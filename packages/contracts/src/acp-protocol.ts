@@ -76,6 +76,8 @@ export interface ClientCapabilities {
 /** `InitializeResponse` — sdk/dist/schema/zod.gen.js:1186-1219. */
 export interface InitializeResult {
   protocolVersion: number;
+  /** Authentication methods advertised by agents that require an explicit handshake. */
+  authMethods?: Array<{ id: string; name: string; description?: string }>;
   agentCapabilities?: AgentCapabilities;
   agentInfo?: Implementation;
   _meta?: Record<string, unknown>;
@@ -141,6 +143,8 @@ export interface NewSessionMeta {
    * `developer_instructions`, hardcoded to `null` (dist/index.js:26263).
    */
   systemPrompt?: string | { append?: string; [key: string]: unknown };
+  /** Grok Build extension: approve tool use without an interactive permission round-trip. */
+  yoloMode?: boolean;
 }
 
 export interface SdkMessageFilter {
@@ -190,7 +194,22 @@ export interface SessionModeState {
 
 export interface SessionModelState {
   currentModelId: string;
-  availableModels: Array<{ modelId: string; name: string; description?: string }>;
+  availableModels: Array<{
+    modelId: string;
+    name: string;
+    description?: string;
+    _meta?: {
+      supportsReasoningEffort?: boolean;
+      reasoningEfforts?: Array<{
+        value: string;
+        label?: string;
+        name?: string;
+        description?: string;
+        default?: boolean;
+      }>;
+      [key: string]: unknown;
+    };
+  }>;
 }
 
 /**
@@ -254,6 +273,7 @@ export interface PromptResult {
     cachedWriteTokens?: number | null;
     totalTokens?: number | null;
   } | null;
+  _meta?: Record<string, unknown>;
 }
 
 export type StopReason = "end_turn" | "tool_deferred" | "cancelled" | "interrupted" | "max_turns";
@@ -478,6 +498,18 @@ export interface SetSessionModeParams {
   modeId: string;
 }
 
+export interface AuthenticateParams {
+  methodId: string;
+  _meta?: Record<string, unknown>;
+}
+
+/** Grok Build extension for switching model and optional reasoning effort. */
+export interface SetSessionModelParams {
+  sessionId: string;
+  modelId: string;
+  _meta?: Record<string, unknown>;
+}
+
 /**
  * `SetSessionConfigOptionRequest` — sdk/dist/schema/zod.gen.js:2543-2555. The
  * only ACP lever for model and effort, and both pinned bridges implement it:
@@ -535,6 +567,17 @@ export interface CloseSessionParams {
 
 export type PromptUsageSettleScope = "turn" | "last-request";
 
+export interface AgentAuthenticationRequest {
+  methodId: string;
+  meta?: Record<string, unknown>;
+}
+
+export interface AgentPromptResultMetadata {
+  usage?: PromptResult["usage"];
+  model?: string | null;
+  costUsd?: number | null;
+}
+
 export interface AgentAdapter {
   readonly agentType: string;
 
@@ -564,6 +607,30 @@ export interface AgentAdapter {
    */
   mapPermissionMode?(mode: string): string[];
 
+  /** Wrap user-supplied agent arguments in the executable's ACP launch command. */
+  buildLaunchArgs?(args: string[]): string[];
+
+  /** Agent-specific metadata sent during initialize. */
+  buildInitializeMeta?(options: AgentSessionOptions): Record<string, unknown> | undefined;
+
+  /** Select a non-interactive authentication method after initialize. */
+  selectAuthentication?(
+    result: InitializeResult,
+    env: Readonly<Record<string, string | undefined>>,
+  ): AgentAuthenticationRequest | null;
+
+  /** Existing-session method; standard bridges use resume, Grok uses load. */
+  readonly sessionRestoreMethod?: "resume" | "load";
+
+  /** Permission is fixed in session metadata instead of changed with session/set_mode. */
+  readonly sessionPermissionModeMethod?: "set-mode" | "session-meta";
+
+  /** Fallback for Grok versions that do not advertise standard config options. */
+  readonly modelSelectionMethod?: "config-option" | "set-model";
+
+  /** Normalize agent-specific prompt settlement metadata. */
+  normalizePromptResult?(result: PromptResult): AgentPromptResultMetadata;
+
   /** Build agent-specific _meta for session/new. */
   buildSessionMeta(options: AgentSessionOptions): NewSessionMeta | undefined;
 
@@ -581,8 +648,8 @@ export interface AskUserQuestionData {
 }
 
 /**
- * Inputs for the agent-specific `session/new` `_meta`. Permission mode is
- * deliberately absent: the claude bridge overwrites
+ * Inputs for agent-specific initialize and `session/new` metadata. Claude
+ * ignores permissionMode because its bridge overwrites
  * `_meta.claudeCode.options.permissionMode` with its own settings-derived value
  * (dist/acp-agent.js:4433 spread, then an explicit `permissionMode` key at
  * :4454), so `session/set_mode` is the only working lever for both agents.
@@ -590,6 +657,7 @@ export interface AskUserQuestionData {
 export interface AgentSessionOptions {
   model?: string | null;
   allowedTools?: string[];
+  permissionMode?: string | null;
   /** Appended to the agent's own system prompt where the agent supports it. */
   systemPrompt?: string | null;
   [key: string]: unknown;

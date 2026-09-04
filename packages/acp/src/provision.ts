@@ -1,13 +1,12 @@
 /**
  * ACP bridge provisioning.
  *
- * Users should only need the agents they actually use — `claude` and `codex`.
- * The ACP bridges (`claude-agent-acp`, `codex-acp`) that the daemon spawns are
- * an implementation detail, so `remi` provisions them itself: for each provider
- * whose CLI is present but whose bridge is missing, npm-install the bridge into
- * `~/.remi/acp`. If `node` is missing, download an official build into
- * `~/.remi/node` first. Everything degrades gracefully — a provider whose bridge
- * can't be provisioned simply won't register; nothing crashes.
+ * Claude and Codex need external ACP bridges (`claude-agent-acp`, `codex-acp`),
+ * which are an implementation detail that `remi` provisions into `~/.remi/acp`.
+ * Grok speaks ACP natively and is tracked only as an agent CLI. If `node` is
+ * missing for bridge installation, download an official build into
+ * `~/.remi/node` first. Everything degrades gracefully — a provider whose
+ * executable cannot be provisioned or resolved simply does not register.
  */
 
 import { execFileSync } from "node:child_process";
@@ -16,11 +15,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export type ProvisionProvider = "claude" | "codex";
+export type AgentCliProvider = ProvisionProvider | "grok";
 type Logger = (message: string) => void;
 
 const NODE_VERSION = "v22.14.0"; // pinned LTS for the bundled fallback
 
-const PROVIDER_CLI: Record<ProvisionProvider, string> = { claude: "claude", codex: "codex" };
+const PROVIDER_CLI: Record<AgentCliProvider, string> = { claude: "claude", codex: "codex", grok: "grok" };
 // The maintained @agentclientprotocol bridges are the only accepted
 // implementations. The deprecated @zed-industries packages and standalone
 // binaries on PATH (e.g. the old embedded-core Rust codex-acp) are
@@ -183,8 +183,8 @@ export function bridgeVersion(provider: ProvisionProvider): string | null {
   return null;
 }
 
-/** Version of the underlying agent CLI itself (`claude` / `codex`), or null. */
-export function agentCliVersion(provider: ProvisionProvider): string | null {
+/** Version of the underlying agent CLI itself, or null. */
+export function agentCliVersion(provider: AgentCliProvider): string | null {
   const cli = which(PROVIDER_CLI[provider]);
   if (!cli) return null;
   try {

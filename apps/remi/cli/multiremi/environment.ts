@@ -25,6 +25,7 @@ export async function prepareDaemonEnvironment(
   const configuredNpmPrefix = absoluteEnvPath(env.NPM_CONFIG_PREFIX, homeDir);
   const npmPrefix = configuredNpmPrefix
     ?? await (options.resolveNpmPrefix ?? resolveNpmGlobalPrefix)(env);
+  const grokHome = absoluteEnvPath(env.GROK_HOME, homeDir) ?? join(homeDir, ".grok");
 
   const managedPaths = [
     join(remiHome, "bin"),
@@ -32,6 +33,7 @@ export async function prepareDaemonEnvironment(
     npmPrefix ? npmBinDir(npmPrefix, platform) : null,
     join(homeDir, ".npm-global", "bin"),
     join(homeDir, ".local", "bin"),
+    join(grokHome, "bin"),
   ];
   const currentPaths = String(env.PATH ?? "")
     .split(delimiter)

@@ -71,6 +71,10 @@ import { issue } from "./multiremi/commands/issue.js";
 import { project } from "./multiremi/commands/project.js";
 import { memory, wiki } from "./multiremi/commands/knowledge.js";
 
+function provisionableProviders(providers: readonly SupportedDaemonProvider[]): ProvisionProvider[] {
+  return providers.filter((provider): provider is ProvisionProvider => provider === "claude" || provider === "codex");
+}
+
 export type { CliOptions } from "./multiremi/options.js";
 export type {
   MultiremiDaemonLaunchSpec,
@@ -189,11 +193,10 @@ function setup(options: CliOptions, programName: string): boolean {
 
   saveMultiremiConfig(next);
   console.log(`Config saved to ${multiremiConfigPath()}`);
-  // Pre-provision ACP bridges for whichever agents the user has (no-op if absent
-  // or already present). The user only needs `claude` / `codex` themselves.
-  const provisionTargets = (next.provider && isSupportedDaemonProvider(next.provider)
+  // Claude/Codex need managed bridge packages; Grok speaks ACP natively.
+  const provisionTargets = provisionableProviders(next.provider && isSupportedDaemonProvider(next.provider)
     ? [next.provider]
-    : [...SUPPORTED_DAEMON_PROVIDERS]) as ProvisionProvider[];
+    : [...SUPPORTED_DAEMON_PROVIDERS]);
   ensureAcpBridges(provisionTargets, (m) => console.log(`  ${m}`));
   if (!next.token) {
     console.log("Token is not set. Run:");
@@ -315,10 +318,8 @@ export async function resolveWorkerDaemons(
   }
   const requestedProvider: SupportedDaemonProvider | null =
     explicitProvider && isSupportedDaemonProvider(explicitProvider) ? explicitProvider : null;
-  // Provision the ACP bridges for the candidate providers (install any that are
-  // missing) before the health check decides what's available — the user only
-  // needs `claude` / `codex` themselves.
-  ensureAcpBridges((requestedProvider ? [requestedProvider] : [...SUPPORTED_DAEMON_PROVIDERS]) as ProvisionProvider[]);
+  // Provision only external bridges; Grok's CLI is itself the ACP executable.
+  ensureAcpBridges(provisionableProviders(requestedProvider ? [requestedProvider] : [...SUPPORTED_DAEMON_PROVIDERS]));
   const providers = await resolveHealthyDaemonProviders(requestedProvider);
   if (providers.length === 0) return [];
 

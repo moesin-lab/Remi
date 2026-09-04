@@ -18,7 +18,7 @@ import type { MultiremiStore } from "@multiremi/store/store.js";
 import type { Context } from "hono";
 import { skillWithFilesCompatibilityResponse } from "./skills.js";
 
-export const MULTIREMI_DAEMON_PROVIDERS = new Set(["claude", "codex"]);
+export const MULTIREMI_DAEMON_PROVIDERS = new Set(["claude", "codex", "grok"]);
 
 export function runtimeWorkspaceId(runtime: MultiremiRuntime): string {
   return runtime.workspaceId ?? "local";
@@ -66,7 +66,7 @@ export function runtimeCompatibilityResponse(runtime: MultiremiRuntime): Record<
  */
 // Maps a model's vendor (as the daemon reports it) to the engine that runs it,
 // for the rare "any" runtime that carries a model catalog but no fixed engine.
-const MODEL_VENDOR_TO_ENGINE: Record<string, string> = { openai: "codex", anthropic: "claude" };
+const MODEL_VENDOR_TO_ENGINE: Record<string, string> = { openai: "codex", anthropic: "claude", xai: "grok" };
 
 export interface FleetModelThinkingLevelResponse {
   value: string;

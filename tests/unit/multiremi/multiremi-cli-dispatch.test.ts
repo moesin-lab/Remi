@@ -174,8 +174,10 @@ describe("remi CLI provider detection", () => {
 
     expect(detectMultiremiProviders({
       pathEnv,
-      canExecute: (path) => path === join("/mock/bin", "claude") || path === join("/other/bin", "codex"),
-    })).toEqual(["claude", "codex"]);
+      canExecute: (path) => path === join("/mock/bin", "claude")
+        || path === join("/other/bin", "codex")
+        || path === join("/mock/bin", "grok"),
+    })).toEqual(["claude", "codex", "grok"]);
 
     expect(detectMultiremiProviders({
       pathEnv,

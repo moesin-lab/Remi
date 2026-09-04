@@ -266,7 +266,7 @@ export class FeishuConnector implements Connector {
       })();
 
       // Determine subtitle
-      const agentLabel = meta.agentType === "codex" ? "Codex" : "Claude";
+      const agentLabel = meta.agentType === "codex" ? "Codex" : meta.agentType === "grok" ? "Grok" : "Claude";
       const modeLabel = meta.mode && meta.mode !== "auto"
         ? ` ${meta.mode === "bypassPermissions" ? "Bypass" : meta.mode.charAt(0).toUpperCase() + meta.mode.slice(1)}`
         : "";

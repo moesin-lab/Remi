@@ -7,14 +7,14 @@ import { ProviderLogo } from "../../runtimes/components/provider-logo";
 import { useT } from "../../i18n";
 
 // The engines a pool agent can run on. Static by design: these are the
-// providers the daemon fleet ships bridges for; the fleet catalog only
+// providers the daemon fleet can launch; the fleet catalog only
 // refines each engine's models + capacity. Single declaration — the create
 // dialog, the edit dialog, the inspector picker and the list filter all
 // import it from here.
-export const ENGINES = ["claude", "codex"] as const;
+export const ENGINES = ["claude", "codex", "grok"] as const;
 
 /**
- * The engine (provider) choice as a segmented button pair, plus the
+ * The engine (provider) choice as segmented buttons, plus the
  * "no online capacity" warning that belongs with it.
  *
  * This is the only "where does it run"-adjacent choice left in the agent

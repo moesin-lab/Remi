@@ -2,7 +2,7 @@
 
 > A Bun-based agent platform that brings Multiremi agents into chat and task workflows.
 
-Remi connects coding agents such as Claude Code and Codex to Feishu through the Agent Client
+Remi connects coding agents such as Claude Code, Codex, and Grok Build to Feishu through the Agent Client
 Protocol. Multiremi owns agent definitions, project memory, issues, tasks, and runtime state; the
 Remi process supplies the persistent chat lane and connector lifecycle.
 
@@ -12,7 +12,7 @@ Remi process supplies the persistent chat lane and connector lifecycle.
 - **One agent configuration** — The `multiremi_agents` row selected by `MULTIREMI_BOT_AGENT_ID` controls the bot's instructions, cwd, provider, model, executable, tools, env, args, MCP servers, thinking level, and concurrency.
 - **Multiremi project memory** — Agents recall and record durable knowledge through the canonical `remi memory` CLI and API.
 - **Multi-connector by design** — Ships with a full Feishu/Lark connector (cards, streaming, mentions, reactions, threading, dynamic menus). The `Connector` interface is a small surface — Slack, Discord, or HTTP webhooks fit the same shape.
-- **ACP providers** — One `AcpProvider` speaks the Agent Client Protocol over stdio to Claude Code or Codex (`acp:claude` / `acp:codex`), using your existing subscription — no API key required. Per-agent behavior lives in swappable adapters.
+- **ACP providers** — One `AcpProvider` speaks ACP over stdio to Claude Code, Codex, or Grok Build (`acp:claude` / `acp:codex` / `acp:grok`). Per-agent behavior lives in swappable adapters; Grok uses its native ACP mode and needs either `XAI_API_KEY` or a cached `grok login` session.
 - **Multiremi platform** — A Hono API (`apps/server/main.ts`) plus a Next.js dashboard (`frontend/`) for workspaces, projects, issues, agents, autopilots, and live task transcripts. The `remi` CLI is its agent-side client.
 - **SQLite plus Postgres** — Persistent ACP session bindings and connector configuration live in local SQLite; Multiremi's authoritative data lives in SQLite or Postgres on the server.
 - **Agent runtime** — The daemon (`packages/daemon/`) checks out repos, assembles per-task context, and spawns isolated agent sessions for issues and autopilot runs.
@@ -44,6 +44,7 @@ Message flow inside `Remi._process()` → `processStream()`:
 - [Bun](https://bun.sh) 1.3.14
 - macOS, Linux, or WSL (SQLite-compatible filesystem)
 - For the default provider: [Claude Code CLI](https://docs.claude.com/claude-code) installed and signed in. No API key needed if you have a Claude subscription.
+- For Grok agents: [Grok Build](https://github.com/xai-org/grok-build) installed and authenticated with `grok login`, or `XAI_API_KEY` set for the daemon.
 
 ### Install
 
@@ -135,7 +136,7 @@ remi/
 ├── packages/
 │   ├── shared/                # L0: config, SQLite (~/.remi/remi.db), logger, tracing, metrics
 │   ├── contracts/             # L0: shared types — API, ACP protocol, Provider/Connector payloads
-│   ├── acp/                   # L1: AcpProvider + per-agent adapters (claude-code, codex)
+│   ├── acp/                   # L1: AcpProvider + per-agent adapters (claude-code, codex, grok)
 │   ├── connectors/            # L1: base.ts (Connector interface) + feishu/ (cards, streaming, menus)
 │   ├── auth/                  # L1: 1Passport — Feishu OAuth, token sync, adapters
 │   ├── daemon/                # L2: agent runtime (repo checkout, prompts, skills, plugins),

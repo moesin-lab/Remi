@@ -278,7 +278,7 @@ export class Remi {
   private static _buildProvider(agent: MultiremiAgent, runtimeEnv: Record<string, string> = {}) {
     const rawType = agent.provider;
     const type = rawType.startsWith("acp:") ? rawType.slice("acp:".length) : rawType;
-    if (type !== "claude" && type !== "codex") {
+    if (type !== "claude" && type !== "codex" && type !== "grok") {
       throw new Error(`Unknown ACP provider: ${rawType}`);
     }
     return new AcpProvider({

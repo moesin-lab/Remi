@@ -29,6 +29,9 @@ export function localSkillRootForProvider(provider: string, overrides: Record<st
   if (normalized === "codex") {
     return process.env.MULTIREMI_CODEX_SKILLS_DIR ?? join(process.env.CODEX_HOME || join(homedir(), ".codex"), "skills");
   }
+  if (normalized === "grok") {
+    return process.env.MULTIREMI_GROK_SKILLS_DIR ?? join(process.env.GROK_HOME || join(homedir(), ".grok"), "skills");
+  }
   return null;
 }
 

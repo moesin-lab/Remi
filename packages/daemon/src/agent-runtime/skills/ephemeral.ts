@@ -4,7 +4,7 @@
  * Per-task workdir preparation for Multiremi tasks: serialize task / GC /
  * project-resource metadata and materialize the agent's skills into the skill
  * root its runtime reads (`.claude/skills` for claude, `.agents/skills` for
- * codex) before the agent runs. Extracted from src/multiremi/daemon.ts in D6.
+ * codex, `.grok/skills` for Grok) before the agent runs.
  */
 
 import { join } from "node:path";
@@ -137,6 +137,7 @@ export function writeProjectResourceContext(workDir: string, task: AgentTask): v
  * sees skills materialized under `<workDir>/.agents/skills`.
  */
 export function agentSkillRoot(workDir: string, provider: string | undefined): string {
+  if (provider === "grok") return join(workDir, ".grok", "skills");
   return provider === "codex"
     ? join(workDir, ".agents", "skills")
     : join(workDir, ".claude", "skills");

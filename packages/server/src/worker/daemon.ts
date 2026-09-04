@@ -1142,10 +1142,10 @@ export class MultiremiDaemon {
     return provider === "claude" || provider === "codex" ? bridgeVersion(provider) : null;
   }
 
-  /** Version of the underlying agent CLI (`claude` / `codex`), or null. */
+  /** Version of the underlying agent CLI (`claude` / `codex` / `grok`), or null. */
   private agentVersion(): string | null {
     const provider = this.options.provider;
-    return provider === "claude" || provider === "codex" ? agentCliVersion(provider) : null;
+    return provider === "claude" || provider === "codex" || provider === "grok" ? agentCliVersion(provider) : null;
   }
 
   private currentRuntimeRegistrationInput(): RegisterRuntimeInput {
@@ -1330,14 +1330,14 @@ export class MultiremiDaemon {
     return reinstallBridge(provider as ProvisionProvider, (m) => log.info(`[acp] ${m}`));
   }
 
-  /** Update the underlying agent CLI (claude/codex) via its own `update` subcommand. */
+  /** Update the underlying agent CLI via its own `update` subcommand. */
   private async updateAgentCli(): Promise<string> {
     const provider = this.options.provider;
-    if (provider !== "claude" && provider !== "codex") {
+    if (provider !== "claude" && provider !== "codex" && provider !== "grok") {
       throw new Error(`agent update not supported for provider: ${provider}`);
     }
     // Spawn with the daemon's own env: it was launched from a login shell, so
-    // PATH already resolves claude/codex (incl. Homebrew on macOS).
+    // PATH already resolves claude/codex and includes GROK_HOME/bin.
     const proc = Bun.spawn([provider, "update"], { stdout: "pipe", stderr: "pipe", env: process.env });
     const [stdout, stderr, exitCode] = await Promise.all([
       streamText(proc.stdout),
@@ -3091,7 +3091,7 @@ export class MultiremiDaemon {
     this.assertWorkspaceRootOwner();
     const agent = task.agent;
     if (!agent) throw new Error(`Task ${task.id} has no agent`);
-    if (agent.provider !== "claude" && agent.provider !== "codex") {
+    if (agent.provider !== "claude" && agent.provider !== "codex" && agent.provider !== "grok") {
       throw new Error(`Unsupported Bun Multiremi provider: ${agent.provider}`);
     }
 
@@ -3893,7 +3893,9 @@ export function runtimeModelsFromAcpCapabilities(
     ? "anthropic"
     : provider.toLowerCase() === "codex"
       ? "openai"
-      : provider;
+      : provider.toLowerCase() === "grok"
+        ? "xai"
+        : provider;
   return capabilities.map((model) => ({
     id: model.id,
     label: model.label,

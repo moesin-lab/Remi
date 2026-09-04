@@ -65,6 +65,15 @@ test("codex tasks materialize skills into .agents/skills — the only root codex
   expect(existsSync(join(workDir, ".claude", "skills"))).toBe(false);
 });
 
+test("grok tasks materialize skills into its native .grok/skills root", () => {
+  const workDir = workspace();
+  writeAgentSkillContext(workDir, taskWithSkill("grok"));
+
+  const skillFile = join(workDir, ".grok", "skills", "deploy-runbook", "SKILL.md");
+  expect(readFileSync(skillFile, "utf-8")).toContain("step one");
+  expect(existsSync(join(workDir, ".claude", "skills"))).toBe(false);
+});
+
 test("an agent without skills writes no skill root at all", () => {
   const workDir = workspace();
   writeAgentSkillContext(workDir, { agent: { skills: [], provider: "codex" } } as unknown as AgentTask);

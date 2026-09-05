@@ -24,7 +24,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 改工作台与通知 | [工作台/收件箱边界](../inbox-workbench-boundary.md) | 通知的触发条件与状态归属 |
 | 改项目 Memory/Wiki | [项目知识契约](../project-wiki-memory-spec.md) | 查询、提案、发布、物化与权限 |
 | 改飞书消息接入 | [消息接入](../feishu-message-ingestion.md) | Connection、Source、消息处理与凭据 |
-| 配置部署或排障 | [部署](../../deploy/README.md)、[daemon 环境](../deploy/66-8-remi-environment.md) | 服务组成、配置和启动条件 |
+| 配置部署或排障 | [部署](../../deploy/README.md)、[本机 stable/dev](../deploy/local-profiles.md)、[daemon 环境](../deploy/66-8-remi-environment.md) | 服务组成、配置和启动条件 |
 | 更新这些开发依据 | [维护方法](context-maintenance.md) | 归属、源码核对和可执行检查 |
 
 文档中的源码链接提供定位依据，测试链接提供验证入口。它们不等于本次测试已通过；性能基线是否已采集以[性能页](performance.md)为准。

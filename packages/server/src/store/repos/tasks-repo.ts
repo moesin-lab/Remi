@@ -135,6 +135,7 @@ interface DelegationWakeupResult {
 interface TaskTerminalFollowUps {
   retry: MultiremiTask | null;
   delegationReturn: MultiremiTask | null;
+  roundPushTasks: MultiremiTask[];
 }
 
 export interface RedispatchTaskResult {
@@ -307,13 +308,13 @@ export class TasksRepo {
       || parentTask?.issueCreationRestricted
       || agent.issueCreationRequiresProposal,
     );
-    const issueId = input.issueId ?? triggerComment?.issueId ?? null;
-    const issue = issueId ? this.ctx.issues().getIssue(issueId) : null;
-    if (issueId && !issue) throw new Error(`Issue not found: ${issueId}`);
-    if (triggerComment && issue && triggerComment.issueId !== issue.id) throw new Error("Trigger comment does not belong to task issue");
     const chatSession = input.chatSessionId ? this.ctx.chat().getChatSession(input.chatSessionId) : null;
     if (input.chatSessionId && !chatSession) throw new Error(`Chat session not found: ${input.chatSessionId}`);
     if (chatSession && chatSession.agentId !== input.agentId) throw new Error("Chat session agent does not match task agent");
+    const issueId = input.issueId ?? triggerComment?.issueId ?? chatSession?.issueId ?? null;
+    const issue = issueId ? this.ctx.issues().getIssue(issueId) : null;
+    if (issueId && !issue) throw new Error(`Issue not found: ${issueId}`);
+    if (triggerComment && issue && triggerComment.issueId !== issue.id) throw new Error("Trigger comment does not belong to task issue");
     // The task always runs in the agent's workspace (stamped below). Reject any
     // issue / chat session from a DIFFERENT workspace so we never create a task
     // in workspace B linked to an issue/project in workspace A (a cross-tenant
@@ -1827,6 +1828,7 @@ export class TasksRepo {
     const task = terminal.task;
     this.postAgentReplyComment(task, input.output);
     if (terminal.followUps.delegationReturn) this.ctx.notifyTaskEnqueued(terminal.followUps.delegationReturn);
+    for (const roundPushTask of terminal.followUps.roundPushTasks) this.ctx.notifyTaskEnqueued(roundPushTask);
     this.ctx.notifyTaskEvent("task:completed", task);
     return task;
   }
@@ -2373,8 +2375,15 @@ export class TasksRepo {
       );
     }
     const retry = status === "failed" ? this.maybeRetryFailedTask(task, workspaceLockHeld) : null;
+    if (retry && task.chatSessionId) {
+      this.ctx.feishuBot().retargetFeishuRoundPushTaskWithinTransaction(task.id, retry.id);
+    }
     let delegationReturn: MultiremiTask | null = null;
+    let roundPushTasks: MultiremiTask[] = [];
     this.ctx.accessTokens().revokeTaskAccessTokens(task.id);
+    if (status === "completed" && task.chatSessionId) {
+      this.ctx.chat().completePendingAgentIssueUpdatesForTaskWithinTransaction(task.chatSessionId, task.id);
+    }
     if (task.chatSessionId && (status === "completed" || (status === "failed" && !retry))) {
       const role = "assistant";
       const messageBody = status === "completed" ? (body || "Task completed.") : (body || `Task ${status}`);
@@ -2422,6 +2431,7 @@ export class TasksRepo {
         ],
       );
       if (status === "completed") {
+        this.ctx.feishuBot().completeFeishuRoundPushTaskWithinTransaction(task, messageBody);
         const session = this.ctx.chat().getChatSession(task.chatSessionId);
         this.ctx.emitWorkspaceEvent({
           type: "chat:done",
@@ -2500,12 +2510,41 @@ export class TasksRepo {
       // Compute status after the return task is present. Otherwise the child
       // completion can mark the Issue done and the queued leader follow-up is
       // deliberately unable to reopen that explicit terminal state.
-      const issueStatus = this.nextIssueStatusAfterTaskTerminal(task, status, retry != null || replacementPlanned);
+      const issueStatus = task.chatSessionId
+        ? null
+        : this.nextIssueStatusAfterTaskTerminal(task, status, retry != null || replacementPlanned);
       if (issueStatus) {
         if (workspaceLockHeld) this.syncIssueStatusFromTaskWithinTransaction(task, issueStatus);
         else this.syncIssueStatusFromTask(task, issueStatus);
       }
       if (issue?.projectId) this.ctx.db.run("UPDATE multiremi_projects SET updated_at = ? WHERE id = ?", [now, issue.projectId]);
+      const lead = issue?.assigneeType && issue.assigneeId
+        ? this.ctx.resolveRunnableAgentForAssignee(issue.assigneeType, issue.assigneeId)
+        : null;
+      if (
+        status === "completed"
+        && task.issueSessionId
+        && !task.chatSessionId
+        && issue
+        && lead?.id === task.agentId
+        && !this.hasActiveTaskForIssue(issue.id, true)
+      ) {
+        this.ctx.notificationChannels().queueAgentIssueUpdate({
+          activityId: `leader-round:${task.id}`,
+          issueId: issue.id,
+          actorType: "agent",
+          actorId: task.agentId,
+          type: "leader_round_completed",
+          body,
+          data: { sourceTaskId: task.id, status: "completed" },
+          createdAt: now,
+        });
+        this.ctx.notificationChannels().flushAgentIssueUpdatesForIssueWithinTransaction(issue.id, now);
+        roundPushTasks = this.ctx.feishuBot().prepareFeishuIssueRoundPushesWithinTransaction({
+          issue,
+          leaderTask: task,
+        });
+      }
     }
 
     const runRow = this.ctx.db.query(
@@ -2605,7 +2644,7 @@ export class TasksRepo {
         }
       }
     }
-    return { retry, delegationReturn };
+    return { retry, delegationReturn, roundPushTasks };
   }
 
   /** Caller holds the task workspace lifecycle lock. */
@@ -2716,7 +2755,7 @@ export class TasksRepo {
   // triggering comment when the task came from an @mention. Legacy daemons
   // still report the "Task completed." placeholder — skip it, it says nothing.
   private postAgentReplyComment(task: MultiremiTask, output: string | null): void {
-    if (!task.issueId || !task.agentId) return;
+    if (!task.issueId || !task.agentId || task.chatSessionId) return;
     const body = (output ?? "").trim();
     if (!body || body === "Task completed.") return;
     try {
@@ -2745,7 +2784,7 @@ export class TasksRepo {
   }
 
   private postContextOverflowSystemComment(task: MultiremiTask): void {
-    if (!task.issueId) return;
+    if (!task.issueId || task.chatSessionId) return;
     const body = "The agent could not complete this task because its context still exceeded the provider limit "
       + `at attempt ${task.attempt} of ${task.maxAttempts}. Automatic retries use progressively smaller Session `
       + "projections. Start a new Session, or publish and condense a checkpoint before retrying.";
@@ -2818,7 +2857,7 @@ export class TasksRepo {
 
   /** Caller owns the task/Issue/outbox transaction. */
   private syncIssueStatusFromTaskWithinTransaction(task: MultiremiTask, status: string): void {
-    if (!task.issueId) return;
+    if (!task.issueId || task.chatSessionId) return;
     // Serialize against direct Issue mutations before checking terminal state.
     // The no-op write acquires a row lock on Postgres and the writer lock on
     // SQLite, so a late worker can never reopen a concurrently accepted or
@@ -2879,10 +2918,11 @@ export class TasksRepo {
     return Boolean(row);
   }
 
-  private hasActiveTaskForIssue(issueId: string): boolean {
+  private hasActiveTaskForIssue(issueId: string, issueLaneOnly = false): boolean {
     const row = this.ctx.db.query(
       `SELECT 1 AS present FROM multiremi_tasks
        WHERE issue_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
+         ${issueLaneOnly ? "AND chat_session_id IS NULL" : ""}
        LIMIT 1`,
     ).get(issueId) as { present: number } | null;
     return Boolean(row);

@@ -32,7 +32,6 @@ export function taskPublicResponse<T extends MultiremiTask>(task: T): Omit<T, In
   return publicTask;
 }
 import type { MultiremiStore } from "@multiremi/store/store.js";
-import { buildChatBootstrapTranscript } from "@multiremi/store/repos/chat-repo.js";
 import { autopilotRunSourceRevision } from "@multiremi/store/repos/autopilots-repo.js";
 import { createLogger } from "@shared/logger.js";
 import { readWorkspacePromptSettings } from "../../prompts/workspace-settings.js";
@@ -319,25 +318,27 @@ export function daemonTaskClaimResponse(
     response.trigger_comment_attachments = store.listAttachmentsForComment(task.triggerCommentId)
       .map(attachmentCompatibilityResponse);
   }
+  if (task.issueSessionId || task.chatSessionId) {
+    const projection = store.buildTaskSessionProjection(task.id);
+    if (projection) {
+      projectionMode = projection.mode;
+      response.session_projection = {
+        session_id: projection.sessionId,
+        target_agent_id: projection.targetAgentId,
+        mode: projection.mode,
+        from_seq: projection.fromSeq,
+        to_seq: projection.toSeq,
+        jsonl: projection.jsonl,
+        truncated: projection.truncated,
+        omitted_events: projection.omittedEvents,
+        estimated_tokens: projection.estimatedTokens,
+      };
+    }
+  }
   if (task.issueSessionId) {
     const issueSession = store.getIssueSession(task.issueSessionId);
     if (issueSession) {
       response.issue_session = issueSession;
-      const projection = store.buildTaskSessionProjection(task.id);
-      if (projection) {
-        projectionMode = projection.mode;
-        response.session_projection = {
-          session_id: projection.sessionId,
-          target_agent_id: projection.targetAgentId,
-          mode: projection.mode,
-          from_seq: projection.fromSeq,
-          to_seq: projection.toSeq,
-          jsonl: projection.jsonl,
-          truncated: projection.truncated,
-          omitted_events: projection.omittedEvents,
-          estimated_tokens: projection.estimatedTokens,
-        };
-      }
       if (task.issueSessionGeneration == null) {
         const lane = store.getSessionAgentLane(task.issueSessionId, task.agentId);
         if (lane) response.issue_session_generation = lane.generation;
@@ -479,10 +480,37 @@ function appendDaemonClaimExecutionContext(
 ): void {
   appendDaemonClaimWorkspaceContext(store, task, response);
   appendDaemonClaimChatContext(store, task, response);
+  appendDaemonClaimBoundIssue(store, task, response);
+  appendDaemonClaimBoundIssueUpdates(store, task, response);
   appendDaemonClaimAutopilotContext(store, task, response);
 
   const quickCreatePrompt = daemonQuickCreatePrompt(task);
   if (quickCreatePrompt) response.quick_create_prompt = quickCreatePrompt;
+}
+
+function appendDaemonClaimBoundIssue(
+  store: MultiremiStore,
+  task: MultiremiTaskWithAgent,
+  response: Record<string, unknown>,
+): void {
+  if (!task.chatSessionId) return;
+  try {
+    const chat = store.getChatSession(task.chatSessionId);
+    const issueId = task.issueId ?? chat?.issueId ?? null;
+    const issue = issueId ? store.getIssue(issueId) : null;
+    if (!issue) return;
+    response.bound_issue = {
+      id: issue.id,
+      key: issue.key,
+      title: issue.title,
+      status: issue.status,
+    };
+  } catch (error) {
+    log.debug(
+      `Failed to load bound Issue for claimed task ${task.id}: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 function appendDaemonClaimWorkspaceContext(store: MultiremiStore, task: MultiremiTaskWithAgent, response: Record<string, unknown>): void {
@@ -512,20 +540,33 @@ function appendDaemonClaimChatContext(store: MultiremiStore, task: MultiremiTask
   if (!task.chatSessionId) return;
   try {
     const allMessages = store.listChatMessages(task.chatSessionId);
-    const parent = task.parentTaskId ? store.getTask(task.parentTaskId) : null;
-    if (
-      parent?.failureReason === "agent_error.stale_session"
-      && parent.chatSessionId === task.chatSessionId
-    ) {
-      const bootstrap = buildChatBootstrapTranscript(allMessages);
-      if (bootstrap.transcript) response.chat_bootstrap_transcript = bootstrap.transcript;
-      return;
-    }
     const messages = trailingDaemonUserMessages(allMessages);
     const chatMessage = messages.map((message) => message.body.trim()).filter(Boolean).join("\n\n");
     if (chatMessage) response.chat_message = chatMessage;
   } catch (error) {
     log.debug(`Failed to load chat context for claimed task ${task.id}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function appendDaemonClaimBoundIssueUpdates(
+  store: MultiremiStore,
+  task: MultiremiTaskWithAgent,
+  response: Record<string, unknown>,
+): void {
+  if (!task.chatSessionId) return;
+  try {
+    const pending = store.preparePendingAgentIssueUpdatesForTask(task.chatSessionId, task.id);
+    if (pending.messages.length) {
+      response.bound_issue_updates = pending.messages.map((message) => message.body);
+    }
+    if (pending.omittedCount > 0) {
+      response.bound_issue_updates_omitted_count = pending.omittedCount;
+    }
+  } catch (error) {
+    log.debug(
+      `Failed to load bound Issue updates for claimed task ${task.id}: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 

@@ -57,7 +57,9 @@ App Secret 在 API 侧通过 [AES-256-GCM](../../packages/server/src/feishu-bot/
 
 ## 实际分配、交接与消息执行
 
-[daemon 心跳路由](../../packages/server/src/api/routers/daemon.ts)只发送 revision、desired_state、config_available。选中的 Runtime 再使用绑定的 daemon 身份访问 `GET /api/daemon/runtimes/:runtimeId/feishu-bot`，获取本次启动的凭据与 Agent；其他 Runtime 无法获取该 assignment。明文凭据用于内存中的 transport，不持久化到本机环境文件。
+[daemon 心跳路由](../../packages/server/src/api/routers/daemon.ts)中的 bot 配置指令发送 revision、desired_state、config_available。选中的 Runtime 再使用绑定的 daemon 身份访问 `GET /api/daemon/runtimes/:runtimeId/feishu-bot`，获取本次启动的凭据与 Agent；其他 Runtime 无法获取该 assignment。明文凭据用于内存中的 transport，不持久化到本机环境文件。
+
+支持出站投递协议的 Runtime 还会从心跳响应的 `pending_feishu_outbound` 领取待发送结果；[daemon](../../packages/server/src/worker/daemon.ts)通过 concierge host 发送后，将投递结果和 claim token 上报到 `POST /api/daemon/runtimes/:runtimeId/feishu-bot/outbound/:deliveryId/result`。这条结果推送链路独立于 bot 配置指令，过期投递租约会被服务端拒绝。
 
 [FeishuBotRepo.directiveForRuntime](../../packages/server/src/store/repos/feishu-bot-repo.ts)给未选中的 Runtime 下发 stopped；新 Runtime 等待其他 host 的 online/starting 状态消失或超过当前 90 秒新鲜度窗口后才得到配置。这是基于状态上报的交接门控，不能描述为具备独立到期停机保证的强租约。[Supervisor](../../packages/server/src/worker/feishu-concierge.ts)串行启动/停止、上报状态并退避重试；新 revision 会重新尝试。
 
@@ -77,4 +79,4 @@ bun test tests/unit/multiremi/feishu-concierge-supervisor.test.ts tests/unit/mul
 bun test tests/unit/multiremi/multiremi-feishu-bot-task-bridge.test.ts
 ```
 
-这些是当前验证入口，本次文档核对未执行 Bun 测试、服务重启、凭据测试或真实飞书消息收发。
+这些是当前验证入口；实际执行结果应记录在对应任务或 PR，并分别说明 Bun 测试、服务重启、凭据测试和真实飞书消息收发的验证范围。

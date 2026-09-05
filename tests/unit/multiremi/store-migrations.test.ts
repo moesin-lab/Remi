@@ -47,6 +47,7 @@ describe("store migrations", () => {
       "multiremi_inbox_items",
       "multiremi_notification_channels",
       "multiremi_notification_deliveries",
+      "multiremi_agent_issue_update_state",
       "multiremi_tasks",
       "multiremi_task_messages",
       "multiremi_workspaces",
@@ -92,6 +93,7 @@ describe("store migrations", () => {
       "proposal_payload", "proposal_status", "proposal_resolved_at", "proposal_resolved_by",
     ]));
     expect(columnNames(database, "multiremi_tasks")).toContain("task_kind");
+    expect(columnNames(database, "multiremi_chat_sessions")).toContain("issue_id");
     expect(columnNames(database, "multiremi_tasks")).toContain("issue_creation_restricted");
     expect(columnNames(database, "multiremi_autopilot_runs")).toContain("source_task_id");
     expect(columnNames(database, "multiremi_autopilots")).toEqual(expect.arrayContaining([
@@ -144,6 +146,72 @@ describe("store migrations", () => {
       "auto_update_last_checked_at",
       "auto_update_last_result",
     ]));
+  });
+
+  it("makes Feishu outbound reply targets nullable without losing queued deliveries", () => {
+    const database = freshDb();
+    migrate(database);
+    database.exec(`
+      DROP TABLE multiremi_feishu_bot_outbound_deliveries;
+      CREATE TABLE multiremi_feishu_bot_outbound_deliveries (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        binding_id TEXT NOT NULL,
+        task_id TEXT UNIQUE,
+        chat_id TEXT NOT NULL,
+        thread_id TEXT,
+        reply_to_message_id TEXT NOT NULL,
+        body TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        claim_token TEXT,
+        leased_until TEXT,
+        available_at TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        external_message_id TEXT,
+        last_error TEXT,
+        sent_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO multiremi_feishu_bot_outbound_deliveries (
+        id, workspace_id, binding_id, task_id, chat_id, thread_id,
+        reply_to_message_id, body, status, available_at, created_at, updated_at
+      ) VALUES (
+        'fbo_legacy', 'local', 'fcb_legacy', NULL, 'oc_legacy', 'om_root',
+        'om_root', 'Legacy delivery', 'pending',
+        '2026-09-04T00:00:00.000Z', '2026-09-04T00:00:00.000Z', '2026-09-04T00:00:00.000Z'
+      );
+      DELETE FROM multiremi_schema_migrations
+      WHERE id = '20260904_feishu_issue_topic_outbound_nullable';
+    `);
+
+    migrate(database);
+    migrate(database);
+
+    const replyColumn = (database.query(
+      "PRAGMA table_info(multiremi_feishu_bot_outbound_deliveries)",
+    ).all() as Array<{ name: string; notnull: number }>)
+      .find((column) => column.name === "reply_to_message_id");
+    expect(replyColumn?.notnull).toBe(0);
+    expect(database.query(
+      "SELECT id, reply_to_message_id, body FROM multiremi_feishu_bot_outbound_deliveries WHERE id = 'fbo_legacy'",
+    ).get()).toEqual({ id: "fbo_legacy", reply_to_message_id: "om_root", body: "Legacy delivery" });
+    expect(() => database.run(
+      `INSERT INTO multiremi_feishu_bot_outbound_deliveries (
+         id, workspace_id, binding_id, task_id, chat_id, thread_id,
+         reply_to_message_id, body, status, available_at, created_at, updated_at
+       ) VALUES (?, ?, ?, NULL, ?, NULL, NULL, ?, 'pending', ?, ?, ?)`,
+      [
+        "fbo_seed",
+        "local",
+        "fcb_seed",
+        "oc_topics",
+        "Issue topic",
+        "2026-09-04T00:00:00.000Z",
+        "2026-09-04T00:00:00.000Z",
+        "2026-09-04T00:00:00.000Z",
+      ],
+    )).not.toThrow();
   });
 
   it("drops removed Agent cwd and Feishu webhook credential columns", () => {
@@ -1328,6 +1396,107 @@ describe("store migrations", () => {
     expect(tableNames(database)).toEqual(first);
     const row = database.query("SELECT name FROM multiremi_agents WHERE id = ?").get("agt_keep") as { name?: string } | null;
     expect(row?.name).toBe("Keep me");
+  });
+
+  it("enables bound Chat updates on upgrade and removes legacy delivery limits", () => {
+    const database = freshDb();
+    database.exec(`
+      CREATE TABLE multiremi_chat_sessions (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL DEFAULT 'local',
+        creator_id TEXT,
+        agent_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        session_id TEXT,
+        work_dir TEXT,
+        latest_task_id TEXT,
+        unread_since TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    migrate(database);
+    migrate(database);
+    expect(columnNames(database, "multiremi_chat_sessions")).toContain("issue_id");
+    expect(columnNames(database, "multiremi_chat_messages")).toEqual(expect.arrayContaining([
+      "pending_agent_delivery",
+      "agent_delivery_task_id",
+    ]));
+    expect(database.query(
+      "SELECT COUNT(*) AS count FROM multiremi_notification_channels WHERE kind = 'agent_chat'",
+    ).get()).toEqual({ count: 0 });
+
+    const now = "2026-09-03T00:00:00.000Z";
+    database.run(
+      "INSERT INTO multiremi_agents (id, name, provider, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      ["agt_chat_issue", "Chat Issue", "codex", now, now],
+    );
+    database.run(
+      "INSERT INTO multiremi_issues (id, title, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      ["iss_chat_issue", "Bound", "todo", now, now],
+    );
+    database.run(
+      `INSERT INTO multiremi_chat_sessions (
+         id, workspace_id, agent_id, issue_id, title, status, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ["chat_issue", "local", "agt_chat_issue", "iss_chat_issue", "Bound", "active", now, now],
+    );
+    database.exec(`
+      ALTER TABLE multiremi_agent_issue_update_state ADD COLUMN window_started_at TEXT;
+      ALTER TABLE multiremi_agent_issue_update_state ADD COLUMN deliveries_in_window INTEGER NOT NULL DEFAULT 0;
+    `);
+
+    migrate(database);
+
+    expect(database.query(
+      `SELECT enabled, target
+       FROM multiremi_notification_channels
+       WHERE kind = 'agent_chat' AND id = ?`,
+    ).get("nch_agent_chat_chat_issue")).toEqual({
+      enabled: 1,
+      target: '{"chatId":"chat_issue"}',
+    });
+    expect(columnNames(database, "multiremi_agent_issue_update_state")).not.toEqual(expect.arrayContaining([
+      "window_started_at",
+      "deliveries_in_window",
+    ]));
+    database.run(
+      "UPDATE multiremi_notification_channels SET enabled = 0 WHERE id = ?",
+      ["nch_agent_chat_chat_issue"],
+    );
+    migrate(database);
+    expect(database.query(
+      "SELECT enabled FROM multiremi_notification_channels WHERE id = ?",
+    ).get("nch_agent_chat_chat_issue")).toEqual({ enabled: 0 });
+    database.run(
+      `INSERT INTO multiremi_feishu_bot_chat_bindings (
+         id, workspace_id, app_id, agent_id, external_session_key,
+         chat_session_id, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "fcb_legacy_destination",
+        "local",
+        "cli_legacy",
+        "agt_chat_issue",
+        "oc_legacy:thread:omt_legacy",
+        "chat_issue",
+        now,
+        now,
+      ],
+    );
+    migrate(database);
+    expect(database.query(
+      "SELECT chat_id, thread_id FROM multiremi_feishu_bot_chat_bindings WHERE id = ?",
+    ).get("fcb_legacy_destination")).toEqual({
+      chat_id: "oc_legacy",
+      thread_id: "omt_legacy",
+    });
+
+    database.exec("PRAGMA foreign_keys = ON");
+    database.run("DELETE FROM multiremi_issues WHERE id = ?", ["iss_chat_issue"]);
+    expect(database.query("SELECT issue_id FROM multiremi_chat_sessions WHERE id = ?").get("chat_issue"))
+      .toEqual({ issue_id: null });
   });
 
   it("backfills completed_at for legacy terminal issues", () => {

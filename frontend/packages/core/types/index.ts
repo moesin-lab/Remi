@@ -113,6 +113,8 @@ export type {
   AutopilotRunTriggerObject,
   InboxItem,
   InboxItemDetails,
+  InboxPage,
+  InboxSummary,
   InboxSeverity,
   InboxItemType,
 } from "./inbox";
@@ -199,6 +201,9 @@ export type {
   FeishuBotStatus,
   FeishuBotErrorCode,
   FeishuBotSecretOp,
+  IssueTopicConfig,
+  IssueTopicConfigResponse,
+  UpdateIssueTopicConfigRequest,
   FeishuBotConfig,
   FeishuBotAvailability,
   FeishuBotStatusSnapshot,

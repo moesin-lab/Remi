@@ -337,6 +337,39 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "workspace.issue-topics.get": {
+      "command": "remi workspace issue-topics get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.issue-topics.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.issue-topics.set": {
+      "command": "remi workspace issue-topics set",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.issue-topics.set",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "workspace.ssh-mesh.get": {
       "command": "remi workspace ssh-mesh get",
       "aliases": [],
@@ -3947,6 +3980,108 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "chat.issue": {
+      "command": "remi chat.issue",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.issue.bind": {
+      "command": "remi chat issue bind",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "chat.issue.bind",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.issue.unbind": {
+      "command": "remi chat issue unbind",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "chat.issue.unbind",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.issue.updates": {
+      "command": "remi chat.issue.updates",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.issue.updates.get": {
+      "command": "remi chat issue updates get",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.issue.updates.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.issue.updates.enable": {
+      "command": "remi chat issue updates enable",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.issue.updates.enable",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.issue.updates.disable": {
+      "command": "remi chat issue updates disable",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.issue.updates.disable",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "chat.delete": {
       "command": "remi chat delete",
       "aliases": [],
@@ -7474,6 +7609,40 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "inbox.page": {
+      "command": "remi inbox page",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "inbox.page",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "inbox.summary": {
+      "command": "remi inbox summary",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "inbox.summary",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "inbox.unread-count": {
       "command": "remi inbox unread-count",
       "aliases": [],
@@ -9275,6 +9444,9 @@
     "GET /api/chat/sessions/:sessionId": {
       "command": "chat.get"
     },
+    "GET /api/chat/sessions/:sessionId/issue-updates": {
+      "command": "chat.issue.updates.get"
+    },
     "GET /api/chat/sessions/:sessionId/messages": {
       "command": "chat.message.list"
     },
@@ -9432,6 +9604,12 @@
     },
     "GET /api/inbox": {
       "command": "inbox.list"
+    },
+    "GET /api/inbox/page": {
+      "command": "inbox.page"
+    },
+    "GET /api/inbox/summary": {
+      "command": "inbox.summary"
     },
     "GET /api/inbox/unread-count": {
       "command": "inbox.unread-count"
@@ -10011,6 +10189,9 @@
     "GET /api/workspaces/:id/issue-archive": {
       "command": "workspace.issue-archive.get"
     },
+    "GET /api/workspaces/:id/issue-topics": {
+      "command": "workspace.issue-topics.get"
+    },
     "GET /api/workspaces/:id/lark/install/:sessionId/status": {
       "command": "lark.install.status"
     },
@@ -10401,6 +10582,11 @@
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
     "POST /api/daemon/runtimes/:runtimeId/feishu-bot/messages": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/runtimes/:runtimeId/feishu-bot/outbound/:deliveryId/result": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -11202,6 +11388,9 @@
     "PUT /api/autopilots/:id/triggers/:triggerId/signing-secret": {
       "command": "autopilot.trigger.set-secret"
     },
+    "PUT /api/chat/sessions/:sessionId/issue-updates": {
+      "command": "chat.issue.updates.enable"
+    },
     "PUT /api/comments/:id": {
       "command": "comment.update"
     },
@@ -11298,6 +11487,9 @@
     },
     "PUT /api/workspaces/:id/issue-archive": {
       "command": "workspace.issue-archive.update"
+    },
+    "PUT /api/workspaces/:id/issue-topics": {
+      "command": "workspace.issue-topics.set"
     },
     "PUT /api/workspaces/:id/organizer": {
       "command": "workspace.organizer.update"

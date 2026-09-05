@@ -1,12 +1,24 @@
 ---
 title: Feishu 消息接入
 status: active
-summary: 当前 Messaging Core、Lark CLI Provider、连接授权、采集边界和验证入口。
+summary: 当前机器人 Chat/Issue 话题与轮次推送，以及独立的 Messaging Core 采集、授权和验证入口。
 ---
 
 # Feishu 消息接入
 
-本页描述[Messaging Core](../packages/server/src/messaging/index.ts)及其 Lark CLI Provider。飞书机器人对话连接器在[packages/connectors/src/feishu](../packages/connectors/src/feishu)，由[工作区 bot 配置与 Runtime 分配](deploy/66-8-remi-environment.md)驱动；两者的凭据、消息处理和验证不能混用。
+本页分别说明机器人对话和 [Messaging Core](../packages/server/src/messaging/index.ts)的 Lark CLI 采集。机器人连接器在[packages/connectors/src/feishu](../packages/connectors/src/feishu)，由[工作区 bot 配置与 Runtime 分配](deploy/66-8-remi-environment.md)驱动；两者的凭据、消息处理和验证不能混用。
+
+## 机器人对话、Issue 话题与更新
+
+[FeishuBotRepo](../packages/server/src/store/repos/feishu-bot-repo.ts)维护飞书会话与平台 Chat 的绑定。[Issue 创建路由](../packages/server/src/api/routers/issues.ts)通过已验证 task token 找到来源 Chat：未绑定时自动绑定新 Issue，已有绑定时保留并返回提示，不会悄悄改绑。人类可用 [Chat CLI](../apps/remi/cli/commands/collaboration.ts)的 `remi chat issue bind/unbind` 显式调整；绑定目标必须属于同一工作区。
+
+- **自动话题**：[工作区配置](../packages/server/src/issue-topics/config.ts)默认关闭，启用需目标群 `chat_id`，可按 `project_ids` 限制；空项目列表表示不限制项目。配置写入要求人类工作区管理员。[workspace CLI](../apps/remi/cli/commands/workspace.ts)提供 `remi workspace issue-topics get/set`。当前 Issue 创建 API 在 bot 在线且命中过滤条件时创建绑定 Chat 和持久化根消息投递；从 Chat 创建的 Issue 不再另开话题。未配置、bot 离线或准备投递失败不阻断 Issue 创建，也不代表以后会自动补建。
+- **增量上下文**：绑定默认建立启用的 agent_chat 通知通道；[AgentIssueUpdatesRepo](../packages/server/src/store/repos/agent-issue-updates-repo.ts)将允许的 Issue activity 按默认 30 秒窗口合并，只保留该批最新正文及事件计数，过滤来源于目标 Chat 的回声。普通更新写为 Chat 待投递消息，不单独唤醒 Agent；下一次 claim 最多注入最新 12 条并给出遗漏数量，成功完成后才清除待投递标记。切换绑定或关闭订阅会清除待投递更新。摘要不替代 `remi issue get` 和最近评论查询。
+- **订阅控制**：[Chat 路由](../packages/server/src/api/routers/chat.ts)提供 `issue-updates` 查询/开关，对 task token 返回 403；CLI 为 `remi chat issue updates get/enable/disable`。开关与绑定分别维护，不能只看 Issue 有绑定就认定更新仍启用。
+- **轮次推送**：[TasksRepo](../packages/server/src/store/repos/tasks-repo.ts)在负责人 Issue Session 任务成功结束、该 Issue 已无其他活跃执行任务后，触发绑定话题的总结。已有 Chat task 时 steer；否则创建一个主动总结 task。按绑定与负责人 task 去重，等待委派任务和负责人回程完成，Chat 总结本身不自动修改 Issue 状态或再发 Issue 评论。
+- **出站投递**：主动总结完成后进入持久化 outbox，daemon 通过心跳领取有租约的 delivery，经 [concierge host](../apps/remi/cli/multiremi.ts)发送并回报；失败按退避重试。[send.ts](../packages/connectors/src/feishu/send.ts)向飞书 create/reply 传 delivery 的幂等键。根消息成功后用返回的消息 ID 固定话题绑定；这些机制不等于真实飞书端已验证恰好一次投递。
+
+Chat 即使绑定 Issue，仍使用独立 Chat 工作目录与会话投影。claim 中的 `bound_issue`、待投递摘要和 [CLI caller context](../packages/server/src/api/routers/cli.ts)可帮助 Agent 找回当前 Issue；不要把任务创建时尚未绑定的空 `issueId` 当作永远没有 Issue 上下文。
 
 ## 当前组件与能力
 
@@ -62,9 +74,11 @@ Connection 的 Provider 配置走结构化输入，具体字段以 API 和 CLI h
 按改动选择当前单元测试：
 
 ```bash
+bun test tests/unit/multiremi/multiremi-feishu-issue-topics.test.ts tests/unit/multiremi/multiremi-feishu-bot-task-bridge.test.ts
+bun test tests/unit/multiremi/multiremi-agent-issue-updates.test.ts tests/unit/multiremi/multiremi-store-daemon-wire.test.ts tests/unit/connectors/feishu-send.test.ts
 bun test tests/unit/multiremi/lark-cli-message-provider.test.ts tests/unit/multiremi/messaging-scheduler.test.ts
 bun test tests/unit/multiremi/messaging-repo.test.ts tests/unit/multiremi/messaging-outcomes.test.ts
 bun test tests/unit/multiremi/messaging-api.test.ts tests/unit/multiremi/messaging-contract.test.ts tests/unit/multiremi/feishu-compat.test.ts
 ```
 
-[真实 CLI 集成测试](../tests/integration/lark-cli-message-provider.test.ts)只读取当前已授权账户，不发送/回复/上传；缺少 lark-cli 或登录时会跳过。`bun test tests/integration/lark-cli-message-provider.test.ts` 的绿色结果必须同时检查执行/跳过数量。更改连接授权、发送等 Provider 能力时，还需分别验证对应能力；只读采集测试不覆盖它们。本次文档核对未运行这些 Bun 测试或访问真实飞书账户。
+[真实 CLI 集成测试](../tests/integration/lark-cli-message-provider.test.ts)只读取当前已授权账户，不发送/回复/上传；缺少 lark-cli 或登录时会跳过。`bun test tests/integration/lark-cli-message-provider.test.ts` 的绿色结果必须同时检查执行/跳过数量。更改连接授权、发送等 Provider 能力时，还需分别验证对应能力；只读采集测试不覆盖它们。实际执行结果和真实飞书验证范围应记录在对应任务或 PR。

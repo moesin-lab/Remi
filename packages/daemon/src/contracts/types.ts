@@ -18,6 +18,7 @@
 import type {
   CreateSkillInput,
   ImportSkillInput,
+  MultiremiBoundIssue,
   MultiremiSkillFile,
   MultiremiSkillImportSource,
   RunAutopilotInput,
@@ -328,6 +329,13 @@ export interface AgentTask {
   requesting_user_profile_description?: string | null;
   chatMessage?: string | null;
   chat_message?: string | null;
+  boundIssueUpdates?: string[];
+  bound_issue_updates?: string[];
+  boundIssueUpdatesOmittedCount?: number;
+  bound_issue_updates_omitted_count?: number;
+  /** Safe identity of the Issue attached to this Chat, not task ownership. */
+  boundIssue?: MultiremiBoundIssue | null;
+  bound_issue?: MultiremiBoundIssue | null;
   chatBootstrapTranscript?: string | null;
   chat_bootstrap_transcript?: string | null;
   chatMessageAttachments?: unknown[];

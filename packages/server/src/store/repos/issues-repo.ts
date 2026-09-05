@@ -19,7 +19,7 @@ import { type StoreContext, toInboxItem, toIssueComment } from "@multiremi/store
 import { createId, nowIso } from "@multiremi/ids.js";
 import { createLogger } from "@shared/logger.js";
 import { resolveIssueArchiveSettings } from "@multiremi/store/issue-archive.js";
-import { INBOX_LEDGER_TYPES } from "@multiremi/contracts";
+import { INBOX_LEDGER_TYPES, isInboxLedgerType } from "@multiremi/contracts";
 import { attachmentIdsFromText } from "@multiremi/contracts/attachments.js";
 import type {
   AssignIssueInput,
@@ -40,6 +40,8 @@ import type {
   MultiremiAttachment,
   MultiremiCommentReaction,
   MultiremiInboxItem,
+  MultiremiInboxPage,
+  MultiremiInboxSummary,
   MultiremiIssue,
   MultiremiIssueAutoTitleMetadata,
   MultiremiIssueActivity,
@@ -68,6 +70,16 @@ import type {
 const log = createLogger("multiremi-store");
 
 type Row = Record<string, unknown>;
+
+export interface IssueMutationActivityContext {
+  actorType?: string;
+  actorId?: string | null;
+  sourceTaskId?: string | null;
+}
+
+function sourceTaskActivityData(sourceTaskId: string | null | undefined): Record<string, string> {
+  return sourceTaskId ? { sourceTaskId, source_task_id: sourceTaskId } : {};
+}
 
 const ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "done", "blocked", "cancelled"] as const;
 const CLOSED_ISSUE_STATUSES = new Set(["done", "completed", "closed", "cancelled", "failed"]);
@@ -780,7 +792,11 @@ export class IssuesRepo {
     return rows.map((row) => this.hydrateIssueDependency(toIssueDependency(row)));
   }
 
-  createIssueDependency(issueId: string, input: CreateIssueDependencyInput): MultiremiIssueDependency {
+  createIssueDependency(
+    issueId: string,
+    input: CreateIssueDependencyInput,
+    activity: IssueMutationActivityContext = {},
+  ): MultiremiIssueDependency {
     const issue = this.getIssue(issueId);
     if (!issue) throw new Error(`Issue not found: ${issueId}`);
     const dependsOnIssueId = input.dependsOnIssueId ?? input.depends_on_issue_id ?? "";
@@ -803,11 +819,16 @@ export class IssuesRepo {
       [id, issue.workspaceId, issue.id, dependsOnIssue.id, type, now],
     );
     this.ctx.appendIssueActivity(issue.id, {
-      actorType: "system",
-      actorId: null,
+      actorType: activity.actorType ?? "system",
+      actorId: activity.actorId ?? null,
       type: "issue_dependency_added",
       body: `${type} ${dependsOnIssue.key}`,
-      data: { dependencyId: id, dependsOnIssueId: dependsOnIssue.id, type },
+      data: {
+        dependencyId: id,
+        dependsOnIssueId: dependsOnIssue.id,
+        type,
+        ...sourceTaskActivityData(activity.sourceTaskId),
+      },
     });
     return this.getIssueDependency(id)!;
   }
@@ -817,7 +838,11 @@ export class IssuesRepo {
     return row ? this.hydrateIssueDependency(toIssueDependency(row)) : null;
   }
 
-  deleteIssueDependency(issueId: string, dependencyId: string): void {
+  deleteIssueDependency(
+    issueId: string,
+    dependencyId: string,
+    activity: IssueMutationActivityContext = {},
+  ): void {
     const dependency = this.getIssueDependency(dependencyId);
     if (!dependency) return;
     if (dependency.issueId !== issueId && dependency.dependsOnIssueId !== issueId) {
@@ -825,11 +850,17 @@ export class IssuesRepo {
     }
     this.ctx.db.run("DELETE FROM multiremi_issue_dependencies WHERE id = ?", [dependencyId]);
     this.ctx.appendIssueActivity(issueId, {
-      actorType: "system",
-      actorId: null,
+      actorType: activity.actorType ?? "system",
+      actorId: activity.actorId ?? null,
       type: "issue_dependency_removed",
       body: dependency.type,
-      data: { dependencyId, issueId: dependency.issueId, dependsOnIssueId: dependency.dependsOnIssueId, type: dependency.type },
+      data: {
+        dependencyId,
+        issueId: dependency.issueId,
+        dependsOnIssueId: dependency.dependsOnIssueId,
+        type: dependency.type,
+        ...sourceTaskActivityData(activity.sourceTaskId),
+      },
     });
   }
 
@@ -1092,6 +1123,8 @@ export class IssuesRepo {
       type: "task_failure",
       taskId,
       task_id: taskId,
+      sourceTaskId: taskId,
+      source_task_id: taskId,
     }, taskId, issueSessionId);
   }
 
@@ -1278,7 +1311,10 @@ export class IssuesRepo {
         actorId,
         type: "issue_unassigned",
         body: null,
-        data: { cancelled },
+        data: {
+          cancelled,
+          ...sourceTaskActivityData(input.parentTaskId ?? input.parent_task_id),
+        },
       });
       return { issue: this.getIssue(id)!, task: null };
     }
@@ -1347,6 +1383,7 @@ export class IssuesRepo {
         to_id: assigneeId,
         taskId: task?.id ?? null,
         task_id: task?.id ?? null,
+        ...sourceTaskActivityData(input.parentTaskId ?? input.parent_task_id),
         cancelled,
       },
     });
@@ -1486,7 +1523,7 @@ export class IssuesRepo {
       actorId: input.authorId ?? null,
       type: "comment_created",
       body,
-      data: { commentId: id },
+      data: { commentId: id, ...(taskId ? { sourceTaskId: taskId } : {}) },
     });
     const comment = this.getIssueComment(id)!;
     // Live-update open issue pages. Emitted from the store (not the HTTP
@@ -2067,7 +2104,11 @@ export class IssuesRepo {
     return rows.map(toLabel);
   }
 
-  attachLabelToIssue(issueId: string, labelId: string): MultiremiLabel[] {
+  attachLabelToIssue(
+    issueId: string,
+    labelId: string,
+    activity: IssueMutationActivityContext = {},
+  ): MultiremiLabel[] {
     const issueRow = this.ctx.db.query("SELECT * FROM multiremi_issues WHERE id = ?").get(issueId) as Row | null;
     if (!issueRow) throw new Error(`Issue not found: ${issueId}`);
     const issue = toIssue(issueRow);
@@ -2085,16 +2126,20 @@ export class IssuesRepo {
     const now = nowIso();
     this.ctx.db.run("UPDATE multiremi_issues SET updated_at = ? WHERE id = ?", [now, issueId]);
     this.ctx.appendIssueActivity(issueId, {
-      actorType: "system",
-      actorId: null,
+      actorType: activity.actorType ?? "system",
+      actorId: activity.actorId ?? null,
       type: "label_attached",
       body: label.name,
-      data: { labelId, color: label.color },
+      data: { labelId, color: label.color, ...sourceTaskActivityData(activity.sourceTaskId) },
     });
     return this.listLabelsForIssue(issueId);
   }
 
-  detachLabelFromIssue(issueId: string, labelId: string): MultiremiLabel[] {
+  detachLabelFromIssue(
+    issueId: string,
+    labelId: string,
+    activity: IssueMutationActivityContext = {},
+  ): MultiremiLabel[] {
     const issueRow = this.ctx.db.query("SELECT * FROM multiremi_issues WHERE id = ?").get(issueId) as Row | null;
     if (!issueRow) throw new Error(`Issue not found: ${issueId}`);
     const issue = toIssue(issueRow);
@@ -2109,11 +2154,11 @@ export class IssuesRepo {
     const now = nowIso();
     this.ctx.db.run("UPDATE multiremi_issues SET updated_at = ? WHERE id = ?", [now, issueId]);
     this.ctx.appendIssueActivity(issueId, {
-      actorType: "system",
-      actorId: null,
+      actorType: activity.actorType ?? "system",
+      actorId: activity.actorId ?? null,
       type: "label_detached",
       body: label.name,
-      data: { labelId, color: label.color },
+      data: { labelId, color: label.color, ...sourceTaskActivityData(activity.sourceTaskId) },
     });
     return this.listLabelsForIssue(issueId);
   }
@@ -2124,10 +2169,109 @@ export class IssuesRepo {
     const rows = this.ctx.db.query(
       "SELECT * FROM multiremi_inbox_items WHERE member_id = ? AND archived = 0 ORDER BY created_at DESC",
     ).all(resolvedMemberId) as Row[];
-    return rows.map((row) => {
+    return this.hydrateInboxRows(rows);
+  }
+
+  listInboxItemsPage(
+    memberId?: string | null,
+    options: { limit?: number; cursor?: string | null } = {},
+  ): MultiremiInboxPage {
+    const resolvedMemberId = memberId ?? this.ctx.workspaces().listWorkspaceMembers()[0]?.id ?? null;
+    const requestedLimit = Math.floor(options.limit ?? 50);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.max(1, Math.min(requestedLimit, 100))
+      : 50;
+    if (!resolvedMemberId) return { items: [], limit, hasMore: false, nextCursor: null };
+
+    const cursor = cleanOptionalString(options.cursor);
+    let cursorCreatedAt: string | null = null;
+    let cursorId: string | null = null;
+    if (cursor) {
+      const decoded = decodeInboxCursor(cursor);
+      cursorCreatedAt = decoded.createdAt;
+      cursorId = decoded.id;
+    }
+
+    const rows = cursorCreatedAt
+      ? this.ctx.db.query(
+          `SELECT * FROM multiremi_inbox_items
+           WHERE member_id = ? AND archived = 0
+             AND (created_at < ? OR (created_at = ? AND id < ?))
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?`,
+        ).all(resolvedMemberId, cursorCreatedAt, cursorCreatedAt, cursorId, limit + 1) as Row[]
+      : this.ctx.db.query(
+          `SELECT * FROM multiremi_inbox_items
+           WHERE member_id = ? AND archived = 0
+           ORDER BY created_at DESC, id DESC
+           LIMIT ?`,
+        ).all(resolvedMemberId, limit + 1) as Row[];
+    const hasMore = rows.length > limit;
+    const pageRows = hasMore ? rows.slice(0, limit) : rows;
+    return {
+      items: this.hydrateInboxRows(pageRows),
+      limit,
+      hasMore,
+      nextCursor: hasMore && pageRows.length > 0 ? encodeInboxCursor(pageRows[pageRows.length - 1]!) : null,
+    };
+  }
+
+  getInboxSummary(
+    memberId?: string | null,
+    timezoneOffsetMinutes = 0,
+  ): MultiremiInboxSummary {
+    const resolvedMemberId = memberId ?? this.ctx.workspaces().listWorkspaceMembers()[0]?.id ?? null;
+    if (!resolvedMemberId) return { unread: 0, attention: 0 };
+
+    // The summary deliberately avoids Issue hydration and large message bodies. Only successful
+    // automation rows need details so their existing UI grouping by autopilot can be preserved.
+    const rows = this.ctx.db.query(
+      `SELECT id, issue_id, type, severity, read, created_at,
+              CASE WHEN type = 'autopilot_run_completed' THEN details ELSE NULL END AS details
+       FROM multiremi_inbox_items
+       WHERE member_id = ? AND archived = 0
+       ORDER BY created_at DESC, id DESC`,
+    ).all(resolvedMemberId) as Row[];
+
+    const visible: Row[] = [];
+    const selectionKeys = new Set<string>();
+    for (const row of rows) {
       const issueId = nullableString(row.issue_id);
-      return toInboxItem(row, issueId ? this.getIssue(issueId) : null);
-    });
+      const type = String(row.type);
+      const key = isInboxLedgerType(type) || !issueId ? `item:${row.id}` : `issue:${issueId}`;
+      if (selectionKeys.has(key)) continue;
+      selectionKeys.add(key);
+      visible.push(row);
+    }
+
+    const attention = visible.filter((row) =>
+      Number(row.read ?? 0) === 0
+      && (row.severity === "attention" || row.severity === "action_required")
+    ).length;
+    const now = new Date();
+    const mergedSuccessfulRuns = new Map<string, { unread: boolean }>();
+    let unread = 0;
+    for (const row of visible) {
+      const isUnread = Number(row.read ?? 0) === 0;
+      const details = row.type === "autopilot_run_completed"
+        ? parseJson<Record<string, unknown> | null>(row.details, null)
+        : null;
+      const autopilotId = typeof details?.autopilot_id === "string" ? details.autopilot_id : null;
+      if (!autopilotId) {
+        if (isUnread) unread += 1;
+        continue;
+      }
+      const dateGroup = inboxDateGroup(String(row.created_at), now, timezoneOffsetMinutes);
+      const mergeKey = `${dateGroup}:${autopilotId}`;
+      const merged = mergedSuccessfulRuns.get(mergeKey);
+      if (merged) {
+        merged.unread ||= isUnread;
+      } else {
+        mergedSuccessfulRuns.set(mergeKey, { unread: isUnread });
+      }
+    }
+    unread += [...mergedSuccessfulRuns.values()].filter((entry) => entry.unread).length;
+    return { unread, attention };
   }
 
   markInboxItemRead(id: string): MultiremiInboxItem {
@@ -2420,7 +2564,12 @@ export class IssuesRepo {
     return issue.metadata;
   }
 
-  setIssueMetadataKey(issueId: string, key: string, value: unknown): Record<string, string | number | boolean> {
+  setIssueMetadataKey(
+    issueId: string,
+    key: string,
+    value: unknown,
+    activity: IssueMutationActivityContext = {},
+  ): Record<string, string | number | boolean> {
     validateIssueMetadataKey(key);
     validatePublicIssueMetadataKey(key);
     const normalized = validateIssueMetadataValue(value);
@@ -2440,11 +2589,11 @@ export class IssuesRepo {
       [toJson(metadata), now, issueId],
     );
     this.ctx.appendIssueActivity(issueId, {
-      actorType: "system",
-      actorId: null,
+      actorType: activity.actorType ?? "system",
+      actorId: activity.actorId ?? null,
       type: "issue_metadata_set",
       body: `${key}=${String(normalized)}`,
-      data: { key, value: normalized },
+      data: { key, value: normalized, ...sourceTaskActivityData(activity.sourceTaskId) },
     });
     return this.listIssueMetadata(issueId);
   }
@@ -2487,7 +2636,11 @@ export class IssuesRepo {
     this.ctx.appendIssueActivity(issueId, input);
   }
 
-  deleteIssueMetadataKey(issueId: string, key: string): Record<string, string | number | boolean> {
+  deleteIssueMetadataKey(
+    issueId: string,
+    key: string,
+    activity: IssueMutationActivityContext = {},
+  ): Record<string, string | number | boolean> {
     validateIssueMetadataKey(key);
     validatePublicIssueMetadataKey(key);
     const issue = this.getIssue(issueId);
@@ -2501,11 +2654,11 @@ export class IssuesRepo {
       [toJson(metadata), now, issueId],
     );
     this.ctx.appendIssueActivity(issueId, {
-      actorType: "system",
-      actorId: null,
+      actorType: activity.actorType ?? "system",
+      actorId: activity.actorId ?? null,
       type: "issue_metadata_deleted",
       body: key,
-      data: { key },
+      data: { key, ...sourceTaskActivityData(activity.sourceTaskId) },
     });
     return this.listIssueMetadata(issueId);
   }
@@ -2583,6 +2736,26 @@ export class IssuesRepo {
     if (issues.length === 0) return issues;
     const labelsByIssue = this.labelsForIssues(issues.map((issue) => issue.id));
     return issues.map((issue) => ({ ...issue, labels: labelsByIssue.get(issue.id) ?? [] }));
+  }
+
+  private hydrateInboxRows(rows: Row[]): MultiremiInboxItem[] {
+    const issueIds = [...new Set(rows.map((row) => nullableString(row.issue_id)).filter((id): id is string => Boolean(id)))];
+    const issuesById = new Map<string, MultiremiIssue>();
+    // Keep below SQLite's default bind-variable limit. PostgreSQL benefits from the same bounded queries.
+    for (let offset = 0; offset < issueIds.length; offset += 400) {
+      const chunk = issueIds.slice(offset, offset + 400);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const issueRows = this.ctx.db.query(
+        `SELECT * FROM multiremi_issues WHERE id IN (${placeholders})`,
+      ).all(...chunk) as Row[];
+      for (const issue of this.hydrateIssues(issueRows.map((row) => toIssue(row)))) {
+        issuesById.set(issue.id, issue);
+      }
+    }
+    return rows.map((row) => {
+      const issueId = nullableString(row.issue_id);
+      return toInboxItem(row, issueId ? issuesById.get(issueId) ?? null : null);
+    });
   }
 
   private labelsForIssues(issueIds: string[]): Map<string, MultiremiLabel[]> {
@@ -3462,6 +3635,49 @@ function normalizeIssueDate(value: string | null | undefined, field: string): st
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) throw new Error(`${field} must be a valid date`);
   return date.toISOString();
+}
+
+function inboxDateGroup(
+  createdAt: string,
+  now: Date,
+  timezoneOffsetMinutes: number,
+): "today" | "yesterday" | "this_week" | "earlier" {
+  const localTimestamp = (value: Date) => value.getTime() - timezoneOffsetMinutes * 60_000;
+  const shiftedNow = new Date(localTimestamp(now));
+  const startToday = Date.UTC(
+    shiftedNow.getUTCFullYear(),
+    shiftedNow.getUTCMonth(),
+    shiftedNow.getUTCDate(),
+  );
+  const startYesterday = startToday - 86_400_000;
+  const daySinceMonday = (shiftedNow.getUTCDay() + 6) % 7;
+  const startWeek = startToday - daySinceMonday * 86_400_000;
+  const timestamp = localTimestamp(new Date(createdAt));
+  if (timestamp >= startToday) return "today";
+  if (timestamp >= startYesterday) return "yesterday";
+  if (timestamp >= startWeek) return "this_week";
+  return "earlier";
+}
+
+function encodeInboxCursor(row: Row): string {
+  return Buffer.from(JSON.stringify([String(row.created_at), String(row.id)]), "utf8").toString("base64url");
+}
+
+function decodeInboxCursor(cursor: string): { createdAt: string; id: string } {
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (
+      !Array.isArray(value)
+      || value.length !== 2
+      || value.some((part) => typeof part !== "string" || !part)
+      || !Number.isFinite(Date.parse(String(value[0])))
+    ) {
+      throw new Error("invalid payload");
+    }
+    return { createdAt: value[0] as string, id: value[1] as string };
+  } catch {
+    throw new Error("Invalid inbox cursor");
+  }
 }
 
 function normalizeJsonArray(value: unknown): unknown[] {

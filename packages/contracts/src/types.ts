@@ -877,6 +877,8 @@ export interface MultiremiDaemonHeartbeatAck {
    * `MultiremiFeishuBotDirective`.
    */
   feishu_bot?: MultiremiFeishuBotDirective;
+  /** One leased proactive reply for the Runtime hosting the Feishu concierge. */
+  pending_feishu_outbound?: MultiremiFeishuBotOutboundDelivery;
   ssh_mesh?: MultiremiSshMeshHeartbeatAck;
   /** Platform maintenance directive: daemons must pause task claims while draining. */
   drain?: MultiremiDaemonDrainDirective;
@@ -1217,6 +1219,14 @@ export interface CreateTaskSteerMessageInput {
   authorId?: string | null;
 }
 
+/** Safe Issue identity attached to a Chat task whose conversation is bound to an Issue. */
+export interface MultiremiBoundIssue {
+  id: string;
+  key: string;
+  title: string;
+  status: string;
+}
+
 export interface MultiremiTask {
   id: string;
   taskKind: "direct" | "quick_create";
@@ -1276,6 +1286,13 @@ export interface MultiremiTask {
   auth_token?: string | null;
   chatMessage?: string | null;
   chat_message?: string | null;
+  boundIssueUpdates?: string[];
+  bound_issue_updates?: string[];
+  boundIssueUpdatesOmittedCount?: number;
+  bound_issue_updates_omitted_count?: number;
+  /** Issue attached to a Chat session, distinct from the task's owned Issue. */
+  boundIssue?: MultiremiBoundIssue | null;
+  bound_issue?: MultiremiBoundIssue | null;
   chatMessageAttachments?: unknown[];
   chat_message_attachments?: unknown[];
   autopilotId?: string | null;
@@ -2275,6 +2292,8 @@ export interface PublishSessionResultInput {
   published_by_type?: string;
   publishedById?: string | null;
   published_by_id?: string | null;
+  /** Server-internal creator lineage. Public routes derive this from the task credential. */
+  sourceTaskId?: string | null;
 }
 
 // ─── Inbox, reactions, attachments, labels & pins ────────────────────────────────────────────────
@@ -2324,7 +2343,19 @@ export interface MultiremiInboxItem {
   issue: MultiremiIssue | null;
 }
 
-export type MultiremiNotificationChannelKind = "inapp" | "feishu_group";
+export interface MultiremiInboxPage {
+  items: MultiremiInboxItem[];
+  limit: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+export interface MultiremiInboxSummary {
+  unread: number;
+  attention: number;
+}
+
+export type MultiremiNotificationChannelKind = "inapp" | "feishu_group" | "agent_chat";
 export type MultiremiNotificationDeliveryStatus = "pending" | "sent" | "failed";
 
 export interface MultiremiNotificationChannel {
@@ -2358,6 +2389,14 @@ export interface MultiremiNotificationDelivery {
   lastAttemptAt: string | null;
   deliveredAt: string | null;
   createdAt: string;
+}
+
+export interface MultiremiAgentIssueUpdateSubscription {
+  chatSessionId: string;
+  issueId: string | null;
+  channelId: string | null;
+  enabled: boolean;
+  debounceWindowSeconds: number;
 }
 
 export interface MultiremiIssueReaction {
@@ -3727,13 +3766,40 @@ export const FEISHU_CONCIERGE_CONFIG_CAPABILITY = "feishu_concierge_config_v1";
 /** Protocol version a daemon reports in register/heartbeat when it can host the bot. */
 export const FEISHU_CONCIERGE_PROTOCOL_VERSION = 1;
 
+/** Adds durable proactive topic replies without removing v1 inbound support. */
+export const FEISHU_CONCIERGE_OUTBOUND_PROTOCOL_VERSION = 2;
+
 export type FeishuBotDomain = "feishu" | "lark" | "bytedance";
+
+/** Workspace policy for creating one Feishu topic per newly created Issue. */
+export interface IssueTopicConfig {
+  enabled: boolean;
+  chatId: string;
+  /** Omitted means every project, including projectless Issues. */
+  projectIds?: string[];
+}
 
 /** What the control plane wants the selected Runtime to do with the connector. */
 export type FeishuBotDesiredState = "running" | "stopped";
 
 /** What a Runtime reports back about the connector it is hosting. */
 export type FeishuBotRuntimeState = "stopped" | "starting" | "online" | "failed";
+
+export interface MultiremiFeishuBotOutboundDelivery {
+  id: string;
+  claimToken: string;
+  claim_token?: string;
+  chatId: string;
+  chat_id?: string;
+  threadId: string | null;
+  thread_id?: string | null;
+  replyToMessageId: string | null;
+  reply_to_message_id?: string | null;
+  body: string;
+  /** Stable across retries so Feishu can deduplicate send-success/ack-failure. */
+  idempotencyKey: string;
+  idempotency_key?: string;
+}
 
 /**
  * Aggregate status shown in Workspace Settings. Derived from the config row,
@@ -4196,6 +4262,8 @@ export interface MultiremiChatSession {
   workspaceId: string;
   creatorId: string | null;
   agentId: string;
+  /** Optional Issue whose context is attached to tasks created from this Chat. */
+  issueId: string | null;
   title: string;
   status: MultiremiChatSessionStatus;
   sessionId: string | null;
@@ -4234,12 +4302,16 @@ export interface CreateChatSessionInput {
   workspace_id?: string | null;
   creatorId?: string | null;
   creator_id?: string | null;
+  issueId?: string | null;
+  issue_id?: string | null;
   title?: string | null;
 }
 
 export interface UpdateChatSessionInput {
   title?: string;
   status?: MultiremiChatSessionStatus;
+  issueId?: string | null;
+  issue_id?: string | null;
 }
 
 export interface SendChatMessageInput {

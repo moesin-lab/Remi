@@ -31,6 +31,8 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 
 ## 启动条件
 
+本机 profile 可按[部署说明](../deploy/local-profiles.md#stable-内网访问)将 stable 的 Web/API 对内网开放。密码登录页在显式 stable 构建的配置主机名显示；`MULTIREMI_DAEMON_DIRECT_BASE_URL` 同时通过 `/api/config.daemon_server_url` 和 daemon 安装说明公布可连接的 API origin，避免远程机器误连自身 loopback。监听 `0.0.0.0` 与客户端连接地址是不同设置，不改变服务端原有鉴权。
+
 [startMultiremiServer](../../packages/server/src/api/server.ts)调用 [evaluateStartupEnv](../../packages/server/src/config/startup-env.ts)：生产模式要求 `MULTIREMI_DATABASE_URL`、`MULTIREMI_TOKEN`、`JWT_SECRET`，缺项会拒绝启动。显式 development/test 作为本地模式；否则 production 或已配置数据库 URL 会触发生产要求。
 
 应用工厂保留本地无鉴权模式并打印警告，这不等于生产入口允许忽略配置。[jwtSecret](../../packages/server/src/api/helpers/jwt.ts)仅在精确的 `NODE_ENV=development/test` 下允许开发默认密钥，其他环境未设密钥时拒绝 JWT；启动配置检查与 JWT 校验是两个不同入口。

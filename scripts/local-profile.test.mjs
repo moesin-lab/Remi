@@ -325,3 +325,47 @@ test('unsupported or misleading ref arguments fail before running external comma
     assert.equal(result.calls.length, 0);
   }
 });
+
+test('stable LAN selection publishes both services and survives upgrades without affecting dev', (t) => {
+  const f = fixture(t);
+  succeeds(f.run('stable', 'prepare', { args: ['--lan-host', '192.168.40.12'] }));
+  succeeds(f.run('stable', 'up'));
+  succeeds(f.run('stable', 'deploy', { commit: NEW_REF }));
+  const stable = parseEnv(readFileSync(join(f.profileRoot(), 'compose.env'), 'utf8'));
+  assert.equal(stable.REMI_BIND_ADDRESS, '0.0.0.0');
+  assert.equal(stable.REMI_PUBLIC_URL, 'http://192.168.40.12:13000');
+  assert.equal(stable.REMI_PUBLIC_WS_URL, 'ws://192.168.40.12:16120/ws');
+  assert.equal(stable.REMI_DAEMON_SERVER_URL, 'http://192.168.40.12:16120');
+  assert.deepEqual(f.readProfile('active.json').network, { hostname: '192.168.40.12', bindAddress: '0.0.0.0' });
+  assert.match(f.run('stable', 'status').stdout, /http:\/\/192\.168\.40\.12:13000/u);
+  succeeds(f.run('dev', 'prepare'));
+  const dev = parseEnv(readFileSync(join(f.profileRoot('dev'), 'compose.env'), 'utf8'));
+  assert.equal(dev.REMI_BIND_ADDRESS, '127.0.0.1');
+  assert.equal(dev.REMI_PUBLIC_URL, 'http://localhost:14000');
+  assert.equal(dev.REMI_DAEMON_SERVER_URL, 'http://localhost:16220');
+});
+
+test('a failed LAN rebuild leaves the active loopback configuration untouched', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const original = readFileSync(join(f.profileRoot(), 'compose.env'));
+  const result = f.run('stable', 'deploy', { args: ['--lan-host', '10.20.30.40'], fail: 'build', commit: NEW_REF });
+  assert.notEqual(result.status, 0);
+  assert.ok(readFileSync(join(f.profileRoot(), 'compose.env')).equals(original));
+  assert.equal(f.readProfile('active.json').network.bindAddress, '127.0.0.1');
+  assert.ok(!result.calls.some(isAction('stop')));
+});
+
+test('LAN settings reject unreachable bind values and never expose dev', (t) => {
+  const f = fixture(t);
+  for (const host of ['0.0.0.0', '127.0.0.1', '8.8.8.8', 'http://192.168.1.2', '192.168.1.300', '172.32.1.2']) {
+    const result = f.run('stable', 'prepare', { args: ['--lan-host', host] });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /private IPv4/u);
+    assert.equal(result.calls.length, 0);
+  }
+  const dev = f.run('dev', 'deploy', { args: ['--lan-host', '192.168.1.2'] });
+  assert.notEqual(dev.status, 0);
+  assert.match(dev.stderr, /only valid for stable/u);
+  assert.equal(dev.calls.length, 0);
+});

@@ -86,6 +86,7 @@ function LoginPageContent() {
     setAllowPasswordLogin(allowsPasswordLogin(
       process.env.NEXT_PUBLIC_LOCAL_PROFILE,
       window.location.hostname,
+      process.env.NEXT_PUBLIC_SITE_URL,
     ));
   }, []);
 

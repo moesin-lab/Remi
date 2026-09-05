@@ -395,6 +395,7 @@ describe("CreateIssueModal", () => {
         attachment_ids: undefined,
         parent_issue_id: undefined,
         project_id: undefined,
+        runtime_workspace_id: null,
       });
     });
 
@@ -442,6 +443,7 @@ describe("CreateIssueModal", () => {
         attachment_ids: undefined,
         parent_issue_id: undefined,
         project_id: undefined,
+        runtime_workspace_id: null,
       });
     });
 

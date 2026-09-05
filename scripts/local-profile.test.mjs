@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHmac } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parseEnv } from 'node:util';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const scriptSource = readFileSync(join(repository, 'scripts/local-profile.mjs'), 'utf8');
@@ -128,6 +130,48 @@ function succeeds(result) {
 
 const dockerCalls = (result) => result.calls.filter((call) => call.command === 'docker');
 const isAction = (action) => (call) => call.command === 'docker' && call.args.includes(action);
+
+test('token signs a 24-hour local session with only the selected profile secret', (t) => {
+  const f = fixture(t);
+  succeeds(f.run('stable', 'prepare'));
+  succeeds(f.run('dev', 'prepare'));
+  const stableEnv = parseEnv(readFileSync(join(f.profileRoot(), 'api.env'), 'utf8'));
+  const devEnv = parseEnv(readFileSync(join(f.profileRoot('dev'), 'api.env'), 'utf8'));
+  const before = Math.floor(Date.now() / 1000);
+  const result = f.run('stable', 'token', { environment: { JWT_SECRET: 'wrong-shell-secret' } });
+  const after = Math.floor(Date.now() / 1000);
+  succeeds(result);
+  assert.equal(result.calls.length, 0, 'Issuing a session must not invoke Docker or Git');
+  const [header, claims, signature, extra] = result.stdout.trim().split('.');
+  assert.equal(extra, undefined);
+  assert.deepEqual(JSON.parse(Buffer.from(header, 'base64url')), { alg: 'HS256', typ: 'JWT' });
+  const payload = JSON.parse(Buffer.from(claims, 'base64url'));
+  assert.equal(payload.sub, 'local');
+  assert.ok(payload.iat >= before && payload.iat <= after);
+  assert.equal(payload.exp - payload.iat, 24 * 60 * 60);
+  const input = `${header}.${claims}`;
+  assert.ok(signature === createHmac('sha256', stableEnv.JWT_SECRET).update(input).digest('base64url'));
+  assert.ok(signature !== createHmac('sha256', devEnv.JWT_SECRET).update(input).digest('base64url'));
+  assert.ok(!result.stdout.includes(stableEnv.MULTIREMI_TOKEN));
+  assert.ok(!result.stdout.includes(stableEnv.JWT_SECRET));
+});
+
+test('token reads quoted profile secrets and fails without a signing secret', (t) => {
+  const f = fixture(t);
+  succeeds(f.run('dev', 'prepare'));
+  const envPath = join(f.profileRoot('dev'), 'api.env');
+  writeFileSync(envPath, 'MULTIREMI_TOKEN=never-output-master\nJWT_SECRET="test-only-quoted-secret"\n');
+  const result = f.run('dev', 'token');
+  succeeds(result);
+  const [header, claims, signature] = result.stdout.trim().split('.');
+  assert.ok(signature === createHmac('sha256', 'test-only-quoted-secret').update(`${header}.${claims}`).digest('base64url'));
+  writeFileSync(envPath, 'MULTIREMI_TOKEN=never-output-master\n');
+  const missing = f.run('dev', 'token', { environment: { JWT_SECRET: 'wrong-shell-secret' } });
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /No local profile JWT_SECRET/u);
+  assert.equal(missing.stdout, '');
+  assert.equal(missing.calls.length, 0);
+});
 
 test('shell profile variables and remote Docker settings cannot override the selected profile', (t) => {
   const f = fixture(t);

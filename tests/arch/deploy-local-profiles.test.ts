@@ -101,6 +101,7 @@ describe("local stable and dev isolation", () => {
     }
     expect(base.services.web!.build.args.NEXT_PUBLIC_SITE_URL).toContain("${REMI_PUBLIC_URL:?");
     expect(base.services.web!.build.args.REMOTE_API_URL).toBe("http://api:6120");
+    expect(base.services.web!.build.args.NEXT_PUBLIC_WS_URL).toContain("${REMI_PUBLIC_WS_URL:?");
   });
 
   test("rebuilds when any current workspace dependency manifest changes", () => {

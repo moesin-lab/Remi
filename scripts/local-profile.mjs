@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, openSync, closeSync, realpathSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve, delimiter, relative, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseEnv } from 'node:util';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const profilesRoot = resolve(process.env.REMI_PROFILES_ROOT || join(homedir(), '.remi', 'profiles'));
@@ -113,6 +114,7 @@ function writeComposeEnvironment(root, deployment) {
     REMI_BUILD_REF: deployment.ref,
     REMI_APP_VERSION: deployment.version,
     REMI_PUBLIC_URL: `http://${config.hostname}:${config.webPort}`,
+    REMI_PUBLIC_WS_URL: `ws://${config.hostname}:${config.apiPort}/ws`,
     REMI_API_BIND_PORT: config.apiPort,
     REMI_WEB_BIND_PORT: config.webPort,
     REMI_BACKGROUND_JOBS: config.backgroundJobs,
@@ -276,10 +278,17 @@ async function main() {
     }
   }
   else if (action === 'token') {
-    let token = /^MULTIREMI_TOKEN=(.*)$/mu.exec(readFileSync(join(root, 'api.env'), 'utf8'))?.[1].trim();
-    if (token?.startsWith("'") && token.endsWith("'")) token = token.slice(1, -1);
-    if (!token) throw new Error('No local profile access key is configured');
-    console.log(token);
+    const { JWT_SECRET: signingSecret } = parseEnv(readFileSync(join(root, 'api.env'), 'utf8'));
+    if (!signingSecret) throw new Error('No local profile JWT_SECRET is configured');
+    // Existing JWT authentication recognizes the local administrator identity;
+    // /api/me mirrors this expiring credential into the attachment auth cookie.
+    // Keep the deployment-wide master token and signing secret out of the browser.
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const claims = Buffer.from(JSON.stringify({ sub: 'local', iat: issuedAt, exp: issuedAt + 24 * 60 * 60 })).toString('base64url');
+    const signingInput = `${header}.${claims}`;
+    const signature = createHmac('sha256', signingSecret).update(signingInput).digest('base64url');
+    console.log(`${signingInput}.${signature}`);
   }
   else throw new Error(`Unknown action: ${action}`);
 }

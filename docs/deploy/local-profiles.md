@@ -24,6 +24,8 @@ summary: 在同一台机器运行独立的稳定环境和开发环境，保留�
 
 目录隔离不能代替数据和登录隔离。两个 API 的数据库、token、JWT secret、home、uploads 和 session archives 独立；PostgreSQL 不发布宿主端口。浏览器使用不同 hostname，因为现有 Cookie 不按端口隔离。保持表中入口，不要将两边都改成 localhost。每套网络中的 `api` 和 `postgres` 只指向该套环境。
 
+WebSocket 通过 `NEXT_PUBLIC_WS_URL` 直连各自的 loopback API 端口，避免 Next dev 的 `/ws` 代理握手阻塞；普通 HTTP API 仍走 Web 的同源代理。此设置只进入本机 profile 镜像，默认发行构建保留原来的 URL 推导行为。
+
 两套 API 都保持生产鉴权检查，dev 的开发模式只用于源码重载和 Web 编译。默认使用 SQL 项目知识库，不运行 OpenViking、SSH Mesh 控制面或 platform-updater；没有把远端部署需要的服务全部拉到本机。需要这些能力时，应分别配置，不能共用 stable 的状态目录或飞书/SCM 凭据。
 
 ## 启动和开发
@@ -42,7 +44,7 @@ Docker Desktop 运行时，容器按 `unless-stopped` 自动恢复；主机重�
 
 ## 本机登录
 
-本机镜像明确设置 `NEXT_PUBLIC_LOCAL_PROFILE=stable/dev`，只在 `127.0.0.1` 或 `localhost` 页面增加“访问密钥”登录入口；默认发行构建和其他主机名仍使用原来的飞书入口。后台继续验证既有 token，没有新增无鉴权 API 或任意邮箱登录。
+本机镜像明确设置 `NEXT_PUBLIC_LOCAL_PROFILE=stable/dev`，只在 `127.0.0.1` 或 `localhost` 页面增加“本机会话密钥（24 小时）”登录入口；默认发行构建和其他主机名仍使用原来的飞书入口。后台继续使用既有 JWT 认证，没有新增无鉴权 API 或任意邮箱登录。
 
 在自己的终端获取对应环境的密钥，然后粘贴到该环境登录页面：
 
@@ -51,7 +53,7 @@ node scripts/local-profile.mjs stable token
 node scripts/local-profile.mjs dev token
 ```
 
-密钥来自该 profile 的外部 `api.env`，不要放进 Git、URL 或截图。复制整个 stable 配置目录给 dev 会连带复制身份与加密密钥，应让脚本为 dev 单独初始化。
+命令使用该 profile 外部 `api.env` 中的 `JWT_SECRET`，离线签发有效期 24 小时、身份为 `local` 的会话 JWT；不会输出永久主令牌或签名密钥。它沿用本机 `local` 用户的既有权限，工作区列表按该用户的成员关系过滤。登录时 `/api/me` 设置 HttpOnly Cookie，供附件预览和原生下载使用；到期后重新运行命令并登录。会话密钥不要放进 Git、URL 或截图。复制整个 stable 配置目录给 dev 会连带复制身份与加密密钥，应让脚本为 dev 单独初始化。
 
 ## 日常操作与升级
 

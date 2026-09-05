@@ -82,6 +82,7 @@ services:
         REMI_APP_VERSION: ${REMI_APP_VERSION:?set REMI_APP_VERSION}
         NEXT_PUBLIC_SITE_URL: ${REMI_PUBLIC_URL:?set REMI_PUBLIC_URL to this environment's browser origin}
         NEXT_PUBLIC_LOCAL_PROFILE: ${REMI_PROFILE:?set REMI_PROFILE to stable or dev}
+        NEXT_PUBLIC_WS_URL: ${REMI_PUBLIC_WS_URL:?set REMI_PUBLIC_WS_URL to this environment's loopback API}
       labels:
         org.opencontainers.image.revision: ${REMI_BUILD_REF:?set REMI_BUILD_REF}
     init: true

@@ -145,7 +145,7 @@ describe("LoginPage", () => {
     // The email OTP input + Continue button are gone for regular web login;
     // the OTP flow survives only behind the CLI handoff (cliCallback).
     expect(screen.queryByLabelText(/email/i)).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Access key")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Local session key (24 hours)")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /^continue$/i }),
     ).not.toBeInTheDocument();
@@ -159,7 +159,7 @@ describe("LoginPage", () => {
     const onTokenLoginStart = vi.fn();
     renderWithI18n(<LoginPage onSuccess={onSuccess} allowTokenLogin onTokenObtained={onTokenObtained} onTokenLoginStart={onTokenLoginStart} />);
     const user = userEvent.setup();
-    const input = screen.getByLabelText("Access key");
+    const input = screen.getByLabelText("Local session key (24 hours)");
     expect(input).toHaveAttribute("type", "password");
     await user.type(input, " local-test-token ");
     await user.click(screen.getByRole("button", { name: "Sign in locally" }));
@@ -176,7 +176,7 @@ describe("LoginPage", () => {
     mockLoginWithToken.mockRejectedValueOnce(new Error("Invalid access key"));
     renderWithI18n(<LoginPage onSuccess={onSuccess} allowTokenLogin />);
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText("Access key"), "invalid-test-token");
+    await user.type(screen.getByLabelText("Local session key (24 hours)"), "invalid-test-token");
     await user.click(screen.getByRole("button", { name: "Sign in locally" }));
     expect(await screen.findByText("Invalid access key")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign in locally" })).toBeEnabled();

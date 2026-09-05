@@ -12,6 +12,8 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 
 - [登录路由](../../packages/server/src/api/routers/auth.ts)把飞书 `open_id`、`union_id` 交给 [WorkspacesRepo.getOrCreateUser](../../packages/server/src/store/repos/workspaces-repo.ts)。身份按 `union_id`、`open_id` 解析；兼容邮箱匹配时不会复用已绑定其他外部身份的用户；否则创建独立用户记录。
 - [localAuthResponse](../../packages/server/src/api/helpers/login.ts)签发包含真实 `userId` 的 30 天 PAT，`purpose` 为 `session`。该文件中的邮箱验证码与 Google fallback 共用 `MULTIREMI_ALLOW_EMAIL_CODE_LOGIN`，默认关闭；启用后验证码直接出现在响应中，Google fallback 也不校验 Google 凭据，不能把它们描述成生产邮件发送或 Google OAuth。当前 `sendLocalAuthCode` 在校验验证码前就调用 `store.updateCurrentUser` 修改旧 current user 的姓名/邮箱，启用此路径时需要单独检查这个副作用。
+- 密码登录使用独立的 `MULTIREMI_ALLOW_PASSWORD_LOGIN` 开关，默认关闭；本机 profile 显式开启。`POST /auth/password` 验证预配账号，再为已确认的真实用户签发 30 天 session PAT，不按邮箱重新创建身份。[私有凭据仓储](../../packages/server/src/store/repos/password-accounts-repo.ts)保存唯一登录邮箱和 Argon2id 哈希，哈希不进入公开 User 类型。`POST /api/auth/password-accounts` 仅允许部署主令牌或显式无鉴权本地模式配置账号及指定工作区 owner 成员；它不是用户自助注册接口，不接受旧 `local` 身份作为密码账号。普通 PAT、JWT、task 和 daemon 均不能调用。
+- `/api/me` 的读取、资料与 onboarding 写入沿用已认证用户，`/api/cli-token` 交接也保留同一用户身份；部署主令牌和原有本地模式仍回退到 `local`。密码登录和刷新页面必须保持同一用户身份，不能把请求身份替换成全局 current user。Web 退出调用 `/auth/logout` 撤销 session PAT 并清理 HttpOnly Cookie，原生 token 客户端的退出行为保持不变。
 - [API 中间件](../../packages/server/src/api/server.ts)在开启鉴权时识别部署主令牌、持久化访问令牌和 JWT。普通 API 优先使用 Bearer；仅在缺少整个 `Authorization` 头且方法为 GET/HEAD 时接受 `multimira_auth` Cookie。公开登录、健康、下载、Webhook 等路径有显式例外，应同时检查各路由自己的验证。
 - [MultiremiRequestAuth](../../packages/server/src/api/wire/context.ts)保存解析后的访问令牌及用户身份，不缓存统一的 workspace/role。部署主令牌和无鉴权本地模式保留无真实用户、回退 `local` 管理员的兼容路径；不能将这种路径的行为当作普通用户授权结果。
 
@@ -29,6 +31,8 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 
 ## 启动条件
 
+本机 profile 可按[部署说明](../deploy/local-profiles.md#stable-内网访问)将 stable 的 Web/API 对内网开放。密码登录页在显式 stable 构建的配置主机名显示；`MULTIREMI_DAEMON_DIRECT_BASE_URL` 同时通过 `/api/config.daemon_server_url` 和 daemon 安装说明公布可连接的 API origin，避免远程机器误连自身 loopback。监听 `0.0.0.0` 与客户端连接地址是不同设置，不改变服务端原有鉴权。
+
 [startMultiremiServer](../../packages/server/src/api/server.ts)调用 [evaluateStartupEnv](../../packages/server/src/config/startup-env.ts)：生产模式要求 `MULTIREMI_DATABASE_URL`、`MULTIREMI_TOKEN`、`JWT_SECRET`，缺项会拒绝启动。显式 development/test 作为本地模式；否则 production 或已配置数据库 URL 会触发生产要求。
 
 应用工厂保留本地无鉴权模式并打印警告，这不等于生产入口允许忽略配置。[jwtSecret](../../packages/server/src/api/helpers/jwt.ts)仅在精确的 `NODE_ENV=development/test` 下允许开发默认密钥，其他环境未设密钥时拒绝 JWT；启动配置检查与 JWT 校验是两个不同入口。
@@ -38,6 +42,7 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 | 变更 | 已有测试 |
 |---|---|
 | 多人登录、成员隔离、邀请、运行时归属 | [multiremi-multiuser-auth.test.ts](../../tests/unit/multiremi/multiremi-multiuser-auth.test.ts) |
+| 密码账号预配、会话身份、错误凭据、重设及并发边界 | [password-auth.test.ts](../../tests/unit/multiremi/password-auth.test.ts) |
 | Bearer/Cookie、task 权限、daemon 边界与迁移例外 | [multiremi-api-auth.test.ts](../../tests/unit/multiremi/multiremi-api-auth.test.ts) |
 | Agent 操作、私有资源和配置脱敏 | [multiremi-store-agent-authz.test.ts](../../tests/unit/multiremi/multiremi-store-agent-authz.test.ts) |
 | 生产配置缺项、本地模式与配置脱敏 | [startup-env.test.ts](../../tests/unit/multiremi/startup-env.test.ts) |

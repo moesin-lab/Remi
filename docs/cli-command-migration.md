@@ -56,6 +56,16 @@ Use `remi help <path>` or `remi <path> --help` for the registered positional and
 option contract. All capability commands declare their authentication identities,
 mutation class, and `table|json|jsonl` output contract in the Registry.
 
+Password authentication uses `remi context auth password --file -` with JSON
+containing `email` and `password` on standard input. It saves the returned session
+in the selected CLI configuration and prints a user summary without credentials.
+Deployment administrators can provision or reset an account with
+`remi context auth password-account set --file -`; the body additionally accepts
+`name` and `workspaceId` (default `local`). That operation requires the deployment
+master token and grants the account owner membership in the selected workspace.
+Both commands are unavailable to task identities; password values have no dedicated
+command-line flag and should be supplied without putting them in shell history.
+
 The Feishu ingestion domain exposes source administration through
 `remi feishu source list|get|status|add|update` and task-safe processing through
 `remi feishu messages list|resolve|notify|draft-reply|propose-issue`. Issue

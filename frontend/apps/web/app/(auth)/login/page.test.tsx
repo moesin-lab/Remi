@@ -114,6 +114,7 @@ describe("LoginPage", () => {
     // No email OTP form on regular web login — it survives only for the CLI.
     expect(screen.queryByLabelText("Email")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Local session key (24 hours)")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Continue" })
     ).not.toBeInTheDocument();
@@ -123,6 +124,7 @@ describe("LoginPage", () => {
     vi.stubEnv("NEXT_PUBLIC_LOCAL_PROFILE", profile);
     render(<LoginPage />, { wrapper: createWrapper() });
     expect(await screen.findByLabelText("Local session key (24 hours)")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Password")).toBeInTheDocument();
   });
 
   it("keeps token login hidden on a public host even for a local build profile", () => {
@@ -132,6 +134,7 @@ describe("LoginPage", () => {
     try {
       render(<LoginPage />, { wrapper: createWrapper() });
       expect(screen.queryByLabelText("Local session key (24 hours)")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
     } finally {
       Object.defineProperty(window, "location", { configurable: true, value: previousLocation });
     }

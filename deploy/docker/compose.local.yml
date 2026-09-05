@@ -39,6 +39,7 @@ services:
       MULTIREMI_PORT: "6120"
       MULTIREMI_DATABASE_URL: postgresql://multiremi:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/multiremi
       MULTIREMI_PUBLIC_URL: ${REMI_PUBLIC_URL:?set REMI_PUBLIC_URL to this environment's browser origin}
+      MULTIREMI_ALLOW_PASSWORD_LOGIN: "1"
       MULTIREMI_PROJECT_KNOWLEDGE_MODE: sql
       MULTIREMI_UPLOAD_DIR: /srv/multiremi/uploads
       MULTIREMI_SESSION_ARCHIVE_ROOT: /srv/multiremi/session-archives

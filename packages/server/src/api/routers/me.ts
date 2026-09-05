@@ -17,6 +17,9 @@ export function registerMeRoutes(app: Hono, deps: RouterDeps): void {
   const { store, authToken } = deps;
 
   app.get("/api/me", (c) => {
+    const userId = currentRequestUserId(c);
+    const user = userId === "local" ? store.getCurrentUser() : store.getUser(userId);
+    if (!user) return c.json({ error: "unauthorized" }, 401);
     // Sessions that predate cookie auth carry only the localStorage token.
     // The app calls /api/me on boot with the Bearer header (already verified
     // by the auth gate), so mirror it into the cookie — existing logins get
@@ -26,7 +29,7 @@ export function registerMeRoutes(app: Hono, deps: RouterDeps): void {
     const header = c.req.header("Authorization") ?? "";
     const bearer = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
     if (bearer && bearer !== authToken) setAuthCookie(c, bearer);
-    return c.json(store.getCurrentUser());
+    return c.json(user);
   });
   app.patch("/api/me", async (c) => {
     const body = await readJson<any>(c);

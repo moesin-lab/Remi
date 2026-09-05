@@ -62,6 +62,7 @@ describe("local stable and dev isolation", () => {
     expect(api.environment.MULTIREMI_PROJECT_KNOWLEDGE_MODE).toBe("sql");
     expect(api.environment.MULTIREMI_SSH_MESH_CONTROL_PLANE).toBe("0");
     expect(api.environment.MULTIREMI_PUBLIC_URL).toContain("${REMI_PUBLIC_URL:?");
+    expect(api.environment.MULTIREMI_ALLOW_PASSWORD_LOGIN).toBe("1");
     for (const key of ["HOME", "MULTIREMI_UPLOAD_DIR", "MULTIREMI_SESSION_ARCHIVE_ROOT", "MULTIREMI_SSH_MESH_CONTROL_PLANE_ROOT"]) {
       expect(api.environment[key]).toMatch(/^\/srv\/multiremi(?:\/|$)/u);
     }

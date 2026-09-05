@@ -124,6 +124,7 @@ describe("Multiremi store — chat sessions and private agent access", () => {
       "has_unread",
       "id",
       "issue_id",
+      "runtime_workspace_id",
       "status",
       "title",
       "updated_at",
@@ -132,6 +133,7 @@ describe("Multiremi store — chat sessions and private agent access", () => {
     expect(createdBody.creator_id).toBe("alice");
     expect(createdBody.agent_id).toBe(agent.id);
     expect(createdBody.issue_id).toBeNull();
+    expect(createdBody.runtime_workspace_id).toBeNull();
     expect(createdBody.has_unread).toBe(false);
 
     const aliceList = await app.request("/api/chat/sessions", { headers: aliceAuthHeaders });

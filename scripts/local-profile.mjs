@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve, delimiter, relative, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
+import { isIPv4 } from 'node:net';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const profilesRoot = resolve(process.env.REMI_PROFILES_ROOT || join(homedir(), '.remi', 'profiles'));
@@ -63,6 +64,18 @@ function readJson(path) {
 
 function secret() { return randomBytes(32).toString('hex'); }
 
+function validateLanHost(hostname) {
+  const [a, b] = hostname.split('.').map(Number);
+  if (!isIPv4(hostname) || !(a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168))) {
+    throw new Error('--lan-host must be a private IPv4 address of this machine, not a URL, loopback, or 0.0.0.0');
+  }
+  return hostname;
+}
+
+function networkSettings(deployment) {
+  return deployment.network ?? { hostname: settings[deployment.profile].hostname, bindAddress: '127.0.0.1' };
+}
+
 function envValue(value) {
   const text = String(value).replaceAll('\\', '/');
   if (/[\r\n']/u.test(text)) throw new Error('Profile paths and values cannot contain newlines or single quotes');
@@ -103,6 +116,7 @@ function compose(root, ...args) { return execute('docker', composeArgs(root, ...
 
 function writeComposeEnvironment(root, deployment) {
   const config = settings[deployment.profile];
+  const network = networkSettings(deployment);
   const credentials = readJson(join(root, 'credentials.json'));
   const variables = {
     REMI_PROFILE: deployment.profile,
@@ -113,8 +127,10 @@ function writeComposeEnvironment(root, deployment) {
     REMI_WEB_IMAGE: deployment.webImage,
     REMI_BUILD_REF: deployment.ref,
     REMI_APP_VERSION: deployment.version,
-    REMI_PUBLIC_URL: `http://${config.hostname}:${config.webPort}`,
-    REMI_PUBLIC_WS_URL: `ws://${config.hostname}:${config.apiPort}/ws`,
+    REMI_PUBLIC_URL: `http://${network.hostname}:${config.webPort}`,
+    REMI_PUBLIC_WS_URL: `ws://${network.hostname}:${config.apiPort}/ws`,
+    REMI_DAEMON_SERVER_URL: `http://${network.hostname}:${config.apiPort}`,
+    REMI_BIND_ADDRESS: network.bindAddress,
     REMI_API_BIND_PORT: config.apiPort,
     REMI_WEB_BIND_PORT: config.webPort,
     REMI_BACKGROUND_JOBS: config.backgroundJobs,
@@ -122,8 +138,12 @@ function writeComposeEnvironment(root, deployment) {
   writeFileSync(join(root, 'compose.env'), Object.entries(variables).map(([key, value]) => `${key}=${envValue(value)}`).join('\n') + '\n', { mode: 0o600 });
 }
 
-function prepare(profile, ref) {
+function prepare(profile, ref, lanHost) {
   const root = initialize(profile);
+  const previous = existsSync(join(root, 'deployment.json')) ? readJson(join(root, 'deployment.json')) : { profile };
+  const network = lanHost
+    ? { hostname: validateLanHost(lanHost), bindAddress: '0.0.0.0' }
+    : profile === 'dev' ? { hostname: settings.dev.hostname, bindAddress: '127.0.0.1' } : networkSettings(previous);
   const managedFiles = ['deployment.json', 'compose.env', 'compose.yml', 'compose.dev.yml'];
   const original = new Map(managedFiles.map((name) => [name, existsSync(join(root, name)) ? readFileSync(join(root, name)) : null]));
   const sha = capture('git', ['rev-parse', '--verify', `${ref}^{commit}`]);
@@ -142,7 +162,7 @@ function prepare(profile, ref) {
   const version = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8')).version;
   const buildId = profile === 'stable' ? sha : 'working-tree';
   const deployment = {
-    profile, ref: sha, source, version: `${version}-${profile}.${sha.slice(0, 8)}`,
+    profile, ref: sha, source, network, version: `${version}-${profile}.${sha.slice(0, 8)}`,
     apiImage: `remi-api:${profile}-${buildId}`, webImage: `remi-web:${profile}-${buildId}`,
   };
   copyFileSync(join(repository, 'deploy/docker/compose.local.yml'), join(root, 'compose.yml'));
@@ -189,7 +209,7 @@ async function status(root) {
   }
   const deployment = readJson(join(root, 'deployment.json'));
   const config = settings[deployment.profile];
-  console.log(`${deployment.profile}: http://${config.hostname}:${config.webPort}`);
+  console.log(`${deployment.profile}: http://${networkSettings(deployment).hostname}:${config.webPort}`);
   console.log(`Source: ${deployment.source}\nCommit: ${deployment.ref}\nConfiguration: ${root}`);
   compose(root, 'ps');
   for (const [service, url] of [['api', `http://127.0.0.1:${config.apiPort}/readyz`], ['web', `http://127.0.0.1:${config.webPort}/login`]]) {
@@ -203,26 +223,39 @@ async function status(root) {
 async function main() {
   const [profile, action, ...args] = process.argv.slice(2);
   if (!Object.hasOwn(settings, profile) || !action || action === '--help') {
-    console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|stop|status|logs|watch|backup|token> [--ref <commit>]');
+    console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|stop|status|logs|watch|backup|token> [--ref <commit>] [--lan-host <private IPv4>]');
     console.log('stable deploy: archive a fixed commit, build, back up existing data, then update containers.');
     console.log('dev deploy + dev watch: build current source, then sync changes without touching stable.');
+    console.log('stable --lan-host: bind Web/API to 0.0.0.0 and persist the advertised LAN address across deploys.');
     return;
   }
   validateProfilesRoot();
-  if (args.length && (args.length !== 2 || args[0] !== '--ref')) throw new Error('Only --ref <commit> is supported');
-  if (args.length && !['prepare', 'deploy'].includes(action)) throw new Error('--ref is only valid with prepare/deploy');
-  if (profile === 'dev' && args[1] && args[1] !== 'HEAD') throw new Error('dev runs the working tree; use stable to deploy a fixed ref');
+  const flags = {};
+  for (let index = 0; index < args.length; index += 2) {
+    const key = args[index];
+    const value = args[index + 1];
+    if (!['--ref', '--lan-host'].includes(key) || !value || value.startsWith('--') || Object.hasOwn(flags, key)) {
+      throw new Error('Only --ref <commit> and --lan-host <private IPv4> are supported, once each');
+    }
+    flags[key] = value;
+  }
+  if (args.length && !['prepare', 'deploy'].includes(action)) throw new Error('--ref and --lan-host are only valid with prepare/deploy');
+  if (profile === 'dev' && flags['--ref'] && flags['--ref'] !== 'HEAD') throw new Error('dev runs the working tree; use stable to deploy a fixed ref');
+  if (flags['--lan-host']) {
+    if (profile !== 'stable') throw new Error('--lan-host is only valid for stable; dev stays on loopback');
+    validateLanHost(flags['--lan-host']);
+  }
   const root = join(profilesRoot, profile);
   if (action === 'prepare') {
     if (existsSync(join(root, 'active.json'))) throw new Error('An activated profile must be upgraded with deploy');
-    prepare(profile, args[1] || 'HEAD');
+    prepare(profile, flags['--ref'] || 'HEAD', flags['--lan-host']);
   } else if (action === 'deploy') {
     const oldFiles = new Map();
     for (const name of ['deployment.json', 'compose.env', 'compose.yml', 'compose.dev.yml']) {
       if (existsSync(join(root, name))) oldFiles.set(name, readFileSync(join(root, name)));
     }
     const previous = existsSync(join(root, 'active.json')) ? readJson(join(root, 'active.json')) : null;
-    prepare(profile, args[1] || 'HEAD');
+    prepare(profile, flags['--ref'] || 'HEAD', flags['--lan-host']);
     try {
       compose(root, 'build', 'api', 'web');
     } catch (error) {

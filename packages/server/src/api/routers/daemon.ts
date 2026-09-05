@@ -209,6 +209,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/multiremi/install/daemon", (c) => {
     return c.json(buildDaemonInstallInstructions({
       requestUrl: c.req.url,
+      daemonServerUrl: deps.daemonDirectBaseUrl,
       serverUrl: c.req.query("serverUrl") ?? c.req.query("server_url"),
       workspaceId: c.req.query("workspaceId") ?? c.req.query("workspace_id"),
       token: c.req.query("token"),
@@ -259,6 +260,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
 
     const installInput = {
       requestUrl: c.req.url,
+      daemonServerUrl: deps.daemonDirectBaseUrl,
       serverUrl: body.serverUrl ?? body.server_url ?? c.req.query("serverUrl") ?? c.req.query("server_url"),
       workspaceId,
       token,

@@ -39,6 +39,7 @@ services:
       MULTIREMI_PORT: "6120"
       MULTIREMI_DATABASE_URL: postgresql://multiremi:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/multiremi
       MULTIREMI_PUBLIC_URL: ${REMI_PUBLIC_URL:?set REMI_PUBLIC_URL to this environment's browser origin}
+      MULTIREMI_DAEMON_DIRECT_BASE_URL: ${REMI_DAEMON_SERVER_URL:?set REMI_DAEMON_SERVER_URL to this environment's reachable API origin}
       MULTIREMI_ALLOW_PASSWORD_LOGIN: "1"
       MULTIREMI_ALLOW_EMAIL_CODE_LOGIN: "0"
       MULTIREMI_PROJECT_KNOWLEDGE_MODE: sql
@@ -70,7 +71,7 @@ services:
       retries: 24
       start_period: 30s
     ports:
-      - 127.0.0.1:${REMI_API_BIND_PORT:-16120}:6120
+      - ${REMI_BIND_ADDRESS:-127.0.0.1}:${REMI_API_BIND_PORT:-16120}:6120
 
   web:
     image: ${REMI_WEB_IMAGE:?set REMI_WEB_IMAGE}
@@ -84,7 +85,7 @@ services:
         REMI_APP_VERSION: ${REMI_APP_VERSION:?set REMI_APP_VERSION}
         NEXT_PUBLIC_SITE_URL: ${REMI_PUBLIC_URL:?set REMI_PUBLIC_URL to this environment's browser origin}
         NEXT_PUBLIC_LOCAL_PROFILE: ${REMI_PROFILE:?set REMI_PROFILE to stable or dev}
-        NEXT_PUBLIC_WS_URL: ${REMI_PUBLIC_WS_URL:?set REMI_PUBLIC_WS_URL to this environment's loopback API}
+        NEXT_PUBLIC_WS_URL: ${REMI_PUBLIC_WS_URL:?set REMI_PUBLIC_WS_URL to this environment's reachable API}
       labels:
         org.opencontainers.image.revision: ${REMI_BUILD_REF:?set REMI_BUILD_REF}
     init: true
@@ -99,7 +100,7 @@ services:
       retries: 18
       start_period: 30s
     ports:
-      - 127.0.0.1:${REMI_WEB_BIND_PORT:-13000}:3000
+      - ${REMI_BIND_ADDRESS:-127.0.0.1}:${REMI_WEB_BIND_PORT:-13000}:3000
 
 volumes:
   postgres-data:

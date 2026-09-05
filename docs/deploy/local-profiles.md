@@ -10,8 +10,8 @@ summary: 在同一台机器运行独立的稳定环境和开发环境，保留�
 
 | 内容 | stable | dev |
 |---|---|---|
-| 浏览器入口 | `http://127.0.0.1:13000` | `http://localhost:14000` |
-| API，仅 loopback | `http://127.0.0.1:16120` | `http://127.0.0.1:16220` |
+| 浏览器入口 | LAN 模式：`http://<内网IP>:13000`；默认 `http://127.0.0.1:13000` | `http://localhost:14000` |
+| API / daemon 入口 | LAN 模式：`http://<内网IP>:16120`；默认 `http://127.0.0.1:16120` | `http://localhost:16220`，仅本机 |
 | Compose 项目 | `remi-stable` | `remi-dev` |
 | 配置及备份目录 | `~/.remi/profiles/stable/` | `~/.remi/profiles/dev/` |
 | 源码 | `releases/<完整提交>/` 的 Git 快照 | 当前开发仓库 |
@@ -24,7 +24,7 @@ summary: 在同一台机器运行独立的稳定环境和开发环境，保留�
 
 目录隔离不能代替数据和登录隔离。两个 API 的数据库、token、JWT secret、home、uploads 和 session archives 独立；PostgreSQL 不发布宿主端口。浏览器使用不同 hostname，因为现有 Cookie 不按端口隔离。保持表中入口，不要将两边都改成 localhost。每套网络中的 `api` 和 `postgres` 只指向该套环境。
 
-WebSocket 通过 `NEXT_PUBLIC_WS_URL` 直连各自的 loopback API 端口，避免 Next dev 的 `/ws` 代理握手阻塞；普通 HTTP API 仍走 Web 的同源代理。此设置只进入本机 profile 镜像，默认发行构建保留原来的 URL 推导行为。
+WebSocket 通过 `NEXT_PUBLIC_WS_URL` 直连所选环境的 API 端口，LAN 模式使用内网 IP，默认使用 loopback，避免 Next dev 的 `/ws` 代理握手阻塞；普通 HTTP API 仍走 Web 的同源代理。`MULTIREMI_DAEMON_DIRECT_BASE_URL` 使用同一个 API origin，供 daemon 连接及归档直接上传；`/api/config` 的 `daemon_server_url` 和 CLI 安装说明一起返回它，所以即使从本机页面打开安装弹窗，也不会给远程机器生成 localhost 地址。默认发行构建保留原来的 WebSocket URL 推导行为。
 
 两套 API 都保持生产鉴权检查，dev 的开发模式只用于源码重载和 Web 编译。默认使用 SQL 项目知识库，不运行 OpenViking、SSH Mesh 控制面或 platform-updater；没有把远端部署需要的服务全部拉到本机。需要这些能力时，应分别配置，不能共用 stable 的状态目录或飞书/SCM 凭据。
 
@@ -40,11 +40,29 @@ node scripts/local-profile.mjs dev watch
 
 stable 只打包已提交的 Git 内容；未提交修改不会进入快照。`--ref` 可以指定已检查的 commit。dev 读取当前工作树；watch 运行期间同步源码并在依赖清单改变时重建，忽略 node_modules、`.next`、Git 元数据和环境文件。Compose 2.30 不支持首次自动全量同步，因此每次启动 watch 都先构建；关闭 watch 终端只停止同步，不停止容器。
 
+## stable 内网访问
+
+在主机选择实际的 RFC 1918 内网 IPv4 地址，然后部署；下面的 IP 仅为示例，需要替换：
+
+```powershell
+node scripts/local-profile.mjs stable deploy --ref HEAD --lan-host 192.168.40.12
+```
+
+该选项把 stable 的 Web `13000` 和 API `16120` 宿主端口一起绑定到 `0.0.0.0`，但浏览器和 daemon 使用实际内网 IP，不能用 `0.0.0.0` 连接。PostgreSQL 仍不发布端口。dev 不接受该选项，始终绑定 loopback。监听地址和对外地址保存在 profile 的 `deployment.json` / `active.json`，后续省略 `--lan-host` 的 stable 升级保留配置；IP 改变时以新地址重新部署，同时重建内嵌 WebSocket 和登录地址的 Web 镜像。构建失败会恢复原配置，未切换运行中的服务。
+
+Windows 防火墙需要允许内网客户端访问这两个端口；只在需要时由管理员创建私有网络规则，例如：
+
+```powershell
+New-NetFirewallRule -Name Remi-Stable-LAN -DisplayName 'Remi stable LAN' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 13000,16120 -Profile Private -RemoteAddress LocalSubnet
+```
+
+从另一台内网机器验证 Web `/login` 和 API `/readyz`，再检查登录、安装命令和 WebSocket 鉴权。仅在服务主机上访问内网 IP 不能证明防火墙已放行远端连接。`--lan-host` 不修改路由器、公网转发或防火墙，也不自动更改其他服务规则。
+
 Docker Desktop 运行时，容器按 `unless-stopped` 自动恢复；主机重启后是否自动启动 Docker Desktop 取决于其本机设置。`dev` 不复制 stable 数据或身份凭据，默认关闭调度器；需要测试自动任务时，显式调整该环境的配置并重新启动。
 
 ## 本机登录
 
-本机镜像明确设置 `NEXT_PUBLIC_LOCAL_PROFILE=stable/dev`，只在 `127.0.0.1` 或 `localhost` 页面增加账号密码和“本机会话密钥（24 小时）”登录入口；飞书入口保留。默认发行构建和其他主机名保持原来的登录页面。
+本机镜像明确设置 `NEXT_PUBLIC_LOCAL_PROFILE=stable/dev`，在 `127.0.0.1` 或 `localhost` 页面增加账号密码和“本机会话密钥（24 小时）”登录入口。stable 还在 `NEXT_PUBLIC_SITE_URL` 配置的内网主机名显示账密入口，本机会话密钥入口仍只在 loopback 页面显示；API 始终独立验证凭据。飞书入口保留，默认发行构建和未配置的主机名保持原来的登录页面。
 
 本机 Compose 启用 `MULTIREMI_ALLOW_PASSWORD_LOGIN=1`，其他部署默认关闭密码登录；同时关闭会在响应中返回验证码的旧邮箱/Google 测试 fallback，避免它绕过密码校验。账号需要部署管理员预先配置，没有公开注册入口。密码使用 Argon2id 加盐哈希，保存在该环境的私有数据库表中，源码、镜像及 `api.env` 都不包含账号密码。支持普通邮箱和 `user@localhost` 形式的本机账号。
 

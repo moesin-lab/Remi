@@ -41,12 +41,12 @@ describe("local stable and dev isolation", () => {
     expect(dev.volumes).toBeUndefined();
   });
 
-  test("keeps PostgreSQL private and exposes API and Web only on loopback", () => {
+  test("keeps PostgreSQL private and defaults published API and Web ports to loopback", () => {
     expect(base.services.postgres!.image).toBe("pgvector/pgvector:pg17");
     expect(base.services.postgres!.ports).toBeUndefined();
     for (const name of ["api", "web"]) {
       expect(base.services[name]!.ports).toHaveLength(1);
-      expect(base.services[name]!.ports[0]).toMatch(/^127\.0\.0\.1:\$\{REMI_(API|WEB)_BIND_PORT:-\d+\}:\d+$/u);
+      expect(base.services[name]!.ports[0]).toMatch(/^\$\{REMI_BIND_ADDRESS:-127\.0\.0\.1\}:\$\{REMI_(API|WEB)_BIND_PORT:-\d+\}:\d+$/u);
       // An override with another published port would append a second mapping.
       expect(dev.services[name]!.ports).toBeUndefined();
     }
@@ -62,6 +62,7 @@ describe("local stable and dev isolation", () => {
     expect(api.environment.MULTIREMI_PROJECT_KNOWLEDGE_MODE).toBe("sql");
     expect(api.environment.MULTIREMI_SSH_MESH_CONTROL_PLANE).toBe("0");
     expect(api.environment.MULTIREMI_PUBLIC_URL).toContain("${REMI_PUBLIC_URL:?");
+    expect(api.environment.MULTIREMI_DAEMON_DIRECT_BASE_URL).toContain("${REMI_DAEMON_SERVER_URL:?");
     expect(api.environment.MULTIREMI_ALLOW_PASSWORD_LOGIN).toBe("1");
     expect(api.environment.MULTIREMI_ALLOW_EMAIL_CODE_LOGIN).toBe("0");
     for (const key of ["HOME", "MULTIREMI_UPLOAD_DIR", "MULTIREMI_SESSION_ARCHIVE_ROOT", "MULTIREMI_SSH_MESH_CONTROL_PLANE_ROOT"]) {

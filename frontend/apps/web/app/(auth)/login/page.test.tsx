@@ -140,6 +140,20 @@ describe("LoginPage", () => {
     }
   });
 
+  it("exposes password login at the configured stable LAN host", async () => {
+    vi.stubEnv("NEXT_PUBLIC_LOCAL_PROFILE", "stable");
+    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "http://192.168.40.12:13000");
+    const previousLocation = window.location;
+    Object.defineProperty(window, "location", { configurable: true, value: { ...previousLocation, hostname: "192.168.40.12" } });
+    try {
+      render(<LoginPage />, { wrapper: createWrapper() });
+      expect(await screen.findByLabelText("Password")).toBeInTheDocument();
+      expect(screen.queryByLabelText("Local session key (24 hours)")).not.toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, "location", { configurable: true, value: previousLocation });
+    }
+  });
+
   it("does not call sendCode when email is empty", async () => {
     searchParamsState.params = new URLSearchParams({ cli_callback: CLI_CALLBACK });
     const user = userEvent.setup();

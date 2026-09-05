@@ -86,6 +86,29 @@ function runtimeSpecs(): CommandSpec[] {
   };
   return [
     group("runtime", "Manage execution runtimes and cloud nodes"),
+    op({ id: "runtime.workspace.list", path: ["runtime", "workspace", "list"], description: "List persistent execution workspaces", method: "GET", auth: HUMAN, collections: ["workspaces"],
+      options: [{ name: "runtime", type: "string", valueName: "runtime", description: "Filter by a Runtime's machine" }],
+      apiPath: async (i, c) => {
+        const selected = stringOption(i, "runtime");
+        return selected ? `/api/runtimes/${encodePath(await resolveRuntimeId(c, i, selected))}/workspaces` : "/api/runtime-workspaces";
+      } }),
+    op({ id: "runtime.workspace.create", path: ["runtime", "workspace", "create"], description: "Register an existing directory on a Runtime's machine", method: "POST", apiPath: runtime("/workspaces"), auth: HUMAN, positionals: [ref("runtime")],
+      options: [...INPUT_OPTIONS,
+        { name: "name", type: "string", valueName: "name", description: "Workspace name" },
+        { name: "root", type: "string", valueName: "absolute-path", description: "Existing root directory on the Runtime machine" },
+        { name: "cwd", type: "string", valueName: "relative-path", description: "Working directory relative to root" },
+        { name: "context-path", type: "string", valueName: "relative-path", repeatable: true, description: "Local instruction file or skill directory" },
+        { name: "env-file", type: "string", valueName: "relative-path", description: "Local env file; values are never uploaded during registration" },
+        { name: "project", type: "string", valueName: "id", description: "Optional Project association" }],
+      body: i => requestBody(i, {
+        name: stringOption(i, "name") ?? undefined, root_path: stringOption(i, "root") ?? undefined,
+        cwd: stringOption(i, "cwd") ?? undefined, context_paths: stringOptions(i, "context-path").length ? stringOptions(i, "context-path") : undefined,
+        env_file: stringOption(i, "env-file") ?? undefined, project_id: stringOption(i, "project") ?? undefined,
+      }) }),
+    op({ id: "runtime.workspace.get", path: ["runtime", "workspace", "get"], description: "Get a runtime workspace", method: "GET", apiPath: i => `/api/runtime-workspaces/${encodePath(positional(i, 0, "workspace"))}`, auth: HUMAN, positionals: [ref("workspace")] }),
+    op({ id: "runtime.workspace.rename", path: ["runtime", "workspace", "rename"], description: "Rename a runtime workspace", method: "PATCH", apiPath: i => `/api/runtime-workspaces/${encodePath(positional(i, 0, "workspace"))}`, auth: HUMAN, positionals: [ref("workspace")],
+      options: [{ name: "name", type: "string", valueName: "name", required: true, description: "New display name" }], body: i => ({ name: stringOption(i, "name") }) }),
+    op({ id: "runtime.workspace.archive", path: ["runtime", "workspace", "archive"], description: "Archive registration and retain all local files", method: "DELETE", mutation: "write", apiPath: i => `/api/runtime-workspaces/${encodePath(positional(i, 0, "workspace"))}`, auth: HUMAN, positionals: [ref("workspace")] }),
     op({ id: "runtime.list", path: ["runtime", "list"], description: "List runtimes", method: "GET", apiPath: "/api/runtimes", auth: HUMAN_DAEMON, collections: ["runtimes"] }),
     op({ id: "runtime.get", path: ["runtime", "get"], description: "Get a runtime", method: "GET", apiPath: runtime(""), auth: HUMAN_DAEMON, positionals: [ref("runtime")] }),
     op({ id: "runtime.create", path: ["runtime", "create"], description: "Register a runtime", method: "POST", apiPath: "/api/multiremi/runtimes", auth: HUMAN_DAEMON, options: INPUT_OPTIONS, body: withWorkspace }),

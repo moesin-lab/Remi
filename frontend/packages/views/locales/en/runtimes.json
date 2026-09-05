@@ -519,8 +519,14 @@
     "subtitle": "Workspace declarations and their latest state on every runtime.",
     "add": "Add provision",
     "filter_label": "Provision kind",
-    "filters": { "all": "All" },
-    "kinds": { "npm_global": "npm global", "command": "Command", "unknown": "Unknown" },
+    "filters": {
+      "all": "All"
+    },
+    "kinds": {
+      "npm_global": "npm global",
+      "command": "Command",
+      "unknown": "Unknown"
+    },
     "load_failed": "Couldn't load runtime provisions",
     "retry": "Retry",
     "empty": "No provisions",
@@ -588,5 +594,34 @@
       "save_failed": "Failed to save provision",
       "delete_failed": "Failed to delete provision"
     }
+  },
+  "workspaces": {
+    "title": "Runtime workspaces",
+    "picker_label": "Execution workspace",
+    "automatic": "Automatic task directory",
+    "description": "Keep a working environment on this machine and reuse it across Chats and Issues. Register an existing directory; Git and a Project are optional.",
+    "name": "Name",
+    "name_placeholder": "My local workbench",
+    "root": "Root directory",
+    "root_placeholder": "C:\\workbench or /home/me/workbench",
+    "cwd": "Working directory (relative)",
+    "project": "Project (optional)",
+    "root_hint": "Choose the parent directory containing shared instructions, skills and repositories. Set the working directory to a repository subdirectory, or use . for the root.",
+    "context_options": "Local context and environment",
+    "context_paths": "Additional instruction files or skill directories",
+    "context_placeholder": "One path per line, relative to root",
+    "env_file": "Environment file (optional)",
+    "context_hint": "Instructions and local skills are read on this machine. Extra paths and the env file must stay inside the root. Registration stores paths without uploading file contents; the executing agent and its model may read them.",
+    "register": "Register workspace",
+    "registered": "Registered. The directory and local context will be checked when a task starts.",
+    "loading": "Loading workspaces…",
+    "load_failed": "Could not load runtime workspaces.",
+    "empty": "No persistent workspaces on this machine yet.",
+    "available": "Host available",
+    "unavailable": "Host unavailable",
+    "wait_hint": "Tasks wait for a compatible Runtime on this machine to come online.",
+    "archive": "Archive registration",
+    "archived": "Registration archived. Local files are retained.",
+    "lifecycle_hint": "Chats and Issues refer to this workspace. Finishing or deleting them does not remove local files. Archiving the registration prevents new runs and retains the directory."
   }
 }

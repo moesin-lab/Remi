@@ -1,4 +1,5 @@
 import type { Context, Hono } from "hono";
+import { assertRuntimeWorkspaceAccess } from "../helpers/runtime-workspaces.js";
 import {
   assigneeFrequencyQuery,
   bindCreatedIssueToRequestChat,
@@ -467,8 +468,25 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const issues = parentIds.flatMap((parentId) => store.listChildIssues(parentId));
     return c.json({ issues, total: issues.length });
   });
+  function validateBatchWorkspaceBinding(c: Context, input: BatchUpdateIssuesInput): Response | null {
+    const updates = input.updates;
+    if (!updates || !("runtimeWorkspaceId" in updates || "runtime_workspace_id" in updates)) return null;
+    for (const id of input.issueIds ?? input.issue_ids ?? []) {
+      const issue = store.getIssue(id);
+      if (!issue) continue;
+      const workspaceId = updates.workspaceId ?? updates.workspace_id ?? issue.workspaceId;
+      const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId)
+        ?? denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+      if (denied) return denied;
+      assertRuntimeWorkspaceAccess(c, store, updates.runtimeWorkspaceId ?? updates.runtime_workspace_id, workspaceId);
+    }
+    return null;
+  }
+
   app.post("/api/multiremi/issues/batch-update", async (c) => {
     const body = await readJson<BatchUpdateIssuesInput>(c);
+    const denied = validateBatchWorkspaceBinding(c, body);
+    if (denied) return denied;
     return c.json(store.batchUpdateIssues({
       ...body,
       updates: body.updates ? { ...body.updates, parentTaskId: currentTaskParentId(c) } : body.updates,
@@ -478,6 +496,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJson<BatchUpdateIssuesInput>(c);
     try {
       const input = issueBatchUpdateCompatibilityInput(body);
+      const denied = validateBatchWorkspaceBinding(c, input);
+      if (denied) return denied;
       const result = store.batchUpdateIssues({
         ...input,
         updates: input.updates ? { ...input.updates, parentTaskId: currentTaskParentId(c) } : input.updates,
@@ -522,6 +542,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyCurrentUserWorkspaceAccess(c, store, body.workspaceId ?? body.workspace_id ?? "local");
     if (denied) return denied;
     const assigneeType = body.assigneeType ?? body.assignee_type ?? (body.agentId ? "agent" : null);
+    assertRuntimeWorkspaceAccess(c, store, body.runtimeWorkspaceId ?? body.runtime_workspace_id, body.workspaceId ?? body.workspace_id ?? "local");
     const assigneeId = body.assigneeId ?? body.assignee_id ?? body.agentId ?? null;
     const issue = store.createIssue({
       ...body,
@@ -552,6 +573,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!String(body.title ?? "").trim()) return c.json({ error: "title is required" }, 400);
     try {
       const issueInput = withIssueCreateRequestContext(c, body, store);
+      assertRuntimeWorkspaceAccess(c, store, issueInput.runtime_workspace_id, issueInput.workspace_id ?? "local");
       const denied = denyCurrentUserWorkspaceAccess(c, store, issueInput.workspace_id ?? "local");
       if (denied) return denied;
       const sourceIssueId = issueInput.source_issue_id ?? null;
@@ -960,6 +982,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const body = await readJson<UpdateIssueInput>(c);
     const input = { ...body, parentTaskId: currentTaskParentId(c) };
+    assertRuntimeWorkspaceAccess(c, store, body.runtimeWorkspaceId ?? body.runtime_workspace_id, issue.workspaceId);
     const updated = store.updateIssue(issue.id, input);
     lockAutoTitleAfterHumanEdit(c, updated, input);
     return c.json({ issue: maybeDispatchOnIssueUpdate(store, issue, updated, input) });
@@ -976,6 +999,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       parentTaskId: currentTaskParentId(c),
     };
     try {
+      assertRuntimeWorkspaceAccess(c, store, input.runtimeWorkspaceId ?? input.runtime_workspace_id, issue.workspaceId);
       const updated = store.updateIssue(issue.id, input);
       lockAutoTitleAfterHumanEdit(c, updated, input);
       const dispatched = maybeDispatchOnIssueUpdate(store, issue, updated, input);

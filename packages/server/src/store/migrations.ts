@@ -2479,6 +2479,32 @@ export function runMigrations(db: SqlDatabase): void {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_multiremi_messages_task_seq_unique
       ON multiremi_task_messages(task_id, seq);
   `);
+  // Runtime workspaces have an independent lifecycle. Never cascade through
+  // Runtime, Project, Issue or Chat deletion: the directory belongs to its host.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS multiremi_runtime_workspaces (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      daemon_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      root_path TEXT NOT NULL,
+      cwd TEXT NOT NULL DEFAULT '.',
+      context_paths TEXT NOT NULL DEFAULT '[]',
+      env_file TEXT,
+      project_id TEXT,
+      archived_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_runtime_workspaces_daemon
+      ON multiremi_runtime_workspaces(workspace_id, daemon_id, archived_at);
+  `);
+  addColumnIfMissing(db, "multiremi_issues", "runtime_workspace_id TEXT");
+  addColumnIfMissing(db, "multiremi_chat_sessions", "runtime_workspace_id TEXT");
+  addColumnIfMissing(db, "multiremi_tasks", "runtime_workspace_id TEXT");
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_runtime_workspace
+    ON multiremi_tasks(runtime_workspace_id, status)`);
   addColumnIfMissing(db, "multiremi_workspaces", "env TEXT NOT NULL DEFAULT '{}'");
   addColumnIfMissing(db, "multiremi_agents", "workspace_id TEXT NOT NULL DEFAULT 'local'");
   addColumnIfMissing(db, "multiremi_agents", "description TEXT NOT NULL DEFAULT ''");

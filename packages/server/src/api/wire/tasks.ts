@@ -114,6 +114,7 @@ export function taskCompatibilityResponse(
   result: unknown | null;
   agent_id: string;
   runtime_id: string | null;
+  runtime_workspace_id: string | null;
   issue_id: string | null;
   issue_session_id: string | null;
   chat_session_id: string | null;
@@ -153,6 +154,7 @@ export function taskCompatibilityResponse(
     result: unknown | null;
     agent_id: string;
     runtime_id: string | null;
+    runtime_workspace_id: string | null;
     issue_id: string | null;
     issue_session_id: string | null;
     chat_session_id: string | null;
@@ -194,6 +196,7 @@ export function taskCompatibilityResponse(
     result: taskResultWireValue(task),
     agent_id: task.agentId,
     runtime_id: task.runtimeId,
+    runtime_workspace_id: task.runtimeWorkspaceId ?? null,
     issue_id: task.issueId,
     issue_session_id: task.issueSessionId,
     chat_session_id: task.chatSessionId,
@@ -299,6 +302,9 @@ export function daemonTaskClaimResponse(
   triggerMetadata: MultiremiTaskTriggerMetadata | null = null,
 ): Record<string, unknown> {
   const response = daemonTaskWireResponse(task, triggerMetadata);
+  response.runtime_workspace_id = task.runtimeWorkspaceId ?? null;
+  // Path metadata only. Instruction/configuration contents are read on the host.
+  response.runtime_workspace = task.runtimeWorkspace ?? null;
   let projectionMode: "bootstrap" | "delta" | null = null;
   response.prompt = task.prompt;
   if (task.sessionId) {

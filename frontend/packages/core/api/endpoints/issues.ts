@@ -12,7 +12,7 @@ import type {
   UpdateIssueRequest,
 } from "../../types";
 import type { HttpClient } from "../http";
-import { parseStrictResponse, parseWithFallback } from "../schema";
+import { ApiContractError, parseStrictResponse, parseWithFallback } from "../schema";
 import {
   ChildIssuesResponseSchema,
   EMPTY_ISSUE_RETITLE_RESPONSE,
@@ -127,10 +127,11 @@ export class IssuesEndpoints {
   }
 
   async createIssue(data: CreateIssueRequest): Promise<Issue> {
-    return this.http.fetch("/api/issues", {
+    const raw = await this.http.fetch<unknown>("/api/issues", {
       method: "POST",
       body: JSON.stringify(data),
     });
+    return parseIssueMutation(raw, "POST /api/issues", data);
   }
 
   async quickCreateIssue(data: {
@@ -154,17 +155,19 @@ export class IssuesEndpoints {
   }
 
   async updateIssue(id: string, data: UpdateIssueRequest): Promise<Issue> {
-    return this.http.fetch(`/api/issues/${id}`, {
+    const raw = await this.http.fetch<unknown>(`/api/issues/${id}`, {
       method: "PUT",
       body: JSON.stringify(data),
     });
+    return parseIssueMutation(raw, "PUT /api/issues/:id", data);
   }
 
   async patchIssue(id: string, data: UpdateIssueRequest): Promise<Issue> {
-    return this.http.fetch(`/api/issues/${id}`, {
+    const raw = await this.http.fetch<unknown>(`/api/issues/${id}`, {
       method: "PATCH",
       body: JSON.stringify(data),
     });
+    return parseIssueMutation(raw, "PATCH /api/issues/:id", data);
   }
 
   async retitleIssue(id: string, apply = true): Promise<IssueRetitleResponse> {
@@ -230,4 +233,12 @@ export class IssuesEndpoints {
       body: JSON.stringify({ issue_ids: issueIds }),
     });
   }
+}
+
+function parseIssueMutation(raw: unknown, endpoint: string, input: { runtime_workspace_id?: string | null }): Issue {
+  const issue = parseStrictResponse<Issue>(raw, IssueSchema, { endpoint });
+  if (input.runtime_workspace_id !== undefined && (issue.runtime_workspace_id ?? null) !== input.runtime_workspace_id) {
+    throw new ApiContractError(endpoint, "Server did not retain the selected runtime workspace");
+  }
+  return issue;
 }

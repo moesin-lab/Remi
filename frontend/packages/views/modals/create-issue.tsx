@@ -1,4 +1,5 @@
 "use client";
+import { RuntimeWorkspacePicker } from "../runtimes/components/runtime-workspace-picker";
 
 import { useEffect, useState, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -129,6 +130,7 @@ export function ManualCreatePanel({
   const [parentIssueId, setParentIssueId] = useState<string | undefined>(
     (data?.parent_issue_id as string) || undefined,
   );
+  const [runtimeWorkspaceId, setRuntimeWorkspaceId] = useState<string | null>((data?.runtime_workspace_id as string) || null);
   const [parentPickerOpen, setParentPickerOpen] = useState(false);
   // Start date is a low-frequency field — by default it lives in the
   // overflow ⋯ menu. Clicking the menu item flips this open, which both
@@ -263,6 +265,7 @@ export function ManualCreatePanel({
         attachment_ids: attachmentIds.length > 0 ? attachmentIds : undefined,
         parent_issue_id: parentIssueId,
         project_id: projectId,
+        runtime_workspace_id: runtimeWorkspaceId,
       });
 
       // Link queued children to the new parent. Deferred to after create
@@ -571,6 +574,7 @@ export function ManualCreatePanel({
               />
 
               {/* Project */}
+              <RuntimeWorkspacePicker wsId={wsId} value={runtimeWorkspaceId} onChange={setRuntimeWorkspaceId} disabled={submitting} />
               <ProjectPicker
                 projectId={projectId ?? null}
                 onUpdate={(u) => handleProjectPicked(u.project_id ?? undefined)}

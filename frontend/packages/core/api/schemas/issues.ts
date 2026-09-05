@@ -12,6 +12,7 @@ import type {
 const IssueMetadataSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({});
 
 export const IssueSchema = z.object({
+  runtime_workspace_id: z.string().nullable().optional(),
   id: z.string(),
   workspace_id: z.string(),
   number: z.number(),

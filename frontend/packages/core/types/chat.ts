@@ -1,4 +1,5 @@
 export interface ChatSession {
+  runtime_workspace_id?: string | null;
   id: string;
   workspace_id: string;
   agent_id: string;

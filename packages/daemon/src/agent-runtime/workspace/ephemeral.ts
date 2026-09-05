@@ -10,12 +10,15 @@
  */
 
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve, relative, sep } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { AgentTask } from "@daemon/contracts/types.js";
 import { resolveWorkDir } from "./persistent.js";
+import { acquireWorkspaceSupervisorLease, WorkspaceSupervisorOwnedError } from "./process-owner.js";
 
 export interface ResolvedTaskWorkDir {
+  runtimeWorkspaceRoot?: string;
   workDir: string;
   localDirectory: boolean;
   // Whether the daemon may create this dir. false only for a local_directory
@@ -103,6 +106,8 @@ export class LocalPathLocker {
 }
 
 export interface ResolveTaskWorkDirOptions {
+  /** Testable host-local lock registry, outside user-owned directories. */
+  runtimeWorkspaceLeaseRoot?: string;
   /** Daemon/runtime identifiers that own local_directory resources. */
   daemonIds: string[];
   /** Root for the default (non-local) per-task workspace path. */
@@ -118,6 +123,43 @@ export async function resolveTaskWorkDir(
   task: AgentTask,
   opts: ResolveTaskWorkDirOptions,
 ): Promise<ResolvedTaskWorkDir> {
+  if (task.runtimeWorkspaceId) {
+    const workspace = task.runtimeWorkspace;
+    if (!workspace || workspace.id !== task.runtimeWorkspaceId || workspace.workspaceId !== task.workspaceId
+      || workspace.archivedAt || !opts.daemonIds.includes(workspace.daemonId)) {
+      throw new LocalDirectoryError("Runtime workspace is unavailable on this daemon");
+    }
+    const root = normalizeLocalDirectoryPath(workspace.rootPath);
+    validateLocalDirectoryPath(root);
+    const workDir = resolve(root, workspace.cwd);
+    validateLocalDirectoryPath(workDir);
+    const rootReal = realpathSync(root);
+    const workReal = realpathSync(workDir);
+    const withinRoot = relative(rootReal, workReal);
+    if (isAbsolute(withinRoot) || withinRoot === ".." || withinRoot.startsWith(`..${sep}`)) {
+      throw new LocalDirectoryError("Runtime workspace cwd escapes its root");
+    }
+    const releaseLocal = await opts.locker.acquire(workReal, task.id,
+      holder => opts.onWaitLocalDirectory(task.id, `Runtime workspace is busy${holder ? ` (${holder})` : ""}`), opts.signal);
+    try {
+      while (true) {
+        opts.signal.throwIfAborted();
+        try {
+          const lease = acquireWorkspaceSupervisorLease(workReal, {
+            stateRoot: opts.runtimeWorkspaceLeaseRoot ?? join(homedir(), ".multiremi", "runtime-workspace-leases"),
+          });
+          return {
+            workDir, runtimeWorkspaceRoot: rootReal, localDirectory: true, ensureDir: false,
+            release: () => { try { lease.release(); } finally { releaseLocal(); } },
+          };
+        } catch (error) {
+          if (!(error instanceof WorkspaceSupervisorOwnedError)) throw error;
+          await opts.onWaitLocalDirectory(task.id, `Runtime workspace is busy (process ${error.ownerPid})`);
+          await delay(250, undefined, { signal: opts.signal });
+        }
+      }
+    } catch (error) { releaseLocal(); throw error; }
+  }
   // Issue workspaces are daemon-owned and stable by Issue key. Historical
   // local_directory resources must never redirect an Issue into a user's
   // checkout; they are retained here only for non-Issue compatibility while

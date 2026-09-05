@@ -495,8 +495,14 @@
     "subtitle": "ワークスペース宣言と各ランタイムの最新状態。",
     "add": "プロビジョンを追加",
     "filter_label": "プロビジョン種別",
-    "filters": { "all": "すべて" },
-    "kinds": { "npm_global": "npm グローバル", "command": "コマンド", "unknown": "不明" },
+    "filters": {
+      "all": "すべて"
+    },
+    "kinds": {
+      "npm_global": "npm グローバル",
+      "command": "コマンド",
+      "unknown": "不明"
+    },
     "load_failed": "ランタイムプロビジョンを読み込めませんでした",
     "retry": "再試行",
     "empty": "プロビジョンがありません",
@@ -564,5 +570,34 @@
       "save_failed": "プロビジョンを保存できませんでした",
       "delete_failed": "プロビジョンを削除できませんでした"
     }
+  },
+  "workspaces": {
+    "title": "Runtime ワークスペース",
+    "picker_label": "実行ワークスペース",
+    "automatic": "自動タスクディレクトリ",
+    "description": "このマシンの作業環境を複数の Chat や Issue で再利用します。既存のディレクトリを登録してください。Git やプロジェクトは任意です。",
+    "name": "名前",
+    "name_placeholder": "ローカル作業環境",
+    "root": "ルートディレクトリ",
+    "root_placeholder": "C:\\workbench または /home/me/workbench",
+    "cwd": "作業ディレクトリ（相対パス）",
+    "project": "プロジェクト（任意）",
+    "root_hint": "共有の指示、Skill、リポジトリを含む親ディレクトリを選びます。作業ディレクトリにはサブディレクトリを指定するか、ルートを使う場合は . を指定します。",
+    "context_options": "ローカルのコンテキストと環境",
+    "context_paths": "追加の指示ファイルまたは Skill ディレクトリ",
+    "context_placeholder": "ルートからの相対パスを1行に1つ入力",
+    "env_file": "環境ファイル（任意）",
+    "context_hint": "指示とローカル Skill はこのマシンで読み取ります。追加パスと環境ファイルはルート内に配置してください。登録時はパスのみ保存します。実行する agent とモデルはファイルの内容を読み取る場合があります。",
+    "register": "ワークスペースを登録",
+    "registered": "登録しました。ディレクトリとローカルコンテキストはタスク開始時に確認します。",
+    "loading": "ワークスペースを読み込み中…",
+    "load_failed": "Runtime ワークスペースを読み込めませんでした。",
+    "empty": "このマシンには永続ワークスペースがまだありません。",
+    "available": "ホスト利用可能",
+    "unavailable": "ホスト利用不可",
+    "wait_hint": "タスクはこのマシンの対応 Runtime がオンラインになるまで待機します。",
+    "archive": "登録をアーカイブ",
+    "archived": "登録をアーカイブしました。ローカルファイルは保持されます。",
+    "lifecycle_hint": "Chat と Issue はこのワークスペースを参照します。完了や削除でローカルファイルが消えることはありません。登録をアーカイブすると新しい実行を停止し、ディレクトリを保持します。"
   }
 }

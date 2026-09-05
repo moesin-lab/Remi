@@ -238,6 +238,7 @@ export class MultiremiDaemonClient {
       cli_version: input.cliVersion ?? "",
       launched_by: input.launchedBy ?? "",
       capabilities: {
+        runtime_workspaces: 1,
         agent_plugins: input.agentPluginProtocol ?? MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
         ssh_mesh: input.sshMeshProtocol ?? MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
       },
@@ -1226,6 +1227,8 @@ function normalizeDaemonClaimTask(raw: any | null): MultiremiTaskWithAgent | nul
     taskKind: raw.task_kind === "quick_create" || raw.kind === "quick_create" ? "quick_create" : "direct",
     agentId: stringOrNull(raw.agent_id ?? raw.agentId) ?? "",
     runtimeId: stringOrNull(raw.runtime_id ?? raw.runtimeId),
+    runtimeWorkspaceId: stringOrNull(raw.runtime_workspace_id ?? raw.runtimeWorkspaceId),
+    runtimeWorkspace: raw.runtime_workspace ?? raw.runtimeWorkspace ?? null,
     issueId: stringOrNull(raw.issue_id ?? raw.issueId),
     issueSessionId: stringOrNull(raw.issue_session_id ?? raw.issueSessionId),
     issueSessionGeneration: numberOrNull(raw.issue_session_generation ?? raw.issueSessionGeneration),

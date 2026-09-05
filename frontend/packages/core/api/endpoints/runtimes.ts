@@ -31,6 +31,8 @@ import type {
   ListCloudRuntimeNodesParams,
 } from "../../runtimes/cloud-runtime";
 import type { HttpClient } from "../http";
+import type { RuntimeWorkspace, CreateRuntimeWorkspaceRequest } from "../../runtimes/workspace-types";
+import { RuntimeWorkspaceSchema, RuntimeWorkspaceListSchema } from "../schemas/runtime-workspaces";
 import {
   ApiContractError,
   parseStrictResponse,
@@ -79,6 +81,22 @@ import {
 
 export class RuntimesEndpoints {
   constructor(readonly http: HttpClient) {}
+
+  async listRuntimeWorkspaces(wsId: string): Promise<RuntimeWorkspace[]> {
+    const raw = await this.http.fetch<unknown>(`/api/runtime-workspaces?workspace_id=${encodeURIComponent(wsId)}`);
+    // A failed catalog must not silently switch a saved local selection to automatic.
+    return parseStrictResponse<{ workspaces: RuntimeWorkspace[] }>(raw, RuntimeWorkspaceListSchema, { endpoint: "GET /api/runtime-workspaces" }).workspaces;
+  }
+
+  async createRuntimeWorkspace(runtimeId: string, input: CreateRuntimeWorkspaceRequest): Promise<RuntimeWorkspace> {
+    const raw = await this.http.fetch<unknown>(`/api/runtimes/${encodeURIComponent(runtimeId)}/workspaces`, { method: "POST", body: JSON.stringify(input) });
+    return parseStrictResponse(raw, RuntimeWorkspaceSchema, { endpoint: "POST /api/runtimes/:id/workspaces" });
+  }
+
+  async archiveRuntimeWorkspace(id: string): Promise<RuntimeWorkspace> {
+    const raw = await this.http.fetch<unknown>(`/api/runtime-workspaces/${encodeURIComponent(id)}`, { method: "DELETE" });
+    return parseStrictResponse(raw, RuntimeWorkspaceSchema, { endpoint: "DELETE /api/runtime-workspaces/:id" });
+  }
 
   async listRuntimes(params?: { workspace_id?: string; owner?: "me" }): Promise<AgentRuntime[]> {
     const search = new URLSearchParams();

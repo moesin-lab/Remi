@@ -1,4 +1,5 @@
 "use client";
+import { RuntimeWorkspacePicker } from "../../runtimes/components/runtime-workspace-picker";
 
 import { Bot, CalendarClock, CalendarDays, CheckCircle2, ChevronRight, ListTree, Plus, Tag } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -85,6 +86,7 @@ export function IssueDetailSidebar({
   canManageArchives,
 }: IssueDetailSidebarProps) {
   const { t } = useT("issues");
+  const { t: tRuntime } = useT("runtimes");
   const paths = useWorkspacePaths();
   const propertiesOpen = sections.isOpen("properties");
   const parentIssueOpen = sections.isOpen("parentIssue");
@@ -153,6 +155,10 @@ export function IssueDetailSidebar({
             />
           </PropRow>
 
+          <PropRow label={tRuntime($ => $.workspaces.picker_label)}>
+            <RuntimeWorkspacePicker wsId={issue.workspace_id} value={issue.runtime_workspace_id ?? null}
+              onChange={id => onUpdateField({ runtime_workspace_id: id })} disabled={tasks.length > 0} />
+          </PropRow>
           {/* Optional props — rendered only when set on the issue OR added
               via "+ Add property" in this session. Row order follows the
               order of `OPTIONAL_PROP_KEYS`. */}

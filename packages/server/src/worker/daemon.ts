@@ -90,6 +90,7 @@ import { prepareIssueWikiWorkspace } from "@daemon/agent-runtime/workspace/wiki.
 import { cleanProcessEnv } from "@daemon/agent-runtime/env/injector.js";
 import { mergeCodexSessionConfig } from "@daemon/agent-runtime/relay-sync.js";
 import { AgentRuntime } from "@daemon/agent-runtime/runtime.js";
+import { prepareRuntimeWorkspaceContext } from "@daemon/agent-runtime/workspace/runtime-context.js";
 import { AgentSession } from "@daemon/agent-runtime/session.js";
 import type { EphemeralContext } from "@daemon/agent-runtime/types.js";
 import { AgentPluginCache } from "@daemon/agent-runtime/agent-plugins/cache.js";
@@ -1165,6 +1166,7 @@ export class MultiremiDaemon {
         agent_version: this.agentVersion() ?? undefined,
         launched_by: this.options.launchedBy ?? "manual",
         agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
+        runtime_workspaces: 1,
         ssh_mesh_protocol: MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
       },
       deviceInfo: `${this.options.runtimeName} · ${multiremiVersion}`,
@@ -2453,7 +2455,7 @@ export class MultiremiDaemon {
           : task.issueId;
         releaseIssueWorkspaceLifecycle = await this.issueWorkspaceLifecycleLocks.acquire(lifecycleKey);
         this.assertWorkspaceRootOwner();
-        if (task.holdsWorkspace !== false && task.issue?.key) {
+        if (!task.runtimeWorkspaceId && task.holdsWorkspace !== false && task.issue?.key) {
           const adopted = await this.topicWorkspaces.preparePendingMigrationForIssue(
             task.issueId,
             task.issue.key,
@@ -2551,6 +2553,11 @@ export class MultiremiDaemon {
           ...(relayAuthoritative ? { relayFragment: relay?.fragment ?? "" } : {}),
           codexRelayUsesEnvApiKey: task.agent?.provider === "codex" && Boolean(providerInstallEnv?.OPENAI_API_KEY),
         });
+        if (task.runtimeWorkspaceId) {
+          writeAgentSkillContext(providerHome.home, task);
+          const localEnv = prepareRuntimeWorkspaceContext(task, providerHome, resolvedWorkDir.workDir);
+          providerEnv = { ...localEnv, ...providerEnv };
+        }
       }
       this.enqueueTaskReport(task.id, "start", {});
       this.enqueueTaskReport(task.id, "progress", { summary: pickTaskStartupLine(task.agent?.name), step: 1, total: 3 });
@@ -2778,7 +2785,7 @@ export class MultiremiDaemon {
     syncResults: MultiremiRepoSyncResult[],
     signal: AbortSignal,
   ): Promise<PreparedIssueWorkspace> {
-    if (task.holdsWorkspace === false) return { checkouts: [], repos: [], warnings: [] };
+    if (task.runtimeWorkspaceId || task.holdsWorkspace === false) return { checkouts: [], repos: [], warnings: [] };
     if (task.issue?.issueKind !== "intake") {
       const prepared = await this.autoCheckoutTaskRepos(task, resolvedWorkDir, syncResults, signal);
       if (!resolvedWorkDir.localDirectory) {
@@ -2853,6 +2860,17 @@ export class MultiremiDaemon {
   ): Promise<void> {
     const runtimeId = task.runtimeId ?? this.options.runtimeId;
     if (!task.issueId || task.holdsWorkspace === false || !runtimeId) return;
+    if (task.runtimeWorkspaceId) {
+      // Only native session/archive state belongs to the Issue. Never report
+      // the external directory as an Issue-owned root that GC may reclaim.
+      this.enqueueTaskReport(task.id, "workspace", {
+        runtimeId,
+        rootPath: resolveIssueRuntimeStateRoot(task, rootPath, this.options.workspacesRoot, true),
+        branchName: task.issue?.issueKind === "intake" ? "" : `agent/${task.issue?.key ?? task.id}`,
+        status: "ready", repos: [],
+      });
+      return;
+    }
     if (task.issue?.issueKind === "intake") {
       // A degraded intake run keeps its error repos; the final report must not
       // paper over them with "ready" or the workspace status would contradict
@@ -3130,16 +3148,20 @@ export class MultiremiDaemon {
     // preparation unchanged, including for any task that also carries Chat
     // metadata but is anchored to an Issue workspace.
     const homepageChat = Boolean(task.chatSessionId && !task.issueId);
-    const repoSyncResults = homepageChat || task.holdsWorkspace === false
+    const repoSyncResults = task.runtimeWorkspaceId || homepageChat || task.holdsWorkspace === false
       ? []
       : await this.registerTaskRepos(task.workspaceId, task.repos ?? [], signal);
     const preparedWorkspace = await this.prepareTaskWorkspace(task, resolvedWorkDir, repoSyncResults, signal);
     this.assertWorkspaceRootOwner();
     try {
-      writeTaskContext(workDir, task);
-      writeTaskGcContext(workDir, task, { localDirectory: resolvedWorkDir.localDirectory });
-      writeProjectResourceContext(workDir, task);
-      writeAgentSkillContext(workDir, task);
+      const contextDir = task.runtimeWorkspaceId ? providerHome?.root : workDir;
+      if (!contextDir) throw new Error("Runtime workspace requires an isolated provider home");
+      writeTaskContext(contextDir, task);
+      if (!task.runtimeWorkspaceId) {
+        writeTaskGcContext(workDir, task, { localDirectory: resolvedWorkDir.localDirectory });
+        writeAgentSkillContext(workDir, task);
+      }
+      writeProjectResourceContext(contextDir, task);
     } catch (err) {
       log.warn(`Failed to write task context for ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
     }

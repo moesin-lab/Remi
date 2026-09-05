@@ -7,6 +7,7 @@ import type { Project } from "./project";
 
 // Issue API
 export interface CreateIssueRequest {
+  runtime_workspace_id?: string | null;
   title: string;
   description?: string;
   status?: IssueStatus;
@@ -23,6 +24,7 @@ export interface CreateIssueRequest {
 }
 
 export interface UpdateIssueRequest {
+  runtime_workspace_id?: string | null;
   title?: string;
   description?: string;
   status?: IssueStatus;

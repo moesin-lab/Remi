@@ -16,6 +16,7 @@ import {
   toJson,
 } from "@multiremi/store/helpers.js";
 import { type StoreContext, toInboxItem, toIssueComment } from "@multiremi/store/context.js";
+import { RuntimeWorkspacesRepo } from "./runtime-workspaces-repo.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { createLogger } from "@shared/logger.js";
 import { resolveIssueArchiveSettings } from "@multiremi/store/issue-archive.js";
@@ -149,6 +150,8 @@ export class IssuesRepo {
     if (parent && parent.workspaceId !== workspaceId) throw new Error("Parent issue belongs to another workspace");
 
     const projectId = input.projectId ?? input.project_id ?? (parent ? parent.projectId : null);
+    const runtimeWorkspaceId = input.runtimeWorkspaceId ?? input.runtime_workspace_id ?? null;
+    if (runtimeWorkspaceId) new RuntimeWorkspacesRepo(this.ctx).require(runtimeWorkspaceId, workspaceId);
     if (projectId) {
       const project = this.ctx.projects().getProject(projectId);
       if (!project) throw new Error(`Project not found: ${projectId}`);
@@ -188,11 +191,12 @@ export class IssuesRepo {
     const completedAt = isTerminalIssueStatus(status) ? now : null;
     this.ctx.db.run(
       `INSERT INTO multiremi_issues (
-        id, issue_number, issue_key, title, description, status, priority, workspace_id, project_id,
+        runtime_workspace_id, id, issue_number, issue_key, title, description, status, priority, workspace_id, project_id,
         parent_issue_id, issue_kind, source_issue_id, assignee_type, assignee_id, position, start_date, due_date,
         acceptance_criteria, context_refs, created_by, completed_at, archived_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        runtimeWorkspaceId,
         id,
         issueNumber,
         issueKey,
@@ -868,6 +872,17 @@ export class IssuesRepo {
     let previous: MultiremiIssue | null = null;
     let updatedAt = "";
     const updated = this.ctx.db.transaction(() => {
+      if (hasAnyField(input, "runtimeWorkspaceId", "runtime_workspace_id")) {
+        const initial = this.getIssue(id);
+        if (initial) {
+          // Match Task creation's workspace-before-Issue lock order so a
+          // first execution cannot race a directory change on Postgres.
+          const targetWorkspace = input.workspaceId ?? input.workspace_id ?? initial.workspaceId;
+          for (const workspaceId of [...new Set([initial.workspaceId, targetWorkspace])].sort()) {
+            this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+          }
+        }
+      }
       // A no-op UPDATE is a portable write lock: Postgres locks this Issue row
       // until commit, while SQLite serializes the writer transaction. Re-read
       // only after acquiring it so a user terminal transition and a worker
@@ -881,6 +896,12 @@ export class IssuesRepo {
       const nextWorkspaceId = resolveOptionalStringField(input, "workspaceId", "workspace_id", current.workspaceId) ?? "local";
       const nextProjectId = resolveOptionalStringField(input, "projectId", "project_id", current.projectId);
       const nextParentIssueId = resolveOptionalStringField(input, "parentIssueId", "parent_issue_id", current.parentIssueId);
+      const nextRuntimeWorkspaceId = resolveOptionalStringField(input, "runtimeWorkspaceId", "runtime_workspace_id", current.runtimeWorkspaceId ?? null);
+      if (nextRuntimeWorkspaceId !== (current.runtimeWorkspaceId ?? null)) {
+        new RuntimeWorkspacesRepo(this.ctx).assertIssueBindingChange(id, nextRuntimeWorkspaceId, nextWorkspaceId);
+      } else if (nextRuntimeWorkspaceId && nextWorkspaceId !== current.workspaceId) {
+        new RuntimeWorkspacesRepo(this.ctx).require(nextRuntimeWorkspaceId, nextWorkspaceId);
+      }
       let nextAssigneeType = resolveOptionalStringField(input, "assigneeType", "assignee_type", current.assigneeType) as MultiremiAssigneeType | null;
       let nextAssigneeId = resolveOptionalStringField(input, "assigneeId", "assignee_id", current.assigneeId);
       const nextStartDate = hasAnyField(input, "startDate", "start_date")
@@ -937,6 +958,7 @@ export class IssuesRepo {
         priority = ?,
         workspace_id = ?,
         project_id = ?,
+        runtime_workspace_id = ?,
         parent_issue_id = ?,
         assignee_type = ?,
         assignee_id = ?,
@@ -956,6 +978,7 @@ export class IssuesRepo {
         normalizeIssuePriority(input.priority ?? current.priority),
         nextWorkspaceId,
         nextProjectId,
+        nextRuntimeWorkspaceId,
         nextParentIssueId,
         nextAssigneeType,
         nextAssigneeId,
@@ -3565,6 +3588,8 @@ function assigneeGroupRank(type: MultiremiAssigneeType | null): number {
 function hasIssueMutation(input: UpdateIssueInput): boolean {
   return hasAnyField(
     input,
+    "runtimeWorkspaceId",
+    "runtime_workspace_id",
     "title",
     "description",
     "status",
@@ -3702,6 +3727,7 @@ function normalizeLabelColor(value: string | undefined): string {
 function toIssue(row: Row): MultiremiIssue {
   const number = Number(row.issue_number ?? 0);
   return {
+    runtimeWorkspaceId: nullableString(row.runtime_workspace_id),
     id: String(row.id),
     key: String(row.issue_key || (number > 0 ? formatIssueKey(number) : row.id)),
     number,

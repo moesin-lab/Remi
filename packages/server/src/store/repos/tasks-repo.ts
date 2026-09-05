@@ -64,6 +64,8 @@ import type {
   RecordTaskPromptInput,
 } from "@multiremi/contracts/types.js";
 
+import { RuntimeWorkspacesRepo, RuntimeWorkspaceError } from "./runtime-workspaces-repo.js";
+
 const log = createLogger("multiremi-store");
 
 type Row = Record<string, unknown>;
@@ -321,6 +323,20 @@ export class TasksRepo {
     // reference that would drive B's agent + machine + credentials from A).
     if (issue && issue.workspaceId !== agent.workspaceId) throw new Error("Issue workspace does not match agent workspace");
     if (chatSession && chatSession.workspaceId !== agent.workspaceId) throw new Error("Chat session workspace does not match agent workspace");
+    const surfaceWorkspaceId = chatSession ? chatSession.runtimeWorkspaceId : issue?.runtimeWorkspaceId;
+    const explicitWorkspaceId = input.runtimeWorkspaceId ?? input.runtime_workspace_id;
+    if ((chatSession || issue) && explicitWorkspaceId != null && explicitWorkspaceId !== surfaceWorkspaceId) {
+      throw new RuntimeWorkspaceError("Task runtime workspace must match its Chat or Issue", 409);
+    }
+    const runtimeWorkspaceId = surfaceWorkspaceId ?? explicitWorkspaceId ?? null;
+    const runtimeWorkspace = runtimeWorkspaceId
+      ? new RuntimeWorkspacesRepo(this.ctx).require(runtimeWorkspaceId, agent.workspaceId) : null;
+    if (runtimeWorkspace && agent.runtimeId) {
+      const pinned = this.ctx.runtimes().getRuntime(agent.runtimeId);
+      if (pinned?.daemonId !== runtimeWorkspace.daemonId) {
+        throw new RuntimeWorkspaceError("Agent is bound to a different machine", 409);
+      }
+    }
     const requestedIssueSessionId = cleanOptionalString(input.issueSessionId ?? input.issue_session_id)
       ?? triggerComment?.issueSessionId
       ?? (issue && !chatSession ? this.ctx.issueSessions().getOrCreateDefaultIssueSession(issue.id).id : null);
@@ -361,6 +377,13 @@ export class TasksRepo {
     );
     if (affinity.runtimeId) runtimeId = affinity.runtimeId;
     if (!input.resetProviderSession) inheritChatSession = affinity.inheritChatSession;
+    if (runtimeWorkspace && runtimeId) {
+      const candidate = this.ctx.runtimes().getRuntime(runtimeId);
+      if (candidate?.daemonId !== runtimeWorkspace.daemonId) {
+        runtimeId = null;
+        inheritChatSession = false;
+      }
+    }
 
     // Product-session affinity is per (session, agent), not per Issue and not
     // shared with other agents. A valid lane pins this task to the runtime that
@@ -382,6 +405,7 @@ export class TasksRepo {
           currentPluginSnapshot.length > 0,
         )
         && laneRuntime != null
+        && (!runtimeWorkspace || laneRuntime.daemonId === runtimeWorkspace.daemonId)
         && this.ctx.runtimes().runtimeCanRunAgent(laneRuntime, agent);
       const runtimeConflict = Boolean(affinity.runtimeId && issueLane.runtimeId && affinity.runtimeId !== issueLane.runtimeId);
       if (laneResumable && !runtimeConflict) {
@@ -420,7 +444,7 @@ export class TasksRepo {
     );
     this.ctx.db.run(
       `INSERT INTO multiremi_tasks (
-        id, task_kind, agent_id, runtime_id, issue_id, issue_session_id, issue_session_generation, holds_workspace, chat_session_id,
+        runtime_workspace_id, id, task_kind, agent_id, runtime_id, issue_id, issue_session_id, issue_session_generation, holds_workspace, chat_session_id,
         trigger_comment_id, trigger_summary, requesting_user_name,
         requesting_user_profile_description, workspace_id, status, priority, prompt,
         attempt, max_attempts, parent_task_id, issue_creation_restricted, delegation_id, delegated_by_agent_id,
@@ -428,10 +452,11 @@ export class TasksRepo {
         provider, plugin_snapshot, execution_fingerprint,
         session_id, work_dir, created_at, updated_at
       ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?,
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       )`,
       [
+        runtimeWorkspaceId,
         id,
         taskKind,
         input.agentId,
@@ -673,6 +698,7 @@ export class TasksRepo {
       : [];
     return {
       ...task,
+      runtimeWorkspace: task.runtimeWorkspaceId ? new RuntimeWorkspacesRepo(this.ctx).get(task.runtimeWorkspaceId) : null,
       agent: this.ctx.agents().getAgent(task.agentId),
       issue,
       project,
@@ -1108,6 +1134,12 @@ export class TasksRepo {
     task: MultiremiTaskWithAgent,
   ): boolean {
     return task.agent != null
+      && (!task.runtimeWorkspaceId || (
+        runtime.metadata.runtime_workspaces === 1
+        && task.runtimeWorkspace?.daemonId === runtime.daemonId
+        && task.runtimeWorkspace?.workspaceId === task.workspaceId
+        && !task.runtimeWorkspace?.archivedAt
+      ))
       && !task.agent.archivedAt
       && this.ctx.runtimes().runtimeCanRunAgent(runtime, task.agent)
       && this.runtimeHasReadyTaskPlugins(runtime, task)
@@ -1202,6 +1234,8 @@ export class TasksRepo {
       runtime.maxConcurrency,
       runtime.workspaceId ?? "local",
       runtimeSupportsIssueWorkspaces(runtime) ? 1 : 0,
+      runtime.metadata.runtime_workspaces === 1 ? 1 : 0,
+      runtime.daemonId ?? "",
       ...daemonAliases,
       ...daemonAliases,
       ...daemonAliases,
@@ -1243,8 +1277,13 @@ export class TasksRepo {
            ) < ?
            ${workspaceFilter}
            AND (t.issue_id IS NULL OR ? = 1)
+           AND (t.runtime_workspace_id IS NULL OR (? = 1 AND EXISTS (
+             SELECT 1 FROM multiremi_runtime_workspaces rw
+             WHERE rw.id = t.runtime_workspace_id AND rw.workspace_id = t.workspace_id
+               AND rw.daemon_id = ? AND rw.archived_at IS NULL
+           )))
            AND (
-             t.issue_id IS NULL
+             t.runtime_workspace_id IS NOT NULL OR t.issue_id IS NULL
              OR NOT EXISTS (
                SELECT 1 FROM multiremi_issue_workspaces issue_workspace
                WHERE issue_workspace.issue_id = t.issue_id
@@ -1322,6 +1361,8 @@ export class TasksRepo {
              SELECT 1 FROM multiremi_tasks active
              WHERE active.status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
                AND (
+                 (t.runtime_workspace_id IS NOT NULL AND active.runtime_workspace_id = t.runtime_workspace_id)
+                 OR
                  (t.issue_session_id IS NOT NULL AND active.issue_session_id = t.issue_session_id)
                  OR (t.issue_id IS NOT NULL AND t.issue_session_id IS NULL AND active.issue_id = t.issue_id)
                  OR (
@@ -1912,6 +1953,7 @@ export class TasksRepo {
     const replacement = this.createTaskWithinWorkspaceLock({
       agentId: current.agentId,
       taskKind: current.taskKind,
+      runtimeWorkspaceId: current.runtimeWorkspaceId,
       runtimeId: null,
       issueId: current.issueId,
       issueSessionId: current.issueSessionId,
@@ -2050,7 +2092,7 @@ export class TasksRepo {
     if (!parent.failureReason || !AUTO_RETRY_FAILURE_REASONS.has(parent.failureReason)) return null;
     if (parent.attempt >= parent.maxAttempts) return null;
     if (parent.autopilotRunId) return null;
-    if (!parent.issueId && !parent.chatSessionId) return null;
+    if (!parent.issueId && !parent.chatSessionId && !parent.runtimeWorkspaceId) return null;
 
     // Resume-safe only if the parent's machine can STILL run this agent. If the
     // agent switched engine/owner (or the runtime changed) since the parent ran,
@@ -2076,7 +2118,10 @@ export class TasksRepo {
       && parent.provider != null
       && parent.provider === agent.provider
       && this.ctx.runtimes().runtimeCanRunAgent(parentRuntime, agent);
-    const resumeSafe = !RESUME_UNSAFE_FAILURE_REASONS.has(parent.failureReason) && parentRuntimeUsable;
+    // Standalone tasks use disposable provider homes. Their persistent working
+    // directory survives, but native session IDs cannot resume in a new home.
+    const resumeSafe = Boolean(parent.issueId || parent.chatSessionId)
+      && !RESUME_UNSAFE_FAILURE_REASONS.has(parent.failureReason) && parentRuntimeUsable;
     // If the Agent changed provider before this failure was reported, the old
     // provider/plugin snapshot can no longer be executed with the Agent's
     // current native config. Treat this as a fresh retry. When the retry was
@@ -2094,6 +2139,7 @@ export class TasksRepo {
       // Resume-safe failures must go back to the machine holding the session;
       // once the session is abandoned, any pool machine may pick up the retry.
       runtimeId: resumeSafe ? parent.runtimeId : null,
+      runtimeWorkspaceId: parent.runtimeWorkspaceId,
       issueId: parent.issueId,
       issueSessionId: parent.issueSessionId,
       chatSessionId: parent.chatSessionId,
@@ -3078,6 +3124,7 @@ function toTask(row: Row): MultiremiTask {
     taskKind: row.task_kind === "quick_create" ? "quick_create" : "direct",
     agentId: String(row.agent_id),
     runtimeId: nullableString(row.runtime_id),
+    runtimeWorkspaceId: nullableString(row.runtime_workspace_id),
     provider: nullableString(row.provider),
     pluginSnapshot: parseJson<MultiremiTaskPluginSnapshotEntry[]>(row.plugin_snapshot, []),
     plugin_snapshot: parseJson<MultiremiTaskPluginSnapshotEntry[]>(row.plugin_snapshot, []),

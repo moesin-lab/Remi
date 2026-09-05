@@ -1,20 +1,20 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 725,
+    "routeCount": 731,
     "routeCountByPrefix": {
       "native": 209,
-      "compat": 502,
+      "compat": 508,
       "root": 14
     },
-    "getRoutes": 309,
-    "getRoutesWithBody": 306,
+    "getRoutes": 312,
+    "getRoutesWithBody": 309,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 416,
+    "mutationRoutes": 419,
     "mutationRoutesCovered": 282,
     "flows": [
       "agents-compat",
@@ -111,6 +111,7 @@
     "DELETE /api/projects/:id/devices/:daemonId",
     "DELETE /api/projects/:id/docs/:ref",
     "DELETE /api/projects/:id/resources/:resourceId",
+    "DELETE /api/runtime-workspaces/:id",
     "DELETE /api/runtimes/:id",
     "DELETE /api/skills/:id",
     "DELETE /api/skills/:id/files/:fileId",
@@ -347,6 +348,8 @@
     "GET /api/remi/releases/download/:tag/:filename",
     "GET /api/remi/releases/latest/:filename",
     "GET /api/remi/releases/latest/version",
+    "GET /api/runtime-workspaces",
+    "GET /api/runtime-workspaces/:id",
     "GET /api/runtimes",
     "GET /api/runtimes/:id",
     "GET /api/runtimes/:id/activity",
@@ -361,6 +364,7 @@
     "GET /api/runtimes/:id/usage",
     "GET /api/runtimes/:id/usage/by-agent",
     "GET /api/runtimes/:id/usage/by-hour",
+    "GET /api/runtimes/:id/workspaces",
     "GET /api/scm/capabilities",
     "GET /api/shares/:token",
     "GET /api/shares/:token/attachments/:attachmentId/content",
@@ -465,6 +469,7 @@
     "PATCH /api/multiremi/skills/:id",
     "PATCH /api/multiremi/squads/:id",
     "PATCH /api/multiremi/squads/:id/members",
+    "PATCH /api/runtime-workspaces/:id",
     "PATCH /api/runtimes/:id",
     "PATCH /api/skills/:id",
     "PATCH /api/squads/:id/members/role",
@@ -682,6 +687,7 @@
     "POST /api/runtimes/:id/local-skills/import",
     "POST /api/runtimes/:id/models",
     "POST /api/runtimes/:id/update",
+    "POST /api/runtimes/:id/workspaces",
     "POST /api/skills",
     "POST /api/skills/import",
     "POST /api/squads",
@@ -1060,6 +1066,8 @@
     "GET /api/remi/releases/download/:tag/:filename",
     "GET /api/remi/releases/latest/:filename",
     "GET /api/remi/releases/latest/version",
+    "GET /api/runtime-workspaces",
+    "GET /api/runtime-workspaces/:id",
     "GET /api/runtimes",
     "GET /api/runtimes/:id",
     "GET /api/runtimes/:id/activity",
@@ -1074,6 +1082,7 @@
     "GET /api/runtimes/:id/usage",
     "GET /api/runtimes/:id/usage/by-agent",
     "GET /api/runtimes/:id/usage/by-hour",
+    "GET /api/runtimes/:id/workspaces",
     "GET /api/scm/capabilities",
     "GET /api/shares/:token",
     "GET /api/shares/:token/attachments/:attachmentId/content",
@@ -2854,6 +2863,7 @@
         "workspace_id": "local",
         "agent_id": "agt_snapshot",
         "issue_id": null,
+        "runtime_workspace_id": null,
         "creator_id": "local",
         "title": "Compat chat",
         "status": "active",
@@ -2890,6 +2900,7 @@
         "workspace_id": "local",
         "agent_id": "agt_snapshot",
         "issue_id": null,
+        "runtime_workspace_id": null,
         "creator_id": "local",
         "title": "Compat chat renamed",
         "status": "active",
@@ -2912,6 +2923,7 @@
       "status": 201,
       "body": {
         "session": {
+          "runtimeWorkspaceId": null,
           "id": "chat_7212d1hv48ko",
           "workspaceId": "local",
           "creatorId": "local",
@@ -2939,6 +2951,7 @@
       "status": 201,
       "body": {
         "session": {
+          "runtimeWorkspaceId": null,
           "id": "cht_snapshot",
           "workspaceId": "local",
           "creatorId": "local",
@@ -2972,6 +2985,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -3047,6 +3061,7 @@
       "status": 200,
       "body": {
         "session": {
+          "runtimeWorkspaceId": null,
           "id": "cht_snapshot",
           "workspaceId": "local",
           "creatorId": "local",
@@ -3852,6 +3867,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -3954,6 +3970,8 @@
           "trigger_comment_content": "Snapshot comment body",
           "trigger_author_type": "member",
           "trigger_author_name": "Snapshot Member",
+          "runtime_workspace_id": null,
+          "runtime_workspace": null,
           "prompt": "A teammate commented on an issue assigned to you. Respond to the current triggering comment as the issue's assignee.",
           "agent": {
             "id": "agt_snapshot",
@@ -4004,6 +4022,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -4188,6 +4207,8 @@
           "chat_session_id": "cht_snapshot",
           "plugin_snapshot": [],
           "execution_fingerprint": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "runtime_workspace_id": null,
+          "runtime_workspace": null,
           "prompt": "Snapshot chat message",
           "agent": {
             "id": "agt_snapshot",
@@ -4268,6 +4289,8 @@
           "autopilot_run_id": "run_sv8e5p1ut6x0",
           "plugin_snapshot": [],
           "execution_fingerprint": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "runtime_workspace_id": null,
+          "runtime_workspace": null,
           "prompt": "snapshot run",
           "agent": {
             "id": "agt_snapshot",
@@ -4318,6 +4341,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -4459,6 +4483,8 @@
           "autopilot_run_id": "run_u4c9m3gewz2d",
           "plugin_snapshot": [],
           "execution_fingerprint": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "runtime_workspace_id": null,
+          "runtime_workspace": null,
           "prompt": "Snapshot {{title}}",
           "agent": {
             "id": "agt_snapshot",
@@ -4509,6 +4535,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -4935,7 +4962,8 @@
               "version": "9.9.9",
               "cli_version": "9.9.9",
               "launched_by": "",
-              "agent_plugin_protocol": 0
+              "agent_plugin_protocol": 0,
+              "runtime_workspaces": 0
             },
             "owner_id": null,
             "visibility": "private",
@@ -5017,6 +5045,8 @@
           "trigger_comment_content": "Snapshot comment body",
           "trigger_author_type": "member",
           "trigger_author_name": "Snapshot Member",
+          "runtime_workspace_id": null,
+          "runtime_workspace": null,
           "prompt": "A teammate commented on an issue assigned to you. Respond to the current triggering comment as the issue's assignee.",
           "agent": {
             "id": "agt_snapshot",
@@ -5067,6 +5097,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -5608,6 +5639,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -5679,6 +5711,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -5750,6 +5783,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -5821,6 +5855,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -5892,6 +5927,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": "claude",
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -6518,6 +6554,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -6589,6 +6626,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -6660,6 +6698,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -6731,6 +6770,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -6802,6 +6842,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": "claude",
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -7246,6 +7287,7 @@
           "workspace_id": "local",
           "agent_id": "agt_snapshot",
           "issue_id": null,
+          "runtime_workspace_id": null,
           "creator_id": "local",
           "title": "Snapshot chat",
           "status": "active",
@@ -7265,6 +7307,7 @@
         "workspace_id": "local",
         "agent_id": "agt_snapshot",
         "issue_id": null,
+        "runtime_workspace_id": null,
         "creator_id": "local",
         "title": "Snapshot chat",
         "status": "active",
@@ -11114,6 +11157,61 @@
             "allowed": true
           },
           {
+            "id": "runtime.workspace.archive",
+            "command": "remi runtime workspace archive",
+            "capability": "runtime.workspace.archive",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.workspace.create",
+            "command": "remi runtime workspace create",
+            "capability": "runtime.workspace.create",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.workspace.get",
+            "command": "remi runtime workspace get",
+            "capability": "runtime.workspace.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.workspace.list",
+            "command": "remi runtime workspace list",
+            "capability": "runtime.workspace.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.workspace.rename",
+            "command": "remi runtime workspace rename",
+            "capability": "runtime.workspace.rename",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "scm.capabilities",
             "command": "remi scm capabilities",
             "capability": "scm.capabilities",
@@ -13365,6 +13463,7 @@
           "createdAt": "<timestamp>",
           "created_at": "<timestamp>",
           "issue": {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot_blocked",
             "key": "MUL-3",
             "number": 3,
@@ -13428,6 +13527,7 @@
             "createdAt": "<timestamp>",
             "created_at": "<timestamp>",
             "issue": {
+              "runtimeWorkspaceId": null,
               "id": "iss_snapshot_blocked",
               "key": "MUL-3",
               "number": 3,
@@ -13537,6 +13637,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": null,
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -13564,6 +13665,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -13591,6 +13693,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -13618,6 +13721,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -13656,6 +13760,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -13692,6 +13797,7 @@
         "issue_kind": "execution",
         "source_issue_id": null,
         "project_id": "prj_snapshot",
+        "runtime_workspace_id": null,
         "position": 0,
         "start_date": null,
         "due_date": null,
@@ -13736,6 +13842,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": null,
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -13803,6 +13910,7 @@
             "cancelledAt": null,
             "agent_id": "agt_snapshot",
             "runtime_id": "rt_snapshot",
+            "runtime_workspace_id": null,
             "issue_id": "iss_snapshot",
             "chat_session_id": null,
             "autopilot_run_id": null,
@@ -13869,6 +13977,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -13964,6 +14073,7 @@
               "issue_kind": "execution",
               "source_issue_id": null,
               "project_id": "prj_snapshot",
+              "runtime_workspace_id": null,
               "position": 0,
               "start_date": null,
               "due_date": null,
@@ -13992,6 +14102,7 @@
               "issue_kind": "execution",
               "source_issue_id": null,
               "project_id": null,
+              "runtime_workspace_id": null,
               "position": 0,
               "start_date": null,
               "due_date": null,
@@ -14324,6 +14435,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -14391,6 +14503,7 @@
           "cancelledAt": null,
           "agent_id": "agt_snapshot",
           "runtime_id": "rt_snapshot",
+          "runtime_workspace_id": null,
           "issue_id": "iss_snapshot",
           "chat_session_id": null,
           "autopilot_run_id": null,
@@ -14418,6 +14531,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": "claude",
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -14495,6 +14609,7 @@
           "cancelledAt": null,
           "agent_id": "agt_snapshot",
           "runtime_id": "rt_snapshot",
+          "runtime_workspace_id": null,
           "issue_id": "iss_snapshot",
           "chat_session_id": null,
           "autopilot_run_id": null,
@@ -14743,6 +14858,7 @@
             "assigneeId": "mem_local_local",
             "issues": [
               {
+                "runtimeWorkspaceId": null,
                 "id": "iss_snapshot_blocked",
                 "key": "MUL-3",
                 "number": 3,
@@ -14779,6 +14895,7 @@
             "assigneeId": "agt_snapshot",
             "issues": [
               {
+                "runtimeWorkspaceId": null,
                 "id": "iss_snapshot",
                 "key": "MUL-1",
                 "number": 1,
@@ -14826,6 +14943,7 @@
             "assigneeId": null,
             "issues": [
               {
+                "runtimeWorkspaceId": null,
                 "id": "iss_8rcx9z88woyu",
                 "key": "MUL-5",
                 "number": 5,
@@ -14854,6 +14972,7 @@
                 "updatedAt": "<timestamp>"
               },
               {
+                "runtimeWorkspaceId": null,
                 "id": "iss_i244sp2mewms",
                 "key": "MUL-4",
                 "number": 4,
@@ -14882,6 +15001,7 @@
                 "updatedAt": "<timestamp>"
               },
               {
+                "runtimeWorkspaceId": null,
                 "id": "iss_snapshot_child",
                 "key": "MUL-2",
                 "number": 2,
@@ -14939,6 +15059,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": null,
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -14966,6 +15087,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -14993,6 +15115,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -15020,6 +15143,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -15050,6 +15174,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -15361,6 +15486,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": null,
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -15432,6 +15558,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": null,
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -15503,6 +15630,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": null,
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -15574,6 +15702,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": null,
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -15645,6 +15774,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": "claude",
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -16343,6 +16473,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": null,
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -16414,6 +16545,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": null,
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -16485,6 +16617,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": null,
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -16556,6 +16689,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": null,
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -16627,6 +16761,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": "claude",
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -17127,6 +17262,7 @@
       "body": {
         "sessions": [
           {
+            "runtimeWorkspaceId": null,
             "id": "cht_snapshot",
             "workspaceId": "local",
             "creatorId": "local",
@@ -17156,6 +17292,7 @@
       "status": 200,
       "body": {
         "session": {
+          "runtimeWorkspaceId": null,
           "id": "cht_snapshot",
           "workspaceId": "local",
           "creatorId": "local",
@@ -17410,6 +17547,7 @@
             "createdAt": "<timestamp>",
             "created_at": "<timestamp>",
             "issue": {
+              "runtimeWorkspaceId": null,
               "id": "iss_snapshot_blocked",
               "key": "MUL-3",
               "number": 3,
@@ -17490,6 +17628,7 @@
       "body": {
         "issues": [
           {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot_blocked",
             "key": "MUL-3",
             "number": 3,
@@ -17521,6 +17660,7 @@
             "latestTaskId": null
           },
           {
+            "runtimeWorkspaceId": null,
             "id": "iss_8rcx9z88woyu",
             "key": "MUL-5",
             "number": 5,
@@ -17552,6 +17692,7 @@
             "latestTaskId": "tsk_9i3epsr6j5hf"
           },
           {
+            "runtimeWorkspaceId": null,
             "id": "iss_i244sp2mewms",
             "key": "MUL-4",
             "number": 4,
@@ -17583,6 +17724,7 @@
             "latestTaskId": "tsk_qdrfz8sqy58x"
           },
           {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot",
             "key": "MUL-1",
             "number": 1,
@@ -17625,6 +17767,7 @@
             "latestTaskId": "tsk_y5zie74khywp"
           },
           {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot_child",
             "key": "MUL-2",
             "number": 2,
@@ -17666,6 +17809,7 @@
       "status": 200,
       "body": {
         "issue": {
+          "runtimeWorkspaceId": null,
           "id": "iss_snapshot",
           "key": "MUL-1",
           "number": 1,
@@ -17709,6 +17853,7 @@
               "taskKind": "direct",
               "agentId": "agt_snapshot",
               "runtimeId": "rt_snapshot",
+              "runtimeWorkspaceId": null,
               "provider": null,
               "pluginSnapshot": [],
               "plugin_snapshot": [],
@@ -17780,6 +17925,7 @@
               "taskKind": "direct",
               "agentId": "agt_snapshot",
               "runtimeId": "rt_snapshot",
+              "runtimeWorkspaceId": null,
               "provider": "claude",
               "pluginSnapshot": [],
               "plugin_snapshot": [],
@@ -17871,6 +18017,7 @@
           "attachments": [],
           "children": [
             {
+              "runtimeWorkspaceId": null,
               "id": "iss_snapshot_child",
               "key": "MUL-2",
               "number": 2,
@@ -17912,6 +18059,7 @@
               "dependsOnIssueId": "iss_snapshot_blocked",
               "type": "blocks",
               "issue": {
+                "runtimeWorkspaceId": null,
                 "id": "iss_snapshot",
                 "key": "MUL-1",
                 "number": 1,
@@ -17951,6 +18099,7 @@
                 "updatedAt": "<timestamp>"
               },
               "dependsOnIssue": {
+                "runtimeWorkspaceId": null,
                 "id": "iss_snapshot_blocked",
                 "key": "MUL-3",
                 "number": 3,
@@ -17984,6 +18133,7 @@
         },
         "children": [
           {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot_child",
             "key": "MUL-2",
             "number": 2,
@@ -18025,6 +18175,7 @@
             "dependsOnIssueId": "iss_snapshot_blocked",
             "type": "blocks",
             "issue": {
+              "runtimeWorkspaceId": null,
               "id": "iss_snapshot",
               "key": "MUL-1",
               "number": 1,
@@ -18064,6 +18215,7 @@
               "updatedAt": "<timestamp>"
             },
             "dependsOnIssue": {
+              "runtimeWorkspaceId": null,
               "id": "iss_snapshot_blocked",
               "key": "MUL-3",
               "number": 3,
@@ -18272,6 +18424,7 @@
       "body": {
         "issues": [
           {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot_child",
             "key": "MUL-2",
             "number": 2,
@@ -18383,6 +18536,7 @@
             "dependsOnIssueId": "iss_snapshot_blocked",
             "type": "blocks",
             "issue": {
+              "runtimeWorkspaceId": null,
               "id": "iss_snapshot",
               "key": "MUL-1",
               "number": 1,
@@ -18422,6 +18576,7 @@
               "updatedAt": "<timestamp>"
             },
             "dependsOnIssue": {
+              "runtimeWorkspaceId": null,
               "id": "iss_snapshot_blocked",
               "key": "MUL-3",
               "number": 3,
@@ -18743,6 +18898,7 @@
             "assigneeId": "mem_local_local",
             "issues": [
               {
+                "runtimeWorkspaceId": null,
                 "id": "iss_snapshot_blocked",
                 "key": "MUL-3",
                 "number": 3,
@@ -18779,6 +18935,7 @@
             "assigneeId": "agt_snapshot",
             "issues": [
               {
+                "runtimeWorkspaceId": null,
                 "id": "iss_snapshot",
                 "key": "MUL-1",
                 "number": 1,
@@ -18826,6 +18983,7 @@
             "assigneeId": null,
             "issues": [
               {
+                "runtimeWorkspaceId": null,
                 "id": "iss_8rcx9z88woyu",
                 "key": "MUL-5",
                 "number": 5,
@@ -18854,6 +19012,7 @@
                 "updatedAt": "<timestamp>"
               },
               {
+                "runtimeWorkspaceId": null,
                 "id": "iss_i244sp2mewms",
                 "key": "MUL-4",
                 "number": 4,
@@ -18882,6 +19041,7 @@
                 "updatedAt": "<timestamp>"
               },
               {
+                "runtimeWorkspaceId": null,
                 "id": "iss_snapshot_child",
                 "key": "MUL-2",
                 "number": 2,
@@ -18923,6 +19083,7 @@
       "body": {
         "issues": [
           {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot_blocked",
             "key": "MUL-3",
             "number": 3,
@@ -18952,6 +19113,7 @@
             "matchSource": "title"
           },
           {
+            "runtimeWorkspaceId": null,
             "id": "iss_8rcx9z88woyu",
             "key": "MUL-5",
             "number": 5,
@@ -18981,6 +19143,7 @@
             "matchSource": "title"
           },
           {
+            "runtimeWorkspaceId": null,
             "id": "iss_i244sp2mewms",
             "key": "MUL-4",
             "number": 4,
@@ -19010,6 +19173,7 @@
             "matchSource": "title"
           },
           {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot",
             "key": "MUL-1",
             "number": 1,
@@ -19051,6 +19215,7 @@
             "matchedCommentSnippet": "Snapshot comment body"
           },
           {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot_child",
             "key": "MUL-2",
             "number": 2,
@@ -19926,6 +20091,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": null,
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -19997,6 +20163,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": null,
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -20068,6 +20235,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": null,
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -20139,6 +20307,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": null,
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -20210,6 +20379,7 @@
             "taskKind": "direct",
             "agentId": "agt_snapshot",
             "runtimeId": "rt_snapshot",
+            "runtimeWorkspaceId": null,
             "provider": "claude",
             "pluginSnapshot": [],
             "plugin_snapshot": [],
@@ -20300,6 +20470,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": "claude",
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -20375,6 +20546,7 @@
           "completedAt": "<timestamp>",
           "failedAt": null,
           "cancelledAt": null,
+          "runtimeWorkspace": null,
           "agent": {
             "id": "agt_snapshot",
             "name": "Snapshot Agent",
@@ -20436,6 +20608,7 @@
             "updatedAt": "<timestamp>"
           },
           "issue": {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot",
             "key": "MUL-1",
             "number": 1,
@@ -21091,6 +21264,24 @@
       }
     },
     {
+      "key": "get-sweep GET /api/runtime-workspaces",
+      "route": "GET /api/runtime-workspaces",
+      "path": "/api/runtime-workspaces",
+      "status": 200,
+      "body": {
+        "workspaces": []
+      }
+    },
+    {
+      "key": "get-sweep GET /api/runtime-workspaces/:id",
+      "route": "GET /api/runtime-workspaces/:id",
+      "path": "/api/runtime-workspaces/rws_snapshot",
+      "status": 404,
+      "body": {
+        "error": "runtime workspace not found"
+      }
+    },
+    {
       "key": "get-sweep GET /api/runtimes",
       "route": "GET /api/runtimes",
       "path": "/api/runtimes",
@@ -21383,6 +21574,15 @@
           "task_count": 1
         }
       ]
+    },
+    {
+      "key": "get-sweep GET /api/runtimes/:id/workspaces",
+      "route": "GET /api/runtimes/:id/workspaces",
+      "path": "/api/runtimes/rt_snapshot/workspaces",
+      "status": 200,
+      "body": {
+        "workspaces": []
+      }
     },
     {
       "key": "get-sweep GET /api/scm/capabilities",
@@ -22917,6 +23117,7 @@
         "createdAt": "<timestamp>",
         "created_at": "<timestamp>",
         "issue": {
+          "runtimeWorkspaceId": null,
           "id": "iss_snapshot_blocked",
           "key": "MUL-3",
           "number": 3,
@@ -22977,6 +23178,7 @@
         "createdAt": "<timestamp>",
         "created_at": "<timestamp>",
         "issue": {
+          "runtimeWorkspaceId": null,
           "id": "iss_snapshot_blocked",
           "key": "MUL-3",
           "number": 3,
@@ -23038,6 +23240,7 @@
           "createdAt": "<timestamp>",
           "created_at": "<timestamp>",
           "issue": {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot_blocked",
             "key": "MUL-3",
             "number": 3,
@@ -23100,6 +23303,7 @@
           "createdAt": "<timestamp>",
           "created_at": "<timestamp>",
           "issue": {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot_blocked",
             "key": "MUL-3",
             "number": 3,
@@ -23280,6 +23484,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": "prj_snapshot",
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -23308,6 +23513,7 @@
             "issue_kind": "execution",
             "source_issue_id": null,
             "project_id": null,
+            "runtime_workspace_id": null,
             "position": 0,
             "start_date": null,
             "due_date": null,
@@ -23452,6 +23658,7 @@
           "dependsOnIssueId": "iss_snapshot_blocked",
           "type": "blocks",
           "issue": {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot",
             "key": "MUL-1",
             "number": 1,
@@ -23482,6 +23689,7 @@
             "updatedAt": "<timestamp>"
           },
           "dependsOnIssue": {
+            "runtimeWorkspaceId": null,
             "id": "iss_snapshot_blocked",
             "key": "MUL-3",
             "number": 3,
@@ -23653,6 +23861,7 @@
         "taskKind": "direct",
         "agentId": "agt_snapshot",
         "runtimeId": "rt_snapshot",
+        "runtimeWorkspaceId": null,
         "provider": null,
         "pluginSnapshot": [],
         "plugin_snapshot": [],
@@ -23720,6 +23929,7 @@
         "cancelledAt": null,
         "agent_id": "agt_snapshot",
         "runtime_id": "rt_snapshot",
+        "runtime_workspace_id": null,
         "issue_id": "iss_snapshot",
         "chat_session_id": null,
         "autopilot_run_id": null,
@@ -23809,6 +24019,7 @@
         "issue_kind": "execution",
         "source_issue_id": null,
         "project_id": "prj_snapshot",
+        "runtime_workspace_id": null,
         "position": 0,
         "start_date": null,
         "due_date": null,
@@ -23844,6 +24055,7 @@
         "issue_kind": "execution",
         "source_issue_id": null,
         "project_id": "prj_snapshot",
+        "runtime_workspace_id": null,
         "position": 0,
         "start_date": null,
         "due_date": null,
@@ -23876,6 +24088,7 @@
         "issue_kind": "execution",
         "source_issue_id": null,
         "project_id": "prj_snapshot",
+        "runtime_workspace_id": null,
         "position": 0,
         "start_date": null,
         "due_date": null,
@@ -23910,6 +24123,7 @@
           "issue_kind": "intake",
           "source_issue_id": null,
           "project_id": null,
+          "runtime_workspace_id": null,
           "position": 0,
           "start_date": null,
           "due_date": null,
@@ -23979,6 +24193,7 @@
       "status": 201,
       "body": {
         "issue": {
+          "runtimeWorkspaceId": null,
           "id": "iss_wk1mrnyfwl4x",
           "key": "MUL-6",
           "number": 6,
@@ -24016,6 +24231,7 @@
       "status": 200,
       "body": {
         "issue": {
+          "runtimeWorkspaceId": null,
           "id": "iss_snapshot",
           "key": "MUL-1",
           "number": 1,
@@ -24063,6 +24279,7 @@
       "status": 200,
       "body": {
         "issue": {
+          "runtimeWorkspaceId": null,
           "id": "iss_snapshot",
           "key": "MUL-1",
           "number": 1,
@@ -24106,6 +24323,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -24183,6 +24401,7 @@
         "taskId": "tsk_jez2ujdp6d5n",
         "task_id": "tsk_jez2ujdp6d5n",
         "issue": {
+          "runtimeWorkspaceId": null,
           "id": "iss_q5010won31uy",
           "key": "MUL-7",
           "number": 7,
@@ -24220,6 +24439,7 @@
           "taskKind": "quick_create",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -26113,6 +26333,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -26192,6 +26413,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -26271,6 +26493,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -26349,6 +26572,7 @@
         "taskKind": "direct",
         "agentId": "agt_snapshot",
         "runtimeId": "rt_snapshot",
+        "runtimeWorkspaceId": null,
         "provider": null,
         "pluginSnapshot": [],
         "plugin_snapshot": [],
@@ -26416,6 +26640,7 @@
         "cancelledAt": "<timestamp>",
         "agent_id": "agt_snapshot",
         "runtime_id": "rt_snapshot",
+        "runtime_workspace_id": null,
         "issue_id": null,
         "chat_session_id": null,
         "autopilot_run_id": null,
@@ -26450,6 +26675,7 @@
           "taskKind": "direct",
           "agentId": "agt_snapshot",
           "runtimeId": "rt_snapshot",
+          "runtimeWorkspaceId": null,
           "provider": null,
           "pluginSnapshot": [],
           "plugin_snapshot": [],
@@ -26528,6 +26754,7 @@
         "taskKind": "direct",
         "agentId": "agt_snapshot",
         "runtimeId": "rt_snapshot",
+        "runtimeWorkspaceId": null,
         "provider": null,
         "pluginSnapshot": [],
         "plugin_snapshot": [],
@@ -26595,6 +26822,7 @@
         "cancelledAt": "<timestamp>",
         "agent_id": "agt_snapshot",
         "runtime_id": "rt_snapshot",
+        "runtime_workspace_id": null,
         "issue_id": "iss_snapshot",
         "chat_session_id": null,
         "autopilot_run_id": null,
@@ -26628,6 +26856,7 @@
         "taskKind": "direct",
         "agentId": "agt_snapshot",
         "runtimeId": "rt_snapshot",
+        "runtimeWorkspaceId": null,
         "provider": null,
         "pluginSnapshot": [],
         "plugin_snapshot": [],
@@ -26695,6 +26924,7 @@
         "cancelledAt": null,
         "agent_id": "agt_snapshot",
         "runtime_id": "rt_snapshot",
+        "runtime_workspace_id": null,
         "issue_id": "iss_snapshot",
         "chat_session_id": null,
         "autopilot_run_id": null,

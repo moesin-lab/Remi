@@ -58,6 +58,7 @@ import { UsageSection } from "./usage-section";
 import { DeleteRuntimeDialog } from "./delete-runtime-dialog";
 import { RetireDaemonDialog } from "./retire-daemon-dialog";
 import { RuntimePluginsTab } from "./runtime-plugins-tab";
+import { RuntimeWorkspacesTab } from "./runtime-workspaces-tab";
 import { RuntimeNameEditor } from "./name-editor";
 import { useT } from "../../i18n";
 
@@ -214,6 +215,9 @@ export function RuntimeDetail({ runtime }: { runtime: AgentRuntime }) {
             <Puzzle />
             {tPlugins(($) => $.runtime.plugins_tab)}
           </TabsTrigger>
+          <TabsTrigger value="workspaces" className="h-auto flex-none rounded-none px-3 py-2.5 text-xs">
+            {t($ => $.workspaces.title)}
+          </TabsTrigger>
         </TabsList>
 
         {/* The Overview panel keeps the original single scroll container so
@@ -259,6 +263,9 @@ export function RuntimeDetail({ runtime }: { runtime: AgentRuntime }) {
         </TabsContent>
         <TabsContent value="plugins" className="min-h-0 flex-1 overflow-y-auto">
           <RuntimePluginsTab runtime={runtime} canManage={!!canDelete} />
+        </TabsContent>
+        <TabsContent value="workspaces" className="min-h-0 flex-1 overflow-y-auto">
+          <RuntimeWorkspacesTab runtime={runtime} canManage={!!isRuntimeOwner || (!user && runtime.owner_id === "local")} />
         </TabsContent>
       </Tabs>
 

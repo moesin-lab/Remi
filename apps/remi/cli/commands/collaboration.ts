@@ -51,6 +51,7 @@ const ISSUE_LIST_OPTIONS: readonly CliOptionSpec[] = [
 ];
 
 const ISSUE_FIELDS: readonly CliOptionSpec[] = [
+  { name: "runtime-workspace", type: "string", valueName: "id", description: "Persistent Runtime workspace (immutable after execution)" },
   { name: "title", type: "string", valueName: "title", description: "Issue title" },
   { name: "description", type: "string", valueName: "text", description: "Issue description" },
   { name: "description-file", type: "string", valueName: "path|-", description: "Read description from a file or stdin" },
@@ -492,8 +493,8 @@ function chatCommandSpecs(): CommandSpec[] {
       const chat = await resolveChat(invocation, positional(invocation, 0, "chat"));
       await getAndRender(invocation, `/api/chat/sessions/${encodePath(String(chat.id))}`);
     }),
-    nativeSpec("chat.create", ["chat", "create"], "Create a chat", "write", HUMAN, [], [...INPUT_OPTIONS, ...chatFields], async (invocation) => {
-      await mutateAndRender(invocation, "POST", "/api/chat/sessions", await requestBody(invocation, { workspace_id: requiredWorkspace(invocation), title: stringOption(invocation, "title") ?? undefined, agent_id: requiredOption(invocation, "agent") }));
+    nativeSpec("chat.create", ["chat", "create"], "Create a chat", "write", HUMAN, [], [...INPUT_OPTIONS, ...chatFields, { name: "runtime-workspace", type: "string", valueName: "id", description: "Persistent Runtime workspace" }], async (invocation) => {
+      await mutateAndRender(invocation, "POST", "/api/chat/sessions", await requestBody(invocation, { workspace_id: requiredWorkspace(invocation), title: stringOption(invocation, "title") ?? undefined, agent_id: requiredOption(invocation, "agent"), runtime_workspace_id: stringOption(invocation, "runtime-workspace") ?? undefined }));
     }),
     nativeSpec("chat.update", ["chat", "update"], "Update a chat", "write", HUMAN, [refPositional("chat")], [...INPUT_OPTIONS, ...chatFields], async (invocation) => {
       const chat = await resolveChat(invocation, positional(invocation, 0, "chat"));

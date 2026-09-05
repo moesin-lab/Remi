@@ -495,8 +495,14 @@
     "subtitle": "工作区声明及其在每个运行时上的最新状态。",
     "add": "添加声明",
     "filter_label": "声明类型",
-    "filters": { "all": "全部" },
-    "kinds": { "npm_global": "npm 全局包", "command": "命令", "unknown": "未知" },
+    "filters": {
+      "all": "全部"
+    },
+    "kinds": {
+      "npm_global": "npm 全局包",
+      "command": "命令",
+      "unknown": "未知"
+    },
     "load_failed": "无法加载运行时声明",
     "retry": "重试",
     "empty": "还没有声明",
@@ -564,5 +570,34 @@
       "save_failed": "保存声明失败",
       "delete_failed": "删除声明失败"
     }
+  },
+  "workspaces": {
+    "title": "Runtime 工作区",
+    "picker_label": "执行工作区",
+    "automatic": "自动任务目录",
+    "description": "让这台机器持有一个可跨 Chat 和 Issue 复用的工作环境。注册已有目录即可，Git 仓库和项目都是可选的。",
+    "name": "名称",
+    "name_placeholder": "我的本地工作台",
+    "root": "根目录",
+    "root_placeholder": "C:\\workbench 或 /home/me/workbench",
+    "cwd": "工作目录（相对路径）",
+    "project": "关联项目（可选）",
+    "root_hint": "选择包含共享指令、Skill 和仓库的父目录。工作目录可设为其中的仓库子目录，或用 . 表示根目录。",
+    "context_options": "本地上下文与环境",
+    "context_paths": "额外指令文件或 Skill 目录",
+    "context_placeholder": "每行一个路径，相对于根目录",
+    "env_file": "环境变量文件（可选）",
+    "context_hint": "在本机读取指令和 Skill。额外路径和环境文件必须位于根目录内。登记只保存路径，不上传文件内容；执行中的 agent 及其模型仍可能读取这些内容。",
+    "register": "注册工作区",
+    "registered": "已注册，任务启动时会检查目录和本地上下文。",
+    "loading": "正在加载工作区…",
+    "load_failed": "无法加载 Runtime 工作区。",
+    "empty": "这台机器还没有持久化工作区。",
+    "available": "主机可用",
+    "unavailable": "主机不可用",
+    "wait_hint": "任务会等待这台机器上兼容的 Runtime 上线。",
+    "archive": "归档注册",
+    "archived": "已归档注册，本地文件仍然保留。",
+    "lifecycle_hint": "Chat 和 Issue 引用这个工作区。完成或删除任务不会删除本地文件；归档注册会停止接收新任务，并保留原目录。"
   }
 }

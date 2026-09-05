@@ -1095,8 +1095,8 @@ runMigrations(this.db);
     return this.workspaces.archiveWorkspaceMember(id);
   }
 
-  getCurrentUser(): MultiremiUser {
-    return this.workspaces.getCurrentUser();
+  getCurrentUser(userId?: string | null): MultiremiUser {
+    return this.workspaces.getCurrentUser(userId);
   }
 
   configurePasswordAccount(input: ConfigurePasswordAccountInput) {
@@ -1144,12 +1144,12 @@ runMigrations(this.db);
     return this.workspaces.listWorkspacesForUser(userId);
   }
 
-  updateCurrentUser(input: UpdateMultiremiUserInput): MultiremiUser {
-    return this.workspaces.updateCurrentUser(input);
+  updateCurrentUser(input: UpdateMultiremiUserInput, userId?: string | null): MultiremiUser {
+    return this.workspaces.updateCurrentUser(input, userId);
   }
 
-  patchCurrentUserOnboarding(questionnaire: Record<string, unknown>): MultiremiUser {
-    return this.workspaces.patchCurrentUserOnboarding(questionnaire);
+  patchCurrentUserOnboarding(questionnaire: Record<string, unknown>, userId?: string | null): MultiremiUser {
+    return this.workspaces.patchCurrentUserOnboarding(questionnaire, userId);
   }
 
   markCurrentUserOnboarded(userId?: string | null): MultiremiUser {

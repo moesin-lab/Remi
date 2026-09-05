@@ -17,7 +17,7 @@ import {
 import type { RouterDeps } from "./deps.js";
 import { PasswordLoginLimiter } from "../helpers/password-login.js";
 import { readRequestBodyLimited } from "../helpers/webhooks.js";
-import { isObjectRecord } from "../wire/context.js";
+import { currentRequestUserId, isObjectRecord } from "../wire/context.js";
 import { PasswordAccountError, normalizePasswordLoginEmail } from "@multiremi/store/repos/password-accounts-repo.js";
 
 export function registerAuthRoutes(app: Hono, deps: RouterDeps): void {
@@ -77,6 +77,7 @@ export function registerAuthRoutes(app: Hono, deps: RouterDeps): void {
     const token = await store.createAccessToken({
       workspaceId: "local",
       name: "CLI token",
+      userId: currentRequestUserId(c),
       type: "pat",
       purpose: "cli",
     });

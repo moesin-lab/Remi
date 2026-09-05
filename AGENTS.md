@@ -21,10 +21,14 @@
   弃用旧命令路径必须注册 deprecated alias 并保留至少一个发版周期，
   服务端注入 prompt 与文档只使用 canonical 命令。
 
+## MR 表述
+
+- 创建、修改或检查 MR/PR 标题与描述时，使用仓库级 [write-mr skill](.agents/skills/write-mr/SKILL.md)；模板和操作方法由该 skill 维护。
+
 ## 云友与 Skill 配置规范
 
 - 新增或修改 agent 模板（`packages/server/src/api/agent-templates/*.json`）与仓库内
-  SKILL.md（`.remi/pipeline/skills/`、`frontend/.agents/skills/`）时，必须遵循
+  SKILL.md（`.agents/skills/`、`.remi/pipeline/skills/`、`frontend/.agents/skills/`）时，必须遵循
   `docs/agent-config-spec.md`：提示词六段骨架，description 必填且写明触发条件；
   `bun test tests/arch/agent-config-metadata.test.ts` 必须通过。
 - 变更工作区云友（DB 中的 instructions/头像）同样以该规范为 checklist；

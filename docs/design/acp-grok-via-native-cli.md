@@ -44,4 +44,6 @@ speaks ACP over stdio.
 - Startup, headless authentication, new/load session, model/effort selection,
   streaming text/tool updates, cancellation, and usage settlement preserve the
   shared Provider contract.
-- Existing Claude and Codex tests and type checks remain green.
+- Verify shared provider behavior using [grok-provider.test.ts](../../tests/unit/acp/grok-provider.test.ts) and the relevant Claude/Codex tests. A test entry is not a statement that it passed on the current tree.
+
+The current adapter is [adapters/grok](../../packages/acp/src/adapters/grok); the shared connection and session implementation is [provider.ts](../../packages/acp/src/provider.ts). Check these sources when changing any launch or authentication assumption above.

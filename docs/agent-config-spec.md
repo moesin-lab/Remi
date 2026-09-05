@@ -6,7 +6,7 @@
 
 - **工作区云友**：Multiremi 里通过 UI/API 配置的 Agent（DB 表 `multiremi_agents`），含 Squad 成员。
 - **内置模板**：`packages/server/src/api/agent-templates/*.json`。
-- **仓库内 Skill**：`.remi/pipeline/skills/*/SKILL.md`、`frontend/.agents/skills/*/SKILL.md`。
+- **仓库内 Skill**：`.agents/skills/*/SKILL.md`、`.remi/pipeline/skills/*/SKILL.md`、`frontend/.agents/skills/*/SKILL.md`。
 - **Plugin**：`packages/plugin-sdk` manifest 与 Multiremi agent plugin。
 
 自动校验：`bun test tests/arch/agent-config-metadata.test.ts`（CI 由 `release-build-check.yml` 的 tests/arch 整目录覆盖）。DB 里的工作区云友无法用仓库测试兜底，靠本规范 + 变更时人工对照。
@@ -94,11 +94,12 @@ description 是模型决定「何时触发」的唯一依据，写得随意直�
 | `packages/daemon/src/agent-runtime/plugins/` | **机制**：Remi host 插件 registry（in-tree 表当前为空） | ❌ |
 | `packages/daemon/src/agent-runtime/agent-plugins/` | **机制**：云友挂载的 provider 原生 bundle 的拉取/物化（与上一行刻意分离） | ❌ |
 | `packages/plugin-sdk/` | Remi host 插件的 manifest 类型与 SDK | ❌（只有类型） |
+| `.agents/skills/` | 整个仓库开发用 skill，例如 MR 表述；按触发条件加载 | ✅ |
 | `.remi/pipeline/skills/` | 历史 Remi 流水线 skill 定义（intake/rfc/execute 等 7 个）。MUL-80 审计确认读取链路已删（死目录，待清理单处理）；清理前仍按本规范校验 | ✅（存量） |
 | `frontend/.agents/skills/` | frontend 仓库开发用 skill | ✅ |
 | `packages/server/src/api/agent-templates/*.json` | 云友模板（含内嵌 skill 引用） | ✅ |
 
-新定义只落在打 ✅ 的三处；在机制目录里新增定义文件视为分层违规。
+新定义落在上表允许的定义目录，并按仓库级、前端或云友模板的用途选择归属；在机制目录里新增定义文件视为分层违规。
 
 ## 6. 自动校验范围
 

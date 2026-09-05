@@ -221,6 +221,31 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "workspace.issue-topics.get": {
+      "command": "remi workspace issue-topics get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.issue-topics.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.issue-topics.set": {
+      "command": "remi workspace issue-topics set",
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.issue-topics.set",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "workspace.ssh-mesh.get": {
       "command": "remi workspace ssh-mesh get",
       "auth": [
@@ -2830,6 +2855,68 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "chat.issue.bind": {
+      "command": "remi chat issue bind",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "chat.issue.bind",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "chat.issue.unbind": {
+      "command": "remi chat issue unbind",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "chat.issue.unbind",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "chat.issue.updates.get": {
+      "command": "remi chat issue updates get",
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.issue.updates.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "chat.issue.updates.enable": {
+      "command": "remi chat issue updates enable",
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.issue.updates.enable",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "chat.issue.updates.disable": {
+      "command": "remi chat issue updates disable",
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.issue.updates.disable",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "chat.delete": {
       "command": "remi chat delete",
       "auth": [
@@ -5316,6 +5403,32 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "inbox.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "inbox.page": {
+      "command": "remi inbox page",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "inbox.page",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "inbox.summary": {
+      "command": "remi inbox summary",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "inbox.summary",
       "output": [
         "table",
         "json",

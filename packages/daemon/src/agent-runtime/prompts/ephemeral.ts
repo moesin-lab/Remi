@@ -288,7 +288,7 @@ function appendClaimContextSections(sections: string[], task: AgentTask, mode: T
     sections.push("The native provider session was unavailable. Continue from this canonical, product-stored history; do not assume any provider-local history survived.");
     sections.push("");
     sections.push(chatBootstrapTranscript);
-  } else if (chatMessage) {
+  } else if (chatMessage && chatMessage.trim() !== currentTaskRequest(task).trim()) {
     sections.push("");
     sections.push("## Chat Message");
     sections.push(chatMessage);
@@ -297,6 +297,39 @@ function appendClaimContextSections(sections: string[], task: AgentTask, mode: T
     sections.push("");
     sections.push("Attachments:");
     appendPromptAttachments(sections, chatAttachments, false);
+  }
+
+  const boundIssueUpdates = arrayField(task, "boundIssueUpdates", "bound_issue_updates")
+    .flatMap((value) => typeof value === "string" && value.trim() ? [value.trim()] : []);
+  const omittedBoundIssueUpdates = numberField(
+    task,
+    "boundIssueUpdatesOmittedCount",
+    "bound_issue_updates_omitted_count",
+  ) ?? 0;
+  if (boundIssueUpdates.length || omittedBoundIssueUpdates > 0) {
+    sections.push("");
+    sections.push("## Bound Issue Updates");
+    if (omittedBoundIssueUpdates > 0) {
+      sections.push(`${omittedBoundIssueUpdates} earlier bound Issue update(s) omitted.`);
+    }
+    boundIssueUpdates.forEach((update, index) => {
+      sections.push("");
+      sections.push(`Update ${index + 1}:`);
+      sections.push(update);
+    });
+  }
+
+  const boundIssue = task.boundIssue ?? task.bound_issue ?? null;
+  if (boundIssue && task.chatSessionId) {
+    sections.push("");
+    sections.push("## Bound Issue");
+    sections.push(`This Feishu topic is bound to ${boundIssue.key} — ${boundIssue.title} (status: ${boundIssue.status}).`);
+    sections.push("");
+    sections.push("Bound Issue Updates are an incremental digest: each batch keeps only the latest body, is capped at 12 entries, and is never re-sent. Do not treat these updates as the full picture.");
+    sections.push("");
+    sections.push("Before answering progress questions, read the current Issue and its recent comments:");
+    sections.push(`  remi issue get ${boundIssue.id} --output json`);
+    sections.push(`  remi comment list ${boundIssue.id} --recent 30 --output json`);
   }
 
   const autopilotTitle = stringField(task, "autopilotTitle", "autopilot_title");

@@ -38,9 +38,11 @@ summary: 从 CLI、Web 和飞书入口追踪到 API、存储与 Agent 执行，�
 [AgentRuntime](../packages/daemon/src/agent-runtime/runtime.ts) 组装执行上下文 → ACP provider → 消息、usage 和终态上报。
 权限请求、会话延续、工作目录归属与重试都在这条链路中，不可只以模型输出判断完成。
 
+Chat 可绑定同工作区的一个 Issue；新 Chat task 可继承该 `issueId`，但仍使用 Chat 工作目录，其完成不会自动改变 Issue 状态或发布 Issue 回复评论。绑定、改绑和待投递更新由 [ChatRepo](../packages/server/src/store/repos/chat-repo.ts)维护。[claim wire](../packages/server/src/api/wire/tasks.ts)为 Chat/Issue 会话生成有预算的 bootstrap/delta projection，并单独携带绑定 Issue 与增量摘要；[CLI context](../packages/server/src/api/routers/cli.ts)提供 caller 的 Chat/Issue 信息，不能从摘要推断完整历史。
+
 **飞书聊天**：[controlPlaneConciergeHost / createFeishuTaskHandler](../apps/remi/cli/multiremi.ts)启动 connector；普通消息经 daemon client 提交平台 Chat/Task，再走上面的任务执行链。connector 从 task 事件流回复；去重、运行中 steering、取消与人工请求也使用平台 task。当前 foreground 不实例化 `packages/remi` 的 `Remi` core，不能以该库的 `_process()` 作为当前 bot 入口。
 工作区的 [Feishu bot 配置](../packages/server/src/store/repos/feishu-bot-repo.ts)指定 Agent 和 Runtime；
-心跳只携带版本和期望状态。[concierge supervisor](../packages/server/src/worker/feishu-concierge.ts)经鉴权接口拉取 assignment 后串行协调 connector 的启动、停止与重试，凭据不随心跳下发。
+bot 控制指令携带版本和期望状态。[concierge supervisor](../packages/server/src/worker/feishu-concierge.ts)经鉴权接口拉取 assignment 后串行协调 connector 的启动、停止与重试，应用凭据不随心跳下发。心跳还可领取持久化出站投递，由 connector 发送并回报；自动 Issue 话题及负责人轮次完成推送见[飞书接入契约](feishu-message-ingestion.md)。
 
 ## 存储与事务
 
@@ -68,6 +70,7 @@ PostgreSQL 的 `PgBridge.request` 用 `Atomics.wait` 等待 [pg-worker](../packa
 | 包依赖与共享类型 | [package-boundaries.test.ts](../tests/arch/package-boundaries.test.ts)、[tsconfig.json](../tsconfig.json) |
 | HTTP 能力与 CLI | [仓库规则](../AGENTS.md)、[路由快照脚本](../scripts/snapshot-api-routes.ts)、[CLI 能力检查](../scripts/check-cli-capabilities.ts) |
 | 任务路由、重试与会话 | [tasks-repo.ts](../packages/server/src/store/repos/tasks-repo.ts) 与 [worker/daemon.ts](../packages/server/src/worker/daemon.ts) 的相关测试；发现方式见[测试指南](../TESTING.md) |
+| Chat/Issue 绑定、上下文与飞书推送 | [claim wire 测试](../tests/unit/multiremi/multiremi-store-daemon-wire.test.ts)、[Issue 更新测试](../tests/unit/multiremi/multiremi-agent-issue-updates.test.ts)、[话题测试](../tests/unit/multiremi/multiremi-feishu-issue-topics.test.ts) |
 | 前端缓存与渲染 | [前端规则](../frontend/AGENTS.md)、[前端地图](dev/frontend.md) |
 
 链接和静态检查只提供定位依据。本页不宣称已经启动生产服务、通过全部测试或完成性能测量。

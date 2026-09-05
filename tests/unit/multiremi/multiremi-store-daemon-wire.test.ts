@@ -726,10 +726,152 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     });
     expect(retry).not.toHaveProperty("session_id");
     expect(retry).not.toHaveProperty("work_dir");
-    expect(retry.chat_bootstrap_transcript).toContain("[user]\nOriginal question");
-    expect(retry.chat_bootstrap_transcript).toContain("[assistant]\nOriginal answer");
-    expect(retry.chat_bootstrap_transcript).toContain("[user]\nContinue from that");
-    expect(retry).not.toHaveProperty("chat_message");
+    expect(retry.session_projection.mode).toBe("bootstrap");
+    expect(retry.session_projection.jsonl).toContain("Original question");
+    expect(retry.session_projection.jsonl).toContain("Original answer");
+    expect(retry.session_projection.jsonl).not.toContain("Continue from that");
+    expect(retry.chat_message).toBe("Continue from that");
+    expect(retry).not.toHaveProperty("chat_bootstrap_transcript");
+  });
+
+  it("switches a bound Chat from bootstrap to delta and removes repeated static prompt bytes", async () => {
+    const store = createStore();
+    const runtime = store.registerRuntime({ id: "rt_chat_delta", name: "chat delta", provider: "codex" });
+    const agent = store.createAgent({
+      name: "Chat Delta",
+      provider: "codex",
+      instructions: "Follow the workspace rules.\n".repeat(400),
+    });
+    const skill = store.createSkill({
+      name: "Large prompt skill",
+      description: "Static bootstrap content",
+      content: "Inspect the repository carefully.\n".repeat(400),
+    });
+    store.setAgentSkills(agent.id, { skillIds: [skill.id!] });
+    const issue = store.createIssue({ title: "Bound delta", workspaceId: "local" });
+    const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id, title: "Bound delta" });
+    const app = createMultiremiApp({ store });
+
+    const first = store.sendChatMessage(chat.id, { body: "First bound request" });
+    const firstResponse = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+    expect(firstResponse.status).toBe(200);
+    const firstClaim = (await firstResponse.json()).task;
+    expect(firstClaim.session_projection.mode).toBe("bootstrap");
+    const firstPrompt = buildTaskPrompt({
+      ...store.getTaskWithAgent(first.task.id)!,
+      sessionProjection: firstClaim.session_projection,
+      chatMessage: firstClaim.chat_message,
+    } as any);
+    expect(firstPrompt.match(/First bound request/g)).toHaveLength(1);
+    expect(firstPrompt).toContain("## Agent Instructions");
+    expect(firstPrompt).toContain("## Skills");
+
+    store.startTask(first.task.id);
+    store.completeTask(first.task.id, { output: "First answer", sessionId: "sess_chat_delta" });
+    const second = store.sendChatMessage(chat.id, { body: "Second bound request" });
+    const secondResponse = await app.request(`/api/daemon/runtimes/${runtime.id}/tasks/claim`, { method: "POST" });
+    expect(secondResponse.status).toBe(200);
+    const secondClaim = (await secondResponse.json()).task;
+    expect(secondClaim.session_projection.mode).toBe("delta");
+    const secondPrompt = buildTaskPrompt({
+      ...store.getTaskWithAgent(second.task.id)!,
+      sessionProjection: secondClaim.session_projection,
+      chatMessage: secondClaim.chat_message,
+    } as any);
+    expect(secondPrompt).toContain("# Delta Prompt");
+    expect(secondPrompt).toContain(`## Issue\nKey: ${issue.key}`);
+    expect(secondPrompt.match(/Second bound request/g)).toHaveLength(1);
+    expect(secondPrompt).not.toContain("## Agent Instructions");
+    expect(secondPrompt).not.toContain("## Skills");
+    expect(Buffer.byteLength(secondPrompt)).toBeLessThan(Buffer.byteLength(firstPrompt) / 2);
+  });
+
+  it("ships bound Issue caller ID for chat tasks and keeps task-owned Issues separate", async () => {
+    const store = createStore();
+    const agent = store.createAgent({ name: "Caller ID agent", provider: "codex" });
+    const issue = store.createIssue({ title: "Caller ID issue", workspaceId: "local" });
+    const boundChat = store.createChatSession({
+      agentId: agent.id,
+      workspaceId: "local",
+      title: "Bound topic",
+    });
+    const boundChatTask = store.sendChatMessage(boundChat.id, { body: "What is the status?" }).task;
+    store.updateChatSession(boundChat.id, { issueId: issue.id });
+    const boundTask = store.getTaskWithAgent(boundChatTask.id)!;
+    const boundWire = daemonTaskClaimResponse(store, boundTask);
+
+    expect(boundWire.bound_issue).toEqual({
+      id: issue.id,
+      key: issue.key,
+      title: issue.title,
+      status: issue.status,
+    });
+    const boundPrompt = buildTaskPrompt({
+      ...boundTask,
+      boundIssue: boundWire.bound_issue,
+    } as any);
+    expect(boundPrompt).toContain("## Bound Issue");
+    expect(boundPrompt).toContain(`This Feishu topic is bound to ${issue.key} — ${issue.title} (status: ${issue.status}).`);
+    expect(boundPrompt).toContain("Do not treat these updates as the full picture.");
+    expect(boundPrompt).toContain(`remi issue get ${issue.id} --output json`);
+    expect(boundPrompt).toContain(`remi comment list ${issue.id} --recent 30 --output json`);
+    expect(boundPrompt).not.toContain("--tail");
+
+    const unboundChat = store.createChatSession({ agentId: agent.id, workspaceId: "local", title: "Unbound topic" });
+    const unboundTask = store.sendChatMessage(unboundChat.id, { body: "No issue here" }).task;
+    const unboundWire = daemonTaskClaimResponse(store, store.getTaskWithAgent(unboundTask.id)!);
+    expect(unboundWire).not.toHaveProperty("bound_issue");
+
+    const ownedTask = store.createTask({
+      agentId: agent.id,
+      issueId: issue.id,
+      chatSessionId: boundChat.id,
+      workspaceId: "local",
+      prompt: "Owned Issue work",
+    });
+    const ownedWire = daemonTaskClaimResponse(store, store.getTaskWithAgent(ownedTask.id)!);
+    expect(ownedWire.bound_issue).toEqual({
+      id: issue.id,
+      key: issue.key,
+      title: issue.title,
+      status: issue.status,
+    });
+  });
+
+  it("keeps a real bound topic task from mutating its Issue or adding an automatic comment", () => {
+    const store = createStore();
+    const runtime = store.registerRuntime({ id: "rt_bound_topic", name: "bound topic", provider: "codex" });
+    const agent = store.createAgent({ name: "Bound topic agent", provider: "codex", runtimeId: runtime.id });
+    const issue = store.createIssue({ title: "Real bound topic", workspaceId: "local" });
+    const chat = store.createChatSession({
+      agentId: agent.id,
+      issueId: issue.id,
+      workspaceId: "local",
+      title: "Real bound topic",
+    });
+    const task = store.sendChatMessage(chat.id, { body: "Please summarize the topic" }).task;
+    expect(task.issueId).toBe(issue.id);
+    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+
+    const claimed = store.getTaskWithAgent(task.id)!;
+    const wire = daemonTaskClaimResponse(store, claimed);
+    expect(wire.bound_issue).toEqual({
+      id: issue.id,
+      key: issue.key,
+      title: issue.title,
+      status: issue.status,
+    });
+    const prompt = buildTaskPrompt({ ...claimed, boundIssue: wire.bound_issue } as any);
+    expect(prompt).toContain("## Bound Issue");
+    expect(prompt).toContain(`remi issue get ${issue.id} --output json`);
+
+    const initialStatus = store.getIssue(issue.id)?.status;
+    store.startTask(task.id);
+    store.completeTask(task.id, { output: "Topic summary" });
+
+    expect(store.getIssue(issue.id)?.status).toBe(initialStatus);
+    expect(store.listIssueComments(issue.id)).toHaveLength(0);
+    expect(store.listIssueActivity(issue.id).length).toBeGreaterThan(0);
   });
 
   it("includes Go pending task optional chat, autopilot, and workdir fields", async () => {

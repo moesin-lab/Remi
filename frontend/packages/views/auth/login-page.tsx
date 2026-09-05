@@ -45,6 +45,10 @@ interface LoginPageProps {
   cliCallback?: CliCallbackConfig;
   /** Called after a token is obtained (e.g. to set cookies). */
   onTokenObtained?: () => void;
+  /** Explicit local-host UI opt-in; the server must still validate the supplied token. */
+  allowTokenLogin?: boolean;
+  /** Keeps the host's already-authenticated redirect from racing workspace hydration. */
+  onTokenLoginStart?: () => void;
   /** Slot rendered at the bottom of the sign-in card. */
   extra?: ReactNode;
 }
@@ -88,6 +92,8 @@ export function LoginPage({
   onSuccess,
   cliCallback,
   onTokenObtained,
+  allowTokenLogin = false,
+  onTokenLoginStart,
   extra,
 }: LoginPageProps) {
   const { t } = useT("auth");
@@ -99,6 +105,7 @@ export function LoginPage({
   const [loading, setLoading] = useState(false);
   const [cooldown, setCooldown] = useState(0);
   const [larkLoading, setLarkLoading] = useState(false);
+  const [accessToken, setAccessToken] = useState("");
   const [existingUser, setExistingUser] = useState<User | null>(null);
   // Tracks how the existing session was detected so handleCliAuthorize
   // uses the matching token source (cookie → issueCliToken, localStorage → direct).
@@ -194,6 +201,27 @@ export function LoginPage({
       setLarkLoading(false);
     }
   }, [t]);
+
+  const handleTokenLogin = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const token = accessToken.trim();
+    if (!allowTokenLogin || !token || loading) return;
+    setLoading(true);
+    setError("");
+    onTokenLoginStart?.();
+    try {
+      await useAuthStore.getState().loginWithToken(token);
+      const workspaces = await api.listWorkspaces();
+      qc.setQueryData(workspaceKeys.list(), workspaces);
+      onTokenObtained?.();
+      setAccessToken("");
+      onSuccess();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t(($) => $.local_token.failed));
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleVerify = useCallback(
     async (value: string) => {
@@ -393,9 +421,8 @@ export function LoginPage({
   // Email step
   // -------------------------------------------------------------------------
 
-  // Non-CLI web login is Feishu-only. The email OTP flow below is retained
-  // solely for the `multimira` CLI's browser handoff (cliCallback), which still
-  // authenticates via verifyCode; regular web users only ever see Feishu SSO.
+  // Web login defaults to Feishu. Local token input requires an explicit host
+  // opt-in; email OTP remains confined to the CLI browser handoff below.
   if (!cliCallback) {
     return (
       <div className="flex min-h-svh items-center justify-center">
@@ -410,10 +437,30 @@ export function LoginPage({
               size="lg"
               className="w-full"
               onClick={handleLarkLogin}
-              disabled={larkLoading}
+              disabled={larkLoading || loading}
             >
               {larkLoading ? t(($) => $.signin.sending) : t(($) => $.signin.lark)}
             </Button>
+            {allowTokenLogin && (
+              <form onSubmit={handleTokenLogin} className="space-y-3 border-t pt-3">
+                <div className="space-y-2">
+                  <Label htmlFor="local-access-token">{t(($) => $.local_token.label)}</Label>
+                  <Input
+                    id="local-access-token"
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={accessToken}
+                    onChange={(event) => setAccessToken(event.target.value)}
+                    placeholder={t(($) => $.local_token.placeholder)}
+                    disabled={loading || larkLoading}
+                  />
+                </div>
+                <Button type="submit" className="w-full" disabled={!accessToken.trim() || loading || larkLoading}>
+                  {loading ? t(($) => $.local_token.signing_in) : t(($) => $.local_token.sign_in)}
+                </Button>
+              </form>
+            )}
             {error && (
               <p className="text-center text-sm text-destructive">{error}</p>
             )}

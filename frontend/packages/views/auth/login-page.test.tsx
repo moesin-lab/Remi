@@ -29,6 +29,7 @@ function renderWithI18n(ui: ReactElement) {
 
 const mockSendCode = vi.hoisted(() => vi.fn());
 const mockVerifyCode = vi.hoisted(() => vi.fn());
+const mockLoginWithToken = vi.hoisted(() => vi.fn());
 const mockApiListWorkspaces = vi.hoisted(() => vi.fn());
 const mockApiVerifyCode = vi.hoisted(() => vi.fn());
 const mockApiSetToken = vi.hoisted(() => vi.fn());
@@ -48,13 +49,14 @@ vi.mock("@multiremi/core/auth", () => ({
   useAuthStore: Object.assign(
     // Zustand hook form — component may call useAuthStore(selector)
     (selector?: (s: unknown) => unknown) => {
-      const state = { sendCode: mockSendCode, verifyCode: mockVerifyCode };
+      const state = { sendCode: mockSendCode, verifyCode: mockVerifyCode, loginWithToken: mockLoginWithToken };
       return selector ? selector(state) : state;
     },
     {
       getState: () => ({
         sendCode: mockSendCode,
         verifyCode: mockVerifyCode,
+        loginWithToken: mockLoginWithToken,
       }),
     },
   ),
@@ -143,9 +145,43 @@ describe("LoginPage", () => {
     // The email OTP input + Continue button are gone for regular web login;
     // the OTP flow survives only behind the CLI handoff (cliCallback).
     expect(screen.queryByLabelText(/email/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Access key")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /^continue$/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it("signs in with an explicitly enabled local token and seeds workspaces before success", async () => {
+    const workspaces = [{ id: "ws-local", slug: "local" }];
+    mockLoginWithToken.mockResolvedValueOnce({ id: "local-user" });
+    mockApiListWorkspaces.mockResolvedValueOnce(workspaces);
+    const onTokenObtained = vi.fn();
+    const onTokenLoginStart = vi.fn();
+    renderWithI18n(<LoginPage onSuccess={onSuccess} allowTokenLogin onTokenObtained={onTokenObtained} onTokenLoginStart={onTokenLoginStart} />);
+    const user = userEvent.setup();
+    const input = screen.getByLabelText("Access key");
+    expect(input).toHaveAttribute("type", "password");
+    await user.type(input, " local-test-token ");
+    await user.click(screen.getByRole("button", { name: "Sign in locally" }));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
+    expect(mockLoginWithToken).toHaveBeenCalledWith("local-test-token");
+    expect(mockSetQueryData).toHaveBeenCalledWith(["workspaces", "list"], workspaces);
+    expect(mockSetQueryData.mock.invocationCallOrder[0]).toBeLessThan(onSuccess.mock.invocationCallOrder[0]!);
+    expect(onTokenObtained).toHaveBeenCalledOnce();
+    expect(onTokenLoginStart).toHaveBeenCalledOnce();
+    expect(mockSendCode).not.toHaveBeenCalled();
+  });
+
+  it("keeps a rejected local token error on the form without continuing", async () => {
+    mockLoginWithToken.mockRejectedValueOnce(new Error("Invalid access key"));
+    renderWithI18n(<LoginPage onSuccess={onSuccess} allowTokenLogin />);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("Access key"), "invalid-test-token");
+    await user.click(screen.getByRole("button", { name: "Sign in locally" }));
+    expect(await screen.findByText("Invalid access key")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in locally" })).toBeEnabled();
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(mockApiListWorkspaces).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------

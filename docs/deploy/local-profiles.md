@@ -44,7 +44,13 @@ Docker Desktop 运行时，容器按 `unless-stopped` 自动恢复；主机重�
 
 ## 本机登录
 
-本机镜像明确设置 `NEXT_PUBLIC_LOCAL_PROFILE=stable/dev`，只在 `127.0.0.1` 或 `localhost` 页面增加“本机会话密钥（24 小时）”登录入口；默认发行构建和其他主机名仍使用原来的飞书入口。后台继续使用既有 JWT 认证，没有新增无鉴权 API 或任意邮箱登录。
+本机镜像明确设置 `NEXT_PUBLIC_LOCAL_PROFILE=stable/dev`，只在 `127.0.0.1` 或 `localhost` 页面增加账号密码和“本机会话密钥（24 小时）”登录入口；飞书入口保留。默认发行构建和其他主机名保持原来的登录页面。
+
+本机 Compose 启用 `MULTIREMI_ALLOW_PASSWORD_LOGIN=1`，其他部署默认关闭密码登录。账号需要部署管理员预先配置，没有公开注册入口。密码使用 Argon2id 加盐哈希，保存在该环境的私有数据库表中，源码、镜像及 `api.env` 都不包含账号密码。支持普通邮箱和 `user@localhost` 形式的本机账号。
+
+管理员通过 `remi context auth password-account set --file -` 从标准输入读取 JSON（`email`、`password`、可选 `name` 和 `workspaceId`），使用对应部署的主令牌配置账号；默认工作区为 `local`。此操作会把账号加入指定工作区并赋予 owner，更新已有账号密码时撤销其浏览器会话。普通用户、任务令牌、daemon 和本机会话 JWT 都不能调用此管理接口。避免把 JSON 或密码直接写进 shell 历史；可从本机密码输入提示构造标准输入。
+
+配置后可以在页面直接使用账号密码，也可以通过 `remi context auth password --file -` 登录 CLI。登录签发绑定真实用户的 30 天会话，同时支持 HttpOnly Cookie；它只具有该用户已加入工作区的权限。两套环境须分别配置，账号及会话不会自动同步。
 
 在自己的终端获取对应环境的密钥，然后粘贴到该环境登录页面：
 

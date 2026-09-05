@@ -22,7 +22,7 @@ import {
 import { Button } from "@multiremi/ui/components/ui/button";
 import { Loader2 } from "lucide-react";
 import { setLoggedInCookie } from "@/features/auth/auth-cookie";
-import { allowsLocalTokenLogin } from "@/features/auth/local-profile";
+import { allowsLocalTokenLogin, allowsPasswordLogin } from "@/features/auth/local-profile";
 import { LoginPage, validateCliCallback } from "@multiremi/views/auth";
 import { useT } from "@multiremi/views/i18n";
 
@@ -74,11 +74,16 @@ function LoginPageContent() {
   const [desktopToken, setDesktopToken] = useState<string | null>(null);
   const [desktopError, setDesktopError] = useState("");
   const [allowTokenLogin, setAllowTokenLogin] = useState(false);
+  const [allowPasswordLogin, setAllowPasswordLogin] = useState(false);
   const [tokenLoginStarted, setTokenLoginStarted] = useState(false);
   const hasOnboarded = useHasOnboarded();
 
   useEffect(() => {
     setAllowTokenLogin(allowsLocalTokenLogin(
+      process.env.NEXT_PUBLIC_LOCAL_PROFILE,
+      window.location.hostname,
+    ));
+    setAllowPasswordLogin(allowsPasswordLogin(
       process.env.NEXT_PUBLIC_LOCAL_PROFILE,
       window.location.hostname,
     ));
@@ -185,6 +190,7 @@ function LoginPageContent() {
     <LoginPage
       onSuccess={handleSuccess}
       allowTokenLogin={allowTokenLogin}
+      allowPasswordLogin={allowPasswordLogin}
       onTokenLoginStart={() => setTokenLoginStarted(true)}
       cliCallback={
         cliCallbackRaw && validateCliCallback(cliCallbackRaw)

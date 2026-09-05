@@ -4,6 +4,7 @@ import { daemonRuntimeId, isTerminalStatus } from "@multiremi/store/helpers.js";
 import { agentRoleAtLeast } from "@multiremi/store/agent-role.js";
 import { FeedbackRepo } from "@multiremi/store/repos/feedback-repo.js";
 import { AccessTokensRepo } from "@multiremi/store/repos/access-tokens-repo.js";
+import { PasswordAccountsRepo, type ConfigurePasswordAccountInput } from "@multiremi/store/repos/password-accounts-repo.js";
 import { IssueSharesRepo } from "@multiremi/store/repos/issue-shares-repo.js";
 import {
   NotificationChannelsRepo,
@@ -433,6 +434,7 @@ export class MultiremiStore {
   private ctx: StoreContext;
   private feedback: FeedbackRepo;
   private accessTokens: AccessTokensRepo;
+  private passwordAccounts: PasswordAccountsRepo;
   private issueShares: IssueSharesRepo;
   private notificationChannels: NotificationChannelsRepo;
   private notificationDispatcher: OutboundNotificationDispatcher;
@@ -514,6 +516,7 @@ export class MultiremiStore {
     this.agents = new AgentsSkillsRepo(this.ctx);
     this.agentPlugins = new AgentPluginsRepo(this.ctx);
     this.workspaces = new WorkspacesRepo(this.ctx);
+    this.passwordAccounts = new PasswordAccountsRepo(this.db, this.workspaces, this.accessTokens);
     this.scm = new ScmRepo(this.ctx);
     this.feishuIngest = new FeishuIngestRepo(this.ctx);
     this.feishuBot = new FeishuBotRepo(this.ctx);
@@ -1094,6 +1097,14 @@ runMigrations(this.db);
 
   getCurrentUser(): MultiremiUser {
     return this.workspaces.getCurrentUser();
+  }
+
+  configurePasswordAccount(input: ConfigurePasswordAccountInput) {
+    return this.passwordAccounts.configure(input);
+  }
+
+  loginWithPassword(email: string, password: string) {
+    return this.passwordAccounts.login(email, password);
   }
 
   getUser(id: string): MultiremiUser | null {

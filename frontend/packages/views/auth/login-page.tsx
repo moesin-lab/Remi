@@ -47,7 +47,9 @@ interface LoginPageProps {
   onTokenObtained?: () => void;
   /** Explicit local-host UI opt-in; the server must still validate the supplied token. */
   allowTokenLogin?: boolean;
-  /** Keeps the host's already-authenticated redirect from racing workspace hydration. */
+  /** Local password login is opt-in and does not enable self-registration. */
+  allowPasswordLogin?: boolean;
+  /** Keeps redirects from racing workspace hydration during local credential login. */
   onTokenLoginStart?: () => void;
   /** Slot rendered at the bottom of the sign-in card. */
   extra?: ReactNode;
@@ -93,6 +95,7 @@ export function LoginPage({
   cliCallback,
   onTokenObtained,
   allowTokenLogin = false,
+  allowPasswordLogin = false,
   onTokenLoginStart,
   extra,
 }: LoginPageProps) {
@@ -106,6 +109,8 @@ export function LoginPage({
   const [cooldown, setCooldown] = useState(0);
   const [larkLoading, setLarkLoading] = useState(false);
   const [accessToken, setAccessToken] = useState("");
+  const [passwordEmail, setPasswordEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [existingUser, setExistingUser] = useState<User | null>(null);
   // Tracks how the existing session was detected so handleCliAuthorize
   // uses the matching token source (cookie → issueCliToken, localStorage → direct).
@@ -219,6 +224,38 @@ export function LoginPage({
     } catch (err) {
       setError(err instanceof Error ? err.message : t(($) => $.local_token.failed));
     } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePasswordLogin = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!allowPasswordLogin || !passwordEmail.trim() || password.length < 6 || loading || larkLoading) return;
+    setLoading(true);
+    setError("");
+    onTokenLoginStart?.();
+    let authenticated = false;
+    try {
+      const { token } = await useAuthStore.getState().loginWithPassword(passwordEmail.trim(), password);
+      authenticated = true;
+      const workspaces = await api.listWorkspaces();
+      qc.setQueryData(workspaceKeys.list(), workspaces);
+      onTokenObtained?.();
+      if (cliCallback) {
+        // Preserve the identity-bound password session, including its workspace
+        // scope, instead of minting a token for a different local account.
+        redirectToCliCallback(cliCallback.url, token, cliCallback.state);
+      } else {
+        onSuccess();
+      }
+    } catch {
+      // The store handles rejected credentials. Also undo a successful login
+      // if workspace hydration or CLI token issuance failed afterwards.
+      if (authenticated) useAuthStore.getState().logout();
+      qc.removeQueries({ queryKey: workspaceKeys.list() });
+      setError(t(($) => $.password_login.failed));
+    } finally {
+      setPassword("");
       setLoading(false);
     }
   };
@@ -421,7 +458,46 @@ export function LoginPage({
   // Email step
   // -------------------------------------------------------------------------
 
-  // Web login defaults to Feishu. Local token input requires an explicit host
+  const passwordForm = allowPasswordLogin && (
+    <form onSubmit={handlePasswordLogin} className="space-y-3 border-t pt-3">
+      <div className="space-y-2">
+        <Label htmlFor="password-email">{t(($) => $.password_login.email)}</Label>
+        <Input
+          id="password-email"
+          type="email"
+          autoComplete="username"
+          value={passwordEmail}
+          onChange={(event) => setPasswordEmail(event.target.value)}
+          placeholder={t(($) => $.common.email_placeholder)}
+          required
+          disabled={loading || larkLoading}
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="account-password">{t(($) => $.password_login.password)}</Label>
+        <Input
+          id="account-password"
+          type="password"
+          autoComplete="current-password"
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          minLength={6}
+          required
+          disabled={loading || larkLoading}
+        />
+      </div>
+      <Button
+        type="submit"
+        data-testid="password-login-submit"
+        className="w-full"
+        disabled={!passwordEmail.trim() || password.length < 6 || loading || larkLoading}
+      >
+        {loading ? t(($) => $.password_login.signing_in) : t(($) => $.password_login.sign_in)}
+      </Button>
+    </form>
+  );
+
+  // Web login defaults to Feishu. Local credentials require explicit host
   // opt-in; email OTP remains confined to the CLI browser handoff below.
   if (!cliCallback) {
     return (
@@ -441,6 +517,7 @@ export function LoginPage({
             >
               {larkLoading ? t(($) => $.signin.sending) : t(($) => $.signin.lark)}
             </Button>
+            {passwordForm}
             {allowTokenLogin && (
               <form onSubmit={handleTokenLogin} className="space-y-3 border-t pt-3">
                 <div className="space-y-2">
@@ -496,6 +573,7 @@ export function LoginPage({
               ? t(($) => $.signin.sending)
               : t(($) => $.signin.lark)}
           </Button>
+          {passwordForm && <div className="mb-4">{passwordForm}</div>}
           <div className="mb-4 flex items-center gap-3">
             <div className="h-px flex-1 bg-border" />
             <span className="text-xs text-muted-foreground">

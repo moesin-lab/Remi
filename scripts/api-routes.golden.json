@@ -22373,7 +22373,7 @@
         {
           "id": "mem_snapshot_two",
           "workspace_id": "local",
-          "user_id": "mem_snapshot_two",
+          "user_id": "usr_snapshot_two",
           "role": "member",
           "created_at": "<timestamp>",
           "name": "Second Member",
@@ -22382,7 +22382,7 @@
         {
           "id": "mem_snapshot_one",
           "workspace_id": "local",
-          "user_id": "mem_snapshot_one",
+          "user_id": "local",
           "role": "admin",
           "created_at": "<timestamp>",
           "name": "Snapshot Member",
@@ -27192,7 +27192,7 @@
       "body": {
         "id": "mem_snapshot_two",
         "workspace_id": "local",
-        "user_id": "mem_snapshot_two",
+        "user_id": "usr_snapshot_two",
         "role": "admin",
         "created_at": "<timestamp>",
         "name": "Second Member",

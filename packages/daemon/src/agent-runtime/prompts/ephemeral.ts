@@ -19,6 +19,7 @@ export interface TaskRepoWarning {
 export interface BuildTaskPromptOptions {
   repoCheckouts?: TaskRepoCheckout[];
   repoWarnings?: TaskRepoWarning[];
+  platform?: NodeJS.Platform;
 }
 
 export type TaskPromptMode = "bootstrap" | "delta";
@@ -44,8 +45,15 @@ export function buildTaskPromptArtifact(task: AgentTask, opts: BuildTaskPromptOp
 
   appendClaimContextSections(sections, task, mode);
   appendWorkspacePromptSection(sections, task, mode);
+  if (task.runtimeWorkspace) {
+    sections.push("", "## Runtime Workspace",
+      `Persistent workspace: ${JSON.stringify(task.runtimeWorkspace.name)} (${task.runtimeWorkspace.id}).`,
+      `Root: ${JSON.stringify(task.runtimeWorkspace.rootPath)}; working directory relative to root: ${JSON.stringify(task.runtimeWorkspace.cwd)}.`,
+      "Work in the existing directory. It may contain multiple repositories, private local context, dependencies, or no Git repository. Inspect existing files before deciding whether Git is relevant. Preserve local configuration and directory relationships.",
+      "Workspace instruction files and the local skill catalog are supplied through the provider's local instruction file. Their source contents are loaded on this machine.");
+  }
   if (mode === "bootstrap") appendHomepageChatCliSection(sections, task);
-  appendSessionContextSections(sections, task, mode);
+  appendSessionContextSections(sections, task, mode, opts.platform ?? process.platform);
 
   if (task.issue) {
     sections.push("");
@@ -70,7 +78,7 @@ export function buildTaskPromptArtifact(task: AgentTask, opts: BuildTaskPromptOp
     }
   }
 
-  appendTriggerCommentSection(sections, task);
+  appendTriggerCommentSection(sections, task, opts.platform ?? process.platform);
 
   appendRepositoryWarnings(sections, opts.repoWarnings ?? []);
   appendRepositoryWikiAvailabilityWarnings(sections, task);
@@ -78,7 +86,7 @@ export function buildTaskPromptArtifact(task: AgentTask, opts: BuildTaskPromptOp
   appendProjectPromptSections(sections, task, mode);
   if (mode === "bootstrap" && task.issue) appendProjectDiscoverySection(sections);
 
-  if (mode === "bootstrap" && task.repos.length && taskHoldsWorkspace(task)) {
+  if (mode === "bootstrap" && !task.runtimeWorkspaceId && task.repos.length && taskHoldsWorkspace(task)) {
     const checkouts = opts.repoCheckouts ?? [];
     const checkoutByUrl = new Map(checkouts.map((checkout) => [checkout.repoUrl.trim(), checkout]));
     sections.push("");
@@ -179,7 +187,7 @@ function appendProjectPromptSections(sections: string[], task: AgentTask, mode: 
     sections.push("## Project Instructions");
     sections.push(projectInstructions);
   }
-  appendProjectKnowledgeSections(sections, task.project.id);
+  appendProjectKnowledgeSections(sections, task.project.id, Boolean(task.runtimeWorkspaceId));
 }
 
 function appendProjectDiscoverySection(sections: string[]): void {
@@ -371,7 +379,7 @@ function appendHomepageChatCliSection(sections: string[], task: AgentTask): void
   sections.push("Repositories are not fetched for Chat startup, and `remi repo list` never contacts Git. Run `remi repo checkout <repo-id>` only when repository files are needed; checkout fetches that one repository and returns timeout or fetch failures as a tool error.");
 }
 
-function appendSessionContextSections(sections: string[], task: AgentTask, mode: TaskPromptMode): void {
+function appendSessionContextSections(sections: string[], task: AgentTask, mode: TaskPromptMode, platform: NodeJS.Platform): void {
   const issueSession = task.issueSession ?? task.issue_session ?? null;
   const projection = task.sessionProjection ?? task.session_projection ?? null;
   if (projection?.jsonl?.trim()) {
@@ -415,7 +423,7 @@ function appendSessionContextSections(sections: string[], task: AgentTask, mode:
     sections.push("");
     sections.push("## Sharing Results Across Sessions");
     sections.push("Historical transcripts are supporting evidence, while published Session results are the canonical cross-session handoff. If you produce a durable decision, artifact, or finding that other Sessions should reuse, explicitly publish only that result. Do not republish an unchanged result.");
-    if (process.platform === "win32") {
+    if (platform === "win32") {
       sections.push(`Write the result body to a UTF-8 file, then run: \`remi session result publish ${issueId} --session ${sessionId} --title "Short title" --type decision --content-file ./session-result.md\`.`);
     } else {
       sections.push([
@@ -431,6 +439,7 @@ function appendSessionContextSections(sections: string[], task: AgentTask, mode:
 }
 
 function hasIssueWorkspaceProviderHistory(task: AgentTask): boolean {
+  if (task.runtimeWorkspaceId) return false;
   const issueId = stringField(task, "issueId", "issue_id") ?? task.issue?.id ?? "";
   const issueSessionId = stringField(task, "issueSessionId", "issue_session_id")
     ?? task.issueSession?.id
@@ -441,7 +450,7 @@ function hasIssueWorkspaceProviderHistory(task: AgentTask): boolean {
   return Boolean(issueId && issueSessionId && agentId && (provider === "claude" || provider === "codex"));
 }
 
-function appendTriggerCommentSection(sections: string[], task: AgentTask): void {
+function appendTriggerCommentSection(sections: string[], task: AgentTask, platform: NodeJS.Platform): void {
   const triggerCommentId = stringField(task, "triggerCommentId", "trigger_comment_id");
   if (!triggerCommentId) return;
   const issueId = stringField(task, "issueId", "issue_id") ?? task.issue?.id ?? "";
@@ -486,7 +495,7 @@ function appendTriggerCommentSection(sections: string[], task: AgentTask): void 
       sections.push(readHint);
     }
   }
-  const replyInstructions = buildCommentReplyInstructions(issueId, triggerCommentId);
+  const replyInstructions = buildCommentReplyInstructions(issueId, triggerCommentId, platform);
   if (replyInstructions) {
     sections.push("");
     sections.push(replyInstructions);
@@ -512,9 +521,9 @@ function buildCommentReadHint(
   return `Read the triggering conversation first: \`remi comment list ${issueId} --thread ${threadId} --tail 30 --output json\`. Need cross-thread background? \`remi comment list ${issueId} --recent 20 --output json\`.`;
 }
 
-function buildCommentReplyInstructions(issueId: string, triggerCommentId: string): string {
+function buildCommentReplyInstructions(issueId: string, triggerCommentId: string, platform: NodeJS.Platform): string {
   if (!issueId || !triggerCommentId) return "";
-  if (process.platform === "win32") {
+  if (platform === "win32") {
     return [
       "If you decide to reply, post it as a comment. Always use the trigger comment ID below, and do not reuse --parent values from previous turns.",
       "",
@@ -637,11 +646,15 @@ function formatProjectResource(resource: AgentTask["projectResources"][number]):
   return `- ${resource.resourceType}: ${JSON.stringify(resource.resourceRef)}`;
 }
 
-function appendProjectKnowledgeSections(sections: string[], projectId: string): void {
+function appendProjectKnowledgeSections(sections: string[], projectId: string, localWorkspace = false): void {
   sections.push("");
   sections.push("## Project Knowledge");
   sections.push("Project Memory is not embedded in this prompt. Use the `remi memory` CLI only: first run `remi memory search \"<query>\"`, then `remi memory get <slug-or-id>` for relevant hits before relying on them.");
   sections.push("Do not use an MCP server for Project Memory. The task environment already scopes these commands to the current project.");
+  if (localWorkspace) {
+    sections.push("Project Wiki is available through the Remi CLI; it is not automatically materialized into this persistent local workspace. Do not assume ./wiki or .multiremi/wiki-base exists.");
+    return;
+  }
   sections.push("");
   sections.push("Project Wiki is materialized in `./wiki`. Repository code facts are materialized in `./wiki/repositories/<repository>/`. Edit files only below `./wiki`; `.multiremi/wiki-base` is a read-only merge baseline and must not be edited.");
   sections.push("Repository Wiki is shared by every Project that references the same repository. Keep code-level facts there; keep cross-repository decisions and synthesis in the Project Wiki.");

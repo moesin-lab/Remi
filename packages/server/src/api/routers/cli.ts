@@ -135,7 +135,6 @@ function buildCliContext(c: Context, deps: RouterDeps, identity: ResolvedCliIden
   const access = currentAccessToken(c);
   const task = identity.type === "task" && access?.taskId ? store.getTask(access.taskId) : null;
   const issue = task?.issueId ? store.getIssue(task.issueId) : null;
-  const project = issue?.projectId ? store.getProject(issue.projectId) : null;
   const agent = task?.agentId
     ? store.getAgent(task.agentId)
     : identity.type === "task" && access?.agentId
@@ -143,6 +142,8 @@ function buildCliContext(c: Context, deps: RouterDeps, identity: ResolvedCliIden
       : null;
   const session = task?.issueSessionId ? store.getIssueSession(task.issueSessionId) : null;
   const chat = task?.chatSessionId ? store.getChatSession(task.chatSessionId) : null;
+  const projectId = task?.runtimeWorkspaceId ? null : chat?.projectId ?? issue?.projectId ?? null;
+  const project = projectId ? store.getProject(projectId) : null;
   const boundIssue = !issue && chat?.issueId ? store.getIssue(chat.issueId) : null;
   const runtime = task?.runtimeId
     ? store.getRuntime(task.runtimeId)

@@ -49,6 +49,7 @@ const DOMAIN_ALIASES: Record<string, string> = {
   pins: "pin",
   projects: "project",
   runtimes: "runtime",
+  "runtime-workspaces": "runtime",
   skills: "skill",
   squads: "squad",
   tasks: "task",
@@ -473,6 +474,12 @@ function mappedResourceCommand(route: string): string | null {
 function mappedOperationsCommand(route: string): string | null {
   const exact: Record<string, string> = {
     "GET /api/runtimes": "runtime.list",
+    "GET /api/runtime-workspaces": "runtime.workspace.list",
+    "GET /api/runtimes/:id/workspaces": "runtime.workspace.list",
+    "POST /api/runtimes/:id/workspaces": "runtime.workspace.create",
+    "GET /api/runtime-workspaces/:id": "runtime.workspace.get",
+    "PATCH /api/runtime-workspaces/:id": "runtime.workspace.rename",
+    "DELETE /api/runtime-workspaces/:id": "runtime.workspace.archive",
     "GET /api/multiremi/runtimes": "runtime.list",
     "POST /api/multiremi/runtimes": "runtime.create",
     "GET /api/models": "runtime.model.catalog",

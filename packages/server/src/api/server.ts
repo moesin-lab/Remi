@@ -41,6 +41,8 @@ import { registerTokenRoutes } from "./routers/tokens.js";
 import { registerNotificationPreferenceRoutes } from "./routers/notification-preferences.js";
 import { registerNotificationChannelRoutes } from "./routers/notification-channels.js";
 import { registerRuntimeRoutes } from "./routers/runtimes.js";
+import { registerRuntimeWorkspaceRoutes } from "./routers/runtime-workspaces.js";
+import { RuntimeWorkspaceError } from "@multiremi/store/repos/runtime-workspaces-repo.js";
 import { registerDaemonRetirementRoutes } from "./routers/daemon-retirement.js";
 import { registerDashboardRoutes } from "./routers/dashboard.js";
 import { registerProjectRoutes } from "./routers/projects.js";
@@ -398,6 +400,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   }
 
   app.onError((err, c) => {
+    if (err instanceof RuntimeWorkspaceError) return c.json({ error: err.message, code: "runtime_workspace_error" }, err.status);
     if (err instanceof RuntimeRegistrationIdentityConflictError) {
       return c.json({ error: err.message, code: err.code }, 409);
     }
@@ -574,6 +577,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   });
 
   registerRuntimeRoutes(app, deps);
+  registerRuntimeWorkspaceRoutes(app, deps);
   registerDaemonRetirementRoutes(app, deps);
   registerPlatformRoutes(app, deps);
 

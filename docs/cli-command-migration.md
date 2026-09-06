@@ -66,6 +66,12 @@ master token and grants the account owner membership in the selected workspace.
 Both commands are unavailable to task identities; password values have no dedicated
 command-line flag and should be supplied without putting them in shell history.
 
+`remi runtime workspace list|create|get|rename|archive` manages persistent execution
+directories owned by a Runtime's daemon. This is distinct from the team tenant
+managed by `remi workspace`. Use `--runtime-workspace <id>` on `chat create` or
+`issue create|update` to select it. See the [runtime workspace contract](dev/runtime-workspaces.md)
+for local context, directory lifetime, and the immutable execution binding.
+
 The Feishu ingestion domain exposes source administration through
 `remi feishu source list|get|status|add|update` and task-safe processing through
 `remi feishu messages list|resolve|notify|draft-reply|propose-issue`. Issue

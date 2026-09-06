@@ -32,6 +32,41 @@ EnvironmentFile=%h/.config/remi/66-8-remi.env
 
 systemd 环境文件权限示例为 `0600`。不要提交填入凭据的文件。安装/管理服务使用 [CLI service 实现](../../apps/remi/cli/multiremi/service.ts)；安装器不把命令行 token 写进 service 文件。完成 unit 后执行 `systemd-analyze verify <unit-path>`，再按部署流程启用服务。
 
+## Heartbeats and network recovery
+
+Runtime availability is derived from control-plane heartbeats and the
+[freshness window](../../packages/contracts/src/runtime-health.ts), not from SSH
+connectivity or whether the machine is powered on. A ready local `/health`
+response does not prove that the control plane is still receiving heartbeats.
+
+The [daemon client](../../packages/server/src/worker/client.ts) applies a default
+30-second deadline to control-plane JSON requests, including connection setup,
+response headers, and body reads for both successful and error responses. This
+bounds heartbeat, plugin configuration, and task claim requests that would
+otherwise block subsequent polling. Archive content uploads retain their
+separate timeout budget.
+
+The running [poll loop](../../packages/server/src/worker/daemon.ts) logs transient
+failures and retries at the polling interval (3 seconds by default). Timeout
+errors identify the method, path, and deadline. The same daemon resumes polling
+when the connection recovers; the HTTP client does not automatically replay
+writes. Authority failures such as 401, 403, and 410 still enter terminal cleanup,
+including when their response headers arrive but the error body times out or is
+interrupted. `--once` still surfaces request failures to its caller.
+
+Stopping the daemon cancels pending heartbeat and plugin configuration requests.
+Cancelling the initial plugin query also finishes startup cleanly; workspace
+ownership loss and other startup failures still propagate to the caller.
+Task claims, execution, and durable reports keep their existing drain semantics.
+These deadlines do not resolve operating-system network permissions, service
+launch configuration, or synchronous event-loop blocking.
+
+The [client tests](../../tests/unit/multiremi/multiremi-daemon-client.test.ts) and
+[HTTP recovery tests](../../tests/integration/multiremi-daemon-heartbeat.test.ts)
+cover connection loss/reopening, stalled headers and bodies, stalled plugin
+queries and claims, 503 responses, and shutdown cancellation using isolated
+databases and directories without contacting a production Runtime.
+
 ## 工作区 bot 配置与启动
 
 当前配置由[Feishu bot API](../../packages/server/src/api/routers/feishu-bot.ts)管理，存于 `multiremi_feishu_bot_configs`，每工作区一条，关联 agent_id/runtime_id；不是 `workspace.settings.botMenu`。botMenu 是独立的菜单配置。

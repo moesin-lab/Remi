@@ -49,6 +49,7 @@ export function buildTaskEnv(task: AgentTask, opts: BuildTaskEnvOptions): Record
     MULTIREMI_WORKSPACE_ID: task.workspaceId,
     MULTIREMI_AGENT_NAME: agent?.name ?? "",
     MULTIREMI_TASK_ID: task.id,
+    ...(task.runtimeWorkspaceId ? { MULTIREMI_RUNTIME_WORKSPACE_ID: task.runtimeWorkspaceId } : {}),
     ...(task.project?.id ? { MULTIREMI_PROJECT_ID: task.project.id } : {}),
     ...((task.issueId ?? task.issue_id) ? { MULTIREMI_ISSUE_ID: String(task.issueId ?? task.issue_id) } : {}),
     ...((task.issueSessionId ?? task.issue_session_id)

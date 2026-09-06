@@ -591,6 +591,34 @@ export type MultiremiRuntimeProvisionKind = "npm-global" | "command";
 export type MultiremiRuntimeProvisionTriggerKind = "cron" | "on_register" | "on_change";
 export type MultiremiRuntimeProvisionStatus = "pending" | "converged" | "drifted" | "failed";
 
+/** A persistent execution environment on one daemon. workspaceId is the team tenant. */
+export interface MultiremiRuntimeWorkspace {
+  id: string;
+  workspaceId: string;
+  daemonId: string;
+  ownerId: string;
+  name: string;
+  rootPath: string;
+  /** Relative to rootPath; preserves the original directory ancestry. */
+  cwd: string;
+  /** Relative instruction files or skill directories, read only on the daemon. */
+  contextPaths: string[];
+  envFile: string | null;
+  projectId: string | null;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateRuntimeWorkspaceInput {
+  name: string;
+  root_path: string;
+  cwd?: string;
+  context_paths?: string[];
+  env_file?: string | null;
+  project_id?: string | null;
+}
+
 export interface MultiremiRuntime {
   id: string;
   name: string;
@@ -1228,6 +1256,7 @@ export interface MultiremiBoundIssue {
 }
 
 export interface MultiremiTask {
+  runtimeWorkspaceId?: string | null;
   id: string;
   taskKind: "direct" | "quick_create";
   agentId: string;
@@ -1406,6 +1435,7 @@ export interface MultiremiTaskTriggerMetadata {
 }
 
 export interface MultiremiTaskWithAgent extends MultiremiTask {
+  runtimeWorkspace?: MultiremiRuntimeWorkspace | null;
   agent: MultiremiAgent | null;
   issue: MultiremiIssue | null;
   project: MultiremiProject | null;
@@ -1494,6 +1524,8 @@ export interface TaskUsageEntry {
 }
 
 export interface CreateTaskInput {
+  runtimeWorkspaceId?: string | null;
+  runtime_workspace_id?: string | null;
   id?: string;
   taskKind?: "direct" | "quick_create";
   task_kind?: "direct" | "quick_create";
@@ -1597,6 +1629,7 @@ export const MULTIREMI_ISSUE_ARCHIVE_MAX_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 export const MULTIREMI_ISSUE_ARCHIVE_MIN_SWEEP_INTERVAL_MS = 60 * 1000;
 
 export interface MultiremiIssue {
+  runtimeWorkspaceId?: string | null;
   id: string;
   key: string;
   number: number;
@@ -1924,6 +1957,8 @@ export interface MultiremiTimelinePage {
 }
 
 export interface CreateIssueInput {
+  runtimeWorkspaceId?: string | null;
+  runtime_workspace_id?: string | null;
   id?: string;
   title: string;
   description?: string | null;
@@ -1962,6 +1997,8 @@ export interface CreateIssueWithTaskInput extends CreateIssueInput {
 }
 
 export interface UpdateIssueInput {
+  runtimeWorkspaceId?: string | null;
+  runtime_workspace_id?: string | null;
   title?: string;
   description?: string | null;
   status?: string;
@@ -2050,6 +2087,8 @@ export interface AssignIssueResult {
 }
 
 export interface QuickCreateIssueInput {
+  runtimeWorkspaceId?: string | null;
+  runtime_workspace_id?: string | null;
   agentId?: string | null;
   agent_id?: string | null;
   squadId?: string | null;
@@ -4258,6 +4297,9 @@ export type MultiremiChatSessionStatus = "active" | "archived";
 export type MultiremiChatMessageRole = "user" | "assistant" | "system";
 
 export interface MultiremiChatSession {
+  /** Explicit work location, independent of a linked Issue. */
+  projectId?: string | null;
+  runtimeWorkspaceId?: string | null;
   id: string;
   workspaceId: string;
   creatorId: string | null;
@@ -4295,6 +4337,10 @@ export interface MultiremiChatMessage {
 }
 
 export interface CreateChatSessionInput {
+  projectId?: string | null;
+  project_id?: string | null;
+  runtimeWorkspaceId?: string | null;
+  runtime_workspace_id?: string | null;
   id?: string;
   agentId?: string;
   agent_id?: string;

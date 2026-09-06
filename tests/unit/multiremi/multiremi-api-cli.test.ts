@@ -105,6 +105,21 @@ describe("Multiremi API - CLI context and capabilities", () => {
     expect(shareContext.catalog).toEqual({ projects: [], repositories: [], next_cursor: null });
   });
 
+  it("reports the selected Chat project and keeps local directory tasks projectless", async () => {
+    const fixture = await cliFixture();
+    const selected = fixture.store.createProject({ title: "Selected Chat project" });
+    const directory = fixture.store.runtimeWorkspaces.create("rt_cli_context", { name: "Local work", root_path: "/local/work" });
+    for (const location of [{ project_id: selected.id }, { runtime_workspace_id: directory.id }]) {
+      const chat = fixture.store.createChatSession({ agentId: fixture.agentId, issueId: fixture.issueId, ...location });
+      const task = fixture.store.sendChatMessage(chat.id, { body: "Inspect context" }).task;
+      const credential = await fixture.store.createTaskAccessToken(task, "local");
+      const response = await fixture.app.request("/api/cli/context", { headers: bearer(credential.token) });
+      expect(response.status).toBe(200);
+      const body = await response.json() as any;
+      expect(body.current.project?.id ?? null).toBe("project_id" in location ? selected.id : null);
+    }
+  });
+
   it("exposes a chat session's bound Issue without changing the task-owned Issue", async () => {
     const fixture = await cliFixture();
     const chat = fixture.store.createChatSession({

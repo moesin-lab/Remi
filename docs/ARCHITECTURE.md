@@ -38,9 +38,9 @@ summary: 从 CLI、Web 和飞书入口追踪到 API、存储与 Agent 执行，�
 [AgentRuntime](../packages/daemon/src/agent-runtime/runtime.ts) 组装执行上下文 → ACP provider → 消息、usage 和终态上报。
 权限请求、会话延续、工作目录归属与重试都在这条链路中，不可只以模型输出判断完成。
 
-Runtime 可持有独立的[持久化工作区](dev/runtime-workspaces.md)：绑定 daemon 的已有目录，Chat / Issue / Task 引用该环境，Git 和 Project 都可选。选择后只能在所属机器执行；未选择时沿用自动任务目录。
+Runtime 可持有独立的[持久化工作区](dev/runtime-workspaces.md)：绑定 daemon 的已有目录。任务和聊天通过统一的「工作位置」选择项目或本机目录，二者互斥；Agent 可在不同任务中选择不同位置。目录绑定只能在所属机器执行；未指定位置时沿用自动任务目录。
 
-Chat 可绑定同工作区的一个 Issue；新 Chat task 可继承该 `issueId`，执行目录由 Chat 的 Runtime 工作区选择决定（未选择时使用自动 Chat 目录），其完成不会自动改变 Issue 状态或发布 Issue 回复评论。绑定、改绑和待投递更新由 [ChatRepo](../packages/server/src/store/repos/chat-repo.ts)维护。[claim wire](../packages/server/src/api/wire/tasks.ts)为 Chat/Issue 会话生成有预算的 bootstrap/delta projection，并单独携带绑定 Issue 与增量摘要；[CLI context](../packages/server/src/api/routers/cli.ts)提供 caller 的 Chat/Issue 信息，不能从摘要推断完整历史。
+Chat 可绑定同工作区的一个 Issue；新 Chat task 可继承该 `issueId`，Chat 创建时保存独立的项目或本机目录选择，显式选择优先于关联 Issue 的项目；本机目录不附加项目仓库，项目聊天沿用按需检出。未选目录时使用自动 Chat 目录，其完成不会自动改变 Issue 状态或发布 Issue 回复评论。绑定、改绑和待投递更新由 [ChatRepo](../packages/server/src/store/repos/chat-repo.ts)维护。[claim wire](../packages/server/src/api/wire/tasks.ts)为 Chat/Issue 会话生成有预算的 bootstrap/delta projection，并单独携带绑定 Issue 与增量摘要；[CLI context](../packages/server/src/api/routers/cli.ts)提供 caller 的 Chat/Issue 信息，不能从摘要推断完整历史。
 
 **飞书聊天**：[controlPlaneConciergeHost / createFeishuTaskHandler](../apps/remi/cli/multiremi.ts)启动 connector；普通消息经 daemon client 提交平台 Chat/Task，再走上面的任务执行链。connector 从 task 事件流回复；去重、运行中 steering、取消与人工请求也使用平台 task。当前 foreground 不实例化 `packages/remi` 的 `Remi` core，不能以该库的 `_process()` 作为当前 bot 入口。
 工作区的 [Feishu bot 配置](../packages/server/src/store/repos/feishu-bot-repo.ts)指定 Agent 和 Runtime；

@@ -2864,6 +2864,7 @@
         "agent_id": "agt_snapshot",
         "issue_id": null,
         "runtime_workspace_id": null,
+        "project_id": null,
         "creator_id": "local",
         "title": "Compat chat",
         "status": "active",
@@ -2901,6 +2902,7 @@
         "agent_id": "agt_snapshot",
         "issue_id": null,
         "runtime_workspace_id": null,
+        "project_id": null,
         "creator_id": "local",
         "title": "Compat chat renamed",
         "status": "active",
@@ -2923,6 +2925,7 @@
       "status": 201,
       "body": {
         "session": {
+          "projectId": null,
           "runtimeWorkspaceId": null,
           "id": "chat_7212d1hv48ko",
           "workspaceId": "local",
@@ -2951,6 +2954,7 @@
       "status": 201,
       "body": {
         "session": {
+          "projectId": null,
           "runtimeWorkspaceId": null,
           "id": "cht_snapshot",
           "workspaceId": "local",
@@ -3061,6 +3065,7 @@
       "status": 200,
       "body": {
         "session": {
+          "projectId": null,
           "runtimeWorkspaceId": null,
           "id": "cht_snapshot",
           "workspaceId": "local",
@@ -7288,6 +7293,7 @@
           "agent_id": "agt_snapshot",
           "issue_id": null,
           "runtime_workspace_id": null,
+          "project_id": null,
           "creator_id": "local",
           "title": "Snapshot chat",
           "status": "active",
@@ -7308,6 +7314,7 @@
         "agent_id": "agt_snapshot",
         "issue_id": null,
         "runtime_workspace_id": null,
+        "project_id": null,
         "creator_id": "local",
         "title": "Snapshot chat",
         "status": "active",
@@ -17262,6 +17269,7 @@
       "body": {
         "sessions": [
           {
+            "projectId": null,
             "runtimeWorkspaceId": null,
             "id": "cht_snapshot",
             "workspaceId": "local",
@@ -17292,6 +17300,7 @@
       "status": 200,
       "body": {
         "session": {
+          "projectId": null,
           "runtimeWorkspaceId": null,
           "id": "cht_snapshot",
           "workspaceId": "local",

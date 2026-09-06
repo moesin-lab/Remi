@@ -18,6 +18,8 @@ describe("Runtime workspace API boundary", () => {
     await expect(api.createIssue({ title: "Local", runtime_workspace_id: "rws-local" })).rejects.toBeInstanceOf(ApiContractError);
     await expect(api.updateIssue("issue", { runtime_workspace_id: "rws-local" })).rejects.toBeInstanceOf(ApiContractError);
     await expect(api.patchIssue("issue", { runtime_workspace_id: "rws-local" })).rejects.toBeInstanceOf(ApiContractError);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({ task_id: "task", issue })));
+    await expect(api.quickCreateIssue({ agent_id: "agent", prompt: "Local", runtime_workspace_id: "rws-local" })).rejects.toBeInstanceOf(ApiContractError);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({ ...issue, runtime_workspace_id: "rws-local" })));
     await expect(api.updateIssue("issue", { runtime_workspace_id: "rws-local" })).resolves.toMatchObject({ runtime_workspace_id: "rws-local" });
   });
@@ -33,5 +35,7 @@ describe("Runtime workspace API boundary", () => {
     const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
     await expect(api.createChatSession({ agent_id: "agent", runtime_workspace_id: "rws-local" })).rejects.toBeInstanceOf(ApiContractError);
     expect(JSON.parse(fetch.mock.calls[0]![1].body)).toMatchObject({ runtime_workspace_id: "rws-local" });
+    fetch.mockResolvedValueOnce(response({ id: "chat", workspace_id: "ws-1", agent_id: "agent", creator_id: "user", title: "Project", status: "active", has_unread: false, created_at: "now", updated_at: "now" }));
+    await expect(api.createChatSession({ agent_id: "agent", project_id: "project" })).rejects.toBeInstanceOf(ApiContractError);
   });
 });

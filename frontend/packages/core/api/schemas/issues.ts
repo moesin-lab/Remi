@@ -183,3 +183,5 @@ export interface DuplicateIssueErrorBody {
     title: string;
   };
 }
+
+export const QuickCreateIssueResponseSchema = z.object({ task_id: z.string().min(1), issue: IssueSchema });

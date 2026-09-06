@@ -16,7 +16,7 @@ import {
   toJson,
 } from "@multiremi/store/helpers.js";
 import { type StoreContext, toInboxItem, toIssueComment } from "@multiremi/store/context.js";
-import { RuntimeWorkspacesRepo } from "./runtime-workspaces-repo.js";
+import { RuntimeWorkspaceError, RuntimeWorkspacesRepo } from "./runtime-workspaces-repo.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { createLogger } from "@shared/logger.js";
 import { resolveIssueArchiveSettings } from "@multiremi/store/issue-archive.js";
@@ -149,8 +149,11 @@ export class IssuesRepo {
     if (parentIssueId && !parent) throw new Error(`Parent issue not found: ${parentIssueId}`);
     if (parent && parent.workspaceId !== workspaceId) throw new Error("Parent issue belongs to another workspace");
 
-    const projectId = input.projectId ?? input.project_id ?? (parent ? parent.projectId : null);
     const runtimeWorkspaceId = input.runtimeWorkspaceId ?? input.runtime_workspace_id ?? null;
+    // A local directory is a complete work location, including for a child issue.
+    // Explicit null also opts out of the parent's project.
+    const projectId = resolveOptionalStringField(input, "projectId", "project_id", runtimeWorkspaceId ? null : parent?.projectId ?? null);
+    if (projectId && runtimeWorkspaceId) throw new RuntimeWorkspaceError("Choose either a project or a runtime workspace");
     if (runtimeWorkspaceId) new RuntimeWorkspacesRepo(this.ctx).require(runtimeWorkspaceId, workspaceId);
     if (projectId) {
       const project = this.ctx.projects().getProject(projectId);
@@ -872,7 +875,7 @@ export class IssuesRepo {
     let previous: MultiremiIssue | null = null;
     let updatedAt = "";
     const updated = this.ctx.db.transaction(() => {
-      if (hasAnyField(input, "runtimeWorkspaceId", "runtime_workspace_id")) {
+      if (hasAnyField(input, "runtimeWorkspaceId", "runtime_workspace_id", "projectId", "project_id")) {
         const initial = this.getIssue(id);
         if (initial) {
           // Match Task creation's workspace-before-Issue lock order so a
@@ -894,9 +897,14 @@ export class IssuesRepo {
       previous = current;
 
       const nextWorkspaceId = resolveOptionalStringField(input, "workspaceId", "workspace_id", current.workspaceId) ?? "local";
-      const nextProjectId = resolveOptionalStringField(input, "projectId", "project_id", current.projectId);
+      let nextProjectId = resolveOptionalStringField(input, "projectId", "project_id", current.projectId);
       const nextParentIssueId = resolveOptionalStringField(input, "parentIssueId", "parent_issue_id", current.parentIssueId);
-      const nextRuntimeWorkspaceId = resolveOptionalStringField(input, "runtimeWorkspaceId", "runtime_workspace_id", current.runtimeWorkspaceId ?? null);
+      let nextRuntimeWorkspaceId = resolveOptionalStringField(input, "runtimeWorkspaceId", "runtime_workspace_id", current.runtimeWorkspaceId ?? null);
+      const picksProject = hasAnyField(input, "projectId", "project_id") && Boolean(nextProjectId);
+      const picksDirectory = hasAnyField(input, "runtimeWorkspaceId", "runtime_workspace_id") && Boolean(nextRuntimeWorkspaceId);
+      if (picksProject && picksDirectory) throw new RuntimeWorkspaceError("Choose either a project or a runtime workspace");
+      if (picksDirectory) nextProjectId = null;
+      if (picksProject) nextRuntimeWorkspaceId = null;
       if (nextRuntimeWorkspaceId !== (current.runtimeWorkspaceId ?? null)) {
         new RuntimeWorkspacesRepo(this.ctx).assertIssueBindingChange(id, nextRuntimeWorkspaceId, nextWorkspaceId);
       } else if (nextRuntimeWorkspaceId && nextWorkspaceId !== current.workspaceId) {
@@ -1440,6 +1448,7 @@ export class IssuesRepo {
     if (!taskAgent) throw new Error(`No runnable agent for ${assigneeType}: ${assigneeId}`);
 
     const issue = this.createIssue({
+      runtimeWorkspaceId: input.runtimeWorkspaceId ?? input.runtime_workspace_id ?? null,
       title: quickCreateTitle(prompt),
       description: prompt,
       workspaceId,
@@ -1456,7 +1465,7 @@ export class IssuesRepo {
       taskKind: "quick_create",
       issueId: issue.id,
       workspaceId,
-      prompt: quickCreateTaskPrompt(prompt, projectId),
+      prompt: quickCreateTaskPrompt(prompt, projectId, input.runtimeWorkspaceId ?? input.runtime_workspace_id ?? null),
     });
     this.ctx.appendIssueActivity(issue.id, {
       actorType: "system",
@@ -3621,8 +3630,14 @@ function quickCreateTitle(prompt: string): string {
   return firstLine.length > 120 ? `${firstLine.slice(0, 117)}...` : firstLine;
 }
 
-function quickCreateTaskPrompt(prompt: string, projectId: string | null): string {
-  const projectInstructions = projectId
+function quickCreateTaskPrompt(prompt: string, projectId: string | null, runtimeWorkspaceId: string | null): string {
+  const projectInstructions = runtimeWorkspaceId
+    ? [
+        `The user explicitly selected runtime workspace ${runtimeWorkspaceId} as the work location.`,
+        `Create each execution issue with --runtime-workspace ${runtimeWorkspaceId}. Leave project_id unset; do not assign a project.`,
+        "Use the existing local directory and its context; no project checkout is needed.",
+      ]
+    : projectId
     ? [
         `The user explicitly selected project ${projectId}.`,
         "Keep the issue in that project; do not infer or move it to another project.",
@@ -3636,7 +3651,7 @@ function quickCreateTaskPrompt(prompt: string, projectId: string | null): string
     "Create one or more new execution issues for the actual work described by this intake request.",
     "Do not treat this intake issue as the execution issue, and do not implement the requested code here.",
     "Create each execution issue with `remi issue create`; the server will link it back to this intake issue.",
-    "Read the available project snapshots and exported knowledge under `projects/<project>/` before deciding.",
+    ...(runtimeWorkspaceId ? [] : ["Read the available project snapshots and exported knowledge under `projects/<project>/` before deciding."]),
     ...projectInstructions,
     "",
     prompt,

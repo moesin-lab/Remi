@@ -124,6 +124,7 @@ describe("Multiremi store — chat sessions and private agent access", () => {
       "has_unread",
       "id",
       "issue_id",
+      "project_id",
       "runtime_workspace_id",
       "status",
       "title",

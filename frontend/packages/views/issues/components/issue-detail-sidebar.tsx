@@ -1,5 +1,5 @@
 "use client";
-import { RuntimeWorkspacePicker } from "../../runtimes/components/runtime-workspace-picker";
+import { WorkLocationPicker } from "../../runtimes/components/runtime-workspace-picker";
 
 import { Bot, CalendarClock, CalendarDays, CheckCircle2, ChevronRight, ListTree, Plus, Tag } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -25,7 +25,6 @@ import { PropRow } from "../../common/prop-row";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { formatTokens } from "../../common/format";
 import { useT } from "../../i18n";
-import { ProjectPicker } from "../../projects/components/project-picker";
 import {
   StatusIcon,
   PriorityIcon,
@@ -148,16 +147,9 @@ export function IssueDetailSidebar({
           <PropRow label={t(($) => $.detail.prop_assignee)}>
             <AssigneePicker assigneeType={issue.assignee_type} assigneeId={issue.assignee_id} onUpdate={onUpdateField} align="start" />
           </PropRow>
-          <PropRow label={t(($) => $.detail.prop_project)}>
-            <ProjectPicker
-              projectId={issue.project_id}
-              onUpdate={onUpdateField}
-            />
-          </PropRow>
-
-          <PropRow label={tRuntime($ => $.workspaces.picker_label)}>
-            <RuntimeWorkspacePicker wsId={issue.workspace_id} value={issue.runtime_workspace_id ?? null}
-              onChange={id => onUpdateField({ runtime_workspace_id: id })} disabled={tasks.length > 0} />
+          <PropRow label={tRuntime($ => $.location.label)} interactive={tasks.length === 0}>
+            <WorkLocationPicker wsId={issue.workspace_id} projectId={issue.project_id}
+              value={issue.runtime_workspace_id ?? null} onChange={onUpdateField} disabled={tasks.length > 0} />
           </PropRow>
           {/* Optional props — rendered only when set on the issue OR added
               via "+ Add property" in this session. Row order follows the

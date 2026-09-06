@@ -295,6 +295,7 @@ export function issueUpdateCompatibilityInput(input: UpdateIssueInput = {}): Upd
 
 export function issueQuickCreateCompatibilityInput(input: QuickCreateIssueInput): QuickCreateIssueInput {
   const out: QuickCreateIssueInput = { prompt: input.prompt };
+  if (hasRequestField(input, "runtime_workspace_id")) out.runtime_workspace_id = input.runtime_workspace_id ?? null;
   if (hasRequestField(input, "agent_id")) out.agent_id = input.agent_id ?? null;
   if (hasRequestField(input, "squad_id")) out.squad_id = input.squad_id ?? null;
   if (hasRequestField(input, "project_id")) out.project_id = input.project_id ?? null;

@@ -94,26 +94,28 @@ const TASK_PROMPT_MAX_BYTES = 2 * 1024 * 1024;
 const DELEGATION_RETURN_BODY_MAX_LENGTH = 16_000;
 const ISSUE_WORKSPACE_MIN_CLI_VERSION = [0, 2, 26] as const;
 
+const TASK_PROJECT_ID_SQL = "(CASE WHEN t.runtime_workspace_id IS NOT NULL THEN NULL ELSE COALESCE(project_chat.project_id, project_issue.project_id) END)";
+
 const PROJECT_DEVICE_ROUTING_ELIGIBILITY_SQL = `(
   (
-    project_issue.project_id IS NULL
+    ${TASK_PROJECT_ID_SQL} IS NULL
     OR NOT EXISTS (
       SELECT 1 FROM multiremi_project_devices project_device
-      WHERE project_device.project_id = project_issue.project_id
+      WHERE project_device.project_id = ${TASK_PROJECT_ID_SQL}
     )
     OR EXISTS (
       SELECT 1 FROM multiremi_project_devices project_device
-      WHERE project_device.project_id = project_issue.project_id
+      WHERE project_device.project_id = ${TASK_PROJECT_ID_SQL}
         AND project_device.daemon_id = ?
     )
   )
   AND (
     ? = 0
     OR (
-      project_issue.project_id IS NOT NULL
+      ${TASK_PROJECT_ID_SQL} IS NOT NULL
       AND EXISTS (
         SELECT 1 FROM multiremi_project_devices project_device
-        WHERE project_device.project_id = project_issue.project_id
+        WHERE project_device.project_id = ${TASK_PROJECT_ID_SQL}
           AND project_device.daemon_id = ?
       )
     )
@@ -371,7 +373,7 @@ export class TasksRepo {
     const affinity = this.resolveTaskAffinity(
       agent,
       input.resetProviderSession ? null : chatSession,
-      issue,
+      runtimeWorkspaceId ? null : chatSession?.projectId ?? (issue?.issueKind !== "intake" ? issue?.projectId : null) ?? null,
       expectedExecutionFingerprint,
       currentPluginSnapshot.length > 0,
     );
@@ -596,7 +598,7 @@ export class TasksRepo {
   private resolveTaskAffinity(
     agent: MultiremiAgent,
     chatSession: MultiremiChatSession | null,
-    issue: MultiremiIssue | null,
+    projectId: string | null,
     executionFingerprint: string,
     hasPlugins: boolean,
   ): { runtimeId: string | null; inheritChatSession: boolean } {
@@ -606,8 +608,8 @@ export class TasksRepo {
     // A task carrying both a chat session and a directory issue must go to the
     // directory's machine; the session is only inherited if that machine is
     // also where the session lives.
-    if (issue?.projectId && issue.issueKind !== "intake") {
-      for (const resource of this.ctx.projects().listProjectResources(issue.projectId)) {
+    if (projectId) {
+      for (const resource of this.ctx.projects().listProjectResources(projectId)) {
         if (resource.resourceType !== "local_directory") continue;
         const daemonId = String(resource.resourceRef.daemonId ?? resource.resourceRef.daemon_id ?? "").trim();
         if (!daemonId) continue;
@@ -691,9 +693,11 @@ export class TasksRepo {
     const task = this.getTask(id);
     if (!task) return null;
     const issue = task.issueId ? this.ctx.issues().getIssue(task.issueId) : null;
-    const project = issue?.projectId ? this.ctx.projects().getProject(issue.projectId) : null;
+    const chat = task.chatSessionId ? this.ctx.chat().getChatSession(task.chatSessionId) : null;
+    const projectId = task.runtimeWorkspaceId ? null : chat?.projectId ?? issue?.projectId ?? null;
+    const project = projectId ? this.ctx.projects().getProject(projectId) : null;
     const projectResources = project ? this.ctx.projects().listProjectResources(project.id) : [];
-    const projectContexts = issue?.issueKind === "intake"
+    const projectContexts = !task.runtimeWorkspaceId && issue?.issueKind === "intake"
       ? this.resolveIntakeProjectContexts(task.workspaceId, project)
       : [];
     return {
@@ -708,7 +712,7 @@ export class TasksRepo {
       // Homepage Chat discovers repositories through the database-backed CLI
       // directory and checks out only on explicit request. Never attach the
       // workspace repository catalog to its daemon claim as eager Git work.
-      repos: task.chatSessionId && !task.issueId
+      repos: task.runtimeWorkspaceId || (task.chatSessionId && !task.issueId)
         ? []
         : projectContexts.length
           ? normalizeRepos(projectContexts.flatMap((context) => context.repos))
@@ -1124,6 +1128,7 @@ export class TasksRepo {
       `SELECT CASE WHEN ${PROJECT_DEVICE_ROUTING_ELIGIBILITY_SQL} THEN 1 ELSE 0 END AS eligible
        FROM multiremi_tasks t
        LEFT JOIN multiremi_issues project_issue ON project_issue.id = t.issue_id
+       LEFT JOIN multiremi_chat_sessions project_chat ON project_chat.id = t.chat_session_id
        WHERE t.id = ?`,
     ).get(...routing.params, taskId) as { eligible?: unknown } | null;
     return Number(row?.eligible ?? 0) === 1;
@@ -1266,6 +1271,7 @@ export class TasksRepo {
          FROM multiremi_tasks t
          JOIN multiremi_agents a ON a.id = t.agent_id
          LEFT JOIN multiremi_issues project_issue ON project_issue.id = t.issue_id
+         LEFT JOIN multiremi_chat_sessions project_chat ON project_chat.id = t.chat_session_id
          WHERE t.status = 'queued'
            AND a.archived_at IS NULL
            AND a.workspace_id = t.workspace_id

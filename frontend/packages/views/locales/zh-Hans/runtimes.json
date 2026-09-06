@@ -572,10 +572,10 @@
     }
   },
   "workspaces": {
-    "title": "Runtime 工作区",
-    "picker_label": "执行工作区",
+    "title": "工作目录",
+    "picker_label": "工作位置",
     "automatic": "自动任务目录",
-    "description": "选择这台机器上的目录，让 Chat 和 Issue 复用其中的文件、指令和依赖。",
+    "description": "把这台机器上的目录登记为工作位置，任务可以直接选择它，复用本地文件、指令和依赖，无需先关联项目。",
     "name": "名称",
     "name_placeholder": "我的本地工作台",
     "root": "共享根目录",
@@ -587,7 +587,7 @@
     "context_placeholder": "每行一个路径，相对于根目录",
     "env_file": "环境变量文件（可选）",
     "context_hint": "在本机读取指令和 Skill。额外路径和环境文件必须位于根目录内。登记只保存路径，不上传文件内容；执行中的 agent 及其模型仍可能读取这些内容。",
-    "register": "注册工作区",
+    "register": "添加工作目录",
     "registered": "已注册，任务启动时会检查目录和本地上下文。",
     "loading": "正在加载工作区…",
     "load_failed": "无法加载 Runtime 工作区。",
@@ -599,7 +599,7 @@
     "archived": "已归档注册，本地文件仍然保留。",
     "lifecycle_hint": "Chat 和 Issue 引用这个工作区。完成或删除任务不会删除本地文件；归档注册会停止接收新任务，并保留原目录。",
     "location_title": "选择工作位置",
-    "details_title": "给工作区命名",
+    "details_title": "给工作目录命名",
     "choose_root": "选择根目录",
     "choose_root_hint": "浏览这台机器上的真实目录",
     "change_directory": "点击更换目录",
@@ -611,7 +611,7 @@
     "preview_cwd": "实际执行目录",
     "preview_empty": "选择目录后显示",
     "reuse_hint": "文件保留在这台机器上。新的 Chat 或 Issue 可以继续使用同一个环境。",
-    "saved_title": "已注册的工作区",
+    "saved_title": "已添加的工作目录",
     "browse_title": "选择目录",
     "browse_cwd_title": "选择 Agent 工作目录",
     "browse_machine": "正在浏览 {{machine}} 上的目录",
@@ -631,5 +631,22 @@
     "browse_select": "使用此目录",
     "browse_inside_root": "请选择共享根目录内部的目录。",
     "browse_missing_path": "Runtime 未返回完整目录路径，请更新后重试。"
+  },
+  "location": {
+    "label": "工作位置",
+    "hint": "为这个任务选择一个项目，或一个本机工作目录。",
+    "chat_hint": "复用本机工作目录，或让这个聊天使用自动目录。",
+    "unassigned": "自动安排",
+    "projects": "项目 / 仓库",
+    "directories": "本机工作目录",
+    "loading": "正在加载…",
+    "projects_failed": "无法加载项目。",
+    "projects_empty": "暂无可用项目。",
+    "directories_empty": "还没有工作目录。请在 Runtime → 工作目录中添加。",
+    "directory_missing": "目录不可用",
+    "project_missing": "项目不可用",
+    "machine_unknown": "所属机器",
+    "offline": "离线 · 等待执行",
+    "locked": "开始执行后工作位置固定，更换位置请新建任务或聊天。"
   }
 }

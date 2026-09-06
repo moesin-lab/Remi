@@ -17,7 +17,7 @@ export interface CreateIssueRequest {
   assignee_type?: IssueAssigneeType | null;
   assignee_id?: string | null;
   parent_issue_id?: string;
-  project_id?: string;
+  project_id?: string | null;
   start_date?: string;
   due_date?: string;
   attachment_ids?: string[];

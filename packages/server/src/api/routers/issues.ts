@@ -657,6 +657,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJson<QuickCreateIssueInput>(c);
     const denied = denyCurrentUserWorkspaceAccess(c, store, body.workspaceId ?? body.workspace_id ?? "local");
     if (denied) return denied;
+    assertRuntimeWorkspaceAccess(c, store, body.runtimeWorkspaceId ?? body.runtime_workspace_id, body.workspaceId ?? body.workspace_id ?? "local");
     const result = safeQuickCreateIssue(store, body);
     if ("error" in result) return c.json({ error: result.error }, 400);
     return c.json({
@@ -673,6 +674,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const input = issueQuickCreateCompatibilityInput(body);
     const denied = denyCurrentUserWorkspaceAccess(c, store, input.workspaceId ?? input.workspace_id ?? "local");
     if (denied) return denied;
+    assertRuntimeWorkspaceAccess(c, store, input.runtimeWorkspaceId ?? input.runtime_workspace_id, input.workspaceId ?? input.workspace_id ?? "local");
     const result = safeQuickCreateIssue(store, input);
     if ("error" in result) return c.json({ error: result.error }, 400);
     return c.json({

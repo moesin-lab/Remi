@@ -10,11 +10,13 @@ Runtime Workspace 是某台机器持有的执行环境，独立于 Issue、Chat�
 
 ## 使用
 
-在 Runtime 详情的「Runtime 工作区」页注册已有目录，随后在新建 Chat / Issue 时选择「执行工作区」。Issue 尚未产生任务时也可在详情中选择；产生任务后绑定固定。Chat 在创建时确定绑定，换目录需要新建 Chat。子 Issue 也独立选择执行环境，不隐式继承父 Issue 的本地目录。
+在 Runtime 详情的「工作目录」页登记已有目录。任务创建（手动或 Agent 模式）和详情使用同一个「工作位置」选择器，将「项目 / 仓库」与「本机工作目录」并列展示；目录项显示所属机器及实际执行路径。每个任务只选择一个位置，选择项目会清空目录绑定，选择目录会清空项目。未指定位置时保留自动安排。
+
+Chat 使用同一选择器，创建时保存 `project_id` 或 `runtime_workspace_id`，两者互斥。显式选择的项目决定项目上下文和设备路由；选本机目录时不附加项目仓库。可选的关联 Issue 不覆盖显式位置。项目聊天仍按需通过 `remi repo checkout` 获取仓库文件，启动时不批量拉取仓库。Issue 尚未产生任务时也可在详情中选择；产生任务后绑定固定。Chat 在创建时确定绑定，换目录需要新建 Chat。子 Issue 也独立选择执行环境，不隐式继承父 Issue 的本地目录。
 
 「选择根目录」通过所属 Runtime 的目录浏览接口打开该机器的用户主目录，可以逐级进入、返回上级、筛选当前文件夹或输入路径跳转。页面使用 daemon 返回的绝对路径，并自动填入目录名称；浏览器在 Windows 上也可以选择 Mac/Linux 的目录。机器离线时不能发起浏览，读取失败不会允许提交上一次的目录结果。
 
-Agent 默认在共享根目录执行，也可通过「选择子目录」指定其内部目录；相对路径自动计算，右侧预览实际执行位置。名称可修改，项目关联、额外上下文和环境文件收在高级设置中。目录浏览只列出已有目录，不创建目录；文件权限和上下文仍在任务启动时再次检查。
+Agent 默认在共享根目录执行，也可通过「选择子目录」指定其内部目录；相对路径自动计算，右侧预览实际执行位置。名称可修改，额外上下文和环境文件收在高级设置中。工作目录无需关联项目。目录浏览只列出已有目录，不创建目录；文件权限和上下文仍在任务启动时再次检查。
 
 例如，根目录设为 `C:\workbench`，工作目录设为 `app`：
 
@@ -30,7 +32,7 @@ C:\workbench\
 
 父子目录关系保留。工作区可以包含多个仓库，也可以没有 Git；注册和启动不会自动 clone、checkout、切分支或创建 Wiki 副本。
 
-控制面保存名称、绝对根路径、相对 `cwd`、可选 `context_paths`、`env_file` 和 Project 关联。Project 关联用于标记归属；Issue 的项目上下文仍由 Issue 的 Project 决定。路径配置注册后固定，可改名或归档；改变环境需注册新工作区。
+控制面保存名称、绝对根路径、相对 `cwd`、可选 `context_paths` 和 `env_file`。注册记录的旧 `project_id` 元数据仍兼容，但不作为执行位置，也不再出现在登记表单中。Issue 创建时同时指定项目与目录会报 400；更新中单独选择一种会原子清空另一种，同时指定两种也报 400。选目录的子 Issue 不继承父 Issue 的项目，显式 `project_id: null` 也不继承。旧版双重绑定记录在普通标题等更新时保持原值，重新选择位置时才按互斥规则处理；已执行任务的目录绑定不允许变更。路径配置注册后固定，可改名或归档；改变环境需注册新工作区。
 
 ```bash
 remi runtime workspace list
@@ -39,9 +41,13 @@ remi runtime workspace create <runtime-id> --name "Local workbench" --root "C:\w
 remi runtime workspace get <runtime-workspace-id>
 remi runtime workspace rename <runtime-workspace-id> --name "Research"
 remi chat create --agent <agent-id> --runtime-workspace <runtime-workspace-id>
+remi chat create --agent <agent-id> --project <project-id>
 remi issue create --title "Inspect local state" --runtime-workspace <runtime-workspace-id>
+remi issue quick-create --agent <agent-id> --prompt "Plan local work" --runtime-workspace <runtime-workspace-id>
 remi runtime workspace archive <runtime-workspace-id>
 ```
+
+Agent 创建模式把工作目录绑定到 intake Issue / Task，并在生成提示词中要求后续 execution Issue 显式携带 `--runtime-workspace`，不再自动匹配项目。它仍由 agent 创建后续任务，不隐式改变所有子任务的继承规则。
 
 重复的 `--context-path` 指向额外指令文件或 Skill 目录，全部相对于根目录。注册也支持 Registry 的 JSON 文件输入。
 

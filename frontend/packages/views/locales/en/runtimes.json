@@ -596,7 +596,7 @@
     }
   },
   "workspaces": {
-    "title": "Runtime workspaces",
+    "title": "Working directories",
     "picker_label": "Execution workspace",
     "automatic": "Automatic task directory",
     "description": "Choose a folder on this machine and reuse its files, instructions and dependencies across Chats and Issues.",
@@ -655,5 +655,22 @@
     "browse_select": "Use this directory",
     "browse_inside_root": "Choose a directory inside the shared root.",
     "browse_missing_path": "The Runtime did not return an absolute directory path. Update it and try again."
+  },
+  "location": {
+    "label": "Work location",
+    "hint": "Choose a project or a local directory for this task.",
+    "chat_hint": "Reuse a local directory, or let this chat use an automatic directory.",
+    "unassigned": "Automatic",
+    "projects": "Projects / repositories",
+    "directories": "Local working directories",
+    "loading": "Loading…",
+    "projects_failed": "Could not load projects.",
+    "projects_empty": "No active projects.",
+    "directories_empty": "No directories registered yet. Add one in Runtime → Working directories.",
+    "directory_missing": "Directory unavailable",
+    "project_missing": "Project unavailable",
+    "machine_unknown": "Registered machine",
+    "offline": "Offline · waits to run",
+    "locked": "The work location is fixed after the session starts. Start a new task or chat to change it."
   }
 }

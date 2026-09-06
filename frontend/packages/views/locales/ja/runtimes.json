@@ -572,7 +572,7 @@
     }
   },
   "workspaces": {
-    "title": "Runtime ワークスペース",
+    "title": "作業ディレクトリ",
     "picker_label": "実行ワークスペース",
     "automatic": "自動タスクディレクトリ",
     "description": "このマシンのフォルダーを選び、Chat や Issue 間でファイル、指示、依存関係を再利用します。",
@@ -631,5 +631,22 @@
     "browse_select": "このディレクトリを使用",
     "browse_inside_root": "共有ルート内のディレクトリを選択してください。",
     "browse_missing_path": "Runtime が絶対パスを返しませんでした。更新して再試行してください。"
+  },
+  "location": {
+    "label": "作業場所",
+    "hint": "タスクのプロジェクト、またはローカル作業ディレクトリを選択します。",
+    "chat_hint": "ローカルディレクトリを再利用するか、チャット用の自動ディレクトリを使います。",
+    "unassigned": "自動",
+    "projects": "プロジェクト / リポジトリ",
+    "directories": "ローカル作業ディレクトリ",
+    "loading": "読み込み中…",
+    "projects_failed": "プロジェクトを読み込めませんでした。",
+    "projects_empty": "有効なプロジェクトがありません。",
+    "directories_empty": "ディレクトリは未登録です。Runtime → 作業ディレクトリで追加してください。",
+    "directory_missing": "ディレクトリを利用できません",
+    "project_missing": "プロジェクトを利用できません",
+    "machine_unknown": "登録先マシン",
+    "offline": "オフライン · 実行待ち",
+    "locked": "開始後は作業場所が固定されます。変更するには新しいタスクかチャットを作成してください。"
   }
 }

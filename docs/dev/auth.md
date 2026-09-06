@@ -22,7 +22,7 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 | 边界 | 当前行为与源码 |
 |---|---|
 | 人类用户的工作区权限 | [denyCurrentUserWorkspaceAccess](../../packages/server/src/api/helpers/auth-guards.ts)按成员关系判断；真实用户的 PAT 可访问其加入的多个工作区，不以登录时写入的 `workspaceId: local` 限制工作区。非成员通常返回 404 隐藏存在性。[工作区路由](../../packages/server/src/api/routers/workspaces.ts)也据此过滤列表。 |
-| 成员与角色 | [WorkspacesRepo](../../packages/server/src/store/repos/workspaces-repo.ts)读取成员 `userId`，兼容旧成员 ID 形式。[currentWorkspaceRoleStrict](../../packages/server/src/api/wire/context.ts)可返回无角色；带默认值的 `currentWorkspaceRole` 不能单独证明成员资格。管理员操作使用相应的 admin guard。 |
+| 成员与角色 | [WorkspacesRepo](../../packages/server/src/store/repos/workspaces-repo.ts)读取成员 `userId`，兼容旧成员 ID 形式。[成员 wire](../../packages/server/src/api/wire/workspaces.ts)的 `user_id` 同样优先使用真实 `userId`，仅在缺失时按旧成员 ID 推导；成员记录 `id` 与用户 ID 不可混用，否则 Web 无法识别已有角色。[currentWorkspaceRoleStrict](../../packages/server/src/api/wire/context.ts)可返回无角色；带默认值的 `currentWorkspaceRole` 不能单独证明成员资格。管理员操作使用相应的 admin guard。 |
 | task 凭据 | [auth-guards.ts](../../packages/server/src/api/helpers/auth-guards.ts)将其限制在绑定工作区，并继承所属用户的业务权限，包括环境值与 SCM 配置等。`taskTokenHardDenyCategory` 另外阻止凭据签发/揭示、身份、工作区生命周期、权限配置等敏感操作；它不是只读令牌。 |
 | daemon 凭据 | 同一 guard 文件中的请求允许列表和 `denyNonDaemonOperationalAccess` 区分机器控制面与人类操作；daemon 绑定、runtime/task 归属及 owner 成员资格另有检查。旧 CLI PAT 升级、注册和特定 SCM 请求存在明确例外，应按实现核对。 |
 | 私有资源与实时消息 | Agent、运行时、附件、会话和 transcript 有各自的权限检查。[realtime.ts](../../packages/server/src/api/realtime.ts)处理浏览器/daemon WebSocket 鉴权与接收范围，不能只验证 HTTP 路径。 |

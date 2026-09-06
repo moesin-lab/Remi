@@ -21,6 +21,7 @@ import {
   EMPTY_LIST_ISSUES_RESPONSE,
   GroupedIssuesResponseSchema,
   IssueSchema,
+  QuickCreateIssueResponseSchema,
   IssueRetitleResponseSchema,
   IssueWorkspaceResponseSchema,
   ListIssuesResponseSchema,
@@ -135,16 +136,19 @@ export class IssuesEndpoints {
   }
 
   async quickCreateIssue(data: {
+    runtime_workspace_id?: string | null;
     agent_id?: string;
     squad_id?: string;
     prompt: string;
     project_id?: string | null;
     parent_issue_id?: string | null;
   }): Promise<{ task_id: string; issue: Issue }> {
-    return this.http.fetch("/api/issues/quick-create", {
+    const raw = await this.http.fetch<unknown>("/api/issues/quick-create", {
       method: "POST",
       body: JSON.stringify(data),
     });
+    const result = parseStrictResponse(raw, QuickCreateIssueResponseSchema, { endpoint: "POST /api/issues/quick-create" });
+    return { task_id: result.task_id, issue: parseIssueMutation(result.issue, "POST /api/issues/quick-create", data) };
   }
 
   async listGeneratedIssues(id: string): Promise<{ issues: Issue[]; total: number }> {

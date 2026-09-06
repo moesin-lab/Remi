@@ -2087,6 +2087,8 @@ export interface AssignIssueResult {
 }
 
 export interface QuickCreateIssueInput {
+  runtimeWorkspaceId?: string | null;
+  runtime_workspace_id?: string | null;
   agentId?: string | null;
   agent_id?: string | null;
   squadId?: string | null;
@@ -4295,6 +4297,8 @@ export type MultiremiChatSessionStatus = "active" | "archived";
 export type MultiremiChatMessageRole = "user" | "assistant" | "system";
 
 export interface MultiremiChatSession {
+  /** Explicit work location, independent of a linked Issue. */
+  projectId?: string | null;
   runtimeWorkspaceId?: string | null;
   id: string;
   workspaceId: string;
@@ -4333,6 +4337,8 @@ export interface MultiremiChatMessage {
 }
 
 export interface CreateChatSessionInput {
+  projectId?: string | null;
+  project_id?: string | null;
   runtimeWorkspaceId?: string | null;
   runtime_workspace_id?: string | null;
   id?: string;

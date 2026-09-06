@@ -25,7 +25,7 @@ export class ChatEndpoints {
     return parseStrictResponse(raw, ChatSessionSchema, { endpoint: "GET /api/chat/sessions/:id" });
   }
 
-  async createChatSession(data: { agent_id: string; title?: string; runtime_workspace_id?: string | null }): Promise<ChatSession> {
+  async createChatSession(data: { agent_id: string; title?: string; project_id?: string | null; runtime_workspace_id?: string | null }): Promise<ChatSession> {
     const raw = await this.http.fetch<unknown>("/api/chat/sessions", {
       method: "POST",
       body: JSON.stringify(data),
@@ -33,6 +33,9 @@ export class ChatEndpoints {
     const session = parseStrictResponse<ChatSession>(raw, ChatSessionSchema, { endpoint: "POST /api/chat/sessions" });
     if (data.runtime_workspace_id && session.runtime_workspace_id !== data.runtime_workspace_id) {
       throw new ApiContractError("POST /api/chat/sessions", "Server did not retain the selected runtime workspace");
+    }
+    if (data.project_id && session.project_id !== data.project_id) {
+      throw new ApiContractError("POST /api/chat/sessions", "Server did not retain the selected project");
     }
     return session;
   }

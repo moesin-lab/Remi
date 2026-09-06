@@ -2502,6 +2502,7 @@ export function runMigrations(db: SqlDatabase): void {
   `);
   addColumnIfMissing(db, "multiremi_issues", "runtime_workspace_id TEXT");
   addColumnIfMissing(db, "multiremi_chat_sessions", "runtime_workspace_id TEXT");
+  addColumnIfMissing(db, "multiremi_chat_sessions", "project_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "runtime_workspace_id TEXT");
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_runtime_workspace
     ON multiremi_tasks(runtime_workspace_id, status)`);

@@ -127,3 +127,71 @@ describe("Runtime-owned workspaces", () => {
     expect(store.runtimeWorkspaces.get(item.id)?.rootPath).toBe("C:\\notes");
   });
 });
+
+
+it("assigns either a project or directory, replaces single-field selections, and preserves execution locks", () => {
+  const { store, workspace, agent } = fixture();
+  const project = store.createProject({ title: "Remi" });
+  const parent = store.createIssue({ title: "Parent", projectId: project.id });
+  expect(() => store.createIssue({ title: "Ambiguous", project_id: project.id, runtime_workspace_id: workspace.id })).toThrow("either a project");
+  const child = store.createIssue({ title: "Local child", parentIssueId: parent.id, runtime_workspace_id: workspace.id });
+  expect(child.projectId).toBeNull();
+  expect(store.createIssue({ title: "Independent", parentIssueId: parent.id, project_id: null }).projectId).toBeNull();
+  const toProject = store.updateIssue(child.id, { project_id: project.id });
+  expect(toProject.runtimeWorkspaceId).toBeNull();
+  expect(toProject.projectId).toBe(project.id);
+  const toDirectory = store.updateIssue(child.id, { runtime_workspace_id: workspace.id });
+  expect(toDirectory.projectId).toBeNull();
+  expect(toDirectory.runtimeWorkspaceId).toBe(workspace.id);
+  expect(() => store.updateIssue(child.id, { project_id: project.id, runtime_workspace_id: workspace.id })).toThrow("either a project");
+  store.createTask({ agentId: agent.id, issueId: child.id, prompt: "Run" });
+  expect(() => store.updateIssue(child.id, { project_id: project.id })).toThrow("executed Issue");
+  expect(store.getIssue(child.id)?.runtimeWorkspaceId).toBe(workspace.id);
+  expect(store.getIssue(child.id)?.projectId).toBeNull();
+});
+
+it("quick-creates a local intake and instructs its agent to preserve the directory on execution issues", async () => {
+  const { store, workspace, agent, runtime } = fixture();
+  const app = createMultiremiApp({ store });
+  const response = await app.request("/api/issues/quick-create", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agent_id: agent.id, prompt: "Inspect my local notes", runtime_workspace_id: workspace.id }) });
+  expect(response.status).toBe(202);
+  const body = await response.json() as { task_id: string; issue: { runtime_workspace_id: string; project_id: string | null } };
+  expect(body.issue.runtime_workspace_id).toBe(workspace.id);
+  expect(body.issue.project_id).toBeNull();
+  const task = store.getTask(body.task_id)!;
+  expect(task.runtimeWorkspaceId).toBe(workspace.id);
+  expect(task.prompt).toContain(`--runtime-workspace ${workspace.id}`);
+  expect(task.prompt).not.toContain("Inspect the workspace's existing active projects");
+  expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+});
+
+
+it("binds a project's context and device routing to Chat independently of a linked Issue", async () => {
+  const { store, runtime, workspace, agent } = fixture();
+  const project = store.createProject({ title: "Chosen project" });
+  store.createProjectDevice(project.id, { daemonId: "laptop", createdBy: "local" });
+  const other = store.registerRuntime({ name: "Other", provider: "codex", daemonId: "other", workspaceId: "local" });
+  const otherProject = store.createProject({ title: "Linked issue project" });
+  const issue = store.createIssue({ title: "Reference only", projectId: otherProject.id });
+  const app = createMultiremiApp({ store });
+  const response = await app.request("/api/chat/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agent_id: agent.id, project_id: project.id, issue_id: issue.id }) });
+  expect(response.status).toBe(201);
+  const chat = await response.json() as { id: string; project_id: string };
+  expect(chat.project_id).toBe(project.id);
+  const task = store.sendChatMessage(chat.id, { body: "Inspect the selected project" }).task;
+  expect(store.getTaskWithAgent(task.id)?.project?.id).toBe(project.id);
+  expect(store.claimTask(other.id)).toBeNull();
+  expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+  store.cancelTask(task.id);
+  expect(() => store.createChatSession({ agentId: agent.id, project_id: project.id, runtime_workspace_id: workspace.id })).toThrow("either a project");
+  const local = store.createChatSession({ agentId: agent.id, runtime_workspace_id: workspace.id, issueId: issue.id });
+  const localTask = store.sendChatMessage(local.id, { body: "Inspect local files" }).task;
+  expect(store.getTaskWithAgent(localTask.id)?.project).toBeNull();
+  expect(store.getTaskWithAgent(localTask.id)?.projectContexts).toEqual([]);
+  const changed = await app.request(`/api/chat/sessions/${chat.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: otherProject.id }) });
+  expect(changed.status).toBe(409);
+  expect(store.getChatSession(chat.id)?.projectId).toBe(project.id);
+  store.createWorkspace({ id: "foreign", name: "Foreign", slug: "foreign" });
+  const foreign = store.createProject({ title: "Foreign", workspaceId: "foreign" });
+  expect(() => store.createChatSession({ agentId: agent.id, projectId: foreign.id })).toThrow("not found");
+});

@@ -7,10 +7,10 @@ import { I18nProvider } from "@multiremi/core/i18n/react";
 import type { AgentRuntime } from "@multiremi/core/types";
 import enRuntimes from "../../locales/en/runtimes.json";
 import { RuntimeWorkspacesTab } from "./runtime-workspaces-tab";
-import { RuntimeWorkspacePicker } from "./runtime-workspace-picker";
+import { RuntimeWorkspacePicker, WorkLocationPicker } from "./runtime-workspace-picker";
 import { RuntimeDirectoryDialog } from "./runtime-directory-dialog";
 
-const api = vi.hoisted(() => ({ listRuntimeWorkspaces: vi.fn(), createRuntimeWorkspace: vi.fn(), archiveRuntimeWorkspace: vi.fn(), initiateDirectoryScan: vi.fn(), getDirectoryScanResult: vi.fn() }));
+const api = vi.hoisted(() => ({ listRuntimeWorkspaces: vi.fn(), listRuntimes: vi.fn(), listProjects: vi.fn(), createRuntimeWorkspace: vi.fn(), archiveRuntimeWorkspace: vi.fn(), initiateDirectoryScan: vi.fn(), getDirectoryScanResult: vi.fn() }));
 vi.mock("@multiremi/core/api", () => ({ api }));
 vi.mock("@multiremi/core/hooks", () => ({ useWorkspaceId: () => "ws-1" }));
 vi.mock("../../projects/components/project-picker", () => ({ ProjectPicker: () => <span>Optional project</span> }));
@@ -18,6 +18,8 @@ afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
   api.listRuntimeWorkspaces.mockResolvedValue([]);
+  api.listRuntimes.mockResolvedValue([runtime]);
+  api.listProjects.mockResolvedValue({ projects: [{ id: "project-1", title: "Remi", icon: null, color: null }] });
   api.initiateDirectoryScan.mockImplementation((_id, params) => {
     const path = params.root === "~" ? "/Users/mac" : params.root;
     const child = path === "/Users/mac" ? "workbench" : path === "/Users/mac/workbench" ? "app" : null;
@@ -54,7 +56,7 @@ it("registers local paths, retains failed input, and surfaces the server error",
   await user.click(screen.getByRole("button", { name: "Use this directory" }));
   await user.click(screen.getByRole("button", { name: "Register workspace" }));
   await waitFor(() => expect(api.createRuntimeWorkspace).toHaveBeenCalledWith("runtime-1", {
-    name: "Private workbench", root_path: "/Users/mac/workbench", cwd: "app", context_paths: [], env_file: null, project_id: null,
+    name: "Private workbench", root_path: "/Users/mac/workbench", cwd: "app", context_paths: [], env_file: null,
   }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Directory already registered");
   expect(screen.getByRole("button", { name: "Choose root directory" })).toHaveTextContent("/Users/mac/workbench");
@@ -121,11 +123,46 @@ it("keeps an unavailable workspace selectable and retains a saved missing select
   const onChange = vi.fn();
   api.listRuntimeWorkspaces.mockResolvedValue([{ id: "rws-1", name: "Laptop", daemon_id: "laptop", root_path: "/local", cwd: ".", status: "unavailable" }]);
   const view = show(<RuntimeWorkspacePicker wsId="ws-1" value="rws-missing" onChange={onChange} />);
-  await screen.findByRole("option", { name: /Laptop/ });
-  expect(screen.getByRole("combobox")).toHaveValue("rws-missing");
-  await user.selectOptions(screen.getByRole("combobox"), "rws-1");
+  const trigger = screen.getByRole("button", { name: "Work location: Directory unavailable" });
+  await user.click(trigger);
+  await user.click(await screen.findByRole("menuitem", { name: /Laptop/ }));
   expect(onChange).toHaveBeenCalledWith("rws-1");
   view.unmount();
   show(<RuntimeWorkspacePicker wsId="ws-1" value="rws-1" onChange={onChange} disabled />);
-  expect(screen.getByRole("combobox")).toBeDisabled();
+  expect(screen.getByRole("button", { name: /Work location:/ })).toBeDisabled();
+});
+
+
+it("replaces a project with a local directory and back with one atomic selection", async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn();
+  api.listRuntimeWorkspaces.mockResolvedValue([{ id: "rws-1", name: "Private workbench", daemon_id: "laptop", root_path: "/Users/mac/workbench", cwd: "app", status: "unavailable" }]);
+  const view = show(<WorkLocationPicker wsId="ws-1" projectId="project-1" value={null} onChange={onChange} />);
+  await user.click(await screen.findByRole("button", { name: "Work location: Remi" }));
+  const directory = await screen.findByRole("menuitem", { name: /Private workbench/ });
+  expect(directory).toHaveTextContent("/Users/mac/workbench/app");
+  expect(directory).toHaveTextContent("Mac");
+  expect(directory).toHaveTextContent("Offline");
+  await user.click(directory);
+  expect(onChange).toHaveBeenLastCalledWith({ project_id: null, runtime_workspace_id: "rws-1" });
+  await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+  view.rerender(<WorkLocationPicker wsId="ws-1" projectId={null} value="rws-1" onChange={onChange} />);
+  await user.click(screen.getByRole("button", { name: "Work location: Private workbench" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Remi" }));
+  expect(onChange).toHaveBeenLastCalledWith({ project_id: "project-1", runtime_workspace_id: null });
+  await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+  await user.click(screen.getByRole("button", { name: /Work location:/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Automatic" }));
+  expect(onChange).toHaveBeenLastCalledWith({ project_id: null, runtime_workspace_id: null });
+});
+
+it("keeps project choices usable when directory loading fails", async () => {
+  api.listRuntimeWorkspaces.mockRejectedValue(new Error("unavailable"));
+  const user = userEvent.setup();
+  const onChange = vi.fn();
+  show(<WorkLocationPicker wsId="ws-1" value={null} onChange={onChange} />);
+  await user.click(screen.getByRole("button", { name: "Work location: Automatic" }));
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  await user.click(await screen.findByRole("menuitem", { name: "Remi" }));
+  expect(onChange).toHaveBeenCalledWith({ project_id: "project-1", runtime_workspace_id: null });
 });

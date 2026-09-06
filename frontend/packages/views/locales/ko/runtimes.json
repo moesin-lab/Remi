@@ -596,7 +596,7 @@
     }
   },
   "workspaces": {
-    "title": "Runtime 작업 공간",
+    "title": "작업 디렉터리",
     "picker_label": "실행 작업 공간",
     "automatic": "자동 작업 디렉터리",
     "description": "이 기기의 폴더를 선택하여 Chat과 Issue에서 파일, 지침, 의존성을 함께 사용하세요.",
@@ -655,5 +655,22 @@
     "browse_select": "이 디렉터리 사용",
     "browse_inside_root": "공유 루트 내부의 디렉터리를 선택하세요.",
     "browse_missing_path": "Runtime이 전체 디렉터리 경로를 반환하지 않았습니다. 업데이트한 후 다시 시도하세요."
+  },
+  "location": {
+    "label": "작업 위치",
+    "hint": "이 작업에 사용할 프로젝트 또는 로컬 작업 디렉터리를 선택하세요.",
+    "chat_hint": "로컬 디렉터리를 재사용하거나 채팅의 자동 디렉터리를 사용하세요.",
+    "unassigned": "자동",
+    "projects": "프로젝트 / 저장소",
+    "directories": "로컬 작업 디렉터리",
+    "loading": "불러오는 중…",
+    "projects_failed": "프로젝트를 불러오지 못했습니다.",
+    "projects_empty": "활성 프로젝트가 없습니다.",
+    "directories_empty": "등록된 디렉터리가 없습니다. Runtime → 작업 디렉터리에서 추가하세요.",
+    "directory_missing": "디렉터리 사용 불가",
+    "project_missing": "프로젝트 사용 불가",
+    "machine_unknown": "등록된 머신",
+    "offline": "오프라인 · 실행 대기",
+    "locked": "시작 후에는 작업 위치가 고정됩니다. 변경하려면 새 작업이나 채팅을 시작하세요."
   }
 }

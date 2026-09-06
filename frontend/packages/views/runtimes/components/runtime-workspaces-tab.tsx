@@ -10,7 +10,6 @@ import { relativeRuntimeDirectory, runtimeDirectoryName, runtimeWorkspaceDirecto
 import { Button } from "@multiremi/ui/components/ui/button";
 import { Input } from "@multiremi/ui/components/ui/input";
 import { Textarea } from "@multiremi/ui/components/ui/textarea";
-import { ProjectPicker } from "../../projects/components/project-picker";
 import { useT } from "../../i18n";
 import { RuntimeDirectoryDialog } from "./runtime-directory-dialog";
 
@@ -30,7 +29,6 @@ function WorkspaceContent({ runtime, canManage, wsId }: { runtime: AgentRuntime;
   const [cwd, setCwd] = useState(".");
   const [context, setContext] = useState("");
   const [envFile, setEnvFile] = useState("");
-  const [projectId, setProjectId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [picker, setPicker] = useState<"root" | "cwd" | null>(null);
   const workspaces = (query.data ?? []).filter(w => w.daemon_id === runtime.daemon_id);
@@ -60,9 +58,9 @@ function WorkspaceContent({ runtime, canManage, wsId }: { runtime: AgentRuntime;
           await create.mutateAsync({ runtimeId: runtime.id, input: {
             name: name.trim(), root_path: root, cwd,
             context_paths: context.split(/\r?\n/).map(path => path.trim()).filter(Boolean),
-            env_file: envFile.trim() || null, project_id: projectId,
+            env_file: envFile.trim() || null,
           } });
-          setName(""); setRoot(""); setCwd("."); setContext(""); setEnvFile(""); setProjectId(null);
+          setName(""); setRoot(""); setCwd("."); setContext(""); setEnvFile("");
           setMessage(t($ => $.workspaces.registered));
         } catch { /* Preserve the chosen directory and input for correction. */ }
       }}>
@@ -115,9 +113,6 @@ function WorkspaceContent({ runtime, canManage, wsId }: { runtime: AgentRuntime;
               <SlidersHorizontal className="size-4" />{t($ => $.workspaces.context_options)}<ChevronRight className="ml-auto size-4 transition-transform group-open:rotate-90" />
             </summary>
             <div className="space-y-4 pt-5">
-              <div className="space-y-2 text-xs font-medium"><p>{t($ => $.workspaces.project)}</p>
-                <ProjectPicker projectId={projectId} onUpdate={update => setProjectId(update.project_id ?? null)} />
-              </div>
               <label className="block space-y-2 text-xs font-medium" htmlFor={`${prefix}-context`}><span>{t($ => $.workspaces.context_paths)}</span>
                 <Textarea id={`${prefix}-context`} value={context} onChange={event => setContext(event.target.value)} placeholder={t($ => $.workspaces.context_placeholder)} rows={3} className="font-mono text-xs" disabled={create.isPending} />
               </label>

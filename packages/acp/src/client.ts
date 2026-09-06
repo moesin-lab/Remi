@@ -13,6 +13,7 @@ import type {
   JsonRpcMessage,
   InitializeParams,
   InitializeResult,
+  AuthenticateParams,
   NewSessionParams,
   NewSessionResult,
   PromptParams,
@@ -24,6 +25,7 @@ import type {
   ElicitationCreateParams,
   ElicitationResult,
   SetSessionModeParams,
+  SetSessionModelParams,
   SetSessionConfigOptionParams,
   SetSessionConfigOptionResult,
   CancelParams,
@@ -475,7 +477,7 @@ export class AcpClient {
 
   // ── ACP protocol methods ───────────────────────────────────────
 
-  async initialize(): Promise<InitializeResult> {
+  async initialize(meta?: Record<string, unknown>): Promise<InitializeResult> {
     const params: InitializeParams = {
       protocolVersion: 1,
       clientInfo: { name: "remi", version: "0.1.0" },
@@ -496,12 +498,18 @@ export class AcpClient {
         // drops a boolean here.
         elicitation: { form: {} },
       },
+      ...(meta ? { _meta: meta } : {}),
     };
 
     const result = await this._request<InitializeResult>("initialize", params);
     this._initialized = true;
     this._initializeResult = result;
     return result;
+  }
+
+  async authenticate(methodId: string, meta?: Record<string, unknown>): Promise<void> {
+    const params: AuthenticateParams = { methodId, ...(meta ? { _meta: meta } : {}) };
+    await this._request("authenticate", params);
   }
 
   async newSession(params?: Partial<NewSessionParams>): Promise<NewSessionResult> {
@@ -533,6 +541,11 @@ export class AcpClient {
   async setMode(sessionId: string, modeId: string): Promise<void> {
     const params: SetSessionModeParams = { sessionId, modeId };
     await this._request("session/set_mode", params);
+  }
+
+  async setModel(sessionId: string, modelId: string, meta?: Record<string, unknown>): Promise<void> {
+    const params: SetSessionModelParams = { sessionId, modelId, ...(meta ? { _meta: meta } : {}) };
+    await this._request("session/set_model", params);
   }
 
   /**

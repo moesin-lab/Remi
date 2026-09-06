@@ -82,6 +82,12 @@ describe("Bun Multiremi daemon smoke", () => {
       },
       { id: "gpt-fast", label: "GPT Fast", provider: "openai", default: false },
     ]);
+
+    expect(runtimeModelsFromAcpCapabilities("grok", [
+      { id: "grok-code-fast-1", label: "Grok Code Fast 1", default: true },
+    ])).toEqual([
+      { id: "grok-code-fast-1", label: "Grok Code Fast 1", provider: "xai", default: true },
+    ]);
   });
 
   it("discovers Claude and Codex gateway models from isolated daemon-owned probe homes", async () => {

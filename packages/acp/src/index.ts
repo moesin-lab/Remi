@@ -9,7 +9,7 @@
  *   SendOptions          — send/sendStream options
  *   MediaAttachment      — connector→provider media type
  *   SessionUpdate + all ACP protocol types
- *   ClaudeAdapter / CodexAdapter / createAdapter
+ *   ClaudeAdapter / CodexAdapter / GrokAdapter / createAdapter
  */
 
 // ── Provider ──────────────────────────────────────────────────
@@ -27,7 +27,14 @@ export type {
   AcpModelCapability,
   AcpModelEffortCapability,
 } from "./provider.js";
-export { ensureAcpBridges, bridgeVersion, agentCliVersion, reinstallBridge, type ProvisionProvider } from "./provision.js";
+export {
+  ensureAcpBridges,
+  bridgeVersion,
+  agentCliVersion,
+  reinstallBridge,
+  type AgentCliProvider,
+  type ProvisionProvider,
+} from "./provision.js";
 
 // ── Provider interface & shared types ─────────────────────────
 export type { Provider, AgentResponse, SendOptions, ProviderEvent } from "@shared/contracts/provider-types.js";
@@ -82,7 +89,7 @@ export { elicitationToQuestions, answersToElicitationContent } from "@shared/con
 export type { ElicitationQuestion } from "@shared/contracts/acp-elicitation.js";
 
 // ── Adapters ──────────────────────────────────────────────────
-export { ClaudeAdapter, CodexAdapter, createAdapter } from "./adapters/index.js";
+export { ClaudeAdapter, CodexAdapter, GrokAdapter, createAdapter } from "./adapters/index.js";
 export type { AgentAdapter, AskUserQuestionData, AgentSessionOptions } from "@shared/contracts/acp-protocol.js";
 
 // ── Streaming meta types (used by connector stream handlers) ──

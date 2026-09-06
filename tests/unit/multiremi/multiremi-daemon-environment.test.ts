@@ -31,6 +31,7 @@ describe("Multiremi daemon environment", () => {
       "/opt/npm-global/bin",
       join(home, ".npm-global", "bin"),
       join(home, ".local", "bin"),
+      join(home, ".grok", "bin"),
       "/usr/bin",
       "/bin",
     ]);
@@ -82,6 +83,7 @@ describe("Multiremi daemon environment", () => {
       join(home, ".remi", "node", "bin"),
       join(home, ".npm-global", "bin"),
       localBin,
+      join(home, ".grok", "bin"),
       "/usr/bin",
     ]);
   });

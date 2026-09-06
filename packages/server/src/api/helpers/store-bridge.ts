@@ -11,6 +11,7 @@ import {
   currentRequestUserId,
   hasRequestField,
   issueCompatibilityResponse,
+  MULTIREMI_DAEMON_PROVIDERS,
   projectCompatibilityResponse,
   projectDocCompatibilityResponse,
   projectResourceCompatibilityResponse,
@@ -494,7 +495,7 @@ export function safeRuntimeOnboardingBootstrap(
   // COALESCE(...,'local') so a workspace-less runtime is treated as local,
   // matching how the claim predicate (and the rest of the system) reads it.
   if (!runtime || (runtime.workspaceId ?? "local") !== workspaceId) return { error: "invalid runtime_id", status: 400 };
-  const provider = runtime.provider === "claude" || runtime.provider === "codex" ? runtime.provider : "codex";
+  const provider = MULTIREMI_DAEMON_PROVIDERS.has(runtime.provider) ? runtime.provider : "codex";
   const before = store.getDefaultAgent(workspaceId, provider, bootstrapUserId);
   const isFirstAgent = isFirstAgentInWorkspace(store, workspaceId);
   const agent = store.ensureDefaultAgent(provider, {

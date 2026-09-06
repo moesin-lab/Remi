@@ -30,7 +30,7 @@ export type { StreamingCloseOptions, TokenProvider } from "./streaming.js";
 export type { StreamMeta, StreamHandlerLog } from "@shared/contracts/acp-protocol.js";
 
 // ── Adapters ──────────────────────────────────────────────────
-export { createAdapter, ClaudeAdapter, CodexAdapter } from "./adapters/index.js";
+export { createAdapter, ClaudeAdapter, CodexAdapter, GrokAdapter } from "./adapters/index.js";
 export type { AgentAdapter, AskUserQuestionData, AgentSessionOptions } from "@shared/contracts/acp-protocol.js";
 
 // ── ACP Protocol types ────────────────────────────────────────

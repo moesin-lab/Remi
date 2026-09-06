@@ -8,7 +8,7 @@ import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { AcpProvider } from "@acp/index.js";
 
-export const SUPPORTED_DAEMON_PROVIDERS = ["claude", "codex"] as const;
+export const SUPPORTED_DAEMON_PROVIDERS = ["claude", "codex", "grok"] as const;
 
 export type SupportedDaemonProvider = typeof SUPPORTED_DAEMON_PROVIDERS[number];
 
@@ -133,7 +133,9 @@ export function detectMultiremiProviders(options: {
   return SUPPORTED_DAEMON_PROVIDERS.filter((provider) => {
     const commands = provider === "claude"
       ? ["remi-claude-agent-acp", "claude-agent-acp", "claude"]
-      : ["codex-acp", "codex"];
+      : provider === "codex"
+        ? ["codex-acp", "codex"]
+        : ["grok"];
     return paths.some((dir) => commands.some((command) => {
       return extensions.some((extension) => canExecute(join(dir, `${command}${extension}`)));
     }));

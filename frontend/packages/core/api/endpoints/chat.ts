@@ -7,6 +7,8 @@ import type {
   SendChatMessageResponse,
 } from "../../types";
 import { type HttpClient, ApiError } from "../http";
+import { ApiContractError, parseStrictResponse } from "../schema";
+import { ChatSessionSchema, ChatSessionListSchema } from "../schemas/chat";
 
 export class ChatEndpoints {
   constructor(readonly http: HttpClient) {}
@@ -14,18 +16,28 @@ export class ChatEndpoints {
   // Chat Sessions
   async listChatSessions(params?: { status?: string }): Promise<ChatSession[]> {
     const query = params?.status ? `?status=${params.status}` : "";
-    return this.http.fetch(`/api/chat/sessions${query}`);
+    const raw = await this.http.fetch<unknown>(`/api/chat/sessions${query}`);
+    return parseStrictResponse(raw, ChatSessionListSchema, { endpoint: "GET /api/chat/sessions" });
   }
 
   async getChatSession(id: string): Promise<ChatSession> {
-    return this.http.fetch(`/api/chat/sessions/${id}`);
+    const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${id}`);
+    return parseStrictResponse(raw, ChatSessionSchema, { endpoint: "GET /api/chat/sessions/:id" });
   }
 
-  async createChatSession(data: { agent_id: string; title?: string }): Promise<ChatSession> {
-    return this.http.fetch("/api/chat/sessions", {
+  async createChatSession(data: { agent_id: string; title?: string; project_id?: string | null; runtime_workspace_id?: string | null }): Promise<ChatSession> {
+    const raw = await this.http.fetch<unknown>("/api/chat/sessions", {
       method: "POST",
       body: JSON.stringify(data),
     });
+    const session = parseStrictResponse<ChatSession>(raw, ChatSessionSchema, { endpoint: "POST /api/chat/sessions" });
+    if (data.runtime_workspace_id && session.runtime_workspace_id !== data.runtime_workspace_id) {
+      throw new ApiContractError("POST /api/chat/sessions", "Server did not retain the selected runtime workspace");
+    }
+    if (data.project_id && session.project_id !== data.project_id) {
+      throw new ApiContractError("POST /api/chat/sessions", "Server did not retain the selected project");
+    }
+    return session;
   }
 
   async deleteChatSession(id: string): Promise<void> {

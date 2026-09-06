@@ -3,6 +3,7 @@
 import { createId, nowIso } from "@multiremi/ids.js";
 import { cleanOptionalString, isActiveTaskStatus, nullableString } from "@multiremi/store/helpers.js";
 import { type StoreContext } from "@multiremi/store/context.js";
+import { RuntimeWorkspaceError, RuntimeWorkspacesRepo } from "./runtime-workspaces-repo.js";
 import { buildSessionProjection } from "@multiremi/store/session-projection.js";
 import { resolveProjectionTokenBudget } from "@multiremi/store/session-projection-budget.js";
 import { createLogger } from "@shared/logger.js";
@@ -109,6 +110,7 @@ function truncateUtf8(value: string, maxBytes: number): string {
   return new TextDecoder().decode(bytes.slice(0, end)).trimEnd();
 }
 
+
 export class ChatRepo {
   constructor(private ctx: StoreContext) {}
 
@@ -124,15 +126,25 @@ export class ChatRepo {
     const issue = issueId ? this.ctx.issues().getIssue(issueId) : null;
     if (issueId && !issue) throw new Error(`Issue not found: ${issueId}`);
     if (issue && issue.workspaceId !== workspaceId) throw new Error("Issue belongs to another workspace");
+    // A Chat selects its own environment even when it later links an Issue.
+    const runtimeWorkspaceId = input.runtimeWorkspaceId ?? input.runtime_workspace_id ?? null;
+    if (runtimeWorkspaceId) new RuntimeWorkspacesRepo(this.ctx).require(runtimeWorkspaceId, workspaceId);
+    const projectId = cleanOptionalString(input.projectId ?? input.project_id);
+    if (projectId && runtimeWorkspaceId) throw new RuntimeWorkspaceError("Choose either a project or a runtime workspace");
+    if (projectId) {
+      const project = this.ctx.projects().getProject(projectId);
+      if (!project || project.workspaceId !== workspaceId) throw new RuntimeWorkspaceError("Project not found", 404);
+      if (project.archivedAt) throw new RuntimeWorkspaceError("Project is archived", 409);
+    }
     const id = input.id ?? createId("chat");
     const now = nowIso();
     const title = input.title?.trim() || `Chat with ${agent.name}`;
     this.ctx.db.run(
       `INSERT INTO multiremi_chat_sessions (
-        id, workspace_id, creator_id, agent_id, issue_id, title, status, session_id, work_dir, latest_task_id,
+        project_id, runtime_workspace_id, id, workspace_id, creator_id, agent_id, issue_id, title, status, session_id, work_dir, latest_task_id,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'active', NULL, NULL, NULL, ?, ?)`,
-      [id, workspaceId, input.creatorId ?? input.creator_id ?? "local", agentId, issue?.id ?? null, title, now, now],
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, NULL, ?, ?)`,
+      [projectId, runtimeWorkspaceId, id, workspaceId, input.creatorId ?? input.creator_id ?? "local", agentId, issue?.id ?? null, title, now, now],
     );
     const session = this.getChatSession(id)!;
     if (session.issueId) this.ensureDefaultAgentIssueUpdatesChannel(session);
@@ -195,6 +207,15 @@ export class ChatRepo {
   updateChatSession(id: string, input: UpdateChatSessionInput): MultiremiChatSession {
     const current = this.getChatSession(id);
     if (!current) throw new Error(`Chat session not found: ${id}`);
+    const location = input as UpdateChatSessionInput & CreateChatSessionInput;
+    for (const [field, saved] of [
+      ["projectId", current.projectId], ["project_id", current.projectId],
+      ["runtimeWorkspaceId", current.runtimeWorkspaceId], ["runtime_workspace_id", current.runtimeWorkspaceId],
+    ] as const) {
+      if (Object.hasOwn(location, field) && (location[field] ?? null) !== (saved ?? null)) {
+        throw new RuntimeWorkspaceError("Chat work location is fixed; create a new Chat to change it", 409);
+      }
+    }
     const issueFieldProvided = Object.hasOwn(input, "issueId") || Object.hasOwn(input, "issue_id");
     const requestedIssueId = issueFieldProvided
       ? cleanOptionalString(input.issueId ?? input.issue_id)
@@ -532,6 +553,8 @@ function chatMessagesAsSessionEvents(
 
 function toChatSession(row: Row): MultiremiChatSession {
   return {
+    projectId: nullableString(row.project_id),
+    runtimeWorkspaceId: nullableString(row.runtime_workspace_id),
     id: String(row.id),
     workspaceId: String(row.workspace_id ?? "local"),
     creatorId: nullableString(row.creator_id) ?? "local",

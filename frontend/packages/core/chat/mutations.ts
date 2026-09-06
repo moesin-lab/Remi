@@ -12,11 +12,12 @@ export function useCreateChatSession() {
   const wsId = useWorkspaceId();
 
   return useMutation({
-    mutationFn: (data: { agent_id: string; title?: string }) => {
+    mutationFn: (data: { agent_id: string; title?: string; project_id?: string | null; runtime_workspace_id?: string | null }) => {
       logger.info("createChatSession.start", { agent_id: data.agent_id, titleLength: data.title?.length ?? 0 });
       return api.createChatSession(data);
     },
     onSuccess: (session) => {
+      qc.setQueryData<ChatSession[]>(chatKeys.sessions(wsId), previous => [session, ...(previous ?? []).filter(item => item.id !== session.id)]);
       logger.info("createChatSession.success", { sessionId: session.id, agentId: session.agent_id });
     },
     onError: (err) => {

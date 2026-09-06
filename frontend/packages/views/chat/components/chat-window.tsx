@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { WorkLocationPicker } from "../../runtimes/components/runtime-workspace-picker";
 import { useInfiniteQuery, useQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { motion } from "motion/react";
 import { Minus, Maximize2, Minimize2, Plus } from "lucide-react";
@@ -70,6 +71,9 @@ function seedChatMessagesPageCache(
 export function ChatWindow() {
   const { t } = useT("chat");
   const wsId = useWorkspaceId();
+  const [runtimeWorkspaceId, setRuntimeWorkspaceId] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState<string | null>(null);
+  useEffect(() => { setRuntimeWorkspaceId(null); setProjectId(null); }, [wsId]);
   const isOpen = useChatStore((s) => s.isOpen);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const selectedAgentId = useChatStore((s) => s.selectedAgentId);
@@ -256,6 +260,8 @@ export function ChatWindow() {
         try {
           const session = await createSession.mutateAsync({
             agent_id: activeAgent.id,
+            runtime_workspace_id: runtimeWorkspaceId,
+            project_id: projectId,
             title: titleSeed.slice(0, 50),
           });
           return session.id;
@@ -266,7 +272,7 @@ export function ChatWindow() {
       sessionPromiseRef.current = promise;
       return promise;
     },
-    [activeSessionId, activeAgent, createSession],
+    [activeSessionId, activeAgent, createSession, runtimeWorkspaceId, projectId],
   );
 
   const handleUploadFile = useCallback(
@@ -430,6 +436,8 @@ export function ChatWindow() {
       previousSessionId: activeSessionId,
       previousPendingTask: pendingTaskId,
     });
+    setRuntimeWorkspaceId(null);
+    setProjectId(null);
     setActiveSession(null);
   }, [activeSessionId, pendingTaskId, setActiveSession]);
 
@@ -560,6 +568,12 @@ export function ChatWindow() {
         </div>
       </div>
 
+      <div className="shrink-0 border-b px-3 py-2">
+        <WorkLocationPicker wsId={wsId} value={activeSessionId ? currentSession?.runtime_workspace_id ?? null : runtimeWorkspaceId}
+          projectId={activeSessionId ? currentSession?.project_id ?? null : projectId}
+          onChange={location => { setProjectId(location.project_id); setRuntimeWorkspaceId(location.runtime_workspace_id); }}
+          disabled={Boolean(activeSessionId) || createSession.isPending} />
+      </div>
       {/* Messages / skeleton / empty state */}
       {showSkeleton ? (
         <ChatMessageSkeleton />

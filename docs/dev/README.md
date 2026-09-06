@@ -18,6 +18,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 判断能力是否存在 | [能力定位](../MULTIREMI_PARITY_MATRIX.md) | 当前实现和验证入口；不从旧完成标记推断 |
 | 运行测试、验证回归 | [测试](../../TESTING.md) | 测试发现范围与真实服务前提 |
 | 新增 API 或 CLI 能力 | [CLI 命令契约](../cli-command-migration.md) | canonical 命令、注册与能力检查 |
+| 改 Runtime 工作区、执行目录或本地上下文 | [Runtime 持久化工作区](runtime-workspaces.md) | daemon 归属、绑定、目录和上下文保留、调度约束 |
 | 修改登录、租户隔离或 token 权限 | [认证与权限](auth.md) | 身份来源、资源 guard 和生产启动约束 |
 | 修改 ACP 后端或 token-sync | [Codex 接入](../design/acp-codex-via-codex-acp.md)、[认证插件与同步](../design/1passport-bytedance-sso.md) | 实际启动、认证、会话和凭据隔离边界 |
 | 修改云友模板或 Skill | [Agent 配置规范](../agent-config-spec.md) | 提示词结构、字段和元信息检查 |

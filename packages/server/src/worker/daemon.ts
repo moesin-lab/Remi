@@ -17,6 +17,7 @@ import type { ElicitationCreateParams, ElicitationResult, PermissionOutcome, Req
 import { answersToElicitationContent, elicitationToQuestions } from "@shared/contracts/acp-elicitation.js";
 import type { AgentResponse, Provider } from "@shared/contracts/provider-types.js";
 import {
+  DEFAULT_DAEMON_REQUEST_TIMEOUT_MS,
   isTerminalDaemonAuthorityError,
   MultiremiDaemonClient,
   MultiremiDaemonHttpError,
@@ -90,6 +91,7 @@ import { prepareIssueWikiWorkspace } from "@daemon/agent-runtime/workspace/wiki.
 import { cleanProcessEnv } from "@daemon/agent-runtime/env/injector.js";
 import { mergeCodexSessionConfig } from "@daemon/agent-runtime/relay-sync.js";
 import { AgentRuntime } from "@daemon/agent-runtime/runtime.js";
+import { prepareRuntimeWorkspaceContext } from "@daemon/agent-runtime/workspace/runtime-context.js";
 import { AgentSession } from "@daemon/agent-runtime/session.js";
 import type { EphemeralContext } from "@daemon/agent-runtime/types.js";
 import { AgentPluginCache } from "@daemon/agent-runtime/agent-plugins/cache.js";
@@ -346,6 +348,8 @@ export interface MultiremiDaemonOptions {
   provider?: string;
   workspaceId?: string | null;
   pollIntervalMs?: number;
+  /** Deadline for control-plane JSON requests; archive uploads have a separate budget. */
+  requestTimeoutMs?: number;
   maxConcurrency?: number;
   once?: boolean;
   providerFactory?: MultiremiDaemonProviderFactory;
@@ -589,6 +593,7 @@ export class MultiremiDaemon {
   private workspaceSettings = new Map<string, Record<string, unknown>>();
   private workspaceRelays = new Map<string, MultiremiRelayWire | undefined>();
   private stopped = false;
+  private pollAbort = new AbortController();
   private startedAt = new Date();
   private ready = false;
   private activeTaskCount = 0;
@@ -689,6 +694,7 @@ export class MultiremiDaemon {
       provider: options.provider ?? process.env.MULTIREMI_PROVIDER ?? "claude",
       workspaceId: options.workspaceId ?? process.env.MULTIREMI_WORKSPACE_ID ?? "local",
       pollIntervalMs: options.pollIntervalMs ?? parseInt(process.env.MULTIREMI_POLL_INTERVAL_MS ?? "3000", 10),
+      requestTimeoutMs: options.requestTimeoutMs ?? DEFAULT_DAEMON_REQUEST_TIMEOUT_MS,
       maxConcurrency: resolveDaemonConcurrency(options.maxConcurrency ?? numberEnv(process.env.MULTIREMI_MAX_CONCURRENCY, 0)),
       once: options.once ?? false,
       launchedBy: options.launchedBy ?? process.env.MULTIREMI_LAUNCHED_BY ?? null,
@@ -753,6 +759,7 @@ export class MultiremiDaemon {
       : [...TERMINAL_AUTHORITY_CLEANUP_RETRY_DELAYS_MS];
     this.localSkillRoots = options.localSkillRoots ?? {};
     this.client = new MultiremiDaemonClient(options.serverUrl, this.options.token, {
+      requestTimeoutMs: this.options.requestTimeoutMs,
       sessionArchiveUploadBaseUrl: options.sessionArchiveUploadBaseUrl === undefined
         ? process.env.MULTIREMI_ARCHIVE_UPLOAD_BASE_URL ?? null
         : options.sessionArchiveUploadBaseUrl,
@@ -922,6 +929,7 @@ export class MultiremiDaemon {
     this.startedAt = new Date();
     this.ready = false;
     this.stopped = false;
+    this.pollAbort = new AbortController();
     this.claimsPaused = false;
     this.serverDrainActive = false;
     this.appliedDrainGeneration = 0;
@@ -980,6 +988,7 @@ export class MultiremiDaemon {
             },
             this.botMenuPublisher !== null,
             this.feishuConcierge !== null,
+            this.pollAbort.signal,
           );
           const skipClaim = await this.handleHeartbeatAck(this.options.runtimeId!, ack);
           if (!skipClaim && !this.stopped) {
@@ -1036,7 +1045,8 @@ export class MultiremiDaemon {
             await this.stopAfterTerminalAuthority();
             break;
           }
-          if (this.stopped || this.options.once) throw err;
+          if (this.stopped) break;
+          if (this.options.once) throw err;
           log.warn(`daemon poll loop error, retrying in ${this.options.pollIntervalMs}ms: ${err instanceof Error ? err.message : String(err)}`);
           await sleep(this.options.pollIntervalMs);
         }
@@ -1047,6 +1057,13 @@ export class MultiremiDaemon {
           `daemon authorization was revoked or retired during startup; entering cleanup-only mode: ${error instanceof Error ? error.message : String(error)}`,
         );
         await this.stopAfterTerminalAuthority();
+      } else if (
+        this.stopped
+        && !this.workspaceOwnershipLost
+        && this.pollAbort.signal.aborted
+        && error === this.pollAbort.signal.reason
+      ) {
+        return;
       }
       throw error;
     } finally {
@@ -1165,6 +1182,7 @@ export class MultiremiDaemon {
         agent_version: this.agentVersion() ?? undefined,
         launched_by: this.options.launchedBy ?? "manual",
         agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
+        runtime_workspaces: 1,
         ssh_mesh_protocol: MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
       },
       deviceInfo: `${this.options.runtimeName} · ${multiremiVersion}`,
@@ -1746,7 +1764,7 @@ export class MultiremiDaemon {
     const abort = new AbortController();
     this.agentPluginReconcileAbort = abort;
     try {
-      const desired = await this.client.getRuntimeAgentPluginDesired(runtimeId);
+      const desired = await this.client.getRuntimeAgentPluginDesired(runtimeId, abort.signal);
       if (desired.runtime_id && desired.runtime_id !== runtimeId) {
         throw new Error(`Agent Plugin desired state belongs to Runtime ${desired.runtime_id}, expected ${runtimeId}`);
       }
@@ -1815,11 +1833,12 @@ export class MultiremiDaemon {
 
   stop(): void {
     this.stopped = true;
+    this.pollAbort.abort();
     // stop() is synchronous and may be called while start() is sleeping. Clear
     // the timer immediately; start()'s finally block waits for any current run.
     this.stopGcLoop();
     this.terminalAuthorityCleanupRetryWake?.();
-    this.agentPluginReconcileAbort?.abort();
+    this.agentPluginReconcileAbort?.abort(this.pollAbort.signal.reason);
     this.cancelRuntimeModelRefresh();
     // Release any handleTask waiting on report delivery; undelivered rows are
     // durable and replay on the next start().
@@ -2453,7 +2472,7 @@ export class MultiremiDaemon {
           : task.issueId;
         releaseIssueWorkspaceLifecycle = await this.issueWorkspaceLifecycleLocks.acquire(lifecycleKey);
         this.assertWorkspaceRootOwner();
-        if (task.holdsWorkspace !== false && task.issue?.key) {
+        if (!task.runtimeWorkspaceId && task.holdsWorkspace !== false && task.issue?.key) {
           const adopted = await this.topicWorkspaces.preparePendingMigrationForIssue(
             task.issueId,
             task.issue.key,
@@ -2551,6 +2570,11 @@ export class MultiremiDaemon {
           ...(relayAuthoritative ? { relayFragment: relay?.fragment ?? "" } : {}),
           codexRelayUsesEnvApiKey: task.agent?.provider === "codex" && Boolean(providerInstallEnv?.OPENAI_API_KEY),
         });
+        if (task.runtimeWorkspaceId) {
+          writeAgentSkillContext(providerHome.home, task);
+          const localEnv = prepareRuntimeWorkspaceContext(task, providerHome, resolvedWorkDir.workDir);
+          providerEnv = { ...localEnv, ...providerEnv };
+        }
       }
       this.enqueueTaskReport(task.id, "start", {});
       this.enqueueTaskReport(task.id, "progress", { summary: pickTaskStartupLine(task.agent?.name), step: 1, total: 3 });
@@ -2778,7 +2802,7 @@ export class MultiremiDaemon {
     syncResults: MultiremiRepoSyncResult[],
     signal: AbortSignal,
   ): Promise<PreparedIssueWorkspace> {
-    if (task.holdsWorkspace === false) return { checkouts: [], repos: [], warnings: [] };
+    if (task.runtimeWorkspaceId || task.holdsWorkspace === false) return { checkouts: [], repos: [], warnings: [] };
     if (task.issue?.issueKind !== "intake") {
       const prepared = await this.autoCheckoutTaskRepos(task, resolvedWorkDir, syncResults, signal);
       if (!resolvedWorkDir.localDirectory) {
@@ -2853,6 +2877,17 @@ export class MultiremiDaemon {
   ): Promise<void> {
     const runtimeId = task.runtimeId ?? this.options.runtimeId;
     if (!task.issueId || task.holdsWorkspace === false || !runtimeId) return;
+    if (task.runtimeWorkspaceId) {
+      // Only native session/archive state belongs to the Issue. Never report
+      // the external directory as an Issue-owned root that GC may reclaim.
+      this.enqueueTaskReport(task.id, "workspace", {
+        runtimeId,
+        rootPath: resolveIssueRuntimeStateRoot(task, rootPath, this.options.workspacesRoot, true),
+        branchName: task.issue?.issueKind === "intake" ? "" : `agent/${task.issue?.key ?? task.id}`,
+        status: "ready", repos: [],
+      });
+      return;
+    }
     if (task.issue?.issueKind === "intake") {
       // A degraded intake run keeps its error repos; the final report must not
       // paper over them with "ready" or the workspace status would contradict
@@ -3130,16 +3165,20 @@ export class MultiremiDaemon {
     // preparation unchanged, including for any task that also carries Chat
     // metadata but is anchored to an Issue workspace.
     const homepageChat = Boolean(task.chatSessionId && !task.issueId);
-    const repoSyncResults = homepageChat || task.holdsWorkspace === false
+    const repoSyncResults = task.runtimeWorkspaceId || homepageChat || task.holdsWorkspace === false
       ? []
       : await this.registerTaskRepos(task.workspaceId, task.repos ?? [], signal);
     const preparedWorkspace = await this.prepareTaskWorkspace(task, resolvedWorkDir, repoSyncResults, signal);
     this.assertWorkspaceRootOwner();
     try {
-      writeTaskContext(workDir, task);
-      writeTaskGcContext(workDir, task, { localDirectory: resolvedWorkDir.localDirectory });
-      writeProjectResourceContext(workDir, task);
-      writeAgentSkillContext(workDir, task);
+      const contextDir = task.runtimeWorkspaceId ? providerHome?.root : workDir;
+      if (!contextDir) throw new Error("Runtime workspace requires an isolated provider home");
+      writeTaskContext(contextDir, task);
+      if (!task.runtimeWorkspaceId) {
+        writeTaskGcContext(workDir, task, { localDirectory: resolvedWorkDir.localDirectory });
+        writeAgentSkillContext(workDir, task);
+      }
+      writeProjectResourceContext(contextDir, task);
     } catch (err) {
       log.warn(`Failed to write task context for ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
     }

@@ -30,6 +30,7 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 | `bun run e2e:frontend` | [Next ↔ Remi Bun API harness](tests/integration/e2e-frontend-ours.ts) | 已运行的 Web `:3000`、API `:6130`、PostgreSQL 与 `remi` 工作区；当前脚本从 Linux 的 `~/.cache/ms-playwright` 查找 Chromium，地址和工作区写在脚本中 |
 | `bun run e2e:multiremi` | [server/daemon/任务链路](tests/integration/e2e-multiremi.ts) | provider CLI、凭据与 Chromium |
 | `bun run smoke:multiremi:acp` | [ACP runtime 冒烟](tests/integration/smoke-multiremi-acp.ts) | 真实 ACP agent |
+| `bun run tests/integration/smoke-runtime-workspace-acp.ts --provider=codex` | [持久化工作区原生验证](tests/integration/smoke-runtime-workspace-acp.ts)：Chat → 重启 daemon → Issue，核对本地上下文与文件保留 | 已登录的 Codex ACP；也支持 `--provider=claude`，会发送两个真实模型请求 |
 | `bun run e2e:acp` / `bun run e2e:acp:full` | [ACP 冒烟](tests/integration/acp-e2e.ts) / [场景套件](tests/integration/acp-e2e-full.ts) | 对应 provider CLI 和凭据 |
 | `bun run probe:feishu` | [飞书流式卡片](tests/integration/feishu-streaming-probe.ts) | 专用测试会话与飞书凭据 |
 | `bun run replay:coverage` | [ACP fixture 重放检查](tests/integration/replay-coverage.ts) | 仓库内 fixture |

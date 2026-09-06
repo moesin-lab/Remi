@@ -147,7 +147,7 @@ export class IssuesEndpoints {
       method: "POST",
       body: JSON.stringify(data),
     });
-    const result = parseStrictResponse(raw, QuickCreateIssueResponseSchema, { endpoint: "POST /api/issues/quick-create" });
+    const result = parseStrictResponse<{ task_id: string; issue: Issue }>(raw, QuickCreateIssueResponseSchema, { endpoint: "POST /api/issues/quick-create" });
     return { task_id: result.task_id, issue: parseIssueMutation(result.issue, "POST /api/issues/quick-create", data) };
   }
 

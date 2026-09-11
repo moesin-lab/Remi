@@ -72,6 +72,19 @@ managed by `remi workspace`. Use `--runtime-workspace <id>` on `chat create` or
 `issue create|update` to select it. See the [runtime workspace contract](dev/runtime-workspaces.md)
 for local context, directory lifetime, and the immutable execution binding.
 
+`remi runtime skill scan <runtime> --root '~/.agents/skills'` discovers skills in
+a directory on that Runtime's machine. Poll `runtime skill status <runtime>
+<scan-request>` until it completes, then import a returned key with `runtime skill
+import <runtime> --scan-request <scan-request> --key <skill-key>`. The scan binds
+the import to the selected directory; `--name` and `--description` optionally
+override library metadata. Poll `runtime skill import-status <runtime>
+<import-request>` to obtain the imported skill. These operations require an online
+Runtime owned by the caller. Imports copy content into the Remi skill library;
+assign the imported skill to a cloud agent separately. See the
+[Runtime skill import contract](dev/runtime-skills.md) for file limits and daemon
+compatibility. JSON request input remains available through `--data` or `--file`;
+`--json` selects JSON output.
+
 The Feishu ingestion domain exposes source administration through
 `remi feishu source list|get|status|add|update` and task-safe processing through
 `remi feishu messages list|resolve|notify|draft-reply|propose-issue`. Issue

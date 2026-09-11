@@ -672,6 +672,7 @@ export interface MultiremiCloudRuntimeNode {
 }
 
 export interface MultiremiRuntimeLocalSkillSummary {
+  error?: string;
   key: string;
   name: string;
   description?: string;
@@ -683,6 +684,8 @@ export interface MultiremiRuntimeLocalSkillSummary {
 }
 
 export interface MultiremiRuntimeLocalSkillListRequest {
+  root?: string | null;
+  warnings?: string[];
   id: string;
   runtimeId: string;
   status: MultiremiRuntimeLocalSkillRequestStatus;
@@ -695,6 +698,7 @@ export interface MultiremiRuntimeLocalSkillListRequest {
 }
 
 export interface MultiremiRuntimeLocalSkillImportRequest {
+  root?: string | null;
   id: string;
   runtimeId: string;
   skillKey: string;
@@ -873,6 +877,7 @@ export interface MultiremiDaemonHeartbeatAck {
   };
   pending_local_skills?: {
     id: string;
+    root?: string;
   };
   pending_directory_scan?: {
     id: string;
@@ -882,10 +887,12 @@ export interface MultiremiDaemonHeartbeatAck {
   };
   pending_local_skill_import?: {
     id: string;
+    root?: string;
     skill_key: string;
   };
   pending_local_skill_imports?: Array<{
     id: string;
+    root?: string;
     skill_key: string;
   }>;
   pending_command?: {
@@ -1078,7 +1085,13 @@ export interface CreateCloudRuntimeNodeInput {
   metadata?: Record<string, unknown>;
 }
 
+export interface CreateRuntimeLocalSkillListInput {
+  root?: string;
+}
+
 export interface CreateRuntimeLocalSkillImportInput {
+  scanRequestId?: string;
+  scan_request_id?: string;
   skillKey?: string;
   skill_key?: string;
   name?: string | null;
@@ -1088,6 +1101,8 @@ export interface CreateRuntimeLocalSkillImportInput {
 }
 
 export interface ReportRuntimeLocalSkillListInput {
+  root?: string;
+  warnings?: string[];
   status?: string;
   skills?: MultiremiRuntimeLocalSkillSummary[];
   supported?: boolean;

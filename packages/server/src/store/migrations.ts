@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { attachmentIdsFromText } from "@multiremi/contracts/attachments.js";
-import { type SqlDatabase } from "@multiremi/store/db/postgres.js";
+import { PostgresSyncDatabase, type SqlDatabase } from "@multiremi/store/db/postgres.js";
 import {
   isSessionArchiveRetryExhausted,
   nextSessionArchiveRetryAt,
@@ -2676,6 +2676,7 @@ export function runMigrations(db: SqlDatabase): void {
   ensureIssueSubscriberTypedSchema(db);
   addColumnIfMissing(db, "multiremi_chat_sessions", "creator_id TEXT");
   addColumnIfMissing(db, "multiremi_chat_sessions", "unread_since TEXT");
+  addColumnIfMissing(db, "multiremi_chat_sessions", "pinned INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(
     db,
     "multiremi_chat_sessions",
@@ -2687,6 +2688,20 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_chat_sessions", "session_runtime_id TEXT");
   addColumnIfMissing(db, "multiremi_chat_sessions", "session_provider TEXT");
   addColumnIfMissing(db, "multiremi_chat_sessions", "session_execution_fingerprint TEXT");
+  addColumnIfMissing(db, "multiremi_chat_sessions", "next_message_seq INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "multiremi_chat_messages", "message_seq INTEGER NOT NULL DEFAULT 0");
+  runMigrationOnce(db, "20260911_chat_message_sequence", () => {
+    const legacyTieBreaker = db instanceof PostgresSyncDatabase ? "id" : "rowid";
+    db.run(`UPDATE multiremi_chat_messages SET message_seq = (
+      SELECT ranked.seq FROM (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY chat_session_id ORDER BY created_at ASC, ${legacyTieBreaker} ASC) AS seq
+        FROM multiremi_chat_messages
+      ) ranked WHERE ranked.id = multiremi_chat_messages.id
+    )`);
+    db.run(`UPDATE multiremi_chat_sessions SET next_message_seq = COALESCE(
+      (SELECT MAX(message_seq) FROM multiremi_chat_messages WHERE chat_session_id = multiremi_chat_sessions.id), 0)`);
+  });
+  db.exec("CREATE INDEX IF NOT EXISTS idx_multiremi_chat_messages_sequence ON multiremi_chat_messages(chat_session_id, message_seq)");
   addColumnIfMissing(db, "multiremi_chat_messages", "failure_reason TEXT");
   addColumnIfMissing(db, "multiremi_chat_messages", "elapsed_ms INTEGER");
   addColumnIfMissing(db, "multiremi_chat_messages", "pending_agent_delivery INTEGER NOT NULL DEFAULT 0");
@@ -2696,6 +2711,7 @@ export function runMigrations(db: SqlDatabase): void {
   dropColumnIfExists(db, "multiremi_agent_issue_update_state", "window_started_at");
   dropColumnIfExists(db, "multiremi_agent_issue_update_state", "deliveries_in_window");
   addColumnIfMissing(db, "multiremi_tasks", "chat_session_id TEXT");
+  addColumnIfMissing(db, "multiremi_tasks", "chat_queue_order INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "multiremi_tasks", "task_kind TEXT NOT NULL DEFAULT 'direct'");
   addColumnIfMissing(db, "multiremi_tasks", "wait_reason TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "failure_reason TEXT");

@@ -4,7 +4,7 @@ import type { Context } from "hono";
 import { MultiremiStore } from "@multiremi/store/store.js";
 import { cleanString, currentRequestUserId } from "../wire/index.js";
 import type { CreateChatSessionInput, SendChatMessageInput } from "@multiremi/contracts/types.js";
-import { canCurrentUserAccessAgent, denyCurrentUserWorkspaceAccess } from "./auth-guards.js";
+import { canCurrentUserAccessAgent, denyCurrentUserWorkspaceAccess, workspaceIdFromSlugHeader } from "./auth-guards.js";
 import { uniqueStrings } from "./common.js";
 import { assertRuntimeWorkspaceAccess } from "./runtime-workspaces.js";
 
@@ -16,16 +16,19 @@ export function withChatSessionCreator(
   return { ...input, creatorId, creator_id: creatorId };
 }
 
-export function requestedChatWorkspaceId(c: Context, input?: Pick<CreateChatSessionInput, "workspaceId" | "workspace_id">): string {
-  return cleanString(input?.workspaceId) ??
-    cleanString(input?.workspace_id) ??
-    cleanString(c.req.query("workspaceId")) ??
-    cleanString(c.req.query("workspace_id")) ??
-    "local";
+export function requestedChatWorkspaceId(c: Context, store: MultiremiStore, input?: Pick<CreateChatSessionInput, "workspaceId" | "workspace_id">): string | Response {
+  const explicit = cleanString(input?.workspaceId) ?? cleanString(input?.workspace_id) ??
+    cleanString(c.req.query("workspaceId")) ?? cleanString(c.req.query("workspace_id"));
+  const slug = cleanString(c.req.header("X-Workspace-Slug"));
+  const fromHeader = workspaceIdFromSlugHeader(c, store);
+  if (slug && !fromHeader) return c.json({ error: "workspace not found" }, 404);
+  if (explicit && fromHeader && explicit !== fromHeader) return c.json({ error: "workspace does not match X-Workspace-Slug" }, 400);
+  return explicit ?? fromHeader ?? "local";
 }
 
 export function withChatSessionRequestContext(c: Context, store: MultiremiStore, input: CreateChatSessionInput): CreateChatSessionInput | Response {
-  const workspaceId = requestedChatWorkspaceId(c, input);
+  const workspaceId = requestedChatWorkspaceId(c, store, input);
+  if (workspaceId instanceof Response) return workspaceId;
   const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
   if (denied) return denied;
   assertRuntimeWorkspaceAccess(c, store, input.runtimeWorkspaceId ?? input.runtime_workspace_id, workspaceId);

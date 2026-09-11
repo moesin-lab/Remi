@@ -28,6 +28,7 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 | 根脚本 | 验证内容 | 运行前准备 |
 |---|---|---|
 | `bun run e2e:frontend` | [Next ↔ Remi Bun API harness](tests/integration/e2e-frontend-ours.ts) | 已运行的 Web `:3000`、API `:6130`、PostgreSQL 与 `remi` 工作区；当前脚本从 Linux 的 `~/.cache/ms-playwright` 查找 Chromium，地址和工作区写在脚本中 |
+| `bun run tests/integration/smoke-chat-workspace.ts` | [Chat 页面冒烟](tests/integration/smoke-chat-workspace.ts)：非默认工作区、队列与会话管理，真实 Next ↔ API ↔ 临时 SQLite；模拟 Agent 任务输出 | 已安装前端依赖和 Chromium；脚本启动隔离服务，不调用真实 provider |
 | `bun run e2e:multiremi` | [server/daemon/任务链路](tests/integration/e2e-multiremi.ts) | provider CLI、凭据与 Chromium |
 | `bun run smoke:multiremi:acp` | [ACP runtime 冒烟](tests/integration/smoke-multiremi-acp.ts) | 真实 ACP agent |
 | `bun run tests/integration/smoke-runtime-workspace-acp.ts --provider=codex` | [持久化工作区原生验证](tests/integration/smoke-runtime-workspace-acp.ts)：Chat → 重启 daemon → Issue，核对本地上下文与文件保留 | 已登录的 Codex ACP；也支持 `--provider=claude`，会发送两个真实模型请求 |

@@ -72,6 +72,13 @@ managed by `remi workspace`. Use `--runtime-workspace <id>` on `chat create` or
 `issue create|update` to select it. See the [runtime workspace contract](dev/runtime-workspaces.md)
 for local context, directory lifetime, and the immutable execution binding.
 
+Chat management uses `remi chat pin|unpin|archive|restore <chat>`. Archiving stops
+unfinished runs and makes the conversation read-only until restored. While a
+Chat is running, `remi chat queue list|update|remove|clear|prioritize` manages its
+queued follow-ups. `prioritize <chat> <task>` moves the selected message next and
+stops the current run; `update <chat> <task> --content-file <path>` edits only a
+message that has not started. See the [Chat contract](chat.md).
+
 The Feishu ingestion domain exposes source administration through
 `remi feishu source list|get|status|add|update` and task-safe processing through
 `remi feishu messages list|resolve|notify|draft-reply|propose-issue`. Issue

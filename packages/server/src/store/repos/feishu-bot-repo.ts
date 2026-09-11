@@ -379,7 +379,7 @@ export class FeishuBotRepo {
           WHERE workspace_id = ? AND app_id = ? AND agent_id = ? AND external_session_key = ?`,
       ).get(workspaceId, config.appId, config.agentId, externalSessionKey) as Row | null;
       if (!binding) {
-        const chat = this.ctx.chat().createChatSession({
+        const chat = this.ctx.chat().createChatSessionWithinTransaction({
           workspaceId,
           agentId: config.agentId,
           creatorId: sender.user?.id ?? sender.actorId,
@@ -455,13 +455,14 @@ export class FeishuBotRepo {
       const now = nowIso();
       const messageId = createId("msg");
       this.ctx.db.run(
-        `INSERT INTO multiremi_chat_messages (id, chat_session_id, task_id, role, body, created_at)
-         VALUES (?, ?, ?, 'user', ?, ?)`,
+        `INSERT INTO multiremi_chat_messages (id, chat_session_id, task_id, role, body, created_at, message_seq)
+         VALUES (?, ?, ?, 'user', ?, ?, ?)`,
         messageId,
         chatSessionId,
         task.id,
         text,
         now,
+        this.ctx.chat().nextChatMessageSequenceWithinTransaction(chatSessionId),
       );
       this.ctx.db.run(
         "UPDATE multiremi_chat_sessions SET latest_task_id = ?, updated_at = ? WHERE id = ?",
@@ -516,7 +517,7 @@ export class FeishuBotRepo {
       ).get(issue.workspaceId, issue.id) as Row | null;
       if (existing) return false;
 
-      const chat = this.ctx.chat().createChatSession({
+      const chat = this.ctx.chat().createChatSessionWithinTransaction({
         id: `chat_issue_topic_${issue.id}`,
         workspaceId: issue.workspaceId,
         agentId: bot.config!.agentId,

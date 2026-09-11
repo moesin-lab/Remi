@@ -42,6 +42,8 @@ Runtime 可持有独立的[持久化工作区](dev/runtime-workspaces.md)：绑�
 
 Chat 可绑定同工作区的一个 Issue；新 Chat task 可继承该 `issueId`，Chat 创建时保存独立的项目或本机目录选择，显式选择优先于关联 Issue 的项目；本机目录不附加项目仓库，项目聊天沿用按需检出。未选目录时使用自动 Chat 目录，其完成不会自动改变 Issue 状态或发布 Issue 回复评论。绑定、改绑和待投递更新由 [ChatRepo](../packages/server/src/store/repos/chat-repo.ts)维护。[claim wire](../packages/server/src/api/wire/tasks.ts)为 Chat/Issue 会话生成有预算的 bootstrap/delta projection，并单独携带绑定 Issue 与增量摘要；[CLI context](../packages/server/src/api/routers/cli.ts)提供 caller 的 Chat/Issue 信息，不能从摘要推断完整历史。
 
+[Chat 独立页面与浮窗](chat.md)共享会话选择、草稿和 Query cache。每条消息保存为独立 task，同一会话串行领取；排队消息在领取时刷新续接上下文，当前轮投影排除后续输入。会话管理和队列修改由 ChatRepo 在工作区生命周期锁下处理，私聊事件仅向有权限的创建者分发。
+
 **飞书聊天**：[controlPlaneConciergeHost / createFeishuTaskHandler](../apps/remi/cli/multiremi.ts)启动 connector；普通消息经 daemon client 提交平台 Chat/Task，再走上面的任务执行链。connector 从 task 事件流回复；去重、运行中 steering、取消与人工请求也使用平台 task。当前 foreground 不实例化 `packages/remi` 的 `Remi` core，不能以该库的 `_process()` 作为当前 bot 入口。
 工作区的 [Feishu bot 配置](../packages/server/src/store/repos/feishu-bot-repo.ts)指定 Agent 和 Runtime；
 bot 控制指令携带版本和期望状态。[concierge supervisor](../packages/server/src/worker/feishu-concierge.ts)经鉴权接口拉取 assignment 后串行协调 connector 的启动、停止与重试，应用凭据不随心跳下发。心跳还可领取持久化出站投递，由 connector 发送并回报；自动 Issue 话题及负责人轮次完成推送见[飞书接入契约](feishu-message-ingestion.md)。

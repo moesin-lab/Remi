@@ -3969,6 +3969,14 @@ runMigrations(this.db);
     return this.autopilots.handleAutopilotWebhookByToken(token, input);
   }
 
+  nextChatMessageSequenceWithinTransaction(chatSessionId: string): number {
+    return this.chat.nextChatMessageSequenceWithinTransaction(chatSessionId);
+  }
+
+  createChatSessionWithinTransaction(input: CreateChatSessionInput): MultiremiChatSession {
+    return this.chat.createChatSessionWithinTransaction(input);
+  }
+
   createChatSession(input: CreateChatSessionInput): MultiremiChatSession {
     return this.chat.createChatSession(input);
   }
@@ -4002,6 +4010,22 @@ runMigrations(this.db);
 
   getPendingChatTask(chatSessionId: string): MultiremiTask | null {
     return this.chat.getPendingChatTask(chatSessionId);
+  }
+
+  listQueuedChatTasks(chatSessionId: string) {
+    return this.chat.listQueuedChatTasks(chatSessionId);
+  }
+
+  updateQueuedChatTask(chatSessionId: string, taskId: string, content: string) {
+    return this.chat.updateQueuedChatTask(chatSessionId, taskId, content);
+  }
+
+  removeQueuedChatTasks(chatSessionId: string, taskId?: string): void {
+    this.chat.removeQueuedChatTasks(chatSessionId, taskId);
+  }
+
+  prioritizeQueuedChatTask(chatSessionId: string, taskId: string) {
+    return this.chat.prioritizeQueuedChatTask(chatSessionId, taskId);
   }
 
   listPendingChatTasks(workspaceId?: string | null, options: { creatorId?: string | null } = {}): MultiremiTask[] {
@@ -4341,6 +4365,14 @@ runMigrations(this.db);
     failure_reason?: string | null;
   }): MultiremiTask {
     return this.tasks.failTask(taskId, input);
+  }
+
+  cancelTaskWithinTransaction(taskId: string): import("./repos/tasks-repo.js").CancelTaskResult {
+    return this.tasks.cancelTaskWithinTransaction(taskId);
+  }
+
+  notifyCancelledTask(result: import("./repos/tasks-repo.js").CancelTaskResult): void {
+    this.tasks.notifyCancelledTask(result);
   }
 
   cancelTask(taskId: string): MultiremiTask {

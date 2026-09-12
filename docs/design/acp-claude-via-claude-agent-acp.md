@@ -16,6 +16,8 @@ Runtime 详情的「Claude Code 连接」支持一个 Anthropic Messages 兼容�
 
 需要先更新并重启 daemon，使注册元数据带有 `claude_profiles: 1`。在此 Runtime 执行的 Claude 任务优先使用这条连接，未启用时继承原有工作区 Relay / 本机登录行为。云友模型需留空或选择该连接配置的模型；显式选择其他模型时任务报错。模型目录是配置声明，不表示服务可达，也不添加推测的 thinking 能力。
 
+启动时读取配置的首次心跳与后续心跳使用相同的完整响应处理器，确保一并领取的更新、模型刷新等维护请求得到处理。
+
 ## 凭据与执行隔离
 
 - [配置契约](../../packages/contracts/src/claude-profile.ts)复用 [公共连接校验](../../packages/contracts/src/runtime-connection.ts)，只接受结构化字段，不接受任意 JSON 设置、命令或内联 URL 凭据。

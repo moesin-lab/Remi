@@ -86,6 +86,8 @@ function runtimeSpecs(): CommandSpec[] {
   };
   return [
     group("runtime", "Manage execution runtimes and cloud nodes"),
+    op({ id: "runtime.codex-profile.get", path: ["runtime", "codex-profile", "get"], description: "Get a Runtime's custom Codex connection", method: "GET", apiPath: runtime("/codex-profile"), auth: HUMAN_DAEMON, positionals: [ref("runtime")] }),
+    op({ id: "runtime.codex-profile.set", path: ["runtime", "codex-profile", "set"], description: "Set a Codex connection with --file; profile: null restores the workspace gateway", method: "PUT", apiPath: runtime("/codex-profile"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
     op({ id: "runtime.workspace.list", path: ["runtime", "workspace", "list"], description: "List persistent execution workspaces", method: "GET", auth: HUMAN, collections: ["workspaces"],
       options: [{ name: "runtime", type: "string", valueName: "runtime", description: "Filter by a Runtime's machine" }],
       apiPath: async (i, c) => {

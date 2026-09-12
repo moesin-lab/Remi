@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
+import { resolveRuntimeCodexProfile, runtimeCodexProfileModels } from "@daemon/agent-runtime/codex-profile.js";
 import { antigravityCliVersion, resolveAntigravityExecutable } from "@acp/antigravity.js";
 import { isPermanentFeishuDeliveryError } from "@shared/feishu-delivery-error.js";
 import { mkdirSync } from "node:fs";
@@ -295,6 +297,7 @@ export async function installCodexPluginReadinessHome(
       ? relayToken ? "workspace-relay" : "workspace-native-oauth"
       : "runtime-native",
     revision: options.relay?.revision ?? null,
+    routing: options.relay?.fragment ? createHash("sha256").update(options.relay.fragment).digest("hex") : null,
   })).digest("hex").slice(0, 24);
   const prepared = await prepareCodexPluginReadinessRuntime(
     snapshot,
@@ -606,6 +609,37 @@ export class MultiremiDaemon {
   private workspaceRepoUrls = new Map<string, Set<string>>();
   private workspaceSettings = new Map<string, Record<string, unknown>>();
   private workspaceRelays = new Map<string, MultiremiRelayWire | undefined>();
+  private runtimeCodexProfile: RuntimeCodexProfile | null = null;
+  private runtimeCodexKeys = new Map<string, Promise<string>>();
+
+  private applyRuntimeCodexProfile(profile: RuntimeCodexProfile | null | undefined): void {
+    const next = parseRuntimeCodexProfile(profile ?? null);
+    if (JSON.stringify(next) === JSON.stringify(this.runtimeCodexProfile)) return;
+    this.runtimeCodexProfile = next;
+    this.cancelRuntimeModelProbe();
+    this.runtimeModels = null;
+    this.runtimeModelsDiscoveredAt = 0;
+    this.wakeRuntimeModelRetry();
+  }
+
+  private async effectiveWorkspaceRelay(workspaceId: string, profile: RuntimeCodexProfile | null = this.runtimeCodexProfile): Promise<MultiremiRelayWire | undefined> {
+    const relay = this.workspaceRelays.get(workspaceId);
+    if (!profile) return relay;
+    let apiKey: string | undefined;
+    if (profile.auth_mode === "api_key") {
+      if (!profile.credential_id || !this.options.runtimeId) throw new Error("Codex profile API key is unavailable");
+      const id = `${this.options.runtimeId}:${profile.credential_id}`;
+      let pending = this.runtimeCodexKeys.get(id);
+      if (!pending) {
+        if (this.runtimeCodexKeys.size >= 64) this.runtimeCodexKeys.clear();
+        pending = this.client.getRuntimeCodexProfileKey(this.options.runtimeId, profile.credential_id);
+        this.runtimeCodexKeys.set(id, pending);
+        pending.catch(() => this.runtimeCodexKeys.delete(id));
+      }
+      apiKey = await pending;
+    }
+    return { claude: relay?.claude ?? null, ...relay, codex: resolveRuntimeCodexProfile(profile, process.env, apiKey) };
+  }
   private stopped = false;
   private pollAbort = new AbortController();
   private startedAt = new Date();
@@ -1153,6 +1187,7 @@ export class MultiremiDaemon {
       const runtime = response.runtimes.find((item) => (item.provider ?? item.type) === this.options.provider) ?? response.runtimes[0];
       if (!runtime) throw new Error("daemon register returned no runtimes");
       this.options.runtimeId = runtime.id;
+      this.applyRuntimeCodexProfile(runtime.codex_profile);
       this.applyWorkspaceRegistrationState(response);
       this.runtimeRegistrationGeneration++;
       log.info(`Runtime registered: ${this.options.runtimeId} (${this.options.provider})`);
@@ -1160,7 +1195,7 @@ export class MultiremiDaemon {
     }
     const runtime = await this.client.registerRuntime(this.currentRuntimeRegistrationInput());
     this.options.runtimeId = runtime.runtime.id;
-    if (this.botMenuPublisher || this.feishuConcierge) {
+    if (this.botMenuPublisher || this.feishuConcierge || this.options.provider === "codex") {
       const ack = await this.client.heartbeatRuntime(
         this.options.runtimeId,
         undefined,
@@ -1170,6 +1205,7 @@ export class MultiremiDaemon {
       );
       if (ack.workspace_settings) this.applyWorkspaceSettings(this.options.workspaceId ?? "local", ack.workspace_settings);
       if (ack.relay) this.workspaceRelays.set(this.options.workspaceId ?? "local", ack.relay);
+      this.applyRuntimeCodexProfile(ack.codex_profile);
       this.applyFeishuBotDirective(ack);
     }
     this.runtimeRegistrationGeneration++;
@@ -1219,6 +1255,7 @@ export class MultiremiDaemon {
         launched_by: this.options.launchedBy ?? "manual",
         agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
         runtime_workspaces: 1,
+        codex_profiles: 1,
         ssh_mesh_protocol: MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
       },
       deviceInfo: `${this.options.runtimeName} · ${multiremiVersion}`,
@@ -1227,6 +1264,7 @@ export class MultiremiDaemon {
   }
 
   private async handleHeartbeatAck(runtimeId: string, ack: MultiremiDaemonHeartbeatConfigAck): Promise<boolean> {
+    this.applyRuntimeCodexProfile(ack.codex_profile);
     const workspaceId = this.options.workspaceId ?? "local";
     if (ack.drain) {
       const draining = ack.drain.mode === "draining";
@@ -1705,6 +1743,10 @@ export class MultiremiDaemon {
   }
 
   private async discoverRuntimeModels(force: boolean): Promise<MultiremiRuntimeModel[]> {
+    if (this.options.provider === "codex" && this.runtimeCodexProfile) {
+      // This is the explicitly configured catalog, not a connectivity claim.
+      return runtimeCodexProfileModels(this.runtimeCodexProfile);
+    }
     if (!this.runtimeModelDiscoveryEnabled) {
       throw new Error(IN_PROCESS_RUNTIME_MODEL_DISCOVERY_DISABLED);
     }
@@ -1762,7 +1804,7 @@ export class MultiremiDaemon {
       return { agentType: provider, cwd: homedir() };
     }
     const workspaceId = this.options.workspaceId ?? "local";
-    const workspaceRelay = this.workspaceRelays.get(workspaceId);
+    const workspaceRelay = await this.effectiveWorkspaceRelay(workspaceId);
     const relayAuthoritative = workspaceRelay !== undefined;
     const relay = provider === "claude" ? workspaceRelay?.claude : workspaceRelay?.codex;
     const owner = `${this.options.daemonId ?? this.options.runtimeName}:${provider}`;
@@ -1937,7 +1979,7 @@ export class MultiremiDaemon {
 
     try {
       const workspaceId = this.options.workspaceId ?? "local";
-      const workspaceRelay = this.workspaceRelays.get(workspaceId);
+      const workspaceRelay = await this.effectiveWorkspaceRelay(workspaceId);
       await installCodexPluginReadinessHome(
         snapshot,
         payloadPath,
@@ -2648,7 +2690,11 @@ export class MultiremiDaemon {
           task.issueId ? { kind: "issue_runtime" } : undefined,
         );
       }
-      const workspaceRelay = this.workspaceRelays.get(task.workspaceId);
+      const codexProfile = task.agent?.provider === "codex" ? task.codexProfile ?? null : null;
+      if (codexProfile && task.agent?.model && task.agent.model !== codexProfile.model) {
+        throw new Error(`This Runtime's Codex profile uses ${codexProfile.model}; select that model or the Runtime default for this Agent`);
+      }
+      const workspaceRelay = await this.effectiveWorkspaceRelay(task.workspaceId, codexProfile);
       const relayAuthoritative = workspaceRelay !== undefined;
       const relay = task.agent?.provider === "claude"
         ? workspaceRelay?.claude
@@ -2664,6 +2710,9 @@ export class MultiremiDaemon {
               }
             : {}),
         });
+        if (codexProfile) {
+          Object.assign(providerEnv, { MODEL_PROVIDER: "remi_custom", CODEX_CONFIG: "", DEFAULT_AUTH_REQUEST: "" });
+        }
         providerInstallEnv = providerBootstrapEnv(task, providerEnv);
         if (
           task.agent?.provider === "codex"
@@ -3233,6 +3282,14 @@ export class MultiremiDaemon {
     providerEnv?: Record<string, string>,
     relayFragment?: string,
   ): Promise<TaskProgressSummarizer | null> {
+    if (task.codexProfile) {
+      // A custom Responses key is scoped to its connection. The optional
+      // summarizer uses Chat Completions and may have a different base URL.
+      if (!process.env.MULTIREMI_PROGRESS_SUMMARY_OPENAI_API_KEY?.trim()
+        || !process.env.MULTIREMI_PROGRESS_SUMMARY_OPENAI_BASE_URL?.trim()) return null;
+      providerEnv = undefined;
+      relayFragment = undefined;
+    }
     try {
       const workspacePolicy = resolveWorkspaceProgressSummaryPolicy(
         this.workspaceSettings.get(task.workspaceId),

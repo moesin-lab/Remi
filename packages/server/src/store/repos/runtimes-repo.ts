@@ -7,6 +7,8 @@
 // own `create` (distinct INSERT columns) and `report` (distinct completed-branch payload); `get`,
 // `claim` and the timeout sweep are the shared template.
 import { createId, nowIso } from "@multiremi/ids.js";
+import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
+import { encryptRuntimeProviderKey, decryptRuntimeProviderKey } from "@multiremi/runtime-provider-credentials.js";
 import { posix, win32 } from "node:path";
 import {
   isRuntimeHeartbeatFresh,
@@ -224,6 +226,53 @@ export class RuntimesRepo {
     this.localSkillImportQueue = new RuntimeRequestQueue(ctx.db, LOCAL_SKILL_IMPORT_REQUESTS);
     this.commandQueue = new RuntimeRequestQueue(ctx.db, COMMAND_REQUESTS);
     this.botMenuPublishQueue = new RuntimeRequestQueue(ctx.db, BOT_MENU_PUBLISH_REQUESTS);
+  }
+
+  getRuntimeCodexProfile(id: string): RuntimeCodexProfile | null {
+    const row = this.ctx.db.query("SELECT profile FROM multiremi_runtime_codex_profiles WHERE runtime_id = ?").get(id) as { profile: string } | null;
+    return row ? parseRuntimeCodexProfile(JSON.parse(row.profile)) : null;
+  }
+
+  listWorkspaceCodexProfileModels(workspaceId: string): string[] {
+    const rows = this.ctx.db.query(`SELECT p.profile FROM multiremi_runtime_codex_profiles p
+      JOIN multiremi_runtimes r ON r.id = p.runtime_id WHERE COALESCE(r.workspace_id, 'local') = ?`).all(workspaceId) as { profile: string }[];
+    return rows.map(row => parseRuntimeCodexProfile(JSON.parse(row.profile))!.model);
+  }
+
+  getRuntimeCodexProfileKey(runtimeId: string, credentialId: string): string | null {
+    const runtime = this.getRuntime(runtimeId);
+    if (!runtime) return null;
+    const row = this.ctx.db.query("SELECT ciphertext FROM multiremi_runtime_provider_credentials WHERE id = ? AND runtime_id = ?").get(credentialId, runtimeId) as { ciphertext: string } | null;
+    return row ? decryptRuntimeProviderKey(row.ciphertext, { workspaceId: runtime.workspaceId ?? "local", runtimeId, credentialId }) : null;
+  }
+
+  setRuntimeCodexProfile(id: string, input: unknown, apiKey?: unknown): RuntimeCodexProfile | null {
+    const profile = parseRuntimeCodexProfile(input);
+    if (apiKey !== undefined && (typeof apiKey !== "string" || !apiKey.trim() || apiKey.length > 8192 || /[\x00-\x1f\x7f]/.test(apiKey))) throw new Error("Invalid API key");
+    if (apiKey !== undefined && profile?.auth_mode !== "api_key") throw new Error("API keys require api_key authentication");
+    return this.withRuntimeLifecycleLock(id, runtime => {
+      if (runtime.provider !== "codex") throw new Error("Custom profiles require a Codex Runtime");
+      if (profile && runtime.metadata.codex_profiles !== 1) throw new Error("Update and restart this Runtime before configuring a Codex profile");
+      if (profile?.auth_mode === "api_key") {
+        // Never trust a credential reference supplied by a caller.
+        const previous = this.getRuntimeCodexProfile(id);
+        const credentialId = apiKey !== undefined ? createId("rck") : previous?.credential_id;
+        if (!credentialId) throw new Error("An API key is required for this connection");
+        profile.credential_id = credentialId;
+        if (typeof apiKey === "string") {
+          const ciphertext = encryptRuntimeProviderKey(apiKey.trim(), { workspaceId: runtime.workspaceId ?? "local", runtimeId: id, credentialId });
+          this.ctx.db.run("INSERT INTO multiremi_runtime_provider_credentials (id, runtime_id, ciphertext) VALUES (?, ?, ?)", [credentialId, id, ciphertext]);
+        }
+      }
+      if (profile) {
+        this.ctx.db.run(`INSERT INTO multiremi_runtime_codex_profiles (runtime_id, profile) VALUES (?, ?)
+          ON CONFLICT(runtime_id) DO UPDATE SET profile = excluded.profile`, [id, toJson(profile)]);
+      } else {
+        this.ctx.db.run("DELETE FROM multiremi_runtime_codex_profiles WHERE runtime_id = ?", [id]);
+      }
+      this.replaceRuntimeModelsWithinTransaction(id, profile ? [{ id: profile.model, label: profile.model, provider: "codex", default: true }] : [], "codex", nowIso());
+      return profile;
+    });
   }
 
   registerRuntime(input: RegisterRuntimeInput): MultiremiRuntime {
@@ -881,6 +930,17 @@ export class RuntimesRepo {
         );
       }
 
+      const oldProfile = this.getRuntimeCodexProfile(oldRuntimeId);
+      if (oldProfile && !this.getRuntimeCodexProfile(newRuntimeId)) {
+        this.ctx.db.run("INSERT INTO multiremi_runtime_codex_profiles (runtime_id, profile) VALUES (?, ?)", [newRuntimeId, toJson(oldProfile)]);
+      }
+      const credentials = this.ctx.db.query("SELECT id, ciphertext FROM multiremi_runtime_provider_credentials WHERE runtime_id = ?").all(oldRuntimeId) as { id: string; ciphertext: string }[];
+      for (const credential of credentials) {
+        const scope = { workspaceId: oldRuntime.workspaceId ?? "local", runtimeId: oldRuntimeId, credentialId: credential.id };
+        const value = decryptRuntimeProviderKey(credential.ciphertext, scope);
+        const ciphertext = encryptRuntimeProviderKey(value, { ...scope, runtimeId: newRuntimeId });
+        this.ctx.db.run("UPDATE multiremi_runtime_provider_credentials SET runtime_id = ?, ciphertext = ? WHERE id = ?", [newRuntimeId, ciphertext, credential.id]);
+      }
       const deleted = this.deleteRuntimeWithinTransaction(oldRuntimeId, { repoolQueuedTasks: false });
       return { agentsReassigned: agents, tasksReassigned: tasks, deleted };
     });
@@ -1874,7 +1934,8 @@ export class RuntimesRepo {
     provider: string,
     now = nowIso(),
   ): void {
-    const normalized = normalizeRuntimeModels(models, provider);
+    const profile = provider === "codex" ? this.getRuntimeCodexProfile(runtimeId) : null;
+    const normalized = normalizeRuntimeModels(profile ? [{ id: profile.model, label: profile.model, provider, default: true }] : models, provider);
     this.ctx.db.run("DELETE FROM multiremi_runtime_models WHERE runtime_id = ?", [runtimeId]);
     for (const model of normalized) {
       this.ctx.db.run(

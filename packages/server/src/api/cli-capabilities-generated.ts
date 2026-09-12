@@ -3993,6 +3993,31 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "runtime.codex-profile.get": {
+      "command": "remi runtime codex-profile get",
+      "auth": [
+        "human",
+        "daemon"
+      ],
+      "capability": "runtime.codex-profile.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.codex-profile.set": {
+      "command": "remi runtime codex-profile set",
+      "auth": [
+        "human"
+      ],
+      "capability": "runtime.codex-profile.set",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "runtime.workspace.list": {
       "command": "remi runtime workspace list",
       "auth": [

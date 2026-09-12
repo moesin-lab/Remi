@@ -177,6 +177,12 @@ export function overlayGatewayModels(
         ...(thinking ? { thinking } : {}),
       };
     });
+    if (engine === "codex") {
+      const customIds = new Set(store.listWorkspaceCodexProfileModels(workspaceId));
+      for (const model of existingModels) {
+        if (customIds.has(model.id) && !models.some(candidate => candidate.id === model.id)) models.push(model);
+      }
+    }
     byEngine.set(engine, {
       provider: engine,
       online_runtime_count: existing?.online_runtime_count ?? 0,

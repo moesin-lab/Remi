@@ -2567,6 +2567,22 @@ runMigrations(this.db);
     return this.runtimes.getRuntime(id);
   }
 
+  getRuntimeCodexProfile(id: string) {
+    return this.runtimes.getRuntimeCodexProfile(id);
+  }
+
+  listWorkspaceCodexProfileModels(workspaceId: string) {
+    return this.runtimes.listWorkspaceCodexProfileModels(workspaceId);
+  }
+
+  setRuntimeCodexProfile(id: string, input: unknown, apiKey?: unknown) {
+    return this.runtimes.setRuntimeCodexProfile(id, input, apiKey);
+  }
+
+  getRuntimeCodexProfileKey(runtimeId: string, credentialId: string) {
+    return this.runtimes.getRuntimeCodexProfileKey(runtimeId, credentialId);
+  }
+
   listRuntimes(): MultiremiRuntime[] {
     return this.runtimes.listRuntimes();
   }

@@ -47,6 +47,7 @@ export type DaemonRegisterRequestBody = {
   capabilities?: {
     runtime_workspaces?: number;
     parallel_agent_execution?: number;
+    codex_profiles?: number;
     agent_plugins?: number;
   };
   runtimes?: Array<{
@@ -362,6 +363,7 @@ export function registerDaemonRuntimes(
           launched_by: launchedBy,
           agent_plugin_protocol: agentPluginProtocol,
           runtime_workspaces: body.capabilities?.runtime_workspaces === 1 ? 1 : 0,
+          codex_profiles: body.capabilities?.codex_profiles === 1 ? 1 : 0,
           ...(body.capabilities?.parallel_agent_execution === 1 ? { parallel_agent_execution: 1 } : {}),
           ...(typeof runtime.acpVersion === "string" && runtime.acpVersion ? { acp_version: runtime.acpVersion } : {}),
           ...(typeof runtime.agentVersion === "string" && runtime.agentVersion ? { agent_version: runtime.agentVersion } : {}),
@@ -453,7 +455,7 @@ export function registerDaemonRuntimes(
     });
   }
   return {
-    runtimes: registered,
+    runtimes: registered.map(runtime => ({ ...runtime, codex_profile: store.getRuntimeCodexProfile(runtime.id) })),
     repos: repos.repos,
     repos_version: repos.repos_version,
     settings: repos.settings,

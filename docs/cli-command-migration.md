@@ -13,6 +13,13 @@ to Claude/Codex.
 
 ## Canonical command tree
 
+Codex Runtime connections use `remi runtime codex-profile get <runtime>` and
+`remi runtime codex-profile set <runtime> --file profile.json`. The JSON body
+contains `profile` and an optional write-only `api_key`; `profile: null` restores
+the workspace gateway. These are human configuration commands; task credentials
+cannot read or change them. See [Codex Runtime connections](design/acp-codex-via-codex-acp.md#runtime-自定义连接)
+for authentication, environment variables and session behavior.
+
 The canonical tree includes a focused top-level Attachment download command;
 Issue and Comment keep their scoped attachment listing and management commands.
 

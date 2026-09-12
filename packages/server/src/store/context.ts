@@ -426,6 +426,7 @@ export interface IssueSessionsSurface {
 }
 
 export interface RuntimesSurface {
+  getRuntimeCodexProfile(id: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntime(id: string): MultiremiRuntime | null;
   listRuntimes(): MultiremiRuntime[];
   hasCliUpdateDrainForRuntime(runtimeId: string): boolean;

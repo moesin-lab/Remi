@@ -13,6 +13,7 @@ import type {
 } from "@multiremi/contracts/types.js";
 
 type InternalTaskField =
+  | "codexProfile"
   | "delegationId"
   | "delegation_id"
   | "delegatedByAgentId"
@@ -24,6 +25,7 @@ type InternalTaskField =
 
 export function taskPublicResponse<T extends MultiremiTask>(task: T): Omit<T, InternalTaskField> {
   const {
+    codexProfile: _codexProfile,
     delegationId: _delegationId,
     delegation_id: _delegationIdSnake,
     delegatedByAgentId: _delegatedByAgentId,
@@ -292,6 +294,7 @@ export function daemonTaskWireResponse(
   if (task.triggerCommentId) response.trigger_comment_id = task.triggerCommentId;
   if (task.triggerSummary) response.trigger_summary = task.triggerSummary;
   if (task.executionFingerprint || task.pluginSnapshot.length) response.plugin_snapshot = task.pluginSnapshot;
+  response.codex_profile = task.codexProfile ?? null;
   if (task.executionFingerprint) response.execution_fingerprint = task.executionFingerprint;
   if (triggerMetadata?.triggerThreadId) response.trigger_thread_id = triggerMetadata.triggerThreadId;
   if (triggerMetadata?.triggerCommentContent) response.trigger_comment_content = triggerMetadata.triggerCommentContent;

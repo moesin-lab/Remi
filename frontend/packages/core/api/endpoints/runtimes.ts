@@ -32,6 +32,8 @@ import type {
   ListCloudRuntimeNodesParams,
 } from "../../runtimes/cloud-runtime";
 import type { HttpClient } from "../http";
+import type { RuntimeCodexProfileConfig, RuntimeCodexProfileInput } from "@multiremi/contracts/codex-profile";
+import { RuntimeCodexProfileConfigSchema } from "../schemas/codex-profile";
 import type { RuntimeWorkspace, CreateRuntimeWorkspaceRequest } from "../../runtimes/workspace-types";
 import { RuntimeWorkspaceSchema, RuntimeWorkspaceListSchema } from "../schemas/runtime-workspaces";
 import { RuntimeLocalSkillListRequestSchema, RuntimeLocalSkillImportRequestSchema } from "../schemas/runtime-local-skills";
@@ -83,6 +85,16 @@ import {
 
 export class RuntimesEndpoints {
   constructor(readonly http: HttpClient) {}
+
+  async getRuntimeCodexProfile(runtimeId: string): Promise<RuntimeCodexProfileConfig> {
+    const raw = await this.http.fetch<unknown>(`/api/runtimes/${encodeURIComponent(runtimeId)}/codex-profile`);
+    return parseStrictResponse(raw, RuntimeCodexProfileConfigSchema, { endpoint: "GET /api/runtimes/:id/codex-profile" });
+  }
+
+  async setRuntimeCodexProfile(runtimeId: string, input: RuntimeCodexProfileInput): Promise<RuntimeCodexProfileConfig> {
+    const raw = await this.http.fetch<unknown>(`/api/runtimes/${encodeURIComponent(runtimeId)}/codex-profile`, { method: "PUT", body: JSON.stringify(input) });
+    return parseStrictResponse(raw, RuntimeCodexProfileConfigSchema, { endpoint: "PUT /api/runtimes/:id/codex-profile" });
+  }
 
   async listRuntimeWorkspaces(wsId: string): Promise<RuntimeWorkspace[]> {
     const raw = await this.http.fetch<unknown>(`/api/runtime-workspaces?workspace_id=${encodeURIComponent(wsId)}`);

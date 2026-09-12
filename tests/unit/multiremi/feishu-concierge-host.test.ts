@@ -66,9 +66,11 @@ function fakeChannel(): {
   fail: (error: unknown) => void;
   stops: () => number;
   sent: Array<{ chatId: string; idempotencyKey: string }>;
+  uploads: Buffer[];
 } {
   let stops = 0;
   const sent: Array<{ chatId: string; idempotencyKey: string }> = [];
+  const uploads: Buffer[] = [];
   let fail!: (error: unknown) => void;
   const start = new Promise<void>((_resolve, reject) => { fail = reject; });
   return {
@@ -80,10 +82,15 @@ function fakeChannel(): {
         sent.push({ chatId: input.chatId, idempotencyKey: input.idempotencyKey });
         return { messageId: "om_proactive" };
       },
+      uploadImage: async (image: Buffer) => {
+        uploads.push(image);
+        return { imageKey: "img_uploaded" };
+      },
     } as unknown as FeishuChannelHandle,
     fail,
     stops: () => stops,
     sent,
+    uploads,
   };
 }
 
@@ -109,6 +116,117 @@ function host(input: {
 }
 
 describe("control-plane Feishu concierge host", () => {
+  it("checkpoints a group owner before sending through the existing Task card", async () => {
+    const test = host({ daemon: fakeDaemon().daemon });
+    await test.conciergeHost.start(assignment());
+    const sequence: string[] = [];
+    test.channel.handle.resolveProactiveMention = async (chatId, mention) => {
+      sequence.push("resolve");
+      expect(chatId).toBe("oc_topic");
+      expect(mention).toEqual({ mode: "group_owner" });
+      return "ou_candidate";
+    };
+    test.channel.handle.streamProactiveTask = async (_chat, _session, _stream, _meta, options) => {
+      sequence.push("card");
+      expect(options.mentionOpenId).toBe("ou_saved");
+      await options.onStarted!("om_card");
+      return { messageId: "om_card" };
+    };
+    const delivery = { id: "fbo_owner", claimToken: "lease", chatId: "oc_topic", threadId: "om_root",
+      replyToMessageId: "om_root", body: "", bodyOrigin: "agent" as const, taskId: "tsk_owner", idempotencyKey: "fbo_owner",
+      mention: { mode: "group_owner" as const } };
+    await test.conciergeHost.sendOutbound!(delivery, {
+      signal: new AbortController().signal,
+      prepareMention: async id => { sequence.push("checkpoint"); expect(id).toBe("ou_candidate"); return "ou_saved"; },
+      onStarted: async () => { sequence.push("started"); },
+    });
+    expect(sequence).toEqual(["resolve", "checkpoint", "card", "started"]);
+    expect(test.channel.sent).toHaveLength(0);
+    sequence.length = 0;
+    await test.conciergeHost.sendOutbound!({ ...delivery, resumeMessageId: "om_card", mention: { mode: "group_owner", resolvedOpenId: "ou_saved" } }, {
+      signal: new AbortController().signal, onStarted: async () => { sequence.push("started"); },
+    });
+    expect(sequence).toEqual(["card", "started"]);
+  });
+
+  it("does not send a card when the recipient checkpoint loses its lease", async () => {
+    const test = host({ daemon: fakeDaemon().daemon });
+    await test.conciergeHost.start(assignment());
+    test.channel.handle.resolveProactiveMention = async () => "ou_owner";
+    let sends = 0;
+    test.channel.handle.streamProactiveTask = async () => { sends++; return { messageId: "om_card" }; };
+    await expect(test.conciergeHost.sendOutbound!({ id: "fbo_owner", claimToken: "lease", chatId: "oc_topic", threadId: "om_root",
+      replyToMessageId: "om_root", body: "", bodyOrigin: "agent", taskId: "tsk_owner", idempotencyKey: "fbo_owner",
+      mention: { mode: "group_owner" } }, { signal: new AbortController().signal,
+      prepareMention: async () => { throw new Error("stale lease"); }, onStarted: async () => {} })).rejects.toThrow("stale lease");
+    expect(sends).toBe(0);
+  });
+
+  it("still sends the report when the saved recipient is absent", async () => {
+    const test = host({ daemon: fakeDaemon().daemon });
+    await test.conciergeHost.start(assignment());
+    test.channel.handle.resolveProactiveMention = async () => null;
+    let sends = 0;
+    test.channel.handle.streamProactiveTask = async (_chat, _session, _stream, _meta, options) => {
+      sends++;
+      expect(options.mentionOpenId).toBeUndefined();
+      return { messageId: "om_card" };
+    };
+    await test.conciergeHost.sendOutbound!({ id: "fbo_owner", claimToken: "lease", chatId: "oc_topic", threadId: "om_root",
+      replyToMessageId: "om_root", body: "", bodyOrigin: "agent", taskId: "tsk_owner", idempotencyKey: "fbo_owner",
+      mention: { mode: "group_owner" } }, { signal: new AbortController().signal,
+      prepareMention: async id => { expect(id).toBeNull(); return null; }, onStarted: async () => {} });
+    expect(sends).toBe(1);
+  });
+
+  it("streams an existing proactive Task instead of sending only its final body", async () => {
+    const fake = fakeDaemon();
+    const reads: number[] = [];
+    Object.assign(fake.daemon, {
+      listFeishuBotTaskMessages: async (_id: string, since: number) => {
+        reads.push(since);
+        return since === 0 ? [{ id: "msg_tool", taskId: "tsk_live", seq: 1, type: "tool_use", tool: "Bash" }] : [];
+      },
+      getFeishuBotTaskSnapshot: async () => ({ taskId: "tsk_live", status: "completed", result: "done", usage: [] }),
+    });
+    const test = host({ daemon: fake.daemon });
+    const events: unknown[] = [];
+    test.channel.handle.streamProactiveTask = async (chatId, _sessionKey, stream, meta, options) => {
+      expect(chatId).toBe("oc_topic");
+      expect(meta.taskId).toBe("tsk_live");
+      expect(options.durable).toEqual({ idempotencyKey: "fbo_live", messageId: "om_existing" });
+      await options.onStarted!("om_existing");
+      for await (const event of stream) events.push(event);
+      return { messageId: "om_existing" };
+    };
+    await test.conciergeHost.start(assignment());
+    const checkpoints: string[] = [];
+    await test.conciergeHost.sendOutbound!({ id: "fbo_live", claimToken: "lease", chatId: "oc_topic", threadId: "om_root",
+      replyToMessageId: "om_root", body: "", bodyOrigin: "agent", taskId: "tsk_live", resumeMessageId: "om_existing",
+      idempotencyKey: "fbo_live" }, { signal: new AbortController().signal, onStarted: async id => { checkpoints.push(id); } });
+    expect(test.channel.sent).toHaveLength(0);
+    expect(checkpoints).toEqual(["om_existing"]);
+    expect(reads).toEqual([0, 1]);
+    expect(events).toEqual([
+      expect.objectContaining({ kind: "message", message: expect.objectContaining({ type: "tool_use" }) }),
+      expect.objectContaining({ kind: "snapshot", snapshot: expect.objectContaining({ status: "completed" }) }),
+    ]);
+  });
+
+  it("applies live no-mention settings to exactly the configured group", async () => {
+    const test = host({ daemon: fakeDaemon().daemon });
+    test.conciergeHost.setNoMentionChatIds!(["oc_topics"]);
+    await test.conciergeHost.start(assignment());
+    const policy = test.calls[0]!.options.groupPolicy!;
+    expect(policy.getByChatId("oc_topics")).toEqual({ monitor: true, replyMode: "thread" });
+    expect(policy.getByChatId("oc_other")).toBeNull();
+    test.conciergeHost.setNoMentionChatIds!(["oc_new"]);
+    expect(policy.getByChatId("oc_topics")).toBeNull();
+    expect(policy.getByChatId("oc_new")?.monitor).toBe(true);
+    test.conciergeHost.setNoMentionChatIds!([]);
+    expect(policy.getByChatId("oc_new")).toBeNull();
+  });
+
   it("routes proactive delivery through the running connector handle", async () => {
     const fake = fakeDaemon();
     const test = host({ daemon: fake.daemon });
@@ -121,11 +239,22 @@ describe("control-plane Feishu concierge host", () => {
       threadId: "omt_host",
       replyToMessageId: "om_root",
       body: "Round complete.",
+      bodyOrigin: "agent",
       idempotencyKey: "fbo_host",
     });
 
     expect(result).toEqual({ messageId: "om_proactive" });
     expect(test.channel.sent).toEqual([{ chatId: "oc_host", idempotencyKey: "fbo_host" }]);
+  });
+
+  it("routes image uploads through the running connector handle", async () => {
+    const fake = fakeDaemon();
+    const test = host({ daemon: fake.daemon });
+    await test.conciergeHost.start(assignment());
+
+    await expect(test.conciergeHost.uploadImage!(Buffer.from("png")))
+      .resolves.toEqual({ imageKey: "img_uploaded" });
+    expect(test.channel.uploads).toEqual([Buffer.from("png")]);
   });
 
   it("admits senders for server-side union_id classification", async () => {

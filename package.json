@@ -1,6 +1,6 @@
 {
   "name": "remi",
-  "version": "0.2.60",
+  "version": "0.2.68",
   "packageManager": "bun@1.3.14",
   "description": "Remi - Multiremi agent runtime with multi-connector messaging and ACP provider integration.",
   "type": "module",
@@ -43,6 +43,7 @@
     "test:frontend": "bun run --filter '@multiremi/*' test",
     "typecheck:frontend": "bun run --filter '@multiremi/*' typecheck",
     "smoke:multiremi:acp": "bun run tests/integration/smoke-multiremi-acp.ts",
+    "smoke:chat": "bun run tests/integration/smoke-chat-workspace.ts",
     "smoke:multiremi:agent-plugin": "bun run tests/integration/smoke-multiremi-agent-plugin.ts",
     "e2e:multiremi": "bun run tests/integration/e2e-multiremi.ts",
     "e2e:frontend": "bun run tests/integration/e2e-frontend-ours.ts",

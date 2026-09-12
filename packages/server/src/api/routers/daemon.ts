@@ -1,4 +1,6 @@
 import type { Hono } from "hono";
+import { parseFeishuPresentation } from "@multiremi/contracts/feishu-presentation.js";
+import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 import {
   MAX_TASK_MESSAGES_PER_REQUEST,
   bindDaemonTokenIdentityOrDeny,
@@ -26,6 +28,7 @@ import {
   registerDaemonRuntimes,
   promoteLegacyCliPatForDaemonHeartbeat,
   promoteLegacyCliPatForDaemonRegistration,
+  localAttachmentFileResponse,
 } from "../helpers.js";
 import {
   authenticatedRequestUserId,
@@ -42,9 +45,16 @@ import {
 } from "../wire/index.js";
 import {
   FEISHU_CONCIERGE_OUTBOUND_PROTOCOL_VERSION,
+  FEISHU_CONCIERGE_TASK_STREAM_PROTOCOL_VERSION,
+  FEISHU_CONCIERGE_NATIVE_COT_PROTOCOL_VERSION,
+  FEISHU_CONCIERGE_OUTBOUND_LEGACY_PROTOCOL_VERSION,
+  FEISHU_CONCIERGE_OUTBOUND_CLAIM_HEADER,
   FEISHU_CONCIERGE_PROTOCOL_VERSION,
 } from "@multiremi/contracts/types.js";
+import { degradeMarkdownImages } from "@shared/feishu-markdown-images.js";
+import { FEISHU_IMAGE_MAX_BYTES } from "@connectors/feishu/outbound-images.js";
 import { FeishuBotEncryptionError } from "@multiremi/feishu-bot/credentials.js";
+import { isFeishuOpenId } from "@shared/feishu-mention.js";
 import { normalizeFeishuBotErrorCode, redactFeishuBotError } from "@multiremi/feishu-bot/diagnostics.js";
 import type {
   FeishuBotTaskSnapshot,
@@ -56,7 +66,7 @@ import type {
   MultiremiTask,
   SubmitFeishuBotMessageInput,
 } from "@multiremi/contracts/types.js";
-import { TaskSteerPendingError } from "@multiremi/store/repos/tasks-repo.js";
+import { BinarySkillFilesUnsupportedError, TaskSteerPendingError } from "@multiremi/store/repos/tasks-repo.js";
 import { FeishuBotConfigError } from "@multiremi/store/repos/feishu-bot-repo.js";
 import { SshMeshKeyError } from "@multiremi/ssh-mesh/keys.js";
 import { SessionArchiveError } from "@multiremi/session-archive/service.js";
@@ -64,6 +74,8 @@ import { scmGitCredentialPassword } from "@multiremi/scm/access-token.js";
 import { resolveScmRepositoryRemote } from "@multiremi/scm/repository-url.js";
 import type { DaemonRegisterRequestBody } from "../helpers.js";
 import type { RouterDeps } from "./deps.js";
+import { hydrateClaimKnowledge } from "@multiremi/project-knowledge/claim-hydration.js";
+import { resolveTaskRepositoryWikiRepositories, canonicalRepositoryRemote } from "@multiremi/repository-wiki/task-scope.js";
 
 type DaemonInstallRequestBody = {
   serverUrl?: string | null;
@@ -132,6 +144,7 @@ function validateDaemonInstallRequestBody(
 
 export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
   const { store, authToken } = deps;
+  const preparingClaims = new Map<string, Promise<Record<string, unknown> | null>>();
 
   app.post("/api/daemon/scm/git-credentials", async (c) => {
     const body = await readJsonStrict<{
@@ -207,11 +220,15 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
   });
 
   app.get("/api/multiremi/install/daemon", (c) => {
+    const workspaceId = resolveRequestWorkspaceId(c, store, c.req.query("workspaceId") ?? c.req.query("workspace_id"));
+    if (workspaceId instanceof Response) return workspaceId;
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+    if (denied) return denied;
     return c.json(buildDaemonInstallInstructions({
       requestUrl: c.req.url,
       daemonServerUrl: deps.daemonDirectBaseUrl,
       serverUrl: c.req.query("serverUrl") ?? c.req.query("server_url"),
-      workspaceId: c.req.query("workspaceId") ?? c.req.query("workspace_id"),
+      workspaceId,
       token: c.req.query("token"),
       provider: c.req.query("provider"),
       version: c.req.query("version"),
@@ -228,9 +245,10 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       return c.json({ error: validatedBody.error }, 400);
     }
     const body = validatedBody.body;
-    const workspaceId = cleanString(
+    const workspaceId = resolveRequestWorkspaceId(c, store, cleanString(
       body.workspaceId ?? body.workspace_id ?? c.req.query("workspaceId") ?? c.req.query("workspace_id"),
-    ) ?? "local";
+    ));
+    if (workspaceId instanceof Response) return workspaceId;
     const actorToken = currentAccessToken(c);
     if (actorToken?.type === "task") {
       return c.json({ error: "forbidden for task token", code: "task_token_hard_denied" }, 403);
@@ -292,9 +310,10 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/daemon/register", async (c) => {
     const body = await readJsonStrict<DaemonRegisterRequestBody>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
-    const denied = denyDaemonTokenWorkspace(c, body.workspace_id);
+    const registerWorkspace = resolveRequestWorkspaceId(c, store, cleanString(body.workspace_id));
+    if (registerWorkspace instanceof Response) return registerWorkspace;
+    const denied = denyDaemonTokenWorkspace(c, registerWorkspace);
     if (denied) return denied;
-    const registerWorkspace = String(body.workspace_id ?? "").trim() || "local";
     const registerDaemonId = String(body.daemon_id ?? "").trim();
     if (registerDaemonId && store.isDaemonRetired(registerWorkspace, registerDaemonId)) {
       return c.json({ error: "daemon has been retired", code: "daemon_retired" }, 410);
@@ -313,7 +332,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       registerDaemonId,
     );
     if (upgradeDenied) return upgradeDenied;
-    const owner = daemonRegisterOwnerContext(c, store, body.workspace_id);
+    const owner = daemonRegisterOwnerContext(c, store, registerWorkspace);
     if ("error" in owner) return c.json({ error: owner.error }, owner.status);
     const identityDenied = bindDaemonTokenIdentityOrDeny(c, store, body.daemon_id);
     if (identityDenied) return identityDenied;
@@ -324,7 +343,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     // master/open bootstrap path retains legacy migration compatibility.
     const usesMasterToken = Boolean(authToken)
       && c.req.header("Authorization") === `Bearer ${authToken}`;
-    const result = registerDaemonRuntimes(store, body, owner, includeRelay, {
+    const result = registerDaemonRuntimes(store, { ...body, workspace_id: registerWorkspace }, owner, includeRelay, {
       allowLegacyDaemonMigration:
         currentAccessToken(c)?.type !== "daemon" && (!authToken || usesMasterToken),
     });
@@ -344,6 +363,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       runtime_id?: string;
       supports_batch_import?: boolean;
       supports_directory_scan?: boolean;
+      supports_skill_directory?: boolean;
       agent_plugin_protocol?: number;
       ssh_mesh_protocol?: number;
       ssh_mesh_status?: MultiremiDaemonSshMeshStatus;
@@ -380,6 +400,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     const ack = store.heartbeatRuntime(runtimeId, {
       supportsBatchImport: body.supports_batch_import ?? false,
       supportsDirectoryScan: body.supports_directory_scan ?? false,
+      supportsSkillDirectory: body.supports_skill_directory === true,
       agentPluginProtocol: reportsAgentPluginProtocol ? body.agent_plugin_protocol : undefined,
       supportsBotMenu: body.supports_bot_menu,
       supportsFeishuBotConfig,
@@ -422,18 +443,30 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       // fetches the payload itself over its own runtime-scoped route.
       const directive = store.feishuBotDirectiveForRuntime(workspaceId, runtimeId);
       if (directive) response.feishu_bot = directive;
-      const outbound = feishuConciergeProtocol >= FEISHU_CONCIERGE_OUTBOUND_PROTOCOL_VERSION
-        ? store.claimFeishuBotOutbound(workspaceId, runtimeId)
+      const outbound = feishuConciergeProtocol >= FEISHU_CONCIERGE_OUTBOUND_LEGACY_PROTOCOL_VERSION
+        ? store.claimFeishuBotOutbound(workspaceId, runtimeId, undefined,
+            feishuConciergeProtocol >= FEISHU_CONCIERGE_TASK_STREAM_PROTOCOL_VERSION,
+            feishuConciergeProtocol >= FEISHU_CONCIERGE_NATIVE_COT_PROTOCOL_VERSION)
         : null;
       if (outbound) {
+        const body = feishuConciergeProtocol >= FEISHU_CONCIERGE_OUTBOUND_PROTOCOL_VERSION
+          ? outbound.body
+          : degradeMarkdownImages(outbound.body, {
+              publicUrl: process.env.MULTIREMI_PUBLIC_URL?.trim() || null,
+            });
         response.pending_feishu_outbound = {
           id: outbound.id,
           claim_token: outbound.claimToken,
           chat_id: outbound.chatId,
           thread_id: outbound.threadId,
           reply_to_message_id: outbound.replyToMessageId,
-          body: outbound.body,
+          body,
+          body_origin: outbound.bodyOrigin,
           idempotency_key: outbound.idempotencyKey,
+          ...(outbound.taskId ? { task_id: outbound.taskId, resume_message_id: outbound.resumeMessageId } : {}),
+          ...(outbound.mention ? { mention: outbound.mention } : {}),
+          ...(outbound.presentation ? { presentation: outbound.presentation } : {}),
+          ...(outbound.interactionOpenId ? { interaction_open_id: outbound.interactionOpenId } : {}),
         };
       }
     }
@@ -530,11 +563,26 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       status?: unknown;
       external_message_id?: unknown;
       error?: unknown;
+      mention_open_id?: unknown;
+      presentation?: unknown;
+      retryable?: unknown;
     }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const claimToken = cleanString(typeof body.claim_token === "string" ? body.claim_token : null);
-    const status = body.status === "sent" || body.status === "failed" ? body.status : null;
+    if (body.status === "prepared") {
+      if (!claimToken || (body.mention_open_id !== null && !isFeishuOpenId(body.mention_open_id))) {
+        return c.json({ error: "claim_token and mention_open_id (open_id or null) are required" }, 400);
+      }
+      const prepared = store.prepareFeishuBotOutboundMention(
+        runtime.workspaceId ?? "local", runtimeId, c.req.param("deliveryId"), claimToken, body.mention_open_id,
+      );
+      if (!prepared) return c.json({ error: "outbound mention lease or policy is stale", code: "stale_lease" }, 409);
+      return c.json({ status: "ok", mention_open_id: prepared.openId });
+    }
+    const status = body.status === "sent" || body.status === "failed" || body.status === "streaming" ? body.status : null;
     if (!claimToken || !status) return c.json({ error: "claim_token and a valid status are required" }, 400);
+    const presentation = body.presentation === undefined ? undefined : parseFeishuPresentation(body.presentation);
+    if (presentation === null) return c.json({ error: "invalid presentation checkpoint" }, 400);
     const accepted = store.reportFeishuBotOutbound(
       runtime.workspaceId ?? "local",
       runtimeId,
@@ -544,11 +592,42 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
         status,
         externalMessageId: cleanString(typeof body.external_message_id === "string" ? body.external_message_id : null),
         error: body.error ? redactFeishuBotError(String(body.error)) : null,
+        presentation,
+        retryable: typeof body.retryable === "boolean" ? body.retryable : undefined,
       },
     );
     if (!accepted) return c.json({ error: "outbound delivery lease is stale", code: "stale_lease" }, 409);
     return c.json({ status: "ok" });
   });
+  app.get(
+    "/api/daemon/runtimes/:runtimeId/feishu-bot/outbound/:deliveryId/attachments/:attachmentId",
+    async (c) => {
+      if (currentAccessToken(c)?.type !== "daemon") {
+        return c.json({ error: "daemon token required", code: "daemon_token_required" }, 403);
+      }
+      const runtimeId = c.req.param("runtimeId");
+      const runtime = store.getRuntime(runtimeId);
+      if (!runtime) return c.json({ error: "attachment not available" }, 404);
+      const claimToken = cleanString(c.req.header(FEISHU_CONCIERGE_OUTBOUND_CLAIM_HEADER));
+      if (!claimToken) return c.json({ error: "attachment not available" }, 404);
+      const attachment = store.getFeishuBotOutboundAttachment(
+        runtime.workspaceId ?? "local",
+        runtimeId,
+        c.req.param("deliveryId"),
+        claimToken,
+        c.req.param("attachmentId"),
+      );
+      if (!attachment) return c.json({ error: "attachment not available" }, 404);
+      if (
+        !attachment.url.startsWith("/api/attachments/")
+        || !attachment.contentType.trim().toLowerCase().startsWith("image/")
+        || attachment.sizeBytes > FEISHU_IMAGE_MAX_BYTES
+      ) {
+        return c.json({ error: "attachment not available" }, 404);
+      }
+      return localAttachmentFileResponse(attachment);
+    },
+  );
   app.post("/api/daemon/runtimes/:runtimeId/feishu-bot/messages", async (c) => {
     const runtimeId = c.req.param("runtimeId");
     const denied = denyDaemonTokenRuntimeIdentity(c, store, runtimeId);
@@ -559,6 +638,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       revision?: unknown;
       external_session_key?: unknown;
       external_message_id?: unknown;
+      chat_type?: unknown;
       reply_to_message_id?: unknown;
       sender_open_id?: unknown;
       sender_user_id?: unknown;
@@ -567,6 +647,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       sender_name?: unknown;
       chat_id?: unknown;
       thread_id?: unknown;
+      delivery_mode?: unknown;
       text?: unknown;
     }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
@@ -575,6 +656,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       revision: Number.isSafeInteger(revision) ? revision : -1,
       externalSessionKey: cleanString(typeof body.external_session_key === "string" ? body.external_session_key : null) ?? "",
       externalMessageId: cleanString(typeof body.external_message_id === "string" ? body.external_message_id : null) ?? "",
+      chatType: body.chat_type === "p2p" || body.chat_type === "group" ? body.chat_type : null,
       replyToMessageId: cleanString(typeof body.reply_to_message_id === "string" ? body.reply_to_message_id : null),
       senderOpenId: cleanString(typeof body.sender_open_id === "string" ? body.sender_open_id : null),
       senderUserId: cleanString(typeof body.sender_user_id === "string" ? body.sender_user_id : null),
@@ -584,6 +666,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       chatId: cleanString(typeof body.chat_id === "string" ? body.chat_id : null),
       threadId: cleanString(typeof body.thread_id === "string" ? body.thread_id : null),
       text: typeof body.text === "string" ? body.text : "",
+      deliveryMode: body.delivery_mode === "native_cot_v1" ? "native_cot_v1" : undefined,
     };
     try {
       return c.json(store.submitFeishuBotMessage(runtime.workspaceId ?? "local", runtimeId, input), 202);
@@ -646,6 +729,8 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     );
     return c.json({
       chat_session_id: snapshot.chatSessionId,
+      agent_id: snapshot.agentId,
+      agent_name: snapshot.agentName,
       task: snapshot.task
         ? {
             task_id: snapshot.task.taskId,
@@ -666,7 +751,10 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     const requestId = c.req.param("requestId");
     const request = store.getBotMenuPublishRequest(runtimeId, requestId);
     if (!request) return c.json({ error: "request not found" }, 404);
-    if (request.status === "completed" || request.status === "failed" || request.status === "timeout") {
+    // `timeout` is deliberately absent: a report that arrives after the
+    // deadline carries the concierge's real outcome, and dropping it here left
+    // operators staring at a generic timeout with the Feishu error discarded.
+    if (request.status === "completed" || request.status === "failed") {
       return c.json({ status: "ok" });
     }
     const body = await readJsonStrict<ReportBotMenuPublishInput>(c);
@@ -721,29 +809,50 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
   });
   // Multiremi daemon-compatible endpoints.
   app.post("/api/daemon/runtimes/:runtimeId/tasks/claim", async (c) => {
-    const task = store.claimTask(c.req.param("runtimeId"));
-    if (!task) return c.json({ task: null });
-    let hydratedTask: typeof task;
-    try {
-      hydratedTask = await deps.projectKnowledge.hydrateTaskKnowledge(task);
-      hydratedTask = await deps.repositoryWiki.hydrateTaskWiki(hydratedTask);
-    } catch (error) {
-      store.failTask(task.id, {
-        error: `Project knowledge unavailable before agent startup: ${safeProjectKnowledgeError(error)}`,
-        failureReason: "project_knowledge_unavailable",
-      });
-      return c.json({ error: "project knowledge unavailable", retryable: true }, 503);
+    const runtimeId = c.req.param("runtimeId");
+    const body = await readJsonStrictAllowEmpty<{ supports_binary_skill_files?: unknown }>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    if (!body || typeof body !== "object" || Array.isArray(body)
+      || (body.supports_binary_skill_files !== undefined && typeof body.supports_binary_skill_files !== "boolean")) {
+      return c.json({ error: "supports_binary_skill_files must be a boolean" }, 400);
     }
-    const response = daemonTaskClaimResponse(store, hydratedTask, store.getTaskTriggerMetadata(task));
-    const runtime = task.runtimeId ? store.getRuntime(task.runtimeId) : null;
-    // Every claim gets a task capability, including ownerless runtimes left by
-    // older releases. `local` matches the legacy owner semantics used by the
-    // runtime claim predicate, while the task/agent/workspace bindings enforce
-    // the actual authorization boundary.
-    const ownerId = cleanString(runtime?.ownerId) ?? "local";
-    const token = await store.createTaskAccessToken(task, ownerId);
-    response.auth_token = token.token;
-    return c.json({ task: response });
+    let preparing = preparingClaims.get(runtimeId);
+    // A duplicate poll must not deliver the same Task twice while its first claim is preparing.
+    if (preparing) return c.json({ task: null });
+    if (!preparing) {
+      preparing = (async () => {
+        const task = store.claimTask(runtimeId, { supportsBinarySkillFiles: body.supports_binary_skill_files === true });
+        if (!task) return null;
+        // Checkout scope is server-owned metadata, independent of Wiki body availability.
+        const remotes = new Set(task.repos.map(repo => canonicalRepositoryRemote(repo.url)));
+        for (const repo of resolveTaskRepositoryWikiRepositories(store, task)) {
+          if (!remotes.has(canonicalRepositoryRemote(repo.url))) {
+            task.repos.push({ url: repo.url });
+            remotes.add(canonicalRepositoryRemote(repo.url));
+          }
+        }
+        const hydratedTask = await hydrateClaimKnowledge(task, deps.projectKnowledge, deps.repositoryWiki);
+        const current = store.getTask(task.id);
+        if (current?.status !== "dispatched" || current.runtimeId !== runtimeId) return null;
+        const response = daemonTaskClaimResponse(store, hydratedTask, store.getTaskTriggerMetadata(task));
+        const runtime = store.getRuntime(runtimeId);
+        // Every claim gets a task capability, including ownerless runtimes left by
+        // older releases. The task/agent/workspace bindings enforce authorization.
+        const ownerId = cleanString(runtime?.ownerId) ?? "local";
+        const token = await store.createTaskAccessToken(task, ownerId);
+        response.auth_token = token.token;
+        return response;
+      })().finally(() => preparingClaims.delete(runtimeId));
+      preparingClaims.set(runtimeId, preparing);
+    }
+    try {
+      return c.json({ task: await preparing });
+    } catch (error) {
+      if (error instanceof BinarySkillFilesUnsupportedError) {
+        return c.json({ error: error.message, code: "binary_skill_files_unsupported" }, 409);
+      }
+      throw error;
+    }
   });
   app.get("/api/daemon/runtimes/:runtimeId/tasks/pending", (c) => {
     const runtime = store.getRuntime(c.req.param("runtimeId"));
@@ -945,6 +1054,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
         worktree_path?: string;
         branch_name?: string;
         base_ref?: string;
+        base_commit?: string | null;
         status?: "ready" | "dirty" | "error";
         dirty?: boolean;
         error?: string | null;
@@ -968,6 +1078,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       worktreePath: repo.worktree_path?.trim() ?? "",
       branchName: repo.branch_name?.trim() ?? body.branch_name!,
       baseRef: repo.base_ref?.trim() ?? "",
+      baseCommit: repo.base_commit?.trim() || null,
       status: repo.status ?? (repo.dirty ? "dirty" : "ready"),
       dirty: repo.dirty ?? false,
       error: repo.error?.trim() || null,
@@ -1060,6 +1171,8 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       sessionId: task.sessionId,
       workDir: task.workDir,
       usage: task.usage,
+      startedAt: task.startedAt,
+      completedAt: task.completedAt,
     };
     return c.json({
       task_id: snapshot.taskId,
@@ -1069,6 +1182,8 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       session_id: snapshot.sessionId,
       work_dir: snapshot.workDir,
       usage: snapshot.usage,
+      started_at: snapshot.startedAt,
+      completed_at: snapshot.completedAt,
     });
   });
   app.get("/api/daemon/tasks/:taskId/steer", (c) => {
@@ -1190,10 +1305,6 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     if (!task) return c.json({ error: "task not found" }, 404);
     return c.json({ status: task.status, completed_at: task.completedAt });
   });
-}
-
-function safeProjectKnowledgeError(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 500);
 }
 
 function normalizeDaemonProtocolVersion(value: unknown): number {

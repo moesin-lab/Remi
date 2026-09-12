@@ -160,14 +160,14 @@ function buildSharedIssueBundle(
     ...issueSessionCompatibilityResponse(session, store.listSessionParticipants(session.id)),
     events: store.listSessionEvents(session.id).map(sessionEventCompatibilityResponse),
     tasks: store.listTasksForIssue(issue.id)
-      .filter((task) => task.issueSessionId === session.id)
+      .filter((task) => task.issueSessionId === session.id && !task.chatSessionId)
       .map((task) => ({
         ...taskCompatibilityResponse(task),
         messages: store.listTaskMessages(task.id),
       })),
   }));
   const unscopedTasks = store.listTasksForIssue(issue.id)
-    .filter((task) => !task.issueSessionId)
+    .filter((task) => !task.issueSessionId && !task.chatSessionId)
     .map((task) => ({
       ...taskCompatibilityResponse(task),
       messages: store.listTaskMessages(task.id),
@@ -212,6 +212,7 @@ function buildSharedIssueBundle(
         worktree_path: repo.worktreePath,
         branch_name: repo.branchName,
         base_ref: repo.baseRef,
+        base_commit: repo.baseCommit ?? null,
         status: repo.status,
         dirty: repo.dirty,
         error: repo.error,

@@ -8,6 +8,7 @@ import {
 import { ProjectKnowledgeService } from "@multiremi/project-knowledge/service.js";
 import { repositoryWikiDocUri, repositoryWikiStorageRootUri } from "@multiremi/repository-wiki/codec.js";
 import { RepositoryWikiService } from "@multiremi/repository-wiki/service.js";
+import { createMultiremiApp } from "@multiremi/api.js";
 import type {
   OpenVikingClientContract,
   OpenVikingFindHit,
@@ -424,6 +425,134 @@ describe("ProjectKnowledgeService OpenViking mode", () => {
 });
 
 describe("RepositoryWikiService OpenViking mode", () => {
+  it("also drains storage jobs in shadow mode", async () => {
+    const store = createLocalStore();
+    const client = new FakeOpenViking();
+    const service = new RepositoryWikiService(store, client, "shadow");
+    const doc = await service.create("local", "repo_alpha", { title: "Shadow", path: "shadow.md", body: "Facts" });
+    expect(store.listRepositoryWikiStorageJobs("local", "repo_alpha")).toHaveLength(1);
+    await service.runStorageJobs();
+    expect(store.listRepositoryWikiStorageJobs("local", "repo_alpha")).toEqual([]);
+    expect((await service.get("local", "repo_alpha", doc.id))?.body).toBe("Facts");
+  });
+
+  it("keeps reads and task hydration responsive behind 100 blocked cleanup paths", async () => {
+    const store = createLocalStore();
+    store.updateWorkspace("local", { repos: [{ id: "repo_alpha", name: "Alpha", url: "https://example.com/alpha.git" }] });
+    const client = new FakeOpenViking();
+    const service = new RepositoryWikiService(store, client, "openviking");
+    const operations = Array.from({ length: 100 }, (_, i) => ({ kind: "create" as const,
+      input: { title: `Page ${i}`, path: `page-${i}.md`, body: `Facts ${i}` } }));
+    await service.applyBatch("local", "repo_alpha", operations);
+    let active = 0;
+    let maximum = 0;
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const remove = client.remove.bind(client);
+    client.remove = async (uri, options?: { wait?: boolean }) => {
+      expect(options?.wait).toBe(false);
+      active++;
+      maximum = Math.max(maximum, active);
+      if (active === 8) entered.resolve();
+      await release.promise;
+      await remove(uri);
+      active--;
+    };
+    const cleaning = service.runStorageJobs();
+    await entered.promise;
+    try {
+      await new RepositoryWikiService(store, client, "openviking").runStorageJobs();
+      const task = { workspaceId: "local", projectResources: [{ resourceType: "github_repo",
+        resourceRef: { url: "https://example.com/alpha.git" } }], repos: [] } as any;
+      const hydrated = await Promise.race([service.hydrateTaskWiki(task),
+        Bun.sleep(500).then(() => { throw new Error("cleanup blocked hydration"); })]);
+      expect(hydrated.repositoryWikiContexts?.[0]?.docs).toHaveLength(100);
+      expect(await service.list("local", "repo_alpha")).toHaveLength(100);
+      expect(maximum).toBe(8);
+    } finally {
+      release.resolve();
+      await cleaning;
+    }
+    expect(store.listRepositoryWikiStorageJobs("local", "repo_alpha")).toEqual([]);
+  });
+
+  it("checkpoints successful deletes and retries only failed paths after restart", async () => {
+    const store = createLocalStore();
+    const client = new FakeOpenViking();
+    const service = new RepositoryWikiService(store, client, "openviking", { cleanupConcurrency: 2 });
+    await service.applyBatch("local", "repo_alpha", [0, 1, 2].map(i => ({ kind: "create",
+      input: { title: `Page ${i}`, path: `page-${i}.md`, body: "Facts" } })));
+    client.failRemoves = 1;
+    await service.runStorageJobs();
+    const job = store.listRepositoryWikiStorageJobs("local", "repo_alpha")[0]!;
+    expect(job.manifest.completedCleanupUris).toHaveLength(2);
+    const visited: string[] = [];
+    const exists = client.exists.bind(client);
+    client.exists = async uri => { visited.push(uri); return exists(uri); };
+    const restarted = new RepositoryWikiService(store, client, "openviking");
+    await restarted.runStorageJobs();
+    expect(visited).toEqual([]);
+    await restarted.runStorageJobs(undefined, Date.now() + 600_000);
+    expect(visited).toHaveLength(1);
+    expect(job.manifest.completedCleanupUris).not.toContain(visited[0]);
+    expect(store.listRepositoryWikiStorageJobs("local", "repo_alpha")).toEqual([]);
+  });
+
+  it("retains progress when the cleanup snapshot fails and does not repeat deletes", async () => {
+    const store = createLocalStore();
+    const client = new FakeOpenViking();
+    const service = new RepositoryWikiService(store, client, "openviking");
+    const doc = await service.create("local", "repo_alpha", { title: "Page", path: "page.md", body: "Facts" });
+    client.failCommits = 1;
+    await service.runStorageJobs();
+    const job = store.listRepositoryWikiStorageJobs("local", "repo_alpha")[0]!;
+    expect(job.manifest.completedCleanupUris).toEqual(job.manifest.cleanupUris);
+    client.remove = async () => { throw new Error("completed path must not be deleted again"); };
+    await new RepositoryWikiService(store, client, "openviking").runStorageJobs(undefined, Date.now() + 600_000);
+    expect(store.listRepositoryWikiStorageJobs("local", "repo_alpha")).toEqual([]);
+    expect(client.files.has(doc.contentUri!)).toBe(true);
+  });
+
+  it("cancels background requests and releases the lease without losing the job", async () => {
+    const store = createLocalStore();
+    const client = new FakeOpenViking();
+    const service = new RepositoryWikiService(store, client, "openviking");
+    await service.create("local", "repo_alpha", { title: "Page", path: "page.md", body: "Facts" });
+    const entered = Promise.withResolvers<void>();
+    (client as OpenVikingClientContract).withSignal = signal => {
+      const scoped = Object.create(client) as FakeOpenViking;
+      scoped.remove = async () => {
+        entered.resolve();
+        return new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }));
+      };
+      return scoped;
+    };
+    const abort = new AbortController();
+    const run = service.runStorageJobs(abort.signal);
+    await entered.promise;
+    abort.abort();
+    await run;
+    const job = store.listRepositoryWikiStorageJobs("local", "repo_alpha")[0]!;
+    expect(job.manifest.completedCleanupUris).toEqual([]);
+    expect(store.claimRepositoryWikiStorageJob(job.id, "next-worker", new Date(Date.now() + 120_000).toISOString(), new Date().toISOString())).toBe(true);
+    store.releaseRepositoryWikiStorageJob(job.id, "next-worker");
+  });
+
+  it("refuses a cleanup manifest that points at live or out-of-scope content", async () => {
+    const store = createLocalStore();
+    const client = new FakeOpenViking();
+    const service = new RepositoryWikiService(store, client, "openviking");
+    const doc = await service.create("local", "repo_alpha", { title: "Live", path: "live.md", body: "Facts" });
+    const job = store.listRepositoryWikiStorageJobs("local", "repo_alpha")[0]!;
+    for (const uri of [doc.contentUri!, "viking://resources/another-workspace/page.md"]) {
+      db!.run("UPDATE multiremi_repository_wiki_storage_jobs SET manifest = ? WHERE id = ?",
+        [JSON.stringify({ ...job.manifest, cleanupUris: [uri] }), job.id]);
+      await service.runStorageJobs(undefined, Date.now() + 600_000);
+      expect(store.listRepositoryWikiStorageJobs("local", "repo_alpha")[0]?.lastError).toContain("Unsafe Wiki cleanup target");
+      expect(client.files.has(doc.contentUri!)).toBe(true);
+    }
+  });
+
   it("isolates unreadable pages in repository lists and marks their bodies unavailable", async () => {
     const store = createStore();
     const client = new FakeOpenViking();
@@ -573,6 +702,7 @@ describe("RepositoryWikiService OpenViking mode", () => {
     const source = await service.create("local", "repo_alpha", {
       title: "Source", path: "guides/index.md", body: "Read [[target]].",
     });
+    await service.runStorageJobs();
     const filesBefore = new Map(client.files);
     client.failWriteAt = client.writeAttempts + 2;
 
@@ -596,7 +726,7 @@ describe("RepositoryWikiService OpenViking mode", () => {
     expect(store.getRepositoryWikiDocByRef("local", "repo_alpha", source.id)).toMatchObject({ version: 1 });
   });
 
-  it("repairs a deferred canonical promotion on the next repository read", async () => {
+  it("reads committed staging content without repair and promotes it in the background", async () => {
     const store = createStore();
     const client = new FakeOpenViking();
     const service = new RepositoryWikiService(store, client, "openviking");
@@ -609,12 +739,72 @@ describe("RepositoryWikiService OpenViking mode", () => {
 
     expect(created.contentUri).toStartWith(`${repositoryWikiStorageRootUri("local", "repo_alpha")}/batches/`);
     expect(client.files.has(canonicalUri)).toBeFalse();
-    const repaired = await new RepositoryWikiService(store, client, "openviking")
-      .get("local", "repo_alpha", created.id);
+    const restarted = new RepositoryWikiService(store, client, "openviking");
+    expect((await restarted.get("local", "repo_alpha", created.id))?.body).toBe("Target v1");
+    expect(client.files.has(canonicalUri)).toBeFalse();
+    await restarted.runStorageJobs(undefined, Date.now() + 600_000);
+    const repaired = await restarted.get("local", "repo_alpha", created.id);
     expect(repaired).toMatchObject({ contentUri: canonicalUri, body: "Target v1", syncStatus: "ready" });
     expect(store.getRepositoryWikiDocByRef("local", "repo_alpha", created.id)?.contentUri).toBe(canonicalUri);
     expect(client.files.get(canonicalUri)).toContain("Target v1");
     expect(client.files.has(created.contentUri!)).toBeFalse();
+  });
+
+  it("returns workspace summaries without touching deferred OpenViking jobs", async () => {
+    const store = createLocalStore();
+    store.updateWorkspace("local", { repos: [{ id: "repo_alpha", name: "Alpha", url: "https://github.com/example/alpha.git", source: "github" }] });
+    const client = new FakeOpenViking();
+    const service = new RepositoryWikiService(store, client, "openviking");
+    client.failWriteAt = 2;
+    const created = await service.create("local", "repo_alpha", {
+      title: "Target", path: "guides/target.md", body: "Committed facts",
+    });
+    const jobs = store.listRepositoryWikiStorageJobs("local", "repo_alpha");
+    expect(jobs).toHaveLength(1);
+    client.readCalls.length = 0;
+    const writes = client.writeAttempts;
+    const commits = client.commits.length;
+    const app = createMultiremiApp({ store, repositoryWiki: service, authToken: "summary-test" });
+    const response = await app.request("/api/workspaces/local/repository-wikis", { headers: { Authorization: "Bearer summary-test" } });
+    expect(response.status).toBe(200);
+    const data = await response.json() as { repositories: Array<{ repository_id: string; page_count: number }> };
+    expect(data.repositories).toMatchObject([{ repository_id: "repo_alpha", page_count: 1 }]);
+    expect(client.readCalls).toEqual([]);
+    expect(client.writeAttempts).toBe(writes);
+    expect(client.commits).toHaveLength(commits);
+    expect(store.listRepositoryWikiStorageJobs("local", "repo_alpha")).toEqual(jobs);
+    expect(store.getRepositoryWikiDocByRef("local", "repo_alpha", created.id)?.contentUri).toBe(created.contentUri);
+    expect(await service.listWorkspace("another-workspace")).toEqual([]);
+    // Target-specific reads also remain read-only; repair is owned by the worker.
+    expect((await service.get("local", "repo_alpha", created.id))?.body).toBe("Committed facts");
+    expect(store.listRepositoryWikiStorageJobs("local", "repo_alpha")).toEqual(jobs);
+    await service.runStorageJobs(undefined, Date.now() + 600_000);
+    expect(store.listRepositoryWikiStorageJobs("local", "repo_alpha")).toEqual([]);
+  });
+
+  it("does not wait for an in-flight canonical repair lock to list summaries", async () => {
+    const store = createLocalStore();
+    const client = new FakeOpenViking();
+    const service = new RepositoryWikiService(store, client, "openviking");
+    client.failWriteAt = 2;
+    const created = await service.create("local", "repo_alpha", { title: "Target", path: "target.md", body: "Facts" });
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const originalRead = client.read.bind(client);
+    client.read = async (uri) => { entered.resolve(); await release.promise; return originalRead(uri); };
+    const repairing = service.get("local", "repo_alpha", created.id);
+    await entered.promise;
+    let settled = false;
+    const listing = service.listWorkspace("local").then((docs) => { settled = true; return docs; });
+    try {
+      // listWorkspace is metadata-only and must settle without releasing the repair.
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      expect(settled).toBe(true);
+    } finally {
+      release.resolve();
+      await repairing;
+      await listing;
+    }
   });
 
   it("repairs a moved page and removes its obsolete canonical URI after restart", async () => {
@@ -635,8 +825,9 @@ describe("RepositoryWikiService OpenViking mode", () => {
     expect(moved.contentUri).toStartWith(`${repositoryWikiStorageRootUri("local", "repo_alpha")}/batches/`);
     expect(client.files.has(oldUri)).toBeTrue();
     expect(store.listRepositoryWikiStorageJobs("local", "repo_alpha")).toHaveLength(1);
-    const repaired = await new RepositoryWikiService(store, client, "openviking")
-      .get("local", "repo_alpha", created.id);
+    const restarted = new RepositoryWikiService(store, client, "openviking");
+    await restarted.runStorageJobs(undefined, Date.now() + 600_000);
+    const repaired = await restarted.get("local", "repo_alpha", created.id);
     expect(repaired).toMatchObject({ path: "new/target.md", contentUri: newUri, body: "Target v1" });
     expect(client.files.has(oldUri)).toBeFalse();
     expect(client.files.has(newUri)).toBeTrue();
@@ -674,15 +865,22 @@ describe("RepositoryWikiService OpenViking mode", () => {
     const created = await service.create("local", "repo_alpha", {
       title: "Delete me", path: "delete-me.md", body: "Temporary",
     });
+    await service.runStorageJobs();
     client.failRemoves = 1;
 
     await service.delete("local", "repo_alpha", created.id, created.version);
+    await service.runStorageJobs();
 
     expect(store.getRepositoryWikiDocByRef("local", "repo_alpha", created.id)).toBeNull();
     expect(client.files.has(canonicalUri)).toBeTrue();
     expect(store.listRepositoryWikiStorageJobs("local", "repo_alpha")).toHaveLength(1);
-    expect(await new RepositoryWikiService(store, client, "openviking").listWorkspace("local"))
-      .toEqual([]);
+    const restarted = new RepositoryWikiService(store, client, "openviking");
+    expect(await restarted.listWorkspace("local")).toEqual([]);
+    expect(client.files.has(canonicalUri)).toBeTrue();
+    // Neither overview nor target reads repair storage.
+    expect(await restarted.list("local", "repo_alpha")).toEqual([]);
+    expect(client.files.has(canonicalUri)).toBeTrue();
+    await restarted.runStorageJobs(undefined, Date.now() + 600_000);
     expect(client.files.has(canonicalUri)).toBeFalse();
     expect(store.listRepositoryWikiStorageJobs("local", "repo_alpha")).toEqual([]);
   });
@@ -698,6 +896,7 @@ describe("RepositoryWikiService OpenViking mode", () => {
 
     expect((await service.get("local", "repo_alpha", created.id))?.contentUri).toBe(canonicalUri);
     expect(client.files.has(canonicalUri)).toBeTrue();
+    await service.runStorageJobs();
     expect(store.listRepositoryWikiStorageJobs("local", "repo_alpha")).toEqual([]);
   });
 
@@ -750,6 +949,7 @@ describe("RepositoryWikiService OpenViking mode", () => {
       body: "Version one",
     });
 
+    await service.runStorageJobs();
     client.failRemoves = 1;
     const moved = await service.update("local", "repo_alpha", created.id, {
       path: "design/architecture.md",

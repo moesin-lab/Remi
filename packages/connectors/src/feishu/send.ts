@@ -4,6 +4,7 @@
  */
 
 import type * as Lark from "@larksuiteoapi/node-sdk";
+import { feishuResponseError } from "./native-cot.js";
 import type { FeishuSendResult } from "./types.js";
 import type { MentionTarget } from "./mention.js";
 import { buildMentionedMessage, buildMentionedCardContent } from "./mention.js";
@@ -16,7 +17,10 @@ function buildFeishuPostMessagePayload(params: { messageText: string }): {
   content: string;
   msgType: string;
 } {
-  const { messageText } = params;
+  const messageText = params.messageText.replace(
+    /!\[([^\]]*)\]\(feishu-image:(img_[A-Za-z0-9_-]+)\)/gu,
+    "![$1]($2)",
+  );
   return {
     content: JSON.stringify({
       zh_cn: {
@@ -61,7 +65,7 @@ export async function sendMessageFeishu(
       },
     });
     if (response.code !== 0) {
-      throw new Error(`Feishu reply failed: ${response.msg || `code ${response.code}`}`);
+      throw feishuResponseError("Feishu reply", response);
     }
     return { messageId: response.data?.message_id ?? "unknown", chatId: receiveId };
   }
@@ -76,7 +80,7 @@ export async function sendMessageFeishu(
     },
   });
   if (response.code !== 0) {
-    throw new Error(`Feishu send failed: ${response.msg || `code ${response.code}`}`);
+    throw feishuResponseError("Feishu send", response);
   }
   return { messageId: response.data?.message_id ?? "unknown", chatId: receiveId };
 }
@@ -104,7 +108,8 @@ export function buildCardHeader(sessionId?: string | null, displayName?: string 
     icon: { tag: "standard_icon" as const, token: "robot_outlined", color: "grey" },
   };
   if (subtitle) {
-    header.subtitle = { tag: "plain_text", content: subtitle };
+    // Feishu's native subtitle is single-line and ellipsizes overflow.
+    header.subtitle = { tag: "plain_text", content: subtitle.replace(/\s+/g, " ") };
   }
   return header;
 }
@@ -165,7 +170,7 @@ export async function sendCardFeishu(
   client: Lark.Client,
   to: string,
   card: Record<string, unknown>,
-  options?: { replyToMessageId?: string },
+  options?: { replyToMessageId?: string; idempotencyKey?: string },
 ): Promise<FeishuSendResult> {
   const receiveId = to.trim();
   if (!receiveId) throw new Error(`Invalid Feishu target: ${to}`);
@@ -176,20 +181,22 @@ export async function sendCardFeishu(
   if (options?.replyToMessageId) {
     const response = await client.im.message.reply({
       path: { message_id: options.replyToMessageId },
-      data: { content, msg_type: "interactive", reply_in_thread: true },
+      data: { content, msg_type: "interactive", reply_in_thread: true,
+        ...(options.idempotencyKey ? { uuid: options.idempotencyKey } : {}) },
     });
     if (response.code !== 0) {
-      throw new Error(`Feishu card reply failed: ${response.msg || `code ${response.code}`}`);
+      throw feishuResponseError("Feishu card reply", response);
     }
     return { messageId: response.data?.message_id ?? "unknown", chatId: receiveId };
   }
 
   const response = await client.im.message.create({
     params: { receive_id_type: receiveIdType },
-    data: { receive_id: receiveId, content, msg_type: "interactive" },
+    data: { receive_id: receiveId, content, msg_type: "interactive",
+      ...(options?.idempotencyKey ? { uuid: options.idempotencyKey } : {}) },
   });
   if (response.code !== 0) {
-    throw new Error(`Feishu card send failed: ${response.msg || `code ${response.code}`}`);
+    throw feishuResponseError("Feishu card send", response);
   }
   return { messageId: response.data?.message_id ?? "unknown", chatId: receiveId };
 }
@@ -206,7 +213,7 @@ export async function updateCardFeishu(
     data: { content },
   });
   if (response.code !== 0) {
-    throw new Error(`Feishu card update failed: ${response.msg || `code ${response.code}`}`);
+    throw feishuResponseError("Feishu card update", response);
   }
 }
 

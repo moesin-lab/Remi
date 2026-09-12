@@ -54,6 +54,32 @@ const CLAUDE_BASH_COMPLETED = {
 };
 
 describe("daemon task-message mapper", () => {
+  it("preserves explicit commentary/final phases for native process/result separation", () => {
+    const map = createEventMapper(createAdapter("codex"));
+    for (const phase of ["commentary", "final_answer"]) {
+      expect(map(event({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: phase }, _meta: { codex: { phase } } })))
+        .toEqual([expect.objectContaining({ type: "text", meta: expect.objectContaining({ phase: phase === "final_answer" ? "final" : "commentary" }) })]);
+    }
+  });
+  it("persists selected model metadata separately from token usage", () => {
+    const map = createEventMapper(createAdapter("claude"));
+    expect(map(event({ sessionUpdate: "config_option_update", id: "model", value: "claude-opus-5" })))
+      .toEqual([{ type: "execution", meta: { provider: "claude", model: "claude-opus-5", modelName: null } }]);
+    expect(map(event({ sessionUpdate: "config_option_update", id: "effort", value: "high" }))).toEqual([]);
+    expect(map(event({ sessionUpdate: "config_option_update", id: "model", value: "child-model",
+      _meta: { claudeCode: { parentToolUseId: "tool_parent" } } }))).toEqual([]);
+  });
+
+  it("keeps context limits and subagent attribution in persisted usage events", () => {
+    const map = createEventMapper(createAdapter("claude"));
+    const mapped = map(event({ sessionUpdate: "usage_update", used: 82000, size: 200000,
+      usage: { totalTokens: 883000 } }));
+    expect(mapped[0]).toMatchObject({ type: "usage", meta: { used: 82000, size: 200000, totalTokens: 883000 } });
+    const child = map(event({ sessionUpdate: "usage_update", used: 10, size: 20,
+      _meta: { claudeCode: { parentToolUseId: "tool_parent" } } }));
+    expect(child[0]?.meta?.parent_tool_call_id).toBe("tool_parent");
+  });
+
   it("classifies only standalone claude compaction status chunks", () => {
     const map = createEventMapper(createAdapter("claude"));
     const statuses = [

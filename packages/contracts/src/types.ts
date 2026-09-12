@@ -15,6 +15,8 @@ export interface MultiremiSkillFile {
   skillId?: string;
   path: string;
   content: string;
+  /** Omitted for UTF-8 text; binary content uses canonical base64. */
+  encoding?: "utf8" | "base64";
   createdAt?: string;
   updatedAt?: string;
 }
@@ -672,6 +674,7 @@ export interface MultiremiCloudRuntimeNode {
 }
 
 export interface MultiremiRuntimeLocalSkillSummary {
+  error?: string;
   key: string;
   name: string;
   description?: string;
@@ -683,6 +686,8 @@ export interface MultiremiRuntimeLocalSkillSummary {
 }
 
 export interface MultiremiRuntimeLocalSkillListRequest {
+  root?: string | null;
+  warnings?: string[];
   id: string;
   runtimeId: string;
   status: MultiremiRuntimeLocalSkillRequestStatus;
@@ -695,6 +700,7 @@ export interface MultiremiRuntimeLocalSkillListRequest {
 }
 
 export interface MultiremiRuntimeLocalSkillImportRequest {
+  root?: string | null;
   id: string;
   runtimeId: string;
   skillKey: string;
@@ -873,6 +879,7 @@ export interface MultiremiDaemonHeartbeatAck {
   };
   pending_local_skills?: {
     id: string;
+    root?: string;
   };
   pending_directory_scan?: {
     id: string;
@@ -882,10 +889,12 @@ export interface MultiremiDaemonHeartbeatAck {
   };
   pending_local_skill_import?: {
     id: string;
+    root?: string;
     skill_key: string;
   };
   pending_local_skill_imports?: Array<{
     id: string;
+    root?: string;
     skill_key: string;
   }>;
   pending_command?: {
@@ -1078,7 +1087,13 @@ export interface CreateCloudRuntimeNodeInput {
   metadata?: Record<string, unknown>;
 }
 
+export interface CreateRuntimeLocalSkillListInput {
+  root?: string;
+}
+
 export interface CreateRuntimeLocalSkillImportInput {
+  scanRequestId?: string;
+  scan_request_id?: string;
   skillKey?: string;
   skill_key?: string;
   name?: string | null;
@@ -1088,6 +1103,8 @@ export interface CreateRuntimeLocalSkillImportInput {
 }
 
 export interface ReportRuntimeLocalSkillListInput {
+  root?: string;
+  warnings?: string[];
   status?: string;
   skills?: MultiremiRuntimeLocalSkillSummary[];
   supported?: boolean;
@@ -1282,6 +1299,7 @@ export interface MultiremiTask {
   /** Generation of this task's per-agent Issue Session lane, frozen at claim
    * time and persisted so late completions cannot promote into a newer lane. */
   issueSessionGeneration?: number | null;
+  execution_scope?: string;
   issue_session_generation?: number | null;
   /** Immutable snapshot of whether this task owns the shared Issue workspace. */
   holdsWorkspace: boolean;
@@ -1367,6 +1385,9 @@ export interface MultiremiTask {
    *  agentId === delegatedByAgentId, which prevents a return from bouncing. */
   delegatedByAgentId: string | null;
   delegated_by_agent_id?: string | null;
+  /** Return task that has claimed this delegated task's terminal report. */
+  delegationReturnTaskId: string | null;
+  delegation_return_task_id?: string | null;
   assignmentEventId: string | null;
   assignment_event_id?: string | null;
   /** System event that caused the automation-owned task to be assigned. This
@@ -1444,6 +1465,7 @@ export interface MultiremiTaskWithAgent extends MultiremiTask {
   /** Full Wiki bodies used only to materialize the Issue workspace working copy. */
   projectWikiDocs?: MultiremiProjectDoc[];
   repositoryWikiContexts?: MultiremiTaskRepositoryWikiContext[];
+  knowledgeWarnings?: string[];
   projectContexts: MultiremiTaskProjectContext[];
   repos: MultiremiRepoData[];
 }
@@ -1541,6 +1563,10 @@ export interface CreateTaskInput {
   issueId?: string | null;
   issueSessionId?: string | null;
   issue_session_id?: string | null;
+  /** Server-internal workspace lease override. Discussion/reporting tasks can
+   * retain Issue context without claiming its code workspace. */
+  holdsWorkspace?: boolean;
+  holds_workspace?: boolean;
   /** Server-internal lane generation. Public task creation strips this field. */
   issueSessionGeneration?: number | null;
   issue_session_generation?: number | null;
@@ -1697,6 +1723,7 @@ export interface MultiremiIssueWorkspaceRepo {
   worktreePath: string;
   branchName: string;
   baseRef: string;
+  baseCommit?: string | null;
   status: "ready" | "dirty" | "error";
   dirty: boolean;
   error: string | null;
@@ -1949,10 +1976,13 @@ export interface MultiremiTimelineEntry {
 
 export interface MultiremiTimelinePage {
   entries: MultiremiTimelineEntry[];
-  next_cursor: null;
+  limit: number;
+  next_cursor: string | null;
   prev_cursor: null;
-  has_more_before: false;
+  has_more: boolean;
+  has_more_before: boolean;
   has_more_after: false;
+  issue_session_id: string | null;
   target_index?: number;
 }
 
@@ -2988,6 +3018,7 @@ export interface CreateKnowledgeCompilationRunInput {
 export interface MultiremiRepoData {
   url: string;
   description?: string;
+  defaultBranch?: string;
 }
 
 export interface CreateProjectInput {
@@ -3387,7 +3418,19 @@ export type MultiremiAutopilotAssigneeType = "agent" | "squad";
 
 export type MultiremiAutopilotTriggerKind = "schedule" | "webhook" | "api" | "system_event" | "scm_event";
 
-export type MultiremiAutopilotRunStatus = "issue_created" | "running" | "completed" | "failed" | "skipped";
+export type MultiremiAutopilotRunStatus = "queued" | "issue_created" | "running" | "completed" | "failed" | "skipped";
+
+export interface MultiremiScheduleTargets {
+  projects: { all: boolean; ids: string[] };
+  repositories: { all: boolean; ids: string[] };
+  prompt?: string | null;
+}
+
+export interface MultiremiScheduleTarget {
+  kind: "project" | "repository";
+  id: string;
+  name: string;
+}
 
 export type MultiremiAutopilotRunSource = "manual" | "schedule" | "webhook" | "api" | "system_event" | "scm_event";
 
@@ -3496,6 +3539,7 @@ export interface MultiremiAutopilot {
 }
 
 export interface MultiremiAutopilotTrigger {
+  scheduleTargets?: MultiremiScheduleTargets | null;
   id: string;
   autopilotId: string;
   kind: MultiremiAutopilotTriggerKind;
@@ -3522,6 +3566,8 @@ export interface MultiremiAutopilotTrigger {
 }
 
 export interface MultiremiAutopilotRun {
+  scheduleTarget?: MultiremiScheduleTarget | null;
+  scheduleBatchId?: string | null;
   id: string;
   autopilotId: string;
   source: MultiremiAutopilotRunSource;
@@ -3578,6 +3624,8 @@ export interface CreateAutopilotInput {
 }
 
 export interface CreateAutopilotTriggerInput {
+  scheduleTargets?: MultiremiScheduleTargets | null;
+  schedule_targets?: MultiremiScheduleTargets | null;
   kind?: MultiremiAutopilotTriggerKind;
   cronExpression?: string | null;
   cron_expression?: string | null;
@@ -3597,6 +3645,8 @@ export interface CreateAutopilotTriggerInput {
 }
 
 export interface UpdateAutopilotTriggerInput {
+  scheduleTargets?: MultiremiScheduleTargets | null;
+  schedule_targets?: MultiremiScheduleTargets | null;
   enabled?: boolean;
   cronExpression?: string | null;
   cron_expression?: string | null;
@@ -3806,16 +3856,35 @@ export const FEISHU_CONCIERGE_CONFIG_CAPABILITY = "feishu_concierge_config_v1";
 export const FEISHU_CONCIERGE_PROTOCOL_VERSION = 1;
 
 /** Adds durable proactive topic replies without removing v1 inbound support. */
-export const FEISHU_CONCIERGE_OUTBOUND_PROTOCOL_VERSION = 2;
+/** v2 can claim text deliveries; v3 adds guarded image attachment fetching. */
+export const FEISHU_CONCIERGE_OUTBOUND_LEGACY_PROTOCOL_VERSION = 2;
+export const FEISHU_CONCIERGE_OUTBOUND_PROTOCOL_VERSION = 3;
+/** v4 consumes proactive Task events and renews delivery leases while streaming. */
+export const FEISHU_CONCIERGE_TASK_STREAM_PROTOCOL_VERSION = 4;
+/** Native CoT, independent interaction/result messages, durable inbound delivery. */
+export const FEISHU_CONCIERGE_NATIVE_COT_PROTOCOL_VERSION = 5;
+export const FEISHU_CONCIERGE_OUTBOUND_CLAIM_HEADER = "X-Multiremi-Feishu-Claim-Token";
 
 export type FeishuBotDomain = "feishu" | "lark" | "bytedance";
 
 /** Workspace policy for creating one Feishu topic per newly created Issue. */
+export type IssueTopicNotifyMode = "group_owner" | "person" | "none";
+
 export interface IssueTopicConfig {
   enabled: boolean;
   chatId: string;
   /** Omitted means every project, including projectless Issues. */
   projectIds?: string[];
+  notifyMode?: IssueTopicNotifyMode;
+  /** Open ID scoped to the bot application; only used in person mode. */
+  notifyOpenId?: string;
+}
+
+export interface FeishuBotOutboundMention {
+  mode: IssueTopicNotifyMode;
+  openId?: string;
+  /** Omitted until prepared; null means a deliberate no-mention outcome. */
+  resolvedOpenId?: string | null;
 }
 
 /** What the control plane wants the selected Runtime to do with the connector. */
@@ -3823,6 +3892,30 @@ export type FeishuBotDesiredState = "running" | "stopped";
 
 /** What a Runtime reports back about the connector it is hosting. */
 export type FeishuBotRuntimeState = "stopped" | "starting" | "online" | "failed";
+
+export type FeishuBotOutboundBodyOrigin = "issue" | "agent";
+
+/** Delivery state only. Task messages and human responses remain authoritative. */
+export interface FeishuPresentationCheckpoint {
+  version: "native_cot_v1";
+  startedAt: number;
+  throughSeq: number;
+  interactionOpenId?: string;
+  cot?: {
+    status: "creating" | "active" | "finished" | "disabled";
+    /** Keep event IDs/layout from different renderers out of the same CoT. */
+    presentation?: "semantic_v1";
+    cotId?: string;
+    messageId?: string;
+    /** Set before a write, cleared after its acknowledgement is checkpointed. */
+    writePending?: boolean;
+    runStarted?: boolean;
+    lastTimestamp?: number;
+    error?: string;
+  };
+  resultMessageId?: string;
+  interactions: Record<string, { messageId: string; receiptStatus?: string; waitingStarted?: boolean; waitingFinished?: boolean }>;
+}
 
 export interface MultiremiFeishuBotOutboundDelivery {
   id: string;
@@ -3835,9 +3928,18 @@ export interface MultiremiFeishuBotOutboundDelivery {
   replyToMessageId: string | null;
   reply_to_message_id?: string | null;
   body: string;
+  bodyOrigin: FeishuBotOutboundBodyOrigin;
+  body_origin?: FeishuBotOutboundBodyOrigin;
   /** Stable across retries so Feishu can deduplicate send-success/ack-failure. */
   idempotencyKey: string;
   idempotency_key?: string;
+  /** Present only for stream-capable daemons; absent on topic seed messages. */
+  taskId?: string;
+  resumeMessageId?: string | null;
+  mention?: FeishuBotOutboundMention;
+  presentation?: FeishuPresentationCheckpoint;
+  /** The requester, including in private chats where the final card needs no @. */
+  interactionOpenId?: string;
 }
 
 /**
@@ -3996,6 +4098,8 @@ export interface MultiremiFeishuBotDirective {
   desired_state: FeishuBotDesiredState;
   /** False while another Runtime still holds the connector (two-phase handover). */
   config_available: boolean;
+  /** Authoritative group admission policy, refreshed even without a bot revision change. */
+  no_mention_chat_ids?: string[];
 }
 
 /** Runtime-scoped payload returned to the daemon. Contains decrypted secrets. */
@@ -4029,6 +4133,7 @@ export interface SubmitFeishuBotMessageInput {
   revision: number;
   externalSessionKey: string;
   externalMessageId: string;
+  chatType?: "p2p" | "group" | null;
   replyToMessageId?: string | null;
   senderOpenId?: string | null;
   senderUserId?: string | null;
@@ -4038,15 +4143,19 @@ export interface SubmitFeishuBotMessageInput {
   chatId?: string | null;
   threadId?: string | null;
   text: string;
+  deliveryMode?: "native_cot_v1";
 }
 
 /** The canonical Chat/Task lineage selected for an inbound Feishu event. */
 export interface SubmitFeishuBotMessageResult {
   chatSessionId: string;
   taskId: string;
+  agentId: string;
+  agentName: string;
   status: MultiremiTaskStatus;
   duplicate: boolean;
   steered: boolean;
+  deliveryQueued?: boolean;
   senderMembership: "member" | "non_member" | "unbound";
 }
 
@@ -4059,12 +4168,39 @@ export interface FeishuBotTaskSnapshot {
   sessionId: string | null;
   workDir: string | null;
   usage: TaskUsageEntry[];
+  startedAt?: string | null;
+  completedAt?: string | null;
 }
 
 /** Current canonical Chat/Task lineage bound to one Feishu conversation. */
 export interface FeishuBotSessionSnapshot {
   chatSessionId: string | null;
+  agentId?: string | null;
+  agentName?: string | null;
   task: FeishuBotTaskSnapshot | null;
+}
+
+export type FeishuBotAgentRouteScope = "p2p_default" | "group_default" | "chat";
+
+export interface MultiremiFeishuBotAgentRoute {
+  id: string;
+  workspaceId: string;
+  scope: FeishuBotAgentRouteScope;
+  chatId: string | null;
+  chatName: string | null;
+  agentId: string;
+  agentName: string | null;
+  agentArchived: boolean;
+  createdAt: string;
+  updatedAt: string;
+  updatedBy: string | null;
+}
+
+export interface ReplaceFeishuBotAgentRouteInput {
+  scope: FeishuBotAgentRouteScope;
+  chatId?: string | null;
+  chatName?: string | null;
+  agentId: string;
 }
 
 /** Result of validating credentials against the Feishu open platform. */
@@ -4321,6 +4457,9 @@ export interface MultiremiChatSession {
   latestTaskId: string | null;
   unreadSince: string | null;
   hasUnread: boolean;
+  pinned: boolean;
+  unreadCount: number;
+  lastMessage: { content: string; role: MultiremiChatMessageRole; createdAt: string } | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -4354,6 +4493,7 @@ export interface CreateChatSessionInput {
 }
 
 export interface UpdateChatSessionInput {
+  pinned?: boolean;
   title?: string;
   status?: MultiremiChatSessionStatus;
   issueId?: string | null;
@@ -4371,6 +4511,7 @@ export interface SendChatMessageInput {
 }
 
 export interface SendChatMessageResult {
+  queued: boolean;
   session: MultiremiChatSession;
   message: MultiremiChatMessage;
   task: MultiremiTask;

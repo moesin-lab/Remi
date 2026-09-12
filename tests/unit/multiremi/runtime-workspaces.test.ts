@@ -13,6 +13,47 @@ function fixture() {
 }
 
 describe("Runtime-owned workspaces", () => {
+  it("serializes different Agents sharing a local directory while allowing another directory", () => {
+    const { store, runtime, workspace, agent } = fixture();
+    const peer = store.createAgent({ name: "Peer", provider: "codex", maxConcurrentTasks: 4 });
+    const otherWorkspace = store.runtimeWorkspaces.create(runtime.id, { name: "Other directory", root_path: "/home/user/other" });
+    const first = store.createTask({ agentId: agent.id, runtimeWorkspaceId: workspace.id, prompt: "First" });
+    const second = store.createTask({ agentId: peer.id, runtimeWorkspaceId: workspace.id, prompt: "Second" });
+    const independent = store.createTask({ agentId: peer.id, runtimeWorkspaceId: otherWorkspace.id, prompt: "Independent" });
+    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
+    expect(store.getTaskQueueBlocker(second.id)?.taskId).toBe(first.id);
+    expect(store.claimTask(runtime.id)?.id).toBe(independent.id);
+    expect(store.claimTask(runtime.id)).toBeNull();
+    store.cancelTask(first.id);
+    expect(store.claimTask(runtime.id)?.id).toBe(second.id);
+  });
+
+  it("lists Runtime directories using workspace slugs and rejects unknown slugs", async () => {
+    const { store, workspace } = fixture();
+    const app = createMultiremiApp({ store });
+    const slug = store.getWorkspace("local")!.slug;
+    const response = await app.request("/api/runtime-workspaces", { headers: { "X-Workspace-Slug": slug } });
+    expect(response.status).toBe(200);
+    expect((await response.json()).workspaces.map((item: { id: string }) => item.id)).toEqual([workspace.id]);
+    const missing = await app.request("/api/runtime-workspaces", { headers: { "X-Workspace-Slug": "missing-workspace" } });
+    expect(missing.status).toBe(404);
+  });
+
+  it("binds a native Issue to a Runtime directory in the workspace selected by its slug", async () => {
+    const { store } = fixture();
+    const tenant = store.createWorkspace({ name: "Team", slug: "runtime-directory-team" });
+    const runtime = store.registerRuntime({ name: "Team machine", provider: "codex", daemonId: "team-machine", workspaceId: tenant.id });
+    const directory = store.runtimeWorkspaces.create(runtime.id, { name: "Team files", root_path: "/home/user/team" });
+    const app = createMultiremiApp({ store });
+    const response = await app.request("/api/multiremi/issues", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Workspace-Slug": tenant.slug },
+      body: JSON.stringify({ title: "Use selected team directory", runtimeWorkspaceId: directory.id }),
+    });
+    expect(response.status).toBe(201);
+    expect(store.listIssues({ workspaceId: tenant.id })[0]?.runtimeWorkspaceId).toBe(directory.id);
+    expect(store.listIssues({ workspaceId: "local" })).toHaveLength(0);
+  });
+
   it("runs independent Chats on the owning daemon and serializes a shared workspace", () => {
     const { store, runtime, workspace, agent } = fixture();
     const other = store.registerRuntime({ name: "Other laptop", provider: "codex", daemonId: "other", workspaceId: "local", metadata: { runtime_workspaces: 1 } });

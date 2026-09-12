@@ -59,6 +59,9 @@ export interface TaskStreamMeta {
   taskId: string;
   displayName?: string | null;
   sessionId?: string | null;
+  signal?: AbortSignal;
+  isHumanRequestPending?: (requestId: string) => Promise<boolean>;
+  getHumanRequest?: (requestId: string) => Promise<MultiremiTaskHumanRequest | null>;
   respondHumanRequest: (
     requestId: string,
     response: Record<string, unknown>,

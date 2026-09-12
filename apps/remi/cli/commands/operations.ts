@@ -122,9 +122,22 @@ function runtimeSpecs(): CommandSpec[] {
     op({ id: "runtime.release.start", path: ["runtime", "release", "start"], description: "Start a runtime update", method: "POST", apiPath: runtime("/update"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
     op({ id: "runtime.release.status", path: ["runtime", "release", "status"], description: "Get a runtime update request", method: "GET", apiPath: async (i, c) => `${await runtime("/update")(i, c)}/${encodePath(positional(i, 1, "update"))}`, auth: HUMAN_DAEMON, positionals: [ref("runtime"), ref("update")] }),
     runtimeCommandRunSpec(),
-    op({ id: "runtime.skill.scan", path: ["runtime", "skill", "scan"], description: "Request local skill discovery", method: "POST", apiPath: runtime("/local-skills"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
+    op({ id: "runtime.skill.scan", path: ["runtime", "skill", "scan"], description: "Discover skills in a directory on the runtime machine", method: "POST", apiPath: runtime("/local-skills"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")],
+      options: [...INPUT_OPTIONS, { name: "root", type: "string", valueName: "directory", description: "Absolute or ~/ directory on the runtime; defaults to the provider's skill directory" }],
+      body: i => requestBody(i, { root: stringOption(i, "root") ?? undefined }) }),
     op({ id: "runtime.skill.status", path: ["runtime", "skill", "status"], description: "Get local skill discovery status", method: "GET", apiPath: async (i, c) => `${await runtime("/local-skills")(i, c)}/${encodePath(positional(i, 1, "request"))}`, auth: HUMAN_DAEMON, positionals: [ref("runtime"), ref("request")] }),
-    op({ id: "runtime.skill.import", path: ["runtime", "skill", "import"], description: "Import local runtime skills", method: "POST", apiPath: runtime("/local-skills/import"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
+    op({ id: "runtime.skill.import", path: ["runtime", "skill", "import"], description: "Copy a runtime skill into the Remi skill library", method: "POST", apiPath: runtime("/local-skills/import"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")],
+      options: [...INPUT_OPTIONS,
+        { name: "scan-request", type: "string", valueName: "id", description: "Completed scan that determines the source directory" },
+        { name: "key", type: "string", valueName: "skill-key", description: "Skill key returned by the scan; . selects the root skill" },
+        { name: "name", type: "string", valueName: "name", description: "Name in the Remi skill library" },
+        { name: "description", type: "string", valueName: "text", description: "Description in the Remi skill library" }],
+      body: i => requestBody(i, {
+        scan_request_id: stringOption(i, "scan-request") ?? undefined,
+        skill_key: stringOption(i, "key") ?? undefined,
+        name: stringOption(i, "name") ?? undefined,
+        description: stringOption(i, "description") ?? undefined,
+      }) }),
     op({ id: "runtime.skill.import-status", path: ["runtime", "skill", "import-status"], description: "Get local skill import status", method: "GET", apiPath: async (i, c) => `${await runtime("/local-skills/import")(i, c)}/${encodePath(positional(i, 1, "request"))}`, auth: HUMAN_DAEMON, positionals: [ref("runtime"), ref("request")] }),
     op({ id: "runtime.directory.scan", path: ["runtime", "directory", "scan"], description: "Request a runtime directory scan", method: "POST", apiPath: runtime("/directory-scans"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
     op({ id: "runtime.directory.status", path: ["runtime", "directory", "status"], description: "Get directory scan status", method: "GET", apiPath: async (i, c) => `${await runtime("/directory-scans")(i, c)}/${encodePath(positional(i, 1, "request"))}`, auth: HUMAN_DAEMON, positionals: [ref("runtime"), ref("request")] }),
@@ -307,15 +320,15 @@ function autopilotSpecs(): CommandSpec[] {
     op({ id: "autopilot.create", path: ["autopilot", "create"], description: "Create an autopilot", method: "POST", apiPath: "/api/autopilots", mutation: "write", auth: HUMAN, options: INPUT_OPTIONS, body: withWorkspace }),
     op({ id: "autopilot.update", path: ["autopilot", "update"], description: "Update an autopilot", method: "PATCH", apiPath: base, mutation: "write", auth: HUMAN, positionals: [ref("autopilot")], options: INPUT_OPTIONS }),
     op({ id: "autopilot.delete", path: ["autopilot", "delete"], description: "Delete an autopilot", method: "DELETE", apiPath: base, mutation: "destructive", auth: HUMAN, positionals: [ref("autopilot")] }),
-    op({ id: "autopilot.run.list", path: ["autopilot", "run", "list"], description: "List autopilot runs", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/runs`, auth: HUMAN, positionals: [ref("autopilot")], collections: ["runs"] }),
+    op({ id: "autopilot.run.list", path: ["autopilot", "run", "list"], description: "List autopilot runs including queued schedule targets", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/runs`, auth: HUMAN, positionals: [ref("autopilot")], options: [{ name: "limit", type: "integer", description: "Page size (up to 200)" }, { name: "offset", type: "integer", description: "Number of runs to skip" }], query: (i) => ({ limit: integerOption(i, "limit"), offset: integerOption(i, "offset") }), collections: ["runs"] }),
     op({ id: "autopilot.run.get", path: ["autopilot", "run", "get"], description: "Get an autopilot run", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/runs/${encodePath(positional(i, 1, "run"))}`, auth: HUMAN, positionals: [ref("autopilot"), ref("run")] }),
     op({ id: "autopilot.run", path: ["autopilot", "run"], description: "Run an autopilot", method: "POST", apiPath: async (i, c) => `${await base(i, c)}/trigger`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot")], options: INPUT_OPTIONS }),
     op({ id: "autopilot.delivery.list", path: ["autopilot", "delivery", "list"], description: "List autopilot webhook deliveries", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/deliveries`, auth: HUMAN, positionals: [ref("autopilot")], collections: ["deliveries"] }),
     op({ id: "autopilot.delivery.get", path: ["autopilot", "delivery", "get"], description: "Get an autopilot delivery", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/deliveries/${encodePath(positional(i, 1, "delivery"))}`, auth: HUMAN, positionals: [ref("autopilot"), ref("delivery")] }),
     op({ id: "autopilot.delivery.replay", path: ["autopilot", "delivery", "replay"], description: "Replay an autopilot delivery", method: "POST", apiPath: async (i, c) => `${await base(i, c)}/deliveries/${encodePath(positional(i, 1, "delivery"))}/replay`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot"), ref("delivery")], options: INPUT_OPTIONS }),
     op({ id: "autopilot.trigger.list", path: ["autopilot", "trigger", "list"], description: "List autopilot triggers", method: "GET", apiPath: base, auth: HUMAN, positionals: [ref("autopilot")], collections: ["triggers"] }),
-    op({ id: "autopilot.trigger.create", path: ["autopilot", "trigger", "create"], description: "Create an autopilot trigger", method: "POST", apiPath: async (i, c) => `${await base(i, c)}/triggers`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot")], options: INPUT_OPTIONS }),
-    op({ id: "autopilot.trigger.update", path: ["autopilot", "trigger", "update"], description: "Update an autopilot trigger", method: "PATCH", apiPath: async (i, c) => `${await base(i, c)}/triggers/${encodePath(positional(i, 1, "trigger"))}`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot"), ref("trigger")], options: INPUT_OPTIONS }),
+    op({ id: "autopilot.trigger.create", path: ["autopilot", "trigger", "create"], description: "Create a trigger; --file supports schedule_targets with projects, repositories and prompt", method: "POST", apiPath: async (i, c) => `${await base(i, c)}/triggers`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot")], options: INPUT_OPTIONS }),
+    op({ id: "autopilot.trigger.update", path: ["autopilot", "trigger", "update"], description: "Update a trigger; schedule_targets replaces target selections or null clears them", method: "PATCH", apiPath: async (i, c) => `${await base(i, c)}/triggers/${encodePath(positional(i, 1, "trigger"))}`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot"), ref("trigger")], options: INPUT_OPTIONS }),
     op({ id: "autopilot.trigger.delete", path: ["autopilot", "trigger", "delete"], description: "Delete an autopilot trigger", method: "DELETE", apiPath: async (i, c) => `${await base(i, c)}/triggers/${encodePath(positional(i, 1, "trigger"))}`, mutation: "destructive", auth: HUMAN, positionals: [ref("autopilot"), ref("trigger")] }),
     op({ id: "autopilot.trigger.rotate-token", path: ["autopilot", "trigger", "rotate-token"], description: "Rotate a webhook trigger token", method: "POST", apiPath: async (i, c) => `${await base(i, c)}/triggers/${encodePath(positional(i, 1, "trigger"))}/rotate-webhook-token`, mutation: "destructive", auth: HUMAN, positionals: [ref("autopilot"), ref("trigger")] }),
     op({ id: "autopilot.trigger.set-secret", path: ["autopilot", "trigger", "set-secret"], description: "Set a webhook signing secret", method: "PUT", apiPath: async (i, c) => `${await base(i, c)}/triggers/${encodePath(positional(i, 1, "trigger"))}/signing-secret`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot"), ref("trigger")], options: INPUT_OPTIONS }),
@@ -642,6 +655,8 @@ function messagingSpecs(): CommandSpec[] {
 function feishuSpecs(): CommandSpec[] {
   const workspaceBase = (i: CommandInvocation) =>
     `/api/workspaces/${encodePath(requiredWorkspace(i))}/feishu`;
+  const botBase = (i: CommandInvocation) =>
+    `/api/workspaces/${encodePath(requiredWorkspace(i))}/feishu-bot`;
   const source = (i: CommandInvocation) =>
     `${workspaceBase(i)}/sources/${encodePath(positional(i, 0, "source"))}`;
   const sourceFields: readonly CliOptionSpec[] = [
@@ -685,6 +700,26 @@ function feishuSpecs(): CommandSpec[] {
   });
   return [
     group("feishu", "Ingest and process allowlisted Feishu messages"),
+    op({
+      id: "feishu.route.list",
+      path: ["feishu", "route", "list"],
+      description: "List Feishu concierge Agent routes",
+      method: "GET",
+      apiPath: (i) => `${botBase(i)}/routes`,
+      auth: HUMAN,
+      collections: ["routes"],
+    }),
+    feishuRouteMutationSpec("set"),
+    feishuRouteMutationSpec("unset"),
+    op({
+      id: "feishu.chat.list",
+      path: ["feishu", "chat", "list"],
+      description: "List groups joined by the Feishu concierge bot",
+      method: "GET",
+      apiPath: (i) => `${botBase(i)}/chats`,
+      auth: HUMAN,
+      collections: ["chats"],
+    }),
     op({ id: "feishu.source.list", path: ["feishu", "source", "list"], description: "List Feishu message sources", method: "GET", apiPath: (i) => `${workspaceBase(i)}/sources`, auth: HUMAN, collections: ["sources"] }),
     op({ id: "feishu.source.get", path: ["feishu", "source", "get"], description: "Get a Feishu message source", method: "GET", apiPath: source, auth: HUMAN, positionals: [ref("source")] }),
     op({ id: "feishu.source.status", path: ["feishu", "source", "status"], description: "Show connection health, lag, and unresolved backlog", method: "GET", apiPath: (i) => `${source(i)}/status`, auth: HUMAN_TASK, positionals: [ref("source")] }),
@@ -860,6 +895,78 @@ function feishuSpecs(): CommandSpec[] {
       positionals: [ref("proposal")],
     }),
   ];
+
+  function feishuRouteMutationSpec(action: "set" | "unset"): CommandSpec {
+    const set = action === "set";
+    return {
+      id: `feishu.route.${action}`,
+      path: ["feishu", "route", action],
+      description: set ? "Set one Feishu concierge Agent route" : "Unset one Feishu concierge Agent route",
+      capability: `feishu.route.${action}`,
+      auth: HUMAN,
+      mutation: "write",
+      outputs: ["table", "json", "jsonl"],
+      positionals: [ref("scope")],
+      options: commandOptions([], [
+        ...(set ? [{
+          name: "agent",
+          type: "string" as const,
+          valueName: "id|name",
+          required: true,
+          description: "Agent ID or exact name",
+        }] : []),
+        { name: "chat", type: "string", valueName: "chat-id", description: "Required for scope=chat" },
+        ...(set ? [{ name: "chat-name", type: "string" as const, valueName: "name", description: "Cached group name" }] : []),
+      ]),
+      run: async (invocation) => {
+        const scope = positional(invocation, 0, "scope");
+        if (scope !== "p2p_default" && scope !== "group_default" && scope !== "chat") {
+          throw new CliError("usage", "scope must be p2p_default, group_default, or chat");
+        }
+        const chatId = stringOption(invocation, "chat");
+        if (scope === "chat" && !chatId) throw new CliError("usage", "scope=chat requires --chat <chat-id>");
+        if (scope !== "chat" && chatId) throw new CliError("usage", "--chat is only valid for scope=chat");
+
+        const client = await clientFor(invocation);
+        const path = `${botBase(invocation)}/routes`;
+        const current = await client.request({ method: "GET", path });
+        const routes = extractRecords(current.data, ["routes"]).map(routeWriteView);
+        const target = (route: Record<string, unknown>) => route.scope === scope
+          && (scope !== "chat" || route.chat_id === chatId);
+        const next = routes.filter((route) => !target(route));
+        if (set) {
+          const agentId = await resolveListedId(
+            client,
+            invocation,
+            requiredStringOption(invocation, "agent"),
+            "agent",
+            "/api/agents",
+            ["agents"],
+          );
+          next.push({
+            scope,
+            chat_id: scope === "chat" ? chatId : null,
+            chat_name: scope === "chat" ? stringOption(invocation, "chat-name") : null,
+            agent_id: agentId,
+          });
+        } else if (next.length === routes.length) {
+          renderSafe(invocation, current.data, ["routes"]);
+          return;
+        }
+        const response = await client.request({ method: "PUT", path, body: { routes: next } });
+        renderSafe(invocation, response.data, ["routes"]);
+      },
+    };
+  }
+}
+
+function routeWriteView(route: Record<string, unknown>): Record<string, unknown> {
+  return {
+    scope: route.scope,
+    chat_id: route.chat_id ?? null,
+    chat_name: route.chat_name ?? null,
+    agent_id: route.agent_id,
+  };
 }
 
 function inboxSpecs(): CommandSpec[] {
@@ -957,7 +1064,7 @@ function platformSpecs(): CommandSpec[] {
     ].map(([id, path, apiPath, description]) => op({ id: id as string, path: path as string[], description: description as string, method: "GET", apiPath: apiPath as string, auth: HUMAN })),
     op({ id: "platform.feedback.create", path: ["platform", "feedback", "create"], description: "Submit product feedback", method: "POST", apiPath: "/api/feedback", mutation: "write", auth: HUMAN, options: INPUT_OPTIONS }),
     op({ id: "platform.settings.update", path: ["platform", "settings", "update"], description: "Update platform settings", method: "PATCH", apiPath: "/api/multiremi/platform/settings", mutation: "destructive", auth: HUMAN, options: INPUT_OPTIONS }),
-    op({ id: "platform.operation.create", path: ["platform", "operation", "create"], description: "Queue a platform update, restart, rollback, or update check", method: "POST", apiPath: "/api/multiremi/platform/operations", mutation: "destructive", auth: HUMAN, options: INPUT_OPTIONS }),
+    op({ id: "platform.operation.create", path: ["platform", "operation", "create"], description: "Queue a platform update, restart, rollback, or update check; updates and rollbacks wait for active tasks without a deadline by default", method: "POST", apiPath: "/api/multiremi/platform/operations", mutation: "destructive", auth: HUMAN, options: INPUT_OPTIONS }),
     op({ id: "platform.operation.cancel", path: ["platform", "operation", "cancel"], description: "Cancel a queued or running platform operation", method: "POST", apiPath: (i) => `/api/multiremi/platform/operations/${encodePath(positional(i, 0, "operation"))}/cancel`, mutation: "destructive", auth: HUMAN, positionals: [ref("operation")] }),
     op({ id: "platform.release.latest", path: ["platform", "release", "latest"], description: "Get latest release metadata", method: "GET", apiPath: (i) => `/api/remi/releases/latest/${encodePath(positional(i, 0, "filename"))}`, auth: HUMAN, positionals: [ref("filename")] }),
     op({ id: "platform.release.get", path: ["platform", "release", "get"], description: "Get tagged release metadata", method: "GET", apiPath: (i) => `/api/remi/releases/download/${encodePath(positional(i, 0, "tag"))}/${encodePath(positional(i, 1, "filename"))}`, auth: HUMAN, positionals: [ref("tag"), ref("filename")] }),

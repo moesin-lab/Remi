@@ -13,6 +13,9 @@ import { sendMarkdownCardFeishu, sendCardFeishu } from "./send.js";
 import { FeishuStreamingSession, buildFinalCard, type TokenProvider } from "./streaming.js";
 import { handleAgentStream } from "./adapters/stream-handler.js";
 import { handleTaskStream } from "./adapters/task-stream-handler.js";
+import { formatExecutionSubtitle } from "./card-metadata.js";
+import { FeishuTaskPresentation } from "./task-presentation.js";
+import type { FeishuPresentationCheckpoint } from "@multiremi/contracts/types.js";
 import type { TaskStreamEvent, TaskStreamMeta } from "../base.js";
 import { createAdapter } from "./adapters/index.js";
 import type { StreamMeta, StreamHandlerLog } from "@shared/contracts/acp-protocol.js";
@@ -41,6 +44,7 @@ export interface HandleStreamOpts {
   /** ACP adapter: pass "claude" | "codex" or a custom AgentAdapter instance. */
   adapter: string | AgentAdapter;
   replyToMessageId?: string;
+  mentionOpenId?: string;
   sessionId?: string | null;
   displayName?: string | null;
   nameSuffix?: string;
@@ -51,9 +55,14 @@ export interface HandleStreamOpts {
 
 export interface HandleTaskStreamOpts {
   replyToMessageId?: string;
+  mentionOpenId?: string;
   displayName?: string | null;
   subtitle?: string | null;
   log?: StreamHandlerLog;
+  durable?: { idempotencyKey: string; messageId?: string | null; presentation?: FeishuPresentationCheckpoint };
+  onStarted?: (messageId: string) => Promise<void>;
+  interactionOpenId?: string;
+  onCheckpoint?: (state: FeishuPresentationCheckpoint) => Promise<void>;
 }
 
 // ── FeishuChannel ─────────────────────────────────────────────
@@ -62,7 +71,7 @@ export class FeishuChannel {
   private readonly _config: FeishuChannelConfig;
   private _wsHandle: FeishuWSHandle | null = null;
   private _messageHandlers: MessageHandler[] = [];
-  private _activeSessions = new Map<string, FeishuStreamingSession>();
+  private _activeSessions = new Map<string, FeishuStreamingSession | FeishuTaskPresentation>();
   private _abortHandler: ((sessionKey: string) => Promise<void>) | null = null;
   private _tokenProvider: TokenProvider | null = null;
   private _senderAuthorizer: FeishuSenderAuthorizer | null = null;
@@ -177,7 +186,7 @@ export class FeishuChannel {
   }
 
   /**
-   * Consume an ACP stream and render it as a streaming Feishu card.
+   * Consume ACP events and update a Feishu card through full-message patches.
    * Handles the full lifecycle: card creation → live updates → close.
    */
   async handleStream(
@@ -202,9 +211,10 @@ export class FeishuChannel {
     this._activeSessions.set(sessionKey, session);
 
     try {
-      // Start streaming card
+      // Create the patch-only message.
       await session.start(chatId, "chat_id", {
         replyToMessageId: opts.replyToMessageId,
+        mentionOpenId: opts.mentionOpenId,
         sessionId: opts.sessionId,
         displayName: opts.displayName ?? undefined,
         nameSuffix: opts.nameSuffix,
@@ -214,16 +224,13 @@ export class FeishuChannel {
       // Consume ACP stream
       const result = await handleAgentStream(session, stream, acpAdapter, chatId, slog, meta);
 
-      // Build stats string
-      const stats = this._formatStreamStats(result.elapsedSec, result.usageTokens, result.contextWindow, result.toolCount);
-
       // Close card
       await session.close({
         finalText: result.contentText || undefined,
         thinking: result.thinkingText || null,
         toolEntries: result.toolEntries.length > 0 ? result.toolEntries : undefined,
         toolCount: result.toolCount > 0 ? result.toolCount : undefined,
-        stats,
+        stats: result.stats,
         sessionId: opts.sessionId,
         displayName: opts.displayName,
       });
@@ -233,18 +240,37 @@ export class FeishuChannel {
         await session.close({ finalText: `Error: ${String(err)}` }).catch(() => {});
       }
     } finally {
-      this._activeSessions.delete(sessionKey);
+      session.detach();
+      if (this._activeSessions.get(sessionKey) === session) this._activeSessions.delete(sessionKey);
     }
   }
 
-  /** Consume the canonical persisted Task stream and render one Feishu card. */
+  /** Present persisted Task events through native CoT and independent cards. */
   async handleTaskStream(
     chatId: string,
     sessionKey: string,
     stream: AsyncIterable<TaskStreamEvent>,
     meta: TaskStreamMeta,
     opts: HandleTaskStreamOpts = {},
-  ): Promise<void> {
+  ): Promise<{ messageId: string }> {
+    // Only already-sent v4 deliveries keep their original card. Every new
+    // Task, regardless of inbound/proactive origin, uses the native renderer.
+    if (!opts.durable?.messageId || opts.durable.presentation) {
+      const presentation = new FeishuTaskPresentation(this._makeClient(), chatId, meta, {
+        appId: this._config.appId, replyToMessageId: opts.replyToMessageId,
+        mentionOpenId: opts.mentionOpenId, interactionOpenId: opts.interactionOpenId,
+        displayName: opts.displayName ?? meta.displayName,
+        idempotencyKey: opts.durable?.idempotencyKey ?? meta.taskId,
+        checkpoint: opts.durable?.presentation, save: opts.onCheckpoint,
+        log: message => log.warn(message),
+      });
+      this._activeSessions.set(sessionKey, presentation);
+      try { return await presentation.consume(stream); }
+      finally {
+        presentation.detach();
+        if (this._activeSessions.get(sessionKey) === presentation) this._activeSessions.delete(sessionKey);
+      }
+    }
     const slog: StreamHandlerLog = opts.log ?? {
       info: (message) => log.info(message),
       warn: (message) => log.warn(message),
@@ -256,10 +282,14 @@ export class FeishuChannel {
     try {
       await session.start(chatId, "chat_id", {
         replyToMessageId: opts.replyToMessageId,
+        mentionOpenId: opts.mentionOpenId,
         sessionId: meta.sessionId,
         displayName: opts.displayName ?? meta.displayName ?? undefined,
-        subtitle: opts.subtitle ?? "Multiremi Task",
+        subtitle: opts.subtitle ?? formatExecutionSubtitle({ agentName: opts.displayName ?? meta.displayName }),
+        durable: opts.durable,
       });
+      const messageId = session.getMessageId()!;
+      if (opts.onStarted) await opts.onStarted(messageId);
       const result = await handleTaskStream(session, stream, chatId, meta);
       await session.close({
         finalText: result.contentText || undefined,
@@ -271,13 +301,17 @@ export class FeishuChannel {
         displayName: opts.displayName ?? meta.displayName,
         aborted: result.cancelled,
       });
+      return { messageId };
     } catch (error) {
       slog.error(`handleTaskStream error: ${String(error)}`);
+      if (opts.durable) throw error;
       if (session.isActive()) {
         await session.close({ finalText: `Error: ${String(error)}` }).catch(() => {});
       }
+      return { messageId: session.getMessageId() ?? "" };
     } finally {
-      this._activeSessions.delete(sessionKey);
+      session.detach();
+      if (this._activeSessions.get(sessionKey) === session) this._activeSessions.delete(sessionKey);
     }
   }
 
@@ -333,16 +367,6 @@ export class FeishuChannel {
     };
   }
 
-  private _formatStreamStats(elapsedSec: number, usedTokens: number, contextWindow: number | null, toolCount: number): string | null {
-    const parts: string[] = [];
-    if (elapsedSec > 0) parts.push(`${elapsedSec.toFixed(1)}s`);
-    if (usedTokens > 0) {
-      const fmtN = (n: number) => n >= 1_000_000 ? `${Math.round(n / 1_000_000)}M` : n >= 1_000 ? `${Math.round(n / 1_000)}k` : `${n}`;
-      parts.push(contextWindow ? `${fmtN(usedTokens)}/${fmtN(contextWindow)}` : fmtN(usedTokens));
-    }
-    if (toolCount > 0) parts.push(`${toolCount} tools`);
-    return parts.length > 0 ? parts.join(" · ") : null;
-  }
 }
 
 // ── Factory ───────────────────────────────────────────────────

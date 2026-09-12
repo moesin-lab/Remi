@@ -3980,6 +3980,74 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "chat.pin": {
+      "command": "remi chat pin",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "chat.pin",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.unpin": {
+      "command": "remi chat unpin",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "chat.unpin",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.archive": {
+      "command": "remi chat archive",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "chat.archive",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.restore": {
+      "command": "remi chat restore",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "chat.restore",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "chat.issue": {
       "command": "remi chat.issue",
       "aliases": [],
@@ -4142,6 +4210,101 @@
       ],
       "capability": "chat.pending",
       "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.queue": {
+      "command": "remi chat queue",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.queue.list": {
+      "command": "remi chat queue list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "chat.queue.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.queue.update": {
+      "command": "remi chat queue update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "chat.queue.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.queue.remove": {
+      "command": "remi chat queue remove",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "chat.queue.remove",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.queue.clear": {
+      "command": "remi chat queue clear",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "chat.queue.clear",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.queue.prioritize": {
+      "command": "remi chat queue prioritize",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "chat.queue.prioritize",
+      "mutation": "write",
       "output": [
         "table",
         "json",
@@ -7350,6 +7513,70 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "feishu.route.list": {
+      "command": "remi feishu route list",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "feishu.route.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "feishu.route.set": {
+      "command": "remi feishu route set",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "feishu.route.set",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "feishu.route.unset": {
+      "command": "remi feishu route unset",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "feishu.route.unset",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "feishu.chat.list": {
+      "command": "remi feishu chat list",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "feishu.chat.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "feishu.source.list": {
       "command": "remi feishu source list",
       "aliases": [],
@@ -8979,6 +9206,16 @@
       "hidden": false,
       "migration_status": "legacy_passthrough"
     },
+    "legacy.runtime-model-probe": {
+      "command": "remi runtime-model-probe",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "legacy_passthrough"
+    },
     "legacy.git-credential": {
       "command": "remi git-credential",
       "aliases": [],
@@ -9297,6 +9534,12 @@
     },
     "DELETE /api/chat/sessions/:sessionId": {
       "command": "chat.delete"
+    },
+    "DELETE /api/chat/sessions/:sessionId/queue": {
+      "command": "chat.queue.clear"
+    },
+    "DELETE /api/chat/sessions/:sessionId/queue/:taskId": {
+      "command": "chat.queue.remove"
     },
     "DELETE /api/cloud-runtime/nodes": {
       "command": "runtime.cloud.node.delete"
@@ -9645,6 +9888,11 @@
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
     "GET /api/daemon/runtimes/:runtimeId/feishu-bot": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "GET /api/daemon/runtimes/:runtimeId/feishu-bot/outbound/:deliveryId/attachments/:attachmentId": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -10303,8 +10551,14 @@
     "GET /api/workspaces/:id/feishu-bot/candidates": {
       "command": "workspace.feishu-bot.candidates"
     },
+    "GET /api/workspaces/:id/feishu-bot/chats": {
+      "command": "feishu.chat.list"
+    },
     "GET /api/workspaces/:id/feishu-bot/registration/:sessionId": {
       "command": "workspace.feishu-bot.register-status"
+    },
+    "GET /api/workspaces/:id/feishu-bot/routes": {
+      "command": "feishu.route.list"
     },
     "GET /api/workspaces/:id/feishu-bot/status": {
       "command": "workspace.feishu-bot.status"
@@ -10478,6 +10732,9 @@
     "PATCH /api/chat/sessions/:sessionId": {
       "command": "chat.update"
     },
+    "PATCH /api/chat/sessions/:sessionId/queue/:taskId": {
+      "command": "chat.queue.update"
+    },
     "PATCH /api/daemons/:daemonId": {
       "command": "daemon.dedicated.set"
     },
@@ -10621,6 +10878,9 @@
     },
     "POST /api/chat/sessions/:sessionId/messages": {
       "command": "chat.message.create"
+    },
+    "POST /api/chat/sessions/:sessionId/queue/:taskId/prioritize": {
+      "command": "chat.queue.prioritize"
     },
     "POST /api/chat/sessions/:sessionId/read": {
       "command": "chat.read"
@@ -11622,6 +11882,9 @@
     },
     "PUT /api/workspaces/:id/feishu-bot": {
       "command": "workspace.feishu-bot.set"
+    },
+    "PUT /api/workspaces/:id/feishu-bot/routes": {
+      "command": "feishu.route.set"
     },
     "PUT /api/workspaces/:id/issue-archive": {
       "command": "workspace.issue-archive.update"

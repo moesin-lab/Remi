@@ -1,6 +1,7 @@
 import type {
   AgentRuntime,
   CreateRuntimeDirectoryScanRequest,
+  CreateRuntimeLocalSkillListRequest,
   CreateRuntimeLocalSkillImportRequest,
   FleetModelsResponse,
   RuntimeDirectoryScanRequest,
@@ -33,6 +34,7 @@ import type {
 import type { HttpClient } from "../http";
 import type { RuntimeWorkspace, CreateRuntimeWorkspaceRequest } from "../../runtimes/workspace-types";
 import { RuntimeWorkspaceSchema, RuntimeWorkspaceListSchema } from "../schemas/runtime-workspaces";
+import { RuntimeLocalSkillListRequestSchema, RuntimeLocalSkillImportRequestSchema } from "../schemas/runtime-local-skills";
 import {
   ApiContractError,
   parseStrictResponse,
@@ -653,34 +655,40 @@ export class RuntimesEndpoints {
 
   async initiateListLocalSkills(
     runtimeId: string,
+    data?: CreateRuntimeLocalSkillListRequest,
   ): Promise<RuntimeLocalSkillListRequest> {
-    return this.http.fetch(`/api/runtimes/${runtimeId}/local-skills`, {
+    const raw = await this.http.fetch<unknown>(`/api/runtimes/${runtimeId}/local-skills`, {
       method: "POST",
+      body: JSON.stringify(data ?? {}),
     });
+    return parseStrictResponse(raw, RuntimeLocalSkillListRequestSchema, { endpoint: "POST /api/runtimes/:id/local-skills" });
   }
 
   async getListLocalSkillsResult(
     runtimeId: string,
     requestId: string,
   ): Promise<RuntimeLocalSkillListRequest> {
-    return this.http.fetch(`/api/runtimes/${runtimeId}/local-skills/${requestId}`);
+    const raw = await this.http.fetch<unknown>(`/api/runtimes/${runtimeId}/local-skills/${requestId}`);
+    return parseStrictResponse(raw, RuntimeLocalSkillListRequestSchema, { endpoint: "GET /api/runtimes/:id/local-skills/:requestId" });
   }
 
   async initiateImportLocalSkill(
     runtimeId: string,
     data: CreateRuntimeLocalSkillImportRequest,
   ): Promise<RuntimeLocalSkillImportRequest> {
-    return this.http.fetch(`/api/runtimes/${runtimeId}/local-skills/import`, {
+    const raw = await this.http.fetch<unknown>(`/api/runtimes/${runtimeId}/local-skills/import`, {
       method: "POST",
       body: JSON.stringify(data),
     });
+    return parseStrictResponse(raw, RuntimeLocalSkillImportRequestSchema, { endpoint: "POST /api/runtimes/:id/local-skills/import" });
   }
 
   async getImportLocalSkillResult(
     runtimeId: string,
     requestId: string,
   ): Promise<RuntimeLocalSkillImportRequest> {
-    return this.http.fetch(`/api/runtimes/${runtimeId}/local-skills/import/${requestId}`);
+    const raw = await this.http.fetch<unknown>(`/api/runtimes/${runtimeId}/local-skills/import/${requestId}`);
+    return parseStrictResponse(raw, RuntimeLocalSkillImportRequestSchema, { endpoint: "GET /api/runtimes/:id/local-skills/import/:requestId" });
   }
 
   async initiateDirectoryScan(

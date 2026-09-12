@@ -78,6 +78,16 @@ export interface IssueMutationActivityContext {
   sourceTaskId?: string | null;
 }
 
+export interface IssueTimelineCursor {
+  createdAt: string;
+  id: string;
+}
+
+export interface IssueTimelinePageResult {
+  entries: MultiremiTimelineEntry[];
+  hasMore: boolean;
+}
+
 function sourceTaskActivityData(sourceTaskId: string | null | undefined): Record<string, string> {
   return sourceTaskId ? { sourceTaskId, source_task_id: sourceTaskId } : {};
 }
@@ -1795,7 +1805,7 @@ export class IssuesRepo {
     const rows = this.ctx.db.query(
       "SELECT * FROM multiremi_issue_comments WHERE issue_id = ? ORDER BY created_at ASC",
     ).all(issueId) as Row[];
-    return rows.map((row) => this.hydrateIssueComment(toIssueComment(row)));
+    return this.hydrateIssueComments(rows.map(toIssueComment));
   }
 
   listIssueCommentsForGoCli(issueId: string, input: ListIssueCommentsInput = {}): ListIssueCommentsResult {
@@ -1992,6 +2002,73 @@ export class IssuesRepo {
       }
       return ascending ? left.id.localeCompare(right.id) : right.id.localeCompare(left.id);
     });
+  }
+
+  listIssueTimelinePage(issueId: string, options: {
+    issueSessionId?: string | null;
+    before?: IssueTimelineCursor | null;
+    limit: number;
+  }): IssueTimelinePageResult {
+    const issueExists = this.ctx.db.query(
+      "SELECT id FROM multiremi_issues WHERE id = ?",
+    ).get(issueId) as Row | null;
+    if (!issueExists) throw new Error(`Issue not found: ${issueId}`);
+    const sessionId = cleanOptionalString(options.issueSessionId);
+    if (sessionId) {
+      const session = this.ctx.issueSessions().getIssueSession(sessionId);
+      if (!session || session.issueId !== issueId) throw new Error(`Issue session not found for issue: ${sessionId}`);
+    }
+
+    const rowLimit = options.limit + 1;
+    const commentWhere = ["issue_id = ?"];
+    const commentParams: unknown[] = [issueId];
+    if (sessionId) {
+      commentWhere.push("issue_session_id = ?");
+      commentParams.push(sessionId);
+    }
+    if (options.before) {
+      commentWhere.push("(created_at < ? OR (created_at = ? AND id < ?))");
+      commentParams.push(options.before.createdAt, options.before.createdAt, options.before.id);
+    }
+    commentParams.push(rowLimit);
+    const commentRows = this.ctx.db.query(
+      `SELECT * FROM multiremi_issue_comments
+       WHERE ${commentWhere.join(" AND ")}
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`,
+    ).all(...commentParams) as Row[];
+
+    const activityRows = sessionId
+      ? []
+      : this.ctx.db.query(
+        `SELECT * FROM multiremi_issue_activity
+         WHERE issue_id = ?
+           ${options.before ? "AND (created_at < ? OR (created_at = ? AND id < ?))" : ""}
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+      ).all(...(
+        options.before
+          ? [issueId, options.before.createdAt, options.before.createdAt, options.before.id, rowLimit]
+          : [issueId, rowLimit]
+      )) as Row[];
+
+    const merged = [
+      ...commentRows.map((row) => ({ kind: "comment" as const, row })),
+      ...activityRows.map((row) => ({ kind: "activity" as const, row })),
+    ].sort((left, right) => {
+      const createdAt = String(right.row.created_at).localeCompare(String(left.row.created_at));
+      return createdAt || String(right.row.id).localeCompare(String(left.row.id));
+    });
+    const selected = merged.slice(0, options.limit);
+    const hydratedComments = new Map(
+      this.hydrateIssueComments(
+        selected.filter((item) => item.kind === "comment").map((item) => toIssueComment(item.row)),
+      ).map((comment) => [comment.id, comment]),
+    );
+    const entries = selected.reverse().map((item) => item.kind === "comment"
+      ? commentToTimelineEntry(hydratedComments.get(String(item.row.id))!)
+      : activityToTimelineEntry(toIssueActivity(item.row)));
+    return { entries, hasMore: merged.length > options.limit };
   }
 
   listIssueSubscribers(issueId: string): MultiremiIssueSubscriber[] {
@@ -2195,18 +2272,28 @@ export class IssuesRepo {
     return this.listLabelsForIssue(issueId);
   }
 
-  listInboxItems(memberId?: string | null): MultiremiInboxItem[] {
+  getInboxItem(id: string): MultiremiInboxItem | null {
+    const row = this.ctx.db.query("SELECT * FROM multiremi_inbox_items WHERE id = ?").get(id) as Row | null;
+    if (!row) return null;
+    const issueId = nullableString(row.issue_id);
+    return toInboxItem(row, issueId ? this.getIssue(issueId) : null);
+  }
+
+  listInboxItems(memberId?: string | null, workspaceId?: string): MultiremiInboxItem[] {
     const resolvedMemberId = memberId ?? this.ctx.workspaces().listWorkspaceMembers()[0]?.id ?? null;
     if (!resolvedMemberId) return [];
+    const workspaceFilter = workspaceId === undefined ? "" : " AND workspace_id = ?";
+    const params = workspaceId === undefined ? [resolvedMemberId] : [resolvedMemberId, workspaceId];
     const rows = this.ctx.db.query(
-      "SELECT * FROM multiremi_inbox_items WHERE member_id = ? AND archived = 0 ORDER BY created_at DESC",
-    ).all(resolvedMemberId) as Row[];
+      `SELECT * FROM multiremi_inbox_items WHERE member_id = ?${workspaceFilter} AND archived = 0 ORDER BY created_at DESC`,
+    ).all(...params) as Row[];
     return this.hydrateInboxRows(rows);
   }
 
   listInboxItemsPage(
     memberId?: string | null,
     options: { limit?: number; cursor?: string | null } = {},
+    workspaceId?: string,
   ): MultiremiInboxPage {
     const resolvedMemberId = memberId ?? this.ctx.workspaces().listWorkspaceMembers()[0]?.id ?? null;
     const requestedLimit = Math.floor(options.limit ?? 50);
@@ -2224,20 +2311,22 @@ export class IssuesRepo {
       cursorId = decoded.id;
     }
 
+    const workspaceFilter = workspaceId === undefined ? "" : " AND workspace_id = ?";
+    const params = workspaceId === undefined ? [resolvedMemberId] : [resolvedMemberId, workspaceId];
     const rows = cursorCreatedAt
       ? this.ctx.db.query(
           `SELECT * FROM multiremi_inbox_items
-           WHERE member_id = ? AND archived = 0
+           WHERE member_id = ?${workspaceFilter} AND archived = 0
              AND (created_at < ? OR (created_at = ? AND id < ?))
            ORDER BY created_at DESC, id DESC
            LIMIT ?`,
-        ).all(resolvedMemberId, cursorCreatedAt, cursorCreatedAt, cursorId, limit + 1) as Row[]
+        ).all(...params, cursorCreatedAt, cursorCreatedAt, cursorId, limit + 1) as Row[]
       : this.ctx.db.query(
           `SELECT * FROM multiremi_inbox_items
-           WHERE member_id = ? AND archived = 0
+           WHERE member_id = ?${workspaceFilter} AND archived = 0
            ORDER BY created_at DESC, id DESC
            LIMIT ?`,
-        ).all(resolvedMemberId, limit + 1) as Row[];
+        ).all(...params, limit + 1) as Row[];
     const hasMore = rows.length > limit;
     const pageRows = hasMore ? rows.slice(0, limit) : rows;
     return {
@@ -2251,9 +2340,12 @@ export class IssuesRepo {
   getInboxSummary(
     memberId?: string | null,
     timezoneOffsetMinutes = 0,
+    workspaceId?: string,
   ): MultiremiInboxSummary {
     const resolvedMemberId = memberId ?? this.ctx.workspaces().listWorkspaceMembers()[0]?.id ?? null;
     if (!resolvedMemberId) return { unread: 0, attention: 0 };
+    const workspaceFilter = workspaceId === undefined ? "" : " AND workspace_id = ?";
+    const params = workspaceId === undefined ? [resolvedMemberId] : [resolvedMemberId, workspaceId];
 
     // The summary deliberately avoids Issue hydration and large message bodies. Only successful
     // automation rows need details so their existing UI grouping by autopilot can be preserved.
@@ -2261,9 +2353,9 @@ export class IssuesRepo {
       `SELECT id, issue_id, type, severity, read, created_at,
               CASE WHEN type = 'autopilot_run_completed' THEN details ELSE NULL END AS details
        FROM multiremi_inbox_items
-       WHERE member_id = ? AND archived = 0
+       WHERE member_id = ?${workspaceFilter} AND archived = 0
        ORDER BY created_at DESC, id DESC`,
-    ).all(resolvedMemberId) as Row[];
+    ).all(...params) as Row[];
 
     const visible: Row[] = [];
     const selectionKeys = new Set<string>();
@@ -2324,49 +2416,55 @@ export class IssuesRepo {
     return toInboxItem(row!, issueId ? this.getIssue(issueId) : null);
   }
 
-  countUnreadInboxItems(memberId?: string | null): number {
+  countUnreadInboxItems(memberId?: string | null, workspaceId?: string): number {
     const resolvedMemberId = memberId ?? this.ctx.workspaces().listWorkspaceMembers()[0]?.id ?? null;
     if (!resolvedMemberId) return 0;
+    const workspaceFilter = workspaceId === undefined ? "" : " AND workspace_id = ?";
+    const params = workspaceId === undefined ? [resolvedMemberId] : [resolvedMemberId, workspaceId];
     const row = this.ctx.db.query(
-      "SELECT COUNT(*) AS count FROM multiremi_inbox_items WHERE member_id = ? AND archived = 0 AND read = 0",
-    ).get(resolvedMemberId) as { count: number } | null;
+      `SELECT COUNT(*) AS count FROM multiremi_inbox_items WHERE member_id = ?${workspaceFilter} AND archived = 0 AND read = 0`,
+    ).get(...params) as { count: number } | null;
     return Number(row?.count ?? 0);
   }
 
-  markAllInboxItemsRead(memberId?: string | null): number {
+  markAllInboxItemsRead(memberId?: string | null, workspaceId?: string): number {
     const resolvedMemberId = memberId ?? this.ctx.workspaces().listWorkspaceMembers()[0]?.id ?? null;
     if (!resolvedMemberId) return 0;
+    const workspaceFilter = workspaceId === undefined ? "" : " AND workspace_id = ?";
+    const params = workspaceId === undefined ? [resolvedMemberId] : [resolvedMemberId, workspaceId];
     const result = this.ctx.db.run(
-      "UPDATE multiremi_inbox_items SET read = 1 WHERE member_id = ? AND archived = 0 AND read = 0",
-      [resolvedMemberId],
+      `UPDATE multiremi_inbox_items SET read = 1 WHERE member_id = ?${workspaceFilter} AND archived = 0 AND read = 0`,
+      params,
     );
     return result.changes;
   }
 
-  archiveAllInboxItems(memberId?: string | null, mode: "all" | "read" | "completed" = "all"): number {
+  archiveAllInboxItems(memberId?: string | null, mode: "all" | "read" | "completed" = "all", workspaceId?: string): number {
     const resolvedMemberId = memberId ?? this.ctx.workspaces().listWorkspaceMembers()[0]?.id ?? null;
     if (!resolvedMemberId) return 0;
+    const workspaceFilter = workspaceId === undefined ? "" : " AND workspace_id = ?";
+    const params = workspaceId === undefined ? [resolvedMemberId] : [resolvedMemberId, workspaceId];
     if (mode === "read") {
       return this.ctx.db.run(
-        "UPDATE multiremi_inbox_items SET archived = 1, read = 1 WHERE member_id = ? AND archived = 0 AND read = 1",
-        [resolvedMemberId],
+        `UPDATE multiremi_inbox_items SET archived = 1, read = 1 WHERE member_id = ?${workspaceFilter} AND archived = 0 AND read = 1`,
+        params,
       ).changes;
     }
     if (mode === "completed") {
       return this.ctx.db.run(
         `UPDATE multiremi_inbox_items
          SET archived = 1, read = 1
-         WHERE member_id = ?
+         WHERE member_id = ?${workspaceFilter}
            AND archived = 0
            AND issue_id IN (
              SELECT id FROM multiremi_issues WHERE status IN ('done', 'completed', 'closed', 'cancelled')
            )`,
-        [resolvedMemberId],
+        params,
       ).changes;
     }
     return this.ctx.db.run(
-      "UPDATE multiremi_inbox_items SET archived = 1, read = 1 WHERE member_id = ? AND archived = 0",
-      [resolvedMemberId],
+      `UPDATE multiremi_inbox_items SET archived = 1, read = 1 WHERE member_id = ?${workspaceFilter} AND archived = 0`,
+      params,
     ).changes;
   }
 
@@ -2386,8 +2484,33 @@ export class IssuesRepo {
   }
 
   listCommentReactions(commentId: string): MultiremiCommentReaction[] {
-    if (!this.ctx.getRawIssueComment(commentId)) throw new Error(`Comment not found: ${commentId}`);
-    return this.listReactions(COMMENT_REACTIONS, commentId);
+    const rows = this.ctx.db.query(
+      `SELECT reactions.*, comments.id AS __comment_exists
+       FROM multiremi_issue_comments comments
+       LEFT JOIN multiremi_comment_reactions reactions ON reactions.comment_id = comments.id
+       WHERE comments.id = ?
+       ORDER BY reactions.created_at ASC`,
+    ).all(commentId) as Row[];
+    if (!rows.length) throw new Error(`Comment not found: ${commentId}`);
+    return rows.filter((row) => row.id != null).map(toCommentReaction);
+  }
+
+  listCommentReactionsForComments(commentIds: string[]): Map<string, MultiremiCommentReaction[]> {
+    const grouped = new Map<string, MultiremiCommentReaction[]>();
+    const ids = [...new Set(commentIds.filter(Boolean))];
+    if (!ids.length) return grouped;
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = this.ctx.db.query(
+      `SELECT * FROM multiremi_comment_reactions
+       WHERE comment_id IN (${placeholders})
+       ORDER BY created_at ASC`,
+    ).all(...ids) as Row[];
+    for (const reaction of rows.map(toCommentReaction)) {
+      const list = grouped.get(reaction.commentId) ?? [];
+      list.push(reaction);
+      grouped.set(reaction.commentId, list);
+    }
+    return grouped;
   }
 
   addCommentReaction(commentId: string, input: ReactionInput): MultiremiCommentReaction {
@@ -2508,11 +2631,34 @@ export class IssuesRepo {
   }
 
   listAttachmentsForComment(commentId: string): MultiremiAttachment[] {
-    if (!this.ctx.getRawIssueComment(commentId)) throw new Error(`Comment not found: ${commentId}`);
     const rows = this.ctx.db.query(
-      "SELECT * FROM multiremi_attachments WHERE comment_id = ? ORDER BY created_at ASC",
+      `SELECT attachments.*, comments.id AS __comment_exists
+       FROM multiremi_issue_comments comments
+       LEFT JOIN multiremi_attachments attachments ON attachments.comment_id = comments.id
+       WHERE comments.id = ?
+       ORDER BY attachments.created_at ASC`,
     ).all(commentId) as Row[];
-    return rows.map(toAttachment);
+    if (!rows.length) throw new Error(`Comment not found: ${commentId}`);
+    return rows.filter((row) => row.id != null).map(toAttachment);
+  }
+
+  listAttachmentsForComments(commentIds: string[]): Map<string, MultiremiAttachment[]> {
+    const grouped = new Map<string, MultiremiAttachment[]>();
+    const ids = [...new Set(commentIds.filter(Boolean))];
+    if (!ids.length) return grouped;
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = this.ctx.db.query(
+      `SELECT * FROM multiremi_attachments
+       WHERE comment_id IN (${placeholders})
+       ORDER BY created_at ASC`,
+    ).all(...ids) as Row[];
+    for (const attachment of rows.map(toAttachment)) {
+      if (!attachment.commentId) continue;
+      const list = grouped.get(attachment.commentId) ?? [];
+      list.push(attachment);
+      grouped.set(attachment.commentId, list);
+    }
+    return grouped;
   }
 
   listAttachmentsForChatMessage(chatMessageId: string): MultiremiAttachment[] {
@@ -2811,11 +2957,19 @@ export class IssuesRepo {
   }
 
   private hydrateIssueComment(comment: MultiremiIssueComment): MultiremiIssueComment {
-    return {
+    return this.hydrateIssueComments([comment])[0]!;
+  }
+
+  private hydrateIssueComments(comments: MultiremiIssueComment[]): MultiremiIssueComment[] {
+    if (!comments.length) return comments;
+    const ids = comments.map((comment) => comment.id);
+    const reactions = this.listCommentReactionsForComments(ids);
+    const attachments = this.listAttachmentsForComments(ids);
+    return comments.map((comment) => ({
       ...comment,
-      reactions: this.listCommentReactions(comment.id),
-      attachments: this.listAttachmentsForComment(comment.id),
-    };
+      reactions: reactions.get(comment.id) ?? [],
+      attachments: attachments.get(comment.id) ?? [],
+    }));
   }
 
   private hydrateIssueDependency(dependency: MultiremiIssueDependency): MultiremiIssueDependency {

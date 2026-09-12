@@ -1,4 +1,5 @@
 import type { Context, Hono } from "hono";
+import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 import { refreshStaleGatewayModels } from "@multiremi/relay/discovery.js";
 import {
   bindDaemonTokenIdentityOrDeny,
@@ -25,6 +26,7 @@ import {
   promoteLegacyCliPatForDaemonRegistration,
   readJson,
   readJsonStrict,
+  readJsonStrictAllowEmpty,
   requireWorkspaceAdmin,
   safeCreateRuntimeUpdateRequest,
   usageQuery,
@@ -53,11 +55,13 @@ import {
   runtimeUsageByAgentCompatibilityResponse,
   runtimeUsageByHourCompatibilityResponse,
   runtimeUsageDailyCompatibilityResponse,
+  runtimeWorkspaceId,
 } from "../wire/index.js";
 import type {
   CreateRuntimeDirectoryScanInput,
   CreateRuntimeCommandInput,
   CreateRuntimeLocalSkillImportInput,
+  CreateRuntimeLocalSkillListInput,
   CreateRuntimeUpdateInput,
   RegisterRuntimeInput,
   ReportRuntimeDirectoryScanInput,
@@ -81,7 +85,8 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
   });
   app.post("/api/multiremi/runtimes", async (c) => {
     const body = await readJson<RegisterRuntimeInput>(c);
-    const workspaceId = body.workspaceId ?? body.workspace_id ?? "local";
+    const workspaceId = resolveRequestWorkspaceId(c, store, cleanString(body.workspaceId) ?? cleanString(body.workspace_id));
+    if (workspaceId instanceof Response) return workspaceId;
     const ownerMembershipDenied = denyDaemonOwnerWorkspaceMembership(c, store);
     if (ownerMembershipDenied) return ownerMembershipDenied;
     const denied = denyDaemonTokenWorkspace(c, workspaceId) ??
@@ -140,15 +145,16 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
       const identityDenied = bindDaemonTokenIdentityOrDeny(c, store, requestedDaemonId);
       if (identityDenied) return identityDenied;
     }
+    const scopedBody = { ...body, workspaceId, workspace_id: workspaceId };
     const registration = requestedDaemonId
       ? {
-        ...body,
+        ...scopedBody,
         daemonId: requestedDaemonId,
         ownerId: registrationOwner && "ownerId" in registrationOwner
           ? registrationOwner.ownerId
           : null,
       }
-      : body;
+      : scopedBody;
     return c.json({ runtime: store.registerRuntime(registration) }, 201);
   });
   app.get("/api/multiremi/runtimes/:id", (c) => {
@@ -353,15 +359,21 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     store.reportRuntimeCommandResult(runtimeId, requestId, body);
     return c.json({ status: "ok" });
   });
-  app.post("/api/multiremi/runtimes/:id/local-skills", (c) => {
+  app.post("/api/multiremi/runtimes/:id/local-skills", async (c) => {
     const loaded = loadRuntimeForCurrentOwner(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
-    return c.json(store.createRuntimeLocalSkillListRequest(loaded.runtime.id));
+    const body = await readJsonStrictAllowEmpty<CreateRuntimeLocalSkillListInput>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "invalid request body" }, 400);
+    return c.json(store.createRuntimeLocalSkillListRequest(loaded.runtime.id, body));
   });
-  app.post("/api/runtimes/:id/local-skills", (c) => {
+  app.post("/api/runtimes/:id/local-skills", async (c) => {
     const loaded = loadRuntimeForCurrentOwner(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
-    return c.json(runtimeLocalSkillListRequestCompatibilityResponse(store.createRuntimeLocalSkillListRequest(loaded.runtime.id)));
+    const body = await readJsonStrictAllowEmpty<CreateRuntimeLocalSkillListInput>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "invalid request body" }, 400);
+    return c.json(runtimeLocalSkillListRequestCompatibilityResponse(store.createRuntimeLocalSkillListRequest(loaded.runtime.id, body)));
   });
   app.get("/api/multiremi/runtimes/:id/local-skills/:requestId", (c) => {
     const loaded = loadRuntimeForCurrentOwner(c, store, c.req.param("id"));
@@ -382,6 +394,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (loaded instanceof Response) return loaded;
     const body = await readJsonStrict<CreateRuntimeLocalSkillImportInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "invalid request body" }, 400);
     return c.json(store.createRuntimeLocalSkillImportRequest(loaded.runtime.id, body));
   });
   app.post("/api/runtimes/:id/local-skills/import", async (c) => {
@@ -389,6 +402,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (loaded instanceof Response) return loaded;
     const body = await readJsonStrict<CreateRuntimeLocalSkillImportInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "invalid request body" }, 400);
     return c.json(runtimeLocalSkillImportRequestCompatibilityResponse(store.createRuntimeLocalSkillImportRequest(loaded.runtime.id, body)));
   });
   app.get("/api/multiremi/runtimes/:id/local-skills/import/:requestId", (c) => {
@@ -406,7 +420,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     return c.json(runtimeLocalSkillImportRequestCompatibilityResponse(request));
   });
   app.post("/api/daemon/runtimes/:runtimeId/local-skills/claim", (c) => {
-    return c.json({ request: store.claimRuntimeLocalSkillListRequest(c.req.param("runtimeId")) });
+    return c.json({ request: store.claimRuntimeLocalSkillListRequest(c.req.param("runtimeId"), c.req.query("supports_skill_directory") === "true") });
   });
   app.post("/api/daemon/runtimes/:runtimeId/local-skills/:requestId/result", async (c) => {
     const runtimeId = c.req.param("runtimeId");
@@ -421,7 +435,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
   });
   app.post("/api/daemon/runtimes/:runtimeId/local-skills/import/claim", (c) => {
     const limit = parseOptionalInt(c.req.query("limit")) ?? 10;
-    return c.json({ requests: store.claimRuntimeLocalSkillImportRequests(c.req.param("runtimeId"), limit) });
+    return c.json({ requests: store.claimRuntimeLocalSkillImportRequests(c.req.param("runtimeId"), limit, c.req.query("supports_skill_directory") === "true") });
   });
   app.post("/api/daemon/runtimes/:runtimeId/local-skills/import/:requestId/result", async (c) => {
     const runtimeId = c.req.param("runtimeId");
@@ -500,19 +514,19 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     const { runtime } = loaded;
-    return c.json({ usage: store.listUsageByAgent(usageQuery(c, { runtimeId: runtime.id })) });
+    return c.json({ usage: store.listUsageByAgent(usageQuery(c, { workspaceId: runtimeWorkspaceId(runtime), runtimeId: runtime.id })) });
   });
   app.get("/api/multiremi/runtimes/:id/usage/by-hour", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     const { runtime } = loaded;
-    return c.json({ usage: store.listUsageByHour(usageQuery(c, { runtimeId: runtime.id })) });
+    return c.json({ usage: store.listUsageByHour(usageQuery(c, { workspaceId: runtimeWorkspaceId(runtime), runtimeId: runtime.id })) });
   });
   app.get("/api/multiremi/runtimes/:id/task-activity", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     const { runtime } = loaded;
-    return c.json({ activity: store.listTaskActivityByHour(usageQuery(c, { runtimeId: runtime.id })) });
+    return c.json({ activity: store.listTaskActivityByHour(usageQuery(c, { workspaceId: runtimeWorkspaceId(runtime), runtimeId: runtime.id })) });
   });
   app.get("/api/runtimes", (c) => {
     const loaded = listRuntimesForCurrentUser(c, store);
@@ -523,9 +537,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const loaded = listRuntimesForCurrentUser(c, store);
     if (loaded instanceof Response) return loaded;
     const providers = fleetModelsResponse(loaded.runtimes, currentRequestUserId(c));
-    // Prefer the explicitly requested workspace over reverse-deriving from the
-    // first runtime (which is wrong / absent when the workspace has no runtimes).
-    const workspaceId = cleanString(c.req.query("workspace_id")) ?? loaded.runtimes[0]?.workspaceId ?? "local";
+    const workspaceId = loaded.workspaceId;
     refreshStaleGatewayModels(store, workspaceId);
     return c.json({ providers: overlayGatewayModels(store, workspaceId, providers) });
   };
@@ -564,7 +576,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     const { runtime } = loaded;
-    return c.json(store.listUsageDaily(usageQuery(c, { runtimeId: runtime.id }))
+    return c.json(store.listUsageDaily(usageQuery(c, { workspaceId: runtimeWorkspaceId(runtime), runtimeId: runtime.id }))
       .map(runtimeUsageDailyCompatibilityResponse)
       .sort(compareRuntimeUsageDailyCompatibilityRows));
   });
@@ -572,25 +584,25 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     const { runtime } = loaded;
-    return c.json(store.listUsageByAgent(usageQuery(c, { runtimeId: runtime.id })).map(runtimeUsageByAgentCompatibilityResponse));
+    return c.json(store.listUsageByAgent(usageQuery(c, { workspaceId: runtimeWorkspaceId(runtime), runtimeId: runtime.id })).map(runtimeUsageByAgentCompatibilityResponse));
   });
   app.get("/api/runtimes/:id/usage/by-hour", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     const { runtime } = loaded;
-    return c.json(store.listUsageByHour(usageQuery(c, { runtimeId: runtime.id })).map(runtimeUsageByHourCompatibilityResponse));
+    return c.json(store.listUsageByHour(usageQuery(c, { workspaceId: runtimeWorkspaceId(runtime), runtimeId: runtime.id })).map(runtimeUsageByHourCompatibilityResponse));
   });
   app.get("/api/runtimes/:id/task-activity", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     const { runtime } = loaded;
-    return c.json(store.listTaskActivityByHour(usageQuery(c, { runtimeId: runtime.id })).map(runtimeTaskActivityCompatibilityResponse));
+    return c.json(store.listTaskActivityByHour(usageQuery(c, { workspaceId: runtimeWorkspaceId(runtime), runtimeId: runtime.id })).map(runtimeTaskActivityCompatibilityResponse));
   });
   app.get("/api/runtimes/:id/activity", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     const { runtime } = loaded;
-    return c.json(store.listTaskActivityByHour(usageQuery(c, { runtimeId: runtime.id })).map(runtimeTaskActivityCompatibilityResponse));
+    return c.json(store.listTaskActivityByHour(usageQuery(c, { workspaceId: runtimeWorkspaceId(runtime), runtimeId: runtime.id })).map(runtimeTaskActivityCompatibilityResponse));
   });
   app.delete("/api/runtimes/:id", (c) => {
     const loaded = loadRuntimeForCurrentEditor(c, store, c.req.param("id"), "delete");
@@ -666,6 +678,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const ack = store.heartbeatRuntime(runtimeId, {
       supportsBatchImport: c.req.query("supports_batch_import") === "true" || c.req.query("supportsBatchImport") === "true",
       supportsDirectoryScan: c.req.query("supports_directory_scan") === "true" || c.req.query("supportsDirectoryScan") === "true",
+      supportsSkillDirectory: c.req.query("supports_skill_directory") === "true",
     });
     if (ack.status === "runtime_gone") return c.json({ error: "runtime not found" }, 404);
     return c.json(ack);

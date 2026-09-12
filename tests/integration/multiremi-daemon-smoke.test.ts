@@ -104,6 +104,59 @@ describe("Bun Multiremi daemon smoke", () => {
       server.stop(true);
     }
   }, 30_000);
+  it("refreshes model capabilities periodically and retries failed probes and reports", async () => {
+    const { store, workDir } = daemonTestBed("multiremi-periodic-models-");
+    store.upsertRelayConfig("local", "codex", {
+      fragment: 'model_provider = "OpenAI"\n[model_providers.OpenAI]\nbase_url = "https://gateway.example/v1"',
+      tokenOp: "set",
+      authToken: "periodic-probe-test-token",
+    });
+    let failedReport = false;
+    const updateModels = store.updateRuntimeModels.bind(store);
+    store.updateRuntimeModels = (runtimeId, models) => {
+      if (!failedReport && models.some(m => m.id === "gpt-6-astra")) {
+        failedReport = true;
+        throw new Error("transient periodic model report failure");
+      }
+      return updateModels(runtimeId, models);
+    };
+    const credential = await store.createAccessToken({ name: "Probe test", type: "daemon", workspaceId: "local" });
+    const server = startMultiremiServer({ store, scheduler: null, authToken: "model-refresh-test", hostname: "127.0.0.1", port: 0 });
+    let probes = 0;
+    const daemon = new MultiremiDaemon({
+      serverUrl: `http://127.0.0.1:${server.port}`, token: credential.token,
+      runtimeName: "periodic-probe", provider: "codex", workspaceId: "local", daemonPort: 0,
+      workspacesRoot: join(workDir, "workspaces"), repoCacheRoot: join(workDir, ".repo-cache"),
+      pollIntervalMs: 10, runtimeModelRefreshIntervalMs: 100,
+      runtimeModelRetryBaseMs: 20, runtimeModelRetryMaxMs: 20,
+      inProcessRuntimeModelDiscoveryEnabled: true,
+      providerFactory: () => ({
+        async *sendStream() {}, getLastResponse: () => null,
+        discoverModelCapabilities: async () => {
+          probes++;
+          if (probes === 2) {
+            expect(store.listRuntimeModels(store.listRuntimes()[0]!.id)).toHaveLength(1);
+            throw new Error("isolated probe failed");
+          }
+          return [{ id: probes > 2 ? "gpt-6-astra" : "old-model", label: "Model", default: true,
+            effort: { supportedLevels: [{ value: "high", label: "High" }] } }];
+        },
+      }),
+    });
+    const running = daemon.start();
+    try {
+      await waitForCondition(() => {
+        const runtime = store.listRuntimes()[0];
+        return !!runtime && store.listRuntimeModels(runtime.id).some(m => m.id === "gpt-6-astra");
+      }, 5000);
+      expect(probes).toBeGreaterThanOrEqual(3);
+      expect(failedReport).toBe(true);
+    } finally {
+      daemon.stop();
+      await running;
+      server.stop(true);
+    }
+  });
 
   it("keeps the unsafe in-process model probe restricted to injected test providers", () => {
     workDir = mkdtempSync(join(tmpdir(), "multiremi-daemon-model-probe-guard-"));
@@ -782,32 +835,38 @@ describe("Bun Multiremi daemon smoke", () => {
         input: message.input,
         output: message.output,
       }))).toEqual([
-        { seq: 1, type: "thinking", tool: null, content: "Thinking", input: null, output: null },
-        { seq: 2, type: "tool_use", tool: "Read", content: null, input: { path: "README.md" }, output: null },
-        { seq: 3, type: "tool_result", tool: "Read", content: null, input: null, output: "{\"content\":\"file body\"}" },
-        { seq: 4, type: "text", tool: null, content: "Smoke completed", input: null, output: null },
-        { seq: 5, type: "usage", tool: null, content: null, input: null, output: null },
+        { seq: 1, type: "execution", tool: null, content: null, input: null, output: null },
+        { seq: 2, type: "thinking", tool: null, content: "Thinking", input: null, output: null },
+        { seq: 3, type: "tool_use", tool: "Read", content: null, input: { path: "README.md" }, output: null },
+        { seq: 4, type: "tool_result", tool: "Read", content: null, input: null, output: "{\"content\":\"file body\"}" },
+        { seq: 5, type: "text", tool: null, content: "Smoke completed", input: null, output: null },
+        { seq: 6, type: "usage", tool: null, content: null, input: null, output: null },
+        { seq: 7, type: "execution", tool: null, content: null, input: null, output: null },
       ]);
+      expect(messages[0]?.meta).toEqual({ agentName: "Claude Smoke", provider: "claude" });
+      expect(messages[6]?.meta).toEqual({ provider: "claude", model: "claude-smoke", modelName: null });
       // tool_use and tool_result pair on a shared (synthetic) tool_call_id.
-      expect(messages[1]?.toolCallId).toBeTruthy();
-      expect(messages[2]?.toolCallId).toBe(messages[1]?.toolCallId);
+      expect(messages[2]?.toolCallId).toBeTruthy();
+      expect(messages[3]?.toolCallId).toBe(messages[2]?.toolCallId);
       // usage numbers now live in meta, not a content JSON string.
-      expect(messages[4]?.meta).toMatchObject({ model: "claude-smoke", inputTokens: 7, outputTokens: 3 });
+      expect(messages[5]?.meta).toMatchObject({ model: "claude-smoke", inputTokens: 7, outputTokens: 3 });
       const transcriptResponse = await fetch(`http://127.0.0.1:${server.port}/api/daemon/tasks/${task.id}/messages`, {
         headers: { Authorization: `Bearer ${daemonToken.token}` },
       });
       expect(transcriptResponse.status).toBe(200);
       const transcriptBody = await transcriptResponse.json() as any[];
       expect(transcriptBody.map((m) => ({ seq: m.seq, type: m.type, tool: m.tool, content: m.content, output: m.output }))).toEqual([
-        { seq: 1, type: "thinking", tool: undefined, content: "Thinking", output: undefined },
-        { seq: 2, type: "tool_use", tool: "Read", content: undefined, output: undefined },
-        { seq: 3, type: "tool_result", tool: "Read", content: undefined, output: "{\"content\":\"file body\"}" },
-        { seq: 4, type: "text", tool: undefined, content: "Smoke completed", output: undefined },
-        { seq: 5, type: "usage", tool: undefined, content: undefined, output: undefined },
+        { seq: 1, type: "execution", tool: undefined, content: undefined, output: undefined },
+        { seq: 2, type: "thinking", tool: undefined, content: "Thinking", output: undefined },
+        { seq: 3, type: "tool_use", tool: "Read", content: undefined, output: undefined },
+        { seq: 4, type: "tool_result", tool: "Read", content: undefined, output: "{\"content\":\"file body\"}" },
+        { seq: 5, type: "text", tool: undefined, content: "Smoke completed", output: undefined },
+        { seq: 6, type: "usage", tool: undefined, content: undefined, output: undefined },
+        { seq: 7, type: "execution", tool: undefined, content: undefined, output: undefined },
       ]);
       // wire carries created_at + the paired tool_call_id
       expect(transcriptBody[0].created_at).toBeTruthy();
-      expect(transcriptBody[2].tool_call_id).toBe(transcriptBody[1].tool_call_id);
+      expect(transcriptBody[3].tool_call_id).toBe(transcriptBody[2].tool_call_id);
       expect(store.getTask(task.id)?.usage[0]).toMatchObject({
         provider: "claude",
         model: "claude-smoke",
@@ -852,6 +911,7 @@ describe("Bun Multiremi daemon smoke", () => {
       "Implemented the fix and verified it.",
     ]);
     expect(store.listTaskMessages(taskId).map((message) => message.type)).toEqual([
+      "execution",
       "text",
       "compaction",
       "compaction",
@@ -872,6 +932,7 @@ describe("Bun Multiremi daemon smoke", () => {
     });
     expect(store.listIssueComments(issueId)).toEqual([]);
     expect(store.listTaskMessages(taskId).map((message) => message.type)).toEqual([
+      "execution",
       "compaction",
       "compaction",
     ]);
@@ -889,7 +950,8 @@ describe("Bun Multiremi daemon smoke", () => {
       result: "Task completed.",
     });
     expect(store.listIssueComments(issueId)).toEqual([]);
-    expect(store.listTaskMessages(taskId)).toEqual([]);
+    expect(store.listTaskMessages(taskId).map(message => ({ type: message.type, meta: message.meta })))
+      .toEqual([{ type: "execution", meta: { agentName: "Claude ordinary-empty", provider: "claude" } }]);
   });
 
   it("reconciles, materializes and cleans a direct task Agent Plugin runtime", async () => {
@@ -1120,6 +1182,57 @@ describe("Bun Multiremi daemon smoke", () => {
       release.resolve();
       daemon.stop();
       await daemonRun?.catch(() => {}); // drain-on-shutdown: resolves once in-flight tasks finish
+      server.stop(true);
+    }
+  });
+
+  it("runs independent delegations in one Issue concurrently without overwriting task context", async () => {
+    const { store, workDir } = daemonTestBed("multiremi-issue-parallel-");
+    const leader = store.createAgent({ name: "Leader", provider: "claude" });
+    const worker = store.createAgent({ name: "Worker", provider: "claude" });
+    const issue = store.createIssue({ title: "Parallel Issue" });
+    const tasks = ["one", "two"].map((scope) => store.createTask({
+      agentId: worker.id, issueId: issue.id, prompt: scope,
+      delegatedByAgentId: leader.id, delegationId: `dlg_${scope}`,
+    }));
+    const credential = await store.createAccessToken({ name: "Parallel daemon", type: "daemon", workspaceId: "local" });
+    const server = startMultiremiServer({ store, scheduler: null, authToken: "parallel-test", hostname: "127.0.0.1", port: 0 });
+    const release = deferred<void>();
+    const bothStarted = deferred<void>();
+    const contexts = new Map<string, string>();
+    const homes = new Set<string>();
+    const daemon = new MultiremiDaemon({
+      serverUrl: `http://127.0.0.1:${server.port}`, token: credential.token,
+      runtimeName: "parallel", provider: "claude", workspaceId: "local", daemonPort: 0,
+      workspacesRoot: join(workDir, "workspaces"), repoCacheRoot: join(workDir, ".repo-cache"),
+      pollIntervalMs: 25, maxConcurrency: 2,
+      providerFactory: (options) => messageProviderFactory({
+        text: "done", sessionId: options.cwd!, requestId: "parallel",
+        onSend: async () => {
+          const contextPath = join(options.cwd!, ".multiremi", "task.json");
+          const context = readFileSync(contextPath, "utf8");
+          contexts.set(contextPath, context);
+          homes.add(options.env!.CLAUDE_CONFIG_DIR!);
+          if (contexts.size === 2) bothStarted.resolve();
+          await release.promise;
+          expect(readFileSync(contextPath, "utf8")).toBe(context);
+        },
+      })(options),
+    });
+    const running = daemon.start();
+    try {
+      await withTimeout(bothStarted.promise, 5_000, "Issue delegations serialized in daemon");
+      expect(homes.size).toBe(2);
+      expect(tasks.map((task) => store.getTask(task.id)?.status)).toEqual(["running", "running"]);
+      for (const task of tasks) expect([...contexts.values()].some((value) => value.includes(task.id))).toBe(true);
+      expect(store.getIssueWorkspace(issue.id)?.rootPath).toBe(join(workDir, "workspaces", "issues", issue.key));
+      release.resolve();
+      await waitForCondition(() => tasks.every((task) => store.getTask(task.id)?.status === "completed"), 5_000);
+      expect(store.getIssueWorkspace(issue.id)?.rootPath).toBe(join(workDir, "workspaces", "issues", issue.key));
+    } finally {
+      release.resolve();
+      daemon.stop();
+      await running;
       server.stop(true);
     }
   });
@@ -1563,7 +1676,7 @@ describe("Bun Multiremi daemon smoke", () => {
       expect(existsSync(join(worktree, "README.md"))).toBe(true);
       const branch = gitOutput(worktree, ["branch", "--show-current"]);
       expect(branch).toBe(`agent/${issue.key}`);
-      expect(prompts[0]).toContain("already checked out into the working directory");
+      expect(prompts[0]).toContain("already checked out on the Issue branch");
       expect(prompts[0]).toContain(`on branch \`${branch}\``);
       expect(prompts[0]).not.toContain("For repositories without a path above");
 
@@ -1729,6 +1842,39 @@ describe("Bun Multiremi daemon smoke", () => {
       server.stop(true);
     }
   }, 120_000);
+
+  it("runs Issue-bound Chat replies without a Discussion Session and resumes their Chat context", async () => {
+    const { store, workDir } = daemonTestBed("multiremi-bound-chat-");
+    const agent = store.createAgent({ name: "Remi", provider: "claude" });
+    const issue = store.createIssue({ title: "Bound Issue", workspaceId: "local" });
+    const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id, title: "Topic" });
+    const originalIssueSessions = store.listIssueSessions(issue.id).map(session => session.id);
+    const token = await store.createAccessToken({ name: "Chat daemon", type: "daemon", workspaceId: "local" });
+    const server = startMultiremiServer({ store, scheduler: null, authToken: "bound-chat-secret", hostname: "127.0.0.1", port: 0 });
+    const workspacesRoot = join(workDir, "workspaces");
+    const sends: SendOptions[] = [];
+    const providerFactory: MultiremiDaemonProviderFactory = () => ({
+      async *sendStream(_message, options) {
+        sends.push(options ?? {});
+        yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "Topic reply" }] } as any;
+      },
+      getLastResponse: () => ({ text: "Topic reply", sessionId: "bound-chat-provider", requestId: "bound-chat-request" }),
+    });
+    try {
+      for (let turn = 0; turn < 2; turn++) {
+        const task = store.createTask({ agentId: agent.id, chatSessionId: chat.id, holdsWorkspace: false, prompt: "Progress?" });
+        expect(task).toMatchObject({ issueId: issue.id, issueSessionId: null, holdsWorkspace: false });
+        await new MultiremiDaemon({ serverUrl: `http://127.0.0.1:${server.port}`, token: token.token,
+          runtimeName: "bound-chat", provider: "claude", workspaceId: "local", once: true, daemonPort: 0,
+          workspacesRoot, repoCacheRoot: join(workDir, ".repo-cache"), providerFactory }).start();
+        expect(store.getTask(task.id)).toMatchObject({ status: "completed", sessionId: "bound-chat-provider",
+          workDir: join(workspacesRoot, "chats", chat.id) });
+      }
+      expect(sends[1]?.sessionId).toBe("bound-chat-provider");
+      expect(store.listIssueSessions(issue.id).map(session => session.id)).toEqual(originalIssueSessions);
+      expect(existsSync(join(workspacesRoot, "issues", issue.key))).toBe(false);
+    } finally { server.stop(true); }
+  });
 
   it("resumes chat tasks with the pinned provider session after daemon restart", async () => {
     const { store, workDir } = daemonTestBed("multiremi-daemon-chat-resume-");
@@ -2001,7 +2147,9 @@ describe("Bun Multiremi daemon smoke", () => {
 
       const completed = store.getTask(task.id)!;
       const issueWorkDir = join(workDir, "workspaces", "issues", issue.key);
-      expect(providerCwd).toBe(issueWorkDir);
+      const executionWorkDir = join(workDir, "workspaces", ".runtime", completed.issueSessionId!, agent.id,
+        String(completed.issueSessionGeneration), "work");
+      expect(providerCwd).toBe(executionWorkDir);
       expect(workspaceAtProviderStart).toMatchObject({
         issueId: issue.id,
         rootPath: issueWorkDir,
@@ -2009,7 +2157,7 @@ describe("Bun Multiremi daemon smoke", () => {
         repos: [],
       });
       expect(completed.status).toBe("completed");
-      expect(completed.workDir).toBe(issueWorkDir);
+      expect(completed.workDir).toBe(executionWorkDir);
       const laneGeneration = completed.issueSessionGeneration ?? completed.issue_session_generation;
       const expectedProviderHome = join(
         workDir,
@@ -2034,7 +2182,7 @@ describe("Bun Multiremi daemon smoke", () => {
         issue_id: issue.id,
         version: 2,
       });
-      expect(JSON.parse(readFileSync(join(issueWorkDir, ".multiremi", "project", "resources.json"), "utf8")).resources).toEqual([]);
+      expect(JSON.parse(readFileSync(join(executionWorkDir, ".multiremi", "project", "resources.json"), "utf8")).resources).toEqual([]);
     } finally {
       server.stop(true);
     }
@@ -2290,6 +2438,68 @@ describe("Bun Multiremi daemon smoke", () => {
     }
   });
 
+  it("imports selected-directory Skills into the library and supplies their files to an agent", async () => {
+    const { store, workDir: root } = daemonTestBed("remi-selected-skill-directory-");
+    const defaultRoot = join(root, "default-skills");
+    const selectedRoot = join(root, "selected-skills");
+    for (const directory of [defaultRoot, selectedRoot]) mkdirSync(join(directory, "helper", "references"), { recursive: true });
+    writeFileSync(join(defaultRoot, "helper", "SKILL.md"), "DEFAULT_DIRECTORY_CONTENT");
+    const main = "---\nname: selected-skill\ndescription: Use to check imported support files.\n---\nSELECTED_DIRECTORY_CONTENT\n";
+    writeFileSync(join(selectedRoot, "helper", "SKILL.md"), main);
+    writeFileSync(join(selectedRoot, "helper", "references", "guide.md"), "IMPORTED_SUPPORT_FILE");
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=", "base64");
+    writeFileSync(join(selectedRoot, "helper", "references", "preview.png"), png);
+    const token = await store.createAccessToken({ name: "Selected skill daemon", type: "daemon", workspaceId: "local", daemonId: "skill-machine" });
+    const server = startMultiremiServer({ store, scheduler: null, authToken: "selected-skill-test", hostname: "127.0.0.1", port: 0 });
+    let sends = 0;
+    const daemon = new MultiremiDaemon({
+      serverUrl: `http://127.0.0.1:${server.port}`, token: token.token,
+      daemonId: "skill-machine", runtimeName: "Skill directory test", provider: "claude", workspaceId: "local",
+      daemonPort: 0, pollIntervalMs: 20, gcEnabled: false,
+      workspacesRoot: join(root, "daemon-state"), repoCacheRoot: join(root, "repo-cache"),
+      localSkillRoots: { claude: defaultRoot },
+      providerFactory: messageProviderFactory({ text: "Skill available", sessionId: "skill-session", requestId: "skill-request",
+        onSend: (_prompt, options) => {
+          sends++;
+          const skillRoot = join(options.cwd!, ".claude", "skills", "selected-skill");
+          expect(readFileSync(join(skillRoot, "SKILL.md"), "utf8")).toBe(main);
+          expect(readFileSync(join(skillRoot, "references", "guide.md"), "utf8")).toBe("IMPORTED_SUPPORT_FILE");
+          expect(readFileSync(join(skillRoot, "references", "preview.png"))).toEqual(png);
+        },
+      }),
+    });
+    let run: Promise<void> | undefined;
+    try {
+      run = daemon.start();
+      await waitForCondition(() => store.listRuntimes().length > 0, 5_000);
+      const runtime = store.listRuntimes()[0]!;
+      const scan = store.createRuntimeLocalSkillListRequest(runtime.id, { root: selectedRoot });
+      await waitForCondition(() => store.getRuntimeLocalSkillListRequest(runtime.id, scan.id)?.status === "completed", 10_000);
+      const discovered = store.getRuntimeLocalSkillListRequest(runtime.id, scan.id)!;
+      expect(discovered.skills.map((candidate) => candidate.key)).toEqual(["helper"]);
+      const request = store.createRuntimeLocalSkillImportRequest(runtime.id, { scan_request_id: scan.id, skill_key: "helper" });
+      await waitForCondition(() => ["completed", "failed"].includes(store.getRuntimeLocalSkillImportRequest(runtime.id, request.id)?.status ?? ""), 10_000);
+      const imported = store.getRuntimeLocalSkillImportRequest(runtime.id, request.id)!;
+      expect(imported.error).toBeNull();
+      expect(imported.skill?.content).toBe(main);
+      expect(imported.skill?.files?.map((file) => file.path)).toEqual(["references/guide.md", "references/preview.png"]);
+      expect(imported.skill?.files?.find((file) => file.path.endsWith(".png"))).toMatchObject({ encoding: "base64", content: png.toString("base64") });
+      const agent = store.createAgent({ name: "Use imported Skill", provider: "claude" });
+      store.setAgentSkills(agent.id, { skill_ids: [imported.skillId!] });
+      const task = store.createTask({ agentId: agent.id, prompt: "Read the selected Skill." });
+      await waitForCondition(() => ["completed", "failed"].includes(store.getTask(task.id)?.status ?? ""), 10_000);
+      expect(store.getTask(task.id)?.error).toBeNull();
+      expect(store.getTask(task.id)?.status).toBe("completed");
+      expect(sends).toBe(1);
+      expect(readFileSync(join(selectedRoot, "helper", "SKILL.md"), "utf8")).toBe(main);
+      expect(readFileSync(join(selectedRoot, "helper", "references", "preview.png"))).toEqual(png);
+    } finally {
+      daemon.stop();
+      await run?.catch(() => {});
+      server.stop(true);
+    }
+  }, 40_000);
+
   it("handles heartbeat maintenance requests for update, models, and local skills", async () => {
     const { store, workDir } = daemonTestBed("multiremi-daemon-maintenance-");
     const skillsRoot = join(workDir, "skills");
@@ -2423,7 +2633,7 @@ describe("Bun Multiremi daemon smoke", () => {
         name: "Review Helper",
         description: "Review local changes",
         provider: "claude",
-        fileCount: 2,
+        fileCount: 3,
       });
       expect(skillsByKey.get("linked-helper")).toMatchObject({
         key: "linked-helper",
@@ -2449,7 +2659,8 @@ describe("Bun Multiremi daemon smoke", () => {
         provider: "claude",
         source_path: skillDir,
       });
-      expect(imported.skill?.files?.map((file) => file.path)).toEqual(["notes/check.md"]);
+      expect(imported.skill?.files?.map((file) => file.path)).toEqual(["image.png", "notes/check.md"]);
+      expect(imported.skill?.files?.find((file) => file.path === "image.png")?.encoding).toBe("base64");
       const nestedImported = store.getRuntimeLocalSkillImportRequest(runtimeId, nestedImportRequest.id)!;
       expect(nestedImported.status).toBe("completed");
       expect(nestedImported.skill?.name).toBe("Nested Helper");

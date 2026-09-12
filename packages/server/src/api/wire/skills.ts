@@ -10,18 +10,19 @@ import type {
 } from "@multiremi/contracts/types.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import type { Context } from "hono";
-import { cleanString, currentAccessToken, parseOptionalInt } from "./context.js";
+import { cleanString, parseOptionalInt } from "./context.js";
+import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 
 export function requestedSkillWorkspaceId(
   c: Context,
+  store: MultiremiStore,
   input?: Pick<CreateSkillInput | ImportSkillInput | UpdateSkillInput, "workspaceId" | "workspace_id">,
-): string {
-  return cleanString(input?.workspaceId) ??
+): string | Response {
+  const explicitId = cleanString(input?.workspaceId) ??
     cleanString(input?.workspace_id) ??
     cleanString(c.req.query("workspaceId")) ??
-    cleanString(c.req.query("workspace_id")) ??
-    currentAccessToken(c)?.workspaceId ??
-    "local";
+    cleanString(c.req.query("workspace_id"));
+  return resolveRequestWorkspaceId(c, store, explicitId);
 }
 
 export function sanitizeSkillFilesForCompatibility<T extends { files?: MultiremiSkillFile[] }>(input: T): T {
@@ -76,6 +77,9 @@ export function skillCompatibilityErrorResponse(
   if (message === "Skill files should not include SKILL.md") {
     return c.json({ error: "SKILL.md is reserved for the primary skill content" }, 400);
   }
+  if (message.startsWith("Invalid skill file encoding:") || message.startsWith("Invalid base64 skill file content:")) {
+    return c.json({ error: message }, 400);
+  }
   if (isUniqueSkillNameError(message)) {
     if (options.duplicateImportInput && options.store) {
       const existing = existingSkillIdentityForInput(options.store, options.duplicateImportInput);
@@ -105,7 +109,7 @@ function existingSkillIdentityForInput(store: MultiremiStore, input: CreateSkill
   return { id: existing.id, name: existing.name };
 }
 
-export function searchSkillsResponse(store: MultiremiStore, c: Context): {
+export function searchSkillsResponse(store: MultiremiStore, c: Context, workspaceId: string): {
   skills: Array<{
     name: string;
     description: string;
@@ -117,7 +121,6 @@ export function searchSkillsResponse(store: MultiremiStore, c: Context): {
   }>;
 } {
   const query = String(c.req.query("q") ?? "").trim().toLowerCase();
-  const workspaceId = requestedSkillWorkspaceId(c);
   const limit = Math.max(1, Math.min(parseOptionalInt(c.req.query("limit")) ?? 50, 200));
   const offset = Math.max(0, parseOptionalInt(c.req.query("offset")) ?? 0);
   const skills = store.listSkills(workspaceId, { includeFiles: false })
@@ -151,6 +154,7 @@ export function daemonClaimSkillResponse(skill: MultiremiSkill): Record<string, 
     files: (skill.files ?? []).map((file) => ({
       path: file.path,
       content: file.content,
+      ...(file.encoding !== undefined && file.encoding !== "utf8" ? { encoding: file.encoding } : {}),
     })),
   };
 }
@@ -193,6 +197,7 @@ export function skillFileCompatibilityResponse(file: MultiremiSkillFile): Record
     skill_id: file.skillId,
     path: file.path,
     content: file.content,
+    ...(file.encoding !== undefined && file.encoding !== "utf8" ? { encoding: file.encoding } : {}),
     created_at: file.createdAt,
     updated_at: file.updatedAt,
   };

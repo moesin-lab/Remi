@@ -49,6 +49,70 @@ describe("native collaboration CLI contracts", () => {
     }
   });
 
+  it("manages private chats and queued messages through the registered commands", async () => {
+    useCliEnv();
+    const cases: Array<{ id: string; args?: string[]; method: string; path: string; body?: unknown }> = [
+      { id: "chat.pin", method: "PATCH", path: "/api/chat/sessions/chat_1", body: { pinned: true } },
+      { id: "chat.unpin", method: "PATCH", path: "/api/chat/sessions/chat_1", body: { pinned: false } },
+      { id: "chat.archive", method: "PATCH", path: "/api/chat/sessions/chat_1", body: { status: "archived" } },
+      { id: "chat.restore", method: "PATCH", path: "/api/chat/sessions/chat_1", body: { status: "active" } },
+      { id: "chat.queue.update", args: ["task_2", "--content", "先检查测试\n再修改实现"], method: "PATCH", path: "/api/chat/sessions/chat_1/queue/task_2", body: { content: "先检查测试\n再修改实现" } },
+      { id: "chat.queue.remove", args: ["task_2"], method: "DELETE", path: "/api/chat/sessions/chat_1/queue/task_2" },
+      { id: "chat.queue.clear", method: "DELETE", path: "/api/chat/sessions/chat_1/queue" },
+      { id: "chat.queue.prioritize", args: ["task_2"], method: "POST", path: "/api/chat/sessions/chat_1/queue/task_2/prioritize", body: {} },
+    ];
+    for (const testCase of cases) {
+      const spec = specById(testCase.id);
+      const writes: Array<{ method: string; path: string; body?: unknown }> = [];
+      globalThis.fetch = capabilityFetch(spec.id, async (request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/api/chat/sessions" && request.method === "GET") {
+          return Response.json([{ id: "chat_1", title: "我的聊天" }]);
+        }
+        writes.push({ method: request.method, path, body: request.body ? await request.json() : undefined });
+        return request.method === "DELETE" ? new Response(null, { status: 204 }) : Response.json({ id: "chat_1", task_id: "task_2", active_task_id: "task_1" });
+      });
+      await capture(() => registryFor([spec]).execute([...spec.path, "我的聊天", ...(testCase.args ?? []), "--output", "json"]));
+      expect(writes, testCase.id).toEqual([{ method: testCase.method, path: testCase.path, body: testCase.body }]);
+      expect(spec.auth, testCase.id).toEqual(["human"]);
+    }
+  });
+
+  it("rejects empty queue edits and propagates a task that already started", async () => {
+    useCliEnv();
+    const spec = specById("chat.queue.update");
+    let writes = 0;
+    globalThis.fetch = capabilityFetch(spec.id, (request) => {
+      if (request.method === "GET") return Response.json([{ id: "chat_1", title: "Work" }]);
+      writes += 1;
+      return Response.json({ error: "task is no longer queued" }, { status: 409 });
+    });
+    await expect(capture(() => registryFor([spec]).execute([
+      ...spec.path, "Work", "task_2", "--content", "   ",
+    ]))).rejects.toThrow("requires non-empty");
+    expect(writes).toBe(0);
+    await expect(capture(() => registryFor([spec]).execute([
+      ...spec.path, "Work", "task_2", "--content", "Updated",
+    ]))).rejects.toThrow("task is no longer queued");
+    expect(writes).toBe(1);
+  });
+
+  it("makes the bound-topic continuation commands available to Task credentials", () => {
+    const registry = registryFor(specs);
+    const inventory = new Map(registry.inventory().map((entry) => [entry.id, entry]));
+    const cases = [
+      ["session.task.list", ["session", "task", "list", "iss_1", "ises_1", "--output", "json"]],
+      ["session.task.create", ["session", "task", "create", "iss_1", "ises_1", "--agent", "agt_owner", "--prompt", "Continue", "--output", "json"]],
+      ["task.get", ["task", "get", "tsk_1", "--output", "json"]],
+      ["task.steer", ["task", "steer", "tsk_1", "--content", "Follow-up", "--output", "json"]],
+      ["task.steer.list", ["task", "steer", "list", "tsk_1", "--output", "json"]],
+    ] as const;
+    for (const [id, argv] of cases) {
+      expect(inventory.get(id)?.auth, id).toContain("task");
+      expect(registry.resolve([...argv])?.spec.id).toBe(id);
+    }
+  });
+
   it("keeps issue share capability management human-only", () => {
     const inventory = new Map(registryFor(specs).inventory().map((entry) => [entry.id, entry]));
     for (const id of ["share.get", "share.create", "share.extend", "share.delete"]) {
@@ -80,6 +144,12 @@ describe("native collaboration CLI contracts", () => {
       "comment list",
       "comment add",
       "session result publish",
+      "session list",
+      "session task list",
+      "session task create",
+      "task get",
+      "task steer",
+      "task steer list",
     ];
     for (const path of canonicalPromptPaths) {
       expect(daemonSource, path).toContain(`remi ${path}`);

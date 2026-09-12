@@ -1,5 +1,8 @@
 import { createReadStream } from "node:fs";
+import { parseFeishuPresentation } from "@multiremi/contracts/feishu-presentation.js";
 import { stat } from "node:fs/promises";
+import { normalizeRepoList } from "@daemon/agent-runtime/repo/checkout.js";
+import { isFeishuOpenId, parseOutboundMention } from "@shared/feishu-mention.js";
 import type {
   MultiremiDaemonHeartbeatAck,
   MultiremiAgent,
@@ -35,7 +38,9 @@ import type {
   SubmitFeishuBotMessageResult,
 } from "@multiremi/contracts/types.js";
 import {
-  FEISHU_CONCIERGE_OUTBOUND_PROTOCOL_VERSION,
+  FEISHU_CONCIERGE_NATIVE_COT_PROTOCOL_VERSION,
+  type FeishuPresentationCheckpoint,
+  FEISHU_CONCIERGE_OUTBOUND_CLAIM_HEADER,
   MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
   MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
 } from "@multiremi/contracts/types.js";
@@ -263,6 +268,7 @@ export class MultiremiDaemonClient {
       launched_by: input.launchedBy ?? "",
       capabilities: {
         runtime_workspaces: 1,
+        parallel_agent_execution: 1,
         agent_plugins: input.agentPluginProtocol ?? MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
         ssh_mesh: input.sshMeshProtocol ?? MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
       },
@@ -275,7 +281,9 @@ export class MultiremiDaemonClient {
   }
 
   async claimTask(runtimeId: string): Promise<any | null> {
-    const resp = await this.post<{ task: any | null }>(`/api/daemon/runtimes/${runtimeId}/tasks/claim`, {});
+    const resp = await this.post<{ task: any | null }>(`/api/daemon/runtimes/${runtimeId}/tasks/claim`, {
+      supports_binary_skill_files: true,
+    });
     return normalizeDaemonClaimTask(resp.task);
   }
 
@@ -293,6 +301,7 @@ export class MultiremiDaemonClient {
         runtime_id: runtimeId,
         supports_batch_import: true,
         supports_directory_scan: true,
+        supports_skill_directory: true,
         supports_bot_menu: supportsBotMenu,
         agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
         ssh_mesh_protocol: MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
@@ -306,7 +315,7 @@ export class MultiremiDaemonClient {
         // Only claimed when this process can actually host the connector, so
         // the control plane never hands the bot to a Runtime that cannot run it.
         ...(supportsFeishuConcierge
-          ? { feishu_concierge_protocol: FEISHU_CONCIERGE_OUTBOUND_PROTOCOL_VERSION }
+          ? { feishu_concierge_protocol: FEISHU_CONCIERGE_NATIVE_COT_PROTOCOL_VERSION }
           : {}),
       }, undefined, signal);
     } catch (error) {
@@ -328,7 +337,15 @@ export class MultiremiDaemonClient {
             ? String(rawOutbound.reply_to_message_id ?? rawOutbound.replyToMessageId)
             : null,
           body: String(rawOutbound.body ?? ""),
+          bodyOrigin: (rawOutbound.body_origin ?? rawOutbound.bodyOrigin) === "agent" ? "agent" : "issue",
           idempotencyKey: String(rawOutbound.idempotency_key ?? rawOutbound.idempotencyKey ?? rawOutbound.id ?? ""),
+          mention: parseOutboundMention(rawOutbound.mention),
+          ...(parseFeishuPresentation(rawOutbound.presentation) ? { presentation: parseFeishuPresentation(rawOutbound.presentation)! } : {}),
+          ...(isFeishuOpenId(rawOutbound.interaction_open_id) ? { interactionOpenId: rawOutbound.interaction_open_id } : {}),
+          ...(typeof rawOutbound.task_id === "string" ? {
+            taskId: rawOutbound.task_id,
+            resumeMessageId: typeof rawOutbound.resume_message_id === "string" ? rawOutbound.resume_message_id : null,
+          } : {}),
         }
       : undefined;
     return {
@@ -405,9 +422,11 @@ export class MultiremiDaemonClient {
     deliveryId: string,
     input: {
       claimToken: string;
-      status: "sent" | "failed";
+      status: "sent" | "failed" | "streaming";
       externalMessageId?: string | null;
       error?: string | null;
+      presentation?: FeishuPresentationCheckpoint;
+      retryable?: boolean;
     },
   ): Promise<void> {
     await this.post(
@@ -417,8 +436,40 @@ export class MultiremiDaemonClient {
         status: input.status,
         external_message_id: input.externalMessageId ?? undefined,
         error: input.error ?? undefined,
+        presentation: input.presentation,
+        retryable: input.retryable,
       },
     );
+  }
+
+  async prepareFeishuBotOutboundMention(
+    runtimeId: string, deliveryId: string, claimToken: string, openId: string | null,
+  ): Promise<string | null> {
+    const result = await this.post<{ status?: string; mention_open_id?: unknown }>(
+      `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/outbound/${encodeURIComponent(deliveryId)}/result`,
+      { claim_token: claimToken, status: "prepared", mention_open_id: openId },
+    );
+    if (result.status !== "ok" || (result.mention_open_id !== null && !isFeishuOpenId(result.mention_open_id))) {
+      throw new Error("Invalid Feishu outbound mention checkpoint response");
+    }
+    return result.mention_open_id;
+  }
+
+  async fetchFeishuBotOutboundAttachment(
+    runtimeId: string,
+    deliveryId: string,
+    claimToken: string,
+    attachmentId: string,
+  ): Promise<Response> {
+    const path = `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/outbound/${encodeURIComponent(deliveryId)}/attachments/${encodeURIComponent(attachmentId)}`;
+    const headers = new Headers(this.headers());
+    headers.set(FEISHU_CONCIERGE_OUTBOUND_CLAIM_HEADER, claimToken);
+    const response = await fetch(this.baseUrl + path, { headers });
+    if (!response.ok) {
+      const responseBody = (await response.text()).slice(0, 2_000);
+      throw new MultiremiDaemonHttpError(response.status, "GET", path, responseBody, null);
+    }
+    return response;
   }
 
   async submitFeishuBotMessage(
@@ -428,14 +479,18 @@ export class MultiremiDaemonClient {
     const response = await this.post<{
       chatSessionId: string;
       taskId: string;
+      agentId: string;
+      agentName: string;
       status: MultiremiTaskStatus;
       duplicate: boolean;
       steered: boolean;
+      deliveryQueued?: boolean;
       senderMembership: SubmitFeishuBotMessageResult["senderMembership"];
     }>(`/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/messages`, {
       revision: input.revision,
       external_session_key: input.externalSessionKey,
       external_message_id: input.externalMessageId,
+      chat_type: input.chatType ?? undefined,
       reply_to_message_id: input.replyToMessageId ?? undefined,
       sender_open_id: input.senderOpenId ?? undefined,
       sender_user_id: input.senderUserId ?? undefined,
@@ -445,6 +500,7 @@ export class MultiremiDaemonClient {
       chat_id: input.chatId ?? undefined,
       thread_id: input.threadId ?? undefined,
       text: input.text,
+      delivery_mode: input.deliveryMode,
     });
     return response;
   }
@@ -476,6 +532,8 @@ export class MultiremiDaemonClient {
   ): Promise<FeishuBotSessionSnapshot> {
     const response = await this.post<{
       chat_session_id?: string | null;
+      agent_id?: string | null;
+      agent_name?: string | null;
       task?: {
         task_id: string;
         status: MultiremiTaskStatus;
@@ -491,6 +549,8 @@ export class MultiremiDaemonClient {
     });
     return {
       chatSessionId: response.chat_session_id ?? null,
+      agentId: response.agent_id ?? null,
+      agentName: response.agent_name ?? null,
       task: response.task
         ? {
             taskId: response.task.task_id,
@@ -615,6 +675,8 @@ export class MultiremiDaemonClient {
     skills?: MultiremiRuntimeLocalSkillSummary[];
     supported?: boolean;
     error?: string;
+    root?: string;
+    warnings?: string[];
   }): Promise<void> {
     await this.post(`/api/daemon/runtimes/${runtimeId}/local-skills/${requestId}/result`, result);
   }
@@ -724,6 +786,8 @@ export class MultiremiDaemonClient {
       session_id?: string | null;
       work_dir?: string | null;
       usage?: TaskUsageEntry[];
+      started_at?: string | null;
+      completed_at?: string | null;
     }>(`/api/daemon/tasks/${encodeURIComponent(taskId)}/status`);
     return {
       taskId: response.task_id ?? taskId,
@@ -733,6 +797,8 @@ export class MultiremiDaemonClient {
       sessionId: response.session_id ?? null,
       workDir: response.work_dir ?? null,
       usage: Array.isArray(response.usage) ? response.usage : [],
+      startedAt: response.started_at ?? null,
+      completedAt: response.completed_at ?? null,
     };
   }
 
@@ -777,6 +843,7 @@ export class MultiremiDaemonClient {
         worktree_path: repo.worktreePath,
         branch_name: repo.branchName,
         base_ref: repo.baseRef,
+        base_commit: repo.baseCommit,
         status: repo.status,
         dirty: repo.dirty,
         error: repo.error,
@@ -1291,6 +1358,7 @@ function normalizeDaemonClaimTask(raw: any | null): MultiremiTaskWithAgent | nul
     issueId: stringOrNull(raw.issue_id ?? raw.issueId),
     issueSessionId: stringOrNull(raw.issue_session_id ?? raw.issueSessionId),
     issueSessionGeneration: numberOrNull(raw.issue_session_generation ?? raw.issueSessionGeneration),
+    execution_scope: typeof raw.execution_scope === "string" ? raw.execution_scope : "",
     holdsWorkspace: booleanOrDefault(raw.holds_workspace ?? raw.holdsWorkspace, true),
     chatSessionId: stringOrNull(raw.chat_session_id ?? raw.chatSessionId),
     autopilotRunId: stringOrNull(raw.autopilot_run_id ?? raw.autopilotRunId),
@@ -1378,9 +1446,11 @@ function normalizeDaemonClaimTask(raw: any | null): MultiremiTaskWithAgent | nul
     projectDocs: normalizeDaemonClaimProjectDocs(raw.project_docs ?? raw.projectDocs),
     projectWikiDocs: normalizeDaemonClaimProjectWikiDocs(raw.project_wiki_docs ?? raw.projectWikiDocs),
     repositoryWikiContexts: normalizeDaemonClaimRepositoryWikiContexts(raw.repository_wiki_contexts ?? raw.repositoryWikiContexts),
+    knowledgeWarnings: Array.isArray(raw.knowledge_warnings)
+      ? raw.knowledge_warnings.filter((warning: unknown): warning is string => typeof warning === "string") : [],
     projectContexts: normalizeDaemonClaimProjectContexts(raw.project_contexts ?? raw.projectContexts),
     squadContext: normalizeDaemonClaimSquadContext(raw.squad_context ?? raw.squadContext),
-    repos: Array.isArray(raw.repos) ? raw.repos : [],
+    repos: normalizeRepoList(Array.isArray(raw.repos) ? raw.repos : []),
     usage: Array.isArray(raw.usage) ? raw.usage : [],
   };
   return normalized as MultiremiTaskWithAgent;
@@ -1652,7 +1722,7 @@ function normalizeDaemonClaimProjectContexts(raw: any): MultiremiTaskWithAgent["
       project,
       resources: normalizeDaemonClaimProjectResources(context.resources),
       docs,
-      repos: Array.isArray(context.repos) ? context.repos : [],
+      repos: normalizeRepoList(Array.isArray(context.repos) ? context.repos : []),
     }];
   });
 }

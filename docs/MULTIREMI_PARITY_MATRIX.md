@@ -17,4 +17,6 @@
 | Autopilot / SCM / Inbox | [autopilot repo](../packages/server/src/store/repos/autopilots-repo.ts)、[SCM 路由](../packages/server/src/api/routers/scm.ts)、[Inbox 路由策略](../packages/server/src/store/inbox-routing.ts) | webhook、运行记录和通知都有专门契约；是否达到业务验收需按场景检查 | [工作台/收件箱边界](inbox-workbench-boundary.md)、[测试指南](../TESTING.md) |
 | 性能与容量 | [同步数据库桥](../packages/server/src/store/db/postgres.ts)、[查询与渲染地图](dev/performance.md) | 结构性热点已定位，未采集的基线不能填入延迟或吞吐数字 | [性能采样方法](dev/performance.md) |
 
+Chat 的独立页面、置顶、归档和消息队列见 [Chat 契约](chat.md)；项目和 Runtime 目录绑定见 [工作位置](dev/runtime-workspaces.md)。并行任务与共享代码目录的限制见 [并行执行](parallel-agent-execution.md)。
+
 改动能力后，同批更新对应专题及验证入口。目录、类型定义、测试文件存在只证明有相应代码，不能自动等价为本次验证通过。

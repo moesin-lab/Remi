@@ -2,6 +2,8 @@ import type { TaskStreamEvent, TaskStreamMeta } from "../../base.js";
 import type { PermissionOption } from "@shared/contracts/acp-protocol.js";
 import type { FeishuStreamingSession } from "../streaming.js";
 import type { ToolEntry } from "../tool-formatters.js";
+import { executionModel, readContextUsage, type ContextUsage } from "@shared/agent-execution.js";
+import { formatCardStats } from "../card-metadata.js";
 import { formatToolInputSummary } from "../tool-formatters.js";
 import {
   buildAskQuestionForm,
@@ -37,23 +39,17 @@ export async function handleTaskStream(
   let sessionId = meta.sessionId ?? null;
   let failed = false;
   let cancelled = false;
-  let usageTokens = 0;
+  let contextUsage: ContextUsage | null = null;
+  let currentModel: string | null | undefined;
   const tools: ToolEntry[] = [];
   const toolIndexes = new Map<string, number>();
 
   for await (const event of stream) {
+    meta.signal?.throwIfAborted();
     if (event.kind === "snapshot") {
       const snapshot = event.snapshot;
       sessionId = snapshot.sessionId ?? sessionId;
-      const snapshotUsageTokens = snapshot.usage.reduce(
-        (total, entry) => total + (
-          entry.totalTokens && entry.totalTokens > 0
-            ? entry.totalTokens
-            : entry.inputTokens + entry.outputTokens
-        ),
-        0,
-      );
-      if (snapshotUsageTokens > 0) usageTokens = snapshotUsageTokens;
+      // Billing usage in the terminal snapshot must never replace context used/size.
       failed = snapshot.status === "failed";
       cancelled = snapshot.status === "cancelled";
       if (snapshot.status === "completed" && snapshot.result && !contentText.trim()) {
@@ -84,10 +80,45 @@ export async function handleTaskStream(
         await session.updateStatus(renderPlan(message.meta?.entries));
         break;
       case "usage":
-        usageTokens = readUsageTokens(message.meta) || usageTokens;
+        if (message.meta?.parent_tool_call_id) break;
+        {
+          const usage = readContextUsage(message.meta);
+          if (usage) {
+            contextUsage = usage;
+            session.updateContextUsage(usage);
+          }
+        }
+        break;
+      case "execution":
+        if (message.meta?.parent_tool_call_id) break;
+        {
+          const info = message.meta ?? {};
+          const model = Object.hasOwn(info, "model") ? executionModel(info.model) : undefined;
+          if (model !== undefined) {
+            if (currentModel !== undefined && model !== currentModel) {
+              contextUsage = null;
+              session.updateContextUsage(null);
+            }
+            currentModel = model;
+          }
+          session.updateExecution({
+            ...(typeof info.agentName === "string" ? { agentName: info.agentName } : {}),
+            ...(typeof info.provider === "string" ? { provider: info.provider } : {}),
+            ...(model !== undefined ? { model, modelName: typeof info.modelName === "string" ? info.modelName : null } : {}),
+          });
+        }
         break;
       case "tool_use": {
         const name = message.tool || String(message.meta?.title ?? "Tool");
+        const existingIndex = message.toolCallId ? toolIndexes.get(message.toolCallId) : undefined;
+        if (existingIndex != null) {
+          const existing = tools[existingIndex]!;
+          existing.input = { ...existing.input, ...message.input };
+          if (existingIndex === tools.length - 1) {
+            session.updateStepDesc(`${existing.name} ${formatToolInputSummary(existing.name, existing.input)}`.trim());
+          }
+          continue;
+        }
         const entry: ToolEntry = {
           name,
           input: message.input ?? undefined,
@@ -108,7 +139,9 @@ export async function handleTaskStream(
           entry.status = "done";
           entry.resultPreview = message.output ?? message.content ?? undefined;
           entry.durationMs = numberValue(message.meta?.duration_ms);
-          if (entry.resultPreview) session.updateStepDesc(entry.resultPreview.slice(0, 400));
+          if (entry.resultPreview) session.updateStepDesc(
+            `${entry.name} ${formatToolInputSummary(entry.name, entry.input)}: ${entry.resultPreview.slice(0, 400)}`.trim(),
+          );
           if (entry.durationMs) session.updateStepDuration(entry.durationMs);
         }
         await session.updateStatus(message.status === "failed" ? "Tool failed" : "Thinking...");
@@ -128,11 +161,7 @@ export async function handleTaskStream(
   }
 
   const elapsed = session.getElapsed();
-  const stats = [
-    elapsed > 0 ? `${elapsed}s` : "",
-    usageTokens > 0 ? `${formatCount(usageTokens)} tokens` : "",
-    tools.length > 0 ? `${tools.length} tools` : "",
-  ].filter(Boolean).join(" · ") || null;
+  const stats = formatCardStats(elapsed, contextUsage, tools.length);
   return { contentText, thinkingText, toolEntries: tools, toolCount: tools.length, stats, sessionId, failed, cancelled };
 }
 
@@ -145,9 +174,15 @@ async function handleHumanRequest(
 ): Promise<void> {
   const requestId = String(input.request_id ?? "").trim();
   if (!requestId) return;
+  if (meta.isHumanRequestPending && !await meta.isHumanRequestPending(requestId)) return;
+  meta.signal?.throwIfAborted();
   const savedStatus = session.getLastStatus();
   let actionId = "";
   let actionPromise: Promise<unknown> | null = null;
+  let settledElsewhere = false;
+  let checking = false;
+  let checkTimer: ReturnType<typeof setInterval> | undefined;
+  const onAbort = () => { if (actionId) rejectPendingAction(actionId, "Task stream interrupted"); };
   try {
     const questions = question ? normalizeQuestions(input.questions) : null;
     actionPromise = new Promise<unknown>((resolve, reject) => {
@@ -158,6 +193,20 @@ async function handleHumanRequest(
         chatId,
       );
     });
+    void actionPromise.catch(() => {});
+    meta.signal?.addEventListener("abort", onAbort, { once: true });
+    if (meta.isHumanRequestPending) {
+      checkTimer = setInterval(() => {
+        if (checking) return;
+        checking = true;
+        void meta.isHumanRequestPending!(requestId).then(pending => {
+          if (!pending) {
+            settledElsewhere = true;
+            rejectPendingAction(actionId, "Request settled outside this card");
+          }
+        }).catch(onAbort).finally(() => { checking = false; });
+      }, 1000);
+    }
     if (question && questions) {
       await session.updateStatus("Waiting for input...");
       await session.appendPermissionForm(buildAskQuestionForm(actionId, questions));
@@ -179,6 +228,7 @@ async function handleHumanRequest(
       }
     }
     const value = await actionPromise;
+    meta.signal?.throwIfAborted();
     const response = question
       ? { answers: objectValue(value) ?? {} }
       : { option_id: permissionDecision(value) };
@@ -188,13 +238,17 @@ async function handleHumanRequest(
       rejectPendingAction(actionId, error instanceof Error ? error.message : String(error));
       await actionPromise?.catch(() => {});
     }
+    if (meta.signal?.aborted) throw meta.signal.reason;
+    if (meta.isHumanRequestPending && !settledElsewhere) throw error;
   } finally {
+    clearInterval(checkTimer);
+    meta.signal?.removeEventListener("abort", onAbort);
     if (actionId) await session.removePermissionForm(actionId).catch(() => {});
     await session.updateStatus(savedStatus || "Running...");
   }
 }
 
-function normalizeQuestions(value: unknown): AskUserQuestionData | null {
+export function normalizeQuestions(value: unknown): AskUserQuestionData | null {
   if (!Array.isArray(value)) return null;
   const questions = value.map((raw) => {
     const row = objectValue(raw) ?? {};
@@ -220,7 +274,7 @@ function normalizeQuestions(value: unknown): AskUserQuestionData | null {
   return questions.length ? { questions } : null;
 }
 
-function normalizePermissionOptions(value: unknown): PermissionOption[] {
+export function normalizePermissionOptions(value: unknown): PermissionOption[] {
   if (!Array.isArray(value)) return [];
   return value.map((raw, index) => {
     const row = objectValue(raw) ?? {};
@@ -247,11 +301,6 @@ function renderPlan(value: unknown): string {
   })].join("\n");
 }
 
-function readUsageTokens(meta: Record<string, unknown> | null): number {
-  const usage = objectValue(meta?.usage) ?? meta ?? {};
-  return numberValue(usage.total_tokens ?? usage.totalTokens ?? usage.used) ?? 0;
-}
-
 function numberValue(value: unknown): number | undefined {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : undefined;
@@ -261,8 +310,4 @@ function objectValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
-}
-
-function formatCount(value: number): string {
-  return value >= 1_000_000 ? `${Math.round(value / 1_000_000)}M` : value >= 1_000 ? `${Math.round(value / 1_000)}k` : String(value);
 }

@@ -346,6 +346,13 @@ export function runMigrations(db: SqlDatabase): void {
       FOREIGN KEY(runtime_id) REFERENCES multiremi_runtimes(id) ON DELETE CASCADE
     );
 
+
+    CREATE TABLE IF NOT EXISTS multiremi_runtime_claude_profiles (
+      runtime_id TEXT PRIMARY KEY,
+      profile TEXT NOT NULL,
+      FOREIGN KEY(runtime_id) REFERENCES multiremi_runtimes(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_runtime_provider_credentials_runtime ON multiremi_runtime_provider_credentials(runtime_id);
 
     CREATE TABLE IF NOT EXISTS multiremi_runtime_models (
@@ -2808,6 +2815,7 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_tasks", "provider TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "plugin_snapshot TEXT NOT NULL DEFAULT '[]'");
   addColumnIfMissing(db, "multiremi_tasks", "codex_profile TEXT");
+  addColumnIfMissing(db, "multiremi_tasks", "claude_profile TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "execution_fingerprint TEXT");
   addColumnIfMissing(db, "multiremi_session_agent_lanes", "execution_fingerprint TEXT");
   migrateExecutionScopedLanes(db);

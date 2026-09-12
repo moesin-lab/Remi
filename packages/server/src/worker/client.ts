@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
+import { parseRuntimeClaudeProfile, type RuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
 import { parseFeishuPresentation } from "@multiremi/contracts/feishu-presentation.js";
 import { stat } from "node:fs/promises";
 import { normalizeRepoList } from "@daemon/agent-runtime/repo/checkout.js";
@@ -90,11 +91,11 @@ export interface MultiremiDaemonRegisterResponse {
   repos_version: string;
   settings?: Record<string, unknown>;
   relay?: MultiremiRelayWire;
-  runtimes: Array<{ id: string; provider?: string; type?: string; codex_profile?: RuntimeCodexProfile | null }>;
+  runtimes: Array<{ id: string; provider?: string; type?: string; claude_profile?: RuntimeClaudeProfile | null; codex_profile?: RuntimeCodexProfile | null }>;
 }
 
 export interface MultiremiDaemonHeartbeatConfigAck extends MultiremiDaemonHeartbeatAck {
-  codex_profile?: RuntimeCodexProfile | null;
+  claude_profile?: RuntimeClaudeProfile | null; codex_profile?: RuntimeCodexProfile | null;
   workspace_settings?: Record<string, unknown>;
   relay?: MultiremiRelayWire;
 }
@@ -270,6 +271,7 @@ export class MultiremiDaemonClient {
       launched_by: input.launchedBy ?? "",
       capabilities: {
         codex_profiles: 1,
+        claude_profiles: 1,
         runtime_workspaces: 1,
         parallel_agent_execution: 1,
         agent_plugins: input.agentPluginProtocol ?? MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
@@ -281,6 +283,12 @@ export class MultiremiDaemonClient {
 
   async getRuntimeCodexProfileKey(runtimeId: string, credentialId: string): Promise<string> {
     const response = await this.get<{ api_key: string }>(`/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/codex-profile-key?credential_id=${encodeURIComponent(credentialId)}`);
+    if (typeof response.api_key !== "string" || !response.api_key) throw new Error("Runtime provider key is unavailable");
+    return response.api_key;
+  }
+
+  async getRuntimeClaudeProfileKey(runtimeId: string, credentialId: string): Promise<string> {
+    const response = await this.get<{ api_key: string }>(`/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/claude-profile-key?credential_id=${encodeURIComponent(credentialId)}`);
     if (typeof response.api_key !== "string" || !response.api_key) throw new Error("Runtime provider key is unavailable");
     return response.api_key;
   }
@@ -1384,6 +1392,7 @@ function normalizeDaemonClaimTask(raw: any | null): MultiremiTaskWithAgent | nul
     parentTaskId: stringOrNull(raw.parent_task_id ?? raw.parentTaskId),
     failureReason: stringOrNull(raw.failure_reason ?? raw.failureReason),
     codexProfile: parseRuntimeCodexProfile(raw.codex_profile ?? raw.codexProfile ?? null),
+    claudeProfile: parseRuntimeClaudeProfile(raw.claude_profile ?? raw.claudeProfile ?? null),
     pluginSnapshot: Array.isArray(raw.plugin_snapshot)
       ? raw.plugin_snapshot
       : Array.isArray(raw.pluginSnapshot)

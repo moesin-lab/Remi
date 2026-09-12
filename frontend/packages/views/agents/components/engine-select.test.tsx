@@ -41,6 +41,12 @@ afterEach(() => {
 });
 
 describe("EngineSelect", () => {
+  it("lets the user select Antigravity", () => {
+    const onChange = vi.fn();
+    renderWithI18n(<EngineSelect wsId="ws-1" value="claude" onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "antigravity" }));
+    expect(onChange).toHaveBeenCalledWith("antigravity");
+  });
   it("renders one button per engine and marks the selected one", () => {
     renderWithI18n(
       <EngineSelect wsId="ws-1" value="claude" onChange={vi.fn()} />

@@ -20,15 +20,33 @@ export async function passwordAuthBody(
   explicit: Readonly<Record<string, unknown>> = {},
 ): Promise<Record<string, unknown>> {
   try {
-    return await requestBody(invocation, explicit);
+    const body = await requestBody(invocation, explicit);
+    // Password account APIs use the camelCase field, not the resource API alias.
+    if ("workspace_id" in body) {
+      body.workspaceId = body.workspace_id;
+      delete body.workspace_id;
+    }
+    return body;
   } catch {
     // JSON parser errors may quote the input, including a password fragment.
     throw new CliError("usage", "Read email/password JSON from a readable --file path or --file - (stdin)");
   }
 }
 
-export function passwordLoginCommandSpec(): CommandSpec {
+export function withValidatedPasswordInput(spec: CommandSpec): CommandSpec {
   return {
+    ...spec,
+    run: async (invocation) => {
+      // clientFor also reads input to resolve workspace context. Validate inside
+      // the redaction boundary first; the invocation cache avoids rereading stdin.
+      await passwordAuthBody(invocation);
+      await spec.run(invocation);
+    },
+  };
+}
+
+export function passwordLoginCommandSpec(): CommandSpec {
+  return withValidatedPasswordInput({
     id: "context.auth.password",
     path: ["context", "auth", "password"],
     description: "Sign in with email/password JSON from --file path|- and save the CLI session",
@@ -73,5 +91,5 @@ export function passwordLoginCommandSpec(): CommandSpec {
         status: "authenticated",
       });
     },
-  };
+  });
 }

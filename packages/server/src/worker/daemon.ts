@@ -1230,11 +1230,9 @@ export class MultiremiDaemon {
         this.botMenuPublisher !== null,
         this.feishuConcierge !== null,
       );
-      if (ack.workspace_settings) this.applyWorkspaceSettings(this.options.workspaceId ?? "local", ack.workspace_settings);
-      if (ack.relay) this.workspaceRelays.set(this.options.workspaceId ?? "local", ack.relay);
-      this.applyRuntimeCodexProfile(ack.codex_profile);
-      this.applyRuntimeClaudeProfile(ack.claude_profile);
-      this.applyFeishuBotDirective(ack);
+      // A heartbeat also claims maintenance requests; process the entire ack
+      // so fetching the initial provider config cannot strand those requests.
+      await this.handleHeartbeatAck(this.options.runtimeId, ack);
     }
     this.runtimeRegistrationGeneration++;
     log.info(`Runtime registered: ${this.options.runtimeId} (${this.options.provider})`);

@@ -1,6 +1,6 @@
 import { expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -18,7 +18,7 @@ it("delivers encrypted Runtime profile keys to task execution while preserving t
   process.env.CLAUDE_CONFIG_DIR = join(root, "empty-base-home");
   const daemonToken = await store.createAccessToken({ name: "Profile daemon", type: "daemon", workspaceId: "local", daemonId: "profile-daemon", userId: "local" });
   const server = startMultiremiServer({ store, scheduler: null, authToken: "profile-test-master", hostname: "127.0.0.1", port: 0 });
-  const observations: { url: unknown; model: unknown; key: string | undefined; home: string }[] = [];
+  const observations: { url: unknown; model: unknown; key: string | undefined; home: string; cwd: string }[] = [];
   const daemon = new MultiremiDaemon({
     serverUrl: `http://127.0.0.1:${server.port}`, token: daemonToken.token, daemonId: "profile-daemon", runtimeName: "Profile daemon", provider: "claude", workspaceId: "local",
     daemonPort: 0, pollIntervalMs: 20, gcEnabled: false, workspacesRoot: join(root, "workspaces"), repoCacheRoot: join(root, "cache"),
@@ -27,7 +27,7 @@ it("delivers encrypted Runtime profile keys to task execution while preserving t
         const home = options.env!.CLAUDE_CONFIG_DIR!;
         const text = readFileSync(join(home, "settings.json"), "utf8");
         const config = JSON.parse(text);
-        observations.push({ url: config.env.ANTHROPIC_BASE_URL, model: config.model, key: (options.env?.ANTHROPIC_API_KEY || options.env?.ANTHROPIC_AUTH_TOKEN), home });
+        observations.push({ url: config.env.ANTHROPIC_BASE_URL, model: config.model, key: (options.env?.ANTHROPIC_API_KEY || options.env?.ANTHROPIC_AUTH_TOKEN), home, cwd: options.cwd! });
         expect(text).not.toContain("private-key-");
         expect(options.env?.ANTHROPIC_MODEL).toBe(config.model);
         expect(options.env?.CLAUDE_CODE_USE_BEDROCK).toBe("0");
@@ -64,6 +64,15 @@ it("delivers encrypted Runtime profile keys to task execution while preserving t
     }
     expect(observations[0]!.home).not.toBe(observations[1]!.home);
     expect(await Bun.file(join(process.env.CLAUDE_CONFIG_DIR!, "settings.json")).exists()).toBe(false);
+    const settingsDir = join(observations[1]!.cwd, ".claude");
+    mkdirSync(settingsDir, { recursive: true });
+    writeFileSync(join(settingsDir, "settings.local.json"), JSON.stringify({ env: { ANTHROPIC_API_KEY: "wrong-project-private-key" } }));
+    const conflict = store.sendChatMessage(chat.id, { body: "Reject conflicting project credentials" }).task;
+    await waitFor(() => ["completed", "failed"].includes(store.getTask(conflict.id)?.status ?? ""));
+    expect(store.getTask(conflict.id)?.status).toBe("failed");
+    expect(store.getTask(conflict.id)?.error).toContain("project credentials conflict");
+    expect(store.getTask(conflict.id)?.error).not.toContain("wrong-project-private-key");
+    expect(observations).toHaveLength(2);
   } finally {
     daemon.stop();
     await run.catch(() => {});

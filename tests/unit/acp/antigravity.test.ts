@@ -102,6 +102,7 @@ describe("Antigravity native provider", () => {
   }, 15_000);
   it("rejects unsupported approvals and MCP before a task can run", async () => {
     await expect(fixture().provider.send("Hello", { permissionMode: "default" })).rejects.toThrow("interactive approvals");
+    await expect(fixture().provider.send("Hello", { permissionMode: "dontAsk" })).rejects.toThrow("interactive approvals");
     await expect(fixture().provider.send("Hello", { allowedTools: ["Read"] })).rejects.toThrow("allowlist");
     const provider = new AntigravityProvider({ getMcpServers: () => [{ name: "test", command: "node", args: [], env: [] }] });
     await expect(provider.send("Hello")).rejects.toThrow("task-scoped MCP");

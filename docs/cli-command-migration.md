@@ -72,6 +72,10 @@ Deployment administrators can provision or reset an account with
 master token and grants the account owner membership in the selected workspace.
 Both commands are unavailable to task identities; password values have no dedicated
 command-line flag and should be supplied without putting them in shell history.
+Both commands validate file/stdin JSON before resolving request context or making
+network requests, so malformed input errors cannot quote password fragments.
+Account provisioning sends only the API's `workspaceId` field; `--workspace`
+overrides either workspace spelling in the input and selects the same request header.
 
 `remi runtime workspace list|create|get|rename|archive` manages persistent execution
 directories owned by a Runtime's daemon. This is distinct from the team tenant

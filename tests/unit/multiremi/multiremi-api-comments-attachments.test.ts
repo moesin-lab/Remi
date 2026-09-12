@@ -159,7 +159,7 @@ describe("Multiremi API — comments, reactions, and attachments", () => {
       body: JSON.stringify({ body: "Hello original" }),
     });
     const sentBody = await sent.json();
-    expect(Object.keys(sentBody).sort()).toEqual(["created_at", "message_id", "task_id"]);
+    expect(Object.keys(sentBody).sort()).toEqual(["created_at", "message_id", "queued", "supports_queue", "task_id"]);
     expect(store.getTask(sentBody.task_id)?.chatSessionId).toBe(chatBody.id);
     const pending = await app.request(`/api/chat/sessions/${chatBody.id}/pending-task`);
     expect((await pending.json()).task_id).toBe(sentBody.task_id);
@@ -423,7 +423,7 @@ describe("Multiremi API — comments, reactions, and attachments", () => {
     expect(wrappedTimelineBody.entries[0].createdAt).toBeDefined();
     expect(wrappedTimelineBody.entries[wrappedTimelineBody.target_index].id).toBe(rootBody.comment.id);
     for (let index = 1; index < wrappedTimelineBody.entries.length; index++) {
-      expect(wrappedTimelineBody.entries[index - 1].created_at >= wrappedTimelineBody.entries[index].created_at).toBe(true);
+      expect(wrappedTimelineBody.entries[index - 1].created_at <= wrappedTimelineBody.entries[index].created_at).toBe(true);
     }
 
     const deleteTarget = store.createIssueComment(issue.id, { body: "Compatibility delete target" });

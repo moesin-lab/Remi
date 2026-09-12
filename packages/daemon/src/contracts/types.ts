@@ -68,6 +68,7 @@ export interface AgentTaskSkill {
 export interface AgentTaskSkillFile {
   path: string;
   content?: string;
+  encoding?: "utf8" | "base64";
 }
 
 export interface AgentTaskAttachment {
@@ -247,6 +248,7 @@ export interface AgentTaskSquadContext {
 export interface AgentTaskRepo {
   url: string;
   description?: string;
+  defaultBranch?: string;
 }
 
 /**
@@ -280,6 +282,7 @@ export interface AgentTask {
   issueSessionId?: string | null;
   issue_session_id?: string | null;
   issueSessionGeneration?: number | null;
+  execution_scope?: string;
   issue_session_generation?: number | null;
   /** Whether this task owns the shared Issue workspace. Missing means true for older servers. */
   holdsWorkspace?: boolean;
@@ -305,6 +308,7 @@ export interface AgentTask {
   projectWikiDocs?: AgentTaskProjectDoc[];
   project_wiki_docs?: AgentTaskProjectDoc[];
   repositoryWikiContexts?: AgentTaskRepositoryWikiContext[];
+  knowledgeWarnings?: string[];
   repository_wiki_contexts?: AgentTaskRepositoryWikiContext[];
   projectContexts?: AgentTaskProjectContext[];
   project_contexts?: AgentTaskProjectContext[];
@@ -396,6 +400,7 @@ export interface AgentTask {
 export interface RepoSpec {
   url: string;
   description?: string;
+  defaultBranch?: string;
 }
 
 // --- Skill import (skills/skill-import.ts) ---------------------------------
@@ -463,6 +468,7 @@ export type { RunAutopilotInput };
 
 /** Store surface the scheduler depends on. */
 export interface AutopilotStore {
+  advanceScheduledTargetRuns?(): void;
   recoverLostScheduleTriggers(now?: Date): number;
   recoverLostRuntimeProvisionSchedules(now?: Date): number;
   listAutopilots(workspaceId?: string | null): Autopilot[];

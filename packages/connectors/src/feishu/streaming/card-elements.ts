@@ -38,6 +38,33 @@ function appendPermissionElements(
   elements.push(form.form);
 }
 
+function buildStatsFooter(stats?: string | null, mentionOpenId?: string): Record<string, unknown>[] {
+  const columns: Record<string, unknown>[] = [];
+  if (mentionOpenId && /^ou_[A-Za-z0-9_-]+$/.test(mentionOpenId)) {
+    columns.push({
+      tag: "column", width: "auto",
+      elements: [{ tag: "markdown", content: `<at id=${mentionOpenId}></at>`, text_size: "notation" }],
+    });
+  }
+  for (const part of stats?.split(" · ").filter(Boolean) ?? []) {
+    // Optional stats must not shift the icon assigned to subsequent columns.
+    const token = /\btools?$/.test(part) ? "setting-inter_outlined"
+      : /^\d+(?:\.\d+)?s$/.test(part) ? "time_outlined" : "translate_outlined";
+    columns.push({
+      tag: "column", width: "auto",
+      elements: [{
+        tag: "div",
+        icon: { tag: "standard_icon", token, color: "grey" },
+        text: { tag: "plain_text", content: part.trim(), text_color: "grey", text_size: "notation" },
+      }],
+    });
+  }
+  return columns.length ? [
+    { tag: "hr" },
+    { tag: "column_set", flex_mode: "flow", horizontal_spacing: "small", columns },
+  ] : [];
+}
+
 /**
  * Build plain-text summary for Feishu card detail page.
  * Strips markdown syntax, preserves full content so the detail page isn't blank.
@@ -165,37 +192,7 @@ export function buildFinalCard(opts: {
     );
   }
 
-  // Stats bar with optional @mention (always last)
-  if (opts.mentionOpenId) {
-    elements.push({ tag: "hr" });
-    elements.push({ tag: "markdown", content: `<at id=${opts.mentionOpenId}></at>` });
-  }
-
-  if (opts.stats) {
-    if (!opts.mentionOpenId) elements.push({ tag: "hr" });
-    // Parse stats string "21.3s · 5→569 · 2 tools" into column_set
-    const statsParts = opts.stats.split(" · ");
-    if (statsParts.length >= 1) {
-      const iconMap = ["time_outlined", "translate_outlined", "setting-inter_outlined"];
-      elements.push({
-        tag: "column_set",
-        flex_mode: "flow",
-        horizontal_spacing: "small",
-        columns: statsParts.map((part, i) => ({
-          tag: "column",
-          width: "auto",
-          elements: [{
-            tag: "div",
-            icon: { tag: "standard_icon", token: iconMap[i] ?? "setting-inter_outlined", color: "grey" },
-            text: { tag: "plain_text", content: part.trim(), text_color: "grey", text_size: "notation" },
-          }],
-        })),
-      });
-    } else {
-      // Fallback: single markdown line
-      elements.push({ tag: "markdown", content: opts.stats });
-    }
-  }
+  elements.push(...buildStatsFooter(opts.stats, opts.mentionOpenId));
 
   return {
     schema: "2.0",
@@ -206,10 +203,10 @@ export function buildFinalCard(opts: {
 }
 
 /**
- * Build the initial streaming card JSON posted by FeishuStreamingSession.start().
- * Element ids here are the contract the CardKit element updates target.
+ * Build the initial patch-only message posted by FeishuStreamingSession.start().
+ * Updates replace this message's full JSON; there is no native streaming mode.
  */
-export function buildStreamingCardJson(options?: {
+export function buildInitialCardJson(options?: {
   sessionId?: string | null;
   displayName?: string | null;
   nameSuffix?: string;
@@ -220,12 +217,7 @@ export function buildStreamingCardJson(options?: {
     header: buildCardHeader(options?.sessionId, options?.displayName, options?.nameSuffix, options?.subtitle),
     config: {
       width_mode: "fill",
-      streaming_mode: true,
       summary: { content: "[Generating...]" },
-      streaming_config: {
-        print_frequency_ms: { default: 50 },
-        print_step: { default: 2 },
-      },
     },
     body: {
       elements: [
@@ -247,18 +239,15 @@ export function buildStreamingCardJson(options?: {
           elements: [],
         },
         { tag: "markdown", content: "", element_id: "content" },
-        { tag: "hr", element_id: "stats_hr" },
-        { tag: "markdown", content: "", element_id: "stats_text" },
       ],
     },
   };
 }
 
 /**
- * Build the full card rebuilt on every im.message.patch while in degraded mode
- * (CardKit element updates unavailable — streaming window expired or failing).
+ * Build the current progress card for the shared im.message.patch path.
  */
-export function buildDegradedCard(args: {
+export function buildProgressCard(args: {
   status?: string;
   steps: StepInfo[];
   text?: string;
@@ -266,6 +255,11 @@ export function buildDegradedCard(args: {
   pendingPermission: PermissionFormElements | null;
   nameSuffix?: string;
   subtitle: string | null;
+  stats?: string | null;
+  /** Keep the live card as a CoT/process card without exposing the answer yet. */
+  includeContent?: boolean;
+  /** Live CoT cards do not show completion statistics before the result exists. */
+  includeStats?: boolean;
 }): Record<string, unknown> {
   const elements: Record<string, unknown>[] = [];
 
@@ -281,7 +275,8 @@ export function buildDegradedCard(args: {
       panelElements.push(buildStepDiv("_default", `+${omitted} earlier steps`));
     }
     for (const step of visible) {
-      panelElements.push(buildStepDiv(step.tool, step.desc));
+      const duration = step.durationMs ? ` (${(step.durationMs / 1000).toFixed(1)}s)` : "";
+      panelElements.push(buildStepDiv(step.tool, `${step.desc}${duration}`));
     }
     elements.push({
       tag: "collapsible_panel",
@@ -295,7 +290,7 @@ export function buildDegradedCard(args: {
     });
   }
 
-  if (args.text?.trim()) {
+  if (args.includeContent !== false && args.text?.trim()) {
     elements.push(...buildContentElements(args.text));
   }
 
@@ -310,6 +305,8 @@ export function buildDegradedCard(args: {
     if (pf.panel) elements.push(pf.panel);
     elements.push(pf.form);
   }
+
+  if (args.includeStats !== false) elements.push(...buildStatsFooter(args.stats));
 
   return {
     schema: "2.0",

@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { resolveRequestWorkspaceId } from "./helpers/workspace-context.js";
 import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { AgentTemplateError } from "./agent-templates.js";
@@ -10,7 +11,7 @@ import {
   DaemonIdentityOwnerConflictError,
   DaemonRetiredError,
 } from "@multiremi/store/repos/daemon-retirement-repo.js";
-import { RuntimeRegistrationIdentityConflictError } from "@multiremi/store/repos/runtimes-repo.js";
+import { RuntimeLocalSkillRequestError, RuntimeRegistrationIdentityConflictError } from "@multiremi/store/repos/runtimes-repo.js";
 import { PlatformOperationConflictError } from "@multiremi/store/repos/platform-operations-repo.js";
 // Domain routers, listed in the order createMultiremiApp registers them.
 import { registerAuthRoutes } from "./routers/auth.js";
@@ -108,6 +109,7 @@ import {
   denyDaemonTokenRuntimeIdentity,
   denyDaemonTokenTaskRuntimeIdentity,
   isDaemonGcCheckRequest,
+  isFeishuBotOutboundAttachmentRequest,
   isDaemonTokenAllowedRequest,
   taskTokenHardDenyCategory,
   log,
@@ -401,6 +403,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
 
   app.onError((err, c) => {
     if (err instanceof RuntimeWorkspaceError) return c.json({ error: err.message, code: "runtime_workspace_error" }, err.status);
+    if (err instanceof RuntimeLocalSkillRequestError) return c.json({ error: err.message }, 400);
     if (err instanceof RuntimeRegistrationIdentityConflictError) {
       return c.json({ error: err.message, code: err.code }, 409);
     }
@@ -466,10 +469,15 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
     await next();
   });
   app.use("/api/daemon/runtimes/:runtimeId/*", async (c, next) => {
+    const hideFeishuAttachment = isFeishuBotOutboundAttachmentRequest(c);
     const denied = denyDaemonTokenRuntimeIdentity(c, store, c.req.param("runtimeId"), {
-      hideForbiddenAsNotFound: isDaemonGcCheckRequest(c),
+      hideForbiddenAsNotFound: isDaemonGcCheckRequest(c) || hideFeishuAttachment,
     });
-    if (denied) return denied;
+    if (denied) {
+      return hideFeishuAttachment && denied.status === 404
+        ? c.json({ error: "attachment not available" }, 404)
+        : denied;
+    }
     await next();
   });
   app.use("/api/daemon/tasks/:taskId/*", async (c, next) => {
@@ -556,13 +564,16 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   registerNotificationChannelRoutes(app, deps);
   app.post("/api/multiremi/feedback", async (c) => {
     const body = await readJson<CreateFeedbackInput>(c);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, body.workspaceId ?? body.workspace_id ?? "local");
+    const workspaceId = resolveRequestWorkspaceId(c, store, body.workspaceId ?? body.workspace_id ?? c.req.query("workspaceId") ?? c.req.query("workspace_id"));
+    if (workspaceId instanceof Response) return workspaceId;
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const feedback = createFeedbackOrApiError(store, withFeedbackRequestMetadata(body, c));
+    const feedback = createFeedbackOrApiError(store, withFeedbackRequestMetadata({ ...body, workspaceId, workspace_id: workspaceId }, c));
     return c.json({ feedback }, 201);
   });
   app.get("/api/multiremi/feedback", (c) => {
-    const workspaceId = c.req.query("workspaceId") ?? c.req.query("workspace_id") ?? "local";
+    const workspaceId = resolveRequestWorkspaceId(c, store, c.req.query("workspaceId") ?? c.req.query("workspace_id"));
+    if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
     const feedback = store.listFeedback(workspaceId);
@@ -570,9 +581,11 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   });
   app.post("/api/feedback", async (c) => {
     const body = await readJson<CreateFeedbackInput>(c);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, body.workspaceId ?? body.workspace_id ?? "local");
+    const workspaceId = resolveRequestWorkspaceId(c, store, body.workspaceId ?? body.workspace_id ?? c.req.query("workspaceId") ?? c.req.query("workspace_id"));
+    if (workspaceId instanceof Response) return workspaceId;
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const feedback = createFeedbackOrApiError(store, withFeedbackRequestMetadata(body, c));
+    const feedback = createFeedbackOrApiError(store, withFeedbackRequestMetadata({ ...body, workspaceId, workspace_id: workspaceId }, c));
     return c.json({ id: feedback.id, created_at: feedback.createdAt }, 201);
   });
 
@@ -672,6 +685,8 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   const authToken = options.authToken ?? process.env.MULTIREMI_TOKEN ?? "";
   const sessionArchives = options.sessionArchives ?? new SessionArchiveService(store);
   if (backgroundJobs) sessionArchives.startIssueArchivePurgeRecovery();
+  const repositoryWiki = options.repositoryWiki ?? createRepositoryWikiServiceFromEnv(store);
+  if (backgroundJobs) repositoryWiki.startStorageWorker?.();
   const app = createMultiremiApp({
     ...options,
     store,
@@ -679,6 +694,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     realtimeState,
     sessionArchives,
     messagingProviders,
+    repositoryWiki,
   });
   const port = options.port ?? parseInt(process.env.MULTIREMI_PORT ?? "6120", 10);
   const hostname = options.hostname ?? process.env.MULTIREMI_HOST ?? "0.0.0.0";
@@ -834,6 +850,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
           const ack = store.heartbeatRuntime(heartbeat.runtimeId, {
             supportsBatchImport: heartbeat.supportsBatchImport,
             supportsDirectoryScan: heartbeat.supportsDirectoryScan,
+            supportsSkillDirectory: heartbeat.supportsSkillDirectory,
             agentPluginProtocol: heartbeat.agentPluginProtocol,
           });
           if (heartbeat.sshMeshProtocol !== undefined) {
@@ -877,6 +894,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   const stopServer = server.stop.bind(server);
   controlPlaneSshMesh?.start();
   server.stop = (closeActiveConnections?: boolean) => {
+    if (backgroundJobs) repositoryWiki.stopStorageWorker?.();
     if (backgroundJobs) sessionArchives.stopIssueArchivePurgeRecovery();
     controlPlaneSshMesh?.stop();
     unsubscribeTaskEnqueued();

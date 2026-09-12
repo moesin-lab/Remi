@@ -1,4 +1,10 @@
-import { keepPreviousData, queryOptions, type QueryClient } from "@tanstack/react-query";
+import {
+  infiniteQueryOptions,
+  keepPreviousData,
+  queryOptions,
+  type InfiniteData,
+  type QueryClient,
+} from "@tanstack/react-query";
 import { api } from "../api";
 import type {
   GroupedIssuesResponse,
@@ -8,6 +14,7 @@ import type {
   ListGroupedIssuesParams,
   ListIssuesParams,
   ListIssuesCache,
+  TimelinePage,
 } from "../types";
 import { BOARD_STATUSES } from "./config";
 
@@ -82,6 +89,10 @@ export const issueKeys = {
   /** Full timeline query key, optionally scoped to one Product Session. */
   timeline: (issueId: string, issueSessionId?: string) =>
     [...issueKeys.timelineAll(issueId), issueSessionId ?? "all"] as const,
+  timelinePrimer: (issueId: string) => ["issues", "timeline-primer", issueId] as const,
+  timelineSyncVersion: (issueId: string) => ["issues", "timeline-sync", issueId, "version"] as const,
+  timelineSyncApplied: (issueId: string, issueSessionId?: string) =>
+    ["issues", "timeline-sync", issueId, issueSessionId ?? "all"] as const,
   sessions: (issueId: string) => ["issues", "sessions", issueId] as const,
   sessionTasks: (issueId: string, issueSessionId: string) =>
     ["issues", "sessions", issueId, issueSessionId, "tasks"] as const,
@@ -118,8 +129,48 @@ export const ISSUE_PAGE_SIZE = 50;
 
 export const ARCHIVED_ISSUE_PAGE_SIZE = 50;
 
+/** QA tuning point for the latest timeline window. */
+export const ISSUE_TIMELINE_PAGE_SIZE = 40;
+
 /** Statuses the issues/my-issues pages paginate. Cancelled is intentionally excluded — it has never been surfaced in the list/board views. */
 export const PAGINATED_STATUSES: readonly IssueStatus[] = BOARD_STATUSES;
+
+/**
+ * Reconcile a per-status fan-out into buckets keyed by each issue's own
+ * `status` field rather than by the status that was requested.
+ *
+ * The fan-out is not a consistent snapshot — it is one request per status,
+ * issued in parallel — so an Issue whose status changes while it is in
+ * flight comes back from two of them. Bucketing by the requested status
+ * then leaves the same id in two columns, and the board's `issueMap`
+ * (last write wins, in `BOARD_STATUSES` order) renders every copy using
+ * the *last* bucket's row. That is how an `in_progress` Issue ends up
+ * drawn under 审核中 while its detail view says 进行中.
+ *
+ * `total` deliberately stays the server's count for the *requested*
+ * status: it is what drives `hasMore` in `useLoadMoreByStatus`, so
+ * replacing it with the reconciled length would report "nothing more to
+ * load" for every column and cap the board at its first page.
+ */
+export function reconcileIssueBuckets(
+  responses: Array<{ status: IssueStatus; issues: Issue[]; total: number }>,
+): ListIssuesCache {
+  const byStatus: ListIssuesCache["byStatus"] = {};
+  for (const status of PAGINATED_STATUSES) byStatus[status] = { issues: [], total: 0 };
+  for (const response of responses) {
+    const requested = byStatus[response.status];
+    if (requested) requested.total = response.total;
+  }
+  const seen = new Set<string>();
+  for (const response of responses) {
+    for (const issue of response.issues) {
+      if (seen.has(issue.id)) continue;
+      seen.add(issue.id);
+      byStatus[issue.status]?.issues.push(issue);
+    }
+  }
+  return { byStatus };
+}
 
 /** Flatten a bucketed response to a single Issue[] for consumers that want the whole list. */
 export function flattenIssueBuckets(data: ListIssuesCache) {
@@ -137,12 +188,7 @@ async function fetchFirstPages(filter: MyIssuesFilter = {}, sort?: IssueSortPara
       api.listIssues({ status, limit: ISSUE_PAGE_SIZE, offset: 0, ...sort, ...filter }),
     ),
   );
-  const byStatus: ListIssuesCache["byStatus"] = {};
-  PAGINATED_STATUSES.forEach((status, i) => {
-    const res = responses[i]!;
-    byStatus[status] = { issues: res.issues, total: res.total };
-  });
-  return { byStatus };
+  return reconcileIssueBuckets(responses.map((res, i) => ({ ...res, status: PAGINATED_STATUSES[i]! })));
 }
 
 /**
@@ -557,17 +603,36 @@ export function childrenByParentsOptions(
   });
 }
 
-/**
- * Single-fetch timeline options. The endpoint returns the full ordered set of
- * comments + activities for an issue (server caps at 2000 as a safety net).
- * Cursor pagination was removed in #1929 — at observed data sizes (p99 ~30
- * entries per issue) it added complexity without a UX win and broke reply
- * threads at page boundaries.
- */
-export function issueTimelineOptions(issueId: string, issueSessionId?: string) {
-  return queryOptions({
+/** Page zero is the latest chronological window; subsequent pages are older. */
+export function issueTimelinePageOptions(issueId: string, issueSessionId?: string) {
+  return infiniteQueryOptions<
+    TimelinePage,
+    Error,
+    InfiniteData<TimelinePage, string | null>,
+    ReturnType<typeof issueKeys.timeline>,
+    string | null
+  >({
     queryKey: issueKeys.timeline(issueId, issueSessionId),
-    queryFn: () => api.listTimeline(issueId, issueSessionId),
+    queryFn: ({ pageParam }) => api.listTimelinePage(issueId, {
+      issueSessionId,
+      before: pageParam,
+      limit: ISSUE_TIMELINE_PAGE_SIZE,
+    }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) =>
+      lastPage.has_more ? lastPage.next_cursor ?? undefined : undefined,
+    staleTime: Infinity,
+  });
+}
+
+export function issueTimelinePrimerOptions(issueId: string) {
+  return queryOptions({
+    queryKey: issueKeys.timelinePrimer(issueId),
+    queryFn: () => api.listTimelinePage(issueId, {
+      issueSessionId: "@default",
+      limit: ISSUE_TIMELINE_PAGE_SIZE,
+    }),
+    staleTime: 0,
   });
 }
 

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isPermanentFeishuDeliveryError } from "@shared/feishu-delivery-error.js";
 import { mkdirSync } from "node:fs";
 import { cpus, homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -31,7 +32,13 @@ import {
 } from "./client.js";
 import { createEventMapper, responseToUsage } from "./acp-event-mapper.js";
 import { FeishuConciergeSupervisor, type FeishuConciergeHost } from "./feishu-concierge.js";
+import { deliverFeishuOutbound } from "./feishu-outbound.js";
 import { redactFeishuBotError } from "@multiremi/feishu-bot/diagnostics.js";
+import { rewriteMarkdownImages } from "@shared/feishu-markdown-images.js";
+import {
+  createFeishuImageResolver,
+  responseToFeishuImage,
+} from "@connectors/feishu/outbound-images.js";
 import {
   buildSteerInjectionPrompt,
   DEFAULT_FORCE_ANSWER_GRACE_MS,
@@ -47,9 +54,11 @@ import {
   type MultiremiOutboxDrainResult,
 } from "./outbox.js";
 import { TaskMessageBatcher } from "./task-message-batcher.js";
+import { probeRuntimeModels } from "./runtime-model-probe.js";
 import {
   browseRuntimeDirectory,
   listRuntimeLocalSkills,
+  scanRuntimeSkillDirectory,
   loadRuntimeLocalSkillBundle,
   localSkillRootForProvider,
   scanRuntimeDirectories,
@@ -80,6 +89,7 @@ import {
   assertIssueSessionNativeCodexOAuth,
   cleanupTemporaryTaskProviderHome,
   ensureProviderHomeDirectory,
+  prepareIssueExecutionDirectory,
   loadIssueSessionProviderEnv,
   listIssueSessionRuntimeRoots,
   prepareIssueSessionProviderHome,
@@ -401,10 +411,12 @@ export interface MultiremiDaemonOptions {
   runtimeModelRetryBaseMs?: number;
   /** Maximum retry delay for Runtime model discovery/reporting. */
   runtimeModelRetryMaxMs?: number;
+  /** Periodic capability refresh; probes run outside the daemon process. */
+  runtimeModelRefreshIntervalMs?: number;
   /**
    * Test-only escape hatch for the legacy in-process ACP model probe. Production
-   * callers must leave this disabled until discovery runs in an isolated OS
-   * process: a native ACP/Bun crash would otherwise terminate the daemon.
+   * callers leave this disabled and use the isolated subprocess instead:
+   * a native ACP/Bun crash must never terminate the daemon.
    */
   inProcessRuntimeModelDiscoveryEnabled?: boolean;
   /** Injectable SSH Mesh lifecycle for daemon integration tests. */
@@ -599,6 +611,7 @@ export class MultiremiDaemon {
   private activeTaskCount = 0;
   private drainingTaskCount = 0;
   private pendingClaimCount = 0;
+  private readonly feishuOutboundRuns = new Map<string, { claimToken: string; abort: AbortController; done: Promise<void> }>();
   private inflight = new Set<Promise<void>>();
   private activeTaskIds = new Set<string>();
   private activeTaskAborts = new Set<AbortController>();
@@ -643,15 +656,20 @@ export class MultiremiDaemon {
   private terminalAuthorityCleanupAttempts = 0;
   private agentPluginReconcileAbort: AbortController | null = null;
   private runtimeModels: MultiremiRuntimeModel[] | null = null;
+  private runtimeModelsReported: MultiremiRuntimeModel[] | null = null;
+  private readonly runtimeModelDiscoveryEnabled: boolean;
+  private runtimeModelsDiscoveredAt = 0;
   private runtimeRegistrationGeneration = 0;
   private runtimeModelReportedGeneration = 0;
   private runtimeModelProbe: Promise<MultiremiRuntimeModel[]> | null = null;
   private runtimeModelProbeAbort: AbortController | null = null;
   private runtimeModelRefreshTask: Promise<void> | null = null;
+  private runtimeModelListRequests = new Map<string, Promise<void>>();
   private runtimeModelRefreshAbort: AbortController | null = null;
   private runtimeModelRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private runtimeModelRetryWake: (() => void) | null = null;
   private botMenuPublisher: ((config: ResolvedBotMenuConfig, dryRun: boolean) => Promise<BotMenuPublishResult>) | null = null;
+  private botMenuPublishChain: Promise<void> = Promise.resolve();
   private feishuConcierge: FeishuConciergeSupervisor | null = null;
   private feishuConciergeReconcile: Promise<void> = Promise.resolve();
 
@@ -661,6 +679,8 @@ export class MultiremiDaemon {
         "In-process Runtime model discovery may only be enabled with an injected test provider",
       );
     }
+    this.runtimeModelDiscoveryEnabled = options.inProcessRuntimeModelDiscoveryEnabled === true
+      || (!options.providerFactory && ["claude", "codex"].includes(options.provider ?? "claude"));
     const workspacesRoot = configuredMultiremiWorkspacesRoot(options.workspacesRoot);
     const runtimeName = options.runtimeName ?? process.env.MULTIREMI_RUNTIME_NAME ?? `${hostname()}-${Bun.env.USER ?? "local"}-bun-runtime`;
     const deviceName = options.deviceName ?? process.env.MULTIREMI_DEVICE_NAME ?? `${hostname()}-${Bun.env.USER ?? "local"}`;
@@ -725,6 +745,7 @@ export class MultiremiDaemon {
         ?? join(homedir(), ".remi", "plugin-cache", "sha256"),
       runtimeModelRetryBaseMs,
       runtimeModelRetryMaxMs,
+      runtimeModelRefreshIntervalMs: Math.max(100, options.runtimeModelRefreshIntervalMs ?? 15 * 60_000),
       inProcessRuntimeModelDiscoveryEnabled:
         options.inProcessRuntimeModelDiscoveryEnabled === true,
       serverUrl: options.serverUrl,
@@ -847,6 +868,14 @@ export class MultiremiDaemon {
     return this.client.getFeishuBotTaskSnapshot(taskId);
   }
 
+  async isFeishuBotHumanRequestPending(taskId: string, requestId: string): Promise<boolean> {
+    return (await this.client.getTaskHumanRequest(taskId, requestId))?.status === "pending";
+  }
+
+  getFeishuBotHumanRequest(taskId: string, requestId: string): Promise<MultiremiTaskHumanRequest | null> {
+    return this.client.getTaskHumanRequest(taskId, requestId);
+  }
+
   respondFeishuBotHumanRequest(
     taskId: string,
     requestId: string,
@@ -956,7 +985,7 @@ export class MultiremiDaemon {
       this.startGcLoop();
       // One-shot mode is primarily used for a single queued task (and tests), so
       // avoid paying for a second ACP process unless a model-list request exists.
-      if (this.options.inProcessRuntimeModelDiscoveryEnabled && !this.options.once) {
+      if (this.runtimeModelDiscoveryEnabled && !this.options.once) {
         this.startRuntimeModelRefresh();
       }
       await this.reconcileRuntimeAgentPlugins(this.options.runtimeId!);
@@ -1075,9 +1104,12 @@ export class MultiremiDaemon {
       this.cancelRuntimeModelRefresh();
       const modelRefresh = this.runtimeModelRefreshTask;
       if (modelRefresh) await Promise.allSettled([modelRefresh]);
+      await Promise.allSettled([...this.runtimeModelListRequests.values()]);
       // Running tasks depend on the repo-checkout server, so let any in-flight
       // tasks drain before waiting for the GC lease they may currently hold.
       await Promise.allSettled([...this.inflight]);
+      for (const run of this.feishuOutboundRuns.values()) run.abort.abort();
+      await Promise.allSettled([...this.feishuOutboundRuns.values()].map(run => run.done));
       await this.drainGcInFlight();
       this.gitWorktreeInspector?.close();
       this.stopRepoCheckoutServer();
@@ -1178,6 +1210,7 @@ export class MultiremiDaemon {
       metadata: {
         version: multiremiVersion,
         cli_version: multiremiVersion,
+        parallel_agent_execution: 1,
         acp_version: this.acpVersion() ?? undefined,
         agent_version: this.agentVersion() ?? undefined,
         launched_by: this.options.launchedBy ?? "manual",
@@ -1220,10 +1253,17 @@ export class MultiremiDaemon {
       await this.handleRuntimeUpdate(runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli");
     }
     if (ack.pending_model_list) {
-      await this.handleRuntimeModelList(runtimeId, ack.pending_model_list.id);
+      const requestId = ack.pending_model_list.id;
+      if (!this.runtimeModelListRequests.has(requestId)) {
+        const request = this.handleRuntimeModelList(runtimeId, requestId)
+          .catch(() => log.warn(`Runtime model list report failed for ${requestId}`))
+          .finally(() => this.runtimeModelListRequests.delete(requestId));
+        this.runtimeModelListRequests.set(requestId, request);
+      }
+      if (this.options.once) await this.runtimeModelListRequests.get(requestId);
     }
     if (ack.pending_local_skills) {
-      await this.handleRuntimeLocalSkillList(runtimeId, ack.pending_local_skills.id);
+      await this.handleRuntimeLocalSkillList(runtimeId, ack.pending_local_skills.id, ack.pending_local_skills.root);
     }
     if (ack.pending_directory_scan) {
       await this.handleRuntimeDirectoryScan(runtimeId, ack.pending_directory_scan);
@@ -1232,11 +1272,11 @@ export class MultiremiDaemon {
       await this.handleRuntimeCommand(runtimeId, ack.pending_command);
     }
     if (ack.pending_bot_menu) {
-      await this.handleBotMenuPublish(runtimeId, ack.pending_bot_menu);
+      this.queueBotMenuPublish(runtimeId, ack.pending_bot_menu);
     }
     this.applyFeishuBotDirective(ack);
     if (ack.pending_feishu_outbound) {
-      await this.handleFeishuBotOutbound(runtimeId, ack.pending_feishu_outbound);
+      this.queueFeishuBotOutbound(runtimeId, ack.pending_feishu_outbound);
     }
     if (ack.ssh_mesh) {
       await this.sshMeshManager.reconcile(ack.ssh_mesh);
@@ -1247,7 +1287,7 @@ export class MultiremiDaemon {
         ? [ack.pending_local_skill_import]
         : [];
     for (const request of imports) {
-      await this.handleRuntimeLocalSkillImport(runtimeId, request.id, request.skill_key);
+      await this.handleRuntimeLocalSkillImport(runtimeId, request.id, request.skill_key, request.root);
     }
     return false;
   }
@@ -1282,7 +1322,7 @@ export class MultiremiDaemon {
         return false;
       }
       if (
-        this.options.inProcessRuntimeModelDiscoveryEnabled
+        this.runtimeModelDiscoveryEnabled
         && (this.runtimeModels || !this.options.once)
       ) {
         this.startRuntimeModelRefresh();
@@ -1372,7 +1412,7 @@ export class MultiremiDaemon {
   }
 
   private async handleRuntimeModelList(runtimeId: string, requestId: string): Promise<void> {
-    if (!this.options.inProcessRuntimeModelDiscoveryEnabled) {
+    if (!this.runtimeModelDiscoveryEnabled) {
       await this.client.reportRuntimeModelListResult(runtimeId, requestId, {
         status: "failed",
         error: IN_PROCESS_RUNTIME_MODEL_DISCOVERY_DISABLED,
@@ -1414,6 +1454,27 @@ export class MultiremiDaemon {
     });
   }
 
+  /**
+   * Publish on its own chain instead of inside the heartbeat.
+   *
+   * A publish walks the Feishu open API once per personalized menu, which can
+   * take tens of seconds; the heartbeat loop is also what claims tasks, so
+   * awaiting here stalled the concierge's Runtime — and the bot with it — for
+   * the whole call. Chaining rather than firing in parallel keeps two publishes
+   * from racing onto the same bot menu.
+   */
+  private queueBotMenuPublish(
+    runtimeId: string,
+    request: NonNullable<MultiremiDaemonHeartbeatAck["pending_bot_menu"]>,
+  ): void {
+    this.botMenuPublishChain = this.botMenuPublishChain
+      .catch(() => {})
+      .then(() => this.handleBotMenuPublish(runtimeId, request))
+      .catch((error) => {
+        log.warn(`bot menu publish ${request.id} could not be reported: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  }
+
   private async handleBotMenuPublish(
     runtimeId: string,
     request: NonNullable<MultiremiDaemonHeartbeatAck["pending_bot_menu"]>,
@@ -1425,16 +1486,24 @@ export class MultiremiDaemon {
       });
       return;
     }
+    const startedAt = Date.now();
+    // The control plane only records the outcome; when a publish is slow enough
+    // to outlive its deadline, this line is the only place the duration and the
+    // Feishu message survive.
+    log.info(`bot menu publish ${request.id} started (dry_run=${request.dry_run})`);
     try {
       const result = await this.botMenuPublisher(request.config, request.dry_run);
+      log.info(`bot menu publish ${request.id} finished in ${Date.now() - startedAt}ms`);
       await this.client.reportBotMenuPublishResult(runtimeId, request.id, {
         status: "completed",
         result,
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.warn(`bot menu publish ${request.id} failed after ${Date.now() - startedAt}ms: ${message}`);
       await this.client.reportBotMenuPublishResult(runtimeId, request.id, {
         status: "failed",
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
       });
     }
   }
@@ -1458,24 +1527,57 @@ export class MultiremiDaemon {
       });
   }
 
+  private queueFeishuBotOutbound(runtimeId: string,
+    delivery: NonNullable<MultiremiDaemonHeartbeatConfigAck["pending_feishu_outbound"]>): void {
+    const previous = this.feishuOutboundRuns.get(delivery.id);
+    if (previous?.claimToken === delivery.claimToken) return;
+    previous?.abort.abort();
+    const abort = new AbortController();
+    const done = (async () => {
+      await previous?.done;
+      await this.handleFeishuBotOutbound(runtimeId, delivery, AbortSignal.any([abort.signal, this.pollAbort.signal]));
+    })().catch(error => log.warn(`Feishu outbound failed: ${redactFeishuBotError(error)}`)).finally(() => {
+      if (this.feishuOutboundRuns.get(delivery.id)?.abort === abort) this.feishuOutboundRuns.delete(delivery.id);
+    });
+    this.feishuOutboundRuns.set(delivery.id, { claimToken: delivery.claimToken, abort, done });
+  }
+
   private async handleFeishuBotOutbound(
     runtimeId: string,
     delivery: NonNullable<MultiremiDaemonHeartbeatConfigAck["pending_feishu_outbound"]>,
+    signal: AbortSignal = this.pollAbort.signal,
   ): Promise<void> {
     const supervisor = this.feishuConcierge;
     try {
       if (!supervisor) throw new Error("Feishu concierge is unavailable");
-      const sent = await supervisor.sendOutbound(delivery);
-      await this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, {
-        claimToken: delivery.claimToken,
-        status: "sent",
-        externalMessageId: sent.messageId,
+      const resolveImage = createFeishuImageResolver({
+        allow: { local: delivery.bodyOrigin === "agent" },
+        loadAttachment: async (source) => responseToFeishuImage(
+          await this.client.fetchFeishuBotOutboundAttachment(
+            runtimeId,
+            delivery.id,
+            delivery.claimToken,
+            source.attachmentId,
+          ),
+          source.name,
+        ),
+        uploadImage: async (image) => (await supervisor.uploadImage(image.buffer)).imageKey,
+      });
+      const body = await rewriteMarkdownImages(delivery.body, resolveImage, {
+        publicUrl: this.options.serverUrl,
+      });
+      await deliverFeishuOutbound(delivery, {
+        signal,
+        prepareMention: openId => this.client.prepareFeishuBotOutboundMention(runtimeId, delivery.id, delivery.claimToken, openId),
+        send: options => supervisor.sendOutbound({ ...delivery, body }, options),
+        report: input => this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, input),
       });
     } catch (error) {
       await this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, {
         claimToken: delivery.claimToken,
         status: "failed",
         error: redactFeishuBotError(error),
+        retryable: !isPermanentFeishuDeliveryError(error),
       });
     }
   }
@@ -1494,12 +1596,13 @@ export class MultiremiDaemon {
     if (this.stopped || signal.aborted) throw new Error("Runtime model refresh cancelled");
     if (this.options.runtimeId === runtimeId && this.runtimeRegistrationGeneration === generation) {
       this.runtimeModelReportedGeneration = generation;
+      this.runtimeModelsReported = models;
     }
     return models;
   }
 
   private startRuntimeModelRefresh(): void {
-    if (!this.options.inProcessRuntimeModelDiscoveryEnabled || this.stopped) return;
+    if (!this.runtimeModelDiscoveryEnabled || this.stopped) return;
     if (this.runtimeModelRefreshTask) {
       this.wakeRuntimeModelRetry();
       return;
@@ -1524,7 +1627,14 @@ export class MultiremiDaemon {
   private async runRuntimeModelRefreshLoop(signal: AbortSignal): Promise<void> {
     let failureCount = 0;
     while (!this.stopped && !signal.aborted) {
-      if (this.runtimeModelReportedGeneration >= this.runtimeRegistrationGeneration) return;
+      if (this.runtimeModelReportedGeneration >= this.runtimeRegistrationGeneration
+        && this.runtimeModelsReported === this.runtimeModels
+        && Date.now() - this.runtimeModelsDiscoveredAt < this.options.runtimeModelRefreshIntervalMs) {
+        await this.waitForRuntimeModelRetry(
+          this.options.runtimeModelRefreshIntervalMs - (Date.now() - this.runtimeModelsDiscoveredAt), signal,
+        );
+        continue;
+      }
       const attemptGeneration = this.runtimeRegistrationGeneration;
       try {
         await this.refreshAndReportRuntimeModels(signal);
@@ -1532,7 +1642,7 @@ export class MultiremiDaemon {
         // The Runtime may have re-registered while the PUT was in flight. In that
         // case the generation was deliberately not marked and the cached catalog
         // is uploaded again immediately to the current Runtime.
-        if (this.runtimeModelReportedGeneration >= this.runtimeRegistrationGeneration) return;
+        // Remain alive for periodic refreshes; successful catalogs must not stay frozen forever.
       } catch (error) {
         if (this.stopped || signal.aborted) return;
         // A replacement Runtime should be attempted immediately. This also
@@ -1591,15 +1701,25 @@ export class MultiremiDaemon {
   }
 
   private async discoverRuntimeModels(force: boolean): Promise<MultiremiRuntimeModel[]> {
-    if (!this.options.inProcessRuntimeModelDiscoveryEnabled) {
+    if (!this.runtimeModelDiscoveryEnabled) {
       throw new Error(IN_PROCESS_RUNTIME_MODEL_DISCOVERY_DISABLED);
     }
-    if (!force && this.runtimeModels) return this.runtimeModels;
+    if (!force && this.runtimeModels
+      && Date.now() - this.runtimeModelsDiscoveredAt < this.options.runtimeModelRefreshIntervalMs) return this.runtimeModels;
     if (this.runtimeModelProbe) return this.runtimeModelProbe;
 
     const abort = new AbortController();
     this.runtimeModelProbeAbort = abort;
     const probe = (async () => {
+      if (!this.options.inProcessRuntimeModelDiscoveryEnabled) {
+        const capabilities = await probeRuntimeModels(await this.runtimeModelProbeProviderOptions(), {
+          signal: abort.signal, timeoutMs: RUNTIME_MODEL_PROBE_TIMEOUT_MS,
+        });
+        const models = runtimeModelsFromAcpCapabilities(this.options.provider, capabilities);
+        this.runtimeModels = models;
+        this.runtimeModelsDiscoveredAt = Date.now();
+        return models;
+      }
       const provider = this.providerFactory(await this.runtimeModelProbeProviderOptions());
       try {
         if (!provider.discoverModelCapabilities) {
@@ -1616,6 +1736,7 @@ export class MultiremiDaemon {
         }
         const models = runtimeModelsFromAcpCapabilities(this.options.provider, capabilities);
         this.runtimeModels = models;
+        this.runtimeModelsDiscoveredAt = Date.now();
         return models;
       } finally {
         await provider.close?.();
@@ -1684,8 +1805,8 @@ export class MultiremiDaemon {
     };
   }
 
-  private async handleRuntimeLocalSkillList(runtimeId: string, requestId: string): Promise<void> {
-    const root = localSkillRootForProvider(this.options.provider, this.localSkillRoots);
+  private async handleRuntimeLocalSkillList(runtimeId: string, requestId: string, requestedRoot?: string): Promise<void> {
+    const root = requestedRoot ?? localSkillRootForProvider(this.options.provider, this.localSkillRoots);
     if (!root) {
       await this.client.reportRuntimeLocalSkillListResult(runtimeId, requestId, {
         status: "completed",
@@ -1695,10 +1816,13 @@ export class MultiremiDaemon {
       return;
     }
     try {
+      const result = requestedRoot
+        ? await scanRuntimeSkillDirectory(this.options.provider, root)
+        : { skills: listRuntimeLocalSkills(this.options.provider, root) };
       await this.client.reportRuntimeLocalSkillListResult(runtimeId, requestId, {
         status: "completed",
         supported: true,
-        skills: listRuntimeLocalSkills(this.options.provider, root),
+        ...result,
       });
     } catch (err) {
       await this.client.reportRuntimeLocalSkillListResult(runtimeId, requestId, {
@@ -1737,8 +1861,8 @@ export class MultiremiDaemon {
     }
   }
 
-  private async handleRuntimeLocalSkillImport(runtimeId: string, requestId: string, skillKey: string): Promise<void> {
-    const root = localSkillRootForProvider(this.options.provider, this.localSkillRoots);
+  private async handleRuntimeLocalSkillImport(runtimeId: string, requestId: string, skillKey: string, requestedRoot?: string): Promise<void> {
+    const root = requestedRoot ?? localSkillRootForProvider(this.options.provider, this.localSkillRoots);
     if (!root) {
       await this.client.reportRuntimeLocalSkillImportResult(runtimeId, requestId, {
         status: "failed",
@@ -1749,7 +1873,7 @@ export class MultiremiDaemon {
     try {
       await this.client.reportRuntimeLocalSkillImportResult(runtimeId, requestId, {
         status: "completed",
-        skill: loadRuntimeLocalSkillBundle(this.options.provider, root, skillKey),
+        skill: loadRuntimeLocalSkillBundle(this.options.provider, root, skillKey, Boolean(requestedRoot)),
       });
     } catch (err) {
       await this.client.reportRuntimeLocalSkillImportResult(runtimeId, requestId, {
@@ -2463,22 +2587,24 @@ export class MultiremiDaemon {
 
     try {
       this.assertWorkspaceRootOwner();
-      if (task.issueId) {
+      if (task.issueId && !task.chatSessionId) {
         // Shared Issue roots and private discussion Session roots have separate
         // lifecycle keys, so each is protected from GC without serializing them
         // against one another.
         const lifecycleKey = task.holdsWorkspace === false
           ? discussionSessionLifecycleKey(task.issueSessionId ?? "")
           : task.issueId;
-        releaseIssueWorkspaceLifecycle = await this.issueWorkspaceLifecycleLocks.acquire(lifecycleKey);
-        this.assertWorkspaceRootOwner();
         if (!task.runtimeWorkspaceId && task.holdsWorkspace !== false && task.issue?.key) {
           const adopted = await this.topicWorkspaces.preparePendingMigrationForIssue(
             task.issueId,
             task.issue.key,
+            true,
           );
           if (adopted) log.info(`Adopted pending Feishu topic workspace for ${task.issue.key}`);
         }
+        releaseIssueWorkspaceLifecycle = await this.issueWorkspaceLifecycleLocks.acquireShared(lifecycleKey);
+        abort.signal.throwIfAborted();
+        this.assertWorkspaceRootOwner();
       }
       resolvedWorkDir = await this.resolveTaskWorkDir(task, abort.signal);
       const issueRuntimeStateRoot = resolveIssueRuntimeStateRoot(
@@ -2747,6 +2873,7 @@ export class MultiremiDaemon {
         const result = await this.repoCache.createWorktree({
           workspaceId: task.workspaceId,
           repoUrl: repo.url,
+          preferredRef: repo.defaultBranch,
           workDir: resolvedWorkDir.workDir,
           agentName: task.agent?.name ?? "agent",
           taskId: task.issue?.key || task.id,
@@ -2756,6 +2883,16 @@ export class MultiremiDaemon {
           signal,
           coAuthoredByEnabled: this.workspaceCoAuthoredByEnabled(task.workspaceId),
         });
+        if (result.preferredRefResolved === false) {
+          const message = `Configured default branch ${JSON.stringify(repo.defaultBranch)} could not be resolved; fell back to ${result.baseRef}`;
+          const previous = warnings.find((warning) => warning.repoUrl === repo.url);
+          upsertRepoWarning(warnings, {
+            repoUrl: repo.url,
+            kind: previous?.kind ?? "default_branch_fallback",
+            message: previous ? `${previous.message}; ${message}` : message,
+          });
+          log.warn(`Auto checkout of ${repo.url} for task ${task.id}: ${message}`);
+        }
         checkouts.push({ repoUrl: repo.url, path: result.path, branch: result.branchName, baseRef: result.baseRef });
         workspaceRepos.push({
           repoUrl: repo.url,
@@ -2763,6 +2900,7 @@ export class MultiremiDaemon {
           worktreePath: result.path,
           branchName: result.branchName,
           baseRef: result.baseRef,
+          baseCommit: result.baseCommit,
           status: "ready",
           dirty: false,
           error: null,
@@ -2805,7 +2943,7 @@ export class MultiremiDaemon {
     if (task.runtimeWorkspaceId || task.holdsWorkspace === false) return { checkouts: [], repos: [], warnings: [] };
     if (task.issue?.issueKind !== "intake") {
       const prepared = await this.autoCheckoutTaskRepos(task, resolvedWorkDir, syncResults, signal);
-      if (!resolvedWorkDir.localDirectory) {
+      if (!resolvedWorkDir.localDirectory && !task.issueSessionId) {
         await prepareIssueWikiWorkspace(resolvedWorkDir.workDir, task);
       }
       return prepared;
@@ -3156,7 +3294,11 @@ export class MultiremiDaemon {
       throw new Error(`Unsupported Bun Multiremi provider: ${agent.provider}`);
     }
 
-    const workDir = resolvedWorkDir.workDir;
+    const codeWorkDir = resolvedWorkDir.workDir;
+    // Private task metadata/skills, shared repositories referenced by absolute paths.
+    const workDir = !task.runtimeWorkspaceId && task.issueSessionId && providerHome
+      ? await prepareIssueExecutionDirectory(providerHome)
+      : codeWorkDir;
     // Only create dirs the daemon owns. local_directory paths are validated
     // separately and carry ensureDir=false.
     if (resolvedWorkDir.ensureDir) mkdirSync(workDir, { recursive: true });
@@ -3168,7 +3310,11 @@ export class MultiremiDaemon {
     const repoSyncResults = task.runtimeWorkspaceId || homepageChat || task.holdsWorkspace === false
       ? []
       : await this.registerTaskRepos(task.workspaceId, task.repos ?? [], signal);
-    const preparedWorkspace = await this.prepareTaskWorkspace(task, resolvedWorkDir, repoSyncResults, signal);
+    const preparedWorkspace = await this.issueWorkspaceLifecycleLocks.runExclusive(`prepare:${codeWorkDir}`, () =>
+      this.prepareTaskWorkspace(task, resolvedWorkDir, repoSyncResults, signal));
+    if (task.issueSessionId && task.holdsWorkspace !== false && !resolvedWorkDir.localDirectory) {
+      await prepareIssueWikiWorkspace(workDir, task);
+    }
     this.assertWorkspaceRootOwner();
     try {
       const contextDir = task.runtimeWorkspaceId ? providerHome?.root : workDir;
@@ -3257,9 +3403,14 @@ export class MultiremiDaemon {
 
     try {
       const session = new AgentSession(provider as any, config);
+      messageBatcher.push([{ type: "execution", meta: { agentName: agent.name, provider: config.agentType } }]);
       const promptArtifact = buildTaskPromptArtifact(task, {
         repoCheckouts: preparedWorkspace.checkouts,
         repoWarnings: preparedWorkspace.warnings,
+        issueWorkspacePath: codeWorkDir,
+        sessionHistoryPaths: task.issueId && this.options.workspacesRoot
+          ? listIssueSessionRuntimeRoots(this.options.workspacesRoot, task.issueId).map((root) => root.root)
+          : undefined,
       });
       this.enqueueTaskReport(task.id, "prompt", {
         mode: promptArtifact.mode,
@@ -3351,6 +3502,9 @@ export class MultiremiDaemon {
           if (graceTimer) clearTimeout(graceTimer);
         }
         const last = provider.getLastResponse?.() as AgentResponse | null | undefined;
+        if (last?.model) {
+          messageBatcher.push([{ type: "execution", meta: { provider: config.agentType, model: last.model, modelName: null } }]);
+        }
         finalSessionId = last?.sessionId ?? finalSessionId;
         usage = mergeTaskUsageEntries(usage, responseToUsage(agent.provider, last, config.model));
         // Resume by provider session id if the follow-up turn needs a fresh
@@ -3434,7 +3588,7 @@ export class MultiremiDaemon {
     } finally {
       messageBatcher?.close();
       steerFeed.stop();
-      await this.reportIssueWorkspaceAfterRun(task, workDir, preparedWorkspace.repos).catch((err) => {
+      await this.reportIssueWorkspaceAfterRun(task, codeWorkDir, preparedWorkspace.repos).catch((err) => {
         log.warn(`Failed to report final workspace state for ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
       });
       await provider.close?.();
@@ -3552,6 +3706,7 @@ export class MultiremiDaemon {
         repoUrl,
         workDir,
         ref: stringField(body.ref) ?? undefined,
+        preferredRef: stringField(body.preferred_ref ?? body.preferredRef) ?? undefined,
         agentName: stringField(body.agent_name ?? body.agentName) ?? "agent",
         taskId: stringField(body.task_id ?? body.taskId) ?? "task",
         signal: request.signal,

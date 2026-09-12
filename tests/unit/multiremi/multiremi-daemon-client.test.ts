@@ -32,6 +32,35 @@ afterEach(() => {
 });
 
 describe("MultiremiDaemonClient request deadlines", () => {
+  it.each(["default_branch", "defaultBranch"])("normalizes %s in task and intake repository claims", async (field) => {
+    const repos = [{ url: "https://example.test/repo.git", [field]: "workflow-dev" }];
+    globalThis.fetch = (async () => Response.json({ task: {
+      id: "tsk_default", workspace_id: "local", agent_id: "agt_default", prompt: "Inspect", repos,
+      project_contexts: [{ project: { id: "prj_default", title: "Default" }, resources: [], docs: [], repos }],
+    } })) as unknown as typeof fetch;
+    const task = await new MultiremiDaemonClient("https://remi.example", "daemon-token").claimTask("runtime-1");
+    expect(task?.repos).toEqual([{ url: "https://example.test/repo.git", defaultBranch: "workflow-dev" }]);
+    expect(task?.projectContexts[0]?.repos).toEqual(task?.repos);
+  });
+
+  it("reports complete baseline refs and commits to the workspace API", async () => {
+    let body: any;
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return Response.json({});
+    }) as typeof fetch;
+    const baseCommit = "a".repeat(40);
+    await new MultiremiDaemonClient("https://remi.example", "daemon-token").reportIssueWorkspace("tsk_default", {
+      runtimeId: "runtime-1", rootPath: "/work", branchName: "agent/MUL-278", status: "ready",
+      repos: [{
+        repoUrl: "https://example.test/repo.git", repoName: "repo", worktreePath: "/work/repo",
+        branchName: "agent/MUL-278", baseRef: "refs/remotes/origin/workflow-dev", baseCommit,
+        status: "ready", dirty: false, error: null,
+      }],
+    });
+    expect(body.repos[0]).toMatchObject({ base_ref: "refs/remotes/origin/workflow-dev", base_commit: baseCommit });
+  });
+
   it.each([
     ["GET", "/api/daemon/ssh-mesh/config?runtime_id=runtime-1", (client: MultiremiDaemonClient) => client.getSshMeshConfig("runtime-1")],
     ["POST", "/api/daemon/heartbeat", (client: MultiremiDaemonClient) => client.heartbeatRuntime("runtime-1")],
@@ -204,6 +233,49 @@ describe("MultiremiDaemonClient HTTP failures", () => {
 });
 
 describe("MultiremiDaemonClient daemon protocol", () => {
+  it("preserves the native CoT checkpoint and private-chat interaction recipient over heartbeat", async () => {
+    const presentation = { version: "native_cot_v1", startedAt: Date.now(), throughSeq: 7, interactions: {},
+      cot: { status: "active", cotId: "cot_recovered", messageId: "om_process" } };
+    globalThis.fetch = (async () => Response.json({ pending_feishu_outbound: {
+      id: "fbo_native", claim_token: "lease", task_id: "tsk_live", chat_id: "oc_private", body: "",
+      presentation, interaction_open_id: "ou_requester", mention: { mode: "none", resolvedOpenId: null },
+    } })) as unknown as typeof globalThis.fetch;
+    const client = new MultiremiDaemonClient("https://remi.example", "daemon-token");
+    expect((await client.heartbeatRuntime("runtime-1")).pending_feishu_outbound).toMatchObject({
+      taskId: "tsk_live", presentation, interactionOpenId: "ou_requester",
+    });
+  });
+  it("normalizes proactive Task identity and existing message checkpoints", async () => {
+    globalThis.fetch = (async () => Response.json({ pending_feishu_outbound: {
+      id: "fbo_stream", claim_token: "lease", task_id: "tsk_live", resume_message_id: "om_card",
+      chat_id: "oc_group", body: "", body_origin: "agent", idempotency_key: "fbo_stream",
+    } })) as unknown as typeof globalThis.fetch;
+    const client = new MultiremiDaemonClient("https://remi.example", "daemon-token");
+    expect((await client.heartbeatRuntime("runtime-1")).pending_feishu_outbound).toMatchObject({
+      taskId: "tsk_live", resumeMessageId: "om_card", bodyOrigin: "agent",
+    });
+  });
+
+  it("normalizes outbound body origin and defaults old-server payloads to Issue", async () => {
+    let bodyOrigin: string | undefined = "agent";
+    globalThis.fetch = (async () => Response.json({
+      status: "ok",
+      pending_feishu_outbound: {
+        id: "fbo_origin",
+        claim_token: "claim_origin",
+        chat_id: "oc_origin",
+        body: "done",
+        ...(bodyOrigin ? { body_origin: bodyOrigin } : {}),
+        idempotency_key: "fbo_origin",
+      },
+    })) as unknown as typeof globalThis.fetch;
+    const client = new MultiremiDaemonClient("https://remi.example", "daemon-token");
+
+    expect((await client.heartbeatRuntime("runtime-1")).pending_feishu_outbound?.bodyOrigin).toBe("agent");
+    bodyOrigin = undefined;
+    expect((await client.heartbeatRuntime("runtime-1")).pending_feishu_outbound?.bodyOrigin).toBe("issue");
+  });
+
   it("normalizes pending bound Issue updates from a task claim", async () => {
     globalThis.fetch = (async () => Response.json({
       task: {

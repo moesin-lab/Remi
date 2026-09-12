@@ -2,9 +2,11 @@
 // terminal-state fan-out into issues/sessions/autopilots), extracted verbatim from MultiremiStore
 // (the facade delegates every public method here).
 import { createHash } from "node:crypto";
+import { taskExecutionScope } from "@multiremi/contracts/task-execution.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { canonicalJson } from "@multiremi/agent-plugins/import.js";
 import {
+  ACTIVE_TASK_STATUSES,
   cleanOptionalString,
   daemonRuntimeId,
   isActiveTaskStatus,
@@ -26,7 +28,7 @@ import {
   autopilotTriggerObjectLabel,
   summarizeAutopilotOutcome,
 } from "@multiremi/store/autopilot-run-notification.js";
-import { normalizeWorkspaceRepositories } from "@multiremi/api/helpers/repositories.js";
+import { normalizeWorkspaceRepositories, workspaceDefaultBranchResolver } from "@multiremi/api/helpers/repositories.js";
 import { autopilotRunTriggerSummary } from "@multiremi/api/wire/autopilots.js";
 import { createLogger } from "@shared/logger.js";
 import type {
@@ -69,6 +71,8 @@ import { RuntimeWorkspacesRepo, RuntimeWorkspaceError } from "./runtime-workspac
 const log = createLogger("multiremi-store");
 
 type Row = Record<string, unknown>;
+
+const TASK_AUTOPILOT_LOOKUP_BATCH_SIZE = 500;
 
 const AUTO_RETRY_FAILURE_REASONS = new Set([
   "runtime_offline",
@@ -134,12 +138,31 @@ interface DelegationWakeupResult {
   task: MultiremiTask | null;
   created: boolean;
   covered: boolean;
+  createdTasks?: MultiremiTask[];
+}
+
+interface DelegationTerminalReport {
+  source: MultiremiTask;
+  sourceAgentName: string;
+  terminalStatus: "completed" | "failed" | "cancelled";
+  terminalBody: string | null;
+  requiredEventSeq: number;
+}
+
+interface DelegationReturnDrainResult {
+  createdTasks: MultiremiTask[];
+  taskBySourceId: Map<string, MultiremiTask>;
 }
 
 interface TaskTerminalFollowUps {
   retry: MultiremiTask | null;
-  delegationReturn: MultiremiTask | null;
+  delegationReturns: MultiremiTask[];
   roundPushTasks: MultiremiTask[];
+}
+
+export interface CancelTaskResult {
+  task: MultiremiTask;
+  followUps: TaskTerminalFollowUps;
 }
 
 export interface RedispatchTaskResult {
@@ -148,6 +171,17 @@ export interface RedispatchTaskResult {
 }
 
 class AgentPluginReadinessChangedError extends Error {}
+
+export interface ClaimTaskOptions {
+  supportsBinarySkillFiles?: boolean;
+}
+
+export class BinarySkillFilesUnsupportedError extends Error {
+  constructor(readonly agentId: string) {
+    super("Task skills contain binary files. Update the Remi daemon to support binary skill files before claiming this task.");
+    this.name = "BinarySkillFilesUnsupportedError";
+  }
+}
 
 /** Steer submitted for a task that already reached a terminal state — API contract: 409. */
 export class TaskSteerConflictError extends Error {}
@@ -158,6 +192,29 @@ export class TaskSteerConflictError extends Error {}
  * was accepted before the run ended would be silently stranded.
  */
 export class TaskSteerPendingError extends Error {}
+
+function executionScopeSql(alias: string): string {
+  return `(CASE WHEN ${alias}.delegated_by_agent_id IS NOT NULL
+    AND ${alias}.agent_id <> ${alias}.delegated_by_agent_id
+    THEN COALESCE(${alias}.delegation_id, '') ELSE '' END)`;
+}
+
+function sameExecutionLaneSql(queued: string, active: string): string {
+  return `((${queued}.runtime_workspace_id IS NOT NULL AND ${active}.runtime_workspace_id = ${queued}.runtime_workspace_id)
+    OR (${active}.agent_id = ${queued}.agent_id AND (
+    (${queued}.issue_session_id IS NOT NULL AND ${active}.issue_session_id = ${queued}.issue_session_id
+      AND ${executionScopeSql(queued)} = ${executionScopeSql(active)})
+    OR (${queued}.chat_session_id IS NOT NULL AND ${active}.chat_session_id = ${queued}.chat_session_id)
+    OR (${queued}.issue_id IS NOT NULL AND ${queued}.issue_session_id IS NULL
+      AND ${active}.issue_id = ${queued}.issue_id AND ${active}.issue_session_id IS NULL)
+  )))`;
+}
+
+function runtimeSupportsParallelExecution(runtime: MultiremiRuntime): boolean {
+  // Versionless runtimes are in-process integrations, as with Issue workspace support.
+  return runtime.metadata.parallel_agent_execution === 1
+    || !(runtime.metadata.cli_version ?? runtime.metadata.cliVersion);
+}
 
 function runtimeSupportsIssueWorkspaces(runtime: MultiremiRuntime): boolean {
   const rawVersion = runtime.metadata.cli_version ?? runtime.metadata.cliVersion;
@@ -194,6 +251,7 @@ export class TasksRepo {
                   AND active.issue_session_id = queued.issue_session_id THEN 'session'
                 WHEN queued.issue_id IS NOT NULL
                   AND queued.issue_session_id IS NULL
+                  AND queued.holds_workspace = 1
                   AND active.issue_id = queued.issue_id THEN 'legacy_issue'
                 ELSE 'issue_workspace'
               END AS blocker_reason
@@ -203,16 +261,7 @@ export class TasksRepo {
        LEFT JOIN multiremi_issue_sessions session ON session.id = active.issue_session_id
        WHERE queued.id = ?
          AND queued.status = 'queued'
-         AND (
-           (queued.issue_session_id IS NOT NULL AND active.issue_session_id = queued.issue_session_id)
-           OR (queued.issue_id IS NOT NULL AND queued.issue_session_id IS NULL AND active.issue_id = queued.issue_id)
-           OR (
-             queued.issue_id IS NOT NULL
-             AND queued.holds_workspace = 1
-             AND active.issue_id = queued.issue_id
-             AND active.holds_workspace = 1
-           )
-         )
+         AND ${sameExecutionLaneSql("queued", "active")}
        ORDER BY active.dispatched_at ASC, active.created_at ASC
        LIMIT 1`,
     ).get(taskId) as Row | null;
@@ -261,7 +310,9 @@ export class TasksRepo {
       }
       return this.ensureDelegationWakeupWithinWorkspaceLock(source, input);
     })();
-    if (result.created && result.task) this.ctx.notifyTaskEnqueued(result.task);
+    for (const task of result.createdTasks ?? (result.created && result.task ? [result.task] : [])) {
+      this.ctx.notifyTaskEnqueued(task);
+    }
     return result;
   }
 
@@ -349,7 +400,13 @@ export class TasksRepo {
     // Snapshot the lease decision on the Task. A Session setting may change
     // later, but an in-flight Task must keep the workspace ownership it was
     // created with. Historical Issue Tasks without a Session stay exclusive.
-    const holdsWorkspace = issueId ? (issueSession?.holdsWorkspace ?? true) : true;
+    const requestedHoldsWorkspace = input.holdsWorkspace ?? input.holds_workspace;
+    if (requestedHoldsWorkspace !== undefined && typeof requestedHoldsWorkspace !== "boolean") {
+      throw new Error("holds_workspace must be a boolean");
+    }
+    const holdsWorkspace = issueId
+      ? (requestedHoldsWorkspace ?? issueSession?.holdsWorkspace ?? true)
+      : true;
     let runtimeId = resolveOptionalStringField(input, "runtimeId", "runtime_id", agent.runtimeId);
     if (runtimeId && !this.ctx.runtimes().getRuntime(runtimeId)) throw new Error(`Runtime not found: ${runtimeId}`);
     // Pool scheduling: tasks stay unbound so any provider-matching runtime can
@@ -373,7 +430,7 @@ export class TasksRepo {
     const affinity = this.resolveTaskAffinity(
       agent,
       input.resetProviderSession ? null : chatSession,
-      runtimeWorkspaceId ? null : chatSession?.projectId ?? (issue?.issueKind !== "intake" ? issue?.projectId : null) ?? null,
+      runtimeWorkspaceId ? null : chatSession?.projectId ?? (holdsWorkspace && issue?.issueKind !== "intake" ? issue?.projectId : null) ?? null,
       expectedExecutionFingerprint,
       currentPluginSnapshot.length > 0,
     );
@@ -392,10 +449,11 @@ export class TasksRepo {
     // owns the ACP lineage. If a local-directory constraint points elsewhere,
     // or the provider/runtime drifted, abandon the cache atomically and cold
     // bootstrap from the canonical event log.
+    const executionScope = taskExecutionScope(input);
     let issueLane: MultiremiSessionAgentLane | null = null;
     let inheritIssueLane = false;
     if (issueSession) {
-      issueLane = this.ctx.issueSessions().getOrCreateSessionAgentLane(issueSession.id, agent.id);
+      issueLane = this.ctx.issueSessions().getOrCreateSessionAgentLane(issueSession.id, agent.id, executionScope);
       const laneRuntime = issueLane.runtimeId ? this.ctx.runtimes().getRuntime(issueLane.runtimeId) : null;
       const laneResumable =
         !input.resetProviderSession
@@ -414,8 +472,8 @@ export class TasksRepo {
         runtimeId = issueLane.runtimeId;
         inheritIssueLane = true;
       } else if (issueLane.providerSessionId || issueLane.cursorSeq > 0) {
-        this.resetSessionAgentLane(issueSession.id, agent.id);
-        issueLane = this.ctx.issueSessions().getOrCreateSessionAgentLane(issueSession.id, agent.id);
+        this.resetSessionAgentLane(issueSession.id, agent.id, executionScope);
+        issueLane = this.ctx.issueSessions().getOrCreateSessionAgentLane(issueSession.id, agent.id, executionScope);
       }
     }
 
@@ -528,6 +586,13 @@ export class TasksRepo {
         now,
       ],
     );
+    if (chatSession) {
+      const retryParent = attempt > 1 && parentTask?.chatSessionId === chatSession.id ? parentTask.id : null;
+      this.ctx.db.run(`UPDATE multiremi_tasks SET chat_queue_order = COALESCE(
+        (SELECT chat_queue_order FROM multiremi_tasks WHERE id = ?),
+        (SELECT COALESCE(MAX(chat_queue_order), 0) + 1 FROM multiremi_tasks WHERE chat_session_id = ?))
+        WHERE id = ?`, [retryParent, chatSession.id, id]);
+    }
     if (inheritedPluginSnapshot) this.replaceTaskPluginSnapshotIndex(id, inheritedPluginSnapshot, now);
     if (issueSession) {
       this.ctx.issueSessions().addSessionParticipant(issueSession.id, {
@@ -565,8 +630,8 @@ export class TasksRepo {
     return task;
   }
 
-  resetSessionAgentLane(sessionId: string, agentId: string): MultiremiSessionAgentLane | null {
-    const lane = this.ctx.issueSessions().getSessionAgentLane(sessionId, agentId);
+  resetSessionAgentLane(sessionId: string, agentId: string, executionScope = ""): MultiremiSessionAgentLane | null {
+    const lane = this.ctx.issueSessions().getSessionAgentLane(sessionId, agentId, executionScope);
     // A legacy task can predate lane creation, and an agent may already have
     // been archived as part of runtime teardown. In both cases there is no
     // resumable cache to clear, so terminal handling must remain a no-op.
@@ -582,10 +647,10 @@ export class TasksRepo {
            generation = generation + 1,
            last_task_id = NULL,
            updated_at = ?
-       WHERE session_id = ? AND agent_id = ?`,
-      [nowIso(), sessionId, agentId],
+       WHERE session_id = ? AND agent_id = ? AND execution_scope = ?`,
+      [nowIso(), sessionId, agentId, executionScope],
     );
-    return this.ctx.issueSessions().getSessionAgentLane(sessionId, agentId) ?? lane;
+    return this.ctx.issueSessions().getSessionAgentLane(sessionId, agentId, executionScope) ?? lane;
   }
 
   /**
@@ -694,8 +759,10 @@ export class TasksRepo {
     if (!task) return null;
     const issue = task.issueId ? this.ctx.issues().getIssue(task.issueId) : null;
     const chat = task.chatSessionId ? this.ctx.chat().getChatSession(task.chatSessionId) : null;
-    const projectId = task.runtimeWorkspaceId ? null : chat?.projectId ?? issue?.projectId ?? null;
-    const project = projectId ? this.ctx.projects().getProject(projectId) : null;
+    const scheduleTarget = task.autopilotRunId ? this.ctx.autopilots().getAutopilotRun(task.autopilotRunId)?.scheduleTarget : null;
+    const projectId = task.runtimeWorkspaceId ? null : chat?.projectId ?? issue?.projectId ?? (scheduleTarget?.kind === "project" ? scheduleTarget.id : null);
+    const candidateProject = projectId ? this.ctx.projects().getProject(projectId) : null;
+    const project = candidateProject?.workspaceId === task.workspaceId ? candidateProject : null;
     const projectResources = project ? this.ctx.projects().listProjectResources(project.id) : [];
     const projectContexts = !task.runtimeWorkspaceId && issue?.issueKind === "intake"
       ? this.resolveIntakeProjectContexts(task.workspaceId, project)
@@ -712,7 +779,7 @@ export class TasksRepo {
       // Homepage Chat discovers repositories through the database-backed CLI
       // directory and checks out only on explicit request. Never attach the
       // workspace repository catalog to its daemon claim as eager Git work.
-      repos: task.runtimeWorkspaceId || (task.chatSessionId && !task.issueId)
+      repos: task.runtimeWorkspaceId || scheduleTarget || task.holdsWorkspace === false || (task.chatSessionId && !task.issueId)
         ? []
         : projectContexts.length
           ? normalizeRepos(projectContexts.flatMap((context) => context.repos))
@@ -724,6 +791,7 @@ export class TasksRepo {
     workspaceId: string,
     selectedProject: MultiremiTaskProjectContext["project"] | null,
   ): MultiremiTaskProjectContext[] {
+    const defaultBranchFor = workspaceDefaultBranchResolver(this.ctx.workspaces().getWorkspace(workspaceId)?.repos ?? []);
     const projects = this.ctx.projects().listProjects(workspaceId);
     const byId = new Map(projects.map((project) => [project.id, project]));
     const roots = selectedProject ? [selectedProject] : projects.filter((project) => !project.archivedAt);
@@ -751,7 +819,7 @@ export class TasksRepo {
         project,
         resources,
         docs: this.ctx.projects().listProjectDocs(project.id),
-        repos: normalizeRepos(refs),
+        repos: normalizeRepos(refs, defaultBranchFor),
       };
     });
   }
@@ -776,6 +844,8 @@ export class TasksRepo {
   }
 
   private resolveTaskRepos(workspaceId: string, projectResources: MultiremiProjectResource[]): MultiremiRepoData[] {
+    const workspaceRepos = this.ctx.workspaces().getWorkspace(workspaceId)?.repos ?? [];
+    const defaultBranchFor = workspaceDefaultBranchResolver(workspaceRepos);
     const ownProjectId = projectResources[0]?.projectId ?? null;
     const refs: Record<string, unknown>[] = [];
     const visited = new Set<string>();
@@ -799,9 +869,9 @@ export class TasksRepo {
       }
     };
     collect(projectResources, 0);
-    const projectRepos = normalizeRepos(refs);
+    const projectRepos = normalizeRepos(refs, defaultBranchFor);
     if (projectRepos.length) return projectRepos;
-    return normalizeRepos(this.ctx.workspaces().getWorkspace(workspaceId)?.repos ?? []);
+    return normalizeRepos(workspaceRepos, defaultBranchFor);
   }
 
   listTasks(status?: MultiremiTaskStatus): MultiremiTask[] {
@@ -820,20 +890,28 @@ export class TasksRepo {
   }
 
   listWorkspaceAgentTaskSnapshot(workspaceId = "local"): MultiremiTask[] {
-    const tasks = this.listTasks().filter((task) => task.workspaceId === workspaceId);
-    const snapshot = new Map<string, MultiremiTask>();
-    for (const task of tasks) {
-      if (isActiveTaskStatus(task.status)) {
-        snapshot.set(task.id, task);
-      }
-    }
-    const latestOutcomeByAgent = new Map<string, MultiremiTask>();
-    for (const task of tasks.filter((item) => item.status === "completed" || item.status === "failed")) {
-      const current = latestOutcomeByAgent.get(task.agentId);
-      if (!current || outcomeTime(task) > outcomeTime(current)) latestOutcomeByAgent.set(task.agentId, task);
-    }
-    for (const task of latestOutcomeByAgent.values()) snapshot.set(task.id, task);
-    return [...snapshot.values()].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+    const activePlaceholders = ACTIVE_TASK_STATUSES.map(() => "?").join(", ");
+    const rows = this.ctx.db.query(
+      `WITH ranked_outcomes AS (
+         SELECT id,
+                ROW_NUMBER() OVER (
+                  PARTITION BY agent_id
+                  ORDER BY COALESCE(completed_at, failed_at, updated_at, created_at) DESC
+                ) AS outcome_rank
+         FROM multiremi_tasks
+         WHERE workspace_id = ? AND status IN ('completed', 'failed')
+       )
+       SELECT task.*
+       FROM multiremi_tasks task
+       WHERE task.workspace_id = ? AND task.status IN (${activePlaceholders})
+       UNION
+       SELECT task.*
+       FROM multiremi_tasks task
+       JOIN ranked_outcomes outcome ON outcome.id = task.id
+       WHERE outcome.outcome_rank = 1
+       ORDER BY updated_at DESC`,
+    ).all(workspaceId, workspaceId, ...ACTIVE_TASK_STATUSES) as Row[];
+    return this.withTaskAutopilotRuns(rows.map(toTask));
   }
 
   listWorkspaceAgentRunCounts(workspaceId = "local", days = 30): MultiremiAgentRunCount[] {
@@ -885,7 +963,8 @@ export class TasksRepo {
     });
   }
 
-  claimTask(runtimeId: string): MultiremiTaskWithAgent | null {
+  claimTask(runtimeId: string, options: ClaimTaskOptions = {}): MultiremiTaskWithAgent | null {
+    const excludedAgentIds = new Set<string>();
     const tx = this.ctx.db.transaction(() => {
       const runtime = this.ctx.runtimes().getRuntime(runtimeId);
       if (!runtime) throw new Error(`Runtime not found: ${runtimeId}`);
@@ -912,20 +991,42 @@ export class TasksRepo {
       // last in-flight Task finishing and the daemon claiming its update.
       if (this.ctx.runtimes().hasCliUpdateDrainForRuntime(runtimeId)) return null;
 
-      const stale = this.reclaimStaleDispatchedTaskForRuntime(runtimeId);
-      if (stale) return this.snapshotTaskExecution(stale, lockedRuntime);
-
-      const claimed = this.claimNextTaskForRuntime(lockedRuntime);
-      return claimed ? this.snapshotTaskExecution(claimed, lockedRuntime) : null;
+      const stale = this.reclaimStaleDispatchedTaskForRuntime(runtimeId, [...excludedAgentIds]);
+      if (!stale) this.refreshQueuedChatAffinity(lockedRuntime.workspaceId ?? "local");
+      const candidate = stale ?? this.claimNextTaskForRuntime(lockedRuntime, [...excludedAgentIds]);
+      if (!candidate) return null;
+      const task = this.snapshotTaskExecution(candidate, lockedRuntime);
+      // Check the actual hydrated payload, including both linked and legacy
+      // inline skills. Older daemons ignore encoding and would write base64
+      // as text. Unknown encodings also require the newer daemon's validator.
+      if (!options.supportsBinarySkillFiles && task.agent?.skills.some((skill) =>
+        skill.files?.some((file) => file.encoding !== undefined && file.encoding !== "utf8")
+      )) {
+        throw new BinarySkillFilesUnsupportedError(task.agentId);
+      }
+      return { task, dispatched: !stale };
     });
-    try {
-      return tx();
-    } catch (error) {
-      // A Plugin binding/version may change between the claim candidate SQL
-      // and the exact snapshot read under PostgreSQL READ COMMITTED. Rolling
-      // the transaction back leaves the task queued for the next reconcile.
-      if (error instanceof AgentPluginReadinessChangedError) return null;
-      throw error;
+    let unsupported: BinarySkillFilesUnsupportedError | null = null;
+    for (;;) {
+      let result: ReturnType<typeof tx>;
+      try {
+        result = tx();
+      } catch (error) {
+        // Roll back the candidate's dispatch and snapshot, then try another
+        // Agent so a binary Skill does not block later text-only tasks.
+        if (error instanceof BinarySkillFilesUnsupportedError && !excludedAgentIds.has(error.agentId)) {
+          excludedAgentIds.add(error.agentId);
+          unsupported = error;
+          continue;
+        }
+        // Plugin readiness drift leaves the task queued for the next reconcile.
+        if (error instanceof AgentPluginReadinessChangedError) return null;
+        throw error;
+      }
+      if (!result && unsupported) throw unsupported;
+      // Only publish a dispatch once the compatible claim has committed.
+      if (result?.dispatched) this.ctx.notifyTaskEvent("task:dispatch", result.task);
+      return result?.task ?? null;
     }
   }
 
@@ -959,7 +1060,7 @@ export class TasksRepo {
     // immutable snapshot. Never resolve mutable Agent bindings again.
     if (task.executionFingerprint) {
       const legacyGeneration = task.issueSessionId && task.issueSessionGeneration == null
-        ? this.ctx.issueSessions().getOrCreateSessionAgentLane(task.issueSessionId, task.agentId).generation
+        ? this.ctx.issueSessions().getOrCreateSessionAgentLane(task.issueSessionId, task.agentId, taskExecutionScope(task)).generation
         : null;
       if ((provider && !task.provider) || legacyGeneration != null) {
         this.ctx.db.run(
@@ -996,7 +1097,7 @@ export class TasksRepo {
       );
     } else if (task.issueSessionId) {
       issueSessionId = task.issueSessionId;
-      let lane = this.ctx.issueSessions().getOrCreateSessionAgentLane(task.issueSessionId, task.agentId);
+      let lane = this.ctx.issueSessions().getOrCreateSessionAgentLane(task.issueSessionId, task.agentId, taskExecutionScope(task));
       const laneRuntime = lane.runtimeId ? this.ctx.runtimes().getRuntime(lane.runtimeId) : null;
       const laneResumable =
         !!lane.providerSessionId
@@ -1014,7 +1115,7 @@ export class TasksRepo {
         issueWorkDir = lane.workDir;
       } else {
         if (lane.providerSessionId || lane.cursorSeq > 0) {
-          lane = this.resetSessionAgentLane(task.issueSessionId, task.agentId) ?? lane;
+          lane = this.resetSessionAgentLane(task.issueSessionId, task.agentId, taskExecutionScope(task)) ?? lane;
         }
         issueProviderSessionId = null;
         issueWorkDir = null;
@@ -1148,11 +1249,13 @@ export class TasksRepo {
       && !task.agent.archivedAt
       && this.ctx.runtimes().runtimeCanRunAgent(runtime, task.agent)
       && this.runtimeHasReadyTaskPlugins(runtime, task)
-      && (!task.issueId || runtimeSupportsIssueWorkspaces(runtime))
-      && this.runtimePassesProjectDeviceRouting(runtime, task.id);
+      && (!task.issueId || !task.holdsWorkspace || runtimeSupportsIssueWorkspaces(runtime))
+      && (!task.issueId || runtimeSupportsParallelExecution(runtime))
+      && ((!task.holdsWorkspace && !(task.chatSessionId && this.ctx.chat().getChatSession(task.chatSessionId)?.projectId))
+        || this.runtimePassesProjectDeviceRouting(runtime, task.id));
   }
 
-  private reclaimStaleDispatchedTaskForRuntime(runtimeId: string): MultiremiTaskWithAgent | null {
+  private reclaimStaleDispatchedTaskForRuntime(runtimeId: string, excludedAgentIds: string[] = []): MultiremiTaskWithAgent | null {
     const cutoff = new Date(Date.now() - CLAIM_RESPONSE_RECOVERY_MS).toISOString();
     const now = nowIso();
     const row = this.ctx.db.query(
@@ -1166,13 +1269,14 @@ export class TasksRepo {
            AND started_at IS NULL
            AND dispatched_at IS NOT NULL
            AND dispatched_at < ?
+           ${excludedAgentIds.length ? `AND agent_id NOT IN (${excludedAgentIds.map(() => "?").join(", ")})` : ""}
          ORDER BY priority DESC, dispatched_at ASC
          LIMIT 1
        )
        AND status = 'dispatched'
        AND started_at IS NULL
        RETURNING *`,
-    ).get(now, now, runtimeId, cutoff) as Row | null;
+    ).get(now, now, runtimeId, cutoff, ...excludedAgentIds) as Row | null;
     if (!row) return null;
     const task = this.getTaskWithAgent(String(row.id));
     // The re-claim above matches only on runtime_id, so a task whose agent or
@@ -1221,7 +1325,39 @@ export class TasksRepo {
     return task;
   }
 
-  private claimNextTaskForRuntime(runtime: MultiremiRuntime): MultiremiTaskWithAgent | null {
+  /** Queued user turns inherit the last completed turn at claim time. Retries
+   * (attempt > 1) keep their explicitly chosen resume/reset behavior. */
+  private refreshQueuedChatAffinity(workspaceId: string): void {
+    const rows = this.ctx.db.query(`SELECT t.id FROM multiremi_tasks t WHERE t.workspace_id = ?
+      AND t.chat_session_id IS NOT NULL AND t.status = 'queued' AND t.execution_fingerprint IS NULL AND t.attempt = 1
+      AND EXISTS (SELECT 1 FROM multiremi_chat_messages m WHERE m.task_id = t.id AND m.role = 'user')`).all(workspaceId) as Row[];
+    for (const row of rows) {
+      const task = this.getTask(String(row.id))!;
+      const chat = this.ctx.chat().getChatSession(task.chatSessionId!);
+      const agent = this.ctx.agents().getAgent(task.agentId);
+      if (!chat || !agent || chat.status === "archived" || agent.archivedAt) continue;
+      const plugins = this.ctx.agentPlugins().resolveAgentPluginSnapshot(agent.id);
+      const fingerprint = this.ctx.agentPlugins().getAgentPluginCapabilityRevision(agent.id);
+      const issue = task.issueId ? this.ctx.issues().getIssue(task.issueId) : null;
+      const projectId = task.runtimeWorkspaceId ? null : chat.projectId ?? (task.holdsWorkspace && issue?.issueKind !== "intake" ? issue?.projectId : null) ?? null;
+      const affinity = this.resolveTaskAffinity(agent, chat, projectId, fingerprint, plugins.length > 0);
+      let runtimeId = affinity.runtimeId ?? (task.sessionId ? agent.runtimeId : task.runtimeId);
+      let inherit = affinity.inheritChatSession;
+      if (task.runtimeWorkspaceId && runtimeId) {
+        const workspace = new RuntimeWorkspacesRepo(this.ctx).require(task.runtimeWorkspaceId, task.workspaceId);
+        if (this.ctx.runtimes().getRuntime(runtimeId)?.daemonId !== workspace.daemonId) {
+          runtimeId = null;
+          inherit = false;
+        }
+      }
+      if (task.runtimeId === runtimeId && task.sessionId === (inherit ? chat.sessionId : null) && task.workDir === (inherit ? chat.workDir : null)) continue;
+      this.ctx.db.run(`UPDATE multiremi_tasks SET runtime_id = ?, session_id = ?, work_dir = ?
+        WHERE id = ? AND status = 'queued' AND execution_fingerprint IS NULL`,
+        [runtimeId, inherit ? chat.sessionId : null, inherit ? chat.workDir : null, task.id]);
+    }
+  }
+
+  private claimNextTaskForRuntime(runtime: MultiremiRuntime, excludedAgentIds: string[] = []): MultiremiTaskWithAgent | null {
     const now = nowIso();
     const deviceRouting = this.runtimeDeviceRoutingContext(runtime);
     // Always constrain by workspace, COALESCE(...,'local') so a runtime with
@@ -1239,6 +1375,7 @@ export class TasksRepo {
       runtime.maxConcurrency,
       runtime.workspaceId ?? "local",
       runtimeSupportsIssueWorkspaces(runtime) ? 1 : 0,
+      runtimeSupportsParallelExecution(runtime) ? 1 : 0,
       runtime.metadata.runtime_workspaces === 1 ? 1 : 0,
       runtime.daemonId ?? "",
       ...daemonAliases,
@@ -1253,6 +1390,7 @@ export class TasksRepo {
       runtime.ownerId,
       runtime.id,
       runtime.id,
+      ...excludedAgentIds,
     ];
     // Ownership guard: a private runtime only executes its owner's agents — a
     // claim hands the runtime the agent's custom_env / mcp_config. Owner match
@@ -1270,10 +1408,20 @@ export class TasksRepo {
          SELECT t.id
          FROM multiremi_tasks t
          JOIN multiremi_agents a ON a.id = t.agent_id
-         LEFT JOIN multiremi_issues project_issue ON project_issue.id = t.issue_id
          LEFT JOIN multiremi_chat_sessions project_chat ON project_chat.id = t.chat_session_id
+         LEFT JOIN multiremi_issues project_issue ON project_issue.id = t.issue_id
          WHERE t.status = 'queued'
            AND a.archived_at IS NULL
+           AND (t.chat_session_id IS NULL OR project_chat.status = 'active')
+           AND NOT EXISTS (
+             SELECT 1 FROM multiremi_tasks earlier WHERE earlier.chat_session_id = t.chat_session_id
+               AND earlier.status = 'queued' AND (
+                 earlier.priority > t.priority
+                 OR (earlier.priority = t.priority AND earlier.chat_queue_order < t.chat_queue_order)
+                 OR (earlier.priority = t.priority AND earlier.chat_queue_order = t.chat_queue_order AND earlier.created_at < t.created_at)
+                 OR (earlier.priority = t.priority AND earlier.chat_queue_order = t.chat_queue_order AND earlier.created_at = t.created_at AND earlier.id < t.id)
+               )
+           )
            AND a.workspace_id = t.workspace_id
            AND (
              SELECT COUNT(*)
@@ -1282,6 +1430,7 @@ export class TasksRepo {
                AND runtime_active.status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
            ) < ?
            ${workspaceFilter}
+           AND (t.issue_id IS NULL OR t.holds_workspace = 0 OR ? = 1)
            AND (t.issue_id IS NULL OR ? = 1)
            AND (t.runtime_workspace_id IS NULL OR (? = 1 AND EXISTS (
              SELECT 1 FROM multiremi_runtime_workspaces rw
@@ -1290,6 +1439,7 @@ export class TasksRepo {
            )))
            AND (
              t.runtime_workspace_id IS NOT NULL OR t.issue_id IS NULL
+             OR t.holds_workspace = 0
              OR NOT EXISTS (
                SELECT 1 FROM multiremi_issue_workspaces issue_workspace
                WHERE issue_workspace.issue_id = t.issue_id
@@ -1308,7 +1458,7 @@ export class TasksRepo {
                  )
              )
            )
-           AND ${PROJECT_DEVICE_ROUTING_ELIGIBILITY_SQL}
+           AND ((t.holds_workspace = 0 AND project_chat.project_id IS NULL) OR ${PROJECT_DEVICE_ROUTING_ELIGIBILITY_SQL})
            AND (t.runtime_id IS NULL OR t.runtime_id = ?)
            AND (a.runtime_id IS NULL OR a.runtime_id = ?)
            AND (? = 'any' OR a.provider = ?)
@@ -1366,28 +1516,9 @@ export class TasksRepo {
            AND NOT EXISTS (
              SELECT 1 FROM multiremi_tasks active
              WHERE active.status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
-               AND (
-                 (t.runtime_workspace_id IS NOT NULL AND active.runtime_workspace_id = t.runtime_workspace_id)
-                 OR
-                 (t.issue_session_id IS NOT NULL AND active.issue_session_id = t.issue_session_id)
-                 OR (t.issue_id IS NOT NULL AND t.issue_session_id IS NULL AND active.issue_id = t.issue_id)
-                 OR (
-                   t.issue_id IS NOT NULL
-                   AND t.holds_workspace = 1
-                   AND active.issue_id = t.issue_id
-                   AND active.holds_workspace = 1
-                 )
-                 OR (active.agent_id = t.agent_id AND t.chat_session_id IS NOT NULL AND active.chat_session_id = t.chat_session_id)
-                 OR (
-                   active.agent_id = t.agent_id
-                   AND
-                   t.issue_id IS NULL
-                   AND t.chat_session_id IS NULL
-                   AND active.issue_id IS NULL
-                   AND active.chat_session_id IS NULL
-                 )
-               )
+               AND ${sameExecutionLaneSql("t", "active")}
            )
+           ${excludedAgentIds.length ? `AND t.agent_id NOT IN (${excludedAgentIds.map(() => "?").join(", ")})` : ""}
          ORDER BY t.priority DESC, t.created_at ASC
          LIMIT 1
        )
@@ -1396,9 +1527,7 @@ export class TasksRepo {
     ).get(...params) as Row | null;
     if (!row) return null;
 
-    const task = this.getTaskWithAgent(String(row.id));
-    if (task) this.ctx.notifyTaskEvent("task:dispatch", task);
-    return task;
+    return this.getTaskWithAgent(String(row.id));
   }
 
   startTask(taskId: string): MultiremiTask {
@@ -1412,7 +1541,7 @@ export class TasksRepo {
       );
       if (result.changes === 0) throw new Error(`Task not found or not dispatched: ${taskId}`);
       const started = this.getTask(taskId)!;
-      this.syncIssueStatusFromTaskWithinTransaction(started, "in_progress");
+      this.syncIssueStatusFromTaskWithinTransaction(started, "in_progress", { rederive: true });
       return started;
     })();
     this.ctx.notifyTaskEvent("task:running", task);
@@ -1480,7 +1609,7 @@ export class TasksRepo {
       );
       if (transition.changes > 0) {
         transitionedTask = this.getTask(input.taskId);
-        if (transitionedTask) this.syncIssueStatusFromTaskWithinTransaction(transitionedTask, "in_review");
+        if (transitionedTask) this.syncIssueStatusFromTaskWithinTransaction(transitionedTask, "in_review", { rederive: true });
       }
       return this.getTaskHumanRequest(id)!;
     })();
@@ -1557,7 +1686,7 @@ export class TasksRepo {
     if (result.changes > 0) {
       const task = this.getTask(taskId);
       if (task) {
-        this.syncIssueStatusFromTaskWithinTransaction(task, "in_progress");
+        this.syncIssueStatusFromTaskWithinTransaction(task, "in_progress", { rederive: true });
         return task;
       }
     }
@@ -1874,7 +2003,9 @@ export class TasksRepo {
     })();
     const task = terminal.task;
     this.postAgentReplyComment(task, input.output);
-    if (terminal.followUps.delegationReturn) this.ctx.notifyTaskEnqueued(terminal.followUps.delegationReturn);
+    for (const delegationReturn of terminal.followUps.delegationReturns) {
+      this.ctx.notifyTaskEnqueued(delegationReturn);
+    }
     for (const roundPushTask of terminal.followUps.roundPushTasks) this.ctx.notifyTaskEnqueued(roundPushTask);
     this.ctx.notifyTaskEvent("task:completed", task);
     return task;
@@ -1924,24 +2055,29 @@ export class TasksRepo {
       this.postContextOverflowSystemComment(terminal.task);
     }
     if (terminal.followUps.retry) this.ctx.notifyTaskEnqueued(terminal.followUps.retry);
-    if (terminal.followUps.delegationReturn) this.ctx.notifyTaskEnqueued(terminal.followUps.delegationReturn);
+    for (const delegationReturn of terminal.followUps.delegationReturns) {
+      this.ctx.notifyTaskEnqueued(delegationReturn);
+    }
     const task = terminal.task;
     this.ctx.notifyTaskEvent("task:failed", task);
     return task;
   }
 
   cancelTask(taskId: string): MultiremiTask {
-    const initial = this.getTask(taskId);
-    if (!initial) throw new Error(`Task not found or terminal: ${taskId}`);
-    const terminal = this.ctx.db.transaction(() => {
-      this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
-      const current = this.getTask(taskId);
-      if (!current || current.workspaceId !== initial.workspaceId) throw new Error(`Task not found or terminal: ${taskId}`);
-      this.lockTaskIssueSessionsWithinWorkspaceLock([current]);
-      return this.cancelTaskWithinWorkspaceLock(current);
-    })();
+    const terminal = this.ctx.db.transaction(() => this.cancelTaskWithinTransaction(taskId))();
     this.notifyCancelledTask(terminal);
     return terminal.task;
+  }
+
+  /** Caller commits before invoking notifyCancelledTask. */
+  cancelTaskWithinTransaction(taskId: string): CancelTaskResult {
+    const initial = this.getTask(taskId);
+    if (!initial) throw new Error(`Task not found or terminal: ${taskId}`);
+    this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
+    const current = this.getTask(taskId);
+    if (!current || current.workspaceId !== initial.workspaceId) throw new Error(`Task not found or terminal: ${taskId}`);
+    this.lockTaskIssueSessionsWithinWorkspaceLock([current]);
+    return this.cancelTaskWithinWorkspaceLock(current);
   }
 
   /** Caller owns the outer transaction; notifications are deferred until it commits. */
@@ -1964,6 +2100,7 @@ export class TasksRepo {
       issueId: current.issueId,
       issueSessionId: current.issueSessionId,
       chatSessionId: current.chatSessionId,
+      holdsWorkspace: current.holdsWorkspace,
       triggerCommentId: current.triggerCommentId,
       triggerSummary: current.triggerSummary,
       workspaceId: current.workspaceId,
@@ -2005,6 +2142,10 @@ export class TasksRepo {
          WHERE workspace_id = ?
            AND trigger_comment_id IN (${placeholders})
            AND status NOT IN ('completed', 'failed', 'cancelled')
+           AND NOT EXISTS (
+             SELECT 1 FROM multiremi_tasks delegation_source
+             WHERE delegation_source.delegation_return_task_id = multiremi_tasks.id
+           )
          ORDER BY created_at ASC, id ASC`,
       ).all(workspaceId, ...uniqueCommentIds) as Row[];
       const tasks = rows.map(toTask);
@@ -2082,7 +2223,7 @@ export class TasksRepo {
       for (const task of failedTasks) {
         const followUps = this.afterTaskTerminal(task, "failed", task.error, true);
         if (followUps.retry) retries.push(followUps.retry);
-        if (followUps.delegationReturn) delegationReturns.push(followUps.delegationReturn);
+        delegationReturns.push(...followUps.delegationReturns);
       }
       return { failedTasks, retries, delegationReturns };
     })();
@@ -2149,6 +2290,7 @@ export class TasksRepo {
       issueId: parent.issueId,
       issueSessionId: parent.issueSessionId,
       chatSessionId: parent.chatSessionId,
+      holdsWorkspace: parent.holdsWorkspace,
       triggerCommentId: parent.triggerCommentId,
       triggerSummary: parent.triggerSummary,
       workspaceId: parent.workspaceId,
@@ -2237,23 +2379,53 @@ export class TasksRepo {
     const delegatedByAgentId = source.delegatedByAgentId;
     const hasDelegationId = Boolean(delegationId);
     const hasDelegator = Boolean(delegatedByAgentId);
+    const terminalStatus = input.terminalStatus ?? null;
+    const drainTerminalReturns = (): DelegationWakeupResult => {
+      if (!source.issueSessionId || !terminalStatus) {
+        return { task: null, created: false, covered: false };
+      }
+      const drained = this.drainDelegationReturnsWithinWorkspaceLock(source.issueSessionId, {
+        source,
+        terminalStatus,
+        terminalBody: input.terminalBody ?? null,
+        requiredEventSeq,
+      });
+      const task = drained.taskBySourceId.get(source.id) ?? null;
+      const created = task != null && drained.createdTasks.some((candidate) => candidate.id === task.id);
+      return {
+        task,
+        created,
+        covered: task != null && !created,
+        createdTasks: drained.createdTasks,
+      };
+    };
     if (!hasDelegationId && !hasDelegator) {
-      return { task: null, created: false, covered: false };
+      return terminalStatus ? drainTerminalReturns() : { task: null, created: false, covered: false };
+    }
+    if (source.agentId === source.delegatedByAgentId) {
+      return terminalStatus ? drainTerminalReturns() : { task: null, created: false, covered: false };
     }
     if (
       !source.issueId ||
       !source.issueSessionId ||
       !hasDelegationId ||
-      !hasDelegator ||
-      source.agentId === source.delegatedByAgentId
+      !hasDelegator
     ) {
       this.recordDelegationReturnSkipped(source, input, requiredEventSeq, "no_lineage");
-      return { task: null, created: false, covered: false };
+      return terminalStatus ? drainTerminalReturns() : { task: null, created: false, covered: false };
+    }
+    if (terminalStatus && source.delegationReturnTaskId) {
+      const returnTask = this.getTask(source.delegationReturnTaskId);
+      this.recordDelegationReturnSkipped(source, input, requiredEventSeq, "already_covered", {
+        returnTaskId: source.delegationReturnTaskId,
+      });
+      return { task: returnTask, created: false, covered: true };
     }
 
     const delegator = this.ctx.agents().getAgent(delegatedByAgentId!);
     if (!delegator || delegator.archivedAt || delegator.workspaceId !== source.workspaceId) {
       log.warn(`delegation ${source.delegationId} cannot return to unavailable agent ${source.delegatedByAgentId}`);
+      if (terminalStatus) return drainTerminalReturns();
       this.recordDelegationReturnSkipped(source, input, requiredEventSeq, "delegator_unavailable");
       return { task: null, created: false, covered: false };
     }
@@ -2265,6 +2437,8 @@ export class TasksRepo {
       "UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?",
       [source.issueSessionId],
     );
+    if (terminalStatus) return drainTerminalReturns();
+
     const lane = this.ctx.issueSessions().getOrCreateSessionAgentLane(source.issueSessionId, delegator.id);
     if (lane.cursorSeq >= requiredEventSeq) {
       this.recordDelegationReturnSkipped(source, input, requiredEventSeq, "already_covered", {
@@ -2282,43 +2456,10 @@ export class TasksRepo {
       const candidate = toTask(row);
       const projectedThrough = candidate.projectionToSeq;
       if (isActiveTaskStatus(candidate.status) && projectedThrough == null) {
-        if (!input.terminalStatus) {
-          this.recordDelegationReturnSkipped(source, input, requiredEventSeq, "already_covered", {
-            returnTaskId: candidate.id,
-          });
-          return { task: candidate, created: false, covered: true };
-        }
-        // An explicit @Leader may have queued this return before the child
-        // produced its final output. While the task is still queued and its
-        // prompt is unfrozen, enrich Current Request with that terminal report.
-        // Once dispatched, the daemon may already hold the old prompt, so a
-        // second Delta task is safer than pretending the output was covered.
-        if (candidate.status === "queued") {
-          const sourceAgent = this.ctx.agents().getAgent(source.agentId);
-          const updated = this.ctx.db.run(
-            `UPDATE multiremi_tasks
-             SET prompt = ?, trigger_comment_id = NULL, trigger_summary = NULL, updated_at = ?
-             WHERE id = ? AND status = 'queued' AND projection_to_seq IS NULL`,
-            [
-              delegationReturnPrompt({
-                sourceTaskId: source.id,
-                sourceAgentName: sourceAgent?.name ?? source.agentId,
-                terminalStatus: input.terminalStatus,
-                terminalBody: input.terminalBody ?? null,
-              }),
-              nowIso(),
-              candidate.id,
-            ],
-          );
-          if (updated.changes > 0) {
-            this.recordDelegationReturnSkipped(source, input, requiredEventSeq, "already_covered", {
-              returnTaskId: candidate.id,
-              terminalReportMerged: true,
-            });
-            return { task: this.getTask(candidate.id)!, created: false, covered: true };
-          }
-        }
-        continue;
+        this.recordDelegationReturnSkipped(source, input, requiredEventSeq, "already_covered", {
+          returnTaskId: candidate.id,
+        });
+        return { task: candidate, created: false, covered: true };
       }
       if (
         (isActiveTaskStatus(candidate.status) && projectedThrough != null && projectedThrough >= requiredEventSeq)
@@ -2343,8 +2484,8 @@ export class TasksRepo {
       prompt: delegationReturnPrompt({
         sourceTaskId: source.id,
         sourceAgentName: sourceAgent?.name ?? source.agentId,
-        terminalStatus: input.terminalStatus ?? null,
-        terminalBody: input.terminalBody ?? null,
+        terminalStatus: null,
+        terminalBody: null,
       }),
       delegationId: source.delegationId,
       delegatedByAgentId: delegator.id,
@@ -2364,17 +2505,267 @@ export class TasksRepo {
         delegatorAgentId: delegator.id,
         delegateAgentId: source.agentId,
         requiredEventSeq,
-        terminalStatus: input.terminalStatus ?? null,
+        terminalStatus: null,
+        coveredSourceTaskIds: [],
+        drained: false,
       },
     });
     return { task, created: true, covered: false };
+  }
+
+  /** Caller holds the workspace lifecycle lock and the Issue Session row lock. */
+  private drainDelegationReturnsWithinWorkspaceLock(
+    issueSessionId: string,
+    trigger: {
+      source: MultiremiTask;
+      terminalStatus: "completed" | "failed" | "cancelled";
+      terminalBody: string | null;
+      requiredEventSeq: number;
+    } | null,
+  ): DelegationReturnDrainResult {
+    this.ctx.db.run(
+      "UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?",
+      [issueSessionId],
+    );
+    const reportRows = this.ctx.db.query(
+      `SELECT task.*,
+              (SELECT MAX(event.seq)
+               FROM multiremi_session_events event
+               WHERE event.session_id = task.issue_session_id
+                 AND event.task_id = task.id
+                 AND event.kind IN ('task_completed', 'task_failed', 'task_cancelled')) AS terminal_event_seq
+       FROM multiremi_tasks task
+       WHERE task.issue_session_id = ?
+         AND task.status IN ('completed', 'failed', 'cancelled')
+         AND task.delegation_id IS NOT NULL
+         AND task.delegated_by_agent_id IS NOT NULL
+         AND task.agent_id <> task.delegated_by_agent_id
+         AND task.delegation_return_task_id IS NULL
+         AND EXISTS (
+           SELECT 1 FROM multiremi_session_events terminal_event
+           WHERE terminal_event.session_id = task.issue_session_id
+             AND terminal_event.task_id = task.id
+             AND terminal_event.kind IN ('task_completed', 'task_failed', 'task_cancelled')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM multiremi_tasks successor
+           WHERE successor.parent_task_id = task.id
+             AND successor.delegation_id = task.delegation_id
+             AND successor.agent_id = task.agent_id
+         )
+       ORDER BY task.completed_at ASC, task.created_at ASC, task.id ASC`,
+    ).all(issueSessionId) as Row[];
+    const reports = reportRows.map((row): DelegationTerminalReport => {
+      const source = toTask(row);
+      const isTrigger = trigger?.source.id === source.id;
+      const terminalStatus = isTrigger
+        ? trigger.terminalStatus
+        : source.status as DelegationTerminalReport["terminalStatus"];
+      return {
+        source,
+        sourceAgentName: this.ctx.agents().getAgent(source.agentId)?.name ?? source.agentId,
+        terminalStatus,
+        terminalBody: isTrigger
+          ? trigger.terminalBody
+          : terminalStatus === "completed"
+            ? source.result
+            : terminalStatus === "failed"
+              ? source.error
+              : null,
+        requiredEventSeq: isTrigger
+          ? trigger.requiredEventSeq
+          : Math.max(1, Number(row.terminal_event_seq ?? 1)),
+      };
+    });
+    if (!reports.length) return { createdTasks: [], taskBySourceId: new Map() };
+
+    const groups = new Map<string, DelegationTerminalReport[]>();
+    for (const report of reports) {
+      const delegatorId = report.source.delegatedByAgentId!;
+      const group = groups.get(delegatorId) ?? [];
+      group.push(report);
+      groups.set(delegatorId, group);
+    }
+
+    const createdTasks: MultiremiTask[] = [];
+    const taskBySourceId = new Map<string, MultiremiTask>();
+    for (const [delegatorId, group] of groups) {
+      const delegator = this.ctx.agents().getAgent(delegatorId);
+      const triggerReport = group.find((report) => report.source.id === trigger?.source.id) ?? null;
+      if (!delegator || delegator.archivedAt || delegator.workspaceId !== group[0]!.source.workspaceId) {
+        if (triggerReport) {
+          this.recordDelegationReturnSkipped(
+            triggerReport.source,
+            delegationWakeupInputForReport(triggerReport),
+            triggerReport.requiredEventSeq,
+            "delegator_unavailable",
+          );
+        }
+        continue;
+      }
+
+      const unresolved: DelegationTerminalReport[] = [];
+      let exactQueuedCandidate: MultiremiTask | null = null;
+      for (const report of group) {
+        const rows = this.ctx.db.query(
+          `SELECT * FROM multiremi_tasks
+           WHERE delegation_id = ? AND agent_id = ? AND issue_session_id = ?
+           ORDER BY created_at DESC`,
+        ).all(report.source.delegationId, delegatorId, issueSessionId) as Row[];
+        let coveredBy: MultiremiTask | null = null;
+        for (const row of rows) {
+          const candidate = toTask(row);
+          if (candidate.status === "queued" && candidate.projectionToSeq == null) {
+            exactQueuedCandidate ??= candidate;
+            break;
+          }
+          const projectedThrough = candidate.projectionToSeq;
+          if (
+            projectedThrough != null
+            && projectedThrough >= report.requiredEventSeq
+            && (isActiveTaskStatus(candidate.status) || candidate.status === "completed")
+          ) {
+            coveredBy = candidate;
+            break;
+          }
+        }
+        if (!coveredBy) {
+          unresolved.push(report);
+          continue;
+        }
+        this.stampDelegationReports([report], coveredBy.id);
+        taskBySourceId.set(report.source.id, coveredBy);
+        this.recordDelegationReturnSkipped(
+          report.source,
+          delegationWakeupInputForReport(report),
+          report.requiredEventSeq,
+          "already_covered",
+          { returnTaskId: coveredBy.id, projectionToSeq: coveredBy.projectionToSeq },
+        );
+      }
+      if (!unresolved.length) continue;
+
+      const queuedCandidate = exactQueuedCandidate ?? this.findQueuedTaskForDelegationReturn(
+        delegatorId,
+        issueSessionId,
+      );
+      if (queuedCandidate) {
+        const returnTask = isDelegationReturnTask(queuedCandidate);
+        const guarded = returnTask
+          ? this.ctx.db.run(
+              `UPDATE multiremi_tasks
+               SET prompt = ?, updated_at = ?
+               WHERE id = ? AND status = 'queued' AND projection_to_seq IS NULL`,
+              [appendDelegationTerminalReports(queuedCandidate.prompt, unresolved), nowIso(), queuedCandidate.id],
+            )
+          : this.ctx.db.run(
+              `UPDATE multiremi_tasks
+               SET updated_at = updated_at
+               WHERE id = ? AND status = 'queued' AND projection_to_seq IS NULL`,
+              [queuedCandidate.id],
+            );
+        if (guarded.changes > 0) {
+          const coveredTask = this.getTask(queuedCandidate.id)!;
+          this.stampDelegationReports(unresolved, coveredTask.id);
+          const coveredSourceTaskIds = unresolved.map((report) => report.source.id);
+          for (const report of unresolved) {
+            taskBySourceId.set(report.source.id, coveredTask);
+            const sameDelegation = report.source.delegationId === coveredTask.delegationId;
+            this.recordDelegationReturnSkipped(
+              report.source,
+              delegationWakeupInputForReport(report),
+              report.requiredEventSeq,
+              returnTask
+                ? sameDelegation ? "already_covered" : "coalesced_into_pending_return"
+                : "covered_by_queued_task",
+              {
+                returnTaskId: coveredTask.id,
+                coveredSourceTaskIds,
+                ...(returnTask ? { terminalReportMerged: true } : {}),
+              },
+            );
+          }
+          continue;
+        }
+      }
+
+      const first = unresolved[0]!;
+      const task = this.createTaskWithinWorkspaceLock({
+        agentId: delegator.id,
+        issueId: first.source.issueId,
+        issueSessionId,
+        workspaceId: first.source.workspaceId,
+        priority: Math.max(...unresolved.map((report) => report.source.priority)),
+        prompt: delegationReturnPrompt({ reports: unresolved }),
+        delegationId: first.source.delegationId,
+        delegatedByAgentId: delegator.id,
+        parentTaskId: first.source.id,
+        assignmentAuthorType: "system",
+        assignmentAuthorId: null,
+      });
+      this.stampDelegationReports(unresolved, task.id);
+      const coveredSourceTaskIds = unresolved.map((report) => report.source.id);
+      for (const report of unresolved) taskBySourceId.set(report.source.id, task);
+      createdTasks.push(task);
+      this.ctx.appendIssueActivity(first.source.issueId!, {
+        actorType: "system",
+        actorId: null,
+        type: "delegation_return_triggered",
+        body: `Queued ${delegator.name} to review delegated teammate reports`,
+        data: {
+          delegationId: first.source.delegationId,
+          sourceTaskId: first.source.id,
+          returnTaskId: task.id,
+          delegatorAgentId: delegator.id,
+          delegateAgentId: first.source.agentId,
+          requiredEventSeq: Math.max(...unresolved.map((report) => report.requiredEventSeq)),
+          terminalStatus: first.terminalStatus,
+          coveredSourceTaskIds,
+          drained: triggerReport == null || group.length > 1,
+        },
+      });
+    }
+    return { createdTasks, taskBySourceId };
+  }
+
+  private findQueuedTaskForDelegationReturn(
+    delegatorId: string,
+    issueSessionId: string,
+  ): MultiremiTask | null {
+    const row = this.ctx.db.query(
+      `SELECT * FROM multiremi_tasks
+       WHERE agent_id = ? AND issue_session_id = ?
+         AND status = 'queued' AND projection_to_seq IS NULL
+         AND ${executionScopeSql("multiremi_tasks")} = ''
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+    ).get(delegatorId, issueSessionId) as Row | null;
+    return row ? toTask(row) : null;
+  }
+
+  private stampDelegationReports(reports: DelegationTerminalReport[], returnTaskId: string): void {
+    if (!reports.length) return;
+    const sourceTaskIds = reports.map((report) => report.source.id);
+    const placeholders = sourceTaskIds.map(() => "?").join(", ");
+    this.ctx.db.run(
+      `UPDATE multiremi_tasks
+       SET delegation_return_task_id = ?, updated_at = ?
+       WHERE id IN (${placeholders}) AND delegation_return_task_id IS NULL`,
+      [returnTaskId, nowIso(), ...sourceTaskIds],
+    );
   }
 
   private recordDelegationReturnSkipped(
     source: MultiremiTask,
     input: DelegationWakeupInput,
     requiredEventSeq: number,
-    reason: "no_lineage" | "delegator_unavailable" | "already_covered",
+    reason:
+      | "no_lineage"
+      | "delegator_unavailable"
+      | "already_covered"
+      | "coalesced_into_pending_return"
+      | "covered_by_queued_task"
+      | "deferred_lane_busy",
     details: Record<string, unknown> = {},
   ): void {
     if (!source.issueId) return;
@@ -2430,7 +2821,7 @@ export class TasksRepo {
     if (retry && task.chatSessionId) {
       this.ctx.feishuBot().retargetFeishuRoundPushTaskWithinTransaction(task.id, retry.id);
     }
-    let delegationReturn: MultiremiTask | null = null;
+    const delegationReturns: MultiremiTask[] = [];
     let roundPushTasks: MultiremiTask[] = [];
     this.ctx.accessTokens().revokeTaskAccessTokens(task.id);
     if (status === "completed" && task.chatSessionId) {
@@ -2442,12 +2833,16 @@ export class TasksRepo {
       const failureReason = status === "failed" ? task.failureReason : null;
       const elapsedMs = computeChatElapsedMs(task);
       const messageId = createId("msg");
-      this.ctx.db.run(
-        `INSERT INTO multiremi_chat_messages (
-          id, chat_session_id, task_id, role, body, failure_reason, elapsed_ms, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [messageId, task.chatSessionId, task.id, role, messageBody, failureReason, elapsedMs, now],
-      );
+      const message = this.ctx.chat().appendChatMessageWithinTransaction({
+        id: messageId,
+        chatSessionId: task.chatSessionId,
+        taskId: task.id,
+        role,
+        body: messageBody,
+        failureReason,
+        elapsedMs,
+        createdAt: now,
+      });
       // Promote the session ATOMICALLY as one unit — session_id together with
       // its machine (runtime) and engine (provider) — and ONLY when this task
       // actually produced a new session id. Otherwise a task that promotes but
@@ -2494,7 +2889,7 @@ export class TasksRepo {
           payload: {
             chat_session_id: task.chatSessionId,
             task_id: task.id,
-            message_id: messageId,
+            message_id: message.id,
             content: messageBody,
             elapsed_ms: elapsedMs,
             created_at: now,
@@ -2541,8 +2936,8 @@ export class TasksRepo {
         // resume-unsafe, which resets the lane then and falls back to a bounded bootstrap.
         if (status === "completed") this.promoteSessionAgentLane(task);
         else if (!retry && status !== "cancelled")
-          this.resetSessionAgentLane(task.issueSessionId, task.agentId);
-        if (!retry && !replacementPlanned) {
+          this.resetSessionAgentLane(task.issueSessionId, task.agentId, taskExecutionScope(task));
+        if (!replacementPlanned) {
           const wakeup = workspaceLockHeld
             ? this.ensureDelegationWakeupWithinWorkspaceLock(task, {
                 sourceTaskId: task.id,
@@ -2556,7 +2951,9 @@ export class TasksRepo {
                 terminalStatus: status,
                 terminalBody: body,
               });
-          if (wakeup.created) delegationReturn = wakeup.task;
+          delegationReturns.push(
+            ...(wakeup.createdTasks ?? (wakeup.created && wakeup.task ? [wakeup.task] : [])),
+          );
         }
       }
       // Compute status after the return task is present. Otherwise the child
@@ -2579,7 +2976,7 @@ export class TasksRepo {
         && !task.chatSessionId
         && issue
         && lead?.id === task.agentId
-        && !this.hasActiveTaskForIssue(issue.id, true)
+        && !this.hasActiveTaskForIssue(issue.id)
       ) {
         this.ctx.notificationChannels().queueAgentIssueUpdate({
           activityId: `leader-round:${task.id}`,
@@ -2696,7 +3093,7 @@ export class TasksRepo {
         }
       }
     }
-    return { retry, delegationReturn, roundPushTasks };
+    return { retry, delegationReturns, roundPushTasks };
   }
 
   /** Caller holds the task workspace lifecycle lock. */
@@ -2712,6 +3109,14 @@ export class TasksRepo {
       [now, now, now, current.id],
     );
     if (result.changes === 0) throw new Error(`Task not found or terminal: ${current.id}`);
+    if (current.projectionToSeq == null) {
+      this.ctx.db.run(
+        `UPDATE multiremi_tasks
+         SET delegation_return_task_id = NULL, updated_at = ?
+         WHERE delegation_return_task_id = ?`,
+        [now, current.id],
+      );
+    }
     const cancelled = this.getTask(current.id)!;
     return {
       task: cancelled,
@@ -2719,12 +3124,9 @@ export class TasksRepo {
     };
   }
 
-  private notifyCancelledTask(terminal: {
-    task: MultiremiTask;
-    followUps: TaskTerminalFollowUps;
-  }): void {
-    if (terminal.followUps.delegationReturn) {
-      this.ctx.notifyTaskEnqueued(terminal.followUps.delegationReturn);
+  notifyCancelledTask(terminal: CancelTaskResult): void {
+    for (const delegationReturn of terminal.followUps.delegationReturns) {
+      this.ctx.notifyTaskEnqueued(delegationReturn);
     }
     this.ctx.notifyTaskEvent("task:cancelled", terminal.task);
   }
@@ -2761,7 +3163,7 @@ export class TasksRepo {
     if (!task.issueSessionId || !task.sessionId || !task.runtimeId || !task.provider) return;
     const cursorSeq = Math.max(0, task.projectionToSeq ?? 0);
     const now = nowIso();
-    const lane = this.ctx.issueSessions().getOrCreateSessionAgentLane(task.issueSessionId, task.agentId);
+    const lane = this.ctx.issueSessions().getOrCreateSessionAgentLane(task.issueSessionId, task.agentId, taskExecutionScope(task));
     // The provider lineage and its cursor are one checkpoint. For a warm turn,
     // only the lineage used by the task may advance; for a cold turn the lane
     // must still be empty. This prevents a late completion from overwriting a
@@ -2776,7 +3178,7 @@ export class TasksRepo {
           cursor_seq = ?,
           last_task_id = ?,
           updated_at = ?
-      WHERE session_id = ? AND agent_id = ? AND generation = ?`;
+      WHERE session_id = ? AND agent_id = ? AND generation = ? AND execution_scope = ?`;
     const params = [
       task.sessionId,
       task.runtimeId,
@@ -2789,6 +3191,7 @@ export class TasksRepo {
       task.issueSessionId,
       task.agentId,
       task.issueSessionGeneration ?? lane.generation,
+      taskExecutionScope(task),
     ];
     // Keep the NULL comparison out of a placeholder expression: SQLite accepts
     // `? IS NULL`, while Postgres cannot infer that placeholder's data type.
@@ -2816,7 +3219,7 @@ export class TasksRepo {
       // tool), don't also post the accumulated transcript text: that double-posts
       // and the auto-reply is the lower-quality, narration-heavy version. The
       // auto-reply stays for direct assignments where the agent doesn't comment.
-      if (this.agentCommentedSince(task.issueId, task.agentId, task.dispatchedAt ?? task.startedAt ?? task.createdAt)) {
+      if (this.agentCommentedSince(task.issueId, task.agentId, task.dispatchedAt ?? task.startedAt ?? task.createdAt, task.id)) {
         return;
       }
       const parent = task.triggerCommentId ? this.ctx.issues().getIssueComment(task.triggerCommentId) : null;
@@ -2847,15 +3250,16 @@ export class TasksRepo {
     }
   }
 
-  private agentCommentedSince(issueId: string, agentId: string, since: string | null): boolean {
+  private agentCommentedSince(issueId: string, agentId: string, since: string | null, taskId: string): boolean {
     // Branch on `since` in JS rather than `(? IS NULL OR …)` in SQL: Postgres
     // cannot infer the type of a placeholder that only appears in IS NULL and
     // rejects the whole query ("could not determine data type of parameter").
     const base = `SELECT 1 AS present FROM multiremi_issue_comments
-       WHERE issue_id = ? AND author_type = 'agent' AND author_id = ? AND type = 'comment'`;
+       WHERE issue_id = ? AND author_type = 'agent' AND author_id = ? AND type = 'comment'
+         AND task_id = ?`;
     const row = (since == null
-      ? this.ctx.db.query(`${base} LIMIT 1`).get(issueId, agentId)
-      : this.ctx.db.query(`${base} AND created_at >= ? LIMIT 1`).get(issueId, agentId, since)) as { present: number } | null;
+      ? this.ctx.db.query(`${base} LIMIT 1`).get(issueId, agentId, taskId)
+      : this.ctx.db.query(`${base} AND created_at >= ? LIMIT 1`).get(issueId, agentId, taskId, since)) as { present: number } | null;
     return Boolean(row);
   }
 
@@ -2890,7 +3294,9 @@ export class TasksRepo {
   private issueStatusForRemainingTasks(issueId: string): string | null {
     const rows = this.ctx.db.query(
       `SELECT status FROM multiremi_tasks
-       WHERE issue_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')`,
+       WHERE issue_id = ?
+         AND chat_session_id IS NULL
+         AND status NOT IN ('completed', 'failed', 'cancelled')`,
     ).all(issueId) as Array<{ status: string }>;
     const statuses = new Set(rows.map((row) => row.status));
     if (statuses.has("awaiting_human")) return "in_review";
@@ -2908,7 +3314,11 @@ export class TasksRepo {
   }
 
   /** Caller owns the task/Issue/outbox transaction. */
-  private syncIssueStatusFromTaskWithinTransaction(task: MultiremiTask, status: string): void {
+  private syncIssueStatusFromTaskWithinTransaction(
+    task: MultiremiTask,
+    status: string,
+    options: { rederive?: boolean } = {},
+  ): void {
     if (!task.issueId || task.chatSessionId) return;
     // Serialize against direct Issue mutations before checking terminal state.
     // The no-op write acquires a row lock on Postgres and the writer lock on
@@ -2916,6 +3326,10 @@ export class TasksRepo {
     // cancelled Issue from a stale pre-lock read.
     const locked = this.ctx.db.run("UPDATE multiremi_issues SET id = id WHERE id = ?", [task.issueId]);
     if (locked.changes === 0) return;
+    // Once the Issue row is locked, derive lifecycle state from the current
+    // task rows. Explicit terminal/retry decisions pass rederive=false because
+    // they are not recoverable from the remaining-task set alone.
+    if (options.rederive) status = this.issueStatusForRemainingTasks(task.issueId) ?? status;
     const issue = this.ctx.issues().getIssue(task.issueId);
     // Explicit issue terminal states are user decisions. A late worker event
     // (or a cancellation racing with it) must not reopen accepted/cancelled
@@ -2964,17 +3378,19 @@ export class TasksRepo {
     const row = this.ctx.db.query(
       `SELECT 1 AS present FROM multiremi_tasks
        WHERE issue_id = ?
+         AND chat_session_id IS NULL
          AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
        LIMIT 1`,
     ).get(issueId) as { present: number } | null;
     return Boolean(row);
   }
 
-  private hasActiveTaskForIssue(issueId: string, issueLaneOnly = false): boolean {
+  private hasActiveTaskForIssue(issueId: string): boolean {
     const row = this.ctx.db.query(
       `SELECT 1 AS present FROM multiremi_tasks
-       WHERE issue_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')
-         ${issueLaneOnly ? "AND chat_session_id IS NULL" : ""}
+       WHERE issue_id = ?
+         AND chat_session_id IS NULL
+         AND status NOT IN ('completed', 'failed', 'cancelled')
        LIMIT 1`,
     ).get(issueId) as { present: number } | null;
     return Boolean(row);
@@ -2989,13 +3405,18 @@ export class TasksRepo {
 
   private withTaskAutopilotRuns(tasks: MultiremiTask[]): MultiremiTask[] {
     if (!tasks.length) return tasks;
-    const placeholders = tasks.map(() => "?").join(", ");
-    const rows = this.ctx.db.query(
-      `SELECT task_id, id
-       FROM multiremi_autopilot_runs
-       WHERE task_id IN (${placeholders})
-       ORDER BY created_at DESC`,
-    ).all(...tasks.map((task) => task.id)) as Row[];
+    const taskIds = tasks.map((task) => task.id);
+    const rows: Row[] = [];
+    for (let offset = 0; offset < taskIds.length; offset += TASK_AUTOPILOT_LOOKUP_BATCH_SIZE) {
+      const batch = taskIds.slice(offset, offset + TASK_AUTOPILOT_LOOKUP_BATCH_SIZE);
+      const placeholders = batch.map(() => "?").join(", ");
+      rows.push(...this.ctx.db.query(
+        `SELECT task_id, id
+         FROM multiremi_autopilot_runs
+         WHERE task_id IN (${placeholders})
+         ORDER BY created_at DESC`,
+      ).all(...batch) as Row[]);
+    }
     const runByTask = new Map<string, string>();
     for (const row of rows) {
       const taskId = nullableString(row.task_id);
@@ -3043,10 +3464,12 @@ function normalizeTriggerSummary(value: unknown): string | null {
 function delegationReturnPrompt(input: {
   sourceTaskId: string;
   sourceAgentName: string;
-  terminalStatus: "completed" | "failed" | "cancelled" | null;
-  terminalBody: string | null;
+  terminalStatus: null;
+  terminalBody: null;
+} | {
+  reports: DelegationTerminalReport[];
 }): string {
-  if (!input.terminalStatus) {
+  if (!("reports" in input)) {
     return [
       `${input.sourceAgentName} requested your attention while working on a task you delegated.`,
       "Read the latest Session Updates, respond to the teammate's report, and continue owning the parent task.",
@@ -3057,34 +3480,63 @@ function delegationReturnPrompt(input: {
     ].join("\n");
   }
 
-  const opening = input.terminalStatus === "completed"
-    ? `${input.sourceAgentName} completed a task you delegated.`
-    : input.terminalStatus === "failed"
-      ? `${input.sourceAgentName} could not complete a task you delegated.`
-      : `A task you delegated to ${input.sourceAgentName} was cancelled.`;
+  const first = input.reports[0]!;
+  const opening = input.reports.length > 1
+    ? `${input.reports.length} delegated task reports are ready for review.`
+    : first.terminalStatus === "completed"
+      ? `${first.sourceAgentName} completed a task you delegated.`
+      : first.terminalStatus === "failed"
+        ? `${first.sourceAgentName} could not complete a task you delegated.`
+        : `A task you delegated to ${first.sourceAgentName} was cancelled.`;
   const prompt = [
     opening,
-    "Read the latest Session Updates and terminal report, then continue owning the parent task.",
+    "Read the latest Session Updates and terminal reports, then continue owning the parent task.",
     "Treat this as one result in the current round. Check the latest Session Updates or `remi context` for other delegated tasks that are still queued or running.",
     "If delegated tasks remain active, continue coordinating and report only meaningful progress, blockers, or decisions needed from the user; do not publish the round delivery summary yet.",
     "Once every delegated task in the current round is completed, failed, or cancelled, validate the combined result and publish one round delivery summary. A later user follow-up starts a new round and may have its own summary.",
     "Do not repeat work that the teammate already completed.",
-    "",
-    `Source task: ${input.sourceTaskId}`,
   ];
-  const body = input.terminalBody?.trim();
-  if (body) {
-    const chars = Array.from(body);
-    const truncated = chars.length > DELEGATION_RETURN_BODY_MAX_LENGTH;
-    prompt.push(
-      "",
-      "## Terminal Report",
-      truncated
-        ? `${chars.slice(0, DELEGATION_RETURN_BODY_MAX_LENGTH).join("")}\n\n[terminal report truncated]`
-        : body,
-    );
-  }
+  for (const report of input.reports) prompt.push("", delegationTerminalReportSection(report));
   return prompt.join("\n");
+}
+
+function appendDelegationTerminalReports(
+  prompt: string,
+  reports: DelegationTerminalReport[],
+): string {
+  return [prompt.trimEnd(), ...reports.map(delegationTerminalReportSection)].join("\n\n");
+}
+
+function delegationTerminalReportSection(report: DelegationTerminalReport): string {
+  const body = report.terminalBody?.trim();
+  const lines = [
+    `## Terminal Report: ${report.sourceAgentName}`,
+    `Source task: ${report.source.id}`,
+    `Status: ${report.terminalStatus}`,
+  ];
+  if (!body) return lines.join("\n");
+  const chars = Array.from(body);
+  const truncated = chars.length > DELEGATION_RETURN_BODY_MAX_LENGTH;
+  lines.push(
+    "",
+    truncated
+      ? `${chars.slice(0, DELEGATION_RETURN_BODY_MAX_LENGTH).join("")}\n\n[terminal report truncated]`
+      : body,
+  );
+  return lines.join("\n");
+}
+
+function delegationWakeupInputForReport(report: DelegationTerminalReport): DelegationWakeupInput {
+  return {
+    sourceTaskId: report.source.id,
+    requiredEventSeq: report.requiredEventSeq,
+    terminalStatus: report.terminalStatus,
+    terminalBody: report.terminalBody,
+  };
+}
+
+function isDelegationReturnTask(task: MultiremiTask): boolean {
+  return task.delegationId != null && task.delegatedByAgentId === task.agentId;
 }
 
 function taskPluginSnapshotInput(input: CreateTaskInput): MultiremiTaskPluginSnapshotEntry[] | null {
@@ -3104,11 +3556,7 @@ function executionFingerprintResumable(
   return stored ? stored === expectedFingerprint : !hasPlugins;
 }
 
-function outcomeTime(task: MultiremiTask): number {
-  return Date.parse(task.completedAt ?? task.failedAt ?? task.updatedAt ?? task.createdAt);
-}
-
-function normalizeRepos(rawRepos: unknown[]): MultiremiRepoData[] {
+function normalizeRepos(rawRepos: unknown[], defaultBranchFor?: (url: string) => string | undefined): MultiremiRepoData[] {
   const repos: MultiremiRepoData[] = [];
   const seen = new Set<string>();
   for (const raw of rawRepos) {
@@ -3118,7 +3566,9 @@ function normalizeRepos(rawRepos: unknown[]): MultiremiRepoData[] {
     if (!url || seen.has(url)) continue;
     seen.add(url);
     const description = typeof record.description === "string" ? record.description : "";
-    repos.push(description ? { url, description } : { url });
+    const defaultBranch = (defaultBranchFor ? defaultBranchFor(url) : String(record.defaultBranch ?? "").trim())
+      || String(record.default_branch_hint ?? record.defaultBranchHint ?? "").trim();
+    repos.push({ url, ...(description ? { description } : {}), ...(defaultBranch ? { defaultBranch } : {}) });
   }
   return repos;
 }
@@ -3164,6 +3614,8 @@ function toTask(row: Row): MultiremiTask {
     delegation_id: nullableString(row.delegation_id),
     delegatedByAgentId: nullableString(row.delegated_by_agent_id),
     delegated_by_agent_id: nullableString(row.delegated_by_agent_id),
+    delegationReturnTaskId: nullableString(row.delegation_return_task_id),
+    delegation_return_task_id: nullableString(row.delegation_return_task_id),
     assignmentEventId: nullableString(row.assignment_event_id),
     assignment_event_id: nullableString(row.assignment_event_id),
     assignmentSourceEventId: nullableString(row.assignment_source_event_id),

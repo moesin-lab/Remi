@@ -7,6 +7,7 @@ import type { CreateChatSessionInput, SendChatMessageInput } from "@multiremi/co
 import { canCurrentUserAccessAgent, denyCurrentUserWorkspaceAccess } from "./auth-guards.js";
 import { uniqueStrings } from "./common.js";
 import { assertRuntimeWorkspaceAccess } from "./runtime-workspaces.js";
+import { resolveRequestWorkspaceId } from "./workspace-context.js";
 
 export function withChatSessionCreator(
   c: Context,
@@ -16,16 +17,21 @@ export function withChatSessionCreator(
   return { ...input, creatorId, creator_id: creatorId };
 }
 
-export function requestedChatWorkspaceId(c: Context, input?: Pick<CreateChatSessionInput, "workspaceId" | "workspace_id">): string {
-  return cleanString(input?.workspaceId) ??
+export function requestedChatWorkspaceId(
+  c: Context,
+  store: MultiremiStore,
+  input?: Pick<CreateChatSessionInput, "workspaceId" | "workspace_id">,
+): string | Response {
+  const explicitId = cleanString(input?.workspaceId) ??
     cleanString(input?.workspace_id) ??
     cleanString(c.req.query("workspaceId")) ??
-    cleanString(c.req.query("workspace_id")) ??
-    "local";
+    cleanString(c.req.query("workspace_id"));
+  return resolveRequestWorkspaceId(c, store, explicitId);
 }
 
 export function withChatSessionRequestContext(c: Context, store: MultiremiStore, input: CreateChatSessionInput): CreateChatSessionInput | Response {
-  const workspaceId = requestedChatWorkspaceId(c, input);
+  const workspaceId = requestedChatWorkspaceId(c, store, input);
+  if (workspaceId instanceof Response) return workspaceId;
   const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
   if (denied) return denied;
   assertRuntimeWorkspaceAccess(c, store, input.runtimeWorkspaceId ?? input.runtime_workspace_id, workspaceId);

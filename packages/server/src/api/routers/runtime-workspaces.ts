@@ -10,7 +10,8 @@ import type { RouterDeps } from "./deps.js";
 
 export function registerRuntimeWorkspaceRoutes(app: Hono, { store }: RouterDeps): void {
   app.get("/api/runtime-workspaces", c => {
-    const workspaceId = requestedRuntimeWorkspaceId(c);
+    const workspaceId = requestedRuntimeWorkspaceId(c, store);
+    if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
     return c.json({ workspaces: store.runtimeWorkspaces.list(workspaceId, c.req.query("archived") === "true")

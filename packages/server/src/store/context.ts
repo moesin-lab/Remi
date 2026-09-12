@@ -23,6 +23,7 @@ import type {
   CreateTaskInput,
   CreateTaskSteerMessageInput,
   ListIssuesInput,
+  UpdateChatSessionInput,
   UpdateIssueInput,
   MultiremiAgent,
   MultiremiAgentPlugin,
@@ -30,6 +31,7 @@ import type {
   MultiremiAgentPluginRuntimeState,
   MultiremiTaskPluginSnapshotEntry,
   MultiremiAnalyticsEvent,
+  MultiremiAttachment,
   MultiremiAutopilotRun,
   MultiremiDaemonHeartbeatAck,
   MultiremiProjectDocsIndex,
@@ -66,6 +68,7 @@ import type {
   MultiremiTaskMessage,
   MultiremiTaskStatus,
   MultiremiFeishuBotOutboundDelivery,
+  FeishuPresentationCheckpoint,
   MultiremiUser,
   MultiremiWebhookDelivery,
   MultiremiWorkspaceMember,
@@ -183,6 +186,7 @@ export interface IssuesSurface {
   getIssue(id: string): MultiremiIssue | null;
   getIssueByRef(ref: string, workspaceId?: string | null): MultiremiIssue | null;
   getIssueComment(id: string): MultiremiIssueComment | null;
+  getAttachment(id: string): MultiremiAttachment | null;
   linkAttachmentsToChatMessage(chatSessionId: string, chatMessageId: string, attachmentIds: string[]): void;
   listIssues(input?: ListIssuesInput): MultiremiIssue[];
   listGeneratedIssues(sourceIssueId: string): MultiremiIssue[];
@@ -346,13 +350,17 @@ export interface TasksSurface {
   listTasks(status?: MultiremiTaskStatus): MultiremiTask[];
   listTasksForIssue(issueId: string): MultiremiTask[];
   cancelTask(taskId: string): MultiremiTask;
+  cancelTaskWithinTransaction(taskId: string): import("./repos/tasks-repo.js").CancelTaskResult;
+  notifyCancelledTask(result: import("./repos/tasks-repo.js").CancelTaskResult): void;
   cancelTasksByTriggerComments(workspaceId: string, commentIds: string[]): number;
   listAgentTasks(agentId: string): MultiremiTask[];
 }
 
 export interface ChatSurface {
   createChatSession(input: CreateChatSessionInput): MultiremiChatSession;
+  createChatSessionWithinTransaction(input: CreateChatSessionInput): MultiremiChatSession;
   getChatSession(id: string): MultiremiChatSession | null;
+  updateChatSession(id: string, input: UpdateChatSessionInput): MultiremiChatSession;
   bindChatSessionIssueIfUnbound(chatSessionId: string, issueId: string): {
     session: MultiremiChatSession;
     bound: boolean;
@@ -363,6 +371,18 @@ export interface ChatSurface {
     session: MultiremiChatSession;
     message: MultiremiChatMessage;
   };
+  appendChatMessageWithinTransaction(input: {
+    id?: string;
+    chatSessionId: string;
+    taskId?: string | null;
+    role: MultiremiChatMessage["role"];
+    body: string;
+    failureReason?: string | null;
+    elapsedMs?: number | null;
+    pendingAgentDelivery?: boolean;
+    agentDeliveryTaskId?: string | null;
+    createdAt?: string;
+  }): MultiremiChatMessage;
   preparePendingAgentIssueUpdatesForTask(chatSessionId: string, taskId: string): {
     messages: MultiremiChatMessage[];
     omittedCount: number;
@@ -381,8 +401,8 @@ export interface IssueSessionsSurface {
   createIssueSessionWithinTransaction(issueId: string, input?: CreateIssueSessionInput): MultiremiIssueSession;
   getLatestActiveIssueSession(issueId: string): MultiremiIssueSession | null;
   addSessionParticipant(sessionId: string, input: AddSessionParticipantInput): MultiremiSessionParticipant;
-  getOrCreateSessionAgentLane(sessionId: string, agentId: string): MultiremiSessionAgentLane;
-  getSessionAgentLane(sessionId: string, agentId: string): MultiremiSessionAgentLane | null;
+  getOrCreateSessionAgentLane(sessionId: string, agentId: string, executionScope?: string): MultiremiSessionAgentLane;
+  getSessionAgentLane(sessionId: string, agentId: string, executionScope?: string): MultiremiSessionAgentLane | null;
   appendSessionEvent(sessionId: string, input: {
     authorType: string;
     authorId?: string | null;
@@ -416,6 +436,7 @@ export interface RuntimesSurface {
     claimPending?: boolean;
     supportsBatchImport?: boolean;
     supportsDirectoryScan?: boolean;
+    supportsSkillDirectory?: boolean;
     agentPluginProtocol?: number;
   }): MultiremiDaemonHeartbeatAck;
   runtimeCanRunAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean;
@@ -440,16 +461,27 @@ export interface FeishuBotSurface {
     workspaceId: string,
     runtimeId: string,
     now?: string | Date,
+    supportsTaskStream?: boolean,
+    supportsNativeCot?: boolean,
   ): MultiremiFeishuBotOutboundDelivery | null;
+  getFeishuBotOutboundAttachment(
+    workspaceId: string,
+    runtimeId: string,
+    deliveryId: string,
+    claimToken: string,
+    attachmentId: string,
+  ): MultiremiAttachment | null;
   reportFeishuBotOutbound(
     workspaceId: string,
     runtimeId: string,
     deliveryId: string,
     input: {
       claimToken: string;
-      status: "sent" | "failed";
+      status: "sent" | "failed" | "streaming";
       externalMessageId?: string | null;
       error?: string | null;
+      presentation?: FeishuPresentationCheckpoint;
+      retryable?: boolean;
     },
     now?: string | Date,
   ): boolean;

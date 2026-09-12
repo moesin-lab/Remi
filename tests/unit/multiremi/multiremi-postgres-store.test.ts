@@ -91,6 +91,13 @@ describe("translateSqliteToPg", () => {
     );
   });
 
+  it("preserves partial unique indexes used for Feishu default routes", () => {
+    const sql = `CREATE UNIQUE INDEX idx_routes_default
+      ON multiremi_feishu_bot_agent_routes(workspace_id, scope)
+      WHERE chat_id IS NULL`;
+    expect(translateSqliteToPg(sql)).toBe(sql);
+  });
+
   it("strips FOREIGN KEY clauses (unenforced in sqlite; rejected on forward refs in PG)", () => {
     expect(
       translateSqliteToPg(
@@ -212,6 +219,38 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     await admin.end();
   });
 
+  it("fences Wiki cleanup leases and persists per-path progress across connections", () => {
+    const otherDb = new PostgresSyncDatabase(pgDatabaseUrl(TEST_DB));
+    const other = new MultiremiStore(otherDb);
+    const jobId = "rwjob_pg_cleanup";
+    // Install a legacy cleanup fixture to exercise the newly added lease columns.
+    db.run(`INSERT INTO multiremi_repository_wiki_storage_jobs
+      (id,workspace_id,repository_id,batch_id,state,manifest,attempt_count,created_at,updated_at)
+      VALUES (?, 'local', 'repo_pg_cleanup', 'batch_pg_cleanup', 'cleanup', ?, 0, ?, ?)
+      ON CONFLICT(id) DO NOTHING`, [jobId, JSON.stringify({ promotions: [], cleanupUris: ["first.md", "second.md"] }),
+      new Date().toISOString(), new Date().toISOString()]);
+    const now = new Date().toISOString();
+    const until = new Date(Date.now() + 120_000).toISOString();
+    try {
+      expect(store.claimRepositoryWikiStorageJob(jobId, "first", until, now)).toBe(true);
+      expect(other.claimRepositoryWikiStorageJob(jobId, "second", until, now)).toBe(false);
+      store.recordRepositoryWikiCleanupProgress(jobId, "first", "first.md");
+      expect(other.listRepositoryWikiStorageJobs("local", "repo_pg_cleanup")[0]?.manifest.completedCleanupUris).toEqual(["first.md"]);
+      db.run("UPDATE multiremi_repository_wiki_storage_jobs SET lease_until = ? WHERE id = ?", ["2020-01-01T00:00:00.000Z", jobId]);
+      expect(other.claimRepositoryWikiStorageJob(jobId, "second", until, now)).toBe(true);
+      expect(store.renewRepositoryWikiStorageJob(jobId, "first", until)).toBe(false);
+      expect(() => store.recordRepositoryWikiCleanupProgress(jobId, "first", "second.md")).toThrow("lease lost");
+      other.recordRepositoryWikiCleanupProgress(jobId, "second", "second.md");
+      store.releaseRepositoryWikiStorageJob(jobId, "first");
+      expect(store.claimRepositoryWikiStorageJob(jobId, "third", until, now)).toBe(false);
+      other.releaseRepositoryWikiStorageJob(jobId, "second");
+      expect(store.claimRepositoryWikiStorageJob(jobId, "third", until, now)).toBe(true);
+    } finally {
+      store.completeRepositoryWikiStorageJob(jobId);
+      otherDb.close();
+    }
+  });
+
   it("checks repository Wiki publication without untyped nullable parameters", () => {
     const { autopilot } = configureRepositoryWikiAutomation(store);
 
@@ -241,6 +280,25 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     expect(store.isRepositoryWikiRunPublished(revisionRun.id)).toBe(true);
   });
 
+  it("resumes target schedules on Postgres without duplicate tasks", () => {
+    const agent = store.createAgent({ name: "PG schedule worker", provider: "claude" });
+    const firstProject = store.createProject({ title: "PG schedule A" });
+    const secondProject = store.createProject({ title: "PG schedule B" });
+    const rule = store.createAutopilot({ title: "PG target schedule", assigneeId: agent.id, executionMode: "run_only" });
+    const trigger = store.createAutopilotTrigger(rule.id, { kind: "schedule", cronExpression: "0 3 * * *", scheduleTargets: { projects: { all: false, ids: [firstProject.id, secondProject.id] }, repositories: { all: false, ids: [] } } });
+    const first = store.runAutopilot(rule.id, { triggerId: trigger.id });
+    expect(first.taskId).toBeTruthy();
+    expect(store.getTaskWithAgent(first.taskId!)?.project?.id).toBe(firstProject.id);
+    store.runAutopilot(rule.id, { triggerId: trigger.id });
+    expect(store.listAutopilotRuns(rule.id)).toHaveLength(2);
+    db.run("UPDATE multiremi_autopilot_runs SET status = 'failed' WHERE id = ?", [first.id]);
+    store.advanceScheduledTargetRuns();
+    const next = store.listAutopilotRuns(rule.id).find((run) => run.status === "running")!;
+    expect(next.scheduleTarget?.id).toBe(secondProject.id);
+    store.advanceScheduledTargetRuns();
+    expect(store.listAutopilotRuns(rule.id).filter((run) => run.taskId)).toHaveLength(2);
+  });
+
   // Each test provisions its own workspace so shared state (issue numbering,
   // list results) stays isolated without per-test databases.
   let wsCounter = 0;
@@ -249,6 +307,102 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const slug = `pgtest-${process.pid}-${wsCounter}`;
     return store.createWorkspace({ name: `PG Test ${wsCounter}`, slug }).id;
   };
+
+  it("lists an agent task snapshot through the batched autopilot lookup", () => {
+    const workspaceId = freshWorkspace();
+    const agent = store.createAgent({ name: `PG snapshot agent ${wsCounter}`, provider: "codex", workspaceId });
+    const active = store.createTask({ agentId: agent.id, prompt: "active snapshot task" });
+    const terminal = store.createTask({ agentId: agent.id, prompt: "terminal snapshot task" });
+    db.run(
+      `UPDATE multiremi_tasks
+       SET status = 'completed', completed_at = ?, updated_at = ?
+       WHERE id = ?`,
+      ["2026-09-10T09:00:00.000Z", "2026-09-10T09:00:00.000Z", terminal.id],
+    );
+    db.run("UPDATE multiremi_tasks SET updated_at = ? WHERE id = ?", ["2026-09-10T10:00:00.000Z", active.id]);
+
+    expect(store.listWorkspaceAgentTaskSnapshot(workspaceId).map((task) => task.id)).toEqual([
+      active.id,
+      terminal.id,
+    ]);
+  });
+
+  it("builds Chat task projections and pending updates without SQLite rowid", () => {
+    const workspaceId = freshWorkspace();
+    const runtime = store.registerRuntime({
+      name: `PG Chat runtime ${wsCounter}`,
+      provider: "claude",
+      workspaceId,
+    });
+    const agent = store.createAgent({
+      name: `PG Chat agent ${wsCounter}`,
+      provider: "claude",
+      runtimeId: runtime.id,
+      workspaceId,
+    });
+    const chat = store.createChatSession({
+      agentId: agent.id,
+      title: "PG portable Chat ordering",
+      workspaceId,
+    });
+    const sent = store.sendChatMessage(chat.id, { body: "Build the PostgreSQL projection." });
+
+    expect(store.claimTask(runtime.id)?.id).toBe(sent.task.id);
+    expect(() => store.buildTaskSessionProjection(sent.task.id)).not.toThrow();
+    expect(store.listChatMessages(chat.id).map((message) => message.body)).toEqual([
+      "Build the PostgreSQL projection.",
+    ]);
+
+    store.createPendingAgentIssueUpdateWithinTransaction(chat.id, "First pending update.");
+    store.createPendingAgentIssueUpdateWithinTransaction(chat.id, "Second pending update.");
+    const pending = store.preparePendingAgentIssueUpdatesForTask(chat.id, sent.task.id);
+    expect(pending.omittedCount).toBe(0);
+    expect(pending.messages.map((message) => message.body).sort()).toEqual([
+      "First pending update.",
+      "Second pending update.",
+    ]);
+  });
+
+  it("migrates legacy Chat sequence columns before creating the index", () => {
+    const workspaceId = freshWorkspace();
+    const agent = store.createAgent({ name: "PG legacy Chat", provider: "claude", workspaceId });
+    const chat = store.createChatSession({ agentId: agent.id, title: "Legacy sequences", workspaceId });
+    const timestamp = "2026-09-01T00:00:00.000Z";
+    for (const [id, createdAt] of [["legacy_seq_b", timestamp], ["legacy_seq_a", timestamp], ["legacy_seq_c", "2026-09-02T00:00:00.000Z"]]) {
+      db.run(
+        "INSERT INTO multiremi_chat_messages (id, chat_session_id, role, body, created_at) VALUES (?, ?, ?, ?, ?)",
+        [id, chat.id, "user", id, createdAt],
+      );
+    }
+    db.exec(`
+      DROP INDEX idx_multiremi_chat_messages_session_sequence;
+      ALTER TABLE multiremi_chat_messages DROP COLUMN sequence;
+      ALTER TABLE multiremi_chat_sessions DROP COLUMN message_sequence;
+      DELETE FROM multiremi_schema_migrations WHERE id = '20260905_chat_message_sequence';
+    `);
+
+    // Upgrades boot a new process; do not reuse pre-DDL prepared statements.
+    db.close();
+    db = new PostgresSyncDatabase(pgDatabaseUrl(TEST_DB));
+    store = new MultiremiStore(db);
+    expect(store.listChatMessages(chat.id).map(message => message.id)).toEqual([
+      "legacy_seq_a", "legacy_seq_b", "legacy_seq_c",
+    ]);
+    expect(db.query("SELECT message_sequence FROM multiremi_chat_sessions WHERE id = ?").get(chat.id))
+      .toEqual({ message_sequence: 3 });
+    expect(db.query("SELECT indexname FROM pg_indexes WHERE tablename = 'multiremi_chat_messages' AND indexname = ?")
+      .get("idx_multiremi_chat_messages_session_sequence")).not.toBeNull();
+
+    store.sendChatMessage(chat.id, { body: "After migration" });
+    runMigrations(db);
+    expect(db.query("SELECT body, sequence FROM multiremi_chat_messages WHERE chat_session_id = ? ORDER BY sequence, id")
+      .all(chat.id)).toEqual([
+        { body: "legacy_seq_a", sequence: 1 },
+        { body: "legacy_seq_b", sequence: 2 },
+        { body: "legacy_seq_c", sequence: 3 },
+        { body: "After migration", sequence: 4 },
+      ]);
+  });
 
   it("migrates knowledge control-plane tables and nullable provenance columns", () => {
     for (const table of [
@@ -445,6 +599,23 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       "PRAGMA table_info(multiremi_daemon_ssh_mesh_states)",
     ).all().map((row: { name: string }) => row.name);
     expect(sshMeshStateColumns).toEqual(expect.arrayContaining(["node_kind", "name"]));
+  });
+
+  it("enforces one Feishu bot default route per scope on Postgres", () => {
+    const first = store.createAgent({ name: "PG Feishu route A", provider: "codex", workspaceId: "local" });
+    const second = store.createAgent({ name: "PG Feishu route B", provider: "codex", workspaceId: "local" });
+    const now = new Date().toISOString();
+    const insert = (id: string, agentId: string) => db.run(
+      `INSERT INTO multiremi_feishu_bot_agent_routes (
+         id, workspace_id, scope, chat_id, chat_name, agent_id,
+         created_at, updated_at, updated_by
+       ) VALUES (?, 'local', 'p2p_default', NULL, NULL, ?, ?, ?, NULL)`,
+      [id, agentId, now, now],
+    );
+
+    insert("fbr_pg_default_first", first.id);
+    expect(() => insert("fbr_pg_default_second", second.id)).toThrow();
+    db.run("DELETE FROM multiremi_feishu_bot_agent_routes WHERE id = ?", ["fbr_pg_default_first"]);
   });
 
   it("does not replay the one-time SCM default backfill on Postgres restart", () => {
@@ -1068,7 +1239,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     expect(store.claimTask(runtime.id)).toBeNull();
   });
 
-  it("grants at most one Issue workspace lease across concurrent claim connections", async () => {
+  it.each([false, true])("claims contexts atomically across connections (independent Agents: %s)", async (independent) => {
     const ws = freshWorkspace();
     const firstRuntime = store.registerRuntime({
       name: "rt-workspace-lease-a",
@@ -1088,15 +1259,11 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       workspaceId: ws,
       maxConcurrentTasks: 2,
     });
-    const secondAgent = store.createAgent({
-      name: "Workspace lease B",
-      provider: "claude",
-      workspaceId: ws,
-      maxConcurrentTasks: 2,
-    });
     const issue = store.createIssue({ title: "Concurrent workspace lease", workspaceId: ws });
     const firstSession = store.createIssueSession(issue.id, { title: "Work A" });
-    const secondSession = store.createIssueSession(issue.id, { title: "Work B" });
+    const secondAgent = independent
+      ? store.createAgent({ name: "Independent worker", provider: "claude", workspaceId: ws, maxConcurrentTasks: 2 })
+      : firstAgent;
     const first = store.createTask({
       agentId: firstAgent.id,
       issueId: issue.id,
@@ -1107,7 +1274,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const second = store.createTask({
       agentId: secondAgent.id,
       issueId: issue.id,
-      issueSessionId: secondSession.id,
+      issueSessionId: firstSession.id,
       prompt: "claim B",
     });
 
@@ -1129,10 +1296,10 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       .map((result) => result.taskId)
       .filter((taskId): taskId is string => Boolean(taskId));
 
-    expect(claimedIds).toHaveLength(1);
+    expect(claimedIds).toHaveLength(independent ? 2 : 1);
     expect([first.id, second.id]).toContain(claimedIds[0]);
     expect([store.getTask(first.id)?.status, store.getTask(second.id)?.status].sort())
-      .toEqual(["dispatched", "queued"]);
+      .toEqual(independent ? ["dispatched", "dispatched"] : ["dispatched", "queued"]);
 
     const firstClosed = waitForWorkerPhase(firstWorker, "closed");
     const secondClosed = waitForWorkerPhase(secondWorker, "closed");
@@ -1141,6 +1308,28 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     await Promise.all([firstClosed, secondClosed]);
     firstWorker.terminate();
     secondWorker.terminate();
+  });
+
+  it("preserves Chat queue order, resumes at claim, and projects sequenced messages", () => {
+    const workspace = store.createWorkspace({ name: "PG chat queue", slug: "pg-chat-queue" });
+    const agent = store.createAgent({ name: "PG chat", provider: "codex", workspaceId: workspace.id, maxConcurrentTasks: 4 });
+    const runtime = store.registerRuntime({ name: "PG chat runtime", provider: "codex", workspaceId: workspace.id, maxConcurrency: 4 });
+    const chat = store.createChatSession({ agentId: agent.id, workspaceId: workspace.id });
+    const first = store.sendChatMessage(chat.id, { content: "first" });
+    const second = store.sendChatMessage(chat.id, { content: "second" });
+    expect(store.getPendingChatTask(chat.id)?.id).toBe(first.task.id);
+    expect(JSON.stringify(store.buildTaskSessionProjection(first.task.id))).not.toContain("second");
+    expect(store.claimTask(runtime.id)?.id).toBe(first.task.id);
+    expect(store.claimTask(runtime.id)).toBeNull();
+    store.startTask(first.task.id);
+    store.completeTask(first.task.id, { output: "answer", sessionId: "pg-chat-session", workDir: "/tmp/pg-chat-queue" });
+    expect(store.listChatMessages(chat.id).map((message) => message.body)).toEqual(["first", "second", "answer"]);
+    expect(store.getChatSession(chat.id)?.lastMessage?.content).toBe("answer");
+    expect(store.claimTask(runtime.id)?.sessionId).toBe("pg-chat-session");
+    expect(store.buildTaskSessionProjection(second.task.id)?.mode).toBe("delta");
+    store.updateChatSession(chat.id, { pinned: true, status: "archived" });
+    expect(store.getChatSession(chat.id)?.pinned).toBe(true);
+    expect(store.getTask(second.task.id)?.status).toBe("cancelled");
   });
 
   it("pool-claims unbound agents' tasks and stamps affinity (chat session + local directory)", () => {
@@ -1758,7 +1947,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const second = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "再来一次", workspaceId: ws });
     expect(store.claimTask(runtime.id)?.id).toBe(second.id);
     store.startTask(second.id);
-    store.createIssueComment(issue.id, { authorType: "agent", authorId: agent.id, body: "自己发的回复" });
+    store.createIssueComment(issue.id, { taskId: second.id, authorType: "agent", authorId: agent.id, body: "自己发的回复" });
     const before = store.listIssueComments(issue.id).length;
     store.completeTask(second.id, { output: "narration text" });
     expect(store.listIssueComments(issue.id)).toHaveLength(before);

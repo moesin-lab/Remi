@@ -12,6 +12,7 @@ import {
   authenticatedRequestUserId,
   currentAccessToken,
   currentWorkspaceMember,
+  runtimeWorkspaceId,
 } from "../wire/index.js";
 import { compatibilityWorkspaceId, denyCurrentUserWorkspaceAccess } from "../helpers.js";
 import { restrictedTaskIssueCreationAgent } from "../helpers.js";
@@ -88,11 +89,13 @@ function resolveCliIdentity(c: Context, deps: RouterDeps): ResolvedCliIdentity |
     : access?.type === "daemon"
       ? "daemon"
       : "human";
+  const workspaceId = access?.type === "task" || access?.type === "daemon"
+    ? access.workspaceId
+    : compatibilityWorkspaceId(c, deps.store);
+  if (workspaceId instanceof Response) return workspaceId;
   return {
     type,
-    workspaceId: access?.type === "task" || access?.type === "daemon"
-      ? access.workspaceId
-      : compatibilityWorkspaceId(c),
+    workspaceId,
     shareIssueId: null,
   };
 }
@@ -104,7 +107,8 @@ function denyCliWorkspaceAccess(
 ): Response | null {
   const explicitlyRequested = c.req.header("X-Workspace-ID")?.trim()
     || c.req.query("workspace_id")?.trim()
-    || "";
+    || (c.req.header("X-Workspace-Slug")?.trim() ? compatibilityWorkspaceId(c, deps.store) : "");
+  if (explicitlyRequested instanceof Response) return explicitlyRequested;
   if (explicitlyRequested && explicitlyRequested !== identity.workspaceId
     && (identity.type === "task" || identity.type === "daemon" || identity.type === "share")) {
     return c.json({ error: "workspace not found" }, 404);
@@ -135,6 +139,8 @@ function buildCliContext(c: Context, deps: RouterDeps, identity: ResolvedCliIden
   const access = currentAccessToken(c);
   const task = identity.type === "task" && access?.taskId ? store.getTask(access.taskId) : null;
   const issue = task?.issueId ? store.getIssue(task.issueId) : null;
+  const project = task ? store.getTaskWithAgent(task.id)?.project ?? null : null;
+  const scheduleTarget = task?.autopilotRunId ? store.getAutopilotRun(task.autopilotRunId)?.scheduleTarget ?? null : null;
   const agent = task?.agentId
     ? store.getAgent(task.agentId)
     : identity.type === "task" && access?.agentId
@@ -142,8 +148,6 @@ function buildCliContext(c: Context, deps: RouterDeps, identity: ResolvedCliIden
       : null;
   const session = task?.issueSessionId ? store.getIssueSession(task.issueSessionId) : null;
   const chat = task?.chatSessionId ? store.getChatSession(task.chatSessionId) : null;
-  const projectId = task?.runtimeWorkspaceId ? null : chat?.projectId ?? issue?.projectId ?? null;
-  const project = projectId ? store.getProject(projectId) : null;
   const boundIssue = !issue && chat?.issueId ? store.getIssue(chat.issueId) : null;
   const runtime = task?.runtimeId
     ? store.getRuntime(task.runtimeId)
@@ -151,7 +155,8 @@ function buildCliContext(c: Context, deps: RouterDeps, identity: ResolvedCliIden
       ? store.getRuntime(agent.runtimeId)
       : null;
   const daemonRuntimes = identity.type === "daemon" && access?.daemonId
-    ? store.listRuntimes().filter((candidate) => candidate.daemonId === access.daemonId)
+    ? store.listRuntimes().filter((candidate) => candidate.daemonId === access.daemonId
+      && runtimeWorkspaceId(candidate) === identity.workspaceId)
     : [];
   const userId = authenticatedRequestUserId(c);
   const user = userId ? store.getUser(userId) : null;
@@ -169,6 +174,7 @@ function buildCliContext(c: Context, deps: RouterDeps, identity: ResolvedCliIden
     },
     workspace: safeWorkspace(workspace),
     current: {
+      schedule_target: scheduleTarget,
       agent: agent ? safeAgent(agent) : null,
       task: task ? safeTask(task) : null,
       chat: chat ? safeChat(chat) : null,

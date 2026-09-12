@@ -60,6 +60,7 @@ export type {
   RuntimeLocalSkillStatus,
   RuntimeLocalSkillSummary,
   RuntimeLocalSkillListRequest,
+  CreateRuntimeLocalSkillListRequest,
   CreateRuntimeLocalSkillImportRequest,
   RuntimeLocalSkillImportRequest,
   RuntimeLocalSkillsResult,
@@ -134,13 +135,14 @@ export type {
 export type { Label, CreateLabelRequest, UpdateLabelRequest, ListLabelsResponse, IssueLabelsResponse } from "./label";
 export type {
   TimelineEntry,
+  TimelinePage,
   AssigneeFrequencyEntry,
 } from "./activity";
 export type { IssueSubscriber } from "./subscriber";
 export type * from "./events";
 export type * from "./api";
 export type { Attachment } from "./attachment";
-export type { ChatSession, ChatMessage, ChatMessagesPage, ChatPendingTask, PendingChatTaskItem, PendingChatTasksResponse, SendChatMessageResponse } from "./chat";
+export type { ChatSession, ChatMessage, ChatMessagesPage, ChatPendingTask, PendingChatTaskItem, PendingChatTasksResponse, SendChatMessageResponse, ChatQueuedTask, UpdateChatSessionInput, PrioritizeChatQueuedTaskResponse } from "./chat";
 export type { StorageAdapter } from "./storage";
 export type {
   Project,
@@ -210,6 +212,13 @@ export type {
   FeishuBotAgentCandidate,
   FeishuBotRuntimeCandidate,
   FeishuBotCandidates,
+  FeishuBotAgentRouteScope,
+  FeishuBotAgentRoute,
+  FeishuBotAgentRoutes,
+  ReplaceFeishuBotAgentRouteInput,
+  ReplaceFeishuBotAgentRoutesRequest,
+  FeishuBotChat,
+  FeishuBotChats,
   FeishuBotTestResult,
   FeishuBotAuditAction,
   FeishuBotAuditEntry,
@@ -228,6 +237,7 @@ export type {
   AutopilotWorkspacePolicy,
   AutopilotAssigneeType,
   AutopilotTrigger,
+  ScheduleTargets,
   AutopilotTriggerKind,
   AutopilotRun,
   AutopilotRunStatus,

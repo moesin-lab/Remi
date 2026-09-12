@@ -399,6 +399,9 @@
     "delegation_return_reason_no_lineage": "委派血缘不完整",
     "delegation_return_reason_delegator_unavailable": "委派人当前不可用",
     "delegation_return_reason_already_covered": "该更新已被处理",
+    "delegation_return_reason_coalesced_into_pending_return": "该更新已合并到待处理的委派回程",
+    "delegation_return_reason_covered_by_queued_task": "委派人已有排队中的 task 会处理该更新",
+    "delegation_return_reason_deferred_lane_busy": "当前 issue 会话仍有其他 task 在执行或排队",
     "child_done_parent_triggered": "已通知父 issue 负责人处理已完成的子 issue",
     "child_done_parent_skipped": "未通知父 issue 负责人：{{reason}}",
     "child_done_parent_reason_no_assignee": "父 issue 没有负责人",
@@ -426,7 +429,8 @@
     "activity_count_other": "{{count}} 条动态",
     "show_more_activities_one": "展开更早 {{count}} 条动态",
     "show_more_activities_other": "展开更早 {{count}} 条动态",
-    "jump_to_latest": "回到最新"
+    "jump_to_latest": "回到最新",
+    "loading_older": "正在加载更早动态..."
   },
   "comment": {
     "delete_title": "删除评论",
@@ -462,6 +466,11 @@
     }
   },
   "agent_activity": {
+    "count_running": "{{count}} 个运行中",
+    "count_starting": "{{count}} 个启动中",
+    "count_queued": "{{count}} 个排队中",
+    "count_awaiting_human": "{{count}} 个等待审核",
+    "count_waiting_directory": "{{count}} 个等待目录",
     "hover_header_other": "{{count}} 个智能体正在工作",
     "status_running": "正在工作",
     "status_awaiting_human": "等待审核",

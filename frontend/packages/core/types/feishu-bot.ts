@@ -43,6 +43,8 @@ export interface IssueTopicConfig {
   chat_id: string;
   /** Null means every project, including projectless Issues. */
   project_ids: string[] | null;
+  notify_mode?: "group_owner" | "person" | "none";
+  notify_open_id?: string | null;
 }
 
 export interface IssueTopicConfigResponse {
@@ -54,6 +56,8 @@ export interface UpdateIssueTopicConfigRequest {
   enabled: boolean;
   chat_id: string;
   project_ids: string[] | null;
+  notify_mode?: "group_owner" | "person" | "none";
+  notify_open_id?: string | null;
 }
 
 export interface FeishuBotConfig {
@@ -132,6 +136,51 @@ export interface FeishuBotCandidates {
   runtimes: FeishuBotRuntimeCandidate[];
   /** False when the server has no encryption key, so saving a secret fails. */
   encryption_available: boolean;
+}
+
+export type FeishuBotAgentRouteScope = "p2p_default" | "group_default" | "chat";
+
+/** One Agent routing rule returned by the workspace Feishu bot API. */
+export interface FeishuBotAgentRoute {
+  id: string;
+  scope: FeishuBotAgentRouteScope;
+  chat_id: string | null;
+  chat_name: string | null;
+  member_count: number | null;
+  agent_id: string;
+  agent_name: string | null;
+  agent_archived: boolean;
+  created_at: string;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+export interface FeishuBotAgentRoutes {
+  workspace_id: string;
+  routes: FeishuBotAgentRoute[];
+}
+
+export interface ReplaceFeishuBotAgentRouteInput {
+  scope: FeishuBotAgentRouteScope;
+  chat_id?: string | null;
+  chat_name?: string | null;
+  agent_id: string;
+}
+
+export interface ReplaceFeishuBotAgentRoutesRequest {
+  routes: ReplaceFeishuBotAgentRouteInput[];
+}
+
+export interface FeishuBotChat {
+  name: string;
+  chat_id: string;
+  member_count: number | null;
+  chat_mode: string | null;
+}
+
+export interface FeishuBotChats {
+  workspace_id: string;
+  chats: FeishuBotChat[];
 }
 
 export interface FeishuBotTestResult {

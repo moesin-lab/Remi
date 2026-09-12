@@ -79,6 +79,7 @@ describe("daemon Session archive GC orchestration", () => {
       gcTimer: null,
       gcInFlight: null,
       inflight: new Set<Promise<void>>(),
+      feishuOutboundRuns: new Map(),
       options: { once: false, pollIntervalMs: 1, runtimeId: "rt_shutdown" },
       client: {
         recoverOrphans: async () => {},
@@ -111,6 +112,7 @@ describe("daemon Session archive GC orchestration", () => {
       reconcileRuntimeAgentPlugins: async () => {},
       handleHeartbeatAck: async () => false,
       runtimeModelRefreshTask: null,
+      runtimeModelListRequests: new Map(),
       terminalAuthorityCleanupRetryWake: null,
       agentPluginReconcileAbort: null,
       runtimeModelRefreshAbort: null,
@@ -278,8 +280,10 @@ describe("daemon Session archive GC orchestration", () => {
       restartRequestedFlag: false,
       workspaceOwnershipLost: false,
       inflight: new Set<Promise<void>>(),
+      feishuOutboundRuns: new Map(),
       gcInFlight: null,
       runtimeModelRefreshTask: null,
+      runtimeModelListRequests: new Map(),
       workspaceRootFence: null,
       options: { once: true, pollIntervalMs: 1, runtimeId: "rt_barrier", maxConcurrency: 1 },
       client: {

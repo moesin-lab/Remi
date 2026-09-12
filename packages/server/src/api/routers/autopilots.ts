@@ -1,3 +1,4 @@
+import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 import type { Context, Hono } from "hono";
 import {
   boundedQueryInt,
@@ -148,7 +149,8 @@ export function registerAutopilotRoutes(app: Hono, deps: RouterDeps): void {
   const { store, scheduler } = deps;
 
   app.get("/api/multiremi/autopilots", (c) => {
-    const workspaceId = c.req.query("workspaceId") ?? "local";
+    const workspaceId = resolveRequestWorkspaceId(c, store, c.req.query("workspaceId"));
+    if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
     const autopilots = store.listAutopilots(workspaceId)
@@ -156,7 +158,8 @@ export function registerAutopilotRoutes(app: Hono, deps: RouterDeps): void {
     return c.json({ autopilots, total: autopilots.length });
   });
   app.get("/api/autopilots", (c) => {
-    const workspaceId = c.req.query("workspace_id") ?? "local";
+    const workspaceId = resolveRequestWorkspaceId(c, store, c.req.query("workspace_id"));
+    if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
     const status = cleanString(c.req.query("status"));
@@ -172,7 +175,9 @@ export function registerAutopilotRoutes(app: Hono, deps: RouterDeps): void {
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const secretDenied = taskTokenSecretCreationDenied(c, body.triggerKind ?? body.trigger_kind);
     if (secretDenied) return secretDenied;
-    const input = autopilotCreateCompatibilityInput(c, body);
+    const workspaceId = resolveRequestWorkspaceId(c, store, body.workspace_id ?? c.req.query("workspace_id"));
+    if (workspaceId instanceof Response) return workspaceId;
+    const input = autopilotCreateCompatibilityInput(c, { ...body, workspace_id: workspaceId });
     if (isJsonApiError(input)) return c.json({ error: input.apiError }, input.statusCode);
     const policy = autopilotIssueCreationPolicyInput(c, store, body);
     if (policy instanceof Response) return policy;
@@ -194,7 +199,9 @@ export function registerAutopilotRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJson<CreateAutopilotInput>(c);
     const secretDenied = taskTokenSecretCreationDenied(c, body.triggerKind ?? body.trigger_kind);
     if (secretDenied) return secretDenied;
-    const input = autopilotCreateInput(c, body);
+    const workspaceId = resolveRequestWorkspaceId(c, store, cleanString(body.workspaceId) ?? cleanString(body.workspace_id));
+    if (workspaceId instanceof Response) return workspaceId;
+    const input = autopilotCreateInput(c, { ...body, workspaceId });
     const policy = autopilotIssueCreationPolicyInput(c, store, body);
     if (policy instanceof Response) return policy;
     const issueDenied = denyRestrictedTaskCreateIssueAutopilot(
@@ -444,7 +451,7 @@ export function registerAutopilotRoutes(app: Hono, deps: RouterDeps): void {
       listWorkspaceRepositories(store, autopilot.workspaceId)
         .map((repository) => [repository.id, repository.name] as const),
     );
-    const runs = store.listAutopilotRuns(autopilot.id).slice(offset, offset + limit).map((run) => autopilotRunCompatibilityResponse(run, {
+    const runs = store.listAutopilotRuns(autopilot.id, limit, offset).map((run) => autopilotRunCompatibilityResponse(run, {
       slim: true,
       resolveRepositoryName: (repositoryId) => repositoryNames.get(repositoryId) ?? null,
     }));

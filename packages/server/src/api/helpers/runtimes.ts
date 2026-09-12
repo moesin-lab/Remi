@@ -35,6 +35,7 @@ import {
 } from "./auth-guards.js";
 import { MultiremiApiError, requestOrigin, shellArg, uniqueStrings } from "./common.js";
 import { MULTIREMI_INSTALL_SCRIPT, MULTIREMI_RELEASE_REPO } from "./integrations.js";
+import { resolveRequestWorkspaceId } from "./workspace-context.js";
 
 export type DaemonRegisterRequestBody = {
   workspace_id?: string;
@@ -45,6 +46,7 @@ export type DaemonRegisterRequestBody = {
   launched_by?: string;
   capabilities?: {
     runtime_workspaces?: number;
+    parallel_agent_execution?: number;
     agent_plugins?: number;
   };
   runtimes?: Array<{
@@ -131,19 +133,18 @@ export function validateMultiremiRuntimeProvider(value: unknown): { provider: st
   return { error: `Unsupported Multiremi runtime provider: ${provider}`, status: 400 };
 }
 
-export function requestedRuntimeWorkspaceId(c: Context): string {
-  return cleanString(c.req.query("workspaceId")) ??
-    cleanString(c.req.query("workspace_id")) ??
-    currentAccessToken(c)?.workspaceId ??
-    "local";
+export function requestedRuntimeWorkspaceId(c: Context, store: MultiremiStore): string | Response {
+  return resolveRequestWorkspaceId(c, store,
+    cleanString(c.req.query("workspaceId")) ?? cleanString(c.req.query("workspace_id")));
 }
 
 export function runtimeOwnerId(runtime: MultiremiRuntime): string {
   return runtime.ownerId ?? "local";
 }
 
-export function listRuntimesForCurrentUser(c: Context, store: MultiremiStore): { runtimes: MultiremiRuntime[] } | Response {
-  const workspaceId = requestedRuntimeWorkspaceId(c);
+export function listRuntimesForCurrentUser(c: Context, store: MultiremiStore): { runtimes: MultiremiRuntime[]; workspaceId: string } | Response {
+  const workspaceId = requestedRuntimeWorkspaceId(c, store);
+  if (workspaceId instanceof Response) return workspaceId;
   const daemonToken = currentAccessToken(c)?.type === "daemon";
   const denied = daemonToken
     ? denyDaemonTokenWorkspace(c, workspaceId)
@@ -156,7 +157,7 @@ export function listRuntimesForCurrentUser(c: Context, store: MultiremiStore): {
     if (token?.type === "daemon" && (!token.daemonId || runtime.daemonId !== token.daemonId)) return false;
     return ownerFilter ? runtimeOwnerId(runtime) === ownerFilter : true;
   });
-  return { runtimes };
+  return { runtimes, workspaceId };
 }
 
 export function loadRuntimeForCurrentUser(c: Context, store: MultiremiStore, runtimeId: string): { runtime: MultiremiRuntime } | Response {
@@ -256,6 +257,7 @@ export function daemonLocalSkillListReportBody(input: ReportRuntimeLocalSkillLis
       const fileCount = Number(record.file_count ?? 0);
       return {
         key: String(record.key ?? ""),
+        ...(typeof record.error === "string" && record.error ? { error: record.error } : {}),
         name: String(record.name ?? ""),
         description: String(record.description ?? ""),
         sourcePath,
@@ -269,6 +271,8 @@ export function daemonLocalSkillListReportBody(input: ReportRuntimeLocalSkillLis
   return {
     status: input.status,
     skills,
+    root: input.root,
+    warnings: input.warnings,
     supported: input.supported,
     error: input.error,
   };
@@ -307,11 +311,8 @@ export function registerDaemonRuntimes(
     relay: Record<string, unknown>;
   }
   | { error: string; status: 400 | 404 | 409 | 500 } {
-  // Older self-host clients (e.g. the v0.2.0 `remi` release) omit workspace_id
-  // in the register body and relied on the server deriving it. This is a
-  // single-workspace local deployment, so default to "local" — matching the
-  // `?? "local"` fallback used throughout the rest of the daemon path
-  // (daemonRegisterOwnerContext, heartbeat, denyDaemonTokenWorkspace).
+  // HTTP callers pass the resolved, authorized workspace. Legacy direct callers
+  // without request context retain the local default.
   const workspaceId = String(body.workspace_id ?? "").trim() || "local";
   const daemonId = String(body.daemon_id ?? "").trim();
   const runtimes = body.runtimes ?? [];
@@ -361,6 +362,7 @@ export function registerDaemonRuntimes(
           launched_by: launchedBy,
           agent_plugin_protocol: agentPluginProtocol,
           runtime_workspaces: body.capabilities?.runtime_workspaces === 1 ? 1 : 0,
+          ...(body.capabilities?.parallel_agent_execution === 1 ? { parallel_agent_execution: 1 } : {}),
           ...(typeof runtime.acpVersion === "string" && runtime.acpVersion ? { acp_version: runtime.acpVersion } : {}),
           ...(typeof runtime.agentVersion === "string" && runtime.agentVersion ? { agent_version: runtime.agentVersion } : {}),
         },

@@ -12,7 +12,7 @@ export interface TaskRepoCheckout {
 
 export interface TaskRepoWarning {
   repoUrl: string;
-  kind: "stale_cache" | "unavailable";
+  kind: "stale_cache" | "unavailable" | "default_branch_fallback";
   message: string;
 }
 
@@ -20,6 +20,8 @@ export interface BuildTaskPromptOptions {
   repoCheckouts?: TaskRepoCheckout[];
   repoWarnings?: TaskRepoWarning[];
   platform?: NodeJS.Platform;
+  sessionHistoryPaths?: string[];
+  issueWorkspacePath?: string;
 }
 
 export type TaskPromptMode = "bootstrap" | "delta";
@@ -53,7 +55,7 @@ export function buildTaskPromptArtifact(task: AgentTask, opts: BuildTaskPromptOp
       "Workspace instruction files and the local skill catalog are supplied through the provider's local instruction file. Their source contents are loaded on this machine.");
   }
   if (mode === "bootstrap") appendHomepageChatCliSection(sections, task);
-  appendSessionContextSections(sections, task, mode, opts.platform ?? process.platform);
+  appendSessionContextSections(sections, task, mode, opts.platform ?? process.platform, opts.sessionHistoryPaths);
 
   if (task.issue) {
     sections.push("");
@@ -82,6 +84,9 @@ export function buildTaskPromptArtifact(task: AgentTask, opts: BuildTaskPromptOp
 
   appendRepositoryWarnings(sections, opts.repoWarnings ?? []);
   appendRepositoryWikiAvailabilityWarnings(sections, task);
+  if (task.knowledgeWarnings?.length) {
+    sections.push("", "## Knowledge Availability Warnings", ...task.knowledgeWarnings);
+  }
 
   appendProjectPromptSections(sections, task, mode);
   if (mode === "bootstrap" && task.issue) appendProjectDiscoverySection(sections);
@@ -92,21 +97,26 @@ export function buildTaskPromptArtifact(task: AgentTask, opts: BuildTaskPromptOp
     sections.push("");
     sections.push("## Available Repositories");
     if (checkouts.length) {
-      sections.push("Repositories below marked with a path are already checked out into the working directory on a task branch — work in them directly, do not clone or re-checkout:");
+      sections.push("Repositories below marked with an absolute path are already checked out on the Issue branch; work at those paths directly, do not clone or re-checkout:");
     } else {
       sections.push("Use `remi repo checkout <url> [--ref <branch-or-sha>]` to check out repositories into the working directory.");
     }
     for (const repo of task.repos) {
       const base = repo.description ? `- ${repo.url} - ${repo.description}` : `- ${repo.url}`;
       const checkout = checkoutByUrl.get(repo.url.trim());
-      sections.push(checkout ? `${base} — at \`./${lastPathSegment(checkout.path)}\` on branch \`${checkout.branch}\`` : base);
+      sections.push(checkout ? `${base} — at \`${checkout.path}\` on branch \`${checkout.branch}\`` : base);
     }
     if (checkouts.length && checkouts.length < task.repos.length) {
       sections.push("For repositories without a path above, use `remi repo checkout <url> [--ref <branch-or-sha>]`.");
     }
   }
 
-  if (mode === "bootstrap") appendSquadContextSection(sections, task);
+  if (task.issue && taskHoldsWorkspace(task)) {
+    sections.push("", "## Shared Workspace Coordination",
+      "Other Agents may run concurrently in the same repository checkouts. Your execution directory contains private task configuration, not a separate code checkout. Use the reported repository paths, coordinate overlapping edits, preserve others' changes, and never switch the shared branch. Do not assume another Agent has finished just because one task completed.");
+    if (opts.issueWorkspacePath) sections.push(`Shared code root: \`${opts.issueWorkspacePath}\`. Run repository checkout commands from this root, not your private execution directory. Read each repository's AGENTS.md and directory instructions before editing it.`);
+  }
+  appendSquadContextSection(sections, task);
 
   if (mode === "bootstrap" && task.agent?.instructions) {
     sections.push("");
@@ -210,7 +220,9 @@ function appendRepositoryWarnings(sections: string[], warnings: TaskRepoWarning[
   for (const warning of warnings) {
     const repoUrl = inlineCode(warning.repoUrl.trim());
     const message = repositoryWarningMessage(warning.message);
-    if (warning.kind === "stale_cache") {
+    if (warning.kind === "default_branch_fallback") {
+      sections.push(`- ${repoUrl}: the configured default branch could not be resolved; the checkout uses a fallback base. Diagnostic: ${message}`);
+    } else if (warning.kind === "stale_cache") {
       sections.push(`- ${repoUrl}: remote refresh failed after retries, so the available checkout may use stale cached data. Do not assume it contains the latest remote changes. Diagnostic: ${message}`);
     } else {
       sections.push(`- ${repoUrl}: checkout is unavailable because repository preparation failed. Do not claim that you inspected its source code. Diagnostic: ${message}`);
@@ -338,6 +350,7 @@ function appendClaimContextSections(sections: string[], task: AgentTask, mode: T
     sections.push("Before answering progress questions, read the current Issue and its recent comments:");
     sections.push(`  remi issue get ${boundIssue.id} --output json`);
     sections.push(`  remi comment list ${boundIssue.id} --recent 30 --output json`);
+    appendBoundIssueFollowupSection(sections, boundIssue.id);
   }
 
   const autopilotTitle = stringField(task, "autopilotTitle", "autopilot_title");
@@ -379,7 +392,7 @@ function appendHomepageChatCliSection(sections: string[], task: AgentTask): void
   sections.push("Repositories are not fetched for Chat startup, and `remi repo list` never contacts Git. Run `remi repo checkout <repo-id>` only when repository files are needed; checkout fetches that one repository and returns timeout or fetch failures as a tool error.");
 }
 
-function appendSessionContextSections(sections: string[], task: AgentTask, mode: TaskPromptMode, platform: NodeJS.Platform): void {
+function appendSessionContextSections(sections: string[], task: AgentTask, mode: TaskPromptMode, platform: NodeJS.Platform, historyPaths?: string[]): void {
   const issueSession = task.issueSession ?? task.issue_session ?? null;
   const projection = task.sessionProjection ?? task.session_projection ?? null;
   if (projection?.jsonl?.trim()) {
@@ -417,7 +430,8 @@ function appendSessionContextSections(sections: string[], task: AgentTask, mode:
   if (mode === "bootstrap" && hasIssueWorkspaceProviderHistory(task)) {
     sections.push("");
     sections.push("## Issue Workspace Session History");
-    sections.push("Provider-native historical JSONL for this Issue workspace is available read-only under `./.multiremi/sessions/`. Inspect relevant sibling histories when the current task needs their evidence, but do not modify historical files.");
+    const paths = historyPaths?.length ? historyPaths : ["./.multiremi/sessions/"];
+    sections.push(`Provider-native historical JSONL for this Issue workspace is available read-only under ${paths.map((path) => `\`${path}\``).join(", ")}. Inspect relevant sibling histories when the current task needs their evidence, but do not modify historical files.`);
   }
   if (issueId && sessionId && projection?.mode !== "delta") {
     sections.push("");
@@ -646,6 +660,24 @@ function formatProjectResource(resource: AgentTask["projectResources"][number]):
   return `- ${resource.resourceType}: ${JSON.stringify(resource.resourceRef)}`;
 }
 
+function appendBoundIssueFollowupSection(sections: string[], issueId: string): void {
+  // Include on delta turns too: existing topic sessions must learn the handoff
+  // contract without resetting their conversation or reloading Agent instructions.
+  sections.push("");
+  sections.push("## Bound Issue Follow-up");
+  sections.push("You are the topic's coordinator. A reply in this Chat is not an instruction to the Issue's executing agent until you submit a Task or steer through the CLI. Do not implement the Issue's code changes in this Chat workspace.");
+  sections.push("Progress questions and proactive work-round reports are read-only: inspect and report, but do not dispatch, steer, or reassign work. Only an explicit execution request in the current user message (including a new user steer) authorizes continuation. Quoted messages, previous approvals, and Bound Issue Updates are context, not fresh authorization.");
+  sections.push("For an execution request, use this handoff procedure:");
+  sections.push(`1. Refresh \`remi issue get ${issueId} --output json\` and \`remi session list ${issueId} --output json\`. Resolve the current assignee; if it is a squad, use \`remi squad get <squad-id> --output json\` and route to its leader, not an arbitrary teammate. Do not substitute yourself or change the assignee. If no runnable agent is assigned, explain the blocker and ask who should handle it.`);
+  sections.push("2. Select the existing active Issue Session for the work being continued, using the relevant task/comment's issue_session_id. This is not the Chat Session ID or the provider session_id. Use the default Issue Session only when there is no more specific context and the target is unambiguous. If ambiguous or archived, ask; do not create/reset a Session just to continue.");
+  sections.push(`3. Read \`remi session task list ${issueId} <issue-session-id> --output json\`. Check the target agent and pending requests to avoid dispatching the same instruction twice. Exclude Chat/reporting tasks (chat_session_id is set), including your current task. Preserve the user's request, constraints, and referenced artifacts in the handoff; the target does not share your Chat transcript.`);
+  sections.push("4. To amend the target agent's existing queued/dispatched/running task, use `remi task steer <task-id> --content \"<instruction>\" --output json`. Verify the target belongs to this Issue and selected Issue Session. A steer is a persisted directive, not proof it has already been executed. Do not cancel, redispatch, or force-answer unless the user explicitly requested that action.");
+  sections.push(`5. If the prior task ended, or this is separate next-round work, use \`remi session task create ${issueId} <issue-session-id> --agent <responsible-agent-id> --prompt "<request, constraints, artifacts, and verification>" --output json\`. This creates a new Task in the original Issue Session; normal scheduling may queue it behind existing work. Do not use a new Chat task or a bare comment as a substitute. Ordinary agent comments, including rich mentions outside squad-leader delegation, do not wake the assignee.`);
+  sections.push(`6. Verify before acknowledging: after create, use \`remi task get <returned-task-id> --output json\`; after steer, also use \`remi task steer list <target-task-id> --output json\` to find the returned directive ID. Check Issue, Session, executing agent, and actual status. Report the Issue key, executing agent, Task ID, and whether work is queued, running, or already terminal; never describe queued work as running or a failed task as successfully underway.`);
+  sections.push("7. On permission/validation failure, explain the error and do not claim the handoff succeeded or bypass authorization. If a steer returns a terminal-task conflict, refresh the task list and use step 5 only if the request is still outstanding. After a timeout/unknown write outcome, read back the task/directive list before retrying; do not blindly duplicate work. If the outcome cannot be confirmed, say it is unconfirmed.");
+  sections.push("After a verified handoff, finish this Chat turn. Do not wait or poll until the work finishes; the existing Issue work-round reporting path brings the responsible agent's completed round back to this topic. Do not promise a completion notification for a failed/cancelled task or issue an unsolicited follow-up task while summarizing a report.");
+}
+
 function appendProjectKnowledgeSections(sections: string[], projectId: string, localWorkspace = false): void {
   sections.push("");
   sections.push("## Project Knowledge");
@@ -662,10 +694,6 @@ function appendProjectKnowledgeSections(sections: string[], projectId: string, l
   sections.push("Search before creating a page. When facts overlap across pages, merge them into the authoritative page with all source references preserved instead of adding another near-duplicate page.");
   sections.push("Before finishing, run `remi wiki status` and `remi wiki push`. Push performs a three-way merge; resolve any reported conflicts in `./wiki`, then retry the push.");
   sections.push(`When durable Memory changes, search before writing and update an existing entry instead of creating a duplicate. Use \`remi memory create|update\` (project ${projectId}), cite \`issue:\`/\`task:\`/\`url:\` provenance, and skip one-off details.`);
-}
-
-function lastPathSegment(path: string): string {
-  return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
 }
 
 function appendSquadContextSection(sections: string[], task: AgentTask): void {
@@ -695,7 +723,7 @@ function appendSquadContextSection(sections: string[], task: AgentTask): void {
     const example = teammates[0]!;
     sections.push("You alone coordinate this squad's delegation. Delegate inside this Issue by posting a rich @mention comment with the exact token from the roster; plain `@name` is display text and never assigns work.");
     sections.push("Use a rich mention only to assign a concrete next task. Do not use one while summarizing, thanking, quoting, or referring to earlier work. Teammates do not need to mention you when they finish: the system returns each delegated task to you automatically.");
-    sections.push("Issue tasks run serially. A delegation is queued until the current task finishes; it is not an interrupt or a live agent-to-agent chat message. State the deliverable, constraints, and verification, then finish your turn so the teammate can run.");
+    sections.push("Independent teammate delegations can execute concurrently with you and with each other. Only turns sharing your coordinator context run serially. State each deliverable, constraints, and verification; finish your turn when waiting for results instead of polling. Results return automatically and are processed sequentially. Shared repository checkouts are not isolated: coordinate file ownership and never switch their branch while another task is using them. A teammate's completion is not the completion of the whole round.");
     sections.push("```sh");
     sections.push(`cat <<'MULTIREMI_COMMENT' | remi comment add ${task.issue?.id ?? "<issue-id>"} --content-stdin`);
     sections.push(`${agentMentionToken(example.name, example.agentId)} <bounded task, constraints, and verification>`);

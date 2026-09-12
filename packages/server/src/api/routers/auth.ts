@@ -17,7 +17,7 @@ import {
 import type { RouterDeps } from "./deps.js";
 import { PasswordLoginLimiter } from "../helpers/password-login.js";
 import { readRequestBodyLimited } from "../helpers/webhooks.js";
-import { currentRequestUserId, isObjectRecord } from "../wire/context.js";
+import { authenticatedRequestUserId, currentAccessToken, currentRequestUserId, isObjectRecord } from "../wire/context.js";
 import { PasswordAccountError, normalizePasswordLoginEmail } from "@multiremi/store/repos/password-accounts-repo.js";
 
 export function registerAuthRoutes(app: Hono, deps: RouterDeps): void {
@@ -74,12 +74,20 @@ export function registerAuthRoutes(app: Hono, deps: RouterDeps): void {
   });
 
   app.post("/api/cli-token", async (c) => {
+    const userId = currentRequestUserId(c);
+    if (userId !== "local" && !store.getUser(userId)) return c.json({ error: "unauthorized" }, 401);
+    const source = currentAccessToken(c);
+    // Keep the migrated owner a verified human without promoting legacy machine
+    // credentials to a human session or a different workspace.
+    const localSession = userId === "local" && (
+      source?.purpose === "session" || (!source && authenticatedRequestUserId(c) === "local")
+    );
     const token = await store.createAccessToken({
-      workspaceId: "local",
+      workspaceId: source?.workspaceId ?? "local",
       name: "CLI token",
-      userId: currentRequestUserId(c),
+      userId,
       type: "pat",
-      purpose: "cli",
+      purpose: localSession ? "session" : "cli",
     });
     return c.json({ token: token.token });
   });

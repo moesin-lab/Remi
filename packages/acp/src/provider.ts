@@ -15,8 +15,10 @@ import type {
 } from "@shared/contracts/provider-types.js";
 import { createAgentResponse } from "@shared/contracts/provider-types.js";
 import { isCompactionChunk } from "@shared/contracts/compaction.js";
+import { readContextUsage, type ContextUsage } from "@shared/agent-execution.js";
 import { AcpClient } from "./client.js";
 import { createAdapter, type AgentAdapter } from "./adapters/index.js";
+import { hasOneMillionContext, resolveClaudeContextModel } from "./adapters/claude-code/model-context.js";
 import type {
   SessionNotification,
   SessionUpdate,
@@ -37,6 +39,8 @@ import type {
 } from "@shared/contracts/acp-protocol.js";
 
 export interface AcpProviderOptions {
+  /** Internal capability probes keep descendants inside the supervisor's process group. */
+  inheritProcessGroup?: boolean;
   /** Agent type: "claude" | "codex" (default: "claude"). */
   agentType?: string;
   /** ACP executable path (auto-detected from agentType if omitted). */
@@ -158,6 +162,7 @@ interface PromptState {
   text: string;
   usage: PromptUsageState;
   completedToolCount: number;
+  contextUsage?: ContextUsage;
 }
 
 export function createPromptUsageState(): PromptUsageState {
@@ -247,11 +252,10 @@ export function resolveAvailableAcpPermissionMode(
 
 /**
  * The `session/set_config_option` call for a requested select value, or null
- * when the bridge does not advertise it. Both bridges reject an unknown option
- * id or value outright
- * (claude-agent-acp dist/acp-agent.js:3476, 3525; codex-acp dist/index.js:29328,
- * 29370, 29379). Callers choose whether a missing value is optional (model)
- * or an explicit unsupported request that must fail (effort).
+ * when the bridge does not advertise it. Codex rejects unknown values;
+ * Claude can additionally resolve full model IDs to SDK picker aliases.
+ * Callers choose whether a missing value is optional (model), must be
+ * resolved by Claude (1M model), or must fail (effort).
  */
 export function resolveConfigOptionChange(
   configOptions: SessionConfigOption[] | undefined,
@@ -534,6 +538,14 @@ export class AcpProvider implements Provider {
       resolveWaiting?.();
     };
 
+    // Publish the acknowledged session model, including default/resumed sessions.
+    // Construction-time model options alone do not prove what the bridge selected.
+    if (selectConfigOption(entry.configOptions, MODEL_OPTION_CATEGORY)) {
+      pushEvent({ sessionUpdate: "config_option_update", configOptions: entry.configOptions });
+    } else if (entry.models?.currentModelId) {
+      pushEvent({ sessionUpdate: "config_option_update", id: "model", value: entry.models.currentModelId });
+    }
+
     // Belt-and-braces against a mid-turn process death: the prompt request's
     // rejection normally wakes the loop, but if the death races request
     // bookkeeping this guarantees the stream still terminates.
@@ -547,8 +559,19 @@ export class AcpProvider implements Provider {
     entry.client["_options"].onSessionUpdate = (notification: SessionNotification) => {
       if (notification.sessionId !== entry.acpSessionId) return;
       const update = notification.update;
+      if (update.sessionUpdate === "config_option_update" && update.configOptions) {
+        entry.configOptions = update.configOptions;
+      } else if (update.sessionUpdate === "config_option_update" && update.id === "model" && typeof update.value === "string") {
+        const value = update.value;
+        entry.configOptions = entry.configOptions?.map(option => option.type === "select" && (option.category === "model" || option.id === "model")
+          ? { ...option, currentValue: value } : option);
+        if (entry.models) entry.models = { ...entry.models, currentModelId: value };
+      }
       if (update.sessionUpdate === "usage_update") {
         accumulateUsage(entry.promptState.usage, update);
+        const context = (update._meta?.claudeCode as { parentToolUseId?: string } | undefined)?.parentToolUseId
+          ? null : readContextUsage(update);
+        if (context) entry.promptState.contextUsage = context;
       }
       if (update.sessionUpdate === "agent_message_chunk") {
         const text = extractChunkText((update as Record<string, any>).content);
@@ -668,7 +691,11 @@ export class AcpProvider implements Provider {
     const cwd = options?.cwd ?? this._options.cwd ?? homedir();
     const mcpServers = this._options.getMcpServers?.() ?? [];
     const mcpServersKey = JSON.stringify(mcpServers);
-    const model = options?.model ?? this._options.model ?? null;
+    const requestedModel = options?.model ?? this._options.model ?? null;
+    const model = this._adapter.agentType === "claude"
+      ? resolveClaudeContextModel(requestedModel,
+        this._options.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT ?? process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT)
+      : requestedModel;
     const effort = options?.effort ?? null;
     const pluginPaths = absolutePluginPaths(pluginOptions?.pluginPaths ?? this._options.pluginPaths);
     const pluginPathsKey = JSON.stringify(pluginPaths);
@@ -747,6 +774,7 @@ export class AcpProvider implements Provider {
     } as Parameters<AgentAdapter["buildSessionMeta"]>[0]);
 
     const client = new AcpClient({
+      inheritProcessGroup: this._options.inheritProcessGroup,
       executable: resolveAcpExecutableForAgent(
         this._adapter.agentType,
         this._options.executable,
@@ -909,7 +937,18 @@ export class AcpProvider implements Provider {
   }
 
   private async _setConfigOption(entry: PoolEntry, category: string, value: string): Promise<boolean> {
-    const change = resolveConfigOptionChange(entry.configOptions, category, value);
+    const claudeOneMillion = this._adapter.agentType === "claude"
+      && category === MODEL_OPTION_CATEGORY && hasOneMillionContext(value);
+    let change = resolveConfigOptionChange(entry.configOptions, category, value);
+    if (!change && claudeOneMillion) {
+      const option = selectConfigOption(entry.configOptions, category);
+      if (option?.currentValue === value) return true;
+      if (!option) throw new Error(`[acp_model_context_unsupported] Claude cannot select ${value}: no model selector`);
+      // Claude ACP resolves full IDs against its SDK modelInfos, including
+      // resolvedModel aliases (e.g. claude-fable-5-1[1m] -> fable[1m]).
+      // Let that resolver validate the request; never silently drop the hint.
+      change = { configId: option.id, value };
+    }
     if (!change) {
       console.warn(
         `[acp] ${this._adapter.agentType}: skipping ${category}="${value}" — the agent does not offer it`,
@@ -918,6 +957,12 @@ export class AcpProvider implements Provider {
     }
     const result = await entry.client.setConfigOption(entry.acpSessionId, change.configId, change.value);
     if (result?.configOptions) entry.configOptions = result.configOptions;
+    if (claudeOneMillion) {
+      const selected = currentConfigValue(entry.configOptions, category);
+      if (!selected || !hasOneMillionContext(selected)) {
+        throw new Error(`[acp_model_context_unsupported] Claude did not select ${value} (selected: ${selected ?? "unknown"})`);
+      }
+    }
     return true;
   }
 
@@ -1210,7 +1255,7 @@ function nonNegativeFinite(value: unknown): number | null {
 }
 
 function buildAgentResponse(entry: PoolEntry, result: PromptResult, settleScope: PromptUsageSettleScope): AgentResponse {
-  const { usage, text, promptStartTime, completedToolCount } = entry.promptState;
+  const { usage, text, promptStartTime, completedToolCount, contextUsage } = entry.promptState;
   const durationMs = Date.now() - promptStartTime;
 
   // Reset per-prompt state for next prompt
@@ -1234,6 +1279,7 @@ function buildAgentResponse(entry: PoolEntry, result: PromptResult, settleScope:
     metadata: {
       stopReason: result.stopReason,
       provider: "acp",
+      ...(contextUsage ? { contextUsage } : {}),
     },
   });
 }

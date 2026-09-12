@@ -396,6 +396,9 @@
     "delegation_return_reason_no_lineage": "委任の関連情報が不完全です",
     "delegation_return_reason_delegator_unavailable": "委任元の agent を利用できません",
     "delegation_return_reason_already_covered": "この更新はすでに処理されています",
+    "delegation_return_reason_coalesced_into_pending_return": "更新を保留中の委任元タスクに統合しました",
+    "delegation_return_reason_covered_by_queued_task": "委任元のキュー済みタスクでこの更新を処理します",
+    "delegation_return_reason_deferred_lane_busy": "この Issue セッションでは他のタスクがまだ進行中です",
     "child_done_parent_triggered": "サブイシューの完了後に親イシューの担当者をキューに追加しました",
     "child_done_parent_skipped": "サブイシューの完了後に親イシューの担当者をキューに追加しませんでした: {{reason}}",
     "child_done_parent_reason_no_assignee": "親イシューに担当者がいません",
@@ -421,7 +424,8 @@
     "coalesced_badge": "×{{count}}",
     "activity_count_other": "アクティビティ {{count}} 件",
     "show_more_activities_other": "アクティビティをさらに {{count}} 件表示",
-    "jump_to_latest": "最新へ移動"
+    "jump_to_latest": "最新へ移動",
+    "loading_older": "以前のアクティビティを読み込み中..."
   },
   "comment": {
     "delete_title": "コメントを削除",
@@ -457,6 +461,11 @@
     }
   },
   "agent_activity": {
+    "count_running": "実行中 {{count}} 件",
+    "count_starting": "起動中 {{count}} 件",
+    "count_queued": "待機中 {{count}} 件",
+    "count_awaiting_human": "確認待ち {{count}} 件",
+    "count_waiting_directory": "ディレクトリ待ち {{count}} 件",
     "hover_header_other": "作業中のエージェント {{count}} 件",
     "status_running": "作業中",
     "status_awaiting_human": "レビュー待ち",

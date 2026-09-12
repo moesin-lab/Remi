@@ -13,7 +13,9 @@ import type {
 } from "@multiremi/contracts/types.js";
 import { FeishuConnector } from "@connectors/feishu/index.js";
 import { MenuSyncer } from "@connectors/feishu/menu-sync.js";
-import type { TaskStreamingHandler } from "@connectors/base.js";
+import type { TaskStreamingHandler, TaskStreamEvent, TaskStreamMeta } from "@connectors/base.js";
+import type { GroupPolicy } from "@connectors/feishu/config.js";
+import type { HandleTaskStreamOpts } from "@connectors/feishu/channel.js";
 
 const log = createLogger("agent");
 
@@ -43,6 +45,10 @@ export interface FeishuChannelCredentials {
 
 /** A running Feishu channel that can be stopped. */
 export interface FeishuChannelHandle {
+  resolveProactiveMention: (chatId: string, mention: import("@multiremi/contracts/types.js").FeishuBotOutboundMention,
+    signal?: AbortSignal) => Promise<string | null>;
+  streamProactiveTask: (chatId: string, sessionKey: string, stream: AsyncIterable<TaskStreamEvent>, meta: TaskStreamMeta,
+    options: HandleTaskStreamOpts) => Promise<{ messageId: string }>;
   start: Promise<void>;
   stop: () => Promise<void>;
   publishBotMenu: (config: ResolvedBotMenuConfig, dryRun: boolean) => Promise<BotMenuPublishResult>;
@@ -52,6 +58,7 @@ export interface FeishuChannelHandle {
     body: string;
     idempotencyKey: string;
   }) => Promise<{ messageId: string }>;
+  uploadImage: (image: Buffer) => Promise<{ imageKey: string }>;
 }
 
 export async function waitForFeishuConnectorStart(
@@ -81,6 +88,7 @@ export async function bootFeishuChannel(
     ensureTopicWorkspace?: (sessionKey: string, topicId: string) => Promise<string | null>;
     credentials: FeishuChannelCredentials;
     taskHandler: TaskStreamingHandler;
+    groupPolicy?: GroupPolicy;
     abortTask?: (sessionKey: string) => Promise<void>;
   },
 ): Promise<FeishuChannelHandle> {
@@ -88,7 +96,7 @@ export async function bootFeishuChannel(
   if (!config.feishu.appId || !config.feishu.appSecret) {
     throw new Error("Feishu channel cannot start; the configured bot is missing an App ID or App Secret");
   }
-  const connector = new FeishuConnector(config.feishu, undefined, authorizeSender);
+  const connector = new FeishuConnector(config.feishu, options.groupPolicy, authorizeSender);
   if (options.abortTask) connector.setAbortHandler(options.abortTask);
   const menuSyncer = new MenuSyncer({
     appId: config.feishu.appId,
@@ -103,5 +111,8 @@ export async function bootFeishuChannel(
     stop: () => connector.stop(),
     publishBotMenu: (menu, dryRun) => menuSyncer.syncAll(menu, { dryRun }),
     sendProactiveThreadReply: (input) => connector.sendProactiveThreadReply(input),
+    streamProactiveTask: (...args) => connector.streamProactiveTask(...args),
+    resolveProactiveMention: (...args) => connector.resolveProactiveMention(...args),
+    uploadImage: (image) => connector.uploadImage(image),
   };
 }

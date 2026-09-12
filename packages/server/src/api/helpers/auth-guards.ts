@@ -3,6 +3,7 @@
 // scoping), and may this user reach this workspace/agent/attachment. `deny*` helpers return a
 // ready-made Response when access is refused and null when it is allowed.
 import type { Context } from "hono";
+import { resolveRequestWorkspaceId } from "./workspace-context.js";
 import { MultiremiStore } from "@multiremi/store/store.js";
 import { daemonRuntimeId } from "@multiremi/store/helpers.js";
 import {
@@ -18,6 +19,7 @@ import {
 import type { MultiremiRequestAuth } from "../wire/index.js";
 import type {
   CreateAccessTokenInput,
+  CreateAttachmentInput,
   MultiremiAccessToken,
   MultiremiAgent,
   MultiremiAttachment,
@@ -322,11 +324,10 @@ export function currentJwtUserId(c: Context): string | null {
   return currentAuth(c).jwtUserId;
 }
 
-export function compatibilityWorkspaceId(c: Context): string {
-  return cleanString(c.req.header("X-Workspace-ID")) ??
-    cleanString(c.req.query("workspace_id")) ??
-    currentAccessToken(c)?.workspaceId ??
-    "local";
+export function compatibilityWorkspaceId(c: Context, store: MultiremiStore): string | Response {
+  return resolveRequestWorkspaceId(c, store,
+    cleanString(c.req.header("X-Workspace-ID")) ?? cleanString(c.req.query("workspace_id")),
+  );
 }
 
 // The web client tags every request with the slug of the workspace the user is
@@ -343,20 +344,31 @@ export function compatibilityUserId(c: Context): string {
     "local";
 }
 
-export function compatibilityInboxMemberId(c: Context, store: MultiremiStore): string {
-  const raw = authenticatedRequestUserId(c) ??
-    cleanString(c.req.query("member_id")) ??
-    "local";
-  // Inbox rows are keyed by member-table ids (mem_<ws>_<user>) — every
-  // createInboxItem writer passes a member id — while auth yields the USER id.
-  // Querying with the raw user id silently returns an empty inbox (MUL-38: 151
-  // unread notifications invisible in the web UI). Accept an exact member id
-  // untouched; otherwise resolve the user's membership, scoped to the request's
-  // workspace when the slug header names one.
-  if (store.getWorkspaceMember(raw)) return raw;
-  const workspaceId = workspaceIdFromSlugHeader(c, store);
-  const membership = store.listWorkspaceMembers(workspaceId).find((member) => member.userId === raw);
-  return membership?.id ?? raw;
+export function compatibilityInboxScope(
+  c: Context,
+  store: MultiremiStore,
+  requestedMemberId = c.req.query("member_id"),
+): { memberId: string; workspaceId: string } | Response {
+  const workspaceId = resolveRequestWorkspaceId(c, store, c.req.query("workspaceId") ?? c.req.query("workspace_id"));
+  if (workspaceId instanceof Response) return workspaceId;
+  const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+  if (denied) return denied;
+  const userId = authenticatedRequestUserId(c);
+  const requested = cleanString(requestedMemberId);
+  const raw = requested ?? userId ?? "local";
+  // Inbox rows use member ids. Resolve only inside the selected workspace,
+  // and never let a human/task credential select another member's inbox.
+  // Keep the workspace in the scope: a moved member can retain older inbox rows.
+  const exact = store.getWorkspaceMember(raw);
+  const member = (exact?.workspaceId === workspaceId ? exact : null)
+    ?? store.listWorkspaceMembers(workspaceId).find((candidate) => candidate.userId === raw)
+    ?? exact;
+  if (member && (member.workspaceId !== workspaceId
+    || (userId && member.userId !== userId && member.id !== userId))) {
+    return c.json({ error: "inbox not found" }, 404);
+  }
+  if (userId && !member) return c.json({ error: "inbox not found" }, 404);
+  return { memberId: member?.id ?? raw, workspaceId };
 }
 
 export function denyCurrentUserRuntimeWorkspaceAccess(c: Context, store: MultiremiStore, runtime: MultiremiRuntime): Response | null {
@@ -366,12 +378,12 @@ export function denyCurrentUserRuntimeWorkspaceAccess(c: Context, store: Multire
   const userId = authenticatedRequestUserId(c);
   // Same rule as denyCurrentUserWorkspaceAccess: a human's login PAT is not
   // workspace-scoped — membership decides which runtimes they can see.
-  const humanPat = token?.type === "pat" && userId && userId !== "local";
+  const humanPat = token?.type === "pat" && userId && (userId !== "local" || token.purpose === "session");
   if (!humanPat && token?.workspaceId && token.workspaceId !== workspaceId) {
     return c.json({ error: "runtime not found" }, 404);
   }
   // A logged-in human who is not a member of the runtime's workspace can't see it.
-  if (userId && userId !== "local" && !store.getUserRoleInWorkspace(userId, workspaceId)) {
+  if (userId && (userId !== "local" || humanPat || !token) && !store.getUserRoleInWorkspace(userId, workspaceId)) {
     return c.json({ error: "runtime not found" }, 404);
   }
   return null;
@@ -411,6 +423,20 @@ export function canUserViewTaskMessages(store: MultiremiStore, userId: string | 
   const agent = task.agentId ? store.getAgent(task.agentId) : null;
   if (!agent) return true;
   return canUserAccessAgentByUserId(store, userId, agent);
+}
+
+// Chat task metadata and controls carry the same creator boundary as its
+// transcript. A task capability may access its own live Chat task even when
+// it was minted for a shared Runtime owner rather than the Chat creator.
+export function canCurrentUserAccessChatTask(c: Context, store: MultiremiStore, task: MultiremiTask): boolean {
+  if (!task.chatSessionId) return true;
+  if (denyCurrentUserWorkspaceAccess(c, store, task.workspaceId)) return false;
+  const session = store.getChatSession(task.chatSessionId);
+  if (!session) return false;
+  const token = currentAccessToken(c);
+  if (token?.type === "task") return token.taskId === task.id
+    && token.agentId === task.agentId && token.workspaceId === task.workspaceId;
+  return canUserViewTaskMessages(store, currentRequestUserId(c), task);
 }
 
 export function currentWorkspaceRole(c: Context, store: MultiremiStore, workspaceId: string): string {
@@ -489,7 +515,9 @@ export function denyCurrentUserWorkspaceAccess(c: Context, store: MultiremiStore
   // reach others. A human's login PAT is minted under "local" but is a session
   // credential, not a scope — the membership check below is the authority for
   // real users, otherwise they could never open a workspace created after login.
-  const humanPat = token?.type === "pat" && userId && userId !== "local";
+  // The migrated deployment owner keeps userId=local; session purpose separates
+  // that login from legacy ownerless workspace credentials.
+  const humanPat = token?.type === "pat" && userId && (userId !== "local" || token.purpose === "session");
   if (!humanPat && token?.workspaceId && token.workspaceId !== workspaceId) {
     return c.json({ error: "workspace not found" }, 404);
   }
@@ -497,7 +525,7 @@ export function denyCurrentUserWorkspaceAccess(c: Context, store: MultiremiStore
   // non-members get 404 (existence hidden). No user id (or the synthetic "local"
   // admin identity carried by user-less workspace access tokens) => master token /
   // open mode => full admin access.
-  if (userId && userId !== "local" && !store.getUserRoleInWorkspace(userId, workspaceId)) {
+  if (userId && (userId !== "local" || humanPat || !token) && !store.getUserRoleInWorkspace(userId, workspaceId)) {
     return c.json({ error: "workspace not found" }, 404);
   }
   return null;
@@ -557,6 +585,39 @@ export function denyAttachmentAccess(c: Context, store: MultiremiStore, attachme
   return denyCurrentUserWorkspaceAccess(c, store, attachment.workspaceId);
 }
 
+export function denyAttachmentCreationAccess(
+  c: Context,
+  store: MultiremiStore,
+  workspaceId: string,
+  input: Pick<CreateAttachmentInput,
+    "issueId" | "issue_id" | "commentId" | "comment_id"
+    | "chatSessionId" | "chat_session_id" | "chatMessageId" | "chat_message_id">,
+): Response | null {
+  const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+  if (denied) return denied;
+  const issueId = cleanString(input.issueId ?? input.issue_id);
+  if (issueId && store.getIssue(issueId)?.workspaceId !== workspaceId) {
+    return c.json({ error: "issue not found" }, 404);
+  }
+  const commentId = cleanString(input.commentId ?? input.comment_id);
+  if (commentId) {
+    const comment = store.getIssueComment(commentId);
+    if (!comment || store.getIssue(comment.issueId)?.workspaceId !== workspaceId) {
+      return c.json({ error: "comment not found" }, 404);
+    }
+  }
+  const chatSessionId = cleanString(input.chatSessionId ?? input.chat_session_id);
+  const chatMessageId = cleanString(input.chatMessageId ?? input.chat_message_id);
+  const chatMessage = chatMessageId ? store.getChatMessage(chatMessageId) : null;
+  if (chatMessageId && !chatMessage) return c.json({ error: "chat message not found" }, 404);
+  for (const sessionId of new Set([chatSessionId, chatMessage?.chatSessionId].filter((id): id is string => Boolean(id)))) {
+    if (store.getChatSession(sessionId)?.workspaceId !== workspaceId) return c.json({ error: "chat session not found" }, 404);
+    const loaded = loadChatSessionForCurrentUser(c, store, sessionId);
+    if (loaded instanceof Response) return loaded;
+  }
+  return null;
+}
+
 export function hasJwtWorkspaceAccess(store: MultiremiStore, userId: string, workspaceId: string): boolean {
   return store.getUserRoleInWorkspace(userId, workspaceId) !== null;
 }
@@ -567,6 +628,11 @@ export type DaemonWorkspaceDenyOptions = {
 
 export function isDaemonGcCheckRequest(c: Context): boolean {
   return new URL(c.req.url).pathname.endsWith("/gc-check");
+}
+
+export function isFeishuBotOutboundAttachmentRequest(c: Context): boolean {
+  return /^\/api\/daemon\/runtimes\/[^/]+\/feishu-bot\/outbound\/[^/]+\/attachments\/[^/]+$/
+    .test(new URL(c.req.url).pathname);
 }
 
 export function denyDaemonTokenWorkspace(c: Context, workspaceId?: string | null, options: DaemonWorkspaceDenyOptions = {}): Response | null {

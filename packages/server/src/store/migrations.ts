@@ -29,6 +29,12 @@ const MARKDOWN_ATTACHMENT_OWNERSHIP_MIGRATION = "20260827_markdown_attachment_ow
 const AGENT_ROLE_MIGRATION = "20260827_agent_roles";
 const PROJECT_DEVICE_DAEMON_CANONICALIZATION_MIGRATION = "20260831_project_device_daemon_canonicalization";
 const FEISHU_ISSUE_TOPIC_OUTBOUND_MIGRATION = "20260904_feishu_issue_topic_outbound_nullable";
+const FEISHU_TOPIC_REPORT_SCHEDULING_MIGRATION = "20260905_feishu_topic_report_scheduling";
+const CHAT_MESSAGE_SEQUENCE_MIGRATION = "20260905_chat_message_sequence";
+const FEISHU_BOT_AGENT_ROUTES_MIGRATION = "20260908_feishu_bot_agent_routes";
+const FEISHU_BOT_AGENT_ROUTE_DEFAULT_UNIQUENESS_MIGRATION =
+  "20260909_feishu_bot_agent_route_default_uniqueness";
+const AGENT_PAGE_QUERY_INDEXES_MIGRATION = "20260910_agent_page_query_indexes";
 
 // Stable Feishu open_id of the deployment owner (hehuajie / 贺华杰). The seed
 // `local` user is tagged with this on migration so SSO login re-binds to it
@@ -2077,6 +2083,7 @@ export function runMigrations(db: SqlDatabase): void {
       work_dir TEXT,
       latest_task_id TEXT,
       unread_since TEXT,
+      message_sequence INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY(agent_id) REFERENCES multiremi_agents(id),
@@ -2096,6 +2103,7 @@ export function runMigrations(db: SqlDatabase): void {
       elapsed_ms INTEGER,
       pending_agent_delivery INTEGER NOT NULL DEFAULT 0,
       agent_delivery_task_id TEXT,
+      sequence INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       FOREIGN KEY(chat_session_id) REFERENCES multiremi_chat_sessions(id) ON DELETE CASCADE,
       FOREIGN KEY(task_id) REFERENCES multiremi_tasks(id) ON DELETE SET NULL
@@ -2150,6 +2158,7 @@ export function runMigrations(db: SqlDatabase): void {
       issue_creation_restricted INTEGER NOT NULL DEFAULT 0,
       delegation_id TEXT,
       delegated_by_agent_id TEXT,
+      delegation_return_task_id TEXT,
       assignment_event_id TEXT,
       assignment_source_event_id TEXT,
       projection_from_seq INTEGER,
@@ -2291,6 +2300,29 @@ export function runMigrations(db: SqlDatabase): void {
 
     CREATE INDEX IF NOT EXISTS idx_multiremi_feishu_bot_round_pushes_wake
       ON multiremi_feishu_bot_round_pushes(wake_task_id, delivery_mode);
+
+    -- A pending human request can wake the bound Feishu topic Agent immediately.
+    -- request_id is the idempotency boundary: retries of the daemon report must
+    -- never create a second wake Task for the same question.
+    CREATE TABLE IF NOT EXISTS multiremi_feishu_bot_human_request_pushes (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      binding_id TEXT NOT NULL,
+      issue_id TEXT NOT NULL,
+      source_task_id TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      wake_task_id TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(binding_id, request_id),
+      FOREIGN KEY(binding_id) REFERENCES multiremi_feishu_bot_chat_bindings(id) ON DELETE CASCADE,
+      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE,
+      FOREIGN KEY(source_task_id) REFERENCES multiremi_tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY(wake_task_id) REFERENCES multiremi_tasks(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_multiremi_feishu_bot_human_request_pushes_wake
+      ON multiremi_feishu_bot_human_request_pushes(wake_task_id);
 
     -- The completed Chat reply is committed here before the daemon sends it.
     -- Leases make daemon crashes recoverable; id is also Feishu's stable uuid.
@@ -2676,6 +2708,7 @@ export function runMigrations(db: SqlDatabase): void {
   ensureIssueSubscriberTypedSchema(db);
   addColumnIfMissing(db, "multiremi_chat_sessions", "creator_id TEXT");
   addColumnIfMissing(db, "multiremi_chat_sessions", "unread_since TEXT");
+  addColumnIfMissing(db, "multiremi_chat_sessions", "pinned INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(
     db,
     "multiremi_chat_sessions",
@@ -2687,15 +2720,24 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_chat_sessions", "session_runtime_id TEXT");
   addColumnIfMissing(db, "multiremi_chat_sessions", "session_provider TEXT");
   addColumnIfMissing(db, "multiremi_chat_sessions", "session_execution_fingerprint TEXT");
+  addColumnIfMissing(db, "multiremi_chat_sessions", "message_sequence INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "multiremi_chat_messages", "failure_reason TEXT");
   addColumnIfMissing(db, "multiremi_chat_messages", "elapsed_ms INTEGER");
   addColumnIfMissing(db, "multiremi_chat_messages", "pending_agent_delivery INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "multiremi_chat_messages", "agent_delivery_task_id TEXT");
+  addColumnIfMissing(db, "multiremi_chat_messages", "sequence INTEGER NOT NULL DEFAULT 0");
+  runMigrationOnce(db, CHAT_MESSAGE_SEQUENCE_MIGRATION, () => backfillChatMessageSequences(db));
   db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_chat_messages_agent_delivery
     ON multiremi_chat_messages(chat_session_id, pending_agent_delivery, created_at)`);
+  // Legacy tables must gain the sequence column before this index is created.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_chat_messages_session_sequence
+    ON multiremi_chat_messages(chat_session_id, sequence, id)`);
   dropColumnIfExists(db, "multiremi_agent_issue_update_state", "window_started_at");
   dropColumnIfExists(db, "multiremi_agent_issue_update_state", "deliveries_in_window");
   addColumnIfMissing(db, "multiremi_tasks", "chat_session_id TEXT");
+  addColumnIfMissing(db, "multiremi_repository_wiki_storage_jobs", "lease_token TEXT");
+  addColumnIfMissing(db, "multiremi_repository_wiki_storage_jobs", "lease_until TEXT");
+  addColumnIfMissing(db, "multiremi_tasks", "chat_queue_order INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "multiremi_tasks", "task_kind TEXT NOT NULL DEFAULT 'direct'");
   addColumnIfMissing(db, "multiremi_tasks", "wait_reason TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "failure_reason TEXT");
@@ -2704,9 +2746,12 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_tasks", "parent_task_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "delegation_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "delegated_by_agent_id TEXT");
+  addColumnIfMissing(db, "multiremi_tasks", "delegation_return_task_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "trigger_comment_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "trigger_summary TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "issue_session_id TEXT");
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_delegation_return_pending
+    ON multiremi_tasks(issue_session_id, delegated_by_agent_id, delegation_return_task_id, status)`);
   addColumnIfMissing(db, "multiremi_tasks", "issue_session_generation INTEGER");
   addColumnIfMissing(db, "multiremi_tasks", "holds_workspace INTEGER NOT NULL DEFAULT 1");
   addColumnIfMissing(db, "multiremi_tasks", "assignment_event_id TEXT");
@@ -2719,8 +2764,18 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_feishu_bot_chat_bindings", "thread_id TEXT");
   addColumnIfMissing(db, "multiremi_feishu_bot_chat_bindings", "reply_to_message_id TEXT");
   backfillFeishuBotReplyDestinations(db);
+  runMigrationOnce(db, FEISHU_BOT_AGENT_ROUTES_MIGRATION, () => ensureFeishuBotAgentRoutesSchema(db));
+  runMigrationOnce(db, FEISHU_BOT_AGENT_ROUTE_DEFAULT_UNIQUENESS_MIGRATION, () => {
+    ensureFeishuBotAgentRouteDefaultUniqueness(db);
+  });
   runMigrationOnce(db, FEISHU_ISSUE_TOPIC_OUTBOUND_MIGRATION, () => {
     allowNullableFeishuOutboundReplyToMessageId(db);
+  });
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "mention_snapshot TEXT");
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "presentation_checkpoint TEXT");
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "interaction_open_id TEXT");
+  runMigrationOnce(db, FEISHU_TOPIC_REPORT_SCHEDULING_MIGRATION, () => {
+    releaseQueuedFeishuTopicReports(db);
   });
   addColumnIfMissing(db, "multiremi_tasks", "projection_from_seq INTEGER");
   addColumnIfMissing(db, "multiremi_tasks", "projection_to_seq INTEGER");
@@ -2739,6 +2794,7 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_tasks", "plugin_snapshot TEXT NOT NULL DEFAULT '[]'");
   addColumnIfMissing(db, "multiremi_tasks", "execution_fingerprint TEXT");
   addColumnIfMissing(db, "multiremi_session_agent_lanes", "execution_fingerprint TEXT");
+  migrateExecutionScopedLanes(db);
   addColumnIfMissing(db, "multiremi_inbox_items", "recipient_type TEXT NOT NULL DEFAULT 'member'");
   addColumnIfMissing(db, "multiremi_inbox_items", "recipient_id TEXT");
   addColumnIfMissing(db, "multiremi_inbox_items", "severity TEXT NOT NULL DEFAULT 'info'");
@@ -2767,6 +2823,12 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_autopilots", "workspace_policy TEXT NOT NULL DEFAULT 'reuse_issue'");
   addColumnIfMissing(db, "multiremi_autopilot_triggers", "event_filters TEXT");
   addColumnIfMissing(db, "multiremi_autopilot_triggers", "event_config TEXT");
+  addColumnIfMissing(db, "multiremi_autopilot_triggers", "schedule_targets TEXT");
+  addColumnIfMissing(db, "multiremi_autopilot_runs", "schedule_target TEXT");
+  addColumnIfMissing(db, "multiremi_autopilot_runs", "schedule_batch_id TEXT");
+  addColumnIfMissing(db, "multiremi_autopilot_runs", "schedule_prompt TEXT");
+  addColumnIfMissing(db, "multiremi_autopilot_runs", "schedule_position INTEGER");
+  db.run("CREATE INDEX IF NOT EXISTS idx_autopilot_schedule_queue ON multiremi_autopilot_runs(autopilot_id, status, schedule_batch_id, schedule_position)");
   addColumnIfMissing(db, "multiremi_autopilot_triggers", "provider TEXT");
   addColumnIfMissing(db, "multiremi_autopilot_triggers", "signing_secret_hint TEXT");
   addColumnIfMissing(db, "multiremi_autopilot_runs", "trigger_id TEXT");
@@ -2842,6 +2904,10 @@ export function runMigrations(db: SqlDatabase): void {
       ON multiremi_autopilot_runs(repository_id, created_at)
       WHERE repository_id IS NOT NULL;
   `);
+  addColumnIfMissing(db, "multiremi_skill_files", "encoding TEXT NOT NULL DEFAULT 'utf8'");
+  addColumnIfMissing(db, "multiremi_runtime_local_skill_list_requests", "root TEXT");
+  addColumnIfMissing(db, "multiremi_runtime_local_skill_list_requests", "warnings TEXT NOT NULL DEFAULT '[]'");
+  addColumnIfMissing(db, "multiremi_runtime_local_skill_import_requests", "root TEXT");
   addColumnIfMissing(db, "multiremi_runtime_update_requests", "scope TEXT NOT NULL DEFAULT 'cli'");
   // Source references on wiki/memory docs. The table itself is new enough that
   // only dev databases predate the column, but CREATE TABLE IF NOT EXISTS never
@@ -2901,6 +2967,22 @@ export function runMigrations(db: SqlDatabase): void {
   db.exec("CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_trigger_comment ON multiremi_tasks(trigger_comment_id)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_issue_session ON multiremi_tasks(issue_session_id, created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_delegation ON multiremi_tasks(delegation_id, agent_id, status)");
+  runMigrationOnce(db, AGENT_PAGE_QUERY_INDEXES_MIGRATION, () => {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_multiremi_autopilot_runs_task
+        ON multiremi_autopilot_runs(task_id);
+      CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_workspace_status
+        ON multiremi_tasks(workspace_id, status);
+      CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_workspace_created
+        ON multiremi_tasks(workspace_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_workspace_completed
+        ON multiremi_tasks(workspace_id, completed_at);
+      CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_agent
+        ON multiremi_tasks(agent_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_multiremi_runtimes_workspace
+        ON multiremi_runtimes(workspace_id, status);
+    `);
+  });
   db.exec("CREATE INDEX IF NOT EXISTS idx_multiremi_issue_comments_session ON multiremi_issue_comments(issue_session_id, created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_multiremi_issues_parent ON multiremi_issues(parent_issue_id, position, created_at)");
   db.exec("CREATE INDEX IF NOT EXISTS idx_multiremi_issues_scheduled ON multiremi_issues(workspace_id, start_date, due_date)");
@@ -2929,6 +3011,40 @@ export function runMigrations(db: SqlDatabase): void {
   backfillDefaultIssueSessions(db);
   backfillIssueKeys(db);
   migrateLegacyGithubProjection(db, legacyGithubTables);
+}
+
+function ensureFeishuBotAgentRoutesSchema(db: SqlDatabase): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS multiremi_feishu_bot_agent_routes (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      scope TEXT NOT NULL CHECK(scope IN ('p2p_default', 'group_default', 'chat')),
+      chat_id TEXT,
+      chat_name TEXT,
+      agent_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      updated_by TEXT,
+      CHECK(
+        (scope = 'chat' AND chat_id IS NOT NULL AND chat_id <> '')
+        OR (scope IN ('p2p_default', 'group_default') AND chat_id IS NULL)
+      ),
+      UNIQUE(workspace_id, scope, chat_id),
+      FOREIGN KEY(workspace_id) REFERENCES multiremi_workspaces(id) ON DELETE CASCADE,
+      FOREIGN KEY(agent_id) REFERENCES multiremi_agents(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_multiremi_feishu_bot_agent_routes_agent
+      ON multiremi_feishu_bot_agent_routes(agent_id);
+  `);
+}
+
+function ensureFeishuBotAgentRouteDefaultUniqueness(db: SqlDatabase): void {
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_multiremi_feishu_bot_agent_routes_default_scope
+      ON multiremi_feishu_bot_agent_routes(workspace_id, scope)
+      WHERE chat_id IS NULL;
+  `);
 }
 
 function migrateLegacyGithubProjection(db: SqlDatabase, legacyTables: Set<string>): void {
@@ -3617,6 +3733,78 @@ function runMigrationOnce(db: SqlDatabase, id: string, migrate: () => void): voi
     ).changes;
     if (claimed !== 1) return;
     migrate();
+  })();
+}
+
+function releaseQueuedFeishuTopicReports(db: SqlDatabase): void {
+  db.run(
+    `UPDATE multiremi_tasks
+        SET holds_workspace = 0,
+            updated_at = ?
+      WHERE status = 'queued'
+        AND issue_id IS NOT NULL
+        AND chat_session_id IS NOT NULL
+        AND holds_workspace <> 0`,
+    [new Date().toISOString()],
+  );
+}
+
+function backfillChatMessageSequences(db: SqlDatabase): void {
+  const sessions = db.query("SELECT id FROM multiremi_chat_sessions ORDER BY id ASC").all() as Array<{ id: string }>;
+  for (const session of sessions) {
+    const messages = db.query(
+      `SELECT id FROM multiremi_chat_messages
+       WHERE chat_session_id = ? ORDER BY created_at ASC, id ASC`,
+    ).all(session.id) as Array<{ id: string }>;
+    messages.forEach((message, index) => {
+      db.run("UPDATE multiremi_chat_messages SET sequence = ? WHERE id = ?", [index + 1, message.id]);
+    });
+    db.run(
+      "UPDATE multiremi_chat_sessions SET message_sequence = ? WHERE id = ?",
+      [messages.length, session.id],
+    );
+  }
+}
+
+function migrateExecutionScopedLanes(db: SqlDatabase): void {
+  const columns = db.query("PRAGMA table_info(multiremi_session_agent_lanes)").all() as Array<{ name: string }>;
+  if (columns.some((column) => column.name === "execution_scope")) return;
+  db.transaction(() => {
+    // Native sessions were rooted in the shared cwd. Rebuild their context
+    // once from canonical events when switching to private execution dirs.
+    db.exec(`CREATE TABLE multiremi_session_agent_lanes_scoped (
+      session_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      execution_scope TEXT NOT NULL DEFAULT '',
+      provider_session_id TEXT,
+      runtime_id TEXT,
+      provider TEXT,
+      work_dir TEXT,
+      cursor_seq INTEGER NOT NULL DEFAULT 0,
+      generation INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'active',
+      last_task_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      execution_fingerprint TEXT,
+      PRIMARY KEY(session_id, agent_id, execution_scope),
+      FOREIGN KEY(session_id) REFERENCES multiremi_issue_sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY(agent_id) REFERENCES multiremi_agents(id) ON DELETE CASCADE
+    );
+    INSERT INTO multiremi_session_agent_lanes_scoped
+      (session_id, agent_id, provider_session_id, runtime_id, provider, work_dir,
+       cursor_seq, generation, status, last_task_id, created_at, updated_at, execution_fingerprint)
+    SELECT session_id, agent_id, NULL, runtime_id, provider, NULL,
+       0, generation + 1, status, last_task_id, created_at, updated_at, execution_fingerprint
+    FROM multiremi_session_agent_lanes;
+    DROP TABLE multiremi_session_agent_lanes;
+    ALTER TABLE multiremi_session_agent_lanes_scoped RENAME TO multiremi_session_agent_lanes;
+    CREATE INDEX idx_multiremi_session_agent_lanes_runtime ON multiremi_session_agent_lanes(runtime_id, status);
+    CREATE INDEX idx_multiremi_session_agent_lanes_agent ON multiremi_session_agent_lanes(agent_id, updated_at);
+    UPDATE multiremi_tasks SET session_id = NULL, work_dir = NULL, issue_session_generation = NULL,
+      projection_from_seq = NULL, projection_to_seq = NULL, projection_mode = NULL,
+      projection_truncated = 0, projection_omitted_events = 0, projection_estimated_tokens = 0
+    WHERE issue_session_id IS NOT NULL AND chat_session_id IS NULL AND status = 'queued';`);
   })();
 }
 

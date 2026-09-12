@@ -80,6 +80,8 @@ import { IssueSessionsRepo } from "@multiremi/store/repos/issue-sessions-repo.js
 import { ChatRepo } from "@multiremi/store/repos/chat-repo.js";
 import {
   IssuesRepo,
+  type IssueTimelineCursor,
+  type IssueTimelinePageResult,
   type BeginIssueDeletionResult,
   type IssueMutationActivityContext,
 } from "@multiremi/store/repos/issues-repo.js";
@@ -113,7 +115,7 @@ import {
   type SshMeshBrowserOverview,
 } from "@multiremi/store/repos/ssh-mesh-repo.js";
 import type { SshMeshKeyMaterial } from "@multiremi/ssh-mesh/keys.js";
-import { TasksRepo } from "@multiremi/store/repos/tasks-repo.js";
+import { TasksRepo, type ClaimTaskOptions } from "@multiremi/store/repos/tasks-repo.js";
 import { OrganizerActionError, readOrganizerMode } from "../organizer/settings.js";
 import {
   AutopilotsRepo,
@@ -194,6 +196,7 @@ import type {
   CreateRuntimeCommandInput,
   CreateWorkspaceRuntimeProvisionInput,
   CreateRuntimeLocalSkillImportInput,
+  CreateRuntimeLocalSkillListInput,
   CreateSessionTaskInput,
   CreateSkillInput,
   ImportAgentPluginInput,
@@ -1746,6 +1749,30 @@ runMigrations(this.db);
     return this.feishuBot.getConfig(workspaceId);
   }
 
+  listFeishuBotAgentRoutes(workspaceId: string): ReturnType<FeishuBotRepo["listRoutes"]> {
+    return this.feishuBot.listRoutes(workspaceId);
+  }
+
+  replaceFeishuBotAgentRoutes(
+    workspaceId: string,
+    routes: Parameters<FeishuBotRepo["replaceRoutes"]>[1],
+    actor?: string | null,
+  ): ReturnType<FeishuBotRepo["replaceRoutes"]> {
+    return this.feishuBot.replaceRoutes(workspaceId, routes, actor);
+  }
+
+  updateFeishuBotRouteChatName(workspaceId: string, chatId: string, chatName: string | null): void {
+    this.feishuBot.updateRouteChatName(workspaceId, chatId, chatName);
+  }
+
+  resolveFeishuBotRouteAgent(
+    workspaceId: string,
+    chatType: "p2p" | "group",
+    chatId?: string | null,
+  ): ReturnType<FeishuBotRepo["resolveRouteAgent"]> {
+    return this.feishuBot.resolveRouteAgent(workspaceId, chatType, chatId);
+  }
+
   upsertFeishuBotConfig(workspaceId: string, input: UpsertFeishuBotConfigInput): MultiremiFeishuBotConfig {
     return this.feishuBot.upsertConfig(workspaceId, input);
   }
@@ -1785,8 +1812,16 @@ runMigrations(this.db);
     return this.feishuBot.submitMessage(workspaceId, runtimeId, input);
   }
 
+  getFeishuBotChatConversationKind(chatSessionId: string): "p2p" | "group" | null {
+    return this.feishuBot.getChatConversationKind(chatSessionId);
+  }
+
   prepareFeishuIssueTopicWithinTransaction(issue: MultiremiIssue): boolean {
     return this.feishuBot.prepareIssueTopicWithinTransaction(issue);
+  }
+
+  prepareFeishuBotHumanRequestPush(request: MultiremiTaskHumanRequest): MultiremiTask | null {
+    return this.feishuBot.prepareHumanRequestPush(request);
   }
 
   prepareFeishuIssueRoundPushesWithinTransaction(input: {
@@ -1801,15 +1836,40 @@ runMigrations(this.db);
   }
 
   completeFeishuRoundPushTaskWithinTransaction(task: MultiremiTask, body: string): void {
-    this.feishuBot.completeRoundPushTaskWithinTransaction(task, body);
+    this.feishuBot.upsertRoundPushDeliveryWithinTransaction(task, body);
   }
 
   claimFeishuBotOutbound(
     workspaceId: string,
     runtimeId: string,
     now?: string | Date,
+    supportsTaskStream = false,
+    supportsNativeCot = false,
   ): MultiremiFeishuBotOutboundDelivery | null {
-    return this.feishuBot.claimOutbound(workspaceId, runtimeId, now);
+    return this.feishuBot.claimOutbound(workspaceId, runtimeId, now, supportsTaskStream, supportsNativeCot);
+  }
+
+  getFeishuBotOutboundAttachment(
+    workspaceId: string,
+    runtimeId: string,
+    deliveryId: string,
+    claimToken: string,
+    attachmentId: string,
+  ): MultiremiAttachment | null {
+    return this.feishuBot.getOutboundAttachment(
+      workspaceId,
+      runtimeId,
+      deliveryId,
+      claimToken,
+      attachmentId,
+    );
+  }
+
+  prepareFeishuBotOutboundMention(
+    workspaceId: string, runtimeId: string, deliveryId: string, claimToken: string,
+    openId: string | null, now?: string | Date,
+  ): { openId: string | null } | null {
+    return this.feishuBot.prepareOutboundMention(workspaceId, runtimeId, deliveryId, claimToken, openId, now);
   }
 
   reportFeishuBotOutbound(
@@ -2736,16 +2796,16 @@ runMigrations(this.db);
     return this.runtimeProvisions.enqueueWorkspaceProvision(provisionId);
   }
 
-  createRuntimeLocalSkillListRequest(runtimeId: string): MultiremiRuntimeLocalSkillListRequest {
-    return this.runtimes.createRuntimeLocalSkillListRequest(runtimeId);
+  createRuntimeLocalSkillListRequest(runtimeId: string, input: CreateRuntimeLocalSkillListInput = {}): MultiremiRuntimeLocalSkillListRequest {
+    return this.runtimes.createRuntimeLocalSkillListRequest(runtimeId, input);
   }
 
   getRuntimeLocalSkillListRequest(runtimeId: string, requestId: string): MultiremiRuntimeLocalSkillListRequest | null {
     return this.runtimes.getRuntimeLocalSkillListRequest(runtimeId, requestId);
   }
 
-  claimRuntimeLocalSkillListRequest(runtimeId: string): MultiremiRuntimeLocalSkillListRequest | null {
-    return this.runtimes.claimRuntimeLocalSkillListRequest(runtimeId);
+  claimRuntimeLocalSkillListRequest(runtimeId: string, supportsSkillDirectory = false): MultiremiRuntimeLocalSkillListRequest | null {
+    return this.runtimes.claimRuntimeLocalSkillListRequest(runtimeId, supportsSkillDirectory);
   }
 
   reportRuntimeLocalSkillListResult(runtimeId: string, requestId: string, input: ReportRuntimeLocalSkillListInput): MultiremiRuntimeLocalSkillListRequest {
@@ -2760,8 +2820,8 @@ runMigrations(this.db);
     return this.runtimes.getRuntimeLocalSkillImportRequest(runtimeId, requestId);
   }
 
-  claimRuntimeLocalSkillImportRequests(runtimeId: string, limit = 10): MultiremiRuntimeLocalSkillImportRequest[] {
-    return this.runtimes.claimRuntimeLocalSkillImportRequests(runtimeId, limit);
+  claimRuntimeLocalSkillImportRequests(runtimeId: string, limit = 10, supportsSkillDirectory = false): MultiremiRuntimeLocalSkillImportRequest[] {
+    return this.runtimes.claimRuntimeLocalSkillImportRequests(runtimeId, limit, supportsSkillDirectory);
   }
 
   reportRuntimeLocalSkillImportResult(runtimeId: string, requestId: string, input: ReportRuntimeLocalSkillImportInput): MultiremiRuntimeLocalSkillImportRequest {
@@ -2835,6 +2895,7 @@ runMigrations(this.db);
     claimPending?: boolean;
     supportsBatchImport?: boolean;
     supportsDirectoryScan?: boolean;
+    supportsSkillDirectory?: boolean;
     agentPluginProtocol?: number;
     supportsBotMenu?: boolean;
     supportsFeishuBotConfig?: boolean;
@@ -3092,6 +3153,14 @@ runMigrations(this.db);
     return this.issues.listIssueTimeline(issueId, options);
   }
 
+  listIssueTimelinePage(issueId: string, options: {
+    issueSessionId?: string | null;
+    before?: IssueTimelineCursor | null;
+    limit: number;
+  }): IssueTimelinePageResult {
+    return this.issues.listIssueTimelinePage(issueId, options);
+  }
+
   listIssueSubscribers(issueId: string): MultiremiIssueSubscriber[] {
     return this.issues.listIssueSubscribers(issueId);
   }
@@ -3157,19 +3226,24 @@ runMigrations(this.db);
     return this.issues.detachLabelFromIssue(issueId, labelId, activity);
   }
 
-  listInboxItems(memberId?: string | null): MultiremiInboxItem[] {
-    return this.issues.listInboxItems(memberId);
+  getInboxItem(id: string): MultiremiInboxItem | null {
+    return this.issues.getInboxItem(id);
+  }
+
+  listInboxItems(memberId?: string | null, workspaceId?: string): MultiremiInboxItem[] {
+    return this.issues.listInboxItems(memberId, workspaceId);
   }
 
   listInboxItemsPage(
     memberId?: string | null,
     options: { limit?: number; cursor?: string | null } = {},
+    workspaceId?: string,
   ): MultiremiInboxPage {
-    return this.issues.listInboxItemsPage(memberId, options);
+    return this.issues.listInboxItemsPage(memberId, options, workspaceId);
   }
 
-  getInboxSummary(memberId?: string | null, timezoneOffsetMinutes = 0): MultiremiInboxSummary {
-    return this.issues.getInboxSummary(memberId, timezoneOffsetMinutes);
+  getInboxSummary(memberId?: string | null, timezoneOffsetMinutes = 0, workspaceId?: string): MultiremiInboxSummary {
+    return this.issues.getInboxSummary(memberId, timezoneOffsetMinutes, workspaceId);
   }
 
   markInboxItemRead(id: string): MultiremiInboxItem {
@@ -3180,16 +3254,16 @@ runMigrations(this.db);
     return this.issues.archiveInboxItem(id);
   }
 
-  countUnreadInboxItems(memberId?: string | null): number {
-    return this.issues.countUnreadInboxItems(memberId);
+  countUnreadInboxItems(memberId?: string | null, workspaceId?: string): number {
+    return this.issues.countUnreadInboxItems(memberId, workspaceId);
   }
 
-  markAllInboxItemsRead(memberId?: string | null): number {
-    return this.issues.markAllInboxItemsRead(memberId);
+  markAllInboxItemsRead(memberId?: string | null, workspaceId?: string): number {
+    return this.issues.markAllInboxItemsRead(memberId, workspaceId);
   }
 
-  archiveAllInboxItems(memberId?: string | null, mode: "all" | "read" | "completed" = "all"): number {
-    return this.issues.archiveAllInboxItems(memberId, mode);
+  archiveAllInboxItems(memberId?: string | null, mode: "all" | "read" | "completed" = "all", workspaceId?: string): number {
+    return this.issues.archiveAllInboxItems(memberId, mode, workspaceId);
   }
 
   listIssueReactions(issueId: string): MultiremiIssueReaction[] {
@@ -3206,6 +3280,10 @@ runMigrations(this.db);
 
   listCommentReactions(commentId: string): MultiremiCommentReaction[] {
     return this.issues.listCommentReactions(commentId);
+  }
+
+  listCommentReactionsForComments(commentIds: string[]): Map<string, MultiremiCommentReaction[]> {
+    return this.issues.listCommentReactionsForComments(commentIds);
   }
 
   addCommentReaction(commentId: string, input: { actorType?: string; actorId?: string | null; emoji: string }): MultiremiCommentReaction {
@@ -3234,6 +3312,10 @@ runMigrations(this.db);
 
   listAttachmentsForComment(commentId: string): MultiremiAttachment[] {
     return this.issues.listAttachmentsForComment(commentId);
+  }
+
+  listAttachmentsForComments(commentIds: string[]): Map<string, MultiremiAttachment[]> {
+    return this.issues.listAttachmentsForComments(commentIds);
   }
 
   listAttachmentsForChatMessage(chatMessageId: string): MultiremiAttachment[] {
@@ -3367,12 +3449,12 @@ runMigrations(this.db);
     return this.sessions.listSessionEvents(sessionId, input);
   }
 
-  getOrCreateSessionAgentLane(sessionId: string, agentId: string): MultiremiSessionAgentLane {
-    return this.sessions.getOrCreateSessionAgentLane(sessionId, agentId);
+  getOrCreateSessionAgentLane(sessionId: string, agentId: string, executionScope = ""): MultiremiSessionAgentLane {
+    return this.sessions.getOrCreateSessionAgentLane(sessionId, agentId, executionScope);
   }
 
-  getSessionAgentLane(sessionId: string, agentId: string): MultiremiSessionAgentLane | null {
-    return this.sessions.getSessionAgentLane(sessionId, agentId);
+  getSessionAgentLane(sessionId: string, agentId: string, executionScope = ""): MultiremiSessionAgentLane | null {
+    return this.sessions.getSessionAgentLane(sessionId, agentId, executionScope);
   }
 
   buildTaskSessionProjection(taskId: string): MultiremiSessionProjection | null {
@@ -3641,6 +3723,22 @@ runMigrations(this.db);
     this.repositoryWiki.completeStorageJob(id);
   }
 
+  claimRepositoryWikiStorageJob(id: string, token: string, until: string, now: string): boolean {
+    return this.repositoryWiki.claimStorageJob(id, token, until, now);
+  }
+
+  renewRepositoryWikiStorageJob(id: string, token: string, until: string): boolean {
+    return this.repositoryWiki.renewStorageJob(id, token, until);
+  }
+
+  releaseRepositoryWikiStorageJob(id: string, token: string): void {
+    this.repositoryWiki.releaseStorageJob(id, token);
+  }
+
+  recordRepositoryWikiCleanupProgress(id: string, token: string, uri: string): void {
+    this.repositoryWiki.recordCleanupProgress(id, token, uri);
+  }
+
   listRepositoryWikiDocRevisions(docId: string): MultiremiRepositoryWikiDocRevision[] {
     return this.repositoryWiki.revisions(docId);
   }
@@ -3892,8 +3990,8 @@ runMigrations(this.db);
     return this.autopilots.dispatchPendingSystemEvents(now, limit);
   }
 
-  listAutopilotRuns(autopilotId: string): MultiremiAutopilotRunRecord[] {
-    return this.autopilots.listAutopilotRuns(autopilotId);
+  listAutopilotRuns(autopilotId: string, limit = 20, offset = 0): MultiremiAutopilotRunRecord[] {
+    return this.autopilots.listAutopilotRuns(autopilotId, limit, offset);
   }
 
   listLatestRepositoryAutopilotRuns(workspaceId: string): MultiremiAutopilotRunRecord[] {
@@ -3922,6 +4020,10 @@ runMigrations(this.db);
 
   runAutopilot(autopilotId: string, input: RunAutopilotStoreInput = {}): MultiremiAutopilotRunRecord {
     return this.autopilots.runAutopilot(autopilotId, input);
+  }
+
+  advanceScheduledTargetRuns(): void {
+    this.autopilots.advanceScheduledTargetRuns();
   }
 
   getAutopilotRun(id: string): MultiremiAutopilotRunRecord | null {
@@ -3969,6 +4071,10 @@ runMigrations(this.db);
     return this.autopilots.handleAutopilotWebhookByToken(token, input);
   }
 
+  createChatSessionWithinTransaction(input: CreateChatSessionInput): MultiremiChatSession {
+    return this.chat.createChatSessionWithinTransaction(input);
+  }
+
   createChatSession(input: CreateChatSessionInput): MultiremiChatSession {
     return this.chat.createChatSession(input);
   }
@@ -4004,6 +4110,22 @@ runMigrations(this.db);
     return this.chat.getPendingChatTask(chatSessionId);
   }
 
+  listQueuedChatTasks(chatSessionId: string) {
+    return this.chat.listQueuedChatTasks(chatSessionId);
+  }
+
+  updateQueuedChatTask(chatSessionId: string, taskId: string, content: string) {
+    return this.chat.updateQueuedChatTask(chatSessionId, taskId, content);
+  }
+
+  removeQueuedChatTasks(chatSessionId: string, taskId?: string): void {
+    this.chat.removeQueuedChatTasks(chatSessionId, taskId);
+  }
+
+  prioritizeQueuedChatTask(chatSessionId: string, taskId: string) {
+    return this.chat.prioritizeQueuedChatTask(chatSessionId, taskId);
+  }
+
   listPendingChatTasks(workspaceId?: string | null, options: { creatorId?: string | null } = {}): MultiremiTask[] {
     return this.chat.listPendingChatTasks(workspaceId, options);
   }
@@ -4014,6 +4136,10 @@ runMigrations(this.db);
 
   sendChatMessage(chatSessionId: string, input: SendChatMessageInput): SendChatMessageResult {
     return this.chat.sendChatMessage(chatSessionId, input);
+  }
+
+  appendChatMessageWithinTransaction(input: Parameters<ChatRepo["appendChatMessageWithinTransaction"]>[0]): MultiremiChatMessage {
+    return this.chat.appendChatMessageWithinTransaction(input);
   }
 
   createPendingAgentIssueUpdateWithinTransaction(chatSessionId: string, body: string): {
@@ -4067,8 +4193,8 @@ runMigrations(this.db);
     return this.tasks.ensureDelegationWakeup(input);
   }
 
-  resetSessionAgentLane(sessionId: string, agentId: string): MultiremiSessionAgentLane | null {
-    return this.tasks.resetSessionAgentLane(sessionId, agentId);
+  resetSessionAgentLane(sessionId: string, agentId: string, executionScope = ""): MultiremiSessionAgentLane | null {
+    return this.tasks.resetSessionAgentLane(sessionId, agentId, executionScope);
   }
 
   /**
@@ -4121,8 +4247,8 @@ runMigrations(this.db);
     return this.tasks.listWorkspaceAgentActivity30d(workspaceId);
   }
 
-  claimTask(runtimeId: string): MultiremiTaskWithAgent | null {
-    return this.tasks.claimTask(runtimeId);
+  claimTask(runtimeId: string, options?: ClaimTaskOptions): MultiremiTaskWithAgent | null {
+    return this.tasks.claimTask(runtimeId, options);
   }
 
   startTask(taskId: string): MultiremiTask {
@@ -4138,7 +4264,10 @@ runMigrations(this.db);
   }
 
   createTaskHumanRequest(input: CreateTaskHumanRequestInput): MultiremiTaskHumanRequest {
-    return this.tasks.createTaskHumanRequest(input);
+    const request = this.tasks.createTaskHumanRequest(input);
+    const wakeTask = this.feishuBot.prepareHumanRequestPush(request);
+    if (wakeTask) this.ctx.notifyTaskEnqueued(wakeTask);
+    return request;
   }
 
   getTaskHumanRequest(requestId: string): MultiremiTaskHumanRequest | null {
@@ -4341,6 +4470,14 @@ runMigrations(this.db);
     failure_reason?: string | null;
   }): MultiremiTask {
     return this.tasks.failTask(taskId, input);
+  }
+
+  cancelTaskWithinTransaction(taskId: string): import("./repos/tasks-repo.js").CancelTaskResult {
+    return this.tasks.cancelTaskWithinTransaction(taskId);
+  }
+
+  notifyCancelledTask(result: import("./repos/tasks-repo.js").CancelTaskResult): void {
+    this.tasks.notifyCancelledTask(result);
   }
 
   cancelTask(taskId: string): MultiremiTask {

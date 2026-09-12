@@ -14,6 +14,7 @@ import type {
 
 type InternalTaskField =
   | "codexProfile"
+  | "claudeProfile"
   | "delegationId"
   | "delegation_id"
   | "delegatedByAgentId"
@@ -26,6 +27,7 @@ type InternalTaskField =
 export function taskPublicResponse<T extends MultiremiTask>(task: T): Omit<T, InternalTaskField> {
   const {
     codexProfile: _codexProfile,
+    claudeProfile: _claudeProfile,
     delegationId: _delegationId,
     delegation_id: _delegationIdSnake,
     delegatedByAgentId: _delegatedByAgentId,
@@ -295,6 +297,7 @@ export function daemonTaskWireResponse(
   if (task.triggerSummary) response.trigger_summary = task.triggerSummary;
   if (task.executionFingerprint || task.pluginSnapshot.length) response.plugin_snapshot = task.pluginSnapshot;
   response.codex_profile = task.codexProfile ?? null;
+  response.claude_profile = task.claudeProfile ?? null;
   if (task.executionFingerprint) response.execution_fingerprint = task.executionFingerprint;
   if (triggerMetadata?.triggerThreadId) response.trigger_thread_id = triggerMetadata.triggerThreadId;
   if (triggerMetadata?.triggerCommentContent) response.trigger_comment_content = triggerMetadata.triggerCommentContent;

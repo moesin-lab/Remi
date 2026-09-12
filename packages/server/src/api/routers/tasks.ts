@@ -66,6 +66,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const {
       provider: _provider,
       codexProfile: _codexProfile,
+      claudeProfile: _claudeProfile,
       pluginSnapshot: _pluginSnapshot,
       plugin_snapshot: _pluginSnapshotSnake,
       executionFingerprint: _executionFingerprint,

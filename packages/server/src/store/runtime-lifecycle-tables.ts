@@ -13,6 +13,7 @@ export const RUNTIME_AUXILIARY_TABLES = [
   "multiremi_runtime_provision_states",
   "multiremi_runtime_models",
   "multiremi_runtime_codex_profiles",
+  "multiremi_runtime_claude_profiles",
   "multiremi_runtime_provider_credentials",
   // A retired Runtime's reported Feishu connector state must go with it;
   // leaving the row behind would make the workspace look permanently

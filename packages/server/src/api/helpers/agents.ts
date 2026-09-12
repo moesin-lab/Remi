@@ -177,8 +177,8 @@ export function overlayGatewayModels(
         ...(thinking ? { thinking } : {}),
       };
     });
-    if (engine === "codex") {
-      const customIds = new Set(store.listWorkspaceCodexProfileModels(workspaceId));
+    if (engine === "codex" || engine === "claude") {
+      const customIds = new Set(engine === "codex" ? store.listWorkspaceCodexProfileModels(workspaceId) : store.listWorkspaceClaudeProfileModels(workspaceId));
       for (const model of existingModels) {
         if (customIds.has(model.id) && !models.some(candidate => candidate.id === model.id)) models.push(model);
       }

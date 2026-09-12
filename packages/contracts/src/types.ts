@@ -5,6 +5,7 @@
 // ─── Agents, skills & templates ──────────────────────────────────────────────────────────────────
 
 import type { RuntimeCodexProfile } from "./codex-profile.js";
+import type { RuntimeClaudeProfile } from "./claude-profile.js";
 
 export type MultiremiAgentProvider = "claude" | "codex" | string;
 
@@ -1291,6 +1292,7 @@ export interface MultiremiTask {
   pluginSnapshot: MultiremiTaskPluginSnapshotEntry[];
   /** Runtime connection frozen at claim time, without credentials. */
   codexProfile?: RuntimeCodexProfile | null;
+  claudeProfile?: RuntimeClaudeProfile | null;
   plugin_snapshot?: MultiremiTaskPluginSnapshotEntry[];
   /** Stable hash of the exact Plugin versions, binding config and Runtime
    * Codex connection/credential version used by this execution. Provider sessions only resume when it
@@ -1562,6 +1564,7 @@ export interface CreateTaskInput {
   provider?: string | null;
   pluginSnapshot?: MultiremiTaskPluginSnapshotEntry[];
   codexProfile?: RuntimeCodexProfile | null;
+  claudeProfile?: RuntimeClaudeProfile | null;
   plugin_snapshot?: MultiremiTaskPluginSnapshotEntry[];
   executionFingerprint?: string | null;
   execution_fingerprint?: string | null;

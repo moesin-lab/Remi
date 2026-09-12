@@ -1,20 +1,20 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 742,
+    "routeCount": 745,
     "routeCountByPrefix": {
       "native": 209,
-      "compat": 519,
+      "compat": 522,
       "root": 14
     },
-    "getRoutes": 317,
-    "getRoutesWithBody": 314,
+    "getRoutes": 319,
+    "getRoutesWithBody": 316,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 425,
+    "mutationRoutes": 426,
     "mutationRoutesCovered": 282,
     "flows": [
       "agents-compat",
@@ -180,6 +180,7 @@
     "GET /api/daemon/autopilot-runs/:runId/gc-check",
     "GET /api/daemon/chat-sessions/:sessionId/gc-check",
     "GET /api/daemon/issues/:issueId/gc-check",
+    "GET /api/daemon/runtimes/:id/claude-profile-key",
     "GET /api/daemon/runtimes/:id/codex-profile-key",
     "GET /api/daemon/runtimes/:runtimeId/agent-plugins/desired",
     "GET /api/daemon/runtimes/:runtimeId/feishu-bot",
@@ -357,6 +358,7 @@
     "GET /api/runtimes",
     "GET /api/runtimes/:id",
     "GET /api/runtimes/:id/activity",
+    "GET /api/runtimes/:id/claude-profile",
     "GET /api/runtimes/:id/codex-profile",
     "GET /api/runtimes/:id/commands/:requestId",
     "GET /api/runtimes/:id/directory-scans/:requestId",
@@ -787,6 +789,7 @@
     "PUT /api/projects/:id/devices",
     "PUT /api/projects/:id/docs/:ref",
     "PUT /api/projects/:id/resources/:resourceId",
+    "PUT /api/runtimes/:id/claude-profile",
     "PUT /api/runtimes/:id/codex-profile",
     "PUT /api/runtimes/:id/models",
     "PUT /api/skills/:id",
@@ -907,6 +910,7 @@
     "GET /api/daemon/autopilot-runs/:runId/gc-check",
     "GET /api/daemon/chat-sessions/:sessionId/gc-check",
     "GET /api/daemon/issues/:issueId/gc-check",
+    "GET /api/daemon/runtimes/:id/claude-profile-key",
     "GET /api/daemon/runtimes/:id/codex-profile-key",
     "GET /api/daemon/runtimes/:runtimeId/agent-plugins/desired",
     "GET /api/daemon/runtimes/:runtimeId/feishu-bot",
@@ -1084,6 +1088,7 @@
     "GET /api/runtimes",
     "GET /api/runtimes/:id",
     "GET /api/runtimes/:id/activity",
+    "GET /api/runtimes/:id/claude-profile",
     "GET /api/runtimes/:id/codex-profile",
     "GET /api/runtimes/:id/commands/:requestId",
     "GET /api/runtimes/:id/directory-scans/:requestId",
@@ -3832,7 +3837,7 @@
           "workspace_id": "local",
           "daemon_id": "dmn_snapshot",
           "owner_user_id": "local",
-          "snapshot": "88263555d7121345b4fc441da4848ccc0ce766670a6a2d508564f7ee7fd9a9f9",
+          "snapshot": "113f72f4f939d0d493f97e7d39d070868cbe7aff07919ca4e9caa9428a03bd2b",
           "already_retired": false,
           "can_retire": true,
           "can_abandon_issue_workspaces": false,
@@ -4034,6 +4039,7 @@
           "trigger_summary": "Snapshot comment body",
           "plugin_snapshot": [],
           "codex_profile": null,
+          "claude_profile": null,
           "execution_fingerprint": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
           "trigger_thread_id": "cmt_xgqkr5l2r04q",
           "trigger_comment_content": "Snapshot comment body",
@@ -4276,6 +4282,7 @@
           "chat_session_id": "cht_snapshot",
           "plugin_snapshot": [],
           "codex_profile": null,
+          "claude_profile": null,
           "execution_fingerprint": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
           "runtime_workspace_id": null,
           "runtime_workspace": null,
@@ -4359,6 +4366,7 @@
           "autopilot_run_id": "run_sv8e5p1ut6x0",
           "plugin_snapshot": [],
           "codex_profile": null,
+          "claude_profile": null,
           "execution_fingerprint": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
           "runtime_workspace_id": null,
           "runtime_workspace": null,
@@ -4554,6 +4562,7 @@
           "autopilot_run_id": "run_u4c9m3gewz2d",
           "plugin_snapshot": [],
           "codex_profile": null,
+          "claude_profile": null,
           "execution_fingerprint": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
           "runtime_workspace_id": null,
           "runtime_workspace": null,
@@ -4978,7 +4987,8 @@
         "progress_total": 2,
         "issue_session_id": "ises_cdyoy133keds",
         "issue_session_generation": 1,
-        "codex_profile": null
+        "codex_profile": null,
+        "claude_profile": null
       }
     },
     {
@@ -5011,6 +5021,7 @@
         "issue_session_generation": 1,
         "plugin_snapshot": [],
         "codex_profile": null,
+        "claude_profile": null,
         "execution_fingerprint": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
       }
     },
@@ -5038,14 +5049,16 @@
               "launched_by": "",
               "agent_plugin_protocol": 0,
               "runtime_workspaces": 0,
-              "codex_profiles": 0
+              "codex_profiles": 0,
+              "claude_profiles": 0
             },
             "owner_id": null,
             "visibility": "private",
             "last_seen_at": "<timestamp>",
             "created_at": "<timestamp>",
             "updated_at": "<timestamp>",
-            "codex_profile": null
+            "codex_profile": null,
+            "claude_profile": null
           }
         ],
         "repos": [
@@ -5080,6 +5093,7 @@
           "generation": 0
         },
         "codex_profile": null,
+        "claude_profile": null,
         "workspace_settings": {},
         "relay": {
           "claude": null,
@@ -5118,6 +5132,7 @@
           "trigger_summary": "Snapshot comment body",
           "plugin_snapshot": [],
           "codex_profile": null,
+          "claude_profile": null,
           "execution_fingerprint": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
           "trigger_thread_id": "cmt_xgqkr5l2r04q",
           "trigger_comment_content": "Snapshot comment body",
@@ -11029,6 +11044,28 @@
             "allowed": true
           },
           {
+            "id": "runtime.claude-profile.get",
+            "command": "remi runtime claude-profile get",
+            "capability": "runtime.claude-profile.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.claude-profile.set",
+            "command": "remi runtime claude-profile set",
+            "capability": "runtime.claude-profile.set",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "runtime.cloud.health",
             "command": "remi runtime cloud health",
             "capability": "runtime.cloud.health",
@@ -13352,6 +13389,15 @@
       }
     },
     {
+      "key": "get-sweep GET /api/daemon/runtimes/:id/claude-profile-key",
+      "route": "GET /api/daemon/runtimes/:id/claude-profile-key",
+      "path": "/api/daemon/runtimes/rt_snapshot/claude-profile-key",
+      "status": 403,
+      "body": {
+        "error": "daemon token required"
+      }
+    },
+    {
       "key": "get-sweep GET /api/daemon/runtimes/:id/codex-profile-key",
       "route": "GET /api/daemon/runtimes/:id/codex-profile-key",
       "path": "/api/daemon/runtimes/rt_snapshot/codex-profile-key",
@@ -13438,6 +13484,7 @@
           "trigger_comment_id": "cmt_xgqkr5l2r04q",
           "trigger_summary": "Snapshot comment body",
           "codex_profile": null,
+          "claude_profile": null,
           "trigger_thread_id": "cmt_xgqkr5l2r04q",
           "trigger_comment_content": "Snapshot comment body",
           "trigger_author_type": "member",
@@ -13462,7 +13509,8 @@
           "created_at": "<timestamp>",
           "kind": "chat",
           "chat_session_id": "cht_snapshot",
-          "codex_profile": null
+          "codex_profile": null,
+          "claude_profile": null
         },
         {
           "id": "tsk_qdrfz8sqy58x",
@@ -13485,7 +13533,8 @@
           "issue_session_id": "ises_j3m15clzy3p6",
           "issue_session_generation": 1,
           "autopilot_run_id": "run_sv8e5p1ut6x0",
-          "codex_profile": null
+          "codex_profile": null,
+          "claude_profile": null
         },
         {
           "id": "tsk_9i3epsr6j5hf",
@@ -13508,7 +13557,8 @@
           "issue_session_id": "ises_gbmah1mhgwob",
           "issue_session_generation": 1,
           "autopilot_run_id": "run_u4c9m3gewz2d",
-          "codex_profile": null
+          "codex_profile": null,
+          "claude_profile": null
         }
       ]
     },
@@ -17738,7 +17788,7 @@
           "workspace_id": "local",
           "daemon_id": "dmn_snapshot",
           "owner_user_id": "local",
-          "snapshot": "88263555d7121345b4fc441da4848ccc0ce766670a6a2d508564f7ee7fd9a9f9",
+          "snapshot": "113f72f4f939d0d493f97e7d39d070868cbe7aff07919ca4e9caa9428a03bd2b",
           "already_retired": false,
           "can_retire": true,
           "can_abandon_issue_workspaces": false,
@@ -21700,6 +21750,15 @@
           "count": 5
         }
       ]
+    },
+    {
+      "key": "get-sweep GET /api/runtimes/:id/claude-profile",
+      "route": "GET /api/runtimes/:id/claude-profile",
+      "path": "/api/runtimes/rt_snapshot/claude-profile",
+      "status": 200,
+      "body": {
+        "profile": null
+      }
     },
     {
       "key": "get-sweep GET /api/runtimes/:id/codex-profile",

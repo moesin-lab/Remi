@@ -34,6 +34,8 @@ import type {
 import type { HttpClient } from "../http";
 import type { RuntimeCodexProfileConfig, RuntimeCodexProfileInput } from "@multiremi/contracts/codex-profile";
 import { RuntimeCodexProfileConfigSchema } from "../schemas/codex-profile";
+import type { RuntimeClaudeProfileConfig, RuntimeClaudeProfileInput } from "@multiremi/contracts/claude-profile";
+import { RuntimeClaudeProfileConfigSchema } from "../schemas/claude-profile";
 import type { RuntimeWorkspace, CreateRuntimeWorkspaceRequest } from "../../runtimes/workspace-types";
 import { RuntimeWorkspaceSchema, RuntimeWorkspaceListSchema } from "../schemas/runtime-workspaces";
 import { RuntimeLocalSkillListRequestSchema, RuntimeLocalSkillImportRequestSchema } from "../schemas/runtime-local-skills";
@@ -94,6 +96,16 @@ export class RuntimesEndpoints {
   async setRuntimeCodexProfile(runtimeId: string, input: RuntimeCodexProfileInput): Promise<RuntimeCodexProfileConfig> {
     const raw = await this.http.fetch<unknown>(`/api/runtimes/${encodeURIComponent(runtimeId)}/codex-profile`, { method: "PUT", body: JSON.stringify(input) });
     return parseStrictResponse(raw, RuntimeCodexProfileConfigSchema, { endpoint: "PUT /api/runtimes/:id/codex-profile" });
+  }
+
+  async getRuntimeClaudeProfile(runtimeId: string): Promise<RuntimeClaudeProfileConfig> {
+    const raw = await this.http.fetch<unknown>(`/api/runtimes/${encodeURIComponent(runtimeId)}/claude-profile`);
+    return parseStrictResponse(raw, RuntimeClaudeProfileConfigSchema, { endpoint: "GET /api/runtimes/:id/claude-profile" });
+  }
+
+  async setRuntimeClaudeProfile(runtimeId: string, input: RuntimeClaudeProfileInput): Promise<RuntimeClaudeProfileConfig> {
+    const raw = await this.http.fetch<unknown>(`/api/runtimes/${encodeURIComponent(runtimeId)}/claude-profile`, { method: "PUT", body: JSON.stringify(input) });
+    return parseStrictResponse(raw, RuntimeClaudeProfileConfigSchema, { endpoint: "PUT /api/runtimes/:id/claude-profile" });
   }
 
   async listRuntimeWorkspaces(wsId: string): Promise<RuntimeWorkspace[]> {

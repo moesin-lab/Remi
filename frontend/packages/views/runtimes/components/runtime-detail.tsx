@@ -60,6 +60,7 @@ import { RetireDaemonDialog } from "./retire-daemon-dialog";
 import { RuntimePluginsTab } from "./runtime-plugins-tab";
 import { RuntimeWorkspacesTab } from "./runtime-workspaces-tab";
 import { RuntimeCodexProfileTab } from "./runtime-codex-profile-tab";
+import { RuntimeProviderProfileTab } from "./runtime-provider-profile-tab";
 import { RuntimeNameEditor } from "./name-editor";
 import { useT } from "../../i18n";
 
@@ -222,6 +223,9 @@ export function RuntimeDetail({ runtime }: { runtime: AgentRuntime }) {
           {runtime.provider === "codex" && <TabsTrigger value="codex-profile" className="h-auto flex-none rounded-none px-3 py-2.5 text-xs">
             {t($ => $.codex_profile.title)}
           </TabsTrigger>}
+          {runtime.provider === "claude" && <TabsTrigger value="claude-profile" className="h-auto flex-none rounded-none px-3 py-2.5 text-xs">
+            {t($ => $.claude_profile.title)}
+          </TabsTrigger>}
         </TabsList>
 
         {/* The Overview panel keeps the original single scroll container so
@@ -273,6 +277,9 @@ export function RuntimeDetail({ runtime }: { runtime: AgentRuntime }) {
         </TabsContent>
         {runtime.provider === "codex" && <TabsContent value="codex-profile" className="min-h-0 flex-1 overflow-y-auto">
           <RuntimeCodexProfileTab runtime={runtime} canManage={!!canDelete} />
+        </TabsContent>}
+        {runtime.provider === "claude" && <TabsContent value="claude-profile" className="min-h-0 flex-1 overflow-y-auto">
+          <RuntimeProviderProfileTab runtime={runtime} canManage={!!canDelete} provider="claude" />
         </TabsContent>}
       </Tabs>
 

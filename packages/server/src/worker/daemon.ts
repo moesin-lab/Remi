@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import { parseRuntimeClaudeProfile, type RuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
-import { resolveRuntimeClaudeProfile, runtimeClaudeProfileEnv, runtimeClaudeProfileModels, runtimeClaudeProfileRouting } from "@daemon/agent-runtime/claude-profile.js";
+import { assertRuntimeClaudeProjectCredentials, resolveRuntimeClaudeProfile, runtimeClaudeProfileEnv, runtimeClaudeProfileModels, runtimeClaudeProfileRouting } from "@daemon/agent-runtime/claude-profile.js";
 import { resolveRuntimeCodexProfile, runtimeCodexProfileModels } from "@daemon/agent-runtime/codex-profile.js";
 import { antigravityCliVersion, resolveAntigravityExecutable } from "@acp/antigravity.js";
 import { isPermanentFeishuDeliveryError } from "@shared/feishu-delivery-error.js";
@@ -2725,6 +2725,7 @@ export class MultiremiDaemon {
       const codexProfile = task.agent?.provider === "codex" ? task.codexProfile ?? null : null;
       const claudeProfile = task.agent?.provider === "claude" ? task.claudeProfile ?? null : null;
       const runtimeProfile = codexProfile ?? claudeProfile;
+      if (claudeProfile) await assertRuntimeClaudeProjectCredentials(resolvedWorkDir.workDir);
       if (runtimeProfile && task.agent?.model && task.agent.model !== runtimeProfile.model) {
         throw new Error(`This Runtime's custom connection uses ${runtimeProfile.model}; select that model or the Runtime default for this Agent`);
       }

@@ -1,13 +1,36 @@
 import { expect, it } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseRuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
-import { resolveRuntimeClaudeProfile, runtimeClaudeProfileEnv, runtimeClaudeProfileRouting } from "@daemon/agent-runtime/claude-profile.js";
+import { assertRuntimeClaudeProjectCredentials, resolveRuntimeClaudeProfile, runtimeClaudeProfileEnv, runtimeClaudeProfileRouting } from "@daemon/agent-runtime/claude-profile.js";
 import { prepareIssueSessionProviderHome, type IssueSessionProviderHome } from "@daemon/agent-runtime/workspace/session-home.js";
 import { ClaudeAdapter } from "@acp/adapters/claude-code/index.js";
 
 const profile = { name: "custom", base_url: "http://127.0.0.1:9000", model: "unlisted-model", env_key: "REMI_CLAUDE_CUSTOM" };
+
+it("rejects project credential overrides without disclosing their values or changing project settings", async () => {
+  const root = await mkdtemp(join(tmpdir(), "remi-claude-project-auth-"));
+  try {
+    const cwd = join(root, "project", "child");
+    await mkdir(cwd, { recursive: true });
+    await mkdir(join(root, "project", ".claude"));
+    const path = join(root, "project", ".claude", "settings.local.json");
+    const safe = { env: { ANTHROPIC_BASE_URL: "http://old.invalid", ANTHROPIC_MODEL: "old" }, hooks: {} };
+    await writeFile(path, JSON.stringify(safe));
+    await assertRuntimeClaudeProjectCredentials(cwd);
+    for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "apiKeyHelper"]) {
+      const text = JSON.stringify(key === "apiKeyHelper" ? { ...safe, apiKeyHelper: "private-value" } : { ...safe, env: { [key]: "private-value" } });
+      await writeFile(path, text);
+      const error = await assertRuntimeClaudeProjectCredentials(cwd).catch(error => error as Error);
+      expect(error).toBeInstanceOf(Error);
+      if (!(error instanceof Error)) throw new Error("Expected project credential conflict");
+      expect(error.message).toContain(key);
+      expect(error.message).not.toContain("private-value");
+      expect(await readFile(path, "utf8")).toBe(text);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 it("validates Claude auth headers and fails closed when its dedicated environment credential is missing", () => {
   expect(parseRuntimeClaudeProfile(profile)?.auth_header).toBe("bearer");

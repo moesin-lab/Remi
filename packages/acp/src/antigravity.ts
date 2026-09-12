@@ -293,6 +293,9 @@ export class AntigravityProvider implements Provider {
       }
       const exit = await outcome;
       const log = parseAntigravityLog(await readBounded(logPath));
+      if (options.sessionId && log.sessionId && log.sessionId !== options.sessionId) {
+        throw new Error("Stale provider session: no conversation found for the requested Antigravity ID");
+      }
       sessionId = sessionId ?? log.sessionId;
       this.lastResponse = createAgentResponse({ text: stdout, sessionId, model: model ?? null, durationMs: Date.now() - started });
       options.signal?.throwIfAborted();

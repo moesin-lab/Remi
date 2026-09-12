@@ -70,6 +70,9 @@ describe("Antigravity native provider", () => {
     for await (const event of provider.sendStream("Run a tool")) types.push(event.sessionUpdate);
     expect(types).toEqual(["tool_call", "tool_call_update", "agent_message_chunk", "agent_message_chunk"]);
   }, 15_000);
+  it.each(["wrong-session", "legacy-wrong-session"])("rejects a different resumed conversation in %s", async mode => {
+    await expect(fixture(mode).provider.send("Next", { sessionId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" })).rejects.toThrow("Stale provider session");
+  }, 15_000);
   it.each(["missing-result", "result-error", "invalid-json", "legacy-error", "legacy-timeout", "legacy-empty"])("fails closed for %s instead of recording empty success", async mode => {
     await expect(fixture(mode).provider.send("Hello")).rejects.toThrow();
   }, 15_000);

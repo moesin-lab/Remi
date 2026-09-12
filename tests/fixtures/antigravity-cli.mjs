@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 const args = process.argv.slice(2);
 const value = flag => args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined;
 const mode = process.env.FAKE_AGY_MODE ?? "stream";
-const session = value("--conversation") || "12345678-1234-1234-1234-123456789abc";
+const session = (!mode.endsWith("wrong-session") && value("--conversation")) || "12345678-1234-1234-1234-123456789abc";
 const emit = event => process.stdout.write(JSON.stringify(event) + "\n");
 if (args.includes("--version")) {
   process.stdout.write("1.2.2\n");
@@ -30,7 +30,7 @@ if (args.includes("--version")) {
     emit({ event: "init", conversation_id: session });
     setInterval(() => {}, 1000);
   } else if (mode.startsWith("legacy")) {
-    if (mode === "legacy-text") process.stdout.write("# Heading\n\n- First\n- Second\n");
+    if (mode === "legacy-text" || mode === "legacy-wrong-session") process.stdout.write("# Heading\n\n- First\n- Second\n");
     if (mode === "legacy-recovery") {
       const file = join(dataDir, "brain", session, ".system_generated", "logs", "transcript.jsonl");
       mkdirSync(dirname(file), { recursive: true });

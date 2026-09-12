@@ -4,6 +4,13 @@ This document is the user-facing migration contract for the Registry-based Remi 
 The machine-readable source of truth remains `cli-capabilities.json`; CI checks this
 table against that manifest.
 
+Agent creation, editing and default-agent commands accept `--provider antigravity`.
+`remi daemon start --provider antigravity` selects the native `agy` runtime;
+automatic daemon discovery also detects it. Install/sign in to agy on the daemon
+machine first. See [Antigravity Runtime](antigravity.md) for model discovery,
+configuration and execution limits. Agent Plugin provider filters remain scoped
+to Claude/Codex.
+
 ## Canonical command tree
 
 The canonical tree includes a focused top-level Attachment download command;

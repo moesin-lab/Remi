@@ -192,8 +192,8 @@ export class AntigravityProvider implements Provider {
     if (this.options.pluginPaths?.length) throw new Error("Antigravity does not support Remi Agent Plugins");
     if (options.allowedTools?.length || this.options.allowedTools?.length) throw new Error("Antigravity cannot enforce a Remi tool allowlist");
     const permission = options.permissionMode ?? "bypassPermissions";
-    if (!["bypassPermissions", "dontAsk", "plan", "acceptEdits"].includes(permission)) {
-      throw new Error("Antigravity headless does not support Remi interactive approvals; use auto approval or another provider");
+    if (!["bypassPermissions", "plan", "acceptEdits"].includes(permission)) {
+      throw new Error("Antigravity headless cannot enforce the requested permission mode or Remi interactive approvals; use auto approval or another provider");
     }
     const caps = await this.getCapabilities();
     if (options.effort && (!caps.effort || !["low", "medium", "high"].includes(options.effort))) {

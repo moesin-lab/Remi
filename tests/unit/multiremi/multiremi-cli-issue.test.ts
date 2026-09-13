@@ -747,7 +747,7 @@ describe("Multiremi CLI — issues, attachments, and sessions", () => {
     }
   });
 
-  test("issue Session CLI lists Sessions and publishes explicit reusable results", async () => {
+  test("Session CLI lists Sessions linked to an issue and publishes explicit reusable results", async () => {
     const requests: Array<{
       method: string;
       path: string;
@@ -841,7 +841,7 @@ describe("Multiremi CLI — issues, attachments, and sessions", () => {
     }
   });
 
-  test("issue Session result publish maps --type and --ref into result metadata", async () => {
+  test("Session result publish maps --type and --ref into result metadata", async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const server = Bun.serve({
       hostname: "127.0.0.1",

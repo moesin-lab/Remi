@@ -1129,7 +1129,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       .toBe("git@github.com:acme/second.git");
   });
 
-  it("persists Issue Sessions, agent lanes, projections, and explicit results", () => {
+  it("persists Sessions, agent lanes, projections, and explicit results", () => {
     const ws = freshWorkspace();
     const runtime = store.registerRuntime({
       name: "rt-session-pg",

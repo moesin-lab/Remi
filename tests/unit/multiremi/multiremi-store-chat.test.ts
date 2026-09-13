@@ -89,7 +89,7 @@ describe("Multiremi store — chat sessions and private agent access", () => {
     expect(store.getChatSession(session.id)?.hasUnread).toBe(false);
   });
 
-  it("stamps a bound Issue onto Chat tasks without creating an Issue Session", () => {
+  it("stamps a bound Issue onto Chat tasks without creating a Session", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Bound chat", provider: "codex" });
     const issue = store.createIssue({ title: "Bound Issue", workspaceId: "local" });

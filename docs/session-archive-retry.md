@@ -1,6 +1,6 @@
-# Session Archive Retry Budget
+# Provider Session Archive Retry Budget
 
-Session Archive uploads use a server-enforced retry budget. The daemon checks the
+Provider Session Archive uploads use a server-enforced retry budget. The daemon checks the
 current archive before packing session files, while the server remains the
 authoritative gate for every upload claim.
 
@@ -37,7 +37,7 @@ considered.
 
 When the sixth automatic attempt fails or stalls, the archive remains visible as
 failed with an exhausted retry state. Automatic claims stop until an administrator
-uses the Retry action in the Issue's Session Archives section or calls:
+uses the Retry action in the Issue's Provider Session Archives section or calls:
 
 ```text
 POST /api/issues/:issueId/session-archives/:archiveId/retry

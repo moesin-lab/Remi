@@ -128,7 +128,7 @@ describe("IssueSessionList rail", () => {
 
     expect(screen.getByText("Sessions")).toHaveAttribute(
       "title",
-      "Sessions on this issue",
+      "Sessions linked to this issue",
     );
   });
 

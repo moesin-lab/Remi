@@ -1,6 +1,8 @@
 import type { AgentTask } from "./agent";
 
-export type IssueSessionStatus = "active" | "archived";
+export type SessionStatus = "active" | "archived";
+/** @deprecated Use `SessionStatus`. */
+export type IssueSessionStatus = SessionStatus;
 export type SessionParticipantType = "agent" | "member";
 
 export interface SessionParticipant {
@@ -14,12 +16,13 @@ export interface SessionParticipant {
   updated_at: string;
 }
 
-export interface IssueSession {
+/** Core product Session. It is currently anchored to exactly one Issue. */
+export interface Session {
   id: string;
   issue_id: string;
   workspace_id: string;
   title: string;
-  status: IssueSessionStatus;
+  status: SessionStatus;
   is_default: boolean;
   holds_workspace?: boolean;
   summary: string | null;
@@ -29,6 +32,9 @@ export interface IssueSession {
   updated_at: string;
   participants: SessionParticipant[];
 }
+
+/** @deprecated Use `Session`. */
+export type IssueSession = Session;
 
 export interface SessionEvent {
   id: string;
@@ -56,10 +62,13 @@ export interface SessionResult {
   created_at: string;
 }
 
-export interface CreateIssueSessionRequest {
+export interface CreateSessionRequest {
   title: string;
   holds_workspace?: boolean;
 }
+
+/** @deprecated Use `CreateSessionRequest`. */
+export type CreateIssueSessionRequest = CreateSessionRequest;
 
 export interface CreateSessionTaskRequest {
   agent_id: string;
@@ -67,6 +76,9 @@ export interface CreateSessionTaskRequest {
   priority?: number;
 }
 
-export interface IssueSessionTask extends AgentTask {
+export interface SessionTask extends AgentTask {
   issue_session_id: string;
 }
+
+/** @deprecated Use `SessionTask`. */
+export type IssueSessionTask = SessionTask;

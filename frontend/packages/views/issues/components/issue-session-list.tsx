@@ -65,7 +65,7 @@ export function IssueSessionList({
     >
       <div className="flex items-center gap-1 pl-2">
         {/* The header stays the bare word "Sessions" — the column is too
-            narrow for "Sessions on this issue" — so the scope rides along
+            narrow for "Sessions linked to this issue" — so the scope rides along
             as the native tooltip / accessible description instead. */}
         <span
           className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground"

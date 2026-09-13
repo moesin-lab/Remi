@@ -493,7 +493,7 @@
     "space_used": "Space used",
     "last_failure": "Latest archive failure",
     "cleanup_title": "Workspace cleanup",
-    "cleanup_description": "Completed issue workspaces remain available for this long. Cleanup scans never remove a workspace before its session archive is verified.",
+    "cleanup_description": "Completed issue workspaces remain available for this long. Cleanup scans never remove a workspace before its provider session archive is verified.",
     "workspace_ttl": "Workspace retention",
     "gc_interval": "Cleanup scan interval",
     "hours": "hours",

@@ -208,20 +208,20 @@ function commentCommandSpecs(): CommandSpec[] {
 
 function sessionCommandSpecs(): CommandSpec[] {
   return [
-    groupSpec("session", "Manage issue Sessions and published results"),
-    legacySpec("session.list", ["session", "list"], "List issue Sessions", "read", HUMAN_TASK, [refPositional("issue")], [], ["issue", "session", "list"], [compatAlias(["issue", "session", "list"], "remi session list")]),
-    nativeSpec("session.get", ["session", "get"], "Get an issue Session", "read", HUMAN_TASK, [refPositional("issue"), refPositional("session")], [], async (invocation) => {
+    groupSpec("session", "Manage Sessions and published results"),
+    legacySpec("session.list", ["session", "list"], "List Sessions linked to an issue", "read", HUMAN_TASK, [refPositional("issue")], [], ["issue", "session", "list"], [compatAlias(["issue", "session", "list"], "remi session list")]),
+    nativeSpec("session.get", ["session", "get"], "Get a Session linked to an issue", "read", HUMAN_TASK, [refPositional("issue"), refPositional("session")], [], async (invocation) => {
       const issue = positional(invocation, 0, "issue");
       await getAndRender(invocation, `/api/issues/${encodePath(issue)}/sessions/${encodePath(positional(invocation, 1, "session"))}`);
     }),
-    nativeSpec("session.create", ["session", "create"], "Create an issue Session", "write", HUMAN, [refPositional("issue")], [...INPUT_OPTIONS, ...titleStatusOptions(), discussionOption()], async (invocation) => {
+    nativeSpec("session.create", ["session", "create"], "Create a Session linked to an issue", "write", HUMAN, [refPositional("issue")], [...INPUT_OPTIONS, ...titleStatusOptions(), discussionOption()], async (invocation) => {
       const body = await requestBody(invocation, {
         title: stringOption(invocation, "title") ?? undefined,
         holds_workspace: invocation.options.discussion === true ? false : undefined,
       });
       await mutateAndRender(invocation, "POST", `/api/issues/${encodePath(positional(invocation, 0, "issue"))}/sessions`, body);
     }),
-    nativeSpec("session.update", ["session", "update"], "Update an issue Session", "write", HUMAN, [refPositional("issue"), refPositional("session")], [...INPUT_OPTIONS, ...titleStatusOptions()], async (invocation) => {
+    nativeSpec("session.update", ["session", "update"], "Update a Session", "write", HUMAN, [refPositional("issue"), refPositional("session")], [...INPUT_OPTIONS, ...titleStatusOptions()], async (invocation) => {
       const body = await requestBody(invocation, { title: stringOption(invocation, "title") ?? undefined, status: stringOption(invocation, "status") ?? undefined });
       await mutateAndRender(invocation, "PATCH", sessionPath(invocation), body);
     }),
@@ -252,14 +252,14 @@ function sessionCommandSpecs(): CommandSpec[] {
     }),
     legacySpec("session.result.list", ["session", "result", "list"], "List published Session results", "read", HUMAN_TASK, [refPositional("issue")], SESSION_RESULT_OPTIONS, ["issue", "session", "result", "list"], [compatAlias(["issue", "session", "result", "list"], "remi session result list")]),
     legacySpec("session.result.publish", ["session", "result", "publish"], "Publish a reusable Session result", "write", HUMAN_TASK, [refPositional("issue")], SESSION_RESULT_OPTIONS, ["issue", "session", "result", "publish"], [compatAlias(["issue", "session", "result", "publish"], "remi session result publish")]),
-    legacySpec("session.archive.list", ["session", "archive", "list"], "List issue Session archives", "read", HUMAN, [refPositional("issue")], [], ["issue", "archive", "list"], [compatAlias(["issue", "archive", "list"], "remi session archive list")]),
-    legacySpec("session.archive.status", ["session", "archive", "status"], "Show issue Session archive status", "read", HUMAN, [refPositional("issue")], [], ["issue", "archive", "status"], [compatAlias(["issue", "archive", "status"], "remi session archive status")]),
-    legacySpec("session.archive.verify", ["session", "archive", "verify"], "Verify an issue Session archive", "write", HUMAN, [refPositional("issue"), optionalPositional("archive")], [], ["issue", "archive", "verify"], [compatAlias(["issue", "archive", "verify"], "remi session archive verify")]),
-    legacySpec("session.archive.retry", ["session", "archive", "retry"], "Retry an issue Session archive", "write", HUMAN, [refPositional("issue"), optionalPositional("archive")], [], ["issue", "archive", "retry"], [compatAlias(["issue", "archive", "retry"], "remi session archive retry")]),
-    nativeSpec("session.config.get", ["session", "config", "get"], "Get workspace Session archive settings", "read", HUMAN, [refPositional("workspace")], [], async (invocation) => {
+    legacySpec("session.archive.list", ["session", "archive", "list"], "List provider session archives for an issue", "read", HUMAN, [refPositional("issue")], [], ["issue", "archive", "list"], [compatAlias(["issue", "archive", "list"], "remi session archive list")]),
+    legacySpec("session.archive.status", ["session", "archive", "status"], "Show provider session archive status", "read", HUMAN, [refPositional("issue")], [], ["issue", "archive", "status"], [compatAlias(["issue", "archive", "status"], "remi session archive status")]),
+    legacySpec("session.archive.verify", ["session", "archive", "verify"], "Verify a provider session archive", "write", HUMAN, [refPositional("issue"), optionalPositional("archive")], [], ["issue", "archive", "verify"], [compatAlias(["issue", "archive", "verify"], "remi session archive verify")]),
+    legacySpec("session.archive.retry", ["session", "archive", "retry"], "Retry a provider session archive", "write", HUMAN, [refPositional("issue"), optionalPositional("archive")], [], ["issue", "archive", "retry"], [compatAlias(["issue", "archive", "retry"], "remi session archive retry")]),
+    nativeSpec("session.config.get", ["session", "config", "get"], "Get workspace provider session archive settings", "read", HUMAN, [refPositional("workspace")], [], async (invocation) => {
       await getAndRender(invocation, `/api/workspaces/${encodePath(positional(invocation, 0, "workspace"))}/session-archive`);
     }),
-    nativeSpec("session.config.update", ["session", "config", "update"], "Update workspace Session archive settings", "write", HUMAN, [refPositional("workspace")], INPUT_OPTIONS, async (invocation) => {
+    nativeSpec("session.config.update", ["session", "config", "update"], "Update workspace provider session archive settings", "write", HUMAN, [refPositional("workspace")], INPUT_OPTIONS, async (invocation) => {
       await mutateAndRender(invocation, "PUT", `/api/workspaces/${encodePath(positional(invocation, 0, "workspace"))}/session-archive`, await requestBody(invocation));
     }),
   ];

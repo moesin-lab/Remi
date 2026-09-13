@@ -20,6 +20,26 @@ summary: 当前机器人 Chat/Issue 话题与轮次推送，以及独立的 Mess
 
 Chat 即使绑定 Issue，仍使用独立 Chat 工作目录与会话投影。claim 中的 `bound_issue`、待投递摘要和 [CLI caller context](../packages/server/src/api/routers/cli.ts)可帮助 Agent 找回当前 Issue；不要把任务创建时尚未绑定的空 `issueId` 当作永远没有 Issue 上下文。
 
+## 机器人发送者白名单
+
+空间设置的「集成」提供飞书账号白名单。机器人收到请求时，按当前应用的 `(app_id, open_id)` 自动记录发送者并去重，保存显示名称、首次和最近请求时间；新账号默认「待授权」。空间管理者可「加入白名单」或「移出白名单」，不需要关联 Remi 用户，也不创建空间成员。更换机器人应用后按新应用的账号范围重新管理。
+
+白名单控制该账号通过机器人 Chat 创建 Issue 的权限，未允许的账号仍可对话。Issue 创建时重新检查来源账号；允许后可继续当前 Chat，移出后该 Chat 及其子任务的下一次创建会被拒绝。同一 Chat 已收到多名发送者的请求时，全部来源账号都需允许。Agent 自身的提议审批策略仍独立生效；白名单不会将普通聊天中的「同意」当作审批，也不会追溯撤销已经建立的独立定时自动化。
+
+旧版本已写入任务的 `issueCreationRestricted` 不会自动清除；历史任务缺少可可靠归因的发送者记录。遇到此类旧受限会话，加入白名单后需在飞书使用 `/new` 开始新会话，再发送请求。
+
+未授权任务创建的持久 Agent 或 Autopilot 配置仍继承已有的提议审批策略，后续给账号授权不会自动清除这些配置上的策略；需要空间管理者另行调整。白名单的动态恢复针对 Chat 与普通任务来源链，不等于重写已保存的自动化权限。
+
+[管理 API](../packages/server/src/api/routers/feishu-bot.ts)仅允许已登录的空间管理者读取和更新账号授权，task/daemon 身份不能自行授权。对应 [CLI](../apps/remi/cli/commands/workspace.ts)使用明确的位置参数，`sender` 为列表返回的账号记录 ID：
+
+```bash
+remi workspace feishu-bot sender list <workspace>
+remi workspace feishu-bot sender allow <workspace> <sender>
+remi workspace feishu-bot sender revoke <workspace> <sender>
+```
+
+这份账号白名单属于机器人对话链路，与下面 Messaging Source 的会话采集 allowlist 分开维护。
+
 ## 当前组件与能力
 
 | 组件 | 职责与源码 |

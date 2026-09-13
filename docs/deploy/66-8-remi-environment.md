@@ -84,6 +84,9 @@ remi workspace feishu-bot test <workspace>
 remi workspace feishu-bot deploy <workspace>
 remi workspace feishu-bot status <workspace>
 remi workspace feishu-bot stop <workspace>
+remi workspace feishu-bot sender list <workspace>
+remi workspace feishu-bot sender allow <workspace> <sender>
+remi workspace feishu-bot sender revoke <workspace> <sender>
 ```
 
 这些管理操作使用具备工作区管理权限的成员身份；daemon 凭据负责它自己的注册、心跳和受限 Runtime API。
@@ -102,7 +105,7 @@ App Secret 在 API 侧通过 [AES-256-GCM](../../packages/server/src/feishu-bot/
 
 [controlPlaneConciergeHost](../../apps/remi/cli/multiremi.ts)和[bootFeishuChannel](../../apps/remi/cli/agent.ts)只启动传输及卡片处理。消息提交到控制面 Chat/Task 链路：同事件去重，有活跃任务时 steer，否则创建关联 Chat Session 的 Task，执行仍走 Task → AgentSession → ACP。Agent instructions 使用该任务所选的 Agent row，不启动一份独立的人格运行时。
 
-发送者通过 union_id 关联用户和工作区成员，分类为 member/non_member/unbound；当前实现为后两类创建的任务设置 Issue 创建限制，不是用应用范围的 open_id 直接拒绝所有消息。具体策略见[submitMessage / resolveSender](../../packages/server/src/store/repos/feishu-bot-repo.ts)。这条机器人对话链路与 [Messaging 消息采集](../feishu-message-ingestion.md)的 Connection/Profile/allowlist 相互独立。
+发送者按当前应用的 `(app_id, open_id)` 自动登记并去重，默认待授权；空间管理者在集成设置或 `sender allow/revoke` 命令中管理白名单，不依赖 Remi 用户关联或成员身份。未允许的发送者仍可对话，但其 Chat 及子任务创建 Issue 时受限制；授权变更在下一次创建时重新检查，Agent 独立策略仍生效。旧版本已有静态限制的任务不会自动清除限制，需在授权后使用飞书 `/new` 开始新会话。完整规则见[机器人发送者白名单](../feishu-message-ingestion.md#机器人发送者白名单)，实现见[FeishuBotRepo](../../packages/server/src/store/repos/feishu-bot-repo.ts)。这份账号白名单与 Messaging 消息采集的 Connection/Profile/会话 allowlist 相互独立。
 
 ## 升级条件与检查
 

@@ -431,7 +431,7 @@ export class MultiremiDaemonClient {
       status: MultiremiTaskStatus;
       duplicate: boolean;
       steered: boolean;
-      senderMembership: SubmitFeishuBotMessageResult["senderMembership"];
+      senderAllowed: SubmitFeishuBotMessageResult["senderAllowed"];
     }>(`/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/messages`, {
       revision: input.revision,
       external_session_key: input.externalSessionKey,

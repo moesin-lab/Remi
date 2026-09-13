@@ -1785,6 +1785,18 @@ runMigrations(this.db);
     return this.feishuBot.submitMessage(workspaceId, runtimeId, input);
   }
 
+  listFeishuBotSenders(workspaceId: string) {
+    return this.feishuBot.listSenders(workspaceId);
+  }
+
+  setFeishuBotSenderAllowed(workspaceId: string, senderId: string, allowed: boolean, actorId?: string | null) {
+    return this.feishuBot.setSenderAllowed(workspaceId, senderId, allowed, actorId);
+  }
+
+  isFeishuBotTaskIssueCreationRestricted(taskId: string): boolean {
+    return this.feishuBot.isTaskIssueCreationRestricted(taskId);
+  }
+
   prepareFeishuIssueTopicWithinTransaction(issue: MultiremiIssue): boolean {
     return this.feishuBot.prepareIssueTopicWithinTransaction(issue);
   }

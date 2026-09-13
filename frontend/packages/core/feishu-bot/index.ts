@@ -4,6 +4,7 @@ export {
   feishuBotStatusOptions,
   feishuBotCandidatesOptions,
   feishuBotAuditOptions,
+  feishuBotSendersOptions,
   issueTopicConfigOptions,
 } from "./queries";
 export {
@@ -15,5 +16,6 @@ export {
   useBeginFeishuBotRegistration,
   useCancelFeishuBotRegistration,
   useSaveIssueTopicConfig,
+  useUpdateFeishuBotSender,
 } from "./mutations";
 export { feishuBotStatusTone, isFeishuBotBusy } from "./status";

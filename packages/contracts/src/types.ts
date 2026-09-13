@@ -4047,7 +4047,19 @@ export interface SubmitFeishuBotMessageResult {
   status: MultiremiTaskStatus;
   duplicate: boolean;
   steered: boolean;
-  senderMembership: "member" | "non_member" | "unbound";
+  senderAllowed: boolean;
+}
+
+/** An account observed by this workspace's current Feishu bot. */
+export interface FeishuBotSender {
+  id: string;
+  app_id: string;
+  display_name: string;
+  open_id: string;
+  union_id: string | null;
+  allowed: boolean;
+  first_seen_at: string;
+  last_seen_at: string;
 }
 
 /** Runtime-facing Task snapshot used by connector delivery polling. */
@@ -4088,7 +4100,9 @@ export type FeishuBotAuditAction =
   | "redeployed"
   | "tested"
   | "registration_started"
-  | "registration_used";
+  | "registration_used"
+  | "sender_allowed"
+  | "sender_revoked";
 
 /**
  * One audited change to the concierge. `details` records which fields moved and

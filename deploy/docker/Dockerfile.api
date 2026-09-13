@@ -35,7 +35,9 @@ RUN set -eu; \
   lark-cli --version
 
 COPY . .
-RUN bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts \
+# Retry with Bun's buffered extractor if streamed tarball extraction fails.
+RUN (bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts \
+    || BUN_FEATURE_FLAG_DISABLE_STREAMING_INSTALL=1 bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts) \
   && rm -rf /root/.bun/install/cache \
   && chmod 0755 /app/deploy/docker/api-entrypoint.sh
 

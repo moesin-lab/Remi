@@ -8,6 +8,8 @@ summary: 在同一台机器运行独立的稳定环境和开发环境，保留�
 
 使用 [本机管理脚本](../../scripts/local-profile.mjs)和 [Compose 模板](../../deploy/docker/compose.local.yml)。需要 Node.js 22+、Git、tar 与运行中的 Docker Desktop（Linux 容器）；Windows 固定使用 `desktop-linux` context。Bun 1.3.14 和 Linux 依赖在镜像内安装，不要求宿主安装 Bun，也不使用宿主 Windows 的 node_modules。
 
+API/Web 镜像安装依赖失败时，会使用 Bun 官方的 `BUN_FEATURE_FLAG_DISABLE_STREAMING_INSTALL=1` 再试一次，先完整下载再解压，以避开流式解压失败。两次安装都使用公共 npm 源和冻结锁文件；第二次失败仍会停止构建。
+
 | 内容 | stable | dev |
 |---|---|---|
 | 浏览器入口 | LAN 模式：`http://<内网IP>:13000`；默认 `http://127.0.0.1:13000` | `http://localhost:14000` |

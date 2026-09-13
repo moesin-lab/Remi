@@ -31,6 +31,8 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 
 ## 启动条件
 
+Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性/编辑权限，task token 对整个配置路由为 hard deny；直接填写的 API Key 经服务端 AES-256-GCM 加密并版本化。只允许绑定机器身份的 daemon token 从专用 `codex-profile-key` / `claude-profile-key` 路由读取对应 Runtime 的凭据，浏览器响应和任务公共响应不含密钥。加密配置、轮换和执行快照见 [Codex Runtime](../design/acp-codex-via-codex-acp.md#runtime-自定义连接)，Claude 的字段和请求头见 [Claude Code Runtime](../design/acp-claude-via-claude-agent-acp.md)，权限回归见 [runtime-codex-profile.test.ts](../../tests/unit/multiremi/runtime-codex-profile.test.ts)。
+
 本机 profile 可按[部署说明](../deploy/local-profiles.md#stable-内网访问)将 stable 的 Web/API 对内网开放。密码登录页在显式 stable 构建的配置主机名显示；`MULTIREMI_DAEMON_DIRECT_BASE_URL` 同时通过 `/api/config.daemon_server_url` 和 daemon 安装说明公布可连接的 API origin，避免远程机器误连自身 loopback。监听 `0.0.0.0` 与客户端连接地址是不同设置，不改变服务端原有鉴权。
 
 [startMultiremiServer](../../packages/server/src/api/server.ts)调用 [evaluateStartupEnv](../../packages/server/src/config/startup-env.ts)：生产模式要求 `MULTIREMI_DATABASE_URL`、`MULTIREMI_TOKEN`、`JWT_SECRET`，缺项会拒绝启动。显式 development/test 作为本地模式；否则 production 或已配置数据库 URL 会触发生产要求。

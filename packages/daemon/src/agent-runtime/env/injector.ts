@@ -62,7 +62,9 @@ export function buildTaskEnv(task: AgentTask, opts: BuildTaskEnvOptions): Record
       ? { CLAUDE_CONFIG_DIR: opts.providerHome.home }
       : opts.providerHome?.provider === "codex"
         ? { CODEX_HOME: opts.providerHome.home }
-        : {}),
+        : opts.providerHome?.provider === "antigravity"
+          ? { MULTIREMI_ANTIGRAVITY_CONTEXT_DIR: opts.providerHome.home }
+          : {}),
     ...(taskAuthToken ? { MULTIREMI_TOKEN: taskAuthToken } : {}),
   };
   const brokerEnv = appendGitCredentialBrokerEnv(env, {

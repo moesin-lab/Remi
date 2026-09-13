@@ -1,4 +1,0 @@
-interface:
-  display_name: "Remi 操作"
-  short_description: "通过现有 CLI 配置 Remi 云友、模型连接、工作区和自动化，并核验结果"
-  default_prompt: "使用 $remi-operations，先检查当前 Remi 实例和权限，再完成我要求的配置并读回验证。"

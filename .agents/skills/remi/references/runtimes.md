@@ -115,6 +115,4 @@ remi runtime directory status <runtime-id> <request-id> --json
 
 ## 离线排查边界
 
-本机 `remi daemon status` / `remi daemon logs` 查询的是当前机器。远端 Runtime 应在它所属的机器上检查。不要从某个 Runtime 离线直接推断整个平台需要重启。
-
-依次区分 API 连接、心跳、daemon 进程、目录请求和 provider 执行。恢复后观察多个新心跳并验证原失败操作。通过 SSH 前台临时启动时明确记录对该连接的依赖；未验证服务接管、断开后的心跳或自动恢复，不能称为持久修复。
+Runtime 在线只证明近期登记状态；目录请求和 provider 执行仍需独立检查。daemon 本机生命周期、后台服务环境、SSH 临时恢复与平台升级见 [运行维护](maintenance.md)，不要从某个 Runtime 离线直接推断整个平台需要重启。

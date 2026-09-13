@@ -1,4 +1,4 @@
-# 自动化、团队与执行
+# 自动化与团队
 
 ## Squad
 
@@ -53,26 +53,17 @@ remi autopilot run list <autopilot-id> --json
 
 `schedule_targets` 的更新替换整个目标选择，`null` 清除；修改其中一个项目或仓库时先保留其余目标。Webhook 的 token / secret 不出现在报告中；重放投递与 `autopilot run` 都会实际执行，只有用户要求时才触发，不拿来当保存成功的探针。
 
-## Issue、Chat 与 Task
-
-Issue 是跟踪的工作，Chat 是会话，Task 是一次执行；配置云友不会自动验证其工作能力。
+## 运行与 Webhook
 
 ```sh
-remi issue list --json
-remi issue get <issue-id> --json
-remi chat create --help
-remi task create --help
-remi task get <task-id> --json
+remi autopilot run --help
+remi autopilot run list <autopilot-id> --json
+remi autopilot trigger update --help
+remi autopilot delivery list --help
+remi autopilot delivery get --help
+remi autopilot delivery replay --help
 ```
 
-实际任务验证必须属于用户的请求。可用 `remi task create --agent <agent-id> --prompt <requested-work> --json`，保存 Task ID 并查询到终态。涉及持久本地目录时，先在 Issue / Chat 选择 `--runtime-workspace`，不要猜一个不存在的 Task 目录参数。
+用户要求立即执行时，按 run 帮助触发一次，记录 run ID 与关联 Issue/Task，沿 [Task 查询](chats-and-tasks.md) 检查执行终态。仅要求设置定时任务时，读回定义、trigger 和 scheduler 即可，不额外跑一轮。
 
-```sh
-remi chat create --agent <agent-id> --runtime-workspace <runtime-workspace-id> --json
-remi chat create --agent <agent-id> --project <project-id> --json
-remi issue create --title "Inspect local state" --runtime-workspace <runtime-workspace-id> --json
-```
-
-这三条是不同的选择示例，不应为了验证而全部执行。派单、发送消息、状态变更可能启动工作；先查看相应命令帮助和当前状态，不假设 Multica 的 `--no-start` 或 mention 语义也适用于 Remi。
-
-已有任务只需要汇报进展时，不再创建一个重复 Task。写入响应丢失时先查任务、自动化运行或消息记录；网络重试不等于可以重复提交用户工作。最终报告实际执行终态和输出，不能用 HTTP 200 或 Runtime 在线替代任务结果。
+Webhook 使用 trigger 配置，密钥维护入口为 trigger rotate-token/set-secret，投递查询与重放使用 delivery 命令。保留 trigger ID 和 delivery ID。投递被接收、通过鉴权与派发成功是不同状态；先查投递及对应 run，再判断是否重放。调整或撤销 Webhook 时保留用户尚需使用的其他触发器。

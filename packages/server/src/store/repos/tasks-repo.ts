@@ -427,12 +427,14 @@ export class TasksRepo {
     // wrong machine (it would run in a scratch checkout of the wrong repo) or
     // carry another machine's provider session. An explicit runtimeId is only
     // honoured when there is no strong affinity to respect.
+    const chatProfile = chatSession?.sessionRuntimeId
+      ? this.ctx.runtimes().getRuntimeExecutionProfile(chatSession.sessionRuntimeId, agent.provider) : null;
     const affinity = this.resolveTaskAffinity(
       agent,
       input.resetProviderSession ? null : chatSession,
       runtimeWorkspaceId ? null : chatSession?.projectId ?? (holdsWorkspace && issue?.issueKind !== "intake" ? issue?.projectId : null) ?? null,
-      expectedExecutionFingerprint,
-      currentPluginSnapshot.length > 0,
+      inheritedExecutionFingerprint ?? withRuntimeProfileFingerprint(expectedExecutionFingerprint, chatProfile),
+      currentPluginSnapshot.length > 0 || Boolean(chatProfile),
     );
     if (affinity.runtimeId) runtimeId = affinity.runtimeId;
     if (!input.resetProviderSession) inheritChatSession = affinity.inheritChatSession;
@@ -455,14 +457,16 @@ export class TasksRepo {
     if (issueSession) {
       issueLane = this.ctx.issueSessions().getOrCreateSessionAgentLane(issueSession.id, agent.id, executionScope);
       const laneRuntime = issueLane.runtimeId ? this.ctx.runtimes().getRuntime(issueLane.runtimeId) : null;
+      const laneProfile = laneRuntime
+        ? this.ctx.runtimes().getRuntimeExecutionProfile(laneRuntime.id, agent.provider) : null;
       const laneResumable =
         !input.resetProviderSession
         && !!issueLane.providerSessionId
         && issueLane.provider === agent.provider
         && executionFingerprintResumable(
           issueLane.executionFingerprint,
-          expectedExecutionFingerprint,
-          currentPluginSnapshot.length > 0,
+          inheritedExecutionFingerprint ?? withRuntimeProfileFingerprint(expectedExecutionFingerprint, laneProfile),
+          currentPluginSnapshot.length > 0 || Boolean(laneProfile),
         )
         && laneRuntime != null
         && (!runtimeWorkspace || laneRuntime.daemonId === runtimeWorkspace.daemonId)
@@ -509,11 +513,11 @@ export class TasksRepo {
         requesting_user_profile_description, workspace_id, status, priority, prompt,
         attempt, max_attempts, parent_task_id, issue_creation_restricted, delegation_id, delegated_by_agent_id,
         assignment_event_id, assignment_source_event_id, projection_degrade_level,
-        provider, plugin_snapshot, execution_fingerprint,
+        provider, plugin_snapshot, execution_fingerprint, codex_profile, claude_profile,
         session_id, work_dir, created_at, updated_at
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?,
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       )`,
       [
         runtimeWorkspaceId,
@@ -551,6 +555,8 @@ export class TasksRepo {
         cleanOptionalString(input.provider),
         toJson(inheritedPluginSnapshot ?? []),
         inheritedExecutionFingerprint,
+        inheritedExecutionFingerprint && input.codexProfile ? toJson(input.codexProfile) : null,
+        inheritedExecutionFingerprint && input.claudeProfile ? toJson(input.claudeProfile) : null,
         // The inheritChatSession gate applies only to a task that HAS a chat
         // session: when false the promoted session belongs to a machine we
         // can't return to (engine switched / runtime gone) — dropped, even if a
@@ -990,6 +996,8 @@ export class TasksRepo {
       // another provider on the same machine fill the idle slot between the
       // last in-flight Task finishing and the daemon claiming its update.
       if (this.ctx.runtimes().hasCliUpdateDrainForRuntime(runtimeId)) return null;
+      if (lockedRuntime.metadata[`${lockedRuntime.provider}_profiles`] !== 1
+        && this.ctx.runtimes().getRuntimeExecutionProfile(runtimeId, lockedRuntime.provider)) return null;
 
       const stale = this.reclaimStaleDispatchedTaskForRuntime(runtimeId, [...excludedAgentIds]);
       if (!stale) this.refreshQueuedChatAffinity(lockedRuntime.workspaceId ?? "local");
@@ -1077,9 +1085,10 @@ export class TasksRepo {
     }
 
     const pluginSnapshot = this.ctx.agentPlugins().resolveAgentPluginSnapshot(currentAgent.id);
-    const executionFingerprint = createHash("sha256")
-      .update(canonicalJson(pluginSnapshot))
-      .digest("hex");
+    const runtimeProfile = this.ctx.runtimes().getRuntimeExecutionProfile(runtime.id, provider);
+    const executionFingerprint = withRuntimeProfileFingerprint(
+      createHash("sha256").update(canonicalJson(pluginSnapshot)).digest("hex"), runtimeProfile,
+    );
     if (!this.runtimeHasReadyPluginSnapshot(runtime, pluginSnapshot)) {
       throw new AgentPluginReadinessChangedError("Agent Plugin readiness changed during task claim");
     }
@@ -1093,7 +1102,7 @@ export class TasksRepo {
       keepProviderSession = executionFingerprintResumable(
         chat?.sessionExecutionFingerprint ?? null,
         executionFingerprint,
-        pluginSnapshot.length > 0,
+        pluginSnapshot.length > 0 || Boolean(runtimeProfile),
       );
     } else if (task.issueSessionId) {
       issueSessionId = task.issueSessionId;
@@ -1105,7 +1114,7 @@ export class TasksRepo {
         && executionFingerprintResumable(
           lane.executionFingerprint,
           executionFingerprint,
-          pluginSnapshot.length > 0,
+          pluginSnapshot.length > 0 || Boolean(runtimeProfile),
         )
         && lane.runtimeId === runtime.id
         && laneRuntime != null
@@ -1125,7 +1134,7 @@ export class TasksRepo {
     }
     this.ctx.db.run(
       `UPDATE multiremi_tasks
-       SET provider = ?, plugin_snapshot = ?, execution_fingerprint = ?,
+       SET provider = ?, plugin_snapshot = ?, execution_fingerprint = ?, codex_profile = ?, claude_profile = ?,
            session_id = CASE WHEN ? = 1 THEN ? WHEN ? = 1 THEN session_id ELSE NULL END,
            work_dir = CASE WHEN ? = 1 THEN ? WHEN ? = 1 THEN work_dir ELSE NULL END,
            issue_session_generation = CASE WHEN ? = 1 THEN ? ELSE issue_session_generation END,
@@ -1135,6 +1144,8 @@ export class TasksRepo {
         provider,
         toJson(pluginSnapshot),
         executionFingerprint,
+        provider === "codex" && runtimeProfile ? toJson(runtimeProfile) : null,
+        provider === "claude" && runtimeProfile ? toJson(runtimeProfile) : null,
         issueSessionId ? 1 : 0,
         issueProviderSessionId,
         keepProviderSession ? 1 : 0,
@@ -1178,6 +1189,8 @@ export class TasksRepo {
   }
 
   private runtimeHasReadyTaskPlugins(runtime: MultiremiRuntime, task: MultiremiTask): boolean {
+    if (task.codexProfile && runtime.metadata.codex_profiles !== 1) return false;
+    if (task.claudeProfile && runtime.metadata.claude_profiles !== 1) return false;
     if (!task.executionFingerprint) {
       return this.ctx.agentPlugins().runtimeHasReadyAgentPlugins(runtime.id, task.agentId);
     }
@@ -1340,7 +1353,8 @@ export class TasksRepo {
       const fingerprint = this.ctx.agentPlugins().getAgentPluginCapabilityRevision(agent.id);
       const issue = task.issueId ? this.ctx.issues().getIssue(task.issueId) : null;
       const projectId = task.runtimeWorkspaceId ? null : chat.projectId ?? (task.holdsWorkspace && issue?.issueKind !== "intake" ? issue?.projectId : null) ?? null;
-      const affinity = this.resolveTaskAffinity(agent, chat, projectId, fingerprint, plugins.length > 0);
+      const profile = chat.sessionRuntimeId ? this.ctx.runtimes().getRuntimeExecutionProfile(chat.sessionRuntimeId, agent.provider) : null;
+      const affinity = this.resolveTaskAffinity(agent, chat, projectId, withRuntimeProfileFingerprint(fingerprint, profile), plugins.length > 0 || Boolean(profile));
       let runtimeId = affinity.runtimeId ?? (task.sessionId ? agent.runtimeId : task.runtimeId);
       let inherit = affinity.inheritChatSession;
       if (task.runtimeWorkspaceId && runtimeId) {
@@ -1518,6 +1532,8 @@ export class TasksRepo {
              WHERE active.status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
                AND ${sameExecutionLaneSql("t", "active")}
            )
+           ${runtime.metadata.codex_profiles !== 1 ? "AND t.codex_profile IS NULL" : ""}
+           ${runtime.metadata.claude_profiles !== 1 ? "AND t.claude_profile IS NULL" : ""}
            ${excludedAgentIds.length ? `AND t.agent_id NOT IN (${excludedAgentIds.map(() => "?").join(", ")})` : ""}
          ORDER BY t.priority DESC, t.created_at ASC
          LIMIT 1
@@ -2281,11 +2297,13 @@ export class TasksRepo {
       taskKind: parent.taskKind,
       provider: inheritExecutionSnapshot ? parent.provider : null,
       pluginSnapshot: inheritExecutionSnapshot ? parent.pluginSnapshot : undefined,
+      codexProfile: inheritExecutionSnapshot ? parent.codexProfile : null,
+      claudeProfile: inheritExecutionSnapshot ? parent.claudeProfile : null,
       executionFingerprint: inheritExecutionSnapshot ? parent.executionFingerprint : null,
       issueSessionGeneration: resumeSafe ? parent.issueSessionGeneration : null,
       // Resume-safe failures must go back to the machine holding the session;
       // once the session is abandoned, any pool machine may pick up the retry.
-      runtimeId: resumeSafe ? parent.runtimeId : null,
+      runtimeId: resumeSafe || parent.codexProfile || parent.claudeProfile ? parent.runtimeId : null,
       runtimeWorkspaceId: parent.runtimeWorkspaceId,
       issueId: parent.issueId,
       issueSessionId: parent.issueSessionId,
@@ -3544,6 +3562,11 @@ function taskPluginSnapshotInput(input: CreateTaskInput): MultiremiTaskPluginSna
   return Array.isArray(value) ? value.map((entry) => ({ ...entry, config: { ...entry.config } })) : null;
 }
 
+function withRuntimeProfileFingerprint(pluginFingerprint: string, profile: unknown): string {
+  // Keep the serialization key stable for existing Codex execution snapshots.
+  return profile ? createHash("sha256").update(canonicalJson({ pluginFingerprint, codexProfile: profile })).digest("hex") : pluginFingerprint;
+}
+
 function executionFingerprintResumable(
   storedFingerprint: string | null | undefined,
   expectedFingerprint: string,
@@ -3583,6 +3606,8 @@ function toTask(row: Row): MultiremiTask {
     runtimeWorkspaceId: nullableString(row.runtime_workspace_id),
     provider: nullableString(row.provider),
     pluginSnapshot: parseJson<MultiremiTaskPluginSnapshotEntry[]>(row.plugin_snapshot, []),
+    codexProfile: parseJson(row.codex_profile, null),
+    claudeProfile: parseJson(row.claude_profile, null),
     plugin_snapshot: parseJson<MultiremiTaskPluginSnapshotEntry[]>(row.plugin_snapshot, []),
     executionFingerprint: nullableString(row.execution_fingerprint),
     execution_fingerprint: nullableString(row.execution_fingerprint),

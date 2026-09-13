@@ -116,7 +116,7 @@ describe("IssueSessionArchivesSection", () => {
     renderSection();
 
     await user.click(screen.getByRole("button", { name: /Provider session archives/ }));
-    expect(screen.getByText("No session archive has been created yet.")).toBeInTheDocument();
+    expect(screen.getByText("No provider session archive has been created yet.")).toBeInTheDocument();
   });
 
   it("verifies a ready archive from the compact issue sidebar section", async () => {

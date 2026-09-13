@@ -1456,7 +1456,7 @@ describe("IssueDetail (shared)", () => {
       screen.getAllByRole("generic").some((el) => el.getAttribute("data-slot") === "skeleton"),
     ).toBe(true);
     expect(
-      screen.queryByText("Couldn't load this issue's sessions"),
+      screen.queryByText("Couldn't load Sessions linked to this issue"),
     ).not.toBeInTheDocument();
   });
 
@@ -1465,7 +1465,7 @@ describe("IssueDetail (shared)", () => {
     renderIssueDetail();
 
     expect(
-      await screen.findByText("Couldn't load this issue's sessions"),
+      await screen.findByText("Couldn't load Sessions linked to this issue"),
     ).toBeInTheDocument();
 
     const callsBeforeRetry = mockApiObj.listIssueSessions.mock.calls.length;
@@ -1482,7 +1482,7 @@ describe("IssueDetail (shared)", () => {
     renderIssueDetail();
 
     expect(
-      await screen.findByText("Couldn't load this issue's sessions"),
+      await screen.findByText("Couldn't load Sessions linked to this issue"),
     ).toBeInTheDocument();
     expect(mockApiObj.listTimeline).toHaveBeenCalledWith("issue-1", undefined);
   });

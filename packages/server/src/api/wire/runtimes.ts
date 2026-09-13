@@ -18,7 +18,7 @@ import type { MultiremiStore } from "@multiremi/store/store.js";
 import type { Context } from "hono";
 import { skillWithFilesCompatibilityResponse } from "./skills.js";
 
-export const MULTIREMI_DAEMON_PROVIDERS = new Set(["claude", "codex"]);
+export const MULTIREMI_DAEMON_PROVIDERS = new Set(["claude", "codex", "antigravity"]);
 
 export function runtimeWorkspaceId(runtime: MultiremiRuntime): string {
   return runtime.workspaceId ?? "local";

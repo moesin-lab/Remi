@@ -27,9 +27,11 @@ export function prepareRuntimeWorkspaceContext(
   const userHome = options.userHome ?? homedir();
   const baseHome = options.baseHome ?? (providerHome.provider === "codex"
     ? process.env.CODEX_HOME ?? join(userHome, ".codex")
-    : process.env.CLAUDE_CONFIG_DIR ?? join(userHome, ".claude"));
+    : providerHome.provider === "antigravity" ? join(userHome, ".gemini", "antigravity-cli")
+      : process.env.CLAUDE_CONFIG_DIR ?? join(userHome, ".claude"));
   const instructionNames = providerHome.provider === "codex"
-    ? ["AGENTS.override.md", "AGENTS.md", "AGENT.md"] : ["CLAUDE.md", "AGENTS.md", "AGENT.md"];
+    ? ["AGENTS.override.md", "AGENTS.md", "AGENT.md"] : providerHome.provider === "antigravity"
+      ? ["AGENTS.md", "AGENT.md"] : ["CLAUDE.md", "AGENTS.md", "AGENT.md"];
 
   const addInstructions = (file: string, boundary?: string) => {
     if (!existsSync(file)) return;
@@ -65,7 +67,7 @@ export function prepareRuntimeWorkspaceContext(
   addSkills(join(userHome, ".agents", "skills"));
   // Database Agent skills are materialized in daemon-owned state, leaving any
   // identically named local skill intact.
-  addSkills(join(providerHome.home, providerHome.provider === "codex" ? ".agents" : ".claude", "skills"));
+  addSkills(join(providerHome.home, providerHome.provider === "claude" ? ".claude" : ".agents", "skills"));
   const ancestors: string[] = [];
   for (let directory = cwd; ; directory = dirname(directory)) {
     ancestors.unshift(directory);
@@ -87,7 +89,7 @@ export function prepareRuntimeWorkspaceContext(
   if (Buffer.byteLength(content) > MAX_CONTEXT_BYTES) {
     throw new LocalDirectoryError("Runtime workspace local context exceeds 24 KiB; reduce instruction files or the skill catalog");
   }
-  const target = join(providerHome.home, providerHome.provider === "codex" ? "AGENTS.md" : "CLAUDE.md");
+  const target = join(providerHome.home, providerHome.provider === "claude" ? "CLAUDE.md" : "AGENTS.md");
   const targetStat = existsSync(target) ? lstatSync(target) : null;
   if (targetStat && (targetStat.isSymbolicLink() || !targetStat.isFile() || targetStat.nlink > 1)) {
     throw new LocalDirectoryError("Runtime workspace provider instructions must be an unlinked regular file");

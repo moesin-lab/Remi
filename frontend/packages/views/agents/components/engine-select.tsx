@@ -11,7 +11,7 @@ import { useT } from "../../i18n";
 // refines each engine's models + capacity. Single declaration — the create
 // dialog, the edit dialog, the inspector picker and the list filter all
 // import it from here.
-export const ENGINES = ["claude", "codex"] as const;
+export const ENGINES = ["claude", "codex", "antigravity"] as const;
 
 /**
  * The engine (provider) choice as a segmented button pair, plus the
@@ -50,7 +50,7 @@ export function EngineSelect({
       <div
         role="group"
         aria-labelledby={labelId}
-        className="mt-1.5 flex gap-2"
+        className="mt-1.5 flex flex-wrap gap-2"
       >
         {ENGINES.map((engine) => (
           <button

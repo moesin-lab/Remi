@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { antigravityCliVersion, resolveAntigravityExecutable } from "@acp/antigravity.js";
 import { isPermanentFeishuDeliveryError } from "@shared/feishu-delivery-error.js";
 import { mkdirSync } from "node:fs";
 import { cpus, homedir, hostname } from "node:os";
@@ -6,6 +7,7 @@ import { basename, join, resolve } from "node:path";
 import { createLogger } from "@shared/logger.js";
 import {
   AcpProvider,
+  createRuntimeProvider,
   type AcpModelCapability,
   type AcpProviderOptions,
   bridgeVersion,
@@ -680,7 +682,7 @@ export class MultiremiDaemon {
       );
     }
     this.runtimeModelDiscoveryEnabled = options.inProcessRuntimeModelDiscoveryEnabled === true
-      || (!options.providerFactory && ["claude", "codex"].includes(options.provider ?? "claude"));
+      || (!options.providerFactory && ["claude", "codex", "antigravity"].includes(options.provider ?? "claude"));
     const workspacesRoot = configuredMultiremiWorkspacesRoot(options.workspacesRoot);
     const runtimeName = options.runtimeName ?? process.env.MULTIREMI_RUNTIME_NAME ?? `${hostname()}-${Bun.env.USER ?? "local"}-bun-runtime`;
     const deviceName = options.deviceName ?? process.env.MULTIREMI_DEVICE_NAME ?? `${hostname()}-${Bun.env.USER ?? "local"}`;
@@ -759,7 +761,7 @@ export class MultiremiDaemon {
       ttlMs: this.options.gcTtlMs,
       intervalMs: this.options.gcIntervalMs,
     };
-    this.providerFactory = options.providerFactory ?? ((providerOptions) => new AcpProvider(providerOptions));
+    this.providerFactory = options.providerFactory ?? createRuntimeProvider;
     this.updateRunner = options.updateRunner ?? runDefaultMultiremiUpdate;
     this.onRestartRequested = options.onRestartRequested ?? null;
     this.cliUpdateCoordinator?.register({
@@ -1195,6 +1197,7 @@ export class MultiremiDaemon {
   /** Version of the underlying agent CLI (`claude` / `codex`), or null. */
   private agentVersion(): string | null {
     const provider = this.options.provider;
+    if (provider === "antigravity") return antigravityCliVersion();
     return provider === "claude" || provider === "codex" ? agentCliVersion(provider) : null;
   }
 
@@ -1395,12 +1398,13 @@ export class MultiremiDaemon {
   /** Update the underlying agent CLI (claude/codex) via its own `update` subcommand. */
   private async updateAgentCli(): Promise<string> {
     const provider = this.options.provider;
-    if (provider !== "claude" && provider !== "codex") {
+    if (!["claude", "codex", "antigravity"].includes(provider)) {
       throw new Error(`agent update not supported for provider: ${provider}`);
     }
     // Spawn with the daemon's own env: it was launched from a login shell, so
     // PATH already resolves claude/codex (incl. Homebrew on macOS).
-    const proc = Bun.spawn([provider, "update"], { stdout: "pipe", stderr: "pipe", env: process.env });
+    const executable = provider === "antigravity" ? resolveAntigravityExecutable() : provider;
+    const proc = Bun.spawn([executable, "update"], { stdout: "pipe", stderr: "pipe", env: process.env });
     const [stdout, stderr, exitCode] = await Promise.all([
       streamText(proc.stdout),
       streamText(proc.stderr),
@@ -3290,7 +3294,7 @@ export class MultiremiDaemon {
     this.assertWorkspaceRootOwner();
     const agent = task.agent;
     if (!agent) throw new Error(`Task ${task.id} has no agent`);
-    if (agent.provider !== "claude" && agent.provider !== "codex") {
+    if (!["claude", "codex", "antigravity"].includes(agent.provider)) {
       throw new Error(`Unsupported Bun Multiremi provider: ${agent.provider}`);
     }
 
@@ -3350,6 +3354,9 @@ export class MultiremiDaemon {
       providerEnv,
     };
     const config = runtime.assemble(ctx);
+    if (config.agentType === "antigravity" && workDir !== codeWorkDir) {
+      config.addDirs = [...new Set([...(config.addDirs ?? []), codeWorkDir])];
+    }
 
     const provider = this.providerFactory({
       agentType: config.agentType,

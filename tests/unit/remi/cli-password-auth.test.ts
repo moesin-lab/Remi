@@ -127,38 +127,49 @@ describe("password authentication CLI", () => {
     }
   });
 
-  it("does not expose malformed password input in CLI errors", async () => {
+  it.each([
+    { path: ["context", "auth", "password"] },
+    { path: ["context", "auth", "password-account", "set"] },
+  ])("does not expose malformed password input in CLI errors for %j", async ({ path }) => {
     writeFileSync(inputPath, `{"password": "${credentials.password}"`);
+    let requests = 0;
     globalThis.fetch = (async () => {
+      requests++;
       throw new Error("Malformed login input must not be sent");
     }) as unknown as typeof fetch;
     let message = "";
     try {
-      await registry().execute(["context", "auth", "password", "--file", inputPath]);
+      await registry().execute([...path, "--file", inputPath]);
     } catch (error) { message = String(error); }
     expect(message).toContain("Read email/password JSON");
     expect(message).not.toContain(credentials.password);
+    expect(requests).toBe(0);
     expect(output).toEqual([]);
   });
 
-  it("negotiates account provisioning and forwards the master credential with file input", async () => {
+  it.each([
+    { input: { workspaceId: "ws_from_file" }, args: ["--workspace", "ws_explicit"], workspace: "ws_explicit" },
+    { input: { workspace_id: "ws_snake" }, args: [], workspace: "ws_snake" },
+    { input: { workspaceId: "ws_camel", workspace_id: "ws_snake" }, args: [], workspace: "ws_camel" },
+  ])("negotiates account provisioning and forwards the master credential with file input %j", async ({ input, args, workspace }) => {
     process.env.MULTIREMI_TOKEN = "provisioning-master-fixture";
-    writeFileSync(inputPath, JSON.stringify({ ...credentials, name: "CLI Reader", workspaceId: "ws_from_file" }));
+    writeFileSync(inputPath, JSON.stringify({ ...credentials, name: "CLI Reader", ...input }));
     const paths: string[] = [];
     globalThis.fetch = (async (input, init) => {
       const request = new Request(input, init);
       const path = new URL(request.url).pathname;
       paths.push(path);
+      expect(request.headers.get("X-Workspace-ID")).toBe(workspace);
       expect(request.headers.get("Authorization")).toBe("Bearer provisioning-master-fixture");
       if (path === "/api/cli/capabilities") {
         return Response.json({ identity: "human", commands: [{ id: "context.auth.password-account.set", allowed: true }] });
       }
       expect(request.method).toBe("POST");
-      expect(await request.json()).toEqual({ ...credentials, name: "CLI Reader", workspaceId: "ws_explicit" });
+      expect(await request.json()).toEqual({ ...credentials, name: "CLI Reader", workspaceId: workspace });
       return Response.json({ user: { id: "usr_provisioned", email: credentials.email }, password: credentials.password, password_hash: "never-output-this" });
     }) as typeof fetch;
 
-    await registry().execute(["context", "auth", "password-account", "set", "--file", inputPath, "--workspace", "ws_explicit", "--output", "json"]);
+    await registry().execute(["context", "auth", "password-account", "set", "--file", inputPath, ...args, "--output", "json"]);
     expect(paths).toEqual(["/api/cli/capabilities", "/api/auth/password-accounts"]);
     expect(JSON.parse(output.join("\n"))).toEqual({ user: { id: "usr_provisioned", email: credentials.email } });
     expect(output.join("\n")).not.toContain(credentials.password);
@@ -194,10 +205,8 @@ describe("password authentication CLI", () => {
       for (const path of [["context", "auth", "password"], ["context", "auth", "password-account", "set"]]) {
         const child = Bun.spawn([process.execPath, "apps/remi/main.ts", ...path, "--file", "-", "--output", "json"], {
           env: { ...process.env, MULTIREMI_SERVER_URL: `http://127.0.0.1:${server.port}`, MULTIREMI_CONFIG: configPath, MULTIREMI_TOKEN: "" },
-          stdin: "pipe", stdout: "pipe", stderr: "pipe",
+          stdin: Buffer.from(JSON.stringify(credentials)), stdout: "pipe", stderr: "pipe",
         });
-        child.stdin.write(JSON.stringify(credentials));
-        child.stdin.end();
         const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
         expect(exitCode, stderr).toBe(0);
         expect(stdout).not.toContain(credentials.password);

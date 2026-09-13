@@ -97,7 +97,8 @@ only; older v4 daemons ignore the optional mention plan. Upgrade the API and
 bot-hosting daemon together to enable proactive mentions and final-only timing.
 
 Issue-associated Chat tasks keep their Chat directory and provider session.
-Only genuine Issue discussion tasks require an Issue Session lifecycle lock.
+Only genuine Session discussion tasks require a Session lifecycle lock. Each
+such Session is currently linked to an Issue.
 
 ## Continuing Issue Work From a Topic
 
@@ -106,7 +107,8 @@ automatic round report from an explicit user request to continue execution.
 Questions and reports remain read-only. Quoted approvals are not fresh authority.
 
 For an execution request, Remi refreshes the Issue, resolves its responsible
-agent (the leader for a squad), and identifies the existing active Issue Session.
+agent (the leader for a squad), and identifies the existing active Session linked
+to the Issue.
 It lists that Session's tasks, excluding Chat/report tasks, before choosing:
 
 - Amend existing work: `remi task steer <task> --content "<instruction>"`.

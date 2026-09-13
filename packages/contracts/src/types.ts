@@ -1302,7 +1302,7 @@ export interface MultiremiTask {
   issueId: string | null;
   issueSessionId: string | null;
   issue_session_id?: string | null;
-  /** Generation of this task's per-agent Issue Session lane, frozen at claim
+  /** Generation of this task's per-agent Session lane, frozen at claim
    * time and persisted so late completions cannot promote into a newer lane. */
   issueSessionGeneration?: number | null;
   execution_scope?: string;
@@ -2187,22 +2187,27 @@ export interface MultiremiProjectSearchResult extends MultiremiProject {
   matchedSnippet?: string;
 }
 
-// ─── Issue sessions ──────────────────────────────────────────────────────────────────────────────
+// ─── Sessions ────────────────────────────────────────────────────────────────────────────────────
+// Sessions are core product entities. The current model anchors each Session to
+// exactly one Issue; `IssueSession` names below remain compatibility aliases.
 
-export type MultiremiIssueSessionStatus = "active" | "archived";
+export type MultiremiSessionStatus = "active" | "archived";
+
+/** @deprecated Use `MultiremiSessionStatus`. */
+export type MultiremiIssueSessionStatus = MultiremiSessionStatus;
 
 export type MultiremiSessionParticipantType = "agent" | "member";
 
 export type MultiremiSessionProjectionMode = "bootstrap" | "delta";
 
-export interface MultiremiIssueSession {
+export interface MultiremiSession {
   id: string;
   issueId: string;
   issue_id?: string;
   workspaceId: string;
   workspace_id?: string;
   title: string;
-  status: MultiremiIssueSessionStatus;
+  status: MultiremiSessionStatus;
   isDefault: boolean;
   is_default?: boolean;
   holdsWorkspace: boolean;
@@ -2217,6 +2222,9 @@ export interface MultiremiIssueSession {
   updatedAt: string;
   updated_at?: string;
 }
+
+/** @deprecated Use `MultiremiSession`. */
+export type MultiremiIssueSession = MultiremiSession;
 
 export interface MultiremiSessionParticipant {
   id: string;
@@ -2316,7 +2324,7 @@ export interface MultiremiSessionProjection {
   estimated_tokens?: number;
 }
 
-export interface CreateIssueSessionInput {
+export interface CreateSessionInput {
   id?: string;
   issueId?: string;
   issue_id?: string;
@@ -2331,11 +2339,17 @@ export interface CreateIssueSessionInput {
   holds_workspace?: boolean;
 }
 
-export interface UpdateIssueSessionInput {
+/** @deprecated Use `CreateSessionInput`. */
+export type CreateIssueSessionInput = CreateSessionInput;
+
+export interface UpdateSessionInput {
   title?: string;
-  status?: MultiremiIssueSessionStatus;
+  status?: MultiremiSessionStatus;
   summary?: string | null;
 }
+
+/** @deprecated Use `UpdateSessionInput`. */
+export type UpdateIssueSessionInput = UpdateSessionInput;
 
 export interface AddSessionParticipantInput {
   participantType?: MultiremiSessionParticipantType;

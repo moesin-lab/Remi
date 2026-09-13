@@ -256,7 +256,7 @@ describe("bootstrap and delta task prompts", () => {
     expect(prompt).toContain("## Autopilot Context");
   });
 
-  it("does not advertise provider history without an Issue Session workspace", () => {
+  it("does not advertise provider history without a Session workspace", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Direct", provider: "codex" });
     const task = store.createTask({ agentId: agent.id, prompt: "Direct task" });

@@ -19,7 +19,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 运行测试、验证回归 | [测试](../../TESTING.md) | 测试发现范围与真实服务前提 |
 | 新增 API 或 CLI 能力 | [CLI 命令契约](../cli-command-migration.md) | canonical 命令、注册与能力检查 |
 | 改 Runtime 工作区、执行目录或本地上下文 | [Runtime 持久化工作区](runtime-workspaces.md) | daemon 归属、绑定、目录和上下文保留、调度约束 |
-| 判断 Topic、Chat、Issue Session、Task 或成果的边界 | [对话与工作会话模型](../conversation-model.md) | 名词、层级、生命周期、绑定与飞书映射 |
+| 判断 Topic、Chat、Session、Task 或成果的边界 | [对话与工作会话模型](../conversation-model.md) | 名词、身份、生命周期、关联与飞书映射 |
 | 改 Chat 页面、私聊或消息队列 | [Chat 契约](../chat.md) | Chat 管理、工作位置、队列串行和私聊权限 |
 | 改 Agent 并行调度与执行目录 | [并行执行](../parallel-agent-execution.md) | Agent/Session 执行隔离、共享代码和 daemon 协议升级 |
 | 修改登录、租户隔离或 token 权限 | [认证与权限](auth.md) | 身份来源、资源 guard 和生产启动约束 |

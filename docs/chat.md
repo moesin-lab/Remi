@@ -7,7 +7,7 @@ summary: 独立 Chat 页面与浮窗共用私聊、执行队列和 Chat 管理�
 # Chat
 
 Chat 是用户与一个云友的持续私聊。可以直接提问、讨论或要求执行工作，无需先创建 Issue。
-它不是 Issue Session；完整对象关系见 [Topic、Chat 与 Issue Session](conversation-model.md)。
+它不是 Session；完整对象关系见 [Topic、Chat 与 Session](conversation-model.md)。
 独立页面位于 `/<workspaceSlug>/chat`，与其他页面的浮窗共享 Chat 选择和草稿；独立页不再挂载浮窗。
 页面可以通过 `?session=<id>` 打开已有聊天，或通过 `?agent=<id>` 开始新聊天。
 

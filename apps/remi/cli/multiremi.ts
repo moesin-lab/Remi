@@ -707,13 +707,19 @@ export function createFeishuTaskHandler(
 }
 
 function renderFeishuChatCommand(command: string, snapshot: FeishuBotSessionSnapshot): string {
-  if (!snapshot.chatSessionId) return "No conversation has been started yet.";
+  const deprecatedSessionsNotice = command === "/sessions"
+    ? "Deprecated: /sessions reports the current Chat. Use /chat."
+    : null;
+  if (!snapshot.chatSessionId) {
+    return [deprecatedSessionsNotice, "No conversation has been started yet."].filter(Boolean).join("\n");
+  }
   const task = snapshot.task;
   if (command === "/chat" || command === "/sessions") {
     return [
+      deprecatedSessionsNotice,
       `Conversation: ${snapshot.chatSessionId}`,
       task ? `Latest task: ${task.taskId} (${task.status})` : "Latest task: none",
-    ].join("\n");
+    ].filter(Boolean).join("\n");
   }
   if (command === "/context") {
     if (!task) return `Conversation: ${snapshot.chatSessionId}\nContext usage: no task usage yet.`;

@@ -822,8 +822,8 @@ export function runMigrations(db: SqlDatabase): void {
       FOREIGN KEY(parent_issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL
     );
 
-    -- Product-level collaboration sessions. These are intentionally distinct
-    -- from ACP/provider session ids stored on tasks and agent lanes.
+    -- Core product Sessions. issue_id is their mandatory goal/access anchor,
+    -- not their identity. They are distinct from ACP/provider session ids.
     CREATE TABLE IF NOT EXISTS multiremi_issue_sessions (
       id TEXT PRIMARY KEY,
       issue_id TEXT NOT NULL,

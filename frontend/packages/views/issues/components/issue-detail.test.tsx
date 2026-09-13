@@ -1027,7 +1027,7 @@ describe("IssueDetail (shared)", () => {
     // The header text stays the bare word; the scope rides along as the
     // tooltip / accessible description.
     const railLabel = await screen.findByText("Sessions");
-    expect(railLabel).toHaveAttribute("title", "Sessions on this issue");
+    expect(railLabel).toHaveAttribute("title", "Sessions linked to this issue");
   });
 
   it("shows the localized default-session name instead of the stored title", async () => {

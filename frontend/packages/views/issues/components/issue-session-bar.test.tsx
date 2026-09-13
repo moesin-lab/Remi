@@ -44,7 +44,7 @@ describe("NewSessionButton", () => {
 
     expect(
       await screen.findByText(
-        "A session keeps its own conversation and agent runs, separate from the others on this issue.",
+      "A Session is a durable work context with its own conversation and Agent runs. It will be linked to this issue.",
       ),
     ).toBeInTheDocument();
 
@@ -93,4 +93,3 @@ describe("NewSessionButton", () => {
     expect(mockMutations.createSession).not.toHaveBeenCalled();
   });
 });
-

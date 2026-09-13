@@ -493,7 +493,7 @@
     "space_used": "使用容量",
     "last_failure": "最新のアーカイブ失敗",
     "cleanup_title": "ワークスペースのクリーンアップ",
-    "cleanup_description": "完了した Issue のワークスペースを指定時間保持します。セッションアーカイブの検証前には削除されません。",
+    "cleanup_description": "完了した Issue のワークスペースを指定時間保持します。Provider セッションアーカイブの検証前には削除されません。",
     "workspace_ttl": "ワークスペース保持期間",
     "gc_interval": "クリーンアップ間隔",
     "hours": "時間",

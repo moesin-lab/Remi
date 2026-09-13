@@ -51,7 +51,7 @@ function scaffold() {
 }
 
 describe("Feishu bot standard Task bridge", () => {
-  it("reports the current platform Chat through /chat while retaining /sessions as an alias", async () => {
+  it("reports the current Chat through /chat and marks /sessions as a deprecated alias", async () => {
     const snapshot = {
       chatSessionId: "chat_current",
       agentId: "agent_current",
@@ -63,7 +63,10 @@ describe("Feishu bot standard Task bridge", () => {
     } as unknown as MultiremiDaemon;
     const handler = createFeishuTaskHandler(daemon, 1, "Remi");
 
-    for (const command of ["/chat", "/sessions"]) {
+    for (const [command, expected] of [
+      ["/chat", "Conversation: chat_current\nLatest task: none"],
+      ["/sessions", "Deprecated: /sessions reports the current Chat. Use /chat.\nConversation: chat_current\nLatest task: none"],
+    ] as const) {
       const output: string[] = [];
       await handler({ text: command, chatId: "oc_chat", sender: "user" }, "oc_chat", async (stream, meta) => {
         expect(meta.taskId).toBe(`feishu-command-${command.slice(1)}`);
@@ -71,7 +74,7 @@ describe("Feishu bot standard Task bridge", () => {
           if (event.kind === "message" && event.message.content) output.push(event.message.content);
         }
       });
-      expect(output).toEqual(["Conversation: chat_current\nLatest task: none"]);
+      expect(output).toEqual([expected]);
     }
   });
 

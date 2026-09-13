@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { runMultiremi } from "../../../apps/remi/cli/multiremi.js";
 
-describe("Multiremi CLI — issue session archives", () => {
+describe("Multiremi CLI — provider session archives", () => {
   test("status, list, verify, and retry use the issue archive API", async () => {
     const requests: Array<{ method: string; path: string }> = [];
     const ready = {

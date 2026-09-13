@@ -7,7 +7,7 @@
   },
   "input": {
     "placeholder_no_agent": "Create an agent to start chatting",
-    "placeholder_archived": "This session is archived",
+    "placeholder_archived": "This chat is archived",
     "placeholder_named": "Message {{name}}…",
     "placeholder_default": "Start a message…",
     "send_tooltip": "Send",
@@ -38,8 +38,8 @@
       "hours": "{{count}}h ago",
       "days": "{{count}}d ago"
     },
-    "row_delete_aria": "Delete chat session",
-    "row_rename_aria": "Rename chat session",
+    "row_delete_aria": "Delete chat",
+    "row_rename_aria": "Rename chat",
     "row_stop_aria": "Stop current run",
     "stop_action": "Stop",
     "row_subtitle": {
@@ -56,9 +56,9 @@
       "confirming": "Stopping..."
     },
     "delete_dialog": {
-      "title": "Delete chat session",
+      "title": "Delete chat",
       "description_with_title": "\"{{title}}\" and its messages will be permanently removed. This action cannot be undone.",
-      "description_default": "This chat session and its messages will be permanently removed. This action cannot be undone.",
+      "description_default": "This chat and its messages will be permanently removed. This action cannot be undone.",
       "cancel": "Cancel",
       "confirm": "Delete",
       "confirming": "Deleting..."

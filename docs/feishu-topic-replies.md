@@ -3,7 +3,7 @@
 When Issue topic synchronization is enabled, the configured group `chat_id`
 accepts human messages without mentioning the bot, including new top-level
 messages and replies inside topics. Existing topic replies continue their bound
-Chat Session. Other groups still require a bot mention or a slash command.
+platform Chat. Other groups still require a bot mention or a slash command.
 Messages authored by bots and messages directed only at other people are ignored.
 Sender identity and workspace permission checks in the Task API are unchanged.
 

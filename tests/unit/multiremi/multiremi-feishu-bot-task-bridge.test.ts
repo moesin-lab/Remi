@@ -51,6 +51,30 @@ function scaffold() {
 }
 
 describe("Feishu bot standard Task bridge", () => {
+  it("reports the current platform Chat through /chat while retaining /sessions as an alias", async () => {
+    const snapshot = {
+      chatSessionId: "chat_current",
+      agentId: "agent_current",
+      agentName: "Remi",
+      task: null,
+    };
+    const daemon = {
+      inspectFeishuBotSession: async () => snapshot,
+    } as unknown as MultiremiDaemon;
+    const handler = createFeishuTaskHandler(daemon, 1, "Remi");
+
+    for (const command of ["/chat", "/sessions"]) {
+      const output: string[] = [];
+      await handler({ text: command, chatId: "oc_chat", sender: "user" }, "oc_chat", async (stream, meta) => {
+        expect(meta.taskId).toBe(`feishu-command-${command.slice(1)}`);
+        for await (const event of stream) {
+          if (event.kind === "message" && event.message.content) output.push(event.message.content);
+        }
+      });
+      expect(output).toEqual(["Conversation: chat_current\nLatest task: none"]);
+    }
+  });
+
   it("queues direct, group, and Issue topic replies with the resolved Agent and original conversation", async () => {
     const { store, config } = scaffold();
     store.reportFeishuBotRuntimeStatus("local", "rt_bot", { appliedRevision: config.revision, state: "online" });

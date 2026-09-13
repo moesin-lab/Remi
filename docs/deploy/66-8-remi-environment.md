@@ -100,7 +100,7 @@ App Secret 在 API 侧通过 [AES-256-GCM](../../packages/server/src/feishu-bot/
 
 单机工作目录另由[process-owner](../../packages/daemon/src/agent-runtime/workspace/process-owner.ts)的 supervisor lease 保护，以进程存活判断所有权。它与 bot 跨 Runtime 的状态交接是不同机制，不能因为一次心跳延迟就移除仍存活的本机 owner。
 
-[controlPlaneConciergeHost](../../apps/remi/cli/multiremi.ts)和[bootFeishuChannel](../../apps/remi/cli/agent.ts)只启动传输及卡片处理。消息提交到控制面 Chat/Task 链路：同事件去重，有活跃任务时 steer，否则创建关联 Chat Session 的 Task，执行仍走 Task → AgentSession → ACP。Agent instructions 使用该任务所选的 Agent row，不启动一份独立的人格运行时。
+[controlPlaneConciergeHost](../../apps/remi/cli/multiremi.ts)和[bootFeishuChannel](../../apps/remi/cli/agent.ts)只启动传输及卡片处理。消息提交到控制面 Chat/Task 链路：同事件去重，有活跃任务时 steer，否则创建关联 Chat 的 Task，执行仍走 Task → AgentSession → ACP。Agent instructions 使用该任务所选的 Agent row，不启动一份独立的人格运行时。
 
 发送者通过 union_id 关联用户和工作区成员，分类为 member/non_member/unbound；当前实现为后两类创建的任务设置 Issue 创建限制，不是用应用范围的 open_id 直接拒绝所有消息。具体策略见[submitMessage / resolveSender](../../packages/server/src/store/repos/feishu-bot-repo.ts)。这条机器人对话链路与 [Messaging 消息采集](../feishu-message-ingestion.md)的 Connection/Profile/allowlist 相互独立。
 

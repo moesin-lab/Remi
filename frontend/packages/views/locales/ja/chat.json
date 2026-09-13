@@ -6,7 +6,7 @@
   },
   "input": {
     "placeholder_no_agent": "チャットを始めるにはエージェントを作成してください",
-    "placeholder_archived": "このセッションはアーカイブされています",
+    "placeholder_archived": "このチャットはアーカイブされています",
     "placeholder_named": "{{name}} にメッセージ…",
     "placeholder_default": "メッセージを入力…",
     "send_tooltip": "送信",
@@ -35,12 +35,12 @@
       "hours": "{{count}}時間前",
       "days": "{{count}}日前"
     },
-    "row_delete_aria": "チャットセッションを削除",
-    "row_rename_aria": "チャットセッションの名前を変更",
+    "row_delete_aria": "チャットを削除",
+    "row_rename_aria": "チャットの名前を変更",
     "delete_dialog": {
-      "title": "チャットセッションを削除",
+      "title": "チャットを削除",
       "description_with_title": "\"{{title}}\" とそのメッセージが完全に削除されます。この操作は取り消せません。",
-      "description_default": "このチャットセッションとそのメッセージが完全に削除されます。この操作は取り消せません。",
+      "description_default": "このチャットとそのメッセージが完全に削除されます。この操作は取り消せません。",
       "cancel": "キャンセル",
       "confirm": "削除",
       "confirming": "削除中..."

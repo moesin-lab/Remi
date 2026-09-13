@@ -139,7 +139,7 @@ describe("SessionDropdown history row", () => {
     renderDropdown([makeSession()]);
     openHistory();
 
-    const rename = screen.getByRole("button", { name: "Rename chat session" });
+    const rename = screen.getByRole("button", { name: "Rename chat" });
     const actions = rename.parentElement!;
 
     // `hidden` alone leaves the row's only rename/delete/stop surface
@@ -221,7 +221,7 @@ describe("SessionDropdown management", () => {
       </I18nProvider>,
     );
     fireEvent.click(
-      screen.getByRole("button", { name: "Delete chat session" }),
+      screen.getByRole("button", { name: "Delete chat" }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     expect(state.select).not.toHaveBeenCalled();
@@ -250,7 +250,7 @@ it("keeps a newer selection when deletion of another conversation completes", ()
       />
     </I18nProvider>,
   );
-  fireEvent.click(screen.getByRole("button", { name: "Delete chat session" }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete chat" }));
   fireEvent.click(screen.getByRole("button", { name: "Delete" }));
   state.activeId = "session-2";
   deleted?.();

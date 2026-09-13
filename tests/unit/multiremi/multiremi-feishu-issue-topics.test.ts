@@ -139,9 +139,12 @@ describe("Feishu Issue topics", () => {
       replyToMessageId: "om_source_message",
       chatId: "oc_source",
       threadId: "om_source_root",
+      senderOpenId: "ou_issue_topic_owner",
       senderUnionId: "on_issue_topic_owner",
       text: "Create an Issue from this topic.",
     });
+    const sender = store.listFeishuBotSenders("local")[0]!;
+    store.setFeishuBotSenderAllowed("local", sender.id, true, "local");
     const task = store.getTask(inbound.taskId)!;
     const credential = await store.createTaskAccessToken(task, "local");
     const app = createMultiremiApp({ store, authToken: "MASTER" });

@@ -260,6 +260,8 @@ function mappedResourceCommand(route: string): string | null {
     [/^GET \/api\/workspaces\/:id\/feishu-bot\/status$/, "workspace.feishu-bot.status"],
     [/^GET \/api\/workspaces\/:id\/feishu-bot\/candidates$/, "workspace.feishu-bot.candidates"],
     [/^GET \/api\/workspaces\/:id\/feishu-bot\/audit$/, "workspace.feishu-bot.audit"],
+    [/^GET \/api\/workspaces\/:id\/feishu-bot\/senders$/, "workspace.feishu-bot.sender.list"],
+    [/^PUT \/api\/workspaces\/:id\/feishu-bot\/senders\/:senderId$/, "workspace.feishu-bot.sender.allow"],
     [/^POST \/api\/workspaces\/:id\/feishu-bot\/test$/, "workspace.feishu-bot.test"],
     [/^POST \/api\/workspaces\/:id\/feishu-bot\/deploy$/, "workspace.feishu-bot.deploy"],
     [/^POST \/api\/workspaces\/:id\/feishu-bot\/stop$/, "workspace.feishu-bot.stop"],

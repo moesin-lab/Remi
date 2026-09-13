@@ -1144,6 +1144,9 @@ export class AutopilotsRepo {
         || sourceTask?.issueCreationRestricted
         || agent?.issueCreationRequiresProposal,
       );
+      const feishuSenderApprovalRequired = sourceTask
+        ? this.ctx.feishuBot().isFeishuBotTaskIssueCreationRestricted(sourceTask.id)
+        : false;
       const skippedReason = !agent
         ? "No runnable agent"
         : autopilot.status !== "active"
@@ -1186,6 +1189,9 @@ export class AutopilotsRepo {
       if (skippedReason || !agent) return this.getAutopilotRun(runId)!;
       if (autopilot.executionMode === "create_issue" && issueCreationRestricted) {
         throw new Error("issue_creation_requires_proposal");
+      }
+      if (autopilot.executionMode === "create_issue" && feishuSenderApprovalRequired) {
+        throw new Error("feishu_sender_approval_required");
       }
 
       let issue: MultiremiIssue | null = null;

@@ -139,6 +139,28 @@ export function registerFeishuBotRoutes(
   });
 
   // ── Write ───────────────────────────────────────────────────────────────
+  app.get("/api/workspaces/:id/feishu-bot/senders", (c) => {
+    const workspaceId = c.req.param("id");
+    const denied = requireWorkspaceAdmin(c, store, workspaceId);
+    if (denied) return denied;
+    if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
+    c.header("Cache-Control", "no-store");
+    return c.json({ senders: store.listFeishuBotSenders(workspaceId) });
+  });
+
+  app.put("/api/workspaces/:id/feishu-bot/senders/:senderId", async (c) => {
+    const workspaceId = c.req.param("id");
+    const denied = requireWorkspaceAdmin(c, store, workspaceId);
+    if (denied) return denied;
+    const body = await readJsonStrict<{ allowed?: unknown }>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    if (typeof body.allowed !== "boolean") return c.json({ error: "allowed must be a boolean" }, 400);
+    const sender = store.setFeishuBotSenderAllowed(workspaceId, c.req.param("senderId"), body.allowed, currentRequestUserId(c));
+    if (!sender) return c.json({ error: "Feishu sender not found" }, 404);
+    c.header("Cache-Control", "no-store");
+    return c.json(sender);
+  });
+
   app.put("/api/workspaces/:id/feishu-bot", async (c) => {
     const workspaceId = c.req.param("id");
     const denied = requireWorkspaceAdmin(c, store, workspaceId);

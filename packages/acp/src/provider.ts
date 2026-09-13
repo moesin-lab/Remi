@@ -17,6 +17,7 @@ import { createAgentResponse } from "@shared/contracts/provider-types.js";
 import { isCompactionChunk } from "@shared/contracts/compaction.js";
 import { readContextUsage, type ContextUsage } from "@shared/agent-execution.js";
 import { AcpClient } from "./client.js";
+import { resolveAcpProcessLaunch } from "./launch.js";
 import { createAdapter, type AgentAdapter } from "./adapters/index.js";
 import { hasOneMillionContext, resolveClaudeContextModel } from "./adapters/claude-code/model-context.js";
 import type {
@@ -660,8 +661,10 @@ export class AcpProvider implements Provider {
     return await new Promise<boolean>((resolve) => {
       let settled = false;
       let stderr = "";
-      const child = spawn(check.command, probeArgs, {
+      const launch = resolveAcpProcessLaunch(check.command, probeArgs);
+      const child = spawn(launch.executable, launch.args, {
         stdio: ["ignore", "ignore", "pipe"],
+        windowsHide: true,
       });
       child.stderr?.on("data", (chunk) => {
         if (stderr.length < 2000) stderr += String(chunk);

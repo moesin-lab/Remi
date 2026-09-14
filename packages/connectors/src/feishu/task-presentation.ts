@@ -42,7 +42,8 @@ export class FeishuTaskPresentation {
   private readonly abortController = new AbortController();
   private active = true;
   private readonly signal: AbortSignal;
-  private readonly timeline: FeishuCotTimeline;
+  private timeline: FeishuCotTimeline;
+  private timelineTaskId: string;
   private execution: AgentExecutionDisplay;
   private context: ContextUsage | null = null;
   private lastFlush = Date.now();
@@ -53,6 +54,7 @@ export class FeishuTaskPresentation {
     this.cot = new FeishuCotTransport(client);
     this.state = structuredClone(options.checkpoint ?? { version: "native_cot_v1", startedAt: Date.now(), throughSeq: 0, interactions: {} });
     this.timeline = new FeishuCotTimeline(meta.taskId, this.state.throughSeq);
+    this.timelineTaskId = meta.taskId;
     this.state.interactionOpenId ??= options.interactionOpenId ?? options.mentionOpenId;
     this.signal = meta.signal ? AbortSignal.any([meta.signal, this.abortController.signal]) : this.abortController.signal;
     this.execution = { agentName: options.displayName ?? meta.displayName };
@@ -112,6 +114,10 @@ export class FeishuTaskPresentation {
     if (!["completed", "failed", "cancelled"].includes(finalStatus)) throw new Error("Task stream ended before a terminal snapshot");
     await this.flush(true);
     await this.finishCot(finalStatus);
+    if (this.meta.finalDelivery === "outbox") {
+      this.active = false;
+      return { messageId: "" };
+    }
     const answer = this.timeline.answer(snapshotText);
     const text = finalStatus === "failed" ? `${answer}${answer ? "\n\n" : ""}**执行失败：** ${error || "请查看工作台任务详情"}`
       : finalStatus === "cancelled" ? `${answer}${answer ? "\n\n" : ""}任务已取消。` : answer || "任务已完成，未返回文字结果。";
@@ -135,6 +141,14 @@ export class FeishuTaskPresentation {
   }
 
   private async message(message: MultiremiTaskMessage): Promise<void> {
+    if (message.taskId !== this.timelineTaskId) {
+      await this.flush(true);
+      await this.writeProcess(this.timeline.finish("cancelled"), this.state.throughSeq);
+      this.timeline = new FeishuCotTimeline(message.taskId);
+      this.timelineTaskId = message.taskId;
+      this.state.throughSeq = 0;
+      this.context = null;
+    }
     this.timeline.accept(message);
     // Nested agent prose must never become the main agent's final answer.
     const nested = Boolean(message.meta?.parent_tool_call_id);
@@ -238,9 +252,9 @@ export class FeishuTaskPresentation {
     if (!requestId) return;
     let request = await this.meta.getHumanRequest?.(requestId);
     if (this.meta.getHumanRequest && !request) throw new Error("Task human request unavailable");
-    request ??= { id: requestId, taskId: this.meta.taskId, kind: message.type === "question_request" ? "question" : "permission",
+    request ??= { id: requestId, taskId: message.taskId, kind: message.type === "question_request" ? "question" : "permission",
       payload: message.input ?? {}, status: "pending", response: null, respondedBy: null, createdAt: message.createdAt, respondedAt: null };
-    if (request.taskId !== this.meta.taskId) throw new Error("Interaction Task mismatch");
+    if (request.taskId !== message.taskId) throw new Error("Interaction Task mismatch");
     let entry = this.state.interactions[requestId];
     if (!entry && request.status !== "pending") return; // historical request already answered on web
     const recipientOpenId = this.state.interactionOpenId;

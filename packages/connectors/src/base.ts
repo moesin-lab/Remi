@@ -57,6 +57,10 @@ export type TaskStreamEvent =
 
 export interface TaskStreamMeta {
   taskId: string;
+  /** Persist the platform reply identity before requests can refer back to it. */
+  onReplyCreated?: (messageId: string) => Promise<void>;
+  /** Bot final replies are delivered by the persistent outbox. */
+  finalDelivery?: "outbox";
   displayName?: string | null;
   sessionId?: string | null;
   signal?: AbortSignal;

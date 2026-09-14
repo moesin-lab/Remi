@@ -5,6 +5,7 @@
   "domains": [
     "context",
     "workspace",
+    "bot",
     "member",
     "invite",
     "token",
@@ -837,6 +838,184 @@
       ],
       "capability": "workspace.issue-archive.update",
       "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "bot": {
+      "command": "remi bot",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "bot.sender": {
+      "command": "remi bot sender",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "bot.session": {
+      "command": "remi bot session",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "bot.list": {
+      "command": "remi bot list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "bot.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "bot.get": {
+      "command": "remi bot get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "bot.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "bot.create": {
+      "command": "remi bot create",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "bot.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "bot.update": {
+      "command": "remi bot update",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "bot.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "bot.delete": {
+      "command": "remi bot delete",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "bot.delete",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "bot.sender.list": {
+      "command": "remi bot sender list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "bot.sender.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "bot.sender.allow": {
+      "command": "remi bot sender allow",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "bot.sender.allow",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "bot.sender.revoke": {
+      "command": "remi bot sender revoke",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "bot.sender.revoke",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "bot.session.list": {
+      "command": "remi bot session list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "bot.session.list",
+      "mutation": "read",
       "output": [
         "table",
         "json",
@@ -5937,7 +6116,8 @@
       "command": "remi runtime command run",
       "aliases": [],
       "auth": [
-        "human"
+        "human",
+        "task"
       ],
       "capability": "runtime.command.run",
       "mutation": "write",
@@ -9598,6 +9778,9 @@
     "DELETE /api/autopilots/:id/triggers/:triggerId": {
       "command": "autopilot.trigger.delete"
     },
+    "DELETE /api/bots/:id": {
+      "command": "bot.delete"
+    },
     "DELETE /api/chat/sessions/:sessionId": {
       "command": "chat.delete"
     },
@@ -9861,6 +10044,18 @@
     "GET /api/autopilots/:id/runs/:runId": {
       "command": "autopilot.run.get"
     },
+    "GET /api/bots": {
+      "command": "bot.list"
+    },
+    "GET /api/bots/:id": {
+      "command": "bot.get"
+    },
+    "GET /api/bots/:id/senders": {
+      "command": "bot.sender.list"
+    },
+    "GET /api/bots/:id/sessions": {
+      "command": "bot.session.list"
+    },
     "GET /api/chat/pending-tasks": {
       "command": "chat.pending"
     },
@@ -9959,6 +10154,16 @@
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
     "GET /api/daemon/runtimes/:runtimeId/agent-plugins/desired": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "GET /api/daemon/runtimes/:runtimeId/bots": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "GET /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -10955,6 +11160,9 @@
     "POST /api/autopilots/:id/triggers/:triggerId/rotate-webhook-token": {
       "command": "autopilot.trigger.rotate-token"
     },
+    "POST /api/bots": {
+      "command": "bot.create"
+    },
     "POST /api/chat/sessions": {
       "command": "chat.create"
     },
@@ -11031,6 +11239,51 @@
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
     "POST /api/daemon/runtimes/:runtimeId/bot-menu/:requestId/result": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/attachments": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/messages": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/outbound/:deliveryId/result": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/outbound/claim": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/session/cancel": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/session/inspect": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/session/reset": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/status": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/tasks/:taskId/replies": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -11867,6 +12120,12 @@
     },
     "PUT /api/autopilots/:id/triggers/:triggerId/signing-secret": {
       "command": "autopilot.trigger.set-secret"
+    },
+    "PUT /api/bots/:id": {
+      "command": "bot.update"
+    },
+    "PUT /api/bots/:id/senders/:senderId": {
+      "command": "bot.sender.allow"
     },
     "PUT /api/chat/sessions/:sessionId/issue-updates": {
       "command": "chat.issue.updates.enable"

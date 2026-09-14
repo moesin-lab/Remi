@@ -345,6 +345,21 @@ export function daemonTaskClaimResponse(
     response.trigger_comment_attachments = store.listAttachmentsForComment(task.triggerCommentId)
       .map(attachmentCompatibilityResponse);
   }
+  if (task.chatSessionId) {
+    // Automatic retries retain the original user message. Send stable file
+    // references to the executor even when the connector runs on another host.
+    const lineage = new Set<string>();
+    let source: MultiremiTask | null = task;
+    while (source?.chatSessionId === task.chatSessionId && !lineage.has(source.id)) {
+      lineage.add(source.id);
+      source = source.parentTaskId ? store.getTask(source.parentTaskId) : null;
+    }
+    const messageIds = store.listChatMessages(task.chatSessionId)
+      .filter((message) => message.role === "user" && message.taskId && lineage.has(message.taskId))
+      .map((message) => message.id);
+    response.chat_message_attachments = [...store.listAttachmentsForChatMessages(messageIds).values()]
+      .flat().map(attachmentCompatibilityResponse);
+  }
   if (task.issueSessionId || task.chatSessionId) {
     const projection = store.buildTaskSessionProjection(task.id);
     if (projection) {

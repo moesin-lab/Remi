@@ -3,6 +3,7 @@
 // authorizers. Moved verbatim out of api/helpers.ts by the D5 split; the
 // WebSocket upgrade wiring itself stays in api/server.ts.
 import {
+  canUserAccessChatSessionByUserId,
   canUserViewTaskMessages,
   hasJwtWorkspaceAccess,
   isDaemonOwnerWorkspaceMember,
@@ -145,7 +146,8 @@ export function authorizeBrowserScope(
   if (scope === "chat") {
     const session = store.getChatSession(id);
     if (!session || session.workspaceId !== client.data.workspaceId) return { ok: false, error: "forbidden" };
-    return session.creatorId === client.data.userId ? { ok: true } : { ok: false, error: "forbidden" };
+    return canUserAccessChatSessionByUserId(store, client.data.userId, session)
+      ? { ok: true } : { ok: false, error: "forbidden" };
   }
   return { ok: false, error: "unknown_scope" };
 }

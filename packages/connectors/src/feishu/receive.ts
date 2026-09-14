@@ -506,11 +506,15 @@ export type ParsedFeishuMessage = {
   media: FeishuMediaInfo[];
   quotedContent?: string;
   rootId?: string;
+  parentId?: string;
 };
 
 export type FeishuAdmissionDenialReason = "not_member" | "unavailable";
 
 export interface FeishuMessageAdmissionOptions {
+  /** Stable platform binding identity; old single-account callers omit it. */
+  eventScope?: string;
+  groupPolicy?: GroupPolicy;
   authorizeSender: FeishuSenderAuthorizer;
   onDenied: (
     context: FeishuMessageContext,
@@ -554,7 +558,7 @@ export async function processFeishuMessageEvent(
   }
 
   // Dedup
-  if (!tryRecordMessage(messageId)) {
+  if (!tryRecordMessage(admission?.eventScope ? `${admission.eventScope}:${messageId}` : messageId)) {
     logDroppedGroupMessage(event, "duplicate");
     return null;
   }
@@ -605,7 +609,7 @@ export async function processFeishuMessageEvent(
     } else if (directedAtOthers) {
       logDroppedGroupMessage(event, "directed_at_others");
       return null;
-    } else if (gcStore().getByChatId(ctx.chatId)?.monitor === true) {
+    } else if ((admission.groupPolicy ?? gcStore()).getByChatId(ctx.chatId)?.monitor === true) {
       monitored = true;
     } else {
       logDroppedGroupMessage(event, "not_mentioned");
@@ -678,6 +682,7 @@ export async function processFeishuMessageEvent(
     media,
     quotedContent,
     rootId: ctx.rootId,
+    parentId: ctx.parentId,
   };
 }
 
@@ -775,6 +780,7 @@ export function startWebSocketListener(
   config: FeishuChannelConfig,
   onMessage: FeishuMessageCallback,
   authorizeSender: FeishuSenderAuthorizer,
+  options?: { eventScope?: string; groupPolicy?: GroupPolicy },
 ): FeishuWSHandle {
   const creds = {
     appId: config.appId,
@@ -804,6 +810,8 @@ export function startWebSocketListener(
       try {
         const msg = await processFeishuMessageEventWithBotIdentity(client, event, botIdentity, {
           authorizeSender,
+          eventScope: options?.eventScope,
+          groupPolicy: options?.groupPolicy,
           onDenied: async (context, reason) => {
             await sendMarkdownCardFeishu(client, context.chatId, feishuAdmissionDenialMessage(reason), {
               replyToMessageId: context.messageId,

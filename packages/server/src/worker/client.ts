@@ -6,6 +6,14 @@ import { stat } from "node:fs/promises";
 import { normalizeRepoList } from "@daemon/agent-runtime/repo/checkout.js";
 import { isFeishuOpenId, parseOutboundMention } from "@shared/feishu-mention.js";
 import type {
+  BotDaemonAssignment,
+  BotDirective,
+  BotOutboundDelivery,
+  BotSessionControlInput,
+  SubmitBotMessageInput,
+  SubmitBotMessageResult,
+} from "@multiremi/contracts/bots.js";
+import type {
   MultiremiDaemonHeartbeatAck,
   MultiremiAgent,
   ReportBotMenuPublishInput,
@@ -167,6 +175,19 @@ export class MultiremiDaemonHttpError extends Error {
   }
 }
 
+function botDaemonPath(runtimeId: string, botId: string, bindingId: string): string {
+  return `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/bots/${encodeURIComponent(botId)}/platforms/${encodeURIComponent(bindingId)}`;
+}
+
+function botSessionControlBody(input: BotSessionControlInput) {
+  return {
+    revision: input.revision,
+    external_session_key: input.externalSessionKey,
+    chat_session_id: input.chatSessionId,
+    reply_to_message_id: input.replyToMessageId,
+  };
+}
+
 export const DEFAULT_DAEMON_REQUEST_TIMEOUT_MS = 30_000;
 
 export class MultiremiDaemonRequestTimeoutError extends Error {
@@ -187,6 +208,7 @@ export class MultiremiDaemonRequestTimeoutError extends Error {
 export interface MultiremiFeishuBotAssignment {
   config: MultiremiFeishuBotDaemonConfig;
   agent: MultiremiAgent;
+  botName?: string;
 }
 
 /**
@@ -415,6 +437,133 @@ export class MultiremiDaemonClient {
       throw new MultiremiFeishuBotAssignmentError("the control plane returned no bot Agent", "agent_unavailable");
     }
     return { config, agent };
+  }
+
+  async getBotDirectives(runtimeId: string, signal?: AbortSignal): Promise<BotDirective[]> {
+    try {
+      const response = await this.get<{ directives: BotDirective[] }>(
+        `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/bots`, signal,
+      );
+      return response.directives;
+    } catch (error) {
+      // Keep the existing daemon usable against servers predating the Bot API.
+      if (error instanceof MultiremiDaemonHttpError && (error.status === 404 || error.status === 405)
+        && !error.code && !error.responseBody.toLowerCase().includes("runtime not found")) return [];
+      throw error;
+    }
+  }
+
+  async getBotConfig(runtimeId: string, botId: string, bindingId: string): Promise<MultiremiFeishuBotAssignment | null> {
+    let payload: BotDaemonAssignment | null;
+    try {
+      payload = await this.get<BotDaemonAssignment | null>(botDaemonPath(runtimeId, botId, bindingId));
+    } catch (error) {
+      if (error instanceof MultiremiDaemonHttpError && error.status === 404 && error.code === "binding_not_found") return null;
+      throw error;
+    }
+    if (!payload) return null;
+    const { bot_agent: rawAgent, ...config } = payload;
+    const agent = normalizeDaemonAgent(rawAgent);
+    if (!agent) throw new MultiremiFeishuBotAssignmentError("the configured bot Agent is unavailable", "agent_unavailable");
+    return { config, agent, botName: payload.bot_name };
+  }
+
+  async reportBotRuntimeStatus(runtimeId: string, botId: string, bindingId: string, input: {
+    applied_revision: number;
+    state: FeishuBotRuntimeState;
+    bot_name?: string | null;
+    bot_open_id?: string | null;
+    error_code?: FeishuBotErrorCode | null;
+    error_message?: string | null;
+  }): Promise<void> {
+    await this.post(`${botDaemonPath(runtimeId, botId, bindingId)}/status`, input);
+  }
+
+  async claimBotOutbound(runtimeId: string, botId: string, bindingId: string): Promise<BotOutboundDelivery | null> {
+    const result = await this.post<{ delivery: BotOutboundDelivery | null }>(
+      `${botDaemonPath(runtimeId, botId, bindingId)}/outbound/claim`, {},
+    );
+    return result.delivery;
+  }
+
+  async reportBotOutboundResult(runtimeId: string, botId: string, bindingId: string, delivery: BotOutboundDelivery, input: {
+    status: "sent" | "failed";
+    externalMessageId?: string;
+    error?: string;
+  }): Promise<void> {
+    await this.post(`${botDaemonPath(runtimeId, botId, bindingId)}/outbound/${encodeURIComponent(delivery.id)}/result`, {
+      claim_token: delivery.claimToken,
+      status: input.status,
+      external_message_id: input.externalMessageId,
+      error: input.error,
+    });
+  }
+
+  async submitBotMessage(runtimeId: string, botId: string, bindingId: string, input: SubmitBotMessageInput): Promise<SubmitBotMessageResult> {
+    return this.post(`${botDaemonPath(runtimeId, botId, bindingId)}/messages`, {
+      revision: input.revision,
+      external_session_key: input.externalSessionKey,
+      external_message_id: input.externalMessageId,
+      reply_to_message_id: input.replyToMessageId ?? undefined,
+      sender_open_id: input.senderOpenId ?? undefined,
+      sender_user_id: input.senderUserId ?? undefined,
+      sender_union_id: input.senderUnionId ?? undefined,
+      sender_tenant_key: input.senderTenantKey ?? undefined,
+      sender_name: input.senderName ?? undefined,
+      chat_id: input.chatId ?? undefined,
+      thread_id: input.threadId ?? undefined,
+      chat_type: input.chatType,
+      command: input.command,
+      target: input.target,
+      attachment_ids: input.attachmentIds,
+      parent_message_id: input.parentMessageId,
+      text: input.text,
+    });
+  }
+
+  async uploadBotAttachment(runtimeId: string, botId: string, bindingId: string, file: File): Promise<string> {
+    const form = new FormData();
+    form.set("file", file);
+    const result = await this.request<{ attachment_id: string }>(
+      `${botDaemonPath(runtimeId, botId, bindingId)}/attachments`, { method: "POST", headers: this.headers(), body: form },
+    );
+    return result.attachment_id;
+  }
+
+  async recordBotReply(runtimeId: string, botId: string, bindingId: string, taskId: string, messageId: string): Promise<void> {
+    await this.post(`${botDaemonPath(runtimeId, botId, bindingId)}/tasks/${encodeURIComponent(taskId)}/replies`, {
+      external_message_id: messageId,
+    });
+  }
+
+  async resetBotSession(runtimeId: string, botId: string, bindingId: string, input: BotSessionControlInput): Promise<boolean> {
+    const result = await this.post<{ reset: boolean }>(
+      `${botDaemonPath(runtimeId, botId, bindingId)}/session/reset`, botSessionControlBody(input),
+    );
+    return result.reset;
+  }
+
+  async cancelBotSessionTask(runtimeId: string, botId: string, bindingId: string, input: BotSessionControlInput): Promise<{ cancelled: boolean; taskId: string | null }> {
+    const result = await this.post<{ cancelled: boolean; task_id?: string | null }>(
+      `${botDaemonPath(runtimeId, botId, bindingId)}/session/cancel`, botSessionControlBody(input),
+    );
+    return { cancelled: result.cancelled, taskId: result.task_id ?? null };
+  }
+
+  async inspectBotSession(runtimeId: string, botId: string, bindingId: string, input: BotSessionControlInput): Promise<FeishuBotSessionSnapshot> {
+    const response = await this.post<{
+      chat_session_id?: string | null;
+      task?: { task_id: string; status: MultiremiTaskStatus; result?: string | null; error?: string | null;
+        session_id?: string | null; work_dir?: string | null; usage?: TaskUsageEntry[] } | null;
+    }>(`${botDaemonPath(runtimeId, botId, bindingId)}/session/inspect`, botSessionControlBody(input));
+    return {
+      chatSessionId: response.chat_session_id ?? null,
+      task: response.task ? {
+        taskId: response.task.task_id, status: response.task.status, result: response.task.result ?? null,
+        error: response.task.error ?? null, sessionId: response.task.session_id ?? null,
+        workDir: response.task.work_dir ?? null, usage: response.task.usage ?? [],
+      } : null,
+    };
   }
 
   async reportFeishuBotRuntimeStatus(
@@ -794,7 +943,7 @@ export class MultiremiDaemonClient {
     }));
   }
 
-  async getFeishuBotTaskSnapshot(taskId: string): Promise<FeishuBotTaskSnapshot> {
+  async getFeishuBotTaskSnapshot(taskId: string): Promise<FeishuBotTaskSnapshot & { replacementTaskId?: string | null }> {
     const response = await this.get<{
       task_id: string;
       status: MultiremiTaskStatus;
@@ -805,6 +954,7 @@ export class MultiremiDaemonClient {
       usage?: TaskUsageEntry[];
       started_at?: string | null;
       completed_at?: string | null;
+      replacement_task_id?: string | null;
     }>(`/api/daemon/tasks/${encodeURIComponent(taskId)}/status`);
     return {
       taskId: response.task_id ?? taskId,
@@ -816,6 +966,7 @@ export class MultiremiDaemonClient {
       usage: Array.isArray(response.usage) ? response.usage : [],
       startedAt: response.started_at ?? null,
       completedAt: response.completed_at ?? null,
+      ...(response.replacement_task_id ? { replacementTaskId: response.replacement_task_id } : {}),
     };
   }
 

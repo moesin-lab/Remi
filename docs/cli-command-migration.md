@@ -31,6 +31,7 @@ Issue and Comment keep their scoped attachment listing and management commands.
 ```text
 remi context
 remi workspace
+remi bot
 remi member
 remi invite
 remi token
@@ -75,6 +76,17 @@ remi lark
 Use `remi help <path>` or `remi <path> --help` for the registered positional and
 option contract. All capability commands declare their authentication identities,
 mutation class, and `table|json|jsonl` output contract in the Registry.
+
+`remi bot list|get|create|update|delete` manages a Bot as one configuration:
+platform accounts, default Agent and execution location, ordered routing rules,
+optional Issue notifications, and an optional sender allowlist. Create and update
+accept complete JSON with `--file <path>` or `--file -`; update replaces the
+configuration and retains omitted secrets by stable platform binding ID. Use
+`remi bot sender list|allow|revoke` for discovered senders and
+`remi bot session list` for the resulting Chat mappings. Bot configuration and
+allowlist writes require a human credential; reads support human and task
+credentials. The existing `remi workspace feishu-bot ...` commands remain
+available for the separate legacy integration. See the [Bot contract](dev/bots.md).
 
 Password authentication uses `remi context auth password --file -` with JSON
 containing `email` and `password` on standard input. It saves the returned session

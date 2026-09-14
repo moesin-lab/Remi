@@ -9,6 +9,7 @@ import { loadConfig, type RemiConfig } from "@shared/config.js";
 import { createLogger } from "@shared/logger.js";
 import type {
   BotMenuPublishResult,
+  FeishuBotOutboundBodyOrigin,
   ResolvedBotMenuConfig,
 } from "@multiremi/contracts/types.js";
 import { FeishuConnector } from "@connectors/feishu/index.js";
@@ -57,6 +58,8 @@ export interface FeishuChannelHandle {
     replyToMessageId?: string;
     body: string;
     idempotencyKey: string;
+    updateMessageId?: string;
+    bodyOrigin?: FeishuBotOutboundBodyOrigin;
   }) => Promise<{ messageId: string }>;
   uploadImage: (image: Buffer) => Promise<{ imageKey: string }>;
 }
@@ -90,6 +93,8 @@ export async function bootFeishuChannel(
     taskHandler: TaskStreamingHandler;
     groupPolicy?: GroupPolicy;
     abortTask?: (sessionKey: string) => Promise<void>;
+    controlPlaneRouting?: boolean;
+    eventScope?: string;
   },
 ): Promise<FeishuChannelHandle> {
   const config = withFeishuCredentials(loadConfig(), options.credentials);
@@ -104,7 +109,10 @@ export async function bootFeishuChannel(
     domain: config.feishu.domain,
   });
   log.info("Starting Feishu channel");
-  const start = connector.startTask(options.taskHandler);
+  const start = connector.startTask(options.taskHandler, {
+    controlPlaneRouting: options.controlPlaneRouting,
+    eventScope: options.eventScope,
+  });
   await waitForFeishuConnectorStart(connector, start);
   return {
     start,

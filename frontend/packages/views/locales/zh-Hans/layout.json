@@ -15,7 +15,8 @@
     "plugins": "插件",
     "skills": "Skills",
     "settings": "设置",
-    "chat": "对话"
+    "chat": "对话",
+    "bots": "机器人"
   },
   "help": {
     "trigger": "帮助",

@@ -15,7 +15,8 @@
     "plugins": "Plugins",
     "skills": "Skills",
     "settings": "Settings",
-    "chat": "Chat"
+    "chat": "Chat",
+    "bots": "Bots"
   },
   "help": {
     "trigger": "Help",

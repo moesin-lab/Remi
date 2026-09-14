@@ -1,3 +1,4 @@
+import { ensureBotSchema } from "@multiremi/bots/schema.js";
 import { createHash } from "node:crypto";
 import { attachmentIdsFromText } from "@multiremi/contracts/attachments.js";
 import { type SqlDatabase } from "@multiremi/store/db/postgres.js";
@@ -2835,6 +2836,7 @@ export function runMigrations(db: SqlDatabase): void {
     CREATE INDEX IF NOT EXISTS idx_multiremi_notification_channels_member
       ON multiremi_notification_channels(workspace_id, member_id, enabled);
   `);
+  ensureBotSchema(db);
   ensureInboxGenericSchema(db);
   runMigrationOnce(db, FEISHU_INGEST_V2_MIGRATION, () => ensureFeishuIngestV2Schema(db));
   runMigrationOnce(db, FEISHU_INGEST_ALERT_DELIVERY_V3_MIGRATION, () => ensureFeishuIngestAlertDeliveryV3Schema(db));

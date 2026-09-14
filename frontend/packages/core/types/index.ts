@@ -10,6 +10,7 @@ export type {
   IssueWorkspaceRepo,
   IssueWorkspaceStatus,
 } from "./issue";
+export type * from "../bots/types";
 export type {
   Agent,
   AgentStatus,

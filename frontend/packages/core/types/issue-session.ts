@@ -16,10 +16,12 @@ export interface SessionParticipant {
   updated_at: string;
 }
 
-/** Core product Session. It is currently anchored to exactly one Issue. */
+/** Core product Session owned by a Chat; Issue linkage is optional. */
 export interface Session {
   id: string;
-  issue_id: string;
+  /** Null only for legacy Issue-owned Sessions awaiting adoption. */
+  chat_id?: string | null;
+  issue_id: string | null;
   workspace_id: string;
   title: string;
   status: SessionStatus;
@@ -52,7 +54,8 @@ export interface SessionEvent {
 
 export interface SessionResult {
   id: string;
-  issue_id: string;
+  chat_id?: string | null;
+  issue_id: string | null;
   source_session_id: string;
   title: string;
   body: string;
@@ -63,6 +66,7 @@ export interface SessionResult {
 }
 
 export interface CreateSessionRequest {
+  chat_id: string;
   title: string;
   holds_workspace?: boolean;
 }

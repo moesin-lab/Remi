@@ -179,6 +179,7 @@ export class ChatRepo {
       [projectId, runtimeWorkspaceId, id, workspaceId, input.creatorId ?? input.creator_id ?? "local", agentId, issue?.id ?? null, title, now, now],
     );
     const session = this.getChatSession(id)!;
+    this.ctx.issueSessions().getOrCreateDefaultChatSession(session.id, session.creatorId);
     if (session.issueId) this.ensureDefaultAgentIssueUpdatesChannel(session);
     return session;
   }
@@ -227,6 +228,8 @@ export class ChatRepo {
     );
     const session = this.getChatSession(current.id)!;
     if (updated.changes === 0) return { session, bound: false };
+    this.ctx.db.run("UPDATE multiremi_issue_sessions SET issue_id = ?, updated_at = ? WHERE chat_id = ?", [issue.id, now, session.id]);
+    this.ctx.db.run("UPDATE multiremi_session_results SET issue_id = ? WHERE chat_id = ?", [issue.id, session.id]);
     this.ensureDefaultAgentIssueUpdatesChannel(session);
     this.ctx.emitChatEvent(session, "chat:session_updated", {
       title: session.title,
@@ -271,8 +274,18 @@ export class ChatRepo {
          WHERE id = ?`,
         [input.title?.trim() || current.title, input.status ?? current.status, issue?.id ?? null, (input.pinned ?? current.pinned) ? 1 : 0, now, id],
       );
+      if (issueFieldProvided && requestedIssueId !== current.issueId) {
+        this.ctx.db.run(
+          "UPDATE multiremi_issue_sessions SET issue_id = ?, updated_at = ? WHERE chat_id = ?",
+          [issue?.id ?? null, now, id],
+        );
+        this.ctx.db.run(
+          "UPDATE multiremi_session_results SET issue_id = ? WHERE chat_id = ?",
+          [issue?.id ?? null, id],
+        );
+      }
       if (input.status === "archived") {
-        for (const task of this.pendingTasks(id)) {
+        for (const task of this.pendingTasks(id, { includeSessionTasks: true })) {
           cancelled.push(this.ctx.tasks().cancelTaskWithinTransaction(task.id));
         }
         this.discardPendingAgentIssueUpdatesWithinTransaction(id);
@@ -301,12 +314,27 @@ export class ChatRepo {
       this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
       const current = this.getChatSession(id);
       if (!current) return null;
-      const cancelled = this.pendingTasks(id).map((task) => this.ctx.tasks().cancelTaskWithinTransaction(task.id));
+      const cancelled = this.pendingTasks(id, { includeSessionTasks: true })
+        .map((task) => this.ctx.tasks().cancelTaskWithinTransaction(task.id));
       // Keep the original private scope on retained task audits. Clearing it
       // would make their transcripts inherit the workspace Agent visibility.
       this.ctx.db.run("DELETE FROM multiremi_attachments WHERE chat_session_id = ?", [id]);
       this.ctx.db.run("DELETE FROM multiremi_chat_messages WHERE chat_session_id = ?", [id]);
       this.ctx.notificationChannels().deleteAgentChatNotificationChannel(id);
+      // Session event/result data belongs to the Chat and follows its explicit
+      // destructive deletion. Keep already-published Issue comments as Issue
+      // audit history; only remove their link to the deleted Session. Task rows
+      // likewise retain their audit record with both foreign keys cleared by
+      // ON DELETE SET NULL.
+      this.ctx.db.run(
+        `UPDATE multiremi_issue_comments
+         SET issue_session_id = NULL
+         WHERE issue_session_id IN (
+           SELECT id FROM multiremi_issue_sessions WHERE chat_id = ?
+         )`,
+        [id],
+      );
+      this.ctx.db.run("DELETE FROM multiremi_issue_sessions WHERE chat_id = ?", [id]);
       const deleted = this.ctx.db.run("DELETE FROM multiremi_chat_sessions WHERE id = ?", [id]).changes > 0;
       return { current, cancelled, deleted };
     })();
@@ -323,9 +351,18 @@ export class ChatRepo {
     this.ctx.emitChatEvent(session, "chat:session_read", {});
   }
 
-  private pendingTasks(chatSessionId: string): MultiremiTask[] {
+  private pendingTasks(
+    chatSessionId: string,
+    options: { includeSessionTasks?: boolean } = {},
+  ): MultiremiTask[] {
+    // Ordinary Chat queue controls must not observe, steer, edit, or prioritize
+    // explicit Session Tasks. Wiring those two interaction surfaces together is
+    // a separate product decision (MUL-3). Chat archive/delete still opt in to
+    // all descendant work for lifecycle safety.
+    const sessionClause = options.includeSessionTasks ? "" : "AND issue_session_id IS NULL";
     const rows = this.ctx.db.query(
       `SELECT id FROM multiremi_tasks WHERE chat_session_id = ?
+       ${sessionClause}
        AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
        ORDER BY CASE WHEN status = 'queued' THEN 1 ELSE 0 END, priority DESC, chat_queue_order ASC, created_at ASC, id ASC`,
     ).all(chatSessionId) as Row[];

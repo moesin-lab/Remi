@@ -1,13 +1,102 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { MultiremiStore } from "@multiremi/store.js";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { buildTaskPrompt } from "@multiremi/prompt.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
-import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { createStore, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
 describe("Issue sessions and per-agent projection lanes", () => {
+  it("makes Chat the Session owner and keeps Issue association optional", () => {
+    const store = createStore();
+    const agent = store.createAgent({ name: "Chat worker", provider: "claude" });
+    const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local", creatorId: "local" });
+    const main = store.listChatOwnedSessions(chat.id)[0]!;
+    const review = store.createSession(chat.id, { title: "Review" });
+
+    expect(main).toMatchObject({ chatId: chat.id, issueId: null, title: "Main", isDefault: true });
+    expect(review).toMatchObject({ chatId: chat.id, issueId: null, title: "Review", isDefault: false });
+
+    const beforeLink = store.createSessionTask(main.id, { agentId: agent.id, prompt: "Before link" });
+    expect(beforeLink).toMatchObject({ chatSessionId: chat.id, issueSessionId: main.id, issueId: null });
+    const result = store.publishSessionResult(main.id, { body: "Durable finding" });
+    expect(result).toMatchObject({ chatId: chat.id, issueId: null, sourceSessionId: main.id });
+
+    const issue = store.createIssue({ title: "Optional anchor", workspaceId: "local" });
+    store.updateChatSession(chat.id, { issueId: issue.id });
+    expect(store.listIssueSessions(issue.id).map((session) => session.id)).toEqual([main.id, review.id]);
+    expect(store.getSessionResult(result.id)?.issueId).toBe(issue.id);
+    expect(store.getTask(beforeLink.id)?.issueId).toBeNull();
+
+    const afterLink = store.createSessionTask(review.id, { agentId: agent.id, prompt: "After link" });
+    expect(afterLink).toMatchObject({ chatSessionId: chat.id, issueSessionId: review.id, issueId: issue.id });
+    store.updateChatSession(chat.id, { issueId: null });
+    expect(store.listIssueSessions(issue.id)).toEqual([]);
+    expect(store.listIssueSessionResults(issue.id)).toEqual([]);
+    expect(store.getSessionResult(result.id)?.issueId).toBeNull();
+    expect(store.listChatOwnedSessions(chat.id)).toHaveLength(2);
+  });
+
+  it("serves canonical Session APIs under the owning Chat", async () => {
+    const store = createStore();
+    const app = createMultiremiApp({ store });
+    const agent = store.createAgent({
+      name: "Session API worker",
+      provider: "claude",
+      visibility: "workspace",
+    });
+    const chat = store.createChatSession({
+      agentId: agent.id,
+      workspaceId: "local",
+      creatorId: "local",
+    });
+    const otherChat = store.createChatSession({
+      agentId: agent.id,
+      workspaceId: "local",
+      creatorId: "local",
+    });
+
+    const initial = await app.request(`/api/multiremi/chats/${chat.id}/sessions`);
+    expect(initial.status).toBe(200);
+    expect(await initial.json()).toMatchObject({
+      sessions: [{ chat_id: chat.id, issue_id: null, title: "Main", is_default: true }],
+    });
+
+    const created = await app.request(`/api/multiremi/chats/${chat.id}/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Research" }),
+    });
+    expect(created.status).toBe(201);
+    const createdBody = await created.json();
+    expect(createdBody.session).toMatchObject({
+      chat_id: chat.id,
+      issue_id: null,
+      title: "Research",
+      is_default: false,
+      created_by_type: "system",
+      created_by_id: null,
+    });
+
+    const posted = await app.request(
+      `/api/multiremi/chats/${chat.id}/sessions/${createdBody.session.id}/messages`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "Keep the actor explicit" }),
+      },
+    );
+    expect(posted.status).toBe(201);
+    expect(await posted.json()).toMatchObject({
+      event: { author_type: "system", author_id: null, body: "Keep the actor explicit" },
+    });
+
+    const wrongOwner = await app.request(
+      `/api/multiremi/chats/${otherChat.id}/sessions/${createdBody.session.id}`,
+    );
+    expect(wrongOwner.status).toBe(404);
+  });
+
   it("keeps multiple product sessions isolated under one issue", () => {
     const store = createStore();
     const issue = store.createIssue({ title: "Multi-session issue", workspaceId: "local" });
@@ -23,30 +112,16 @@ describe("Issue sessions and per-agent projection lanes", () => {
     expect(store.listSessionEvents(review.id).some((event) => event.body === "Review-only context")).toBe(true);
   });
 
-  it("backfills one default Session and canonical events for legacy Issue rows", () => {
+  it("adopts an unambiguous legacy Issue Session without changing its identity", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Legacy worker", provider: "claude" });
     const issue = store.createIssue({ title: "Legacy issue", workspaceId: "local" });
-    const comment = store.createIssueComment(issue.id, { body: "Legacy comment" });
-    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Legacy task" });
+    const legacy = store.createIssueSession(issue.id, { title: "Legacy" });
+    const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local", creatorId: "local", issueId: issue.id });
+    const adopted = store.adoptLegacySession(chat.id, legacy.id);
 
-    db!.run("UPDATE multiremi_issue_comments SET issue_session_id = NULL WHERE issue_id = ?", [issue.id]);
-    db!.run("UPDATE multiremi_tasks SET issue_session_id = NULL WHERE issue_id = ?", [issue.id]);
-    db!.run("DELETE FROM multiremi_session_events WHERE session_id IN (SELECT id FROM multiremi_issue_sessions WHERE issue_id = ?)", [issue.id]);
-    db!.run("DELETE FROM multiremi_issue_sessions WHERE issue_id = ?", [issue.id]);
-
-    const migrated = new MultiremiStore(db!);
-    const sessions = migrated.listIssueSessions(issue.id);
-    expect(sessions).toHaveLength(1);
-    expect(sessions[0]).toMatchObject({ title: "Main", isDefault: true });
-    expect(migrated.getIssueComment(comment.id)?.issueSessionId).toBe(sessions[0]!.id);
-    expect(migrated.getTask(task.id)?.issueSessionId).toBe(sessions[0]!.id);
-    expect(migrated.listSessionEvents(sessions[0]!.id)).toEqual([
-      expect.objectContaining({
-        sourceCommentId: comment.id,
-        body: "Legacy comment",
-      }),
-    ]);
+    expect(adopted).toMatchObject({ id: legacy.id, chatId: chat.id, issueId: issue.id, isDefault: false });
+    expect(store.listSessionEvents(legacy.id).at(-1)).toMatchObject({ kind: "session_adopted" });
   });
 
   it("records comment corrections as append-only Session events", () => {
@@ -118,7 +193,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     expect(firstPrompt).toContain("Historical transcripts are supporting evidence");
     expect(firstPrompt).toContain("## Current Request\nImplement the projection.");
     expect(firstPrompt).toContain(
-      `remi session result publish ${issue.id} --session ${session.id}`,
+      `remi session result publish ${session.chatId} ${session.id}`,
     );
     // The result taxonomy is only useful if the agent is told it exists.
     expect(firstPrompt).toContain("--type mr|report|deploy|decision|doc|other");
@@ -677,7 +752,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     expect(created.task_id).toBe(task.id);
   });
 
-  it("gives an owner task token parity across sibling Sessions and tasks", async () => {
+  it("keeps a task token inside its Session while exposing published sibling results", async () => {
     const store = createStore();
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const agent = store.createAgent({ name: "Scoped agent", provider: "claude" });
@@ -707,7 +782,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     expect((await app.request(
       `/api/issues/${issue.id}/sessions/${sibling.id}/events`,
       { headers },
-    )).status).toBe(200);
+    )).status).toBe(403);
     expect((await app.request(
       `/api/issues/${issue.id}/timeline`,
       { headers },
@@ -732,7 +807,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     const detail = await detailResponse.json();
     expect(detail.comments.map((comment: { body: string }) => comment.body)).toContain("Visible current context");
     expect(detail.comments.map((comment: { body: string }) => comment.body)).toContain("Hidden sibling context");
-    expect(detail.issue.tasks.map((item: { id: string }) => item.id).sort()).toEqual([task.id, siblingTask.id].sort());
+    expect(detail.issue.tasks.map((item: { id: string }) => item.id)).toEqual([task.id]);
 
     const searchResponse = await app.request(
       `/api/issues/search?q=${encodeURIComponent("Hidden sibling context")}`,
@@ -743,22 +818,22 @@ describe("Issue sessions and per-agent projection lanes", () => {
 
     const taskRunsResponse = await app.request(`/api/issues/${issue.id}/task-runs`, { headers });
     expect(taskRunsResponse.status).toBe(200);
-    expect((await taskRunsResponse.json()).map((item: { id: string }) => item.id).sort()).toEqual([task.id, siblingTask.id].sort());
+    expect((await taskRunsResponse.json()).map((item: { id: string }) => item.id)).toEqual([task.id]);
     const rawTasksResponse = await app.request("/api/multiremi/tasks", { headers });
     expect(rawTasksResponse.status).toBe(200);
-    expect((await rawTasksResponse.json()).tasks.map((item: { id: string }) => item.id).sort()).toEqual([task.id, siblingTask.id].sort());
-    expect((await app.request(`/api/multiremi/tasks/${siblingTask.id}`, { headers })).status).toBe(200);
+    expect((await rawTasksResponse.json()).tasks.map((item: { id: string }) => item.id)).toEqual([task.id]);
+    expect((await app.request(`/api/multiremi/tasks/${siblingTask.id}`, { headers })).status).toBe(403);
     expect((await app.request(`/api/tasks/${siblingTask.id}/cancel`, {
       method: "POST",
       headers,
-    })).status).toBe(200);
+    })).status).toBe(403);
     expect((await app.request("/api/multiremi/tasks", {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({ agentId: agent.id, issueId: issue.id, prompt: "Bypass Session route" }),
     })).status).toBe(201);
     expect((await app.request(`/api/tasks/${task.id}/messages`, { headers })).status).toBe(200);
-    expect((await app.request(`/api/tasks/${siblingTask.id}/messages`, { headers })).status).toBe(200);
+    expect((await app.request(`/api/tasks/${siblingTask.id}/messages`, { headers })).status).toBe(403);
 
     const agentCommentResponse = await app.request(`/api/issues/${issue.id}/comments`, {
       method: "POST",
@@ -776,12 +851,12 @@ describe("Issue sessions and per-agent projection lanes", () => {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({ content: "Forbidden sibling write" }),
-    })).status).toBe(201);
+    })).status).toBe(403);
     expect((await app.request(`/api/issues/${issue.id}/sessions/${sibling.id}/results`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({ title: "Bad", body: "Forbidden sibling publish" }),
-    })).status).toBe(201);
+    })).status).toBe(403);
 
     const resultsResponse = await app.request(`/api/issues/${issue.id}/session-results`, { headers });
     expect(resultsResponse.status).toBe(200);
@@ -789,10 +864,6 @@ describe("Issue sessions and per-agent projection lanes", () => {
       expect.objectContaining({
         source_session_id: sibling.id,
         body: "Safe shared result",
-      }),
-      expect.objectContaining({
-        source_session_id: sibling.id,
-        body: "Forbidden sibling publish",
       }),
     ]));
   });

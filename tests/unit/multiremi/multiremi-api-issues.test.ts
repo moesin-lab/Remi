@@ -69,7 +69,12 @@ describe("Multiremi API — issue endpoints", () => {
       body: JSON.stringify({ title: "Created from Issue lane" }),
     });
     expect(issueLaneCreate.status).toBe(201);
-    expect((await issueLaneCreate.json()).chat_issue_binding).toBeUndefined();
+    expect((await issueLaneCreate.json()).chat_issue_binding).toEqual({
+      status: "preserved",
+      chat_session_id: chat.id,
+      issue_id: expect.any(String),
+      existing_issue_id: firstBody.id,
+    });
     expect(store.getChatSession(chat.id)?.issueId).toBe(firstBody.id);
   });
 

@@ -1781,7 +1781,7 @@ export const MULTIREMI_SESSION_ARCHIVE_MIN_GC_INTERVAL_MS = 60 * 1000;
 export const MULTIREMI_SESSION_ARCHIVE_PREPARATION_FAILURE_REVISION = "preparation-failed";
 
 /**
- * Control-plane metadata for a provider-native Issue session archive.
+ * Control-plane metadata for an Issue-scoped Provider Session Archive.
  * Archive bytes live in SessionArchiveStore, never in SQL.
  */
 export interface MultiremiSessionArchive {
@@ -2188,8 +2188,9 @@ export interface MultiremiProjectSearchResult extends MultiremiProject {
 }
 
 // ─── Sessions ────────────────────────────────────────────────────────────────────────────────────
-// Sessions are core product entities. The current model anchors each Session to
-// exactly one Issue; `IssueSession` names below remain compatibility aliases.
+// Sessions are core product entities owned by a Chat. Issue is an optional
+// management association inherited from that Chat; `IssueSession` names below
+// remain compatibility aliases for the former issue-nested API.
 
 export type MultiremiSessionStatus = "active" | "archived";
 
@@ -2202,8 +2203,12 @@ export type MultiremiSessionProjectionMode = "bootstrap" | "delta";
 
 export interface MultiremiSession {
   id: string;
-  issueId: string;
-  issue_id?: string;
+  /** Owning Chat. Null is emitted only for unmigrated legacy Issue Sessions. */
+  chatId: string | null;
+  chat_id?: string | null;
+  /** Current optional Issue association of the owning Chat. */
+  issueId: string | null;
+  issue_id?: string | null;
   workspaceId: string;
   workspace_id?: string;
   title: string;
@@ -2290,8 +2295,10 @@ export interface MultiremiSessionAgentLane {
 
 export interface MultiremiSessionResult {
   id: string;
-  issueId: string;
-  issue_id?: string;
+  chatId: string | null;
+  chat_id?: string | null;
+  issueId: string | null;
+  issue_id?: string | null;
   sourceSessionId: string;
   source_session_id?: string;
   title: string;
@@ -2326,8 +2333,8 @@ export interface MultiremiSessionProjection {
 
 export interface CreateSessionInput {
   id?: string;
-  issueId?: string;
-  issue_id?: string;
+  chatId?: string;
+  chat_id?: string;
   title?: string;
   createdByType?: string;
   created_by_type?: string;

@@ -19,11 +19,6 @@ vi.mock("@multiremi/core/issues", () => ({
   useAddSessionParticipant: () => addParticipantState,
 }));
 
-// The session bar has its own spec; stub it so this file only exercises the rail.
-vi.mock("./issue-session-bar", () => ({
-  NewSessionButton: () => <button type="button">New session</button>,
-}));
-
 vi.mock("../../common/actor-avatar", () => ({
   ActorAvatar: ({ actorType, actorId }: { actorType: string; actorId: string }) => (
     <span data-testid="actor-avatar">{actorType}:{actorId}</span>
@@ -104,12 +99,9 @@ describe("IssueSessionList rail", () => {
     renderRail([makeSession()]);
 
     // The rail is not conditional on having something to switch to.
-    expect(screen.getByText("Sessions")).toBeInTheDocument();
+    expect(screen.getByText("Linked Sessions")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Main/ })).toBeInTheDocument();
-    // Exactly one create-session control, in the header.
-    const newSession = screen.getAllByRole("button", { name: "New session" });
-    expect(newSession).toHaveLength(1);
-    expect(screen.getByText("Sessions").parentElement).toContainElement(newSession[0]!);
+    expect(screen.queryByRole("button", { name: "New session" })).not.toBeInTheDocument();
   });
 
   it("offers participants and nothing else in the row menu", async () => {
@@ -126,9 +118,9 @@ describe("IssueSessionList rail", () => {
   it("carries the scope as a tooltip so the narrow header can stay one word", () => {
     renderRail(SESSIONS);
 
-    expect(screen.getByText("Sessions")).toHaveAttribute(
+    expect(screen.getByText("Linked Sessions")).toHaveAttribute(
       "title",
-      "Sessions linked to this issue",
+      "Sessions owned by Chats currently linked to this Issue",
     );
   });
 

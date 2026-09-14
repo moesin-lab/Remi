@@ -204,7 +204,8 @@ function sameExecutionLaneSql(queued: string, active: string): string {
     OR (${active}.agent_id = ${queued}.agent_id AND (
     (${queued}.issue_session_id IS NOT NULL AND ${active}.issue_session_id = ${queued}.issue_session_id
       AND ${executionScopeSql(queued)} = ${executionScopeSql(active)})
-    OR (${queued}.chat_session_id IS NOT NULL AND ${active}.chat_session_id = ${queued}.chat_session_id)
+    OR (${queued}.chat_session_id IS NOT NULL AND ${queued}.issue_session_id IS NULL
+      AND ${active}.chat_session_id = ${queued}.chat_session_id AND ${active}.issue_session_id IS NULL)
     OR (${queued}.issue_id IS NOT NULL AND ${queued}.issue_session_id IS NULL
       AND ${active}.issue_id = ${queued}.issue_id AND ${active}.issue_session_id IS NULL)
   )))`;
@@ -363,9 +364,16 @@ export class TasksRepo {
       || parentTask?.issueCreationRestricted
       || agent.issueCreationRequiresProposal,
     );
-    const chatSession = input.chatSessionId ? this.ctx.chat().getChatSession(input.chatSessionId) : null;
-    if (input.chatSessionId && !chatSession) throw new Error(`Chat session not found: ${input.chatSessionId}`);
-    if (chatSession && chatSession.agentId !== input.agentId) throw new Error("Chat session agent does not match task agent");
+    const explicitIssueSessionId = cleanOptionalString(input.issueSessionId ?? input.issue_session_id)
+      ?? triggerComment?.issueSessionId
+      ?? null;
+    const explicitIssueSession = explicitIssueSessionId ? this.ctx.issueSessions().getIssueSession(explicitIssueSessionId) : null;
+    const resolvedChatSessionId = input.chatSessionId ?? explicitIssueSession?.chatId ?? null;
+    const chatSession = resolvedChatSessionId ? this.ctx.chat().getChatSession(resolvedChatSessionId) : null;
+    if (resolvedChatSessionId && !chatSession) throw new Error(`Chat session not found: ${resolvedChatSessionId}`);
+    if (chatSession && chatSession.agentId !== input.agentId && !explicitIssueSession) {
+      throw new Error("Chat session agent does not match task agent");
+    }
     const issueId = input.issueId ?? triggerComment?.issueId ?? chatSession?.issueId ?? null;
     const issue = issueId ? this.ctx.issues().getIssue(issueId) : null;
     if (issueId && !issue) throw new Error(`Issue not found: ${issueId}`);
@@ -390,13 +398,16 @@ export class TasksRepo {
         throw new RuntimeWorkspaceError("Agent is bound to a different machine", 409);
       }
     }
-    const requestedIssueSessionId = cleanOptionalString(input.issueSessionId ?? input.issue_session_id)
+    const requestedIssueSessionId = explicitIssueSessionId
       ?? triggerComment?.issueSessionId
-      ?? (issue && !chatSession ? this.ctx.issueSessions().getOrCreateDefaultIssueSession(issue.id).id : null);
+      ?? null;
     const issueSession = requestedIssueSessionId ? this.ctx.issueSessions().getIssueSession(requestedIssueSessionId) : null;
-    if (requestedIssueSessionId && !issueSession) throw new Error(`Issue session not found: ${requestedIssueSessionId}`);
-    if (issueSession && issueSession.issueId !== issueId) throw new Error("Issue session does not belong to task issue");
-    if (issueSession && issueSession.workspaceId !== agent.workspaceId) throw new Error("Issue session workspace does not match agent workspace");
+    if (requestedIssueSessionId && !issueSession) throw new Error(`Session not found: ${requestedIssueSessionId}`);
+    if (issueSession && issueSession.issueId !== issueId) throw new Error("Session is not currently linked to the Task Issue");
+    if (issueSession && issueSession.chatId !== (chatSession?.id ?? null)) {
+      throw new Error("Session does not belong to task Chat");
+    }
+    if (issueSession && issueSession.workspaceId !== agent.workspaceId) throw new Error("Session workspace does not match Agent workspace");
     // Snapshot the lease decision on the Task. A Session setting may change
     // later, but an in-flight Task must keep the workspace ownership it was
     // created with. Historical Issue Tasks without a Session stay exclusive.
@@ -529,7 +540,7 @@ export class TasksRepo {
         issueSession?.id ?? null,
         issueSessionGeneration,
         holdsWorkspace ? 1 : 0,
-        input.chatSessionId ?? null,
+        resolvedChatSessionId,
         triggerCommentId,
         triggerSummary,
         cleanOptionalString(input.requestingUserName ?? input.requesting_user_name),
@@ -1097,14 +1108,7 @@ export class TasksRepo {
     let issueSessionGeneration: number | null = task.issueSessionGeneration ?? null;
     let issueProviderSessionId: string | null = task.sessionId;
     let issueWorkDir: string | null = task.workDir;
-    if (task.sessionId && task.chatSessionId) {
-      const chat = this.ctx.chat().getChatSession(task.chatSessionId);
-      keepProviderSession = executionFingerprintResumable(
-        chat?.sessionExecutionFingerprint ?? null,
-        executionFingerprint,
-        pluginSnapshot.length > 0 || Boolean(runtimeProfile),
-      );
-    } else if (task.issueSessionId) {
+    if (task.issueSessionId) {
       issueSessionId = task.issueSessionId;
       let lane = this.ctx.issueSessions().getOrCreateSessionAgentLane(task.issueSessionId, task.agentId, taskExecutionScope(task));
       const laneRuntime = lane.runtimeId ? this.ctx.runtimes().getRuntime(lane.runtimeId) : null;
@@ -1131,6 +1135,13 @@ export class TasksRepo {
       }
       issueSessionGeneration = lane.generation;
       keepProviderSession = laneResumable;
+    } else if (task.sessionId && task.chatSessionId) {
+      const chat = this.ctx.chat().getChatSession(task.chatSessionId);
+      keepProviderSession = executionFingerprintResumable(
+        chat?.sessionExecutionFingerprint ?? null,
+        executionFingerprint,
+        pluginSnapshot.length > 0 || Boolean(runtimeProfile),
+      );
     }
     this.ctx.db.run(
       `UPDATE multiremi_tasks
@@ -1427,15 +1438,16 @@ export class TasksRepo {
          WHERE t.status = 'queued'
            AND a.archived_at IS NULL
            AND (t.chat_session_id IS NULL OR project_chat.status = 'active')
-           AND NOT EXISTS (
+           AND (t.issue_session_id IS NOT NULL OR NOT EXISTS (
              SELECT 1 FROM multiremi_tasks earlier WHERE earlier.chat_session_id = t.chat_session_id
+               AND earlier.issue_session_id IS NULL
                AND earlier.status = 'queued' AND (
                  earlier.priority > t.priority
                  OR (earlier.priority = t.priority AND earlier.chat_queue_order < t.chat_queue_order)
                  OR (earlier.priority = t.priority AND earlier.chat_queue_order = t.chat_queue_order AND earlier.created_at < t.created_at)
                  OR (earlier.priority = t.priority AND earlier.chat_queue_order = t.chat_queue_order AND earlier.created_at = t.created_at AND earlier.id < t.id)
                )
-           )
+           ))
            AND a.workspace_id = t.workspace_id
            AND (
              SELECT COUNT(*)
@@ -2130,7 +2142,7 @@ export class TasksRepo {
       delegatedByAgentId: current.delegatedByAgentId,
       assignmentSourceEventId: current.assignmentSourceEventId,
     });
-    if (replacement.chatSessionId) {
+    if (replacement.chatSessionId && !replacement.issueSessionId) {
       this.ctx.db.run(
         "UPDATE multiremi_chat_sessions SET latest_task_id = ?, updated_at = ? WHERE id = ?",
         [replacement.id, nowIso(), replacement.chatSessionId],
@@ -2332,7 +2344,7 @@ export class TasksRepo {
     const retry = workspaceLockHeld
       ? this.createTaskWithinWorkspaceLock(retryInput)
       : this.createTask(retryInput);
-    if (retry.chatSessionId) {
+    if (retry.chatSessionId && !retry.issueSessionId) {
       this.ctx.db.run(
         "UPDATE multiremi_chat_sessions SET latest_task_id = ?, updated_at = ? WHERE id = ?",
         [retry.id, nowIso(), retry.chatSessionId],
@@ -2531,7 +2543,7 @@ export class TasksRepo {
     return { task, created: true, covered: false };
   }
 
-  /** Caller holds the workspace lifecycle lock and the Issue Session row lock. */
+  /** Caller holds the workspace lifecycle lock and the Session row lock. */
   private drainDelegationReturnsWithinWorkspaceLock(
     issueSessionId: string,
     trigger: {
@@ -2814,9 +2826,10 @@ export class TasksRepo {
     replacementPlanned = false,
   ): TaskTerminalFollowUps {
     const now = nowIso();
+    const ordinaryChatTask = Boolean(task.chatSessionId && !task.issueSessionId);
     if (
       status === "failed"
-      && task.chatSessionId
+      && ordinaryChatTask
       && task.failureReason === "agent_error.stale_session"
     ) {
       // The provider session and its machine-local directory are one lineage.
@@ -2836,16 +2849,16 @@ export class TasksRepo {
       );
     }
     const retry = status === "failed" ? this.maybeRetryFailedTask(task, workspaceLockHeld) : null;
-    if (retry && task.chatSessionId) {
+    if (retry && ordinaryChatTask) {
       this.ctx.feishuBot().retargetFeishuRoundPushTaskWithinTransaction(task.id, retry.id);
     }
     const delegationReturns: MultiremiTask[] = [];
     let roundPushTasks: MultiremiTask[] = [];
     this.ctx.accessTokens().revokeTaskAccessTokens(task.id);
-    if (status === "completed" && task.chatSessionId) {
+    if (status === "completed" && ordinaryChatTask) {
       this.ctx.chat().completePendingAgentIssueUpdatesForTaskWithinTransaction(task.chatSessionId, task.id);
     }
-    if (task.chatSessionId && (status === "completed" || (status === "failed" && !retry))) {
+    if (ordinaryChatTask && task.chatSessionId && (status === "completed" || (status === "failed" && !retry))) {
       const role = "assistant";
       const messageBody = status === "completed" ? (body || "Task completed.") : (body || `Task ${status}`);
       const failureReason = status === "failed" ? task.failureReason : null;
@@ -2977,7 +2990,7 @@ export class TasksRepo {
       // Compute status after the return task is present. Otherwise the child
       // completion can mark the Issue done and the queued leader follow-up is
       // deliberately unable to reopen that explicit terminal state.
-      const issueStatus = task.chatSessionId
+      const issueStatus = task.chatSessionId && !task.issueSessionId
         ? null
         : this.nextIssueStatusAfterTaskTerminal(task, status, retry != null || replacementPlanned);
       if (issueStatus) {
@@ -2991,7 +3004,6 @@ export class TasksRepo {
       if (
         status === "completed"
         && task.issueSessionId
-        && !task.chatSessionId
         && issue
         && lead?.id === task.agentId
         && !this.hasActiveTaskForIssue(issue.id)
@@ -3228,7 +3240,7 @@ export class TasksRepo {
   // triggering comment when the task came from an @mention. Legacy daemons
   // still report the "Task completed." placeholder — skip it, it says nothing.
   private postAgentReplyComment(task: MultiremiTask, output: string | null): void {
-    if (!task.issueId || !task.agentId || task.chatSessionId) return;
+    if (!task.issueId || !task.agentId || (task.chatSessionId && !task.issueSessionId)) return;
     const body = (output ?? "").trim();
     if (!body || body === "Task completed.") return;
     try {
@@ -3257,7 +3269,7 @@ export class TasksRepo {
   }
 
   private postContextOverflowSystemComment(task: MultiremiTask): void {
-    if (!task.issueId || task.chatSessionId) return;
+    if (!task.issueId || (task.chatSessionId && !task.issueSessionId)) return;
     const body = "The agent could not complete this task because its context still exceeded the provider limit "
       + `at attempt ${task.attempt} of ${task.maxAttempts}. Automatic retries use progressively smaller Session `
       + "projections. Start a new Session, or publish and condense a checkpoint before retrying.";
@@ -3313,7 +3325,7 @@ export class TasksRepo {
     const rows = this.ctx.db.query(
       `SELECT status FROM multiremi_tasks
        WHERE issue_id = ?
-         AND chat_session_id IS NULL
+         AND (chat_session_id IS NULL OR issue_session_id IS NOT NULL)
          AND status NOT IN ('completed', 'failed', 'cancelled')`,
     ).all(issueId) as Array<{ status: string }>;
     const statuses = new Set(rows.map((row) => row.status));
@@ -3337,7 +3349,7 @@ export class TasksRepo {
     status: string,
     options: { rederive?: boolean } = {},
   ): void {
-    if (!task.issueId || task.chatSessionId) return;
+    if (!task.issueId || (task.chatSessionId && !task.issueSessionId)) return;
     // Serialize against direct Issue mutations before checking terminal state.
     // The no-op write acquires a row lock on Postgres and the writer lock on
     // SQLite, so a late worker can never reopen a concurrently accepted or
@@ -3396,7 +3408,7 @@ export class TasksRepo {
     const row = this.ctx.db.query(
       `SELECT 1 AS present FROM multiremi_tasks
        WHERE issue_id = ?
-         AND chat_session_id IS NULL
+         AND (chat_session_id IS NULL OR issue_session_id IS NOT NULL)
          AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
        LIMIT 1`,
     ).get(issueId) as { present: number } | null;
@@ -3407,7 +3419,7 @@ export class TasksRepo {
     const row = this.ctx.db.query(
       `SELECT 1 AS present FROM multiremi_tasks
        WHERE issue_id = ?
-         AND chat_session_id IS NULL
+         AND (chat_session_id IS NULL OR issue_session_id IS NOT NULL)
          AND status NOT IN ('completed', 'failed', 'cancelled')
        LIMIT 1`,
     ).get(issueId) as { present: number } | null;

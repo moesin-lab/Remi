@@ -85,7 +85,7 @@ export function mergeCodexConfig(currentToml: string, fragment: string): string 
 }
 
 /**
- * Merge Relay routing into an Issue Session CODEX_HOME. Relay credentials are
+ * Merge Relay routing into a Session-scoped CODEX_HOME. Relay credentials are
  * supplied to the child process through OPENAI_API_KEY, so the active provider
  * must explicitly read that environment variable instead of requiring Codex's
  * filesystem authentication. No credential value is written to config.toml.

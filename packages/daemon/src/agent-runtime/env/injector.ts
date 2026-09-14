@@ -19,7 +19,7 @@ export interface BuildTaskEnvOptions {
   serverUrl: string;
   /** Resolved task workspace, independent of the agent's current repo cwd. */
   workDir?: string;
-  /** Issue Session-scoped provider config/history root. */
+  /** Session-scoped provider config/history root. */
   providerHome?: IssueSessionProviderHome;
   /** Daemon-resolved provider endpoint/auth; never persisted in the workspace. */
   providerEnv?: Record<string, string>;

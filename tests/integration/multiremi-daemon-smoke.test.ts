@@ -1191,8 +1191,11 @@ describe("Bun Multiremi daemon smoke", () => {
     const leader = store.createAgent({ name: "Leader", provider: "claude" });
     const worker = store.createAgent({ name: "Worker", provider: "claude" });
     const issue = store.createIssue({ title: "Parallel Issue" });
+    const chat = store.createChatSession({ agentId: worker.id, issueId: issue.id, workspaceId: "local" });
+    const session = store.getOrCreateDefaultChatSession(chat.id);
     const tasks = ["one", "two"].map((scope) => store.createTask({
       agentId: worker.id, issueId: issue.id, prompt: scope,
+      chatSessionId: chat.id, issueSessionId: session.id,
       delegatedByAgentId: leader.id, delegationId: `dlg_${scope}`,
     }));
     const credential = await store.createAccessToken({ name: "Parallel daemon", type: "daemon", workspaceId: "local" });
@@ -2097,7 +2100,9 @@ describe("Bun Multiremi daemon smoke", () => {
       provider: "claude",
     });
     const issue = store.createIssue({ title: "Use local directory", projectId: project.id });
-    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Read the local project" });
+    const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id, workspaceId: "local" });
+    const session = store.getOrCreateDefaultChatSession(chat.id);
+    const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Read the local project" });
     const daemonToken = await store.createAccessToken({
       name: "Local directory daemon",
       type: "daemon",
@@ -2208,12 +2213,9 @@ describe("Bun Multiremi daemon smoke", () => {
       provider: "codex",
     });
     const issue = store.createIssue({ title: "Capture Codex home", workspaceId: "local" });
-    const task = store.createTask({
-      agentId: agent.id,
-      issueId: issue.id,
-      workspaceId: "local",
-      prompt: "Capture the provider environment",
-    });
+    const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id, workspaceId: "local" });
+    const session = store.getOrCreateDefaultChatSession(chat.id);
+    const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Capture the provider environment" });
     const daemonToken = await store.createAccessToken({
       name: "Codex home daemon",
       type: "daemon",

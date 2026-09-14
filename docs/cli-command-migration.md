@@ -276,9 +276,9 @@ remove any alias.
 | `remi issue comment delete` | `remi comment delete` | One-release compatibility alias |
 | `remi issue comment resolve` | `remi comment resolve` | One-release compatibility alias |
 | `remi issue comment unresolve` | `remi comment unresolve` | One-release compatibility alias |
-| `remi issue session list` | `remi session list` | One-release compatibility alias |
-| `remi issue session result list` | `remi session result list` | One-release compatibility alias |
-| `remi issue session result publish` | `remi session result publish` | One-release compatibility alias |
+| `remi issue session list` | `remi session list` | Compatibility form takes `<issue>`; canonical form takes `<chat>` |
+| `remi issue session result list` | `remi session result list` | Compatibility form aggregates by Issue; canonical form takes `<chat> <session>` |
+| `remi issue session result publish` | `remi session result publish` | Canonical form takes `<chat> <session>` and follows Chat ownership |
 | `remi issue archive list` | `remi session archive list` | One-release compatibility alias |
 | `remi issue archive status` | `remi session archive status` | One-release compatibility alias |
 | `remi issue archive verify` | `remi session archive verify` | One-release compatibility alias |

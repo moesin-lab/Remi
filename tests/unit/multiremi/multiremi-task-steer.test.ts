@@ -83,7 +83,9 @@ describe("task steer messages (store)", () => {
     const runtime = store.registerRuntime({ id: "rt_steer_evt", name: "steer-evt", provider: "claude", workspaceId: "local", ownerId: "local" });
     const agent = store.createAgent({ name: "Steer Session Agent", provider: "claude" });
     const issue = store.createIssue({ title: "Steer audit" });
-    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work" });
+    const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id });
+    const session = store.getOrCreateDefaultChatSession(chat.id);
+    const task = store.createTask({ agentId: agent.id, issueId: issue.id, issueSessionId: session.id, prompt: "work" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
 

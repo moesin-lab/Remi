@@ -102,6 +102,7 @@ export function issueSessionCompatibilityResponse(
 ): Record<string, unknown> {
   return {
     id: session.id,
+    chat_id: session.chatId,
     issue_id: session.issueId,
     workspace_id: session.workspaceId,
     title: session.title,
@@ -136,6 +137,7 @@ export function sessionEventCompatibilityResponse(event: MultiremiSessionEvent):
 export function sessionResultCompatibilityResponse(result: MultiremiSessionResult): Record<string, unknown> {
   return {
     id: result.id,
+    chat_id: result.chatId,
     issue_id: result.issueId,
     source_session_id: result.sourceSessionId,
     title: result.title,

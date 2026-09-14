@@ -33,7 +33,14 @@ function createProjectTask(store: MultiremiStore) {
     description: "Implement the requested behavior.",
     projectId: project.id,
   });
-  const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Do the work" });
+  const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id });
+  const session = store.getOrCreateDefaultChatSession(chat.id);
+  const task = store.createTask({
+    agentId: agent.id,
+    issueId: issue.id,
+    issueSessionId: session.id,
+    prompt: "Do the work",
+  });
   return { agent, project, issue, task: store.getTaskWithAgent(task.id)! };
 }
 

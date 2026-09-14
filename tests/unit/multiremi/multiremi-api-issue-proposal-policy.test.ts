@@ -551,8 +551,22 @@ async function policyFixture() {
   const ordinary = store.createAgent({ name: "Ordinary collaborator", provider: "codex" });
   const worker = store.createAgent({ name: "Quick-create worker", provider: "codex" });
   const current = store.createIssue({ title: "Current work", workspaceId: "local" });
-  const restrictedTask = store.createTask({ agentId: restricted.id, issueId: current.id, prompt: "watch Feishu" });
-  const ordinaryTask = store.createTask({ agentId: ordinary.id, issueId: current.id, prompt: "collaborate" });
+  const restrictedChat = store.createChatSession({ agentId: restricted.id, issueId: current.id });
+  const ordinaryChat = store.createChatSession({ agentId: ordinary.id, issueId: current.id });
+  const restrictedSession = store.getOrCreateDefaultChatSession(restrictedChat.id);
+  const ordinarySession = store.getOrCreateDefaultChatSession(ordinaryChat.id);
+  const restrictedTask = store.createTask({
+    agentId: restricted.id,
+    issueId: current.id,
+    issueSessionId: restrictedSession.id,
+    prompt: "watch Feishu",
+  });
+  const ordinaryTask = store.createTask({
+    agentId: ordinary.id,
+    issueId: current.id,
+    issueSessionId: ordinarySession.id,
+    prompt: "collaborate",
+  });
   const restrictedCredential = await store.createTaskAccessToken(restrictedTask, "local");
   const ordinaryCredential = await store.createTaskAccessToken(ordinaryTask, "local");
   const app = createMultiremiApp({ store, authToken: "root-secret" });

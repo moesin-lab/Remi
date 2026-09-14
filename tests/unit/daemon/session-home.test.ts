@@ -131,7 +131,7 @@ describe("Issue Session provider home", () => {
     expect(existsSync(firstHome.home)).toBe(true);
   });
 
-  it("keeps an Issue-bound Chat in the Chat provider home", () => {
+  it("keeps an ordinary Issue-bound Chat Task in the Chat provider home", () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-bound-chat-home-"));
     roots.push(root);
     const workspaces = join(root, "workspaces");
@@ -139,6 +139,7 @@ describe("Issue Session provider home", () => {
       ...task("claude"),
       id: "tsk_bound_chat",
       chatSessionId: "chat_1",
+      issueSessionId: null,
     } as AgentTask;
 
     expect(resolveTaskProviderHome(boundChat, join(root, "issue-runtime"), workspaces))
@@ -146,6 +147,23 @@ describe("Issue Session provider home", () => {
         root: join(workspaces, ".runtime", "chat_1", "agt_1", "1"),
         sessionId: "chat_1",
         runtimeStateRoot: join(workspaces, ".runtime", "chat_1"),
+      });
+  });
+
+  it("keeps a Chat-owned Session Task in the product Session provider lane", () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-chat-session-home-"));
+    roots.push(root);
+    const workspaces = join(root, "workspaces");
+    const sessionTask = {
+      ...task("claude"),
+      chatSessionId: "chat_1",
+    } as AgentTask;
+
+    expect(resolveTaskProviderHome(sessionTask, join(root, "issue-runtime"), workspaces))
+      .toMatchObject({
+        root: join(workspaces, ".runtime", "ises_1", "agt_1", "3"),
+        sessionId: "ises_1",
+        runtimeStateRoot: join(workspaces, ".runtime", "ises_1"),
       });
   });
 
@@ -235,7 +253,7 @@ describe("Issue Session provider home", () => {
     const workspaces = join(root, "workspaces");
     const first = {
       ...task("claude"),
-      ...(kind === "chat" ? { chatSessionId: "chat_claude" } : {}),
+      ...(kind === "chat" ? { chatSessionId: "chat_claude", issueSessionId: null } : {}),
       claudeProfile: { name: "private", base_url: "https://example.test", model: "custom", env_key: "REMI_CLAUDE_API_KEY" },
     } as AgentTask;
     const resolve = (input: AgentTask) => resolveTaskProviderHome(input, join(root, "cwd"), workspaces)!;

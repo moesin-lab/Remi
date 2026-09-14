@@ -22,6 +22,25 @@ export function resolveWorkDir(
   task: AgentTask,
   workspacesRoot = join(homedir(), ".remi", "multiremi", "workspaces"),
 ): ResolvedWorkDir {
+  const productSessionId = task.issueSessionId ?? task.issue_session_id;
+  // A Session Task may also carry its owning Chat id. The Session marker wins:
+  // linked work still prepares the Issue workspace, while ordinary Chat Tasks
+  // stay in the Chat root.
+  if (productSessionId && task.issue?.key) {
+    const issueKey = safePathSegment(task.issue.key, "issue key");
+    if (task.holdsWorkspace === false || task.holds_workspace === false) {
+      return {
+        workDir: join(
+          workspacesRoot,
+          "discussions",
+          issueKey,
+          safePathSegment(productSessionId, "product Session id"),
+        ),
+        ensureDir: true,
+      };
+    }
+    return { workDir: join(workspacesRoot, "issues", issueKey), ensureDir: true };
+  }
   if (task.chatSessionId) {
     return {
       workDir: task.workDir ?? join(
@@ -35,14 +54,13 @@ export function resolveWorkDir(
   if (task.issue?.key) {
     const issueKey = safePathSegment(task.issue.key, "issue key");
     if (task.holdsWorkspace === false || task.holds_workspace === false) {
-      const issueSessionId = task.issueSessionId ?? task.issue_session_id;
-      if (!issueSessionId) throw new Error("discussion task requires an issue session id");
+      if (!productSessionId) throw new Error("discussion task requires a product Session id");
       return {
         workDir: join(
           workspacesRoot,
           "discussions",
           issueKey,
-          safePathSegment(issueSessionId, "issue session id"),
+          safePathSegment(productSessionId, "product Session id"),
         ),
         ensureDir: true,
       };

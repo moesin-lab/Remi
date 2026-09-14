@@ -19,7 +19,7 @@ import {
   writeIssueSessionArchiveReceipt,
 } from "@daemon/agent-runtime/workspace/session-archive.js";
 
-describe("Issue session archive", () => {
+describe("Provider Session Archive", () => {
   const roots: string[] = [];
   const supportedPlatformIt = process.platform === "linux" ? it : it.skip;
 
@@ -118,7 +118,7 @@ describe("Issue session archive", () => {
     writeFileSync(join(home, "rollout.jsonl"), "123456789");
 
     await expect(prepareIssueSessionArchive(root, { maxSourceBytes: 8 }))
-      .rejects.toThrow("Issue session history exceeds 8 bytes");
+      .rejects.toThrow("Provider Session Archive history exceeds 8 bytes");
   });
 
   supportedPlatformIt("rejects a snapshot when a provider adds history during archive creation", async () => {

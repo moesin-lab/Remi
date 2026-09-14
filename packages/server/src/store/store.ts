@@ -3418,6 +3418,22 @@ runMigrations(this.db);
     return this.sessions.getOrCreateDefaultIssueSession(issueId, createdById);
   }
 
+  getOrCreateDefaultChatSession(chatId: string, createdById: string | null = null): MultiremiIssueSession {
+    return this.sessions.getOrCreateDefaultChatSession(chatId, createdById);
+  }
+
+  createSession(chatId: string, input: CreateIssueSessionInput = {}): MultiremiIssueSession {
+    return this.sessions.createSession(chatId, input);
+  }
+
+  listChatOwnedSessions(chatId: string, includeArchived = false): MultiremiIssueSession[] {
+    return this.sessions.listChatSessions(chatId, includeArchived);
+  }
+
+  adoptLegacySession(chatId: string, sessionId: string): MultiremiIssueSession {
+    return this.sessions.adoptLegacySession(chatId, sessionId);
+  }
+
   createIssueSession(issueId: string, input: CreateIssueSessionInput = {}): MultiremiIssueSession {
     return this.sessions.createIssueSession(issueId, input);
   }
@@ -3514,6 +3530,10 @@ runMigrations(this.db);
 
   listIssueSessionResults(issueId: string): MultiremiSessionResult[] {
     return this.sessions.listIssueSessionResults(issueId);
+  }
+
+  listSessionResults(sessionId: string): MultiremiSessionResult[] {
+    return this.sessions.listSessionResults(sessionId);
   }
 
   listTasksForIssue(issueId: string): MultiremiTask[] {

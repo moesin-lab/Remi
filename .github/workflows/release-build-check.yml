@@ -62,7 +62,7 @@ jobs:
       - name: Install dependencies from the public registry
         run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
 
-      - name: Verify native Issue session archive traversal
+      - name: Verify native Provider Session Archive traversal
         run: bun test tests/unit/daemon/session-archive.test.ts
 
   build:

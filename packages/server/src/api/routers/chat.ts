@@ -1,6 +1,8 @@
 import type { Context, Hono } from "hono";
 import {
+  canCurrentUserAccessAgent,
   canCurrentUserAccessChatSessionAgent,
+  currentTaskParentId,
   denyCurrentUserWorkspaceAccess,
   loadChatSessionForCurrentUser,
   normalizeSendChatMessageInput,
@@ -10,21 +12,40 @@ import {
 } from "../helpers.js";
 import {
   currentTaskAccessToken,
+  authenticatedRequestUserId,
   currentWorkspaceMember,
   chatMessageCompatibilityResponse,
   chatSessionCompatibilityResponse,
   currentRequestUserId,
+  issueSessionCompatibilityResponse,
+  sessionEventCompatibilityResponse,
+  sessionParticipantCompatibilityResponse,
+  sessionResultCompatibilityResponse,
   sendChatMessageCompatibilityResponse,
   taskPublicResponse,
 } from "../wire/index.js";
 import type {
   CreateChatSessionInput,
+  AddSessionParticipantInput,
+  CreateIssueSessionInput,
+  CreateSessionTaskInput,
+  PublishSessionResultInput,
   SendChatMessageInput,
   UpdateChatSessionInput,
+  UpdateIssueSessionInput,
 } from "@multiremi/contracts/types.js";
 import type { RouterDeps } from "./deps.js";
 import { ChatConflictError, ChatValidationError } from "@multiremi/store/repos/chat-repo.js";
 import { AgentIssueUpdateValidationError } from "@multiremi/store/repos/agent-issue-updates-repo.js";
+
+function sessionMutationActor(c: Context): { actorType: "agent" | "member" | "system"; actorId: string | null } {
+  const taskAgentId = currentTaskAccessToken(c)?.agentId ?? null;
+  if (taskAgentId) return { actorType: "agent", actorId: taskAgentId };
+  const userId = authenticatedRequestUserId(c);
+  return userId
+    ? { actorType: "member", actorId: userId }
+    : { actorType: "system", actorId: null };
+}
 
 export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
@@ -45,6 +66,160 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
     const input = withChatSessionRequestContext(c, store, body);
     if (input instanceof Response) return input;
     return chatMutation(c, () => c.json({ session: store.createChatSession(input) }, 201));
+  });
+  app.get("/api/multiremi/chats/:id/sessions", (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    const sessions = store.listChatOwnedSessions(loaded.session.id, c.req.query("include_archived") === "true");
+    return c.json({
+      sessions: sessions.map((session) => issueSessionCompatibilityResponse(session, store.listSessionParticipants(session.id))),
+    });
+  });
+  app.post("/api/multiremi/chats/:id/sessions", async (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    const body = await readJson<CreateIssueSessionInput>(c);
+    return chatMutation(c, () => {
+      const taskAgentId = currentTaskAccessToken(c)?.agentId ?? null;
+      const userId = authenticatedRequestUserId(c);
+      const session = store.createSession(loaded.session.id, {
+        ...body,
+        chatId: loaded.session.id,
+        createdByType: taskAgentId ? "agent" : userId ? "member" : "system",
+        createdById: taskAgentId ?? userId,
+      });
+      return c.json({ session: issueSessionCompatibilityResponse(session, store.listSessionParticipants(session.id)) }, 201);
+    });
+  });
+  app.post("/api/multiremi/chats/:id/sessions/:sessionId/adopt", (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    return chatMutation(c, () => {
+      const session = store.adoptLegacySession(loaded.session.id, c.req.param("sessionId"));
+      return c.json({ session: issueSessionCompatibilityResponse(session, store.listSessionParticipants(session.id)) });
+    });
+  });
+  app.get("/api/multiremi/chats/:id/sessions/:sessionId", (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    const session = store.getIssueSession(c.req.param("sessionId"));
+    if (!session || session.chatId !== loaded.session.id) return c.json({ error: "session not found" }, 404);
+    return c.json({ session: issueSessionCompatibilityResponse(session, store.listSessionParticipants(session.id)) });
+  });
+  app.patch("/api/multiremi/chats/:id/sessions/:sessionId", async (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    const session = store.getIssueSession(c.req.param("sessionId"));
+    if (!session || session.chatId !== loaded.session.id) return c.json({ error: "session not found" }, 404);
+    const body = await readJson<UpdateIssueSessionInput>(c);
+    return chatMutation(c, () => c.json({
+      session: issueSessionCompatibilityResponse(
+        store.updateIssueSession(session.id, body),
+        store.listSessionParticipants(session.id),
+      ),
+    }));
+  });
+  app.get("/api/multiremi/chats/:id/sessions/:sessionId/events", (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    const session = store.getIssueSession(c.req.param("sessionId"));
+    if (!session || session.chatId !== loaded.session.id) return c.json({ error: "session not found" }, 404);
+    const sinceSeq = Number(c.req.query("since_seq") ?? 0);
+    return c.json({ events: store.listSessionEvents(session.id, { sinceSeq }).map(sessionEventCompatibilityResponse) });
+  });
+  app.post("/api/multiremi/chats/:id/sessions/:sessionId/messages", async (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    const session = store.getIssueSession(c.req.param("sessionId"));
+    if (!session || session.chatId !== loaded.session.id) return c.json({ error: "session not found" }, 404);
+    const body = await readJson<{ body?: string; content?: string }>(c);
+    const content = (body.body ?? body.content ?? "").trim();
+    if (!content) return c.json({ error: "message body is required" }, 400);
+    const actor = sessionMutationActor(c);
+    return c.json({ event: sessionEventCompatibilityResponse(store.appendSessionEvent(session.id, {
+      authorType: actor.actorType,
+      authorId: actor.actorId,
+      kind: "message",
+      body: content,
+    })) }, 201);
+  });
+  app.get("/api/multiremi/chats/:id/sessions/:sessionId/participants", (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    const session = store.getIssueSession(c.req.param("sessionId"));
+    if (!session || session.chatId !== loaded.session.id) return c.json({ error: "session not found" }, 404);
+    return c.json({ participants: store.listSessionParticipants(session.id).map(sessionParticipantCompatibilityResponse) });
+  });
+  app.post("/api/multiremi/chats/:id/sessions/:sessionId/participants", async (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    const session = store.getIssueSession(c.req.param("sessionId"));
+    if (!session || session.chatId !== loaded.session.id) return c.json({ error: "session not found" }, 404);
+    const body = await readJson<AddSessionParticipantInput>(c);
+    const participantType = body.participantType ?? body.participant_type;
+    const participantId = body.participantId ?? body.participant_id;
+    if (participantType === "agent" && participantId) {
+      const agent = store.getAgent(participantId);
+      if (!agent || !canCurrentUserAccessAgent(c, store, agent)) return c.json({ error: "you do not have access to this agent" }, 403);
+    }
+    return chatMutation(c, () => c.json({
+      participant: sessionParticipantCompatibilityResponse(store.addSessionParticipant(session.id, body)),
+    }, 201));
+  });
+  app.delete("/api/multiremi/chats/:id/sessions/:sessionId/participants/:participantType/:participantId", (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    const session = store.getIssueSession(c.req.param("sessionId"));
+    if (!session || session.chatId !== loaded.session.id) return c.json({ error: "session not found" }, 404);
+    store.removeSessionParticipant(session.id, c.req.param("participantType"), c.req.param("participantId"));
+    return c.body(null, 204);
+  });
+  app.get("/api/multiremi/chats/:id/sessions/:sessionId/tasks", (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    const session = store.getIssueSession(c.req.param("sessionId"));
+    if (!session || session.chatId !== loaded.session.id) return c.json({ error: "session not found" }, 404);
+    return c.json({ tasks: store.listTasks().filter((task) => task.issueSessionId === session.id).map(taskPublicResponse) });
+  });
+  app.post("/api/multiremi/chats/:id/sessions/:sessionId/tasks", async (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    const session = store.getIssueSession(c.req.param("sessionId"));
+    if (!session || session.chatId !== loaded.session.id) return c.json({ error: "session not found" }, 404);
+    const body = await readJson<CreateSessionTaskInput>(c);
+    const agentId = body.agentId ?? body.agent_id;
+    const agent = agentId ? store.getAgent(agentId) : null;
+    if (!agent) return c.json({ error: "agent not found" }, 404);
+    if (!canCurrentUserAccessAgent(c, store, agent)) return c.json({ error: "you do not have access to this agent" }, 403);
+    const actor = sessionMutationActor(c);
+    return chatMutation(c, () => c.json({ task: taskPublicResponse(store.createSessionTask(session.id, {
+      ...body,
+      agentId,
+      createdByType: actor.actorType,
+      createdById: actor.actorId,
+      parentTaskId: currentTaskParentId(c),
+    })) }, 201));
+  });
+  app.get("/api/multiremi/chats/:id/sessions/:sessionId/results", (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    const session = store.getIssueSession(c.req.param("sessionId"));
+    if (!session || session.chatId !== loaded.session.id) return c.json({ error: "session not found" }, 404);
+    return c.json({ results: store.listSessionResults(session.id).map(sessionResultCompatibilityResponse) });
+  });
+  app.post("/api/multiremi/chats/:id/sessions/:sessionId/results", async (c) => {
+    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    const session = store.getIssueSession(c.req.param("sessionId"));
+    if (!session || session.chatId !== loaded.session.id) return c.json({ error: "session not found" }, 404);
+    const body = await readJson<PublishSessionResultInput>(c);
+    const actor = sessionMutationActor(c);
+    return chatMutation(c, () => c.json({ result: sessionResultCompatibilityResponse(store.publishSessionResult(session.id, {
+      ...body,
+      publishedByType: actor.actorType,
+      publishedById: actor.actorId,
+      sourceTaskId: currentTaskParentId(c),
+    })) }, 201));
   });
   app.get("/api/multiremi/chats/:id", (c) => {
     const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));

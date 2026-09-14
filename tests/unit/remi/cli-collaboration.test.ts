@@ -144,7 +144,6 @@ describe("native collaboration CLI contracts", () => {
       "comment list",
       "comment add",
       "session result publish",
-      "session list",
       "session task list",
       "session task create",
       "task get",
@@ -154,6 +153,7 @@ describe("native collaboration CLI contracts", () => {
     for (const path of canonicalPromptPaths) {
       expect(daemonSource, path).toContain(`remi ${path}`);
     }
+    expect(daemonSource).toContain("remi issue session list");
     const compatibilityPaths = [
       "issue comment list",
       "issue comment add",
@@ -262,13 +262,13 @@ describe("native collaboration CLI contracts", () => {
     ]);
   });
 
-  it("creates workspace Sessions by default and supports discussion Sessions", async () => {
+  it("creates Chat-owned Sessions by default and supports discussion Sessions", async () => {
     useCliEnv();
     const bodies: Array<Record<string, unknown>> = [];
     globalThis.fetch = capabilityFetch("session.create", async (input) => {
       const request = input;
       expect(request.method).toBe("POST");
-      expect(new URL(request.url).pathname).toBe("/api/issues/MUL-136/sessions");
+      expect(new URL(request.url).pathname).toBe("/api/multiremi/chats/chat-136/sessions");
       const body = await request.json() as Record<string, unknown>;
       bodies.push(body);
       return Response.json({ id: `ises_${bodies.length}`, ...body }, { status: 201 });
@@ -276,10 +276,10 @@ describe("native collaboration CLI contracts", () => {
     const spec = specById("session.create");
 
     await capture(() => registryFor([spec]).execute([
-      "session", "create", "MUL-136", "--title", "Implementation", "--output", "json",
+      "session", "create", "chat-136", "--title", "Implementation", "--output", "json",
     ]));
     await capture(() => registryFor([spec]).execute([
-      "session", "create", "MUL-136", "--title", "Design chat", "--discussion", "--output", "json",
+      "session", "create", "chat-136", "--title", "Design chat", "--discussion", "--output", "json",
     ]));
 
     expect(bodies).toEqual([

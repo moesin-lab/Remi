@@ -17,8 +17,33 @@ summary: 当前机器人 Chat/Issue 话题与轮次推送，以及独立的 Mess
 - **订阅控制**：[Chat 路由](../packages/server/src/api/routers/chat.ts)提供 `issue-updates` 查询/开关，对 task token 返回 403；CLI 为 `remi chat issue updates get/enable/disable`。开关与绑定分别维护，不能只看 Issue 有绑定就认定更新仍启用。
 - **轮次推送**：[TasksRepo](../packages/server/src/store/repos/tasks-repo.ts)在负责人 Issue Session 任务成功结束、该 Issue 已无其他活跃执行任务后，触发绑定话题的总结。已有 Chat task 时 steer；否则创建一个主动总结 task。按绑定与负责人 task 去重，等待委派任务和负责人回程完成，Chat 总结本身不自动修改 Issue 状态或再发 Issue 评论。
 - **出站投递**：主动总结完成后进入持久化 outbox，daemon 通过心跳领取有租约的 delivery，经 [concierge host](../apps/remi/cli/multiremi.ts)发送并回报；失败按退避重试。[send.ts](../packages/connectors/src/feishu/send.ts)向飞书 create/reply 传 delivery 的幂等键。根消息成功后用返回的消息 ID 固定话题绑定；这些机制不等于真实飞书端已验证恰好一次投递。
+- **消息回应**：原消息收到后保留 🤔（`THINKING`）；任务正常完成且结果卡已发送后替换为 ✅（`DONE`），失败或取消替换为 ❌（`CROSSMARK`）。入队和 steer 返回不清除回应；最终任务快照携带全部原消息 ID，确保执行期间追加的消息也能更新。替换先添加新回应，再删除本机器人的旧状态，保留其他人的回应；重复事件不把终态改回处理中。终态回应的可重试错误由持久化 outbox 重试，已确认的结果卡不重复发送，Runtime 交接不标记失败。实现见[回应状态](../packages/connectors/src/feishu/message-receipt.ts)与[任务投递](../packages/connectors/src/feishu/task-presentation.ts)；需要同时更新平台和承载机器人的 Runtime。
 
 Chat 即使绑定 Issue，仍使用独立 Chat 工作目录与会话投影。claim 中的 `bound_issue`、待投递摘要和 [CLI caller context](../packages/server/src/api/routers/cli.ts)可帮助 Agent 找回当前 Issue；不要把任务创建时尚未绑定的空 `issueId` 当作永远没有 Issue 上下文。
+
+## 机器人发送者白名单
+
+空间设置的「集成」提供飞书账号白名单。机器人收到请求时，按当前应用的 `(app_id, open_id)` 自动记录发送者并去重，保存显示名称、首次和最近请求时间；新账号默认「待授权」。空间管理者可「加入白名单」或「移出白名单」，不需要关联 Remi 用户，也不创建空间成员。更换机器人应用后按新应用的账号范围重新管理。
+
+账号列表会从机器人已接收消息的发送者信息补全姓名和英文名（`with_sender_name=true`），不要求额外的通讯录资料权限。Web 展示姓名、英文名、Open ID，并可展开查看 Union ID；CLI `sender list` 同步返回这些资料。列表每次最多刷新 10 个账号，单次网络查询最多 4 秒，同一账号 10 分钟内复用结果；查询失败保留已知姓名及原有授权。刷新只更新资料，不改变授权、首次或最近请求时间。无法读取姓名时，页面用账号 ID 后缀区分用户。
+
+白名单控制该账号通过机器人 Chat 创建 Issue 的权限，未允许的账号仍可对话。Issue 创建时重新检查来源账号；允许后可继续当前 Chat，移出后该 Chat 及其子任务的下一次创建会被拒绝。同一 Chat 已收到多名发送者的请求时，全部来源账号都需允许。Agent 自身的提议审批策略仍独立生效；白名单不会将普通聊天中的「同意」当作审批，也不会追溯撤销已经建立的独立定时自动化。
+
+已配置群话题的自动 Issue 创建同样检查白名单和 Agent 提议策略；已有 Chat 必须满足全部来源账号均已允许，才会在后续群消息到达时创建并绑定 Issue。群聊路由仍决定负责该 Issue 的 Agent。
+
+旧版本已写入任务的 `issueCreationRestricted` 不会自动清除；历史任务缺少可可靠归因的发送者记录。遇到此类旧受限会话，加入白名单后需在飞书使用 `/new` 开始新会话，再发送请求。
+
+未授权任务创建的持久 Agent 或 Autopilot 配置仍继承已有的提议审批策略，后续给账号授权不会自动清除这些配置上的策略；需要空间管理者另行调整。白名单的动态恢复针对 Chat 与普通任务来源链，不等于重写已保存的自动化权限。
+
+[管理 API](../packages/server/src/api/routers/feishu-bot.ts)仅允许已登录的空间管理者读取和更新账号授权，task/daemon 身份不能自行授权。对应 [CLI](../apps/remi/cli/commands/workspace.ts)使用明确的位置参数，`sender` 为列表返回的账号记录 ID：
+
+```bash
+remi workspace feishu-bot sender list <workspace>
+remi workspace feishu-bot sender allow <workspace> <sender>
+remi workspace feishu-bot sender revoke <workspace> <sender>
+```
+
+这份账号白名单属于机器人对话链路，与下面 Messaging Source 的会话采集 allowlist 分开维护。
 
 ## 当前组件与能力
 

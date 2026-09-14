@@ -251,6 +251,17 @@ describe("Feishu outbound image loading", () => {
     }
   });
 
+  it("keeps remote image uploads available when Bot local paths are disabled", async () => {
+    const resolver = createFeishuImageResolver({
+      allow: { local: false },
+      fetchFn: async () => new Response(Buffer.from("png"), { headers: { "content-type": "image/png" } }),
+      assertRemoteHost: async () => undefined,
+      uploadImage: async () => "img_remote_bot",
+    });
+    expect(await rewriteMarkdownImages("![remote](https://cdn.example/image.png)", resolver))
+      .toBe("![remote](feishu-image:img_remote_bot)");
+  });
+
   it("degrades loader failures instead of retaining broken image syntax", async () => {
     const resolver = createFeishuImageResolver({
       loadAttachment: async () => ({ buffer: Buffer.from("text"), contentType: "text/plain" }),

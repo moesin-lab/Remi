@@ -8,7 +8,7 @@
 import type { FeishuChannelConfig, FeishuSenderAuthorizer, GroupPolicy } from "./config.js";
 import { createLogger } from "@shared/logger.js";
 import { createFeishuClient } from "./client.js";
-import { startWebSocketListener, setGroupPolicy, flushDedupCacheSync, type FeishuWSHandle, type ParsedFeishuMessage } from "./receive.js";
+import { startWebSocketListener, flushDedupCacheSync, type FeishuWSHandle, type ParsedFeishuMessage } from "./receive.js";
 import { sendMarkdownCardFeishu, sendCardFeishu } from "./send.js";
 import { FeishuStreamingSession, buildFinalCard, type TokenProvider } from "./streaming.js";
 import { handleAgentStream } from "./adapters/stream-handler.js";
@@ -74,6 +74,7 @@ export class FeishuChannel {
   private _activeSessions = new Map<string, FeishuStreamingSession | FeishuTaskPresentation>();
   private _abortHandler: ((sessionKey: string) => Promise<void>) | null = null;
   private _tokenProvider: TokenProvider | null = null;
+  private _groupPolicy: GroupPolicy = { getByChatId: () => null };
   private _senderAuthorizer: FeishuSenderAuthorizer | null = null;
 
   constructor(config: FeishuChannelConfig) {
@@ -84,7 +85,7 @@ export class FeishuChannel {
 
   /** Inject group policy (remi's GroupConfigStore). Must be called before connect(). */
   setGroupPolicy(policy: GroupPolicy): this {
-    setGroupPolicy(policy);
+    this._groupPolicy = policy;
     return this;
   }
 
@@ -107,7 +108,7 @@ export class FeishuChannel {
   }
 
   /** Start WebSocket listener. Rejects if the initial connection fails. */
-  connect(): Promise<void> {
+  connect(options?: { eventScope?: string }): Promise<void> {
     if (!this._config.appId || !this._config.appSecret) {
       throw new Error("FeishuChannel: appId and appSecret are required");
     }
@@ -123,6 +124,7 @@ export class FeishuChannel {
         }
       },
       this._senderAuthorizer,
+      { ...options, groupPolicy: this._groupPolicy },
     );
 
     return this._wsHandle.ready.then(() => new Promise<void>(() => {
@@ -290,6 +292,7 @@ export class FeishuChannel {
       });
       const messageId = session.getMessageId()!;
       if (opts.onStarted) await opts.onStarted(messageId);
+      if (meta.onReplyCreated) await meta.onReplyCreated(messageId);
       const result = await handleTaskStream(session, stream, chatId, meta);
       await session.close({
         finalText: result.contentText || undefined,

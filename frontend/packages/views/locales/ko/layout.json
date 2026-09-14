@@ -15,7 +15,8 @@
     "plugins": "플러그인",
     "skills": "스킬",
     "settings": "설정",
-    "chat": "채팅"
+    "chat": "채팅",
+    "bots": "봇"
   },
   "help": {
     "trigger": "도움말",

@@ -632,6 +632,18 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
             `Feishu issue topic creation skipped for ${issue.id}: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
+        const botTopicStartedAt = Date.now();
+        try {
+          store.prepareBotIssueTopicWithinTransaction(issue);
+        } catch (error) {
+          log.warn("bot.issue_topic.failed", {
+            issueId: issue.id,
+            workspaceId: issue.workspaceId,
+            durationMs: Date.now() - botTopicStartedAt,
+            error: error instanceof Error ? error.stack ?? error.message : String(error),
+            cause: error instanceof Error && error.cause ? String(error.cause) : null,
+          });
+        }
       }
       publishIssueCreated(c, store, issue, issueCompatibilityResponse(issue));
       // go-compat (maybeEnqueueOnAssign): creating an issue assigned to an agent/squad

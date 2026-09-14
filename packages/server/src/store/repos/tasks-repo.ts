@@ -2838,6 +2838,7 @@ export class TasksRepo {
     const retry = status === "failed" ? this.maybeRetryFailedTask(task, workspaceLockHeld) : null;
     if (retry && task.chatSessionId) {
       this.ctx.feishuBot().retargetFeishuRoundPushTaskWithinTransaction(task.id, retry.id);
+      this.ctx.bots().retargetBotTaskWithinTransaction(task.id, retry.id);
     }
     const delegationReturns: MultiremiTask[] = [];
     let roundPushTasks: MultiremiTask[] = [];
@@ -2895,6 +2896,7 @@ export class TasksRepo {
           task.id, now, now, task.chatSessionId,
         ],
       );
+      this.ctx.bots().completeBotTaskWithinTransaction(task, messageBody);
       if (status === "completed") {
         this.ctx.feishuBot().completeFeishuRoundPushTaskWithinTransaction(task, messageBody);
         const session = this.ctx.chat().getChatSession(task.chatSessionId);
@@ -2914,6 +2916,10 @@ export class TasksRepo {
           },
         });
       }
+    }
+
+    if (task.chatSessionId && status === "cancelled" && !replacementPlanned) {
+      this.ctx.bots().completeBotTaskWithinTransaction(task, body || "Task cancelled.");
     }
 
     if (task.issueId) {
@@ -3007,10 +3013,10 @@ export class TasksRepo {
           createdAt: now,
         });
         this.ctx.notificationChannels().flushAgentIssueUpdatesForIssueWithinTransaction(issue.id, now);
-        roundPushTasks = this.ctx.feishuBot().prepareFeishuIssueRoundPushesWithinTransaction({
-          issue,
-          leaderTask: task,
-        });
+        roundPushTasks = [
+          ...this.ctx.feishuBot().prepareFeishuIssueRoundPushesWithinTransaction({ issue, leaderTask: task }),
+          ...this.ctx.bots().prepareBotIssueRoundPushesWithinTransaction({ issue, leaderTask: task }),
+        ];
       }
     }
 

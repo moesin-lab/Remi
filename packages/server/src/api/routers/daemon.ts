@@ -1,6 +1,7 @@
 import type { Hono } from "hono";
 import { parseFeishuPresentation } from "@multiremi/contracts/feishu-presentation.js";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
+import { denyDaemonTaskConversationAccess } from "../helpers/daemon-task-conversations.js";
 import {
   MAX_TASK_MESSAGES_PER_REQUEST,
   bindDaemonTokenIdentityOrDeny,
@@ -924,7 +925,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     return c.json({ request }, 201);
   });
   app.get("/api/daemon/tasks/:taskId/human-requests/:requestId", (c) => {
-    const identityDenied = denyDaemonTokenTaskRuntimeIdentity(c, store, c.req.param("taskId"));
+    const identityDenied = denyDaemonTaskConversationAccess(c, store, c.req.param("taskId"));
     if (identityDenied) return identityDenied;
     const request = store.getTaskHumanRequest(c.req.param("requestId"));
     if (!request || request.taskId !== c.req.param("taskId")) return c.json({ error: "request not found" }, 404);
@@ -945,7 +946,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
   });
   app.post("/api/daemon/tasks/:taskId/human-requests/:requestId/respond", async (c) => {
     const taskId = c.req.param("taskId");
-    const identityDenied = denyDaemonTokenTaskRuntimeIdentity(c, store, taskId);
+    const identityDenied = denyDaemonTaskConversationAccess(c, store, taskId);
     if (identityDenied) return identityDenied;
     const body = await readJsonStrict<{ response?: Record<string, unknown>; responded_by?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
@@ -1018,7 +1019,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
   });
   app.get("/api/daemon/tasks/:taskId/messages", (c) => {
     const taskId = c.req.param("taskId");
-    const identityDenied = denyDaemonTokenTaskRuntimeIdentity(c, store, taskId);
+    const identityDenied = denyDaemonTaskConversationAccess(c, store, taskId);
     if (identityDenied) return identityDenied;
     const task = store.getTask(taskId);
     if (!task) return c.json({ error: "task not found" }, 404);
@@ -1161,7 +1162,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
   });
   app.get("/api/daemon/tasks/:taskId/status", (c) => {
     const taskId = c.req.param("taskId");
-    const identityDenied = denyDaemonTokenTaskRuntimeIdentity(c, store, taskId);
+    const identityDenied = denyDaemonTaskConversationAccess(c, store, taskId);
     if (identityDenied) return identityDenied;
     const task = store.getTask(taskId);
     if (!task) return c.json({ error: "task not found" }, 404);
@@ -1186,6 +1187,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       usage: snapshot.usage,
       started_at: snapshot.startedAt,
       completed_at: snapshot.completedAt,
+      replacement_task_id: store.getBotTaskReplacement(task.id),
     });
   });
   app.get("/api/daemon/tasks/:taskId/steer", (c) => {

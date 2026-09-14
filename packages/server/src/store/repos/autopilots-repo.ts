@@ -1348,6 +1348,10 @@ export class AutopilotsRepo {
       if (autopilot.executionMode === "create_issue" && issueCreationRestricted) {
         throw new Error("issue_creation_requires_proposal");
       }
+      if (autopilot.executionMode === "create_issue" && sourceTask
+        && this.ctx.bots().isBotTaskIssueCreationRestricted(sourceTask.id)) {
+        throw new Error("bot_sender_approval_required");
+      }
 
       let issue: MultiremiIssue | null = null;
       let issueSessionId: string | null = null;

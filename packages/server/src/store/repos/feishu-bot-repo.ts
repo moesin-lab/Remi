@@ -263,6 +263,7 @@ export class FeishuBotRepo {
     if (!runtimeId) throw new FeishuBotConfigError("runtime_id is required", 400, "runtime_required");
     if (!appId) throw new FeishuBotConfigError("app_id is required", 400, "app_id_required");
     const domain = normalizeDomain(input.domain);
+    if (input.enabled) this.assertAccountNotHostedByBot(appId, domain);
 
     const agent = this.ctx.agents().getAgent(agentId);
     if (!agent || agent.workspaceId !== workspaceId) {
@@ -368,6 +369,7 @@ export class FeishuBotRepo {
   setEnabled(workspaceId: string, enabled: boolean, actor?: string | null): MultiremiFeishuBotConfig | null {
     const existing = this.rawConfigRow(workspaceId);
     if (!existing) return null;
+    if (enabled) this.assertAccountNotHostedByBot(String(existing.app_id), String(existing.domain));
     this.ctx.db.run(
       `UPDATE multiremi_feishu_bot_configs
           SET enabled = ?, revision = revision + 1, updated_at = ?, updated_by = ?
@@ -378,6 +380,17 @@ export class FeishuBotRepo {
       workspaceId,
     );
     return this.getConfig(workspaceId);
+  }
+
+  private assertAccountNotHostedByBot(appId: string, domain: string): void {
+    const active = this.ctx.db.query(
+      "SELECT id FROM multiremi_bot_platform_bindings WHERE platform = 'feishu' AND app_id = ? AND domain = ? AND active = 1 LIMIT 1",
+    ).get(appId, domain);
+    if (active) throw new FeishuBotConfigError(
+      "This platform account is already enabled in Bots. Disable it there before enabling the legacy integration.",
+      409,
+      "bot_account_conflict",
+    );
   }
 
   /**
@@ -1382,7 +1395,10 @@ export class FeishuBotRepo {
     if (!Number(row.enabled ?? 0)) {
       return { revision, desired_state: "stopped", config_available: false };
     }
-    const blockers = this.liveForeignRuntimeIds(workspaceId, runtimeId);
+    const blockers = [
+      ...this.liveForeignRuntimeIds(workspaceId, runtimeId),
+      ...this.liveBotRuntimeIds(String(row.app_id), String(row.domain)),
+    ];
     if (blockers.length > 0) {
       // Hold the new host at `stopped` until the previous one lets go.
       return { revision, desired_state: "stopped", config_available: false };
@@ -1571,7 +1587,10 @@ export class FeishuBotRepo {
     const runtime = this.ctx.runtimes().getRuntime(config.runtimeId);
     const runtimeOnline = Boolean(runtime && isRuntimeEffectivelyOnline(runtime));
     const reported = this.getRuntimeStatus(workspaceId, config.runtimeId);
-    const staleRuntimeIds = this.liveForeignRuntimeIds(workspaceId, config.runtimeId);
+    const staleRuntimeIds = [...new Set([
+      ...this.liveForeignRuntimeIds(workspaceId, config.runtimeId),
+      ...this.liveBotRuntimeIds(config.appId, config.domain),
+    ])];
     const desiredState: FeishuBotDesiredState = config.enabled && staleRuntimeIds.length === 0
       ? "running"
       : "stopped";
@@ -1646,6 +1665,20 @@ export class FeishuBotRepo {
     return this.ctx.db
       .query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ?")
       .get(workspaceId) as Row | null;
+  }
+
+  private liveBotRuntimeIds(appId: string, domain: string): string[] {
+    const rows = this.ctx.db.query(`SELECT s.runtime_id, s.reported_at
+      FROM multiremi_bot_runtime_states s
+      JOIN multiremi_bot_platform_bindings p ON p.id = s.platform_binding_id
+      WHERE p.platform = 'feishu' AND p.app_id = ? AND p.domain = ?
+        AND s.state IN ('online', 'starting')`).all(appId, domain) as Row[];
+    const cutoff = Date.now() - RUNTIME_STATE_STALE_MS;
+    return rows.filter((row) => {
+      const runtime = this.ctx.runtimes().getRuntime(String(row.runtime_id));
+      return Date.parse(String(row.reported_at)) >= cutoff
+        && runtime != null && isRuntimeEffectivelyOnline(runtime);
+    }).map((row) => String(row.runtime_id));
   }
 
   /**

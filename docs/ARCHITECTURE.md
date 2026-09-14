@@ -17,6 +17,7 @@ summary: 从 CLI、Web 和飞书入口追踪到 API、存储与 Agent 执行，�
 | `apps/server` | 平台 CLI 入口，复用服务端启动分发 | [main.ts](../apps/server/main.ts)、[multiremi.ts](../apps/remi/cli/multiremi.ts) |
 | `frontend/apps/web` | Next.js Web 入口 | [应用目录](../frontend/apps/web)、[前端地图](dev/frontend.md) |
 | `packages/server` | Hono API、wire 序列化、领域存储、平台 worker | [API 组合与服务启动](../packages/server/src/api/server.ts)、[Store](../packages/server/src/store/store.ts) |
+| Bot | 独立机器人主体；平台账号、Agent 承载、路由、执行位置和可选白名单归于 Bot 内配置 | [Bot 契约](dev/bots.md)、[类型](../packages/contracts/src/bots.ts)、[CLI](../apps/remi/cli/commands/bots.ts) |
 | `packages/daemon` | 共享 AgentRuntime、工作目录/插件/MCP/提示词组装、lane 和定时调度 | [runtime.ts](../packages/daemon/src/agent-runtime/runtime.ts)、[orchestrator.ts](../packages/daemon/src/orchestrator.ts)、[scheduler.ts](../packages/daemon/src/scheduler.ts) |
 | `packages/remi` | Remi core 库与会话辅助代码；当前 foreground 的飞书消息接线位于 `apps/remi/cli/multiremi.ts` | [core.ts](../packages/remi/src/core.ts)、[当前 foreground](../apps/remi/cli/multiremi.ts) |
 | `packages/acp` | ACP 连接、原生 agy 与统一 provider 事件 | [provider 工厂](../packages/acp/src/runtime-provider.ts)、[client.ts](../packages/acp/src/client.ts)、[adapter registry](../packages/acp/src/adapters/index.ts) |
@@ -46,6 +47,8 @@ Chat 可绑定同工作区的一个 Issue；新 Chat task 可继承该 `issueId`
 工作区的 [Feishu bot 配置](../packages/server/src/store/repos/feishu-bot-repo.ts)指定 Agent 和 Runtime；
 bot 控制指令携带版本和期望状态。[concierge supervisor](../packages/server/src/worker/feishu-concierge.ts)经鉴权接口拉取 assignment 后串行协调 connector 的启动、停止与重试，应用凭据不随心跳下发。心跳还可领取持久化出站投递，由 connector 发送并回报；自动 Issue 话题及负责人轮次完成推送见[飞书接入契约](feishu-message-ingestion.md)。
 
+新 [Bot 入口](dev/bots.md)与上述工作区飞书配置并行：一个 Bot 内配置多个平台账号与有序路由，解析后选中已有 Agent 和执行设置，再复用 Chat → Task → Runtime。平台绑定与目标共同定位 Chat，规则 ID 和凭据轮换不拆散历史；收发宿主与 Agent 执行 Runtime 分别配置。旧配置、API、CLI 与会话继续使用原路径，新体系不依赖 Messaging 采集记录。
+
 ## 存储与事务
 
 当前 Store 使用同步 `SqlDatabase` 接口。[openMultiremiDatabase](../packages/server/src/store/db/postgres.ts)
@@ -60,7 +63,7 @@ PostgreSQL 的 `PgBridge.request` 用 `Atomics.wait` 等待 [pg-worker](../packa
 
 ## 配置与能力定位
 
-- bot assignment 由工作区独立的 `multiremi_feishu_bot_configs` 记录关联 Agent/Runtime；实际任务通过 Agent 行组装执行参数。bot 凭据在控制面配置，daemon 环境仅承载连接和进程设置，见[配置说明](deploy/66-8-remi-environment.md)。
+- 旧飞书 bot assignment 由工作区独立的 `multiremi_feishu_bot_configs` 记录关联 Agent/Runtime；新 Bot 在自身平台绑定中配置账号与连接宿主，在默认目标和路由中选择 Agent 与执行位置。实际任务继续通过 Agent 行组装执行参数。bot 凭据在控制面配置，daemon 环境仅承载连接和进程设置，见[Bot 契约](dev/bots.md)与[旧配置说明](deploy/66-8-remi-environment.md)。
 - 当前运行时支持 Claude、Codex 和 [Antigravity](antigravity.md)：前两者通过 ACP，Antigravity 通过原生 `agy` CLI，统一输出 Remi 事件。认证方式按各 CLI 和[安装说明](../README.md)配置，不能把所有后端概括为“不需要 API key”。
 - Codex 与 Claude Code 的 Runtime 详情支持自定义模型连接，执行时注入隔离 Home；鉴权、任务快照与协议分别见 [Codex 连接](design/acp-codex-via-codex-acp.md) 和 [Claude Code 连接](design/acp-claude-via-claude-agent-acp.md)。
 - [MCP 组装](../packages/daemon/src/agent-runtime/mcp/ephemeral.ts)当前接受 `command` 形式的 stdio 服务；远程 HTTP 配置不能仅因存进 agent 字段就视为已注入。

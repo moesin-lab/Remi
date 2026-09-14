@@ -1,21 +1,21 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 745,
+    "routeCount": 764,
     "routeCountByPrefix": {
       "native": 209,
-      "compat": 522,
+      "compat": 541,
       "root": 14
     },
-    "getRoutes": 319,
-    "getRoutesWithBody": 316,
+    "getRoutes": 325,
+    "getRoutesWithBody": 322,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 426,
-    "mutationRoutesCovered": 282,
+    "mutationRoutes": 439,
+    "mutationRoutesCovered": 286,
     "flows": [
       "agents-compat",
       "agents-native",
@@ -23,6 +23,7 @@
       "auth",
       "autopilots-compat",
       "autopilots-native",
+      "bots",
       "chat",
       "cloud",
       "comments-compat",
@@ -68,6 +69,7 @@
     "DELETE /api/attachments/:id",
     "DELETE /api/autopilots/:id",
     "DELETE /api/autopilots/:id/triggers/:triggerId",
+    "DELETE /api/bots/:id",
     "DELETE /api/chat/sessions/:sessionId",
     "DELETE /api/chat/sessions/:sessionId/queue",
     "DELETE /api/chat/sessions/:sessionId/queue/:taskId",
@@ -155,6 +157,10 @@
     "GET /api/autopilots/:id/deliveries/:deliveryId",
     "GET /api/autopilots/:id/runs",
     "GET /api/autopilots/:id/runs/:runId",
+    "GET /api/bots",
+    "GET /api/bots/:id",
+    "GET /api/bots/:id/senders",
+    "GET /api/bots/:id/sessions",
     "GET /api/chat/pending-tasks",
     "GET /api/chat/sessions",
     "GET /api/chat/sessions/:sessionId",
@@ -183,6 +189,8 @@
     "GET /api/daemon/runtimes/:id/claude-profile-key",
     "GET /api/daemon/runtimes/:id/codex-profile-key",
     "GET /api/daemon/runtimes/:runtimeId/agent-plugins/desired",
+    "GET /api/daemon/runtimes/:runtimeId/bots",
+    "GET /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId",
     "GET /api/daemon/runtimes/:runtimeId/feishu-bot",
     "GET /api/daemon/runtimes/:runtimeId/feishu-bot/outbound/:deliveryId/attachments/:attachmentId",
     "GET /api/daemon/runtimes/:runtimeId/issues/:issueId/session-archives/:archiveId/content",
@@ -503,6 +511,7 @@
     "POST /api/autopilots/:id/trigger",
     "POST /api/autopilots/:id/triggers",
     "POST /api/autopilots/:id/triggers/:triggerId/rotate-webhook-token",
+    "POST /api/bots",
     "POST /api/chat/sessions",
     "POST /api/chat/sessions/:sessionId/messages",
     "POST /api/chat/sessions/:sessionId/queue/:taskId/prioritize",
@@ -525,6 +534,15 @@
     "POST /api/daemon/register",
     "POST /api/daemon/runtimes/:runtimeId/agent-plugins/:versionId/state",
     "POST /api/daemon/runtimes/:runtimeId/bot-menu/:requestId/result",
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/attachments",
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/messages",
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/outbound/:deliveryId/result",
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/outbound/claim",
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/session/cancel",
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/session/inspect",
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/session/reset",
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/status",
+    "POST /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId/tasks/:taskId/replies",
     "POST /api/daemon/runtimes/:runtimeId/commands/:requestId/result",
     "POST /api/daemon/runtimes/:runtimeId/commands/claim",
     "POST /api/daemon/runtimes/:runtimeId/directory-scans/:requestId/result",
@@ -766,6 +784,8 @@
     "PUT /api/agents/:id/skills",
     "PUT /api/agents/:id/supervisor",
     "PUT /api/autopilots/:id/triggers/:triggerId/signing-secret",
+    "PUT /api/bots/:id",
+    "PUT /api/bots/:id/senders/:senderId",
     "PUT /api/chat/sessions/:sessionId/issue-updates",
     "PUT /api/comments/:id",
     "PUT /api/daemon/runtimes/:runtimeId/issues/:issueId/session-archives/:archiveId/content",
@@ -815,6 +835,7 @@
     "DELETE /api/attachments/:id",
     "DELETE /api/autopilots/:id",
     "DELETE /api/autopilots/:id/triggers/:triggerId",
+    "DELETE /api/bots/:id",
     "DELETE /api/chat/sessions/:sessionId",
     "DELETE /api/cloud-runtime/nodes",
     "DELETE /api/comments/:id",
@@ -885,6 +906,10 @@
     "GET /api/autopilots/:id/deliveries/:deliveryId",
     "GET /api/autopilots/:id/runs",
     "GET /api/autopilots/:id/runs/:runId",
+    "GET /api/bots",
+    "GET /api/bots/:id",
+    "GET /api/bots/:id/senders",
+    "GET /api/bots/:id/sessions",
     "GET /api/chat/pending-tasks",
     "GET /api/chat/sessions",
     "GET /api/chat/sessions/:sessionId",
@@ -913,6 +938,8 @@
     "GET /api/daemon/runtimes/:id/claude-profile-key",
     "GET /api/daemon/runtimes/:id/codex-profile-key",
     "GET /api/daemon/runtimes/:runtimeId/agent-plugins/desired",
+    "GET /api/daemon/runtimes/:runtimeId/bots",
+    "GET /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId",
     "GET /api/daemon/runtimes/:runtimeId/feishu-bot",
     "GET /api/daemon/runtimes/:runtimeId/feishu-bot/outbound/:deliveryId/attachments/:attachmentId",
     "GET /api/daemon/runtimes/:runtimeId/issues/:issueId/session-archives/:archiveId/content",
@@ -1219,6 +1246,7 @@
     "POST /api/autopilots/:id/trigger",
     "POST /api/autopilots/:id/triggers",
     "POST /api/autopilots/:id/triggers/:triggerId/rotate-webhook-token",
+    "POST /api/bots",
     "POST /api/chat/sessions",
     "POST /api/chat/sessions/:sessionId/messages",
     "POST /api/chat/sessions/:sessionId/read",
@@ -1387,6 +1415,8 @@
     "PUT /api/agents/:id/env",
     "PUT /api/agents/:id/skills",
     "PUT /api/autopilots/:id/triggers/:triggerId/signing-secret",
+    "PUT /api/bots/:id",
+    "PUT /api/bots/:id/senders/:senderId",
     "PUT /api/comments/:id",
     "PUT /api/daemon/runtimes/:runtimeId/models",
     "PUT /api/issues/:id",
@@ -2891,6 +2921,163 @@
       }
     },
     {
+      "key": "bots#000 POST /api/bots",
+      "route": "POST /api/bots",
+      "path": "/api/bots",
+      "status": 201,
+      "body": {
+        "id": "bot_wk1mrnyfwl4x",
+        "workspace_id": "local",
+        "name": "Snapshot Bot",
+        "enabled": false,
+        "revision": 1,
+        "platform_bindings": [
+          {
+            "id": "bp_va5q49t622xv",
+            "platform": "feishu",
+            "app_id": "cli_snapshot_new_bot",
+            "domain": "feishu",
+            "host_runtime_id": "rt_snapshot",
+            "enabled": true,
+            "app_secret_configured": true,
+            "app_secret_hint": "snap••••••",
+            "status": "stopped",
+            "last_error": null,
+            "last_seen_at": null
+          }
+        ],
+        "default_target": {
+          "kind": "agent",
+          "agent_id": "agt_snapshot",
+          "runtime_id": null,
+          "project_id": null,
+          "runtime_workspace_id": null
+        },
+        "routes": [],
+        "allowlist_enabled": false,
+        "issue_notifications": null,
+        "created_at": "<timestamp>",
+        "updated_at": "<timestamp>"
+      }
+    },
+    {
+      "key": "bots#001 GET /api/bots/:id",
+      "route": "GET /api/bots/:id",
+      "path": "/api/bots/bot_wk1mrnyfwl4x",
+      "status": 200,
+      "body": {
+        "id": "bot_wk1mrnyfwl4x",
+        "workspace_id": "local",
+        "name": "Snapshot Bot",
+        "enabled": false,
+        "revision": 1,
+        "platform_bindings": [
+          {
+            "id": "bp_va5q49t622xv",
+            "platform": "feishu",
+            "app_id": "cli_snapshot_new_bot",
+            "domain": "feishu",
+            "host_runtime_id": "rt_snapshot",
+            "enabled": true,
+            "app_secret_configured": true,
+            "app_secret_hint": "snap••••••",
+            "status": "stopped",
+            "last_error": null,
+            "last_seen_at": null
+          }
+        ],
+        "default_target": {
+          "kind": "agent",
+          "agent_id": "agt_snapshot",
+          "runtime_id": null,
+          "project_id": null,
+          "runtime_workspace_id": null
+        },
+        "routes": [],
+        "allowlist_enabled": false,
+        "issue_notifications": null,
+        "created_at": "<timestamp>",
+        "updated_at": "<timestamp>"
+      }
+    },
+    {
+      "key": "bots#002 PUT /api/bots/:id",
+      "route": "PUT /api/bots/:id",
+      "path": "/api/bots/bot_wk1mrnyfwl4x",
+      "status": 200,
+      "body": {
+        "id": "bot_wk1mrnyfwl4x",
+        "workspace_id": "local",
+        "name": "Updated Snapshot Bot",
+        "enabled": false,
+        "revision": 2,
+        "platform_bindings": [
+          {
+            "id": "bp_va5q49t622xv",
+            "platform": "feishu",
+            "app_id": "cli_snapshot_new_bot",
+            "domain": "feishu",
+            "host_runtime_id": "rt_snapshot",
+            "enabled": true,
+            "app_secret_configured": true,
+            "app_secret_hint": "snap••••••",
+            "status": "stopped",
+            "last_error": null,
+            "last_seen_at": null
+          }
+        ],
+        "default_target": {
+          "kind": "agent",
+          "agent_id": "agt_snapshot",
+          "runtime_id": null,
+          "project_id": null,
+          "runtime_workspace_id": null
+        },
+        "routes": [],
+        "allowlist_enabled": false,
+        "issue_notifications": null,
+        "created_at": "<timestamp>",
+        "updated_at": "<timestamp>"
+      }
+    },
+    {
+      "key": "bots#003 GET /api/bots/:id/senders",
+      "route": "GET /api/bots/:id/senders",
+      "path": "/api/bots/bot_wk1mrnyfwl4x/senders",
+      "status": 200,
+      "body": {
+        "senders": []
+      }
+    },
+    {
+      "key": "bots#004 GET /api/bots/:id/sessions",
+      "route": "GET /api/bots/:id/sessions",
+      "path": "/api/bots/bot_wk1mrnyfwl4x/sessions",
+      "status": 200,
+      "body": {
+        "sessions": []
+      }
+    },
+    {
+      "key": "bots#005 PUT /api/bots/:id/senders/:senderId",
+      "route": "PUT /api/bots/:id/senders/:senderId",
+      "path": "/api/bots/bot_wk1mrnyfwl4x/senders/bse_snapshot",
+      "status": 404,
+      "body": {
+        "error": "Sender not found",
+        "code": "invalid_bot"
+      }
+    },
+    {
+      "key": "bots#006 DELETE /api/bots/:id",
+      "route": "DELETE /api/bots/:id",
+      "path": "/api/bots/bot_wk1mrnyfwl4x",
+      "status": 200,
+      "body": {
+        "deleted": true
+      }
+    },
+    {
       "key": "chat#000 POST /api/chat/sessions",
       "route": "POST /api/chat/sessions",
       "path": "/api/chat/sessions",
@@ -4319,6 +4506,7 @@
             ],
             "max_concurrent_tasks": 6
           },
+          "chat_message_attachments": [],
           "session_projection": {
             "session_id": "cht_snapshot",
             "target_agent_id": "agt_snapshot",
@@ -7362,6 +7550,45 @@
       }
     },
     {
+      "key": "get-sweep GET /api/bots",
+      "route": "GET /api/bots",
+      "path": "/api/bots?workspace_id=local",
+      "status": 200,
+      "body": {
+        "bots": []
+      }
+    },
+    {
+      "key": "get-sweep GET /api/bots/:id",
+      "route": "GET /api/bots/:id",
+      "path": "/api/bots/bot_snapshot",
+      "status": 404,
+      "body": {
+        "error": "bot not found",
+        "code": "bot_not_found"
+      }
+    },
+    {
+      "key": "get-sweep GET /api/bots/:id/senders",
+      "route": "GET /api/bots/:id/senders",
+      "path": "/api/bots/bot_snapshot/senders",
+      "status": 404,
+      "body": {
+        "error": "bot not found",
+        "code": "bot_not_found"
+      }
+    },
+    {
+      "key": "get-sweep GET /api/bots/:id/sessions",
+      "route": "GET /api/bots/:id/sessions",
+      "path": "/api/bots/bot_snapshot/sessions",
+      "status": 404,
+      "body": {
+        "error": "bot not found",
+        "code": "bot_not_found"
+      }
+    },
+    {
       "key": "get-sweep GET /api/chat/pending-tasks",
       "route": "GET /api/chat/pending-tasks",
       "path": "/api/chat/pending-tasks",
@@ -8055,6 +8282,105 @@
             "id": "billing.transaction.list",
             "command": "remi billing transaction list",
             "capability": "billing.transaction.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "bot.create",
+            "command": "remi bot create",
+            "capability": "bot.create",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "bot.delete",
+            "command": "remi bot delete",
+            "capability": "bot.delete",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "bot.get",
+            "command": "remi bot get",
+            "capability": "bot.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "bot.list",
+            "command": "remi bot list",
+            "capability": "bot.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "bot.sender.allow",
+            "command": "remi bot sender allow",
+            "capability": "bot.sender.allow",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "bot.sender.list",
+            "command": "remi bot sender list",
+            "capability": "bot.sender.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "bot.sender.revoke",
+            "command": "remi bot sender revoke",
+            "capability": "bot.sender.revoke",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "bot.session.list",
+            "command": "remi bot session list",
+            "capability": "bot.session.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "bot.update",
+            "command": "remi bot update",
+            "capability": "bot.update",
             "outputs": [
               "table",
               "json",
@@ -13418,6 +13744,26 @@
       }
     },
     {
+      "key": "get-sweep GET /api/daemon/runtimes/:runtimeId/bots",
+      "route": "GET /api/daemon/runtimes/:runtimeId/bots",
+      "path": "/api/daemon/runtimes/rt_snapshot/bots",
+      "status": 403,
+      "body": {
+        "error": "daemon token required",
+        "code": "daemon_token_required"
+      }
+    },
+    {
+      "key": "get-sweep GET /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId",
+      "route": "GET /api/daemon/runtimes/:runtimeId/bots/:botId/platforms/:bindingId",
+      "path": "/api/daemon/runtimes/rt_snapshot/bots/bot_snapshot/platforms/bpl_snapshot",
+      "status": 403,
+      "body": {
+        "error": "daemon token required",
+        "code": "daemon_token_required"
+      }
+    },
+    {
       "key": "get-sweep GET /api/daemon/runtimes/:runtimeId/feishu-bot",
       "route": "GET /api/daemon/runtimes/:runtimeId/feishu-bot",
       "path": "/api/daemon/runtimes/rt_snapshot/feishu-bot",
@@ -13643,7 +13989,8 @@
           }
         ],
         "started_at": "<timestamp>",
-        "completed_at": "<timestamp>"
+        "completed_at": "<timestamp>",
+        "replacement_task_id": null
       }
     },
     {

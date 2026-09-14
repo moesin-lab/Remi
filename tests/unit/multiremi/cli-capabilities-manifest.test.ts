@@ -108,6 +108,23 @@ describe("CLI capabilities manifest", () => {
     expect(inventory.get("feishu.chat.list")?.path).toEqual(["feishu", "chat", "list"]);
   });
 
+  it("exposes Bot as an aggregate domain while retaining the legacy workspace integration", () => {
+    expect(manifest.domains).toContain("bot");
+    expect(manifest.routes["POST /api/bots"]).toEqual({ command: "bot.create" });
+    expect(manifest.routes["PUT /api/bots/:id"]).toEqual({ command: "bot.update" });
+    expect(manifest.routes["GET /api/bots/:id/sessions"]).toEqual({ command: "bot.session.list" });
+    expect(manifest.routes["PUT /api/bots/:id/senders/:senderId"]).toEqual({ command: "bot.sender.allow" });
+    expect(manifest.commands["workspace.feishu-bot.set"]?.command).toBe("remi workspace feishu-bot set");
+    for (const id of ["bot.list", "bot.get", "bot.sender.list", "bot.session.list"]) {
+      expect(manifest.commands[id]?.auth, id).toEqual(["human", "task"]);
+    }
+    for (const id of ["bot.create", "bot.update", "bot.delete", "bot.sender.allow", "bot.sender.revoke"]) {
+      expect(manifest.commands[id]?.auth, id).toEqual(["human"]);
+    }
+    expect(migrationDoc).toContain("remi bot");
+
+  });
+
   it("generates discoverable help for every visible Registry command and its direct children", () => {
     const inventory = cliCommandInventory();
     for (const entry of inventory.filter((candidate) => !candidate.hidden)) {
@@ -151,10 +168,11 @@ describe("CLI capabilities manifest", () => {
 
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
     expect(cliCoverageReport(manifest)).toEqual({
-      mapped: 655,
-      exempt: 90,
+      mapped: 663,
+      exempt: 101,
       missing: 0,
-      total: 745,
+      total: 764,
+
     });
     expect(manifest.max_planned_routes).toBe(0);
     expect(cliCoverageReport(manifest).missing).toBeLessThanOrEqual(manifest.max_planned_routes);

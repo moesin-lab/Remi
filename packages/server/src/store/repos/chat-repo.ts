@@ -191,7 +191,10 @@ export class ChatRepo {
       params.push(workspaceId);
     }
     if (options.creatorId) {
-      clauses.push("creator_id = ?");
+      clauses.push(`(creator_id = ? OR EXISTS (
+        SELECT 1 FROM multiremi_bot_sessions bot_session
+        WHERE bot_session.chat_session_id = chat.id
+      ))`);
       params.push(options.creatorId);
     }
     if (!options.includeArchived) {

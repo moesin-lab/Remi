@@ -29,6 +29,14 @@ import { parseBooleanQuery, parseIntegerQuery } from "./request.js";
 export const SUBSCRIPTION_REASONS: MultiremiSubscriptionReason[] = ["created", "assigned", "commented", "mentioned", "manual"];
 
 export const ISSUE_CREATION_REQUIRES_PROPOSAL_CODE = "issue_creation_requires_proposal";
+export const BOT_SENDER_APPROVAL_REQUIRED_CODE = "bot_sender_approval_required";
+
+/** Sender approval is evaluated on each request, so allowing an account also
+ * releases existing Chats and their descendants without rewriting task policy. */
+export function currentTaskBotSenderApprovalRequired(c: Context, store: MultiremiStore): boolean {
+  const taskId = currentTaskAccessToken(c)?.taskId;
+  return taskId ? store.isBotTaskIssueCreationRestricted(taskId) : false;
+}
 
 export function restrictedTaskIssueCreationAgent(c: Context, store: MultiremiStore): MultiremiAgent | null {
   const token = currentTaskAccessToken(c);
@@ -55,7 +63,13 @@ export function currentTaskParentId(c: Context): string | null {
 }
 
 export function denyRestrictedTaskIssueCreation(c: Context, store: MultiremiStore): Response | null {
-  if (!restrictedTaskIssueCreationAgent(c, store)) return null;
+  if (!currentTaskIssueCreationRestricted(c, store)) {
+    if (!currentTaskBotSenderApprovalRequired(c, store)) return null;
+    return c.json({
+      error: "A platform account in this conversation needs approval. Allow it in this Bot's account list, then retry creating the Issue in this Chat.",
+      code: BOT_SENDER_APPROVAL_REQUIRED_CODE,
+    }, 403);
+  }
   return c.json({
     error: "This agent must use `remi feishu messages propose-issue`; a human must approve before an Issue is created.",
     code: ISSUE_CREATION_REQUIRES_PROPOSAL_CODE,

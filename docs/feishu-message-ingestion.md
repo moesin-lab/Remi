@@ -6,7 +6,7 @@ summary: 当前机器人 Chat/Issue 话题与轮次推送，以及独立的 Mess
 
 # Feishu 消息接入
 
-本页分别说明机器人对话和 [Messaging Core](../packages/server/src/messaging/index.ts)的 Lark CLI 采集。机器人连接器在[packages/connectors/src/feishu](../packages/connectors/src/feishu)，由[工作区 bot 配置与 Runtime 分配](deploy/66-8-remi-environment.md)驱动；两者的凭据、消息处理和验证不能混用。
+本页说明旧工作区飞书机器人的对话、Issue 话题，以及独立 [Messaging Core](../packages/server/src/messaging/index.ts) 的 Lark CLI 采集。新机器人使用独立的 [Bot 配置与路由](dev/bots.md)，支持一个 Bot 的多账号和不同 Agent 承载，并与旧体系并行。两套机器人复用 [Feishu connector](../packages/connectors/src/feishu)，旧体系仍由[工作区 bot 配置与 Runtime 分配](deploy/66-8-remi-environment.md)驱动；机器人和采集的凭据、消息记录、处理与验证不能混用。
 
 ## 机器人对话、Issue 话题与更新
 

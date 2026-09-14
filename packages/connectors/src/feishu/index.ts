@@ -24,7 +24,7 @@ import {
 } from "./sdk.js";
 import { createFeishuClient } from "./sdk.js";
 import { createAdapter } from "./sdk.js";
-import { sendMessageFeishu } from "./send.js";
+import { sendMessageFeishu, updateCardFeishu } from "./send.js";
 import type { HandleTaskStreamOpts } from "./channel.js";
 import { uploadImageFeishu } from "./media.js";
 import { createFeishuImageResolver } from "./outbound-images.js";
@@ -32,7 +32,7 @@ import { rewriteMarkdownImages } from "@shared/feishu-markdown-images.js";
 import { readContextUsage } from "@shared/agent-execution.js";
 import { formatCardStats } from "./card-metadata.js";
 import { resolveProactiveMention } from "./proactive-mention.js";
-import type { FeishuBotOutboundMention } from "@multiremi/contracts/types.js";
+import type { FeishuBotOutboundBodyOrigin, FeishuBotOutboundMention } from "@multiremi/contracts/types.js";
 
 const log = createLogger("feishu");
 
@@ -65,6 +65,7 @@ export class FeishuConnector implements Connector {
   private _handler: MessageHandler | null = null;
   private _streamHandler: StreamingHandler | null = null;
   private _taskStreamHandler: TaskStreamingHandler | null = null;
+  private _controlPlaneRouting = false;
 
   constructor(
     config: FeishuConfig & { domain?: string; connectionMode?: string },
@@ -110,16 +111,17 @@ export class FeishuConnector implements Connector {
   }
 
   /** Start in Multiremi Task mode; no Remi/Provider callback is installed. */
-  async startTask(handler: TaskStreamingHandler): Promise<void> {
+  async startTask(handler: TaskStreamingHandler, options?: { controlPlaneRouting?: boolean; eventScope?: string }): Promise<void> {
     if (!this._config.appId || !this._config.appSecret) {
       throw new Error("Feishu connector: appId and appSecret are required");
     }
     this._taskStreamHandler = handler;
+    this._controlPlaneRouting = options?.controlPlaneRouting ?? false;
     log.info("starting connector in task mode...");
     this._channel.on("message", async (msg) => {
       await this._handleFeishuMessage(msg);
     });
-    return this._channel.connect();
+    return this._channel.connect({ eventScope: options?.eventScope });
   }
 
   waitUntilReady(): Promise<void> {
@@ -139,13 +141,20 @@ export class FeishuConnector implements Connector {
     replyToMessageId?: string;
     body: string;
     idempotencyKey: string;
+    updateMessageId?: string;
+    bodyOrigin?: FeishuBotOutboundBodyOrigin;
   }): Promise<{ messageId: string }> {
     const client = createFeishuClient({
       appId: this._config.appId,
       appSecret: this._config.appSecret,
       domain: this._config.domain,
     });
-    const body = await this._rewriteImages(client, input.body);
+    // Bot execution can happen on another Runtime; its paths never name host files.
+    const body = await this._rewriteImages(client, input.body, !this._controlPlaneRouting && input.bodyOrigin !== "issue");
+    if (input.updateMessageId) {
+      await updateCardFeishu(client, input.updateMessageId, buildFinalCard({ text: body }));
+      return { messageId: input.updateMessageId };
+    }
     const result = await sendMessageFeishu(client, input.chatId, body, {
       replyToMessageId: input.replyToMessageId,
       idempotencyKey: input.idempotencyKey,
@@ -198,7 +207,7 @@ export class FeishuConnector implements Connector {
     if (!this._handler && !this._taskStreamHandler) return;
 
     // /esc: abort active session
-    if (/^\/esc$/i.test(msg.rawContent.trim())) {
+    if (!this._controlPlaneRouting && /^\/esc$/i.test(msg.rawContent.trim())) {
       const sessionKey = this._resolveSessionKey(msg);
       await this._channel.abortSession(sessionKey, msg.chatId);
       return;
@@ -215,7 +224,9 @@ export class FeishuConnector implements Connector {
     }));
 
     let text = msg.text;
-    for (const m of media) {
+    // Bot execution may run on another Runtime. Preserve the original text and
+    // bytes for server-backed attachments instead of publishing host-local paths.
+    for (const m of this._controlPlaneRouting ? [] : media) {
       if (m.mediaType === "image") {
         const feishuMedia = msg.media.find((fm) => fm.buffer === m.buffer);
         const imageKey = feishuMedia?.imageKey;
@@ -249,6 +260,7 @@ export class FeishuConnector implements Connector {
         mediaCount: msg.media.length,
         quotedContent: msg.quotedContent,
         rootId: msg.rootId,
+        parentId: msg.parentId,
         rawContent: msg.rawContent,
       },
     };
@@ -336,18 +348,22 @@ export class FeishuConnector implements Connector {
   ): Promise<void> {
     const slog = _log ?? log;
     await this._taskStreamHandler!(incoming, sessionKey, async (stream, meta) => {
-      await this._channel.handleTaskStream(chatId, sessionKey, stream, meta, {
-        replyToMessageId,
-        mentionOpenId: this._replyMentionOpenId(incoming),
-        interactionOpenId: typeof incoming.metadata?.senderOpenId === "string" ? incoming.metadata.senderOpenId : undefined,
-        displayName: meta.displayName,
-        log: {
-          info: (message) => slog.info(message),
-          warn: (message) => slog.warn(message),
-          error: (message) => slog.error(message),
-          debug: (message) => slog.debug(message),
-        },
-      });
+      try {
+        await this._channel.handleTaskStream(chatId, sessionKey, stream, meta, {
+          replyToMessageId,
+          mentionOpenId: this._replyMentionOpenId(incoming),
+          interactionOpenId: typeof incoming.metadata?.senderOpenId === "string" ? incoming.metadata.senderOpenId : undefined,
+          displayName: meta.displayName,
+          log: {
+            info: (message) => slog.info(message),
+            warn: (message) => slog.warn(message),
+            error: (message) => slog.error(message),
+            debug: (message) => slog.debug(message),
+          },
+        });
+      } catch (error) {
+        if (!meta.signal?.aborted) throw error;
+      }
     });
   }
 
@@ -380,8 +396,9 @@ export class FeishuConnector implements Connector {
     return msg.chatId;
   }
 
-  private async _rewriteImages(client: ReturnType<typeof createFeishuClient>, text: string): Promise<string> {
+  private async _rewriteImages(client: ReturnType<typeof createFeishuClient>, text: string, allowLocalImages = true): Promise<string> {
     const resolveImage = createFeishuImageResolver({
+      allow: { local: allowLocalImages },
       uploadImage: async (image) => (await uploadImageFeishu(client, image.buffer)).imageKey,
     });
     return rewriteMarkdownImages(text, resolveImage);

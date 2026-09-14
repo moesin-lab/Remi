@@ -165,6 +165,7 @@ describe("operations CLI contracts", () => {
     for (const id of [
       "runtime.list",
       "runtime.update",
+      "runtime.command.run",
       "autopilot.list",
       "autopilot.update",
       "platform.feedback.create",
@@ -180,7 +181,6 @@ describe("operations CLI contracts", () => {
       "runtime.delete",
       "runtime.archive-agents-and-delete",
       "runtime.release.start",
-      "runtime.command.run",
       "runtime.cloud.status",
       "billing.balance",
       "platform.settings.update",

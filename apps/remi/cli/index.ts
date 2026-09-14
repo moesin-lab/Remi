@@ -8,6 +8,7 @@
 import { VERSION } from "@shared/version.js";
 import { CommandRegistry, type CommandInventoryEntry, type CommandSource } from "./core/command-registry.js";
 import { agentExtensionCommandSpecs } from "./commands/agent-extensions.js";
+import { botCommandSpecs } from "./commands/bots.js";
 import { contextCommandSpec } from "./commands/context.js";
 import { collaborationCommandSpecs } from "./commands/collaboration.js";
 import { inviteCommandSpecs } from "./commands/invite.js";
@@ -23,6 +24,7 @@ const commandRegistry = new CommandRegistry();
 commandRegistry.register(contextCommandSpec());
 for (const spec of [
   ...workspaceCommandSpecs(),
+  ...botCommandSpecs(),
   ...memberCommandSpecs(),
   ...inviteCommandSpecs(),
   ...tokenCommandSpecs(),

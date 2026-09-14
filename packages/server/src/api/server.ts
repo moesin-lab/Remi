@@ -27,6 +27,8 @@ import { registerScmRoutes } from "./routers/scm.js";
 import { registerFeishuCompatRoutes } from "./routers/feishu-compat.js";
 import { registerMessagingRoutes } from "./routers/messaging.js";
 import { registerFeishuBotRoutes } from "./routers/feishu-bot.js";
+import { registerBotRoutes } from "./routers/bots.js";
+import { denyDaemonTaskConversationAccess, isDaemonTaskConversationRequest } from "./helpers/daemon-task-conversations.js";
 import {
   FeishuBotRegistrationService,
   type FeishuBotRegistrationOptions,
@@ -473,9 +475,11 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
     await next();
   });
   app.use("/api/daemon/tasks/:taskId/*", async (c, next) => {
-    const denied = denyDaemonTokenTaskRuntimeIdentity(c, store, c.req.param("taskId"), {
-      hideForbiddenAsNotFound: isDaemonGcCheckRequest(c),
-    });
+    const denied = isDaemonTaskConversationRequest(c)
+      ? denyDaemonTaskConversationAccess(c, store, c.req.param("taskId"))
+      : denyDaemonTokenTaskRuntimeIdentity(c, store, c.req.param("taskId"), {
+        hideForbiddenAsNotFound: isDaemonGcCheckRequest(c),
+      });
     if (denied) return denied;
     await next();
   });
@@ -534,6 +538,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   registerMessagingRoutes(app, deps);
   registerFeishuCompatRoutes(app, deps);
   registerFeishuBotRoutes(app, deps, new FeishuBotRegistrationService(options.feishuBotRegistrations));
+  registerBotRoutes(app, deps);
   registerMemberRoutes(app, deps);
   registerInvitationRoutes(app, deps);
   app.post("/api/lark/binding/redeem", async (c) => {

@@ -1,8 +1,20 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
+import { CliApiClient } from "../../../apps/remi/cli/core/api-client.js";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
-afterEach(resetMultiremiTestEnv);
+let previousEncryptionKey: string | undefined;
+
+beforeEach(() => {
+  previousEncryptionKey = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
+  process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
+});
+
+afterEach(() => {
+  if (previousEncryptionKey === undefined) delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
+  else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousEncryptionKey;
+  resetMultiremiTestEnv();
+});
 
 describe("Multiremi API - runtime commands", () => {
   it("restricts execution to workspace managers and keeps its audit response redacted", async () => {
@@ -21,7 +33,7 @@ describe("Multiremi API - runtime commands", () => {
       workspaceId: "local",
       prompt: "Attempt a runtime command",
     });
-    const taskToken = await store.createTaskAccessToken(task, "local");
+    const taskToken = await store.createTaskAccessToken(task, "command-member");
     const daemonToken = await store.createAccessToken({
       name: "Command Daemon",
       type: "daemon",
@@ -57,6 +69,7 @@ describe("Multiremi API - runtime commands", () => {
       body: JSON.stringify({ command }),
     });
     expect(taskDenied.status).toBe(403);
+    expect(await taskDenied.json()).toEqual({ error: "insufficient permissions" });
 
     const spoofedProvision = await app.request(`/api/runtimes/${runtime.id}/commands`, {
       method: "POST",
@@ -115,6 +128,66 @@ describe("Multiremi API - runtime commands", () => {
     const resultBody = await result.json();
     expect(resultBody).toMatchObject({ status: "completed", exit_code: 9, stdout: "result [REDACTED]", duration_ms: 14 });
     expect(JSON.stringify(resultBody)).not.toContain(tokenLikeValue);
+  });
+
+  it.each(["web", "feishu"] as const)("lets %s Chat task credentials execute and read commands on another runtime in their workspace", async (origin) => {
+    const { app, task, token, sourceRuntime, targetRuntime, targetDaemonToken } = await chatCommandFixture(origin);
+    expect(task.runtimeId).toBe(sourceRuntime.id);
+    expect(task.issueCreationRestricted).toBe(origin === "feishu");
+    const taskHeaders = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+    const created = await app.request(`/api/runtimes/${targetRuntime.id}/commands`, {
+      method: "POST",
+      headers: taskHeaders,
+      body: JSON.stringify({ command: "echo runtime-result", timeout_ms: 2_000 }),
+    });
+    expect(created.status).toBe(202);
+    const command = await created.json();
+    expect(command).toMatchObject({ runtime_id: targetRuntime.id, created_by: "local", status: "pending" });
+
+    const claimed = await app.request(`/api/daemon/runtimes/${targetRuntime.id}/commands/claim`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${targetDaemonToken}` },
+    });
+    expect(claimed.status).toBe(200);
+    expect((await claimed.json()).request).toMatchObject({ id: command.id, command: "echo runtime-result" });
+    const reported = await app.request(`/api/daemon/runtimes/${targetRuntime.id}/commands/${command.id}/result`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${targetDaemonToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "completed", exit_code: 0, stdout: "runtime-result", stderr: "", duration_ms: 12 }),
+    });
+    expect(reported.status).toBe(200);
+    const result = await app.request(`/api/runtimes/${targetRuntime.id}/commands/${command.id}`, { headers: taskHeaders });
+    expect(result.status).toBe(200);
+    expect(await result.json()).toMatchObject({ id: command.id, status: "completed", exit_code: 0, stdout: "runtime-result" });
+  });
+
+  it.each(["web", "feishu"] as const)("advertises runtime command capability to a %s Chat task credential", async (origin) => {
+    const { app, token } = await chatCommandFixture(origin);
+    const client = new CliApiClient({
+      serverUrl: "http://remi.test",
+      workspaceId: "local",
+      token,
+      fetch: (input, init) => Promise.resolve(app.request(new Request(input, init))),
+    });
+    expect(await client.requireCapability("runtime.command.run")).toMatchObject({ identity: "task" });
+  });
+
+  it("keeps command workspace boundaries and request/runtime pairing for task credentials", async () => {
+    const { app, store, token, sourceRuntime, targetRuntime } = await chatCommandFixture("web");
+    const remoteWorkspace = store.createWorkspace({ id: "ws_command_remote", name: "Other space", slug: "command-remote" }, "local");
+    const remoteRuntime = store.registerRuntime({ id: "rt_command_remote", name: "Other runtime", provider: "codex", workspaceId: remoteWorkspace.id });
+    const ownCommand = store.createRuntimeCommandRequest(targetRuntime.id, { command: "echo own" });
+    const remoteCommand = store.createRuntimeCommandRequest(remoteRuntime.id, { command: "echo remote" });
+    const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-Workspace-ID": remoteWorkspace.id };
+    const remoteCreate = await app.request(`/api/runtimes/${remoteRuntime.id}/commands`, {
+      method: "POST", headers, body: JSON.stringify({ command: "echo inaccessible" }),
+    });
+    expect(remoteCreate.status).toBe(404);
+    const remoteRead = await app.request(`/api/runtimes/${remoteRuntime.id}/commands/${remoteCommand.id}`, { headers });
+    expect(remoteRead.status).toBe(404);
+    const wrongRuntime = await app.request(`/api/runtimes/${sourceRuntime.id}/commands/${ownCommand.id}`, { headers });
+    expect(wrongRuntime.status).toBe(404);
+    expect(await wrongRuntime.json()).toEqual({ error: "request not found" });
   });
 
   it("restricts workspace Runtime provision CRUD to managers and denies task tokens", async () => {
@@ -189,3 +262,34 @@ describe("Multiremi API - runtime commands", () => {
     expect(audit.snapshot).not.toContain("placeholder-value");
   });
 });
+
+async function chatCommandFixture(origin: "web" | "feishu") {
+  const store = createStore();
+  store.ensureLocalWorkspace();
+  const sourceRuntime = store.registerRuntime({
+    id: "rt_command_chat", name: "Chat runtime", provider: "codex", workspaceId: "local", daemonId: "command-chat-daemon",
+  });
+  const targetRuntime = store.registerRuntime({
+    id: "rt_command_target", name: "Windows runtime", provider: "codex", workspaceId: "local", daemonId: "command-target-daemon",
+  });
+  const agent = store.createAgent({ name: "Command Chat", provider: "codex", workspaceId: "local", runtimeId: sourceRuntime.id });
+  const task = origin === "web"
+    ? store.sendChatMessage(store.createChatSession({ agentId: agent.id, workspaceId: "local" }).id, { body: "Inspect another runtime" }).task
+    : (() => {
+      const config = store.upsertFeishuBotConfig("local", {
+        agentId: agent.id, runtimeId: sourceRuntime.id, appId: "cli_command_fixture", appSecretOp: "set",
+        appSecret: "runtime-command-test-secret", domain: "feishu", enabled: true,
+      });
+      const inbound = store.submitFeishuBotMessage("local", sourceRuntime.id, {
+        revision: config.revision, externalSessionKey: "oc_command", externalMessageId: "om_command",
+        chatId: "oc_command", senderOpenId: "ou_external_command", text: "Inspect another runtime",
+      });
+      return store.getTask(inbound.taskId)!;
+    })();
+  const token = await store.createTaskAccessToken(task, "local");
+  const targetDaemonToken = await store.createAccessToken({
+    name: "Command target daemon", type: "daemon", workspaceId: "local", daemonId: "command-target-daemon",
+  });
+  const app = createMultiremiApp({ store, authToken: "root-command-secret" });
+  return { app, store, task, token: token.token, sourceRuntime, targetRuntime, targetDaemonToken: targetDaemonToken.token };
+}

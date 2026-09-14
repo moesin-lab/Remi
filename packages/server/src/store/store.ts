@@ -1,3 +1,5 @@
+import { BotsRepo } from "@multiremi/store/repos/bots-repo.js";
+import { BotIssueUpdates } from "@multiremi/bots/issue-updates.js";
 import { type SqlDatabase, openMultiremiDatabase } from "@multiremi/store/db/postgres.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { daemonRuntimeId, isTerminalStatus } from "@multiremi/store/helpers.js";
@@ -449,6 +451,8 @@ export class MultiremiStore {
   private scm: ScmRepo;
   private feishuIngest: FeishuIngestRepo;
   private feishuBot: FeishuBotRepo;
+  private botsRepo: BotsRepo;
+  private botIssueUpdates: BotIssueUpdates;
   /**
    * The Messaging Core's persistence, exposed whole rather than through
    * per-method delegates.
@@ -522,6 +526,8 @@ export class MultiremiStore {
     this.scm = new ScmRepo(this.ctx);
     this.feishuIngest = new FeishuIngestRepo(this.ctx);
     this.feishuBot = new FeishuBotRepo(this.ctx);
+    this.botsRepo = new BotsRepo(this.ctx);
+    this.botIssueUpdates = new BotIssueUpdates(this.ctx);
     this.messaging = new MessagingRepo(this.ctx);
     this.messagingOutcomes = new MessagingOutcomeService(this.ctx, this.messaging);
     this.usage = new UsageRepo(this.ctx);
@@ -1736,6 +1742,35 @@ runMigrations(this.db);
   deleteExpiredFeishuMessages(now?: Date): number {
     return this.feishuIngest.deleteExpiredMessages(now);
   }
+
+
+  // Bot is independent of the legacy workspace connector.
+  listBots(...args: Parameters<BotsRepo["list"]>): ReturnType<BotsRepo["list"]> { return this.botsRepo.list(...args); }
+  getBot(...args: Parameters<BotsRepo["get"]>): ReturnType<BotsRepo["get"]> { return this.botsRepo.get(...args); }
+  createBot(...args: Parameters<BotsRepo["create"]>): ReturnType<BotsRepo["create"]> { return this.botsRepo.create(...args); }
+  updateBot(...args: Parameters<BotsRepo["update"]>): ReturnType<BotsRepo["update"]> { return this.botsRepo.update(...args); }
+  deleteBot(...args: Parameters<BotsRepo["delete"]>): ReturnType<BotsRepo["delete"]> { return this.botsRepo.delete(...args); }
+  listBotSenders(...args: Parameters<BotsRepo["listSenders"]>): ReturnType<BotsRepo["listSenders"]> { return this.botsRepo.listSenders(...args); }
+  setBotSenderAllowed(...args: Parameters<BotsRepo["setSenderAllowed"]>): ReturnType<BotsRepo["setSenderAllowed"]> { return this.botsRepo.setSenderAllowed(...args); }
+  listBotSessions(...args: Parameters<BotsRepo["listSessions"]>): ReturnType<BotsRepo["listSessions"]> { return this.botsRepo.listSessions(...args); }
+  isBotChatSession(chatSessionId: string): boolean { return this.botsRepo.isChatSession(chatSessionId); }
+  botDirectivesForRuntime(...args: Parameters<BotsRepo["directivesForRuntime"]>): ReturnType<BotsRepo["directivesForRuntime"]> { return this.botsRepo.directivesForRuntime(...args); }
+  getBotDaemonAssignment(...args: Parameters<BotsRepo["getDaemonAssignment"]>): ReturnType<BotsRepo["getDaemonAssignment"]> { return this.botsRepo.getDaemonAssignment(...args); }
+  reportBotRuntimeStatus(...args: Parameters<BotsRepo["reportRuntimeStatus"]>): ReturnType<BotsRepo["reportRuntimeStatus"]> { return this.botsRepo.reportRuntimeStatus(...args); }
+  submitBotMessage(...args: Parameters<BotsRepo["submitMessage"]>): ReturnType<BotsRepo["submitMessage"]> { return this.botsRepo.submitMessage(...args); }
+  resetBotSession(...args: Parameters<BotsRepo["resetSession"]>): ReturnType<BotsRepo["resetSession"]> { return this.botsRepo.resetSession(...args); }
+  cancelBotSessionTask(...args: Parameters<BotsRepo["cancelSessionTask"]>): ReturnType<BotsRepo["cancelSessionTask"]> { return this.botsRepo.cancelSessionTask(...args); }
+  inspectBotSession(...args: Parameters<BotsRepo["inspectSession"]>): ReturnType<BotsRepo["inspectSession"]> { return this.botsRepo.inspectSession(...args); }
+  claimBotOutbound(...args: Parameters<BotsRepo["claimOutbound"]>): ReturnType<BotsRepo["claimOutbound"]> { return this.botsRepo.claimOutbound(...args); }
+  reportBotOutbound(...args: Parameters<BotsRepo["reportOutbound"]>): ReturnType<BotsRepo["reportOutbound"]> { return this.botsRepo.reportOutbound(...args); }
+  recordBotReply(...args: Parameters<BotsRepo["recordReply"]>): ReturnType<BotsRepo["recordReply"]> { return this.botsRepo.recordReply(...args); }
+  getBotTaskReplacement(taskId: string): string | null { return this.botsRepo.getTaskReplacement(taskId); }
+  isBotHostForTask(...args: Parameters<BotsRepo["isHostForTask"]>): ReturnType<BotsRepo["isHostForTask"]> { return this.botsRepo.isHostForTask(...args); }
+  isBotTaskIssueCreationRestricted(...args: Parameters<BotsRepo["isTaskIssueCreationRestricted"]>): ReturnType<BotsRepo["isTaskIssueCreationRestricted"]> { return this.botsRepo.isTaskIssueCreationRestricted(...args); }
+  retargetBotTaskWithinTransaction(from: string, to: string): void { this.botsRepo.retargetTaskWithinTransaction(from, to); this.botIssueUpdates.retargetTaskWithinTransaction(from, to); }
+  prepareBotIssueTopicWithinTransaction(...args: Parameters<BotIssueUpdates["prepareIssueTopicWithinTransaction"]>): ReturnType<BotIssueUpdates["prepareIssueTopicWithinTransaction"]> { return this.botIssueUpdates.prepareIssueTopicWithinTransaction(...args); }
+  prepareBotIssueRoundPushesWithinTransaction(...args: Parameters<BotIssueUpdates["prepareIssueRoundPushesWithinTransaction"]>): ReturnType<BotIssueUpdates["prepareIssueRoundPushesWithinTransaction"]> { return this.botIssueUpdates.prepareIssueRoundPushesWithinTransaction(...args); }
+  completeBotTaskWithinTransaction(...args: Parameters<BotIssueUpdates["completeTaskWithinTransaction"]>): ReturnType<BotIssueUpdates["completeTaskWithinTransaction"]> { return this.botIssueUpdates.completeTaskWithinTransaction(...args); }
 
   // ── Workspace Feishu concierge bot (MUL-206) ──────────────────────────────
   // Secrets stay inside the repo: only `getFeishuBotDaemonConfig` and

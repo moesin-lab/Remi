@@ -605,6 +605,118 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "bot.list": {
+      "command": "remi bot list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "bot.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "bot.get": {
+      "command": "remi bot get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "bot.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "bot.create": {
+      "command": "remi bot create",
+      "auth": [
+        "human"
+      ],
+      "capability": "bot.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "bot.update": {
+      "command": "remi bot update",
+      "auth": [
+        "human"
+      ],
+      "capability": "bot.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "bot.delete": {
+      "command": "remi bot delete",
+      "auth": [
+        "human"
+      ],
+      "capability": "bot.delete",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "bot.sender.list": {
+      "command": "remi bot sender list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "bot.sender.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "bot.sender.allow": {
+      "command": "remi bot sender allow",
+      "auth": [
+        "human"
+      ],
+      "capability": "bot.sender.allow",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "bot.sender.revoke": {
+      "command": "remi bot sender revoke",
+      "auth": [
+        "human"
+      ],
+      "capability": "bot.sender.revoke",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "bot.session.list": {
+      "command": "remi bot session list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "bot.session.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "member.list": {
       "command": "remi member list",
       "auth": [
@@ -4099,7 +4211,8 @@ export const CLI_CAPABILITIES_RUNTIME = {
     "runtime.command.run": {
       "command": "remi runtime command run",
       "auth": [
-        "human"
+        "human",
+        "task"
       ],
       "capability": "runtime.command.run",
       "output": [

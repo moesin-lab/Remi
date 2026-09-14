@@ -13,7 +13,7 @@ type Credentials = {
   domain?: FeishuDomain;
 };
 
-let cachedClient: { client: Lark.Client; key: string } | null = null;
+let cachedClient: { client: Lark.Client; key: string; appSecret: string } | null = null;
 
 export function resolveLarkSdkDomain(domain?: FeishuDomain): Lark.Domain | string {
   if (domain === "lark") return Lark.Domain.Lark;
@@ -24,7 +24,7 @@ export function resolveLarkSdkDomain(domain?: FeishuDomain): Lark.Domain | strin
 /** Create or get a cached Feishu HTTP client. */
 export function createFeishuClient(creds: Credentials): Lark.Client {
   const key = `${creds.appId}:${creds.domain ?? "feishu"}`;
-  if (cachedClient && cachedClient.key === key) {
+  if (cachedClient && cachedClient.key === key && cachedClient.appSecret === creds.appSecret) {
     return cachedClient.client;
   }
 
@@ -35,7 +35,7 @@ export function createFeishuClient(creds: Credentials): Lark.Client {
     domain: resolveLarkSdkDomain(creds.domain),
   });
 
-  cachedClient = { client, key };
+  cachedClient = { client, key, appSecret: creds.appSecret };
   return client;
 }
 
@@ -98,7 +98,7 @@ export function createEventDispatcher(_creds?: {
 }
 
 /** Probe the bot info to get botOpenId. Cached for 15 min. */
-const probeCache = new Map<string, { result: FeishuProbeResult; ts: number }>();
+const probeCache = new Map<string, { result: FeishuProbeResult; ts: number; appSecret: string }>();
 const PROBE_TTL_MS = 15 * 60 * 1000;
 
 export async function probeFeishu(creds: Credentials): Promise<FeishuProbeResult> {
@@ -108,7 +108,7 @@ export async function probeFeishu(creds: Credentials): Promise<FeishuProbeResult
 
   const key = `${creds.appId}:${creds.domain ?? "feishu"}`;
   const cached = probeCache.get(key);
-  if (cached && Date.now() - cached.ts < PROBE_TTL_MS) {
+  if (cached && cached.appSecret === creds.appSecret && Date.now() - cached.ts < PROBE_TTL_MS) {
     return cached.result;
   }
 
@@ -126,7 +126,7 @@ export async function probeFeishu(creds: Credentials): Promise<FeishuProbeResult
         appId: creds.appId,
         error: `API error: ${response.msg || `code ${response.code}`}`,
       };
-      probeCache.set(key, { result, ts: Date.now() });
+      probeCache.set(key, { result, ts: Date.now(), appSecret: creds.appSecret });
       return result;
     }
 
@@ -137,7 +137,7 @@ export async function probeFeishu(creds: Credentials): Promise<FeishuProbeResult
       botName: bot?.bot_name,
       botOpenId: bot?.open_id,
     };
-    probeCache.set(key, { result, ts: Date.now() });
+    probeCache.set(key, { result, ts: Date.now(), appSecret: creds.appSecret });
     return result;
   } catch (err) {
     const result: FeishuProbeResult = {
@@ -145,7 +145,7 @@ export async function probeFeishu(creds: Credentials): Promise<FeishuProbeResult
       appId: creds.appId,
       error: err instanceof Error ? err.message : String(err),
     };
-    probeCache.set(key, { result, ts: Date.now() });
+    probeCache.set(key, { result, ts: Date.now(), appSecret: creds.appSecret });
     return result;
   }
 }

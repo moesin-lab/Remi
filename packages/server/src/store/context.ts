@@ -462,7 +462,16 @@ export interface KnowledgeSurface {
   } | null;
 }
 
-export interface StoreContextHost extends AgentsSurface, AgentPluginsSurface, IssuesSurface, WorkspacesSurface, NotificationChannelsSurface, SquadsSurface, ProjectsSurface, TasksSurface, RuntimesSurface, ChatSurface, IssueSessionsSurface, AutopilotsSurface, AccessTokensSurface, FeishuBotSurface, KnowledgeSurface {}
+export interface BotsSurface {
+  isBotChatSession(chatId: string): boolean;
+  isBotTaskIssueCreationRestricted(taskId: string): boolean;
+  retargetBotTaskWithinTransaction(from: string, to: string): void;
+  completeBotTaskWithinTransaction(task: MultiremiTask, body: string): void;
+  prepareBotIssueTopicWithinTransaction(issue: MultiremiIssue): boolean;
+  prepareBotIssueRoundPushesWithinTransaction(input: {issue: MultiremiIssue; leaderTask: MultiremiTask}): MultiremiTask[];
+}
+
+export interface StoreContextHost extends BotsSurface, AgentsSurface, AgentPluginsSurface, IssuesSurface, WorkspacesSurface, NotificationChannelsSurface, SquadsSurface, ProjectsSurface, TasksSurface, RuntimesSurface, ChatSurface, IssueSessionsSurface, AutopilotsSurface, AccessTokensSurface, FeishuBotSurface, KnowledgeSurface {}
 
 export class StoreContext {
   readonly taskEnqueuedListeners = new Set<TaskEnqueuedListener>();
@@ -597,6 +606,8 @@ export class StoreContext {
   issueSessions(): IssueSessionsSurface {
     return this.resolveHost();
   }
+
+  bots(): BotsSurface { return this.resolveHost(); }
 
   feishuBot(): FeishuBotSurface {
     return this.resolveHost();

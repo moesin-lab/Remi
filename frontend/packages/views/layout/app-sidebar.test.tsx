@@ -110,6 +110,7 @@ vi.mock("@multiremi/core/paths", () => ({
     knowledge: () => "/acme/knowledge",
     autopilots: () => "/acme/autopilots",
     agents: () => "/acme/agents",
+    bots: () => "/acme/bots",
     squads: () => "/acme/squads",
     usage: () => "/acme/usage",
     runtimes: () => "/acme/runtimes",
@@ -158,6 +159,15 @@ vi.mock("@tanstack/react-query", async (importOriginal) => ({
   },
   useQueryClient: () => ({ fetchQuery: vi.fn(), invalidateQueries: vi.fn() }),
 }));
+
+describe("Bots navigation", () => {
+  it("links to the workspace Bot page and marks its nested routes active", () => {
+    pathname.current = "/acme/bots/bot-1";
+    const { container } = render(<AppSidebar />);
+    expect(container.querySelector('[data-href="/acme/bots"]')).toHaveAttribute("data-active", "true");
+    expect(container.querySelector('[data-href="/acme/settings"]')).toBeInTheDocument();
+  });
+});
 
 describe("PinRow", () => {
   beforeEach(() => {

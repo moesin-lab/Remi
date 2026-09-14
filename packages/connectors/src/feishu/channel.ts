@@ -98,7 +98,7 @@ export class FeishuChannel {
   }
 
   /** Start WebSocket listener. Rejects if the initial connection fails. */
-  connect(): Promise<void> {
+  connect(options?: { eventScope?: string }): Promise<void> {
     if (!this._config.appId || !this._config.appSecret) {
       throw new Error("FeishuChannel: appId and appSecret are required");
     }
@@ -114,6 +114,7 @@ export class FeishuChannel {
         }
       },
       this._senderAuthorizer,
+      options,
     );
 
     return this._wsHandle.ready.then(() => new Promise<void>(() => {
@@ -260,6 +261,8 @@ export class FeishuChannel {
         displayName: opts.displayName ?? meta.displayName ?? undefined,
         subtitle: opts.subtitle ?? "Multiremi Task",
       });
+      const replyId = session.getMessageId();
+      if (replyId && meta.onReplyCreated) await meta.onReplyCreated(replyId);
       const result = await handleTaskStream(session, stream, chatId, meta);
       await session.close({
         finalText: result.contentText || undefined,

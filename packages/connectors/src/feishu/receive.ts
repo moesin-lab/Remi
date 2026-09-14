@@ -467,11 +467,14 @@ export type ParsedFeishuMessage = {
   media: FeishuMediaInfo[];
   quotedContent?: string;
   rootId?: string;
+  parentId?: string;
 };
 
 export type FeishuAdmissionDenialReason = "not_member" | "unavailable";
 
 export interface FeishuMessageAdmissionOptions {
+  /** Stable platform binding identity; old single-account callers omit it. */
+  eventScope?: string;
   authorizeSender: FeishuSenderAuthorizer;
   onDenied: (
     context: FeishuMessageContext,
@@ -508,7 +511,7 @@ export async function processFeishuMessageEvent(
   const messageId = event.message.message_id;
 
   // Dedup
-  if (!tryRecordMessage(messageId)) return null;
+  if (!tryRecordMessage(admission?.eventScope ? `${admission.eventScope}:${messageId}` : messageId)) return null;
 
   // Parse
   const ctx = parseFeishuMessageEvent(event, botOpenId);
@@ -635,6 +638,7 @@ export async function processFeishuMessageEvent(
     media,
     quotedContent,
     rootId: ctx.rootId,
+    parentId: ctx.parentId,
   };
 }
 
@@ -652,6 +656,7 @@ export function startWebSocketListener(
   config: FeishuChannelConfig,
   onMessage: FeishuMessageCallback,
   authorizeSender: FeishuSenderAuthorizer,
+  options?: { eventScope?: string },
 ): FeishuWSHandle {
   const creds = {
     appId: config.appId,
@@ -688,6 +693,7 @@ export function startWebSocketListener(
         const event = data as unknown as FeishuMessageEvent;
         const msg = await processFeishuMessageEvent(client, event, botOpenId, {
           authorizeSender,
+          eventScope: options?.eventScope,
           onDenied: async (context, reason) => {
             await sendMarkdownCardFeishu(client, context.chatId, feishuAdmissionDenialMessage(reason), {
               replyToMessageId: context.messageId,

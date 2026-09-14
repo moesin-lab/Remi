@@ -122,7 +122,6 @@ export function taskTokenHardDenyCategory(request: Request): TaskTokenHardDenyCa
     || (/^\/api\/runtimes\/[^/]+$/.test(path) && method === "DELETE")
     || (/^\/api\/runtimes\/[^/]+\/archive-agents-and-delete$/.test(path) && method === "POST")
     || (/^\/api\/(?:multiremi\/)?runtimes\/[^/]+\/update$/.test(path) && method === "POST")
-    || /^\/api\/runtimes\/[^/]+\/commands(?:\/[^/]+)?$/.test(path)
     || /^\/api\/workspaces\/[^/]+\/runtime-provisions(?:\/[^/]+(?:\/states)?)?$/.test(path)
     || (/^\/api\/multiremi\/daemons\/[^/]+\/retire$/.test(path) && method === "POST")
     || (/^\/api\/workspaces\/[^/]+\/ssh-mesh$/.test(path) && method === "PUT")
@@ -406,11 +405,24 @@ export function canUserViewTaskMessages(store: MultiremiStore, userId: string | 
     const session = store.getChatSession(task.chatSessionId);
     if (!session) return false;
     if (userId == null) return true;
-    return session.creatorId === userId;
+    return canUserAccessChatSessionByUserId(store, userId, session);
   }
   const agent = task.agentId ? store.getAgent(task.agentId) : null;
   if (!agent) return true;
   return canUserAccessAgentByUserId(store, userId, agent);
+}
+
+/** Bot conversations belong to their space. External senders stay Bot
+ * identities; they do not need a workspace member or a synthetic user. */
+export function canUserAccessChatSessionByUserId(
+  store: MultiremiStore,
+  userId: string | null,
+  session: MultiremiChatSession,
+): boolean {
+  if (session.creatorId === userId) return true;
+  if (!store.isBotChatSession(session.id)) return false;
+  const agent = store.getAgent(session.agentId);
+  return Boolean(agent && canUserAccessAgentByUserId(store, userId, agent));
 }
 
 export function currentWorkspaceRole(c: Context, store: MultiremiStore, workspaceId: string): string {
@@ -523,7 +535,7 @@ export function loadChatSessionForCurrentUser(
   if (!session) return c.json({ error: "chat session not found" }, 404);
   const denied = denyCurrentUserWorkspaceAccess(c, store, session.workspaceId);
   if (denied) return denied;
-  if ((session.creatorId ?? "local") !== currentRequestUserId(c)) {
+  if (!canUserAccessChatSessionByUserId(store, currentRequestUserId(c), session)) {
     return c.json({ error: "not your chat session" }, 403);
   }
   if (options.requireAgentAccess !== false && !canCurrentUserAccessChatSessionAgent(c, store, session)) {

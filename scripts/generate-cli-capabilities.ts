@@ -19,7 +19,7 @@ const RUNTIME_MANIFEST_PATH = resolve(ROOT, "packages/server/src/api/cli-capabil
 const MAX_PLANNED_ROUTES = 0;
 
 const DOMAINS = [
-  "context", "workspace", "member", "invite", "token",
+  "context", "workspace", "bot", "member", "invite", "token",
   "project", "repo", "knowledge", "memory", "wiki",
   "issue", "comment", "session", "share", "label", "attachment",
   "chat", "task",
@@ -38,6 +38,7 @@ const DOMAIN_ALIASES: Record<string, string> = {
   agents: "agent",
   attachments: "attachment",
   autopilots: "autopilot",
+  bots: "bot",
   chats: "chat",
   comments: "comment",
   daemons: "daemon",
@@ -139,6 +140,14 @@ function mappedResourceCommand(route: string): string | null {
     "GET /api/cli/capabilities": "context.get",
     "GET /api/workspaces": "workspace.list",
     "POST /api/workspaces": "workspace.create",
+    "GET /api/bots": "bot.list",
+    "POST /api/bots": "bot.create",
+    "GET /api/bots/:id": "bot.get",
+    "PUT /api/bots/:id": "bot.update",
+    "DELETE /api/bots/:id": "bot.delete",
+    "GET /api/bots/:id/senders": "bot.sender.list",
+    "PUT /api/bots/:id/senders/:senderId": "bot.sender.allow",
+    "GET /api/bots/:id/sessions": "bot.session.list",
     "GET /api/invitations": "invite.list",
     "GET /api/me": "member.get",
     "PATCH /api/me": "member.update",

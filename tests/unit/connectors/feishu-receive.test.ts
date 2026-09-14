@@ -98,6 +98,23 @@ function admission(
 }
 
 describe("Feishu workspace membership admission", () => {
+  it("deduplicates within a Bot binding while delivering the same group event to another binding", async () => {
+    const event = messageEvent({ messageId: uniqueMessageId("multi-bot"), senderOpenId: "ou_multi_bot" });
+    const { client } = clientWithSender();
+    const gate = admission(async () => true);
+    const receive = (eventScope: string) => processFeishuMessageEvent(client, event, undefined, { ...gate.options, eventScope });
+    expect(await receive("binding-one")).not.toBeNull();
+    expect(await receive("binding-one")).toBeNull();
+    expect(await receive("binding-two")).not.toBeNull();
+  });
+
+  it("retains the quoted platform message identity for Bot control routing", async () => {
+    const event = messageEvent({ messageId: uniqueMessageId("quoted-bot"), senderOpenId: "ou_quoted_bot" });
+    event.message.parent_id = "platform-bot-card";
+    const { client } = clientWithSender();
+    const result = await processFeishuMessageEvent(client, event, undefined, admission(async () => true).options);
+    expect(result?.parentId).toBe("platform-bot-card");
+  });
   it("refuses to connect when no membership authorizer was injected", () => {
     const channel = new FeishuChannel({ appId: "app", appSecret: "secret" });
     expect(() => channel.connect()).toThrow("workspace membership authorizer is required");

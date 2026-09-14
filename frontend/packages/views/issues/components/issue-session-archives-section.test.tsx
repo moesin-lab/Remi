@@ -115,8 +115,8 @@ describe("IssueSessionArchivesSection", () => {
     const user = userEvent.setup();
     renderSection();
 
-    await user.click(screen.getByRole("button", { name: /Session archives/ }));
-    expect(screen.getByText("No session archive has been created yet.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Provider session archives/ }));
+    expect(screen.getByText("No provider session archive has been created yet.")).toBeInTheDocument();
   });
 
   it("verifies a ready archive from the compact issue sidebar section", async () => {
@@ -125,7 +125,7 @@ describe("IssueSessionArchivesSection", () => {
     archivesRef.data = { archives: [archive], latest: archive, latest_ready: archive };
     renderSection();
 
-    await user.click(screen.getByRole("button", { name: /Session archives/ }));
+    await user.click(screen.getByRole("button", { name: /Provider session archives/ }));
     await user.click(screen.getByRole("button", { name: "Verify archive" }));
 
     await waitFor(() => expect(mockVerify).toHaveBeenCalledWith(archive.id));
@@ -138,7 +138,7 @@ describe("IssueSessionArchivesSection", () => {
     archivesRef.data = { archives: [archive], latest: archive, latest_ready: null };
     renderSection();
 
-    await user.click(screen.getByRole("button", { name: /Session archives/ }));
+    await user.click(screen.getByRole("button", { name: /Provider session archives/ }));
     expect(screen.getByText(/disk full/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Retry archive" }));
 
@@ -160,7 +160,7 @@ describe("IssueSessionArchivesSection", () => {
     renderSection();
 
     expect(screen.getByText("Automatic retries stopped")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Session archives/ }));
+    await user.click(screen.getByRole("button", { name: /Provider session archives/ }));
     expect(screen.getAllByText("Automatic retries stopped")).toHaveLength(2);
     expect(screen.getByText((_, element) =>
       element?.tagName === "P" && element.textContent?.includes("6 attempts") === true
@@ -172,7 +172,7 @@ describe("IssueSessionArchivesSection", () => {
 
   it("stays hidden for an active issue with no archive", () => {
     renderSection({ issueStatus: "in_progress" });
-    expect(screen.queryByText("Session archives")).not.toBeInTheDocument();
+    expect(screen.queryByText("Provider session archives")).not.toBeInTheDocument();
   });
 
   it("does not report an empty archive when loading the archive state failed", async () => {
@@ -183,15 +183,15 @@ describe("IssueSessionArchivesSection", () => {
     expect(screen.getByText("Unknown")).toBeInTheDocument();
     expect(screen.queryByText("Not archived")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Session archives/ }));
-    expect(screen.getByText("Could not load session archives.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Provider session archives/ }));
+    expect(screen.getByText("Could not load provider session archives.")).toBeInTheDocument();
   });
 
   it("does not expose archive controls to regular members", () => {
     const archive = makeArchive();
     archivesRef.data = { archives: [archive], latest: archive, latest_ready: archive };
     renderSection({ canManage: false });
-    expect(screen.queryByText("Session archives")).not.toBeInTheDocument();
+    expect(screen.queryByText("Provider session archives")).not.toBeInTheDocument();
   });
 });
 

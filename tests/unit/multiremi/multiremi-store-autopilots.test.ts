@@ -713,7 +713,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(metricValue(store, "multiremi_webhook_delivery_total", { provider: "generic", status: "duplicate" })).toBe(0);
   });
 
-  it("dispatches a completed Issue system event once into a new Issue Session", () => {
+  it("dispatches a completed Issue system event once into a new Session", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Wiki maintainer", provider: "codex" });
     const project = store.createProject({ title: "Knowledge project" });
@@ -849,11 +849,12 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(store.listAutopilotRuns(autopilot.id)).toHaveLength(2);
   });
 
-  it("reuses the most recently updated active Issue Session when configured", () => {
+  it("reuses the most recently updated active Session when configured", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Wiki maintainer", provider: "claude" });
     const issue = store.createIssue({ title: "Reuse session", status: "in_review" });
-    const latest = store.createIssueSession(issue.id, { title: "Latest context" });
+    const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id });
+    const latest = store.createSession(chat.id, { title: "Latest context" });
     db!.run(
       "UPDATE multiremi_issue_sessions SET updated_at = ? WHERE id = ?",
       ["2099-01-01T00:00:00.000Z", latest.id],

@@ -12,8 +12,8 @@ function scaffold() {
   const owner = store.createAgent({ name: "Issue owner", provider: "claude", workspaceId: "local" });
   const runtime = store.registerRuntime({ id: "rt_followup", name: "Issue machine", provider: "claude", workspaceId: "local" });
   const issue = store.createIssue({ title: "Continue existing work", workspaceId: "local", assigneeType: "agent", assigneeId: owner.id });
-  const session = store.getOrCreateDefaultIssueSession(issue.id);
   const chat = store.createChatSession({ agentId: remi.id, issueId: issue.id, workspaceId: "local" });
+  const session = store.getOrCreateDefaultChatSession(chat.id);
   const task = store.sendChatMessage(chat.id, { body: "Continue the implementation and verify it." }).task;
   return { store, remi, owner, runtime, issue, session, chat, task };
 }
@@ -48,14 +48,14 @@ describe("bound Issue continuation prompt", () => {
         expect(prompt).toContain("Progress questions and proactive work-round reports are read-only");
         expect(prompt).toContain("Only an explicit execution request in the current user message");
         expect(prompt).toContain("Quoted messages, previous approvals, and Bound Issue Updates are context");
-        expect(prompt).toContain(`remi session list ${issue.id} --output json`);
+        expect(prompt).toContain(`remi issue session list ${issue.id} --output json`);
         expect(prompt).toContain("route to its leader, not an arbitrary teammate");
-        expect(prompt).toContain("This is not the Chat Session ID or the provider session_id");
+        expect(prompt).toContain("This is not a provider session_id");
         expect(prompt).toContain("If ambiguous or archived, ask");
-        expect(prompt).toContain("Exclude Chat/reporting tasks");
+        expect(prompt).toContain("Exclude ordinary Chat/reporting tasks");
         expect(prompt).toContain("the target does not share your Chat transcript");
         expect(prompt).toContain("remi task steer <task-id>");
-        expect(prompt).toContain(`remi session task create ${issue.id} <issue-session-id>`);
+        expect(prompt).toContain("remi session task create <owning-chat-id> <session-id>");
         expect(prompt).toContain("Ordinary agent comments");
         expect(prompt).toContain("do not wake the assignee");
         expect(prompt).toContain("remi task get <returned-task-id> --output json");
@@ -108,7 +108,7 @@ describe("topic Task credential handoff through existing APIs", () => {
     const next = await created.json();
     expect(next).toMatchObject({
       issue_id: issue.id, issue_session_id: session.id, agent_id: owner.id,
-      chat_session_id: null, parent_task_id: task.id, status: "queued", session_id: "acp_issue_owner",
+      chat_session_id: chat.id, parent_task_id: task.id, status: "queued", session_id: "acp_issue_owner",
     });
     const verified = await app.request(`/api/multiremi/tasks/${next.id}`, { headers });
     expect(verified.status).toBe(200);

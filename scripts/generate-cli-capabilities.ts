@@ -234,6 +234,20 @@ function mappedResourceCommand(route: string): string | null {
   };
   if (exact[route]) return exact[route]!;
   const rules: Array<[RegExp, string]> = [
+    [/^GET \/api\/multiremi\/chats\/:id\/sessions$/, "session.list"],
+    [/^POST \/api\/multiremi\/chats\/:id\/sessions$/, "session.create"],
+    [/^GET \/api\/multiremi\/chats\/:id\/sessions\/:sessionId$/, "session.get"],
+    [/^PATCH \/api\/multiremi\/chats\/:id\/sessions\/:sessionId$/, "session.update"],
+    [/^POST \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/adopt$/, "session.adopt"],
+    [/^GET \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/events$/, "session.event.list"],
+    [/^POST \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/messages$/, "session.message.create"],
+    [/^GET \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/participants$/, "session.participant.list"],
+    [/^POST \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/participants$/, "session.participant.add"],
+    [/^DELETE \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/participants\/:participantType\/:participantId$/, "session.participant.remove"],
+    [/^GET \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/tasks$/, "session.task.list"],
+    [/^POST \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/tasks$/, "session.task.create"],
+    [/^GET \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/results$/, "session.result.list"],
+    [/^POST \/api\/multiremi\/chats\/:id\/sessions\/:sessionId\/results$/, "session.result.publish"],
     [/^GET \/api\/workspaces\/:id$/, "workspace.get"],
     [/^(?:PUT|PATCH) \/api\/workspaces\/:id$/, "workspace.update"],
     [/^DELETE \/api\/workspaces\/:id$/, "workspace.delete"],

@@ -20,7 +20,7 @@ import {
   taskCompatibilityResponse,
   taskPublicResponse,
 } from "../wire/index.js";
-import type { CreateTaskInput } from "@multiremi/contracts/types.js";
+import type { CreateTaskInput, MultiremiTask } from "@multiremi/contracts/types.js";
 import { createId } from "@multiremi/ids.js";
 import { TaskSteerConflictError } from "@multiremi/store/repos/tasks-repo.js";
 import { OrganizerActionError } from "../../organizer/settings.js";
@@ -28,6 +28,24 @@ import type { RouterDeps } from "./deps.js";
 
 export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+  // Preserve the existing Feishu coordinator handoff after Session Tasks gain
+  // their owning chat_session_id. This is deliberately limited to same-Chat,
+  // same-Issue task metadata/control; ordinary Chat message routing and queue
+  // behavior remain separate (MUL-3).
+  const canCoordinateOwnedSessionTask = (c: any, target: MultiremiTask): boolean => {
+    if (canCurrentUserAccessChatTask(c, store, target)) return true;
+    const taskToken = currentTaskAccessToken(c);
+    const source = taskToken?.taskId ? store.getTask(taskToken.taskId) : null;
+    return Boolean(
+      source
+      && !source.issueSessionId
+      && target.issueSessionId
+      && source.chatSessionId
+      && source.chatSessionId === target.chatSessionId
+      && source.issueId
+      && source.issueId === target.issueId,
+    );
+  };
 
   app.get("/api/multiremi/tasks", (c) => {
     const status = c.req.query("status") as any;
@@ -125,7 +143,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
+    if (!canCoordinateOwnedSessionTask(c, task)) return c.json({ error: "forbidden" }, 403);
     return c.json({ task: taskPublicResponse(task) });
   });
   const cancelTaskRoute = async (c: any, compatibility: boolean) => {
@@ -133,7 +151,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
+    if (!canCoordinateOwnedSessionTask(c, task)) return c.json({ error: "forbidden" }, 403);
     const taskToken = currentTaskAccessToken(c);
     if (taskToken?.taskId) {
       const supervisor = supervisorTaskIdentity(c, store);
@@ -175,7 +193,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
+    if (!canCoordinateOwnedSessionTask(c, task)) return c.json({ error: "forbidden" }, 403);
     const body = await readJson<{ content?: string; kind?: string; force_answer?: boolean; forceAnswer?: boolean; reason?: string }>(c);
     const forceAnswer = body?.kind === "force_answer" || body?.force_answer === true || body?.forceAnswer === true;
     const content = cleanString(body?.content)
@@ -231,7 +249,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
+    if (!canCoordinateOwnedSessionTask(c, task)) return c.json({ error: "forbidden" }, 403);
     return c.json({ messages: store.listTaskSteerMessages(task.id) });
   };
   app.post("/api/multiremi/tasks/:id/steer", steerTaskRoute);

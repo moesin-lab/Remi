@@ -989,20 +989,17 @@ describe("IssueDetail (shared)", () => {
     expect(mockNavigationReplace).not.toHaveBeenCalled();
   });
 
-  it("keeps the session rail mounted on a single-session issue, with the only New-session control in its header", async () => {
+  it("keeps the linked-session rail mounted on a single-session issue without an Issue-owned create control", async () => {
     // Default fixture: one default "Main" session. The rail still mounts —
-    // it is where sessions are read *and* created, so hiding it on the
-    // single-session case hid the concept from everyone who never had two.
+    // it is where linked Sessions are selected, so hiding it on the
+    // single-session case would hide the relationship from most users.
     renderIssueDetail();
 
-    const railLabel = await screen.findByText("Sessions");
+    await screen.findByText("Linked Sessions");
     expect(screen.getByRole("button", { name: /^Main/ })).toBeInTheDocument();
 
-    // Exactly one create-session control in the whole page, and it lives in
-    // the rail header.
-    const newSessionControls = screen.getAllByRole("button", { name: "New session" });
-    expect(newSessionControls).toHaveLength(1);
-    expect(railLabel.parentElement).toContainElement(newSessionControls[0]!);
+    // Session creation belongs to the owning Chat, not this Issue projection.
+    expect(screen.queryByRole("button", { name: "New session" })).not.toBeInTheDocument();
 
   });
 
@@ -1017,17 +1014,20 @@ describe("IssueDetail (shared)", () => {
     // multi-session case uses, so the reading column never shifts when a
     // second session appears.
     expect(scrollRoot!.previousElementSibling).toContainElement(
-      screen.getByText("Sessions"),
+      screen.getByText("Linked Sessions"),
     );
   });
 
   it("explains the rail's scope without widening the column", async () => {
     renderIssueDetail();
 
-    // The header text stays the bare word; the scope rides along as the
-    // tooltip / accessible description.
-    const railLabel = await screen.findByText("Sessions");
-    expect(railLabel).toHaveAttribute("title", "Sessions on this issue");
+    // The header identifies this as an Issue-scoped projection; the tooltip
+    // makes clear that the Sessions are owned by linked Chats.
+    const railLabel = await screen.findByText("Linked Sessions");
+    expect(railLabel).toHaveAttribute(
+      "title",
+      "Sessions owned by Chats currently linked to this Issue",
+    );
   });
 
   it("shows the localized default-session name instead of the stored title", async () => {
@@ -1099,64 +1099,7 @@ describe("IssueDetail (shared)", () => {
     expect(mockNavigationReplace).not.toHaveBeenCalled();
   });
 
-  it("creates a second session from the rail header and switches to it", async () => {
-    const sessionMain = {
-      id: "session-main",
-      issue_id: mockIssue.id,
-      workspace_id: "ws-1",
-      title: "Main",
-      status: "active",
-      is_default: true,
-      summary: null,
-      created_by_type: "system",
-      created_by_id: null,
-      created_at: "2025-01-01T00:00:00Z",
-      updated_at: "2025-01-01T00:00:00Z",
-      participants: [],
-    };
-    const sessionReview = {
-      ...sessionMain,
-      id: "session-review",
-      title: "Review",
-      is_default: false,
-      created_by_type: "member",
-      created_by_id: "user-1",
-      created_at: "2025-01-02T00:00:00Z",
-      updated_at: "2025-01-02T00:00:00Z",
-    };
-    mockApiObj.listIssueSessions.mockResolvedValue([sessionMain]);
-    // The mutation invalidates the sessions query on settle, so the refetch
-    // must see the new session — that refetch is what mounts the column.
-    mockApiObj.createIssueSession.mockImplementation(async () => {
-      mockApiObj.listIssueSessions.mockResolvedValue([sessionMain, sessionReview]);
-      return sessionReview;
-    });
-    renderIssueDetail();
-
-    fireEvent.click(await screen.findByRole("button", { name: "New session" }));
-
-    const createDialog = within(await screen.findByRole("dialog"));
-    expect(createDialog.getByText("Create session")).toBeInTheDocument();
-    fireEvent.change(createDialog.getByLabelText("Session name"), {
-      target: { value: "Review" },
-    });
-    fireEvent.click(createDialog.getByRole("button", { name: "Create" }));
-
-    await waitFor(() => {
-      expect(mockApiObj.createIssueSession).toHaveBeenCalledWith("issue-1", {
-        title: "Review",
-        holds_workspace: true,
-      });
-    });
-    // Sessions refetched → the rail gains a second row and the new session
-    // is the one being read.
-    expect(await screen.findByRole("button", { name: /^Review/ })).toBeInTheDocument();
-    await waitFor(() => {
-      expect(mockApiObj.listTimeline).toHaveBeenCalledWith("issue-1", "session-review");
-    });
-  });
-
-  it("renders one rail row per session, one New-session control, and the panel actions", async () => {
+  it("renders one rail row per linked Session without an Issue-owned create control", async () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {
         id: "session-main",
@@ -1189,12 +1132,10 @@ describe("IssueDetail (shared)", () => {
     ]);
     renderIssueDetail();
 
-    expect(await screen.findByText("Sessions")).toBeInTheDocument();
+    expect(await screen.findByText("Linked Sessions")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Main/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Review/ })).toBeInTheDocument();
-    // The + affordance lives in the rail header — and only there, so the
-    // panel must not mount a second copy.
-    expect(screen.getAllByRole("button", { name: "New session" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "New session" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Session actions" })).toHaveLength(2);
   });
 
@@ -1231,7 +1172,7 @@ describe("IssueDetail (shared)", () => {
     ]);
     renderIssueDetail();
 
-    const sessionsLabel = await screen.findByText("Sessions");
+    const sessionsLabel = await screen.findByText("Linked Sessions");
     const scrollRoot = document.querySelector<HTMLElement>("[data-tab-scroll-root]");
     expect(scrollRoot).not.toBeNull();
     // Rendering the column inside the scroll container (its previous home,
@@ -1456,7 +1397,7 @@ describe("IssueDetail (shared)", () => {
       screen.getAllByRole("generic").some((el) => el.getAttribute("data-slot") === "skeleton"),
     ).toBe(true);
     expect(
-      screen.queryByText("Couldn't load this issue's sessions"),
+      screen.queryByText("Couldn't load Sessions linked to this issue"),
     ).not.toBeInTheDocument();
   });
 
@@ -1465,7 +1406,7 @@ describe("IssueDetail (shared)", () => {
     renderIssueDetail();
 
     expect(
-      await screen.findByText("Couldn't load this issue's sessions"),
+      await screen.findByText("Couldn't load Sessions linked to this issue"),
     ).toBeInTheDocument();
 
     const callsBeforeRetry = mockApiObj.listIssueSessions.mock.calls.length;
@@ -1482,7 +1423,7 @@ describe("IssueDetail (shared)", () => {
     renderIssueDetail();
 
     expect(
-      await screen.findByText("Couldn't load this issue's sessions"),
+      await screen.findByText("Couldn't load Sessions linked to this issue"),
     ).toBeInTheDocument();
     expect(mockApiObj.listTimeline).toHaveBeenCalledWith("issue-1", undefined);
   });
@@ -1643,10 +1584,10 @@ describe("IssueDetail (shared)", () => {
     expect(screen.queryByText("Properties")).not.toBeInTheDocument();
     const sessionsToggle = screen.getByRole("button", { name: "Toggle sessions" });
     expect(sessionsToggle).toHaveAttribute("aria-pressed", "false");
-    expect(screen.queryByText("Sessions")).not.toBeInTheDocument();
+    expect(screen.queryByText("Linked Sessions")).not.toBeInTheDocument();
 
     fireEvent.click(sessionsToggle);
-    expect(await screen.findByText("Sessions")).toBeInTheDocument();
+    expect(await screen.findByText("Linked Sessions")).toBeInTheDocument();
     expect(sessionsToggle).toHaveAttribute("aria-pressed", "true");
   });
 

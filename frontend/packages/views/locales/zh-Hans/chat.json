@@ -6,7 +6,7 @@
   },
   "input": {
     "placeholder_no_agent": "创建一个智能体后才能开始对话",
-    "placeholder_archived": "此会话已归档",
+    "placeholder_archived": "此对话已归档",
     "placeholder_named": "给 {{name}} 发消息…",
     "placeholder_default": "输入消息…",
     "send_tooltip": "发送",

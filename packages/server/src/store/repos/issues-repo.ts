@@ -261,7 +261,6 @@ export class IssuesRepo {
       const creator = this.ctx.workspaces().findWorkspaceMemberForUser(createdBy, workspaceId);
       if (creator) this.addIssueSubscriber(id, creator.id, "created");
     }
-    this.ctx.issueSessions().getOrCreateDefaultIssueSession(id, createdBy);
     return this.getIssue(id)!;
   }
 
@@ -1178,19 +1177,17 @@ export class IssuesRepo {
   ): MultiremiIssueComment {
     const id = createId("cmt");
     const now = nowIso();
-    const issueSession = issueSessionId
-      ? this.ctx.issueSessions().getIssueSession(issueSessionId)
-      : this.ctx.issueSessions().getOrCreateDefaultIssueSession(issueId);
-    if (!issueSession || issueSession.issueId !== issueId) {
-      throw new Error(`Issue session not found for system comment: ${issueSessionId}`);
+    const issueSession = issueSessionId ? this.ctx.issueSessions().getIssueSession(issueSessionId) : null;
+    if (issueSessionId && (!issueSession || issueSession.issueId !== issueId)) {
+      throw new Error(`Session is not currently linked to this Issue: ${issueSessionId}`);
     }
     this.ctx.db.run(
       `INSERT INTO multiremi_issue_comments (
          id, issue_id, issue_session_id, author_type, author_id, task_id, parent_id, body, type, created_at, updated_at
        ) VALUES (?, ?, ?, 'system', ?, ?, NULL, ?, 'system', ?, ?)`,
-      [id, issueId, issueSession.id, SYSTEM_AUTHOR_ID, taskId, body, now, now],
+      [id, issueId, issueSession?.id ?? null, SYSTEM_AUTHOR_ID, taskId, body, now, now],
     );
-    this.ctx.issueSessions().appendSessionEvent(issueSession.id, {
+    if (issueSession) this.ctx.issueSessions().appendSessionEvent(issueSession.id, {
       authorType: "system",
       authorId: SYSTEM_AUTHOR_ID,
       kind: "system",
@@ -1505,12 +1502,15 @@ export class IssuesRepo {
     if (parentId) {
       if (!parent || parent.issueId !== issueId) throw new Error(`Parent comment not found: ${parentId}`);
     }
+    const taskId = cleanOptionalString(input.taskId ?? input.task_id) ?? null;
+    const sourceTask = taskId ? this.ctx.tasks().getTask(taskId) : null;
     const issueSessionId = cleanOptionalString(input.issueSessionId ?? input.issue_session_id)
       ?? parent?.issueSessionId
-      ?? this.ctx.issueSessions().getOrCreateDefaultIssueSession(issueId, input.authorId ?? null).id;
-    const issueSession = this.ctx.issueSessions().getIssueSession(issueSessionId);
-    if (!issueSession || issueSession.issueId !== issueId) {
-      throw new Error(`Issue session not found for issue: ${issueSessionId}`);
+      ?? sourceTask?.issueSessionId
+      ?? null;
+    const issueSession = issueSessionId ? this.ctx.issueSessions().getIssueSession(issueSessionId) : null;
+    if (issueSessionId && (!issueSession || issueSession.issueId !== issueId)) {
+      throw new Error(`Session is not currently linked to this Issue: ${issueSessionId}`);
     }
     if (parent && parent.issueSessionId && parent.issueSessionId !== issueSessionId) {
       throw new Error("Reply must belong to the parent comment's session");
@@ -1518,7 +1518,6 @@ export class IssuesRepo {
     const id = createId("cmt");
     const now = nowIso();
     const body = rawBody.trim();
-    const taskId = cleanOptionalString(input.taskId ?? input.task_id) ?? null;
     this.ctx.db.run(
       `INSERT INTO multiremi_issue_comments (
          id, issue_id, issue_session_id, author_type, author_id, task_id, parent_id, body, type, created_at, updated_at
@@ -1530,12 +1529,12 @@ export class IssuesRepo {
     this.linkReferencedAttachmentsToComment(id, issueId, body);
     this.ctx.db.run("UPDATE multiremi_issues SET updated_at = ? WHERE id = ?", [now, issueId]);
     if (parentId) this.unresolveThreadRoot(parentId);
-    if (authorType === "agent" && input.authorId) {
+    if (issueSessionId && authorType === "agent" && input.authorId) {
       this.ctx.issueSessions().addSessionParticipant(issueSessionId, {
         participantType: "agent",
         participantId: input.authorId,
       });
-    } else if (authorType === "member" && input.authorId) {
+    } else if (issueSessionId && authorType === "member" && input.authorId) {
       const member = this.ctx.workspaces().getWorkspaceMember(input.authorId) ?? this.ctx.workspaces().findWorkspaceMemberForUser(input.authorId, issue.workspaceId);
       if (member) {
         this.ctx.issueSessions().addSessionParticipant(issueSessionId, {
@@ -1544,7 +1543,7 @@ export class IssuesRepo {
         });
       }
     }
-    const commentEvent = this.ctx.issueSessions().appendSessionEvent(issueSessionId, {
+    const commentEvent = issueSessionId ? this.ctx.issueSessions().appendSessionEvent(issueSessionId, {
       authorType,
       authorId: input.authorId ?? null,
       kind: "message",
@@ -1552,7 +1551,7 @@ export class IssuesRepo {
       sourceCommentId: id,
       metadata: { parent_comment_id: parentId },
       createdAt: now,
-    });
+    }) : null;
     if (authorType === "member" && input.authorId) {
       // authorId is a request user id, not a member row id — translate before
       // subscribing, and skip (rather than fail the comment) when the author
@@ -1589,7 +1588,7 @@ export class IssuesRepo {
       { comment_id: id, issue_session_id: issueSessionId },
     );
     if (options.deferAgentMentionDispatch) return comment;
-    const mentionTasks = this.triggerCommentMentions(issue, comment, commentEvent.seq);
+    const mentionTasks = this.triggerCommentMentions(issue, comment, commentEvent?.seq ?? 0);
     this.triggerAssigneeAutoResponse(issue, comment, mentionTasks.length > 0 || mentionedMemberIds.length > 0);
     return comment;
   }
@@ -1607,6 +1606,9 @@ export class IssuesRepo {
     }
     const issue = this.getIssue(comment.issueId);
     if (!issue) throw new Error(`Issue not found: ${comment.issueId}`);
+    if (!comment.issueSessionId) {
+      return this.triggerCommentMentions(issue, comment, 0);
+    }
     const event = this.ctx.db.query(
       `SELECT seq FROM multiremi_session_events
        WHERE session_id = ? AND source_comment_id = ? AND kind = 'message'
@@ -1812,7 +1814,7 @@ export class IssuesRepo {
     const issueSessionId = cleanOptionalString(input.issueSessionId ?? input.issue_session_id);
     if (issueSessionId) {
       const session = this.ctx.issueSessions().getIssueSession(issueSessionId);
-      if (!session || session.issueId !== issueId) throw new Error("issue session not found in this issue");
+      if (!session || session.issueId !== issueId) throw new Error("Session is not currently linked to this Issue");
     }
     const comments = this.listIssueComments(issueId)
       .filter((comment) => !issueSessionId || comment.issueSessionId === issueSessionId)
@@ -1984,7 +1986,7 @@ export class IssuesRepo {
     const sessionId = cleanOptionalString(options.issueSessionId);
     if (sessionId) {
       const session = this.ctx.issueSessions().getIssueSession(sessionId);
-      if (!session || session.issueId !== issueId) throw new Error(`Issue session not found for issue: ${sessionId}`);
+      if (!session || session.issueId !== issueId) throw new Error(`Session is not currently linked to this Issue: ${sessionId}`);
     }
     const entries: MultiremiTimelineEntry[] = [
       ...this.listIssueComments(issueId)
@@ -2016,7 +2018,7 @@ export class IssuesRepo {
     const sessionId = cleanOptionalString(options.issueSessionId);
     if (sessionId) {
       const session = this.ctx.issueSessions().getIssueSession(sessionId);
-      if (!session || session.issueId !== issueId) throw new Error(`Issue session not found for issue: ${sessionId}`);
+      if (!session || session.issueId !== issueId) throw new Error(`Session is not currently linked to this Issue: ${sessionId}`);
     }
 
     const rowLimit = options.limit + 1;

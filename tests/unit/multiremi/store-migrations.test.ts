@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
 import { runMigrations } from "@multiremi/store/migrations.js";
+import { MultiremiStore } from "@multiremi/store.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 
 let db: Database | null = null;
@@ -106,6 +107,18 @@ describe("store migrations", () => {
       "proposal_payload", "proposal_status", "proposal_resolved_at", "proposal_resolved_by",
     ]));
     expect(columnNames(database, "multiremi_tasks")).toContain("task_kind");
+    expect(database.query("PRAGMA foreign_key_list(multiremi_issue_sessions)").all()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ from: "chat_id", table: "multiremi_chat_sessions", on_delete: "CASCADE" }),
+        expect.objectContaining({ from: "issue_id", table: "multiremi_issues", on_delete: "SET NULL" }),
+      ]),
+    );
+    expect(database.query("PRAGMA foreign_key_list(multiremi_session_results)").all()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ from: "chat_id", table: "multiremi_chat_sessions", on_delete: "CASCADE" }),
+        expect.objectContaining({ from: "issue_id", table: "multiremi_issues", on_delete: "SET NULL" }),
+      ]),
+    );
     expect(columnNames(database, "multiremi_tasks")).toContain("delegation_return_task_id");
     expect(columnNames(database, "multiremi_chat_sessions")).toContain("issue_id");
     expect(columnNames(database, "multiremi_tasks")).toContain("issue_creation_restricted");
@@ -160,6 +173,29 @@ describe("store migrations", () => {
       "auto_update_last_checked_at",
       "auto_update_last_result",
     ]));
+  });
+
+  it("adopts an unambiguous legacy Session and preserves Task and result provenance", () => {
+    const database = freshDb();
+    const store = new MultiremiStore(database);
+    const agent = store.createAgent({ name: "Migration agent", provider: "codex" });
+    const issue = store.createIssue({ title: "Legacy Session owner" });
+    const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id });
+    const session = store.getOrCreateDefaultChatSession(chat.id);
+    const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Preserve me" });
+    const result = store.publishSessionResult(session.id, { body: "Durable result", sourceTaskId: task.id });
+
+    database.run("UPDATE multiremi_tasks SET chat_session_id = NULL WHERE id = ?", [task.id]);
+    database.run("UPDATE multiremi_session_results SET chat_id = NULL WHERE id = ?", [result.id]);
+    database.run("UPDATE multiremi_issue_sessions SET chat_id = NULL WHERE id = ?", [session.id]);
+    database.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", ["20260913_chat_owned_sessions"]);
+
+    migrate(database);
+
+    expect(store.getIssueSession(session.id)).toMatchObject({ id: session.id, chatId: chat.id, issueId: issue.id });
+    expect(store.getTask(task.id)).toMatchObject({ issueSessionId: session.id, chatSessionId: chat.id });
+    expect(store.listSessionResults(session.id)[0]).toMatchObject({ id: result.id, chatId: chat.id, issueId: issue.id });
+    expect(store.listChatOwnedSessions(chat.id, true).filter((entry) => entry.isDefault)).toHaveLength(1);
   });
 
   it("adds legacy Chat sequence columns before indexing and preserves message order", () => {

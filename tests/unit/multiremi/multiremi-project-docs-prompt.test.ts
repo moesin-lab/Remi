@@ -33,7 +33,14 @@ function createProjectTask(store: MultiremiStore) {
     description: "Implement the requested behavior.",
     projectId: project.id,
   });
-  const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Do the work" });
+  const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id });
+  const session = store.getOrCreateDefaultChatSession(chat.id);
+  const task = store.createTask({
+    agentId: agent.id,
+    issueId: issue.id,
+    issueSessionId: session.id,
+    prompt: "Do the work",
+  });
   return { agent, project, issue, task: store.getTaskWithAgent(task.id)! };
 }
 
@@ -256,7 +263,7 @@ describe("bootstrap and delta task prompts", () => {
     expect(prompt).toContain("## Autopilot Context");
   });
 
-  it("does not advertise provider history without an Issue Session workspace", () => {
+  it("does not advertise provider history without a Session workspace", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Direct", provider: "codex" });
     const task = store.createTask({ agentId: agent.id, prompt: "Direct task" });

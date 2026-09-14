@@ -184,8 +184,11 @@ export function resolveTaskProviderHome(
   issueRuntimeStateRoot: string,
   workspacesRoot: string,
 ): IssueSessionProviderHome | null {
+  const formalSessionId = cleanString(task.issueSessionId ?? task.issue_session_id);
   const issueId = cleanString(task.issueId ?? task.issue_id);
-  if (issueId && !cleanString(task.chatSessionId)) {
+  // Session Tasks also carry their owning Chat id. Their product Session lane,
+  // generation, and execution scope remain the provider-state identity.
+  if (formalSessionId || (issueId && !cleanString(task.chatSessionId))) {
     const issueHome = resolveIssueSessionProviderHome(task, issueRuntimeStateRoot, workspacesRoot);
     return issueHome;
   }
@@ -819,7 +822,7 @@ function positiveInteger(value: unknown, fallback: number): number {
 function safePathSegment(value: string): string {
   const segment = value.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
   if (!segment || segment === "." || segment === "..") {
-    throw new Error(`invalid Issue Session path segment: ${JSON.stringify(value)}`);
+    throw new Error(`invalid Session path segment: ${JSON.stringify(value)}`);
   }
   return segment;
 }

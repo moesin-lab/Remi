@@ -13,14 +13,16 @@ function fixture() {
   const worker = store.createAgent({ name: "Worker", provider: "claude" });
   const qa = store.createAgent({ name: "QA", provider: "claude" });
   const issue = store.createIssue({ title: "Concurrent delivery" });
-  const main = store.createTask({ agentId: leader.id, issueId: issue.id, prompt: "coordinate" });
+  const chat = store.createChatSession({ agentId: leader.id, issueId: issue.id });
+  const session = store.getOrCreateDefaultChatSession(chat.id);
+  const main = store.createTask({ agentId: leader.id, issueId: issue.id, issueSessionId: session.id, prompt: "coordinate" });
   expect(store.claimTask(runtime.id)?.id).toBe(main.id);
   store.buildTaskSessionProjection(main.id);
   store.startTask(main.id);
   const delegate = (agentId: string, delegationId: string) => store.createTask({
-    agentId, issueId: issue.id, prompt: delegationId, delegationId, delegatedByAgentId: leader.id,
+    agentId, issueId: issue.id, issueSessionId: session.id, prompt: delegationId, delegationId, delegatedByAgentId: leader.id,
   });
-  return { store, runtime, leader, worker, qa, issue, main, delegate };
+  return { store, runtime, leader, worker, qa, issue, session, main, delegate };
 }
 
 describe("parallel agent execution", () => {
@@ -29,7 +31,7 @@ describe("parallel agent execution", () => {
     f.store.completeTask(f.main.id, { output: "historical answer", sessionId: "old_provider", workDir: "/tmp/old" });
     const session = f.main.issueSessionId!;
     const old = f.store.getSessionAgentLane(session, f.leader.id)!;
-    const queued = f.store.createTask({ agentId: f.leader.id, issueId: f.issue.id, prompt: "continue" });
+    const queued = f.store.createTask({ agentId: f.leader.id, issueId: f.issue.id, issueSessionId: f.session.id, prompt: "continue" });
     expect(f.store.getTask(queued.id)?.sessionId).toBe("old_provider");
     const events = db!.query("SELECT * FROM multiremi_session_events WHERE session_id = ? ORDER BY seq").all(session);
     db!.exec(`CREATE TABLE legacy_lanes AS SELECT session_id, agent_id, provider_session_id,
@@ -68,7 +70,7 @@ describe("parallel agent execution", () => {
 
   it("runs Leader, worker and QA together but serializes the next Leader turn", () => {
     const f = fixture();
-    const next = f.store.createTask({ agentId: f.leader.id, issueId: f.issue.id, prompt: "follow up" });
+    const next = f.store.createTask({ agentId: f.leader.id, issueId: f.issue.id, issueSessionId: f.session.id, prompt: "follow up" });
     const worker = f.delegate(f.worker.id, "dlg_work");
     const qa = f.delegate(f.qa.id, "dlg_qa");
     expect(f.store.claimTask(f.runtime.id)?.id).toBe(worker.id);

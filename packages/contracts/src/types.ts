@@ -1302,7 +1302,7 @@ export interface MultiremiTask {
   issueId: string | null;
   issueSessionId: string | null;
   issue_session_id?: string | null;
-  /** Generation of this task's per-agent Issue Session lane, frozen at claim
+  /** Generation of this task's per-agent Session lane, frozen at claim
    * time and persisted so late completions cannot promote into a newer lane. */
   issueSessionGeneration?: number | null;
   execution_scope?: string;
@@ -1781,7 +1781,7 @@ export const MULTIREMI_SESSION_ARCHIVE_MIN_GC_INTERVAL_MS = 60 * 1000;
 export const MULTIREMI_SESSION_ARCHIVE_PREPARATION_FAILURE_REVISION = "preparation-failed";
 
 /**
- * Control-plane metadata for a provider-native Issue session archive.
+ * Control-plane metadata for an Issue-scoped Provider Session Archive.
  * Archive bytes live in SessionArchiveStore, never in SQL.
  */
 export interface MultiremiSessionArchive {
@@ -2187,22 +2187,32 @@ export interface MultiremiProjectSearchResult extends MultiremiProject {
   matchedSnippet?: string;
 }
 
-// ─── Issue sessions ──────────────────────────────────────────────────────────────────────────────
+// ─── Sessions ────────────────────────────────────────────────────────────────────────────────────
+// Sessions are core product entities owned by a Chat. Issue is an optional
+// management association inherited from that Chat; `IssueSession` names below
+// remain compatibility aliases for the former issue-nested API.
 
-export type MultiremiIssueSessionStatus = "active" | "archived";
+export type MultiremiSessionStatus = "active" | "archived";
+
+/** @deprecated Use `MultiremiSessionStatus`. */
+export type MultiremiIssueSessionStatus = MultiremiSessionStatus;
 
 export type MultiremiSessionParticipantType = "agent" | "member";
 
 export type MultiremiSessionProjectionMode = "bootstrap" | "delta";
 
-export interface MultiremiIssueSession {
+export interface MultiremiSession {
   id: string;
-  issueId: string;
-  issue_id?: string;
+  /** Owning Chat. Null is emitted only for unmigrated legacy Issue Sessions. */
+  chatId: string | null;
+  chat_id?: string | null;
+  /** Current optional Issue association of the owning Chat. */
+  issueId: string | null;
+  issue_id?: string | null;
   workspaceId: string;
   workspace_id?: string;
   title: string;
-  status: MultiremiIssueSessionStatus;
+  status: MultiremiSessionStatus;
   isDefault: boolean;
   is_default?: boolean;
   holdsWorkspace: boolean;
@@ -2217,6 +2227,9 @@ export interface MultiremiIssueSession {
   updatedAt: string;
   updated_at?: string;
 }
+
+/** @deprecated Use `MultiremiSession`. */
+export type MultiremiIssueSession = MultiremiSession;
 
 export interface MultiremiSessionParticipant {
   id: string;
@@ -2282,8 +2295,10 @@ export interface MultiremiSessionAgentLane {
 
 export interface MultiremiSessionResult {
   id: string;
-  issueId: string;
-  issue_id?: string;
+  chatId: string | null;
+  chat_id?: string | null;
+  issueId: string | null;
+  issue_id?: string | null;
   sourceSessionId: string;
   source_session_id?: string;
   title: string;
@@ -2316,10 +2331,10 @@ export interface MultiremiSessionProjection {
   estimated_tokens?: number;
 }
 
-export interface CreateIssueSessionInput {
+export interface CreateSessionInput {
   id?: string;
-  issueId?: string;
-  issue_id?: string;
+  chatId?: string;
+  chat_id?: string;
   title?: string;
   createdByType?: string;
   created_by_type?: string;
@@ -2331,11 +2346,17 @@ export interface CreateIssueSessionInput {
   holds_workspace?: boolean;
 }
 
-export interface UpdateIssueSessionInput {
+/** @deprecated Use `CreateSessionInput`. */
+export type CreateIssueSessionInput = CreateSessionInput;
+
+export interface UpdateSessionInput {
   title?: string;
-  status?: MultiremiIssueSessionStatus;
+  status?: MultiremiSessionStatus;
   summary?: string | null;
 }
+
+/** @deprecated Use `UpdateSessionInput`. */
+export type UpdateIssueSessionInput = UpdateSessionInput;
 
 export interface AddSessionParticipantInput {
   participantType?: MultiremiSessionParticipantType;

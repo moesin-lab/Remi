@@ -493,7 +493,7 @@
     "space_used": "사용 공간",
     "last_failure": "최근 아카이브 실패",
     "cleanup_title": "작업 공간 정리",
-    "cleanup_description": "완료된 Issue 작업 공간을 지정한 시간 동안 유지합니다. 세션 아카이브가 검증되기 전에는 삭제하지 않습니다.",
+    "cleanup_description": "완료된 Issue 작업 공간을 지정한 시간 동안 유지합니다. Provider 세션 아카이브가 검증되기 전에는 삭제하지 않습니다.",
     "workspace_ttl": "작업 공간 보존 기간",
     "gc_interval": "정리 검사 간격",
     "hours": "시간",

@@ -1351,6 +1351,7 @@ export class AutopilotsRepo {
 
       let issue: MultiremiIssue | null = null;
       let issueSessionId: string | null = null;
+      let chatSessionId: string | null = null;
       if (autopilot.executionMode === "create_issue") {
         issue = this.ctx.issues().createIssue({
           title: prompt,
@@ -1382,22 +1383,45 @@ export class AutopilotsRepo {
             throw new Error("System event does not belong to the trigger issue");
           }
         }
+        const existingChat = this.ctx.db.query(
+          `SELECT id FROM multiremi_chat_sessions
+           WHERE issue_id = ? AND agent_id = ? AND status = 'active'
+           ORDER BY updated_at DESC LIMIT 1`,
+        ).get(issue.id, agent.id) as { id?: string } | null;
+        const chat = existingChat?.id
+          ? this.ctx.chat().getChatSession(existingChat.id)!
+          : this.ctx.chat().createChatSessionWithinTransaction({
+            workspaceId: issue.workspaceId,
+            creatorId: agent.ownerId,
+            agentId: agent.id,
+            issueId: issue.id,
+            title: `${autopilot.title} · ${issue.key}`,
+          });
+        const reusableSession = autopilot.sessionPolicy === "reuse_latest"
+          ? this.ctx.db.query(
+            `SELECT id FROM multiremi_issue_sessions
+             WHERE chat_id = ? AND status = 'active'
+             ORDER BY updated_at DESC, id DESC LIMIT 1`,
+          ).get(chat.id) as { id?: string } | null
+          : null;
         const issueSession = autopilot.sessionPolicy === "reuse_latest"
-          ? this.ctx.issueSessions().getLatestActiveIssueSession(issue.id)
-            ?? this.ctx.issueSessions().getOrCreateDefaultIssueSession(issue.id)
-          : this.ctx.issueSessions().createIssueSessionWithinTransaction(issue.id, {
+          ? (reusableSession?.id ? this.ctx.issueSessions().getIssueSession(reusableSession.id) : null)
+            ?? this.ctx.issueSessions().getOrCreateDefaultChatSession(chat.id, agent.ownerId)
+          : this.ctx.issueSessions().createSession(chat.id, {
             title: `${autopilot.title} · ${issue.key}`,
             createdByType: "agent",
             createdById: agent.id,
             participantAgentIds: [agent.id],
           });
         issueSessionId = issueSession.id;
+        chatSessionId = chat.id;
       }
 
       const task = this.ctx.tasks().createTaskWithinTransaction({
         agentId: agent.id,
         issueId: issue?.id ?? null,
         issueSessionId,
+        chatSessionId,
         workspaceId: autopilot.workspaceId,
         prompt,
         assignmentAuthorType: "system",

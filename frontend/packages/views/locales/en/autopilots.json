@@ -145,7 +145,7 @@
   },
   "run": {
     "issue_linked": "Issue linked",
-    "session_linked": "Issue Session linked",
+    "session_linked": "Session linked",
     "view_log": "View execution log",
     "skipped_group": {
       "label": "Skipped",

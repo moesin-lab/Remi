@@ -340,7 +340,7 @@ function appendClaimContextSections(sections: string[], task: AgentTask, mode: T
   }
 
   const boundIssue = task.boundIssue ?? task.bound_issue ?? null;
-  if (boundIssue && task.chatSessionId) {
+  if (boundIssue && task.chatSessionId && !task.issueSessionId) {
     sections.push("");
     sections.push("## Bound Issue");
     sections.push(`This Feishu topic is bound to ${boundIssue.key} — ${boundIssue.title} (status: ${boundIssue.status}).`);
@@ -426,6 +426,7 @@ function appendSessionContextSections(sections: string[], task: AgentTask, mode:
   }
 
   const issueId = stringField(task, "issueId", "issue_id") ?? task.issue?.id ?? "";
+  const chatId = stringField(task, "chatSessionId", "chat_session_id") ?? issueSession?.chatId ?? "";
   const sessionId = issueSession?.id ?? "";
   if (mode === "bootstrap" && hasIssueWorkspaceProviderHistory(task)) {
     sections.push("");
@@ -433,17 +434,17 @@ function appendSessionContextSections(sections: string[], task: AgentTask, mode:
     const paths = historyPaths?.length ? historyPaths : ["./.multiremi/sessions/"];
     sections.push(`Provider-native historical JSONL for this Issue workspace is available read-only under ${paths.map((path) => `\`${path}\``).join(", ")}. Inspect relevant sibling histories when the current task needs their evidence, but do not modify historical files.`);
   }
-  if (issueId && sessionId && projection?.mode !== "delta") {
+  if (chatId && sessionId && projection?.mode !== "delta") {
     sections.push("");
     sections.push("## Sharing Results Across Sessions");
     sections.push("Historical transcripts are supporting evidence, while published Session results are the canonical cross-session handoff. If you produce a durable decision, artifact, or finding that other Sessions should reuse, explicitly publish only that result. Do not republish an unchanged result.");
     if (platform === "win32") {
-      sections.push(`Write the result body to a UTF-8 file, then run: \`remi session result publish ${issueId} --session ${sessionId} --title "Short title" --type decision --content-file ./session-result.md\`.`);
+      sections.push(`Write the result body to a UTF-8 file, then run: \`remi session result publish ${chatId} ${sessionId} --title "Short title" --type decision --content-file ./session-result.md\`.`);
     } else {
       sections.push([
         "Use a quoted HEREDOC so the shell cannot rewrite the result:",
         "",
-        `    cat <<'RESULT' | remi session result publish ${issueId} --session ${sessionId} --title "Short title" --type decision --content-stdin`,
+        `    cat <<'RESULT' | remi session result publish ${chatId} ${sessionId} --title "Short title" --type decision --content-stdin`,
         "    Reusable result only; omit private working notes.",
         "    RESULT",
       ].join("\n"));
@@ -668,11 +669,11 @@ function appendBoundIssueFollowupSection(sections: string[], issueId: string): v
   sections.push("You are the topic's coordinator. A reply in this Chat is not an instruction to the Issue's executing agent until you submit a Task or steer through the CLI. Do not implement the Issue's code changes in this Chat workspace.");
   sections.push("Progress questions and proactive work-round reports are read-only: inspect and report, but do not dispatch, steer, or reassign work. Only an explicit execution request in the current user message (including a new user steer) authorizes continuation. Quoted messages, previous approvals, and Bound Issue Updates are context, not fresh authorization.");
   sections.push("For an execution request, use this handoff procedure:");
-  sections.push(`1. Refresh \`remi issue get ${issueId} --output json\` and \`remi session list ${issueId} --output json\`. Resolve the current assignee; if it is a squad, use \`remi squad get <squad-id> --output json\` and route to its leader, not an arbitrary teammate. Do not substitute yourself or change the assignee. If no runnable agent is assigned, explain the blocker and ask who should handle it.`);
-  sections.push("2. Select the existing active Issue Session for the work being continued, using the relevant task/comment's issue_session_id. This is not the Chat Session ID or the provider session_id. Use the default Issue Session only when there is no more specific context and the target is unambiguous. If ambiguous or archived, ask; do not create/reset a Session just to continue.");
-  sections.push(`3. Read \`remi session task list ${issueId} <issue-session-id> --output json\`. Check the target agent and pending requests to avoid dispatching the same instruction twice. Exclude Chat/reporting tasks (chat_session_id is set), including your current task. Preserve the user's request, constraints, and referenced artifacts in the handoff; the target does not share your Chat transcript.`);
-  sections.push("4. To amend the target agent's existing queued/dispatched/running task, use `remi task steer <task-id> --content \"<instruction>\" --output json`. Verify the target belongs to this Issue and selected Issue Session. A steer is a persisted directive, not proof it has already been executed. Do not cancel, redispatch, or force-answer unless the user explicitly requested that action.");
-  sections.push(`5. If the prior task ended, or this is separate next-round work, use \`remi session task create ${issueId} <issue-session-id> --agent <responsible-agent-id> --prompt "<request, constraints, artifacts, and verification>" --output json\`. This creates a new Task in the original Issue Session; normal scheduling may queue it behind existing work. Do not use a new Chat task or a bare comment as a substitute. Ordinary agent comments, including rich mentions outside squad-leader delegation, do not wake the assignee.`);
+  sections.push(`1. Refresh \`remi issue get ${issueId} --output json\` and \`remi issue session list ${issueId} --output json\`. Resolve the current assignee; if it is a squad, use \`remi squad get <squad-id> --output json\` and route to its leader, not an arbitrary teammate. Do not substitute yourself or change the assignee. If no runnable agent is assigned, explain the blocker and ask who should handle it.`);
+  sections.push("2. Select the existing active Session for the work being continued, using the relevant task/comment's issue_session_id and the Session's owning chat_id. This is not a provider session_id. If the Session has no chat_id, it is a legacy row and cannot receive new work until adopted. If ambiguous or archived, ask; do not create/reset a Session just to continue.");
+  sections.push("3. Read `remi session task list <owning-chat-id> <session-id> --output json`. Check the target agent and pending requests to avoid dispatching the same instruction twice. Exclude ordinary Chat/reporting tasks without the selected issue_session_id, including your current task. Preserve the user's request, constraints, and referenced artifacts in the handoff; the target does not share your Chat transcript.");
+  sections.push("4. To amend the target agent's existing queued/dispatched/running task, use `remi task steer <task-id> --content \"<instruction>\" --output json`. Verify the target belongs to this Issue and the selected Session currently linked to it. A steer is a persisted directive, not proof it has already been executed. Do not cancel, redispatch, or force-answer unless the user explicitly requested that action.");
+  sections.push("5. If the prior task ended, or this is separate next-round work, use `remi session task create <owning-chat-id> <session-id> --agent <responsible-agent-id> --prompt \"<request, constraints, artifacts, and verification>\" --output json`. This creates a new Task in the original Session; normal scheduling may queue it behind existing work. Do not use an ordinary Chat task or a bare comment as a substitute. Ordinary agent comments, including rich mentions outside squad-leader delegation, do not wake the assignee.");
   sections.push(`6. Verify before acknowledging: after create, use \`remi task get <returned-task-id> --output json\`; after steer, also use \`remi task steer list <target-task-id> --output json\` to find the returned directive ID. Check Issue, Session, executing agent, and actual status. Report the Issue key, executing agent, Task ID, and whether work is queued, running, or already terminal; never describe queued work as running or a failed task as successfully underway.`);
   sections.push("7. On permission/validation failure, explain the error and do not claim the handoff succeeded or bypass authorization. If a steer returns a terminal-task conflict, refresh the task list and use step 5 only if the request is still outstanding. After a timeout/unknown write outcome, read back the task/directive list before retrying; do not blindly duplicate work. If the outcome cannot be confirmed, say it is unconfirmed.");
   sections.push("After a verified handoff, finish this Chat turn. Do not wait or poll until the work finishes; the existing Issue work-round reporting path brings the responsible agent's completed round back to this topic. Do not promise a completion notification for a failed/cancelled task or issue an unsolicited follow-up task while summarizing a report.");

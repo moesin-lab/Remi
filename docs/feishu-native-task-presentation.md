@@ -1,7 +1,7 @@
 # Feishu Task presentation
 
 New inbound chats, Issue topic replies and proactive Task reports use
-`FeishuTaskPresentation`. Agent execution, Chat Session identity, Task messages
+`FeishuTaskPresentation`. Agent execution, Chat identity, Task messages
 and human responses remain on the existing Task pipeline.
 
 | Stage | Transport | Visible content |

@@ -655,9 +655,9 @@ export function createFeishuTaskHandler(
       });
       return;
     }
-    if (command === "/status" || command === "/sessions" || command === "/context") {
+    if (command === "/status" || command === "/chat" || command === "/sessions" || command === "/context") {
       const snapshot = await daemon.inspectFeishuBotSession(revision, sessionKey);
-      await consumer(singleMessageStream(renderFeishuSessionCommand(command, snapshot)), {
+      await consumer(singleMessageStream(renderFeishuChatCommand(command, snapshot)), {
         taskId: `feishu-command-${command.slice(1)}`,
         displayName: snapshot.agentName ?? displayName,
         respondHumanRequest: async () => { throw new Error("command has no human request"); },
@@ -706,14 +706,20 @@ export function createFeishuTaskHandler(
   };
 }
 
-function renderFeishuSessionCommand(command: string, snapshot: FeishuBotSessionSnapshot): string {
-  if (!snapshot.chatSessionId) return "No conversation has been started yet.";
+function renderFeishuChatCommand(command: string, snapshot: FeishuBotSessionSnapshot): string {
+  const deprecatedSessionsNotice = command === "/sessions"
+    ? "Deprecated: /sessions reports the current Chat. Use /chat."
+    : null;
+  if (!snapshot.chatSessionId) {
+    return [deprecatedSessionsNotice, "No conversation has been started yet."].filter(Boolean).join("\n");
+  }
   const task = snapshot.task;
-  if (command === "/sessions") {
+  if (command === "/chat" || command === "/sessions") {
     return [
+      deprecatedSessionsNotice,
       `Conversation: ${snapshot.chatSessionId}`,
       task ? `Latest task: ${task.taskId} (${task.status})` : "Latest task: none",
-    ].join("\n");
+    ].filter(Boolean).join("\n");
   }
   if (command === "/context") {
     if (!task) return `Conversation: ${snapshot.chatSessionId}\nContext usage: no task usage yet.`;

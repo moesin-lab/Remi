@@ -3,7 +3,7 @@
 When Issue topic synchronization is enabled, the configured group `chat_id`
 accepts human messages without mentioning the bot, including new top-level
 messages and replies inside topics. Existing topic replies continue their bound
-Chat Session. Other groups still require a bot mention or a slash command.
+platform Chat. Other groups still require a bot mention or a slash command.
 Messages authored by bots and messages directed only at other people are ignored.
 Sender identity and workspace permission checks in the Task API are unchanged.
 
@@ -97,7 +97,8 @@ only; older v4 daemons ignore the optional mention plan. Upgrade the API and
 bot-hosting daemon together to enable proactive mentions and final-only timing.
 
 Issue-associated Chat tasks keep their Chat directory and provider session.
-Only genuine Issue discussion tasks require an Issue Session lifecycle lock.
+Only genuine Session discussion tasks require a Session lifecycle lock. Each
+Session belongs to a Chat; the Chat may or may not currently link an Issue.
 
 ## Continuing Issue Work From a Topic
 
@@ -106,12 +107,13 @@ automatic round report from an explicit user request to continue execution.
 Questions and reports remain read-only. Quoted approvals are not fresh authority.
 
 For an execution request, Remi refreshes the Issue, resolves its responsible
-agent (the leader for a squad), and identifies the existing active Issue Session.
+agent (the leader for a squad), and identifies an accessible active Session owned
+by a Chat currently linked to the Issue.
 It lists that Session's tasks, excluding Chat/report tasks, before choosing:
 
 - Amend existing work: `remi task steer <task> --content "<instruction>"`.
 - Continue after completion or queue separate next-round work:
-  `remi session task create <issue> <session> --agent <agent> --prompt "<request>"`.
+  `remi session task create <chat> <session> --agent <agent> --prompt "<request>"`.
 
 The handoff includes the user's constraints and artifact references because the
 Issue executor does not share the topic's Chat transcript. It must not silently

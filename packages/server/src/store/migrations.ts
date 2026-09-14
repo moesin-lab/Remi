@@ -9,7 +9,7 @@ import {
 } from "@multiremi/session-archive/retry-policy.js";
 import { createLogger } from "@shared/logger.js";
 import { canonicalizeDaemonRoutingWithinTransaction } from "@multiremi/store/daemon-routing.js";
-import { isPostgresConfigured } from "@multiremi/store/db/postgres.js";
+import { isPostgresConfigured, PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 
 const log = createLogger("multiremi-store");
 const SCM_CONNECTION_ORIGIN_MIGRATION = "20260822_scm_connection_origins";
@@ -35,6 +35,7 @@ const FEISHU_BOT_AGENT_ROUTES_MIGRATION = "20260908_feishu_bot_agent_routes";
 const FEISHU_BOT_AGENT_ROUTE_DEFAULT_UNIQUENESS_MIGRATION =
   "20260909_feishu_bot_agent_route_default_uniqueness";
 const AGENT_PAGE_QUERY_INDEXES_MIGRATION = "20260910_agent_page_query_indexes";
+const CHAT_OWNED_SESSIONS_MIGRATION = "20260913_chat_owned_sessions";
 
 // Stable Feishu open_id of the deployment owner (hehuajie / 贺华杰). The seed
 // `local` user is tagged with this on migration so SSO login re-binds to it
@@ -822,11 +823,13 @@ export function runMigrations(db: SqlDatabase): void {
       FOREIGN KEY(parent_issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL
     );
 
-    -- Product-level collaboration sessions. These are intentionally distinct
-    -- from ACP/provider session ids stored on tasks and agent lanes.
+    -- Core product Sessions. chat_id is the owner; issue_id is a nullable
+    -- compatibility/index snapshot of the Chat's current Issue association.
+    -- The physical table name is retained for upgrade compatibility.
     CREATE TABLE IF NOT EXISTS multiremi_issue_sessions (
       id TEXT PRIMARY KEY,
-      issue_id TEXT NOT NULL,
+      chat_id TEXT,
+      issue_id TEXT,
       workspace_id TEXT NOT NULL DEFAULT 'local',
       title TEXT NOT NULL DEFAULT 'Main',
       status TEXT NOT NULL DEFAULT 'active',
@@ -837,16 +840,13 @@ export function runMigrations(db: SqlDatabase): void {
       created_by_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE
+      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL
     );
 
     CREATE INDEX IF NOT EXISTS idx_multiremi_issue_sessions_issue
       ON multiremi_issue_sessions(issue_id, status, updated_at);
     CREATE INDEX IF NOT EXISTS idx_multiremi_issue_sessions_workspace
       ON multiremi_issue_sessions(workspace_id, updated_at);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_multiremi_issue_sessions_default
-      ON multiremi_issue_sessions(issue_id) WHERE is_default = 1;
-
     CREATE TABLE IF NOT EXISTS multiremi_session_participants (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
@@ -918,7 +918,8 @@ export function runMigrations(db: SqlDatabase): void {
     -- published results/summaries, not the source session's private event log.
     CREATE TABLE IF NOT EXISTS multiremi_session_results (
       id TEXT PRIMARY KEY,
-      issue_id TEXT NOT NULL,
+      chat_id TEXT,
+      issue_id TEXT,
       source_session_id TEXT NOT NULL,
       title TEXT NOT NULL DEFAULT '',
       body TEXT NOT NULL,
@@ -926,7 +927,7 @@ export function runMigrations(db: SqlDatabase): void {
       published_by_type TEXT NOT NULL DEFAULT 'agent',
       published_by_id TEXT,
       created_at TEXT NOT NULL,
-      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE,
+      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL,
       FOREIGN KEY(source_session_id) REFERENCES multiremi_issue_sessions(id) ON DELETE CASCADE
     );
 
@@ -3032,7 +3033,7 @@ export function runMigrations(db: SqlDatabase): void {
   // boot. Pre-pool tasks keep their pin (claimable by their original machine);
   // new tasks are already unbound by createTask. Only the agent binding above
   // is cleared, which is the invariant the pool model needs.
-  backfillDefaultIssueSessions(db);
+  migrateChatOwnedSessions(db);
   backfillIssueKeys(db);
   migrateLegacyGithubProjection(db, legacyGithubTables);
 }
@@ -3197,39 +3198,201 @@ function normalizeSquadLeaderRoles(db: SqlDatabase): void {
   );
 }
 
-function backfillDefaultIssueSessions(db: SqlDatabase): void {
+function migrateChatOwnedSessions(db: SqlDatabase): void {
+  const applied = db.query("SELECT 1 AS applied FROM multiremi_schema_migrations WHERE id = ?").get(
+    CHAT_OWNED_SESSIONS_MIGRATION,
+  );
+  if (applied) return;
+
+  if (isPostgresConfigured() || db instanceof PostgresSyncDatabase) {
+    runMigrationOnce(db, CHAT_OWNED_SESSIONS_MIGRATION, () => {
+      addColumnIfMissing(db, "multiremi_issue_sessions", "chat_id TEXT");
+      addColumnIfMissing(db, "multiremi_session_results", "chat_id TEXT");
+      db.exec(`
+        ALTER TABLE multiremi_issue_sessions ALTER COLUMN issue_id DROP NOT NULL;
+        ALTER TABLE multiremi_session_results ALTER COLUMN issue_id DROP NOT NULL;
+        ALTER TABLE multiremi_issue_sessions DROP CONSTRAINT IF EXISTS multiremi_issue_sessions_issue_id_fkey;
+        ALTER TABLE multiremi_issue_sessions ADD CONSTRAINT multiremi_issue_sessions_issue_id_fkey
+          FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL;
+        ALTER TABLE multiremi_issue_sessions DROP CONSTRAINT IF EXISTS multiremi_issue_sessions_chat_id_fkey;
+        ALTER TABLE multiremi_issue_sessions ADD CONSTRAINT multiremi_issue_sessions_chat_id_fkey
+          FOREIGN KEY(chat_id) REFERENCES multiremi_chat_sessions(id) ON DELETE CASCADE;
+        ALTER TABLE multiremi_session_results DROP CONSTRAINT IF EXISTS multiremi_session_results_issue_id_fkey;
+        ALTER TABLE multiremi_session_results ADD CONSTRAINT multiremi_session_results_issue_id_fkey
+          FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL;
+        ALTER TABLE multiremi_session_results DROP CONSTRAINT IF EXISTS multiremi_session_results_chat_id_fkey;
+        ALTER TABLE multiremi_session_results ADD CONSTRAINT multiremi_session_results_chat_id_fkey
+          FOREIGN KEY(chat_id) REFERENCES multiremi_chat_sessions(id) ON DELETE CASCADE;
+        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_default;
+        CREATE UNIQUE INDEX idx_multiremi_issue_sessions_default
+          ON multiremi_issue_sessions(chat_id) WHERE is_default = 1 AND chat_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_multiremi_issue_sessions_chat
+          ON multiremi_issue_sessions(chat_id, status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_multiremi_session_results_chat
+          ON multiremi_session_results(chat_id, created_at);
+      `);
+      backfillChatOwnedSessions(db);
+    });
+    return;
+  }
+
+  const foreignKeysEnabled = Number((db.query("PRAGMA foreign_keys").get() as { foreign_keys?: number } | null)?.foreign_keys ?? 0) === 1;
+  db.exec("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;");
+  try {
+    db.transaction(() => {
+      const claimed = db.run(
+        "INSERT OR IGNORE INTO multiremi_schema_migrations (id, applied_at) VALUES (?, ?)",
+        [CHAT_OWNED_SESSIONS_MIGRATION, new Date().toISOString()],
+      ).changes;
+      if (claimed !== 1) return;
+      db.exec(`
+        ALTER TABLE multiremi_issue_sessions RENAME TO multiremi_issue_sessions_issue_owned;
+        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_issue;
+        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_workspace;
+        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_default;
+        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_chat;
+        CREATE TABLE multiremi_issue_sessions (
+          id TEXT PRIMARY KEY,
+          chat_id TEXT,
+          issue_id TEXT,
+          workspace_id TEXT NOT NULL DEFAULT 'local',
+          title TEXT NOT NULL DEFAULT 'Main',
+          status TEXT NOT NULL DEFAULT 'active',
+          is_default INTEGER NOT NULL DEFAULT 0,
+          holds_workspace INTEGER NOT NULL DEFAULT 1,
+          summary TEXT,
+          created_by_type TEXT NOT NULL DEFAULT 'member',
+          created_by_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(chat_id) REFERENCES multiremi_chat_sessions(id) ON DELETE CASCADE,
+          FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL
+        );
+        INSERT INTO multiremi_issue_sessions (
+          id, chat_id, issue_id, workspace_id, title, status, is_default,
+          holds_workspace, summary, created_by_type, created_by_id, created_at, updated_at
+        )
+        SELECT id, NULL, issue_id, workspace_id, title, status, is_default,
+          holds_workspace, summary, created_by_type, created_by_id, created_at, updated_at
+        FROM multiremi_issue_sessions_issue_owned;
+        DROP TABLE multiremi_issue_sessions_issue_owned;
+        CREATE INDEX idx_multiremi_issue_sessions_issue
+          ON multiremi_issue_sessions(issue_id, status, updated_at);
+        CREATE INDEX idx_multiremi_issue_sessions_workspace
+          ON multiremi_issue_sessions(workspace_id, updated_at);
+        CREATE INDEX idx_multiremi_issue_sessions_chat
+          ON multiremi_issue_sessions(chat_id, status, updated_at);
+        CREATE UNIQUE INDEX idx_multiremi_issue_sessions_default
+          ON multiremi_issue_sessions(chat_id) WHERE is_default = 1 AND chat_id IS NOT NULL;
+
+        ALTER TABLE multiremi_session_results RENAME TO multiremi_session_results_issue_owned;
+        DROP INDEX IF EXISTS idx_multiremi_session_results_issue;
+        DROP INDEX IF EXISTS idx_multiremi_session_results_source;
+        DROP INDEX IF EXISTS idx_multiremi_session_results_chat;
+        CREATE TABLE multiremi_session_results (
+          id TEXT PRIMARY KEY,
+          chat_id TEXT,
+          issue_id TEXT,
+          source_session_id TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          body TEXT NOT NULL,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          published_by_type TEXT NOT NULL DEFAULT 'agent',
+          published_by_id TEXT,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(chat_id) REFERENCES multiremi_chat_sessions(id) ON DELETE CASCADE,
+          FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL,
+          FOREIGN KEY(source_session_id) REFERENCES multiremi_issue_sessions(id) ON DELETE CASCADE
+        );
+        INSERT INTO multiremi_session_results (
+          id, chat_id, issue_id, source_session_id, title, body, metadata,
+          published_by_type, published_by_id, created_at
+        )
+        SELECT id, NULL, issue_id, source_session_id, title, body, metadata,
+          published_by_type, published_by_id, created_at
+        FROM multiremi_session_results_issue_owned;
+        DROP TABLE multiremi_session_results_issue_owned;
+        CREATE INDEX idx_multiremi_session_results_issue
+          ON multiremi_session_results(issue_id, created_at);
+        CREATE INDEX idx_multiremi_session_results_chat
+          ON multiremi_session_results(chat_id, created_at);
+        CREATE INDEX idx_multiremi_session_results_source
+          ON multiremi_session_results(source_session_id, created_at);
+      `);
+      backfillChatOwnedSessions(db);
+    })();
+  } finally {
+    db.exec(`PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ${foreignKeysEnabled ? "ON" : "OFF"};`);
+  }
+  // Existing installations can contain an unrelated legacy violation which a
+  // later migration repairs. Fail only for tables whose references can be
+  // affected by rebuilding the Session/result parents here.
+  const sessionTables = new Set([
+    "multiremi_issue_sessions",
+    "multiremi_session_results",
+    "multiremi_session_events",
+    "multiremi_session_participants",
+    "multiremi_session_agent_lanes",
+    "multiremi_tasks",
+    "multiremi_issue_comments",
+  ]);
+  const violations = (db.query("PRAGMA foreign_key_check").all() as Array<{ table?: string }>)
+    .filter((row) => sessionTables.has(String(row.table ?? "")));
+  if (violations.length > 0) throw new Error(`Chat-owned Session migration left ${violations.length} foreign-key violation(s)`);
+}
+
+function backfillChatOwnedSessions(db: SqlDatabase): void {
   const now = new Date().toISOString();
+  // A legacy Issue Session can be adopted without ambiguity only when its Issue
+  // has exactly one Chat. Ambiguous rows remain readable through the deprecated
+  // Issue API until a caller explicitly adopts them into a Chat.
+  db.run(
+    `UPDATE multiremi_issue_sessions
+     SET chat_id = (
+       SELECT MIN(c.id) FROM multiremi_chat_sessions c
+       WHERE c.issue_id = multiremi_issue_sessions.issue_id
+     )
+     WHERE chat_id IS NULL AND issue_id IS NOT NULL
+       AND 1 = (
+         SELECT COUNT(*) FROM multiremi_chat_sessions c
+         WHERE c.issue_id = multiremi_issue_sessions.issue_id
+       )`,
+  );
+  // Every Chat owns a default Main Session. Creating it does not route Chat
+  // messages through Session Tasks; that interaction remains a separate layer.
   db.run(
     `INSERT INTO multiremi_issue_sessions (
-       id, issue_id, workspace_id, title, status, is_default,
+       id, chat_id, issue_id, workspace_id, title, status, is_default,
        created_by_type, created_by_id, created_at, updated_at
      )
-     SELECT 'ises_' || i.id, i.id, i.workspace_id, 'Main', 'active', 1,
-            'system', NULL, i.created_at, i.updated_at
-     FROM multiremi_issues i
+     SELECT 'ises_chat_' || c.id, c.id, c.issue_id, c.workspace_id, 'Main', 'active', 1,
+            'member', c.creator_id, c.created_at, c.updated_at
+     FROM multiremi_chat_sessions c
      WHERE NOT EXISTS (
        SELECT 1 FROM multiremi_issue_sessions s
-       WHERE s.issue_id = i.id AND s.is_default = 1
+       WHERE s.chat_id = c.id AND s.is_default = 1
      )
      ON CONFLICT DO NOTHING`,
   );
   db.run(
-    `UPDATE multiremi_issue_comments
-     SET issue_session_id = (
-       SELECT s.id FROM multiremi_issue_sessions s
-       WHERE s.issue_id = multiremi_issue_comments.issue_id AND s.is_default = 1
-       LIMIT 1
+    `UPDATE multiremi_tasks
+     SET chat_session_id = (
+       SELECT s.chat_id FROM multiremi_issue_sessions s
+       WHERE s.id = multiremi_tasks.issue_session_id
      )
-     WHERE issue_session_id IS NULL`,
+     WHERE issue_session_id IS NOT NULL AND chat_session_id IS NULL
+       AND EXISTS (
+         SELECT 1 FROM multiremi_issue_sessions s
+         WHERE s.id = multiremi_tasks.issue_session_id AND s.chat_id IS NOT NULL
+       )`,
   );
   db.run(
-    `UPDATE multiremi_tasks
-     SET issue_session_id = (
-       SELECT s.id FROM multiremi_issue_sessions s
-       WHERE s.issue_id = multiremi_tasks.issue_id AND s.is_default = 1
-       LIMIT 1
+    `UPDATE multiremi_session_results
+     SET chat_id = (
+       SELECT s.chat_id FROM multiremi_issue_sessions s
+       WHERE s.id = multiremi_session_results.source_session_id
      )
-     WHERE issue_id IS NOT NULL AND issue_session_id IS NULL`,
+     WHERE chat_id IS NULL`,
   );
   db.run(
     `INSERT INTO multiremi_session_events (
@@ -3828,7 +3991,7 @@ function migrateExecutionScopedLanes(db: SqlDatabase): void {
     UPDATE multiremi_tasks SET session_id = NULL, work_dir = NULL, issue_session_generation = NULL,
       projection_from_seq = NULL, projection_to_seq = NULL, projection_mode = NULL,
       projection_truncated = 0, projection_omitted_events = 0, projection_estimated_tokens = 0
-    WHERE issue_session_id IS NOT NULL AND chat_session_id IS NULL AND status = 'queued';`);
+    WHERE issue_session_id IS NOT NULL AND status = 'queued';`);
   })();
 }
 

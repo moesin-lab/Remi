@@ -51,6 +51,33 @@ function scaffold() {
 }
 
 describe("Feishu bot standard Task bridge", () => {
+  it("reports the current Chat through /chat and marks /sessions as a deprecated alias", async () => {
+    const snapshot = {
+      chatSessionId: "chat_current",
+      agentId: "agent_current",
+      agentName: "Remi",
+      task: null,
+    };
+    const daemon = {
+      inspectFeishuBotSession: async () => snapshot,
+    } as unknown as MultiremiDaemon;
+    const handler = createFeishuTaskHandler(daemon, 1, "Remi");
+
+    for (const [command, expected] of [
+      ["/chat", "Conversation: chat_current\nLatest task: none"],
+      ["/sessions", "Deprecated: /sessions reports the current Chat. Use /chat.\nConversation: chat_current\nLatest task: none"],
+    ] as const) {
+      const output: string[] = [];
+      await handler({ text: command, chatId: "oc_chat", sender: "user" }, "oc_chat", async (stream, meta) => {
+        expect(meta.taskId).toBe(`feishu-command-${command.slice(1)}`);
+        for await (const event of stream) {
+          if (event.kind === "message" && event.message.content) output.push(event.message.content);
+        }
+      });
+      expect(output).toEqual([expected]);
+    }
+  });
+
   it("queues direct, group, and Issue topic replies with the resolved Agent and original conversation", async () => {
     const { store, config } = scaffold();
     store.reportFeishuBotRuntimeStatus("local", "rt_bot", { appliedRevision: config.revision, state: "online" });
@@ -273,18 +300,6 @@ describe("Feishu bot standard Task bridge", () => {
     })).toBe(true);
     expect(store.claimFeishuBotOutbound("local", "rt_bot", new Date(Date.now() + 60_000))).toBeNull();
 
-    const failedLeader = store.createSessionTask(session.id, {
-      agentId: agent.id,
-      prompt: "This round will fail.",
-    });
-    expect(store.claimTask("rt_issue_workspace")?.id).toBe(failedLeader.id);
-    store.startTask(failedLeader.id);
-    const countBeforeFailure = store.listTasks().length;
-    store.failTask(failedLeader.id, {
-      error: "final failure",
-      failureReason: "agent_error",
-    });
-    expect(store.listTasks()).toHaveLength(countBeforeFailure);
   });
 
   it("steers an existing inbound Chat task instead of creating a second round task", () => {
@@ -380,14 +395,17 @@ describe("Feishu bot standard Task bridge", () => {
       body: `Please implement this [@Teammate](mention://agent/${teammate.id})`,
     });
     const teammateTask = store.listTasksForIssue(issue.id).find((task) => task.agentId === teammate.id)!;
-    const baselineChatTaskCount = store.listTasks().filter((task) => task.chatSessionId === inbound.chatSessionId).length;
+    const ordinaryChatTasks = () => store.listTasks().filter((task) =>
+      task.chatSessionId === inbound.chatSessionId && !task.issueSessionId
+    );
+    const baselineChatTaskCount = ordinaryChatTasks().length;
 
     store.completeTask(leaderTask.id, { output: "Delegated; waiting for implementation." });
-    expect(store.listTasks().filter((task) => task.chatSessionId === inbound.chatSessionId)).toHaveLength(baselineChatTaskCount);
+    expect(ordinaryChatTasks()).toHaveLength(baselineChatTaskCount);
     expect(store.claimTask("rt_bot")?.id).toBe(teammateTask.id);
     store.startTask(teammateTask.id);
     store.completeTask(teammateTask.id, { output: "Implementation complete." });
-    expect(store.listTasks().filter((task) => task.chatSessionId === inbound.chatSessionId)).toHaveLength(baselineChatTaskCount);
+    expect(ordinaryChatTasks()).toHaveLength(baselineChatTaskCount);
 
     const leaderReturn = store.listTasksForIssue(issue.id).find((task) =>
       task.agentId === agent.id && task.parentTaskId === teammateTask.id

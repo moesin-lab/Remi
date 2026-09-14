@@ -98,7 +98,7 @@ bot-hosting daemon together to enable proactive mentions and final-only timing.
 
 Issue-associated Chat tasks keep their Chat directory and provider session.
 Only genuine Session discussion tasks require a Session lifecycle lock. Each
-such Session is currently linked to an Issue.
+Session belongs to a Chat; the Chat may or may not currently link an Issue.
 
 ## Continuing Issue Work From a Topic
 
@@ -107,13 +107,13 @@ automatic round report from an explicit user request to continue execution.
 Questions and reports remain read-only. Quoted approvals are not fresh authority.
 
 For an execution request, Remi refreshes the Issue, resolves its responsible
-agent (the leader for a squad), and identifies the existing active Session linked
-to the Issue.
+agent (the leader for a squad), and identifies an accessible active Session owned
+by a Chat currently linked to the Issue.
 It lists that Session's tasks, excluding Chat/report tasks, before choosing:
 
 - Amend existing work: `remi task steer <task> --content "<instruction>"`.
 - Continue after completion or queue separate next-round work:
-  `remi session task create <issue> <session> --agent <agent> --prompt "<request>"`.
+  `remi session task create <chat> <session> --agent <agent> --prompt "<request>"`.
 
 The handoff includes the user's constraints and artifact references because the
 Issue executor does not share the topic's Chat transcript. It must not silently

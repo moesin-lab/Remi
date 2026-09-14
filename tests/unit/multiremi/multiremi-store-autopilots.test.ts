@@ -853,7 +853,8 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Wiki maintainer", provider: "claude" });
     const issue = store.createIssue({ title: "Reuse session", status: "in_review" });
-    const latest = store.createIssueSession(issue.id, { title: "Latest context" });
+    const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id });
+    const latest = store.createSession(chat.id, { title: "Latest context" });
     db!.run(
       "UPDATE multiremi_issue_sessions SET updated_at = ? WHERE id = ?",
       ["2099-01-01T00:00:00.000Z", latest.id],

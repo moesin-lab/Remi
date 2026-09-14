@@ -2885,6 +2885,23 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "session.adopt": {
+      "command": "remi session adopt",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "session.adopt",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "session.update": {
       "command": "remi session update",
       "aliases": [],
@@ -9658,6 +9675,9 @@
     "DELETE /api/multiremi/autopilots/:id": {
       "command": "autopilot.delete"
     },
+    "DELETE /api/multiremi/chats/:id/sessions/:sessionId/participants/:participantType/:participantId": {
+      "command": "session.participant.remove"
+    },
     "DELETE /api/multiremi/comments/:id": {
       "command": "comment.delete"
     },
@@ -10243,6 +10263,24 @@
     },
     "GET /api/multiremi/chats/:id/messages": {
       "command": "chat.message.list"
+    },
+    "GET /api/multiremi/chats/:id/sessions": {
+      "command": "session.list"
+    },
+    "GET /api/multiremi/chats/:id/sessions/:sessionId": {
+      "command": "session.get"
+    },
+    "GET /api/multiremi/chats/:id/sessions/:sessionId/events": {
+      "command": "session.event.list"
+    },
+    "GET /api/multiremi/chats/:id/sessions/:sessionId/participants": {
+      "command": "session.participant.list"
+    },
+    "GET /api/multiremi/chats/:id/sessions/:sessionId/results": {
+      "command": "session.result.list"
+    },
+    "GET /api/multiremi/chats/:id/sessions/:sessionId/tasks": {
+      "command": "session.task.list"
     },
     "GET /api/multiremi/comments/:id/attachments": {
       "command": "comment.attachment.list"
@@ -10847,6 +10885,9 @@
     "PATCH /api/multiremi/chats/:id": {
       "command": "chat.update"
     },
+    "PATCH /api/multiremi/chats/:id/sessions/:sessionId": {
+      "command": "session.update"
+    },
     "PATCH /api/multiremi/comments/:id": {
       "command": "comment.update"
     },
@@ -11428,6 +11469,24 @@
     },
     "POST /api/multiremi/chats/:id/messages": {
       "command": "chat.message.create"
+    },
+    "POST /api/multiremi/chats/:id/sessions": {
+      "command": "session.create"
+    },
+    "POST /api/multiremi/chats/:id/sessions/:sessionId/adopt": {
+      "command": "session.adopt"
+    },
+    "POST /api/multiremi/chats/:id/sessions/:sessionId/messages": {
+      "command": "session.message.create"
+    },
+    "POST /api/multiremi/chats/:id/sessions/:sessionId/participants": {
+      "command": "session.participant.add"
+    },
+    "POST /api/multiremi/chats/:id/sessions/:sessionId/results": {
+      "command": "session.result.publish"
+    },
+    "POST /api/multiremi/chats/:id/sessions/:sessionId/tasks": {
+      "command": "session.task.create"
     },
     "POST /api/multiremi/comments/:id/reactions": {
       "command": "comment.reaction.add"

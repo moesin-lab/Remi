@@ -103,13 +103,13 @@ export async function prepareIssueSessionArchive(
   options: PrepareIssueSessionArchiveOptions = {},
 ): Promise<PreparedIssueSessionArchive> {
   const workspaceRoot = resolve(workspaceDir);
-  log.debug(`Issue Session archive started: ${workspaceRoot}`);
+  log.debug(`Provider Session Archive started: ${workspaceRoot}`);
   const maxSourceBytes = positiveLimit(options.maxSourceBytes, DEFAULT_MAX_SOURCE_BYTES);
   const sources = await resolveArchiveSources(workspaceRoot, options);
-  log.debug(`Issue Session archive roots checked: ${workspaceRoot} count=${sources.length}`);
+  log.debug(`Provider Session Archive roots checked: ${workspaceRoot} count=${sources.length}`);
   assertSessionArchiveTraversalSupported();
   const sourceSnapshot = await scanArchiveEntries(sources, maxSourceBytes);
-  log.debug(`Issue Session archive source scanned: ${workspaceRoot} files=${sourceSnapshot.files.length}`);
+  log.debug(`Provider Session Archive source scanned: ${workspaceRoot} files=${sourceSnapshot.files.length}`);
   const entries = sourceSnapshot.files;
   const metadata = {
     format: ARCHIVE_FORMAT,
@@ -120,29 +120,29 @@ export async function prepareIssueSessionArchive(
   const stagingRoot = resolve(options.stagingRoot ?? join(workspaceRoot, ".multiremi", "archive-spool"));
   assertContained(workspaceRoot, stagingRoot, "archive staging root");
   await ensureRealDirectoryTree(workspaceRoot, stagingRoot, "archive staging root");
-  log.debug(`Issue Session archive staging ready: ${workspaceRoot}`);
+  log.debug(`Provider Session Archive staging ready: ${workspaceRoot}`);
   const archivePath = join(stagingRoot, `${sourceRevision}.tar.gz`);
   const partialPath = `${archivePath}.${process.pid}.${randomUUID()}.partial`;
 
   await rm(partialPath, { force: true });
   try {
-    log.debug(`Issue Session archive compression started: ${workspaceRoot}`);
+    log.debug(`Provider Session Archive compression started: ${workspaceRoot}`);
     await pipeline(
       Readable.from(tarStream(entries, manifest)),
       createGzip({ level: 6 }),
       createWriteStream(partialPath, { flags: "wx", mode: 0o600 }),
     );
-    log.debug(`Issue Session archive compression finished: ${workspaceRoot}`);
+    log.debug(`Provider Session Archive compression finished: ${workspaceRoot}`);
     const verifiedSnapshot = await scanArchiveEntries(sources, maxSourceBytes);
-    log.debug(`Issue Session archive verification scan finished: ${workspaceRoot}`);
+    log.debug(`Provider Session Archive verification scan finished: ${workspaceRoot}`);
     assertSameArchiveSnapshot(sourceSnapshot, verifiedSnapshot);
     await rename(partialPath, archivePath).catch(async (error) => {
       if (!isAlreadyExists(error)) throw error;
       await rm(partialPath, { force: true });
     });
-    log.debug(`Issue Session archive published locally: ${workspaceRoot}`);
+    log.debug(`Provider Session Archive published locally: ${workspaceRoot}`);
     const archived = await inspectRegularFile(archivePath);
-    log.debug(`Issue Session archive digest verified: ${workspaceRoot}`);
+    log.debug(`Provider Session Archive digest verified: ${workspaceRoot}`);
     return {
       archivePath,
       sourceRevision,
@@ -170,7 +170,7 @@ export async function readIssueSessionArchiveReceipt(workspaceDir: string): Prom
     throw error;
   }
   if (!info.isFile() || info.isSymbolicLink()) {
-    throw new Error(`Issue session archive receipt must be a regular file: ${receiptPath}`);
+    throw new Error(`Provider Session Archive receipt must be a regular file: ${receiptPath}`);
   }
   await ensureRealDirectoryTree(workspaceRoot, dirname(receiptPath), "Issue metadata root");
   try {
@@ -202,9 +202,9 @@ export async function writeIssueSessionArchiveReceipt(
   workspaceDir: string,
   receipt: Omit<IssueSessionArchiveReceipt, "version" | "archivedAt"> & { archivedAt?: string },
 ): Promise<void> {
-  if (!nonEmptyString(receipt.issueId)) throw new Error("Issue session archive receipt requires an Issue id");
+  if (!nonEmptyString(receipt.issueId)) throw new Error("Provider Session Archive receipt requires an Issue id");
   if (!sha256String(receipt.sourceRevision) || !sha256String(receipt.sha256)) {
-    throw new Error("Issue session archive receipt requires SHA-256 digests");
+    throw new Error("Provider Session Archive receipt requires SHA-256 digests");
   }
   const workspaceRoot = resolve(workspaceDir);
   const metadataRoot = join(workspaceRoot, ".multiremi");
@@ -244,18 +244,18 @@ async function resolveArchiveSources(
   if (options.sessionRoots) {
     const boundary = resolve(options.sessionRootBoundary ?? "");
     if (!options.sessionRootBoundary) {
-      throw new Error("Issue session runtime roots require a storage boundary");
+      throw new Error("Provider Session Archive runtime roots require a storage boundary");
     }
     const seen = new Set<string>();
     return options.sessionRoots.map((source) => {
       assertArchiveRelativePath(source.sessionId);
-      if (source.sessionId.includes("/")) throw new Error(`Invalid Issue Session id: ${source.sessionId}`);
-      if (seen.has(source.sessionId)) throw new Error(`Duplicate Issue Session root: ${source.sessionId}`);
+      if (source.sessionId.includes("/")) throw new Error(`Invalid Session id: ${source.sessionId}`);
+      if (seen.has(source.sessionId)) throw new Error(`Duplicate Session root: ${source.sessionId}`);
       seen.add(source.sessionId);
       const sourceRoot = resolve(source.root);
       const rel = relative(boundary, sourceRoot);
       if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-        throw new Error(`Issue Session root escapes runtime storage: ${source.root}`);
+        throw new Error(`Session root escapes runtime storage: ${source.root}`);
       }
       return {
         boundary,
@@ -269,7 +269,7 @@ async function resolveArchiveSources(
   const sessionsExist = await assertOptionalRealDirectoryTree(
     workspaceRoot,
     sessionsRoot,
-    "Issue session history root",
+    "Provider Session Archive history root",
   );
   return sessionsExist
     ? [{ boundary: workspaceRoot, segments: [".multiremi", "sessions"], archivePrefix: "" }]
@@ -290,7 +290,7 @@ async function scanArchiveEntries(
     sourceDirectory: string,
   ): Promise<void> => {
     const before = await directory.stat();
-    if (!before.isDirectory()) throw new Error("Issue session history contains a non-directory parent");
+    if (!before.isDirectory()) throw new Error("Provider Session Archive history contains a non-directory parent");
     const children = (await readdir(fileHandlePath(directory), { withFileTypes: true }))
       .sort((left, right) => stableTextCompare(left.name, right.name));
     for (const child of children) {
@@ -310,11 +310,11 @@ async function scanArchiveEntries(
         }
         if (EXCLUDED_FILE_NAMES.has(child.name)) continue;
         if (!info.isFile()) throw new Error(`Refusing to archive non-regular file: ${archivePath}`);
-        log.debug(`Issue Session archive scanning file: ${archivePath} bytes=${info.size}`);
+        log.debug(`Provider Session Archive scanning file: ${archivePath} bytes=${info.size}`);
         const inspected = await inspectOpenRegularFile(handle, archivePath, info);
-        log.debug(`Issue Session archive scanned file: ${archivePath}`);
+        log.debug(`Provider Session Archive scanned file: ${archivePath}`);
         totalBytes += inspected.stats.size;
-        if (totalBytes > maxBytes) throw new Error(`Issue session history exceeds ${maxBytes} bytes`);
+        if (totalBytes > maxBytes) throw new Error(`Provider Session Archive history exceeds ${maxBytes} bytes`);
         files.push({
           path: archivePath,
           size: inspected.stats.size,
@@ -334,7 +334,7 @@ async function scanArchiveEntries(
     }
     const after = await directory.stat();
     if (!sameDirectorySnapshot(before, after)) {
-      throw new Error(`Issue session directory changed while preparing archive: ${archiveDirectory || "."}`);
+      throw new Error(`Provider Session Archive directory changed while preparing archive: ${archiveDirectory || "."}`);
     }
     directories.push({
       path: archiveDirectory || ".",
@@ -346,7 +346,7 @@ async function scanArchiveEntries(
   };
   for (const source of sources) {
     const root = await openWorkspaceDirectory(source.boundary, source.segments);
-    if (!root) throw new Error(`Issue Session root does not exist: ${source.archivePrefix}`);
+    if (!root) throw new Error(`Session root does not exist: ${source.archivePrefix}`);
     try {
       await visit(source, root, source.archivePrefix, "");
     } finally {
@@ -505,7 +505,7 @@ function assertSameArchiveSnapshot(
         && entry.ctimeMs === candidate.ctimeMs;
     });
   if (!sameFiles || !sameDirectories) {
-    throw new Error("Issue session history changed while archiving; retry with a fresh snapshot");
+    throw new Error("Provider Session Archive history changed while archiving; retry with a fresh snapshot");
   }
 }
 
@@ -573,7 +573,7 @@ async function openDirectoryChild(parent: FileHandle, name: string): Promise<Fil
   const info = await handle.stat();
   if (!info.isDirectory()) {
     await handle.close();
-    throw new Error(`Issue session history parent is not a directory: ${name}`);
+    throw new Error(`Provider Session Archive history parent is not a directory: ${name}`);
   }
   return handle;
 }
@@ -601,7 +601,7 @@ export function resolveSessionArchiveFileDescriptorPath(
     throw new Error(`Invalid session archive file descriptor: ${descriptor}`);
   }
   if (platform === "linux") return `/proc/self/fd/${descriptor}`;
-  throw new Error(`Secure Issue session archive traversal is unsupported on ${platform}`);
+  throw new Error(`Secure Provider Session Archive traversal is unsupported on ${platform}`);
 }
 
 function assertSessionArchiveTraversalSupported(): void {
@@ -685,7 +685,7 @@ function matchesArchiveEntry(stats: Stats, entry: IssueSessionArchiveEntry): boo
 }
 
 function archiveEntryChanged(path: string): Error {
-  return new Error(`Issue session file changed while archiving: ${path}`);
+  return new Error(`Provider Session Archive file changed while archiving: ${path}`);
 }
 
 function isSymlinkOpenError(error: unknown): boolean {

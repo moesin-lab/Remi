@@ -78,7 +78,7 @@ export interface AgentTask {
   // autopilot-spawned. Check chat_session_id / autopilot_run_id to tell
   // which source produced it.
   issue_id: string;
-  /** Product Session under the Issue. Empty/missing for legacy tasks. */
+  /** Product Session owned by the task's Chat. Empty/missing for legacy tasks. */
   issue_session_id?: string;
   /** Immutable snapshot of whether this task owns the shared Issue workspace. */
   holds_workspace?: boolean;

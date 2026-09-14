@@ -233,7 +233,8 @@ export class AgentIssueUpdatesRepo {
     for (const key of SOURCE_TASK_KEYS) {
       const taskId = nullableString(data[key]);
       if (!taskId) continue;
-      if (this.ctx.tasks().getTask(taskId)?.chatSessionId === chatSessionId) return true;
+      const sourceTask = this.ctx.tasks().getTask(taskId);
+      if (sourceTask?.chatSessionId === chatSessionId && !sourceTask.issueSessionId) return true;
       // The leader-round marker already carries this task's final output. The
       // automatic Issue comment is posted just after the terminal transaction;
       // suppress only that covered copy so it cannot become a second pending

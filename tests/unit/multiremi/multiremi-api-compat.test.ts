@@ -19,7 +19,8 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
     });
     const firstAgent = store.createAgent({ name: "Builder", provider: "claude" });
     const issue = store.createIssue({ title: "Queue source", workspaceId: "local" });
-    const firstSession = store.createIssueSession(issue.id, { title: "Implementation" });
+    const chat = store.createChatSession({ agentId: firstAgent.id, issueId: issue.id });
+    const firstSession = store.createSession(chat.id, { title: "Implementation" });
     const first = store.createTask({
       agentId: firstAgent.id,
       issueId: issue.id,
@@ -40,7 +41,7 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
     const discussionResponse = await app.request(`/api/issues/${issue.id}/sessions`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "Discussion", holds_workspace: false }),
+      body: JSON.stringify({ chat_id: chat.id, title: "Discussion", holds_workspace: false }),
     });
     expect(discussionResponse.status).toBe(201);
     expect(await discussionResponse.json()).toMatchObject({

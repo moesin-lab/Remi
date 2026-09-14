@@ -7,7 +7,7 @@ summary: 独立 Chat 页面与浮窗共用私聊、执行队列和 Chat 管理�
 # Chat
 
 Chat 是用户与一个云友的持续私聊。可以直接提问、讨论或要求执行工作，无需先创建 Issue。
-它不是 Session；完整对象关系见 [Topic、Chat 与 Session](conversation-model.md)。
+它不是 Session，但它拥有自己的工作 Sessions；完整对象关系见 [Topic、Chat 与 Session](conversation-model.md)。
 独立页面位于 `/<workspaceSlug>/chat`，与其他页面的浮窗共享 Chat 选择和草稿；独立页不再挂载浮窗。
 页面可以通过 `?session=<id>` 打开已有聊天，或通过 `?agent=<id>` 开始新聊天。
 
@@ -16,7 +16,8 @@ Chat 是用户与一个云友的持续私聊。可以直接提问、讨论或要
 新聊天选择云友，首条消息或首次附件上传时创建 Chat。每个 Chat 绑定一个云友，切换云友会开始新 Chat。
 新聊天可通过工作位置选择器绑定项目或 Runtime 本机目录，两者互斥；未选择时由现有任务调度与云友配置决定。
 绑定在创建后固定，关联 Issue 不覆盖显式选择，详见 [Runtime 工作区契约](dev/runtime-workspaces.md)。历史列表不提供按云友或 Runtime 的筛选。
-Chat 可绑定一个同工作区 Issue，绑定不把聊天变成团队公开讨论，也不让 Chat 完成自动改变 Issue 状态。
+每个 Chat 创建时拥有默认 `Main` Session，可再创建多个独立工作 Session。Chat 可绑定一个同工作区 Issue，
+绑定会让其 Sessions 出现在 Issue 聚合视图，但不会把私聊公开，也不让 Chat 完成自动改变 Issue 状态。
 
 Chat 支持重命名、置顶、归档、恢复和删除。归档会停止未完成的运行并禁止继续发送，恢复后可继续聊天。
 删除会移除 Chat 及消息，并取消未完成运行。列表提供最新消息、未读数及运行状态；置顶 Chat 优先。
@@ -51,6 +52,8 @@ Chat 记录与 provider session 是两层状态。正常续接复用既有运行
 
 ```bash
 remi chat create --agent <id>
+remi session list <chat>
+remi session create <chat> --title <title>
 remi chat message create <chat> --content-file <path>
 remi chat pin <chat>
 remi chat unpin <chat>

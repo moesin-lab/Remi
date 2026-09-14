@@ -16,6 +16,24 @@ function setup() {
 const jsonHeaders = { "Content-Type": "application/json" };
 
 describe("Chat queues", () => {
+  it("keeps explicit Session Tasks outside the ordinary Chat message queue", () => {
+    const { store, agent, chat } = setup();
+    const session = store.listChatOwnedSessions(chat.id)[0]!;
+    const sessionTask = store.createSessionTask(session.id, {
+      agentId: agent.id,
+      prompt: "Session-only work",
+    });
+
+    expect(store.getPendingChatTask(chat.id)).toBeNull();
+    expect(store.listQueuedChatTasks(chat.id)).toEqual([]);
+
+    const ordinary = store.sendChatMessage(chat.id, { content: "Ordinary Chat turn" });
+    expect(ordinary.queued).toBe(false);
+    expect(ordinary.task).toMatchObject({ chatSessionId: chat.id, issueSessionId: null });
+    expect(store.getPendingChatTask(chat.id)?.id).toBe(ordinary.task.id);
+    expect(store.getTask(sessionTask.id)?.status).toBe("queued");
+  });
+
   it("claims same-millisecond inputs FIFO and refreshes provider affinity after the preceding turn", () => {
     const { store, agent, runtime, chat } = setup();
     const otherRuntime = store.registerRuntime({ name: "Other runtime", provider: "codex", maxConcurrency: 4 });

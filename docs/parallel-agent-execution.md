@@ -3,7 +3,7 @@
 ## Scheduling
 
 - A continuous Agent context is serialized by Session and Agent. Each Session is
-  currently linked to exactly one Issue. Leader
+  owned by exactly one Chat; that Chat may optionally link an Issue. Leader
   turns and delegation-return turns use this continuous context.
 - Each independent delegation has its own execution scope, derived from the
   existing delegation ID. Different delegations can run together, including

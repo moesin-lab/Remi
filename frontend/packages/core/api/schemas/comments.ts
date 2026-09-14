@@ -43,7 +43,8 @@ export const EMPTY_SESSION_PARTICIPANTS: SessionParticipant[] = [];
 
 export const IssueSessionSchema = z.object({
   id: z.string(),
-  issue_id: z.string(),
+  chat_id: z.string().nullable().default(null),
+  issue_id: z.string().nullable().default(null),
   workspace_id: z.string(),
   title: z.string(),
   status: z.string(),
@@ -63,7 +64,8 @@ export const EMPTY_ISSUE_SESSIONS: IssueSession[] = [];
 
 export const EMPTY_ISSUE_SESSION: IssueSession = {
   id: "",
-  issue_id: "",
+  chat_id: null,
+  issue_id: null,
   workspace_id: "",
   title: "",
   status: "active",
@@ -97,7 +99,8 @@ export const EMPTY_SESSION_EVENTS: SessionEvent[] = [];
 
 export const SessionResultSchema = z.object({
   id: z.string(),
-  issue_id: z.string(),
+  chat_id: z.string().nullable().default(null),
+  issue_id: z.string().nullable().default(null),
   source_session_id: z.string(),
   title: z.string().default(""),
   body: z.string(),
@@ -123,7 +126,7 @@ export const IssueSessionTaskSchema = z.object({
   id: z.string(),
   agent_id: z.string(),
   runtime_id: z.preprocess((value) => value ?? "", z.string()),
-  issue_id: z.string(),
+  issue_id: z.string().nullable(),
   issue_session_id: z.string(),
   holds_workspace: z.boolean().default(true),
   queue_blocker: z.object({

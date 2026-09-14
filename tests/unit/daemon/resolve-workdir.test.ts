@@ -59,12 +59,12 @@ test("discussion Session paths sanitize unsafe segments", () => {
   }), ROOT).workDir).toBe(join(ROOT, "discussions", "..-..-MUL-136", "..-..-side-chat"));
 });
 
-test("discussion Tasks fail closed when the Issue Session id is absent", () => {
+test("discussion Tasks fail closed when the product Session id is absent", () => {
   expect(() => resolveWorkDir(task({
     issueId: "iss_1",
     holdsWorkspace: false,
     issue: { id: "iss_1", key: "MUL-136" },
-  }), ROOT)).toThrow("discussion task requires an issue session id");
+  }), ROOT)).toThrow("discussion task requires a product Session id");
 });
 
 test("chat Tasks use one stable directory per Chat Session", () => {
@@ -82,6 +82,19 @@ test("Issue-bound Chat Tasks stay in their Chat workspace", () => {
     issue: { id: "iss_1", key: "MUL-226" },
   }), ROOT)).toEqual({
     workDir: join(ROOT, "chats", "chat_1"),
+    ensureDir: true,
+  });
+});
+
+test("Chat-owned Session Tasks linked to an Issue keep the Issue workspace", () => {
+  expect(resolveWorkDir(task({
+    id: "t11",
+    chatSessionId: "chat_1",
+    issueSessionId: "ises_1",
+    issueId: "iss_1",
+    issue: { id: "iss_1", key: "MUL-226" },
+  }), ROOT)).toEqual({
+    workDir: join(ROOT, "issues", "MUL-226"),
     ensureDir: true,
   });
 });

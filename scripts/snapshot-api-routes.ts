@@ -932,7 +932,11 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
     case "versionId":
       return "apv_snapshot";
     case "bindingId":
-      return "apb_snapshot";
+      return pattern.includes("/bots/") ? "bpl_snapshot" : "apb_snapshot";
+    case "botId":
+      return "bot_snapshot";
+    case "senderId":
+      return "bse_snapshot";
     case "daemonId":
       return "dmn_snapshot";
     case "connectionId":
@@ -1004,6 +1008,7 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
       const segments = pattern.split("/");
       const index = segments.indexOf(":id");
       const collection = segments[index - 1];
+      if (collection === "bots") return "bot_snapshot";
       if (collection === "agent-plugins") return "apl_snapshot";
       const key = ID_BY_COLLECTION[collection];
       if (key) return String(refs[key]);
@@ -1020,6 +1025,8 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
 /** GET routes whose handler needs a query string to return a real body. */
 function getQuery(pattern: string, refs: SeedRefs): string {
   switch (pattern) {
+    case "/api/bots":
+      return `?workspace_id=${encodeURIComponent(refs.workspaceId)}`;
     case "/api/issues/search":
     case "/api/multiremi/issues/search":
     case "/api/projects/search":
@@ -1742,6 +1749,45 @@ flow("attachments", async (rec, refs) => {
 });
 
 // -- feishu concierge bot ---------------------------------------------------
+flow("bots", async (rec, refs) => {
+  const config = {
+    workspace_id: refs.workspaceId,
+    name: "Snapshot Bot",
+    enabled: false,
+    platform_bindings: [{
+      platform: "feishu",
+      app_id: "cli_snapshot_new_bot",
+      domain: "feishu",
+      host_runtime_id: refs.runtimeId,
+      app_secret_op: "set",
+      app_secret: "snapshot-bot-secret",
+    }],
+    default_target: { kind: "agent", agent_id: refs.agentId },
+    routes: [],
+    allowlist_enabled: false,
+    issue_notifications: null,
+  };
+  const created = await rec.json("POST", "/api/bots", config);
+  const botId = created.body?.id ?? "bot_snapshot";
+  const bindingId = created.body?.platform_bindings?.[0]?.id ?? "bpl_snapshot";
+  await rec.call("GET", `/api/bots/${botId}`);
+  await rec.json("PUT", `/api/bots/${botId}`, {
+    ...config,
+    name: "Updated Snapshot Bot",
+    platform_bindings: [{
+      id: bindingId,
+      platform: "feishu",
+      app_id: "cli_snapshot_new_bot",
+      domain: "feishu",
+      host_runtime_id: refs.runtimeId,
+    }],
+  });
+  await rec.call("GET", `/api/bots/${botId}/senders`);
+  await rec.call("GET", `/api/bots/${botId}/sessions`);
+  await rec.json("PUT", `/api/bots/${botId}/senders/bse_snapshot`, { allowed: true });
+  await rec.call("DELETE", `/api/bots/${botId}`);
+});
+
 flow("feishu-bot", async (rec, refs) => {
   const base = `/api/workspaces/${refs.workspaceId}/feishu-bot`;
   await rec.json("PUT", base, {

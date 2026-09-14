@@ -31,6 +31,8 @@ import {
 } from "./client.js";
 import { createEventMapper, responseToUsage } from "./acp-event-mapper.js";
 import { FeishuConciergeSupervisor, type FeishuConciergeHost } from "./feishu-concierge.js";
+import { BotConciergeSupervisor } from "./bot-concierge.js";
+import type { BotDirective, BotSessionControlInput, SubmitBotMessageInput } from "@multiremi/contracts/bots.js";
 import { redactFeishuBotError } from "@multiremi/feishu-bot/diagnostics.js";
 import {
   buildSteerInjectionPrompt,
@@ -654,6 +656,10 @@ export class MultiremiDaemon {
   private botMenuPublisher: ((config: ResolvedBotMenuConfig, dryRun: boolean) => Promise<BotMenuPublishResult>) | null = null;
   private feishuConcierge: FeishuConciergeSupervisor | null = null;
   private feishuConciergeReconcile: Promise<void> = Promise.resolve();
+  private botConciergeHostFactory: ((directive: BotDirective) => FeishuConciergeHost) | null = null;
+  private botConcierge: BotConciergeSupervisor | null = null;
+  private botConciergeRuntimeId: string | null = null;
+  private botConciergePoll: Promise<void> | null = null;
 
   constructor(options: MultiremiDaemonOptions) {
     if (options.inProcessRuntimeModelDiscoveryEnabled && !options.providerFactory) {
@@ -843,7 +849,7 @@ export class MultiremiDaemon {
     return this.client.listTaskMessages(taskId, sinceSeq);
   }
 
-  getFeishuBotTaskSnapshot(taskId: string): Promise<FeishuBotTaskSnapshot> {
+  getFeishuBotTaskSnapshot(taskId: string): Promise<FeishuBotTaskSnapshot & { replacementTaskId?: string | null }> {
     return this.client.getFeishuBotTaskSnapshot(taskId);
   }
 
@@ -872,6 +878,70 @@ export class MultiremiDaemon {
 
   async ensureTopicWorkspace(sessionKey: string, topicId: string): Promise<string | null> {
     return this.topicWorkspaces.ensureTopicWorkspace(sessionKey, topicId);
+  }
+
+  submitBotMessage(botId: string, bindingId: string, input: SubmitBotMessageInput) {
+    return this.client.submitBotMessage(this.options.runtimeId!, botId, bindingId, input);
+  }
+
+  uploadBotAttachment(botId: string, bindingId: string, file: File) {
+    return this.client.uploadBotAttachment(this.options.runtimeId!, botId, bindingId, file);
+  }
+
+  recordBotReply(botId: string, bindingId: string, taskId: string, messageId: string) {
+    return this.client.recordBotReply(this.options.runtimeId!, botId, bindingId, taskId, messageId);
+  }
+
+  resetBotSession(botId: string, bindingId: string, input: BotSessionControlInput) {
+    return this.client.resetBotSession(this.options.runtimeId!, botId, bindingId, input);
+  }
+
+  cancelBotSessionTask(botId: string, bindingId: string, input: BotSessionControlInput) {
+    return this.client.cancelBotSessionTask(this.options.runtimeId!, botId, bindingId, input);
+  }
+
+  inspectBotSession(botId: string, bindingId: string, input: BotSessionControlInput) {
+    return this.client.inspectBotSession(this.options.runtimeId!, botId, bindingId, input);
+  }
+
+  setBotConciergeHostFactory(factory: (directive: BotDirective) => FeishuConciergeHost): void {
+    this.botConciergeHostFactory = factory;
+  }
+
+  async reportBotConciergeFailure(bindingId: string, error: unknown): Promise<void> {
+    await this.botConcierge?.reportChannelFailure(bindingId, error);
+  }
+
+  async shutdownBotConcierges(): Promise<void> {
+    await this.botConciergePoll?.catch(() => {});
+    await this.botConcierge?.shutdown();
+    this.botConcierge = null;
+    this.botConciergeRuntimeId = null;
+  }
+
+  private pollBotConcierges(): void {
+    const factory = this.botConciergeHostFactory;
+    if (!factory || this.botConciergePoll || this.stopped) return;
+    const runtimeId = this.options.runtimeId!;
+    this.botConciergePoll = (async () => {
+      if (this.botConciergeRuntimeId !== runtimeId) {
+        await this.botConcierge?.shutdown();
+        this.botConciergeRuntimeId = runtimeId;
+        this.botConcierge = new BotConciergeSupervisor({
+          createHost: factory,
+          fetchConfig: (directive) => this.client.getBotConfig(runtimeId, directive.bot_id, directive.platform_binding_id),
+          report: (directive, input) => this.client.reportBotRuntimeStatus(runtimeId, directive.bot_id, directive.platform_binding_id, input),
+          claimOutbound: (directive) => this.client.claimBotOutbound(runtimeId, directive.bot_id, directive.platform_binding_id),
+          reportOutbound: (directive, delivery, result) => this.client.reportBotOutboundResult(runtimeId, directive.bot_id, directive.platform_binding_id, delivery, result),
+          log: { info: (message) => log.info(message), warn: (message) => log.warn(message) },
+        });
+      }
+      const directives = await this.client.getBotDirectives(runtimeId, this.pollAbort.signal);
+      if (this.stopped || runtimeId !== this.options.runtimeId) return;
+      await this.botConcierge!.apply(directives);
+    })().catch((error) => {
+      if (!this.stopped) log.warn(`Bot connections reconcile failed: ${redactFeishuBotError(error)}`);
+    }).finally(() => { this.botConciergePoll = null; });
   }
 
   setBotMenuPublisher(
@@ -991,6 +1061,7 @@ export class MultiremiDaemon {
             this.pollAbort.signal,
           );
           const skipClaim = await this.handleHeartbeatAck(this.options.runtimeId!, ack);
+          if (!skipClaim && !this.stopped) this.pollBotConcierges();
           if (!skipClaim && !this.stopped) {
             await this.reconcileRuntimeAgentPlugins(this.options.runtimeId!);
           }

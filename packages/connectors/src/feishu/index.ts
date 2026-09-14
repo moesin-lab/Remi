@@ -24,7 +24,7 @@ import {
 } from "./sdk.js";
 import { createFeishuClient } from "./sdk.js";
 import { createAdapter } from "./sdk.js";
-import { sendMessageFeishu } from "./send.js";
+import { sendMessageFeishu, updateCardFeishu } from "./send.js";
 
 const log = createLogger("feishu");
 
@@ -57,6 +57,7 @@ export class FeishuConnector implements Connector {
   private _handler: MessageHandler | null = null;
   private _streamHandler: StreamingHandler | null = null;
   private _taskStreamHandler: TaskStreamingHandler | null = null;
+  private _controlPlaneRouting = false;
 
   constructor(
     config: FeishuConfig & { domain?: string; connectionMode?: string },
@@ -102,16 +103,17 @@ export class FeishuConnector implements Connector {
   }
 
   /** Start in Multiremi Task mode; no Remi/Provider callback is installed. */
-  async startTask(handler: TaskStreamingHandler): Promise<void> {
+  async startTask(handler: TaskStreamingHandler, options?: { controlPlaneRouting?: boolean; eventScope?: string }): Promise<void> {
     if (!this._config.appId || !this._config.appSecret) {
       throw new Error("Feishu connector: appId and appSecret are required");
     }
     this._taskStreamHandler = handler;
+    this._controlPlaneRouting = options?.controlPlaneRouting ?? false;
     log.info("starting connector in task mode...");
     this._channel.on("message", async (msg) => {
       await this._handleFeishuMessage(msg);
     });
-    return this._channel.connect();
+    return this._channel.connect({ eventScope: options?.eventScope });
   }
 
   waitUntilReady(): Promise<void> {
@@ -131,12 +133,17 @@ export class FeishuConnector implements Connector {
     replyToMessageId?: string;
     body: string;
     idempotencyKey: string;
+    updateMessageId?: string;
   }): Promise<{ messageId: string }> {
     const client = createFeishuClient({
       appId: this._config.appId,
       appSecret: this._config.appSecret,
       domain: this._config.domain,
     });
+    if (input.updateMessageId) {
+      await updateCardFeishu(client, input.updateMessageId, buildFinalCard({ text: input.body }));
+      return { messageId: input.updateMessageId };
+    }
     const result = await sendMessageFeishu(client, input.chatId, input.body, {
       replyToMessageId: input.replyToMessageId,
       idempotencyKey: input.idempotencyKey,
@@ -171,7 +178,7 @@ export class FeishuConnector implements Connector {
     if (!this._handler && !this._taskStreamHandler) return;
 
     // /esc: abort active session
-    if (/^\/esc$/i.test(msg.rawContent.trim())) {
+    if (!this._controlPlaneRouting && /^\/esc$/i.test(msg.rawContent.trim())) {
       const sessionKey = this._resolveSessionKey(msg);
       await this._channel.abortSession(sessionKey, msg.chatId);
       return;
@@ -188,7 +195,9 @@ export class FeishuConnector implements Connector {
     }));
 
     let text = msg.text;
-    for (const m of media) {
+    // Bot execution may run on another Runtime. Preserve the original text and
+    // bytes for server-backed attachments instead of publishing host-local paths.
+    for (const m of this._controlPlaneRouting ? [] : media) {
       if (m.mediaType === "image") {
         const feishuMedia = msg.media.find((fm) => fm.buffer === m.buffer);
         const imageKey = feishuMedia?.imageKey;
@@ -222,6 +231,7 @@ export class FeishuConnector implements Connector {
         mediaCount: msg.media.length,
         quotedContent: msg.quotedContent,
         rootId: msg.rootId,
+        parentId: msg.parentId,
         rawContent: msg.rawContent,
       },
     };

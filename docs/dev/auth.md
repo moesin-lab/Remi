@@ -29,6 +29,10 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 
 修改路由时，从请求实际指向的资源解析 workspace，再调用对应 guard；不要仅凭客户端传入的 ID 或“已经登录”认定有权限。[server.ts](../../packages/server/src/api/server.ts)中的 daemon 前缀中间件必须注册在对应 handler 之前，Hono 的注册顺序会影响覆盖范围。
 
+普通 Chat 与 [Bot Chat](bots.md) 的 task 凭据可调用 `remi runtime command run`，并查询对应命令结果。[Runtime 命令路由](../../packages/server/src/api/routers/runtimes.ts)根据目标 Runtime 检查原用户归属及 task 工作区；CLI 能力投影与服务端一致，不再仅因凭据类型为 task 拒绝命令。此能力复用现有身份和资源检查，不增加 Bot 专用授权对象。
+
+新 Bot 的 Chat 按所属空间访问，HTTP、附件下载、任务 transcript 和 WebSocket 订阅使用一致的 Chat 判定，并继续检查 Agent 可见性；已有个人 Chat 仍按创建者隔离。接收消息的 Bot Runtime 可读取并回应其关联 Task 的会话信息，任务开始、完成、写执行记录等操作仍由实际执行 Runtime 负责。[会话入口](../../packages/server/src/api/helpers/daemon-task-conversations.ts)同时用于前缀中间件与具体路由。
+
 ## 启动条件
 
 本机 profile 可按[部署说明](../deploy/local-profiles.md#stable-内网访问)将 stable 的 Web/API 对内网开放。密码登录页在显式 stable 构建的配置主机名显示；`MULTIREMI_DAEMON_DIRECT_BASE_URL` 同时通过 `/api/config.daemon_server_url` 和 daemon 安装说明公布可连接的 API origin，避免远程机器误连自身 loopback。监听 `0.0.0.0` 与客户端连接地址是不同设置，不改变服务端原有鉴权。

@@ -159,7 +159,10 @@ export class ChatRepo {
       params.push(workspaceId);
     }
     if (options.creatorId) {
-      clauses.push("creator_id = ?");
+      clauses.push(`(creator_id = ? OR EXISTS (
+        SELECT 1 FROM multiremi_bot_sessions bot_session
+        WHERE bot_session.chat_session_id = multiremi_chat_sessions.id
+      ))`);
       params.push(options.creatorId);
     }
     if (!options.includeArchived) {
@@ -287,7 +290,8 @@ export class ChatRepo {
       .filter((task) =>
         task.chatSessionId &&
         (workspaceId ? task.workspaceId === workspaceId : true) &&
-        (options.creatorId ? this.getChatSession(task.chatSessionId)?.creatorId === options.creatorId : true) &&
+        (options.creatorId ? this.getChatSession(task.chatSessionId)?.creatorId === options.creatorId
+          || this.ctx.bots().isBotChatSession(task.chatSessionId) : true) &&
         isActiveTaskStatus(task.status)
       )
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));

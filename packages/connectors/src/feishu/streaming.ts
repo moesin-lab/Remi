@@ -86,12 +86,12 @@ export interface StreamingCloseOptions {
 
 // ── Token cache (shared across sessions) ────────────────────
 
-const tokenCache = new Map<string, { token: string; expiresAt: number }>();
+const tokenCache = new Map<string, { token: string; expiresAt: number; appSecret: string }>();
 
 async function getToken(creds: Credentials): Promise<string> {
   const key = `${creds.domain ?? "feishu"}|${creds.appId}`;
   const cached = tokenCache.get(key);
-  if (cached && cached.expiresAt > Date.now() + 60000) {
+  if (cached && cached.appSecret === creds.appSecret && cached.expiresAt > Date.now() + 60000) {
     return cached.token;
   }
 
@@ -113,6 +113,7 @@ async function getToken(creds: Credentials): Promise<string> {
     throw new Error(`Token error: ${data.msg}`);
   }
   tokenCache.set(key, {
+    appSecret: creds.appSecret,
     token: data.tenant_access_token,
     expiresAt: Date.now() + (data.expire ?? 7200) * 1000,
   });

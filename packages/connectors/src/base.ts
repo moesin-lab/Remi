@@ -57,6 +57,8 @@ export type TaskStreamEvent =
 
 export interface TaskStreamMeta {
   taskId: string;
+  /** Persist the platform reply identity before requests can refer back to it. */
+  onReplyCreated?: (messageId: string) => Promise<void>;
   displayName?: string | null;
   sessionId?: string | null;
   respondHumanRequest: (

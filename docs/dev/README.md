@@ -24,6 +24,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 修改云友模板或 Skill | [Agent 配置规范](../agent-config-spec.md) | 提示词结构、字段和元信息检查 |
 | 改工作台与通知 | [工作台/收件箱边界](../inbox-workbench-boundary.md) | 通知的触发条件与状态归属 |
 | 改项目 Memory/Wiki | [项目知识契约](../project-wiki-memory-spec.md) | 查询、提案、发布、物化与权限 |
+| 改机器人、平台账号或请求路由 | [Bot 配置与执行](bots.md) | 多账号、Agent 承载、目录、白名单及新旧并行 |
 | 改飞书消息接入 | [消息接入](../feishu-message-ingestion.md) | Connection、Source、消息处理与凭据 |
 | 配置部署或排障 | [部署](../../deploy/README.md)、[本机 stable/dev](../deploy/local-profiles.md)、[daemon 环境](../deploy/66-8-remi-environment.md) | 服务组成、配置和启动条件 |
 | 更新这些开发依据 | [维护方法](context-maintenance.md) | 归属、源码核对和可执行检查 |

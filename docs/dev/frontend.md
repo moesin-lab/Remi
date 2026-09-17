@@ -67,7 +67,7 @@ WSClient → useRealtimeSync → sync/<领域>.ts
 
 ## 实时更新与性能定位
 
-Runtime 详情的 Codex / Claude Code 连接页通过 [provider-profile.ts](../../frontend/packages/core/runtimes/provider-profile.ts) 与[共享表单](../../frontend/packages/views/runtimes/components/runtime-provider-profile-tab.tsx)读取和保存单个 Runtime 的 provider 配置；查询键包含 workspace/runtime ID，响应严格校验。表单支持 API Key（保存后清空，留空保留）和本机环境变量；Claude 还支持 Bearer / x-api-key 请求鉴权；未声明对应 `codex_profiles: 1` 或 `claude_profiles: 1` 的旧 daemon 只能查看更新提示。保存后失效 Runtime 和模型目录缓存；鉴权与隔离契约见 [Codex Runtime](../design/acp-codex-via-codex-acp.md#runtime-自定义连接)和 [Claude Code Runtime](../design/acp-claude-via-claude-agent-acp.md)。
+能力组选项和 Runtime 的能力组信息提供共享连接入口，通过 [execution-group-profile.ts](../../frontend/packages/core/runtimes/execution-group-profile.ts) 与[共享表单](../../frontend/packages/views/runtimes/components/execution-group-provider-profile.tsx)读取和保存组级连接；查询键包含 workspace/group ID，响应严格校验。工作区 owner/admin 可配置一个连接、默认模型和可选模型列表；API Key 保存后清空，留空保留，也支持各成员本机环境变量。自动调度的模型选择使用工作区目录，指定组使用组目录；不再因缺少固定 Runtime/group ID 禁用选择器。保存后失效 Runtime 和模型目录缓存。旧 daemon 不领取自定义连接任务；鉴权、迁移和任务快照见 [Codex 连接](../design/acp-codex-via-codex-acp.md#能力组自定义连接)和 [Claude Code 连接](../design/acp-claude-via-claude-agent-acp.md)。
 
 - [useRealtimeSync](../../frontend/packages/core/realtime/use-realtime-sync.ts)负责订阅生命周期和断线重连后的缓存恢复；领域处理器集中在 [realtime/sync/](../../frontend/packages/core/realtime/sync/)。
 - [issues/ws-updaters.ts](../../frontend/packages/core/issues/ws-updaters.ts)补写可确定的任务列表和详情，对派生列表做失效处理。改任务响应字段时同时检查这里和 mutation 的缓存处理。

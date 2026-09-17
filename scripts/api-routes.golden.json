@@ -1,20 +1,20 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 749,
+    "routeCount": 751,
     "routeCountByPrefix": {
       "native": 210,
-      "compat": 525,
+      "compat": 527,
       "root": 14
     },
-    "getRoutes": 321,
-    "getRoutesWithBody": 318,
+    "getRoutes": 322,
+    "getRoutesWithBody": 319,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 428,
+    "mutationRoutes": 429,
     "mutationRoutesCovered": 282,
     "flows": [
       "agents-compat",
@@ -201,6 +201,7 @@
     "GET /api/dashboard/usage/by-agent",
     "GET /api/dashboard/usage/daily",
     "GET /api/execution-groups",
+    "GET /api/execution-groups/:id/provider-profile",
     "GET /api/inbox",
     "GET /api/inbox/page",
     "GET /api/inbox/summary",
@@ -773,6 +774,7 @@
     "PUT /api/comments/:id",
     "PUT /api/daemon/runtimes/:runtimeId/issues/:issueId/session-archives/:archiveId/content",
     "PUT /api/daemon/runtimes/:runtimeId/models",
+    "PUT /api/execution-groups/:id/provider-profile",
     "PUT /api/issues/:id",
     "PUT /api/issues/:id/metadata/:key",
     "PUT /api/issues/:issueId/change-requests/:changeRequestId",
@@ -935,6 +937,7 @@
     "GET /api/dashboard/usage/by-agent",
     "GET /api/dashboard/usage/daily",
     "GET /api/execution-groups",
+    "GET /api/execution-groups/:id/provider-profile",
     "GET /api/inbox",
     "GET /api/inbox/page",
     "GET /api/inbox/summary",
@@ -11218,6 +11221,28 @@
             "allowed": true
           },
           {
+            "id": "runtime.group.profile.get",
+            "command": "remi runtime group profile get",
+            "capability": "runtime.group.profile.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.group.profile.set",
+            "command": "remi runtime group profile set",
+            "capability": "runtime.group.profile.set",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "runtime.list",
             "command": "remi runtime list",
             "capability": "runtime.list",
@@ -13770,6 +13795,15 @@
             "is_default": true
           }
         ]
+      }
+    },
+    {
+      "key": "get-sweep GET /api/execution-groups/:id/provider-profile",
+      "route": "GET /api/execution-groups/:id/provider-profile",
+      "path": "/api/execution-groups/eg_28e77cae80e6822ff0223ecf2c27d4a7/provider-profile",
+      "status": 200,
+      "body": {
+        "profile": null
       }
     },
     {

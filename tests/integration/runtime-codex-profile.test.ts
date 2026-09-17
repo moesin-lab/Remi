@@ -8,7 +8,7 @@ import { MultiremiStore } from "@multiremi/store.js";
 import { startMultiremiServer } from "@multiremi/api.js";
 import { MultiremiDaemon } from "@multiremi/daemon.js";
 
-it("delivers encrypted Runtime profile keys to task execution while preserving the base home", async () => {
+it("delivers group codex connections and the automatically scheduled agent model to execution", async () => {
   const root = mkdtempSync(join(tmpdir(), "remi-profile-daemon-"));
   const db = new Database(":memory:");
   const store = new MultiremiStore(db);
@@ -54,16 +54,17 @@ it("delivers encrypted Runtime profile keys to task execution while preserving t
     const agent = store.createAgent({ name: "Custom model", provider: "codex" });
     const chat = store.createChatSession({ agentId: agent.id });
     for (const version of [1, 2]) {
-      const config = { profile: { name: "private", base_url: `http://127.0.0.1:${8100 + version}/v1`, model: `unlisted-${version}`, env_key: "", auth_mode: "api_key" }, api_key: `private-key-${version}` };
-      const saved = await fetch(`http://127.0.0.1:${server.port}/api/runtimes/${runtime.id}/codex-profile`, { method: "PUT", headers: { Authorization: "Bearer profile-test-master", "Content-Type": "application/json" }, body: JSON.stringify(config) });
+      const config = { profile: { name: "private", base_url: `http://127.0.0.1:${8100 + version}/v1`, model: "default-model", models: ["default-model", "selected-1", "selected-2"], env_key: "", auth_mode: "api_key" }, api_key: `private-key-${version}` };
+      const saved = await fetch(`http://127.0.0.1:${server.port}/api/execution-groups/${runtime.executionGroupIds![0]}/provider-profile`, { method: "PUT", headers: { Authorization: "Bearer profile-test-master", "Content-Type": "application/json" }, body: JSON.stringify(config) });
       expect(saved.status).toBe(200);
       expect(await saved.text()).not.toContain(config.api_key);
       await waitFor(() => store.listRuntimeModels(runtime.id).some(model => model.id === config.profile.model && model.thinking?.supportedLevels.some(level => level.value === "high")));
+      store.updateAgent(agent.id, { model: `selected-${version}` });
       const task = store.sendChatMessage(chat.id, { body: `Run ${version}` }).task;
       await waitFor(() => ["completed", "failed"].includes(store.getTask(task.id)?.status ?? ""));
       expect(store.getTask(task.id)?.error).toBeNull();
       expect(store.getTask(task.id)?.status).toBe("completed");
-      expect(observations[version - 1]).toMatchObject({ model: config.profile.model, url: config.profile.base_url, key: config.api_key });
+      expect(observations[version - 1]).toMatchObject({ model: `selected-${version}`, url: config.profile.base_url, key: config.api_key });
     }
     expect(observations[0]!.home).not.toBe(observations[1]!.home);
     expect(await Bun.file(join(process.env.CODEX_HOME!, "config.toml")).exists()).toBe(false);

@@ -12,7 +12,7 @@ import { Input } from "@multiremi/ui/components/ui/input";
 import { Label } from "@multiremi/ui/components/ui/label";
 import { useT } from "../../i18n";
 
-// The catalog is scoped to the selected machine and Runtime type.
+// Automatic scheduling uses the workspace pool; explicit targets scope the catalog.
 export function ModelDropdown({
   wsId,
   runtimeId,
@@ -70,7 +70,6 @@ export function ModelDropdown({
       </div>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger
-          disabled={!runtimeId && !executionGroupId}
           className="flex w-full min-w-0 items-center gap-3 rounded-lg border border-border bg-background px-3 py-2.5 mt-1.5 text-left text-sm transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
         >
           <Cpu className="h-4 w-4 shrink-0 text-muted-foreground" />

@@ -454,6 +454,7 @@ export interface SeedRefs {
   skillId: string;
   skillFileId: string;
   runtimeId: string;
+  executionGroupId: string;
   projectId: string;
   repositoryId: string;
   projectResourceId: string;
@@ -821,6 +822,7 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
     skillId,
     skillFileId: skillFile?.id ?? "skf_snapshot",
     runtimeId: runtime.id,
+    executionGroupId: runtime.executionGroupIds![0]!,
     projectId: project.id,
     repositoryId: "repo_snapshot",
     projectResourceId: projectResource.id,
@@ -1005,6 +1007,7 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
       const index = segments.indexOf(":id");
       const collection = segments[index - 1];
       if (collection === "agent-plugins") return "apl_snapshot";
+      if (collection === "execution-groups") return refs.executionGroupId;
       const key = ID_BY_COLLECTION[collection];
       if (key) return String(refs[key]);
       break;

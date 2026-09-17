@@ -1,3 +1,4 @@
+import { runtimeConnectionSnapshot } from "@multiremi/contracts/runtime-connection";
 // Runtime and daemon request plumbing: provider validation, the ownership-scoped runtime loaders,
 // the daemon install instructions, and the registration/deregistration paths the daemon calls.
 import type { Context } from "hono";
@@ -35,6 +36,7 @@ import {
   denyDaemonTokenRuntimeIdentity,
   denyDaemonTokenWorkspace,
   hasJwtWorkspaceAccess,
+  requireHumanWorkspaceAdmin,
 } from "./auth-guards.js";
 import { MultiremiApiError, requestOrigin, shellArg, uniqueStrings } from "./common.js";
 import { MULTIREMI_INSTALL_SCRIPT, MULTIREMI_RELEASE_REPO } from "./integrations.js";
@@ -460,7 +462,7 @@ export function registerDaemonRuntimes(
     });
   }
   return {
-    runtimes: registered.map(runtime => ({ ...runtime, codex_profile: store.getRuntimeCodexProfile(runtime.id), claude_profile: store.getRuntimeClaudeProfile(runtime.id) })),
+    runtimes: registered.map(runtime => ({ ...runtime, codex_profile: runtimeConnectionSnapshot(store.getRuntimeCodexProfile(runtime.id)), claude_profile: runtimeConnectionSnapshot(store.getRuntimeClaudeProfile(runtime.id)) })),
     repos: repos.repos,
     repos_version: repos.repos_version,
     settings: repos.settings,
@@ -610,5 +612,8 @@ export function validateRuntimeExecutionGroupInput(
   if (provider === "any") return c.json({ error: "an any-provider Runtime cannot join a custom execution group" }, 400);
   const existing = store.getExecutionGroup(raw.trim(), workspaceId);
   if (existing && existing.provider !== provider) return c.json({ error: "execution group members must use the same provider" }, 400);
+  if (existing && store.getExecutionGroupProfile(workspaceId, existing.id)) {
+    return requireHumanWorkspaceAdmin(c, store, workspaceId);
+  }
   return null;
 }

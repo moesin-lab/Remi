@@ -5578,6 +5578,38 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "runtime.group.profile.get": {
+      "command": "remi runtime group profile get",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "runtime.group.profile.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.profile.set": {
+      "command": "remi runtime group profile set",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "runtime.group.profile.set",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "runtime.codex-profile.get": {
       "command": "remi runtime codex-profile get",
       "aliases": [],
@@ -10042,6 +10074,9 @@
     "GET /api/execution-groups": {
       "command": "runtime.group.list"
     },
+    "GET /api/execution-groups/:id/provider-profile": {
+      "command": "runtime.group.profile.get"
+    },
     "GET /api/inbox": {
       "command": "inbox.list"
     },
@@ -11893,6 +11928,9 @@
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "PUT /api/execution-groups/:id/provider-profile": {
+      "command": "runtime.group.profile.set"
     },
     "PUT /api/issues/:id": {
       "command": "issue.update"

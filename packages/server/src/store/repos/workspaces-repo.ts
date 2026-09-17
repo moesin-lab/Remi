@@ -561,6 +561,8 @@ export class WorkspacesRepo {
       this.assertWorkspaceDaemonTrustRevoked(id);
       this.deleteWorkspaceScmState(id);
       this.ctx.db.run("DELETE FROM multiremi_execution_group_members WHERE workspace_id = ?", [id]);
+      this.ctx.db.run("DELETE FROM multiremi_execution_group_credentials WHERE workspace_id = ?", [id]);
+      this.ctx.db.run("DELETE FROM multiremi_execution_group_profiles WHERE workspace_id = ?", [id]);
       this.ctx.db.run("DELETE FROM multiremi_execution_groups WHERE workspace_id = ?", [id]);
       const result = this.ctx.db.run("DELETE FROM multiremi_workspaces WHERE id = ?", [id]);
       if (result.changes === 0) return false;

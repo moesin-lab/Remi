@@ -7,6 +7,7 @@ import { useUpdateRuntime } from "@multiremi/core/runtimes/mutations";
 import { Input } from "@multiremi/ui/components/ui/input";
 import { Label } from "@multiremi/ui/components/ui/label";
 import { Button } from "@multiremi/ui/components/ui/button";
+import { ExecutionGroupProfileDialog } from "./execution-group-profile-dialog";
 import { toast } from "sonner";
 import { useT } from "../../i18n";
 
@@ -54,6 +55,7 @@ export function RuntimeExecutionGroupEditor({ runtime, canEdit }: {
           {groupId}
         </code>
       ))}
+      {(runtime.provider === "codex" || runtime.provider === "claude") && (runtime.execution_group_ids ?? []).map(groupId => <ExecutionGroupProfileDialog key={groupId} wsId={wsId} groupId={groupId} provider={runtime.provider} />)}
       <p className="mt-1.5 text-xs text-muted-foreground">{t(($) => $.execution_group.hint)}</p>
     </div>
   );

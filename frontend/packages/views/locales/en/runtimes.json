@@ -723,6 +723,10 @@
     "auth_header": "Request authentication"
   },
   "execution_group": {
+    "connection_title": "Group connection",
+    "connection_hint": "Configure the shared connection for execution group {{group}}. Changes apply to all members; compatible Runtimes execute the selected model.",
+    "models": "Available model IDs",
+    "models_hint": "One model ID per line or separated by commas. The default model is always included.",
     "label": "Execution group ID",
     "default": "Default: machine + Runtime type",
     "hint": "Runtimes with the same group ID and type share execution capacity. Leave blank to restore the default machine group.",

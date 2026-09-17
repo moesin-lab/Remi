@@ -83,6 +83,7 @@ export function taskTokenHardDenyCategory(request: Request): TaskTokenHardDenyCa
     || path === "/api/cli-token"
     || path === "/api/auth/password-accounts"
     || /^\/api\/runtimes\/[^/]+\/(?:codex|claude)-profile$/.test(path)
+    || /^\/api\/execution-groups\/[^/]+\/provider-profile$/.test(path)
     || /^\/api\/issues\/[^/]+\/share(?:\/extend)?$/.test(path)
     || /^\/api\/autopilots\/[^/]+\/triggers\/[^/]+\/(?:rotate-webhook-token|signing-secret)$/.test(path)
     || /^\/api\/workspaces\/[^/]+\/relay-config\/[^/]+\/reveal$/.test(path)

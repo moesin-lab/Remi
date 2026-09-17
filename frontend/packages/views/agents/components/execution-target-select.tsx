@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { executionGroupListOptions, runtimeListOptions } from "@multiremi/core/runtimes";
 import { useAuthStore } from "@multiremi/core/auth";
 import { Label } from "@multiremi/ui/components/ui/label";
+import { ExecutionGroupProfileDialog } from "../../runtimes/components/execution-group-profile-dialog";
 import { ProviderLogo } from "../../runtimes/components/provider-logo";
 import { PickerItem, PropertyPicker } from "../../issues/components/pickers";
 import { useT } from "../../i18n";
@@ -97,18 +98,20 @@ export function ExecutionTargetSelect({ wsId, value, onChange, compact = false, 
     </PickerItem>
   ));
   if (!canEdit) return <span className="min-w-0 truncate px-1.5 text-xs" title={selectedTooltip}>{label}</span>;
+  const connection = value.executionGroupId ? <ExecutionGroupProfileDialog wsId={wsId} groupId={value.executionGroupId} provider={value.provider} /> : null;
   if (compact) return (
-    <PropertyPicker open={open} onOpenChange={setOpen} width="w-auto min-w-[16rem] max-w-md" align="start"
+    <div className="flex min-w-0 flex-wrap items-center gap-1"><PropertyPicker open={open} onOpenChange={setOpen} width="w-auto min-w-[16rem] max-w-md" align="start"
       tooltip={selectedTooltip} triggerRender={<button type="button" className={CHIP_CLASS} aria-label={t(($) => $.execution_target.label)} />}
       trigger={<span className="min-w-0 truncate">{label}</span>}>
       <div className="max-h-72 overflow-y-auto">{options}</div>
       <p className="border-t px-3 py-2 text-xs text-muted-foreground" role="status">{status}</p>
-    </PropertyPicker>
+    </PropertyPicker>{connection}</div>
   );
   return (
     <div>
       <Label id={labelId} className="text-xs text-muted-foreground">{t(($) => $.execution_target.label)}</Label>
       <div role="group" aria-labelledby={labelId} className="mt-1.5 max-h-56 overflow-y-auto rounded-lg border p-1">{options}</div>
+      {connection}
       <p className={`mt-1.5 text-xs ${selected && !selected.online ? "text-warning" : "text-muted-foreground"}`} role="status">{status}</p>
     </div>
   );

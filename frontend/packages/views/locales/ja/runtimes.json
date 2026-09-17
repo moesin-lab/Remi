@@ -699,6 +699,10 @@
     "auth_header": "リクエスト認証"
   },
   "execution_group": {
+    "connection_title": "実行グループの接続",
+    "connection_hint": "実行グループ {{group}} の共有接続を設定します。変更は全メンバーに適用され、対応する Runtime が選択モデルを実行します。",
+    "models": "利用可能なモデル ID",
+    "models_hint": "モデル ID を改行またはカンマで区切ります。既定モデルは常に含まれます。",
     "label": "実行グループ ID",
     "default": "既定：マシン + Runtime タイプ",
     "hint": "同じグループ ID とタイプの Runtime がタスクを共有します。空欄で保存すると既定のマシングループに戻ります。",

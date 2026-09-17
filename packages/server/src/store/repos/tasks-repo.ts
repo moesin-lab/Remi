@@ -446,7 +446,7 @@ export class TasksRepo {
     // carry another machine's provider session. An explicit runtimeId is only
     // honoured when there is no strong affinity to respect.
     const chatProfile = chatSession?.sessionRuntimeId
-      ? this.ctx.runtimes().getRuntimeExecutionProfile(chatSession.sessionRuntimeId, agent.provider) : null;
+      ? this.ctx.runtimes().getAgentExecutionProfile(chatSession.sessionRuntimeId, agent) : null;
     const affinity = this.resolveTaskAffinity(
       agent,
       input.resetProviderSession ? null : chatSession,
@@ -477,7 +477,7 @@ export class TasksRepo {
       issueLane = this.ctx.issueSessions().getOrCreateSessionAgentLane(issueSession.id, agent.id, executionScope);
       const laneRuntime = issueLane.runtimeId ? this.ctx.runtimes().getRuntime(issueLane.runtimeId) : null;
       const laneProfile = laneRuntime
-        ? this.ctx.runtimes().getRuntimeExecutionProfile(laneRuntime.id, agent.provider) : null;
+        ? this.ctx.runtimes().getAgentExecutionProfile(laneRuntime.id, agent) : null;
       const laneResumable =
         !input.resetProviderSession
         && !!issueLane.providerSessionId
@@ -1100,12 +1100,12 @@ export class TasksRepo {
         && this.ctx.runtimes().getRuntimeExecutionProfile(runtimeId, lockedRuntime.provider)) return null;
 
       const stale = this.reclaimStaleDispatchedTaskForRuntime(runtimeId, [...excludedAgentIds]);
-      // Group membership and reported model capabilities can change while work
+      // Group membership and model capabilities can change while work
       // is queued. Skip incompatible Agents before selecting, so they cannot
       // block another runnable task at the head of the queue.
       const groupAgentRows = this.ctx.db.query(`SELECT DISTINCT a.id FROM multiremi_agents a
         JOIN multiremi_tasks t ON t.agent_id = a.id
-        WHERE a.workspace_id = ? AND a.execution_group_id IS NOT NULL
+        WHERE a.workspace_id = ? AND (a.execution_group_id IS NOT NULL OR COALESCE(a.model, '') <> '')
           AND t.status IN ('queued', 'dispatched')`).all(lockedRuntime.workspaceId ?? "local") as { id: string }[];
       for (const row of groupAgentRows) {
         const agent = this.ctx.agents().getAgent(row.id);
@@ -1207,7 +1207,7 @@ export class TasksRepo {
     }
 
     const pluginSnapshot = this.ctx.agentPlugins().resolveAgentPluginSnapshot(currentAgent.id);
-    const runtimeProfile = this.ctx.runtimes().getRuntimeExecutionProfile(runtime.id, provider);
+    const runtimeProfile = this.ctx.runtimes().getAgentExecutionProfile(runtime.id, currentAgent);
     const executionFingerprint = withRuntimeProfileFingerprint(
       createHash("sha256").update(canonicalJson(pluginSnapshot)).digest("hex"), runtimeProfile,
     );
@@ -1475,7 +1475,7 @@ export class TasksRepo {
       const fingerprint = this.ctx.agentPlugins().getAgentPluginCapabilityRevision(agent.id);
       const issue = task.issueId ? this.ctx.issues().getIssue(task.issueId) : null;
       const projectId = task.runtimeWorkspaceId ? null : chat.projectId ?? (task.holdsWorkspace && issue?.issueKind !== "intake" ? issue?.projectId : null) ?? null;
-      const profile = chat.sessionRuntimeId ? this.ctx.runtimes().getRuntimeExecutionProfile(chat.sessionRuntimeId, agent.provider) : null;
+      const profile = chat.sessionRuntimeId ? this.ctx.runtimes().getAgentExecutionProfile(chat.sessionRuntimeId, agent) : null;
       const affinity = this.resolveTaskAffinity(agent, chat, issue, projectId, withRuntimeProfileFingerprint(fingerprint, profile), plugins.length > 0 || Boolean(profile));
       let runtimeId = affinity.runtimeId ?? (task.sessionId ? agent.runtimeId : task.runtimeId);
       let inherit = affinity.inheritChatSession;

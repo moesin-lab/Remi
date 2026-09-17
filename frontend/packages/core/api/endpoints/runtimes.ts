@@ -91,6 +91,16 @@ import {
 export class RuntimesEndpoints {
   constructor(readonly http: HttpClient) {}
 
+  async getExecutionGroupProfile(wsId: string, groupId: string): Promise<RuntimeClaudeProfileConfig> {
+    const raw = await this.http.fetch<unknown>(`/api/execution-groups/${encodeURIComponent(groupId)}/provider-profile?workspace_id=${encodeURIComponent(wsId)}`);
+    return parseStrictResponse(raw, RuntimeClaudeProfileConfigSchema, { endpoint: "GET /api/execution-groups/:id/provider-profile" });
+  }
+
+  async setExecutionGroupProfile(wsId: string, groupId: string, input: RuntimeClaudeProfileInput): Promise<RuntimeClaudeProfileConfig> {
+    const raw = await this.http.fetch<unknown>(`/api/execution-groups/${encodeURIComponent(groupId)}/provider-profile?workspace_id=${encodeURIComponent(wsId)}`, { method: "PUT", body: JSON.stringify(input) });
+    return parseStrictResponse(raw, RuntimeClaudeProfileConfigSchema, { endpoint: "PUT /api/execution-groups/:id/provider-profile" });
+  }
+
   async getRuntimeCodexProfile(runtimeId: string): Promise<RuntimeCodexProfileConfig> {
     const raw = await this.http.fetch<unknown>(`/api/runtimes/${encodeURIComponent(runtimeId)}/codex-profile`);
     return parseStrictResponse(raw, RuntimeCodexProfileConfigSchema, { endpoint: "GET /api/runtimes/:id/codex-profile" });

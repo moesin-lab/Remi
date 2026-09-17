@@ -1,4 +1,4 @@
-import { getExecutionGroup, listExecutionGroups } from "@multiremi/store/execution-groups.js";
+import { getExecutionGroup, listExecutionGroups, getExecutionGroupProfile, setExecutionGroupProfile } from "@multiremi/store/execution-groups.js";
 import { type SqlDatabase, openMultiremiDatabase } from "@multiremi/store/db/postgres.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { daemonRuntimeId, isTerminalStatus } from "@multiremi/store/helpers.js";
@@ -801,6 +801,13 @@ runMigrations(this.db);
 
   listExecutionGroups(workspaceId: string) { return listExecutionGroups(this.db, workspaceId); }
   getExecutionGroup(id: string, workspaceId = "local") { return getExecutionGroup(this.db, id, workspaceId); }
+  getExecutionGroupProfile(workspaceId: string, groupId: string) { return getExecutionGroupProfile(this.db, workspaceId, groupId); }
+  setExecutionGroupProfile(workspaceId: string, groupId: string, input: unknown, apiKey?: unknown) {
+    return this.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      return setExecutionGroupProfile(this.db, workspaceId, groupId, input, apiKey);
+    })();
+  }
 
   createAgent(input: CreateAgentInput): MultiremiAgent {
     return this.agents.createAgent(input);
@@ -2623,6 +2630,9 @@ runMigrations(this.db);
 
   getRuntimeExecutionProfile(id: string, provider: string) {
     return this.runtimes.getRuntimeExecutionProfile(id, provider);
+  }
+  getAgentExecutionProfile(id: string, agent: MultiremiAgent) {
+    return this.runtimes.getAgentExecutionProfile(id, agent);
   }
 
   listWorkspaceCodexProfileModels(workspaceId: string) {

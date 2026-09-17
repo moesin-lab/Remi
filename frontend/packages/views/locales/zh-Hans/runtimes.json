@@ -699,6 +699,10 @@
     "auth_header": "请求鉴权"
   },
   "execution_group": {
+    "connection_title": "能力组连接",
+    "connection_hint": "配置能力组 {{group}} 的共享连接。变更对组内成员生效，由兼容的 Runtime 执行所选模型。",
+    "models": "可选模型 ID",
+    "models_hint": "每行一个模型 ID，或用逗号分隔。默认模型始终包含在列表中。",
     "label": "执行能力组标识",
     "default": "默认：机器 + Runtime 类型",
     "hint": "相同组标识、相同类型的 Runtime 共同承接任务。留空保存可恢复默认机器组。",

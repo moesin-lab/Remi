@@ -33,6 +33,7 @@ import {
   readJsonStrict,
   readJsonStrictAllowEmpty,
   requireWorkspaceAdmin,
+  requireHumanWorkspaceAdmin,
   safeCreateRuntimeUpdateRequest,
   usageQuery,
   validateMultiremiRuntimeProvider,
@@ -84,6 +85,29 @@ import type { RouterDeps } from "./deps.js";
 export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
   const { store, authToken } = deps;
 
+  app.get("/api/execution-groups/:id/provider-profile", (c) => {
+    const workspaceId = resolveRequestWorkspaceId(c, store, c.req.query("workspace_id"));
+    if (workspaceId instanceof Response) return workspaceId;
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+    if (denied) return denied;
+    if (!store.getExecutionGroup(c.req.param("id"), workspaceId)) return c.json({ error: "execution group not found" }, 404);
+    return c.json({ profile: store.getExecutionGroupProfile(workspaceId, c.req.param("id")) });
+  });
+  app.put("/api/execution-groups/:id/provider-profile", async (c) => {
+    const workspaceId = resolveRequestWorkspaceId(c, store, c.req.query("workspace_id"));
+    if (workspaceId instanceof Response) return workspaceId;
+    const denied = requireHumanWorkspaceAdmin(c, store, workspaceId);
+    if (denied) return denied;
+    if (!store.getExecutionGroup(c.req.param("id"), workspaceId)) return c.json({ error: "execution group not found" }, 404);
+    const body = await readJsonStrict<{ profile?: unknown; api_key?: unknown }>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    try {
+      return c.json({ profile: store.setExecutionGroupProfile(workspaceId, c.req.param("id"), body.profile, body.api_key) });
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : "Invalid execution group connection" }, 400);
+    }
+  });
+
   app.get("/api/runtimes/:id/codex-profile", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
@@ -92,6 +116,8 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
   app.put("/api/runtimes/:id/codex-profile", async (c) => {
     const loaded = loadRuntimeForCurrentEditor(c, store, c.req.param("id"), "edit");
     if (loaded instanceof Response) return loaded;
+    const denied = requireHumanWorkspaceAdmin(c, store, loaded.runtime.workspaceId ?? "local");
+    if (denied) return denied;
     const body = await readJsonStrict<{ profile?: unknown; api_key?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
@@ -124,6 +150,8 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
   app.put("/api/runtimes/:id/claude-profile", async (c) => {
     const loaded = loadRuntimeForCurrentEditor(c, store, c.req.param("id"), "edit");
     if (loaded instanceof Response) return loaded;
+    const denied = requireHumanWorkspaceAdmin(c, store, loaded.runtime.workspaceId ?? "local");
+    if (denied) return denied;
     const body = await readJsonStrict<{ profile?: unknown; api_key?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {

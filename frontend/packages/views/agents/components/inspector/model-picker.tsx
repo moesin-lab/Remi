@@ -11,7 +11,7 @@ import {
 import { CHIP_CLASS } from "./chip";
 import { useT } from "../../../i18n";
 
-// The catalog is scoped to the selected machine and Runtime type.
+// Automatic scheduling uses the workspace pool; explicit targets scope the catalog.
 export function ModelPicker({
   wsId,
   runtimeId,
@@ -62,7 +62,7 @@ export function ModelPicker({
     if (id !== value) await onChange(id);
   };
 
-  if (!canEdit || (!runtimeId && !executionGroupId)) {
+  if (!canEdit) {
     return (
       <span
         className="min-w-0 truncate px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"

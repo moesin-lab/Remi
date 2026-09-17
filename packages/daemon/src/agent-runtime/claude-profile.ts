@@ -25,7 +25,7 @@ export async function assertRuntimeClaudeProjectCredentials(cwd: string): Promis
       const conflicts = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"]
         .filter(key => Object.prototype.hasOwnProperty.call(env, key));
       if (Object.prototype.hasOwnProperty.call(settings, "apiKeyHelper")) conflicts.push("apiKeyHelper");
-      if (conflicts.length) throw new Error(`Claude project credentials conflict with the Runtime connection: remove ${conflicts.join(", ")} from ${path} and configure credentials in Runtime instead`);
+      if (conflicts.length) throw new Error(`Claude project credentials conflict with the Runtime connection: remove ${conflicts.join(", ")} from ${path} and configure credentials in the execution group instead`);
     }
     const parent = dirname(directory);
     if (parent === directory) return;

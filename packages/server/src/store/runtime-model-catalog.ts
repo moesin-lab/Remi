@@ -22,7 +22,7 @@ export const MULTIREMI_DAEMON_PROVIDERS = new Set(["claude", "codex", "antigravi
  */
 // Maps a model's vendor (as the daemon reports it) to the engine that runs it,
 // for the rare "any" runtime that carries a model catalog but no fixed engine.
-const MODEL_VENDOR_TO_ENGINE: Record<string, string> = { openai: "codex", anthropic: "claude" };
+export const MODEL_VENDOR_TO_ENGINE: Record<string, string> = { openai: "codex", anthropic: "claude", codex: "codex", claude: "claude", antigravity: "antigravity" };
 
 export interface FleetModelThinkingLevelResponse {
   value: string;

@@ -1,5 +1,5 @@
 import { CHAT_ISSUE_DECOUPLED_FINGERPRINT, chatTaskRetryParentSql } from "@multiremi/store/helpers.js";
-import { syncRuntimeExecutionGroups } from "@multiremi/store/execution-groups.js";
+import { syncRuntimeExecutionGroups, migrateExecutionGroupProfiles } from "@multiremi/store/execution-groups.js";
 import { createHash } from "node:crypto";
 import { attachmentIdsFromText } from "@multiremi/contracts/attachments.js";
 import { type SqlDatabase } from "@multiremi/store/db/postgres.js";
@@ -3124,6 +3124,17 @@ export function runMigrations(db: SqlDatabase): void {
       SELECT group_id FROM multiremi_execution_group_members m WHERE m.runtime_id = multiremi_agents.runtime_id AND m.provider = multiremi_agents.provider
     ) WHERE execution_group_id IS NULL AND runtime_id IS NOT NULL`);
   });
+  db.exec(`CREATE TABLE IF NOT EXISTS multiremi_execution_group_profiles (
+    workspace_id TEXT NOT NULL, group_id TEXT NOT NULL, profile TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, group_id),
+    FOREIGN KEY(workspace_id, group_id) REFERENCES multiremi_execution_groups(workspace_id, id)
+  );
+  CREATE TABLE IF NOT EXISTS multiremi_execution_group_credentials (
+    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, group_id TEXT NOT NULL,
+    scope_id TEXT NOT NULL, ciphertext TEXT NOT NULL,
+    FOREIGN KEY(workspace_id, group_id) REFERENCES multiremi_execution_groups(workspace_id, id)
+  );`);
+  runMigrationOnce(db, "execution_group_profiles_v1", () => migrateExecutionGroupProfiles(db));
   backfillDefaultIssueSessions(db);
   backfillIssueKeys(db);
   migrateLegacyGithubProjection(db, legacyGithubTables);

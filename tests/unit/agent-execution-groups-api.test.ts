@@ -163,12 +163,13 @@ describe("execution group API", () => {
     expect((await request("/api/agents", { name: "Good", execution_group_id: "shared", model: "common", thinking_level: "low" })).status).toBe(201);
   });
 
-  it("does not combine incompatible fixed connections, while runtime defaults remain selectable", async () => {
+  it("updates the shared group connection through legacy Runtime aliases", async () => {
     const { store, runtime, peer, app, request, join } = setup();
     join();
     store.setRuntimeCodexProfile(runtime.id, { name: "first", base_url: "https://first.example/v1", model: "first", env_key: "REMI_CODEX_FIRST" });
     store.setRuntimeCodexProfile(peer.id, { name: "second", base_url: "https://second.example/v1", model: "second", env_key: "REMI_CODEX_SECOND" });
-    expect((await (await app.request("/api/models?execution_group_id=shared")).json()).providers[0].models).toEqual([]);
+    expect((await (await app.request("/api/models?execution_group_id=shared")).json()).providers[0].models.map((model: { id: string }) => model.id)).toEqual(["second"]);
+    expect(store.getRuntimeCodexProfile(runtime.id)).toEqual(store.getRuntimeCodexProfile(peer.id));
     expect((await request("/api/agents", { name: "Default", execution_group_id: "shared" })).status).toBe(201);
     expect((await request("/api/agents", { name: "Wrong", execution_group_id: "shared", model: "first" })).status).toBe(400);
   });

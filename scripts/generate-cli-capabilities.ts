@@ -492,6 +492,8 @@ function mappedOperationsCommand(route: string): string | null {
     "GET /api/multiremi/runtimes": "runtime.list",
     "POST /api/multiremi/runtimes": "runtime.create",
     "GET /api/execution-groups": "runtime.group.list",
+    "GET /api/execution-groups/:id/provider-profile": "runtime.group.profile.get",
+    "PUT /api/execution-groups/:id/provider-profile": "runtime.group.profile.set",
     "GET /api/multiremi/execution-groups": "runtime.group.list",
     "GET /api/models": "runtime.model.catalog",
     "GET /api/multiremi/models": "runtime.model.catalog",

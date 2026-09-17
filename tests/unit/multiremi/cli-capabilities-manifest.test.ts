@@ -168,12 +168,14 @@ describe("CLI capabilities manifest", () => {
 
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
     expect(cliCoverageReport(manifest)).toEqual({
-      mapped: 658,
+      mapped: 660,
       exempt: 91,
       missing: 0,
-      total: 749,
+      total: 751,
     });
     expect(manifest.max_planned_routes).toBe(0);
+    expect(manifest.routes["PUT /api/execution-groups/:id/provider-profile"]).toEqual({ command: "runtime.group.profile.set" });
+    expect(manifest.commands["runtime.group.profile.set"]?.auth).toEqual(["human"]);
     expect(manifest.routes["POST /api/chat/attachments/send"]).toEqual({ command: "chat.attachment.send" });
     expect(manifest.commands["chat.attachment.send"]?.auth).toEqual(["task"]);
     expect(manifest.routes["POST /api/daemon/runtimes/:runtimeId/feishu-bot/attachments"])

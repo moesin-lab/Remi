@@ -30,17 +30,16 @@ they do not fall back to unrelated Runtimes sharing a provider.
 
 ## Canonical command tree
 
-Codex Runtime connections use `remi runtime codex-profile get <runtime>` and
-`remi runtime codex-profile set <runtime> --file profile.json`. The JSON body
-contains `profile` and an optional write-only `api_key`; `profile: null` restores
-the workspace gateway. These are human configuration commands; task credentials
-cannot read or change them. See [Codex Runtime connections](design/acp-codex-via-codex-acp.md#runtime-自定义连接)
-for authentication, environment variables and session behavior.
-
-Claude Code uses `remi runtime claude-profile get <runtime>` and
-`remi runtime claude-profile set <runtime> --file profile.json`, with the same
-credential and clear semantics plus `auth_header: bearer | x-api-key`. See
-[Claude Code Runtime connections](design/acp-claude-via-claude-agent-acp.md).
+Execution-group custom connections use `remi runtime group profile get <group>`
+and `remi runtime group profile set <group> --file profile.json`. The body contains
+`profile` and an optional write-only `api_key`; `profile.models` lists allowed
+models and `profile.model` selects the default. `profile: null` restores inheritance.
+Writes require a human workspace owner/admin; task credentials cannot access these
+commands. Codex and Claude use the same group endpoint; Claude additionally accepts
+`auth_header: bearer | x-api-key`. The old `runtime codex-profile` and
+`runtime claude-profile` paths remain compatibility commands for the Runtime's
+current group, with the same administrator requirement for writes. See
+[connection and migration semantics](design/acp-codex-via-codex-acp.md#能力组自定义连接).
 
 The canonical tree includes a focused top-level Attachment download command;
 Issue and Comment keep their scoped attachment listing and management commands.

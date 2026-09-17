@@ -131,7 +131,7 @@ function validateAgentModelSelection(
   },
 ): Response | null {
   const profile = input.runtimeId ? store.getRuntimeExecutionProfile(input.runtimeId, input.provider) : null;
-  if (profile && input.model && input.model !== profile.model) {
+  if (profile && input.model && !(profile.models ?? [profile.model]).includes(input.model)) {
     return c.json({ error: `model "${input.model}" is not supported by the selected Runtime connection; expected "${profile.model}"` }, 400);
   }
   const groupModels = !input.runtimeId && input.executionGroupId

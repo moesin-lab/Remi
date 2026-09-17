@@ -27,6 +27,35 @@ afterEach(() => {
 });
 
 describe("operations CLI contracts", () => {
+  it("reads and writes a group's connection and model list without resolving a Runtime", async () => {
+    useCliEnv();
+    const get = specById("runtime.group.profile.get");
+    const set = specById("runtime.group.profile.set");
+    const config = { profile: { name: "custom", model: "first", models: ["first", "second"], base_url: "https://example.com/v1", env_key: "REMI_CODEX_KEY" } };
+    const directory = mkdtempSync(join(tmpdir(), "remi-cli-group-profile-"));
+    tempDirectories.push(directory);
+    const path = join(directory, "profile.json");
+    writeFileSync(path, JSON.stringify(config));
+    const bodies: unknown[] = [];
+    globalThis.fetch = capabilityFetch(set.id, async request => {
+      const url = new URL(request.url);
+      expect(url.pathname).toBe("/api/execution-groups/shared/provider-profile");
+      expect(url.searchParams.get("workspace_id")).toBe("ws_1");
+      bodies.push(await request.json());
+      return Response.json(config);
+    });
+    await capture(() => registryFor([set]).execute(["runtime", "group", "profile", "set", "shared", "--file", path, "--json"]));
+    await capture(() => registryFor([set]).execute(["runtime", "group", "profile", "set", "shared", "--data", '{"profile":null}', "--json"]));
+    expect(bodies).toEqual([config, { profile: null }]);
+    globalThis.fetch = capabilityFetch(get.id, request => {
+      expect(new URL(request.url).pathname).toBe("/api/execution-groups/shared/provider-profile");
+      expect(request.method).toBe("GET");
+      return Response.json(config);
+    });
+    const output = await capture(() => registryFor([get]).execute(["runtime", "group", "profile", "get", "shared", "--json"]));
+    expect(JSON.parse(output.stdout)).toEqual(config);
+  });
+
   it("filters the model catalog by the selected runtime", async () => {
     useCliEnv();
     const spec = specById("runtime.model.catalog");

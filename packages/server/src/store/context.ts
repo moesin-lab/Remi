@@ -425,6 +425,7 @@ export interface IssueSessionsSurface {
 }
 
 export interface RuntimesSurface {
+  getAgentExecutionProfile(id: string, agent: MultiremiAgent): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntimeCodexProfile(id: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntimeExecutionProfile(id: string, provider: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntime(id: string): MultiremiRuntime | null;

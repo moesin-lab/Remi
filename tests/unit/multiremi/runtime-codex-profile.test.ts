@@ -152,7 +152,7 @@ describe("Runtime Codex profiles", () => {
     expect(saved.status).toBe(200);
     const wire = await saved.json();
     expect(JSON.stringify(wire)).not.toContain(body.api_key);
-    expect(JSON.stringify(db!.query("SELECT * FROM multiremi_runtime_provider_credentials").all())).not.toContain(body.api_key);
+    expect(JSON.stringify(db!.query("SELECT * FROM multiremi_execution_group_credentials").all())).not.toContain(body.api_key);
     const secretPath = `/api/daemon/runtimes/${runtime.id}/codex-profile-key?credential_id=${wire.profile.credential_id}`;
     for (const token of [owner.token, member.token, taskToken.token, wrongDaemon.token]) expect((await request(secretPath, token)).status).toBe(403);
     const key = await request(secretPath, daemon.token);
@@ -181,7 +181,7 @@ describe("Runtime Codex profiles", () => {
     expect(store.claimTask(runtime.id)?.codexProfile).toEqual(profile);
   });
 
-  it("rebinds encrypted credential versions when Runtime identities are merged", () => {
+  it("preserves group configuration and credential versions when Runtime identities are merged", () => {
     const { store, runtime } = setup();
     process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
     const first = store.setRuntimeCodexProfile(runtime.id, apiProfile, "historical-key")!;
@@ -194,13 +194,15 @@ describe("Runtime Codex profiles", () => {
     expect(store.getRuntimeCodexProfileKey(runtime.id, current.credential_id!)).toBeNull();
   });
 
-  it("removes configuration and historical keys with the Runtime", () => {
+  it("preserves group configuration and credentials after deleting a Runtime", () => {
     const { store, runtime } = setup();
     process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY = Buffer.alloc(32, 5).toString("base64");
-    store.setRuntimeCodexProfile(runtime.id, apiProfile, "delete-key");
+    const profile = store.setRuntimeCodexProfile(runtime.id, apiProfile, "delete-key")!;
     store.registerRuntime({ name: "Other engine", provider: "claude", daemonId: runtime.daemonId, workspaceId: "local", ownerId: "local" });
     expect(store.deleteRuntime(runtime.id)).toBe(true);
-    expect(db!.query("SELECT * FROM multiremi_runtime_provider_credentials").all()).toEqual([]);
+    expect(db!.query("SELECT * FROM multiremi_execution_group_credentials").all()).toHaveLength(1);
+    expect(db!.query("SELECT * FROM multiremi_execution_group_profiles").all()).toHaveLength(1);
+    expect(store.getRuntimeCodexProfileKey(runtime.id, profile.credential_id!)).toBeNull();
     expect(db!.query("SELECT * FROM multiremi_runtime_codex_profiles").all()).toEqual([]);
   });
 });

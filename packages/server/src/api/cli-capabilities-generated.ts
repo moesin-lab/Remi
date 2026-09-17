@@ -3992,6 +3992,30 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "runtime.group.profile.get": {
+      "command": "remi runtime group profile get",
+      "auth": [
+        "human"
+      ],
+      "capability": "runtime.group.profile.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.group.profile.set": {
+      "command": "remi runtime group profile set",
+      "auth": [
+        "human"
+      ],
+      "capability": "runtime.group.profile.set",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "runtime.codex-profile.get": {
       "command": "remi runtime codex-profile get",
       "auth": [

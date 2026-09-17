@@ -4,6 +4,19 @@ import type { HttpClient } from "../api/http";
 import { executionTargetModelsOptions, runtimeModelsKeys } from "./models";
 
 describe("execution target model catalog", () => {
+  it("reads and writes group profiles through a strict workspace-scoped response boundary", async () => {
+    const profile = { name: "custom", base_url: "https://example.com/v1", model: "first", models: ["first", "second"], env_key: "REMI_CODEX_KEY" };
+    const fetch = vi.fn().mockResolvedValue({ profile });
+    const endpoints = new RuntimesEndpoints({ fetch } as unknown as HttpClient);
+    expect(await endpoints.getExecutionGroupProfile("ws", "shared:codex")).toEqual({ profile });
+    expect(fetch).toHaveBeenLastCalledWith("/api/execution-groups/shared%3Acodex/provider-profile?workspace_id=ws");
+    await endpoints.setExecutionGroupProfile("ws", "shared:codex", { profile });
+    expect(fetch).toHaveBeenLastCalledWith("/api/execution-groups/shared%3Acodex/provider-profile?workspace_id=ws", { method: "PUT", body: JSON.stringify({ profile }) });
+    fetch.mockResolvedValue({ profile: { ...profile, models: "invalid" } });
+    await expect(endpoints.getExecutionGroupProfile("ws", "shared:codex")).rejects.toThrow();
+    await expect(endpoints.setExecutionGroupProfile("ws", "shared:codex", { profile })).rejects.toThrow();
+  });
+
   it("isolates group models by workspace, group and agent owner context", () => {
     const first = executionTargetModelsOptions("ws", null, "team", "agent-a");
     expect(first.enabled).toBe(true);

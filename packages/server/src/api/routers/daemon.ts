@@ -1,3 +1,4 @@
+import { runtimeConnectionSnapshot } from "@multiremi/contracts/runtime-connection";
 import type { Hono } from "hono";
 import { mkdir, writeFile, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -432,8 +433,8 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       );
     }
     const response = daemonHeartbeatHttpResponse(ack);
-    response.codex_profile = store.getRuntimeCodexProfile(runtimeId);
-    response.claude_profile = store.getRuntimeClaudeProfile(runtimeId);
+    response.codex_profile = runtimeConnectionSnapshot(store.getRuntimeCodexProfile(runtimeId));
+    response.claude_profile = runtimeConnectionSnapshot(store.getRuntimeClaudeProfile(runtimeId));
     const runtime = store.getRuntime(runtimeId);
     const workspaceId = runtime?.workspaceId ?? "local";
     const workspaceConfig = workspaceReposResponse(

@@ -1488,6 +1488,16 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     store.startTask(first.task.id);
     store.completeTask(first.task.id, { output: "answer", sessionId: "pg-chat-session", workDir: "/tmp/pg-chat-queue" });
     expect(store.listChatMessages(chat.id).map((message) => message.body)).toEqual(["first", "second", "answer"]);
+    const newest = store.listChatMessagesPage(chat.id, { limit: 2 });
+    expect(newest.messages.map((message) => message.body)).toEqual(["second", "answer"]);
+    expect(newest.hasMore).toBe(true);
+    const before = { id: newest.messages[0]!.id, createdAt: newest.messages[0]!.createdAt };
+    const older = store.listChatMessagesPage(chat.id, { limit: 2, before });
+    expect(older.messages.map((message) => message.body)).toEqual(["first"]);
+    expect(older.hasMore).toBe(false);
+    expect(() => store.listChatMessagesPage(chat.id, {
+      limit: 2, before: { ...before, createdAt: "2000-01-01T00:00:00.000Z" },
+    })).toThrow("invalid cursor");
     expect(store.getChatSession(chat.id)?.lastMessage?.content).toBe("answer");
     expect(store.claimTask(runtime.id)?.sessionId).toBe("pg-chat-session");
     expect(store.buildTaskSessionProjection(second.task.id)?.mode).toBe("delta");

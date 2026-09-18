@@ -30,13 +30,13 @@ function show(node: ReactNode) {
 }
 afterEach(() => { cleanup(); state.runtimes = []; state.error = false; state.emptyGroup = false; state.shared = false; });
 describe("ExecutionTargetSelect", () => {
-  it("retains Antigravity automatic and execution-group targets", async () => {
+  it("retains Antigravity model routing and execution-group targets", async () => {
     state.runtimes = [runtime("agy", "antigravity")];
     const onChange = vi.fn();
     show(<ExecutionTargetSelect wsId="ws" value={{ executionGroupId: "", provider: "claude" }} onChange={onChange} />);
     fireEvent.click(await screen.findByRole("button", { name: /Machine agy \/ Antigravity/ }));
     expect(onChange).toHaveBeenLastCalledWith({ executionGroupId: "agy", provider: "antigravity" });
-    fireEvent.click(screen.getByRole("button", { name: /Automatic · Antigravity/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Model routing · Antigravity/ }));
     expect(onChange).toHaveBeenLastCalledWith({ executionGroupId: "", provider: "antigravity" });
   });
   it("distinguishes two machines running the same Runtime type", async () => {
@@ -57,7 +57,7 @@ describe("ExecutionTargetSelect", () => {
   it("shows the saved target without an editor for read-only users", async () => {
     state.runtimes = [runtime("a")];
     show(<ExecutionTargetSelect wsId="ws" compact canEdit={false} value={{ executionGroupId: "a", provider: "codex" }} onChange={vi.fn()} />);
-    expect(await screen.findByText("Machine a / Codex")).toBeInTheDocument();
+    expect(await screen.findByText("Fixed execution group · Machine a / Codex")).toBeInTheDocument();
     expect(screen.queryByRole("button")).toBeNull();
   });
   it("keeps an offline target selectable and explains the wait", async () => {
@@ -71,20 +71,20 @@ describe("ExecutionTargetSelect", () => {
     state.runtimes = [runtime("a")];
     const onChange = vi.fn();
     show(<ExecutionTargetSelect wsId="ws" value={{ executionGroupId: "", provider: "codex" }} onChange={onChange} />);
-    expect(await screen.findByText(enAgents.execution_target.automatic_hint)).toBeInTheDocument();
+    expect(await screen.findByText(enAgents.execution_target.model_routing_hint)).toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
   });
-  it("can switch from a group to automatic scheduling across machines", async () => {
+  it("can switch from a group to model routing across machines", async () => {
     state.runtimes = [runtime("a"), runtime("b")];
     const onChange = vi.fn();
     show(<ExecutionTargetSelect wsId="ws" value={{ executionGroupId: "a", provider: "codex" }} onChange={onChange} />);
-    fireEvent.click(await screen.findByRole("button", { name: /Automatic · Codex/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Model routing · Codex/ }));
     expect(onChange).toHaveBeenCalledWith({ executionGroupId: "", provider: "codex" });
   });
-  it("allows choosing automatic scheduling before connecting a runtime", async () => {
+  it("allows choosing model routing before connecting a runtime", async () => {
     const onChange = vi.fn();
     show(<ExecutionTargetSelect wsId="ws" value={{ executionGroupId: "", provider: "claude" }} onChange={onChange} />);
-    fireEvent.click(await screen.findByRole("button", { name: /Automatic · Codex/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Model routing · Codex/ }));
     expect(onChange).toHaveBeenCalledWith({ executionGroupId: "", provider: "codex" });
   });
   it("shows a missing saved target explicitly", async () => {

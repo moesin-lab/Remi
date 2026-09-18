@@ -1862,11 +1862,9 @@ export class RuntimesRepo {
   runtimeCanRunAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
     if (agent.runtimeId && agent.runtimeId !== runtime.id) return false;
     if (agent.executionGroupId && runtimeExecutionGroupId(this.ctx.db, runtime.id, agent.provider) !== agent.executionGroupId) return false;
-    if (agent.executionGroupId && !agent.runtimeId && !this.runtimeSupportsAgentModel(runtime, agent)) return false;
-    if (!agent.runtimeId && !agent.executionGroupId && agent.model &&
-      (agent.provider === "codex" || agent.provider === "claude") &&
-      this.listWorkspaceProviderProfileModels(agent.workspaceId, agent.provider).includes(agent.model) &&
-      !this.runtimeSupportsAgentModel(runtime, agent)) return false;
+    // Model routing spans groups, but every candidate must satisfy the model
+    // and thinking requirements. Keep legacy explicit Runtime pins compatible.
+    if (!agent.runtimeId && !this.runtimeSupportsAgentModel(runtime, agent)) return false;
     const profile = this.getRuntimeExecutionProfile(runtime.id, agent.provider);
     if (profile && (runtime.metadata[`${agent.provider}_profiles`] !== 1 ||
       (agent.model && !(profile.models ?? [profile.model]).includes(agent.model)))) return false;

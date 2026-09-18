@@ -30,7 +30,7 @@ function renderSelection(component: React.ReactNode) {
 
 describe.each([ModelDropdown, ModelPicker])("$name model selection", (Component) => {
   it.each([
-    { name: "automatic", target: {}, query: {} },
+    { name: "model routing", target: {}, query: {} },
     { name: "group", target: { executionGroupId: "group-1" }, query: { execution_group_id: "group-1" } },
     { name: "legacy runtime", target: { runtimeId: "runtime-1" }, query: { runtime_id: "runtime-1" } },
   ])("selects a supported model for $name scheduling", async ({ target, query }) => {
@@ -47,7 +47,7 @@ describe.each([ModelDropdown, ModelPicker])("$name model selection", (Component)
   });
 });
 
-it("keeps the automatic model read-only when editing is forbidden", () => {
+it("keeps the model routing model read-only when editing is forbidden", () => {
   renderSelection(<ModelPicker wsId="ws-1" provider="codex" value="supported-model" canEdit={false} onChange={vi.fn()} />);
   expect(screen.getByText("supported-model")).toBeInTheDocument();
   expect(screen.queryByRole("button")).not.toBeInTheDocument();

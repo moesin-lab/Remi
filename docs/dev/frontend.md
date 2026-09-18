@@ -67,7 +67,7 @@ WSClient → useRealtimeSync → sync/<领域>.ts
 
 ## 实时更新与性能定位
 
-能力组选项和 Runtime 的能力组信息提供共享连接入口，通过 [execution-group-profile.ts](../../frontend/packages/core/runtimes/execution-group-profile.ts) 与[共享表单](../../frontend/packages/views/runtimes/components/execution-group-provider-profile.tsx)读取和保存组级连接；查询键包含 workspace/group ID，响应严格校验。工作区 owner/admin 可配置一个连接、默认模型和可选模型列表；API Key 保存后清空，留空保留，也支持各成员本机环境变量。自动调度的模型选择使用工作区目录，指定组使用组目录；不再因缺少固定 Runtime/group ID 禁用选择器。保存后失效 Runtime 和模型目录缓存。旧 daemon 不领取自定义连接任务；鉴权、迁移和任务快照见 [Codex 连接](../design/acp-codex-via-codex-acp.md#能力组自定义连接)和 [Claude Code 连接](../design/acp-claude-via-claude-agent-acp.md)。
+能力组选项和 Runtime 的能力组信息提供共享连接入口，通过 [execution-group-profile.ts](../../frontend/packages/core/runtimes/execution-group-profile.ts) 与[共享表单](../../frontend/packages/views/runtimes/components/execution-group-provider-profile.tsx)读取和保存组级连接；查询键包含 workspace/group ID，响应严格校验。工作区 owner/admin 可配置一个连接、默认模型和可选模型列表；API Key 保存后清空，留空保留，也支持各成员本机环境变量。模型路由的模型选择使用工作区目录，指定组使用组目录；不再因缺少固定 Runtime/group ID 禁用选择器。保存后失效 Runtime 和模型目录缓存。旧 daemon 不领取自定义连接任务；鉴权、迁移和任务快照见 [Codex 连接](../design/acp-codex-via-codex-acp.md#能力组自定义连接)和 [Claude Code 连接](../design/acp-claude-via-claude-agent-acp.md)。
 
 - [useRealtimeSync](../../frontend/packages/core/realtime/use-realtime-sync.ts)负责订阅生命周期和断线重连后的缓存恢复；领域处理器集中在 [realtime/sync/](../../frontend/packages/core/realtime/sync/)。
 - [issues/ws-updaters.ts](../../frontend/packages/core/issues/ws-updaters.ts)补写可确定的任务列表和详情，对派生列表做失效处理。改任务响应字段时同时检查这里和 mutation 的缓存处理。
@@ -88,3 +88,5 @@ WSClient → useRealtimeSync → sync/<领域>.ts
 | 浏览器端到端 | [tests/integration/e2e-frontend-ours.ts](../../tests/integration/e2e-frontend-ours.ts)：仓库实际 E2E 入口，运行条件以该脚本为准 |
 
 文案使用 [views/i18n/](../../frontend/packages/views/i18n/) 的 `useT`；语言资源在 [locales/](../../frontend/packages/views/locales/)，键一致性检查在 [parity.test.ts](../../frontend/packages/views/locales/parity.test.ts)，术语维护见 [glossary.md](../../frontend/packages/views/locales/glossary.md)。
+
+模型路由与固定能力组沿用现有 API：未指定 `runtime_id` / `execution_group_id` 表示模型路由；指定 `execution_group_id` 表示固定能力组，旧 `runtime_id` 绑定继续兼容。模型路由在云友有权使用的同引擎 Runtime 间，按模型及思考等级匹配；固定能力组只在组内匹配。领取任务时重新校验能力，不匹配的任务继续排队且不阻塞其他兼容任务。未指定模型时使用 Runtime 默认模型；指定思考等级时默认模型也必须支持该等级。工作区、私有 Runtime 权限及持久目录约束仍然生效。CLI 使用同一 agent 创建/更新字段与模型查询接口。

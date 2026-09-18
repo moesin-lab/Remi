@@ -11,7 +11,7 @@ import {
 import { CHIP_CLASS } from "./chip";
 import { useT } from "../../../i18n";
 
-// Automatic scheduling uses the workspace pool; explicit targets scope the catalog.
+// Model routing uses the workspace pool; explicit targets scope the catalog.
 export function ModelPicker({
   wsId,
   runtimeId,

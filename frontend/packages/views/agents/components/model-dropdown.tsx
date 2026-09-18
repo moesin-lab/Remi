@@ -12,7 +12,7 @@ import { Input } from "@multiremi/ui/components/ui/input";
 import { Label } from "@multiremi/ui/components/ui/label";
 import { useT } from "../../i18n";
 
-// Automatic scheduling uses the workspace pool; explicit targets scope the catalog.
+// Model routing uses the workspace pool; explicit targets scope the catalog.
 export function ModelDropdown({
   wsId,
   runtimeId,

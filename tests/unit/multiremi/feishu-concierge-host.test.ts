@@ -7,7 +7,8 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { controlPlaneConciergeHost } from "../../../apps/remi/cli/multiremi.js";
+import { attachControlPlaneConciergeHosts, controlPlaneConciergeHost } from "../../../apps/remi/cli/multiremi.js";
+import type { FeishuConciergeHost } from "@multiremi/worker/feishu-concierge.js";
 import type { bootFeishuChannel, FeishuChannelHandle } from "../../../apps/remi/cli/agent.js";
 import type { MultiremiDaemon } from "@multiremi/worker/daemon.js";
 import type {
@@ -116,6 +117,52 @@ function host(input: {
 }
 
 describe("control-plane Feishu concierge host", () => {
+  it("hosts either co-resident provider without letting a sibling stop or detach its channel", async () => {
+    const daemons = [fakeDaemon(), fakeDaemon()];
+    const hosts: FeishuConciergeHost[] = [];
+    const shutdowns = [0, 0];
+    for (const [index, test] of daemons.entries()) {
+      Object.assign(test.daemon, {
+        localPort: () => 4242 + index,
+        setFeishuConciergeHost: (host: FeishuConciergeHost) => { hosts[index] = host; },
+        shutdownFeishuConcierge: async () => {
+          shutdowns[index]!++;
+          await hosts[index]!.stop();
+        },
+      });
+    }
+    const channels: ReturnType<typeof fakeChannel>[] = [];
+    const ports: number[] = [];
+    const stop = attachControlPlaneConciergeHosts(daemons.map(test => test.daemon), {
+      workspacesRoot: () => "/tmp/workspaces",
+      boot: async (_authorize, options) => {
+        ports.push(options!.daemonPort!);
+        const channel = fakeChannel();
+        channels.push(channel);
+        return channel.handle;
+      },
+    });
+    expect(hosts).toHaveLength(2);
+    // Codex is normally the second daemon; it must boot using its own port.
+    await hosts[1]!.start(assignment({ runtime_id: "rt_codex" }));
+    await hosts[0]!.stop();
+    expect(channels[0]!.stops()).toBe(0);
+    expect(await hosts[1]!.uploadImage!(Buffer.from("codex image"))).toEqual({ imageKey: "img_uploaded" });
+    // Simulate the control plane's stopped-before-started handover to Claude.
+    await hosts[1]!.stop();
+    await hosts[0]!.start(assignment({ runtime_id: "rt_claude" }));
+    channels[0]!.fail(new Error("late failure from the stopped Codex channel"));
+    await Promise.resolve();
+    await hosts[1]!.stop();
+    expect(channels[1]!.stops()).toBe(0);
+    expect(await hosts[0]!.uploadImage!(Buffer.from("claude image"))).toEqual({ imageKey: "img_uploaded" });
+    expect(ports).toEqual([4243, 4242]);
+    expect(daemons.flatMap(test => test.failures)).toEqual([]);
+    await Promise.all([stop(), stop()]);
+    expect(shutdowns).toEqual([1, 1]);
+    expect(channels.map(channel => channel.stops())).toEqual([1, 1]);
+  });
+
   it("routes a private Task to the main chat without inventing a thread session key", async () => {
     const test = host({ daemon: fakeDaemon().daemon });
     await test.conciergeHost.start(assignment());
@@ -136,6 +183,42 @@ describe("control-plane Feishu concierge host", () => {
       signal: new AbortController().signal, onStarted: async () => {},
     });
     expect(sends).toBe(1);
+  });
+
+  it("opens a Task stream without a session and surfaces the provider session as soon as it is pinned", async () => {
+    const { daemon } = fakeDaemon();
+    const statuses = [
+      { status: "running" as const, sessionId: null },
+      { status: "running" as const, sessionId: "sess_pinned" },
+      // A repeat poll must not replay the same session as another snapshot.
+      { status: "running" as const, sessionId: "sess_pinned" },
+      { status: "completed" as const, sessionId: "sess_pinned" },
+    ];
+    let poll = 0;
+    Object.assign(daemon, {
+      listFeishuBotTaskMessages: async () => [],
+      getFeishuBotTaskSnapshot: async () => {
+        const next = statuses[Math.min(poll++, statuses.length - 1)]!;
+        return { taskId: "tsk_private", status: next.status, result: "done", error: null,
+          sessionId: next.sessionId, workDir: null, usage: [] };
+      },
+    });
+    const test = host({ daemon });
+    await test.conciergeHost.start(assignment());
+    const observed: Array<string | null> = [];
+    let metaSessionId: string | null | undefined = "not observed";
+    test.channel.handle.streamProactiveTask = async (_chat, _session, stream, meta) => {
+      metaSessionId = meta.sessionId;
+      for await (const event of stream) if (event.kind === "snapshot") observed.push(event.snapshot.sessionId);
+      return { messageId: "om_result" };
+    };
+    await test.conciergeHost.sendOutbound!({ id: "fbo_private", claimToken: "lease", chatId: "oc_private",
+      threadId: null, replyToMessageId: null, body: "", bodyOrigin: "agent", taskId: "tsk_private",
+      idempotencyKey: "fbo_private", mention: { mode: "none", resolvedOpenId: null } },
+      { signal: new AbortController().signal, onStarted: async () => {} });
+    // `null`, not `undefined`: the card starts as a newborn, not a bare agent name.
+    expect(metaSessionId).toBeNull();
+    expect(observed).toEqual(["sess_pinned", "sess_pinned"]);
   });
 
   it("checkpoints a group owner before sending through the existing Task card", async () => {

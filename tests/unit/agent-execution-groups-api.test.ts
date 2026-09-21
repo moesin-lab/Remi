@@ -53,6 +53,36 @@ describe("execution group API", () => {
     expect(catalog.providers[0].provider).toBe("antigravity");
   });
 
+  it("routes a native model across groups without blocking compatible queued work", () => {
+    const { store, runtime, peer } = setup();
+    const routed = store.createAgent({ name: "Model routed", provider: "codex", model: "peer-only" });
+    const waiting = store.createTask({ agentId: routed.id, prompt: "Needs peer model" });
+    const compatible = store.createAgent({ name: "Compatible", provider: "codex", model: "common" });
+    const runnable = store.createTask({ agentId: compatible.id, prompt: "Can run here" });
+    expect(store.claimTask(runtime.id)?.id).toBe(runnable.id);
+    expect(store.getTask(waiting.id)?.status).toBe("queued");
+    expect(store.claimTask(peer.id)?.id).toBe(waiting.id);
+  });
+
+  it("matches thinking requirements even when the Runtime default model is used", () => {
+    const { store, runtime, peer } = setup();
+    const agent = store.createAgent({ name: "Thinking routed", provider: "codex", thinkingLevel: "high" });
+    const task = store.createTask({ agentId: agent.id, prompt: "Needs high thinking" });
+    expect(store.claimTask(peer.id)).toBeNull();
+    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+  });
+
+  it("rechecks model capabilities after enqueue and keeps fixed groups bounded", () => {
+    const { store, runtime, peer } = setup();
+    const group = store.listExecutionGroups("local").find(entry => entry.runtimeIds.includes(runtime.id))!;
+    const fixed = store.createAgent({ name: "Fixed", provider: "codex", executionGroupId: group.id, model: "peer-only" });
+    const fixedTask = store.createTask({ agentId: fixed.id, prompt: "Stay in group" });
+    expect(store.claimTask(peer.id)).toBeNull();
+    expect(store.claimTask(runtime.id)).toBeNull();
+    store.updateRuntimeModels(runtime.id, [{ id: "peer-only", label: "Peer", provider: "openai", default: true }]);
+    expect(store.claimTask(runtime.id)?.id).toBe(fixedTask.id);
+  });
+
   for (const provider of ["codex", "claude"] as const) {
     it(`preserves reported ${provider} reasoning through custom connections, group validation and dispatch`, async () => {
       const { store, app, request } = setup();
@@ -60,25 +90,34 @@ describe("execution group API", () => {
       legacyGroup(store, "custom-group", [runtime.id], provider);
       const profile = { name: "custom", base_url: "https://example.com/v1", model: "custom-model", env_key: provider === "codex" ? "REMI_CODEX_KEY" : "REMI_CLAUDE_KEY" };
       const configure = () => provider === "codex" ? store.setRuntimeCodexProfile(runtime.id, profile) : store.setRuntimeClaudeProfile(runtime.id, profile);
-      configure();
+      const savedProfile = configure()!;
       store.updateRuntimeModels(runtime.id, [
         { id: "custom-model", label: "Custom model", provider, default: true, thinking: { supportedLevels: [{ value: "high", label: "High" }], defaultLevel: "high" } },
-        { id: "unrelated-model", label: "Unrelated", provider, default: false },
-      ]);
+        { id: "alternative-model", label: "Alternative", provider, default: false, thinking: { supportedLevels: [{ value: "high", label: "High" }] } },
+      ], savedProfile);
       for (const query of [`runtime_id=${runtime.id}`, "execution_group_id=custom-group"]) {
         const response = await app.request(`/api/models?workspace_id=local&${query}`);
         expect(response.status).toBe(200);
         const { providers } = await response.json();
-        expect(providers[0].models).toEqual([{
+        expect(providers[0].models.map((model: { default?: boolean }) => ({ ...model, default: model.default === true }))).toEqual([{
           id: "custom-model", label: "Custom model", provider, default: true,
           thinking: { supported_levels: [{ value: "high", label: "High" }], default_level: "high" },
+          // Reported by the Runtime itself, so the catalog names it as that source
+          // rather than leaving the levels unattributed.
+          thinking_source: "runtime",
+        }, {
+          id: "alternative-model", label: "Alternative", provider, default: false,
+          thinking: { supported_levels: [{ value: "high", label: "High" }] },
+          thinking_source: "runtime",
         }]);
       }
-      const response = await request("/api/agents", { name: "Reasoning", execution_group_id: "custom-group", model: "custom-model", thinking_level: "high" });
+      const response = await request("/api/agents", { name: "Reasoning", execution_group_id: "custom-group", model: "alternative-model", thinking_level: "high" });
       expect(response.status).toBe(201);
       const agent = await response.json();
       const task = store.createTask({ agentId: agent.id, prompt: "Use the configured connection" });
-      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      const claimed = store.claimTask(runtime.id)!;
+      expect(claimed.id).toBe(task.id);
+      expect((provider === "codex" ? claimed.codexProfile : claimed.claudeProfile)?.model).toBe("alternative-model");
       // Changing a connection must invalidate capabilities from its previous endpoint.
       configure();
       expect(store.listRuntimeModels(runtime.id)[0]?.thinking).toBeUndefined();

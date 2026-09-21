@@ -19,6 +19,7 @@ import type {
   MultiremiNotificationGroupKey,
   MultiremiNotificationPreferenceResponse,
   MultiremiNotificationPreferences,
+  MultiremiRuntimeModelThinking,
   MultiremiUser,
   MultiremiWorkspace,
   MultiremiWorkspaceInvitation,
@@ -51,10 +52,33 @@ export interface RelayConfigForBrowser {
   modelDiscovery: boolean;
 }
 export interface GatewayModelsSnapshot {
-  models: Array<{ id: string; label: string }>;
+  models: Array<{ id: string; label: string; thinking?: MultiremiRuntimeModelThinking }>;
+  /** A ready native Codex directory is authoritative even when models is empty. */
+  nativeCatalogStatus?: "ready" | "error";
   sourceRevision: number;
   lastSuccessAt: string | null;
   lastError: string | null;
+}
+
+/**
+ * An administrator's explicit reasoning-level declaration for one gateway model.
+ *
+ * This is a first-class capability source, not a borrowed one: no engine publishes
+ * levels for these models (the gateway `/v1/models` inventory carries ids and
+ * labels only), so an operator stating them is the only way the model can become
+ * selectable at a chosen effort. It is stored per workspace × engine × model,
+ * apart from the discovery snapshot, so re-probing can never erase it.
+ *
+ * `levels` is always non-empty — clearing a declaration deletes the row rather
+ * than storing an empty set, because an empty set would read as "unsupported"
+ * and silently reintroduce the MUL-338 failure.
+ */
+export interface GatewayModelReasoningDecl {
+  modelId: string;
+  levels: string[];
+  defaultLevel?: string;
+  updatedBy: string | null;
+  updatedAt: string;
 }
 
 export class WorkspaceDaemonRetirementRequiredError extends Error {
@@ -838,7 +862,9 @@ export class WorkspacesRepo {
       .get(workspaceId, engine) as Row | null;
     if (!row) return null;
     return {
-      models: parseJson<Array<{ id: string; label: string }>>(row.models, []),
+      models: parseJson<GatewayModelsSnapshot["models"]>(row.models, []),
+      ...(row.native_catalog_status === "ready" || row.native_catalog_status === "error"
+        ? { nativeCatalogStatus: row.native_catalog_status } : {}),
       sourceRevision: Number(row.source_revision ?? 0),
       lastSuccessAt: nullableString(row.last_success_at),
       lastError: nullableString(row.last_error),
@@ -849,7 +875,7 @@ export class WorkspacesRepo {
   saveGatewayModels(
     workspaceId: string,
     engine: RelayEngine,
-    input: { models?: Array<{ id: string; label: string }>; sourceRevision: number; error?: string | null },
+    input: { models?: GatewayModelsSnapshot["models"]; sourceRevision: number; nativeCatalogStatus?: GatewayModelsSnapshot["nativeCatalogStatus"]; error?: string | null },
   ): void {
     const now = nowIso();
     // Read the fence and write in one transaction so a slow, stale discovery run
@@ -863,18 +889,91 @@ export class WorkspacesRepo {
       // On a FAILED discovery keep the source_revision of the last SUCCESS, so a
       // stale catalog can never masquerade as freshly discovered for a new config.
       const sourceRevision = success ? input.sourceRevision : (existing?.sourceRevision ?? input.sourceRevision);
+      const nativeCatalogStatus = input.nativeCatalogStatus ?? (success ? null : existing?.nativeCatalogStatus ?? null);
       this.ctx.db.run(
-        `INSERT INTO multiremi_gateway_models (workspace_id, engine, models, source_revision, last_success_at, last_error, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO multiremi_gateway_models (workspace_id, engine, models, source_revision, last_success_at, last_error, native_catalog_status, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(workspace_id, engine) DO UPDATE SET
            models = excluded.models,
            source_revision = excluded.source_revision,
            last_success_at = excluded.last_success_at,
            last_error = excluded.last_error,
+           native_catalog_status = excluded.native_catalog_status,
            updated_at = excluded.updated_at`,
-        [workspaceId, engine, toJson(models), sourceRevision, lastSuccessAt, input.error ?? null, now],
+        [workspaceId, engine, toJson(models), sourceRevision, lastSuccessAt, input.error ?? null, nativeCatalogStatus, now],
       );
     })();
+  }
+
+  // ── Model gateway: administrator-declared reasoning levels ─────
+
+  listGatewayModelReasoning(workspaceId: string, engine: RelayEngine): GatewayModelReasoningDecl[] {
+    const rows = this.ctx.db
+      .query("SELECT * FROM multiremi_gateway_model_reasoning WHERE workspace_id = ? AND engine = ? ORDER BY model_id")
+      .all(workspaceId, engine) as Row[];
+    return rows.map(row => this.gatewayModelReasoningFromRow(row));
+  }
+
+  getGatewayModelReasoning(workspaceId: string, engine: RelayEngine, modelId: string): GatewayModelReasoningDecl | null {
+    const row = this.ctx.db
+      .query("SELECT * FROM multiremi_gateway_model_reasoning WHERE workspace_id = ? AND engine = ? AND model_id = ?")
+      .get(workspaceId, engine, modelId) as Row | null;
+    return row ? this.gatewayModelReasoningFromRow(row) : null;
+  }
+
+  /**
+   * Upsert one declaration. An empty `levels` is a delete, not a stored empty
+   * set: persisting "no levels" would read as an authoritative `unsupported`
+   * anywhere the declaration is consulted and re-create the MUL-338 queue hang.
+   */
+  saveGatewayModelReasoning(
+    workspaceId: string,
+    engine: RelayEngine,
+    input: { modelId: string; levels: string[]; defaultLevel?: string | null; updatedBy?: string | null },
+  ): GatewayModelReasoningDecl | null {
+    const modelId = input.modelId.trim();
+    if (!modelId) throw new Error("model id is required");
+    if (input.levels.length === 0) {
+      this.deleteGatewayModelReasoning(workspaceId, engine, modelId);
+      return null;
+    }
+    const now = nowIso();
+    const defaultLevel = input.defaultLevel ? input.defaultLevel : null;
+    this.ctx.db.run(
+      `INSERT INTO multiremi_gateway_model_reasoning (workspace_id, engine, model_id, levels, default_level, updated_by, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(workspace_id, engine, model_id) DO UPDATE SET
+         levels = excluded.levels,
+         default_level = excluded.default_level,
+         updated_by = excluded.updated_by,
+         updated_at = excluded.updated_at`,
+      [workspaceId, engine, modelId, toJson(input.levels), defaultLevel, input.updatedBy ?? null, now],
+    );
+    return this.getGatewayModelReasoning(workspaceId, engine, modelId);
+  }
+
+  deleteGatewayModelReasoning(workspaceId: string, engine: RelayEngine, modelId: string): boolean {
+    const existing = this.getGatewayModelReasoning(workspaceId, engine, modelId);
+    if (!existing) return false;
+    this.ctx.db.run(
+      "DELETE FROM multiremi_gateway_model_reasoning WHERE workspace_id = ? AND engine = ? AND model_id = ?",
+      [workspaceId, engine, modelId],
+    );
+    return true;
+  }
+
+  private gatewayModelReasoningFromRow(row: Row): GatewayModelReasoningDecl {
+    const levels = parseJson<string[]>(row.levels, []).filter(level => typeof level === "string" && level.length > 0);
+    const defaultLevel = nullableString(row.default_level);
+    return {
+      modelId: String(row.model_id),
+      levels,
+      // A default that is not in the declared set is dropped rather than surfaced:
+      // the pair is written together, so a mismatch can only be stale data.
+      ...(defaultLevel && levels.includes(defaultLevel) ? { defaultLevel } : {}),
+      updatedBy: nullableString(row.updated_by),
+      updatedAt: String(row.updated_at ?? ""),
+    };
   }
 
   createWorkspaceInvitation(workspaceId: string, input: CreateWorkspaceInvitationInput, inviterUserId?: string | null): MultiremiWorkspaceInvitation {

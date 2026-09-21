@@ -22,6 +22,7 @@ export {
   resolveAcpExecutableForAgent,
   resolveAcpHealthCheckCommand,
   UnsupportedAcpEffortError,
+  UnsupportedAcpModelError,
 } from "./provider.js";
 export type {
   AcpProviderOptions,
@@ -93,3 +94,9 @@ export type { StreamMeta, StreamHandlerLog } from "@shared/contracts/acp-protoco
 // ── ACP Client (lower-level) ──────────────────────────────────
 export { AcpClient } from "./client.js";
 export type { AcpClientOptions } from "./client.js";
+export {
+  isolateProcessTmp,
+  mapPrivateTmpPath,
+  privateTmpVisiblePath,
+  PrivateTmpIsolationUnavailableError,
+} from "./private-tmp.js";

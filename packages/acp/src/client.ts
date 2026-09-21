@@ -7,6 +7,7 @@ const _log = { info: (...a: unknown[]) => console.log("[acp-client]", ...a), war
 function createLogger(_: string) { return _log; }
 
 import { resolveAcpProcessLaunch } from "./launch.js";
+import { isolateProcessTmp, mapPrivateTmpPath } from "./private-tmp.js";
 
 import type {
   JsonRpcRequest,
@@ -48,6 +49,8 @@ export interface AcpClientOptions {
   agentType?: string;
   /** Working directory for the agent process. */
   cwd?: string;
+  /** Daemon-owned directory mounted as this task execution's literal /tmp. */
+  privateTmpDirectory?: string;
   /** Additional MCP servers to configure. */
   mcpServers?: McpServerConfig[];
   /** Environment variables for the agent process. */
@@ -135,7 +138,11 @@ export class AcpClient {
 
     this._log("spawning", executable, "cwd:", cwd);
 
-    const launch = resolveAcpProcessLaunch(executable, this._options.args ?? []);
+    const launch = isolateProcessTmp(
+      resolveAcpProcessLaunch(executable, this._options.args ?? []),
+      this._options.privateTmpDirectory,
+      env,
+    );
     this._process = Bun.spawn([launch.executable, ...launch.args], {
       stdin: "pipe",
       stdout: "pipe",
@@ -457,7 +464,7 @@ export class AcpClient {
         // `line` is 1-based and `limit` caps the returned line count
         // (sdk schema.json ReadTextFileRequest); both are optional.
         const { path, line, limit } = msg.params as { path: string; line?: number | null; limit?: number | null };
-        let content = readFileSync(path, "utf-8");
+        let content = readFileSync(mapPrivateTmpPath(path, this._options.privateTmpDirectory), "utf-8");
         if (line != null || limit != null) {
           const start = line != null && line > 0 ? line - 1 : 0;
           const lines = content.split("\n");
@@ -466,7 +473,7 @@ export class AcpClient {
         this._respond(msg.id, { content });
       } else if (msg.method === "fs/write_text_file") {
         const { path, content } = msg.params as { path: string; content: string };
-        writeFileSync(path, content, "utf-8");
+        writeFileSync(mapPrivateTmpPath(path, this._options.privateTmpDirectory), content, "utf-8");
         this._respond(msg.id, {});
       }
     } catch (err: any) {
@@ -488,11 +495,13 @@ export class AcpClient {
         // `subagent-transcript` opts into subagent prose: claude-agent-acp >= 0.66
         // strips a subagent's text/thinking chunks unless the client declares it
         // (the bridge checks `capabilities?._meta?.["subagent-transcript"] === true`).
-        // codex-acp reads exactly one client `_meta` key — `terminal_output`
-        // (dist/index.js:22754-22760) — so the claude-only key is left out there.
+        // Codex's recommendedValue extension distinguishes model defaults from
+        // a session's current effort, which can survive a model switch.
         _meta: {
           terminal_output: true,
-          ...(this._options.agentType === "codex" ? {} : { "subagent-transcript": true }),
+          ...(this._options.agentType === "codex"
+            ? { jetbrains: { air: { version: 1, capabilities: ["recommendedValue"] } } }
+            : { "subagent-transcript": true }),
         },
         fs: { readTextFile: true, writeTextFile: true },
         // Form-elicitation support: the agent keeps AskUserQuestion enabled and

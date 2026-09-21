@@ -2,6 +2,7 @@ import { createId } from "@multiremi/ids.js";
 import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
 import { ExecutionProfilesRepo } from "@multiremi/store/repos/execution-profiles-repo.js";
 import { getExecutionGroup, listExecutionGroups, saveExecutionGroup, deleteExecutionGroup } from "@multiremi/store/execution-groups.js";
+import type { RuntimeConnectionProfile } from "@multiremi/contracts/runtime-connection";
 import { type SqlDatabase, openMultiremiDatabase } from "@multiremi/store/db/postgres.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { daemonRuntimeId, isTerminalStatus } from "@multiremi/store/helpers.js";
@@ -10,6 +11,7 @@ import { FeedbackRepo } from "@multiremi/store/repos/feedback-repo.js";
 import { AccessTokensRepo } from "@multiremi/store/repos/access-tokens-repo.js";
 import { PasswordAccountsRepo, type ConfigurePasswordAccountInput } from "@multiremi/store/repos/password-accounts-repo.js";
 import { IssueSharesRepo } from "@multiremi/store/repos/issue-shares-repo.js";
+import { TaskCapabilityMonitor } from "@multiremi/store/task-capability-monitor.js";
 import {
   NotificationChannelsRepo,
   type CreateNotificationChannelInput,
@@ -142,6 +144,7 @@ import {
 } from "@multiremi/store/repos/analytics-repo.js";
 import {
   WorkspacesRepo,
+  type GatewayModelReasoningDecl,
   type GatewayModelsSnapshot,
   type RelayConfigForBrowser,
   type RelayConfigForDaemon,
@@ -149,6 +152,7 @@ import {
 } from "@multiremi/store/repos/workspaces-repo.js";
 // The relay/gateway config types used to be declared here; keep the public surface unchanged.
 export type {
+  GatewayModelReasoningDecl,
   GatewayModelsSnapshot,
   RelayConfigForBrowser,
   RelayConfigForDaemon,
@@ -324,6 +328,7 @@ import type {
   MultiremiSessionEvent,
   MultiremiSessionParticipant,
   MultiremiSessionProjection,
+  MultiremiSessionInheritedContext,
   MultiremiSessionResult,
   MultiremiSystemEvent,
   MultiremiSquad,
@@ -446,6 +451,7 @@ export class MultiremiStore {
   private issueShares: IssueSharesRepo;
   private notificationChannels: NotificationChannelsRepo;
   private notificationDispatcher: OutboundNotificationDispatcher;
+  private taskCapabilityMonitor: TaskCapabilityMonitor;
   private agentIssueUpdates: AgentIssueUpdatesRepo;
   private cloudNodes: CloudRuntimeNodesRepo;
   private platformOperations: PlatformOperationsRepo;
@@ -560,6 +566,7 @@ export class MultiremiStore {
     this.sshMesh = new SshMeshRepo(this.ctx);
     this.autopilots = new AutopilotsRepo(this.ctx);
     this.tasks = new TasksRepo(this.ctx);
+    this.taskCapabilityMonitor = new TaskCapabilityMonitor(now => this.tasks.refreshQueuedCapabilityWaitReasons(now));
     this.migrate();
   }
 
@@ -1492,9 +1499,29 @@ runMigrations(this.db);
   saveGatewayModels(
     workspaceId: string,
     engine: RelayEngine,
-    input: { models?: Array<{ id: string; label: string }>; sourceRevision: number; error?: string | null },
+    input: { models?: GatewayModelsSnapshot["models"]; sourceRevision: number; nativeCatalogStatus?: GatewayModelsSnapshot["nativeCatalogStatus"]; error?: string | null },
   ): void {
     return this.workspaces.saveGatewayModels(workspaceId, engine, input);
+  }
+
+  listGatewayModelReasoning(workspaceId: string, engine: RelayEngine): GatewayModelReasoningDecl[] {
+    return this.workspaces.listGatewayModelReasoning(workspaceId, engine);
+  }
+
+  getGatewayModelReasoning(workspaceId: string, engine: RelayEngine, modelId: string): GatewayModelReasoningDecl | null {
+    return this.workspaces.getGatewayModelReasoning(workspaceId, engine, modelId);
+  }
+
+  saveGatewayModelReasoning(
+    workspaceId: string,
+    engine: RelayEngine,
+    input: { modelId: string; levels: string[]; defaultLevel?: string | null; updatedBy?: string | null },
+  ): GatewayModelReasoningDecl | null {
+    return this.workspaces.saveGatewayModelReasoning(workspaceId, engine, input);
+  }
+
+  deleteGatewayModelReasoning(workspaceId: string, engine: RelayEngine, modelId: string): boolean {
+    return this.workspaces.deleteGatewayModelReasoning(workspaceId, engine, modelId);
   }
 
   createWorkspaceInvitation(workspaceId: string, input: CreateWorkspaceInvitationInput, inviterUserId?: string | null): MultiremiWorkspaceInvitation {
@@ -1695,10 +1722,12 @@ runMigrations(this.db);
 
   startNotificationDeliverySweeper(): void {
     this.notificationDispatcher.start();
+    this.taskCapabilityMonitor.start();
   }
 
   stopNotificationDeliverySweeper(): void {
     this.notificationDispatcher.stop();
+    this.taskCapabilityMonitor.stop();
   }
 
   createFeedback(input: CreateFeedbackInput): MultiremiFeedback {
@@ -1953,6 +1982,10 @@ runMigrations(this.db);
 
   isFeishuTransportChatSession(chatSessionId: string): boolean {
     return this.feishuBot.isTransportChatSession(chatSessionId);
+  }
+
+  canFeishuBotDaemonAccessTask(workspaceId: string, daemonId: string, taskId: string): boolean {
+    return this.feishuBot.canDaemonAccessTask(workspaceId, daemonId, taskId);
   }
 
   assertFeishuBotInboundAttachmentScope(...args: Parameters<FeishuBotRepo["assertInboundAttachmentScope"]>) {
@@ -2881,8 +2914,8 @@ runMigrations(this.db);
     return this.runtimes.listRuntimeModels(runtimeId);
   }
 
-  updateRuntimeModels(runtimeId: string, models: MultiremiRuntimeModel[]): MultiremiRuntimeModel[] {
-    return this.runtimes.updateRuntimeModels(runtimeId, models);
+  updateRuntimeModels(runtimeId: string, models: MultiremiRuntimeModel[], modelProfile?: RuntimeConnectionProfile | null): MultiremiRuntimeModel[] {
+    return this.runtimes.updateRuntimeModels(runtimeId, models, modelProfile);
   }
 
   createRuntimeModelListRequest(runtimeId: string): MultiremiRuntimeModelListRequest {
@@ -3619,6 +3652,10 @@ runMigrations(this.db);
     return this.sessions.getIssueSession(id);
   }
 
+  getSessionInheritedContext(sessionId: string): MultiremiSessionInheritedContext | null {
+    return this.sessions.getSessionInheritedContext(sessionId);
+  }
+
   listIssueSessions(issueId: string, includeArchived = false): MultiremiIssueSession[] {
     return this.sessions.listIssueSessions(issueId, includeArchived);
   }
@@ -3972,6 +4009,18 @@ runMigrations(this.db);
     deduplicated: boolean;
   } {
     return this.knowledge.createSubmission(input);
+  }
+
+  reportRepositoryWikiOutcome(input: import("./repos/knowledge-repo.js").ReportRepositoryWikiOutcomeInput) {
+    return this.knowledge.reportRepositoryOutcome(input);
+  }
+
+  repositoryWikiTaskOutcome(workspaceId: string, repositoryId: string, taskId: string) {
+    return this.knowledge.repositoryTaskOutcome(workspaceId, repositoryId, taskId);
+  }
+
+  repositoryWikiObservability(workspaceId: string) {
+    return this.knowledge.repositoryObservability(workspaceId);
   }
 
   getKnowledgeSubmission(id: string): MultiremiKnowledgeSubmission | null {
@@ -4422,6 +4471,18 @@ runMigrations(this.db);
    */
   runtimeCanRunAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
     return this.runtimes.runtimeCanRunAgent(runtime, agent);
+  }
+
+  runtimeCanRouteAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
+    return this.runtimes.runtimeCanRouteAgent(runtime, agent);
+  }
+
+  runtimeSupportsAgentModel(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
+    return this.runtimes.runtimeSupportsAgentModel(runtime, agent);
+  }
+
+  refreshQueuedCapabilityWaitReasons(now = Date.now()): { updated: number; alerted: number } {
+    return this.tasks.refreshQueuedCapabilityWaitReasons(now);
   }
 
   getRuntimeByDaemonAndProvider(daemonId: string, provider: string): MultiremiRuntime | null {

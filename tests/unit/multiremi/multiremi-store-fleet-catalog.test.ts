@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
+import type { GatewayModelsSnapshot } from "@multiremi/store/store.js";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
@@ -21,7 +22,7 @@ function runtimeThinking(values: string[], defaultLevel?: string) {
 function saveGatewayCatalog(
   store: MultiremiStore,
   engine: "claude" | "codex",
-  models: Array<{ id: string; label: string }>,
+  models: GatewayModelsSnapshot["models"],
 ): void {
   store.setRelayModelDiscovery("local", true);
   const revision = store.upsertRelayConfig("local", engine, {
@@ -33,7 +34,7 @@ function saveGatewayCatalog(
     tokenOp: "set",
     authToken: "test-token",
   });
-  store.saveGatewayModels("local", engine, { sourceRevision: revision, models });
+  store.saveGatewayModels("local", engine, { sourceRevision: revision, ...(engine === "codex" ? { nativeCatalogStatus: "ready" as const } : {}), models });
 }
 
 describe("Multiremi store — fleet engine and model catalog", () => {
@@ -264,7 +265,7 @@ describe("Multiremi store — fleet engine and model catalog", () => {
     expect(fable.thinking.supported_levels.map((level: any) => level.value).sort()).toEqual(["high", "low"]);
   });
 
-  it("resolves mismatched Claude families and provider effort metadata", async () => {
+  it("resolves known Claude families without inventing effort metadata for unrelated models", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
     const levels = ["low", "medium", "high", "xhigh", "max"];
@@ -308,8 +309,7 @@ describe("Multiremi store — fleet engine and model catalog", () => {
     const haiku = models.get("claude-haiku-4-5-20251001") as any;
     expect(opus.thinking.supported_levels.map((level: any) => level.value)).toEqual(levels);
     expect(opus.default).toBe(true);
-    expect(fable.thinking.supported_levels.map((level: any) => level.value)).toEqual(levels);
-    expect(fable.thinking.default_level).toBeUndefined();
+    expect(fable.thinking).toBeUndefined();
     expect(fable.default).toBeUndefined();
     // A known non-thinking family is a negative match, not a provider-fallback candidate.
     expect(haiku.thinking).toBeUndefined();
@@ -322,13 +322,19 @@ describe("Multiremi store — fleet engine and model catalog", () => {
     });
     expect(created.status).toBe(201);
     const agent = await created.json();
-    const valid = await app.request(`/api/agents/${agent.id}`, {
+    const unverified = await app.request(`/api/agents/${agent.id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model: "claude-fable-5", thinking_level: "max" }),
     });
+    expect(unverified.status).toBe(400);
+    const valid = await app.request(`/api/agents/${agent.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "claude-opus-5", thinking_level: "max" }),
+    });
     expect(valid.status).toBe(200);
-    expect(store.getAgent(agent.id)).toMatchObject({ model: "claude-fable-5", thinkingLevel: "max" });
+    expect(store.getAgent(agent.id)).toMatchObject({ model: "claude-opus-5", thinkingLevel: "max" });
 
     const invalid = await app.request(`/api/agents/${agent.id}`, {
       method: "PUT",
@@ -733,7 +739,7 @@ describe("Multiremi store — fleet engine and model catalog", () => {
     expect((await response.json()).thinking_level).toBe("ultra");
   });
 
-  it("requires an explicit model for effort when the catalog has no declared default", async () => {
+  it("accepts common reported effort without pinning a model on older daemons", async () => {
     const store = createStore();
     store.registerRuntime({
       id: "rt_no_default_model",
@@ -756,8 +762,10 @@ describe("Multiremi store — fleet engine and model catalog", () => {
       headers,
       body: JSON.stringify({ name: "Ambiguous effort", provider: "codex", thinking_level: "high" }),
     });
-    expect(ambiguous.status).toBe(400);
-    expect((await ambiguous.json()).error).toContain("no default model is identified");
+    expect(ambiguous.status).toBe(201);
+    const created = await ambiguous.json();
+    expect(created.model ?? "").toBe("");
+    expect(created.thinking_level).toBe("high");
 
     const explicit = await app.request("/api/agents", {
       method: "POST",
@@ -770,6 +778,84 @@ describe("Multiremi store — fleet engine and model catalog", () => {
       }),
     });
     expect(explicit.status).toBe(201);
+  });
+
+  it("persists provider-default capabilities and exposes them separately from model choices", async () => {
+    const store = createStore();
+    const runtime = store.registerRuntime({
+      id: "rt_default_state", name: "Default state", provider: "claude", workspaceId: "local",
+      models: [
+        { id: "default", label: "Default", provider: "anthropic", default: true, providerDefault: true,
+          thinking: runtimeThinking(["high", "max"]) },
+        { id: "sonnet", label: "Sonnet", provider: "anthropic", default: false, thinking: runtimeThinking(["low", "high"]) },
+      ],
+    });
+    expect(store.listRuntimeModels(runtime.id).find((model) => model.providerDefault)?.id).toBe("default");
+    const app = createMultiremiApp({ store });
+    for (const query of ["", `?runtime_id=${runtime.id}`]) {
+      const catalog = await (await app.request(`/api/models${query}`)).json();
+      const provider = catalog.providers.find((entry: any) => entry.provider === "claude");
+      expect(provider.models.map((model: any) => model.id)).toEqual(["sonnet"]);
+      expect(provider.default_thinking.supported_levels.map((level: any) => level.value)).toEqual(["high", "max"]);
+    }
+    const headers = { "Content-Type": "application/json" };
+    for (const runtime_id of [undefined, runtime.id]) {
+      const response = await app.request("/api/agents", { method: "POST", headers,
+        body: JSON.stringify({ name: `Default capability ${runtime_id ?? "automatic"}`, provider: "claude", runtime_id, thinking_level: "max" }) });
+      expect(response.status).toBe(201);
+      const agent = await response.json();
+      expect(agent.model ?? "").toBe("");
+      const update = await app.request(`/api/agents/${agent.id}`, { method: "PUT", headers,
+        body: JSON.stringify({ thinking_level: "high" }) });
+      expect(update.status).toBe(200);
+      const invalid = await app.request(`/api/agents/${agent.id}`, { method: "PUT", headers,
+        body: JSON.stringify({ thinking_level: "low" }) });
+      expect(invalid.status).toBe(400);
+    }
+  });
+
+  it("does not borrow concrete capabilities when the provider default reports none", async () => {
+    const store = createStore();
+    store.registerRuntime({ id: "rt_empty_default", name: "Empty default", provider: "claude", workspaceId: "local",
+      models: [
+        { id: "default", label: "Default", provider: "anthropic", default: true, providerDefault: true },
+        { id: "sonnet", label: "Sonnet", provider: "anthropic", default: false, thinking: runtimeThinking(["high"]) },
+      ] });
+    const app = createMultiremiApp({ store });
+    const catalog = await (await app.request("/api/models")).json();
+    expect(catalog.providers[0].default_thinking.supported_levels).toEqual([]);
+    const response = await app.request("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "No effort", provider: "claude", thinking_level: "high" }) });
+    expect(response.status).toBe(400);
+  });
+
+  it("intersects default capabilities across mixed daemon versions and preserves them under gateway overlays", async () => {
+    const store = createStore();
+    store.ensureLocalWorkspace();
+    const modern = store.registerRuntime({ id: "rt_modern", name: "Modern", provider: "claude", executionGroupId: "mixed",
+      models: [
+        { id: "default", label: "Default", provider: "anthropic", default: true, providerDefault: true, thinking: runtimeThinking(["high", "max"]) },
+        { id: "sonnet", label: "Sonnet", provider: "anthropic", default: false, thinking: runtimeThinking(["low", "high"]) },
+      ] });
+    const legacy = store.registerRuntime({ id: "rt_legacy", name: "Legacy", provider: "claude", executionGroupId: "mixed",
+      models: [{ id: "sonnet", label: "Sonnet", provider: "anthropic", default: false, thinking: runtimeThinking(["low", "high"]) }] });
+    saveGatewayCatalog(store, "claude", [{ id: "claude-sonnet-5", label: "Sonnet 5" }]);
+    const app = createMultiremiApp({ store });
+    for (const query of ["", "?execution_group_id=mixed"]) {
+      const catalog = await (await app.request(`/api/models${query}`)).json();
+      expect(catalog.providers[0].default_thinking.supported_levels.map((level: any) => level.value)).toEqual(["high"]);
+    }
+    const agent = store.createAgent({ name: "Default effort", provider: "claude", executionGroupId: "mixed", thinkingLevel: "high" });
+    const first = store.createTask({ agentId: agent.id, prompt: "modern" });
+    expect(store.claimTask(modern.id)?.id).toBe(first.id);
+    store.cancelTask(first.id);
+    const second = store.createTask({ agentId: agent.id, prompt: "legacy" });
+    expect(store.claimTask(legacy.id)?.id).toBe(second.id);
+    store.cancelTask(second.id);
+    store.updateAgent(agent.id, { thinkingLevel: "max" });
+    const third = store.createTask({ agentId: agent.id, prompt: "modern only" });
+    expect(store.claimTask(legacy.id)).toBeNull();
+    expect(store.claimTask(modern.id)?.id).toBe(third.id);
   });
 
   it("claims runtime tasks atomically across sqlite connections", () => {

@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { Loader2, Plus } from "lucide-react";
-import { useExecutionTargetModels } from "@multiremi/core/runtimes";
+import { isFallbackModelUnavailable, isModelCatalogRestricted, isModelExecutionUnknown, isModelUnavailable, useExecutionTargetModels } from "@multiremi/core/runtimes";
 import { Input } from "@multiremi/ui/components/ui/input";
 import {
   PickerItem,
@@ -11,7 +11,7 @@ import {
 import { CHIP_CLASS } from "./chip";
 import { useT } from "../../../i18n";
 
-// The catalog is scoped to the selected machine and Runtime type.
+// Model routing uses the workspace pool; explicit targets scope the catalog.
 export function ModelPicker({
   wsId,
   runtimeId,
@@ -21,6 +21,8 @@ export function ModelPicker({
   value,
   canEdit = true,
   onChange,
+  fallback = false,
+  excludedModel,
 }: {
   wsId: string;
   runtimeId?: string | null;
@@ -31,12 +33,14 @@ export function ModelPicker({
   /** When false, render a static read-only display and skip the popover. */
   canEdit?: boolean;
   onChange: (next: string) => Promise<void> | void;
+  fallback?: boolean;
+  excludedModel?: string;
 }) {
   const { t } = useT("agents");
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
 
-  const { models, isLoading } = useExecutionTargetModels(wsId, provider, runtimeId, executionGroupId, agentId);
+  const { models, modelCatalogStatus, isLoading } = useExecutionTargetModels(wsId, provider, runtimeId, executionGroupId, agentId);
 
   const filtered = useMemo(() => {
     const s = search.trim().toLowerCase();
@@ -51,29 +55,49 @@ export function ModelPicker({
   const exactMatch = models.some(
     (m) => m.id === trimmedSearch || m.label === trimmedSearch,
   );
-  const canCreate = trimmedSearch.length > 0 && !exactMatch;
+  const authoritative = isModelCatalogRestricted(provider, models, modelCatalogStatus);
+  const unknown = !!value && isModelExecutionUnknown(provider, value, models, modelCatalogStatus);
+  const isUnavailable = (id: string) => fallback
+    ? isFallbackModelUnavailable(provider, id, models, modelCatalogStatus)
+    : isModelUnavailable(provider, id, models, modelCatalogStatus);
+  const unavailable = isUnavailable(value);
+  const canCreate = !isLoading && !authoritative && trimmedSearch.length > 0 && !exactMatch && trimmedSearch !== excludedModel && !isUnavailable(trimmedSearch);
 
-  const triggerLabel = value || t(($) => $.pickers.model_default);
-  const triggerTitle = t(($) => $.pickers.model_tooltip, { value: triggerLabel });
+  const triggerLabel = value || (fallback ? t(($) => $.fallback.unconfigured) : t(($) => $.pickers.model_default));
+  const triggerTitle = fallback
+    ? `${t(($) => $.fallback.model_label)} · ${triggerLabel}`
+    : t(($) => $.pickers.model_tooltip, { value: triggerLabel });
 
   const select = async (id: string) => {
+    if (id && (id === excludedModel || isUnavailable(id))) return;
     setOpen(false);
     setSearch("");
     if (id !== value) await onChange(id);
   };
 
-  if (!canEdit || (!runtimeId && !executionGroupId)) {
+  const unavailableStatus = (unavailable || unknown) && <span className="text-xs text-destructive" role="status">
+    {unknown ? t(($) => $.pickers.model_execution_unknown) : t(($) => $.pickers.model_unavailable)}
+  </span>;
+
+  // Model routing binds neither a Runtime nor a group, yet the fleet
+  // catalog still answers for the selected provider — only a missing provider
+  // means there is no execution target to pick a model for.
+  if (!canEdit || !provider) {
     return (
+      <div className="flex min-w-0 flex-col items-start">
       <span
         className="min-w-0 truncate px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
         title={triggerTitle}
       >
         {triggerLabel}
       </span>
+      {unavailableStatus}
+      </div>
     );
   }
 
   return (
+    <div className="flex min-w-0 flex-col items-start">
     <PropertyPicker
       open={open}
       onOpenChange={setOpen}
@@ -115,12 +139,13 @@ export function ModelPicker({
         filtered.map((m) => (
           <PickerItem
             key={m.id}
+            disabled={m.id === excludedModel || isUnavailable(m.id)}
             selected={m.id === value}
             onClick={() => void select(m.id)}
             // Tooltip carries the canonical model id even when the chip
             // shows the friendlier label, so users can always see what
             // string actually ships to the agent.
-            tooltip={m.label !== m.id ? `${m.label} · ${m.id}` : m.id}
+            tooltip={m.id === excludedModel ? t(($) => $.fallback.same_as_primary) : m.label !== m.id ? `${m.label} · ${m.id}` : m.id}
           >
             {/* PickerItem wraps children in a flex `<span>`. Putting a
                 `<div>` inside that <span> is block-in-inline (invalid
@@ -134,6 +159,14 @@ export function ModelPicker({
               {m.label !== m.id && (
                 <span className="mt-0.5 block truncate font-mono text-[10px] leading-snug text-muted-foreground">
                   {m.id}
+                </span>
+              )}
+              {m.id === excludedModel ? (
+                <span className="block text-xs text-muted-foreground">{t(($) => $.fallback.same_as_primary)}</span>
+              ) : isUnavailable(m.id) && (
+                <span className="block text-xs text-muted-foreground">
+                  {isModelExecutionUnknown(provider, m.id, models, modelCatalogStatus)
+                    ? t(($) => $.pickers.model_execution_unknown) : t(($) => $.pickers.model_unavailable)}
                 </span>
               )}
             </span>
@@ -164,11 +197,13 @@ export function ModelPicker({
           type="button"
           onClick={() => void select("")}
           className="mt-1 flex w-full items-center border-t px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-accent/50"
-          title={t(($) => $.pickers.model_clear_title)}
+          title={fallback ? t(($) => $.fallback.clear) : t(($) => $.pickers.model_clear_title)}
         >
-          {t(($) => $.pickers.model_clear)}
+          {fallback ? t(($) => $.fallback.clear) : t(($) => $.pickers.model_clear)}
         </button>
       )}
     </PropertyPicker>
+    {unavailableStatus}
+    </div>
   );
 }

@@ -513,6 +513,57 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "workspace.relay.probe": {
+      "command": "remi workspace relay probe",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.relay.probe",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.relay.reasoning-levels.get": {
+      "command": "remi workspace relay reasoning-levels get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.relay.reasoning-levels.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.relay.reasoning-levels.update": {
+      "command": "remi workspace relay reasoning-levels update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.relay.reasoning-levels.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "workspace.bot-menu.get": {
       "command": "remi workspace bot-menu get",
       "aliases": [],
@@ -2261,6 +2312,90 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "wiki.repository.mv": {
+      "command": "remi wiki repository mv",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "wiki.repository.mv",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "wiki.repository.merge": {
+      "command": "remi wiki repository merge",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "wiki.repository.merge",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "wiki.repository.outcome": {
+      "command": "remi wiki repository outcome",
+      "aliases": [],
+      "auth": [
+        "task"
+      ],
+      "capability": "wiki.repository.outcome",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "wiki.repository.restore": {
+      "command": "remi wiki repository restore",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "wiki.repository.restore",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "wiki.repository.repair-log": {
+      "command": "remi wiki repository repair-log",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "wiki.repository.repair-log",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "wiki.repository.revisions": {
       "command": "remi wiki repository revisions",
       "aliases": [],
@@ -2917,6 +3052,40 @@
         "task"
       ],
       "capability": "session.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "session.show": {
+      "command": "remi session show",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "session.show",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "session.inherited-context": {
+      "command": "remi session inherited-context",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "session.inherited-context",
       "mutation": "read",
       "output": [
         "table",
@@ -4364,6 +4533,22 @@
         "task"
       ],
       "capability": "task.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "task.continue": {
+      "command": "remi task continue",
+      "aliases": [],
+      "auth": [
+        "task"
+      ],
+      "capability": "task.continue",
       "mutation": "write",
       "output": [
         "table",
@@ -10731,6 +10916,12 @@
     "GET /api/scm/capabilities": {
       "command": "scm.capabilities"
     },
+    "GET /api/sessions/:sessionId": {
+      "command": "session.show"
+    },
+    "GET /api/sessions/:sessionId/inherited-context": {
+      "command": "session.inherited-context"
+    },
     "GET /api/shares/:token": {
       "command": "share.view"
     },
@@ -10847,6 +11038,9 @@
     },
     "GET /api/workspaces/:id/relay-config": {
       "command": "workspace.relay.get"
+    },
+    "GET /api/workspaces/:id/relay-config/:engine/reasoning-levels": {
+      "command": "workspace.relay.reasoning-levels.get"
     },
     "GET /api/workspaces/:id/repos": {
       "command": "repo.list"
@@ -11921,6 +12115,9 @@
     "POST /api/workspaces/:id/members": {
       "command": "invite.create"
     },
+    "POST /api/workspaces/:id/relay-config/:engine/probe": {
+      "command": "workspace.relay.probe"
+    },
     "POST /api/workspaces/:id/relay-config/:engine/reveal": {
       "command": "workspace.relay.reveal"
     },
@@ -11936,8 +12133,23 @@
     "POST /api/workspaces/:id/repos/:repositoryId/wiki/build": {
       "command": "wiki.repository.build"
     },
+    "POST /api/workspaces/:id/repos/:repositoryId/wiki/merge": {
+      "command": "wiki.repository.merge"
+    },
+    "POST /api/workspaces/:id/repos/:repositoryId/wiki/move": {
+      "command": "wiki.repository.mv"
+    },
+    "POST /api/workspaces/:id/repos/:repositoryId/wiki/outcome": {
+      "command": "wiki.repository.outcome"
+    },
     "POST /api/workspaces/:id/repos/:repositoryId/wiki/publish": {
       "command": "wiki.publish"
+    },
+    "POST /api/workspaces/:id/repos/:repositoryId/wiki/repair-log": {
+      "command": "wiki.repository.repair-log"
+    },
+    "POST /api/workspaces/:id/repos/:repositoryId/wiki/restore": {
+      "command": "wiki.repository.restore"
     },
     "POST /api/workspaces/:id/repos/inspect": {
       "command": "repo.inspect"
@@ -12181,6 +12393,9 @@
     },
     "PUT /api/workspaces/:id/relay-config/:engine": {
       "command": "workspace.relay.update"
+    },
+    "PUT /api/workspaces/:id/relay-config/:engine/reasoning-levels": {
+      "command": "workspace.relay.reasoning-levels.update"
     },
     "PUT /api/workspaces/:id/relay-config/discovery": {
       "command": "workspace.relay.discovery"

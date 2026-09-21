@@ -5,7 +5,7 @@ import { taskExecutionScope } from "@multiremi/contracts/task-execution.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
 import { type StoreContext } from "@multiremi/store/context.js";
 import { buildSessionProjection } from "@multiremi/store/session-projection.js";
-import { resolveProjectionTokenBudget } from "@multiremi/store/session-projection-budget.js";
+import { resolveFollowDeltaRatio, resolveFollowTokenLimit, resolveProjectionTokenBudget } from "@multiremi/store/session-projection-budget.js";
 import { createLogger } from "@shared/logger.js";
 import type {
   AddSessionParticipantInput,
@@ -16,6 +16,7 @@ import type {
   MultiremiSessionEvent,
   MultiremiSessionParticipant,
   MultiremiSessionProjection,
+  MultiremiSessionInheritedContext,
   MultiremiSessionResult,
   MultiremiTask,
   PublishSessionResultInput,
@@ -24,6 +25,12 @@ import type {
 
 type Row = Record<string, unknown>;
 const log = createLogger("multiremi-store");
+const SESSION_SELECT = `SELECT s.*, (
+  SELECT COUNT(*) FROM multiremi_session_events e
+  WHERE e.session_id = s.parent_session_id
+    AND ((s.inherit_mode = 'follow' AND (s.follow_frozen_seq IS NULL OR e.seq <= s.follow_frozen_seq))
+      OR (s.inherit_mode <> 'follow' AND e.seq <= s.inherit_cutoff_seq))
+) AS inherited_event_count FROM multiremi_issue_sessions s`;
 type AppendSessionEventInput = {
   authorType: string;
   authorId?: string | null;
@@ -42,7 +49,7 @@ export class IssueSessionsRepo {
     const issue = this.ctx.issues().getIssue(issueId);
     if (!issue) throw new Error(`Issue not found: ${issueId}`);
     const existing = this.ctx.db.query(
-      "SELECT * FROM multiremi_issue_sessions WHERE issue_id = ? AND is_default = 1 LIMIT 1",
+      `${SESSION_SELECT} WHERE issue_id = ? AND is_default = 1 LIMIT 1`,
     ).get(issueId) as Row | null;
     if (existing) return toIssueSession(existing);
 
@@ -57,7 +64,7 @@ export class IssueSessionsRepo {
       [id, issueId, issue.workspaceId, createdById ? "member" : "system", createdById, now, now],
     );
     const row = this.ctx.db.query(
-      "SELECT * FROM multiremi_issue_sessions WHERE issue_id = ? AND is_default = 1 LIMIT 1",
+      `${SESSION_SELECT} WHERE issue_id = ? AND is_default = 1 LIMIT 1`,
     ).get(issueId) as Row | null;
     if (!row) throw new Error(`Failed to create default session for issue: ${issueId}`);
     return toIssueSession(row);
@@ -76,14 +83,61 @@ export class IssueSessionsRepo {
     const now = nowIso();
     const createdByType = input.createdByType ?? input.created_by_type ?? "member";
     const createdById = input.createdById ?? input.created_by_id ?? null;
-    const holdsWorkspace = input.holdsWorkspace ?? input.holds_workspace ?? true;
-    if (typeof holdsWorkspace !== "boolean") throw new Error("holds_workspace must be a boolean");
+    const requestedHoldsWorkspace = input.holdsWorkspace ?? input.holds_workspace ?? true;
+    if (typeof requestedHoldsWorkspace !== "boolean") throw new Error("holds_workspace must be a boolean");
+    const parentInput = input.parentSessionId ?? input.parent_session_id;
+    if (parentInput != null && (typeof parentInput !== "string" || !parentInput.trim())) {
+      throw new Error("parent_session_id must be a non-empty string");
+    }
+    const parentSessionId = parentInput?.trim() ?? null;
+    const withCode = input.withCode ?? input.with_code ?? false;
+    for (const requested of [input.withCode, input.with_code]) {
+      if (requested !== undefined && (typeof requested !== "boolean" || requested !== withCode)) {
+        throw new Error("with_code must be a boolean; withCode and with_code must agree");
+      }
+    }
+    if (withCode && !parentSessionId) throw new Error("with_code requires parent_session_id");
+    let codeRuntimeId: string | null = null;
+    const requestedInheritMode = input.inheritMode ?? input.inherit_mode;
+    const inheritMode = requestedInheritMode ?? (parentSessionId ? "snapshot" : "none");
+    if (parentSessionId ? inheritMode !== "snapshot" && inheritMode !== "follow" : inheritMode !== "none") {
+      throw new Error(parentSessionId
+        ? "inherit_mode must be snapshot or follow with parent_session_id"
+        : "inherit_mode must be none without parent_session_id");
+    }
+    let inheritCutoffSeq: number | null = null;
+    if (parentSessionId) {
+      // Use the same row lock as event appends: the cutoff and child creation
+      // form one snapshot, including across PostgreSQL server processes.
+      this.ctx.db.run("UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?", [parentSessionId]);
+      const parent = this.getIssueSession(parentSessionId);
+      if (!parent) throw new Error(`Parent session not found: ${parentSessionId}`);
+      if (parent.issueId !== issueId) throw new Error("Parent session must belong to the same issue");
+      if (parent.inheritMode !== "none") throw new Error("Cannot inherit from a side session (chained forks are not supported)");
+      const max = this.ctx.db.query(
+        "SELECT COALESCE(MAX(seq), 0) AS seq FROM multiremi_session_events WHERE session_id = ?",
+      ).get(parentSessionId) as { seq: number } | null;
+      inheritCutoffSeq = Number(max?.seq ?? 0);
+      if (withCode) {
+        const lane = this.ctx.db.query(
+          `SELECT lane.runtime_id FROM multiremi_session_agent_lanes lane
+           JOIN multiremi_runtimes runtime ON runtime.id = lane.runtime_id
+           WHERE lane.session_id = ? AND COALESCE(runtime.workspace_id, 'local') = ?
+           ORDER BY lane.updated_at DESC, lane.agent_id, lane.execution_scope LIMIT 1`,
+        ).get(parentSessionId, issue.workspaceId) as Row | null;
+        codeRuntimeId = nullableString(lane?.runtime_id);
+        if (!codeRuntimeId) throw new Error("with_code requires a parent session lane with a runtime");
+      }
+    }
+    const holdsWorkspace = parentSessionId ? false : requestedHoldsWorkspace;
     this.ctx.db.run(
       `INSERT INTO multiremi_issue_sessions (
          id, issue_id, workspace_id, title, status, is_default, holds_workspace,
+         parent_session_id, inherit_mode, inherit_cutoff_seq, with_code, code_runtime_id,
          created_by_type, created_by_id, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?)`,
-      [id, issueId, issue.workspaceId, title, holdsWorkspace ? 1 : 0, createdByType, createdById, now, now],
+       ) VALUES (?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, issueId, issue.workspaceId, title, holdsWorkspace ? 1 : 0,
+        parentSessionId, inheritMode, inheritCutoffSeq, withCode ? 1 : 0, codeRuntimeId, createdByType, createdById, now, now],
     );
     if (createdById && (createdByType === "member" || createdByType === "agent")) {
       this.addSessionParticipant(id, {
@@ -109,7 +163,7 @@ export class IssueSessionsRepo {
   getLatestActiveIssueSession(issueId: string): MultiremiIssueSession | null {
     if (!this.ctx.issues().getIssue(issueId)) throw new Error(`Issue not found: ${issueId}`);
     const row = this.ctx.db.query(
-      `SELECT * FROM multiremi_issue_sessions
+      `${SESSION_SELECT}
        WHERE issue_id = ? AND status = 'active'
        ORDER BY updated_at DESC, created_at DESC, id DESC
        LIMIT 1`,
@@ -118,18 +172,71 @@ export class IssueSessionsRepo {
   }
 
   getIssueSession(id: string): MultiremiIssueSession | null {
-    const row = this.ctx.db.query("SELECT * FROM multiremi_issue_sessions WHERE id = ?").get(id) as Row | null;
+    const row = this.ctx.db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) as Row | null;
     return row ? toIssueSession(row) : null;
+  }
+
+  getSessionInheritedContext(sessionId: string): MultiremiSessionInheritedContext | null {
+    const session = this.getIssueSession(sessionId);
+    if (!session) return null;
+    const inherits = session.inheritMode !== "none" && session.parentSessionId !== null;
+    const row = inherits ? this.ctx.db.query(
+      `SELECT id, agent_id, inherited_projection_truncated, inherited_projection_omitted_events,
+              inherited_projection_estimated_tokens, inherited_projection_to_seq,
+              inherited_projection_token_budget, inherited_projection_recorded_at
+       FROM multiremi_tasks
+       WHERE issue_session_id = ? AND inherited_projection_truncated IS NOT NULL
+       ORDER BY inherited_projection_recorded_at DESC, id DESC LIMIT 1`,
+    ).get(sessionId) as Row | null : null;
+    const cost = this.ctx.db.query(
+      "SELECT inherited_tokens_total, follow_frozen_seq FROM multiremi_issue_sessions WHERE id = ?",
+    ).get(sessionId) as Row;
+    const parentMax = inherits ? this.parentMaxSeq(session.parentSessionId!) : null;
+    const lanes = inherits ? this.ctx.db.query(
+      `SELECT agent_id, execution_scope, parent_cursor_seq FROM multiremi_session_agent_lanes
+       WHERE session_id = ? ORDER BY agent_id, execution_scope`,
+    ).all(sessionId) as Row[] : [];
+    return {
+      session_id: session.id,
+      parent_session_id: inherits ? session.parentSessionId : null,
+      parent_session_title: inherits ? this.getIssueSession(session.parentSessionId!)?.title ?? null : null,
+      inherit_mode: session.inheritMode,
+      inherit_cutoff_seq: inherits ? session.inheritCutoffSeq : null,
+      ...(session.inheritMode === "follow" ? {
+        parent_max_seq: parentMax,
+        lanes: lanes.map((lane) => ({
+          agent_id: String(lane.agent_id),
+          execution_scope: String(lane.execution_scope),
+          parent_cursor_seq: Number(lane.parent_cursor_seq),
+        })),
+        inherited_tokens_total: Number(cost.inherited_tokens_total),
+        follow_token_limit: resolveFollowTokenLimit(),
+        follow_frozen: cost.follow_frozen_seq != null,
+        follow_frozen_seq: cost.follow_frozen_seq == null ? null : Number(cost.follow_frozen_seq),
+      } : {}),
+      // Raw parent size before truncation; follow includes new parent events.
+      inherited_event_count: inherits ? session.inheritedEventCount : null,
+      diagnostics: row ? {
+        task_id: String(row.id),
+        agent_id: String(row.agent_id),
+        to_seq: Number(row.inherited_projection_to_seq),
+        truncated: Boolean(Number(row.inherited_projection_truncated)),
+        omitted_events: Number(row.inherited_projection_omitted_events),
+        estimated_tokens: Number(row.inherited_projection_estimated_tokens),
+        token_budget: Number(row.inherited_projection_token_budget),
+        recorded_at: String(row.inherited_projection_recorded_at),
+      } : null,
+    };
   }
 
   listIssueSessions(issueId: string, includeArchived = false): MultiremiIssueSession[] {
     if (!this.ctx.issues().getIssue(issueId)) throw new Error(`Issue not found: ${issueId}`);
     const rows = includeArchived
       ? this.ctx.db.query(
-        "SELECT * FROM multiremi_issue_sessions WHERE issue_id = ? ORDER BY is_default DESC, updated_at DESC",
+        `${SESSION_SELECT} WHERE issue_id = ? ORDER BY is_default DESC, updated_at DESC`,
       ).all(issueId) as Row[]
       : this.ctx.db.query(
-        "SELECT * FROM multiremi_issue_sessions WHERE issue_id = ? AND status = 'active' ORDER BY is_default DESC, updated_at DESC",
+        `${SESSION_SELECT} WHERE issue_id = ? AND status = 'active' ORDER BY is_default DESC, updated_at DESC`,
       ).all(issueId) as Row[];
     return rows.map(toIssueSession);
   }
@@ -296,36 +403,100 @@ export class IssueSessionsRepo {
     return this.ctx.db.transaction(() => {
       const task = this.ctx.tasks().getTask(taskId);
       if (!task?.issueSessionId) return null;
-      // Delegation wakeup coalescing uses the same Session row lock. Whichever
-      // side wins decides deterministically whether this prompt includes a new
-      // teammate event or a follow-up Delta task is required.
-      this.ctx.db.run(
-        "UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?",
-        [task.issueSessionId],
-      );
+      // Match bulk lifecycle lock ordering, including the parent row used by
+      // event appends. Holding both locks covers MAX(seq), the event read and
+      // recording the follow window without a side/parent lock inversion.
+      const initialSession = this.getIssueSession(task.issueSessionId)!;
+      const sessionIds = [task.issueSessionId, initialSession.parentSessionId]
+        .filter((id): id is string => id !== null).sort();
+      for (const sessionId of sessionIds) {
+        this.ctx.db.run(
+          "UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?",
+          [sessionId],
+        );
+      }
       const lane = this.getOrCreateSessionAgentLane(task.issueSessionId, task.agentId, taskExecutionScope(task));
       const agent = this.ctx.agents().getAgent(task.agentId);
+      const session = this.getIssueSession(task.issueSessionId)!;
       const events = this.listSessionEvents(task.issueSessionId);
       const tokenBudget = resolveProjectionTokenBudget({
         provider: agent?.provider,
         model: agent?.model,
         degradeLevel: task.projectionDegradeLevel,
       });
+      const inherits = session.inheritMode !== "none" && session.parentSessionId !== null;
+      // Once claimed, a follow task owns an immutable parent window. In
+      // particular a retry must not absorb events appended after its first build.
+      const recorded = this.ctx.db.query(
+        `SELECT inherited_projection_from_seq, inherited_projection_to_seq,
+                inherited_projection_token_budget FROM multiremi_tasks WHERE id = ?`,
+      ).get(task.id) as Row;
+      const recordedFollow = recorded.inherited_projection_from_seq != null;
+      const follows = session.inheritMode === "follow" || recordedFollow;
+      let parentFromSeq = 0;
+      let parentToSeq = session.inheritCutoffSeq ?? 0;
+      if (follows) {
+        parentFromSeq = recordedFollow ? Number(recorded.inherited_projection_from_seq) : lane.parentCursorSeq;
+        const state = this.ctx.db.query(
+          "SELECT follow_frozen_seq FROM multiremi_issue_sessions WHERE id = ?",
+        ).get(session.id) as Row;
+        parentToSeq = recordedFollow ? Number(recorded.inherited_projection_to_seq)
+          : Math.min(this.parentMaxSeq(session.parentSessionId!),
+            state.follow_frozen_seq == null ? Infinity : Number(state.follow_frozen_seq));
+      }
+      const hasInheritedWindow = inherits && (!follows || parentToSeq > parentFromSeq);
+      const inheritedTokenBudget = !hasInheritedWindow ? 0 : recordedFollow
+        ? Number(recorded.inherited_projection_token_budget)
+        : Math.floor(tokenBudget * (follows && parentFromSeq > 0 ? resolveFollowDeltaRatio() : 0.4));
       const projection = buildSessionProjection({
         sessionId: task.issueSessionId,
         targetAgentId: task.agentId,
         events,
         cursorSeq: lane.cursorSeq,
         providerSessionId: task.sessionId && task.sessionId === lane.providerSessionId ? task.sessionId : null,
-        tokenBudget,
+        tokenBudget: tokenBudget - inheritedTokenBudget,
         currentTaskId: task.id,
         resolveAuthorName: (type, id) => this.sessionAuthorName(type, id),
       });
+      if (hasInheritedWindow) {
+        const parent = this.getIssueSession(session.parentSessionId!);
+        if (!parent) throw new Error(`Parent session not found: ${session.parentSessionId}`);
+        const inheritedProjection = buildSessionProjection({
+          sessionId: parent.id,
+          targetAgentId: task.agentId,
+          events: this.listSessionEvents(parent.id, { sinceSeq: parentFromSeq, toSeq: parentToSeq }),
+          cursorSeq: 0,
+          fromSeq: parentFromSeq,
+          toSeq: parentToSeq,
+          providerSessionId: null,
+          perspectiveMode: "inherited",
+          tokenBudget: inheritedTokenBudget,
+          resolveAuthorName: (type, id) => this.sessionAuthorName(type, id),
+        });
+        // The legacy projector always retains its JSONL header. If operators
+        // configure a budget smaller than both envelopes, fail rather than
+        // silently exceed the total budget when combining two projections.
+        if (projection.estimatedTokens > tokenBudget - inheritedTokenBudget
+          || inheritedProjection.estimatedTokens > inheritedTokenBudget) {
+          throw new Error("Side session projection token budget is too small for the snapshot headers");
+        }
+        inheritedProjection.sessionTitle = parent.title;
+        inheritedProjection.session_title = parent.title;
+        projection.inheritedSessionProjection = inheritedProjection;
+        projection.inherited_session_projection = inheritedProjection;
+      } else if (follows) {
+        projection.inheritedSessionProjection = null;
+        projection.inherited_session_projection = null;
+      }
+      const inheritedProjection = projection.inheritedSessionProjection;
+      const now = nowIso();
       this.ctx.db.run(
         `UPDATE multiremi_tasks
          SET projection_from_seq = ?, projection_to_seq = ?, projection_mode = ?,
              projection_truncated = ?, projection_omitted_events = ?, projection_estimated_tokens = ?,
-             updated_at = ?
+             inherited_projection_truncated = ?, inherited_projection_omitted_events = ?,
+             inherited_projection_estimated_tokens = ?, inherited_projection_to_seq = ?,
+             inherited_projection_from_seq = ?, inherited_projection_token_budget = ?, inherited_projection_recorded_at = ?, updated_at = ?
          WHERE id = ?`,
         [
           projection.fromSeq,
@@ -334,10 +505,43 @@ export class IssueSessionsRepo {
           projection.truncated ? 1 : 0,
           projection.omittedEvents,
           projection.estimatedTokens,
-          nowIso(),
+          // Explicit NULLs also clear any diagnostics left by an earlier claim.
+          inheritedProjection ? (inheritedProjection.truncated ? 1 : 0) : null,
+          inheritedProjection?.omittedEvents ?? null,
+          inheritedProjection?.estimatedTokens ?? null,
+          follows ? parentToSeq : inheritedProjection?.toSeq ?? null,
+          follows ? parentFromSeq : null,
+          inheritedProjection ? inheritedTokenBudget : null,
+          inherits ? (follows ? task.inheritedProjectionRecordedAt ?? now : now) : null,
+          now,
           taskId,
         ],
       );
+      if (follows && !recordedFollow && inheritedProjection) {
+        // The session locks above serialize this with other builds. The
+        // post-lock task window is our once-per-task receipt, so failures are
+        // charged too and rebuilding the same task cannot double-charge.
+        this.ctx.db.run(
+          `UPDATE multiremi_issue_sessions
+           SET inherited_tokens_total = inherited_tokens_total + ? WHERE id = ?`,
+          [inheritedProjection.estimatedTokens, session.id],
+        );
+        const cost = this.ctx.db.query(
+          "SELECT inherited_tokens_total, follow_frozen_seq FROM multiremi_issue_sessions WHERE id = ?",
+        ).get(session.id) as Row;
+        if (cost.follow_frozen_seq == null && Number(cost.inherited_tokens_total) >= resolveFollowTokenLimit()) {
+          this.ctx.db.run(
+            "UPDATE multiremi_issue_sessions SET follow_frozen_seq = ? WHERE id = ? AND follow_frozen_seq IS NULL",
+            [lane.parentCursorSeq, session.id],
+          );
+          this.appendSessionEventWithinTransaction(session.id, {
+            authorType: "system",
+            kind: "follow_frozen",
+            body: "跟随已达成本上限，已冻结。",
+            metadata: { follow_frozen_seq: lane.parentCursorSeq },
+          });
+        }
+      }
       if (projection.truncated) {
         log.warn(
           `session projection truncated for task ${taskId}: omitted=${projection.omittedEvents} `
@@ -437,6 +641,13 @@ export class IssueSessionsRepo {
     return rows.map(toSessionResult);
   }
 
+  private parentMaxSeq(sessionId: string): number {
+    const row = this.ctx.db.query(
+      "SELECT COALESCE(MAX(seq), 0) AS seq FROM multiremi_session_events WHERE session_id = ?",
+    ).get(sessionId) as { seq: number };
+    return Number(row.seq);
+  }
+
   private sessionAuthorName(authorType: string, authorId: string | null): string | null {
     if (!authorId) return null;
     if (authorType === "agent") return this.ctx.agents().getAgent(authorId)?.name ?? null;
@@ -452,6 +663,10 @@ function toIssueSession(row: Row): MultiremiIssueSession {
   const workspaceId = String(row.workspace_id ?? "local");
   const isDefault = Boolean(Number(row.is_default ?? 0));
   const holdsWorkspace = Boolean(Number(row.holds_workspace ?? 1));
+  const parentSessionId = nullableString(row.parent_session_id);
+  const inheritMode = String(row.inherit_mode ?? "none") as MultiremiIssueSession["inheritMode"];
+  const inheritCutoffSeq = row.inherit_cutoff_seq == null ? null : Number(row.inherit_cutoff_seq);
+  const inheritedEventCount = Number(row.inherited_event_count ?? 0);
   const createdByType = String(row.created_by_type ?? "member");
   const createdById = nullableString(row.created_by_id);
   const createdAt = String(row.created_at);
@@ -468,6 +683,18 @@ function toIssueSession(row: Row): MultiremiIssueSession {
     is_default: isDefault,
     holdsWorkspace,
     holds_workspace: holdsWorkspace,
+    withCode: Boolean(Number(row.with_code ?? 0)),
+    with_code: Boolean(Number(row.with_code ?? 0)),
+    codeRuntimeId: nullableString(row.code_runtime_id),
+    code_runtime_id: nullableString(row.code_runtime_id),
+    parentSessionId,
+    parent_session_id: parentSessionId,
+    inheritMode,
+    inherit_mode: inheritMode,
+    inheritCutoffSeq,
+    inherit_cutoff_seq: inheritCutoffSeq,
+    inheritedEventCount,
+    inherited_event_count: inheritedEventCount,
     summary: nullableString(row.summary),
     createdByType,
     created_by_type: createdByType,
@@ -558,6 +785,8 @@ function toSessionAgentLane(row: Row): MultiremiSessionAgentLane {
     work_dir: workDir,
     cursorSeq,
     cursor_seq: cursorSeq,
+    parentCursorSeq: Number(row.parent_cursor_seq ?? 0),
+    parent_cursor_seq: Number(row.parent_cursor_seq ?? 0),
     generation: Number(row.generation ?? 1),
     status: String(row.status ?? "active"),
     lastTaskId,

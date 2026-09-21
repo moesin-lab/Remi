@@ -164,7 +164,7 @@ describe("Execution groups", () => {
         const runtime = store.registerRuntime({ name: "Legacy", provider: "codex", metadata: { codex_profiles: 1 } });
         legacyGroup(store, "old", [runtime.id]);
         store.setRuntimeCodexProfile(runtime.id, { name: "legacy", base_url: "https://legacy.example/v1", model: "custom", auth_mode: authMode, env_key: "REMI_CODEX_KEY" }, authMode === "api_key" ? "old-key" : undefined);
-        store.updateRuntimeModels(runtime.id, [{ id: "custom", label: "Custom", provider: "codex", default: true, thinking: { supportedLevels: [{ value: "high", label: "High" }] } }]);
+        store.updateRuntimeModels(runtime.id, [{ id: "custom", label: "Custom", provider: "codex", default: true, thinking: { supportedLevels: [{ value: "high", label: "High" }] } }], store.getRuntimeCodexProfile(runtime.id));
         const agent = store.createAgent({ name: "Reasoner", provider: "codex", executionGroupId: "old", model: "custom", thinkingLevel: "high" });
         db!.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", ["central_execution_profiles_legacy_v1"]);
         const migrated = new MultiremiStore(db!);

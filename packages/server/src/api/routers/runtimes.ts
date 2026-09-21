@@ -1,6 +1,5 @@
 import type { Context, Hono } from "hono";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
-import { refreshStaleGatewayModels } from "@multiremi/relay/discovery.js";
 import {
   bindDaemonTokenIdentityOrDeny,
   daemonLocalSkillImportReportBody,
@@ -20,7 +19,7 @@ import {
   loadRuntimeForCurrentEditor,
   loadRuntimeForCurrentOwner,
   loadRuntimeForCurrentUser,
-  overlayGatewayModels,
+  workspaceRuntimeModelCatalog,
   runtimeTargetModelCatalog,
   executionGroupRuntimes,
   executionGroupModelCatalog,
@@ -46,7 +45,6 @@ import {
   currentWorkspaceRoleStrict,
   currentRequestUserId,
   directoryScanErrorResponse,
-  fleetModelsResponse,
   hasRequestField,
   parseOptionalInt,
   runtimeCompatibilityResponse,
@@ -305,12 +303,12 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const runtimeId = c.req.param("runtimeId");
     const denied = denyDaemonRuntimeObservedStateAccess(c, store, runtimeId, authToken);
     if (denied) return denied;
-    const body = await readJsonStrict<{ models?: MultiremiRuntimeModel[]; supported?: boolean }>(c);
+    const body = await readJsonStrict<Pick<ReportRuntimeModelListInput, "models" | "supported" | "model_profile">>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     return c.json({
       runtime_id: runtimeId,
       supported: body.supported !== false,
-      models: store.updateRuntimeModels(runtimeId, body.models ?? []),
+      models: store.updateRuntimeModels(runtimeId, body.models ?? [], body.model_profile),
     });
   });
   app.post("/api/daemon/runtimes/:runtimeId/models/claim", (c) => {
@@ -646,19 +644,15 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
       const runtimes = executionGroupRuntimes(store, workspaceId, groupId, ownerId);
       const visibleIds = new Set(loaded.runtimes.map((runtime) => runtime.id));
       if (!runtimes.length || runtimes.some((runtime) => !visibleIds.has(runtime.id))) return c.json({ error: "no accessible execution group members" }, 403);
-      refreshStaleGatewayModels(store, workspaceId);
       return c.json({ providers: executionGroupModelCatalog(store, workspaceId, groupId, ownerId) });
     }
     if (runtimeId) {
       const runtime = loaded.runtimes.find((candidate) => candidate.id === runtimeId);
       if (!runtime) return c.json({ error: "invalid runtime_id" }, 400);
       if (!canCurrentUserUseRuntime(c, store, runtime)) return c.json({ error: "runtime is private" }, 403);
-      refreshStaleGatewayModels(store, workspaceId);
       return c.json({ providers: runtimeTargetModelCatalog(store, workspaceId, runtime) });
     }
-    const providers = fleetModelsResponse(loaded.runtimes, ownerId);
-    refreshStaleGatewayModels(store, workspaceId);
-    return c.json({ providers: overlayGatewayModels(store, workspaceId, providers) });
+    return c.json({ providers: workspaceRuntimeModelCatalog(store, workspaceId, loaded.runtimes, ownerId) });
   };
   app.get("/api/models", fleetModelsHandler);
   app.get("/api/multiremi/models", fleetModelsHandler);

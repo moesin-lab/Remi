@@ -9,7 +9,7 @@ import { SkillMultiSelect } from "./skill-multi-select";
 import { AvatarPicker } from "./avatar-picker";
 import { api } from "@multiremi/core/api";
 import { useWorkspaceId } from "@multiremi/core/hooks";
-import { useExecutionTargetModels } from "@multiremi/core/runtimes";
+import { isFallbackModelUnavailable, isModelExecutionUnknown, isModelUnavailable, useExecutionTargetModels } from "@multiremi/core/runtimes";
 import { workspaceKeys } from "@multiremi/core/workspace/queries";
 import type {
   Agent,
@@ -34,6 +34,7 @@ import { ExecutionTargetSelect, type ExecutionTarget } from "./execution-target-
 import { useT } from "../../i18n";
 import { ThinkingField } from "./thinking-field";
 import {
+  getModelThinking,
   getModelThinkingLevels,
   supportsThinkingLevel,
 } from "./inspector/thinking-levels";
@@ -82,6 +83,8 @@ export function CreateAgentDialog({
   const [thinkingLevel, setThinkingLevel] = useState(
     template?.thinking_level ?? "",
   );
+  const [fallbackModel, setFallbackModel] = useState(template?.fallback_model ?? template?.fallbackModel ?? "");
+  const [fallbackThinkingLevel, setFallbackThinkingLevel] = useState(template?.fallback_thinking_level ?? template?.fallbackThinkingLevel ?? "");
   const [instructions, setInstructions] = useState(template?.instructions ?? "");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(template?.avatar_url ?? null);
   const [selectedSkillIds, setSelectedSkillIds] = useState<Set<string>>(
@@ -93,10 +96,17 @@ export function CreateAgentDialog({
   const [executionGroupId, setExecutionGroupId] = useState(template?.execution_group_id ?? "");
   const [legacyRuntimeId, setLegacyRuntimeId] = useState(template?.runtime_id ?? "");
   const targetModels = useExecutionTargetModels(wsId ?? "", provider, executionGroupId ? undefined : legacyRuntimeId, executionGroupId);
+  const executionUnknown = isModelExecutionUnknown(provider, model, targetModels.models, targetModels.modelCatalogStatus);
+  const unavailable = isModelUnavailable(provider, model, targetModels.models, targetModels.modelCatalogStatus);
   const thinkingLevels = useMemo(
-    () => getModelThinkingLevels(targetModels.models, model),
-    [targetModels.models, model],
+    () => getModelThinkingLevels(targetModels.models, model, targetModels.defaultThinking),
+    [targetModels.models, model, targetModels.defaultThinking],
   );
+  const primaryModel = model || targetModels.models.find((entry) => entry.default)?.id || "";
+  const fallbackUnavailable = isFallbackModelUnavailable(provider, fallbackModel, targetModels.models, targetModels.modelCatalogStatus);
+  const fallbackInvalid = !!fallbackModel && (fallbackModel === primaryModel || fallbackUnavailable ||
+    !supportsThinkingLevel(targetModels.models, fallbackModel, fallbackThinkingLevel, targetModels.defaultThinking));
+  const fallbackLevels = getModelThinkingLevels(targetModels.models, fallbackModel, targetModels.defaultThinking);
 
   const switchTarget = (next: ExecutionTarget) => {
     setProvider(next.provider);
@@ -105,16 +115,29 @@ export function CreateAgentDialog({
     // Models and reasoning options belong to the selected execution target.
     setModel("");
     setThinkingLevel("");
+    setFallbackModel("");
+    setFallbackThinkingLevel("");
   };
 
   const switchModel = (next: string) => {
     if (
       next !== model &&
-      !supportsThinkingLevel(targetModels.models, next, thinkingLevel)
+      !supportsThinkingLevel(targetModels.models, next, thinkingLevel, targetModels.defaultThinking)
     ) {
       setThinkingLevel("");
     }
     setModel(next);
+    if ((next || targetModels.models.find((entry) => entry.default)?.id) === fallbackModel) {
+      setFallbackModel("");
+      setFallbackThinkingLevel("");
+    }
+  };
+
+  const switchFallback = (next: string) => {
+    if (!next || !supportsThinkingLevel(targetModels.models, next, fallbackThinkingLevel, targetModels.defaultThinking)) {
+      setFallbackThinkingLevel("");
+    }
+    setFallbackModel(next);
   };
 
   // Shared squad-join follow-up. Returns nothing — the caller has
@@ -148,7 +171,7 @@ export function CreateAgentDialog({
   };
 
   const handleSubmit = async () => {
-    if (!name.trim() || !provider) return;
+    if (!name.trim() || !provider || unavailable || fallbackInvalid) return;
     setCreating(true);
 
     try {
@@ -160,6 +183,8 @@ export function CreateAgentDialog({
         ...(legacyRuntimeId ? { runtime_id: legacyRuntimeId } : executionGroupId ? { execution_group_id: executionGroupId } : {}),
         visibility,
         model: model.trim() || undefined,
+        fallback_model: fallbackModel.trim() || undefined,
+        fallback_thinking_level: fallbackModel && fallbackThinkingLevel ? fallbackThinkingLevel : undefined,
         instructions: trimmedInstructions || undefined,
         avatar_url: avatarUrl ?? undefined,
       };
@@ -349,8 +374,38 @@ export function CreateAgentDialog({
             <ThinkingField
               value={thinkingLevel}
               levels={thinkingLevels}
+              thinking={getModelThinking(targetModels.models, model, targetModels.defaultThinking)}
+              isLoading={targetModels.isLoading}
+              isError={targetModels.isError}
+              modelUnavailable={unavailable} modelExecutionUnknown={executionUnknown}
               onChange={setThinkingLevel}
             />
+
+            <div className="space-y-2 border-t pt-4">
+              <ModelDropdown
+                runtimeId={executionGroupId ? undefined : legacyRuntimeId}
+                executionGroupId={executionGroupId}
+                wsId={wsId ?? ""}
+                provider={provider}
+                value={fallbackModel}
+                onChange={switchFallback}
+                fallback
+                excludedModel={primaryModel}
+              />
+              <p className="text-xs text-muted-foreground">{t(($) => $.fallback.description)}</p>
+              {fallbackInvalid && fallbackModel === primaryModel && <p role="status" className="text-xs text-destructive">{t(($) => $.fallback.same_as_primary)}</p>}
+              {fallbackModel && <ThinkingField
+                value={fallbackThinkingLevel}
+                levels={fallbackLevels}
+                thinking={getModelThinking(targetModels.models, fallbackModel, targetModels.defaultThinking)}
+                isLoading={targetModels.isLoading}
+                isError={targetModels.isError}
+                modelUnavailable={fallbackUnavailable}
+                modelExecutionUnknown={isModelExecutionUnknown(provider, fallbackModel, targetModels.models, targetModels.modelCatalogStatus)}
+                label={t(($) => $.fallback.thinking_label)}
+                onChange={setFallbackThinkingLevel}
+              />}
+            </div>
 
             {/* --- Optional sections (instructions / skills) ---
                 Collapsed by default so quick-create stays fast.
@@ -382,7 +437,7 @@ export function CreateAgentDialog({
           <Button variant="ghost" onClick={onClose}>
             {t(($) => $.create_dialog.cancel)}
           </Button>
-          <Button onClick={handleSubmit} disabled={creating || !name.trim() || !provider}>
+          <Button onClick={handleSubmit} disabled={creating || !name.trim() || !provider || unavailable || fallbackInvalid}>
             {creating ? t(($) => $.create_dialog.creating) : t(($) => $.create_dialog.create)}
           </Button>
         </div>

@@ -11,6 +11,13 @@ machine first. See [Antigravity Runtime](antigravity.md) for model discovery,
 configuration and execution limits. Agent Plugin provider filters remain scoped
 to Claude/Codex.
 
+`remi agent create|update|template create` accept `--fallback-model <model>` and
+`--fallback-thinking-level <level>`. The backup must differ from the primary
+model and be executable on the same selected target; its reasoning level must
+belong to the backup model's catalog. Use `remi agent update <agent>
+--fallback-model ''` to clear the backup. Changing an Agent's provider, Runtime,
+execution group or workspace clears the saved backup unless supplied again.
+
 `remi agent create`, `remi agent template create <template>`, `remi agent update
 <agent>` and `remi agent default` accept `--execution-group <group-id>`.
 Use `remi runtime group list` to find groups and their online Runtime counts,
@@ -28,6 +35,21 @@ the selected target unless explicitly supplied; an explicit provider must match.
 Tasks use eligible members of the selected group and wait when none is available;
 they do not fall back to unrelated Runtimes sharing a provider.
 
+`remi runtime model catalog --agent <agent-id> --json` returns the same selectable
+models and reasoning capabilities as the Agent editor. For the Codex gateway,
+`model_catalog_status: "ready"` means `models` is the authoritative execution
+catalog. A saved model absent from that list is not executable; its saved model
+and thinking level remain intact. New selections of that model return
+`model_not_in_execution_catalog`. `model_catalog_status: "error"` retains the
+ordinary gateway inventory and reports capability loading failure instead of
+emptying the picker. Each model's `execution_status` distinguishes `available`,
+`unavailable`, and `unknown`; only actual ACP fallback members stay executable
+when that Runtime cannot load the native catalog. Bundled GPT reasoning options
+remain usable. `model_catalog_status: "unknown"` marks missing, obsolete, or
+unrefreshed snapshots; new explicit selections return
+`model_execution_catalog_unknown` until discovery finishes. The saved model and
+thinking level are preserved. Custom Runtime connections keep their own catalogs.
+
 ## Canonical command tree
 
 Reusable workspace connections use `remi runtime profile list|get|create|update|delete`.
@@ -43,6 +65,13 @@ cannot manage these resources. Examples and migration limits are in
 The older `runtime codex-profile get|set` and `runtime claude-profile get|set`
 commands remain available for retained per-Runtime connections. New configuration
 uses central profiles; the legacy commands do not edit a group's central profile.
+
+For either custom connection, `remi runtime model refresh <runtime>` asks its
+daemon to discover the provider catalog. Poll `runtime model status <runtime>
+<request-id>` for completion, then use `runtime model list <runtime>`. These
+model commands are available to task credentials without exposing connection
+secrets. Set a cloud agent's selection with `remi agent update <agent> --model <model-id>`;
+the connection's configured model remains the default when no model is selected.
 
 The canonical tree includes a focused top-level Attachment download command;
 Issue and Comment keep their scoped attachment listing and management commands.

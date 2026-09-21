@@ -168,7 +168,11 @@ describe("bootstrap and delta task prompts", () => {
     expect(artifact.prompt).toContain("`remi wiki push`");
     expect(artifact.prompt).toContain("non-empty root `index.md`");
     expect(artifact.prompt).toContain("non-empty root `log.md`");
-    expect(artifact.prompt).toContain("let project and repository semantics determine whether `overview.md`, directories, or nesting are useful");
+    expect(artifact.prompt).toContain("let project and repository semantics choose the directory names");
+    // Names stay free, but the size baseline has to travel with them: without it
+    // the agent satisfies "organize by semantics" with one 100-page directory.
+    expect(artifact.prompt).toContain("at most 20 body pages directly inside any one directory");
+    expect(artifact.prompt).toContain("at most 5 non-index body pages at the root");
     expect(artifact.prompt).not.toContain("no deeper than five levels");
     expect(artifact.prompt).not.toContain("`overview.md` index for every functional directory");
   });
@@ -387,6 +391,8 @@ describe("bootstrap and delta task prompts", () => {
     expect(prompt).toContain("Reviewer (agent: agt_reviewer) - reviewer - Owns security reviews");
     expect(prompt).toContain("`[@Reviewer](mention://agent/agt_reviewer)`");
     expect(prompt).toContain("independent workstreams");
+    expect(prompt).toContain("remi task continue <previous-delegated-task-id>");
+    expect(prompt).toContain("never infer a continuation target from prose");
     expect(prompt).toContain(`remi comment add ${issue.id} --content-stdin`);
     expect(prompt).toContain("cat <<'MULTIREMI_COMMENT'");
     // Delegation happens via comments inside this issue; the squad block must

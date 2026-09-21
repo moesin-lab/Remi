@@ -2,11 +2,13 @@ import type { RuntimeExecutionBinding, RuntimeExecutionBindingAck } from "@multi
 import { createHash } from "node:crypto";
 import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import { parseRuntimeClaudeProfile, type RuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
-import { assertRuntimeClaudeProjectCredentials, resolveRuntimeClaudeProfile, runtimeClaudeProfileEnv, runtimeClaudeProfileModels, runtimeClaudeProfileRouting } from "@daemon/agent-runtime/claude-profile.js";
-import { resolveRuntimeCodexProfile, runtimeCodexProfileModels } from "@daemon/agent-runtime/codex-profile.js";
+import { assertRuntimeClaudeProjectCredentials, resolveRuntimeClaudeProfile, runtimeClaudeProfileEnv, runtimeClaudeProfileRouting } from "@daemon/agent-runtime/claude-profile.js";
+import { resolveRuntimeCodexProfile } from "@daemon/agent-runtime/codex-profile.js";
+import { discoverRuntimeProfileModels } from "./runtime-profile-models.js";
 import { antigravityCliVersion, resolveAntigravityExecutable } from "@acp/antigravity.js";
+import { prepareRuntimeCodexModelCatalog } from "./runtime-codex-model-catalog.js";
 import { isPermanentFeishuDeliveryError } from "@shared/feishu-delivery-error.js";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import { cpus, homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { createLogger } from "@shared/logger.js";
@@ -24,6 +26,7 @@ import {
 import type { ElicitationCreateParams, ElicitationResult, PermissionOutcome, RequestPermissionParams } from "@shared/contracts/acp-protocol.js";
 import { answersToElicitationContent, elicitationToQuestions } from "@shared/contracts/acp-elicitation.js";
 import type { AgentResponse, Provider } from "@shared/contracts/provider-types.js";
+import type { AgentTask } from "@daemon/contracts/types.js";
 import {
   DEFAULT_DAEMON_REQUEST_TIMEOUT_MS,
   isTerminalDaemonAuthorityError,
@@ -72,6 +75,8 @@ import {
   localSkillRootForProvider,
   scanRuntimeDirectories,
 } from "./local-skills.js";
+import { hasReadOnlyCodeSnapshot, isSideConversation } from "@daemon/agent-runtime/prompts/side-conversation.js";
+import type { TaskRepoSnapshot } from "@daemon/agent-runtime/prompts/ephemeral.js";
 import { buildTaskPromptArtifact, type TaskRepoCheckout, type TaskRepoWarning } from "@multiremi/prompt.js";
 import {
   MultiremiRepoCache,
@@ -93,10 +98,13 @@ import {
   writeProjectResourceContext,
   writeAgentSkillContext,
 } from "@daemon/agent-runtime/skills/ephemeral.js";
+import { runSnapshotGcOnce } from "@daemon/agent-runtime/repo/snapshot-gc.js";
 import { prepareIntakeWorkspace } from "@daemon/agent-runtime/workspace/intake.js";
+import { prepareReadOnlyCodeWorkspace } from "@daemon/agent-runtime/workspace/readonly-code.js";
 import {
   assertIssueSessionNativeCodexOAuth,
   cleanupTemporaryTaskProviderHome,
+  cleanupTaskPrivateTempDirectory,
   ensureProviderHomeDirectory,
   prepareIssueExecutionDirectory,
   loadIssueSessionProviderEnv,
@@ -104,12 +112,15 @@ import {
   prepareIssueSessionProviderHome,
   resolveIssueRuntimeStateRoot,
   resolveTaskProviderHome,
+  prepareTaskPrivateTempDirectory,
+  type TaskPrivateTempDirectory,
   type IssueSessionProviderHome,
 } from "@daemon/agent-runtime/workspace/session-home.js";
 import { prepareIssueWikiWorkspace } from "@daemon/agent-runtime/workspace/wiki.js";
+import { prepareChatRepositories } from "@daemon/agent-runtime/workspace/chat-repos.js";
 import { materializeChatAttachments } from "@daemon/agent-runtime/workspace/chat-attachments.js";
 import { cleanProcessEnv } from "@daemon/agent-runtime/env/injector.js";
-import { mergeCodexSessionConfig } from "@daemon/agent-runtime/relay-sync.js";
+import { mergeCodexSessionConfig, type CodexModelCatalogState } from "@daemon/agent-runtime/relay-sync.js";
 import { AgentRuntime } from "@daemon/agent-runtime/runtime.js";
 import { prepareRuntimeWorkspaceContext } from "@daemon/agent-runtime/workspace/runtime-context.js";
 import { AgentSession } from "@daemon/agent-runtime/session.js";
@@ -395,6 +406,8 @@ export interface MultiremiDaemonOptions {
   gcEnabled?: boolean;
   gcIntervalMs?: number;
   gcTtlMs?: number;
+  /** Last-access TTL for immutable archive snapshots; independent of workspace policy. */
+  snapshotTtlMs?: number;
   gcOrphanTtlMs?: number;
   /** Session archives are a mandatory Issue GC precondition by default. */
   gcRequireArchive?: boolean;
@@ -479,6 +492,8 @@ interface RunSummary {
 }
 
 interface PreparedIssueWorkspace {
+  wikiMaterialized?: boolean;
+  snapshots?: TaskRepoSnapshot[];
   checkouts: TaskRepoCheckout[];
   repos: MultiremiIssueWorkspaceRepo[];
   warnings: TaskRepoWarning[];
@@ -710,6 +725,28 @@ export class MultiremiDaemon {
       ...(claudeProfile ? { claude: resolveRuntimeClaudeProfile(claudeProfile, process.env, await this.runtimeProfileKey(claudeProfile, "claude")) } : {}),
     };
   }
+  private async prepareCodexModelCatalog(
+    profile: RuntimeCodexProfile,
+    token: string,
+    home: string,
+    signal: AbortSignal,
+    taskId?: string,
+  ): Promise<void> {
+    const startedAt = Date.now();
+    try {
+      await prepareRuntimeCodexModelCatalog(profile, token, home, signal);
+    } catch (error) {
+      signal.throwIfAborted();
+      // Metadata is optional for existing Responses providers. Keep their
+      // native Codex fallback behavior when no usable catalog can be loaded.
+      log.warn("Runtime Codex model metadata unavailable", {
+        event: "runtime_codex_model_catalog_unavailable",
+        runtimeId: this.options.runtimeId, taskId, model: profile.model,
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   private stopped = false;
   private pollAbort = new AbortController();
   private startedAt = new Date();
@@ -845,6 +882,7 @@ export class MultiremiDaemon {
       gcEnabled: options.gcEnabled ?? booleanEnv(process.env.MULTIREMI_GC_ENABLED, true),
       gcIntervalMs: options.gcIntervalMs ?? numberEnv(process.env.MULTIREMI_GC_INTERVAL_MS, 15 * 60 * 1000),
       gcTtlMs: options.gcTtlMs ?? numberEnv(process.env.MULTIREMI_GC_TTL_MS, 72 * 60 * 60 * 1000),
+      snapshotTtlMs: options.snapshotTtlMs ?? numberEnv(process.env.MULTIREMI_SNAPSHOT_TTL_MS, 72 * 60 * 60 * 1000),
       gcOrphanTtlMs: options.gcOrphanTtlMs ?? numberEnv(process.env.MULTIREMI_GC_ORPHAN_TTL_MS, 72 * 60 * 60 * 1000),
       gcRequireArchive: options.gcRequireArchive ?? true,
       sessionArchiveMaxSourceBytes: options.sessionArchiveMaxSourceBytes
@@ -1551,11 +1589,13 @@ export class MultiremiDaemon {
       return;
     }
     try {
+      const modelProfile = this.runtimeModelProfile();
       const models = await this.discoverRuntimeModels(true);
       await this.client.reportRuntimeModelListResult(runtimeId, requestId, {
         status: "completed",
         supported: true,
         models,
+        model_profile: modelProfile,
       });
     } catch (error) {
       await this.client.reportRuntimeModelListResult(runtimeId, requestId, {
@@ -1714,6 +1754,7 @@ export class MultiremiDaemon {
   }
 
   private async refreshAndReportRuntimeModels(signal: AbortSignal): Promise<MultiremiRuntimeModel[]> {
+    const modelProfile = this.runtimeModelProfile();
     const models = await this.discoverRuntimeModels(false);
     if (this.stopped || signal.aborted) throw new Error("Runtime model refresh cancelled");
 
@@ -1723,7 +1764,7 @@ export class MultiremiDaemon {
     const runtimeId = this.options.runtimeId;
     if (!runtimeId) throw new Error("Runtime model refresh has no registered Runtime");
     const generation = this.runtimeRegistrationGeneration;
-    await this.client.updateRuntimeModels(runtimeId, models, signal);
+    await this.client.updateRuntimeModels(runtimeId, models, signal, modelProfile);
     if (this.stopped || signal.aborted) throw new Error("Runtime model refresh cancelled");
     if (this.options.runtimeId === runtimeId && this.runtimeRegistrationGeneration === generation) {
       this.runtimeModelReportedGeneration = generation;
@@ -1823,6 +1864,9 @@ export class MultiremiDaemon {
 
   private cancelRuntimeModelProbe(): void {
     this.runtimeModelProbeAbort?.abort();
+    // A resolved probe can still be awaiting its outer finally. A new connection
+    // must not reuse that promise and label the old catalog with its own profile.
+    this.runtimeModelProbe = null;
   }
 
   private cancelRuntimeModelRefresh(): void {
@@ -1831,14 +1875,14 @@ export class MultiremiDaemon {
     this.wakeRuntimeModelRetry();
   }
 
+  private runtimeModelProfile(): RuntimeCodexProfile | RuntimeClaudeProfile | null {
+    return this.options.provider === "codex" ? this.runtimeCodexProfile : this.options.provider === "claude" ? this.runtimeClaudeProfile : null;
+  }
+
   private async discoverRuntimeModels(force: boolean): Promise<MultiremiRuntimeModel[]> {
-    const claudeProfile = this.options.provider === "claude" ? this.runtimeClaudeProfile : null;
-    const codexProfile = this.options.provider === "codex" ? this.runtimeCodexProfile : null;
-    const scopeModels = (models: MultiremiRuntimeModel[]) => claudeProfile
-      ? runtimeClaudeProfileModels(claudeProfile, models)
-      : codexProfile ? runtimeCodexProfileModels(codexProfile, models) : models;
     if (!this.runtimeModelDiscoveryEnabled) {
-      if (claudeProfile || codexProfile) return scopeModels([]);
+      const profile = this.runtimeModelProfile();
+      if (profile) return [{ id: profile.model, label: profile.model, provider: this.options.provider, default: true }];
       throw new Error(IN_PROCESS_RUNTIME_MODEL_DISCOVERY_DISABLED);
     }
     if (!force && this.runtimeModels
@@ -1848,38 +1892,44 @@ export class MultiremiDaemon {
     const abort = new AbortController();
     this.runtimeModelProbeAbort = abort;
     const probe = (async () => {
-      if (!this.options.inProcessRuntimeModelDiscoveryEnabled) {
-        const capabilities = await probeRuntimeModels(await this.runtimeModelProbeProviderOptions(), {
-          signal: abort.signal, timeoutMs: RUNTIME_MODEL_PROBE_TIMEOUT_MS,
-        });
-        if (abort.signal.aborted) throw new Error("Runtime model discovery cancelled");
-        const models = scopeModels(runtimeModelsFromAcpCapabilities(this.options.provider, capabilities));
-        this.runtimeModels = models;
-        this.runtimeModelsDiscoveredAt = Date.now();
-        return models;
-      }
-      const provider = this.providerFactory(await this.runtimeModelProbeProviderOptions());
-      try {
-        if (!provider.discoverModelCapabilities) {
-          throw new Error(`ACP model discovery is not supported by provider: ${this.options.provider}`);
+      const provider = this.options.provider;
+      const profile = this.runtimeModelProfile();
+      let models: MultiremiRuntimeModel[];
+      if ((provider === "codex" || provider === "claude") && profile) {
+        const key = await this.runtimeProfileKey(profile, provider);
+        const { auth_token } = provider === "codex"
+          ? resolveRuntimeCodexProfile(profile, process.env, key)
+          : resolveRuntimeClaudeProfile(profile, process.env, key);
+        const [catalog, capabilities] = await Promise.allSettled([
+          discoverRuntimeProfileModels(provider, profile, auth_token, abort.signal),
+          this.discoverAcpRuntimeModels(abort.signal),
+        ]);
+        abort.signal.throwIfAborted();
+        if (catalog.status === "rejected" && capabilities.status === "rejected") throw catalog.reason;
+        // ACP supplies reasoning metadata, not the custom supplier's model inventory.
+        // Services without a models endpoint retain the configured model and its ACP capabilities.
+        models = catalog.status === "fulfilled" ? catalog.value : this.runtimeModels
+          ?? [{ id: profile.model, label: profile.model, provider, default: true }];
+        if (capabilities.status === "fulfilled") {
+          const byId = new Map(capabilities.value.map(model => [model.id, model]));
+          models = models.map(model => {
+            const capability = byId.get(model.id);
+            return capability ? { ...model, thinking: capability.thinking } : model;
+          });
         }
-        const capabilities = await withTimeout(
-          provider.discoverModelCapabilities(),
-          RUNTIME_MODEL_PROBE_TIMEOUT_MS,
-          `ACP model discovery timed out after ${RUNTIME_MODEL_PROBE_TIMEOUT_MS}ms`,
-          abort.signal,
-        );
-        if (abort.signal.aborted) throw new Error("Runtime model discovery cancelled");
-        if (!capabilities.length) {
-          throw new Error(`ACP did not advertise any models for provider: ${this.options.provider}`);
+        if (catalog.status === "rejected") {
+          log.warn("Runtime provider catalog unavailable; retaining known models", {
+            event: "runtime_profile_catalog_unavailable", provider, profile: profile.name,
+            error: catalog.reason instanceof Error ? catalog.reason.message : String(catalog.reason),
+          });
         }
-        const models = scopeModels(runtimeModelsFromAcpCapabilities(this.options.provider, capabilities));
-        this.runtimeModels = models;
-        this.runtimeModelsDiscoveredAt = Date.now();
-        return models;
-      } finally {
-        await provider.close?.();
+      } else {
+        models = await this.discoverAcpRuntimeModels(abort.signal);
       }
+      abort.signal.throwIfAborted();
+      this.runtimeModels = models;
+      this.runtimeModelsDiscoveredAt = Date.now();
+      return models;
     })();
 
     this.runtimeModelProbe = probe;
@@ -1891,10 +1941,57 @@ export class MultiremiDaemon {
     }
   }
 
-  private async runtimeModelProbeProviderOptions(): Promise<AcpProviderOptions> {
+  private async discoverAcpRuntimeModels(signal: AbortSignal): Promise<MultiremiRuntimeModel[]> {
+    const prepared = await this.runtimeModelProbeProviderOptions();
+    const probe = async (): Promise<MultiremiRuntimeModel[]> => {
+      if (!this.options.inProcessRuntimeModelDiscoveryEnabled) {
+        const capabilities = await probeRuntimeModels(prepared.options, {
+          signal, timeoutMs: RUNTIME_MODEL_PROBE_TIMEOUT_MS,
+        });
+        signal.throwIfAborted();
+        return runtimeModelsFromAcpCapabilities(this.options.provider, capabilities);
+      }
+      const provider = this.providerFactory(prepared.options);
+      try {
+        if (!provider.discoverModelCapabilities) {
+          throw new Error(`ACP model discovery is not supported by provider: ${this.options.provider}`);
+        }
+        const capabilities = await withTimeout(
+          provider.discoverModelCapabilities(), RUNTIME_MODEL_PROBE_TIMEOUT_MS,
+          `ACP model discovery timed out after ${RUNTIME_MODEL_PROBE_TIMEOUT_MS}ms`, signal,
+        );
+        signal.throwIfAborted();
+        if (!capabilities.length) throw new Error(`ACP did not advertise any models for provider: ${this.options.provider}`);
+        return runtimeModelsFromAcpCapabilities(this.options.provider, capabilities);
+      } finally {
+        await provider.close?.();
+      }
+    };
+    if (prepared.catalogState?.status !== "error") {
+      const models = await probe();
+      return prepared.catalogState?.status === "loaded"
+        ? models.map(model => ({ ...model, catalog: { status: "ready" as const } }))
+        : models;
+    }
+    // The ACP selector now uses the bundled catalog. Only this probe's actual
+    // members are executable: neither a previous successful native catalog nor
+    // the gateway's generic inventory can add members to the fallback selector.
+    const probed = await probe().then(
+      models => models,
+      () => [],
+    );
+    signal.throwIfAborted();
+    return runtimeModelsWithCatalogError(probed, prepared.catalogState.error);
+  }
+
+  private async runtimeModelProbeProviderOptions(): Promise<{
+    options: AcpProviderOptions;
+    catalogState?: CodexModelCatalogState;
+    relay?: MultiremiRelayEngineWire | null;
+  }> {
     const provider = this.options.provider;
     if (provider !== "claude" && provider !== "codex") {
-      return { agentType: provider, cwd: homedir() };
+      return { options: { agentType: provider, cwd: homedir() } };
     }
     const workspaceId = this.options.workspaceId ?? "local";
     const workspaceRelay = await this.effectiveWorkspaceRelay(workspaceId);
@@ -1925,22 +2022,29 @@ export class MultiremiDaemon {
     });
     if (provider === "claude" && this.runtimeClaudeProfile) Object.assign(providerEnv, runtimeClaudeProfileEnv(this.runtimeClaudeProfile, relay!.auth_token));
     const usesCodexRelayKey = provider === "codex" && Boolean(providerEnv.OPENAI_API_KEY);
-    await prepareIssueSessionProviderHome(providerHome, {
+    const prepared = await prepareIssueSessionProviderHome(providerHome, {
       linkCodexAuth: provider === "codex" && !usesCodexRelayKey,
       linkClaudeCredentials: provider === "claude"
         && !providerEnv.ANTHROPIC_AUTH_TOKEN
         && !providerEnv.ANTHROPIC_API_KEY,
       ...(relayAuthoritative ? { relayFragment: relay?.fragment ?? "" } : {}),
       codexRelayUsesEnvApiKey: usesCodexRelayKey,
+      // Runtime profiles may be LAN/OpenAI-compatible services with their own
+      // ACP capabilities. Only workspace Relays opt into the native catalog.
+      relayAuthToken: this.runtimeCodexProfile ? undefined : relay?.auth_token,
     });
     return {
-      agentType: provider,
-      cwd: root,
-      env: {
-        ...providerEnv,
-        ...(provider === "claude"
-          ? { CLAUDE_CONFIG_DIR: providerHome.home }
-          : { CODEX_HOME: providerHome.home }),
+      catalogState: prepared.codexModelCatalog,
+      relay,
+      options: {
+        agentType: provider,
+        cwd: root,
+        env: {
+          ...providerEnv,
+          ...(provider === "claude"
+            ? { CLAUDE_CONFIG_DIR: providerHome.home }
+            : { CODEX_HOME: providerHome.home }),
+        },
       },
     };
   }
@@ -2217,10 +2321,27 @@ export class MultiremiDaemon {
       },
     });
     this.assertWorkspaceRootOwner();
+    const snapshots = await runSnapshotGcOnce({
+      workspacesRoot: this.options.workspacesRoot,
+      snapshotsRoot: this.snapshotsRoot,
+      repoCacheRoot: this.options.repoCacheRoot,
+      ttlMs: this.options.snapshotTtlMs,
+      withRepoLock: (barePath, action) => this.repoCache.runExclusiveForBarePath(barePath, action),
+      assertRootOwner: () => this.assertWorkspaceRootOwner(),
+      onError: (path, error) => {
+        log.warn(`Snapshot GC skipped ${path}: ${error instanceof Error ? error.message : String(error)}`);
+      },
+    });
+    log.info("Snapshot GC finished", snapshots);
+    this.assertWorkspaceRootOwner();
     // Repo worktree metadata is pruned lazily for the repository that is about
     // to create a worktree. Sweeping every cached repository here creates a
     // large burst of synchronous child processes in the long-lived Bun daemon.
     return summary;
+  }
+
+  private get snapshotsRoot(): string {
+    return join(this.options.workspacesRoot, ".snapshots");
   }
 
   private async ensureIssueSessionArchive(
@@ -2681,6 +2802,11 @@ export class MultiremiDaemon {
   }
 
   private async handleTask(task: MultiremiTaskWithAgent): Promise<void> {
+    // Historical claims may still carry their parent's directory binding.
+    // Non-workspace Sessions execute in their own daemon-owned directory.
+    if (task.issueId && task.holdsWorkspace === false && task.runtimeWorkspaceId) {
+      task = { ...task, runtimeWorkspaceId: null, runtimeWorkspace: null };
+    }
     if (this.activeTaskIds.has(task.id)) {
       log.warn(`Ignored duplicate claim for active task ${task.id}`);
       return;
@@ -2707,6 +2833,7 @@ export class MultiremiDaemon {
     let pluginRuntimeBase: string | null = null;
     let pluginRuntime: PreparedAgentPluginRuntime | undefined;
     let providerHome: IssueSessionProviderHome | null = null;
+    let taskPrivateTmp: TaskPrivateTempDirectory | null = null;
     let providerEnv: Record<string, string> | undefined;
     let providerInstallEnv: Record<string, string> | undefined;
     let releaseIssueWorkspaceLifecycle: (() => void) | null = null;
@@ -2747,6 +2874,18 @@ export class MultiremiDaemon {
         this.assertWorkspaceRootOwner();
       }
       resolvedWorkDir = await this.resolveTaskWorkDir(task, abort.signal);
+      if (resolvedWorkDir.resetSession) {
+        const projection = (task as AgentTask).sessionProjection ?? (task as AgentTask).session_projection;
+        if (projection?.mode === "delta") {
+          // Only this host can detect symlink/ownership changes. A delta lacks
+          // the earlier conversation, so use the existing resume-unsafe retry
+          // to obtain a complete bootstrap projection before starting a provider.
+          const error = new LocalDirectoryError("Chat workspace changed; a full bootstrap is required before resuming");
+          error.failureReason = "agent_error.stale_session";
+          throw error;
+        }
+        task = { ...task, sessionId: null, workDir: resolvedWorkDir.workDir };
+      }
       const issueRuntimeStateRoot = resolveIssueRuntimeStateRoot(
         task,
         resolvedWorkDir.workDir,
@@ -2786,11 +2925,7 @@ export class MultiremiDaemon {
       }
       const codexProfile = task.agent?.provider === "codex" ? task.codexProfile ?? null : null;
       const claudeProfile = task.agent?.provider === "claude" ? task.claudeProfile ?? null : null;
-      const runtimeProfile = codexProfile ?? claudeProfile;
       if (claudeProfile) await assertRuntimeClaudeProjectCredentials(resolvedWorkDir.workDir);
-      if (runtimeProfile && task.agent?.model && task.agent.model !== runtimeProfile.model) {
-        throw new Error(`This Runtime's custom connection uses ${runtimeProfile.model}; select that model or the Runtime default for this Agent`);
-      }
       const workspaceRelay = await this.effectiveWorkspaceRelay(task.workspaceId, codexProfile, claudeProfile);
       const relayAuthoritative = workspaceRelay !== undefined;
       const relay = task.agent?.provider === "claude"
@@ -2838,25 +2973,44 @@ export class MultiremiDaemon {
           providerInstallEnv,
         );
       }
+      let codexCatalogError: string | undefined;
       if (providerHome) {
         this.assertWorkspaceRootOwner();
-        await prepareIssueSessionProviderHome(providerHome, {
+        const prepared = await prepareIssueSessionProviderHome(providerHome, {
+          sideConversation: isSideConversation(task),
           codexPluginInstalled: task.agent?.provider === "codex" && Boolean(pluginRuntime?.codexHome),
           linkCodexAuth: !providerInstallEnv?.OPENAI_API_KEY,
           linkClaudeCredentials: !providerInstallEnv?.ANTHROPIC_AUTH_TOKEN && !providerInstallEnv?.ANTHROPIC_API_KEY,
           ...(relayAuthoritative ? { relayFragment: relay?.fragment ?? "" } : {}),
           codexRelayUsesEnvApiKey: task.agent?.provider === "codex" && Boolean(providerInstallEnv?.OPENAI_API_KEY),
+          relayAuthToken: codexProfile ? undefined : relay?.auth_token,
         });
+        if (prepared.codexModelCatalog?.status === "error") {
+          codexCatalogError = prepared.codexModelCatalog.error;
+          log.warn("Codex capability catalog load failed; using bundled catalog", { error: codexCatalogError });
+          this.runtimeModelsDiscoveredAt = 0;
+          this.startRuntimeModelRefresh();
+        }
+        if (codexProfile) {
+          await this.prepareCodexModelCatalog(codexProfile, relay!.auth_token, providerHome.home, abort.signal, task.id);
+        }
         if (task.runtimeWorkspaceId) {
           writeAgentSkillContext(providerHome.home, task);
           const localEnv = prepareRuntimeWorkspaceContext(task, providerHome, resolvedWorkDir.workDir);
           providerEnv = { ...localEnv, ...providerEnv };
         }
       }
+      if (!providerHome) throw new Error(`Task ${task.id} has no isolated provider home`);
+      taskPrivateTmp = await prepareTaskPrivateTempDirectory(providerHome, task.id);
       this.enqueueTaskReport(task.id, "start", {});
+      if (codexCatalogError) {
+        this.enqueueTaskReport(task.id, "progress", {
+          summary: `能力加载失败，已回退 Codex 内置目录：${codexCatalogError}`,
+        });
+      }
       this.enqueueTaskReport(task.id, "progress", { summary: pickTaskStartupLine(task.agent?.name), step: 1, total: 3 });
       progressSummarizer = await this.createTaskProgressSummarizer(task, providerEnv, relay?.fragment);
-      summary = await this.runAgent(task, abort.signal, resolvedWorkDir, pluginRuntime, providerHome, providerEnv, progressSummarizer);
+      summary = await this.runAgent(task, abort.signal, resolvedWorkDir, pluginRuntime, providerHome, providerEnv, progressSummarizer, taskPrivateTmp.path);
       if (!summary.completed) {
         const failureReason = summary.failureReason
           ?? classifyPoisonedOutput(summary.output)
@@ -2906,6 +3060,12 @@ export class MultiremiDaemon {
       this.finalizeTaskProgress(progressSummarizer, "failed", error);
       await awaitFinalReportDrain();
     } finally {
+      await cleanupTaskPrivateTempDirectory(
+        taskPrivateTmp,
+        () => this.assertWorkspaceRootOwner(),
+      ).catch((error) => {
+        log.warn(`Failed to clean task private temp for ${task.id}: ${error instanceof Error ? error.message : String(error)}`);
+      });
       if (pluginRuntimeBase && !task.issueId && !task.chatSessionId) {
         await cleanupNonIssueTaskPluginRuntime(
           task,
@@ -2983,8 +3143,8 @@ export class MultiremiDaemon {
    * Pre-flight repo materialization: check out every task repo as a worktree
    * in the task's workDir before the agent starts, so an issue's work is
    * branch-isolated from the first turn without relying on the agent running
-   * `remi repo checkout` itself. Scope is deliberately narrow: issue tasks
-   * only, and only in daemon-owned dirs (never local_directory).
+   * `remi repo checkout` itself. Project-bound Chat uses only its explicitly
+   * declared repository list, in daemon-owned dirs (never local_directory).
    * An existing worktree is reused as-is so a resumed task keeps uncommitted
    * work, and any failure degrades to the manual-checkout prompt instead of
    * failing the task.
@@ -2995,16 +3155,17 @@ export class MultiremiDaemon {
     syncResults: MultiremiRepoSyncResult[],
     signal: AbortSignal,
   ): Promise<PreparedIssueWorkspace> {
-    const repos = normalizeRepoList(task.repos ?? []);
+    const boundChat = this.canAutoCheckoutChatRepos(task, resolvedWorkDir);
+    const repos = normalizeRepoList(boundChat ? task.chatAutoCheckoutRepos ?? [] : task.repos ?? []);
     const warnings = repoWarningsFromSyncResults(syncResults);
-    if (!repos.length || !task.issueId || !resolvedWorkDir.ensureDir || resolvedWorkDir.localDirectory) {
+    if (!repos.length || (!task.issueId && !boundChat) || !resolvedWorkDir.ensureDir || resolvedWorkDir.localDirectory) {
       return { checkouts: [], repos: [], warnings };
     }
     const checkouts: TaskRepoCheckout[] = [];
     const workspaceRepos: MultiremiIssueWorkspaceRepo[] = [];
     const runtimeId = task.runtimeId ?? this.options.runtimeId;
-    const branchName = `agent/${task.issue?.key ?? task.id}`;
-    if (runtimeId) {
+    const branchName = boundChat ? `chat/${task.chatSessionId}` : `agent/${task.issue?.key ?? task.id}`;
+    if (runtimeId && task.issueId) {
       this.enqueueTaskReport(task.id, "workspace", {
         runtimeId,
         rootPath: resolvedWorkDir.workDir,
@@ -3021,6 +3182,7 @@ export class MultiremiDaemon {
         }
         await this.ensureRepoReady(task.workspaceId, repo.url, signal);
         this.assertWorkspaceRootOwner();
+        if (boundChat) this.repoCache.hasWorktree({ workspaceId: task.workspaceId, repoUrl: repo.url, workDir: resolvedWorkDir.workDir });
         const result = await this.repoCache.createWorktree({
           workspaceId: task.workspaceId,
           repoUrl: repo.url,
@@ -3073,7 +3235,7 @@ export class MultiremiDaemon {
         log.warn(`Auto checkout of ${repo.url} failed for task ${task.id}: ${error}`);
       }
     }
-    if (runtimeId) {
+    if (runtimeId && task.issueId) {
       this.enqueueTaskReport(task.id, "workspace", {
         runtimeId,
         rootPath: resolvedWorkDir.workDir,
@@ -3085,19 +3247,122 @@ export class MultiremiDaemon {
     return { checkouts, repos: workspaceRepos, warnings };
   }
 
+  private canAutoCheckoutChatRepos(task: MultiremiTaskWithAgent, workDir: ResolvedTaskWorkDir): boolean {
+    const bound = Boolean(!task.runtimeWorkspaceId && task.chatSessionId && !task.issueId && !task.issue
+      && task.chatProjectId && task.chatProjectId === task.project?.id
+      && task.project.workspaceId === task.workspaceId && task.holdsWorkspace !== false
+      && workDir.ensureDir && !workDir.localDirectory);
+    if (!bound) return false;
+    // A former local_directory can survive in task.workDir after the Project
+    // resource is removed. ensureDir alone does not prove daemon ownership.
+    try {
+      const root = realpathSync(this.options.workspacesRoot);
+      return realpathSync(workDir.workDir) === join(root, "chats", task.chatSessionId!);
+    } catch {
+      return false;
+    }
+  }
+
+  private async prepareChatTaskWorkspace(
+    task: MultiremiTaskWithAgent,
+    resolvedWorkDir: ResolvedTaskWorkDir,
+    signal: AbortSignal,
+  ): Promise<PreparedIssueWorkspace> {
+    const plan = await prepareChatRepositories({
+      workDir: resolvedWorkDir.workDir,
+      workspaceId: task.workspaceId,
+      chatSessionId: task.chatSessionId!,
+      projectId: task.chatProjectId!,
+      repos: normalizeRepoList(task.chatAutoCheckoutRepos ?? []),
+      cache: this.repoCache,
+      signal,
+    });
+    // Register the allowlist on every turn, including after daemon restart,
+    // without fetching an already materialized worktree.
+    const allowed = this.workspaceRepoUrls.get(task.workspaceId) ?? new Set<string>();
+    for (const repo of plan.repos) allowed.add(repo.url);
+    this.workspaceRepoUrls.set(task.workspaceId, allowed);
+    if (plan.reposToSync.length) this.enqueueTaskReport(task.id, "progress", {
+      summary: "正在准备项目仓库…", step: 1, total: 3,
+    });
+    const syncResults = await this.syncColdChatRepos(task.workspaceId, plan.reposToSync, signal);
+    const prepared = await this.prepareTaskWorkspace(
+      { ...task, chatAutoCheckoutRepos: plan.repos }, resolvedWorkDir, syncResults, signal,
+    );
+    await plan.recordCheckouts(prepared.checkouts);
+    if (plan.reposToSync.length) this.enqueueTaskReport(task.id, "progress", {
+      summary: "项目仓库准备完成，正在启动智能体…", step: 1, total: 3,
+    });
+    return { ...prepared, warnings: [...plan.warnings, ...prepared.warnings] };
+  }
+
+  private async syncColdChatRepos(
+    workspaceId: string,
+    repos: MultiremiRepoData[],
+    signal: AbortSignal,
+    budgetMs = chatRepoStartupBudgetMs(),
+  ): Promise<MultiremiRepoSyncResult[]> {
+    if (!repos.length) return [];
+    // Chat has one shared network budget, independent of the much longer
+    // per-repository budgets needed by Issue jobs. Await cancellation so no
+    // background clone races the agent or a subsequent checkout.
+    const expiresAt = Date.now() + budgetMs;
+    const results: MultiremiRepoSyncResult[] = [];
+    for (const repo of repos) {
+      signal.throwIfAborted();
+      const remainingMs = expiresAt - Date.now();
+      const cached = Boolean(this.repoCache.lookup(workspaceId, repo.url));
+      const timeoutError = `Chat repository startup exceeded ${budgetMs}ms network budget`;
+      if (remainingMs <= 0) {
+        results.push({ repoUrl: repo.url, status: cached ? "cached" : "failed", error: timeoutError });
+        continue;
+      }
+      // Refreshing an existing cache gets a short budget; initial clones may
+      // consume the remainder. Earlier successes survive a later timeout.
+      const repoBudgetMs = cached ? Math.min(30_000, remainingMs) : remainingMs;
+      const deadline = new AbortController();
+      const error = cached && repoBudgetMs < remainingMs
+        ? `Chat cached repository refresh exceeded ${repoBudgetMs}ms network budget`
+        : timeoutError;
+      const timeout = setTimeout(() => deadline.abort(new Error(error)), repoBudgetMs);
+      try {
+        results.push(...await this.registerTaskRepos(workspaceId, [repo], AbortSignal.any([signal, deadline.signal])));
+      } catch (error) {
+        signal.throwIfAborted();
+        if (!deadline.signal.aborted) throw error;
+        results.push({
+          repoUrl: repo.url,
+          status: this.repoCache.lookup(workspaceId, repo.url) ? "cached" : "failed",
+          error: deadline.signal.reason.message,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    return results;
+  }
+
   private async prepareTaskWorkspace(
     task: MultiremiTaskWithAgent,
     resolvedWorkDir: ResolvedTaskWorkDir,
     syncResults: MultiremiRepoSyncResult[],
     signal: AbortSignal,
   ): Promise<PreparedIssueWorkspace> {
+    if (hasReadOnlyCodeSnapshot(task)) {
+      if (!resolvedWorkDir.ensureDir || resolvedWorkDir.localDirectory) {
+        throw new Error("Read-only code snapshots require a daemon-owned discussion workspace");
+      }
+      this.assertWorkspaceRootOwner();
+      return prepareReadOnlyCodeWorkspace(resolvedWorkDir.workDir, task, this.repoCache, signal);
+    }
     if (task.runtimeWorkspaceId || task.holdsWorkspace === false) return { checkouts: [], repos: [], warnings: [] };
     if (task.issue?.issueKind !== "intake") {
       const prepared = await this.autoCheckoutTaskRepos(task, resolvedWorkDir, syncResults, signal);
+      let wikiMaterialized = false;
       if (!resolvedWorkDir.localDirectory && !task.issueSessionId) {
-        await prepareIssueWikiWorkspace(resolvedWorkDir.workDir, task);
+        wikiMaterialized = Boolean(await prepareIssueWikiWorkspace(resolvedWorkDir.workDir, task));
       }
-      return prepared;
+      return { ...prepared, wikiMaterialized };
     }
     if (!task.issueId || !resolvedWorkDir.ensureDir || resolvedWorkDir.localDirectory) {
       throw new Error("Intake tasks require a daemon-owned issue workspace");
@@ -3122,7 +3387,7 @@ export class MultiremiDaemon {
     let prepared: PreparedIssueWorkspace;
     try {
       prepared = await prepareIntakeWorkspace(resolvedWorkDir.workDir, task, this.repoCache, {
-        snapshotsRoot: join(this.options.workspacesRoot, ".snapshots"),
+        snapshotsRoot: this.snapshotsRoot,
         skipRepoFetch: true,
         signal,
       });
@@ -3445,6 +3710,7 @@ export class MultiremiDaemon {
     providerHome?: IssueSessionProviderHome | null,
     providerEnv?: Record<string, string>,
     progressSummarizer?: TaskProgressSummarizer | null,
+    privateTmpDirectory?: string,
   ): Promise<RunSummary> {
     this.assertWorkspaceRootOwner();
     const agent = task.agent;
@@ -3461,18 +3727,20 @@ export class MultiremiDaemon {
     // Only create dirs the daemon owns. local_directory paths are validated
     // separately and carry ensureDir=false.
     if (resolvedWorkDir.ensureDir) mkdirSync(workDir, { recursive: true });
-    // Homepage Chat starts from the safe database directory and performs Git
-    // work only through an explicit `remi repo checkout`. Keep Issue task repo
-    // preparation unchanged, including for any task that also carries Chat
-    // metadata but is anchored to an Issue workspace.
+    // Unbound Chat retains its on-demand checkout behavior. Bound Chat prepares
+    // only explicit Project repositories, fetching only absent worktrees.
     const homepageChat = Boolean(task.chatSessionId && !task.issueId);
     const repoSyncResults = task.runtimeWorkspaceId || homepageChat || task.holdsWorkspace === false
       ? []
       : await this.registerTaskRepos(task.workspaceId, task.repos ?? [], signal);
+    const chatRepoAutoCheckout = this.canAutoCheckoutChatRepos(task, resolvedWorkDir);
     const preparedWorkspace = await this.issueWorkspaceLifecycleLocks.runExclusive(`prepare:${codeWorkDir}`, () =>
-      this.prepareTaskWorkspace(task, resolvedWorkDir, repoSyncResults, signal));
+      chatRepoAutoCheckout
+        ? this.prepareChatTaskWorkspace(task, resolvedWorkDir, signal)
+        : this.prepareTaskWorkspace(task, resolvedWorkDir, repoSyncResults, signal));
+    let wikiMaterialized = preparedWorkspace.wikiMaterialized ?? false;
     if (task.issueSessionId && task.holdsWorkspace !== false && !resolvedWorkDir.localDirectory) {
-      await prepareIssueWikiWorkspace(workDir, task);
+      wikiMaterialized = Boolean(await prepareIssueWikiWorkspace(workDir, task));
     }
     this.assertWorkspaceRootOwner();
     if (task.chatMessageAttachments?.length) {
@@ -3530,6 +3798,7 @@ export class MultiremiDaemon {
       ...(task.claudeProfile ? { claudeSettings: { model: task.claudeProfile.model, env: runtimeClaudeProfileRouting(task.claudeProfile) } } : {}),
       allowedTools: config.allowedTools,
       cwd: config.cwd,
+      privateTmpDirectory,
       env: config.env,
       getMcpServers: () => config.mcpServers,
       pluginPaths: config.pluginPaths,
@@ -3577,8 +3846,11 @@ export class MultiremiDaemon {
       const session = new AgentSession(provider as any, config);
       messageBatcher.push([{ type: "execution", meta: { agentName: agent.name, provider: config.agentType } }]);
       const promptArtifact = buildTaskPromptArtifact(task, {
+        wikiMaterialized,
         repoCheckouts: preparedWorkspace.checkouts,
+        repoSnapshots: preparedWorkspace.snapshots,
         repoWarnings: preparedWorkspace.warnings,
+        chatRepoAutoCheckout,
         issueWorkspacePath: codeWorkDir,
         sessionHistoryPaths: task.issueId && this.options.workspacesRoot
           ? listIssueSessionRuntimeRoots(this.options.workspacesRoot, task.issueId).map((root) => root.root)
@@ -4201,6 +4473,11 @@ async function pluginProbeCommandSucceeds(
   }
 }
 
+export function chatRepoStartupBudgetMs(env: Record<string, string | undefined> = process.env): number {
+  const value = Number(env.MULTIREMI_REPO_CHAT_STARTUP_TIMEOUT_MS);
+  return Number.isSafeInteger(value) && value > 0 && value <= 2_147_483_647 ? value : 120_000;
+}
+
 function stringField(value: unknown): string | null {
   const trimmed = typeof value === "string" ? value.trim() : "";
   return trimmed ? trimmed : null;
@@ -4295,13 +4572,37 @@ export function runtimeModelsFromAcpCapabilities(
     label: model.label,
     provider: vendor,
     default: model.default,
-    ...(model.effort?.supportedLevels.length
+    ...(model.providerDefault ? { providerDefault: true } : {}),
+    ...(model.effort || model.providerDefault
       ? {
           thinking: {
-            supportedLevels: model.effort.supportedLevels.map((level) => ({ ...level })),
+            supportedLevels: (model.effort?.supportedLevels ?? []).map((level) => ({ ...level })),
+            ...(model.effort?.defaultLevel ? { defaultLevel: model.effort.defaultLevel } : {}),
+            ...(model.effort?.status ? { status: model.effort.status } : {}),
           },
         }
       : {}),
+  }));
+}
+
+/** Retain actual fallback capabilities separately from native-catalog health. */
+export function runtimeModelsWithCatalogError(
+  models: MultiremiRuntimeModel[],
+  error: string,
+): MultiremiRuntimeModel[] {
+  // A diagnostic provider-default entry publishes the failure even when ACP
+  // itself fails. It replaces stale reports without inventing an executable ID.
+  const actualModels: MultiremiRuntimeModel[] = models.length ? models : [{
+    id: "__codex_catalog_unavailable__",
+    label: "Codex model catalog unavailable",
+    provider: "openai",
+    default: false,
+    providerDefault: true,
+    thinking: { status: "unknown", supportedLevels: [] },
+  }];
+  return actualModels.map(model => ({
+    ...model,
+    catalog: { status: "error", error },
   }));
 }
 

@@ -1,3 +1,4 @@
+import type { RuntimeExecutionBinding, RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection";
 import { createReadStream } from "node:fs";
 import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import { parseRuntimeClaudeProfile, type RuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
@@ -105,6 +106,7 @@ export interface MultiremiDaemonRegisterResponse {
 }
 
 export interface MultiremiDaemonHeartbeatConfigAck extends MultiremiDaemonHeartbeatAck {
+  runtime_bindings?: RuntimeExecutionBinding[];
   claude_profile?: RuntimeClaudeProfile | null; codex_profile?: RuntimeCodexProfile | null;
   workspace_settings?: Record<string, unknown>;
   relay?: MultiremiRelayWire;
@@ -280,6 +282,7 @@ export class MultiremiDaemonClient {
       cli_version: input.cliVersion ?? "",
       launched_by: input.launchedBy ?? "",
       capabilities: {
+        execution_profiles: 1,
         codex_profiles: 1,
         claude_profiles: 1,
         runtime_workspaces: 1,
@@ -321,11 +324,14 @@ export class MultiremiDaemonClient {
     supportsBotMenu = false,
     supportsFeishuConcierge = false,
     signal?: AbortSignal,
+    bindingAcks: RuntimeExecutionBindingAck[] = [],
   ): Promise<MultiremiDaemonHeartbeatConfigAck> {
     let resp: Partial<MultiremiDaemonHeartbeatConfigAck>;
     try {
       resp = await this.post<Partial<MultiremiDaemonHeartbeatAck>>("/api/daemon/heartbeat", {
         runtime_id: runtimeId,
+        execution_profile_protocol: 1,
+        runtime_binding_acks: bindingAcks,
         supports_batch_import: true,
         supports_directory_scan: true,
         supports_skill_directory: true,

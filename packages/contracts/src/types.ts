@@ -5291,6 +5291,10 @@ export interface MultiremiMetricCounter {
 
 export interface MultiremiExecutionGroup {
   id: string;
+  name: string;
+  profileId: string | null;
+  profileRevision: number | null;
+  managed: boolean;
   workspaceId: string;
   provider: string;
   machineId: string | null;

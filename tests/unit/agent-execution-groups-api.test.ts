@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { createStore, resetMultiremiTestEnv } from "./multiremi/helpers.js";
+import { createStore, db, resetMultiremiTestEnv } from "./multiremi/helpers.js";
 
 afterEach(resetMultiremiTestEnv);
+
+function legacyGroup(store: ReturnType<typeof createStore>, id: string, runtimeIds: string[], provider = "codex") {
+  store.saveExecutionGroup("local", { name: id, provider, profile_id: null, runtime_ids: runtimeIds }, id);
+  db!.run("UPDATE multiremi_execution_groups SET managed = 0 WHERE id = ?", [id]);
+}
 
 function setup() {
   const store = createStore();
@@ -17,13 +22,14 @@ function setup() {
     metadata: { codex_profiles: 1 },
     models: [{ id: "common", label: "Common", provider: "openai", default: true, thinking: { supportedLevels: [{ value: "low", label: "Low" }] } }, { id: "peer-only", label: "Peer", provider: "openai", default: false }],
   });
+  legacyGroup(store, "machine-a", [runtime.id]);
+  legacyGroup(store, "machine-b", [peer.id]);
   const app = createMultiremiApp({ store });
   const request = (path: string, body: unknown, method = "POST") => app.request(path, {
     method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
   const join = () => {
-    store.updateRuntime(runtime.id, { executionGroupId: "shared" });
-    store.updateRuntime(peer.id, { executionGroupId: "shared" });
+    legacyGroup(store, "shared", [runtime.id, peer.id]);
   };
   return { store, runtime, peer, app, request, join };
 }
@@ -36,6 +42,7 @@ describe("execution group API", () => {
     });
     expect(registered.status).toBe(201);
     const { runtime } = await registered.json();
+    legacyGroup(store, "agy-group", [runtime.id], "antigravity");
     const response = await request("/api/agents", { name: "Antigravity worker", execution_group_id: "agy-group" });
     expect(response.status).toBe(201);
     const agent = await response.json();
@@ -50,6 +57,7 @@ describe("execution group API", () => {
     it(`preserves reported ${provider} reasoning through custom connections, group validation and dispatch`, async () => {
       const { store, app, request } = setup();
       const runtime = store.registerRuntime({ name: "Custom reasoning", provider, executionGroupId: "custom-group", metadata: { [`${provider}_profiles`]: 1 } });
+      legacyGroup(store, "custom-group", [runtime.id], provider);
       const profile = { name: "custom", base_url: "https://example.com/v1", model: "custom-model", env_key: provider === "codex" ? "REMI_CODEX_KEY" : "REMI_CLAUDE_KEY" };
       const configure = () => provider === "codex" ? store.setRuntimeCodexProfile(runtime.id, profile) : store.setRuntimeClaudeProfile(runtime.id, profile);
       configure();
@@ -89,7 +97,7 @@ describe("execution group API", () => {
     expect(store.claimTask(peer.id)?.id).toBe(task.id);
   });
 
-  it("lists separate default machine/type groups and exposes membership in Runtime responses", async () => {
+  it("lists existing legacy machine/type groups and exposes membership in Runtime responses", async () => {
     const { runtime, peer, app } = setup();
     const response = await app.request("/api/execution-groups?workspace_id=local");
     expect(response.status).toBe(200);
@@ -101,29 +109,26 @@ describe("execution group API", () => {
     expect(runtimes.find((item: { id: string }) => item.id === runtime.id)).toMatchObject({ execution_group_id: null, execution_group_ids: [groups.find((group: { runtime_ids: string[] }) => group.runtime_ids.includes(runtime.id)).id] });
   });
 
-  it("joins a custom group via both PATCH surfaces and restores default membership with null", async () => {
-    const { store, runtime, peer, app, request } = setup();
-    expect((await request(`/api/runtimes/${runtime.id}`, { name: "Renamed", execution_group_id: "shared" }, "PATCH")).status).toBe(200);
-    expect((await request(`/api/multiremi/runtimes/${peer.id}`, { execution_group_id: "shared" }, "PATCH")).status).toBe(200);
-    expect(store.getRuntime(runtime.id)?.name).toBe("Renamed");
-    const { groups } = await (await app.request("/api/execution-groups")).json();
-    expect(groups).toEqual([{ id: "shared", workspace_id: "local", name: "shared", provider: "codex", runtime_ids: [runtime.id, peer.id], online_runtime_count: 2, is_default: false }]);
-    expect((await request(`/api/runtimes/${peer.id}`, { execution_group_id: null }, "PATCH")).status).toBe(200);
-    expect(store.getRuntime(peer.id)?.executionGroupId).toBeNull();
-    expect(store.getExecutionGroup("shared", "local")?.runtimeIds).toEqual([runtime.id]);
+  it("configures membership through the central group API", async () => {
+    const { store, runtime, peer, request } = setup();
+    const created = await request("/api/execution-groups?workspace_id=local", {
+      name: "Shared", provider: "codex", profile_id: null, runtime_ids: [runtime.id, peer.id],
+    });
+    expect(created.status).toBe(201);
+    const body = await created.json();
+    const id = (body.group ?? body).id;
+    expect(store.getExecutionGroup(id)?.runtimeIds.sort()).toEqual([runtime.id, peer.id].sort());
+    expect(store.getExecutionGroup(id)?.managed).toBe(true);
   });
 
-  it("rejects incompatible providers, reserved ids and malformed custom group values before mutation", async () => {
-    const { store, runtime, request, join } = setup();
-    join();
+  it("rejects incompatible members before mutating a central group", async () => {
+    const { store, runtime, request } = setup();
     const claude = store.registerRuntime({ name: "Claude", provider: "claude" });
-    const any = store.registerRuntime({ name: "Any", provider: "any" });
-    for (const [id, value] of [[claude.id, "shared"], [runtime.id, "eg_reserved"], [runtime.id, ""], [runtime.id, 123], [any.id, "another"]]) {
-      expect((await request(`/api/runtimes/${id}`, { execution_group_id: value }, "PATCH")).status).toBe(400);
-    }
-    const created = await request("/api/multiremi/runtimes", { name: "Incompatible", provider: "claude", execution_group_id: "shared" });
-    expect(created.status).toBe(400);
-    expect(store.listRuntimes().some((candidate) => candidate.name === "Incompatible")).toBe(false);
+    const response = await request("/api/execution-groups?workspace_id=local", {
+      name: "Invalid", provider: "codex", profile_id: null, runtime_ids: [runtime.id, claude.id],
+    });
+    expect(response.status).toBe(400);
+    expect(store.listExecutionGroups("local").some(group => group.name === "Invalid")).toBe(false);
   });
 
   for (const path of ["/api/agents", "/api/multiremi/agents", "/api/agents/from-template", "/api/multiremi/agents/from-template", "/api/multiremi/agents/default"]) {
@@ -175,7 +180,8 @@ describe("execution group API", () => {
 
   it("uses the managed agent owner for group and model queries, with workspace and access checks", async () => {
     const { store, runtime, app, request } = setup();
-    store.updateRuntime(runtime.id, { ownerId: "other", executionGroupId: "others" });
+    store.updateRuntime(runtime.id, { ownerId: "other" });
+    legacyGroup(store, "others", [runtime.id]);
     const agent = store.createAgent({ name: "Other owner", provider: "codex", ownerId: "other" });
     const defaultGroups = await (await app.request("/api/execution-groups")).json();
     expect(defaultGroups.groups.some((group: { id: string }) => group.id === "others")).toBe(false);
@@ -194,7 +200,8 @@ describe("execution group API", () => {
     const { store, runtime } = setup();
     store.createWorkspaceMember({ id: "group-owner", name: "Owner", role: "member" });
     store.createWorkspaceMember({ id: "group-outsider", name: "Outsider", role: "member" });
-    store.updateRuntime(runtime.id, { ownerId: "group-owner", executionGroupId: "private-group" });
+    store.updateRuntime(runtime.id, { ownerId: "group-owner" });
+    legacyGroup(store, "private-group", [runtime.id]);
     const agent = store.createAgent({ name: "Private", provider: "codex", ownerId: "group-owner", executionGroupId: "private-group" });
     const { token } = await store.createAccessToken({ name: "Outsider", type: "pat", workspaceId: "local", userId: "group-outsider" });
     const app = createMultiremiApp({ store, authToken: "root-secret" });

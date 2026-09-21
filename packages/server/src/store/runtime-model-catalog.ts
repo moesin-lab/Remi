@@ -1,11 +1,13 @@
 import type { MultiremiRuntime, MultiremiRuntimeModel } from "@multiremi/contracts/types.js";
-import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
+import { runtimeConnectionModels, type RuntimeConnectionProfile } from "@multiremi/contracts/runtime-connection";
 import type { MultiremiStore } from "./store.js";
 
 /** Minimal data source shared by API catalogs and dispatch capability checks. */
 export type RuntimeModelCatalogSource = Pick<MultiremiStore,
   "getRelayModelDiscovery" | "getRelayConfigForDaemon" | "getGatewayModels" |
-  "listWorkspaceCodexProfileModels" | "listWorkspaceClaudeProfileModels" | "getRuntimeExecutionProfile">;
+  "listWorkspaceCodexProfileModels" | "listWorkspaceClaudeProfileModels" | "getRuntimeExecutionProfile"> & {
+    runtimeProfileModelEvidenceMatches?: (runtimeId: string, provider: string, profile: RuntimeConnectionProfile) => boolean;
+  };
 
 export const MULTIREMI_DAEMON_PROVIDERS = new Set(["claude", "codex", "antigravity"]);
 
@@ -262,14 +264,28 @@ export function runtimeTargetModelCatalog(
   store: RuntimeModelCatalogSource,
   workspaceId: string,
   runtime: MultiremiRuntime,
+  profileOverride?: RuntimeConnectionProfile | null,
 ): FleetProviderModelsResponse[] {
   // Keep the last reported catalog while offline so saved configurations remain editable.
   const providers = fleetModelsResponse([{ ...runtime, status: "online", visibility: "public" }], runtime.ownerId ?? "local");
   return providers.map((entry) => {
-    const profile = store.getRuntimeExecutionProfile(runtime.id, entry.provider);
+    const legacyProfile = store.getRuntimeExecutionProfile(runtime.id, entry.provider);
+    const profile = profileOverride === undefined ? legacyProfile : profileOverride;
+    // A model ID alone cannot identify an endpoint's capabilities. Reuse legacy
+    // evidence only for the same connection on this runtime, including migration
+    // provenance when an API credential was re-encrypted under a new reference.
+    const matchingEnvConnection = profileOverride && legacyProfile
+      && (profileOverride.auth_mode ?? "env") === "env"
+      && (legacyProfile.auth_mode ?? "env") === "env"
+      && profileOverride.base_url === legacyProfile.base_url
+      && profileOverride.model === legacyProfile.model
+      && profileOverride.env_key === legacyProfile.env_key;
+    const matchesLegacy = matchingEnvConnection || (profileOverride
+      && store.runtimeProfileModelEvidenceMatches?.(runtime.id, entry.provider, profileOverride));
+    const reportedModels = profileOverride === undefined || (!profileOverride && !legacyProfile) || matchesLegacy ? entry.models : [];
     const models = profile
-      ? runtimeConnectionModels(profile, entry.provider, entry.models)
-      : overlayGatewayModels(store, workspaceId, [entry]).find((candidate) => candidate.provider === entry.provider)?.models ?? [];
+      ? runtimeConnectionModels(profile, entry.provider, reportedModels)
+      : overlayGatewayModels(store, workspaceId, [{ ...entry, models: reportedModels }]).find((candidate) => candidate.provider === entry.provider)?.models ?? [];
     return { ...entry, online_runtime_count: runtime.status === "online" ? 1 : 0, models };
   });
 }

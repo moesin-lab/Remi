@@ -1,6 +1,6 @@
 import { runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
-import { syncRuntimeExecutionGroups, runtimeExecutionGroupId } from "@multiremi/store/execution-groups.js";
+import { syncRuntimeExecutionGroups, getExecutionGroup, getGroupExecutionProfile } from "@multiremi/store/execution-groups.js";
 import { WorkspacesRepo } from "@multiremi/store/repos/workspaces-repo.js";
 // Runtimes domain (runtime registration/lifecycle, models, and the five daemon async-request
 // families: model list, directory scan, update, local-skill list, local-skill import), extracted
@@ -260,7 +260,9 @@ export class RuntimesRepo {
     const runtime = this.getRuntime(runtimeId);
     if (!runtime) return null;
     const row = this.ctx.db.query("SELECT ciphertext FROM multiremi_runtime_provider_credentials WHERE id = ? AND runtime_id = ?").get(credentialId, runtimeId) as { ciphertext: string } | null;
-    return row ? decryptRuntimeProviderKey(row.ciphertext, { workspaceId: runtime.workspaceId ?? "local", runtimeId, credentialId }) : null;
+    return row
+      ? decryptRuntimeProviderKey(row.ciphertext, { workspaceId: runtime.workspaceId ?? "local", runtimeId, credentialId })
+      : this.ctx.executionProfiles().getKeyForRuntime(runtimeId, credentialId);
   }
 
   setRuntimeProviderProfile(id: string, provider: "codex" | "claude", input: unknown, apiKey?: unknown): RuntimeCodexProfile | null {
@@ -391,6 +393,10 @@ export class RuntimesRepo {
     // remain valid after a daemon identity is established and cause pinned work
     // to be re-pooled below. A rejected conflict reports zero changed rows.
     if (result.changes === 0) throw new RuntimeRegistrationIdentityConflictError(id);
+    // A newly registered daemon must apply its bindings again; a previous
+    // process's acknowledgement does not prove this process has the config.
+    this.ctx.db.run("DELETE FROM multiremi_execution_binding_states WHERE runtime_id = ?", [id]);
+    this.ctx.db.run("DELETE FROM multiremi_execution_binding_generations WHERE runtime_id = ?", [id]);
     if (hasAnyField(input, "executionGroupId", "execution_group_id")) {
       this.ctx.db.run("UPDATE multiremi_runtimes SET execution_group_id = ? WHERE id = ?", [cleanOptionalString(input.executionGroupId ?? input.execution_group_id), id]);
     }
@@ -1859,7 +1865,9 @@ export class RuntimesRepo {
    */
   runtimeCanRunAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
     if (agent.runtimeId && agent.runtimeId !== runtime.id) return false;
-    if (agent.executionGroupId && runtimeExecutionGroupId(this.ctx.db, runtime.id, agent.provider) !== agent.executionGroupId) return false;
+    if (agent.executionGroupId && !this.ctx.db.query(`SELECT 1 FROM multiremi_execution_group_members
+      WHERE runtime_id = ? AND provider = ? AND workspace_id = ? AND group_id = ?`)
+      .get(runtime.id, agent.provider, agent.workspaceId ?? "local", agent.executionGroupId)) return false;
     if (agent.executionGroupId && !agent.runtimeId && !this.runtimeSupportsAgentModel(runtime, agent)) return false;
     if (runtime.provider !== "any" && runtime.provider !== agent.provider) return false;
     // A task runs in its agent's workspace and the claim SQL requires the
@@ -1870,9 +1878,29 @@ export class RuntimesRepo {
     return (runtime.ownerId ?? "local") === (agent.ownerId ?? "local");
   }
 
+  runtimeProfileModelEvidenceMatches(runtimeId: string, provider: string, profile: RuntimeCodexProfile): boolean {
+    const legacy = this.getRuntimeExecutionProfile(runtimeId, provider);
+    if (!legacy) return false;
+    const rows = this.ctx.db.query(`SELECT s.legacy_profile, v.profile FROM multiremi_execution_profile_legacy_sources s
+      JOIN multiremi_execution_profile_versions v ON v.workspace_id = s.workspace_id
+        AND v.id = s.profile_id AND v.revision = s.revision
+      JOIN multiremi_runtimes r ON r.id = s.runtime_id AND COALESCE(r.workspace_id, 'local') = s.workspace_id
+      WHERE s.runtime_id = ? AND s.provider = ?`).all(runtimeId, provider) as { legacy_profile: string; profile: string }[];
+    return rows.some(row => sameConnection(legacy, JSON.parse(row.legacy_profile))
+      && sameConnection(profile, JSON.parse(row.profile)));
+  }
+
+  getAgentExecutionProfile(runtimeId: string | null, agent: MultiremiAgent): RuntimeCodexProfile | null {
+    const group = agent.executionGroupId ? getExecutionGroup(this.ctx.db, agent.executionGroupId, agent.workspaceId) : null;
+    if (group?.managed) return getGroupExecutionProfile(this.ctx.db, group.id, agent.workspaceId)?.profile ?? null;
+    return runtimeId ? this.getRuntimeExecutionProfile(runtimeId, agent.provider) : null;
+  }
+
   private runtimeSupportsAgentModel(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
     if (!agent.model && !agent.thinkingLevel) return true;
     const workspaces = new WorkspacesRepo(this.ctx);
+    const group = agent.executionGroupId ? getExecutionGroup(this.ctx.db, agent.executionGroupId, agent.workspaceId) : null;
+    const profileOverride = group?.managed ? this.getAgentExecutionProfile(runtime.id, agent) : undefined;
     const catalog = runtimeTargetModelCatalog({
       getRelayModelDiscovery: (id) => workspaces.getRelayModelDiscovery(id),
       getRelayConfigForDaemon: (id) => workspaces.getRelayConfigForDaemon(id),
@@ -1880,7 +1908,8 @@ export class RuntimesRepo {
       listWorkspaceCodexProfileModels: (id) => this.listWorkspaceCodexProfileModels(id),
       listWorkspaceClaudeProfileModels: (id) => this.listWorkspaceClaudeProfileModels(id),
       getRuntimeExecutionProfile: (id, provider) => this.getRuntimeExecutionProfile(id, provider),
-    }, agent.workspaceId, runtime).find(entry => entry.provider === agent.provider)?.models ?? [];
+      runtimeProfileModelEvidenceMatches: (id, provider, profile) => this.runtimeProfileModelEvidenceMatches(id, provider, profile),
+    }, agent.workspaceId, runtime, profileOverride).find(entry => entry.provider === agent.provider)?.models ?? [];
     const model = agent.model ? catalog.find(model => model.id === agent.model) : catalog.find(model => model.default);
     return Boolean(model && (!agent.thinkingLevel || model.thinking?.supported_levels.some(level => level.value === agent.thinkingLevel)));
   }
@@ -2041,6 +2070,13 @@ export class RuntimesRepo {
     }
     return stats;
   }
+}
+
+/** Names are presentation; endpoint, model and authentication identify the connection. */
+function sameConnection(left: RuntimeCodexProfile, right: RuntimeCodexProfile): boolean {
+  return left.base_url === right.base_url && left.model === right.model
+    && (left.auth_mode ?? "env") === (right.auth_mode ?? "env")
+    && left.env_key === right.env_key && left.credential_id === right.credential_id;
 }
 
 function normalizeAgentPluginProtocol(value: unknown): number {

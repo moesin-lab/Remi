@@ -366,6 +366,8 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/daemon/heartbeat", async (c) => {
     const body = await readJsonStrict<{
       runtime_id?: string;
+      execution_profile_protocol?: number;
+      runtime_binding_acks?: unknown;
       supports_batch_import?: boolean;
       supports_directory_scan?: boolean;
       supports_skill_directory?: boolean;
@@ -389,7 +391,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     const authorization = c.req.header("Authorization") ?? "";
     const usesMasterToken = Boolean(authToken) && authorization === `Bearer ${authToken}`;
     if (
-      (reportsAgentPluginProtocol || reportsSshMeshProtocol) &&
+      (reportsAgentPluginProtocol || reportsSshMeshProtocol || body.execution_profile_protocol !== undefined || body.runtime_binding_acks !== undefined) &&
       currentAccessToken(c)?.type !== "daemon" &&
       authToken &&
       !usesMasterToken
@@ -431,7 +433,11 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
         Number.isSafeInteger(activeCount) && activeCount >= 0 ? activeCount : null,
       );
     }
+    if (body.execution_profile_protocol === 1) {
+      store.recordRuntimeExecutionBindingAcks(runtimeId, body.runtime_binding_acks);
+    }
     const response = daemonHeartbeatHttpResponse(ack);
+    if (body.execution_profile_protocol === 1) response.runtime_bindings = store.getRuntimeExecutionBindings(runtimeId);
     response.codex_profile = store.getRuntimeCodexProfile(runtimeId);
     response.claude_profile = store.getRuntimeClaudeProfile(runtimeId);
     const runtime = store.getRuntime(runtimeId);

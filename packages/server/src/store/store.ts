@@ -1,4 +1,7 @@
-import { getExecutionGroup, listExecutionGroups } from "@multiremi/store/execution-groups.js";
+import { createId } from "@multiremi/ids.js";
+import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
+import { ExecutionProfilesRepo } from "@multiremi/store/repos/execution-profiles-repo.js";
+import { getExecutionGroup, listExecutionGroups, saveExecutionGroup, deleteExecutionGroup } from "@multiremi/store/execution-groups.js";
 import { type SqlDatabase, openMultiremiDatabase } from "@multiremi/store/db/postgres.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { daemonRuntimeId, isTerminalStatus } from "@multiremi/store/helpers.js";
@@ -483,6 +486,8 @@ export class MultiremiStore {
   private sessionArchives: SessionArchivesRepo;
   readonly runtimeWorkspaces: RuntimeWorkspacesRepo;
   private runtimes: RuntimesRepo;
+  private executionBindingStates: ExecutionBindingStatesRepo;
+  private executionProfiles: ExecutionProfilesRepo;
   private daemonProfiles: DaemonProfilesRepo;
   private runtimeProvisions: RuntimeProvisionsRepo;
   private daemonRetirement: DaemonRetirementRepo;
@@ -547,6 +552,8 @@ export class MultiremiStore {
     this.sessionArchives = new SessionArchivesRepo(this.ctx);
     this.runtimes = new RuntimesRepo(this.ctx);
     this.runtimeWorkspaces = new RuntimeWorkspacesRepo(this.ctx);
+    this.executionBindingStates = new ExecutionBindingStatesRepo(this.ctx);
+    this.executionProfiles = new ExecutionProfilesRepo(this.ctx);
     this.daemonProfiles = new DaemonProfilesRepo(this.ctx);
     this.runtimeProvisions = new RuntimeProvisionsRepo(this.ctx);
     this.daemonRetirement = new DaemonRetirementRepo(this.ctx);
@@ -799,8 +806,132 @@ runMigrations(this.db);
     return this.sessionArchives.retry(id);
   }
 
-  listExecutionGroups(workspaceId: string) { return listExecutionGroups(this.db, workspaceId); }
-  getExecutionGroup(id: string, workspaceId = "local") { return getExecutionGroup(this.db, id, workspaceId); }
+  getExecutionGroupMembers(id: string, workspaceId: string) {
+    const group = this.getExecutionGroup(id, workspaceId);
+    if (!group) return [];
+    return group.runtimeIds.map((runtimeId) => {
+      const row = this.db
+        .query(
+          "SELECT profile_id,profile_revision,status,error,generation FROM multiremi_execution_binding_states WHERE workspace_id=? AND group_id=? AND runtime_id=?",
+        )
+        .get(workspaceId, id, runtimeId) as {
+        profile_id: string | null;
+        profile_revision: number | null;
+        status: string;
+        error: string | null;
+        generation: string | null;
+      } | null;
+      const desired = this.getRuntimeExecutionBindings(runtimeId).find(
+        (binding) => binding.groupId === id,
+      );
+      const current =
+        row &&
+        row.profile_id === group.profileId &&
+        row.profile_revision === group.profileRevision &&
+        row.generation === desired?.generation;
+      return {
+        runtime_id: runtimeId,
+        status: !group.managed ? "ready" : current ? row.status : "pending",
+        error: current ? row.error : null,
+      };
+    });
+  }
+  executionBindingStatesRepo() {
+    return this.executionBindingStates;
+  }
+  getRuntimeExecutionBindings(runtimeId: string) {
+    return this.executionBindingStates.getRuntimeExecutionBindings(runtimeId);
+  }
+  recordRuntimeExecutionBindingAcks(runtimeId: string, input: unknown) {
+    return this.executionBindingStates.recordRuntimeExecutionBindingAcks(
+      runtimeId,
+      input,
+    );
+  }
+  isRuntimeExecutionBindingReady(
+    groupId: string,
+    runtimeId: string,
+    profileId: string | null,
+    revision: number | null,
+  ) {
+    return this.executionBindingStates.isRuntimeExecutionBindingReady(
+      groupId,
+      runtimeId,
+      profileId,
+      revision,
+    );
+  }
+  runtimeProfileModelEvidenceMatches(
+    runtimeId: string,
+    provider: string,
+    profile: import("@multiremi/contracts/runtime-connection.js").RuntimeConnectionProfile,
+  ) {
+    return this.runtimes.runtimeProfileModelEvidenceMatches(
+      runtimeId,
+      provider,
+      profile,
+    );
+  }
+  getAgentExecutionProfile(runtimeId: string | null, agent: MultiremiAgent) {
+    return this.runtimes.getAgentExecutionProfile(runtimeId, agent);
+  }
+  executionProfilesRepo() {
+    return this.executionProfiles;
+  }
+  listExecutionProfiles(workspaceId: string) {
+    return this.executionProfiles.list(workspaceId);
+  }
+  getExecutionProfile(id: string, workspaceId: string, revision?: number) {
+    return this.executionProfiles.get(id, workspaceId, revision);
+  }
+  getGroupExecutionProfile(id: string, workspaceId: string) {
+    return this.executionProfiles.getGroupExecutionProfile(id, workspaceId);
+  }
+  saveExecutionProfile(
+    workspaceId: string,
+    input: import("@multiremi/contracts/execution-profile.js").ExecutionProfileInput,
+    id?: string,
+  ) {
+    return this.executionProfiles.save(workspaceId, input, id);
+  }
+  deleteExecutionProfile(id: string, workspaceId: string) {
+    return this.executionProfiles.delete(id, workspaceId);
+  }
+  getExecutionProfileKey(
+    id: string,
+    workspaceId: string,
+    revision: number,
+    credentialId: string,
+  ) {
+    return this.executionProfiles.getKey(
+      id,
+      workspaceId,
+      revision,
+      credentialId,
+    );
+  }
+  saveExecutionGroup(
+    workspaceId: string,
+    input: import("@multiremi/contracts/execution-profile.js").ExecutionGroupInput,
+    id = createId("eg"),
+  ) {
+    return this.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      return saveExecutionGroup(this.db, workspaceId, id, input);
+    })();
+  }
+  deleteExecutionGroup(id: string, workspaceId: string) {
+    return this.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      return deleteExecutionGroup(this.db, id, workspaceId);
+    })();
+  }
+  listExecutionGroups(workspaceId: string) {
+    return listExecutionGroups(this.db, workspaceId);
+  }
+  getExecutionGroup(id: string, workspaceId = "local") {
+    return getExecutionGroup(this.db, id, workspaceId);
+  }
 
   createAgent(input: CreateAgentInput): MultiremiAgent {
     return this.agents.createAgent(input);

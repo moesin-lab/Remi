@@ -9,6 +9,8 @@ export const RUNTIME_REQUEST_TABLES = [
 ] as const;
 
 export const RUNTIME_AUXILIARY_TABLES = [
+  "multiremi_execution_binding_states",
+  "multiremi_execution_binding_generations",
   "multiremi_execution_group_members",
   "multiremi_agent_plugin_runtime_states",
   "multiremi_runtime_provision_states",

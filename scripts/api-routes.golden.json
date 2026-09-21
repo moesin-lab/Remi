@@ -1,20 +1,20 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 749,
+    "routeCount": 758,
     "routeCountByPrefix": {
       "native": 210,
-      "compat": 525,
+      "compat": 534,
       "root": 14
     },
-    "getRoutes": 321,
-    "getRoutesWithBody": 318,
+    "getRoutes": 324,
+    "getRoutesWithBody": 321,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 428,
+    "mutationRoutes": 434,
     "mutationRoutesCovered": 282,
     "flows": [
       "agents-compat",
@@ -75,6 +75,8 @@
     "DELETE /api/comments/:id",
     "DELETE /api/comments/:id/reactions",
     "DELETE /api/comments/:id/resolve",
+    "DELETE /api/execution-groups/:id",
+    "DELETE /api/execution-profiles/:id",
     "DELETE /api/issues/:id",
     "DELETE /api/issues/:id/dependencies/:dependencyId",
     "DELETE /api/issues/:id/labels/:labelId",
@@ -201,6 +203,9 @@
     "GET /api/dashboard/usage/by-agent",
     "GET /api/dashboard/usage/daily",
     "GET /api/execution-groups",
+    "GET /api/execution-groups/:id",
+    "GET /api/execution-profiles",
+    "GET /api/execution-profiles/:id",
     "GET /api/inbox",
     "GET /api/inbox/page",
     "GET /api/inbox/summary",
@@ -570,6 +575,8 @@
     "POST /api/daemon/tasks/:taskId/wait-local-directory",
     "POST /api/daemon/tasks/:taskId/workspace",
     "POST /api/daemon/workspaces/:workspaceId/external-membership/check",
+    "POST /api/execution-groups",
+    "POST /api/execution-profiles",
     "POST /api/feedback",
     "POST /api/inbox/:id/archive",
     "POST /api/inbox/:id/read",
@@ -773,6 +780,8 @@
     "PUT /api/comments/:id",
     "PUT /api/daemon/runtimes/:runtimeId/issues/:issueId/session-archives/:archiveId/content",
     "PUT /api/daemon/runtimes/:runtimeId/models",
+    "PUT /api/execution-groups/:id",
+    "PUT /api/execution-profiles/:id",
     "PUT /api/issues/:id",
     "PUT /api/issues/:id/metadata/:key",
     "PUT /api/issues/:issueId/change-requests/:changeRequestId",
@@ -935,6 +944,9 @@
     "GET /api/dashboard/usage/by-agent",
     "GET /api/dashboard/usage/daily",
     "GET /api/execution-groups",
+    "GET /api/execution-groups/:id",
+    "GET /api/execution-profiles",
+    "GET /api/execution-profiles/:id",
     "GET /api/inbox",
     "GET /api/inbox/page",
     "GET /api/inbox/summary",
@@ -1430,7 +1442,7 @@
         "id": "agt_wk1mrnyfwl4x",
         "workspace_id": "local",
         "runtime_id": "rt_snapshot",
-        "execution_group_id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+        "execution_group_id": null,
         "provider": "claude",
         "name": "Compat Agent",
         "description": "",
@@ -1468,7 +1480,7 @@
         "id": "agt_wk1mrnyfwl4x",
         "workspace_id": "local",
         "runtime_id": "rt_snapshot",
-        "execution_group_id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+        "execution_group_id": null,
         "provider": "claude",
         "name": "Compat Agent Renamed",
         "description": "",
@@ -1563,7 +1575,7 @@
         "id": "agt_wk1mrnyfwl4x",
         "workspace_id": "local",
         "runtime_id": "rt_snapshot",
-        "execution_group_id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+        "execution_group_id": null,
         "provider": "claude",
         "name": "Compat Agent Renamed",
         "description": "",
@@ -1607,7 +1619,7 @@
         "id": "agt_wk1mrnyfwl4x",
         "workspace_id": "local",
         "runtime_id": "rt_snapshot",
-        "execution_group_id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+        "execution_group_id": null,
         "provider": "claude",
         "name": "Compat Agent Renamed",
         "description": "",
@@ -1713,8 +1725,8 @@
           "visibility": "private",
           "runtimeId": "rt_snapshot",
           "runtime_id": "rt_snapshot",
-          "executionGroupId": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
-          "execution_group_id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+          "executionGroupId": null,
+          "execution_group_id": null,
           "instructions": "Be deterministic.",
           "skills": [
             {
@@ -1910,8 +1922,8 @@
           "visibility": "private",
           "runtimeId": "rt_snapshot",
           "runtime_id": "rt_snapshot",
-          "executionGroupId": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
-          "execution_group_id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+          "executionGroupId": null,
+          "execution_group_id": null,
           "instructions": "Be deterministic.",
           "skills": [
             {
@@ -3819,7 +3831,7 @@
           "workspace_id": "local",
           "daemon_id": "dmn_snapshot",
           "owner_user_id": "local",
-          "snapshot": "ac9dd836e8d16cfbce2c204c6b3df118fc2161ba8b2d716275bc0f0329ae52d6",
+          "snapshot": "e8522f7e8caac1a961db853962104dd46a45c7c00ddead9d0d4bf1ffe2ce4189",
           "already_retired": false,
           "can_retire": true,
           "can_abandon_issue_workspaces": false,
@@ -6519,7 +6531,7 @@
           "id": "agt_snapshot",
           "workspace_id": "local",
           "runtime_id": "rt_snapshot",
-          "execution_group_id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+          "execution_group_id": null,
           "provider": "claude",
           "name": "Snapshot Agent",
           "description": "",
@@ -6564,7 +6576,7 @@
         "id": "agt_snapshot",
         "workspace_id": "local",
         "runtime_id": "rt_snapshot",
-        "execution_group_id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+        "execution_group_id": null,
         "provider": "claude",
         "name": "Snapshot Agent",
         "description": "",
@@ -11207,9 +11219,53 @@
             "allowed": true
           },
           {
+            "id": "runtime.group.create",
+            "command": "remi runtime group create",
+            "capability": "runtime.group.create",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.group.delete",
+            "command": "remi runtime group delete",
+            "capability": "runtime.group.delete",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.group.get",
+            "command": "remi runtime group get",
+            "capability": "runtime.group.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "runtime.group.list",
             "command": "remi runtime group list",
             "capability": "runtime.group.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.group.update",
+            "command": "remi runtime group update",
+            "capability": "runtime.group.update",
             "outputs": [
               "table",
               "json",
@@ -11276,6 +11332,61 @@
             "id": "runtime.model.status",
             "command": "remi runtime model status",
             "capability": "runtime.model.status",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.profile.create",
+            "command": "remi runtime profile create",
+            "capability": "runtime.profile.create",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.profile.delete",
+            "command": "remi runtime profile delete",
+            "capability": "runtime.profile.delete",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.profile.get",
+            "command": "remi runtime profile get",
+            "capability": "runtime.profile.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.profile.list",
+            "command": "remi runtime profile list",
+            "capability": "runtime.profile.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "runtime.profile.update",
+            "command": "remi runtime profile update",
+            "capability": "runtime.profile.update",
             "outputs": [
               "table",
               "json",
@@ -13754,22 +13865,113 @@
     {
       "key": "get-sweep GET /api/execution-groups",
       "route": "GET /api/execution-groups",
-      "path": "/api/execution-groups",
+      "path": "/api/execution-groups?workspace_id=local",
       "status": 200,
       "body": {
         "groups": [
           {
-            "id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+            "members": [
+              {
+                "runtime_id": "rt_snapshot",
+                "status": "pending",
+                "error": null
+              }
+            ],
+            "id": "eg_snapshot",
             "workspace_id": "local",
             "provider": "claude",
-            "name": "snapshot-runtime / claude",
+            "profile_id": "ep_snapshot",
+            "profile_revision": 1,
+            "managed": true,
+            "name": "Snapshot group",
             "runtime_ids": [
               "rt_snapshot"
             ],
             "online_runtime_count": 1,
-            "is_default": true
+            "is_default": false
           }
         ]
+      }
+    },
+    {
+      "key": "get-sweep GET /api/execution-groups/:id",
+      "route": "GET /api/execution-groups/:id",
+      "path": "/api/execution-groups/eg_snapshot?workspace_id=local",
+      "status": 200,
+      "body": {
+        "group": {
+          "members": [
+            {
+              "runtime_id": "rt_snapshot",
+              "status": "pending",
+              "error": null
+            }
+          ],
+          "id": "eg_snapshot",
+          "workspace_id": "local",
+          "name": "Snapshot group",
+          "provider": "claude",
+          "profile_id": "ep_snapshot",
+          "profile_revision": 1,
+          "runtime_ids": [
+            "rt_snapshot"
+          ],
+          "managed": true,
+          "is_default": false,
+          "online_runtime_count": 1
+        }
+      }
+    },
+    {
+      "key": "get-sweep GET /api/execution-profiles",
+      "route": "GET /api/execution-profiles",
+      "path": "/api/execution-profiles?workspace_id=local",
+      "status": 200,
+      "body": {
+        "profiles": [
+          {
+            "id": "ep_snapshot",
+            "workspace_id": "local",
+            "name": "Snapshot connection",
+            "provider": "claude",
+            "revision": 1,
+            "profile": {
+              "name": "snapshot",
+              "base_url": "https://models.snapshot.invalid",
+              "model": "claude-sonnet-4",
+              "env_key": "REMI_CLAUDE_SNAPSHOT_KEY",
+              "auth_mode": "env",
+              "auth_header": "bearer"
+            },
+            "created_at": "<timestamp>",
+            "updated_at": "<timestamp>"
+          }
+        ]
+      }
+    },
+    {
+      "key": "get-sweep GET /api/execution-profiles/:id",
+      "route": "GET /api/execution-profiles/:id",
+      "path": "/api/execution-profiles/ep_snapshot?workspace_id=local",
+      "status": 200,
+      "body": {
+        "profile": {
+          "id": "ep_snapshot",
+          "workspace_id": "local",
+          "name": "Snapshot connection",
+          "provider": "claude",
+          "revision": 1,
+          "profile": {
+            "name": "snapshot",
+            "base_url": "https://models.snapshot.invalid",
+            "model": "claude-sonnet-4",
+            "env_key": "REMI_CLAUDE_SNAPSHOT_KEY",
+            "auth_mode": "env",
+            "auth_header": "bearer"
+          },
+          "created_at": "<timestamp>",
+          "updated_at": "<timestamp>"
+        }
       }
     },
     {
@@ -16641,8 +16843,8 @@
             "visibility": "private",
             "runtimeId": "rt_snapshot",
             "runtime_id": "rt_snapshot",
-            "executionGroupId": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
-            "execution_group_id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+            "executionGroupId": null,
+            "execution_group_id": null,
             "instructions": "Be deterministic.",
             "skills": [
               {
@@ -16712,8 +16914,8 @@
           "visibility": "private",
           "runtimeId": "rt_snapshot",
           "runtime_id": "rt_snapshot",
-          "executionGroupId": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
-          "execution_group_id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+          "executionGroupId": null,
+          "execution_group_id": null,
           "instructions": "Be deterministic.",
           "skills": [
             {
@@ -17787,7 +17989,7 @@
           "workspace_id": "local",
           "daemon_id": "dmn_snapshot",
           "owner_user_id": "local",
-          "snapshot": "ac9dd836e8d16cfbce2c204c6b3df118fc2161ba8b2d716275bc0f0329ae52d6",
+          "snapshot": "1e6c75a8c85eae971bb2646be5ce5e2ab3d4ddfa9d13f97049f0065cf84672cf",
           "already_retired": false,
           "can_retire": true,
           "can_abandon_issue_workspaces": false,
@@ -17862,15 +18064,25 @@
       "body": {
         "groups": [
           {
-            "id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+            "members": [
+              {
+                "runtime_id": "rt_snapshot",
+                "status": "pending",
+                "error": null
+              }
+            ],
+            "id": "eg_snapshot",
             "workspace_id": "local",
             "provider": "claude",
-            "name": "snapshot-runtime / claude",
+            "profile_id": "ep_snapshot",
+            "profile_revision": 1,
+            "managed": true,
+            "name": "Snapshot group",
             "runtime_ids": [
               "rt_snapshot"
             ],
             "online_runtime_count": 1,
-            "is_default": true
+            "is_default": false
           }
         ]
       }
@@ -20051,7 +20263,7 @@
             "createdAt": "<timestamp>",
             "updatedAt": "<timestamp>",
             "executionGroupIds": [
-              "eg_28e77cae80e6822ff0223ecf2c27d4a7"
+              "eg_snapshot"
             ]
           }
         ]
@@ -20104,7 +20316,7 @@
           "createdAt": "<timestamp>",
           "updatedAt": "<timestamp>",
           "executionGroupIds": [
-            "eg_28e77cae80e6822ff0223ecf2c27d4a7"
+            "eg_snapshot"
           ]
         },
         "usage": [
@@ -20962,8 +21174,8 @@
             "visibility": "private",
             "runtimeId": "rt_snapshot",
             "runtime_id": "rt_snapshot",
-            "executionGroupId": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
-            "execution_group_id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+            "executionGroupId": null,
+            "execution_group_id": null,
             "instructions": "Be deterministic.",
             "skills": [
               {
@@ -21700,7 +21912,7 @@
           "provider": "claude",
           "execution_group_id": null,
           "execution_group_ids": [
-            "eg_28e77cae80e6822ff0223ecf2c27d4a7"
+            "eg_snapshot"
           ],
           "launch_header": "claude (stream-json)",
           "status": "online",
@@ -21763,7 +21975,7 @@
           "createdAt": "<timestamp>",
           "updatedAt": "<timestamp>",
           "executionGroupIds": [
-            "eg_28e77cae80e6822ff0223ecf2c27d4a7"
+            "eg_snapshot"
           ],
           "daemon_display_name": null
         },
@@ -25774,9 +25986,7 @@
           "lastHeartbeatAt": "<timestamp>",
           "createdAt": "<timestamp>",
           "updatedAt": "<timestamp>",
-          "executionGroupIds": [
-            "eg_9c763fde3e4d45f05d45fcf0ba05f4a6"
-          ]
+          "executionGroupIds": []
         }
       }
     },
@@ -25827,7 +26037,7 @@
           "createdAt": "<timestamp>",
           "updatedAt": "<timestamp>",
           "executionGroupIds": [
-            "eg_28e77cae80e6822ff0223ecf2c27d4a7"
+            "eg_snapshot"
           ]
         }
       }
@@ -25847,7 +26057,7 @@
         "provider": "claude",
         "execution_group_id": null,
         "execution_group_ids": [
-          "eg_28e77cae80e6822ff0223ecf2c27d4a7"
+          "eg_snapshot"
         ],
         "launch_header": "claude (stream-json)",
         "status": "online",
@@ -26151,8 +26361,8 @@
             "visibility": "private",
             "runtimeId": "rt_snapshot",
             "runtime_id": "rt_snapshot",
-            "executionGroupId": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
-            "execution_group_id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+            "executionGroupId": null,
+            "execution_group_id": null,
             "instructions": "Be deterministic.",
             "skills": [
               {
@@ -26225,8 +26435,8 @@
             "visibility": "private",
             "runtimeId": "rt_snapshot",
             "runtime_id": "rt_snapshot",
-            "executionGroupId": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
-            "execution_group_id": "eg_28e77cae80e6822ff0223ecf2c27d4a7",
+            "executionGroupId": null,
+            "execution_group_id": null,
             "instructions": "Be deterministic.",
             "skills": [
               {

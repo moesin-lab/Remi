@@ -729,5 +729,28 @@
     "save": "저장",
     "saved": "실행 그룹이 업데이트되었습니다",
     "failed": "실행 그룹을 업데이트하지 못했습니다"
+  },
+  "configuration": {
+    "title": "기능 설정",
+    "description": "연결 Profile과 기능 그룹을 중앙에서 관리하고 선택한 머신의 Runtime에 배포합니다. 자동 검색은 머신의 기능만 보고합니다.",
+    "profiles": "연결 Profile",
+    "groups": "기능 그룹",
+    "add_profile": "Profile 추가",
+    "add_group": "그룹 추가",
+    "no_profiles": "연결 Profile이 없습니다.",
+    "no_groups": "할당된 기능 그룹이 없습니다.",
+    "name": "이름",
+    "provider": "실행 엔진",
+    "native": "머신 기본 연결",
+    "members": "실행 Runtime",
+    "edit": "편집",
+    "delete": "삭제",
+    "cancel": "취소",
+    "pending": "적용 대기",
+    "applied": "적용됨",
+    "failed": "적용 실패",
+    "unknown": "미확인",
+    "load_error": "설정을 불러오지 못했습니다. 새로고침하세요.",
+    "legacy": "기존 Runtime 설정"
   }
 }

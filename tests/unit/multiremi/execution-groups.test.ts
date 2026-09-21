@@ -1,203 +1,203 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { executionGroupModelCatalog } from "@multiremi/api/helpers/agents.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
+function group(store: MultiremiStore, id: string, runtimeIds: string[], workspace = "local", provider = "codex") {
+  return store.saveExecutionGroup(workspace, { name: id, provider, profile_id: null, runtime_ids: runtimeIds }, id);
+}
+
+/** An existing legacy group retains dispatch compatibility during migration. */
+function legacyGroup(store: MultiremiStore, id: string, runtimeIds: string[]) {
+  const result = group(store, id, runtimeIds);
+  db!.run("UPDATE multiremi_execution_groups SET managed = 0 WHERE id = ?", [id]);
+  return result;
+}
+
 describe("Execution groups", () => {
-  it("keeps default group IDs across display-name changes, restart and Runtime replacement", () => {
+  it("does not turn machine discovery into capability configuration", () => {
+    const store = createStore();
+    for (const provider of ["codex", "claude", "antigravity", "any"]) {
+      const runtime = store.registerRuntime({ name: provider, provider, daemonId: "machine" });
+      expect(runtime.executionGroupIds).toEqual([]);
+    }
+    expect(store.listExecutionGroups("local")).toEqual([]);
+  });
+
+  it("keeps explicit membership across registration and display-name changes", () => {
     const store = createStore();
     const runtime = store.registerRuntime({ name: "Laptop", provider: "codex", daemonId: "machine" });
-    const groupId = runtime.executionGroupIds![0]!;
+    group(store, "shared", [runtime.id]);
     store.updateRuntime(runtime.id, { name: "Renamed" });
+    store.registerRuntime({ id: runtime.id, name: "Restart", provider: "codex", daemonId: "machine" });
     const reopened = new MultiremiStore(db!);
-    expect(reopened.getExecutionGroup(groupId)?.runtimeIds).toEqual([runtime.id]);
-    const agent = reopened.createAgent({ name: "Grouped", provider: "codex", executionGroupId: groupId });
-    reopened.registerRuntime({ name: "Peer engine", provider: "claude", daemonId: "machine" });
-    expect(reopened.deleteRuntime(runtime.id)).toBe(true);
-    expect(reopened.getExecutionGroup(groupId)?.runtimeIds).toEqual([]);
-    expect(reopened.getAgent(agent.id)?.executionGroupId).toBe(groupId);
-    const task = reopened.createTask({ agentId: agent.id, prompt: "Wait for the same machine" });
-    const outsider = reopened.registerRuntime({ name: "Other", provider: "codex", daemonId: "other" });
-    expect(reopened.claimTask(outsider.id)).toBeNull();
-    const replacement = reopened.registerRuntime({ name: "Replacement", provider: "codex", daemonId: "machine" });
-    expect(replacement.executionGroupIds).toEqual([groupId]);
-    expect(reopened.claimTask(replacement.id)?.id).toBe(task.id);
+    expect(reopened.getExecutionGroup("shared")?.runtimeIds).toEqual([runtime.id]);
+    const sibling = reopened.registerRuntime({ name: "Sibling", provider: "codex", daemonId: "machine" });
+    expect(sibling.executionGroupIds).toEqual([]);
   });
 
-  it("preserves the default group when legacy registration gains its daemon identity", () => {
+  it("clears prior binding readiness when the daemon re-registers", () => {
     const store = createStore();
-    const runtime = store.registerRuntime({ id: "legacy", name: "Legacy", provider: "codex" });
-    const groupId = runtime.executionGroupIds![0]!;
-    const pinned = store.createAgent({ name: "Pinned", provider: "codex", runtimeId: runtime.id });
-    const grouped = store.createAgent({ name: "Grouped", provider: "codex", executionGroupId: groupId });
-    const task = store.createTask({ agentId: pinned.id, prompt: "Before registration upgrade" });
-    const upgraded = store.registerRuntime({ id: runtime.id, name: "Named", provider: "codex", daemonId: "machine" });
-    expect(upgraded.executionGroupIds).toEqual([groupId]);
-    expect(store.getAgent(grouped.id)?.executionGroupId).toBe(groupId);
-    expect(store.getExecutionGroup(groupId)?.machineId).toBe("machine");
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
-    const sibling = store.registerRuntime({ name: "Second Runtime", provider: "codex", daemonId: "machine" });
-    expect(sibling.executionGroupIds).toEqual([groupId]);
+    const runtime = store.registerRuntime({ name: "Machine", provider: "codex", daemonId: "machine" });
+    group(store, "shared", [runtime.id]);
+    db!.run(`INSERT INTO multiremi_execution_binding_states
+      (workspace_id, group_id, runtime_id, profile_id, profile_revision, status, updated_at)
+      VALUES ('local', 'shared', ?, NULL, NULL, 'ready', ?)`, [runtime.id, new Date().toISOString()]);
+    store.registerRuntime({ id: runtime.id, name: "Restart", provider: "codex", daemonId: "machine" });
+    expect(db!.query("SELECT status FROM multiremi_execution_binding_states WHERE runtime_id = ?").get(runtime.id)).toBeNull();
+    expect(store.getExecutionGroup("shared")?.runtimeIds).toEqual([runtime.id]);
   });
 
-  it("preserves a temporarily empty default group when identity is learned while using a custom group", () => {
+  it("supports multiple groups on the same Runtime without weakening owner or workspace checks", () => {
     const store = createStore();
-    const runtime = store.registerRuntime({ id: "legacy", name: "Legacy", provider: "codex" });
-    const defaultId = runtime.executionGroupIds![0]!;
-    const agent = store.createAgent({ name: "Default worker", provider: "codex", executionGroupId: defaultId });
-    store.updateRuntime(runtime.id, { executionGroupId: "custom" });
-    const customAgent = store.createAgent({ name: "Custom worker", provider: "codex", executionGroupId: "custom" });
-    store.registerRuntime({ id: runtime.id, name: "Identified", provider: "codex", daemonId: "machine" });
-    expect(store.getAgent(customAgent.id)?.executionGroupId).toBe("custom");
-    expect(store.getExecutionGroup(defaultId)).toMatchObject({ machineId: "machine", runtimeIds: [] });
-    const restored = store.updateRuntime(runtime.id, { executionGroupId: null });
-    expect(restored.executionGroupIds).toEqual([defaultId]);
-    const task = store.createTask({ agentId: agent.id, prompt: "Default target restored" });
-    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    const runtime = store.registerRuntime({ name: "Private", provider: "codex", ownerId: "alice" });
+    group(store, "one", [runtime.id]);
+    group(store, "two", [runtime.id]);
+    for (const id of ["one", "two"]) {
+      const agent = store.createAgent({ name: id, provider: "codex", ownerId: "alice", executionGroupId: id });
+      expect(store.runtimeCanRunAgent(runtime, agent)).toBe(true);
+      expect(store.runtimeCanRunAgent(runtime, { ...agent, ownerId: "bob" })).toBe(false);
+      expect(store.runtimeCanRunAgent(runtime, { ...agent, workspaceId: "foreign" })).toBe(false);
+    }
+    const direct = store.createAgent({ name: "Direct", provider: "codex", ownerId: "alice", runtimeId: runtime.id });
+    expect(direct.executionGroupId).toBeNull();
   });
 
-  it("pools custom groups across machines, keeps types and workspaces isolated, and rejects reserved IDs", () => {
+  it("rejects incompatible machines and scopes identically named groups by workspace", () => {
     const store = createStore();
-    const first = store.registerRuntime({ name: "A", provider: "codex", daemonId: "a", executionGroupId: "company-code" });
-    const second = store.registerRuntime({ name: "B", provider: "codex", daemonId: "b", executionGroupId: "company-code" });
-    const other = store.registerRuntime({ name: "C", provider: "codex", daemonId: "c" });
-    expect(store.getExecutionGroup("company-code")?.runtimeIds.sort()).toEqual([first.id, second.id].sort());
-    expect(() => store.registerRuntime({ name: "Wrong type", provider: "claude", executionGroupId: "company-code" })).toThrow("provider");
-    expect(() => store.updateRuntime(other.id, { executionGroupId: first.executionGroupIds![0]!.replace("company-code", "eg_reserved") })).toThrow("reserved");
-    expect(() => store.registerRuntime({ name: "Any", provider: "any", executionGroupId: "custom" })).toThrow("concrete");
+    const runtime = store.registerRuntime({ name: "Codex", provider: "codex" });
+    const claude = store.registerRuntime({ name: "Claude", provider: "claude" });
+    expect(() => group(store, "shared", [claude.id])).toThrow("incompatible");
+    group(store, "shared", [runtime.id]);
     store.createWorkspace({ id: "team", name: "Team", slug: "team" });
-    const foreign = store.registerRuntime({ name: "Foreign", provider: "claude", workspaceId: "team", executionGroupId: "company-code" });
-    expect(store.getExecutionGroup("company-code", "team")?.runtimeIds).toEqual([foreign.id]);
-    const agent = store.createAgent({ name: "Worker", provider: "codex", executionGroupId: "company-code" });
-    const task = store.createTask({ agentId: agent.id, prompt: "group only" });
-    expect(store.claimTask(other.id)).toBeNull();
-    expect(store.claimTask(second.id)?.id).toBe(task.id);
+    const foreign = store.registerRuntime({ name: "Foreign", provider: "claude", workspaceId: "team" });
+    expect(() => group(store, "foreign", [foreign.id])).toThrow("incompatible");
+    group(store, "shared", [foreign.id], "team", "claude");
+    expect(store.getExecutionGroup("shared")?.runtimeIds).toEqual([runtime.id]);
+    expect(store.getExecutionGroup("shared", "team")?.runtimeIds).toEqual([foreign.id]);
   });
 
-  it("preserves custom assignment on registration and restores the original default ID on clear", () => {
+  it("uses each group's fixed profile independently of the machine's old profile", () => {
     const store = createStore();
-    const runtime = store.registerRuntime({ name: "Machine", provider: "codex", daemonId: "a" });
-    const defaultId = runtime.executionGroupIds![0]!;
-    store.updateRuntime(runtime.id, { executionGroupId: "custom" });
-    const refreshed = store.registerRuntime({ id: runtime.id, name: "Restart", provider: "codex", daemonId: "a" });
-    expect(refreshed.executionGroupIds).toEqual(["custom"]);
-    const restored = store.updateRuntime(runtime.id, { executionGroupId: null });
-    expect(restored.executionGroupIds).toEqual([defaultId]);
-    expect(store.getExecutionGroup("custom")?.runtimeIds).toEqual([]);
+    const runtime = store.registerRuntime({ name: "Codex", provider: "codex", metadata: { codex_profiles: 1 } });
+    store.setRuntimeCodexProfile(runtime.id, { name: "legacy", base_url: "https://legacy.example", model: "legacy", env_key: "REMI_CODEX_KEY" });
+    for (const model of ["first", "second"]) {
+      const profile = store.saveExecutionProfile("local", { name: model, provider: "codex", profile: { name: model, base_url: `https://${model}.example`, model, env_key: "REMI_CODEX_KEY" } });
+      store.saveExecutionGroup("local", { name: model, provider: "codex", profile_id: profile.id, runtime_ids: [runtime.id] }, model);
+      const agent = store.createAgent({ name: model, provider: "codex", executionGroupId: model, model });
+      expect(store.runtimeCanRunAgent(runtime, agent)).toBe(true);
+      expect(store.runtimeCanRunAgent(runtime, { ...agent, model: "legacy" })).toBe(false);
+    }
+    group(store, "default", [runtime.id]);
+    const agent = store.createAgent({ name: "Default", provider: "codex", executionGroupId: "default", model: "legacy" });
+    expect(store.runtimeCanRunAgent(runtime, agent)).toBe(false);
   });
 
-  it("rechecks model evidence per member and does not block other Agents", () => {
+  it("rechecks legacy model evidence per member and does not block another agent", () => {
     const store = createStore();
-    const first = store.registerRuntime({ name: "A", provider: "codex", executionGroupId: "custom", models: [{ id: "a-model", label: "A", provider: "codex", default: true }] });
-    const second = store.registerRuntime({ name: "B", provider: "codex", executionGroupId: "custom", models: [{ id: "b-model", label: "B", provider: "codex", default: true }] });
-    const agentA = store.createAgent({ name: "A", provider: "codex", executionGroupId: "custom", model: "a-model" });
-    const agentB = store.createAgent({ name: "B", provider: "codex", executionGroupId: "custom", model: "b-model" });
-    const taskA = store.createTask({ agentId: agentA.id, prompt: "A" });
-    const taskB = store.createTask({ agentId: agentB.id, prompt: "B" });
+    const first = store.registerRuntime({ name: "A", provider: "codex", models: [{ id: "a", label: "A", provider: "codex", default: true }] });
+    const second = store.registerRuntime({ name: "B", provider: "codex", models: [{ id: "b", label: "B", provider: "codex", default: true }] });
+    legacyGroup(store, "legacy", [first.id, second.id]);
+    const a = store.createAgent({ name: "A", provider: "codex", executionGroupId: "legacy", model: "a" });
+    const b = store.createAgent({ name: "B", provider: "codex", executionGroupId: "legacy", model: "b" });
+    const taskA = store.createTask({ agentId: a.id, prompt: "A" });
+    const taskB = store.createTask({ agentId: b.id, prompt: "B" });
     expect(store.claimTask(second.id)?.id).toBe(taskB.id);
     expect(store.claimTask(first.id)?.id).toBe(taskA.id);
     store.cancelTask(taskA.id);
     store.updateRuntime(first.id, { models: [] });
-    const queued = store.createTask({ agentId: agentA.id, prompt: "No evidence" });
+    const queued = store.createTask({ agentId: a.id, prompt: "No evidence" });
     expect(store.claimTask(first.id)).toBeNull();
     expect(store.getTask(queued.id)?.status).toBe("queued");
   });
 
-  it("uses vendor model catalogs and rechecks reasoning support including default-model selections", () => {
+  it("removing membership leaves queued work available to remaining legacy members", () => {
     const store = createStore();
-    const runtime = store.registerRuntime({ name: "Vendor", provider: "codex", executionGroupId: "vendor", models: [{
-      id: "gpt-model", label: "GPT", provider: "openai", default: true,
-      thinking: { supportedLevels: [{ value: "high", label: "High" }] },
-    }] });
-    const agent = store.createAgent({ name: "Reasoner", provider: "codex", executionGroupId: "vendor", thinkingLevel: "high" });
-    const first = store.createTask({ agentId: agent.id, prompt: "Uses default" });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
-    store.cancelTask(first.id);
-    store.updateRuntime(runtime.id, { models: [{ id: "gpt-model", label: "GPT", provider: "openai", default: true }] });
-    const next = store.createTask({ agentId: agent.id, prompt: "Reasoning disappeared" });
-    expect(store.claimTask(runtime.id)).toBeNull();
-    expect(store.getTask(next.id)?.status).toBe("queued");
-    store.updateAgent(agent.id, { model: "gpt-model", thinkingLevel: null });
-    expect(store.claimTask(runtime.id)?.id).toBe(next.id);
-  });
-
-  it("leaves work in its group when a member departs and migrates legacy pins without weakening them", () => {
-    const store = createStore();
-    const first = store.registerRuntime({ name: "A", provider: "codex", daemonId: "a", executionGroupId: "original" });
-    const second = store.registerRuntime({ name: "B", provider: "codex", daemonId: "b", executionGroupId: "original" });
-    const legacy = store.createAgent({ name: "Legacy", provider: "codex", runtimeId: first.id });
-    db!.run("UPDATE multiremi_agents SET execution_group_id = NULL WHERE id = ?", [legacy.id]);
-    db!.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", ["execution_groups_v1"]);
-    const reopened = new MultiremiStore(db!);
-    expect(reopened.getAgent(legacy.id)).toMatchObject({ runtimeId: first.id, executionGroupId: "original" });
-    const task = reopened.createTask({ agentId: legacy.id, prompt: "Legacy remains pinned" });
-    expect(reopened.claimTask(second.id)).toBeNull();
-    reopened.updateAgent(legacy.id, { executionGroupId: "original" });
-    expect(reopened.getAgent(legacy.id)?.runtimeId).toBeNull();
-    reopened.updateRuntime(first.id, { executionGroupId: "departed" });
-    expect(reopened.claimTask(first.id)).toBeNull();
-    expect(reopened.claimTask(second.id)?.id).toBe(task.id);
-  });
-
-  it("reclaims a lost dispatch only within its group after the original member leaves", () => {
-    const store = createStore();
-    const first = store.registerRuntime({ name: "A", provider: "codex", executionGroupId: "original" });
-    const second = store.registerRuntime({ name: "B", provider: "codex", executionGroupId: "original" });
+    const first = store.registerRuntime({ name: "A", provider: "codex" });
+    const second = store.registerRuntime({ name: "B", provider: "codex" });
+    legacyGroup(store, "original", [first.id, second.id]);
     const agent = store.createAgent({ name: "Worker", provider: "codex", executionGroupId: "original" });
-    const task = store.createTask({ agentId: agent.id, prompt: "Lost claim response" });
+    const task = store.createTask({ agentId: agent.id, prompt: "Group only" });
+    legacyGroup(store, "original", [second.id]);
+    expect(store.claimTask(first.id)).toBeNull();
+    expect(store.claimTask(second.id)?.id).toBe(task.id);
+  });
+
+  it("reclaims a lost dispatch only within its group after a member leaves", () => {
+    const store = createStore();
+    const first = store.registerRuntime({ name: "A", provider: "codex" });
+    const second = store.registerRuntime({ name: "B", provider: "codex" });
+    legacyGroup(store, "original", [first.id, second.id]);
+    const agent = store.createAgent({ name: "Worker", provider: "codex", executionGroupId: "original" });
+    const task = store.createTask({ agentId: agent.id, prompt: "Lost claim" });
     expect(store.claimTask(first.id)?.id).toBe(task.id);
-    store.updateRuntime(first.id, { executionGroupId: "departed" });
+    legacyGroup(store, "original", [second.id]);
     db!.run("UPDATE multiremi_tasks SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
     expect(store.claimTask(first.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
     expect(store.claimTask(second.id)?.id).toBe(task.id);
   });
 
-  it("releases queued session affinity when registration moves a member into another group", () => {
+  it("cancels a frozen dispatch when its agent switches groups", () => {
     const store = createStore();
-    const first = store.registerRuntime({ name: "A", provider: "codex", executionGroupId: "original" });
-    const second = store.registerRuntime({ name: "B", provider: "codex", executionGroupId: "original" });
-    const agent = store.createAgent({ name: "Worker", provider: "codex", executionGroupId: "original" });
-    const task = store.createTask({ agentId: agent.id, runtimeId: first.id, prompt: "Queued affinity" });
-    expect(task.runtimeId).toBe(first.id);
-    store.registerRuntime({ id: first.id, name: "Moved", provider: "codex", executionGroupId: "departed" });
-    expect(store.getTask(task.id)?.runtimeId).toBeNull();
-    expect(store.claimTask(first.id)).toBeNull();
-    expect(store.claimTask(second.id)?.id).toBe(task.id);
-  });
-
-  it("cancels a frozen dispatch when its Agent switches groups", () => {
-    const store = createStore();
-    const first = store.registerRuntime({ name: "A", provider: "codex", executionGroupId: "original" });
-    const second = store.registerRuntime({ name: "B", provider: "codex", executionGroupId: "target" });
+    const first = store.registerRuntime({ name: "A", provider: "codex" });
+    const second = store.registerRuntime({ name: "B", provider: "codex" });
+    legacyGroup(store, "original", [first.id]);
+    legacyGroup(store, "target", [second.id]);
     const agent = store.createAgent({ name: "Worker", provider: "codex", executionGroupId: "original" });
     const task = store.createTask({ agentId: agent.id, prompt: "Not started" });
     expect(store.claimTask(first.id)?.id).toBe(task.id);
     store.updateAgent(agent.id, { executionGroupId: "target" });
-    db!.run("UPDATE multiremi_tasks SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
     expect(store.getTask(task.id)?.status).toBe("cancelled");
     expect(store.claimTask(first.id)).toBeNull();
     expect(store.claimTask(second.id)).toBeNull();
   });
 
-  it("migrates both binding forms when a legacy identity joins an existing default group", () => {
-    const store = createStore();
-    const canonical = store.registerRuntime({ name: "Canonical", provider: "codex", daemonId: "machine" });
-    const legacy = store.registerRuntime({ id: "legacy", name: "Legacy", provider: "codex" });
-    const agent = store.createAgent({ name: "Grouped", provider: "codex", executionGroupId: legacy.executionGroupIds![0] });
-    const pinned = store.createAgent({ name: "Pinned", provider: "codex", runtimeId: legacy.id });
-    store.registerRuntime({ id: legacy.id, name: "Upgrade", provider: "codex", daemonId: "machine" });
-    expect(store.getAgent(agent.id)?.executionGroupId).toBe(canonical.executionGroupIds![0]);
-    expect(store.getAgent(pinned.id)).toMatchObject({ runtimeId: legacy.id, executionGroupId: canonical.executionGroupIds![0] });
-    expect(store.getExecutionGroup(canonical.executionGroupIds![0]!)?.runtimeIds.sort()).toEqual([canonical.id, legacy.id].sort());
-  });
+  for (const authMode of ["env", "api_key"] as const) {
+    it(`preserves proven ${authMode} thinking capability through profile migration`, () => {
+      const previousKey = process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY;
+      process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
+      try {
+        const store = createStore();
+        const runtime = store.registerRuntime({ name: "Legacy", provider: "codex", metadata: { codex_profiles: 1 } });
+        legacyGroup(store, "old", [runtime.id]);
+        store.setRuntimeCodexProfile(runtime.id, { name: "legacy", base_url: "https://legacy.example/v1", model: "custom", auth_mode: authMode, env_key: "REMI_CODEX_KEY" }, authMode === "api_key" ? "old-key" : undefined);
+        store.updateRuntimeModels(runtime.id, [{ id: "custom", label: "Custom", provider: "codex", default: true, thinking: { supportedLevels: [{ value: "high", label: "High" }] } }]);
+        const agent = store.createAgent({ name: "Reasoner", provider: "codex", executionGroupId: "old", model: "custom", thinkingLevel: "high" });
+        db!.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", ["central_execution_profiles_legacy_v1"]);
+        const migrated = new MultiremiStore(db!);
+        const profile = migrated.getGroupExecutionProfile("old", "local")!;
+        expect(migrated.getExecutionGroup("old")?.managed).toBe(true);
+        const models = executionGroupModelCatalog(migrated, "local", "old", "local")[0]!.models;
+        expect(models[0]?.thinking?.supported_levels.map(level => level.value)).toEqual(["high"]);
+        migrated.recordRuntimeExecutionBindingAcks(runtime.id, migrated.getRuntimeExecutionBindings(runtime.id).map(binding => ({ ...binding, status: "ready" })));
+        const task = migrated.createTask({ agentId: agent.id, prompt: "Still supports high" });
+        expect(migrated.claimTask(runtime.id)?.id).toBe(task.id);
+        migrated.cancelTask(task.id);
+        migrated.saveExecutionProfile("local", { name: "Renamed", provider: "codex", profile: profile.profile }, profile.id);
+        expect(executionGroupModelCatalog(migrated, "local", "old", "local")[0]?.models[0]?.thinking).toBeDefined();
+        migrated.saveExecutionProfile("local", { name: "Changed", provider: "codex", profile: { ...profile.profile, base_url: "https://different.example/v1" } }, profile.id);
+        expect(executionGroupModelCatalog(migrated, "local", "old", "local")[0]?.models[0]?.thinking).toBeUndefined();
+        if (authMode === "api_key") {
+          migrated.saveExecutionProfile("local", { name: "Rotated", provider: "codex", profile: profile.profile, api_key: "new-key" }, profile.id);
+          expect(executionGroupModelCatalog(migrated, "local", "old", "local")[0]?.models[0]?.thinking).toBeUndefined();
+        }
+      } finally {
+        if (previousKey === undefined) delete process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY;
+        else process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY = previousKey;
+      }
+    });
+  }
 
-  it("creates one default group per concrete engine for a legacy any Runtime", () => {
+  it("backfills legacy pins during migration without changing their owner or machine pin", () => {
     const store = createStore();
-    const runtime = store.registerRuntime({ name: "Legacy", provider: "any", daemonId: "a" });
-    const groups = store.listExecutionGroups("local");
-    expect(groups.map(group => group.provider).sort()).toEqual(["antigravity", "claude", "codex"]);
-    expect(runtime.executionGroupIds).toHaveLength(3);
+    const runtime = store.registerRuntime({ name: "Legacy", provider: "codex", daemonId: "machine", executionGroupId: "old-group" });
+    const agent = store.createAgent({ name: "Pinned", provider: "codex", runtimeId: runtime.id });
+    db!.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", ["execution_groups_v1"]);
+    const reopened = new MultiremiStore(db!);
+    expect(reopened.getAgent(agent.id)).toMatchObject({ runtimeId: runtime.id, executionGroupId: "old-group", ownerId: "local" });
+    expect(reopened.getExecutionGroup("old-group")?.managed).toBe(false);
   });
 });

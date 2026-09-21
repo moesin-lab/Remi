@@ -11,12 +11,13 @@ const thinking = (level: string) => ({ status: "supported" as const,
 
 function setup() {
   const store = createLocalStore();
-  const runtime = store.registerRuntime({ name: "Codex", provider: "codex", executionGroupId: "fallback-group",
+  const runtime = store.registerRuntime({ name: "Codex", provider: "codex",
     models: [
       { id: "primary", label: "Primary", provider: "openai", default: true, thinking: thinking("high"), catalog: { status: "ready" } },
       { id: "backup", label: "Backup", provider: "openai", default: false, thinking: thinking("low"), catalog: { status: "ready" } },
     ],
   });
+  store.saveExecutionGroup("local", { name: "Fallback", provider: "codex", profile_id: null, runtime_ids: [runtime.id] }, "fallback-group");
   const other = store.registerRuntime({ name: "Other", provider: "codex", models: [
     { id: "other", label: "Other", provider: "openai", default: true, catalog: { status: "ready" } },
   ] });

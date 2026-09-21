@@ -552,12 +552,13 @@ describe("MUL-338 gateway reasoning declarations: the group-scoped catalog", () 
       sourceRevision: revision, models: GATEWAY_MODELS.map(id => ({ id, label: id })),
     });
     const runtimes = reports.map((thinking, index) => store.registerRuntime({
-      name: `member-${index}`, provider: "claude", workspaceId: "local", executionGroupId: "reasoning-group",
+      name: `member-${index}`, provider: "claude", workspaceId: "local",
       models: [...claudeRuntimeModels(), {
         id: "deepseek-v4-flash", label: "deepseek-v4-flash", provider: "anthropic", default: false,
         ...(thinking ? { thinking } : {}),
       }],
     }));
+    store.saveExecutionGroup("local", { name: "Reasoning", provider: "claude", profile_id: null, runtime_ids: runtimes.map(runtime => runtime.id) }, "reasoning-group");
     return { store, runtimes, app: createMultiremiApp({ store }) };
   }
 

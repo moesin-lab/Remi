@@ -1138,6 +1138,53 @@ describe("MultiremiDaemonClient Issue session archive wire", () => {
     expect(reportedError).toContain("upload timed out after 25ms");
   });
 
+  it("handles an HTTP rejection before the native fetch finishes reading the archive", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-daemon-client-early-rejection-"));
+    temporaryRoots.push(root);
+    const archivePath = join(root, "sessions.tar.gz");
+    const sizeBytes = 32 * 1024 * 1024;
+    writeFileSync(archivePath, Buffer.alloc(sizeBytes, 0x61));
+    let reportedError = "";
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      // A proxy can reject the upload without consuming its body.
+      fetch: () => new Response("archive rejected", { status: 413 }),
+    });
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "PUT") return originalFetch(input, init);
+      if (init?.method === "HEAD") {
+        return new Response(null, { status: 204, headers: { "X-Remi-Archive-Direct": "1" } });
+      }
+      if (String(input).endsWith("/init")) {
+        return Response.json({
+          archive: { id: "archive-early", status: "pending", size_bytes: sizeBytes },
+          upload_attempt: 1,
+          upload_url: new URL(
+            "/api/daemon/runtimes/runtime-early/issues/issue-early/session-archives/archive-early/content?attempt=1",
+            String(input),
+          ).toString(),
+        });
+      }
+      reportedError = JSON.parse(String(init?.body)).error;
+      return Response.json({ archive: { id: "archive-early", status: "failed" } });
+    }) as typeof globalThis.fetch;
+    try {
+      const client = new MultiremiDaemonClient(`http://127.0.0.1:${server.port}`, "daemon-token");
+      await client.initIssueSessionArchive("runtime-early", "issue-early", {
+        sourceRevision: "revision-early", sha256: "abc", sizeBytes, fileCount: 1,
+      });
+      await expect(client.uploadIssueSessionArchive(
+        "runtime-early", "issue-early", "archive-early", archivePath,
+      )).rejects.toThrow("413: archive rejected");
+      expect(reportedError).toContain("413: archive rejected");
+      // Let pending stream close callbacks run; bun test must see no unhandled errors.
+      await Bun.sleep(20);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   it("streams a direct archive larger than 10 MiB through Bun 1.3.14 with the exact SHA-256", async () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-daemon-client-native-upload-"));
     temporaryRoots.push(root);

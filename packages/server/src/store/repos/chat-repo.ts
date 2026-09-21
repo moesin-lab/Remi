@@ -318,6 +318,28 @@ export class ChatRepo {
     return rows.map(toChatMessage);
   }
 
+  listChatMessagesPage(chatSessionId: string, options: {
+    limit: number;
+    before?: { id: string; createdAt: string };
+  }): { messages: MultiremiChatMessage[]; hasMore: boolean } {
+    const { limit, before } = options;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new ChatValidationError("invalid limit");
+    // The public cursor predates sequence ordering. Resolve its position in this
+    // session rather than comparing timestamps (which may tie or go backwards).
+    const cursor = before ? this.ctx.db.query(
+      "SELECT sequence, id FROM multiremi_chat_messages WHERE chat_session_id = ? AND id = ? AND created_at = ?",
+    ).get(chatSessionId, before.id, before.createdAt) as Row | null : null;
+    if (before && !cursor) throw new ChatValidationError("invalid cursor");
+    const rows = this.ctx.db.query(
+      `SELECT * FROM multiremi_chat_messages WHERE chat_session_id = ?
+       ${cursor ? "AND (sequence, id) < (?, ?)" : ""}
+       ORDER BY sequence DESC, id DESC LIMIT ?`,
+    ).all(...(cursor
+      ? [chatSessionId, cursor.sequence, cursor.id, limit + 1]
+      : [chatSessionId, limit + 1])) as Row[];
+    return { messages: rows.slice(0, limit).reverse().map(toChatMessage), hasMore: rows.length > limit };
+  }
+
   appendChatMessageWithinTransaction(input: {
     id?: string;
     chatSessionId: string;

@@ -3,6 +3,7 @@ import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/c
 import { parseRuntimeClaudeProfile, type RuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
 import { parseFeishuPresentation } from "@multiremi/contracts/feishu-presentation.js";
 import { stat } from "node:fs/promises";
+import { Readable } from "node:stream";
 import { normalizeRepoList } from "@daemon/agent-runtime/repo/checkout.js";
 import { CHAT_ATTACHMENT_MAX_BYTES, readChatAttachmentBytes } from "@daemon/agent-runtime/workspace/chat-attachments.js";
 import { isFeishuOpenId, parseOutboundMention } from "@shared/feishu-mention.js";
@@ -1093,7 +1094,9 @@ export class MultiremiDaemonClient {
         const request: RequestInit & { duplex: "half" } = {
           method: "PUT",
           headers,
-          body: archive as unknown as BodyInit,
+          // Bun's implicit Node stream adapter leaks a rejection if an early HTTP
+          // response wins the race with destroy(). Queue at most one Web chunk.
+          body: Readable.toWeb(archive, { strategy: { highWaterMark: 1 } }) as unknown as BodyInit,
           duplex: "half",
           redirect: "error",
           signal: AbortSignal.timeout(this.sessionArchiveUploadTimeoutMs),

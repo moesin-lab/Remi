@@ -4269,6 +4269,10 @@ runMigrations(this.db);
     return this.chat.listChatMessages(chatSessionId);
   }
 
+  listChatMessagesPage(chatSessionId: string, options: Parameters<ChatRepo["listChatMessagesPage"]>[1]) {
+    return this.chat.listChatMessagesPage(chatSessionId, options);
+  }
+
   sendChatMessage(chatSessionId: string, input: SendChatMessageInput): SendChatMessageResult {
     return this.chat.sendChatMessage(chatSessionId, input);
   }

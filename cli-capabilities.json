@@ -5578,6 +5578,159 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "runtime.profile.list": {
+      "command": "remi runtime profile list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.profile.get": {
+      "command": "remi runtime profile get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.profile.create": {
+      "command": "remi runtime profile create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.profile.update": {
+      "command": "remi runtime profile update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.profile.delete": {
+      "command": "remi runtime profile delete",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.delete",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.get": {
+      "command": "remi runtime group get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.create": {
+      "command": "remi runtime group create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.update": {
+      "command": "remi runtime group update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.delete": {
+      "command": "remi runtime group delete",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.delete",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "runtime.codex-profile.get": {
       "command": "remi runtime codex-profile get",
       "aliases": [],
@@ -9618,6 +9771,12 @@
     "DELETE /api/comments/:id/resolve": {
       "command": "comment.unresolve"
     },
+    "DELETE /api/execution-groups/:id": {
+      "command": "runtime.group.delete"
+    },
+    "DELETE /api/execution-profiles/:id": {
+      "command": "runtime.profile.delete"
+    },
     "DELETE /api/issues/:id": {
       "command": "issue.delete"
     },
@@ -10041,6 +10200,15 @@
     },
     "GET /api/execution-groups": {
       "command": "runtime.group.list"
+    },
+    "GET /api/execution-groups/:id": {
+      "command": "runtime.group.get"
+    },
+    "GET /api/execution-profiles": {
+      "command": "runtime.profile.list"
+    },
+    "GET /api/execution-profiles/:id": {
+      "command": "runtime.profile.get"
     },
     "GET /api/inbox": {
       "command": "inbox.list"
@@ -11253,6 +11421,12 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
+    "POST /api/execution-groups": {
+      "command": "runtime.group.create"
+    },
+    "POST /api/execution-profiles": {
+      "command": "runtime.profile.create"
+    },
     "POST /api/feedback": {
       "command": "platform.feedback.create"
     },
@@ -11893,6 +12067,12 @@
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "PUT /api/execution-groups/:id": {
+      "command": "runtime.group.update"
+    },
+    "PUT /api/execution-profiles/:id": {
+      "command": "runtime.profile.update"
     },
     "PUT /api/issues/:id": {
       "command": "issue.update"

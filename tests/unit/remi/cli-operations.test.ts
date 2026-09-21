@@ -67,6 +67,35 @@ describe("operations CLI contracts", () => {
       .rejects.toThrow("conflict");
   });
 
+  it("creates a reusable profile and binds several runtimes through a central group", async () => {
+    useCliEnv();
+    const config = {
+      name: "Shared Codex", provider: "codex",
+      profile: { name: "shared", model: "custom-model", base_url: "https://models.example/v1", auth_mode: "api_key", env_key: "" },
+      api_key: "test-secret",
+    };
+    const create = specById("runtime.profile.create");
+    globalThis.fetch = capabilityFetch(create.id, async (request) => {
+      const url = new URL(request.url);
+      expect(request.method).toBe("POST");
+      expect(url.pathname).toBe("/api/execution-profiles");
+      expect(url.searchParams.get("workspace_id")).toBe("ws_1");
+      expect(await request.json()).toEqual({ ...config, workspace_id: "ws_1" });
+      return Response.json({ profile: { id: "ep_shared", revision: 1 } });
+    });
+    await capture(() => registryFor([create]).execute(["runtime", "profile", "create", "--data", JSON.stringify(config), "--json"]));
+
+    const update = specById("runtime.group.update");
+    const binding = { name: "Team", provider: "codex", profile_id: "ep_shared", runtime_ids: ["rt_a", "rt_b"] };
+    globalThis.fetch = capabilityFetch(update.id, async (request) => {
+      expect(request.method).toBe("PUT");
+      expect(new URL(request.url).pathname).toBe("/api/execution-groups/eg_team");
+      expect(await request.json()).toEqual({ ...binding, workspace_id: "ws_1" });
+      return Response.json({ group: { id: "eg_team", ...binding } });
+    });
+    await capture(() => registryFor([update]).execute(["runtime", "group", "update", "eg_team", "--data", JSON.stringify(binding), "--json"]));
+  });
+
   it("assigns a Runtime group and restores the default with JSON null", async () => {
     useCliEnv();
     const spec = specById("runtime.update");

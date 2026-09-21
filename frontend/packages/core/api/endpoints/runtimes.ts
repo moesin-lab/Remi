@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { ExecutionProfileListSchema, ExecutionProfileResponseSchema, type ExecutionProfile, type ExecutionProfileInput, type ExecutionGroupInput } from "../schemas/execution-profiles";
 import type {
   AgentRuntime,
   CreateRuntimeDirectoryScanRequest,
@@ -50,6 +52,7 @@ import {
   AgentRuntimeListSchema,
   AgentRuntimeSchema,
   ExecutionGroupListSchema,
+  ExecutionGroupSchema,
   type ExecutionGroupList,
   CloudRuntimeNodeListSchema,
   CloudRuntimeNodeSchema,
@@ -90,6 +93,31 @@ import {
 
 export class RuntimesEndpoints {
   constructor(readonly http: HttpClient) {}
+
+  async listExecutionProfiles(wsId: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-profiles?workspace_id=${encodeURIComponent(wsId)}`);
+    return parseStrictResponse<{ profiles: ExecutionProfile[] }>(raw, ExecutionProfileListSchema, { endpoint: "GET /api/execution-profiles" });
+  }
+
+  async saveExecutionProfile(wsId: string, id: string | undefined, input: ExecutionProfileInput) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-profiles${id ? `/${encodeURIComponent(id)}` : ""}?workspace_id=${encodeURIComponent(wsId)}`, { method: id ? "PUT" : "POST", body: JSON.stringify({ ...input, workspace_id: wsId }) });
+    return parseStrictResponse<{ profile: ExecutionProfile }>(raw, ExecutionProfileResponseSchema, { endpoint: "SAVE /api/execution-profiles" });
+  }
+
+  async deleteExecutionProfile(wsId: string, id: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-profiles/${encodeURIComponent(id)}?workspace_id=${encodeURIComponent(wsId)}`, { method: "DELETE" });
+    parseStrictResponse(raw, z.object({ ok: z.literal(true) }), { endpoint: "DELETE /api/execution-profiles/:id" });
+  }
+
+  async saveExecutionGroup(wsId: string, id: string | undefined, input: ExecutionGroupInput) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-groups${id ? `/${encodeURIComponent(id)}` : ""}?workspace_id=${encodeURIComponent(wsId)}`, { method: id ? "PUT" : "POST", body: JSON.stringify({ ...input, workspace_id: wsId }) });
+    return parseStrictResponse(raw, z.object({ group: ExecutionGroupSchema }), { endpoint: "SAVE /api/execution-groups" });
+  }
+
+  async deleteExecutionGroup(wsId: string, id: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-groups/${encodeURIComponent(id)}?workspace_id=${encodeURIComponent(wsId)}`, { method: "DELETE" });
+    parseStrictResponse(raw, z.object({ ok: z.literal(true) }), { endpoint: "DELETE /api/execution-groups/:id" });
+  }
 
   async getRuntimeCodexProfile(runtimeId: string): Promise<RuntimeCodexProfileConfig> {
     const raw = await this.http.fetch<unknown>(`/api/runtimes/${encodeURIComponent(runtimeId)}/codex-profile`);

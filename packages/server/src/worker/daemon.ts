@@ -1,3 +1,4 @@
+import type { RuntimeExecutionBinding, RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection";
 import { createHash } from "node:crypto";
 import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import { parseRuntimeClaudeProfile, type RuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
@@ -617,6 +618,46 @@ export class MultiremiDaemon {
   private runtimeCodexProfile: RuntimeCodexProfile | null = null;
   private runtimeClaudeProfile: RuntimeClaudeProfile | null = null;
   private runtimeProviderKeys = new Map<string, Promise<string>>();
+  private runtimeBindingAcks: RuntimeExecutionBindingAck[] = [];
+
+  private async applyRuntimeExecutionBindings(bindings: RuntimeExecutionBinding[]): Promise<void> {
+    const acknowledgements: RuntimeExecutionBindingAck[] = [];
+    for (const binding of bindings) {
+      const identity = { generation: binding.generation, groupId: binding.groupId, profileId: binding.profileId, profileRevision: binding.profileRevision };
+      try {
+        if (typeof binding.generation !== "string" || !binding.generation) throw new Error("Binding generation is required");
+        if (this.options.provider !== binding.provider && this.options.provider !== "any") {
+          throw new Error("Runtime provider does not match capability group");
+        }
+        if (binding.profileId !== null && (!binding.profile || !Number.isSafeInteger(binding.profileRevision) || binding.profileRevision! < 1)) {
+          throw new Error("Capability group profile revision is unavailable");
+        }
+        if (binding.profileId === null && (binding.profile !== null || binding.profileRevision !== null)) {
+          throw new Error("Invalid capability group profile reference");
+        }
+        if (binding.profile) {
+          if (binding.provider !== "codex" && binding.provider !== "claude") {
+            throw new Error("Runtime provider does not support connection profiles");
+          }
+          const profile = binding.provider === "codex"
+            ? parseRuntimeCodexProfile(binding.profile)!
+            : parseRuntimeClaudeProfile(binding.profile)!;
+          const key = await this.runtimeProfileKey(profile, binding.provider);
+          // Build the same isolated configuration used by task snapshots. Never
+          // replace the Runtime's global provider config with a group's profile.
+          if (binding.provider === "codex") resolveRuntimeCodexProfile(profile, process.env, key);
+          else resolveRuntimeClaudeProfile(profile, process.env, key);
+        }
+        acknowledgements.push({ ...identity, status: "ready" });
+      } catch {
+        // Do not return raw transport/configuration errors: they can contain
+        // provider credentials or response bodies.
+        acknowledgements.push({ ...identity, status: "error", error: "Profile could not be applied; check provider compatibility and configured credentials" });
+      }
+    }
+    this.runtimeBindingAcks = acknowledgements;
+  }
+
 
   private applyRuntimeCodexProfile(profile: RuntimeCodexProfile | null | undefined): void {
     const next = parseRuntimeCodexProfile(profile ?? null);
@@ -1094,6 +1135,7 @@ export class MultiremiDaemon {
             this.botMenuPublisher !== null,
             this.feishuConcierge !== null,
             this.pollAbort.signal,
+            this.runtimeBindingAcks,
           );
           const skipClaim = await this.handleHeartbeatAck(this.options.runtimeId!, ack);
           if (!skipClaim && !this.stopped) {
@@ -1298,6 +1340,7 @@ export class MultiremiDaemon {
         launched_by: this.options.launchedBy ?? "manual",
         agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
         runtime_workspaces: 1,
+        execution_profiles: 1,
         codex_profiles: 1,
         claude_profiles: 1,
         ssh_mesh_protocol: MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
@@ -1308,6 +1351,7 @@ export class MultiremiDaemon {
   }
 
   private async handleHeartbeatAck(runtimeId: string, ack: MultiremiDaemonHeartbeatConfigAck): Promise<boolean> {
+    if (ack.runtime_bindings) await this.applyRuntimeExecutionBindings(ack.runtime_bindings);
     this.applyRuntimeCodexProfile(ack.codex_profile);
     this.applyRuntimeClaudeProfile(ack.claude_profile);
     const workspaceId = this.options.workspaceId ?? "local";

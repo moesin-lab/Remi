@@ -1,5 +1,8 @@
 "use client";
 
+import { useWorkspacePaths } from "@multiremi/core/paths";
+import { AppLink } from "../../navigation";
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDefaultLayout } from "react-resizable-panels";
 import {
@@ -428,6 +431,7 @@ function PageHeaderBar({
   onRetireMachine?: () => void;
 }) {
   const { t } = useT("runtimes");
+  const paths = useWorkspacePaths();
   return (
     <PageHeader className="justify-between px-5">
       <div className="flex items-center gap-2">
@@ -440,6 +444,7 @@ function PageHeaderBar({
         )}
       </div>
       <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+        <AppLink className="text-xs text-primary underline" href={`${paths.runtimes()}/configuration`}>{t($ => $.configuration.title)}</AppLink>
         {mobile ? (
           <DropdownMenu>
             <DropdownMenuTrigger

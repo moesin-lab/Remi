@@ -2,6 +2,7 @@
 // terminal-state fan-out into issues/sessions/autopilots), extracted verbatim from MultiremiStore
 // (the facade delegates every public method here).
 import { createHash } from "node:crypto";
+import { getExecutionGroup } from "@multiremi/store/execution-groups.js";
 import { taskExecutionScope } from "@multiremi/contracts/task-execution.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { canonicalJson } from "@multiremi/agent-plugins/import.js";
@@ -446,7 +447,7 @@ export class TasksRepo {
     // carry another machine's provider session. An explicit runtimeId is only
     // honoured when there is no strong affinity to respect.
     const chatProfile = chatSession?.sessionRuntimeId
-      ? this.ctx.runtimes().getRuntimeExecutionProfile(chatSession.sessionRuntimeId, agent.provider) : null;
+      ? this.ctx.runtimes().getAgentExecutionProfile(chatSession.sessionRuntimeId, agent) : null;
     const affinity = this.resolveTaskAffinity(
       agent,
       input.resetProviderSession ? null : chatSession,
@@ -477,7 +478,7 @@ export class TasksRepo {
       issueLane = this.ctx.issueSessions().getOrCreateSessionAgentLane(issueSession.id, agent.id, executionScope);
       const laneRuntime = issueLane.runtimeId ? this.ctx.runtimes().getRuntime(issueLane.runtimeId) : null;
       const laneProfile = laneRuntime
-        ? this.ctx.runtimes().getRuntimeExecutionProfile(laneRuntime.id, agent.provider) : null;
+        ? this.ctx.runtimes().getAgentExecutionProfile(laneRuntime.id, agent) : null;
       const laneResumable =
         !input.resetProviderSession
         && !!issueLane.providerSessionId
@@ -1096,23 +1097,27 @@ export class TasksRepo {
       // another provider on the same machine fill the idle slot between the
       // last in-flight Task finishing and the daemon claiming its update.
       if (this.ctx.runtimes().hasCliUpdateDrainForRuntime(runtimeId)) return null;
-      if (lockedRuntime.metadata[`${lockedRuntime.provider}_profiles`] !== 1
-        && this.ctx.runtimes().getRuntimeExecutionProfile(runtimeId, lockedRuntime.provider)) return null;
 
       const stale = this.reclaimStaleDispatchedTaskForRuntime(runtimeId, [...excludedAgentIds]);
       // Group membership and reported model capabilities can change while work
       // is queued. Skip incompatible Agents before selecting, so they cannot
       // block another runnable task at the head of the queue.
-      const groupAgentRows = this.ctx.db.query(`SELECT DISTINCT a.id FROM multiremi_agents a
-        JOIN multiremi_tasks t ON t.agent_id = a.id
-        WHERE a.workspace_id = ? AND a.execution_group_id IS NOT NULL
-          AND t.status IN ('queued', 'dispatched')`).all(lockedRuntime.workspaceId ?? "local") as { id: string }[];
-      for (const row of groupAgentRows) {
-        const agent = this.ctx.agents().getAgent(row.id);
-        if (agent && !this.ctx.runtimes().runtimeCanRunAgent(lockedRuntime, agent)) excludedAgentIds.add(agent.id);
+      const queuedRows = this.ctx.db.query(`SELECT t.id, t.agent_id, t.execution_fingerprint
+        FROM multiremi_tasks t WHERE t.workspace_id = ? AND t.status = 'queued'
+          AND (t.runtime_id IS NULL OR t.runtime_id = ?)`)
+        .all(lockedRuntime.workspaceId ?? "local", runtimeId) as Array<{ id: string; agent_id: string; execution_fingerprint: string | null }>;
+      const excludedTaskIds: string[] = [];
+      const agents = new Map<string, MultiremiAgent | null>();
+      for (const row of queuedRows) {
+        if (!agents.has(row.agent_id)) agents.set(row.agent_id, this.ctx.agents().getAgent(row.agent_id));
+        const agent = agents.get(row.agent_id);
+        if (!agent || !this.runtimeCanRunTaskAgent(lockedRuntime, agent, Boolean(row.execution_fingerprint))
+          || (!row.execution_fingerprint && !this.runtimeHasReadyExecutionGroup(lockedRuntime, agent))) {
+          excludedTaskIds.push(row.id);
+        }
       }
       if (!stale) this.refreshQueuedChatAffinity(lockedRuntime.workspaceId ?? "local");
-      const candidate = stale ?? this.claimNextTaskForRuntime(lockedRuntime, [...excludedAgentIds]);
+      const candidate = stale ?? this.claimNextTaskForRuntime(lockedRuntime, [...excludedAgentIds], excludedTaskIds);
       if (!candidate) return null;
       const task = this.snapshotTaskExecution(candidate, lockedRuntime);
       // Check the actual hydrated payload, including both linked and legacy
@@ -1176,8 +1181,11 @@ export class TasksRepo {
       [task.agentId],
     );
     const currentAgent = this.ctx.agents().getAgent(task.agentId);
-    if (!currentAgent || currentAgent.archivedAt || !this.ctx.runtimes().runtimeCanRunAgent(runtime, currentAgent)) {
+    if (!currentAgent || currentAgent.archivedAt || !this.runtimeCanRunTaskAgent(runtime, currentAgent, Boolean(task.executionFingerprint))) {
       throw new AgentPluginReadinessChangedError("claimed Agent is no longer executable");
+    }
+    if (!task.executionFingerprint && !this.runtimeHasReadyExecutionGroup(runtime, currentAgent)) {
+      throw new AgentPluginReadinessChangedError("Execution group configuration has not been applied by this Runtime");
     }
     const provider = runtime.provider !== "any" ? runtime.provider : currentAgent.provider;
     if (runtime.provider !== "any" && runtime.provider !== currentAgent.provider) {
@@ -1207,7 +1215,7 @@ export class TasksRepo {
     }
 
     const pluginSnapshot = this.ctx.agentPlugins().resolveAgentPluginSnapshot(currentAgent.id);
-    const runtimeProfile = this.ctx.runtimes().getRuntimeExecutionProfile(runtime.id, provider);
+    const runtimeProfile = this.ctx.runtimes().getAgentExecutionProfile(runtime.id, currentAgent);
     const executionFingerprint = withRuntimeProfileFingerprint(
       createHash("sha256").update(canonicalJson(pluginSnapshot)).digest("hex"), runtimeProfile,
     );
@@ -1310,7 +1318,35 @@ export class TasksRepo {
     }
   }
 
+  private runtimeCanRunTaskAgent(runtime: MultiremiRuntime, agent: MultiremiAgent, frozen: boolean): boolean {
+    // A frozen task already owns model/connection evidence from its original
+    // claim. Recheck membership and authorization, not a newer profile catalog.
+    return this.ctx.runtimes().runtimeCanRunAgent(runtime, frozen
+      ? { ...agent, model: null, thinkingLevel: null }
+      : agent);
+  }
+
+  private runtimeHasReadyExecutionGroup(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
+    if (!agent.executionGroupId) {
+      const profile = this.ctx.runtimes().getAgentExecutionProfile(runtime.id, agent);
+      return !profile || runtime.metadata[`${agent.provider}_profiles`] === 1;
+    }
+
+    const group = getExecutionGroup(this.ctx.db, agent.executionGroupId, agent.workspaceId);
+    if (!group) return false;
+    if (!group.managed) {
+      const profile = this.ctx.runtimes().getAgentExecutionProfile(runtime.id, agent);
+      return !profile || runtime.metadata[`${agent.provider}_profiles`] === 1;
+    }
+
+    return this.ctx.executionBindingStates().isRuntimeExecutionBindingReady(
+      group.id, runtime.id, group.profileId, group.profileRevision,
+    );
+  }
+
   private runtimeHasReadyTaskPlugins(runtime: MultiremiRuntime, task: MultiremiTask): boolean {
+    const agent = this.ctx.agents().getAgent(task.agentId);
+    if (!agent || (!task.executionFingerprint && !this.runtimeHasReadyExecutionGroup(runtime, agent))) return false;
     if (task.codexProfile && runtime.metadata.codex_profiles !== 1) return false;
     if (task.claudeProfile && runtime.metadata.claude_profiles !== 1) return false;
     if (!task.executionFingerprint) {
@@ -1382,7 +1418,7 @@ export class TasksRepo {
         && !task.runtimeWorkspace?.archivedAt
       ))
       && !task.agent.archivedAt
-      && this.ctx.runtimes().runtimeCanRunAgent(runtime, task.agent)
+      && this.runtimeCanRunTaskAgent(runtime, task.agent, Boolean(task.executionFingerprint))
       && this.runtimeHasReadyTaskPlugins(runtime, task)
       && (!task.issueId || !task.holdsWorkspace || runtimeSupportsIssueWorkspaces(runtime))
       && (!task.issueId || runtimeSupportsParallelExecution(runtime))
@@ -1475,7 +1511,7 @@ export class TasksRepo {
       const fingerprint = this.ctx.agentPlugins().getAgentPluginCapabilityRevision(agent.id);
       const issue = task.issueId ? this.ctx.issues().getIssue(task.issueId) : null;
       const projectId = task.runtimeWorkspaceId ? null : chat.projectId ?? (task.holdsWorkspace && issue?.issueKind !== "intake" ? issue?.projectId : null) ?? null;
-      const profile = chat.sessionRuntimeId ? this.ctx.runtimes().getRuntimeExecutionProfile(chat.sessionRuntimeId, agent.provider) : null;
+      const profile = chat.sessionRuntimeId ? this.ctx.runtimes().getAgentExecutionProfile(chat.sessionRuntimeId, agent) : null;
       const affinity = this.resolveTaskAffinity(agent, chat, issue, projectId, withRuntimeProfileFingerprint(fingerprint, profile), plugins.length > 0 || Boolean(profile));
       let runtimeId = affinity.runtimeId ?? (task.sessionId ? agent.runtimeId : task.runtimeId);
       let inherit = affinity.inheritChatSession;
@@ -1493,7 +1529,7 @@ export class TasksRepo {
     }
   }
 
-  private claimNextTaskForRuntime(runtime: MultiremiRuntime, excludedAgentIds: string[] = []): MultiremiTaskWithAgent | null {
+  private claimNextTaskForRuntime(runtime: MultiremiRuntime, excludedAgentIds: string[] = [], excludedTaskIds: string[] = []): MultiremiTaskWithAgent | null {
     const now = nowIso();
     const deviceRouting = this.runtimeDeviceRoutingContext(runtime);
     // Always constrain by workspace, COALESCE(...,'local') so a runtime with
@@ -1528,6 +1564,7 @@ export class TasksRepo {
       runtime.id,
       runtime.id,
       ...excludedAgentIds,
+      ...excludedTaskIds,
     ];
     // Ownership guard: a private runtime only executes its owner's agents — a
     // claim hands the runtime the agent's custom_env / mcp_config. Owner match
@@ -1663,6 +1700,7 @@ export class TasksRepo {
            ${runtime.metadata.codex_profiles !== 1 ? "AND t.codex_profile IS NULL" : ""}
            ${runtime.metadata.claude_profiles !== 1 ? "AND t.claude_profile IS NULL" : ""}
            ${excludedAgentIds.length ? `AND t.agent_id NOT IN (${excludedAgentIds.map(() => "?").join(", ")})` : ""}
+           ${excludedTaskIds.length ? `AND t.id NOT IN (${excludedTaskIds.map(() => "?").join(", ")})` : ""}
          ORDER BY t.priority DESC, t.created_at ASC
          LIMIT 1
        )

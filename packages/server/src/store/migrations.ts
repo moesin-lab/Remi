@@ -39,6 +39,8 @@ const FEISHU_BOT_AGENT_ROUTE_DEFAULT_UNIQUENESS_MIGRATION =
   "20260909_feishu_bot_agent_route_default_uniqueness";
 const CHAT_ISSUE_DECOUPLING_MIGRATION = "20260916_chat_issue_decoupling";
 const AGENT_PAGE_QUERY_INDEXES_MIGRATION = "20260910_agent_page_query_indexes";
+const TASK_FALLBACK_MODEL_MIGRATION = "20260919_task_fallback_model";
+const GATEWAY_MODEL_REASONING_MIGRATION = "20260919_gateway_model_reasoning";
 
 // Stable Feishu open_id of the deployment owner (hehuajie / 贺华杰). The seed
 // `local` user is tagged with this on migration so SSO login re-binds to it
@@ -366,6 +368,7 @@ export function runMigrations(db: SqlDatabase): void {
       provider TEXT NOT NULL,
       is_default INTEGER NOT NULL DEFAULT 0,
       thinking TEXT,
+      is_provider_default INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       PRIMARY KEY(runtime_id, model_id),
@@ -407,6 +410,7 @@ export function runMigrations(db: SqlDatabase): void {
       engine TEXT NOT NULL,
       models TEXT NOT NULL DEFAULT '[]',
       source_revision INTEGER NOT NULL DEFAULT 0,
+      native_catalog_status TEXT,
       last_success_at TEXT,
       last_error TEXT,
       updated_at TEXT NOT NULL,
@@ -836,6 +840,13 @@ export function runMigrations(db: SqlDatabase): void {
       status TEXT NOT NULL DEFAULT 'active',
       is_default INTEGER NOT NULL DEFAULT 0,
       holds_workspace INTEGER NOT NULL DEFAULT 1,
+      parent_session_id TEXT,
+      inherit_mode TEXT NOT NULL DEFAULT 'none',
+      inherit_cutoff_seq INTEGER,
+      inherited_tokens_total INTEGER NOT NULL DEFAULT 0,
+      follow_frozen_seq INTEGER,
+      with_code INTEGER NOT NULL DEFAULT 0,
+      code_runtime_id TEXT,
       summary TEXT,
       created_by_type TEXT NOT NULL DEFAULT 'member',
       created_by_id TEXT,
@@ -903,6 +914,7 @@ export function runMigrations(db: SqlDatabase): void {
       provider TEXT,
       work_dir TEXT,
       cursor_seq INTEGER NOT NULL DEFAULT 0,
+      parent_cursor_seq INTEGER NOT NULL DEFAULT 0,
       generation INTEGER NOT NULL DEFAULT 1,
       status TEXT NOT NULL DEFAULT 'active',
       last_task_id TEXT,
@@ -2179,6 +2191,7 @@ export function runMigrations(db: SqlDatabase): void {
       attempt INTEGER NOT NULL DEFAULT 1,
       max_attempts INTEGER NOT NULL DEFAULT 3,
       parent_task_id TEXT,
+      continued_from_task_id TEXT,
       issue_creation_restricted INTEGER NOT NULL DEFAULT 0,
       delegation_id TEXT,
       delegated_by_agent_id TEXT,
@@ -2681,6 +2694,9 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_runtimes", "owner_id TEXT");
   addColumnIfMissing(db, "multiremi_runtimes", "visibility TEXT NOT NULL DEFAULT 'private'");
   addColumnIfMissing(db, "multiremi_runtimes", "name_customized INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "multiremi_runtime_models", "is_provider_default INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "multiremi_gateway_models", "native_catalog_status TEXT");
+  addColumnIfMissing(db, "multiremi_runtime_models", "catalog TEXT");
   runMigrationOnce(db, DAEMON_PROFILES_MIGRATION, () => {
     createDaemonProfilesAndBackfill(db);
   });
@@ -2772,6 +2788,13 @@ export function runMigrations(db: SqlDatabase): void {
   // Existing Sessions and Tasks keep the historical Issue-wide workspace
   // lease. New discussion Sessions must opt out explicitly.
   addColumnIfMissing(db, "multiremi_issue_sessions", "holds_workspace INTEGER NOT NULL DEFAULT 1");
+  addColumnIfMissing(db, "multiremi_issue_sessions", "parent_session_id TEXT");
+  addColumnIfMissing(db, "multiremi_issue_sessions", "inherit_mode TEXT NOT NULL DEFAULT 'none'");
+  addColumnIfMissing(db, "multiremi_issue_sessions", "inherit_cutoff_seq INTEGER");
+  addColumnIfMissing(db, "multiremi_issue_sessions", "inherited_tokens_total INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "multiremi_issue_sessions", "follow_frozen_seq INTEGER");
+  addColumnIfMissing(db, "multiremi_issue_sessions", "with_code INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "multiremi_issue_sessions", "code_runtime_id TEXT");
   // Agent auto-reply comments point back at the run that produced them, so the
   // chat stream can open that task's transcript. Forward-only: no backfill.
   addColumnIfMissing(db, "multiremi_issue_comments", "task_id TEXT");
@@ -2779,6 +2802,7 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_attachments", "chat_message_id TEXT");
   ensureIssueSubscriberTypedSchema(db);
   addColumnIfMissing(db, "multiremi_chat_sessions", "creator_id TEXT");
+  addColumnIfMissing(db, "multiremi_chat_sessions", "project_id TEXT");
   addColumnIfMissing(db, "multiremi_chat_sessions", "unread_since TEXT");
   addColumnIfMissing(db, "multiremi_chat_sessions", "pinned INTEGER NOT NULL DEFAULT 0");
   // Pool scheduling records the machine + engine that produced the promoted
@@ -2814,6 +2838,7 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_tasks", "attempt INTEGER NOT NULL DEFAULT 1");
   addColumnIfMissing(db, "multiremi_tasks", "max_attempts INTEGER NOT NULL DEFAULT 3");
   addColumnIfMissing(db, "multiremi_tasks", "parent_task_id TEXT");
+  addColumnIfMissing(db, "multiremi_tasks", "continued_from_task_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "delegation_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "delegated_by_agent_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "delegation_return_task_id TEXT");
@@ -2892,6 +2917,15 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_tasks", "projection_truncated INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "multiremi_tasks", "projection_omitted_events INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "multiremi_tasks", "projection_estimated_tokens INTEGER NOT NULL DEFAULT 0");
+  // NULL means no inherited projection has been recorded for this task.
+  addColumnIfMissing(db, "multiremi_tasks", "inherited_projection_truncated INTEGER");
+  addColumnIfMissing(db, "multiremi_tasks", "inherited_projection_omitted_events INTEGER");
+  addColumnIfMissing(db, "multiremi_tasks", "inherited_projection_estimated_tokens INTEGER");
+  addColumnIfMissing(db, "multiremi_tasks", "inherited_projection_to_seq INTEGER");
+  // A recorded follow window also pins retries of an empty parent round.
+  addColumnIfMissing(db, "multiremi_tasks", "inherited_projection_from_seq INTEGER");
+  addColumnIfMissing(db, "multiremi_tasks", "inherited_projection_token_budget INTEGER");
+  addColumnIfMissing(db, "multiremi_tasks", "inherited_projection_recorded_at TEXT");
   addColumnIfMissing(db, "multiremi_task_messages", "tool_call_id TEXT");
   addColumnIfMissing(db, "multiremi_task_messages", "status TEXT");
   addColumnIfMissing(db, "multiremi_task_messages", "meta TEXT");
@@ -2905,6 +2939,7 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_tasks", "execution_fingerprint TEXT");
   addColumnIfMissing(db, "multiremi_session_agent_lanes", "execution_fingerprint TEXT");
   migrateExecutionScopedLanes(db);
+  addColumnIfMissing(db, "multiremi_session_agent_lanes", "parent_cursor_seq INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "multiremi_inbox_items", "recipient_type TEXT NOT NULL DEFAULT 'member'");
   addColumnIfMissing(db, "multiremi_inbox_items", "recipient_id TEXT");
   addColumnIfMissing(db, "multiremi_inbox_items", "severity TEXT NOT NULL DEFAULT 'info'");
@@ -3158,6 +3193,45 @@ export function runMigrations(db: SqlDatabase): void {
       CREATE INDEX idx_execution_group_members_group ON multiremi_execution_group_members(workspace_id,group_id);`);
   });
   runMigrationOnce(db, "central_execution_profiles_legacy_v1", () => migrateLegacyExecutionProfiles(db));
+  // MUL-336: a task (and its recovery chain) can run on a model other than its
+  // Agent's primary one after a gateway resource failure. The override lives on
+  // the task so the Agent's own model stays untouched and concurrent tasks of
+  // the same Agent keep their own selection. `fallback_switched` bounds the
+  // chain to a single model switch; `next_retry_at` defers a transient-throttle
+  // retry instead of hammering the exhausted pool (Retry-After aware).
+  runMigrationOnce(db, TASK_FALLBACK_MODEL_MIGRATION, () => {
+    addColumnIfMissing(db, "multiremi_tasks", "execution_model TEXT");
+    addColumnIfMissing(db, "multiremi_tasks", "execution_thinking_level TEXT");
+    addColumnIfMissing(db, "multiremi_tasks", "fallback_switched INTEGER NOT NULL DEFAULT 0");
+    addColumnIfMissing(db, "multiremi_tasks", "switch_reason TEXT");
+    addColumnIfMissing(db, "multiremi_tasks", "next_retry_at TEXT");
+    db.run(
+      "CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_next_retry_at ON multiremi_tasks(next_retry_at)",
+    );
+  });
+  runMigrationOnce(db, "20260919_agent_fallback_model", () => {
+    addColumnIfMissing(db, "multiremi_agents", "fallback_model TEXT");
+    addColumnIfMissing(db, "multiremi_agents", "fallback_thinking_level TEXT");
+  });
+  // MUL-338: a gateway model whose engine publishes no reasoning metadata (every
+  // Claude alias outside the ACP selector) can have its levels declared by an
+  // administrator. That is an explicit operator statement, not a borrowed one, so
+  // it lives in its own table: the discovery snapshot is rewritten on every probe
+  // with `models = excluded.models`, and sharing a row would clear the declaration.
+  runMigrationOnce(db, GATEWAY_MODEL_REASONING_MIGRATION, () => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS multiremi_gateway_model_reasoning (
+        workspace_id TEXT NOT NULL,
+        engine TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        levels TEXT NOT NULL DEFAULT '[]',
+        default_level TEXT,
+        updated_by TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(workspace_id, engine, model_id)
+      );
+    `);
+  });
   backfillDefaultIssueSessions(db);
   backfillIssueKeys(db);
   migrateLegacyGithubProjection(db, legacyGithubTables);
@@ -3931,6 +4005,7 @@ function migrateExecutionScopedLanes(db: SqlDatabase): void {
       provider TEXT,
       work_dir TEXT,
       cursor_seq INTEGER NOT NULL DEFAULT 0,
+      parent_cursor_seq INTEGER NOT NULL DEFAULT 0,
       generation INTEGER NOT NULL DEFAULT 1,
       status TEXT NOT NULL DEFAULT 'active',
       last_task_id TEXT,

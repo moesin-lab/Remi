@@ -1,14 +1,16 @@
 import { createHash, randomBytes } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
-import { access, lstat, mkdir, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AgentTask } from "@daemon/contracts/types.js";
 import { linkCodexAuthFromBase, seedCodexHomeFromBase } from "../agent-plugins/codex-home.js";
 import { AgentPluginError } from "../agent-plugins/types.js";
 import { sanitizeProviderConfigValue } from "../provider-config-sanitize.js";
-import { mergeClaudeSettings, mergeCodexSessionConfig } from "../relay-sync.js";
+import { loadCodexModelCatalog, mergeClaudeSettings, mergeCodexSessionConfig, type CodexModelCatalogState } from "../relay-sync.js";
+import type { RelayHttpRequest } from "@shared/relay-http.js";
 import { removeOwnedDirectorySync } from "./safe-remove.js";
+import { SIDE_CONVERSATION_INSTRUCTIONS } from "../prompts/side-conversation.js";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
 const SESSION_HOME_MARKER = ".multiremi-session-home.json";
@@ -38,7 +40,14 @@ export interface IssueSessionRuntimeRoot {
   root: string;
 }
 
+export interface TaskPrivateTempDirectory {
+  storageRoot: string;
+  path: string;
+}
+
 export interface PrepareIssueSessionProviderHomeOptions {
+  /** Codex ACP has no system-prompt channel; install side policy in its private config. */
+  sideConversation?: boolean;
   /** A Codex Plugin installer already created and seeded this exact home. */
   codexPluginInstalled?: boolean;
   baseClaudeConfigDir?: string;
@@ -47,6 +56,10 @@ export interface PrepareIssueSessionProviderHomeOptions {
   relayFragment?: string;
   /** The Relay token is injected as OPENAI_API_KEY into the Codex child. */
   codexRelayUsesEnvApiKey?: boolean;
+  /** Used only to fetch the native catalog; never written to the provider config. */
+  relayAuthToken?: string;
+  /** Injectable transport for an isolated catalog test. */
+  codexCatalogHttpRequest?: RelayHttpRequest;
   /** Link the base Codex auth file for subscription OAuth. Defaults to true. */
   linkCodexAuth?: boolean;
   /** Link the base Claude credentials file for subscription OAuth. Defaults to true. */
@@ -252,6 +265,32 @@ export async function prepareIssueExecutionDirectory(resolvedHome: IssueSessionP
   return workDir;
 }
 
+/** Create one non-reused /tmp backing directory for a claimed task execution. */
+export async function prepareTaskPrivateTempDirectory(
+  resolvedHome: IssueSessionProviderHome,
+  taskId: string,
+): Promise<TaskPrivateTempDirectory> {
+  const parent = join(resolvedHome.root, "task-tmp");
+  await ensureRealDirectoryTree(resolvedHome.storageRoot, parent, "Task private temp root");
+  const path = await mkdtemp(join(parent, `${safePathSegment(taskId)}-`));
+  await chmod(path, 0o700);
+  await assertRealDirectory(path, "Task private temp directory");
+  return { storageRoot: resolvedHome.storageRoot, path };
+}
+
+/** Remove only the exact directory allocated to this execution. */
+export async function cleanupTaskPrivateTempDirectory(
+  directory: TaskPrivateTempDirectory | null | undefined,
+  assertRootOwner?: () => void,
+): Promise<void> {
+  if (!directory) return;
+  const runtimeRelative = relative(resolve(directory.storageRoot), resolve(directory.path));
+  if (!runtimeRelative || runtimeRelative === ".." || runtimeRelative.startsWith(`..${sep}`) || isAbsolute(runtimeRelative)) {
+    throw new Error(`Task private temp directory escapes daemon storage: ${directory.path}`);
+  }
+  removeOwnedDirectorySync(directory.storageRoot, directory.path, { assertRootOwner });
+}
+
 /** Reject linked parents before a plugin installer or provider can write through them. */
 export async function ensureProviderHomeDirectory(
   resolvedHome: IssueSessionProviderHome,
@@ -294,8 +333,11 @@ export async function cleanupTemporaryTaskProviderHome(
 export async function prepareIssueSessionProviderHome(
   resolvedHome: IssueSessionProviderHome,
   options: PrepareIssueSessionProviderHomeOptions = {},
-): Promise<void> {
+): Promise<{ codexModelCatalog?: CodexModelCatalogState }> {
   await ensureProviderHomeDirectory(resolvedHome);
+  // The lineage root may be genuine while its home child has been replaced by
+  // a link. Validate the whole path before reading its marker or reconciling.
+  await ensureRealDirectoryTree(resolvedHome.storageRoot, resolvedHome.home, "Provider Home");
   if (resolvedHome.provider === "antigravity") {
     // agy owns its native OAuth/history directory; this home owns only Remi
     // task context. Never seed it with Claude/Codex credentials.
@@ -304,7 +346,7 @@ export async function prepareIssueSessionProviderHome(
       schemaVersion: 1, provider: "antigravity", sessionId: resolvedHome.sessionId,
       agentId: resolvedHome.agentId, generation: resolvedHome.generation, providerHome: "home",
     }) + "\n", { mode: 0o600 });
-    return;
+    return {};
   }
   if (!(await isPreparedHome(resolvedHome.home))) {
     if (resolvedHome.provider === "codex") {
@@ -342,7 +384,7 @@ export async function prepareIssueSessionProviderHome(
   // Homes are stable for a Session lane, while workspace Relay configuration
   // may change between turns. Reconcile routing on every start without touching
   // provider-native history or Plugin-owned configuration.
-  await reconcileIssueSessionProviderConfig(resolvedHome, baseline, options);
+  const codexModelCatalog = await reconcileIssueSessionProviderConfig(resolvedHome, baseline, options);
 
   // Authentication is runtime state, not immutable home configuration. Reconcile
   // it on every start so removing a Relay from an existing lane can fall back to
@@ -380,6 +422,7 @@ export async function prepareIssueSessionProviderHome(
     executionFingerprint: resolvedHome.executionFingerprint ?? null,
     providerHome: "home",
   }, null, 2)}\n`, { mode: 0o600 });
+  return codexModelCatalog ? { codexModelCatalog } : {};
 }
 
 async function ensureRealDirectoryTree(
@@ -444,7 +487,7 @@ async function reconcileIssueSessionProviderConfig(
   resolvedHome: IssueSessionProviderHome,
   baseline: string,
   options: PrepareIssueSessionProviderHomeOptions,
-): Promise<void> {
+): Promise<CodexModelCatalogState | undefined> {
   if (resolvedHome.provider === "claude") {
     const target = join(resolvedHome.home, "settings.json");
     const current = parseJsonObject(baseline, `${resolvedHome.root}/${PROVIDER_CONFIG_BASELINE}`);
@@ -458,12 +501,38 @@ async function reconcileIssueSessionProviderConfig(
   }
 
   const target = join(resolvedHome.home, "config.toml");
+  const catalog = await loadCodexModelCatalog(
+    options.relayFragment ?? "",
+    options.codexRelayUsesEnvApiKey ? options.relayAuthToken ?? "" : "",
+    options.codexCatalogHttpRequest,
+  );
+  const catalogPath = join(resolve(resolvedHome.home), "model-catalog.json");
+  let catalogState: CodexModelCatalogState = catalog.status === "loaded" ? { status: "loaded" } : catalog;
+  if (catalog.status === "loaded") {
+    try {
+      await writePrivateFileIfChanged(catalogPath, catalog.content);
+      await chmod(catalogPath, 0o600);
+    } catch {
+      catalogState = { status: "error", error: "Codex model catalog could not be written to the isolated home" };
+    }
+  }
   const merged = mergeCodexSessionConfig(
     baseline,
     options.relayFragment ?? "",
     options.codexRelayUsesEnvApiKey === true,
+    catalogState.status === "loaded" ? catalogPath : undefined,
   );
-  await writePrivateFileIfChanged(target, merged);
+  if (options.sideConversation) {
+    const config = parseToml(merged);
+    const inheritedInstructions = typeof config.developer_instructions === "string"
+      ? config.developer_instructions : "";
+    config.developer_instructions = [inheritedInstructions, SIDE_CONVERSATION_INSTRUCTIONS]
+      .filter(Boolean).join("\n\n");
+    await writePrivateFileIfChanged(target, stringifyToml(config));
+  } else {
+    await writePrivateFileIfChanged(target, merged);
+  }
+  return catalogState;
 }
 
 interface ProviderConfigBaseline {
@@ -555,6 +624,7 @@ function sanitizeCodexBaseline(current: string, relayAuthoritative: boolean): st
     throw new Error("Provider configuration is not valid TOML");
   }
   parsed = sanitizeProviderConfigValue(parsed) as Record<string, unknown>;
+  delete parsed.model_catalog_json;
   if (relayAuthoritative) {
     // The daemon's global CLI files may have been deep-merged by an older
     // version. Provider routing is therefore not a trustworthy native baseline
@@ -593,7 +663,7 @@ async function readTextFileForReconcile(path: string): Promise<string | null> {
   return readFile(path, "utf8");
 }
 
-async function writePrivateFileIfChanged(path: string, content: string): Promise<void> {
+export async function writePrivateFileIfChanged(path: string, content: string): Promise<void> {
   const current = await readTextFileForReconcile(path);
   if (current === content) return;
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });

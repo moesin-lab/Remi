@@ -2,7 +2,7 @@
 // Go-compat (`*Compatibility*`) and native shapers sit side by side on purpose:
 // the two route prefixes are intentionally divergent and must stay diffable.
 import { CHAT_ISSUE_DECOUPLED_FINGERPRINT } from "@multiremi/store/helpers.js";
-import { taskExecutionScope } from "@multiremi/contracts/task-execution.js";
+import { agentAtTaskTarget, taskExecutionScope } from "@multiremi/contracts/task-execution.js";
 import type {
   MultiremiChatMessage,
   MultiremiDaemonHeartbeatAck,
@@ -284,6 +284,7 @@ export function daemonTaskWireResponse(
   };
   if (task.failureReason) response.failure_reason = task.failureReason;
   if (task.parentTaskId) response.parent_task_id = task.parentTaskId;
+  if (task.continuedFromTaskId) response.continued_from_task_id = task.continuedFromTaskId;
   if (task.waitReason) response.wait_reason = task.waitReason;
   if (task.progressSummary) response.progress_summary = task.progressSummary;
   if (task.progressStep != null) response.progress_step = task.progressStep;
@@ -332,23 +333,45 @@ export function daemonTaskClaimResponse(
     };
   }
   if (task.executionFingerprint === CHAT_ISSUE_DECOUPLED_FINGERPRINT) task = { ...task, sessionId: null };
-  const chatProjectId = task.chatSessionId ? store.getChatSession(task.chatSessionId)?.projectId ?? null : null;
   // Re-check the live destination even when the caller retained an earlier
-  // hydrated claim. A changed binding must never receive that old Issue prompt.
-  if (task.chatSessionId && store.getTaskChatExecutionKind(task) === "ordinary") {
-    const explicitProject = !task.runtimeWorkspaceId && chatProjectId && task.project?.id === chatProjectId;
+  // hydrated claim. Stale or unavailable bindings must not retain Project or Issue context.
+  const ordinaryChat = Boolean(task.chatSessionId && store.getTaskChatExecutionKind(task) === "ordinary");
+  if (ordinaryChat) {
+    const chat = store.getChatSession(task.chatSessionId!);
+    const currentProject = chat?.projectId ? store.getProject(chat.projectId) : null;
+    // A claim payload may have been retained across a resource mutation. Read
+    // the current hydrated task so stale assignments cannot restore a directory
+    // that the live workspace lineage has already rejected.
+    if (chat?.projectId) {
+      const current = store.getTaskWithAgent(task.id);
+      if (current) {
+        task = { ...task, sessionId: current.sessionId, workDir: current.workDir,
+          projectResources: current.projectResources };
+        if (task.runtimeId !== current.runtimeId) task = { ...task, sessionId: null, workDir: null, codexProfile: null, claudeProfile: null };
+      }
+    }
+    const keepProject = Boolean(!task.runtimeWorkspaceId && currentProject && !currentProject.archivedAt
+      && currentProject.workspaceId === task.workspaceId && chat?.projectId && chat.workspaceId === task.workspaceId
+      && chat.projectId === task.chatProjectId && chat.projectId === task.project?.id
+      && task.project.workspaceId === task.workspaceId);
     task = {
       ...task, issueId: null, issueSessionId: null, issueSessionGeneration: null,
       sessionId: task.issueId || task.issueSessionId || task.executionFingerprint === CHAT_ISSUE_DECOUPLED_FINGERPRINT ? null : task.sessionId,
-      issue: null,
-      project: explicitProject ? task.project : null,
-      projectResources: explicitProject ? task.projectResources : [],
-      projectDocs: explicitProject ? task.projectDocs : null,
-      projectContexts: [], repos: [],
+      issue: null, triggerCommentId: null,
+      chatProjectId: keepProject ? chat!.projectId : null,
+      chatAutoCheckoutRepos: keepProject ? task.chatAutoCheckoutRepos : [],
+      project: keepProject ? task.project : null,
+      projectResources: keepProject ? task.projectResources : [],
+      projectDocs: keepProject ? task.projectDocs : null,
+      projectWikiDocs: keepProject ? task.projectWikiDocs : [],
+      repositoryWikiContexts: keepProject ? task.repositoryWikiContexts : [],
+      projectContexts: [], repos: keepProject ? task.repos : [],
+      knowledgeWarnings: keepProject ? task.knowledgeWarnings : [],
     };
+    triggerMetadata = null;
   }
   const response = daemonTaskWireResponse(task, triggerMetadata);
-  response.chat_project_id = chatProjectId;
+  if (task.chatProjectId && task.chatProjectId === task.project?.id) response.chat_project_id = task.chatProjectId;
   response.runtime_workspace_id = task.runtimeWorkspaceId ?? null;
   // Path metadata only. Instruction/configuration contents are read on the host.
   response.runtime_workspace = task.runtimeWorkspace ?? null;
@@ -362,7 +385,18 @@ export function daemonTaskClaimResponse(
   }
   if (task.branchName) response.branch_name = task.branchName;
   if (task.workDir) response.prior_work_dir = task.workDir;
-  if (task.agent) response.agent = daemonClaimAgentResponse(task.agent);
+  if (task.agent) {
+    // The daemon executes the model/effort it is handed here — it has no view
+    // of the task's recovery override. A chain that already moved to the
+    // fallback model must therefore present that model as the Agent's, or the
+    // dispatched attempt would quietly run the primary one again. A switched
+    // task also carries no further fallback: the chain's single switch is spent
+    // (MUL-336), so the daemon is never invited to bounce back to the primary.
+    const executionAgent = agentAtTaskTarget(task.agent, task);
+    response.agent = daemonClaimAgentResponse(
+      task.executionModel ? { ...executionAgent, fallbackModel: null, fallbackThinkingLevel: null } : executionAgent,
+    );
+  }
   if (task.issue) {
     response.issue = {
       ...issueCompatibilityResponse(task.issue, { includeLabels: true }),
@@ -376,7 +410,7 @@ export function daemonTaskClaimResponse(
   if (task.issueSessionId || task.chatSessionId) {
     const projection = store.buildTaskSessionProjection(task.id);
     if (projection) {
-      projectionMode = projection.mode;
+      projectionMode = projection.mode === "delta" ? "delta" : "bootstrap";
       response.session_projection = {
         session_id: projection.sessionId,
         target_agent_id: projection.targetAgentId,
@@ -388,6 +422,23 @@ export function daemonTaskClaimResponse(
         omitted_events: projection.omittedEvents,
         estimated_tokens: projection.estimatedTokens,
       };
+      const inherited = projection.inheritedSessionProjection;
+      if (inherited) {
+        response.inherited_session_projection = {
+          session_id: inherited.sessionId,
+          session_title: inherited.sessionTitle,
+          target_agent_id: inherited.targetAgentId,
+          mode: inherited.mode,
+          from_seq: inherited.fromSeq,
+          to_seq: inherited.toSeq,
+          jsonl: inherited.jsonl,
+          truncated: inherited.truncated,
+          omitted_events: inherited.omittedEvents,
+          estimated_tokens: inherited.estimatedTokens,
+        };
+      } else if (inherited === null) {
+        response.inherited_session_projection = null;
+      }
     }
   }
   if (task.issueSessionId) {
@@ -472,6 +523,13 @@ export function daemonTaskClaimResponse(
   }
   if (task.repos.length) {
     response.repos = task.repos.map((repo) => ({
+      url: repo.url,
+      ...(repo.description ? { description: repo.description } : {}),
+      ...(repo.defaultBranch ? { default_branch: repo.defaultBranch } : {}),
+    }));
+  }
+  if (ordinaryChat && task.chatProjectId && task.chatAutoCheckoutRepos) {
+    response.chat_auto_checkout_repos = task.chatAutoCheckoutRepos.map((repo) => ({
       url: repo.url,
       ...(repo.description ? { description: repo.description } : {}),
       ...(repo.defaultBranch ? { default_branch: repo.defaultBranch } : {}),

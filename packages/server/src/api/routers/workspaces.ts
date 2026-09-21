@@ -4,6 +4,7 @@ import {
   createScmAwareGitRemoteInspector,
   currentTaskParentId,
   denyCurrentUserWorkspaceAccess,
+  gatewayReasoningLevels,
   importWorkspaceRepository,
   inspectWorkspaceRepository,
   isFirstAgentInWorkspace,
@@ -25,6 +26,7 @@ import {
   safeCreateWorkspace,
   safeLeaveWorkspace,
   updateWorkspaceRepository,
+  validateGatewayReasoningLevels,
   WorkspaceRepositoryError,
 } from "../helpers.js";
 import type {
@@ -70,7 +72,7 @@ import type {
   UpdateWorkspaceRuntimeProvisionInput,
 } from "@multiremi/contracts/types.js";
 import { createId, nowIso } from "@multiremi/ids.js";
-import { RepositoryWikiUnavailableError } from "@multiremi/repository-wiki/service.js";
+import { REPOSITORY_WIKI_BATCH_LIMIT, RepositoryWikiLogHistoryError, RepositoryWikiUnavailableError } from "@multiremi/repository-wiki/service.js";
 import { normalizeRepositoryWikiPath } from "@multiremi/store/repos/repository-wiki-repo.js";
 import {
   defaultRepositoryWikiPath,
@@ -85,6 +87,7 @@ import { buildPlatformPromptTemplatePreview } from "../../prompts/platform-templ
 import { listWorkspaceRepositories } from "../helpers/repositories.js";
 import {
   discoverGatewayModels,
+  probeGatewayModels,
   triggerGatewayDiscovery,
 } from "@multiremi/relay/discovery.js";
 import {
@@ -506,6 +509,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         store.listLatestRepositoryAutopilotRuns(workspaceId)
           .map((run) => [run.repositoryId!, run] as const),
       );
+      const observability = store.repositoryWikiObservability(workspaceId);
       return c.json({ repositories: repositories.map((repository) => {
         const repositoryDocs = docsByRepository.get(repository.id) ?? [];
         const latest = repositoryDocs.reduce<MultiremiRepositoryWikiDoc | null>(
@@ -513,23 +517,30 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
           null,
         );
         const build = repositoryWikiBuildState(store, buildRuns.get(repository.id) ?? null);
-        // An active build overrides the doc-derived status ("building"), and a
-        // failed last build surfaces as "failed" — the docs themselves are
-        // untouched and keep being listed either way.
+        const metrics = observability[repository.id];
+        // Execution completion is not publication success. Only explicit
+        // blocked reports make an otherwise healthy Wiki stale; noop is normal.
         const status = build.status === "queued" || build.status === "building"
           ? "building"
-          : build.status === "failed"
-            ? "failed"
-            : latest?.status ?? "unbuilt";
+          : metrics?.latest_completed_outcome?.status === "blocked"
+            ? "stale"
+            : build.status === "failed"
+              ? "failed"
+              : latest?.status ?? "unbuilt";
         return {
           repository_id: repository.id,
           repository_name: repository.name,
           status,
-          status_message: latest?.statusMessage ?? null,
+          status_message: status === "stale" && metrics?.latest_completed_outcome?.status === "blocked"
+            ? metrics.latest_completed_outcome.reason : latest?.statusMessage ?? null,
           source_revision: latest?.sourceRevision ?? null,
           page_count: repositoryDocs.length,
           updated_at: latest?.updatedAt ?? null,
           build,
+          last_published_at: metrics?.last_published_at ?? null,
+          builds_since_publish: metrics?.builds_since_publish ?? 0,
+          consecutive_blocked: metrics?.consecutive_blocked ?? 0,
+          alert: metrics?.alert ?? null,
         };
       }) });
     } catch (error) {
@@ -726,8 +737,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     const hasPublishedWiki = store.listRepositoryWikiDocs(workspaceId, repositoryId).length > 0;
     const mode = hasPublishedWiki ? "lint" : "bootstrap_repository";
     const prompt = hasPublishedWiki
-      ? "Review and organize the existing Repository Wiki in Atlas lint mode. Read the complete current Wiki and repository evidence, repair structure and durable content, maintain a non-empty root index.md, append this run to the non-empty root log.md without rewriting its history, and let repository semantics determine every other page and directory. Inspect remi wiki status and diff, then publish the coherent working copy."
-      : "Bootstrap the Repository Wiki from the checked-out default branch. Create a non-empty root index.md reading map and a non-empty append-only root log.md; let repository semantics determine whether overview.md, directories, or nesting are useful, without fixed directories or arbitrary depth limits. Resolve the checked-out HEAD revision, inspect remi wiki status and diff, then publish with remi wiki push --source-revision <sha>.";
+      ? "Review and organize the existing Repository Wiki in Atlas lint mode. Read the complete current Wiki and repository evidence, repair structure and durable content, maintain a non-empty root index.md, and append this run to the non-empty root log.md without rewriting its history. Repository semantics choose the directory names, but every directory must hold at most 20 body pages directly, the root at most 5 non-index body pages, and nesting at most 4 levels; split any directory that exceeds this by subsystem and report the per-directory page counts. Inspect remi wiki status and diff, then publish the coherent working copy. Before the run ends, record the result with `remi wiki repository outcome <repo> --outcome <published|published_with_warnings|noop|blocked> --reason '<specifics>'`: a run that reports nothing is indistinguishable from a successful one, and prose in the summary registers nowhere. Skip the report only when `remi wiki repository outcome --help` shows the deployed CLI predates the command."
+      : "Bootstrap the Repository Wiki from the checked-out default branch. Create a non-empty root index.md reading map and a non-empty append-only root log.md; repository semantics choose the directory names, without a fixed vocabulary and without mirroring the source tree. Keep at most 20 body pages directly inside any directory, at most 5 non-index body pages at the root, and at most 4 levels of nesting. Resolve the checked-out HEAD revision, inspect remi wiki status and diff, then publish with remi wiki push --source-revision <sha>. Before the run ends, record the result with `remi wiki repository outcome <repo> --outcome <published|published_with_warnings|noop|blocked> --reason '<specifics>'`: a run that reports nothing is indistinguishable from a successful one, and prose in the summary registers nowhere. Skip the report only when `remi wiki repository outcome --help` shows the deployed CLI predates the command.";
     const run = store.runAutopilot(automation.id, {
       source: "api",
       prompt,
@@ -1231,6 +1242,65 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     c.header("Cache-Control", "no-store");
     return c.json({ token: store.revealRelayToken(workspaceId, engine) ?? "" });
   });
+  // Explicit "probe now": run discovery once (awaited, same 8s bound as the save
+  // path) and answer with the resulting snapshot, so the client can show the
+  // fresh model list / effort support instead of waiting for the 1h TTL refresh.
+  app.post("/api/workspaces/:id/relay-config/:engine/probe", async (c) => {
+    const workspaceId = c.req.param("id");
+    const engine = c.req.param("engine");
+    if (engine !== "claude" && engine !== "codex") return c.json({ error: "invalid engine" }, 400);
+    const denied = requireWorkspaceAdmin(c, store, workspaceId);
+    if (denied) return denied;
+    c.header("Cache-Control", "no-store");
+    return c.json(await probeGatewayModels(store, workspaceId, engine));
+  });
+  // ── Model gateway: administrator-declared reasoning levels ─────
+  // A gateway alias whose engine publishes no reasoning metadata (every Claude
+  // alias outside the ACP selector) is otherwise permanently unusable at a chosen
+  // effort. An administrator can state its levels here; that declaration is stored
+  // separately from the discovery snapshot and only ever fills a gap, so re-probing
+  // never erases it and it never overrides a real gateway/Runtime statement.
+  app.get("/api/workspaces/:id/relay-config/:engine/reasoning-levels", (c) => {
+    const workspaceId = c.req.param("id");
+    const engine = c.req.param("engine");
+    if (engine !== "claude" && engine !== "codex") return c.json({ error: "invalid engine" }, 400);
+    const denied = requireWorkspaceAdmin(c, store, workspaceId);
+    if (denied) return denied;
+    c.header("Cache-Control", "no-store");
+    return c.json(gatewayReasoningLevels(store, workspaceId, engine, currentRequestUserId(c)));
+  });
+  app.put("/api/workspaces/:id/relay-config/:engine/reasoning-levels", async (c) => {
+    const workspaceId = c.req.param("id");
+    const engine = c.req.param("engine");
+    if (engine !== "claude" && engine !== "codex") return c.json({ error: "invalid engine" }, 400);
+    const denied = requireWorkspaceAdmin(c, store, workspaceId);
+    if (denied) return denied;
+    c.header("Cache-Control", "no-store");
+    const body = await readJsonStrict<{ model?: unknown; levels?: unknown; default_level?: unknown }>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    const validation = validateGatewayReasoningLevels(engine, body);
+    if (!validation.ok) return c.json({ error: validation.error }, 400);
+    const updatedBy = currentRequestUserId(c);
+    // An empty level set means "stop declaring this model" — stored as a deleted row
+    // rather than an empty list, because an empty list reads as "unsupported" and
+    // would silently re-create the MUL-338 hang for that alias.
+    let deleted = false;
+    if (validation.levels.length === 0) {
+      deleted = store.deleteGatewayModelReasoning(workspaceId, engine, validation.modelId);
+    } else {
+      store.saveGatewayModelReasoning(workspaceId, engine, {
+        modelId: validation.modelId,
+        levels: validation.levels,
+        ...(validation.defaultLevel ? { defaultLevel: validation.defaultLevel } : {}),
+        updatedBy,
+      });
+    }
+    // The write answers with the same listing the GET returns (plus `deleted`), so
+    // the client never has to guess whether its own write took effect — a
+    // declaration can be outranked by a gateway/Runtime statement, and the row's
+    // `effective.source` is the only honest answer to that.
+    return c.json({ deleted, ...gatewayReasoningLevels(store, workspaceId, engine, updatedBy) });
+  });
   app.post("/api/workspaces/:id/leave", async (c) => {
     const workspaceId = c.req.param("id");
     const requester = loadCurrentWorkspaceMember(c, store, workspaceId);
@@ -1293,7 +1363,7 @@ function normalizeRepositoryWikiBatchOperations(input: {
   if (!Array.isArray(input.operations) || input.operations.length === 0) {
     throw new Error("repository wiki batch operations are required");
   }
-  if (input.operations.length > 256) throw new Error("repository wiki batch supports at most 256 operations");
+  if (input.operations.length > REPOSITORY_WIKI_BATCH_LIMIT) throw new Error(`repository wiki batch supports at most ${REPOSITORY_WIKI_BATCH_LIMIT} operations`);
   const operations: RepositoryWikiBatchOperation[] = [];
   for (const value of input.operations) {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid repository wiki batch operation");
@@ -1366,6 +1436,7 @@ interface RepositoryWikiBuildState {
   updated_at: string | null;
   source_revision: string | null;
   published: boolean | null;
+  outcome: import("@multiremi/store/repository-wiki-outcome.js").RepositoryWikiOutcome | null;
 }
 
 /**
@@ -1388,6 +1459,7 @@ function repositoryWikiBuildState(
       updated_at: null,
       source_revision: null,
       published: null,
+      outcome: null,
     };
   }
   const task = run.taskId ? store.getTask(run.taskId) : null;
@@ -1405,6 +1477,7 @@ function repositoryWikiBuildState(
     updated_at: run.completedAt ?? task?.updatedAt ?? run.triggeredAt,
     source_revision: autopilotRunSourceRevision(run),
     published: run.status === "completed" ? store.isRepositoryWikiRunPublished(run.id) : null,
+    outcome: task && run.repositoryId ? store.repositoryWikiTaskOutcome(task.workspaceId, run.repositoryId, task.id) : null,
   };
 }
 
@@ -1552,6 +1625,7 @@ function repositoryWikiRevisionResponse(revision: MultiremiRepositoryWikiDocRevi
 function repositoryWikiError(c: Context, error: unknown): Response {
   const message = error instanceof Error ? error.message : "repository wiki request failed";
   if (error instanceof RepositoryWikiUnavailableError) return c.json({ error: message }, 503);
+  if (error instanceof RepositoryWikiLogHistoryError) return c.json({ error: message }, 409);
   if (error instanceof RepositoryWikiLinkValidationError) return c.json({ error: message }, 409);
   if (message.includes("not found")) return c.json({ error: message }, 404);
   if (message.includes("conflict") || message.includes("already exists")) return c.json({ error: message }, 409);

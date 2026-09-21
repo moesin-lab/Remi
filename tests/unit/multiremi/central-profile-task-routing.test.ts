@@ -43,6 +43,42 @@ describe("central profile task routing", () => {
     expect(store.getExecutionGroup(a.id)?.runtimeIds).toContain(runtime.id);
   });
 
+  it("freezes a fallback task's selected model inside its central connection", () => {
+    const { store, runtime, first, a, agentA, ready } = setup();
+    store.setRuntimeCodexProfile(runtime.id, first.profile);
+    store.updateRuntimeModels(runtime.id, [
+      { id: first.profile.model, label: "Primary", provider: "codex", default: true },
+      { id: "fallback-model", label: "Fallback", provider: "codex", default: false },
+    ], first.profile);
+    store.updateAgent(agentA.id, { model: first.profile.model });
+    ready(a.id);
+    // Recovery stamps the effective target separately from the Agent default.
+    const task = store.createTask({ agentId: agentA.id, prompt: "Fallback recovery", executionModel: "fallback-model" });
+    const claimed = store.claimTask(runtime.id)!;
+    expect(claimed.id).toBe(task.id);
+    expect(claimed.executionModel).toBe("fallback-model");
+    expect(claimed.codexProfile).toEqual({ ...first.profile, model: "fallback-model" });
+    expect(store.getExecutionProfile(first.id, "local")?.profile.model).toBe(first.profile.model);
+  });
+
+  it("keeps a frozen native retry eligible when newer work with the same target is unavailable", () => {
+    const { store, runtime, a, agentA, ready } = setup();
+    store.saveExecutionGroup("local", { name: "Native", provider: "codex", profile_id: null, runtime_ids: [runtime.id] }, a.id);
+    store.updateRuntimeModels(runtime.id, [{ id: "native-model", label: "Native", provider: "codex", default: true }]);
+    store.updateAgent(agentA.id, { model: "native-model" });
+    ready(a.id);
+    const task = store.createTask({ agentId: agentA.id, issueId: store.createIssue({ title: "Native retry" }).id, prompt: "Original" });
+    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    store.startTask(task.id);
+    store.failTask(task.id, { error: "Runtime unavailable", failureReason: "runtime_offline" });
+    const retry = store.listTasks().find(candidate => candidate.parentTaskId === task.id)!;
+    expect(retry.codexProfile).toBeNull();
+    store.updateRuntimeModels(runtime.id, [{ id: "replacement", label: "Replacement", provider: "codex", default: true }]);
+    const newer = store.createTask({ agentId: agentA.id, prompt: "New work", priority: 10 });
+    expect(store.claimTask(runtime.id)?.id).toBe(retry.id);
+    expect(store.getTask(newer.id)?.status).toBe("queued");
+  });
+
   it("freezes connections per task and fences the next revision until applied", () => {
     const { store, runtime, first, a, agentA, ready } = setup();
     ready(a.id);

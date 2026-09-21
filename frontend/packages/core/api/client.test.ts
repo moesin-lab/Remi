@@ -1,11 +1,93 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClient, ApiError } from "./client";
+import { toSafeErrorDetails } from "./http";
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("toSafeErrorDetails", () => {
+  it("allowlists ApiError metadata without exposing its body or cause", () => {
+    const sensitiveToken = "secret-token-value";
+    const sensitiveMessage = "private message body";
+    const sensitiveCause = "credential-bearing upstream URL";
+    const error = new ApiError("request rejected", 502, "Bad Gateway", {
+      token: sensitiveToken,
+      content: sensitiveMessage,
+    });
+    Object.defineProperty(error, "cause", {
+      value: new Error(sensitiveCause),
+      enumerable: true,
+    });
+
+    const details = toSafeErrorDetails(error);
+
+    expect(details).toEqual({
+      name: "ApiError",
+      message: "request rejected",
+      status: 502,
+      statusText: "Bad Gateway",
+    });
+    expect(details).not.toHaveProperty("body");
+    expect(details).not.toHaveProperty("cause");
+    expect(JSON.stringify(details)).not.toContain(sensitiveToken);
+    expect(JSON.stringify(details)).not.toContain(sensitiveMessage);
+    expect(JSON.stringify(details)).not.toContain(sensitiveCause);
+  });
+
+  it.each(["raw failure", { message: "object failure" }, undefined])(
+    "uses a fixed safe fallback for non-Error input %#",
+    (error) => {
+      expect(toSafeErrorDetails(error)).toEqual({
+        name: "UnknownError",
+        message: "Unknown error",
+      });
+    },
+  );
+});
+
 describe("ApiClient", () => {
+  it("sends the parent session in snake case and preserves side-chat metadata", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: "sess_side",
+      issue_id: "issue_1",
+      workspace_id: "ws_1",
+      title: "Review",
+      status: "active",
+      holds_workspace: false,
+      parent_session_id: "sess_main",
+      inherit_mode: "snapshot",
+      inherit_cutoff_seq: 42,
+      inherited_event_count: 38,
+      created_at: "2026-09-18T00:00:00Z",
+      updated_at: "2026-09-18T00:00:00Z",
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient("https://api.example.test");
+
+    await expect(client.createIssueSession("issue_1", {
+      title: "Review",
+      parent_session_id: "sess_main",
+    })).resolves.toMatchObject({
+      id: "sess_side",
+      holds_workspace: false,
+      parent_session_id: "sess_main",
+      inherit_mode: "snapshot",
+      inherit_cutoff_seq: 42,
+      inherited_event_count: 38,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.test/api/issues/issue_1/sessions",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ title: "Review", parent_session_id: "sess_main" }),
+      }),
+    );
+  });
+
   it("preserves HTTP status on failed requests", async () => {
     vi.stubGlobal(
       "fetch",

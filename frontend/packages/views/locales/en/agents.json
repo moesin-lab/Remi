@@ -129,6 +129,20 @@
     "agent_restored_toast": "Agent restored",
     "restore_failed_toast": "Failed to restore agent"
   },
+  "fallback": {
+    "model_label": "Fallback model",
+    "thinking_label": "Fallback reasoning effort",
+    "description": "Only takes over the current task when the primary model's gateway resources are unavailable.",
+    "unconfigured": "Not configured",
+    "same_as_primary": "Must differ from the primary model",
+    "clear": "Remove fallback model",
+    "actual_model": "Execution model",
+    "switched": "Switched from primary to fallback",
+    "switch_count": "{{count}} switch",
+    "reason_gateway": "Gateway resources unavailable",
+    "reason_no_account": "No available gateway account",
+    "reason_unknown": "Resource unavailable"
+  },
   "inspector": {
     "section_properties": "Properties",
     "section_details": "Details",
@@ -163,6 +177,8 @@
   "pickers": {
     "concurrency_tooltip": "Concurrency · {{value}} max concurrent tasks",
     "concurrency_range": "Max concurrent tasks ({{min}}–{{max}})",
+    "model_unavailable": "Not in execution catalog · Cannot run",
+    "model_execution_unknown": "Execution capability unknown · Refreshing catalog",
     "model_default": "Default",
     "model_tooltip": "Model · {{value}}",
     "model_search_placeholder": "Search or type a model ID",
@@ -174,9 +190,11 @@
     "model_clear": "Clear (use provider default)",
     "model_clear_title": "Clear and fall back to the runtime's provider default",
     "thinking_default": "Follow runtime default",
+    "thinking_unsupported": "Reasoning configuration not supported",
+    "thinking_model_default": "Model default: {{value}}",
     "thinking_loading": "Loading reasoning options...",
-    "thinking_load_error": "Could not load reasoning options",
-    "thinking_unknown": "Reasoning options not reported",
+    "thinking_load_error": "Reasoning capability loading failed",
+    "thinking_unknown": "Reasoning capability unknown",
     "thinking_tooltip": "Reasoning effort · {{value}}",
     "thinking_clear": "Follow runtime default",
     "thinking_clear_title": "Clear the override and use the runtime's default reasoning effort",
@@ -473,10 +491,8 @@
     "agent_count_other": "{{count}} agents"
   },
   "execution_target": {
-    "automatic": "Automatic · {{provider}}",
-    "automatic_hint": "Tasks can run on any Runtime of this engine available to this agent across the workspace.",
-    "label": "Execution group",
-    "placeholder": "Choose an execution group",
+    "label": "Execution mode",
+    "placeholder": "Choose model routing or a fixed execution group",
     "unavailable": "Execution group unavailable; choose another group",
     "loading": "Loading execution groups…",
     "error": "Could not load execution groups",
@@ -485,6 +501,11 @@
     "offline": "This group has no online Runtime. Tasks will wait for a member to reconnect.",
     "offline_badge": "Offline",
     "members": "{{online}} online · {{count}} Runtime",
-    "pinned": "Currently pinned to Runtime {{runtime}}. Select an execution group again to allow scheduling within the group."
+    "pinned": "Currently pinned to Runtime {{runtime}}. Select an execution group again to allow scheduling within the group.",
+    "automatic": "Automatic · {{provider}}",
+    "automatic_hint": "Tasks can run on any Runtime of this engine available to this agent across the workspace.",
+    "model_routing": "Model routing · {{provider}}",
+    "model_routing_hint": "Match the selected model and thinking level across available execution groups and Runtimes. With no model selected, use a compatible Runtime default.",
+    "fixed_group": "Fixed execution group · {{group}}"
   }
 }

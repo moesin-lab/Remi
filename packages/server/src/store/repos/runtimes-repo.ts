@@ -1,4 +1,5 @@
-import { runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
+import { createLogger } from "@shared/logger.js";
+import { catalogAllowsModel, modelThinkingState, providerDeclaresReasoningLevels, runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
 import { syncRuntimeExecutionGroups, getExecutionGroup, getGroupExecutionProfile } from "@multiremi/store/execution-groups.js";
 import { WorkspacesRepo } from "@multiremi/store/repos/workspaces-repo.js";
@@ -10,6 +11,7 @@ import { WorkspacesRepo } from "@multiremi/store/repos/workspaces-repo.js";
 // (./runtime-request-queue.ts) and configured by the specs below. Each family keeps its
 // own `create` (distinct INSERT columns) and `report` (distinct completed-branch payload); `get`,
 // `claim` and the timeout sweep are the shared template.
+import { canonicalJson } from "@multiremi/agent-plugins/import.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import { parseRuntimeClaudeProfile, type RuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
@@ -99,6 +101,24 @@ import {
 } from "@multiremi/contracts/types.js";
 
 type Row = Record<string, unknown>;
+
+const log = createLogger("runtimes");
+
+// `runtimeSupportsAgentModel` runs per Runtime per queued task (claim, capability
+// sweep, repool), so an unconditional log would flood. The decision itself is
+// silent by design — this is the audit trail that says *why* a configured effort
+// was ignored, keyed so each (provider, model, level) combination is reported
+// once per process.
+const reportedDroppedEfforts = new Set<string>();
+
+function logEffortNotApplicable(provider: string, runtimeId: string, model: string, level: string): void {
+  const key = `${provider}\0${model}\0${level}`;
+  if (reportedDroppedEfforts.has(key)) return;
+  // Bounded: a workspace with many aliases must not grow this without limit.
+  if (reportedDroppedEfforts.size > 500) reportedDroppedEfforts.clear();
+  reportedDroppedEfforts.add(key);
+  log.info(`ignoring reasoning level "${level}" for ${provider} model "${model}": the model declares no levels (runtime ${runtimeId})`);
+}
 
 export class RuntimeLocalSkillRequestError extends Error {}
 
@@ -251,9 +271,14 @@ export class RuntimesRepo {
   }
 
   listWorkspaceProviderProfileModels(workspaceId: string, provider: "codex" | "claude"): string[] {
-    const rows = this.ctx.db.query(`SELECT p.profile FROM multiremi_runtime_${provider}_profiles p
-      JOIN multiremi_runtimes r ON r.id = p.runtime_id WHERE COALESCE(r.workspace_id, 'local') = ?`).all(workspaceId) as { profile: string }[];
-    return rows.map(row => (provider === "codex" ? parseRuntimeCodexProfile : parseRuntimeClaudeProfile)(JSON.parse(row.profile))!.model);
+    const rows = this.ctx.db.query(`SELECT p.profile, m.model_id FROM multiremi_runtime_${provider}_profiles p
+      JOIN multiremi_runtimes r ON r.id = p.runtime_id
+      LEFT JOIN multiremi_runtime_models m ON m.runtime_id = r.id
+      WHERE COALESCE(r.workspace_id, 'local') = ?`).all(workspaceId) as { profile: string; model_id: string | null }[];
+    return [...new Set(rows.flatMap(row => [
+      (provider === "codex" ? parseRuntimeCodexProfile : parseRuntimeClaudeProfile)(JSON.parse(row.profile))!.model,
+      ...(row.model_id ? [row.model_id] : []),
+    ]))];
   }
 
   getRuntimeProviderKey(runtimeId: string, credentialId: string): string | null {
@@ -289,7 +314,7 @@ export class RuntimesRepo {
       } else {
         this.ctx.db.run(`DELETE FROM multiremi_runtime_${provider}_profiles WHERE runtime_id = ?`, [id]);
       }
-      this.replaceRuntimeModelsWithinTransaction(id, profile ? [{ id: profile.model, label: profile.model, provider, default: true }] : [], provider, nowIso());
+      this.replaceRuntimeModelsWithinTransaction(id, profile ? [{ id: profile.model, label: profile.model, provider, default: true }] : [], provider, nowIso(), profile);
       return profile;
     });
   }
@@ -574,6 +599,7 @@ export class RuntimesRepo {
            execution_fingerprint = NULL,
            work_dir = NULL,
            cursor_seq = 0,
+           parent_cursor_seq = 0,
            generation = generation + 1,
            last_task_id = NULL,
            updated_at = ?
@@ -1048,12 +1074,13 @@ export class RuntimesRepo {
     return this.listRuntimeModelsForExistingRuntime(runtimeId);
   }
 
-  updateRuntimeModels(runtimeId: string, models: MultiremiRuntimeModel[]): MultiremiRuntimeModel[] {
+  updateRuntimeModels(runtimeId: string, models: MultiremiRuntimeModel[], modelProfile?: RuntimeCodexProfile | null): MultiremiRuntimeModel[] {
+    let accepted = false;
     const updated = this.withRuntimeLifecycleLock(runtimeId, (runtime) => {
-      this.replaceRuntimeModelsWithinTransaction(runtimeId, models, runtime.provider, nowIso());
+      accepted = this.replaceRuntimeModelsWithinTransaction(runtimeId, models, runtime.provider, nowIso(), modelProfile);
       return this.listRuntimeModelsForExistingRuntime(runtimeId);
     });
-    this.publishRuntimeModelsUpdated(runtimeId);
+    if (accepted) this.publishRuntimeModelsUpdated(runtimeId);
     return updated;
   }
 
@@ -1098,12 +1125,18 @@ export class RuntimesRepo {
     if (status === "completed") {
       this.withRuntimeLifecycleLock(runtimeId, (runtime) => {
         const models = normalizeRuntimeModels(input.models ?? [], runtime.provider);
-        this.replaceRuntimeModelsWithinTransaction(runtimeId, models, runtime.provider, now);
+        if (!this.replaceRuntimeModelsWithinTransaction(runtimeId, models, runtime.provider, now, input.model_profile)) {
+          this.ctx.db.run(
+            `UPDATE multiremi_runtime_model_list_requests SET status = 'failed', error = ?, updated_at = ? WHERE id = ?`,
+            ["Runtime connection changed during model discovery; refresh with an updated daemon", now, requestId],
+          );
+          return;
+        }
         this.ctx.db.run(
           `UPDATE multiremi_runtime_model_list_requests
            SET status = 'completed', models = ?, supported = ?, error = NULL, updated_at = ?
            WHERE id = ?`,
-          [toJson(models), input.supported === false ? 0 : 1, now, requestId],
+          [toJson(this.listRuntimeModelsForExistingRuntime(runtimeId)), input.supported === false ? 0 : 1, now, requestId],
         );
       });
     } else {
@@ -1114,8 +1147,9 @@ export class RuntimesRepo {
         [input.error ?? "runtime model list failed", now, requestId],
       );
     }
-    if (status === "completed") this.publishRuntimeModelsUpdated(runtimeId);
-    return this.getRuntimeModelListRequest(runtimeId, requestId)!;
+    const result = this.getRuntimeModelListRequest(runtimeId, requestId)!;
+    if (result.status === "completed") this.publishRuntimeModelsUpdated(runtimeId);
+    return result;
   }
 
   createRuntimeDirectoryScanRequest(runtimeId: string, params: { root?: string; maxDepth?: number; mode?: "scan" | "browse" } = {}): MultiremiRuntimeDirectoryScanRequest {
@@ -1864,18 +1898,22 @@ export class RuntimesRepo {
    * so single-machine NULL owners still pair). The provider must also match.
    */
   runtimeCanRunAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
+    return this.runtimeCanRouteAgent(runtime, agent) && this.runtimeSupportsAgentModel(runtime, agent);
+  }
+
+  /** Routing eligibility is independent of liveness, concurrency and model capability. */
+  runtimeCanRouteAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
     if (agent.runtimeId && agent.runtimeId !== runtime.id) return false;
     if (agent.executionGroupId && !this.ctx.db.query(`SELECT 1 FROM multiremi_execution_group_members
       WHERE runtime_id = ? AND provider = ? AND workspace_id = ? AND group_id = ?`)
       .get(runtime.id, agent.provider, agent.workspaceId ?? "local", agent.executionGroupId)) return false;
-    if (agent.executionGroupId && !agent.runtimeId && !this.runtimeSupportsAgentModel(runtime, agent)) return false;
     if (runtime.provider !== "any" && runtime.provider !== agent.provider) return false;
     // A task runs in its agent's workspace and the claim SQL requires the
     // runtime's workspace to match, so a runtime in a different workspace can
     // never run this agent (COALESCE(...,'local') for NULL-workspace runtimes).
     if ((runtime.workspaceId ?? "local") !== (agent.workspaceId ?? "local")) return false;
-    if (runtime.visibility === "public") return true;
-    return (runtime.ownerId ?? "local") === (agent.ownerId ?? "local");
+    if (runtime.visibility !== "public" && (runtime.ownerId ?? "local") !== (agent.ownerId ?? "local")) return false;
+    return true;
   }
 
   runtimeProfileModelEvidenceMatches(runtimeId: string, provider: string, profile: RuntimeCodexProfile): boolean {
@@ -1896,7 +1934,7 @@ export class RuntimesRepo {
     return runtimeId ? this.getRuntimeExecutionProfile(runtimeId, agent.provider) : null;
   }
 
-  private runtimeSupportsAgentModel(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
+  runtimeSupportsAgentModel(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
     if (!agent.model && !agent.thinkingLevel) return true;
     const workspaces = new WorkspacesRepo(this.ctx);
     const group = agent.executionGroupId ? getExecutionGroup(this.ctx.db, agent.executionGroupId, agent.workspaceId) : null;
@@ -1905,13 +1943,40 @@ export class RuntimesRepo {
       getRelayModelDiscovery: (id) => workspaces.getRelayModelDiscovery(id),
       getRelayConfigForDaemon: (id) => workspaces.getRelayConfigForDaemon(id),
       getGatewayModels: (id, provider) => workspaces.getGatewayModels(id, provider),
+      listGatewayModelReasoning: (id, provider) => workspaces.listGatewayModelReasoning(id, provider),
       listWorkspaceCodexProfileModels: (id) => this.listWorkspaceCodexProfileModels(id),
       listWorkspaceClaudeProfileModels: (id) => this.listWorkspaceClaudeProfileModels(id),
       getRuntimeExecutionProfile: (id, provider) => this.getRuntimeExecutionProfile(id, provider),
       runtimeProfileModelEvidenceMatches: (id, provider, profile) => this.runtimeProfileModelEvidenceMatches(id, provider, profile),
-    }, agent.workspaceId, runtime, profileOverride).find(entry => entry.provider === agent.provider)?.models ?? [];
-    const model = agent.model ? catalog.find(model => model.id === agent.model) : catalog.find(model => model.default);
-    return Boolean(model && (!agent.thinkingLevel || model.thinking?.supported_levels.some(level => level.value === agent.thinkingLevel)));
+    }, agent.workspaceId, runtime, profileOverride).find(entry => entry.provider === agent.provider);
+    const models = catalog?.models ?? [];
+    if (!catalogAllowsModel(catalog, agent.model ?? "")) return false;
+    if (agent.model && !models.some(model => model.id === agent.model)
+      && ((!agent.runtimeId && (agent.provider === "codex" || runtime.metadata[`${agent.provider}_profiles`] === 1))
+        || catalog?.model_catalog_status === "ready" || agent.thinkingLevel
+        || (agent.executionGroupId && !agent.runtimeId))) return false;
+    if (!agent.thinkingLevel) return true;
+    const capability = modelThinkingState(models, agent.model ?? "", catalog?.default_thinking);
+    if (capability.state === "supported") {
+      return capability.levels.some(level => level.value === agent.thinkingLevel);
+    }
+    // A load failure is the execution engine telling us it cannot honour this
+    // model right now; that state recovers, so keep the Runtime out.
+    if (capability.state === "error") return false;
+    // Any engine that reports reasoning levels at all is taken at its word: an
+    // empty level list means it cannot honour the saved effort. That is
+    // MUL-330/#220's contract and it stays blocking.
+    if (providerDeclaresReasoningLevels(agent.provider)) return false;
+    // Claude reports none — the gateway inventory carries ids and labels only,
+    // and the ACP bridge reports the native selector only for its own aliases —
+    // so an empty level list says nothing about the model. The saved effort is
+    // not a capability this Runtime can fail to provide. Dropping it is the only
+    // option that does not fabricate levels from another model
+    // (docs/runtime-model-discovery.md), and treating it as a constraint instead
+    // strands every task on every Runtime forever: the Agent keeps its effort, no
+    // catalog ever advertises it, and nothing clears the selection.
+    logEffortNotApplicable(agent.provider, runtime.id, agent.model ?? "", agent.thinkingLevel);
+    return true;
   }
 
   getRuntimeByDaemonAndProvider(daemonId: string, provider: string): MultiremiRuntime | null {
@@ -2010,15 +2075,19 @@ export class RuntimesRepo {
     models: MultiremiRuntimeModel[],
     provider: string,
     now = nowIso(),
-  ): void {
+    modelProfile?: RuntimeCodexProfile | null,
+  ): boolean {
     const profile = this.getRuntimeExecutionProfile(runtimeId, provider);
+    // A report belongs to the connection it probed. Legacy custom reports have
+    // no identity and must not replace a directory discovered for a newer one.
+    if (modelProfile === undefined ? profile !== null : canonicalJson(modelProfile) !== canonicalJson(profile)) return false;
     const normalized = normalizeRuntimeModels(profile ? runtimeConnectionModels(profile, provider, models) : models, provider);
     this.ctx.db.run("DELETE FROM multiremi_runtime_models WHERE runtime_id = ?", [runtimeId]);
     for (const model of normalized) {
       this.ctx.db.run(
         `INSERT INTO multiremi_runtime_models (
-          runtime_id, model_id, label, provider, is_default, thinking, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          runtime_id, model_id, label, provider, is_default, thinking, created_at, updated_at, is_provider_default, catalog
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           runtimeId,
           model.id,
@@ -2028,9 +2097,12 @@ export class RuntimesRepo {
           model.thinking ? toJson(model.thinking) : null,
           now,
           now,
+          model.providerDefault ? 1 : 0,
+          model.catalog ? toJson(model.catalog) : null,
         ],
       );
     }
+    return true;
   }
 
   private runtimeUsageSummary(runtimeId: string): Pick<MultiremiRuntime,
@@ -2191,9 +2263,18 @@ function normalizeRuntimeModels(models: MultiremiRuntimeModel[], provider: strin
       label: String(model.label ?? id).trim() || id,
       provider: String(model.provider ?? provider ?? "").trim() || provider,
       default: Boolean(model.default),
+      ...(model.providerDefault === true ? { providerDefault: true } : {}),
       thinking: normalizeRuntimeModelThinking(model.thinking),
+      ...(model.catalog ? { catalog: normalizeRuntimeModelCatalog(model.catalog) } : {}),
     };
   });
+}
+
+function normalizeRuntimeModelCatalog(value: NonNullable<MultiremiRuntimeModel["catalog"]>): NonNullable<MultiremiRuntimeModel["catalog"]> {
+  return value.status === "ready" ? { status: "ready" } : {
+    status: "error",
+    error: typeof value.error === "string" ? value.error.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200) : "Codex model catalog unavailable",
+  };
 }
 
 function normalizeRuntimeModelThinking(value: MultiremiRuntimeModel["thinking"]): MultiremiRuntimeModel["thinking"] | undefined {
@@ -2203,10 +2284,17 @@ function normalizeRuntimeModelThinking(value: MultiremiRuntimeModel["thinking"])
     label: String(level.label ?? level.value ?? "").trim(),
     ...(level.description ? { description: String(level.description) } : {}),
   })).filter((level) => level.value);
-  if (!supportedLevels.length) return undefined;
+  const status = value.status;
+  if (status !== undefined && !["supported", "unsupported", "unknown", "error"].includes(status)) {
+    return { status: "error", supportedLevels: [], error: "invalid runtime reasoning metadata" };
+  }
+  const availableLevels = status && status !== "supported" ? [] : supportedLevels;
+  const defaultLevel = value.defaultLevel ?? value.default_level;
   return {
-    supportedLevels,
-    ...(value.defaultLevel || value.default_level ? { defaultLevel: String(value.defaultLevel ?? value.default_level) } : {}),
+    supportedLevels: availableLevels,
+    ...(defaultLevel && availableLevels.some((level) => level.value === defaultLevel) ? { defaultLevel: String(defaultLevel) } : {}),
+    ...(status ? { status } : {}),
+    ...(status === "error" && value.error ? { error: String(value.error).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200) } : {}),
   };
 }
 
@@ -2518,7 +2606,9 @@ function toRuntimeModel(row: Row): MultiremiRuntimeModel {
     label: String(row.label ?? row.model_id),
     provider: String(row.provider ?? ""),
     default: Boolean(Number(row.is_default ?? 0)),
+    ...(Number(row.is_provider_default) === 1 ? { providerDefault: true } : {}),
     thinking: row.thinking == null ? undefined : parseJson(row.thinking, undefined),
+    ...(row.catalog == null ? {} : { catalog: parseJson(row.catalog, undefined) }),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };

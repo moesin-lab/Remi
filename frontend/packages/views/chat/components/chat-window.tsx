@@ -31,7 +31,8 @@ import {
   memberListOptions,
 } from "@multiremi/core/workspace/queries";
 import { canAssignAgent } from "@multiremi/views/issues/components";
-import { api } from "@multiremi/core/api";
+import { api, toSafeErrorDetails } from "@multiremi/core/api";
+import { projectListOptions } from "@multiremi/core/projects/queries";
 import {
   useAgentPresenceDetail,
   useWorkspaceAgentAvailability,
@@ -60,6 +61,7 @@ import { useChatScopeSubscription } from "@multiremi/core/realtime";
 import { ChatMessageList, ChatMessageSkeleton } from "./chat-message-list";
 import { ChatInput } from "./chat-input";
 import { AgentDropdown } from "./agent-dropdown";
+import { ProjectDisplay } from "./project-dropdown";
 import { SessionDropdown } from "./session-dropdown";
 import { EmptyState } from "./chat-empty-state";
 import { ChatResizeHandles } from "./chat-resize-handles";
@@ -77,6 +79,7 @@ import { useT } from "../../i18n";
 import { useNavigation } from "../../navigation";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import { getCurrentWsId } from "@multiremi/core/platform";
+import { createSafeId } from "@multiremi/core/utils";
 import { PageHeader } from "../../layout/page-header";
 import { ChatQueue } from "./chat-queue";
 
@@ -120,11 +123,12 @@ export function ChatWindow({
   const { t } = useT("chat");
   const wsId = useWorkspaceId();
   const [runtimeWorkspaceId, setRuntimeWorkspaceId] = useState<string | null>(null);
-  const [projectId, setProjectId] = useState<string | null>(null);
-  useEffect(() => { setRuntimeWorkspaceId(null); setProjectId(null); }, [wsId]);
+  useEffect(() => { setRuntimeWorkspaceId(null); }, [wsId]);
   const isOpen = useChatStore((s) => s.isOpen);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const selectedAgentId = useChatStore((s) => s.selectedAgentId);
+  const draftProjectId = useChatStore((s) => s.draftProjectId);
+  const setDraftProjectId = useChatStore((s) => s.setDraftProjectId);
   const setOpen = useChatStore((s) => s.setOpen);
   const storeSetActiveSession = useChatStore((s) => s.setActiveSession);
   const setActiveSession = useCallback(
@@ -139,6 +143,7 @@ export function ChatWindow({
   const user = useAuthStore((s) => s.user);
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
   const { data: members = [] } = useQuery(memberListOptions(wsId));
+  const { data: projects = [] } = useQuery(projectListOptions(wsId));
   // Single sessions cache — eliminates the separate active/all queries
   // that used to drift during the WS-invalidate window.
   const {
@@ -329,9 +334,9 @@ export function ChatWindow({
         try {
           const session = await createSession.mutateAsync({
             agent_id: activeAgent.id,
-            runtime_workspace_id: runtimeWorkspaceId,
-            project_id: projectId,
+            ...(runtimeWorkspaceId ? { runtime_workspace_id: runtimeWorkspaceId } : {}),
             title: titleSeed.slice(0, 50),
+            ...(draftProjectId ? { project_id: draftProjectId } : {}),
           });
           return session.id;
         } finally {
@@ -341,7 +346,7 @@ export function ChatWindow({
       sessionPromiseRef.current = promise;
       return promise;
     },
-    [activeSessionId, activeAgent, createSession, runtimeWorkspaceId, projectId],
+    [activeSessionId, activeAgent, createSession, runtimeWorkspaceId, draftProjectId],
   );
 
   const handleUploadFile = useCallback(
@@ -378,7 +383,7 @@ export function ChatWindow({
       const isFollowup = !!priorPending?.task_id;
       const sentAt = new Date().toISOString();
       const optimistic: ChatMessage = {
-        id: `optimistic-${crypto.randomUUID()}`,
+        id: `optimistic-${createSafeId()}`,
         chat_session_id: sessionId,
         role: "user",
         content,
@@ -433,7 +438,10 @@ export function ChatWindow({
           });
         }
       } catch (error) {
-        apiLogger.error("sendChatMessage.error", { sessionId, error });
+        apiLogger.error("sendChatMessage.error", {
+          sessionId,
+          error: toSafeErrorDetails(error),
+        });
         throw error;
       } finally {
         // Drop only this send's optimistic row. Concurrent WS messages stay intact.
@@ -511,6 +519,7 @@ export function ChatWindow({
         previousSessionId: activeSessionId,
       });
       setSelectedAgentId(agent.id);
+      if (activeSessionId) setDraftProjectId(null);
       // Reset session when switching agent
       setActiveSession(null, agent.id);
     },
@@ -519,6 +528,7 @@ export function ChatWindow({
       selectedAgentId,
       activeSessionId,
       setSelectedAgentId,
+      setDraftProjectId,
       setActiveSession,
     ],
   );
@@ -529,9 +539,9 @@ export function ChatWindow({
       previousPendingTask: pendingTaskId,
     });
     setRuntimeWorkspaceId(null);
-    setProjectId(null);
+    setDraftProjectId(null);
     setActiveSession(null);
-  }, [activeSessionId, pendingTaskId, setActiveSession]);
+  }, [activeSessionId, pendingTaskId, setActiveSession, setDraftProjectId]);
 
   const handleSelectSession = useCallback(
     (session: ChatSession) => {
@@ -684,12 +694,23 @@ export function ChatWindow({
         )}
       </div>
 
-      <div className="shrink-0 border-b px-3 py-2">
-        <WorkLocationPicker wsId={wsId} value={activeSessionId ? currentSession?.runtime_workspace_id ?? null : runtimeWorkspaceId}
-          projectId={activeSessionId ? currentSession?.project_id ?? null : projectId}
-          onChange={location => { setProjectId(location.project_id); setRuntimeWorkspaceId(location.runtime_workspace_id); }}
-          disabled={Boolean(activeSessionId) || createSession.isPending} />
+      <div className="flex min-w-0 items-center border-b px-4 py-1.5">
+        {activeSessionId && !currentSession?.runtime_workspace_id ? (
+          <ProjectDisplay projects={projects} projectId={currentSession?.project_id ?? null} />
+        ) : (
+          <WorkLocationPicker
+            wsId={wsId}
+            value={activeSessionId ? currentSession?.runtime_workspace_id ?? null : runtimeWorkspaceId}
+            projectId={activeSessionId ? currentSession?.project_id ?? null : draftProjectId}
+            onChange={location => {
+              setDraftProjectId(location.project_id);
+              setRuntimeWorkspaceId(location.runtime_workspace_id);
+            }}
+            disabled={Boolean(activeSessionId) || createSession.isPending}
+          />
+        )}
       </div>
+
       {/* Messages / skeleton / empty state */}
       {messagesError ? (
         <div

@@ -5,6 +5,8 @@ export {
   PreviewUnsupportedError,
 } from "./client";
 export type { ApiClientOptions } from "./client";
+export { toSafeErrorDetails } from "./http";
+export type { SafeErrorDetails } from "./http";
 export {
   ApiContractError,
   parseStrictResponse,
@@ -14,7 +16,18 @@ export {
 export type { ParseOptions } from "./schema";
 export { DuplicateIssueErrorBodySchema } from "./schemas";
 export type { DuplicateIssueErrorBody } from "./schemas";
-export type { RelayConfigResponse, RelayEngineConfig } from "./schemas";
+export type {
+  RelayConfigResponse,
+  RelayEngineConfig,
+  RelayEngineProbe,
+  RelayReasoningLevelEffective,
+  RelayReasoningLevelManual,
+  RelayReasoningLevelManualState,
+  RelayReasoningLevelManualStateCode,
+  RelayReasoningLevelModel,
+  RelayReasoningLevelsResponse,
+  RelayReasoningLevelSaveResult,
+} from "./schemas";
 export type {
   IssueSessionArchivesResponse,
   SessionArchive,

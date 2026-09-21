@@ -50,9 +50,9 @@ export class AgentsSkillsRepo {
       this.ctx.db.run(
         `INSERT INTO multiremi_agents (
           id, workspace_id, name, description, avatar_url, provider, owner_id, visibility, runtime_id, instructions, skills, executable, model,
-          max_concurrent_tasks, allowed_tools, custom_env, custom_args, mcp_config, thinking_level,
+          fallback_model, fallback_thinking_level, max_concurrent_tasks, allowed_tools, custom_env, custom_args, mcp_config, thinking_level,
           issue_creation_requires_proposal, role, supervisor, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           workspaceId,
@@ -67,6 +67,8 @@ export class AgentsSkillsRepo {
           toJson(input.skills ?? []),
           input.executable ?? null,
           input.model ?? null,
+          cleanOptionalString(input.fallbackModel ?? input.fallback_model),
+          cleanOptionalString(input.fallbackThinkingLevel ?? input.fallback_thinking_level),
           normalizeRuntimeConcurrency(input.maxConcurrentTasks ?? input.max_concurrent_tasks ?? 6),
           toJson(input.allowedTools ?? input.allowed_tools ?? []),
           toJson(input.customEnv ?? input.custom_env ?? {}),
@@ -178,6 +180,8 @@ export class AgentsSkillsRepo {
         skills = ?,
         executable = ?,
         model = ?,
+        fallback_model = ?,
+        fallback_thinking_level = ?,
         max_concurrent_tasks = ?,
         allowed_tools = ?,
         custom_env = ?,
@@ -204,6 +208,12 @@ export class AgentsSkillsRepo {
         input.skills === undefined ? toJson(current.skills) : toJson(input.skills),
         input.executable === undefined ? current.executable : input.executable,
         input.model === undefined ? current.model : input.model,
+        hasAnyField(input, "fallbackModel", "fallback_model")
+          ? cleanOptionalString(input.fallbackModel ?? input.fallback_model)
+          : current.fallbackModel,
+        hasAnyField(input, "fallbackThinkingLevel", "fallback_thinking_level")
+          ? cleanOptionalString(input.fallbackThinkingLevel ?? input.fallback_thinking_level)
+          : current.fallbackThinkingLevel,
         hasAnyField(input, "maxConcurrentTasks", "max_concurrent_tasks")
           ? normalizeRuntimeConcurrency(input.maxConcurrentTasks ?? input.max_concurrent_tasks)
           : current.maxConcurrentTasks,
@@ -242,7 +252,10 @@ export class AgentsSkillsRepo {
     const ownerChanged = (updated.ownerId ?? "local") !== (current.ownerId ?? "local");
     const workspaceChanged = updated.workspaceId !== current.workspaceId;
     const runtimeChanged = updated.runtimeId !== current.runtimeId || updated.executionGroupId !== current.executionGroupId;
-    const modelChanged = updated.model !== current.model || updated.thinkingLevel !== current.thinkingLevel;
+    const managedGroup = updated.executionGroupId
+      ? getExecutionGroup(this.ctx.db, updated.executionGroupId, updated.workspaceId)?.managed : false;
+    const modelChanged = Boolean(managedGroup)
+      && (updated.model !== current.model || updated.thinkingLevel !== current.thinkingLevel);
     if (providerChanged || ownerChanged || workspaceChanged || runtimeChanged || modelChanged) {
       // Dispatched tasks contain a frozen connection but hydrate Agent model
       // settings on recovery. Retire those unstarted snapshots when the user
@@ -859,11 +872,15 @@ export function toAgent(row: Row): MultiremiAgent {
     max_concurrent_tasks: Number(row.max_concurrent_tasks ?? 6),
     executable: nullableString(row.executable),
     model: nullableString(row.model),
+    fallbackModel: nullableString(row.fallback_model),
+    fallback_model: nullableString(row.fallback_model),
     allowedTools: parseJson(row.allowed_tools, []),
     customEnv: parseJson(row.custom_env, {}),
     customArgs: parseJson(row.custom_args, []),
     mcpConfig: row.mcp_config == null ? null : parseJson(row.mcp_config, null),
     thinkingLevel: nullableString(row.thinking_level),
+    fallbackThinkingLevel: nullableString(row.fallback_thinking_level),
+    fallback_thinking_level: nullableString(row.fallback_thinking_level),
     issueCreationRequiresProposal: Boolean(Number(row.issue_creation_requires_proposal ?? 0)),
     issue_creation_requires_proposal: Boolean(Number(row.issue_creation_requires_proposal ?? 0)),
     role,

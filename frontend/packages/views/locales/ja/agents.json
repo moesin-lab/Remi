@@ -125,6 +125,20 @@
     "agent_restored_toast": "エージェントを復元しました",
     "restore_failed_toast": "エージェントを復元できませんでした"
   },
+  "fallback": {
+    "model_label": "予備モデル",
+    "thinking_label": "予備モデルの推論強度",
+    "description": "主モデルのゲートウェイリソースが利用できない場合にのみ、現在のタスクを引き継ぎます。",
+    "unconfigured": "未設定",
+    "same_as_primary": "主モデルとは異なるモデルを選択してください",
+    "clear": "予備モデルを解除",
+    "actual_model": "実行モデル",
+    "switched": "主モデルから予備モデルへ切り替え済み",
+    "switch_count": "切り替え {{count}} 回",
+    "reason_gateway": "ゲートウェイリソースが利用不可",
+    "reason_no_account": "利用可能なゲートウェイアカウントなし",
+    "reason_unknown": "リソースが利用不可"
+  },
   "inspector": {
     "section_properties": "プロパティ",
     "section_details": "詳細",
@@ -159,6 +173,8 @@
   "pickers": {
     "concurrency_tooltip": "同時実行数 · 最大 {{value}} 件の同時タスク",
     "concurrency_range": "最大同時タスク数（{{min}}–{{max}}）",
+    "model_unavailable": "実行カタログにないため実行できません",
+    "model_execution_unknown": "実行可否が不明です · カタログを更新中",
     "model_default": "デフォルト",
     "model_tooltip": "モデル · {{value}}",
     "model_search_placeholder": "モデル ID を検索または入力",
@@ -170,9 +186,11 @@
     "model_clear": "クリア（プロバイダーのデフォルトを使用）",
     "model_clear_title": "選択をクリアし、ランタイムのプロバイダーのデフォルトに戻します",
     "thinking_default": "ランタイムのデフォルトに従う",
+    "thinking_unsupported": "推論設定はサポートされていません",
+    "thinking_model_default": "モデルの既定値：{{value}}",
     "thinking_loading": "推論オプションを読み込み中...",
-    "thinking_load_error": "推論オプションを読み込めませんでした",
-    "thinking_unknown": "推論オプションは未報告です",
+    "thinking_load_error": "推論機能の読み込みに失敗しました",
+    "thinking_unknown": "推論機能は不明です",
     "thinking_tooltip": "推論強度 · {{value}}",
     "thinking_clear": "ランタイムのデフォルトに従う",
     "thinking_clear_title": "上書きを解除し、ランタイムのデフォルトの推論強度を使用します",
@@ -461,10 +479,8 @@
     "agent_count_other": "{{count}} 件のエージェント"
   },
   "execution_target": {
-    "automatic": "自動割り当て · {{provider}}",
-    "automatic_hint": "タスクはワークスペース内でこのエージェントが利用できる同じエンジンの Runtime に自動的に割り当てられます。",
-    "label": "実行グループ",
-    "placeholder": "実行グループを選択",
+    "label": "実行モード",
+    "placeholder": "モデルルーティングまたは固定実行グループを選択",
     "unavailable": "実行グループが利用できません。再選択してください",
     "loading": "実行グループを読み込み中…",
     "error": "実行グループを読み込めませんでした",
@@ -473,6 +489,11 @@
     "offline": "このグループにはオンラインの Runtime がありません。再接続を待ちます。",
     "offline_badge": "オフライン",
     "members": "{{online}} オンライン · {{count}} Runtime",
-    "pinned": "現在は Runtime {{runtime}} に固定されています。実行グループを再選択するとグループ内で割り当てられます。"
+    "pinned": "現在は Runtime {{runtime}} に固定されています。実行グループを再選択するとグループ内で割り当てられます。",
+    "automatic": "自動割り当て · {{provider}}",
+    "automatic_hint": "タスクはワークスペース内でこのエージェントが利用できる同じエンジンの Runtime に自動的に割り当てられます。",
+    "model_routing": "モデルルーティング · {{provider}}",
+    "model_routing_hint": "選択したモデルと思考レベルに合う実行グループと Runtime を選びます。モデル未指定時は互換 Runtime の既定モデルを使います。",
+    "fixed_group": "固定実行グループ · {{group}}"
   }
 }

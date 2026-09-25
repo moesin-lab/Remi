@@ -705,5 +705,28 @@
     "save": "保存",
     "saved": "执行能力组已更新",
     "failed": "执行能力组更新失败"
+  },
+  "configuration": {
+    "title": "能力配置",
+    "description": "统一管理连接 Profile 和能力组，再将配置下发到选定机器的 Runtime。自动扫描只报告机器能力。",
+    "profiles": "连接 Profile",
+    "groups": "能力组",
+    "add_profile": "新建 Profile",
+    "add_group": "新建能力组",
+    "no_profiles": "还没有连接 Profile。",
+    "no_groups": "尚未绑定能力组。",
+    "name": "名称",
+    "provider": "执行引擎",
+    "native": "使用机器原生连接",
+    "members": "承载 Runtime",
+    "edit": "编辑",
+    "delete": "删除",
+    "cancel": "取消",
+    "pending": "等待应用",
+    "applied": "已应用",
+    "failed": "应用失败",
+    "unknown": "未确认",
+    "load_error": "配置加载失败，请刷新重试。",
+    "legacy": "旧版 Runtime 配置"
   }
 }

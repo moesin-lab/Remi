@@ -1,3 +1,4 @@
+import { registerExecutionConfigRoutes } from "./routers/execution-config.js";
 import { Hono } from "hono";
 import { resolveRequestWorkspaceId } from "./helpers/workspace-context.js";
 import { cors } from "hono/cors";
@@ -604,6 +605,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
     return c.json({ id: feedback.id, created_at: feedback.createdAt }, 201);
   });
 
+  registerExecutionConfigRoutes(app, deps);
   registerRuntimeRoutes(app, deps);
   registerRuntimeWorkspaceRoutes(app, deps);
   registerDaemonRetirementRoutes(app, deps);

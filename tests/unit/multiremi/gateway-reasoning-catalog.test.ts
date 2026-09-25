@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import type { MultiremiRuntimeModelThinking } from "@multiremi/contracts/types.js";
 import { discoverGatewayModels } from "@multiremi/relay/discovery.js";
-import { createLocalStore, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -26,6 +26,10 @@ function setup() {
       { id: "gpt-runtime", label: "GPT", provider: "openai", default: true, thinking: reasoning(["low", "high"], "low") },
     ],
   });
+  // Keep these pre-existing group catalog tests independent of the new
+  // configuration acknowledgement protocol; discovery no longer creates groups.
+  store.saveExecutionGroup("local", { name: "reasoning-group", provider: "codex", profile_id: null, runtime_ids: [runtime.id] }, "reasoning-group");
+  db!.run("UPDATE multiremi_execution_groups SET managed = 0 WHERE id = ?", ["reasoning-group"]);
   return { store, revision, runtime, app: createMultiremiApp({ store }) };
 }
 

@@ -23,7 +23,20 @@ Claude ACP 使用 @anthropic-ai/claude-agent-sdk 内的 CC 执行文件，Codex 
 
 ## 安装与启用
 
-平台的 CLI 升级请求沿用现有排空/暂停接单流程。安装脚本解压发布包后，由新包的 remi runtime prepare 安装并验证该版本的固定依赖。验证成功后才替换 remi 与配套 Claude wrapper，随后 daemon 重启、重新注册。依赖准备失败时安装命令返回失败，已有 daemon 二进制保持不变。
+平台的 CLI 升级请求沿用现有排空/暂停接单流程。`remi update` 从
+`MULTIREMI_RELEASE_REPO`（兼容回退为 `MULTIREMI_REPO`，默认
+`Grassgod/Remi`）读取 GitHub Release。它按当前 OS/架构精确选择
+`remi-<version>-<os>-<arch>.tar.gz`，核对 GitHub 资产的 SHA-256 digest、
+归档路径和新二进制 `--version`，再由新包的 `remi runtime prepare` 安装并
+验证该版本的固定依赖。任一步失败都不会改写现有 executable。
+
+验证成功后，新包进入 `~/.local/lib/remi/versions/<digest-prefix>/`，旧快照
+保留。稳定 launcher 仅原子替换其中的版本目标，并将原内容保存为新快照的
+`previous-launcher`；已有自定义参数改写仍保留。macOS launchd 如果直接指向
+旧快照，会改为指向稳定 launcher，同时保存 `previous-launchd.plist`。
+updater 不停止或重启 daemon；维护者仍需在已排空且明确批准的维护窗口中执行
+`remi restart`。安装脚本的首次安装路径同样先运行 runtime prepare，再替换
+`remi` 与配套 Claude wrapper。
 
 daemon 由 systemd 托管时，重启交给 `systemctl --user restart --no-block <unit>`，由 systemd 重建整个 unit cgroup，只留一个新进程；launchd 托管时使用 `launchctl kickstart -k`。unit 名只从 /proc/self/cgroup 的 `0::` 或 `name=systemd` 行取，cgroup v1 主机上其它控制器行只到 `user@<uid>.service`（见 [apps/remi/cli/multiremi/service.ts](../apps/remi/cli/multiremi/service.ts)）。管理器调用失败或进程不受管理器托管时才退回 spawn 后继进程。修复前的版本在 cgroup v1 主机上总是退回 spawn，旧进程留在 unit 里；这样启动的新进程在接管工作区和接单前自检，以下条件全部满足时请求一次 unit 重启：自己不是 unit 的 MainPID；MainPID 是前台 daemon；从自己往上直到 MainPID 的每一级父进程都是前台 daemon，也就是由 spawn 回退逐代拉起；同一 HOME 下没有其它 daemon 持有工作区 supervisor 租约。任务进程同样在 unit 里并继承 INVOCATION_ID，任务里起的 daemon 与 unit 的 daemon 之间隔着 shell 或 agent 运行时，因此无论它换了 HOME、状态目录还是端口，都只记日志、不重启。租约仍被占用说明有 daemon 可能在跑任务，同样只记日志。
 
@@ -32,6 +45,88 @@ daemon 由 systemd 托管时，重启交给 `systemctl --user restart --no-block
 全局 claude、codex 命令与用户登录配置不被覆盖。显式配置的自定义执行文件仍由用户管理；发行版校验针对 Remi 托管依赖。启动和 ACP 重装入口使用相同的版本与安装逻辑。仅 bridge 版本正确不代表 SDK 与实际执行文件正确。
 
 原有 daemon 启动健康检查继续执行；安装校验不等同于登录授权、真实模型调用或重启后服务注册成功的端到端验收。旧发布包不含 runtime-bundle.json，安装脚本仍兼容旧版本安装；旧 daemon 需要升级到包含本改动的版本才会使用新依赖。
+
+## 0.2.68 macOS arm64 临时恢复
+
+`0.2.68-stable.9498e426` 的 updater 固定访问已不存在的
+`grasscoder/remi`，并按已经退役的 `remi-v<version>-...` 文件名查找资产；
+这个版本不能靠自身先取得修复。下面路径固定使用 2026-09-25 已核验的正式
+`v0.2.81` arm64 资产。第一段只下载到临时目录并校验，不改 launcher、launchd
+或正在运行的 daemon：
+
+```bash
+set -euo pipefail
+recovery_dir="$(mktemp -d)"
+curl -fsSL \
+  https://github.com/Grassgod/Remi/releases/download/v0.2.81/remi-0.2.81-darwin-arm64.tar.gz \
+  -o "$recovery_dir/remi.tar.gz"
+printf '%s  %s\n' \
+  c6611a25a51132726f99294a2c3971be6f751062bde8d9ca298d6175ea949f35 \
+  "$recovery_dir/remi.tar.gz" | shasum -a 256 -c -
+tar -tzf "$recovery_dir/remi.tar.gz"
+tar -xzf "$recovery_dir/remi.tar.gz" -C "$recovery_dir"
+file "$recovery_dir/remi"
+"$recovery_dir/remi" --version
+```
+
+预期结果分别包含 `OK`、仅有 `remi` / `remi-claude-agent-acp` /
+`runtime-bundle.json`、`arm64` 和 `0.2.81`。不要在承载当前任务的 daemon 上继续
+执行激活。由 Remi 外部的宿主终端在排空并确认维护窗口后执行以下激活；它保留
+旧快照与 launcher，而且不调用 `launchctl`、不重启 daemon：
+
+```bash
+set -euo pipefail
+snapshot="$HOME/.local/lib/remi/versions/c6611a25"
+launcher=/usr/local/bin/remi
+mkdir -p "$snapshot"
+"$recovery_dir/remi" runtime prepare
+install -m 0755 "$recovery_dir/remi" "$snapshot/remi"
+install -m 0755 "$recovery_dir/remi-claude-agent-acp" "$snapshot/remi-claude-agent-acp"
+install -m 0644 "$recovery_dir/runtime-bundle.json" "$snapshot/runtime-bundle.json"
+cp "$launcher" "$snapshot/previous-launcher"
+python3 - "$snapshot/previous-launcher" "$snapshot/remi" "$snapshot/launcher" <<'PY'
+import pathlib, re, sys
+source, binary, output = map(pathlib.Path, sys.argv[1:])
+text = source.read_text()
+pattern = re.compile(r'^(\s*exec\s+)(?:"[^"]*/remi"|\x27[^\x27]*/remi\x27|\S*/remi)(.*)$', re.M)
+updated, count = pattern.subn(lambda m: f"{m.group(1)}'{binary}'{m.group(2)}", text, count=1)
+if count != 1:
+    raise SystemExit("launcher did not contain exactly one remi exec target; no files changed")
+output.write_text(updated)
+PY
+chmod 0755 "$snapshot/launcher"
+plist="$HOME/Library/LaunchAgents/dev.remi.multiremi.daemon.plist"
+if [ -f "$plist" ]; then
+  cp "$plist" "$snapshot/previous-launchd.plist"
+  python3 - "$plist" "$launcher" <<'PY'
+import os, pathlib, plistlib, sys
+path, launcher = pathlib.Path(sys.argv[1]), sys.argv[2]
+with path.open("rb") as stream:
+    data = plistlib.load(stream)
+arguments = data.get("ProgramArguments")
+if not isinstance(arguments, list) or not arguments:
+    raise SystemExit("launchd plist has no ProgramArguments; no files changed")
+arguments[0] = launcher
+temporary = path.with_name(f".{path.name}.tmp")
+with temporary.open("wb") as stream:
+    plistlib.dump(data, stream)
+os.replace(temporary, path)
+PY
+fi
+install -m 0755 "$snapshot/launcher" "$launcher"
+"$launcher" --version
+```
+
+上述命令只改 launchd 文件中的稳定入口，不 load、kickstart 或 restart。回滚时执行
+`install -m 0755 "$snapshot/previous-launcher" /usr/local/bin/remi`；如果保存了
+`previous-launchd.plist`，同时复制回原 plist。旧 `9498e426` 快照不删除。服务重启后
+的注册、readiness 和 WebSocket 仍需在维护窗口单独验收。
+
+服务端 `remi platform release version` 只读取
+`MULTIREMI_RELEASE_DIR` 的本地镜像，不会隐式回退 GitHub。目录缺失或没有可识别的
+release tarball 时返回 404 `release_catalog_empty`，错误会明确提示配置该目录或使用
+GitHub installer。要启用管理式镜像，发布流程必须把同一版本的各架构 tarball 放入
+该目录并持久挂载；这与修复客户端 GitHub 来源是两个独立动作。
 
 ## 本地准备与验证
 

@@ -134,6 +134,81 @@ describe("central execution binding readiness", () => {
     expect(repo.isRuntimeExecutionBindingReady("group-a", "rt_a", null, null)).toBe(false);
   });
 
+  it("preserves unchanged member generations across group metadata and membership API updates", async () => {
+    const { store, repo } = stateRepo();
+    const original = { ...repo.getRuntimeExecutionBindings("rt_a")[0]!, status: "ready" as const };
+    repo.recordRuntimeExecutionBindingAcks("rt_a", [original]);
+    const owner = await store.createAccessToken({
+      name: "Owner",
+      type: "pat",
+      workspaceId: "local",
+      userId: "local",
+    });
+    const app = createMultiremiApp({ store, authToken: "test-master" });
+    const update = (body: Record<string, unknown>) =>
+      app.request("/api/execution-groups/group-a", {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${owner.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          workspace_id: "local",
+          name: "Renamed",
+          provider: "codex",
+          profile_id: null,
+          runtime_ids: ["rt_a"],
+          ...body,
+        }),
+      });
+
+    const renamed = await update({});
+    expect(renamed.status).toBe(200);
+    expect((await renamed.json() as any).group.members).toEqual([
+      { runtime_id: "rt_a", status: "ready", error: null },
+    ]);
+    expect(repo.getRuntimeExecutionBindings("rt_a")[0]!.generation).toBe(
+      original.generation,
+    );
+
+    const expanded = await update({ runtime_ids: ["rt_a", "rt_b"] });
+    expect(expanded.status).toBe(200);
+    expect((await expanded.json() as any).group.members).toEqual([
+      { runtime_id: "rt_a", status: "ready", error: null },
+      { runtime_id: "rt_b", status: "pending", error: null },
+    ]);
+    expect(repo.getRuntimeExecutionBindings("rt_a")[0]!.generation).toBe(
+      original.generation,
+    );
+    expect(repo.getRuntimeExecutionBindings("rt_b")[0]!.generation).not.toBe(
+      original.generation,
+    );
+
+    const profile = store.saveExecutionProfile("local", {
+      name: "Central",
+      provider: "codex",
+      profile: {
+        name: "central",
+        base_url: "https://models.example/v1",
+        model: "model-a",
+        env_key: "REMI_CODEX_TEST_KEY",
+        auth_mode: "env",
+      },
+    });
+    const rebound = await update({
+      profile_id: profile.id,
+      runtime_ids: ["rt_a", "rt_b"],
+    });
+    expect(rebound.status).toBe(200);
+    expect((await rebound.json() as any).group.members).toEqual([
+      { runtime_id: "rt_a", status: "pending", error: null },
+      { runtime_id: "rt_b", status: "pending", error: null },
+    ]);
+    expect(repo.getRuntimeExecutionBindings("rt_a")[0]!.generation).not.toBe(
+      original.generation,
+    );
+  });
+
   it("rejects delayed acknowledgements after remove/re-add and profile A to B to A reassignment", () => {
     const { store, repo } = stateRepo();
     const original = { ...repo.getRuntimeExecutionBindings("rt_a")[0]!, status: "ready" };

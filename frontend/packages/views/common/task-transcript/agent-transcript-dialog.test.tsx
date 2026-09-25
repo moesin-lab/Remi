@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AgentTask } from "@multiremi/core/types/agent";
 import { renderWithI18n } from "../../test/i18n";
@@ -9,6 +9,7 @@ import { AgentTranscriptDialog } from "./agent-transcript-dialog";
 import type { TimelineItem } from "./build-timeline";
 
 const getTaskPrompt = vi.hoisted(() => vi.fn());
+const scrollIntoView = vi.fn();
 vi.mock("@multiremi/core/api", () => ({
   api: {
     getTaskPrompt,
@@ -19,6 +20,29 @@ vi.mock("@multiremi/core/api", () => ({
 
 beforeEach(() => {
   getTaskPrompt.mockReset();
+  scrollIntoView.mockReset();
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: scrollIntoView,
+  });
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 const MISSING_COMMAND_LABEL = "Command not recorded (task from an older version)";
@@ -104,6 +128,55 @@ describe("transcript pending task state", () => {
     expect(screen.queryByText("Running")).not.toBeInTheDocument();
     expect(screen.queryByText("Waiting for events...")).not.toBeInTheDocument();
     expect(document.querySelector(".animate-spin")).toBeNull();
+  });
+});
+
+describe("timeline jump feedback", () => {
+  it("jumps paired tool-result blocks to their row and briefly emphasizes the destination", () => {
+    renderTranscript(bashStep({ command: "echo hi" }));
+    const timeline = screen.getByRole("navigation", { name: "Timeline" });
+    const [, resultBlock] = within(timeline).getAllByRole("button");
+    const row = screen.getByText("$ echo hi").closest<HTMLElement>("[data-transcript-row]")!;
+
+    vi.useFakeTimers();
+    fireEvent.click(resultBlock!);
+
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      behavior: "smooth",
+      block: "center",
+      inline: "nearest",
+    });
+    expect(scrollIntoView.mock.contexts[0]).toBe(row);
+    expect(row).toHaveFocus();
+    expect(row).toHaveAttribute("aria-current", "location");
+    expect(row).toHaveAttribute("data-jump-highlighted", "true");
+    expect(row).toHaveClass("ring-2", "scroll-my-4", "focus-visible:ring-2");
+
+    act(() => vi.advanceTimersByTime(1_800));
+    expect(row).not.toHaveAttribute("data-jump-highlighted");
+    expect(row).not.toHaveClass("ring-2");
+  });
+
+  it("keeps the jump immediate when reduced motion is requested", () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    renderTranscript(bashStep({ command: "echo hi" }));
+
+    fireEvent.click(
+      within(screen.getByRole("navigation", { name: "Timeline" })).getAllByRole("button")[0]!,
+    );
+
+    expect(scrollIntoView).toHaveBeenCalledWith(
+      expect.objectContaining({ behavior: "auto" }),
+    );
   });
 });
 

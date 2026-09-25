@@ -4,16 +4,18 @@ set -euo pipefail
 # Remi agent installer.
 #
 # Usage:
-#   curl -fsSL https://github.com/Grassgod/remi/releases/latest/download/install-remi.sh | bash
+#   curl -fsSL https://github.com/Grassgod/Remi/releases/latest/download/install-remi.sh | bash
 #
 # Environment:
 #   MULTIREMI_VERSION  Specific version to install, with or without leading "v".
 #   MULTIREMI_BASE_URL Download from a self-hosted Remi server instead of GitHub.
+#   MULTIREMI_RELEASE_REPO GitHub owner/repository used for releases. The older
+#                          MULTIREMI_REPO name remains a compatibility fallback.
 #   MULTIREMI_BIN_DIR  Directory for the remi binary. Defaults to
 #                      /usr/local/bin, falling back to ~/.local/bin when sudo
 #                      is unavailable.
 
-REPO="${MULTIREMI_REPO:-Grassgod/remi}"
+REPO="${MULTIREMI_RELEASE_REPO:-${MULTIREMI_REPO:-Grassgod/Remi}}"
 VERSION="${MULTIREMI_VERSION:-latest}"
 BIN_DIR="${MULTIREMI_BIN_DIR:-/usr/local/bin}"
 

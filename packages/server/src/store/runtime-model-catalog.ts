@@ -1,5 +1,5 @@
 import type { MultiremiRuntime, MultiremiRuntimeModel, MultiremiRuntimeModelThinking } from "@multiremi/contracts/types.js";
-import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
+import { runtimeConnectionModels, type RuntimeConnectionProfile } from "@multiremi/contracts/runtime-connection";
 import { commonThinkingLevels, modelThinkingLevels } from "@multiremi/contracts/model-thinking.js";
 import type { GatewayModelReasoningDecl, MultiremiStore, RelayEngine } from "./store.js";
 
@@ -7,7 +7,9 @@ import type { GatewayModelReasoningDecl, MultiremiStore, RelayEngine } from "./s
 export type RuntimeModelCatalogSource = Pick<MultiremiStore,
   "getRelayModelDiscovery" | "getRelayConfigForDaemon" | "getGatewayModels" |
   "listGatewayModelReasoning" |
-  "listWorkspaceCodexProfileModels" | "listWorkspaceClaudeProfileModels" | "getRuntimeExecutionProfile">;
+  "listWorkspaceCodexProfileModels" | "listWorkspaceClaudeProfileModels" | "getRuntimeExecutionProfile"> & {
+    runtimeProfileModelEvidenceMatches?: (runtimeId: string, provider: string, profile: RuntimeConnectionProfile) => boolean;
+  };
 
 /**
  * The effort values an administrator may declare per engine. Deliberately the
@@ -626,21 +628,38 @@ export function runtimeTargetModelCatalog(
   store: RuntimeModelCatalogSource,
   workspaceId: string,
   runtime: MultiremiRuntime,
+  profileOverride?: RuntimeConnectionProfile | null,
 ): FleetProviderModelsResponse[] {
   // Keep the last reported catalog while offline so saved configurations remain editable.
   const providers = fleetModelsResponse([{ ...runtime, status: "online", visibility: "public" }], runtime.ownerId ?? "local");
   return providers.map((entry) => {
-    const profile = store.getRuntimeExecutionProfile(runtime.id, entry.provider);
+    const legacyProfile = store.getRuntimeExecutionProfile(runtime.id, entry.provider);
+    const profile = profileOverride === undefined ? legacyProfile : profileOverride;
+    // A model ID alone cannot identify an endpoint's capabilities. Reuse legacy
+    // evidence only for the same connection on this runtime, including migration
+    // provenance when an API credential was re-encrypted under a new reference.
+    const matchingEnvConnection = profileOverride && legacyProfile
+      && (profileOverride.auth_mode ?? "env") === "env"
+      && (legacyProfile.auth_mode ?? "env") === "env"
+      && profileOverride.base_url === legacyProfile.base_url
+      && profileOverride.model === legacyProfile.model
+      && profileOverride.env_key === legacyProfile.env_key;
+    const matchesLegacy = matchingEnvConnection || (profileOverride
+      && store.runtimeProfileModelEvidenceMatches?.(runtime.id, entry.provider, profileOverride));
+    const reportedModels = profileOverride === undefined || (!profileOverride && !legacyProfile) || matchesLegacy ? entry.models : [];
     const online_runtime_count = runtime.status === "online" ? 1 : 0;
+    const reportedEntry = reportedModels === entry.models ? entry : { provider: entry.provider, online_runtime_count, models: reportedModels };
     if (profile) {
-      const models = runtimeConnectionModels(profile, entry.provider, entry.models);
-      // Custom connections use their own catalog and never inherit a workspace
-      // gateway's native membership constraint or loading status.
-      return { ...entry, online_runtime_count, models, default_thinking: defaultModelThinking(models) };
+      const models = runtimeConnectionModels(profile, entry.provider, reportedModels);
+      // Custom connections never inherit the workspace gateway's native
+      // membership constraint, nor another connection's loading outcome.
+      return { ...reportedEntry, online_runtime_count, models, default_thinking: defaultModelThinking(models) };
     }
-    const gateway = overlayGatewayModels(store, workspaceId, [entry], { preserveCustomProfileModels: entry.provider !== "codex", requireRuntimeMembership: entry.provider === "codex" })
-      .find((candidate) => candidate.provider === entry.provider);
-    return { ...(gateway ?? entry), online_runtime_count };
+    const gateway = overlayGatewayModels(store, workspaceId, [reportedEntry], {
+      preserveCustomProfileModels: entry.provider !== "codex",
+      requireRuntimeMembership: entry.provider === "codex",
+    }).find((candidate) => candidate.provider === entry.provider);
+    return { ...(gateway ?? reportedEntry), online_runtime_count };
   });
 }
 

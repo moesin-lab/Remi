@@ -44,16 +44,19 @@ export const AgentRuntimeSchema = z.object({
 export const AgentRuntimeListSchema = z.array(AgentRuntimeSchema);
 export const EMPTY_AGENT_RUNTIME_LIST: AgentRuntime[] = [];
 
-export const ExecutionGroupListSchema = z.object({
-  groups: z.array(z.object({
+export const ExecutionGroupSchema = z.object({
     id: z.string().min(1),
     workspace_id: z.string(),
     name: z.string(),
     provider: z.string(),
     runtime_ids: z.array(z.string()),
     online_runtime_count: z.number().int().nonnegative(),
-  })),
+    managed: z.boolean().optional(),
+    profile_id: z.string().nullable().optional(),
+    profile_revision: z.number().nullable().optional(),
+    members: z.array(z.object({ runtime_id: z.string(), status: z.string(), error: z.string().nullable().optional() }).loose()).optional(),
 });
+export const ExecutionGroupListSchema = z.object({ groups: z.array(ExecutionGroupSchema) });
 export type ExecutionGroupList = z.infer<typeof ExecutionGroupListSchema>;
 
 export const DaemonProfileResponseSchema = z.object({

@@ -42,6 +42,7 @@ import {
   cleanString,
   compareRuntimeUsageDailyCompatibilityRows,
   currentAccessToken,
+  currentWorkspaceRoleStrict,
   currentRequestUserId,
   directoryScanErrorResponse,
   hasRequestField,
@@ -613,12 +614,14 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const visibleIds = new Set(loaded.runtimes.map((runtime) => runtime.id));
     const groups = store.listExecutionGroups(loaded.workspaceId).flatMap((group) => {
       const runtimes = executionGroupRuntimes(store, loaded.workspaceId, group.id, ownerId).filter((runtime) => visibleIds.has(runtime.id)).sort((a, b) => a.id.localeCompare(b.id));
-      if (!runtimes.length) return [];
+      if (!runtimes.length && !group.managed) return [];
       const machine = runtimes[0];
       return [{
+        members: store.getExecutionGroupMembers(group.id,loaded.workspaceId).filter(member => ["admin","owner"].includes(currentWorkspaceRoleStrict(c,store,loaded.workspaceId) ?? "") || visibleIds.has(member.runtime_id)),
         id: group.id, workspace_id: loaded.workspaceId, provider: group.provider,
-        name: group.machineId ? `${machine?.daemonDisplayName ?? machine?.name ?? group.machineId} / ${group.provider}` : group.id,
-        runtime_ids: runtimes.map((runtime) => runtime.id),
+        profile_id: group.profileId, profile_revision: group.profileRevision, managed: group.managed,
+        name: group.managed ? group.name : group.machineId ? `${machine?.daemonDisplayName ?? machine?.name ?? group.machineId} / ${group.provider}` : group.id,
+        runtime_ids: ["admin","owner"].includes(currentWorkspaceRoleStrict(c,store,loaded.workspaceId) ?? "") ? group.runtimeIds : runtimes.map((runtime) => runtime.id),
         online_runtime_count: runtimes.filter((runtime) => runtime.status === "online").length,
         is_default: group.machineId !== null,
       }];

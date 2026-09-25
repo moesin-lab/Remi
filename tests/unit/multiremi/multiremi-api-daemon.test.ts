@@ -236,8 +236,8 @@ describe("Multiremi API — daemon endpoints", () => {
     const previewBody = await preview.json();
     expect(preview.status).toBe(200);
     expect(previewBody.product).toBe("multiremi");
-    expect(previewBody.installScriptUrl).toBe("https://github.com/Grassgod/remi/releases/download/v1.2.3/install-remi.sh");
-    expect(previewBody.installCommand).toBe("curl -fsSL https://github.com/Grassgod/remi/releases/download/v1.2.3/install-remi.sh | bash");
+    expect(previewBody.installScriptUrl).toBe("https://github.com/Grassgod/Remi/releases/download/v1.2.3/install-remi.sh");
+    expect(previewBody.installCommand).toBe("curl -fsSL https://github.com/Grassgod/Remi/releases/download/v1.2.3/install-remi.sh | bash");
     expect(previewBody.setupCommand).toBe("multiremi setup --server https://remi.example --workspace ws_1 --token tok_123 --provider codex");
     expect(previewBody.daemonCommand).toBe("multiremi daemon");
     expect(previewBody.installCommand).not.toContain("multimira");

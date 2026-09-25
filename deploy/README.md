@@ -38,6 +38,9 @@ CI rejects version bumps without a matching prepared runtime snapshot. The tag
 workflow checks that snapshot and successful full CI on the exact main commit
 before publishing the CLI; it does not resolve dependencies again after tagging.
 See [daemon runtime upgrades](../docs/daemon-runtime-upgrades.md) for installation.
+That guide also contains the checksum-pinned macOS arm64 recovery path for the
+legacy 0.2.68 updater and documents the deliberately separate self-hosted CLI
+release mirror configuration.
 
 `Platform release` keeps a manual dispatch entry for recovery. Images carry
 both the version tag and a `sha-<commit>` tag. A retry reuses an existing image

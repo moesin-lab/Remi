@@ -5001,7 +5001,7 @@ function formatDuration(ms: number): string {
 async function runDefaultMultiremiUpdate(targetVersion: string): Promise<string> {
   const version = targetVersion.trim();
   if (!version) throw new Error("target_version is required");
-  const repo = process.env.MULTIREMI_REPO || "Grassgod/remi";
+  const repo = process.env.MULTIREMI_RELEASE_REPO || process.env.MULTIREMI_REPO || "Grassgod/Remi";
   const installerUrl = process.env.MULTIREMI_INSTALLER_URL || `https://github.com/${repo}/releases/latest/download/install-remi.sh`;
   const env = cleanProcessEnv({
     ...process.env,

@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 export function multiremiReleaseRepository(): string {
   return process.env.MULTIREMI_RELEASE_REPO?.trim()
     || process.env.MULTIREMI_REPO?.trim()
-    || "Grassgod/remi";
+    || "Grassgod/Remi";
 }
 
 export const MULTIREMI_RELEASE_REPO = multiremiReleaseRepository();

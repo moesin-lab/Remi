@@ -1871,15 +1871,20 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
 
   it("persists custom execution groups and enforces membership claims on Postgres", () => {
     const ws = freshWorkspace();
-    const first = store.registerRuntime({ name: "Group A", provider: "codex", workspaceId: ws, executionGroupId: "shared", models: [
+    const first = store.registerRuntime({ name: "Group A", provider: "codex", workspaceId: ws, models: [
       { id: "group-model", label: "Model", provider: "openai", default: true },
     ] });
-    const second = store.registerRuntime({ name: "Group B", provider: "codex", workspaceId: ws, executionGroupId: "shared", models: [
+    const second = store.registerRuntime({ name: "Group B", provider: "codex", workspaceId: ws, models: [
       { id: "group-model", label: "Model", provider: "openai", default: true },
     ] });
+    store.saveExecutionGroup(ws, { name: "Shared", provider: "codex", profile_id: null, runtime_ids: [first.id, second.id] }, "shared");
     const agent = store.createAgent({ name: "Grouped worker", provider: "codex", workspaceId: ws, executionGroupId: "shared", model: "group-model" });
     const task = store.createTask({ agentId: agent.id, prompt: "Only group members" });
-    store.updateRuntime(first.id, { executionGroupId: "departed" });
+    store.saveExecutionGroup(ws, { name: "Shared", provider: "codex", profile_id: null, runtime_ids: [second.id] }, "shared");
+    expect(store.claimTask(second.id)).toBeNull();
+    store.recordRuntimeExecutionBindingAcks(second.id, store.getRuntimeExecutionBindings(second.id).map(binding => ({
+      ...binding, status: "ready",
+    })));
     expect(store.claimTask(first.id)).toBeNull();
     expect(store.claimTask(second.id)?.id).toBe(task.id);
     store.cancelTask(task.id);

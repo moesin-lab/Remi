@@ -2,6 +2,7 @@
 // terminal-state fan-out into issues/sessions/autopilots), extracted verbatim from MultiremiStore
 // (the facade delegates every public method here).
 import { createHash } from "node:crypto";
+import { getExecutionGroup } from "@multiremi/store/execution-groups.js";
 import { agentAtTaskTarget, taskExecutionScope, taskExecutionTarget } from "@multiremi/contracts/task-execution.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { canonicalJson } from "@multiremi/agent-plugins/import.js";
@@ -157,7 +158,7 @@ function excludedExecutionTargetSql(excludedTargets: readonly ExecutionTargetExc
   );
   // Frozen profiles carry their own connection/model and are checked by task
   // id. An Agent-level target exclusion must not mask one of those retries.
-  return `AND (t.codex_profile IS NOT NULL OR t.claude_profile IS NOT NULL OR (${clauses.join(" AND ")}))`;
+  return `AND (t.execution_fingerprint IS NOT NULL OR t.codex_profile IS NOT NULL OR t.claude_profile IS NOT NULL OR (${clauses.join(" AND ")}))`;
 }
 
 /** Positional params for `excludedExecutionTargetSql`, in clause order. */
@@ -1639,8 +1640,6 @@ export class TasksRepo {
       // another provider on the same machine fill the idle slot between the
       // last in-flight Task finishing and the daemon claiming its update.
       if (this.ctx.runtimes().hasCliUpdateDrainForRuntime(runtimeId)) return null;
-      if (lockedRuntime.metadata[`${lockedRuntime.provider}_profiles`] !== 1
-        && this.ctx.runtimes().getRuntimeExecutionProfile(runtimeId, lockedRuntime.provider)) return null;
 
       this.resetStaleChatWorkspaceTasks(lockedRuntime.workspaceId ?? "local");
       // Recovery must examine stale dispatches even when their Agent can no
@@ -1680,19 +1679,22 @@ export class TasksRepo {
           excludedTargets.set(executionTargetKey(row.agent_id, target), { agentId: row.agent_id, ...target });
         }
       }
-      // A retry can retain a frozen Runtime profile after its Agent changes
-      // model. Check those tasks individually so the frozen connection stays
-      // eligible without hiding compatible work from the same Agent.
+      // Frozen retries and configuration readiness are task-specific. Check
+      // each queued task so a pending group or an incompatible legacy Runtime
+      // connection cannot block another runnable task from the same Agent.
       const profileTaskRows = this.ctx.db.query(`SELECT t.id FROM multiremi_tasks t
         JOIN multiremi_agents a ON a.id = t.agent_id
         WHERE a.workspace_id = ? AND t.status = 'queued'
-          AND (t.codex_profile IS NOT NULL OR t.claude_profile IS NOT NULL)`
-      ).all(lockedRuntime.workspaceId ?? "local") as { id: string }[];
+          AND (t.runtime_id IS NULL OR t.runtime_id = ?)`
+      ).all(lockedRuntime.workspaceId ?? "local", runtimeId) as { id: string }[];
       const excludedTaskIds: string[] = [];
       for (const row of profileTaskRows) {
         const task = this.getTask(row.id);
         const agent = task && this.ctx.agents().getAgent(task.agentId);
-        if (task && agent && !this.runtimeCanRunTaskAgent(lockedRuntime, agent, task)) excludedTaskIds.push(task.id);
+        if (task && (!agent || !this.runtimeCanRunTaskAgent(lockedRuntime, agent, task)
+          || (!task.executionFingerprint && !this.runtimeHasReadyExecutionGroup(lockedRuntime, agent)))) {
+          excludedTaskIds.push(task.id);
+        }
       }
       if (!stale) this.refreshQueuedChatAffinity(lockedRuntime.workspaceId ?? "local");
       const candidate = stale
@@ -1772,6 +1774,9 @@ export class TasksRepo {
       || !this.runtimeCanRunTaskAgent(runtime, currentAgent, task)) {
       throw new AgentPluginReadinessChangedError("claimed Agent is no longer executable");
     }
+    if (!task.executionFingerprint && !this.runtimeHasReadyExecutionGroup(runtime, currentAgent)) {
+      throw new AgentPluginReadinessChangedError("Execution group configuration has not been applied by this Runtime");
+    }
     const provider = runtime.provider !== "any" ? runtime.provider : currentAgent.provider;
     if (runtime.provider !== "any" && runtime.provider !== currentAgent.provider) {
       throw new AgentPluginReadinessChangedError("Agent provider changed during task claim");
@@ -1781,10 +1786,12 @@ export class TasksRepo {
     }
     const transition = chatWorkspaceTransition(task.executionFingerprint);
     if (transition && task.chatSessionId && !task.issueId) {
-      // Freeze Plugins and provider across the context transition. Runtime
-      // credentials stay on their original host; a new host supplies its own.
+      // Freeze Plugins and provider across the context transition. Legacy Runtime
+      // credentials stay host-local; centrally managed connections keep their snapshot.
       const frozenProfile = task.codexProfile ?? task.claudeProfile ?? null;
-      const destinationProfile = transition.runtimeId === runtime.id
+      const group = currentAgent.executionGroupId
+        ? getExecutionGroup(this.ctx.db, currentAgent.executionGroupId, currentAgent.workspaceId) : null;
+      const destinationProfile = transition.runtimeId === runtime.id || group?.managed
         ? frozenProfile : this.runtimeProfileForAgent(runtime.id, currentAgent, task);
       // The selected model is part of the frozen execution, while connection
       // credentials remain host-local. Moving a retry cannot reset its model
@@ -1940,7 +1947,27 @@ export class TasksRepo {
     }
   }
 
+  private runtimeHasReadyExecutionGroup(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
+    if (!agent.executionGroupId) {
+      const profile = this.ctx.runtimes().getAgentExecutionProfile(runtime.id, agent);
+      return !profile || runtime.metadata[`${agent.provider}_profiles`] === 1;
+    }
+
+    const group = getExecutionGroup(this.ctx.db, agent.executionGroupId, agent.workspaceId);
+    if (!group) return false;
+    if (!group.managed) {
+      const profile = this.ctx.runtimes().getAgentExecutionProfile(runtime.id, agent);
+      return !profile || runtime.metadata[`${agent.provider}_profiles`] === 1;
+    }
+
+    return this.ctx.executionBindingStates().isRuntimeExecutionBindingReady(
+      group.id, runtime.id, group.profileId, group.profileRevision,
+    );
+  }
+
   private runtimeHasReadyTaskPlugins(runtime: MultiremiRuntime, task: MultiremiTask): boolean {
+    const agent = this.ctx.agents().getAgent(task.agentId);
+    if (!agent || (!task.executionFingerprint && !this.runtimeHasReadyExecutionGroup(runtime, agent))) return false;
     if (task.codexProfile && runtime.metadata.codex_profiles !== 1) return false;
     if (task.claudeProfile && runtime.metadata.claude_profiles !== 1) return false;
     if (!task.executionFingerprint) {
@@ -2001,7 +2028,7 @@ export class TasksRepo {
   }
 
   private runtimeProfileForAgent(runtimeId: string, agent: MultiremiAgent, task?: TaskExecutionTargetFields | null) {
-    const profile = this.ctx.runtimes().getRuntimeExecutionProfile(runtimeId, agent.provider);
+    const profile = this.ctx.runtimes().getAgentExecutionProfile(runtimeId, agent);
     // Freeze the selected model with its connection; retries keep the stored
     // profile, while changing models invalidates the provider session fingerprint.
     // A fallback-switched task freezes ITS model, not the Agent's selection.
@@ -2019,12 +2046,21 @@ export class TasksRepo {
 
   private runtimeCanRunTaskAgent(runtime: MultiremiRuntime, agent: MultiremiAgent, task: MultiremiTask): boolean {
     const effectiveAgent = agentAtTaskTarget(agent, task);
+    const group = agent.executionGroupId
+      ? getExecutionGroup(this.ctx.db, agent.executionGroupId, agent.workspaceId) : null;
+    if (task.executionFingerprint && group?.managed) {
+      // Central tasks already own immutable connection/model evidence. Keep
+      // checking membership and authorization without consulting a newer catalog.
+      return this.ctx.runtimes().runtimeCanRunAgent(runtime, {
+        ...effectiveAgent, model: null, thinkingLevel: null,
+      });
+    }
     const profile = task.executionFingerprint ? task.codexProfile ?? task.claudeProfile : null;
     if (!profile) return this.ctx.runtimes().runtimeCanRunAgent(runtime, effectiveAgent);
     const transition = chatWorkspaceTransition(task.executionFingerprint);
     const originalRuntimeId = transition ? transition.runtimeId : task.runtimeId;
     const originalHost = originalRuntimeId === runtime.id;
-    const liveProfile = this.ctx.runtimes().getRuntimeExecutionProfile(runtime.id, effectiveAgent.provider);
+    const liveProfile = this.ctx.runtimes().getAgentExecutionProfile(runtime.id, effectiveAgent);
     // A native destination executes the current Agent model: the transition
     // cannot carry a custom connection onto a host with no such connection.
     if (!originalHost && !liveProfile) return this.ctx.runtimes().runtimeCanRunAgent(runtime, effectiveAgent);

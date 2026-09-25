@@ -1,3 +1,4 @@
+import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
 import { createLogger } from "@shared/logger.js";
 import { workspaceRuntimeModelCatalog, catalogAllowsModel, commonThinkingCapabilities, modelThinkingState, providerDeclaresReasoningLevels, runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { GATEWAY_REASONING_LEVELS, manualThinkingResponse } from "@multiremi/store/runtime-model-catalog.js";
@@ -68,6 +69,7 @@ export function executionGroupRuntimes(store: MultiremiStore, workspaceId: strin
   const ids = new Set(group.runtimeIds);
   return store.listRuntimes().filter((runtime) => ids.has(runtime.id)
     && (runtime.workspaceId ?? "local") === workspaceId
+    && (runtime.provider === "any" || runtime.provider === group.provider)
     && (runtime.visibility === "public" || (runtime.ownerId ?? "local") === ownerId));
 }
 
@@ -76,7 +78,13 @@ export function executionGroupModelCatalog(store: MultiremiStore, workspaceId: s
   const group = store.getExecutionGroup(groupId, workspaceId);
   if (!group) return [];
   const runtimes = executionGroupRuntimes(store, workspaceId, groupId, ownerId).sort((a, b) => a.id.localeCompare(b.id));
-  const providers = runtimes.map((runtime) => runtimeTargetModelCatalog(store, workspaceId, runtime)
+  const profile = group.managed ? store.getGroupExecutionProfile(groupId, workspaceId)?.profile ?? null : undefined;
+  if (profile && !runtimes.length) return [{
+    provider: group.provider,
+    models: runtimeConnectionModels(profile, group.provider, []),
+    online_runtime_count: runtimes.filter((runtime) => runtime.status === "online").length,
+  }];
+  const providers = runtimes.map((runtime) => runtimeTargetModelCatalog(store, workspaceId, runtime, profile)
     .find((entry) => entry.provider === group.provider));
   const catalogs = providers.map((entry) => entry?.models ?? []);
   const models = (catalogs[0] ?? []).flatMap((model): FleetModelResponse[] => {

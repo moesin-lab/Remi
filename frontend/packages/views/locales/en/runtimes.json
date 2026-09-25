@@ -729,5 +729,28 @@
     "save": "Save",
     "saved": "Execution group updated",
     "failed": "Could not update execution group"
+  },
+  "configuration": {
+    "title": "Capability configuration",
+    "description": "Manage connection profiles and capability groups centrally, then assign them to machine runtimes. Discovery only reports machine capabilities.",
+    "profiles": "Connection profiles",
+    "groups": "Capability groups",
+    "add_profile": "Add profile",
+    "add_group": "Add group",
+    "no_profiles": "No connection profiles yet.",
+    "no_groups": "No capability groups assigned.",
+    "name": "Name",
+    "provider": "Execution engine",
+    "native": "Machine native connection",
+    "members": "Runtime members",
+    "edit": "Edit",
+    "delete": "Delete",
+    "cancel": "Cancel",
+    "pending": "Pending",
+    "applied": "Applied",
+    "failed": "Failed",
+    "unknown": "Unconfirmed",
+    "load_error": "Could not load configuration. Refresh to retry.",
+    "legacy": "Legacy Runtime configuration"
   }
 }

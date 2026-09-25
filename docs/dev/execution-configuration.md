@@ -63,6 +63,8 @@ remi runtime group list --json
 
 [daemon 心跳](../../packages/server/src/api/routers/daemon.ts)下发组 ID、绑定 generation、Profile ID、revision 与非秘密配置。[daemon](../../packages/server/src/worker/daemon.ts)检查 provider、解析配置并取得对应凭据或本机环境变量，随后回报 ready 或 error。[服务端状态存储](../../packages/server/src/store/repos/execution-binding-states-repo.ts)只接受与当前绑定 generation 和 Profile 版本一致的确认，重新注册或修改绑定后拒绝旧确认；[任务调度](../../packages/server/src/store/repos/tasks-repo.ts)要求受管组配置 ready 才能首次领取任务。更新 Profile 后旧 revision 的确认不再满足领取条件。旧 daemon 不能为受管组确认配置。
 
+generation 只跟踪实际 Runtime 绑定。能力组改名不会清除已有 ready；只增删成员时，仅新增或移除的成员生成新 generation，未变成员继续可调度。切换 Profile 或把旧组转换为受管组会轮换所有成员的 generation，直到各 Runtime 确认新配置。这样管理元数据和横向扩容不会制造无关的执行中断，同时旧确认仍不能复活已改变的绑定。
+
 ready 表示配置与凭据解析成功，不表示已调用远端模型。Runtime 在线、模型出现在目录与配置 ready 是不同证据，真实连通性仍需执行任务验证。
 
 首次 claim 冻结完整连接配置和凭据版本，加入执行指纹。运行中任务继续使用自己的快照，daemon 按任务构造隔离配置；同一 Runtime 上不同组的任务不会互相覆盖全局 provider 设置。已冻结任务重领继续使用旧连接；显式修改云友模型或 thinking 参数时，已冻结但尚未启动的任务取消，运行中任务继续原执行。重试与会话隔离约束见各 provider 接入文档。

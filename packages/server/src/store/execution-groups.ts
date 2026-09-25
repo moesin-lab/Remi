@@ -281,6 +281,19 @@ export function saveExecutionGroup(
       )
         throw new Error("Runtime is missing or incompatible with this group");
     }
+    const oldRuntimeIds = new Set(old?.runtimeIds ?? []);
+    const nextRuntimeIds = new Set(input.runtime_ids);
+    const bindingChangedForEveryMember = Boolean(
+      old && (!old.managed || old.profileId !== input.profile_id),
+    );
+    const invalidatedRuntimeIds = bindingChangedForEveryMember
+      ? new Set([...oldRuntimeIds, ...nextRuntimeIds])
+      : new Set(
+          [...oldRuntimeIds, ...nextRuntimeIds].filter(
+            (runtimeId) =>
+              oldRuntimeIds.has(runtimeId) !== nextRuntimeIds.has(runtimeId),
+          ),
+        );
     db.run(
       `INSERT INTO multiremi_execution_groups(id,workspace_id,provider,machine_id,created_at,name,profile_id,managed) VALUES(?,?,?,NULL,?,?,?,1)
       ON CONFLICT(workspace_id,id) DO UPDATE SET name=excluded.name,profile_id=excluded.profile_id,managed=1,machine_id=NULL`,
@@ -293,21 +306,20 @@ export function saveExecutionGroup(
         input.profile_id,
       ],
     );
-    // A new assignment must not inherit an in-flight acknowledgement for an older binding.
-    db.run(
-      "DELETE FROM multiremi_execution_binding_generations WHERE workspace_id=? AND group_id=?",
-      [workspaceId, id],
-    );
-    db.run(
-      "DELETE FROM multiremi_execution_binding_states WHERE workspace_id=? AND group_id=?",
-      [workspaceId, id],
-    );
-    for (const runtimeId of old?.runtimeIds ?? []) {
-      if (!input.runtime_ids.includes(runtimeId))
-        db.run(
-          "DELETE FROM multiremi_execution_binding_states WHERE workspace_id=? AND group_id=? AND runtime_id=?",
-          [workspaceId, id, runtimeId],
-        );
+    // Generations identify the effective binding, not the group's display
+    // metadata. Preserve acknowledgements for unchanged members so renaming a
+    // group or adding another Runtime cannot make healthy members unavailable.
+    // Profile changes and legacy-to-managed conversion affect every member;
+    // membership-only edits invalidate just the added or removed bindings.
+    for (const runtimeId of invalidatedRuntimeIds) {
+      db.run(
+        "DELETE FROM multiremi_execution_binding_generations WHERE workspace_id=? AND group_id=? AND runtime_id=?",
+        [workspaceId, id, runtimeId],
+      );
+      db.run(
+        "DELETE FROM multiremi_execution_binding_states WHERE workspace_id=? AND group_id=? AND runtime_id=?",
+        [workspaceId, id, runtimeId],
+      );
     }
     db.run(
       "DELETE FROM multiremi_execution_group_members WHERE workspace_id=? AND group_id=?",

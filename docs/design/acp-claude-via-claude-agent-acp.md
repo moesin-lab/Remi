@@ -12,11 +12,11 @@ Windows 通过 Node 启动随仓库提供的无扩展名 `remi-claude-agent-acp`
 
 ## Runtime 自定义连接
 
-统一配置入口的 Claude Profile 支持一个 Anthropic Messages 兼容接口和一个默认模型，再由能力组绑定到多个 Runtime。填写连接名称、API 基础地址、模型 ID，以及 API Key 或本机 `REMI_CLAUDE_*` 环境变量名；请求鉴权可选 Bearer Token 或 `x-api-key`。地址填写服务基础路径，Claude Code 在其后请求 `/v1/messages`，例如网关是 `https://gateway.example/anthropic`，不要填写完整 messages 路径。允许 Runtime 可访问的 HTTP(S) 本机或局域网地址，服务端不主动请求该地址。
+统一配置入口的 Claude Profile 支持一个 Anthropic Messages 兼容接口、一个默认模型和可选 `models` 白名单，再由能力组绑定到多个 Runtime。填写连接名称、API 基础地址、模型 ID，以及 API Key 或本机 `REMI_CLAUDE_*` 环境变量名；请求鉴权可选 Bearer Token 或 `x-api-key`。地址填写服务基础路径，Claude Code 在其后请求 `/v1/messages`，例如网关是 `https://gateway.example/anthropic`，不要填写完整 messages 路径。允许 Runtime 可访问的 HTTP(S) 本机或局域网地址，服务端不主动请求该地址。
 
 请求头对应 Claude Code 的 `ANTHROPIC_AUTH_TOKEN`（Bearer）或 `ANTHROPIC_API_KEY`（x-api-key），每次仅注入选中的一种。具体协议见 [Claude Code 官方网关接入说明](https://code.claude.com/docs/en/llm-gateway-connect)。这不是 OpenAI Chat Completions/Responses 协议转换器。
 
-中央配置要求 daemon 支持 Profile 下发并确认组的当前版本。组内任务优先使用其 Profile，组未指定 Profile 时使用工作区 Relay / 本机登录。配置流程、权限与旧数据迁移见[执行配置](../dev/execution-configuration.md)。留空时使用连接默认模型；旧 Runtime 连接的发现目录支持选择其他模型。中央 Profile 尚无独立目录探测缓存：组目录默认只确定配置模型，仅在同一 Runtime 的旧连接与中央配置可证明等价时复用目录和 thinking 证据（环境变量连接校验路由与鉴权字段，API Key 连接还要求迁移来源证明）。不同连接的探测状态和能力不混用，多机器组取成员有效能力交集。
+中央配置要求 daemon 支持 Profile 下发并确认组的当前版本。组内任务优先使用其 Profile，组未指定 Profile 时使用工作区 Relay / 本机登录。配置流程、权限与旧数据迁移见[执行配置](../dev/execution-configuration.md)。留空时使用连接默认模型；旧 Runtime 连接的发现目录支持选择其他模型。中央 Profile 尚无独立目录探测缓存：未配置 `models` 白名单时，组目录默认只确定配置模型，仅在同一 Runtime 的旧连接与中央配置可证明等价时复用目录和 thinking 证据。显式 `models` 白名单提供无需探测即可选择的模型集合；等价目录证据只为其中相同 ID 补充 thinking 能力。不同连接的探测状态和能力不混用，多机器组取成员有效能力交集。
 
 旧 Runtime 连接的[模型发现](../../packages/server/src/worker/runtime-profile-models.ts)由 daemon 使用所选鉴权头请求 `/v1/models`，基础地址已以 `/v1` 结尾时不重复追加；按 [Claude Models API](https://platform.claude.com/docs/en/api/models/list) 的 `has_more` / `last_id` 翻页。完整目录保留配置默认模型，探测失败保留上次目录；首次失败仍可使用配置模型。thinking 能力仅按准确模型 ID 合并 ACP 实测结果，目录可读取也不代表模型推理成功。供应商目录不可用但 ACP 探测成功时，保留已有目录（首次使用配置默认模型）并更新已知模型的能力，日志明确记录目录探测失败；不会把 ACP 的官方模型列表当作 custom 供应商目录。平台和 daemon 需同时更新：模型上报携带 `model_profile`，过期或旧 daemon 的无标识上报不能覆盖 custom 目录。
 

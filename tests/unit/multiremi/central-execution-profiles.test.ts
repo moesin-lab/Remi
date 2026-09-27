@@ -30,6 +30,37 @@ function setup() {
   return { store, runtime };
 }
 describe("Central execution configuration", () => {
+  it("stores a profile model allowlist but sends only the selected default to daemons", async () => {
+    const { store, runtime } = setup();
+    const saved = store.saveExecutionProfile("local", {
+      name: "Allowlisted gateway",
+      provider: "codex",
+      profile: { ...profile, models: [profile.model, "alternate"] },
+      api_key: "allowlisted-secret",
+    });
+    const group = store.saveExecutionGroup("local", {
+      name: "Allowlisted",
+      provider: "codex",
+      profile_id: saved.id,
+      runtime_ids: [runtime.id],
+    });
+    expect(store.getExecutionProfile(saved.id, "local")?.profile.models).toEqual([profile.model, "alternate"]);
+    const { models: _models, ...daemonProfile } = saved.profile;
+    expect(store.getRuntimeExecutionBindings(runtime.id)[0]?.profile).toEqual(daemonProfile);
+    expect(store.getRuntimeExecutionBindings(runtime.id)[0]?.profile).not.toHaveProperty("models");
+    const app = createMultiremiApp({ store });
+    const catalog = await (await app.request(`/api/models?execution_group_id=${group.id}`)).json() as any;
+    expect(catalog.providers[0].models.map((model: { id: string }) => model.id)).toEqual([profile.model, "alternate"]);
+    const agent = await app.request("/api/agents", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Alternate", execution_group_id: group.id, model: "alternate" }),
+    });
+    expect(agent.status).toBe(201);
+    expect(() => store.saveExecutionProfile("local", {
+      name: "Invalid", provider: "codex", profile: { ...profile, models: ["alternate"] }, api_key: "secret",
+    })).toThrow("including the default model");
+  });
+
   it("does not create groups during discovery and supports multiple explicitly assigned profiles", () => {
     const { store, runtime } = setup();
     expect(store.listExecutionGroups("local")).toEqual([]);

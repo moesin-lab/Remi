@@ -1,6 +1,7 @@
 // Runtime and daemon request plumbing: provider validation, the ownership-scoped runtime loaders,
 // the daemon install instructions, and the registration/deregistration paths the daemon calls.
 import type { Context } from "hono";
+import { runtimeConnectionSnapshot } from "@multiremi/contracts/runtime-connection.js";
 import { MultiremiStore, daemonRuntimeId } from "@multiremi/store/store.js";
 import {
   DaemonIdentityOwnerConflictError,
@@ -460,7 +461,11 @@ export function registerDaemonRuntimes(
     });
   }
   return {
-    runtimes: registered.map(runtime => ({ ...runtime, codex_profile: store.getRuntimeCodexProfile(runtime.id), claude_profile: store.getRuntimeClaudeProfile(runtime.id) })),
+    runtimes: registered.map(runtime => ({
+      ...runtime,
+      codex_profile: runtimeConnectionSnapshot(store.getRuntimeCodexProfile(runtime.id)),
+      claude_profile: runtimeConnectionSnapshot(store.getRuntimeClaudeProfile(runtime.id)),
+    })),
     repos: repos.repos,
     repos_version: repos.repos_version,
     settings: repos.settings,

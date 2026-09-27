@@ -1,4 +1,4 @@
-import type { RuntimeExecutionBinding, RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection.js";
+import { runtimeConnectionSnapshot, type RuntimeExecutionBinding, type RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection.js";
 import type { StoreContext } from "@multiremi/store/context.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 
@@ -34,7 +34,9 @@ export class ExecutionBindingStatesRepo {
           provider: row.provider,
           profileId: row.profile_id,
           profileRevision: row.revision,
-          profile: row.profile ? JSON.parse(row.profile) : null,
+          // The allowlist is a control-plane catalog contract. Older daemons
+          // understand the selected/default model but reject unknown fields.
+          profile: row.profile ? runtimeConnectionSnapshot(JSON.parse(row.profile)) : null,
         };
       });
     })();

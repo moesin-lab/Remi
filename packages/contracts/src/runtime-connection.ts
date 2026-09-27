@@ -3,10 +3,22 @@ export interface RuntimeConnectionProfile {
   name: string;
   base_url: string;
   model: string;
+  /** Optional administrator-owned allowlist. Omit it to use provider discovery. */
+  models?: string[];
   env_key: string;
   auth_mode?: "api_key" | "env";
   /** Opaque immutable credential version; never contains the key. */
   credential_id?: string;
+}
+
+/** Freeze one selected model without sending the control-plane allowlist to daemons. */
+export function runtimeConnectionSnapshot(
+  profile: RuntimeConnectionProfile | null,
+  model?: string | null,
+): RuntimeConnectionProfile | null {
+  if (!profile) return null;
+  const { models: _models, ...snapshot } = profile;
+  return { ...snapshot, model: model && (!profile.models || profile.models.includes(model)) ? model : profile.model };
 }
 
 export interface RuntimeConnectionProfileConfig {
@@ -24,11 +36,11 @@ export function runtimeConnectionModels<T extends { id: string; label: string }>
   provider: string,
   models: readonly T[],
 ) {
-  const reported = models.find((model) => model.id === profile.model);
-  return [
-    { ...reported, id: profile.model, label: reported?.label ?? profile.model, provider, default: true },
-    ...models.filter(model => model.id !== profile.model).map(model => ({ ...model, provider, default: false })),
-  ];
+  const ids = profile.models ?? [profile.model, ...models.map(model => model.id).filter(id => id !== profile.model)];
+  return ids.map(id => {
+    const reported = models.find(model => model.id === id);
+    return { ...reported, id, label: reported?.label ?? id, provider, default: id === profile.model };
+  });
 }
 
 /** Shared by the control plane and daemon; never accept executable TOML or inline secrets. */
@@ -36,7 +48,7 @@ export function parseRuntimeConnectionProfile(value: unknown, envPrefix: "REMI_C
   if (value === null) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("profile must be an object or null");
   const row = value as Record<string, unknown>;
-  if (Object.keys(row).some(key => !["name", "base_url", "model", "env_key", "auth_mode", "credential_id"].includes(key))) {
+  if (Object.keys(row).some(key => !["name", "base_url", "model", "models", "env_key", "auth_mode", "credential_id"].includes(key))) {
     throw new Error("Unsupported profile field; send api_key separately or reference a Runtime variable with env_key");
   }
   const field = (key: string, max: number) => {
@@ -54,6 +66,12 @@ export function parseRuntimeConnectionProfile(value: unknown, envPrefix: "REMI_C
   if (credential_id !== undefined && (typeof credential_id !== "string" || !/^rck_[a-zA-Z0-9_-]{1,100}$/.test(credential_id))) throw new Error("Invalid credential reference");
   if (!/^[a-zA-Z0-9_-]+$/.test(name)) throw new Error("Profile name must use letters, numbers, underscores or hyphens");
   if (!model) throw new Error("Profile model is required");
+  const models = row.models;
+  if (models !== undefined && (!Array.isArray(models) || models.length === 0 || models.length > 200 ||
+    models.some(id => typeof id !== "string" || !id.trim() || id !== id.trim() || id.length > 200 || /[\x00-\x1f\x7f]/.test(id)) ||
+    new Set(models).size !== models.length || !models.includes(model))) {
+    throw new Error("models must contain unique model IDs including the default model");
+  }
   // A dedicated prefix prevents remote configuration from redirecting unrelated daemon secrets.
   if (auth_mode === "env" && !new RegExp(`^${envPrefix}[A-Z0-9_]+$`).test(env_key)) throw new Error(`env_key must name a ${envPrefix}* Runtime environment variable`);
   let url: URL;
@@ -63,6 +81,7 @@ export function parseRuntimeConnectionProfile(value: unknown, envPrefix: "REMI_C
   }
   // Only the Runtime connects to this URL; loopback and LAN endpoints are intentional.
   return { name, base_url: url.toString().replace(/\/$/, ""), model, env_key: auth_mode === "env" ? env_key : "", auth_mode,
+    ...(models !== undefined ? { models: models as string[] } : {}),
     ...(auth_mode === "api_key" && credential_id ? { credential_id } : {}) };
 }
 

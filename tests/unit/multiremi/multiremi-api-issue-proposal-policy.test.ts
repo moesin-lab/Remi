@@ -551,10 +551,10 @@ async function policyFixture() {
   const ordinary = store.createAgent({ name: "Ordinary collaborator", provider: "codex" });
   const worker = store.createAgent({ name: "Quick-create worker", provider: "codex" });
   const current = store.createIssue({ title: "Current work", workspaceId: "local" });
-  const restrictedChat = store.createChatSession({ agentId: restricted.id, issueId: current.id });
-  const ordinaryChat = store.createChatSession({ agentId: ordinary.id, issueId: current.id });
-  const restrictedSession = store.getOrCreateDefaultChatSession(restrictedChat.id);
-  const ordinarySession = store.getOrCreateDefaultChatSession(ordinaryChat.id);
+  const restrictedChat = store.createChatSession({ agentId: restricted.id });
+  const ordinaryChat = store.createChatSession({ agentId: ordinary.id });
+  const restrictedSession = store.createIssueSession(current.id, { chatId: restrictedChat.id, title: "Restricted work" });
+  const ordinarySession = store.createIssueSession(current.id, { chatId: ordinaryChat.id, title: "Collaboration" });
   const restrictedTask = store.createTask({
     agentId: restricted.id,
     issueId: current.id,

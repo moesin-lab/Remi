@@ -1,20 +1,32 @@
-import { expect, it } from "bun:test";
+import { expect, it, spyOn } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import * as os from "node:os";
 import { join, resolve } from "node:path";
 import { startMultiremiServer } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { MultiremiDaemon } from "@multiremi/daemon.js";
+import { isolateProcessTmp, PrivateTmpIsolationUnavailableError } from "@acp/index.js";
 
 it("runs native Antigravity through API, daemon, Chat resume and an Issue in a retained directory", async () => {
-  const root = mkdtempSync(join(tmpdir(), "remi-agy-daemon-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "remi-agy-daemon-")));
   const database = new Database(":memory:");
   const store = new MultiremiStore(database);
   store.ensureLocalWorkspace();
   const local = join(root, "user-project");
   const capture = join(root, "capture.json");
+  const isolationProbe = join(root, "isolation-probe");
   mkdirSync(local);
+  mkdirSync(isolationProbe);
+  writeFileSync(capture, "");
+  let isolationUnavailable: PrivateTmpIsolationUnavailableError | null = null;
+  try {
+    isolateProcessTmp({ executable: Bun.which("true") ?? "true", args: [] }, isolationProbe);
+  } catch (error) {
+    if (!(error instanceof PrivateTmpIsolationUnavailableError)) throw error;
+    isolationUnavailable = error;
+  }
   writeFileSync(join(local, "AGENTS.md"), "AGY_LOCAL_CONTEXT_SENTINEL");
   writeFileSync(join(local, "user-file.txt"), "retained");
   const agent = store.createAgent({ name: "AGY", provider: "antigravity", executable: Bun.which("node") ?? process.execPath,
@@ -28,6 +40,8 @@ it("runs native Antigravity through API, daemon, Chat resume and an Issue in a r
     provider: "antigravity", workspaceId: "local", daemonPort: 0, pollIntervalMs: 20, gcEnabled: false,
     workspacesRoot: join(root, "state"), repoCacheRoot: join(root, "repo-cache"),
   });
+  // Do not load the developer's global instructions or installed skills.
+  const homeSpy = spyOn(os, "homedir").mockReturnValue(join(root, "user-home"));
   const run = daemon.start();
   try {
     await poll(() => store.listRuntimes().length > 0);
@@ -41,6 +55,12 @@ it("runs native Antigravity through API, daemon, Chat resume and an Issue in a r
         : store.sendChatMessage(chat.id, { body: "Inspect project" }).task;
       await poll(() => ["completed", "failed"].includes(store.getTask(task.id)?.status ?? ""));
       const complete = store.getTask(task.id)!;
+      if (isolationUnavailable) {
+        expect(complete.status).toBe("failed");
+        expect(complete.error).toContain("[private_tmp_isolation_unavailable]");
+        expect(complete.error).toContain("runtime cannot create a private /tmp mount");
+        break;
+      }
       expect(complete.error).toBeNull();
       expect(complete.status).toBe("completed");
       expect(complete.sessionId).toBe("12345678-1234-1234-1234-123456789abc");
@@ -60,6 +80,7 @@ it("runs native Antigravity through API, daemon, Chat resume and an Issue in a r
   } finally {
     daemon.stop();
     await run.catch(() => {});
+    homeSpy.mockRestore();
     server.stop(true);
     database.close();
     rmSync(root, { recursive: true, force: true, maxRetries: 5 });

@@ -43,7 +43,13 @@ import { api } from "@multiremi/core/api";
 import { useTranscriptViewStore } from "@multiremi/core/agents/stores";
 import type { AgentTask, Agent, AgentRuntime } from "@multiremi/core/types/agent";
 import { redactString } from "./redact";
-import { buildEntries, countToolCalls, nestEntries, type TimelineItem } from "./build-timeline";
+import {
+  buildEntries,
+  countToolCalls,
+  nestEntries,
+  type TimelineItem,
+  type TranscriptEntry,
+} from "./build-timeline";
 import { useT } from "../../i18n";
 import {
   formatProvider,
@@ -56,6 +62,7 @@ import { SortDirectionToggle } from "./sort-direction-toggle";
 import { TimelineBar } from "./timeline-bar";
 import { TranscriptEventRow } from "./transcript-event-row";
 import { TranscriptStepRow } from "./transcript-step-row";
+import { ExecutionModelInfo } from "./execution-model-info";
 
 interface AgentTranscriptDialogProps {
   open: boolean;
@@ -77,6 +84,20 @@ interface AgentTranscriptDialogProps {
 
 /** Task states after which no step can still be running. */
 const TERMINAL_TASK_STATUS = new Set<string>(["completed", "failed", "cancelled"]);
+const JUMP_HIGHLIGHT_MS = 1_800;
+
+function sourceSeqsForEntry(
+  entry: TranscriptEntry,
+  seqsByToolCall: Map<string, number[]>,
+): number[] {
+  if (entry.kind === "event") return [entry.seq];
+  return [
+    ...(seqsByToolCall.get(entry.toolCallId) ?? [entry.seq]),
+    ...(entry.children ?? []).flatMap((child) =>
+      sourceSeqsForEntry(child, seqsByToolCall),
+    ),
+  ];
+}
 
 // ─── Main dialog ────────────────────────────────────────────────────────────
 
@@ -91,6 +112,9 @@ export function AgentTranscriptDialog({
 }: AgentTranscriptDialogProps) {
   const { t } = useT("agents");
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
+  const [jumpHighlightedSeq, setJumpHighlightedSeq] = useState<number | null>(
+    null,
+  );
   const [elapsed, setElapsed] = useState("");
   const [copied, setCopied] = useState(false);
   const [copiedWorkdir, setCopiedWorkdir] = useState(false);
@@ -103,6 +127,7 @@ export function AgentTranscriptDialog({
   const setSortDirection = useTranscriptViewStore((s) => s.setSortDirection);
   const eventRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const jumpHighlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const promptQuery = useQuery({
     queryKey: ["task-prompt", task.id],
     queryFn: () => api.getTaskPrompt(task.id),
@@ -172,6 +197,7 @@ export function AgentTranscriptDialog({
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
+    setAgentInfo(null);
 
     if (task.agent_id) {
       api.getAgent(task.agent_id).then((agent) => {
@@ -200,9 +226,36 @@ export function AgentTranscriptDialog({
     return () => clearInterval(interval);
   }, [isLive, task.started_at, task.dispatched_at]);
 
+  useEffect(
+    () => () => {
+      if (jumpHighlightTimerRef.current) {
+        clearTimeout(jumpHighlightTimerRef.current);
+      }
+    },
+    [],
+  );
+
   const handleSegmentClick = useCallback((seq: number) => {
+    const target = eventRefs.current.get(seq);
+    if (!target) return;
     setSelectedSeq(seq);
-    eventRefs.current.get(seq)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setJumpHighlightedSeq(seq);
+    if (jumpHighlightTimerRef.current) clearTimeout(jumpHighlightTimerRef.current);
+    jumpHighlightTimerRef.current = setTimeout(() => {
+      setJumpHighlightedSeq((current) => current === seq ? null : current);
+      jumpHighlightTimerRef.current = null;
+    }, JUMP_HIGHLIGHT_MS);
+    const reduceMotion =
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    target.scrollIntoView({
+      behavior: reduceMotion ? "auto" : "smooth",
+      block: "center",
+      inline: "nearest",
+    });
+    // The row's scroll margin and centered placement keep it below the fixed
+    // dialog header. Moving focus communicates the new location to keyboard
+    // and assistive-technology users without triggering a second scroll.
+    target.focus({ preventScroll: true });
   }, []);
 
   // Live-follow: the transcript is tailing a running task. Also gates the
@@ -326,6 +379,16 @@ export function AgentTranscriptDialog({
     const paired = nestEntries(buildEntries(filteredItems));
     return sortDirection === "newest_first" ? [...paired].reverse() : paired;
   }, [filteredItems, sortDirection]);
+  const seqsByToolCall = useMemo(() => {
+    const result = new Map<string, number[]>();
+    for (const item of filteredItems) {
+      if (!item.toolCallId) continue;
+      const seqs = result.get(item.toolCallId) ?? [];
+      seqs.push(item.seq);
+      result.set(item.toolCallId, seqs);
+    }
+    return result;
+  }, [filteredItems]);
   const planEntries = useMemo(() => {
     for (let i = items.length - 1; i >= 0; i--) {
       const it = items[i];
@@ -341,7 +404,7 @@ export function AgentTranscriptDialog({
   const statusDisplay = task.status === "queued"
     ? { label: t(($) => $.transcript.status_queued), icon: Clock, tone: "bg-muted text-muted-foreground", spins: false }
     : task.status === "dispatched"
-      ? { label: t(($) => $.transcript.status_dispatched), icon: Loader2, tone: "bg-info/15 text-info", spins: true }
+      ? { label: t(($) => $.transcript.status_dispatched), icon: task.queue_blocker ? Clock : Loader2, tone: task.queue_blocker ? "bg-muted text-muted-foreground" : "bg-info/15 text-info", spins: !task.queue_blocker }
       : task.status === "waiting_local_directory"
         ? { label: t(($) => $.transcript.status_waiting_local_directory), icon: Clock, tone: "bg-muted text-muted-foreground", spins: false }
         : task.status === "running"
@@ -373,7 +436,7 @@ export function AgentTranscriptDialog({
         : isLive
           ? t(($) => $.transcript.waiting_events)
           : null;
-  const emptyStateSpins = task.status === "dispatched" || (task.status === "running" && isLive);
+  const emptyStateSpins = (task.status === "dispatched" && !task.queue_blocker) || (task.status === "running" && isLive);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -559,9 +622,9 @@ export function AgentTranscriptDialog({
                   : usage.totalTokens
                     ? t(($) => $.transcript.tokens_context, { value: formatTokens(usage.totalTokens) })
                     : null}
-                {usage.model && <span className="text-muted-foreground/60 ml-1">{usage.model}</span>}
               </MetadataChip>
             )}
+            <ExecutionModelInfo task={task} usageModel={usage?.model} agentModel={agentInfo?.model} agentThinkingLevel={agentInfo?.thinking_level} />
 
             {/* Working directory — server-derived display path. Falls back to
                 nothing when older backends omit the field rather than rendering
@@ -727,21 +790,26 @@ export function AgentTranscriptDialog({
             </div>
           ) : (
             <div className="divide-y">
-              {entries.map((entry) =>
-                entry.kind === "step" ? (
+              {entries.map((entry) => {
+                const sourceSeqs = sourceSeqsForEntry(entry, seqsByToolCall);
+                return entry.kind === "step" ? (
                   <TranscriptStepRow
                     key={`s-${entry.toolCallId}`}
                     ref={(el) => {
                       // Nested children have no row of their own while the group
                       // is collapsed — register the group for their seqs too, so
                       // timeline-bar navigation still lands on them.
-                      for (const seq of [entry.seq, ...(entry.children ?? []).map((c) => c.seq)]) {
+                      for (const seq of sourceSeqs) {
                         if (el) eventRefs.current.set(seq, el);
                         else eventRefs.current.delete(seq);
                       }
                     }}
                     step={entry}
                     selectedSeq={selectedSeq}
+                    sourceSeqs={sourceSeqs}
+                    isJumpHighlighted={
+                      jumpHighlightedSeq !== null && sourceSeqs.includes(jumpHighlightedSeq)
+                    }
                     liveFollow={liveFollow}
                     taskTerminal={taskTerminal}
                   />
@@ -754,9 +822,10 @@ export function AgentTranscriptDialog({
                     }}
                     item={entry.item}
                     isSelected={selectedSeq === entry.seq}
+                    isJumpHighlighted={jumpHighlightedSeq === entry.seq}
                   />
-                ),
-              )}
+                );
+              })}
             </div>
           )}
         </div>

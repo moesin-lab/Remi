@@ -1,6 +1,11 @@
 import { readFileSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { basename } from "node:path";
+import { CHAT_ATTACHMENT_MAX_BYTES } from "@multiremi/contracts/attachments.js";
+import type { MultiremiSessionInheritedContext } from "@multiremi/contracts/types.js";
 import {
   CliError,
+  CliRenderer,
   ResourceResolver,
   type CliIdentity,
   type CliMutation,
@@ -12,6 +17,7 @@ import {
 import { parseArgs, type CliOptions } from "../multiremi/options.js";
 import {
   multiremiApiUploadFile,
+  detectCliContentTypeFromFilename,
   normalizedAttachmentRecord,
   readAttachmentFiles,
 } from "../multiremi/http.js";
@@ -24,6 +30,8 @@ import {
   encodePath,
   extractRecords,
   integerOption,
+  isRecord,
+  outputMode,
   positional,
   queryOptions,
   renderResource,
@@ -139,7 +147,7 @@ function issueCompatibilitySpecs(): CommandSpec[] {
     legacySpec("issue.assign", ["issue", "assign"], "Assign or unassign an issue", "write", HUMAN_TASK, [refPositional("issue")], [
       { name: "to", type: "string", valueName: "ref", description: "Assignee reference" },
       { name: "to-type", type: "string", valueName: "type", description: "Assignee type" },
-      { name: "unassign", type: "boolean", description: "Clear the assignee" },
+      { name: "unassign", type: "boolean", description: "Clear the assignee and cancel active tasks on this issue" },
     ], ["issue", "assign"]),
     legacySpec("issue.status", ["issue", "status"], "Change issue status", "write", HUMAN_TASK, [refPositional("issue"), refPositional("status")], [], ["issue", "status"]),
     legacySpec("issue.delete", ["issue", "delete"], "Delete an issue", "destructive", HUMAN_TASK, [refPositional("issue")], [], ["issue", "delete"]),
@@ -215,10 +223,75 @@ function sessionCommandSpecs(): CommandSpec[] {
     nativeSpec("session.get", ["session", "get"], "Get a Session owned by a Chat", "read", HUMAN_TASK, [refPositional("chat"), refPositional("session")], [], async (invocation) => {
       await getAndRender(invocation, sessionPath(invocation));
     }),
-    nativeSpec("session.create", ["session", "create"], "Create a Session in a Chat", "write", HUMAN, [refPositional("chat")], [...INPUT_OPTIONS, ...titleStatusOptions(), discussionOption()], async (invocation) => {
+    nativeSpec("session.show", ["session", "show"], "Show a Session and its inherited context", "read", HUMAN_TASK, [refPositional("session")], [], async (invocation) => {
+      const client = await clientFor(invocation);
+      const path = `/api/sessions/${encodePath(positional(invocation, 0, "session"))}`;
+      const response = await client.request({ method: "GET", path });
+      const mode = outputMode(invocation);
+      const inheritedContext = mode === "table"
+        ? (await client.request<MultiremiSessionInheritedContext>({ method: "GET", path: `${path}/inherited-context` })).data
+        : null;
+      new CliRenderer().render<Record<string, unknown>>(response.data, {
+        mode,
+        columns: [
+          { header: "ID", value: (row) => row.id },
+          { header: "TITLE", value: (row) => row.title },
+          { header: "STATUS", value: (row) => row.status },
+          { header: "PARENT", value: (row) => row.parent_session_id ?? "-" },
+          { header: "WITH CODE", value: (row) => row.with_code ?? false },
+          { header: "CODE RUNTIME", value: (row) => row.code_runtime_id ?? "-" },
+          { header: "INHERIT", value: (row) => row.inherit_mode ?? "none" },
+          { header: "CUTOFF", value: (row) => row.inherit_cutoff_seq ?? "-" },
+          { header: "INHERITED EVENTS (PRE-TRUNCATION)", value: (row) => row.inherited_event_count ?? 0 },
+          { header: "PARENT MAX", value: () => inheritedContext?.parent_max_seq },
+          { header: "PARENT CURSORS", value: () => inheritedContext?.lanes?.map((lane) => `${lane.agent_id}/${lane.execution_scope}:${lane.parent_cursor_seq}`).join(", ") },
+          { header: "TOTAL INHERITED TOKENS", value: () => inheritedContext?.inherited_tokens_total },
+          { header: "FOLLOW TOKEN LIMIT", value: () => inheritedContext?.follow_token_limit },
+          { header: "FOLLOW FROZEN", value: () => inheritedContext?.follow_frozen },
+          { header: "FROZEN AT", value: () => inheritedContext?.follow_frozen_seq },
+          { header: "TRUNCATED", value: () => inheritedContext?.diagnostics?.truncated ?? "-" },
+        ],
+      });
+    }),
+    nativeSpec("session.inherited-context", ["session", "inherited-context"], "Show inherited context diagnostics, follow progress and token costs (event count is before truncation)", "read", HUMAN_TASK, [refPositional("session")], [], async (invocation) => {
+      const client = await clientFor(invocation);
+      const response = await client.request<MultiremiSessionInheritedContext>({
+        method: "GET", path: `/api/sessions/${encodePath(positional(invocation, 0, "session"))}/inherited-context`,
+      });
+      new CliRenderer().render<MultiremiSessionInheritedContext>(response.data, {
+        mode: outputMode(invocation),
+        columns: [
+          { header: "SESSION", value: (row) => row.session_id },
+          { header: "PARENT", value: (row) => row.parent_session_id },
+          { header: "CUTOFF", value: (row) => row.inherit_cutoff_seq },
+          { header: "INHERITED EVENTS (PRE-TRUNCATION)", value: (row) => row.inherited_event_count },
+          { header: "TRUNCATED", value: (row) => row.diagnostics?.truncated },
+          { header: "OMITTED", value: (row) => row.diagnostics?.omitted_events },
+          { header: "EST TOKENS", value: (row) => row.diagnostics?.estimated_tokens },
+          { header: "TOKEN BUDGET", value: (row) => row.diagnostics?.token_budget },
+          { header: "INHERIT", value: (row) => row.inherit_mode },
+          { header: "PARENT MAX", value: (row) => row.parent_max_seq },
+          { header: "PARENT CURSORS", value: (row) => row.lanes?.map((lane) => `${lane.agent_id}/${lane.execution_scope}:${lane.parent_cursor_seq}`).join(", ") },
+          { header: "TOTAL INHERITED TOKENS", value: (row) => row.inherited_tokens_total },
+          { header: "FOLLOW TOKEN LIMIT", value: (row) => row.follow_token_limit },
+          { header: "FOLLOW FROZEN", value: (row) => row.follow_frozen },
+          { header: "FROZEN AT", value: (row) => row.follow_frozen_seq },
+        ],
+      });
+    }),
+    nativeSpec("session.create", ["session", "create"], "Create a Session owned by a Chat", "write", HUMAN, [refPositional("chat")], [
+      ...INPUT_OPTIONS, ...titleStatusOptions(), discussionOption(),
+      { name: "from", type: "string", valueName: "session-id", description: "Inherit parent Session context (implies --discussion; snapshot by default)" },
+      { name: "inherit-mode", type: "string", valueName: "snapshot|follow", description: "Use a frozen snapshot or follow new parent events (requires --from)" },
+      { name: "with-code", type: "boolean", description: "Attach a read-only parent code snapshot (requires --from and a parent Runtime)" },
+    ], async (invocation) => {
+      const parentSessionId = stringOption(invocation, "from");
       const body = await requestBody(invocation, {
         title: stringOption(invocation, "title") ?? undefined,
-        holds_workspace: invocation.options.discussion === true ? false : undefined,
+        holds_workspace: invocation.options.discussion === true || parentSessionId ? false : undefined,
+        parent_session_id: parentSessionId ?? undefined,
+        inherit_mode: stringOption(invocation, "inherit-mode") ?? undefined,
+        with_code: invocation.options["with-code"] === true ? true : undefined,
       });
       await mutateAndRender(invocation, "POST", `/api/multiremi/chats/${encodePath(positional(invocation, 0, "chat"))}/sessions`, body);
     }),
@@ -304,7 +377,7 @@ function issueExtendedSpecs(): CommandSpec[] {
       });
     }),
     nativeSpec("issue.active-task", ["issue", "active-task"], "Show an issue's active task", "read", HUMAN_TASK, [refPositional("issue")], [], async (invocation) => {
-      await getAndRender(invocation, `/api/issues/${encodePath(positional(invocation, 0, "issue"))}/active-task`);
+      await getAndRender(invocation, `/api/issues/${encodePath(positional(invocation, 0, "issue"))}/active-task`, ["tasks"]);
     }),
     nativeSpec("issue.usage", ["issue", "usage"], "Show issue usage", "read", HUMAN_TASK, [refPositional("issue")], [], async (invocation) => {
       await getAndRender(invocation, `/api/issues/${encodePath(positional(invocation, 0, "issue"))}/usage`);
@@ -512,6 +585,7 @@ function chatCommandSpecs(): CommandSpec[] {
   const chatFields: readonly CliOptionSpec[] = [
     { name: "title", type: "string", valueName: "title", description: "Chat title" },
     { name: "agent", type: "string", valueName: "agent-id", description: "Chat agent" },
+    { name: "project", type: "string", valueName: "project-id|none", description: "Choose a Project when creating the Chat, or use none for pure chat" },
     { name: "status", type: "string", valueName: "status", description: "Chat status" },
   ];
   return [
@@ -525,12 +599,25 @@ function chatCommandSpecs(): CommandSpec[] {
       const chat = await resolveChat(invocation, positional(invocation, 0, "chat"));
       await getAndRender(invocation, `/api/chat/sessions/${encodePath(String(chat.id))}`);
     }),
-    nativeSpec("chat.create", ["chat", "create"], "Create a chat", "write", HUMAN, [], [...INPUT_OPTIONS, ...chatFields, { name: "project", type: "string", valueName: "id", description: "Project work location", conflictsWith: ["runtime-workspace"] }, { name: "runtime-workspace", type: "string", valueName: "id", description: "Persistent Runtime workspace" }], async (invocation) => {
-      await mutateAndRender(invocation, "POST", "/api/chat/sessions", await requestBody(invocation, { workspace_id: requiredWorkspace(invocation), title: stringOption(invocation, "title") ?? undefined, agent_id: requiredOption(invocation, "agent"), project_id: stringOption(invocation, "project") ?? undefined, runtime_workspace_id: stringOption(invocation, "runtime-workspace") ?? undefined }));
+    nativeSpec("chat.create", ["chat", "create"], "Create a chat", "write", HUMAN, [], [...INPUT_OPTIONS, ...chatFields, { name: "runtime-workspace", type: "string", valueName: "id", description: "Persistent Runtime workspace", conflictsWith: ["project"] }], async (invocation) => {
+      await mutateAndRender(invocation, "POST", "/api/chat/sessions", await requestBody(invocation, {
+        workspace_id: requiredWorkspace(invocation),
+        title: stringOption(invocation, "title") ?? undefined,
+        agent_id: requiredOption(invocation, "agent"),
+        projectId: chatProjectOption(invocation),
+        runtime_workspace_id: stringOption(invocation, "runtime-workspace") ?? undefined,
+      }));
     }),
-    nativeSpec("chat.update", ["chat", "update"], "Update a chat", "write", HUMAN, [refPositional("chat")], [...INPUT_OPTIONS, ...chatFields], async (invocation) => {
+    nativeSpec("chat.update", ["chat", "update"], "Update a chat", "write", HUMAN, [refPositional("chat")], [...INPUT_OPTIONS, ...chatFields.filter((field) => field.name !== "project")], async (invocation) => {
+      const body = await requestBody(invocation, {
+        title: stringOption(invocation, "title") ?? undefined,
+        status: stringOption(invocation, "status") ?? undefined,
+      });
+      if (Object.hasOwn(body, "projectId") || Object.hasOwn(body, "project_id")) {
+        throw new CliError("usage", "A Chat Project can only be selected when creating the session");
+      }
       const chat = await resolveChat(invocation, positional(invocation, 0, "chat"));
-      await mutateAndRender(invocation, "PATCH", `/api/chat/sessions/${encodePath(String(chat.id))}`, await requestBody(invocation, { title: stringOption(invocation, "title") ?? undefined, status: stringOption(invocation, "status") ?? undefined }));
+      await mutateAndRender(invocation, "PATCH", `/api/chat/sessions/${encodePath(String(chat.id))}`, body);
     }),
     ...([
       ["pin", "Pin a chat", { pinned: true }],
@@ -543,29 +630,6 @@ function chatCommandSpecs(): CommandSpec[] {
         await mutateAndRender(invocation, "PATCH", `/api/chat/sessions/${encodePath(String(chat.id))}`, body);
       }),
     ),
-    groupSpec("chat.issue", "Manage a Chat's bound Issue"),
-    nativeSpec("chat.issue.bind", ["chat", "issue", "bind"], "Bind a Chat to an Issue", "write", HUMAN, [refPositional("chat"), refPositional("issue")], [], async (invocation) => {
-      const chat = await resolveChat(invocation, positional(invocation, 0, "chat"));
-      const issue = await resolveIssue(invocation, positional(invocation, 1, "issue"));
-      await mutateAndRender(invocation, "PATCH", `/api/chat/sessions/${encodePath(String(chat.id))}`, { issue_id: issue.id });
-    }),
-    nativeSpec("chat.issue.unbind", ["chat", "issue", "unbind"], "Unbind a Chat from its Issue", "write", HUMAN, [refPositional("chat")], [], async (invocation) => {
-      const chat = await resolveChat(invocation, positional(invocation, 0, "chat"));
-      await mutateAndRender(invocation, "PATCH", `/api/chat/sessions/${encodePath(String(chat.id))}`, { issue_id: null });
-    }),
-    groupSpec("chat.issue.updates", "Manage Issue updates sent to a Chat agent"),
-    nativeSpec("chat.issue.updates.get", ["chat", "issue", "updates", "get"], "Show Issue update delivery settings", "read", HUMAN, [refPositional("chat")], [], async (invocation) => {
-      const chat = await resolveChat(invocation, positional(invocation, 0, "chat"));
-      await getAndRender(invocation, `/api/chat/sessions/${encodePath(String(chat.id))}/issue-updates`);
-    }),
-    nativeSpec("chat.issue.updates.enable", ["chat", "issue", "updates", "enable"], "Send bound Issue updates to the Chat agent", "write", HUMAN, [refPositional("chat")], [], async (invocation) => {
-      const chat = await resolveChat(invocation, positional(invocation, 0, "chat"));
-      await mutateAndRender(invocation, "PUT", `/api/chat/sessions/${encodePath(String(chat.id))}/issue-updates`, { enabled: true });
-    }),
-    nativeSpec("chat.issue.updates.disable", ["chat", "issue", "updates", "disable"], "Stop sending bound Issue updates to the Chat agent", "write", HUMAN, [refPositional("chat")], [], async (invocation) => {
-      const chat = await resolveChat(invocation, positional(invocation, 0, "chat"));
-      await mutateAndRender(invocation, "PUT", `/api/chat/sessions/${encodePath(String(chat.id))}/issue-updates`, { enabled: false });
-    }),
     nativeSpec("chat.delete", ["chat", "delete"], "Delete a chat", "destructive", HUMAN, [refPositional("chat")], [YES_OPTION], async (invocation) => {
       requireConfirmation(invocation);
       const chat = await resolveChat(invocation, positional(invocation, 0, "chat"));
@@ -576,6 +640,44 @@ function chatCommandSpecs(): CommandSpec[] {
     }),
     nativeSpec("chat.message.create", ["chat", "message", "create"], "Send a chat message", "write", HUMAN, [refPositional("chat")], [...INPUT_OPTIONS, ...COMMENT_BODY_OPTIONS], async (invocation) => {
       await mutateAndRender(invocation, "POST", `/api/chat/sessions/${encodePath(positional(invocation, 0, "chat"))}/messages`, await requestBody(invocation, { content: await contentOption(invocation) }));
+    }),
+    groupSpec("chat.attachment", "Send files to the current Task's Chat", ["chat", "attachment"]),
+    nativeSpec("chat.attachment.send", ["chat", "attachment", "send"], "Send local files to the current Task's Chat", "write", TASK, [], [
+      { name: "attachment", type: "string", valueName: "path", repeatable: true, description: "Local attachment file (20MB maximum per file)" },
+      ...COMMENT_BODY_OPTIONS,
+    ], async (invocation) => {
+      const paths = stringOptions(invocation, "attachment");
+      if (!paths.length) throw new CliError("usage", "chat attachment send requires --attachment <local-path> (repeatable)");
+      const form = new FormData();
+      for (const path of paths) {
+        if (!path.trim() || /^https?:\/\//i.test(path)) throw new CliError("usage", "--attachment requires a local file path");
+        const handle = await open(path, "r");
+        try {
+          const stat = await handle.stat();
+          if (!stat.isFile()) throw new CliError("usage", `Attachment ${basename(path)} must be a regular file`);
+          if (stat.size === 0) throw new CliError("usage", `Attachment ${basename(path)} is empty (0 bytes)`);
+          const limit = CHAT_ATTACHMENT_MAX_BYTES;
+          if (stat.size > limit) throw new CliError("usage", `Attachment ${basename(path)} exceeds the 20MB limit`);
+          // Bound the read as well as stat: a file can grow while being read.
+          const chunks: Buffer[] = [];
+          let size = 0;
+          for await (const chunk of handle.createReadStream({ autoClose: false })) {
+            size += chunk.length;
+            if (size > limit) throw new CliError("usage", `Attachment ${basename(path)} exceeds the 20MB limit`);
+            chunks.push(chunk);
+          }
+          const name = basename(path);
+          if (size === 0) throw new CliError("usage", `Attachment ${name} is empty (0 bytes)`);
+          form.append("file", new File([Buffer.concat(chunks)], name, { type: detectCliContentTypeFromFilename(name) }));
+        } finally {
+          await handle.close();
+        }
+      }
+      const content = await contentOption(invocation);
+      if (content) form.set("content", content);
+      const client = await clientFor(invocation);
+      const response = await client.request({ method: "POST", path: "/api/chat/attachments/send", body: form });
+      renderResource(invocation, response.data, ["attachments"]);
     }),
     nativeSpec("chat.pending", ["chat", "pending"], "Show pending chat tasks", "read", HUMAN, [optionalPositional("chat")], [], async (invocation) => {
       const chat = invocation.positionals[0]?.trim();
@@ -615,8 +717,14 @@ function taskCommandSpecs(): CommandSpec[] {
     groupSpec("task", "Manage agent tasks and human requests"),
     nativeSpec("task.list", ["task", "list"], "List tasks", "read", HUMAN_TASK, [], [
       { name: "status", type: "string", valueName: "status", description: "Task status" },
+      { name: "limit", type: "integer", valueName: "n", description: "Maximum results (default 100, max 500)" },
+      { name: "offset", type: "integer", valueName: "n", description: "Authorized results to skip" },
     ], async (invocation) => {
-      await getAndRender(invocation, "/api/multiremi/tasks", ["tasks"], { status: stringOption(invocation, "status") });
+      await getAndRender(invocation, "/api/multiremi/tasks", ["tasks"], {
+        status: stringOption(invocation, "status"),
+        limit: integerOption(invocation, "limit"),
+        offset: integerOption(invocation, "offset"),
+      });
     }),
     nativeSpec("task.get", ["task", "get"], "Get a task", "read", HUMAN_TASK, [refPositional("task")], [], async (invocation) => {
       await getAndRender(invocation, `/api/multiremi/tasks/${encodePath(positional(invocation, 0, "task"))}`);
@@ -626,6 +734,31 @@ function taskCommandSpecs(): CommandSpec[] {
       { name: "chat", type: "string", valueName: "chat-id", description: "Related chat" },
     ], async (invocation) => {
       await mutateAndRender(invocation, "POST", "/api/multiremi/tasks", await requestBody(invocation, { agentId: requiredOption(invocation, "agent"), prompt: stringOption(invocation, "prompt") ?? undefined, issueId: stringOption(invocation, "issue") ?? undefined, chatSessionId: stringOption(invocation, "chat") ?? undefined }));
+    }),
+    nativeSpec("task.continue", ["task", "continue"], "Continue an existing delegated task in its provider session", "write", TASK, [refPositional("task")], [
+      { name: "prompt", type: "string", valueName: "text", description: "Continuation request", required: true },
+    ], async (invocation) => {
+      const taskId = positional(invocation, 0, "task");
+      const client = await clientFor(invocation);
+      const response = await client.request<Record<string, unknown>>({
+        method: "GET",
+        path: `/api/multiremi/tasks/${encodePath(taskId)}`,
+      });
+      const continued = isRecord(response.data.task) ? response.data.task : response.data;
+      const agentId = continued?.agentId ?? continued?.agent_id;
+      if (typeof agentId !== "string" || !agentId.trim()) {
+        throw new CliError("server", "continued task response is missing agentId");
+      }
+      const created = await client.request({
+        method: "POST",
+        path: "/api/multiremi/tasks",
+        body: {
+          agentId,
+          prompt: requiredOption(invocation, "prompt"),
+          continueTaskId: taskId,
+        },
+      });
+      renderResource(invocation, created.data);
     }),
     nativeSpec("task.cancel", ["task", "cancel"], "Cancel a task", "destructive", HUMAN_TASK, [refPositional("task")], [YES_OPTION,
       { name: "reason", type: "string", valueName: "text", description: "Organizer action criterion" },
@@ -797,6 +930,12 @@ async function resolveLabel(invocation: CommandInvocation, ref: string): Promise
     id: (label) => String(label.id ?? ""),
     name: (label) => typeof label.name === "string" ? label.name : null,
   }).resolve(ref);
+}
+
+function chatProjectOption(invocation: CommandInvocation): string | null | undefined {
+  if (!Object.hasOwn(invocation.options, "project")) return undefined;
+  const project = requiredOption(invocation, "project");
+  return project === "none" ? null : project;
 }
 
 async function resolveChat(invocation: CommandInvocation, ref: string): Promise<Record<string, unknown>> {

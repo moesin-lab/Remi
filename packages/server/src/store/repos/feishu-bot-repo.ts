@@ -17,6 +17,8 @@
  *    offline). That is the two-phase handover acceptance criterion 8 asks for.
  */
 
+import { FEISHU_IMAGE_MAX_BYTES } from "@connectors/feishu/outbound-images.js";
+import { chatAttachmentValidationError } from "@multiremi/contracts/attachments.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { advancesFeishuPresentation, parseFeishuPresentation } from "@multiremi/contracts/feishu-presentation.js";
 import type { StoreContext } from "@multiremi/store/context.js";
@@ -31,6 +33,7 @@ import { isRuntimeEffectivelyOnline } from "@multiremi/store/repos/runtimes-repo
 import { readWorkspaceIssueTopics } from "@multiremi/issue-topics/config.js";
 import { findMarkdownImages } from "@shared/feishu-markdown-images.js";
 import { isFeishuOpenId, parseOutboundMention } from "@shared/feishu-mention.js";
+import { FEISHU_CONCIERGE_CONFIG_CAPABILITY } from "@multiremi/contracts/types.js";
 import type {
   FeishuBotAuditAction,
   FeishuPresentationCheckpoint,
@@ -39,6 +42,10 @@ import type {
   FeishuBotErrorCode,
   FeishuBotRuntimeState,
   FeishuBotAgentRouteScope,
+  FeishuBotSender,
+  FeishuBotCancelCandidate,
+  FeishuBotCancelRejection,
+  FeishuBotCancelResult,
   FeishuBotSessionSnapshot,
   FeishuBotSecretOp,
   FeishuBotStatus,
@@ -50,11 +57,11 @@ import type {
   MultiremiFeishuBotRuntimeStatus,
   MultiremiFeishuBotAgentRoute,
   MultiremiAttachment,
+  CreateAttachmentInput,
   MultiremiIssue,
+  MultiremiChatSession,
   MultiremiTask,
   MultiremiTaskHumanRequest,
-  MultiremiUser,
-  MultiremiWorkspaceMember,
   SubmitFeishuBotMessageInput,
   SubmitFeishuBotMessageResult,
   ReportFeishuBotRuntimeStatusInput,
@@ -64,12 +71,82 @@ import type {
 
 type Row = Record<string, unknown>;
 
-type FeishuSenderMembership = SubmitFeishuBotMessageResult["senderMembership"];
+/** How many ambiguous candidates travel to the reply card. */
+const MAX_STOP_CANDIDATES = 5;
+
+/** One Task a stop request could act on, with the context a human needs. */
+export interface ResolvedCancelTarget {
+  task: MultiremiTask;
+  agentName: string | null;
+  issueKey: string | null;
+  chatTitle: string | null;
+}
+
+/**
+ * Tie-break for a group top-level stop, where the Feishu client gives no
+ * thread lineage: stop the sender's only unfinished Task, otherwise list the
+ * choices.
+ *
+ * Guessing which of several concurrent runs the user meant is not recoverable —
+ * a cancelled run cannot be resumed — while asking costs one more message. The
+ * candidates arrive newest-first, so this function is the single place a
+ * "most recent wins" policy would go if that trade-off were ever revisited.
+ */
+export function resolveFallbackCancelTarget(
+  candidates: ResolvedCancelTarget[],
+): { kind: "none" } | { kind: "ambiguous"; count: number } | { kind: "target"; target: ResolvedCancelTarget } {
+  if (candidates.length === 0) return { kind: "none" };
+  if (candidates.length === 1) return { kind: "target", target: candidates[0]! };
+  return { kind: "ambiguous", count: candidates.length };
+}
+
+function rejectedCancel(reason: FeishuBotCancelRejection): FeishuBotCancelResult {
+  return {
+    outcome: "rejected",
+    agentName: null,
+    taskId: null,
+    issueKey: null,
+    chatTitle: null,
+    candidates: [],
+    candidateCount: 0,
+    reason,
+  };
+}
+
+function cancelledCancel(target: ResolvedCancelTarget): FeishuBotCancelResult {
+  return {
+    outcome: "cancelled",
+    agentName: target.agentName,
+    taskId: target.task.id,
+    issueKey: target.issueKey,
+    chatTitle: target.chatTitle,
+    candidates: [],
+    candidateCount: 1,
+    reason: null,
+  };
+}
+
+function toCancelCandidate(target: ResolvedCancelTarget): FeishuBotCancelCandidate {
+  return {
+    taskId: target.task.id,
+    status: target.task.status,
+    agentName: target.agentName,
+    issueId: target.task.issueId,
+    issueKey: target.issueKey,
+    chatTitle: target.chatTitle,
+    startedAt: target.task.startedAt ?? target.task.createdAt,
+  };
+}
+
+/** Newest first: the most recently started run is the likeliest intent. */
+function compareCancelTargets(left: MultiremiTask, right: MultiremiTask): number {
+  const key = (task: MultiremiTask) => `${task.startedAt ?? task.createdAt}\u0000${task.id}`;
+  return key(right).localeCompare(key(left), "en");
+}
 
 interface ResolvedFeishuSender {
-  membership: FeishuSenderMembership;
-  user: MultiremiUser | null;
-  member: MultiremiWorkspaceMember | null;
+  id: string | null;
+  allowed: boolean;
   displayName: string;
   actorId: string;
   profileDescription: string;
@@ -122,6 +199,94 @@ export class FeishuBotConfigError extends Error {
 
 export class FeishuBotRepo {
   constructor(private readonly ctx: StoreContext) {}
+
+  listTaskReceiptMessageIds(workspaceId: string, taskId: string): string[] {
+    return (this.ctx.db.query(`SELECT d.external_message_id FROM multiremi_feishu_bot_deliveries d
+      JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id
+      JOIN multiremi_feishu_bot_configs c ON c.workspace_id = d.workspace_id AND c.app_id = b.app_id
+      WHERE d.workspace_id = ? AND d.task_id = ?
+      ORDER BY d.created_at, d.external_message_id`).all(workspaceId, taskId) as Row[])
+      .map(row => String(row.external_message_id));
+  }
+
+  listSenders(workspaceId: string): FeishuBotSender[] {
+    const config = this.getConfig(workspaceId);
+    if (!config) return [];
+    return (this.ctx.db.query(
+      `SELECT * FROM multiremi_feishu_bot_senders
+       WHERE workspace_id = ? AND app_id = ?
+       ORDER BY allowed ASC, last_seen_at DESC, id ASC`,
+    ).all(workspaceId, config.appId) as Row[]).map(toSender);
+  }
+
+  listSenderProfileSources(workspaceId: string, before: string) {
+    const config = this.getConfig(workspaceId);
+    if (!config) return [];
+    const rows = this.ctx.db.query(`SELECT s.id, s.app_id, s.open_id,
+        (SELECT d.external_message_id FROM multiremi_feishu_bot_deliveries d
+         WHERE d.sender_id = s.id ORDER BY d.created_at DESC, d.external_message_id DESC LIMIT 1) AS message_id
+      FROM multiremi_feishu_bot_senders s
+      WHERE s.workspace_id = ? AND s.app_id = ?
+        AND s.open_id IS NOT NULL
+        AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_deliveries d WHERE d.sender_id = s.id)
+        AND (s.profile_checked_at IS NULL OR s.profile_checked_at < ?)
+      ORDER BY s.profile_checked_at ASC, s.last_seen_at DESC, s.id ASC LIMIT 10`
+    ).all(workspaceId, config.appId, before) as Row[];
+    return rows.flatMap(row => row.message_id ? [{ id: String(row.id), appId: String(row.app_id),
+      openId: String(row.open_id), messageId: String(row.message_id) }] : []);
+  }
+
+  updateSenderProfile(workspaceId: string, appId: string, senderId: string,
+    profile: { name: string; nameEn: string | null } | null, checkedAt: string): void {
+    if (this.getConfig(workspaceId)?.appId !== appId) return;
+    this.ctx.db.run(`UPDATE multiremi_feishu_bot_senders
+      SET display_name = COALESCE(?, display_name), name_en = COALESCE(?, name_en), profile_checked_at = ?
+      WHERE id = ? AND workspace_id = ? AND app_id = ?`,
+    [profile?.name ?? null, profile?.nameEn ?? null, checkedAt, senderId, workspaceId, appId]);
+  }
+
+  setSenderAllowed(workspaceId: string, senderId: string, allowed: boolean, actorId?: string | null): FeishuBotSender | null {
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const config = this.getConfig(workspaceId);
+      if (!config) return null;
+      const row = this.ctx.db.query(
+        `SELECT * FROM multiremi_feishu_bot_senders WHERE id = ? AND workspace_id = ? AND app_id = ?`,
+      ).get(senderId, workspaceId, config.appId) as Row | null;
+      if (!row) return null;
+      if (Boolean(Number(row.allowed)) !== allowed) {
+        this.ctx.db.run("UPDATE multiremi_feishu_bot_senders SET allowed = ? WHERE id = ?", [allowed ? 1 : 0, senderId]);
+        this.recordAudit(workspaceId, allowed ? "sender_allowed" : "sender_revoked", {
+          actorId,
+          details: { sender_id: senderId, app_id: config.appId },
+        });
+      }
+      return toSender({ ...row, allowed: allowed ? 1 : 0 });
+    })();
+  }
+
+  /** Chat history and delegated tasks retain their input's current authority.
+   * Keep this separate from the static task policy so approval can take effect
+   * without clearing an independent Agent or parent-task restriction. */
+  isTaskIssueCreationRestricted(taskId: string): boolean {
+    return Boolean(this.ctx.db.query(
+      `WITH RECURSIVE lineage AS (
+         SELECT id, parent_task_id, chat_session_id FROM multiremi_tasks WHERE id = ?
+         UNION
+         SELECT p.id, p.parent_task_id, p.chat_session_id FROM multiremi_tasks p
+         JOIN lineage child ON p.id = child.parent_task_id
+       )
+       SELECT 1 AS restricted FROM multiremi_feishu_bot_deliveries d
+       JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id
+       JOIN multiremi_feishu_bot_configs c ON c.workspace_id = d.workspace_id
+       LEFT JOIN multiremi_feishu_bot_senders s ON s.id = d.sender_id
+       WHERE c.sender_access_policy = 'allowlist' AND d.sender_recorded = 1
+         AND (d.task_id IN (SELECT id FROM lineage)
+           OR b.chat_session_id IN (SELECT chat_session_id FROM lineage))
+         AND (s.id IS NULL OR s.allowed = 0)
+       LIMIT 1`,
+    ).get(taskId));
+  }
 
   getConfig(workspaceId: string): MultiremiFeishuBotConfig | null {
     const row = this.ctx.db
@@ -250,6 +415,28 @@ export class FeishuBotRepo {
     return { agentId: config.agentId, agentName: agent?.name ?? config.agentId };
   }
 
+  /** Reject run intent before changing the saved host, secrets, or revision. */
+  private requireDeployableRuntime(workspaceId: string, runtimeId: string): void {
+    const runtime = this.ctx.runtimes().getRuntime(runtimeId);
+    if (!runtime || runtime.workspaceId !== workspaceId) {
+      throw new FeishuBotConfigError("runtime does not belong to this workspace", 400, "runtime_not_in_workspace");
+    }
+    if (!isRuntimeEffectivelyOnline(runtime)) {
+      throw new FeishuBotConfigError(
+        "runtime is offline or its heartbeat has expired; bring it online before enabling or deploying, or save with enabled=false",
+        409,
+        "runtime_offline",
+      );
+    }
+    if (runtime.metadata[FEISHU_CONCIERGE_CONFIG_CAPABILITY] !== true) {
+      throw new FeishuBotConfigError(
+        "runtime does not advertise Feishu concierge configuration support; select a capable runtime or save with enabled=false",
+        409,
+        "runtime_config_unsupported",
+      );
+    }
+  }
+
   /**
    * Create or replace the workspace's config. Secret columns follow the
    * caller's per-field op so a PUT that only changes the domain cannot wipe an
@@ -282,8 +469,13 @@ export class FeishuBotRepo {
         "runtime_agent_incompatible",
       );
     }
+    if (input.enabled) this.requireDeployableRuntime(workspaceId, runtimeId);
 
     const existing = this.rawConfigRow(workspaceId);
+    const senderAccessPolicy = input.senderAccessPolicy ?? existing?.sender_access_policy ?? "agent";
+    if (senderAccessPolicy !== "agent" && senderAccessPolicy !== "allowlist") {
+      throw new FeishuBotConfigError("sender_access_policy must be agent or allowlist", 400, "invalid_sender_access_policy");
+    }
     const appSecret = resolveSecretColumn(
       workspaceId,
       "app_secret",
@@ -310,10 +502,10 @@ export class FeishuBotRepo {
       `INSERT INTO multiremi_feishu_bot_configs (
          workspace_id, agent_id, runtime_id, app_id,
          app_secret_encrypted, app_secret_hint,
-         domain, enabled, revision,
+         domain, enabled, sender_access_policy, revision,
          bot_name, bot_open_id, last_tested_at, last_test_error, last_test_error_code,
          created_at, updated_at, updated_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(workspace_id) DO UPDATE SET
          agent_id = excluded.agent_id,
          runtime_id = excluded.runtime_id,
@@ -322,6 +514,7 @@ export class FeishuBotRepo {
          app_secret_hint = excluded.app_secret_hint,
          domain = excluded.domain,
          enabled = excluded.enabled,
+         sender_access_policy = excluded.sender_access_policy,
          revision = excluded.revision,
          bot_name = excluded.bot_name,
          bot_open_id = excluded.bot_open_id,
@@ -338,6 +531,7 @@ export class FeishuBotRepo {
       hint,
       domain,
       input.enabled ? 1 : 0,
+      senderAccessPolicy,
       revision,
       identityChanged ? null : nullableString(existing?.bot_name),
       identityChanged ? null : nullableString(existing?.bot_open_id),
@@ -368,6 +562,7 @@ export class FeishuBotRepo {
   setEnabled(workspaceId: string, enabled: boolean, actor?: string | null): MultiremiFeishuBotConfig | null {
     const existing = this.rawConfigRow(workspaceId);
     if (!existing) return null;
+    if (enabled) this.requireDeployableRuntime(workspaceId, String(existing.runtime_id));
     this.ctx.db.run(
       `UPDATE multiremi_feishu_bot_configs
           SET enabled = ?, revision = revision + 1, updated_at = ?, updated_by = ?
@@ -468,6 +663,90 @@ export class FeishuBotRepo {
     };
   }
 
+  assertInboundAttachmentScope(workspaceId: string, runtimeId: string,
+    input: Pick<SubmitFeishuBotMessageInput, "revision" | "externalSessionKey" | "externalMessageId">): MultiremiFeishuBotConfig {
+    const config = this.getConfig(workspaceId);
+    if (!config?.enabled) throw new FeishuBotConfigError("feishu bot is not running", 409, "bot_not_running");
+    if (config.runtimeId !== runtimeId) throw new FeishuBotConfigError("runtime does not host this feishu bot", 403, "runtime_not_selected");
+    if (config.revision !== input.revision) throw new FeishuBotConfigError("feishu bot assignment is stale", 409, "stale_revision");
+    requiredBoundedString(input.externalSessionKey, "external_session_key", 1_024);
+    requiredBoundedString(input.externalMessageId, "external_message_id", 512);
+    return config;
+  }
+
+  createInboundAttachment(workspaceId: string, runtimeId: string,
+    scope: Pick<SubmitFeishuBotMessageInput, "revision" | "externalSessionKey" | "externalMessageId">,
+    input: CreateAttachmentInput): MultiremiAttachment {
+    return this.ctx.db.transaction(() => {
+      const config = this.assertInboundAttachmentScope(workspaceId, runtimeId, scope);
+      const attachment = this.ctx.issues().createAttachment({ ...input, workspaceId,
+        issueId: null, commentId: null, chatSessionId: null, chatMessageId: null,
+        uploaderType: "daemon", uploaderId: runtimeId });
+      this.ctx.db.run(`INSERT INTO multiremi_feishu_bot_inbound_attachments
+        (attachment_id, workspace_id, runtime_id, app_id, revision, external_session_key, external_message_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`, [attachment.id, workspaceId, runtimeId, config.appId,
+          scope.revision, scope.externalSessionKey.trim(), scope.externalMessageId.trim()]);
+      return attachment;
+    })();
+  }
+
+  /** Atomic Chat message + outbox registration. File bytes are already persisted. */
+  sendChatAttachments(taskId: string, inputs: CreateAttachmentInput[], body = "") {
+    const result = this.ctx.db.transaction(() => {
+      const task = this.ctx.tasks().getTask(taskId);
+      if (!task?.chatSessionId) throw new Error("current task is not a Chat task");
+      const session = this.ctx.chat().getChatSession(task.chatSessionId);
+      if (!session || session.workspaceId !== task.workspaceId) throw new Error("chat session not found");
+      if (!inputs.length || inputs.length > 10) throw new Error("between 1 and 10 attachments are required");
+      for (const input of inputs) {
+        const error = chatAttachmentValidationError(input.filename, Number(input.sizeBytes));
+        if (error) throw new Error(error);
+      }
+      const config = this.getConfig(task.workspaceId);
+      const binding = this.ctx.db.query(`SELECT * FROM multiremi_feishu_bot_chat_bindings
+        WHERE chat_session_id = ? AND workspace_id = ? ORDER BY created_at DESC LIMIT 1`)
+        .get(session.id, session.workspaceId) as Row | null;
+      if (binding && (!config?.enabled || binding.app_id !== config.appId)) {
+        throw new Error("Feishu bot is unavailable for this Chat");
+      }
+      // Policy extension point: evaluate future workspace Chat delivery policy
+      // before creating either the assistant message or outbound rows.
+      const message = this.ctx.chat().appendChatMessageWithinTransaction({ chatSessionId: session.id,
+        taskId, role: "assistant", body });
+      const attachments = inputs.map(input => this.ctx.issues().createAttachment({ ...input,
+        workspaceId: session.workspaceId, chatSessionId: session.id, chatMessageId: message.id,
+        uploaderType: "agent", uploaderId: task.agentId }));
+      const deliveryIds: string[] = [];
+      if (binding) {
+        if (!binding.chat_id) throw new Error("Feishu Chat has no destination");
+        const batchId = createId("fbo");
+        const now = nowIso();
+        for (const [index, attachment] of attachments.entries()) {
+          // Keep a readable batch order; claim eligibility is enforced by the
+          // predecessor, not by sorting (other deliveries may run concurrently).
+          const id = `${batchId}_${String(index).padStart(2, "0")}`;
+          const descriptor = { id: attachment.id, filename: attachment.filename,
+            contentType: attachment.contentType, sizeBytes: attachment.sizeBytes };
+          // One file per delivery gives retries an independent stable Feishu UUID.
+          this.ctx.db.run(`INSERT INTO multiremi_feishu_bot_outbound_deliveries
+            (id, workspace_id, binding_id, chat_id, thread_id, reply_to_message_id,
+             body, attachments, previous_delivery_id, status, available_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+            [id, task.workspaceId, binding.id, binding.chat_id, binding.thread_id,
+              binding.reply_to_message_id, deliveryIds.length === 0 ? body : "", toJson([descriptor]),
+              deliveryIds.at(-1) ?? null, now, now, now]);
+          deliveryIds.push(id);
+        }
+      }
+      return { message, attachments, delivery_ids: deliveryIds };
+    })();
+    const session = this.ctx.chat().getChatSession(result.message.chatSessionId)!;
+    this.ctx.emitChatEvent(session, "chat:message", { message_id: result.message.id,
+      role: "assistant", content: result.message.body, task_id: taskId, created_at: result.message.createdAt },
+      { actorType: "agent", actorId: this.ctx.tasks().getTask(taskId)!.agentId });
+    return result;
+  }
+
   /**
    * Join one Feishu event to the canonical browser Chat/Task execution path.
    * The event id is the idempotency key; an active Task receives a steer,
@@ -491,36 +770,47 @@ export class FeishuBotRepo {
     const externalSessionKey = requiredBoundedString(input.externalSessionKey, "external_session_key", 1_024);
     const externalMessageId = requiredBoundedString(input.externalMessageId, "external_message_id", 512);
     const text = requiredBoundedString(input.text, "text", 200_000);
-    const sender = this.resolveSender(workspaceId, config.appId, input);
     const chatId = cleanOptionalString(input.chatId);
     const chatType = resolveFeishuBotChatType(input, externalSessionKey);
+    const threadId = cleanOptionalString(input.threadId);
+    // Ordinary private messages stay in the main chat, even when an older
+    // daemon unconditionally supplies the incoming message as a reply target.
+    const replyToMessageId = chatType === "p2p" && !threadId
+      ? null : cleanOptionalString(input.replyToMessageId) ?? externalMessageId;
     const routeAgent = this.resolveRouteAgent(workspaceId, chatType, chatId)!;
     const workspace = this.ctx.workspaces().getWorkspace(workspaceId);
     const topicConfig = workspace ? readWorkspaceIssueTopics(workspace.settings) : null;
-    const autoCreateGroupIssue = sender.membership === "member"
-      && chatType === "group"
-      && Boolean(chatId)
-      && topicConfig?.enabled === true
-      && topicConfig.chatId === chatId;
-    const createGroupIssue = () => this.ctx.issues().createIssue({
-      title: issueTitleFromFeishuMessage(text),
-      description: text,
-      status: "in_progress",
-      workspaceId,
-      projectId: topicConfig?.projectIds?.length === 1 ? topicConfig.projectIds[0] : null,
-      assigneeType: "agent",
-      assigneeId: routeAgent.agentId,
-      createdBy: sender.user?.id ?? null,
-      contextRefs: [{
-        type: "feishu_bot_message",
-        message_id: externalMessageId,
-        chat_id: chatId,
-        thread_id: cleanOptionalString(input.threadId) ?? externalMessageId,
-      }],
-    });
     let enqueuedTask: MultiremiTask | null = null;
 
     const result = this.ctx.db.transaction((): SubmitFeishuBotMessageResult => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const sender = this.resolveSender(workspaceId, config.appId, input, config.senderAccessPolicy);
+      let binding = this.ctx.db.query(
+        `SELECT * FROM multiremi_feishu_bot_chat_bindings
+          WHERE workspace_id = ? AND app_id = ? AND agent_id = ? AND external_session_key = ?`,
+      ).get(workspaceId, config.appId, routeAgent.agentId, externalSessionKey) as Row | null;
+      const autoCreateGroupIssue = sender.allowed
+        && !this.ctx.agents().getAgent(routeAgent.agentId)?.issueCreationRequiresProposal
+        && chatType === "group"
+        && Boolean(chatId)
+        && topicConfig?.enabled === true
+        && topicConfig.chatId === chatId;
+      const createGroupIssue = () => this.ctx.issues().createIssue({
+        title: issueTitleFromFeishuMessage(text),
+        description: text,
+        status: "in_progress",
+        workspaceId,
+        projectId: topicConfig?.projectIds?.length === 1 ? topicConfig.projectIds[0] : null,
+        assigneeType: "agent",
+        assigneeId: routeAgent.agentId,
+        createdBy: sender.actorId,
+        contextRefs: [{
+          type: "feishu_bot_message",
+          message_id: externalMessageId,
+          chat_id: chatId,
+          thread_id: cleanOptionalString(input.threadId) ?? externalMessageId,
+        }],
+      });
       const duplicate = this.ctx.db.query(
         `SELECT d.task_id, b.chat_session_id, b.agent_id, a.name AS agent_name, t.status
            FROM multiremi_feishu_bot_deliveries d
@@ -538,51 +828,71 @@ export class FeishuBotRepo {
           status: String(duplicate.status) as SubmitFeishuBotMessageResult["status"],
           duplicate: true,
           steered: false,
-          senderMembership: sender.membership,
+          senderAllowed: sender.allowed,
         };
       }
 
-      let binding = this.ctx.db.query(
-        `SELECT * FROM multiremi_feishu_bot_chat_bindings
-          WHERE workspace_id = ? AND app_id = ? AND agent_id = ? AND external_session_key = ?`,
-      ).get(workspaceId, config.appId, routeAgent.agentId, externalSessionKey) as Row | null;
+      const attachmentIds = [...new Set(input.attachmentIds ?? [])];
+      if (attachmentIds.length > 10) throw new Error("at most 10 attachments are allowed per message");
+      for (const attachmentId of attachmentIds) {
+        const upload = this.ctx.db.query(`SELECT a.id FROM multiremi_feishu_bot_inbound_attachments u
+          JOIN multiremi_attachments a ON a.id = u.attachment_id
+          WHERE u.attachment_id = ? AND u.workspace_id = ? AND u.runtime_id = ? AND u.app_id = ?
+            AND u.revision = ? AND u.external_session_key = ? AND u.external_message_id = ?
+            AND a.chat_message_id IS NULL AND a.chat_session_id IS NULL`)
+          .get(attachmentId, workspaceId, runtimeId, config.appId, input.revision, externalSessionKey, externalMessageId);
+        if (!upload) throw new FeishuBotConfigError("attachment does not belong to this inbound message", 403, "invalid_attachment");
+      }
+
       if (!binding) {
         const issue = autoCreateGroupIssue ? createGroupIssue() : null;
         const chat = this.ctx.chat().createChatSessionWithinTransaction({
           workspaceId,
           agentId: routeAgent.agentId,
-          creatorId: sender.user?.id ?? sender.actorId,
-          issueId: issue?.id ?? null,
+          creatorId: sender.actorId,
           title: issue ? `${issue.key}: ${issue.title}` : "Feishu conversation",
         });
         const bindingId = createId("fcb");
         const now = nowIso();
+        this.assertChatHasNoBinding(chat.id, bindingId);
         this.ctx.db.run(
           `INSERT INTO multiremi_feishu_bot_chat_bindings (
              id, workspace_id, app_id, agent_id, external_session_key,
-             chat_session_id, chat_id, thread_id, reply_to_message_id,
+             chat_session_id, issue_id, chat_id, thread_id, reply_to_message_id,
              created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           bindingId,
           workspaceId,
           config.appId,
           routeAgent.agentId,
           externalSessionKey,
           chat.id,
+          issue?.id ?? null,
           chatId,
-          cleanOptionalString(input.threadId),
-          cleanOptionalString(input.replyToMessageId) ?? externalMessageId,
+          threadId,
+          replyToMessageId,
           now,
           now,
         );
-        binding = { id: bindingId, chat_session_id: chat.id };
+        binding = { id: bindingId, chat_session_id: chat.id, issue_id: issue?.id ?? null };
+        if (issue) {
+          this.projectChatSessionsToIssue(chat.id, issue.id);
+          this.ensureDefaultAgentIssueUpdatesChannel(chat);
+        }
       } else if (autoCreateGroupIssue) {
         const chatSessionId = String(binding.chat_session_id);
         const chat = this.ctx.chat().getChatSession(chatSessionId);
-        if (chat && !chat.issueId) {
+        if (chat && !binding.issue_id
+          && (!chat.latestTaskId || !this.isTaskIssueCreationRestricted(chat.latestTaskId))) {
           const issue = createGroupIssue();
+          this.ctx.db.run(
+            "UPDATE multiremi_feishu_bot_chat_bindings SET issue_id = ?, updated_at = ? WHERE id = ?",
+            [issue.id, nowIso(), String(binding.id)],
+          );
+          binding.issue_id = issue.id;
+          this.projectChatSessionsToIssue(chat.id, issue.id);
+          this.ensureDefaultAgentIssueUpdatesChannel(chat);
           this.ctx.chat().updateChatSession(chat.id, {
-            issueId: issue.id,
             title: `${issue.key}: ${issue.title}`,
           });
         }
@@ -597,8 +907,8 @@ export class FeishuBotRepo {
          WHERE id = ?`,
         [
           chatId,
-          cleanOptionalString(input.threadId),
-          cleanOptionalString(input.replyToMessageId) ?? externalMessageId,
+          threadId,
+          replyToMessageId,
           nowIso(),
           String(binding.id),
         ],
@@ -609,26 +919,20 @@ export class FeishuBotRepo {
       let task;
       let steered = false;
       if (activeTask) {
-        this.ctx.tasks().createTaskSteerMessage({
-          taskId: activeTask.id,
-          kind: "steer",
-          content: text,
-          authorType: sender.membership === "member" ? "member" : "external",
-          authorId: sender.member?.id ?? sender.actorId,
-        });
         task = activeTask;
         steered = true;
       } else {
         task = this.ctx.tasks().createTaskWithinTransaction({
           agentId: routeAgent.agentId,
-          runtimeId,
+          // The selected Runtime owns the connector transport. Task execution
+          // follows the routed Agent and normal Chat/session affinity instead.
           chatSessionId,
+          issueId: nullableString(binding.issue_id),
           workspaceId,
           holdsWorkspace: false,
           prompt: text,
           requestingUserName: sender.displayName,
           requestingUserProfileDescription: sender.profileDescription,
-          issueCreationRestricted: sender.membership !== "member",
         });
         enqueuedTask = task;
       }
@@ -643,6 +947,15 @@ export class FeishuBotRepo {
         body: text,
         createdAt: now,
       });
+      for (const attachmentId of attachmentIds) {
+        this.ctx.db.run(`UPDATE multiremi_attachments SET chat_session_id = ?, chat_message_id = ?
+          WHERE id = ? AND workspace_id = ? AND chat_session_id IS NULL AND chat_message_id IS NULL`,
+          [chatSessionId, messageId, attachmentId, workspaceId]);
+      }
+      if (steered) {
+        this.ctx.tasks().createTaskSteerMessage({ taskId: task.id, kind: "steer", content: text,
+          authorType: "external", authorId: sender.actorId, sourceChatMessageId: messageId });
+      }
       this.ctx.db.run(
         "UPDATE multiremi_chat_sessions SET latest_task_id = ?, updated_at = ? WHERE id = ?",
         task.id,
@@ -652,15 +965,16 @@ export class FeishuBotRepo {
       this.ctx.db.run(
         `INSERT INTO multiremi_feishu_bot_deliveries (
            workspace_id, external_message_id, binding_id, task_id,
-           reply_to_message_id, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           reply_to_message_id, created_at, updated_at, sender_id, sender_recorded
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         workspaceId,
         externalMessageId,
         String(binding.id),
         task.id,
-        cleanOptionalString(input.replyToMessageId),
+        replyToMessageId,
         now,
         now,
+        sender.id,
       );
       if (input.deliveryMode === "native_cot_v1" && chatId && !steered) {
         // Use the same leased queue as proactive replies. A lost inbound WS
@@ -674,7 +988,7 @@ export class FeishuBotRepo {
            ) VALUES (?, ?, ?, ?, ?, ?, ?, '', 'pending', ?, ?, ?, ?, ?, ?)
            ON CONFLICT(task_id) DO NOTHING`,
           [createId("fbo"), workspaceId, String(binding.id), task.id, chatId,
-            cleanOptionalString(input.threadId), cleanOptionalString(input.replyToMessageId) ?? externalMessageId,
+            threadId, replyToMessageId,
             now, now, now, toJson(chatType === "group" && openId
               ? { mode: "person", openId, resolvedOpenId: openId } : { mode: "none", resolvedOpenId: null }),
             openId, toJson({ version: "native_cot_v1", startedAt: Date.now(), throughSeq: 0, interactions: {} })],
@@ -689,11 +1003,91 @@ export class FeishuBotRepo {
         duplicate: false,
         steered,
         ...(input.deliveryMode === "native_cot_v1" && chatId ? { deliveryQueued: true } : {}),
-        senderMembership: sender.membership,
+        senderAllowed: sender.allowed,
       };
     })();
     if (enqueuedTask) this.ctx.notifyTaskEnqueued(enqueuedTask);
     return result;
+  }
+
+  // Both callers create a fresh Chat in the same transaction and hold the
+  // workspace lifecycle lock. Check globally: a corrupt cross-workspace row
+  // must not make an already occupied Chat look available.
+  private assertChatHasNoBinding(chatSessionId: string, bindingId: string): void {
+    const existing = this.ctx.db.query(`SELECT id FROM multiremi_feishu_bot_chat_bindings
+      WHERE chat_session_id = ? ORDER BY id LIMIT 1`).get(chatSessionId) as Row | null;
+    if (existing) {
+      throw new FeishuBotConfigError(
+        `Cannot create binding ${bindingId}: Chat ${chatSessionId} already has binding ${String(existing.id)}`,
+        409,
+        "chat_binding_conflict",
+      );
+    }
+  }
+
+  getIssueIdForChatSession(chatSessionId: string): string | null {
+    const row = this.ctx.db.query(
+      `SELECT issue_id FROM multiremi_feishu_bot_chat_bindings
+       WHERE chat_session_id = ? AND issue_id IS NOT NULL
+       ORDER BY created_at ASC, id ASC LIMIT 1`,
+    ).get(chatSessionId) as Row | null;
+    return nullableString(row?.issue_id);
+  }
+
+  /**
+   * A binding row exists only for Chats the connector created as Feishu
+   * transport, whether or not they ever grew an Issue. Both kinds live in
+   * Feishu, not in the user's private conversation list.
+   */
+  isTransportChatSession(chatSessionId: string): boolean {
+    return this.ctx.db.query(
+      `SELECT 1 AS present FROM multiremi_feishu_bot_chat_bindings
+       WHERE chat_session_id = ? LIMIT 1`,
+    ).get(chatSessionId) != null;
+  }
+
+  /** The selected transport may stream and relay answers for its bound Chats
+   * even when execution is queued or assigned to a different machine. */
+  canDaemonAccessTask(workspaceId: string, daemonId: string, taskId: string): boolean {
+    return this.ctx.db.query(`SELECT 1 AS present
+      FROM multiremi_feishu_bot_configs c
+      JOIN multiremi_runtimes r ON r.id = c.runtime_id AND r.workspace_id = c.workspace_id
+      JOIN multiremi_feishu_bot_chat_bindings b ON b.workspace_id = c.workspace_id AND b.app_id = c.app_id
+      JOIN multiremi_tasks t ON t.chat_session_id = b.chat_session_id
+        AND t.workspace_id = b.workspace_id AND t.agent_id = b.agent_id
+      WHERE c.workspace_id = ? AND c.enabled = 1 AND r.daemon_id = ? AND t.id = ? LIMIT 1`)
+      .get(workspaceId, daemonId, taskId) != null;
+  }
+
+  private ensureDefaultAgentIssueUpdatesChannel(session: MultiremiChatSession): void {
+    const member = session.creatorId
+      ? this.ctx.workspaces().getWorkspaceMember(session.creatorId)
+        ?? this.ctx.workspaces().findWorkspaceMemberForUser(session.creatorId, session.workspaceId)
+      : null;
+    this.ctx.notificationChannels().upsertAgentChatNotificationChannel({
+      workspaceId: session.workspaceId,
+      chatSessionId: session.id,
+      name: `${session.title} Issue updates`,
+      enabled: true,
+      memberId: member && member.workspaceId === session.workspaceId && !member.archivedAt ? member.id : null,
+      createdBy: session.creatorId,
+    });
+  }
+
+  private projectChatSessionsToIssue(chatSessionId: string, issueId: string): void {
+    const now = nowIso();
+    this.ctx.db.run(
+      `UPDATE multiremi_issue_sessions
+       SET issue_id = ?, updated_at = ?
+       WHERE chat_id = ? AND issue_id IS NULL`,
+      [issueId, now, chatSessionId],
+    );
+    this.ctx.db.run(
+      `UPDATE multiremi_session_results
+       SET issue_id = ?
+       WHERE chat_id = ? AND issue_id IS NULL`,
+      [issueId, chatSessionId],
+    );
   }
 
   getChatConversationKind(chatSessionId: string): "p2p" | "group" | null {
@@ -727,7 +1121,7 @@ export class FeishuBotRepo {
         `SELECT 1 AS present
          FROM multiremi_feishu_bot_chat_bindings b
          JOIN multiremi_chat_sessions c ON c.id = b.chat_session_id
-         WHERE b.workspace_id = ? AND c.issue_id = ?
+         WHERE b.workspace_id = ? AND b.issue_id = ?
          LIMIT 1`,
       ).get(issue.workspaceId, issue.id) as Row | null;
       if (existing) return false;
@@ -737,18 +1131,18 @@ export class FeishuBotRepo {
         workspaceId: issue.workspaceId,
         agentId: routeAgent.agentId,
         creatorId: issue.createdBy ?? "local",
-        issueId: issue.id,
         title: `${issue.key}: ${issue.title}`,
       });
       const bindingId = `fcb_issue_topic_${issue.id}`;
       const deliveryId = `fbo_issue_topic_${issue.id}`;
       const now = nowIso();
+      this.assertChatHasNoBinding(chat.id, bindingId);
       this.ctx.db.run(
         `INSERT INTO multiremi_feishu_bot_chat_bindings (
            id, workspace_id, app_id, agent_id, external_session_key,
-           chat_session_id, chat_id, thread_id, reply_to_message_id,
+           chat_session_id, issue_id, chat_id, thread_id, reply_to_message_id,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
         [
           bindingId,
           issue.workspaceId,
@@ -756,11 +1150,14 @@ export class FeishuBotRepo {
           routeAgent.agentId,
           `pending:${issue.id}`,
           chat.id,
+          issue.id,
           topicConfig.chatId,
           now,
           now,
         ],
       );
+      this.projectChatSessionsToIssue(chat.id, issue.id);
+      this.ensureDefaultAgentIssueUpdatesChannel(chat);
       this.ctx.db.run(
         `INSERT INTO multiremi_feishu_bot_outbound_deliveries (
            id, workspace_id, binding_id, task_id, chat_id, thread_id,
@@ -804,7 +1201,7 @@ export class FeishuBotRepo {
       const binding = this.ctx.db.query(
         `SELECT b.* FROM multiremi_feishu_bot_chat_bindings b
          JOIN multiremi_chat_sessions c ON c.id = b.chat_session_id
-         WHERE b.workspace_id = ? AND c.issue_id = ? AND c.status = 'active'
+         WHERE b.workspace_id = ? AND b.issue_id = ? AND c.status = 'active'
            AND b.chat_id = ? AND b.reply_to_message_id IS NOT NULL
          ORDER BY b.updated_at DESC, b.created_at DESC, b.id DESC
          LIMIT 1`,
@@ -818,13 +1215,12 @@ export class FeishuBotRepo {
       if (existing) return this.ctx.tasks().getTask(String(existing.wake_task_id));
 
       const agentId = String(binding.agent_id ?? "");
-      const runtimeId = bot.config?.runtimeId;
-      if (!agentId || !runtimeId) return null;
+      if (!agentId) return null;
       const payload = request.payload ?? {};
       const wakeTask = this.ctx.tasks().createTaskWithinTransaction({
         agentId,
-        runtimeId,
         chatSessionId: String(binding.chat_session_id),
+        issueId: issue.id,
         workspaceId: issue.workspaceId,
         holdsWorkspace: false,
         prompt: humanRequestPushPrompt(issue, sourceTask, request),
@@ -883,7 +1279,7 @@ export class FeishuBotRepo {
       `SELECT b.* FROM multiremi_feishu_bot_chat_bindings b
        JOIN multiremi_chat_sessions c ON c.id = b.chat_session_id
        WHERE b.workspace_id = ? AND b.app_id = ?
-         AND c.issue_id = ? AND c.status = 'active'
+         AND b.issue_id = ? AND c.status = 'active'
          AND b.chat_id IS NOT NULL AND b.reply_to_message_id IS NOT NULL
        ORDER BY b.updated_at DESC, b.created_at DESC, b.id DESC`,
     ).all(input.issue.workspaceId, config.appId, input.issue.id) as Row[];
@@ -904,6 +1300,11 @@ export class FeishuBotRepo {
       if (alreadyPrepared) continue;
 
       let wakeTask = this.ctx.chat().getPendingChatTask(chatSessionId);
+      // Binding changes cannot turn an existing private/different-Issue user
+      // turn into an Issue notification. Only coalesce into the same transport.
+      if (wakeTask && (wakeTask.issueId !== input.issue.id
+        || wakeTask.workspaceId !== input.issue.workspaceId
+        || wakeTask.agentId !== binding.agent_id)) wakeTask = null;
       let deliveryMode: "inbound" | "proactive";
       if (wakeTask) {
         const proactive = this.ctx.db.query(
@@ -925,8 +1326,8 @@ export class FeishuBotRepo {
         deliveryMode = "proactive";
         wakeTask = this.ctx.tasks().createTaskWithinTransaction({
           agentId: String(binding.agent_id),
-          runtimeId: config.runtimeId,
           chatSessionId,
+          issueId: input.issue.id,
           workspaceId: input.issue.workspaceId,
           holdsWorkspace: false,
           prompt: roundPushPrompt(input.issue),
@@ -968,6 +1369,11 @@ export class FeishuBotRepo {
       [toTaskId, nowIso(), fromTaskId],
     );
     this.ctx.db.run(
+      `UPDATE multiremi_feishu_bot_human_request_pushes
+       SET wake_task_id = ?, updated_at = ? WHERE wake_task_id = ?`,
+      [toTaskId, nowIso(), fromTaskId],
+    );
+    this.ctx.db.run(
       `UPDATE multiremi_feishu_bot_outbound_deliveries
        SET task_id = ?, body = '', status = 'pending', claim_token = NULL, leased_until = NULL,
            external_message_id = CASE WHEN presentation_checkpoint IS NULL THEN external_message_id ELSE NULL END,
@@ -985,6 +1391,7 @@ export class FeishuBotRepo {
       `SELECT b.* FROM multiremi_feishu_bot_round_pushes r
        JOIN multiremi_feishu_bot_chat_bindings b ON b.id = r.binding_id
        WHERE r.wake_task_id = ? AND r.delivery_mode = 'proactive'
+         AND b.workspace_id = r.workspace_id AND b.issue_id = r.issue_id
        ORDER BY r.created_at ASC, r.id ASC LIMIT 1`,
     ).get(task.id) as Row | null;
     if (!row) return;
@@ -1020,6 +1427,7 @@ export class FeishuBotRepo {
     nowInput: string | Date = new Date(),
     supportsTaskStream = false,
     supportsNativeCot = false,
+    supportsAttachments = false,
   ): MultiremiFeishuBotOutboundDelivery | null {
     const now = nowInput instanceof Date ? nowInput : new Date(nowInput);
     if (!Number.isFinite(now.getTime())) throw new Error("now must be a valid date");
@@ -1037,12 +1445,29 @@ export class FeishuBotRepo {
         `SELECT o.* FROM multiremi_feishu_bot_outbound_deliveries o
          JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id
          WHERE o.workspace_id = ? AND b.app_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM multiremi_feishu_bot_round_pushes r
+             WHERE r.wake_task_id = o.task_id AND r.binding_id = b.id
+               AND r.workspace_id = o.workspace_id AND r.delivery_mode = 'proactive'
+               AND (b.issue_id IS NULL OR b.issue_id <> r.issue_id)
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM multiremi_feishu_bot_human_request_pushes h
+             WHERE h.wake_task_id = o.task_id AND h.binding_id = b.id
+               AND h.workspace_id = o.workspace_id
+               AND (b.issue_id IS NULL OR b.issue_id <> h.issue_id)
+           )
            AND (o.task_id IS NULL OR ? = 1 OR o.body <> '')
            AND (? = 1 OR o.presentation_checkpoint IS NULL)
+           AND (? = 1 OR o.attachments IS NULL)
+           AND (o.previous_delivery_id IS NULL OR EXISTS (
+             SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries previous
+             WHERE previous.id = o.previous_delivery_id AND previous.workspace_id = o.workspace_id
+               AND previous.status = 'sent'))
            AND ((o.status = 'pending' AND o.available_at <= ?)
              OR (o.status = 'sending' AND o.leased_until IS NOT NULL AND o.leased_until <= ?))
          ORDER BY o.created_at ASC, o.id ASC LIMIT 1`,
-      ).get(workspaceId, config.appId, supportsTaskStream ? 1 : 0, supportsNativeCot ? 1 : 0, nowIsoValue, nowIsoValue) as Row | null;
+      ).get(workspaceId, config.appId, supportsTaskStream ? 1 : 0, supportsNativeCot ? 1 : 0, supportsAttachments ? 1 : 0, nowIsoValue, nowIsoValue) as Row | null;
       if (!row) return null;
       let mention = parseOutboundMention(parseJson(row.mention_snapshot, null));
       if (supportsTaskStream && row.task_id && !row.mention_snapshot) {
@@ -1067,6 +1492,11 @@ export class FeishuBotRepo {
              attempt_count = attempt_count + 1, updated_at = ?,
              mention_snapshot = COALESCE(mention_snapshot, ?), presentation_checkpoint = COALESCE(presentation_checkpoint, ?)
          WHERE id = ?
+           AND (previous_delivery_id IS NULL OR EXISTS (
+             SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries previous
+             WHERE previous.id = multiremi_feishu_bot_outbound_deliveries.previous_delivery_id
+               AND previous.workspace_id = multiremi_feishu_bot_outbound_deliveries.workspace_id
+               AND previous.status = 'sent'))
            AND ((status = 'pending' AND available_at <= ?)
              OR (status = 'sending' AND leased_until IS NOT NULL AND leased_until <= ?))`,
         [claimToken, leasedUntil, nowIsoValue, mention ? toJson(mention) : null, presentation ? toJson(presentation) : null,
@@ -1077,6 +1507,7 @@ export class FeishuBotRepo {
         ...outboundDelivery(row, claimToken),
         ...(supportsTaskStream && row.task_id ? {
           taskId: String(row.task_id),
+          receiptMessageIds: this.listTaskReceiptMessageIds(workspaceId, String(row.task_id)),
           resumeMessageId: cleanOptionalString(row.external_message_id),
           ...(mention ? { mention } : {}),
           ...(presentation ? { presentation } : {}),
@@ -1129,17 +1560,22 @@ export class FeishuBotRepo {
     attachmentId: string,
   ): MultiremiAttachment | null {
     const config = this.getConfig(workspaceId);
-    if (!config || config.runtimeId !== runtimeId) return null;
+    if (!config?.enabled || config.runtimeId !== runtimeId) return null;
     const delivery = this.ctx.db.query(
-      `SELECT body FROM multiremi_feishu_bot_outbound_deliveries
-       WHERE id = ? AND workspace_id = ? AND status = 'sending' AND claim_token = ?`,
-    ).get(deliveryId, workspaceId, claimToken) as Row | null;
+      `SELECT o.body, o.attachments FROM multiremi_feishu_bot_outbound_deliveries o
+       JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id
+       WHERE o.id = ? AND o.workspace_id = ? AND o.status = 'sending' AND o.claim_token = ?
+         AND o.leased_until > ? AND b.app_id = ?`,
+    ).get(deliveryId, workspaceId, claimToken, nowIso(), config.appId) as Row | null;
     if (!delivery) return null;
     const attachment = this.ctx.issues().getAttachment(attachmentId);
     if (!attachment || attachment.workspaceId !== workspaceId) return null;
+    const explicit = parseJson<MultiremiFeishuBotOutboundDelivery["attachments"]>(delivery.attachments, []) ?? [];
+    if (explicit.some(entry => entry.id === attachmentId)) return attachment;
     const referenced = findMarkdownImages(String(delivery.body ?? ""))
       .some((match) => match.source.kind === "attachment" && match.source.attachmentId === attachmentId);
-    return referenced ? attachment : null;
+    return referenced && attachment.contentType.toLowerCase().startsWith("image/")
+      && attachment.sizeBytes <= FEISHU_IMAGE_MAX_BYTES ? attachment : null;
   }
 
   reportOutbound(
@@ -1174,7 +1610,7 @@ export class FeishuBotRepo {
          SET external_message_id = COALESCE(?, external_message_id), leased_until = ?, updated_at = ?,
              presentation_checkpoint = COALESCE(?, presentation_checkpoint)
          WHERE id = ? AND workspace_id = ? AND status = 'sending' AND claim_token = ?
-           AND leased_until > ? AND task_id IS NOT NULL
+           AND leased_until > ? AND (task_id IS NOT NULL OR attachments IS NOT NULL)
            AND binding_id IN (SELECT id FROM multiremi_feishu_bot_chat_bindings WHERE app_id = ?)`,
         [cleanOptionalString(input.externalMessageId), new Date(now.getTime() + 120_000).toISOString(),
           now.toISOString(), input.presentation ? toJson(input.presentation) : null,
@@ -1184,13 +1620,15 @@ export class FeishuBotRepo {
     if (input.status === "sent") {
       return this.ctx.db.transaction(() => {
         const row = this.ctx.db.query(
-          `SELECT binding_id, chat_id, reply_to_message_id
+          `SELECT binding_id, chat_id, reply_to_message_id, task_id, attachments
            FROM multiremi_feishu_bot_outbound_deliveries
            WHERE id = ? AND workspace_id = ? AND status = 'sending' AND claim_token = ?`,
         ).get(deliveryId, workspaceId, input.claimToken) as Row | null;
         if (!row) return false;
         const externalMessageId = cleanOptionalString(input.externalMessageId);
-        const seedsTopic = !cleanOptionalString(row.reply_to_message_id);
+        // Only a standalone Issue topic seed establishes a new conversation
+        // root. A Task result sent to a private chat must preserve its binding.
+        const seedsTopic = !row.task_id && !row.attachments && !cleanOptionalString(row.reply_to_message_id);
         if (seedsTopic && !externalMessageId) return false;
         const sentAt = now.toISOString();
         const updated = this.ctx.db.run(
@@ -1219,62 +1657,100 @@ export class FeishuBotRepo {
         return true;
       })();
     }
-    const row = this.ctx.db.query(
-      `SELECT attempt_count FROM multiremi_feishu_bot_outbound_deliveries
-       WHERE id = ? AND workspace_id = ? AND status = 'sending' AND claim_token = ?`,
-    ).get(deliveryId, workspaceId, input.claimToken) as Row | null;
-    if (!row) return false;
-    const delayMs = Math.min(5 * 60_000, 5_000 * 2 ** Math.min(6, Math.max(0, Number(row.attempt_count) - 1)));
-    const terminal = input.retryable === false || Number(row.attempt_count) >= 6;
-    return this.ctx.db.run(
-      `UPDATE multiremi_feishu_bot_outbound_deliveries
-       SET status = ?, claim_token = NULL, leased_until = NULL,
-           available_at = ?, last_error = ?, updated_at = ?
-       WHERE id = ? AND workspace_id = ? AND status = 'sending' AND claim_token = ?`,
-      [
-        terminal ? "failed" : "pending",
-        new Date(now.getTime() + delayMs).toISOString(),
-        cleanOptionalString(input.error)?.slice(0, 2_000) ?? "Feishu send failed",
-        now.toISOString(),
-        deliveryId,
-        workspaceId,
-        input.claimToken,
-      ],
-    ).changes === 1;
+    return this.ctx.db.transaction(() => {
+      const row = this.ctx.db.query(
+        `SELECT attempt_count FROM multiremi_feishu_bot_outbound_deliveries
+         WHERE id = ? AND workspace_id = ? AND status = 'sending' AND claim_token = ?`,
+      ).get(deliveryId, workspaceId, input.claimToken) as Row | null;
+      if (!row) return false;
+      const delayMs = Math.min(5 * 60_000, 5_000 * 2 ** Math.min(6, Math.max(0, Number(row.attempt_count) - 1)));
+      const terminal = input.retryable === false || Number(row.attempt_count) >= 6;
+      const error = cleanOptionalString(input.error)?.slice(0, 2_000) ?? "Feishu send failed";
+      const updated = this.ctx.db.run(
+        `UPDATE multiremi_feishu_bot_outbound_deliveries
+         SET status = ?, claim_token = NULL, leased_until = NULL,
+             available_at = ?, last_error = ?, updated_at = ?
+         WHERE id = ? AND workspace_id = ? AND status = 'sending' AND claim_token = ?`,
+        [
+          terminal ? "failed" : "pending",
+          new Date(now.getTime() + delayMs).toISOString(),
+          error,
+          now.toISOString(),
+          deliveryId,
+          workspaceId,
+          input.claimToken,
+        ],
+      );
+      if (updated.changes !== 1) return false;
+      if (terminal) {
+        // A failed caption/attachment must not let the rest of that batch
+        // overtake it, nor leave descendants pending forever without a reason.
+        this.ctx.db.run(
+          `WITH RECURSIVE successors AS (
+             SELECT id FROM multiremi_feishu_bot_outbound_deliveries
+             WHERE previous_delivery_id = ? AND workspace_id = ?
+             UNION
+             SELECT o.id FROM multiremi_feishu_bot_outbound_deliveries o
+             JOIN successors previous ON o.previous_delivery_id = previous.id
+             WHERE o.workspace_id = ?
+           )
+           UPDATE multiremi_feishu_bot_outbound_deliveries
+           SET status = 'failed', last_error = ?, updated_at = ?
+           WHERE id IN (SELECT id FROM successors) AND status = 'pending'`,
+          [deliveryId, workspaceId, workspaceId,
+            `Not sent because earlier batch delivery ${deliveryId} failed: ${error}`.slice(0, 2_000), now.toISOString()],
+        );
+      }
+      return true;
+    })();
   }
 
   private resolveSender(
     workspaceId: string,
     appId: string,
     input: SubmitFeishuBotMessageInput,
+    accessPolicy: MultiremiFeishuBotConfig["senderAccessPolicy"],
   ): ResolvedFeishuSender {
     const unionId = optionalBoundedString(input.senderUnionId, "sender_union_id", 512);
     const openId = optionalBoundedString(input.senderOpenId, "sender_open_id", 512);
     const userId = optionalBoundedString(input.senderUserId, "sender_user_id", 512);
     const tenantKey = optionalBoundedString(input.senderTenantKey, "sender_tenant_key", 512);
     const eventName = optionalBoundedString(input.senderName, "sender_name", 512);
-    const user = unionId ? this.ctx.workspaces().getUserByFeishuUnionId(unionId) : null;
-    const member = user
-      ? this.ctx.workspaces().findWorkspaceMemberForUser(user.id, workspaceId)
-      : null;
-    const activeMember = member && !member.archivedAt ? member : null;
-    const membership: FeishuSenderMembership = activeMember
-      ? "member"
-      : user
-        ? "non_member"
-        : "unbound";
-    const displayName = activeMember?.name || user?.name || eventName || "Feishu user";
-    const actorId = user?.id
+    let account: FeishuBotSender | null = null;
+    // open_id is always supplied by the real connector. Its app scope makes
+    // the same account stable even when a later event adds or omits union_id.
+    // Sender records are for attribution; only opt-in allowlists gate access.
+    if (openId) {
+      const now = nowIso();
+      this.ctx.db.run(
+        `INSERT INTO multiremi_feishu_bot_senders
+           (id, workspace_id, app_id, open_id, union_id, display_name, allowed, first_seen_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+         ON CONFLICT(workspace_id, app_id, open_id) DO UPDATE SET
+           union_id = COALESCE(excluded.union_id, multiremi_feishu_bot_senders.union_id),
+           display_name = COALESCE(?, multiremi_feishu_bot_senders.display_name),
+           last_seen_at = excluded.last_seen_at`,
+        [createId("fbs"), workspaceId, appId, openId, unionId, eventName ?? "Feishu user", now, now, eventName],
+      );
+      account = toSender(this.ctx.db.query(
+        "SELECT * FROM multiremi_feishu_bot_senders WHERE workspace_id = ? AND app_id = ? AND open_id = ?",
+      ).get(workspaceId, appId, openId) as Row);
+    }
+    const displayName = account?.display_name ?? eventName ?? "Feishu user";
+    const actorId = (openId ? `feishu:open:${appId}:${openId}` : null)
       ?? (unionId ? `feishu:union:${unionId}` : null)
-      ?? (openId ? `feishu:open:${appId}:${openId}` : null)
       ?? (userId ? `feishu:user:${tenantKey ?? "unknown"}:${userId}` : null)
       ?? `feishu:session:${input.externalSessionKey}`;
-    const profileDescription = [
+    const profileDescription = accessPolicy === "agent" ? [
       "Source: Feishu personal bot",
-      `Workspace membership: ${membership}`,
-      ...(activeMember ? [`Workspace role: ${activeMember.role}`] : []),
+      "Anyone who can message this bot may use the responding Agent's enabled capabilities. No separate sender approval or workspace membership is required.",
+      "The Agent's own permissions and approval requirements still apply. The API checks the bot's current access policy; do not infer a pending approval from earlier conversation history.",
+    ].join("\n") : [
+      "Source: Feishu personal bot",
+      "The space owner manages account access in Settings > Integrations > Feishu account allowlist.",
+      "Approval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
     ].join("\n");
-    return { membership, user, member: activeMember, displayName, actorId, profileDescription };
+    return { id: account?.id ?? null, allowed: accessPolicy === "agent" || (account?.allowed ?? false), displayName, actorId, profileDescription };
   }
 
   resetSession(workspaceId: string, runtimeId: string, revision: number, externalSessionKey: string): boolean {
@@ -1294,27 +1770,167 @@ export class FeishuBotRepo {
     return result.changes > 0;
   }
 
-  cancelSessionTask(workspaceId: string, runtimeId: string, revision: number, externalSessionKey: string): string | null {
+  /**
+   * Resolve and execute one Feishu stop request.
+   *
+   * The Feishu client's CoT "中断" control sends a plain `@bot /stop` text
+   * (single chat: `/stop`) as a *new top-level* message, so it carries no
+   * thread lineage back to the run the user was watching. Resolution therefore
+   * has three levels:
+   *
+   * 1. The conversation key the connector derived (`chatId` in a single chat,
+   *    `chatId:thread:rootId` inside a topic) — the precise case.
+   * 2. Group top-level messages: the sender's own unfinished Tasks in this
+   *    chat. Exactly one candidate can be stopped; several stay untouched and
+   *    come back as a shortlist, because stopping the wrong long run is
+   *    irreversible while asking again is cheap.
+   * 3. Nothing — report "none" without writing anything.
+   *
+   * A request naming an explicit target (`/stop <task_id|Issue key>`) is only
+   * honoured inside the sender's own candidate set, so an id cannot be used to
+   * stop someone else's work.
+   *
+   * Scope: exactly one Chat Task is cancelled — the concierge run bound to this
+   * conversation. Work this run delegated carries `parent_task_id` pointing
+   * back at it, but that edge records what triggered the work, not whose run it
+   * belongs to: delegated and Issue-side Tasks have no `chat_session_id` and
+   * keep running. Stopping the Feishu conversation must not end Issue work.
+   */
+  cancelSessionTask(
+    workspaceId: string,
+    runtimeId: string,
+    revision: number,
+    externalSessionKey: string,
+    options: { chatId?: string | null; senderOpenId?: string | null; target?: string | null } = {},
+  ): FeishuBotCancelResult {
     const config = this.getConfig(workspaceId);
-    if (!config || config.runtimeId !== runtimeId || config.revision !== revision) return null;
+    if (!config || config.runtimeId !== runtimeId || config.revision !== revision) {
+      return rejectedCancel("stale_assignment");
+    }
     const key = requiredBoundedString(externalSessionKey, "external_session_key", 1_024);
+    const target = cleanOptionalString(options.target ?? null);
+    const senderOpenId = cleanOptionalString(options.senderOpenId ?? null);
+    const chatId = cleanOptionalString(options.chatId ?? null);
+
     const bindings = this.ctx.db.query(
       `SELECT chat_session_id FROM multiremi_feishu_bot_chat_bindings
         WHERE workspace_id = ? AND app_id = ? AND external_session_key = ?
         ORDER BY updated_at DESC, id DESC`,
     ).all(workspaceId, config.appId, key) as Row[];
+    const sessionTargets: ResolvedCancelTarget[] = [];
     const seenSessions = new Set<string>();
-    let latestCancelledTaskId: string | null = null;
     for (const binding of bindings) {
       const chatSessionId = String(binding.chat_session_id);
       if (seenSessions.has(chatSessionId)) continue;
       seenSessions.add(chatSessionId);
       const task = this.ctx.chat().getPendingChatTask(chatSessionId);
-      if (!task) continue;
-      this.ctx.tasks().cancelTask(task.id);
-      latestCancelledTaskId ??= task.id;
+      if (task) sessionTargets.push(this.describeCancelTarget(task, chatId));
     }
-    return latestCancelledTaskId;
+
+    const candidates = chatId && senderOpenId
+      ? this.listCancelCandidates(workspaceId, config.appId, chatId, senderOpenId, seenSessions)
+      : [];
+
+    if (target) {
+      const match = [...sessionTargets, ...candidates]
+        .find((candidate) => candidate.task.id === target || candidate.issueKey === target);
+      if (!match) return rejectedCancel("target_not_candidate");
+      this.ctx.tasks().cancelTask(match.task.id);
+      return cancelledCancel(match);
+    }
+
+    if (sessionTargets.length) {
+      for (const candidate of sessionTargets) this.ctx.tasks().cancelTask(candidate.task.id);
+      return cancelledCancel(sessionTargets[0]!);
+    }
+    const resolution = resolveFallbackCancelTarget(candidates);
+    if (resolution.kind === "target") {
+      this.ctx.tasks().cancelTask(resolution.target.task.id);
+      return cancelledCancel(resolution.target);
+    }
+    if (resolution.kind === "ambiguous") {
+      return {
+        outcome: "ambiguous",
+        agentName: null,
+        taskId: null,
+        issueKey: null,
+        chatTitle: null,
+        candidates: candidates.slice(0, MAX_STOP_CANDIDATES).map(toCancelCandidate),
+        candidateCount: resolution.count,
+        reason: null,
+      };
+    }
+    return {
+      outcome: "none",
+      agentName: null,
+      taskId: null,
+      issueKey: null,
+      chatTitle: null,
+      candidates: [],
+      candidateCount: 0,
+      reason: null,
+    };
+  }
+
+  /**
+   * The sender's own unfinished Tasks in one chat.
+   *
+   * "Unfinished" reuses the Chat queue's pending statuses instead of inventing
+   * a second definition, and a Task whose newest inbound delivery cannot be
+   * attributed to this sender is excluded rather than assumed.
+   */
+  private listCancelCandidates(
+    workspaceId: string,
+    appId: string,
+    chatId: string,
+    senderOpenId: string,
+    excludedChatSessionIds: Set<string>,
+  ): ResolvedCancelTarget[] {
+    const rows = this.ctx.db.query(
+      `SELECT b.chat_session_id
+         FROM multiremi_feishu_bot_chat_bindings b
+        WHERE b.workspace_id = ? AND b.app_id = ? AND b.chat_id = ?
+          AND b.external_session_key NOT LIKE '%:closed:%'
+        ORDER BY b.updated_at DESC, b.id DESC`,
+    ).all(workspaceId, appId, chatId) as Row[];
+    const seen = new Set(excludedChatSessionIds);
+    const targets: ResolvedCancelTarget[] = [];
+    for (const row of rows) {
+      const chatSessionId = String(row.chat_session_id);
+      if (seen.has(chatSessionId)) continue;
+      seen.add(chatSessionId);
+      const task = this.ctx.chat().getPendingChatTask(chatSessionId);
+      if (!task) continue;
+      if (!this.isTaskOwnedBySender(workspaceId, task.id, senderOpenId)) continue;
+      targets.push(this.describeCancelTarget(task, chatId));
+    }
+    targets.sort((a, b) => compareCancelTargets(a.task, b.task));
+    return targets;
+  }
+
+  /** Whether the newest inbound delivery for this Task belongs to the sender. */
+  private isTaskOwnedBySender(workspaceId: string, taskId: string, senderOpenId: string): boolean {
+    const row = this.ctx.db.query(
+      `SELECT s.open_id AS open_id
+         FROM multiremi_feishu_bot_deliveries d
+         JOIN multiremi_feishu_bot_senders s ON s.id = d.sender_id
+        WHERE d.workspace_id = ? AND d.task_id = ?
+        ORDER BY d.created_at DESC, d.external_message_id DESC
+        LIMIT 1`,
+    ).get(workspaceId, taskId) as Row | null;
+    return Boolean(row) && String(row!.open_id) === senderOpenId;
+  }
+
+  private describeCancelTarget(task: MultiremiTask, chatId: string | null): ResolvedCancelTarget {
+    const agent = this.ctx.agents().getAgent(task.agentId);
+    const issue = task.issueId ? this.ctx.issues().getIssue(task.issueId) : null;
+    const chat = task.chatSessionId ? this.ctx.chat().getChatSession(task.chatSessionId) : null;
+    return {
+      task,
+      agentName: agent?.name ?? null,
+      issueKey: issue?.key ?? null,
+      chatTitle: chat?.title ?? chatId,
+    };
   }
 
   inspectSession(
@@ -1731,6 +2347,20 @@ export function deriveStatus(input: {
   return "deploying";
 }
 
+function toSender(row: Row): FeishuBotSender {
+  return {
+    id: String(row.id),
+    app_id: String(row.app_id),
+    display_name: String(row.display_name),
+    name_en: nullableString(row.name_en),
+    open_id: String(row.open_id),
+    union_id: nullableString(row.union_id),
+    allowed: Boolean(Number(row.allowed)),
+    first_seen_at: String(row.first_seen_at),
+    last_seen_at: String(row.last_seen_at),
+  };
+}
+
 function resolveSecretColumn(
   workspaceId: string,
   field: "app_secret",
@@ -1781,6 +2411,7 @@ function mapConfig(row: Row): MultiremiFeishuBotConfig {
     appId: String(row.app_id ?? ""),
     domain: normalizeDomain(row.domain),
     enabled: Boolean(Number(row.enabled ?? 0)),
+    senderAccessPolicy: row.sender_access_policy === "allowlist" ? "allowlist" : "agent",
     revision: Number(row.revision ?? 0),
     hasAppSecret: Boolean(nullableString(row.app_secret_encrypted)),
     appSecretHint: nullableString(row.app_secret_hint),
@@ -1890,7 +2521,7 @@ function humanRequestPushPrompt(
 
 function outboundDelivery(row: Row, claimToken: string): MultiremiFeishuBotOutboundDelivery {
   const id = String(row.id);
-  const bodyOrigin = row.task_id == null ? "issue" : "agent";
+  const bodyOrigin = row.task_id == null && !row.attachments ? "issue" : "agent";
   return {
     id,
     claimToken,
@@ -1906,6 +2537,7 @@ function outboundDelivery(row: Row, claimToken: string): MultiremiFeishuBotOutbo
     body_origin: bodyOrigin,
     idempotencyKey: id,
     idempotency_key: id,
+    ...(row.attachments ? { attachments: parseJson(row.attachments, []) } : {}),
   };
 }
 

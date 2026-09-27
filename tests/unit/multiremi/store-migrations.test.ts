@@ -9,6 +9,11 @@ import { runMigrations } from "@multiremi/store/migrations.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 
+import {
+  CHAT_ISSUE_CLASSIFICATION_CASES, classificationChatId, CHAT_ISSUE_MIGRATION,
+  seedLegacyChatIssueClassificationFixture, seedLegacyChatWakeFixture, assertLegacyChatWakeSettlement, assertCancelledLegacyWakesCannotRun, assertLegacyChatWakeRollback, mintLegacyWakeTokens, assertLegacyWakeTokens, seedWakeInvariantMatrix, assertWakeInvariantMatrix, seedLegacyProactiveRetryMatrix, assertLegacyProactiveRetryMatrix, seedLegacyChatIssueFixture,
+} from "./chat-issue-migration-fixture.js";
+
 let db: Database | null = null;
 
 function freshDb(): Database {
@@ -40,6 +45,15 @@ afterEach(() => {
 });
 
 describe("store migrations", () => {
+  it("adds provider-default metadata to existing runtime model tables idempotently", () => {
+    const database = freshDb();
+    migrate(database);
+    database.exec("ALTER TABLE multiremi_runtime_models DROP COLUMN is_provider_default");
+    migrate(database);
+    migrate(database);
+    expect(columnNames(database, "multiremi_runtime_models")).toContain("is_provider_default");
+  });
+
   it("creates the schema on a fresh database", () => {
     const database = freshDb();
     migrate(database);
@@ -54,6 +68,7 @@ describe("store migrations", () => {
       "multiremi_notification_channels",
       "multiremi_notification_deliveries",
       "multiremi_agent_issue_update_state",
+      "multiremi_feishu_bot_issue_link_audit",
       "multiremi_tasks",
       "multiremi_task_messages",
       "multiremi_workspaces",
@@ -120,7 +135,9 @@ describe("store migrations", () => {
       ]),
     );
     expect(columnNames(database, "multiremi_tasks")).toContain("delegation_return_task_id");
-    expect(columnNames(database, "multiremi_chat_sessions")).toContain("issue_id");
+    expect(columnNames(database, "multiremi_tasks")).toContain("continued_from_task_id");
+    expect(columnNames(database, "multiremi_chat_sessions")).not.toContain("issue_id");
+    expect(columnNames(database, "multiremi_feishu_bot_chat_bindings")).toContain("issue_id");
     expect(columnNames(database, "multiremi_tasks")).toContain("issue_creation_restricted");
     expect(columnNames(database, "multiremi_autopilot_runs")).toContain("source_task_id");
     expect(columnNames(database, "multiremi_autopilots")).toEqual(expect.arrayContaining([
@@ -175,27 +192,64 @@ describe("store migrations", () => {
     ]));
   });
 
-  it("adopts an unambiguous legacy Session and preserves Task and result provenance", () => {
+  it("adopts an unambiguous legacy Session before removing Chat issue ownership", () => {
     const database = freshDb();
-    const store = new MultiremiStore(database);
-    const agent = store.createAgent({ name: "Migration agent", provider: "codex" });
+    const store = new MultiremiStore(database as unknown as SqlDatabase);
+    const agent = store.createAgent({ name: "Migration worker", provider: "claude" });
     const issue = store.createIssue({ title: "Legacy Session owner" });
-    const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id });
+    const chat = store.createChatSession({ agentId: agent.id });
     const session = store.getOrCreateDefaultChatSession(chat.id);
-    const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Preserve me" });
-    const result = store.publishSessionResult(session.id, { body: "Durable result", sourceTaskId: task.id });
+    database.run("UPDATE multiremi_issue_sessions SET issue_id = ? WHERE id = ?", [issue.id, session.id]);
+    const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Preserve ownership" });
+    const result = store.publishSessionResult(session.id, { body: "Preserve result ownership" });
 
-    database.run("UPDATE multiremi_tasks SET chat_session_id = NULL WHERE id = ?", [task.id]);
-    database.run("UPDATE multiremi_session_results SET chat_id = NULL WHERE id = ?", [result.id]);
+    database.exec("ALTER TABLE multiremi_chat_sessions ADD COLUMN issue_id TEXT");
+    database.run("UPDATE multiremi_chat_sessions SET issue_id = ? WHERE id = ?", [issue.id, chat.id]);
     database.run("UPDATE multiremi_issue_sessions SET chat_id = NULL WHERE id = ?", [session.id]);
-    database.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", ["20260913_chat_owned_sessions"]);
+    database.run("UPDATE multiremi_session_results SET chat_id = NULL WHERE id = ?", [result.id]);
+    database.run("UPDATE multiremi_tasks SET chat_session_id = NULL WHERE id = ?", [task.id]);
+    database.run(
+      "DELETE FROM multiremi_schema_migrations WHERE id IN (?, ?)",
+      ["20260913_chat_owned_sessions", "20260916_chat_issue_decoupling"],
+    );
 
     migrate(database);
 
-    expect(store.getIssueSession(session.id)).toMatchObject({ id: session.id, chatId: chat.id, issueId: issue.id });
-    expect(store.getTask(task.id)).toMatchObject({ issueSessionId: session.id, chatSessionId: chat.id });
-    expect(store.listSessionResults(session.id)[0]).toMatchObject({ id: result.id, chatId: chat.id, issueId: issue.id });
-    expect(store.listChatOwnedSessions(chat.id, true).filter((entry) => entry.isDefault)).toHaveLength(1);
+    expect(columnNames(database, "multiremi_chat_sessions")).not.toContain("issue_id");
+    expect(database.query("SELECT chat_id, issue_id FROM multiremi_issue_sessions WHERE id = ?").get(session.id))
+      .toEqual({ chat_id: chat.id, issue_id: issue.id });
+    expect(database.query("SELECT chat_session_id, issue_session_id, issue_id FROM multiremi_tasks WHERE id = ?").get(task.id))
+      .toEqual({ chat_session_id: chat.id, issue_session_id: session.id, issue_id: issue.id });
+    expect(database.query("SELECT chat_id, issue_id FROM multiremi_session_results WHERE id = ?").get(result.id))
+      .toEqual({ chat_id: chat.id, issue_id: issue.id });
+  });
+
+  it("adds continuation lineage to an existing task table idempotently without losing rows", () => {
+    const database = freshDb();
+    migrate(database);
+    database.exec("ALTER TABLE multiremi_tasks DROP COLUMN continued_from_task_id");
+    const timestamp = "2026-09-18T00:00:00.000Z";
+    database.run(
+      "INSERT INTO multiremi_agents (id, name, provider, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      ["agt_continuation_migration", "Migration worker", "claude", timestamp, timestamp],
+    );
+    database.run(
+      `INSERT INTO multiremi_tasks
+        (id, agent_id, workspace_id, status, prompt, created_at, updated_at)
+       VALUES (?, ?, 'local', 'completed', ?, ?, ?)`,
+      ["tsk_continuation_migration", "agt_continuation_migration", "Legacy task", timestamp, timestamp],
+    );
+
+    migrate(database);
+    migrate(database);
+
+    expect(columnNames(database, "multiremi_tasks")).toContain("continued_from_task_id");
+    expect(database.query(
+      "SELECT id, continued_from_task_id FROM multiremi_tasks WHERE id = ?",
+    ).get("tsk_continuation_migration")).toEqual({
+      id: "tsk_continuation_migration",
+      continued_from_task_id: null,
+    });
   });
 
   it("adds legacy Chat sequence columns before indexing and preserves message order", () => {
@@ -290,6 +344,10 @@ describe("store migrations", () => {
     expect(database.query(
       "SELECT id, reply_to_message_id, body FROM multiremi_feishu_bot_outbound_deliveries WHERE id = 'fbo_legacy'",
     ).get()).toEqual({ id: "fbo_legacy", reply_to_message_id: "om_root", body: "Legacy delivery" });
+    expect(database.query(
+      "SELECT status, previous_delivery_id FROM multiremi_feishu_bot_outbound_deliveries WHERE id = 'fbo_legacy'",
+    ).get()).toEqual({ status: "pending", previous_delivery_id: null });
+    expect(indexNames(database)).toContain("idx_multiremi_feishu_bot_outbound_previous");
     expect(() => database.run(
       `INSERT INTO multiremi_feishu_bot_outbound_deliveries (
          id, workspace_id, binding_id, task_id, chat_id, thread_id,
@@ -306,6 +364,15 @@ describe("store migrations", () => {
         "2026-09-04T00:00:00.000Z",
       ],
     )).not.toThrow();
+    database.run("UPDATE multiremi_feishu_bot_outbound_deliveries SET previous_delivery_id = ? WHERE id = ?",
+      ["fbo_legacy", "fbo_seed"]);
+    migrate(database);
+    expect(database.query(
+      "SELECT id, status, previous_delivery_id FROM multiremi_feishu_bot_outbound_deliveries ORDER BY id",
+    ).all()).toEqual([
+      { id: "fbo_legacy", status: "pending", previous_delivery_id: null },
+      { id: "fbo_seed", status: "pending", previous_delivery_id: "fbo_legacy" },
+    ]);
   });
 
   it("drops removed Agent cwd and Feishu webhook credential columns", () => {
@@ -1492,105 +1559,227 @@ describe("store migrations", () => {
     expect(row?.name).toBe("Keep me");
   });
 
-  it("enables bound Chat updates on upgrade and removes legacy delivery limits", () => {
+  for (const tableForeignKey of [false, true]) {
+    it(`indexes task Chat lookups before cold-start updates (table FK=${tableForeignKey})`, () => {
+      const database = freshDb();
+      seedLegacyChatIssueFixture(database, tableForeignKey);
+      database.exec("DROP INDEX idx_multiremi_tasks_chat_session");
+      database.exec(`CREATE TRIGGER require_task_chat_index BEFORE UPDATE OF session_id ON multiremi_tasks
+        WHEN OLD.session_id IS NOT NULL AND NEW.session_id IS NULL
+        BEGIN
+          SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_multiremi_tasks_chat_session'
+          ) THEN RAISE(ABORT, 'cold-start task update requires Chat index') END;
+        END`);
+      migrate(database);
+      expect(database.query("SELECT session_id FROM multiremi_tasks WHERE id = 'tsk_chat_migration_queued'").get())
+        .toEqual({ session_id: null });
+      const explain = database.prepare(`EXPLAIN QUERY PLAN UPDATE multiremi_tasks SET session_id = NULL
+        WHERE status IN ('queued', 'dispatched') AND chat_session_id = ?`);
+      const plan = explain.all("chat_web_migration");
+      explain.finalize();
+      expect(plan.some((row: any) => row.detail.includes("idx_multiremi_tasks_chat_session"))).toBe(true);
+      // Already-decoupled stores also gain the index without replaying cleanup.
+      database.exec("DROP INDEX idx_multiremi_tasks_chat_session");
+      database.run("UPDATE multiremi_chat_sessions SET session_id = 'fresh' WHERE id = 'chat_web_migration'");
+      migrate(database);
+      expect(database.query("PRAGMA index_info(idx_multiremi_tasks_chat_session)").all())
+        .toMatchObject([{ name: "chat_session_id" }]);
+      expect(database.query("SELECT session_id FROM multiremi_chat_sessions WHERE id = 'chat_web_migration'").get())
+        .toEqual({ session_id: "fresh" });
+    });
+
+    it(`classifies legacy Feishu links using authoritative evidence and audits every decision (table FK=${tableForeignKey})`, async () => {
+      const database = freshDb();
+      seedLegacyChatIssueClassificationFixture(database, tableForeignKey);
+      seedLegacyChatWakeFixture(database);
+    seedWakeInvariantMatrix(database);
+    seedLegacyProactiveRetryMatrix(database);
+    const tokens = await mintLegacyWakeTokens(database);
+      assertLegacyChatWakeRollback(database);
+    await assertLegacyWakeTokens(database, tokens, true);
+      migrate(database);
+      assertLegacyChatWakeSettlement(database);
+      migrate(database);
+      assertLegacyChatWakeSettlement(database);
+      for (const entry of CHAT_ISSUE_CLASSIFICATION_CASES) {
+        const chatId = classificationChatId(entry);
+        const issueId = `iss_classification_${entry.name}`;
+        const recovery = database.query(`SELECT * FROM multiremi_feishu_bot_issue_link_audit
+          WHERE binding_id = ?`).get(`fcb_${chatId}`) as Record<string, string> | null;
+        const synced = entry.synced?.filter((value) => (value.workspace ?? "local") === "local"
+          && (value.sourceWorkspace ?? "local") === "local") ?? [];
+        const p2p = synced.some((value) => value.chatType === "p2p");
+        expect(recovery).toMatchObject({ binding_id: `fcb_${chatId}`, workspace_id: "local", issue_id: issueId,
+          chat_session_id: chatId,
+          disposition: entry.preserve ? "preserved" : "discarded",
+          classification_version: 2, hit_canonical: Number(entry.canonical ?? false),
+          hit_marker: Number(entry.provenance === "exact"),
+          hit_synced_group: Number(synced.some((value) => value.chatType === "group")),
+          hit_synced_p2p: Number(p2p),
+        });
+        expect(Number.isFinite(Date.parse(recovery!.audited_at))).toBe(true);
+        expect(recovery!.reason).toBe(p2p ? "p2p_evidence"
+          : entry.canonical ? "canonical_topic" : entry.provenance === "exact" ? "creation_provenance"
+            : entry.preserve ? "synced_group" : "unproven_ownership");
+        expect(JSON.parse(recovery!.binding_snapshot)).toMatchObject({
+          id: `fcb_${chatId}`, workspace_id: "local", app_id: "cli_migration",
+          agent_id: "agt_chat_migration", chat_session_id: chatId, issue_id: issueId,
+          chat_id: `oc_${entry.name}`, thread_id: entry.thread || entry.key ? `om_${entry.name}` : null,
+        });
+        expect(recovery!.channel_snapshot ? JSON.parse(recovery!.channel_snapshot) : null).toEqual(entry.noChannel ? null : {
+          id: `nch_agent_chat_${chatId}`, workspace_id: "local", member_id: null, kind: "agent_chat",
+          name: "Legacy updates", enabled: entry.channelEnabled ?? 0, target: JSON.stringify({ chatId }),
+          event_types: '["comment_created"]', min_severity: "warning", created_by: "legacy-owner",
+          created_at: "2026-09-03T00:00:00.000Z", updated_at: "2026-09-03T00:00:00.000Z",
+        });
+        expect(database.query("SELECT issue_id FROM multiremi_feishu_bot_chat_bindings WHERE id = ?").get(`fcb_${chatId}`))
+          .toEqual({ issue_id: entry.preserve ? issueId : null });
+        expect(database.query(`SELECT session_id, session_provider, session_execution_fingerprint, work_dir, session_runtime_id
+          FROM multiremi_chat_sessions WHERE id = ?`).get(chatId)).toEqual({
+          session_id: entry.preserve && !entry.sharedPrivateBinding && entry.name !== "group_without_thread" ? "provider-legacy" : null,
+          session_provider: entry.preserve && !entry.sharedPrivateBinding && entry.name !== "group_without_thread" ? "codex" : null,
+          session_execution_fingerprint: entry.preserve && !entry.sharedPrivateBinding && entry.name !== "group_without_thread" ? "legacy-fingerprint" : null,
+          work_dir: "/work/keep", session_runtime_id: "rt_legacy",
+        });
+        expect(database.query("SELECT issue_id, session_id FROM multiremi_tasks WHERE id = ?").get(`tsk_${chatId}`))
+          .toEqual({ issue_id: entry.preserve ? issueId : null, session_id: entry.preserve && !entry.sharedPrivateBinding && entry.name !== "group_without_thread" ? "provider-task-legacy" : null });
+        expect(database.query("SELECT role, pending_agent_delivery FROM multiremi_chat_messages WHERE chat_session_id = ? ORDER BY role").all(chatId))
+          .toEqual(entry.preserve
+            ? [{ role: "assistant", pending_agent_delivery: 0 }, { role: "system", pending_agent_delivery: 1 }, { role: "user", pending_agent_delivery: 0 }]
+            : [{ role: "assistant", pending_agent_delivery: 0 }, { role: "user", pending_agent_delivery: 0 }]);
+        expect(database.query("SELECT pending_count FROM multiremi_agent_issue_update_state WHERE chat_session_id = ?").get(chatId))
+          .toEqual(entry.preserve ? { pending_count: 1 } : null);
+        expect(database.query("SELECT enabled FROM multiremi_notification_channels WHERE id = ?").get(`nch_agent_chat_${chatId}`))
+          .toEqual(entry.preserve ? { enabled: 0 } : null);
+      }
+      await assertLegacyWakeTokens(database, tokens);
+    assertLegacyProactiveRetryMatrix(database);
+    assertWakeInvariantMatrix(database);
+    assertCancelledLegacyWakesCannotRun(database);
+    });
+
+    for (const enforceForeignKeys of [false, true]) {
+      it(`moves Issue ownership without losing Chat data (table FK=${tableForeignKey}, enforcement=${enforceForeignKeys})`, () => {
+        const database = freshDb();
+        seedLegacyChatIssueFixture(database, tableForeignKey);
+        database.exec("CREATE TRIGGER chat_fixture_trigger AFTER UPDATE OF fixture_extra ON multiremi_chat_sessions BEGIN SELECT 1; END");
+        database.exec(`PRAGMA foreign_keys = ${enforceForeignKeys ? "ON" : "OFF"}`);
+        migrate(database);
+        migrate(database);
+        expect(columnNames(database, "multiremi_chat_sessions")).not.toContain("issue_id");
+        expect(columnNames(database, "multiremi_chat_sessions")).toContain("fixture_extra");
+        expect(indexNames(database)).toContain("idx_chat_fixture_extra");
+        expect(database.query("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'trigger' AND name = 'chat_fixture_trigger'").get()).toEqual({ count: 1 });
+        for (const status of ["queued", "dispatched"]) {
+          expect(database.query("SELECT issue_id, session_id, work_dir, issue_session_id, issue_session_generation FROM multiremi_tasks WHERE id = ?").get(`tsk_chat_migration_${status}`))
+            .toEqual({ issue_id: null, session_id: null, work_dir: "/work/keep", issue_session_id: null, issue_session_generation: null });
+        }
+        expect(database.query("SELECT issue_id, issue_session_id FROM multiremi_tasks WHERE id = 'tsk_chat_migration_running'").get())
+          .toEqual({ issue_id: "iss_chat_migration", issue_session_id: "ises_legacy_chat_migration" });
+        expect(database.query("SELECT issue_id, issue_session_id, issue_session_generation FROM multiremi_tasks WHERE id = 'tsk_topic_migration_queued'").get())
+          .toEqual({ issue_id: "iss_chat_migration", issue_session_id: null, issue_session_generation: null });
+        expect(database.query("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: enforceForeignKeys ? 1 : 0 });
+        expect(database.query("SELECT COUNT(*) AS count FROM multiremi_chat_sessions").get()).toEqual({ count: 4 });
+        expect(database.query("SELECT COUNT(*) AS count FROM multiremi_feishu_bot_chat_bindings").get()).toEqual({ count: 3 });
+        // Web associations never enter the transport audit table.
+        expect(database.query("SELECT binding_id, disposition FROM multiremi_feishu_bot_issue_link_audit ORDER BY binding_id").all())
+          .toEqual([
+            { binding_id: "fcb_chat_group_migration", disposition: "preserved" },
+            { binding_id: "fcb_chat_issue_topic_iss_chat_migration", disposition: "preserved" },
+            { binding_id: "fcb_chat_private_migration", disposition: "discarded" },
+          ]);
+        expect(database.query("SELECT chat_session_id, issue_id FROM multiremi_feishu_bot_chat_bindings ORDER BY chat_session_id").all()).toEqual([
+          { chat_session_id: "chat_group_migration", issue_id: "iss_chat_migration" },
+          { chat_session_id: "chat_issue_topic_iss_chat_migration", issue_id: "iss_chat_migration" },
+          { chat_session_id: "chat_private_migration", issue_id: null },
+        ]);
+        expect(database.query("SELECT COUNT(*) AS count FROM multiremi_chat_messages WHERE role IN ('user', 'assistant')").get()).toEqual({ count: 8 });
+        expect(database.query("SELECT COUNT(*) AS count FROM multiremi_chat_messages WHERE role = 'system'").get()).toEqual({ count: 2 });
+        expect(database.query("SELECT COUNT(*) AS count FROM multiremi_agent_issue_update_state").get()).toEqual({ count: 2 });
+        expect(database.query("SELECT COUNT(*) AS count FROM multiremi_notification_channels WHERE kind = 'agent_chat' AND enabled = 0").get()).toEqual({ count: 2 });
+        expect(database.query("SELECT session_id, session_runtime_id, work_dir, fixture_extra FROM multiremi_chat_sessions WHERE id = 'chat_web_migration'").get())
+          .toEqual({ session_id: null, session_runtime_id: "rt_legacy", work_dir: "/work/keep", fixture_extra: "preserve extra" });
+        expect(database.query("SELECT session_id FROM multiremi_chat_sessions WHERE id = 'chat_group_migration'").get())
+          .toEqual({ session_id: "provider-legacy" });
+        // SQLite preserves the new binding FK and its delete semantics.
+        database.exec("PRAGMA foreign_keys = ON");
+        database.run("UPDATE multiremi_tasks SET issue_id = NULL WHERE issue_id = 'iss_chat_migration'");
+        database.run("DELETE FROM multiremi_issues WHERE id = 'iss_chat_migration'");
+        expect(database.query("SELECT COUNT(*) AS count FROM multiremi_feishu_bot_chat_bindings WHERE issue_id IS NOT NULL").get()).toEqual({ count: 0 });
+      });
+    }
+  }
+
+  it("creates the audit table even when the original decoupling ledger is already applied", () => {
     const database = freshDb();
-    database.exec(`
-      CREATE TABLE multiremi_chat_sessions (
-        id TEXT PRIMARY KEY,
-        workspace_id TEXT NOT NULL DEFAULT 'local',
-        creator_id TEXT,
-        agent_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'active',
-        session_id TEXT,
-        work_dir TEXT,
-        latest_task_id TEXT,
-        unread_since TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-    `);
     migrate(database);
+    database.exec("DROP TABLE multiremi_feishu_bot_issue_link_audit");
     migrate(database);
-    expect(columnNames(database, "multiremi_chat_sessions")).toContain("issue_id");
-    expect(columnNames(database, "multiremi_chat_messages")).toEqual(expect.arrayContaining([
-      "pending_agent_delivery",
-      "agent_delivery_task_id",
-    ]));
-    expect(database.query(
-      "SELECT COUNT(*) AS count FROM multiremi_notification_channels WHERE kind = 'agent_chat'",
-    ).get()).toEqual({ count: 0 });
+    expect(tableNames(database)).toContain("multiremi_feishu_bot_issue_link_audit");
+    expect(database.query("SELECT COUNT(*) AS count FROM multiremi_schema_migrations WHERE id = ?").get(CHAT_ISSUE_MIGRATION))
+      .toEqual({ count: 1 });
+    migrate(database);
+    expect(database.query("SELECT COUNT(*) AS count FROM multiremi_feishu_bot_issue_link_audit").get()).toEqual({ count: 0 });
+  });
 
-    const now = "2026-09-03T00:00:00.000Z";
-    database.run(
-      "INSERT INTO multiremi_agents (id, name, provider, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-      ["agt_chat_issue", "Chat Issue", "codex", now, now],
-    );
-    database.run(
-      "INSERT INTO multiremi_issues (id, title, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-      ["iss_chat_issue", "Bound", "todo", now, now],
-    );
-    database.run(
-      `INSERT INTO multiremi_chat_sessions (
-         id, workspace_id, agent_id, issue_id, title, status, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      ["chat_issue", "local", "agt_chat_issue", "iss_chat_issue", "Bound", "active", now, now],
-    );
-    database.exec(`
-      ALTER TABLE multiremi_agent_issue_update_state ADD COLUMN window_started_at TEXT;
-      ALTER TABLE multiremi_agent_issue_update_state ADD COLUMN deliveries_in_window INTEGER NOT NULL DEFAULT 0;
-    `);
-
+  it("never backfills an Issue Session onto a new Feishu topic task on restart", () => {
+    const database = freshDb();
+    seedLegacyChatIssueFixture(database);
     migrate(database);
-
-    expect(database.query(
-      `SELECT enabled, target
-       FROM multiremi_notification_channels
-       WHERE kind = 'agent_chat' AND id = ?`,
-    ).get("nch_agent_chat_chat_issue")).toEqual({
-      enabled: 1,
-      target: '{"chatId":"chat_issue"}',
-    });
-    expect(columnNames(database, "multiremi_agent_issue_update_state")).not.toEqual(expect.arrayContaining([
-      "window_started_at",
-      "deliveries_in_window",
-    ]));
-    database.run(
-      "UPDATE multiremi_notification_channels SET enabled = 0 WHERE id = ?",
-      ["nch_agent_chat_chat_issue"],
-    );
+    const now = new Date().toISOString();
+    database.run(`INSERT INTO multiremi_tasks (id, workspace_id, agent_id, issue_id, chat_session_id,
+      prompt, status, created_at, updated_at)
+      VALUES ('tsk_topic_after_migration', 'local', 'agt_chat_migration', 'iss_chat_migration',
+        'chat_group_migration', 'New topic task', 'queued', ?, ?)`, [now, now]);
     migrate(database);
-    expect(database.query(
-      "SELECT enabled FROM multiremi_notification_channels WHERE id = ?",
-    ).get("nch_agent_chat_chat_issue")).toEqual({ enabled: 0 });
-    database.run(
-      `INSERT INTO multiremi_feishu_bot_chat_bindings (
-         id, workspace_id, app_id, agent_id, external_session_key,
-         chat_session_id, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        "fcb_legacy_destination",
-        "local",
-        "cli_legacy",
-        "agt_chat_issue",
-        "oc_legacy:thread:omt_legacy",
-        "chat_issue",
-        now,
-        now,
-      ],
-    );
     migrate(database);
-    expect(database.query(
-      "SELECT chat_id, thread_id FROM multiremi_feishu_bot_chat_bindings WHERE id = ?",
-    ).get("fcb_legacy_destination")).toEqual({
-      chat_id: "oc_legacy",
-      thread_id: "omt_legacy",
-    });
+    expect(database.query("SELECT issue_id, issue_session_id, issue_session_generation FROM multiremi_tasks WHERE id = 'tsk_topic_after_migration'").get())
+      .toEqual({ issue_id: "iss_chat_migration", issue_session_id: null, issue_session_generation: null });
+  });
 
+  it("restores the old schema and private metadata from a verified pre-upgrade backup", () => {
+    const database = freshDb();
+    seedLegacyChatIssueFixture(database, true);
+    const backup = database.serialize();
+    migrate(database);
+    expect(columnNames(database, "multiremi_chat_sessions")).not.toContain("issue_id");
+    const restored = Database.deserialize(backup);
+    try {
+      expect(columnNames(restored, "multiremi_chat_sessions")).toContain("issue_id");
+      expect(restored.query("SELECT issue_id, session_id, work_dir FROM multiremi_chat_sessions WHERE id = 'chat_web_migration'").get())
+        .toEqual({ issue_id: "iss_chat_migration", session_id: "provider-legacy", work_dir: "/work/keep" });
+      expect(restored.query("SELECT COUNT(*) AS count FROM multiremi_chat_messages").get()).toEqual({ count: 12 });
+      expect(restored.query("SELECT COUNT(*) AS count FROM multiremi_feishu_bot_chat_bindings").get()).toEqual({ count: 3 });
+      expect(restored.query("SELECT COUNT(*) AS count FROM multiremi_schema_migrations WHERE id = ?").get(CHAT_ISSUE_MIGRATION))
+        .toEqual({ count: 0 });
+    } finally {
+      restored.close();
+    }
+  });
+
+  it("rolls back the entire ownership migration if table rebuilding changes dependent row counts", () => {
+    const database = freshDb();
+    seedLegacyChatIssueFixture(database, true);
     database.exec("PRAGMA foreign_keys = ON");
-    database.run("DELETE FROM multiremi_issues WHERE id = ?", ["iss_chat_issue"]);
-    expect(database.query("SELECT issue_id FROM multiremi_chat_sessions WHERE id = ?").get("chat_issue"))
-      .toEqual({ issue_id: null });
+    const wrapped = new Proxy(database, {
+      get(target, property) {
+        if (property === "exec") return (sql: string) => {
+          target.exec(sql);
+          if (sql === "ALTER TABLE multiremi_chat_sessions_without_issue RENAME TO multiremi_chat_sessions") {
+            target.run("DELETE FROM multiremi_chat_messages WHERE id = 'chat_group_migration_user'");
+          }
+        };
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    expect(() => runMigrations(wrapped)).toThrow("changed Chat or dependent row counts");
+    expect(columnNames(database, "multiremi_chat_sessions")).toContain("issue_id");
+    expect(database.query("SELECT COUNT(*) AS count FROM multiremi_chat_messages").get()).toEqual({ count: 12 });
+    expect(database.query("SELECT COUNT(*) AS count FROM multiremi_feishu_bot_issue_link_audit").get()).toEqual({ count: 0 });
+    expect(database.query("SELECT COUNT(*) AS count FROM multiremi_schema_migrations WHERE id = ?").get(CHAT_ISSUE_MIGRATION)).toEqual({ count: 0 });
+    expect(database.query("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });
   });
 
   it("backfills completed_at for legacy terminal issues", () => {

@@ -12,6 +12,84 @@ import {
 const originalFetch = globalThis.fetch;
 const temporaryRoots: string[] = [];
 
+describe("Chat attachment transport", () => {
+  it.each(["headers", "body"])("bounds a stalled attachment download while waiting for %s", async (phase) => {
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      if (phase === "headers") return rejectWhenAborted(init?.signal);
+      return new Response(new ReadableStream({ start(controller) {
+        init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), { once: true });
+      } }));
+    }) as typeof fetch;
+    await expect(new MultiremiDaemonClient("https://remi.example", "daemon-test-token", { requestTimeoutMs: 25 })
+      .downloadTaskAttachment("att_1", "task-test-token")).rejects.toThrow();
+  });
+
+  it("advertises the binary delivery protocol and preserves attachment descriptors over heartbeat", async () => {
+    let payload: Record<string, any> = {};
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      payload = JSON.parse(String(init?.body));
+      return Response.json({ pending_feishu_outbound: {
+        id: "fbo_binary", claim_token: "lease", chat_id: "oc_1", body: "",
+        attachments: [{ id: "att_report", filename: "report.html", content_type: "text/html", size_bytes: 18 }],
+      } });
+    }) as typeof fetch;
+    const response = await new MultiremiDaemonClient("https://remi.example", "daemon-test-token")
+      .heartbeatRuntime("rt_1", undefined, undefined, false, true);
+    expect(payload.feishu_concierge_protocol).toBe(6);
+    expect(response.pending_feishu_outbound?.attachments).toMatchObject([
+      { id: "att_report", filename: "report.html", contentType: "text/html", sizeBytes: 18 },
+    ]);
+  });
+
+  it("uploads multipart bytes with runtime authority before submitting attachment IDs", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      requests.push({ url: String(input), init });
+      return Response.json(requests.length === 1 ? { attachment: { id: "att_uploaded" } } : { taskId: "tsk_1" });
+    }) as typeof fetch;
+    const client = new MultiremiDaemonClient("https://remi.example", "daemon-test-token");
+    const attachment = await client.uploadFeishuBotAttachment("rt_1", {
+      revision: 3, externalSessionKey: "chat:oc_1", externalMessageId: "om_1",
+      fileName: "brief.pdf", contentType: "application/pdf", buffer: Buffer.from("pdf"),
+    });
+    await client.submitFeishuBotMessage("rt_1", {
+      revision: 3, externalSessionKey: "chat:oc_1", externalMessageId: "om_1",
+      text: "Read this", attachmentIds: [attachment.id],
+    });
+    expect(requests[0]!.url).toEndWith("/api/daemon/runtimes/rt_1/feishu-bot/attachments");
+    const form = requests[0]!.init!.body as FormData;
+    expect(form.get("external_session_key")).toBe("chat:oc_1");
+    expect(form.get("revision")).toBe("3");
+    expect(await (form.get("file") as File).text()).toBe("pdf");
+    expect(new Headers(requests[0]!.init!.headers).get("authorization")).toBe("Bearer daemon-test-token");
+    expect(new Headers(requests[0]!.init!.headers).has("content-type")).toBe(false);
+    expect(JSON.parse(String(requests[1]!.init!.body)).attachment_ids).toEqual(["att_uploaded"]);
+  });
+
+  it("downloads through scoped credentials and never follows external redirects", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      requests.push({ url: String(input), init });
+      return requests.length === 3
+        ? new Response(null, { status: 302, headers: { location: "https://other.example/file" } })
+        : new Response("attachment bytes");
+    }) as typeof fetch;
+    const client = new MultiremiDaemonClient("https://remi.example", "daemon-test-token");
+    expect(await client.downloadTaskAttachment("att_1", "task-test-token")).toEqual(Buffer.from("attachment bytes"));
+    await client.downloadFeishuBotOutboundAttachment("rt_1", "fbo_1", "claim-test-token", "att_1");
+    await expect(client.downloadTaskAttachment("att_external", "task-test-token")).rejects.toThrow("302");
+    expect(requests[0]!.url).toBe("https://remi.example/api/attachments/att_1/download");
+    expect(new Headers(requests[0]!.init!.headers).get("authorization")).toBe("Bearer task-test-token");
+    const outboundHeaders = new Headers(requests[1]!.init!.headers);
+    expect(outboundHeaders.get("authorization")).toBe("Bearer daemon-test-token");
+    expect(outboundHeaders.get("X-Multiremi-Feishu-Claim-Token")).toBe("claim-test-token");
+    expect(requests.every(request => request.init?.redirect === "manual")).toBe(true);
+    expect(requests).toHaveLength(3);
+    await expect(client.downloadTaskAttachment("att_1", "")).rejects.toThrow("task credential");
+    expect(requests).toHaveLength(3);
+  });
+});
+
 async function readStreamingBody(body: unknown): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of body as AsyncIterable<Uint8Array>) chunks.push(Buffer.from(chunk));
@@ -206,6 +284,35 @@ describe("MultiremiDaemonClient HTTP failures", () => {
     expect(isTerminalDaemonAuthorityError(error)).toBe(false);
   });
 
+  it("preserves the desired Plugin revision from the heartbeat ack", async () => {
+    globalThis.fetch = (async () => Response.json({
+      status: "ok",
+      agent_plugins: { revision: "rev-abc" },
+    })) as unknown as typeof globalThis.fetch;
+    const response = await new MultiremiDaemonClient("https://remi.example", "daemon-token")
+      .heartbeatRuntime("rt_1");
+    expect(response.agent_plugins).toEqual({ revision: "rev-abc" });
+  });
+
+  it("drops a malformed desired Plugin revision instead of caching garbage", async () => {
+    globalThis.fetch = (async () => Response.json({
+      status: "ok",
+      agent_plugins: { revision: "" },
+    })) as unknown as typeof globalThis.fetch;
+    const response = await new MultiremiDaemonClient("https://remi.example", "daemon-token")
+      .heartbeatRuntime("rt_1");
+    // A server from before PR-1 simply omits the field; an unusable value must
+    // behave the same so the daemon keeps its periodic desired refresh.
+    expect(response.agent_plugins).toBeUndefined();
+  });
+
+  it("omits the desired Plugin revision when the ack has no such field", async () => {
+    globalThis.fetch = (async () => Response.json({ status: "ok" })) as unknown as typeof globalThis.fetch;
+    const response = await new MultiremiDaemonClient("https://remi.example", "daemon-token")
+      .heartbeatRuntime("rt_1");
+    expect(response.agent_plugins).toBeUndefined();
+  });
+
   it("treats an old server without Agent Plugin routes as protocol zero", async () => {
     globalThis.fetch = (async () => new Response("404 Not Found", { status: 404 })) as unknown as typeof globalThis.fetch;
 
@@ -239,10 +346,12 @@ describe("MultiremiDaemonClient daemon protocol", () => {
     globalThis.fetch = (async () => Response.json({ pending_feishu_outbound: {
       id: "fbo_native", claim_token: "lease", task_id: "tsk_live", chat_id: "oc_private", body: "",
       presentation, interaction_open_id: "ou_requester", mention: { mode: "none", resolvedOpenId: null },
+      receipt_message_ids: ["om_initial", "om_steer"],
     } })) as unknown as typeof globalThis.fetch;
     const client = new MultiremiDaemonClient("https://remi.example", "daemon-token");
     expect((await client.heartbeatRuntime("runtime-1")).pending_feishu_outbound).toMatchObject({
       taskId: "tsk_live", presentation, interactionOpenId: "ou_requester",
+      receiptMessageIds: ["om_initial", "om_steer"],
     });
   });
   it("normalizes proactive Task identity and existing message checkpoints", async () => {
@@ -1056,6 +1165,53 @@ describe("MultiremiDaemonClient Issue session archive wire", () => {
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(streamedBytes).toBeLessThan(declaredBytes);
     expect(reportedError).toContain("upload timed out after 25ms");
+  });
+
+  it("handles an HTTP rejection before the native fetch finishes reading the archive", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-daemon-client-early-rejection-"));
+    temporaryRoots.push(root);
+    const archivePath = join(root, "sessions.tar.gz");
+    const sizeBytes = 32 * 1024 * 1024;
+    writeFileSync(archivePath, Buffer.alloc(sizeBytes, 0x61));
+    let reportedError = "";
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      // A proxy can reject the upload without consuming its body.
+      fetch: () => new Response("archive rejected", { status: 413 }),
+    });
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "PUT") return originalFetch(input, init);
+      if (init?.method === "HEAD") {
+        return new Response(null, { status: 204, headers: { "X-Remi-Archive-Direct": "1" } });
+      }
+      if (String(input).endsWith("/init")) {
+        return Response.json({
+          archive: { id: "archive-early", status: "pending", size_bytes: sizeBytes },
+          upload_attempt: 1,
+          upload_url: new URL(
+            "/api/daemon/runtimes/runtime-early/issues/issue-early/session-archives/archive-early/content?attempt=1",
+            String(input),
+          ).toString(),
+        });
+      }
+      reportedError = JSON.parse(String(init?.body)).error;
+      return Response.json({ archive: { id: "archive-early", status: "failed" } });
+    }) as typeof globalThis.fetch;
+    try {
+      const client = new MultiremiDaemonClient(`http://127.0.0.1:${server.port}`, "daemon-token");
+      await client.initIssueSessionArchive("runtime-early", "issue-early", {
+        sourceRevision: "revision-early", sha256: "abc", sizeBytes, fileCount: 1,
+      });
+      await expect(client.uploadIssueSessionArchive(
+        "runtime-early", "issue-early", "archive-early", archivePath,
+      )).rejects.toThrow("413: archive rejected");
+      expect(reportedError).toContain("413: archive rejected");
+      // Let pending stream close callbacks run; bun test must see no unhandled errors.
+      await Bun.sleep(20);
+    } finally {
+      server.stop(true);
+    }
   });
 
   it("streams a direct archive larger than 10 MiB through Bun 1.3.14 with the exact SHA-256", async () => {

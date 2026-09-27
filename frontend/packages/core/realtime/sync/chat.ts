@@ -16,6 +16,7 @@ import type {
   ChatMessage,
   ChatPendingTask,
   TaskAwaitingHumanPayload,
+  TaskProgressPayload,
   ChatMessagesPage,
   ChatSession,
 } from "../../types";
@@ -207,7 +208,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
           chatKeys.pendingTask(payload.chat_session_id),
           (old) => {
             if (!old || old.task_id !== payload.task_id) return old;
-            return { ...old, status: "running" };
+            return { ...old, status: "running", wait_reason: null };
           },
         );
       },
@@ -224,12 +225,24 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
           chatKeys.pendingTask(payload.chat_session_id),
           (old) => {
             if (!old || old.task_id !== payload.task_id) return old;
-            return { ...old, status: "running" };
+            return { ...old, status: "running", wait_reason: null };
           },
         );
         // awaiting_human → running means the request was resolved (respond or
         // timeout); refetch so pending cards flip to their settled state.
         void qc.invalidateQueries({ queryKey: chatKeys.humanRequests(payload.task_id) });
+      },
+
+      "task:progress": (p) => {
+        if (!p || typeof p !== "object") return;
+        const payload = p as TaskProgressPayload;
+        if (typeof payload.chat_session_id !== "string" || typeof payload.task_id !== "string"
+          || (typeof payload.progress_summary !== "string" && payload.progress_summary !== null)) return;
+        qc.setQueryData<ChatPendingTask>(
+          chatKeys.pendingTask(payload.chat_session_id),
+          old => old?.task_id === payload.task_id
+            ? { ...old, progress_summary: payload.progress_summary } : old,
+        );
       },
 
       // task:waiting_local_directory fires when the daemon dequeues a task but

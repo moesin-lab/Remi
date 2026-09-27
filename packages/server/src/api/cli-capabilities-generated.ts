@@ -347,6 +347,45 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "workspace.relay.probe": {
+      "command": "remi workspace relay probe",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.relay.probe",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.relay.reasoning-levels.get": {
+      "command": "remi workspace relay reasoning-levels get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.relay.reasoning-levels.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.relay.reasoning-levels.update": {
+      "command": "remi workspace relay reasoning-levels update",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.relay.reasoning-levels.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "workspace.bot-menu.get": {
       "command": "remi workspace bot-menu get",
       "auth": [
@@ -438,6 +477,42 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "human"
       ],
       "capability": "workspace.feishu-bot.audit",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.feishu-bot.sender.list": {
+      "command": "remi workspace feishu-bot sender list",
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.sender.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.feishu-bot.sender.allow": {
+      "command": "remi workspace feishu-bot sender allow",
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.sender.allow",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.feishu-bot.sender.revoke": {
+      "command": "remi workspace feishu-bot sender revoke",
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.sender.revoke",
       "output": [
         "table",
         "json",
@@ -1558,6 +1633,70 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "wiki.repository.mv": {
+      "command": "remi wiki repository mv",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "wiki.repository.mv",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "wiki.repository.merge": {
+      "command": "remi wiki repository merge",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "wiki.repository.merge",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "wiki.repository.outcome": {
+      "command": "remi wiki repository outcome",
+      "auth": [
+        "task"
+      ],
+      "capability": "wiki.repository.outcome",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "wiki.repository.restore": {
+      "command": "remi wiki repository restore",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "wiki.repository.restore",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "wiki.repository.repair-log": {
+      "command": "remi wiki repository repair-log",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "wiki.repository.repair-log",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "wiki.repository.revisions": {
       "command": "remi wiki repository revisions",
       "auth": [
@@ -2033,6 +2172,32 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "session.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "session.show": {
+      "command": "remi session show",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "session.show",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "session.inherited-context": {
+      "command": "remi session inherited-context",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "session.inherited-context",
       "output": [
         "table",
         "json",
@@ -2920,68 +3085,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "chat.issue.bind": {
-      "command": "remi chat issue bind",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "chat.issue.bind",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "chat.issue.unbind": {
-      "command": "remi chat issue unbind",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "chat.issue.unbind",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "chat.issue.updates.get": {
-      "command": "remi chat issue updates get",
-      "auth": [
-        "human"
-      ],
-      "capability": "chat.issue.updates.get",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "chat.issue.updates.enable": {
-      "command": "remi chat issue updates enable",
-      "auth": [
-        "human"
-      ],
-      "capability": "chat.issue.updates.enable",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "chat.issue.updates.disable": {
-      "command": "remi chat issue updates disable",
-      "auth": [
-        "human"
-      ],
-      "capability": "chat.issue.updates.disable",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
     "chat.delete": {
       "command": "remi chat delete",
       "auth": [
@@ -3015,6 +3118,18 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "chat.message.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "chat.attachment.send": {
+      "command": "remi chat attachment send",
+      "auth": [
+        "task"
+      ],
+      "capability": "chat.attachment.send",
       "output": [
         "table",
         "json",
@@ -3145,6 +3260,18 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "task.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "task.continue": {
+      "command": "remi task continue",
+      "auth": [
+        "task"
+      ],
+      "capability": "task.continue",
       "output": [
         "table",
         "json",
@@ -4000,6 +4127,136 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "plugin.runtime.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.group.list": {
+      "command": "remi runtime group list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.profile.list": {
+      "command": "remi runtime profile list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.profile.get": {
+      "command": "remi runtime profile get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.profile.create": {
+      "command": "remi runtime profile create",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.profile.update": {
+      "command": "remi runtime profile update",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.profile.delete": {
+      "command": "remi runtime profile delete",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.delete",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.group.get": {
+      "command": "remi runtime group get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.group.create": {
+      "command": "remi runtime group create",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.group.update": {
+      "command": "remi runtime group update",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.group.delete": {
+      "command": "remi runtime group delete",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.delete",
       "output": [
         "table",
         "json",

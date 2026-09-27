@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   cleanupTemporaryTaskProviderHome,
+  cleanupTaskPrivateTempDirectory,
   prepareIssueSessionProviderHome,
   prepareIssueExecutionDirectory,
+  prepareTaskPrivateTempDirectory,
   loadIssueSessionProviderEnv,
   resolveIssueRuntimeStateRoot,
   resolveIssueSessionProviderHome,
@@ -19,7 +21,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function task(provider: "claude" | "codex", generation = 3): AgentTask {
+function task(provider: "claude" | "codex" | "grok", generation = 3): AgentTask {
   return {
     id: "tsk_home",
     workspaceId: "ws_1",
@@ -33,6 +35,45 @@ function task(provider: "claude" | "codex", generation = 3): AgentTask {
 }
 
 describe("Issue Session provider home", () => {
+  it("allocates daemon-owned Grok task state without copying machine credentials", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-grok-home-"));
+    roots.push(root);
+    const resolved = resolveTaskProviderHome({
+      ...task("grok"),
+      id: "tsk_grok",
+      issueId: null,
+      issueSessionId: null,
+    } as AgentTask, join(root, "cwd"), join(root, "workspaces"))!;
+
+    expect(resolved.provider).toBe("grok");
+    expect(await loadIssueSessionProviderEnv(resolved)).toEqual({});
+    await prepareIssueSessionProviderHome(resolved);
+    expect(JSON.parse(readFileSync(join(resolved.root, "meta.json"), "utf8"))).toMatchObject({
+      provider: "grok",
+      providerHome: "home",
+    });
+    expect(existsSync(join(resolved.home, "auth.json"))).toBe(false);
+    expect(existsSync(join(resolved.home, ".credentials.json"))).toBe(false);
+  });
+
+  it("allocates a fresh private temp per execution and cleans only its own directory", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-task-private-tmp-"));
+    roots.push(root);
+    const workspaces = join(root, "workspaces");
+    const home = resolveTaskProviderHome(task("claude"), join(root, "issue-runtime"), workspaces)!;
+    const first = await prepareTaskPrivateTempDirectory(home, "tsk_same");
+    const second = await prepareTaskPrivateTempDirectory(home, "tsk_same");
+    expect(first.path).not.toBe(second.path);
+    writeFileSync(join(first.path, "first.txt"), "first");
+    writeFileSync(join(second.path, "second.txt"), "second");
+
+    await cleanupTaskPrivateTempDirectory(first);
+    expect(existsSync(first.path)).toBe(false);
+    expect(readFileSync(join(second.path, "second.txt"), "utf8")).toBe("second");
+    await cleanupTaskPrivateTempDirectory(second);
+    expect(existsSync(second.path)).toBe(false);
+  });
+
   it("isolates delegation working directories and refuses a symlinked directory", async () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-delegation-home-"));
     roots.push(root);
@@ -714,4 +755,26 @@ describe("Issue Session provider home", () => {
     );
     expect(resolveIssueRuntimeStateRoot(task("claude"), source, workspaces, false)).toBe(source);
   });
+});
+
+it("installs side developer instructions in the private Codex config exactly once across restarts", async () => {
+  const root = mkdtempSync(join(tmpdir(), "multiremi-side-home-"));
+  roots.push(root);
+  const baseHome = join(root, "base");
+  mkdirSync(baseHome);
+  writeFileSync(join(baseHome, "config.toml"), 'model = "gpt-test"\ndeveloper_instructions = "Existing developer rules"\n');
+  const resolved = resolveIssueSessionProviderHome(task("codex"), root, join(root, "workspaces"))!;
+  // Plugin/native lane configuration is preserved; host-wide arbitrary
+  // instructions are intentionally excluded by the seed allowlist.
+  mkdirSync(resolved.home, { recursive: true });
+  writeFileSync(join(resolved.home, "config.toml"), readFileSync(join(baseHome, "config.toml")));
+  const options = { baseCodexHome: baseHome, linkCodexAuth: false, sideConversation: true, codexPluginInstalled: true };
+  await prepareIssueSessionProviderHome(resolved, options);
+  const first = readFileSync(join(resolved.home, "config.toml"), "utf8");
+  expect(first).toContain("developer_instructions");
+  expect(first).toContain("Existing developer rules");
+  expect(first).toContain("Sub-agents are off-limits");
+  await prepareIssueSessionProviderHome(resolved, options);
+  expect(readFileSync(join(resolved.home, "config.toml"), "utf8")).toBe(first);
+  expect(readFileSync(join(baseHome, "config.toml"), "utf8")).not.toContain("Sub-agents are off-limits");
 });

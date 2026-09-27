@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { parseLatestReleaseVersion } from "@multiremi/api/routers/cli-latest-version.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createStore, mockFetch, resetMultiremiTestEnv } from "./helpers.js";
 
 let previousReleaseRepository: string | undefined;
@@ -9,7 +12,7 @@ let previousRepository: string | undefined;
 beforeEach(() => {
   previousReleaseRepository = process.env.MULTIREMI_RELEASE_REPO;
   previousRepository = process.env.MULTIREMI_REPO;
-  process.env.MULTIREMI_RELEASE_REPO = "Grassgod/remi";
+  process.env.MULTIREMI_RELEASE_REPO = "Grassgod/Remi";
   delete process.env.MULTIREMI_REPO;
 });
 
@@ -41,7 +44,7 @@ describe("Multiremi API - latest CLI version", () => {
     let fetchCalls = 0;
     mockFetch((url, init) => {
       fetchCalls += 1;
-      expect(url).toBe("https://github.com/Grassgod/remi/releases/latest");
+      expect(url).toBe("https://github.com/Grassgod/Remi/releases/latest");
       expect(init?.redirect).toBe("manual");
       return new Response(null, {
         status: 302,
@@ -83,6 +86,35 @@ describe("Multiremi API - latest CLI version", () => {
     const response = await app.request("/api/cli/latest-version");
 
     expect(response.status).toBe(401);
+  });
+
+  it("explains how to recover when the self-hosted release catalog is empty", async () => {
+    const releaseDir = mkdtempSync(join(tmpdir(), "multiremi-empty-releases-"));
+    const previousReleaseDir = process.env.MULTIREMI_RELEASE_DIR;
+    process.env.MULTIREMI_RELEASE_DIR = releaseDir;
+    try {
+      const app = createMultiremiApp({
+        store: createStore(),
+        authToken: "latest-version-secret",
+        backgroundJobs: false,
+        controlPlaneSshMesh: null,
+        scmPolling: null,
+      });
+
+      const response = await app.request("/api/remi/releases/latest/version", {
+        headers: { Authorization: "Bearer latest-version-secret" },
+      });
+
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({
+        code: "release_catalog_empty",
+        error: "no CLI releases are configured on this server; configure MULTIREMI_RELEASE_DIR or use the GitHub release installer",
+      });
+    } finally {
+      if (previousReleaseDir === undefined) delete process.env.MULTIREMI_RELEASE_DIR;
+      else process.env.MULTIREMI_RELEASE_DIR = previousReleaseDir;
+      rmSync(releaseDir, { recursive: true, force: true });
+    }
   });
 
   it("returns null when GitHub discovery fails", async () => {

@@ -23,18 +23,16 @@ describe("Issue sessions and per-agent projection lanes", () => {
     expect(result).toMatchObject({ chatId: chat.id, issueId: null, sourceSessionId: main.id });
 
     const issue = store.createIssue({ title: "Optional anchor", workspaceId: "local" });
-    store.updateChatSession(chat.id, { issueId: issue.id });
-    expect(store.listIssueSessions(issue.id).map((session) => session.id)).toEqual([main.id, review.id]);
-    expect(store.getSessionResult(result.id)?.issueId).toBe(issue.id);
+    const issueWork = store.createIssueSession(issue.id, { chatId: chat.id, title: "Issue work" });
+    expect(store.listIssueSessions(issue.id).map((session) => session.id)).toEqual([issueWork.id]);
+    expect(store.getSessionResult(result.id)?.issueId).toBeNull();
     expect(store.getTask(beforeLink.id)?.issueId).toBeNull();
 
-    const afterLink = store.createSessionTask(review.id, { agentId: agent.id, prompt: "After link" });
-    expect(afterLink).toMatchObject({ chatSessionId: chat.id, issueSessionId: review.id, issueId: issue.id });
-    store.updateChatSession(chat.id, { issueId: null });
-    expect(store.listIssueSessions(issue.id)).toEqual([]);
-    expect(store.listIssueSessionResults(issue.id)).toEqual([]);
-    expect(store.getSessionResult(result.id)?.issueId).toBeNull();
-    expect(store.listChatOwnedSessions(chat.id)).toHaveLength(2);
+    const issueTask = store.createSessionTask(issueWork.id, { agentId: agent.id, prompt: "Issue work" });
+    expect(issueTask).toMatchObject({ chatSessionId: chat.id, issueSessionId: issueWork.id, issueId: issue.id });
+    const issueResult = store.publishSessionResult(issueWork.id, { body: "Issue finding" });
+    expect(store.listIssueSessionResults(issue.id).map((entry) => entry.id)).toEqual([issueResult.id]);
+    expect(store.listChatOwnedSessions(chat.id)).toHaveLength(3);
   });
 
   it("serves canonical Session APIs under the owning Chat", async () => {
@@ -114,10 +112,10 @@ describe("Issue sessions and per-agent projection lanes", () => {
 
   it("adopts an unambiguous legacy Issue Session without changing its identity", () => {
     const store = createStore();
-    const agent = store.createAgent({ name: "Legacy worker", provider: "claude" });
     const issue = store.createIssue({ title: "Legacy issue", workspaceId: "local" });
     const legacy = store.createIssueSession(issue.id, { title: "Legacy" });
-    const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local", creatorId: "local", issueId: issue.id });
+    const agent = store.createAgent({ name: "Legacy worker", provider: "claude" });
+    const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local", creatorId: "local" });
     const adopted = store.adoptLegacySession(chat.id, legacy.id);
 
     expect(adopted).toMatchObject({ id: legacy.id, chatId: chat.id, issueId: issue.id, isDefault: false });

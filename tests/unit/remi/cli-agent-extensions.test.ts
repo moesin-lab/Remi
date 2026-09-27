@@ -77,6 +77,85 @@ describe("agent extension CLI contracts", () => {
     expect(JSON.parse(jsonl)).toMatchObject({ id: "agt_123", name: "Builder" });
   });
 
+  it("includes model capability wait reasons when listing an agent's tasks", async () => {
+    useCliEnv();
+    const spec = specById("agent.task.list");
+    const task = {
+      id: "tsk_queued",
+      status: "queued",
+      wait_reason: "等待模型能力恢复：3 个候选 Runtime 均无法执行 claude-opus-5（thinking: high）",
+    };
+    globalThis.fetch = capabilityFetch(spec.id, (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/agents") return Response.json({ agents: [{ id: "agt_123", name: "Builder" }] });
+      expect(path).toBe("/api/agents/agt_123/tasks");
+      return Response.json({ tasks: [task] });
+    });
+    const table = await capture(() => registryFor([spec]).execute(["agent", "task", "list", "Builder"]));
+    expect(table).toContain("WAIT REASON");
+    expect(table).toContain("queued");
+    expect(table).toContain(task.wait_reason);
+    const jsonl = await capture(() => registryFor([spec]).execute(["agent", "task", "list", "Builder", "--output", "jsonl"]));
+    expect(JSON.parse(jsonl)).toEqual(task);
+  });
+
+  it.each([
+    ["agent.create", ["agent", "create"], "POST", "/api/agents"],
+    ["agent.template.create", ["agent", "template", "create", "builder"], "POST", "/api/agents/from-template"],
+    ["agent.update", ["agent", "update", "Builder"], "PUT", "/api/agents/agt_123"],
+    ["agent.update", ["agent", "edit", "Builder"], "PUT", "/api/agents/agt_123"],
+    ["agent.default", ["agent", "default"], "POST", "/api/multiremi/agents/default"],
+  ] as const)("binds execution target through %s (%j)", async (id, argv, method, path) => {
+    useCliEnv();
+    const spec = specById(id);
+    let body: unknown;
+    globalThis.fetch = capabilityFetch(spec.id, async (request) => {
+      if (request.method === "GET" && new URL(request.url).pathname === "/api/agents") {
+        return Response.json({ agents: [{ id: "agt_123", name: "Builder", provider: "claude" }] });
+      }
+      expect(request.method).toBe(method);
+      expect(new URL(request.url).pathname).toBe(path);
+      body = await request.json();
+      return Response.json({ id: "agt_123", runtime_id: "rt_codex" });
+    });
+    await capture(() => registryFor([spec]).execute([...argv, "--runtime", "rt_codex", "--json"]));
+    expect(body).toMatchObject({ runtime_id: "rt_codex" });
+    expect(body).not.toHaveProperty("provider");
+    await capture(() => registryFor([spec]).execute([...argv, "--execution-group", "team-code", "--json"]));
+    expect(body).toMatchObject({ execution_group_id: "team-code" });
+    expect(body).not.toHaveProperty("runtime_id");
+    expect(body).not.toHaveProperty("provider");
+    await expect(registryFor([spec]).execute([...argv, "--runtime", "rt_codex", "--execution-group", "team-code"]))
+      .rejects.toThrow("conflict");
+  });
+
+  it("keeps JSON execution targets free of an injected provider", async () => {
+    useCliEnv();
+    const spec = specById("agent.create");
+    let body: unknown;
+    globalThis.fetch = capabilityFetch(spec.id, async (request) => {
+      body = await request.json();
+      return Response.json({ id: "agt_123" });
+    });
+    await capture(() => registryFor([spec]).execute([
+      "agent", "create", "--data", '{"name":"Builder","runtime_id":"rt_codex"}', "--json",
+    ]));
+    expect(body).toEqual({ name: "Builder", runtime_id: "rt_codex", workspace_id: "ws_1" });
+  });
+
+  it("preserves the target when updating unrelated agent fields", async () => {
+    useCliEnv();
+    const spec = specById("agent.update");
+    let body: unknown;
+    globalThis.fetch = capabilityFetch(spec.id, async (request) => {
+      if (request.method === "GET") return Response.json({ agents: [{ id: "agt_123", name: "Builder" }] });
+      body = await request.json();
+      return Response.json({ id: "agt_123" });
+    });
+    await capture(() => registryFor([spec]).execute(["agent", "update", "Builder", "--description", "Updated", "--json"]));
+    expect(body).toEqual({ description: "Updated" });
+  });
+
   it("sets supervisor authority through a human-only command", async () => {
     useCliEnv();
     const spec = specById("agent.supervisor.set");

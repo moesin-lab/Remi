@@ -1,5 +1,6 @@
 import {
   CliError,
+  CliRenderer,
   ResourceResolver,
   type CliOptionSpec,
   type CommandInvocation,
@@ -15,6 +16,7 @@ import {
   encodePath,
   extractRecords,
   integerOption,
+  outputMode,
   positional,
   renderResource,
   requestBody,
@@ -55,13 +57,14 @@ const RUNTIME_PROVISION_FIELDS: readonly CliOptionSpec[] = [
  * which is the only safe default for a partial update.
  */
 const FEISHU_BOT_FIELDS: readonly CliOptionSpec[] = [
+  { name: "sender-access-policy", type: "string", valueName: "agent|allowlist", description: "Use Agent permissions (default) or require a sender allowlist" },
   { name: "agent", type: "string", valueName: "agent-id", description: "Agent that answers concierge messages" },
   { name: "runtime", type: "string", valueName: "runtime-id", description: "Runtime that hosts the connector" },
   { name: "app-id", type: "string", valueName: "cli_xxx", description: "Feishu App ID" },
   { name: "app-secret", type: "string", valueName: "secret", description: "Feishu App Secret (stored encrypted)" },
   { name: "domain", type: "string", valueName: "feishu|lark|bytedance", description: "Open platform domain" },
-  { name: "enabled", type: "boolean", description: "Run the concierge after saving" },
-  { name: "disabled", type: "boolean", description: "Save the configuration without running it" },
+  { name: "enabled", type: "boolean", description: "Run after saving; requires an online Runtime with concierge support" },
+  { name: "disabled", type: "boolean", description: "Save without running; permits an offline Runtime or one without concierge support" },
 ];
 
 export function workspaceCommandSpecs(): CommandSpec[] {
@@ -173,6 +176,23 @@ export function workspaceCommandSpecs(): CommandSpec[] {
     scopedWrite("workspace.relay.discovery", ["workspace", "relay", "discovery"], "Update relay discovery settings", "/relay-config/discovery", "PUT"),
     scopedWrite("workspace.relay.update", ["workspace", "relay", "update"], "Update a relay engine", "/relay-config/:engine", "PUT", [refPositional("engine")]),
     scopedWrite("workspace.relay.reveal", ["workspace", "relay", "reveal"], "Reveal a relay engine credential", "/relay-config/:engine/reveal", "POST", [refPositional("engine")]),
+    scopedWrite("workspace.relay.probe", ["workspace", "relay", "probe"], "Probe a relay engine's gateway for its model catalog and reasoning levels", "/relay-config/:engine/probe", "POST", [refPositional("engine")]),
+    scopedRead("workspace.relay.reasoning-levels.get", ["workspace", "relay", "reasoning-levels", "get"], "Read a gateway engine's declared reasoning levels and what routes for each model", "/relay-config/:engine/reasoning-levels", [refPositional("engine")]),
+    scopedWrite(
+      "workspace.relay.reasoning-levels.update",
+      ["workspace", "relay", "reasoning-levels", "update"],
+      "Declare the reasoning levels of a gateway model whose engine publishes none",
+      "/relay-config/:engine/reasoning-levels",
+      "PUT",
+      [
+        refPositional("engine"),
+        { name: "model", type: "string", valueName: "model-id", description: "Gateway model id; need not be one the probe returned" },
+        { name: "level", type: "string", valueName: "level", repeatable: true, description: "Declared reasoning level, in the engine's order of increasing effort" },
+        { name: "default-level", type: "string", valueName: "level", description: "Default level; must be one of --level" },
+        { name: "clear", type: "boolean", description: "Remove the declaration instead of setting one" },
+      ],
+      reasoningLevelsBody,
+    ),
     scopedRead("workspace.bot-menu.get", ["workspace", "bot-menu", "get"], "Read the workspace Feishu bot menu", "/bot-menu"),
     scopedWrite(
       "workspace.bot-menu.update",
@@ -210,6 +230,23 @@ export function workspaceCommandSpecs(): CommandSpec[] {
     scopedRead("workspace.feishu-bot.status", ["workspace", "feishu-bot", "status"], "Read Feishu concierge runtime status", "/feishu-bot/status"),
     scopedRead("workspace.feishu-bot.candidates", ["workspace", "feishu-bot", "candidates"], "List Agents and Runtimes the concierge can use", "/feishu-bot/candidates"),
     scopedRead("workspace.feishu-bot.audit", ["workspace", "feishu-bot", "audit"], "Read the Feishu concierge audit trail", "/feishu-bot/audit"),
+    readSpec(
+      "workspace.feishu-bot.sender.list",
+      ["workspace", "feishu-bot", "sender", "list"],
+      "List discovered Feishu senders and their allowlist status",
+      [refPositional("workspace")],
+      async (invocation) => {
+        const client = await clientFor(invocation);
+        const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
+        const response = await client.request({
+          method: "GET",
+          path: `/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot/senders`,
+        });
+        renderFeishuBotSenders(invocation, response.data);
+      },
+    ),
+    feishuBotSenderAccessSpec("allow", true),
+    feishuBotSenderAccessSpec("revoke", false),
     scopedWrite(
       "workspace.feishu-bot.set",
       ["workspace", "feishu-bot", "set"],
@@ -220,7 +257,7 @@ export function workspaceCommandSpecs(): CommandSpec[] {
       feishuBotBody,
     ),
     scopedWrite("workspace.feishu-bot.test", ["workspace", "feishu-bot", "test"], "Test the Feishu concierge credentials", "/feishu-bot/test", "POST"),
-    scopedWrite("workspace.feishu-bot.deploy", ["workspace", "feishu-bot", "deploy"], "Enable and deploy the Feishu concierge", "/feishu-bot/deploy", "POST"),
+    scopedWrite("workspace.feishu-bot.deploy", ["workspace", "feishu-bot", "deploy"], "Enable and deploy the Feishu concierge; requires an online Runtime with concierge support", "/feishu-bot/deploy", "POST"),
     scopedWrite("workspace.feishu-bot.stop", ["workspace", "feishu-bot", "stop"], "Stop the Feishu concierge", "/feishu-bot/stop", "POST"),
     scopedWrite(
       "workspace.feishu-bot.register",
@@ -381,12 +418,61 @@ function destructiveSpec(
   };
 }
 
-function scopedRead(id: string, path: string[], description: string, suffix: string): CommandSpec {
-  return readSpec(id, path, description, [refPositional("workspace")], async (invocation) => {
+function scopedRead(
+  id: string,
+  path: string[],
+  description: string,
+  suffix: string,
+  extra: readonly ReturnType<typeof refPositional>[] = [],
+): CommandSpec {
+  return readSpec(id, path, description, [refPositional("workspace"), ...extra], async (invocation) => {
     const client = await clientFor(invocation);
     const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
-    const response = await client.request({ method: "GET", path: `/api/workspaces/${encodePath(String(workspace.id))}${suffix}` });
+    const engine = extra.length ? positional(invocation, 1, extra[0]!.name) : "";
+    const scopedSuffix = suffix.replace(":engine", encodePath(engine));
+    const response = await client.request({ method: "GET", path: `/api/workspaces/${encodePath(String(workspace.id))}${scopedSuffix}` });
     renderResource(invocation, response.data);
+  });
+}
+
+function feishuBotSenderAccessSpec(action: "allow" | "revoke", allowed: boolean): CommandSpec {
+  const id = `workspace.feishu-bot.sender.${action}`;
+  return {
+    id,
+    path: ["workspace", "feishu-bot", "sender", action],
+    description: allowed ? "Allow a discovered Feishu sender to create Issues" : "Revoke a Feishu sender's permission to create Issues",
+    capability: id,
+    auth: ["human"],
+    mutation: "write",
+    outputs: ["table", "json", "jsonl"],
+    positionals: [refPositional("workspace"), { name: "sender", required: true, description: "Sender ID from sender list" }],
+    options: commandOptions(),
+    run: async (invocation) => {
+      const client = await clientFor(invocation);
+      const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
+      const senderId = positional(invocation, 1, "sender");
+      const response = await client.request({
+        method: "PUT",
+        path: `/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot/senders/${encodePath(senderId)}`,
+        body: { allowed },
+      });
+      renderFeishuBotSenders(invocation, response.data);
+    },
+  };
+}
+
+function renderFeishuBotSenders(invocation: CommandInvocation, value: unknown): void {
+  new CliRenderer().render<Record<string, unknown>>(value, {
+    mode: outputMode(invocation),
+    rows: (input) => extractRecords(input, ["senders"]),
+    columns: [
+      { header: "ID", value: (row) => row.id },
+      { header: "NAME", value: (row) => row.display_name, maxWidth: 48 },
+      { header: "ENGLISH_NAME", value: (row) => row.name_en ?? "", maxWidth: 48 },
+      { header: "STATUS", value: (row) => row.allowed === true ? "allowed" : "pending" },
+      { header: "OPEN_ID", value: (row) => row.open_id },
+      { header: "LAST_SEEN", value: (row) => row.last_seen_at },
+    ],
   });
 }
 
@@ -463,6 +549,26 @@ async function runtimeProvisionBody(invocation: CommandInvocation): Promise<Reco
   });
 }
 
+/**
+ * A declaration is the administrator's explicit statement about a model whose
+ * engine publishes no reasoning metadata. Clearing it is a distinct intent, so it
+ * needs its own flag: without one, a typo'd `--model` and no `--level` would delete
+ * a declaration rather than fail.
+ */
+async function reasoningLevelsBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
+  const model = stringOption(invocation, "model");
+  if (!model) throw new CliError("usage", "workspace relay reasoning-levels update requires --model");
+  const clear = booleanOption(invocation, "clear") === true;
+  const levels = stringOptions(invocation, "level").map((level) => level.trim()).filter(Boolean);
+  if (clear && levels.length) throw new CliError("usage", "--clear cannot be combined with --level");
+  if (!clear && !levels.length) throw new CliError("usage", "workspace relay reasoning-levels update requires --level (repeatable) or --clear");
+  return requestBody(invocation, {
+    model,
+    levels: clear ? [] : levels,
+    default_level: clear ? undefined : stringOption(invocation, "default-level") ?? undefined,
+  });
+}
+
 async function envBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
   const body = await requestBody(invocation);
   const pairs = stringOptions(invocation, "set");
@@ -488,6 +594,7 @@ function feishuBotRegistrationPath(workspaceId: string, sessionId: string): stri
 
 async function feishuBotBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
   const body = await requestBody(invocation, {
+    sender_access_policy: stringOption(invocation, "sender-access-policy") ?? undefined,
     agent_id: stringOption(invocation, "agent") ?? undefined,
     runtime_id: stringOption(invocation, "runtime") ?? undefined,
     app_id: stringOption(invocation, "app-id") ?? undefined,

@@ -18,15 +18,18 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 判断能力是否存在 | [能力定位](../MULTIREMI_PARITY_MATRIX.md) | 当前实现和验证入口；不从旧完成标记推断 |
 | 运行测试、验证回归 | [测试](../../TESTING.md) | 测试发现范围与真实服务前提 |
 | 新增 API 或 CLI 能力 | [CLI 命令契约](../cli-command-migration.md) | canonical 命令、注册与能力检查 |
+| 通过 CLI 使用、管理或排查 Remi | [Remi Skill](../../.agents/skills/remi/SKILL.md) | 任务协作、项目知识、云友与模型、集成、权限和运行维护 |
+| 改能力组、连接 Profile 或配置下发 | [执行配置](execution-configuration.md) | 集中配置、成员关系、版本确认与旧数据兼容 |
 | 改 Runtime 工作区、执行目录或本地上下文 | [Runtime 持久化工作区](runtime-workspaces.md) | daemon 归属、绑定、目录和上下文保留、调度约束 |
 | 判断 Topic、Chat、Session、Task 或成果的边界 | [对话与工作会话模型](../conversation-model.md) | 名词、身份、生命周期、关联与飞书映射 |
 | 改 Chat 页面、私聊或消息队列 | [Chat 契约](../chat.md) | Chat 管理、工作位置、队列串行和私聊权限 |
 | 改 Agent 并行调度与执行目录 | [并行执行](../parallel-agent-execution.md) | Agent/Session 执行隔离、共享代码和 daemon 协议升级 |
 | 修改登录、租户隔离或 token 权限 | [认证与权限](auth.md) | 身份来源、资源 guard 和生产启动约束 |
-| 修改 ACP 后端或 token-sync | [Codex 接入](../design/acp-codex-via-codex-acp.md)、[Claude Code 接入](../design/acp-claude-via-claude-agent-acp.md)、[认证插件与同步](../design/1passport-bytedance-sso.md) | 实际启动、认证、会话和凭据隔离边界 |
+| 修改 ACP 后端或 token-sync | [Codex 接入](../design/acp-codex-via-codex-acp.md)、[Claude Code 接入](../design/acp-claude-via-claude-agent-acp.md)、[Grok 接入](../design/acp-grok-via-native-cli.md)、[认证插件与同步](../design/1passport-bytedance-sso.md) | 实际启动、认证、会话和凭据隔离边界 |
 | 修改 Antigravity / agy 执行 | [Antigravity Runtime](../antigravity.md) | 原生 CLI 发现、事件流、续接、旧版恢复和能力边界 |
 | 修改云友模板或 Skill | [Agent 配置规范](../agent-config-spec.md) | 提示词结构、字段和元信息检查 |
 | 改工作台与通知 | [工作台/收件箱边界](../inbox-workbench-boundary.md) | 通知的触发条件与状态归属 |
+| 改 daemon 轮询节奏、心跳 ack 或插件 desired 协议 | [ADR 0001](../adr/0001-daemon-poll-cadence-and-desired-revision.md) | 已定的取舍、被否决的替代方案和回到源码的位置 |
 | 改项目 Memory/Wiki | [项目知识契约](../project-wiki-memory-spec.md) | 查询、提案、发布、物化与权限 |
 | 改飞书消息接入 | [消息接入](../feishu-message-ingestion.md) | Connection、Source、消息处理与凭据 |
 | 配置部署或排障 | [部署](../../deploy/README.md)、[本机 stable/dev](../deploy/local-profiles.md)、[daemon 环境](../deploy/66-8-remi-environment.md) | 服务组成、配置和启动条件 |

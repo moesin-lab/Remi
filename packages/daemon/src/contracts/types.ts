@@ -93,19 +93,33 @@ export interface AgentTaskIssue {
 }
 
 export interface AgentTaskIssueSession {
+  withCode?: boolean;
+  with_code?: boolean;
+  codeRuntimeId?: string | null;
+  code_runtime_id?: string | null;
   id: string;
-  issueId?: string;
-  issue_id?: string;
+  chatId?: string | null;
+  chat_id?: string | null;
+  parentSessionId?: string | null;
+  parent_session_id?: string | null;
+  inheritMode?: "none" | "snapshot" | "follow";
+  inherit_mode?: "none" | "snapshot" | "follow";
+  inheritCutoffSeq?: number | null;
+  inherit_cutoff_seq?: number | null;
+  issueId?: string | null;
+  issue_id?: string | null;
   title: string;
   summary?: string | null;
 }
 
 export interface AgentTaskSessionProjection {
+  sessionTitle?: string;
+  session_title?: string;
   sessionId?: string;
   session_id?: string;
   targetAgentId?: string;
   target_agent_id?: string;
-  mode: "bootstrap" | "delta";
+  mode: "bootstrap" | "delta" | "inherited_delta";
   fromSeq?: number;
   from_seq?: number;
   toSeq?: number;
@@ -131,6 +145,8 @@ export interface AgentTaskIssueSessionResult {
 
 /** Project attached to a task. */
 export interface AgentTaskProject {
+  workspaceId?: string;
+  workspace_id?: string;
   id: string;
   title: string;
   description: string | null;
@@ -288,6 +304,13 @@ export interface AgentTask {
   holdsWorkspace?: boolean;
   holds_workspace?: boolean;
   chatSessionId: string | null;
+  chat_session_id?: string | null;
+  /** Explicit Chat Project binding, independent of any historical Issue context. */
+  chatProjectId?: string | null;
+  chat_project_id?: string | null;
+  /** Explicit Project repositories only; kept separate from the display catalog. */
+  chatAutoCheckoutRepos?: AgentTaskRepo[];
+  chat_auto_checkout_repos?: AgentTaskRepo[];
   autopilotRunId: string | null;
   completedAt: string | null;
   createdAt: string;
@@ -298,6 +321,8 @@ export interface AgentTask {
   issue_session?: AgentTaskIssueSession | null;
   sessionProjection?: AgentTaskSessionProjection | null;
   session_projection?: AgentTaskSessionProjection | null;
+  inheritedSessionProjection?: AgentTaskSessionProjection | null;
+  inherited_session_projection?: AgentTaskSessionProjection | null;
   issueSessionResults?: AgentTaskIssueSessionResult[];
   issue_session_results?: AgentTaskIssueSessionResult[];
   project: AgentTaskProject | null;
@@ -321,6 +346,7 @@ export interface AgentTask {
   plugin_snapshot?: AgentPluginSnapshot[];
   /** Capability fingerprint frozen by the server; snake_case accepted on wire. */
   executionFingerprint?: string | null;
+  codexProfile?: import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   claudeProfile?: import("@multiremi/contracts/claude-profile").RuntimeClaudeProfile | null;
   execution_fingerprint?: string | null;
 
@@ -350,11 +376,9 @@ export interface AgentTask {
   bound_issue_updates?: string[];
   boundIssueUpdatesOmittedCount?: number;
   bound_issue_updates_omitted_count?: number;
-  /** Safe identity of the Issue attached to this Chat, not task ownership. */
+  /** Safe Issue identity from a Feishu topic binding; absent for private Chat. */
   boundIssue?: MultiremiBoundIssue | null;
   bound_issue?: MultiremiBoundIssue | null;
-  chatBootstrapTranscript?: string | null;
-  chat_bootstrap_transcript?: string | null;
   chatMessageAttachments?: unknown[];
   chat_message_attachments?: unknown[];
   autopilotTitle?: string | null;

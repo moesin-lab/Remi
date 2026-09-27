@@ -1,7 +1,8 @@
 // Wire serializers for the tasks domain, moved verbatim out of api.ts.
 // Go-compat (`*Compatibility*`) and native shapers sit side by side on purpose:
 // the two route prefixes are intentionally divergent and must stay diffable.
-import { taskExecutionScope } from "@multiremi/contracts/task-execution.js";
+import { CHAT_ISSUE_DECOUPLED_FINGERPRINT } from "@multiremi/store/helpers.js";
+import { agentAtTaskTarget, taskExecutionScope } from "@multiremi/contracts/task-execution.js";
 import type {
   MultiremiChatMessage,
   MultiremiDaemonHeartbeatAck,
@@ -24,6 +25,22 @@ type InternalTaskField =
   | "issueCreationRestricted"
   | "issue_creation_restricted";
 
+/**
+ * MUL-357: fields the global task *list* deliberately omits. Every task carries
+ * its full prompt, its full result text, the resolved Plugin snapshot (written
+ * twice, camelCase + snake_case) and usage rows; a production list response was
+ * 54.6 MB, of which these were ~38%. The CLI table renders none of them.
+ * `GET /api/multiremi/tasks/:id` still returns the complete shape.
+ */
+type TaskListOmittedField =
+  | "result"
+  | "prompt"
+  | "pluginSnapshot"
+  | "plugin_snapshot"
+  | "executionFingerprint"
+  | "execution_fingerprint"
+  | "usage";
+
 export function taskPublicResponse<T extends MultiremiTask>(task: T): Omit<T, InternalTaskField> {
   const {
     codexProfile: _codexProfile,
@@ -40,6 +57,24 @@ export function taskPublicResponse<T extends MultiremiTask>(task: T): Omit<T, In
   } = task;
   return publicTask;
 }
+
+/** The list shape: public task fields minus the heavy ones above. */
+export type MultiremiTaskListEntry = Omit<MultiremiTask, InternalTaskField | TaskListOmittedField>;
+
+export function taskListResponse(task: MultiremiTask): MultiremiTaskListEntry {
+  const {
+    result: _result,
+    prompt: _prompt,
+    pluginSnapshot: _pluginSnapshot,
+    plugin_snapshot: _pluginSnapshotSnake,
+    executionFingerprint: _executionFingerprint,
+    execution_fingerprint: _executionFingerprintSnake,
+    usage: _usage,
+    ...listTask
+  } = taskPublicResponse(task);
+  return listTask;
+}
+
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import { workspaceDefaultBranchResolver } from "../helpers/repositories.js";
 import { autopilotRunSourceRevision } from "@multiremi/store/repos/autopilots-repo.js";
@@ -71,6 +106,10 @@ export function daemonHeartbeatHttpResponse(ack: MultiremiDaemonHeartbeatAck): R
   // allowlist is not a dropped field — it is a request consumed and destroyed,
   // which the operator only sees minutes later as an unexplained timeout.
   if (ack.pending_bot_menu) response.pending_bot_menu = ack.pending_bot_menu;
+  // Not a `pending_*`: the daemon only uses this to decide whether it can skip
+  // a desired-state GET, but dropping it here would silently restore the polling
+  // this field exists to remove.
+  if (ack.agent_plugins) response.agent_plugins = ack.agent_plugins;
   if (ack.ssh_mesh) response.ssh_mesh = ack.ssh_mesh;
   if (ack.drain) response.drain = ack.drain;
   return response;
@@ -283,6 +322,7 @@ export function daemonTaskWireResponse(
   };
   if (task.failureReason) response.failure_reason = task.failureReason;
   if (task.parentTaskId) response.parent_task_id = task.parentTaskId;
+  if (task.continuedFromTaskId) response.continued_from_task_id = task.continuedFromTaskId;
   if (task.waitReason) response.wait_reason = task.waitReason;
   if (task.progressSummary) response.progress_summary = task.progressSummary;
   if (task.progressStep != null) response.progress_step = task.progressStep;
@@ -320,7 +360,56 @@ export function daemonTaskClaimResponse(
   task: MultiremiTaskWithAgent,
   triggerMetadata: MultiremiTaskTriggerMetadata | null = null,
 ): Record<string, unknown> {
+  // Migration can invalidate a provider after this claim was hydrated. Resume
+  // identity must come from the current row, never the caller's cached snapshot.
+  if (task.chatSessionId) {
+    const current = store.getTask(task.id);
+    if (current) task = {
+      ...task,
+      sessionId: task.sessionId === current.sessionId ? task.sessionId : null,
+      executionFingerprint: current.executionFingerprint,
+    };
+  }
+  if (task.executionFingerprint === CHAT_ISSUE_DECOUPLED_FINGERPRINT) task = { ...task, sessionId: null };
+  // Re-check the live destination even when the caller retained an earlier
+  // hydrated claim. Stale or unavailable bindings must not retain Project or Issue context.
+  const ordinaryChat = Boolean(task.chatSessionId && store.getTaskChatExecutionKind(task) === "ordinary");
+  if (ordinaryChat) {
+    const chat = store.getChatSession(task.chatSessionId!);
+    const currentProject = chat?.projectId ? store.getProject(chat.projectId) : null;
+    // A claim payload may have been retained across a resource mutation. Read
+    // the current hydrated task so stale assignments cannot restore a directory
+    // that the live workspace lineage has already rejected.
+    if (chat?.projectId) {
+      const current = store.getTaskWithAgent(task.id);
+      if (current) {
+        task = { ...task, sessionId: current.sessionId, workDir: current.workDir,
+          projectResources: current.projectResources };
+        if (task.runtimeId !== current.runtimeId) task = { ...task, sessionId: null, workDir: null, codexProfile: null, claudeProfile: null };
+      }
+    }
+    const keepProject = Boolean(!task.runtimeWorkspaceId && currentProject && !currentProject.archivedAt
+      && currentProject.workspaceId === task.workspaceId && chat?.projectId && chat.workspaceId === task.workspaceId
+      && chat.projectId === task.chatProjectId && chat.projectId === task.project?.id
+      && task.project.workspaceId === task.workspaceId);
+    task = {
+      ...task, issueId: null, issueSessionId: null, issueSessionGeneration: null,
+      sessionId: task.issueId || task.issueSessionId || task.executionFingerprint === CHAT_ISSUE_DECOUPLED_FINGERPRINT ? null : task.sessionId,
+      issue: null, triggerCommentId: null,
+      chatProjectId: keepProject ? chat!.projectId : null,
+      chatAutoCheckoutRepos: keepProject ? task.chatAutoCheckoutRepos : [],
+      project: keepProject ? task.project : null,
+      projectResources: keepProject ? task.projectResources : [],
+      projectDocs: keepProject ? task.projectDocs : null,
+      projectWikiDocs: keepProject ? task.projectWikiDocs : [],
+      repositoryWikiContexts: keepProject ? task.repositoryWikiContexts : [],
+      projectContexts: [], repos: keepProject ? task.repos : [],
+      knowledgeWarnings: keepProject ? task.knowledgeWarnings : [],
+    };
+    triggerMetadata = null;
+  }
   const response = daemonTaskWireResponse(task, triggerMetadata);
+  if (task.chatProjectId && task.chatProjectId === task.project?.id) response.chat_project_id = task.chatProjectId;
   response.runtime_workspace_id = task.runtimeWorkspaceId ?? null;
   // Path metadata only. Instruction/configuration contents are read on the host.
   response.runtime_workspace = task.runtimeWorkspace ?? null;
@@ -334,7 +423,18 @@ export function daemonTaskClaimResponse(
   }
   if (task.branchName) response.branch_name = task.branchName;
   if (task.workDir) response.prior_work_dir = task.workDir;
-  if (task.agent) response.agent = daemonClaimAgentResponse(task.agent);
+  if (task.agent) {
+    // The daemon executes the model/effort it is handed here — it has no view
+    // of the task's recovery override. A chain that already moved to the
+    // fallback model must therefore present that model as the Agent's, or the
+    // dispatched attempt would quietly run the primary one again. A switched
+    // task also carries no further fallback: the chain's single switch is spent
+    // (MUL-336), so the daemon is never invited to bounce back to the primary.
+    const executionAgent = agentAtTaskTarget(task.agent, task);
+    response.agent = daemonClaimAgentResponse(
+      task.executionModel ? { ...executionAgent, fallbackModel: null, fallbackThinkingLevel: null } : executionAgent,
+    );
+  }
   if (task.issue) {
     response.issue = {
       ...issueCompatibilityResponse(task.issue, { includeLabels: true }),
@@ -348,7 +448,7 @@ export function daemonTaskClaimResponse(
   if (task.issueSessionId || task.chatSessionId) {
     const projection = store.buildTaskSessionProjection(task.id);
     if (projection) {
-      projectionMode = projection.mode;
+      projectionMode = projection.mode === "delta" ? "delta" : "bootstrap";
       response.session_projection = {
         session_id: projection.sessionId,
         target_agent_id: projection.targetAgentId,
@@ -360,6 +460,23 @@ export function daemonTaskClaimResponse(
         omitted_events: projection.omittedEvents,
         estimated_tokens: projection.estimatedTokens,
       };
+      const inherited = projection.inheritedSessionProjection;
+      if (inherited) {
+        response.inherited_session_projection = {
+          session_id: inherited.sessionId,
+          session_title: inherited.sessionTitle,
+          target_agent_id: inherited.targetAgentId,
+          mode: inherited.mode,
+          from_seq: inherited.fromSeq,
+          to_seq: inherited.toSeq,
+          jsonl: inherited.jsonl,
+          truncated: inherited.truncated,
+          omitted_events: inherited.omittedEvents,
+          estimated_tokens: inherited.estimatedTokens,
+        };
+      } else if (inherited === null) {
+        response.inherited_session_projection = null;
+      }
     }
   }
   if (task.issueSessionId) {
@@ -449,6 +566,13 @@ export function daemonTaskClaimResponse(
       ...(repo.defaultBranch ? { default_branch: repo.defaultBranch } : {}),
     }));
   }
+  if (ordinaryChat && task.chatProjectId && task.chatAutoCheckoutRepos) {
+    response.chat_auto_checkout_repos = task.chatAutoCheckoutRepos.map((repo) => ({
+      url: repo.url,
+      ...(repo.description ? { description: repo.description } : {}),
+      ...(repo.defaultBranch ? { default_branch: repo.defaultBranch } : {}),
+    }));
+  }
   appendDaemonClaimSquadContext(store, task, response);
   appendDaemonClaimExecutionContext(store, task, response);
   return response;
@@ -523,10 +647,10 @@ function appendDaemonClaimBoundIssue(
   task: MultiremiTaskWithAgent,
   response: Record<string, unknown>,
 ): void {
-  if (!task.chatSessionId) return;
+  if (!task.chatSessionId || !task.issueId) return;
   try {
-    const chat = store.getChatSession(task.chatSessionId);
-    const issueId = task.issueId ?? chat?.issueId ?? null;
+    const issueId = store.getFeishuIssueIdForChatSession(task.chatSessionId);
+    if (issueId !== task.issueId) return;
     const issue = issueId ? store.getIssue(issueId) : null;
     if (!issue) return;
     response.bound_issue = {
@@ -573,6 +697,9 @@ function appendDaemonClaimChatContext(store: MultiremiStore, task: MultiremiTask
     const messages = daemonUserMessagesForTask(store, task, allMessages);
     const chatMessage = messages.map((message) => message.body.trim()).filter(Boolean).join("\n\n");
     if (chatMessage) response.chat_message = chatMessage;
+    const attachments = store.listAttachmentsForChatMessages(messages.map(message => message.id));
+    response.chat_message_attachments = messages.flatMap(message => attachments.get(message.id) ?? [])
+      .map(attachmentCompatibilityResponse);
   } catch (error) {
     log.debug(`Failed to load chat context for claimed task ${task.id}: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -583,7 +710,7 @@ function appendDaemonClaimBoundIssueUpdates(
   task: MultiremiTaskWithAgent,
   response: Record<string, unknown>,
 ): void {
-  if (!task.chatSessionId) return;
+  if (!task.chatSessionId || !response.bound_issue) return;
   try {
     const pending = store.preparePendingAgentIssueUpdatesForTask(task.chatSessionId, task.id);
     if (pending.messages.length) {

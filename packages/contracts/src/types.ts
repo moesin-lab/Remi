@@ -67,6 +67,8 @@ export interface MultiremiAgentTemplate extends MultiremiAgentTemplateSummary {
 export type MultiremiAgentRole = "normal" | "maintainer" | "supervisor";
 
 export interface MultiremiAgent {
+  executionGroupId?: string | null;
+  execution_group_id?: string | null;
   id: string;
   name: string;
   description: string;
@@ -86,11 +88,15 @@ export interface MultiremiAgent {
   max_concurrent_tasks?: number;
   executable: string | null;
   model: string | null;
+  fallbackModel?: string | null;
+  fallback_model?: string | null;
   allowedTools: string[];
   customEnv: Record<string, string>;
   customArgs: string[];
   mcpConfig: unknown | null;
   thinkingLevel: string | null;
+  fallbackThinkingLevel?: string | null;
+  fallback_thinking_level?: string | null;
   issueCreationRequiresProposal: boolean;
   issue_creation_requires_proposal?: boolean;
   role: MultiremiAgentRole;
@@ -101,6 +107,8 @@ export interface MultiremiAgent {
 }
 
 export interface CreateAgentInput {
+  executionGroupId?: string | null;
+  execution_group_id?: string | null;
   id?: string;
   name: string;
   provider: MultiremiAgentProvider;
@@ -121,6 +129,8 @@ export interface CreateAgentInput {
   max_concurrent_tasks?: number;
   executable?: string | null;
   model?: string | null;
+  fallbackModel?: string | null;
+  fallback_model?: string | null;
   allowedTools?: string[];
   allowed_tools?: string[];
   customEnv?: Record<string, string>;
@@ -131,12 +141,16 @@ export interface CreateAgentInput {
   mcp_config?: unknown | null;
   thinkingLevel?: string | null;
   thinking_level?: string | null;
+  fallbackThinkingLevel?: string | null;
+  fallback_thinking_level?: string | null;
   issueCreationRequiresProposal?: boolean;
   issue_creation_requires_proposal?: boolean;
   role?: MultiremiAgentRole;
 }
 
 export interface UpdateAgentInput {
+  executionGroupId?: string | null;
+  execution_group_id?: string | null;
   name?: string;
   description?: string | null;
   avatarUrl?: string | null;
@@ -155,6 +169,8 @@ export interface UpdateAgentInput {
   max_concurrent_tasks?: number;
   executable?: string | null;
   model?: string | null;
+  fallbackModel?: string | null;
+  fallback_model?: string | null;
   allowedTools?: string[];
   allowed_tools?: string[];
   customEnv?: Record<string, string>;
@@ -165,12 +181,16 @@ export interface UpdateAgentInput {
   mcp_config?: unknown | null;
   thinkingLevel?: string | null;
   thinking_level?: string | null;
+  fallbackThinkingLevel?: string | null;
+  fallback_thinking_level?: string | null;
   issueCreationRequiresProposal?: boolean;
   issue_creation_requires_proposal?: boolean;
   role?: MultiremiAgentRole;
 }
 
 export interface CreateAgentFromTemplateInput {
+  executionGroupId?: string | null;
+  execution_group_id?: string | null;
   templateSlug?: string;
   template_slug?: string;
   name: string;
@@ -178,8 +198,12 @@ export interface CreateAgentFromTemplateInput {
   runtime_id?: string | null;
   provider?: MultiremiAgentProvider | null;
   model?: string | null;
+  fallbackModel?: string | null;
+  fallback_model?: string | null;
   thinkingLevel?: string | null;
   thinking_level?: string | null;
+  fallbackThinkingLevel?: string | null;
+  fallback_thinking_level?: string | null;
   visibility?: string;
   maxConcurrentTasks?: number;
   max_concurrent_tasks?: number;
@@ -625,6 +649,9 @@ export interface CreateRuntimeWorkspaceInput {
 }
 
 export interface MultiremiRuntime {
+  executionGroupIds?: string[];
+  executionGroupId?: string | null;
+  execution_group_id?: string | null;
   id: string;
   name: string;
   provider: MultiremiAgentProvider | "any";
@@ -912,6 +939,14 @@ export interface MultiremiDaemonHeartbeatAck {
     dry_run: boolean;
   };
   /**
+   * Revision of this Runtime's desired Plugin set. Present only when the daemon
+   * advertised `agent_plugin_protocol`. A daemon whose cached revision matches
+   * may skip `GET .../agent-plugins/desired`; the value is a pure optimization,
+   * so a daemon that ignores it (or a server that omits it) stays correct.
+   * Additive field: the protocol version stays at 1.
+   */
+  agent_plugins?: { revision: string };
+  /**
    * Feishu concierge assignment for this Runtime. Present only when the daemon
    * advertised `feishu_concierge_protocol`. Carries no credentials — see
    * `MultiremiFeishuBotDirective`.
@@ -1022,6 +1057,9 @@ export interface MultiremiRuntimeModelThinkingLevel {
 }
 
 export interface MultiremiRuntimeModelThinking {
+  /** Missing status is a legacy report; an explicit empty level set is unsupported. */
+  status?: "supported" | "unsupported" | "unknown" | "error";
+  error?: string;
   supportedLevels: MultiremiRuntimeModelThinkingLevel[];
   supported_levels?: MultiremiRuntimeModelThinkingLevel[];
   defaultLevel?: string;
@@ -1033,12 +1071,18 @@ export interface MultiremiRuntimeModel {
   label: string;
   provider: string;
   default: boolean;
+  /** Capability of the provider's default selector; excluded from concrete model pickers. */
+  providerDefault?: boolean;
   thinking?: MultiremiRuntimeModelThinking;
+  /** Native catalog load result. Concrete entries are actual ACP-selectable members, even on fallback. */
+  catalog?: { status: "ready" | "error"; error?: string };
   createdAt?: string;
   updatedAt?: string;
 }
 
 export interface RegisterRuntimeInput {
+  executionGroupId?: string | null;
+  execution_group_id?: string | null;
   id?: string;
   name: string;
   provider: MultiremiAgentProvider | "any";
@@ -1063,6 +1107,8 @@ export interface RegisterRuntimeInput {
 }
 
 export interface UpdateRuntimeInput {
+  executionGroupId?: string | null;
+  execution_group_id?: string | null;
   name?: string;
   ownerId?: string | null;
   owner_id?: string | null;
@@ -1147,6 +1193,8 @@ export interface ReportRuntimeLocalSkillImportInput {
 export interface ReportRuntimeModelListInput {
   status?: string;
   models?: MultiremiRuntimeModel[];
+  /** Connection used by this probe; null denotes the native/relay catalog. */
+  model_profile?: RuntimeCodexProfile | RuntimeClaudeProfile | null;
   supported?: boolean;
   error?: string;
 }
@@ -1243,6 +1291,8 @@ export type MultiremiTaskSteerKind = "steer" | "force_answer";
  *  provider session without cancelling the run. `force_answer` asks the agent
  *  to stop exploring and deliver its best conclusion now. */
 export interface MultiremiTaskSteerMessage {
+  sourceChatMessageId?: string;
+  attachments?: MultiremiAttachment[];
   id: string;
   taskId: string;
   task_id?: string;
@@ -1259,6 +1309,7 @@ export interface MultiremiTaskSteerMessage {
 }
 
 export interface CreateTaskSteerMessageInput {
+  sourceChatMessageId?: string;
   id?: string;
   taskId: string;
   kind: MultiremiTaskSteerKind;
@@ -1299,6 +1350,24 @@ export interface MultiremiTask {
    * still matches. Null until a normal queued task is claimed. */
   executionFingerprint: string | null;
   execution_fingerprint?: string | null;
+  /** MUL-336 execution-model override. Null means "use the Agent's model".
+   * Set only by a recovery chain that switched to the Agent's fallback model
+   * after a gateway resource failure; the Agent's own selection is never
+   * rewritten, so concurrent tasks of the same Agent keep theirs. */
+  executionModel?: string | null;
+  execution_model?: string | null;
+  executionThinkingLevel?: string | null;
+  execution_thinking_level?: string | null;
+  /** 1 once this recovery chain has spent its single model switch. Bounds the
+   * chain: a fallback that also fails ends instead of switching again. */
+  fallbackSwitched?: boolean;
+  fallback_switched?: boolean;
+  /** Why the execution model differs from the Agent's selection, for display. */
+  switchReason?: string | null;
+  switch_reason?: string | null;
+  /** Earliest time a deferred retry may be claimed (transient throttling). */
+  nextRetryAt?: string | null;
+  next_retry_at?: string | null;
   issueId: string | null;
   issueSessionId: string | null;
   issue_session_id?: string | null;
@@ -1379,6 +1448,10 @@ export interface MultiremiTask {
   attempt: number;
   maxAttempts: number;
   parentTaskId: string | null;
+  /** Exact delegated Task explicitly continued by this requested round. This
+   * is separate from parentTaskId, which represents execution retry lineage. */
+  continuedFromTaskId: string | null;
+  continued_from_task_id?: string | null;
   /** Immutable capability attenuation snapshot. Once true, every descendant
    * task must also require a human-approved proposal before creating Issues. */
   issueCreationRestricted: boolean;
@@ -1415,6 +1488,19 @@ export interface MultiremiTask {
   projection_omitted_events?: number;
   projectionEstimatedTokens: number;
   projection_estimated_tokens?: number;
+  /** Actual inherited projection recorded at claim; null before claim or without inheritance. */
+  inheritedProjectionTruncated: boolean | null;
+  inherited_projection_truncated?: boolean | null;
+  inheritedProjectionOmittedEvents: number | null;
+  inherited_projection_omitted_events?: number | null;
+  inheritedProjectionEstimatedTokens: number | null;
+  inherited_projection_estimated_tokens?: number | null;
+  inheritedProjectionToSeq: number | null;
+  inherited_projection_to_seq?: number | null;
+  inheritedProjectionTokenBudget: number | null;
+  inherited_projection_token_budget?: number | null;
+  inheritedProjectionRecordedAt: string | null;
+  inherited_projection_recorded_at?: string | null;
   result: string | null;
   error: string | null;
   failureReason: string | null;
@@ -1462,6 +1548,14 @@ export interface MultiremiTaskTriggerMetadata {
 }
 
 export interface MultiremiTaskWithAgent extends MultiremiTask {
+  issueSession?: MultiremiIssueSession | null;
+  issue_session?: MultiremiIssueSession | null;
+  /** Explicit Chat binding; consumers must match this to project.id. */
+  chatProjectId?: string | null;
+  /** Explicit Project repositories eligible for Chat checkout; never includes the workspace fallback catalog. */
+  chatAutoCheckoutRepos?: MultiremiRepoData[];
+  inheritedSessionProjection?: MultiremiSessionProjection | null;
+  inherited_session_projection?: MultiremiSessionProjection | null;
   runtimeWorkspace?: MultiremiRuntimeWorkspace | null;
   agent: MultiremiAgent | null;
   issue: MultiremiIssue | null;
@@ -1568,6 +1662,18 @@ export interface CreateTaskInput {
   plugin_snapshot?: MultiremiTaskPluginSnapshotEntry[];
   executionFingerprint?: string | null;
   execution_fingerprint?: string | null;
+  /** MUL-336 recovery chain: the model this task must execute with, overriding
+   * the Agent's selection without mutating it. */
+  executionModel?: string | null;
+  execution_model?: string | null;
+  executionThinkingLevel?: string | null;
+  execution_thinking_level?: string | null;
+  fallbackSwitched?: boolean;
+  fallback_switched?: boolean;
+  switchReason?: string | null;
+  switch_reason?: string | null;
+  nextRetryAt?: string | null;
+  next_retry_at?: string | null;
   issueId?: string | null;
   issueSessionId?: string | null;
   issue_session_id?: string | null;
@@ -1599,6 +1705,10 @@ export interface CreateTaskInput {
   projection_degrade_level?: number | null;
   parentTaskId?: string | null;
   parent_task_id?: string | null;
+  /** Server-derived continuation lineage. Public task creation strips this
+   * field and derives it only from continueTaskId. */
+  continuedFromTaskId?: string | null;
+  continued_from_task_id?: string | null;
   /** Server-derived capability snapshot. Public task creation must not trust
    * this value; TasksRepo derives it from parent lineage and the target Agent. */
   issueCreationRestricted?: boolean;
@@ -1608,6 +1718,10 @@ export interface CreateTaskInput {
   delegation_id?: string | null;
   delegatedByAgentId?: string | null;
   delegated_by_agent_id?: string | null;
+  /** Public dispatch hint. The API validates the referenced delegated task and
+   * derives its lineage; callers cannot provide a delegation ID directly. */
+  continueTaskId?: string | null;
+  continue_task_id?: string | null;
   assignmentEventId?: string | null;
   assignment_event_id?: string | null;
   assignmentAuthorType?: string;
@@ -2037,6 +2151,9 @@ export interface CreateIssueWithTaskInput extends CreateIssueInput {
 export interface UpdateIssueInput {
   runtimeWorkspaceId?: string | null;
   runtime_workspace_id?: string | null;
+  /** Server-internal attribution, overwritten from the authenticated request. */
+  actorType?: string;
+  actorId?: string | null;
   title?: string;
   description?: string | null;
   status?: string;
@@ -2122,6 +2239,7 @@ export interface AssignIssueInput {
 export interface AssignIssueResult {
   issue: MultiremiIssue;
   task: MultiremiTask | null;
+  cancelledTasks: number;
 }
 
 export interface QuickCreateIssueInput {
@@ -2189,24 +2307,34 @@ export interface MultiremiProjectSearchResult extends MultiremiProject {
 
 // ─── Sessions ────────────────────────────────────────────────────────────────────────────────────
 // Sessions are core product entities owned by a Chat. Issue is an optional
-// management association inherited from that Chat; `IssueSession` names below
-// remain compatibility aliases for the former issue-nested API.
+// work-management projection on a Session (for example, from an Issue entry
+// point or a validated Feishu Issue topic); it is not a generic Chat binding.
+// `IssueSession` names below remain compatibility aliases for the former
+// issue-nested API.
 
 export type MultiremiSessionStatus = "active" | "archived";
 
 /** @deprecated Use `MultiremiSessionStatus`. */
 export type MultiremiIssueSessionStatus = MultiremiSessionStatus;
 
+export type MultiremiIssueSessionInheritMode = "none" | "snapshot" | "follow";
+
 export type MultiremiSessionParticipantType = "agent" | "member";
 
-export type MultiremiSessionProjectionMode = "bootstrap" | "delta";
+export type MultiremiSessionProjectionMode = "bootstrap" | "delta" | "inherited_delta";
 
 export interface MultiremiSession {
+  /** Opt-in detached, read-only code from the parent workspace. */
+  withCode?: boolean;
+  with_code?: boolean;
+  /** Parent Runtime captured at creation; its daemon owns the repository cache. */
+  codeRuntimeId?: string | null;
+  code_runtime_id?: string | null;
   id: string;
   /** Owning Chat. Null is emitted only for unmigrated legacy Issue Sessions. */
   chatId: string | null;
   chat_id?: string | null;
-  /** Current optional Issue association of the owning Chat. */
+  /** Current optional Issue work-management projection. */
   issueId: string | null;
   issue_id?: string | null;
   workspaceId: string;
@@ -2217,6 +2345,15 @@ export interface MultiremiSession {
   is_default?: boolean;
   holdsWorkspace: boolean;
   holds_workspace?: boolean;
+  parentSessionId: string | null;
+  parent_session_id?: string | null;
+  inheritMode: MultiremiIssueSessionInheritMode;
+  inherit_mode?: MultiremiIssueSessionInheritMode;
+  inheritCutoffSeq: number | null;
+  inherit_cutoff_seq?: number | null;
+  /** Parent events in the available inheritance window, before projection truncation. */
+  inheritedEventCount: number;
+  inherited_event_count?: number;
   summary: string | null;
   createdByType: string;
   created_by_type?: string;
@@ -2230,6 +2367,35 @@ export interface MultiremiSession {
 
 /** @deprecated Use `MultiremiSession`. */
 export type MultiremiIssueSession = MultiremiSession;
+
+/** On-demand diagnostics for the latest task with a recorded inherited projection. */
+export interface MultiremiSessionInheritedContext {
+  session_id: string;
+  parent_session_id: string | null;
+  parent_session_title: string | null;
+  inherit_mode: MultiremiIssueSessionInheritMode;
+  inherit_cutoff_seq: number | null;
+  /** Follow-only progress and cost diagnostics; omitted for snapshot and ordinary Sessions. */
+  parent_max_seq?: number | null;
+  lanes?: { agent_id: string; execution_scope: string; parent_cursor_seq: number }[];
+  inherited_tokens_total?: number;
+  follow_token_limit?: number;
+  follow_frozen?: boolean;
+  follow_frozen_seq?: number | null;
+  /** Raw parent event count before truncation, not the number supplied to the model. */
+  inherited_event_count: number | null;
+  diagnostics: {
+    task_id: string;
+    agent_id: string;
+    to_seq: number;
+    truncated: boolean;
+    omitted_events: number;
+    estimated_tokens: number;
+    token_budget: number;
+    /** Time the inherited projection was recorded at claim, independent of later task updates. */
+    recorded_at: string;
+  } | null;
+}
 
 export interface MultiremiSessionParticipant {
   id: string;
@@ -2283,6 +2449,8 @@ export interface MultiremiSessionAgentLane {
   work_dir?: string | null;
   cursorSeq: number;
   cursor_seq?: number;
+  parentCursorSeq: number;
+  parent_cursor_seq?: number;
   generation: number;
   status: string;
   lastTaskId: string | null;
@@ -2329,9 +2497,17 @@ export interface MultiremiSessionProjection {
   omitted_events?: number;
   estimatedTokens: number;
   estimated_tokens?: number;
+  /** Present on a parent projection so prompt renderers can identify its source. */
+  sessionTitle?: string;
+  session_title?: string;
+  /** Side-session inherited context; absent for ordinary Sessions. */
+  inheritedSessionProjection?: MultiremiSessionProjection | null;
+  inherited_session_projection?: MultiremiSessionProjection | null;
 }
 
 export interface CreateSessionInput {
+  withCode?: boolean;
+  with_code?: boolean;
   id?: string;
   chatId?: string;
   chat_id?: string;
@@ -2344,6 +2520,11 @@ export interface CreateSessionInput {
   participant_agent_ids?: string[];
   holdsWorkspace?: boolean;
   holds_workspace?: boolean;
+  /** A parent creates a discussion Session, with snapshot inheritance by default. */
+  parentSessionId?: string | null;
+  parent_session_id?: string | null;
+  inheritMode?: MultiremiIssueSessionInheritMode;
+  inherit_mode?: MultiremiIssueSessionInheritMode;
 }
 
 /** @deprecated Use `CreateSessionInput`. */
@@ -2918,6 +3099,7 @@ export type MultiremiKnowledgeCompilationStatus =
   | "validating"
   | "published"
   | "published_with_warnings"
+  | "blocked"
   | "failed"
   | "noop";
 export type MultiremiKnowledgeCompilationAction =
@@ -3892,6 +4074,8 @@ export const FEISHU_CONCIERGE_OUTBOUND_PROTOCOL_VERSION = 3;
 export const FEISHU_CONCIERGE_TASK_STREAM_PROTOCOL_VERSION = 4;
 /** Native CoT, independent interaction/result messages, durable inbound delivery. */
 export const FEISHU_CONCIERGE_NATIVE_COT_PROTOCOL_VERSION = 5;
+/** v6 supports explicit binary Chat attachment deliveries. */
+export const FEISHU_CONCIERGE_ATTACHMENT_PROTOCOL_VERSION = 6;
 export const FEISHU_CONCIERGE_OUTBOUND_CLAIM_HEADER = "X-Multiremi-Feishu-Claim-Token";
 
 export type FeishuBotDomain = "feishu" | "lark" | "bytedance";
@@ -3947,6 +4131,9 @@ export interface FeishuPresentationCheckpoint {
 }
 
 export interface MultiremiFeishuBotOutboundDelivery {
+  attachments?: Array<Pick<MultiremiAttachment, "id" | "filename" | "contentType" | "sizeBytes">>;
+  /** Original inbound messages only; never the root of an unrelated proactive reply. */
+  receiptMessageIds?: string[];
   id: string;
   claimToken: string;
   claim_token?: string;
@@ -4004,6 +4191,7 @@ export interface MultiremiFeishuBotConfig {
   appId: string;
   domain: FeishuBotDomain;
   enabled: boolean;
+  senderAccessPolicy: "agent" | "allowlist";
   /** Bumped on every mutation; daemons refetch when their applied revision lags. */
   revision: number;
   hasAppSecret: boolean;
@@ -4036,6 +4224,7 @@ export interface FeishuBotConfigView {
   app_id: string;
   domain: FeishuBotDomain;
   enabled: boolean;
+  sender_access_policy: "agent" | "allowlist";
   revision: number;
   app_secret_configured: boolean;
   app_secret_hint: string | null;
@@ -4090,6 +4279,7 @@ export interface UpsertFeishuBotConfigInput {
   appId: string;
   domain: FeishuBotDomain;
   enabled: boolean;
+  senderAccessPolicy?: "agent" | "allowlist";
   appSecretOp: FeishuBotSecretOp;
   appSecret?: string;
   actor?: string | null;
@@ -4159,6 +4349,8 @@ export interface MultiremiFeishuBotDaemonPayload extends MultiremiFeishuBotDaemo
 
 /** One inbound Feishu event submitted by the Runtime hosting the connector. */
 export interface SubmitFeishuBotMessageInput {
+  /** Uploaded before submission, scoped to this runtime/revision/external message. */
+  attachmentIds?: string[];
   revision: number;
   externalSessionKey: string;
   externalMessageId: string;
@@ -4185,11 +4377,26 @@ export interface SubmitFeishuBotMessageResult {
   duplicate: boolean;
   steered: boolean;
   deliveryQueued?: boolean;
-  senderMembership: "member" | "non_member" | "unbound";
+  senderAllowed: boolean;
+}
+
+/** An account observed by this workspace's current Feishu bot. */
+export interface FeishuBotSender {
+  id: string;
+  app_id: string;
+  display_name: string;
+  name_en?: string | null;
+  open_id: string;
+  union_id: string | null;
+  allowed: boolean;
+  first_seen_at: string;
+  last_seen_at: string;
 }
 
 /** Runtime-facing Task snapshot used by connector delivery polling. */
 export interface FeishuBotTaskSnapshot {
+  /** Includes later steer messages so each sender's receipt reaches the terminal state. */
+  receiptMessageIds?: string[];
   taskId: string;
   status: MultiremiTaskStatus;
   result: string | null;
@@ -4208,6 +4415,48 @@ export interface FeishuBotSessionSnapshot {
   agentName?: string | null;
   task: FeishuBotTaskSnapshot | null;
 }
+
+
+/** One Task that a Feishu `/stop` could target, with the context a human
+ *  needs to tell several concurrent runs apart. */
+export interface FeishuBotCancelCandidate {
+  taskId: string;
+  status: MultiremiTaskStatus;
+  agentName: string | null;
+  issueId: string | null;
+  issueKey: string | null;
+  chatTitle: string | null;
+  startedAt: string | null;
+}
+
+/**
+ * Result of resolving one Feishu stop request against the platform's durable
+ * Tasks. `cancelled` also covers the session-scoped hit every group thread
+ * already relied on; the other outcomes exist so the daemon can answer a
+ * group-top-level stop without guessing which run the user meant.
+ */
+export interface FeishuBotCancelResult {
+  outcome: "cancelled" | "none" | "ambiguous" | "rejected";
+  /** Agent whose Task the request targeted, for the reply card. */
+  agentName: string | null;
+  taskId: string | null;
+  issueKey: string | null;
+  chatTitle: string | null;
+  /** Populated only for `ambiguous`; a bounded, sender-scoped shortlist. */
+  candidates: FeishuBotCancelCandidate[];
+  /** Total candidates before truncation, so the card can say "N more". */
+  candidateCount: number;
+  /** Why the request was refused. A stable code, not display copy: the daemon
+   *  owns the wording of the reply card, and the user's own input is echoed
+   *  there rather than passed back through the wire. */
+  reason: FeishuBotCancelRejection | null;
+}
+
+export type FeishuBotCancelRejection =
+  /** The Runtime's bot assignment changed underneath the request. */
+  | "stale_assignment"
+  /** The named target is not one of the sender's own unfinished Tasks here. */
+  | "target_not_candidate";
 
 export type FeishuBotAgentRouteScope = "p2p_default" | "group_default" | "chat";
 
@@ -4253,7 +4502,9 @@ export type FeishuBotAuditAction =
   | "redeployed"
   | "tested"
   | "registration_started"
-  | "registration_used";
+  | "registration_used"
+  | "sender_allowed"
+  | "sender_revoked";
 
 /**
  * One audited change to the concierge. `details` records which fields moved and
@@ -4463,14 +4714,12 @@ export type MultiremiChatMessageRole = "user" | "assistant" | "system";
 
 export interface MultiremiChatSession {
   /** Explicit work location, independent of a linked Issue. */
-  projectId?: string | null;
   runtimeWorkspaceId?: string | null;
   id: string;
   workspaceId: string;
   creatorId: string | null;
   agentId: string;
-  /** Optional Issue whose context is attached to tasks created from this Chat. */
-  issueId: string | null;
+  projectId: string | null;
   title: string;
   status: MultiremiChatSessionStatus;
   sessionId: string | null;
@@ -4505,8 +4754,6 @@ export interface MultiremiChatMessage {
 }
 
 export interface CreateChatSessionInput {
-  projectId?: string | null;
-  project_id?: string | null;
   runtimeWorkspaceId?: string | null;
   runtime_workspace_id?: string | null;
   id?: string;
@@ -4516,17 +4763,15 @@ export interface CreateChatSessionInput {
   workspace_id?: string | null;
   creatorId?: string | null;
   creator_id?: string | null;
-  issueId?: string | null;
-  issue_id?: string | null;
   title?: string | null;
+  projectId?: string | null;
+  project_id?: string | null;
 }
 
 export interface UpdateChatSessionInput {
   pinned?: boolean;
   title?: string;
   status?: MultiremiChatSessionStatus;
-  issueId?: string | null;
-  issue_id?: string | null;
 }
 
 export interface SendChatMessageInput {
@@ -5263,4 +5508,17 @@ export interface MultiremiMetricCounter {
   name: string;
   labels: Record<string, string>;
   value: number;
+}
+
+export interface MultiremiExecutionGroup {
+  id: string;
+  name: string;
+  profileId: string | null;
+  profileRevision: number | null;
+  managed: boolean;
+  workspaceId: string;
+  provider: string;
+  machineId: string | null;
+  runtimeIds: string[];
+  createdAt: string;
 }

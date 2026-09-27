@@ -13,8 +13,10 @@ import { buildTaskInteractionCard, registerTaskInteraction } from "./task-intera
 import { createFeishuImageResolver } from "./outbound-images.js";
 import { uploadImageFeishu } from "./media.js";
 import { rewriteMarkdownImages } from "@shared/feishu-markdown-images.js";
+import { setFeishuMessageReceipt, type FeishuMessageReceipt } from "./message-receipt.js";
 
 export interface TaskPresentationOptions {
+  receiptMessageIds?: string[];
   appId: string;
   replyToMessageId?: string;
   mentionOpenId?: string;
@@ -44,9 +46,13 @@ export class FeishuTaskPresentation {
   private readonly signal: AbortSignal;
   private readonly timeline: FeishuCotTimeline;
   private execution: AgentExecutionDisplay;
+  /** Provider session behind this reply: `null` until the Task reports one,
+   * `undefined` for command replies that carry no conversation at all. */
+  private sessionId: string | null | undefined;
   private context: ContextUsage | null = null;
   private lastFlush = Date.now();
   private lastBatch = 0;
+  private readonly receiptMessageIds = new Set<string>();
 
   constructor(private readonly client: Lark.Client, private readonly chatId: string,
     private readonly meta: TaskStreamMeta, private readonly options: TaskPresentationOptions) {
@@ -56,6 +62,8 @@ export class FeishuTaskPresentation {
     this.state.interactionOpenId ??= options.interactionOpenId ?? options.mentionOpenId;
     this.signal = meta.signal ? AbortSignal.any([meta.signal, this.abortController.signal]) : this.abortController.signal;
     this.execution = { agentName: options.displayName ?? meta.displayName };
+    this.sessionId = meta.sessionId;
+    for (const id of options.receiptMessageIds ?? []) this.receiptMessageIds.add(id);
   }
 
   isActive(): boolean { return this.active; }
@@ -63,6 +71,33 @@ export class FeishuTaskPresentation {
   detach(): void { this.active = false; }
 
   async consume(stream: AsyncIterable<TaskStreamEvent>): Promise<{ messageId: string }> {
+    // A retry after acknowledged result delivery only reconciles the terminal
+    // receipt. Do not flash THINKING again, including after a daemon restart.
+    if (!this.state.resultMessageId) await this.receipt("received");
+    try { return await this.consumeTask(stream); }
+    catch (error) {
+      // Handover/shutdown is not a task failure; the next leased consumer will resume.
+      // The marker is best effort: the original error decides whether the outbox retries.
+      if (!this.signal.aborted && !this.state.resultMessageId) {
+        await this.receipt("failed").catch(failure =>
+          this.options.log?.(`Failure receipt update failed: ${String(failure)}`));
+      }
+      throw error;
+    }
+  }
+
+  private async receipt(state: FeishuMessageReceipt): Promise<void> {
+    for (const id of this.receiptMessageIds) {
+      try { await setFeishuMessageReceipt(this.client, this.options.appId, id, state, this.signal); }
+      catch (error) {
+        this.signal.throwIfAborted();
+        if (state !== "received") throw error; // Durable outbox retries without resending its checkpointed result.
+        this.options.log?.(`Message receipt update failed: ${String(error)}`);
+      }
+    }
+  }
+
+  private async consumeTask(stream: AsyncIterable<TaskStreamEvent>): Promise<{ messageId: string }> {
     if (this.state.cot?.status === "creating" || this.state.cot?.writePending) {
       // The native API exposes no verified idempotency key. An unacknowledged
       // create/write is not replayed: preserve the known handle and final lane.
@@ -95,6 +130,11 @@ export class FeishuTaskPresentation {
         if (event.kind === "message") {
           await this.message(event.message);
         } else {
+          for (const id of event.snapshot.receiptMessageIds ?? []) this.receiptMessageIds.add(id);
+          // Snapshots are polled while the Task runs, so the conversation label
+          // settles as soon as the provider session is pinned. A command reply
+          // reports no session and keeps the plain agent name.
+          if (event.snapshot.sessionId) this.sessionId = event.snapshot.sessionId;
           finalStatus = event.snapshot.status;
           error = event.snapshot.error;
           snapshotText = event.snapshot.result ?? "";
@@ -119,7 +159,7 @@ export class FeishuTaskPresentation {
       const renderedText = await rewriteMarkdownImages(text, createFeishuImageResolver({
         uploadImage: async image => (await uploadImageFeishu(this.client, image.buffer)).imageKey,
       }));
-      const card = buildFinalCard({ text: renderedText, displayName: this.execution.agentName,
+      const card = buildFinalCard({ text: renderedText, agentName: this.execution.agentName, sessionId: this.sessionId,
         subtitle: formatExecutionSubtitle(this.execution), mentionOpenId: this.options.mentionOpenId,
         stats: formatCardStats(elapsed ?? Math.max(0, Math.round((Date.now() - this.state.startedAt) / 1000)), this.context, this.timeline.toolCount) });
       const sent = await this.retry(() => sendCardFeishu(this.client, this.chatId, card, {
@@ -130,6 +170,7 @@ export class FeishuTaskPresentation {
       this.state.resultMessageId = sent.messageId;
       await this.save();
     }
+    await this.receipt(finalStatus === "completed" ? "completed" : "failed");
     this.active = false;
     return { messageId: this.state.resultMessageId };
   }
@@ -173,7 +214,11 @@ export class FeishuTaskPresentation {
       this.state.cot = { status: "creating", presentation: "semantic_v1" };
       await this.save(); // write-ahead creation intent, even before we know either ID
       let handle;
-      try { handle = await this.retry(() => this.cot.create(this.chatId, this.options.replyToMessageId), false); }
+      try {
+        handle = await this.retry(() => this.cot.create(
+          this.chatId, this.options.replyToMessageId, Boolean(this.options.replyToMessageId),
+        ), false);
+      }
       catch (error) { await this.disableCot(error); return; }
       this.state.cot = { ...handle, status: "active", presentation: "semantic_v1" };
       await this.save(); // Never let a failed checkpoint get swallowed as an API error.
@@ -245,7 +290,7 @@ export class FeishuTaskPresentation {
     if (!entry && request.status !== "pending") return; // historical request already answered on web
     const recipientOpenId = this.state.interactionOpenId;
     if (!entry) {
-      const card = buildTaskInteractionCard(request, { displayName: this.execution.agentName, recipientOpenId });
+      const card = buildTaskInteractionCard(request, { agentName: this.execution.agentName, sessionId: this.sessionId, recipientOpenId });
       const sent = await this.retry(() => sendCardFeishu(this.client, this.chatId, card, {
         replyToMessageId: this.options.replyToMessageId, idempotencyKey: stableId(`${this.options.idempotencyKey}:${this.meta.taskId}:request:${requestId}`),
       }), true);
@@ -260,7 +305,7 @@ export class FeishuTaskPresentation {
     };
     if (entry.receiptStatus === request.status) { await finishWaiting(); await this.save(); return; }
     const registered = registerTaskInteraction({ appId: this.options.appId, chatId: this.chatId, messageId: entry.messageId,
-      recipientOpenId, request, displayName: this.execution.agentName,
+      recipientOpenId, request, agentName: this.execution.agentName, sessionId: this.sessionId,
       submit: async response => {
         this.signal.throwIfAborted();
         try { return await this.meta.respondHumanRequest(requestId, response); }
@@ -283,7 +328,7 @@ export class FeishuTaskPresentation {
         request = registered.current() ?? await this.meta.getHumanRequest?.(requestId) ?? request;
       }
       await this.retry(() => updateCardFeishu(this.client, entry!.messageId,
-        buildTaskInteractionCard(request!, { displayName: this.execution.agentName, receipt: true })), true);
+        buildTaskInteractionCard(request!, { agentName: this.execution.agentName, sessionId: this.sessionId, receipt: true })), true);
       entry.receiptStatus = request.status;
       await finishWaiting();
       await this.save();

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, statSync, appendFileSync, chmodSync, copyFileSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, type Dirent } from "node:fs";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { accessSync, constants, existsSync, mkdirSync, statSync, lstatSync, realpathSync, appendFileSync, chmodSync, copyFileSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync, type Dirent } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import type { RepoSpec } from "@daemon/contracts/types.js";
 import { createLogger } from "@shared/logger.js";
@@ -33,6 +33,8 @@ export interface MultiremiWorktreeParams {
   reuseExisting?: boolean;
   /** The caller already refreshed this repo in the same preparation flow. */
   skipFetch?: boolean;
+  /** Create a read-only detached worktree from an explicit full ref or commit OID. */
+  detach?: boolean;
   signal?: AbortSignal;
 }
 
@@ -98,6 +100,12 @@ export interface MultiremiWorktreeState {
   hasUnpushedCommits: boolean;
 }
 
+export interface ManagedWorktreeParams {
+  workspaceId: string;
+  repoUrl: string;
+  workDir: string;
+}
+
 const AGENT_GIT_EXCLUDE_PATTERNS = [".agent_context", ".multiremi", "CLAUDE.md", "AGENTS.md", ".claude", ".opencode"];
 const MODERN_FETCH_REFSPEC = "+refs/heads/*:refs/remotes/origin/*";
 const MIRRORED_TAG_FETCH_REFSPEC = "+refs/tags/*:refs/tags/*";
@@ -121,6 +129,29 @@ const DEFAULT_GIT_SSH_COMMAND = [
 const RESERVED_ISSUE_WORKSPACE_DIRECTORIES = new Set(["wiki", ".multiremi"]);
 const MULTIREMI_HOOK_MARKER = "# multiremi:prepare-commit-msg:co-authored-by";
 const MULTIREMI_CHAINED_HOOK_MARKER = "# multiremi:chained-hook-suffix=";
+const MULTIREMI_HOST_HOOK_MARKER = "# multiremi:host-hook-path=";
+const MULTIREMI_HOST_SHIM_HEADER = "#!/bin/sh\n# multiremi:host-hook-forwarder\n";
+// Fixed names from Git 2.39.5 githooks(5), cross-checked against its hook templates.
+// Do not scan the host directory: hooks added after checkout must work immediately.
+// prepare-commit-msg is handled separately, preserving host -> user -> attribution.
+// Exclude push-to-checkout: its mere presence replaces receive.denyCurrentBranch
+// updateInstead's default index/worktree update, even when the shim only exits 0.
+// Exclude reference-transaction: a 1,000-ref local fetch on Git 2.39.5 took
+// median 57.55ms without it vs 1,803.59ms with an empty forwarding shim (5 rounds).
+// Git invokes it for every prepared/committed ref transaction, making no-op
+// forwarding a substantial fetch regression. These two host hooks are not forwarded.
+const HOST_FORWARDED_GIT_HOOKS = [
+  "applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit",
+  "pre-merge-commit", "commit-msg", "post-commit", "pre-rebase",
+  "post-checkout", "post-merge", "pre-push", "pre-receive", "update",
+  "proc-receive", "post-receive", "post-update", "pre-auto-gc", "post-rewrite",
+  "sendemail-validate", "fsmonitor-watchman", "p4-changelist",
+  "p4-prepare-changelist", "p4-post-changelist", "p4-pre-submit", "post-index-change",
+] as const;
+const EXCLUDED_HOST_GIT_HOOKS = {
+  "push-to-checkout": "Its presence replaces the default index/worktree update for receive.denyCurrentBranch=updateInstead",
+  "reference-transaction": "A 1000-ref fetch benchmark measured a 31.34x slowdown (57.55ms -> 1803.59ms) with an empty forwarding shim",
+} as const;
 const LEGACY_DAEMON_HOOK_SIGNATURES = [
   "# multimira:prepare-commit-msg:co-authored-by",
   "# Installed by the Multimira daemon.",
@@ -247,6 +278,46 @@ export class MultiremiRepoCache {
     return isBareRepo(barePath) ? barePath : null;
   }
 
+  expectedWorktreePath(workDir: string, repoUrl: string): string {
+    const path = resolve(workDir, worktreeDirectoryName(repoUrl));
+    if (dirname(path) !== resolve(workDir)) throw new Error("repository name escapes the workspace");
+    return path;
+  }
+
+  /** Inspect local registration only; occupied paths must never be adopted as another repo. */
+  hasWorktree(params: ManagedWorktreeParams): boolean {
+    const path = this.expectedWorktreePath(params.workDir, params.repoUrl);
+    const info = lstatSync(path, { throwIfNoEntry: false });
+    if (!info) return false;
+    if (info.isSymbolicLink() || !info.isDirectory()
+      || lstatSync(params.workDir).isSymbolicLink()) {
+      throw new Error(`unsafe managed worktree path: ${path}`);
+    }
+    const barePath = this.barePath(params.workspaceId, params.repoUrl);
+    const gitFile = lstatSync(join(path, ".git"), { throwIfNoEntry: false });
+    if (!gitFile?.isFile() || gitFile.isSymbolicLink()
+      || !isBareRepo(barePath) || lstatSync(barePath).isSymbolicLink()) {
+      throw new Error(`path is not a registered worktree for the requested repository: ${path}`);
+    }
+    const commonDir = git(path, ["rev-parse", "--git-common-dir"]);
+    if (realpathSync(resolve(path, commonDir)) !== realpathSync(barePath)) {
+      throw new Error(`worktree belongs to another repository: ${path}`);
+    }
+    // Validate the standard worktree backlink directly. Older supported Git
+    // versions lack `worktree list -z`; line parsing would mishandle paths
+    // containing newlines, so verify the exact registered path instead.
+    const gitDir = resolve(path, git(path, ["rev-parse", "--git-dir"]));
+    const registeredFile = join(gitDir, "gitdir");
+    const registeredInfo = lstatSync(registeredFile, { throwIfNoEntry: false });
+    if (lstatSync(gitDir).isSymbolicLink() || lstatSync(join(barePath, "worktrees")).isSymbolicLink()
+      || dirname(realpathSync(gitDir)) !== realpathSync(join(barePath, "worktrees"))
+      || !registeredInfo?.isFile() || registeredInfo.isSymbolicLink()
+      || realpathSync(readFileSync(registeredFile, "utf8").replace(/\r?\n$/, "")) !== realpathSync(join(path, ".git"))) {
+      throw new Error(`worktree registration does not match its path: ${path}`);
+    }
+    return true;
+  }
+
   async createWorktree(params: MultiremiWorktreeParams): Promise<MultiremiWorktreeResult> {
     const barePath = this.barePath(params.workspaceId, params.repoUrl);
     if (!isBareRepo(barePath)) {
@@ -281,12 +352,19 @@ export class MultiremiRepoCache {
       );
       const snapshotPath = join(repoRoot, commit);
       if (existsSync(snapshotPath)) {
+        // Revalidate snapshots created before the symlink containment guard.
+        makeTreeReadOnly(snapshotPath);
+        // GC shares this lock and uses the root mtime as last access. A failed
+        // touch must reject preparation rather than hand out an expired tree.
+        const now = new Date();
+        utimesSync(snapshotPath, now, now);
         return { path: snapshotPath, commit, ...resolution, created: false };
       }
 
       mkdirSync(repoRoot, { recursive: true });
       const temporaryPath = join(repoRoot, `.${commit}.tmp-${process.pid}-${Date.now()}`);
       mkdirSync(temporaryPath, { recursive: true });
+      let published = false;
       try {
         const archive = spawnSync("git", ["--git-dir", barePath, "archive", "--format=tar", commit], {
           encoding: null,
@@ -308,10 +386,16 @@ export class MultiremiRepoCache {
         }
         makeTreeReadOnly(temporaryPath);
         renameSync(temporaryPath, snapshotPath);
+        published = true;
+        // Relative links survive the rename; absolute links must also remain
+        // contained at the published location, not point back into staging.
+        assertSnapshotSymlinksContained(snapshotPath);
       } catch (error) {
-        rmSync(temporaryPath, { recursive: true, force: true });
+        removeFailedSnapshotTree(published ? snapshotPath : temporaryPath);
         throw error;
       }
+      const now = new Date();
+      utimesSync(snapshotPath, now, now);
       return { path: snapshotPath, commit, ...resolution, created: true };
     }, params.signal);
   }
@@ -327,6 +411,7 @@ export class MultiremiRepoCache {
     barePath: string,
     params: MultiremiWorktreeParams,
   ): Promise<MultiremiWorktreeResult> {
+    if (params.detach) return this.createDetachedWorktreeLocked(barePath, params);
     const worktreePath = join(params.workDir, worktreeDirectoryName(params.repoUrl));
     const legacyWorktreePath = join(params.workDir, repoNameFromUrl(params.repoUrl));
     if (
@@ -391,6 +476,62 @@ export class MultiremiRepoCache {
     return { path: worktreePath, branch_name: branchName, branchName, created: true, ...worktreeBaseResult(worktreePath, resolution) };
   }
 
+  private async createDetachedWorktreeLocked(
+    barePath: string,
+    params: MultiremiWorktreeParams,
+  ): Promise<MultiremiWorktreeResult> {
+    const baseRef = params.ref?.trim();
+    if (!baseRef || (!baseRef.startsWith("refs/") && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(baseRef))) {
+      throw new Error("detached worktree requires an explicit full ref or commit OID");
+    }
+    if (baseRef.startsWith("refs/")) git(barePath, ["check-ref-format", baseRef]);
+    if (params.branchName) throw new Error("detached worktree cannot request a branch name");
+    const worktreePath = this.expectedWorktreePath(params.workDir, params.repoUrl);
+    const result = (created: boolean): MultiremiWorktreeResult => {
+      const commit = git(worktreePath, ["rev-parse", "--verify", "HEAD^{commit}"]);
+      return {
+        path: worktreePath, branch_name: "HEAD", branchName: "HEAD", created,
+        base_ref: baseRef, baseRef, base_commit: commit, baseCommit: commit,
+      };
+    };
+    if (this.hasWorktree(params)) {
+      const branch = git(worktreePath, ["symbolic-ref", "--quiet", "HEAD"], { allowFailure: true });
+      if (branch) throw new Error(`worktree ${worktreePath} is on ${branch}; refusing to detach an existing branch`);
+      // A side conversation keeps its original snapshot even if the parent's
+      // branch advances or disappears. Never reset or re-resolve that branch.
+      const existing = result(false);
+      makeTreeReadOnly(worktreePath);
+      return existing;
+    }
+    if (!params.skipFetch) {
+      await this.fetch(barePath, {
+        env: this.gitAuth(params.workspaceId, params.repoUrl),
+        signal: params.signal,
+      });
+    }
+    // Resolve exactly the caller's local ref under the repository lock, without
+    // origin/default-branch fallback. This includes unpushed Issue commits.
+    const commit = git(barePath, ["rev-parse", "--verify", `${baseRef}^{commit}`]);
+    mkdirSync(params.workDir, { recursive: true });
+    if (lstatSync(params.workDir).isSymbolicLink()) {
+      throw new Error(`unsafe managed worktree parent: ${params.workDir}`);
+    }
+    // GC removes the private directory; the next add collects its stale
+    // registration through the same lazy pruning as regular worktrees.
+    git(barePath, ["worktree", "prune"], { allowFailure: true });
+    try {
+      git(barePath, ["worktree", "add", "--detach", worktreePath, commit]);
+      makeTreeReadOnly(worktreePath);
+      return result(true);
+    } catch (error) {
+      // Never leave a rejected or partially protected tree available for reuse.
+      // We still hold the repo lock, so its stale registration can be removed now.
+      removeFailedSnapshotTree(worktreePath);
+      git(barePath, ["worktree", "prune"]);
+      throw error;
+    }
+  }
+
   private barePath(workspaceId: string, repoUrl: string): string {
     return join(this.root, safePathPart(workspaceId), bareDirName(repoUrl));
   }
@@ -440,17 +581,38 @@ export class MultiremiRepoCache {
     fn: () => Promise<T> | T,
     signal?: AbortSignal,
   ): Promise<T> {
-    const release = await acquireRepoCacheLock(
-      barePath,
-      this.options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
-      this.options.staleLockMs ?? DEFAULT_STALE_LOCK_MS,
+    return await this.runExclusiveForBarePath(barePath, fn, signal);
+  }
+
+  /** Share snapshot creation's lock and configured budgets with maintenance. */
+  async runExclusiveForBarePath<T>(
+    barePath: string,
+    fn: () => Promise<T> | T,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return await withRepoCacheLock(barePath, fn, {
+      timeoutMs: this.options.lockTimeoutMs,
+      staleLockMs: this.options.staleLockMs,
       signal,
-    );
-    try {
-      return await fn();
-    } finally {
-      release();
-    }
+    });
+  }
+}
+
+export async function withRepoCacheLock<T>(
+  barePath: string,
+  fn: () => Promise<T> | T,
+  options: { timeoutMs?: number; staleLockMs?: number; signal?: AbortSignal } = {},
+): Promise<T> {
+  const release = await acquireRepoCacheLock(
+    barePath,
+    options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS,
+    options.staleLockMs ?? DEFAULT_STALE_LOCK_MS,
+    options.signal,
+  );
+  try {
+    return await fn();
+  } finally {
+    release();
   }
 }
 
@@ -514,17 +676,66 @@ function safeReadDir(path: string): Dirent[] {
 }
 
 function makeTreeReadOnly(root: string): void {
-  for (const entry of safeReadDir(root)) {
+  // Validate the entire tree before changing permissions. chmod must never
+  // follow a symlink: its target could be the writable parent Issue checkout.
+  assertSnapshotSymlinksContained(root);
+  setSnapshotTreeReadOnly(root);
+}
+
+function assertSnapshotSymlinksContained(root: string): void {
+  const info = lstatSync(root);
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error(`unsafe read-only snapshot root: ${root}`);
+  }
+  const canonicalRoot = realpathSync(root);
+  const visit = (directory: string): void => {
+    // Fail closed on unreadable directories as well as unresolved links.
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        let target: string;
+        try {
+          target = realpathSync(path);
+        } catch (error) {
+          throw new Error(`cannot resolve read-only snapshot symlink: ${path}`, { cause: error });
+        }
+        const rel = relative(canonicalRoot, target);
+        if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+          throw new Error(`read-only snapshot symlink escapes snapshot root: ${path}`);
+        }
+      } else if (entry.isDirectory()) {
+        visit(path);
+      }
+    }
+  };
+  visit(root);
+}
+
+function setSnapshotTreeReadOnly(root: string): void {
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
     const path = join(root, entry.name);
     if (entry.isSymbolicLink()) continue;
     if (entry.isDirectory()) {
-      makeTreeReadOnly(path);
-      chmodSync(path, 0o555);
+      setSnapshotTreeReadOnly(path);
     } else {
       chmodSync(path, 0o444);
     }
   }
   chmodSync(root, 0o555);
+}
+
+/** Roll back only a newly created tree, without touching any symlink target. */
+function removeFailedSnapshotTree(root: string): void {
+  const makeDirectoriesWritable = (path: string): void => {
+    const info = lstatSync(path, { throwIfNoEntry: false });
+    if (!info?.isDirectory() || info.isSymbolicLink()) return;
+    chmodSync(path, info.mode | 0o700);
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      if (entry.isDirectory() && !entry.isSymbolicLink()) makeDirectoriesWritable(join(path, entry.name));
+    }
+  };
+  makeDirectoriesWritable(root);
+  rmSync(root, { recursive: true, force: true });
 }
 
 function git(
@@ -1040,8 +1251,12 @@ function applyCoAuthoredByHook(worktreePath: string, enabled: boolean): void {
   try {
     if (enabled) installCoAuthoredByHook(worktreePath);
     else removeCoAuthoredByHook(worktreePath);
-  } catch {
-    // Go treats hook install/remove failures as non-fatal to checkout.
+  } catch (error) {
+    log.warn("Failed to apply co-authored-by hook; continuing checkout", {
+      worktreePath,
+      enabled,
+      error: redactGitCredentialError(errorMessage(error)),
+    });
   }
 }
 
@@ -1057,11 +1272,22 @@ function installCoAuthoredByHook(worktreePath: string): void {
       chainedHookSuffix = preserveUserHook(hookPath, existing);
     }
   }
-  writeManagedHookAtomically(hookPath, prepareCommitMsgHook(chainedHookSuffix));
+  const hostHooksPath = resolveHostHooksPath(worktreePath, dirname(hookPath));
+  const hostHookPath = hostPrepareCommitMsgHookPath(hostHooksPath, hookPath);
+  writeManagedHookAtomically(hookPath, prepareCommitMsgHook(chainedHookSuffix, hostHookPath));
+  installHostHookShims(dirname(hookPath), hostHooksPath);
+  // The common config belongs to the daemon cache and is shared by its worktrees.
+  // Pin it even without a host override so subsequent commits use this hook.
+  git(worktreePath, ["config", "--local", "core.hooksPath", dirname(hookPath)]);
 }
 
 function removeCoAuthoredByHook(worktreePath: string): void {
   const hookPath = prepareCommitMsgHookPath(worktreePath);
+  const localHooksPath = git(worktreePath, ["config", "--local", "--get", "core.hooksPath"], { allowFailure: true });
+  if (localHooksPath === dirname(hookPath)) {
+    git(worktreePath, ["config", "--local", "--unset", "core.hooksPath"], { allowFailure: true });
+  }
+  removeHostHookShims(dirname(hookPath));
   if (!existsSync(hookPath)) return;
   const content = readFileSync(hookPath, "utf8");
   if (content.includes(MULTIREMI_HOOK_MARKER)) {
@@ -1081,15 +1307,109 @@ function removeCoAuthoredByHook(worktreePath: string): void {
 
 function prepareCommitMsgHookPath(worktreePath: string): string {
   const commonDir = git(worktreePath, ["rev-parse", "--git-common-dir"]);
-  const resolvedCommonDir = isAbsolute(commonDir) ? commonDir : join(worktreePath, commonDir);
+  const resolvedCommonDir = resolve(worktreePath, commonDir);
   return join(resolvedCommonDir, "hooks", "prepare-commit-msg");
 }
 
-function prepareCommitMsgHook(chainedHookSuffix: string | null): string {
-  if (!chainedHookSuffix) return PREPARE_COMMIT_MSG_HOOK_BODY;
+function resolveHostHooksPath(worktreePath: string, hooksPath: string): string | null {
+  // Read only host scopes: the effective value may already be our local pin.
+  const hostHooksPath = git(worktreePath, ["config", "--global", "--get", "--type=path", "core.hooksPath"], { allowFailure: true })
+    || git(worktreePath, ["config", "--system", "--get", "--type=path", "core.hooksPath"], { allowFailure: true });
+  if (!hostHooksPath) return null;
+  if (!isAbsolute(hostHooksPath)) {
+    log.warn("Skipping host Git hooks: core.hooksPath is relative", { worktreePath, hostHooksPath });
+    return null;
+  }
+  // Reject the whole directory before generating even absent-hook shims.
+  if (existsSync(hostHooksPath) && realpathSync(hostHooksPath) === realpathSync(hooksPath)) return null;
+  return hostHooksPath;
+}
+
+function hostPrepareCommitMsgHookPath(hostHooksPath: string | null, hookPath: string): string | null {
+  if (!hostHooksPath) return null;
+  const hostHookPath = join(hostHooksPath, "prepare-commit-msg");
+  if (!isExecutableHook(hostHookPath)) return null;
+  // A host setting can point back at this cache, including through a symlink.
+  if (existsSync(hookPath) && realpathSync(hostHookPath) === realpathSync(hookPath)) return null;
+  return hostHookPath;
+}
+
+function isExecutableHook(hookPath: string): boolean {
+  if (!existsSync(hookPath) || !statSync(hookPath).isFile()) return false;
+  try {
+    accessSync(hookPath, constants.X_OK);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+function installHostHookShims(hooksPath: string, hostHooksPath: string | null): void {
+  if (!hostHooksPath) {
+    removeHostHookShims(hooksPath);
+    return;
+  }
+  for (const [hookName, reason] of Object.entries(EXCLUDED_HOST_GIT_HOOKS)) {
+    const hostHookPath = join(hostHooksPath, hookName);
+    if (isExecutableHook(hostHookPath)) {
+      log.warn("Skipping excluded host Git hook; host forwarding not installed", {
+        hookName, hostHooksPath, hostHookPath, reason,
+      });
+    }
+  }
+  for (const name of HOST_FORWARDED_GIT_HOOKS) {
+    const hookPath = join(hooksPath, name);
+    // Never replace another owner's hook (including a dangling symlink).
+    const existing = lstatSync(hookPath, { throwIfNoEntry: false });
+    if (existing && (!existing.isFile() || !readFileSync(hookPath, "utf8").startsWith(MULTIREMI_HOST_SHIM_HEADER))) {
+      log.warn("Preserving non-managed Git hook; host forwarding not installed", { hookPath, hostHooksPath });
+      continue;
+    }
+    const hostHookPath = join(hostHooksPath, name);
+    writeManagedHookAtomically(hookPath, `${MULTIREMI_HOST_SHIM_HEADER}${MULTIREMI_HOST_HOOK_MARKER}${JSON.stringify(hostHookPath)}
+# Installed by the Multiremi daemon. Do not edit - it will be overwritten.
+HOST_HOOK='${hostHookPath.replaceAll("'", "'\\''")}'
+# Check at invocation time, including aliases introduced after installation.
+if [ -f "$HOST_HOOK" ] && [ -x "$HOST_HOOK" ] && ! [ "$HOST_HOOK" -ef "$0" ]; then
+  exec "$HOST_HOOK" "$@"
+fi
+exit 0
+`);
+  }
+}
+
+function removeHostHookShims(hooksPath: string): void {
+  if (!existsSync(hooksPath)) return;
+  for (const entry of readdirSync(hooksPath, { withFileTypes: true })) {
+    // Do not follow symlinks, even when their targets carry our ownership marker.
+    if (!entry.isFile()) continue;
+    const hookPath = join(hooksPath, entry.name);
+    if (readFileSync(hookPath, "utf8").startsWith(MULTIREMI_HOST_SHIM_HEADER)) {
+      rmSync(hookPath);
+    }
+  }
+}
+
+function prepareCommitMsgHook(chainedHookSuffix: string | null, hostHookPath: string | null): string {
+  const hooks: string[] = [];
+  if (hostHookPath) {
+    hooks.push(`${MULTIREMI_HOST_HOOK_MARKER}${JSON.stringify(hostHookPath)}
+HOST_HOOK='${hostHookPath.replaceAll("'", "'\\''")}'
+if [ -x "$HOST_HOOK" ]; then
+  "$HOST_HOOK" "$@" || exit $?
+fi`);
+  }
+  if (chainedHookSuffix) {
+    hooks.push(`${MULTIREMI_CHAINED_HOOK_MARKER}${chainedHookSuffix}
+CHAINED_HOOK="\${0}${chainedHookSuffix}"
+if [ -x "$CHAINED_HOOK" ]; then
+  "$CHAINED_HOOK" "$@" || exit $?
+fi`);
+  }
+  if (!hooks.length) return PREPARE_COMMIT_MSG_HOOK_BODY;
   return PREPARE_COMMIT_MSG_HOOK_BODY.replace(
     "\nCOMMIT_MSG_FILE=",
-    `\n${MULTIREMI_CHAINED_HOOK_MARKER}${chainedHookSuffix}\nCHAINED_HOOK="\${0}${chainedHookSuffix}"\nif [ -x "$CHAINED_HOOK" ]; then\n  "$CHAINED_HOOK" "$@" || exit $?\nfi\n\nCOMMIT_MSG_FILE=`,
+    () => `\n${hooks.join("\n\n")}\n\nCOMMIT_MSG_FILE=`,
   );
 }
 

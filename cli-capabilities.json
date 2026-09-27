@@ -59,6 +59,16 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "runtime.prepare": {
+      "command": "remi runtime prepare",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "write",
+      "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "workspace": {
       "command": "remi workspace",
       "aliases": [],
@@ -503,6 +513,57 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "workspace.relay.probe": {
+      "command": "remi workspace relay probe",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.relay.probe",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.relay.reasoning-levels.get": {
+      "command": "remi workspace relay reasoning-levels get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.relay.reasoning-levels.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.relay.reasoning-levels.update": {
+      "command": "remi workspace relay reasoning-levels update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.relay.reasoning-levels.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "workspace.bot-menu.get": {
       "command": "remi workspace bot-menu get",
       "aliases": [],
@@ -624,6 +685,54 @@
       ],
       "capability": "workspace.feishu-bot.audit",
       "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.feishu-bot.sender.list": {
+      "command": "remi workspace feishu-bot sender list",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.sender.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.feishu-bot.sender.allow": {
+      "command": "remi workspace feishu-bot sender allow",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.sender.allow",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.feishu-bot.sender.revoke": {
+      "command": "remi workspace feishu-bot sender revoke",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.sender.revoke",
+      "mutation": "write",
       "output": [
         "table",
         "json",
@@ -2203,6 +2312,90 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "wiki.repository.mv": {
+      "command": "remi wiki repository mv",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "wiki.repository.mv",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "wiki.repository.merge": {
+      "command": "remi wiki repository merge",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "wiki.repository.merge",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "wiki.repository.outcome": {
+      "command": "remi wiki repository outcome",
+      "aliases": [],
+      "auth": [
+        "task"
+      ],
+      "capability": "wiki.repository.outcome",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "wiki.repository.restore": {
+      "command": "remi wiki repository restore",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "wiki.repository.restore",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "wiki.repository.repair-log": {
+      "command": "remi wiki repository repair-log",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "wiki.repository.repair-log",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "wiki.repository.revisions": {
       "command": "remi wiki repository revisions",
       "aliases": [],
@@ -2859,6 +3052,40 @@
         "task"
       ],
       "capability": "session.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "session.show": {
+      "command": "remi session show",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "session.show",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "session.inherited-context": {
+      "command": "remi session inherited-context",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "session.inherited-context",
       "mutation": "read",
       "output": [
         "table",
@@ -4065,108 +4292,6 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "chat.issue": {
-      "command": "remi chat.issue",
-      "aliases": [],
-      "auth": [],
-      "capability": null,
-      "mutation": "read",
-      "output": [],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "chat.issue.bind": {
-      "command": "remi chat issue bind",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "chat.issue.bind",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "chat.issue.unbind": {
-      "command": "remi chat issue unbind",
-      "aliases": [],
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "chat.issue.unbind",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "chat.issue.updates": {
-      "command": "remi chat.issue.updates",
-      "aliases": [],
-      "auth": [],
-      "capability": null,
-      "mutation": "read",
-      "output": [],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "chat.issue.updates.get": {
-      "command": "remi chat issue updates get",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "chat.issue.updates.get",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "chat.issue.updates.enable": {
-      "command": "remi chat issue updates enable",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "chat.issue.updates.enable",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "chat.issue.updates.disable": {
-      "command": "remi chat issue updates disable",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "chat.issue.updates.disable",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
     "chat.delete": {
       "command": "remi chat delete",
       "aliases": [],
@@ -4209,6 +4334,32 @@
         "task"
       ],
       "capability": "chat.message.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.attachment": {
+      "command": "remi chat attachment",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "chat.attachment.send": {
+      "command": "remi chat attachment send",
+      "aliases": [],
+      "auth": [
+        "task"
+      ],
+      "capability": "chat.attachment.send",
       "mutation": "write",
       "output": [
         "table",
@@ -4399,6 +4550,22 @@
         "task"
       ],
       "capability": "task.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "task.continue": {
+      "command": "remi task continue",
+      "aliases": [],
+      "auth": [
+        "task"
+      ],
+      "capability": "task.continue",
       "mutation": "write",
       "output": [
         "table",
@@ -5593,6 +5760,176 @@
       "capability": null,
       "mutation": "read",
       "output": [],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.list": {
+      "command": "remi runtime group list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.profile.list": {
+      "command": "remi runtime profile list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.profile.get": {
+      "command": "remi runtime profile get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.profile.create": {
+      "command": "remi runtime profile create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.profile.update": {
+      "command": "remi runtime profile update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.profile.delete": {
+      "command": "remi runtime profile delete",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.profile.delete",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.get": {
+      "command": "remi runtime group get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.create": {
+      "command": "remi runtime group create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.update": {
+      "command": "remi runtime group update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.group.delete": {
+      "command": "remi runtime group delete",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.group.delete",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
       "hidden": false,
       "migration_status": "native"
     },
@@ -9636,6 +9973,12 @@
     "DELETE /api/comments/:id/resolve": {
       "command": "comment.unresolve"
     },
+    "DELETE /api/execution-groups/:id": {
+      "command": "runtime.group.delete"
+    },
+    "DELETE /api/execution-profiles/:id": {
+      "command": "runtime.profile.delete"
+    },
     "DELETE /api/issues/:id": {
       "command": "issue.delete"
     },
@@ -9890,9 +10233,6 @@
     "GET /api/chat/sessions/:sessionId": {
       "command": "chat.get"
     },
-    "GET /api/chat/sessions/:sessionId/issue-updates": {
-      "command": "chat.issue.updates.get"
-    },
     "GET /api/chat/sessions/:sessionId/messages": {
       "command": "chat.message.list"
     },
@@ -10062,6 +10402,18 @@
     },
     "GET /api/dashboard/usage/daily": {
       "command": "dashboard.usage.daily"
+    },
+    "GET /api/execution-groups": {
+      "command": "runtime.group.list"
+    },
+    "GET /api/execution-groups/:id": {
+      "command": "runtime.group.get"
+    },
+    "GET /api/execution-profiles": {
+      "command": "runtime.profile.list"
+    },
+    "GET /api/execution-profiles/:id": {
+      "command": "runtime.profile.get"
     },
     "GET /api/inbox": {
       "command": "inbox.list"
@@ -10293,6 +10645,9 @@
     },
     "GET /api/multiremi/daemons/:daemonId/retirement-plan": {
       "command": "daemon.retirement-plan"
+    },
+    "GET /api/multiremi/execution-groups": {
+      "command": "runtime.group.list"
     },
     "GET /api/multiremi/feedback": {
       "command": "platform.feedback.list"
@@ -10599,6 +10954,12 @@
     "GET /api/scm/capabilities": {
       "command": "scm.capabilities"
     },
+    "GET /api/sessions/:sessionId": {
+      "command": "session.show"
+    },
+    "GET /api/sessions/:sessionId/inherited-context": {
+      "command": "session.inherited-context"
+    },
     "GET /api/shares/:token": {
       "command": "share.view"
     },
@@ -10680,6 +11041,9 @@
     "GET /api/workspaces/:id/feishu-bot/routes": {
       "command": "feishu.route.list"
     },
+    "GET /api/workspaces/:id/feishu-bot/senders": {
+      "command": "workspace.feishu-bot.sender.list"
+    },
     "GET /api/workspaces/:id/feishu-bot/status": {
       "command": "workspace.feishu-bot.status"
     },
@@ -10712,6 +11076,9 @@
     },
     "GET /api/workspaces/:id/relay-config": {
       "command": "workspace.relay.get"
+    },
+    "GET /api/workspaces/:id/relay-config/:engine/reasoning-levels": {
+      "command": "workspace.relay.reasoning-levels.get"
     },
     "GET /api/workspaces/:id/repos": {
       "command": "repo.list"
@@ -10996,6 +11363,9 @@
     "POST /api/autopilots/:id/triggers/:triggerId/rotate-webhook-token": {
       "command": "autopilot.trigger.rotate-token"
     },
+    "POST /api/chat/attachments/send": {
+      "command": "chat.attachment.send"
+    },
     "POST /api/chat/sessions": {
       "command": "chat.create"
     },
@@ -11092,6 +11462,11 @@
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
     "POST /api/daemon/runtimes/:runtimeId/directory-scans/claim": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/runtimes/:runtimeId/feishu-bot/attachments": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -11280,6 +11655,12 @@
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/execution-groups": {
+      "command": "runtime.group.create"
+    },
+    "POST /api/execution-profiles": {
+      "command": "runtime.profile.create"
     },
     "POST /api/feedback": {
       "command": "platform.feedback.create"
@@ -11793,6 +12174,9 @@
     "POST /api/workspaces/:id/members": {
       "command": "invite.create"
     },
+    "POST /api/workspaces/:id/relay-config/:engine/probe": {
+      "command": "workspace.relay.probe"
+    },
     "POST /api/workspaces/:id/relay-config/:engine/reveal": {
       "command": "workspace.relay.reveal"
     },
@@ -11808,8 +12192,23 @@
     "POST /api/workspaces/:id/repos/:repositoryId/wiki/build": {
       "command": "wiki.repository.build"
     },
+    "POST /api/workspaces/:id/repos/:repositoryId/wiki/merge": {
+      "command": "wiki.repository.merge"
+    },
+    "POST /api/workspaces/:id/repos/:repositoryId/wiki/move": {
+      "command": "wiki.repository.mv"
+    },
+    "POST /api/workspaces/:id/repos/:repositoryId/wiki/outcome": {
+      "command": "wiki.repository.outcome"
+    },
     "POST /api/workspaces/:id/repos/:repositoryId/wiki/publish": {
       "command": "wiki.publish"
+    },
+    "POST /api/workspaces/:id/repos/:repositoryId/wiki/repair-log": {
+      "command": "wiki.repository.repair-log"
+    },
+    "POST /api/workspaces/:id/repos/:repositoryId/wiki/restore": {
+      "command": "wiki.repository.restore"
     },
     "POST /api/workspaces/:id/repos/inspect": {
       "command": "repo.inspect"
@@ -11927,9 +12326,6 @@
     "PUT /api/autopilots/:id/triggers/:triggerId/signing-secret": {
       "command": "autopilot.trigger.set-secret"
     },
-    "PUT /api/chat/sessions/:sessionId/issue-updates": {
-      "command": "chat.issue.updates.enable"
-    },
     "PUT /api/comments/:id": {
       "command": "comment.update"
     },
@@ -11942,6 +12338,12 @@
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "PUT /api/execution-groups/:id": {
+      "command": "runtime.group.update"
+    },
+    "PUT /api/execution-profiles/:id": {
+      "command": "runtime.profile.update"
     },
     "PUT /api/issues/:id": {
       "command": "issue.update"
@@ -12033,6 +12435,9 @@
     "PUT /api/workspaces/:id/feishu-bot/routes": {
       "command": "feishu.route.set"
     },
+    "PUT /api/workspaces/:id/feishu-bot/senders/:senderId": {
+      "command": "workspace.feishu-bot.sender.allow"
+    },
     "PUT /api/workspaces/:id/issue-archive": {
       "command": "workspace.issue-archive.update"
     },
@@ -12047,6 +12452,9 @@
     },
     "PUT /api/workspaces/:id/relay-config/:engine": {
       "command": "workspace.relay.update"
+    },
+    "PUT /api/workspaces/:id/relay-config/:engine/reasoning-levels": {
+      "command": "workspace.relay.reasoning-levels.update"
     },
     "PUT /api/workspaces/:id/relay-config/discovery": {
       "command": "workspace.relay.discovery"

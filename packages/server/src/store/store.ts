@@ -1,3 +1,8 @@
+import { createId } from "@multiremi/ids.js";
+import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
+import { ExecutionProfilesRepo } from "@multiremi/store/repos/execution-profiles-repo.js";
+import { getExecutionGroup, listExecutionGroups, saveExecutionGroup, deleteExecutionGroup } from "@multiremi/store/execution-groups.js";
+import type { RuntimeConnectionProfile } from "@multiremi/contracts/runtime-connection";
 import { type SqlDatabase, openMultiremiDatabase } from "@multiremi/store/db/postgres.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { daemonRuntimeId, isTerminalStatus } from "@multiremi/store/helpers.js";
@@ -6,6 +11,7 @@ import { FeedbackRepo } from "@multiremi/store/repos/feedback-repo.js";
 import { AccessTokensRepo } from "@multiremi/store/repos/access-tokens-repo.js";
 import { PasswordAccountsRepo, type ConfigurePasswordAccountInput } from "@multiremi/store/repos/password-accounts-repo.js";
 import { IssueSharesRepo } from "@multiremi/store/repos/issue-shares-repo.js";
+import { TaskCapabilityMonitor } from "@multiremi/store/task-capability-monitor.js";
 import {
   NotificationChannelsRepo,
   type CreateNotificationChannelInput,
@@ -115,7 +121,12 @@ import {
   type SshMeshBrowserOverview,
 } from "@multiremi/store/repos/ssh-mesh-repo.js";
 import type { SshMeshKeyMaterial } from "@multiremi/ssh-mesh/keys.js";
-import { TasksRepo, type ClaimTaskOptions } from "@multiremi/store/repos/tasks-repo.js";
+import {
+  TasksRepo,
+  type ClaimTaskOptions,
+  type TaskListCandidate,
+  type TaskListCursor,
+} from "@multiremi/store/repos/tasks-repo.js";
 import { OrganizerActionError, readOrganizerMode } from "../organizer/settings.js";
 import {
   AutopilotsRepo,
@@ -138,6 +149,7 @@ import {
 } from "@multiremi/store/repos/analytics-repo.js";
 import {
   WorkspacesRepo,
+  type GatewayModelReasoningDecl,
   type GatewayModelsSnapshot,
   type RelayConfigForBrowser,
   type RelayConfigForDaemon,
@@ -145,6 +157,7 @@ import {
 } from "@multiremi/store/repos/workspaces-repo.js";
 // The relay/gateway config types used to be declared here; keep the public surface unchanged.
 export type {
+  GatewayModelReasoningDecl,
   GatewayModelsSnapshot,
   RelayConfigForBrowser,
   RelayConfigForDaemon,
@@ -320,6 +333,7 @@ import type {
   MultiremiSessionEvent,
   MultiremiSessionParticipant,
   MultiremiSessionProjection,
+  MultiremiSessionInheritedContext,
   MultiremiSessionResult,
   MultiremiSystemEvent,
   MultiremiSquad,
@@ -442,6 +456,7 @@ export class MultiremiStore {
   private issueShares: IssueSharesRepo;
   private notificationChannels: NotificationChannelsRepo;
   private notificationDispatcher: OutboundNotificationDispatcher;
+  private taskCapabilityMonitor: TaskCapabilityMonitor;
   private agentIssueUpdates: AgentIssueUpdatesRepo;
   private cloudNodes: CloudRuntimeNodesRepo;
   private platformOperations: PlatformOperationsRepo;
@@ -482,6 +497,8 @@ export class MultiremiStore {
   private sessionArchives: SessionArchivesRepo;
   readonly runtimeWorkspaces: RuntimeWorkspacesRepo;
   private runtimes: RuntimesRepo;
+  private executionBindingStates: ExecutionBindingStatesRepo;
+  private executionProfiles: ExecutionProfilesRepo;
   private daemonProfiles: DaemonProfilesRepo;
   private runtimeProvisions: RuntimeProvisionsRepo;
   private daemonRetirement: DaemonRetirementRepo;
@@ -546,12 +563,15 @@ export class MultiremiStore {
     this.sessionArchives = new SessionArchivesRepo(this.ctx);
     this.runtimes = new RuntimesRepo(this.ctx);
     this.runtimeWorkspaces = new RuntimeWorkspacesRepo(this.ctx);
+    this.executionBindingStates = new ExecutionBindingStatesRepo(this.ctx);
+    this.executionProfiles = new ExecutionProfilesRepo(this.ctx);
     this.daemonProfiles = new DaemonProfilesRepo(this.ctx);
     this.runtimeProvisions = new RuntimeProvisionsRepo(this.ctx);
     this.daemonRetirement = new DaemonRetirementRepo(this.ctx);
     this.sshMesh = new SshMeshRepo(this.ctx);
     this.autopilots = new AutopilotsRepo(this.ctx);
     this.tasks = new TasksRepo(this.ctx);
+    this.taskCapabilityMonitor = new TaskCapabilityMonitor(now => this.tasks.refreshQueuedCapabilityWaitReasons(now));
     this.migrate();
   }
 
@@ -798,6 +818,133 @@ runMigrations(this.db);
     return this.sessionArchives.retry(id);
   }
 
+  getExecutionGroupMembers(id: string, workspaceId: string) {
+    const group = this.getExecutionGroup(id, workspaceId);
+    if (!group) return [];
+    return group.runtimeIds.map((runtimeId) => {
+      const row = this.db
+        .query(
+          "SELECT profile_id,profile_revision,status,error,generation FROM multiremi_execution_binding_states WHERE workspace_id=? AND group_id=? AND runtime_id=?",
+        )
+        .get(workspaceId, id, runtimeId) as {
+        profile_id: string | null;
+        profile_revision: number | null;
+        status: string;
+        error: string | null;
+        generation: string | null;
+      } | null;
+      const desired = this.getRuntimeExecutionBindings(runtimeId).find(
+        (binding) => binding.groupId === id,
+      );
+      const current =
+        row &&
+        row.profile_id === group.profileId &&
+        row.profile_revision === group.profileRevision &&
+        row.generation === desired?.generation;
+      return {
+        runtime_id: runtimeId,
+        status: !group.managed ? "ready" : current ? row.status : "pending",
+        error: current ? row.error : null,
+      };
+    });
+  }
+  executionBindingStatesRepo() {
+    return this.executionBindingStates;
+  }
+  getRuntimeExecutionBindings(runtimeId: string) {
+    return this.executionBindingStates.getRuntimeExecutionBindings(runtimeId);
+  }
+  recordRuntimeExecutionBindingAcks(runtimeId: string, input: unknown) {
+    return this.executionBindingStates.recordRuntimeExecutionBindingAcks(
+      runtimeId,
+      input,
+    );
+  }
+  isRuntimeExecutionBindingReady(
+    groupId: string,
+    runtimeId: string,
+    profileId: string | null,
+    revision: number | null,
+  ) {
+    return this.executionBindingStates.isRuntimeExecutionBindingReady(
+      groupId,
+      runtimeId,
+      profileId,
+      revision,
+    );
+  }
+  runtimeProfileModelEvidenceMatches(
+    runtimeId: string,
+    provider: string,
+    profile: import("@multiremi/contracts/runtime-connection.js").RuntimeConnectionProfile,
+  ) {
+    return this.runtimes.runtimeProfileModelEvidenceMatches(
+      runtimeId,
+      provider,
+      profile,
+    );
+  }
+  getAgentExecutionProfile(runtimeId: string | null, agent: MultiremiAgent) {
+    return this.runtimes.getAgentExecutionProfile(runtimeId, agent);
+  }
+  executionProfilesRepo() {
+    return this.executionProfiles;
+  }
+  listExecutionProfiles(workspaceId: string) {
+    return this.executionProfiles.list(workspaceId);
+  }
+  getExecutionProfile(id: string, workspaceId: string, revision?: number) {
+    return this.executionProfiles.get(id, workspaceId, revision);
+  }
+  getGroupExecutionProfile(id: string, workspaceId: string) {
+    return this.executionProfiles.getGroupExecutionProfile(id, workspaceId);
+  }
+  saveExecutionProfile(
+    workspaceId: string,
+    input: import("@multiremi/contracts/execution-profile.js").ExecutionProfileInput,
+    id?: string,
+  ) {
+    return this.executionProfiles.save(workspaceId, input, id);
+  }
+  deleteExecutionProfile(id: string, workspaceId: string) {
+    return this.executionProfiles.delete(id, workspaceId);
+  }
+  getExecutionProfileKey(
+    id: string,
+    workspaceId: string,
+    revision: number,
+    credentialId: string,
+  ) {
+    return this.executionProfiles.getKey(
+      id,
+      workspaceId,
+      revision,
+      credentialId,
+    );
+  }
+  saveExecutionGroup(
+    workspaceId: string,
+    input: import("@multiremi/contracts/execution-profile.js").ExecutionGroupInput,
+    id = createId("eg"),
+  ) {
+    return this.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      return saveExecutionGroup(this.db, workspaceId, id, input);
+    })();
+  }
+  deleteExecutionGroup(id: string, workspaceId: string) {
+    return this.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      return deleteExecutionGroup(this.db, id, workspaceId);
+    })();
+  }
+  listExecutionGroups(workspaceId: string) {
+    return listExecutionGroups(this.db, workspaceId);
+  }
+  getExecutionGroup(id: string, workspaceId = "local") {
+    return getExecutionGroup(this.db, id, workspaceId);
+  }
+
   createAgent(input: CreateAgentInput): MultiremiAgent {
     return this.agents.createAgent(input);
   }
@@ -1026,7 +1173,9 @@ runMigrations(this.db);
   }
 
   /** Internal cross-domain primitive; caller owns workspace lifecycle + Plugin locks. */
-  recordAgentPluginRuntimeHeartbeatWithinLock(runtimeId: string): MultiremiAgentPluginRuntimeState[] {
+  recordAgentPluginRuntimeHeartbeatWithinLock(
+    runtimeId: string,
+  ): { changes: MultiremiAgentPluginRuntimeState[]; revision: string } {
     return this.agentPlugins.recordAgentPluginRuntimeHeartbeatWithinLock(runtimeId);
   }
 
@@ -1357,9 +1506,29 @@ runMigrations(this.db);
   saveGatewayModels(
     workspaceId: string,
     engine: RelayEngine,
-    input: { models?: Array<{ id: string; label: string }>; sourceRevision: number; error?: string | null },
+    input: { models?: GatewayModelsSnapshot["models"]; sourceRevision: number; nativeCatalogStatus?: GatewayModelsSnapshot["nativeCatalogStatus"]; error?: string | null },
   ): void {
     return this.workspaces.saveGatewayModels(workspaceId, engine, input);
+  }
+
+  listGatewayModelReasoning(workspaceId: string, engine: RelayEngine): GatewayModelReasoningDecl[] {
+    return this.workspaces.listGatewayModelReasoning(workspaceId, engine);
+  }
+
+  getGatewayModelReasoning(workspaceId: string, engine: RelayEngine, modelId: string): GatewayModelReasoningDecl | null {
+    return this.workspaces.getGatewayModelReasoning(workspaceId, engine, modelId);
+  }
+
+  saveGatewayModelReasoning(
+    workspaceId: string,
+    engine: RelayEngine,
+    input: { modelId: string; levels: string[]; defaultLevel?: string | null; updatedBy?: string | null },
+  ): GatewayModelReasoningDecl | null {
+    return this.workspaces.saveGatewayModelReasoning(workspaceId, engine, input);
+  }
+
+  deleteGatewayModelReasoning(workspaceId: string, engine: RelayEngine, modelId: string): boolean {
+    return this.workspaces.deleteGatewayModelReasoning(workspaceId, engine, modelId);
   }
 
   createWorkspaceInvitation(workspaceId: string, input: CreateWorkspaceInvitationInput, inviterUserId?: string | null): MultiremiWorkspaceInvitation {
@@ -1560,10 +1729,12 @@ runMigrations(this.db);
 
   startNotificationDeliverySweeper(): void {
     this.notificationDispatcher.start();
+    this.taskCapabilityMonitor.start();
   }
 
   stopNotificationDeliverySweeper(): void {
     this.notificationDispatcher.stop();
+    this.taskCapabilityMonitor.stop();
   }
 
   createFeedback(input: CreateFeedbackInput): MultiremiFeedback {
@@ -1812,8 +1983,57 @@ runMigrations(this.db);
     return this.feishuBot.submitMessage(workspaceId, runtimeId, input);
   }
 
+  getFeishuIssueIdForChatSession(chatSessionId: string): string | null {
+    return this.feishuBot.getIssueIdForChatSession(chatSessionId);
+  }
+
+  isFeishuTransportChatSession(chatSessionId: string): boolean {
+    return this.feishuBot.isTransportChatSession(chatSessionId);
+  }
+
+  canFeishuBotDaemonAccessTask(workspaceId: string, daemonId: string, taskId: string): boolean {
+    return this.feishuBot.canDaemonAccessTask(workspaceId, daemonId, taskId);
+  }
+
+  assertFeishuBotInboundAttachmentScope(...args: Parameters<FeishuBotRepo["assertInboundAttachmentScope"]>) {
+    return this.feishuBot.assertInboundAttachmentScope(...args);
+  }
+
+  createFeishuBotInboundAttachment(...args: Parameters<FeishuBotRepo["createInboundAttachment"]>) {
+    return this.feishuBot.createInboundAttachment(...args);
+  }
+
+  sendChatAttachments(...args: Parameters<FeishuBotRepo["sendChatAttachments"]>) {
+    return this.feishuBot.sendChatAttachments(...args);
+  }
+
   getFeishuBotChatConversationKind(chatSessionId: string): "p2p" | "group" | null {
     return this.feishuBot.getChatConversationKind(chatSessionId);
+  }
+
+  listFeishuBotSenders(workspaceId: string) {
+    return this.feishuBot.listSenders(workspaceId);
+  }
+
+  listFeishuBotTaskReceiptMessageIds(workspaceId: string, taskId: string) {
+    return this.feishuBot.listTaskReceiptMessageIds(workspaceId, taskId);
+  }
+
+  listFeishuBotSenderProfileSources(workspaceId: string, before: string) {
+    return this.feishuBot.listSenderProfileSources(workspaceId, before);
+  }
+
+  updateFeishuBotSenderProfile(workspaceId: string, appId: string, senderId: string,
+    profile: { name: string; nameEn: string | null } | null, checkedAt: string): void {
+    this.feishuBot.updateSenderProfile(workspaceId, appId, senderId, profile, checkedAt);
+  }
+
+  setFeishuBotSenderAllowed(workspaceId: string, senderId: string, allowed: boolean, actorId?: string | null) {
+    return this.feishuBot.setSenderAllowed(workspaceId, senderId, allowed, actorId);
+  }
+
+  isFeishuBotTaskIssueCreationRestricted(taskId: string): boolean {
+    return this.feishuBot.isTaskIssueCreationRestricted(taskId);
   }
 
   prepareFeishuIssueTopicWithinTransaction(issue: MultiremiIssue): boolean {
@@ -1845,8 +2065,9 @@ runMigrations(this.db);
     now?: string | Date,
     supportsTaskStream = false,
     supportsNativeCot = false,
+    supportsAttachments = false,
   ): MultiremiFeishuBotOutboundDelivery | null {
-    return this.feishuBot.claimOutbound(workspaceId, runtimeId, now, supportsTaskStream, supportsNativeCot);
+    return this.feishuBot.claimOutbound(workspaceId, runtimeId, now, supportsTaskStream, supportsNativeCot, supportsAttachments);
   }
 
   getFeishuBotOutboundAttachment(
@@ -1896,8 +2117,9 @@ runMigrations(this.db);
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
-  ): string | null {
-    return this.feishuBot.cancelSessionTask(workspaceId, runtimeId, revision, externalSessionKey);
+    options: { chatId?: string | null; senderOpenId?: string | null; target?: string | null } = {},
+  ): import("@multiremi/contracts/types.js").FeishuBotCancelResult {
+    return this.feishuBot.cancelSessionTask(workspaceId, runtimeId, revision, externalSessionKey, options);
   }
 
   inspectFeishuBotSession(
@@ -2700,8 +2922,8 @@ runMigrations(this.db);
     return this.runtimes.listRuntimeModels(runtimeId);
   }
 
-  updateRuntimeModels(runtimeId: string, models: MultiremiRuntimeModel[]): MultiremiRuntimeModel[] {
-    return this.runtimes.updateRuntimeModels(runtimeId, models);
+  updateRuntimeModels(runtimeId: string, models: MultiremiRuntimeModel[], modelProfile?: RuntimeConnectionProfile | null): MultiremiRuntimeModel[] {
+    return this.runtimes.updateRuntimeModels(runtimeId, models, modelProfile);
   }
 
   createRuntimeModelListRequest(runtimeId: string): MultiremiRuntimeModelListRequest {
@@ -3091,7 +3313,11 @@ runMigrations(this.db);
   }
 
   updateIssue(id: string, input: UpdateIssueInput): MultiremiIssue {
-    return this.issues.updateIssue(id, input);
+    return this.updateIssueWithOutcome(id, input).issue;
+  }
+
+  updateIssueWithOutcome(id: string, input: UpdateIssueInput): { issue: MultiremiIssue; cancelledTasks: number } {
+    return this.issues.updateIssueWithOutcome(id, input);
   }
 
   restoreIssue(id: string): MultiremiIssue {
@@ -3450,6 +3676,10 @@ runMigrations(this.db);
     return this.sessions.getIssueSession(id);
   }
 
+  getSessionInheritedContext(sessionId: string): MultiremiSessionInheritedContext | null {
+    return this.sessions.getSessionInheritedContext(sessionId);
+  }
+
   listIssueSessions(issueId: string, includeArchived = false): MultiremiIssueSession[] {
     return this.sessions.listIssueSessions(issueId, includeArchived);
   }
@@ -3511,6 +3741,9 @@ runMigrations(this.db);
 
   buildTaskSessionProjection(taskId: string): MultiremiSessionProjection | null {
     const task = this.tasks.getTask(taskId);
+    if (task?.chatSessionId && !this.feishuBot.getIssueIdForChatSession(task.chatSessionId)) {
+      return this.chat.buildTaskSessionProjection(taskId);
+    }
     if (task?.issueSessionId) return this.sessions.buildTaskSessionProjection(taskId);
     if (task?.chatSessionId) return this.chat.buildTaskSessionProjection(taskId);
     return null;
@@ -3804,6 +4037,18 @@ runMigrations(this.db);
     deduplicated: boolean;
   } {
     return this.knowledge.createSubmission(input);
+  }
+
+  reportRepositoryWikiOutcome(input: import("./repos/knowledge-repo.js").ReportRepositoryWikiOutcomeInput) {
+    return this.knowledge.reportRepositoryOutcome(input);
+  }
+
+  repositoryWikiTaskOutcome(workspaceId: string, repositoryId: string, taskId: string) {
+    return this.knowledge.repositoryTaskOutcome(workspaceId, repositoryId, taskId);
+  }
+
+  repositoryWikiObservability(workspaceId: string) {
+    return this.knowledge.repositoryObservability(workspaceId);
   }
 
   getKnowledgeSubmission(id: string): MultiremiKnowledgeSubmission | null {
@@ -4143,13 +4388,6 @@ runMigrations(this.db);
     return this.chat.getChatSession(id);
   }
 
-  bindChatSessionIssueIfUnbound(chatSessionId: string, issueId: string): {
-    session: MultiremiChatSession;
-    bound: boolean;
-  } {
-    return this.chat.bindChatSessionIssueIfUnbound(chatSessionId, issueId);
-  }
-
   updateChatSession(id: string, input: UpdateChatSessionInput): MultiremiChatSession {
     return this.chat.updateChatSession(id, input);
   }
@@ -4188,6 +4426,10 @@ runMigrations(this.db);
 
   listChatMessages(chatSessionId: string): MultiremiChatMessage[] {
     return this.chat.listChatMessages(chatSessionId);
+  }
+
+  listChatMessagesPage(chatSessionId: string, options: Parameters<ChatRepo["listChatMessagesPage"]>[1]) {
+    return this.chat.listChatMessagesPage(chatSessionId, options);
   }
 
   sendChatMessage(chatSessionId: string, input: SendChatMessageInput): SendChatMessageResult {
@@ -4263,6 +4505,18 @@ runMigrations(this.db);
     return this.runtimes.runtimeCanRunAgent(runtime, agent);
   }
 
+  runtimeCanRouteAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
+    return this.runtimes.runtimeCanRouteAgent(runtime, agent);
+  }
+
+  runtimeSupportsAgentModel(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
+    return this.runtimes.runtimeSupportsAgentModel(runtime, agent);
+  }
+
+  refreshQueuedCapabilityWaitReasons(now = Date.now()): { updated: number; alerted: number } {
+    return this.tasks.refreshQueuedCapabilityWaitReasons(now);
+  }
+
   getRuntimeByDaemonAndProvider(daemonId: string, provider: string): MultiremiRuntime | null {
     return this.runtimes.getRuntimeByDaemonAndProvider(daemonId, provider);
   }
@@ -4275,6 +4529,10 @@ runMigrations(this.db);
     return this.tasks.getTaskByRef(ref, input);
   }
 
+  getTaskChatExecutionKind(task: MultiremiTask): "ordinary" | "topic" {
+    return this.tasks.getTaskChatExecutionKind(task);
+  }
+
   getTaskWithAgent(id: string): MultiremiTaskWithAgent | null {
     return this.tasks.getTaskWithAgent(id);
   }
@@ -4285,6 +4543,18 @@ runMigrations(this.db);
 
   listTasks(status?: MultiremiTaskStatus): MultiremiTask[] {
     return this.tasks.listTasks(status);
+  }
+
+  listTasksChunk(
+    status: MultiremiTaskStatus | undefined,
+    cursor: TaskListCursor | null,
+    chunkSize: number,
+  ): { tasks: TaskListCandidate[]; nextCursor: TaskListCursor | null } {
+    return this.tasks.listTasksChunk(status, cursor, chunkSize);
+  }
+
+  hydrateTasksByIds(ids: readonly string[]): MultiremiTask[] {
+    return this.tasks.hydrateTasksByIds(ids);
   }
 
   listAgentTasks(agentId: string): MultiremiTask[] {

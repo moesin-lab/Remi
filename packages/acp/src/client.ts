@@ -7,6 +7,7 @@ const _log = { info: (...a: unknown[]) => console.log("[acp-client]", ...a), war
 function createLogger(_: string) { return _log; }
 
 import { resolveAcpProcessLaunch } from "./launch.js";
+import { isolateProcessTmp, mapPrivateTmpPath } from "./private-tmp.js";
 
 import type {
   JsonRpcRequest,
@@ -15,6 +16,7 @@ import type {
   JsonRpcMessage,
   InitializeParams,
   InitializeResult,
+  AuthenticateParams,
   NewSessionParams,
   NewSessionResult,
   PromptParams,
@@ -26,6 +28,7 @@ import type {
   ElicitationCreateParams,
   ElicitationResult,
   SetSessionModeParams,
+  SetSessionModelParams,
   SetSessionConfigOptionParams,
   SetSessionConfigOptionResult,
   CancelParams,
@@ -48,6 +51,8 @@ export interface AcpClientOptions {
   agentType?: string;
   /** Working directory for the agent process. */
   cwd?: string;
+  /** Daemon-owned directory mounted as this task execution's literal /tmp. */
+  privateTmpDirectory?: string;
   /** Additional MCP servers to configure. */
   mcpServers?: McpServerConfig[];
   /** Environment variables for the agent process. */
@@ -135,7 +140,11 @@ export class AcpClient {
 
     this._log("spawning", executable, "cwd:", cwd);
 
-    const launch = resolveAcpProcessLaunch(executable, this._options.args ?? []);
+    const launch = isolateProcessTmp(
+      resolveAcpProcessLaunch(executable, this._options.args ?? []),
+      this._options.privateTmpDirectory,
+      env,
+    );
     this._process = Bun.spawn([launch.executable, ...launch.args], {
       stdin: "pipe",
       stdout: "pipe",
@@ -457,7 +466,7 @@ export class AcpClient {
         // `line` is 1-based and `limit` caps the returned line count
         // (sdk schema.json ReadTextFileRequest); both are optional.
         const { path, line, limit } = msg.params as { path: string; line?: number | null; limit?: number | null };
-        let content = readFileSync(path, "utf-8");
+        let content = readFileSync(mapPrivateTmpPath(path, this._options.privateTmpDirectory), "utf-8");
         if (line != null || limit != null) {
           const start = line != null && line > 0 ? line - 1 : 0;
           const lines = content.split("\n");
@@ -466,7 +475,7 @@ export class AcpClient {
         this._respond(msg.id, { content });
       } else if (msg.method === "fs/write_text_file") {
         const { path, content } = msg.params as { path: string; content: string };
-        writeFileSync(path, content, "utf-8");
+        writeFileSync(mapPrivateTmpPath(path, this._options.privateTmpDirectory), content, "utf-8");
         this._respond(msg.id, {});
       }
     } catch (err: any) {
@@ -480,7 +489,7 @@ export class AcpClient {
 
   // ── ACP protocol methods ───────────────────────────────────────
 
-  async initialize(): Promise<InitializeResult> {
+  async initialize(meta?: Record<string, unknown>): Promise<InitializeResult> {
     const params: InitializeParams = {
       protocolVersion: 1,
       clientInfo: { name: "remi", version: "0.1.0" },
@@ -488,11 +497,13 @@ export class AcpClient {
         // `subagent-transcript` opts into subagent prose: claude-agent-acp >= 0.66
         // strips a subagent's text/thinking chunks unless the client declares it
         // (the bridge checks `capabilities?._meta?.["subagent-transcript"] === true`).
-        // codex-acp reads exactly one client `_meta` key — `terminal_output`
-        // (dist/index.js:22754-22760) — so the claude-only key is left out there.
+        // Codex's recommendedValue extension distinguishes model defaults from
+        // a session's current effort, which can survive a model switch.
         _meta: {
           terminal_output: true,
-          ...(this._options.agentType === "codex" ? {} : { "subagent-transcript": true }),
+          ...(this._options.agentType === "codex"
+            ? { jetbrains: { air: { version: 1, capabilities: ["recommendedValue"] } } }
+            : { "subagent-transcript": true }),
         },
         fs: { readTextFile: true, writeTextFile: true },
         // Form-elicitation support: the agent keeps AskUserQuestion enabled and
@@ -501,12 +512,18 @@ export class AcpClient {
         // drops a boolean here.
         elicitation: { form: {} },
       },
+      ...(meta ? { _meta: meta } : {}),
     };
 
     const result = await this._request<InitializeResult>("initialize", params);
     this._initialized = true;
     this._initializeResult = result;
     return result;
+  }
+
+  async authenticate(methodId: string, meta?: Record<string, unknown>): Promise<void> {
+    const params: AuthenticateParams = { methodId, ...(meta ? { _meta: meta } : {}) };
+    await this._request("authenticate", params);
   }
 
   async newSession(params?: Partial<NewSessionParams>): Promise<NewSessionResult> {
@@ -538,6 +555,11 @@ export class AcpClient {
   async setMode(sessionId: string, modeId: string): Promise<void> {
     const params: SetSessionModeParams = { sessionId, modeId };
     await this._request("session/set_mode", params);
+  }
+
+  async setModel(sessionId: string, modelId: string, meta?: Record<string, unknown>): Promise<void> {
+    const params: SetSessionModelParams = { sessionId, modelId, ...(meta ? { _meta: meta } : {}) };
+    await this._request("session/set_model", params);
   }
 
   /**

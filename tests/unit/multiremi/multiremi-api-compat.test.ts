@@ -19,8 +19,8 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
     });
     const firstAgent = store.createAgent({ name: "Builder", provider: "claude" });
     const issue = store.createIssue({ title: "Queue source", workspaceId: "local" });
-    const chat = store.createChatSession({ agentId: firstAgent.id, issueId: issue.id });
-    const firstSession = store.createSession(chat.id, { title: "Implementation" });
+    const chat = store.createChatSession({ agentId: firstAgent.id });
+    const firstSession = store.createIssueSession(issue.id, { chatId: chat.id, title: "Implementation" });
     const first = store.createTask({
       agentId: firstAgent.id,
       issueId: issue.id,
@@ -738,6 +738,7 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
     );
     store.createWorkspaceMember({
       id: "external-admin",
+      userId: "external-admin",
       workspaceId: "ws_external_invite",
       name: "External Admin",
       email: "external-admin@example.com",
@@ -820,6 +821,7 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
     const owner = store.getWorkspaceMember(`mem_${workspace.id}_local`)!;
     store.createWorkspaceMember({
       id: "guard-admin",
+      userId: "guard-admin",
       workspaceId: workspace.id,
       name: "Guard Admin",
       email: "guard-admin@example.com",
@@ -827,6 +829,7 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
     });
     const plain = store.createWorkspaceMember({
       id: "guard-member",
+      userId: "guard-member",
       workspaceId: workspace.id,
       name: "Guard Member",
       email: "guard-member@example.com",
@@ -1019,6 +1022,27 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
     }]);
     const runtime = store.registerRuntime({ name: "Codex Runtime", provider: "codex", workspaceId: "local" });
     const app = createMultiremiApp({ store });
+
+    // An upstream daemon build predates Agent Plugins entirely: it sends no
+    // `agent_plugin_protocol`, so the ack must stay byte-compatible with the
+    // shape it has always received. `agent_plugins` is additive and only ever
+    // appears for a daemon that asked for the Plugin protocol.
+    const legacyHeartbeat = await app.request("/api/daemon/heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runtime_id: runtime.id }),
+    });
+    expect(legacyHeartbeat.status).toBe(200);
+    const legacyHeartbeatBody = await legacyHeartbeat.json();
+    expect(legacyHeartbeatBody.agent_plugins).toBeUndefined();
+    expect(Object.keys(legacyHeartbeatBody).sort()).toEqual([
+      "claude_profile",
+      "codex_profile",
+      "drain",
+      "relay",
+      "status",
+      "workspace_settings",
+    ]);
 
     expect((await app.request("/readyz")).status).toBe(200);
     expect((await app.request("/healthz")).status).toBe(200);
@@ -1292,13 +1316,15 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
     })).status).toBe(201);
 
     store.updateAgent(agent.id, { runtimeId: runtime.id });
+    // Selecting a target cancels the waiting task's already-frozen execution before the cascade.
+    expect(store.getTask(task.id)?.status).toBe("cancelled");
     const cascade = await app.request(`/api/runtimes/${runtime.id}/archive-agents-and-delete`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ expected_active_agent_ids: [agent.id] }),
     });
     const cascadeBody = await cascade.json();
-    expect(cascadeBody).toEqual({ status: "ok", agents_archived: 1, tasks_cancelled: 3 });
+    expect(cascadeBody).toEqual({ status: "ok", agents_archived: 1, tasks_cancelled: 2 });
     expect(store.getRuntime(runtime.id)).toBeNull();
     expect(store.getAgent(agent.id)).toMatchObject({ runtimeId: null });
     expect(store.getAgent(agent.id)?.archivedAt).not.toBeNull();

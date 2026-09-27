@@ -79,6 +79,25 @@ export function operationsCommandSpecs(): CommandSpec[] {
   ];
 }
 
+function executionConfigurationSpecs(): CommandSpec[] {
+  return ([
+    { resource: "profile", endpoint: "execution-profiles", collection: "profiles" },
+    { resource: "group", endpoint: "execution-groups", collection: "groups" },
+  ] as const).flatMap(({ resource, endpoint, collection }) => {
+    const root = `/api/${endpoint}`;
+    const item = (i: CommandInvocation) => `${root}/${encodePath(positional(i, 0, resource))}`;
+    const scope = (i: CommandInvocation) => queryOptions(i, { workspace_id: requiredWorkspace(i) });
+
+    return [
+      ...(resource === "profile" ? [op({ id: "runtime.profile.list", path: ["runtime", "profile", "list"], description: "List reusable workspace connection profiles", method: "GET", apiPath: root, auth: HUMAN, query: scope, collections: [collection] })] : []),
+      op({ id: `runtime.${resource}.get`, path: ["runtime", resource, "get"], description: `Get a workspace execution ${resource}`, method: "GET", apiPath: item, auth: HUMAN, positionals: [ref(resource)], query: scope }),
+      op({ id: `runtime.${resource}.create`, path: ["runtime", resource, "create"], description: `Create a workspace execution ${resource} from JSON`, method: "POST", apiPath: root, mutation: "write", auth: HUMAN, options: INPUT_OPTIONS, query: scope, body: withWorkspace }),
+      op({ id: `runtime.${resource}.update`, path: ["runtime", resource, "update"], description: `Replace a workspace execution ${resource} configuration from JSON`, method: "PUT", apiPath: item, mutation: "write", auth: HUMAN, positionals: [ref(resource)], options: INPUT_OPTIONS, query: scope, body: withWorkspace }),
+      op({ id: `runtime.${resource}.delete`, path: ["runtime", resource, "delete"], description: `Delete an unused workspace execution ${resource}`, method: "DELETE", apiPath: item, mutation: "destructive", auth: HUMAN, positionals: [ref(resource)], query: scope }),
+    ];
+  });
+}
+
 function runtimeSpecs(): CommandSpec[] {
   const runtime = (suffix: string) => async (invocation: CommandInvocation, client: CliApiClient) => {
     const id = await resolveRuntimeId(client, invocation, positional(invocation, 0, "runtime"));
@@ -86,6 +105,8 @@ function runtimeSpecs(): CommandSpec[] {
   };
   return [
     group("runtime", "Manage execution runtimes and cloud nodes"),
+    op({ id: "runtime.group.list", path: ["runtime", "group", "list"], description: "List execution groups", method: "GET", apiPath: "/api/execution-groups", auth: HUMAN, query: (i) => queryOptions(i, { workspace_id: requiredWorkspace(i) }), collections: ["groups"] }),
+    ...executionConfigurationSpecs(),
     op({ id: "runtime.codex-profile.get", path: ["runtime", "codex-profile", "get"], description: "Get a Runtime's custom Codex connection", method: "GET", apiPath: runtime("/codex-profile"), auth: HUMAN_DAEMON, positionals: [ref("runtime")] }),
     op({ id: "runtime.codex-profile.set", path: ["runtime", "codex-profile", "set"], description: "Set a Codex connection with --file; profile: null restores the workspace gateway", method: "PUT", apiPath: runtime("/codex-profile"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
     op({ id: "runtime.claude-profile.get", path: ["runtime", "claude-profile", "get"], description: "Get a Runtime's custom Claude Code connection", method: "GET", apiPath: runtime("/claude-profile"), auth: HUMAN_DAEMON, positionals: [ref("runtime")] }),
@@ -116,7 +137,7 @@ function runtimeSpecs(): CommandSpec[] {
     op({ id: "runtime.list", path: ["runtime", "list"], description: "List runtimes", method: "GET", apiPath: "/api/runtimes", auth: HUMAN_DAEMON, collections: ["runtimes"] }),
     op({ id: "runtime.get", path: ["runtime", "get"], description: "Get a runtime", method: "GET", apiPath: runtime(""), auth: HUMAN_DAEMON, positionals: [ref("runtime")] }),
     op({ id: "runtime.create", path: ["runtime", "create"], description: "Register a runtime", method: "POST", apiPath: "/api/multiremi/runtimes", auth: HUMAN_DAEMON, options: INPUT_OPTIONS, body: withWorkspace }),
-    op({ id: "runtime.update", path: ["runtime", "update"], description: "Update a runtime", method: "PATCH", apiPath: runtime(""), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
+    op({ id: "runtime.update", path: ["runtime", "update"], description: "Update a runtime", method: "PATCH", apiPath: runtime(""), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: [...INPUT_OPTIONS, { name: "execution-group", type: "string", valueName: "group-id", description: "Assign this Runtime to an execution group" }], body: (i) => requestBody(i, { execution_group_id: stringOption(i, "execution-group") ?? undefined }) }),
     op({ id: "runtime.delete", path: ["runtime", "delete"], description: "Delete a runtime after reporting active impact", method: "DELETE", apiPath: runtime(""), mutation: "destructive", auth: HUMAN, positionals: [ref("runtime")], before: runtimeImpact }),
     op({ id: "runtime.archive-agents-and-delete", path: ["runtime", "archive-agents-and-delete"], description: "Archive active agents and delete a runtime", method: "POST", apiPath: runtime("/archive-agents-and-delete"), mutation: "destructive", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS, before: runtimeImpact }),
     op({ id: "runtime.model.list", path: ["runtime", "model", "list"], description: "List runtime models", method: "GET", apiPath: runtime("/models"), auth: HUMAN_DAEMON, positionals: [ref("runtime")], collections: ["models"] }),
@@ -152,7 +173,7 @@ function runtimeSpecs(): CommandSpec[] {
       ["runtime.task-activity", ["runtime", "task-activity"], "/task-activity", "Get runtime task activity"],
       ["runtime.activity", ["runtime", "activity"], "/activity", "Get runtime activity"],
     ].map(([id, path, suffix, description]) => op({ id: id as string, path: path as string[], description: description as string, method: "GET", apiPath: runtime(suffix as string), auth: HUMAN_DAEMON, positionals: [ref("runtime")] })),
-    op({ id: "runtime.model.catalog", path: ["runtime", "model", "catalog"], description: "List fleet model providers", method: "GET", apiPath: "/api/models", auth: HUMAN, collections: ["providers"] }),
+    op({ id: "runtime.model.catalog", path: ["runtime", "model", "catalog"], description: "List model execution availability, catalog loading status, reasoning levels and defaults for the fleet or an agent", method: "GET", apiPath: "/api/models", auth: HUMAN, options: [{ name: "agent", type: "string", valueName: "agent-id", description: "Use the agent execution target and connection" }, { name: "runtime", type: "string", valueName: "runtime-id", description: "Filter by legacy Runtime target", conflictsWith: ["execution-group"] }, { name: "execution-group", type: "string", valueName: "group-id", description: "Filter by execution group", conflictsWith: ["runtime"] }], query: (i) => queryOptions(i, { agent_id: stringOption(i, "agent"), runtime_id: stringOption(i, "runtime"), execution_group_id: stringOption(i, "execution-group") }), collections: ["providers"] }),
     op({ id: "runtime.cloud.status", path: ["runtime", "cloud", "status"], description: "Get cloud runtime status", method: "GET", apiPath: "/api/cloud-runtime", auth: HUMAN }),
     op({ id: "runtime.cloud.health", path: ["runtime", "cloud", "health"], description: "Check cloud runtime health", method: "GET", apiPath: "/api/cloud-runtime/healthz", auth: HUMAN }),
     op({ id: "runtime.cloud.ready", path: ["runtime", "cloud", "ready"], description: "Check cloud runtime readiness", method: "GET", apiPath: "/api/cloud-runtime/readyz", auth: HUMAN }),

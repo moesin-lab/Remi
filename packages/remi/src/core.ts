@@ -278,7 +278,7 @@ export class Remi {
   private static _buildProvider(agent: MultiremiAgent, runtimeEnv: Record<string, string> = {}) {
     const rawType = agent.provider;
     const type = rawType.startsWith("acp:") ? rawType.slice("acp:".length) : rawType;
-    if (!["claude", "codex", "antigravity"].includes(type)) {
+    if (!["claude", "codex", "grok", "antigravity"].includes(type)) {
       throw new Error(`Unknown runtime provider: ${rawType}`);
     }
     return createRuntimeProvider({

@@ -25,7 +25,6 @@ import type {
   MultiremiAttachment,
   MultiremiChatSession,
   MultiremiRuntime,
-  MultiremiTask,
   MultiremiWorkspaceMember,
 } from "@multiremi/contracts/types.js";
 
@@ -365,7 +364,7 @@ export function compatibilityInboxScope(
     ?? store.listWorkspaceMembers(workspaceId).find((candidate) => candidate.userId === raw)
     ?? exact;
   if (member && (member.workspaceId !== workspaceId
-    || (userId && member.userId !== userId && member.id !== userId))) {
+    || (userId && member.userId !== userId))) {
     return c.json({ error: "inbox not found" }, 404);
   }
   if (userId && !member) return c.json({ error: "inbox not found" }, 404);
@@ -414,14 +413,88 @@ export function canUserAccessAgentByUserId(store: MultiremiStore, userId: string
 // tasks are creator-only, and a private agent's task is owner/admin-only.
 // Workspace membership itself is enforced by the caller (registry keying /
 // route guard). userId null = no-identity admin path.
-export function canUserViewTaskMessages(store: MultiremiStore, userId: string | null, task: MultiremiTask): boolean {
+/**
+ * MUL-357: request-scoped memo for the task-visibility guards. A list request
+ * checks one workspace/session/agent set per candidate task, so without this
+ * the same rows are re-read once per task (N+1).
+ *
+ * It caches query *results* only — never a decision. It must be created inside
+ * a single request and dropped with it: a process-level cache would let one
+ * caller's visibility answer apply to another's.
+ */
+/**
+ * MUL-357: the fields a task-visibility decision is allowed to read. Declared
+ * structurally so the list route can pass the narrow candidate projection from
+ * `store.listTasksChunk` (id / workspace / chat session / agent) instead of
+ * hydrating a whole task row -- including its result and prompt -- only to
+ * reject it. `MultiremiTask` satisfies this shape.
+ */
+export interface TaskVisibilitySubject {
+  id: string;
+  workspaceId: string;
+  chatSessionId: string | null;
+  agentId: string;
+}
+
+export interface TaskAuthMemo {
+  workspaceAccess: Map<string, boolean>;
+  chatSessions: Map<string, MultiremiChatSession | null>;
+  agents: Map<string, MultiremiAgent | null>;
+}
+
+export function createTaskAuthMemo(): TaskAuthMemo {
+  return { workspaceAccess: new Map(), chatSessions: new Map(), agents: new Map() };
+}
+
+function memoizedChatSession(
+  store: MultiremiStore,
+  memo: TaskAuthMemo | undefined,
+  sessionId: string,
+): MultiremiChatSession | null {
+  if (!memo) return store.getChatSession(sessionId);
+  if (!memo.chatSessions.has(sessionId)) memo.chatSessions.set(sessionId, store.getChatSession(sessionId));
+  return memo.chatSessions.get(sessionId) ?? null;
+}
+
+function memoizedAgent(
+  store: MultiremiStore,
+  memo: TaskAuthMemo | undefined,
+  agentId: string,
+): MultiremiAgent | null {
+  if (!memo) return store.getAgent(agentId);
+  if (!memo.agents.has(agentId)) memo.agents.set(agentId, store.getAgent(agentId));
+  return memo.agents.get(agentId) ?? null;
+}
+
+/** `denyCurrentUserWorkspaceAccess` as a boolean, memoized per workspace. */
+export function currentUserWorkspaceAccessAllowed(
+  c: Context,
+  store: MultiremiStore,
+  memo: TaskAuthMemo | undefined,
+  workspaceId: string,
+): boolean {
+  if (memo) {
+    const cached = memo.workspaceAccess.get(workspaceId);
+    if (cached !== undefined) return cached;
+  }
+  const allowed = denyCurrentUserWorkspaceAccess(c, store, workspaceId) == null;
+  memo?.workspaceAccess.set(workspaceId, allowed);
+  return allowed;
+}
+
+export function canUserViewTaskMessages(
+  store: MultiremiStore,
+  userId: string | null,
+  task: TaskVisibilitySubject,
+  memo?: TaskAuthMemo,
+): boolean {
   if (task.chatSessionId) {
-    const session = store.getChatSession(task.chatSessionId);
+    const session = memoizedChatSession(store, memo, task.chatSessionId);
     if (!session) return false;
     if (userId == null) return true;
     return session.creatorId === userId;
   }
-  const agent = task.agentId ? store.getAgent(task.agentId) : null;
+  const agent = task.agentId ? memoizedAgent(store, memo, task.agentId) : null;
   if (!agent) return true;
   return canUserAccessAgentByUserId(store, userId, agent);
 }
@@ -429,15 +502,20 @@ export function canUserViewTaskMessages(store: MultiremiStore, userId: string | 
 // Chat task metadata and controls carry the same creator boundary as its
 // transcript. A task capability may access its own live Chat task even when
 // it was minted for a shared Runtime owner rather than the Chat creator.
-export function canCurrentUserAccessChatTask(c: Context, store: MultiremiStore, task: MultiremiTask): boolean {
+export function canCurrentUserAccessChatTask(
+  c: Context,
+  store: MultiremiStore,
+  task: TaskVisibilitySubject,
+  memo?: TaskAuthMemo,
+): boolean {
   if (!task.chatSessionId) return true;
-  if (denyCurrentUserWorkspaceAccess(c, store, task.workspaceId)) return false;
-  const session = store.getChatSession(task.chatSessionId);
+  if (!currentUserWorkspaceAccessAllowed(c, store, memo, task.workspaceId)) return false;
+  const session = memoizedChatSession(store, memo, task.chatSessionId);
   if (!session) return false;
   const token = currentAccessToken(c);
   if (token?.type === "task") return token.taskId === task.id
     && token.agentId === task.agentId && token.workspaceId === task.workspaceId;
-  return canUserViewTaskMessages(store, currentRequestUserId(c), task);
+  return canUserViewTaskMessages(store, currentRequestUserId(c), task, memo);
 }
 
 export function currentWorkspaceRole(c: Context, store: MultiremiStore, workspaceId: string): string {
@@ -575,7 +653,22 @@ export function canCurrentUserAccessChatSessionAgent(
 // comment, and free-standing attachments are scoped to the attachment workspace.
 // Returns a denial Response when access is forbidden, or null when allowed.
 export function denyAttachmentAccess(c: Context, store: MultiremiStore, attachment: MultiremiAttachment): Response | null {
+  // Inbound files are private staging objects until submit atomically links them
+  // to their Chat. Workspace membership must not expose an unlinked private file.
+  if (attachment.uploaderType === "daemon" && !attachment.chatSessionId
+    && !attachment.issueId && !attachment.commentId) return c.json({ error: "attachment not available" }, 404);
   if (attachment.chatSessionId) {
+    const token = currentAccessToken(c);
+    if (token?.type === "task") {
+      const task = token.taskId ? store.getTask(token.taskId) : null;
+      // Grant file reads only to the Task's exact Chat. Owner identity alone
+      // would either deny Feishu chats or expose unrelated private sessions.
+      if ((c.req.method === "GET" || c.req.method === "HEAD")
+        && task?.chatSessionId === attachment.chatSessionId
+        && task.workspaceId === attachment.workspaceId
+        && token.workspaceId === attachment.workspaceId) return null;
+      return c.json({ error: "attachment not available" }, 404);
+    }
     const loaded = loadChatSessionForCurrentUser(c, store, attachment.chatSessionId, { requireAgentAccess: false });
     return loaded instanceof Response ? loaded : null;
   }
@@ -634,6 +727,14 @@ export function isDaemonGcCheckRequest(c: Context): boolean {
 export function isFeishuBotOutboundAttachmentRequest(c: Context): boolean {
   return /^\/api\/daemon\/runtimes\/[^/]+\/feishu-bot\/outbound\/[^/]+\/attachments\/[^/]+$/
     .test(new URL(c.req.url).pathname);
+}
+
+/** Reads the bot host needs to present a Task, plus answering its requests.
+ * Creating or expiring a human request stays with the executing daemon. */
+function isFeishuBotTaskTransportRequest(c: Context): boolean {
+  const path = new URL(c.req.url).pathname;
+  return (c.req.method === "GET" && /^\/api\/daemon\/tasks\/[^/]+\/(?:status|messages|human-requests\/[^/]+)$/.test(path))
+    || (c.req.method === "POST" && /^\/api\/daemon\/tasks\/[^/]+\/human-requests\/[^/]+\/respond$/.test(path));
 }
 
 export function denyDaemonTokenWorkspace(c: Context, workspaceId?: string | null, options: DaemonWorkspaceDenyOptions = {}): Response | null {
@@ -752,6 +853,10 @@ export function denyDaemonTokenTaskRuntimeIdentity(
   }
   const tokenDaemonId = cleanString(token.daemonId);
   const runtimeDaemonId = cleanString(runtime?.daemonId);
+  // Only transport read/answer routes qualify. Task execution mutations must
+  // still belong to the claiming Runtime's daemon, even for the bot host.
+  if (isFeishuBotTaskTransportRequest(c) && tokenDaemonId
+    && store.canFeishuBotDaemonAccessTask(task.workspaceId, tokenDaemonId, task.id)) return null;
   if (!tokenDaemonId || !runtimeDaemonId || tokenDaemonId !== runtimeDaemonId) {
     if (options.hideForbiddenAsNotFound) return c.json({ error: "task not found" }, 404);
     return c.json({ error: "forbidden for daemon identity", code: "daemon_identity_forbidden" }, 403);

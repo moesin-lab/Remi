@@ -35,8 +35,9 @@ vi.mock("@tanstack/react-query", () => ({
 }));
 
 vi.mock("@multiremi/core/hooks", () => ({ useWorkspaceId: () => "ws-1" }));
-vi.mock("@multiremi/core/runtimes", () => ({
-  useFleetProviderModels: () => ({
+vi.mock("@multiremi/core/runtimes", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@multiremi/core/runtimes")>(),
+  useExecutionTargetModels: () => ({
     models: modelCatalogRef.current,
     onlineRuntimeCount: 1,
     isLoading: false,
@@ -70,17 +71,23 @@ vi.mock("../../common/actor-avatar", () => ({
 vi.mock("./inspector/concurrency-picker", () => ({
   ConcurrencyPicker: () => <span>concurrency-picker</span>,
 }));
-vi.mock("./inspector/engine-picker", () => ({
-  EnginePicker: () => <span>engine-picker</span>,
+vi.mock("./execution-target-select", () => ({
+  ExecutionTargetSelect: ({ onChange }: { onChange: (target: { executionGroupId: string; provider: string }) => void }) => (
+    <>{["claude", "codex"].map((provider) => <button key={provider} onClick={() => onChange({ executionGroupId: `group-${provider}`, provider })}>{provider}</button>)}</>
+  ),
 }));
+
+
 vi.mock("./inspector/model-picker", () => ({
   ModelPicker: ({
     onChange,
+    fallback,
   }: {
     onChange: (value: string) => Promise<void> | void;
+    fallback?: boolean;
   }) => (
     <button type="button" onClick={() => void onChange("claude-opus")}>
-      switch-model
+      {fallback ? "switch-fallback" : "switch-model"}
     </button>
   ),
 }));
@@ -177,6 +184,18 @@ afterEach(() => {
 });
 
 describe("AgentDetailInspector skills section", () => {
+  it("updates the machine and Runtime type atomically and clears old model options", () => {
+    const { onUpdate } = renderInspector(makeAgent({ runtime_id: "other-codex", provider: "codex", model: "old-model", thinking_level: "high" }));
+    fireEvent.click(screen.getByRole("button", { name: "codex" }));
+    expect(onUpdate).toHaveBeenCalledWith("agent-1", { execution_group_id: "group-codex", provider: "codex", model: "", thinking_level: "", fallback_model: "", fallback_thinking_level: "" });
+  });
+
+  it("updates the fallback without mutating the primary selection", () => {
+    const { onUpdate } = renderInspector(makeAgent({ fallback_model: "" }));
+    fireEvent.click(screen.getByRole("button", { name: "switch-fallback" }));
+    expect(onUpdate).toHaveBeenCalledWith("agent-1", { fallback_model: "claude-opus" });
+  });
+
   it("explains the empty state instead of leaving a bare header", () => {
     renderInspector(makeAgent({ skills: [] }));
     expect(screen.getByText("No skills attached yet.")).toBeInTheDocument();

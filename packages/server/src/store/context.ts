@@ -8,6 +8,8 @@
 // the MultiremiStore facade, which delegates on to the owning repo. Repo methods the facade does not
 // expose publicly (today: the analytics recorders) are instead registered on this object by the
 // facade's constructor and resolved at call time.
+import { selectChatLocalDirectory } from "@multiremi/contracts/chat-local-directory.js";
+import { resolveChatWorkspace } from "@multiremi/store/chat-workspace.js";
 import { type SqlDatabase } from "@multiremi/store/db/postgres.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
@@ -16,6 +18,7 @@ import { INBOX_ROUTING, inboxRouteFor } from "@multiremi/store/inbox-routing.js"
 import type {
   AddSessionParticipantInput,
   CreateChatSessionInput,
+  CreateAttachmentInput,
   CreateIssueCommentInput,
   CreateIssueInput,
   CreateIssueSessionInput,
@@ -82,12 +85,14 @@ export const EVENT_RUNTIME_REGISTERED = "runtime_registered";
 export const EVENT_RUNTIME_READY = "runtime_ready";
 export const EVENT_RUNTIME_FAILED = "runtime_failed";
 export const EVENT_RUNTIME_OFFLINE = "runtime_offline";
+export const EVENT_TASK_QUEUED_CAPABILITY_TIMEOUT = "task_queued_capability_timeout";
 export const EVENT_AGENT_CREATED = "agent_created";
 export const EVENT_AUTOPILOT_CREATED = "autopilot_created";
 export const EVENT_AUTOPILOT_RUN_STARTED = "autopilot_run_started";
 export const EVENT_AUTOPILOT_RUN_COMPLETED = "autopilot_run_completed";
 export const EVENT_AUTOPILOT_RUN_FAILED = "autopilot_run_failed";
 const METRICS_ONLY_EVENTS = new Set([
+  EVENT_TASK_QUEUED_CAPABILITY_TIMEOUT,
   EVENT_RUNTIME_REGISTERED,
   EVENT_RUNTIME_READY,
   EVENT_RUNTIME_FAILED,
@@ -114,6 +119,7 @@ const KNOWN_RUNTIME_PROVIDERS = new Set([
   "copilot",
   "cursor",
   "gemini",
+  "grok",
   "hermes",
   "kiro",
   "kimi",
@@ -135,6 +141,7 @@ const KNOWN_FAILURE_REASONS = new Set([
   "agent_error.provider_auth_or_access",
   "agent_error.provider_capacity_or_rate_limit",
   "agent_error.provider_network",
+  "agent_error.provider_no_available_account",
   "agent_error.provider_quota_limit",
   "agent_error.provider_server_error",
   "agent_error.runtime_missing_executable",
@@ -187,6 +194,8 @@ export interface IssuesSurface {
   getIssueByRef(ref: string, workspaceId?: string | null): MultiremiIssue | null;
   getIssueComment(id: string): MultiremiIssueComment | null;
   getAttachment(id: string): MultiremiAttachment | null;
+  createAttachment(input: CreateAttachmentInput): MultiremiAttachment;
+  listAttachmentsForChatMessage(id: string): MultiremiAttachment[];
   linkAttachmentsToChatMessage(chatSessionId: string, chatMessageId: string, attachmentIds: string[]): void;
   listIssues(input?: ListIssuesInput): MultiremiIssue[];
   listGeneratedIssues(sourceIssueId: string): MultiremiIssue[];
@@ -227,7 +236,9 @@ export interface AgentPluginsSurface {
   runtimeHasReadyAgentPlugins(runtimeId: string, agentId: string): boolean;
   assertAgentPluginProviderCompatible(agentId: string, provider: string): void;
   recordAgentPluginRuntimeHeartbeat(runtimeId: string): MultiremiAgentPluginRuntimeState[];
-  recordAgentPluginRuntimeHeartbeatWithinLock(runtimeId: string): MultiremiAgentPluginRuntimeState[];
+  recordAgentPluginRuntimeHeartbeatWithinLock(
+    runtimeId: string,
+  ): { changes: MultiremiAgentPluginRuntimeState[]; revision: string };
 }
 
 // The analytics recorders are shared by the runtimes, autopilots and tasks domains but are not part
@@ -347,7 +358,18 @@ export interface TasksSurface {
     terminalBody?: string | null;
   }): { task: MultiremiTask | null; created: boolean; covered: boolean };
   getTask(id: string): MultiremiTask | null;
+  getTaskWithAgent(id: string): import("@multiremi/contracts/types.js").MultiremiTaskWithAgent | null;
   listTasks(status?: MultiremiTaskStatus): MultiremiTask[];
+  listTasksChunk(
+    status: MultiremiTaskStatus | undefined,
+    cursor: import("./repos/tasks-repo.js").TaskListCursor | null,
+    chunkSize: number,
+  ): {
+    tasks: import("./repos/tasks-repo.js").TaskListCandidate[];
+    nextCursor: import("./repos/tasks-repo.js").TaskListCursor | null;
+  };
+  /** Full rows for the ids a page kept, in the caller's order. */
+  hydrateTasksByIds(ids: readonly string[]): MultiremiTask[];
   listTasksForIssue(issueId: string): MultiremiTask[];
   cancelTask(taskId: string): MultiremiTask;
   cancelTaskWithinTransaction(taskId: string): import("./repos/tasks-repo.js").CancelTaskResult;
@@ -361,10 +383,6 @@ export interface ChatSurface {
   createChatSessionWithinTransaction(input: CreateChatSessionInput): MultiremiChatSession;
   getChatSession(id: string): MultiremiChatSession | null;
   updateChatSession(id: string, input: UpdateChatSessionInput): MultiremiChatSession;
-  bindChatSessionIssueIfUnbound(chatSessionId: string, issueId: string): {
-    session: MultiremiChatSession;
-    bound: boolean;
-  };
   getChatMessage(id: string): MultiremiChatMessage | null;
   getPendingChatTask(chatSessionId: string): MultiremiTask | null;
   createPendingAgentIssueUpdateWithinTransaction(chatSessionId: string, body: string): {
@@ -399,7 +417,7 @@ export interface IssueSessionsSurface {
   getIssueSession(id: string): MultiremiIssueSession | null;
   getOrCreateDefaultChatSession(chatId: string, createdById?: string | null): MultiremiIssueSession;
   createSession(chatId: string, input?: CreateIssueSessionInput): MultiremiIssueSession;
-  listChatSessions(chatId: string, includeArchived?: boolean): MultiremiIssueSession[];
+  listChatOwnedSessions(chatId: string, includeArchived?: boolean): MultiremiIssueSession[];
   adoptLegacySession(chatId: string, sessionId: string): MultiremiIssueSession;
   getOrCreateDefaultIssueSession(issueId: string, createdById?: string | null): MultiremiIssueSession;
   createIssueSessionWithinTransaction(issueId: string, input?: CreateIssueSessionInput): MultiremiIssueSession;
@@ -430,6 +448,9 @@ export interface IssueSessionsSurface {
 }
 
 export interface RuntimesSurface {
+  executionBindingStatesRepo(): import("@multiremi/store/repos/execution-binding-states-repo.js").ExecutionBindingStatesRepo;
+  getAgentExecutionProfile(runtimeId: string|null, agent: MultiremiAgent): import("@multiremi/contracts/runtime-connection.js").RuntimeConnectionProfile|null;
+  executionProfilesRepo(): import("@multiremi/store/repos/execution-profiles-repo.js").ExecutionProfilesRepo;
   getRuntimeCodexProfile(id: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntimeExecutionProfile(id: string, provider: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntime(id: string): MultiremiRuntime | null;
@@ -446,6 +467,8 @@ export interface RuntimesSurface {
     agentPluginProtocol?: number;
   }): MultiremiDaemonHeartbeatAck;
   runtimeCanRunAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean;
+  runtimeCanRouteAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean;
+  runtimeSupportsAgentModel(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean;
 }
 
 /**
@@ -454,6 +477,8 @@ export interface RuntimesSurface {
  * than leave a workspace pointing at something that no longer exists.
  */
 export interface FeishuBotSurface {
+  getFeishuIssueIdForChatSession(chatSessionId: string): string | null;
+  isFeishuBotTaskIssueCreationRestricted(taskId: string): boolean;
   disableFeishuBotConfigsReferencingAgent(agentId: string, actor?: string | null): string[];
   disableFeishuBotConfigsReferencingRuntime(runtimeId: string, actor?: string | null): string[];
   prepareFeishuIssueTopicWithinTransaction(issue: MultiremiIssue): boolean;
@@ -469,6 +494,7 @@ export interface FeishuBotSurface {
     now?: string | Date,
     supportsTaskStream?: boolean,
     supportsNativeCot?: boolean,
+    supportsAttachments?: boolean,
   ): MultiremiFeishuBotOutboundDelivery | null;
   getFeishuBotOutboundAttachment(
     workspaceId: string,
@@ -511,6 +537,9 @@ export class StoreContext {
   readonly metricCounters = new Map<string, MultiremiMetricCounter>();
 
   private analyticsRepo: AnalyticsSurface | null = null;
+
+  executionBindingStates() { return this.resolveHost().executionBindingStatesRepo(); }
+  executionProfiles() { return this.resolveHost().executionProfilesRepo(); }
 
   constructor(readonly db: SqlDatabase, private readonly resolveHost: () => StoreContextHost) {}
 
@@ -722,6 +751,11 @@ export class StoreContext {
 
   incrementMetricForAnalyticsEvent(event: MultiremiAnalyticsEvent): void {
     switch (event.name) {
+      case EVENT_TASK_QUEUED_CAPABILITY_TIMEOUT:
+        this.incrementMetricCounter("multiremi_task_queued_capability_timeout_total", {
+          provider: normalizeRuntimeProviderLabel(stringProp(event.properties, "provider")),
+        });
+        break;
       case EVENT_RUNTIME_REGISTERED:
         this.incrementMetricCounter(METRIC_RUNTIME_REGISTERED, {
           runtime_mode: normalizeRuntimeModeLabel(stringProp(event.properties, "runtime_mode")),
@@ -889,16 +923,33 @@ export class StoreContext {
 
   // Cross-domain: read by the agents (updateAgent rescheduling), runtimes and tasks bands.
   localDirectoryDaemonForTask(taskRow: Row): string | null {
-    const issueId = cleanOptionalString(taskRow.issue_id);
-    if (!issueId) return null;
-    const issue = this.issues().getIssue(issueId);
-    if (!issue?.projectId) return null;
-    for (const resource of this.projects().listProjectResources(issue.projectId)) {
-      if (resource.resourceType !== "local_directory") continue;
-      const daemonId = String(resource.resourceRef.daemonId ?? resource.resourceRef.daemon_id ?? "").trim();
-      if (daemonId) return daemonId;
+    // Both local directories and read-only side snapshots require a specific
+    // machine. Preserve that constraint across provider changes and re-pooling.
+    const sessionId = cleanOptionalString(taskRow.issue_session_id);
+    const session = sessionId ? this.issueSessions().getIssueSession(sessionId) : null;
+    if (session?.withCode && session.codeRuntimeId) {
+      return this.runtimes().getRuntime(session.codeRuntimeId)?.daemonId ?? session.codeRuntimeId;
     }
-    return null;
+    const issueId = cleanOptionalString(taskRow.issue_id);
+    const issue = issueId ? this.issues().getIssue(issueId) : null;
+    const chatId = cleanOptionalString(taskRow.chat_session_id);
+    const chat = chatId ? this.chat().getChatSession(chatId) : null;
+    const projectId = issue?.projectId ?? chat?.projectId;
+    const chatWorkspace = !issue ? resolveChatWorkspace(this, chat, {
+      executionFingerprint: nullableString(taskRow.execution_fingerprint),
+      workDir: nullableString(taskRow.work_dir),
+      runtimeId: nullableString(taskRow.runtime_id),
+    }) : null;
+    if (chatWorkspace?.mode === "managed") return null;
+    if (!projectId) return null;
+    if (!issue?.projectId && chat) {
+      const project = this.projects().getProject(projectId);
+      if (!project || project.archivedAt || project.workspaceId !== chat.workspaceId
+        || project.workspaceId !== taskRow.workspace_id) return null;
+    }
+    const assignment = chatWorkspace ? chatWorkspace.assignment
+      : selectChatLocalDirectory(this.projects().listProjectResources(projectId));
+    return assignment?.daemon ?? null;
   }
 
   // Cross-domain: the un-hydrated comment row. Read by the issues band and by the tasks band

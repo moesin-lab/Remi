@@ -12,7 +12,7 @@ import { useAuthStore } from "@multiremi/core/auth";
 import { larkInstallationsOptions } from "@multiremi/core/lark";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
 import { useWorkspaceId } from "@multiremi/core/hooks";
-import { useFleetProviderModels } from "@multiremi/core/runtimes";
+import { useExecutionTargetModels } from "@multiremi/core/runtimes";
 import { isImeComposing } from "@multiremi/core/utils";
 import { useTimeAgo } from "../../i18n";
 import { Button } from "@multiremi/ui/components/ui/button";
@@ -38,7 +38,7 @@ import { availabilityConfig } from "../presence";
 import { CharCounter } from "./char-counter";
 import { useT } from "../../i18n";
 import { ConcurrencyPicker } from "./inspector/concurrency-picker";
-import { EnginePicker } from "./inspector/engine-picker";
+import { ExecutionTargetSelect, type ExecutionTarget } from "./execution-target-select";
 import { ModelPicker } from "./inspector/model-picker";
 import { SkillAttach } from "./inspector/skill-attach";
 import { ThinkingPropRow } from "./inspector/thinking-prop-row";
@@ -89,18 +89,31 @@ export function AgentDetailInspector({
   const timeAgo = useTimeAgo();
   const wsId = useWorkspaceId();
   const update = (data: Record<string, unknown>) => onUpdate(agent.id, data);
-  const provider = agent.provider || "claude";
-  const { models } = useFleetProviderModels(wsId ?? "", provider);
+  const provider = agent.provider ?? "";
+  const { models, defaultThinking } = useExecutionTargetModels(wsId ?? "", provider, agent.runtime_id, agent.execution_group_id, agent.id);
   const showIntegrations = useHasIntegrations(agent.id);
-  const switchEngine = (next: string) =>
-    update({ provider: next, model: "", thinking_level: "" });
+  const switchTarget = (next: ExecutionTarget) =>
+    update({ execution_group_id: next.executionGroupId || null, provider: next.provider, model: "", thinking_level: "", fallback_model: "", fallback_thinking_level: "" });
   const switchModel = (next: string) => {
     const data: Record<string, unknown> = { model: next };
     if (
       next !== (agent.model ?? "") &&
-      !supportsThinkingLevel(models, next, agent.thinking_level ?? "")
+      !supportsThinkingLevel(models, next, agent.thinking_level ?? "", defaultThinking)
     ) {
       data.thinking_level = "";
+    }
+    if ((next || models.find((entry) => entry.default)?.id) === (agent.fallback_model ?? agent.fallbackModel)) {
+      data.fallback_model = "";
+      data.fallback_thinking_level = "";
+    }
+    return update(data);
+  };
+  const fallbackModel = agent.fallback_model ?? agent.fallbackModel ?? "";
+  const primaryModel = agent.model || models.find((entry) => entry.default)?.id || "";
+  const switchFallback = (next: string) => {
+    const data: Record<string, unknown> = { fallback_model: next };
+    if (!next || !supportsThinkingLevel(models, next, agent.fallback_thinking_level ?? agent.fallbackThinkingLevel ?? "", defaultThinking)) {
+      data.fallback_thinking_level = "";
     }
     return update(data);
   };
@@ -123,14 +136,22 @@ export function AgentDetailInspector({
           the value is visible but not interactive. */}
       <Section label={t(($) => $.inspector.section_properties)}>
         <PropRow label={t(($) => $.inspector.prop_engine)} interactive={false}>
-          <EnginePicker
-            value={provider}
+          <ExecutionTargetSelect
+            ownerId={agent.owner_id}
+            compact
+            wsId={wsId ?? ""}
+            value={{ executionGroupId: agent.execution_group_id ?? "", provider }}
+            legacyRuntimeId={agent.runtime_id}
+            agentId={agent.id}
             canEdit={canEdit}
-            onChange={switchEngine}
+            onChange={switchTarget}
           />
         </PropRow>
         <PropRow label={t(($) => $.inspector.prop_model)} interactive={false}>
           <ModelPicker
+            runtimeId={agent.runtime_id}
+            executionGroupId={agent.execution_group_id}
+            agentId={agent.id}
             wsId={wsId ?? ""}
             provider={provider}
             value={agent.model ?? ""}
@@ -139,6 +160,9 @@ export function AgentDetailInspector({
           />
         </PropRow>
         <ThinkingPropRow
+          runtimeId={agent.runtime_id}
+          executionGroupId={agent.execution_group_id}
+          agentId={agent.id}
           wsId={wsId ?? ""}
           provider={provider}
           model={agent.model ?? ""}
@@ -146,6 +170,32 @@ export function AgentDetailInspector({
           canEdit={canEdit}
           onChange={(v) => update({ thinking_level: v })}
         />
+        <PropRow label={t(($) => $.fallback.model_label)} interactive={false}>
+          <ModelPicker
+            runtimeId={agent.runtime_id}
+            executionGroupId={agent.execution_group_id}
+            agentId={agent.id}
+            wsId={wsId ?? ""}
+            provider={provider}
+            value={fallbackModel}
+            fallback
+            excludedModel={primaryModel}
+            canEdit={canEdit}
+            onChange={switchFallback}
+          />
+        </PropRow>
+        {fallbackModel && <ThinkingPropRow
+          runtimeId={agent.runtime_id}
+          executionGroupId={agent.execution_group_id}
+          agentId={agent.id}
+          wsId={wsId ?? ""}
+          provider={provider}
+          model={fallbackModel}
+          value={agent.fallback_thinking_level ?? agent.fallbackThinkingLevel ?? ""}
+          label={t(($) => $.fallback.thinking_label)}
+          canEdit={canEdit}
+          onChange={(v) => update({ fallback_thinking_level: v })}
+        />}
         <PropRow label={t(($) => $.inspector.prop_visibility)} interactive={false}>
           <VisibilityPicker
             value={agent.visibility}

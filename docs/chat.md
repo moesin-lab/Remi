@@ -85,6 +85,14 @@ Project 资源列表变化或项目不可用时，已有工作副本保留。
 聊天记录与 provider 会话是两层状态。正常续接复用既有运行上下文；无法续接时，Remi 使用有预算的聊天历史投影，
 截断会被标识。不能据此承诺每轮携带完整历史或底层工具的全部工作记忆。
 
+页面和浮窗首次读取最新 50 条聊天消息，向上滚动加载历史。分页接口在数据库中按 `(sequence, id)`
+倒序读取至多 `limit + 1` 条（`limit` 上限 100），以正序返回当前页，并且只补全该页附件。
+公开游标仍是 `created_at` 与 `id`；服务端验证消息属于当前会话并解析其 sequence，不按时间戳重排消息。
+完整历史接口和执行时的上下文投影保持原有语义。加载边界、游标和附件回归见
+[分页测试](../tests/unit/multiremi/chat-message-pagination.test.ts)；在隔离测试环境运行
+`CHAT_PAGE_BENCH=1 bun test tests/unit/multiremi/chat-message-pagination.test.ts` 可采集 5,000 条、
+每条正文 4 KiB 的内存 SQLite API 基准（5 次预热、30 次串行样本），不代表 PostgreSQL 或浏览器端延迟。
+
 ## 权限与实时更新
 
 直接聊天仅创建者可读写，另需满足工作区成员与云友访问条件。其他工作区成员及管理员不能读取别人的私聊。

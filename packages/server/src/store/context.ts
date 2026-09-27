@@ -415,6 +415,10 @@ export interface ChatSurface {
 
 export interface IssueSessionsSurface {
   getIssueSession(id: string): MultiremiIssueSession | null;
+  getOrCreateDefaultChatSession(chatId: string, createdById?: string | null): MultiremiIssueSession;
+  createSession(chatId: string, input?: CreateIssueSessionInput): MultiremiIssueSession;
+  listChatOwnedSessions(chatId: string, includeArchived?: boolean): MultiremiIssueSession[];
+  adoptLegacySession(chatId: string, sessionId: string): MultiremiIssueSession;
   getOrCreateDefaultIssueSession(issueId: string, createdById?: string | null): MultiremiIssueSession;
   createIssueSessionWithinTransaction(issueId: string, input?: CreateIssueSessionInput): MultiremiIssueSession;
   getLatestActiveIssueSession(issueId: string): MultiremiIssueSession | null;

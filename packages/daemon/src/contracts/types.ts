@@ -98,14 +98,16 @@ export interface AgentTaskIssueSession {
   codeRuntimeId?: string | null;
   code_runtime_id?: string | null;
   id: string;
+  chatId?: string | null;
+  chat_id?: string | null;
   parentSessionId?: string | null;
   parent_session_id?: string | null;
   inheritMode?: "none" | "snapshot" | "follow";
   inherit_mode?: "none" | "snapshot" | "follow";
   inheritCutoffSeq?: number | null;
   inherit_cutoff_seq?: number | null;
-  issueId?: string;
-  issue_id?: string;
+  issueId?: string | null;
+  issue_id?: string | null;
   title: string;
   summary?: string | null;
 }
@@ -302,6 +304,7 @@ export interface AgentTask {
   holdsWorkspace?: boolean;
   holds_workspace?: boolean;
   chatSessionId: string | null;
+  chat_session_id?: string | null;
   /** Explicit Chat Project binding, independent of any historical Issue context. */
   chatProjectId?: string | null;
   chat_project_id?: string | null;

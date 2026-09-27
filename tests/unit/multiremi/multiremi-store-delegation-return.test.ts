@@ -78,9 +78,10 @@ function createDelegationFixture(): DelegationFixture {
     assigneeType: "squad",
     assigneeId: squad.id,
   });
-  const leaderTask = store.createTask({
+  const chat = store.createChatSession({ agentId: leader.id });
+  const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Delegation" });
+  const leaderTask = store.createSessionTask(session.id, {
     agentId: leader.id,
-    issueId: issue.id,
     prompt: "Lead the implementation.",
   });
   expect(store.claimTask(leaderRuntime.id)?.id).toBe(leaderTask.id);
@@ -96,6 +97,8 @@ function createDelegationFixture(): DelegationFixture {
   const childTask = store.listTasksForIssue(issue.id).find((task) => task.agentId === qa.id)!;
   expect(childTask).toMatchObject({
     delegatedByAgentId: leader.id,
+    chatSessionId: chat.id,
+    issueSessionId: session.id,
     status: "queued",
   });
   expect(childTask.delegationId).toBeTruthy();
@@ -201,10 +204,12 @@ function createFanoutFixture(feishu = false): FanoutFixture {
     });
     chatSessionId = `chat_issue_topic_${issue.id}`;
     expect(store.getFeishuIssueIdForChatSession(chatSessionId)).toBe(issue.id);
+  } else {
+    chatSessionId = store.createChatSession({ agentId: leader.id }).id;
   }
-  const leaderTask = store.createTask({
+  const session = store.createIssueSession(issue.id, { chatId: chatSessionId, title: "Fanout" });
+  const leaderTask = store.createSessionTask(session.id, {
     agentId: leader.id,
-    issueId: issue.id,
     prompt: "Lead the fanout.",
   });
   expect(store.claimTask(leaderRuntime.id)?.id).toBe(leaderTask.id);

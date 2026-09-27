@@ -317,8 +317,8 @@ describe("delegated task continuation API", () => {
       prompt: "Coordinate sibling.",
     });
     const siblingHeaders = await taskHeaders(f, siblingLeaderTask);
-    await expectError(await request({ continueTaskId: f.delegated.id }, siblingHeaders), 400, "another Issue Session");
-    await expectError(await request({ continueTaskId: f.delegated.id, issueSessionId: sibling.id }), 400, "requested Issue Session");
+    await expectError(await request({ continueTaskId: f.delegated.id }, siblingHeaders), 400, "another Session");
+    await expectError(await request({ continueTaskId: f.delegated.id, issueSessionId: sibling.id }), 400, "requested Session");
 
     const privateDelegation = f.store.createTask({
       agentId: f.privateWorker.id,

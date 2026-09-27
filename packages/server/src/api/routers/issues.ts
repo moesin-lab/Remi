@@ -13,6 +13,7 @@ import {
   issueCommentCreateInput,
   issueFromParam,
   issueListQuery,
+  loadChatSessionForCurrentUser,
   issueMutationActor,
   denyAttachmentCreationAccess,
   issueSubscriberCaller,
@@ -38,6 +39,7 @@ import {
   attachmentCompatibilityResponse,
   cleanString,
   commentCompatibilityResponse,
+  currentWorkspaceMember,
   currentTaskAccessToken,
   currentAccessToken,
   hasRequestField,
@@ -86,6 +88,7 @@ import type {
   CreateSessionTaskInput,
   ListIssuesInput,
   MultiremiIssue,
+  MultiremiIssueSession,
   MultiremiAssigneeType,
   MultiremiIssueWorkspaceArchiveBinding,
   PublishSessionResultInput,
@@ -194,6 +197,31 @@ function existingIssueDispatchResponse(store: MultiremiStore, issue: MultiremiIs
   const reason = typeof data?.reason === "string" ? data.reason : "no_runnable_agent";
   const error = typeof data?.error === "string" ? data.error : skipActivity?.body ?? null;
   return skipped(reason, error);
+}
+
+function denyLinkedSessionChatAccess(
+  c: Context,
+  store: MultiremiStore,
+  session: MultiremiIssueSession,
+): Response | null {
+  const taskAccess = currentTaskAccessToken(c);
+  if (taskAccess?.taskId) {
+    const task = store.getTask(taskAccess.taskId);
+    if (task?.issueSessionId && task.issueSessionId !== session.id) {
+      return c.json({ error: "forbidden outside current Session" }, 403);
+    }
+  }
+  return denyLinkedSessionChatOwnerAccess(c, store, session);
+}
+
+function denyLinkedSessionChatOwnerAccess(
+  c: Context,
+  store: MultiremiStore,
+  session: MultiremiIssueSession,
+): Response | null {
+  if (!session.chatId) return null; // legacy Issue-owned compatibility row
+  const loaded = loadChatSessionForCurrentUser(c, store, session.chatId);
+  return loaded instanceof Response ? loaded : null;
 }
 
 export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
@@ -1266,7 +1294,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue) return c.json({ error: "issue not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
-    const sessions = store.listIssueSessions(issue.id, c.req.query("include_archived") === "true");
+    const sessions = store.listIssueSessions(issue.id, c.req.query("include_archived") === "true")
+      .filter((session) => !denyLinkedSessionChatOwnerAccess(c, store, session));
     return c.json(sessions.map((session) => issueSessionCompatibilityResponse(
       session,
       store.listSessionParticipants(session.id),
@@ -1279,6 +1308,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const body = await readJson<CreateIssueSessionInput & { inheritMode?: unknown; inherit_mode?: unknown }>(c);
     const creator = issueSubscriberCaller(c);
+    const hasMemberActor = creator.actorType !== "member"
+      || Boolean(currentWorkspaceMember(c, store, issue.workspaceId));
     try {
       // Validate both spellings so contradictory inheritance requests are not ignored.
       const parentSessionId = body.parentSessionId ?? body.parent_session_id;
@@ -1292,8 +1323,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       }
       const session = store.createIssueSession(issue.id, {
         ...body,
-        createdByType: creator.actorType,
-        createdById: creator.actorId,
+        createdByType: hasMemberActor ? creator.actorType : "system",
+        createdById: hasMemberActor ? creator.actorId : null,
       });
       return c.json(issueSessionCompatibilityResponse(
         session,
@@ -1309,6 +1340,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
+    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
+    if (chatDenied) return chatDenied;
     return c.json(issueSessionCompatibilityResponse(
       session,
       store.listSessionParticipants(session.id),
@@ -1320,6 +1353,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
+    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
+    if (chatDenied) return chatDenied;
     const body = await readJson<UpdateIssueSessionInput>(c);
     try {
       return c.json(issueSessionCompatibilityResponse(
@@ -1336,6 +1371,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
+    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
+    if (chatDenied) return chatDenied;
     return c.json(store.listSessionParticipants(session.id).map(sessionParticipantCompatibilityResponse));
   });
   app.post("/api/issues/:id/sessions/:sessionId/participants", async (c) => {
@@ -1344,6 +1381,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
+    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
+    if (chatDenied) return chatDenied;
     const body = await readJson<AddSessionParticipantInput>(c);
     const participantType = body.participantType ?? body.participant_type;
     const participantId = body.participantId ?? body.participant_id;
@@ -1365,6 +1404,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
+    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
+    if (chatDenied) return chatDenied;
     store.removeSessionParticipant(session.id, c.req.param("participantType"), c.req.param("participantId"));
     return c.body(null, 204);
   });
@@ -1374,6 +1415,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
+    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
+    if (chatDenied) return chatDenied;
     // Task-scoped agents may read their current Session, but cannot use this
     // endpoint to pull sibling transcripts. Cross-session agent access is via
     // the explicit published-results endpoint below.
@@ -1388,6 +1431,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
+    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
+    if (chatDenied) return chatDenied;
     const body = await readJson<CreateIssueCommentInput>(c);
     try {
       return c.json(commentCompatibilityResponse(store.createIssueComment(issue.id, {
@@ -1404,8 +1449,13 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
+    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
+    if (chatDenied) return chatDenied;
     return c.json(store.listTasksForIssue(issue.id)
-      .filter((task) => task.issueSessionId === session.id && canCurrentUserAccessChatTask(c, store, task))
+      // The Session-level guard above already proves access to the owning
+      // Chat. Return task metadata for every participant in this Session;
+      // transcript routes retain their stricter per-task visibility checks.
+      .filter((task) => task.issueSessionId === session.id)
       .map((task) => taskCompatibilityResponse(
         task,
         null,
@@ -1450,7 +1500,12 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue) return c.json({ error: "issue not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
-    return c.json(store.listIssueSessionResults(issue.id).map(sessionResultCompatibilityResponse));
+    return c.json(store.listIssueSessionResults(issue.id)
+      .filter((result) => {
+        const source = store.getIssueSession(result.sourceSessionId);
+        return Boolean(source && !denyLinkedSessionChatOwnerAccess(c, store, source));
+      })
+      .map(sessionResultCompatibilityResponse));
   });
   app.post("/api/issues/:id/sessions/:sessionId/results", async (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
@@ -1458,6 +1513,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
+    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
+    if (chatDenied) return chatDenied;
     const body = await readJson<PublishSessionResultInput>(c);
     const publisher = issueSubscriberCaller(c);
     try {

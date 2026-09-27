@@ -505,9 +505,18 @@ describe("Organizer supervisor privilege layer", () => {
       assigneeType: "squad",
       assigneeId: squad.id,
     });
+    const delegatedChat = fixture.store.createChatSession({
+      agentId: leader.id,
+      workspaceId: "local",
+    });
+    const delegatedSession = fixture.store.createIssueSession(delegatedIssue.id, {
+      chatId: delegatedChat.id,
+      title: "Delegated organizer work",
+    });
     const delegatedSupervisorTask = fixture.store.createTask({
       agentId: fixture.supervisorAgent.id,
       issueId: delegatedIssue.id,
+      issueSessionId: delegatedSession.id,
       workspaceId: "local",
       prompt: "inspect delegated tasks",
       delegationId: "dlg_organizer_return",

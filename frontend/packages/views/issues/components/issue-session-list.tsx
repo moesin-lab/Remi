@@ -25,7 +25,6 @@ import { toast } from "sonner";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { useT, useTimeAgo } from "../../i18n";
 import { getSessionDisplayName } from "../utils/session-display";
-import { NewSessionButton, NewSessionDialog } from "./issue-session-bar";
 
 interface IssueSessionListProps {
   issueId: string;
@@ -37,9 +36,8 @@ interface IssueSessionListProps {
 }
 
 // Narrow session switcher rail on the far left of the issue detail panel.
-// Mounted for every issue at every width, including the single-session case:
-// the rail is where sessions are read *and* created, so hiding it made the
-// concept appear only after someone had already found it somewhere else.
+// Mounted for every issue at every width. This is a linked-Session view;
+// Session creation belongs to its owning Chat, not to the Issue rail.
 // One session renders as one highlighted row.
 //
 // It is a sibling of the issue's scroll container, not a child: the rail
@@ -55,7 +53,6 @@ export function IssueSessionList({
   className,
 }: IssueSessionListProps) {
   const { t } = useT("issues");
-  const [sideChatParentId, setSideChatParentId] = useState<string | null>(null);
   const sessionRows = useMemo<Array<{ session: IssueSession; parentSession?: IssueSession }>>(() => {
     // Only regular sessions can be parents. Preserve the original order of
     // parents and siblings, and leave children with missing parents flat.
@@ -87,16 +84,14 @@ export function IssueSessionList({
       )}
     >
       <div className="flex items-center gap-1 pl-2">
-        {/* The header stays the bare word "Sessions" — the column is too
-            narrow for "Sessions on this issue" — so the scope rides along
-            as the native tooltip / accessible description instead. */}
+        {/* The header identifies this as an Issue projection; the tooltip
+            explains that the owning objects are the linked Chats. */}
         <span
           className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground"
           title={t(($) => $.detail.sessions_scope_hint)}
         >
           {t(($) => $.detail.sessions_label)}
         </span>
-        <NewSessionButton issueId={issueId} sessions={sessions} onCreated={onSelectSession} />
       </div>
 
       <div className="mt-1 space-y-0.5">
@@ -109,20 +104,9 @@ export function IssueSessionList({
             agents={agents}
             isSelected={session.id === selectedSessionId}
             onSelect={onSelectSession}
-            onSideChat={setSideChatParentId}
           />
         ))}
       </div>
-      <NewSessionDialog
-        issueId={issueId}
-        sessions={sessions}
-        open={sideChatParentId !== null}
-        onOpenChange={(open) => {
-          if (!open) setSideChatParentId(null);
-        }}
-        parentSessionId={sideChatParentId ?? undefined}
-        onCreated={onSelectSession}
-      />
     </div>
   );
 }
@@ -144,7 +128,6 @@ function SessionRow({
   agents,
   isSelected,
   onSelect,
-  onSideChat,
 }: {
   issueId: string;
   session: IssueSession;
@@ -152,7 +135,6 @@ function SessionRow({
   agents: Agent[];
   isSelected: boolean;
   onSelect: (sessionId: string) => void;
-  onSideChat: (sessionId: string) => void;
 }) {
   const { t } = useT("issues");
   const timeAgo = useTimeAgo();
@@ -214,11 +196,6 @@ function SessionRow({
           <DropdownMenuItem onClick={() => setParticipantsOpen(true)}>
             {t(($) => $.detail.session_participants)}
           </DropdownMenuItem>
-          {session.parent_session_id == null && (
-            <DropdownMenuItem onClick={() => onSideChat(session.id)}>
-              {t(($) => $.detail.session_side_chat)}
-            </DropdownMenuItem>
-          )}
         </DropdownMenuContent>
       </DropdownMenu>
 

@@ -875,7 +875,10 @@ export class FeishuBotRepo {
           now,
         );
         binding = { id: bindingId, chat_session_id: chat.id, issue_id: issue?.id ?? null };
-        if (issue) this.ensureDefaultAgentIssueUpdatesChannel(chat);
+        if (issue) {
+          this.projectChatSessionsToIssue(chat.id, issue.id);
+          this.ensureDefaultAgentIssueUpdatesChannel(chat);
+        }
       } else if (autoCreateGroupIssue) {
         const chatSessionId = String(binding.chat_session_id);
         const chat = this.ctx.chat().getChatSession(chatSessionId);
@@ -887,6 +890,7 @@ export class FeishuBotRepo {
             [issue.id, nowIso(), String(binding.id)],
           );
           binding.issue_id = issue.id;
+          this.projectChatSessionsToIssue(chat.id, issue.id);
           this.ensureDefaultAgentIssueUpdatesChannel(chat);
           this.ctx.chat().updateChatSession(chat.id, {
             title: `${issue.key}: ${issue.title}`,
@@ -1070,6 +1074,22 @@ export class FeishuBotRepo {
     });
   }
 
+  private projectChatSessionsToIssue(chatSessionId: string, issueId: string): void {
+    const now = nowIso();
+    this.ctx.db.run(
+      `UPDATE multiremi_issue_sessions
+       SET issue_id = ?, updated_at = ?
+       WHERE chat_id = ? AND issue_id IS NULL`,
+      [issueId, now, chatSessionId],
+    );
+    this.ctx.db.run(
+      `UPDATE multiremi_session_results
+       SET issue_id = ?
+       WHERE chat_id = ? AND issue_id IS NULL`,
+      [issueId, chatSessionId],
+    );
+  }
+
   getChatConversationKind(chatSessionId: string): "p2p" | "group" | null {
     const row = this.ctx.db.query(
       `SELECT external_session_key, thread_id
@@ -1136,6 +1156,7 @@ export class FeishuBotRepo {
           now,
         ],
       );
+      this.projectChatSessionsToIssue(chat.id, issue.id);
       this.ensureDefaultAgentIssueUpdatesChannel(chat);
       this.ctx.db.run(
         `INSERT INTO multiremi_feishu_bot_outbound_deliveries (

@@ -96,6 +96,7 @@ export class ChatRepo {
       [projectId, runtimeWorkspaceId, id, workspaceId, input.creatorId ?? input.creator_id ?? "local", agentId, title, now, now],
     );
     const session = this.getChatSession(id)!;
+    this.ctx.issueSessions().getOrCreateDefaultChatSession(session.id, session.creatorId);
     return session;
   }
 
@@ -165,7 +166,7 @@ export class ChatRepo {
         [input.title?.trim() || current.title, input.status ?? current.status, (input.pinned ?? current.pinned) ? 1 : 0, now, id],
       );
       if (input.status === "archived") {
-        for (const task of this.pendingTasks(id)) {
+        for (const task of this.pendingTasks(id, { includeSessionTasks: true })) {
           cancelled.push(this.ctx.tasks().cancelTaskWithinTransaction(task.id));
         }
         this.discardPendingAgentIssueUpdatesWithinTransaction(id);
@@ -191,12 +192,44 @@ export class ChatRepo {
       this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
       const current = this.getChatSession(id);
       if (!current) return null;
-      const cancelled = this.pendingTasks(id).map((task) => this.ctx.tasks().cancelTaskWithinTransaction(task.id));
+      const cancelled = this.pendingTasks(id, { includeSessionTasks: true })
+        .map((task) => this.ctx.tasks().cancelTaskWithinTransaction(task.id));
       // Keep the original private scope on retained task audits. Clearing it
       // would make their transcripts inherit the workspace Agent visibility.
       this.ctx.db.run("DELETE FROM multiremi_attachments WHERE chat_session_id = ?", [id]);
       this.ctx.db.run("DELETE FROM multiremi_chat_messages WHERE chat_session_id = ?", [id]);
       this.ctx.notificationChannels().deleteAgentChatNotificationChannel(id);
+      // Session event/result data belongs to the Chat and follows its explicit
+      // destructive deletion. Keep already-published Issue comments as Issue
+      // audit history; only remove their link to the deleted Session. Task rows
+      // likewise retain their audit record, while their Session reference is
+      // cleared before the Session rows are removed.
+      this.ctx.db.run(
+        `UPDATE multiremi_issue_comments
+         SET issue_session_id = NULL
+         WHERE issue_session_id IN (
+           SELECT id FROM multiremi_issue_sessions WHERE chat_id = ?
+         )`,
+        [id],
+      );
+      this.ctx.db.run(
+        `UPDATE multiremi_tasks
+         SET issue_session_id = NULL, issue_session_generation = NULL
+         WHERE issue_session_id IN (
+           SELECT id FROM multiremi_issue_sessions WHERE chat_id = ?
+         )`,
+        [id],
+      );
+      this.ctx.db.run("DELETE FROM multiremi_session_results WHERE chat_id = ?", [id]);
+      for (const table of ["multiremi_session_events", "multiremi_session_participants", "multiremi_session_agent_lanes"]) {
+        this.ctx.db.run(
+          `DELETE FROM ${table} WHERE session_id IN (
+             SELECT id FROM multiremi_issue_sessions WHERE chat_id = ?
+           )`,
+          [id],
+        );
+      }
+      this.ctx.db.run("DELETE FROM multiremi_issue_sessions WHERE chat_id = ?", [id]);
       const deleted = this.ctx.db.run("DELETE FROM multiremi_chat_sessions WHERE id = ?", [id]).changes > 0;
       return { current, cancelled, deleted };
     })();
@@ -213,9 +246,18 @@ export class ChatRepo {
     this.ctx.emitChatEvent(session, "chat:session_read", {});
   }
 
-  private pendingTasks(chatSessionId: string): MultiremiTask[] {
+  private pendingTasks(
+    chatSessionId: string,
+    options: { includeSessionTasks?: boolean } = {},
+  ): MultiremiTask[] {
+    // Ordinary Chat queue controls must not observe, steer, edit, or prioritize
+    // explicit Session Tasks. Wiring those two interaction surfaces together is
+    // a separate product decision (MUL-3). Chat archive/delete still opt in to
+    // all descendant work for lifecycle safety.
+    const sessionClause = options.includeSessionTasks ? "" : "AND issue_session_id IS NULL";
     const rows = this.ctx.db.query(
       `SELECT id FROM multiremi_tasks WHERE chat_session_id = ?
+       ${sessionClause}
        AND status IN ('queued', 'dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
        ORDER BY CASE WHEN status = 'queued' THEN 1 ELSE 0 END, priority DESC, chat_queue_order ASC, created_at ASC, id ASC`,
     ).all(chatSessionId) as Row[];

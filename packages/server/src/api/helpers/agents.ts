@@ -440,7 +440,7 @@ function validateAgentModelSelection(
   },
 ): Response | null {
   const profile = input.runtimeId ? store.getRuntimeExecutionProfile(input.runtimeId, input.provider) : null;
-  if (profile && input.model && input.model !== profile.model) {
+  if (profile && input.model && !(profile.models ?? [profile.model]).includes(input.model)) {
     return c.json({ error: `model "${input.model}" is not supported by the selected Runtime connection; expected "${profile.model}"` }, 400);
   }
   // Unrelated edits may resend the saved selection. Discovery must never force
@@ -519,7 +519,7 @@ function validateAgentFallbackSelection(
   if (effectiveModel === input.fallbackModel) {
     return c.json({ error: "fallback_model must be different from the primary model" }, 400);
   }
-  if (profile && input.fallbackModel !== profile.model) {
+  if (profile && !(profile.models ?? [profile.model]).includes(input.fallbackModel)) {
     return c.json({
       code: "model_not_in_execution_catalog",
       error: `fallback_model "${input.fallbackModel}" is not supported by the selected Runtime connection`,

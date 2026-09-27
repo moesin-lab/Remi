@@ -55,6 +55,34 @@ it("retains an existing credential when editing a profile without a new key", as
   await waitFor(() => expect(api.saveExecutionProfile).toHaveBeenCalledWith("ws", "p1", { name: "Aiden", provider: "codex", profile: profile.profile }));
 });
 
+it("saves an optional model allowlist while always including the default", async () => {
+  const user = userEvent.setup();
+  show();
+  await screen.findByText("Claude only");
+  const edit = await screen.findAllByRole("button", { name: "Edit" });
+  await user.click(edit[0]!);
+  await user.type(screen.getByLabelText(/Allowed model IDs/), "alternate\ntest-model\nalternate");
+  await user.click(screen.getByRole("button", { name: "Save connection" }));
+  await waitFor(() => expect(api.saveExecutionProfile).toHaveBeenCalledWith("ws", "p1", {
+    name: "Aiden", provider: "codex", profile: { ...profile.profile, models: ["test-model", "alternate"] },
+  }));
+});
+
+it("preserves an explicit default-only allowlist when editing other profile fields", async () => {
+  const restricted = { ...profile, profile: { ...profile.profile, models: [profile.profile.model] } };
+  api.listExecutionProfiles.mockResolvedValue({ profiles: [restricted] });
+  const user = userEvent.setup();
+  show();
+  await waitFor(() => expect(screen.getAllByRole("button", { name: "Edit" })).toHaveLength(2));
+  const edit = screen.getAllByRole("button", { name: "Edit" });
+  await user.click(edit[0]!);
+  expect(await screen.findByLabelText(/Allowed model IDs/)).toHaveValue("test-model");
+  await user.click(screen.getByRole("button", { name: "Save connection" }));
+  await waitFor(() => expect(api.saveExecutionProfile).toHaveBeenCalledWith("ws", "p1", {
+    name: "Aiden", provider: "codex", profile: restricted.profile,
+  }));
+});
+
 it("shows every binding and an unconfirmed state without inventing successful application", async () => {
   api.listExecutionGroups.mockResolvedValue({ groups: [group, { ...group, id: "g2", name: "Second group", members: [] }] });
   show(<RuntimeExecutionBindings runtimeId="r1" />);

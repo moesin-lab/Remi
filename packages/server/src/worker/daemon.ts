@@ -1,4 +1,4 @@
-import type { RuntimeExecutionBinding, RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection";
+import { runtimeConnectionModels, type RuntimeExecutionBinding, type RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection";
 import { createHash } from "node:crypto";
 import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import { parseRuntimeClaudeProfile, type RuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
@@ -2218,7 +2218,7 @@ export class MultiremiDaemon {
   private async discoverRuntimeModels(force: boolean): Promise<MultiremiRuntimeModel[]> {
     if (!this.runtimeModelDiscoveryEnabled) {
       const profile = this.runtimeModelProfile();
-      if (profile) return [{ id: profile.model, label: profile.model, provider: this.options.provider, default: true }];
+      if (profile) return runtimeConnectionModels(profile, this.options.provider, []);
       throw new Error(IN_PROCESS_RUNTIME_MODEL_DISCOVERY_DISABLED);
     }
     if (!force && this.runtimeModels
@@ -2245,7 +2245,7 @@ export class MultiremiDaemon {
         // ACP supplies reasoning metadata, not the custom supplier's model inventory.
         // Services without a models endpoint retain the configured model and its ACP capabilities.
         models = catalog.status === "fulfilled" ? catalog.value : this.runtimeModels
-          ?? [{ id: profile.model, label: profile.model, provider, default: true }];
+          ?? runtimeConnectionModels(profile, provider, []);
         if (capabilities.status === "fulfilled") {
           const byId = new Map(capabilities.value.map(model => [model.id, model]));
           models = models.map(model => {

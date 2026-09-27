@@ -29,6 +29,7 @@ remi runtime profile create --file profile.json --json
     "name": "team-codex",
     "base_url": "https://gateway.example/v1",
     "model": "custom-model",
+    "models": ["custom-model", "custom-model-fast"],
     "auth_mode": "api_key",
     "env_key": ""
   },
@@ -36,7 +37,7 @@ remi runtime profile create --file profile.json --json
 }
 ```
 
-外层 `name` 是展示名，内层 `profile.name` 是连接标识，只接受字母、数字、下划线、连字符。Codex 接口须兼容 Responses；Claude 须兼容 Anthropic Messages，并可设置 `auth_header: "bearer"` 或 `"x-api-key"`。每个 Profile 声明一个模型。地址、模型与思考能力规则见 [Codex](../design/acp-codex-via-codex-acp.md#runtime-自定义连接)和 [Claude](../design/acp-claude-via-claude-agent-acp.md)。不要把真实密钥提交到 Git。
+外层 `name` 是展示名，内层 `profile.name` 是连接标识，只接受字母、数字、下划线、连字符。Codex 接口须兼容 Responses；Claude 须兼容 Anthropic Messages，并可设置 `auth_header: "bearer"` 或 `"x-api-key"`。`model` 是默认模型；可选 `models` 是最多 200 个唯一模型 ID 的白名单，必须包含默认模型。省略 `models` 时沿用 provider 自动发现的目录；显式配置后只允许列表内模型。地址、模型与思考能力规则见 [Codex](../design/acp-codex-via-codex-acp.md#runtime-自定义连接)和 [Claude](../design/acp-claude-via-claude-agent-acp.md)。不要把真实密钥提交到 Git。
 
 选择机器上登记的 Runtime，使用返回的 Profile ID 创建组：
 

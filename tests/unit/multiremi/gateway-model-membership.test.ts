@@ -25,6 +25,10 @@ function setup() {
     // A stale runtime report must not resurrect a member removed by the native catalog.
     models: inventory.map(id => ({ id, label: id, provider: "openai", default: id === "executable-model" })),
   });
+  // Keep these pre-existing group catalog tests independent of the new
+  // configuration acknowledgement protocol; discovery no longer creates groups.
+  store.saveExecutionGroup("local", { name: "catalog-group", provider: "codex", profile_id: null, runtime_ids: [runtime.id] }, "catalog-group");
+  db!.run("UPDATE multiremi_execution_groups SET managed = 0 WHERE id = ?", ["catalog-group"]);
   const app = createMultiremiApp({ store });
   const discover = (nativeIds = ["executable-model"], nativeStatus = 200) => discoverGatewayModels(
     store, "local", "codex", async url => url.endsWith("/backend-api/codex/models")

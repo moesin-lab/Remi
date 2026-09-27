@@ -67,7 +67,7 @@ WSClient → useRealtimeSync → sync/<领域>.ts
 
 ## 实时更新与性能定位
 
-Runtime 详情的 Codex / Claude Code 连接页通过 [provider-profile.ts](../../frontend/packages/core/runtimes/provider-profile.ts) 与[共享表单](../../frontend/packages/views/runtimes/components/runtime-provider-profile-tab.tsx)读取和保存单个 Runtime 的 provider 配置；查询键包含 workspace/runtime ID，响应严格校验。表单支持 API Key（保存后清空，留空保留）和本机环境变量；Claude 还支持 Bearer / x-api-key 请求鉴权；未声明对应 `codex_profiles: 1` 或 `claude_profiles: 1` 的旧 daemon 只能查看更新提示。保存后失效 Runtime 和模型目录缓存；鉴权与隔离契约见 [Codex Runtime](../design/acp-codex-via-codex-acp.md#runtime-自定义连接)和 [Claude Code Runtime](../design/acp-claude-via-claude-agent-acp.md)。
+Runtime 的统一配置页 [execution-config-page.tsx](../../frontend/packages/views/runtimes/components/execution-config-page.tsx)集中管理工作区连接 Profile 与能力组：先建 Claude/Codex Profile，再选择组的 provider、Profile 与 Runtime 成员。Runtime 详情展示组绑定和应用状态，并链接统一入口。查询与 mutation 由 [execution-config.ts](../../frontend/packages/core/runtimes/execution-config.ts)提供，响应通过 [execution-profiles.ts](../../frontend/packages/core/api/schemas/execution-profiles.ts)校验；保存后失效配置、Runtime 和模型目录缓存。API Key 不读回，编辑时留空保留已有密钥；Claude 支持 Bearer / x-api-key。配置状态区分待应用、已应用与失败，不以在线状态代替配置确认。权限、下发和旧数据行为见[执行配置](execution-configuration.md)。
 
 - [useRealtimeSync](../../frontend/packages/core/realtime/use-realtime-sync.ts)负责订阅生命周期和断线重连后的缓存恢复；领域处理器集中在 [realtime/sync/](../../frontend/packages/core/realtime/sync/)。
 - [issues/ws-updaters.ts](../../frontend/packages/core/issues/ws-updaters.ts)补写可确定的任务列表和详情，对派生列表做失效处理。改任务响应字段时同时检查这里和 mutation 的缓存处理。

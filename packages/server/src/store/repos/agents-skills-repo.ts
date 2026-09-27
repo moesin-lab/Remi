@@ -252,8 +252,15 @@ export class AgentsSkillsRepo {
     const ownerChanged = (updated.ownerId ?? "local") !== (current.ownerId ?? "local");
     const workspaceChanged = updated.workspaceId !== current.workspaceId;
     const runtimeChanged = updated.runtimeId !== current.runtimeId || updated.executionGroupId !== current.executionGroupId;
-    if (providerChanged || ownerChanged || workspaceChanged || runtimeChanged) {
-      this.rescheduleAgentQueuedTasks(updated, { workspaceChanged, executionTargetChanged: providerChanged || runtimeChanged });
+    const managedGroup = updated.executionGroupId
+      ? getExecutionGroup(this.ctx.db, updated.executionGroupId, updated.workspaceId)?.managed : false;
+    const modelChanged = Boolean(managedGroup)
+      && (updated.model !== current.model || updated.thinkingLevel !== current.thinkingLevel);
+    if (providerChanged || ownerChanged || workspaceChanged || runtimeChanged || modelChanged) {
+      // Dispatched tasks contain a frozen connection but hydrate Agent model
+      // settings on recovery. Retire those unstarted snapshots when the user
+      // changes execution parameters, just as for an explicit target change.
+      this.rescheduleAgentQueuedTasks(updated, { workspaceChanged, executionTargetChanged: providerChanged || runtimeChanged || modelChanged });
     }
     return updated;
   }
@@ -364,7 +371,9 @@ export class AgentsSkillsRepo {
     if (group.provider !== provider) throw new Error("Execution group provider does not match Agent provider");
     if (!group.runtimeIds.some(runtimeId => {
       const runtime = this.ctx.runtimes().getRuntime(runtimeId);
-      return runtime && (runtime.visibility === "public" || (runtime.ownerId ?? "local") === ownerId);
+      return runtime && (runtime.workspaceId ?? "local") === workspaceId
+        && (runtime.provider === "any" || runtime.provider === provider)
+        && (runtime.visibility === "public" || (runtime.ownerId ?? "local") === ownerId);
     })) throw new Error("Execution group has no Runtime available to the Agent owner");
   }
 

@@ -5,6 +5,8 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 
 import { I18nProvider } from "@multiremi/core/i18n/react";
+import { WorkspaceSlugProvider } from "@multiremi/core/paths";
+import { NavigationProvider } from "../../navigation";
 import type { AgentRuntime } from "@multiremi/core/types";
 import type { DaemonInventoryEntry } from "@multiremi/core/runtimes";
 import enCommon from "../../locales/en/common.json";
@@ -70,14 +72,6 @@ vi.mock("@multiremi/core/runtimes/mutations", () => ({
   }),
 }));
 vi.mock("@multiremi/ui/hooks/use-mobile", () => ({ useIsMobile: () => true }));
-vi.mock("../../navigation", async () => {
-  const actual =
-    await vi.importActual<typeof import("../../navigation")>("../../navigation");
-  return {
-    ...actual,
-    useNavigation: () => ({ searchParams: fixture.searchParams }),
-  };
-});
 vi.mock("react-resizable-panels", () => ({
   Group: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   Panel: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -126,7 +120,18 @@ function makeRuntime(overrides: Partial<AgentRuntime> = {}): AgentRuntime {
 function renderPage() {
   return render(
     <I18nProvider locale="en" resources={resources}>
-      <RuntimesPage />
+      <WorkspaceSlugProvider slug="workspace">
+        <NavigationProvider value={{
+          pathname: "/workspace/runtimes",
+          searchParams: fixture.searchParams,
+          push: vi.fn(),
+          replace: vi.fn(),
+          back: vi.fn(),
+          getShareableUrl: (path) => `https://remi.example${path}`,
+        }}>
+          <RuntimesPage />
+        </NavigationProvider>
+      </WorkspaceSlugProvider>
     </I18nProvider>,
   );
 }

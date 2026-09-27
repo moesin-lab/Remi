@@ -454,6 +454,8 @@ export interface SeedRefs {
   skillId: string;
   skillFileId: string;
   runtimeId: string;
+  executionProfileId: string;
+  executionGroupId: string;
   projectId: string;
   repositoryId: string;
   projectResourceId: string;
@@ -810,7 +812,17 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
   store.assignIssue(blockedIssue.id, { assigneeType: "member", assigneeId: inboxMemberId } as any);
   const inboxItem = store.listInboxItems(inboxMemberId)[0];
 
+  const executionProfile = store.saveExecutionProfile(workspaceId, {
+    name: "Snapshot connection", provider: "claude",
+    profile: { name: "snapshot", base_url: "https://models.snapshot.invalid", model: "claude-sonnet-4", auth_mode: "env", env_key: "REMI_CLAUDE_SNAPSHOT_KEY" },
+  }, "ep_snapshot");
+  const executionGroup = store.saveExecutionGroup(workspaceId, {
+    name: "Snapshot group", provider: "claude", profile_id: executionProfile.id, runtime_ids: [runtime.id],
+  }, "eg_snapshot");
+
   return {
+    executionProfileId: executionProfile.id,
+    executionGroupId: executionGroup.id,
     workspaceId,
     otherWorkspaceId: other.id,
     userId: user.id,
@@ -895,6 +907,8 @@ const ID_BY_COLLECTION: Record<string, keyof SeedRefs> = {
   runs: "knowledgeRunId",
   submissions: "knowledgeSubmissionId",
   runtimes: "runtimeId",
+  "execution-profiles": "executionProfileId",
+  "execution-groups": "executionGroupId",
   skills: "skillId",
   squads: "squadId",
   tasks: "taskId",
@@ -1020,6 +1034,11 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
 /** GET routes whose handler needs a query string to return a real body. */
 function getQuery(pattern: string, refs: SeedRefs): string {
   switch (pattern) {
+    case "/api/execution-profiles":
+    case "/api/execution-profiles/:id":
+    case "/api/execution-groups":
+    case "/api/execution-groups/:id":
+      return `?workspace_id=${encodeURIComponent(refs.workspaceId)}`;
     case "/api/issues/search":
     case "/api/multiremi/issues/search":
     case "/api/projects/search":

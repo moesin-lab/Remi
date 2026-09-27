@@ -22,11 +22,11 @@ execution group or workspace clears the saved backup unless supplied again.
 <agent>` and `remi agent default` accept `--execution-group <group-id>`.
 Use `remi runtime group list` to find groups and their online Runtime counts,
 then `remi runtime model catalog --execution-group <group-id>` to inspect models.
-Groups default to one machine and Runtime type. Assign the same custom group ID
-with `remi runtime update <runtime> --execution-group <group-id>` to pool Runtimes
-in the same workspace and provider. Workspace boundaries remain isolated;
-a group cannot mix Runtime types. Restore a Runtime's default group with
-`remi runtime update <runtime> --data '{"execution_group_id":null}'`.
+Create and maintain groups explicitly with `remi runtime group create|update`
+and a JSON body containing `name`, `provider`, `profile_id` (or null), and
+`runtime_ids`. Discovery no longer creates groups. A Runtime can belong to several
+groups in its workspace; provider compatibility is checked. Existing legacy groups
+and bindings are retained on upgrade. See [execution configuration](dev/execution-configuration.md).
 
 The legacy `--runtime <runtime-id>` agent and model-catalog option remains
 supported, and is mutually exclusive with `--execution-group`. Omitting both
@@ -52,17 +52,19 @@ thinking level are preserved. Custom Runtime connections keep their own catalogs
 
 ## Canonical command tree
 
-Codex Runtime connections use `remi runtime codex-profile get <runtime>` and
-`remi runtime codex-profile set <runtime> --file profile.json`. The JSON body
-contains `profile` and an optional write-only `api_key`; `profile: null` restores
-the workspace gateway. These are human configuration commands; task credentials
-cannot read or change them. See [Codex Runtime connections](design/acp-codex-via-codex-acp.md#runtime-自定义连接)
-for authentication, environment variables and session behavior.
+Reusable workspace connections use `remi runtime profile list|get|create|update|delete`.
+Create/update accepts `name`, `provider` (`codex` or `claude`), a structured `profile`,
+and an optional write-only `api_key`. Updates replace configuration and allocate a
+new revision; omitting `api_key` preserves an existing key. Use
+`remi runtime group list|get|create|update|delete` to bind profiles to explicit
+Runtime members. Writes require workspace administration, and group changes also
+require permission to edit the affected Runtimes. Task and daemon credentials
+cannot manage these resources. Examples and migration limits are in
+[execution configuration](dev/execution-configuration.md).
 
-Claude Code uses `remi runtime claude-profile get <runtime>` and
-`remi runtime claude-profile set <runtime> --file profile.json`, with the same
-credential and clear semantics plus `auth_header: bearer | x-api-key`. See
-[Claude Code Runtime connections](design/acp-claude-via-claude-agent-acp.md).
+The older `runtime codex-profile get|set` and `runtime claude-profile get|set`
+commands remain available for retained per-Runtime connections. New configuration
+uses central profiles; the legacy commands do not edit a group's central profile.
 
 For either custom connection, `remi runtime model refresh <runtime>` asks its
 daemon to discover the provider catalog. Poll `runtime model status <runtime>

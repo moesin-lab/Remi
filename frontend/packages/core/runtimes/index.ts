@@ -13,6 +13,8 @@ export * from "./custom-pricing-store";
 export * from "./usage-diagnostics-store";
 export * from "./cloud-runtime";
 export * from "./provisions";
+
+export * from "./execution-config";
 // Subpath, never the root barrel: a *value* import from "@multiremi/contracts"
 // drags every `export * from "./x.js"` in its index into the Next build, and
 // webpack cannot resolve those .js specifiers against TS sources. Type-only

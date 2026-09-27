@@ -95,7 +95,7 @@ describe("Multiremi store — orphan recovery and retry rules", () => {
 
     // Provider sessions are runtime-owned state. The daemon reports them only
     // after a successful claim; pre-claim task input is not an established
-    // Issue Session lane and is deliberately discarded at claim time.
+    // Session lane and is deliberately discarded at claim time.
     store.pinTaskSession(retryTask.id, "sess-issue", "/tmp/issue");
     store.pinTaskSession(chatTask.id, "sess-chat", "/tmp/chat");
 

@@ -3644,6 +3644,22 @@ runMigrations(this.db);
     return this.sessions.getOrCreateDefaultIssueSession(issueId, createdById);
   }
 
+  getOrCreateDefaultChatSession(chatId: string, createdById: string | null = null): MultiremiIssueSession {
+    return this.sessions.getOrCreateDefaultChatSession(chatId, createdById);
+  }
+
+  createSession(chatId: string, input: CreateIssueSessionInput = {}): MultiremiIssueSession {
+    return this.sessions.createSession(chatId, input);
+  }
+
+  listChatOwnedSessions(chatId: string, includeArchived = false): MultiremiIssueSession[] {
+    return this.sessions.listChatSessions(chatId, includeArchived);
+  }
+
+  adoptLegacySession(chatId: string, sessionId: string): MultiremiIssueSession {
+    return this.sessions.adoptLegacySession(chatId, sessionId);
+  }
+
   createIssueSession(issueId: string, input: CreateIssueSessionInput = {}): MultiremiIssueSession {
     return this.sessions.createIssueSession(issueId, input);
   }
@@ -3725,11 +3741,14 @@ runMigrations(this.db);
 
   buildTaskSessionProjection(taskId: string): MultiremiSessionProjection | null {
     const task = this.tasks.getTask(taskId);
-    if (task?.chatSessionId && !this.feishuBot.getIssueIdForChatSession(task.chatSessionId)) {
+    if (task?.chatSessionId) {
+      const executionKind = this.tasks.getTaskChatExecutionKind(task);
+      if (task.issueSessionId && executionKind !== "ordinary") {
+        return this.sessions.buildTaskSessionProjection(taskId);
+      }
       return this.chat.buildTaskSessionProjection(taskId);
     }
     if (task?.issueSessionId) return this.sessions.buildTaskSessionProjection(taskId);
-    if (task?.chatSessionId) return this.chat.buildTaskSessionProjection(taskId);
     return null;
   }
 
@@ -3747,6 +3766,10 @@ runMigrations(this.db);
 
   listIssueSessionResults(issueId: string): MultiremiSessionResult[] {
     return this.sessions.listIssueSessionResults(issueId);
+  }
+
+  listSessionResults(sessionId: string): MultiremiSessionResult[] {
+    return this.sessions.listSessionResults(sessionId);
   }
 
   listTasksForIssue(issueId: string): MultiremiTask[] {
@@ -4509,7 +4532,7 @@ runMigrations(this.db);
     return this.tasks.getTaskByRef(ref, input);
   }
 
-  getTaskChatExecutionKind(task: MultiremiTask): "ordinary" | "topic" {
+  getTaskChatExecutionKind(task: MultiremiTask): "ordinary" | "session" | "topic" {
     return this.tasks.getTaskChatExecutionKind(task);
   }
 

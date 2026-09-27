@@ -110,6 +110,12 @@ describe("translateSqliteToPg", () => {
     ).toBe("CREATE TABLE t (id TEXT, x TEXT)");
   });
 
+  it("preserves explicit Postgres constraints added after schema creation", () => {
+    const sql = "ALTER TABLE child ADD CONSTRAINT child_parent_fkey "
+      + "FOREIGN KEY(parent_id) REFERENCES parent(id) ON DELETE SET NULL";
+    expect(translateSqliteToPg(sql)).toBe(sql);
+  });
+
   it("rewrites the sqlite rowid dedup DELETE to a Postgres ctid self-join", () => {
     expect(
       translateSqliteToPg("DELETE FROM t WHERE rowid NOT IN (SELECT MAX(rowid) FROM t GROUP BY a, b)"),
@@ -757,11 +763,14 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       assigneeId: squad.id,
       workspaceId,
     });
-    const leaderTask = store.createTask({
+    const chat = store.createChatSession({
       agentId: leader.id,
-      issueId: issue.id,
-      prompt: "Lead the PG delegation test.",
       workspaceId,
+    });
+    const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "PG delegation" });
+    const leaderTask = store.createSessionTask(session.id, {
+      agentId: leader.id,
+      prompt: "Lead the PG delegation test.",
     });
     expect(store.claimTask(leaderRuntime.id)?.id).toBe(leaderTask.id);
     store.buildTaskSessionProjection(leaderTask.id);
@@ -1351,7 +1360,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       .toBe("git@github.com:acme/second.git");
   });
 
-  it("persists Issue Sessions, agent lanes, projections, and explicit results", () => {
+  it("persists Sessions, agent lanes, projections, and explicit results", () => {
     const ws = freshWorkspace();
     const runtime = store.registerRuntime({
       name: "rt-session-pg",
@@ -2338,7 +2347,9 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const runtime = store.registerRuntime({ name: "projection-race-runtime", provider: "codex", workspaceId: ws });
     const agent = store.createAgent({ name: "Projection Race", provider: "codex", workspaceId: ws });
     const issue = store.createIssue({ title: "Projection race", workspaceId: ws });
-    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Freeze this prompt" });
+    const chat = store.createChatSession({ agentId: agent.id, workspaceId: ws });
+    const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Projection race" });
+    const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Freeze this prompt" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     expect(task.issueSessionId).toBeString();
 

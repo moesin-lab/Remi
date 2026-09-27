@@ -669,14 +669,17 @@ describe("Feishu bot standard Task bridge", () => {
       body: `Please implement this [@Teammate](mention://agent/${teammate.id})`,
     });
     const teammateTask = store.listTasksForIssue(issue.id).find((task) => task.agentId === teammate.id)!;
-    const baselineChatTaskCount = store.listTasks().filter((task) => task.chatSessionId === inbound.chatSessionId).length;
+    const ordinaryChatTasks = () => store.listTasks().filter((task) =>
+      task.chatSessionId === inbound.chatSessionId && !task.issueSessionId
+    );
+    const baselineChatTaskCount = ordinaryChatTasks().length;
 
     store.completeTask(leaderTask.id, { output: "Delegated; waiting for implementation." });
-    expect(store.listTasks().filter((task) => task.chatSessionId === inbound.chatSessionId)).toHaveLength(baselineChatTaskCount);
+    expect(ordinaryChatTasks()).toHaveLength(baselineChatTaskCount);
     expect(store.claimTask("rt_bot")?.id).toBe(teammateTask.id);
     store.startTask(teammateTask.id);
     store.completeTask(teammateTask.id, { output: "Implementation complete." });
-    expect(store.listTasks().filter((task) => task.chatSessionId === inbound.chatSessionId)).toHaveLength(baselineChatTaskCount);
+    expect(ordinaryChatTasks()).toHaveLength(baselineChatTaskCount);
 
     const leaderReturn = store.listTasksForIssue(issue.id).find((task) =>
       task.agentId === agent.id && task.parentTaskId === teammateTask.id

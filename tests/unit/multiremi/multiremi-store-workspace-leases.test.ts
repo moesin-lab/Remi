@@ -26,7 +26,7 @@ function seed(store: MultiremiStore) {
   return { runtime, firstAgent, secondAgent, issue };
 }
 
-describe("Issue Session workspace leases", () => {
+describe("Session workspace leases", () => {
   it("claims tasks from two discussion Sessions concurrently", () => {
     const store = createStore();
     const { runtime, firstAgent, secondAgent, issue } = seed(store);

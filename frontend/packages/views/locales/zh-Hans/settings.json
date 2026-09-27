@@ -493,7 +493,7 @@
     "space_used": "占用空间",
     "last_failure": "最近一次归档失败",
     "cleanup_title": "工作目录清理",
-    "cleanup_description": "已完成 Issue 的工作目录会保留指定时间。会话归档校验成功前，清理任务不会删除工作目录。",
+    "cleanup_description": "已完成 Issue 的工作目录会保留指定时间。Provider Session 归档校验成功前，清理任务不会删除工作目录。",
     "workspace_ttl": "工作目录保留时间",
     "gc_interval": "清理扫描周期",
     "hours": "小时",

@@ -374,7 +374,8 @@ function sameExecutionLaneSql(queued: string, active: string): string {
     OR (${active}.agent_id = ${queued}.agent_id AND (
     (${queued}.issue_session_id IS NOT NULL AND ${active}.issue_session_id = ${queued}.issue_session_id
       AND ${executionScopeSql(queued)} = ${executionScopeSql(active)})
-    OR (${queued}.chat_session_id IS NOT NULL AND ${active}.chat_session_id = ${queued}.chat_session_id)
+    OR (${queued}.chat_session_id IS NOT NULL AND ${queued}.issue_session_id IS NULL
+      AND ${active}.chat_session_id = ${queued}.chat_session_id AND ${active}.issue_session_id IS NULL)
     OR (${queued}.issue_id IS NOT NULL AND ${queued}.issue_session_id IS NULL
       AND ${active}.issue_id = ${queued}.issue_id AND ${active}.issue_session_id IS NULL)
   )))`;
@@ -619,7 +620,12 @@ export class TasksRepo {
     const agent = this.ctx.agents().getAgent(input.agentId);
     if (!agent) throw new Error(`Agent not found: ${input.agentId}`);
     if (agent.archivedAt) throw new Error(`Agent is archived: ${input.agentId}`);
-    const inputChat = input.chatSessionId ? this.ctx.chat().getChatSession(input.chatSessionId) : null;
+    const explicitIssueSessionId = cleanOptionalString(input.issueSessionId ?? input.issue_session_id);
+    const explicitIssueSession = explicitIssueSessionId
+      ? this.ctx.issueSessions().getIssueSession(explicitIssueSessionId)
+      : null;
+    let resolvedChatSessionId = input.chatSessionId ?? explicitIssueSession?.chatId ?? null;
+    const inputChat = resolvedChatSessionId ? this.ctx.chat().getChatSession(resolvedChatSessionId) : null;
     const inputChatLineage = inputChat ? {
       executionFingerprint: cleanOptionalString(input.executionFingerprint ?? input.execution_fingerprint) ?? inputChat.sessionExecutionFingerprint,
       workDir: input.workDir ?? inputChat.workDir,
@@ -677,10 +683,20 @@ export class TasksRepo {
       || parentTask?.issueCreationRestricted
       || agent.issueCreationRequiresProposal,
     );
-    const chatSession = input.chatSessionId ? this.ctx.chat().getChatSession(input.chatSessionId) : null;
-    if (input.chatSessionId && !chatSession) throw new Error(`Chat session not found: ${input.chatSessionId}`);
-    if (chatSession && chatSession.agentId !== input.agentId) throw new Error("Chat session agent does not match task agent");
-    const issueId = input.issueId ?? triggerComment?.issueId ?? null;
+    const requestedIssueSessionId = explicitIssueSessionId
+      ?? triggerComment?.issueSessionId
+      ?? null;
+    const issueSession = requestedIssueSessionId
+      ? (requestedIssueSessionId === explicitIssueSessionId ? explicitIssueSession : this.ctx.issueSessions().getIssueSession(requestedIssueSessionId))
+      : null;
+    if (requestedIssueSessionId && !issueSession) throw new Error(`Session not found: ${requestedIssueSessionId}`);
+    resolvedChatSessionId ??= issueSession?.chatId ?? null;
+    const chatSession = resolvedChatSessionId ? this.ctx.chat().getChatSession(resolvedChatSessionId) : null;
+    if (resolvedChatSessionId && !chatSession) throw new Error(`Chat session not found: ${resolvedChatSessionId}`);
+    if (chatSession && !issueSession && chatSession.agentId !== input.agentId) {
+      throw new Error("Chat session agent does not match task agent");
+    }
+    const issueId = input.issueId ?? triggerComment?.issueId ?? issueSession?.issueId ?? null;
     const issue = issueId ? this.ctx.issues().getIssue(issueId) : null;
     if (issueId && !issue) throw new Error(`Issue not found: ${issueId}`);
     if (triggerComment && issue && triggerComment.issueId !== issue.id) throw new Error("Trigger comment does not belong to task issue");
@@ -690,17 +706,15 @@ export class TasksRepo {
     // reference that would drive B's agent + machine + credentials from A).
     if (issue && issue.workspaceId !== agent.workspaceId) throw new Error("Issue workspace does not match agent workspace");
     if (chatSession && chatSession.workspaceId !== agent.workspaceId) throw new Error("Chat session workspace does not match agent workspace");
-    if (chatSession && issueId
+    if (chatSession && issueId && !issueSession
       && this.ctx.feishuBot().getFeishuIssueIdForChatSession(chatSession.id) !== issueId) {
       throw new ChatIssueTaskConflictError("Only Feishu Issue topics can create Chat transport tasks with an Issue");
     }
-    const requestedIssueSessionId = cleanOptionalString(input.issueSessionId ?? input.issue_session_id)
-      ?? triggerComment?.issueSessionId
-      ?? (issue && !chatSession ? this.ctx.issueSessions().getOrCreateDefaultIssueSession(issue.id).id : null);
-    const issueSession = requestedIssueSessionId ? this.ctx.issueSessions().getIssueSession(requestedIssueSessionId) : null;
-    if (requestedIssueSessionId && !issueSession) throw new Error(`Issue session not found: ${requestedIssueSessionId}`);
-    if (issueSession && issueSession.issueId !== issueId) throw new Error("Issue session does not belong to task issue");
-    if (issueSession && issueSession.workspaceId !== agent.workspaceId) throw new Error("Issue session workspace does not match agent workspace");
+    if (issueSession && issueSession.issueId !== issueId) throw new Error("Session is not currently linked to the Task Issue");
+    if (issueSession && issueSession.chatId !== (chatSession?.id ?? null)) {
+      throw new Error("Session does not belong to task Chat");
+    }
+    if (issueSession && issueSession.workspaceId !== agent.workspaceId) throw new Error("Session workspace does not match Agent workspace");
     // Snapshot the lease decision on the Task. A Session setting may change
     // later, but an in-flight Task must keep the workspace ownership it was
     // created with. Historical Issue Tasks without a Session stay exclusive.
@@ -711,7 +725,9 @@ export class TasksRepo {
     const holdsWorkspace = issueId
       ? (issueSession?.withCode ? false : requestedHoldsWorkspace ?? issueSession?.holdsWorkspace ?? true)
       : true;
-    const surfaceWorkspaceId = chatSession ? chatSession.runtimeWorkspaceId : holdsWorkspace ? issue?.runtimeWorkspaceId : null;
+    const surfaceWorkspaceId = chatSession && (!issueSession || holdsWorkspace)
+      ? chatSession.runtimeWorkspaceId
+      : holdsWorkspace ? issue?.runtimeWorkspaceId : null;
     const explicitWorkspaceId = input.runtimeWorkspaceId ?? input.runtime_workspace_id;
     if (issueId && !holdsWorkspace && explicitWorkspaceId != null) {
       throw new RuntimeWorkspaceError("A task without workspace ownership cannot select a runtime workspace", 409);
@@ -886,7 +902,7 @@ export class TasksRepo {
         issueSession?.id ?? null,
         issueSessionGeneration,
         holdsWorkspace ? 1 : 0,
-        input.chatSessionId ?? null,
+        resolvedChatSessionId,
         triggerCommentId,
         triggerSummary,
         cleanOptionalString(input.requestingUserName ?? input.requesting_user_name),
@@ -1028,7 +1044,7 @@ export class TasksRepo {
     );
     if (audit) {
       const session = this.ctx.issueSessions().getIssueSession(sessionId);
-      if (session) {
+      if (session?.issueId) {
         this.ctx.appendIssueActivity(session.issueId, {
           actorType: "system",
           actorId: null,
@@ -1229,14 +1245,28 @@ export class TasksRepo {
   /** Live transport provenance, independent of migration/audit records. A
    * historical user turn may be detached and run cold; a proactive Issue wake
    * has no meaning once its exact destination has changed. */
-  getTaskChatExecutionKind(task: MultiremiTask): "ordinary" | "topic" {
+  getTaskChatExecutionKind(task: MultiremiTask): "ordinary" | "session" | "topic" {
     if (!task.chatSessionId) return "ordinary";
     const invalid = () => { throw new InvalidChatTaskDestinationError(task.id); };
     const liveTask = this.getTask(task.id);
     if (!liveTask || liveTask.status === "cancelled" || liveTask.workspaceId !== task.workspaceId
       || liveTask.agentId !== task.agentId || liveTask.chatSessionId !== task.chatSessionId) return invalid();
     const chat = this.ctx.chat().getChatSession(task.chatSessionId);
-    if (!chat || chat.workspaceId !== task.workspaceId || chat.agentId !== task.agentId) return invalid();
+    if (!chat || chat.workspaceId !== task.workspaceId) return invalid();
+    let detachedSessionReference = false;
+    if (task.issueSessionId) {
+      const session = this.ctx.issueSessions().getIssueSession(task.issueSessionId);
+      if (session && session.workspaceId === task.workspaceId && session.issueId === task.issueId
+        && session.chatId === chat.id) {
+        return "session";
+      }
+      // A pre-migration private Chat turn can retain an Issue Session audit
+      // reference which now belongs to another Chat (or no longer exists).
+      // Defer that stale reference until transport classification: an ordinary
+      // Chat is scrubbed below, while a Topic must still prove its live binding.
+      detachedSessionReference = true;
+    }
+    if (chat.agentId !== task.agentId) return invalid();
     const bindings = this.ctx.db.query(
       "SELECT id, workspace_id, agent_id, chat_session_id, issue_id FROM multiremi_feishu_bot_chat_bindings WHERE chat_session_id = ?",
     ).all(task.chatSessionId) as Row[];
@@ -1269,7 +1299,9 @@ export class TasksRepo {
     }
     // An ordinary legacy turn may already be detached by hydration. A topic
     // claim must still match the live row before its cached Issue is shipped.
-    if (liveTask.issueId !== task.issueId || !bindings.length || !bindings.every(matches)) return invalid();
+    if ((detachedSessionReference && task.executionFingerprint !== CHAT_ISSUE_DECOUPLED_FINGERPRINT)
+      || liveTask.issueId !== task.issueId
+      || !bindings.length || !bindings.every(matches)) return invalid();
     const issue = this.ctx.issues().getIssue(task.issueId!);
     if (!issue || issue.workspaceId !== task.workspaceId) return invalid();
     return "topic";
@@ -1282,7 +1314,8 @@ export class TasksRepo {
     if (task.executionFingerprint === CHAT_ISSUE_DECOUPLED_FINGERPRINT) task = { ...task, sessionId: null };
     // Retained task audits may still carry a pre-MUL-301 private Chat binding.
     // Never let that old association re-enter a daemon claim or eager checkout.
-    const ordinaryChat = Boolean(task.chatSessionId && this.getTaskChatExecutionKind(task) === "ordinary");
+    const chatExecutionKind = task.chatSessionId ? this.getTaskChatExecutionKind(task) : null;
+    const ordinaryChat = chatExecutionKind === "ordinary";
     if (ordinaryChat) {
       task = {
         ...task,
@@ -1306,7 +1339,15 @@ export class TasksRepo {
     // would erase the evidence that this task must stay in managed mode.
     const chatWorkspace = ordinaryChat && !task.runtimeWorkspaceId ? resolveChatWorkspace(this.ctx, chat, task) : null;
     if (chatWorkspace?.changed) task = { ...task, sessionId: null, workDir: null };
-    const issueSession = task.issueSessionId ? this.ctx.issueSessions().getIssueSession(task.issueSessionId) : null;
+    let issueSession = task.issueSessionId ? this.ctx.issueSessions().getIssueSession(task.issueSessionId) : null;
+    if (chatExecutionKind === "topic" && task.issueSessionId
+      && (!issueSession || issueSession.chatId !== task.chatSessionId || issueSession.issueId !== task.issueId)) {
+      // A retained migration-era Topic task may carry the old Issue's Session
+      // audit reference. Keep its verified Topic destination, but never expose
+      // or restore the stale product Session/provider lane.
+      task = { ...task, sessionId: null, issueSessionId: null, issueSessionGeneration: null };
+      issueSession = null;
+    }
     const resources = project ? this.ctx.projects().listProjectResources(project.id) : [];
     const projectResources = chatWorkspace?.mode === "managed"
       ? resources.filter((resource) => resource.resourceType !== "local_directory") : resources;
@@ -1319,7 +1360,7 @@ export class TasksRepo {
       ...task,
       runtimeWorkspace: task.runtimeWorkspaceId ? new RuntimeWorkspacesRepo(this.ctx).get(task.runtimeWorkspaceId) : null,
       agent: this.ctx.agents().getAgent(task.agentId),
-      ...(issueSession?.withCode ? { issueSession, issue_session: issueSession } : {}),
+      ...(issueSession ? { issueSession, issue_session: issueSession } : {}),
       issue,
       project,
       chatProjectId,
@@ -1844,14 +1885,7 @@ export class TasksRepo {
     let issueSessionGeneration: number | null = task.issueSessionGeneration ?? null;
     let issueProviderSessionId: string | null = task.sessionId;
     let issueWorkDir: string | null = task.workDir;
-    if (task.sessionId && task.chatSessionId) {
-      const chat = this.ctx.chat().getChatSession(task.chatSessionId);
-      keepProviderSession = executionFingerprintResumable(
-        chat?.sessionExecutionFingerprint ?? null,
-        executionFingerprint,
-        pluginSnapshot.length > 0 || Boolean(runtimeProfile),
-      );
-    } else if (task.issueSessionId) {
+    if (task.issueSessionId) {
       issueSessionId = task.issueSessionId;
       let lane = this.ctx.issueSessions().getOrCreateSessionAgentLane(task.issueSessionId, task.agentId, taskExecutionScope(task));
       const laneRuntime = lane.runtimeId ? this.ctx.runtimes().getRuntime(lane.runtimeId) : null;
@@ -1891,6 +1925,13 @@ export class TasksRepo {
       }
       issueSessionGeneration = lane.generation;
       keepProviderSession = laneResumable;
+    } else if (task.sessionId && task.chatSessionId) {
+      const chat = this.ctx.chat().getChatSession(task.chatSessionId);
+      keepProviderSession = executionFingerprintResumable(
+        chat?.sessionExecutionFingerprint ?? null,
+        executionFingerprint,
+        pluginSnapshot.length > 0 || Boolean(runtimeProfile),
+      );
     }
     this.ctx.db.run(
       `UPDATE multiremi_tasks
@@ -2284,15 +2325,16 @@ export class TasksRepo {
            AND (t.next_retry_at IS NULL OR t.next_retry_at <= ?)
            AND a.archived_at IS NULL
            AND (t.chat_session_id IS NULL OR project_chat.status = 'active')
-           AND NOT EXISTS (
+           AND (t.issue_session_id IS NOT NULL OR NOT EXISTS (
              SELECT 1 FROM multiremi_tasks earlier WHERE earlier.chat_session_id = t.chat_session_id
+               AND earlier.issue_session_id IS NULL
                AND earlier.status = 'queued' AND (
                  earlier.priority > t.priority
                  OR (earlier.priority = t.priority AND earlier.chat_queue_order < t.chat_queue_order)
                  OR (earlier.priority = t.priority AND earlier.chat_queue_order = t.chat_queue_order AND earlier.created_at < t.created_at)
                  OR (earlier.priority = t.priority AND earlier.chat_queue_order = t.chat_queue_order AND earlier.created_at = t.created_at AND earlier.id < t.id)
                )
-           )
+           ))
            AND a.workspace_id = t.workspace_id
            AND (
              SELECT COUNT(*)
@@ -3004,7 +3046,7 @@ export class TasksRepo {
     this.lockTaskIssueSessionsWithinWorkspaceLock([current]);
     const terminal = this.cancelTaskWithinWorkspaceLock(current, true);
     const nextAttempt = current.attempt + 1;
-    const detachedChatIssue = !!current.chatSessionId && !!current.issueId
+    const detachedChatIssue = !!current.chatSessionId && !!current.issueId && !current.issueSessionId
       && this.ctx.feishuBot().getFeishuIssueIdForChatSession(current.chatSessionId) !== current.issueId;
     const replacement = this.createTaskWithinWorkspaceLock({
       agentId: current.agentId,
@@ -3029,7 +3071,7 @@ export class TasksRepo {
       delegatedByAgentId: current.delegatedByAgentId,
       assignmentSourceEventId: current.assignmentSourceEventId,
     });
-    if (replacement.chatSessionId) {
+    if (replacement.chatSessionId && !replacement.issueSessionId) {
       this.ctx.db.run(
         "UPDATE multiremi_chat_sessions SET latest_task_id = ?, updated_at = ? WHERE id = ?",
         [replacement.id, nowIso(), replacement.chatSessionId],
@@ -3227,7 +3269,7 @@ export class TasksRepo {
       && parent.provider != null
       && parent.provider === parentEffectiveAgent.provider
       && this.runtimeCanRunTaskAgent(parentRuntime, parentEffectiveAgent, parent);
-    const detachedChatIssue = !!parent.chatSessionId && !!parent.issueId
+    const detachedChatIssue = !!parent.chatSessionId && !!parent.issueId && !parent.issueSessionId
       && this.ctx.feishuBot().getFeishuIssueIdForChatSession(parent.chatSessionId) !== parent.issueId;
     const invalidatedChatWorkspace = Boolean(parent.chatSessionId && !parent.issueId
       && !chatWorkspaceLineageCurrent(this.ctx, this.ctx.chat().getChatSession(parent.chatSessionId), parent));
@@ -3307,7 +3349,7 @@ export class TasksRepo {
     const retry = workspaceLockHeld
       ? this.createTaskWithinWorkspaceLock(retryInput)
       : this.createTask(retryInput);
-    if (retry.chatSessionId) {
+    if (retry.chatSessionId && !retry.issueSessionId) {
       this.ctx.db.run(
         "UPDATE multiremi_chat_sessions SET latest_task_id = ?, updated_at = ? WHERE id = ?",
         [retry.id, nowIso(), retry.chatSessionId],
@@ -3506,7 +3548,7 @@ export class TasksRepo {
     return { task, created: true, covered: false };
   }
 
-  /** Caller holds the workspace lifecycle lock and the Issue Session row lock. */
+  /** Caller holds the workspace lifecycle lock and the Session row lock. */
   private drainDelegationReturnsWithinWorkspaceLock(
     issueSessionId: string,
     trigger: {
@@ -3800,9 +3842,10 @@ export class TasksRepo {
         return { retry: null, delegationReturns: [], roundPushTasks: [] };
       }
     }
+    const ordinaryChatTask = Boolean(task.chatSessionId && !task.issueSessionId);
     if (
       status === "failed"
-      && task.chatSessionId
+      && ordinaryChatTask
       && task.failureReason === "agent_error.stale_session"
     ) {
       // The provider session and its machine-local directory are one lineage.
@@ -3822,7 +3865,7 @@ export class TasksRepo {
       );
     }
     const retry = status === "failed" ? this.maybeRetryFailedTask(task, workspaceLockHeld) : null;
-    if (retry && task.chatSessionId) {
+    if (retry && ordinaryChatTask) {
       this.ctx.feishuBot().retargetFeishuRoundPushTaskWithinTransaction(task.id, retry.id);
     }
     // A run row points at the task that currently IS the run. When the failure
@@ -3840,10 +3883,10 @@ export class TasksRepo {
     const delegationReturns: MultiremiTask[] = [];
     let roundPushTasks: MultiremiTask[] = [];
     this.ctx.accessTokens().revokeTaskAccessTokens(task.id);
-    if (status === "completed" && task.chatSessionId) {
+    if (status === "completed" && ordinaryChatTask && task.chatSessionId) {
       this.ctx.chat().completePendingAgentIssueUpdatesForTaskWithinTransaction(task.chatSessionId, task.id);
     }
-    if (task.chatSessionId && (status === "completed" || (status === "failed" && !retry))) {
+    if (ordinaryChatTask && task.chatSessionId && (status === "completed" || (status === "failed" && !retry))) {
       const role = "assistant";
       const messageBody = status === "completed" ? (body || "Task completed.") : (body || `Task ${status}`);
       const failureReason = status === "failed" ? task.failureReason : null;
@@ -3993,7 +4036,7 @@ export class TasksRepo {
       // Compute status after the return task is present. Otherwise the child
       // completion can mark the Issue done and the queued leader follow-up is
       // deliberately unable to reopen that explicit terminal state.
-      const issueStatus = task.chatSessionId
+      const issueStatus = task.chatSessionId && !task.issueSessionId
         ? null
         : this.nextIssueStatusAfterTaskTerminal(task, status, retry != null || replacementPlanned);
       if (issueStatus) {
@@ -4007,7 +4050,6 @@ export class TasksRepo {
       if (
         status === "completed"
         && task.issueSessionId
-        && !task.chatSessionId
         && issue
         && lead?.id === task.agentId
         && !this.hasActiveTaskForIssue(issue.id)
@@ -4281,7 +4323,7 @@ export class TasksRepo {
   // triggering comment when the task came from an @mention. Legacy daemons
   // still report the "Task completed." placeholder — skip it, it says nothing.
   private postAgentReplyComment(task: MultiremiTask, output: string | null): void {
-    if (!task.issueId || !task.agentId || task.chatSessionId) return;
+    if (!task.issueId || !task.agentId || (task.chatSessionId && !task.issueSessionId)) return;
     const body = (output ?? "").trim();
     if (!body || body === "Task completed.") return;
     try {
@@ -4310,7 +4352,7 @@ export class TasksRepo {
   }
 
   private postContextOverflowSystemComment(task: MultiremiTask): void {
-    if (!task.issueId || task.chatSessionId) return;
+    if (!task.issueId || (task.chatSessionId && !task.issueSessionId)) return;
     const body = "The agent could not complete this task because its context still exceeded the provider limit "
       + `at attempt ${task.attempt} of ${task.maxAttempts}. Automatic retries use progressively smaller Session `
       + "projections. Start a new Session, or publish and condense a checkpoint before retrying.";
@@ -4366,7 +4408,7 @@ export class TasksRepo {
     const rows = this.ctx.db.query(
       `SELECT status FROM multiremi_tasks
        WHERE issue_id = ?
-         AND chat_session_id IS NULL
+         AND (chat_session_id IS NULL OR issue_session_id IS NOT NULL)
          AND status NOT IN ('completed', 'failed', 'cancelled')`,
     ).all(issueId) as Array<{ status: string }>;
     const statuses = new Set(rows.map((row) => row.status));
@@ -4390,7 +4432,7 @@ export class TasksRepo {
     status: string,
     options: { rederive?: boolean } = {},
   ): void {
-    if (!task.issueId || task.chatSessionId) return;
+    if (!task.issueId || (task.chatSessionId && !task.issueSessionId)) return;
     // Serialize against direct Issue mutations before checking terminal state.
     // The no-op write acquires a row lock on Postgres and the writer lock on
     // SQLite, so a late worker can never reopen a concurrently accepted or
@@ -4449,7 +4491,7 @@ export class TasksRepo {
     const row = this.ctx.db.query(
       `SELECT 1 AS present FROM multiremi_tasks
        WHERE issue_id = ?
-         AND chat_session_id IS NULL
+         AND (chat_session_id IS NULL OR issue_session_id IS NOT NULL)
          AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
        LIMIT 1`,
     ).get(issueId) as { present: number } | null;
@@ -4460,7 +4502,7 @@ export class TasksRepo {
     const row = this.ctx.db.query(
       `SELECT 1 AS present FROM multiremi_tasks
        WHERE issue_id = ?
-         AND chat_session_id IS NULL
+         AND (chat_session_id IS NULL OR issue_session_id IS NOT NULL)
          AND status NOT IN ('completed', 'failed', 'cancelled')
        LIMIT 1`,
     ).get(issueId) as { present: number } | null;

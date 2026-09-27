@@ -2868,7 +2868,7 @@ export class MultiremiDaemon {
             }
           : {}),
       });
-      log.debug(`Issue Session archive prepared for ${issueId}`);
+      log.debug(`Provider Session Archive prepared for ${issueId}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       try {
@@ -2878,13 +2878,13 @@ export class MultiremiDaemon {
         });
       } catch (reportError) {
         log.warn(
-          `Failed to report Issue session archive preparation failure for ${issueId}: ${reportError instanceof Error ? reportError.message : String(reportError)}`,
+          `Failed to report Provider Session Archive preparation failure for ${issueId}: ${reportError instanceof Error ? reportError.message : String(reportError)}`,
         );
       }
       throw error;
     }
     try {
-      log.debug(`Checking Issue Session archive status for ${issueId}`);
+      log.debug(`Checking Provider Session Archive status for ${issueId}`);
       const status = await this.client.getIssueSessionArchiveStatus(
         runtimeId,
         issueId,
@@ -2892,7 +2892,7 @@ export class MultiremiDaemon {
         prepared.sha256,
         forceFreshSnapshot,
       );
-      log.debug(`Issue Session archive status checked for ${issueId}: ready=${status.gc_ready}`);
+      log.debug(`Provider Session Archive status checked for ${issueId}: ready=${status.gc_ready}`);
       if (status.gc_ready) {
         if (
           status.latest?.source_revision === MULTIREMI_SESSION_ARCHIVE_PREPARATION_FAILURE_REVISION
@@ -2925,7 +2925,7 @@ export class MultiremiDaemon {
         };
       }
 
-      log.debug(`Initializing Issue Session archive for ${issueId}`);
+      log.debug(`Initializing Provider Session Archive for ${issueId}`);
       const initialized = await this.client.initIssueSessionArchive(runtimeId, issueId, {
         sourceRevision: prepared.sourceRevision,
         sha256: prepared.sha256,
@@ -2936,7 +2936,7 @@ export class MultiremiDaemon {
           source: sessionArchiveSource,
         },
       });
-      log.debug(`Issue Session archive initialized for ${issueId}: status=${initialized.archive.status}`);
+      log.debug(`Provider Session Archive initialized for ${issueId}: status=${initialized.archive.status}`);
       if (initialized.archive.status === "ready") {
         this.assertWorkspaceRootOwner();
         await writeIssueSessionArchiveReceipt(workspaceDir, {
@@ -2951,14 +2951,14 @@ export class MultiremiDaemon {
           sha256: prepared.sha256,
         };
       }
-      log.debug(`Uploading Issue Session archive for ${issueId}`);
+      log.debug(`Uploading Provider Session Archive for ${issueId}`);
       await this.client.uploadIssueSessionArchive(
         runtimeId,
         issueId,
         initialized.archive.id,
         prepared.archivePath,
       );
-      log.debug(`Issue Session archive uploaded for ${issueId}`);
+      log.debug(`Provider Session Archive uploaded for ${issueId}`);
       const completed = await this.client.completeIssueSessionArchive(
         runtimeId,
         issueId,
@@ -3005,8 +3005,8 @@ export class MultiremiDaemon {
       if (logs.size > 1_000) logs.delete(logs.keys().next().value!);
       log.warn(
         retryState === "exhausted"
-          ? `Issue Session archive automatic retries exhausted for ${issueId}; preserving workspace for manual retry`
-          : `Issue Session archive retry deferred for ${issueId} until ${archive?.next_retry_at ?? "the server retry window"}`,
+          ? `Provider Session Archive automatic retries exhausted for ${issueId}; preserving workspace for manual retry`
+          : `Provider Session Archive retry deferred for ${issueId} until ${archive?.next_retry_at ?? "the server retry window"}`,
       );
     }
     return true;
@@ -3343,7 +3343,7 @@ export class MultiremiDaemon {
 
     try {
       this.assertWorkspaceRootOwner();
-      if (task.issueId && !task.chatSessionId) {
+      if (task.issueId && (!task.chatSessionId || task.issueSessionId)) {
         // Shared Issue roots and private discussion Session roots have separate
         // lifecycle keys, so each is protected from GC without serializing them
         // against one another.
@@ -3921,7 +3921,8 @@ export class MultiremiDaemon {
     const runtimeId = task.runtimeId ?? this.options.runtimeId;
     if (!task.issueId || task.holdsWorkspace === false || !runtimeId) return;
     if (task.runtimeWorkspaceId) {
-      // Only native session/archive state belongs to the Issue. Never report
+      // Only the Issue workspace and its Provider Session Archive state belong
+      // to the Issue. Never report
       // the external directory as an Issue-owned root that GC may reclaim.
       this.enqueueTaskReport(task.id, "workspace", {
         runtimeId,

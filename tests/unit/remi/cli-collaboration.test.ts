@@ -320,7 +320,7 @@ describe("native collaboration CLI contracts", () => {
   it.each([
     ["task.list", ["task", "list"], "/api/multiremi/tasks"],
     ["task.get", ["task", "get", "tsk_queued"], "/api/multiremi/tasks/tsk_queued"],
-    ["session.task.list", ["session", "task", "list", "iss_1", "ises_1"], "/api/issues/iss_1/sessions/ises_1/tasks"],
+    ["session.task.list", ["session", "task", "list", "chat_1", "ises_1"], "/api/multiremi/chats/chat_1/sessions/ises_1/tasks"],
     ["issue.active-task", ["issue", "active-task", "iss_1"], "/api/issues/iss_1/active-task"],
   ] as const)("shows complete queued task wait reasons through %s", async (id, argv, path) => {
     useCliEnv();
@@ -459,7 +459,6 @@ describe("native collaboration CLI contracts", () => {
       "comment list",
       "comment add",
       "session result publish",
-      "session list",
       "session task list",
       "session task create",
       "task get",
@@ -469,6 +468,7 @@ describe("native collaboration CLI contracts", () => {
     for (const path of canonicalPromptPaths) {
       expect(daemonSource, path).toContain(`remi ${path}`);
     }
+    expect(daemonSource).toContain("remi issue session list");
     const compatibilityPaths = [
       "issue comment list",
       "issue comment add",
@@ -555,13 +555,13 @@ describe("native collaboration CLI contracts", () => {
     expect(requests).toBe(0);
   });
 
-  it("creates workspace Sessions by default and supports discussion Sessions", async () => {
+  it("creates Chat-owned Sessions by default and supports discussion Sessions", async () => {
     useCliEnv();
     const bodies: Array<Record<string, unknown>> = [];
     globalThis.fetch = capabilityFetch("session.create", async (input) => {
       const request = input;
       expect(request.method).toBe("POST");
-      expect(new URL(request.url).pathname).toBe("/api/issues/MUL-136/sessions");
+      expect(new URL(request.url).pathname).toBe("/api/multiremi/chats/chat-136/sessions");
       const body = await request.json() as Record<string, unknown>;
       bodies.push(body);
       return Response.json({ id: `ises_${bodies.length}`, ...body }, { status: 201 });
@@ -569,10 +569,10 @@ describe("native collaboration CLI contracts", () => {
     const spec = specById("session.create");
 
     await capture(() => registryFor([spec]).execute([
-      "session", "create", "MUL-136", "--title", "Implementation", "--output", "json",
+      "session", "create", "chat-136", "--title", "Implementation", "--output", "json",
     ]));
     await capture(() => registryFor([spec]).execute([
-      "session", "create", "MUL-136", "--title", "Design chat", "--discussion", "--output", "json",
+      "session", "create", "chat-136", "--title", "Design chat", "--discussion", "--output", "json",
     ]));
 
     expect(bodies).toEqual([
@@ -586,14 +586,14 @@ describe("native collaboration CLI contracts", () => {
     const bodies: Array<Record<string, unknown>> = [];
     globalThis.fetch = capabilityFetch("session.create", async (request) => {
       expect(request.method).toBe("POST");
-      expect(new URL(request.url).pathname).toBe("/api/issues/MUL-312/sessions");
+      expect(new URL(request.url).pathname).toBe("/api/multiremi/chats/chat-312/sessions");
       bodies.push(await request.json() as Record<string, unknown>);
       return Response.json({ id: "ises_side" }, { status: 201 });
     });
     const spec = specById("session.create");
     for (const extra of [[], ["--discussion"]]) {
       await capture(() => registryFor([spec]).execute([
-        "session", "create", "MUL-312", "--title", "Side", "--from", "ises_main", ...extra,
+        "session", "create", "chat-312", "--title", "Side", "--from", "ises_main", ...extra,
       ]));
     }
     expect(bodies).toEqual([
@@ -635,7 +635,7 @@ describe("native collaboration CLI contracts", () => {
       "/api/sessions/ises_side", "/api/sessions/ises_side", "/api/sessions/ises_side",
       "/api/sessions/ises_side/inherited-context",
     ]);
-    expect(registryFor(specs).resolve(["session", "get", "MUL-312", "ises_side"])?.spec.id).toBe("session.get");
+    expect(registryFor(specs).resolve(["session", "get", "chat-312", "ises_side"])?.spec.id).toBe("session.get");
   });
 
   it("creates follow Sessions with an explicit inheritance mode", async () => {
@@ -647,7 +647,7 @@ describe("native collaboration CLI contracts", () => {
       return Response.json({ id: "ises_follow" }, { status: 201 });
     });
     await capture(() => registryFor([spec]).execute([
-      "session", "create", "MUL-324", "--title", "Follow", "--from", "ises_main", "--inherit-mode", "follow",
+      "session", "create", "chat-324", "--title", "Follow", "--from", "ises_main", "--inherit-mode", "follow",
     ]));
     expect(body).toEqual({ title: "Follow", holds_workspace: false, parent_session_id: "ises_main", inherit_mode: "follow" });
     expect(registryFor([spec]).renderHelpForArgv(["session", "create", "--help"]))
@@ -659,14 +659,14 @@ describe("native collaboration CLI contracts", () => {
     const spec = specById("session.create");
     const bodies: unknown[] = [];
     globalThis.fetch = capabilityFetch(spec.id, async (request) => {
-      expect(new URL(request.url).pathname).toBe("/api/issues/MUL-324/sessions");
+      expect(new URL(request.url).pathname).toBe("/api/multiremi/chats/chat-324/sessions");
       bodies.push(await request.json());
       return Response.json({ id: "ises_code" }, { status: 201 });
     });
     for (const inheritMode of ["snapshot", "follow"]) {
       for (const extra of [[], ["--with-code"]]) {
         await capture(() => registryFor([spec]).execute([
-          "session", "create", "MUL-324", "--from", "ises_main", "--inherit-mode", inheritMode, ...extra,
+          "session", "create", "chat-324", "--from", "ises_main", "--inherit-mode", inheritMode, ...extra,
         ]));
       }
     }

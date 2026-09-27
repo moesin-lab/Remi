@@ -74,7 +74,7 @@ export interface EphemeralContext {
   approvalMode?: "auto" | "ask";
   /** Async cache/materialization result prepared before synchronous assembly. */
   pluginRuntime?: PreparedAgentPluginRuntime;
-  /** Provider-native config/session root owned by this Issue Session lane. */
+  /** Provider-native config/session root owned by this Session lane. */
   providerHome?: IssueSessionProviderHome;
   /** In-memory endpoint/auth overlay for an isolated provider home. */
   providerEnv?: Record<string, string>;

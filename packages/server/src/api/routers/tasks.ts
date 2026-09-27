@@ -48,6 +48,20 @@ function clampTaskListLimit(value: number | undefined): number {
 
 export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+  const canCoordinateOwnedSessionTask = (c: Context, target: MultiremiTask): boolean => {
+    if (canCurrentUserAccessChatTask(c, store, target)) return true;
+    const taskToken = currentTaskAccessToken(c);
+    const source = taskToken?.taskId ? store.getTask(taskToken.taskId) : null;
+    return Boolean(
+      source
+      && !source.issueSessionId
+      && target.issueSessionId
+      && source.chatSessionId
+      && source.chatSessionId === target.chatSessionId
+      && source.issueId
+      && source.issueId === target.issueId,
+    );
+  };
   const denySideSessionDispatch = (c: Context): Response | null => {
     const sourceTaskId = currentTaskAccessToken(c)?.taskId;
     const sourceTask = sourceTaskId ? store.getTask(sourceTaskId) : null;
@@ -197,16 +211,16 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
         return c.json({ error: "continued task was delegated by another agent" }, 403);
       }
       if (!continuedTask.issueId || !continuedTask.issueSessionId) {
-        return c.json({ error: "continued task does not belong to an Issue Session" }, 400);
+        return c.json({ error: "continued task does not belong to a Session" }, 400);
       }
       if (sourceTask!.issueSessionId !== continuedTask.issueSessionId) {
-        return c.json({ error: "continued task belongs to another Issue Session" }, 400);
+        return c.json({ error: "continued task belongs to another Session" }, 400);
       }
       if (issueId && issueId !== continuedTask.issueId) {
         return c.json({ error: "requested issue does not match the continued task" }, 400);
       }
       if (requestedIssueSessionId && requestedIssueSessionId !== continuedTask.issueSessionId) {
-        return c.json({ error: "requested Issue Session does not match the continued task" }, 400);
+        return c.json({ error: "requested Session does not match the continued task" }, 400);
       }
     }
     const leaderDelegation = Boolean(
@@ -260,7 +274,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
+    if (!canCoordinateOwnedSessionTask(c, task)) return c.json({ error: "forbidden" }, 403);
     try {
       return c.json({ task: taskPublicResponse(store.getTaskWithAgent(task.id)!) });
     } catch (error) {
@@ -296,7 +310,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
+    if (!canCoordinateOwnedSessionTask(c, task)) return c.json({ error: "forbidden" }, 403);
     const body = await readJson<{ content?: string; kind?: string; force_answer?: boolean; forceAnswer?: boolean; reason?: string }>(c);
     const forceAnswer = body?.kind === "force_answer" || body?.force_answer === true || body?.forceAnswer === true;
     const content = cleanString(body?.content)
@@ -328,7 +342,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
+    if (!canCoordinateOwnedSessionTask(c, task)) return c.json({ error: "forbidden" }, 403);
     return c.json({ messages: store.listTaskSteerMessages(task.id) });
   };
   app.post("/api/multiremi/tasks/:id/steer", steerTaskRoute);

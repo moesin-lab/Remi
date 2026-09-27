@@ -45,40 +45,36 @@ type AppendSessionEventInput = {
 export class IssueSessionsRepo {
   constructor(private ctx: StoreContext) {}
 
-  getOrCreateDefaultIssueSession(issueId: string, createdById: string | null = null): MultiremiIssueSession {
-    const issue = this.ctx.issues().getIssue(issueId);
-    if (!issue) throw new Error(`Issue not found: ${issueId}`);
+  getOrCreateDefaultChatSession(chatId: string, createdById: string | null = null): MultiremiIssueSession {
+    const chat = this.ctx.chat().getChatSession(chatId);
+    if (!chat) throw new Error(`Chat not found: ${chatId}`);
     const existing = this.ctx.db.query(
-      `${SESSION_SELECT} WHERE issue_id = ? AND is_default = 1 LIMIT 1`,
-    ).get(issueId) as Row | null;
+      `${SESSION_SELECT} WHERE s.chat_id = ? AND s.is_default = 1 LIMIT 1`,
+    ).get(chatId) as Row | null;
     if (existing) return toIssueSession(existing);
-
-    const id = createId("ises");
-    const now = nowIso();
-    this.ctx.db.run(
-      `INSERT INTO multiremi_issue_sessions (
-         id, issue_id, workspace_id, title, status, is_default,
-         created_by_type, created_by_id, created_at, updated_at
-       ) VALUES (?, ?, ?, 'Main', 'active', 1, ?, ?, ?, ?)
-       ON CONFLICT DO NOTHING`,
-      [id, issueId, issue.workspaceId, createdById ? "member" : "system", createdById, now, now],
-    );
-    const row = this.ctx.db.query(
-      `${SESSION_SELECT} WHERE issue_id = ? AND is_default = 1 LIMIT 1`,
-    ).get(issueId) as Row | null;
-    if (!row) throw new Error(`Failed to create default session for issue: ${issueId}`);
-    return toIssueSession(row);
+    return this.createChatSessionWithinTransaction(chatId, {
+      title: "Main",
+      createdByType: "system",
+      createdById,
+    }, true);
   }
 
-  createIssueSession(issueId: string, input: CreateIssueSessionInput = {}): MultiremiIssueSession {
-    return this.ctx.db.transaction(() => this.createIssueSessionWithinTransaction(issueId, input))();
+  createSession(chatId: string, input: CreateIssueSessionInput = {}): MultiremiIssueSession {
+    return this.ctx.db.transaction(() => this.createChatSessionWithinTransaction(chatId, input, false))();
   }
 
-  /** Caller already owns the transaction for the session + first event. */
-  createIssueSessionWithinTransaction(issueId: string, input: CreateIssueSessionInput = {}): MultiremiIssueSession {
-    const issue = this.ctx.issues().getIssue(issueId);
-    if (!issue) throw new Error(`Issue not found: ${issueId}`);
-    const title = input.title?.trim() || `Session ${this.listIssueSessions(issueId, true).length + 1}`;
+  private createChatSessionWithinTransaction(
+    chatId: string,
+    input: CreateIssueSessionInput,
+    isDefault: boolean,
+    issueIdOverride?: string | null,
+  ): MultiremiIssueSession {
+    const chat = this.ctx.chat().getChatSession(chatId);
+    if (!chat) throw new Error(`Chat not found: ${chatId}`);
+    const issueId = issueIdOverride === undefined
+      ? this.ctx.feishuBot().getFeishuIssueIdForChatSession(chat.id)
+      : issueIdOverride;
+    const title = input.title?.trim() || (isDefault ? "Main" : `Session ${this.listChatSessions(chatId, true).length + 1}`);
     const id = input.id ?? createId("ises");
     const now = nowIso();
     const createdByType = input.createdByType ?? input.created_by_type ?? "member";
@@ -112,7 +108,199 @@ export class IssueSessionsRepo {
       this.ctx.db.run("UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?", [parentSessionId]);
       const parent = this.getIssueSession(parentSessionId);
       if (!parent) throw new Error(`Parent session not found: ${parentSessionId}`);
-      if (parent.issueId !== issueId) throw new Error("Parent session must belong to the same issue");
+      if (parent.chatId !== chat.id) throw new Error("Parent session must belong to the same Chat");
+      if (parent.inheritMode !== "none") throw new Error("Cannot inherit from a side session (chained forks are not supported)");
+      const max = this.ctx.db.query(
+        "SELECT COALESCE(MAX(seq), 0) AS seq FROM multiremi_session_events WHERE session_id = ?",
+      ).get(parentSessionId) as { seq: number } | null;
+      inheritCutoffSeq = Number(max?.seq ?? 0);
+      if (withCode) {
+        const lane = this.ctx.db.query(
+          `SELECT lane.runtime_id FROM multiremi_session_agent_lanes lane
+           JOIN multiremi_runtimes runtime ON runtime.id = lane.runtime_id
+           WHERE lane.session_id = ? AND COALESCE(runtime.workspace_id, 'local') = ?
+           ORDER BY lane.updated_at DESC, lane.agent_id, lane.execution_scope LIMIT 1`,
+        ).get(parentSessionId, chat.workspaceId) as Row | null;
+        codeRuntimeId = nullableString(lane?.runtime_id);
+        if (!codeRuntimeId) throw new Error("with_code requires a parent session lane with a runtime");
+      }
+    }
+    const holdsWorkspace = parentSessionId ? false : requestedHoldsWorkspace;
+    this.ctx.db.run(
+      `INSERT INTO multiremi_issue_sessions (
+         id, chat_id, issue_id, workspace_id, title, status, is_default, holds_workspace,
+         parent_session_id, inherit_mode, inherit_cutoff_seq, with_code, code_runtime_id,
+         created_by_type, created_by_id, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT DO NOTHING`,
+      [id, chat.id, issueId, chat.workspaceId, title, isDefault ? 1 : 0, holdsWorkspace ? 1 : 0,
+        parentSessionId, inheritMode, inheritCutoffSeq, withCode ? 1 : 0, codeRuntimeId, createdByType, createdById, now, now],
+    );
+    const session = this.getIssueSession(id)
+      ?? (isDefault ? this.listChatSessions(chatId, true).find((entry) => entry.isDefault) : null);
+    if (!session) throw new Error(`Failed to create Session for Chat: ${chatId}`);
+    if (createdById && (createdByType === "member" || createdByType === "agent")) {
+      this.addSessionParticipant(session.id, { participantType: createdByType, participantId: createdById, role: "owner" });
+    }
+    for (const agentId of input.participantAgentIds ?? input.participant_agent_ids ?? []) {
+      this.addSessionParticipant(session.id, { participantType: "agent", participantId: agentId });
+    }
+    if (!isDefault && this.listSessionEvents(session.id).length === 0) {
+      this.appendSessionEventWithinTransaction(session.id, {
+        authorType: "system",
+        kind: "session_created",
+        body: title,
+        metadata: { chat_id: chat.id, created_by_type: createdByType, created_by_id: createdById },
+      });
+    }
+    return this.getIssueSession(session.id)!;
+  }
+
+  listChatSessions(chatId: string, includeArchived = false): MultiremiIssueSession[] {
+    if (!this.ctx.chat().getChatSession(chatId)) throw new Error(`Chat not found: ${chatId}`);
+    const rows = includeArchived
+      ? this.ctx.db.query(`${SESSION_SELECT} WHERE s.chat_id = ? ORDER BY s.is_default DESC, s.updated_at DESC`).all(chatId) as Row[]
+      : this.ctx.db.query(`${SESSION_SELECT} WHERE s.chat_id = ? AND s.status = 'active' ORDER BY s.is_default DESC, s.updated_at DESC`).all(chatId) as Row[];
+    return rows.map(toIssueSession);
+  }
+
+  adoptLegacySession(chatId: string, sessionId: string): MultiremiIssueSession {
+    return this.ctx.db.transaction(() => {
+      const chat = this.ctx.chat().getChatSession(chatId);
+      if (!chat) throw new Error(`Chat not found: ${chatId}`);
+      const session = this.getIssueSession(sessionId);
+      if (!session) throw new Error(`Session not found: ${sessionId}`);
+      if (session.chatId) {
+        if (session.chatId !== chat.id) throw new Error("Session already belongs to another Chat");
+        return session;
+      }
+      if (session.workspaceId !== chat.workspaceId) throw new Error("Session belongs to another workspace");
+      const issueId = session.issueId ?? this.ctx.feishuBot().getFeishuIssueIdForChatSession(chat.id);
+      const now = nowIso();
+      this.ctx.db.run(
+        `UPDATE multiremi_issue_sessions
+         SET chat_id = ?, issue_id = ?, is_default = 0, updated_at = ? WHERE id = ? AND chat_id IS NULL`,
+        [chat.id, issueId, now, session.id],
+      );
+      this.ctx.db.run(
+        "UPDATE multiremi_tasks SET chat_session_id = ? WHERE issue_session_id = ? AND chat_session_id IS NULL",
+        [chat.id, session.id],
+      );
+      this.ctx.db.run(
+        "UPDATE multiremi_session_results SET chat_id = ?, issue_id = ? WHERE source_session_id = ?",
+        [chat.id, issueId, session.id],
+      );
+      this.appendSessionEventWithinTransaction(session.id, {
+        authorType: "system",
+        kind: "session_adopted",
+        body: `Session adopted by Chat ${chat.id}`,
+        metadata: { chat_id: chat.id, issue_id: issueId },
+      });
+      return this.getIssueSession(session.id)!;
+    })();
+  }
+
+  /** @deprecated Compatibility bridge for Issue-scoped callers. Product code should start from a Chat. */
+  getOrCreateDefaultIssueSession(issueId: string, createdById: string | null = null): MultiremiIssueSession {
+    const issue = this.ctx.issues().getIssue(issueId);
+    if (!issue) throw new Error(`Issue not found: ${issueId}`);
+    const existing = this.listIssueSessions(issueId, true).find((session) => session.isDefault) ?? null;
+    if (existing) return existing;
+    // Deprecated store callers may still request an Issue default directly.
+    // Prefer constructing a real Chat owner when an Agent is available; an
+    // agent-less legacy row is the last-resort upgrade bridge only.
+    const agentRow = this.ctx.db.query(
+      `SELECT id, owner_id FROM multiremi_agents
+       WHERE workspace_id = ? AND archived_at IS NULL ORDER BY created_at ASC LIMIT 1`,
+    ).get(issue.workspaceId) as { id?: string; owner_id?: string } | null;
+    if (agentRow?.id) {
+      const chat = this.ctx.chat().createChatSessionWithinTransaction({
+        workspaceId: issue.workspaceId,
+        creatorId: createdById ?? agentRow.owner_id ?? "local",
+        agentId: agentRow.id,
+        projectId: issue.projectId,
+        runtimeWorkspaceId: issue.runtimeWorkspaceId,
+        title: issue.title,
+      });
+      const session = this.getOrCreateDefaultChatSession(chat.id, createdById);
+      this.ctx.db.run(
+        "UPDATE multiremi_issue_sessions SET issue_id = ?, updated_at = ? WHERE id = ?",
+        [issue.id, nowIso(), session.id],
+      );
+      return this.getIssueSession(session.id)!;
+    }
+    return this.createLegacyIssueSession(issue, { title: "Main", createdById }, true);
+  }
+
+  /** @deprecated Compatibility bridge for Issue-scoped callers. Product code should call createSession. */
+  createIssueSession(issueId: string, input: CreateIssueSessionInput = {}): MultiremiIssueSession {
+    return this.ctx.db.transaction(() => this.createIssueSessionWithinTransaction(issueId, input))();
+  }
+
+  /** Caller already owns the transaction for the session + first event. */
+  createIssueSessionWithinTransaction(issueId: string, input: CreateIssueSessionInput = {}): MultiremiIssueSession {
+    const issue = this.ctx.issues().getIssue(issueId);
+    if (!issue) throw new Error(`Issue not found: ${issueId}`);
+    const chatId = cleanOptionalString(input.chatId ?? input.chat_id);
+    if (!chatId) {
+      const chatIds = [...new Set(this.listIssueSessions(issueId, true).map((session) => session.chatId).filter(Boolean))] as string[];
+      if (chatIds.length === 1) return this.createChatSessionWithinTransaction(chatIds[0]!, input, false, issue.id);
+      if (chatIds.length === 0) {
+        const defaultSession = this.getOrCreateDefaultIssueSession(
+          issue.id,
+          input.createdById ?? input.created_by_id ?? null,
+        );
+        if (defaultSession.chatId) {
+          return this.createChatSessionWithinTransaction(defaultSession.chatId, input, false, issue.id);
+        }
+      }
+      return this.createLegacyIssueSession(issue, input, false);
+    }
+    const chat = this.ctx.chat().getChatSession(chatId);
+    if (!chat || chat.workspaceId !== issue.workspaceId) throw new Error("Chat and Issue must belong to the same workspace");
+    return this.createChatSessionWithinTransaction(chat.id, input, false, issue.id);
+  }
+
+  private createLegacyIssueSession(
+    issue: { id: string; workspaceId: string },
+    input: CreateIssueSessionInput,
+    isDefault: boolean,
+  ): MultiremiIssueSession {
+    const id = input.id ?? createId("ises");
+    const now = nowIso();
+    const title = input.title?.trim() || (isDefault ? "Main" : `Session ${this.listIssueSessions(issue.id, true).length + 1}`);
+    const createdByType = input.createdByType ?? input.created_by_type ?? (input.createdById ? "member" : "system");
+    const createdById = input.createdById ?? input.created_by_id ?? null;
+    const requestedHoldsWorkspace = input.holdsWorkspace ?? input.holds_workspace ?? true;
+    if (typeof requestedHoldsWorkspace !== "boolean") throw new Error("holds_workspace must be a boolean");
+    const parentInput = input.parentSessionId ?? input.parent_session_id;
+    if (parentInput != null && (typeof parentInput !== "string" || !parentInput.trim())) {
+      throw new Error("parent_session_id must be a non-empty string");
+    }
+    const parentSessionId = parentInput?.trim() ?? null;
+    const withCode = input.withCode ?? input.with_code ?? false;
+    for (const requested of [input.withCode, input.with_code]) {
+      if (requested !== undefined && (typeof requested !== "boolean" || requested !== withCode)) {
+        throw new Error("with_code must be a boolean; withCode and with_code must agree");
+      }
+    }
+    if (withCode && !parentSessionId) throw new Error("with_code requires parent_session_id");
+    const requestedInheritMode = input.inheritMode ?? input.inherit_mode;
+    const inheritMode = requestedInheritMode ?? (parentSessionId ? "snapshot" : "none");
+    if (parentSessionId ? inheritMode !== "snapshot" && inheritMode !== "follow" : inheritMode !== "none") {
+      throw new Error(parentSessionId
+        ? "inherit_mode must be snapshot or follow with parent_session_id"
+        : "inherit_mode must be none without parent_session_id");
+    }
+    let inheritCutoffSeq: number | null = null;
+    let codeRuntimeId: string | null = null;
+    if (parentSessionId) {
+      this.ctx.db.run("UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?", [parentSessionId]);
+      const parent = this.getIssueSession(parentSessionId);
+      if (!parent) throw new Error(`Parent session not found: ${parentSessionId}`);
+      if (parent.chatId || parent.issueId !== issue.id) {
+        throw new Error("Parent session must belong to the same issue and remain unadopted");
+      }
       if (parent.inheritMode !== "none") throw new Error("Cannot inherit from a side session (chained forks are not supported)");
       const max = this.ctx.db.query(
         "SELECT COALESCE(MAX(seq), 0) AS seq FROM multiremi_session_events WHERE session_id = ?",
@@ -132,31 +320,26 @@ export class IssueSessionsRepo {
     const holdsWorkspace = parentSessionId ? false : requestedHoldsWorkspace;
     this.ctx.db.run(
       `INSERT INTO multiremi_issue_sessions (
-         id, issue_id, workspace_id, title, status, is_default, holds_workspace,
+         id, chat_id, issue_id, workspace_id, title, status, is_default, holds_workspace,
          parent_session_id, inherit_mode, inherit_cutoff_seq, with_code, code_runtime_id,
          created_by_type, created_by_id, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, issueId, issue.workspaceId, title, holdsWorkspace ? 1 : 0,
-        parentSessionId, inheritMode, inheritCutoffSeq, withCode ? 1 : 0, codeRuntimeId, createdByType, createdById, now, now],
+       ) VALUES (?, NULL, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, issue.id, issue.workspaceId, title, isDefault ? 1 : 0, holdsWorkspace ? 1 : 0,
+        parentSessionId, inheritMode, inheritCutoffSeq, withCode ? 1 : 0, codeRuntimeId,
+        createdByType, createdById, now, now],
     );
     if (createdById && (createdByType === "member" || createdByType === "agent")) {
-      this.addSessionParticipant(id, {
-        participantType: createdByType,
-        participantId: createdById,
-        role: "owner",
-      });
+      this.addSessionParticipant(id, { participantType: createdByType, participantId: createdById, role: "owner" });
     }
-    const participantAgentIds = input.participantAgentIds ?? input.participant_agent_ids ?? [];
-    for (const agentId of participantAgentIds) {
+    for (const agentId of input.participantAgentIds ?? input.participant_agent_ids ?? []) {
       this.addSessionParticipant(id, { participantType: "agent", participantId: agentId });
     }
-    this.appendSessionEventWithinTransaction(id, {
-      authorType: "system",
-      authorId: null,
-      kind: "session_created",
-      body: title,
-      metadata: { created_by_type: createdByType, created_by_id: createdById },
-    });
+    if (!isDefault) {
+      this.appendSessionEventWithinTransaction(id, {
+        authorType: "system", kind: "session_created", body: title,
+        metadata: { legacy_issue_id: issue.id, created_by_type: createdByType, created_by_id: createdById },
+      });
+    }
     return this.getIssueSession(id)!;
   }
 
@@ -243,7 +426,7 @@ export class IssueSessionsRepo {
 
   updateIssueSession(id: string, input: UpdateIssueSessionInput): MultiremiIssueSession {
     const session = this.getIssueSession(id);
-    if (!session) throw new Error(`Issue session not found: ${id}`);
+    if (!session) throw new Error(`Session not found: ${id}`);
     const title = input.title === undefined ? session.title : input.title.trim();
     if (!title) throw new Error("Session title is required");
     const status = input.status ?? session.status;
@@ -259,7 +442,7 @@ export class IssueSessionsRepo {
 
   addSessionParticipant(sessionId: string, input: AddSessionParticipantInput): MultiremiSessionParticipant {
     const session = this.getIssueSession(sessionId);
-    if (!session) throw new Error(`Issue session not found: ${sessionId}`);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
     const participantType = input.participantType ?? input.participant_type;
     const participantId = input.participantId ?? input.participant_id;
     if (participantType !== "agent" && participantType !== "member") {
@@ -298,7 +481,7 @@ export class IssueSessionsRepo {
   }
 
   removeSessionParticipant(sessionId: string, participantType: string, participantId: string): void {
-    if (!this.getIssueSession(sessionId)) throw new Error(`Issue session not found: ${sessionId}`);
+    if (!this.getIssueSession(sessionId)) throw new Error(`Session not found: ${sessionId}`);
     this.ctx.db.run(
       `UPDATE multiremi_session_participants
        SET status = 'left', updated_at = ?
@@ -308,7 +491,7 @@ export class IssueSessionsRepo {
   }
 
   listSessionParticipants(sessionId: string, includeLeft = false): MultiremiSessionParticipant[] {
-    if (!this.getIssueSession(sessionId)) throw new Error(`Issue session not found: ${sessionId}`);
+    if (!this.getIssueSession(sessionId)) throw new Error(`Session not found: ${sessionId}`);
     const rows = includeLeft
       ? this.ctx.db.query(
         "SELECT * FROM multiremi_session_participants WHERE session_id = ? ORDER BY joined_at ASC",
@@ -326,7 +509,7 @@ export class IssueSessionsRepo {
   /** Caller already owns the transaction that serializes this session write. */
   appendSessionEventWithinTransaction(sessionId: string, input: AppendSessionEventInput): MultiremiSessionEvent {
     const session = this.getIssueSession(sessionId);
-    if (!session) throw new Error(`Issue session not found: ${sessionId}`);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
     // Row self-write serializes sequence allocation across server processes.
     this.ctx.db.run("UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?", [sessionId]);
     const max = this.ctx.db.query(
@@ -359,7 +542,7 @@ export class IssueSessionsRepo {
   }
 
   listSessionEvents(sessionId: string, input: { sinceSeq?: number | null; toSeq?: number | null } = {}): MultiremiSessionEvent[] {
-    if (!this.getIssueSession(sessionId)) throw new Error(`Issue session not found: ${sessionId}`);
+    if (!this.getIssueSession(sessionId)) throw new Error(`Session not found: ${sessionId}`);
     const sinceSeq = Math.max(0, Math.floor(Number(input.sinceSeq ?? 0)));
     const toSeq = input.toSeq == null ? null : Math.max(0, Math.floor(Number(input.toSeq)));
     const rows = toSeq == null
@@ -374,7 +557,7 @@ export class IssueSessionsRepo {
 
   getOrCreateSessionAgentLane(sessionId: string, agentId: string, executionScope = ""): MultiremiSessionAgentLane {
     const session = this.getIssueSession(sessionId);
-    if (!session) throw new Error(`Issue session not found: ${sessionId}`);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
     const agent = this.ctx.agents().getAgent(agentId);
     if (!agent || agent.archivedAt) throw new Error(`Agent not found: ${agentId}`);
     if (agent.workspaceId !== session.workspaceId) throw new Error("Agent belongs to another workspace");
@@ -554,15 +737,39 @@ export class IssueSessionsRepo {
   }
 
   createSessionTask(sessionId: string, input: CreateSessionTaskInput): MultiremiTask {
-    const session = this.getIssueSession(sessionId);
-    if (!session) throw new Error(`Issue session not found: ${sessionId}`);
+    let session = this.getIssueSession(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    if (session.status === "archived") throw new Error("Session is archived");
     const agentId = input.agentId ?? input.agent_id;
     if (!agentId) throw new Error("agent_id is required");
+    let chat = session.chatId ? this.ctx.chat().getChatSession(session.chatId) : null;
+    if (!chat) {
+      const agent = this.ctx.agents().getAgent(agentId);
+      if (!agent || agent.workspaceId !== session.workspaceId) {
+        throw new Error("Agent and Session must belong to the same workspace");
+      }
+      const parent = session.parentSessionId ? this.getIssueSession(session.parentSessionId) : null;
+      chat = parent?.chatId ? this.ctx.chat().getChatSession(parent.chatId) : null;
+      if (!chat) {
+        const issue = session.issueId ? this.ctx.issues().getIssue(session.issueId) : null;
+        chat = this.ctx.chat().createChatSession({
+          workspaceId: session.workspaceId,
+          creatorId: session.createdById ?? agent.ownerId ?? "local",
+          agentId,
+          projectId: issue?.projectId ?? null,
+          title: issue?.title ?? session.title,
+        });
+        if (parent && !parent.chatId) this.adoptLegacySession(chat.id, parent.id);
+      }
+      session = this.adoptLegacySession(chat.id, session.id);
+    }
+    if (chat.status === "archived") throw new Error("Owning Chat is archived");
     this.addSessionParticipant(sessionId, { participantType: "agent", participantId: agentId });
     return this.ctx.tasks().createTask({
       agentId,
       issueId: session.issueId,
       issueSessionId: sessionId,
+      chatSessionId: session.chatId,
       workspaceId: session.workspaceId,
       priority: input.priority,
       prompt: input.prompt,
@@ -575,7 +782,7 @@ export class IssueSessionsRepo {
 
   publishSessionResult(sessionId: string, input: PublishSessionResultInput): MultiremiSessionResult {
     const session = this.getIssueSession(sessionId);
-    if (!session) throw new Error(`Issue session not found: ${sessionId}`);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
     const body = input.body.trim();
     if (!body) throw new Error("Result body is required");
     const id = createId("sres");
@@ -584,11 +791,12 @@ export class IssueSessionsRepo {
     const publishedById = input.publishedById ?? input.published_by_id ?? null;
     this.ctx.db.run(
       `INSERT INTO multiremi_session_results (
-         id, issue_id, source_session_id, title, body, metadata,
+         id, chat_id, issue_id, source_session_id, title, body, metadata,
          published_by_type, published_by_id, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
+        session.chatId,
         session.issueId,
         sessionId,
         input.title?.trim() ?? "",
@@ -607,7 +815,7 @@ export class IssueSessionsRepo {
       metadata: { result_id: id, title: input.title?.trim() ?? "" },
     });
     const result = this.getSessionResult(id)!;
-    try {
+    if (session.issueId) try {
       this.ctx.notificationChannels().queueAgentIssueUpdate({
         activityId: result.id,
         issueId: session.issueId,
@@ -629,14 +837,26 @@ export class IssueSessionsRepo {
   }
 
   getSessionResult(id: string): MultiremiSessionResult | null {
-    const row = this.ctx.db.query("SELECT * FROM multiremi_session_results WHERE id = ?").get(id) as Row | null;
+    const row = this.ctx.db.query(
+      "SELECT * FROM multiremi_session_results WHERE id = ?",
+    ).get(id) as Row | null;
     return row ? toSessionResult(row) : null;
+  }
+
+  listSessionResults(sessionId: string): MultiremiSessionResult[] {
+    if (!this.getIssueSession(sessionId)) throw new Error(`Session not found: ${sessionId}`);
+    const rows = this.ctx.db.query(
+      `SELECT * FROM multiremi_session_results
+       WHERE source_session_id = ? ORDER BY created_at ASC`,
+    ).all(sessionId) as Row[];
+    return rows.map(toSessionResult);
   }
 
   listIssueSessionResults(issueId: string): MultiremiSessionResult[] {
     if (!this.ctx.issues().getIssue(issueId)) throw new Error(`Issue not found: ${issueId}`);
     const rows = this.ctx.db.query(
-      "SELECT * FROM multiremi_session_results WHERE issue_id = ? ORDER BY created_at ASC",
+      `SELECT * FROM multiremi_session_results
+       WHERE issue_id = ? ORDER BY created_at ASC`,
     ).all(issueId) as Row[];
     return rows.map(toSessionResult);
   }
@@ -659,7 +879,8 @@ export class IssueSessionsRepo {
 }
 
 function toIssueSession(row: Row): MultiremiIssueSession {
-  const issueId = String(row.issue_id);
+  const chatId = nullableString(row.chat_id);
+  const issueId = nullableString(row.issue_id);
   const workspaceId = String(row.workspace_id ?? "local");
   const isDefault = Boolean(Number(row.is_default ?? 0));
   const holdsWorkspace = Boolean(Number(row.holds_workspace ?? 1));
@@ -673,6 +894,8 @@ function toIssueSession(row: Row): MultiremiIssueSession {
   const updatedAt = String(row.updated_at);
   return {
     id: String(row.id),
+    chatId,
+    chat_id: chatId,
     issueId,
     issue_id: issueId,
     workspaceId,
@@ -799,13 +1022,16 @@ function toSessionAgentLane(row: Row): MultiremiSessionAgentLane {
 }
 
 function toSessionResult(row: Row): MultiremiSessionResult {
-  const issueId = String(row.issue_id);
+  const chatId = nullableString(row.chat_id);
+  const issueId = nullableString(row.issue_id);
   const sourceSessionId = String(row.source_session_id);
   const publishedByType = String(row.published_by_type ?? "agent");
   const publishedById = nullableString(row.published_by_id);
   const createdAt = String(row.created_at);
   return {
     id: String(row.id),
+    chatId,
+    chat_id: chatId,
     issueId,
     issue_id: issueId,
     sourceSessionId,

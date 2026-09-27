@@ -713,7 +713,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(metricValue(store, "multiremi_webhook_delivery_total", { provider: "generic", status: "duplicate" })).toBe(0);
   });
 
-  it("dispatches a completed Issue system event once into a new Issue Session", () => {
+  it("dispatches a completed Issue system event once into a new Session", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Wiki maintainer", provider: "codex" });
     const project = store.createProject({ title: "Knowledge project" });
@@ -789,7 +789,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(store.getTask(runs[0].taskId!)?.issueSessionId).toBe(runs[0].issueSessionId);
     expect(store.getTask(runs[0].taskId!)?.prompt).toBe("Inspect the completed work and reconcile the Wiki");
     expect(store.getIssue(issue.id)?.status).toBe("done");
-    expect(store.listIssueSessions(issue.id, true)).toHaveLength(2);
+    expect(store.listIssueSessions(issue.id, true)).toHaveLength(1);
     expect(store.getSystemEvent(eventRow.id)?.status).toBe("processed");
 
     expect(scheduler.tickSystemEvents()).toEqual([]);
@@ -849,11 +849,12 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(store.listAutopilotRuns(autopilot.id)).toHaveLength(2);
   });
 
-  it("reuses the most recently updated active Issue Session when configured", () => {
+  it("reuses the most recently updated active Session when configured", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Wiki maintainer", provider: "claude" });
     const issue = store.createIssue({ title: "Reuse session", status: "in_review" });
-    const latest = store.createIssueSession(issue.id, { title: "Latest context" });
+    const chat = store.createChatSession({ agentId: agent.id });
+    const latest = store.createIssueSession(issue.id, { chatId: chat.id, title: "Latest context" });
     db!.run(
       "UPDATE multiremi_issue_sessions SET updated_at = ? WHERE id = ?",
       ["2099-01-01T00:00:00.000Z", latest.id],
@@ -876,7 +877,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     store.updateIssue(issue.id, { status: "done" });
     const [run] = store.dispatchPendingSystemEvents();
     expect(run.issueSessionId).toBe(latest.id);
-    expect(store.listIssueSessions(issue.id, true)).toHaveLength(2);
+    expect(store.listIssueSessions(issue.id, true)).toHaveLength(1);
   });
 
   it("claims each pending system event once across sqlite connections", () => {

@@ -122,14 +122,18 @@ export type {
 export type { NotificationGroupKey, NotificationGroupValue, NotificationPreferences, NotificationPreferenceResponse } from "./notification-preference";
 export type { Comment, CommentType, CommentAuthorType, Reaction } from "./comment";
 export type {
+  Session,
+  SessionStatus,
   IssueSession,
   IssueSessionStatus,
   SessionParticipant,
   SessionParticipantType,
   SessionEvent,
   SessionResult,
+  CreateSessionRequest,
   CreateIssueSessionRequest,
   CreateSessionTaskRequest,
+  SessionTask,
   IssueSessionTask,
 } from "./issue-session";
 export type { Label, CreateLabelRequest, UpdateLabelRequest, ListLabelsResponse, IssueLabelsResponse } from "./label";

@@ -156,7 +156,7 @@ App Secret 在 API 侧通过 [AES-256-GCM](../../packages/server/src/feishu-bot/
 
 单机工作目录另由[process-owner](../../packages/daemon/src/agent-runtime/workspace/process-owner.ts)的 supervisor lease 保护，以进程存活判断所有权。它与 bot 跨 Runtime 的状态交接是不同机制，不能因为一次心跳延迟就移除仍存活的本机 owner。
 
-[controlPlaneConciergeHost](../../apps/remi/cli/multiremi.ts)和[bootFeishuChannel](../../apps/remi/cli/agent.ts)只启动传输及卡片处理。消息提交到控制面 Chat/Task 链路：同事件去重，有活跃任务时 steer，否则创建关联 Chat Session 的 Task，执行仍走 Task → AgentSession → ACP。Agent instructions 使用该任务所选的 Agent row，不启动一份独立的人格运行时。
+[controlPlaneConciergeHost](../../apps/remi/cli/multiremi.ts)和[bootFeishuChannel](../../apps/remi/cli/agent.ts)只启动传输及卡片处理。消息提交到控制面 Chat/Task 链路：同事件去重，有活跃任务时 steer，否则创建关联 Chat 的 Task，执行仍走 Task → AgentSession → ACP。Agent instructions 使用该任务所选的 Agent row，不启动一份独立的人格运行时。
 
 机器人按应用范围的 `(app_id, open_id)` 记录发送者，默认 `sender_access_policy=agent`，无需绑定工作区成员或额外授权即可使用 Agent 已开放能力。工作区管理者可主动改为 `allowlist`，通过 `remi workspace feishu-bot sender list|allow|revoke` 管理机器人 Chat 及其任务来源链的 Issue 创建权限；未授权账号仍可普通对话，Agent 自身的提议审批策略继续生效。具体策略与命令见[机器人发送者白名单](../feishu-message-ingestion.md#机器人发送者白名单)。它与 Messaging Source 的会话采集 allowlist 相互独立。
 

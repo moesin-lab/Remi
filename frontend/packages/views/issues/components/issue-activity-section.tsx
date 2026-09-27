@@ -187,6 +187,13 @@ export function IssueActivitySection({
   // at the top and then jump to the bottom.
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
   const [atBottom, setAtBottom] = useState(true);
+  const atBottomRef = useRef(true);
+  const handleAtBottomStateChange = useCallback((nextAtBottom: boolean) => {
+    // Keep the ref in sync in the scroll callback itself. React state may not
+    // commit before a realtime append asks followOutput what to do.
+    atBottomRef.current = nextAtBottom;
+    setAtBottom(nextAtBottom);
+  }, []);
 
   const jumpToLatest = useCallback(() => {
     virtuosoRef.current?.scrollToIndex({ index: "LAST", align: "end", behavior: "smooth" });
@@ -422,10 +429,22 @@ export function IssueActivitySection({
                 increaseViewportBy={{ top: 800, bottom: 800 }}
                 computeItemKey={(_i, item) => `${item.kind}:${item.id}`}
                 skipAnimationFrameInResizeObserver
-                atBottomThreshold={120}
-                atBottomStateChange={setAtBottom}
-                followOutput={() => (
-                  !isFetchingOlderTimeline && atBottom ? "smooth" : false
+                // Issue detail is a document-shaped scroller. Keep this close
+                // to the real bottom so a single wheel notch already hands
+                // scroll ownership to the reader instead of being swallowed
+                // by the next realtime timeline update.
+                atBottomThreshold={4}
+                atBottomStateChange={handleAtBottomStateChange}
+                // Use Virtuoso's synchronous position, not React's `atBottom`
+                // state from the previous render. New entries can arrive in
+                // the same frame as wheel / scrollbar / keyboard scrolling;
+                // the stale state used to return "smooth" and drag the page
+                // back down. An immediate follow also avoids a smooth-scroll
+                // animation continuing to fight later user input.
+                followOutput={(isAtBottom) => (
+                  !isFetchingOlderTimeline && isAtBottom && atBottomRef.current
+                    ? "auto"
+                    : false
                 )}
                 startReached={() => {
                   if (hasOlderTimeline && !isFetchingOlderTimeline) {

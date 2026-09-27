@@ -318,7 +318,7 @@ export class RuntimesRepo {
       } else {
         this.ctx.db.run(`DELETE FROM multiremi_runtime_${provider}_profiles WHERE runtime_id = ?`, [id]);
       }
-      this.replaceRuntimeModelsWithinTransaction(id, profile ? [{ id: profile.model, label: profile.model, provider, default: true }] : [], provider, nowIso(), profile);
+      this.replaceRuntimeModelsWithinTransaction(id, profile ? runtimeConnectionModels(profile, provider, []) : [], provider, nowIso(), profile);
       return profile;
     });
   }

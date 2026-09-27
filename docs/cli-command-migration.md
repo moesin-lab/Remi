@@ -54,7 +54,9 @@ thinking level are preserved. Custom Runtime connections keep their own catalogs
 
 Reusable workspace connections use `remi runtime profile list|get|create|update|delete`.
 Create/update accepts `name`, `provider` (`codex` or `claude`), a structured `profile`,
-and an optional write-only `api_key`. Updates replace configuration and allocate a
+and an optional write-only `api_key`. The structured profile accepts an optional
+`models` allowlist containing its default `model`; omitting it keeps provider model
+discovery authoritative. Updates replace configuration and allocate a
 new revision; omitting `api_key` preserves an existing key. Use
 `remi runtime group list|get|create|update|delete` to bind profiles to explicit
 Runtime members. Writes require workspace administration, and group changes also

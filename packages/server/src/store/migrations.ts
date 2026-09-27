@@ -2487,6 +2487,7 @@ export function runMigrations(db: SqlDatabase): void {
 
     CREATE TABLE IF NOT EXISTS multiremi_platform_operations (
       id TEXT PRIMARY KEY,
+      idempotency_key TEXT,
       kind TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'queued',
       driver TEXT NOT NULL,
@@ -2510,7 +2511,6 @@ export function runMigrations(db: SqlDatabase): void {
       ON multiremi_platform_operations(active_slot);
     CREATE INDEX IF NOT EXISTS idx_multiremi_platform_operations_created
       ON multiremi_platform_operations(created_at);
-
     CREATE TABLE IF NOT EXISTS multiremi_platform_maintenance (
       id TEXT PRIMARY KEY,
       mode TEXT NOT NULL DEFAULT 'normal',
@@ -2710,6 +2710,10 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_runtimes", "drain_ack_at TEXT");
   addColumnIfMissing(db, "multiremi_runtimes", "drain_reported_active_tasks INTEGER");
   addColumnIfMissing(db, "multiremi_platform_operations", "cancel_requested INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "multiremi_platform_operations", "idempotency_key TEXT");
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_multiremi_platform_operations_idempotency
+    ON multiremi_platform_operations(requested_by, idempotency_key)
+    WHERE idempotency_key IS NOT NULL`);
   addColumnIfMissing(db, "multiremi_platform_state", "auto_update_time TEXT NOT NULL DEFAULT '05:00'");
   addColumnIfMissing(
     db,

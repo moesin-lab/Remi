@@ -2,11 +2,29 @@
 
 For two isolated environments on one development computer, use the
 [local stable/dev guide](../docs/deploy/local-profiles.md). It runs separate
-API/Web/PostgreSQL projects and does not use the host updater described below.
+API/Web/PostgreSQL projects. A stable profile can opt into the repository-
+external host updater; dev never shares that updater or its state.
 
 The API records lifecycle operations. A host-owned `remi-platform-updater`
 service executes them through one deployment driver. The API container never
 receives the Docker socket and cannot invoke `systemctl`.
+
+The pieces have deliberately narrow responsibilities:
+
+| Piece | Responsibility | Recovery boundary |
+|---|---|---|
+| platform operation/release API | Persist request, safe cancellation flag, progress, release metadata and updater heartbeat | Survives API restarts in PostgreSQL; it does not execute host commands |
+| `remi-platform-updater` | Claim/resume the active operation, coordinate drain and invoke one host driver | Must be supervised outside Remi API and daemon |
+| daemon | Acknowledge drain, stop new task claims and durably queue task reports | Never stops or replaces the control plane |
+| `systemd_release` | Verify archive, atomically switch source symlink, restart systemd units | Restores code symlink only; use only with backward-compatible DB migrations or an external matching DB restore plan |
+| `docker_compose` | Pull immutable image digests and replace owned containers | Restores image/env selection only; it is not a database rollback |
+| `local_profile` | Fetch fixed commit, validate release artifact, build, create verified data/config backup, switch and health-check | Restores PostgreSQL, API home, configuration and old images from the same backup |
+
+`currentRelease`, `latestRelease`, `services` and `updaterStatus` are heartbeat
+projections, not release discovery performed by the API. An installation with
+no supervised updater (the historical local-profile default), no independent
+updater token, or no release feed therefore correctly shows an offline updater,
+null releases and an empty service list even while API/Web containers run.
 
 ## Release pipeline
 
@@ -58,6 +76,57 @@ tag pair fails closed.
 The transitional `systemd_release` driver builds a verified release archive in
 a new directory, atomically switches the `current` symlink, restarts API/Web,
 and restores the old symlink if health checks fail.
+
+### Windows stable local-profile host
+
+The `local_profile` driver is the Windows-first self-update path. It reuses the
+same persisted API operation and drain protocol, but stages a fixed Git commit
+and the checksum-pinned release source before touching the running profile.
+The updater executable, task wrapper, secrets, operation journals and profile
+data all live outside the source checkout and the API containers.
+
+1. From the exact reviewed updater commit, build the standalone executable with
+   `bun run platform-updater:compile:windows`. Release CI must attest or retain
+   that executable; do not compile unreviewed source on the production host.
+2. Keep a dedicated host checkout at `MULTIREMI_LOCAL_PROFILE_REPOSITORY`.
+   Updating fetches Git objects but never checks out over the running updater.
+3. Copy [`windows/platform-updater.env.example`](windows/platform-updater.env.example)
+   outside Git, replace every placeholder, and use an updater token distinct
+   from the API administrator token.
+4. In an elevated PowerShell, install the executable and configuration with
+   `deploy/windows/install-platform-updater.ps1 -UpdaterExecutable <path> -Config <path>`.
+   The installer copies them below ProgramData, restricts the ACL to the current
+   user and SYSTEM, and registers a highest-privilege logon scheduled task with
+   one-minute restart-on-failure. Docker Desktop must run in that same user
+   session; the task is deliberately not attached to the Remi daemon or API.
+5. Put the same `MULTIREMI_PLATFORM_UPDATER_TOKEN` in stable `api.env`, restart
+   stable once using the existing manual runbook, then verify `platform status`
+   reports driver `local_profile`, a current release, services and a fresh
+   heartbeat before enabling updates.
+
+The source release manifest is accepted only with SemVer, a full 40-hex commit,
+an HTTPS URL without credentials, query or fragment, and a SHA-256. Host staging checks
+free space and host/Docker architecture, downloads and hashes the CI-produced
+archive, fetches that exact commit from `origin`, builds candidate images, then
+restores the live configuration. Switching begins only after drain succeeds.
+
+Each switch writes an atomic journal under
+`<profiles-root>/stable/host-operations/<operation-id>/`. The global host lock
+prevents concurrent mutation. A v2 backup completion manifest hashes the
+PostgreSQL dump, API-home archive and matching configuration and records the
+recovery command. If the executor dies after writers stop, its next scheduled
+start runs recovery before heartbeat: pre-migration interruptions restart the
+old release; later interruptions restore the matching database, API home,
+configuration and images. A code-only switch is never reported as database
+rollback. Repeated API creates can carry `requestId`; repeated creates with the
+same caller/key/payload return the same operation, and the host stages/activates
+the resulting operation ID at most once.
+
+macOS and Linux may reuse `local_profile` with launchd/systemd plus the same
+environment contract, but only the Windows scheduled-task installer is shipped
+here. Non-profile Linux deployments continue to use `systemd_release` or
+`docker_compose`; their storage and migration rollback boundaries are not
+interchangeable with local-profile backups.
 
 ## Docker Compose control plane
 

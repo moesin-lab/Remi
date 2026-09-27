@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
+import { Database } from "bun:sqlite";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { PlatformOperationConflictError } from "@multiremi/store/repos/platform-operations-repo.js";
+import { runMigrations } from "@multiremi/store/migrations.js";
+import {
+  PlatformOperationConflictError,
+  PlatformOperationIdempotencyConflictError,
+} from "@multiremi/store/repos/platform-operations-repo.js";
 import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(() => {
@@ -9,6 +14,24 @@ afterEach(() => {
 });
 
 describe("platform lifecycle", () => {
+  it("adds operation idempotency to an existing platform operation table before indexing it", () => {
+    const legacy = new Database(":memory:");
+    legacy.exec(`CREATE TABLE multiremi_platform_operations (
+      id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued',
+      driver TEXT NOT NULL, active_slot INTEGER, target_version TEXT, target_ref TEXT,
+      target_manifest TEXT NOT NULL DEFAULT '{}', progress TEXT NOT NULL DEFAULT '{}',
+      requested_by TEXT NOT NULL, output TEXT, error TEXT, previous_release TEXT,
+      result_release TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      started_at TEXT, finished_at TEXT
+    )`);
+    expect(() => runMigrations(legacy)).not.toThrow();
+    const columns = legacy.query("PRAGMA table_info(multiremi_platform_operations)").all() as Array<{ name: string }>;
+    expect(columns.some((column) => column.name === "idempotency_key")).toBe(true);
+    const indexes = legacy.query("PRAGMA index_list(multiremi_platform_operations)").all() as Array<{ name: string }>;
+    expect(indexes.some((index) => index.name === "idx_multiremi_platform_operations_idempotency")).toBe(true);
+    legacy.close();
+  });
+
   it("serializes operations and resumes a claimed operation", () => {
     const store = createLocalStore();
     const created = store.createPlatformOperation({ kind: "restart" }, "local");
@@ -25,6 +48,44 @@ describe("platform lifecycle", () => {
     expect(completed?.finishedAt).not.toBeNull();
     expect(store.getActivePlatformOperation()).toBeNull();
     expect(store.createPlatformOperation({ kind: "check_updates" }, "local").kind).toBe("check_updates");
+  });
+
+  it("deduplicates retried create requests with a caller operation key", () => {
+    const store = createLocalStore();
+    const input = { kind: "restart" as const, requestId: "deploy-MUL-17-001" };
+    const created = store.createPlatformOperation(input, "local");
+    const retried = store.createPlatformOperation(input, "local");
+    expect(retried.id).toBe(created.id);
+    expect(retried.requestId).toBe(input.requestId);
+    expect(store.listPlatformOperations()).toHaveLength(1);
+
+    store.reportPlatformOperation(created.id, { status: "succeeded" });
+    expect(store.createPlatformOperation(input, "local").id).toBe(created.id);
+    expect(() => store.createPlatformOperation({
+      kind: "check_updates", requestId: input.requestId,
+    }, "local")).toThrow(PlatformOperationIdempotencyConflictError);
+  });
+
+  it("deduplicates operation retries at the HTTP boundary and accepts local-profile heartbeats", async () => {
+    const store = createLocalStore();
+    const app = createMultiremiApp({
+      store, authToken: "master-secret", platformUpdaterToken: "updater-secret",
+    });
+    const headers = { Authorization: "Bearer master-secret", "Content-Type": "application/json" };
+    const body = JSON.stringify({ kind: "restart", requestId: "MUL-17-retry-01" });
+    const first = await app.request("/api/multiremi/platform/operations", { method: "POST", headers, body });
+    const second = await app.request("/api/multiremi/platform/operations", { method: "POST", headers, body });
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+    expect((await second.json()).operation.id).toBe((await first.json()).operation.id);
+
+    const heartbeat = await app.request("/api/platform-updater/heartbeat", {
+      method: "POST",
+      headers: { ...headers, "X-Multiremi-Updater-Token": "updater-secret" },
+      body: JSON.stringify({ driver: "local_profile", currentRelease: release("0.2.81") }),
+    });
+    expect(heartbeat.status).toBe(200);
+    expect(store.getPlatformState().driver).toBe("local_profile");
   });
 
   it("separates administrator and updater credentials", async () => {

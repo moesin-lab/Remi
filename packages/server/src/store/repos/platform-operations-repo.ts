@@ -46,6 +46,10 @@ export class PlatformOperationNotCancellableError extends Error {
   readonly code = "platform_operation_not_cancellable";
 }
 
+export class PlatformOperationIdempotencyConflictError extends Error {
+  readonly code = "platform_operation_idempotency_conflict";
+}
+
 export interface PlatformStateRecord {
   driver: MultiremiPlatformDeploymentDriver;
   currentRelease: MultiremiPlatformRelease | null;
@@ -175,17 +179,30 @@ export class PlatformOperationsRepo {
   }
 
   create(input: CreatePlatformOperationInput, requestedBy: string): MultiremiPlatformOperation {
+    const requestId = input.requestId?.trim() || null;
+    if (requestId) {
+      const existing = this.findByRequestId(requestedBy, requestId);
+      if (existing) {
+        if (!sameRequest(existing, input)) {
+          throw new PlatformOperationIdempotencyConflictError(
+            "requestId was already used for a different platform operation",
+          );
+        }
+        return existing;
+      }
+    }
     const state = this.getState();
     const id = createId("pop");
     const now = nowIso();
     try {
       this.db.run(
         `INSERT INTO multiremi_platform_operations (
-          id, kind, status, driver, active_slot, target_version, target_ref,
+          id, idempotency_key, kind, status, driver, active_slot, target_version, target_ref,
           target_manifest, progress, requested_by, created_at, updated_at
-        ) VALUES (?, ?, 'queued', ?, 1, ?, ?, ?, '{}', ?, ?, ?)`,
+        ) VALUES (?, ?, ?, 'queued', ?, 1, ?, ?, ?, '{}', ?, ?, ?)`,
         [
           id,
+          requestId,
           input.kind,
           state.driver,
           input.targetVersion ?? null,
@@ -199,11 +216,23 @@ export class PlatformOperationsRepo {
     } catch (error) {
       const message = String((error as Error).message ?? error).toLowerCase();
       if (message.includes("unique") || message.includes("duplicate")) {
+        if (requestId) {
+          const existing = this.findByRequestId(requestedBy, requestId);
+          if (existing && sameRequest(existing, input)) return existing;
+          if (existing) throw new PlatformOperationIdempotencyConflictError("requestId was already used for a different platform operation");
+        }
         throw new PlatformOperationConflictError("another platform operation is already active");
       }
       throw error;
     }
     return this.get(id)!;
+  }
+
+  private findByRequestId(requestedBy: string, requestId: string): MultiremiPlatformOperation | null {
+    const row = this.db.query(
+      "SELECT * FROM multiremi_platform_operations WHERE requested_by = ? AND idempotency_key = ? LIMIT 1",
+    ).get(requestedBy, requestId) as Row | null;
+    return row ? toOperation(row) : null;
   }
 
   get(id: string): MultiremiPlatformOperation | null {
@@ -333,6 +362,7 @@ function toState(row: Row): PlatformStateRecord {
 function toOperation(row: Row): MultiremiPlatformOperation {
   return {
     id: String(row.id),
+    requestId: row.idempotency_key ? String(row.idempotency_key) : null,
     kind: String(row.kind) as MultiremiPlatformOperation["kind"],
     status: String(row.status) as MultiremiPlatformOperationStatus,
     driver: String(row.driver) as MultiremiPlatformDeploymentDriver,
@@ -351,6 +381,13 @@ function toOperation(row: Row): MultiremiPlatformOperation {
     startedAt: row.started_at ? String(row.started_at) : null,
     finishedAt: row.finished_at ? String(row.finished_at) : null,
   };
+}
+
+function sameRequest(existing: MultiremiPlatformOperation, input: CreatePlatformOperationInput): boolean {
+  return existing.kind === input.kind
+    && existing.targetVersion === (input.targetVersion ?? null)
+    && existing.targetRef === (input.targetRef ?? null)
+    && JSON.stringify(existing.targetManifest) === JSON.stringify(input.targetManifest ?? {});
 }
 
 function parseNullableRelease(value: unknown): MultiremiPlatformRelease | null {

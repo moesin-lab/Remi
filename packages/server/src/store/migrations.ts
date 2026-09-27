@@ -3425,7 +3425,20 @@ function migrateChatOwnedSessions(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_feishu_bot_chat_bindings",
     "issue_id TEXT REFERENCES multiremi_issues(id) ON DELETE SET NULL");
 
-  if (isPostgresConfigured() || db instanceof PostgresSyncDatabase) {
+  // Tests and observability can wrap PostgresSyncDatabase in another
+  // SqlDatabase, so instanceof and the process-level URL are not sufficient.
+  // sqlite_version() is deliberately left untranslated by the PG bridge: a
+  // successful probe identifies SQLite, while PostgreSQL rejects it without
+  // changing state.
+  let postgresDatabase = isPostgresConfigured() || db instanceof PostgresSyncDatabase;
+  if (!postgresDatabase) {
+    try {
+      db.query("SELECT sqlite_version() AS version").get();
+    } catch {
+      postgresDatabase = true;
+    }
+  }
+  if (postgresDatabase) {
     runMigrationOnce(db, CHAT_OWNED_SESSIONS_MIGRATION, () => {
       addColumnIfMissing(db, "multiremi_issue_sessions", "chat_id TEXT");
       addColumnIfMissing(db, "multiremi_session_results", "chat_id TEXT");

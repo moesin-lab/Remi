@@ -131,7 +131,7 @@ export class IssueSessionsRepo {
          id, chat_id, issue_id, workspace_id, title, status, is_default, holds_workspace,
          parent_session_id, inherit_mode, inherit_cutoff_seq, with_code, code_runtime_id,
          created_by_type, created_by_id, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT DO NOTHING`,
       [id, chat.id, issueId, chat.workspaceId, title, isDefault ? 1 : 0, holdsWorkspace ? 1 : 0,
         parentSessionId, inheritMode, inheritCutoffSeq, withCode ? 1 : 0, codeRuntimeId, createdByType, createdById, now, now],

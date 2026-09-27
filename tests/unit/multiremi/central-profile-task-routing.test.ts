@@ -30,6 +30,23 @@ function setup() {
 }
 
 describe("central profile task routing", () => {
+  it("freezes an allowlisted model without leaking the allowlist into the daemon task profile", () => {
+    const { store, runtime, first, a, agentA, ready } = setup();
+    const updated = store.saveExecutionProfile("local", {
+      name: first.name,
+      provider: "codex",
+      profile: { ...first.profile, models: [first.profile.model, "alternate-model"] },
+    }, first.id);
+    store.updateAgent(agentA.id, { model: "alternate-model" });
+    ready(a.id);
+    const task = store.createTask({ agentId: agentA.id, prompt: "Use allowed alternate" });
+    const claimed = store.claimTask(runtime.id)!;
+    expect(claimed.id).toBe(task.id);
+    const { models: _models, ...snapshot } = updated.profile;
+    expect(claimed.codexProfile).toEqual({ ...snapshot, model: "alternate-model" });
+    expect(claimed.codexProfile).not.toHaveProperty("models");
+  });
+
   it("keeps unacknowledged work queued without blocking another ready group on the same runtime", () => {
     const { store, runtime, a, b, agentA, agentB, second, ready } = setup();
     const blocked = store.createTask({ agentId: agentA.id, prompt: "wait" });

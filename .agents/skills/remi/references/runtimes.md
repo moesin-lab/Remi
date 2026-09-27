@@ -34,6 +34,7 @@ Codex 需要 Responses 兼容接口；Claude Code 需要 Anthropic Messages 兼�
     "name": "custom-codex",
     "base_url": "https://gateway.example/v1",
     "model": "provider-model-id",
+    "models": ["provider-model-id", "provider-model-id-fast"],
     "auth_mode": "api_key",
     "env_key": ""
   },
@@ -41,7 +42,7 @@ Codex 需要 Responses 兼容接口；Claude Code 需要 Anthropic Messages 兼�
 }
 ```
 
-Claude 使用 `provider: "claude"`，在 `profile` 中加 `auth_header: "bearer"` 或 `"x-api-key"`。内层连接 `name` 只用字母、数字、下划线、连字符，外层 `name` 是展示名；`base_url` 是 HTTP(S) 基础地址，无用户信息、query 或 fragment。Claude 基础地址不包含完整 `/v1/messages` 路径。
+Claude 使用 `provider: "claude"`，在 `profile` 中加 `auth_header: "bearer"` 或 `"x-api-key"`。内层连接 `name` 只用字母、数字、下划线、连字符，外层 `name` 是展示名；`base_url` 是 HTTP(S) 基础地址，无用户信息、query 或 fragment。Claude 基础地址不包含完整 `/v1/messages` 路径。`models` 是可选白名单，必须包含默认 `model`；省略时使用 provider 发现目录。
 
 ```sh
 remi runtime profile create --file <private-profile.json> --json

@@ -5,6 +5,7 @@ import { CHAT_ATTACHMENT_MAX_BYTES, sanitizeChatAttachmentFilename } from "@mult
 import { createUploadAttachmentId, detectContentTypeFromFilename, uploadAbsolutePath, uploadRelativePath,
   stringFormValue } from "../helpers/uploads.js";
 import { parseFeishuPresentation } from "@multiremi/contracts/feishu-presentation.js";
+import { runtimeConnectionSnapshot } from "@multiremi/contracts/runtime-connection.js";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 import {
   MAX_TASK_MESSAGES_PER_REQUEST,
@@ -441,8 +442,8 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     }
     const response = daemonHeartbeatHttpResponse(ack);
     if (body.execution_profile_protocol === 1) response.runtime_bindings = store.getRuntimeExecutionBindings(runtimeId);
-    response.codex_profile = store.getRuntimeCodexProfile(runtimeId);
-    response.claude_profile = store.getRuntimeClaudeProfile(runtimeId);
+    response.codex_profile = runtimeConnectionSnapshot(store.getRuntimeCodexProfile(runtimeId));
+    response.claude_profile = runtimeConnectionSnapshot(store.getRuntimeClaudeProfile(runtimeId));
     const runtime = store.getRuntime(runtimeId);
     const workspaceId = runtime?.workspaceId ?? "local";
     const workspaceConfig = workspaceReposResponse(

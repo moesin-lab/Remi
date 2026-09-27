@@ -28,8 +28,11 @@ function fixture(binding: "automatic" | "runtime" | "group" | "task" = "automati
   });
   const runtime = store.registerRuntime({
     name: "Candidate", provider: "codex", workspaceId: "local",
-    executionGroupId: "capability-group", models: models(), maxConcurrency: 1,
+    models: models(), maxConcurrency: 1,
   });
+  store.saveExecutionGroup("local", { name: "Capability", provider: "codex", profile_id: null, runtime_ids: [runtime.id] }, "capability-group");
+  // Capability waits are evaluated after the explicitly assigned default connection is ready.
+  store.recordRuntimeExecutionBindingAcks(runtime.id, store.getRuntimeExecutionBindings(runtime.id).map(binding => ({ ...binding, status: "ready" })));
   store.saveGatewayModels("local", "codex", {
     sourceRevision: revision, nativeCatalogStatus: "ready",
     models: [{ id: MODEL, label: "DeepSeek", thinking: models()[0]!.thinking }],
@@ -170,12 +173,15 @@ describe("queued task model capability waits", () => {
       const { store, task, now, fail } = fixture(restriction === "group" || restriction === "runtime" ? restriction : "automatic");
       const workspace = restriction === "workspace"
         ? store.createWorkspace({ name: "Other workspace", slug: "other-capability" }).id : "local";
-      store.registerRuntime({
+      const ineligible = store.registerRuntime({
         name: "Ineligible healthy runtime", workspaceId: workspace,
         provider: restriction === "provider" ? "claude" : "codex", models: models(),
         ...(restriction === "owner" ? { ownerId: "another-owner", visibility: "private" as const } : {}),
-        ...(restriction === "group" ? { executionGroupId: "another-capability-group" } : {}),
       });
+      if (restriction === "group") {
+        store.saveExecutionGroup("local", { name: "Another capability", provider: "codex", profile_id: null, runtime_ids: [ineligible.id] }, "another-capability-group");
+        store.recordRuntimeExecutionBindingAcks(ineligible.id, store.getRuntimeExecutionBindings(ineligible.id).map(binding => ({ ...binding, status: "ready" })));
+      }
       fail();
       expect(store.refreshQueuedCapabilityWaitReasons(now)).toEqual({ updated: 1, alerted: 0 });
       expect(store.getTask(task.id)?.waitReason).toContain(MODEL);

@@ -443,6 +443,9 @@ export interface IssueSessionsSurface {
 }
 
 export interface RuntimesSurface {
+  executionBindingStatesRepo(): import("@multiremi/store/repos/execution-binding-states-repo.js").ExecutionBindingStatesRepo;
+  getAgentExecutionProfile(runtimeId: string|null, agent: MultiremiAgent): import("@multiremi/contracts/runtime-connection.js").RuntimeConnectionProfile|null;
+  executionProfilesRepo(): import("@multiremi/store/repos/execution-profiles-repo.js").ExecutionProfilesRepo;
   getRuntimeCodexProfile(id: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntimeExecutionProfile(id: string, provider: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntime(id: string): MultiremiRuntime | null;
@@ -529,6 +532,9 @@ export class StoreContext {
   readonly metricCounters = new Map<string, MultiremiMetricCounter>();
 
   private analyticsRepo: AnalyticsSurface | null = null;
+
+  executionBindingStates() { return this.resolveHost().executionBindingStatesRepo(); }
+  executionProfiles() { return this.resolveHost().executionProfilesRepo(); }
 
   constructor(readonly db: SqlDatabase, private readonly resolveHost: () => StoreContextHost) {}
 

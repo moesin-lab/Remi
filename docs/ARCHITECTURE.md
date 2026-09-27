@@ -80,8 +80,12 @@ PostgreSQL 的 `PgBridge.request` 用 `Atomics.wait` 等待 [pg-worker](../packa
 
 ## 云友执行能力组
 
-[执行组存储](../packages/server/src/store/execution-groups.ts)与[调度](../packages/server/src/store/repos/tasks-repo.ts)共同管理执行能力组。云友通过 `execution_group_id` 选择执行能力组，`provider` 表示 Runtime 类型。系统默认按工作区、机器（优先使用 daemon ID）与 Runtime 类型生成稳定的 `eg_` 组标识；Runtime 也可配置自定义组标识，将同工作区、同类型的多个 Runtime 合并调度。自定义标识使用 1–128 位字母、数字、下划线、点、冒号或连字符，首位必须为字母或数字，`eg_` 前缀保留给默认组。旧机器身份补齐时保留默认组，已有同机器默认组时归并并迁移云友引用。将 Runtime 的 `execution_group_id` 设为 `null` 可恢复默认组；`execution_group_ids` 返回实际成员关系。通用 `any` Runtime 自动加入 Claude/Codex 默认组，自定义组要求具体类型。
+[执行组存储](../packages/server/src/store/execution-groups.ts)与[中央 Profile 存储](../packages/server/src/store/repos/execution-profiles-repo.ts)分别管理执行成员和连接配置。Profile 属于工作区，保存 Claude/Codex 连接及不可变版本；能力组明确指定 provider、Profile 和 Runtime 成员，同一个 Runtime 可以加入多个组。自动发现只登记机器的引擎与健康状态，不再创建能力组。配置入口、权限与升级兼容见[执行配置](dev/execution-configuration.md)。
 
-创建和编辑云友共用能力组选择器，显示组标识、成员和在线数量；也可选择「自动调度」，保留按引擎和归属在工作区内跨机器调度的原有行为。自动调度的模型与思考选项使用云友所有者可用的工作区目录。选择具体组时，模型及思考选项取各可执行成员（含离线成员）的有效连接目录交集：自定义连接优先，并保留 daemon 为配置模型实际探测到的思考能力，否则应用工作区网关；成员一致时才标记默认模型。组内任务领取及重领通过 `runtimeCanRunAgent` 复验成员关系、模型能力、类型、工作区和归属，并与项目设备和本机目录约束取交集。组离线或无可用成员时排队，不转到组外机器。
+云友通过 `execution_group_id` 选择能力组，也可保留「自动调度」。组内任务领取通过 `runtimeCanRunAgent` 复验成员关系、模型、类型、工作区与归属，并与项目设备和本机目录约束取交集。受管能力组还要求 daemon 对当前 Profile 版本回报 ready；在线数量不代表配置已就绪。无可用成员时排队，不转到组外机器。中央 Profile 的模型用于该组目录，未配置中央 Profile 的路径沿用有效连接目录；目录声明不代表服务连通。
 
-切换云友执行组默认清空模型和思考覆盖，未冻结的排队任务清除旧会话信息，已冻结但未启动的任务取消，运行中任务继续原执行。组和成员关系持久化；Runtime 离组或删除后保留组，已有云友不会静默转组。旧 `runtime_id` 绑定迁移到对应组并保留机器约束与手填模型兼容行为，显式选择组（包括重选当前组）后解除旧机器绑定并启用组模型校验；原先未绑定的云友保留原调度行为。当前分组由默认规则和显式组标识决定，后续可在组成员解析层扩展能力匹配。
+[调度](../packages/server/src/store/repos/tasks-repo.ts)首次 claim 时冻结完整连接与凭据版本，并纳入执行指纹。daemon 按任务快照构造隔离的 provider 配置，不以组配置覆盖机器全局配置。配置变更不改写运行中任务。
+
+迁移按每个 Runtime/provider 独立导入旧连接与凭据，并保留原数据供旧任务快照使用；可确定单一连接的旧组转换为受管组，连接不一致的旧组保留原行为。新组由用户显式创建，不按名称合并 Profile。组被云友引用时不可删除，Profile 被组引用时不可删除；历史 Profile 版本与加密凭据保留供任务快照使用。
+
+切换云友执行组默认清空模型和思考覆盖，未冻结的排队任务清除旧会话信息，已冻结但未启动的任务取消，运行中任务继续原执行。Runtime 离组或删除后保留组，已有云友不会静默转组。旧 `runtime_id` 绑定保留机器约束与手填模型兼容行为，显式选择组后解除旧机器绑定并启用组模型校验；原先未绑定的云友保留原调度行为。

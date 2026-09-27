@@ -81,7 +81,7 @@ function setup(options: { snapshot: "stale" | "failed" | "empty" }) {
     name: "claude-0", provider: "claude", workspaceId: "local",
     models: [{ id: "claude-fable-5-1", label: "Claude Fable 5.1", provider: "anthropic", default: true }],
   });
-  store.updateRuntime(runtime.id, { executionGroupId: "probe-group" });
+  store.saveExecutionGroup("local", { name: "Probe", provider: "claude", profile_id: null, runtime_ids: [runtime.id] }, "probe-group");
   const agent = store.createAgent({ name: "reader", provider: "claude", model: "claude-fable-5-1" });
   return {
     store, runtime, agent,

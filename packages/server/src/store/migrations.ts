@@ -1,5 +1,6 @@
+import { migrateLegacyExecutionProfiles } from "@multiremi/store/execution-profile-migration.js";
 import { CHAT_ISSUE_DECOUPLED_FINGERPRINT, chatTaskRetryParentSql } from "@multiremi/store/helpers.js";
-import { syncRuntimeExecutionGroups } from "@multiremi/store/execution-groups.js";
+import { backfillRuntimeExecutionGroups } from "@multiremi/store/execution-groups.js";
 import { createHash } from "node:crypto";
 import { attachmentIdsFromText } from "@multiremi/contracts/attachments.js";
 import { type SqlDatabase } from "@multiremi/store/db/postgres.js";
@@ -3155,11 +3156,44 @@ export function runMigrations(db: SqlDatabase): void {
   );
   CREATE INDEX IF NOT EXISTS idx_execution_group_members_group ON multiremi_execution_group_members(workspace_id, group_id);`);
   runMigrationOnce(db, "execution_groups_v1", () => {
-    for (const row of db.query("SELECT id FROM multiremi_runtimes").all() as { id: string }[]) syncRuntimeExecutionGroups(db, row.id);
+    for (const row of db.query("SELECT id FROM multiremi_runtimes").all() as { id: string }[]) backfillRuntimeExecutionGroups(db, row.id);
     db.run(`UPDATE multiremi_agents SET execution_group_id = (
       SELECT group_id FROM multiremi_execution_group_members m WHERE m.runtime_id = multiremi_agents.runtime_id AND m.provider = multiremi_agents.provider
     ) WHERE execution_group_id IS NULL AND runtime_id IS NOT NULL`);
   });
+  addColumnIfMissing(db, "multiremi_execution_groups", "name TEXT");
+  addColumnIfMissing(db, "multiremi_execution_groups", "profile_id TEXT");
+  addColumnIfMissing(db, "multiremi_execution_groups", "managed INTEGER NOT NULL DEFAULT 0");
+  db.exec(`CREATE TABLE IF NOT EXISTS multiremi_execution_profiles (
+    id TEXT NOT NULL,workspace_id TEXT NOT NULL,name TEXT NOT NULL,provider TEXT NOT NULL,
+    revision INTEGER NOT NULL,deleted_at TEXT,PRIMARY KEY(workspace_id,id));
+    CREATE TABLE IF NOT EXISTS multiremi_execution_profile_versions (
+    id TEXT NOT NULL,workspace_id TEXT NOT NULL,name TEXT NOT NULL,provider TEXT NOT NULL,
+    revision INTEGER NOT NULL,profile TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+    PRIMARY KEY(workspace_id,id,revision));
+    CREATE TABLE IF NOT EXISTS multiremi_execution_profile_legacy_sources (
+    profile_id TEXT NOT NULL,workspace_id TEXT NOT NULL,revision INTEGER NOT NULL,runtime_id TEXT NOT NULL,
+    provider TEXT NOT NULL,legacy_profile TEXT NOT NULL,PRIMARY KEY(workspace_id,profile_id));
+    CREATE TABLE IF NOT EXISTS multiremi_execution_profile_credentials (
+    id TEXT PRIMARY KEY,profile_id TEXT NOT NULL,workspace_id TEXT NOT NULL,ciphertext TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS multiremi_execution_binding_generations (
+    workspace_id TEXT NOT NULL,group_id TEXT NOT NULL,runtime_id TEXT NOT NULL,generation TEXT NOT NULL,
+    PRIMARY KEY(workspace_id,group_id,runtime_id));
+    CREATE TABLE IF NOT EXISTS multiremi_execution_binding_states (
+    workspace_id TEXT NOT NULL,group_id TEXT NOT NULL,runtime_id TEXT NOT NULL,profile_id TEXT,
+    profile_revision INTEGER,status TEXT NOT NULL,error TEXT,updated_at TEXT NOT NULL,
+    PRIMARY KEY(workspace_id,group_id,runtime_id));`);
+  addColumnIfMissing(db, "multiremi_execution_binding_states", "generation TEXT");
+  runMigrationOnce(db, "central_execution_profiles_v1", () => {
+    db.exec(`ALTER TABLE multiremi_execution_group_members RENAME TO multiremi_execution_group_members_legacy;
+      CREATE TABLE multiremi_execution_group_members (
+      runtime_id TEXT NOT NULL,provider TEXT NOT NULL,workspace_id TEXT NOT NULL,group_id TEXT NOT NULL,
+      PRIMARY KEY(workspace_id,group_id,runtime_id));
+      INSERT INTO multiremi_execution_group_members SELECT * FROM multiremi_execution_group_members_legacy;
+      DROP TABLE multiremi_execution_group_members_legacy;
+      CREATE INDEX idx_execution_group_members_group ON multiremi_execution_group_members(workspace_id,group_id);`);
+  });
+  runMigrationOnce(db, "central_execution_profiles_legacy_v1", () => migrateLegacyExecutionProfiles(db));
   // MUL-336: a task (and its recovery chain) can run on a model other than its
   // Agent's primary one after a gateway resource failure. The override lives on
   // the task so the Agent's own model stays untouched and concurrent tasks of

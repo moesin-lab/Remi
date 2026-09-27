@@ -65,3 +65,22 @@ export function parseRuntimeConnectionProfile(value: unknown, envPrefix: "REMI_C
   return { name, base_url: url.toString().replace(/\/$/, ""), model, env_key: auth_mode === "env" ? env_key : "", auth_mode,
     ...(auth_mode === "api_key" && credential_id ? { credential_id } : {}) };
 }
+
+/** A centrally managed connection applied independently for each capability group. */
+export interface RuntimeExecutionBinding {
+  generation: string;
+  groupId: string;
+  provider: string;
+  profileId: string | null;
+  profileRevision: number | null;
+  profile: (RuntimeConnectionProfile & { auth_header?: "bearer" | "x-api-key" }) | null;
+}
+
+export interface RuntimeExecutionBindingAck {
+  generation: string;
+  groupId: string;
+  profileId: string | null;
+  profileRevision: number | null;
+  status: "ready" | "error";
+  error?: string;
+}

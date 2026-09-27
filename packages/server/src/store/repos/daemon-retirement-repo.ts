@@ -17,6 +17,8 @@ const BLOCKING_TASK_STATUSES = ["dispatched", "running", "waiting_local_director
 const RUNTIME_AUXILIARY_IDENTITY_COLUMNS: Partial<Record<(typeof RUNTIME_AUXILIARY_TABLES)[number], string[]>> = {
   multiremi_runtime_models: ["runtime_id", "model_id"],
   multiremi_execution_group_members: ["runtime_id", "provider", "group_id"],
+  multiremi_execution_binding_states: ["workspace_id", "group_id", "runtime_id", "generation"],
+  multiremi_execution_binding_generations: ["workspace_id", "group_id", "runtime_id", "generation"],
   multiremi_runtime_codex_profiles: ["runtime_id", "profile"],
   multiremi_runtime_claude_profiles: ["runtime_id", "profile"],
   multiremi_runtime_provision_states: ["runtime_id", "provision_id"],

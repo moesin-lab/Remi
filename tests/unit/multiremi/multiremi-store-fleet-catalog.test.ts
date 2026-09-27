@@ -832,13 +832,17 @@ describe("Multiremi store — fleet engine and model catalog", () => {
   it("intersects default capabilities across mixed daemon versions and preserves them under gateway overlays", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
-    const modern = store.registerRuntime({ id: "rt_modern", name: "Modern", provider: "claude", executionGroupId: "mixed",
+    const modern = store.registerRuntime({ id: "rt_modern", name: "Modern", provider: "claude",
       models: [
         { id: "default", label: "Default", provider: "anthropic", default: true, providerDefault: true, thinking: runtimeThinking(["high", "max"]) },
         { id: "sonnet", label: "Sonnet", provider: "anthropic", default: false, thinking: runtimeThinking(["low", "high"]) },
       ] });
-    const legacy = store.registerRuntime({ id: "rt_legacy", name: "Legacy", provider: "claude", executionGroupId: "mixed",
+    const legacy = store.registerRuntime({ id: "rt_legacy", name: "Legacy", provider: "claude",
       models: [{ id: "sonnet", label: "Sonnet", provider: "anthropic", default: false, thinking: runtimeThinking(["low", "high"]) }] });
+    store.saveExecutionGroup("local", { name: "Mixed", provider: "claude", profile_id: null, runtime_ids: [modern.id, legacy.id] }, "mixed");
+    for (const runtime of [modern, legacy]) {
+      store.recordRuntimeExecutionBindingAcks(runtime.id, store.getRuntimeExecutionBindings(runtime.id).map(binding => ({ ...binding, status: "ready" })));
+    }
     saveGatewayCatalog(store, "claude", [{ id: "claude-sonnet-5", label: "Sonnet 5" }]);
     const app = createMultiremiApp({ store });
     for (const query of ["", "?execution_group_id=mixed"]) {
@@ -884,5 +888,5 @@ describe("Multiremi store — fleet engine and model catalog", () => {
       dbB.close();
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });

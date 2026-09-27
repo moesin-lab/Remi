@@ -71,7 +71,9 @@ vi.mock("@tanstack/react-query", async () => {
             isLoading: false,
             isError: false,
           }
-        : { data: [], isLoading: false, isError: false },
+        : options.queryKey?.includes("execution-groups")
+          ? { data: { groups: [] }, isLoading: false, isError: false }
+          : { data: [], isLoading: false, isError: false },
     ),
   };
 });
@@ -83,6 +85,7 @@ vi.mock("@multiremi/core/auth", () => ({
 
 vi.mock("@multiremi/core/runtimes", () => ({
   deriveRuntimeHealth: () => "online",
+  executionGroupListOptions: (wsId: string) => ({ queryKey: ["runtimes", wsId, "execution-groups"] }),
 }));
 
 vi.mock("@multiremi/core/agents", () => ({

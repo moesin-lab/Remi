@@ -11,23 +11,25 @@ remi runtime task-activity <runtime-id> --json
 
 Runtime 是某台 daemon 提供的执行能力，Agent 是工作区里的云友定义。修改云友模型与配置模型提供商连接是不同操作。核对 provider、归属机器、心跳新鲜度和活动任务；仅 `status: online` 或 SSH 可达不能证明目录扫描或执行已经恢复。
 
-## Codex / Claude 自定义连接
+## 集中配置连接与能力组
 
-连接属于 Runtime，由人类配置；任务凭据不能管理它。先查询现值与帮助：
+先在工作区配置可复用 Profile，再把 Profile 和机器上的 Runtime 绑定到能力组，最后让云友选择组。写入需人类工作区管理员权限；组成员还受 Runtime 编辑权限约束。task/daemon 凭据不能管理配置。自动扫描只发现引擎，不创建能力组。
+
+先核对已有对象与当前命令参数：
 
 ```sh
-remi runtime codex-profile get <runtime-id> --json
-remi runtime codex-profile set --help
-remi runtime claude-profile get <runtime-id> --json
-remi runtime claude-profile set --help
+remi runtime profile list --json
+remi runtime group list --json
+remi runtime profile create --help
+remi runtime group create --help
 ```
 
-只对匹配 provider 的 Runtime 执行相应命令。Codex 需要 Responses 兼容接口；Claude Code 需要 Anthropic Messages 兼容接口，不把任意 OpenAI chat/completions 接口当作二者通用入口。先让用户确认服务商协议、基础地址和模型 ID。
-
-保存 API key 的 Codex 请求文件：
+Codex 需要 Responses 兼容接口；Claude Code 需要 Anthropic Messages 兼容接口。根据用户提供的信息核对协议、基础地址和模型 ID，缺失且影响配置时再询问。Codex 请求文件示例：
 
 ```json
 {
+  "name": "团队 Codex",
+  "provider": "codex",
   "profile": {
     "name": "custom-codex",
     "base_url": "https://gateway.example/v1",
@@ -39,55 +41,40 @@ remi runtime claude-profile set --help
 }
 ```
 
+Claude 使用 `provider: "claude"`，在 `profile` 中加 `auth_header: "bearer"` 或 `"x-api-key"`。内层连接 `name` 只用字母、数字、下划线、连字符，外层 `name` 是展示名；`base_url` 是 HTTP(S) 基础地址，无用户信息、query 或 fragment。Claude 基础地址不包含完整 `/v1/messages` 路径。
+
 ```sh
-remi runtime codex-profile set <runtime-id> --file <private-codex-profile.json> --json
-remi runtime codex-profile get <runtime-id> --json
+remi runtime profile create --file <private-profile.json> --json
+remi runtime profile get <profile-id> --json
 ```
 
-Claude 请求的连接字段相同，另外指定 `auth_header`：
+更新使用 `remi runtime profile update <profile-id> --file <private-profile.json> --json`，提交完整配置。已有密钥时省略顶层 `api_key` 表示保留；首次使用 `api_key` 模式需提供密钥。读取只返回配置和不透明凭据引用。每次保存生成新 revision；provider 创建后不能改。
+
+使用实际返回的 Profile ID 和查询到的 Runtime ID 创建组：
 
 ```json
 {
-  "profile": {
-    "name": "custom-claude",
-    "base_url": "https://anthropic-compatible.example",
-    "model": "provider-model-id",
-    "auth_mode": "api_key",
-    "env_key": "",
-    "auth_header": "x-api-key"
-  },
-  "api_key": "<user-supplied-api-key>"
+  "name": "团队开发",
+  "provider": "codex",
+  "profile_id": "<profile-id>",
+  "runtime_ids": ["<runtime-id>"]
 }
 ```
 
 ```sh
-remi runtime claude-profile set <runtime-id> --file <private-claude-profile.json> --json
-remi runtime claude-profile get <runtime-id> --json
+remi runtime group create --file <group.json> --json
+remi runtime group get <group-id> --json
+remi runtime group list --json
+remi runtime model catalog --execution-group <group-id> --json
 ```
 
-`auth_header` 可为 `bearer` 或 `x-api-key`，按服务商要求选择；缺省是 bearer。不要把凭据塞进 `profile` 内、URL 用户信息或 query。`name` 只用字母、数字、下划线、连字符；`base_url` 是 HTTP(S) 基础地址，无 query 或 fragment。
+成员必须属于当前工作区并兼容组的 provider；一个 Runtime 可以加入多个组。`profile_id: null` 使用工作区 Relay / 原生连接，不继承旧的单 Runtime 自定义连接。组修改使用 `runtime group update <group-id> --file <group.json>`；云友通过 `agent update <agent-id> --execution-group <group-id>` 选择组，执行前核对用户要求的云友和目标。
 
-已有密钥时省略顶层 `api_key` 表示保留；首次使用 `api_key` 模式需提供密钥。读回不返回明文；`credential_id` 是服务端管理的版本引用，不是用户生成的 API key。
+读回配置和成员后，等待各机器确认当前 Profile revision。待应用或失败的机器不能领取该受管组任务；在线不等于已应用，已应用也不等于模型调用成功。任务首次领取冻结连接快照，运行中任务不随配置变更切换。用户要求验证执行时再创建最小测试任务或 Chat，并检查终态。
 
-若密钥已配置在 Runtime 的 **daemon 进程环境**，使用 `auth_mode: "env"`，省略 `api_key`。Codex 的 `env_key` 必须为 `REMI_CODEX_*`，Claude 必须为 `REMI_CLAUDE_*`。例如 Codex 的完整 `profile` 可用：
+若密钥已配置在每台承载机器的 daemon 进程环境，使用 `auth_mode: "env"`，省略 `api_key`。Codex 的 `env_key` 必须为 `REMI_CODEX_*`，Claude 必须为 `REMI_CLAUDE_*`。运行管理 CLI 的终端变量不会自动进入远端或后台 daemon；修改环境时核对实际服务管理方式和重启影响。
 
-```json
-{
-  "profile": {
-    "name": "runtime-env",
-    "base_url": "https://gateway.example/v1",
-    "model": "provider-model-id",
-    "auth_mode": "env",
-    "env_key": "REMI_CODEX_PROVIDER_KEY"
-  }
-}
-```
-
-不要只在运行配置 CLI 的机器上设置该变量，或假设交互终端的变量会自动进入后台 daemon。若需要改变 daemon 启动环境，先确认实际服务管理方式和重启影响；本 Skill 不擅自安装另一套后台服务。
-
-清除自定义连接的请求体为 `{"profile": null}`，通过相应的 `*-profile set --file` 提交，恢复工作区网关。清除与删除 Runtime 无关。
-
-保存后读回 profile，等待该 Runtime 后续心跳应用，再检查模型目录。任务保存自己的连接快照，已有任务不随配置变更自动切换。只有用户要求验证执行时才创建最小测试任务或 Chat，并检查终态；模型出现在目录里仅证明配置或发现成功，不证明接口调用成功。
+删除使用 `runtime profile delete <profile-id>` 或 `runtime group delete <group-id>`：仍被组引用的 Profile、仍被云友引用的组会拒绝删除。旧版单 Runtime 的 `runtime codex-profile get|set`、`runtime claude-profile get|set` 保留兼容，但不编辑中央组配置。迁移和下发契约见[执行配置](../../../../docs/dev/execution-configuration.md)。
 
 ## 本地工作目录
 

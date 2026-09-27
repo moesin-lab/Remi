@@ -705,5 +705,28 @@
     "save": "保存",
     "saved": "実行グループを更新しました",
     "failed": "実行グループを更新できませんでした"
+  },
+  "configuration": {
+    "title": "能力設定",
+    "description": "接続 Profile と能力グループを一元管理し、選択したマシンの Runtime に配布します。自動検出はマシンの能力のみを報告します。",
+    "profiles": "接続 Profile",
+    "groups": "能力グループ",
+    "add_profile": "Profile を追加",
+    "add_group": "グループを追加",
+    "no_profiles": "接続 Profile はまだありません。",
+    "no_groups": "能力グループは割り当てられていません。",
+    "name": "名前",
+    "provider": "実行エンジン",
+    "native": "マシンの標準接続",
+    "members": "実行 Runtime",
+    "edit": "編集",
+    "delete": "削除",
+    "cancel": "キャンセル",
+    "pending": "適用待ち",
+    "applied": "適用済み",
+    "failed": "適用失敗",
+    "unknown": "未確認",
+    "load_error": "設定を読み込めませんでした。再読み込みしてください。",
+    "legacy": "旧 Runtime 設定"
   }
 }

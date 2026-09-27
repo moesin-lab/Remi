@@ -258,8 +258,10 @@ export class IssuesRepo {
       });
     }
     if (createdBy) {
-      const creator = this.ctx.workspaces().findWorkspaceMemberForUser(createdBy, workspaceId);
-      if (creator) this.addIssueSubscriber(id, creator.id, "created");
+      const creator = this.ctx.workspaces().getWorkspaceMember(createdBy) ?? this.ctx.workspaces().findWorkspaceMemberForUser(createdBy, workspaceId);
+      if (creator && creator.workspaceId === workspaceId && !creator.archivedAt) {
+        this.addIssueSubscriber(id, creator.id, "created");
+      }
     }
     return this.getIssue(id)!;
   }
@@ -563,6 +565,11 @@ export class IssuesRepo {
     // leave a retirement blocker or orphaned archive metadata.
     this.ctx.db.run("DELETE FROM multiremi_session_archives WHERE issue_id = ?", [id]);
     this.ctx.db.run("DELETE FROM multiremi_issue_workspaces WHERE issue_id = ?", [id]);
+    // Sessions and their published results are owned by Chats. Issue deletion
+    // removes only the optional work-management projection, including in
+    // SQLite test/dev stores where foreign-key enforcement may be disabled.
+    this.ctx.db.run("UPDATE multiremi_issue_sessions SET issue_id = NULL WHERE issue_id = ?", [id]);
+    this.ctx.db.run("UPDATE multiremi_session_results SET issue_id = NULL WHERE issue_id = ?", [id]);
     const removed = this.ctx.db.run("DELETE FROM multiremi_issues WHERE id = ?", [id]);
     if (issue.projectId) {
       this.ctx.db.run("UPDATE multiremi_projects SET updated_at = ? WHERE id = ?", [nowIso(), issue.projectId]);
@@ -881,8 +888,13 @@ export class IssuesRepo {
   }
 
   updateIssue(id: string, input: UpdateIssueInput): MultiremiIssue {
+    return this.updateIssueWithOutcome(id, input).issue;
+  }
+
+  updateIssueWithOutcome(id: string, input: UpdateIssueInput): { issue: MultiremiIssue; cancelledTasks: number } {
     let previous: MultiremiIssue | null = null;
     let updatedAt = "";
+    let cancelledTasks = 0;
     const updated = this.ctx.db.transaction(() => {
       if (hasAnyField(input, "runtimeWorkspaceId", "runtime_workspace_id", "projectId", "project_id")) {
         const initial = this.getIssue(id);
@@ -1010,6 +1022,14 @@ export class IssuesRepo {
         id,
         ],
       );
+      if (hasAnyField(input, "assigneeType", "assignee_type", "assigneeId", "assignee_id")
+        && !nextAssigneeType && !nextAssigneeId && current.assigneeId) {
+        cancelledTasks = this.unassignIssueWithinTransaction(id, {
+          actorType: input.actorType ?? "system",
+          actorId: input.actorId ?? null,
+          parentTaskId: input.parentTaskId ?? input.parent_task_id,
+        });
+      }
       const next = this.getIssue(id)!;
       this.linkReferencedAttachmentsToIssue(id, next.description);
       this.ctx.autopilots().enqueueIssueStatusChangedEvent({
@@ -1038,7 +1058,7 @@ export class IssuesRepo {
       updated,
       cleanOptionalString(input.parentTaskId ?? input.parent_task_id),
     );
-    return updated;
+    return { issue: updated, cancelledTasks };
   }
 
   restoreIssue(id: string): MultiremiIssue {
@@ -1326,6 +1346,26 @@ export class IssuesRepo {
     });
   }
 
+  private unassignIssueWithinTransaction(id: string, input: {
+    actorType: string;
+    actorId: string | null;
+    parentTaskId?: string | null;
+  }): number {
+    const cancelled = this.cancelActiveIssueTasks(id, "issue_unassigned");
+    this.ctx.db.run(
+      "UPDATE multiremi_issues SET assignee_type = NULL, assignee_id = NULL, updated_at = ? WHERE id = ?",
+      [nowIso(), id],
+    );
+    this.ctx.appendIssueActivity(id, {
+      actorType: input.actorType,
+      actorId: input.actorId,
+      type: "issue_unassigned",
+      body: null,
+      data: { cancelled, ...sourceTaskActivityData(input.parentTaskId) },
+    });
+    return cancelled;
+  }
+
   assignIssue(id: string, input: AssignIssueInput): AssignIssueResult {
     const current = this.getIssue(id);
     if (!current) throw new Error(`Issue not found: ${id}`);
@@ -1339,22 +1379,12 @@ export class IssuesRepo {
       throw new Error("Assignee id is required when assignee type is provided");
     }
     if (!requestedAssigneeType && !requestedAssigneeId) {
-      const cancelled = this.cancelActiveIssueTasks(id, "issue_unassigned");
-      this.ctx.db.run(
-        "UPDATE multiremi_issues SET assignee_type = NULL, assignee_id = NULL, updated_at = ? WHERE id = ?",
-        [now, id],
-      );
-      this.ctx.appendIssueActivity(id, {
+      const cancelledTasks = this.ctx.db.transaction(() => this.unassignIssueWithinTransaction(id, {
         actorType,
         actorId,
-        type: "issue_unassigned",
-        body: null,
-        data: {
-          cancelled,
-          ...sourceTaskActivityData(input.parentTaskId ?? input.parent_task_id),
-        },
-      });
-      return { issue: this.getIssue(id)!, task: null };
+        parentTaskId: input.parentTaskId ?? input.parent_task_id,
+      }))();
+      return { issue: this.getIssue(id)!, task: null, cancelledTasks };
     }
 
     // requestedAssigneeId is non-null here (the early-return above handled the
@@ -1426,7 +1456,7 @@ export class IssuesRepo {
       },
     });
     if (current.projectId) this.ctx.db.run("UPDATE multiremi_projects SET updated_at = ? WHERE id = ?", [now, current.projectId]);
-    return { issue: this.getIssue(id)!, task };
+    return { issue: this.getIssue(id)!, task, cancelledTasks: cancelled };
   }
 
   quickCreateIssue(input: QuickCreateIssueInput): QuickCreateIssueResult {
@@ -1553,11 +1583,12 @@ export class IssuesRepo {
       createdAt: now,
     }) : null;
     if (authorType === "member" && input.authorId) {
-      // authorId is a request user id, not a member row id — translate before
-      // subscribing, and skip (rather than fail the comment) when the author
-      // has no member row in this workspace.
-      const authorMember = this.ctx.workspaces().findWorkspaceMemberForUser(input.authorId, issue.workspaceId);
-      if (authorMember) this.addIssueSubscriber(issueId, authorMember.id, "commented");
+      // Member authors may use a member row id or a request user id. Resolve
+      // explicitly for subscriptions without broadening authorization lookup.
+      const authorMember = this.ctx.workspaces().getWorkspaceMember(input.authorId) ?? this.ctx.workspaces().findWorkspaceMemberForUser(input.authorId, issue.workspaceId);
+      if (authorMember && authorMember.workspaceId === issue.workspaceId && !authorMember.archivedAt) {
+        this.addIssueSubscriber(issueId, authorMember.id, "commented");
+      }
     }
     this.ctx.appendIssueActivity(issueId, {
       actorType: authorType,
@@ -3109,9 +3140,26 @@ export class IssuesRepo {
     const targets = this.resolveCommentMentionTargets(comment.body, issue.workspaceId);
     if (!targets.length) return [];
 
+    const session = comment.issueSessionId
+      ? this.ctx.issueSessions().getIssueSession(comment.issueSessionId) : null;
+    const sourceTask = comment.taskId ? this.ctx.tasks().getTask(comment.taskId) : null;
+    const sourceSession = sourceTask?.issueSessionId
+      ? this.ctx.issueSessions().getIssueSession(sourceTask.issueSessionId) : null;
+    // The user can still ask any agent a question in a side conversation;
+    // only model-authored dispatch is forbidden, including deferred mentions.
+    if (comment.authorType === "agent" && (
+      (session && session.inheritMode !== "none")
+      || (sourceSession && sourceSession.inheritMode !== "none")
+    )) {
+      for (const target of targets) {
+        const agent = this.ctx.resolveRunnableAgentForAssignee(target.assigneeType, target.assigneeId);
+        this.recordCommentMentionSkipped(issue, comment, agent, target, "side_session_delegation_blocked");
+      }
+      return [];
+    }
+
     const tasks: MultiremiTask[] = [];
     const seenAgents = new Set<string>();
-    const sourceTask = comment.taskId ? this.ctx.tasks().getTask(comment.taskId) : null;
     const taskAuthoredByCommentAgent = comment.authorType === "agent"
       && !!comment.authorId
       && sourceTask?.agentId === comment.authorId
@@ -3170,6 +3218,8 @@ export class IssuesRepo {
       // still-queued task: it has not been claimed, so its session projection is
       // built later and already carries this comment. A dispatched or running
       // task has its context frozen, so a follow-up there must get its own turn.
+      // Explicit continuation tasks are also excluded: they belong to a prior
+      // delegation lane, while this rich mention is an independent delegation.
       // Human mentions are never coalesced, so that a mentioning comment and a
       // plain one behave alike: an un-mentioned human comment always dispatches
       // individually (no batching, by request — see triggerAssigneeAutoResponse),
@@ -3194,7 +3244,17 @@ export class IssuesRepo {
         continue;
       }
 
-      const delegationId = leaderDelegation ? createId("dlg") : null;
+      // A rich mention is the same leader talking to the same teammate again.
+      // Continue the lane that teammate already owns in this Session so it
+      // keeps one provider conversation and receives a delta; a teammate that
+      // has never been delegated to still gets a fresh lane, and `remi task
+      // create` remains the explicit way to start an independent one.
+      const continuedDelegation = leaderDelegation
+        ? this.latestDelegatedTaskForAgent(issue.id, agent.id, comment.authorId, comment.issueSessionId)
+        : null;
+      const delegationId = leaderDelegation
+        ? continuedDelegation?.delegationId ?? createId("dlg")
+        : null;
       const task = this.ctx.tasks().createTask({
         agentId: agent.id,
         issueId: issue.id,
@@ -3231,7 +3291,7 @@ export class IssuesRepo {
     comment: MultiremiIssueComment,
     agent: MultiremiAgent | null,
     target: { assigneeType: "agent" | "squad"; assigneeId: string },
-    reason: "self_mention" | "unsupported_direction" | "unlinked_agent_comment" | "target_unavailable",
+    reason: "self_mention" | "unsupported_direction" | "unlinked_agent_comment" | "target_unavailable" | "side_session_delegation_blocked",
   ): void {
     this.ctx.appendIssueActivity(issue.id, {
       actorType: "system",
@@ -3330,6 +3390,36 @@ export class IssuesRepo {
   }
 
   /**
+   * The most recent task this delegator handed to this agent in the same Issue
+   * Session. A rich mention continues that delegation instead of starting a new
+   * lane, so re-mentioning a teammate resumes its provider conversation rather
+   * than cold-bootstrapping the whole Issue again.
+   */
+  private latestDelegatedTaskForAgent(
+    issueId: string,
+    agentId: string,
+    delegatedByAgentId: string | null,
+    issueSessionId: string | null,
+  ): MultiremiTask | null {
+    if (!delegatedByAgentId) return null;
+    const sessionClause = issueSessionId === null
+      ? "issue_session_id IS NULL"
+      : "issue_session_id = ?";
+    const params: unknown[] = issueSessionId === null
+      ? [issueId, agentId, delegatedByAgentId]
+      : [issueId, agentId, delegatedByAgentId, issueSessionId];
+    const row = this.ctx.db.query(
+      `SELECT id FROM multiremi_tasks
+       WHERE issue_id = ? AND agent_id = ? AND delegated_by_agent_id = ?
+         AND delegation_id IS NOT NULL
+         AND ${sessionClause}
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    ).get(...params) as { id: string } | null;
+    return row ? this.ctx.tasks().getTask(row.id) : null;
+  }
+
+  /**
    * The agent's task on this issue that is still waiting to be claimed, if any.
    * Scoped to the issue Session so a queued leftover from another Session (or a
    * Session that has since been reset) never swallows a fresh delegation.
@@ -3350,6 +3440,7 @@ export class IssuesRepo {
     const row = this.ctx.db.query(
       `SELECT id FROM multiremi_tasks
        WHERE issue_id = ? AND agent_id = ? AND status = 'queued'
+         AND continued_from_task_id IS NULL
          AND ${sessionClause}
        ORDER BY created_at DESC
        LIMIT 1`,

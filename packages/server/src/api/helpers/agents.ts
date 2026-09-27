@@ -1,3 +1,10 @@
+import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
+import { createLogger } from "@shared/logger.js";
+import { workspaceRuntimeModelCatalog, catalogAllowsModel, commonThinkingCapabilities, modelThinkingState, providerDeclaresReasoningLevels, runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
+import { GATEWAY_REASONING_LEVELS, manualThinkingResponse } from "@multiremi/store/runtime-model-catalog.js";
+import type { FleetModelThinkingResponse, FleetModelThinkingSource } from "@multiremi/store/runtime-model-catalog.js";
+import type { RelayEngine } from "@multiremi/store/store.js";
+export { workspaceRuntimeModelCatalog, overlayGatewayModels, runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
 // Agent and skill request plumbing: the `with*RequestContext` builders that fold caller identity
 // and defaults into create/update inputs, the `load*For*` guards, and the provider/thinking-level
 // validation shared by the agents, skills and agent-template routers.
@@ -32,71 +39,16 @@ import {
 import { canCurrentUserUseRuntime } from "./runtimes.js";
 import { resolveRequestWorkspaceId } from "./workspace-context.js";
 import {
-  fleetModelsResponse,
   type FleetModelResponse,
-  type FleetModelThinkingResponse,
   type FleetProviderModelsResponse,
 } from "../wire/runtimes.js";
 import { isAgentRole } from "@multiremi/store/agent-role.js";
 import { currentTaskIssueCreationRestricted } from "./issues.js";
+import { modelThinkingLevels } from "@multiremi/contracts/model-thinking.js";
 
 export const MAX_AGENT_DESCRIPTION_LENGTH = 255;
 
-type ClaudeModelFamily = "opus" | "sonnet" | "haiku";
-
-function claudeModelFamily(modelId: string): ClaudeModelFamily | undefined {
-  const normalized = modelId.toLowerCase().replace(/\[1m\]$/, "");
-  return normalized.match(
-    /^(?:claude-)?(opus|sonnet|haiku)(?:-\d+(?:-\d+)*)?$/,
-  )?.[1] as ClaudeModelFamily | undefined;
-}
-
-function thinkingLevelsKey(thinking: FleetModelThinkingResponse): string {
-  return JSON.stringify([...thinking.supported_levels].sort((a, b) =>
-    a.value.localeCompare(b.value)
-      || a.label.localeCompare(b.label)
-      || (a.description ?? "").localeCompare(b.description ?? "")
-  ));
-}
-
-function familyThinkingConsensus(models: FleetModelResponse[]): FleetModelThinkingResponse | undefined {
-  const first = models[0]?.thinking;
-  const firstKey = first
-    ? `${thinkingLevelsKey(first)}\0${first.default_level ?? ""}`
-    : undefined;
-  if (!models.every((model) => {
-    if (!model.thinking) return firstKey === undefined;
-    return `${thinkingLevelsKey(model.thinking)}\0${model.thinking.default_level ?? ""}` === firstKey;
-  })) return undefined;
-  return first;
-}
-
-/**
- * Last-resort tier for gateway models with no exact and no family counterpart
- * (e.g. `claude-fable-5`, which has no runtime id at all): if every effort-capable
- * runtime model of this provider agrees on one level set, assume a new model of the
- * same provider shares it. This is a heuristic, so it fails closed on any
- * disagreement — Codex, whose runtimes expose 4- and 6-level sets, never reaches a
- * consensus here. It never propagates `default`; only an exact or unambiguous family
- * hit may do that. Revisit if a future Claude model ships an effort set that diverges
- * from its siblings — it would be given the consensus set rather than its own.
- */
-function providerThinkingConsensus(models: FleetModelResponse[]): FleetModelThinkingResponse | undefined {
-  const capable = models.flatMap((model) =>
-    model.thinking?.supported_levels.length ? [model.thinking] : []
-  );
-  const first = capable[0];
-  if (!first) return undefined;
-  const levelsKey = thinkingLevelsKey(first);
-  if (!capable.every((thinking) => thinkingLevelsKey(thinking) === levelsKey)) return undefined;
-  const defaultLevel = capable.every((thinking) => thinking.default_level === first.default_level)
-    ? first.default_level
-    : undefined;
-  return {
-    supported_levels: first.supported_levels,
-    ...(defaultLevel ? { default_level: defaultLevel } : {}),
-  };
-}
+const log = createLogger("agent-selection");
 
 export function requestedAgentWorkspaceId(
   c: Context,
@@ -110,86 +62,85 @@ export function requestedAgentWorkspaceId(
   return resolveRequestWorkspaceId(c, store, explicitId);
 }
 
-/**
- * Prefer server-discovered gateway models per engine when a snapshot exists (so the
- * dropdown reflects the real gateway even with zero online runtimes); otherwise keep
- * the per-runtime union. online_runtime_count still comes from the runtime buckets.
- */
-export function overlayGatewayModels(
-  store: MultiremiStore,
-  workspaceId: string,
-  providers: FleetProviderModelsResponse[],
-): FleetProviderModelsResponse[] {
-  // Discovery off → never surface a (possibly stale) gateway snapshot; fall back
-  // to the per-runtime union so turning the toggle off actually hides the models.
-  if (!store.getRelayModelDiscovery(workspaceId)) return providers;
-  const config = store.getRelayConfigForDaemon(workspaceId);
-  const byEngine = new Map<string, FleetProviderModelsResponse>();
-  for (const provider of providers) byEngine.set(provider.provider, provider);
-  for (const engine of ["claude", "codex"] as const) {
-    const engineConfig = config[engine];
-    // No live gateway credential → don't surface any (possibly stale) snapshot.
-    if (!engineConfig || !engineConfig.authToken) continue;
-    const snapshot = store.getGatewayModels(workspaceId, engine);
-    if (!snapshot || snapshot.models.length === 0) continue;
-    // Only show a snapshot discovered for the CURRENT config revision — a changed
-    // gateway/token invalidates the old catalog until rediscovery catches up.
-    if (snapshot.sourceRevision !== engineConfig.revision) continue;
-    const existing = byEngine.get(engine);
-    const existingModels = existing?.models ?? [];
-    const runtimeModels = new Map(existingModels.map((model) => [model.id, model]));
-    const familyModels = new Map<ClaudeModelFamily, FleetModelResponse[]>();
-    const gatewayFamilyCounts = new Map<ClaudeModelFamily, number>();
-    if (engine === "claude") {
-      for (const model of existingModels) {
-        const family = claudeModelFamily(model.id);
-        if (family) familyModels.set(family, [...(familyModels.get(family) ?? []), model]);
-      }
-      for (const model of snapshot.models) {
-        const family = claudeModelFamily(model.id);
-        if (family) gatewayFamilyCounts.set(family, (gatewayFamilyCounts.get(family) ?? 0) + 1);
-      }
-    }
-    const providerThinking = providerThinkingConsensus(existingModels);
-    const models = snapshot.models.map((model): FleetModelResponse => {
-      const runtimeModel = runtimeModels.get(model.id);
-      const family = engine === "claude" ? claudeModelFamily(model.id) : undefined;
-      const matchingFamilyModels = family ? familyModels.get(family) ?? [] : [];
-      const familyMatched = matchingFamilyModels.length > 0;
-      // A match with no thinking metadata is a negative result and must not
-      // continue to the broader provider fallback (notably for Claude Haiku).
-      const thinking = runtimeModel
-        ? runtimeModel.thinking
-        : familyMatched
-        ? familyThinkingConsensus(matchingFamilyModels)
-        : providerThinking;
-      const isDefault = runtimeModel
-        ? runtimeModel.default === true
-        : family !== undefined
-          && familyMatched
-          && gatewayFamilyCounts.get(family) === 1
-          && matchingFamilyModels.filter((candidate) => candidate.default).length === 1;
-      return {
-        id: model.id,
-        label: model.label,
-        provider: engine,
-        ...(isDefault ? { default: true } : {}),
-        ...(thinking ? { thinking } : {}),
-      };
-    });
-    if (engine === "codex" || engine === "claude") {
-      const customIds = new Set(engine === "codex" ? store.listWorkspaceCodexProfileModels(workspaceId) : store.listWorkspaceClaudeProfileModels(workspaceId));
-      for (const model of existingModels) {
-        if (customIds.has(model.id) && !models.some(candidate => candidate.id === model.id)) models.push(model);
-      }
-    }
-    byEngine.set(engine, {
-      provider: engine,
-      online_runtime_count: existing?.online_runtime_count ?? 0,
-      models,
-    });
-  }
-  return [...byEngine.values()].sort((a, b) => a.provider.localeCompare(b.provider));
+/** Return only members that can execute this owner's agents, including offline members. */
+export function executionGroupRuntimes(store: MultiremiStore, workspaceId: string, groupId: string, ownerId: string): MultiremiRuntime[] {
+  const group = store.getExecutionGroup(groupId, workspaceId);
+  if (!group) return [];
+  const ids = new Set(group.runtimeIds);
+  return store.listRuntimes().filter((runtime) => ids.has(runtime.id)
+    && (runtime.workspaceId ?? "local") === workspaceId
+    && (runtime.provider === "any" || runtime.provider === group.provider)
+    && (runtime.visibility === "public" || (runtime.ownerId ?? "local") === ownerId));
+}
+
+/** An explicit group model must be supported by every currently eligible member. */
+export function executionGroupModelCatalog(store: MultiremiStore, workspaceId: string, groupId: string, ownerId: string): FleetProviderModelsResponse[] {
+  const group = store.getExecutionGroup(groupId, workspaceId);
+  if (!group) return [];
+  const runtimes = executionGroupRuntimes(store, workspaceId, groupId, ownerId).sort((a, b) => a.id.localeCompare(b.id));
+  const profile = group.managed ? store.getGroupExecutionProfile(groupId, workspaceId)?.profile ?? null : undefined;
+  if (profile && !runtimes.length) return [{
+    provider: group.provider,
+    models: runtimeConnectionModels(profile, group.provider, []),
+    online_runtime_count: runtimes.filter((runtime) => runtime.status === "online").length,
+  }];
+  const providers = runtimes.map((runtime) => runtimeTargetModelCatalog(store, workspaceId, runtime, profile)
+    .find((entry) => entry.provider === group.provider));
+  const catalogs = providers.map((entry) => entry?.models ?? []);
+  const models = (catalogs[0] ?? []).flatMap((model): FleetModelResponse[] => {
+    const matches = catalogs.map((catalog) => catalog.find((candidate) => candidate.id === model.id));
+    if (matches.some((candidate) => !candidate)) return [];
+    const supported = modelThinkingLevels([model], model.id).filter((level) => matches.every((candidate) =>
+      candidate && modelThinkingLevels([candidate], candidate.id).some((entry) => entry.value === level.value)));
+    const failed = matches.find((candidate) => candidate?.thinking?.status === "error")?.thinking;
+    const unknown = matches.some((candidate) => !candidate?.thinking || candidate.thinking.status === "unknown");
+    const status = failed ? "error" : unknown ? "unknown" : supported.length ? "supported" : "unsupported";
+    const explicitStatus = matches.some((candidate) => candidate?.thinking?.status !== undefined);
+    const defaultLevel = model.thinking?.default_level;
+    const thinkingDefault = defaultLevel && supported.some((level) => level.value === defaultLevel)
+      && matches.every((candidate) => candidate?.thinking?.default_level === defaultLevel) ? defaultLevel : undefined;
+    // These levels are the intersection across the group's members, so naming a
+    // single member's source for the consensus would misattribute it: report one
+    // only when every member that offers the model states the same source.
+    const sources = matches.map((candidate) => candidate?.thinking_source);
+    const thinkingSource = sources.length > 0
+      && sources.every((source) => source !== undefined && source === sources[0]) ? sources[0] : undefined;
+    return [{
+      id: model.id, label: model.label, provider: group.provider,
+      ...(matches.some(candidate => candidate?.execution_status !== undefined) ? {
+        execution_status: matches.some(candidate => candidate?.execution_status === "unknown") ? "unknown" as const
+          : matches.some(candidate => candidate?.execution_status === "unavailable") ? "unavailable" as const : "available" as const,
+      } : {}),
+      ...(matches.every((candidate) => candidate?.default) ? { default: true } : {}),
+      ...(supported.length || explicitStatus || matches.every((candidate) => candidate?.thinking) ? { thinking: {
+        supported_levels: supported,
+        ...(explicitStatus ? { status } : {}),
+        ...(failed?.error ? { error: failed.error } : {}),
+        ...(thinkingDefault ? { default_level: thinkingDefault } : {}),
+      } } : {}),
+      ...(thinkingSource ? { thinking_source: thinkingSource } : {}),
+    }];
+  });
+  return [{ provider: group.provider, models, online_runtime_count: runtimes.filter((runtime) => runtime.status === "online").length,
+    ...(providers.some((entry) => entry?.model_catalog_status === "unknown")
+      ? { model_catalog_status: "unknown" as const }
+      : providers.some((entry) => entry?.model_catalog_status === "error")
+      ? { model_catalog_status: "error" as const }
+      : providers.some((entry) => entry?.model_catalog_status === "ready")
+      ? { model_catalog_status: "ready" as const } : {}),
+    ...(providers.some((entry) => entry?.default_thinking) ? { default_thinking: commonThinkingCapabilities(providers.map((entry) =>
+      entry?.default_thinking ?? { supported_levels: modelThinkingLevels(entry?.models ?? [], "") })),
+    } : {}),
+  }];
+}
+
+export function executionGroupRequestOwner(c: Context, store: MultiremiStore, workspaceId: string): string | Response {
+  const agentId = cleanString(c.req.query("agent_id"));
+  if (!agentId) return currentRequestUserId(c);
+  const loaded = loadAgentForCurrentManager(c, store, agentId);
+  if (loaded instanceof Response) return loaded;
+  if (loaded.agent.workspaceId !== workspaceId) return c.json({ error: "agent not found" }, 404);
+  return loaded.agent.ownerId ?? "local";
 }
 
 /** Build the same workspace/provider catalog used by GET /api/models. */
@@ -198,10 +149,280 @@ export function workspaceProviderModelCatalog(
   workspaceId: string,
   provider: string,
   callerOwnerId: string,
+  runtimeId?: string | null,
 ): FleetModelResponse[] {
+  return workspaceProviderCatalog(store, workspaceId, provider, callerOwnerId, runtimeId)?.models ?? [];
+}
+
+function workspaceProviderCatalog(
+  store: MultiremiStore,
+  workspaceId: string,
+  provider: string,
+  callerOwnerId: string,
+  runtimeId?: string | null,
+): FleetProviderModelsResponse | undefined {
+  if (runtimeId) {
+    const runtime = store.getRuntime(runtimeId);
+    return runtime && (runtime.workspaceId ?? "local") === workspaceId
+      ? runtimeTargetModelCatalog(store, workspaceId, runtime).find((entry) => entry.provider === provider)
+      : undefined;
+  }
   const runtimes = store.listRuntimes().filter((runtime) => (runtime.workspaceId ?? "local") === workspaceId);
-  const providers = overlayGatewayModels(store, workspaceId, fleetModelsResponse(runtimes, callerOwnerId));
-  return providers.find((entry) => entry.provider === provider)?.models ?? [];
+  const providers = workspaceRuntimeModelCatalog(store, workspaceId, runtimes, callerOwnerId);
+  return providers.find((entry) => entry.provider === provider);
+}
+
+/** One gateway model's declared reasoning levels and what they resolve to. */
+export interface GatewayReasoningLevelRow {
+  model_id: string;
+  label: string;
+  /** The administrator's stored declaration, or null when none is stored. */
+  manual: GatewayReasoningLevelManual | null;
+  /** What routing will use, or null when the model has no reasoning entry. */
+  effective: (FleetModelThinkingResponse & { source: FleetModelThinkingSource }) | null;
+}
+
+export interface GatewayReasoningLevelManual {
+  levels: string[];
+  default_level?: string;
+  updated_by: string | null;
+  updated_at: string;
+  /**
+   * What this declaration is doing right now. `outranked` is the existing
+   * conflict case (a gateway/Runtime/family statement wins); `blocked` means the
+   * model cannot be selected for this engine at all, which the page has to say
+   * out loud rather than showing a declaration that quietly does nothing.
+   */
+  state: "effective" | "outranked" | "blocked";
+  /** Why it is blocked. Absent in every other state. */
+  state_code?: "not_in_execution_catalog" | "execution_catalog_unknown" | "not_in_catalog";
+}
+
+function gatewayReasoningLevelManual(decl: {
+  levels: string[]; defaultLevel?: string; updatedBy: string | null; updatedAt: string;
+}, state: GatewayReasoningLevelManual["state"], stateCode?: GatewayReasoningLevelManual["state_code"]): GatewayReasoningLevelManual {
+  return {
+    levels: decl.levels,
+    ...(decl.defaultLevel ? { default_level: decl.defaultLevel } : {}),
+    state,
+    ...(stateCode ? { state_code: stateCode } : {}),
+    updated_by: decl.updatedBy,
+    updated_at: decl.updatedAt,
+  };
+}
+
+/**
+ * The gateway model list for one engine, each row carrying the stored
+ * declaration and the levels that actually take effect.
+ *
+ * `effective` is read from the same catalog an Agent's selection is validated
+ * against, so the page cannot disagree with routing. `source` says where those
+ * levels came from — that is what lets the UI tell an administrator their
+ * declaration is being outranked by a real gateway/Runtime statement instead of
+ * silently ignoring it.
+ */
+export function gatewayReasoningLevels(
+  store: MultiremiStore,
+  workspaceId: string,
+  engine: RelayEngine,
+  callerOwnerId: string,
+): { engine: RelayEngine; allowed_levels: readonly string[]; models: GatewayReasoningLevelRow[] } {
+  const snapshot = store.getGatewayModels(workspaceId, engine);
+  const declarations = store.listGatewayModelReasoning(workspaceId, engine);
+  // The provider entry (not just its models) is what says whether a model can be
+  // selected at all: the Codex execution catalog's loading state lives here.
+  const catalog = workspaceProviderCatalog(store, workspaceId, engine, callerOwnerId);
+  const effectiveModels = new Map((catalog?.models ?? []).map(model => [model.id, model]));
+  const rows = new Map<string, {
+    model_id: string;
+    label: string;
+    decl: {
+      modelId: string; levels: string[]; defaultLevel?: string;
+      updatedBy: string | null; updatedAt: string;
+    } | null;
+    manual: GatewayReasoningLevelRow["manual"];
+    effective: GatewayReasoningLevelRow["effective"];
+  }>();
+  for (const model of snapshot?.models ?? []) {
+    rows.set(model.id, { model_id: model.id, label: model.label, decl: null, manual: null, effective: null });
+  }
+  // A declaration outlives the model's gateway entry: the snapshot is replaced on
+  // every probe, so an alias that disappears would otherwise become impossible to
+  // clear from the page that created it. Since round C it is also how a model
+  // nobody discovered gets *into* the catalog, so this row is not merely a
+  // tombstone.
+  for (const decl of declarations) {
+    const existing = rows.get(decl.modelId);
+    rows.set(decl.modelId, {
+      model_id: decl.modelId,
+      label: existing?.label ?? decl.modelId,
+      decl,
+      manual: null,
+      effective: null,
+    });
+  }
+  for (const [modelId, row] of rows) {
+    const resolved = effectiveModels.get(modelId);
+    if (resolved?.thinking) row.effective = { ...resolved.thinking, source: resolved.thinking_source ?? "none" };
+    if (row.decl) {
+      const { state, stateCode } = manualState(row.effective, engine, catalog);
+      row.manual = gatewayReasoningLevelManual(row.decl, state, stateCode);
+    }
+  }
+  return {
+    engine,
+    allowed_levels: GATEWAY_REASONING_LEVELS[engine],
+    models: [...rows.values()].map(({ decl: _decl, ...row }) => row)
+      .sort((a, b) => a.model_id.localeCompare(b.model_id)),
+  };
+}
+
+/**
+ * Whether a stored declaration is actually doing what it says. `blocked` is the
+ * one the page must never render as "declared and done": on Codex an execution
+ * model is only executable when the native catalog lists it (#220), so a
+ * declaration for anything else is stored, shown, and inert until that catalog
+ * offers the model.
+ */
+function manualState(
+  effective: GatewayReasoningLevelRow["effective"],
+  engine: RelayEngine,
+  catalog: FleetProviderModelsResponse | undefined,
+): { state: GatewayReasoningLevelManual["state"]; stateCode?: GatewayReasoningLevelManual["state_code"] } {
+  if (effective) {
+    return { state: effective.source === "manual" ? "effective" : "outranked" };
+  }
+  if (engine !== "codex") return { state: "blocked", stateCode: "not_in_catalog" };
+  // Only an execution catalog that actually loaded can be said to *omit* the
+  // model. With no catalog at all — engine unconfigured — or one that has not
+  // answered yet, "not decided" is the honest answer.
+  const decided = catalog !== undefined && catalog.model_catalog_status !== "unknown";
+  return { state: "blocked", stateCode: decided ? "not_in_execution_catalog" : "execution_catalog_unknown" };
+}
+
+/**
+ * Validate one declaration request. Returns the normalized pair or an error
+ * string; the enum is checked server-side because the values are forwarded to the
+ * CLI verbatim — an unknown spelling would route as if declared and then fail at
+ * execution, which is worse than a 400 here.
+ */
+export function validateGatewayReasoningLevels(
+  engine: RelayEngine,
+  input: { model?: unknown; levels?: unknown; default_level?: unknown },
+): { ok: true; modelId: string; levels: string[]; defaultLevel?: string } | { ok: false; error: string } {
+  const modelId = cleanString(typeof input.model === "string" ? input.model : "");
+  if (!modelId) return { ok: false, error: "model is required" };
+  if (!Array.isArray(input.levels)) return { ok: false, error: "levels must be an array" };
+  const allowed = GATEWAY_REASONING_LEVELS[engine];
+  const levels: string[] = [];
+  for (const value of input.levels) {
+    if (!allowed.includes(value as string)) {
+      return { ok: false, error: `unsupported reasoning level "${String(value)}" for engine "${engine}" (allowed: ${allowed.join(", ")})` };
+    }
+    if (!levels.includes(value as string)) levels.push(value as string);
+  }
+  if (input.default_level !== undefined && input.default_level !== null && input.default_level !== "") {
+    if (typeof input.default_level !== "string" || !levels.includes(input.default_level)) {
+      return { ok: false, error: "default_level must be one of levels" };
+    }
+    return { ok: true, modelId, levels, defaultLevel: input.default_level };
+  }
+  return { ok: true, modelId, levels };
+}
+
+/** The catalog the selection is validated against: the execution group's common
+ *  set when one is selected, otherwise the workspace/provider (or pinned Runtime). */
+function agentSelectionCatalog(
+  c: Context,
+  store: MultiremiStore,
+  input: {
+    workspaceId: string;
+    provider: string;
+    runtimeId?: string | null;
+    executionGroupId?: string | null;
+    ownerId?: string;
+  },
+): FleetProviderModelsResponse | undefined {
+  return input.executionGroupId && !input.runtimeId
+    ? executionGroupModelCatalog(store, input.workspaceId, input.executionGroupId, input.ownerId ?? currentRequestUserId(c))[0]
+    : workspaceProviderCatalog(store, input.workspaceId, input.provider, currentRequestUserId(c), input.runtimeId);
+}
+
+/**
+ * Drop a reasoning level the target model cannot honour, instead of storing it.
+ *
+ * Gateway-only models — Claude has no `supported_reasoning_levels`, and the
+ * Runtime reports the native ACP selector only for its own aliases — declare no
+ * levels at all. The Agent can still carry a level from before that was true
+ * (MUL-338), and validation only ever looked at an EXPLICITLY sent level, so any
+ * later metadata-only edit preserved the unusable value forever. Clearing it is
+ * what the capability contract actually says: `docs/runtime-model-discovery.md`
+ * forbids borrowing another model's levels, so "no declaration" means the effort
+ * is not applicable rather than pending. Routing ignores such a level too, but
+ * leaving it stored keeps the Agent pinned to a value the UI cannot even render.
+ *
+ * This only rewrites a level the caller did NOT freshly choose. An effort named
+ * while also changing the selection is judged as before and rejected with a 400
+ * when the catalog cannot confirm it, so an API client is told its request was
+ * not honoured instead of silently getting something else. Everything else is a
+ * leftover: no level sent at all, or the saved selection echoed back verbatim —
+ * the case that used to short-circuit validation, which is why the stale value
+ * survived every later edit.
+ *
+ * It also only applies where nothing declares levels at all. Engines that do
+ * (`providerDeclaresReasoningLevels`) are left alone: clearing their stored value
+ * would turn a selection routing still refuses into a claimable one running at
+ * the default effort, which is exactly what MUL-330/#220 forbids.
+ *
+ * Finally, only a catalog that actually lists the model (or identifies the
+ * provider default) may clear it: an absent entry is missing metadata, not an
+ * answer.
+ */
+function convergeAgentThinkingLevel(
+  c: Context,
+  store: MultiremiStore,
+  input: {
+    workspaceId: string;
+    provider: string;
+    model: string;
+    thinkingLevel: string;
+    runtimeId?: string | null;
+    executionGroupId?: string | null;
+    ownerId?: string;
+    /** True when the level comes from the stored Agent rather than this request. */
+    carriedOver: boolean;
+    /** True when this request changes model/provider/target, not just metadata. */
+    selectionChanged: boolean;
+  },
+): string {
+  if (!input.thinkingLevel) return "";
+  if (!input.carriedOver) return input.thinkingLevel;
+  // Engines that report reasoning levels answer for themselves: leave the stored
+  // value alone and let validation (or task eligibility) judge it. Clearing it
+  // here would silently turn a rejected selection into a runnable one at the
+  // default effort, which is the one thing MUL-330/#220 forbids.
+  if (providerDeclaresReasoningLevels(input.provider)) return input.thinkingLevel;
+  const catalog = agentSelectionCatalog(c, store, input);
+  const models = catalog?.models ?? [];
+  const known = input.model
+    ? models.some((model) => model.id === input.model)
+    : Boolean(catalog?.default_thinking);
+  if (!known) return input.thinkingLevel;
+  const capability = modelThinkingState(models, input.model, catalog?.default_thinking);
+  if (capability.state === "supported") {
+    // The model does declare levels — from the engine, or from an administrator's
+    // gateway declaration (MUL-338). A stored level inside that set is a valid
+    // selection and is preserved here; one outside it is not usable at all.
+    if (capability.levels.some((level) => level.value === input.thinkingLevel)) return input.thinkingLevel;
+    // Unusable, and the model itself did not change: nothing can make this value
+    // valid, so clear it rather than keep it stored forever. When the selection IS
+    // changing, the caller is moving to a model that does offer efforts, and the
+    // carried value is a mismatch it must be told about — leave it for validation
+    // to reject, which is MUL-330/#220's atomic model+effort contract.
+    return input.selectionChanged ? input.thinkingLevel : "";
+  }
+  log.info(`clearing carried-over thinking_level "${input.thinkingLevel}" for ${input.provider} model "${input.model || "default"}": the model declares no reasoning levels`);
+  return "";
 }
 
 function validateAgentModelSelection(
@@ -212,23 +433,46 @@ function validateAgentModelSelection(
     provider: string;
     model: string;
     thinkingLevel: string;
+    runtimeId?: string | null;
+    executionGroupId?: string | null;
+    ownerId?: string;
+    preserveSavedSelection?: boolean;
   },
 ): Response | null {
-  // Model IDs remain an escape hatch for gateways that have not refreshed yet.
-  // Capability validation is needed only when an explicit effort override is
-  // requested, because that override must be proven against a concrete model.
+  const profile = input.runtimeId ? store.getRuntimeExecutionProfile(input.runtimeId, input.provider) : null;
+  if (profile && input.model && input.model !== profile.model) {
+    return c.json({ error: `model "${input.model}" is not supported by the selected Runtime connection; expected "${profile.model}"` }, 400);
+  }
+  // Unrelated edits may resend the saved selection. Discovery must never force
+  // users to replace a saved model/effort just to edit an Agent's metadata.
+  if (input.preserveSavedSelection) return null;
+  const groupCatalog = !input.runtimeId && input.executionGroupId
+    ? executionGroupModelCatalog(store, input.workspaceId, input.executionGroupId, input.ownerId ?? currentRequestUserId(c))[0]
+    : undefined;
+  const groupModels = !input.runtimeId && input.executionGroupId
+    ? groupCatalog?.models ?? []
+    : null;
+  if (groupModels && input.model && !groupModels.some((model) => model.id === input.model)) {
+    return c.json({ error: `model "${input.model}" is not supported by every available member of the selected execution group` }, 400);
+  }
+  const catalog = input.executionGroupId && !input.runtimeId ? groupCatalog : agentSelectionCatalog(c, store, input);
+  const models = catalog?.models ?? [];
+  if (!catalogAllowsModel(catalog, input.model)) {
+    return c.json({
+      code: catalog?.model_catalog_status === "unknown" ? "model_execution_catalog_unknown" : "model_not_in_execution_catalog",
+      error: catalog?.model_catalog_status === "unknown"
+        ? `model "${input.model}" cannot be selected while the Codex execution catalog is unknown or loading`
+        : `model "${input.model}" is not in the available Codex execution catalog and cannot be executed`,
+    }, 400);
+  }
+  // Unmanaged/custom connections retain their own model selection behavior.
   if (!input.thinkingLevel) return null;
-  const models = workspaceProviderModelCatalog(
-    store,
-    input.workspaceId,
-    input.provider,
-    currentRequestUserId(c),
-  );
+  const supportedLevels = modelThinkingLevels(models, input.model, catalog?.default_thinking);
   const selectedModel = input.model
     ? models.find((model) => model.id === input.model)
     : models.find((model) => model.default);
 
-  if (!selectedModel) {
+  if (!selectedModel && (input.model || (supportedLevels.length === 0 && !catalog?.default_thinking))) {
     if (input.model && models.length > 0) {
       return c.json({
         error: `thinking_level "${input.thinkingLevel}" cannot be set because model "${input.model}" is not available for provider "${input.provider}" in workspace "${input.workspaceId}"`,
@@ -243,11 +487,54 @@ function validateAgentModelSelection(
       error: `thinking_level "${input.thinkingLevel}" cannot be set because no model catalog is available for provider "${input.provider}" in workspace "${input.workspaceId}"`,
     }, 400);
   }
-  const supportedLevels = selectedModel.thinking?.supported_levels ?? [];
   if (!supportedLevels.some((level) => level.value === input.thinkingLevel)) {
     return c.json({
-      error: `thinking_level "${input.thinkingLevel}" is not supported by model "${selectedModel.id}" for provider "${input.provider}"`,
+      // Name the concrete model whenever one is identifiable; "default" is
+      // reserved for the provider-default capability, which has no model id.
+      error: `thinking_level "${input.thinkingLevel}" is not supported by model "${input.model || selectedModel?.id || "default"}" for provider "${input.provider}"`,
     }, 400);
+  }
+  return null;
+}
+
+function validateAgentFallbackSelection(
+  c: Context,
+  store: MultiremiStore,
+  input: {
+    workspaceId: string;
+    provider: string;
+    model: string;
+    fallbackModel: string;
+    fallbackThinkingLevel: string;
+    runtimeId?: string | null;
+    executionGroupId?: string | null;
+    ownerId?: string;
+    preserveSavedSelection?: boolean;
+  },
+): Response | null {
+  if (!input.fallbackModel || input.preserveSavedSelection) return null;
+  const profile = input.runtimeId ? store.getRuntimeExecutionProfile(input.runtimeId, input.provider) : null;
+  const catalog = agentSelectionCatalog(c, store, input);
+  const effectiveModel = input.model || profile?.model || catalog?.models.find((model) => model.default)?.id;
+  if (effectiveModel === input.fallbackModel) {
+    return c.json({ error: "fallback_model must be different from the primary model" }, 400);
+  }
+  if (profile && input.fallbackModel !== profile.model) {
+    return c.json({
+      code: "model_not_in_execution_catalog",
+      error: `fallback_model "${input.fallbackModel}" is not supported by the selected Runtime connection`,
+    }, 400);
+  }
+  if (!catalogAllowsModel(catalog, input.fallbackModel)
+    || (input.executionGroupId && !input.runtimeId && !catalog?.models.some((model) => model.id === input.fallbackModel))) {
+    return c.json({
+      code: catalog?.model_catalog_status === "unknown" ? "model_execution_catalog_unknown" : "model_not_in_execution_catalog",
+      error: `fallback_model "${input.fallbackModel}" is not in the selected execution target's model catalog`,
+    }, 400);
+  }
+  if (input.fallbackThinkingLevel && !modelThinkingLevels(catalog?.models ?? [], input.fallbackModel, catalog?.default_thinking)
+    .some((level) => level.value === input.fallbackThinkingLevel)) {
+    return c.json({ error: `fallback_thinking_level "${input.fallbackThinkingLevel}" is not supported by model "${input.fallbackModel}"` }, 400);
   }
   return null;
 }
@@ -415,15 +702,28 @@ export function withAgentRequestContext(c: Context, store: MultiremiStore, input
   const description = normalizeAgentRequestDescription(c, input.description);
   if (description instanceof Response) return description;
   const model = agentRequestModel(input);
+  const fallbackModel = agentRequestFallbackModel(input);
+  const runtimeId = cleanString(input.runtimeId ?? input.runtime_id);
+  const executionGroupId = cleanString(input.executionGroupId ?? input.execution_group_id);
+  // A new Agent has no stored selection to carry over, so an effort named here is
+  // a deliberate request: validation judges it, and rejects what it cannot confirm.
   const thinkingLevel = agentRequestThinkingLevel(input);
+  const fallbackThinkingLevel = fallbackModel ? agentRequestFallbackThinkingLevel(input) : "";
   const invalidSelection = validateAgentModelSelection(c, store, {
     workspaceId,
     provider,
     model,
     thinkingLevel,
+    runtimeId,
+    executionGroupId,
   });
   if (invalidSelection) return invalidSelection;
   const ownerId = currentRequestUserId(c);
+  const invalidFallback = validateAgentFallbackSelection(c, store, {
+    workspaceId, provider, model, fallbackModel, fallbackThinkingLevel,
+    runtimeId, executionGroupId, ownerId,
+  });
+  if (invalidFallback) return invalidFallback;
   return {
     ...input,
     name,
@@ -433,11 +733,17 @@ export function withAgentRequestContext(c: Context, store: MultiremiStore, input
     workspace_id: workspaceId,
     ownerId,
     owner_id: ownerId,
-    runtimeId: null,
-    runtime_id: null,
+    runtimeId: runtimeId ?? null,
+    runtime_id: runtimeId ?? null,
+    executionGroupId: executionGroupId ?? null,
+    execution_group_id: executionGroupId ?? null,
     model: model || null,
+    fallbackModel: fallbackModel || null,
+    fallback_model: fallbackModel || null,
     thinkingLevel: thinkingLevel || null,
     thinking_level: thinkingLevel || null,
+    fallbackThinkingLevel: fallbackThinkingLevel || null,
+    fallback_thinking_level: fallbackThinkingLevel || null,
     maxConcurrentTasks,
     max_concurrent_tasks: maxConcurrentTasks,
     ...role,
@@ -507,24 +813,37 @@ export function withAgentUpdateRequestContext(
     }
     applyProvider(provider);
   }
-  // Agents are pool workers now — machine binding is gone. A legacy "move to
-  // runtime" request keeps its one observable effect, switching the agent's
-  // engine, with full legacy validation (existence, workspace, the
-  // private-runtime gate). The binding itself is dropped.
-  if (hasRequestField(input, "runtimeId", "runtime_id")) {
-    const legacyRuntimeId = cleanString(input.runtimeId ?? input.runtime_id);
-    delete next.runtimeId;
-    delete next.runtime_id;
-    if (legacyRuntimeId) {
-      const provider = resolveAgentRequestProvider(c, store, targetWorkspaceId, {
-        runtime_id: legacyRuntimeId,
-        // On an "any" runtime the request's provider falls through; default it
-        // to the agent's CURRENT provider (not "claude") so a legacy move to an
-        // any-runtime doesn't silently flip a Codex agent to Claude.
-        provider: input.provider ?? current.provider,
-      });
-      if (provider instanceof Response) return provider;
-      applyProvider(provider);
+  const runtimeProvided = hasRequestField(input, "runtimeId", "runtime_id");
+  const groupProvided = hasRequestField(input, "executionGroupId", "execution_group_id");
+  const requestedRuntimeId = cleanString(input.runtimeId ?? input.runtime_id) ?? null;
+  const requestedGroupId = cleanString(input.executionGroupId ?? input.execution_group_id) ?? null;
+  if (runtimeProvided && groupProvided && requestedRuntimeId && requestedGroupId) return c.json({ error: "select either runtime_id or execution_group_id" }, 400);
+  const targetRuntimeId = runtimeProvided ? requestedRuntimeId : groupProvided ? null : current.runtimeId ?? null;
+  const targetGroupId = groupProvided ? requestedGroupId : runtimeProvided ? null : current.executionGroupId ?? null;
+  const runtimeChanged = targetRuntimeId !== (current.runtimeId ?? null);
+  const groupChanged = !targetRuntimeId && targetGroupId !== (current.executionGroupId ?? null);
+  const targetOwnerId = hasRequestField(input, "ownerId", "owner_id")
+    ? cleanString(input.ownerId ?? input.owner_id) ?? "local"
+    : current.ownerId ?? "local";
+  if ((targetRuntimeId || targetGroupId) && (runtimeProvided || groupProvided || providerChanged || targetOwnerId !== (current.ownerId ?? "local") || targetWorkspaceId !== current.workspaceId)) {
+    const provider = resolveAgentRequestProvider(c, store, targetWorkspaceId, {
+      runtime_id: targetRuntimeId,
+      execution_group_id: targetRuntimeId ? null : targetGroupId,
+      provider: hasRequestField(input, "provider") ? input.provider
+        : targetRuntimeId && store.getRuntime(targetRuntimeId)?.provider === "any" ? current.provider : undefined,
+    }, targetOwnerId);
+    if (provider instanceof Response) return provider;
+    applyProvider(provider);
+  }
+  if (runtimeProvided || groupProvided) {
+    next.runtimeId = targetRuntimeId;
+    next.runtime_id = targetRuntimeId;
+    if (groupProvided && !targetRuntimeId) {
+      next.executionGroupId = targetGroupId;
+      next.execution_group_id = targetGroupId;
+    } else {
+      delete next.executionGroupId;
+      delete next.execution_group_id;
     }
   }
   if (providerChanged) {
@@ -538,40 +857,93 @@ export function withAgentUpdateRequestContext(
       }, 409);
     }
   }
-  // A model id is engine-specific — carrying e.g. a claude model onto codex
-  // would hand the codex CLI an unknown model. Unless the request also picks
-  // a model, an engine switch resets it to the engine default.
+  // Changing execution targets must not carry a model or effort from another machine.
+  const targetChanged = providerChanged || runtimeChanged || groupChanged || targetWorkspaceId !== current.workspaceId;
   const modelProvided = hasRequestField(input, "model");
   const thinkingLevelProvided = hasRequestField(input, "thinkingLevel", "thinking_level");
+  const fallbackModelProvided = hasRequestField(input, "fallbackModel", "fallback_model");
+  const fallbackThinkingLevelProvided = hasRequestField(input, "fallbackThinkingLevel", "fallback_thinking_level");
   const targetModel = modelProvided
     ? agentRequestModel(input)
-    : providerChanged ? "" : cleanString(current.model) ?? "";
+    : targetChanged ? "" : cleanString(current.model) ?? "";
   const targetThinkingLevel = thinkingLevelProvided
     ? agentRequestThinkingLevel(input)
-    : cleanString(current.thinkingLevel) ?? "";
-  if (modelProvided) {
-    next.model = targetModel;
-  } else if (providerChanged) {
-    next.model = "";
-  }
-  if (thinkingLevelProvided) {
-    next.thinkingLevel = targetThinkingLevel;
-    next.thinking_level = targetThinkingLevel;
-  }
+    : targetChanged ? "" : cleanString(current.thinkingLevel) ?? "";
+  const targetFallbackModel = fallbackModelProvided
+    ? agentRequestFallbackModel(input)
+    : targetChanged ? "" : cleanString(current.fallbackModel) ?? "";
+  const targetFallbackThinkingLevel = !targetFallbackModel ? "" : fallbackThinkingLevelProvided
+    ? agentRequestFallbackThinkingLevel(input)
+    : targetChanged ? "" : cleanString(current.fallbackThinkingLevel) ?? "";
   const currentModel = cleanString(current.model) ?? "";
   const currentThinkingLevel = cleanString(current.thinkingLevel) ?? "";
-  const selectionChanged = targetWorkspaceId !== current.workspaceId ||
+  const selectionChanged = runtimeChanged || groupChanged || targetOwnerId !== (current.ownerId ?? "local") || targetWorkspaceId !== current.workspaceId ||
     targetProvider !== current.provider ||
     targetModel !== currentModel ||
     targetThinkingLevel !== currentThinkingLevel;
-  if (selectionChanged) {
+  // MUL-338: a model that declares no reasoning levels must not keep one stored.
+  // This runs on EVERY update, including one that changed nothing else, because
+  // the unusable level is usually already saved and no later edit ever revisited it.
+  // A level the caller actively named while changing the selection is the one case
+  // that stays a request rather than a leftover; everything else — no level sent,
+  // or the saved selection echoed back verbatim — is the stored value surviving.
+  const carriedOver = !thinkingLevelProvided || !selectionChanged;
+  const effectiveThinkingLevel = convergeAgentThinkingLevel(c, store, {
+    workspaceId: targetWorkspaceId, provider: targetProvider, model: targetModel,
+    thinkingLevel: targetThinkingLevel, runtimeId: targetRuntimeId,
+    executionGroupId: targetGroupId, ownerId: targetOwnerId,
+    carriedOver, selectionChanged,
+  });
+  const effectiveFallbackThinkingLevel = !targetFallbackModel ? "" : convergeAgentThinkingLevel(c, store, {
+    workspaceId: targetWorkspaceId, provider: targetProvider, model: targetFallbackModel,
+    thinkingLevel: targetFallbackThinkingLevel, runtimeId: targetRuntimeId,
+    executionGroupId: targetGroupId, ownerId: targetOwnerId,
+    carriedOver: !fallbackThinkingLevelProvided || !selectionChanged,
+    selectionChanged,
+  });
+  if (modelProvided) {
+    next.model = targetModel;
+  } else if (targetChanged) {
+    next.model = "";
+  }
+  if (thinkingLevelProvided || targetChanged || effectiveThinkingLevel !== targetThinkingLevel) {
+    next.thinkingLevel = effectiveThinkingLevel;
+    next.thinking_level = effectiveThinkingLevel;
+  }
+  if (fallbackModelProvided || targetChanged) {
+    next.fallbackModel = targetFallbackModel || null;
+    next.fallback_model = targetFallbackModel || null;
+  }
+  if (fallbackThinkingLevelProvided || fallbackModelProvided && !targetFallbackModel || targetChanged
+    || effectiveFallbackThinkingLevel !== targetFallbackThinkingLevel) {
+    next.fallbackThinkingLevel = effectiveFallbackThinkingLevel || null;
+    next.fallback_thinking_level = effectiveFallbackThinkingLevel || null;
+  }
+  if (selectionChanged || modelProvided) {
     const invalidSelection = validateAgentModelSelection(c, store, {
       workspaceId: targetWorkspaceId,
       provider: targetProvider,
       model: targetModel,
-      thinkingLevel: targetThinkingLevel,
+      // Metadata edits may resend an unchanged selection while discovery is unavailable.
+      // Still enforce a fixed connection model, but revalidate effort only when it changes.
+      thinkingLevel: selectionChanged ? effectiveThinkingLevel : "",
+      runtimeId: targetRuntimeId,
+      executionGroupId: targetGroupId,
+      ownerId: targetOwnerId,
+      preserveSavedSelection: !selectionChanged,
     });
     if (invalidSelection) return invalidSelection;
+  }
+  const fallbackSelectionChanged = selectionChanged ||
+    targetFallbackModel !== (cleanString(current.fallbackModel) ?? "") ||
+    targetFallbackThinkingLevel !== (cleanString(current.fallbackThinkingLevel) ?? "");
+  if (fallbackSelectionChanged) {
+    const invalidFallback = validateAgentFallbackSelection(c, store, {
+      workspaceId: targetWorkspaceId, provider: targetProvider, model: targetModel,
+      fallbackModel: targetFallbackModel, fallbackThinkingLevel: effectiveFallbackThinkingLevel,
+      runtimeId: targetRuntimeId, executionGroupId: targetGroupId, ownerId: targetOwnerId,
+    });
+    if (invalidFallback) return invalidFallback;
   }
   if (hasRequestField(input, "maxConcurrentTasks", "max_concurrent_tasks")) {
     const maxConcurrentTasks = normalizeAgentRequestMaxConcurrentTasks(c, input.maxConcurrentTasks ?? input.max_concurrent_tasks);
@@ -636,6 +1008,28 @@ export function withAgentTemplateRequestContext(
   const provider = resolveAgentRequestProvider(c, store, workspaceId, input);
   if (provider instanceof Response) return provider;
   const model = agentRequestModel(input);
+  const fallbackModel = agentRequestFallbackModel(input);
+  const fallbackThinkingLevel = fallbackModel ? agentRequestFallbackThinkingLevel(input) : "";
+  const effectiveModel = model || ((input.runtimeId ?? input.runtime_id ?? input.executionGroupId ?? input.execution_group_id)
+    ? "" : cleanString(template.recommendedModel) ?? "");
+  const runtimeId = cleanString(input.runtimeId ?? input.runtime_id);
+  const executionGroupId = cleanString(input.executionGroupId ?? input.execution_group_id);
+  // Like the create path: nothing stored to carry over, so the request is judged
+  // as what it is — a fresh selection.
+  const requestedThinkingLevel = agentRequestThinkingLevel(input);
+  const thinkingLevel = requestedThinkingLevel;
+  const effectiveFallbackThinkingLevel = !fallbackModel ? "" : fallbackThinkingLevel;
+  const invalidSelection = validateAgentModelSelection(c, store, {
+    workspaceId, provider, model, thinkingLevel,
+    runtimeId, executionGroupId,
+  });
+  if (invalidSelection) return invalidSelection;
+  const invalidFallback = validateAgentFallbackSelection(c, store, {
+    workspaceId, provider, model: effectiveModel, fallbackModel,
+    fallbackThinkingLevel: effectiveFallbackThinkingLevel,
+    runtimeId, executionGroupId,
+  });
+  if (invalidFallback) return invalidFallback;
   const maxConcurrentTasks = normalizeAgentRequestMaxConcurrentTasks(c, input.maxConcurrentTasks ?? input.max_concurrent_tasks);
   if (maxConcurrentTasks instanceof Response) return maxConcurrentTasks;
   const description = normalizeAgentRequestDescription(c, input.description ?? template.description);
@@ -650,9 +1044,17 @@ export function withAgentTemplateRequestContext(
     workspace_id: workspaceId,
     ownerId,
     owner_id: ownerId,
-    runtimeId: null,
-    runtime_id: null,
+    runtimeId: runtimeId ?? null,
+    runtime_id: runtimeId ?? null,
+    executionGroupId: executionGroupId ?? null,
+    execution_group_id: executionGroupId ?? null,
     model: model || null,
+    fallbackModel: fallbackModel || null,
+    fallback_model: fallbackModel || null,
+    // Only override the passthrough when convergence actually dropped a level.
+    ...(thinkingLevel === requestedThinkingLevel ? {} : { thinkingLevel: thinkingLevel || null, thinking_level: thinkingLevel || null }),
+    fallbackThinkingLevel: effectiveFallbackThinkingLevel || null,
+    fallback_thinking_level: effectiveFallbackThinkingLevel || null,
     maxConcurrentTasks,
     max_concurrent_tasks: maxConcurrentTasks,
     ...role,
@@ -675,19 +1077,27 @@ function agentRoleRequestInput(
   return { role: input.role };
 }
 
-/**
- * Resolve the provider for an agent create request. Agents are pool workers —
- * they never bind to a runtime — but legacy clients still send runtime_id, so
- * a supplied one keeps its full validation (existence, workspace, visibility)
- * and contributes only its provider.
- */
+/** Validate the selected execution target and resolve its engine. */
 export function resolveAgentRequestProvider(
   c: Context,
   store: MultiremiStore,
   workspaceId: string,
-  input: { runtimeId?: string | null; runtime_id?: string | null; provider?: unknown },
+  input: { runtimeId?: string | null; runtime_id?: string | null; executionGroupId?: string | null; execution_group_id?: string | null; provider?: unknown },
+  agentOwnerId = currentRequestUserId(c),
 ): string | Response {
   const runtimeId = cleanString(input.runtimeId ?? input.runtime_id);
+  const groupId = cleanString(input.executionGroupId ?? input.execution_group_id);
+  if (runtimeId && groupId) return c.json({ error: "select either runtime_id or execution_group_id" }, 400);
+  if (groupId) {
+    const group = store.getExecutionGroup(groupId, workspaceId);
+    if (!group) return c.json({ error: "invalid execution_group_id" }, 400);
+    const requestedProvider = cleanString(typeof input.provider === "string" ? input.provider : null);
+    if (requestedProvider && requestedProvider !== group.provider) return c.json({ error: "provider does not match the selected execution group" }, 400);
+    if (!executionGroupRuntimes(store, workspaceId, groupId, agentOwnerId).length) {
+      return c.json({ error: "no execution group member can run this owner's agents" }, 403);
+    }
+    return group.provider;
+  }
   if (runtimeId) {
     const runtime = store.getRuntime(runtimeId);
     if (!runtime || (runtime.workspaceId ?? "local") !== workspaceId) {
@@ -695,6 +1105,13 @@ export function resolveAgentRequestProvider(
     }
     if (!canCurrentUserUseRuntime(c, store, runtime)) {
       return c.json({ error: "this runtime is private; only its owner or a workspace admin can create agents on it" }, 403);
+    }
+    if (runtime.visibility !== "public" && (runtime.ownerId ?? "local") !== agentOwnerId) {
+      return c.json({ error: "a private runtime can only execute agents owned by its owner" }, 403);
+    }
+    const requestedProvider = cleanString(typeof input.provider === "string" ? input.provider : null);
+    if (runtime.provider !== "any" && requestedProvider && requestedProvider !== runtime.provider) {
+      return c.json({ error: "provider does not match the selected runtime" }, 400);
     }
     // An "any" runtime contributes no provider of its own — the requested one
     // falls through and must still pass the whitelist.
@@ -730,7 +1147,15 @@ export function agentRequestModel(
   return cleanString(input.model) ?? "";
 }
 
-export function agentRequestThinkingLevel(input: CreateAgentInput | UpdateAgentInput): string {
+function agentRequestFallbackModel(input: Pick<CreateAgentInput, "fallbackModel" | "fallback_model">): string {
+  return cleanString(input.fallbackModel ?? input.fallback_model) ?? "";
+}
+
+function agentRequestFallbackThinkingLevel(input: Pick<CreateAgentInput, "fallbackThinkingLevel" | "fallback_thinking_level">): string {
+  return cleanString(input.fallbackThinkingLevel ?? input.fallback_thinking_level) ?? "";
+}
+
+export function agentRequestThinkingLevel(input: Pick<CreateAgentInput, "thinkingLevel" | "thinking_level">): string {
   return cleanString(input.thinkingLevel ?? input.thinking_level) ?? "";
 }
 

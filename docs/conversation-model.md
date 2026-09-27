@@ -14,7 +14,8 @@ flowchart LR
   Topic["飞书 Topic<br/>外部话题/线程"] -->|外部绑定| Chat
   Workspace --> Chat
   Chat -->|拥有 1..n| Session
-  Chat -. "可关联 0..1" .-> Issue
+  Session -. "可选工作投影" .-> Issue
+  Topic -. "验证后的 Issue binding" .-> Issue
   Session -->|执行轮次| SessionTask[Session Task]
   Session -->|显式发布| Result[Session Result]
   Chat -->|普通消息| ChatTask[Chat Task]
@@ -27,15 +28,16 @@ flowchart LR
 | 名称 | 产品职责 | 持久化关系 |
 |---|---|---|
 | Topic | 飞书群原生话题/线程，是消息接入地址，不是 Remi 一级对象。 | 飞书 `chat_id` 与根消息 ID 组成外部键，经 binding 指向 Chat。 |
-| Chat | 用户与一个 Agent 的持续对话及工作入口，保存消息、队列、未读状态和工作位置。 | 属于 Workspace，固定一个 Agent，拥有 1..n Session，可选关联 0..1 个同 Workspace Issue。 |
-| Session | 有稳定 ID、状态、参与者、追加事件、独立 Agent lane 和成果的持久工作脉络。 | 必须属于且只属于一个 Chat；默认 `Main` 在 Chat 创建时建立，同一 Chat 可再建多个 Session。 |
-| Issue | 对部分工作进行跟踪、分派和验收的管理锚点。 | Chat 可升级/关联到 Issue；一个 Issue 可关联多个 Chat，因而聚合这些 Chat 的 Session。Issue 不拥有 Session。 |
+| Chat | 用户与一个 Agent 的持续对话及工作入口，保存消息、队列、未读状态和工作位置。 | 属于 Workspace，固定一个 Agent，拥有 1..n Session；普通 Web/私聊 Chat 不保存通用 Issue 外键。 |
+| Session | 有稳定 ID、状态、参与者、追加事件、独立 Agent lane 和成果的持久工作脉络。 | 必须属于且只属于一个 Chat；默认 `Main` 在 Chat 创建时建立，同一 Chat 可再建多个 Session；可选关联 0..1 个同 Workspace Issue。 |
+| Issue | 对部分工作进行跟踪、分派和验收的管理锚点。 | 通过 Session 或验证后的飞书 Issue Topic 聚合工作；Issue 不拥有 Session，删除 Issue 只清空关联投影。 |
 | Task | 一次可调度、可取消、可审计的执行轮次。 | 普通 Chat Task 只有 Chat 上下文；Session Task 同时记录所属 Chat 与 Session，并可快照当时的 Issue。 |
 | Session Result | Session 显式发布的不可变成果。 | 始终记录来源 Chat/Session，可选记录来源 Task；Issue 只在关联存在时提供聚合视图。 |
 | provider session | Codex/Claude 等后端的上下文续接标识。 | Chat 保存普通对话续接状态；Session 按 lane 保存。它不是产品 Session。 |
 
 数据库表 `multiremi_issue_sessions`、列 `issue_session_id` 和兼容类型 `MultiremiIssueSession` 是历史命名，
-不表达所有权。新契约使用 `Session.chat_id`；`issue_id` 是所属 Chat 当前关联 Issue 的可空兼容/索引值。
+不表达所有权。新契约使用 `Session.chat_id`；`issue_id` 是该 Session 当前 Issue 工作关联的可空投影，
+不是所属 Chat 的通用外键。
 规范 API 位于 `/api/multiremi/chats/:chatId/sessions`，旧 `/api/issues/:issueId/sessions` 只提供受 Chat
 访问控制约束的聚合兼容视图。
 
@@ -50,20 +52,22 @@ flowchart LR
 - 删除 Chat 是显式破坏性操作：其消息、Session 事件及成果随所有者删除；Task 审计行保留，但 Chat/Session
   外键清空。删除或解绑 Issue 不删除 Chat、Session、Task 或成果。
 
-### 关联或升级为 Issue
+### 关联到 Issue
 
-Chat 的 `issue_id` 是可选关联，不改变 Chat 或 Session 身份：
+最新 main 已按 MUL-301 移除普通 Chat 的通用 `issue_id`。MUL-1 在该边界上定义 Session 的可选关联：
 
-1. 普通 Chat 及其所有既有 Session 可在没有 Issue 时工作。
-2. Chat 关联 Issue 后，所有 Session 立即出现在该 Issue 的“关联 Sessions”聚合视图；Session ID、事件、lane
-   和成果来源不变。
-3. 关联前创建的 Task 保留创建时的 `issue_id = null` 审计快照，不被重写为 Issue Task。关联后的新
-   Session Task 同时记录 `chat_session_id`、`issue_session_id` 和当时的 `issue_id`。
-4. 成果的所有权始终是 Chat/Session。关联 Issue 后可从 Issue 聚合查看；解绑后从该 Issue 视图消失，
-   仍可从原 Chat/Session 访问。
-5. Issue 聚合不得扩大私有 Chat 的可见性。兼容 Issue API 仍须先通过 Chat 创建者与 Agent 访问检查。
+1. 普通 Chat 及其 Session 可在没有 Issue 时工作；创建 Issue 也不会自动创建 Session。
+2. 从 Issue 入口创建工作时，创建的是“由某 Chat 拥有、同时关联该 Issue”的 Session。只有这些 Session
+   出现在 Issue 的聚合视图；同一 Chat 中未关联的其他 Session 不会被隐式纳入。
+3. 经服务端验证的飞书 Issue Topic binding 是例外的传输关联：建立 binding 时，可把该 Topic Chat
+   当时未关联 Issue 的 Session 投影到目标 Issue。普通 Web Chat、飞书私聊及未验证群聊不能走这条路径。
+4. 关联前创建的 Task 保留 `issue_id = null` 审计快照。关联后的 Session Task 同时记录
+   `chat_session_id`、`issue_session_id` 和当时的 `issue_id`；历史 Task 不追溯重写。
+5. 成果的所有权始终是 Chat/Session。Session 关联 Issue 后，其新成果进入 Issue 聚合视图；取消关联或
+   删除 Issue 不删除原 Chat/Session/成果。Issue 聚合不得扩大私有 Chat 的访问权限。
 
-Chat 改绑/解绑 Issue 只更新当前关联索引，不合并 transcript、队列或 provider context，也不追溯修改历史 Task。
+关联只改变工作管理投影，不合并 transcript、队列或 provider context。普通 Chat 的 Project 选择仍与 Issue
+独立，具体迁移约束见 [Chat–Issue 解耦迁移](migrations/chat-issue-decoupling.md)。
 
 ## Task、消息与成果边界
 
@@ -74,7 +78,7 @@ Chat 改绑/解绑 Issue 只更新当前关联索引，不合并 transcript、�
   控制面兼容路径，不会把普通 Chat 输入、消息记录或队列自动并入 Session。
 - 显式 Session Task 同时携带 Chat 与 Session 身份；Session 的 Issue 关联可空。归档的所属 Chat 不能再创建
   Session Task。
-- Session message 是追加事件，不等同于 Issue 评论。只有 Chat 当前关联 Issue 且调用兼容 Issue message
+- Session message 是追加事件，不等同于 Issue 评论。只有 Session 当前关联 Issue 且调用兼容 Issue message
   入口时，才同时形成 Issue 评论。
 - Task 输出或完整 transcript 不自动成为成果。只有显式 publish 才创建 Session Result；跨 Session 复用
   应使用成果，而不是读取来源 Session 的私有事件。
@@ -83,10 +87,14 @@ Chat 改绑/解绑 Issue 只更新当前关联索引，不合并 transcript、�
 
 升级迁移先放宽旧 `issue_id NOT NULL`，增加 `chat_id` 并改变级联语义：
 
-- 若一个存量 Issue 恰好只绑定一个 Chat，旧 Session 及其 Task/成果可无歧义地自动归到该 Chat。
+- 在 MUL-301 移除旧 Chat `issue_id` 前，若一个存量 Issue 恰好只绑定一个 Chat，旧 Session 及其
+  Task/成果可无歧义地自动归到该 Chat。
+- 若实例已经执行 MUL-301、旧 Chat `issue_id` 已删除，则只把唯一且经验证的飞书 Issue Topic binding
+  当作自动归属证据；普通 Chat 不通过标题、历史 Task 或时间邻近关系推测 Issue。
 - 每个尚无默认 Session 的存量 Chat 补建 `Main`；这不改变普通 Chat message → Task 行为。
 - 一个 Issue 没有 Chat 或绑定多个 Chat 时，迁移不猜测所有者。旧 Session 暂以 `chat_id = null` 保留在
   兼容 Issue API；它可读、可导出，但在显式归入 Chat 前不能创建新的 Session Task。
+- Chat-owned Session 迁移必须先于 Chat–Issue 解耦迁移执行；后者完成后普通 Chat 不再保留 `issue_id`。
 - SQLite 迁移在单事务中重建两张元数据表，迁移后执行外键检查；PostgreSQL 放宽非空约束并重建索引/外键。
   任一步失败都不会记录迁移完成标记。
 - 旧 Issue 嵌套 REST、`IssueSession` 类型和 `remi issue session ...` 兼容入口可继续读取；新代码、CLI 与 UI

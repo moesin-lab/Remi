@@ -3,7 +3,6 @@ import type { Context, Hono } from "hono";
 import { assertRuntimeWorkspaceAccess } from "../helpers/runtime-workspaces.js";
 import {
   assigneeFrequencyQuery,
-  bindCreatedIssueToRequestChat,
   canCurrentUserAccessAgent,
   canCurrentUserAccessChatTask,
   currentTaskParentId,
@@ -29,20 +28,21 @@ import {
   readJson,
   readJsonStrict,
   requireWorkspaceAdmin,
+  safeAssignIssue,
   safeQuickCreateIssue,
   safeRerunIssue,
   setIssueCommentCursorHeaders,
   splitQueryList,
-  supervisorTaskIdentity,
   withIssueCreateRequestContext,
 } from "../helpers.js";
 import {
   attachmentCompatibilityResponse,
   cleanString,
   commentCompatibilityResponse,
+  currentWorkspaceMember,
   currentTaskAccessToken,
   currentAccessToken,
-  currentWorkspaceMember,
+  hasRequestField,
   issueBatchDeleteCompatibilityInput,
   issueBatchUpdateCompatibilityInput,
   issueCommentListErrorResponse,
@@ -89,6 +89,7 @@ import type {
   ListIssuesInput,
   MultiremiIssue,
   MultiremiIssueSession,
+  MultiremiAssigneeType,
   MultiremiIssueWorkspaceArchiveBinding,
   PublishSessionResultInput,
   QuickCreateIssueInput,
@@ -101,8 +102,65 @@ import {
   MULTIREMI_ISSUE_ARCHIVE_MIN_TTL_MS,
 } from "@multiremi/contracts/types.js";
 import { resolveIssueArchiveSettings } from "@multiremi/store/issue-archive.js";
-import { OrganizerActionError } from "../../organizer/settings.js";
+import { resolveOptionalStringField } from "@multiremi/store/helpers.js";
 import type { RouterDeps } from "./deps.js";
+
+// Check trusted caller lineage before an Issue mutation can cancel existing
+// work, change assignment, or create a new Issue and then dispatch an agent.
+function denySideSessionAgentDispatch(c: Context, store: MultiremiStore): Response | null {
+  const sourceTaskId = currentTaskAccessToken(c)?.taskId;
+  const sourceTask = sourceTaskId ? store.getTask(sourceTaskId) : null;
+  const sourceSession = sourceTask?.issueSessionId ? store.getIssueSession(sourceTask.issueSessionId) : null;
+  return sourceSession && sourceSession.inheritMode !== "none"
+    ? c.json({ error: "Agent delegation is not allowed from side sessions" }, 403)
+    : null;
+}
+
+function denySideSessionAssigneeDispatch(
+  c: Context,
+  store: MultiremiStore,
+  workspaceId: string,
+  assigneeType: MultiremiAssigneeType | null | undefined,
+  assigneeId: string | null | undefined,
+): Response | null {
+  if (!assigneeId || assigneeType === "member") return null;
+  const denied = denySideSessionAgentDispatch(c, store);
+  if (!denied) return null;
+  // An untyped reference may still resolve to a human member. Keep that
+  // non-agent assignment available; unresolved references cannot authorize it.
+  if (!assigneeType) {
+    try {
+      if (store.resolveAssigneeRef(assigneeType, assigneeId, workspaceId)?.assigneeType === "member") return null;
+    } catch { /* Deny a side agent's unresolved dispatch request before mutation. */ }
+  }
+  return denied;
+}
+
+function denySideSessionIssueUpdate(
+  c: Context,
+  store: MultiremiStore,
+  issue: MultiremiIssue,
+  input: UpdateIssueInput,
+): Response | null {
+  const changesAssignee = hasRequestField(input, "assigneeType", "assignee_type", "assigneeId", "assignee_id");
+  const leavesBacklog = issue.status === "backlog" && hasRequestField(input, "status");
+  if (!changesAssignee && !leavesBacklog) return null;
+  const status = hasRequestField(input, "status") ? String(input.status ?? "todo").trim() : issue.status;
+  if (status === "backlog" || status === "done" || status === "cancelled") return null;
+  const denied = denySideSessionAgentDispatch(c, store);
+  if (!denied) return null;
+  const type = hasRequestField(input, "assigneeType", "assignee_type")
+    ? resolveOptionalStringField(input, "assigneeType", "assignee_type", issue.assigneeType)
+    : hasRequestField(input, "assigneeId", "assignee_id") ? null : issue.assigneeType;
+  const id = resolveOptionalStringField(input, "assigneeId", "assignee_id", issue.assigneeId);
+  try {
+    const workspaceId = resolveOptionalStringField(input, "workspaceId", "workspace_id", issue.workspaceId) ?? "local";
+    const assignee = store.resolveAssigneeRef(type as MultiremiAssigneeType | null, id, workspaceId);
+    if (!assignee || assignee.assigneeType === "member") return null;
+    if (!leavesBacklog && assignee.assigneeType === issue.assigneeType && assignee.assigneeId === issue.assigneeId) return null;
+  } catch { /* Invalid side dispatch input cannot authorize a mutation. */ }
+  return denied;
+}
 
 // The idempotent generated-issue replay (source_issue_id + same title, 200)
 // must satisfy the same dispatch-outcome contract as a fresh create: a
@@ -147,7 +205,7 @@ function denyLinkedSessionChatAccess(
   session: MultiremiIssueSession,
 ): Response | null {
   const taskAccess = currentTaskAccessToken(c);
-  if (taskAccess) {
+  if (taskAccess?.taskId) {
     const task = store.getTask(taskAccess.taskId);
     if (task?.issueSessionId && task.issueSessionId !== session.id) {
       return c.json({ error: "forbidden outside current Session" }, 403);
@@ -182,6 +240,34 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   const issueDeleteAccess = (c: Context, workspaceId: string): Response | null =>
     denyCurrentUserWorkspaceAccess(c, store, workspaceId)
       ?? requireWorkspaceAdmin(c, store, workspaceId);
+
+  const listAccessibleChildIssues = (c: Context, parentIds: string[]): MultiremiIssue[] => {
+    const workspaceAccess = new Map<string, boolean>();
+    const canAccessWorkspace = (workspaceId: string): boolean => {
+      let allowed = workspaceAccess.get(workspaceId);
+      if (allowed === undefined) {
+        allowed = denyCurrentUserWorkspaceAccess(c, store, workspaceId) == null;
+        workspaceAccess.set(workspaceId, allowed);
+      }
+      return allowed;
+    };
+    return parentIds.flatMap((parentId) => {
+      const parent = store.getIssue(parentId);
+      if (!parent || !canAccessWorkspace(parent.workspaceId)) return [];
+      return store.listChildIssues(parentId).filter((child) => canAccessWorkspace(child.workspaceId));
+    });
+  };
+
+  const issueBatchUpdateAccess = (c: Context, input: BatchUpdateIssuesInput): Response | null => {
+    const issueIds = new Set(input.issueIds ?? input.issue_ids ?? []);
+    for (const issueId of issueIds) {
+      const issue = store.getIssue(issueId);
+      if (!issue) continue;
+      const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
+      if (denied) return denied;
+    }
+    return null;
+  };
 
   const beginIssueDeletion = (issueId: string): boolean => {
     const begun = store.beginIssueDeletion(issueId);
@@ -507,14 +593,13 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   });
   app.get("/api/issues/children", (c) => {
     const parentIds = splitQueryList(c.req.query("parent_ids"));
-    const issues = parentIds
-      .flatMap((parentId) => store.listChildIssues(parentId))
+    const issues = listAccessibleChildIssues(c, parentIds)
       .map((child) => issueCompatibilityResponse(child));
     return c.json({ issues, total: issues.length });
   });
   app.get("/api/multiremi/issues/children", (c) => {
     const parentIds = splitQueryList(c.req.query("parent_ids") ?? c.req.query("parentIds"));
-    const issues = parentIds.flatMap((parentId) => store.listChildIssues(parentId));
+    const issues = listAccessibleChildIssues(c, parentIds);
     return c.json({ issues, total: issues.length });
   });
   function validateBatchWorkspaceBinding(c: Context, input: BatchUpdateIssuesInput): Response | null {
@@ -534,7 +619,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
 
   app.post("/api/multiremi/issues/batch-update", async (c) => {
     const body = await readJson<BatchUpdateIssuesInput>(c);
-    const denied = validateBatchWorkspaceBinding(c, body);
+    const denied = issueBatchUpdateAccess(c, body) ?? validateBatchWorkspaceBinding(c, body);
     if (denied) return denied;
     return c.json(store.batchUpdateIssues({
       ...body,
@@ -545,7 +630,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJson<BatchUpdateIssuesInput>(c);
     try {
       const input = issueBatchUpdateCompatibilityInput(body);
-      const denied = validateBatchWorkspaceBinding(c, input);
+      const denied = issueBatchUpdateAccess(c, input) ?? validateBatchWorkspaceBinding(c, input);
       if (denied) return denied;
       const result = store.batchUpdateIssues({
         ...input,
@@ -595,6 +680,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const assigneeType = body.assigneeType ?? body.assignee_type ?? (body.agentId ? "agent" : null);
     assertRuntimeWorkspaceAccess(c, store, body.runtimeWorkspaceId ?? body.runtime_workspace_id, workspaceId);
     const assigneeId = body.assigneeId ?? body.assignee_id ?? body.agentId ?? null;
+    const dispatchDenied = denySideSessionAssigneeDispatch(c, store, workspaceId, assigneeType, assigneeId);
+    if (dispatchDenied) return dispatchDenied;
     const issue = store.createIssue({
       ...body,
       workspaceId,
@@ -630,36 +717,30 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       assertRuntimeWorkspaceAccess(c, store, issueInput.runtime_workspace_id, workspaceId);
       const denied = denyCurrentUserWorkspaceAccess(c, store, issueInput.workspace_id ?? "local");
       if (denied) return denied;
+      const dispatchDenied = String(issueInput.status ?? "todo").trim() === "backlog" ? null
+        : denySideSessionAssigneeDispatch(c, store, issueInput.workspace_id ?? "local", issueInput.assignee_type, issueInput.assignee_id);
+      if (dispatchDenied) return dispatchDenied;
       const sourceIssueId = issueInput.source_issue_id ?? null;
       if (sourceIssueId) {
         const existing = store.findGeneratedIssueByTitle(sourceIssueId, issueInput.title);
         if (existing) {
-          const chatBinding = bindCreatedIssueToRequestChat(c, store, existing);
-          if (chatBinding?.chat_issue_binding.status === "independent") {
-            try {
-              store.prepareFeishuIssueTopicWithinTransaction(existing);
-            } catch (error) {
-              log.warn(
-                `Feishu issue topic creation skipped for ${existing.id}: ${error instanceof Error ? error.message : String(error)}`,
-              );
-            }
+          try {
+            store.prepareFeishuIssueTopicWithinTransaction(existing);
+          } catch (error) {
+            log.warn(
+              `Feishu issue topic creation skipped for ${existing.id}: ${error instanceof Error ? error.message : String(error)}`,
+            );
           }
-          return c.json({
-            ...existingIssueDispatchResponse(store, existing),
-            ...(chatBinding ?? {}),
-          }, 200);
+          return c.json(existingIssueDispatchResponse(store, existing), 200);
         }
       }
       const issue = store.createIssue(issueInput);
-      const chatBinding = bindCreatedIssueToRequestChat(c, store, issue);
-      if (!chatBinding || chatBinding.chat_issue_binding.status === "independent") {
-        try {
-          store.prepareFeishuIssueTopicWithinTransaction(issue);
-        } catch (error) {
-          log.warn(
-            `Feishu issue topic creation skipped for ${issue.id}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
+      try {
+        store.prepareFeishuIssueTopicWithinTransaction(issue);
+      } catch (error) {
+        log.warn(
+          `Feishu issue topic creation skipped for ${issue.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
       publishIssueCreated(c, store, issue, issueCompatibilityResponse(issue));
       // go-compat (maybeEnqueueOnAssign): creating an issue assigned to an agent/squad
@@ -701,7 +782,6 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       }
       const response: Record<string, unknown> = {
         ...issueCompatibilityResponse(finalIssue),
-        ...(chatBinding ?? {}),
         task_id: task?.id ?? null,
         dispatch_status: task ? "dispatched" : "skipped",
         dispatch_skipped_reason: task ? null : dispatchSkippedReason,
@@ -715,6 +795,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     }
   });
   app.post("/api/multiremi/issues/quick-create", async (c) => {
+    const dispatchDenied = denySideSessionAgentDispatch(c, store);
+    if (dispatchDenied) return dispatchDenied;
     const policyDenied = denyRestrictedTaskIssueCreation(c, store);
     if (policyDenied) return policyDenied;
     const body = await readJson<QuickCreateIssueInput>(c);
@@ -733,6 +815,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     }, 202);
   });
   app.post("/api/issues/quick-create", async (c) => {
+    const dispatchDenied = denySideSessionAgentDispatch(c, store);
+    if (dispatchDenied) return dispatchDenied;
     const policyDenied = denyRestrictedTaskIssueCreation(c, store);
     if (policyDenied) return policyDenied;
     const body = await readJson<QuickCreateIssueInput>(c);
@@ -867,7 +951,9 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       .map((task) => taskCompatibilityResponse(
         task,
         null,
-        task.status === "queued" ? store.getTaskQueueBlocker(task.id) : null,
+        task.status === "queued" || task.status === "dispatched"
+          ? store.getTaskQueueBlocker(task.id)
+          : null,
       ));
     return c.json({ tasks });
   });
@@ -881,7 +967,9 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       .map((task) => taskCompatibilityResponse(
         task,
         null,
-        task.status === "queued" ? store.getTaskQueueBlocker(task.id) : null,
+        task.status === "queued" || task.status === "dispatched"
+          ? store.getTaskQueueBlocker(task.id)
+          : null,
       )));
   });
   app.get("/api/issues/:id/usage", (c) => {
@@ -892,6 +980,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     return c.json(issueUsageResponse(store, issue));
   });
   app.post("/api/issues/:id/rerun", async (c) => {
+    const dispatchDenied = denySideSessionAgentDispatch(c, store);
+    if (dispatchDenied) return dispatchDenied;
     const issue = issueFromParam(store, c, "id", "compat");
     if (!issue) return c.json({ error: "issue not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
@@ -913,31 +1003,6 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
     if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
-    const taskToken = currentTaskAccessToken(c);
-    const supervisor = supervisorTaskIdentity(c, store);
-    if (supervisor && task.id === supervisor.task.id) {
-      return c.json({ error: "a supervisor cannot act on its own task", code: "organizer_self_action_forbidden" }, 403);
-    }
-    if (supervisor && taskToken?.taskId && task.id !== taskToken.taskId) {
-      const body = await readJson<{ reason?: string }>(c);
-      try {
-        const result = store.performOrganizerAction({
-          supervisorTaskId: supervisor.task.id,
-          supervisorAgentId: supervisor.agentId,
-          targetTaskId: task.id,
-          action: "cancel",
-          reason: cleanString(body.reason) ?? "",
-        });
-        return c.json({
-          ...taskCompatibilityResponse(result.task),
-          organizer_action: result.audit,
-          comment_id: result.comment.id,
-        });
-      } catch (error) {
-        if (error instanceof OrganizerActionError) return c.json({ error: error.message, code: error.code }, error.status);
-        throw error;
-      }
-    }
     return c.json(taskCompatibilityResponse(store.cancelTask(task.id)));
   });
   app.post("/api/issues/:id/squad-evaluated", async (c) => {
@@ -1066,11 +1131,15 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
     const body = await readJson<UpdateIssueInput>(c);
-    const input = { ...body, parentTaskId: currentTaskParentId(c) };
+    const { actorType, actorId } = issueMutationActivity(c);
+    const input = { ...body, actorType, actorId, parentTaskId: currentTaskParentId(c) };
     assertRuntimeWorkspaceAccess(c, store, body.runtimeWorkspaceId ?? body.runtime_workspace_id, issue.workspaceId);
-    const updated = store.updateIssue(issue.id, input);
+    const dispatchDenied = denySideSessionIssueUpdate(c, store, issue, input);
+    if (dispatchDenied) return dispatchDenied;
+    const { issue: updated, cancelledTasks } = store.updateIssueWithOutcome(issue.id, input);
     lockAutoTitleAfterHumanEdit(c, updated, input);
-    return c.json({ issue: maybeDispatchOnIssueUpdate(store, issue, updated, input) });
+    const dispatched = maybeDispatchOnIssueUpdate(store, issue, updated, input);
+    return c.json({ issue: dispatched.issue, cancelled_tasks: cancelledTasks + dispatched.cancelledTasks });
   });
   const updateIssueCompatibilityRoute = async (c: Context) => {
     const issue = issueFromParam(store, c, "id", "compat");
@@ -1079,17 +1148,26 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const body = await readJsonStrict<UpdateIssueInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    const { actorType, actorId } = issueMutationActivity(c);
     const input = {
       ...issueUpdateCompatibilityInput(body),
+      actorType,
+      actorId,
       parentTaskId: currentTaskParentId(c),
     };
+    const dispatchDenied = denySideSessionIssueUpdate(c, store, issue, input);
+    if (dispatchDenied) return dispatchDenied;
     try {
       assertRuntimeWorkspaceAccess(c, store, input.runtimeWorkspaceId ?? input.runtime_workspace_id, issue.workspaceId);
-      const updated = store.updateIssue(issue.id, input);
+      const { issue: updated, cancelledTasks } = store.updateIssueWithOutcome(issue.id, input);
       lockAutoTitleAfterHumanEdit(c, updated, input);
       const dispatched = maybeDispatchOnIssueUpdate(store, issue, updated, input);
-      const response = issueCompatibilityResponse(dispatched);
-      publishIssueUpdated(c, store, issue, dispatched, input, response);
+      const response = {
+        ...issueCompatibilityResponse(dispatched.issue),
+        task_id: dispatched.task?.id ?? null,
+        cancelled_tasks: cancelledTasks + dispatched.cancelledTasks,
+      };
+      publishIssueUpdated(c, store, issue, dispatched.issue, input, response);
       return c.json(response);
     } catch (err) {
       const response = issueErrorResponse(c, err);
@@ -1177,14 +1255,39 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
     const body = await readJson<AssignIssueInput>(c);
-    const result = store.assignIssue(issue.id, {
+    const dispatchDenied = denySideSessionAssigneeDispatch(c, store, issue.workspaceId,
+      body.assigneeType ?? body.assignee_type, body.assigneeId ?? body.assignee_id);
+    if (dispatchDenied) return dispatchDenied;
+    const { actorType, actorId } = issueMutationActivity(c);
+    const result = safeAssignIssue(store, issue.id, {
       ...body,
+      actorType,
+      actorId,
       parentTaskId: currentTaskParentId(c),
     });
+    if ("error" in result) return c.json({ error: result.error }, result.status);
     return c.json({
-      ...result,
+      issue: result.issue,
+      cancelled_tasks: result.cancelledTasks,
       task: result.task ? taskPublicResponse(result.task) : null,
     });
+  });
+  app.get("/api/sessions/:sessionId", (c) => {
+    const session = store.getIssueSession(c.req.param("sessionId"));
+    if (!session) return c.json({ error: "session not found" }, 404);
+    const denied = denyCurrentUserWorkspaceAccess(c, store, session.workspaceId);
+    if (denied) return denied;
+    return c.json(issueSessionCompatibilityResponse(
+      session,
+      store.listSessionParticipants(session.id),
+    ));
+  });
+  app.get("/api/sessions/:sessionId/inherited-context", (c) => {
+    const session = store.getIssueSession(c.req.param("sessionId"));
+    if (!session) return c.json({ error: "session not found" }, 404);
+    const denied = denyCurrentUserWorkspaceAccess(c, store, session.workspaceId);
+    if (denied) return denied;
+    return c.json(store.getSessionInheritedContext(session.id));
   });
   app.get("/api/issues/:id/sessions", (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
@@ -1203,16 +1306,21 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue) return c.json({ error: "issue not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
-    const body = await readJson<CreateIssueSessionInput>(c);
-    const chatId = cleanString(body.chatId ?? body.chat_id);
-    if (!chatId) return c.json({ error: "chat_id is required; Sessions are created from a Chat" }, 400);
-    const loadedChat = loadChatSessionForCurrentUser(c, store, chatId);
-    if (loadedChat instanceof Response) return loadedChat;
-    if (loadedChat.session.issueId !== issue.id) return c.json({ error: "Chat is not linked to this Issue" }, 400);
+    const body = await readJson<CreateIssueSessionInput & { inheritMode?: unknown; inherit_mode?: unknown }>(c);
     const creator = issueSubscriberCaller(c);
     const hasMemberActor = creator.actorType !== "member"
       || Boolean(currentWorkspaceMember(c, store, issue.workspaceId));
     try {
+      // Validate both spellings so contradictory inheritance requests are not ignored.
+      const parentSessionId = body.parentSessionId ?? body.parent_session_id;
+      const hasParent = typeof parentSessionId === "string" && Boolean(parentSessionId.trim());
+      const inheritMode = body.inheritMode ?? body.inherit_mode ?? (hasParent ? "snapshot" : "none");
+      for (const requestedMode of [body.inheritMode, body.inherit_mode]) {
+        if (requestedMode !== undefined && (requestedMode !== inheritMode
+          || (hasParent ? requestedMode !== "snapshot" && requestedMode !== "follow" : requestedMode !== "none"))) {
+          throw new Error(`inherit_mode must be ${hasParent ? "snapshot or follow" : "none"} for this parent_session_id; inheritMode and inherit_mode must agree`);
+        }
+      }
       const session = store.createIssueSession(issue.id, {
         ...body,
         createdByType: hasMemberActor ? creator.actorType : "system",
@@ -1351,7 +1459,9 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       .map((task) => taskCompatibilityResponse(
         task,
         null,
-        task.status === "queued" ? store.getTaskQueueBlocker(task.id) : null,
+        task.status === "queued" || task.status === "dispatched"
+          ? store.getTaskQueueBlocker(task.id)
+          : null,
       )));
   });
   app.post("/api/issues/:id/sessions/:sessionId/tasks", async (c) => {
@@ -1360,8 +1470,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
-    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
-    if (chatDenied) return chatDenied;
+    const dispatchDenied = denySideSessionAgentDispatch(c, store);
+    if (dispatchDenied) return dispatchDenied;
     const body = await readJson<CreateSessionTaskInput>(c);
     const agentId = cleanString(body.agentId ?? body.agent_id);
     const agent = agentId ? store.getAgent(agentId) : null;

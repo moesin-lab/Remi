@@ -968,13 +968,18 @@ export class AutopilotsRepo {
     const rows = this.ctx.db.query(
       `SELECT r.* FROM multiremi_autopilot_runs r
        JOIN multiremi_autopilots a ON a.id = r.autopilot_id
-       WHERE a.workspace_id = ? AND r.repository_id IS NOT NULL
+       WHERE a.workspace_id = ? AND (r.repository_id IS NOT NULL OR
+         (r.schedule_target IS NOT NULL AND EXISTS (
+           SELECT 1 FROM multiremi_knowledge_compilation_runs k
+           WHERE k.autopilot_run_id = r.id AND k.repository_id IS NOT NULL)))
        ORDER BY r.created_at DESC, r.id DESC`,
     ).all(workspaceId) as Row[];
     const isActive = (status: MultiremiAutopilotRun["status"]): boolean =>
       (ACTIVE_RUN_STATUSES as readonly string[]).includes(status);
     const latest = new Map<string, MultiremiAutopilotRunRecord>();
     for (const row of rows.map(toAutopilotRun)) {
+      row.repositoryId ??= row.scheduleTarget?.kind === "repository" ? row.scheduleTarget.id : null;
+      if (!row.repositoryId) continue;
       const current = latest.get(row.repositoryId!);
       if (!current) {
         latest.set(row.repositoryId!, row);
@@ -994,7 +999,9 @@ export class AutopilotsRepo {
    */
   isRepositoryWikiRunPublished(runId: string): boolean {
     const run = this.getAutopilotRun(runId);
-    if (!run?.repositoryId) return false;
+    if (!run) return false;
+    run.repositoryId ??= run.scheduleTarget?.kind === "repository" ? run.scheduleTarget.id : null;
+    if (!run.repositoryId) return false;
     return this.repositoryWikiRunHasPublication(run);
   }
 
@@ -1305,6 +1312,9 @@ export class AutopilotsRepo {
         || sourceTask?.issueCreationRestricted
         || agent?.issueCreationRequiresProposal,
       );
+      const feishuSenderApprovalRequired = sourceTask
+        ? this.ctx.feishuBot().isFeishuBotTaskIssueCreationRestricted(sourceTask.id)
+        : false;
       const skippedReason = !agent
         ? "No runnable agent"
         : autopilot.status !== "active"
@@ -1348,6 +1358,9 @@ export class AutopilotsRepo {
       if (autopilot.executionMode === "create_issue" && issueCreationRestricted) {
         throw new Error("issue_creation_requires_proposal");
       }
+      if (autopilot.executionMode === "create_issue" && feishuSenderApprovalRequired) {
+        throw new Error("feishu_sender_approval_required");
+      }
 
       let issue: MultiremiIssue | null = null;
       let issueSessionId: string | null = null;
@@ -1383,31 +1396,36 @@ export class AutopilotsRepo {
             throw new Error("System event does not belong to the trigger issue");
           }
         }
-        const existingChat = this.ctx.db.query(
-          `SELECT id FROM multiremi_chat_sessions
-           WHERE issue_id = ? AND agent_id = ? AND status = 'active'
-           ORDER BY updated_at DESC LIMIT 1`,
-        ).get(issue.id, agent.id) as { id?: string } | null;
-        const chat = existingChat?.id
-          ? this.ctx.chat().getChatSession(existingChat.id)!
+        const reusableSession = autopilot.sessionPolicy === "reuse_latest"
+          ? this.ctx.db.query(
+            `SELECT s.id, s.chat_id FROM multiremi_issue_sessions s
+             JOIN multiremi_chat_sessions c ON c.id = s.chat_id
+             WHERE s.issue_id = ? AND s.status = 'active'
+               AND c.agent_id = ? AND c.status = 'active'
+             ORDER BY s.updated_at DESC, s.id DESC LIMIT 1`,
+          ).get(issue.id, agent.id) as { id?: string; chat_id?: string } | null
+          : null;
+        const chat = reusableSession?.chat_id
+          ? this.ctx.chat().getChatSession(reusableSession.chat_id)!
           : this.ctx.chat().createChatSessionWithinTransaction({
             workspaceId: issue.workspaceId,
             creatorId: agent.ownerId,
             agentId: agent.id,
-            issueId: issue.id,
+            projectId: issue.projectId,
             title: `${autopilot.title} · ${issue.key}`,
           });
-        const reusableSession = autopilot.sessionPolicy === "reuse_latest"
-          ? this.ctx.db.query(
-            `SELECT id FROM multiremi_issue_sessions
-             WHERE chat_id = ? AND status = 'active'
-             ORDER BY updated_at DESC, id DESC LIMIT 1`,
-          ).get(chat.id) as { id?: string } | null
-          : null;
-        const issueSession = autopilot.sessionPolicy === "reuse_latest"
-          ? (reusableSession?.id ? this.ctx.issueSessions().getIssueSession(reusableSession.id) : null)
-            ?? this.ctx.issueSessions().getOrCreateDefaultChatSession(chat.id, agent.ownerId)
-          : this.ctx.issueSessions().createSession(chat.id, {
+        const issueSession = reusableSession?.id
+          ? this.ctx.issueSessions().getIssueSession(reusableSession.id)!
+          : autopilot.sessionPolicy === "reuse_latest"
+            ? this.ctx.issueSessions().createIssueSessionWithinTransaction(issue.id, {
+              chatId: chat.id,
+              title: "Main",
+              createdByType: "agent",
+              createdById: agent.id,
+              participantAgentIds: [agent.id],
+            })
+            : this.ctx.issueSessions().createIssueSessionWithinTransaction(issue.id, {
+            chatId: chat.id,
             title: `${autopilot.title} · ${issue.key}`,
             createdByType: "agent",
             createdById: agent.id,

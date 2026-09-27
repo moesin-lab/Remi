@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { ExecutionProfileListSchema, ExecutionProfileResponseSchema, type ExecutionProfile, type ExecutionProfileInput, type ExecutionGroupInput } from "../schemas/execution-profiles";
 import type {
   AgentRuntime,
   CreateRuntimeDirectoryScanRequest,
@@ -48,6 +50,10 @@ import {
   type CliLatestVersionResponse,
   CliLatestVersionResponseSchema,
   AgentRuntimeListSchema,
+  AgentRuntimeSchema,
+  ExecutionGroupListSchema,
+  ExecutionGroupSchema,
+  type ExecutionGroupList,
   CloudRuntimeNodeListSchema,
   CloudRuntimeNodeSchema,
   DaemonInventoryResponseSchema,
@@ -72,6 +78,12 @@ import {
   EMPTY_DAEMON_ROUTING_RESPONSE,
   type RelayConfigResponse,
   RelayConfigResponseSchema,
+  type RelayEngineProbe,
+  RelayEngineProbeSchema,
+  type RelayReasoningLevelSaveResult,
+  RelayReasoningLevelSaveResultSchema,
+  type RelayReasoningLevelsResponse,
+  RelayReasoningLevelsResponseSchema,
   RuntimeDirectoryScanRequestSchema,
   RuntimeProvisionListResponseSchema,
   RuntimeProvisionResponseSchema,
@@ -87,6 +99,31 @@ import {
 
 export class RuntimesEndpoints {
   constructor(readonly http: HttpClient) {}
+
+  async listExecutionProfiles(wsId: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-profiles?workspace_id=${encodeURIComponent(wsId)}`);
+    return parseStrictResponse<{ profiles: ExecutionProfile[] }>(raw, ExecutionProfileListSchema, { endpoint: "GET /api/execution-profiles" });
+  }
+
+  async saveExecutionProfile(wsId: string, id: string | undefined, input: ExecutionProfileInput) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-profiles${id ? `/${encodeURIComponent(id)}` : ""}?workspace_id=${encodeURIComponent(wsId)}`, { method: id ? "PUT" : "POST", body: JSON.stringify({ ...input, workspace_id: wsId }) });
+    return parseStrictResponse<{ profile: ExecutionProfile }>(raw, ExecutionProfileResponseSchema, { endpoint: "SAVE /api/execution-profiles" });
+  }
+
+  async deleteExecutionProfile(wsId: string, id: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-profiles/${encodeURIComponent(id)}?workspace_id=${encodeURIComponent(wsId)}`, { method: "DELETE" });
+    parseStrictResponse(raw, z.object({ ok: z.literal(true) }), { endpoint: "DELETE /api/execution-profiles/:id" });
+  }
+
+  async saveExecutionGroup(wsId: string, id: string | undefined, input: ExecutionGroupInput) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-groups${id ? `/${encodeURIComponent(id)}` : ""}?workspace_id=${encodeURIComponent(wsId)}`, { method: id ? "PUT" : "POST", body: JSON.stringify({ ...input, workspace_id: wsId }) });
+    return parseStrictResponse(raw, z.object({ group: ExecutionGroupSchema }), { endpoint: "SAVE /api/execution-groups" });
+  }
+
+  async deleteExecutionGroup(wsId: string, id: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-groups/${encodeURIComponent(id)}?workspace_id=${encodeURIComponent(wsId)}`, { method: "DELETE" });
+    parseStrictResponse(raw, z.object({ ok: z.literal(true) }), { endpoint: "DELETE /api/execution-groups/:id" });
+  }
 
   async getRuntimeCodexProfile(runtimeId: string): Promise<RuntimeCodexProfileConfig> {
     const raw = await this.http.fetch<unknown>(`/api/runtimes/${encodeURIComponent(runtimeId)}/codex-profile`);
@@ -134,17 +171,25 @@ export class RuntimesEndpoints {
     });
   }
 
-  // Fleet-level model catalog: the union of the online runtimes' models,
-  // grouped by provider, with online-capacity counts. Powers the
-  // machine-less agent creation flow (engine toggle + model dropdown).
-  async listFleetModels(params?: { workspace_id?: string }): Promise<FleetModelsResponse> {
+  // An optional execution target scopes both models and online capacity.
+  async listFleetModels(params?: { workspace_id?: string; runtime_id?: string; execution_group_id?: string; agent_id?: string }): Promise<FleetModelsResponse> {
     const search = new URLSearchParams();
     if (params?.workspace_id) search.set("workspace_id", params.workspace_id);
+    if (params?.runtime_id) search.set("runtime_id", params.runtime_id);
+    if (params?.execution_group_id) search.set("execution_group_id", params.execution_group_id);
+    if (params?.agent_id) search.set("agent_id", params.agent_id);
     const query = search.toString();
     const raw = await this.http.fetch<unknown>(`/api/models${query ? `?${query}` : ""}`);
     return parseWithFallback(raw, FleetModelsResponseSchema, EMPTY_FLEET_MODELS, {
       endpoint: "GET /api/models",
     });
+  }
+
+  async listExecutionGroups(params: { workspace_id: string; agent_id?: string }): Promise<ExecutionGroupList> {
+    const search = new URLSearchParams({ workspace_id: params.workspace_id });
+    if (params.agent_id) search.set("agent_id", params.agent_id);
+    const raw = await this.http.fetch<unknown>(`/api/execution-groups?${search}`);
+    return parseStrictResponse(raw, ExecutionGroupListSchema, { endpoint: "GET /api/execution-groups" });
   }
 
   // Model gateway: fleet-wide relay config (owner/admin only). Tokens are masked
@@ -176,6 +221,55 @@ export class RuntimesEndpoints {
       { method: "POST" },
     );
     return typeof raw?.token === "string" ? raw.token : "";
+  }
+
+  // Explicit "probe now": run gateway discovery once and answer with the fresh
+  // snapshot. Strictly parsed — the caller reports the model/effort counts as
+  // fact, so a drifted body must surface as a contract error, not "0 models".
+  async probeRelayEngine(workspaceId: string, engine: "claude" | "codex"): Promise<RelayEngineProbe> {
+    const raw = await this.http.fetch<unknown>(
+      `/api/workspaces/${workspaceId}/relay-config/${engine}/probe`,
+      { method: "POST" },
+    );
+    return parseStrictResponse(raw, RelayEngineProbeSchema, {
+      endpoint: "POST /api/workspaces/:id/relay-config/:engine/probe",
+    });
+  }
+
+  // Per-model manual reasoning levels (owner/admin only). The GET enumerates
+  // the probe snapshot — including models with no declaration — and the PUT is
+  // a per-model upsert where `levels: []` clears the declaration. Both parse
+  // strictly: the editor renders these rows as enforcement facts, so a drifted
+  // shape must surface as a contract error instead of "not declared".
+  async getRelayReasoningLevels(
+    workspaceId: string,
+    engine: "claude" | "codex",
+  ): Promise<RelayReasoningLevelsResponse> {
+    const raw = await this.http.fetch<unknown>(
+      `/api/workspaces/${workspaceId}/relay-config/${engine}/reasoning-levels`,
+    );
+    return parseStrictResponse(raw, RelayReasoningLevelsResponseSchema, {
+      endpoint: "GET /api/workspaces/:id/relay-config/:engine/reasoning-levels",
+    });
+  }
+
+  async putRelayReasoningLevel(
+    workspaceId: string,
+    engine: "claude" | "codex",
+    data: { model: string; levels: string[]; default_level?: string },
+  ): Promise<RelayReasoningLevelSaveResult> {
+    const body: { model: string; levels: string[]; default_level?: string } = {
+      model: data.model,
+      levels: data.levels,
+    };
+    if (data.default_level) body.default_level = data.default_level;
+    const raw = await this.http.fetch<unknown>(
+      `/api/workspaces/${workspaceId}/relay-config/${engine}/reasoning-levels`,
+      { method: "PUT", body: JSON.stringify(body) },
+    );
+    return parseStrictResponse(raw, RelayReasoningLevelSaveResultSchema, {
+      endpoint: "PUT /api/workspaces/:id/relay-config/:engine/reasoning-levels",
+    });
   }
 
   async setRelayDiscovery(workspaceId: string, enabled: boolean): Promise<void> {
@@ -504,12 +598,13 @@ export class RuntimesEndpoints {
 
   async updateRuntime(
     runtimeId: string,
-    patch: { visibility?: "private" | "public"; name?: string },
+    patch: { visibility?: "private" | "public"; name?: string; execution_group_id?: string | null },
   ): Promise<AgentRuntime> {
-    return this.http.fetch(`/api/runtimes/${runtimeId}`, {
+    const raw = await this.http.fetch<unknown>(`/api/runtimes/${runtimeId}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
     });
+    return parseStrictResponse(raw, AgentRuntimeSchema, { endpoint: "PATCH /api/runtimes/:id" });
   }
 
   async updateDaemonDisplayName(

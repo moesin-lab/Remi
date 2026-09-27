@@ -97,14 +97,18 @@ export function outputMode(invocation: CommandInvocation): CliOutputMode {
 }
 
 export function renderResource(invocation: CommandInvocation, value: unknown, collectionKeys: readonly string[] = []): void {
+  const rows = resourceRows(value, collectionKeys);
+  const hasWaitReason = rows.some((row) => "wait_reason" in row || "waitReason" in row);
   new CliRenderer().render(value ?? { ok: true }, {
     mode: outputMode(invocation),
     rows: (input) => resourceRows(input, collectionKeys),
     columns: [
       { header: "ID", value: (row) => scalar(row.id) ?? "-", maxWidth: 28 },
-      { header: "NAME", value: (row) => scalar(row.name) ?? scalar(row.title) ?? scalar(row.slug) ?? "-", maxWidth: 48 },
+      { header: "NAME", value: (row) => scalar(row.name) ?? scalar(row.title) ?? scalar(row.slug) ?? scalar(row.filename) ?? "-", maxWidth: 48 },
       { header: "STATUS", value: (row) => scalar(row.status) ?? scalar(row.role) ?? scalar(row.kind) ?? "-", maxWidth: 24 },
       { header: "DETAIL", value: (row) => scalar(row.email) ?? scalar(row.url) ?? scalar(row.description) ?? "-", maxWidth: 72 },
+      // Keep the full reason visible, including the model and thinking level.
+      ...(hasWaitReason ? [{ header: "WAIT REASON", value: (row: Record<string, unknown>) => scalar(row.wait_reason) ?? scalar(row.waitReason) }] : []),
     ],
   });
 }
@@ -216,7 +220,7 @@ function resourceRows(value: unknown, collectionKeys: readonly string[]): Record
   if (rows.length !== 1 || !isRecord(value)) return rows;
   for (const key of [
     "workspace", "member", "invitation", "token", "project", "repository", "doc", "metadata",
-    "agent", "squad", "skill", "plugin", "binding", "version", "inspection",
+    "agent", "squad", "skill", "plugin", "binding", "version", "inspection", "task",
   ]) {
     if (isRecord(value[key])) return [value[key] as Record<string, unknown>];
   }

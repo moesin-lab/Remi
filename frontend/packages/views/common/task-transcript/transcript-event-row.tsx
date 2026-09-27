@@ -18,12 +18,14 @@ import { useT } from "../../i18n";
 interface TranscriptEventRowProps {
   item: TimelineItem;
   isSelected: boolean;
+  isJumpHighlighted?: boolean;
 }
 
 export const TranscriptEventRow = ({
   ref,
   item,
   isSelected,
+  isJumpHighlighted = false,
 }: TranscriptEventRowProps & { ref?: React.Ref<HTMLDivElement> }) => {
   const [expanded, setExpanded] = useState(false);
   const color = getEventColor(item);
@@ -47,9 +49,16 @@ export const TranscriptEventRow = ({
   return (
     <div
       ref={ref}
+      data-transcript-row
+      data-jump-highlighted={isJumpHighlighted ? "true" : undefined}
+      role="group"
+      aria-label={`${label}: ${summary || "(empty)"}`}
+      aria-current={isSelected ? "location" : undefined}
+      tabIndex={-1}
       className={cn(
-        "group transition-colors",
+        "group scroll-my-4 outline-none transition-[background-color,box-shadow] duration-300 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring motion-reduce:transition-none",
         isSelected && "bg-accent/50",
+        isJumpHighlighted && "bg-primary/10 ring-2 ring-inset ring-primary/70",
       )}
     >
       <Collapsible open={expanded} onOpenChange={setExpanded}>

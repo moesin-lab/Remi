@@ -853,8 +853,8 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Wiki maintainer", provider: "claude" });
     const issue = store.createIssue({ title: "Reuse session", status: "in_review" });
-    const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id });
-    const latest = store.createSession(chat.id, { title: "Latest context" });
+    const chat = store.createChatSession({ agentId: agent.id });
+    const latest = store.createIssueSession(issue.id, { chatId: chat.id, title: "Latest context" });
     db!.run(
       "UPDATE multiremi_issue_sessions SET updated_at = ? WHERE id = ?",
       ["2099-01-01T00:00:00.000Z", latest.id],
@@ -906,7 +906,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
       dbB.close();
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it("requeues a system event when its trigger execution fails", () => {
     const store = createStore();

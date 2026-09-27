@@ -8,7 +8,12 @@ export function registerRemiReleaseRoutes(app: Hono, _deps: RouterDeps): void {
   // Self-host release mirror (install-remi.sh reads these when MULTIREMI_BASE_URL is set).
   app.get("/api/remi/releases/latest/version", (c) => {
     const version = latestMirrorReleaseVersion();
-    if (!version) return c.json({ error: "no releases available on this server" }, 404);
+    if (!version) {
+      return c.json({
+        code: "release_catalog_empty",
+        error: "no CLI releases are configured on this server; configure MULTIREMI_RELEASE_DIR or use the GitHub release installer",
+      }, 404);
+    }
     return c.text(version);
   });
   app.get("/api/remi/releases/latest/:filename", (c) => {

@@ -1,5 +1,6 @@
 import { createId, nowIso } from "@multiremi/ids.js";
 import { createLogger } from "@shared/logger.js";
+import { abortable, deadlineClient } from "./deadline.js";
 import type {
   CreateRepositoryWikiDocInput,
   MultiremiRepositoryWikiDoc,
@@ -21,6 +22,7 @@ import type { OpenVikingClientContract, ProjectKnowledgeMode } from "@multiremi/
 import {
   decodeRepositoryWikiBody,
   encodeRepositoryWikiDocument,
+  canonicalRepositoryWikiBody,
   repositoryWikiDocUri,
   repositoryWikiRetrievalTags,
   repositoryWikiRootUri,
@@ -34,7 +36,66 @@ import {
 import {
   assertNoIntroducedRepositoryWikiLinks,
   repositoryWikiBacklinks,
+  rewriteRepositoryWikiLinks,
+  type RepositoryWikiGraphDoc,
 } from "./links.js";
+
+export interface RepositoryWikiMigrationOptions {
+  expectedVersion?: number;
+  updatedByType?: MultiremiRepositoryWikiDoc["updatedByType"];
+  updatedById?: string | null;
+}
+
+export interface RepositoryWikiRestoreTarget {
+  ref: string;
+  expected_version: number;
+  snapshot_oid: string;
+  content_sha256: string;
+}
+
+export interface RepositoryWikiRestoreResult {
+  id: string;
+  path: string;
+  version: number;
+  content_uri: string;
+  snapshot_oid: string;
+  content_sha256: string;
+  body_bytes: number;
+  state: "missing" | "present" | "restored";
+}
+
+export interface RepositoryWikiRestoreReport {
+  dry_run: boolean;
+  results: RepositoryWikiRestoreResult[];
+  recovery_snapshot_oid: string | null;
+  repository_readable: boolean;
+  unreadable: Array<{ id: string; path: string }>;
+}
+
+export interface RepositoryWikiLogRepairInput {
+  body: string;
+  expectedVersion: number;
+  expectedBodySha256: string;
+  reason: string;
+  updatedByType?: MultiremiRepositoryWikiDoc["updatedByType"];
+  updatedById?: string | null;
+  sourceRevision?: string | null;
+}
+
+export interface RepositoryWikiLogRepairReport {
+  doc: MultiremiRepositoryWikiDoc;
+  audit: {
+    reason: string;
+    before: { version: number; body_sha256: string; content_sha256: string | null };
+    after: { version: number; body_sha256: string; content_sha256: string | null };
+  };
+}
+
+export class RepositoryWikiRestoreConflictError extends Error {}
+export class RepositoryWikiRestoreInputError extends Error {}
+export class RepositoryWikiLogRepairConflictError extends Error {}
+export class RepositoryWikiLogRepairInputError extends Error {}
+export class RepositoryWikiLogHistoryError extends Error {}
 
 export interface RepositoryWikiServiceContract {
   readonly mode: ProjectKnowledgeMode;
@@ -46,6 +107,12 @@ export interface RepositoryWikiServiceContract {
   update(workspaceId: string, repositoryId: string, ref: string, input: UpdateRepositoryWikiDocInput): Promise<MultiremiRepositoryWikiDoc>;
   delete(workspaceId: string, repositoryId: string, ref: string, expectedVersion?: number | null): Promise<MultiremiRepositoryWikiDoc>;
   applyBatch(workspaceId: string, repositoryId: string, operations: readonly RepositoryWikiBatchOperation[]): Promise<RepositoryWikiBatchResult[]>;
+  move(workspaceId: string, repositoryId: string, ref: string, path: string, options?: RepositoryWikiMigrationOptions): Promise<RepositoryWikiBatchResult[]>;
+  merge(workspaceId: string, repositoryId: string, targetRef: string, sourceRefs: readonly string[], options?: RepositoryWikiMigrationOptions): Promise<RepositoryWikiBatchResult[]>;
+  restore(workspaceId: string, repositoryId: string, targets: readonly RepositoryWikiRestoreTarget[], options: {
+    dryRun: boolean; auditId: string; onProgress?: (results: RepositoryWikiRestoreResult[]) => void;
+  }): Promise<RepositoryWikiRestoreReport>;
+  repairLog(workspaceId: string, repositoryId: string, input: RepositoryWikiLogRepairInput): Promise<RepositoryWikiLogRepairReport>;
   revisions(workspaceId: string, repositoryId: string, ref: string): Promise<MultiremiRepositoryWikiDocRevision[]>;
   search(workspaceId: string, repositoryId: string, query: string, limit?: number): Promise<MultiremiRepositoryWikiDoc[]>;
   backlinks(workspaceId: string, repositoryId: string, ref: string): Promise<MultiremiRepositoryWikiDoc[]>;
@@ -55,8 +122,58 @@ export interface RepositoryWikiServiceContract {
 }
 
 export class RepositoryWikiUnavailableError extends Error {}
+export const REPOSITORY_WIKI_BATCH_LIMIT = 256;
+const STORAGE_WRITE_CONCURRENCY = 4;
+const PROMOTION_CHECKPOINT_SIZE = 8;
+
+/** Unknown outgoing links cannot be checked when an existing target moves or disappears. */
+export function assertRepositoryWikiPathChangesReadable(
+  before: readonly RepositoryWikiGraphDoc[],
+  after: readonly RepositoryWikiGraphDoc[],
+): void {
+  const nextPaths = new Map(after.map(doc => [doc.id, doc.path]));
+  if (!before.some(doc => nextPaths.get(doc.id) !== doc.path)) return;
+  const unavailable = before.filter(doc => doc.bodyUnavailable);
+  if (unavailable.length) {
+    throw new RepositoryWikiUnavailableError(
+      `Repository wiki path changes and deletes require all bodies to be readable; unavailable: ${unavailable.map(doc => `${doc.path} (${doc.id})`).join(", ")}`,
+    );
+  }
+}
+
+/** Preserve the root publication log across every ordinary write path. */
+function assertRepositoryWikiLogHistory(
+  before: readonly RepositoryWikiGraphDoc[],
+  after: readonly RepositoryWikiGraphDoc[],
+  internal: RepositoryWikiBatchInternalOptions = {},
+): void {
+  const current = before.find(doc => doc.path === REPOSITORY_WIKI_LOG_PATH);
+  if (!current) return;
+  const next = after.find(doc => doc.id === current.id);
+  if (!next || next.path !== REPOSITORY_WIKI_LOG_PATH) {
+    throw new RepositoryWikiLogHistoryError("Repository wiki log.md is append-only and cannot be moved or deleted");
+  }
+  const previousBody = canonicalRepositoryWikiBody(current.body);
+  const nextBody = canonicalRepositoryWikiBody(next.body);
+  if (previousBody === nextBody) return;
+  if (internal.logRepairDocId === current.id) return;
+  const rewritten = internal.logLinkRewriteBodies?.get(current.id);
+  if (rewritten !== undefined && canonicalRepositoryWikiBody(rewritten) === nextBody) return;
+  if (!previousBody || nextBody.startsWith(`${previousBody}\n`)) return;
+  throw new RepositoryWikiLogHistoryError(
+    "Repository wiki log.md is append-only; use the audited repair-log operation for historical repair",
+  );
+}
 
 const log = createLogger("repository-wiki");
+const REPOSITORY_WIKI_LOG_PATH = "log.md";
+
+interface RepositoryWikiBatchInternalOptions {
+  /** Exact bodies generated by the service's own move/merge link rewriter. */
+  logLinkRewriteBodies?: ReadonlyMap<string, string>;
+  /** One repair authorized only after locked version + baseline hash checks. */
+  logRepairDocId?: string;
+}
 
 export class RepositoryWikiService implements RepositoryWikiServiceContract {
   private readonly writeQueues = new Map<string, Promise<void>>();
@@ -64,15 +181,21 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
   private storageAbort: AbortController | null = null;
   private storageRun: Promise<void> | null = null;
   private readonly cleanupConcurrency: number;
+  private readonly writeTimeoutMs: number;
+  private readonly storageJobTimeoutMs: number;
+  private readonly operationSignal?: AbortSignal;
 
   constructor(
     private readonly store: MultiremiStore,
     private readonly client: OpenVikingClientContract | null,
     readonly mode: ProjectKnowledgeMode,
-    options: { cleanupConcurrency?: number } = {},
+    options: { cleanupConcurrency?: number; writeTimeoutMs?: number; storageJobTimeoutMs?: number; signal?: AbortSignal } = {},
   ) {
     const concurrency = options.cleanupConcurrency ?? Number(process.env.MULTIREMI_WIKI_CLEANUP_CONCURRENCY ?? 8);
     this.cleanupConcurrency = Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 32 ? concurrency : 8;
+    this.writeTimeoutMs = Math.max(1, options.writeTimeoutMs ?? positiveInt(process.env.MULTIREMI_WIKI_WRITE_TIMEOUT_MS, 120_000));
+    this.storageJobTimeoutMs = Math.max(1, options.storageJobTimeoutMs ?? 60_000);
+    this.operationSignal = options.signal;
   }
 
   startStorageWorker(): void {
@@ -106,7 +229,7 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
           if (signal?.aborted) return;
           const backoff = job.lastError ? Math.min(300_000, 5_000 * 2 ** Math.min(job.attemptCount, 6)) : 0;
           if (now - Date.parse(job.updatedAt) < backoff) continue;
-          await this.withWriteLock(job.workspaceId, job.repositoryId, () => this.processStorageJobUnlocked(job, true, signal));
+          await this.withWriteLock(job.workspaceId, job.repositoryId, service => service.processStorageJobUnlocked(job, true, signal));
         }
       }
     })();
@@ -117,22 +240,26 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
   async list(workspaceId: string, repositoryId: string): Promise<MultiremiRepositoryWikiDoc[]> {
     const docs = this.store.listRepositoryWikiDocs(workspaceId, repositoryId);
     if (this.mode === "sql") return docs;
-    return Promise.all(docs.map(async (doc) => {
-      try {
-        return await this.hydrate(doc);
-      } catch (error) {
-        const message = repositoryWikiHydrationError(doc, error);
-        log.warn(message);
-        return {
-          ...doc,
-          body: "",
-          status: "failed",
-          statusMessage: message,
-          syncStatus: "failed",
-          syncError: message,
-        };
-      }
-    }));
+    return Promise.all(docs.map((doc) => this.hydrateTolerant(doc)));
+  }
+
+  private async hydrateTolerant(doc: MultiremiRepositoryWikiDoc): Promise<MultiremiRepositoryWikiDoc & { bodyUnavailable?: boolean }> {
+    try {
+      return await this.hydrate(doc);
+    } catch (error) {
+      this.operationSignal?.throwIfAborted();
+      const message = repositoryWikiHydrationError(doc, error);
+      log.warn(message);
+      return {
+        ...doc,
+        body: "",
+        bodyUnavailable: true,
+        status: "failed",
+        statusMessage: message,
+        syncStatus: "failed",
+        syncError: message,
+      };
+    }
   }
 
   async listStrict(workspaceId: string, repositoryId: string): Promise<MultiremiRepositoryWikiDoc[]> {
@@ -153,8 +280,8 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
   }
 
   async create(workspaceId: string, repositoryId: string, input: CreateRepositoryWikiDocInput): Promise<MultiremiRepositoryWikiDoc> {
-    return this.withWriteLock(workspaceId, repositoryId, async () => {
-      const result = await this.applyBatchUnlocked(workspaceId, repositoryId, [{ kind: "create", input }]);
+    return this.withWriteLock(workspaceId, repositoryId, async service => {
+      const result = await service.applyBatchUnlocked(workspaceId, repositoryId, [{ kind: "create", input }]);
       return result[0]!.doc;
     });
   }
@@ -165,10 +292,10 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
     ref: string,
     input: UpdateRepositoryWikiDocInput,
   ): Promise<MultiremiRepositoryWikiDoc> {
-    return this.withWriteLock(workspaceId, repositoryId, async () => {
-      const current = await this.requireDocUnlocked(workspaceId, repositoryId, ref);
+    return this.withWriteLock(workspaceId, repositoryId, async service => {
+      const current = await service.requireDocUnlocked(workspaceId, repositoryId, ref);
       const expectedVersion = input.expectedVersion ?? input.expected_version ?? current.version;
-      const result = await this.applyBatchUnlocked(workspaceId, repositoryId, [{
+      const result = await service.applyBatchUnlocked(workspaceId, repositoryId, [{
         kind: "update",
         ref: current.id,
         input: { ...input, expectedVersion, expected_version: expectedVersion },
@@ -178,10 +305,10 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
   }
 
   async delete(workspaceId: string, repositoryId: string, ref: string, expectedVersion?: number | null): Promise<MultiremiRepositoryWikiDoc> {
-    return this.withWriteLock(workspaceId, repositoryId, async () => {
-      const current = await this.requireDocUnlocked(workspaceId, repositoryId, ref);
+    return this.withWriteLock(workspaceId, repositoryId, async service => {
+      const current = await service.requireDocUnlocked(workspaceId, repositoryId, ref);
       const version = expectedVersion ?? current.version;
-      const result = await this.applyBatchUnlocked(workspaceId, repositoryId, [{
+      const result = await service.applyBatchUnlocked(workspaceId, repositoryId, [{
         kind: "delete",
         ref: current.id,
         expectedVersion: version,
@@ -196,8 +323,161 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
     repositoryId: string,
     operations: readonly RepositoryWikiBatchOperation[],
   ): Promise<RepositoryWikiBatchResult[]> {
-    return this.withWriteLock(workspaceId, repositoryId, () =>
-      this.applyBatchUnlocked(workspaceId, repositoryId, operations));
+    return this.withWriteLock(workspaceId, repositoryId, service =>
+      service.applyBatchUnlocked(workspaceId, repositoryId, operations));
+  }
+
+  async restore(workspaceId: string, repositoryId: string, targets: readonly RepositoryWikiRestoreTarget[], options: {
+    dryRun: boolean; auditId: string; onProgress?: (results: RepositoryWikiRestoreResult[]) => void;
+  }): Promise<RepositoryWikiRestoreReport> {
+    return this.withWriteLock(workspaceId, repositoryId, async service => {
+      if (service.mode === "sql") throw new Error("Repository wiki restore requires OpenViking storage");
+      if (!Array.isArray(targets) || !targets.length || targets.length > 32) {
+        throw new RepositoryWikiRestoreInputError("Repository wiki restore requires 1 to 32 targets");
+      }
+      // Do not race a pending promotion/cleanup or implicitly repair anything
+      // outside the operator's explicit target list.
+      if (service.store.listRepositoryWikiStorageJobs(workspaceId, repositoryId).length) {
+        throw new RepositoryWikiUnavailableError("Repository wiki storage repair is still pending");
+      }
+      const client = service.requireClient();
+      const root = repositoryWikiRootUri(workspaceId, repositoryId);
+      const ids = new Set<string>();
+      const plan: Array<{ doc: MultiremiRepositoryWikiDoc; raw: string; result: RepositoryWikiRestoreResult }> = [];
+      // Preflight the ENTIRE batch, including existing objects, before any write.
+      for (const target of targets) {
+        if (!target || typeof target.ref !== "string" || !target.ref.trim()
+          || !Number.isSafeInteger(target.expected_version) || target.expected_version < 1
+          || typeof target.snapshot_oid !== "string" || !target.snapshot_oid.trim()
+          || typeof target.content_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(target.content_sha256)) {
+          throw new RepositoryWikiRestoreInputError("Restore targets require ref, positive expected_version, snapshot_oid and SHA-256 content_sha256");
+        }
+        const doc = service.store.getRepositoryWikiDocByRef(workspaceId, repositoryId, target.ref);
+        if (!doc) throw new Error(`repository wiki doc not found: ${target.ref}`);
+        if (ids.has(doc.id)) throw new RepositoryWikiRestoreInputError(`Duplicate restore target: ${doc.id}`);
+        ids.add(doc.id);
+        if (doc.version !== target.expected_version || doc.snapshotOid !== target.snapshot_oid
+          || doc.contentSha256 !== target.content_sha256) {
+          throw new RepositoryWikiRestoreConflictError(`Restore metadata conflict for ${doc.path} (${doc.id})`);
+        }
+        const uri = repositoryWikiDocUri(workspaceId, repositoryId, doc.path);
+        if (doc.storageBackend !== "openviking" || doc.syncStatus !== "ready" || doc.contentUri !== uri) {
+          throw new RepositoryWikiRestoreConflictError(`Restore requires a ready canonical OpenViking record: ${doc.id}`);
+        }
+        const raw = await client.show(target.snapshot_oid, uri);
+        if (sha256Text(raw) !== target.content_sha256) {
+          throw new RepositoryWikiRestoreConflictError(`Snapshot checksum mismatch for ${doc.path} (${doc.id})`);
+        }
+        const body = decodeRepositoryWikiBody(raw, doc);
+        const present = await client.exists(uri);
+        if (present && sha256Text(await client.read(uri)) !== target.content_sha256) {
+          throw new RepositoryWikiRestoreConflictError(`Existing object checksum mismatch; refusing to overwrite ${doc.path} (${doc.id})`);
+        }
+        plan.push({ doc, raw, result: {
+          id: doc.id, path: doc.path, version: doc.version, content_uri: uri,
+          snapshot_oid: target.snapshot_oid, content_sha256: target.content_sha256,
+          body_bytes: Buffer.byteLength(body, "utf8"), state: present ? "present" : "missing",
+        } });
+      }
+      let recoverySnapshot: string | null = null;
+      if (!options.dryRun) {
+        for (const entry of plan) {
+          service.operationSignal?.throwIfAborted();
+          // Recheck metadata after remote reads, before writing the pinned URI.
+          const current = service.store.getRepositoryWikiDocByRef(workspaceId, repositoryId, entry.doc.id);
+          if (!current || current.version !== entry.doc.version || current.contentUri !== entry.doc.contentUri
+            || current.contentSha256 !== entry.doc.contentSha256 || current.snapshotOid !== entry.doc.snapshotOid) {
+            throw new RepositoryWikiRestoreConflictError(`Restore metadata changed for ${entry.doc.id}`);
+          }
+          if (entry.result.state === "missing") {
+            await service.ensureUriDirectories(root, entry.result.content_uri);
+            try {
+              await client.create(entry.result.content_uri, root, entry.raw);
+              entry.result.state = "restored";
+            } catch (error) {
+              service.operationSignal?.throwIfAborted();
+              // A concurrent create or an ambiguous response can be successful.
+              // Read back; never fall back to replace or remove.
+              if (!await client.exists(entry.result.content_uri)) throw error;
+              if (sha256Text(await client.read(entry.result.content_uri)) !== entry.result.content_sha256) {
+                throw new RepositoryWikiRestoreConflictError(`Concurrent object checksum mismatch for ${entry.doc.id}`);
+              }
+              entry.result.state = "present";
+            }
+          }
+          if (sha256Text(await client.read(entry.result.content_uri)) !== entry.result.content_sha256) {
+            throw new RepositoryWikiRestoreConflictError(`Restored object checksum mismatch for ${entry.doc.id}`);
+          }
+          // Retrying after tag/commit failure completes these ancillary steps.
+          await client.setTags(entry.result.content_uri, repositoryWikiRetrievalTags(entry.doc));
+          options.onProgress?.(plan.map(item => ({ ...item.result })));
+        }
+        recoverySnapshot = await client.commit(`repository wiki restore ${options.auditId}`, plan.map(entry => entry.result.content_uri));
+        if (!recoverySnapshot) throw new RepositoryWikiUnavailableError("Restore snapshot commit returned no oid");
+      }
+      // Preserve all document/revision metadata, including original provenance.
+      let unreadable: Array<{ id: string; path: string }> = [];
+      try {
+        await service.listStrict(workspaceId, repositoryId);
+      } catch {
+        service.operationSignal?.throwIfAborted();
+        const docs = await service.list(workspaceId, repositoryId);
+        unreadable = docs.filter(doc => doc.syncStatus === "failed").map(({ id, path }) => ({ id, path }));
+        // A transient failure in the strict pass must not be advertised as a
+        // successful strict verification even if a subsequent read recovers.
+        if (!unreadable.length) throw new RepositoryWikiUnavailableError("Repository strict verification failed; retry verification");
+      }
+      return { dry_run: options.dryRun, results: plan.map(entry => entry.result),
+        recovery_snapshot_oid: recoverySnapshot, repository_readable: unreadable.length === 0, unreadable };
+    });
+  }
+
+  async repairLog(
+    workspaceId: string,
+    repositoryId: string,
+    input: RepositoryWikiLogRepairInput,
+  ): Promise<RepositoryWikiLogRepairReport> {
+    return this.withWriteLock(workspaceId, repositoryId, async service => {
+      const reason = String(input.reason ?? "").trim();
+      if (!reason || reason.length > 4_000) {
+        throw new RepositoryWikiLogRepairInputError("Log repair reason must be non-empty and at most 4000 characters");
+      }
+      if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+        throw new RepositoryWikiLogRepairInputError("Log repair requires a positive expected_version");
+      }
+      if (!/^[a-f0-9]{64}$/.test(input.expectedBodySha256)) {
+        throw new RepositoryWikiLogRepairInputError("Log repair requires a lowercase SHA-256 expected_body_sha256");
+      }
+      const current = await service.requireDocUnlocked(workspaceId, repositoryId, REPOSITORY_WIKI_LOG_PATH);
+      const beforeBodySha256 = sha256Text(canonicalRepositoryWikiBody(current.body));
+      if (current.version !== input.expectedVersion || beforeBodySha256 !== input.expectedBodySha256) {
+        throw new RepositoryWikiLogRepairConflictError("Repository wiki log repair baseline conflict");
+      }
+      const [result] = await service.applyBatchUnlocked(workspaceId, repositoryId, [{
+        kind: "update",
+        ref: current.id,
+        input: {
+          body: input.body,
+          expectedVersion: input.expectedVersion,
+          sourceRevision: input.sourceRevision,
+          updatedByType: input.updatedByType,
+          updatedById: input.updatedById,
+        },
+      }], { logRepairDocId: current.id });
+      if (!result || result.kind === "delete") throw new Error("Repository wiki log repair produced no document");
+      return {
+        doc: result.doc,
+        audit: {
+          reason,
+          before: { version: current.version, body_sha256: beforeBodySha256, content_sha256: current.contentSha256 },
+          after: {
+            version: result.doc.version,
+            body_sha256: sha256Text(canonicalRepositoryWikiBody(result.doc.body)),
+            content_sha256: result.doc.contentSha256,
+          },
+        },
+      };
+    });
   }
 
   async revisions(workspaceId: string, repositoryId: string, ref: string): Promise<MultiremiRepositoryWikiDocRevision[]> {
@@ -209,6 +489,84 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
       const content = await this.requireClient().show(revision.snapshotOid, revision.contentUri);
       return { ...revision, body: decodeRepositoryWikiBody(content, { ...current, path: revision.path }) };
     }));
+  }
+
+  async move(workspaceId: string, repositoryId: string, ref: string, path: string, options: RepositoryWikiMigrationOptions = {}): Promise<RepositoryWikiBatchResult[]> {
+    return this.withWriteLock(workspaceId, repositoryId, async service => {
+      // Migration promises complete reference rewriting, so unknown outgoing
+      // links are a blocker here (unlike ordinary edits on readable documents).
+      const before = await service.listStrict(workspaceId, repositoryId);
+      const target = resolveBatchDocument(ref, before);
+      if (!target) throw new Error(`repository wiki doc not found: ${ref}`);
+      assertMigrationVersion(target, options.expectedVersion);
+      const nextPath = normalizeRepositoryWikiPath(path);
+      if (target.path === REPOSITORY_WIKI_LOG_PATH || nextPath === REPOSITORY_WIKI_LOG_PATH) {
+        throw new Error("Repository wiki log.md cannot be moved");
+      }
+      const after = before.map(doc => doc.id === target.id ? { ...doc, path: nextPath } : doc);
+      assertUniqueRepositoryWikiPaths(after);
+      const operations: RepositoryWikiBatchOperation[] = [];
+      const logLinkRewriteBodies = new Map<string, string>();
+      for (const doc of before) {
+        const next = after.find(candidate => candidate.id === doc.id)!;
+        const body = rewriteRepositoryWikiLinks(doc.body, doc.path, next.path, before, after);
+        if (next.path === doc.path && body === doc.body) continue;
+        if (doc.path === REPOSITORY_WIKI_LOG_PATH) logLinkRewriteBodies.set(doc.id, body);
+        operations.push({ kind: "update", ref: doc.id, input: {
+          path: next.path, body, expectedVersion: doc.version,
+          updatedByType: options.updatedByType, updatedById: options.updatedById,
+        } });
+      }
+      return operations.length
+        ? service.applyBatchUnlocked(workspaceId, repositoryId, operations, { logLinkRewriteBodies })
+        : [];
+    });
+  }
+
+  async merge(workspaceId: string, repositoryId: string, targetRef: string, sourceRefs: readonly string[], options: RepositoryWikiMigrationOptions = {}): Promise<RepositoryWikiBatchResult[]> {
+    return this.withWriteLock(workspaceId, repositoryId, async service => {
+      if (!sourceRefs.length) throw new Error("repository wiki merge sources are required");
+      const before = await service.listStrict(workspaceId, repositoryId);
+      const target = resolveBatchDocument(targetRef, before);
+      if (!target) throw new Error(`repository wiki doc not found: ${targetRef}`);
+      assertMigrationVersion(target, options.expectedVersion);
+      const sources = sourceRefs.map(ref => {
+        const source = resolveBatchDocument(ref, before);
+        if (!source) throw new Error(`repository wiki doc not found: ${ref}`);
+        return source;
+      });
+      if ([target, ...sources].some(doc => doc.path === REPOSITORY_WIKI_LOG_PATH)) {
+        throw new Error("Repository wiki log.md cannot be a merge source or target");
+      }
+      const sourceIds = new Set(sources.map(source => source.id));
+      if (sourceIds.has(target.id) || sourceIds.size !== sources.length) throw new Error("repository wiki merge requires distinct source and target documents");
+      const mergedIds = new Map(sources.map(source => [source.id, target.id]));
+      const after = before.filter(doc => !sourceIds.has(doc.id));
+      const operations: RepositoryWikiBatchOperation[] = sources.map(source => ({
+        kind: "delete", ref: source.id, expectedVersion: source.version,
+      }));
+      const logLinkRewriteBodies = new Map<string, string>();
+      for (const doc of after) {
+        let body = rewriteRepositoryWikiLinks(doc.body, doc.path, doc.path, before, after, mergedIds);
+        if (doc.id === target.id) {
+          for (const source of sources) {
+            const content = rewriteRepositoryWikiLinks(source.body, source.path, target.path, before, after, mergedIds);
+            body += `\n\n## ${source.title}\n\n${content}`;
+          }
+        }
+        if (body === doc.body && doc.id !== target.id) continue;
+        if (doc.path === REPOSITORY_WIKI_LOG_PATH) logLinkRewriteBodies.set(doc.id, body);
+        operations.push({ kind: "update", ref: doc.id, input: {
+          body, expectedVersion: doc.version,
+          ...(doc.id === target.id ? {
+            tags: [...new Set([doc, ...sources].flatMap(entry => entry.tags))],
+            refs: [...new Map([doc, ...sources].flatMap(entry => entry.refs).map(ref => [JSON.stringify(ref), ref])).values()],
+          } : {}),
+          updatedByType: options.updatedByType, updatedById: options.updatedById,
+        } });
+      }
+      return service.applyBatchUnlocked(workspaceId, repositoryId, operations, { logLinkRewriteBodies });
+    });
   }
 
   async search(workspaceId: string, repositoryId: string, query: string, limit = 20): Promise<MultiremiRepositoryWikiDoc[]> {
@@ -235,8 +593,9 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
   }
 
   async backlinks(workspaceId: string, repositoryId: string, ref: string): Promise<MultiremiRepositoryWikiDoc[]> {
-    const target = await this.requireDoc(workspaceId, repositoryId, ref);
-    const documents = await this.listStrict(workspaceId, repositoryId);
+    const target = this.store.getRepositoryWikiDocByRef(workspaceId, repositoryId, ref);
+    if (!target) throw new Error("repository wiki doc not found");
+    const documents = await this.list(workspaceId, repositoryId);
     return repositoryWikiBacklinks(target, documents);
   }
 
@@ -262,15 +621,27 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
     workspaceId: string,
     repositoryId: string,
     operations: readonly RepositoryWikiBatchOperation[],
+    internal: RepositoryWikiBatchInternalOptions = {},
   ): Promise<RepositoryWikiBatchResult[]> {
     if (!operations.length) throw new Error("repository wiki batch operations are required");
-    if (operations.length > 256) throw new Error("repository wiki batch supports at most 256 operations");
+    if (operations.length > REPOSITORY_WIKI_BATCH_LIMIT) throw new Error(`repository wiki batch supports at most ${REPOSITORY_WIKI_BATCH_LIMIT} operations`);
 
     await this.repairDeferredCanonicalUnlocked(workspaceId, repositoryId);
     if (this.store.listRepositoryWikiStorageJobs(workspaceId, repositoryId).length) {
       throw new RepositoryWikiUnavailableError("Repository wiki storage repair is still pending");
     }
-    const before = await this.hydrateStrict(this.store.listRepositoryWikiDocs(workspaceId, repositoryId));
+    const metadata = this.store.listRepositoryWikiDocs(workspaceId, repositoryId);
+    const requiredIds = new Set(operations.flatMap((operation) => {
+      if (operation.kind === "create") return [];
+      const current = resolveBatchDocument(operation.ref, metadata);
+      if (!current) throw new Error(`repository wiki doc not found: ${operation.ref}`);
+      return [current.id];
+    }));
+    // Missing unrelated objects must not block content edits or creates.
+    // Keep their identities in the graph, but never treat an unreadable body as
+    // a successfully read empty page. Every mutated document remains strict.
+    const before = this.mode === "sql" ? metadata : await Promise.all(metadata.map((doc) =>
+      requiredIds.has(doc.id) ? this.hydrate(doc) : this.hydrateTolerant(doc)));
     const afterById = new Map(before.map((doc) => [doc.id, doc]));
     const touched = new Set<string>();
     const storeOperations: RepositoryWikiStoreBatchOperation[] = [];
@@ -321,8 +692,13 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
     }
 
     const after = [...afterById.values()];
+    // Check the normalized graph, not the presence of a path/slug input:
+    // explicitly keeping the same path remains a tolerant content update.
+    assertRepositoryWikiPathChangesReadable(before, after);
     assertUniqueRepositoryWikiPaths(after);
     assertNoIntroducedRepositoryWikiLinks(before, after);
+    assertRepositoryWikiLogHistory(before, after, internal);
+    this.operationSignal?.throwIfAborted();
     if (this.mode === "sql") return this.store.applyRepositoryWikiBatch(storeOperations);
     return this.applyOpenVikingBatch(workspaceId, repositoryId, storeOperations, afterById);
   }
@@ -372,11 +748,11 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
     let snapshotOid: string | null = null;
     let stored: RepositoryWikiBatchResult[];
     try {
-      for (const entry of staged) {
+      await forEachStorageEntry(staged, async (entry) => {
         await this.ensureUriDirectories(storageRootUri, entry.uri);
         await client.create(entry.uri, storageRootUri, entry.content);
         await client.setTags(entry.uri, repositoryWikiRetrievalTags(entry.doc));
-      }
+      });
       if (staged.length) {
         snapshotOid = requireSnapshot(await client.commit(`repository_wiki_batch:${batchId}`, stagedUris));
       }
@@ -395,6 +771,7 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
           ? { ...operation, control }
           : { ...operation, control };
       });
+      this.operationSignal?.throwIfAborted();
       stored = this.store.applyRepositoryWikiBatch(controlled, storageJob).map((result) => ({
         ...result,
         doc: result.kind === "delete"
@@ -471,8 +848,8 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
     if (!currentJob) return false;
     job = currentJob;
     const abort = new AbortController();
-    const deadline = setTimeout(() => abort.abort(), 60_000);
-    const scopedSignal = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
+    const deadline = setTimeout(() => abort.abort(new RepositoryWikiUnavailableError("Repository wiki storage job deadline exceeded")), this.storageJobTimeoutMs);
+    const scopedSignal = AbortSignal.any([abort.signal, ...[signal, this.operationSignal].filter((value): value is AbortSignal => Boolean(value))]);
     const assertLease = () => {
       scopedSignal.throwIfAborted();
       if (!this.store.renewRepositoryWikiStorageJob(job.id, token, until())) {
@@ -482,14 +859,16 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
     };
     const renewal = setInterval(() => { try { assertLease(); } catch { abort.abort(); } }, 20_000);
     const baseClient = this.requireClient();
-    const client = baseClient.withSignal?.(scopedSignal) ?? baseClient;
+    const client = deadlineClient(baseClient, scopedSignal);
     const rootUri = repositoryWikiRootUri(job.workspaceId, job.repositoryId);
     const storageRootUri = repositoryWikiStorageRootUri(job.workspaceId, job.repositoryId);
     const previousCanonical = new Map<string, string | null>();
     let phase = job.state;
     try {
       if (phase === "pending") {
-        const entries = await Promise.all(job.manifest.promotions.map(async (promotion) => {
+        // The manifest contains only unfinished promotions. Each checkpoint
+        // atomically advances doc/revision pointers and removes its entries.
+        const entries = job.manifest.promotions.map((promotion) => {
           if (!isRepositoryWikiStagingUri(storageRootUri, promotion.stagedUri)) {
             throw new RepositoryWikiUnavailableError(`Invalid Repository Wiki staging URI for ${promotion.docId}`);
           }
@@ -499,41 +878,45 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
           if (promotion.finalUri !== expectedFinalUri) {
             throw new RepositoryWikiUnavailableError(`Invalid Repository Wiki final URI for ${promotion.docId}`);
           }
-          const content = await client.read(promotion.stagedUri);
-          if (sha256Text(content) !== promotion.contentSha256) {
-            throw new RepositoryWikiUnavailableError(`Repository wiki checksum mismatch for ${promotion.docId}`);
-          }
-          return { doc, content, ...promotion };
-        }));
+          return { doc, ...promotion };
+        });
 
-        for (const entry of entries) {
+        for (let offset = 0; offset < entries.length; offset += PROMOTION_CHECKPOINT_SIZE) {
+          const chunk = entries.slice(offset, offset + PROMOTION_CHECKPOINT_SIZE);
+          await forEachStorageEntry(chunk, async (entry) => {
+            assertLease();
+            const content = await client.read(entry.stagedUri);
+            if (sha256Text(content) !== entry.contentSha256) {
+              throw new RepositoryWikiUnavailableError(`Repository wiki checksum mismatch for ${entry.docId}`);
+            }
+            await this.ensureUriDirectories(rootUri, entry.finalUri, client);
+            const exists = await client.exists(entry.finalUri);
+            const previous = exists ? await client.read(entry.finalUri) : null;
+            previousCanonical.set(entry.finalUri, previous);
+            if (previous === null) {
+              await client.create(entry.finalUri, rootUri, content);
+            } else if (previous !== content) {
+              await client.replace(entry.finalUri, rootUri, content, sha256Text(previous));
+            }
+            await client.setTags(entry.finalUri, repositoryWikiRetrievalTags(entry.doc));
+          });
+
+          const snapshotOid = requireSnapshot(await client.commit(
+            `repository_wiki_batch:${job.batchId}:promote`, chunk.map(entry => entry.finalUri),
+          ));
           assertLease();
-          await this.ensureUriDirectories(rootUri, entry.finalUri);
-          const exists = await client.exists(entry.finalUri);
-          const previous = exists ? await client.read(entry.finalUri) : null;
-          previousCanonical.set(entry.finalUri, previous);
-          if (previous === null) {
-            await client.create(entry.finalUri, rootUri, entry.content);
-          } else {
-            await client.replace(entry.finalUri, rootUri, entry.content, sha256Text(previous));
-          }
-          await client.setTags(entry.finalUri, repositoryWikiRetrievalTags(entry.doc));
+          this.store.finalizeRepositoryWikiBatchStorage(chunk.map((entry) => ({
+            docId: entry.docId,
+            version: entry.version,
+            control: { contentUri: entry.finalUri, contentSha256: entry.contentSha256, snapshotOid },
+          })), job.id);
+          // Never roll back a durable checkpoint when a later chunk fails.
+          previousCanonical.clear();
         }
-
-        const finalUris = entries.map((entry) => entry.finalUri);
-        const snapshotOid = entries.length
-          ? requireSnapshot(await client.commit(`repository_wiki_batch:${job.batchId}:promote`, finalUris))
-          : null;
-        assertLease();
-        this.store.finalizeRepositoryWikiBatchStorage(entries.map((entry) => ({
-          docId: entry.docId,
-          version: entry.version,
-          control: {
-            contentUri: entry.finalUri,
-            contentSha256: entry.contentSha256,
-            snapshotOid,
-          },
-        })), job.id);
+        if (!entries.length) {
+          assertLease();
+          this.store.finalizeRepositoryWikiBatchStorage([], job.id);
+        }
         phase = "cleanup";
       }
       if (!cleanup) return true;
@@ -619,7 +1002,7 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
   private async withWriteLock<T>(
     workspaceId: string,
     repositoryId: string,
-    operation: () => Promise<T>,
+    operation: (service: RepositoryWikiService) => Promise<T>,
   ): Promise<T> {
     const key = `${workspaceId}\u0000${repositoryId}`;
     const previous = this.writeQueues.get(key) ?? Promise.resolve();
@@ -627,12 +1010,22 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const tail = previous.then(() => gate);
     this.writeQueues.set(key, tail);
-    await previous;
+    // A queued caller can time out before the preceding writer exits. Keep
+    // that predecessor in the lane until the entire tail has actually settled.
+    void tail.then(() => { if (this.writeQueues.get(key) === tail) this.writeQueues.delete(key); });
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(new RepositoryWikiUnavailableError("Repository wiki write deadline exceeded")), this.writeTimeoutMs);
+    const scoped = new RepositoryWikiService(this.store, this.client ? deadlineClient(this.client, abort.signal) : null, this.mode, {
+      cleanupConcurrency: this.cleanupConcurrency, writeTimeoutMs: this.writeTimeoutMs, signal: abort.signal,
+      storageJobTimeoutMs: this.storageJobTimeoutMs,
+    });
     try {
-      return await operation();
+      await abortable(previous, abort.signal);
+      abort.signal.throwIfAborted();
+      return await operation(scoped);
     } finally {
+      clearTimeout(timer);
       release();
-      if (this.writeQueues.get(key) === tail) this.writeQueues.delete(key);
     }
   }
 
@@ -644,7 +1037,14 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
   }
 
   private async hydrateStrict(docs: readonly MultiremiRepositoryWikiDoc[]): Promise<MultiremiRepositoryWikiDoc[]> {
-    return this.mode === "sql" ? [...docs] : Promise.all(docs.map((doc) => this.hydrate(doc)));
+    return this.mode === "sql" ? [...docs] : Promise.all(docs.map(async (doc) => {
+      try {
+        return await this.hydrate(doc);
+      } catch (error) {
+        this.operationSignal?.throwIfAborted();
+        throw new RepositoryWikiUnavailableError(repositoryWikiHydrationError(doc, error));
+      }
+    }));
   }
 
   private async requireDoc(workspaceId: string, repositoryId: string, ref: string): Promise<MultiremiRepositoryWikiDoc> {
@@ -664,8 +1064,7 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
     return this.client;
   }
 
-  private async ensureUriDirectories(root: string, uri: string): Promise<void> {
-    const client = this.requireClient();
+  private async ensureUriDirectories(root: string, uri: string, client = this.requireClient()): Promise<void> {
     await client.ensureDirectory(root);
     const relative = uri.startsWith(`${root}/`) ? uri.slice(root.length + 1) : "";
     const parts = relative.split("/").slice(0, -1).filter(Boolean);
@@ -675,6 +1074,20 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
       await client.ensureDirectory(current);
     }
   }
+}
+
+/** Drain in-flight writers before rollback/checkpoint; stop scheduling after failure. */
+async function forEachStorageEntry<T>(entries: readonly T[], operation: (entry: T) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  let failed = false;
+  const results = await Promise.allSettled(Array.from({ length: Math.min(STORAGE_WRITE_CONCURRENCY, entries.length) }, async () => {
+    while (!failed && cursor < entries.length) {
+      const entry = entries[cursor++]!;
+      try { await operation(entry); }
+      catch (error) { failed = true; throw error; }
+    }
+  }));
+  for (const result of results) if (result.status === "rejected") throw result.reason;
 }
 
 function resolveBatchDocument(
@@ -687,6 +1100,12 @@ function resolveBatchDocument(
   if (byId) return byId;
   const path = normalizeRepositoryWikiPath(value);
   return documents.find((document) => document.path === path) ?? null;
+}
+
+function assertMigrationVersion(doc: MultiremiRepositoryWikiDoc, expected?: number): void {
+  if (expected !== undefined && (!Number.isInteger(expected) || expected !== doc.version)) {
+    throw new Error("repository wiki version conflict");
+  }
 }
 
 function assertUniqueRepositoryWikiPaths(documents: readonly MultiremiRepositoryWikiDoc[]): void {
@@ -772,5 +1191,5 @@ function parseMode(value: string | undefined): ProjectKnowledgeMode { const mode
 function requireSnapshot(value: string | null): string { if (!value) throw new RepositoryWikiUnavailableError("OpenViking snapshot commit returned no OID"); return value; }
 function repositoryWikiHydrationError(doc: MultiremiRepositoryWikiDoc, error: unknown): string {
   const detail = error instanceof Error ? error.message : String(error);
-  return `Repository wiki body unavailable for ${doc.id}: ${detail}`.slice(0, 1_000);
+  return `Repository wiki body unavailable for ${doc.id} (${doc.path}): ${detail}`.slice(0, 1_000);
 }

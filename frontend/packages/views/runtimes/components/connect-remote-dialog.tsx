@@ -38,7 +38,7 @@ type Step = "instructions" | "success";
 const SERVER_URL_PLACEHOLDER = "<SERVER_URL>";
 const WORKSPACE_ID_PLACEHOLDER = "<WORKSPACE_ID>";
 const INSTALL_CMD =
-  "curl -fsSL https://github.com/Grassgod/remi/releases/latest/download/install-remi.sh | bash";
+  "curl -fsSL https://github.com/Grassgod/Remi/releases/latest/download/install-remi.sh | bash";
 
 function normalizeCommandURL(url: string | undefined) {
   return url?.trim().replace(/\/+$/, "") ?? "";

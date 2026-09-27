@@ -42,7 +42,7 @@ import type {
 export interface AcpProviderOptions {
   /** Internal capability probes keep descendants inside the supervisor's process group. */
   inheritProcessGroup?: boolean;
-  /** Agent type: "claude" | "codex" (default: "claude"). */
+  /** Agent type: "claude" | "codex" | "grok" (default: "claude"). */
   agentType?: string;
   /** ACP executable path (auto-detected from agentType if omitted). */
   executable?: string;
@@ -60,6 +60,8 @@ export interface AcpProviderOptions {
   allowedTools?: string[];
   /** Working directory. */
   cwd?: string;
+  /** Daemon-owned directory mounted as this task execution's literal /tmp. */
+  privateTmpDirectory?: string;
   /** Inject MCP servers at construction time (ACP wire shape — see {@link McpServerConfig}). */
   getMcpServers?: () => McpServerConfig[];
   /** Extra environment variables for the spawned ACP process. */
@@ -82,6 +84,10 @@ export interface AcpAgentPluginSendOptions {
 }
 
 export interface AcpModelEffortCapability {
+  /** Missing selectors are unknown; an advertised empty selector is unsupported. */
+  status?: "supported" | "unsupported" | "unknown" | "error";
+  /** Concrete default reported after selecting this model, if available. */
+  defaultLevel?: string;
   supportedLevels: Array<{
     value: string;
     label: string;
@@ -95,7 +101,25 @@ export interface AcpModelCapability {
   label: string;
   description?: string;
   default: boolean;
+  /** The bridge's default selector state, not a guessed concrete model. */
+  providerDefault?: boolean;
   effort?: AcpModelEffortCapability;
+}
+
+/** Codex cannot run an explicitly selected model on a different, previously active model. */
+export class UnsupportedAcpModelError extends Error {
+  readonly code = "acp_model_unsupported";
+
+  constructor(
+    readonly agentType: string,
+    readonly model: string,
+    readonly supportedModels: string[],
+    readonly selectedModel?: string | null,
+  ) {
+    super(`[acp_model_unsupported] ${agentType}: cannot select model "${model}" ` +
+      `(selected: ${selectedModel ?? "unknown"}; available: ${supportedModels.join(", ") || "none"})`);
+    this.name = "UnsupportedAcpModelError";
+  }
 }
 
 /** A caller explicitly requested an effort value the selected model does not advertise. */
@@ -127,6 +151,7 @@ const DEFAULT_PERMISSION_MODE_BY_AGENT: Record<string, string | null> = {
   // `agent-full-access`. Without an entry here an unconfigured codex chat
   // stayed in codex's own initial mode and prompted for every tool call.
   codex: "bypassPermissions",
+  grok: "bypassPermissions",
 };
 const REMI_CLAUDE_AGENT_ACP_WRAPPER = "remi-claude-agent-acp";
 
@@ -257,8 +282,8 @@ export function resolveAvailableAcpPermissionMode(
  * The `session/set_config_option` call for a requested select value, or null
  * when the bridge does not advertise it. Codex rejects unknown values;
  * Claude can additionally resolve full model IDs to SDK picker aliases.
- * Callers choose whether a missing value is optional (model), must be
- * resolved by Claude (1M model), or must fail (effort).
+ * Codex rejects missing explicit selections; Claude also supports SDK model
+ * IDs via session metadata and resolves explicit 1M aliases through its bridge.
  */
 export function resolveConfigOptionChange(
   configOptions: SessionConfigOption[] | undefined,
@@ -290,6 +315,38 @@ function selectConfigOption(
 
 function flattenSelectOptions(option: Extract<SessionConfigOption, { type: "select" }>): SessionConfigSelectOption[] {
   return option.options.flatMap((item) => ("options" in item ? item.options : [item]));
+}
+
+function recommendedConfigValue(option: SessionConfigOption | undefined): string | undefined {
+  const jetbrains = option?._meta?.jetbrains;
+  if (!jetbrains || typeof jetbrains !== "object") return undefined;
+  const air = (jetbrains as Record<string, unknown>).air;
+  if (!air || typeof air !== "object") return undefined;
+  const value = (air as Record<string, unknown>).recommendedValue;
+  return typeof value === "string" ? value : undefined;
+}
+
+function capabilitiesFromModelState(models: SessionModelState | undefined): AcpModelCapability[] {
+  return (models?.availableModels ?? []).map((model) => {
+    const efforts = model._meta?.reasoningEfforts ?? [];
+    return {
+      id: model.modelId,
+      label: model.name || model.modelId,
+      ...(model.description ? { description: model.description } : {}),
+      default: model.modelId === models?.currentModelId,
+      ...(efforts.length
+        ? {
+            effort: {
+              supportedLevels: efforts.map((effort) => ({
+                value: effort.value,
+                label: effort.label || effort.name || effort.value,
+                ...(effort.description ? { description: effort.description } : {}),
+              })),
+            },
+          }
+        : {}),
+    };
+  });
 }
 
 function isAcpDefaultSentinel(value: string): boolean {
@@ -340,6 +397,20 @@ export function resolveAcpExecutableForAgent(agentType: string, executable: stri
     }
 
     const pathExecutable = resolveExecutableOnPath("codex-acp");
+    if (pathExecutable) return pathExecutable;
+  }
+
+  if (agentType === "grok") {
+    const envExecutable = process.env.REMI_GROK_EXECUTABLE?.trim();
+    if (envExecutable) return envExecutable;
+
+    const grokHome = process.env.GROK_HOME?.trim() || join(homedir(), ".grok");
+    const candidates = [join(grokHome, "bin", "grok"), join(homedir(), ".grok", "bin", "grok")];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+
+    const pathExecutable = resolveExecutableOnPath("grok");
     if (pathExecutable) return pathExecutable;
   }
 
@@ -463,14 +534,19 @@ export class AcpProvider implements Provider {
 
     try {
       const modelOption = selectConfigOption(entry.configOptions, MODEL_OPTION_CATEGORY);
-      if (!modelOption) return [];
+      if (!modelOption) return capabilitiesFromModelState(entry.models);
 
       const initialModel = modelOption.currentValue;
       const models = flattenSelectOptions(modelOption).filter((model) => !isAcpDefaultSentinel(model.value));
+      if (isAcpDefaultSentinel(initialModel)) {
+        models.unshift({ value: initialModel, name: "Default" });
+      }
       const discovered: AcpModelCapability[] = [];
 
       for (const model of models) {
-        if (currentConfigValue(entry.configOptions, MODEL_OPTION_CATEGORY) !== model.value) {
+        const previousEffort = currentConfigValue(entry.configOptions, EFFORT_OPTION_CATEGORY);
+        const modelChanged = currentConfigValue(entry.configOptions, MODEL_OPTION_CATEGORY) !== model.value;
+        if (modelChanged) {
           await this._setConfigOption(entry, MODEL_OPTION_CATEGORY, model.value);
         }
 
@@ -478,22 +554,29 @@ export class AcpProvider implements Provider {
         const effortLevels = effortOption
           ? flattenSelectOptions(effortOption).filter((level) => !isAcpDefaultSentinel(level.value))
           : [];
+        // Recent Codex bridges preserve the prior effort when both models
+        // support it. Prefer their recommendation; unchanged currentValue
+        // after switching is not evidence of the new model's default.
+        const recommendedEffort = recommendedConfigValue(effortOption);
+        const defaultEffort = recommendedEffort
+          ?? (!modelChanged || effortOption?.currentValue !== previousEffort ? effortOption?.currentValue : undefined);
         discovered.push({
           id: model.value,
           label: model.name || model.value,
           ...(model.description ? { description: model.description } : {}),
           default: model.value === initialModel,
-          ...(effortLevels.length
-            ? {
-                effort: {
-                  supportedLevels: effortLevels.map((level) => ({
-                    value: level.value,
-                    label: level.name || level.value,
-                    ...(level.description ? { description: level.description } : {}),
-                  })),
-                },
-              }
-            : {}),
+          ...(isAcpDefaultSentinel(model.value) ? { providerDefault: true } : {}),
+          effort: {
+            status: !effortOption ? "unknown" : effortLevels.length ? "supported" : "unsupported",
+            ...(defaultEffort && effortLevels.some((level) => level.value === defaultEffort)
+              ? { defaultLevel: defaultEffort }
+              : {}),
+            supportedLevels: effortLevels.map((level) => ({
+              value: level.value,
+              label: level.name || level.value,
+              ...(level.description ? { description: level.description } : {}),
+            })),
+          },
         });
       }
 
@@ -594,7 +677,11 @@ export class AcpProvider implements Provider {
       .prompt(entry.acpSessionId, message, buildMediaContent(options?.media))
       .then((result: PromptResult) => {
         promptDone = true;
-        this._lastResponse = buildAgentResponse(entry, result, this._adapter.promptUsageSettleScope);
+        const normalized = this._adapter.normalizePromptResult?.(result);
+        if (normalized?.model !== undefined) entry.promptState.usage.model = normalized.model;
+        if (normalized?.costUsd != null) entry.promptState.usage.costUsd = normalized.costUsd;
+        const responseResult = normalized?.usage !== undefined ? { ...result, usage: normalized.usage } : result;
+        this._lastResponse = buildAgentResponse(entry, responseResult, this._adapter.promptUsageSettleScope);
         if (result.stopReason === "cancelled" || result.stopReason === "interrupted") {
           promptError = new Error("Cancelled");
         }
@@ -665,6 +752,7 @@ export class AcpProvider implements Provider {
       const child = spawn(launch.executable, launch.args, {
         stdio: ["ignore", "ignore", "pipe"],
         windowsHide: true,
+        env: { ...process.env, ...this._options.env },
       });
       child.stderr?.on("data", (chunk) => {
         if (stderr.length < 2000) stderr += String(chunk);
@@ -768,6 +856,9 @@ export class AcpProvider implements Provider {
       if (this._options.apiKey) env.ANTHROPIC_API_KEY = this._options.apiKey;
       if (this._options.baseUrl) env.ANTHROPIC_BASE_URL = this._options.baseUrl;
     }
+    if (this._adapter.agentType === "grok" && this._options.apiKey) {
+      env.XAI_API_KEY = this._options.apiKey;
+    }
     if (this._options.env) Object.assign(env, this._options.env);
     if (codexHome) env.CODEX_HOME = codexHome;
 
@@ -776,8 +867,17 @@ export class AcpProvider implements Provider {
       claudeSettings: this._options.claudeSettings,
       allowedTools: options?.allowedTools ?? this._options.allowedTools,
       systemPrompt: options?.systemPrompt,
+      permissionMode,
       pluginPaths,
     } as Parameters<AgentAdapter["buildSessionMeta"]>[0]);
+
+    const initializeMeta = this._adapter.buildInitializeMeta?.({
+      model,
+      allowedTools: options?.allowedTools ?? this._options.allowedTools,
+      systemPrompt: options?.systemPrompt,
+      permissionMode,
+      pluginPaths,
+    });
 
     const client = new AcpClient({
       inheritProcessGroup: this._options.inheritProcessGroup,
@@ -786,9 +886,10 @@ export class AcpProvider implements Provider {
         this._options.executable,
         this._adapter.defaultExecutable(),
       ),
-      args: this._options.args,
+      args: this._adapter.buildLaunchArgs?.(this._options.args ?? []) ?? this._options.args,
       agentType: this._adapter.agentType,
       cwd,
+      privateTmpDirectory: this._options.privateTmpDirectory,
       env,
       onPermissionRequest: (params) => this._handlePermission(params),
       onElicitationRequest: (params) => this._handleElicitation(params),
@@ -802,7 +903,14 @@ export class AcpProvider implements Provider {
     this._startingClients.add(client);
     try {
       await client.start();
-      const initializeResult = await client.initialize();
+      const initializeResult = await client.initialize(initializeMeta);
+      const authentication = this._adapter.selectAuthentication?.(
+        initializeResult,
+        { ...(process.env as Record<string, string | undefined>), ...env },
+      );
+      if (authentication) {
+        await client.authenticate(authentication.methodId, authentication.meta);
+      }
 
       // Official field when the agent advertises it, `_meta.additionalRoots`
       // otherwise — both pinned bridges read the meta form as the compatibility
@@ -815,7 +923,9 @@ export class AcpProvider implements Provider {
       const additionalDirectories = officialAddDirs ? addDirs : undefined;
 
       const result = options?.sessionId
-        ? await client.resumeSession(options.sessionId, cwd, mcpServers, { additionalDirectories, _meta: meta })
+        ? this._adapter.sessionRestoreMethod === "load"
+          ? await client.loadSession(options.sessionId, cwd, mcpServers)
+          : await client.resumeSession(options.sessionId, cwd, mcpServers, { additionalDirectories, _meta: meta })
         : await client.newSession({ cwd, mcpServers, additionalDirectories, _meta: meta });
 
       const entry: PoolEntry = {
@@ -853,7 +963,7 @@ export class AcpProvider implements Provider {
     entry.modes = result.modes;
     entry.configOptions = result.configOptions;
     entry.models = result.models;
-    entry.appliedModel = currentConfigValue(result.configOptions, MODEL_OPTION_CATEGORY);
+    entry.appliedModel = currentConfigValue(result.configOptions, MODEL_OPTION_CATEGORY) ?? result.models?.currentModelId ?? null;
     entry.appliedEffort = currentConfigValue(result.configOptions, EFFORT_OPTION_CATEGORY);
   }
 
@@ -884,6 +994,9 @@ export class AcpProvider implements Provider {
   }
 
   private async _applyMode(entry: PoolEntry, permissionMode: string | null): Promise<void> {
+    // Grok fixes always-approve per session through session/new._meta.yoloMode;
+    // its advertised modes are prompt modes, not Remi permission modes.
+    if (this._adapter.sessionPermissionModeMethod === "session-meta") return;
     const effectiveMode = resolveAvailableAcpPermissionMode(permissionMode, entry.modes, this._adapter);
     // Report a translation or a skip once per session, not once per turn.
     if (effectiveMode !== permissionMode && permissionMode !== entry.warnedPermissionMode) {
@@ -903,11 +1016,17 @@ export class AcpProvider implements Provider {
   }
 
   /**
-   * Model first, then effort: changing the model resets the effort to the new
-   * model's default and rewrites the effort option's valid values
-   * (claude-agent-acp dist/acp-agent.js:4084-4100, codex-acp dist/index.js:29369-29374).
+   * Model first, then effort: switching rewrites the valid effort values and
+   * may reset or retain the current effort, depending on the bridge.
    */
   private async _applyModelAndEffort(entry: PoolEntry, model: string | null, effort: string | null): Promise<void> {
+    if (
+      this._adapter.modelSelectionMethod === "set-model" &&
+      !selectConfigOption(entry.configOptions, MODEL_OPTION_CATEGORY)
+    ) {
+      await this._applyExtendedModelAndEffort(entry, model, effort);
+      return;
+    }
     if (model && model !== entry.appliedModel) {
       if (await this._setConfigOption(entry, MODEL_OPTION_CATEGORY, model)) {
         entry.appliedModel = model;
@@ -938,11 +1057,57 @@ export class AcpProvider implements Provider {
       if (requestedEffort === entry.appliedEffort) return;
       const result = await entry.client.setConfigOption(entry.acpSessionId, option.id, requestedEffort);
       if (result?.configOptions) entry.configOptions = result.configOptions;
+      if (this._adapter.agentType === "codex"
+        && currentConfigValue(entry.configOptions, EFFORT_OPTION_CATEGORY) !== requestedEffort) {
+        throw new Error(`[acp_effort_unacknowledged] ${this._adapter.agentType}: the agent did not select effort "${requestedEffort}"`);
+      }
       entry.appliedEffort = requestedEffort;
     }
   }
 
+  private async _applyExtendedModelAndEffort(
+    entry: PoolEntry,
+    model: string | null,
+    effort: string | null,
+  ): Promise<void> {
+    const requestedModel = model?.trim() || entry.models?.currentModelId || entry.appliedModel;
+    const requestedEffort = effort?.trim() || null;
+    if (!requestedModel) {
+      if (requestedEffort) {
+        throw new UnsupportedAcpEffortError(this._adapter.agentType, null, requestedEffort, []);
+      }
+      return;
+    }
+
+    const catalog = entry.models?.availableModels ?? [];
+    const selected = catalog.find((item) => item.modelId === requestedModel);
+    if (model && catalog.length > 0 && !selected) {
+      console.warn(`[acp] ${this._adapter.agentType}: skipping model="${requestedModel}" — the agent does not offer it`);
+      return;
+    }
+
+    const effortLevels = selected?._meta?.reasoningEfforts ?? [];
+    const supported = effortLevels.map((item) => item.value);
+    if (requestedEffort && !supported.includes(requestedEffort)) {
+      throw new UnsupportedAcpEffortError(this._adapter.agentType, requestedModel, requestedEffort, supported);
+    }
+
+    if (requestedModel === entry.appliedModel && requestedEffort === entry.appliedEffort) return;
+    await entry.client.setModel(
+      entry.acpSessionId,
+      requestedModel,
+      requestedEffort ? { reasoningEffort: requestedEffort } : undefined,
+    );
+    entry.appliedModel = requestedModel;
+    entry.appliedEffort = requestedEffort ?? effortLevels.find((item) => item.default)?.value ?? null;
+    if (entry.models) entry.models = { ...entry.models, currentModelId: requestedModel };
+  }
+
   private async _setConfigOption(entry: PoolEntry, category: string, value: string): Promise<boolean> {
+    const option = selectConfigOption(entry.configOptions, category);
+    if (option?.currentValue === value) return true;
+    if (!option && category === MODEL_OPTION_CATEGORY
+      && entry.models?.currentModelId.replace(/\[[^\]]*\]$/, "") === value) return true;
     const claudeOneMillion = this._adapter.agentType === "claude"
       && category === MODEL_OPTION_CATEGORY && hasOneMillionContext(value);
     let change = resolveConfigOptionChange(entry.configOptions, category, value);
@@ -956,10 +1121,19 @@ export class AcpProvider implements Provider {
       change = { configId: option.id, value };
     }
     if (!change) {
-      console.warn(
-        `[acp] ${this._adapter.agentType}: skipping ${category}="${value}" — the agent does not offer it`,
+      if (this._adapter.agentType !== "codex") {
+        // Claude's session metadata can already select a full SDK model ID
+        // while its picker reports an alias. Preserve that existing path;
+        // the explicit 1M resolver above still validates context selection.
+        console.warn(`[acp] ${this._adapter.agentType}: skipping ${category}="${value}" — the agent does not offer it`);
+        return false;
+      }
+      throw new UnsupportedAcpModelError(
+        this._adapter.agentType,
+        value,
+        option ? flattenSelectOptions(option).map((item) => item.value) : [],
+        currentConfigValue(entry.configOptions, MODEL_OPTION_CATEGORY) ?? entry.models?.currentModelId,
       );
-      return false;
     }
     const result = await entry.client.setConfigOption(entry.acpSessionId, change.configId, change.value);
     if (result?.configOptions) entry.configOptions = result.configOptions;
@@ -968,6 +1142,14 @@ export class AcpProvider implements Provider {
       if (!selected || !hasOneMillionContext(selected)) {
         throw new Error(`[acp_model_context_unsupported] Claude did not select ${value} (selected: ${selected ?? "unknown"})`);
       }
+    } else if (this._adapter.agentType === "codex"
+      && category === MODEL_OPTION_CATEGORY && currentConfigValue(entry.configOptions, category) !== value) {
+      throw new UnsupportedAcpModelError(
+        this._adapter.agentType,
+        value,
+        option ? flattenSelectOptions(option).map((item) => item.value) : [],
+        currentConfigValue(entry.configOptions, category),
+      );
     }
     return true;
   }

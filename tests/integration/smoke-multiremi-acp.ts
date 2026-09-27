@@ -15,7 +15,7 @@ import { MultiremiDaemon } from "@multiremi/daemon.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import type { MultiremiTaskHumanRequest } from "@multiremi/contracts/types.js";
 
-type SmokeProvider = "claude" | "codex";
+type SmokeProvider = "claude" | "codex" | "grok";
 type SmokeStatus = "passed" | "failed" | "unavailable" | "available";
 
 interface SmokeOptions {
@@ -358,10 +358,12 @@ function parseArgs(args: string[]): SmokeOptions {
   }
 
   const providers = provider === "all"
-    ? ["claude", "codex"] as SmokeProvider[]
+    ? ["claude", "codex", "grok"] as SmokeProvider[]
     : [provider as SmokeProvider];
   for (const item of providers) {
-    if (item !== "claude" && item !== "codex") throw new Error(`Unsupported provider: ${item}`);
+    if (item !== "claude" && item !== "codex" && item !== "grok") {
+      throw new Error(`Unsupported provider: ${item}`);
+    }
   }
   if (!marker.trim()) throw new Error("--marker must not be empty");
   if (!prompt.trim()) throw new Error("--prompt must not be empty");
@@ -402,11 +404,13 @@ function executableUnavailable(command: string): string | null {
 }
 
 function defaultExecutable(provider: SmokeProvider): string {
-  return provider === "claude" ? "claude-agent-acp" : "codex-acp";
+  if (provider === "claude") return "claude-agent-acp";
+  if (provider === "codex") return "codex-acp";
+  return "grok";
 }
 
 function printHelp(): void {
-  console.log(`Usage: bun run tests/integration/smoke-multiremi-acp.ts [--provider=all|claude|codex] [--allow-unavailable] [--check-only]
+  console.log(`Usage: bun run tests/integration/smoke-multiremi-acp.ts [--provider=all|claude|codex|grok] [--allow-unavailable] [--check-only]
 
 Runs a real ACP-backed Multiremi daemon smoke against a local in-memory server.
 The smoke uses a daemon token, creates one agent/task, runs the daemon once, and

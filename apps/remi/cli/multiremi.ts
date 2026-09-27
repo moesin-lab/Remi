@@ -7,7 +7,7 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, networkInterfaces } from "node:os";
 import { dirname } from "node:path";
@@ -18,9 +18,11 @@ import {
 } from "@multiremi/index.js";
 import type { MultiremiDaemonOptions } from "@multiremi/daemon.js";
 import type {
+  FeishuBotCancelCandidate,
+  FeishuBotCancelResult,
   FeishuBotSessionSnapshot,
 } from "@multiremi/contracts/types.js";
-import type { TaskStreamingHandler, TaskStreamEvent } from "@connectors/base.js";
+import type { IncomingMessage, TaskStreamingHandler, TaskStreamEvent } from "@connectors/base.js";
 import { MultiremiCliUpdateCoordinator } from "@multiremi/worker/cli-update-coordinator.js";
 import { setLogLevel } from "@shared/logger.js";
 import { multiremiVersion } from "@multiremi/version.js";
@@ -37,10 +39,12 @@ import { ensureAcpBridges, type ProvisionProvider } from "@acp/provision.js";
 import { IssueWorkspaceLifecycleLocker } from "@daemon/agent-runtime/workspace/lifecycle-lock.js";
 import {
   acquireWorkspaceSupervisorLease,
+  activeWorkspaceSupervisorPids,
   configuredMultiremiWorkspacesRoot,
   type WorkspaceSupervisorLease,
 } from "@daemon/agent-runtime/workspace/process-owner.js";
 import { type CliOptions, numberOpt, parseArgs, stringOpt } from "./multiremi/options.js";
+import { isUnknownFeishuCommand, resolveFeishuCommand, unknownCommandMessage } from "./feishu-commands.js";
 import {
   SUPPORTED_DAEMON_PROVIDERS,
   type SupportedDaemonProvider,
@@ -58,6 +62,8 @@ import {
   buildMultiremiDaemonServiceSpec,
   daemonPortFromOptions,
   multiremiDaemonPaths,
+  planDaemonRestart,
+  planSpawnedSuccessorRestart,
   runServiceCommands,
   servicePlatformFromOptions,
   shellQuote,
@@ -70,6 +76,10 @@ import { agent } from "./multiremi/commands/agent.js";
 import { issue } from "./multiremi/commands/issue.js";
 import { project } from "./multiremi/commands/project.js";
 import { memory, wiki } from "./multiremi/commands/knowledge.js";
+
+function provisionableProviders(providers: readonly SupportedDaemonProvider[]): ProvisionProvider[] {
+  return providers.filter((provider): provider is ProvisionProvider => provider === "claude" || provider === "codex");
+}
 
 export type { CliOptions } from "./multiremi/options.js";
 export type {
@@ -84,6 +94,9 @@ export {
   detectMultiremiServicePlatform,
   multiremiDaemonPaths,
   multiremiDaemonServicePath,
+  planDaemonRestart,
+  planSpawnedSuccessorRestart,
+  systemdUnitFromCgroup,
 } from "./multiremi/service.js";
 export { detectMultiremiProviders } from "./multiremi/daemon-health.js";
 
@@ -189,11 +202,10 @@ function setup(options: CliOptions, programName: string): boolean {
 
   saveMultiremiConfig(next);
   console.log(`Config saved to ${multiremiConfigPath()}`);
-  // Pre-provision ACP bridges for whichever agents the user has (no-op if absent
-  // or already present). The user only needs `claude` / `codex` themselves.
-  const provisionTargets = (next.provider && isSupportedDaemonProvider(next.provider)
+  // Claude/Codex need managed bridge packages; Grok speaks ACP natively.
+  const provisionTargets = provisionableProviders(next.provider && isSupportedDaemonProvider(next.provider)
     ? [next.provider]
-    : [...SUPPORTED_DAEMON_PROVIDERS]).filter((provider): provider is ProvisionProvider => provider === "claude" || provider === "codex");
+    : [...SUPPORTED_DAEMON_PROVIDERS]);
   ensureAcpBridges(provisionTargets, (m) => console.log(`  ${m}`));
   if (!next.token) {
     console.log("Token is not set. Run:");
@@ -315,11 +327,8 @@ export async function resolveWorkerDaemons(
   }
   const requestedProvider: SupportedDaemonProvider | null =
     explicitProvider && isSupportedDaemonProvider(explicitProvider) ? explicitProvider : null;
-  // Provision the ACP bridges for the candidate providers (install any that are
-  // missing) before the health check decides what's available — the user only
-  // needs `claude` / `codex` themselves.
-  ensureAcpBridges((requestedProvider ? [requestedProvider] : [...SUPPORTED_DAEMON_PROVIDERS])
-    .filter((provider): provider is ProvisionProvider => provider === "claude" || provider === "codex"));
+  // Provision only external bridges; Grok's CLI is itself the ACP executable.
+  ensureAcpBridges(provisionableProviders(requestedProvider ? [requestedProvider] : [...SUPPORTED_DAEMON_PROVIDERS]));
   const providers = await resolveHealthyDaemonProviders(requestedProvider);
   if (providers.length === 0) return [];
 
@@ -405,13 +414,41 @@ export function instantiateCoResidentWorkerDaemons(
   });
 }
 
+/** Each provider can own the transport; the control plane selects one Runtime
+ * and waits for the previous owner to stop before allowing a handover. Handles
+ * must remain per Runtime so an idle sibling cannot stop the active channel. */
+export function attachControlPlaneConciergeHosts(
+  daemons: readonly MultiremiDaemon[],
+  deps: { workspacesRoot: () => string | undefined; boot?: typeof bootFeishuChannel },
+): () => Promise<void> {
+  const stops = daemons.map((daemon) => {
+    let channel: FeishuChannelHandle | null = null;
+    const host = controlPlaneConciergeHost({
+      daemon: () => daemon,
+      workspacesRoot: deps.workspacesRoot,
+      current: () => channel,
+      attach: (handle) => { channel = handle; },
+      boot: deps.boot,
+    });
+    daemon.setFeishuConciergeHost(host);
+    return async () => {
+      // Report stopped before the process disappears so handovers need not
+      // wait for the old owner's heartbeat to become stale.
+      await daemon.shutdownFeishuConcierge();
+      await host.stop();
+    };
+  });
+  let stopping: Promise<void> | null = null;
+  return () => stopping ??= Promise.all(stops.map(stop => stop())).then(() => {});
+}
+
 async function runDaemonForeground(options: CliOptions, programName: string): Promise<void> {
+  if (!options.once && restartUnitIfSpawnedSuccessor()) process.exit(0);
   let workspaceSupervisor: WorkspaceSupervisorLease | null = acquireWorkspaceSupervisorLease(
     configuredMultiremiWorkspacesRoot(),
     { basePort: daemonPortFromOptions(options) },
   );
   let daemons: MultiremiDaemon[] = [];
-  let feishu: Awaited<ReturnType<typeof bootFeishuChannel>> | null = null;
   let stopAll = (): void => {};
   let signalsRegistered = false;
   let ownerWatch: ReturnType<typeof setInterval> | null = null;
@@ -437,18 +474,12 @@ async function runDaemonForeground(options: CliOptions, programName: string): Pr
       throw new Error(`Nothing to start: no healthy runtime provider (install/authenticate one of: ${SUPPORTED_DAEMON_PROVIDERS.join(", ")}) and Feishu is not configured.`);
     }
 
-    /**
-     * Tear down whichever concierge is running. The supervisor goes first so
-     * the control plane hears `stopped` from this Runtime before the process
-     * disappears; otherwise a workspace whose bot was moved elsewhere waits out
-     * the staleness window before the new Runtime is allowed to start.
-     */
-    const stopFeishu = async (): Promise<void> => {
-      await daemons[0]?.shutdownFeishuConcierge();
-      const handle = feishu;
-      feishu = null;
-      if (handle) await handle.stop();
-    };
+    // Install before registration so every provider advertises the capability
+    // from its first heartbeat, including Codex when Claude is also installed.
+    const stopFeishu = attachControlPlaneConciergeHosts(
+      conciergeFromControlPlane ? daemons : [],
+      { workspacesRoot: () => workspaceSupervisor?.workspaceRoot },
+    );
     stopAll = (): void => {
       for (const runtimeDaemon of daemons) runtimeDaemon.stop();
       stopFeishu().catch(() => {});
@@ -475,14 +506,6 @@ async function runDaemonForeground(options: CliOptions, programName: string): Pr
     const providerRuns = daemons.map((runtimeDaemon) => runtimeDaemon.start());
     const running: Promise<void>[] = [...providerRuns];
     try {
-      if (conciergeFromControlPlane) {
-        daemons[0]!.setFeishuConciergeHost(controlPlaneConciergeHost({
-          daemon: () => daemons[0],
-          workspacesRoot: () => workspaceSupervisor?.workspaceRoot,
-          current: () => feishu,
-          attach: (handle) => { feishu = handle; },
-        }));
-      }
       stopChannelWhenProvidersFinish(providerRuns, { stop: stopFeishu });
       await Promise.all(running);
     } catch (error) {
@@ -592,6 +615,28 @@ export function controlPlaneConciergeHost(deps: {
     async sendOutbound(delivery, options) {
       const handle = deps.current();
       if (!handle) throw new Error("Feishu concierge channel is not running");
+      if (delivery.attachments?.length) {
+        const daemon = deps.daemon();
+        if (!daemon) throw new Error("Attachment transport is unavailable");
+        let result: { messageId: string } | undefined;
+        const replyToMessageId = delivery.replyToMessageId ?? delivery.threadId ?? undefined;
+        if (delivery.body.trim()) {
+          options?.signal.throwIfAborted();
+          result = await handle.sendProactiveThreadReply({ chatId: delivery.chatId, replyToMessageId,
+            body: delivery.body, idempotencyKey: delivery.idempotencyKey });
+        }
+        for (const attachment of delivery.attachments) {
+          options?.signal.throwIfAborted();
+          const buffer = await daemon.downloadFeishuBotOutboundAttachment(delivery.id, delivery.claimToken, attachment.id);
+          options?.signal.throwIfAborted();
+          result = await handle.sendProactiveAttachment({ chatId: delivery.chatId, replyToMessageId,
+            buffer, filename: attachment.filename, contentType: attachment.contentType, signal: options?.signal,
+            // Feishu UUIDs allow at most 50 characters. Hash stable delivery and
+            // attachment IDs so retries reuse the same UUID even after a crash.
+            idempotencyKey: createHash("sha256").update(`${delivery.idempotencyKey}:${attachment.id}`).digest("hex").slice(0, 40) });
+        }
+        return result!;
+      }
       if (delivery.taskId) {
         const daemon = deps.daemon();
         if (!daemon || !options) throw new Error("Task stream transport is unavailable");
@@ -606,14 +651,19 @@ export function controlPlaneConciergeHost(deps: {
         options.signal.throwIfAborted();
         const interactionOpenId = delivery.interactionOpenId ?? delivery.presentation?.interactionOpenId ?? mentionOpenId
           ?? (delivery.presentation ? await handle.resolveProactiveMention(delivery.chatId, { mode: "group_owner" }, options.signal) : undefined);
-        return handle.streamProactiveTask(delivery.chatId, `${delivery.chatId}:thread:${delivery.threadId ?? delivery.replyToMessageId}`,
+        const threadId = delivery.threadId ?? delivery.replyToMessageId;
+        const sessionKey = threadId ? `${delivery.chatId}:thread:${threadId}` : delivery.chatId;
+        return handle.streamProactiveTask(delivery.chatId, sessionKey,
           pollFeishuTask(daemon, taskId, options.signal), {
-            taskId, displayName, signal: options.signal,
+            // `null` until the first snapshot pins the provider session, so the
+            // card opens as "刚醒来的 <agent>" instead of a bare agent name.
+            taskId, displayName, sessionId: null, signal: options.signal,
             isHumanRequestPending: requestId => daemon.isFeishuBotHumanRequestPending(taskId, requestId),
             getHumanRequest: requestId => daemon.getFeishuBotHumanRequest(taskId, requestId),
             respondHumanRequest: (requestId, response) => daemon.respondFeishuBotHumanRequest(taskId, requestId, response),
           }, {
             replyToMessageId: delivery.replyToMessageId ?? undefined,
+            receiptMessageIds: delivery.receiptMessageIds,
             mentionOpenId: mentionOpenId ?? undefined,
             durable: { idempotencyKey: delivery.idempotencyKey, messageId: delivery.resumeMessageId,
               presentation: delivery.presentation },
@@ -643,52 +693,95 @@ export function createFeishuTaskHandler(
   displayName: string,
 ): TaskStreamingHandler {
   return async (message, sessionKey, consumer) => {
-    const command = message.text.trim().toLowerCase();
-    if (command === "/new") {
+    // Commands are matched on the raw body. `message.text` carries the group
+    // speaker prefix and the quoted-reply prefix, so matching it silently made
+    // every command in a group miss and start a Task instead.
+    const rawContent = feishuMessageRawContent(message);
+    const command = resolveFeishuCommand(rawContent);
+    const replyCard = (text: string, taskId: string, name: string) => consumer(singleMessageStream(text), {
+      taskId,
+      displayName: name,
+      respondHumanRequest: async () => { throw new Error("command has no human request"); },
+    });
+    if (command && command.name === "stop") {
+      // A stop that could not be requested must say so. Letting the error escape
+      // would surface the connector's generic `**Error:** <http text>` card,
+      // which tells the user nothing about whether their Task is still running.
+      let result: FeishuBotCancelResult;
+      try {
+        result = await daemon.cancelFeishuBotSessionTask(revision, sessionKey, {
+          chatId: message.chatId,
+          senderOpenId: stringMetadata(message, "senderOpenId"),
+          target: command.args || null,
+        });
+      } catch (error) {
+        await replyCard(
+          renderFeishuStopFailure(error),
+          "feishu-command-stop",
+          displayName,
+        );
+        return;
+      }
+      await replyCard(
+        renderFeishuStopResult(result, command.args || null, displayName),
+        "feishu-command-stop",
+        result.agentName ?? displayName,
+      );
+      return;
+    }
+    if (command && command.name === "new") {
       const snapshot = await daemon.inspectFeishuBotSession(revision, sessionKey);
       await daemon.cancelFeishuBotSessionTask(revision, sessionKey);
       const reset = await daemon.resetFeishuBotSession(revision, sessionKey);
-      await consumer(singleMessageStream(reset ? "New conversation started." : "Conversation is already new."), {
-        taskId: "feishu-command-new",
-        displayName: snapshot.agentName ?? displayName,
-        respondHumanRequest: async () => { throw new Error("command has no human request"); },
-      });
+      await replyCard(
+        reset ? "已开启新对话。" : "当前已是新对话。",
+        "feishu-command-new",
+        snapshot.agentName ?? displayName,
+      );
       return;
     }
-    if (command === "/status" || command === "/chat" || command === "/sessions" || command === "/context") {
+    if (command && command.name === "status") {
       const snapshot = await daemon.inspectFeishuBotSession(revision, sessionKey);
-      await consumer(singleMessageStream(renderFeishuChatCommand(command, snapshot)), {
-        taskId: `feishu-command-${command.slice(1)}`,
-        displayName: snapshot.agentName ?? displayName,
-        respondHumanRequest: async () => { throw new Error("command has no human request"); },
-      });
+      await replyCard(
+        renderFeishuStatus(snapshot),
+        "feishu-command-status",
+        snapshot.agentName ?? displayName,
+      );
       return;
     }
-    if (command === "/cwd" || command === "/compact") {
-      await consumer(singleMessageStream(`${command} is no longer supported.`), {
-        taskId: "feishu-command-removed",
-        displayName,
-        respondHumanRequest: async () => { throw new Error("command has no human request"); },
-      });
+    // An unrecognised bare slash message is answered instead of being filed as
+    // new work. `/data00/x …` and other slash-prefixed requests keep working.
+    if (isUnknownFeishuCommand(rawContent)) {
+      await replyCard(unknownCommandMessage(rawContent), "feishu-command-unknown", displayName);
       return;
     }
 
     const externalMessageId = String(message.metadata?.messageId ?? "").trim();
     if (!externalMessageId) throw new Error("Feishu message id is missing");
+    const chatType = message.metadata?.chatType === "group" ? "group" : "p2p";
+    const threadId = String(message.metadata?.rootId ?? "").trim() || null;
+    const attachmentIds: string[] = [];
+    for (const media of message.media ?? []) {
+      if (media.mediaType === "sticker") continue;
+      const attachment = await daemon.uploadFeishuBotAttachment({ revision, externalSessionKey: sessionKey,
+        externalMessageId, fileName: media.fileName ?? "attachment.bin", contentType: media.contentType, buffer: media.buffer });
+      attachmentIds.push(attachment.id);
+    }
     const submitted = await daemon.submitFeishuBotMessage({
       revision,
       externalSessionKey: sessionKey,
       externalMessageId,
-      chatType: message.metadata?.chatType === "group" ? "group" : "p2p",
-      replyToMessageId: externalMessageId,
+      chatType,
+      replyToMessageId: chatType === "group" || threadId ? externalMessageId : null,
       senderOpenId: String(message.metadata?.senderOpenId ?? "").trim() || null,
       senderUserId: String(message.metadata?.senderUserId ?? "").trim() || null,
       senderUnionId: String(message.metadata?.senderUnionId ?? "").trim() || null,
       senderTenantKey: String(message.metadata?.senderTenantKey ?? "").trim() || null,
       senderName: String(message.metadata?.senderName ?? "").trim() || null,
       chatId: message.chatId,
-      threadId: String(message.metadata?.rootId ?? "").trim() || null,
+      threadId,
       text: message.text,
+      attachmentIds,
       deliveryMode: "native_cot_v1",
     });
     // A live Task already has the card created by its first event. The steer is
@@ -699,6 +792,7 @@ export function createFeishuTaskHandler(
     await consumer(pollFeishuTask(daemon, submitted.taskId), {
       taskId: submitted.taskId,
       displayName: submitted.agentName,
+      sessionId: null,
       getHumanRequest: requestId => daemon.getFeishuBotHumanRequest(submitted.taskId, requestId),
       respondHumanRequest: (requestId, response) =>
         daemon.respondFeishuBotHumanRequest(submitted.taskId, requestId, response),
@@ -706,40 +800,140 @@ export function createFeishuTaskHandler(
   };
 }
 
-function renderFeishuChatCommand(command: string, snapshot: FeishuBotSessionSnapshot): string {
-  const deprecatedSessionsNotice = command === "/sessions"
-    ? "Deprecated: /sessions reports the current Chat. Use /chat."
-    : null;
-  if (!snapshot.chatSessionId) {
-    return [deprecatedSessionsNotice, "No conversation has been started yet."].filter(Boolean).join("\n");
+/**
+ * Raw inbound body for command matching. The connector strips the bot mention
+ * before recording it, so `@Remi /stop` is already `/stop` here.
+ */
+function feishuMessageRawContent(message: IncomingMessage): string {
+  const raw = message.metadata?.rawContent;
+  if (typeof raw === "string" && raw.trim()) return raw;
+  return message.text ?? "";
+}
+
+function stringMetadata(message: IncomingMessage, key: string): string | null {
+  const value = message.metadata?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/**
+ * Reply card for a stop request.
+ *
+ * Only the server's answer is reported: a request that was accepted says so
+ * ("已请求停止"), and the CoT card is what turns an accepted request into the
+ * visible interrupted state. Nothing here claims a Task has already stopped.
+ */
+function renderFeishuStopResult(
+  result: FeishuBotCancelResult,
+  target?: string | null,
+  fallbackAgentName?: string | null,
+): string {
+  if (result.outcome === "cancelled") {
+    // An older server does not echo `agent_name`. Fall back to the name this
+    // handler already has rather than an English placeholder in a Chinese card.
+    const name = result.agentName ?? fallbackAgentName ?? "该 Agent";
+    const context = result.issueKey ?? result.chatTitle;
+    return `已请求停止 ${name} 的任务 ${result.taskId}${context ? `（${context}）` : ""}，CoT 会在数秒内标记为已中断。`;
   }
-  const task = snapshot.task;
-  if (command === "/chat" || command === "/sessions") {
+  if (result.outcome === "ambiguous") {
+    const listed = result.candidates
+      .map((candidate) => `- ${renderFeishuCancelCandidate(candidate)}`)
+      .join("\n");
+    const omitted = result.candidateCount - result.candidates.length;
     return [
-      deprecatedSessionsNotice,
-      `Conversation: ${snapshot.chatSessionId}`,
-      task ? `Latest task: ${task.taskId} (${task.status})` : "Latest task: none",
-    ].filter(Boolean).join("\n");
+      `你在本群还有 ${result.candidateCount} 个未结束的任务，请指定要停止哪一个：`,
+      "",
+      listed,
+      ...(omitted > 0 ? [`另有 ${omitted} 个未列出。`] : []),
+      "",
+      "发送 `/stop <task_id>` 或 `/stop <Issue key>` 停止指定任务；",
+      "或在对应话题内手动发送 `/stop`（话题内可精确定位该轮任务）。",
+    ].join("\n");
   }
-  if (command === "/context") {
-    if (!task) return `Conversation: ${snapshot.chatSessionId}\nContext usage: no task usage yet.`;
-    const input = task.usage.reduce((sum, entry) => sum + entry.inputTokens, 0);
-    const output = task.usage.reduce((sum, entry) => sum + entry.outputTokens, 0);
-    const total = task.usage.reduce(
-      (sum, entry) => sum + (
-        entry.totalTokens && entry.totalTokens > 0
-          ? entry.totalTokens
-          : entry.inputTokens + entry.outputTokens
-      ),
-      0,
-    );
-    return `Context usage: ${total} tokens (${input} input, ${output} output)`;
+  if (result.outcome === "rejected") {
+    // The card owns its wording, so echo the user's own target here rather than
+    // passing display text back from the server.
+    const reason = result.reason === "stale_assignment"
+      ? "机器人配置已变更，请重试"
+      : result.reason === "target_not_candidate"
+        ? `${target ? `${target} ` : ""}不是你在本群发起的未结束任务`
+        : "该目标不可用于停止";
+    return `没有停止任何任务：${reason}。`;
   }
+  return "当前没有正在运行的任务。";
+}
+
+/**
+ * Reply card for a stop request that never reached the server.
+ *
+ * The Task was not confirmed stopped, so the card must not imply either
+ * outcome: it reports the failure and points at the workbench, where the real
+ * state is visible.
+ */
+function renderFeishuStopFailure(error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  const reason = formatStopFailureReason(detail);
+  return `停止请求失败：${reason}。任务可能仍在运行，请到工作台确认。`;
+}
+
+/**
+ * Keep the operator-useful part of a transport error without pasting a raw
+ * English HTTP dump into the card.
+ */
+function formatStopFailureReason(detail: string): string {
+  const status = /\breturned (\d{3})\b/.exec(detail) ?? /\b(\d{3})\b/.exec(detail);
+  if (status) return `服务端返回 ${status[1]}`;
+  if (/timed? ?out/i.test(detail)) return "请求超时";
+  if (/fetch failed|ECONNREFUSED|ENOTFOUND|network/i.test(detail)) return "无法连接服务端";
+  return "服务端未确认";
+}
+
+function renderFeishuCancelCandidate(candidate: FeishuBotCancelCandidate): string {
+  const label = candidate.issueKey ?? candidate.chatTitle ?? "对话";
   return [
-    `Conversation: ${snapshot.chatSessionId}`,
-    task ? `Task: ${task.taskId}` : "Task: none",
-    task ? `Status: ${task.status}` : "Status: idle",
-    task?.workDir ? `Working directory: ${task.workDir}` : "Working directory: not created yet",
+    label,
+    candidate.taskId,
+    candidate.status,
+    formatFeishuRunningFor(candidate.startedAt),
+  ].join(" · ");
+}
+
+function formatFeishuRunningFor(startedAt: string | null): string {
+  if (!startedAt) return "已运行时长未知";
+  const started = Date.parse(startedAt);
+  if (!Number.isFinite(started)) return "已运行时长未知";
+  const minutes = Math.max(0, Math.floor((Date.now() - started) / 60_000));
+  if (minutes < 1) return "刚启动";
+  if (minutes < 60) return `已运行 ${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `已运行 ${hours} 小时`;
+  return `已运行 ${Math.floor(hours / 24)} 天`;
+}
+
+/** Chinese label for one Task status, so the card carries no English. */
+const FEISHU_STATUS_LABELS: Record<string, string> = {
+  queued: "排队中",
+  dispatched: "已派发",
+  running: "运行中",
+  waiting_local_directory: "等待本地目录",
+  awaiting_human: "等待人工",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
+/**
+ * `/status` card: the bound conversation, its latest Task, and where that Task
+ * runs. Status values are shown in Chinese; an unknown value is passed through
+ * rather than hidden.
+ */
+function renderFeishuStatus(snapshot: FeishuBotSessionSnapshot): string {
+  if (!snapshot.chatSessionId) return "还没有开始对话。";
+  const task = snapshot.task;
+  return [
+    `对话：${snapshot.chatSessionId}`,
+    task ? `任务：${task.taskId}` : "任务：无",
+    task ? `状态：${FEISHU_STATUS_LABELS[task.status] ?? task.status}` : "状态：空闲",
+    task?.workDir ? `工作目录：${task.workDir}` : "工作目录：尚未创建",
   ].join("\n");
 }
 
@@ -749,6 +943,7 @@ async function* pollFeishuTask(
   signal?: AbortSignal,
 ): AsyncGenerator<TaskStreamEvent> {
   let sinceSeq = 0;
+  let reportedSessionId: string | null = null;
   for (;;) {
     signal?.throwIfAborted();
     const messages = await daemon.listFeishuBotTaskMessages(taskId, sinceSeq);
@@ -770,6 +965,13 @@ async function* pollFeishuTask(
       }
       yield { kind: "snapshot", snapshot };
       return;
+    }
+    // The provider session is pinned before the Task finishes on a continued
+    // conversation. Surface it early so the live approval and question cards
+    // carry the same session label as the result card.
+    if (snapshot.sessionId && snapshot.sessionId !== reportedSessionId) {
+      reportedSessionId = snapshot.sessionId;
+      yield { kind: "snapshot", snapshot };
     }
     await sleep(400);
   }
@@ -1196,6 +1398,24 @@ function removeMatchingPidFile(pidPath: string, expectedPid: number): void {
 }
 
 function restartForegroundDaemonProcess(options: CliOptions, programName: string): void {
+  const plan = planDaemonRestart({
+    platform: process.platform,
+    env: process.env,
+    cgroup: process.platform === "linux" ? readCgroupOrNull() : null,
+    uid: typeof process.getuid === "function" ? process.getuid() : null,
+  });
+  if (plan.kind === "service-manager") {
+    // The unit owns this cgroup: a successor spawned here dies with us, and
+    // staying alive to avoid that would leak one idle supervisor per upgrade.
+    // Let the manager replace the whole cgroup with one process on the new
+    // binary, which also retires any pile an older release left behind.
+    const result = spawnSync(plan.command, plan.args, { stdio: "inherit" });
+    if (result.status === 0) {
+      console.error(`Multiremi daemon restarting via ${plan.command} ${plan.args.join(" ")}`);
+      process.exit(0);
+    }
+    console.error(`Multiremi daemon restart via ${plan.command} failed (${result.status ?? result.signal ?? "unknown"}); falling back to a spawned successor`);
+  }
   const spec = buildMultiremiDaemonLaunchSpec(options, programName);
   const child = spawn(spec.command, spec.args, {
     detached: true,
@@ -1204,6 +1424,63 @@ function restartForegroundDaemonProcess(options: CliOptions, programName: string
   });
   child.unref();
   console.error(`Multiremi daemon restarting with updated binary (pid ${child.pid ?? "unknown"})`);
+}
+
+/**
+ * Runs before this process claims a workspace or any task, so the only work a
+ * unit restart can interrupt here is its own startup.
+ */
+function restartUnitIfSpawnedSuccessor(): boolean {
+  const plan = planSpawnedSuccessorRestart({
+    platform: process.platform,
+    env: process.env,
+    cgroup: process.platform === "linux" ? readCgroupOrNull() : null,
+    pid: process.pid,
+    mainPid: readSystemdUserMainPid,
+    parentPid: readParentPid,
+    commandLine: readProcessCommandLine,
+    activeSupervisorPids: () => activeWorkspaceSupervisorPids(),
+  });
+  if (plan.kind === "none") return false;
+  if (plan.kind === "blocked") {
+    console.error(`Multiremi daemon runs beside ${plan.unit} main pid ${plan.mainPid}; not restarting the unit because ${plan.reason}`);
+    return false;
+  }
+  const result = spawnSync(plan.command, plan.args, { stdio: "inherit", timeout: 15_000 });
+  if (result.status === 0) {
+    console.error(`Multiremi daemon runs beside ${plan.unit} main pid ${plan.mainPid}; restarting via ${plan.command} ${plan.args.join(" ")}`);
+    return true;
+  }
+  console.error(`Multiremi daemon restart via ${plan.command} failed (${result.status ?? result.signal ?? result.error?.message ?? "unknown"}); continuing beside ${plan.unit} main pid ${plan.mainPid}`);
+  return false;
+}
+
+function readSystemdUserMainPid(unit: string): number | null {
+  const result = spawnSync("systemctl", ["--user", "show", "-p", "MainPID", "--value", unit], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 5_000,
+  });
+  if (result.status !== 0) return null;
+  const pid = Number(result.stdout.trim());
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+function readParentPid(pid: number): number | null {
+  try {
+    const ppid = Number(/^PPid:\s*(\d+)$/m.exec(readFileSync(`/proc/${pid}/status`, "utf8"))?.[1]);
+    return Number.isSafeInteger(ppid) && ppid > 0 ? ppid : null;
+  } catch {
+    return null;
+  }
+}
+
+function readProcessCommandLine(pid: number): string[] | null {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+  } catch {
+    return null;
+  }
 }
 
 async function stopDaemon(options: CliOptions, opts: { quietIfStopped?: boolean } = {}): Promise<void> {
@@ -1525,3 +1802,7 @@ async function waitForShutdown(stop: () => void): Promise<void> {
 }
 
 export const run = runMultiremi;
+
+function readCgroupOrNull(): string | null {
+  try { return readFileSync("/proc/self/cgroup", "utf8"); } catch { return null; }
+}

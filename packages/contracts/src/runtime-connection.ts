@@ -18,6 +18,19 @@ export interface RuntimeConnectionProfileInput extends RuntimeConnectionProfileC
   api_key?: string;
 }
 
+/** Preserve the discovered catalog and exact-model capabilities, keeping the configured default. */
+export function runtimeConnectionModels<T extends { id: string; label: string }>(
+  profile: RuntimeConnectionProfile,
+  provider: string,
+  models: readonly T[],
+) {
+  const reported = models.find((model) => model.id === profile.model);
+  return [
+    { ...reported, id: profile.model, label: reported?.label ?? profile.model, provider, default: true },
+    ...models.filter(model => model.id !== profile.model).map(model => ({ ...model, provider, default: false })),
+  ];
+}
+
 /** Shared by the control plane and daemon; never accept executable TOML or inline secrets. */
 export function parseRuntimeConnectionProfile(value: unknown, envPrefix: "REMI_CODEX_" | "REMI_CLAUDE_"): RuntimeConnectionProfile | null {
   if (value === null) return null;
@@ -51,4 +64,23 @@ export function parseRuntimeConnectionProfile(value: unknown, envPrefix: "REMI_C
   // Only the Runtime connects to this URL; loopback and LAN endpoints are intentional.
   return { name, base_url: url.toString().replace(/\/$/, ""), model, env_key: auth_mode === "env" ? env_key : "", auth_mode,
     ...(auth_mode === "api_key" && credential_id ? { credential_id } : {}) };
+}
+
+/** A centrally managed connection applied independently for each capability group. */
+export interface RuntimeExecutionBinding {
+  generation: string;
+  groupId: string;
+  provider: string;
+  profileId: string | null;
+  profileRevision: number | null;
+  profile: (RuntimeConnectionProfile & { auth_header?: "bearer" | "x-api-key" }) | null;
+}
+
+export interface RuntimeExecutionBindingAck {
+  generation: string;
+  groupId: string;
+  profileId: string | null;
+  profileRevision: number | null;
+  status: "ready" | "error";
+  error?: string;
 }

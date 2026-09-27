@@ -46,7 +46,6 @@ const CHAT_SESSION_SELECT = `SELECT chat.*,
 
 const log = createLogger("multiremi-store");
 
-export const CHAT_BOOTSTRAP_MAX_MESSAGES = 64;
 export const AGENT_ISSUE_UPDATE_PROMPT_LIMIT = 12;
 
 export interface PendingAgentIssueUpdateWriteResult {
@@ -58,82 +57,6 @@ export interface PendingAgentIssueUpdateBatch {
   messages: MultiremiChatMessage[];
   omittedCount: number;
 }
-export const CHAT_BOOTSTRAP_MAX_BYTES = 64 * 1024;
-export const CHAT_BOOTSTRAP_OMITTED_NOTICE = "[Earlier product chat history omitted.]";
-const CHAT_BOOTSTRAP_TRUNCATED_NOTICE = "[Message truncated.]";
-
-export interface ChatBootstrapTranscript {
-  transcript: string;
-  includedMessages: number;
-  totalMessages: number;
-  omitted: boolean;
-}
-
-export function buildChatBootstrapTranscript(
-  messages: readonly MultiremiChatMessage[],
-): ChatBootstrapTranscript {
-  const entries = messages.flatMap((message) => {
-    const body = message.body.trim();
-    return body ? [`[${message.role}]\n${body}`] : [];
-  });
-  const noticeBytes = utf8Bytes(`${CHAT_BOOTSTRAP_OMITTED_NOTICE}\n\n`);
-  const separatorBytes = utf8Bytes("\n\n");
-  const selected: string[] = [];
-  let selectedBytes = 0;
-  let omitted = false;
-
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    if (selected.length >= CHAT_BOOTSTRAP_MAX_MESSAGES) {
-      omitted = true;
-      break;
-    }
-    const separator = selected.length ? separatorBytes : 0;
-    const available = CHAT_BOOTSTRAP_MAX_BYTES - noticeBytes - selectedBytes - separator;
-    const entry = entries[index]!;
-    const entryBytes = utf8Bytes(entry);
-    if (entryBytes <= available) {
-      selected.unshift(entry);
-      selectedBytes += separator + entryBytes;
-      continue;
-    }
-    omitted = true;
-    if (!selected.length) {
-      const suffix = `\n${CHAT_BOOTSTRAP_TRUNCATED_NOTICE}`;
-      const body = truncateUtf8(entry, Math.max(0, available - utf8Bytes(suffix)));
-      selected.unshift(`${body}${suffix}`);
-    }
-    break;
-  }
-
-  if (selected.length < entries.length) omitted = true;
-  const body = selected.join("\n\n");
-  const transcript = omitted && body
-    ? `${CHAT_BOOTSTRAP_OMITTED_NOTICE}\n\n${body}`
-    : omitted
-      ? CHAT_BOOTSTRAP_OMITTED_NOTICE
-      : body;
-  return {
-    transcript,
-    includedMessages: selected.length,
-    totalMessages: entries.length,
-    omitted,
-  };
-}
-
-function utf8Bytes(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
-}
-
-function truncateUtf8(value: string, maxBytes: number): string {
-  if (maxBytes <= 0) return "";
-  const bytes = new TextEncoder().encode(value);
-  if (bytes.byteLength <= maxBytes) return value;
-  let end = Math.min(maxBytes, bytes.byteLength);
-  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
-  return new TextDecoder().decode(bytes.slice(0, end)).trimEnd();
-}
-
-
 export class ChatRepo {
   constructor(private ctx: StoreContext) {}
 
@@ -143,6 +66,9 @@ export class ChatRepo {
 
   /** Caller owns the transaction, including any accompanying Chat binding. */
   createChatSessionWithinTransaction(input: CreateChatSessionInput): MultiremiChatSession {
+    if (Object.hasOwn(input, "issueId") || Object.hasOwn(input, "issue_id")) {
+      throw new ChatValidationError("Chat sessions cannot be bound to an Issue");
+    }
     const workspaceId = input.workspaceId ?? input.workspace_id ?? "local";
     this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
     const agentId = input.agentId ?? input.agent_id;
@@ -151,20 +77,11 @@ export class ChatRepo {
     if (!agent) throw new Error(`Agent not found: ${agentId}`);
     if (agent.archivedAt) throw new Error(`Agent is archived: ${agentId}`);
     if (agent.workspaceId !== workspaceId) throw new Error("Agent belongs to another workspace");
-    const issueId = cleanOptionalString(input.issueId ?? input.issue_id);
-    const issue = issueId ? this.ctx.issues().getIssue(issueId) : null;
-    if (issueId && !issue) throw new Error(`Issue not found: ${issueId}`);
-    if (issue && issue.workspaceId !== workspaceId) throw new Error("Issue belongs to another workspace");
-    // A Chat selects its own environment even when it later links an Issue.
     const runtimeWorkspaceId = input.runtimeWorkspaceId ?? input.runtime_workspace_id ?? null;
     if (runtimeWorkspaceId) new RuntimeWorkspacesRepo(this.ctx).require(runtimeWorkspaceId, workspaceId);
-    const projectId = cleanOptionalString(input.projectId ?? input.project_id);
+    const projectId = this.validateProjectBinding(workspaceId,
+      Object.hasOwn(input, "projectId") ? input.projectId : input.project_id);
     if (projectId && runtimeWorkspaceId) throw new RuntimeWorkspaceError("Choose either a project or a runtime workspace");
-    if (projectId) {
-      const project = this.ctx.projects().getProject(projectId);
-      if (!project || project.workspaceId !== workspaceId) throw new RuntimeWorkspaceError("Project not found", 404);
-      if (project.archivedAt) throw new RuntimeWorkspaceError("Project is archived", 409);
-    }
     const id = input.id ?? createId("chat");
     if (this.getChatSession(id) || this.ctx.db.query("SELECT id FROM multiremi_tasks WHERE chat_session_id = ? LIMIT 1").get(id)) {
       throw new ChatConflictError("Chat session id has already been used");
@@ -173,15 +90,26 @@ export class ChatRepo {
     const title = input.title?.trim() || `Chat with ${agent.name}`;
     this.ctx.db.run(
       `INSERT INTO multiremi_chat_sessions (
-        project_id, runtime_workspace_id, id, workspace_id, creator_id, agent_id, issue_id, title, status, session_id, work_dir, latest_task_id,
+        project_id, runtime_workspace_id, id, workspace_id, creator_id, agent_id, title, status, session_id, work_dir, latest_task_id,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, NULL, ?, ?)`,
-      [projectId, runtimeWorkspaceId, id, workspaceId, input.creatorId ?? input.creator_id ?? "local", agentId, issue?.id ?? null, title, now, now],
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, NULL, ?, ?)`,
+      [projectId, runtimeWorkspaceId, id, workspaceId, input.creatorId ?? input.creator_id ?? "local", agentId, title, now, now],
     );
     const session = this.getChatSession(id)!;
     this.ctx.issueSessions().getOrCreateDefaultChatSession(session.id, session.creatorId);
-    if (session.issueId) this.ensureDefaultAgentIssueUpdatesChannel(session);
     return session;
+  }
+
+  private validateProjectBinding(workspaceId: string, value: unknown): string | null {
+    if (value == null) return null;
+    if (typeof value !== "string" || !value.trim()) {
+      throw new ChatValidationError("project_id must be a Project ID or null");
+    }
+    const project = this.ctx.projects().getProject(value.trim());
+    if (!project || project.workspaceId !== workspaceId || project.archivedAt) {
+      throw new ChatValidationError("Project must exist, belong to this workspace, and not be archived");
+    }
+    return project.id;
   }
 
   listChatSessions(workspaceId?: string | null, options: { creatorId?: string | null; includeArchived?: boolean } = {}): MultiremiChatSession[] {
@@ -208,38 +136,13 @@ export class ChatRepo {
     return row ? toChatSession(row) : null;
   }
 
-  bindChatSessionIssueIfUnbound(chatSessionId: string, issueId: string): {
-    session: MultiremiChatSession;
-    bound: boolean;
-  } {
-    const current = this.getChatSession(chatSessionId);
-    if (!current) throw new Error(`Chat session not found: ${chatSessionId}`);
-    const issue = this.ctx.issues().getIssue(issueId);
-    if (!issue) throw new Error(`Issue not found: ${issueId}`);
-    if (issue.workspaceId !== current.workspaceId) throw new Error("Issue belongs to another workspace");
-    if (current.issueId) return { session: current, bound: false };
-
-    const now = nowIso();
-    const updated = this.ctx.db.run(
-      `UPDATE multiremi_chat_sessions
-       SET issue_id = ?, updated_at = ?
-       WHERE id = ? AND issue_id IS NULL`,
-      [issue.id, now, current.id],
-    );
-    const session = this.getChatSession(current.id)!;
-    if (updated.changes === 0) return { session, bound: false };
-    this.ctx.db.run("UPDATE multiremi_issue_sessions SET issue_id = ?, updated_at = ? WHERE chat_id = ?", [issue.id, now, session.id]);
-    this.ctx.db.run("UPDATE multiremi_session_results SET issue_id = ? WHERE chat_id = ?", [issue.id, session.id]);
-    this.ensureDefaultAgentIssueUpdatesChannel(session);
-    this.ctx.emitChatEvent(session, "chat:session_updated", {
-      title: session.title,
-      issue_id: session.issueId,
-      updated_at: session.updatedAt,
-    });
-    return { session, bound: true };
-  }
-
   updateChatSession(id: string, input: UpdateChatSessionInput): MultiremiChatSession {
+    if (Object.hasOwn(input, "projectId") || Object.hasOwn(input, "project_id")) {
+      throw new ChatValidationError("A Chat Project can only be selected when creating the session");
+    }
+    if (Object.hasOwn(input, "issueId") || Object.hasOwn(input, "issue_id")) {
+      throw new ChatValidationError("Chat sessions cannot be bound to an Issue");
+    }
     const cancelled: CancelTaskResult[] = [];
     const updated = this.ctx.db.transaction(() => {
       const initial = this.getChatSession(id);
@@ -249,41 +152,19 @@ export class ChatRepo {
       if (!current) throw new Error(`Chat session not found: ${id}`);
       const location = input as UpdateChatSessionInput & CreateChatSessionInput;
       for (const [field, saved] of [
-        ["projectId", current.projectId], ["project_id", current.projectId],
         ["runtimeWorkspaceId", current.runtimeWorkspaceId], ["runtime_workspace_id", current.runtimeWorkspaceId],
       ] as const) {
         if (Object.hasOwn(location, field) && (location[field] ?? null) !== (saved ?? null)) {
           throw new RuntimeWorkspaceError("Chat work location is fixed; create a new Chat to change it", 409);
         }
       }
-      const issueFieldProvided = Object.hasOwn(input, "issueId") || Object.hasOwn(input, "issue_id");
-      const requestedIssueId = issueFieldProvided
-        ? cleanOptionalString(input.issueId ?? input.issue_id)
-        : current.issueId;
-      const issue = requestedIssueId ? this.ctx.issues().getIssue(requestedIssueId) : null;
-      if (requestedIssueId && !issue) throw new Error(`Issue not found: ${requestedIssueId}`);
-      if (issue && issue.workspaceId !== current.workspaceId) throw new Error("Issue belongs to another workspace");
       const now = nowIso();
-      if (issueFieldProvided && requestedIssueId !== current.issueId) {
-        this.ctx.db.run("DELETE FROM multiremi_agent_issue_update_state WHERE chat_session_id = ?", [id]);
-        this.discardPendingAgentIssueUpdatesWithinTransaction(id);
-      }
       this.ctx.db.run(
         `UPDATE multiremi_chat_sessions
-         SET title = ?, status = ?, issue_id = ?, pinned = ?, updated_at = ?
+         SET title = ?, status = ?, pinned = ?, updated_at = ?
          WHERE id = ?`,
-        [input.title?.trim() || current.title, input.status ?? current.status, issue?.id ?? null, (input.pinned ?? current.pinned) ? 1 : 0, now, id],
+        [input.title?.trim() || current.title, input.status ?? current.status, (input.pinned ?? current.pinned) ? 1 : 0, now, id],
       );
-      if (issueFieldProvided && requestedIssueId !== current.issueId) {
-        this.ctx.db.run(
-          "UPDATE multiremi_issue_sessions SET issue_id = ?, updated_at = ? WHERE chat_id = ?",
-          [issue?.id ?? null, now, id],
-        );
-        this.ctx.db.run(
-          "UPDATE multiremi_session_results SET issue_id = ? WHERE chat_id = ?",
-          [issue?.id ?? null, id],
-        );
-      }
       if (input.status === "archived") {
         for (const task of this.pendingTasks(id, { includeSessionTasks: true })) {
           cancelled.push(this.ctx.tasks().cancelTaskWithinTransaction(task.id));
@@ -291,9 +172,6 @@ export class ChatRepo {
         this.discardPendingAgentIssueUpdatesWithinTransaction(id);
       }
       const updated = this.getChatSession(id)!;
-      if (updated.issueId && !this.ctx.notificationChannels().getAgentChatNotificationChannel(updated.id)) {
-        this.ensureDefaultAgentIssueUpdatesChannel(updated);
-      }
       return updated;
     })();
     for (const result of cancelled) this.ctx.tasks().notifyCancelledTask(result);
@@ -301,7 +179,7 @@ export class ChatRepo {
       title: updated.title,
       status: updated.status,
       pinned: updated.pinned,
-      issue_id: updated.issueId,
+      project_id: updated.projectId,
       updated_at: updated.updatedAt,
     });
     return updated;
@@ -334,6 +212,24 @@ export class ChatRepo {
          )`,
         [id],
       );
+      this.ctx.db.run(
+        `UPDATE multiremi_tasks
+         SET issue_session_id = NULL, issue_session_generation = NULL
+         WHERE issue_session_id IN (
+           SELECT id FROM multiremi_issue_sessions WHERE chat_id = ?
+         )`,
+        [id],
+      );
+      this.ctx.db.run("UPDATE multiremi_tasks SET chat_session_id = NULL WHERE chat_session_id = ?", [id]);
+      this.ctx.db.run("DELETE FROM multiremi_session_results WHERE chat_id = ?", [id]);
+      for (const table of ["multiremi_session_events", "multiremi_session_participants", "multiremi_session_agent_lanes"]) {
+        this.ctx.db.run(
+          `DELETE FROM ${table} WHERE session_id IN (
+             SELECT id FROM multiremi_issue_sessions WHERE chat_id = ?
+           )`,
+          [id],
+        );
+      }
       this.ctx.db.run("DELETE FROM multiremi_issue_sessions WHERE chat_id = ?", [id]);
       const deleted = this.ctx.db.run("DELETE FROM multiremi_chat_sessions WHERE id = ?", [id]).changes > 0;
       return { current, cancelled, deleted };
@@ -465,6 +361,28 @@ export class ChatRepo {
     return rows.map(toChatMessage);
   }
 
+  listChatMessagesPage(chatSessionId: string, options: {
+    limit: number;
+    before?: { id: string; createdAt: string };
+  }): { messages: MultiremiChatMessage[]; hasMore: boolean } {
+    const { limit, before } = options;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new ChatValidationError("invalid limit");
+    // The public cursor predates sequence ordering. Resolve its position in this
+    // session rather than comparing timestamps (which may tie or go backwards).
+    const cursor = before ? this.ctx.db.query(
+      "SELECT sequence, id FROM multiremi_chat_messages WHERE chat_session_id = ? AND id = ? AND created_at = ?",
+    ).get(chatSessionId, before.id, before.createdAt) as Row | null : null;
+    if (before && !cursor) throw new ChatValidationError("invalid cursor");
+    const rows = this.ctx.db.query(
+      `SELECT * FROM multiremi_chat_messages WHERE chat_session_id = ?
+       ${cursor ? "AND (sequence, id) < (?, ?)" : ""}
+       ORDER BY sequence DESC, id DESC LIMIT ?`,
+    ).all(...(cursor
+      ? [chatSessionId, cursor.sequence, cursor.id, limit + 1]
+      : [chatSessionId, limit + 1])) as Row[];
+    return { messages: rows.slice(0, limit).reverse().map(toChatMessage), hasMore: rows.length > limit };
+  }
+
   appendChatMessageWithinTransaction(input: {
     id?: string;
     chatSessionId: string;
@@ -510,7 +428,9 @@ export class ChatRepo {
   buildTaskSessionProjection(taskId: string): MultiremiSessionProjection | null {
     return this.ctx.db.transaction(() => {
       const task = this.ctx.tasks().getTask(taskId);
-      if (!task?.chatSessionId || task.issueSessionId) return null;
+      if (!task?.chatSessionId) return null;
+      const topicIssueId = this.ctx.feishuBot().getFeishuIssueIdForChatSession(task.chatSessionId);
+      if (task.issueSessionId && topicIssueId) return null;
       const session = this.getChatSession(task.chatSessionId);
       if (!session) return null;
       const agent = this.ctx.agents().getAgent(task.agentId);
@@ -521,7 +441,12 @@ export class ChatRepo {
         return source?.status !== "queued";
       });
       const events = chatMessagesAsSessionEvents(messages, session, task.id, currentLineageTaskIds);
-      const warmProviderSessionId = task.sessionId;
+      const detachedChatIssue = (task.issueId && topicIssueId !== task.issueId)
+        || (task.issueSessionId && !topicIssueId);
+      // Workspace validation may reject an active lease's old directory without
+      // mutating its immutable execution snapshot. Projection must use that
+      // same live decision, otherwise a cold provider receives only a delta.
+      const warmProviderSessionId = detachedChatIssue ? null : this.ctx.tasks().getTaskWithAgent(task.id)?.sessionId ?? null;
       const tokenBudget = resolveProjectionTokenBudget({
         provider: agent?.provider,
         model: agent?.model,
@@ -579,6 +504,8 @@ export class ChatRepo {
       const task = this.ctx.tasks().createTaskWithinTransaction({
         agentId: session.agentId,
         chatSessionId: session.id,
+        // Issue ownership belongs to the Feishu transport binding, never Chat.
+        issueId: this.ctx.feishuBot().getFeishuIssueIdForChatSession(session.id),
         workspaceId: session.workspaceId,
         holdsWorkspace: false,
         prompt: body,
@@ -712,17 +639,7 @@ export class ChatRepo {
     return row ? toChatMessage(row) : null;
   }
 
-  private ensureDefaultAgentIssueUpdatesChannel(session: MultiremiChatSession): void {
-    const member = this.ctx.workspaces().findWorkspaceMemberForUser(session.creatorId, session.workspaceId);
-    this.ctx.notificationChannels().upsertAgentChatNotificationChannel({
-      workspaceId: session.workspaceId,
-      chatSessionId: session.id,
-      name: `${session.title} Issue updates`,
-      enabled: true,
-      memberId: member?.id ?? null,
-      createdBy: session.creatorId,
-    });
-  }
+
 }
 
 function chatTaskLineageIds(ctx: StoreContext, task: MultiremiTask): Set<string> {
@@ -776,13 +693,12 @@ function chatMessagesAsSessionEvents(
 
 function toChatSession(row: Row): MultiremiChatSession {
   return {
-    projectId: nullableString(row.project_id),
     runtimeWorkspaceId: nullableString(row.runtime_workspace_id),
     id: String(row.id),
     workspaceId: String(row.workspace_id ?? "local"),
     creatorId: nullableString(row.creator_id) ?? "local",
     agentId: String(row.agent_id),
-    issueId: nullableString(row.issue_id),
+    projectId: nullableString(row.project_id),
     title: String(row.title ?? ""),
     status: String(row.status ?? "active") as MultiremiChatSession["status"],
     sessionId: nullableString(row.session_id),

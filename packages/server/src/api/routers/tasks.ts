@@ -1,10 +1,12 @@
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { assertRuntimeWorkspaceAccess } from "../helpers/runtime-workspaces.js";
 import {
   canCurrentUserAccessAgent,
   canCurrentUserAccessChatTask,
   canUserViewTaskMessages,
+  createTaskAuthMemo,
   currentTaskParentId,
+  currentUserWorkspaceAccessAllowed,
   denyCurrentUserWorkspaceAccess,
   loadChatSessionForCurrentUser,
   organizerTaskInspection,
@@ -17,22 +19,36 @@ import {
   authenticatedRequestUserId,
   cleanString,
   currentTaskAccessToken,
+  parseOptionalInt,
   taskCompatibilityResponse,
+  taskListResponse,
   taskPublicResponse,
 } from "../wire/index.js";
-import type { CreateTaskInput, MultiremiTask } from "@multiremi/contracts/types.js";
+import type { CreateTaskInput, MultiremiTask, MultiremiTaskStatus } from "@multiremi/contracts/types.js";
+import type { TaskListCandidate, TaskListCursor } from "@multiremi/store/repos/tasks-repo.js";
 import { createId } from "@multiremi/ids.js";
-import { TaskSteerConflictError } from "@multiremi/store/repos/tasks-repo.js";
+import { ChatIssueTaskConflictError, TaskSteerConflictError } from "@multiremi/store/repos/tasks-repo.js";
 import { OrganizerActionError } from "../../organizer/settings.js";
 import type { RouterDeps } from "./deps.js";
 
+/**
+ * MUL-357: the global task list defaults to a bounded page. An unbounded call
+ * used to serialize the whole table; the ceiling is deliberate so that
+ * "no --limit" still returns promptly. Authorization still decides *which*
+ * tasks fill the page, never how many rows are read.
+ */
+const TASK_LIST_DEFAULT_LIMIT = 100;
+const TASK_LIST_MAX_LIMIT = 500;
+const TASK_LIST_CHUNK_SIZE = 200;
+
+function clampTaskListLimit(value: number | undefined): number {
+  if (value == null || value <= 0) return TASK_LIST_DEFAULT_LIMIT;
+  return Math.min(value, TASK_LIST_MAX_LIMIT);
+}
+
 export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
-  // Preserve the existing Feishu coordinator handoff after Session Tasks gain
-  // their owning chat_session_id. This is deliberately limited to same-Chat,
-  // same-Issue task metadata/control; ordinary Chat message routing and queue
-  // behavior remain separate (MUL-3).
-  const canCoordinateOwnedSessionTask = (c: any, target: MultiremiTask): boolean => {
+  const canCoordinateOwnedSessionTask = (c: Context, target: MultiremiTask): boolean => {
     if (canCurrentUserAccessChatTask(c, store, target)) return true;
     const taskToken = currentTaskAccessToken(c);
     const source = taskToken?.taskId ? store.getTask(taskToken.taskId) : null;
@@ -46,18 +62,88 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
       && source.issueId === target.issueId,
     );
   };
+  const denySideSessionDispatch = (c: Context): Response | null => {
+    const sourceTaskId = currentTaskAccessToken(c)?.taskId;
+    const sourceTask = sourceTaskId ? store.getTask(sourceTaskId) : null;
+    const sourceSession = sourceTask?.issueSessionId ? store.getIssueSession(sourceTask.issueSessionId) : null;
+    // The source credential governs both ordinary dispatch and supervisor
+    // redispatch, regardless of the caller-selected target or delegation fields.
+    return sourceSession && sourceSession.inheritMode !== "none"
+      ? c.json({ error: "Agent delegation is not allowed from side sessions" }, 403)
+      : null;
+  };
 
   app.get("/api/multiremi/tasks", (c) => {
-    const status = c.req.query("status") as any;
+    const status = c.req.query("status") as MultiremiTaskStatus | undefined;
+    const limit = clampTaskListLimit(parseOptionalInt(c.req.query("limit")));
+    const offset = Math.max(0, parseOptionalInt(c.req.query("offset")) ?? 0);
     const taskToken = currentTaskAccessToken(c);
-    const tasks = store.listTasks(status).filter((task) =>
-      (taskToken?.workspaceId == null || task.workspaceId === taskToken.workspaceId)
-      && canCurrentUserAccessChatTask(c, store, task)
-    );
-    return c.json({ tasks: tasks.map(taskPublicResponse) });
+    // One memo per request: it only de-duplicates the reads the guards already
+    // perform, and it dies with the response.
+    const memo = createTaskAuthMemo();
+    const visible = (task: TaskListCandidate): boolean => {
+      const allowed = taskToken
+        ? taskToken.workspaceId == null || task.workspaceId === taskToken.workspaceId
+        : currentUserWorkspaceAccessAllowed(c, store, memo, task.workspaceId);
+      return allowed && canCurrentUserAccessChatTask(c, store, task, memo);
+    };
+
+    // `limit` is the limit of the AUTHORIZED result set, so it cannot be pushed
+    // into SQL: candidates are read in chunks and filtered one by one until the
+    // page is full or the table is exhausted. Skipping `offset` authorized rows
+    // is counted the same way, so a caller cannot use it to widen visibility.
+    // Phase one keeps ids only: a rejected candidate never gets hydrated, so the
+    // cost of scanning past an invisible task is its few guard columns, not its
+    // full `result` / `prompt` payload. Phase two loads the rows the page keeps.
+    const visibleIds: string[] = [];
+    let cursor: TaskListCursor | null = null;
+    let skipped = 0;
+    let hasMore = false;
+    for (;;) {
+      const chunk = store.listTasksChunk(status, cursor, TASK_LIST_CHUNK_SIZE);
+      for (const task of chunk.tasks) {
+        if (!visible(task)) continue;
+        if (skipped < offset) {
+          skipped += 1;
+          continue;
+        }
+        if (visibleIds.length < limit) {
+          visibleIds.push(task.id);
+          continue;
+        }
+        hasMore = true;
+        break;
+      }
+      if (hasMore) break;
+      cursor = chunk.nextCursor;
+      if (!cursor) break;
+    }
+    const tasks = store.hydrateTasksByIds(visibleIds);
+    return c.json({
+      tasks: tasks.map(taskListResponse),
+      has_more: hasMore,
+      next_offset: hasMore ? offset + tasks.length : null,
+      limit,
+      offset,
+    });
   });
   app.post("/api/multiremi/tasks", async (c) => {
+    const sideDenied = denySideSessionDispatch(c);
+    if (sideDenied) return sideDenied;
     const body = await readJson<CreateTaskInput>(c);
+    const continueTaskId = cleanString(body.continueTaskId ?? body.continue_task_id);
+    const taskToken = currentTaskAccessToken(c);
+    const sourceTask = taskToken?.taskId ? store.getTaskWithAgent(taskToken.taskId) : null;
+    const continuedTask = continueTaskId ? store.getTask(continueTaskId) : null;
+    if (continueTaskId && (!taskToken || !sourceTask)) {
+      return c.json({ error: "continuing a delegation requires a task credential" }, 403);
+    }
+    if (continueTaskId && !continuedTask) {
+      return c.json({ error: `continued task not found: ${continueTaskId}` }, 404);
+    }
+    if (continuedTask && continuedTask.workspaceId !== taskToken!.workspaceId) {
+      return c.json({ error: "continued task belongs to another workspace" }, 403);
+    }
     // Gate on the target agent: without this, any member could create a task
     // for another workspace's (private) agent and drive its machine +
     // credentials. The task always runs in the agent's workspace, so that's
@@ -95,24 +181,51 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
       holds_workspace: _holdsWorkspaceSnake,
       parentTaskId: _parentTaskId,
       parent_task_id: _parentTaskIdSnake,
+      continuedFromTaskId: _continuedFromTaskId,
+      continued_from_task_id: _continuedFromTaskIdSnake,
       issueCreationRestricted: _issueCreationRestricted,
       issue_creation_restricted: _issueCreationRestrictedSnake,
       delegationId: _delegationId,
       delegation_id: _delegationIdSnake,
       delegatedByAgentId: _delegatedByAgentId,
       delegated_by_agent_id: _delegatedByAgentIdSnake,
+      continueTaskId: _continueTaskId,
+      continue_task_id: _continueTaskIdSnake,
       assignmentSourceEventId: _assignmentSourceEventId,
       assignment_source_event_id: _assignmentSourceEventIdSnake,
       ...publicInput
     } = body;
-    const taskToken = currentTaskAccessToken(c);
-    const sourceTask = taskToken?.taskId ? store.getTask(taskToken.taskId) : null;
     const issueId = cleanString(publicInput.issueId);
     const issue = issueId ? store.getIssue(issueId) : null;
     const requestedIssueSessionId = cleanString(publicInput.issueSessionId ?? publicInput.issue_session_id);
     const inheritedIssueSessionId = requestedIssueSessionId ?? sourceTask?.issueSessionId ?? null;
+    if (continuedTask) {
+      if (!continuedTask.delegationId || !continuedTask.delegatedByAgentId
+        || continuedTask.agentId === continuedTask.delegatedByAgentId) {
+        return c.json({ error: "continued task is not a delegated task" }, 400);
+      }
+      if (agent.id !== continuedTask.agentId) {
+        return c.json({ error: "target agent does not match the continued task" }, 400);
+      }
+      if (continuedTask.delegatedByAgentId !== taskToken!.agentId) {
+        return c.json({ error: "continued task was delegated by another agent" }, 403);
+      }
+      if (!continuedTask.issueId || !continuedTask.issueSessionId) {
+        return c.json({ error: "continued task does not belong to a Session" }, 400);
+      }
+      if (sourceTask!.issueSessionId !== continuedTask.issueSessionId) {
+        return c.json({ error: "continued task belongs to another Session" }, 400);
+      }
+      if (issueId && issueId !== continuedTask.issueId) {
+        return c.json({ error: "requested issue does not match the continued task" }, 400);
+      }
+      if (requestedIssueSessionId && requestedIssueSessionId !== continuedTask.issueSessionId) {
+        return c.json({ error: "requested Session does not match the continued task" }, 400);
+      }
+    }
     const leaderDelegation = Boolean(
-      taskToken
+      !continuedTask
+      && taskToken
       && sourceTask
       && issue
       && store.isSquadLeaderDelegation({
@@ -123,10 +236,23 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
         issueSessionId: inheritedIssueSessionId,
       })
     );
+    // Keep continuation ancestry on the current Leader turn. A same-agent,
+    // same-delegation successor of the previous child is reserved for retry /
+    // self-continuation and intentionally suppresses that child's return in
+    // drainDelegationReturnsWithinWorkspaceLock. This is a new requested round,
+    // so every completed child Task must remain independently returnable.
     const createInput: CreateTaskInput = {
       ...publicInput,
       parentTaskId: currentTaskParentId(c),
-      ...(leaderDelegation
+      ...(continuedTask
+        ? {
+          issueId: continuedTask.issueId,
+          issueSessionId: continuedTask.issueSessionId,
+          continuedFromTaskId: continuedTask.id,
+          delegationId: continuedTask.delegationId,
+          delegatedByAgentId: continuedTask.delegatedByAgentId,
+        }
+        : leaderDelegation
         ? {
           issueSessionId: inheritedIssueSessionId,
           delegationId: createId("dlg"),
@@ -135,48 +261,39 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
         : {}),
     };
     assertRuntimeWorkspaceAccess(c, store, createInput.runtimeWorkspaceId ?? createInput.runtime_workspace_id, agent.workspaceId);
-    const task = store.createTask(createInput);
-    return c.json({ task: taskPublicResponse(task) }, 201);
+    try {
+      const task = store.createTask(createInput);
+      return c.json({ task: taskPublicResponse(task) }, 201);
+    } catch (error) {
+      if (error instanceof ChatIssueTaskConflictError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
   });
   app.get("/api/multiremi/tasks/:id", (c) => {
-    const task = store.getTaskWithAgent(c.req.param("id"));
+    const task = store.getTask(c.req.param("id"));
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCoordinateOwnedSessionTask(c, task)) return c.json({ error: "forbidden" }, 403);
-    return c.json({ task: taskPublicResponse(task) });
+    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
+    try {
+      return c.json({ task: taskPublicResponse(store.getTaskWithAgent(task.id)!) });
+    } catch (error) {
+      if (!(error instanceof ChatIssueTaskConflictError)) throw error;
+      // Owners can still inspect their cancelled/stale task history. Execution
+      // eligibility must not turn that read into a 500 or load another Issue.
+      return c.json({ task: taskPublicResponse({ ...task,
+        issueId: null, issueSessionId: null, issueSessionGeneration: null, sessionId: null,
+        agent: store.getAgent(task.agentId), issue: null, project: null,
+        projectResources: [], projectDocs: null, projectContexts: [], repos: [],
+      }) });
+    }
   });
   const cancelTaskRoute = async (c: any, compatibility: boolean) => {
     const task = taskFromParam(store, c, "id");
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCoordinateOwnedSessionTask(c, task)) return c.json({ error: "forbidden" }, 403);
-    const taskToken = currentTaskAccessToken(c);
-    if (taskToken?.taskId) {
-      const supervisor = supervisorTaskIdentity(c, store);
-      if (supervisor && task.id === supervisor.task.id) {
-        return c.json({ error: "a supervisor cannot act on its own task", code: "organizer_self_action_forbidden" }, 403);
-      }
-      if (supervisor && task.id !== taskToken.taskId) {
-        const body = await readJson<{ reason?: string }>(c);
-        try {
-          const result = store.performOrganizerAction({
-            supervisorTaskId: supervisor.task.id,
-            supervisorAgentId: supervisor.agentId,
-            targetTaskId: task.id,
-            action: "cancel",
-            reason: cleanString(body.reason) ?? "",
-          });
-          return compatibility
-            ? c.json({ ...taskCompatibilityResponse(result.task), organizer_action: result.audit, comment_id: result.comment.id })
-            : c.json({ task: taskPublicResponse(result.task), organizer_action: result.audit, comment_id: result.comment.id });
-        } catch (error) {
-          if (error instanceof OrganizerActionError) return c.json({ error: error.message, code: error.code }, error.status);
-          throw error;
-        }
-      }
-    }
+    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
     const cancelled = store.cancelTask(task.id);
     return compatibility
       ? c.json(taskCompatibilityResponse(cancelled))
@@ -199,30 +316,6 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const content = cleanString(body?.content)
       ?? (forceAnswer ? "Please stop exploring and deliver your best conclusion based on the work so far." : null);
     if (!content) return c.json({ error: "content is required" }, 400);
-    const taskToken = currentTaskAccessToken(c);
-    if (taskToken?.taskId) {
-      const supervisor = supervisorTaskIdentity(c, store);
-      if (supervisor && task.id === supervisor.task.id) {
-        return c.json({ error: "a supervisor cannot act on its own task", code: "organizer_self_action_forbidden" }, 403);
-      }
-      if (supervisor && task.id !== taskToken.taskId) {
-        try {
-          const result = store.performOrganizerAction({
-            supervisorTaskId: supervisor.task.id,
-            supervisorAgentId: supervisor.agentId,
-            targetTaskId: task.id,
-            action: forceAnswer ? "force_answer" : "steer",
-            reason: cleanString(body.reason) ?? "",
-            content,
-          });
-          return c.json({ message: result.message, organizer_action: result.audit, comment_id: result.comment.id }, 201);
-        } catch (error) {
-          if (error instanceof OrganizerActionError) return c.json({ error: error.message, code: error.code }, error.status);
-          if (error instanceof TaskSteerConflictError) return c.json({ error: error.message }, 409);
-          throw error;
-        }
-      }
-    }
     // Re-read after body parsing: the task may have finished while the body
     // streamed in, and the pre-parse snapshot would let a doomed insert reach
     // the store. The store's own terminal check backstops the remaining race.
@@ -267,6 +360,8 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/multiremi/tasks/:id/inspection", inspectTaskRoute);
   app.get("/api/tasks/:id/inspection", inspectTaskRoute);
   const redispatchTaskRoute = async (c: any) => {
+    const sideDenied = denySideSessionDispatch(c);
+    if (sideDenied) return sideDenied;
     const task = taskFromParam(store, c, "id");
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);

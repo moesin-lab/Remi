@@ -533,6 +533,7 @@ describe("Multiremi API — realtime websockets", () => {
     const remoteWorkspace = store.createWorkspace({ id: "ws_browser_events_remote", name: "Browser Events Remote", slug: "browser-events-remote" });
     store.createWorkspaceMember({
       id: `mem_${remoteWorkspace.id}_admin-user`,
+      userId: "admin-user",
       workspaceId: remoteWorkspace.id,
       name: "Remote Admin",
       email: "remote-admin@example.com",
@@ -857,6 +858,63 @@ describe("Multiremi API — realtime websockets", () => {
       } as any);
       await expectWebSocketRejected(remote);
     } finally {
+      server.stop(true);
+    }
+  });
+
+  it("carries the desired Plugin revision in a websocket heartbeat ack", async () => {
+    const store = createStore();
+    const runtime = store.registerRuntime({
+      id: "rt_ws_plugin_revision",
+      name: "WS plugin runtime",
+      provider: "claude",
+      workspaceId: "local",
+      daemonId: "daemon-ws-plugin",
+      metadata: { agent_plugin_protocol: 1 },
+    });
+    const agent = store.createAgent({ name: "WS plugin agent", provider: "claude", workspaceId: "local" });
+    const plugin = store.importAgentPlugin({
+      workspaceId: "local",
+      provider: "claude",
+      manifest: { name: "ws-plugin", version: "1.0.0" },
+    });
+    store.createAgentPluginBinding(agent.id, { pluginId: plugin.id });
+    const daemonToken = await store.createAccessToken({
+      workspaceId: "local",
+      daemonId: "daemon-ws-plugin",
+      name: "WS plugin daemon",
+      type: "daemon",
+    });
+    const server = startMultiremiServer({
+      store,
+      scheduler: null,
+      port: 0,
+      hostname: "127.0.0.1",
+      authToken: "root-secret",
+    });
+    // The HTTP and websocket heartbeats share one store method, so a daemon that
+    // keeps its heartbeat on the socket must get the same skip-GET token.
+    const socket = new WebSocket(
+      `ws://127.0.0.1:${server.port}/api/daemon/ws?runtime_ids=${runtime.id}`,
+      { headers: { Authorization: `Bearer ${daemonToken.token}` } } as any,
+    );
+    try {
+      expect(await nextWebSocketMessage(socket)).toMatchObject({ type: "ready", runtime_id: runtime.id });
+      socket.send(JSON.stringify({
+        type: "daemon:heartbeat",
+        payload: { runtime_id: runtime.id, agent_plugin_protocol: 1 },
+      }));
+      const ack = await nextWebSocketMessage(socket);
+      expect(ack).toMatchObject({
+        type: "daemon:heartbeat_ack",
+        payload: { runtime_id: runtime.id, status: "ok" },
+      });
+      expect(ack.payload.agent_plugins.revision).toBe(
+        store.getRuntimeAgentPluginDesiredSnapshot(runtime.id).revision,
+      );
+      expect(ack.payload.agent_plugins.revision).toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      socket.close();
       server.stop(true);
     }
   });

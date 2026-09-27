@@ -46,6 +46,68 @@ afterEach(() => {
 });
 
 describe("native CLI resource contracts", () => {
+  it("exposes nested bot help and sends the configured sender access policy", async () => {
+    const registry = registryFor(SPECS);
+    expect(registry.renderHelpForArgv(["workspace", "feishu-bot", "--help"]))
+      .toContain("workspace feishu-bot sender");
+    expect(registry.renderHelpForArgv(["workspace", "feishu-bot", "sender", "--help"]))
+      .toContain("workspace feishu-bot sender list");
+    useCliEnv();
+    const spec = specById("workspace.feishu-bot.set");
+    let saved: unknown;
+    globalThis.fetch = mockFetch(spec.id, [], async (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/workspaces/ws_1") return Response.json({ id: "ws_1", name: "Workspace" });
+      if (path === "/api/workspaces/ws_1/feishu-bot" && request.method === "PUT") {
+        saved = await request.json();
+        return Response.json(saved);
+      }
+      throw new Error(`unexpected request ${request.method} ${path}`);
+    });
+    await execute(spec, ["ws_1", "--agent", "agt_bot", "--runtime", "rt_bot", "--app-id", "cli_bot", "--domain", "feishu", "--enabled", "--sender-access-policy", "agent"]);
+    expect(saved).toMatchObject({ sender_access_policy: "agent", enabled: true });
+  });
+  for (const action of ["set", "deploy"] as const) {
+    for (const code of ["runtime_offline", "runtime_config_unsupported"]) {
+      it(`surfaces ${code} when concierge ${action} is rejected`, async () => {
+        useCliEnv();
+        const spec = specById(`workspace.feishu-bot.${action}`);
+        globalThis.fetch = mockFetch(spec.id, [], (request) => {
+          const path = new URL(request.url).pathname;
+          if (path === "/api/workspaces/ws_1") return Response.json({ id: "ws_1", name: "Workspace" });
+          if (path === `/api/workspaces/ws_1/feishu-bot${action === "deploy" ? "/deploy" : ""}`) {
+            return Response.json({ code, error: "Select an online Runtime with concierge support" }, { status: 409 });
+          }
+          throw new Error(`unexpected request ${request.method} ${path}`);
+        });
+        const args = action === "set"
+          ? ["ws_1", "--agent", "agt_bot", "--runtime", "rt_bot", "--app-id", "cli_bot", "--enabled"]
+          : ["ws_1"];
+        await expect(execute(spec, args)).rejects.toMatchObject({
+          code: "conflict", status: 409, details: { code },
+          message: "Select an online Runtime with concierge support",
+        });
+      });
+    }
+  }
+
+  it("sends an explicit disabled config for a host that cannot run the concierge yet", async () => {
+    useCliEnv();
+    const spec = specById("workspace.feishu-bot.set");
+    let saved: unknown;
+    globalThis.fetch = mockFetch(spec.id, [], async (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/workspaces/ws_1") return Response.json({ id: "ws_1", name: "Workspace" });
+      if (path === "/api/workspaces/ws_1/feishu-bot" && request.method === "PUT") {
+        saved = await request.json();
+        return Response.json({ runtime_supports_config: false, ...saved as object });
+      }
+      throw new Error(`unexpected request ${request.method} ${path}`);
+    });
+    await execute(spec, ["ws_1", "--agent", "agt_bot", "--runtime", "rt_pending", "--app-id", "cli_bot", "--disabled"]);
+    expect(saved).toMatchObject({ runtime_id: "rt_pending", enabled: false });
+  });
+
   it("advertises task parity except for identity and workspace lifecycle commands", () => {
     const registry = registryFor(SPECS);
     const inventory = new Map(registry.inventory().map((entry) => [entry.id, entry]));
@@ -63,6 +125,9 @@ describe("native CLI resource contracts", () => {
       "invite.list",
       "token.list",
       "workspace.organizer.update",
+      "workspace.feishu-bot.sender.list",
+      "workspace.feishu-bot.sender.allow",
+      "workspace.feishu-bot.sender.revoke",
     ]) {
       expect(inventory.get(id)?.auth, id).toEqual(["human"]);
     }
@@ -167,6 +232,82 @@ describe("native CLI resource contracts", () => {
 
     await execute(spec, ["--file", inputPath, "--name", "Explicit", "--output", "json"]);
     expect(body).toEqual({ name: "Explicit", description: "file description" });
+  });
+
+  it("lists discovered Feishu accounts and changes only the selected sender's allowlist status", async () => {
+    useCliEnv();
+    const sender = {
+      id: "sender/one",
+      app_id: "cli_bot",
+      display_name: "Feishu sender",
+      name_en: "English Sender",
+      open_id: "ou_sender",
+      union_id: null,
+      allowed: false,
+      first_seen_at: "2026-09-13T00:00:00.000Z",
+      last_seen_at: "2026-09-13T01:00:00.000Z",
+    };
+    const updates: Array<{ path: string; body: unknown }> = [];
+    const handler = async (request: Request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/workspaces/ws_1" && request.method === "GET") {
+        return Response.json({ id: "ws_1", name: "Private space" });
+      }
+      if (path === "/api/workspaces/ws_1/feishu-bot/senders" && request.method === "GET") {
+        return Response.json({ senders: [sender] });
+      }
+      if (path === "/api/workspaces/ws_1/feishu-bot/senders/sender%2Fone" && request.method === "PUT") {
+        const body = await request.json() as { allowed: boolean };
+        updates.push({ path, body });
+        return Response.json({ ...sender, allowed: body.allowed });
+      }
+      throw new Error(`unexpected request ${request.method} ${path}`);
+    };
+    const list = specById("workspace.feishu-bot.sender.list");
+    globalThis.fetch = mockFetch(list.id, [], handler);
+    const table = await execute(list, ["ws_1"]);
+    expect(table).toContain("Feishu sender");
+    expect(table).toContain("ENGLISH_NAME");
+    expect(table).toContain("English Sender");
+    expect(table).toContain("pending");
+    expect(table).toContain("ou_sender");
+    expect(JSON.parse(await execute(list, ["ws_1", "--output", "json"]))).toEqual({ senders: [sender] });
+    expect(JSON.parse(await execute(list, ["ws_1", "--output", "jsonl"]))).toEqual(sender);
+
+    for (const [action, allowed] of [["allow", true], ["revoke", false]] as const) {
+      const spec = specById(`workspace.feishu-bot.sender.${action}`);
+      globalThis.fetch = mockFetch(spec.id, [], handler);
+      const output = await execute(spec, ["ws_1", sender.id, "--output", "json"]);
+      expect(JSON.parse(output)).toEqual({ ...sender, allowed });
+      expect(registryFor([spec]).renderHelp(spec.path)).toContain(`<workspace> <sender>`);
+      await expect(execute(spec, ["ws_1"])).rejects.toThrow("sender");
+    }
+    expect(updates).toEqual([
+      { path: "/api/workspaces/ws_1/feishu-bot/senders/sender%2Fone", body: { allowed: true } },
+      { path: "/api/workspaces/ws_1/feishu-bot/senders/sender%2Fone", body: { allowed: false } },
+    ]);
+  });
+
+  it("stops unauthorized Feishu sender management before reading accounts or changing access", async () => {
+    useCliEnv();
+    process.env.MULTIREMI_TOKEN = "task-credential";
+    for (const action of ["list", "allow", "revoke"] as const) {
+      const spec = specById(`workspace.feishu-bot.sender.${action}`);
+      const paths: string[] = [];
+      globalThis.fetch = (async (input, init) => {
+        const path = new URL(new Request(input, init).url).pathname;
+        paths.push(path);
+        if (path !== "/api/cli/capabilities") throw new Error("unauthorized account access");
+        return Response.json({
+          protocol_version: 1,
+          identity: "task",
+          commands: [{ id: spec.id, allowed: false }],
+        });
+      }) as typeof fetch;
+      await expect(execute(spec, action === "list" ? ["ws_1"] : ["ws_1", "sender_1"]))
+        .rejects.toMatchObject({ code: "forbidden" });
+      expect(paths).toEqual(["/api/cli/capabilities"]);
+    }
   });
 
   it("passes the explicit Runtime provision version-check opt-out", async () => {
@@ -588,6 +729,120 @@ describe("native CLI resource contracts", () => {
       "GET /api/workspaces/ws_1/repos",
       "GET /api/workspaces/ws_1/repos/repo_123456/wiki/architecture%2Foverview/backlinks",
     ]);
+  });
+
+  it("reports a task-bound Wiki outcome through the canonical API and requires an outcome and reason", async () => {
+    useCliEnv();
+    const spec = specById("wiki.repository.outcome");
+    expect(spec.auth).toEqual(["task"]);
+    const sent: any[] = [];
+    globalThis.fetch = mockFetch(spec.id, [], async request => {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/workspaces/ws_1/repos") return Response.json({ repositories: [{ id: "repo_123456", name: "Remi" }] });
+      if (path === "/api/workspaces/ws_1/repos/repo_123456/wiki/outcome" && request.method === "POST") {
+        sent.push(await request.json());
+        return Response.json({ run: { id: "krun_report", status: "blocked" }, deduplicated: false });
+      }
+      throw new Error(`unexpected request ${request.method} ${path}`);
+    });
+    await execute(spec, ["Remi", "--outcome", "blocked", "--reason", "Missing object", "--output", "json"]);
+    expect(sent).toEqual([{ outcome: "blocked", reason: "Missing object" }]);
+    await expect(execute(spec, ["Remi", "--outcome", "blocked"])).rejects.toThrow();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("restores pinned repository objects through the API and defaults to dry-run even with input dry_run=false", async () => {
+    useCliEnv();
+    const spec = specById("wiki.repository.restore");
+    const targets = [{ ref: "rwdoc_1", expected_version: 1, snapshot_oid: "snapshot_1", content_sha256: "a".repeat(64) }];
+    const sent: any[] = [];
+    globalThis.fetch = mockFetch(spec.id, [], async request => {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/workspaces/ws_1/repos") return Response.json({ repositories: [{ id: "repo_123456", name: "Remi" }] });
+      if (path === "/api/workspaces/ws_1/repos/repo_123456/wiki/restore" && request.method === "POST") {
+        sent.push(await request.json());
+        return Response.json({ results: [] });
+      }
+      throw new Error(`unexpected request ${request.method} ${path}`);
+    });
+    const data = JSON.stringify({ targets, dry_run: false });
+    await execute(spec, ["Remi", "--data", data, "--output", "json"]);
+    await execute(spec, ["Remi", "--data", data, "--yes", "--output", "json"]);
+    expect(sent).toEqual([{ targets, dry_run: true }, { targets, dry_run: false }]);
+    await expect(execute(spec, ["Remi", "--data", data, "--yes", "--dry-run"])).rejects.toThrow();
+    expect(sent).toHaveLength(2);
+  });
+
+  it("repairs repository log history only with explicit confirmation and pinned input", async () => {
+    useCliEnv();
+    const spec = specById("wiki.repository.repair-log");
+    const input = {
+      body: "# Recovered log",
+      expected_version: 50,
+      expected_body_sha256: "a".repeat(64),
+      reason: "MUL-316 restore verified history",
+    };
+    let sent: unknown;
+    globalThis.fetch = mockFetch(spec.id, [], async request => {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/workspaces/ws_1/repos") return Response.json({ repositories: [{ id: "repo_123456", name: "Remi" }] });
+      if (path === "/api/workspaces/ws_1/repos/repo_123456/wiki/repair-log" && request.method === "POST") {
+        sent = await request.json();
+        return Response.json({ doc: { id: "rwdoc_log", version: 51 } });
+      }
+      throw new Error(`unexpected request ${request.method} ${path}`);
+    });
+    await expect(execute(spec, ["Remi", "--data", JSON.stringify(input)])).rejects.toThrow();
+    await execute(spec, ["Remi", "--data", JSON.stringify(input), "--yes", "--output", "json"]);
+    expect(sent).toEqual(input);
+  });
+
+  it("does not silently intersect repository knowledge queries with the inherited Issue project", async () => {
+    useCliEnv();
+    process.env.MULTIREMI_PROJECT_ID = "prj_ambient";
+    for (const id of ["knowledge.submissions", "knowledge.runs"]) {
+      const queries: URLSearchParams[] = [];
+      globalThis.fetch = mockFetch(id, [], async request => {
+        const url = new URL(request.url);
+        if (url.pathname === "/api/workspaces/ws_1/repos") return Response.json({ repositories: [{ id: "repo_123456", name: "Remi" }] });
+        if (url.pathname === "/api/projects") return Response.json({ projects: [{ id: "prj_ambient", title: "Ambient" }] });
+        if (url.pathname.startsWith("/api/projects/prj_ambient")) return Response.json({ id: "prj_ambient", title: "Ambient" });
+        if (url.pathname === `/api/knowledge/${id === "knowledge.submissions" ? "submissions" : "runs"}`) {
+          queries.push(url.searchParams);
+          return Response.json({ submissions: [], runs: [], next_cursor: null });
+        }
+        throw new Error(`unexpected request ${request.method} ${url.pathname}`);
+      });
+      await execute(specById(id), ["--repo", "Remi", "--output", "json"]);
+      expect(queries[0]!.get("repository_id")).toBe("repo_123456");
+      expect(queries[0]!.has("project_id")).toBe(false);
+      await execute(specById(id), ["--repo", "Remi", "--project", "prj_ambient", "--output", "json"]);
+      expect(queries[1]!.get("project_id")).toBe("prj_ambient");
+      expect(queries[1]!.get("repository_id")).toBe("repo_123456");
+      await execute(specById(id), ["--output", "json"]);
+      expect(queries[2]!.get("project_id")).toBe("prj_ambient");
+    }
+  });
+
+  it("executes repository mv and merge against server migration endpoints", async () => {
+    useCliEnv();
+    for (const [id, endpoint, args, expected] of [
+      ["wiki.repository.mv", "move", ["Remi", "guide.md", "concepts/guide.md", "--expected-version", "3"], { ref: "guide.md", path: "concepts/guide.md", expected_version: 3 }],
+      ["wiki.repository.merge", "merge", ["Remi", "guide.md", "source-a.md", "source-b.md", "--yes"], { target: "guide.md", sources: ["source-a.md", "source-b.md"] }],
+    ] as const) {
+      let body: unknown;
+      globalThis.fetch = mockFetch(id, [], async request => {
+        const path = new URL(request.url).pathname;
+        if (path === "/api/workspaces/ws_1/repos") return Response.json({ repositories: [{ id: "repo_123456", name: "Remi" }] });
+        if (path === `/api/workspaces/ws_1/repos/repo_123456/wiki/${endpoint}` && request.method === "POST") {
+          body = await request.json();
+          return Response.json({ results: [] });
+        }
+        throw new Error(`unexpected request ${request.method} ${path}`);
+      });
+      await execute(specById(id), [...args, "--output", "json"]);
+      expect(body).toMatchObject(expected);
+    }
   });
 
   it("keeps native Repository Wiki status and push usable without a project", async () => {

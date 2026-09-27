@@ -1,6 +1,5 @@
 import type { Context, Hono } from "hono";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
-import { refreshStaleGatewayModels } from "@multiremi/relay/discovery.js";
 import {
   bindDaemonTokenIdentityOrDeny,
   daemonLocalSkillImportReportBody,
@@ -20,7 +19,12 @@ import {
   loadRuntimeForCurrentEditor,
   loadRuntimeForCurrentOwner,
   loadRuntimeForCurrentUser,
-  overlayGatewayModels,
+  workspaceRuntimeModelCatalog,
+  runtimeTargetModelCatalog,
+  executionGroupRuntimes,
+  executionGroupModelCatalog,
+  executionGroupRequestOwner,
+  canCurrentUserUseRuntime,
   parseExpectedActiveAgentIds,
   promoteLegacyCliPatForDaemonHeartbeat,
   promoteLegacyCliPatForDaemonRegistration,
@@ -31,15 +35,16 @@ import {
   safeCreateRuntimeUpdateRequest,
   usageQuery,
   validateMultiremiRuntimeProvider,
+  validateRuntimeExecutionGroupInput,
 } from "../helpers.js";
 import {
   authenticatedRequestUserId,
   cleanString,
   compareRuntimeUsageDailyCompatibilityRows,
   currentAccessToken,
+  currentWorkspaceRoleStrict,
   currentRequestUserId,
   directoryScanErrorResponse,
-  fleetModelsResponse,
   hasRequestField,
   parseOptionalInt,
   runtimeCompatibilityResponse,
@@ -219,6 +224,8 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
           : null,
       }
       : scopedBody;
+    const invalidGroup = validateRuntimeExecutionGroupInput(c, store, workspaceId, registration.provider, registration);
+    if (invalidGroup) return invalidGroup;
     return c.json({ runtime: store.registerRuntime(registration) }, 201);
   });
   app.get("/api/multiremi/runtimes/:id", (c) => {
@@ -232,6 +239,8 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (loaded instanceof Response) return loaded;
     const body = await readJsonStrict<UpdateRuntimeInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    const invalidGroup = validateRuntimeExecutionGroupInput(c, store, loaded.runtime.workspaceId ?? "local", loaded.runtime.provider, body);
+    if (invalidGroup) return invalidGroup;
     return c.json({ runtime: store.updateRuntime(loaded.runtime.id, body) });
   });
   app.get("/api/multiremi/runtimes/:id/models", (c) => {
@@ -294,12 +303,12 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const runtimeId = c.req.param("runtimeId");
     const denied = denyDaemonRuntimeObservedStateAccess(c, store, runtimeId, authToken);
     if (denied) return denied;
-    const body = await readJsonStrict<{ models?: MultiremiRuntimeModel[]; supported?: boolean }>(c);
+    const body = await readJsonStrict<Pick<ReportRuntimeModelListInput, "models" | "supported" | "model_profile">>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     return c.json({
       runtime_id: runtimeId,
       supported: body.supported !== false,
-      models: store.updateRuntimeModels(runtimeId, body.models ?? []),
+      models: store.updateRuntimeModels(runtimeId, body.models ?? [], body.model_profile),
     });
   });
   app.post("/api/daemon/runtimes/:runtimeId/models/claim", (c) => {
@@ -597,13 +606,53 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (loaded instanceof Response) return loaded;
     return c.json(loaded.runtimes.map(runtimeCompatibilityResponse));
   });
+  const executionGroupsHandler = (c: Context) => {
+    const loaded = listRuntimesForCurrentUser(c, store);
+    if (loaded instanceof Response) return loaded;
+    const ownerId = executionGroupRequestOwner(c, store, loaded.workspaceId);
+    if (ownerId instanceof Response) return ownerId;
+    const visibleIds = new Set(loaded.runtimes.map((runtime) => runtime.id));
+    const groups = store.listExecutionGroups(loaded.workspaceId).flatMap((group) => {
+      const runtimes = executionGroupRuntimes(store, loaded.workspaceId, group.id, ownerId).filter((runtime) => visibleIds.has(runtime.id)).sort((a, b) => a.id.localeCompare(b.id));
+      if (!runtimes.length && !group.managed) return [];
+      const machine = runtimes[0];
+      return [{
+        members: store.getExecutionGroupMembers(group.id,loaded.workspaceId).filter(member => ["admin","owner"].includes(currentWorkspaceRoleStrict(c,store,loaded.workspaceId) ?? "") || visibleIds.has(member.runtime_id)),
+        id: group.id, workspace_id: loaded.workspaceId, provider: group.provider,
+        profile_id: group.profileId, profile_revision: group.profileRevision, managed: group.managed,
+        name: group.managed ? group.name : group.machineId ? `${machine?.daemonDisplayName ?? machine?.name ?? group.machineId} / ${group.provider}` : group.id,
+        runtime_ids: ["admin","owner"].includes(currentWorkspaceRoleStrict(c,store,loaded.workspaceId) ?? "") ? group.runtimeIds : runtimes.map((runtime) => runtime.id),
+        online_runtime_count: runtimes.filter((runtime) => runtime.status === "online").length,
+        is_default: group.machineId !== null,
+      }];
+    });
+    return c.json({ groups });
+  };
+  app.get("/api/execution-groups", executionGroupsHandler);
+  app.get("/api/multiremi/execution-groups", executionGroupsHandler);
   const fleetModelsHandler = (c: Context) => {
     const loaded = listRuntimesForCurrentUser(c, store);
     if (loaded instanceof Response) return loaded;
-    const providers = fleetModelsResponse(loaded.runtimes, currentRequestUserId(c));
     const workspaceId = loaded.workspaceId;
-    refreshStaleGatewayModels(store, workspaceId);
-    return c.json({ providers: overlayGatewayModels(store, workspaceId, providers) });
+    const runtimeId = cleanString(c.req.query("runtime_id") ?? c.req.query("runtimeId"));
+    const groupId = cleanString(c.req.query("execution_group_id") ?? c.req.query("executionGroupId"));
+    const ownerId = executionGroupRequestOwner(c, store, workspaceId);
+    if (ownerId instanceof Response) return ownerId;
+    if (runtimeId && groupId) return c.json({ error: "select either runtime_id or execution_group_id" }, 400);
+    if (groupId) {
+      if (!store.getExecutionGroup(groupId, workspaceId)) return c.json({ error: "invalid execution_group_id" }, 400);
+      const runtimes = executionGroupRuntimes(store, workspaceId, groupId, ownerId);
+      const visibleIds = new Set(loaded.runtimes.map((runtime) => runtime.id));
+      if (!runtimes.length || runtimes.some((runtime) => !visibleIds.has(runtime.id))) return c.json({ error: "no accessible execution group members" }, 403);
+      return c.json({ providers: executionGroupModelCatalog(store, workspaceId, groupId, ownerId) });
+    }
+    if (runtimeId) {
+      const runtime = loaded.runtimes.find((candidate) => candidate.id === runtimeId);
+      if (!runtime) return c.json({ error: "invalid runtime_id" }, 400);
+      if (!canCurrentUserUseRuntime(c, store, runtime)) return c.json({ error: "runtime is private" }, 403);
+      return c.json({ providers: runtimeTargetModelCatalog(store, workspaceId, runtime) });
+    }
+    return c.json({ providers: workspaceRuntimeModelCatalog(store, workspaceId, loaded.runtimes, ownerId) });
   };
   app.get("/api/models", fleetModelsHandler);
   app.get("/api/multiremi/models", fleetModelsHandler);
@@ -621,20 +670,24 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (loaded instanceof Response) return loaded;
     const body = await readJsonStrict<UpdateRuntimeInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    const invalidGroup = validateRuntimeExecutionGroupInput(c, store, loaded.runtime.workspaceId ?? "local", loaded.runtime.provider, body);
+    if (invalidGroup) return invalidGroup;
+    const patch: UpdateRuntimeInput = {};
     if (hasRequestField(body, "name")) {
       const name = cleanString(typeof body.name === "string" ? body.name : null);
       if (!name) return c.json({ error: "name must be a non-empty string" }, 400);
       if (name.length > 100) return c.json({ error: "name must be at most 100 characters" }, 400);
-      return c.json(runtimeCompatibilityResponse(store.updateRuntime(loaded.runtime.id, { name })));
+      patch.name = name;
     }
     if (hasRequestField(body, "visibility")) {
       const visibility = cleanString(typeof body.visibility === "string" ? body.visibility : null);
-      if (visibility !== "private" && visibility !== "public") {
-        return c.json({ error: "visibility must be 'private' or 'public'" }, 400);
-      }
-      return c.json(runtimeCompatibilityResponse(store.updateRuntime(loaded.runtime.id, { visibility })));
+      if (visibility !== "private" && visibility !== "public") return c.json({ error: "visibility must be 'private' or 'public'" }, 400);
+      patch.visibility = visibility;
     }
-    return c.json(runtimeCompatibilityResponse(loaded.runtime));
+    if (hasRequestField(body, "executionGroupId", "execution_group_id")) {
+      patch.executionGroupId = body.executionGroupId ?? body.execution_group_id ?? null;
+    }
+    return c.json(runtimeCompatibilityResponse(Object.keys(patch).length ? store.updateRuntime(loaded.runtime.id, patch) : loaded.runtime));
   });
   app.get("/api/runtimes/:id/usage", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));

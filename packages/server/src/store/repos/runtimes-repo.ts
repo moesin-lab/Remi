@@ -1,3 +1,8 @@
+import { createLogger } from "@shared/logger.js";
+import { catalogAllowsModel, modelThinkingState, providerDeclaresReasoningLevels, runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
+import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
+import { syncRuntimeExecutionGroups, getExecutionGroup, getGroupExecutionProfile } from "@multiremi/store/execution-groups.js";
+import { WorkspacesRepo } from "@multiremi/store/repos/workspaces-repo.js";
 // Runtimes domain (runtime registration/lifecycle, models, and the five daemon async-request
 // families: model list, directory scan, update, local-skill list, local-skill import), extracted
 // verbatim from MultiremiStore (the facade delegates every public method here).
@@ -6,6 +11,7 @@
 // (./runtime-request-queue.ts) and configured by the specs below. Each family keeps its
 // own `create` (distinct INSERT columns) and `report` (distinct completed-branch payload); `get`,
 // `claim` and the timeout sweep are the shared template.
+import { canonicalJson } from "@multiremi/agent-plugins/import.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import { parseRuntimeClaudeProfile, type RuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
@@ -20,6 +26,7 @@ import {
   cleanOptionalString,
   daemonRuntimeId,
   hasAnyField,
+  IN_FLIGHT_TASK_STATUSES,
   isActiveTaskStatus,
   isInFlightTaskStatus,
   isRecord,
@@ -31,6 +38,7 @@ import {
   toJson,
 } from "@multiremi/store/helpers.js";
 import { type StoreContext } from "@multiremi/store/context.js";
+import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { canonicalizeDaemonRoutingWithinTransaction } from "@multiremi/store/daemon-routing.js";
 import { RuntimeRequestQueue, type RuntimeRequestSpec } from "@multiremi/store/repos/runtime-request-queue.js";
 import { runtimeDaemonAliases } from "@multiremi/store/runtime-affinity.js";
@@ -95,6 +103,24 @@ import {
 } from "@multiremi/contracts/types.js";
 
 type Row = Record<string, unknown>;
+
+const log = createLogger("runtimes");
+
+// `runtimeSupportsAgentModel` runs per Runtime per queued task (claim, capability
+// sweep, repool), so an unconditional log would flood. The decision itself is
+// silent by design — this is the audit trail that says *why* a configured effort
+// was ignored, keyed so each (provider, model, level) combination is reported
+// once per process.
+const reportedDroppedEfforts = new Set<string>();
+
+function logEffortNotApplicable(provider: string, runtimeId: string, model: string, level: string): void {
+  const key = `${provider}\0${model}\0${level}`;
+  if (reportedDroppedEfforts.has(key)) return;
+  // Bounded: a workspace with many aliases must not grow this without limit.
+  if (reportedDroppedEfforts.size > 500) reportedDroppedEfforts.clear();
+  reportedDroppedEfforts.add(key);
+  log.info(`ignoring reasoning level "${level}" for ${provider} model "${model}": the model declares no levels (runtime ${runtimeId})`);
+}
 
 export class RuntimeLocalSkillRequestError extends Error {}
 
@@ -218,6 +244,8 @@ export class RuntimesRepo {
   private readonly localSkillImportQueue: RuntimeRequestQueue<MultiremiRuntimeLocalSkillImportRequest>;
   private readonly commandQueue: RuntimeRequestQueue<MultiremiRuntimeCommandRequest>;
   private readonly botMenuPublishQueue: RuntimeRequestQueue<MultiremiBotMenuPublishRequest>;
+  // Postgres only: per runtime, token totals over its settled tasks and the row version they reflect.
+  private readonly settledUsageCache = new Map<string, { version: string; tokens: TaskTokenTotals }>();
 
   constructor(private ctx: StoreContext) {
     this.modelListQueue = new RuntimeRequestQueue(ctx.db, MODEL_LIST_REQUESTS);
@@ -247,16 +275,23 @@ export class RuntimesRepo {
   }
 
   listWorkspaceProviderProfileModels(workspaceId: string, provider: "codex" | "claude"): string[] {
-    const rows = this.ctx.db.query(`SELECT p.profile FROM multiremi_runtime_${provider}_profiles p
-      JOIN multiremi_runtimes r ON r.id = p.runtime_id WHERE COALESCE(r.workspace_id, 'local') = ?`).all(workspaceId) as { profile: string }[];
-    return rows.map(row => (provider === "codex" ? parseRuntimeCodexProfile : parseRuntimeClaudeProfile)(JSON.parse(row.profile))!.model);
+    const rows = this.ctx.db.query(`SELECT p.profile, m.model_id FROM multiremi_runtime_${provider}_profiles p
+      JOIN multiremi_runtimes r ON r.id = p.runtime_id
+      LEFT JOIN multiremi_runtime_models m ON m.runtime_id = r.id
+      WHERE COALESCE(r.workspace_id, 'local') = ?`).all(workspaceId) as { profile: string; model_id: string | null }[];
+    return [...new Set(rows.flatMap(row => [
+      (provider === "codex" ? parseRuntimeCodexProfile : parseRuntimeClaudeProfile)(JSON.parse(row.profile))!.model,
+      ...(row.model_id ? [row.model_id] : []),
+    ]))];
   }
 
   getRuntimeProviderKey(runtimeId: string, credentialId: string): string | null {
     const runtime = this.getRuntime(runtimeId);
     if (!runtime) return null;
     const row = this.ctx.db.query("SELECT ciphertext FROM multiremi_runtime_provider_credentials WHERE id = ? AND runtime_id = ?").get(credentialId, runtimeId) as { ciphertext: string } | null;
-    return row ? decryptRuntimeProviderKey(row.ciphertext, { workspaceId: runtime.workspaceId ?? "local", runtimeId, credentialId }) : null;
+    return row
+      ? decryptRuntimeProviderKey(row.ciphertext, { workspaceId: runtime.workspaceId ?? "local", runtimeId, credentialId })
+      : this.ctx.executionProfiles().getKeyForRuntime(runtimeId, credentialId);
   }
 
   setRuntimeProviderProfile(id: string, provider: "codex" | "claude", input: unknown, apiKey?: unknown): RuntimeCodexProfile | null {
@@ -283,7 +318,7 @@ export class RuntimesRepo {
       } else {
         this.ctx.db.run(`DELETE FROM multiremi_runtime_${provider}_profiles WHERE runtime_id = ?`, [id]);
       }
-      this.replaceRuntimeModelsWithinTransaction(id, profile ? [{ id: profile.model, label: profile.model, provider, default: true }] : [], provider, nowIso());
+      this.replaceRuntimeModelsWithinTransaction(id, profile ? [{ id: profile.model, label: profile.model, provider, default: true }] : [], provider, nowIso(), profile);
       return profile;
     });
   }
@@ -296,6 +331,8 @@ export class RuntimesRepo {
   registerRuntimeWithinTransaction(input: RegisterRuntimeInput): MultiremiRuntime {
     const id = input.id ?? createId("rt");
     const now = nowIso();
+    const existingWorkspace = this.ctx.db.query("SELECT workspace_id FROM multiremi_runtimes WHERE id = ?").get(id) as { workspace_id: string | null } | null;
+    this.ctx.lockWorkspaceRuntimeLifecycle(input.workspaceId ?? input.workspace_id ?? existingWorkspace?.workspace_id ?? "local");
     const currentRow = this.ctx.db.query("SELECT * FROM multiremi_runtimes WHERE id = ?").get(id) as Row | null;
     const current = currentRow ? toRuntime(currentRow) : null;
     const inputOwnerId = hasAnyField(input, "ownerId", "owner_id")
@@ -385,6 +422,14 @@ export class RuntimesRepo {
     // remain valid after a daemon identity is established and cause pinned work
     // to be re-pooled below. A rejected conflict reports zero changed rows.
     if (result.changes === 0) throw new RuntimeRegistrationIdentityConflictError(id);
+    // A newly registered daemon must apply its bindings again; a previous
+    // process's acknowledgement does not prove this process has the config.
+    this.ctx.db.run("DELETE FROM multiremi_execution_binding_states WHERE runtime_id = ?", [id]);
+    this.ctx.db.run("DELETE FROM multiremi_execution_binding_generations WHERE runtime_id = ?", [id]);
+    if (hasAnyField(input, "executionGroupId", "execution_group_id")) {
+      this.ctx.db.run("UPDATE multiremi_runtimes SET execution_group_id = ? WHERE id = ?", [cleanOptionalString(input.executionGroupId ?? input.execution_group_id), id]);
+    }
+    syncRuntimeExecutionGroups(this.ctx.db, id);
     if (input.models !== undefined) {
       this.replaceRuntimeModelsWithinTransaction(id, input.models, input.provider, now);
     }
@@ -398,6 +443,7 @@ export class RuntimesRepo {
       // tasks pinned here that this runtime may no longer claim. Re-pool the
       // ineligible ones. (setRuntimeOffline is intentionally NOT treated this
       // way — offline is a recoverable transient state; the task waits.)
+      current.executionGroupId !== runtime.executionGroupId ||
       current.provider !== runtime.provider ||
       (current.workspaceId ?? "local") !== (runtime.workspaceId ?? "local") ||
       current.visibility !== runtime.visibility ||
@@ -476,12 +522,16 @@ export class RuntimesRepo {
           id,
         ],
       );
+      if (hasAnyField(input, "executionGroupId", "execution_group_id")) {
+        this.ctx.db.run("UPDATE multiremi_runtimes SET execution_group_id = ? WHERE id = ?", [cleanOptionalString(input.executionGroupId ?? input.execution_group_id), id]);
+        syncRuntimeExecutionGroups(this.ctx.db, id);
+      }
       if (input.models !== undefined) this.replaceRuntimeModelsWithinTransaction(id, input.models, current.provider, now);
       const updated = this.getRuntime(id)!;
       // Ownership/visibility just changed → re-pool any queued task pinned here
       // that the runtime may no longer run, so it isn't stranded on a machine the
       // claim predicate now rejects.
-      if (current.visibility !== updated.visibility || (current.ownerId ?? "local") !== (updated.ownerId ?? "local")) {
+      if (current.visibility !== updated.visibility || (current.ownerId ?? "local") !== (updated.ownerId ?? "local") || current.executionGroupId !== updated.executionGroupId) {
         this.repoolQueuedTasksForRuntime(id, (agent) => this.runtimeCanRunAgent(updated, agent));
       }
       return updated;
@@ -521,6 +571,7 @@ export class RuntimesRepo {
     options: { repoolQueuedTasks?: boolean } = {},
   ): boolean {
     if (!this.getRuntime(id)) return false;
+    if (this.ctx.db.query("SELECT id FROM multiremi_agents WHERE runtime_id = ? LIMIT 1").get(id)) return false;
     // Task claim takes the same workspace lifecycle lock as Runtime deletion,
     // so this check cannot race a queued task becoming dispatched. Queued work
     // is safely re-pooled below; work already owned by a daemon must be handled
@@ -537,10 +588,6 @@ export class RuntimesRepo {
     // FK enforcement disabled. Keep every runtime reference explicit here so
     // all delete paths have identical behavior.
     this.ctx.db.run(
-      "UPDATE multiremi_agents SET runtime_id = NULL, updated_at = ? WHERE runtime_id = ?",
-      [now, id],
-    );
-    this.ctx.db.run(
       `UPDATE multiremi_issue_workspaces
        SET runtime_id = NULL,
            status = CASE WHEN status = 'cleaned' THEN status ELSE 'runtime_offline' END,
@@ -556,6 +603,7 @@ export class RuntimesRepo {
            execution_fingerprint = NULL,
            work_dir = NULL,
            cursor_seq = 0,
+           parent_cursor_seq = 0,
            generation = generation + 1,
            last_task_id = NULL,
            updated_at = ?
@@ -890,8 +938,10 @@ export class RuntimesRepo {
         }
       }
       const agents = this.ctx.db.run(
-        "UPDATE multiremi_agents SET runtime_id = ?, updated_at = ? WHERE runtime_id = ?",
-        [newRuntimeId, now, oldRuntimeId],
+        `UPDATE multiremi_agents SET runtime_id = ?, execution_group_id = (
+          SELECT group_id FROM multiremi_execution_group_members m WHERE m.runtime_id = ? AND m.provider = multiremi_agents.provider
+        ), updated_at = ? WHERE runtime_id = ?`,
+        [newRuntimeId, newRuntimeId, now, oldRuntimeId],
       ).changes;
       const tasks = this.ctx.db.run(
         "UPDATE multiremi_tasks SET runtime_id = ?, updated_at = ? WHERE runtime_id = ?",
@@ -1028,12 +1078,13 @@ export class RuntimesRepo {
     return this.listRuntimeModelsForExistingRuntime(runtimeId);
   }
 
-  updateRuntimeModels(runtimeId: string, models: MultiremiRuntimeModel[]): MultiremiRuntimeModel[] {
+  updateRuntimeModels(runtimeId: string, models: MultiremiRuntimeModel[], modelProfile?: RuntimeCodexProfile | null): MultiremiRuntimeModel[] {
+    let accepted = false;
     const updated = this.withRuntimeLifecycleLock(runtimeId, (runtime) => {
-      this.replaceRuntimeModelsWithinTransaction(runtimeId, models, runtime.provider, nowIso());
+      accepted = this.replaceRuntimeModelsWithinTransaction(runtimeId, models, runtime.provider, nowIso(), modelProfile);
       return this.listRuntimeModelsForExistingRuntime(runtimeId);
     });
-    this.publishRuntimeModelsUpdated(runtimeId);
+    if (accepted) this.publishRuntimeModelsUpdated(runtimeId);
     return updated;
   }
 
@@ -1078,12 +1129,18 @@ export class RuntimesRepo {
     if (status === "completed") {
       this.withRuntimeLifecycleLock(runtimeId, (runtime) => {
         const models = normalizeRuntimeModels(input.models ?? [], runtime.provider);
-        this.replaceRuntimeModelsWithinTransaction(runtimeId, models, runtime.provider, now);
+        if (!this.replaceRuntimeModelsWithinTransaction(runtimeId, models, runtime.provider, now, input.model_profile)) {
+          this.ctx.db.run(
+            `UPDATE multiremi_runtime_model_list_requests SET status = 'failed', error = ?, updated_at = ? WHERE id = ?`,
+            ["Runtime connection changed during model discovery; refresh with an updated daemon", now, requestId],
+          );
+          return;
+        }
         this.ctx.db.run(
           `UPDATE multiremi_runtime_model_list_requests
            SET status = 'completed', models = ?, supported = ?, error = NULL, updated_at = ?
            WHERE id = ?`,
-          [toJson(models), input.supported === false ? 0 : 1, now, requestId],
+          [toJson(this.listRuntimeModelsForExistingRuntime(runtimeId)), input.supported === false ? 0 : 1, now, requestId],
         );
       });
     } else {
@@ -1094,8 +1151,9 @@ export class RuntimesRepo {
         [input.error ?? "runtime model list failed", now, requestId],
       );
     }
-    if (status === "completed") this.publishRuntimeModelsUpdated(runtimeId);
-    return this.getRuntimeModelListRequest(runtimeId, requestId)!;
+    const result = this.getRuntimeModelListRequest(runtimeId, requestId)!;
+    if (result.status === "completed") this.publishRuntimeModelsUpdated(runtimeId);
+    return result;
   }
 
   createRuntimeDirectoryScanRequest(runtimeId: string, params: { root?: string; maxDepth?: number; mode?: "scan" | "browse" } = {}): MultiremiRuntimeDirectoryScanRequest {
@@ -1695,6 +1753,11 @@ export class RuntimesRepo {
     let previousAgentPluginProtocol = readAgentPluginProtocol(runtime.metadata);
     let agentPluginProtocol = previousAgentPluginProtocol;
     let pluginStateChanges: MultiremiAgentPluginRuntimeState[] = [];
+    // Revision of the Runtime's desired Plugin set, echoed back in the ack so a
+    // daemon can skip `GET .../agent-plugins/desired` while nothing it must act
+    // on changed. Computed by the same helper the desired snapshot uses, from
+    // rows this transaction already loaded — no extra query.
+    let agentPluginDesiredRevision: string | null = null;
     if (options.agentPluginProtocol !== undefined) {
       const workspaceId = runtime.workspaceId ?? "local";
       const result = this.ctx.db.transaction(() => {
@@ -1710,14 +1773,16 @@ export class RuntimesRepo {
           [toJson({ ...lockedRuntime.metadata, agent_plugin_protocol: protocol, ...metadataPatch }), now, now, runtimeId],
         );
         const updatedRuntime = this.getRuntime(runtimeId)!;
-        const changes = this.ctx.agentPlugins().recordAgentPluginRuntimeHeartbeatWithinLock(runtimeId);
-        return { runtime: updatedRuntime, previous, protocol, changes };
+        const { changes, revision } =
+          this.ctx.agentPlugins().recordAgentPluginRuntimeHeartbeatWithinLock(runtimeId);
+        return { runtime: updatedRuntime, previous, protocol, changes, revision };
       })();
       if (!result) return { runtime_id: runtimeId, status: "runtime_gone", runtime_gone: true };
       runtime = result.runtime;
       previousAgentPluginProtocol = result.previous;
       agentPluginProtocol = result.protocol;
       pluginStateChanges = result.changes;
+      agentPluginDesiredRevision = result.revision;
       for (const state of pluginStateChanges) {
         this.ctx.emitWorkspaceEvent({
           type: "agent_plugin:runtime_state",
@@ -1770,6 +1835,14 @@ export class RuntimesRepo {
       );
     }
     const ack: MultiremiDaemonHeartbeatAck = { runtime_id: runtimeId, status: "ok" };
+    // Only a daemon that speaks the Plugin protocol can use this; a legacy
+    // daemon that advertises protocol 0 ignores unknown ack fields anyway.
+    if (
+      agentPluginDesiredRevision
+      && (agentPluginProtocol ?? 0) >= MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION
+    ) {
+      ack.agent_plugins = { revision: agentPluginDesiredRevision };
+    }
     if (options.claimPending === false) return ack;
 
     const pendingUpdate = this.claimRuntimeUpdateRequest(runtimeId);
@@ -1844,13 +1917,85 @@ export class RuntimesRepo {
    * so single-machine NULL owners still pair). The provider must also match.
    */
   runtimeCanRunAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
+    return this.runtimeCanRouteAgent(runtime, agent) && this.runtimeSupportsAgentModel(runtime, agent);
+  }
+
+  /** Routing eligibility is independent of liveness, concurrency and model capability. */
+  runtimeCanRouteAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
+    if (agent.runtimeId && agent.runtimeId !== runtime.id) return false;
+    if (agent.executionGroupId && !this.ctx.db.query(`SELECT 1 FROM multiremi_execution_group_members
+      WHERE runtime_id = ? AND provider = ? AND workspace_id = ? AND group_id = ?`)
+      .get(runtime.id, agent.provider, agent.workspaceId ?? "local", agent.executionGroupId)) return false;
     if (runtime.provider !== "any" && runtime.provider !== agent.provider) return false;
     // A task runs in its agent's workspace and the claim SQL requires the
     // runtime's workspace to match, so a runtime in a different workspace can
     // never run this agent (COALESCE(...,'local') for NULL-workspace runtimes).
     if ((runtime.workspaceId ?? "local") !== (agent.workspaceId ?? "local")) return false;
-    if (runtime.visibility === "public") return true;
-    return (runtime.ownerId ?? "local") === (agent.ownerId ?? "local");
+    if (runtime.visibility !== "public" && (runtime.ownerId ?? "local") !== (agent.ownerId ?? "local")) return false;
+    return true;
+  }
+
+  runtimeProfileModelEvidenceMatches(runtimeId: string, provider: string, profile: RuntimeCodexProfile): boolean {
+    const legacy = this.getRuntimeExecutionProfile(runtimeId, provider);
+    if (!legacy) return false;
+    const rows = this.ctx.db.query(`SELECT s.legacy_profile, v.profile FROM multiremi_execution_profile_legacy_sources s
+      JOIN multiremi_execution_profile_versions v ON v.workspace_id = s.workspace_id
+        AND v.id = s.profile_id AND v.revision = s.revision
+      JOIN multiremi_runtimes r ON r.id = s.runtime_id AND COALESCE(r.workspace_id, 'local') = s.workspace_id
+      WHERE s.runtime_id = ? AND s.provider = ?`).all(runtimeId, provider) as { legacy_profile: string; profile: string }[];
+    return rows.some(row => sameConnection(legacy, JSON.parse(row.legacy_profile))
+      && sameConnection(profile, JSON.parse(row.profile)));
+  }
+
+  getAgentExecutionProfile(runtimeId: string | null, agent: MultiremiAgent): RuntimeCodexProfile | null {
+    const group = agent.executionGroupId ? getExecutionGroup(this.ctx.db, agent.executionGroupId, agent.workspaceId) : null;
+    if (group?.managed) return getGroupExecutionProfile(this.ctx.db, group.id, agent.workspaceId)?.profile ?? null;
+    return runtimeId ? this.getRuntimeExecutionProfile(runtimeId, agent.provider) : null;
+  }
+
+  runtimeSupportsAgentModel(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
+    if (!agent.model && !agent.thinkingLevel) return true;
+    const workspaces = new WorkspacesRepo(this.ctx);
+    const group = agent.executionGroupId ? getExecutionGroup(this.ctx.db, agent.executionGroupId, agent.workspaceId) : null;
+    const profileOverride = group?.managed ? this.getAgentExecutionProfile(runtime.id, agent) : undefined;
+    const catalog = runtimeTargetModelCatalog({
+      getRelayModelDiscovery: (id) => workspaces.getRelayModelDiscovery(id),
+      getRelayConfigForDaemon: (id) => workspaces.getRelayConfigForDaemon(id),
+      getGatewayModels: (id, provider) => workspaces.getGatewayModels(id, provider),
+      listGatewayModelReasoning: (id, provider) => workspaces.listGatewayModelReasoning(id, provider),
+      listWorkspaceCodexProfileModels: (id) => this.listWorkspaceCodexProfileModels(id),
+      listWorkspaceClaudeProfileModels: (id) => this.listWorkspaceClaudeProfileModels(id),
+      getRuntimeExecutionProfile: (id, provider) => this.getRuntimeExecutionProfile(id, provider),
+      runtimeProfileModelEvidenceMatches: (id, provider, profile) => this.runtimeProfileModelEvidenceMatches(id, provider, profile),
+    }, agent.workspaceId, runtime, profileOverride).find(entry => entry.provider === agent.provider);
+    const models = catalog?.models ?? [];
+    if (!catalogAllowsModel(catalog, agent.model ?? "")) return false;
+    if (agent.model && !models.some(model => model.id === agent.model)
+      && ((!agent.runtimeId && (agent.provider === "codex" || runtime.metadata[`${agent.provider}_profiles`] === 1))
+        || catalog?.model_catalog_status === "ready" || agent.thinkingLevel
+        || (agent.executionGroupId && !agent.runtimeId))) return false;
+    if (!agent.thinkingLevel) return true;
+    const capability = modelThinkingState(models, agent.model ?? "", catalog?.default_thinking);
+    if (capability.state === "supported") {
+      return capability.levels.some(level => level.value === agent.thinkingLevel);
+    }
+    // A load failure is the execution engine telling us it cannot honour this
+    // model right now; that state recovers, so keep the Runtime out.
+    if (capability.state === "error") return false;
+    // Any engine that reports reasoning levels at all is taken at its word: an
+    // empty level list means it cannot honour the saved effort. That is
+    // MUL-330/#220's contract and it stays blocking.
+    if (providerDeclaresReasoningLevels(agent.provider)) return false;
+    // Claude reports none — the gateway inventory carries ids and labels only,
+    // and the ACP bridge reports the native selector only for its own aliases —
+    // so an empty level list says nothing about the model. The saved effort is
+    // not a capability this Runtime can fail to provide. Dropping it is the only
+    // option that does not fabricate levels from another model
+    // (docs/runtime-model-discovery.md), and treating it as a constraint instead
+    // strands every task on every Runtime forever: the Agent keeps its effort, no
+    // catalog ever advertises it, and nothing clears the selection.
+    logEffortNotApplicable(agent.provider, runtime.id, agent.model ?? "", agent.thinkingLevel);
+    return true;
   }
 
   getRuntimeByDaemonAndProvider(daemonId: string, provider: string): MultiremiRuntime | null {
@@ -1874,6 +2019,7 @@ export class RuntimesRepo {
     return {
       ...runtime,
       ...stats,
+      executionGroupIds: (this.ctx.db.query("SELECT group_id FROM multiremi_execution_group_members WHERE runtime_id = ? ORDER BY provider").all(runtime.id) as { group_id: string }[]).map(row => row.group_id),
       models: this.listRuntimeModelsForExistingRuntime(runtime.id),
     };
   }
@@ -1948,15 +2094,19 @@ export class RuntimesRepo {
     models: MultiremiRuntimeModel[],
     provider: string,
     now = nowIso(),
-  ): void {
+    modelProfile?: RuntimeCodexProfile | null,
+  ): boolean {
     const profile = this.getRuntimeExecutionProfile(runtimeId, provider);
-    const normalized = normalizeRuntimeModels(profile ? [{ id: profile.model, label: profile.model, provider, default: true }] : models, provider);
+    // A report belongs to the connection it probed. Legacy custom reports have
+    // no identity and must not replace a directory discovered for a newer one.
+    if (modelProfile === undefined ? profile !== null : canonicalJson(modelProfile) !== canonicalJson(profile)) return false;
+    const normalized = normalizeRuntimeModels(profile ? runtimeConnectionModels(profile, provider, models) : models, provider);
     this.ctx.db.run("DELETE FROM multiremi_runtime_models WHERE runtime_id = ?", [runtimeId]);
     for (const model of normalized) {
       this.ctx.db.run(
         `INSERT INTO multiremi_runtime_models (
-          runtime_id, model_id, label, provider, is_default, thinking, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          runtime_id, model_id, label, provider, is_default, thinking, created_at, updated_at, is_provider_default, catalog
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           runtimeId,
           model.id,
@@ -1966,21 +2116,23 @@ export class RuntimesRepo {
           model.thinking ? toJson(model.thinking) : null,
           now,
           now,
+          model.providerDefault ? 1 : 0,
+          model.catalog ? toJson(model.catalog) : null,
         ],
       );
     }
+    return true;
   }
 
-  private runtimeUsageSummary(runtimeId: string): Pick<MultiremiRuntime,
-    "taskCount" |
-    "activeTaskCount" |
-    "completedTaskCount" |
-    "failedTaskCount" |
-    "inputTokens" |
-    "outputTokens" |
-    "cacheReadTokens" |
-    "cacheWriteTokens"
-  > {
+  private runtimeUsageSummary(runtimeId: string): RuntimeUsageSummary {
+    // Every runtime read (heartbeat, claim, runtime lists) lands here. On Postgres each row crosses
+    // the worker bridge as JSON, so re-reading a runtime's whole task history on every read
+    // dominated those requests. bun:sqlite reads in-process and keeps the plain scan.
+    if (this.ctx.db instanceof PostgresSyncDatabase) return this.runtimeUsageSummaryPostgres(this.ctx.db, runtimeId);
+    return this.runtimeUsageSummaryScan(runtimeId);
+  }
+
+  private runtimeUsageSummaryScan(runtimeId: string): RuntimeUsageSummary {
     const rows = this.ctx.db.query(
       "SELECT id, status, usage FROM multiremi_tasks WHERE runtime_id = ?",
     ).all(runtimeId) as Row[];
@@ -1999,15 +2151,104 @@ export class RuntimesRepo {
       if (isInFlightTaskStatus(status)) stats.activeTaskCount += 1;
       if (status === "completed") stats.completedTaskCount += 1;
       if (status === "failed") stats.failedTaskCount += 1;
-      for (const entry of parseTaskUsageEntries(row.usage)) {
-        stats.inputTokens += entry.inputTokens;
-        stats.outputTokens += entry.outputTokens;
-        stats.cacheReadTokens += entry.cacheReadTokens;
-        stats.cacheWriteTokens += entry.cacheWriteTokens;
-      }
+      addTaskUsage(stats, row.usage);
     }
     return stats;
   }
+
+  /**
+   * Counts come from SQL. Token totals still come from `parseTaskUsageEntries`, so they match the
+   * scan exactly, but only unsettled tasks (a handful) send their usage every time. Settled tasks'
+   * totals are cached per runtime under a version of those rows (ids plus `xmin`, which every
+   * insert, update or delete changes) and re-read only when the version moves.
+   */
+  private runtimeUsageSummaryPostgres(db: PostgresSyncDatabase, runtimeId: string): RuntimeUsageSummary {
+    const inFlight = IN_FLIGHT_TASK_STATUSES.map(() => "?").join(", ");
+    const settled = SETTLED_TASK_STATUSES.map(() => "?").join(", ");
+    const row = db.query(
+      `SELECT COUNT(*) AS task_count,
+              COUNT(*) FILTER (WHERE status IN (${inFlight})) AS active_task_count,
+              COUNT(*) FILTER (WHERE status = 'completed') AS completed_task_count,
+              COUNT(*) FILTER (WHERE status = 'failed') AS failed_task_count,
+              ${tasksVersionSql(` FILTER (WHERE status IN (${settled}))`)} AS settled_version,
+              (json_agg(usage) FILTER (WHERE status NOT IN (${settled})))::text AS open_usage
+       FROM multiremi_tasks
+       WHERE runtime_id = ?`,
+    ).get(...IN_FLIGHT_TASK_STATUSES, ...SETTLED_TASK_STATUSES, ...SETTLED_TASK_STATUSES, runtimeId) as Row;
+    const settledTokens = this.settledTaskTokens(db, runtimeId, String(row.settled_version ?? ""));
+    // A task settled or changed between the two reads; rescan rather than mix two snapshots.
+    if (!settledTokens) return this.runtimeUsageSummaryScan(runtimeId);
+    const stats = {
+      taskCount: Number(row.task_count ?? 0),
+      activeTaskCount: Number(row.active_task_count ?? 0),
+      completedTaskCount: Number(row.completed_task_count ?? 0),
+      failedTaskCount: Number(row.failed_task_count ?? 0),
+      ...settledTokens,
+    };
+    for (const usage of parseJson<unknown[]>(row.open_usage, [])) addTaskUsage(stats, usage);
+    return stats;
+  }
+
+  /** Token totals over the runtime's settled tasks at `version`, or null if the rows moved past it. */
+  private settledTaskTokens(db: PostgresSyncDatabase, runtimeId: string, version: string): TaskTokenTotals | null {
+    const cached = this.settledUsageCache.get(runtimeId);
+    if (cached?.version === version) return { ...cached.tokens };
+    const settled = SETTLED_TASK_STATUSES.map(() => "?").join(", ");
+    const row = db.query(
+      `SELECT ${tasksVersionSql()} AS settled_version, json_agg(usage)::text AS settled_usage
+       FROM multiremi_tasks
+       WHERE runtime_id = ? AND status IN (${settled})`,
+    ).get(runtimeId, ...SETTLED_TASK_STATUSES) as Row;
+    const tokens = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    for (const usage of parseJson<unknown[]>(row.settled_usage, [])) addTaskUsage(tokens, usage);
+    const current = String(row.settled_version ?? "");
+    // Two writes to one row inside a transaction leave the same `xmin`, so a version read between
+    // them could outlive the second write. Cache only outside transactions; lookups inside one stay
+    // safe, since no cached version can include rows this transaction wrote.
+    if (!db.inTransaction) this.settledUsageCache.set(runtimeId, { version: current, tokens });
+    return current === version ? { ...tokens } : null;
+  }
+}
+
+type RuntimeUsageSummary = Pick<MultiremiRuntime,
+  "taskCount" |
+  "activeTaskCount" |
+  "completedTaskCount" |
+  "failedTaskCount" |
+  "inputTokens" |
+  "outputTokens" |
+  "cacheReadTokens" |
+  "cacheWriteTokens"
+>;
+
+type TaskTokenTotals = Pick<MultiremiRuntime, "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens">;
+
+// Tasks in these states are finished; their rows (and usage) rarely change again.
+const SETTLED_TASK_STATUSES: readonly MultiremiTaskStatus[] = ["completed", "failed", "cancelled"];
+
+/**
+ * Digest of task ids and `xmin`. A row's `xmin` is the transaction that wrote its current version,
+ * so inserting, updating, deleting or re-homing any matched row changes the digest. "C" collation
+ * keeps the order independent of the database locale.
+ */
+function tasksVersionSql(filter = ""): string {
+  return `md5(string_agg(id || ':' || xmin::text, ',' ORDER BY id COLLATE "C")${filter})`;
+}
+
+function addTaskUsage(stats: TaskTokenTotals, usage: unknown): void {
+  for (const entry of parseTaskUsageEntries(usage)) {
+    stats.inputTokens += entry.inputTokens;
+    stats.outputTokens += entry.outputTokens;
+    stats.cacheReadTokens += entry.cacheReadTokens;
+    stats.cacheWriteTokens += entry.cacheWriteTokens;
+  }
+}
+
+/** Names are presentation; endpoint, model and authentication identify the connection. */
+function sameConnection(left: RuntimeCodexProfile, right: RuntimeCodexProfile): boolean {
+  return left.base_url === right.base_url && left.model === right.model
+    && (left.auth_mode ?? "env") === (right.auth_mode ?? "env")
+    && left.env_key === right.env_key && left.credential_id === right.credential_id;
 }
 
 function normalizeAgentPluginProtocol(value: unknown): number {
@@ -2122,9 +2363,18 @@ function normalizeRuntimeModels(models: MultiremiRuntimeModel[], provider: strin
       label: String(model.label ?? id).trim() || id,
       provider: String(model.provider ?? provider ?? "").trim() || provider,
       default: Boolean(model.default),
+      ...(model.providerDefault === true ? { providerDefault: true } : {}),
       thinking: normalizeRuntimeModelThinking(model.thinking),
+      ...(model.catalog ? { catalog: normalizeRuntimeModelCatalog(model.catalog) } : {}),
     };
   });
+}
+
+function normalizeRuntimeModelCatalog(value: NonNullable<MultiremiRuntimeModel["catalog"]>): NonNullable<MultiremiRuntimeModel["catalog"]> {
+  return value.status === "ready" ? { status: "ready" } : {
+    status: "error",
+    error: typeof value.error === "string" ? value.error.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200) : "Codex model catalog unavailable",
+  };
 }
 
 function normalizeRuntimeModelThinking(value: MultiremiRuntimeModel["thinking"]): MultiremiRuntimeModel["thinking"] | undefined {
@@ -2134,10 +2384,17 @@ function normalizeRuntimeModelThinking(value: MultiremiRuntimeModel["thinking"])
     label: String(level.label ?? level.value ?? "").trim(),
     ...(level.description ? { description: String(level.description) } : {}),
   })).filter((level) => level.value);
-  if (!supportedLevels.length) return undefined;
+  const status = value.status;
+  if (status !== undefined && !["supported", "unsupported", "unknown", "error"].includes(status)) {
+    return { status: "error", supportedLevels: [], error: "invalid runtime reasoning metadata" };
+  }
+  const availableLevels = status && status !== "supported" ? [] : supportedLevels;
+  const defaultLevel = value.defaultLevel ?? value.default_level;
   return {
-    supportedLevels,
-    ...(value.defaultLevel || value.default_level ? { defaultLevel: String(value.defaultLevel ?? value.default_level) } : {}),
+    supportedLevels: availableLevels,
+    ...(defaultLevel && availableLevels.some((level) => level.value === defaultLevel) ? { defaultLevel: String(defaultLevel) } : {}),
+    ...(status ? { status } : {}),
+    ...(status === "error" && value.error ? { error: String(value.error).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200) } : {}),
   };
 }
 
@@ -2149,6 +2406,8 @@ function toRuntime(row: Row): MultiremiRuntime {
     daemonId: nullableString(row.daemon_id),
     legacyDaemonId: nullableString(row.legacy_daemon_id),
     daemonDisplayName: nullableString(row.daemon_display_name),
+    executionGroupId: nullableString(row.execution_group_id),
+    execution_group_id: nullableString(row.execution_group_id),
     runtimeMode: String(row.runtime_mode ?? "local"),
     deviceInfo: String(row.device_info ?? ""),
     metadata: parseJson<Record<string, unknown>>(row.metadata, {}),
@@ -2447,7 +2706,9 @@ function toRuntimeModel(row: Row): MultiremiRuntimeModel {
     label: String(row.label ?? row.model_id),
     provider: String(row.provider ?? ""),
     default: Boolean(Number(row.is_default ?? 0)),
+    ...(Number(row.is_provider_default) === 1 ? { providerDefault: true } : {}),
     thinking: row.thinking == null ? undefined : parseJson(row.thinking, undefined),
+    ...(row.catalog == null ? {} : { catalog: parseJson(row.catalog, undefined) }),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };

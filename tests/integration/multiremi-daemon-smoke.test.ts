@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
+import * as os from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { AcpProviderOptions } from "@acp/index.js";
 import type { MultiremiRuntimeModel } from "@multiremi/contracts/types.js";
@@ -19,10 +20,36 @@ import {
   type MultiremiDaemonProviderFactory,
 } from "@multiremi/daemon.js";
 import { MultiremiStore } from "@multiremi/store.js";
+import { prepareFeishuIssueTopic } from "../fixtures/multiremi-feishu-topic.js";
 import { MultiremiRepoCache } from "@multiremi/repo-cache.js";
 
 let db: Database | null = null;
 let workDir: string | null = null;
+
+/**
+ * Pin the provider base homes at an empty temp dir for this file.
+ *
+ * The runtime model probe resolves its base home from `CLAUDE_CONFIG_DIR` /
+ * `CODEX_HOME` and falls back to `~/.claude` / `~/.codex`. `bun test` now runs with
+ * the repo's env namespace stripped (tests/setup/hermetic-env.ts, MUL-318), so
+ * without this the probe would read the developer's real Claude credentials and
+ * report a credential-link error instead of the expected probe failure — green in
+ * CI (no `~/.claude`), red on any machine that has actually logged in.
+ */
+let providerHomeBase: string | null = null;
+
+beforeAll(() => {
+  providerHomeBase = mkdtempSync(join(tmpdir(), "multiremi-daemon-provider-home-"));
+  process.env.CLAUDE_CONFIG_DIR = join(providerHomeBase, "claude");
+  process.env.CODEX_HOME = join(providerHomeBase, "codex");
+});
+
+afterAll(() => {
+  delete process.env.CLAUDE_CONFIG_DIR;
+  delete process.env.CODEX_HOME;
+  if (providerHomeBase) rmSync(providerHomeBase, { recursive: true, force: true });
+  providerHomeBase = null;
+});
 
 afterEach(() => {
   db?.close();
@@ -59,6 +86,7 @@ describe("Bun Multiremi daemon smoke", () => {
     const previousHome = process.env.CLAUDE_CONFIG_DIR;
     process.env.CLAUDE_CONFIG_DIR = baseHome;
     let sends = 0;
+    let sideWorkDir: string | null = null;
     const daemon = new MultiremiDaemon({
       serverUrl: `http://127.0.0.1:${server.port}`, token: token.token, daemonId: "workspace-laptop", runtimeName: "Local workspace test",
       provider: "claude", workspaceId: "local", daemonPort: 0, pollIntervalMs: 20, gcEnabled: false,
@@ -66,15 +94,22 @@ describe("Bun Multiremi daemon smoke", () => {
       providerFactory: messageProviderFactory({ text: "Local workspace verified", sessionId: "local-session", requestId: "local-request",
         onSend: (prompt, options) => {
           sends++;
-          expect(options.cwd).toBe(cwd);
-          expect(options.env?.LOCAL_DEPENDENCY).toBe("retained");
-          expect(readFileSync(join(options.env!.CLAUDE_CONFIG_DIR!, "CLAUDE.md"), "utf8")).toContain("PRIVATE_PARENT_CONTEXT");
+          expect(options.cwd).toBe(sideWorkDir ?? cwd);
+          if (sideWorkDir) {
+            expect(options.env?.LOCAL_DEPENDENCY).toBeUndefined();
+            expect(prompt).not.toContain("## Runtime Workspace");
+          } else {
+            expect(options.env?.LOCAL_DEPENDENCY).toBe("retained");
+            expect(readFileSync(join(options.env!.CLAUDE_CONFIG_DIR!, "CLAUDE.md"), "utf8")).toContain("PRIVATE_PARENT_CONTEXT");
+          }
           expect(prompt).not.toContain("PRIVATE_PARENT_CONTEXT");
           expect(existsSync(join(cwd, ".multiremi"))).toBe(false);
           expect(existsSync(join(cwd, "wiki"))).toBe(false);
         },
       }),
     });
+    // Keep local context discovery independent of the developer's installed skills.
+    const homeSpy = spyOn(os, "homedir").mockReturnValue(join(root, "user-home"));
     let run: Promise<void> | null = null;
     try {
       run = daemon.start();
@@ -92,6 +127,28 @@ describe("Bun Multiremi daemon smoke", () => {
         expect(store.getTask(task.id)?.workDir).toBe(cwd);
       }
       expect(sends).toBe(2);
+      const sideIssue = store.createIssue({ title: "Discuss outside the user directory", runtime_workspace_id: workspace.id });
+      const parent = store.getOrCreateDefaultIssueSession(sideIssue.id);
+      const side = store.createIssueSession(sideIssue.id, { title: "Side", parentSessionId: parent.id });
+      sideWorkDir = join(daemonState, ".runtime", side.id, agent.id, "1", "work");
+      // Emulate an older server returning the parent directory in a side claim.
+      const client = (daemon as any).client;
+      const claim = client.claimTask.bind(client);
+      const claimSpy = spyOn(client, "claimTask").mockImplementation(async (id: string) => {
+        const claimed = await claim(id);
+        return claimed?.holdsWorkspace === false
+          ? { ...claimed, runtimeWorkspaceId: workspace.id, runtimeWorkspace: workspace }
+          : claimed;
+      });
+      try {
+        const sideTask = store.createTask({ agentId: agent.id, issueId: sideIssue.id, issueSessionId: side.id, prompt: "Discuss only" });
+        expect(sideTask.runtimeWorkspaceId).toBeNull();
+        await waitForCondition(() => ["completed", "failed"].includes(store.getTask(sideTask.id)?.status ?? ""), 10_000);
+        expect(store.getTask(sideTask.id)?.error).toBeNull();
+        expect(store.getTask(sideTask.id)?.status).toBe("completed");
+        expect(store.getTask(sideTask.id)?.workDir).toBe(sideWorkDir);
+      } finally { claimSpy.mockRestore(); }
+      expect(sends).toBe(3);
       expect(readFileSync(join(cwd, "local-state.txt"), "utf8")).toBe("private ignored state");
       expect(existsSync(join(root, "repo-cache"))).toBe(false);
       store.runtimeWorkspaces.archive(workspace.id);
@@ -99,6 +156,7 @@ describe("Bun Multiremi daemon smoke", () => {
     } finally {
       daemon.stop();
       await run?.catch(() => {});
+      homeSpy.mockRestore();
       if (previousHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
       else process.env.CLAUDE_CONFIG_DIR = previousHome;
       server.stop(true);
@@ -171,6 +229,10 @@ describe("Bun Multiremi daemon smoke", () => {
   });
 
   it("maps ACP model-specific effort capabilities to runtime model metadata", () => {
+    expect(runtimeModelsFromAcpCapabilities("claude", [{ id: "default", label: "Default", default: true,
+      providerDefault: true, effort: { supportedLevels: [] } }])).toEqual([
+      { id: "default", label: "Default", default: true, providerDefault: true, provider: "anthropic", thinking: { supportedLevels: [] } },
+    ]);
     expect(runtimeModelsFromAcpCapabilities("codex", [
       {
         id: "gpt-probe",
@@ -198,6 +260,12 @@ describe("Bun Multiremi daemon smoke", () => {
         },
       },
       { id: "gpt-fast", label: "GPT Fast", provider: "openai", default: false },
+    ]);
+
+    expect(runtimeModelsFromAcpCapabilities("grok", [
+      { id: "grok-code-fast-1", label: "Grok Code Fast 1", default: true },
+    ])).toEqual([
+      { id: "grok-code-fast-1", label: "Grok Code Fast 1", provider: "xai", default: true },
     ]);
   });
 
@@ -687,6 +755,7 @@ describe("Bun Multiremi daemon smoke", () => {
       id: expectedRuntimeId,
       name: "smoke-runtime",
       provider: "claude",
+      models: [{ id: "claude-smoke", label: "Smoke", provider: "anthropic", default: true }],
       workspaceId: "local",
       ownerId: "local",
     });
@@ -1191,8 +1260,8 @@ describe("Bun Multiremi daemon smoke", () => {
     const leader = store.createAgent({ name: "Leader", provider: "claude" });
     const worker = store.createAgent({ name: "Worker", provider: "claude" });
     const issue = store.createIssue({ title: "Parallel Issue" });
-    const chat = store.createChatSession({ agentId: worker.id, issueId: issue.id, workspaceId: "local" });
-    const session = store.getOrCreateDefaultChatSession(chat.id);
+    const chat = store.createChatSession({ agentId: worker.id, workspaceId: "local" });
+    const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Parallel work" });
     const tasks = ["one", "two"].map((scope) => store.createTask({
       agentId: worker.id, issueId: issue.id, prompt: scope,
       chatSessionId: chat.id, issueSessionId: session.id,
@@ -1226,7 +1295,9 @@ describe("Bun Multiremi daemon smoke", () => {
     try {
       await withTimeout(bothStarted.promise, 5_000, "Issue delegations serialized in daemon");
       expect(homes.size).toBe(2);
-      expect(tasks.map((task) => store.getTask(task.id)?.status)).toEqual(["running", "running"]);
+      // `dispatched -> running` is written back asynchronously by the daemon, so poll instead of
+      // reading the status right after both providers started.
+      await waitForCondition(() => tasks.every((task) => store.getTask(task.id)?.status === "running"), 5_000);
       for (const task of tasks) expect([...contexts.values()].some((value) => value.includes(task.id))).toBe(true);
       expect(store.getIssueWorkspace(issue.id)?.rootPath).toBe(join(workDir, "workspaces", "issues", issue.key));
       release.resolve();
@@ -1846,11 +1917,12 @@ describe("Bun Multiremi daemon smoke", () => {
     }
   }, 120_000);
 
-  it("runs Issue-bound Chat replies without a Discussion Session and resumes their Chat context", async () => {
+  it("runs Feishu Issue-topic replies without a Discussion Session and resumes their Chat context", async () => {
     const { store, workDir } = daemonTestBed("multiremi-bound-chat-");
     const agent = store.createAgent({ name: "Remi", provider: "claude" });
     const issue = store.createIssue({ title: "Bound Issue", workspaceId: "local" });
-    const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id, title: "Topic" });
+    const topicRuntime = store.registerRuntime({ id: "rt_topic_setup", name: "Topic setup", provider: "claude", workspaceId: "local" });
+    const chat = prepareFeishuIssueTopic(store, { agentId: agent.id, issueId: issue.id, runtimeId: topicRuntime.id });
     const originalIssueSessions = store.listIssueSessions(issue.id).map(session => session.id);
     const token = await store.createAccessToken({ name: "Chat daemon", type: "daemon", workspaceId: "local" });
     const server = startMultiremiServer({ store, scheduler: null, authToken: "bound-chat-secret", hostname: "127.0.0.1", port: 0 });
@@ -1865,7 +1937,7 @@ describe("Bun Multiremi daemon smoke", () => {
     });
     try {
       for (let turn = 0; turn < 2; turn++) {
-        const task = store.createTask({ agentId: agent.id, chatSessionId: chat.id, holdsWorkspace: false, prompt: "Progress?" });
+        const task = store.sendChatMessage(chat.id, { body: "Progress?" }).task;
         expect(task).toMatchObject({ issueId: issue.id, issueSessionId: null, holdsWorkspace: false });
         await new MultiremiDaemon({ serverUrl: `http://127.0.0.1:${server.port}`, token: token.token,
           runtimeName: "bound-chat", provider: "claude", workspaceId: "local", once: true, daemonPort: 0,
@@ -1882,6 +1954,12 @@ describe("Bun Multiremi daemon smoke", () => {
   it("resumes chat tasks with the pinned provider session after daemon restart", async () => {
     const { store, workDir } = daemonTestBed("multiremi-daemon-chat-resume-");
     const workspacesRoot = join(workDir, "workspaces");
+    store.registerRuntime({
+      id: daemonRuntimeIdForTest("daemon-chat-resume", "claude"),
+      name: "chat-resume-runtime", provider: "claude", workspaceId: "local", ownerId: "local",
+      models: [{ id: "claude-chat", label: "Chat", provider: "anthropic", default: true,
+        thinking: { supportedLevels: [{ value: "xhigh", label: "Extra high" }] } }],
+    });
     const agent = store.createAgent({
       name: "Chat Claude",
       provider: "claude",
@@ -1889,6 +1967,14 @@ describe("Bun Multiremi daemon smoke", () => {
       thinkingLevel: "xhigh",
       mcpConfig: { mcpServers: { recall: { command: "/bin/recall", env: { TOKEN: "t" } } } },
     });
+    // The injected provider deliberately bypasses live capability discovery.
+    // Advertise its fixture model so task eligibility can validate xhigh while
+    // this test continues to exercise session persistence across daemon restarts.
+    const runtime = store.registerRuntime({ id: "rt_chat_resume", name: "chat-resume-runtime", provider: "claude", workspaceId: "local" });
+    store.updateRuntimeModels(runtime.id, [{
+      id: "claude-chat", label: "Chat Claude", provider: "anthropic", default: true,
+      thinking: { supportedLevels: [{ value: "xhigh", label: "Extra high" }] },
+    }]);
     const session = store.createChatSession({ agentId: agent.id, title: "Resume chat" });
     const first = store.sendChatMessage(session.id, { body: "Start the chat" });
     const daemonToken = await store.createAccessToken({
@@ -1943,6 +2029,8 @@ describe("Bun Multiremi daemon smoke", () => {
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       runtimeName: "chat-resume-runtime",
+      runtimeId: runtime.id,
+      daemonId: "daemon-chat-resume",
       provider: "claude",
       workspaceId: "local",
       once: true,
@@ -2100,8 +2188,8 @@ describe("Bun Multiremi daemon smoke", () => {
       provider: "claude",
     });
     const issue = store.createIssue({ title: "Use local directory", projectId: project.id });
-    const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id, workspaceId: "local" });
-    const session = store.getOrCreateDefaultChatSession(chat.id);
+    const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local", projectId: project.id });
+    const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Local directory work" });
     const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Read the local project" });
     const daemonToken = await store.createAccessToken({
       name: "Local directory daemon",
@@ -2213,8 +2301,8 @@ describe("Bun Multiremi daemon smoke", () => {
       provider: "codex",
     });
     const issue = store.createIssue({ title: "Capture Codex home", workspaceId: "local" });
-    const chat = store.createChatSession({ agentId: agent.id, issueId: issue.id, workspaceId: "local" });
-    const session = store.getOrCreateDefaultChatSession(chat.id);
+    const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local" });
+    const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Provider environment" });
     const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Capture the provider environment" });
     const daemonToken = await store.createAccessToken({
       name: "Codex home daemon",
@@ -3051,7 +3139,7 @@ describe("Bun Multiremi daemon smoke", () => {
     }
   });
 
-  it("retries SSH Mesh cleanup and waits for success before stopping after daemon authority is revoked", async () => {
+  it("retries SSH Mesh cleanup, then keeps probing instead of exiting after daemon authority is revoked", async () => {
     const { store, workDir } = daemonTestBed("multiremi-daemon-authority-cleanup-");
     const daemonToken = await store.createAccessToken({
       name: "Authority cleanup daemon",
@@ -3093,6 +3181,7 @@ describe("Bun Multiremi daemon smoke", () => {
         },
       },
       terminalAuthorityCleanupRetryDelaysMs: [10],
+      authorityProbeDelaysMs: [10],
     });
     let settled = false;
     const daemonRun = daemon.start().finally(() => { settled = true; });
@@ -3112,9 +3201,26 @@ describe("Bun Multiremi daemon smoke", () => {
       expect(settled).toBe(false);
 
       releaseCleanup();
-      await daemonRun;
+      // Cleanup success no longer ends the process: exiting here is what let
+      // systemd's Restart=always turn a revoked credential into a retry storm.
+      // The daemon stays alive and probes register on the authority schedule.
+      const probeHealth = await waitForHealth(
+        port,
+        (health) => Number(
+          (health.authority_probe as { attempts?: number } | undefined)?.attempts ?? 0,
+        ) >= 1,
+        5_000,
+      );
+      // The wake-up channel stays connected while the process is alive…
+      expect(["connected", "connecting", "disconnected"]).toContain(
+        String((probeHealth.claim_wake_ws as { state?: string }).state),
+      );
       expect(cleanupCalls).toBe(2);
-      expect(settled).toBe(true);
+      expect(settled).toBe(false);
+      // …and is torn down once the daemon stops, so an idle socket never
+      // outlives the poll loop that consumes its frames.
+      daemon.stop();
+      expect(daemon.taskWakeupStatus()).toMatchObject({ state: "disabled", connected: false });
     } finally {
       releaseCleanup();
       daemon.stop();
@@ -3123,7 +3229,93 @@ describe("Bun Multiremi daemon smoke", () => {
     }
   });
 
+  it("logs the first authority failure as ERROR and later probes as WARN with the next probe time", async () => {
+    const { store, workDir } = daemonTestBed("multiremi-daemon-authority-log-");
+    const daemonToken = await store.createAccessToken({
+      name: "Authority log daemon",
+      type: "daemon",
+      workspaceId: "local",
+    });
+    const server = startMultiremiServer({
+      store,
+      scheduler: null,
+      authToken: "root-authority-log-secret",
+      hostname: "127.0.0.1",
+      port: 0,
+    });
+    const lines: string[] = [];
+    const errorSpy = spyOn(console, "error").mockImplementation(((message: unknown) => {
+      lines.push(`ERROR ${String(message)}`);
+    }) as never);
+    const warnSpy = spyOn(console, "warn").mockImplementation(((message: unknown) => {
+      lines.push(`WARN ${String(message)}`);
+    }) as never);
+    const daemon = new MultiremiDaemon({
+      serverUrl: `http://127.0.0.1:${server.port}`,
+      token: daemonToken.token,
+      daemonId: "daemon-authority-log",
+      runtimeName: "authority-log-runtime",
+      provider: "claude",
+      workspaceId: "local",
+      daemonPort: 0,
+      pollIntervalMs: 10,
+      repoCacheRoot: join(workDir, ".repo-cache"),
+      providerFactory: () => ({
+        async *sendStream() {},
+        getLastResponse: () => null,
+      }),
+      sshMeshManager: {
+        getHeartbeatStatus: () => ({ status: "disabled" }),
+        reconcile: async () => {},
+        cleanupForRetirement: async () => {},
+      },
+      terminalAuthorityCleanupRetryDelaysMs: [10],
+      authorityProbeDelaysMs: [10, 10, 10],
+    });
+    const daemonRun = daemon.start();
+    try {
+      await waitForLocalPort(daemon);
+      const retirementPlan = store.getDaemonRetirementPlan("local", "daemon-authority-log");
+      expect(store.retireDaemon(
+        "local",
+        "daemon-authority-log",
+        retirementPlan.snapshot,
+        "local",
+      )).toMatchObject({ status: "retired" });
+
+      await waitForCondition(
+        () => lines.filter((line) => line.startsWith("WARN") && line.includes("authority probe")).length >= 2,
+        5_000,
+      );
+    } finally {
+      daemon.stop();
+      await daemonRun.catch(() => {});
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+      server.stop(true);
+    }
+
+    const errors = lines.filter((line) => line.startsWith("ERROR"));
+    const warnings = lines.filter((line) => line.startsWith("WARN") && line.includes("authority probe"));
+    // The revocation itself is the one ERROR line an operator must see.
+    expect(errors.join("\n")).toContain("authorization was revoked or retired");
+    // The line has to name the HTTP cause so an operator can tell a revoked
+    // credential (401/403) from a retired daemon (410) without reading the server.
+    expect(errors.join("\n")).toMatch(/HTTP (401|403|410)/);
+    expect(errors.join("\n")).toContain("daemon_retired");
+    // Every later probe is a WARN that names the next probe time.
+    expect(warnings.length).toBeGreaterThanOrEqual(2);
+    for (const warning of warnings) {
+      // "next probe in <delay>ms at <iso time>": both halves are required so an
+      // operator can tell how long the daemon will stay paused and until when.
+      expect(warning).toContain("next probe in");
+      expect(warning).toMatch(/ at \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    }
+    expect(errors.filter((line) => line.includes("authority probe"))).toHaveLength(0);
+  }, 20_000);
+
   it("stays cleanup-only and stops claiming while terminal SSH Mesh cleanup keeps failing", async () => {
+
     const { store, workDir } = daemonTestBed("multiremi-daemon-authority-cleanup-failure-");
     const daemonToken = await store.createAccessToken({
       name: "Authority cleanup failure daemon",
@@ -3634,6 +3826,23 @@ async function waitForRunningHealth(port: number): Promise<Record<string, unknow
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`daemon did not report running health: ${JSON.stringify(last)}`);
+}
+
+/** Poll `/health` until `predicate` holds, returning the matching payload. */
+async function waitForHealth(
+  port: number,
+  predicate: (health: Record<string, unknown>) => boolean,
+  timeoutMs = 2_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  let last: Record<string, unknown> = {};
+  while (Date.now() < deadline) {
+    const response = await fetch(`http://127.0.0.1:${port}/health`);
+    last = await response.json() as Record<string, unknown>;
+    if (predicate(last)) return last;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`daemon health never matched: ${JSON.stringify(last)}`);
 }
 
 function deferred<T = void>(): {

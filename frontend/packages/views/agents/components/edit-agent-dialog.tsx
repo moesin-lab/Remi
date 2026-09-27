@@ -10,7 +10,7 @@ import type {
 } from "@multiremi/core/types";
 import { AGENT_DESCRIPTION_MAX_LENGTH } from "@multiremi/core/agents";
 import { useWorkspaceId } from "@multiremi/core/hooks";
-import { useFleetProviderModels } from "@multiremi/core/runtimes";
+import { isFallbackModelUnavailable, isModelExecutionUnknown, isModelUnavailable, useExecutionTargetModels } from "@multiremi/core/runtimes";
 import { isImeComposing } from "@multiremi/core/utils";
 import { Button } from "@multiremi/ui/components/ui/button";
 import {
@@ -33,11 +33,12 @@ import {
 import { useT } from "../../i18n";
 import { AvatarPicker } from "./avatar-picker";
 import { CharCounter } from "./char-counter";
-import { EngineSelect } from "./engine-select";
+import { ExecutionTargetSelect, type ExecutionTarget } from "./execution-target-select";
 import { InstructionsEditor } from "./instructions-editor";
 import { ModelDropdown } from "./model-dropdown";
 import { ThinkingField } from "./thinking-field";
 import {
+  getModelThinking,
   getModelThinkingLevels,
   supportsThinkingLevel,
 } from "./inspector/thinking-levels";
@@ -69,11 +70,15 @@ export function EditAgentDialog({
   const [avatarUrl, setAvatarUrl] = useState<string | null>(
     agent.avatar_url ?? null,
   );
-  const [provider, setProvider] = useState(agent.provider || "claude");
+  const [executionGroupId, setExecutionGroupId] = useState(agent.execution_group_id ?? "");
+  const [legacyRuntimeId, setLegacyRuntimeId] = useState(agent.runtime_id ?? "");
+  const [provider, setProvider] = useState(agent.provider ?? "");
   const [model, setModel] = useState(agent.model ?? "");
   const [thinkingLevel, setThinkingLevel] = useState(
     agent.thinking_level ?? "",
   );
+  const [fallbackModel, setFallbackModel] = useState(agent.fallback_model ?? agent.fallbackModel ?? "");
+  const [fallbackThinkingLevel, setFallbackThinkingLevel] = useState(agent.fallback_thinking_level ?? agent.fallbackThinkingLevel ?? "");
   const [visibility, setVisibility] = useState<AgentVisibility>(
     agent.visibility,
   );
@@ -84,37 +89,68 @@ export function EditAgentDialog({
   const [role, setRole] = useState<AgentRole>(agent.role ?? "normal");
   const [saving, setSaving] = useState(false);
 
-  const fleet = useFleetProviderModels(wsId ?? "", provider);
+  const targetModels = useExecutionTargetModels(wsId ?? "", provider, executionGroupId ? undefined : legacyRuntimeId, executionGroupId, agent.id);
+  const executionUnknown = isModelExecutionUnknown(provider, model, targetModels.models, targetModels.modelCatalogStatus);
+  const unavailable = isModelUnavailable(provider, model, targetModels.models, targetModels.modelCatalogStatus);
   const thinkingLevels = useMemo(
-    () => getModelThinkingLevels(fleet.models, model),
-    [fleet.models, model],
+    () => getModelThinkingLevels(targetModels.models, model, targetModels.defaultThinking),
+    [targetModels.models, model, targetModels.defaultThinking],
   );
+  const primaryModel = model || targetModels.models.find((entry) => entry.default)?.id || "";
+  const fallbackUnavailable = isFallbackModelUnavailable(provider, fallbackModel, targetModels.models, targetModels.modelCatalogStatus);
+  const fallbackChanged = fallbackModel !== (agent.fallback_model ?? agent.fallbackModel ?? "") ||
+    fallbackThinkingLevel !== (agent.fallback_thinking_level ?? agent.fallbackThinkingLevel ?? "") || model !== (agent.model ?? "") ||
+    provider !== (agent.provider ?? "") || executionGroupId !== (agent.execution_group_id ?? "") || legacyRuntimeId !== (agent.runtime_id ?? "");
+  const fallbackInvalid = fallbackChanged && !!fallbackModel && (fallbackModel === primaryModel || fallbackUnavailable ||
+    !supportsThinkingLevel(targetModels.models, fallbackModel, fallbackThinkingLevel, targetModels.defaultThinking));
+  const fallbackLevels = getModelThinkingLevels(targetModels.models, fallbackModel, targetModels.defaultThinking);
 
   const concurrency = Number(maxConcurrency);
   const validConcurrency =
     Number.isInteger(concurrency) &&
     concurrency >= MIN_CONCURRENCY &&
     concurrency <= MAX_CONCURRENCY;
-  const canSave =
+  const executionChanged = provider !== (agent.provider ?? "") || model !== (agent.model ?? "")
+    || thinkingLevel !== (agent.thinking_level ?? "") || executionGroupId !== (agent.execution_group_id ?? "")
+    || legacyRuntimeId !== (agent.runtime_id ?? "");
+  const canSave = (!executionChanged || !unavailable) && !fallbackInvalid &&
     name.trim().length > 0 &&
     [...description].length <= AGENT_DESCRIPTION_MAX_LENGTH &&
     validConcurrency;
 
-  const switchEngine = (next: string) => {
-    setProvider(next);
+  const switchTarget = (next: ExecutionTarget) => {
+    setProvider(next.provider);
+    setExecutionGroupId(next.executionGroupId);
+    setLegacyRuntimeId("");
     setModel("");
     setThinkingLevel("");
+    setFallbackModel("");
+    setFallbackThinkingLevel("");
   };
 
   const switchModel = (next: string) => {
     if (
       next !== model &&
-      !supportsThinkingLevel(fleet.models, next, thinkingLevel)
+      !supportsThinkingLevel(targetModels.models, next, thinkingLevel, targetModels.defaultThinking)
     ) {
       setThinkingLevel("");
     }
     setModel(next);
+    if ((next || targetModels.models.find((entry) => entry.default)?.id) === fallbackModel) {
+      setFallbackModel("");
+      setFallbackThinkingLevel("");
+    }
   };
+
+  const switchFallback = (next: string) => {
+    if (!next || !supportsThinkingLevel(targetModels.models, next, fallbackThinkingLevel, targetModels.defaultThinking)) {
+      setFallbackThinkingLevel("");
+    }
+    setFallbackModel(next);
+  };
+
+  const targetChanged = executionGroupId !== (agent.execution_group_id ?? "") ||
+    (!!agent.runtime_id && !legacyRuntimeId);
 
   const submit = async () => {
     if (!canSave || saving) return;
@@ -124,9 +160,14 @@ export function EditAgentDialog({
         name: name.trim(),
         description: description.trim(),
         avatar_url: avatarUrl ?? "",
-        provider,
+        ...(provider ? { provider } : {}),
+        ...(targetChanged ? { execution_group_id: executionGroupId || null } : {}),
         model: model.trim(),
         thinking_level: thinkingLevel,
+        ...(fallbackModel !== (agent.fallback_model ?? agent.fallbackModel ?? "") || targetChanged
+          ? { fallback_model: fallbackModel.trim() } : {}),
+        ...(fallbackThinkingLevel !== (agent.fallback_thinking_level ?? agent.fallbackThinkingLevel ?? "") || targetChanged
+          ? { fallback_thinking_level: fallbackModel ? fallbackThinkingLevel : "" } : {}),
         visibility,
         max_concurrent_tasks: concurrency,
         instructions,
@@ -248,13 +289,19 @@ export function EditAgentDialog({
               </div>
             )}
 
-            <EngineSelect
+            <ExecutionTargetSelect
+              agentId={agent.id}
+              ownerId={agent.owner_id}
               wsId={wsId ?? ""}
-              value={provider}
-              onChange={switchEngine}
+              value={{ executionGroupId, provider }}
+              legacyRuntimeId={legacyRuntimeId}
+              onChange={switchTarget}
             />
 
             <ModelDropdown
+              agentId={agent.id}
+              runtimeId={executionGroupId ? undefined : legacyRuntimeId}
+              executionGroupId={executionGroupId}
               wsId={wsId ?? ""}
               provider={provider}
               value={model}
@@ -291,8 +338,39 @@ export function EditAgentDialog({
               <ThinkingField
                 value={thinkingLevel}
                 levels={thinkingLevels}
+                thinking={getModelThinking(targetModels.models, model, targetModels.defaultThinking)}
+                isLoading={targetModels.isLoading}
+                isError={targetModels.isError}
+                modelUnavailable={unavailable} modelExecutionUnknown={executionUnknown}
                 onChange={setThinkingLevel}
               />
+            </div>
+
+            <div className="space-y-2 border-t pt-4">
+              <ModelDropdown
+                agentId={agent.id}
+                runtimeId={executionGroupId ? undefined : legacyRuntimeId}
+                executionGroupId={executionGroupId}
+                wsId={wsId ?? ""}
+                provider={provider}
+                value={fallbackModel}
+                onChange={switchFallback}
+                fallback
+                excludedModel={primaryModel}
+              />
+              <p className="text-xs text-muted-foreground">{t(($) => $.fallback.description)}</p>
+              {fallbackInvalid && fallbackModel === primaryModel && <p role="status" className="text-xs text-destructive">{t(($) => $.fallback.same_as_primary)}</p>}
+              {fallbackModel && <ThinkingField
+                value={fallbackThinkingLevel}
+                levels={fallbackLevels}
+                thinking={getModelThinking(targetModels.models, fallbackModel, targetModels.defaultThinking)}
+                isLoading={targetModels.isLoading}
+                isError={targetModels.isError}
+                modelUnavailable={fallbackUnavailable}
+                modelExecutionUnknown={isModelExecutionUnknown(provider, fallbackModel, targetModels.models, targetModels.modelCatalogStatus)}
+                label={t(($) => $.fallback.thinking_label)}
+                onChange={setFallbackThinkingLevel}
+              />}
             </div>
 
             <InstructionsEditor

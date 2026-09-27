@@ -7,6 +7,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type {
@@ -20,6 +21,12 @@ import enAgents from "../../locales/en/agents.json";
 import zhCommon from "../../locales/zh-Hans/common.json";
 import zhAgents from "../../locales/zh-Hans/agents.json";
 
+vi.mock("./execution-target-select", () => ({
+  ExecutionTargetSelect: ({ onChange }: { onChange: (target: { executionGroupId: string; provider: string }) => void }) => (
+    <div role="group" aria-label="Execution target">{["claude", "codex"].map((provider) => <button key={provider} onClick={() => onChange({ executionGroupId: `group-${provider}`, provider })}>{provider}</button>)}</div>
+  ),
+}));
+
 const TEST_RESOURCES = {
   en: { common: enCommon, agents: enAgents },
   "zh-Hans": { common: zhCommon, agents: zhAgents },
@@ -29,8 +36,11 @@ vi.mock("@multiremi/core/hooks", () => ({
   useWorkspaceId: () => "ws-1",
 }));
 
-vi.mock("@multiremi/core/runtimes", () => ({
-  useFleetProviderModels: (_wsId: string, provider: string) => ({
+const catalog = vi.hoisted(() => ({ status: "ready", models: [] as Array<{ id: string; label: string; execution_status: string }> }));
+
+vi.mock("@multiremi/core/runtimes", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@multiremi/core/runtimes")>(),
+  useExecutionTargetModels: (_wsId: string, provider: string) => ({
     models:
       provider === "claude"
         ? [
@@ -63,8 +73,16 @@ vi.mock("@multiremi/core/runtimes", () => ({
                 ],
               },
             },
+            {
+              // Capability load failed for this model: the thinking block
+              // carries an explicit error instead of an empty level set.
+              id: "claude-flaky",
+              label: "Flaky",
+              thinking: { status: "error", supported_levels: [] },
+            },
           ]
-        : [],
+        : catalog.models,
+    modelCatalogStatus: provider === "codex" ? catalog.status : undefined,
     onlineRuntimeCount: 1,
     isLoading: false,
     isError: false,
@@ -83,12 +101,14 @@ vi.mock("./model-dropdown", () => ({
   ModelDropdown: ({
     value,
     onChange,
+    fallback,
   }: {
     value: string;
     onChange: (value: string) => void;
+    fallback?: boolean;
   }) => (
     <input
-      aria-label="Model"
+      aria-label={fallback ? "Fallback model" : "Model"}
       value={value}
       onChange={(event) => onChange(event.target.value)}
     />
@@ -190,11 +210,50 @@ function renderDialog(
 }
 
 afterEach(() => {
+  catalog.status = "ready";
+  catalog.models = [];
   cleanup();
   document.body.innerHTML = "";
 });
 
 describe("EditAgentDialog", () => {
+  it.each(["unknown", "error"])("allows only unrelated edits when the saved execution capability is %s", async (status) => {
+    catalog.status = status;
+    catalog.models = [{ id: "inventory-only", label: "Inventory only", execution_status: status === "unknown" ? "unknown" : "unavailable" }];
+    const { onSave } = renderDialog(makeAgent({ provider: "codex", model: "inventory-only", thinking_level: "saved-effort" }));
+    expect(screen.getByText(status === "unknown" ? "Execution capability unknown · Refreshing catalog" : "Not in execution catalog · Cannot run")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "Updated description" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[0]).toMatchObject({ description: "Updated description", model: "inventory-only", thinking_level: "saved-effort" });
+  });
+
+  it("blocks execution edits while the catalog is unknown", () => {
+    catalog.status = "unknown";
+    const { onSave } = renderDialog(makeAgent({ provider: "codex", model: "inventory-only", thinking_level: "" }));
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "other-route" } });
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("keeps an unavailable saved model and reasoning unchanged during an unrelated save", async () => {
+    const { onSave } = renderDialog(makeAgent({ provider: "codex", model: "inventory-only", thinking_level: "saved-effort" }));
+    expect(screen.getByText("Not in execution catalog · Cannot run")).toBeInTheDocument();
+    expect(screen.queryByText("Reasoning capability unknown")).toBeNull();
+    expect(screen.getByLabelText("Model")).toHaveValue("inventory-only");
+    // The model declares no levels, so the draft's effort renders read-only
+    // instead of as an editable picker. The unexecutable model is not editable
+    // here, so no clear control is offered either.
+    expect(screen.queryByRole("combobox", { name: "Reasoning effort" })).toBeNull();
+    expect(screen.getByText("saved-effort")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Clear the override/i })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "Updated description" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[0]).toMatchObject({ description: "Updated description", model: "inventory-only", thinking_level: "saved-effort" });
+  });
+
   it("submits the editable platform metadata in one update", async () => {
     const { onSave, onClose } = renderDialog();
 
@@ -248,8 +307,17 @@ describe("EditAgentDialog", () => {
     expect(onSave.mock.calls[0]?.[0]).toMatchObject({ role: "maintainer" });
   });
 
-  it("clears engine-specific model and thinking settings on engine switch", async () => {
-    const { onSave } = renderDialog();
+  it("sends the current group again when explicitly releasing a migrated machine pin", async () => {
+    const { onSave } = renderDialog(makeAgent({ runtime_id: "old-machine", execution_group_id: "group-claude" }));
+    fireEvent.click(screen.getByRole("button", { name: "claude" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[0]).toMatchObject({ execution_group_id: "group-claude", provider: "claude" });
+    expect(onSave.mock.calls[0]?.[0]).not.toHaveProperty("runtime_id");
+  });
+
+  it("clears target-specific model and thinking settings when changing targets", async () => {
+    const { onSave } = renderDialog(makeAgent({ fallback_model: "claude-opus", fallback_thinking_level: "high" }));
 
     fireEvent.click(screen.getByRole("button", { name: "codex" }));
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
@@ -257,9 +325,46 @@ describe("EditAgentDialog", () => {
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
     expect(onSave.mock.calls[0]?.[0]).toMatchObject({
       provider: "codex",
+      execution_group_id: "group-codex",
       model: "",
       thinking_level: "",
+      fallback_model: "",
+      fallback_thinking_level: "",
     });
+  });
+
+  it("persists fallback selection and explicit clearing without changing unrelated fields", async () => {
+    const { onSave } = renderDialog();
+    fireEvent.change(screen.getByLabelText("Fallback model"), { target: { value: "claude-opus" } });
+    expect(screen.getByRole("group", { name: "Fallback reasoning effort" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ fallback_model: "claude-opus" })));
+  });
+
+  it("clears the saved fallback and effort, and prevents choosing the primary", async () => {
+    const { onSave } = renderDialog(makeAgent({ fallback_model: "claude-opus", fallback_thinking_level: "high" }));
+    fireEvent.change(screen.getByLabelText("Fallback model"), { target: { value: "claude-sonnet" } });
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Fallback model"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ fallback_model: "", fallback_thinking_level: "" })));
+  });
+
+  it("preserves a saved unavailable fallback on unrelated edits", async () => {
+    catalog.models = [{ id: "old", label: "Old", execution_status: "unavailable" }];
+    const { onSave } = renderDialog(makeAgent({ provider: "codex", model: "", thinking_level: "", fallback_model: "old" }));
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "Updated" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ description: "Updated" })));
+    expect(onSave.mock.calls[0]?.[0]).not.toHaveProperty("fallback_model");
+  });
+
+  it("blocks a newly selected unavailable fallback", () => {
+    catalog.models = [{ id: "old", label: "Old", execution_status: "unavailable" }];
+    const { onSave } = renderDialog(makeAgent({ provider: "codex", model: "", thinking_level: "" }));
+    fireEvent.change(screen.getByLabelText("Fallback model"), { target: { value: "old" } });
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    expect(onSave).not.toHaveBeenCalled();
   });
 
   it("clears an effort that the newly selected model does not support", async () => {
@@ -302,18 +407,57 @@ describe("EditAgentDialog", () => {
     });
   });
 
-  it("surfaces an orphan effort until the user explicitly clears it", async () => {
+  it("shows an orphan effort read-only until the user explicitly clears it", async () => {
     const { onSave } = renderDialog(
       makeAgent({ model: "claude-retired", thinking_level: "xhigh" }),
     );
 
-    const effort = screen.getByRole("combobox", { name: "Reasoning effort" });
-    expect((effort as HTMLSelectElement).value).toBe("xhigh");
-    fireEvent.change(effort, { target: { value: "" } });
+    // A model that declares no levels gets a read-only value plus an explicit
+    // clear control, not an empty editable picker.
+    expect(screen.getByText("xhigh")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Reasoning effort" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Clear the override/i }));
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
     expect(onSave.mock.calls[0]?.[0].thinking_level).toBe("");
+  });
+
+  it("keeps the editable picker when the model's capability load failed", () => {
+    // A failed load is not an authoritative "no levels" verdict, so the saved
+    // effort stays editable (and clearable) exactly as before.
+    renderDialog(makeAgent({ provider: "claude", model: "claude-flaky", thinking_level: "high" }));
+
+    expect(screen.getByRole("combobox", { name: "Reasoning effort" })).toHaveValue("high");
+    expect(screen.getByText("Reasoning capability loading failed")).toBeInTheDocument();
+  });
+
+  it("keeps the editable picker when the model declares reasoning levels", () => {
+    renderDialog(makeAgent({ provider: "claude", model: "claude-opus", thinking_level: "high" }));
+
+    expect(screen.getByRole("combobox", { name: "Reasoning effort" })).toHaveValue("high");
+    expect(screen.getByRole("option", { name: "High" })).toBeInTheDocument();
+  });
+
+  it("shows a level-less fallback effort read-only and clears it", async () => {
+    const { onSave } = renderDialog(makeAgent({
+      provider: "claude",
+      model: "claude-sonnet",
+      thinking_level: "low",
+      fallback_model: "claude-retired",
+      fallback_thinking_level: "xhigh",
+    }));
+
+    const fallbackGroup = screen.getByRole("group", { name: "Fallback reasoning effort" });
+    expect(within(fallbackGroup).getByText("xhigh")).toBeInTheDocument();
+    expect(fallbackGroup.querySelector("select")).toBeNull();
+    fireEvent.click(within(fallbackGroup).getByRole("button", { name: /Clear the override/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    // The fallback model itself is unchanged, so only the cleared effort ships.
+    expect(onSave.mock.calls[0]?.[0]).toMatchObject({ fallback_thinking_level: "" });
+    expect(onSave.mock.calls[0]?.[0].fallback_model).toBeUndefined();
   });
 
   it("rejects an empty name and out-of-range concurrency locally", () => {
@@ -352,7 +496,7 @@ describe("EditAgentDialog", () => {
       (screen.getByLabelText("Concurrency") as HTMLInputElement).value,
     ).toBe("3");
     expect(screen.getByRole("group", { name: "Visibility" })).not.toBeNull();
-    expect(screen.getByRole("group", { name: "Engine" })).not.toBeNull();
+    expect(screen.getByRole("group", { name: "Execution target" })).not.toBeNull();
     expect(
       screen.getByRole("group", { name: "Reasoning effort" }),
     ).not.toBeNull();

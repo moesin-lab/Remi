@@ -35,6 +35,7 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 | `bun run probe:feishu` | [飞书流式卡片](tests/integration/feishu-streaming-probe.ts) | 专用测试会话与飞书凭据 |
 | `bun run replay:coverage` | [ACP fixture 重放检查](tests/integration/replay-coverage.ts) | 仓库内 fixture |
 | `bun run smoke:chat` | 独立 Chat 页面、队列、会话管理和附件；隔离 Next ↔ Bun API ↔ 临时 SQLite，模拟 Agent 输出 | 前端依赖与 Chromium；不调用真实 provider |
+| `bun run tests/integration/smoke-execution-configuration.ts` | [集中配置浏览器冒烟](tests/integration/smoke-execution-configuration.ts)：Profile/能力组增改删、绑定状态、版本失效及移动端；隔离 Next ↔ HTTP API ↔ 临时 SQLite | 前端依赖与 Chromium；使用测试凭据、模拟绑定确认，不调用真实模型 |
 
 `frontend/e2e/` 仍有继承的 Playwright 用例和上游登录/数据库假设；[配置](frontend/playwright.config.ts)只指定浏览器与 baseURL，不启动服务。它不能替代根 `e2e:frontend` 对 Remi Bun API 的验证。针对这些用例开发时，先核对 [env.ts](frontend/e2e/env.ts) 和实际 helper。
 
@@ -46,10 +47,14 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 |---|---|
 | [dev-context.yml](.github/workflows/dev-context.yml) | PR / main push；Linux、Windows 上的 Node 检查器测试及默认文档阅读链校验 |
 | [release-build-check.yml](.github/workflows/release-build-check.yml) | 按路径触发；后端套件、架构、CLI 能力、前端类型/测试、CLI 和容器构建、平台专项检查 |
-| [release.yml](.github/workflows/release.yml) / [platform-release.yml](.github/workflows/platform-release.yml) | CLI / 平台发版路径；发版条件遵循 [AGENTS.md](AGENTS.md) |
+| [release.yml](.github/workflows/release.yml) / [platform-release.yml](.github/workflows/platform-release.yml) | CLI 发布前校验依赖准备快照、tag 版本与同一 main 提交的全量 CI；平台发版条件遵循 [AGENTS.md](AGENTS.md) |
 
 真实 provider、飞书和浏览器 harness 的成功不能由普通单测或构建绿灯推断。报告验证时写明实际命令、环境、结果和未覆盖项。
 
-## 环境差异排查
+## 测试环境隔离与排查
 
-测试会继承进程环境和 Git 配置。遇到环境相关失败，先核对任务注入的 `MULTIREMI_*`、provider 凭据和 `core.hooksPath`；在隔离进程中仅移除影响该测试的配置再复现。不要修改用户全局配置来掩盖失败，也不要引用过往失败数量作为当前结果。
+`bun test` 通过 [bunfig.toml](bunfig.toml) 的 preload 在测试模块加载前执行 [hermetic-env.ts](tests/setup/hermetic-env.ts)，清除继承的产品配置和凭据。精确范围以纯模块 [hermetic-env-policy.ts](tests/setup/hermetic-env-policy.ts) 为准：清除 `MULTIREMI_*`、`REMI_*`、`ANTHROPIC_*`、`FEISHU_*` 及列明的独立变量，保留 `MULTIREMI_TEST_*`、`FEISHU_TEST_*` 测试输入。测试需要的环境变量由测试自己设置并还原；显式指定的测试数据库连接失败不能当作未配置而跳过。
+
+`NODE_ENV`、`PATH`、`HOME`、`SHELL`、`USER`、`GIT_*` 和 `SQLITE_LIB_PATH` 等宿主能力仍保留；这不是文件系统或全局 Git 配置隔离。遇到 `core.hooksPath` 等环境差异，先定位实际影响，再在隔离进程中复现，不修改用户全局配置来掩盖失败。
+
+[环境护栏测试](tests/arch/hermetic-test-env.test.ts)检查 preload 挂载、实际执行标记和变量泄漏；测试只导入 policy，不能通过直接导入 preload 自行清理后证明隔离成功。通过 `bun run` 执行的独立 harness 不加载该测试 preload，仍使用真实环境。

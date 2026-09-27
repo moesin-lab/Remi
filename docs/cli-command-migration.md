@@ -11,22 +11,92 @@ machine first. See [Antigravity Runtime](antigravity.md) for model discovery,
 configuration and execution limits. Agent Plugin provider filters remain scoped
 to Claude/Codex.
 
+`remi agent create|update|template create` accept `--fallback-model <model>` and
+`--fallback-thinking-level <level>`. The backup must differ from the primary
+model and be executable on the same selected target; its reasoning level must
+belong to the backup model's catalog. Use `remi agent update <agent>
+--fallback-model ''` to clear the backup. Changing an Agent's provider, Runtime,
+execution group or workspace clears the saved backup unless supplied again.
+
+`remi agent create`, `remi agent template create <template>`, `remi agent update
+<agent>` and `remi agent default` accept `--execution-group <group-id>`.
+Use `remi runtime group list` to find groups and their online Runtime counts,
+then `remi runtime model catalog --execution-group <group-id>` to inspect models.
+Create and maintain groups explicitly with `remi runtime group create|update`
+and a JSON body containing `name`, `provider`, `profile_id` (or null), and
+`runtime_ids`. Discovery no longer creates groups. A Runtime can belong to several
+groups in its workspace; provider compatibility is checked. Existing legacy groups
+and bindings are retained on upgrade. See [execution configuration](dev/execution-configuration.md).
+
+The legacy `--runtime <runtime-id>` agent and model-catalog option remains
+supported, and is mutually exclusive with `--execution-group`. Omitting both
+on agent update preserves the existing target. The provider is inferred from
+the selected target unless explicitly supplied; an explicit provider must match.
+Tasks use eligible members of the selected group and wait when none is available;
+they do not fall back to unrelated Runtimes sharing a provider.
+
+`remi runtime model catalog --agent <agent-id> --json` returns the same selectable
+models and reasoning capabilities as the Agent editor. For the Codex gateway,
+`model_catalog_status: "ready"` means `models` is the authoritative execution
+catalog. A saved model absent from that list is not executable; its saved model
+and thinking level remain intact. New selections of that model return
+`model_not_in_execution_catalog`. `model_catalog_status: "error"` retains the
+ordinary gateway inventory and reports capability loading failure instead of
+emptying the picker. Each model's `execution_status` distinguishes `available`,
+`unavailable`, and `unknown`; only actual ACP fallback members stay executable
+when that Runtime cannot load the native catalog. Bundled GPT reasoning options
+remain usable. `model_catalog_status: "unknown"` marks missing, obsolete, or
+unrefreshed snapshots; new explicit selections return
+`model_execution_catalog_unknown` until discovery finishes. The saved model and
+thinking level are preserved. Custom Runtime connections keep their own catalogs.
+
 ## Canonical command tree
 
-Codex Runtime connections use `remi runtime codex-profile get <runtime>` and
-`remi runtime codex-profile set <runtime> --file profile.json`. The JSON body
-contains `profile` and an optional write-only `api_key`; `profile: null` restores
-the workspace gateway. These are human configuration commands; task credentials
-cannot read or change them. See [Codex Runtime connections](design/acp-codex-via-codex-acp.md#runtime-自定义连接)
-for authentication, environment variables and session behavior.
+Reusable workspace connections use `remi runtime profile list|get|create|update|delete`.
+Create/update accepts `name`, `provider` (`codex` or `claude`), a structured `profile`,
+and an optional write-only `api_key`. Updates replace configuration and allocate a
+new revision; omitting `api_key` preserves an existing key. Use
+`remi runtime group list|get|create|update|delete` to bind profiles to explicit
+Runtime members. Writes require workspace administration, and group changes also
+require permission to edit the affected Runtimes. Task and daemon credentials
+cannot manage these resources. Examples and migration limits are in
+[execution configuration](dev/execution-configuration.md).
 
-Claude Code uses `remi runtime claude-profile get <runtime>` and
-`remi runtime claude-profile set <runtime> --file profile.json`, with the same
-credential and clear semantics plus `auth_header: bearer | x-api-key`. See
-[Claude Code Runtime connections](design/acp-claude-via-claude-agent-acp.md).
+The older `runtime codex-profile get|set` and `runtime claude-profile get|set`
+commands remain available for retained per-Runtime connections. New configuration
+uses central profiles; the legacy commands do not edit a group's central profile.
+
+For either custom connection, `remi runtime model refresh <runtime>` asks its
+daemon to discover the provider catalog. Poll `runtime model status <runtime>
+<request-id>` for completion, then use `runtime model list <runtime>`. These
+model commands are available to task credentials without exposing connection
+secrets. Set a cloud agent's selection with `remi agent update <agent> --model <model-id>`;
+the connection's configured model remains the default when no model is selected.
 
 The canonical tree includes a focused top-level Attachment download command;
 Issue and Comment keep their scoped attachment listing and management commands.
+
+`remi task list` accepts `--limit` and `--offset`. The limit applies to the
+tasks the caller is allowed to see, not to the scanned rows: `GET
+/api/multiremi/tasks` walks candidates in chunks, applies the same per-task
+visibility filter as before, and stops once the page is full. Omitting
+`--limit` returns at most 100 tasks (the server cap is 500) and reports
+`has_more` / `next_offset` for the next page. List entries omit `result`,
+`prompt`, `pluginSnapshot` / `plugin_snapshot`, `executionFingerprint` /
+`execution_fingerprint` and `usage`; `remi task get` and
+`GET /api/multiremi/tasks/:id` still return the full task.
+
+Chat Tasks can deliver files to their current conversation with
+`remi chat attachment send --attachment report.html --attachment chart.png`.
+`--content`, `--content-file`, and `--content-stdin` optionally add a caption.
+The server resolves the destination from the Task credential; no Feishu chat ID
+is needed. Each file must be non-empty, at most 20MB, and pass the server's file type allowlist.
+Within one command, the caption precedes the files, which are delivered in input
+order. A retry keeps later files waiting; a permanent failure marks the remaining
+files failed with the reason. Raster images larger than 10MB use file cards;
+smaller images use inline image messages. SVG files always use file cards.
+The response includes attachment IDs and queued delivery IDs; queueing does not
+mean Feishu has acknowledged delivery. This command requires a Chat Task credential.
 
 ```text
 remi context
@@ -60,6 +130,7 @@ remi runtime
 remi daemon
 remi autopilot
 remi scm
+remi messaging
 remi feishu
 
 remi inbox
@@ -94,6 +165,15 @@ directories owned by a Runtime's daemon. This is distinct from the team tenant
 managed by `remi workspace`. Use `--runtime-workspace <id>` on `chat create` or
 `issue create|update` to select it. See the [runtime workspace contract](dev/runtime-workspaces.md)
 for local context, directory lifetime, and the immutable execution binding.
+
+`remi runtime prepare [--provider claude|codex]` installs this release's fixed ACP
+and Agent dependencies, verifying executables and ACP initialization without
+switching a running daemon. This local command does not require server authentication.
+Maintainers refresh dependencies before every release with
+`bun run release:prepare --version <next>`; daemons do not poll the registry.
+See [daemon runtime upgrades](daemon-runtime-upgrades.md) for the release and
+installation checks.
+
 `remi runtime skill scan <runtime> --root '~/.agents/skills'` discovers skills in
 a directory on that Runtime's machine. Poll `runtime skill status <runtime>
 <scan-request>` until it completes, then import a returned key with `runtime skill
@@ -143,6 +223,25 @@ proposals are non-blocking Inbox items; only humans can run
 Inbox/Issue object and audited outcome, and generic `resolve` cannot forge those
 outcomes. An empty source allowlist means zero ingestion; `source update
 --clear-allowlist` restores that state.
+
+Feishu bots default to Agent capabilities: anyone who can message the bot may
+use its enabled capabilities without sender approval. `remi workspace feishu-bot
+set <workspace> ... --sender-access-policy agent|allowlist` selects this policy;
+omitting the option preserves the saved choice. Existing bot configurations
+upgrade to `agent`. Agent and inherited task proposal policies still apply.
+
+The optional Feishu bot sender allowlist uses `remi workspace feishu-bot sender
+list <workspace>`, `allow <workspace> <sender>`, and `revoke <workspace> <sender>`.
+The sender ID comes from `list`; accounts are discovered from incoming bot
+requests and deduplicated within the current bot app. These human-only commands
+manage permission to create Issues through bot Chats without linking senders to
+Remi users or workspace members. This account allowlist is separate from the
+Messaging Source conversation allowlist. See the [sender policy](feishu-message-ingestion.md#机器人发送者白名单)
+for active Chat checks and legacy restricted sessions.
+
+`sender list` also refreshes names from previously received bot messages; JSON
+includes optional `name_en`, and table output includes `ENGLISH_NAME`. Profile
+refresh preserves sender IDs and allowlist decisions.
 
 The current main integration also exposes archived Issue recovery, Workspace
 prompt/archive settings, and Repository Wiki administration through:
@@ -241,6 +340,43 @@ authenticated user or task agent. Caller-supplied actor fields remain available
 for deployment-master and auth-disabled requests. Comment resolution accepts an
 empty body even when the client sends `Content-Type: application/json`.
 
+## Removed Chat Issue binding (MUL-301)
+
+Chat Sessions are independent conversations. Creating an Issue from Chat no longer
+binds the Chat or subscribes it to Issue activity. Feishu Issue topics retain their
+Issue association in the Feishu binding table and continue receiving updates and
+work-round replies. Legacy group associations without deterministic ownership
+evidence require audited operator restoration before daemon traffic resumes;
+see the [migration runbook](migrations/chat-issue-decoupling.md).
+
+This is an intentional breaking capability removal, with no replacement command.
+Unlike renamed command paths, it has no executable compatibility alias: retaining
+one would restore the binding capability being removed. The five executable
+commands removed are:
+
+- `remi chat issue bind`
+- `remi chat issue unbind`
+- `remi chat issue updates get`
+- `remi chat issue updates enable`
+- `remi chat issue updates disable`
+
+The `chat.issue` and `chat.issue.updates` grouping nodes are also removed.
+Chat creation, messages, queues, pinning, archiving and restoration remain supported.
+Chat session lists and the global pending-task list exclude Feishu Issue-topic
+transport sessions, including topics created by the current user.
+
+API changes:
+
+- Chat session create/update no longer accept `issueId` or `issue_id`; sending
+  either field returns HTTP 400.
+- Chat session responses no longer include `issueId` (native API) or `issue_id`
+  (compatibility API).
+- Issue creation no longer returns `chat_issue_binding` or `chat_issue_binding_hint`.
+- `GET` and `PUT /api/chat/sessions/:sessionId/issue-updates` are removed.
+- CLI context no longer includes `current.chat.issue_id` or `current.bound_issue`.
+- Internal daemon task wire removes `chat_bootstrap_transcript`; cold conversation
+  history continues through the existing session projection.
+
 ## Deprecated aliases
 
 `remi wiki lint` is deprecated since `0.2.58` with no CLI replacement. Wiki
@@ -318,9 +454,10 @@ The server-injected agent prompt now uses only canonical commands in
 - `remi session result publish`
 - `remi memory search|get|create|update`
 
-The matching durable command examples were updated in
+The matching durable command examples use canonical commands in
 `docs/project-wiki-memory-spec.md`, `docs/issue-key-results.md`, and the frontend
-Session-result convention comment. There are no tracked `SKILL.md` files in this
-repository, so there were no in-repository skill command strings to migrate.
+Session-result convention comment. The repository-maintained
+[Remi skill](../.agents/skills/remi/SKILL.md) provides CLI workflows with
+task-specific references; keep its examples aligned with this command contract.
 Legacy handler usage strings remain unchanged because they document commands
 that are deliberately supported during the compatibility period.

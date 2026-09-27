@@ -31,6 +31,8 @@ import { useT } from "../../i18n";
 interface TranscriptStepRowProps {
   step: Extract<TranscriptEntry, { kind: "step" }>;
   selectedSeq: number | null;
+  sourceSeqs?: number[];
+  isJumpHighlighted?: boolean;
   liveFollow: boolean;
   /** The task itself has finished, so a step still marked running never will. */
   taskTerminal: boolean;
@@ -40,6 +42,8 @@ export const TranscriptStepRow = ({
   ref,
   step,
   selectedSeq,
+  sourceSeqs,
+  isJumpHighlighted = false,
   liveFollow,
   taskTerminal,
 }: TranscriptStepRowProps & { ref?: React.Ref<HTMLDivElement> }) => {
@@ -62,7 +66,10 @@ export const TranscriptStepRow = ({
   const commandMissing = isBashCommandMissing(step.tool, step.input, running);
   const failed = step.status === "failed";
   const children = step.children ?? [];
-  const isSelected = selectedSeq === step.seq || children.some((child) => child.seq === selectedSeq);
+  const isSelected =
+    selectedSeq === step.seq ||
+    children.some((child) => child.seq === selectedSeq) ||
+    (selectedSeq !== null && sourceSeqs?.includes(selectedSeq));
   // Codex collab steps render their own structured pane; whatever CollabDetail
   // doesn't show still goes through the generic JSON block.
   const collabInput = isCollabInput(step.input) ? step.input : undefined;
@@ -87,7 +94,20 @@ export const TranscriptStepRow = ({
   }, [liveFollow, running, step.tool]);
 
   return (
-    <div ref={ref} className={cn("group transition-colors", isSelected && "bg-accent/50")}>
+    <div
+      ref={ref}
+      data-transcript-row
+      data-jump-highlighted={isJumpHighlighted ? "true" : undefined}
+      role="group"
+      aria-label={`${step.tool ?? "Tool"}: ${summary || runningSummary || ""}`}
+      aria-current={isSelected ? "location" : undefined}
+      tabIndex={-1}
+      className={cn(
+        "group scroll-my-4 outline-none transition-[background-color,box-shadow] duration-300 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring motion-reduce:transition-none",
+        isSelected && "bg-accent/50",
+        isJumpHighlighted && "bg-primary/10 ring-2 ring-inset ring-primary/70",
+      )}
+    >
       <Collapsible open={expanded} onOpenChange={setExpanded}>
         <div className="flex items-start gap-2 px-4 py-2">
           {/* status dot */}

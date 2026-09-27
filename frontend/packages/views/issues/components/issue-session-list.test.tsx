@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { I18nProvider } from "@multiremi/core/i18n/react";
 import type { Agent, IssueSession } from "@multiremi/core/types";
 import enCommon from "../../locales/en/common.json";
@@ -14,11 +14,8 @@ const addParticipantState = vi.hoisted(() => ({
   isPending: false,
   variables: undefined as { participantType: string; participantId: string } | undefined,
 }));
-const createSession = vi.hoisted(() => vi.fn());
-
 vi.mock("@multiremi/core/issues", () => ({
   useAddSessionParticipant: () => addParticipantState,
-  useCreateIssueSession: () => ({ mutateAsync: createSession, isPending: false }),
 }));
 
 vi.mock("../../common/actor-avatar", () => ({
@@ -114,7 +111,7 @@ describe("IssueSessionList rail", () => {
     expect(screen.queryByRole("button", { name: "New session" })).not.toBeInTheDocument();
   });
 
-  it("offers participants and side chat in a regular session's row menu", async () => {
+  it("keeps the linked Issue projection read-only apart from participants", async () => {
     // Publishing a result and delegating a task used to sit here too. Both are
     // agent-side actions driven from the CLI — members never used the buttons,
     // so the page no longer shows them (MUL-204).
@@ -122,30 +119,7 @@ describe("IssueSessionList rail", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Session actions" })[0]!);
 
     const items = await screen.findAllByRole("menuitem");
-    expect(items.map((item) => item.textContent)).toEqual(["Session participants", "Side chat"]);
-  });
-
-  it("opens a discussion prefilled with the chosen parent and selects the created side chat", async () => {
-    createSession.mockResolvedValue({ id: "session-side" });
-    const onSelectSession = vi.fn();
-    renderRail(SESSIONS, [], { onSelectSession });
-    fireEvent.click(screen.getAllByRole("button", { name: "Session actions" })[1]!);
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Side chat" }));
-
-    expect(await screen.findByRole("combobox")).toHaveValue("session-2");
-    expect(screen.getByRole("button", { name: "Discussion" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Work" })).toBeDisabled();
-    fireEvent.change(screen.getByLabelText("Session name"), {
-      target: { value: "Review side chat" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create" }));
-
-    await waitFor(() => expect(createSession).toHaveBeenCalledWith({
-      title: "Review side chat",
-      holds_workspace: false,
-      parent_session_id: "session-2",
-    }));
-    expect(onSelectSession).toHaveBeenCalledWith("session-side");
+    expect(items.map((item) => item.textContent)).toEqual(["Session participants"]);
   });
 
   it("does not offer side chat from an existing side session", async () => {

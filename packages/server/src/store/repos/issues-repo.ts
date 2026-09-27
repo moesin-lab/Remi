@@ -1533,7 +1533,10 @@ export class IssuesRepo {
       if (!parent || parent.issueId !== issueId) throw new Error(`Parent comment not found: ${parentId}`);
     }
     const taskId = cleanOptionalString(input.taskId ?? input.task_id) ?? null;
-    const sourceTask = taskId ? this.ctx.tasks().getTask(taskId) : null;
+    // Hydrate through the live Chat destination guard so a retained private
+    // Chat audit row cannot smuggle its pre-migration Session into a new Issue
+    // comment. Real Topic and product Session tasks retain their context.
+    const sourceTask = taskId ? this.ctx.tasks().getTaskWithAgent(taskId) : null;
     const issueSessionId = cleanOptionalString(input.issueSessionId ?? input.issue_session_id)
       ?? parent?.issueSessionId
       ?? sourceTask?.issueSessionId

@@ -789,7 +789,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(store.getTask(runs[0].taskId!)?.issueSessionId).toBe(runs[0].issueSessionId);
     expect(store.getTask(runs[0].taskId!)?.prompt).toBe("Inspect the completed work and reconcile the Wiki");
     expect(store.getIssue(issue.id)?.status).toBe("done");
-    expect(store.listIssueSessions(issue.id, true)).toHaveLength(2);
+    expect(store.listIssueSessions(issue.id, true)).toHaveLength(1);
     expect(store.getSystemEvent(eventRow.id)?.status).toBe("processed");
 
     expect(scheduler.tickSystemEvents()).toEqual([]);
@@ -877,7 +877,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     store.updateIssue(issue.id, { status: "done" });
     const [run] = store.dispatchPendingSystemEvents();
     expect(run.issueSessionId).toBe(latest.id);
-    expect(store.listIssueSessions(issue.id, true)).toHaveLength(2);
+    expect(store.listIssueSessions(issue.id, true)).toHaveLength(1);
   });
 
   it("claims each pending system event once across sqlite connections", () => {

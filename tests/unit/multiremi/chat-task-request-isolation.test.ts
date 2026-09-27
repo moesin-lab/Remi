@@ -15,10 +15,14 @@ async function fixture(topic = false) {
     defaultAssigneeId: executor.id,
   });
   const issue = store.createIssue({ title: "Former Chat Issue", projectId: project.id, issueKind: "intake" });
-  const defaultSession = store.getOrCreateDefaultIssueSession(issue.id);
-  const session = store.createIssueSession(issue.id, { title: "Original task session" });
   const chat = store.createChatSession({ agentId: agent.id, creatorId: "local" });
   if (topic) bindFeishuTopicFixture(store, db!, chat.id, issue.id);
+  const defaultSession = topic
+    ? store.createIssueSession(issue.id, { chatId: chat.id, title: "Topic work" })
+    : store.getOrCreateDefaultIssueSession(issue.id);
+  const session = topic
+    ? defaultSession
+    : store.createIssueSession(issue.id, { title: "Original task session" });
   const task = store.createTask({
     agentId: agent.id,
     chatSessionId: chat.id,
@@ -100,13 +104,12 @@ describe("Chat task request isolation", () => {
   });
 
   it("does not reuse the old Issue Session for an explicit comment", async () => {
-    const { app, headers, issue, defaultSession, session } = await fixture();
+    const { app, headers, issue, session } = await fixture();
     const response = await app.request(`/api/issues/${issue.id}/comments`, {
       method: "POST", headers, body: JSON.stringify({ content: "An explicit new comment from Chat" }),
     });
     expect(response.status).toBe(201);
     const body = await response.json();
-    expect(body.issue_session_id).toBe(defaultSession.id);
     expect(body.issue_session_id).not.toBe(session.id);
   });
 

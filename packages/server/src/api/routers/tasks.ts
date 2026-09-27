@@ -274,7 +274,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     if (!task) return c.json({ error: "task not found" }, 404);
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
-    if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
+    if (!canCoordinateOwnedSessionTask(c, task)) return c.json({ error: "forbidden" }, 403);
     try {
       return c.json({ task: taskPublicResponse(store.getTaskWithAgent(task.id)!) });
     } catch (error) {

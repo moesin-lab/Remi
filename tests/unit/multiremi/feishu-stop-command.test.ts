@@ -238,8 +238,8 @@ describe("Feishu stop resolution", () => {
     const leaderTask = store.getTask(submitted.taskId)!;
     expect(leaderTask.chatSessionId).toBe(submitted.chatSessionId);
 
-    // This is the shape an agent tool call produces: an Issue-side Task whose
-    // parent is the Task that requested it, and which has no chat session.
+    // The delegated Session Task belongs to its Session's distinct owning Chat;
+    // the parent records what requested it, not the Feishu conversation owner.
     const issueSession = store.getOrCreateDefaultIssueSession(issue.id);
     const child = store.createTask({
       agentId: worker.id,
@@ -252,7 +252,8 @@ describe("Feishu stop resolution", () => {
     });
     expect(child).toMatchObject({ status: "queued", delegatedByAgentId: agentId });
     expect(child.parentTaskId).toBe(leaderTask.id);
-    expect(child.chatSessionId).toBeNull();
+    expect(child.chatSessionId).toBe(issueSession.chatId);
+    expect(child.chatSessionId).not.toBe(leaderTask.chatSessionId);
     expect(child.issueId).toBe(issue.id);
 
     const census = () => ({
@@ -308,15 +309,16 @@ describe("Feishu stop resolution", () => {
     store.startTask(child.id);
     store.completeTask(child.id, { output: "Verified.", sessionId: "child_session" });
 
-    // Its report reaches the delegator agent as a fresh queued Issue Task that
-    // does not belong to the stopped conversation. The child points at it.
+    // Its report reaches the delegator agent in the same product Session, whose
+    // owning Chat remains distinct from the stopped Feishu conversation.
     const returnTaskId = store.getTask(child.id)?.delegationReturnTaskId;
     expect(returnTaskId).toBeTruthy();
     const returnTask = store.getTask(returnTaskId!)!;
     expect(returnTask.agentId).toBe(agentId);
     expect(returnTask.delegationId).toBe(child.delegationId);
     expect(returnTask.status).toBe("queued");
-    expect(returnTask.chatSessionId).toBeNull();
+    expect(returnTask.chatSessionId).toBe(issueSession.chatId);
+    expect(returnTask.chatSessionId).not.toBe(leaderTask.chatSessionId);
     expect(returnTask.issueId).toBe(issue.id);
     // The delegator's Feishu run stays stopped: the report did not resurrect it.
     expect(store.getTask(leaderTask.id)?.status).toBe("cancelled");

@@ -26,7 +26,9 @@ function fixture() {
     assigneeType: "squad",
     assigneeId: squad.id,
   });
-  const main = store.createTask({ agentId: leader.id, issueId: issue.id, prompt: "Coordinate." });
+  const chat = store.createChatSession({ agentId: leader.id });
+  const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Coordination" });
+  const main = store.createSessionTask(session.id, { agentId: leader.id, prompt: "Coordinate." });
   expect(main.issueSessionId).toBeTruthy();
   expect(store.claimTask(runtime.id)?.id).toBe(main.id);
   store.buildTaskSessionProjection(main.id);

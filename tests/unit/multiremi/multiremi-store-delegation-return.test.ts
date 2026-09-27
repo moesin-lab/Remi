@@ -204,8 +204,11 @@ function createFanoutFixture(feishu = false): FanoutFixture {
     });
     chatSessionId = `chat_issue_topic_${issue.id}`;
     expect(store.getFeishuIssueIdForChatSession(chatSessionId)).toBe(issue.id);
+  } else {
+    chatSessionId = store.createChatSession({ agentId: leader.id }).id;
   }
-  const leaderTask = store.createTask({
+  const session = store.createIssueSession(issue.id, { chatId: chatSessionId, title: "Fanout" });
+  const leaderTask = store.createSessionTask(session.id, {
     agentId: leader.id,
     prompt: "Lead the fanout.",
   });

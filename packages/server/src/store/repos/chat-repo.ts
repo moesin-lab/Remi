@@ -202,8 +202,8 @@ export class ChatRepo {
       // Session event/result data belongs to the Chat and follows its explicit
       // destructive deletion. Keep already-published Issue comments as Issue
       // audit history; only remove their link to the deleted Session. Task rows
-      // likewise retain their audit record with both foreign keys cleared by
-      // ON DELETE SET NULL.
+      // likewise retain their audit record, while their Session reference is
+      // cleared before the Session rows are removed.
       this.ctx.db.run(
         `UPDATE multiremi_issue_comments
          SET issue_session_id = NULL
@@ -220,7 +220,6 @@ export class ChatRepo {
          )`,
         [id],
       );
-      this.ctx.db.run("UPDATE multiremi_tasks SET chat_session_id = NULL WHERE chat_session_id = ?", [id]);
       this.ctx.db.run("DELETE FROM multiremi_session_results WHERE chat_id = ?", [id]);
       for (const table of ["multiremi_session_events", "multiremi_session_participants", "multiremi_session_agent_lanes"]) {
         this.ctx.db.run(

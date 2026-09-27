@@ -14,9 +14,9 @@ function scaffold() {
   const owner = store.createAgent({ name: "Issue owner", provider: "claude", workspaceId: "local" });
   const runtime = store.registerRuntime({ id: "rt_followup", name: "Issue machine", provider: "claude", workspaceId: "local" });
   const issue = store.createIssue({ title: "Continue existing work", workspaceId: "local", assigneeType: "agent", assigneeId: owner.id });
-  const session = store.getOrCreateDefaultIssueSession(issue.id);
   const chat = store.createChatSession({ agentId: remi.id, workspaceId: "local" });
   bindFeishuTopicFixture(store, db!, chat.id, issue.id);
+  const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Topic work" });
   const task = store.sendChatMessage(chat.id, { body: "Continue the implementation and verify it." }).task;
   return { store, remi, owner, runtime, issue, session, chat, task };
 }

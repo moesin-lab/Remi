@@ -3741,11 +3741,14 @@ runMigrations(this.db);
 
   buildTaskSessionProjection(taskId: string): MultiremiSessionProjection | null {
     const task = this.tasks.getTask(taskId);
-    if (task?.chatSessionId && !this.feishuBot.getIssueIdForChatSession(task.chatSessionId)) {
+    if (task?.chatSessionId) {
+      const executionKind = this.tasks.getTaskChatExecutionKind(task);
+      if (task.issueSessionId && executionKind !== "ordinary") {
+        return this.sessions.buildTaskSessionProjection(taskId);
+      }
       return this.chat.buildTaskSessionProjection(taskId);
     }
     if (task?.issueSessionId) return this.sessions.buildTaskSessionProjection(taskId);
-    if (task?.chatSessionId) return this.chat.buildTaskSessionProjection(taskId);
     return null;
   }
 
@@ -4529,7 +4532,7 @@ runMigrations(this.db);
     return this.tasks.getTaskByRef(ref, input);
   }
 
-  getTaskChatExecutionKind(task: MultiremiTask): "ordinary" | "topic" {
+  getTaskChatExecutionKind(task: MultiremiTask): "ordinary" | "session" | "topic" {
     return this.tasks.getTaskChatExecutionKind(task);
   }
 

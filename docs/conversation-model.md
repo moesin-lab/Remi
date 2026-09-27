@@ -93,7 +93,9 @@ flowchart LR
   当作自动归属证据；普通 Chat 不通过标题、历史 Task 或时间邻近关系推测 Issue。
 - 每个尚无默认 Session 的存量 Chat 补建 `Main`；这不改变普通 Chat message → Task 行为。
 - 一个 Issue 没有 Chat 或绑定多个 Chat 时，迁移不猜测所有者。旧 Session 暂以 `chat_id = null` 保留在
-  兼容 Issue API；它可读、可导出，但在显式归入 Chat 前不能创建新的 Session Task。
+  兼容 Issue API；它可读、可导出。`remi session adopt` 可把它显式归入已有 Chat；若旧客户端从 deprecated
+  Issue Session Task 入口发起一次明确执行，服务端则以所选 Agent 新建独立 Chat，再把该 Session（以及必要的
+  未归属父 Session）安全归入新 Chat 后执行，不会猜测或复用某个既有 Chat。
 - Chat-owned Session 迁移必须先于 Chat–Issue 解耦迁移执行；后者完成后普通 Chat 不再保留 `issue_id`。
 - SQLite 迁移在单事务中重建两张元数据表，迁移后执行外键检查；PostgreSQL 放宽非空约束并重建索引/外键。
   任一步失败都不会记录迁移完成标记。

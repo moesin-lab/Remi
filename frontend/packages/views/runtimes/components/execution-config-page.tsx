@@ -67,12 +67,22 @@ function ProfileForm({ initial, pending, onSave, onCancel }: { initial?: Executi
   const { t } = useT("runtimes");
   const [input, setInput] = useState<ExecutionProfileInput>(initial ?? { name: "", provider: "codex", profile: { name: "custom", base_url: "", model: "", env_key: "", auth_mode: "api_key" } });
   const [apiKey, setApiKey] = useState("");
+  const [models, setModels] = useState(initial?.profile.models?.join("\n") ?? "");
   const profile = input.profile;
   const change = (patch: Partial<typeof profile>) => setInput(current => ({ ...current, profile: { ...current.profile, ...patch } }));
-  return <form className="space-y-3 rounded-lg border bg-card p-4" onSubmit={event => { event.preventDefault(); onSave({ name: input.name, provider: input.provider, profile, ...(apiKey && profile.auth_mode === "api_key" ? { api_key: apiKey } : {}) }); }}>
+  return <form className="space-y-3 rounded-lg border bg-card p-4" onSubmit={event => {
+    event.preventDefault();
+    const requestedModels = [...new Set(models.split(/[,\n]/).map(id => id.trim()).filter(Boolean))];
+    const additionalModels = requestedModels.filter(id => id !== profile.model.trim());
+    const savedProfile = requestedModels.length
+      ? { ...profile, models: [profile.model.trim(), ...additionalModels] }
+      : Object.fromEntries(Object.entries(profile).filter(([key]) => key !== "models")) as typeof profile;
+    onSave({ name: input.name, provider: input.provider, profile: savedProfile, ...(apiKey && profile.auth_mode === "api_key" ? { api_key: apiKey } : {}) });
+  }}>
     <label className="block text-sm">{t($ => $.configuration.name)}<Input required value={input.name} onChange={e => setInput({ ...input, name: e.target.value })} /></label>
     <label className="block text-sm">{t($ => $.configuration.provider)}<NativeSelect value={input.provider} disabled={!!initial} onChange={e => setInput({ ...input, provider: e.target.value as "claude" | "codex" })}><NativeSelectOption value="codex">Codex</NativeSelectOption><NativeSelectOption value="claude">Claude Code</NativeSelectOption></NativeSelect></label>
     {(["name", "base_url", "model"] as const).map(key => <label className="block text-sm" key={key}>{t($ => $.codex_profile[key])}<Input required value={profile[key]} onChange={e => change({ [key]: e.target.value })} /></label>)}
+    <label className="block text-sm">{t($ => $.codex_profile.models)}<textarea value={models} onChange={e => setModels(e.target.value)} className="mt-1 min-h-24 w-full rounded-md border bg-background p-2 text-sm" /><span className="mt-1 block text-xs text-muted-foreground">{t($ => $.codex_profile.models_hint)}</span></label>
     <label className="block text-sm">{t($ => $.codex_profile.auth)}<NativeSelect value={profile.auth_mode ?? "env"} onChange={e => { setApiKey(""); change({ auth_mode: e.target.value as "api_key" | "env" }); }}><NativeSelectOption value="api_key">{t($ => $.codex_profile.api_key)}</NativeSelectOption><NativeSelectOption value="env">{t($ => $.codex_profile.environment)}</NativeSelectOption></NativeSelect></label>
     {profile.auth_mode === "api_key" ? <label className="block text-sm">{t($ => $.codex_profile.api_key)}<Input type="password" autoComplete="new-password" required={!initial?.profile.credential_id} value={apiKey} placeholder={initial?.profile.credential_id ? t($ => $.codex_profile.key_saved) : ""} onChange={e => setApiKey(e.target.value)} /></label> : <label className="block text-sm">{t($ => $.codex_profile.env_key)}<Input required value={profile.env_key} onChange={e => change({ env_key: e.target.value })} /></label>}
     {input.provider === "claude" && <label className="block text-sm">{t($ => $.claude_profile.auth_header)}<NativeSelect value={profile.auth_header ?? "bearer"} onChange={e => change({ auth_header: e.target.value as "bearer" | "x-api-key" })}><NativeSelectOption value="bearer">Bearer Token</NativeSelectOption><NativeSelectOption value="x-api-key">API Key (x-api-key)</NativeSelectOption></NativeSelect></label>}

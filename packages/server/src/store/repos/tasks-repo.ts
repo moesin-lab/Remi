@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import { getExecutionGroup } from "@multiremi/store/execution-groups.js";
 import { agentAtTaskTarget, taskExecutionScope, taskExecutionTarget } from "@multiremi/contracts/task-execution.js";
+import { runtimeConnectionSnapshot } from "@multiremi/contracts/runtime-connection.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { canonicalJson } from "@multiremi/agent-plugins/import.js";
 import {
@@ -2054,7 +2055,7 @@ export class TasksRepo {
     // profile, while changing models invalidates the provider session fingerprint.
     // A fallback-switched task freezes ITS model, not the Agent's selection.
     const model = task ? taskExecutionTarget(agent, task).model : cleanOptionalString(agent.model);
-    return profile ? { ...profile, model: model ?? profile.model } : null;
+    return runtimeConnectionSnapshot(profile, model);
   }
 
   private runtimeMatchesCodeSnapshot(runtime: MultiremiRuntime, task: MultiremiTaskWithAgent): boolean {

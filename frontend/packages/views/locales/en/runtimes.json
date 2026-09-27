@@ -11,6 +11,8 @@
     "name": "Profile name",
     "base_url": "API base URL",
     "model": "Model ID",
+    "models": "Allowed model IDs (optional)",
+    "models_hint": "One model ID per line. The default model is always included. Leave empty to use the provider's discovered catalog.",
     "env_key": "API key environment variable",
     "credentials_hint": "Set a dedicated REMI_CODEX_* environment variable in the Runtime's service or launch environment, then restart it. Enter the variable name here, never the key. The API must support Responses.",
     "sessions_hint": "Changes apply to new tasks. Running tasks and automatic retries keep their original connection. A changed connection starts a new Codex session; agents must use this model or the Runtime default.",

@@ -878,7 +878,7 @@ export class MultiremiDaemon {
       );
     }
     this.runtimeModelDiscoveryEnabled = options.inProcessRuntimeModelDiscoveryEnabled === true
-      || (!options.providerFactory && ["claude", "codex", "antigravity"].includes(options.provider ?? "claude"));
+      || (!options.providerFactory && ["claude", "codex", "grok", "antigravity"].includes(options.provider ?? "claude"));
     const workspacesRoot = configuredMultiremiWorkspacesRoot(options.workspacesRoot);
     const runtimeName = options.runtimeName ?? process.env.MULTIREMI_RUNTIME_NAME ?? `${hostname()}-${Bun.env.USER ?? "local"}-bun-runtime`;
     const deviceName = options.deviceName ?? process.env.MULTIREMI_DEVICE_NAME ?? `${hostname()}-${Bun.env.USER ?? "local"}`;
@@ -1683,11 +1683,11 @@ export class MultiremiDaemon {
     return provider === "claude" || provider === "codex" ? bridgeVersion(provider) : null;
   }
 
-  /** Version of the underlying agent CLI (`claude` / `codex`), or null. */
+  /** Version of the underlying agent CLI (`claude` / `codex` / `grok`), or null. */
   private agentVersion(): string | null {
     const provider = this.options.provider;
     if (provider === "antigravity") return antigravityCliVersion();
-    return provider === "claude" || provider === "codex" ? agentCliVersion(provider) : null;
+    return provider === "claude" || provider === "codex" || provider === "grok" ? agentCliVersion(provider) : null;
   }
 
   private currentRuntimeRegistrationInput(): RegisterRuntimeInput {
@@ -1891,14 +1891,14 @@ export class MultiremiDaemon {
     return reinstallBridge(provider as ProvisionProvider, (m) => log.info(`[acp] ${m}`));
   }
 
-  /** Update the underlying agent CLI (claude/codex) via its own `update` subcommand. */
+  /** Update the underlying agent CLI via its own `update` subcommand. */
   private async updateAgentCli(): Promise<string> {
     const provider = this.options.provider;
-    if (!["claude", "codex", "antigravity"].includes(provider)) {
+    if (!["claude", "codex", "grok", "antigravity"].includes(provider)) {
       throw new Error(`agent update not supported for provider: ${provider}`);
     }
     // Spawn with the daemon's own env: it was launched from a login shell, so
-    // PATH already resolves claude/codex (incl. Homebrew on macOS).
+    // PATH already resolves claude/codex/grok (incl. Homebrew on macOS).
     const executable = provider === "antigravity" ? resolveAntigravityExecutable() : provider;
     const proc = Bun.spawn([executable, "update"], { stdout: "pipe", stderr: "pipe", env: process.env });
     const [stdout, stderr, exitCode] = await Promise.all([
@@ -4204,7 +4204,7 @@ export class MultiremiDaemon {
     this.assertWorkspaceRootOwner();
     const agent = task.agent;
     if (!agent) throw new Error(`Task ${task.id} has no agent`);
-    if (!["claude", "codex", "antigravity"].includes(agent.provider)) {
+    if (!["claude", "codex", "grok", "antigravity"].includes(agent.provider)) {
       throw new Error(`Unsupported Bun Multiremi provider: ${agent.provider}`);
     }
 
@@ -5083,7 +5083,9 @@ export function runtimeModelsFromAcpCapabilities(
     ? "anthropic"
     : provider.toLowerCase() === "codex"
       ? "openai"
-      : provider;
+      : provider.toLowerCase() === "grok"
+        ? "xai"
+        : provider;
   return capabilities.map((model) => ({
     id: model.id,
     label: model.label,

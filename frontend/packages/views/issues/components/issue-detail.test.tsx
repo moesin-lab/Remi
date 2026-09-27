@@ -915,6 +915,42 @@ describe("IssueDetail (shared)", () => {
     );
   });
 
+  it("does not follow realtime output after the viewport moves away from the bottom", async () => {
+    renderIssueDetail();
+    await waitFor(() => {
+      expect(screen.getByTestId("virtuoso-mock")).toBeInTheDocument();
+    });
+
+    const atBottomStateChange = virtuosoLatestProps.current?.atBottomStateChange as
+      | ((atBottom: boolean) => void)
+      | undefined;
+    const followOutput = virtuosoLatestProps.current?.followOutput as
+      | ((isAtBottom: boolean) => "auto" | "smooth" | boolean)
+      | undefined;
+
+    expect(atBottomStateChange).toBeTypeOf("function");
+    expect(followOutput).toBeTypeOf("function");
+    expect(virtuosoLatestProps.current?.atBottomThreshold).toBe(4);
+
+    // Virtuoso derives this boolean from scroll position, so the same path
+    // covers wheel scrolling, scrollbar dragging, PageUp and Home. Exercise
+    // the race that caused the regression: output arrives before React has
+    // committed the atBottomStateChange state update.
+    act(() => {
+      atBottomStateChange!(false);
+      expect(followOutput!(false)).toBe(false);
+      // react-virtuoso treats an in-progress programmatic scroll as being at
+      // the bottom. The synchronous reader-position ref must still win after
+      // the user has moved away.
+      expect(followOutput!(true)).toBe(false);
+    });
+
+    // Realtime entries still follow while the reader genuinely remains at
+    // the bottom, but without a smooth animation that can fight later input.
+    act(() => atBottomStateChange!(true));
+    expect(followOutput!(true)).toBe("auto");
+  });
+
   it("switches the visible conversation by product Session", async () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {

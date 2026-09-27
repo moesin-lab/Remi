@@ -52,8 +52,34 @@ export function buildTaskPrompt(task: AgentTask, opts: BuildTaskPromptOptions = 
 export function buildTaskPromptArtifact(task: AgentTask, opts: BuildTaskPromptOptions = {}): TaskPromptArtifact {
   // Only a Feishu topic binding can attach Issue context to a Chat turn.
   // Ignore unrelated Issue payload fields when the topic identity is absent.
-  const privateChat = Boolean(task.chatSessionId && !(task.boundIssue ?? task.bound_issue));
-  if (privateChat) task = withoutIssueContext(task);
+  const issueSession = task.issueSession ?? task.issue_session;
+  const chatId = stringField(task, "chatSessionId", "chat_session_id");
+  const issueSessionId = stringField(task, "issueSessionId", "issue_session_id");
+  const sessionChatId = issueSession?.chatId ?? issueSession?.chat_id;
+  const productSession = Boolean(
+    issueSessionId
+      && chatId
+      && issueSession?.id === issueSessionId
+      && (!sessionChatId || sessionChatId === chatId),
+  );
+  const detachedSessionReference = Boolean(
+    issueSessionId && !productSession,
+  );
+  const privateChat = Boolean(
+    task.chatSessionId && !(task.boundIssue ?? task.bound_issue) && !productSession,
+  );
+  if (privateChat) task = withoutIssueContext(task, !detachedSessionReference);
+  if (productSession) task = {
+    ...task,
+    // A Session Task may share the Feishu Topic's Chat, but it is executing
+    // inside the product Session rather than coordinating that Topic.
+    boundIssue: null,
+    bound_issue: null,
+    boundIssueUpdates: [],
+    bound_issue_updates: [],
+    boundIssueUpdatesOmittedCount: 0,
+    bound_issue_updates_omitted_count: 0,
+  };
   const mode = taskPromptMode(task);
   const sections: string[] = [];
 
@@ -190,10 +216,11 @@ function taskHoldsWorkspace(task: AgentTask): boolean {
   return task.holdsWorkspace !== false && task.holds_workspace !== false;
 }
 
-function withoutIssueContext(task: AgentTask): AgentTask {
+function withoutIssueContext(task: AgentTask, allowChatProject = true): AgentTask {
   const chatProjectId = stringField(task, "chatProjectId", "chat_project_id");
   const projectWorkspaceId = task.project?.workspaceId ?? task.project?.workspace_id;
-  const preserveProject = Boolean(!task.runtimeWorkspaceId && chatProjectId && task.project?.id === chatProjectId
+  const preserveProject = Boolean(allowChatProject && !task.runtimeWorkspaceId
+    && chatProjectId && task.project?.id === chatProjectId
     && (projectWorkspaceId === undefined || projectWorkspaceId === task.workspaceId));
   return {
     ...task,
@@ -449,7 +476,17 @@ function appendClaimContextSections(sections: string[], task: AgentTask, mode: T
 }
 
 function appendHomepageChatCliSection(sections: string[], task: AgentTask, chatRepoAutoCheckout?: boolean): void {
-  if (!task.chatSessionId || task.boundIssue || task.bound_issue) return;
+  const chatId = task.chatSessionId ?? task.chat_session_id;
+  const issueSession = task.issueSession ?? task.issue_session;
+  const issueSessionId = task.issueSessionId ?? task.issue_session_id;
+  const sessionChatId = issueSession?.chatId ?? issueSession?.chat_id;
+  const productSession = Boolean(
+    issueSessionId
+      && chatId
+      && issueSession?.id === issueSessionId
+      && (!sessionChatId || sessionChatId === chatId),
+  );
+  if (!chatId || task.boundIssue || task.bound_issue || productSession) return;
   sections.push("");
   sections.push("## Remi Context");
   if (task.project) sections.push(`Current Chat project: ${task.project.title} (${task.project.id}).`);

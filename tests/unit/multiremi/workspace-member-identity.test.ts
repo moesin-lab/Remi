@@ -313,7 +313,9 @@ describe("MUL-288: explicit workspace user identity", () => {
     const commenter = store.createWorkspaceMember({ name: "Commenter", userId: linked ? commenterUser.id : null });
     const issue = store.createIssue({ title: "Member row collaborators", createdBy: creator.id });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
-    const comment = store.createIssueComment(issue.id, { authorType: "member", authorId: commenter.id, body: "Subscribe me" });
+    const comment = store.createIssueComment(issue.id, {
+      authorType: "member", authorId: commenter.id, issueSessionId: session.id, body: "Subscribe me",
+    });
 
     expect(store.listIssueSubscribers(issue.id)).toEqual(expect.arrayContaining([
       expect.objectContaining({ memberId: creator.id, reason: "created" }),

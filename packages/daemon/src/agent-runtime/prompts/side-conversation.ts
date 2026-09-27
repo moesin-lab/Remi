@@ -12,8 +12,17 @@ export const SIDE_CONVERSATION_INSTRUCTIONS = [
 
 export function isSideConversation(task: AgentTask): boolean {
   // Ordinary private chats must not inherit unrelated Issue payload policy.
-  if (task.chatSessionId && !(task.boundIssue ?? task.bound_issue)) return false;
   const session = task.issueSession ?? task.issue_session;
+  const chatId = task.chatSessionId ?? task.chat_session_id;
+  const issueSessionId = task.issueSessionId ?? task.issue_session_id;
+  const sessionChatId = session?.chatId ?? session?.chat_id;
+  const productSession = Boolean(
+    issueSessionId
+      && chatId
+      && session?.id === issueSessionId
+      && (!sessionChatId || sessionChatId === chatId),
+  );
+  if (task.chatSessionId && !(task.boundIssue ?? task.bound_issue) && !productSession) return false;
   const mode = session?.inheritMode ?? session?.inherit_mode;
   return Boolean((mode && mode !== "none")
     || task.inheritedSessionProjection || task.inherited_session_projection);

@@ -725,7 +725,9 @@ export class TasksRepo {
     const holdsWorkspace = issueId
       ? (issueSession?.withCode ? false : requestedHoldsWorkspace ?? issueSession?.holdsWorkspace ?? true)
       : true;
-    const surfaceWorkspaceId = chatSession ? chatSession.runtimeWorkspaceId : holdsWorkspace ? issue?.runtimeWorkspaceId : null;
+    const surfaceWorkspaceId = chatSession && (!issueSession || holdsWorkspace)
+      ? chatSession.runtimeWorkspaceId
+      : holdsWorkspace ? issue?.runtimeWorkspaceId : null;
     const explicitWorkspaceId = input.runtimeWorkspaceId ?? input.runtime_workspace_id;
     if (issueId && !holdsWorkspace && explicitWorkspaceId != null) {
       throw new RuntimeWorkspaceError("A task without workspace ownership cannot select a runtime workspace", 409);
@@ -1243,7 +1245,7 @@ export class TasksRepo {
   /** Live transport provenance, independent of migration/audit records. A
    * historical user turn may be detached and run cold; a proactive Issue wake
    * has no meaning once its exact destination has changed. */
-  getTaskChatExecutionKind(task: MultiremiTask): "ordinary" | "topic" {
+  getTaskChatExecutionKind(task: MultiremiTask): "ordinary" | "session" | "topic" {
     if (!task.chatSessionId) return "ordinary";
     const invalid = () => { throw new InvalidChatTaskDestinationError(task.id); };
     const liveTask = this.getTask(task.id);
@@ -1251,11 +1253,18 @@ export class TasksRepo {
       || liveTask.agentId !== task.agentId || liveTask.chatSessionId !== task.chatSessionId) return invalid();
     const chat = this.ctx.chat().getChatSession(task.chatSessionId);
     if (!chat || chat.workspaceId !== task.workspaceId) return invalid();
+    let detachedSessionReference = false;
     if (task.issueSessionId) {
       const session = this.ctx.issueSessions().getIssueSession(task.issueSessionId);
-      if (!session || session.chatId !== chat.id || session.workspaceId !== task.workspaceId
-        || session.issueId !== task.issueId) return invalid();
-      return "ordinary";
+      if (session && session.workspaceId === task.workspaceId && session.issueId === task.issueId
+        && session.chatId === chat.id) {
+        return "session";
+      }
+      // A pre-migration private Chat turn can retain an Issue Session audit
+      // reference which now belongs to another Chat (or no longer exists).
+      // Defer that stale reference until transport classification: an ordinary
+      // Chat is scrubbed below, while a Topic must still prove its live binding.
+      detachedSessionReference = true;
     }
     if (chat.agentId !== task.agentId) return invalid();
     const bindings = this.ctx.db.query(
@@ -1290,7 +1299,8 @@ export class TasksRepo {
     }
     // An ordinary legacy turn may already be detached by hydration. A topic
     // claim must still match the live row before its cached Issue is shipped.
-    if (liveTask.issueId !== task.issueId || !bindings.length || !bindings.every(matches)) return invalid();
+    if (detachedSessionReference || liveTask.issueId !== task.issueId
+      || !bindings.length || !bindings.every(matches)) return invalid();
     const issue = this.ctx.issues().getIssue(task.issueId!);
     if (!issue || issue.workspaceId !== task.workspaceId) return invalid();
     return "topic";
@@ -1340,7 +1350,7 @@ export class TasksRepo {
       ...task,
       runtimeWorkspace: task.runtimeWorkspaceId ? new RuntimeWorkspacesRepo(this.ctx).get(task.runtimeWorkspaceId) : null,
       agent: this.ctx.agents().getAgent(task.agentId),
-      ...(issueSession?.withCode ? { issueSession, issue_session: issueSession } : {}),
+      ...(issueSession ? { issueSession, issue_session: issueSession } : {}),
       issue,
       project,
       chatProjectId,

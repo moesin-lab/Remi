@@ -25,7 +25,6 @@ import { toast } from "sonner";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { useT, useTimeAgo } from "../../i18n";
 import { getSessionDisplayName } from "../utils/session-display";
-import { NewSessionButton, NewSessionDialog } from "./issue-session-bar";
 
 interface IssueSessionListProps {
   issueId: string;
@@ -54,7 +53,6 @@ export function IssueSessionList({
   className,
 }: IssueSessionListProps) {
   const { t } = useT("issues");
-  const [sideChatParentId, setSideChatParentId] = useState<string | null>(null);
   const sessionRows = useMemo<Array<{ session: IssueSession; parentSession?: IssueSession }>>(() => {
     // Only regular sessions can be parents. Preserve the original order of
     // parents and siblings, and leave children with missing parents flat.
@@ -94,7 +92,6 @@ export function IssueSessionList({
         >
           {t(($) => $.detail.sessions_label)}
         </span>
-        <NewSessionButton issueId={issueId} sessions={sessions} onCreated={onSelectSession} />
       </div>
 
       <div className="mt-1 space-y-0.5">
@@ -107,20 +104,9 @@ export function IssueSessionList({
             agents={agents}
             isSelected={session.id === selectedSessionId}
             onSelect={onSelectSession}
-            onSideChat={setSideChatParentId}
           />
         ))}
       </div>
-      <NewSessionDialog
-        issueId={issueId}
-        sessions={sessions}
-        open={sideChatParentId !== null}
-        onOpenChange={(open) => {
-          if (!open) setSideChatParentId(null);
-        }}
-        parentSessionId={sideChatParentId ?? undefined}
-        onCreated={onSelectSession}
-      />
     </div>
   );
 }
@@ -142,7 +128,6 @@ function SessionRow({
   agents,
   isSelected,
   onSelect,
-  onSideChat,
 }: {
   issueId: string;
   session: IssueSession;
@@ -150,7 +135,6 @@ function SessionRow({
   agents: Agent[];
   isSelected: boolean;
   onSelect: (sessionId: string) => void;
-  onSideChat: (sessionId: string) => void;
 }) {
   const { t } = useT("issues");
   const timeAgo = useTimeAgo();
@@ -212,11 +196,6 @@ function SessionRow({
           <DropdownMenuItem onClick={() => setParticipantsOpen(true)}>
             {t(($) => $.detail.session_participants)}
           </DropdownMenuItem>
-          {session.parent_session_id == null && (
-            <DropdownMenuItem onClick={() => onSideChat(session.id)}>
-              {t(($) => $.detail.session_side_chat)}
-            </DropdownMenuItem>
-          )}
         </DropdownMenuContent>
       </DropdownMenu>
 

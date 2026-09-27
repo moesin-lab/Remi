@@ -70,6 +70,7 @@ describe("Multiremi store — fleet engine and model catalog", () => {
     const providers = new Map(body.providers.map((entry: any) => [entry.provider, entry]));
     expect((providers.get("claude") as any)?.online_runtime_count).toBe(1);
     expect((providers.get("codex") as any)?.online_runtime_count).toBe(1);
+    expect((providers.get("grok") as any)?.online_runtime_count).toBe(1);
   });
 
   it("maps an any-runtime's vendor models onto the right engine buckets", async () => {
@@ -82,17 +83,21 @@ describe("Multiremi store — fleet engine and model catalog", () => {
       models: [
         { id: "gpt-5.5", label: "GPT-5.5", provider: "openai", default: true },
         { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", provider: "anthropic", default: true },
+        { id: "grok-4.6", label: "Grok 4.6", provider: "xai", default: true },
       ],
     });
     const app = createMultiremiApp({ store });
     const body = await (await app.request("/api/models")).json();
     const codex = body.providers.find((e: any) => e.provider === "codex");
     const claude = body.providers.find((e: any) => e.provider === "claude");
+    const grok = body.providers.find((e: any) => e.provider === "grok");
     expect(codex.models.map((m: any) => m.id)).toEqual(["gpt-5.5"]);
     expect(claude.models.map((m: any) => m.id)).toEqual(["claude-sonnet-4-6"]);
+    expect(grok.models.map((m: any) => m.id)).toEqual(["grok-4.6"]);
     // No vendor buckets leak into the response.
     expect(body.providers.find((e: any) => e.provider === "openai")).toBeUndefined();
     expect(body.providers.find((e: any) => e.provider === "anthropic")).toBeUndefined();
+    expect(body.providers.find((e: any) => e.provider === "xai")).toBeUndefined();
   });
 
   it("buckets fleet models by the runtime engine, not the model vendor", async () => {

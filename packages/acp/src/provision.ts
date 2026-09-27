@@ -1,13 +1,14 @@
 /**
  * ACP bridge provisioning.
  *
- * Users should only need the agents they actually use — `claude` and `codex`.
- * The ACP bridges (`claude-agent-acp`, `codex-acp`) that the daemon spawns are
+ * Users should only need the agents they actually use. The ACP bridges
+ * (`claude-agent-acp`, `codex-acp`) that the daemon spawns for Claude and Codex are
  * an implementation detail, so `remi` provisions them itself: for each provider
  * whose CLI/bridge is present, prepare its selected ACP + SDK bundle in
  * `~/.remi/acp/bundles`. If `node` is missing, download an official build into
  * `~/.remi/node` first. Startup degrades gracefully per provider. Installer
  * preflight is strict: a failure stops the upgrade before replacing the CLI.
+ * Grok speaks ACP natively and therefore needs no managed bridge.
  */
 
 import { execFileSync } from "node:child_process";
@@ -19,11 +20,12 @@ import { releaseRuntimeVersions } from "./runtime-versions.js";
 export { BRIDGE_PIN, RUNTIME_PIN } from "./runtime-versions.js";
 
 export type ProvisionProvider = "claude" | "codex";
+export type AgentCliProvider = ProvisionProvider | "grok";
 type Logger = (message: string) => void;
 
 const NODE_VERSION = "v22.14.0"; // pinned LTS for the bundled fallback
 
-const PROVIDER_CLI: Record<ProvisionProvider, string> = { claude: "claude", codex: "codex" };
+const PROVIDER_CLI: Record<AgentCliProvider, string> = { claude: "claude", codex: "codex", grok: "grok" };
 // The maintained @agentclientprotocol bridges are the only accepted
 // implementations. The deprecated @zed-industries packages and standalone
 // binaries on PATH (e.g. the old embedded-core Rust codex-acp) are
@@ -186,8 +188,18 @@ export function bridgeVersion(provider: ProvisionProvider): string | null {
   return null;
 }
 
-/** Version of the underlying agent CLI itself (`claude` / `codex`), or null. */
-export function agentCliVersion(provider: ProvisionProvider): string | null {
+/** Version of the underlying agent CLI itself, or null. */
+export function agentCliVersion(provider: AgentCliProvider): string | null {
+  if (provider === "grok") {
+    const cli = which(PROVIDER_CLI[provider]);
+    if (!cli) return null;
+    try {
+      const out = execFileSync(cli, ["--version"], { encoding: "utf8", timeout: 8000, stdio: ["ignore", "pipe", "ignore"] });
+      return out.match(/\d+\.\d+\.\d+[\w.-]*/)?.[0] ?? null;
+    } catch {
+      return null;
+    }
+  }
   const override = provider === "claude"
     ? process.env.REMI_CLAUDE_CODE_EXECUTABLE || process.env.CLAUDE_CODE_EXECUTABLE
     : process.env.CODEX_PATH;

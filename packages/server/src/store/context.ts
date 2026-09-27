@@ -119,6 +119,7 @@ const KNOWN_RUNTIME_PROVIDERS = new Set([
   "copilot",
   "cursor",
   "gemini",
+  "grok",
   "hermes",
   "kiro",
   "kimi",

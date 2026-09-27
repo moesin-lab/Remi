@@ -21,12 +21,12 @@ export interface IssueSessionProviderHome {
   storageRoot: string;
   /** Workspace-visible lineage root for one provider lane generation. */
   root: string;
-  /** Actual CLAUDE_CONFIG_DIR/CODEX_HOME. Native history is written here. */
+  /** Provider-scoped daemon state. Claude/Codex also write native history here. */
   home: string;
   sessionId: string;
   agentId: string;
   generation: number;
-  provider: "claude" | "codex" | "antigravity";
+  provider: "claude" | "codex" | "grok" | "antigravity";
   /** Codex execution identity. Different Plugin sets must never share a Home. */
   executionFingerprint?: string;
   /** Daemon-owned GC boundary for non-Issue provider state. */
@@ -119,7 +119,7 @@ export function resolveIssueSessionProviderHome(
   const sessionId = formalSessionId ?? (issueId ? `legacy-${issueId}` : null);
   const agentId = cleanString(task.agent?.id);
   const provider = task.agent?.provider;
-  if (!sessionId || !agentId || (provider !== "claude" && provider !== "codex" && provider !== "antigravity")) return null;
+  if (!sessionId || !agentId || (provider !== "claude" && provider !== "codex" && provider !== "grok" && provider !== "antigravity")) return null;
 
   const generation = formalSessionId
     ? positiveInteger(task.issueSessionGeneration ?? task.issue_session_generation, 1)
@@ -205,7 +205,7 @@ export function resolveTaskProviderHome(
 
   const agentId = cleanString(task.agent?.id);
   const provider = task.agent?.provider;
-  if (!agentId || (provider !== "claude" && provider !== "codex" && provider !== "antigravity")) return null;
+  if (!agentId || (provider !== "claude" && provider !== "codex" && provider !== "grok" && provider !== "antigravity")) return null;
 
   const taskId = cleanString(task.id);
   if (!taskId) throw new Error("Task provider home requires a task id");
@@ -338,12 +338,12 @@ export async function prepareIssueSessionProviderHome(
   // The lineage root may be genuine while its home child has been replaced by
   // a link. Validate the whole path before reading its marker or reconciling.
   await ensureRealDirectoryTree(resolvedHome.storageRoot, resolvedHome.home, "Provider Home");
-  if (resolvedHome.provider === "antigravity") {
-    // agy owns its native OAuth/history directory; this home owns only Remi
-    // task context. Never seed it with Claude/Codex credentials.
-    await ensureRealDirectoryTree(resolvedHome.storageRoot, resolvedHome.home, "Antigravity context");
+  if (resolvedHome.provider === "antigravity" || resolvedHome.provider === "grok") {
+    // These native CLIs own their OAuth/history directories; this home owns only
+    // Remi task context and private temp state. Never seed it with credentials.
+    await ensureRealDirectoryTree(resolvedHome.storageRoot, resolvedHome.home, `${resolvedHome.provider} context`);
     await writeFile(join(resolvedHome.root, "meta.json"), JSON.stringify({
-      schemaVersion: 1, provider: "antigravity", sessionId: resolvedHome.sessionId,
+      schemaVersion: 1, provider: resolvedHome.provider, sessionId: resolvedHome.sessionId,
       agentId: resolvedHome.agentId, generation: resolvedHome.generation, providerHome: "home",
     }) + "\n", { mode: 0o600 });
     return {};
@@ -742,7 +742,7 @@ export async function loadIssueSessionProviderEnv(
   resolvedHome: IssueSessionProviderHome,
   options: IssueSessionProviderEnvOptions = {},
 ): Promise<Record<string, string>> {
-  if (resolvedHome.provider === "antigravity") return {};
+  if (resolvedHome.provider === "antigravity" || resolvedHome.provider === "grok") return {};
   if (resolvedHome.provider === "claude") {
     const relayAuthoritative = options.relayFragment !== undefined
       || options.relayAuthToken !== undefined;

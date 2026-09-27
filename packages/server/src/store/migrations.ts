@@ -3419,6 +3419,12 @@ function migrateChatOwnedSessions(db: SqlDatabase): void {
   );
   if (applied) return;
 
+  // MUL-301 normally adds this projection during Chat decoupling, but the
+  // Session ownership migration must run first so it can consume validated
+  // binding evidence on databases where Chat.issue_id is already absent.
+  addColumnIfMissing(db, "multiremi_feishu_bot_chat_bindings",
+    "issue_id TEXT REFERENCES multiremi_issues(id) ON DELETE SET NULL");
+
   if (isPostgresConfigured() || db instanceof PostgresSyncDatabase) {
     runMigrationOnce(db, CHAT_OWNED_SESSIONS_MIGRATION, () => {
       addColumnIfMissing(db, "multiremi_issue_sessions", "chat_id TEXT");

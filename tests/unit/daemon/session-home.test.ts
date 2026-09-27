@@ -21,7 +21,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function task(provider: "claude" | "codex", generation = 3): AgentTask {
+function task(provider: "claude" | "codex" | "grok", generation = 3): AgentTask {
   return {
     id: "tsk_home",
     workspaceId: "ws_1",
@@ -35,6 +35,27 @@ function task(provider: "claude" | "codex", generation = 3): AgentTask {
 }
 
 describe("Issue Session provider home", () => {
+  it("allocates daemon-owned Grok task state without copying machine credentials", async () => {
+    const root = mkdtempSync(join(tmpdir(), "multiremi-grok-home-"));
+    roots.push(root);
+    const resolved = resolveTaskProviderHome({
+      ...task("grok"),
+      id: "tsk_grok",
+      issueId: null,
+      issueSessionId: null,
+    } as AgentTask, join(root, "cwd"), join(root, "workspaces"))!;
+
+    expect(resolved.provider).toBe("grok");
+    expect(await loadIssueSessionProviderEnv(resolved)).toEqual({});
+    await prepareIssueSessionProviderHome(resolved);
+    expect(JSON.parse(readFileSync(join(resolved.root, "meta.json"), "utf8"))).toMatchObject({
+      provider: "grok",
+      providerHome: "home",
+    });
+    expect(existsSync(join(resolved.home, "auth.json"))).toBe(false);
+    expect(existsSync(join(resolved.home, ".credentials.json"))).toBe(false);
+  });
+
   it("allocates a fresh private temp per execution and cleans only its own directory", async () => {
     const root = mkdtempSync(join(tmpdir(), "multiremi-task-private-tmp-"));
     roots.push(root);

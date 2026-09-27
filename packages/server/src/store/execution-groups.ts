@@ -34,7 +34,7 @@ export function backfillRuntimeExecutionGroups(
     );
   const providers =
     runtime.provider === "any"
-      ? ["claude", "codex", "antigravity"]
+      ? ["claude", "codex", "grok", "antigravity"]
       : [runtime.provider];
   // A pre-daemon registration gaining its machine identity is still the same
   // target. Preserve its ID, or migrate references to an already known identity.
@@ -238,7 +238,7 @@ export function saveExecutionGroup(
     input.name.length > 128
   )
     throw new Error("Group name is required (maximum 128 characters)");
-  if (!["claude", "codex", "antigravity"].includes(input.provider))
+  if (!["claude", "codex", "grok", "antigravity"].includes(input.provider))
     throw new Error("Invalid execution provider");
   if (
     !Array.isArray(input.runtime_ids) ||

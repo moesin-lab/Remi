@@ -1,16 +1,19 @@
 export type { AgentAdapter, AskUserQuestionData, AgentSessionOptions } from "@shared/contracts/acp-protocol.js";
 export { ClaudeAdapter } from "./claude-code/index.js";
 export { CodexAdapter } from "./codex/index.js";
+export { GrokAdapter } from "./grok/index.js";
 
 import type { AgentAdapter } from "@shared/contracts/acp-protocol.js";
 import { ClaudeAdapter } from "./claude-code/index.js";
 import { CodexAdapter } from "./codex/index.js";
 import { antigravityAdapter } from "./antigravity.js";
+import { GrokAdapter } from "./grok/index.js";
 
 const registry: Record<string, () => AgentAdapter> = {
   claude: () => new ClaudeAdapter(),
   codex: () => new CodexAdapter(),
   antigravity: () => antigravityAdapter,
+  grok: () => new GrokAdapter(),
 };
 
 export function createAdapter(agentType: string): AgentAdapter {

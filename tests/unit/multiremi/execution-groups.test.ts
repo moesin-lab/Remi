@@ -19,7 +19,7 @@ function legacyGroup(store: MultiremiStore, id: string, runtimeIds: string[]) {
 describe("Execution groups", () => {
   it("does not turn machine discovery into capability configuration", () => {
     const store = createStore();
-    for (const provider of ["codex", "claude", "antigravity", "any"]) {
+    for (const provider of ["codex", "claude", "grok", "antigravity", "any"]) {
       const runtime = store.registerRuntime({ name: provider, provider, daemonId: "machine" });
       expect(runtime.executionGroupIds).toEqual([]);
     }

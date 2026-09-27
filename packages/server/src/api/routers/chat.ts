@@ -147,24 +147,21 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
     if (beforeCreatedAt && Number.isNaN(Date.parse(beforeCreatedAt))) {
       return c.json({ error: "invalid cursor" }, 400);
     }
-    const sessionMessages = store.listChatMessages(loaded.session.id);
-    const attachments = store.listAttachmentsForChatMessages(sessionMessages.map((message) => message.id));
-    const messages = sessionMessages.map((message) => chatMessageCompatibilityResponse(message, attachments.get(message.id) ?? []));
-    const cursorIndex = beforeCreatedAt
-      ? messages.findIndex((message) => message.id === beforeId && message.created_at === beforeCreatedAt)
-      : messages.length;
-    if (cursorIndex < 0) return c.json({ error: "invalid cursor" }, 400);
-    const filtered = messages.slice(0, cursorIndex);
-    const pageMessages = filtered.slice(Math.max(0, filtered.length - limit));
-    const hasMore = filtered.length > pageMessages.length;
-    const nextCursor = hasMore && pageMessages[0]
-      ? { created_at: pageMessages[0].created_at, id: pageMessages[0].id }
-      : null;
-    return c.json({
-      messages: pageMessages,
-      limit,
-      has_more: hasMore,
-      next_cursor: nextCursor,
+    return chatMutation(c, () => {
+      const page = store.listChatMessagesPage(loaded.session.id, {
+        limit,
+        before: beforeCreatedAt && beforeId ? { createdAt: beforeCreatedAt, id: beforeId } : undefined,
+      });
+      const attachments = store.listAttachmentsForChatMessages(page.messages.map((message) => message.id));
+      const messages = page.messages.map((message) => chatMessageCompatibilityResponse(message, attachments.get(message.id) ?? []));
+      return c.json({
+        messages,
+        limit,
+        has_more: page.hasMore,
+        next_cursor: page.hasMore && messages[0]
+          ? { created_at: messages[0].created_at, id: messages[0].id }
+          : null,
+      });
     });
   });
   app.post("/api/chat/sessions/:sessionId/messages", async (c) => {

@@ -5343,7 +5343,7 @@ export interface MultiremiAgentActivityBucket {
 
 // ─── Platform lifecycle ─────────────────────────────────────────────────────
 
-export type MultiremiPlatformDeploymentDriver = "systemd_release" | "docker_compose";
+export type MultiremiPlatformDeploymentDriver = "systemd_release" | "docker_compose" | "local_profile";
 
 export type MultiremiPlatformOperationKind =
   | "check_updates"
@@ -5419,6 +5419,8 @@ export interface MultiremiPlatformRelease {
 
 export interface MultiremiPlatformOperation {
   id: string;
+  /** Caller-supplied retry key, scoped to requestedBy. */
+  requestId?: string | null;
   kind: MultiremiPlatformOperationKind;
   status: MultiremiPlatformOperationStatus;
   driver: MultiremiPlatformDeploymentDriver;
@@ -5480,6 +5482,8 @@ export interface MultiremiPlatformStatus {
 
 export interface CreatePlatformOperationInput {
   kind: MultiremiPlatformOperationKind;
+  /** Makes repeated create requests return the same operation. */
+  requestId?: string | null;
   targetVersion?: string | null;
   targetRef?: string | null;
   targetManifest?: Record<string, unknown>;

@@ -60,7 +60,7 @@ export function buildTaskPromptArtifact(task: AgentTask, opts: BuildTaskPromptOp
     issueSessionId
       && chatId
       && issueSession?.id === issueSessionId
-      && (!sessionChatId || sessionChatId === chatId),
+      && sessionChatId === chatId,
   );
   const detachedSessionReference = Boolean(
     issueSessionId && !productSession,
@@ -484,7 +484,7 @@ function appendHomepageChatCliSection(sections: string[], task: AgentTask, chatR
     issueSessionId
       && chatId
       && issueSession?.id === issueSessionId
-      && (!sessionChatId || sessionChatId === chatId),
+      && sessionChatId === chatId,
   );
   if (!chatId || task.boundIssue || task.bound_issue || productSession) return;
   sections.push("");

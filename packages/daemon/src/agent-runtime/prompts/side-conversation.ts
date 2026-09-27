@@ -20,7 +20,7 @@ export function isSideConversation(task: AgentTask): boolean {
     issueSessionId
       && chatId
       && session?.id === issueSessionId
-      && (!sessionChatId || sessionChatId === chatId),
+      && sessionChatId === chatId,
   );
   if (task.chatSessionId && !(task.boundIssue ?? task.bound_issue) && !productSession) return false;
   const mode = session?.inheritMode ?? session?.inherit_mode;

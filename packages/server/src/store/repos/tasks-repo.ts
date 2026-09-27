@@ -1299,7 +1299,8 @@ export class TasksRepo {
     }
     // An ordinary legacy turn may already be detached by hydration. A topic
     // claim must still match the live row before its cached Issue is shipped.
-    if (detachedSessionReference || liveTask.issueId !== task.issueId
+    if ((detachedSessionReference && task.executionFingerprint !== CHAT_ISSUE_DECOUPLED_FINGERPRINT)
+      || liveTask.issueId !== task.issueId
       || !bindings.length || !bindings.every(matches)) return invalid();
     const issue = this.ctx.issues().getIssue(task.issueId!);
     if (!issue || issue.workspaceId !== task.workspaceId) return invalid();
@@ -1313,7 +1314,8 @@ export class TasksRepo {
     if (task.executionFingerprint === CHAT_ISSUE_DECOUPLED_FINGERPRINT) task = { ...task, sessionId: null };
     // Retained task audits may still carry a pre-MUL-301 private Chat binding.
     // Never let that old association re-enter a daemon claim or eager checkout.
-    const ordinaryChat = Boolean(task.chatSessionId && this.getTaskChatExecutionKind(task) === "ordinary");
+    const chatExecutionKind = task.chatSessionId ? this.getTaskChatExecutionKind(task) : null;
+    const ordinaryChat = chatExecutionKind === "ordinary";
     if (ordinaryChat) {
       task = {
         ...task,
@@ -1337,7 +1339,15 @@ export class TasksRepo {
     // would erase the evidence that this task must stay in managed mode.
     const chatWorkspace = ordinaryChat && !task.runtimeWorkspaceId ? resolveChatWorkspace(this.ctx, chat, task) : null;
     if (chatWorkspace?.changed) task = { ...task, sessionId: null, workDir: null };
-    const issueSession = task.issueSessionId ? this.ctx.issueSessions().getIssueSession(task.issueSessionId) : null;
+    let issueSession = task.issueSessionId ? this.ctx.issueSessions().getIssueSession(task.issueSessionId) : null;
+    if (chatExecutionKind === "topic" && task.issueSessionId
+      && (!issueSession || issueSession.chatId !== task.chatSessionId || issueSession.issueId !== task.issueId)) {
+      // A retained migration-era Topic task may carry the old Issue's Session
+      // audit reference. Keep its verified Topic destination, but never expose
+      // or restore the stale product Session/provider lane.
+      task = { ...task, sessionId: null, issueSessionId: null, issueSessionGeneration: null };
+      issueSession = null;
+    }
     const resources = project ? this.ctx.projects().listProjectResources(project.id) : [];
     const projectResources = chatWorkspace?.mode === "managed"
       ? resources.filter((resource) => resource.resourceType !== "local_directory") : resources;

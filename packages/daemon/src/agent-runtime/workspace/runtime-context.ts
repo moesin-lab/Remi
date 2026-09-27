@@ -28,10 +28,12 @@ export function prepareRuntimeWorkspaceContext(
   const baseHome = options.baseHome ?? (providerHome.provider === "codex"
     ? process.env.CODEX_HOME ?? join(userHome, ".codex")
     : providerHome.provider === "antigravity" ? join(userHome, ".gemini", "antigravity-cli")
+      : providerHome.provider === "grok" ? process.env.GROK_HOME ?? join(userHome, ".grok")
       : process.env.CLAUDE_CONFIG_DIR ?? join(userHome, ".claude"));
   const instructionNames = providerHome.provider === "codex"
     ? ["AGENTS.override.md", "AGENTS.md", "AGENT.md"] : providerHome.provider === "antigravity"
-      ? ["AGENTS.md", "AGENT.md"] : ["CLAUDE.md", "AGENTS.md", "AGENT.md"];
+      ? ["AGENTS.md", "AGENT.md"] : providerHome.provider === "grok"
+        ? ["AGENTS.md", "AGENT.md"] : ["CLAUDE.md", "AGENTS.md", "AGENT.md"];
 
   const addInstructions = (file: string, boundary?: string) => {
     if (!existsSync(file)) return;
@@ -67,7 +69,7 @@ export function prepareRuntimeWorkspaceContext(
   addSkills(join(userHome, ".agents", "skills"));
   // Database Agent skills are materialized in daemon-owned state, leaving any
   // identically named local skill intact.
-  addSkills(join(providerHome.home, providerHome.provider === "claude" ? ".claude" : ".agents", "skills"));
+  addSkills(join(providerHome.home, providerHome.provider === "claude" ? ".claude" : providerHome.provider === "grok" ? ".grok" : ".agents", "skills"));
   const ancestors: string[] = [];
   for (let directory = cwd; ; directory = dirname(directory)) {
     ancestors.unshift(directory);
@@ -79,6 +81,7 @@ export function prepareRuntimeWorkspaceContext(
     if (file) addInstructions(join(directory, file), root);
     addSkills(join(directory, ".agents", "skills"), root);
     if (providerHome.provider === "claude") addSkills(join(directory, ".claude", "skills"), root);
+    if (providerHome.provider === "grok") addSkills(join(directory, ".grok", "skills"), root);
   }
   for (const source of workspace.contextPaths) {
     const path = containedPath(root, resolve(root, source));

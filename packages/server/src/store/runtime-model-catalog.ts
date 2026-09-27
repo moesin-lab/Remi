@@ -53,7 +53,7 @@ export function isGatewayReasoningLevel(engine: RelayEngine, value: unknown): va
  */
 export type FleetModelThinkingSource = "gateway" | "runtime" | "manual" | "family" | "none";
 
-export const MULTIREMI_DAEMON_PROVIDERS = new Set(["claude", "codex", "antigravity"]);
+export const MULTIREMI_DAEMON_PROVIDERS = new Set(["claude", "codex", "grok", "antigravity"]);
 
 /**
  * Union of the online runtimes' model catalogs, grouped by provider — the
@@ -68,7 +68,7 @@ export const MULTIREMI_DAEMON_PROVIDERS = new Set(["claude", "codex", "antigravi
  */
 // Maps a model's vendor (as the daemon reports it) to the engine that runs it,
 // for the rare "any" runtime that carries a model catalog but no fixed engine.
-const MODEL_VENDOR_TO_ENGINE: Record<string, string> = { openai: "codex", anthropic: "claude" };
+const MODEL_VENDOR_TO_ENGINE: Record<string, string> = { openai: "codex", anthropic: "claude", xai: "grok" };
 
 export interface FleetModelThinkingLevelResponse {
   value: string;

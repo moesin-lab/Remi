@@ -8,7 +8,7 @@ import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { createRuntimeProvider, resolveAntigravityExecutable } from "@acp/index.js";
 
-export const SUPPORTED_DAEMON_PROVIDERS = ["claude", "codex", "antigravity"] as const;
+export const SUPPORTED_DAEMON_PROVIDERS = ["claude", "codex", "grok", "antigravity"] as const;
 
 export type SupportedDaemonProvider = typeof SUPPORTED_DAEMON_PROVIDERS[number];
 
@@ -137,7 +137,9 @@ export function detectMultiremiProviders(options: {
     }
     const commands = provider === "claude"
       ? ["remi-claude-agent-acp", "claude-agent-acp", "claude"]
-      : provider === "codex" ? ["codex-acp", "codex"] : ["agy"];
+      : provider === "codex"
+        ? ["codex-acp", "codex"]
+        : provider === "grok" ? ["grok"] : ["agy"];
     return paths.some((dir) => commands.some((command) => {
       return extensions.some((extension) => canExecute(join(dir, `${command}${extension}`)));
     }));

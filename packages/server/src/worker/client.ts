@@ -1,10 +1,8 @@
 import type { RuntimeExecutionBinding, RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection";
-import { createReadStream } from "node:fs";
 import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import { parseRuntimeClaudeProfile, type RuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
 import { parseFeishuPresentation } from "@multiremi/contracts/feishu-presentation.js";
-import { stat } from "node:fs/promises";
-import { Readable } from "node:stream";
+import { open, stat } from "node:fs/promises";
 import { normalizeRepoList } from "@daemon/agent-runtime/repo/checkout.js";
 import { CHAT_ATTACHMENT_MAX_BYTES, readChatAttachmentBytes } from "@daemon/agent-runtime/workspace/chat-attachments.js";
 import { isFeishuOpenId, parseOutboundMention } from "@shared/feishu-mention.js";
@@ -1306,18 +1304,17 @@ export class MultiremiDaemonClient {
         );
       }
 
-      // Bun 1.3.14 can crash when Bun.file is used as a fetch body in the co-resident ACP daemon.
-      // A Node ReadStream stays incremental without entering that Bun.file native path.
-      const archive = createReadStream(archivePath);
+      // Avoid both Bun.file's native upload path and the Node-to-Web adapter:
+      // an early HTTP response can leave the latter's close rejection unhandled.
+      const archive = await openArchiveUploadBody(archivePath, archiveStat.size);
+      let uploadFailed = false;
       try {
         const headers = new Headers(this.headers("application/octet-stream"));
         headers.set("Content-Length", String(archiveStat.size));
         const request: RequestInit & { duplex: "half" } = {
           method: "PUT",
           headers,
-          // Bun's implicit Node stream adapter leaks a rejection if an early HTTP
-          // response wins the race with destroy(). Queue at most one Web chunk.
-          body: Readable.toWeb(archive, { strategy: { highWaterMark: 1 } }) as unknown as BodyInit,
+          body: archive.body,
           duplex: "half",
           redirect: "error",
           signal: AbortSignal.timeout(this.sessionArchiveUploadTimeoutMs),
@@ -1335,8 +1332,16 @@ export class MultiremiDaemonClient {
           throw error;
         }
         return (await parseResponse<{ archive: MultiremiDaemonSessionArchiveWire }>(resp, "PUT", path)).archive;
+      } catch (error) {
+        uploadFailed = true;
+        throw error;
       } finally {
-        archive.destroy();
+        try {
+          await archive.close();
+        } catch (error) {
+          // Preserve the server/network/read error if cleanup also fails.
+          if (!uploadFailed) throw error;
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1609,6 +1614,81 @@ function normalizeSessionArchiveDurationMs(
     throw new Error(`${environmentName} must be a positive safe integer`);
   }
   return duration;
+}
+
+/** Own the file and every read until fetch has stopped consuming its body. */
+async function openArchiveUploadBody(path: string, sizeBytes: number): Promise<{
+  body: ReadableStream<Uint8Array>;
+  close(): Promise<void>;
+}> {
+  const file = await open(path, "r");
+  let stopped = false;
+  let remaining = sizeBytes;
+  let reading: Promise<unknown> | undefined;
+  let closing: Promise<void> | undefined;
+  let controller: ReadableStreamDefaultController<Uint8Array>;
+  const closeFile = (): Promise<void> => {
+    if (!closing) {
+      const pending = reading;
+      closing = (async () => {
+        // pull delivers read errors to the body. During cancellation, wait for
+        // that same read to settle before closing its descriptor.
+        await pending?.catch(() => undefined);
+        await file.close();
+      })();
+    }
+    return closing;
+  };
+  const body = new ReadableStream<Uint8Array>({
+    start(value) { controller = value; },
+    async pull() {
+      if (stopped) return;
+      if (remaining === 0) {
+        stopped = true;
+        controller.close();
+        await closeFile();
+        return;
+      }
+      const chunk = new Uint8Array(Math.min(64 * 1024, remaining));
+      const pending = file.read(chunk, 0, chunk.byteLength, null);
+      reading = pending;
+      try {
+        const { bytesRead } = await pending;
+        if (stopped) return;
+        if (bytesRead === 0) {
+          stopped = true;
+          controller.close();
+        } else {
+          remaining -= bytesRead;
+          controller.enqueue(chunk.subarray(0, bytesRead));
+        }
+      } catch (error) {
+        if (!stopped) {
+          stopped = true;
+          controller.error(error);
+        }
+      } finally {
+        reading = undefined;
+        if (stopped) await closeFile();
+      }
+    },
+    async cancel() {
+      stopped = true;
+      await closeFile();
+    },
+  }, { highWaterMark: 1 });
+  return {
+    body,
+    async close() {
+      if (!stopped) {
+        stopped = true;
+        // Finish a still-locked fetch reader normally after an early response.
+        // destroy()/controller.error() would invent a second upload failure.
+        controller.close();
+      }
+      await closeFile();
+    },
+  };
 }
 
 async function parseResponse<T>(resp: Response, method: string, path: string): Promise<T> {

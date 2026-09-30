@@ -1207,11 +1207,27 @@ describe("MultiremiDaemonClient Issue session archive wire", () => {
         "runtime-early", "issue-early", "archive-early", archivePath,
       )).rejects.toThrow("413: archive rejected");
       expect(reportedError).toContain("413: archive rejected");
-      // Let pending stream close callbacks run; bun test must see no unhandled errors.
+      // Force finalizers as well as queued callbacks: the Node-to-Web adapter
+      // used to surface its AbortError only when a later test triggered GC.
+      Bun.gc(true);
       await Bun.sleep(20);
     } finally {
       server.stop(true);
     }
+  });
+
+  it("leaves no delayed stream rejection after repeated native HTTP rejections", async () => {
+    const child = Bun.spawn([
+      process.execPath, "test", import.meta.path,
+      "--test-name-pattern", "handles an HTTP rejection before the native fetch finishes reading the archive",
+      "--rerun-each", "10",
+    ], { stdout: "pipe", stderr: "pipe" });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ]);
+    expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
+    expect(stderr).not.toContain("Unhandled error");
+    expect(stderr).toContain("10 pass");
   });
 
   it("streams a direct archive larger than 10 MiB through Bun 1.3.14 with the exact SHA-256", async () => {

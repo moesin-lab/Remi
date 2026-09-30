@@ -33,6 +33,7 @@
   },
   "scripts": {
     "platform-updater": "bun run apps/platform-updater/main.ts",
+    "platform-updater:compile:windows": "bun build --compile --target=bun-windows-x64 apps/platform-updater/main.ts --outfile dist/remi-platform-updater.exe",
     "build:multiremi": "bun run scripts/build-multiremi.ts",
     "release:prepare": "bun run scripts/release-runtime.ts prepare",
     "release:check": "bun run scripts/release-runtime.ts check",

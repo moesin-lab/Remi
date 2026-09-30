@@ -14,6 +14,7 @@ import {
 import {
   PlatformOperationNotCancellableError,
   PlatformOperationConflictError,
+  PlatformOperationIdempotencyConflictError,
 } from "@multiremi/store/repos/platform-operations-repo.js";
 import { isValidDailyScheduleTime, isValidIanaTimezone } from "@multiremi/store/schedule.js";
 import { loadCurrentWorkspaceRole, readJson } from "../helpers.js";
@@ -28,7 +29,7 @@ const OPERATION_STATUSES = new Set<MultiremiPlatformOperationStatus>([
   "queued", "preparing", "pulling", "draining", "switching", "restarting", "verifying",
   "succeeded", "failed", "cancelled", "rolling_back", "rolled_back",
 ]);
-const DRIVERS = new Set<MultiremiPlatformDeploymentDriver>(["systemd_release", "docker_compose"]);
+const DRIVERS = new Set<MultiremiPlatformDeploymentDriver>(["systemd_release", "docker_compose", "local_profile"]);
 
 export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
@@ -75,16 +76,28 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
     if (requester instanceof Response) return requester;
     const body = await readJson<CreatePlatformOperationInput>(c);
     if (!OPERATION_KINDS.has(body.kind)) return c.json({ error: "invalid platform operation kind" }, 400);
+    const requestId = clean(body.requestId);
+    if (requestId && !/^[A-Za-z0-9._:-]{1,128}$/.test(requestId)) {
+      return c.json({ error: "requestId is invalid" }, 400);
+    }
     if ((body.kind === "update" || body.kind === "rollback") && !clean(body.targetRef) && !clean(body.targetVersion)) {
       return c.json({ error: "targetVersion or targetRef is required" }, 400);
     }
-    const operation = store.createPlatformOperation({
-      kind: body.kind,
-      targetVersion: clean(body.targetVersion),
-      targetRef: clean(body.targetRef),
-      targetManifest: body.targetManifest ?? {},
-    }, currentRequestUserId(c));
-    return c.json({ operation }, 202);
+    try {
+      const operation = store.createPlatformOperation({
+        kind: body.kind,
+        requestId,
+        targetVersion: clean(body.targetVersion),
+        targetRef: clean(body.targetRef),
+        targetManifest: body.targetManifest ?? {},
+      }, currentRequestUserId(c));
+      return c.json({ operation }, 202);
+    } catch (error) {
+      if (error instanceof PlatformOperationIdempotencyConflictError) {
+        return c.json({ error: error.message, code: error.code }, 409);
+      }
+      throw error;
+    }
   });
 
   app.post("/api/multiremi/platform/operations/:id/cancel", (c) => {

@@ -643,7 +643,7 @@ runMigrations(this.db);
   }
 
   heartbeatPlatformUpdater(input: {
-    driver: "systemd_release" | "docker_compose";
+    driver: "systemd_release" | "docker_compose" | "local_profile";
     currentRelease?: MultiremiPlatformRelease | null;
     latestRelease?: MultiremiPlatformRelease | null;
     recentReleases?: MultiremiPlatformRelease[];

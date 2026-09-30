@@ -7,6 +7,7 @@ import {
   resolveDrainTimeoutMs,
 } from "@remi-platform/updater/drain.js";
 import { fetchReleaseFeed } from "@remi-platform/updater/release-feed.js";
+import { LocalProfileDriver } from "@remi-platform/updater/local-profile-driver.js";
 import { SystemdReleaseDriver } from "@remi-platform/updater/systemd-release-driver.js";
 import { BunCommandRunner, type PlatformDeploymentDriver } from "@remi-platform/updater/types.js";
 
@@ -114,6 +115,16 @@ function createDriver(): PlatformDeploymentDriver {
       webHealthUrl: process.env.MULTIREMI_PLATFORM_WEB_HEALTH_URL ?? "http://127.0.0.1:3000/login",
       postgresContainer: optionalEnv("MULTIREMI_PLATFORM_POSTGRES_CONTAINER"),
       openvikingContainer: optionalEnv("MULTIREMI_PLATFORM_OPENVIKING_CONTAINER"),
+    }, runner);
+  }
+  if (kind === "local_profile") {
+    return new LocalProfileDriver({
+      repository: requiredEnv("MULTIREMI_LOCAL_PROFILE_REPOSITORY"),
+      profilesRoot: requiredEnv("MULTIREMI_LOCAL_PROFILE_ROOT"),
+      profile: process.env.MULTIREMI_LOCAL_PROFILE_NAME ?? "stable",
+      nodeExecutable: requiredEnv("MULTIREMI_PLATFORM_NODE"),
+      expectedArchitecture: process.env.MULTIREMI_PLATFORM_ARCH ?? process.arch,
+      minimumFreeBytes: positiveNumber(process.env.MULTIREMI_PLATFORM_MIN_FREE_BYTES, 5 * 1024 * 1024 * 1024),
     }, runner);
   }
   if (kind !== "systemd_release") throw new Error(`Unsupported platform driver: ${kind}`);

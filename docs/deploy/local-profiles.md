@@ -26,7 +26,7 @@ summary: 在同一台机器运行独立的稳定环境和开发环境，保留�
 
 WebSocket 通过 `NEXT_PUBLIC_WS_URL` 直连所选环境的 API 端口，LAN 模式使用内网 IP，默认使用 loopback，避免 Next dev 的 `/ws` 代理握手阻塞；普通 HTTP API 仍走 Web 的同源代理。`MULTIREMI_DAEMON_DIRECT_BASE_URL` 使用同一个 API origin，供 daemon 连接及归档直接上传；`/api/config` 的 `daemon_server_url` 和 CLI 安装说明一起返回它，所以即使从本机页面打开安装弹窗，也不会给远程机器生成 localhost 地址。默认发行构建保留原来的 WebSocket URL 推导行为。
 
-两套 API 都保持生产鉴权检查，dev 的开发模式只用于源码重载和 Web 编译。默认使用 SQL 项目知识库，不运行 OpenViking、SSH Mesh 控制面或 platform-updater；没有把远端部署需要的服务全部拉到本机。需要这些能力时，应分别配置，不能共用 stable 的状态目录或飞书/SCM 凭据。
+两套 API 都保持生产鉴权检查，dev 的开发模式只用于源码重载和 Web 编译。默认使用 SQL 项目知识库，不运行 OpenViking 或 SSH Mesh 控制面。dev 不运行 platform-updater；stable 只有按下文安装仓库外宿主后才运行 updater。两套环境不能共用 updater 状态、飞书/SCM 凭据或 profile 数据。
 
 ## 启动和开发
 
@@ -92,9 +92,38 @@ node scripts/local-profile.mjs stable backup
 
 开发流程：在分支修改 → dev 验证 → 运行对应测试和文档检查 → 提交 → 使用具体 commit 更新 stable。stable 的源码和镜像不会跟随开发目录或分支切换自动变化。部署本机提交不等于创建 GitHub Release；正式发版仍遵循 [仓库规则](../../AGENTS.md)。
 
-`deploy` 更新已激活的环境时先构建候选镜像，再停止该环境的 API/Web 写入，保存数据库逻辑备份、API home、旧配置与镜像记录，然后启动并等待健康检查；已经 stop 的环境也保留升级备份步骤。单独 `backup` 同样停止写入，成功后只恢复原本运行的 API/Web。完整备份带有 `complete.json`，中途失败的目录不能当作可恢复备份。稳定环境升级前还应结束正在执行的 Agent 任务；API 启动会自动迁移数据库，关闭后台任务也不会跳过迁移。
+`deploy` 更新已激活的环境时先构建候选镜像，再停止该环境的 API/Web 写入，保存数据库逻辑备份、API home、旧配置与镜像记录，然后启动并等待健康检查；已经 stop 的环境也保留升级备份步骤。单独 `backup` 同样停止写入，成功后只恢复原本运行的 API/Web。新备份的 `complete.json` 包含每个恢复文件的大小和 SHA-256；旧版只有时间戳的 marker 不满足自动恢复校验。中途失败的目录不能当作可恢复备份。稳定环境升级前还应结束正在执行的 Agent 任务；API 启动会自动迁移数据库，关闭后台任务也不会跳过迁移。
 
 备份保存在 profile 的 `backups/<时间>/`。停止、重建和升级命令保留命名卷；脚本不提供删除卷操作。回滚涉及数据库模式时，先停止该环境 API/Web，恢复匹配备份的 PostgreSQL 和 API home，再使用备份配置启动旧镜像；只切旧代码不能保证与已迁移数据兼容。备份和旧镜像都应保留到升级后的实际使用验证完成。
+
+## 可恢复的 stable 自更新宿主
+
+普通 `stable deploy` 是人工前台流程；终端或执行它的 Agent 退出后不会被另一个进程接管。生产自更新使用[平台部署说明中的 Windows 宿主](../../deploy/README.md#windows-stable-local-profile-host)，不要把 `deploy` 包进当前 Remi Task。
+
+宿主沿用 platform operation API/CLI：
+
+```powershell
+remi platform operation create --file update.json --yes --json
+remi platform operation list --json
+remi platform operation cancel <operation-id> --yes --json
+```
+
+`update.json` 使用发布 manifest URL 和可重试 request ID，例如：
+
+```json
+{
+  "kind": "update",
+  "requestId": "MUL-17-prod-2026-09-27-01",
+  "targetVersion": "0.2.81",
+  "targetRef": "https://github.com/OWNER/REPO/releases/download/v0.2.81/platform-release.json"
+}
+```
+
+回滚同样走 `platform operation create`，kind 为 `rollback`，并用 `targetRef` 指向备份中 `active.json` 的完整 commit。宿主只选择带 v2 hash manifest、同时包含 PostgreSQL dump、API-home archive 和匹配配置的完整备份。取消只在 `queued/preparing/pulling/draining` 安全阶段生效；进入切换后由宿主完成或回滚，不能强行中止。
+
+宿主启动时先执行本地恢复，再尝试向 API 心跳。因此即使上一次进程在 API 停止后退出，它也能从 `host-operations/<operation-id>/operation.json` 判断阶段、恢复旧服务并在 API 可达后上报终态。journal 只记录 commit、阶段、校验摘要和备份路径，不保存 token、完整环境或 profile 密钥。
+
+`updaterStatus: offline` 且 `currentRelease/latestRelease` 为空的直接原因不是 Git 缓存或旧 daemon：local profile 默认没有启动 platform-updater，也没有配置独立 updater token 和 release feed，因而 `/api/platform-updater/heartbeat` 从未写入这些字段。`services: []` 同理只表示没有宿主 inspection 心跳，不表示 Docker 中没有服务。安装后必须同时核对 scheduled task 存活、token、feed URL、driver 和首次 heartbeat；只有 release feed 成功才会出现 `latestRelease`。
 
 ## 验证范围
 

@@ -494,6 +494,30 @@ function withImageIdentities(deployment) {
   return next;
 }
 
+function assertReleaseImageRevision(deployment, service) {
+  const image = deployment[`${service}Image`];
+  const labels = JSON.parse(capture('docker', ['image', 'inspect', '--format', '{{json .Config.Labels}}', image]));
+  if (labels?.['org.opencontainers.image.revision'] !== deployment.ref) {
+    throw new Error(`${service} image ${image} revision does not match the requested commit; refusing to overwrite a fixed release tag`);
+  }
+}
+
+function buildMissingReleaseImages(root, deployment) {
+  const missing = [];
+  for (const service of ['api', 'web']) {
+    const image = deployment[`${service}Image`];
+    // Listing distinguishes an absent image (successful empty response) from
+    // Docker/permission errors. Never treat a failed inspection as cache miss.
+    const cached = capture('docker', ['image', 'ls', '--quiet', '--no-trunc', '--filter', `reference=${image}`]);
+    if (cached) assertReleaseImageRevision(deployment, service);
+    else missing.push(service);
+  }
+  // Validate every existing tag before building anything. Rebuilding a fixed
+  // commit tag could change the image ID already recorded by an older backup.
+  if (missing.length > 0) compose(root, 'build', ...missing);
+  for (const service of ['api', 'web']) assertReleaseImageRevision(deployment, service);
+}
+
 function verifyServiceImages(root, requireHealthy = true) {
   const deployment = withImageIdentities(readJson(join(root, 'deployment.json')));
   for (const service of ['api', 'web']) {
@@ -643,7 +667,7 @@ async function hostStage(profile, flags) {
         throw new Error(`Commit package version ${deployment.version} does not match manifest ${state.targetVersion}`);
       }
       state = saveOperation(root, state, { phase: 'prepared' });
-      compose(root, 'build', 'api', 'web');
+      buildMissingReleaseImages(root, deployment);
       saveJson(join(root, 'deployment.json'), withImageIdentities(deployment));
       snapshotProfile(root, candidate);
       restoreProfileSnapshot(root, previous);

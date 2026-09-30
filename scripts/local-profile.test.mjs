@@ -50,9 +50,18 @@ childProcess.spawnSync = (command, args, options = {}) => {
     return succeed();
   }
   if (command !== 'docker') throw new Error('Unmocked command: ' + command);
+  if (args.includes('image') && args.includes('ls')) {
+    const tag = args[args.indexOf('--filter') + 1].slice('reference='.length);
+    const service = tag.startsWith('remi-api:') ? 'api' : 'web';
+    return succeed((process.env.TEST_CACHED_IMAGES || '').split(',').includes(service) ? imageId(tag) : '');
+  }
   if (args.includes('image') && args.includes('inspect')) {
     if (process.env.TEST_FAIL === 'missing_old_web' && args.at(-1) === 'remi-web:stable-' + 'a'.repeat(40)) return fail();
     if (process.env.TEST_FAIL === 'mutated_old_web' && args.at(-1) === 'remi-web:stable-' + 'a'.repeat(40)) return succeed(imageId('different-content'));
+    if (args.includes('{{json .Config.Labels}}')) {
+      const revision = process.env.TEST_FAIL === 'image_revision' ? 'wrong-revision' : args.at(-1).split(':stable-')[1];
+      return succeed(JSON.stringify({ 'org.opencontainers.image.revision': revision }));
+    }
     return succeed(imageId(args.at(-1)));
   }
   if (args.includes('ps') && args.includes('--quiet')) return succeed(args.at(-1) + '-fixture');
@@ -441,6 +450,57 @@ test('recoverable host update stages before switching and is idempotent by opera
   assert.equal(complete.schemaVersion, 2);
   assert.match(complete.files['postgres.dump'].sha256, /^[a-f0-9]{64}$/u);
   assert.match(complete.restoreCommand, /host-rollback-stage/u);
+});
+
+test('host staging reuses a matching API image and builds only the missing Web image', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_cached_api';
+  const staged = f.run('stable', 'host-stage', {
+    args: hostStageArgs(operationId), commit: NEW_REF, environment: { TEST_CACHED_IMAGES: 'api' },
+  });
+  succeeds(staged);
+  const builds = dockerCalls(staged).filter(isAction('build'));
+  assert.equal(builds.length, 1);
+  assert.deepEqual(builds[0].args.slice(builds[0].args.indexOf('build') + 1), ['web']);
+  const candidate = JSON.parse(readFileSync(join(f.profileRoot(), 'host-operations', operationId, 'candidate', 'deployment.json'), 'utf8'));
+  for (const service of ['api', 'web']) {
+    assert.equal(candidate[`${service}ImageId`], `sha256:${createHash('sha256').update(candidate[`${service}Image`]).digest('hex')}`);
+  }
+  assert.equal(f.readProfile('active.json').ref, OLD_REF);
+});
+
+test('host staging reuses both matching fixed-commit images without a rebuild', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_cached_pair';
+  const staged = f.run('stable', 'host-stage', {
+    args: hostStageArgs(operationId), commit: NEW_REF, environment: { TEST_CACHED_IMAGES: 'api,web' },
+  });
+  succeeds(staged);
+  assert.ok(!dockerCalls(staged).some(isAction('build')));
+  assert.ok(!dockerCalls(staged).some(isAction('stop')));
+  const candidate = JSON.parse(readFileSync(join(f.profileRoot(), 'host-operations', operationId, 'candidate', 'deployment.json'), 'utf8'));
+  for (const service of ['api', 'web']) {
+    assert.equal(candidate[`${service}ImageId`], `sha256:${createHash('sha256').update(candidate[`${service}Image`]).digest('hex')}`);
+  }
+  assert.equal(JSON.parse(readFileSync(join(f.profileRoot(), 'host-operations', operationId, 'operation.json'), 'utf8')).phase, 'built');
+});
+
+test('host staging refuses an existing fixed tag with a different revision before building anything', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_wrong_cached_revision';
+  const staged = f.run('stable', 'host-stage', {
+    args: hostStageArgs(operationId), commit: NEW_REF, fail: 'image_revision', environment: { TEST_CACHED_IMAGES: 'web' },
+  });
+  assert.notEqual(staged.status, 0);
+  assert.match(staged.stderr, /revision does not match the requested commit; refusing to overwrite/u);
+  assert.ok(!dockerCalls(staged).some(isAction('build')), 'even a missing API must not build before validating the cached Web');
+  assert.ok(!dockerCalls(staged).some(isAction('stop')));
+  assert.equal(f.readProfile('active.json').ref, OLD_REF);
+  assert.equal(f.readProfile('deployment.json').ref, OLD_REF);
+  assert.equal(JSON.parse(readFileSync(join(f.profileRoot(), 'host-operations', operationId, 'operation.json'), 'utf8')).status, 'failed');
 });
 
 test('failed activation restores matching database, API home, configuration, and old services', (t) => {

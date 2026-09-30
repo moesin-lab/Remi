@@ -140,7 +140,9 @@ outcomes keep the fence closed.
 
 During switching, an external `host-control/write-fence.json` and a host-pinned
 Bun preload block business mutations even when restoring an older API image.
-HTTP reads/health and the authenticated updater channel remain available.
+WebSocket handshakes are also rejected: daemon heartbeats can claim commands
+and update runtime state. HTTP reads/health and the authenticated updater
+channel remain available.
 Switch-phase maintenance cannot expire automatically; writes reopen only after
 both containers (or recovery) are verified and the API acknowledges the durable
 terminal receipt. Interrupted or incomplete recovery remains closed.
@@ -152,6 +154,11 @@ break acknowledgement after rollback. To rotate them deliberately, update the
 host configuration and profile `api.env`, run
 `node scripts/local-profile.mjs stable host-auth-refresh`, then recreate API and
 restart the updater. Refresh is rejected while a host write fence is active.
+
+The Windows runner holds a named mutex for its configuration path across logon
+sessions, so a manual runner and scheduled-task retry cannot overlap. Staging
+reuses fixed-commit images only when their OCI revision labels exactly match;
+missing services are built, and conflicting existing tags are never overwritten.
 
 Repeated API creates can carry `requestId`; repeated creates with the
 same caller/key/payload return the same operation, and the host stages/activates

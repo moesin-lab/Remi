@@ -867,7 +867,9 @@ export function daemonTaskMessageWireResponse(
 function daemonTaskKind(
   task: MultiremiTask & { issue?: MultiremiTaskWithAgent["issue"] },
 ): "chat" | "autopilot" | "quick_create" | "comment" | "direct" {
-  if (task.chatSessionId) return "chat";
+  // Session Tasks also carry their owning Chat. Preserve their execution kind;
+  // only ordinary Chat turns use the Chat wire classification.
+  if (task.chatSessionId && !task.issueSessionId) return "chat";
   if (task.autopilotRunId) return "autopilot";
   if (task.taskKind === "quick_create" || !task.issueId || task.issue?.issueKind === "intake") return "quick_create";
   if (task.triggerCommentId) return "comment";

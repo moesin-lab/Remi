@@ -25,6 +25,18 @@ export class PlatformDrainConflictError extends Error {
 export class PlatformMaintenanceRepo {
   constructor(private readonly db: SqlDatabase) {}
 
+  /** One fresh, narrow read per mutation; no operation payload or lease writes. */
+  writeBlockingOperationId(): string | null {
+    const row = this.db.query(
+      `SELECT operation.id FROM multiremi_platform_maintenance maintenance
+       JOIN multiremi_platform_operations operation ON operation.id = maintenance.operation_id
+       WHERE maintenance.id = 'platform' AND maintenance.mode = 'draining'
+         AND operation.active_slot = 1
+         AND operation.status IN ('switching', 'restarting', 'verifying', 'rolling_back')`,
+    ).get() as { id: string } | null;
+    return row?.id ?? null;
+  }
+
   get(nowMs = Date.now()): MultiremiPlatformMaintenance {
     this.ensureRow();
     const maintenance = this.read();

@@ -13,7 +13,7 @@
  *   ④ `role` reaches both metrics events and the health payloads.
  *
  * The matrix drives the same inventory the API snapshot does
- * (`scripts/api-routes.golden.json`, 759 patterns) instead of a hand-picked list,
+ * (`scripts/api-routes.golden.json`, 801 patterns) instead of a hand-picked list,
  * so a route added later under either prefix is covered without editing this file.
  */
 import { afterEach, describe, expect, it } from "bun:test";
@@ -356,19 +356,14 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       if (status === 421) misdirected.push(pattern);
     }
     // Fixed counts, derived from the literal rule above (not from the guard).
-    // 73 of the 774 swept patterns are refused here; `GET /api/daemon/ws` is the
+    // 73 of the 798 swept patterns are refused here; `GET /api/daemon/ws` is the
     // upgrade-only route this sweep cannot drive — the websocket block asserts it —
     // so the full-inventory total is 74. Pinning the swept count AND the arithmetic
     // means a route cannot be reclassified without one of the numbers moving.
-    // MUL-412's two /api/daemon/issues/:issueId/decisions routes are runtime
-    // protocol traffic, so they move the swept/full totals from 70/71 to 72/73.
-    // MUL-462 adds two /internal/peer/* routes. Both roles serve /internal, so
-    // the swept inventory grows from 769 to 771 while these refusal totals stay put.
-    // MUL-479's context-window PUT is browser traffic that ui serves, so it takes
-    // the swept inventory to 772 without moving these totals either.
-    // MUL-487's native card mint takes it to 773 and ui must refuse that route.
-    // MUL-467's workspace abandonment POST is browser/CLI traffic served by ui,
-    // so it takes the swept inventory to 774 without moving these totals.
+    // Since the 777-pattern inventory, nine execution profile/group management
+    // routes, fourteen Chat-owned session routes and one updater reconciliation
+    // route were added. They all belong to the UI/control plane (see the runtime
+    // classification below), so none changes the daemon refusal totals.
     expect(misdirected).toContain("POST /api/daemon/tasks/:taskId/human-requests/:requestId/card");
     expect(misdirected).not.toContain("POST /api/issues/:id/workspace/abandon");
     expect(misdirected, routeCountHint("ui")).toHaveLength(73);
@@ -383,28 +378,28 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(status === 421, `${pattern} -> ${status}`).toBe(expectedRefusal("runtime", path));
       if (status === 421) refused += 1;
     }
-    // 694 of the 774 swept patterns are refused; the two browser upgrade routes
+    // 718 of the 798 swept patterns are refused; the two browser upgrade routes
     // (`GET /ws`, `GET /api/realtime/ws`) are upgrade-only, so the full-inventory
-    // total is 696. Every browser route main added before MUL-462 sits outside
-    // the runtime allowlist (no /api/daemon/, /health/, /internal/ prefix and no bare
-    // health path), so each one is refused here and served by ui: MUL-410's five
-    // /api/issues/:id/decisions* routes took this count 682 -> 687, and MUL-457's
-    // four /api[/multiremi]/issues/:id/parent-done-grant routes took it 687 -> 691.
-    // MUL-479's context-window PUT is workspace admin/browser traffic, outside
-    // every runtime allowlist prefix; ui serves it and runtime refuses it.
-    // MUL-395: /api/issues/status-pages is browser/CLI traffic, outside the
-    // runtime allowlist. UI serves it; runtime refuses this one new route.
-    // MUL-462's two /internal/peer/* routes increase the swept inventory by two,
-    // but runtime serves both, so they leave the refusal totals unchanged.
-    // MUL-467's abandonment POST and MUL-479's context-window PUT are outside
-    // the runtime allowlist; together they move the totals to 694/696.
-    // The native card mint is served by runtime and leaves these totals unchanged.
+    // total is 720. The 24 additions since the 777-pattern inventory were reviewed
+    // against the literal allowlist and their handlers, moving 694/696 to 718/720:
+    // - /api/execution-profiles: list/get/create/update/delete (5) and
+    //   /api/execution-groups: get/create/update/delete (4) require human access
+    //   and workspace-admin writes; they configure runtimes rather than speaking
+    //   the /api/daemon/ protocol.
+    // - /api/multiremi/chats/:id/sessions: list/create, get/update/adopt,
+    //   events/messages, participants list/add/remove, tasks list/create and
+    //   results list/create (14) use the Chat user's access checks.
+    // - POST /api/platform-updater/operations/reconcile (1) is the authenticated
+    //   host updater control plane, alongside its heartbeat/claim/report routes.
+    // All are served by ui and refused by runtime. The native card mint remains
+    // daemon protocol traffic, so runtime serves it and ui refuses it.
     const mintRoute = "POST /api/daemon/tasks/:taskId/human-requests/:requestId/card";
     expect(statuses.has(mintRoute)).toBe(true);
     expect(statuses.get(mintRoute)).not.toBe(421);
     expect(statuses.get("POST /api/issues/:id/workspace/abandon")).toBe(421);
-    expect(refused, routeCountHint("runtime")).toBe(694);
-    expect(refused + 2, routeCountHint("runtime")).toBe(696);
+    expect(statuses.get("POST /api/platform-updater/operations/reconcile")).toBe(421);
+    expect(refused, routeCountHint("runtime")).toBe(718);
+    expect(refused + 2, routeCountHint("runtime")).toBe(720);
   });
 
   it("answers 421 with the misdirected body, the role header, and a real route still reachable", async () => {

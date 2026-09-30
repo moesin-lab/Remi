@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
+import { backfillRuntimeExecutionGroups } from "@multiremi/store/execution-groups.js";
 import type { SqlDatabase, SqlStatement } from "@multiremi/store/db/postgres.js";
 import { openHotspotDatabase } from "./first-screen-hotspots-database.js";
 import { seedFirstScreenHotspotsFixture } from "./first-screen-hotspots-fixture.js";
@@ -92,6 +93,12 @@ export async function createPr2Harness(options: { inboxRows?: number; runtimes?:
   for (let index = 0; index < (options.foreignRuntimes ?? 30); index++) {
     store.registerRuntime({ id: `rt_pr2_foreign_${index}`, name: `Foreign ${index}`, workspaceId: other.id, provider: "claude" });
     store.updateRuntimeModels(`rt_pr2_foreign_${index}`, [{ id: "foreign-model", label: "Foreign", provider: "claude", default: true }]);
+  }
+  // This fixture represents an existing fleet with migrated default groups.
+  // New runtime registration no longer creates those groups implicitly.
+  for (const runtimeId of [...runtimeIds,
+    ...Array.from({ length: options.foreignRuntimes ?? 30 }, (_, index) => `rt_pr2_foreign_${index}`)]) {
+    backfillRuntimeExecutionGroups(db, runtimeId);
   }
   const uploadRoot = mkdtempSync(join(tmpdir(), "mul473-pr2-upload-"));
   const previousUploadDir = process.env.MULTIREMI_UPLOAD_DIR;

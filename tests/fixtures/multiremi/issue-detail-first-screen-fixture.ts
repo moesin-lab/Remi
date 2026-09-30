@@ -12,8 +12,11 @@
 // byte-comparable.
 import { performance } from "node:perf_hooks";
 import type { MultiremiStore } from "@multiremi/store.js";
+import { createId, nowIso } from "@multiremi/ids.js";
 
 export interface IssueDetailFixtureOptions {
+  /** Capture the historical Issue-owned rows in the compatibility golden. Requires run. */
+  legacyIssueSessions?: boolean;
   /** Root comments on the long Issue. Replies are added on top. */
   rootComments?: number;
   /** Replies spread across the root comments. */
@@ -143,6 +146,20 @@ export function seedIssueDetailFirstScreenFixture(
     assigneeId: agent.id,
     createdBy: owner.id,
   });
+  if (options.legacyIssueSessions) {
+    if (!options.run) throw new Error("Historical Issue sessions require a fixture SQL executor");
+    // Seed the historical row explicitly: the current compatibility constructor
+    // creates a Chat first, which changes ownership and consumes an extra ID.
+    // Keep this golden exercising existing pre-Chat data rather than silently
+    // changing its dataset whenever the new-session constructor evolves.
+    const id = createId("ises");
+    const now = nowIso();
+    options.run(`INSERT INTO multiremi_issue_sessions
+      (id, chat_id, issue_id, workspace_id, title, status, is_default, holds_workspace,
+       created_by_type, created_by_id, created_at, updated_at)
+      VALUES (?, NULL, ?, ?, 'Main', 'active', 1, 1, 'member', ?, ?, ?)`,
+    [id, issue.id, WORKSPACE_ID, owner.id, now, now]);
+  }
   const defaultSession = store.getOrCreateDefaultIssueSession(issue.id, owner.id);
 
   // ── sessions + participants ────────────────────────────────────────────────
@@ -331,6 +348,13 @@ export function seedIssueDetailFirstScreenFixture(
 
   // `createIssueComment` auto-joins the authoring agent to the session, so the
   // seeded counts are a lower bound. Report what the store actually holds.
+  if (options.legacyIssueSessions) {
+    // The final lane's author can be auto-joined during late task seeding.
+    // Its historical fixture identity must not depend on IDs consumed while
+    // constructing the children's newer Chat-owned Sessions.
+    options.run!("UPDATE multiremi_session_participants SET id = ? WHERE session_id = ? AND participant_type = 'agent' AND participant_id = ?",
+      ["spart_85jvtionb0jv", "ises_mul385_04", agent.id]);
+  }
   for (const sessionId of sessionIds) {
     participantCountBySession[sessionId] = store.listSessionParticipants(sessionId, true).length;
   }

@@ -149,7 +149,7 @@ remi platform operation cancel <operation-id> --yes --json
 
 宿主启动时先执行本地恢复，再重放终态回执，然后才发送心跳和领取新操作。阶段位于 `host-operations/<operation-id>/operation.json`，原始 API 请求及终态回执位于 `host-operation-receipts/`，两者均在容器与业务数据库之外。回执经 updater 专用 `operations/reconcile` 接口幂等补回数据库恢复丢失的操作；成功上报后仍保留，后续回滚可能再次还原旧操作状态。对账冲突或恢复未完成时不领取新操作、不开放业务写入；日志和回执不保存 token、完整环境或 profile 密钥。
 
-切换期间维护租约不会按普通 drain TTL 自动开放。宿主还将固定的 Bun preload 写入闸门挂入 API，使用独立 `host-control/write-fence.json`，因此回滚到没有新中间件的旧 API 也能阻止业务写入。切换时业务 mutation 返回 `503 platform_update_in_progress` 和 `Retry-After: 5`；读取、健康检查及已有双凭据保护的 updater 通道仍可用。API/Web 的实际镜像 ID 与 Docker 健康状态都必须匹配目标，单独 `/readyz`、`/login` 返回 200 不算切换成功。只有匹配 operation 的终态回执获 API 确认后，宿主 `host-finalize` 才移除外部闸门。
+切换期间维护租约不会按普通 drain TTL 自动开放。宿主还将固定的 Bun preload 写入闸门挂入 API，使用独立 `host-control/write-fence.json`，因此回滚到没有新中间件的旧 API 也能阻止业务写入。切换时业务 mutation 返回 `503 platform_update_in_progress` 和 `Retry-After: 5`；读取、健康检查及已有双凭据保护的 updater 通道仍可用。API 的每个业务写请求（包括 daemon 消息）以一条只投影阻断 operation ID 的查询核验当前共享门禁，不缓存开放状态；读取请求不增加该查询。API/Web 的实际镜像 ID 与 Docker 健康状态都必须匹配目标，单独 `/readyz`、`/login` 返回 200 不算切换成功。只有匹配 operation 的终态回执获 API 确认后，宿主 `host-finalize` 才移除外部闸门。
 
 数据库恢复会在 API/Web 停止后重建空数据库，以事务方式还原，避免新版新增表残留。显式回滚先给当前版本建立救援备份，再恢复目标业务快照；当前 operation、维护闸门和平台状态通过独立 `control-plane.dump` 保留，不随旧业务数据倒退。目标回滚失败时尝试恢复刚才的救援备份；仍失败则保持 `recovery_required` 和写入关闭，由下一次宿主启动继续恢复。备份缺文件、哈希不匹配或旧镜像丢失都会在替换数据前拒绝。回滚会恢复到所选备份时间的业务数据，不能保留该备份之后的业务变更。
 

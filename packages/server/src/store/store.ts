@@ -721,6 +721,10 @@ runMigrations(this.db);
     return this.platformMaintenance.get();
   }
 
+  getPlatformWriteBlockingOperationId(): string | null {
+    return this.platformMaintenance.writeBlockingOperationId();
+  }
+
   beginPlatformDrain(input: { operationId: string; reason?: string | null; ttlMs?: number }): MultiremiPlatformMaintenance {
     return this.platformMaintenance.beginDrain(input);
   }
@@ -4046,7 +4050,7 @@ runMigrations(this.db);
   listIssueSessions(
     issueId: string,
     includeArchived = false,
-    options: { skipExistenceCheck?: boolean } = {},
+    options: { skipExistenceCheck?: boolean; chatAccess?: { userId: string; roleWithoutMembership: "owner" | "member" } } = {},
   ): MultiremiIssueSession[] {
     return this.sessions.listIssueSessions(issueId, includeArchived, options);
   }

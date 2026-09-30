@@ -204,9 +204,9 @@ describe("MUL-448 task assignment author comes from the credential", () => {
 
 describe("MUL-448 comment run link comes from the credential", () => {
   it("strips a member's forged task_id and taskId from comments", async () => {
-    const { store, app, agentId, headers } = await fixture();
+    const { store, app, agentId, headers, owner } = await fixture();
     const issue = store.createIssue({ title: "Comment run link" });
-    const session = store.createIssueSession(issue.id, { title: "Discussion" });
+    const session = store.createIssueSession(issue.id, { title: "Discussion", createdById: owner.id });
     const otherRun = store.createTask({ agentId, issueId: issue.id, prompt: "Another run" });
 
     const endpoints = [

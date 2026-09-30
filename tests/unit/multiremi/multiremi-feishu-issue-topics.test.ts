@@ -376,7 +376,13 @@ describe("Feishu Issue topics", () => {
       configureTopics(store);
       const wake = prepareReport(store);
       const issue = store.getIssue(wake.issueId!)!;
-      db!.run("UPDATE multiremi_tasks SET status = 'completed' WHERE issue_id = ? AND chat_session_id IS NULL", [issue.id]);
+      // Session tasks also belong to a Chat; complete the previous work round
+      // through the store so it cannot keep the next round's active-task gate closed.
+      const previousLeader = store.listTasks().find(task => task.issueId === issue.id && task.issueSessionId)!;
+      expect(previousLeader.chatSessionId).not.toBeNull();
+      db!.run("UPDATE multiremi_tasks SET status = 'running' WHERE id = ?", [previousLeader.id]);
+      expect(store.completeTask(previousLeader.id, { output: "Previous round result" }).status).toBe("completed");
+      expect(store.getTask(wake.id)!.status).toBe("queued");
       const session = store.getOrCreateDefaultIssueSession(issue.id);
       const leader = store.createSessionTask(session.id, { agentId: wake.agentId, prompt: "Next round" });
       db!.run("UPDATE multiremi_tasks SET status = 'running' WHERE id = ?", [leader.id]);
@@ -409,6 +415,8 @@ describe("Feishu Issue topics", () => {
         expect(injected).toBe(true);
         expect(store.getTask(leader.id)!.status).toBe("running");
         expect(store.listTaskSteerMessages(wake.id)).toHaveLength(0);
+        expect(db!.query("SELECT id FROM multiremi_feishu_bot_round_pushes WHERE leader_task_id = ?").all(leader.id)).toHaveLength(0);
+        expect(db!.query("SELECT id FROM multiremi_session_events WHERE task_id = ? AND kind = 'task_completed'").all(leader.id)).toHaveLength(0);
         expect(events.filter(event => event.type === "chat:message")).toHaveLength(0);
         expect(events).toEqual([]);
       } else {

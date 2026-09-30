@@ -38,6 +38,7 @@ try {
   const store = new MultiremiStore(db);
   const app = createMultiremiApp({ store, authToken: AUTH_TOKEN });
   const fixture = seedIssueDetailFirstScreenFixture(store, {
+    legacyIssueSessions: true,
     run: (sql, params) => { runPinned(db, sql, params); },
   });
 

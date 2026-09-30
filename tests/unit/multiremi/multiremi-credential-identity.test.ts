@@ -70,7 +70,7 @@ describe("MUL-448 B1: X-Agent-ID cannot outrank a member credential", () => {
     const { store, app, ownerId, memberId, otherAgentId, agentId, headers } = await fixture();
     const forged = { ...headers, "X-Agent-ID": otherAgentId };
     const issue = store.createIssue({ title: "MUL-448 B1 issue" });
-    const session = store.createIssueSession(issue.id, { title: "B1 session" });
+    const session = store.createIssueSession(issue.id, { title: "B1 session", createdById: ownerId });
 
     // Session task: the `task_assigned` author is the member, not the header agent.
     const taskResponse = await app.request(`/api/issues/${issue.id}/sessions/${session.id}/tasks`, {

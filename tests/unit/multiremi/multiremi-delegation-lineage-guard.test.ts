@@ -92,7 +92,10 @@ async function fixture(store: MultiremiStore, authToken?: string): Promise<Fixtu
   const child = store.createIssue({
     title: "Child", parentIssueId: parent.id, status: "in_progress", assigneeType: "agent", assigneeId: worker.id,
   });
-  const leaderSession = store.createIssueSession(parent.id, { title: "Dispatch round" });
+  // The member exercises lineage stripping inside a Chat they actually own.
+  const user = store.getOrCreateUser({ email: `lineage-${parent.id}@example.test`, name: "Lineage member" });
+  store.createWorkspaceMember({ workspaceId: "local", userId: user.id, name: "Lineage member", role: "member" });
+  const leaderSession = store.createIssueSession(parent.id, { title: "Dispatch round", createdById: user.id });
   const sourceTask = store.createTask({
     agentId: leader.id, issueId: parent.id, issueSessionId: leaderSession.id, prompt: "Coordinate.",
   });
@@ -111,8 +114,6 @@ async function fixture(store: MultiremiStore, authToken?: string): Promise<Fixtu
   expect(delegatedTask.delegatedByAgentId).toBe(leader.id);
   expect(delegatedTask.delegatedFromIssueSessionId).toBe(leaderSession.id);
   // A member PAT for the same workspace.
-  const user = store.getOrCreateUser({ email: `lineage-${parent.id}@example.test`, name: "Lineage member" });
-  store.createWorkspaceMember({ workspaceId: "local", userId: user.id, name: "Lineage member", role: "member" });
   const pat = await store.createAccessToken({
     workspaceId: "local", userId: user.id, name: "member", type: "pat", purpose: "session",
   });

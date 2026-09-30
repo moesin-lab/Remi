@@ -53,7 +53,7 @@ async function withStore(backend: "sqlite" | "postgres", run: (store: MultiremiS
   }
 }
 
-function fixture(store: MultiremiStore, daemonId?: string) {
+function fixture(store: MultiremiStore, daemonId?: string, creatorId = "local") {
   const runtimeIdentity = daemonId ? { daemonId, ownerId: "local" } : {};
   const leaderRuntime = store.registerRuntime({ name: "Leader runtime", provider: "claude", workspaceId: "local",
     ...runtimeIdentity });
@@ -65,7 +65,7 @@ function fixture(store: MultiremiStore, daemonId?: string) {
   const parent = store.createIssue({ title: "Parent", status: "in_progress", assigneeType: "squad", assigneeId: squad.id });
   const child = store.createIssue({ title: "Child", parentIssueId: parent.id, status: "in_progress",
     assigneeType: "agent", assigneeId: worker.id });
-  const leaderSession = store.createIssueSession(parent.id, { title: "Dispatch round" });
+  const leaderSession = store.createIssueSession(parent.id, { title: "Dispatch round", createdById: creatorId });
   const leaderTask = store.createTask({ agentId: leader.id, issueId: parent.id,
     issueSessionId: leaderSession.id, prompt: "Coordinate." });
   return { leaderRuntime, workerRuntime, leader, worker, parent, child, leaderSession, leaderTask };
@@ -179,7 +179,7 @@ async function requestJson(
     body: JSON.stringify(body),
   });
   const text = await response.text();
-  expect(response.status).toBe(expected);
+  expect(response.status, `${method} ${path}: ${text}`).toBe(expected);
   return text ? JSON.parse(text) as Record<string, any> : {};
 }
 
@@ -203,7 +203,7 @@ async function httpCredentials(store: MultiremiStore, daemonId: string) {
     name: "Snapshot member", type: "pat", purpose: "cli" });
   const daemon = await store.createAccessToken({ workspaceId: "local", userId: "local",
     name: "Snapshot daemon", type: "daemon", purpose: "daemon", daemonId });
-  return { member: member.token, daemon: daemon.token };
+  return { member: member.token, daemon: daemon.token, userId: user.id };
 }
 
 async function startThroughDaemon(
@@ -238,8 +238,8 @@ async function runCancelledReturnSnapshotCase(
   withInRunComment: boolean,
 ): Promise<void> {
   const daemonId = `mul456-f2-${process.pid}-${++sequence}`;
-  const f = fixture(store, daemonId);
   const credentials = await httpCredentials(store, daemonId);
+  const f = fixture(store, daemonId, credentials.userId);
   await withHttpApi(store, async (base) => {
     const childTask = await dispatchThroughHttp(base, store, f.leaderTask, f.child, f.worker.id);
     await startThroughDaemon(base, credentials.daemon, f.leaderTask, f.leaderRuntime.id);
@@ -298,8 +298,8 @@ async function runCancelledReturnSnapshotCase(
 
 async function runCancelledE2SnapshotCase(store: MultiremiStore): Promise<void> {
   const daemonId = `mul456-f2-e2-${process.pid}-${++sequence}`;
-  const f = fixture(store, daemonId);
   const credentials = await httpCredentials(store, daemonId);
+  const f = fixture(store, daemonId, credentials.userId);
   await withHttpApi(store, async (base) => {
     const childTask = await dispatchThroughHttp(base, store, f.leaderTask, f.child, f.worker.id);
     await startThroughDaemon(base, credentials.daemon, f.leaderTask, f.leaderRuntime.id);
@@ -339,8 +339,8 @@ async function runCancelledE2SnapshotCase(store: MultiremiStore): Promise<void> 
 
 async function runMissingSnapshotCompatibilityCase(store: MultiremiStore): Promise<void> {
   const daemonId = `mul456-f2-legacy-${process.pid}-${++sequence}`;
-  const f = fixture(store, daemonId);
   const credentials = await httpCredentials(store, daemonId);
+  const f = fixture(store, daemonId, credentials.userId);
   await withHttpApi(store, async (base) => {
     const childTask = await dispatchThroughHttp(base, store, f.leaderTask, f.child, f.worker.id);
     await startThroughDaemon(base, credentials.daemon, f.leaderTask, f.leaderRuntime.id);
@@ -373,8 +373,8 @@ async function runMissingSnapshotCompatibilityCase(store: MultiremiStore): Promi
 
 async function runRedispatchThenDrainSnapshotCase(store: MultiremiStore): Promise<void> {
   const daemonId = `mul456-f2-redispatch-${process.pid}-${++sequence}`;
-  const f = fixture(store, daemonId);
   const credentials = await httpCredentials(store, daemonId);
+  const f = fixture(store, daemonId, credentials.userId);
   await withHttpApi(store, async (base) => {
     const first = await dispatchThroughHttp(base, store, f.leaderTask, f.child, f.worker.id);
     const second = await dispatchThroughHttp(base, store, f.leaderTask, f.child, f.worker.id);
@@ -419,8 +419,8 @@ async function runSkippedManualWakeCancellationSnapshotCase(
   withInRunComment: boolean,
 ): Promise<void> {
   const daemonId = `mul456-f3-skip-${process.pid}-${++sequence}`;
-  const f = fixture(store, daemonId);
   const credentials = await httpCredentials(store, daemonId);
+  const f = fixture(store, daemonId, credentials.userId);
   await withHttpApi(store, async (base) => {
     const childTask = await dispatchThroughHttp(base, store, f.leaderTask, f.child, f.worker.id);
     await startThroughDaemon(base, credentials.daemon, f.leaderTask, f.leaderRuntime.id);
@@ -481,8 +481,8 @@ async function runSkippedManualWakeCancellationSnapshotCase(
 
 async function runSameIssueResultCommentParityCase(store: MultiremiStore): Promise<void> {
   const daemonId = `mul456-f3-same-${process.pid}-${++sequence}`;
-  const f = fixture(store, daemonId);
   const credentials = await httpCredentials(store, daemonId);
+  const f = fixture(store, daemonId, credentials.userId);
   await withHttpApi(store, async (base) => {
     const delegated = await dispatchThroughHttp(base, store, f.leaderTask, f.parent, f.worker.id);
     expect(delegated.issueSessionId).toBe(f.leaderSession.id);
@@ -528,8 +528,8 @@ async function runSameIssueResultCommentParityCase(store: MultiremiStore): Promi
 
 async function runDelegateWakeupCoverageStillDrainsHistoryCase(store: MultiremiStore): Promise<void> {
   const daemonId = `mul456-f3-covered-${process.pid}-${++sequence}`;
-  const f = fixture(store, daemonId);
   const credentials = await httpCredentials(store, daemonId);
+  const f = fixture(store, daemonId, credentials.userId);
   await withHttpApi(store, async (base) => {
     const historical = await dispatchThroughHttp(base, store, f.leaderTask, f.child, f.worker.id);
     const trigger = await dispatchThroughHttp(base, store, f.leaderTask, f.child, f.worker.id);

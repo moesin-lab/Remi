@@ -1697,11 +1697,17 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue) return c.json({ error: "issue not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
-    const sessions = store.listIssueSessions(issue.id, c.req.query("include_archived") === "true")
-      .filter((session) => !denyLinkedSessionChatOwnerAccess(c, store, session));
+    const sessions = store.listIssueSessions(issue.id, c.req.query("include_archived") === "true", {
+      skipExistenceCheck: true,
+      chatAccess: {
+        userId: currentRequestUserId(c),
+        roleWithoutMembership: issue.workspaceId === "local" && authenticatedRequestUserId(c) === null ? "owner" : "member",
+      },
+    });
+    const participants = store.listSessionParticipantsForSessions(sessions.map((session) => session.id));
     return c.json(sessions.map((session) => issueSessionCompatibilityResponse(
       session,
-      store.listSessionParticipants(session.id),
+      participants.get(session.id) ?? [],
     )));
   });
   app.post("/api/issues/:id/sessions", async (c) => {

@@ -421,19 +421,36 @@ export class IssueSessionsRepo {
   listIssueSessions(
     issueId: string,
     includeArchived = false,
-    options: { skipExistenceCheck?: boolean } = {},
+    options: { skipExistenceCheck?: boolean; chatAccess?: { userId: string; roleWithoutMembership: "owner" | "member" } } = {},
   ): MultiremiIssueSession[] {
     // Existence only: the caller wants session rows, not the Issue's labels.
     if (!options.skipExistenceCheck && !this.ctx.issues().hasIssue(issueId)) {
       throw new Error(`Issue not found: ${issueId}`);
     }
-    const rows = includeArchived
-      ? this.ctx.db.query(
-        `${SESSION_SELECT} WHERE issue_id = ? ORDER BY is_default DESC, updated_at DESC`,
-      ).all(issueId) as Row[]
-      : this.ctx.db.query(
-        `${SESSION_SELECT} WHERE issue_id = ? AND status = 'active' ORDER BY is_default DESC, updated_at DESC`,
-      ).all(issueId) as Row[];
+    const clauses = ["s.issue_id = ?"];
+    const params: unknown[] = [issueId];
+    if (!includeArchived) clauses.push("s.status = 'active'");
+    if (options.chatAccess) {
+      // Batch equivalent of loadChatSessionForCurrentUser after the request has
+      // authorized the Issue workspace. Missing/cross-workspace Chats or Agents
+      // fail closed; a workspace admin still cannot read another creator's Chat.
+      clauses.push(`(s.chat_id IS NULL OR EXISTS (
+        SELECT 1 FROM multiremi_chat_sessions chat
+        JOIN multiremi_agents agent ON agent.id = chat.agent_id AND agent.workspace_id = chat.workspace_id
+        WHERE chat.id = s.chat_id AND chat.workspace_id = s.workspace_id
+          AND chat.workspace_id = (SELECT workspace_id FROM multiremi_issues WHERE id = s.issue_id)
+          AND COALESCE(chat.creator_id, 'local') = ?
+          AND (LOWER(TRIM(COALESCE(agent.visibility, 'private'))) = 'workspace' OR agent.owner_id = ?
+            OR COALESCE((SELECT member.role FROM multiremi_workspace_members member
+              WHERE member.workspace_id = s.workspace_id AND member.user_id = ? AND member.archived_at IS NULL
+              ORDER BY member.name ASC LIMIT 1), ?) IN ('owner', 'admin'))
+      ))`);
+      params.push(options.chatAccess.userId, options.chatAccess.userId,
+        options.chatAccess.userId, options.chatAccess.roleWithoutMembership);
+    }
+    const rows = this.ctx.db.query(
+      `${SESSION_SELECT} WHERE ${clauses.join(" AND ")} ORDER BY s.is_default DESC, s.updated_at DESC`,
+    ).all(...params) as Row[];
     return rows.map(toIssueSession);
   }
 

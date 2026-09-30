@@ -4844,7 +4844,9 @@ export class IssuesRepo {
     const sourceTask = taskId ? this.ctx.tasks().getTaskWithAgent(taskId) : null;
     const issueSessionId = cleanOptionalString(input.issueSessionId ?? input.issue_session_id)
       ?? parent?.issueSessionId
-      ?? sourceTask?.issueSessionId
+      // Cross-Issue coordination keeps the source run as provenance without
+      // importing that run's private Session into the destination Issue.
+      ?? (sourceTask?.issueId === issueId ? sourceTask.issueSessionId : null)
       ?? null;
     const issueSession = issueSessionId ? this.ctx.issueSessions().getIssueSession(issueSessionId) : null;
     if (issueSessionId && (!issueSession || issueSession.issueId !== issueId)) {

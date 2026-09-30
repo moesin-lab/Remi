@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -35,6 +35,7 @@ childProcess.spawnSync = (command, args, options = {}) => {
     selectedProfile: selection?.profile ?? null,
   }) + '\n');
   if (command === 'git' && args[0] === 'rev-parse') return succeed(process.env.TEST_COMMIT + '\n');
+  if (command === 'git' && args[0] === 'fetch') return succeed();
   if (command === 'git' && args[0] === 'archive') {
     writeFileSync(args[args.indexOf('--output') + 1], 'Test archive');
     return succeed();
@@ -48,6 +49,7 @@ childProcess.spawnSync = (command, args, options = {}) => {
   if (command !== 'docker') throw new Error('Unmocked command: ' + command);
   if (process.env.TEST_FAIL === 'config' && args.includes('config')) return fail();
   if (process.env.TEST_FAIL === 'build' && args.includes('build')) return fail();
+  if (process.env.TEST_FAIL === 'activate' && args.includes('up') && selection?.ref === process.env.TEST_NEW_COMMIT) return fail();
   if (args.includes('pg_dump')) {
     writeSync(options.stdio[1], 'PGDMP test fixture');
     return succeed();
@@ -65,7 +67,7 @@ for (const name of ['spawn', 'exec', 'execSync', 'execFile', 'execFileSync', 'fo
   childProcess[name] = () => { throw new Error('Unmocked process API: ' + name); };
 }
 syncBuiltinESMExports();
-globalThis.fetch = async () => ({ status: 200 });
+globalThis.fetch = async () => ({ status: 200, ok: true, arrayBuffer: async () => Buffer.from('release archive') });
 `;
 
 function fixture(t) {
@@ -104,7 +106,10 @@ function fixture(t) {
         TEST_PROFILE_ROOT: join(profileBase, profile),
         TEST_COMMAND_LOG: log,
         TEST_COMMIT: commit,
+        TEST_NEW_COMMIT: NEW_REF,
         TEST_FAIL: fail,
+        REMI_HOST_MIN_FREE_BYTES: '1',
+        REMI_HOST_EXPECTED_ARCH: process.arch,
       },
       encoding: 'utf8',
       windowsHide: true,
@@ -130,6 +135,14 @@ function succeeds(result) {
 
 const dockerCalls = (result) => result.calls.filter((call) => call.command === 'docker');
 const isAction = (action) => (call) => call.command === 'docker' && call.args.includes(action);
+const releaseSha = createHash('sha256').update('release archive').digest('hex');
+const hostStageArgs = (operationId = 'pop_recoverable_test') => [
+  '--operation-id', operationId,
+  '--ref', NEW_REF,
+  '--version', '0.2.60',
+  '--source-url', 'https://example.com/platform-release.tar.gz',
+  '--source-sha256', releaseSha,
+];
 
 test('token signs a 24-hour local session with only the selected profile secret', (t) => {
   const f = fixture(t);
@@ -368,4 +381,131 @@ test('LAN settings reject unreachable bind values and never expose dev', (t) => 
   assert.notEqual(dev.status, 0);
   assert.match(dev.stderr, /only valid for stable/u);
   assert.equal(dev.calls.length, 0);
+});
+
+test('recoverable host update stages before switching and is idempotent by operation ID', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const staged = f.run('stable', 'host-stage', { args: hostStageArgs(), commit: NEW_REF });
+  succeeds(staged);
+  assert.equal(f.readProfile('active.json').ref, OLD_REF, 'staging must not switch the live profile');
+  const journalPath = join(f.profileRoot(), 'host-operations', 'pop_recoverable_test', 'operation.json');
+  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).phase, 'built');
+  assert.ok(staged.calls.some((call) => call.command === 'git' && call.args[0] === 'fetch' && call.args.includes(NEW_REF)));
+  assert.ok(staged.calls.some(isAction('build')));
+  assert.ok(!staged.calls.some(isAction('stop')));
+
+  const duplicate = f.run('stable', 'host-stage', { args: hostStageArgs(), commit: NEW_REF });
+  succeeds(duplicate);
+  assert.equal(duplicate.calls.length, 0, 'a duplicate staged operation must not rebuild');
+
+  const activated = f.run('stable', 'host-activate', { args: ['--operation-id', 'pop_recoverable_test'], commit: NEW_REF });
+  succeeds(activated);
+  assert.equal(f.readProfile('active.json').ref, NEW_REF);
+  const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+  assert.equal(journal.status, 'succeeded');
+  assert.equal(journal.resultRelease.ref, NEW_REF);
+  assert.ok(existsSync(join(journal.backupDir, 'complete.json')));
+  const complete = JSON.parse(readFileSync(join(journal.backupDir, 'complete.json'), 'utf8'));
+  assert.equal(complete.schemaVersion, 2);
+  assert.match(complete.files['postgres.dump'].sha256, /^[a-f0-9]{64}$/u);
+  assert.match(complete.restoreCommand, /host-rollback-stage/u);
+});
+
+test('failed activation restores matching database, API home, configuration, and old services', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_failed_activation';
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs(operationId), commit: NEW_REF }));
+  const failed = f.run('stable', 'host-activate', {
+    args: ['--operation-id', operationId], commit: NEW_REF, fail: 'activate',
+  });
+  assert.notEqual(failed.status, 0);
+  assert.equal(f.readProfile('active.json').ref, OLD_REF);
+  const journal = JSON.parse(readFileSync(join(f.profileRoot(), 'host-operations', operationId, 'operation.json'), 'utf8'));
+  assert.equal(journal.status, 'rolled_back');
+  assert.match(journal.error, /Update failed/u);
+  const calls = dockerCalls(failed);
+  assert.ok(calls.some((call) => call.args.includes('pg_restore') && call.args.includes('--clean') && call.args.includes('--if-exists')));
+  assert.ok(calls.some((call) => call.args.some((arg) => String(arg).includes('/snapshot/api-home.tar'))));
+  assert.ok(calls.some((call) => isAction('up')(call) && call.selectedRef === OLD_REF));
+});
+
+test('explicit host rollback restores the verified matching backup', (t) => {
+  const f = fixture(t);
+  f.activate();
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs('pop_before_rollback'), commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-activate', {
+    args: ['--operation-id', 'pop_before_rollback'], commit: NEW_REF,
+  }));
+  assert.equal(f.readProfile('active.json').ref, NEW_REF);
+
+  const staged = f.run('stable', 'host-rollback-stage', {
+    args: ['--operation-id', 'pop_explicit_rollback', '--ref', OLD_REF], commit: NEW_REF,
+  });
+  succeeds(staged);
+  assert.equal(f.readProfile('active.json').ref, NEW_REF, 'staging a rollback must not stop or switch services');
+  assert.ok(!staged.calls.some(isAction('stop')));
+
+  const activated = f.run('stable', 'host-rollback-activate', {
+    args: ['--operation-id', 'pop_explicit_rollback'], commit: NEW_REF,
+  });
+  succeeds(activated);
+  assert.equal(f.readProfile('active.json').ref, OLD_REF);
+  const journal = JSON.parse(readFileSync(join(
+    f.profileRoot(), 'host-operations', 'pop_explicit_rollback', 'operation.json',
+  ), 'utf8'));
+  assert.equal(journal.status, 'succeeded');
+  assert.equal(journal.resultRelease.ref, OLD_REF);
+  const calls = dockerCalls(activated);
+  assert.ok(calls.some((call) => call.args.includes('pg_restore')));
+  assert.ok(calls.some((call) => call.args.some((arg) => String(arg).includes('/snapshot/api-home.tar'))));
+});
+
+test('rollback refuses a backup whose content no longer matches its completion manifest', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_backup_integrity';
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs(operationId), commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-activate', {
+    args: ['--operation-id', operationId], commit: NEW_REF,
+  }));
+  const completed = JSON.parse(readFileSync(join(
+    f.profileRoot(), 'host-operations', operationId, 'operation.json',
+  ), 'utf8'));
+  writeFileSync(join(completed.backupDir, 'postgres.dump'), 'tampered backup');
+
+  const rejected = f.run('stable', 'host-rollback-stage', {
+    args: ['--operation-id', 'pop_tampered_rollback', '--ref', OLD_REF], commit: NEW_REF,
+  });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /No verified complete backup/u);
+  assert.ok(!dockerCalls(rejected).some((call) =>
+    call.args.includes('stop') || call.args.includes('up') || call.args.includes('pg_restore')
+  ), 'an invalid backup must be rejected before any destructive Docker action');
+  assert.equal(f.readProfile('active.json').ref, NEW_REF);
+});
+
+test('host recovery restores the old release after an executor crash during switch', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_crash_recovery';
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs(operationId), commit: NEW_REF }));
+  const operationRoot = join(f.profileRoot(), 'host-operations', operationId);
+  const journalPath = join(operationRoot, 'operation.json');
+  const journal = JSON.parse(readFileSync(journalPath, 'utf8'));
+  writeFileSync(journalPath, JSON.stringify({ ...journal, phase: 'switching', status: 'running' }));
+  for (const name of ['deployment.json', 'compose.env', 'compose.yml']) {
+    copyFileSync(join(operationRoot, 'candidate', name), join(f.profileRoot(), name));
+  }
+  assert.equal(f.readProfile('deployment.json').ref, NEW_REF);
+
+  const recovered = f.run('stable', 'host-recover');
+  succeeds(recovered);
+  assert.equal(f.readProfile('active.json').ref, OLD_REF);
+  assert.equal(f.readProfile('deployment.json').ref, OLD_REF);
+  const after = JSON.parse(readFileSync(journalPath, 'utf8'));
+  assert.equal(after.status, 'rolled_back');
+  assert.match(after.error, /interrupted/u);
+  assert.ok(dockerCalls(recovered).some((call) => isAction('up')(call) && call.selectedRef === OLD_REF));
 });

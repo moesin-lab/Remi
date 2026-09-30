@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { createHmac, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, openSync, closeSync, realpathSync, unlinkSync } from 'node:fs';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, openSync, closeSync, realpathSync, unlinkSync, renameSync, readdirSync, rmSync, statSync, statfsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve, delimiter, relative, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,7 +55,9 @@ function capture(command, args) {
 }
 
 function saveJson(path, value) {
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  const temporary = `${path}.tmp-${process.pid}`;
+  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  renameSync(temporary, path);
 }
 
 function readJson(path) {
@@ -181,7 +183,7 @@ function prepare(profile, ref, lanHost) {
   return root;
 }
 
-function backup(root) {
+function backup(root, operationId = null) {
   const timestamp = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
   const backupDir = join(root, 'backups', timestamp);
   mkdirSync(backupDir, { recursive: true, mode: 0o700 });
@@ -192,14 +194,438 @@ function backup(root) {
   try {
     execute('docker', composeArgs(root, 'exec', '-T', 'postgres', 'pg_dump', '-U', 'multiremi', '-d', 'multiremi', '-Fc'), { stdio: ['ignore', db, 'inherit'] });
   } finally { closeSync(db); }
-  const files = openSync(join(backupDir, 'api-home.tar'), 'w', 0o600);
+  const apiFiles = openSync(join(backupDir, 'api-home.tar'), 'w', 0o600);
   try {
     const deployment = readJson(join(root, 'deployment.json'));
-    execute('docker', ['run', '--rm', '--network', 'none', '--mount', `type=volume,src=remi-${deployment.profile}_api-home,dst=/backup,readonly`, '--entrypoint', 'tar', deployment.apiImage, '-C', '/backup', '-cf', '-', '.'], { stdio: ['ignore', files, 'inherit'] });
-  } finally { closeSync(files); }
-  saveJson(join(backupDir, 'complete.json'), { completedAt: new Date().toISOString() });
+    execute('docker', ['run', '--rm', '--network', 'none', '--mount', `type=volume,src=remi-${deployment.profile}_api-home,dst=/backup,readonly`, '--entrypoint', 'tar', deployment.apiImage, '-C', '/backup', '-cf', '-', '.'], { stdio: ['ignore', apiFiles, 'inherit'] });
+  } finally { closeSync(apiFiles); }
+  const files = {};
+  for (const name of readdirSync(backupDir)) {
+    if (name === 'complete.json') continue;
+    const path = join(backupDir, name);
+    if (!statSync(path).isFile()) continue;
+    files[name] = { size: statSync(path).size, sha256: fileSha256(path) };
+  }
+  const deployment = readJson(join(root, 'deployment.json'));
+  saveJson(join(backupDir, 'complete.json'), {
+    schemaVersion: 2,
+    completedAt: new Date().toISOString(),
+    operationId,
+    files,
+    restoreCommand: `node scripts/local-profile.mjs ${deployment.profile} host-rollback-stage --operation-id <new-operation-id> --ref ${deployment.ref}`,
+  });
   console.log(`Backup: ${backupDir}`);
   return backupDir;
+}
+
+const managedProfileFiles = ['api.env', 'credentials.json', 'compose.env', 'deployment.json', 'active.json', 'compose.yml', 'compose.dev.yml'];
+const switchPhases = new Set(['switching', 'backup_complete', 'activating', 'rolling_back']);
+
+function fileSha256(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function safeOperationId(value) {
+  if (!/^[A-Za-z0-9_-]{3,128}$/u.test(value || '')) throw new Error('--operation-id is invalid');
+  return value;
+}
+
+function operationDirectory(root, operationId) {
+  const base = join(root, 'host-operations');
+  mkdirSync(base, { recursive: true, mode: 0o700 });
+  const directory = resolve(base, safeOperationId(operationId));
+  if (dirname(directory) !== resolve(base)) throw new Error('Operation path escapes the profile root');
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  return directory;
+}
+
+function operationPath(root, operationId) {
+  return join(operationDirectory(root, operationId), 'operation.json');
+}
+
+function saveOperation(root, state, change = {}) {
+  const next = { ...state, ...change, updatedAt: new Date().toISOString() };
+  saveJson(operationPath(root, next.operationId), next);
+  return next;
+}
+
+function snapshotProfile(root, destination) {
+  rmSync(destination, { recursive: true, force: true });
+  mkdirSync(destination, { recursive: true, mode: 0o700 });
+  const files = managedProfileFiles.filter((name) => existsSync(join(root, name)));
+  for (const name of files) copyFileSync(join(root, name), join(destination, name));
+  saveJson(join(destination, 'files.json'), { files });
+}
+
+function restoreProfileSnapshot(root, source) {
+  const { files } = readJson(join(source, 'files.json'));
+  for (const name of managedProfileFiles) {
+    const target = join(root, name);
+    if (existsSync(target)) unlinkSync(target);
+  }
+  for (const name of files) copyFileSync(join(source, name), join(root, name));
+}
+
+function acquireHostLock(root) {
+  const path = join(root, 'host-update.lock');
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const descriptor = openSync(path, 'wx', 0o600);
+      writeFileSync(descriptor, `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`);
+      return () => {
+        try { closeSync(descriptor); } catch {}
+        try { unlinkSync(path); } catch {}
+      };
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      let active = true;
+      try {
+        const pid = Number(readJson(path).pid);
+        process.kill(pid, 0);
+      } catch (probe) {
+        active = probe?.code === 'EPERM';
+      }
+      if (active) throw new Error('Another local-profile host operation holds the lock');
+      unlinkSync(path);
+    }
+  }
+  throw new Error('Unable to acquire the local-profile host lock');
+}
+
+function validateHostCapacity(root) {
+  const minimum = Number(process.env.REMI_HOST_MIN_FREE_BYTES || 5 * 1024 * 1024 * 1024);
+  const stats = statfsSync(root);
+  const available = Number(stats.bavail) * Number(stats.bsize);
+  if (!Number.isFinite(minimum) || minimum < 1) throw new Error('REMI_HOST_MIN_FREE_BYTES is invalid');
+  if (available < minimum) throw new Error(`Insufficient disk space: ${available} bytes available, ${minimum} required`);
+  const expected = (process.env.REMI_HOST_EXPECTED_ARCH || process.arch).toLowerCase();
+  const actual = process.arch.toLowerCase();
+  const aliases = { amd64: 'x64', x86_64: 'x64', aarch64: 'arm64' };
+  if ((aliases[expected] || expected) !== (aliases[actual] || actual)) {
+    throw new Error(`Host architecture ${actual} does not match required ${expected}`);
+  }
+  const dockerArchitecture = capture('docker', ['info', '--format', '{{.Architecture}}']).trim().toLowerCase();
+  if (dockerArchitecture && (aliases[dockerArchitecture] || dockerArchitecture) !== (aliases[expected] || expected)) {
+    throw new Error(`Docker architecture ${dockerArchitecture} does not match required ${expected}`);
+  }
+}
+
+async function validateReleaseArtifact(url, expectedSha256) {
+  const parsed = validateReleaseArtifactInput(url, expectedSha256);
+  const response = await fetch(parsed, { signal: AbortSignal.timeout(120_000) });
+  const ok = response.ok ?? (response.status >= 200 && response.status < 300);
+  if (!ok) throw new Error(`Release source returned HTTP ${response.status}`);
+  const digest = createHash('sha256').update(Buffer.from(await response.arrayBuffer())).digest('hex');
+  if (digest !== expectedSha256.toLowerCase()) throw new Error('Release source checksum mismatch');
+}
+
+function validateReleaseArtifactInput(url, expectedSha256) {
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new Error('Release source URL is invalid'); }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error('Release source URL must use HTTPS without credentials, query, or fragment');
+  }
+  if (!/^[a-f0-9]{64}$/iu.test(expectedSha256 || '')) throw new Error('Release source SHA-256 is invalid');
+  return parsed;
+}
+
+function resultRelease(deployment) {
+  return {
+    version: deployment.version.split('-stable.')[0],
+    ref: deployment.ref,
+    publishedAt: new Date().toISOString(),
+    releaseUrl: null,
+    manifestUrl: null,
+    apiImage: deployment.apiImage,
+    webImage: deployment.webImage,
+  };
+}
+
+async function verifyProfileHealth(profile) {
+  const config = settings[profile];
+  for (const [service, url] of [['api', `http://127.0.0.1:${config.apiPort}/readyz`], ['web', `http://127.0.0.1:${config.webPort}/login`]]) {
+    let last = `${service} did not become ready`;
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+        const ok = response.ok ?? (response.status >= 200 && response.status < 300);
+        if (ok) { last = ''; break; }
+        last = `${service} returned HTTP ${response.status}`;
+      } catch (error) { last = error.message; }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 2_500));
+    }
+    if (last) throw new Error(last);
+  }
+}
+
+function verifyCompleteBackup(backupDir) {
+  const marker = readJson(join(backupDir, 'complete.json'));
+  if (marker.schemaVersion !== 2 || !marker.files || typeof marker.files !== 'object') {
+    throw new Error(`Backup ${backupDir} lacks a verifiable v2 completion manifest`);
+  }
+  for (const [name, expected] of Object.entries(marker.files)) {
+    if (!/^[A-Za-z0-9.-]+$/u.test(name) || dirname(resolve(backupDir, name)) !== resolve(backupDir)) {
+      throw new Error('Backup completion manifest contains an invalid file name');
+    }
+    const path = join(backupDir, name);
+    if (!existsSync(path) || statSync(path).size !== expected.size || fileSha256(path) !== expected.sha256) {
+      throw new Error(`Backup integrity check failed for ${name}`);
+    }
+  }
+  for (const required of ['postgres.dump', 'api-home.tar', 'deployment.json', 'active.json']) {
+    if (!marker.files[required] || marker.files[required].size < 1) throw new Error(`Backup completion manifest is missing or empty: ${required}`);
+  }
+  return marker;
+}
+
+function restoreBackup(root, backupDir) {
+  const backupsRoot = resolve(root, 'backups');
+  const resolvedBackup = resolve(backupDir);
+  if (dirname(resolvedBackup) !== backupsRoot) throw new Error('Backup path escapes the profile backup root');
+  backupDir = resolvedBackup;
+  verifyCompleteBackup(backupDir);
+  for (const name of managedProfileFiles) {
+    const source = join(backupDir, name);
+    const target = join(root, name);
+    if (existsSync(target)) unlinkSync(target);
+    if (existsSync(source)) copyFileSync(source, target);
+  }
+  const deployment = readJson(join(root, 'deployment.json'));
+  compose(root, 'stop', 'web', 'api');
+  compose(root, 'up', '-d', '--wait', 'postgres');
+  execute('docker', [
+    'run', '--rm', '--network', 'none',
+    '--mount', `type=volume,src=remi-${deployment.profile}_api-home,dst=/restore`,
+    '--mount', `type=bind,src=${backupDir},dst=/snapshot,readonly`,
+    '--entrypoint', 'sh', deployment.apiImage,
+    '-c', 'find /restore -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar -xf /snapshot/api-home.tar -C /restore',
+  ]);
+  execute('docker', composeArgs(root, 'exec', '-T', 'postgres', 'pg_restore', '-U', 'multiremi', '-d', 'multiremi', '--clean', '--if-exists', '/dev/stdin'), {
+    input: readFileSync(join(backupDir, 'postgres.dump')),
+    stdio: ['pipe', 'inherit', 'inherit'],
+  });
+  compose(root, 'up', '-d', '--wait', '--wait-timeout', '240');
+  saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
+}
+
+async function hostStage(profile, flags) {
+  if (profile !== 'stable') throw new Error('The recoverable host executor only manages the stable profile');
+  const operationId = safeOperationId(flags['--operation-id']);
+  const ref = flags['--ref'];
+  const version = flags['--version'];
+  if (!/^[a-f0-9]{40}$/iu.test(ref || '')) throw new Error('--ref must be a full Git commit');
+  if (!/^v?\d+\.\d+\.\d+$/u.test(version || '')) throw new Error('--version must be SemVer');
+  validateReleaseArtifactInput(flags['--source-url'], flags['--source-sha256']);
+  const root = initialize(profile);
+  if (!existsSync(join(root, 'active.json'))) throw new Error('The stable profile must be active before a host update');
+  const release = acquireHostLock(root);
+  try {
+    const path = operationPath(root, operationId);
+    let state = existsSync(path) ? readJson(path) : null;
+    if (state) {
+      if (state.kind !== 'update' || state.targetRef !== ref || state.targetVersion !== version) {
+        throw new Error('Operation ID was already used with different update parameters');
+      }
+      if (state.status === 'succeeded' || state.phase === 'built') return;
+      if (state.status !== 'running') throw new Error(state.error || `Host operation is ${state.status}`);
+    } else {
+      state = {
+        schemaVersion: 1,
+        operationId,
+        kind: 'update',
+        status: 'running',
+        phase: 'requested',
+        targetRef: ref.toLowerCase(),
+        targetVersion: version.replace(/^v/u, ''),
+        sourceUrl: flags['--source-url'],
+        sourceSha256: flags['--source-sha256']?.toLowerCase(),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        error: null,
+        backupDir: null,
+        resultRelease: null,
+      };
+      saveJson(path, state);
+    }
+    const directory = operationDirectory(root, operationId);
+    const previous = join(directory, 'previous');
+    const candidate = join(directory, 'candidate');
+    try {
+      validateHostCapacity(root);
+      await validateReleaseArtifact(state.sourceUrl, state.sourceSha256);
+      execute('git', ['fetch', '--no-tags', 'origin', ref]);
+      const resolved = capture('git', ['rev-parse', '--verify', `${ref}^{commit}`]).toLowerCase();
+      if (resolved !== ref.toLowerCase()) throw new Error('Fetched Git object does not match the requested commit');
+      state = saveOperation(root, state, { phase: 'fetched' });
+      if (!existsSync(join(previous, 'files.json'))) snapshotProfile(root, previous);
+      else restoreProfileSnapshot(root, previous);
+      prepare(profile, ref);
+      const deployment = readJson(join(root, 'deployment.json'));
+      if (!deployment.version.startsWith(`${state.targetVersion}-stable.`)) {
+        throw new Error(`Commit package version ${deployment.version} does not match manifest ${state.targetVersion}`);
+      }
+      state = saveOperation(root, state, { phase: 'prepared' });
+      compose(root, 'build', 'api', 'web');
+      snapshotProfile(root, candidate);
+      restoreProfileSnapshot(root, previous);
+      saveOperation(root, state, { phase: 'built' });
+    } catch (error) {
+      if (existsSync(join(previous, 'files.json'))) restoreProfileSnapshot(root, previous);
+      saveOperation(root, state, { status: 'failed', phase: 'failed', error: error.message });
+      throw error;
+    }
+  } finally { release(); }
+}
+
+async function rollbackInterruptedUpdate(root, state, reason) {
+  const directory = operationDirectory(root, state.operationId);
+  const previous = join(directory, 'previous');
+  let next = saveOperation(root, state, { status: 'recovery_required', phase: 'rolling_back', error: reason });
+  try {
+    if (next.backupDir) restoreBackup(root, next.backupDir);
+    else {
+      restoreProfileSnapshot(root, previous);
+      compose(root, 'up', '-d', '--wait', '--wait-timeout', '240');
+      saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
+    }
+    await verifyProfileHealth('stable');
+    next = saveOperation(root, next, { status: 'rolled_back', phase: 'rolled_back', error: reason });
+    return next;
+  } catch (rollbackError) {
+    saveOperation(root, next, {
+      status: 'recovery_required',
+      phase: 'rolling_back',
+      error: `${reason}; automatic rollback failed: ${rollbackError.message}`,
+    });
+    throw rollbackError;
+  }
+}
+
+async function hostActivate(profile, flags) {
+  if (profile !== 'stable') throw new Error('The recoverable host executor only manages the stable profile');
+  const operationId = safeOperationId(flags['--operation-id']);
+  const root = join(profilesRoot, profile);
+  const release = acquireHostLock(root);
+  try {
+    let state = readJson(operationPath(root, operationId));
+    if (state.kind !== 'update') throw new Error('Host operation is not an update');
+    if (state.status === 'succeeded') return;
+    if (state.status !== 'running' || state.phase !== 'built') throw new Error(state.error || `Host operation cannot activate from ${state.phase}`);
+    const directory = operationDirectory(root, operationId);
+    const previous = join(directory, 'previous');
+    const candidate = join(directory, 'candidate');
+    try {
+      restoreProfileSnapshot(root, previous);
+      state = saveOperation(root, state, { phase: 'switching' });
+      compose(root, 'stop', 'web', 'api');
+      compose(root, 'up', '-d', '--wait', 'postgres');
+      const saved = backup(root, operationId);
+      state = saveOperation(root, state, { phase: 'backup_complete', backupDir: saved });
+      restoreProfileSnapshot(root, candidate);
+      state = saveOperation(root, state, { phase: 'activating' });
+      compose(root, 'up', '-d', '--wait', '--wait-timeout', '240');
+      await verifyProfileHealth(profile);
+      const deployment = readJson(join(root, 'deployment.json'));
+      saveJson(join(root, 'active.json'), deployment);
+      saveOperation(root, state, { status: 'succeeded', phase: 'succeeded', resultRelease: resultRelease(deployment) });
+    } catch (error) {
+      if (switchPhases.has(state.phase)) await rollbackInterruptedUpdate(root, state, `Update failed: ${error.message}`);
+      else saveOperation(root, state, { status: 'failed', phase: 'failed', error: error.message });
+      throw error;
+    }
+  } finally { release(); }
+}
+
+function findBackupForTarget(root, target) {
+  const backupsRoot = join(root, 'backups');
+  const names = existsSync(backupsRoot) ? readdirSync(backupsRoot).sort().reverse() : [];
+  for (const name of names) {
+    const backupDir = join(backupsRoot, name);
+    try {
+      verifyCompleteBackup(backupDir);
+      const deployment = readJson(join(backupDir, 'active.json'));
+      if (deployment.ref === target || deployment.version === target || deployment.version.startsWith(`${target}-`)) return backupDir;
+    } catch {}
+  }
+  throw new Error(`No verified complete backup matches ${target}`);
+}
+
+function hostRollbackStage(profile, flags) {
+  if (profile !== 'stable') throw new Error('The recoverable host executor only manages the stable profile');
+  const operationId = safeOperationId(flags['--operation-id']);
+  const target = flags['--ref'];
+  if (!target) throw new Error('--ref is required');
+  const root = join(profilesRoot, profile);
+  const release = acquireHostLock(root);
+  try {
+    const path = operationPath(root, operationId);
+    if (existsSync(path)) {
+      const state = readJson(path);
+      if (state.kind !== 'rollback' || state.targetRef !== target) throw new Error('Operation ID was already used with different rollback parameters');
+      if (state.status === 'succeeded' || state.phase === 'rollback_ready') return;
+      throw new Error(state.error || `Host rollback is ${state.status}`);
+    }
+    validateHostCapacity(root);
+    const backupDir = findBackupForTarget(root, target);
+    saveJson(path, {
+      schemaVersion: 1, operationId, kind: 'rollback', status: 'running', phase: 'rollback_ready',
+      targetRef: target, backupDir, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      error: null, resultRelease: null,
+    });
+  } finally { release(); }
+}
+
+async function hostRollbackActivate(profile, flags) {
+  const operationId = safeOperationId(flags['--operation-id']);
+  const root = join(profilesRoot, profile);
+  const release = acquireHostLock(root);
+  try {
+    let state = readJson(operationPath(root, operationId));
+    if (state.kind !== 'rollback') throw new Error('Host operation is not a rollback');
+    if (state.status === 'succeeded') return;
+    if (state.status !== 'running' || state.phase !== 'rollback_ready') throw new Error(state.error || `Host rollback cannot activate from ${state.phase}`);
+    state = saveOperation(root, state, { status: 'recovery_required', phase: 'rolling_back' });
+    try {
+      restoreBackup(root, state.backupDir);
+      await verifyProfileHealth(profile);
+      const deployment = readJson(join(root, 'active.json'));
+      saveOperation(root, state, { status: 'succeeded', phase: 'succeeded', resultRelease: resultRelease(deployment) });
+    } catch (error) {
+      saveOperation(root, state, { status: 'recovery_required', phase: 'rolling_back', error: `Rollback failed: ${error.message}` });
+      throw error;
+    }
+  } finally { release(); }
+}
+
+async function hostRecover(profile) {
+  if (profile !== 'stable') throw new Error('The recoverable host executor only manages the stable profile');
+  const root = join(profilesRoot, profile);
+  if (!existsSync(root)) return;
+  const release = acquireHostLock(root);
+  try {
+    const operations = join(root, 'host-operations');
+    if (!existsSync(operations)) return;
+    for (const operationId of readdirSync(operations).sort()) {
+      const path = join(operations, operationId, 'operation.json');
+      if (!existsSync(path)) continue;
+      const state = readJson(path);
+      if (!['running', 'recovery_required'].includes(state.status)) continue;
+      if (state.kind === 'update' && switchPhases.has(state.phase)) {
+        await rollbackInterruptedUpdate(root, state, state.error || 'Host executor was interrupted during the switch');
+      } else if (state.kind === 'rollback' && state.phase === 'rolling_back') {
+        try {
+          restoreBackup(root, state.backupDir);
+          await verifyProfileHealth(profile);
+          const deployment = readJson(join(root, 'active.json'));
+          saveOperation(root, state, { status: 'succeeded', phase: 'succeeded', resultRelease: resultRelease(deployment) });
+        } catch (error) {
+          saveOperation(root, state, { status: 'recovery_required', error: `Rollback recovery failed: ${error.message}` });
+          throw error;
+        }
+      }
+    }
+  } finally { release(); }
 }
 
 async function status(root) {
@@ -223,7 +649,7 @@ async function status(root) {
 async function main() {
   const [profile, action, ...args] = process.argv.slice(2);
   if (!Object.hasOwn(settings, profile) || !action || action === '--help') {
-    console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|stop|status|logs|watch|backup|token> [--ref <commit>] [--lan-host <private IPv4>]');
+    console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|stop|restart|status|logs|watch|backup|token|host-stage|host-activate|host-recover|host-rollback-stage|host-rollback-activate> [options]');
     console.log('stable deploy: archive a fixed commit, build, back up existing data, then update containers.');
     console.log('dev deploy + dev watch: build current source, then sync changes without touching stable.');
     console.log('stable --lan-host: bind Web/API to 0.0.0.0 and persist the advertised LAN address across deploys.');
@@ -234,19 +660,32 @@ async function main() {
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index];
     const value = args[index + 1];
-    if (!['--ref', '--lan-host'].includes(key) || !value || value.startsWith('--') || Object.hasOwn(flags, key)) {
-      throw new Error('Only --ref <commit> and --lan-host <private IPv4> are supported, once each');
+    if (!['--ref', '--lan-host', '--operation-id', '--version', '--source-url', '--source-sha256'].includes(key) || !value || value.startsWith('--') || Object.hasOwn(flags, key)) {
+      throw new Error('Unsupported, missing, or duplicate --ref/--lan-host/host option');
     }
     flags[key] = value;
   }
-  if (args.length && !['prepare', 'deploy'].includes(action)) throw new Error('--ref and --lan-host are only valid with prepare/deploy');
+  const actionOptions = {
+    prepare: ['--ref', '--lan-host'], deploy: ['--ref', '--lan-host'],
+    'host-stage': ['--operation-id', '--ref', '--version', '--source-url', '--source-sha256'],
+    'host-activate': ['--operation-id'],
+    'host-rollback-stage': ['--operation-id', '--ref'],
+    'host-rollback-activate': ['--operation-id'],
+  };
+  const acceptedOptions = actionOptions[action] || [];
+  if (Object.keys(flags).some((key) => !acceptedOptions.includes(key))) throw new Error(`--ref and --lan-host or host options are not valid with ${action}`);
   if (profile === 'dev' && flags['--ref'] && flags['--ref'] !== 'HEAD') throw new Error('dev runs the working tree; use stable to deploy a fixed ref');
   if (flags['--lan-host']) {
     if (profile !== 'stable') throw new Error('--lan-host is only valid for stable; dev stays on loopback');
     validateLanHost(flags['--lan-host']);
   }
   const root = join(profilesRoot, profile);
-  if (action === 'prepare') {
+  if (action === 'host-stage') await hostStage(profile, flags);
+  else if (action === 'host-activate') await hostActivate(profile, flags);
+  else if (action === 'host-recover') await hostRecover(profile);
+  else if (action === 'host-rollback-stage') hostRollbackStage(profile, flags);
+  else if (action === 'host-rollback-activate') await hostRollbackActivate(profile, flags);
+  else if (action === 'prepare') {
     if (existsSync(join(root, 'active.json'))) throw new Error('An activated profile must be upgraded with deploy');
     prepare(profile, flags['--ref'] || 'HEAD', flags['--lan-host']);
   } else if (action === 'deploy') {
@@ -293,6 +732,10 @@ async function main() {
     saveJson(join(root, 'active.json'), candidate);
   }
   else if (action === 'stop') compose(root, 'stop');
+  else if (action === 'restart') {
+    compose(root, 'restart', 'api', 'web');
+    await verifyProfileHealth(profile);
+  }
   else if (action === 'status') await status(root);
   else if (action === 'logs') compose(root, 'logs', '--tail', '80', 'api', 'web');
   else if (action === 'watch') {

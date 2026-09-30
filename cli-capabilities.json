@@ -12293,6 +12293,11 @@
       "category": "platform_updater_internal",
       "reason": "Platform updater callback is an internal deployment control-plane protocol."
     },
+    "POST /api/platform-updater/operations/reconcile": {
+      "cli_exempt": true,
+      "category": "platform_updater_internal",
+      "reason": "Platform updater callback is an internal deployment control-plane protocol."
+    },
     "POST /api/project-knowledge/migration/backfill": {
       "command": "memory.migration.backfill"
     },

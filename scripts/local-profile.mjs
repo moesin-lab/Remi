@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, openSync, closeSync, realpathSync, unlinkSync, renameSync, readdirSync, rmSync, statSync, statfsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, openSync, closeSync, fsyncSync, realpathSync, unlinkSync, renameSync, readdirSync, rmSync, statSync, statfsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve, delimiter, relative, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -54,11 +54,17 @@ function capture(command, args) {
   return execute(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
-function saveJson(path, value) {
+function savePrivateFile(path, contents) {
   const temporary = `${path}.tmp-${process.pid}`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  const descriptor = openSync(temporary, 'w', 0o600);
+  try {
+    writeFileSync(descriptor, contents);
+    fsyncSync(descriptor);
+  } finally { closeSync(descriptor); }
   renameSync(temporary, path);
 }
+
+function saveJson(path, value) { savePrivateFile(path, `${JSON.stringify(value, null, 2)}\n`); }
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
@@ -111,6 +117,7 @@ function composeArgs(root, ...args) {
   }
   const flags = ['compose', '-p', `remi-${deployment.profile}`, '--env-file', join(root, 'compose.env'), '-f', join(root, 'compose.yml')];
   if (deployment.profile === 'dev') flags.push('-f', join(root, 'compose.dev.yml'));
+  if (deployment.profile === 'stable' && existsSync(join(root, 'compose.host-control.yml'))) flags.push('-f', join(root, 'compose.host-control.yml'));
   return [...flags, ...args];
 }
 
@@ -190,10 +197,21 @@ function backup(root, operationId = null) {
   for (const name of ['api.env', 'credentials.json', 'compose.env', 'deployment.json', 'active.json', 'compose.yml', 'compose.dev.yml']) {
     if (existsSync(join(root, name))) copyFileSync(join(root, name), join(backupDir, name));
   }
+  // Persist immutable image identities with the matching data snapshot. A tag
+  // alone cannot prove that a later rollback is running the backed-up code.
+  const deployment = withImageIdentities(readJson(join(root, 'deployment.json')));
+  saveJson(join(backupDir, 'deployment.json'), deployment);
+  saveJson(join(backupDir, 'active.json'), deployment);
   const db = openSync(join(backupDir, 'postgres.dump'), 'w', 0o600);
   try {
     execute('docker', composeArgs(root, 'exec', '-T', 'postgres', 'pg_dump', '-U', 'multiremi', '-d', 'multiremi', '-Fc'), { stdio: ['ignore', db, 'inherit'] });
   } finally { closeSync(db); }
+  const controlPlane = openSync(join(backupDir, 'control-plane.dump'), 'w', 0o600);
+  try {
+    execute('docker', composeArgs(root, 'exec', '-T', 'postgres', 'pg_dump', '-U', 'multiremi', '-d', 'multiremi', '-Fc',
+      '--table=public.multiremi_platform_operations', '--table=public.multiremi_platform_maintenance', '--table=public.multiremi_platform_state'),
+    { stdio: ['ignore', controlPlane, 'inherit'] });
+  } finally { closeSync(controlPlane); }
   const apiFiles = openSync(join(backupDir, 'api-home.tar'), 'w', 0o600);
   try {
     const deployment = readJson(join(root, 'deployment.json'));
@@ -206,7 +224,6 @@ function backup(root, operationId = null) {
     if (!statSync(path).isFile()) continue;
     files[name] = { size: statSync(path).size, sha256: fileSha256(path) };
   }
-  const deployment = readJson(join(root, 'deployment.json'));
   saveJson(join(backupDir, 'complete.json'), {
     schemaVersion: 2,
     completedAt: new Date().toISOString(),
@@ -220,6 +237,100 @@ function backup(root, operationId = null) {
 
 const managedProfileFiles = ['api.env', 'credentials.json', 'compose.env', 'deployment.json', 'active.json', 'compose.yml', 'compose.dev.yml'];
 const switchPhases = new Set(['switching', 'backup_complete', 'activating', 'rolling_back']);
+const updaterAuthKeys = ['MULTIREMI_TOKEN', 'MULTIREMI_PLATFORM_UPDATER_TOKEN'];
+
+function validateUpdaterAuth(values) {
+  for (const key of updaterAuthKeys) {
+    if (typeof values[key] !== 'string' || !values[key].trim() || /[\r\n\0]/u.test(values[key])) {
+      throw new Error(`Host updater credential ${key} is missing or invalid`);
+    }
+  }
+  return values;
+}
+
+function readHostUpdaterAuth(path) {
+  // Match Compose env_file format: raw. Dotenv parsing would strip a '#' or
+  // quotes from opaque credential values that must be preserved byte-for-byte.
+  return Object.fromEntries(readFileSync(path, 'utf8').split(/\r?\n/u).filter(Boolean).map((line) => {
+    const separator = line.indexOf('=');
+    if (separator < 1) throw new Error('The captured host updater credentials are invalid');
+    return [line.slice(0, separator), line.slice(separator + 1)];
+  }));
+}
+
+function captureHostUpdaterAuth(root, operationId, refreshFromProfile = false) {
+  const controlRoot = join(root, 'host-control');
+  const authPath = join(controlRoot, 'updater-auth.env');
+  const receiptPath = join(controlRoot, 'auth-operation.json');
+  mkdirSync(controlRoot, { recursive: true, mode: 0o700 });
+  if (!refreshFromProfile && existsSync(receiptPath) && readJson(receiptPath).operationId === operationId) {
+    // The profile may already contain historic credentials after restore. A
+    // resumed operation must use the durable pre-switch capture, or fail shut.
+    if (!existsSync(authPath)) throw new Error('The captured host updater credentials are missing');
+    validateUpdaterAuth(readHostUpdaterAuth(authPath));
+    return authPath;
+  }
+  const fromProfile = parseEnv(readFileSync(join(root, 'api.env'), 'utf8'));
+  const currentOverlay = !refreshFromProfile && existsSync(authPath) ? readHostUpdaterAuth(authPath) : {};
+  // Compose reads this env_file last, so its values are the actual effective
+  // credentials even after a rollback has restored an older api.env.
+  const effective = validateUpdaterAuth({ ...fromProfile, ...currentOverlay });
+  savePrivateFile(authPath, updaterAuthKeys.map((key) => `${key}=${effective[key]}`).join('\n') + '\n');
+  saveJson(receiptPath, { operationId, capturedAt: new Date().toISOString() });
+  return authPath;
+}
+
+function installHostWriteFence(root, operationId) {
+  const controlRoot = join(root, 'host-control');
+  const marker = join(controlRoot, 'write-fence.json');
+  if (existsSync(marker) && readJson(marker).operationId !== operationId) {
+    throw new Error('Another host operation still owns the write fence');
+  }
+  mkdirSync(controlRoot, { recursive: true, mode: 0o700 });
+  const authPath = captureHostUpdaterAuth(root, operationId);
+  copyFileSync(join(repository, 'deploy/docker/host-write-fence.ts'), join(controlRoot, 'host-write-fence.ts'));
+  // This host-owned mount survives restoring old application configuration and
+  // works with older API images that predate the in-process maintenance guard.
+  const override = {
+    services: {
+      api: {
+        env_file: [{ path: authPath.replaceAll('\\', '/'), format: 'raw' }],
+        volumes: [{ type: 'bind', source: controlRoot.replaceAll('\\', '/'), target: '/remi-host', read_only: true }],
+        command: ['bun', 'run', '--preload', '/remi-host/host-write-fence.ts', 'apps/server/main.ts', 'serve'],
+      },
+    },
+  };
+  saveJson(join(root, 'compose.host-control.yml'), override);
+  saveJson(marker, { operationId });
+}
+
+function hostAuthRefresh(profile) {
+  if (profile !== 'stable') throw new Error('The recoverable host executor only manages the stable profile');
+  const root = join(profilesRoot, profile);
+  const release = acquireHostLock(root);
+  try {
+    if (existsSync(join(root, 'host-control', 'write-fence.json'))) throw new Error('Cannot rotate host updater credentials during a fenced operation');
+    if (!existsSync(join(root, 'compose.host-control.yml'))) throw new Error('Host control must be installed before refreshing its credentials');
+    captureHostUpdaterAuth(root, null, true);
+  } finally { release(); }
+}
+
+function hostFinalize(profile, flags) {
+  if (profile !== 'stable') throw new Error('The recoverable host executor only manages the stable profile');
+  const operationId = safeOperationId(flags['--operation-id']);
+  const root = join(profilesRoot, profile);
+  const release = acquireHostLock(root);
+  try {
+    const state = readJson(operationPath(root, operationId));
+    if (!['succeeded', 'rolled_back', 'failed', 'cancelled'].includes(state.status)) {
+      throw new Error('Host operation is not terminal; its write fence must remain installed');
+    }
+    const marker = join(root, 'host-control', 'write-fence.json');
+    if (!existsSync(marker)) return;
+    if (readJson(marker).operationId !== operationId) throw new Error('Host operation does not own the write fence');
+    unlinkSync(marker);
+  } finally { release(); }
+}
 
 function fileSha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -343,6 +454,8 @@ function resultRelease(deployment) {
 }
 
 async function verifyProfileHealth(profile) {
+  const root = join(profilesRoot, profile);
+  verifyServiceImages(root, false);
   const config = settings[profile];
   for (const [service, url] of [['api', `http://127.0.0.1:${config.apiPort}/readyz`], ['web', `http://127.0.0.1:${config.webPort}/login`]]) {
     let last = `${service} did not become ready`;
@@ -356,6 +469,40 @@ async function verifyProfileHealth(profile) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 2_500));
     }
     if (last) throw new Error(last);
+  }
+  // `restart` returns before Docker's next health probe, unlike compose up
+  // --wait. Allow that probe to catch up after both HTTP endpoints are ready.
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    try { verifyServiceImages(root); return; }
+    catch (error) {
+      if (attempt === 23) throw error;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 2_500));
+    }
+  }
+}
+
+function withImageIdentities(deployment) {
+  const next = { ...deployment };
+  for (const service of ['api', 'web']) {
+    const id = capture('docker', ['image', 'inspect', '--format', '{{.Id}}', deployment[`${service}Image`]]);
+    if (!/^sha256:[a-f0-9]{64}$/u.test(id)) throw new Error(`${service} image is unavailable or has an invalid identity`);
+    if (deployment[`${service}ImageId`] && deployment[`${service}ImageId`] !== id) {
+      throw new Error(`${service} image no longer matches the recorded release`);
+    }
+    next[`${service}ImageId`] = id;
+  }
+  return next;
+}
+
+function verifyServiceImages(root, requireHealthy = true) {
+  const deployment = withImageIdentities(readJson(join(root, 'deployment.json')));
+  for (const service of ['api', 'web']) {
+    const ids = capture('docker', composeArgs(root, 'ps', '--all', '--quiet', service)).split(/\r?\n/u).filter(Boolean);
+    if (ids.length !== 1) throw new Error(`${service} must have exactly one running container`);
+    const image = JSON.parse(capture('docker', ['inspect', '--format', '{{json .Image}}', ids[0]]));
+    const state = JSON.parse(capture('docker', ['inspect', '--format', '{{json .State}}', ids[0]]));
+    if (image !== deployment[`${service}ImageId`]) throw new Error(`${service} container is running a different release image`);
+    if (!state.Running || (requireHealthy && state.Health?.Status !== 'healthy')) throw new Error(`${service} container is not healthy`);
   }
 }
 
@@ -373,18 +520,32 @@ function verifyCompleteBackup(backupDir) {
       throw new Error(`Backup integrity check failed for ${name}`);
     }
   }
-  for (const required of ['postgres.dump', 'api-home.tar', 'deployment.json', 'active.json']) {
+  for (const required of ['postgres.dump', 'api-home.tar', 'deployment.json', 'active.json', 'api.env', 'credentials.json', 'compose.env', 'compose.yml']) {
     if (!marker.files[required] || marker.files[required].size < 1) throw new Error(`Backup completion manifest is missing or empty: ${required}`);
   }
   return marker;
 }
 
-function restoreBackup(root, backupDir) {
+function checkedBackupDirectory(root, backupDir) {
   const backupsRoot = resolve(root, 'backups');
   const resolvedBackup = resolve(backupDir);
   if (dirname(resolvedBackup) !== backupsRoot) throw new Error('Backup path escapes the profile backup root');
-  backupDir = resolvedBackup;
+  return resolvedBackup;
+}
+
+function restoreBackup(root, backupDir, controlPlaneBackupDir = null) {
+  backupDir = checkedBackupDirectory(root, backupDir);
   verifyCompleteBackup(backupDir);
+  let controlPlaneDump = null;
+  if (controlPlaneBackupDir && resolve(controlPlaneBackupDir) !== backupDir) {
+    controlPlaneBackupDir = checkedBackupDirectory(root, controlPlaneBackupDir);
+    const marker = verifyCompleteBackup(controlPlaneBackupDir);
+    if (!marker.files['control-plane.dump']?.size) throw new Error('Rollback rescue backup lacks the current control plane');
+    controlPlaneDump = join(controlPlaneBackupDir, 'control-plane.dump');
+  }
+  // Refuse an unavailable/mutated old image before stopping the current pair or
+  // replacing any data. Both services must be recoverable from this snapshot.
+  const savedDeployment = withImageIdentities(readJson(join(backupDir, 'deployment.json')));
   for (const name of managedProfileFiles) {
     const source = join(backupDir, name);
     const target = join(root, name);
@@ -392,6 +553,7 @@ function restoreBackup(root, backupDir) {
     if (existsSync(source)) copyFileSync(source, target);
   }
   const deployment = readJson(join(root, 'deployment.json'));
+  saveJson(join(root, 'deployment.json'), savedDeployment);
   compose(root, 'stop', 'web', 'api');
   compose(root, 'up', '-d', '--wait', 'postgres');
   execute('docker', [
@@ -401,10 +563,25 @@ function restoreBackup(root, backupDir) {
     '--entrypoint', 'sh', deployment.apiImage,
     '-c', 'find /restore -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + && tar -xf /snapshot/api-home.tar -C /restore',
   ]);
-  execute('docker', composeArgs(root, 'exec', '-T', 'postgres', 'pg_restore', '-U', 'multiremi', '-d', 'multiremi', '--clean', '--if-exists', '/dev/stdin'), {
+  // --clean only drops objects present in the old dump; new-version tables
+  // would survive it. Recreate the database and restore atomically instead.
+  compose(root, 'exec', '-T', 'postgres', 'dropdb', '-U', 'multiremi', '--if-exists', '--force', 'multiremi');
+  compose(root, 'exec', '-T', 'postgres', 'createdb', '-U', 'multiremi', '--owner=multiremi', '--template=template0', 'multiremi');
+  // Omit a filename so pg_restore owns stdin directly. /dev/stdin makes its
+  // archive-format probe reopen an already-consumed Docker pipe.
+  execute('docker', composeArgs(root, 'exec', '-T', 'postgres', 'pg_restore', '-U', 'multiremi', '-d', 'multiremi', '--exit-on-error', '--single-transaction'), {
     input: readFileSync(join(backupDir, 'postgres.dump')),
     stdio: ['pipe', 'inherit', 'inherit'],
   });
+  if (controlPlaneDump) {
+    // These three tables have no external foreign keys. Keep the current
+    // operation and drain fence when business data is rolled back to an older
+    // point in time; otherwise the new API could start accepting writes early.
+    execute('docker', composeArgs(root, 'exec', '-T', 'postgres', 'pg_restore', '-U', 'multiremi', '-d', 'multiremi',
+      '--clean', '--if-exists', '--exit-on-error', '--single-transaction'), {
+      input: readFileSync(controlPlaneDump), stdio: ['pipe', 'inherit', 'inherit'],
+    });
+  }
   compose(root, 'up', '-d', '--wait', '--wait-timeout', '240');
   saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
 }
@@ -467,6 +644,7 @@ async function hostStage(profile, flags) {
       }
       state = saveOperation(root, state, { phase: 'prepared' });
       compose(root, 'build', 'api', 'web');
+      saveJson(join(root, 'deployment.json'), withImageIdentities(deployment));
       snapshotProfile(root, candidate);
       restoreProfileSnapshot(root, previous);
       saveOperation(root, state, { phase: 'built' });
@@ -490,7 +668,7 @@ async function rollbackInterruptedUpdate(root, state, reason) {
       saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
     }
     await verifyProfileHealth('stable');
-    next = saveOperation(root, next, { status: 'rolled_back', phase: 'rolled_back', error: reason });
+    next = saveOperation(root, next, { status: 'rolled_back', phase: 'rolled_back', error: reason, resultRelease: resultRelease(readJson(join(root, 'active.json'))) });
     return next;
   } catch (rollbackError) {
     saveOperation(root, next, {
@@ -516,7 +694,10 @@ async function hostActivate(profile, flags) {
     const previous = join(directory, 'previous');
     const candidate = join(directory, 'candidate');
     try {
+      withImageIdentities(readJson(join(candidate, 'deployment.json')));
+      withImageIdentities(readJson(join(previous, 'deployment.json')));
       restoreProfileSnapshot(root, previous);
+      installHostWriteFence(root, operationId);
       state = saveOperation(root, state, { phase: 'switching' });
       compose(root, 'stop', 'web', 'api');
       compose(root, 'up', '-d', '--wait', 'postgres');
@@ -568,9 +749,11 @@ function hostRollbackStage(profile, flags) {
     }
     validateHostCapacity(root);
     const backupDir = findBackupForTarget(root, target);
+    withImageIdentities(readJson(join(backupDir, 'deployment.json')));
+    snapshotProfile(root, join(operationDirectory(root, operationId), 'previous'));
     saveJson(path, {
       schemaVersion: 1, operationId, kind: 'rollback', status: 'running', phase: 'rollback_ready',
-      targetRef: target, backupDir, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      targetRef: target, backupDir, fallbackBackupDir: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
       error: null, resultRelease: null,
     });
   } finally { release(); }
@@ -585,17 +768,39 @@ async function hostRollbackActivate(profile, flags) {
     if (state.kind !== 'rollback') throw new Error('Host operation is not a rollback');
     if (state.status === 'succeeded') return;
     if (state.status !== 'running' || state.phase !== 'rollback_ready') throw new Error(state.error || `Host rollback cannot activate from ${state.phase}`);
-    state = saveOperation(root, state, { status: 'recovery_required', phase: 'rolling_back' });
+    installHostWriteFence(root, operationId);
+    state = saveOperation(root, state, { status: 'recovery_required', phase: 'rollback_backing_up' });
     try {
-      restoreBackup(root, state.backupDir);
+      compose(root, 'stop', 'web', 'api');
+      compose(root, 'up', '-d', '--wait', 'postgres');
+      const fallbackBackupDir = backup(root, operationId);
+      state = saveOperation(root, state, { phase: 'rolling_back', fallbackBackupDir, controlPlaneBackupDir: fallbackBackupDir });
+      restoreBackup(root, state.backupDir, state.controlPlaneBackupDir);
       await verifyProfileHealth(profile);
       const deployment = readJson(join(root, 'active.json'));
       saveOperation(root, state, { status: 'succeeded', phase: 'succeeded', resultRelease: resultRelease(deployment) });
     } catch (error) {
-      saveOperation(root, state, { status: 'recovery_required', phase: 'rolling_back', error: `Rollback failed: ${error.message}` });
+      await recoverFailedRollback(root, state, `Rollback failed: ${error.message}`);
       throw error;
     }
   } finally { release(); }
+}
+
+async function recoverFailedRollback(root, state, reason) {
+  const next = saveOperation(root, state, { status: 'recovery_required', phase: 'rollback_recovering', error: reason });
+  try {
+    if (next.fallbackBackupDir) restoreBackup(root, next.fallbackBackupDir);
+    else {
+      restoreProfileSnapshot(root, join(operationDirectory(root, state.operationId), 'previous'));
+      compose(root, 'up', '-d', '--wait', '--wait-timeout', '240');
+      saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
+    }
+    await verifyProfileHealth('stable');
+    saveOperation(root, next, { status: 'failed', phase: 'failed', resultRelease: resultRelease(readJson(join(root, 'active.json'))) });
+  } catch (error) {
+    saveOperation(root, next, { error: `${reason}; restoring pre-rollback state failed: ${error.message}` });
+    throw error;
+  }
 }
 
 async function hostRecover(profile) {
@@ -612,16 +817,24 @@ async function hostRecover(profile) {
       const state = readJson(path);
       if (!['running', 'recovery_required'].includes(state.status)) continue;
       if (state.kind === 'update' && switchPhases.has(state.phase)) {
+        installHostWriteFence(root, operationId);
         await rollbackInterruptedUpdate(root, state, state.error || 'Host executor was interrupted during the switch');
+      } else if (state.kind === 'update' && ['requested', 'fetched', 'prepared'].includes(state.phase)) {
+        const previous = join(operationDirectory(root, operationId), 'previous');
+        if (existsSync(join(previous, 'files.json'))) restoreProfileSnapshot(root, previous);
+        saveOperation(root, state, { status: 'failed', phase: 'failed', error: 'Host executor was interrupted while staging; the active release was preserved' });
+      } else if (state.kind === 'rollback' && ['rollback_backing_up', 'rollback_recovering'].includes(state.phase)) {
+        installHostWriteFence(root, operationId);
+        await recoverFailedRollback(root, state, state.error || 'Host executor was interrupted before rollback completed');
       } else if (state.kind === 'rollback' && state.phase === 'rolling_back') {
+        installHostWriteFence(root, operationId);
         try {
-          restoreBackup(root, state.backupDir);
+          restoreBackup(root, state.backupDir, state.controlPlaneBackupDir);
           await verifyProfileHealth(profile);
           const deployment = readJson(join(root, 'active.json'));
           saveOperation(root, state, { status: 'succeeded', phase: 'succeeded', resultRelease: resultRelease(deployment) });
         } catch (error) {
-          saveOperation(root, state, { status: 'recovery_required', error: `Rollback recovery failed: ${error.message}` });
-          throw error;
+          await recoverFailedRollback(root, state, `Rollback recovery failed: ${error.message}`);
         }
       }
     }
@@ -649,7 +862,7 @@ async function status(root) {
 async function main() {
   const [profile, action, ...args] = process.argv.slice(2);
   if (!Object.hasOwn(settings, profile) || !action || action === '--help') {
-    console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|stop|restart|status|logs|watch|backup|token|host-stage|host-activate|host-recover|host-rollback-stage|host-rollback-activate> [options]');
+    console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|stop|restart|status|logs|watch|backup|token|host-stage|host-activate|host-recover|host-rollback-stage|host-rollback-activate|host-finalize|host-auth-refresh> [options]');
     console.log('stable deploy: archive a fixed commit, build, back up existing data, then update containers.');
     console.log('dev deploy + dev watch: build current source, then sync changes without touching stable.');
     console.log('stable --lan-host: bind Web/API to 0.0.0.0 and persist the advertised LAN address across deploys.');
@@ -671,6 +884,7 @@ async function main() {
     'host-activate': ['--operation-id'],
     'host-rollback-stage': ['--operation-id', '--ref'],
     'host-rollback-activate': ['--operation-id'],
+    'host-finalize': ['--operation-id'],
   };
   const acceptedOptions = actionOptions[action] || [];
   if (Object.keys(flags).some((key) => !acceptedOptions.includes(key))) throw new Error(`--ref and --lan-host or host options are not valid with ${action}`);
@@ -685,6 +899,8 @@ async function main() {
   else if (action === 'host-recover') await hostRecover(profile);
   else if (action === 'host-rollback-stage') hostRollbackStage(profile, flags);
   else if (action === 'host-rollback-activate') await hostRollbackActivate(profile, flags);
+  else if (action === 'host-finalize') hostFinalize(profile, flags);
+  else if (action === 'host-auth-refresh') hostAuthRefresh(profile);
   else if (action === 'prepare') {
     if (existsSync(join(root, 'active.json'))) throw new Error('An activated profile must be upgraded with deploy');
     prepare(profile, flags['--ref'] || 'HEAD', flags['--lan-host']);

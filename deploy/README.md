@@ -110,6 +110,11 @@ free space and host/Docker architecture, downloads and hashes the CI-produced
 archive, fetches that exact commit from `origin`, builds candidate images, then
 restores the live configuration. Switching begins only after drain succeeds.
 
+The browser/CLI creates the operation inside the API container; the host polls
+the published API port with the API and independent updater credentials. It
+builds and switches **both API and Web** from the same immutable commit. No
+Docker socket or host command channel is exposed to the browser or API container.
+
 Each switch writes an atomic journal under
 `<profiles-root>/stable/host-operations/<operation-id>/`. The global host lock
 prevents concurrent mutation. A v2 backup completion manifest hashes the
@@ -117,8 +122,38 @@ PostgreSQL dump, API-home archive and matching configuration and records the
 recovery command. If the executor dies after writers stop, its next scheduled
 start runs recovery before heartbeat: pre-migration interruptions restart the
 old release; later interruptions restore the matching database, API home,
-configuration and images. A code-only switch is never reported as database
-rollback. Repeated API creates can carry `requestId`; repeated creates with the
+configuration and images. Database restoration recreates the database before a
+transactional restore, so tables introduced by the failed version cannot remain.
+Explicit rollback first saves a rescue backup and preserves the current control
+plane separately from the older business snapshot. If target restoration fails,
+the host attempts to restore that rescue backup and otherwise stays fenced for
+recovery. Actual API and Web image IDs and container health are checked together.
+A code-only switch is never reported as database rollback.
+
+The host retains request envelopes and terminal receipts outside the database
+under `host-operation-receipts/`. Before any new claim it replays receipts through
+the updater-only `/api/platform-updater/operations/reconcile` endpoint. Restoring
+a DB cannot silently erase the operation audit or replay a previously completed
+update. For old APIs without that endpoint, the preserved control-plane rows can
+be acknowledged through the existing report protocol; missing or conflicting
+outcomes keep the fence closed.
+
+During switching, an external `host-control/write-fence.json` and a host-pinned
+Bun preload block business mutations even when restoring an older API image.
+HTTP reads/health and the authenticated updater channel remain available.
+Switch-phase maintenance cannot expire automatically; writes reopen only after
+both containers (or recovery) are verified and the API acknowledges the durable
+terminal receipt. Interrupted or incomplete recovery remains closed.
+
+The host also retains the effective API/updater credentials in
+`host-control/updater-auth.env`, loaded after the business snapshot's `api.env`.
+Retries of the same operation reuse that capture so older credentials cannot
+break acknowledgement after rollback. To rotate them deliberately, update the
+host configuration and profile `api.env`, run
+`node scripts/local-profile.mjs stable host-auth-refresh`, then recreate API and
+restart the updater. Refresh is rejected while a host write fence is active.
+
+Repeated API creates can carry `requestId`; repeated creates with the
 same caller/key/payload return the same operation, and the host stages/activates
 the resulting operation ID at most once.
 
@@ -944,13 +979,14 @@ net — whenever a terminal operation status is reported.
 
 - The drain state lives in the database (`multiremi_platform_maintenance`),
   so an API restart mid-update does not lose it.
-- The drain lease has a TTL (default 120 s, renewed every poll). If the
-  updater crashes, the API lazily flips back to `normal` on the next read and
-  daemons resume claiming — the platform can never stay stuck draining.
+- During preparation and draining, the lease has a TTL (default 120 s,
+  renewed every poll); an expired lease lets daemons resume claiming. Once
+  switching, restarting, verifying or rolling back begins, expiry and explicit
+  release cannot reopen the gate. Recovery must reach a terminal outcome.
 - The task wait has no deadline by default: `MULTIREMI_PLATFORM_DRAIN_TIMEOUT_MS=0`
   (or unset) waits until existing tasks finish or the operator cancels. New
   tasks remain queued throughout the wait. This does not disable the 120 s
-  crash-recovery lease above. Human-blocked or stuck tasks still need operator
+  pre-switch crash-recovery lease above. Human-blocked or stuck tasks still need operator
   attention; cancel the update to resume scheduling without interrupting them.
 - Operators can opt into a finite wait with a positive
   `MULTIREMI_PLATFORM_DRAIN_TIMEOUT_MS`. If it expires, the switch is NOT

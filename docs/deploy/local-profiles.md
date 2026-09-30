@@ -100,6 +100,28 @@ node scripts/local-profile.mjs stable backup
 
 普通 `stable deploy` 是人工前台流程；终端或执行它的 Agent 退出后不会被另一个进程接管。生产自更新使用[平台部署说明中的 Windows 宿主](../../deploy/README.md#windows-stable-local-profile-host)，不要把 `deploy` 包进当前 Remi Task。
 
+更新范围是同一固定提交的 **API 与 Web 两个容器**。浏览器或 CLI 向容器内 API 创建 operation；宿主 updater 经发布到宿主的 API 端口轮询领取，再调用宿主 Docker Compose。容器无需 Docker socket，也不需要 SSH 到 Windows；专用 updater 凭据只保存在宿主与 API 配置中。
+
+```mermaid
+sequenceDiagram
+  participant UI as Web / CLI
+  participant API as 容器内 API
+  participant DB as PostgreSQL
+  participant Host as Windows updater
+  participant Docker as 宿主 Docker
+  UI->>API: 创建 update operation
+  API->>DB: 持久化请求与 requestId
+  Host->>API: 双凭据领取 operation
+  Host->>Host: 持久化原请求、阶段与恢复回执
+  Host->>Docker: 同一提交构建 API + Web
+  Host->>API: drain，等待在途任务结束
+  Host->>Host: 关闭业务写入，保存完整备份
+  Host->>Docker: 启动目标 API + Web，核验镜像和健康
+  Note over Host,Docker: 失败则恢复匹配的代码、业务数据和配置
+  Host->>API: 重放终态回执，对账恢复操作记录
+  Host->>Host: 回执确认后解除宿主写入闸门
+```
+
 宿主沿用 platform operation API/CLI：
 
 ```powershell
@@ -121,11 +143,19 @@ remi platform operation cancel <operation-id> --yes --json
 
 回滚同样走 `platform operation create`，kind 为 `rollback`，并用 `targetRef` 指向备份中 `active.json` 的完整 commit。宿主只选择带 v2 hash manifest、同时包含 PostgreSQL dump、API-home archive 和匹配配置的完整备份。取消只在 `queued/preparing/pulling/draining` 安全阶段生效；进入切换后由宿主完成或回滚，不能强行中止。
 
-宿主启动时先执行本地恢复，再尝试向 API 心跳。因此即使上一次进程在 API 停止后退出，它也能从 `host-operations/<operation-id>/operation.json` 判断阶段、恢复旧服务并在 API 可达后上报终态。journal 只记录 commit、阶段、校验摘要和备份路径，不保存 token、完整环境或 profile 密钥。
+宿主启动时先执行本地恢复，再重放终态回执，然后才发送心跳和领取新操作。阶段位于 `host-operations/<operation-id>/operation.json`，原始 API 请求及终态回执位于 `host-operation-receipts/`，两者均在容器与业务数据库之外。回执经 updater 专用 `operations/reconcile` 接口幂等补回数据库恢复丢失的操作；成功上报后仍保留，后续回滚可能再次还原旧操作状态。对账冲突或恢复未完成时不领取新操作、不开放业务写入；日志和回执不保存 token、完整环境或 profile 密钥。
+
+切换期间维护租约不会按普通 drain TTL 自动开放。宿主还将固定的 Bun preload 写入闸门挂入 API，使用独立 `host-control/write-fence.json`，因此回滚到没有新中间件的旧 API 也能阻止业务写入。切换时业务 mutation 返回 `503 platform_update_in_progress` 和 `Retry-After: 5`；读取、健康检查及已有双凭据保护的 updater 通道仍可用。API/Web 的实际镜像 ID 与 Docker 健康状态都必须匹配目标，单独 `/readyz`、`/login` 返回 200 不算切换成功。只有匹配 operation 的终态回执获 API 确认后，宿主 `host-finalize` 才移除外部闸门。
+
+数据库恢复会在 API/Web 停止后重建空数据库，以事务方式还原，避免新版新增表残留。显式回滚先给当前版本建立救援备份，再恢复目标业务快照；当前 operation、维护闸门和平台状态通过独立 `control-plane.dump` 保留，不随旧业务数据倒退。目标回滚失败时尝试恢复刚才的救援备份；仍失败则保持 `recovery_required` 和写入关闭，由下一次宿主启动继续恢复。备份缺文件、哈希不匹配或旧镜像丢失都会在替换数据前拒绝。回滚会恢复到所选备份时间的业务数据，不能保留该备份之后的业务变更。
 
 `updaterStatus: offline` 且 `currentRelease/latestRelease` 为空的直接原因不是 Git 缓存或旧 daemon：local profile 默认没有启动 platform-updater，也没有配置独立 updater token 和 release feed，因而 `/api/platform-updater/heartbeat` 从未写入这些字段。`services: []` 同理只表示没有宿主 inspection 心跳，不表示 Docker 中没有服务。安装后必须同时核对 scheduled task 存活、token、feed URL、driver 和首次 heartbeat；只有 release feed 成功才会出现 `latestRelease`。
 
 发布源尚未发布清单或临时不可用时，宿主记录错误并按五分钟间隔重试，仍执行本地恢复、心跳和操作领取。首次成功读取发布源前 `latestRelease` 为空；显式 `check_updates` 仍会报告读取失败。
+
+宿主的 `host-control/updater-auth.env` 独立保留当前 API/updater 控制凭据，Compose 在历史 `api.env` 之后加载它，避免旧备份删除或覆盖更新器凭据而卡住结果确认。同一 operation 的恢复重试复用这些凭据；新的 operation 读取有效的配置组合。需要轮换控制凭据时，先更新宿主配置和 profile 的 `api.env`，再运行 `node scripts/local-profile.mjs stable host-auth-refresh` 并重建 API、重启 updater；写入闸门尚未解除时禁止轮换。不要输出或提交这些文件。
+
+本机 Web 构建默认使用两个 Next.js worker，可通过 Compose 插值变量 `REMI_NEXT_BUILD_CPUS` 调整，以控制 Docker Desktop 的构建内存。恢复故障测试入口是 `node --test scripts/local-profile.test.mjs`；在已预载 `pgvector/pgvector:pg17` 与 `oven/bun:1.3.14` 的 Docker 主机上，设置 `MULTIREMI_TEST_DOCKER_RECOVERY=1` 并运行 `bun test tests/integration/platform-recovery-postgres.test.ts`，会在独立临时容器中验证数据库恢复与控制面重放，不访问实际 profile 数据库。
 
 ## 验证范围
 

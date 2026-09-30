@@ -5,6 +5,7 @@ import type {
   ReportPlatformOperationInput,
 } from "@multiremi/contracts";
 import type { PlatformInspection } from "./types.js";
+import type { PlatformOperationReceipt } from "./operation-outbox.js";
 
 export interface PlatformDrainStatusWire {
   generation: number;
@@ -48,6 +49,32 @@ export class PlatformUpdaterClient {
       {},
     );
     return response.operation ?? null;
+  }
+
+  async reconcile(receipts: PlatformOperationReceipt[]): Promise<void> {
+    let response: { reconciled: string[] };
+    try {
+      response = await this.request<{ reconciled: string[] }>("/api/platform-updater/operations/reconcile", { receipts });
+    } catch (error) {
+      if (!(error instanceof PlatformUpdaterHttpError) || error.status !== 404) throw error;
+      // Rollback can boot a previous API without the receipt endpoint. The
+      // host restores current control-plane tables alongside the old business
+      // DB, so exact operation IDs remain reportable through the old protocol.
+      // Missing rows still fail closed; never create a new update as a retry.
+      for (const receipt of receipts) {
+        const result = await this.request<{ operation: MultiremiPlatformOperation }>(
+          `/api/platform-updater/operations/${encodeURIComponent(receipt.operation.id)}/report`, receipt.report,
+        );
+        if (result.operation?.id !== receipt.operation.id || result.operation.status !== receipt.report.status
+          || (receipt.report.resultRelease?.ref && result.operation.resultRelease?.ref !== receipt.report.resultRelease.ref)) {
+          throw new Error("Restored API returned a conflicting host operation outcome");
+        }
+      }
+      return;
+    }
+    if (!Array.isArray(response.reconciled) || receipts.some(receipt => !response.reconciled.includes(receipt.operation.id))) {
+      throw new Error("API did not acknowledge every durable host receipt");
+    }
   }
 
   async report(id: string, input: ReportPlatformOperationInput): Promise<void> {

@@ -50,6 +50,21 @@ export class PlatformOperationIdempotencyConflictError extends Error {
   readonly code = "platform_operation_idempotency_conflict";
 }
 
+export class PlatformOperationReceiptConflictError extends Error {
+  readonly code = "platform_operation_receipt_conflict";
+}
+
+export class PlatformOperationReceiptValidationError extends Error {
+  readonly code = "platform_operation_receipt_invalid";
+}
+
+/** The host keeps this outside the database that an update may restore. */
+export interface PlatformOperationReceipt {
+  operation: MultiremiPlatformOperation;
+  report: ReportPlatformOperationInput;
+  completedAt: string;
+}
+
 export interface PlatformStateRecord {
   driver: MultiremiPlatformDeploymentDriver;
   currentRelease: MultiremiPlatformRelease | null;
@@ -304,6 +319,10 @@ export class PlatformOperationsRepo {
   }
 
   report(id: string, input: ReportPlatformOperationInput): MultiremiPlatformOperation | null {
+    return this.db.transaction(() => this.reportWithinTransaction(id, input))();
+  }
+
+  private reportWithinTransaction(id: string, input: ReportPlatformOperationInput): MultiremiPlatformOperation | null {
     const current = this.get(id);
     if (!current) return null;
     if (TERMINAL_STATUSES.has(current.status)) return current;
@@ -327,7 +346,95 @@ export class PlatformOperationsRepo {
         id,
       ],
     );
+    if (["switching", "restarting", "verifying", "rolling_back"].includes(input.status)) {
+      // Older API releases only understand lease expiry. Preserve a fence
+      // they understand when this control-plane state survives DB rollback.
+      this.db.run(
+        `UPDATE multiremi_platform_maintenance SET expires_at = ?, updated_at = ?
+         WHERE id = 'platform' AND mode = 'draining' AND operation_id = ?`,
+        ["9999-12-31T23:59:59.999Z", now, id],
+      );
+    } else if (terminal) {
+      this.db.run(
+        `UPDATE multiremi_platform_maintenance
+         SET mode = 'normal', operation_id = NULL, started_at = NULL, expires_at = NULL, reason = NULL, updated_at = ?
+         WHERE id = 'platform' AND operation_id = ?`,
+        [now, id],
+      );
+    }
     return this.get(id);
+  }
+
+  /**
+   * Restore operation history lost with a database backup, and finish any
+   * pre-switch operation resurrected by that backup. Replaying a receipt must
+   * never release an unrelated operation's active slot or maintenance gate.
+   */
+  reconcile(receipts: PlatformOperationReceipt[]): MultiremiPlatformOperation[] {
+    if (!Array.isArray(receipts) || receipts.length > 100) {
+      throw new PlatformOperationReceiptValidationError("receipts must be an array of at most 100 entries");
+    }
+    receipts.forEach(validateReceipt);
+    return this.db.transaction(() => {
+      for (const receipt of receipts) {
+        const { operation, report, completedAt } = receipt;
+        const existing = this.get(operation.id);
+        const keyed = operation.requestId ? this.findByRequestId(operation.requestedBy, operation.requestId) : null;
+        if ((existing && !sameOperationIdentity(existing, operation)) || (keyed && keyed.id !== operation.id)) {
+          throw new PlatformOperationReceiptConflictError(`operation ${operation.id} does not match the host receipt identity`);
+        }
+        if (existing && TERMINAL_STATUSES.has(existing.status)) {
+          if (existing.status !== report.status) {
+            throw new PlatformOperationReceiptConflictError(`operation ${operation.id} already has a different terminal outcome`);
+          }
+          const resultRelease = report.resultRelease === undefined ? operation.resultRelease : report.resultRelease;
+          if ((existing.resultRelease?.ref ?? null) !== (resultRelease?.ref ?? null)) {
+            throw new PlatformOperationReceiptConflictError(`operation ${operation.id} already has a different terminal release`);
+          }
+          continue;
+        }
+        if (!existing) {
+          // Insert directly as terminal: a new active operation may already
+          // exist, and a historical receipt must not contend for its slot.
+          this.db.run(
+            `INSERT INTO multiremi_platform_operations (
+              id, idempotency_key, kind, status, driver, active_slot, target_version, target_ref,
+              target_manifest, progress, requested_by, output, error, previous_release,
+              result_release, cancel_requested, created_at, updated_at, started_at, finished_at
+            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              operation.id, operation.requestId ?? null, operation.kind, report.status, operation.driver,
+              operation.targetVersion, operation.targetRef, toJson(operation.targetManifest),
+              toJson(report.progress ?? operation.progress), operation.requestedBy,
+              report.output === undefined ? operation.output : report.output,
+              report.error === undefined ? operation.error : report.error,
+              toJson(report.previousRelease === undefined ? operation.previousRelease : report.previousRelease),
+              toJson(report.resultRelease === undefined ? operation.resultRelease : report.resultRelease),
+              operation.cancelRequested ? 1 : 0, operation.createdAt, completedAt,
+              operation.startedAt, completedAt,
+            ],
+          );
+        } else {
+          this.reportWithinTransaction(operation.id, report);
+          this.db.run(
+            "UPDATE multiremi_platform_operations SET updated_at = ?, finished_at = ? WHERE id = ?",
+            [completedAt, completedAt, operation.id],
+          );
+          if (existing.requestedBy === "system:auto-update") {
+            this.setAutoUpdateResult(report.status === "succeeded" ? "updated" : "failed");
+          }
+        }
+      }
+      for (const { operation } of receipts) {
+        this.db.run(
+          `UPDATE multiremi_platform_maintenance
+           SET mode = 'normal', operation_id = NULL, started_at = NULL, expires_at = NULL, reason = NULL, updated_at = ?
+           WHERE id = 'platform' AND operation_id = ?`,
+          [nowIso(), operation.id],
+        );
+      }
+      return receipts.map(({ operation }) => this.get(operation.id)!);
+    })();
   }
 
   private ensureState(): void {
@@ -388,6 +495,57 @@ function sameRequest(existing: MultiremiPlatformOperation, input: CreatePlatform
     && existing.targetVersion === (input.targetVersion ?? null)
     && existing.targetRef === (input.targetRef ?? null)
     && JSON.stringify(existing.targetManifest) === JSON.stringify(input.targetManifest ?? {});
+}
+
+function sameOperationIdentity(left: MultiremiPlatformOperation, right: MultiremiPlatformOperation): boolean {
+  return left.id === right.id && left.requestId === (right.requestId ?? null)
+    && left.requestedBy === right.requestedBy && left.createdAt === right.createdAt
+    && left.driver === right.driver && left.kind === right.kind
+    && left.targetVersion === right.targetVersion && left.targetRef === right.targetRef
+    && canonicalJson(left.targetManifest) === canonicalJson(right.targetManifest);
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function validateReceipt(receipt: PlatformOperationReceipt): void {
+  const operation = receipt?.operation;
+  const report = receipt?.report;
+  if (!operation || !report || !["update", "rollback"].includes(operation.kind)
+    || !TERMINAL_STATUSES.has(report.status)
+    || typeof operation.id !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(operation.id)
+    || typeof operation.requestedBy !== "string" || !operation.requestedBy.trim()
+    || !["systemd_release", "docker_compose", "local_profile"].includes(operation.driver)
+    || !validTimestamp(operation.createdAt) || !validTimestamp(receipt.completedAt)
+    || Date.parse(receipt.completedAt) < Date.parse(operation.createdAt)
+    || (operation.startedAt !== null && !validTimestamp(operation.startedAt))
+    || !nullableString(operation.targetVersion) || !nullableString(operation.targetRef)
+    || !nullableString(operation.output) || !nullableString(operation.error)
+    || (report.output !== undefined && !nullableString(report.output))
+    || (report.error !== undefined && !nullableString(report.error))
+    || typeof operation.cancelRequested !== "boolean"
+    || !isRecord(operation.progress) || (report.progress !== undefined && !isRecord(report.progress))
+    || !operation.targetManifest || typeof operation.targetManifest !== "object" || Array.isArray(operation.targetManifest)
+    || (operation.requestId != null && !/^[A-Za-z0-9._:-]{1,128}$/.test(operation.requestId))) {
+    throw new PlatformOperationReceiptValidationError("invalid terminal operation receipt");
+  }
+}
+
+function nullableString(value: unknown): boolean {
+  return value === null || typeof value === "string";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function validTimestamp(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value) && Number.isFinite(Date.parse(value));
 }
 
 function parseNullableRelease(value: unknown): MultiremiPlatformRelease | null {

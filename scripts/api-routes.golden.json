@@ -1,10 +1,10 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 800,
+    "routeCount": 801,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 558,
+      "compat": 559,
       "root": 16
     },
     "getRoutes": 338,
@@ -14,7 +14,7 @@
       "GET /api/realtime/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 462,
+    "mutationRoutes": 463,
     "mutationRoutesCovered": 283,
     "flows": [
       "agents-compat",
@@ -727,6 +727,7 @@
     "POST /api/platform-updater/heartbeat",
     "POST /api/platform-updater/operations/:id/report",
     "POST /api/platform-updater/operations/claim",
+    "POST /api/platform-updater/operations/reconcile",
     "POST /api/project-knowledge/migration/backfill",
     "POST /api/project-knowledge/migration/retry-failed",
     "POST /api/project-knowledge/migration/verify",
@@ -23107,7 +23108,7 @@
       "body": {
         "config": {
           "backend": "local",
-          "root_hint": "~/.remi/multiremi/session-archives",
+          "root_hint": "...\\session-archives",
           "require_archive": true,
           "max_bytes": 2147483648,
           "min_free_bytes": 10737418240,

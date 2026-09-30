@@ -15,6 +15,9 @@ import {
   PlatformOperationNotCancellableError,
   PlatformOperationConflictError,
   PlatformOperationIdempotencyConflictError,
+  PlatformOperationReceiptConflictError,
+  PlatformOperationReceiptValidationError,
+  type PlatformOperationReceipt,
 } from "@multiremi/store/repos/platform-operations-repo.js";
 import { isValidDailyScheduleTime, isValidIanaTimezone } from "@multiremi/store/schedule.js";
 import { loadCurrentWorkspaceRole, readJson } from "../helpers.js";
@@ -175,6 +178,24 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyUpdater(c, deps);
     if (denied) return denied;
     return c.json({ operation: store.claimPlatformOperation() });
+  });
+
+  app.post("/api/platform-updater/operations/reconcile", async (c) => {
+    const denied = denyUpdater(c, deps);
+    if (denied) return denied;
+    const body = await readJson<{ receipts: PlatformOperationReceipt[] }>(c);
+    try {
+      const operations = store.reconcilePlatformOperations(body?.receipts);
+      return c.json({ reconciled: operations.map((operation) => operation.id) });
+    } catch (error) {
+      if (error instanceof PlatformOperationReceiptValidationError) {
+        return c.json({ error: error.message, code: error.code }, 400);
+      }
+      if (error instanceof PlatformOperationReceiptConflictError) {
+        return c.json({ error: error.message, code: error.code }, 409);
+      }
+      throw error;
+    }
   });
 
   app.post("/api/platform-updater/operations/:id/report", async (c) => {

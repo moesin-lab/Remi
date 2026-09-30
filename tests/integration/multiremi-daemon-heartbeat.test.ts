@@ -20,7 +20,8 @@ async function faultTestBed(fault: Fault, requestTimeoutMs = 250) {
     name: "Heartbeat recovery test", type: "daemon", workspaceId: "local", daemonId: "heartbeat-test",
   });
   const app = createMultiremiApp({ store, authToken: "heartbeat-test-root" });
-  const state = { armed: false, failures: 0, heartbeats: 0, claims: 0, registrations: 0, cleanupCalls: 0, authorityStatus: 0 };
+  const state = { armed: false, failures: 0, heartbeats: 0, claims: 0, registrations: 0, cleanupCalls: 0,
+    authorityStatus: 0, authorityBodyReleases: 0 };
   const pending: Array<() => void> = [];
   const serve = (port: number) => Bun.serve({
     hostname: "127.0.0.1",
@@ -30,7 +31,10 @@ async function faultTestBed(fault: Fault, requestTimeoutMs = 250) {
       const path = new URL(request.url).pathname;
       const heartbeat = path === "/api/daemon/heartbeat";
       const claim = path.endsWith("/tasks/claim");
-      const matches = fault === "plugins" ? path.endsWith("/agent-plugins/desired")
+      // Revocation can first reach any poll-loop request, including plugin
+      // refresh or claim. Delay that actual authority response, whichever wins.
+      const matches = fault === "retired-body" ? path.startsWith("/api/daemon/")
+        : fault === "plugins" ? path.endsWith("/agent-plugins/desired")
         : fault === "claim" ? claim : heartbeat;
       if (state.armed && matches && fault !== "retired-body") {
         state.failures++;
@@ -66,12 +70,10 @@ async function faultTestBed(fault: Fault, requestTimeoutMs = 250) {
         return new Response(new ReadableStream<Uint8Array>({
           start(controller) {
             controller.enqueue(new TextEncoder().encode(" ".repeat(8192)));
-            const release = () => {
-              clearTimeout(timer);
+            pending.push(() => {
+              state.authorityBodyReleases++;
               try { controller.enqueue(new TextEncoder().encode(body)); controller.close(); } catch {}
-            };
-            const timer = setTimeout(release, requestTimeoutMs * 3);
-            pending.push(release);
+            });
           },
         }), { status: response.status, headers: { "Content-Type": "application/json" } });
       }
@@ -151,6 +153,7 @@ describe("daemon heartbeat network recovery", () => {
       await waitUntil(() => bed.state.cleanupCalls >= 1, "retirement cleanup after an incomplete authority response", 1_500);
       expect(bed.state.authorityStatus).toBe(401);
       expect(bed.state.failures).toBe(1);
+      expect(bed.state.authorityBodyReleases).toBe(0);
 
       // Cleanup success no longer ends the process: exiting here is what let the
       // service manager's restart policy retry every few seconds. The daemon

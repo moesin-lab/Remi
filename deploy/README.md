@@ -155,6 +155,8 @@ host configuration and profile `api.env`, run
 `node scripts/local-profile.mjs stable host-auth-refresh`, then recreate API and
 restart the updater. Refresh is rejected while a host write fence is active.
 
+The installer prefers an installed PowerShell 7 executable, falls back to
+Windows PowerShell, and accepts `-PowerShellExecutable` for an explicit path.
 The Windows runner holds a named mutex for its configuration path across logon
 sessions, so a manual runner and scheduled-task retry cannot overlap. Staging
 reuses fixed-commit images only when their OCI revision labels exactly match;

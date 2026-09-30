@@ -2,10 +2,17 @@ param(
   [Parameter(Mandatory = $true)][string]$UpdaterExecutable,
   [Parameter(Mandatory = $true)][string]$Config,
   [string]$InstallDirectory = "$env:ProgramData\Remi\platform-updater",
-  [string]$TaskName = "Remi Platform Updater"
+  [string]$TaskName = "Remi Platform Updater",
+  [string]$PowerShellExecutable
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $PowerShellExecutable) {
+  $modernShell = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+  $PowerShellExecutable = if ($modernShell) { $modernShell.Source } else { Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe" }
+}
+if (-not (Test-Path -LiteralPath $PowerShellExecutable -PathType Leaf)) { throw "PowerShell executable not found" }
+$PowerShellExecutable = (Resolve-Path -LiteralPath $PowerShellExecutable).ProviderPath
 $sourceRunner = Join-Path $PSScriptRoot "run-platform-updater.ps1"
 foreach ($path in @($UpdaterExecutable, $Config, $sourceRunner)) {
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required file not found: $path" }
@@ -40,9 +47,8 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 & icacls.exe $InstallDirectory /inheritance:r /grant:r "$identity`:(OI)(CI)F" "SYSTEM:(OI)(CI)F" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Failed to restrict updater directory ACL" }
 
-$arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$installedRunner`" -Executable `"$installedExecutable`" -Config `"$installedConfig`""
-$windowsPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-$action = New-ScheduledTaskAction -Execute $windowsPowerShell -Argument $arguments -WorkingDirectory $InstallDirectory
+$arguments = "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$installedRunner`" -Executable `"$installedExecutable`" -Config `"$installedConfig`""
+$action = New-ScheduledTaskAction -Execute $PowerShellExecutable -Argument $arguments -WorkingDirectory $InstallDirectory
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew

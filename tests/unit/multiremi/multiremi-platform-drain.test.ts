@@ -51,6 +51,24 @@ describe("platform maintenance store", () => {
     expect(store.renewPlatformDrain("pop_crash")).toBeNull();
   });
 
+  it("keeps scheduling paused beyond the lease while the host switches or restores both services", () => {
+    const store = createLocalStore();
+    const operation = store.createPlatformOperation({ kind: "update", targetVersion: "1.0.0" }, "local");
+    store.claimPlatformOperation();
+    store.beginPlatformDrain({ operationId: operation.id, ttlMs: 30_000 });
+    for (const status of ["switching", "verifying", "rolling_back"] as const) {
+      store.reportPlatformOperation(operation.id, { status });
+      // Old releases only check expiry, so the persisted switch fence must
+      // remain readable after rolling back to one of those releases.
+      expect(store.getPlatformMaintenance().expiresAt).toBe("9999-12-31T23:59:59.999Z");
+      db!.run("UPDATE multiremi_platform_maintenance SET expires_at = ? WHERE id = 'platform'", [new Date(0).toISOString()]);
+      expect(store.getPlatformMaintenance()).toMatchObject({ mode: "draining", operationId: operation.id });
+      expect(store.releasePlatformDrain(operation.id)).toMatchObject({ mode: "draining", operationId: operation.id });
+    }
+    store.reportPlatformOperation(operation.id, { status: "rolled_back" });
+    expect(store.getPlatformMaintenance()).toMatchObject({ mode: "normal", operationId: null });
+  });
+
   it("gates readiness on daemon acks of the current generation AND zero in-flight tasks", () => {
     const store = createStore();
     const runtime = store.registerRuntime({ id: "rt_drain", name: "drain", provider: "claude", workspaceId: "local" });

@@ -10,6 +10,8 @@ import { fetchReleaseFeed } from "@remi-platform/updater/release-feed.js";
 import { LocalProfileDriver } from "@remi-platform/updater/local-profile-driver.js";
 import { SystemdReleaseDriver } from "@remi-platform/updater/systemd-release-driver.js";
 import { BunCommandRunner, type PlatformDeploymentDriver } from "@remi-platform/updater/types.js";
+import { LocalProfileOperationOutbox } from "@remi-platform/updater/operation-outbox.js";
+import { join } from "node:path";
 
 const apiUrl = requiredEnv("MULTIREMI_API_URL");
 const apiToken = requiredEnv("MULTIREMI_TOKEN");
@@ -20,6 +22,9 @@ const drainTimeoutMs = resolveDrainTimeoutMs(process.env.MULTIREMI_PLATFORM_DRAI
 const runner = new BunCommandRunner();
 const client = new PlatformUpdaterClient(apiUrl, apiToken, updaterToken);
 const driver = createDriver();
+const outbox = driver.kind === "local_profile"
+  ? new LocalProfileOperationOutbox(join(requiredEnv("MULTIREMI_LOCAL_PROFILE_ROOT"), process.env.MULTIREMI_LOCAL_PROFILE_NAME ?? "stable"))
+  : null;
 let latestRelease: MultiremiPlatformRelease | null = null;
 let lastFeedCheck = 0;
 
@@ -27,6 +32,10 @@ console.info(`Multiremi platform updater started with ${driver.kind} driver`);
 
 while (true) {
   try {
+    // The API can be down, or its database can have been restored to an older
+    // snapshot. Recover locally and reconcile durable outcomes BEFORE claiming.
+    const inspection = await driver.inspect();
+    if (outbox) await outbox.reconcile(client, finalizeHostOperation);
     if (Date.now() - lastFeedCheck > 300_000 || lastFeedCheck === 0) {
       lastFeedCheck = Date.now();
       try {
@@ -37,7 +46,7 @@ while (true) {
         console.error(`release feed unavailable: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    await client.heartbeat(await driver.inspect(), latestRelease);
+    await client.heartbeat(inspection, latestRelease);
     const operation = await client.claim();
     if (operation) await execute(operation);
   } catch (error) {
@@ -48,8 +57,8 @@ while (true) {
 
 async function execute(operation: MultiremiPlatformOperation): Promise<void> {
   // Only container/service switches need a drained platform. The coordinator
-  // renews a server-side lease on every poll, so if this process dies the API
-  // auto-releases the drain when the lease expires.
+  // renews a server-side lease during draining. Once switching starts, the
+  // server keeps the gate closed until a verified terminal receipt arrives.
   const drain = operation.kind === "update" || operation.kind === "rollback"
     ? new PlatformDrainCoordinator(client, operation.id, {
         timeoutMs: drainTimeoutMs,
@@ -58,6 +67,11 @@ async function execute(operation: MultiremiPlatformOperation): Promise<void> {
           : `platform update to ${operation.targetVersion ?? "new release"}`,
       })
     : null;
+  const durable = drain ? outbox : null;
+  // Persist the exact API envelope, before manifest resolution or any service
+  // mutation, so restoring a database cannot erase this request's identity.
+  if (durable) await durable.remember(operation);
+  let terminal: import("@multiremi/contracts").ReportPlatformOperationInput;
   try {
     if (operation.kind === "check_updates") {
       latestRelease = await fetchReleaseFeed(releaseFeedUrl);
@@ -69,27 +83,31 @@ async function execute(operation: MultiremiPlatformOperation): Promise<void> {
       (input) => client.report(operation.id, input),
       drain ?? undefined,
     );
-    await client.report(operation.id, {
+    terminal = {
       status: operation.kind === "rollback" ? "rolled_back" : "succeeded",
       resultRelease,
       progress: { message: operation.kind === "check_updates" ? "Release information refreshed" : "Operation completed" },
-    });
-    await client.heartbeat(await driver.inspect(), latestRelease);
+    };
   } catch (error) {
-    await client.report(operation.id, {
+    terminal = {
       status: error instanceof DrainCancelledError ? "cancelled" : "failed",
       error: error instanceof Error ? error.message : String(error),
-    });
-  } finally {
-    // Success, failure, failed health checks and automatic rollback all end
-    // here; release is idempotent and also covered server-side by the
-    // terminal-report hook and the lease TTL.
-    if (drain) {
-      await drain.release().catch((error: unknown) => {
-        console.error(`drain release failed (lease TTL will recover): ${error instanceof Error ? error.message : String(error)}`);
-      });
-    }
+    };
   }
+  // A reporting outage must never turn a successful switch into a failed
+  // deployment. Incomplete recovery throws here and keeps maintenance held.
+  if (durable) {
+    await durable.complete(operation.id, terminal);
+    await durable.reconcile(client, finalizeHostOperation);
+  } else {
+    await client.report(operation.id, terminal);
+  }
+  if (drain) await drain.release();
+  await client.heartbeat(await driver.inspect(), latestRelease);
+}
+
+async function finalizeHostOperation(operationId: string): Promise<void> {
+  if (driver instanceof LocalProfileDriver) await driver.finalize(operationId);
 }
 
 async function resolveManifest(operation: MultiremiPlatformOperation): Promise<MultiremiPlatformOperation> {

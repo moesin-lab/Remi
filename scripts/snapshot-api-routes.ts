@@ -152,6 +152,9 @@ function installDeterminism(): () => void {
   setEnv("MULTIREMI_DATABASE_URL", undefined); // never touch a real Postgres
   setEnv("NODE_ENV", "test");
   setEnv("MULTIREMI_UPLOAD_DIR", UPLOAD_DIR);
+  // Purge callbacks write a durable outbox: keep it inside this disposable
+  // fixture instead of touching the operator's real session archive directory.
+  setEnv("MULTIREMI_SESSION_ARCHIVE_ROOT", join(SNAPSHOT_TMP, "session-archives"));
   setEnv("MULTIREMI_RELEASE_DIR", RELEASE_DIR);
   setEnv("MULTIREMI_SCRIPTS_DIR", SCRIPTS_DIR);
   setEnv("MULTIREMI_RELEASE_REPO", "Grassgod/Remi");

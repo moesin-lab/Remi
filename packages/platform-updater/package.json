@@ -8,6 +8,7 @@
     "./compose-driver.js": "./src/compose-driver.ts",
     "./drain.js": "./src/drain.ts",
     "./local-profile-driver.js": "./src/local-profile-driver.ts",
+    "./operation-outbox.js": "./src/operation-outbox.ts",
     "./release-feed.js": "./src/release-feed.ts",
     "./systemd-release-driver.js": "./src/systemd-release-driver.ts",
     "./types.js": "./src/types.ts"

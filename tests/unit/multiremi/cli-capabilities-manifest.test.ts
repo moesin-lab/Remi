@@ -178,9 +178,10 @@ describe("CLI capabilities manifest", () => {
       // traffic between two API processes with no user-facing command.
       // MUL-487 adds one daemon-only route to mint a native question card.
       // MUL-467's mapped workspace abandonment route brings the total to 777.
-      exempt: 97,
+      // Host receipt reconciliation is an updater-only authenticated protocol.
+      exempt: 98,
       missing: 0,
-      total: 800,
+      total: 801,
     });
     expect(manifest.routes["GET /api/daemon/runtimes/:runtimeId/feishu-bot/decision-cards"])
       .toMatchObject({ cli_exempt: true, category: "daemon_internal_protocol" });

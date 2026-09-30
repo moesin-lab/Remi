@@ -60,6 +60,10 @@ export class LocalProfileDriver implements PlatformDeploymentDriver {
     };
   }
 
+  async finalize(operationId: string): Promise<void> {
+    await this.runHost(["host-finalize", "--operation-id", operationId]);
+  }
+
   async execute(
     operation: MultiremiPlatformOperation,
     report: (input: ReportPlatformOperationInput) => Promise<void>,

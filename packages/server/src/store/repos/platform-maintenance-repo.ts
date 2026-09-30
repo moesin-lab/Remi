@@ -18,9 +18,9 @@ export class PlatformDrainConflictError extends Error {
 
 /**
  * Persistent platform maintenance (drain) state. One row, survives API
- * restarts. The lease expiry is enforced lazily on every read: if the updater
- * stops renewing (crash), the next reader observes `normal` and daemons resume
- * claiming on their next heartbeat — no background sweeper required.
+ * restarts. Pre-switch leases expire lazily so an abandoned preparation does
+ * not stop scheduling. Once switching starts, only a terminal host receipt
+ * may release the gate: the API can return before Web verification or rollback.
  */
 export class PlatformMaintenanceRepo {
   constructor(private readonly db: SqlDatabase) {}
@@ -31,12 +31,24 @@ export class PlatformMaintenanceRepo {
     if (maintenance.mode !== "draining") return maintenance;
     const expiresAt = maintenance.expiresAt ? Date.parse(maintenance.expiresAt) : Number.NaN;
     if (Number.isFinite(expiresAt) && expiresAt > nowMs) return maintenance;
-    // Lease expired (or unparsable): auto-recover so a crashed updater can
-    // never freeze the platform in draining.
+    // API downtime can outlast the lease during migration or a DB restore.
+    // Do not admit new tasks until the host verifies both API and Web, or
+    // finishes recovery. This state is persisted in the pre-switch backup.
+    const switching = maintenance.operationId && this.db.query(
+      `SELECT id FROM multiremi_platform_operations
+       WHERE id = ? AND active_slot = 1 AND status IN ('switching', 'restarting', 'verifying', 'rolling_back')`,
+    ).get(maintenance.operationId);
+    if (switching) return maintenance;
+    // An abandoned preparation/drain is safe to release on lease expiry.
     this.db.run(
       `UPDATE multiremi_platform_maintenance
        SET mode = 'normal', operation_id = NULL, started_at = NULL, expires_at = NULL, reason = NULL, updated_at = ?
-       WHERE id = 'platform' AND mode = 'draining'`,
+       WHERE id = 'platform' AND mode = 'draining'
+         AND NOT EXISTS (
+           SELECT 1 FROM multiremi_platform_operations
+           WHERE id = multiremi_platform_maintenance.operation_id AND active_slot = 1
+             AND status IN ('switching', 'restarting', 'verifying', 'rolling_back')
+         )`,
       [nowIso()],
     );
     return this.read();
@@ -89,13 +101,21 @@ export class PlatformMaintenanceRepo {
     return result.changes > 0 ? this.read() : null;
   }
 
-  /** Idempotent: releasing an already-released (or foreign) drain is a no-op. */
+  /**
+   * Idempotent, and fail closed during a switch. The host must reconcile a
+   * terminal result before releasing a gate that protects possible rollback.
+   */
   releaseDrain(operationId: string): MultiremiPlatformMaintenance {
     this.ensureRow();
     this.db.run(
       `UPDATE multiremi_platform_maintenance
        SET mode = 'normal', operation_id = NULL, started_at = NULL, expires_at = NULL, reason = NULL, updated_at = ?
-       WHERE id = 'platform' AND mode = 'draining' AND operation_id = ?`,
+       WHERE id = 'platform' AND mode = 'draining' AND operation_id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM multiremi_platform_operations
+           WHERE id = multiremi_platform_maintenance.operation_id AND active_slot = 1
+             AND status IN ('switching', 'restarting', 'verifying', 'rolling_back')
+         )`,
       [nowIso(), operationId],
     );
     return this.get();

@@ -31,7 +31,7 @@ import {
   type NotificationSenderRegistry,
 } from "@multiremi/notifications/outbound-dispatcher.js";
 import { CloudRuntimeNodesRepo } from "@multiremi/store/repos/cloud-runtime-nodes-repo.js";
-import { PlatformOperationsRepo } from "@multiremi/store/repos/platform-operations-repo.js";
+import { PlatformOperationsRepo, type PlatformOperationReceipt } from "@multiremi/store/repos/platform-operations-repo.js";
 import { PlatformMaintenanceRepo } from "@multiremi/store/repos/platform-maintenance-repo.js";
 import { AgentsSkillsRepo } from "@multiremi/store/repos/agents-skills-repo.js";
 import { AgentPluginsRepo } from "@multiremi/store/repos/agent-plugins-repo.js";
@@ -707,6 +707,10 @@ runMigrations(this.db);
     input: ReportPlatformOperationInput,
   ): MultiremiPlatformOperation | null {
     return this.platformOperations.report(id, input);
+  }
+
+  reconcilePlatformOperations(receipts: PlatformOperationReceipt[]): MultiremiPlatformOperation[] {
+    return this.platformOperations.reconcile(receipts);
   }
 
   cancelPlatformOperation(id: string): MultiremiPlatformOperation {

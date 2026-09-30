@@ -1,6 +1,7 @@
 import { registerExecutionConfigRoutes } from "./routers/execution-config.js";
 import { Hono } from "hono";
 import { resolveRequestWorkspaceId } from "./helpers/workspace-context.js";
+import { createPlatformMaintenanceWriteGate } from "./helpers/platform-maintenance-gate.js";
 import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { AgentTemplateError } from "./agent-templates.js";
@@ -515,6 +516,11 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
       await next();
     });
   }
+
+  // Register before every business router (including auth/webhooks/daemon).
+  // Auth still runs first; only the separately authenticated updater control
+  // channel may write while the host verifies or rolls back API + Web.
+  app.use("*", createPlatformMaintenanceWriteGate(store));
 
   app.onError((err, c) => {
     // MUL-400 E1: the parent-status guard is a decision the caller must see, not

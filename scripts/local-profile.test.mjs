@@ -21,9 +21,11 @@ import childProcess from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
+import { createHash } from 'node:crypto';
 
 const succeed = (stdout = '') => ({ status: 0, stdout, stderr: '' });
 const fail = () => ({ status: 1, stdout: '', stderr: 'Injected test failure' });
+const imageId = (tag) => 'sha256:' + createHash('sha256').update(tag).digest('hex');
 childProcess.spawnSync = (command, args, options = {}) => {
   const metadataPath = join(process.env.TEST_PROFILE_ROOT, 'deployment.json');
   const selection = existsSync(metadataPath) ? JSON.parse(readFileSync(metadataPath, 'utf8')) : null;
@@ -33,6 +35,7 @@ childProcess.spawnSync = (command, args, options = {}) => {
     environmentKeys: Object.keys(options.env || {}),
     selectedRef: selection?.ref ?? null,
     selectedProfile: selection?.profile ?? null,
+    restoreControlPlane: args.includes('pg_restore') && String(options.input ?? '').includes('CONTROL-PLANE'),
   }) + '\n');
   if (command === 'git' && args[0] === 'rev-parse') return succeed(process.env.TEST_COMMIT + '\n');
   if (command === 'git' && args[0] === 'fetch') return succeed();
@@ -47,11 +50,31 @@ childProcess.spawnSync = (command, args, options = {}) => {
     return succeed();
   }
   if (command !== 'docker') throw new Error('Unmocked command: ' + command);
+  if (args.includes('image') && args.includes('inspect')) {
+    if (process.env.TEST_FAIL === 'missing_old_web' && args.at(-1) === 'remi-web:stable-' + 'a'.repeat(40)) return fail();
+    if (process.env.TEST_FAIL === 'mutated_old_web' && args.at(-1) === 'remi-web:stable-' + 'a'.repeat(40)) return succeed(imageId('different-content'));
+    return succeed(imageId(args.at(-1)));
+  }
+  if (args.includes('ps') && args.includes('--quiet')) return succeed(args.at(-1) + '-fixture');
+  if (args.includes('inspect')) {
+    const service = args.at(-1).split('-')[0];
+    if (args.includes('{{json .Image}}')) {
+      const stale = process.env.TEST_FAIL === 'stale_web' && service === 'web' && selection.ref === process.env.TEST_NEW_COMMIT;
+      return succeed(JSON.stringify(imageId(stale ? 'remi-web:stable-' + 'a'.repeat(40) : selection[service + 'Image'])));
+    }
+    return succeed(JSON.stringify({ Running: true, Health: { Status: 'healthy' } }));
+  }
   if (process.env.TEST_FAIL === 'config' && args.includes('config')) return fail();
   if (process.env.TEST_FAIL === 'build' && args.includes('build')) return fail();
-  if (process.env.TEST_FAIL === 'activate' && args.includes('up') && selection?.ref === process.env.TEST_NEW_COMMIT) return fail();
+  if (process.env.TEST_FAIL === 'crash_build' && args.includes('build')) process.exit(91);
+  if (['activate', 'activate_restore'].includes(process.env.TEST_FAIL) && args.includes('up') && selection?.ref === process.env.TEST_NEW_COMMIT) return fail();
+  if (['restore_old', 'activate_restore'].includes(process.env.TEST_FAIL) && args.includes('pg_restore') && selection?.ref !== process.env.TEST_NEW_COMMIT) return fail();
+  if (process.env.TEST_FAIL === 'control_overlay' && args.includes('pg_restore') && String(options.input ?? '').includes('CONTROL-PLANE')) return fail();
+  if (process.env.TEST_FAIL === 'crash_overlay' && args.includes('pg_restore') && String(options.input ?? '').includes('CONTROL-PLANE')) process.exit(91);
+  if (process.env.TEST_FAIL === 'crash_restore' && args.includes('createdb')) process.exit(91);
+  if (process.env.TEST_FAIL === 'crash_activate' && args.includes('up') && selection?.ref === process.env.TEST_NEW_COMMIT) process.exit(91);
   if (args.includes('pg_dump')) {
-    writeSync(options.stdio[1], 'PGDMP test fixture');
+    writeSync(options.stdio[1], args.some((arg) => arg.startsWith('--table=')) ? 'PGDMP CONTROL-PLANE ' + selection.ref : 'PGDMP test fixture');
     return succeed();
   }
   if (args.includes('tar')) {
@@ -67,7 +90,12 @@ for (const name of ['spawn', 'exec', 'execSync', 'execFile', 'execFileSync', 'fo
   childProcess[name] = () => { throw new Error('Unmocked process API: ' + name); };
 }
 syncBuiltinESMExports();
-globalThis.fetch = async () => ({ status: 200, ok: true, arrayBuffer: async () => Buffer.from('release archive') });
+globalThis.fetch = async (url) => {
+  const deployment = JSON.parse(readFileSync(join(process.env.TEST_PROFILE_ROOT, 'deployment.json'), 'utf8'));
+  if (process.env.TEST_FAIL === 'web_health' && String(url).includes(':13000/') && deployment.ref === process.env.TEST_NEW_COMMIT) return { status: 503, ok: false };
+  return { status: 200, ok: true, arrayBuffer: async () => Buffer.from('release archive') };
+};
+if (process.env.TEST_FAIL === 'web_health') globalThis.setTimeout = (fn) => { fn(); return 0; };
 `;
 
 function fixture(t) {
@@ -90,6 +118,7 @@ function fixture(t) {
   mkdirSync(join(source, 'deploy/docker'), { recursive: true });
   writeFileSync(script, scriptSource);
   writeFileSync(join(source, 'package.json'), '{"version":"0.2.60"}\n');
+  writeFileSync(join(source, 'deploy/docker/host-write-fence.ts'), '// Runtime fence is validated independently.\n');
   for (const name of ['compose.local.yml', 'compose.local-dev.yml']) {
     copyFileSync(join(repository, 'deploy/docker', name), join(source, 'deploy/docker', name));
   }
@@ -123,6 +152,8 @@ function fixture(t) {
   const readProfile = (name, profile = 'stable') => JSON.parse(readFileSync(join(profileRoot(profile), name), 'utf8'));
   function activate() {
     succeeds(run('stable', 'prepare'));
+    const apiEnv = join(profileRoot(), 'api.env');
+    writeFileSync(apiEnv, readFileSync(apiEnv, 'utf8') + '\nMULTIREMI_PLATFORM_UPDATER_TOKEN=fixture-updater-token\n');
     succeeds(run('stable', 'up'));
     assert.equal(readProfile('active.json').ref, OLD_REF);
   }
@@ -426,7 +457,12 @@ test('failed activation restores matching database, API home, configuration, and
   assert.equal(journal.status, 'rolled_back');
   assert.match(journal.error, /Update failed/u);
   const calls = dockerCalls(failed);
-  assert.ok(calls.some((call) => call.args.includes('pg_restore') && call.args.includes('--clean') && call.args.includes('--if-exists')));
+  const drop = calls.findIndex((call) => call.args.includes('dropdb') && call.args.includes('--force'));
+  const create = calls.findIndex((call) => call.args.includes('createdb') && call.args.includes('--template=template0'));
+  const restore = calls.findIndex((call) => call.args.includes('pg_restore') && call.args.includes('--exit-on-error') && call.args.includes('--single-transaction'));
+  assert.ok(drop >= 0 && create > drop && restore > create, 'restore must replace the database, removing objects introduced by new migrations');
+  assert.ok(calls.filter((call) => call.args.includes('pg_restore')).every((call) => !call.args.includes('/dev/stdin')), 'pg_restore must consume the archive from stdin without reopening a non-seekable Docker pipe');
+  assert.equal(journal.resultRelease.ref, OLD_REF);
   assert.ok(calls.some((call) => call.args.some((arg) => String(arg).includes('/snapshot/api-home.tar'))));
   assert.ok(calls.some((call) => isAction('up')(call) && call.selectedRef === OLD_REF));
 });
@@ -438,6 +474,7 @@ test('explicit host rollback restores the verified matching backup', (t) => {
   succeeds(f.run('stable', 'host-activate', {
     args: ['--operation-id', 'pop_before_rollback'], commit: NEW_REF,
   }));
+  succeeds(f.run('stable', 'host-finalize', { args: ['--operation-id', 'pop_before_rollback'] }));
   assert.equal(f.readProfile('active.json').ref, NEW_REF);
 
   const staged = f.run('stable', 'host-rollback-stage', {
@@ -460,6 +497,13 @@ test('explicit host rollback restores the verified matching backup', (t) => {
   const calls = dockerCalls(activated);
   assert.ok(calls.some((call) => call.args.includes('pg_restore')));
   assert.ok(calls.some((call) => call.args.some((arg) => String(arg).includes('/snapshot/api-home.tar'))));
+  assert.equal(journal.controlPlaneBackupDir, journal.fallbackBackupDir);
+  const overlayIndex = calls.findIndex((call) => call.restoreControlPlane);
+  assert.ok(overlayIndex >= 0 && calls[overlayIndex].args.includes('--single-transaction'));
+  assert.ok(calls.slice(overlayIndex + 1).some(isAction('up')), 'the current operation/drain must be restored before starting API and Web');
+  const marker = JSON.parse(readFileSync(join(journal.controlPlaneBackupDir, 'complete.json'), 'utf8'));
+  assert.ok(marker.files['control-plane.dump'].size > 0);
+  assert.ok(readFileSync(join(journal.controlPlaneBackupDir, 'control-plane.dump'), 'utf8').includes(NEW_REF), 'overlay comes from rollback start, not the old business backup');
 });
 
 test('rollback refuses a backup whose content no longer matches its completion manifest', (t) => {
@@ -508,4 +552,278 @@ test('host recovery restores the old release after an executor crash during swit
   assert.equal(after.status, 'rolled_back');
   assert.match(after.error, /interrupted/u);
   assert.ok(dockerCalls(recovered).some((call) => isAction('up')(call) && call.selectedRef === OLD_REF));
+});
+
+for (const failure of ['stale_web', 'web_health']) {
+  test(`a healthy API with ${failure} cannot commit a mixed or unhealthy release`, (t) => {
+    const f = fixture(t);
+    f.activate();
+    const operationId = `pop_${failure}`;
+    succeeds(f.run('stable', 'host-stage', { args: hostStageArgs(operationId), commit: NEW_REF }));
+    const failed = f.run('stable', 'host-activate', { args: ['--operation-id', operationId], commit: NEW_REF, fail: failure });
+    assert.notEqual(failed.status, 0);
+    const journal = JSON.parse(readFileSync(join(f.profileRoot(), 'host-operations', operationId, 'operation.json'), 'utf8'));
+    assert.equal(journal.status, 'rolled_back');
+    assert.equal(journal.resultRelease.ref, OLD_REF);
+    assert.equal(f.readProfile('active.json').ref, OLD_REF);
+    assert.ok(dockerCalls(failed).some((call) => call.args.includes('pg_restore')));
+  });
+}
+
+test('a failed database restore leaves writers stopped and can recover on the next host start', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_restore_retry';
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs(operationId), commit: NEW_REF }));
+  const failed = f.run('stable', 'host-activate', { args: ['--operation-id', operationId], commit: NEW_REF, fail: 'activate_restore' });
+  assert.notEqual(failed.status, 0);
+  const journalPath = join(f.profileRoot(), 'host-operations', operationId, 'operation.json');
+  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).status, 'recovery_required');
+  const calls = dockerCalls(failed);
+  const restore = calls.findIndex((call) => call.args.includes('pg_restore'));
+  assert.ok(restore >= 0);
+  assert.ok(!calls.slice(restore + 1).some(isAction('up')), 'no writer may restart after an incomplete restore');
+  succeeds(f.run('stable', 'host-recover'));
+  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).status, 'rolled_back');
+  assert.equal(f.readProfile('active.json').ref, OLD_REF);
+});
+
+test('an actual executor exit during candidate activation restores both services and data after restart', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_real_activation_crash';
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs(operationId), commit: NEW_REF }));
+  const crashed = f.run('stable', 'host-activate', { args: ['--operation-id', operationId], commit: NEW_REF, fail: 'crash_activate' });
+  assert.equal(crashed.status, 91);
+  const journalPath = join(f.profileRoot(), 'host-operations', operationId, 'operation.json');
+  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).phase, 'activating');
+  const recovered = f.run('stable', 'host-recover');
+  succeeds(recovered);
+  assert.equal(JSON.parse(readFileSync(journalPath, 'utf8')).resultRelease.ref, OLD_REF);
+  assert.ok(dockerCalls(recovered).some((call) => call.args.includes('dropdb')));
+  assert.ok(dockerCalls(recovered).some((call) => call.args.includes('{{json .Image}}') && call.args.at(-1) === 'web-fixture'));
+});
+
+test('a failed explicit rollback restores its pre-rollback rescue snapshot', (t) => {
+  const f = fixture(t);
+  f.activate();
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs('pop_upgrade'), commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-activate', { args: ['--operation-id', 'pop_upgrade'], commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-finalize', { args: ['--operation-id', 'pop_upgrade'] }));
+  const operationId = 'pop_failed_rollback';
+  succeeds(f.run('stable', 'host-rollback-stage', { args: ['--operation-id', operationId, '--ref', OLD_REF] }));
+  const failed = f.run('stable', 'host-rollback-activate', { args: ['--operation-id', operationId], fail: 'restore_old' });
+  assert.notEqual(failed.status, 0);
+  const journal = JSON.parse(readFileSync(join(f.profileRoot(), 'host-operations', operationId, 'operation.json'), 'utf8'));
+  assert.equal(journal.status, 'failed');
+  assert.equal(journal.resultRelease.ref, NEW_REF);
+  assert.ok(journal.fallbackBackupDir);
+  assert.equal(f.readProfile('active.json').ref, NEW_REF);
+  assert.equal(dockerCalls(failed).filter((call) => call.args.includes('pg_restore')).length, 2);
+});
+
+test('rollback rejects a missing old Web image before stopping the current pair', (t) => {
+  const f = fixture(t);
+  f.activate();
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs('pop_upgrade'), commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-activate', { args: ['--operation-id', 'pop_upgrade'], commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-finalize', { args: ['--operation-id', 'pop_upgrade'] }));
+  const rejected = f.run('stable', 'host-rollback-stage', { args: ['--operation-id', 'pop_missing_web', '--ref', OLD_REF], fail: 'missing_old_web' });
+  assert.notEqual(rejected.status, 0);
+  assert.ok(!dockerCalls(rejected).some(isAction('stop')));
+  assert.equal(f.readProfile('active.json').ref, NEW_REF);
+});
+
+test('a crash while restoring PostgreSQL is retried without accepting a partial restore', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_database_crash';
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs(operationId), commit: NEW_REF }));
+  f.run('stable', 'host-activate', { args: ['--operation-id', operationId], fail: 'activate_restore' });
+  const crashed = f.run('stable', 'host-recover', { fail: 'crash_restore' });
+  assert.equal(crashed.status, 91);
+  succeeds(f.run('stable', 'host-recover'));
+  const journal = JSON.parse(readFileSync(join(f.profileRoot(), 'host-operations', operationId, 'operation.json'), 'utf8'));
+  assert.equal(journal.status, 'rolled_back');
+  assert.equal(journal.resultRelease.ref, OLD_REF);
+});
+
+test('a crash while building restores profile metadata without stopping the active pair', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_stage_crash';
+  const crashed = f.run('stable', 'host-stage', { args: hostStageArgs(operationId), commit: NEW_REF, fail: 'crash_build' });
+  assert.equal(crashed.status, 91);
+  assert.equal(f.readProfile('deployment.json').ref, NEW_REF);
+  const recovered = f.run('stable', 'host-recover');
+  succeeds(recovered);
+  assert.equal(f.readProfile('deployment.json').ref, OLD_REF);
+  assert.equal(f.readProfile('active.json').ref, OLD_REF);
+  assert.ok(!dockerCalls(recovered).some(isAction('stop')));
+  const journal = JSON.parse(readFileSync(join(f.profileRoot(), 'host-operations', operationId, 'operation.json'), 'utf8'));
+  assert.equal(journal.status, 'failed');
+});
+
+test('rollback rejects an old image tag that now resolves to different content', (t) => {
+  const f = fixture(t);
+  f.activate();
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs('pop_upgrade'), commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-activate', { args: ['--operation-id', 'pop_upgrade'], commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-finalize', { args: ['--operation-id', 'pop_upgrade'] }));
+  const rejected = f.run('stable', 'host-rollback-stage', { args: ['--operation-id', 'pop_mutated_web', '--ref', OLD_REF], fail: 'mutated_old_web' });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /web image no longer matches/u);
+  assert.ok(!dockerCalls(rejected).some(isAction('stop')));
+});
+
+test('a checksum manifest omitting required configuration is not a complete rollback backup', (t) => {
+  const f = fixture(t);
+  f.activate();
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs('pop_upgrade'), commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-activate', { args: ['--operation-id', 'pop_upgrade'], commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-finalize', { args: ['--operation-id', 'pop_upgrade'] }));
+  const journal = JSON.parse(readFileSync(join(f.profileRoot(), 'host-operations', 'pop_upgrade', 'operation.json'), 'utf8'));
+  const markerPath = join(journal.backupDir, 'complete.json');
+  const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+  delete marker.files['api.env'];
+  writeFileSync(markerPath, JSON.stringify(marker));
+  const rejected = f.run('stable', 'host-rollback-stage', { args: ['--operation-id', 'pop_missing_config', '--ref', OLD_REF] });
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /No verified complete backup/u);
+  assert.ok(!dockerCalls(rejected).some(isAction('stop')));
+});
+
+test('failure restoring the current control plane does not start the old API with an absent fence', (t) => {
+  const f = fixture(t);
+  f.activate();
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs('pop_upgrade'), commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-activate', { args: ['--operation-id', 'pop_upgrade'], commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-finalize', { args: ['--operation-id', 'pop_upgrade'] }));
+  const operationId = 'pop_control_overlay_failure';
+  succeeds(f.run('stable', 'host-rollback-stage', { args: ['--operation-id', operationId, '--ref', OLD_REF] }));
+  const failed = f.run('stable', 'host-rollback-activate', { args: ['--operation-id', operationId], fail: 'control_overlay' });
+  assert.notEqual(failed.status, 0);
+  const calls = dockerCalls(failed);
+  const overlay = calls.findIndex((call) => call.restoreControlPlane);
+  assert.ok(overlay >= 0);
+  assert.ok(!calls.slice(overlay + 1).some((call) => isAction('up')(call) && call.selectedRef === OLD_REF));
+  const journal = JSON.parse(readFileSync(join(f.profileRoot(), 'host-operations', operationId, 'operation.json'), 'utf8'));
+  assert.equal(journal.status, 'failed');
+  assert.equal(journal.resultRelease.ref, NEW_REF);
+});
+
+test('a restart during explicit rollback reuses its persisted current control-plane snapshot', (t) => {
+  const f = fixture(t);
+  f.activate();
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs('pop_upgrade'), commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-activate', { args: ['--operation-id', 'pop_upgrade'], commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-finalize', { args: ['--operation-id', 'pop_upgrade'] }));
+  const operationId = 'pop_control_overlay_crash';
+  succeeds(f.run('stable', 'host-rollback-stage', { args: ['--operation-id', operationId, '--ref', OLD_REF] }));
+  const crashed = f.run('stable', 'host-rollback-activate', { args: ['--operation-id', operationId], fail: 'crash_overlay' });
+  assert.equal(crashed.status, 91);
+  const journalPath = join(f.profileRoot(), 'host-operations', operationId, 'operation.json');
+  const before = JSON.parse(readFileSync(journalPath, 'utf8'));
+  assert.equal(before.phase, 'rolling_back');
+  const recovered = f.run('stable', 'host-recover');
+  succeeds(recovered);
+  const after = JSON.parse(readFileSync(journalPath, 'utf8'));
+  assert.equal(after.controlPlaneBackupDir, before.controlPlaneBackupDir);
+  assert.equal(after.status, 'succeeded');
+  assert.equal(after.resultRelease.ref, OLD_REF);
+  assert.equal(dockerCalls(recovered).filter((call) => call.restoreControlPlane).length, 1);
+  assert.ok(!dockerCalls(recovered).some((call) => call.args.includes('pg_dump')), 'recovery must not replace the persisted control plane with the partially restored database');
+});
+
+test('host write fence survives success until terminal acknowledgement and is mounted into API', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_fence_lifecycle';
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs(operationId), commit: NEW_REF }));
+  const activated = f.run('stable', 'host-activate', { args: ['--operation-id', operationId], commit: NEW_REF });
+  succeeds(activated);
+  const fencePath = join(f.profileRoot(), 'host-control', 'write-fence.json');
+  assert.equal(JSON.parse(readFileSync(fencePath, 'utf8')).operationId, operationId);
+  const overridePath = join(f.profileRoot(), 'compose.host-control.yml');
+  const override = JSON.parse(readFileSync(overridePath, 'utf8'));
+  assert.deepEqual(override.services.api.command, ['bun', 'run', '--preload', '/remi-host/host-write-fence.ts', 'apps/server/main.ts', 'serve']);
+  assert.equal(override.services.api.volumes[0].target, '/remi-host');
+  assert.equal(override.services.api.volumes[0].read_only, true);
+  assert.ok(dockerCalls(activated).filter((call) => call.args.includes('compose') && call.args.includes('up')).every((call) => call.args.includes(overridePath)));
+  succeeds(f.run('stable', 'host-finalize', { args: ['--operation-id', operationId] }));
+  assert.ok(!existsSync(fencePath));
+  assert.ok(existsSync(overridePath), 'preload remains attached and dynamically observes the next fence');
+  succeeds(f.run('stable', 'host-finalize', { args: ['--operation-id', operationId] }));
+});
+
+test('host finalize cannot remove a nonterminal or different operation write fence', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_fence_guard';
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs(operationId), commit: NEW_REF }));
+  const crashed = f.run('stable', 'host-activate', { args: ['--operation-id', operationId], fail: 'crash_activate' });
+  assert.equal(crashed.status, 91);
+  const fencePath = join(f.profileRoot(), 'host-control', 'write-fence.json');
+  const unfinished = f.run('stable', 'host-finalize', { args: ['--operation-id', operationId] });
+  assert.notEqual(unfinished.status, 0);
+  assert.match(unfinished.stderr, /not terminal/u);
+  succeeds(f.run('stable', 'host-recover'));
+  assert.equal(JSON.parse(readFileSync(fencePath, 'utf8')).operationId, operationId, 'automatic rollback retains the fence until its report is acknowledged');
+  writeFileSync(fencePath, JSON.stringify({ operationId: 'pop_new_owner' }));
+  const wrongOwner = f.run('stable', 'host-finalize', { args: ['--operation-id', operationId] });
+  assert.notEqual(wrongOwner.status, 0);
+  assert.match(wrongOwner.stderr, /does not own/u);
+  assert.equal(JSON.parse(readFileSync(fencePath, 'utf8')).operationId, 'pop_new_owner');
+});
+
+test('old backup recovery and the next operation preserve the effective updater credentials through acknowledgement', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const apiEnvPath = join(f.profileRoot(), 'api.env');
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs('pop_auth_upgrade'), commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-activate', { args: ['--operation-id', 'pop_auth_upgrade'], commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-finalize', { args: ['--operation-id', 'pop_auth_upgrade'] }));
+  const setCurrentCredentials = (source) => source
+    .replace(/^MULTIREMI_TOKEN=.*$/mu, "MULTIREMI_TOKEN='fixture#new$master'")
+    .replace(/^MULTIREMI_PLATFORM_UPDATER_TOKEN=.*$/mu, "MULTIREMI_PLATFORM_UPDATER_TOKEN='fixture#new$updater'");
+  writeFileSync(apiEnvPath, setCurrentCredentials(readFileSync(apiEnvPath, 'utf8')));
+  succeeds(f.run('stable', 'host-auth-refresh'));
+  const authPath = join(f.profileRoot(), 'host-control', 'updater-auth.env');
+  const currentAuth = readFileSync(authPath, 'utf8');
+  assert.ok(currentAuth.includes('MULTIREMI_TOKEN=fixture#new$master\n'));
+  const operationId = 'pop_auth_rollback';
+  succeeds(f.run('stable', 'host-rollback-stage', { args: ['--operation-id', operationId, '--ref', OLD_REF] }));
+  const crashed = f.run('stable', 'host-rollback-activate', { args: ['--operation-id', operationId], fail: 'crash_overlay' });
+  assert.equal(crashed.status, 91);
+  assert.ok(!readFileSync(apiEnvPath, 'utf8').includes('fixture#new$master'), 'the old business configuration really was restored');
+  assert.ok(readFileSync(authPath, 'utf8') === currentAuth, 'current control credentials remain outside the business backup');
+  const recovered = f.run('stable', 'host-recover');
+  succeeds(recovered);
+  assert.ok(readFileSync(authPath, 'utf8') === currentAuth, 'same-operation recovery must not capture old api.env');
+  const marker = join(f.profileRoot(), 'host-control', 'write-fence.json');
+  assert.ok(existsSync(marker), 'credentials remain usable while acknowledgement is still pending');
+  const overridePath = join(f.profileRoot(), 'compose.host-control.yml');
+  const override = JSON.parse(readFileSync(overridePath, 'utf8'));
+  assert.equal(override.services.api.env_file.at(-1).path, authPath.replaceAll('\\', '/'));
+  assert.equal(override.services.api.env_file.at(-1).format, 'raw');
+  succeeds(f.run('stable', 'host-finalize', { args: ['--operation-id', operationId] }));
+  assert.ok(!existsSync(marker));
+  assert.ok(readFileSync(authPath, 'utf8') === currentAuth, 'acknowledgement must preserve the control channel overlay');
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs('pop_auth_next'), commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-activate', { args: ['--operation-id', 'pop_auth_next'], commit: NEW_REF }));
+  assert.ok(readFileSync(authPath, 'utf8') === currentAuth, 'a new operation captures effective overlay values rather than historic api.env');
+});
+
+test('credential refresh is explicit and cannot replace an in-flight operation capture', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_auth_refresh_guard';
+  succeeds(f.run('stable', 'host-stage', { args: hostStageArgs(operationId), commit: NEW_REF }));
+  succeeds(f.run('stable', 'host-activate', { args: ['--operation-id', operationId], commit: NEW_REF }));
+  const authPath = join(f.profileRoot(), 'host-control', 'updater-auth.env');
+  const before = readFileSync(authPath, 'utf8');
+  const refused = f.run('stable', 'host-auth-refresh');
+  assert.notEqual(refused.status, 0);
+  assert.match(refused.stderr, /during a fenced operation/u);
+  assert.ok(readFileSync(authPath, 'utf8') === before);
 });

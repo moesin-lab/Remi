@@ -38,6 +38,8 @@ import { useT } from "../../i18n";
 
 interface ChatMessageListProps {
   messages: ChatMessage[];
+  /** Hidden cached windows keep rendering data, but must not refetch it. */
+  visible?: boolean;
   /**
    * Server-authoritative pending-task snapshot. `null` / undefined means
    * no in-flight task — list renders without StatusPill.
@@ -53,6 +55,7 @@ interface ChatMessageListProps {
 
 export function ChatMessageList({
   messages,
+  visible = true,
   pendingTask,
   availability,
   firstItemIndex = 0,
@@ -91,7 +94,7 @@ export function ChatMessageList({
   const canFetchLiveTimeline = isTaskMessageTaskId(pendingTaskId) && !pendingAlreadyPersisted;
   const { data: liveTaskMessages } = useQuery({
     ...taskMessagesOptions(pendingTaskId ?? ""),
-    enabled: canFetchLiveTimeline,
+    enabled: visible && canFetchLiveTimeline,
   });
   const liveTimeline: ChatTimelineItem[] = toChatTimeline(liveTaskMessages ?? []);
   const hasLive = showLiveTimeline && liveTimeline.length > 0;
@@ -99,11 +102,15 @@ export function ChatMessageList({
 
   const totalCount = messages.length + (hasLive || showStatusPill ? 1 : 0);
   const firstIndex = totalCount > 0 ? firstItemIndex : 0;
+  // The terminal anchor is keyed by identity so it survives the logical-index
+  // offset Virtuoso applies (see the `itemContent` comment below).
+  const latestMessageId = messages.length > 0 ? messages[messages.length - 1]!.id : null;
 
   return (
     <div
       ref={setScrollContainerRef}
       data-tab-scroll-root
+      data-perf-scroll="chat"
       style={fadeStyle}
       className="flex-1 overflow-y-auto"
     >
@@ -121,7 +128,7 @@ export function ChatMessageList({
         atBottomStateChange={setIsNearBottom}
         followOutput={() => (!isFetchingOlderMessages && isNearBottom ? "smooth" : false)}
         startReached={() => {
-          if (hasOlderMessages && !isFetchingOlderMessages) {
+          if (visible && hasOlderMessages && !isFetchingOlderMessages) {
             onLoadOlderMessages?.();
           }
         }}
@@ -151,10 +158,23 @@ export function ChatMessageList({
             </div>
           ),
         }}
-        itemContent={(_, msg) => (
-          <div className="mx-auto w-full max-w-4xl px-5 py-2">
+        itemContent={(_index, msg) => (
+          // MUL-384 measurement contract: `data-perf-item` marks a real message,
+          // `data-perf-key` keys it, and the last one carries the terminal anchor.
+          // Attributes only — nothing here changes rendering or behavior.
+          // The newest message by identity, not by index: Virtuoso hands this
+          // renderer a logical index offset by `firstItemIndex` (1_000_000 in
+          // chat-window), so `index === messages.length - 1` never matches and the
+          // terminal anchor would silently never render.
+          <div
+            className="mx-auto w-full max-w-4xl px-5 py-2"
+            data-perf-item="message"
+            data-perf-key={msg.id}
+            {...(msg.id === latestMessageId ? { "data-perf-anchor": "latest-message" } : null)}
+          >
             <MessageBubble
               message={msg}
+              visible={visible}
               isPending={!!pendingTaskId && msg.task_id === pendingTaskId}
             />
           </div>
@@ -194,7 +214,7 @@ export function ChatMessageSkeleton() {
 
 // ─── Message bubbles ─────────────────────────────────────────────────────
 
-function MessageBubble({ message, isPending }: { message: ChatMessage; isPending: boolean }) {
+function MessageBubble({ message, isPending, visible }: { message: ChatMessage; isPending: boolean; visible: boolean }) {
   if (message.role === "user") {
     const markdown = chatMessageMarkdown(message);
     return (
@@ -217,15 +237,17 @@ function MessageBubble({ message, isPending }: { message: ChatMessage; isPending
     );
   }
 
-  return <AssistantMessage message={message} isPending={isPending} />;
+  return <AssistantMessage message={message} isPending={isPending} visible={visible} />;
 }
 
 function AssistantMessage({
   message,
   isPending,
+  visible,
 }: {
   message: ChatMessage;
   isPending: boolean;
+  visible: boolean;
 }) {
   const taskId = message.task_id;
   // A mid-run attachment push shares its task id with the terminal reply that
@@ -240,7 +262,7 @@ function AssistantMessage({
   // task finishes, since WS already populated it.
   const { data: taskMessages } = useQuery({
     ...taskMessagesOptions(taskId ?? ""),
-    enabled: canFetchTaskMessages,
+    enabled: visible && canFetchTaskMessages,
   });
 
   const timeline: ChatTimelineItem[] = isAttachmentPush

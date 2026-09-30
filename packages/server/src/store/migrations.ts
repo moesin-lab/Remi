@@ -3,7 +3,7 @@ import { CHAT_ISSUE_DECOUPLED_FINGERPRINT, chatTaskRetryParentSql } from "@multi
 import { backfillRuntimeExecutionGroups } from "@multiremi/store/execution-groups.js";
 import { createHash } from "node:crypto";
 import { attachmentIdsFromText } from "@multiremi/contracts/attachments.js";
-import { type SqlDatabase } from "@multiremi/store/db/postgres.js";
+import { type SqlDatabase, type SqlDatabaseDialect } from "@multiremi/store/db/postgres.js";
 import {
   isSessionArchiveRetryExhausted,
   nextSessionArchiveRetryAt,
@@ -12,7 +12,8 @@ import {
 } from "@multiremi/session-archive/retry-policy.js";
 import { createLogger } from "@shared/logger.js";
 import { canonicalizeDaemonRoutingWithinTransaction } from "@multiremi/store/daemon-routing.js";
-import { isPostgresConfigured, PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
+import { advisoryLock, isPostgresConfigured } from "@multiremi/store/db/postgres.js";
+import { MIGRATION_ADVISORY_LOCK_KEY } from "@multiremi/store/advisory-locks.js";
 
 const log = createLogger("multiremi-store");
 const SCM_CONNECTION_ORIGIN_MIGRATION = "20260822_scm_connection_origins";
@@ -42,14 +43,31 @@ const CHAT_OWNED_SESSIONS_MIGRATION = "20260913_chat_owned_sessions";
 const AGENT_PAGE_QUERY_INDEXES_MIGRATION = "20260910_agent_page_query_indexes";
 const TASK_FALLBACK_MODEL_MIGRATION = "20260919_task_fallback_model";
 const GATEWAY_MODEL_REASONING_MIGRATION = "20260919_gateway_model_reasoning";
+const GATEWAY_MODEL_CONTEXT_MIGRATION = "20260928_gateway_model_context";
 const TASK_LIST_PAGINATION_INDEXES_MIGRATION = "20260921_task_list_pagination_indexes";
+const ISSUE_NUMBER_UNIQUE_INDEX = "idx_multiremi_issues_workspace_number";
+const PROJECT_DOC_CONTENT_URI_INDEX_MIGRATION = "20260926_project_doc_content_uri_index";
 
 // Stable Feishu open_id of the deployment owner (hehuajie / 贺华杰). The seed
 // `local` user is tagged with this on migration so SSO login re-binds to it
 // instead of creating a duplicate. Overridable via MULTIREMI_OWNER_OPEN_ID.
 const DEFAULT_OWNER_OPEN_ID = "ou_e6b7ffc662b392317275b817295c0b44";
 
-export function runMigrations(db: SqlDatabase): void {
+export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseDialect } = {}): void {
+  // MUL-405: the lock spans the entire run, so a second process either waits for
+  // a finished migration or proceeds exactly as before (SQLite, where the lock
+  // is a no-op). It releases on throw as well as on return, so a failed
+  // migration cannot strand it.
+  advisoryLock(db, MIGRATION_ADVISORY_LOCK_KEY, () =>
+    runMigrationsForDialect(db, resolveSqlDialect(db, options.dialect)));
+}
+
+/**
+ * The migration body. The dialect is resolved once, up front, from declared
+ * facts, and passed down to the few steps that differ per backend — rather than
+ * rediscovered per step by probing (MUL-407).
+ */
+function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): void {
   renameLegacyMulticaObjects(db);
   const legacyGithubTables = existingTableNames(db);
   db.exec(`
@@ -2198,6 +2216,9 @@ export function runMigrations(db: SqlDatabase): void {
       delegation_id TEXT,
       delegated_by_agent_id TEXT,
       delegation_return_task_id TEXT,
+      delegated_from_issue_session_id TEXT,
+      delegation_skip_reason TEXT,
+      wake_source TEXT,
       assignment_event_id TEXT,
       assignment_source_event_id TEXT,
       projection_from_seq INTEGER,
@@ -2452,6 +2473,42 @@ export function runMigrations(db: SqlDatabase): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_multiremi_human_requests_task ON multiremi_task_human_requests(task_id, status);
+    CREATE INDEX IF NOT EXISTS idx_multiremi_human_requests_pending ON multiremi_task_human_requests(status, task_id);
+
+    -- MUL-400 E4: the light "waiting for your decision" row. A child run raises
+    -- one of these instead of blocking; the parent owner answers it or hands it
+    -- to a human. No scope, expiry or revocation: that is not a grant object.
+    CREATE TABLE IF NOT EXISTS multiremi_issue_decisions (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      issue_id TEXT NOT NULL,
+      source_issue_id TEXT NOT NULL,
+      source_task_id TEXT,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      options TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      answer TEXT,
+      answered_by_member_id TEXT,
+      answered_at TEXT,
+      history TEXT NOT NULL DEFAULT '[]',
+      owner_agent_id TEXT,
+      created_by_agent_id TEXT,
+      -- MUL-412: the single text nudge a decision card gets. Decisions never
+      -- expire, so this is a one-shot slot rather than a deadline offset.
+      reminder_sent_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE,
+      FOREIGN KEY(source_issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE
+    );
+
+    -- The read model asks "this Issue's open/pending rows" on every parent page.
+    CREATE INDEX IF NOT EXISTS idx_multiremi_issue_decisions_issue
+      ON multiremi_issue_decisions(issue_id, status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_multiremi_issue_decisions_source
+      ON multiremi_issue_decisions(source_issue_id, created_at);
 
     CREATE TABLE IF NOT EXISTS multiremi_task_steer_messages (
       id TEXT PRIMARY KEY,
@@ -2775,6 +2832,12 @@ export function runMigrations(db: SqlDatabase): void {
   // purge snapshot or resurrect archive bytes after the control-plane row is
   // removed.
   addColumnIfMissing(db, "multiremi_issues", "lifecycle_state TEXT NOT NULL DEFAULT 'active'");
+  // MUL-400 S1c (A4): a member may authorize the parent issue's owner agent to
+  // close that single parent once its children are finished. Three nullable
+  // columns, add-only: NULL means "no grant" and matches the pre-S1c behaviour.
+  addColumnIfMissing(db, "multiremi_issues", "parent_done_grant_at TEXT");
+  addColumnIfMissing(db, "multiremi_issues", "parent_done_grant_by TEXT");
+  addColumnIfMissing(db, "multiremi_issues", "parent_done_grant_agent_id TEXT");
   const issueCompletedAtAdded = addColumnIfMissing(db, "multiremi_issues", "completed_at TEXT");
   addColumnIfMissing(db, "multiremi_issues", "archived_at TEXT");
   addColumnIfMissing(db, "multiremi_issue_workspaces", "cleaned_archive_id TEXT");
@@ -2848,11 +2911,26 @@ export function runMigrations(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_tasks", "delegation_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "delegated_by_agent_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "delegation_return_task_id TEXT");
+  // MUL-400 E2b: where a cross-issue delegation returns (the delegator's Issue
+  // Session at dispatch time) and why a task-token dispatch was not recorded as
+  // a delegation. Both are add-only: existing rows read NULL, which keeps the
+  // legacy "return to the task's own Session" behaviour for old tasks.
+  addColumnIfMissing(db, "multiremi_tasks", "delegated_from_issue_session_id TEXT");
+  addColumnIfMissing(db, "multiremi_tasks", "delegation_skip_reason TEXT");
+  // MUL-400 E2b ruling: server-owned marker for notification rounds the server
+  // generated itself (E2 child-status rounds). NULL means "not a server wake
+  // round", so D4's manual-wakeup lookup can exclude it without trusting any
+  // request-body field. Add-only: existing rows read NULL.
+  addColumnIfMissing(db, "multiremi_tasks", "wake_source TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "trigger_comment_id TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "trigger_summary TEXT");
   addColumnIfMissing(db, "multiremi_tasks", "issue_session_id TEXT");
   db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_delegation_return_pending
     ON multiremi_tasks(issue_session_id, delegated_by_agent_id, delegation_return_task_id, status)`);
+  // MUL-400 E2b: the drain now selects by the return Session, which is not the
+  // task's own Session for a cross-issue delegation.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_tasks_delegation_return_target
+    ON multiremi_tasks(delegated_from_issue_session_id, delegated_by_agent_id, delegation_return_task_id, status)`);
   addColumnIfMissing(db, "multiremi_tasks", "issue_session_generation INTEGER");
   addColumnIfMissing(db, "multiremi_tasks", "holds_workspace INTEGER NOT NULL DEFAULT 1");
   addColumnIfMissing(db, "multiremi_tasks", "assignment_event_id TEXT");
@@ -2878,7 +2956,7 @@ export function runMigrations(db: SqlDatabase): void {
   // Session ownership must be migrated while the legacy Chat issue_id column
   // is still available as a safe, one-time backfill hint. The following
   // migration intentionally removes that generic Chat-to-Issue binding.
-  migrateChatOwnedSessions(db);
+  migrateChatOwnedSessions(db, dialect);
   // SQLite cannot change foreign_keys inside a transaction. Disable it only
   // around this atomic table rebuild, then restore the caller's setting.
   const chatSchema = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'multiremi_chat_sessions'")
@@ -3230,6 +3308,70 @@ export function runMigrations(db: SqlDatabase): void {
         ON multiremi_tasks(status, created_at DESC, id DESC);
     `);
   });
+  // MUL-407 (E5): an Issue human request now becomes a server-built decision
+  // card delivery instead of waking a relay Agent. The push row keeps its
+  // idempotency duty but no longer requires a wake Task, and the request gains
+  // the deadline the reminder lane and the timeout card both read.
+  //
+  // Every step below is idempotent (the rebuild returns early once the column is
+  // nullable), so it runs beside the other Feishu column additions instead of
+  // through `runMigrationOnce`: that helper stamps `new Date()`, and consuming
+  // an extra clock read shifts the deterministic cursor pinned by
+  // `tests/unit/multiremi/issue-detail-first-screen-query-count.test.ts`.
+  allowNullableHumanRequestPushWakeTaskId(db, dialect);
+  addColumnIfMissing(db, "multiremi_feishu_bot_human_request_pushes", "delivery_id TEXT");
+  addColumnIfMissing(db, "multiremi_task_human_requests", "expires_at TEXT");
+  addColumnIfMissing(db, "multiremi_task_human_requests", "reminder_sent_at TEXT");
+  // The delivery lane itself: NULL kind keeps every existing row on its old
+  // meaning (topic seed, Task stream, or plain text).
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "kind TEXT");
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "human_request_id TEXT");
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "human_request_task_id TEXT");
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "expires_at TEXT");
+  // A patch lane edits an already-sent message instead of creating one, so it
+  // must name its target rather than reuse `external_message_id` (which means
+  // "the message this delivery produced").
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "target_message_id TEXT");
+  // Why a decision lane carried plain text instead of a card. NULL means the
+  // delivery is a normal card (or not a decision lane at all).
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "degraded TEXT");
+  // MUL-412 (E4 x E5): an E4 decision rides the same pipeline. It gets its own
+  // nullable pointer rather than borrowing `human_request_id`, so a delivery
+  // row names exactly one owner and MUL-440 can split lanes by kind without
+  // guessing. `reminder_sent_at` is the one-shot slot for the decision's single
+  // reminder: decisions never expire, so there is no deadline to key it on.
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "decision_id TEXT");
+  // The Issue the decision hangs on. Redundant with the decision row's own
+  // `issue_id`, but the delivery is read on its own when the host reports an
+  // outcome or re-registers a card, and a join for one column on those paths
+  // buys nothing.
+  addColumnIfMissing(db, "multiremi_feishu_bot_outbound_deliveries", "decision_issue_id TEXT");
+  addColumnIfMissing(db, "multiremi_issue_decisions", "reminder_sent_at TEXT");
+  runMigrationOnce(db, "20260929_human_request_tokens", () => {
+    for (const table of ["multiremi_task_human_requests", "multiremi_issue_decisions"]) {
+      addColumnIfMissing(db, table, "token_hash TEXT");
+      addColumnIfMissing(db, table, "token_recipient TEXT");
+      addColumnIfMissing(db, table, "token_consumed_at TEXT");
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_token_hash
+        ON ${table}(token_hash) WHERE token_hash IS NOT NULL`);
+    }
+  });
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_human_requests_expiry
+    ON multiremi_task_human_requests(status, expires_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_feishu_bot_outbound_kind
+    ON multiremi_feishu_bot_outbound_deliveries(kind, status, available_at)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_feishu_bot_outbound_decision
+    ON multiremi_feishu_bot_outbound_deliveries(decision_id, status, available_at)`);
+  // MUL-386 C.2: `recall` resolves one OpenViking URI per search hit. It used to
+  // call `listProjectDocs`, reading every doc in the project (body included) and
+  // comparing URIs in JavaScript — 15.5 MB of bridge payload per request. This
+  // index backs the replacement lookup by `(project_id, content_uri)`.
+  runMigrationOnce(db, PROJECT_DOC_CONTENT_URI_INDEX_MIGRATION, () => {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_multiremi_project_docs_content_uri
+        ON multiremi_project_docs(project_id, content_uri);
+    `);
+  });
   runMigrationOnce(db, "20260919_agent_fallback_model", () => {
     addColumnIfMissing(db, "multiremi_agents", "fallback_model TEXT");
     addColumnIfMissing(db, "multiremi_agents", "fallback_thinking_level TEXT");
@@ -3253,8 +3395,100 @@ export function runMigrations(db: SqlDatabase): void {
       );
     `);
   });
+  runMigrationOnce(db, GATEWAY_MODEL_CONTEXT_MIGRATION, () => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS multiremi_gateway_model_context (
+        workspace_id TEXT NOT NULL,
+        engine TEXT NOT NULL CHECK(engine = 'claude'),
+        model_id TEXT NOT NULL,
+        context_window TEXT NOT NULL CHECK(context_window = '1m'),
+        updated_by TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(workspace_id, engine, model_id)
+      );
+    `);
+  });
   backfillIssueKeys(db);
   migrateLegacyGithubProjection(db, legacyGithubTables);
+  ensureIssueNumberUniqueness(db, legacyGithubTables);
+}
+
+/**
+ * Second line of defense for issue numbering (MUL-405): the transaction lock in
+ * `IssuesRepo.createIssue` is what allocates numbers, and this index is what
+ * makes a duplicate number impossible even if a future caller forgets it.
+ *
+ * It MUST NOT be able to fail a startup. The daily release updates the platform
+ * container unattended at 07:00 Beijing time, and the updater rolls back when the
+ * new container does not come up — a failed `CREATE UNIQUE INDEX` on existing
+ * duplicate data would take the whole release down over a defense that no read
+ * path depends on. So the run degrades instead: duplicates or any other failure
+ * log one grep-able `api_startup_warning` line and leave the index absent, and
+ * the next startup retries, which is why this does not go through
+ * `runMigrationOnce`.
+ */
+function ensureIssueNumberUniqueness(db: SqlDatabase, objects: Set<string>): void {
+  if (objects.has(ISSUE_NUMBER_UNIQUE_INDEX)) return;
+  // `issue_number = 0` is the "not allocated yet" placeholder, not a number: the
+  // column defaults to 0 and `backfillIssueKeys` hands those rows real numbers on
+  // every startup. Rows written by an out-of-band writer (a fixture, a script, a
+  // pre-upgrade client) all sit at 0, so enforcing uniqueness over the whole
+  // column would make the index reject them and it would be the index, not the
+  // allocator, that broke them. The predicate therefore covers exactly the rows
+  // an allocator produced, which is where a duplicate number can come from.
+  const allocatedOnly = "issue_number > 0";
+  let duplicates: Array<{ workspace_id?: unknown; issue_number?: unknown; count?: unknown }> = [];
+  try {
+    duplicates = db.query(
+      `SELECT workspace_id, issue_number, COUNT(*) AS count
+         FROM multiremi_issues
+        WHERE ${allocatedOnly}
+        GROUP BY workspace_id, issue_number
+       HAVING COUNT(*) > 1
+        LIMIT 1`,
+    ).all() as Array<{ workspace_id?: unknown; issue_number?: unknown; count?: unknown }>;
+  } catch (err) {
+    logStartupWarning("duplicate check failed", err, {});
+    return;
+  }
+  if (duplicates.length) {
+    const row = duplicates[0]!;
+    logStartupWarning("duplicate issue numbers found, unique index skipped", null, {
+      workspace_id: row.workspace_id ?? null,
+      issue_number: row.issue_number ?? null,
+      duplicate_rows: row.count ?? null,
+    });
+    return;
+  }
+  try {
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${ISSUE_NUMBER_UNIQUE_INDEX}
+         ON multiremi_issues(workspace_id, issue_number)
+       WHERE ${allocatedOnly}`,
+    );
+  } catch (err) {
+    logStartupWarning("unique index creation failed", err, {});
+  }
+}
+
+/**
+ * One JSON line per degraded startup step, on stdout next to the other
+ * machine-read startup lines (`api_minute_summary`, `api_slow_request`).
+ * `createLogger` cannot be used here: WARN goes to stderr and stops being a
+ * parseable record of what the process decided at boot.
+ */
+function logStartupWarning(message: string, error: unknown, fields: Record<string, unknown>): void {
+  try {
+    console.log(JSON.stringify({
+      event: "api_startup_warning",
+      ts: new Date().toISOString(),
+      message,
+      ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
+      ...fields,
+    }));
+  } catch {
+    // A hostile console is not worth failing a migration over.
+  }
 }
 
 function ensureFeishuBotAgentRoutesSchema(db: SqlDatabase): void {
@@ -3417,7 +3651,7 @@ function normalizeSquadLeaderRoles(db: SqlDatabase): void {
   );
 }
 
-function migrateChatOwnedSessions(db: SqlDatabase): void {
+function migrateChatOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect): void {
   const applied = db.query("SELECT 1 AS applied FROM multiremi_schema_migrations WHERE id = ?").get(
     CHAT_OWNED_SESSIONS_MIGRATION,
   );
@@ -3429,20 +3663,7 @@ function migrateChatOwnedSessions(db: SqlDatabase): void {
   addColumnIfMissing(db, "multiremi_feishu_bot_chat_bindings",
     "issue_id TEXT REFERENCES multiremi_issues(id) ON DELETE SET NULL");
 
-  // Tests and observability can wrap PostgresSyncDatabase in another
-  // SqlDatabase, so instanceof and the process-level URL are not sufficient.
-  // sqlite_version() is deliberately left untranslated by the PG bridge: a
-  // successful probe identifies SQLite, while PostgreSQL rejects it without
-  // changing state.
-  let postgresDatabase = isPostgresConfigured() || db instanceof PostgresSyncDatabase;
-  if (!postgresDatabase) {
-    try {
-      db.query("SELECT sqlite_version() AS version").get();
-    } catch {
-      postgresDatabase = true;
-    }
-  }
-  if (postgresDatabase) {
+  if (dialect === "postgres") {
     runMigrationOnce(db, CHAT_OWNED_SESSIONS_MIGRATION, () => {
       addColumnIfMissing(db, "multiremi_issue_sessions", "chat_id TEXT");
       addColumnIfMissing(db, "multiremi_session_results", "chat_id TEXT");
@@ -4325,6 +4546,283 @@ function allowNullableFeishuOutboundReplyToMessageId(db: SqlDatabase): void {
     CREATE INDEX idx_multiremi_feishu_bot_outbound_pending
       ON multiremi_feishu_bot_outbound_deliveries(status, available_at, leased_until, created_at);
   `);
+}
+
+/**
+ * MUL-407: a decision-card push has no wake Task, so `wake_task_id` must accept
+ * NULL. SQLite cannot drop NOT NULL in place and the column is UNIQUE, so the
+ * table is rebuilt. Same shape as the outbound-delivery rebuild above, including
+ * the Postgres branch that only has to relax the column.
+ */
+const HUMAN_REQUEST_PUSH_TABLE = "multiremi_feishu_bot_human_request_pushes";
+const HUMAN_REQUEST_PUSH_LEGACY_TABLE = `${HUMAN_REQUEST_PUSH_TABLE}_legacy`;
+
+/**
+ * MUL-407: a decision-card push has no wake Task, so `wake_task_id` must accept
+ * NULL. SQLite cannot drop NOT NULL in place and the column is UNIQUE, so the
+ * table is rebuilt.
+ *
+ * The rebuild is atomic and self-healing, because a crash used to be permanent:
+ * the previous version ran RENAME → CREATE → copy → DROP as four separate
+ * statements, so a crash after the RENAME left every push row stranded in
+ * `_legacy` with an empty live table and no way back. Two habits fix that:
+ * run the whole rebuild inside one transaction (SQLite rolls a DDL transaction
+ * back cleanly), and treat a surviving `_legacy` table as unfinished work —
+ * copy from it and drop it — rather than as an error.
+ *
+ * `foreign_keys` cannot be toggled inside a transaction. Nothing references
+ * this table (it is a leaf: no `REFERENCES multiremi_feishu_bot_human_request_pushes`
+ * anywhere in the schema), so the surrounding code only has to turn them off
+ * for the rebuild's duration to keep the RENAME from rewriting its own FKs.
+ */
+function allowNullableHumanRequestPushWakeTaskId(db: SqlDatabase, dialect: SqlDatabaseDialect): void {
+  if (isPostgresDialect(db, dialect)) {
+    // Postgres can relax the column in place, and the PRAGMA below is SQLite
+    // only — asking for `is_nullable` through `PRAGMA table_info` would be
+    // translated into a query Postgres cannot answer. `DROP NOT NULL` is itself
+    // idempotent, so a repeated run is harmless.
+    const column = (db.query(`PRAGMA table_info(${HUMAN_REQUEST_PUSH_TABLE})`).all() as Array<{
+      name: string;
+      notnull: number;
+    }>).find((entry) => entry.name === "wake_task_id");
+    if (!column || Number(column.notnull) === 0) return;
+    db.exec(`ALTER TABLE ${HUMAN_REQUEST_PUSH_TABLE} ALTER COLUMN wake_task_id DROP NOT NULL`);
+    return;
+  }
+
+  const columns = db.query(`PRAGMA table_info(${HUMAN_REQUEST_PUSH_TABLE})`).all() as Array<{
+    name: string;
+    notnull: number;
+  }>;
+  const wakeTask = columns.find((entry) => entry.name === "wake_task_id");
+  const hasDeliveryId = columns.some((entry) => entry.name === "delivery_id");
+  const alreadyRebuilt = hasDeliveryId && wakeTask !== undefined && Number(wakeTask.notnull) === 0;
+
+  // The steady state: the live table is already the new shape and no crashed
+  // copy is waiting beside it. Nothing to merge and nothing to rebuild, so this
+  // must not run the full-table copy — it costs a `SELECT` plus an `INSERT` per
+  // row on every startup (measured ~122ms at 10k rows).
+  //
+  // Both halves matter. A `_legacy` table means the previous run died mid-heal,
+  // and the copy it holds may be the only copy. A missing `delivery_id` means
+  // the live table predates the rebuild and the nullable column has to be
+  // produced by one.
+  if (alreadyRebuilt && !tableExists(db, HUMAN_REQUEST_PUSH_LEGACY_TABLE)) {
+    // The rebuild is done, but a crash between the DROP and the index creation
+    // in the version that shipped this would have left the table without its
+    // index, so assert it either way — the statement is idempotent.
+    ensureHumanRequestPushWakeIndex(db);
+    return;
+  }
+
+  // Every other state needs the merge: a stranded copy to fold back in, an old
+  // shape to rebuild into the new one, or both. `mergeHumanRequestPushRows`
+  // reads both tables, so it covers the plain old-shape rebuild too.
+  rebuildHumanRequestPushTableForNullableWakeTaskId(db);
+}
+
+function ensureHumanRequestPushWakeIndex(db: SqlDatabase): void {
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_${HUMAN_REQUEST_PUSH_TABLE}_wake
+    ON ${HUMAN_REQUEST_PUSH_TABLE}(wake_task_id)`);
+}
+
+/**
+ * Which SQL this handle speaks.
+ *
+ * Resolved from declared facts only — never by running a statement that one
+ * backend cannot answer. The previous probe (`SELECT … FROM sqlite_master`)
+ * logged an ERROR on Postgres at every startup, aborted the surrounding
+ * transaction if one was ever open, and read SQLite as Postgres whenever that
+ * query failed for an unrelated reason such as a lock.
+ *
+ * Order: an explicit argument (how a caller that already knows says so) beats
+ * the handle's own `dialect` marker, which beats `MULTIREMI_DATABASE_URL`. A
+ * thin test double with no marker falls through to the configured backend,
+ * which is what its SQL is written against anyway.
+ */
+export function resolveSqlDialect(db: SqlDatabase, explicit?: SqlDatabaseDialect): SqlDatabaseDialect {
+  if (explicit) return explicit;
+  const marker = (db as { dialect?: unknown }).dialect;
+  if (marker === "postgres" || marker === "sqlite") return marker;
+  return isPostgresConfigured() ? "postgres" : "sqlite";
+}
+
+function isPostgresDialect(db: SqlDatabase, explicit?: SqlDatabaseDialect): boolean {
+  return resolveSqlDialect(db, explicit) === "postgres";
+}
+
+// A stranded copy is only ever left by an early version of this migration.
+// `origin/main` does create the live table (migrations.ts:2382), but it has never
+// created the `_legacy` one, so the two sides here are the same table at two
+// points in our own rebuild: the live copy and the copy a crashed run stranded.
+// A key collision therefore means the two versions genuinely disagree rather
+// than that something expected happened. The caller routes both the ordinary
+// rebuild and the recovery through `mergeHumanRequestPushTables`, so there is one
+// code path to reason about.
+
+function tableExists(db: SqlDatabase, table: string): boolean {
+  return Boolean(db.query(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+  ).get(table));
+}
+
+/** One push row, with the pre-MUL-407 shape normalized (`delivery_id` -> NULL). */
+interface HumanRequestPushRow {
+  id: string;
+  workspace_id: string;
+  binding_id: string;
+  issue_id: string;
+  source_task_id: string;
+  request_id: string;
+  wake_task_id: string | null;
+  delivery_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+const humanRequestPushFingerprint = (row: HumanRequestPushRow): string => JSON.stringify([
+  row.id, row.workspace_id, row.binding_id, row.issue_id, row.source_task_id,
+  row.request_id, row.wake_task_id, row.delivery_id, row.created_at, row.updated_at,
+]);
+
+function readHumanRequestPushRows(db: SqlDatabase, table: string): HumanRequestPushRow[] {
+  if (!tableExists(db, table)) return [];
+  const columns = (db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
+    .map((column) => column.name);
+  // The old shape has no `delivery_id`; read it as NULL so both sides compare
+  // over the same field list.
+  const delivery = columns.includes("delivery_id") ? "delivery_id" : "NULL AS delivery_id";
+  return (db.query(`SELECT id, workspace_id, binding_id, issue_id, source_task_id,
+      request_id, wake_task_id, ${delivery}, created_at, updated_at FROM ${table}`)
+    .all() as Array<Record<string, unknown>>).map((row) => ({
+    id: String(row.id),
+    workspace_id: String(row.workspace_id),
+    binding_id: String(row.binding_id),
+    issue_id: String(row.issue_id),
+    source_task_id: String(row.source_task_id),
+    request_id: String(row.request_id),
+    wake_task_id: row.wake_task_id == null ? null : String(row.wake_task_id),
+    delivery_id: row.delivery_id == null ? null : String(row.delivery_id),
+    created_at: String(row.created_at),
+    updated_at: String(row.updated_at),
+  }));
+}
+
+/**
+ * Union the live table's rows with a stranded copy's.
+ *
+ * Identical rows (every column equal) collapse: a partly finished copy has the
+ * rows that already landed present on both sides, and those are the same row.
+ * A collision on any key where the contents differ is a real ambiguity — the two
+ * versions disagree about what happened, and choosing one silently would either
+ * drop a real push or resurrect a superseded one. That throws, which rolls the
+ * surrounding transaction back and leaves both tables exactly as they were.
+ */
+function mergeHumanRequestPushRows(
+  live: HumanRequestPushRow[],
+  legacy: HumanRequestPushRow[],
+): HumanRequestPushRow[] {
+  const merged: HumanRequestPushRow[] = [];
+  const seen = new Set<string>();
+  const byId = new Map<string, HumanRequestPushRow>();
+  const byRequest = new Map<string, HumanRequestPushRow>();
+  const byWakeTask = new Map<string, HumanRequestPushRow>();
+  const add = (row: HumanRequestPushRow): void => {
+    const fingerprint = humanRequestPushFingerprint(row);
+    if (seen.has(fingerprint)) return;
+    const clashes: string[] = [];
+    if (byId.has(row.id)) clashes.push(`id=${row.id}`);
+    const requestKey = `${row.binding_id}\u0000${row.request_id}`;
+    if (byRequest.has(requestKey)) {
+      clashes.push(`(binding_id=${row.binding_id}, request_id=${row.request_id})`);
+    }
+    if (row.wake_task_id && byWakeTask.has(row.wake_task_id)) {
+      clashes.push(`wake_task_id=${row.wake_task_id}`);
+    }
+    if (clashes.length) {
+      throw new Error(
+        `multiremi_feishu_bot_human_request_pushes rebuild conflict: the live table and its `
+        + `stranded copy hold different rows for ${clashes.join(", ")}. The correct row cannot be `
+        + `chosen automatically; reconcile the two tables and retry.`,
+      );
+    }
+    seen.add(fingerprint);
+    byId.set(row.id, row);
+    byRequest.set(requestKey, row);
+    if (row.wake_task_id) byWakeTask.set(row.wake_task_id, row);
+    merged.push(row);
+  };
+  for (const row of live) add(row);
+  for (const row of legacy) add(row);
+  return merged;
+}
+
+/**
+ * Rebuild the push table in one transaction, keeping every distinct row from the
+ * live table and any stranded copy. With no stranded copy this is the ordinary
+ * first-time rebuild, so both the normal path and the recovery path share it.
+ */
+function mergeHumanRequestPushTables(db: SqlDatabase): void {
+  // `foreign_keys` cannot be toggled inside a transaction, so it is switched
+  // around the whole transaction and restored on every path — including the
+  // throw a merge conflict raises.
+  const foreignKeysEnabled =
+    Number((db.query("PRAGMA foreign_keys").get() as { foreign_keys?: number } | null)?.foreign_keys) === 1;
+  if (foreignKeysEnabled) db.exec("PRAGMA foreign_keys = OFF");
+  try {
+    db.transaction(() => {
+      // Read both sides inside the transaction: the snapshot the merge decides
+      // on and the tables it replaces must be the same one, or a concurrent
+      // write could land between the read and the drop.
+      const merged = mergeHumanRequestPushRows(
+        readHumanRequestPushRows(db, HUMAN_REQUEST_PUSH_TABLE),
+        readHumanRequestPushRows(db, HUMAN_REQUEST_PUSH_LEGACY_TABLE),
+      );
+      db.exec(`DROP TABLE IF EXISTS ${HUMAN_REQUEST_PUSH_TABLE}`);
+      db.exec(`DROP TABLE IF EXISTS ${HUMAN_REQUEST_PUSH_LEGACY_TABLE}`);
+      createHumanRequestPushTable(db);
+      for (const row of merged) {
+        db.run(
+          `INSERT INTO ${HUMAN_REQUEST_PUSH_TABLE} (
+             id, workspace_id, binding_id, issue_id, source_task_id,
+             request_id, wake_task_id, delivery_id, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [row.id, row.workspace_id, row.binding_id, row.issue_id, row.source_task_id,
+            row.request_id, row.wake_task_id, row.delivery_id, row.created_at, row.updated_at],
+        );
+      }
+      ensureHumanRequestPushWakeIndex(db);
+    })();
+  } finally {
+    if (foreignKeysEnabled) db.exec("PRAGMA foreign_keys = ON");
+  }
+}
+
+function createHumanRequestPushTable(db: SqlDatabase): void {
+  db.exec(`
+    CREATE TABLE ${HUMAN_REQUEST_PUSH_TABLE} (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      binding_id TEXT NOT NULL,
+      issue_id TEXT NOT NULL,
+      source_task_id TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      wake_task_id TEXT UNIQUE,
+      delivery_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(binding_id, request_id),
+      FOREIGN KEY(binding_id) REFERENCES multiremi_feishu_bot_chat_bindings(id) ON DELETE CASCADE,
+      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE,
+      FOREIGN KEY(source_task_id) REFERENCES multiremi_tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY(wake_task_id) REFERENCES multiremi_tasks(id) ON DELETE CASCADE
+    )`);
+}
+
+function rebuildHumanRequestPushTableForNullableWakeTaskId(db: SqlDatabase): void {
+  // Same merge as the recovery path; with no stranded copy this is just the
+  // ordinary single-table rebuild, and it inherits the conflict detection too.
+  mergeHumanRequestPushTables(db);
 }
 
 function backfillCanonicalDaemonRouting(db: SqlDatabase): void {

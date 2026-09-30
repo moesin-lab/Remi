@@ -18,12 +18,19 @@
  * The integration suite is skipped (not failed) when Postgres is unreachable, so
  * the file is safe on machines without the configured MULTIREMI_DATABASE_URL.
  */
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setSystemTime, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
+import { createMultiremiApp } from "@multiremi/api.js";
 import type { MultiremiRuntimeModel } from "@multiremi/contracts/types.js";
 import { PostgresSyncDatabase, translateSqliteToPg } from "@multiremi/store/db/postgres.js";
 import { daemonRuntimeId, MultiremiStore } from "@multiremi/store.js";
+import { StoreContext, type CommitEventQueue } from "@multiremi/store/context.js";
+import { TasksRepo } from "@multiremi/store/repos/tasks-repo.js";
+import type { IssuesRepo } from "@multiremi/store/repos/issues-repo.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { ProjectInstructionsRevisionConflictError } from "@multiremi/store/repos/projects-repo.js";
 import { TaskSteerConflictError, TaskSteerPendingError } from "@multiremi/store/repos/tasks-repo.js";
@@ -210,6 +217,13 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
   let db: PostgresSyncDatabase;
   let store: MultiremiStore;
 
+  function drainSystemEvents(): void {
+    const pending = db.query("SELECT 1 FROM multiremi_system_events WHERE status IN ('pending', 'processing') LIMIT 1");
+    const at = new Date(Date.now() + 24 * 60 * 60 * 1_000);
+    for (let round = 0; round < 100 && pending.get(); round++) store.dispatchPendingSystemEvents(at);
+    if (pending.get()) throw new Error("System event queue did not drain within 100 rounds");
+  }
+
   beforeAll(async () => {
     const admin = new Bun.SQL(PG_ADMIN_URL, { max: 1 });
     await admin.unsafe(`DROP DATABASE IF EXISTS ${TEST_DB} WITH (FORCE)`);
@@ -229,6 +243,100 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     await admin.end();
   });
 
+  it.each(["redispatch", "retry", "continuation", "delegation_return", "parent_wakeup"] as const)(
+    "writes the %s dependency exemption after commit (PG)",
+    (source) => {
+      const runtime = store.registerRuntime({
+        id: `rt_pg_exemption_${++wsCounter}`, name: `PG exemption ${source}`, provider: "claude",
+      });
+      const agent = store.createAgent({ name: `PG exemption ${source} ${wsCounter}`, provider: "claude", runtimeId: runtime.id });
+      const prerequisite = store.createIssue({ title: `PG prerequisite ${source}`, status: "in_progress" });
+      const issue = store.createIssue({ title: `PG earlier work ${source}`, status: "in_progress" });
+      const previous = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "earlier round" });
+      if (source === "redispatch") store.cancelTask(previous.id);
+      if (source === "retry") {
+        expect(store.claimTask(runtime.id)?.id).toBe(previous.id);
+        store.startTask(previous.id);
+        store.failTask(previous.id, { error: "failed", failureReason: "unknown" });
+      }
+      store.createIssueDependency(issue.id, { dependsOnIssueId: prerequisite.id, type: "blocked_by" });
+      store.updateIssue(issue.id, { status: "backlog" });
+      const eventStates: boolean[] = [];
+      const stop = store.onWorkspaceEvent((event) => {
+        if (event.type === "activity:created"
+          && (event.payload.entry as { action?: string })?.action === "dependency_gate_exempted") {
+          eventStates.push(db.inTransaction);
+        }
+      });
+      db.resetTransactionDepthStats();
+      const task = store.createTask({
+        agentId: agent.id, issueId: issue.id, prompt: `continue ${source}`,
+        ...(source === "redispatch" || source === "retry" ? { attempt: 2, parentTaskId: previous.id } : {}),
+        ...(source === "continuation" ? { continuedFromTaskId: previous.id } : {}),
+        ...(source === "delegation_return" ? {
+          delegationId: `dlg_exemption_${wsCounter}`, delegatedByAgentId: agent.id, parentTaskId: previous.id,
+        } : {}),
+        ...(source === "parent_wakeup" ? { preserveIssueStatus: true, parentTaskId: previous.id } : {}),
+      });
+      stop();
+      expect(db.maxTransactionDepth).toBe(1);
+      expect(eventStates).toEqual([false]);
+      expect(store.getTask(task.id)?.status).toBe("queued");
+      const activities = store.listIssueActivity(issue.id).filter((row) => row.type === "dependency_gate_exempted");
+      expect(activities).toHaveLength(1);
+      expect(activities[0]!.data).toMatchObject({
+        source, taskId: task.id, task_id: task.id,
+        previousTaskId: previous.id, previous_task_id: previous.id,
+        unmet: [{ key: prerequisite.key }],
+      });
+    },
+  );
+
+  it("does not auto-claim a backlog issue with an active exempt round (PG)", () => {
+    const runtime = store.registerRuntime({ id: `rt_pg_active_${++wsCounter}`, name: "Active exemption", provider: "claude" });
+    const agent = store.createAgent({ name: `Active exemption ${wsCounter}`, provider: "claude", runtimeId: runtime.id });
+    const prerequisite = store.createIssue({ title: "Active prerequisite", status: "in_progress" });
+    const issue = store.createIssue({
+      title: "Active dependent", status: "backlog", blockedBy: [prerequisite.id],
+      assigneeType: "agent", assigneeId: agent.id,
+    });
+    const task = store.createTask({
+      agentId: agent.id, issueId: issue.id, prompt: "existing continuation",
+      attempt: 2, preserveIssueStatus: true,
+    });
+    db.resetTransactionDepthStats();
+    store.updateIssue(prerequisite.id, { status: "done" });
+    expect(db.maxTransactionDepth).toBe(1);
+    expect(store.getIssue(issue.id)?.status).toBe("backlog");
+    expect(store.listTasksForIssue(issue.id).map((row) => row.id)).toEqual([task.id]);
+    expect(store.listIssueActivity(issue.id).filter((row) =>
+      row.type === "dependency_auto_started" || row.type === "dependency_auto_start_skipped")).toEqual([]);
+    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    store.startTask(task.id);
+    expect(store.getIssue(issue.id)?.status).toBe("in_progress");
+  });
+
+  it("maps a waiting session task request to 409 with unmet prerequisites (PG)", async () => {
+    const agent = store.createAgent({ name: `Session gate ${++wsCounter}`, provider: "claude" });
+    const prerequisite = store.createIssue({ title: "Session prerequisite", status: "in_progress" });
+    const issue = store.createIssue({ title: "Session waiting", status: "backlog", blockedBy: [prerequisite.id] });
+    const session = store.getOrCreateDefaultIssueSession(issue.id);
+    const app = createMultiremiApp({ store });
+    const response = await app.request(`/api/issues/${issue.id}/sessions/${session.id}/tasks`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agent_id: agent.id, prompt: "blocked" }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "dependencies_unmet", unmet: [{ key: prerequisite.key }] });
+    expect(store.listTasksForIssue(issue.id)).toEqual([]);
+    expect(store.getIssue(issue.id)?.status).toBe("backlog");
+    const unknownAgent = await app.request(`/api/issues/${issue.id}/sessions/${session.id}/tasks`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agent_id: "agt_not_found", prompt: "blocked" }),
+    });
+    expect(unknownAgent.status).toBe(404);
+  });
+
   // Real PostgreSQL performs repeated full startup migrations plus classification
   // fixtures and their cleanup; allow for database round trips.
   it("moves legacy Chat ownership into Feishu topics and is idempotent", async () => {
@@ -243,6 +351,11 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     assertLegacyChatWakeSettlement(db);
     runMigrations(db);
     assertLegacyChatWakeSettlement(db);
+    // DDL fixtures change SELECT * result shapes. Reconnect as a deployed API
+    // does after migration rather than retaining pre-migration prepared plans.
+    db.close();
+    db = new PostgresSyncDatabase(pgDatabaseUrl(TEST_DB));
+    store = new MultiremiStore(db);
     expect((db.query("PRAGMA table_info(multiremi_chat_sessions)").all() as Array<{ name: string }>).map(column => column.name)).not.toContain("issue_id");
     expect(db.query(`SELECT chat_session_id, issue_id FROM multiremi_feishu_bot_chat_bindings
       WHERE app_id = 'cli_migration' AND chat_session_id NOT LIKE '%classification_%' ORDER BY chat_session_id`).all()).toEqual([
@@ -1445,6 +1558,83 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     expect(store.listIssues({ workspaceId: ws, limit: 2, offset: 2 }).length).toBe(1);
   });
 
+  it("keeps backlog out of active child progress and projects parent inbox fields (PG)", () => {
+    const ws = freshWorkspace();
+    const member = store.createWorkspaceMember({ name: "Parent owner", workspaceId: ws, role: "member" });
+    const parent = store.createIssue({ title: "Parent", workspaceId: ws, status: "in_progress", assigneeType: "member", assigneeId: member.id });
+    store.createIssue({ title: "Unscheduled", workspaceId: ws, parentIssueId: parent.id, status: "backlog" });
+    store.createIssue({ title: "Active", workspaceId: ws, parentIssueId: parent.id, status: "todo" });
+    const terminal = store.createIssue({ title: "Terminal", workspaceId: ws, parentIssueId: parent.id, status: "in_progress" });
+    store.updateIssue(terminal.id, { status: "done" });
+
+    expect(store.getChildIssueProgress(parent.id)).toMatchObject({ total: 3, active: 1, done: 1, waiting: 0 });
+    const notification = store.listInboxItems(member.id, ws).find((item) => item.type === "child_issue_terminal");
+    expect(notification).toMatchObject({
+      issueId: parent.id,
+      issue_parent_id: parent.id,
+      issue_parent_key: parent.key,
+      issue_parent_title: parent.title,
+    });
+  });
+
+  it("scopes parent projections and progress to the child's workspace (PG)", () => {
+    const workspaceA = freshWorkspace();
+    const workspaceB = freshWorkspace();
+    const reviewer = store.createWorkspaceMember({ name: "Scoped parent reviewer", workspaceId: workspaceA, role: "member" });
+    const author = store.createWorkspaceMember({ name: "Scoped parent author", workspaceId: workspaceA, role: "member" });
+    const parent = store.createIssue({ title: "Parent moved to B", workspaceId: workspaceA });
+    const child = store.createIssue({
+      title: "Child staying in A",
+      workspaceId: workspaceA,
+      parentIssueId: parent.id,
+      createdBy: reviewer.id,
+      status: "todo",
+    });
+    store.createIssueComment(child.id, {
+      authorType: "member",
+      authorId: author.id,
+      body: "Notify before moving the parent",
+    });
+
+    // MUL-476 refuses moving an Issue that still has a child, so the parent can
+    // only be in B as a legacy row from before that rule, which is not migrated.
+    expect(() => store.updateIssue(parent.id, { workspaceId: workspaceB }))
+      .toThrow("Detach parent, child and dependency relationships, cancel or finish its tasks, and clean or abandon its Issue workspace before moving an issue to another workspace");
+    expect(store.getIssue(parent.id)?.workspaceId).toBe(workspaceA);
+    db.run("UPDATE multiremi_issues SET workspace_id = ? WHERE id = ?", [workspaceB, parent.id]);
+    expect(store.getIssue(parent.id)?.workspaceId).toBe(workspaceB);
+
+    expect(store.listInboxItems(reviewer.id, workspaceA).find((item) => item.issueId === child.id)).toMatchObject({
+      issue_parent_id: null,
+      issue_parent_key: null,
+      issue_parent_title: null,
+    });
+    expect(store.getChildIssueProgress(parent.id)).toMatchObject({ total: 0, active: 0 });
+    expect(store.listChildIssueProgress(workspaceA).some((progress) => progress.parentIssueId === parent.id)).toBe(false);
+    expect(store.listChildIssueProgress(workspaceB).some((progress) => progress.parentIssueId === parent.id)).toBe(false);
+    expect(store.listIssues({ workspaceId: workspaceA, topLevelOnly: true }).map((issue) => issue.id)).toContain(child.id);
+    expect(store.listIssues({ workspaceId: workspaceA, parentId: parent.id })).toHaveLength(0);
+
+    const deletedParent = store.createIssue({ title: "Parent deleted in A", workspaceId: workspaceA });
+    const orphan = store.createIssue({
+      title: "Child orphaned in A",
+      workspaceId: workspaceA,
+      parentIssueId: deletedParent.id,
+      createdBy: reviewer.id,
+    });
+    store.createIssueComment(orphan.id, {
+      authorType: "member",
+      authorId: author.id,
+      body: "Notify before deleting the parent",
+    });
+    expect(store.deleteIssue(deletedParent.id)).toBe(true);
+    expect(store.listInboxItems(reviewer.id, workspaceA).find((item) => item.issueId === orphan.id)).toMatchObject({
+      issue_parent_id: null,
+      issue_parent_key: null,
+      issue_parent_title: null,
+    });
+  });
+
   it("filters issues by assignee via the IN (…) pushdown", () => {
     const ws = freshWorkspace();
     const member = store.createWorkspaceMember({ name: "Assignee", workspaceId: ws, role: "member" });
@@ -1998,9 +2188,13 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     });
     expect(store.deleteRuntime(newRuntime.id)).toBeFalse();
     store.updateAgent(agent.id, { runtimeId: null });
-    expect(store.deleteRuntime(newRuntime.id)).toBeTrue();
+    expect(store.deleteRuntime(newRuntime.id)).toBeFalse();
+    expect(store.getIssueWorkspace(issue.id)).toMatchObject({ runtimeId: newRuntime.id, status: "ready" });
+    expect(store.deleteRuntimeWithArchivedAgentCleanup(newRuntime.id, { abandonIssueWorkspaces: true })).toEqual({
+      status: "deleted", issueWorkspacesAbandoned: 1,
+    });
     expect(store.getAgent(agent.id)?.runtimeId).toBeNull();
-    expect(store.getIssueWorkspace(issue.id)).toMatchObject({ runtimeId: null, status: "runtime_offline" });
+    expect(store.getIssueWorkspace(issue.id)).toMatchObject({ runtimeId: null, status: "cleaned" });
     for (const table of [
       "multiremi_agent_plugin_runtime_states",
       "multiremi_runtime_models",
@@ -2185,6 +2379,57 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     ]);
   });
 
+  // MUL-389: the merged heartbeat probe and the rewritten claim/expire statements only ever ran on
+  // SQLite before this test. Postgres is stricter in two ways that matter here: `UNION ALL`
+  // requires every branch to agree on a column type (the `housekeeping` column used to be integer
+  // `0` in six branches and boolean `EXISTS` in the command branch), and `UPDATE ... RETURNING`
+  // plus `IN (SELECT ... LIMIT n)` have to be accepted by the real planner.
+  it("runs the merged heartbeat probe and the rewritten request-queue statements on Postgres", () => {
+    const ws = freshWorkspace();
+    const runtime = store.registerRuntime({ name: "rt-pg-probe", provider: "claude", workspaceId: ws, daemonId: `pg_probe_${wsCounter}` });
+    const capabilities = { supportsBatchImport: true, supportsDirectoryScan: true, supportsSkillDirectory: true, supportsBotMenu: true };
+
+    // Idle: one probe row per family, nothing to claim.
+    const idle = store.heartbeatRuntime(runtime.id, capabilities);
+    expect(idle.status).toBe("ok");
+    expect(idle.pending_update).toBeUndefined();
+
+    // One row in every family, and ten in the batch family. The batch claim is the
+    // `IN (SELECT ... LIMIT ?)` form, the rest are the single-row `WHERE id = (...)` form.
+    const update = store.createRuntimeUpdateRequest(runtime.id, { targetVersion: "9.9.9" });
+    const modelList = store.createRuntimeModelListRequest(runtime.id);
+    const command = store.createRuntimeCommandRequest(runtime.id, { command: "printf pg", args: ["a"] });
+    store.createRuntimeLocalSkillListRequest(runtime.id, {});
+    const batch = Array.from({ length: 10 }, (_v, index) =>
+      store.createRuntimeLocalSkillImportRequest(runtime.id, { skillKey: `pg-${index}` }));
+    const scan = store.createRuntimeDirectoryScanRequest(runtime.id, { root: "/tmp", maxDepth: 2 });
+
+    const claimed = store.heartbeatRuntime(runtime.id, capabilities);
+    expect(claimed.status).toBe("ok");
+    expect(claimed.pending_update).toMatchObject({ id: update.id, target_version: "9.9.9" });
+    expect(claimed.pending_model_list).toMatchObject({ id: modelList.id });
+    expect(claimed.pending_command).toMatchObject({ id: command.id, command: "printf pg" });
+    expect(claimed.pending_directory_scan).toMatchObject({ id: scan.id, root: "/tmp", max_depth: 2 });
+    const claimedBatch = claimed.pending_local_skill_imports ?? [];
+    expect(claimedBatch).toHaveLength(10);
+    // Oldest first, and exactly the ten rows that were queued.
+    expect(claimedBatch.map((entry) => entry.skill_key)).toEqual(batch.map((entry) => entry.skillKey));
+
+    // The single-statement expire has to write each row's OWN timeout copy on PG too.
+    const toRun = store.createRuntimeCommandRequest(runtime.id, { command: "slow", args: [] });
+    expect(store.claimRuntimeCommandRequest(runtime.id)?.id).toBe(toRun.id);
+    const toStayPending = store.createRuntimeCommandRequest(runtime.id, { command: "wait", args: [] });
+    const staleRun = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const stalePending = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    db.run("UPDATE multiremi_runtime_command_requests SET run_started_at = ? WHERE id = ?", [staleRun, toRun.id]);
+    db.run("UPDATE multiremi_runtime_command_requests SET created_at = ? WHERE id = ?", [stalePending, toStayPending.id]);
+    store.getRuntimeCommandRequest(runtime.id, toStayPending.id);
+    expect(db.query("SELECT status, error FROM multiremi_runtime_command_requests WHERE id = ?").get(toRun.id))
+      .toMatchObject({ status: "timeout", error: "daemon did not finish the command within 20 minutes" });
+    expect(db.query("SELECT status, error FROM multiremi_runtime_command_requests WHERE id = ?").get(toStayPending.id))
+      .toMatchObject({ status: "timeout", error: "daemon did not respond within 3 minutes" });
+  });
+
   it("resolves project_ref expansion and rejects duplicate refs via the UNIQUE index", () => {
     const ws = freshWorkspace();
     store.updateWorkspaceRepositories(ws, [
@@ -2243,6 +2488,16 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
   });
 
   it("dispatches trigger_issue system events atomically on Postgres", () => {
+    // Earlier tests share this queue; drain their events before testing one atomic dispatch.
+    const drainAt = new Date(Date.now() + 24 * 60 * 60 * 1_000);
+    const pendingEvents = db.query(
+      "SELECT 1 FROM multiremi_system_events WHERE status IN ('pending', 'processing') LIMIT 1",
+    );
+    for (let round = 0; round < 100 && pendingEvents.get(); round++) {
+      store.dispatchPendingSystemEvents(drainAt);
+    }
+    if (pendingEvents.get()) throw new Error("System event queue did not drain within 100 rounds");
+
     const ws = freshWorkspace();
     const agent = store.createAgent({ name: "Wiki PG", provider: "codex", workspaceId: ws });
     const issue = store.createIssue({ title: "Wiki PG evidence", workspaceId: ws, status: "in_review" });
@@ -2505,6 +2760,342 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     expect(store.listTaskSteerMessages(task.id)).toHaveLength(0);
   });
 
+  /**
+   * MUL-409 fix round, blocking 2: issue creation is one transaction on this
+   * bridge. Postgres has no savepoint here, so a nested `BEGIN` would commit the
+   * issue row early and let it survive the rollback — exactly the orphan the QA
+   * pass found. The depth counter is asserted alongside the data, so a future
+   * refactor that reintroduces nesting fails here rather than in production.
+   */
+  it("rolls a rejected blocked_by creation back and stays a single transaction (PG)", () => {
+    const parent = store.createIssue({ title: "PG rollback parent", status: "in_progress" });
+    const issuesBefore = store.listIssues({ workspaceId: "local" }).length;
+    const childrenBefore = store.listChildIssues(parent.id).length;
+    const dependenciesBefore = (db.query("SELECT COUNT(*) AS n FROM multiremi_issue_dependencies").get() as { n: number }).n;
+    // The next number is the workspace maximum, not the row count: earlier tests
+    // in this file archive rows, and `listIssues` hides those.
+    const nextNumberBefore = Number((db.query(
+      "SELECT COALESCE(MAX(issue_number), 0) + 1 AS next FROM multiremi_issues WHERE workspace_id = ?",
+    ).get("local") as { next: number }).next);
+
+    db.resetTransactionDepthStats();
+    let failure: Error & { code?: string } | null = null;
+    try {
+      store.createIssue({
+        title: "PG rejected child",
+        status: "todo",
+        parentIssueId: parent.id,
+        blockedBy: [parent.id],
+      });
+    } catch (err) {
+      failure = err as Error & { code?: string };
+    }
+
+    expect(failure?.code).toBe("dependency_on_ancestor");
+    expect(db.maxTransactionDepth).toBe(1);
+    expect(store.listIssues({ workspaceId: "local" }).length).toBe(issuesBefore);
+    expect(store.listChildIssues(parent.id).length).toBe(childrenBefore);
+    expect((db.query("SELECT COUNT(*) AS n FROM multiremi_issue_dependencies").get() as { n: number }).n)
+      .toBe(dependenciesBefore);
+    // The consumed number is rolled back with everything else.
+    expect(store.createIssue({ title: "PG after the rejection" }).key)
+      .toBe(`MUL-${nextNumberBefore}`);
+  });
+
+  /**
+   * MUL-409 fix round 2, blocking 4: the automatic-start chain must not nest a
+   * transaction on this bridge. `transaction()` is a bare BEGIN/COMMIT with no
+   * savepoint, so a nested BEGIN lets the inner COMMIT end the outer unit and a
+   * later ROLLBACK cannot undo it. S1 moved the E1/E2 hook post-commit; these
+   * three scenarios pin that the S2 dependency logic (auto-start on `done`, the
+   * two-prerequisite case, and the member forced start) now runs at depth 1.
+   */
+  it("keeps the automatic-start chain at one transaction (PG)", () => {
+    const runtime = store.registerRuntime({ id: "rt_dep_depth", name: "Depth worker", provider: "claude", maxConcurrency: 4 });
+    const owner = store.createAgent({ name: "Depth owner", provider: "claude", runtimeId: runtime.id });
+
+    // (a) prerequisite done -> dependent auto-starts
+    const prereq = store.createIssue({ title: "Depth prerequisite", status: "in_progress", assigneeType: "agent", assigneeId: owner.id });
+    const dependent = store.createIssue({
+      title: "Depth dependent",
+      status: "backlog",
+      blockedBy: [prereq.id],
+      assigneeType: "agent",
+      assigneeId: owner.id,
+    });
+    const prereqTask = store.createTask({ agentId: owner.id, issueId: prereq.id, prompt: "finish the prerequisite" });
+    let claimed = store.claimTask(runtime.id);
+    while (claimed && claimed.id !== prereqTask.id) claimed = store.claimTask(runtime.id);
+    store.startTask(prereqTask.id);
+    store.completeTask(prereqTask.id, { output: "prerequisite finished" });
+
+    db.resetTransactionDepthStats();
+    store.updateIssue(prereq.id, { status: "done" });
+    expect(db.maxTransactionDepth).toBe(1);
+    expect(store.getIssue(dependent.id)?.status).toBe("todo");
+    expect(store.listTasksForIssue(dependent.id).filter((task) => task.status !== "cancelled")).toHaveLength(1);
+
+    // (b) two prerequisites finishing: one dispatch, still depth 1
+    const first = store.createIssue({ title: "Depth first", status: "in_progress" });
+    const second = store.createIssue({ title: "Depth second", status: "in_progress" });
+    const bothWaiting = store.createIssue({
+      title: "Depth both",
+      status: "backlog",
+      blockedBy: [first.id, second.id],
+      assigneeType: "agent",
+      assigneeId: owner.id,
+    });
+    db.resetTransactionDepthStats();
+    store.updateIssue(first.id, { status: "done" });
+    store.updateIssue(second.id, { status: "done" });
+    expect(db.maxTransactionDepth).toBe(1);
+    expect(store.getIssue(bothWaiting.id)?.status).toBe("todo");
+    expect(store.listTasksForIssue(bothWaiting.id).filter((task) => task.status !== "cancelled")).toHaveLength(1);
+
+    // (c) member forced start: the override dispatches after its own commit
+    const forcedPrereq = store.createIssue({ title: "Depth forced prerequisite", status: "in_progress" });
+    const forced = store.createIssue({
+      title: "Depth forced",
+      status: "backlog",
+      blockedBy: [forcedPrereq.id],
+      assigneeType: "agent",
+      assigneeId: owner.id,
+    });
+    db.resetTransactionDepthStats();
+    store.updateIssue(forced.id, { status: "todo", force: true, actorType: "member", actorId: "local" });
+    expect(db.maxTransactionDepth).toBe(1);
+    expect(store.getIssue(forced.id)?.status).toBe("todo");
+    expect(store.listTasksForIssue(forced.id).filter((task) => task.status !== "cancelled")).toHaveLength(1);
+  });
+
+  /**
+   * MUL-409 fix round 2, blocking 4, failure half: when the dispatch itself
+   * fails the prerequisite's `done` must not roll back, and the dependent must
+   * stay in a state a human can retry from. An unavailable owner is a business
+   * skip, recorded under the same locks as the start decision.
+   */
+  it("keeps the prerequisite done and the dependent retryable when auto-start dispatch fails (PG)", () => {
+    const runtime = store.registerRuntime({ id: "rt_dep_fail", name: "Depth worker", provider: "claude", maxConcurrency: 4 });
+    const owner = store.createAgent({ name: "Doomed owner", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "Prerequisite", status: "in_progress" });
+    const dependent = store.createIssue({
+      title: "Dependent",
+      status: "backlog",
+      blockedBy: [prereq.id],
+      assigneeType: "agent",
+      assigneeId: owner.id,
+    });
+    // The dependent's owner is unavailable when the hook makes its decision.
+    db.run("UPDATE multiremi_agents SET archived_at = ? WHERE id = ?", [new Date().toISOString(), owner.id]);
+
+    db.resetTransactionDepthStats();
+    store.updateIssue(prereq.id, { status: "done" });
+
+    expect(db.maxTransactionDepth).toBe(1);
+    expect(store.getIssue(prereq.id)?.status).toBe("done");
+    // Still waiting, so the automatic path can pick it up again once a human
+    // fixes the owner: backlog + unmet prerequisite is the retryable state.
+    expect(store.getIssue(dependent.id)?.status).toBe("backlog");
+    expect(store.listTasksForIssue(dependent.id)).toHaveLength(0);
+    const skipped = store.listIssueActivity(dependent.id).filter((entry) => entry.type === "dependency_auto_start_skipped");
+    expect(skipped).toHaveLength(1);
+    expect(String(skipped[0]?.body ?? "")).toContain("No runnable agent");
+    // An unavailable owner is decided under the lock before the claim, so the
+    // dependent stays in backlog and the business skip is the durable trace.
+    expect(skipped[0]?.data).toMatchObject({ reason: "dispatch_failed" });
+    expect(skipped[0]?.data ?? {}).not.toHaveProperty("claimReleased");
+    // And the retry really works once the owner is fixed.
+    db.run("UPDATE multiremi_agents SET archived_at = NULL WHERE id = ?", [owner.id]);
+    const restored = store.createAgent({ name: "Replacement owner", provider: "claude", runtimeId: runtime.id });
+    const assigned = store.assignIssue(dependent.id, { assigneeType: "agent", assigneeId: restored.id });
+    expect(assigned.task?.id).toBeDefined();
+    expect(store.listTasksForIssue(dependent.id).filter((task) => task.status !== "cancelled")).toHaveLength(1);
+  });
+
+  /**
+   * MUL-409 fix round 3 (QA round-2 blockers) on Postgres: the gate refuses a
+   * forged structural exemption, a member override queues exactly one row, a
+   * rejected `blocked_by` keeps its HTTP contract, and batch is not a second
+   * override.
+   */
+  it("holds the dependency gate against forged exemptions and batch force (PG)", async () => {
+    const app = createMultiremiApp({ store });
+    const runtime = store.registerRuntime({ id: "rt_gate_pg", name: "Gate worker", provider: "claude", maxConcurrency: 4 });
+    const owner = store.createAgent({ name: "Gate owner", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "Gate prerequisite", status: "in_progress" });
+    const waiting = store.createIssue({
+      title: "Gate waiting",
+      status: "backlog",
+      blockedBy: [prereq.id],
+      assigneeType: "agent",
+      assigneeId: owner.id,
+    });
+    const taskRows = () => db.query("SELECT id, status FROM multiremi_tasks WHERE issue_id = ?").all(waiting.id) as Array<{ id: string; status: string }>;
+    const forceActivities = () => db.query(
+      "SELECT id FROM multiremi_issue_activity WHERE issue_id = ? AND type = 'dependency_force_started'",
+    ).all(waiting.id) as Array<{ id: string }>;
+    const post = (path: string, body: unknown) => app.request(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    // (a) forged exemptions are ignored on the public task route
+    for (const extra of [{ attempt: 2 }, { preserve_issue_status: true }]) {
+      const response = await post("/api/multiremi/tasks", {
+        agentId: owner.id,
+        issueId: waiting.id,
+        prompt: "forged",
+        ...extra,
+      });
+      expect(response.status).toBe(409);
+      expect((await response.json() as { code?: string }).code).toBe("dependencies_unmet");
+    }
+    expect(taskRows()).toHaveLength(0);
+    expect(store.getIssue(waiting.id)?.status).toBe("backlog");
+
+    // (b) batch force is ignored by the dependency gate
+    const batched = await post("/api/issues/batch-update", {
+      issue_ids: [waiting.id],
+      updates: { status: "todo", force: true },
+    });
+    expect(batched.status).toBe(200);
+    expect(store.getIssue(waiting.id)?.status).toBe("backlog");
+    expect(taskRows()).toHaveLength(0);
+    expect(forceActivities()).toHaveLength(0);
+
+    // (c) the member PATCH override queues exactly one row
+    const forced = await app.request(`/api/issues/${waiting.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "todo", force: true }),
+    });
+    expect(forced.status).toBe(200);
+    expect(store.getIssue(waiting.id)?.status).toBe("todo");
+    expect(taskRows().map((row) => row.status)).toEqual(["queued"]);
+    expect(forceActivities()).toHaveLength(1);
+
+    // (d) a rejected blocked_by keeps its HTTP contract and rolls back
+    const parent = store.createIssue({ title: "PG parent" });
+    const issuesBefore = (db.query("SELECT COUNT(*) AS n FROM multiremi_issues").get() as { n: number }).n;
+    for (const [blockedBy, expected] of [
+      [[parent.id], 409],
+      [["iss_missing_pg"], 400],
+    ] as const) {
+      const response = await post("/api/issues", { title: "PG rejected", parent_issue_id: parent.id, blocked_by: blockedBy });
+      expect(response.status).toBe(expected);
+      expect((db.query("SELECT COUNT(*) AS n FROM multiremi_issues").get() as { n: number }).n).toBe(issuesBefore);
+      expect(store.listChildIssues(parent.id)).toHaveLength(0);
+    }
+  });
+
+  /**
+   * MUL-409 fix round 3, blocker 3 on Postgres. Two prerequisites reaching
+   * `done` concurrently on independent connections used to leave two queued
+   * rounds and two `dependency_auto_started` rows, because both readers saw the
+   * dependent as `backlog`. The atomic claim fixes it; this test spawns two
+   * workers so the race is real, and repeats to catch flakiness. Sequential
+   * calls cannot prove this property.
+   */
+  it("lets only one of two concurrent prerequisites auto-start the dependent (PG)", async () => {
+    const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const runtime = store.registerRuntime({ id: "rt_conc_pg", name: "Conc worker", provider: "claude", maxConcurrency: 8 });
+    const owner = store.createAgent({ name: "Conc owner", provider: "claude", runtimeId: runtime.id });
+    const workerUrl = new URL("./fixtures/postgres-complete-issue-worker.ts", import.meta.url).href;
+    const waitFor = (worker: Worker, phase: string) => new Promise<void>((resolve, reject) => {
+      const onMessage = (event: MessageEvent<{ phase?: string; error?: string }>) => {
+        if (event.data.phase === "error") { cleanup(); reject(new Error(event.data.error ?? "worker failed")); }
+        else if (event.data.phase === phase) { cleanup(); resolve(); }
+      };
+      const onError = (event: ErrorEvent) => { cleanup(); reject(event.error ?? new Error(event.message)); };
+      const cleanup = () => { worker.removeEventListener("message", onMessage as never); worker.removeEventListener("error", onError as never); };
+      worker.addEventListener("message", onMessage as never);
+      worker.addEventListener("error", onError as never);
+    });
+
+    const ROUNDS = Number(process.env.MUL409_CONCURRENCY_ROUNDS ?? 12);
+    let doubleDispatched = 0;
+    for (let round = 0; round < ROUNDS; round++) {
+      const first = store.createIssue({ title: `Conc first ${round}`, status: "in_progress" });
+      const second = store.createIssue({ title: `Conc second ${round}`, status: "in_progress" });
+      const dependent = store.createIssue({
+        title: `Conc dependent ${round}`,
+        status: "backlog",
+        blockedBy: [first.id, second.id],
+        assigneeType: "agent",
+        assigneeId: owner.id,
+      });
+      // The workers need the live database URL; the store holds the bridge.
+      const databaseUrl = pgDatabaseUrl(TEST_DB);
+      const barrierDir = mkdtempSync(join(tmpdir(), "mul409-conc-"));
+      const barrier = join(barrierDir, "go");
+      const workers = [first, second].map((issue) => {
+        const worker = new Worker(workerUrl, { type: "module" });
+        worker.postMessage({ type: "init", databaseUrl, issueId: issue.id, barrierPath: barrier });
+        return worker;
+      });
+      await Promise.all(workers.map((worker) => waitFor(worker, "ready")));
+      writeFileSync(barrier, "go");
+      await Promise.all(workers.map((worker) => waitFor(worker, "done")));
+      workers.forEach((worker) => worker.terminate());
+      rmSync(barrierDir, { recursive: true, force: true });
+
+      const rows = db.query("SELECT id, status FROM multiremi_tasks WHERE issue_id = ?").all(dependent.id) as Array<{ status: string }>;
+      const autoStarted = db.query(
+        "SELECT id FROM multiremi_issue_activity WHERE issue_id = ? AND type = 'dependency_auto_started'",
+      ).all(dependent.id) as Array<{ id: string }>;
+      if (rows.length !== 1 || autoStarted.length !== 1) doubleDispatched++;
+    }
+    expect(doubleDispatched).toBe(0);
+  }, 120_000);
+
+  /**
+   * MUL-409 fix round 3, blocker 3 (second half): a member's forced start and the
+   * automatic start that the last prerequisite triggers must not both queue a
+   * round either. Both paths arbitrate on the same conditional
+   * `backlog -> todo` claim, so exactly one wins.
+   */
+  it("lets only one of a forced start and an automatic start dispatch (PG)", async () => {
+    const runtime = store.registerRuntime({ id: "rt_force_race", name: "Race worker", provider: "claude", maxConcurrency: 8 });
+    const owner = store.createAgent({ name: "Race owner", provider: "claude", runtimeId: runtime.id });
+    const ROUNDS = Number(process.env.MUL409_FORCE_RACE_ROUNDS ?? 8);
+    let doubleDispatched = 0;
+    for (let round = 0; round < ROUNDS; round++) {
+      const prereq = store.createIssue({ title: `Race prereq ${round}`, status: "in_progress" });
+      const dependent = store.createIssue({
+        title: `Race dependent ${round}`,
+        status: "backlog",
+        blockedBy: [prereq.id],
+        assigneeType: "agent",
+        assigneeId: owner.id,
+      });
+      // Kick off both contenders in the same tick. They run on one connection
+      // here, so this exercises the claim ordering rather than true network
+      // concurrency; the two-process test above covers the cross-connection
+      // race.
+      const forced = Promise.resolve().then(() => {
+        try {
+          store.updateIssue(dependent.id, { status: "todo", force: true, actorType: "member", actorId: "local" });
+        } catch { /* the losing contender may legitimately refuse */ }
+      });
+      const automatic = Promise.resolve().then(() => {
+        try {
+          store.updateIssue(prereq.id, { status: "done" });
+        } catch { /* the losing contender may legitimately refuse */ }
+      });
+      await Promise.all([forced, automatic]);
+
+      const rows = db.query("SELECT id, status FROM multiremi_tasks WHERE issue_id = ?").all(dependent.id) as Array<{ status: string }>;
+      const started = db.query(
+        "SELECT id FROM multiremi_issue_activity WHERE issue_id = ? AND type IN ('dependency_force_started', 'dependency_auto_started')",
+      ).all(dependent.id) as Array<{ id: string }>;
+      if (rows.length !== 1 || started.length !== 1) doubleDispatched++;
+    }
+    expect(doubleDispatched).toBe(0);
+  }, 60_000);
+
   it("creates a fresh terminal return when comment editing cancels the explicit return first (PG)", () => {
     const fixture = createDelegationFixture();
     store.updateIssueComment(fixture.report.id, { body: "Intermediate report withdrawn." });
@@ -2522,4 +3113,959 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     expect(terminalReturn.status).toBe("queued");
     expect(terminalReturn.prompt).toContain("Final PG QA result after the explicit report was withdrawn.");
   });
+
+  /**
+   * MUL-409 fix round 4 (QA round 3, blocker 3) on Postgres: the native PATCH
+   * route must answer the dependency hold with 409 + `dependencies_unmet`
+   * instead of letting `IssueDependencyError` become a bare 500.
+   */
+  it("answers 409 dependencies_unmet from both PATCH routes on a waiting issue (PG)", async () => {
+    const app = createMultiremiApp({ store });
+    const runtime = store.registerRuntime({ id: "rt_patch_pg", name: "Patch worker", provider: "claude", maxConcurrency: 4 });
+    const owner = store.createAgent({ name: "Patch owner", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "Patch prerequisite", status: "in_progress" });
+    const waiting = store.createIssue({
+      title: "Patch waiting",
+      status: "backlog",
+      blockedBy: [prereq.id],
+      assigneeType: "agent",
+      assigneeId: owner.id,
+    });
+
+    // QA's four spellings, on both routes.
+    const forms: Array<Record<string, unknown>> = [
+      { status: "todo" },
+      { status: "todo", parentStatusForce: true },
+      { status: "todo", parent_status_force: true },
+      { status: "todo", options: { parentStatusForce: true } },
+    ];
+    for (const path of ["/api/multiremi/issues", "/api/issues"]) {
+      for (const body of forms) {
+        const response = await app.request(`${path}/${waiting.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const payload = await response.json() as { code?: string; error?: string };
+        expect({ path, body: JSON.stringify(body), status: response.status })
+          .toEqual({ path, body: JSON.stringify(body), status: 409 });
+        expect(payload.code).toBe("dependencies_unmet");
+        expect(String(payload.error ?? "")).toContain(waiting.key);
+      }
+    }
+
+    // Nothing half-written on any of the eight attempts.
+    expect(store.getIssue(waiting.id)?.status).toBe("backlog");
+    const taskRows = db.query(
+      "SELECT status FROM multiremi_tasks WHERE issue_id = ? ORDER BY created_at ASC",
+    ).all(waiting.id) as Array<{ status: string }>;
+    expect(taskRows).toEqual([]);
+    const forced = db.query(
+      "SELECT id FROM multiremi_issue_activity WHERE issue_id = ? AND type = 'dependency_force_started'",
+    ).all(waiting.id) as Array<{ id: string }>;
+    expect(forced).toEqual([]);
+  });
+
+  /**
+   * MUL-409 fix round 4 (QA round 3, blockers 1+2) on Postgres.
+   *
+   * The automatic start is one transaction: the claim, the status write, the
+   * round and both activities commit together or not at all. These cases assert
+   * that on the real bridge, where a nested BEGIN would silently end the outer
+   * transaction early.
+   */
+  it("rolls the whole automatic start back when a step fails (PG)", () => {
+    drainSystemEvents();
+    const runtime = store.registerRuntime({ id: "rt_atomic_pg", name: "Atomic worker", provider: "claude", maxConcurrency: 4 });
+    const owner = store.createAgent({ name: "Atomic owner", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "Atomic prerequisite", status: "in_progress" });
+    const dependent = store.createIssue({
+      title: "Atomic dependent",
+      status: "backlog",
+      blockedBy: [prereq.id],
+      assigneeType: "agent",
+      assigneeId: owner.id,
+    });
+
+    // QA's injection point: the activity write that happens AFTER the round was
+    // inserted. Pre-fix this left `backlog` + a queued round.
+    type Ctx = {
+      appendIssueActivity(issueId: string, input: { type: string }, ...rest: unknown[]): void;
+    };
+    const ctx = (store as unknown as { ctx: Ctx }).ctx;
+    const original = ctx.appendIssueActivity.bind(ctx);
+    let fired = false;
+    ctx.appendIssueActivity = (issueId: string, input: { type: string }, ...rest: unknown[]) => {
+      if (!fired && input.type === "issue_assigned") {
+        fired = true;
+        throw new Error("injected activity failure");
+      }
+      original(issueId, input, ...rest);
+    };
+
+    const warnings = spyOn(console, "warn").mockImplementation(() => {});
+    db.resetTransactionDepthStats();
+    try {
+      store.updateIssue(prereq.id, { status: "done" });
+    } finally {
+      ctx.appendIssueActivity = original;
+    }
+    expect(warnings.mock.calls).toHaveLength(1);
+    warnings.mockRestore();
+
+    // Whole row sets, not counts of a filtered subset.
+    const taskRows = db.query(
+      "SELECT status FROM multiremi_tasks WHERE issue_id = ? ORDER BY created_at ASC",
+    ).all(dependent.id) as Array<{ status: string }>;
+    expect(taskRows).toEqual([]);
+    expect(store.getIssue(dependent.id)?.status).toBe("backlog");
+    // The prerequisite's `done` committed while the dependent's attempt rolled
+    // back. The surviving backlog with no round is recovered by the check below.
+    expect(store.listUnmetPrerequisites(dependent.id)).toHaveLength(0);
+    const auto = db.query(
+      "SELECT id FROM multiremi_issue_activity WHERE issue_id = ? AND type = 'dependency_auto_started'",
+    ).all(dependent.id) as Array<{ id: string }>;
+    expect(auto).toEqual([]);
+    const skipped = db.query(
+      "SELECT data FROM multiremi_issue_activity WHERE issue_id = ? AND type = 'dependency_auto_start_skipped'",
+    ).all(dependent.id) as Array<{ data: string }>;
+    expect(skipped).toEqual([]);
+    // The prerequisite's own transition is untouched, and the depth stayed 1.
+    expect(store.getIssue(prereq.id)?.status).toBe("done");
+    expect(db.maxTransactionDepth).toBe(1);
+
+    const checkRow = db.query("SELECT id FROM multiremi_system_events WHERE resource_id = ? AND event = 'dependency_auto_start_check'")
+      .get(prereq.id) as { id: string };
+    const check = store.getSystemEvent(checkRow.id)!;
+    store.dispatchPendingSystemEvents(new Date(check.availableAt));
+    expect(store.getIssue(dependent.id)?.status).toBe("todo");
+    expect(store.listIssueActivity(dependent.id).filter((entry) => entry.type === "dependency_auto_started"))
+      .toEqual([expect.objectContaining({ data: expect.objectContaining({ replayed: true }) })]);
+    expect(store.listIssueActivity(dependent.id).filter((entry) => entry.type === "dependency_auto_start_skipped")).toEqual([]);
+    expect(store.getSystemEvent(check.id)?.status).toBe("processed");
+    expect(db.query(
+      "SELECT status FROM multiremi_tasks WHERE issue_id = ? ORDER BY created_at ASC",
+    ).all(dependent.id)).toEqual([{ status: "queued" }]);
+  });
+
+  it("U8 ignores a stale backlog issue after its round was already queued (PG)", () => {
+    const runtime = store.registerRuntime({ name: "Stale PG runtime", provider: "claude" });
+    const owner = store.createAgent({ name: "Stale PG owner", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "Stale PG prerequisite", status: "in_progress" });
+    const dependent = store.createIssue({ title: "Stale PG dependent", status: "backlog", blockedBy: [prereq.id],
+      assigneeType: "agent", assigneeId: owner.id });
+    store.updateIssue(prereq.id, { status: "done" });
+    expect(store.getIssue(dependent.id)?.status).toBe("todo");
+    const before = store.listTasksForIssue(dependent.id);
+    expect(before).toHaveLength(1);
+    const issues = (store as unknown as { issues: { autoStartDependent(...args: unknown[]): unknown } }).issues;
+    const checkId = (db.query("SELECT id FROM multiremi_system_events WHERE resource_id = ? AND event = 'dependency_auto_start_check'")
+      .get(prereq.id) as { id: string }).id;
+    issues.autoStartDependent(dependent, store.getIssue(prereq.id)!, null, { dependencyCheckEventId: checkId });
+    expect(store.listTasksForIssue(dependent.id)).toEqual(before);
+    expect(store.listIssueActivity(dependent.id).filter((entry) => entry.type === "dependency_auto_started")).toHaveLength(1);
+    expect(store.listIssueActivity(dependent.id).filter((entry) => entry.type === "dependency_auto_start_skipped")).toEqual([]);
+  });
+
+  describe("MUL-452 check event identity (PG)", () => {
+    const base = Date.parse("2028-01-01T00:00:00.000Z");
+
+    function drainIdentityEvents() {
+      const pending = db.query("SELECT 1 FROM multiremi_system_events WHERE status IN ('pending', 'processing') LIMIT 1");
+      const at = new Date(Math.max(Date.now(), base + 60_000) + 24 * 60 * 60 * 1_000);
+      for (let round = 0; round < 100 && pending.get(); round++) store.dispatchPendingSystemEvents(at);
+      if (pending.get()) throw new Error("Identity test event queue did not drain within 100 rounds");
+    }
+
+    function chain() {
+      const runtime = store.registerRuntime({ name: `Check identity ${++wsCounter}`, provider: "claude" });
+      const agent = store.createAgent({ name: `Check identity ${wsCounter}`, provider: "claude", runtimeId: runtime.id });
+      const prerequisite = store.createIssue({ title: `Check prerequisite ${wsCounter}`, status: "in_progress" });
+      const dependent = store.createIssue({ title: `Check dependent ${wsCounter}`, status: "backlog",
+        blockedBy: [prerequisite.id], assigneeType: "agent", assigneeId: agent.id });
+      return { agent, prerequisite, dependent };
+    }
+
+    function checks(issueId: string) {
+      const rows = db.query("SELECT id FROM multiremi_system_events WHERE resource_id = ? AND event = 'dependency_auto_start_check'")
+        .all(issueId) as Array<{ id: string }>;
+      return rows.map(({ id }) => store.getSystemEvent(id)!);
+    }
+
+    function activities(issueId: string, type: string) {
+      return store.listIssueActivity(issueId).filter((entry) => entry.type === type);
+    }
+
+    function withoutHooks(fn: () => void) {
+      const issues = (store as unknown as { issues: IssuesRepo }).issues;
+      const hook = spyOn(issues, "runIssueUpdatePostCommit").mockImplementation(() => {});
+      try { fn(); } finally { hook.mockRestore(); }
+    }
+
+    it("passes the task-terminal check id to the normal post-commit start (PG)", () => {
+      drainIdentityEvents();
+      const runtime = store.registerRuntime({ name: `Terminal check PG ${++wsCounter}`, provider: "claude" });
+      const owner = store.createAgent({ name: `Terminal check PG ${wsCounter}`, provider: "claude", runtimeId: runtime.id });
+      const prerequisite = store.createIssue({ title: `Terminal check prerequisite PG ${wsCounter}`, status: "todo", issueKind: "intake" });
+      store.createIssue({ title: `Terminal generated PG ${wsCounter}`, sourceIssueId: prerequisite.id });
+      const dependent = store.createIssue({ title: `Terminal check dependent PG ${wsCounter}`, status: "backlog",
+        blockedBy: [prerequisite.id], assigneeType: "agent", assigneeId: owner.id });
+      const task = store.createTask({ agentId: owner.id, issueId: prerequisite.id, prompt: "Finish intake" });
+      expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+      store.startTask(task.id);
+      store.completeTask(task.id, { output: "Generated work" });
+
+      const check = checks(prerequisite.id)[0]!;
+      expect(store.getIssue(prerequisite.id)?.status).toBe("done");
+      expect(store.getIssue(dependent.id)?.status).toBe("todo");
+      expect(store.listTasksForIssue(dependent.id)).toHaveLength(1);
+      expect(activities(dependent.id, "dependency_auto_started")[0]?.data)
+        .toMatchObject({ dependency_check_event_id: check.id });
+      expect(activities(dependent.id, "dependency_auto_started")[0]?.data)
+        .not.toHaveProperty("replayed");
+    });
+
+    it.each([
+      ["reopened later", "later"],
+      ["U11 same millisecond", "same millisecond"],
+      ["U12 slower process", "slower process"],
+    ] as const)(
+      "starts again after an old skip (%s, PG)", (_case, timing) => {
+        drainIdentityEvents();
+        const { agent, prerequisite, dependent } = chain();
+        try {
+          setSystemTime(new Date(base + (timing === "slower process" ? 60_000 : 0)));
+          db.run("UPDATE multiremi_agents SET archived_at = ? WHERE id = ?", [new Date().toISOString(), agent.id]);
+          store.updateIssue(prerequisite.id, { status: "done" });
+          const oldCheck = checks(prerequisite.id)[0]!;
+          expect(activities(dependent.id, "dependency_auto_start_skipped")).toHaveLength(1);
+          expect(activities(dependent.id, "dependency_auto_start_skipped")[0]?.data)
+            .toMatchObject({ dependency_check_event_id: oldCheck.id });
+
+          setSystemTime(new Date(base + (timing === "same millisecond" ? 0 : 1_000)));
+          store.updateIssue(prerequisite.id, { status: "in_progress" });
+          db.run("UPDATE multiremi_agents SET archived_at = NULL WHERE id = ?", [agent.id]);
+          setSystemTime(new Date(base + (timing === "same millisecond" ? 0 : 2_000)));
+          store.updateIssue(prerequisite.id, { status: "done" });
+          const nextCheck = checks(prerequisite.id).find((event) => event.id !== oldCheck.id)!;
+          expect(nextCheck.id).not.toBe(oldCheck.id);
+          if (timing === "same millisecond") expect(nextCheck.createdAt).toBe(oldCheck.createdAt);
+          if (timing === "slower process") expect(Date.parse(nextCheck.createdAt)).toBeLessThan(Date.parse(oldCheck.createdAt));
+
+          setSystemTime(new Date(base + 7_000));
+          store.dispatchPendingSystemEvents();
+          expect(store.getSystemEvent(nextCheck.id)?.status).toBe("processed");
+          expect(store.getIssue(dependent.id)?.status).toBe("todo");
+          expect(store.listTasksForIssue(dependent.id)).toHaveLength(1);
+          expect(activities(dependent.id, "dependency_auto_start_skipped")).toHaveLength(1);
+          expect(activities(dependent.id, "dependency_auto_started")[0]?.data)
+            .toMatchObject({ dependency_check_event_id: nextCheck.id });
+        } finally {
+          setSystemTime();
+        }
+      },
+    );
+
+    it.each(["archived-agent", "missing-agent", "archived-squad", "missing-squad", "no-runnable-squad"] as const)(
+      "treats an unavailable owner as a business skip (%s, PG)", (kind) => {
+        drainIdentityEvents();
+        const { agent, prerequisite, dependent } = chain();
+        if (kind === "archived-agent") {
+          db.run("UPDATE multiremi_agents SET archived_at = ? WHERE id = ?", [new Date().toISOString(), agent.id]);
+        } else if (kind === "missing-agent") {
+          db.run("UPDATE multiremi_issues SET assignee_id = 'missing-agent' WHERE id = ?", [dependent.id]);
+        } else {
+          const squad = store.createSquad({ name: `Unavailable PG ${kind}`, leaderId: agent.id });
+          db.run("UPDATE multiremi_issues SET assignee_type = 'squad', assignee_id = ? WHERE id = ?", [squad.id, dependent.id]);
+          if (kind === "archived-squad") db.run("UPDATE multiremi_squads SET archived_at = ? WHERE id = ?", [new Date().toISOString(), squad.id]);
+          if (kind === "missing-squad") db.run("UPDATE multiremi_issues SET assignee_id = 'missing-squad' WHERE id = ?", [dependent.id]);
+          if (kind === "no-runnable-squad") db.run("UPDATE multiremi_agents SET archived_at = ? WHERE id = ?", [new Date().toISOString(), agent.id]);
+        }
+        withoutHooks(() => store.updateIssue(prerequisite.id, { status: "done" }));
+        const check = checks(prerequisite.id)[0]!;
+        store.dispatchPendingSystemEvents(new Date(check.availableAt));
+        expect(store.getSystemEvent(check.id)?.status).toBe("processed");
+        expect(activities(dependent.id, "dependency_auto_start_skipped")).toHaveLength(1);
+        expect(activities(dependent.id, "dependency_auto_start_skipped")[0]?.data)
+          .toMatchObject({ reason: "dispatch_failed", dependency_check_event_id: check.id });
+        expect(store.getIssue(dependent.id)?.status).toBe("backlog");
+        expect(store.listTasksForIssue(dependent.id)).toEqual([]);
+        (store as unknown as { issues: IssuesRepo }).issues.replayDependencyAutoStart(check);
+        expect(activities(dependent.id, "dependency_auto_start_skipped")).toHaveLength(1);
+      },
+    );
+
+    it("a partial replay retry does not redo an earlier task or skip (PG)", () => {
+      drainIdentityEvents();
+      const { agent, prerequisite, dependent } = chain();
+      const unavailable = store.createAgent({ name: `Unavailable PG ${++wsCounter}`, provider: "claude", runtimeId: agent.runtimeId! });
+      const skipped = store.createIssue({ title: `Skipped PG ${wsCounter}`, status: "backlog", blockedBy: [prerequisite.id],
+        assigneeType: "agent", assigneeId: unavailable.id });
+      db.run("UPDATE multiremi_agents SET archived_at = ? WHERE id = ?", [new Date().toISOString(), unavailable.id]);
+      const failed = store.createIssue({ title: `Failed PG ${wsCounter}`, status: "backlog", blockedBy: [prerequisite.id],
+        assigneeType: "agent", assigneeId: agent.id });
+      withoutHooks(() => store.updateIssue(prerequisite.id, { status: "done" }));
+      const check = checks(prerequisite.id)[0]!;
+      const issues = (store as unknown as { issues: IssuesRepo }).issues;
+      const list = spyOn(issues as unknown as { listDependencyDependents(id: string): unknown[] }, "listDependencyDependents")
+        .mockImplementation(() => [dependent, skipped, failed].map((issue) => store.getIssue(issue.id)!));
+      const run = db.run.bind(db);
+      let injected = false;
+      const failure = spyOn(db, "run").mockImplementation((sql, ...args) => {
+        if (!injected && sql.includes("SET status = 'todo'") && (args[0] as unknown[] | undefined)?.[1] === failed.id) {
+          injected = true;
+          throw new Error("third PG dependent failed");
+        }
+        return run(sql, ...args);
+      });
+      try {
+        store.dispatchPendingSystemEvents(new Date(check.availableAt));
+        expect(injected).toBe(true);
+        expect(store.getSystemEvent(check.id)).toMatchObject({ status: "pending", attemptCount: 1 });
+        expect(store.listTasksForIssue(dependent.id)).toHaveLength(1);
+        expect(activities(skipped.id, "dependency_auto_start_skipped")).toHaveLength(1);
+        expect(store.listTasksForIssue(failed.id)).toEqual([]);
+        failure.mockRestore();
+        store.dispatchPendingSystemEvents(new Date(Date.parse(check.availableAt) + 2_000));
+        expect(store.getSystemEvent(check.id)).toMatchObject({ status: "processed", attemptCount: 2 });
+        expect(store.listTasksForIssue(dependent.id)).toHaveLength(1);
+        expect(activities(skipped.id, "dependency_auto_start_skipped")).toHaveLength(1);
+        expect(store.listTasksForIssue(failed.id)).toHaveLength(1);
+      } finally {
+        failure.mockRestore();
+        list.mockRestore();
+      }
+    });
+  });
+
+  it("U9 retries a transaction write failure without a business skip (PG 40001)", () => {
+    drainSystemEvents();
+    const runtime = store.registerRuntime({ name: "Replay write PG", provider: "claude" });
+    const owner = store.createAgent({ name: "Replay write PG", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "Replay write PG prerequisite", status: "in_progress" });
+    const dependent = store.createIssue({ title: "Replay write PG dependent", status: "backlog", blockedBy: [prereq.id],
+      assigneeType: "agent", assigneeId: owner.id });
+    const issues = (store as unknown as { issues: { runIssueUpdatePostCommit(...args: unknown[]): void } }).issues;
+    const hook = spyOn(issues, "runIssueUpdatePostCommit").mockImplementation(() => {});
+    try { store.updateIssue(prereq.id, { status: "done" }); } finally { hook.mockRestore(); }
+    const row = db.query("SELECT id FROM multiremi_system_events WHERE resource_id = ? AND event = 'dependency_auto_start_check'")
+      .get(prereq.id) as { id: string };
+    const check = store.getSystemEvent(row.id)!;
+    const run = db.run.bind(db);
+    let injected = false;
+    const failure = spyOn(db, "run").mockImplementation((sql, ...args) => {
+      if (!injected && sql.includes("SET status = 'todo'")) {
+        injected = true;
+        return run("DO $$ BEGIN RAISE EXCEPTION 'injected replay PG write failure' USING ERRCODE = '40001'; END $$", []);
+      }
+      return run(sql, ...args);
+    });
+    try { store.dispatchPendingSystemEvents(new Date(check.availableAt)); } finally { failure.mockRestore(); }
+    expect(injected).toBe(true);
+    const first = store.getSystemEvent(check.id)!;
+    expect(first.status).toBe("pending");
+    expect(first.attemptCount).toBe(1);
+    expect(first.lastError).toContain("injected replay PG write failure");
+    expect(store.getIssue(dependent.id)?.status).toBe("backlog");
+    expect(store.listTasksForIssue(dependent.id)).toEqual([]);
+    expect(store.listIssueActivity(dependent.id).filter((entry) => entry.type === "dependency_auto_start_skipped")).toEqual([]);
+    store.dispatchPendingSystemEvents(new Date(Date.parse(check.availableAt) + 10_000));
+    expect(store.getIssue(dependent.id)?.status).toBe("todo");
+    expect(store.listTasksForIssue(dependent.id).map((task) => task.status)).toEqual(["queued"]);
+    expect(store.listIssueActivity(dependent.id).filter((entry) => entry.type === "dependency_auto_started"))
+      .toEqual([expect.objectContaining({ data: expect.objectContaining({ replayed: true }) })]);
+    expect(store.listIssueActivity(dependent.id).filter((entry) => entry.type === "dependency_auto_start_skipped")).toEqual([]);
+    expect(store.getSystemEvent(check.id)).toMatchObject({ status: "processed", attemptCount: 2 });
+  });
+
+  it("U10 contains a PATCH auto-start write failure and replays it (PG)", async () => {
+    drainSystemEvents();
+    const app = createMultiremiApp({ store });
+    const runtime = store.registerRuntime({ name: "Patch write PG", provider: "claude" });
+    const owner = store.createAgent({ name: "Patch write PG", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "Patch write PG prerequisite", status: "in_progress" });
+    const dependent = store.createIssue({ title: "Patch write PG dependent", status: "backlog", blockedBy: [prereq.id],
+      assigneeType: "agent", assigneeId: owner.id });
+    const run = db.run.bind(db);
+    let injected = false;
+    const failure = spyOn(db, "run").mockImplementation((sql, ...args) => {
+      if (!injected && sql.includes("SET status = 'todo'")) {
+        injected = true;
+        return run("DO $$ BEGIN RAISE EXCEPTION 'injected normal PG write failure' USING ERRCODE = '40001'; END $$", []);
+      }
+      return run(sql, ...args);
+    });
+    const warnings = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const response = await app.request(`/api/issues/${prereq.id}`, {
+        method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "done" }),
+      });
+      expect(response.status).toBe(200);
+      expect(injected).toBe(true);
+      expect(warnings.mock.calls).toHaveLength(1);
+    } finally {
+      failure.mockRestore();
+      warnings.mockRestore();
+    }
+    expect(store.getIssue(prereq.id)?.status).toBe("done");
+    expect(store.getIssue(dependent.id)?.status).toBe("backlog");
+    expect(store.listTasksForIssue(dependent.id)).toEqual([]);
+    expect(store.listIssueActivity(dependent.id).filter((entry) => entry.type === "dependency_auto_start_skipped")).toEqual([]);
+    const row = db.query("SELECT id FROM multiremi_system_events WHERE resource_id = ? AND event = 'dependency_auto_start_check'")
+      .get(prereq.id) as { id: string };
+    const check = store.getSystemEvent(row.id)!;
+    store.dispatchPendingSystemEvents(new Date(check.availableAt));
+    expect(store.getIssue(dependent.id)?.status).toBe("todo");
+    expect(store.listTasksForIssue(dependent.id).map((task) => task.status)).toEqual(["queued"]);
+    expect(store.listIssueActivity(dependent.id).filter((entry) => entry.type === "dependency_auto_started"))
+      .toEqual([expect.objectContaining({ data: expect.objectContaining({ replayed: true }) })]);
+    expect(store.listIssueActivity(dependent.id).filter((entry) => entry.type === "dependency_auto_start_skipped")).toEqual([]);
+    expect(store.getSystemEvent(check.id)?.status).toBe("processed");
+  });
+
+  it("U10b rolls back a failed business skip and records one on replay (PG)", async () => {
+    drainSystemEvents();
+    const app = createMultiremiApp({ store });
+    const runtime = store.registerRuntime({ name: "Patch skip PG", provider: "claude" });
+    const owner = store.createAgent({ name: "Patch skip PG", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "Patch skip PG prerequisite", status: "in_progress" });
+    const dependent = store.createIssue({ title: "Patch skip PG dependent", status: "backlog", blockedBy: [prereq.id],
+      assigneeType: "agent", assigneeId: owner.id });
+    db.run("UPDATE multiremi_agents SET archived_at = ? WHERE id = ?", [new Date().toISOString(), owner.id]);
+    const ctx = (store as unknown as { ctx: StoreContext }).ctx;
+    const original = ctx.appendIssueActivity.bind(ctx);
+    let injected = false;
+    ctx.appendIssueActivity = (issueId, input, deferredEvents) => {
+      if (!injected && input.type === "dependency_auto_start_skipped") {
+        injected = true;
+        throw new Error("injected PG skip activity failure");
+      }
+      original(issueId, input, deferredEvents);
+    };
+    const warnings = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const response = await app.request(`/api/issues/${prereq.id}`, {
+        method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "done" }),
+      });
+      expect(response.status).toBe(200);
+      expect(injected).toBe(true);
+      expect(warnings.mock.calls).toHaveLength(1);
+    } finally {
+      ctx.appendIssueActivity = original;
+      warnings.mockRestore();
+    }
+    expect(store.getIssue(prereq.id)?.status).toBe("done");
+    expect(store.getIssue(dependent.id)?.status).toBe("backlog");
+    expect(store.listTasksForIssue(dependent.id)).toEqual([]);
+    expect(store.listIssueActivity(dependent.id).filter((entry) => entry.type === "dependency_auto_start_skipped")).toEqual([]);
+    const row = db.query("SELECT id FROM multiremi_system_events WHERE resource_id = ? AND event = 'dependency_auto_start_check'")
+      .get(prereq.id) as { id: string };
+    const check = store.getSystemEvent(row.id)!;
+    store.dispatchPendingSystemEvents(new Date(check.availableAt));
+    expect(store.listIssueActivity(dependent.id).filter((entry) => entry.type === "dependency_auto_start_skipped"))
+      .toHaveLength(1);
+    expect(store.listTasksForIssue(dependent.id)).toEqual([]);
+    expect(store.getSystemEvent(check.id)?.status).toBe("processed");
+  });
+
+  it("leaves no todo-without-round and no backlog-with-round when the process dies at the claim (PG)", async () => {
+    const runtime = store.registerRuntime({ id: "rt_crash_pg", name: "Crash worker", provider: "claude", maxConcurrency: 4 });
+    const owner = store.createAgent({ name: "Crash owner", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "Crash prerequisite", status: "in_progress" });
+    const dependent = store.createIssue({
+      title: "Crash dependent",
+      status: "backlog",
+      blockedBy: [prereq.id],
+      assigneeType: "agent",
+      assigneeId: owner.id,
+    });
+
+    // QA's seam, run as a real OS process: it exits the first time the dependent
+    // is visible as `todo`. Pre-fix that was the standalone claim commit, so the
+    // process died with `todo` and no round — the permanent hole in the report.
+    const probe = Bun.spawn([
+      "bun", "run", new URL("./fixtures/postgres-autostart-crash-probe.ts", import.meta.url).pathname,
+      pgDatabaseUrl(TEST_DB), prereq.id, dependent.id, "after-claim-commit",
+    ], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: process.env.HOME } });
+    const stdout = await killProbeOnPhase(probe, "after-claim-commit");
+    expect(stdout).toContain("after-claim-commit");
+
+    // Whole row sets, as the plan requires.
+    const taskRows = db.query(
+      "SELECT status FROM multiremi_tasks WHERE issue_id = ? ORDER BY created_at ASC",
+    ).all(dependent.id) as Array<{ status: string }>;
+    const status = store.getIssue(dependent.id)?.status;
+    const activeRows = taskRows.filter((row) => !["completed", "failed", "cancelled"].includes(row.status));
+    const activities = db.query(
+      "SELECT type FROM multiremi_issue_activity WHERE issue_id = ? ORDER BY created_at ASC",
+    ).all(dependent.id) as Array<{ type: string }>;
+    const autoStarted = activities.filter((row) => row.type === "dependency_auto_started").length;
+
+    // The two invariants the fix exists for, asserted as a pair so exactly one
+    // shape is accepted: the durable state is either the untouched waiting row or
+    // the complete start. The pre-fix "todo with no round" fails both.
+    expect({ status: status === "todo" && activeRows.length === 0 }).toEqual({ status: false });
+    expect({ status: status === "backlog" && activeRows.length > 0 }).toEqual({ status: false });
+    if (status === "todo") {
+      // Committed start: the round and the activity are there with it.
+      expect(activeRows).toHaveLength(1);
+      expect(autoStarted).toBe(1);
+    } else {
+      // Rolled back: still waiting, nothing of the attempt survived.
+      expect(status).toBe("backlog");
+      expect(taskRows).toEqual([]);
+      expect(autoStarted).toBe(0);
+    }
+    // The prerequisite's own `done` is not part of the attempt: it is the trigger
+    // and stays committed either way.
+    expect(store.getIssue(prereq.id)?.status).toBe("done");
+
+    // Whatever the crash left, the issue is startable through a public path —
+    // this is the recovery the ADR documents for the crash window.
+    if (status === "backlog") {
+      const assigned = store.assignIssue(dependent.id, { assigneeType: "agent", assigneeId: owner.id });
+      expect(assigned.task?.id).toBeDefined();
+      expect(store.getIssue(dependent.id)?.status).toBe("todo");
+    }
+    expect(db.query(
+      "SELECT status FROM multiremi_tasks WHERE issue_id = ? ORDER BY created_at ASC",
+    ).all(dependent.id)).toEqual([{ status: "queued" }]);
+  }, 60_000);
+
+  /**
+   * MUL-409 fix round 5 (QA round 4, blocker 1) on Postgres: the member's forced
+   * start is one transaction.
+   *
+   * QA's round-4 probe exited after the status transaction committed and before
+   * the dispatch ran, and found `A=todo` with no task rows while
+   * `dependency_force_started` was already durable. Both seams run the real
+   * store against a real Postgres connection.
+   */
+  it("rolls the forced start back when the process dies before COMMIT (PG)", async () => {
+    const runtime = store.registerRuntime({ id: "rt_force_before", name: "Force before worker", provider: "claude", maxConcurrency: 4 });
+    const owner = store.createAgent({ name: "Force before owner", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "Force before prerequisite", status: "in_progress" });
+    const dependent = store.createIssue({
+      title: "Force before dependent",
+      status: "backlog",
+      blockedBy: [prereq.id],
+      assigneeType: "agent",
+      assigneeId: owner.id,
+    });
+
+    const probe = Bun.spawn([
+      "bun", "run", new URL("./fixtures/postgres-force-start-crash-probe.ts", import.meta.url).pathname,
+      pgDatabaseUrl(TEST_DB), dependent.id, "before-commit",
+    ], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: process.env.HOME } });
+    const stdout = await killProbeOnPhase(probe, "after-status-update");
+    expect(stdout).toContain("after-status-update");
+
+    // The status UPDATE died with its transaction: the issue is still waiting
+    // and nothing about the attempt survives.
+    expect(store.getIssue(dependent.id)?.status).toBe("backlog");
+    expect(db.query("SELECT status FROM multiremi_tasks WHERE issue_id = ?").all(dependent.id)).toEqual([]);
+    const types = (db.query("SELECT type FROM multiremi_issue_activity WHERE issue_id = ?").all(dependent.id) as Array<{ type: string }>)
+      .map((row) => row.type);
+    expect(types).not.toContain("dependency_force_started");
+    expect(types).not.toContain("issue_assigned");
+    expect(store.getIssue(prereq.id)?.status).toBe("in_progress");
+  }, 60_000);
+
+  it("keeps todo plus its round when the process dies after the forced start commits (PG)", async () => {
+    const runtime = store.registerRuntime({ id: "rt_force_after", name: "Force after worker", provider: "claude", maxConcurrency: 4 });
+    const owner = store.createAgent({ name: "Force after owner", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "Force after prerequisite", status: "in_progress" });
+    const dependent = store.createIssue({
+      title: "Force after dependent",
+      status: "backlog",
+      blockedBy: [prereq.id],
+      assigneeType: "agent",
+      assigneeId: owner.id,
+    });
+
+    const probe = Bun.spawn([
+      "bun", "run", new URL("./fixtures/postgres-force-start-crash-probe.ts", import.meta.url).pathname,
+      pgDatabaseUrl(TEST_DB), dependent.id, "after-status-commit", "19",
+    ], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: process.env.HOME } });
+    const { stdout, exitCode } = await waitForProbeExit(probe, "after-status-commit");
+    expect(stdout).toContain("after-status-commit");
+    expect(exitCode).toBe(19);
+
+    // The whole forced start committed: `todo` with exactly one queued round and
+    // the override already on record. Only the live notification was lost.
+    expect(store.getIssue(dependent.id)?.status).toBe("todo");
+    expect(db.query(
+      "SELECT status FROM multiremi_tasks WHERE issue_id = ? ORDER BY created_at ASC",
+    ).all(dependent.id)).toEqual([{ status: "queued" }]);
+    const types = (db.query("SELECT type FROM multiremi_issue_activity WHERE issue_id = ?").all(dependent.id) as Array<{ type: string }>)
+      .map((row) => row.type);
+    expect(types).toContain("dependency_force_started");
+    expect(types).toContain("issue_assigned");
+    // The prerequisite is untouched: the member overrode the hold, it did not
+    // satisfy it.
+    expect(store.getIssue(prereq.id)?.status).toBe("in_progress");
+    expect(store.listUnmetPrerequisites(dependent.id)).toHaveLength(1);
+  }, 60_000);
+
+  it("keeps the gate-open member start record when the process dies after COMMIT (PG)", async () => {
+    const runtime = store.registerRuntime({ id: "rt_gate_open_after", name: "Gate-open worker", provider: "claude", maxConcurrency: 4 });
+    const owner = store.createAgent({ name: "Gate-open owner", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "Gate-open prerequisite", status: "in_progress" });
+    const dependent = store.createIssue({
+      title: "Gate-open dependent",
+      status: "backlog",
+      blockedBy: [prereq.id],
+      assigneeType: "agent",
+      assigneeId: owner.id,
+    });
+
+    // Open the gate without running the automatic-start hook. The child then
+    // exits immediately after the member update's owner transaction commits,
+    // before `runIssueUpdatePostCommit` can publish the queued events.
+    db.run("UPDATE multiremi_issues SET status = 'done' WHERE id = ?", [prereq.id]);
+    expect(store.listUnmetPrerequisites(dependent.id)).toEqual([]);
+    const probe = Bun.spawn([
+      "bun", "run", new URL("./fixtures/postgres-force-start-crash-probe.ts", import.meta.url).pathname,
+      pgDatabaseUrl(TEST_DB), dependent.id, "after-gate-open-commit", "19",
+    ], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: process.env.HOME } });
+    const { stdout, exitCode } = await waitForProbeExit(probe, "after-gate-open-commit");
+    expect(stdout).toContain("after-gate-open-commit");
+    expect(exitCode).toBe(19);
+
+    expect(store.getIssue(dependent.id)?.status).toBe("todo");
+    expect(db.query(
+      "SELECT status FROM multiremi_tasks WHERE issue_id = ? ORDER BY created_at ASC",
+    ).all(dependent.id)).toEqual([{ status: "queued" }]);
+    const activities = store.listIssueActivity(dependent.id);
+    expect(activities.filter((entry) => entry.type === "issue_assigned")).toHaveLength(1);
+    expect(activities.filter((entry) => entry.type === "dependency_auto_started")).toEqual([]);
+    expect(activities.filter((entry) => entry.type === "dependency_force_started")).toEqual([]);
+    const memberUpdates = activities.filter((entry) => entry.type === "issue_updated"
+      && (entry.data as Record<string, unknown> | null)?.status === "todo"
+      && (entry.data as Record<string, unknown> | null)?.force === true);
+    expect(memberUpdates).toHaveLength(1);
+    expect(memberUpdates[0]!.data).toMatchObject({
+      actorType: "member",
+      actorId: "mem_local",
+    });
+  }, 60_000);
+
+  it.each(["status update", "task insert", "issue_assigned", "dependency_force_started"] as const)(
+    "rolls the forced start back when %s fails (PG)",
+    (step) => {
+      const runtime = store.registerRuntime({ id: `rt_force_inj_${step.replace(/ /g, "_")}`, name: "Force injection worker", provider: "claude", maxConcurrency: 4 });
+      const owner = store.createAgent({ name: `Force injection ${step}`, provider: "claude", runtimeId: runtime.id });
+      const prereq = store.createIssue({ title: "Injection prerequisite", status: "in_progress" });
+      const dependent = store.createIssue({
+        title: `Injection dependent ${step}`,
+        status: "backlog",
+        blockedBy: [prereq.id],
+        assigneeType: "agent",
+        assigneeId: owner.id,
+      });
+
+      let injected = false;
+      const fail = (): never => { injected = true; throw new Error(`injected PG failure at ${step}`); };
+      const restore: Array<() => void> = [];
+      const handle = (store as unknown as { ctx: { db: Record<string, unknown> } }).ctx.db;
+      if (step === "status update") {
+        const original = handle.run as (...args: unknown[]) => unknown;
+        handle.run = (...args: unknown[]) => {
+          const sql = String(args[0] ?? "");
+          if (!injected && sql.includes("UPDATE multiremi_issues") && sql.includes("title = ?")) fail();
+          return original.apply(handle, args);
+        };
+        restore.push(() => { handle.run = original; });
+      } else if (step === "task insert") {
+        const original = TasksRepo.prototype.createTaskWithinTransaction;
+        TasksRepo.prototype.createTaskWithinTransaction = function patched(this: TasksRepo, ...args: unknown[]) {
+          if (!injected) fail();
+          return (original as (...inner: unknown[]) => unknown).apply(this, args);
+        } as typeof TasksRepo.prototype.createTaskWithinTransaction;
+        restore.push(() => { TasksRepo.prototype.createTaskWithinTransaction = original; });
+      } else {
+        // Patch the INSTANCE, not the prototype: an earlier case in this file
+        // already replaced `ctx.appendIssueActivity` on the shared store, so a
+        // prototype patch would sit underneath it and never see the call.
+        const ctx = (store as unknown as {
+          ctx: { appendIssueActivity: (...args: unknown[]) => unknown };
+        }).ctx;
+        const original = ctx.appendIssueActivity;
+        ctx.appendIssueActivity = (...args: unknown[]) => {
+          const input = args[1] as { type?: string } | undefined;
+          if (!injected && input?.type === step) fail();
+          return original.apply(ctx, args);
+        };
+        restore.push(() => { ctx.appendIssueActivity = original; });
+      }
+
+      try {
+        expect(() => store.updateIssue(dependent.id, {
+          status: "todo", force: true, actorType: "member", actorId: "mem_local",
+        })).toThrow(/injected PG failure/);
+        expect(injected).toBe(true);
+      } finally {
+        for (const undo of restore.reverse()) undo();
+      }
+
+      // The whole attempt rolled back on the real bridge: back to `backlog`, no
+      // round, no activity, and the prerequisite untouched.
+      expect({
+        step,
+        status: store.getIssue(dependent.id)?.status,
+        tasks: db.query("SELECT status FROM multiremi_tasks WHERE issue_id = ?").all(dependent.id),
+        activities: (db.query(
+          "SELECT type FROM multiremi_issue_activity WHERE issue_id = ? AND type IN ('dependency_force_started', 'issue_assigned')",
+        ).all(dependent.id) as Array<{ type: string }>).map((row) => row.type),
+      }).toEqual({ step, status: "backlog", tasks: [], activities: [] });
+    },
+  );
+
+  it("keeps todo plus its round when the process dies after COMMIT (PG)", async () => {
+    const runtime = store.registerRuntime({ id: "rt_after_commit", name: "After commit worker", provider: "claude", maxConcurrency: 4 });
+    const owner = store.createAgent({ name: "After commit owner", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "After commit prerequisite", status: "in_progress" });
+    const dependent = store.createIssue({
+      title: "After commit dependent",
+      status: "backlog",
+      blockedBy: [prereq.id],
+      assigneeType: "agent",
+      assigneeId: owner.id,
+    });
+
+    const probe = Bun.spawn([
+      "bun", "run", new URL("./fixtures/postgres-autostart-crash-probe.ts", import.meta.url).pathname,
+      pgDatabaseUrl(TEST_DB), prereq.id, dependent.id, "after-commit",
+    ], { stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: process.env.HOME } });
+    const stdout = await killProbeOnPhase(probe, "after-commit");
+    expect(stdout).toContain("after-commit");
+
+    // The COMMIT is durable: the dependent is `todo` with exactly one queued
+    // round and both activities. Only the live notification was lost, which a
+    // client recovers by refreshing.
+    expect(store.getIssue(dependent.id)?.status).toBe("todo");
+    const taskRows = db.query(
+      "SELECT status FROM multiremi_tasks WHERE issue_id = ? ORDER BY created_at ASC",
+    ).all(dependent.id) as Array<{ status: string }>;
+    expect(taskRows).toEqual([{ status: "queued" }]);
+    const activities = db.query(
+      "SELECT type FROM multiremi_issue_activity WHERE issue_id = ? ORDER BY created_at ASC",
+    ).all(dependent.id) as Array<{ type: string }>;
+    const types = activities.map((row) => row.type);
+    expect(types).toContain("issue_assigned");
+    expect(types).toContain("dependency_auto_started");
+    expect(types).not.toContain("dependency_auto_start_skipped");
+  }, 60_000);
+
+  it("runs an automatic start of a second owner in the reverse order of a forced start (PG)", async () => {
+    const app = createMultiremiApp({ store });
+    const runtime = store.registerRuntime({ id: "rt_order_pg", name: "Order worker", provider: "claude", maxConcurrency: 4 });
+    const owner = store.createAgent({ name: "Order owner", provider: "claude", runtimeId: runtime.id });
+    const prereq = store.createIssue({ title: "Order prerequisite", status: "in_progress" });
+    const dependent = store.createIssue({
+      title: "Order dependent",
+      status: "backlog",
+      blockedBy: [prereq.id],
+      assigneeType: "agent",
+      assigneeId: owner.id,
+    });
+
+    // Reverse of the covered order: the automatic start wins first, then a member
+    // still sends a forced start. It answers 200 (the status write is an
+    // ordinary no-op move) and queues nothing more.
+    store.updateIssue(prereq.id, { status: "done" });
+    const response = await app.request(`/api/issues/${dependent.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "todo", force: true }),
+    });
+    expect(response.status).toBe(200);
+
+    const taskRows = db.query(
+      "SELECT status FROM multiremi_tasks WHERE issue_id = ? ORDER BY created_at ASC",
+    ).all(dependent.id) as Array<{ status: string }>;
+    expect(taskRows).toEqual([{ status: "queued" }]);
+    const auto = db.query(
+      "SELECT id FROM multiremi_issue_activity WHERE issue_id = ? AND type = 'dependency_auto_started'",
+    ).all(dependent.id) as Array<{ id: string }>;
+    expect(auto).toHaveLength(1);
+    const forced = db.query(
+      "SELECT id FROM multiremi_issue_activity WHERE issue_id = ? AND type = 'dependency_force_started'",
+    ).all(dependent.id) as Array<{ id: string }>;
+    expect(forced).toEqual([]);
+  }, 60_000);
+
+  /**
+   * Await the probe's phase line on its stdout, then kill it. The probe holds
+   * the transaction open until killed, so the phase line is the signal that the
+   * process is parked exactly where the test wants it.
+   */
+  async function killProbeOnPhase(probe: Bun.Subprocess<"ignore", "pipe", "pipe">, phase: string): Promise<string> {
+    const reader = probe.stdout.getReader();
+    const decoder = new TextDecoder();
+    let seen = "";
+    try {
+      while (!seen.includes(phase)) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error(`probe exited before announcing ${phase}; stdout=${seen}`);
+        seen += decoder.decode(value, { stream: true });
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    probe.kill("SIGKILL");
+    await probe.exited;
+    return seen;
+  }
+
+  /**
+   * Await a probe that exits on its own (a real crash), and return what it wrote
+   * plus its exit code. Unlike `killProbeOnPhase` the process is expected to die
+   * by itself; the phase line proves it reached the seam before dying.
+   */
+  async function waitForProbeExit(
+    probe: Bun.Subprocess<"ignore", "pipe", "pipe">,
+    phase: string,
+  ): Promise<{ stdout: string; exitCode: number | null }> {
+    const decoder = new TextDecoder();
+    let stdout = "";
+    const reader = probe.stdout.getReader();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        stdout += decoder.decode(value, { stream: true });
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const exitCode = await probe.exited;
+    if (!stdout.includes(phase)) {
+      throw new Error(`probe never announced ${phase}; stdout=${stdout}`);
+    }
+    return { stdout, exitCode };
+  }
+
+  /**
+   * Await one named phase from a Worker; rejects on its error phase.
+   *
+   * The listener is attached BEFORE the caller posts the init message: a worker
+   * that reports `ready` quickly would otherwise post into the void, and the test
+   * would hang instead of running.
+   */
+  function armWorkerPhase(worker: Worker, phase: string, timeoutMs = 60_000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`two-connection race worker did not reach ${phase} within ${timeoutMs}ms`));
+      }, timeoutMs);
+      const onMessage = (event: MessageEvent<{ phase?: string; error?: string }>) => {
+        if (event.data.phase === "error") {
+          cleanup();
+          reject(new Error(event.data.error ?? "two-connection race worker failed"));
+        } else if (event.data.phase === phase) {
+          cleanup();
+          resolve();
+        }
+      };
+      const onError = (event: ErrorEvent) => {
+        cleanup();
+        reject(event.error ?? new Error(event.message));
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        worker.removeEventListener("message", onMessage);
+        worker.removeEventListener("error", onError);
+      };
+      worker.addEventListener("message", onMessage);
+      worker.addEventListener("error", onError);
+    });
+  }
+
+  it("keeps exactly one start record when a forced and an automatic start race (PG)", async () => {
+    const runtime = store.registerRuntime({ id: "rt_two_conn", name: "Two connection worker", provider: "claude", maxConcurrency: 8 });
+    const owner = store.createAgent({ name: "Two connection owner", provider: "claude", runtimeId: runtime.id });
+    const ROUNDS = Number(process.env.MUL409_TWO_CONN_ROUNDS ?? 30);
+    const workerUrl = new URL("./fixtures/postgres-two-connection-race-worker.ts", import.meta.url);
+    // Per-attempt invariant, from the QA round 4 ruling: exactly one task row
+    // (every status, cancelled included) and exactly one of the three start
+    // records. Zero and two are both failures.
+    const distribution = { auto: 0, force: 0, member: 0, none: 0, both: 0 };
+    const mismatches: Array<Record<string, unknown>> = [];
+    for (let round = 0; round < ROUNDS; round++) {
+      const prereq = store.createIssue({ title: `Two conn prereq ${round}`, status: "in_progress" });
+      const dependent = store.createIssue({
+        title: `Two conn dependent ${round}`,
+        status: "backlog",
+        blockedBy: [prereq.id],
+        assigneeType: "agent",
+        assigneeId: owner.id,
+      });
+      const barrierDir = mkdtempSync(join(tmpdir(), "mul409-two-conn-"));
+      const barrier = join(barrierDir, "go");
+      const databaseUrl = pgDatabaseUrl(TEST_DB);
+      const workers: Array<{ worker: Worker; ready: Promise<void>; done: Promise<void> }> = ["force", "auto"].map((role) => {
+        const worker = new Worker(workerUrl, { type: "module" });
+        // Arm both phases before the init message, so a fast reply is never lost.
+        const ready = armWorkerPhase(worker, "ready");
+        const done = armWorkerPhase(worker, "done");
+        worker.postMessage({ databaseUrl, issueId: dependent.id, prerequisiteId: prereq.id, barrierPath: barrier, role });
+        return { worker, ready, done };
+      });
+      await Promise.all(workers.map((entry) => entry.ready));
+      writeFileSync(barrier, "go");
+      await Promise.all(workers.map((entry) => entry.done));
+      workers.forEach((entry) => entry.worker.terminate());
+      rmSync(barrierDir, { recursive: true, force: true });
+
+      // All task rows, cancelled included: a round that was queued and then
+      // cancelled is still evidence that the start ran once.
+      const rows = db.query("SELECT id, status FROM multiremi_tasks WHERE issue_id = ? ORDER BY created_at ASC")
+        .all(dependent.id) as Array<{ status: string }>;
+      const activityTypes = db.query(
+        "SELECT type, data FROM multiremi_issue_activity WHERE issue_id = ? ORDER BY created_at ASC",
+      ).all(dependent.id) as Array<{ type: string; data: string | null }>;
+      const auto = activityTypes.filter((row) => row.type === "dependency_auto_started").length;
+      const force = activityTypes.filter((row) => row.type === "dependency_force_started").length;
+      // The third kind: the member's own backlog -> todo write, with no
+      // dependency start activity beside it. That is the ruling's "the gate was
+      // already open when the lock was taken" outcome.
+      const member = activityTypes.some((row) => {
+        if (row.type !== "issue_updated") return false;
+        try {
+          const data = JSON.parse(row.data ?? "{}") as Record<string, unknown>;
+          return data.status === "todo";
+        } catch { return false; }
+      });
+      const kind = auto && force ? "both"
+        : auto ? "auto"
+        : force ? "force"
+        : member ? "member"
+        : "none";
+      distribution[kind as keyof typeof distribution] += 1;
+      const rowStatuses = rows.map((row) => row.status);
+      if (rows.length !== 1 || (kind !== "auto" && kind !== "force" && kind !== "member")) {
+        mismatches.push({
+          round,
+          kind,
+          status: store.getIssue(dependent.id)?.status,
+          rows: rowStatuses,
+          auto,
+          force,
+          member,
+        });
+      }
+    }
+    // The per-kind split is a genuine race and is reported, not asserted. The
+    // counts themselves are the deliverable: the QA round printed 4 rounds with
+    // no start record at all, which this loop now fails on.
+    console.log(`[mul409-two-conn] distribution=${JSON.stringify(distribution)} mismatches=${JSON.stringify(mismatches)}`);
+    expect({ distribution: { ...distribution, none: 0, both: 0 }, mismatches }).toEqual({
+      distribution: { auto: expect.any(Number), force: expect.any(Number), member: expect.any(Number), none: 0, both: 0 },
+      mismatches: [],
+    });
+    // Every round produced a record: the three kinds must account for the run.
+    expect(distribution.auto + distribution.force + distribution.member).toBe(ROUNDS);
+  }, 180_000);
+
 });

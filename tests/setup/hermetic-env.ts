@@ -26,9 +26,22 @@
  *
  * Guarded by `tests/arch/hermetic-test-env.test.ts`.
  */
-import { HERMETIC_ENV_SENTINEL, scrubInheritedEnv } from "./hermetic-env-policy.js";
+import { HERMETIC_ENV_DEFAULTS, HERMETIC_ENV_SENTINEL, scrubInheritedEnv } from "./hermetic-env-policy.js";
 
 const removed = scrubInheritedEnv();
+
+// The lock-order sentinel is a check the suite runs with by default, but it is
+// also a diagnostic a developer may want off; `MULTIREMI_TEST_*` survives the
+// scrub, so capture the caller's choice before the defaults force the rest.
+const explicitSentinel = process.env.MULTIREMI_TEST_LOCK_ORDER_SENTINEL;
+
+// Deliberate defaults the suite runs with, applied only after the host values are
+// gone, so they cannot be influenced from outside. See HERMETIC_ENV_DEFAULTS.
+for (const [name, value] of Object.entries(HERMETIC_ENV_DEFAULTS)) {
+  process.env[name] = value;
+}
+if (explicitSentinel === "0") process.env.MULTIREMI_TEST_LOCK_ORDER_SENTINEL = "0";
+
 (globalThis as Record<symbol, unknown>)[HERMETIC_ENV_SENTINEL] = { removed };
 
 if (removed.length > 0 && process.env.CI !== "true") {

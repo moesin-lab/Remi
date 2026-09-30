@@ -2,8 +2,9 @@
 // results), extracted verbatim from MultiremiStore (the facade delegates every public method here).
 import { createId, nowIso } from "@multiremi/ids.js";
 import { taskExecutionScope } from "@multiremi/contracts/task-execution.js";
-import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
-import { type StoreContext } from "@multiremi/store/context.js";
+import { cleanOptionalString, nullableString, parseJson, resolveCamelOrSnakeString, toJson } from "@multiremi/store/helpers.js";
+import { createCommitEventQueue, type CommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
+import type { ChildStatusChangeCollector } from "@multiremi/store/repos/tasks-repo.js";
 import { buildSessionProjection } from "@multiremi/store/session-projection.js";
 import { resolveFollowDeltaRatio, resolveFollowTokenLimit, resolveProjectionTokenBudget } from "@multiremi/store/session-projection-budget.js";
 import { createLogger } from "@shared/logger.js";
@@ -412,8 +413,20 @@ export class IssueSessionsRepo {
     };
   }
 
-  listIssueSessions(issueId: string, includeArchived = false): MultiremiIssueSession[] {
-    if (!this.ctx.issues().getIssue(issueId)) throw new Error(`Issue not found: ${issueId}`);
+  /**
+   * @param options.skipExistenceCheck Set only when this same request already
+   * proved the issue exists. The throw for an unknown issue is otherwise
+   * preserved exactly.
+   */
+  listIssueSessions(
+    issueId: string,
+    includeArchived = false,
+    options: { skipExistenceCheck?: boolean } = {},
+  ): MultiremiIssueSession[] {
+    // Existence only: the caller wants session rows, not the Issue's labels.
+    if (!options.skipExistenceCheck && !this.ctx.issues().hasIssue(issueId)) {
+      throw new Error(`Issue not found: ${issueId}`);
+    }
     const rows = includeArchived
       ? this.ctx.db.query(
         `${SESSION_SELECT} WHERE issue_id = ? ORDER BY is_default DESC, updated_at DESC`,
@@ -502,6 +515,42 @@ export class IssueSessionsRepo {
     return rows.map(toSessionParticipant);
   }
 
+  /**
+   * Batch twin of `listSessionParticipants` for callers that already hold the
+   * sessions (e.g. `GET /api/issues/:id/sessions`): one statement for the whole
+   * set instead of 1 + N. Existing-session validation is the caller's job — the
+   * sessions were just read from `listIssueSessions`, so re-reading each row
+   * would only add round trips.
+   *
+   * Chunked at 400 ids to stay below SQLite's default bind-variable limit;
+   * PostgreSQL benefits from the same bound. The ordering contract matches the
+   * single-session form: `joined_at ASC`, and sessions keep their input order.
+   */
+  listSessionParticipantsForSessions(
+    sessionIds: string[],
+    includeLeft = false,
+  ): Map<string, MultiremiSessionParticipant[]> {
+    const grouped = new Map<string, MultiremiSessionParticipant[]>();
+    const ids = [...new Set(sessionIds.filter(Boolean))];
+    for (const id of ids) grouped.set(id, []);
+    if (!ids.length) return grouped;
+    const statusFilter = includeLeft ? "" : " AND status = 'active'";
+    for (let offset = 0; offset < ids.length; offset += 400) {
+      const chunk = ids.slice(offset, offset + 400);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = this.ctx.db.query(
+        `SELECT * FROM multiremi_session_participants
+         WHERE session_id IN (${placeholders})${statusFilter}
+         ORDER BY joined_at ASC`,
+      ).all(...chunk) as Row[];
+      for (const participant of rows.map(toSessionParticipant)) {
+        const list = grouped.get(participant.sessionId);
+        if (list) list.push(participant);
+      }
+    }
+    return grouped;
+  }
+
   appendSessionEvent(sessionId: string, input: AppendSessionEventInput): MultiremiSessionEvent {
     return this.ctx.db.transaction(() => this.appendSessionEventWithinTransaction(sessionId, input))();
   }
@@ -558,7 +607,8 @@ export class IssueSessionsRepo {
   getOrCreateSessionAgentLane(sessionId: string, agentId: string, executionScope = ""): MultiremiSessionAgentLane {
     const session = this.getIssueSession(sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
-    const agent = this.ctx.agents().getAgent(agentId);
+    // Lane bookkeeping reads the Agent's identity and workspace only.
+    const agent = this.ctx.agents().getAgentLite(agentId);
     if (!agent || agent.archivedAt) throw new Error(`Agent not found: ${agentId}`);
     if (agent.workspaceId !== session.workspaceId) throw new Error("Agent belongs to another workspace");
     const now = nowIso();
@@ -599,7 +649,8 @@ export class IssueSessionsRepo {
         );
       }
       const lane = this.getOrCreateSessionAgentLane(task.issueSessionId, task.agentId, taskExecutionScope(task));
-      const agent = this.ctx.agents().getAgent(task.agentId);
+      // The projection budget needs the Agent's provider/model, not its Skills.
+      const agent = this.ctx.agents().getAgentLite(task.agentId);
       const session = this.getIssueSession(task.issueSessionId)!;
       const events = this.listSessionEvents(task.issueSessionId);
       const tokenBudget = resolveProjectionTokenBudget({
@@ -736,6 +787,24 @@ export class IssueSessionsRepo {
     })();
   }
 
+  /**
+   * MUL-409 (QA round 4, blocker 2): the participant, the agent lane and the
+   * round are one transaction.
+   *
+   * The participant row implies a lane (`addSessionParticipant` creates one for
+   * an agent), but the round can still be refused afterwards — the dependency
+   * gate answers 409 `dependencies_unmet` for a waiting issue, and any other
+   * failure in task creation throws. Without a shared transaction the refusal
+   * left the session mutated: `participants` gained the agent and `lanes` gained
+   * a row, so a rejected request changed what the next reader saw.
+   *
+   * Chosen over "check the gate under the same lock first": the gate is only one
+   * of the ways the task write can fail (agent archived mid-flight, workspace
+   * bound, trigger comment missing), and a pre-check that mirrors a funnel which
+   * already owns the decision would have to be kept in sync with it forever.
+   * One transaction makes every failure leave the session exactly as it was,
+   * whatever the cause.
+   */
   createSessionTask(sessionId: string, input: CreateSessionTaskInput): MultiremiTask {
     let session = this.getIssueSession(sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
@@ -764,20 +833,44 @@ export class IssueSessionsRepo {
       session = this.adoptLegacySession(chat.id, session.id);
     }
     if (chat.status === "archived") throw new Error("Owning Chat is archived");
-    this.addSessionParticipant(sessionId, { participantType: "agent", participantId: agentId });
-    return this.ctx.tasks().createTask({
-      agentId,
-      issueId: session.issueId,
-      issueSessionId: sessionId,
-      chatSessionId: session.chatId,
-      workspaceId: session.workspaceId,
-      priority: input.priority,
-      prompt: input.prompt,
-      assignmentAuthorType: input.createdByType ?? input.created_by_type ?? "system",
-      assignmentAuthorId: input.createdById ?? input.created_by_id ?? null,
-      assignmentSourceEventId: input.sourceEventId ?? input.source_event_id ?? null,
-      parentTaskId: input.parentTaskId ?? input.parent_task_id ?? null,
-    });
+    const childStatusChanges: ChildStatusChangeCollector = [];
+    const deferredEvents = createCommitEventQueue();
+    let task: MultiremiTask;
+    try {
+      task = this.ctx.db.transaction(() => {
+        // Global lock order (MUL-405): W before this transaction's first domain
+        // write. `addSessionParticipant` inserts a participant row (D) and the
+        // Task writer below takes W again for free; taking W here is what keeps
+        // the order W -> D instead of the D -> W the sentinel caught.
+        this.ctx.lockWorkspaceRuntimeLifecycle(session.workspaceId);
+        this.addSessionParticipant(sessionId, { participantType: "agent", participantId: agentId });
+        return this.ctx.tasks().createTaskWithinTransaction({
+          agentId,
+          issueId: session.issueId,
+          issueSessionId: sessionId,
+          chatSessionId: session.chatId,
+          workspaceId: session.workspaceId,
+          priority: input.priority,
+          prompt: input.prompt,
+          assignmentAuthorType: input.createdByType ?? input.created_by_type ?? "system",
+          assignmentAuthorId: input.createdById ?? input.created_by_id ?? null,
+          assignmentSourceEventId: input.sourceEventId ?? input.source_event_id ?? null,
+          parentTaskId: resolveCamelOrSnakeString(input, "parentTaskId", "parent_task_id"),
+        }, childStatusChanges, deferredEvents);
+      })();
+    } catch (err) {
+      // The transaction rolled back, so the participant and the lane it would
+      // have created are gone with the round. Only the pending in-memory
+      // collector and queue are discarded.
+      log.warn(
+        `session task rejected for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw err;
+    }
+    this.ctx.notifyTaskEnqueued(task);
+    this.ctx.tasks().runCollectedChildStatusChanges(childStatusChanges);
+    this.ctx.emitCommitEvents(deferredEvents);
+    return task;
   }
 
   publishSessionResult(sessionId: string, input: PublishSessionResultInput): MultiremiSessionResult {

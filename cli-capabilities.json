@@ -564,6 +564,23 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "workspace.relay.context-window.update": {
+      "command": "remi workspace relay context-window update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.relay.context-window.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "workspace.bot-menu.get": {
       "command": "remi workspace bot-menu get",
       "aliases": [],
@@ -3413,6 +3430,23 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "issue.status-pages": {
+      "command": "remi issue status-pages",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.status-pages",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "issue.grouped": {
       "command": "remi issue grouped",
       "aliases": [],
@@ -3532,6 +3566,108 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "issue.workspace.abandon": {
+      "command": "remi issue workspace abandon",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.workspace.abandon",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.decision.request": {
+      "command": "remi issue decision request",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.decision.request",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.decision.list": {
+      "command": "remi issue decision list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.decision.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.decision.answer": {
+      "command": "remi issue decision answer",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.decision.answer",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.decision.escalate": {
+      "command": "remi issue decision escalate",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.decision.escalate",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.decision.withdraw": {
+      "command": "remi issue decision withdraw",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.decision.withdraw",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "issue.dependency.list": {
       "command": "remi issue dependency list",
       "aliases": [],
@@ -3575,6 +3711,40 @@
       ],
       "capability": "issue.dependency.remove",
       "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.done-grant.add": {
+      "command": "remi issue done-grant add",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.done-grant.add",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.done-grant.remove": {
+      "command": "remi issue done-grant remove",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.done-grant.remove",
+      "mutation": "write",
       "output": [
         "table",
         "json",
@@ -7000,6 +7170,23 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "autopilot.run.group": {
+      "command": "remi autopilot run",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": null,
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "autopilot.run.list": {
       "command": "remi autopilot run list",
       "aliases": [],
@@ -7034,14 +7221,14 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "autopilot.run": {
-      "command": "remi autopilot run",
+    "autopilot.run-now": {
+      "command": "remi autopilot run-now",
       "aliases": [],
       "auth": [
         "human",
         "task"
       ],
-      "capability": "autopilot.run",
+      "capability": "autopilot.run-now",
       "mutation": "write",
       "output": [
         "table",
@@ -9991,6 +10178,9 @@
     "DELETE /api/issues/:id/metadata/:key": {
       "command": "issue.metadata.delete"
     },
+    "DELETE /api/issues/:id/parent-done-grant": {
+      "command": "issue.done-grant.remove"
+    },
     "DELETE /api/issues/:id/reactions": {
       "command": "issue.reaction.remove"
     },
@@ -10041,6 +10231,9 @@
     },
     "DELETE /api/multiremi/issues/:id/metadata/:key": {
       "command": "issue.metadata.delete"
+    },
+    "DELETE /api/multiremi/issues/:id/parent-done-grant": {
+      "command": "issue.done-grant.remove"
     },
     "DELETE /api/multiremi/issues/:id/reactions": {
       "command": "issue.reaction.remove"
@@ -10303,6 +10496,11 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
+    "GET /api/daemon/issues/:issueId/decisions/:decisionId": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
     "GET /api/daemon/issues/:issueId/gc-check": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
@@ -10324,6 +10522,11 @@
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
     "GET /api/daemon/runtimes/:runtimeId/feishu-bot": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "GET /api/daemon/runtimes/:runtimeId/feishu-bot/decision-cards": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -10454,6 +10657,9 @@
     "GET /api/issues/:id/comments": {
       "command": "comment.list"
     },
+    "GET /api/issues/:id/decisions": {
+      "command": "issue.decision.list"
+    },
     "GET /api/issues/:id/dependencies": {
       "command": "issue.dependency.list"
     },
@@ -10519,6 +10725,9 @@
     },
     "GET /api/issues/search": {
       "command": "issue.search"
+    },
+    "GET /api/issues/status-pages": {
+      "command": "issue.status-pages"
     },
     "GET /api/knowledge/runs": {
       "command": "knowledge.runs"
@@ -11202,6 +11411,11 @@
     "GET /healthz": {
       "command": "platform.health"
     },
+    "GET /internal/peer/health": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Cross-process API peer channel is machine-to-server traffic; it has no user-facing CLI workflow."
+    },
     "GET /readyz": {
       "command": "platform.ready"
     },
@@ -11355,7 +11569,7 @@
       "command": "autopilot.delivery.replay"
     },
     "POST /api/autopilots/:id/trigger": {
-      "command": "autopilot.run"
+      "command": "autopilot.run-now"
     },
     "POST /api/autopilots/:id/triggers": {
       "command": "autopilot.trigger.create"
@@ -11422,6 +11636,11 @@
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
     "POST /api/daemon/heartbeat": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemon/issues/:issueId/decisions/:decisionId/answer": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
@@ -11596,6 +11815,11 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
+    "POST /api/daemon/tasks/:taskId/human-requests/:requestId/card": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
     "POST /api/daemon/tasks/:taskId/human-requests/:requestId/expire": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
@@ -11695,11 +11919,26 @@
     "POST /api/issues/:id/comments": {
       "command": "comment.add"
     },
+    "POST /api/issues/:id/decisions": {
+      "command": "issue.decision.request"
+    },
+    "POST /api/issues/:id/decisions/:decisionId/answer": {
+      "command": "issue.decision.answer"
+    },
+    "POST /api/issues/:id/decisions/:decisionId/escalate": {
+      "command": "issue.decision.escalate"
+    },
+    "POST /api/issues/:id/decisions/:decisionId/withdraw": {
+      "command": "issue.decision.withdraw"
+    },
     "POST /api/issues/:id/dependencies": {
       "command": "issue.dependency.add"
     },
     "POST /api/issues/:id/labels": {
       "command": "issue.label.add"
+    },
+    "POST /api/issues/:id/parent-done-grant": {
+      "command": "issue.done-grant.add"
     },
     "POST /api/issues/:id/reactions": {
       "command": "issue.reaction.add"
@@ -11742,6 +11981,9 @@
     },
     "POST /api/issues/:id/unsubscribe": {
       "command": "issue.subscriber.remove"
+    },
+    "POST /api/issues/:id/workspace/abandon": {
+      "command": "issue.workspace.abandon"
     },
     "POST /api/issues/:issueId/session-archives/:archiveId/retry": {
       "command": "session.archive.retry"
@@ -11830,15 +12072,15 @@
       "command": "autopilot.delivery.replay"
     },
     "POST /api/multiremi/autopilots/:id/run": {
-      "command": "autopilot.run"
+      "command": "autopilot.run-now"
     },
     "POST /api/multiremi/autopilots/:id/run-scheduled": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
-      "reason": "Scheduler execution is machine-to-server traffic; users trigger an autopilot with remi autopilot run."
+      "reason": "Scheduler execution is machine-to-server traffic; users trigger an autopilot with remi autopilot run-now."
     },
     "POST /api/multiremi/autopilots/:id/trigger": {
-      "command": "autopilot.run"
+      "command": "autopilot.run-now"
     },
     "POST /api/multiremi/autopilots/:id/webhook": {
       "cli_exempt": true,
@@ -11907,6 +12149,9 @@
     },
     "POST /api/multiremi/issues/:id/labels": {
       "command": "issue.label.add"
+    },
+    "POST /api/multiremi/issues/:id/parent-done-grant": {
+      "command": "issue.done-grant.add"
     },
     "POST /api/multiremi/issues/:id/reactions": {
       "command": "issue.reaction.add"
@@ -12308,6 +12553,11 @@
     "POST /auth/verify-code": {
       "command": "context.auth.verify-code"
     },
+    "POST /internal/peer/events": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Cross-process API peer channel is machine-to-server traffic; it has no user-facing CLI workflow."
+    },
     "PUT /api/agents/:id": {
       "command": "agent.update"
     },
@@ -12452,6 +12702,9 @@
     },
     "PUT /api/workspaces/:id/relay-config/:engine": {
       "command": "workspace.relay.update"
+    },
+    "PUT /api/workspaces/:id/relay-config/:engine/context-window": {
+      "command": "workspace.relay.context-window.update"
     },
     "PUT /api/workspaces/:id/relay-config/:engine/reasoning-levels": {
       "command": "workspace.relay.reasoning-levels.update"

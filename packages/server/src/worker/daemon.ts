@@ -14,6 +14,9 @@ import { basename, join, resolve } from "node:path";
 import { createLogger } from "@shared/logger.js";
 import {
   AcpProvider,
+  AcpSessionFailureError,
+  AcpRpcError,
+  redactProviderErrorText,
   createRuntimeProvider,
   type AcpModelCapability,
   type AcpProviderOptions,
@@ -92,6 +95,7 @@ import {
 } from "@multiremi/repo-cache.js";
 import {
   classifyDaemonTaskFailure,
+  classifyLegacyProviderFailure,
   classifyPoisonedOutput,
   TaskFailureReason,
   type TaskFailureReasonValue,
@@ -104,7 +108,11 @@ import {
   writeProjectResourceContext,
   writeAgentSkillContext,
 } from "@daemon/agent-runtime/skills/ephemeral.js";
-import { runSnapshotGcOnce } from "@daemon/agent-runtime/repo/snapshot-gc.js";
+import {
+  runSnapshotGcOnce,
+  type RunSnapshotGcOnceOptions,
+  type SnapshotGcSummary,
+} from "@daemon/agent-runtime/repo/snapshot-gc.js";
 import { prepareIntakeWorkspace } from "@daemon/agent-runtime/workspace/intake.js";
 import { prepareReadOnlyCodeWorkspace } from "@daemon/agent-runtime/workspace/readonly-code.js";
 import {
@@ -168,6 +176,7 @@ import {
   discussionSessionLifecycleKey,
   runWorkspaceGcOnce,
   type MultiremiDaemonGcSummary,
+  type RunWorkspaceGcOnceOptions,
 } from "@daemon/agent-runtime/workspace/gc.js";
 import { resolveWorkspaceGcPolicy, type WorkspaceGcPolicy } from "@daemon/agent-runtime/workspace/gc-policy.js";
 import { resolveWorkspaceProgressSummaryPolicy } from "@daemon/agent-runtime/workspace/progress-summary-policy.js";
@@ -196,6 +205,7 @@ import type {
   MultiremiDaemonSshMeshStatus,
   MultiremiIssueWorkspaceRepo,
   MultiremiIssueWorkspaceArchiveBinding,
+  MultiremiIssueDecision,
   MultiremiRepoData,
   MultiremiRuntimeModel,
   MultiremiRuntimeUpdateScope,
@@ -472,6 +482,14 @@ export interface MultiremiDaemonOptions {
   issueWorkspaceLifecycleLocker?: IssueWorkspaceLifecycleLocker;
   /** Verifies that this process still owns the canonical workspaces root. */
   workspaceRootFence?: () => void;
+  /**
+   * Replacement workspace-GC pass. `executeGcOnce` orchestrates the two sweeps
+   * and their independent failure handling, so tests inject one pass to observe
+   * the sequencing without touching the filesystem.
+   */
+  runWorkspaceGcPass?: (options: RunWorkspaceGcOnceOptions) => Promise<MultiremiDaemonGcSummary>;
+  /** Replacement snapshot-GC pass; see {@link runWorkspaceGcPass}. */
+  runSnapshotGcPass?: (options: RunSnapshotGcOnceOptions) => Promise<SnapshotGcSummary>;
   /** Shared readiness of every provider daemon in this supervisor process. */
   supervisorReady?: () => boolean;
   /** Updates the shared provider readiness barrier. */
@@ -548,6 +566,7 @@ function upsertRepoWarning(warnings: TaskRepoWarning[], warning: TaskRepoWarning
 }
 
 export type MultiremiTaskProvider = Pick<Provider, "sendStream" | "getLastResponse"> & {
+  readonly typedSessionFailures?: boolean;
   close?: () => Promise<void> | void;
   discoverModelCapabilities?: () => Promise<AcpModelCapability[]>;
   getStreamedText?: (chatId: string) => string;
@@ -633,7 +652,7 @@ export class MultiremiRuntimeReregisterGate {
 
 export class MultiremiDaemon {
   private client: MultiremiDaemonClient;
-  private options: Required<Omit<MultiremiDaemonOptions, "token" | "runtimeId" | "daemonId" | "workspaceId" | "providerFactory" | "updateRunner" | "localSkillRoots" | "launchedBy" | "onRestartRequested" | "taskTimeoutMs" | "daemonPort" | "workspacesRoot" | "repoCacheRoot" | "gcEnabled" | "gcIntervalMs" | "gcTtlMs" | "gcOrphanTtlMs" | "gcRequireArchive" | "gitWorktreeInspector" | "sessionArchiveMaxSourceBytes" | "sessionArchiveUploadBaseUrl" | "sessionArchiveProxyMaxBytes" | "sessionArchiveDirectProbeTtlMs" | "sessionArchiveDirectProbeTimeoutMs" | "sessionArchiveUploadTimeoutMs" | "sessionArchiveFailureReportTimeoutMs" | "pluginCacheRoot" | "agentPluginProviderPreflight" | "sshMeshManager" | "terminalAuthorityCleanupRetryDelaysMs" | "issueWorkspaceLifecycleLocker" | "workspaceRootFence" | "supervisorReady" | "onReadyChange" | "cliUpdateCoordinator" | "outboxPath" | "outboxBackoffMs" | "outboxMaxBytes" | "heartbeatIntervalMs" | "claimIdleMaxMs" | "pluginDesiredRefreshMs" | "taskWakeupEnabled" | "taskWakeup" | "taskWakeupConnect" | "authorityProbeDelaysMs">> & {
+  private options: Required<Omit<MultiremiDaemonOptions, "token" | "runtimeId" | "daemonId" | "workspaceId" | "providerFactory" | "updateRunner" | "localSkillRoots" | "launchedBy" | "onRestartRequested" | "taskTimeoutMs" | "daemonPort" | "workspacesRoot" | "repoCacheRoot" | "gcEnabled" | "gcIntervalMs" | "gcTtlMs" | "gcOrphanTtlMs" | "gcRequireArchive" | "gitWorktreeInspector" | "sessionArchiveMaxSourceBytes" | "sessionArchiveUploadBaseUrl" | "sessionArchiveProxyMaxBytes" | "sessionArchiveDirectProbeTtlMs" | "sessionArchiveDirectProbeTimeoutMs" | "sessionArchiveUploadTimeoutMs" | "sessionArchiveFailureReportTimeoutMs" | "pluginCacheRoot" | "agentPluginProviderPreflight" | "sshMeshManager" | "terminalAuthorityCleanupRetryDelaysMs" | "issueWorkspaceLifecycleLocker" | "workspaceRootFence" | "runWorkspaceGcPass" | "runSnapshotGcPass" | "supervisorReady" | "onReadyChange" | "cliUpdateCoordinator" | "outboxPath" | "outboxBackoffMs" | "outboxMaxBytes" | "heartbeatIntervalMs" | "claimIdleMaxMs" | "pluginDesiredRefreshMs" | "taskWakeupEnabled" | "taskWakeup" | "taskWakeupConnect" | "authorityProbeDelaysMs">> & {
     token: string | null;
     runtimeId: string | null;
     daemonId: string | null;
@@ -813,6 +832,8 @@ export class MultiremiDaemon {
   private gcInFlight: Promise<MultiremiDaemonGcSummary> | null = null;
   private sessionArchiveRetryLogAt = new Map<string, number>();
   private readonly gitWorktreeInspector: GitWorktreeInspector;
+  private readonly runWorkspaceGcPass: (options: RunWorkspaceGcOnceOptions) => Promise<MultiremiDaemonGcSummary>;
+  private readonly runSnapshotGcPass: (options: RunSnapshotGcOnceOptions) => Promise<SnapshotGcSummary>;
   private localPathLocks = new LocalPathLocker();
   private issueWorkspaceLifecycleLocks: IssueWorkspaceLifecycleLocker;
   private readonly topicWorkspaces: TopicWorkspaceLifecycle;
@@ -900,6 +921,8 @@ export class MultiremiDaemon {
     this.gitWorktreeInspector = options.gitWorktreeInspector
       ?? new IsomorphicGitWorktreeInspector();
     this.workspaceRootFence = options.workspaceRootFence ?? null;
+    this.runWorkspaceGcPass = options.runWorkspaceGcPass ?? runWorkspaceGcOnce;
+    this.runSnapshotGcPass = options.runSnapshotGcPass ?? runSnapshotGcOnce;
     this.supervisorReady = options.supervisorReady ?? (() => this.ready);
     this.onReadyChange = options.onReadyChange ?? (() => {});
     this.cliUpdateCoordinator = options.cliUpdateCoordinator ?? null;
@@ -1120,16 +1143,55 @@ export class MultiremiDaemon {
     return (await this.client.getTaskHumanRequest(taskId, requestId))?.status === "pending";
   }
 
+  /** Cards this Runtime still owes click handlers for (MUL-407 restart recovery). */
+  listFeishuBotDecisionCards(): Promise<Array<{
+    requestId: string;
+    taskId: string;
+    chatId: string;
+    messageId: string;
+    recipientOpenId: string;
+  }>> {
+    return this.client.listFeishuBotDecisionCards(this.options.runtimeId!);
+  }
+
+  /** Issue decision cards this Runtime must re-register after a restart (MUL-412). */
+  listFeishuIssueDecisionCards(): Promise<Array<{
+    decisionId: string;
+    issueId: string;
+    chatId: string;
+    messageId: string;
+    recipientOpenId: string;
+  }>> {
+    return this.client.listFeishuIssueDecisionCards(this.options.runtimeId!);
+  }
+
+  getFeishuIssueDecision(issueId: string, decisionId: string): Promise<MultiremiIssueDecision | null> {
+    return this.client.getFeishuIssueDecision(issueId, decisionId);
+  }
+
+  answerFeishuIssueDecision(
+    issueId: string,
+    decisionId: string,
+    input: { answer: string; operatorOpenId: string; token?: string },
+  ): Promise<MultiremiIssueDecision> {
+    return this.client.answerFeishuIssueDecision(issueId, decisionId, input);
+  }
+
   getFeishuBotHumanRequest(taskId: string, requestId: string): Promise<MultiremiTaskHumanRequest | null> {
     return this.client.getTaskHumanRequest(taskId, requestId);
+  }
+
+  prepareTaskHumanRequestCard(taskId: string, requestId: string, recipientOpenId: string): Promise<Record<string, unknown>> {
+    return this.client.prepareTaskHumanRequestCard(taskId, requestId, recipientOpenId);
   }
 
   respondFeishuBotHumanRequest(
     taskId: string,
     requestId: string,
     response: Record<string, unknown>,
+    credential?: { token: string; operatorOpenId: string },
   ): Promise<MultiremiTaskHumanRequest> {
-    return this.client.respondTaskHumanRequest(taskId, requestId, response);
+    return this.client.respondTaskHumanRequest(taskId, requestId, response, credential);
   }
 
   resetFeishuBotSession(revision: number, externalSessionKey: string): Promise<boolean> {
@@ -2770,49 +2832,66 @@ export class MultiremiDaemon {
 
   private async executeGcOnce(): Promise<MultiremiDaemonGcSummary> {
     this.assertWorkspaceRootOwner();
-    const summary = await runWorkspaceGcOnce({
-      root: this.options.workspacesRoot,
-      ttlMs: this.options.gcTtlMs,
-      orphanTtlMs: this.options.gcOrphanTtlMs,
-      client: this.client,
-      runtimeId: this.options.runtimeId,
-      requireIssueSessionArchive: this.options.gcRequireArchive,
-      ensureIssueSessionArchive: (issueId, workspaceDir, forceFreshSnapshot) =>
-        this.ensureIssueSessionArchive(issueId, workspaceDir, forceFreshSnapshot),
-      assertRootOwner: () => this.assertWorkspaceRootOwner(),
-      hasDirtyGitWorktree: (workspaceDir) =>
-        this.gitWorktreeInspector.hasDirtyWorktree(workspaceDir),
-      withIssueWorkspaceLock: (issueId, _workspaceDir, action) =>
-        this.issueWorkspaceLifecycleLocks.runExclusive(issueId, async () => {
-          this.assertWorkspaceRootOwner();
-          await action();
-          this.assertWorkspaceRootOwner();
-        }),
-      recoverTopicWorkspace: (topicDir) => this.topicWorkspaces.recoverTopicWorkspace(topicDir),
-      isTopicWorkspaceBound: (topicDir) => this.topicWorkspaces.isTopicWorkspaceBound(topicDir),
-      recoverIssueWorkspace: (issueDir) => this.topicWorkspaces.recoverIssueWorkspace(issueDir),
-      returnTerminalIssueToTopic: (issueDir) => this.topicWorkspaces.returnTerminalIssueToTopic(issueDir),
-      onError: (workspaceDir, error) => {
-        log.warn(`Workspace GC skipped ${workspaceDir}: ${error instanceof Error ? error.message : String(error)}`);
-      },
-    });
+    let summary: MultiremiDaemonGcSummary = { cleaned: 0, orphaned: 0, skipped: 0 };
+    let workspaceFailure: unknown = null;
+    try {
+      summary = await this.runWorkspaceGcPass({
+        root: this.options.workspacesRoot,
+        ttlMs: this.options.gcTtlMs,
+        orphanTtlMs: this.options.gcOrphanTtlMs,
+        client: this.client,
+        runtimeId: this.options.runtimeId,
+        requireIssueSessionArchive: this.options.gcRequireArchive,
+        ensureIssueSessionArchive: (issueId, workspaceDir, forceFreshSnapshot) =>
+          this.ensureIssueSessionArchive(issueId, workspaceDir, forceFreshSnapshot),
+        assertRootOwner: () => this.assertWorkspaceRootOwner(),
+        hasDirtyGitWorktree: (workspaceDir) =>
+          this.gitWorktreeInspector.hasDirtyWorktree(workspaceDir),
+        withIssueWorkspaceLock: (issueId, _workspaceDir, action) =>
+          this.issueWorkspaceLifecycleLocks.runExclusive(issueId, async () => {
+            this.assertWorkspaceRootOwner();
+            await action();
+            this.assertWorkspaceRootOwner();
+          }),
+        recoverTopicWorkspace: (topicDir) => this.topicWorkspaces.recoverTopicWorkspace(topicDir),
+        isTopicWorkspaceBound: (topicDir) => this.topicWorkspaces.isTopicWorkspaceBound(topicDir),
+        recoverIssueWorkspace: (issueDir) => this.topicWorkspaces.recoverIssueWorkspace(issueDir),
+        returnTerminalIssueToTopic: (issueDir) => this.topicWorkspaces.returnTerminalIssueToTopic(issueDir),
+        onError: (workspaceDir, error) => {
+          log.warn(`Workspace GC skipped ${workspaceDir}: ${error instanceof Error ? error.message : String(error)}`);
+        },
+      });
+    } catch (error) {
+      // A workspace-level failure must not cost the snapshot sweep, which is
+      // the only path that reclaims `.snapshots` bytes. Ownership loss throws
+      // out of the fence below instead, so snapshot GC never runs without the
+      // root. The error is rethrown after the snapshot sweep, keeping the
+      // "Workspace GC failed" report in startGcLoop and `--once` unchanged.
+      workspaceFailure = error;
+    }
     this.assertWorkspaceRootOwner();
-    const snapshots = await runSnapshotGcOnce({
-      workspacesRoot: this.options.workspacesRoot,
-      snapshotsRoot: this.snapshotsRoot,
-      repoCacheRoot: this.options.repoCacheRoot,
-      ttlMs: this.options.snapshotTtlMs,
-      withRepoLock: (barePath, action) => this.repoCache.runExclusiveForBarePath(barePath, action),
-      assertRootOwner: () => this.assertWorkspaceRootOwner(),
-      onError: (path, error) => {
-        log.warn(`Snapshot GC skipped ${path}: ${error instanceof Error ? error.message : String(error)}`);
-      },
-    });
-    log.info("Snapshot GC finished", snapshots);
+    try {
+      const snapshots = await this.runSnapshotGcPass({
+        workspacesRoot: this.options.workspacesRoot,
+        snapshotsRoot: this.snapshotsRoot,
+        repoCacheRoot: this.options.repoCacheRoot,
+        ttlMs: this.options.snapshotTtlMs,
+        withRepoLock: (barePath, action) => this.repoCache.runExclusiveForBarePath(barePath, action),
+        assertRootOwner: () => this.assertWorkspaceRootOwner(),
+        onError: (path, error) => {
+          log.warn(`Snapshot GC skipped ${path}: ${error instanceof Error ? error.message : String(error)}`);
+        },
+      });
+      log.info("Snapshot GC finished", snapshots);
+    } catch (error) {
+      log.warn(`Snapshot GC failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
     this.assertWorkspaceRootOwner();
     // Repo worktree metadata is pruned lazily for the repository that is about
     // to create a worktree. Sweeping every cached repository here creates a
     // large burst of synchronous child processes in the long-lived Bun daemon.
+    if (workspaceFailure) throw workspaceFailure;
     return summary;
   }
 
@@ -3324,6 +3403,12 @@ export class MultiremiDaemon {
     let providerHome: IssueSessionProviderHome | null = null;
     let taskPrivateTmp: TaskPrivateTempDirectory | null = null;
     let providerEnv: Record<string, string> | undefined;
+    const failureCredentials: string[] = [];
+    const redactTaskError = (text: string) => redactProviderErrorText(text, [
+      ...failureCredentials, ...Object.entries(providerEnv ?? {})
+        .filter(([name]) => /(?:^|_)(?:SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL)(?:_|$)/i.test(name))
+        .map(([, value]) => value),
+    ]);
     let providerInstallEnv: Record<string, string> | undefined;
     let releaseIssueWorkspaceLifecycle: (() => void) | null = null;
     let progressSummarizer: TaskProgressSummarizer | null = null;
@@ -3422,6 +3507,8 @@ export class MultiremiDaemon {
         : task.agent?.provider === "codex"
           ? workspaceRelay?.codex
           : null;
+      if (relay?.auth_token) failureCredentials.push(relay.auth_token);
+      if (task.authToken) failureCredentials.push(task.authToken);
       if (providerHome) {
         providerEnv = await loadIssueSessionProviderEnv(providerHome, {
           ...(relayAuthoritative
@@ -3499,14 +3586,18 @@ export class MultiremiDaemon {
       }
       this.enqueueTaskReport(task.id, "progress", { summary: pickTaskStartupLine(task.agent?.name), step: 1, total: 3 });
       progressSummarizer = await this.createTaskProgressSummarizer(task, providerEnv, relay?.fragment);
-      summary = await this.runAgent(task, abort.signal, resolvedWorkDir, pluginRuntime, providerHome, providerEnv, progressSummarizer, taskPrivateTmp.path);
+      summary = await this.runAgent(
+        task, abort.signal, resolvedWorkDir, pluginRuntime, providerHome, providerEnv,
+        progressSummarizer, taskPrivateTmp.aliasPath ?? taskPrivateTmp.path,
+        relay?.one_million_models ?? [],
+      );
       if (!summary.completed) {
         const failureReason = summary.failureReason
           ?? classifyPoisonedOutput(summary.output)
           ?? TaskFailureReason.AgentFallbackMessage;
         if (summary.usage.length) this.enqueueTaskReport(task.id, "usage", { usage: summary.usage });
         this.enqueueTaskReport(task.id, "fail", {
-          error: summary.output,
+          error: redactTaskError(summary.output),
           sessionId: summary.sessionId,
           workDir: summary.workDir,
           failureReason,
@@ -3523,7 +3614,7 @@ export class MultiremiDaemon {
       this.finalizeTaskProgress(progressSummarizer, "completed", summary.output);
       await awaitFinalReportDrain();
     } catch (err) {
-      const error = timedOut ? `Agent timed out after ${timeoutMs}ms` : err instanceof Error ? err.message : String(err);
+      const error = redactTaskError(timedOut ? `Agent timed out after ${timeoutMs}ms` : err instanceof Error ? err.message : String(err));
       if (!timedOut && abort.signal.aborted && serverTerminalStatus) {
         if (serverTerminalStatus === "cancelled") this.outbox?.purgeTask(task.id);
         log.info(`Task ${task.id} is already ${serverTerminalStatus} on the server; stopped local execution`);
@@ -3538,7 +3629,10 @@ export class MultiremiDaemon {
       }
       const failureReason = err instanceof LocalDirectoryError
         ? err.failureReason
-        : classifyDaemonTaskFailure(task.agent?.provider ?? "", error);
+        : classifyDaemonTaskFailure(task.agent?.provider ?? "", error,
+          err instanceof AcpSessionFailureError ? err.hint
+            : err instanceof AcpRpcError && err.data && typeof err.data === "object"
+              ? err.data : undefined);
       this.enqueueTaskReport(task.id, "fail", {
         error,
         sessionId: summary?.sessionId ?? task.sessionId,
@@ -4007,6 +4101,8 @@ export class MultiremiDaemon {
           const request = await this.client.createTaskHumanRequest(task.id, {
             kind: "permission",
             payload: { session_id: params.sessionId, tool_call: params.toolCall ?? null, options: params.options },
+            // Publish the deadline so the topic can remind before it elapses.
+            timeoutMs: humanRequestTimeoutMs,
           });
           await this.reportHumanRequestMessage(task.id, nextSeq(), "permission_request", `Permission requested: ${toolTitle}`, {
             request_id: request.id,
@@ -4061,6 +4157,7 @@ export class MultiremiDaemon {
             questions,
             ...(context ? { context } : {}),
           },
+          timeoutMs: humanRequestTimeoutMs,
         });
         await this.reportHumanRequestMessage(task.id, nextSeq(), "question_request", params.message || "Agent asked a question", {
           request_id: request.id,
@@ -4201,6 +4298,7 @@ export class MultiremiDaemon {
     providerEnv?: Record<string, string>,
     progressSummarizer?: TaskProgressSummarizer | null,
     privateTmpDirectory?: string,
+    claudeOneMillionModels: readonly string[] = [],
   ): Promise<RunSummary> {
     this.assertWorkspaceRootOwner();
     const agent = task.agent;
@@ -4276,6 +4374,9 @@ export class MultiremiDaemon {
       providerEnv,
     };
     const config = runtime.assemble(ctx);
+    const failureCredentials = Object.entries(config.env ?? {})
+      .filter(([name]) => /(?:^|_)(?:SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL)(?:_|$)/i.test(name))
+      .map(([, value]) => value);
     if (config.agentType === "antigravity" && workDir !== codeWorkDir) {
       config.addDirs = [...new Set([...(config.addDirs ?? []), codeWorkDir])];
     }
@@ -4285,6 +4386,7 @@ export class MultiremiDaemon {
       executable: config.executable,
       args: config.customArgs,
       model: task.claudeProfile?.model ?? config.model,
+      claudeOneMillionModels,
       ...(task.claudeProfile ? { claudeSettings: { model: task.claudeProfile.model, env: runtimeClaudeProfileRouting(task.claudeProfile) } } : {}),
       allowedTools: config.allowedTools,
       cwd: config.cwd,
@@ -4417,11 +4519,17 @@ export class MultiremiDaemon {
         }
         steerFeed.setInterrupt(() => turnAbort.abort());
         let turnError: unknown = null;
+        let lastTurnMessage: { type: string; content?: string | null } | null = null;
         try {
           resetElicitationContextOffset();
           for await (const event of session.run(prompt)) {
             const emitted = toMessages(event);
             for (const message of emitted) {
+              if (provider.typedSessionFailures === false && message.type === "text" && message.content
+                && classifyLegacyProviderFailure(message.content)) {
+                message.content = redactProviderErrorText(message.content, failureCredentials);
+              }
+              lastTurnMessage = message;
               if (message.type === "compaction") sawCompaction = true;
               // Assistant text becomes the task result / issue activity body.
               if (message.type === "text" && message.content) output += message.content;
@@ -4451,6 +4559,14 @@ export class MultiremiDaemon {
         if (signal.aborted) throw (turnError ?? new Error("Cancelled"));
         const steered = steerFeed.take().filter((m) => !recordedSteerIds.has(m.id));
         if (turnError && !turnAbort.signal.aborted) throw turnError;
+        if (!turnAbort.signal.aborted && provider.typedSessionFailures === false && lastTurnMessage?.type === "text") {
+          const error = redactProviderErrorText(lastTurnMessage.content ?? "", failureCredentials);
+          const failureReason = classifyLegacyProviderFailure(error);
+          if (failureReason) {
+            await this.client.pinTaskSession(task.id, finalSessionId, workDir);
+            return { output: error, sessionId: finalSessionId, workDir, usage, completed: false, failureReason };
+          }
+        }
         if (forceAnswerExpired) {
           log.warn(`Task ${task.id} force-answer grace elapsed; delivering accumulated output`);
           // Steers that arrived too late to act on are still recorded/consumed

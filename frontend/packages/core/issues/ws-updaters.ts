@@ -81,9 +81,8 @@ export function onIssueUpdated(
   }
   if (issue.archived_at !== undefined) {
     qc.invalidateQueries({ queryKey: issueKeys.archivedAll(wsId) });
-    if (issue.archived_at === null) {
-      qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
-    }
+    // The workspace list owns the archive count as well as the status pages.
+    qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
   }
   if (issue.position !== undefined) {
     qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
@@ -104,6 +103,16 @@ export function onIssueUpdated(
   qc.setQueryData<Issue>(issueKeys.detail(wsId, issue.id), (old) =>
     old ? { ...old, ...issue } : old,
   );
+  if (
+    Object.prototype.hasOwnProperty.call(issue, "parent_done_grant_at") ||
+    Object.prototype.hasOwnProperty.call(issue, "parent_done_grant_by") ||
+    Object.prototype.hasOwnProperty.call(issue, "parent_done_grant_agent_id")
+  ) {
+    // These event fields are raw storage columns. The detail endpoint owns
+    // `effective` and `ineffective_reason`, so always refresh instead of
+    // deriving either value in the browser.
+    qc.invalidateQueries({ queryKey: issueKeys.detail(wsId, issue.id) });
+  }
 
   // Invalidate old parent's children (issue was removed from it)
   if (oldParentId) {

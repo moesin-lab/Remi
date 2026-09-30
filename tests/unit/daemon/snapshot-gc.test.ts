@@ -150,9 +150,29 @@ describe("snapshot TTL GC", () => {
       },
       onError: (path) => errors.push(path),
     })).toEqual({ removed: 1, retained: 0, skipped: 1 });
-    expect(errors).toEqual([blocked]);
+    expect(errors).toHaveLength(1);
+    const failedPath = errors[0]!;
+    expect([blocked, next]).toContain(failedPath);
+    const removedPath = failedPath === blocked ? next : blocked;
+    expect(existsSync(failedPath)).toBe(true);
+    expect(existsSync(removedPath)).toBe(false);
+  });
+
+  it("aborts the sweep when the ownership fence keeps rejecting", async () => {
+    const f = fixture();
+    const blocked = f.tree("a-blocked", f.now - ttlMs - 1);
+    const next = f.tree("b-next", f.now - ttlMs - 1);
+    const errors: string[] = [];
+    await expect(runSnapshotGcOnce({
+      ...f.options,
+      assertRootOwner: () => { throw new Error("workspace supervisor lease lost"); },
+      onError: (path) => errors.push(path),
+    })).rejects.toThrow("workspace supervisor lease lost");
+    // Ownership loss ends the round: no later directory is examined, so the
+    // control plane never sees removals attributed to a root we do not own.
+    expect(errors).toEqual([]);
     expect(existsSync(blocked)).toBe(true);
-    expect(existsSync(next)).toBe(false);
+    expect(existsSync(next)).toBe(true);
   });
 
   it.each(["workspace", "repo", "snapshot"] as const)("never follows a %s symlink", async (level) => {

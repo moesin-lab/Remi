@@ -43,6 +43,42 @@ export function readWorkspaceIssueTopics(settings: Record<string, unknown>): Iss
     : parseIssueTopicConfig(settings.issueTopics);
 }
 
+/** Recover usable fields from legacy configs; unexpected failures still propagate. */
+export function readWorkspaceIssueTopicsLenient(
+  settings: Record<string, unknown>,
+  onInvalid?: (error: IssueTopicConfigError) => void,
+): IssueTopicConfig {
+  try {
+    return readWorkspaceIssueTopics(settings);
+  } catch (error) {
+    if (!(error instanceof IssueTopicConfigError)) throw error;
+    onInvalid?.(error);
+    const raw = settings.issueTopics;
+    if (!isRecord(raw)) return { enabled: false, chatId: "" };
+    // Every field is read defensively: the whole point of this reader is that a
+    // stored config cannot abort a read, so a second malformed field must not
+    // throw here either.
+    let projectIds: string[] | undefined;
+    try { projectIds = parseProjectIds(raw.projectIds); } catch { projectIds = undefined; }
+    return {
+      enabled: raw.enabled === true,
+      chatId: cleanString(raw.chatId) ?? "",
+      ...(projectIds ? { projectIds } : {}),
+      // An unrecognised mode falls back to the documented default rather than
+      // inventing `person`, which would send the request looking for a target
+      // that was never configured.
+      notifyMode: raw.notifyMode === "none" ? "none"
+        : raw.notifyMode === "person" ? "person" : "group_owner",
+      ...(isFeishuOpenId(raw.notifyOpenId) ? { notifyOpenId: raw.notifyOpenId } : {}),
+    };
+  }
+}
+
+/** An unusable person target leaves delivery to degrade to text without a mention. */
+export function readWorkspaceIssueTopicsForDelivery(settings: Record<string, unknown>): IssueTopicConfig {
+  return readWorkspaceIssueTopicsLenient(settings);
+}
+
 function parseProjectIds(value: unknown): string[] | undefined {
   if (value === undefined || value === null) return undefined;
   if (!Array.isArray(value)) {

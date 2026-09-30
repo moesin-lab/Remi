@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** MUL-304: disposable, local-only cold-start migration benchmark. */
-import { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir, cpus, totalmem } from "node:os";
 import { join } from "node:path";
@@ -139,7 +139,10 @@ async function main() {
         try {
           console.error(`benchmark ${target}: ${size} Chats, sample ${sample}/${repeats}`);
           if (directory) {
-            db = new Database(join(directory, "synthetic.sqlite"));
+            // Declare the backend: migrations must not fall back to
+            // `MULTIREMI_DATABASE_URL` when an unrelated PG URL happens to be
+            // exported in this shell (MUL-407).
+            db = openSqliteDatabase(join(directory, "synthetic.sqlite"));
             db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL");
           } else {
             await admin!.unsafe(`CREATE DATABASE ${database}`);

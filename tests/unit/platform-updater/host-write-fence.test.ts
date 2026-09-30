@@ -30,6 +30,7 @@ const server = Bun.serve({
   hostname: "127.0.0.1", port: 0,
   async fetch(request, server) {
     const path = new URL(request.url).pathname;
+    if (["/ws", "/api/realtime/ws", "/api/daemon/ws"].includes(path) && server.upgrade(request)) return;
     if (path.startsWith("/api/platform-updater/")) {
       if (request.headers.get("Authorization") !== "Bearer master"
         || request.headers.get("X-Multiremi-Updater-Token") !== "updater") return new Response("Unauthorized", { status: 401 });
@@ -38,6 +39,9 @@ const server = Bun.serve({
     if (request.method === "OPTIONS") return new Response(null, { status: 204 });
     if (!["GET", "HEAD"].includes(request.method)) mutations++;
     return Response.json({ mutations, thisIsServer: this === server, args: process.argv.slice(2) });
+  },
+  websocket: {
+    message(ws) { mutations++; ws.send(JSON.stringify({ mutations })); },
   },
 });
 console.log(JSON.stringify({ port: server.port }));
@@ -65,6 +69,24 @@ async function startLegacyApi(fixture: ReturnType<typeof legacyFixture>) {
     if (timer) clearTimeout(timer);
     reader.releaseLock();
   }
+}
+
+async function mutateOverWebSocket(url: string): Promise<{ mutations: number }> {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(url.replace(/^http:/, "ws:"));
+    const timeout = setTimeout(() => { socket.close(); reject(new Error("WebSocket request timed out")); }, 3_000);
+    socket.onopen = () => socket.send(JSON.stringify({ type: "daemon:heartbeat" }));
+    socket.onmessage = (event) => {
+      clearTimeout(timeout);
+      socket.close();
+      resolve(JSON.parse(String(event.data)) as { mutations: number });
+    };
+    socket.onerror = () => {
+      clearTimeout(timeout);
+      socket.close();
+      reject(new Error("WebSocket upgrade rejected"));
+    };
+  });
 }
 
 describe("host-injected legacy API write fence", () => {
@@ -121,4 +143,26 @@ describe("host-injected legacy API write fence", () => {
     expect(recover.status).toBe(200);
     expect(await (await fetch(`${running.url}/api/issues`)).json()).toMatchObject({ mutations: 0 });
   });
+
+  it("blocks WebSocket upgrades that would otherwise bypass the HTTP write fence", async () => {
+    const fixture = legacyFixture();
+    const running = await startLegacyApi(fixture);
+    expect(await mutateOverWebSocket(`${running.url}/api/daemon/ws`)).toEqual({ mutations: 1 });
+    writeFileSync(fixture.marker, JSON.stringify({ operationId: "pop_legacy" }));
+
+    for (const path of ["/ws", "/api/realtime/ws", "/api/daemon/ws", "/api/platform-updater/operations/reconcile"]) {
+      const handshake = await fetch(`${running.url}${path}`, {
+        headers: { ...dualHeaders, Upgrade: "WebSocket", Connection: "Upgrade", "Sec-WebSocket-Version": "13",
+          "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==" },
+      });
+      expect(handshake.status).toBe(503);
+      expect(await handshake.json()).toMatchObject({ code: "platform_update_in_progress" });
+    }
+    await expect(mutateOverWebSocket(`${running.url}/api/daemon/ws`)).rejects.toThrow("upgrade rejected");
+    expect(await (await fetch(`${running.url}/api/issues`)).json()).toMatchObject({ mutations: 1 });
+    expect((await fetch(`${running.url}/readyz`)).status).toBe(200);
+    expect((await fetch(`${running.url}/api/platform-updater/operations/reconcile`, { method: "POST", headers: dualHeaders })).status).toBe(200);
+    unlinkSync(fixture.marker);
+    expect(await mutateOverWebSocket(`${running.url}/ws`)).toEqual({ mutations: 2 });
+  }, 15_000);
 });

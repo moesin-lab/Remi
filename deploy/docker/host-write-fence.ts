@@ -11,7 +11,11 @@ const readMethods = new Set(["GET", "HEAD", "OPTIONS"]);
 const originalServe = Bun.serve;
 
 function fenceResponse(request: Request): Response | null {
-  if (readMethods.has(request.method) || new URL(request.url).pathname.startsWith("/api/platform-updater/")) {
+  // WebSocket handshakes use GET, but daemon frames write Runtime state outside
+  // the HTTP middleware. Refuse new sockets while fenced. The host stops the
+  // previous API before backing up, so its existing sockets are already closed.
+  const websocket = request.headers.get("Upgrade")?.split(",").some(value => value.trim().toLowerCase() === "websocket");
+  if (!websocket && (readMethods.has(request.method) || new URL(request.url).pathname.startsWith("/api/platform-updater/"))) {
     return null;
   }
   let operationId: string | null = null;

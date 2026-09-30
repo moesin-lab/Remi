@@ -122,6 +122,10 @@ sequenceDiagram
   Host->>Host: 回执确认后解除宿主写入闸门
 ```
 
+Windows runner 使用按配置文件路径派生的跨会话互斥锁，手动启动与计划任务重试不能同时运行两个更新器。宿主准备镜像时只构建缺失的 API/Web 镜像；已有固定 commit tag 必须带完全匹配的 `org.opencontainers.image.revision`，否则拒绝覆盖。通过验证的镜像会记录实际 ID，供切换和后续回滚核验。
+
+切换期间也拒绝 WebSocket Upgrade 握手，避免 daemon 通过长连接领取命令或写入心跳；原连接在停止 API 时断开。普通 HTTP 读取、健康检查和 updater 控制通道仍可用。
+
 宿主沿用 platform operation API/CLI：
 
 ```powershell

@@ -28,8 +28,14 @@ console.info(`Multiremi platform updater started with ${driver.kind} driver`);
 while (true) {
   try {
     if (Date.now() - lastFeedCheck > 300_000 || lastFeedCheck === 0) {
-      latestRelease = await fetchReleaseFeed(releaseFeedUrl);
       lastFeedCheck = Date.now();
+      try {
+        latestRelease = await fetchReleaseFeed(releaseFeedUrl);
+      } catch (error) {
+        // Release discovery must not block host recovery, heartbeats or an
+        // explicitly requested operation when a feed is absent/unavailable.
+        console.error(`release feed unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     await client.heartbeat(await driver.inspect(), latestRelease);
     const operation = await client.claim();

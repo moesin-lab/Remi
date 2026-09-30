@@ -10,16 +10,20 @@
 // facade's constructor and resolved at call time.
 import { selectChatLocalDirectory } from "@multiremi/contracts/chat-local-directory.js";
 import { resolveChatWorkspace } from "@multiremi/store/chat-workspace.js";
-import { type SqlDatabase } from "@multiremi/store/db/postgres.js";
+import { afterCommit, type SqlDatabase } from "@multiremi/store/db/postgres.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
 import { createLogger } from "@shared/logger.js";
 import { INBOX_ROUTING, inboxRouteFor } from "@multiremi/store/inbox-routing.js";
+import { markRequestReadCacheLockTaken } from "@multiremi/store/request-read-cache.js";
+import type { TaskMessageFanoutSubject } from "@multiremi/contracts/task-message-fanout.js";
+export type { TaskMessageFanoutSubject } from "@multiremi/contracts/task-message-fanout.js";
 import type {
   AddSessionParticipantInput,
   CreateChatSessionInput,
   CreateAttachmentInput,
   CreateIssueCommentInput,
+  CreateIssueDependencyInput,
   CreateIssueInput,
   CreateIssueSessionInput,
   CreateSkillInput,
@@ -28,6 +32,7 @@ import type {
   ListIssuesInput,
   UpdateChatSessionInput,
   UpdateIssueInput,
+  UpdateIssueOptions,
   MultiremiAgent,
   MultiremiAgentPlugin,
   MultiremiAgentPluginBinding,
@@ -46,8 +51,10 @@ import type {
   MultiremiInboxItem,
   MultiremiIssueComment,
   MultiremiIssue,
+  MultiremiIssueDependencyView,
   MultiremiKnowledgeSubmission,
   MultiremiIssueSession,
+  MultiremiIssueWaitingOn,
   MultiremiMetricCounter,
   MultiremiNotificationGroupKey,
   MultiremiNotificationChannel,
@@ -156,6 +163,7 @@ const KNOWN_FAILURE_REASONS = new Set([
   "provider_auth",
   "provider_error",
   "queued_expired",
+  "queued_model_unavailable",
   "registration_failed",
   "runtime_offline",
   "runtime_recovery",
@@ -165,9 +173,40 @@ const KNOWN_FAILURE_REASONS = new Set([
 const KNOWN_AUTOPILOT_CADENCES = new Set(["hourly", "daily", "weekly", "monthly", "manual", "webhook", "system_event", "unknown"]);
 const KNOWN_AUTOPILOT_TRIGGERS = new Set(["schedule", "webhook", "system_event", "manual", "unknown"]);
 
+/**
+ * MUL-400 S1 (QA round 3): events a caller-owned transaction may only publish
+ * after it commits.
+ *
+ * `PostgresSyncDatabase` is synchronous, so an event emitted mid-transaction
+ * reaches clients before the row is durable — and, on rollback, describes a row
+ * that never existed. A `...WithinTransaction` writer therefore hands its
+ * publishable events to the transaction's owner through this queue, and the
+ * owner flushes it after COMMIT.
+ */
+export interface CommitEventQueue {
+  workspace: WorkspaceEvent[];
+  enqueuedTasks: MultiremiTask[];
+  issueActivities: Array<{ issueId: string; type: string; body: string; data: unknown }>;
+}
+
+export function createCommitEventQueue(): CommitEventQueue {
+  return { workspace: [], enqueuedTasks: [], issueActivities: [] };
+}
+
+/**
+ * MUL-400 S1: a comment written inside a caller-owned transaction must hand its
+ * realtime push to the owner's queue. The union makes the queue mandatory (and
+ * the compiler enforced) exactly when `withinTransaction` is set.
+ */
+export type CreateIssueCommentOptions =
+  | { deferAgentMentionDispatch?: boolean; withinTransaction?: false; deferredEvents?: CommitEventQueue }
+  | { deferAgentMentionDispatch?: boolean; withinTransaction: true; deferredEvents: CommitEventQueue };
+
 export type TaskEnqueuedListener = (task: MultiremiTask) => void;
 export type TaskEventListener = (event: { type: string; task: MultiremiTask }) => void;
-export type TaskMessagesListener = (event: { task: MultiremiTask; messages: MultiremiTaskMessage[] }) => void;
+export type TaskMessagesListener = (
+  event: { task: TaskMessageFanoutSubject; messages: MultiremiTaskMessage[] },
+) => void;
 export type WorkspaceEventListener = (event: {
   type: string;
   workspaceId: string;
@@ -177,13 +216,33 @@ export type WorkspaceEventListener = (event: {
   actorId?: string | null;
 }) => void;
 
+/** One workspace/realtime event. */
+export type WorkspaceEvent = Parameters<WorkspaceEventListener>[0];
+
 // The domain surfaces the shared helpers and the carved-out repos need to reach. Resolved lazily so
 // that carve order never becomes a construction-order constraint. Each surface is the slice one
 // not-yet-carved domain owes the rest; when that domain is carved the accessor below is repointed
 // at its repo and nothing else changes.
 export interface IssuesSurface {
-  createIssue(input: CreateIssueInput): MultiremiIssue;
-  createIssueComment(issueId: string, input: CreateIssueCommentInput): MultiremiIssueComment;
+  createIssue(input: CreateIssueInput, transaction?: {
+    childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector;
+    deferredEvents: CommitEventQueue;
+  }): MultiremiIssue;
+  /**
+   * MUL-400 E3: creation for a caller that already holds a transaction. The
+   * child-status collector and the commit-event queue are both required, with no
+   * defaults, so nothing this creation derives or queues can be dropped.
+   */
+  createIssueWithinTransaction(
+    input: CreateIssueInput,
+    childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: CommitEventQueue,
+  ): MultiremiIssue;
+  createIssueComment(
+    issueId: string,
+    input: CreateIssueCommentInput,
+    options?: CreateIssueCommentOptions,
+  ): MultiremiIssueComment;
   createTaskFailureSystemComment(
     issueId: string,
     issueSessionId: string | null,
@@ -191,6 +250,7 @@ export interface IssuesSurface {
     body: string,
   ): MultiremiIssueComment;
   getIssue(id: string): MultiremiIssue | null;
+  hasIssue(id: string): boolean;
   getIssueByRef(ref: string, workspaceId?: string | null): MultiremiIssue | null;
   getIssueComment(id: string): MultiremiIssueComment | null;
   getAttachment(id: string): MultiremiAttachment | null;
@@ -199,7 +259,103 @@ export interface IssuesSurface {
   linkAttachmentsToChatMessage(chatSessionId: string, chatMessageId: string, attachmentIds: string[]): void;
   listIssues(input?: ListIssuesInput): MultiremiIssue[];
   listGeneratedIssues(sourceIssueId: string): MultiremiIssue[];
-  updateIssue(id: string, input: UpdateIssueInput): MultiremiIssue;
+  updateIssue(id: string, input: UpdateIssueInput, options?: UpdateIssueOptions): MultiremiIssue;
+  /**
+   * MUL-400 S1c (QA round 1): the same write as {@link updateIssue} but owned by
+   * the caller's transaction. The status row, its audit activities and (for the
+   * SCM merge effect) the effect's own bookkeeping commit together; every
+   * outbound event goes on `deferredEvents` and only flushes after COMMIT.
+   */
+  updateIssueWithinTransaction(
+    id: string,
+    input: UpdateIssueInput,
+    options: UpdateIssueOptions,
+    collector: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: CommitEventQueue,
+  ): {
+    issue: MultiremiIssue;
+    previous: MultiremiIssue;
+    cancelledTasks: number;
+    handledForcedStart: boolean;
+    dependencyCheckEventId: string | null;
+  };
+  /** Post-COMMIT half of {@link updateIssueWithinTransaction}. */
+  runIssueUpdatePostCommit(
+    result: {
+      issue: MultiremiIssue;
+      previous: MultiremiIssue;
+      cancelledTasks: number;
+      handledForcedStart: boolean;
+      dependencyCheckEventId: string | null;
+    },
+    input: UpdateIssueInput,
+    collector: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: CommitEventQueue,
+  ): void;
+  hasChildIssues(issueId: string): boolean;
+  parentDoneGrantStatus(issue: MultiremiIssue): {
+    granted: boolean;
+    grantedAt: string | null;
+    grantedBy: string | null;
+    agentId: string | null;
+    ownerAgentId: string | null;
+    effective: boolean;
+    reason: import("./repos/issues-repo.js").ParentDoneGrantRefusalReason | null;
+  };
+  finalSummaryAfterLastChild(parentIssueId: string, options?: { acceptCommentBy?: string | null }): {
+    satisfied: boolean;
+    lastChildClosedAt: string | null;
+  };
+  /** MUL-400 E1: children that still count as unfinished (not done/cancelled). */
+  countOpenChildIssues(parentIssueId: string): number;
+  /**
+   * MUL-400 E1 guard B: hold a parent at in_progress while children are open.
+   * `exempt` is for transitions the guard deliberately leaves alone (the
+   * human-request `in_review` transient).
+   */
+  holdParentStatusForOpenChildren(
+    issueId: string,
+    requested: string,
+    options: { exempt?: boolean; deferredEvents: CommitEventQueue },
+  ): string;
+  /** MUL-400 E3: direct prerequisites of an issue that are not `done` yet. */
+  listUnmetPrerequisites(issueId: string): import("./repos/issue-dependencies.js").IssueDependencyUnmetRef[];
+  replayDependencyAutoStart(event: MultiremiSystemEvent): void;
+  /** MUL-458: caller owns the force-start task/status/activity transaction. */
+  recordDependencyForceStarted(
+    issueId: string,
+    input: import("./repos/issues-repo.js").DependencyForceStartedInput,
+    deferredEvents: CommitEventQueue,
+  ): void;
+  /** MUL-400 E3: page data for the detail surface. */
+  getIssueWaitingOn(issueId: string): MultiremiIssueWaitingOn;
+  /** MUL-400 E3: caller owns the transaction, e.g. issue creation. */
+  createIssueDependencyWithinTransaction(
+    issueId: string,
+    input: CreateIssueDependencyInput,
+    activity: import("./repos/issues-repo.js").IssueMutationActivityContext,
+    deferredEvents: CommitEventQueue,
+  ): MultiremiIssueDependencyView;
+  /** MUL-400 E1/E2 post-commit hook shared by both Issue write paths. */
+  /**
+   * Post-commit E1/E2 hook. Every Issue transition the hook's own writes produce
+   * (the parent round can move that parent's status, which is a child event for
+   * ITS parent) is pushed into `collector`; the owner replays it after the next
+   * commit. Collector and queue are required so no call site can drop a
+   * transition by ignoring a return value, and no event escapes mid-transaction.
+   */
+  notifyChildStatusChange(
+    previous: MultiremiIssue,
+    issue: MultiremiIssue,
+    parentTaskId: string | null,
+    collector: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    options: {
+      taskTerminalStatus?: "completed" | "failed" | "cancelled";
+      dependencyCheckEventId?: string | null;
+      /** Replay chain de-duplication; see runCollectedChildStatusChanges. */
+      seen?: Set<string>;
+    },
+  ): void;
   restoreIssue(id: string): MultiremiIssue;
   archiveEligibleIssues(now?: Date): MultiremiIssue[];
   issueArchiveSweepIntervalMs(): number;
@@ -209,13 +365,25 @@ export interface IssuesSurface {
     authorAgentId: string | null;
     targetAgentId: string;
     issueSessionId: string | null;
-  }): boolean;
+  }): import("./repos/issues-repo.js").SquadLeaderDelegationDecision;
+  /** MUL-412: one decision by its own id (the Feishu card lane keys on it). */
+  getIssueDecisionAnywhere(decisionId: string): import("@multiremi/contracts/types.js").MultiremiIssueDecision | null;
+  /** One decision scoped to the Issue it hangs on. */
+  getIssueDecision(issueId: string, decisionId: string): import("@multiremi/contracts/types.js").MultiremiIssueDecision | null;
 }
 
 export interface AgentsSurface {
   getAgent(id: string): MultiremiAgent | null;
+  /** The Agent row without Skills or Skill files — eligibility decisions only. */
+  getAgentLite(id: string): MultiremiAgent | null;
   listAgents(options?: { includeArchived?: boolean }): MultiremiAgent[];
+  /** Every Agent row without Skills — capability decisions only. */
+  listAgentsLite(options?: { includeArchived?: boolean }): MultiremiAgent[];
   getAgentByRef(ref: string, workspaceId?: string | null): MultiremiAgent | null;
+  /** Reference resolution from Agent rows only — no Skills, no Skill files. */
+  getAgentLiteByRef(ref: string, workspaceId?: string | null): MultiremiAgent | null;
+  /** Live Agent rows by id, without Skills or Skill files. */
+  listAgentsLiteByIds(ids: readonly string[]): MultiremiAgent[];
   listActiveAgentsByRuntime(runtimeId: string): MultiremiAgent[];
   createSkill(input: CreateSkillInput): MultiremiSkill;
   createSkillWithinTransaction(input: CreateSkillInput): MultiremiSkill;
@@ -238,6 +406,8 @@ export interface AgentPluginsSurface {
   recordAgentPluginRuntimeHeartbeat(runtimeId: string): MultiremiAgentPluginRuntimeState[];
   recordAgentPluginRuntimeHeartbeatWithinLock(
     runtimeId: string,
+    /** The Runtime row the caller already holds, so the heartbeat does not re-read it. */
+    knownRuntime?: { daemonId: string | null; metadata: Record<string, unknown>; workspaceId: string | null },
   ): { changes: MultiremiAgentPluginRuntimeState[]; revision: string };
 }
 
@@ -258,6 +428,8 @@ export interface AnalyticsSurface {
 export interface WorkspacesSurface {
   getUser(id: string): MultiremiUser | null;
   getUserByFeishuUnionId(unionId: string | null | undefined): MultiremiUser | null;
+  /** MUL-412: the users-table row a Feishu open_id belongs to, if any. */
+  getUserByExternalId(externalId: string | null | undefined): MultiremiUser | null;
   listWorkspaces(): MultiremiWorkspace[];
   getWorkspace(id: string): MultiremiWorkspace | null;
   findWorkspaceMemberForUser(userId: string | null | undefined, workspaceId: string): MultiremiWorkspaceMember | null;
@@ -301,6 +473,7 @@ export interface NotificationChannelsSurface {
   }): void;
   flushAgentIssueUpdatesForIssueWithinTransaction(
     issueId: string,
+    deferredEvents: CommitEventQueue,
     now?: string | Date,
   ): { delivered: number; dropped: number };
 }
@@ -338,7 +511,7 @@ export interface AutopilotsSurface {
     actorId?: string | null;
     automationSourceEventId?: string | null;
     automationSourceTaskId?: string | null;
-  }): MultiremiSystemEvent | null;
+  }): { event: MultiremiSystemEvent | null; dependencyCheckEventId: string | null };
 }
 
 export interface AccessTokensSurface {
@@ -347,9 +520,21 @@ export interface AccessTokensSurface {
 
 export interface TasksSurface {
   createTask(input: CreateTaskInput): MultiremiTask;
-  /** Internal primitive for a caller that already owns a database transaction. */
-  createTaskWithinTransaction(input: CreateTaskInput): MultiremiTask;
+  /**
+   * Internal primitive for a caller that already owns a database transaction.
+   * `childStatusChanges` collects the Issue transitions this write produces; the
+   * caller replays them through {@link runCollectedChildStatusChanges} after its
+   * COMMIT. It is required on purpose: a nested `transaction()` would commit the
+   * caller's transaction early on Postgres, which has no savepoints.
+   */
+  createTaskWithinTransaction(
+    input: CreateTaskInput,
+    childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: CommitEventQueue,
+  ): MultiremiTask;
   createTaskSteerMessage(input: CreateTaskSteerMessageInput): import("@multiremi/contracts/types.js").MultiremiTaskSteerMessage;
+  /** Caller owns the transaction and post-commit notifications; emits no events. */
+  createTaskSteerMessageWithinTransaction(input: CreateTaskSteerMessageInput): import("@multiremi/contracts/types.js").MultiremiTaskSteerMessage;
   ensureDelegationWakeup(input: {
     sourceTaskId: string;
     requiredEventSeq: number;
@@ -358,8 +543,22 @@ export interface TasksSurface {
     terminalBody?: string | null;
   }): { task: MultiremiTask | null; created: boolean; covered: boolean };
   getTask(id: string): MultiremiTask | null;
+  /**
+   * MUL-474: identity/status columns only — no `prompt`, `result` or `usage`.
+   * The daemon identity guard and the task-level handlers read this instead of
+   * {@link getTask}; the row is cached for the rest of the request.
+   */
+  getTaskIdentity(id: string): import("./repos/tasks-repo.js").MultiremiTaskIdentity | null;
+  /** MUL-474: the `status` route's fields, without the prompt column. */
+  getTaskStatusSnapshot(id: string): import("./repos/tasks-repo.js").TaskStatusSnapshot | null;
   getTaskWithAgent(id: string): import("@multiremi/contracts/types.js").MultiremiTaskWithAgent | null;
   listTasks(status?: MultiremiTaskStatus): MultiremiTask[];
+  listTasksForRuntimeStatuses(runtimeId: string, statuses: readonly MultiremiTaskStatus[]): MultiremiTask[];
+  listTaskRefs(input: {
+    statuses: readonly MultiremiTaskStatus[];
+    runtimeId?: string | null;
+    agentIds?: readonly string[];
+  }): import("./repos/tasks-repo.js").TaskRef[];
   listTasksChunk(
     status: MultiremiTaskStatus | undefined,
     cursor: import("./repos/tasks-repo.js").TaskListCursor | null,
@@ -371,9 +570,23 @@ export interface TasksSurface {
   /** Full rows for the ids a page kept, in the caller's order. */
   hydrateTasksByIds(ids: readonly string[]): MultiremiTask[];
   listTasksForIssue(issueId: string): MultiremiTask[];
+  /** Read one human request without going through the facade (MUL-407). */
+  getTaskHumanRequest(requestId: string): import("@multiremi/contracts/types.js").MultiremiTaskHumanRequest | null;
   cancelTask(taskId: string): MultiremiTask;
-  cancelTaskWithinTransaction(taskId: string): import("./repos/tasks-repo.js").CancelTaskResult;
+  cancelTaskWithinTransaction(
+    taskId: string,
+    childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
+    deferredEvents: CommitEventQueue,
+  ): import("./repos/tasks-repo.js").CancelTaskResult;
   notifyCancelledTask(result: import("./repos/tasks-repo.js").CancelTaskResult): void;
+  /**
+   * Replay an owner's collected Issue transitions after it committed. `seen`
+   * de-duplicates the chain so a status ping-pong cannot loop forever.
+   */
+  runCollectedChildStatusChanges(
+    changes: import("./repos/tasks-repo.js").ChildStatusChange[],
+    seen?: Set<string>,
+  ): void;
   cancelTasksByTriggerComments(workspaceId: string, commentIds: string[]): number;
   listAgentTasks(agentId: string): MultiremiTask[];
 }
@@ -385,6 +598,15 @@ export interface ChatSurface {
   updateChatSession(id: string, input: UpdateChatSessionInput): MultiremiChatSession;
   getChatMessage(id: string): MultiremiChatMessage | null;
   getPendingChatTask(chatSessionId: string): MultiremiTask | null;
+  /**
+   * The first in-flight task of every Chat the caller can list, in one statement
+   * (MUL-473). Ranked by the same expression {@link getPendingChatTask} uses per
+   * Session.
+   */
+  listPendingChatTaskCandidates(
+    workspaceId?: string | null,
+    options?: { creatorId?: string | null; excludeTransportSessions?: boolean },
+  ): import("./repos/chat-repo.js").PendingChatTaskCandidate[];
   createPendingAgentIssueUpdateWithinTransaction(chatSessionId: string, body: string): {
     session: MultiremiChatSession;
     message: MultiremiChatMessage;
@@ -454,7 +676,14 @@ export interface RuntimesSurface {
   getRuntimeCodexProfile(id: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntimeExecutionProfile(id: string, provider: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntime(id: string): MultiremiRuntime | null;
+  /** The Runtime row without the derived usage / model / execution-group reads. */
+  getRuntimeLite(id: string): MultiremiRuntime | null;
   listRuntimes(): MultiremiRuntime[];
+  /**
+   * One workspace's Runtimes with the same hydration `listRuntimes` adds, but
+   * with the workspace filter in SQL and the derived reads batched (MUL-473).
+   */
+  listRuntimesForWorkspace(workspaceId: string): MultiremiRuntime[];
   hasCliUpdateDrainForRuntime(runtimeId: string): boolean;
   createRuntimeCommandRequest(runtimeId: string, input: import("@multiremi/contracts/types.js").CreateRuntimeCommandInput): MultiremiRuntimeCommandRequest;
   getRuntimeCommandRequest(runtimeId: string, requestId: string): MultiremiRuntimeCommandRequest | null;
@@ -482,9 +711,56 @@ export interface FeishuBotSurface {
   disableFeishuBotConfigsReferencingAgent(agentId: string, actor?: string | null): string[];
   disableFeishuBotConfigsReferencingRuntime(runtimeId: string, actor?: string | null): string[];
   prepareFeishuIssueTopicWithinTransaction(issue: MultiremiIssue): boolean;
+  /**
+   * MUL-412: queue (or deliberately skip) the card for an escalated decision.
+   * Runs inside the caller's transaction and writes every event on its queue.
+   */
+  prepareIssueDecisionCardWithinTransaction(
+    issue: MultiremiIssue,
+    decision: import("@multiremi/contracts/types.js").MultiremiIssueDecision,
+    deferredEvents: CommitEventQueue,
+  ): void;
+  /** MUL-412: queue the in-place terminal rewrite for a settled decision. */
+  enqueueIssueDecisionCardPatchWithinTransaction(
+    decision: import("@multiremi/contracts/types.js").MultiremiIssueDecision,
+    deferredEvents: CommitEventQueue,
+  ): void;
+  /**
+   * MUL-412: may this bot host read and answer decisions on this Issue? The
+   * same active-topic-binding predicate the human-request lane uses.
+   */
+  canFeishuBotDaemonAccessIssueDecision(workspaceId: string, daemonId: string, issueId: string): boolean;
+  /** MUL-412: the operator behind a card click, as a live non-agent member. */
+  resolveFeishuDecisionOperatorMember(
+    workspaceId: string,
+    appId: string,
+    openId: string | null | undefined,
+  ): import("@multiremi/store/repos/feishu-bot-repo.js").IssueDecisionOperatorMemberResolution;
+  /** MUL-412: decision cards a restarting host must re-register. */
+  listFeishuIssueDecisionCards(
+    workspaceId: string,
+    runtimeId: string,
+  ): Array<{
+    decision_id: string;
+    issue_id: string;
+    chat_id: string;
+    message_id: string;
+    recipient_open_id: string;
+  }>;
+  /** MUL-412: the lane a card click answers on. */
+  getFeishuIssueDecisionCardContext(workspaceId: string, decisionId: string): {
+    decision: import("@multiremi/contracts/types.js").MultiremiIssueDecision;
+    issue: MultiremiIssue;
+    appId: string;
+    chatId: string;
+    messageId: string | null;
+    recipientOpenId: string;
+  } | null;
   prepareFeishuIssueRoundPushesWithinTransaction(input: {
     issue: MultiremiIssue;
     leaderTask: MultiremiTask;
+    childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector;
+    deferredEvents: CommitEventQueue;
   }): MultiremiTask[];
   retargetFeishuRoundPushTaskWithinTransaction(fromTaskId: string, toTaskId: string): void;
   completeFeishuRoundPushTaskWithinTransaction(task: MultiremiTask, body: string): void;
@@ -579,7 +855,9 @@ export class StoreContext {
    * Serialize workspace-scoped Runtime lifecycle mutations across SQLite and
    * Postgres. Daemon retirement holds this row lock while it re-reads its plan
    * and removes Runtime-affine state; every write that can add such state must
-   * take the same lock and revalidate after acquiring it.
+   * take the same lock and revalidate after acquiring it. The per-request read
+   * cache serves none of the rows read before the lock, so that revalidation
+   * always reaches the database.
    *
    * The caller must already be inside a database transaction.
    */
@@ -588,6 +866,7 @@ export class StoreContext {
       "UPDATE multiremi_workspaces SET updated_at = updated_at WHERE id = ?",
       [workspaceId],
     );
+    markRequestReadCacheLockTaken();
   }
 
   /** Serialize repository topology and project repository-resource mutations. */
@@ -669,14 +948,70 @@ export class StoreContext {
     return this.resolveHost();
   }
 
-  emitWorkspaceEvent(event: Parameters<WorkspaceEventListener>[0]): void {
-    for (const listener of [...this.workspaceEventListeners]) {
-      try {
-        listener(event);
-      } catch {
-        // Realtime listeners are best-effort and must not roll back mutations.
+  /**
+   * Publish one realtime event.
+   *
+   * Routed through the database's after-commit hook (MUL-405 QA round 2): while
+   * any transaction is open the event waits for the OUTERMOST COMMIT, and a
+   * rollback drops it. A nested writer cannot tell whether its caller commits,
+   * so without this an outer ROLLBACK could leave a pushed row that never
+   * existed. With no transaction open the hook runs the publish immediately, so
+   * autocommit callers behave exactly as before.
+   */
+  emitWorkspaceEvent(event: WorkspaceEvent): void {
+    afterCommit(this.db, () => {
+      for (const listener of [...this.workspaceEventListeners]) {
+        try {
+          listener(event);
+        } catch {
+          // Realtime listeners are best-effort and must not roll back mutations.
+        }
+
       }
-    }
+    });
+  }
+
+  /**
+   * Publish a caller-owned transaction's deferred events once the OUTERMOST
+   * transaction commits (MUL-405 QA round 2).
+   *
+   * Callers drain this right after their own \`transaction()\` returns, but that
+   * is not necessarily a commit: a nested call on Postgres only released a
+   * SAVEPOINT, and the caller above it can still roll back. Publishing there
+   * would push a row the ROLLBACK then erases. So the queue is handed to the
+   * database's after-commit hook, which runs it only after the real COMMIT and
+   * drops it on rollback. With no transaction open the hook runs it
+   * immediately, so autocommit callers are unchanged.
+   *
+   * Ordering is preserved: one call to this method enqueues one callback, and
+   * the hook runs callbacks in the order they were queued.
+   */
+  emitCommitEvents(queue: CommitEventQueue): void {
+    if (
+      queue.workspace.length === 0
+      && queue.enqueuedTasks.length === 0
+      && queue.issueActivities.length === 0
+    ) return;
+    afterCommit(this.db, () => {
+      // MUL-409's post-COMMIT activity writer and MUL-405's realtime pushes both
+      // ride the outermost commit: the queue is drained by the database's
+      // after-commit hook, so a nested caller's rollback drops the whole set.
+      for (const activity of queue.issueActivities) {
+        try {
+          this.appendIssueActivity(activity.issueId, {
+            actorType: "system",
+            actorId: null,
+            type: activity.type,
+            body: activity.body,
+            data: activity.data,
+          });
+        } catch (error) {
+          log.warn(`post-commit issue activity failed for ${activity.issueId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      for (const event of queue.workspace) this.emitWorkspaceEvent(event);
+      for (const task of queue.enqueuedTasks) this.notifyTaskEnqueued(task);
+    });
   }
 
   emitChatEvent(
@@ -698,17 +1033,24 @@ export class StoreContext {
     });
   }
 
+  /**
+   * Wake listeners for a newly enqueued task, after the outermost COMMIT for the
+   * same reason as {@link emitWorkspaceEvent}: a phantom wakeup for a task a
+   * ROLLBACK erased makes a daemon claim work that does not exist.
+   */
   notifyTaskEnqueued(task: MultiremiTask): void {
-    for (const listener of [...this.taskEnqueuedListeners]) {
-      try {
-        listener(task);
-      } catch {
-        // Wakeup listeners are best-effort and must not roll back task enqueue.
+    afterCommit(this.db, () => {
+      for (const listener of [...this.taskEnqueuedListeners]) {
+        try {
+          listener(task);
+        } catch {
+          // Wakeup listeners are best-effort and must not roll back task enqueue.
+        }
       }
-    }
+    });
   }
 
-  notifyTaskMessages(task: MultiremiTask, messages: MultiremiTaskMessage[]): void {
+  notifyTaskMessages(task: TaskMessageFanoutSubject, messages: MultiremiTaskMessage[]): void {
     if (messages.length === 0) return;
     for (const listener of [...this.taskMessagesListeners]) {
       try {
@@ -826,13 +1168,22 @@ export class StoreContext {
     this.metricCounters.set(key, { name, labels: { ...labels }, value: 1 });
   }
 
+  /**
+   * Record an Issue activity.
+   *
+   * `deferredEvents` is for a caller that owns the transaction: the row is
+   * written now, but the `activity:created` realtime push is queued on the
+   * owner's commit-event queue instead of going out mid-transaction (Postgres is
+   * synchronous, so an immediate push would describe a row a ROLLBACK can
+   * still erase).
+   */
   appendIssueActivity(issueId: string, input: {
     actorType: string;
     actorId?: string | null;
     type: string;
     body?: string | null;
     data?: unknown | null;
-  }): void {
+  }, deferredEvents?: CommitEventQueue): void {
     const id = createId("act");
     const now = nowIso();
     this.db.run(
@@ -872,7 +1223,7 @@ export class StoreContext {
     try {
       const workspaceId = this.issueWorkspaceId(issueId);
       if (!workspaceId) return;
-      this.emitWorkspaceEvent({
+      const event: WorkspaceEvent = {
         type: "activity:created",
         workspaceId,
         actorType: input.actorType,
@@ -889,7 +1240,9 @@ export class StoreContext {
             details: input.data ?? (input.body == null ? null : { body: input.body }),
           },
         },
-      });
+      };
+      if (deferredEvents) deferredEvents.workspace.push(event);
+      else this.emitWorkspaceEvent(event);
     } catch (err) {
       log.warn(`activity:created broadcast skipped for ${issueId}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -930,8 +1283,16 @@ export class StoreContext {
     if (session?.withCode && session.codeRuntimeId) {
       return this.runtimes().getRuntime(session.codeRuntimeId)?.daemonId ?? session.codeRuntimeId;
     }
+    // A Project directory is only assigned to tasks that hold an Issue
+    // workspace — see the creation predicate in `tasks-repo.ts`:
+    // `holdsWorkspace && directoryProjectId && issue?.issueKind !== "intake"`.
+    // A discussion/side Task (holds_workspace = 0) deliberately does not
+    // inherit the directory, so treating it as a directory pin here would
+    // strand it on a machine Project device routing can refuse (MUL-449).
+    if (Number(taskRow.holds_workspace ?? 1) !== 1) return null;
     const issueId = cleanOptionalString(taskRow.issue_id);
     const issue = issueId ? this.issues().getIssue(issueId) : null;
+    if (issue?.issueKind === "intake") return null;
     const chatId = cleanOptionalString(taskRow.chat_session_id);
     const chat = chatId ? this.chat().getChatSession(chatId) : null;
     const projectId = issue?.projectId ?? chat?.projectId;
@@ -1151,7 +1512,11 @@ function notificationGroupForInboxType(type: string): MultiremiNotificationGroup
   return "updates";
 }
 
-export function toInboxItem(row: Row, issue: MultiremiIssue | null): MultiremiInboxItem {
+export function toInboxItem(
+  row: Row,
+  issue: MultiremiIssue | null,
+  parent: Pick<MultiremiIssue, "id" | "key" | "title"> | null = null,
+): MultiremiInboxItem {
   const workspaceId = String(row.workspace_id ?? "local");
   const issueId = nullableString(row.issue_id);
   const memberId = String(row.member_id);
@@ -1166,6 +1531,9 @@ export function toInboxItem(row: Row, issue: MultiremiIssue | null): MultiremiIn
     workspace_id: workspaceId,
     issueId,
     issue_id: issueId,
+    issue_parent_id: parent?.id ?? null,
+    issue_parent_key: parent?.key ?? null,
+    issue_parent_title: parent?.title ?? null,
     memberId,
     member_id: memberId,
     recipientType,

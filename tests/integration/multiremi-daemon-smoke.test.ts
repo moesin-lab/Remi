@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -2283,6 +2284,17 @@ describe("Bun Multiremi daemon smoke", () => {
 
   it("passes an Issue-scoped CODEX_HOME and in-memory key to the ACP provider", async () => {
     const { store, workDir } = daemonTestBed("multiremi-daemon-codex-home-");
+    // This fixture verifies credential delivery, not the live gateway's latency.
+    const originalFetch = globalThis.fetch;
+    const gatewayRequests: string[] = [];
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      if (url.origin === "https://ai.openremi.fun") {
+        gatewayRequests.push(url.pathname);
+        return new Response("fixture unauthorized", { status: 401 });
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch);
     store.upsertRelayConfig("local", "codex", {
       fragment: [
         'model_provider = "OpenAI"',
@@ -2343,6 +2355,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
       const completed = store.getTask(task.id)!;
       expect(completed.status).toBe("completed");
+      expect(gatewayRequests).toContain("/backend-api/codex/models");
       const expectedHome = join(
         workspacesRoot,
         ".runtime",
@@ -2361,6 +2374,7 @@ describe("Bun Multiremi daemon smoke", () => {
       expect(existsSync(join(expectedHome, ".multiremi-session-home.json"))).toBe(true);
     } finally {
       server.stop(true);
+      fetchSpy.mockRestore();
     }
   });
 
@@ -3015,9 +3029,11 @@ describe("Bun Multiremi daemon smoke", () => {
         runtime_name: "lifecycle-runtime",
         provider: "claude",
         workspace_id: "local",
-        workspace_cleanup_capability: process.platform === "linux" ? "available" : "blocked",
+        // Linux anchors through /proc/self/fd and darwin through re-verified
+        // paths; other platforms stay blocked.
+        workspace_cleanup_capability: ["linux", "darwin"].includes(process.platform) ? "available" : "blocked",
       });
-      if (process.platform === "linux") expect(health.workspace_cleanup_error).toBeNull();
+      if (["linux", "darwin"].includes(process.platform)) expect(health.workspace_cleanup_error).toBeNull();
       else expect(health.workspace_cleanup_error).toEqual(expect.any(String));
       expect(typeof health.runtime_id).toBe("string");
       expect(typeof health.cli_version).toBe("string");
@@ -3571,7 +3587,7 @@ describe("Bun Multiremi daemon smoke", () => {
  * `string`.
  */
 function daemonTestBed(tmpPrefix: string): { store: MultiremiStore; workDir: string } {
-  db = new Database(":memory:");
+  db = openSqliteDatabase(":memory:");
   workDir = mkdtempSync(join(tmpdir(), tmpPrefix));
   return { store: new MultiremiStore(db), workDir };
 }

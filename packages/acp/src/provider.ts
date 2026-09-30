@@ -17,9 +17,10 @@ import { createAgentResponse } from "@shared/contracts/provider-types.js";
 import { isCompactionChunk } from "@shared/contracts/compaction.js";
 import { readContextUsage, type ContextUsage } from "@shared/agent-execution.js";
 import { AcpClient } from "./client.js";
+import { AcpSessionFailureError, airMetadata, readSessionFailure, redactProviderError, redactProviderErrorText, record, type AcpSessionFailure } from "./session-failure.js";
 import { resolveAcpProcessLaunch } from "./launch.js";
 import { createAdapter, type AgentAdapter } from "./adapters/index.js";
-import { hasOneMillionContext, resolveClaudeContextModel } from "./adapters/claude-code/model-context.js";
+import { resolveClaudeContextSelection, hasOneMillionContext } from "./adapters/claude-code/model-context.js";
 import type {
   SessionNotification,
   SessionUpdate,
@@ -54,14 +55,21 @@ export interface AcpProviderOptions {
   baseUrl?: string;
   /** Default model. */
   model?: string | null;
+  /** Administrator-declared Claude gateway models using the 1M context window. */
+  claudeOneMillionModels?: readonly string[];
   /** Default timeout in seconds. */
   timeout?: number;
   /** Tools to allow. */
   allowedTools?: string[];
   /** Working directory. */
   cwd?: string;
-  /** Daemon-owned directory mounted as this task execution's literal /tmp. */
+  /**
+   * Daemon-owned directory bound to this task execution. Linux mounts it as the
+   * literal /tmp; macOS (MUL-449) exports it through TMPDIR/TMP/TEMP instead.
+   */
   privateTmpDirectory?: string;
+  /** Platform override for the private-/tmp contract (test injection). */
+  privateTmpPlatform?: NodeJS.Platform;
   /** Inject MCP servers at construction time (ACP wire shape — see {@link McpServerConfig}). */
   getMcpServers?: () => McpServerConfig[];
   /** Extra environment variables for the spawned ACP process. */
@@ -239,8 +247,15 @@ interface PoolEntry {
   pluginPathsKey: string;
   pluginFingerprint: string;
   codexHome: string | null;
+  /** Session env is fixed at creation; a changed declaration requires a new process. */
+  customModelOption: string | null;
+  /** Claude model pinned in the bridge process env, including resumed sessions. */
+  startupModel: string | null;
   /** Values currently in force, so a re-apply is only sent when they change. */
   appliedModel: string | null;
+  /** Last requested model, including an unsuccessful but already attempted declaration. */
+  attemptedModel: string | null;
+  appliedContext: string | null;
   appliedEffort: string | null;
   /** Last permission mode we logged about, so a fallback is reported once per session. */
   warnedPermissionMode: string | null;
@@ -479,6 +494,7 @@ export class AcpProvider implements Provider {
   private _elicitationHandlers = new Map<string, ElicitationHandler>();
   private _sessionToChatId = new Map<string, string>();
   private _lastResponse: AgentResponse | null = null;
+  private _typedSessionFailures: boolean | undefined;
   /** Active-stream wakeups keyed by chatId, fired when the entry's ACP process dies. */
   private _deathListeners = new Map<string, (reason: string) => void>();
 
@@ -490,6 +506,10 @@ export class AcpProvider implements Provider {
 
   get adapter(): AgentAdapter {
     return this._adapter;
+  }
+
+  get typedSessionFailures(): boolean | undefined {
+    return this._typedSessionFailures;
   }
 
   /** Register external handler for permission requests (AskUserQuestion, ExitPlanMode, tool approval). */
@@ -606,8 +626,12 @@ export class AcpProvider implements Provider {
   }
 
   async *sendStream(message: string, options?: SendOptions): AsyncGenerator<ProviderEvent> {
+    const credentials = [this._options.apiKey, ...Object.entries(this._options.env ?? {})
+      .filter(([name]) => /(?:^|_)(?:SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL)(?:_|$)/i.test(name))
+      .map(([, value]) => value)].filter((value): value is string => Boolean(value));
     const chatId = options?.chatId ?? "__default__";
     const entry = await abortableEnsureSession(this._ensureSession(chatId, options), options?.signal);
+    this._typedSessionFailures = entry.client.typedSessionFailures ?? false;
 
     this._activeStreaming.add(chatId);
     entry.lastUsed = Date.now();
@@ -617,6 +641,9 @@ export class AcpProvider implements Provider {
     const eventQueue: ProviderEvent[] = [];
     let promptDone = false;
     let promptError: Error | null = null;
+    const failureState: { failure: AcpSessionFailure | null; compaction: AcpSessionFailure | null } = { failure: null, compaction: null };
+    const turnFailure = () => failureState.failure?.severity === "error"
+      ? failureState.failure : failureState.compaction ?? failureState.failure;
     let resolveWaiting: (() => void) | null = null;
 
     const pushEvent = (evt: ProviderEvent) => {
@@ -637,14 +664,23 @@ export class AcpProvider implements Provider {
     // bookkeeping this guarantees the stream still terminates.
     this._deathListeners.set(chatId, (reason) => {
       promptDone = true;
-      promptError ??= new Error(`ACP agent died unexpectedly (${reason})`);
+      promptError ??= new Error(redactProviderErrorText(`ACP agent died unexpectedly (${reason})`, credentials));
       resolveWaiting?.();
     });
 
     const originalOnUpdate = entry.client["_options"].onSessionUpdate;
     entry.client["_options"].onSessionUpdate = (notification: SessionNotification) => {
       if (notification.sessionId !== entry.acpSessionId) return;
-      const update = notification.update;
+      let update = notification.update;
+      if (update.sessionUpdate === "session_info_update") {
+        const failure = readSessionFailure(update._meta, credentials);
+        if (failure && (failure.severity === "error" || failureState.failure?.severity !== "error")) failureState.failure = failure;
+        if (failure) update = {
+          ...update, _meta: { ...update._meta, jetbrains: {
+            ...record(record(update._meta)?.jetbrains), air: { ...airMetadata(update._meta), sessionFailure: failure },
+          } },
+        };
+      }
       if (update.sessionUpdate === "config_option_update" && update.configOptions) {
         entry.configOptions = update.configOptions;
       } else if (update.sessionUpdate === "config_option_update" && update.id === "model" && typeof update.value === "string") {
@@ -661,10 +697,30 @@ export class AcpProvider implements Provider {
       }
       if (update.sessionUpdate === "agent_message_chunk") {
         const text = extractChunkText((update as Record<string, any>).content);
-        if (!isCompactionChunk(text)) entry.promptState.text += text;
+        if (!isCompactionChunk(text)) {
+          entry.promptState.text += text;
+          if (text.trim() && failureState.compaction) {
+            failureState.compaction = null;
+            console.warn("[AcpProvider] Assistant continued after a context compaction failure");
+          }
+        }
       }
       if (update.sessionUpdate === "tool_call_update") {
         const status = (update as any).status;
+        const compaction = record(record(update._meta)?.contextCompaction);
+        // Claude /compact can resolve end_turn after this failed tool, without
+        // an AIR failure. Only later assistant output in this prompt recovers it.
+        if (status === "failed" && compaction) {
+          const details = redactProviderErrorText(typeof compaction.error === "string" ? compaction.error : "Compacting failed", credentials);
+          failureState.compaction = {
+            id: update.toolCallId, revision: 1, category: "unknown", severity: "error",
+            title: "Context compaction failed",
+            details,
+          };
+          // This failed tool's text also becomes task messages, not just Error.message.
+          update = JSON.parse(JSON.stringify(update, (_key, value) =>
+            typeof value === "string" ? redactProviderErrorText(value, credentials) : value));
+        }
         if (status === "completed" || status === "failed") {
           entry.promptState.completedToolCount++;
         }
@@ -677,20 +733,22 @@ export class AcpProvider implements Provider {
       .prompt(entry.acpSessionId, message, buildMediaContent(options?.media))
       .then((result: PromptResult) => {
         promptDone = true;
+        const failure = readSessionFailure(result._meta, credentials);
+        if (failure && (failure.severity === "error" || failureState.failure?.severity !== "error")) failureState.failure = failure;
         const normalized = this._adapter.normalizePromptResult?.(result);
         if (normalized?.model !== undefined) entry.promptState.usage.model = normalized.model;
         if (normalized?.costUsd != null) entry.promptState.usage.costUsd = normalized.costUsd;
         const responseResult = normalized?.usage !== undefined ? { ...result, usage: normalized.usage } : result;
-        this._lastResponse = buildAgentResponse(entry, responseResult, this._adapter.promptUsageSettleScope);
+        this._lastResponse = buildAgentResponse(entry, responseResult, this._adapter.promptUsageSettleScope, turnFailure());
         if (result.stopReason === "cancelled" || result.stopReason === "interrupted") {
           promptError = new Error("Cancelled");
         }
         resolveWaiting?.();
       })
-      .catch((err: Error) => {
+      .catch((err: unknown) => {
         promptDone = true;
-        promptError = err;
-        console.error(`[AcpProvider] prompt FAILED after ${((Date.now() - promptStartMs) / 1000).toFixed(1)}s: ${err.message}`);
+        promptError = redactProviderError(err, credentials);
+        console.error(`[AcpProvider] prompt FAILED after ${((Date.now() - promptStartMs) / 1000).toFixed(1)}s: ${promptError.message}`);
         resolveWaiting?.();
       });
 
@@ -721,6 +779,8 @@ export class AcpProvider implements Provider {
       entry.lastUsed = Date.now();
     }
 
+    const failure = turnFailure();
+    if (failure?.severity === "error") throw new AcpSessionFailureError(failure, promptError ?? undefined, credentials);
     if (promptError) throw promptError;
   }
 
@@ -784,11 +844,11 @@ export class AcpProvider implements Provider {
     const cwd = options?.cwd ?? this._options.cwd ?? homedir();
     const mcpServers = this._options.getMcpServers?.() ?? [];
     const mcpServersKey = JSON.stringify(mcpServers);
-    const requestedModel = options?.model ?? this._options.model ?? null;
-    const model = this._adapter.agentType === "claude"
-      ? resolveClaudeContextModel(requestedModel,
-        this._options.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT ?? process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT)
-      : requestedModel;
+    const model = options?.model ?? this._options.model ?? null;
+    const startupModel = this._adapter.agentType === "claude" ? model : null;
+    const customModelOption = this._adapter.agentType === "claude"
+      ? resolveClaudeContextSelection(model, this._options.claudeOneMillionModels).customModelOption
+      : null;
     const effort = options?.effort ?? null;
     const pluginPaths = absolutePluginPaths(pluginOptions?.pluginPaths ?? this._options.pluginPaths);
     const pluginPathsKey = JSON.stringify(pluginPaths);
@@ -803,6 +863,16 @@ export class AcpProvider implements Provider {
       throw new Error("Codex Agent Plugins require an isolated CODEX_HOME");
     }
 
+    const sessionMeta = this._adapter.buildSessionMeta({
+      model,
+      permissionMode,
+      claudeEnv: customModelOption ? { ANTHROPIC_CUSTOM_MODEL_OPTION: customModelOption } : undefined,
+      claudeSettings: this._options.claudeSettings,
+      allowedTools: options?.allowedTools ?? this._options.allowedTools,
+      systemPrompt: options?.systemPrompt,
+      pluginPaths,
+    } as Parameters<AgentAdapter["buildSessionMeta"]>[0]);
+
     const existing = this._pool.get(chatId);
     if (existing) {
       const stale =
@@ -811,7 +881,9 @@ export class AcpProvider implements Provider {
         existing.mcpServersKey !== mcpServersKey ||
         existing.pluginPathsKey !== pluginPathsKey ||
         existing.pluginFingerprint !== pluginFingerprint ||
-        existing.codexHome !== codexHome;
+        existing.codexHome !== codexHome ||
+        existing.customModelOption !== customModelOption ||
+        existing.startupModel !== startupModel;
       if (stale && existing.client.alive) {
         const reason = existing.cwd !== cwd
           ? `cwd ${existing.cwd} -> ${cwd}`
@@ -819,7 +891,11 @@ export class AcpProvider implements Provider {
             ? "mcpServers changed"
             : existing.pluginFingerprint !== pluginFingerprint || existing.pluginPathsKey !== pluginPathsKey
               ? "Agent Plugins changed"
-              : "CODEX_HOME changed";
+              : existing.customModelOption !== customModelOption
+                ? "Claude context declaration changed"
+                : existing.startupModel !== startupModel
+                  ? `startup model ${existing.startupModel} -> ${model}`
+                  : "CODEX_HOME changed";
         console.warn(
           `[acp] ${this._adapter.agentType}: recreating session for ${chatId} — ` +
             `${reason} (fixed at process/session creation and cannot be re-applied)`,
@@ -831,7 +907,13 @@ export class AcpProvider implements Provider {
         try {
           if (options?.sessionId && options.sessionId !== existing.acpSessionId) {
             this._sessionToChatId.delete(existing.acpSessionId);
-            const result = await existing.client.loadSession(options.sessionId, cwd, mcpServers);
+            const addDirs = absoluteAdditionalDirectories(options.addDirs, this._adapter.agentType);
+            const officialAddDirs = !!existing.client.initializeResult?.agentCapabilities?.sessionCapabilities?.additionalDirectories;
+            const meta = addDirs.length && !officialAddDirs
+              ? { ...(sessionMeta ?? {}), additionalRoots: addDirs } : sessionMeta;
+            const result = await existing.client.loadSession(options.sessionId, cwd, mcpServers, {
+              additionalDirectories: officialAddDirs ? addDirs : undefined, _meta: meta,
+            });
             existing.acpSessionId = result.sessionId;
             this._adoptSessionState(existing, result);
             this._sessionToChatId.set(existing.acpSessionId, chatId);
@@ -860,16 +942,9 @@ export class AcpProvider implements Provider {
       env.XAI_API_KEY = this._options.apiKey;
     }
     if (this._options.env) Object.assign(env, this._options.env);
+    // The bridge's current-model/effort state reads its process env, not startup metadata.
+    if (startupModel) env.ANTHROPIC_MODEL = startupModel;
     if (codexHome) env.CODEX_HOME = codexHome;
-
-    const sessionMeta = this._adapter.buildSessionMeta({
-      model,
-      claudeSettings: this._options.claudeSettings,
-      allowedTools: options?.allowedTools ?? this._options.allowedTools,
-      systemPrompt: options?.systemPrompt,
-      permissionMode,
-      pluginPaths,
-    } as Parameters<AgentAdapter["buildSessionMeta"]>[0]);
 
     const initializeMeta = this._adapter.buildInitializeMeta?.({
       model,
@@ -890,6 +965,7 @@ export class AcpProvider implements Provider {
       agentType: this._adapter.agentType,
       cwd,
       privateTmpDirectory: this._options.privateTmpDirectory,
+      privateTmpPlatform: this._options.privateTmpPlatform,
       env,
       onPermissionRequest: (params) => this._handlePermission(params),
       onElicitationRequest: (params) => this._handleElicitation(params),
@@ -938,7 +1014,11 @@ export class AcpProvider implements Provider {
         pluginPathsKey,
         pluginFingerprint,
         codexHome,
+        customModelOption,
+        startupModel,
         appliedModel: null,
+        attemptedModel: null,
+        appliedContext: null,
         appliedEffort: null,
         warnedPermissionMode: null,
       };
@@ -963,7 +1043,10 @@ export class AcpProvider implements Provider {
     entry.modes = result.modes;
     entry.configOptions = result.configOptions;
     entry.models = result.models;
+    // Apply the declaration once even when new/resume/load already selected the ID.
     entry.appliedModel = currentConfigValue(result.configOptions, MODEL_OPTION_CATEGORY) ?? result.models?.currentModelId ?? null;
+    entry.attemptedModel = this._adapter.agentType === "claude" ? null : entry.appliedModel;
+    entry.appliedContext = null;
     entry.appliedEffort = currentConfigValue(result.configOptions, EFFORT_OPTION_CATEGORY);
   }
 
@@ -1015,6 +1098,33 @@ export class AcpProvider implements Provider {
     if (entry.modes) entry.modes = { ...entry.modes, currentModeId: effectiveMode };
   }
 
+  private async _applyModel(entry: PoolEntry, model: string): Promise<void> {
+    if (model === entry.attemptedModel && entry.appliedContext === entry.customModelOption) return;
+    if (entry.customModelOption) {
+      try {
+        await this._setConfigOption(entry, MODEL_OPTION_CATEGORY, entry.customModelOption);
+      } catch (error) {
+        if (!entry.client.alive) throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        const applied = await this._setConfigOption(entry, MODEL_OPTION_CATEGORY, model);
+        const actual = currentConfigValue(entry.configOptions, MODEL_OPTION_CATEGORY) ?? entry.models?.currentModelId ?? null;
+        console.warn(
+          `[acp_model_context_fallback] claude: model="${model}", selection="${entry.customModelOption}": ${reason}; ` +
+            `actual="${actual ?? "unknown"}"; ` +
+            (applied && actual === model ? "running with the standard context window"
+              : "standard model not confirmed; keeping the agent's actual selection"),
+        );
+      }
+    } else if (!await this._setConfigOption(entry, MODEL_OPTION_CATEGORY, model)) {
+      return;
+    }
+    // Cache the attempt separately: a skipped fallback must not claim the requested model was applied.
+    entry.appliedModel = currentConfigValue(entry.configOptions, MODEL_OPTION_CATEGORY) ?? entry.models?.currentModelId ?? null;
+    entry.attemptedModel = model;
+    entry.appliedContext = entry.customModelOption;
+    entry.appliedEffort = currentConfigValue(entry.configOptions, EFFORT_OPTION_CATEGORY);
+  }
+
   /**
    * Model first, then effort: switching rewrites the valid effort values and
    * may reset or retain the current effort, depending on the bridge.
@@ -1027,17 +1137,7 @@ export class AcpProvider implements Provider {
       await this._applyExtendedModelAndEffort(entry, model, effort);
       return;
     }
-    if (model && model !== entry.appliedModel) {
-      if (await this._setConfigOption(entry, MODEL_OPTION_CATEGORY, model)) {
-        entry.appliedModel = model;
-        // The agent just rewrote the effort option: codex re-derives it from the
-        // new model's supported list (dist/index.js:29372-29374) and claude
-        // rebuilds and re-clamps it (dist/acp-agent.js:4084-4100). Re-read what
-        // it now reports, or a requested effort equal to the pre-switch value
-        // would look already-applied and be skipped.
-        entry.appliedEffort = currentConfigValue(entry.configOptions, EFFORT_OPTION_CATEGORY);
-      }
-    }
+    if (model) await this._applyModel(entry, model);
     const requestedEffort = effort?.trim() || null;
     if (requestedEffort) {
       const option = selectConfigOption(entry.configOptions, EFFORT_OPTION_CATEGORY);
@@ -1116,7 +1216,7 @@ export class AcpProvider implements Provider {
       if (option?.currentValue === value) return true;
       if (!option) throw new Error(`[acp_model_context_unsupported] Claude cannot select ${value}: no model selector`);
       // Claude ACP resolves full IDs against its SDK modelInfos, including
-      // resolvedModel aliases (e.g. claude-fable-5-1[1m] -> fable[1m]).
+      // resolvedModel aliases (e.g. claude-opus-5-5[1m] -> opus[1m]).
       // Let that resolver validate the request; never silently drop the hint.
       change = { configId: option.id, value };
     }
@@ -1139,7 +1239,10 @@ export class AcpProvider implements Provider {
     if (result?.configOptions) entry.configOptions = result.configOptions;
     if (claudeOneMillion) {
       const selected = currentConfigValue(entry.configOptions, category);
-      if (!selected || !hasOneMillionContext(selected)) {
+      const selectedOption = selectConfigOption(entry.configOptions, category);
+      const declaredCustomRow = entry.customModelOption === value && selectedOption
+        && flattenSelectOptions(selectedOption).some(item => item.value === selected && item.description?.includes(value));
+      if (!selected || (!hasOneMillionContext(selected) && !declaredCustomRow)) {
         throw new Error(`[acp_model_context_unsupported] Claude did not select ${value} (selected: ${selected ?? "unknown"})`);
       }
     } else if (this._adapter.agentType === "codex"
@@ -1442,7 +1545,7 @@ function nonNegativeFinite(value: unknown): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-function buildAgentResponse(entry: PoolEntry, result: PromptResult, settleScope: PromptUsageSettleScope): AgentResponse {
+function buildAgentResponse(entry: PoolEntry, result: PromptResult, settleScope: PromptUsageSettleScope, sessionFailure?: AcpSessionFailure | null): AgentResponse {
   const { usage, text, promptStartTime, completedToolCount, contextUsage } = entry.promptState;
   const durationMs = Date.now() - promptStartTime;
 
@@ -1467,6 +1570,7 @@ function buildAgentResponse(entry: PoolEntry, result: PromptResult, settleScope:
     metadata: {
       stopReason: result.stopReason,
       provider: "acp",
+      ...(sessionFailure ? { sessionFailure } : {}),
       ...(contextUsage ? { contextUsage } : {}),
     },
   });

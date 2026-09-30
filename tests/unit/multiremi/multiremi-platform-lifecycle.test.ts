@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import {
@@ -15,7 +16,7 @@ afterEach(() => {
 
 describe("platform lifecycle", () => {
   it("adds operation idempotency to an existing platform operation table before indexing it", () => {
-    const legacy = new Database(":memory:");
+    const legacy = openSqliteDatabase(":memory:");
     legacy.exec(`CREATE TABLE multiremi_platform_operations (
       id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued',
       driver TEXT NOT NULL, active_slot INTEGER, target_version TEXT, target_ref TEXT,

@@ -4,13 +4,15 @@ import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
-import { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import {
+  HERMETIC_ENV_DEFAULTS,
   HERMETIC_ENV_SENTINEL,
   SCRUBBED_ENV_KEYS,
   SCRUBBED_ENV_PREFIXES,
   isScrubbedEnvKey,
 } from "../setup/hermetic-env-policy.js";
+import { DEFAULT_DB_REPLY_MAX_BYTES } from "@multiremi/observability/request-metrics.js";
 
 /**
  * The backend suite must not read this repo's configuration out of the host shell.
@@ -52,12 +54,28 @@ describe("hermetic test environment", () => {
   });
 
   test("no repo-owned env var survives into the test process", () => {
-    const leaked = Object.keys(process.env).filter(isScrubbedEnvKey).sort();
+    // Variables the preload sets deliberately are exempt from the leak check, but
+    // only at the exact value it set: anything else under the scrubbed prefixes
+    // (a host value, a different default, a leftover from another test) fails.
+    const defaults = HERMETIC_ENV_DEFAULTS as Record<string, string>;
+    const leaked = Object.keys(process.env)
+      .filter((name) => isScrubbedEnvKey(name) && process.env[name] !== defaults[name])
+      .sort();
     expect(
       leaked,
       "these env vars change server behavior and must not be inherited or leaked between "
         + `tests (set and restore them inside the test that needs them): ${leaked.join(", ")}`,
     ).toEqual([]);
+  });
+
+  test("the preload applies every declared default, with the ruled value", () => {
+    for (const [name, value] of Object.entries(HERMETIC_ENV_DEFAULTS)) {
+      expect(process.env[name], `${name} must be set by the preload`).toBe(value);
+    }
+    // MUL-398 C-1: threshold agrees; CI enforces while production observes.
+    expect(HERMETIC_ENV_DEFAULTS.MULTIREMI_PG_REPLY_MAX_BYTES)
+      .toBe(String(DEFAULT_DB_REPLY_MAX_BYTES));
+    expect(HERMETIC_ENV_DEFAULTS.MULTIREMI_PG_REPLY_ENFORCE).toBe("1");
   });
 
   test("the scrub list covers the auth-relevant variables", () => {
@@ -98,7 +116,7 @@ describe("hermetic test environment", () => {
   test("an app built without authToken serves unauthenticated requests", async () => {
     // The exact shape of the MUL-318 false failure: no Authorization header,
     // and the response must not be a 401 produced by an inherited token.
-    const db = new Database(":memory:");
+    const db = openSqliteDatabase(":memory:");
     try {
       const app = createMultiremiApp({ store: new MultiremiStore(db) });
       const res = await app.request("/api/multiremi/projects");

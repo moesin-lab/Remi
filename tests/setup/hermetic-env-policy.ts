@@ -51,7 +51,6 @@ export const SCRUBBED_ENV_KEYS = [
   "JWT_SECRET",
   "CLAUDE_CONFIG_DIR",
   "CODEX_HOME",
-  "CLAUDE_CODE_DISABLE_1M_CONTEXT",
   "OPENAI_API_KEY",
   "OPENVIKING_API_KEY",
   "GOOGLE_API_KEY",
@@ -66,6 +65,37 @@ export const SCRUBBED_ENV_KEYS = [
   "INVOCATION_ID",
   "XPC_SERVICE_NAME",
 ] as const;
+
+/**
+ * Repo-owned variables the preload *sets* after scrubbing, as opposed to leaving
+ * empty.
+ *
+ * `MULTIREMI_PG_REPLY_MAX_BYTES` is here on purpose (MUL-398 C-1): production
+ * and the suite both use an 8 MiB threshold. Production defaults ENFORCE to 0
+ * to preserve existing HTTP behavior; tests explicitly preload ENFORCE=1 so an
+ * unbounded read fails in CI. C-2 needs fresh authorization to flip production.
+ * The threshold value is
+ * duplicated from the source constant rather than imported, so this preload stays
+ * dependency-free; `tests/arch/hermetic-test-env.test.ts` asserts the two agree.
+ *
+ * `MULTIREMI_TEST_LOCK_ORDER_SENTINEL` is set here rather than left to the caller
+ * because it must be ON for the whole suite by default; a developer can still
+ * turn it off explicitly with `MULTIREMI_TEST_LOCK_ORDER_SENTINEL=0`, since
+ * `MULTIREMI_TEST_*` names survive the scrub.
+ *
+ * The guard exempts only these exact keys-with-values. Everything else under the
+ * scrubbed prefixes must still be absent, so this cannot become a general escape
+ * hatch for host configuration.
+ */
+export const HERMETIC_ENV_DEFAULTS: Readonly<Record<string, string>> = {
+  MULTIREMI_PG_REPLY_MAX_BYTES: String(8 * 1_048_576),
+  MULTIREMI_PG_REPLY_ENFORCE: "1",
+  // MUL-405 whole-suite lock-order sentinel. On by default in tests (it is a
+  // check, not a fixture), refused under NODE_ENV=production inside the module,
+  // and a single cached boolean when off. See
+  // `packages/server/src/store/lock-order-sentinel.ts`.
+  MULTIREMI_TEST_LOCK_ORDER_SENTINEL: "1",
+};
 
 /** True when `name` is one of the variables the preload removes. */
 export function isScrubbedEnvKey(name: string): boolean {

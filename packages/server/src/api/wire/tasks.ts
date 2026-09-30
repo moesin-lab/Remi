@@ -3,6 +3,7 @@
 // the two route prefixes are intentionally divergent and must stay diffable.
 import { CHAT_ISSUE_DECOUPLED_FINGERPRINT } from "@multiremi/store/helpers.js";
 import { agentAtTaskTarget, taskExecutionScope } from "@multiremi/contracts/task-execution.js";
+import type { TaskMessageFanoutSubject } from "@multiremi/store/context.js";
 import type {
   MultiremiChatMessage,
   MultiremiDaemonHeartbeatAck,
@@ -22,6 +23,12 @@ type InternalTaskField =
   | "delegated_by_agent_id"
   | "delegationReturnTaskId"
   | "delegation_return_task_id"
+  | "delegatedFromIssueSessionId"
+  | "delegated_from_issue_session_id"
+  | "delegationSkipReason"
+  | "delegation_skip_reason"
+  | "wakeSource"
+  | "wake_source"
   | "issueCreationRestricted"
   | "issue_creation_restricted";
 
@@ -51,6 +58,12 @@ export function taskPublicResponse<T extends MultiremiTask>(task: T): Omit<T, In
     delegated_by_agent_id: _delegatedByAgentIdSnake,
     delegationReturnTaskId: _delegationReturnTaskId,
     delegation_return_task_id: _delegationReturnTaskIdSnake,
+    delegatedFromIssueSessionId: _delegatedFromIssueSessionId,
+    delegated_from_issue_session_id: _delegatedFromIssueSessionIdSnake,
+    delegationSkipReason: _delegationSkipReason,
+    delegation_skip_reason: _delegationSkipReasonSnake,
+    wakeSource: _wakeSource,
+    wake_source: _wakeSourceSnake,
     issueCreationRestricted: _issueCreationRestricted,
     issue_creation_restricted: _issueCreationRestrictedSnake,
     ...publicTask
@@ -115,7 +128,15 @@ export function daemonHeartbeatHttpResponse(ack: MultiremiDaemonHeartbeatAck): R
   return response;
 }
 
-export function taskMessageRealtimePayload(message: MultiremiTaskMessage, task: MultiremiTask): Record<string, unknown> {
+/**
+ * MUL-474: only routing/scope fields are read, so the builder takes the narrow
+ * fan-out subject instead of a whole Task — appending a message must not load
+ * the prompt.
+ */
+export function taskMessageRealtimePayload(
+  message: MultiremiTaskMessage,
+  task: TaskMessageFanoutSubject,
+): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     task_id: message.taskId,
     issue_id: task.issueId,
@@ -735,7 +756,17 @@ function appendDaemonClaimAutopilotContext(store: MultiremiStore, task: Multirem
   response.autopilot_source = run.source;
   if (run.payload != null) response.autopilot_trigger_payload = run.payload;
   const autopilot = store.getAutopilot(run.autopilotId);
-  const repositoryWikiRun = resolveRepositoryWikiAutomation(store, task.workspaceId)?.id === run.autopilotId;
+  // Capability resolution reads roles and plugin bindings; the Agent's Skills cannot
+  // change the answer, so it reads the rows without them.
+  // Capability resolution reads roles and plugin bindings; the Agent's Skills cannot
+  // change the answer, so it reads the Agent rows without them.
+  const repositoryWikiRun = resolveRepositoryWikiAutomation({
+    listAgents: () => store.listAgentsLite(),
+    listAutopilots: (workspaceId) => store.listAutopilots(workspaceId),
+    listAgentPlugins: (workspaceId, options) => store.listAgentPlugins(workspaceId, options),
+    listAgentPluginBindings: (agentId) => store.listAgentPluginBindings(agentId),
+    listAutopilotTriggers: (autopilotId) => store.listAutopilotTriggers(autopilotId),
+  }, task.workspaceId)?.id === run.autopilotId;
   if (repositoryWikiRun && task.repositoryWikiContexts?.length) {
     const scmRevision = autopilotRunSourceRevision(run);
     if (scmRevision) response.scm_revision = scmRevision;
@@ -812,7 +843,10 @@ function taskResultWireValue(task: MultiremiTask): unknown | null {
   };
 }
 
-export function daemonTaskMessageWireResponse(message: MultiremiTaskMessage, task: MultiremiTask): Record<string, unknown> {
+export function daemonTaskMessageWireResponse(
+  message: MultiremiTaskMessage,
+  task: TaskMessageFanoutSubject,
+): Record<string, unknown> {
   const response: Record<string, unknown> = {
     task_id: message.taskId,
     seq: message.seq,

@@ -39,6 +39,10 @@ const HUMAN: readonly CliIdentity[] = ["human"];
 const HUMAN_TASK: readonly CliIdentity[] = ["human", "task"];
 const HUMAN_DAEMON: readonly CliIdentity[] = ["human", "daemon"];
 const DEPRECATED_SINCE = "0.3.0";
+const ABANDON_ISSUE_WORKSPACES_OPTION: CliOptionSpec = {
+  name: "abandon-issue-workspaces", type: "boolean",
+  description: "Explicitly abandon active Issue workspaces and retain their local files",
+};
 
 type OperationPath = string | ((invocation: CommandInvocation, client: CliApiClient) => string | Promise<string>);
 
@@ -138,8 +142,11 @@ function runtimeSpecs(): CommandSpec[] {
     op({ id: "runtime.get", path: ["runtime", "get"], description: "Get a runtime", method: "GET", apiPath: runtime(""), auth: HUMAN_DAEMON, positionals: [ref("runtime")] }),
     op({ id: "runtime.create", path: ["runtime", "create"], description: "Register a runtime", method: "POST", apiPath: "/api/multiremi/runtimes", auth: HUMAN_DAEMON, options: INPUT_OPTIONS, body: withWorkspace }),
     op({ id: "runtime.update", path: ["runtime", "update"], description: "Update a runtime", method: "PATCH", apiPath: runtime(""), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: [...INPUT_OPTIONS, { name: "execution-group", type: "string", valueName: "group-id", description: "Assign this Runtime to an execution group" }], body: (i) => requestBody(i, { execution_group_id: stringOption(i, "execution-group") ?? undefined }) }),
-    op({ id: "runtime.delete", path: ["runtime", "delete"], description: "Delete a runtime after reporting active impact", method: "DELETE", apiPath: runtime(""), mutation: "destructive", auth: HUMAN, positionals: [ref("runtime")], before: runtimeImpact }),
-    op({ id: "runtime.archive-agents-and-delete", path: ["runtime", "archive-agents-and-delete"], description: "Archive active agents and delete a runtime", method: "POST", apiPath: runtime("/archive-agents-and-delete"), mutation: "destructive", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS, before: runtimeImpact }),
+    op({ id: "runtime.delete", path: ["runtime", "delete"], description: "Delete a runtime after reporting active impact", method: "DELETE", apiPath: runtime(""), mutation: "destructive", auth: HUMAN, positionals: [ref("runtime")], before: runtimeImpact,
+      options: [ABANDON_ISSUE_WORKSPACES_OPTION],
+      query: i => ({ abandon_issue_workspaces: booleanOption(i, "abandon-issue-workspaces") ? true : undefined }) }),
+    op({ id: "runtime.archive-agents-and-delete", path: ["runtime", "archive-agents-and-delete"], description: "Archive active agents and delete a runtime", method: "POST", apiPath: runtime("/archive-agents-and-delete"), mutation: "destructive", auth: HUMAN, positionals: [ref("runtime")], options: [...INPUT_OPTIONS, ABANDON_ISSUE_WORKSPACES_OPTION], before: runtimeImpact,
+      body: i => requestBody(i, { abandon_issue_workspaces: booleanOption(i, "abandon-issue-workspaces") ? true : undefined }) }),
     op({ id: "runtime.model.list", path: ["runtime", "model", "list"], description: "List runtime models", method: "GET", apiPath: runtime("/models"), auth: HUMAN_DAEMON, positionals: [ref("runtime")], collections: ["models"] }),
     op({ id: "runtime.model.set", path: ["runtime", "model", "set"], description: "Replace runtime model configuration", method: "PUT", apiPath: runtime("/models"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
     op({ id: "runtime.model.refresh", path: ["runtime", "model", "refresh"], description: "Request a runtime model refresh", method: "POST", apiPath: runtime("/models"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
@@ -345,9 +352,10 @@ function autopilotSpecs(): CommandSpec[] {
     op({ id: "autopilot.create", path: ["autopilot", "create"], description: "Create an autopilot", method: "POST", apiPath: "/api/autopilots", mutation: "write", auth: HUMAN, options: INPUT_OPTIONS, body: withWorkspace }),
     op({ id: "autopilot.update", path: ["autopilot", "update"], description: "Update an autopilot", method: "PATCH", apiPath: base, mutation: "write", auth: HUMAN, positionals: [ref("autopilot")], options: INPUT_OPTIONS }),
     op({ id: "autopilot.delete", path: ["autopilot", "delete"], description: "Delete an autopilot", method: "DELETE", apiPath: base, mutation: "destructive", auth: HUMAN, positionals: [ref("autopilot")] }),
+    autopilotRunGuard(),
     op({ id: "autopilot.run.list", path: ["autopilot", "run", "list"], description: "List autopilot runs including queued schedule targets", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/runs`, auth: HUMAN, positionals: [ref("autopilot")], options: [{ name: "limit", type: "integer", description: "Page size (up to 200)" }, { name: "offset", type: "integer", description: "Number of runs to skip" }], query: (i) => ({ limit: integerOption(i, "limit"), offset: integerOption(i, "offset") }), collections: ["runs"] }),
     op({ id: "autopilot.run.get", path: ["autopilot", "run", "get"], description: "Get an autopilot run", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/runs/${encodePath(positional(i, 1, "run"))}`, auth: HUMAN, positionals: [ref("autopilot"), ref("run")] }),
-    op({ id: "autopilot.run", path: ["autopilot", "run"], description: "Run an autopilot", method: "POST", apiPath: async (i, c) => `${await base(i, c)}/trigger`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot")], options: INPUT_OPTIONS }),
+    op({ id: "autopilot.run-now", path: ["autopilot", "run-now"], description: "Start one run now (same as Run now in the UI); --data '{\"trigger_id\":\"...\"}' selects a schedule trigger", method: "POST", apiPath: async (i, c) => `${await base(i, c)}/trigger`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot")], options: INPUT_OPTIONS }),
     op({ id: "autopilot.delivery.list", path: ["autopilot", "delivery", "list"], description: "List autopilot webhook deliveries", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/deliveries`, auth: HUMAN, positionals: [ref("autopilot")], collections: ["deliveries"] }),
     op({ id: "autopilot.delivery.get", path: ["autopilot", "delivery", "get"], description: "Get an autopilot delivery", method: "GET", apiPath: async (i, c) => `${await base(i, c)}/deliveries/${encodePath(positional(i, 1, "delivery"))}`, auth: HUMAN, positionals: [ref("autopilot"), ref("delivery")] }),
     op({ id: "autopilot.delivery.replay", path: ["autopilot", "delivery", "replay"], description: "Replay an autopilot delivery", method: "POST", apiPath: async (i, c) => `${await base(i, c)}/deliveries/${encodePath(positional(i, 1, "delivery"))}/replay`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot"), ref("delivery")], options: INPUT_OPTIONS }),
@@ -359,6 +367,34 @@ function autopilotSpecs(): CommandSpec[] {
     op({ id: "autopilot.trigger.set-secret", path: ["autopilot", "trigger", "set-secret"], description: "Set a webhook signing secret", method: "PUT", apiPath: async (i, c) => `${await base(i, c)}/triggers/${encodePath(positional(i, 1, "trigger"))}/signing-secret`, mutation: "write", auth: HUMAN, positionals: [ref("autopilot"), ref("trigger")], options: INPUT_OPTIONS }),
     op({ id: "autopilot.scheduler", path: ["autopilot", "scheduler"], description: "Get scheduler state", method: "GET", apiPath: "/api/multiremi/scheduler", auth: HUMAN }),
   ];
+}
+
+/**
+ * MUL-468: `remi autopilot run <autopilot>` used to POST the trigger endpoint and
+ * start a run, while sharing its prefix with the read-only `run list` / `run get`
+ * queries. Two people read it as a query and launched runs they did not want, so
+ * the path is now a guard: it explains the three correct commands and, crucially,
+ * issues no HTTP request at all — not even resolving the autopilot name.
+ */
+function autopilotRunGuard(): CommandSpec {
+  return {
+    id: "autopilot.run.group",
+    path: ["autopilot", "run"],
+    description: "List or inspect autopilot runs (run list | run get); start one with autopilot run-now",
+    auth: HUMAN,
+    mutation: "read",
+    outputs: ["table", "json", "jsonl"],
+    parse: "passthrough",
+    run: async () => {
+      throw new CliError(
+        "usage",
+        "remi autopilot run no longer starts a run; use one of: "
+          + "remi autopilot run list <autopilot>, "
+          + "remi autopilot run get <autopilot> <run>, "
+          + "remi autopilot run-now <autopilot>",
+      );
+    },
+  };
 }
 
 function scmSpecs(): CommandSpec[] {

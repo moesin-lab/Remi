@@ -10,7 +10,8 @@ import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "nod
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { startMultiremiServer } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -52,7 +53,7 @@ process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("ba
 
 try {
   await assertPortAvailable(port);
-  db = new Database(join(root, "configuration.sqlite"));
+  db = openSqliteDatabase(join(root, "configuration.sqlite"));
   const store = new MultiremiStore(db);
   store.ensureLocalWorkspace();
   const user = store.getOrCreateUser({ name: "Configuration smoke user", email: "configuration-smoke@example.test" });

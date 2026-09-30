@@ -1,8 +1,73 @@
 # CLI command migration
 
+`remi issue decision request <source-issue> --kind <kind> --title <title>
+[--body-stdin] [--option <choice>...]` records a non-blocking decision on the
+source issue's parent (or on the source issue itself when it has no parent).
+The requesting task can end its current round after the command returns. The
+parent owner agent answers with `remi issue decision answer <parent> <decision>
+--text <answer> --reason <why> --overturn <how>`, or hands it to a member with
+`remi issue decision escalate <parent> <decision>`. Members can answer or revise
+any decision. `remi issue decision list <parent>` shows the waiting-on-human and
+owner/answered groups; `remi issue decision withdraw <parent> <decision>` removes
+an unanswered request. The answer record ID must be cited as `decision:<id>` in
+subsequent work.
+
 This document is the user-facing migration contract for the Registry-based Remi CLI.
 The machine-readable source of truth remains `cli-capabilities.json`; CI checks this
 table against that manifest.
+
+`remi issue status-pages --statuses todo,in_progress --limit 50
+--include-archived-total --output json` calls `GET /api/issues/status-pages`.
+The response is `{ groups: { [status]: { issues, total, has_more } },
+archived_total? }`. Each bucket contains the same compatibility Issue records
+and total as `/api/issues?status=...&limit=...&offset=0`. Default statuses are
+all seven server statuses, including `cancelled`; `open` normalizes to `todo`.
+The default limit is 50 per status, capped at 500. Only offset 0 is accepted;
+continue each bucket through the existing `/api/issues` route.
+
+`remi issue grouped --include-archived-total --output json` also opts into
+the workspace-wide `archived_total` for assignee boards. Omitting the flag
+preserves the existing response and avoids the additional archive count.
+
+The API reuses the compatibility list query: `workspace_id`, `statuses`/`status`,
+`priorities`/`priority`, `assignee_types`, `assignee_id`, `assignee_ids`,
+`project_id`, `project_ids`, `parent_id`, `top_level_only`, `metadata` (JSON
+equality filters), `include_no_assignee`, `include_no_project`, `include_archived`,
+`archived_only`, `limit`, and `offset`. Lists are comma-separated. CLI options
+use `--workspace`, `--statuses`/`--status`, `--priority`, `--assignee-type`,
+`--assignee`, `--assignee-ids`, `--project`, `--project-ids`, `--parent`,
+`--metadata`, and hyphenated forms of the Boolean flags. Assignee references
+use the shared resolver, including user IDs, member IDs, Agent IDs and names.
+The compatibility list query also accepts the legacy `assignee_type` spelling
+when `assignee_types` is absent; the plural takes precedence, including when
+empty. Native queries retain `assigneeTypes`/`assignee_types` only. The CLI sends
+`assignee_types` for `--assignee-type`.
+Like the existing list, ordering is `updated_at DESC`; `sort_by`, `sort_order`,
+`creator_id` and `involves_user_id` currently have no effect.
+
+`remi issue children <key-or-id>` accepts either reference. Both children batch
+routes resolve `parent_ids` to parent IDs and deduplicate those IDs before
+listing children. A full issue ID resolves globally, whatever workspace is
+selected, so the CLI's default `X-Workspace-ID` never hides a parent the caller
+can access; the workspace only distinguishes keys, numbers and ID prefixes.
+For those, explicit workspace selectors take precedence in this order: query
+`workspace_id` (native requests first check `workspaceId`, then `workspace_id`),
+`X-Workspace-ID`, then `X-Workspace-Slug` resolved to a workspace ID. An unknown
+explicit slug skips keys, numbers and prefixes but still resolves full IDs. With
+no explicit selector, resolution remains unscoped and does not infer token or
+member defaults. Non-ID references follow `getIssueByRef`, like
+`/api/issues/:id/children`: a unique match wins, or, without a workspace
+selector, the unique local row takes precedence among multiple matches. An
+explicit workspace restricts resolution to that workspace's row. Unknown or
+still unresolved references and inaccessible parents are skipped; children must
+also pass the existing workspace access check. Compatibility responses retain
+snake_case Issue fields, while native responses retain camelCase.
+
+`include_archived_total=true` (CLI `--include-archived-total`) adds the
+workspace-wide archived count, independent of other list filters. Omission
+performs no archive count query and omits the field. Buckets, totals, labels
+and the optional count share a SQLite read transaction or a PostgreSQL
+read-only Repeatable Read transaction. The Web pages do not call this API yet.
 
 Agent creation, editing and default-agent commands accept `--provider antigravity`.
 `remi daemon start --provider antigravity` selects the native `agy` runtime;
@@ -168,9 +233,19 @@ managed by `remi workspace`. Use `--runtime-workspace <id>` on `chat create` or
 `issue create|update` to select it. See the [runtime workspace contract](dev/runtime-workspaces.md)
 for local context, directory lifetime, and the immutable execution binding.
 
+`remi runtime delete <runtime> --yes` and `runtime archive-agents-and-delete`
+block on uncleaned Issue workspaces. Add `--abandon-issue-workspaces` only after
+reviewing the affected Issue list. For historical records with no Runtime,
+`remi issue workspace abandon <issue> --yes` releases their task affinity and
+retains local files. Records still attached to a Runtime must use deletion or
+retirement instead. `remi issue workspace <issue>` remains the read command.
+
 `remi runtime prepare [--provider claude|codex]` installs this release's fixed ACP
 and Agent dependencies, verifying executables and ACP initialization without
-switching a running daemon. This local command does not require server authentication.
+switching a running daemon. Without `--provider` it prepares the configured or
+detected providers that have an ACP bundle and skips the rest (such as
+antigravity), succeeding with empty `runtimes` when none remain; an explicit
+`--provider` other than claude or codex is rejected. This local command does not require server authentication.
 Maintainers refresh dependencies before every release with
 `bun run release:prepare --version <next>`; daemons do not poll the registry.
 See [daemon runtime upgrades](daemon-runtime-upgrades.md) for the release and
@@ -258,6 +333,11 @@ remi wiki publish
 remi memory publish
 remi platform operation cancel <operation> --yes
 ```
+
+`remi wiki repository list <repo>` prints document metadata only, matching the
+API list contract from [ADR 0002](adr/0002-repository-wiki-list-without-bodies.md).
+Pass `--include-body --ids <a,b>` (at most 20 ids per request) to fetch bodies
+for specific documents.
 
 ## Current user identity
 
@@ -378,6 +458,41 @@ API changes:
 - CLI context no longer includes `current.chat.issue_id` or `current.bound_issue`.
 - Internal daemon task wire removes `chat_bootstrap_transcript`; cold conversation
   history continues through the existing session projection.
+
+## Autopilot run must not read as a query (MUL-468)
+
+`remi autopilot run <autopilot>` shares its prefix with the read-only
+`remi autopilot run list <autopilot>` and `remi autopilot run get <autopilot>
+<run>`. In the parent help the `run` line borrowed the description of its first
+child ("List autopilot runs including queued schedule targets"), so the trigger
+command read as a query. On 2026-09-27 that misfire launched six unrequested
+autopilot runs and published an unintended release; a second operator read it the
+same way later that day.
+
+Starting one run now has its own verb, matching the UI label:
+
+- `remi autopilot run-now <autopilot>` — POST a run now, the same action as
+  "立即运行 / Run now". `--data '{"trigger_id":"..."}'` selects the schedule
+  trigger to start.
+- `remi autopilot run <autopilot>` — rejects the invocation with a usage error and
+  names the three correct commands. It sends no request at all, not even the
+  autopilot name lookup.
+- `remi autopilot run list|get` — unchanged read-only queries.
+
+**This rename intentionally ships without a compatibility alias.** The repository
+rule that deprecated command paths stay executable for one release assumes the old
+path was a working spelling of the intent. Here the old spelling is exactly the
+hazard: an alias would keep turning a read into a manual run on every Runtime that
+has not upgraded yet, which is how this incident happened twice. The path is
+therefore removed outright and replaced by the guard above, so an un-upgraded CLI
+is the only way to still reach the old behavior.
+
+The same audit found `remi task steer <task>` (write) sharing a prefix with
+`remi task steer list <task>` (read). A bare steer with no `--content`,
+`--content-file`, `--content-stdin`, or `--force-answer` would POST an empty
+directive that the server rejects with 400; the CLI now fails locally before
+sending anything. A Registry constraint test keeps any command that has
+subcommands read-only, with `task.steer` the only registered exception.
 
 ## Deprecated aliases
 

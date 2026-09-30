@@ -15,15 +15,26 @@
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import { Hono } from "hono";
-import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
+import { PostgresSyncDatabase, PostgresReplyTooLargeError, resetDbReplyLimitForTest } from "@multiremi/store/db/postgres.js";
 import {
   createRequestMetricsMiddleware,
+  DEFAULT_DB_REPLY_MAX_BYTES,
   drainRequestMetricsForTest,
   formatServerTiming,
   percentile,
   RequestMetricsRing,
+  RECOMMENDED_DB_REPLY_MAX_BYTES,
   recordDbQuery,
+  resolveDbReplyMaxBytes,
   resolveRequestMetricsOptions,
+  drainPeerWindowMetrics,
+  peerMetricsSnapshot,
+  recordPeerBatch,
+  recordPeerDegraded,
+  recordPeerDropped,
+  recordPeerDuplicate,
+  recordPeerFailure,
+  recordPeerOversizeDropped,
   resetRequestMetricsForTest,
   startRequestMetricsSummary,
   summarizeWindow,
@@ -31,12 +42,27 @@ import {
   type RequestMetricsOptions,
 } from "@multiremi/observability/request-metrics.js";
 
+/**
+ * The value the MUL-386 test preload armed (see `tests/setup/hermetic-env.ts`),
+ * captured before any case mutates it. Cases must restore this rather than
+ * `delete` the key: test files share a process, and a deleted key would leave
+ * later files running with the bridge limit disabled.
+ */
+const PRELOAD_PG_REPLY_MAX_BYTES = process.env.MULTIREMI_PG_REPLY_MAX_BYTES;
+
+function restoreDbReplyLimitEnv(): void {
+  if (PRELOAD_PG_REPLY_MAX_BYTES === undefined) delete process.env.MULTIREMI_PG_REPLY_MAX_BYTES;
+  else process.env.MULTIREMI_PG_REPLY_MAX_BYTES = PRELOAD_PG_REPLY_MAX_BYTES;
+  resetDbReplyLimitForTest();
+}
+
 const OPTIONS: RequestMetricsOptions = {
   enabled: true,
   slowRequestMs: 500,
   summaryIntervalMs: 60_000,
   summaryTopRoutes: 10,
   bufferCapacity: 256,
+  role: "all",
 };
 
 afterEach(() => {
@@ -126,6 +152,18 @@ describe("MUL-367 request metrics — Server-Timing format", () => {
     // the only observable, and it must not contain the token.
     expect(response.headers.get("server-timing")).not.toContain("SECRET_P");
     expect(response.status).toBe(200);
+  });
+
+  it("keeps static status-pages separate from a later overlapping issue-id handler", async () => {
+    const app = new Hono();
+    app.use("*", createRequestMetricsMiddleware(OPTIONS));
+    app.get("/api/issues/status-pages", (c) => c.json({ groups: {} }));
+    app.get("/api/issues/:id", (c) => c.json({ id: c.req.param("id") }));
+    await app.request("/api/issues/status-pages?assignee_id=usr_private");
+    await app.request("/api/issues/iss_private");
+    expect(drainRequestMetricsForTest().samples.map((sample) => sample.route)).toEqual([
+      "/api/issues/status-pages", "/api/issues/:id",
+    ]);
   });
 });
 
@@ -249,6 +287,10 @@ describe("MUL-367 request metrics — slow-request log privacy", () => {
     // Not even the query delimiter survives: the log carries no path at all.
     expect(raw).not.toContain("?token");
 
+    // The pid addition must not touch the response header this same request emits.
+    expect(response.headers.get("server-timing"))
+      .toMatch(/^total;dur=\d+\.\d, db;dur=9\.5, dbp;dur=\d+\.\d, dbq;desc="1", dbb;desc="4096"$/);
+
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     expect(parsed.event).toBe("api_slow_request");
     expect(parsed.method).toBe("POST");
@@ -260,9 +302,11 @@ describe("MUL-367 request metrics — slow-request log privacy", () => {
     expect(typeof parsed.total_ms).toBe("number");
     expect(typeof parsed.ts).toBe("string");
     // The exact field set is the contract the Issue fixed.
+    expect(parsed.pid).toBe(process.pid);
     expect(Object.keys(parsed).sort()).toEqual([
-      "db_bytes", "db_ms", "db_parse_ms", "db_queries", "event", "method", "route", "status", "total_ms", "ts",
+      "db_bytes", "db_ms", "db_parse_ms", "db_queries", "event", "method", "pid", "role", "route", "status", "total_ms", "ts",
     ]);
+    expect(parsed.role).toBe("all");
   });
 
   it("uses <unmatched> for a request that matched no route", async () => {
@@ -304,22 +348,23 @@ describe("MUL-367 request metrics — slow-request log privacy", () => {
 
 describe("MUL-367 request metrics — environment switches", () => {
   it("defaults to enabled with a 500 ms threshold and a one-minute summary", () => {
-    expect(resolveRequestMetricsOptions({})).toEqual({
+    expect(resolveRequestMetricsOptions("all", {})).toEqual({
       enabled: true,
       slowRequestMs: 500,
       summaryIntervalMs: 60_000,
       summaryTopRoutes: 10,
       bufferCapacity: 4096,
+      role: "all",
     });
   });
 
   it("treats 0/false/off as off and ignores unparsable numbers", () => {
     for (const off of ["0", "false", "FALSE", "off", " off "]) {
-      expect(resolveRequestMetricsOptions({ MULTIREMI_REQUEST_METRICS: off }).enabled, off).toBe(false);
+      expect(resolveRequestMetricsOptions("all", { MULTIREMI_REQUEST_METRICS: off }).enabled, off).toBe(false);
     }
-    expect(resolveRequestMetricsOptions({ MULTIREMI_REQUEST_METRICS: "1" }).enabled).toBe(true);
+    expect(resolveRequestMetricsOptions("all", { MULTIREMI_REQUEST_METRICS: "1" }).enabled).toBe(true);
 
-    const invalid = resolveRequestMetricsOptions({
+    const invalid = resolveRequestMetricsOptions("all", {
       MULTIREMI_SLOW_REQUEST_MS: "not-a-number",
       MULTIREMI_METRICS_SUMMARY_INTERVAL_MS: "0",
     });
@@ -328,9 +373,40 @@ describe("MUL-367 request metrics — environment switches", () => {
   });
 
   it("accepts an explicit 0 threshold so every request can be logged", () => {
-    expect(resolveRequestMetricsOptions({ MULTIREMI_SLOW_REQUEST_MS: "0" }).slowRequestMs).toBe(0);
-    expect(resolveRequestMetricsOptions({ MULTIREMI_METRICS_SUMMARY_INTERVAL_MS: "5000" }).summaryIntervalMs)
+    expect(resolveRequestMetricsOptions("all", { MULTIREMI_SLOW_REQUEST_MS: "0" }).slowRequestMs).toBe(0);
+    expect(resolveRequestMetricsOptions("all", { MULTIREMI_METRICS_SUMMARY_INTERVAL_MS: "5000" }).summaryIntervalMs)
       .toBe(5000);
+  });
+});
+
+/**
+ * MUL-386 ruling (Senior大哥, `cmt_s2bvzfer9t94`): production ships the bridge hard
+ * limit DISABLED — unset, empty, non-numeric and negative all resolve to 0, with
+ * no fallback to 8 MB. The test suite arms it from the preload instead; the
+ * PG-backed cases below assert the enabled behaviour explicitly.
+ */
+describe("MUL-386 bridge reply limit — environment resolution", () => {
+  it("defaults to 8 MiB and falls back to it for invalid overrides", () => {
+    expect(resolveDbReplyMaxBytes({})).toBe(8_388_608);
+    expect(resolveDbReplyMaxBytes({ MULTIREMI_PG_REPLY_MAX_BYTES: "" })).toBe(8_388_608);
+    expect(resolveDbReplyMaxBytes({ MULTIREMI_PG_REPLY_MAX_BYTES: "   " })).toBe(8_388_608);
+    for (const invalid of [
+      "abc", "-1", "-8388608", "8mb", "NaN", "Infinity", "1.5",
+      "1\n", "\n1", " 1\n", "1\t", "0x10", "1e3", "+1",
+    ]) {
+      expect(resolveDbReplyMaxBytes({ MULTIREMI_PG_REPLY_MAX_BYTES: invalid }), invalid).toBe(8_388_608);
+    }
+  });
+
+  it("arm exactly when given a non-negative integer", () => {
+    expect(resolveDbReplyMaxBytes({ MULTIREMI_PG_REPLY_MAX_BYTES: "0" })).toBe(0);
+    expect(resolveDbReplyMaxBytes({ MULTIREMI_PG_REPLY_MAX_BYTES: "8388608" })).toBe(8 * 1_048_576);
+    expect(resolveDbReplyMaxBytes({ MULTIREMI_PG_REPLY_MAX_BYTES: " 2097152 " })).toBe(2 * 1_048_576);
+  });
+
+  it("keeps the production and hermetic defaults equal", () => {
+    expect(DEFAULT_DB_REPLY_MAX_BYTES).toBe(8_388_608);
+    expect(PRELOAD_PG_REPLY_MAX_BYTES).toBe(String(RECOMMENDED_DB_REPLY_MAX_BYTES));
   });
 });
 
@@ -363,6 +439,7 @@ describe("MUL-367 request metrics — window aggregation", () => {
         sample({ route: "/api/a", totalMs: 30 }),
         sample({ method: "POST", route: "/api/b", totalMs: 100 }),
       ],
+      role: "ui",
       dropped: 0,
       dbMs: 1000,
       dbQueries: 42,
@@ -381,6 +458,7 @@ describe("MUL-367 request metrics — window aggregation", () => {
     const summary = summarizeWindow({
       windowMs: 10_000,
       samples: [sample({ status: 503, slow: true }), sample({ status: 200 })],
+      role: "runtime",
       dropped: 7,
       dbMs: 2500,
       dbQueries: 5,
@@ -405,11 +483,13 @@ describe("MUL-367 request metrics — window aggregation", () => {
       dbQueries: 0,
       eventLoopLagMaxMs: 0,
       topRoutes: 10,
+      role: "all",
       now: new Date("2026-09-24T12:00:00.000Z"),
     });
     expect(summary).toEqual({
       event: "api_minute_summary",
       ts: "2026-09-24T12:00:00.000Z",
+      pid: process.pid,
       window_ms: 60_000,
       requests: 0,
       status_5xx: 0,
@@ -418,8 +498,39 @@ describe("MUL-367 request metrics — window aggregation", () => {
       db_busy_pct: 0,
       db_queries: 0,
       event_loop_lag_max_ms: 0,
+      role: "all",
       routes: [],
+      // MUL-462: the peer block is always present; with no peer channel it is
+      // the zeroed heartbeat, so the summary shape does not depend on env.
+      peer: {
+        sent: 0, batches: 0, dropped: 0, failed: 0, rtt_p95_ms: 0,
+        oversize_dropped: 0, degraded: 0, duplicates: 0,
+      },
     });
+  });
+
+  it("records nothing when the switch is off, for both DB and peer counters", async () => {
+    // Both hooks are keyed off the same switch, so a deployment that turns
+    // metrics off pays nothing for either — and cannot leak counters into a
+    // later summary through a stale window.
+    const app = new Hono();
+    app.use("*", createRequestMetricsMiddleware({ ...OPTIONS, enabled: false }));
+    app.get("/api/issues/:id", (c) => {
+      recordDbQuery(5, 128);
+      recordPeerBatch({ events: 3, rttMs: 9 });
+      recordPeerDropped(2);
+      recordPeerFailure();
+      return c.json({ ok: true });
+    });
+
+    await app.request("/api/issues/iss_1");
+    const zeroedPeer = {
+      sent: 0, batches: 0, dropped: 0, failed: 0, rtt_p95_ms: 0,
+      oversize_dropped: 0, degraded: 0, duplicates: 0,
+    };
+    expect(peerMetricsSnapshot()).toEqual(zeroedPeer);
+    expect(drainPeerWindowMetrics()).toEqual(zeroedPeer);
+    expect(drainRequestMetricsForTest()).toEqual({ samples: [], dropped: 0 });
   });
 
   it("counts samples past the fixed capacity as dropped and keeps the newest ones", () => {
@@ -455,10 +566,12 @@ describe("MUL-367 request metrics — minute summary timer", () => {
     const summaryLines = lines.filter((line) => line.includes("api_minute_summary"));
     expect(summaryLines).toHaveLength(1);
     const summary = JSON.parse(summaryLines[0]!) as Record<string, unknown>;
+    expect(summary.pid).toBe(process.pid);
     expect(Object.keys(summary).sort()).toEqual([
       "db_busy_pct", "db_queries", "dropped", "event", "event_loop_lag_max_ms",
-      "requests", "routes", "slow", "status_5xx", "ts", "window_ms",
+      "peer", "pid", "requests", "role", "routes", "slow", "status_5xx", "ts", "window_ms",
     ]);
+    expect(summary.role).toBe("all");
     expect(summary.requests).toBe(1);
     expect(summary.db_queries).toBe(1);
     expect(summary.routes).toEqual([
@@ -466,6 +579,69 @@ describe("MUL-367 request metrics — minute summary timer", () => {
     ]);
 
     runtime!.stop();
+  });
+
+  it("carries MUL-461's role and MUL-462's peer block in the same summary line", async () => {
+    // The two features landed independently and both touch this line: role names
+    // the process, peer is a per-window counter block. Merging them must not drop
+    // either — and role must be the configured value, not a hardcoded `all`.
+    const app = new Hono();
+    app.use("*", createRequestMetricsMiddleware({ ...OPTIONS, role: "runtime", bufferCapacity: 64 }));
+    app.get("/api/daemon/runtimes/:id/activity", (c) => c.json({ ok: true }));
+    const runtime = startRequestMetricsSummary({
+      ...OPTIONS, role: "runtime", bufferCapacity: 64, summaryTopRoutes: 10,
+    });
+
+    recordPeerBatch({ events: 4, rttMs: 6 });
+    recordPeerDropped(1);
+
+    const { lines } = await captureConsoleLog(async () => {
+      await app.request("/api/daemon/runtimes/rt_1/activity");
+      runtime!.flush();
+    });
+
+    const summaryLine = lines.find((line) => line.includes("api_minute_summary"));
+    expect(summaryLine).toBeTruthy();
+    const summary = JSON.parse(summaryLine!) as {
+      role?: string;
+      peer?: Record<string, number>;
+    };
+
+    // MUL-461 field, with its own value.
+    expect(summary.role).toBe("runtime");
+    // MUL-462 block, with its own counters — both present, neither clobbering
+    // the other's reading.
+    expect(summary.peer).toMatchObject({ sent: 4, batches: 1, dropped: 1, failed: 0 });
+
+    runtime!.stop();
+  });
+
+  it("reports this window's peer counters and resets them for the next one", () => {
+    // MUL-462: the peer block is per-window, not a running total, so a burst of
+    // cross-process forwarding in one minute is not smeared across the next.
+    recordPeerBatch({ events: 3, rttMs: 4 });
+    recordPeerBatch({ events: 5, rttMs: 8 });
+    recordPeerDropped(2);
+    recordPeerFailure();
+    recordPeerOversizeDropped();
+    recordPeerDegraded();
+    recordPeerDuplicate();
+
+    const first = drainPeerWindowMetrics();
+    expect(first).toEqual({
+      sent: 8, batches: 2, dropped: 2, failed: 1, rtt_p95_ms: 8,
+      oversize_dropped: 1, degraded: 1, duplicates: 1,
+    });
+    expect(drainPeerWindowMetrics()).toEqual({
+      sent: 0, batches: 0, dropped: 0, failed: 0, rtt_p95_ms: 0,
+      oversize_dropped: 0, degraded: 0, duplicates: 0,
+    });
+
+    // The lifetime view keeps the totals the health endpoint reports.
+    expect(peerMetricsSnapshot()).toMatchObject({
+      sent: 8, batches: 2, dropped: 2, failed: 1,
+      oversize_dropped: 1, degraded: 1, duplicates: 1,
+    });
   });
 
   it("creates no timer when metrics are disabled", () => {
@@ -495,7 +671,7 @@ async function postgresReachable(): Promise<boolean> {
 
 const pgAvailable = await postgresReachable();
 if (!pgAvailable) {
-  console.warn(`[mul367-metrics] Postgres not reachable at ${PG_URL} — skipping the real-bridge checks.`);
+  console.warn("[mul367-metrics] Test Postgres not reachable; skipping the real-bridge checks.");
 }
 
 describe.skipIf(!pgAvailable)("MUL-367 request metrics — real Postgres bridge", () => {
@@ -519,6 +695,221 @@ describe.skipIf(!pgAvailable)("MUL-367 request metrics — real Postgres bridge"
       expect(Number(timing.dbb!.desc)).toBeGreaterThan(0);
       expect(timing.db!.dur).toBeGreaterThan(0);
     } finally {
+      database.close();
+    }
+  });
+});
+
+/**
+ * MUL-386 C.1 — the PG bridge reply guardrails.
+ *
+ * Two behaviours, both about the number that crossed the bridge:
+ *   - a reply over 1 MB logs `api_large_db_reply`, with the Hono route PATTERN
+ *     and the byte count and nothing else;
+ *   - a reply over the hard limit is refused before decode/parse.
+ *
+ * The privacy assertions are structural: the emitted line is compared against the
+ * exact expected key set, so a future field (SQL text, a parameter, the real path)
+ * fails the test instead of quietly shipping.
+ */
+/**
+ * These cases need a real `PostgresSyncDatabase`: the guardrail lives in the
+ * bridge, which does not exist in the SQLite path. Skipped, never failed, when no
+ * Postgres is reachable — the same contract as the other PG-backed suites.
+ */
+describe.skipIf(!pgAvailable)("MUL-386 bridge reply guardrails", () => {
+  /** Big enough to exceed the 1 MB default warning threshold. */
+  const BIG_ROWS = "x".repeat(1_200_000);
+
+  /** Collect stdout lines, tolerating a throwing operation so lines survive. */
+  async function capture<T>(run: () => Promise<T> | T): Promise<{ lines: string[]; result: T | null; error: unknown }> {
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map((arg) => String(arg)).join(" ")); };
+    try {
+      return { lines, result: await run(), error: null };
+    } catch (error) {
+      return { lines, result: null, error };
+    } finally {
+      console.log = original;
+    }
+  }
+
+  it("logs api_large_db_reply with the route pattern and byte count only", async () => {
+    resetDbReplyLimitForTest();
+    const database = new PostgresSyncDatabase(PG_URL);
+    const app = new Hono();
+    app.use("*", createRequestMetricsMiddleware(OPTIONS));
+    app.get("/api/leaky/:id/reply", (c) => {
+      // The secret lives in the path and in a parameter; neither may reach the log.
+      const rows = database.query("SELECT ?::text AS payload").all(BIG_ROWS) as Array<{ payload: string }>;
+      return c.json({ bytes: rows[0]?.payload.length ?? 0 });
+    });
+
+    try {
+      const { lines } = await capture(() => app.request("/api/leaky/super-secret-id/reply"));
+      const event = lines.map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find((line) => line.event === "api_large_db_reply");
+      expect(event).toBeDefined();
+      // Exact key set: no SQL text, no params, no real path, no query string.
+      expect(Object.keys(event!).sort()).toEqual(["bytes", "enforced", "event", "exempt", "limit_bytes", "method", "route", "ts"]);
+      expect(event).toMatchObject({ limit_bytes: 8_388_608, exempt: false, enforced: true });
+      expect(event!.route).toBe("/api/leaky/:id/reply");
+      expect(event!.method).toBe("GET");
+      expect(Number(event!.bytes)).toBeGreaterThan(1_048_576);
+      for (const line of lines) {
+        expect(line).not.toContain("super-secret-id");
+        expect(line).not.toContain("SELECT");
+        expect(line).not.toContain(BIG_ROWS.slice(0, 40));
+      }
+    } finally {
+      database.close();
+    }
+  });
+
+  it("labels a query with no request context as <background>", async () => {
+    resetDbReplyLimitForTest();
+    const database = new PostgresSyncDatabase(PG_URL);
+    try {
+      const { lines } = await capture(() => {
+        database.query("SELECT ?::text AS payload").all(BIG_ROWS);
+      });
+      const event = lines.map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find((line) => line.event === "api_large_db_reply");
+      expect(event).toBeDefined();
+      expect(event!.route).toBe("<background>");
+      expect(event!.method).toBe("<background>");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("refuses a reply over the hard limit before decoding it", async () => {
+    // 2 MB limit, 4 MB payload: refused before any decode/parse work happens.
+    process.env.MULTIREMI_PG_REPLY_MAX_BYTES = String(2 * 1_048_576);
+    resetDbReplyLimitForTest();
+    const database = new PostgresSyncDatabase(PG_URL);
+    const payload = "y".repeat(4 * 1_048_576);
+    const app = new Hono();
+    let caught: unknown;
+    app.use("*", createRequestMetricsMiddleware(OPTIONS));
+    app.get("/api/guardrail-probe", (c) => {
+      database.query("SELECT ?::text AS payload").all(payload);
+      return c.json({ ok: true });
+    });
+    app.onError((error, c) => { caught = error; return c.json({ error: error.message }, 500); });
+    try {
+      const first = await capture(() => app.request("/api/guardrail-probe"));
+      expect(first.result!.status).toBe(500);
+      expect(caught).toBeInstanceOf(PostgresReplyTooLargeError);
+      const rejected = first.lines
+        .map((line) => { try { return JSON.parse(line) as Record<string, unknown>; } catch { return null; } })
+        .find((line) => line?.event === "api_db_reply_rejected");
+      expect(rejected).toBeDefined();
+      // Exact key set: no SQL text, no parameters, not the payload.
+      expect(Object.keys(rejected!).sort()).toEqual(["bytes", "event", "max_bytes", "method", "route", "ts"]);
+      expect(rejected!.bytes).toBeGreaterThan(2 * 1_048_576);
+      expect(rejected!.max_bytes).toBe(2 * 1_048_576);
+      expect(rejected!.route).toBe("/api/guardrail-probe");
+
+      const message = (caught as Error).message;
+      expect(message).toMatch(/postgres reply of \d+ bytes exceeds \d+ bytes bridge limit; paginate or project columns/);
+      expect(message).not.toContain("SELECT");
+      expect(message).not.toContain("y".repeat(16));
+    } finally {
+      restoreDbReplyLimitEnv();
+      database.close();
+    }
+  });
+
+  it("labels a rejected reply with the handler's route pattern", async () => {
+    process.env.MULTIREMI_PG_REPLY_MAX_BYTES = String(2 * 1_048_576);
+    resetDbReplyLimitForTest();
+    const database = new PostgresSyncDatabase(PG_URL);
+    const payload = "y".repeat(4 * 1_048_576);
+    const app = new Hono();
+    app.use("*", createRequestMetricsMiddleware(OPTIONS));
+    app.get("/api/leaky/:id/reply", () => {
+      database.query("SELECT ?::text AS payload").all(payload);
+      return new Response("unreachable");
+    });
+    try {
+      // Hono turns the handler's throw into a 500 response; the point here is the
+      // route label on the guardrail line, not the request's outcome.
+      const { lines } = await capture(async () => {
+        const response = await app.request("/api/leaky/hard-secret-id/reply");
+        // Hono's default error path; asserting the body keeps the case honest
+        // about the request having actually failed rather than being swallowed.
+        return { status: response.status, body: await response.text() };
+      });
+      const rejected = lines
+        .map((line) => { try { return JSON.parse(line) as Record<string, unknown>; } catch { return null; } })
+        .find((line) => line?.event === "api_db_reply_rejected");
+      expect(rejected).toBeDefined();
+      // The handler's pattern, never the wildcard middleware route and never the
+      // real path — the same contract `api_slow_request` follows.
+      expect(rejected!.route).toBe("/api/leaky/:id/reply");
+      expect(rejected!.method).toBe("GET");
+      for (const line of lines) {
+        expect(line).not.toContain("hard-secret-id");
+        expect(line).not.toContain("SELECT");
+      }
+    } finally {
+      restoreDbReplyLimitEnv();
+      database.close();
+    }
+  });
+
+  it("retains 64 MiB for the background transition exception when env is unset", async () => {
+    // C-1 defaults HTTP to 8 MiB while background retains the original ceiling.
+    delete process.env.MULTIREMI_PG_REPLY_MAX_BYTES;
+    resetDbReplyLimitForTest();
+    const database = new PostgresSyncDatabase(PG_URL);
+    try {
+      const size = 9 * 1_048_576;
+      const { result, lines, error } = await capture(
+        () => database.query("SELECT ?::text AS payload").all("z".repeat(size)),
+      );
+      expect(error).toBeNull();
+      expect((result as Array<{ payload: string }>)[0]!.payload.length).toBe(size);
+      const warned = lines
+        .map((line) => { try { return JSON.parse(line) as Record<string, unknown>; } catch { return null; } })
+        .find((line) => line?.event === "api_large_db_reply");
+      expect(warned).toBeDefined();
+      expect(Number(warned!.bytes)).toBeGreaterThan(8 * 1_048_576);
+    } finally {
+      restoreDbReplyLimitEnv();
+      database.close();
+    }
+  });
+
+  it("retains the background exception after an invalid override falls back to 8 MiB", async () => {
+    process.env.MULTIREMI_PG_REPLY_MAX_BYTES = "not-a-number";
+    resetDbReplyLimitForTest();
+    const database = new PostgresSyncDatabase(PG_URL);
+    try {
+      const size = 9 * 1_048_576;
+      const { result, lines, error } = await capture(
+        () => database.query("SELECT ?::text AS payload").all("z".repeat(size)),
+      );
+      expect(error).toBeNull();
+      expect((result as Array<{ payload: string }>)[0]!.payload.length).toBe(size);
+      expect(lines.some((line) => line.includes("api_large_db_reply"))).toBe(true);
+    } finally {
+      restoreDbReplyLimitEnv();
+      database.close();
+    }
+  });
+
+  it("disables the hard limit when the override is 0", async () => {
+    process.env.MULTIREMI_PG_REPLY_MAX_BYTES = "0";
+    resetDbReplyLimitForTest();
+    const database = new PostgresSyncDatabase(PG_URL);
+    try {
+      const { result } = await capture(() => database.query("SELECT ?::text AS payload").all("z".repeat(9 * 1_048_576)));
+      expect((result as Array<{ payload: string }>)[0]!.payload.length).toBe(9 * 1_048_576);
+    } finally {
+      restoreDbReplyLimitEnv();
       database.close();
     }
   });

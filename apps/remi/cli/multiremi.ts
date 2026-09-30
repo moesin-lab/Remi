@@ -21,10 +21,14 @@ import type {
   FeishuBotCancelCandidate,
   FeishuBotCancelResult,
   FeishuBotSessionSnapshot,
+  FeishuDecisionDegradeReason,
+  MultiremiFeishuBotOutboundDelivery,
 } from "@multiremi/contracts/types.js";
 import type { IncomingMessage, TaskStreamingHandler, TaskStreamEvent } from "@connectors/base.js";
 import { MultiremiCliUpdateCoordinator } from "@multiremi/worker/cli-update-coordinator.js";
-import { setLogLevel } from "@shared/logger.js";
+import { createLogger, setLogLevel } from "@shared/logger.js";
+
+const log = createLogger("multiremi-cli");
 import { multiremiVersion } from "@multiremi/version.js";
 import {
   loadMultiremiConfig,
@@ -34,7 +38,21 @@ import {
   type MultiremiCliConfig,
 } from "@multiremi/config.js";
 import { bootFeishuChannel, type FeishuChannelHandle } from "./agent.js";
-import { FeishuConciergeError, type FeishuConciergeHost } from "@multiremi/worker/feishu-concierge.js";
+import { feishuTransportError } from "@connectors/feishu/native-cot.js";
+import { redactFeishuBotError } from "@multiremi/feishu-bot/diagnostics.js";
+import { formatMentionForCard } from "@connectors/feishu/mention.js";
+import {
+  registerDecisionCardInteraction,
+  registerIssueDecisionCardInteraction,
+  registerQuestionCardClient,
+} from "@connectors/feishu/task-interaction.js";
+import { FeishuDeliveryError } from "@shared/feishu-delivery-error.js";
+import { DECISION_RECIPIENT_SENTINEL, decodeDecisionCardBody, questionCardIdempotencyKey } from "@shared/feishu-task-card.js";
+import {
+  FeishuConciergeError,
+  type FeishuConciergeHost,
+  type FeishuOutboundOptions,
+} from "@multiremi/worker/feishu-concierge.js";
 import { ensureAcpBridges, type ProvisionProvider } from "@acp/provision.js";
 import { IssueWorkspaceLifecycleLocker } from "@daemon/agent-runtime/workspace/lifecycle-lock.js";
 import {
@@ -557,6 +575,7 @@ export function controlPlaneConciergeHost(deps: {
   const boot = deps.boot ?? bootFeishuChannel;
   let noMentionChatIds = new Set<string>();
   let displayName = "Remi";
+  let stopQuestionCardClient: (() => void) | undefined;
   return {
     setNoMentionChatIds(chatIds) { noMentionChatIds = new Set(chatIds); },
     async start(assignment) {
@@ -573,6 +592,13 @@ export function controlPlaneConciergeHost(deps: {
         );
       }
       const { config, agent } = assignment;
+      stopQuestionCardClient?.();
+      stopQuestionCardClient = registerQuestionCardClient(config.app_id, {
+        getRequest: (taskId, requestId) => daemon.getFeishuBotHumanRequest(taskId, requestId),
+        respond: (taskId, requestId, response, credential) => daemon.respondFeishuBotHumanRequest(taskId, requestId, response, credential),
+        getDecision: (issueId, decisionId) => daemon.getFeishuIssueDecision(issueId, decisionId),
+        answer: (issueId, decisionId, answer, credential) => daemon.answerFeishuIssueDecision(issueId, decisionId, { answer, ...credential }),
+      });
       displayName = agent.name;
       const handle = await boot(
         async () => true,
@@ -594,6 +620,11 @@ export function controlPlaneConciergeHost(deps: {
       );
       deps.attach(handle);
       daemon.setBotMenuPublisher(handle.publishBotMenu);
+      // The click map is process-local, so a restart empties it while the cards
+      // stay on screen. Re-register from the control plane before serving.
+      await restoreDecisionCardClicks(daemon, handle).catch((error: unknown) => {
+        log.warn(`Decision card recovery failed: ${redactFeishuBotError(error)}`);
+      });
       // `handle.start` runs for the life of the channel. Nobody awaits it here —
       // the daemon loop owns the process lifetime — so a connector that dies on
       // its own is reported back rather than leaving the settings page showing
@@ -607,6 +638,8 @@ export function controlPlaneConciergeHost(deps: {
       return { botName: agent.name };
     },
     async stop() {
+      stopQuestionCardClient?.();
+      stopQuestionCardClient = undefined;
       const handle = deps.current();
       deps.attach(null);
       deps.daemon()?.setBotMenuPublisher(null);
@@ -615,6 +648,14 @@ export function controlPlaneConciergeHost(deps: {
     async sendOutbound(delivery, options) {
       const handle = deps.current();
       if (!handle) throw new Error("Feishu concierge channel is not running");
+      if (delivery.kind) {
+        // Two card families share the lane and the kinds (MUL-407, MUL-412).
+        // A decision delivery names its decision; everything else is a
+        // human-request card.
+        return delivery.decisionId
+          ? sendIssueDecisionLane(handle, delivery, options, deps.daemon())
+          : sendDecisionLane(handle, delivery, options, deps.daemon());
+      }
       if (delivery.attachments?.length) {
         const daemon = deps.daemon();
         if (!daemon) throw new Error("Attachment transport is unavailable");
@@ -660,7 +701,8 @@ export function controlPlaneConciergeHost(deps: {
             taskId, displayName, sessionId: null, signal: options.signal,
             isHumanRequestPending: requestId => daemon.isFeishuBotHumanRequestPending(taskId, requestId),
             getHumanRequest: requestId => daemon.getFeishuBotHumanRequest(taskId, requestId),
-            respondHumanRequest: (requestId, response) => daemon.respondFeishuBotHumanRequest(taskId, requestId, response),
+            prepareHumanRequestCard: (requestId, openId) => daemon.prepareTaskHumanRequestCard(taskId, requestId, openId),
+            respondHumanRequest: (requestId, response, credential) => daemon.respondFeishuBotHumanRequest(taskId, requestId, response, credential),
           }, {
             replyToMessageId: delivery.replyToMessageId ?? undefined,
             receiptMessageIds: delivery.receiptMessageIds,
@@ -685,6 +727,279 @@ export function controlPlaneConciergeHost(deps: {
       return handle.uploadImage(image);
     },
   };
+}
+
+/**
+ * Render one decision-card lane (MUL-407). The control plane builds the card
+ * JSON and owns the request's lifecycle; the host resolves the @, sends or
+ * patches the message, registers the click, and degrades to text when the card
+ * cannot reach anybody.
+ *
+ * Three degradations land here, and all three end in the same place — plain
+ * text carrying the question, its options and the workbench link:
+ * - the control plane already decided nobody is addressable (`delivery.degraded`);
+ * - the `group_owner` lookup this process performs comes back empty;
+ * - Feishu rejects the card with an error that retrying cannot fix.
+ * In the latter two the host reports the reason with the send, so the control
+ * plane skips both the terminal patch and the reminder's @.
+ */
+export async function sendDecisionLane(
+  handle: FeishuChannelHandle,
+  delivery: MultiremiFeishuBotOutboundDelivery,
+  options?: FeishuOutboundOptions,
+  daemon?: MultiremiDaemon,
+): Promise<{ messageId: string }> {
+  const envelope = decodeDecisionCardBody(delivery.body);
+  if (delivery.kind === "decision_card_patch") {
+    const target = delivery.targetMessageId ?? delivery.replyToMessageId;
+    if (!target) throw new FeishuDeliveryError("Decision card patch has no target message", false);
+    // Refuse a body we cannot read rather than PATCHing an empty card over the
+    // live one; the row stays put for a build that understands it.
+    if (!envelope) throw new FeishuDeliveryError("Decision card patch body is not a card envelope", false);
+    await handle.updateProactiveCard(target, envelope.card);
+    // A patch produces no message of its own; the outbox only needs a stable
+    // acknowledgement, and the target id is exactly that.
+    return { messageId: target };
+  }
+  if (delivery.kind === "decision_reminder") {
+    if (envelope && delivery.targetMessageId) await handle.updateProactiveCard(delivery.targetMessageId, envelope.card);
+    const body = envelope?.fallback_text ?? delivery.body;
+    const mention = delivery.mention;
+    const openId = cleanMentionOpenId(mention?.resolvedOpenId ?? mention?.openId);
+    return handle.sendProactiveThreadReply({
+      chatId: delivery.chatId,
+      replyToMessageId: delivery.replyToMessageId ?? undefined,
+      body: openId ? `${formatMentionForCard({ openId, name: "", key: "" })} ${body}` : body,
+      idempotencyKey: delivery.idempotencyKey,
+    });
+  }
+  const degrade = async (reason: FeishuDecisionDegradeReason, openId: string | null) => {
+    const sent = await handle.sendProactiveThreadReply({
+      chatId: delivery.chatId,
+      replyToMessageId: delivery.replyToMessageId ?? undefined,
+      body: envelope?.fallback_text?.trim() || delivery.body,
+      idempotencyKey: delivery.idempotencyKey,
+    });
+    await options?.onDecisionSent?.({ messageId: sent.messageId, interactionOpenId: openId, degraded: reason });
+    return sent;
+  };
+  // The control plane already knows nobody can be addressed.
+  if (delivery.degraded) return degrade(delivery.degraded, null);
+  if (!envelope) throw new FeishuDeliveryError("Decision card body is not a card envelope", true);
+  // `person` names the recipient on the delivery; only `group_owner` needs the
+  // bot token, which is why this process performs that lookup.
+  const resolved = cleanMentionOpenId(delivery.interactionOpenId)
+    ?? cleanMentionOpenId(await handle.resolveProactiveMention(delivery.chatId, { mode: "group_owner" }, options?.signal));
+  options?.signal?.throwIfAborted();
+  if (!resolved) return degrade("unresolved_recipient", null);
+  const card = withDecisionRecipient(envelope.card, resolved);
+  let sent: { messageId: string };
+  try {
+    sent = await handle.sendProactiveCard({
+      chatId: delivery.chatId,
+      replyToMessageId: delivery.replyToMessageId ?? undefined,
+      card,
+      idempotencyKey: questionCardIdempotencyKey(card, delivery.idempotencyKey),
+    });
+  } catch (error) {
+    const failure = feishuTransportError("Decision card", error);
+    // A retryable failure stays on the outbox backoff; only a terminal rejection
+    // is worth replacing with text, because retrying it cannot succeed.
+    if (failure.retryable) throw failure;
+    return degrade("send_failed", resolved);
+  }
+  // Only a card that actually reached the chat is clickable. Registered here
+  // rather than from a Task stream because this lane has none — and persisted
+  // against the request id so a restart can re-register it.
+  registerDecisionCardClick({
+    daemon, appId: handle.appId, chatId: delivery.chatId, messageId: sent.messageId,
+    recipientOpenId: resolved, taskId: delivery.humanRequestTaskId, requestId: delivery.humanRequestId,
+  });
+  await options?.onDecisionSent?.({ messageId: sent.messageId, interactionOpenId: resolved, degraded: null });
+  return sent;
+}
+
+/** Accept only a real bot-scoped open_id; anything else means "no recipient". */
+function cleanMentionOpenId(value: unknown): string | null {
+  return typeof value === "string" && /^ou_[A-Za-z0-9_-]{1,128}$/.test(value) ? value : null;
+}
+
+/**
+ * Render one Issue decision lane (MUL-412).
+ *
+ * Same three shapes as a human-request decision lane — send the card, rewrite it
+ * in place, post the one text nudge — but the identity is the decision rather
+ * than a Task's human request, and the answer is submitted with the operator's
+ * open_id so the server can map it to a member itself.
+ */
+export async function sendIssueDecisionLane(
+  handle: FeishuChannelHandle,
+  delivery: MultiremiFeishuBotOutboundDelivery,
+  options?: FeishuOutboundOptions,
+  daemon?: MultiremiDaemon,
+): Promise<{ messageId: string }> {
+  const issueId = delivery.decisionIssueId;
+  const decisionId = delivery.decisionId;
+  if (!issueId || !decisionId) throw new FeishuDeliveryError("Decision delivery names no decision", false);
+  const envelope = decodeDecisionCardBody(delivery.body);
+  if (delivery.kind === "decision_card_patch") {
+    const target = delivery.targetMessageId ?? delivery.replyToMessageId;
+    if (!target) throw new FeishuDeliveryError("Decision card patch has no target message", false);
+    // The control plane writes the terminal card into the patch row, so the
+    // host sends exactly the state that was committed with the answer — same
+    // contract as a human-request patch.
+    if (!envelope) throw new FeishuDeliveryError("Decision card patch body is not a card envelope", false);
+    await handle.updateProactiveCard(target, envelope.card);
+    return { messageId: target };
+  }
+  if (delivery.kind === "decision_reminder") {
+    if (envelope && delivery.targetMessageId) await handle.updateProactiveCard(delivery.targetMessageId, envelope.card);
+    const body = envelope?.fallback_text ?? delivery.body;
+    const mention = delivery.mention;
+    const openId = cleanMentionOpenId(mention?.resolvedOpenId ?? mention?.openId);
+    return handle.sendProactiveThreadReply({
+      chatId: delivery.chatId,
+      replyToMessageId: delivery.replyToMessageId ?? undefined,
+      body: openId ? `${formatMentionForCard({ openId, name: "", key: "" })} ${body}` : body,
+      idempotencyKey: delivery.idempotencyKey,
+    });
+  }
+  const degrade = async (reason: FeishuDecisionDegradeReason, openId: string | null) => {
+    const sent = await handle.sendProactiveThreadReply({
+      chatId: delivery.chatId,
+      replyToMessageId: delivery.replyToMessageId ?? undefined,
+      body: envelope?.fallback_text?.trim() || delivery.body,
+      idempotencyKey: delivery.idempotencyKey,
+    });
+    await options?.onDecisionSent?.({ messageId: sent.messageId, interactionOpenId: openId, degraded: reason });
+    return sent;
+  };
+  if (delivery.degraded) return degrade(delivery.degraded, null);
+  if (!envelope) throw new FeishuDeliveryError("Decision card body is not a card envelope", true);
+  const resolved = cleanMentionOpenId(delivery.interactionOpenId)
+    ?? cleanMentionOpenId(await handle.resolveProactiveMention(delivery.chatId, { mode: "group_owner" }, options?.signal));
+  options?.signal?.throwIfAborted();
+  if (!resolved) return degrade("unresolved_recipient", null);
+  const card = withDecisionRecipient(envelope.card, resolved);
+  let sent: { messageId: string };
+  try {
+    sent = await handle.sendProactiveCard({
+      chatId: delivery.chatId,
+      replyToMessageId: delivery.replyToMessageId ?? undefined,
+      card,
+      idempotencyKey: questionCardIdempotencyKey(card, delivery.idempotencyKey),
+    });
+  } catch (error) {
+    const failure = feishuTransportError("Decision card", error);
+    if (failure.retryable) throw failure;
+    return degrade("send_failed", resolved);
+  }
+  registerIssueDecisionCardClick({
+    daemon, appId: handle.appId, chatId: delivery.chatId, messageId: sent.messageId,
+    recipientOpenId: resolved, issueId, decisionId,
+  });
+  await options?.onDecisionSent?.({ messageId: sent.messageId, interactionOpenId: resolved, degraded: null });
+  return sent;
+}
+
+/**
+ * Re-register every still-pending card this Runtime sent (MUL-407).
+ *
+ * The click handler lives in this process; a restart empties it while the card
+ * stays visible in Feishu. Recovery cannot replay a presentation checkpoint the
+ * way a Task-stream card does, so it rebuilds each registration from the
+ * delivery row the control plane kept — the request identity the callback name
+ * is derived from, plus the recipient the card was addressed to.
+ */
+export async function restoreDecisionCardClicks(daemon: MultiremiDaemon, handle: FeishuChannelHandle): Promise<void> {
+  const cards = await daemon.listFeishuBotDecisionCards();
+  for (const card of cards) {
+    registerDecisionCardClick({
+      daemon, appId: handle.appId, chatId: card.chatId, messageId: card.messageId,
+      recipientOpenId: card.recipientOpenId, taskId: card.taskId, requestId: card.requestId,
+    });
+  }
+  // The Issue-decision family (MUL-412) is keyed by decision rather than Task,
+  // so it is recovered from its own list.
+  const decisions = await daemon.listFeishuIssueDecisionCards();
+  for (const card of decisions) {
+    registerIssueDecisionCardClick({
+      daemon, appId: handle.appId, chatId: card.chatId, messageId: card.messageId,
+      recipientOpenId: card.recipientOpenId, issueId: card.issueId, decisionId: card.decisionId,
+    });
+  }
+  const total = cards.length + decisions.length;
+  if (total) log.info(`Re-registered ${total} decision card(s) for clicks`);
+}
+
+/**
+ * Register the click handler for a card this host just sent (MUL-407).
+ *
+ * The callback name is derived from the request identity, so answering only
+ * needs the task and request ids — both persisted on the delivery, which is why
+ * a restarted host can rebuild this registration without remembering anything
+ * from the send that is now gone.
+ */
+function registerDecisionCardClick(input: {
+  daemon?: MultiremiDaemon;
+  appId?: string | null;
+  chatId: string;
+  messageId: string;
+  recipientOpenId: string;
+  taskId?: string | null;
+  requestId?: string | null;
+}): void {
+  const { daemon, chatId, messageId, recipientOpenId } = input;
+  const appId = input.appId?.trim();
+  const taskId = input.taskId?.trim();
+  const requestId = input.requestId?.trim();
+  if (!daemon || !appId || !taskId || !requestId) return;
+  registerDecisionCardInteraction({
+    appId, messageId,
+  });
+}
+
+/**
+ * Register the click handler for an Issue decision card this host just sent or
+ * recovered (MUL-412). The callback name derives from the Issue and the
+ * decision, so a restart only needs those two ids plus the recipient.
+ */
+function registerIssueDecisionCardClick(input: {
+  daemon?: MultiremiDaemon;
+  appId?: string | null;
+  chatId: string;
+  messageId: string;
+  recipientOpenId: string;
+  issueId?: string | null;
+  decisionId?: string | null;
+}): void {
+  const { daemon, chatId, messageId, recipientOpenId } = input;
+  const appId = input.appId?.trim();
+  const issueId = input.issueId?.trim();
+  const decisionId = input.decisionId?.trim();
+  if (!daemon || !appId || !issueId || !decisionId) return;
+  registerIssueDecisionCardInteraction({
+    appId, messageId,
+  });
+}
+
+/** Replace the unresolved @ sentinel with the resolved open_id, or drop it. */
+function withDecisionRecipient(card: Record<string, unknown>, openId: string | null): Record<string, unknown> {
+  const elements = (card.body as { elements?: unknown } | undefined)?.elements;
+  if (!Array.isArray(elements)) return card;
+  const marker = `<at id=${DECISION_RECIPIENT_SENTINEL}></at>`;
+  const resolved = openId && /^ou_[A-Za-z0-9_-]+$/.test(openId) ? `<at id=${openId}></at>` : null;
+  card.body = {
+    ...(card.body as Record<string, unknown>),
+    elements: elements.flatMap((element) => {
+      if (!element || typeof element !== "object") return [element];
+      const row = element as Record<string, unknown>;
+      if (row.tag !== "markdown" || typeof row.content !== "string") return [element];
+      if (resolved) return [{ ...row, content: row.content.replace(marker, resolved) }];
+      return row.content === marker ? [] : [row];
+    }),
+  };
+  return card;
 }
 
 export function createFeishuTaskHandler(
@@ -794,8 +1109,9 @@ export function createFeishuTaskHandler(
       displayName: submitted.agentName,
       sessionId: null,
       getHumanRequest: requestId => daemon.getFeishuBotHumanRequest(submitted.taskId, requestId),
-      respondHumanRequest: (requestId, response) =>
-        daemon.respondFeishuBotHumanRequest(submitted.taskId, requestId, response),
+      prepareHumanRequestCard: (requestId, openId) => daemon.prepareTaskHumanRequestCard(submitted.taskId, requestId, openId),
+      respondHumanRequest: (requestId, response, credential) =>
+        daemon.respondFeishuBotHumanRequest(submitted.taskId, requestId, response, credential),
     });
   };
 }

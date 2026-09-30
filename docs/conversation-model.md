@@ -45,7 +45,7 @@ flowchart LR
 
 ### Chat 与 Session
 
-- 创建 Chat 时同步建立唯一默认 `Main` Session；额外 Session 从该 Chat 显式创建。创建 Issue 不再创建 Session。
+- 创建 Chat 时同步建立唯一默认 `Main` Session；额外 Session 从该 Chat 显式创建。创建 Issue 不再创建 Session。旧 Issue 派发入口在首次创建 Task 时，若没有显式 Chat/Session，则通过兼容层懒创建 Chat 所有的默认 Session，以保留委派返回与依赖恢复所需的 lane。
 - Session 的标题、`active`/`archived`、摘要、参与者、事件和 lane 独立存在。切换 Session 或 Agent 会切换 lane。
 - Session 归档会隐藏该工作脉络并禁止创建新的 Session Task，但不等于 Chat 归档。Chat 归档会取消该 Chat 下尚未完成的普通 Chat Task
   与 Session Task；恢复 Chat 后，未单独归档的 Session 可继续使用。
@@ -131,3 +131,5 @@ bun test tests/unit/multiremi/multiremi-feishu-bot-task-bridge.test.ts
 npm run docs:test
 npm run docs:check
 ```
+
+监督者的 Issue 任务恢复操作沿用工作区 organizer 的授权、模式和审计检查；Session Task 同时关联 Chat 不会被误判为普通 Chat Task。普通 Chat 的 redispatch 仍受创建者与任务凭据隔离限制，侧 Session 不能发起监督者 redispatch。

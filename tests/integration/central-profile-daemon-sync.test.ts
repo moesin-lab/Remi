@@ -1,5 +1,6 @@
 import { expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,7 +23,7 @@ it("syncs multiple centrally configured profiles through real HTTP daemon heartb
   delete process.env.REMI_CODEX_ISOLATED_TEST_UNCONFIGURED;
   process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY = Buffer.alloc(32, 31).toString("base64");
   const root = mkdtempSync(join(tmpdir(), "remi-central-profile-sync-"));
-  const db = new Database(":memory:");
+  const db = openSqliteDatabase(":memory:");
   const store = new MultiremiStore(db);
   store.ensureLocalWorkspace();
   const daemonToken = await store.createAccessToken({ name: "Isolated daemon", type: "daemon", workspaceId: "local", daemonId: "central-profile-test", userId: "local" });

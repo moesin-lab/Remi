@@ -1,18 +1,53 @@
 // Autopilot run state, cron scheduling and trigger claiming, the failure-rate
 // auto-pause, analytics, and webhook delivery.
 import { afterEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiScheduler } from "@multiremi/scheduler.js";
 import { MultiremiStore } from "@multiremi/store.js";
+import { StoreContext } from "@multiremi/store/context.js";
 import { configureRepositoryWikiAutomation, createStore, db, metricValue, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
 describe("Multiremi store — autopilots, schedules, and webhooks", () => {
+  for (const rollback of [false, true]) {
+    it(`publishes create-issue autopilot activity ${rollback ? "never on rollback" : "after commit"}`, () => {
+      const store = createStore();
+      store.ensureLocalWorkspace();
+      const agent = store.createAgent({ name: "Create issue owner", provider: "claude" });
+      const autopilot = store.createAutopilot({
+        title: "Queued audit run", assigneeId: agent.id, executionMode: "create_issue",
+      });
+      const events: boolean[] = [];
+      const unsubscribe = store.onWorkspaceEvent((event) => {
+        if (event.type === "activity:created" && (event.payload.entry as { action?: string })?.action === "issue_created") {
+          events.push(db!.inTransaction);
+        }
+      });
+      const original = StoreContext.prototype.appendIssueActivity;
+      if (rollback) StoreContext.prototype.appendIssueActivity = function patched(this: StoreContext, issueId, input, queue) {
+        original.call(this, issueId, input, queue);
+        if (input.type === "issue_created") throw new Error("autopilot rollback injection");
+      };
+      try {
+        if (rollback) expect(() => store.runAutopilot(autopilot.id)).toThrow("autopilot rollback injection");
+        else {
+          const run = store.runAutopilot(autopilot.id);
+          expect(store.listIssueActivity(run.issueId!).filter((entry) => entry.type === "issue_created")).toHaveLength(1);
+        }
+      } finally {
+        StoreContext.prototype.appendIssueActivity = original;
+        unsubscribe();
+      }
+      expect(events).toEqual(rollback ? [] : [false]);
+      if (rollback) expect(store.listIssues().filter((issue) => issue.title === "Queued audit run")).toHaveLength(0);
+    });
+  }
+
   it("does not create status_changed events when the issue archive sweep runs", () => {
     const store = createStore();
     store.ensureLocalWorkspace();
@@ -362,8 +397,8 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
   it("claims due schedule triggers atomically across sqlite connections", () => {
     const dir = mkdtempSync(join(tmpdir(), "multiremi-schedule-claim-"));
     const path = join(dir, "multiremi.db");
-    const dbA = new Database(path);
-    const dbB = new Database(path);
+    const dbA = openSqliteDatabase(path);
+    const dbB = openSqliteDatabase(path);
     try {
       const storeA = new MultiremiStore(dbA);
       const storeB = new MultiremiStore(dbB);
@@ -804,6 +839,28 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(store.listTasksForIssue(issue.id)).toHaveLength(1);
   });
 
+  it("U7 does not match dependency_auto_start_check to a done autopilot", () => {
+    const store = createStore();
+    const agent = store.createAgent({ name: "Done checker", provider: "claude" });
+    const issue = store.createIssue({ title: "Completed prerequisite", status: "in_progress" });
+    const autopilot = store.createAutopilot({ title: "Observe done", assigneeId: agent.id, executionMode: "trigger_issue" });
+    store.createAutopilotTrigger(autopilot.id, {
+      kind: "system_event", eventConfig: { resource: "issue", event: "status_changed",
+        conditions: [{ field: "status", operator: "becomes", value: "done" }] },
+    });
+    store.updateIssue(issue.id, { status: "done" });
+    const rows = db!.query("SELECT id FROM multiremi_system_events WHERE resource_id = ?").all(issue.id) as Array<{ id: string }>;
+    const events = rows.map(({ id }) => store.getSystemEvent(id)!);
+    const check = events.find((event) => event.event === "dependency_auto_start_check")!;
+    const status = events.find((event) => event.event === "status_changed")!;
+    const first = store.dispatchPendingSystemEvents(new Date(check.availableAt));
+    expect(first).toHaveLength(1);
+    expect(first[0]?.eventId).toBe(status.id);
+    expect(store.dispatchPendingSystemEvents(new Date(Date.parse(check.availableAt) + 60_000))).toEqual([]);
+    expect(store.listAutopilotRuns(autopilot.id)).toHaveLength(1);
+    expect(store.getSystemEvent(check.id)?.status).toBe("processed");
+  });
+
   it("does not feed automation-owned task status writes back into the same system event trigger", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Review maintainer", provider: "codex" });
@@ -883,8 +940,8 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
   it("claims each pending system event once across sqlite connections", () => {
     const dir = mkdtempSync(join(tmpdir(), "multiremi-system-event-claim-"));
     const path = join(dir, "multiremi.db");
-    const dbA = new Database(path);
-    const dbB = new Database(path);
+    const dbA = openSqliteDatabase(path);
+    const dbB = openSqliteDatabase(path);
     try {
       const storeA = new MultiremiStore(dbA);
       const storeB = new MultiremiStore(dbB);

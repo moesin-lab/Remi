@@ -28,6 +28,7 @@ import type {
   MultiremiIssueWorkspaceRepo,
   MultiremiIssueWorkspaceStatus,
   MultiremiIssueWorkspaceArchiveBinding,
+  MultiremiIssueDecision,
   MultiremiDaemonSshMeshConfig,
   MultiremiDaemonSshMeshStatus,
   ReportAgentPluginRuntimeStateInput,
@@ -45,6 +46,9 @@ import type {
 } from "@multiremi/contracts/types.js";
 import {
   FEISHU_CONCIERGE_ATTACHMENT_PROTOCOL_VERSION,
+  FEISHU_DECISION_CARD_PROTOCOL_VERSION,
+  FEISHU_ISSUE_DECISION_CARD_PROTOCOL_VERSION,
+  type FeishuDecisionDegradeReason,
   type FeishuPresentationCheckpoint,
   FEISHU_CONCIERGE_OUTBOUND_CLAIM_HEADER,
   MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
@@ -91,6 +95,7 @@ export interface MultiremiRelayEngineWire {
   fragment: string;
   auth_token: string;
   revision: number;
+  one_million_models?: string[];
 }
 export interface MultiremiRelayWire {
   claude: MultiremiRelayEngineWire | null;
@@ -350,7 +355,16 @@ export class MultiremiDaemonClient {
         // Only claimed when this process can actually host the connector, so
         // the control plane never hands the bot to a Runtime that cannot run it.
         ...(supportsFeishuConcierge
-          ? { feishu_concierge_protocol: FEISHU_CONCIERGE_ATTACHMENT_PROTOCOL_VERSION }
+          ? {
+              feishu_concierge_protocol: FEISHU_CONCIERGE_ATTACHMENT_PROTOCOL_VERSION,
+              // MUL-407: this build renders server-built decision cards. The
+              // control plane only enqueues one for a host that says so.
+              feishu_decision_card: FEISHU_DECISION_CARD_PROTOCOL_VERSION,
+              // MUL-412: this build also renders and answers E4 decision
+              // cards. Declared on its own so a host without it is handed no
+              // decision card rather than one whose buttons do nothing.
+              feishu_issue_decision_card: FEISHU_ISSUE_DECISION_CARD_PROTOCOL_VERSION,
+            }
           : {}),
       }, undefined, signal);
     } catch (error) {
@@ -383,6 +397,37 @@ export class MultiremiDaemonClient {
           } : {}),
           ...(parseFeishuPresentation(rawOutbound.presentation) ? { presentation: parseFeishuPresentation(rawOutbound.presentation)! } : {}),
           ...(isFeishuOpenId(rawOutbound.interaction_open_id) ? { interactionOpenId: rawOutbound.interaction_open_id } : {}),
+          ...(typeof rawOutbound.kind === "string" ? {
+            kind: rawOutbound.kind as MultiremiFeishuBotOutboundDelivery["kind"],
+          } : {}),
+          ...(typeof rawOutbound.decision_id === "string" ? {
+            decisionId: rawOutbound.decision_id,
+            decision_id: rawOutbound.decision_id,
+            ...(typeof rawOutbound.decision_issue_id === "string" ? {
+              decisionIssueId: rawOutbound.decision_issue_id,
+              decision_issue_id: rawOutbound.decision_issue_id,
+            } : {}),
+          } : {}),
+          ...(typeof rawOutbound.human_request_id === "string" ? {
+            humanRequestId: rawOutbound.human_request_id,
+            human_request_id: rawOutbound.human_request_id,
+          } : {}),
+          ...(typeof rawOutbound.human_request_task_id === "string" ? {
+            humanRequestTaskId: rawOutbound.human_request_task_id,
+            human_request_task_id: rawOutbound.human_request_task_id,
+          } : {}),
+          ...(typeof rawOutbound.target_message_id === "string" ? {
+            targetMessageId: rawOutbound.target_message_id,
+            target_message_id: rawOutbound.target_message_id,
+          } : {}),
+          ...(typeof rawOutbound.expires_at === "string" ? {
+            expiresAt: rawOutbound.expires_at,
+            expires_at: rawOutbound.expires_at,
+          } : {}),
+          ...(typeof rawOutbound.degraded === "string" ? {
+            degraded: rawOutbound.degraded as MultiremiFeishuBotOutboundDelivery["degraded"],
+            degradeReason: rawOutbound.degraded as MultiremiFeishuBotOutboundDelivery["degraded"],
+          } : {}),
           ...(typeof rawOutbound.task_id === "string" ? {
             taskId: rawOutbound.task_id,
             resumeMessageId: typeof rawOutbound.resume_message_id === "string" ? rawOutbound.resume_message_id : null,
@@ -481,6 +526,8 @@ export class MultiremiDaemonClient {
       error?: string | null;
       presentation?: FeishuPresentationCheckpoint;
       retryable?: boolean;
+      interactionOpenId?: string | null;
+      degraded?: FeishuDecisionDegradeReason | null;
     },
   ): Promise<void> {
     await this.post(
@@ -490,10 +537,92 @@ export class MultiremiDaemonClient {
         status: input.status,
         external_message_id: input.externalMessageId ?? undefined,
         error: input.error ?? undefined,
+        ...(input.interactionOpenId !== undefined ? { interaction_open_id: input.interactionOpenId } : {}),
+        ...(input.degraded !== undefined ? { degraded: input.degraded } : {}),
         presentation: input.presentation,
         retryable: input.retryable,
       },
     );
+  }
+
+  /**
+   * Cards this Runtime must keep answering clicks for (MUL-407). The host calls
+   * this on every start to rebuild the click map it lost with the process.
+   */
+  async listFeishuBotDecisionCards(runtimeId: string): Promise<Array<{
+    requestId: string;
+    taskId: string;
+    chatId: string;
+    messageId: string;
+    recipientOpenId: string;
+  }>> {
+    const resp = await this.get<{ cards?: Array<Record<string, unknown>> }>(
+      `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/decision-cards`,
+    );
+    return (resp.cards ?? []).flatMap((card) => {
+      // Only the human-request family keys on a Task; an Issue decision names
+      // its Issue and decision instead (MUL-412). A row without a `lane`
+      // predates the split and is a human-request card.
+      if (card.lane === "issue_decision") return [];
+      const requestId = typeof card.request_id === "string" ? card.request_id : null;
+      const taskId = typeof card.task_id === "string" ? card.task_id : null;
+      const chatId = typeof card.chat_id === "string" ? card.chat_id : null;
+      const messageId = typeof card.message_id === "string" ? card.message_id : null;
+      const recipientOpenId = typeof card.recipient_open_id === "string" ? card.recipient_open_id : null;
+      return requestId && taskId && chatId && messageId && recipientOpenId
+        ? [{ requestId, taskId, chatId, messageId, recipientOpenId }]
+        : [];
+    });
+  }
+
+  /**
+   * Cards whose submit button answers an E4 decision (MUL-412). A separate
+   * list from the human-request one because the identity a registration needs
+   * differs: an Issue and a decision, not a Task and a request.
+   */
+  async listFeishuIssueDecisionCards(runtimeId: string): Promise<Array<{
+    decisionId: string;
+    issueId: string;
+    chatId: string;
+    messageId: string;
+    recipientOpenId: string;
+  }>> {
+    const resp = await this.get<{ cards?: Array<Record<string, unknown>> }>(
+      `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/decision-cards`,
+    );
+    return (resp.cards ?? []).flatMap((card) => {
+      if (card.lane !== "issue_decision") return [];
+      const decisionId = typeof card.decision_id === "string" ? card.decision_id : null;
+      const issueId = typeof card.issue_id === "string" ? card.issue_id : null;
+      const chatId = typeof card.chat_id === "string" ? card.chat_id : null;
+      const messageId = typeof card.message_id === "string" ? card.message_id : null;
+      const recipientOpenId = typeof card.recipient_open_id === "string" ? card.recipient_open_id : null;
+      return decisionId && issueId && chatId && messageId && recipientOpenId
+        ? [{ decisionId, issueId, chatId, messageId, recipientOpenId }]
+        : [];
+    });
+  }
+
+  getFeishuIssueDecision(issueId: string, decisionId: string): Promise<MultiremiIssueDecision | null> {
+    return this.get<{ decision?: MultiremiIssueDecision | null }>(
+      `/api/daemon/issues/${encodeURIComponent(issueId)}/decisions/${encodeURIComponent(decisionId)}`,
+    ).then(resp => resp.decision ?? null);
+  }
+
+  /**
+   * Answer an E4 decision from a card click (MUL-412). The operator's open_id
+   * is the only identity sent: the server resolves it to a member and refuses
+   * anyone it cannot resolve, so a request body can never name its own answerer.
+   */
+  answerFeishuIssueDecision(
+    issueId: string,
+    decisionId: string,
+    input: { answer: string; operatorOpenId: string; token?: string },
+  ): Promise<MultiremiIssueDecision> {
+    return this.post<{ decision: MultiremiIssueDecision }>(
+      `/api/daemon/issues/${encodeURIComponent(issueId)}/decisions/${encodeURIComponent(decisionId)}/answer`,
+      { answer: input.answer, operator_open_id: input.operatorOpenId, token: input.token },
+    ).then(resp => resp.decision);
   }
 
   async prepareFeishuBotOutboundMention(
@@ -766,8 +895,21 @@ export class MultiremiDaemonClient {
     return response.allowed === true;
   }
 
-  async createTaskHumanRequest(taskId: string, input: { kind: "permission" | "question"; payload: Record<string, unknown> }): Promise<MultiremiTaskHumanRequest> {
-    const resp = await this.post<{ request: MultiremiTaskHumanRequest }>(`/api/daemon/tasks/${taskId}/human-requests`, input);
+  async createTaskHumanRequest(taskId: string, input: {
+    kind: "permission" | "question";
+    payload: Record<string, unknown>;
+    /**
+     * MUL-407: the deadline the control plane records for this request. The
+     * daemon still decides when to expire it; the server publishes the time so
+     * the topic can remind the requester ten minutes before it elapses.
+     */
+    timeoutMs?: number;
+  }): Promise<MultiremiTaskHumanRequest> {
+    // The wire field is snake_case like every other daemon body; `timeoutMs` is
+    // only the ergonomic spelling at the call site.
+    const { timeoutMs, ...rest } = input;
+    const resp = await this.post<{ request: MultiremiTaskHumanRequest }>(`/api/daemon/tasks/${taskId}/human-requests`,
+      timeoutMs === undefined ? rest : { ...rest, timeout_ms: timeoutMs });
     return resp.request;
   }
 
@@ -958,12 +1100,20 @@ export class MultiremiDaemonClient {
     taskId: string,
     requestId: string,
     response: Record<string, unknown>,
+    credential?: { token: string; operatorOpenId: string },
   ): Promise<MultiremiTaskHumanRequest> {
     const result = await this.post<{ request: MultiremiTaskHumanRequest }>(
       `/api/daemon/tasks/${encodeURIComponent(taskId)}/human-requests/${encodeURIComponent(requestId)}/respond`,
-      { response, responded_by: "feishu" },
+      { response, token: credential?.token, operator_open_id: credential?.operatorOpenId },
     );
     return result.request;
+  }
+
+  prepareTaskHumanRequestCard(taskId: string, requestId: string, recipientOpenId: string): Promise<Record<string, unknown>> {
+    return this.post<{ card: Record<string, unknown> }>(
+      `/api/daemon/tasks/${encodeURIComponent(taskId)}/human-requests/${encodeURIComponent(requestId)}/card`,
+      { recipient_open_id: recipientOpenId },
+    ).then(result => result.card);
   }
 
   async reportTaskPrompt(taskId: string, input: { mode: "bootstrap" | "delta"; prompt: string; sha256: string }): Promise<void> {

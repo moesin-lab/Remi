@@ -54,6 +54,10 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 Linux 设置 `MULTIREMI_TEST_DOCKER_RECOVERY=1` 运行隔离的 PostgreSQL 17 恢复和回执对账测试。
 这些脚本不会由普通 `bun test` 自动覆盖；Docker 恢复测试未设置开关时跳过。
 
+完整后端套件使用 Bun 原生 `--shard=1/4` 至 `--shard=4/4` 分片，每片有独立 runner、PostgreSQL 17
+和锁序 sentinel，全部通过才算工作流成功。发现范围仍由 `bunfig.toml` 决定，未改为手选测试清单；
+CLI、前端和 API/Web 镜像构建并行执行，便于尽早发现构建错误。
+
 真实 provider、飞书和浏览器 harness 的成功不能由普通单测或构建绿灯推断。报告验证时写明实际命令、环境、结果和未覆盖项。
 
 ## 测试环境隔离与排查

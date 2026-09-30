@@ -125,6 +125,8 @@ remi platform operation cancel <operation-id> --yes --json
 
 `updaterStatus: offline` 且 `currentRelease/latestRelease` 为空的直接原因不是 Git 缓存或旧 daemon：local profile 默认没有启动 platform-updater，也没有配置独立 updater token 和 release feed，因而 `/api/platform-updater/heartbeat` 从未写入这些字段。`services: []` 同理只表示没有宿主 inspection 心跳，不表示 Docker 中没有服务。安装后必须同时核对 scheduled task 存活、token、feed URL、driver 和首次 heartbeat；只有 release feed 成功才会出现 `latestRelease`。
 
+发布源尚未发布清单或临时不可用时，宿主记录错误并按五分钟间隔重试，仍执行本地恢复、心跳和操作领取。首次成功读取发布源前 `latestRelease` 为空；显式 `check_updates` 仍会报告读取失败。
+
 ## 验证范围
 
 `status` 检查 API `/readyz` 和 Web `/login`，只能证明服务启动。还应验证登录、旧工作区与 Issue 数量、浏览器 API/WS，以及 dev token 无法访问 stable。Agent 执行还需要给对应环境单独注册 Runtime；宿主 Codex 已登录不等于平台已有可用 Runtime。真实 provider、飞书、SSH Mesh 与外部同步各自需要对应验证。

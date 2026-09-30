@@ -68,6 +68,7 @@ const NORMALIZER_RULES = [
   "local timestamp ids (local[-contact|-lark]-<epoch>) -> \"<timestamp>\" suffix",
   "epoch-millisecond numbers (1.5e12..4e12) and *_ms/duration/elapsed/uptime/latency numeric keys -> 0",
   "absolute machine paths (repo root, $HOME, $TMPDIR, upload dir) -> \"<repo>\"/\"<home>\"/\"<tmp>\"/\"<uploads>\"",
+  "root_hint path separators -> / (portable redacted storage paths)",
   "hostname in URL/UNC authorities -> \"<hostname>\"; username in Unix/Windows home paths -> \"<user>\"",
   "package VERSION -> \"<version>\"",
   "non-JSON bodies larger than 2000 bytes -> { __body__: { contentType, bytes, sha256 } }",
@@ -357,8 +358,13 @@ export function scrubString(value: string, identity: SnapshotMachineIdentity = {
   return out;
 }
 
-function normalize(value: unknown, key = ""): unknown {
-  if (typeof value === "string") return scrubString(value);
+export function normalize(value: unknown, key = ""): unknown {
+  if (typeof value === "string") {
+    // root_hint is already redacted (e.g. ...\\session-archives), so it does
+    // not match the absolute-path scrubber. Keep this OS normalization scoped
+    // to the path field; backslashes in ordinary response text are meaningful.
+    return scrubString(key === "root_hint" ? value.replaceAll("\\", "/") : value);
+  }
   if (typeof value === "number") {
     if (TIME_KEY_RE.test(key) || MS_KEY_RE.test(key)) return 0;
     if (Number.isFinite(value) && value >= 1_500_000_000_000 && value <= 4_000_000_000_000) return 0;

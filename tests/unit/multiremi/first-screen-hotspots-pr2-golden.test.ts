@@ -7,7 +7,7 @@ const fixtureDir = `${import.meta.dir}/../../fixtures/multiremi`;
 
 it("matches the pre-PR2 wire response golden byte for byte", async () => {
   expect(`${JSON.stringify(await capturePr2Responses(), null, 2)}\n`)
-    .toBe(readFileSync(`${fixtureDir}/first-screen-hotspots-pr2-golden.json`, "utf8"));
+    .toBe(readFileSync(`${fixtureDir}/first-screen-hotspots-pr2-golden.json`, "utf8").replace(/\r\n/g, "\n"));
 }, 20000);
 
 const dbqGolden = JSON.parse(readFileSync(`${fixtureDir}/first-screen-hotspots-pr2-dbq-golden.json`, "utf8"));

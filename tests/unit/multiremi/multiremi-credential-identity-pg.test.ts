@@ -120,7 +120,7 @@ describe.skipIf(!pgAvailable)("MUL-448 credential identity on PostgreSQL", () =>
     const forged = { ...fixture.headers, "X-Agent-ID": fixture.otherAgentId };
 
     const issue = store.createIssue({ title: "MUL448 R2 PG B1", workspaceId: fixture.workspaceId });
-    const session = store.createIssueSession(issue.id, { title: "PG B1 session" });
+    const session = store.createIssueSession(issue.id, { title: "PG B1 session", createdById: fixture.ownerId });
     const sessionTasksPath = "/api/issues/" + issue.id + "/sessions/" + session.id + "/tasks";
     const taskResponse = await fixture.app.request(sessionTasksPath, {
       method: "POST", headers: forged,

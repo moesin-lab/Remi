@@ -1,15 +1,27 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { signIssueShareId } from "@multiremi/api/helpers/issue-share-tokens.js";
+import { SessionArchiveService } from "@multiremi/session-archive/service.js";
 import { createStore, resetMultiremiTestEnv } from "./helpers.js";
 
-afterEach(resetMultiremiTestEnv);
+let archiveRoot: string | undefined;
+afterEach(() => {
+  resetMultiremiTestEnv();
+  if (archiveRoot) rmSync(archiveRoot, { recursive: true, force: true });
+  archiveRoot = undefined;
+});
 
 describe("collaboration CLI authorization boundaries", () => {
   it("lets an owner task token manage sibling issues in its workspace", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
-    const app = createMultiremiApp({ store, authToken: "root-secret" });
+    archiveRoot = mkdtempSync(join(tmpdir(), "remi-cli-collaboration-archives-"));
+    const app = createMultiremiApp({ store, authToken: "root-secret",
+      sessionArchives: new SessionArchiveService(store, { root: archiveRoot }),
+    });
     const agent = store.createAgent({ name: "Scoped CLI agent", provider: "claude" });
     const current = store.createIssue({ title: "Current issue", workspaceId: "local" });
     const sibling = store.createIssue({ title: "Sibling issue", workspaceId: "local" });
@@ -43,6 +55,10 @@ describe("collaboration CLI authorization boundaries", () => {
       body: JSON.stringify({ content: "Cross-issue coordination remains allowed" }),
     });
     expect(crossIssueComment.status).toBe(201);
+    const crossIssueCommentBody = await crossIssueComment.json();
+    const storedComment = store.getIssueComment(crossIssueCommentBody.id)!;
+    expect(storedComment.taskId).toBe(task.id);
+    expect(storedComment.issueSessionId).toBeNull();
     const child = await app.request("/api/issues", {
       method: "POST",
       headers,

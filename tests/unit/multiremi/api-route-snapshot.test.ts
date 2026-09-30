@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import {
   captureApiSnapshot,
   GOLDEN_PATH,
+  normalize,
   scrubString,
   serializeSnapshot,
   type SnapshotFile,
@@ -30,6 +32,12 @@ function firstDiff(actual: string, expected: string): string | null {
 }
 
 describe("api route golden snapshot", () => {
+  it("normalizes storage root hints across Windows and Unix without changing prose", () => {
+    expect(normalize({ root_hint: "...\\session-archives", body: "literal\\value" }))
+      .toEqual({ root_hint: ".../session-archives", body: "literal\\value" });
+    expect(normalize({ root_hint: ".../session-archives" }))
+      .toEqual({ root_hint: ".../session-archives" });
+  });
   it("scrubs machine identity only in path-shaped contexts", () => {
     const identity = { hostname: "unknown", username: "unknown" };
 
@@ -109,11 +117,12 @@ describe("api route golden snapshot", () => {
   // $TMPDIR is /tmp, a $HOME of /tmp/alice is nested under it, and the shorter
   // rule winning would leave the machine-specific username behind.
   it("applies the longest matching path prefix", () => {
-    const identity = { hostname: "unknown", username: "unknown", homedir: "/tmp/alice" };
+    const temporary = tmpdir().replace(/[/\\]$/, "");
+    const identity = { hostname: "unknown", username: "unknown", homedir: `${temporary}/alice` };
 
-    expect(scrubString("/tmp/alice/private", identity)).toBe("<home>/private");
-    expect(scrubString("/tmp/other/private", identity)).toBe("<tmp>/other/private");
-    expect(scrubString("/tmp/alice", identity)).toBe("<home>");
+    expect(scrubString(`${temporary}/alice/private`, identity)).toBe("<home>/private");
+    expect(scrubString(`${temporary}/other/private`, identity)).toBe("<tmp>/other/private");
+    expect(scrubString(`${temporary}/alice`, identity)).toBe("<home>");
   });
 
   // A replacement token must not become a delimiter for the next rule, or one

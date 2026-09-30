@@ -140,7 +140,9 @@ async function countRoute(
 }
 
 /**
- * Statement ceilings for the owner daemon's happy path.
+ * Business-statement ceilings for the owner daemon's happy path. Mutations
+ * additionally perform exactly one narrow read of the shared update fence;
+ * that safety check cannot cache an "open" answer across API processes.
  *
  * Tight on purpose: each is the measured count at the time of writing, so any of
  * the three regressions this file exists for pushes a route over its ceiling.
@@ -151,6 +153,15 @@ async function countRoute(
  *     rather than by the count, because the projection is what changes.
  */
 const MAX_STATEMENTS = { status: 6, steer: 5, messages: 9 } as const;
+
+function expectMaintenanceGateReads(sql: string[], expected: number): string[] {
+  const gate = sql.filter((statement) => /\bmultiremi_platform_(?:maintenance|operations)\b/.test(statement));
+  expect(gate).toHaveLength(expected);
+  for (const statement of gate) {
+    expect(statement).toMatch(/^SELECT operation\.id FROM multiremi_platform_maintenance maintenance JOIN multiremi_platform_operations operation /);
+  }
+  return sql.filter((statement) => !gate.includes(statement));
+}
 
 /** Statements that must never appear on a task-level poll. */
 const FORBIDDEN_SQL = [
@@ -171,6 +182,7 @@ describe("MUL-474 daemon task-level polls", () => {
   it("bounds GET status and never reads the task payload", async () => {
     const scaffolded = await scaffold();
     const sql = await countRoute(scaffolded, "GET", `/api/daemon/tasks/${scaffolded.fixture.taskId}/status`);
+    expectMaintenanceGateReads(sql, 0);
     expect(sql.length).toBeLessThanOrEqual(MAX_STATEMENTS.status);
     expectNoTaskPayloadReads(sql);
   });
@@ -178,6 +190,7 @@ describe("MUL-474 daemon task-level polls", () => {
   it("bounds GET steer and never reads the task payload", async () => {
     const scaffolded = await scaffold();
     const sql = await countRoute(scaffolded, "GET", `/api/daemon/tasks/${scaffolded.fixture.taskId}/steer`);
+    expectMaintenanceGateReads(sql, 0);
     expect(sql.length).toBeLessThanOrEqual(MAX_STATEMENTS.steer);
     expectNoTaskPayloadReads(sql);
   });
@@ -187,7 +200,8 @@ describe("MUL-474 daemon task-level polls", () => {
     const sql = await countRoute(scaffolded, "POST", `/api/daemon/tasks/${scaffolded.fixture.taskId}/messages`, {
       messages: [{ type: "text", content: "one message" }],
     });
-    expect(sql.length).toBeLessThanOrEqual(MAX_STATEMENTS.messages);
+    expect(expectMaintenanceGateReads(sql, 1).length).toBeLessThanOrEqual(MAX_STATEMENTS.messages);
+    expect(sql.length).toBeLessThanOrEqual(MAX_STATEMENTS.messages + 1);
     expectNoTaskPayloadReads(sql);
   });
 

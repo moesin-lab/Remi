@@ -45,6 +45,13 @@ async function setup() {
     provider: "codex",
     workspaceId: "local",
   });
+  // Preserve the owner-parity contract for upgraded Issue-owned rows. Create
+  // these Sessions before Agents exist so the compatibility bridge cannot
+  // convert the fixture into private Chats; Chat isolation is covered below.
+  const targetIssue = store.createIssue({ title: "Target issue", workspaceId: "local" });
+  const patrolIssue = store.createIssue({ title: "Organizer patrol", workspaceId: "local" });
+  store.getOrCreateDefaultIssueSession(targetIssue.id);
+  store.getOrCreateDefaultIssueSession(patrolIssue.id);
   const supervisorAgent = store.createAgent({
     name: "Organizer",
     provider: "codex",
@@ -57,8 +64,6 @@ async function setup() {
     workspaceId: "local",
     ownerId: "owner",
   });
-  const targetIssue = store.createIssue({ title: "Target issue", workspaceId: "local" });
-  const patrolIssue = store.createIssue({ title: "Organizer patrol", workspaceId: "local" });
   store.addIssueSubscriber(patrolIssue.id, owner.id);
   const supervisorTask = store.createTask({
     agentId: supervisorAgent.id,
@@ -195,7 +200,7 @@ describe("Organizer supervisor privilege layer", () => {
     expect(revokedOldToken.status).toBe(401);
   });
 
-  it("exposes transcript-free inspection metadata while preserving main's owner parity", async () => {
+  it("exposes transcript-free inspection metadata while preserving legacy Issue owner parity", async () => {
     const fixture = await setup();
     const supervisorToken = await grantSupervisor(fixture);
     const normalTaskToken = await fixture.store.createTaskAccessToken(fixture.targetTask, "owner");
@@ -261,6 +266,42 @@ describe("Organizer supervisor privilege layer", () => {
     expect(JSON.stringify(await normalCrossRead.json())).not.toContain("inspect tasks");
   });
 
+  it("keeps private Chat tasks isolated from sibling and supervisor task credentials", async () => {
+    const fixture = await setup();
+    const supervisorToken = await grantSupervisor(fixture);
+    const normalTaskToken = await fixture.store.createTaskAccessToken(fixture.targetTask, "owner");
+    const issue = fixture.store.createIssue({ title: "Private Chat work", workspaceId: "local" });
+    const privateTask = fixture.store.createTask({
+      agentId: fixture.targetAgent.id, issueId: issue.id, prompt: "Private Chat prompt",
+    });
+    expect(privateTask.chatSessionId).not.toBeNull();
+    for (const token of [supervisorToken, normalTaskToken]) {
+      for (const path of [
+        `/api/tasks/${privateTask.id}/inspection`,
+        `/api/multiremi/tasks/${privateTask.id}`,
+      ]) {
+        expect((await fixture.app.request(path, { headers: headers(token.token) })).status).toBe(403);
+      }
+      for (const action of ["steer", "cancel"]) {
+        const response = await fixture.app.request(`/api/tasks/${privateTask.id}/${action}`, {
+          method: "POST", headers: headers(token.token), body: JSON.stringify({ content: "Cross-Chat action" }),
+        });
+        expect(response.status).toBe(403);
+      }
+      const list = await fixture.app.request("/api/multiremi/tasks", { headers: headers(token.token) });
+      expect((await list.json()).tasks.map((task: any) => task.id)).not.toContain(privateTask.id);
+    }
+    expect(fixture.store.getTask(privateTask.id)?.status).toBe("queued");
+    expect(fixture.store.listOrganizerActionsForTask(privateTask.id)).toHaveLength(0);
+    const ownToken = await fixture.store.createTaskAccessToken(privateTask, "owner");
+    for (const token of [fixture.ownerToken, ownToken]) {
+      const ownRead = await fixture.app.request(`/api/tasks/${privateTask.id}/inspection`, {
+        headers: headers(token.token),
+      });
+      expect(ownRead.status).toBe(200);
+    }
+  });
+
   it("keeps redispatch restrictions while allowing baseline actions in report_only", async () => {
     const fixture = await setup();
     const supervisorToken = await grantSupervisor(fixture);
@@ -276,7 +317,7 @@ describe("Organizer supervisor privilege layer", () => {
 
     const ordinaryTarget = fixture.store.createTask({
       agentId: fixture.targetAgent.id,
-      issueId: fixture.store.createIssue({ title: "Owner parity target", workspaceId: "local" }).id,
+      issueId: fixture.targetIssue.id,
       workspaceId: "local",
       prompt: "ordinary owner action",
     });

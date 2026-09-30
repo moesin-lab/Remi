@@ -198,6 +198,7 @@
   "sessions": [
     {
       "id": "ises_3ru5sqbftvq8",
+      "chat_id": null,
       "issue_id": "iss_mul385_long",
       "workspace_id": "local",
       "title": "Main",
@@ -250,6 +251,7 @@
     },
     {
       "id": "ises_mul385_04",
+      "chat_id": null,
       "issue_id": "iss_mul385_long",
       "workspace_id": "local",
       "title": "MUL-385 side session 5",
@@ -312,6 +314,7 @@
     },
     {
       "id": "ises_mul385_03",
+      "chat_id": null,
       "issue_id": "iss_mul385_long",
       "workspace_id": "local",
       "title": "MUL-385 side session 4",
@@ -364,6 +367,7 @@
     },
     {
       "id": "ises_mul385_02",
+      "chat_id": null,
       "issue_id": "iss_mul385_long",
       "workspace_id": "local",
       "title": "MUL-385 side session 3",
@@ -436,6 +440,7 @@
     },
     {
       "id": "ises_mul385_01",
+      "chat_id": null,
       "issue_id": "iss_mul385_long",
       "workspace_id": "local",
       "title": "MUL-385 side session 2",
@@ -498,6 +503,7 @@
     },
     {
       "id": "ises_mul385_00",
+      "chat_id": null,
       "issue_id": "iss_mul385_long",
       "workspace_id": "local",
       "title": "MUL-385 side session 1",

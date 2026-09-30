@@ -21,6 +21,9 @@ async function setup() {
   db!.run("UPDATE multiremi_tasks SET issue_id = ? WHERE id = ?", [issue.id, privateTask.id]);
   store.appendTaskMessages(privateTask.id, [{ type: "text", content: "PRIVATE_CHAT_TRANSCRIPT" }]);
   const publicTask = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Public issue work" });
+  // This fixture exercises historical Issue-only tasks. New Session Tasks also
+  // belong to a private Chat and must not become visible to every Issue reader.
+  db!.run("UPDATE multiremi_tasks SET chat_session_id = NULL, issue_session_id = NULL WHERE id = ?", [publicTask.id]);
   const app = createMultiremiApp({ store, authToken: "test-root", shareSecret: "test-share-secret" });
   return { store, app, issue, chat, privateTask, publicTask, alice: { Authorization: `Bearer ${alice.token}` }, bob: { Authorization: `Bearer ${bob.token}` } };
 }

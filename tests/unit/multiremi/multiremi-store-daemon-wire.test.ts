@@ -172,6 +172,7 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     expect(Object.keys(pendingBody[0]).sort()).toEqual([
       "agent_id",
       "attempt",
+      "chat_session_id",
       "claude_profile",
       "codex_profile",
       "completed_at",
@@ -182,6 +183,8 @@ describe("Multiremi store — Go daemon wire shapes", () => {
       "holds_workspace",
       "id",
       "issue_id",
+      "issue_session_generation",
+      "issue_session_id",
       "kind",
       "max_attempts",
       "plugin_snapshot",
@@ -199,6 +202,9 @@ describe("Multiremi store — Go daemon wire shapes", () => {
       agent_id: boundAgent.id,
       runtime_id: runtime.id,
       issue_id: issue.id,
+      chat_session_id: high.chatSessionId,
+      issue_session_id: high.issueSessionId,
+      issue_session_generation: 1,
       // The daemon reads this to pick between the shared Issue root and a
       // discussion Session's private root, so it must survive the wire.
       holds_workspace: true,
@@ -362,8 +368,9 @@ describe("Multiremi store — Go daemon wire shapes", () => {
       agentId: agent.id,
       runtimeId: runtime.id,
       issueId: secondIssue.id,
-      issueSessionId: null,
-      issueSessionGeneration: null,
+      chatSessionId: second.chatSessionId,
+      issueSessionId: second.issueSessionId,
+      issueSessionGeneration: 1,
       workspaceId: "local",
       prompt: "Second claim",
       agent: {
@@ -961,15 +968,18 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     const unboundWire = daemonTaskClaimResponse(store, store.getTaskWithAgent(unboundTask.id)!);
     expect(unboundWire).not.toHaveProperty("bound_issue");
 
+    // A Session on the bound topic legitimately retains its Feishu identity.
+    // Use a separate Issue to exercise ordinary Issue dispatch without a topic.
+    const ordinaryIssue = store.createIssue({ title: "Ordinary Issue work", workspaceId: "local" });
     const ownedTask = store.createTask({
       agentId: agent.id,
-      issueId: issue.id,
+      issueId: ordinaryIssue.id,
       workspaceId: "local",
       prompt: "Owned Issue work",
     });
     const ownedWire = daemonTaskClaimResponse(store, store.getTaskWithAgent(ownedTask.id)!);
     expect(ownedWire).not.toHaveProperty("bound_issue");
-    expect(ownedWire.issue).toMatchObject({ id: issue.id });
+    expect(ownedWire.issue).toMatchObject({ id: ordinaryIssue.id });
   });
 
   it("keeps a real bound topic task from mutating its Issue or adding an automatic comment", () => {

@@ -40,6 +40,8 @@ flowchart LR
 不是所属 Chat 的通用外键。
 规范 API 位于 `/api/multiremi/chats/:chatId/sessions`，旧 `/api/issues/:issueId/sessions` 只提供受 Chat
 访问控制约束的聚合兼容视图。
+该聚合在批量查询中按 Chat 创建者和 Agent 可见性过滤 Session，再批量读取参与者；
+工作区管理员也不能借 Issue 读取他人的私有 Chat，查询往返次数不随 Session 数量线性增长。
 
 ## 创建与生命周期
 
@@ -78,8 +80,11 @@ flowchart LR
   控制面兼容路径，不会把普通 Chat 输入、消息记录或队列自动并入 Session。
 - 显式 Session Task 同时携带 Chat 与 Session 身份；Session 的 Issue 关联可空。归档的所属 Chat 不能再创建
   Session Task。
+  daemon 协议按执行来源保留 `direct`、`comment`、`autopilot` 等分类；仅普通 Chat Task 使用 `kind=chat`。
 - Session message 是追加事件，不等同于 Issue 评论。只有 Session 当前关联 Issue 且调用兼容 Issue message
   入口时，才同时形成 Issue 评论。
+- Task 凭据在同工作区跨 Issue 评论时保留来源 Task 作为作者审计，但不自动带入来源 Session；显式指定的
+  Session 仍须当前关联目标 Issue，避免把另一个 Issue 的私有会话接到评论中。
 - Task 输出或完整 transcript 不自动成为成果。只有显式 publish 才创建 Session Result；跨 Session 复用
   应使用成果，而不是读取来源 Session 的私有事件。
 

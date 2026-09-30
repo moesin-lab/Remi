@@ -108,6 +108,7 @@ describe("MUL-385 issue detail first-screen response shape", () => {
     const { store, db } = createStore();
     const app = createMultiremiApp({ store, authToken: AUTH_TOKEN });
     const fixture = seedIssueDetailFirstScreenFixture(store, {
+      legacyIssueSessions: true,
       run: (sql, params) => { runPinned(db, sql, params); },
     });
 
@@ -208,6 +209,78 @@ describe("MUL-385 issue detail first-screen query counts", () => {
 
     // An empty input must not issue a statement and must not invent sessions.
     expect(store.listSessionParticipantsForSessions([]).size).toBe(0);
+  });
+
+  it("batches multiple Chats without exposing another creator or an inaccessible private Agent", async () => {
+    const { store, db, probe } = createCountedStore();
+    store.ensureLocalWorkspace();
+    for (const [userId, role] of [["alice", "member"], ["bob", "member"], ["admin", "admin"]] as const) {
+      store.createWorkspaceMember({ id: `mem_first_screen_${userId}`, workspaceId: "local", userId, name: userId, role });
+    }
+    const publicAgent = store.createAgent({ id: "agt_first_screen_public", name: "Shared", provider: "codex", ownerId: "alice", visibility: "workspace" });
+    const privateAgent = store.createAgent({ id: "agt_first_screen_private", name: "Private", provider: "codex", ownerId: "bob", visibility: "private" });
+    const issue = store.createIssue({ id: "iss_first_screen_access", title: "Shared issue", workspaceId: "local" });
+    const addChat = (id: string, creatorId: string, agentId = publicAgent.id) => {
+      const chat = store.createChatSession({ id, agentId, creatorId, workspaceId: "local" });
+      const session = store.getOrCreateDefaultChatSession(chat.id, creatorId);
+      db.run("UPDATE multiremi_issue_sessions SET issue_id = ? WHERE id = ?", [issue.id, session.id]);
+      store.addSessionParticipant(session.id, { participantType: "agent", participantId: agentId });
+      return session.id;
+    };
+    const aliceVisible = addChat("chat_first_screen_alice", "alice");
+    const bobVisible = addChat("chat_first_screen_bob", "bob", privateAgent.id);
+    const alicePrivate = addChat("chat_first_screen_inaccessible", "alice", privateAgent.id);
+    const adminVisible = addChat("chat_first_screen_admin", "admin", privateAgent.id);
+    const inconsistentChat = addChat("chat_first_screen_foreign", "alice");
+    store.createWorkspace({ id: "ws_first_screen_foreign", name: "Foreign", slug: "first-screen-foreign" });
+    db.run("UPDATE multiremi_chat_sessions SET workspace_id = ? WHERE id = ?", ["ws_first_screen_foreign", "chat_first_screen_foreign"]);
+    const foreignAgent = store.createAgent({ id: "agt_first_screen_foreign", name: "Foreign", provider: "codex",
+      workspaceId: "ws_first_screen_foreign", ownerId: "alice", visibility: "workspace" });
+    store.createChatSession({ id: "chat_first_screen_foreign_session", workspaceId: "ws_first_screen_foreign",
+      creatorId: "alice", agentId: foreignAgent.id });
+    const foreignSession = store.getOrCreateDefaultChatSession("chat_first_screen_foreign_session", "alice");
+    db.run("UPDATE multiremi_issue_sessions SET issue_id = ? WHERE id = ?", [issue.id, foreignSession.id]);
+    const app = createMultiremiApp({ store, authToken: AUTH_TOKEN });
+    const headersFor = async (userId: string) => ({ Authorization: `Bearer ${(await store.createAccessToken({
+      name: userId, type: "pat", userId, workspaceId: "local",
+    })).token}` });
+    const aliceHeaders = await headersFor("alice");
+    const path = `/api/issues/${issue.id}/sessions`;
+    const read = async (headers: Record<string, string>) => {
+      const response = await app.request(path, { headers });
+      expect(response.status).toBe(200);
+      return await response.json() as Array<{ id: string; participants: unknown[] }>;
+    };
+    // Warm token verification so the first last-used write does not distort
+    // the comparison against later requests with the same credential.
+    await read(aliceHeaders);
+    probe.reset();
+    expect((await read(aliceHeaders)).map((session) => session.id)).toEqual([aliceVisible]);
+    const initialCount = probe.statements;
+    expect((await read(await headersFor("bob"))).map((session) => session.id)).toEqual([bobVisible]);
+    // Admin may access a private Agent, but remains restricted to their own Chat.
+    expect((await read(await headersFor("admin"))).map((session) => session.id)).toEqual([adminVisible]);
+    expect((await read(AUTH_HEADERS)).map((session) => session.id)).toEqual([]);
+    const outsiders = await headersFor("outsider");
+    expect((await app.request(path, { headers: outsiders })).status).toBe(404);
+    for (let index = 0; index < 12; index += 1) addChat(`chat_first_screen_extra_${index}`, "alice");
+    probe.reset();
+    const expanded = await read(aliceHeaders);
+    expect(expanded).toHaveLength(13);
+    expect(expanded.every((session) => session.participants.length > 0)).toBe(true);
+    expect(expanded.some((session) => session.id === alicePrivate)).toBe(false);
+    expect(expanded.some((session) => session.id === inconsistentChat)).toBe(false);
+    expect(expanded.some((session) => session.id === foreignSession.id)).toBe(false);
+    expect(probe.statements).toBe(initialCount);
+    expect([...probe.bySql.keys()].filter((sql) => sql.includes("FROM multiremi_session_participants"))).toHaveLength(1);
+    const task = store.createTask({ id: "tsk_first_screen_access", agentId: publicAgent.id, prompt: "Credential scope" });
+    const taskCredential = await store.createAccessToken({ name: "Task", type: "task", userId: "alice",
+      agentId: publicAgent.id, taskId: task.id, workspaceId: "local" });
+    const taskSessions = await read({ Authorization: `Bearer ${taskCredential.token}` });
+    expect(taskSessions.map((session) => session.id).sort()).toEqual(expanded.map((session) => session.id).sort());
+    // Private-Agent ownership changes are evaluated afresh on each request.
+    store.updateAgent(privateAgent.id, { ownerId: "alice" });
+    expect((await read(aliceHeaders)).some((session) => session.id === alicePrivate)).toBe(true);
   });
 });
 

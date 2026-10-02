@@ -7,6 +7,7 @@ import { dirname, join, resolve, delimiter, relative, isAbsolute, basename } fro
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import { isIPv4 } from 'node:net';
+import { loadCiImages } from './ci-images.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const profilesRoot = resolve(process.env.REMI_PROFILES_ROOT || join(homedir(), '.remi', 'profiles'));
@@ -118,6 +119,7 @@ function composeArgs(root, ...args) {
   const flags = ['compose', '-p', `remi-${deployment.profile}`, '--env-file', join(root, 'compose.env'), '-f', join(root, 'compose.yml')];
   if (deployment.profile === 'dev') flags.push('-f', join(root, 'compose.dev.yml'));
   if (deployment.profile === 'stable' && existsSync(join(root, 'compose.host-control.yml'))) flags.push('-f', join(root, 'compose.host-control.yml'));
+  if (deployment.profile === 'stable' && args[0] === 'up' && !args.includes('--build')) args = [args[0], '--no-build', ...args.slice(1)];
   return [...flags, ...args];
 }
 
@@ -518,6 +520,27 @@ function buildMissingReleaseImages(root, deployment) {
   for (const service of ['api', 'web']) assertReleaseImageRevision(deployment, service);
 }
 
+function prepareDeploymentImages(root, flags) {
+  const deployment = readJson(join(root, 'deployment.json'));
+  if (deployment.profile !== 'stable' || flags['--build-local'] === 'true') {
+    buildMissingReleaseImages(root, deployment);
+    return deployment;
+  }
+  const manifest = loadCiImages({ deployment, manifestPath: flags['--image-manifest'], root, capture, execute });
+  if (manifest.version !== deployment.version) throw new Error('CI image version does not match the commit package version');
+  const candidate = { ...deployment, apiImage: manifest.apiImage, webImage: manifest.webImage, imageSource: 'ci' };
+  for (const service of ['api', 'web']) {
+    execute('docker', ['pull', candidate[`${service}Image`]]);
+    assertReleaseImageRevision(candidate, service);
+  }
+  const labels = JSON.parse(capture('docker', ['image', 'inspect', '--format', '{{json .Config.Labels}}', candidate.webImage]));
+  if (labels['io.remi.local-profile.hostname'] !== networkSettings(deployment).hostname) throw new Error('CI Web image hostname label mismatch');
+  const verified = withImageIdentities(candidate);
+  saveJson(join(root, 'deployment.json'), verified);
+  writeComposeEnvironment(root, verified);
+  return verified;
+}
+
 function verifyServiceImages(root, requireHealthy = true) {
   const deployment = withImageIdentities(readJson(join(root, 'deployment.json')));
   for (const service of ['api', 'web']) {
@@ -662,12 +685,12 @@ async function hostStage(profile, flags) {
       if (!existsSync(join(previous, 'files.json'))) snapshotProfile(root, previous);
       else restoreProfileSnapshot(root, previous);
       prepare(profile, ref);
-      const deployment = readJson(join(root, 'deployment.json'));
+      let deployment = readJson(join(root, 'deployment.json'));
       if (!deployment.version.startsWith(`${state.targetVersion}-stable.`)) {
         throw new Error(`Commit package version ${deployment.version} does not match manifest ${state.targetVersion}`);
       }
       state = saveOperation(root, state, { phase: 'prepared' });
-      buildMissingReleaseImages(root, deployment);
+      deployment = prepareDeploymentImages(root, flags);
       saveJson(join(root, 'deployment.json'), withImageIdentities(deployment));
       snapshotProfile(root, candidate);
       restoreProfileSnapshot(root, previous);
@@ -887,7 +910,8 @@ async function main() {
   const [profile, action, ...args] = process.argv.slice(2);
   if (!Object.hasOwn(settings, profile) || !action || action === '--help') {
     console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|stop|restart|status|logs|watch|backup|token|host-stage|host-activate|host-recover|host-rollback-stage|host-rollback-activate|host-finalize|host-auth-refresh> [options]');
-    console.log('stable deploy: archive a fixed commit, build, back up existing data, then update containers.');
+    console.log('stable deploy: pull verified CI images for a fixed commit, back up data, then update containers.');
+    console.log('--image-manifest <path>: use a downloaded stable-images.json; --build-local true: explicitly compile locally.');
     console.log('dev deploy + dev watch: build current source, then sync changes without touching stable.');
     console.log('stable --lan-host: bind Web/API to 0.0.0.0 and persist the advertised LAN address across deploys.');
     return;
@@ -897,20 +921,22 @@ async function main() {
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index];
     const value = args[index + 1];
-    if (!['--ref', '--lan-host', '--operation-id', '--version', '--source-url', '--source-sha256'].includes(key) || !value || value.startsWith('--') || Object.hasOwn(flags, key)) {
+    if (!['--ref', '--lan-host', '--operation-id', '--version', '--source-url', '--source-sha256', '--image-manifest', '--build-local'].includes(key) || !value || value.startsWith('--') || Object.hasOwn(flags, key)) {
       throw new Error('Unsupported, missing, or duplicate --ref/--lan-host/host option');
     }
     flags[key] = value;
   }
   const actionOptions = {
-    prepare: ['--ref', '--lan-host'], deploy: ['--ref', '--lan-host'],
-    'host-stage': ['--operation-id', '--ref', '--version', '--source-url', '--source-sha256'],
+    prepare: ['--ref', '--lan-host'], deploy: ['--ref', '--lan-host', '--image-manifest', '--build-local'],
+    'host-stage': ['--operation-id', '--ref', '--version', '--source-url', '--source-sha256', '--image-manifest', '--build-local'],
     'host-activate': ['--operation-id'],
     'host-rollback-stage': ['--operation-id', '--ref'],
     'host-rollback-activate': ['--operation-id'],
     'host-finalize': ['--operation-id'],
   };
   const acceptedOptions = actionOptions[action] || [];
+  if (flags['--build-local'] && flags['--build-local'] !== 'true') throw new Error('--build-local only accepts true');
+  if (flags['--image-manifest'] && (profile !== 'stable' || flags['--build-local'])) throw new Error('--image-manifest is for stable CI deployments only');
   if (Object.keys(flags).some((key) => !acceptedOptions.includes(key))) throw new Error(`--ref and --lan-host or host options are not valid with ${action}`);
   if (profile === 'dev' && flags['--ref'] && flags['--ref'] !== 'HEAD') throw new Error('dev runs the working tree; use stable to deploy a fixed ref');
   if (flags['--lan-host']) {
@@ -936,7 +962,8 @@ async function main() {
     const previous = existsSync(join(root, 'active.json')) ? readJson(join(root, 'active.json')) : null;
     prepare(profile, flags['--ref'] || 'HEAD', flags['--lan-host']);
     try {
-      compose(root, 'build', 'api', 'web');
+      if (profile === 'dev') compose(root, 'build', 'api', 'web');
+      else prepareDeploymentImages(root, flags);
     } catch (error) {
       for (const [name, contents] of oldFiles) writeFileSync(join(root, name), contents);
       throw error;
@@ -960,7 +987,7 @@ async function main() {
       console.error(saved ? `Restore the matching data and configuration from ${saved} before rolling code back.` : 'Start failed; data volumes were retained.');
       throw error;
     }
-    saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
+    saveJson(join(root, 'active.json'), withImageIdentities(readJson(join(root, 'deployment.json'))));
     await status(root);
   } else if (action === 'build') compose(root, 'build', 'api', 'web');
   else if (action === 'up') {

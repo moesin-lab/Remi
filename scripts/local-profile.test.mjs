@@ -39,6 +39,8 @@ childProcess.spawnSync = (command, args, options = {}) => {
   }) + '\n');
   if (command === 'git' && args[0] === 'rev-parse') return succeed(process.env.TEST_COMMIT + '\n');
   if (command === 'git' && args[0] === 'fetch') return succeed();
+  if (command === 'git' && args[0] === 'remote') return succeed('https://github.com/example/remi.git');
+  if (command === 'gh') return succeed(JSON.stringify({ artifacts: [] }));
   if (command === 'git' && args[0] === 'archive') {
     writeFileSync(args[args.indexOf('--output') + 1], 'Test archive');
     return succeed();
@@ -59,8 +61,8 @@ childProcess.spawnSync = (command, args, options = {}) => {
     if (process.env.TEST_FAIL === 'missing_old_web' && args.at(-1) === 'remi-web:stable-' + 'a'.repeat(40)) return fail();
     if (process.env.TEST_FAIL === 'mutated_old_web' && args.at(-1) === 'remi-web:stable-' + 'a'.repeat(40)) return succeed(imageId('different-content'));
     if (args.includes('{{json .Config.Labels}}')) {
-      const revision = process.env.TEST_FAIL === 'image_revision' ? 'wrong-revision' : args.at(-1).split(':stable-')[1];
-      return succeed(JSON.stringify({ 'org.opencontainers.image.revision': revision }));
+      const revision = process.env.TEST_FAIL === 'image_revision' ? 'wrong-revision' : (args.at(-1).split(':stable-')[1] || process.env.TEST_COMMIT);
+      return succeed(JSON.stringify({ 'org.opencontainers.image.revision': revision, 'io.remi.local-profile.hostname': '127.0.0.1' }));
     }
     return succeed(imageId(args.at(-1)));
   }
@@ -75,6 +77,7 @@ childProcess.spawnSync = (command, args, options = {}) => {
   }
   if (process.env.TEST_FAIL === 'config' && args.includes('config')) return fail();
   if (process.env.TEST_FAIL === 'build' && args.includes('build')) return fail();
+  if (process.env.TEST_FAIL === 'pull' && args.includes('pull')) return fail();
   if (process.env.TEST_FAIL === 'crash_build' && args.includes('build')) process.exit(91);
   if (['activate', 'activate_restore'].includes(process.env.TEST_FAIL) && args.includes('up') && selection?.ref === process.env.TEST_NEW_COMMIT) return fail();
   if (['restore_old', 'activate_restore'].includes(process.env.TEST_FAIL) && args.includes('pg_restore') && selection?.ref !== process.env.TEST_NEW_COMMIT) return fail();
@@ -126,6 +129,7 @@ function fixture(t) {
   mkdirSync(dirname(script), { recursive: true });
   mkdirSync(join(source, 'deploy/docker'), { recursive: true });
   writeFileSync(script, scriptSource);
+  copyFileSync(join(repository, 'scripts/ci-images.mjs'), join(source, 'scripts/ci-images.mjs'));
   writeFileSync(join(source, 'package.json'), '{"version":"0.2.60"}\n');
   writeFileSync(join(source, 'deploy/docker/host-write-fence.ts'), '// Runtime fence is validated independently.\n');
   for (const name of ['compose.local.yml', 'compose.local-dev.yml']) {
@@ -133,8 +137,9 @@ function fixture(t) {
   }
   writeFileSync(mock, mockSource);
 
-  function run(profile, action, { args = [], commit = OLD_REF, fail = '', environment = {}, profileBase = profilesRoot } = {}) {
+  function run(profile, action, { args = [], commit = OLD_REF, fail = '', environment = {}, profileBase = profilesRoot, localBuild = true } = {}) {
     writeFileSync(log, '');
+    if (localBuild && profile === 'stable' && ['deploy', 'host-stage'].includes(action)) args = [...args, '--build-local', 'true'];
     const result = spawnSync(process.execPath, ['--import', pathToFileURL(mock).href, script, profile, action, ...args], {
       env: {
         ...process.env,
@@ -183,6 +188,41 @@ const hostStageArgs = (operationId = 'pop_recoverable_test') => [
   '--source-url', 'https://example.com/platform-release.tar.gz',
   '--source-sha256', releaseSha,
 ];
+
+test('stable deploy pulls verified CI digests before stopping the previous service', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const manifest = { schemaVersion: 1, repository: 'example/remi', ref: NEW_REF,
+    hostname: '127.0.0.1', profile: 'stable', platform: 'linux/amd64', version: '0.2.60-stable.bbbbbbbb',
+    apiImage: `ghcr.io/example/remi-api@sha256:${'c'.repeat(64)}`, webImage: `ghcr.io/example/remi-web@sha256:${'d'.repeat(64)}` };
+  const path = join(f.root, 'stable-images.json');
+  writeFileSync(path, JSON.stringify(manifest));
+  const result = f.run('stable', 'deploy', { commit: NEW_REF, localBuild: false, args: ['--image-manifest', path] });
+  succeeds(result);
+  assert.equal(result.calls.filter(isAction('pull')).length, 2);
+  assert.equal(result.calls.filter(isAction('build')).length, 0);
+  assert.ok(result.calls.findLastIndex(isAction('pull')) < result.calls.findIndex(isAction('stop')));
+  assert.equal(f.readProfile('active.json').apiImage, manifest.apiImage);
+  assert.equal(f.readProfile('active.json').imageSource, 'ci');
+});
+
+for (const scenario of ['missing', 'hostname', 'pull', 'image_revision']) {
+  test(`CI ${scenario} failure leaves the previous deployment intact`, (t) => {
+    const f = fixture(t);
+    f.activate();
+    const path = join(f.root, 'stable-images.json');
+    writeFileSync(path, JSON.stringify({ schemaVersion: 1, repository: 'example/remi', ref: NEW_REF,
+      hostname: scenario === 'hostname' ? '192.168.1.2' : '127.0.0.1', profile: 'stable', platform: 'linux/amd64', version: '0.2.60-stable.bbbbbbbb',
+      apiImage: `ghcr.io/example/remi-api@sha256:${'c'.repeat(64)}`, webImage: `ghcr.io/example/remi-web@sha256:${'d'.repeat(64)}` }));
+    const result = f.run('stable', 'deploy', { commit: NEW_REF, localBuild: false, fail: scenario,
+      args: scenario === 'missing' ? [] : ['--image-manifest', path] });
+    assert.notEqual(result.status, 0);
+    assert.equal(result.calls.filter(isAction('build')).length, 0);
+    assert.equal(result.calls.filter(isAction('stop')).length, 0);
+    assert.equal(f.readProfile('active.json').ref, OLD_REF);
+    assert.equal(f.readProfile('deployment.json').ref, OLD_REF);
+  });
+}
 
 test('token signs a 24-hour local session with only the selected profile secret', (t) => {
   const f = fixture(t);

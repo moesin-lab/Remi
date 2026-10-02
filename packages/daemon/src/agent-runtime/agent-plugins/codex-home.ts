@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, copyFile, lstat, mkdir, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, link, lstat, mkdir, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { sanitizeProviderConfigValue } from "../provider-config-sanitize.js";
@@ -119,7 +119,8 @@ export async function linkCodexAuthFromBase(baseHome: string, targetHome: string
       { cause: error },
     );
   }
-  if (!authInfo.isFile() || authInfo.isSymbolicLink() || (authInfo.mode & 0o077) !== 0) {
+  // Windows reports synthetic POSIX mode bits; access is controlled by NTFS ACLs.
+  if (!authInfo.isFile() || authInfo.isSymbolicLink() || (process.platform !== "win32" && (authInfo.mode & 0o077) !== 0)) {
     throw new AgentPluginError(
       `Codex authentication must be a private regular file: ${sourceAuth}`,
       "plugin_codex_auth_invalid",
@@ -135,11 +136,20 @@ async function ensureCredentialLink(source: string, target: string): Promise<voi
     await symlink(source, target, "file");
     return;
   } catch (error) {
-    if (!isAlreadyExists(error)) throw error;
+    if (process.platform === "win32" && ["EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+      // File hard links preserve the source ACL and shared credential writes,
+      // without requiring the Windows symbolic-link privilege.
+      try { await link(source, target); return; }
+      catch (linkError) { if (!isAlreadyExists(linkError)) throw linkError; }
+    } else if (!isAlreadyExists(error)) throw error;
   }
 
   const targetInfo = await lstat(target);
   if (!targetInfo.isSymbolicLink()) {
+    if (process.platform === "win32" && targetInfo.isFile()) {
+      const sourceInfo = await lstat(source);
+      if (sourceInfo.ino !== 0 && sourceInfo.dev === targetInfo.dev && sourceInfo.ino === targetInfo.ino) return;
+    }
     throw new AgentPluginError(
       `Codex authentication target is not a managed link: ${target}`,
       "plugin_codex_auth_invalid",

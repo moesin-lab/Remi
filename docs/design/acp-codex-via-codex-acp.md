@@ -13,6 +13,7 @@ summary: 说明任务到 Codex ACP 的当前执行链、配置来源、会话隔
 - 在工作区 Agent 上设置 `provider: codex`，由符合路由条件的 Codex runtime 领取任务。[CLI Registry](../../apps/remi/cli/commands/agent-extensions.ts)提供 `remi agent create`、`remi agent update` 的 `--provider`、`--model` 和 `--thinking-level` 参数；先用对应命令的 `--help` 核对当前参数与身份要求。
 - [daemon 启动入口](../../apps/remi/cli/multiremi.ts)调用 [ensureAcpBridges](../../packages/acp/src/provision.ts)，使用源码固定的 `@agentclientprotocol/codex-acp` 版本及 Remi usage 补丁。版本以 [runtime-versions.json](../../packages/acp/src/runtime-versions.json) 为准；它同时固定 bridge、配套 Codex SDK 和实际执行文件版本。发版准备与安装校验见[配套升级说明](../daemon-runtime-upgrades.md)。系统或 Homebrew 的 Codex 升级不会替换 Remi 托管依赖。
 - ACP 执行文件按显式 `executable`、`REMI_CODEX_AGENT_ACP_EXECUTABLE`、Remi 管理目录与 PATH 解析，具体顺序见 `resolveAcpExecutableForAgent`。Windows 的扩展名解析也在该函数所在文件中。
+- Codex 隔离 Home 的认证链接在 POSIX 上要求私有普通文件；Windows 使用 NTFS ACL，不把模拟的 POSIX mode 当作访问权限。缺少符号链接权限时，使用保留源 ACL 的同卷文件硬链接；重入时核对文件身份，拒绝覆盖不相关文件。源文件被原子替换后，旧硬链接会被拒绝，需重新准备该 Home 的认证链接。回归入口为 `tests/unit/daemon/codex-auth-link.test.ts`。
 - 当前 Codex 健康检查只确认执行文件可解析，不启动模型进程。检查通过不等于登录、网络、模型或真实任务已可用。
 
 ## 协议与隔离

@@ -4,8 +4,9 @@ import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createMultiremiApp } from "@multiremi/api.js";
-import { MultiremiDaemon } from "@multiremi/daemon.js";
+import { startMultiremiServer, TestMultiremiDaemon as MultiremiDaemon } from "../fixtures/daemon-protocol.js";
+import type { MultiremiDaemonClient } from "@multiremi/client.js";
+
 import { MultiremiStore } from "@multiremi/store.js";
 import type { RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection.js";
 
@@ -17,7 +18,7 @@ async function waitUntil(check: () => boolean, description: string) {
   }
 }
 
-it("syncs multiple centrally configured profiles through real HTTP daemon heartbeats and rejects delayed revision acknowledgements", async () => {
+it("syncs multiple centrally configured profiles through real WebSocket daemon configuration frames and rejects delayed revision acknowledgements", async () => {
   const previousKey = process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY;
   const previousMissingEnv = process.env.REMI_CODEX_ISOLATED_TEST_UNCONFIGURED;
   delete process.env.REMI_CODEX_ISOLATED_TEST_UNCONFIGURED;
@@ -28,29 +29,14 @@ it("syncs multiple centrally configured profiles through real HTTP daemon heartb
   store.ensureLocalWorkspace();
   const daemonToken = await store.createAccessToken({ name: "Isolated daemon", type: "daemon", workspaceId: "local", daemonId: "central-profile-test", userId: "local" });
   const humanToken = await store.createAccessToken({ name: "Isolated administrator", type: "pat", workspaceId: "local", userId: "local" });
-  const app = createMultiremiApp({ store, authToken: "isolated-test-root" });
+
   const receivedAcks: RuntimeExecutionBindingAck[][] = [];
   const fetchedCredentialIds = new Set<string>();
   let providerCalls = 0;
   let holdHeartbeat = false;
   let heldHeartbeat = false;
   let releaseHeartbeat: (() => void) | undefined;
-  const server = Bun.serve({
-    hostname: "127.0.0.1", port: 0,
-    fetch: async (request) => {
-      const url = new URL(request.url);
-      if (url.pathname.endsWith("/codex-profile-key")) fetchedCredentialIds.add(url.searchParams.get("credential_id")!);
-      if (url.pathname === "/api/daemon/heartbeat") {
-        const body = await request.clone().json() as { runtime_binding_acks?: RuntimeExecutionBindingAck[] };
-        receivedAcks.push(body.runtime_binding_acks ?? []);
-        if (holdHeartbeat && !request.headers.has("x-test-delayed-ack")) {
-          heldHeartbeat = true;
-          await new Promise<void>((resolve) => { releaseHeartbeat = resolve; });
-        }
-      }
-      return app.fetch(request);
-    },
-  });
+  const server = startMultiremiServer({ store, authToken: "isolated-test-root", hostname: "127.0.0.1", port: 0 });
   const baseUrl = `http://127.0.0.1:${server.port}`;
   const daemon = new MultiremiDaemon({
     serverUrl: baseUrl, token: daemonToken.token, daemonId: "central-profile-test", runtimeName: "Central profile test",
@@ -59,6 +45,18 @@ it("syncs multiple centrally configured profiles through real HTTP daemon heartb
     providerFactory: () => ({ async *sendStream() { providerCalls++; }, getLastResponse: () => null }),
     sshMeshManager: { getHeartbeatStatus: () => ({ status: "disabled" }), reconcile: async () => {}, cleanupForRetirement: async () => {} },
   });
+  const client = (daemon as unknown as { client: MultiremiDaemonClient }).client;
+  const reportAcks = client.reportRuntimeBindingAcks.bind(client);
+  client.reportRuntimeBindingAcks = async (rt, acks) => {
+    receivedAcks.push(acks);
+    if (holdHeartbeat) {
+      heldHeartbeat = true;
+      await new Promise<void>(resolve => { releaseHeartbeat = resolve; });
+    }
+    await reportAcks(rt, acks);
+  };
+  const fetchKey = client.getRuntimeCodexProfileKey.bind(client);
+  client.getRuntimeCodexProfileKey = async (rt, id) => { fetchedCredentialIds.add(id); return fetchKey(rt, id); };
   let daemonError: unknown;
   const run = daemon.start().catch((error) => { daemonError = error; });
   const human = async (path: string, body?: unknown, method = body ? "POST" : "GET") => {
@@ -72,7 +70,7 @@ it("syncs multiple centrally configured profiles through real HTTP daemon heartb
   };
   const connection = (model: string) => ({ name: model, base_url: "https://never-contacted.example/v1", model, env_key: "", auth_mode: "api_key" });
   try {
-    await waitUntil(() => store.listRuntimes().length === 1 && receivedAcks.length > 0, "daemon registration and first real HTTP heartbeat");
+    await waitUntil(() => store.listRuntimes().length === 1 && (daemon as any).runtimeProfileSnapshotReceived === true, "daemon registration and first WebSocket configuration");
     const runtimeId = store.listRuntimes()[0]!.id;
     const first = (await human("/api/execution-profiles", { name: "Profile A", provider: "codex", profile: connection("model-a"), api_key: "isolated-key-a" })).profile;
     const second = (await human("/api/execution-profiles", { name: "Profile B", provider: "codex", profile: connection("model-b"), api_key: "isolated-key-b" })).profile;
@@ -88,17 +86,15 @@ it("syncs multiple centrally configured profiles through real HTTP daemon heartb
 
     const oldAcks = receivedAcks.findLast((acks) => acks.some((ack) => ack.groupId === groupA.id && ack.status === "ready"))!;
     holdHeartbeat = true;
-    await waitUntil(() => heldHeartbeat, "an in-flight heartbeat carrying the old revision");
+
     const updated = (await human(`/api/execution-profiles/${first.id}`, {
       name: "Profile A", provider: "codex", profile: connection("model-a-v2"), api_key: "isolated-key-a-v2",
     }, "PUT")).profile;
     expect(updated.revision).toBe(2);
     expect((await human(`/api/execution-groups/${groupA.id}`)).group.members[0].status).toBe("pending");
-    const replay = await fetch(`${baseUrl}/api/daemon/heartbeat`, {
-      method: "POST", headers: { Authorization: `Bearer ${daemonToken.token}`, "Content-Type": "application/json", "x-test-delayed-ack": "1" },
-      body: JSON.stringify({ runtime_id: runtimeId, execution_profile_protocol: 1, runtime_binding_acks: oldAcks }),
-    });
-    expect(replay.status).toBe(200);
+    await waitUntil(() => heldHeartbeat, "new revision application held before its acknowledgement");
+    await reportAcks(runtimeId, oldAcks);
+    store.recordRuntimeExecutionBindingAcks(runtimeId, oldAcks);
     expect(store.isRuntimeExecutionBindingReady(groupA.id, runtimeId, first.id, 2)).toBe(false);
     expect((await human(`/api/execution-groups/${groupA.id}`)).group.members[0].status).toBe("pending");
     holdHeartbeat = false;

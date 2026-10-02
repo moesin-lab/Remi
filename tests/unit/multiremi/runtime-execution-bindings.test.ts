@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { runtimeInputSnapshot } from "@multiremi/api/daemon-protocol/runtime-input-snapshot.js";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiDaemon } from "@multiremi/daemon.js";
 import { MultiremiDaemonClient } from "@multiremi/client.js";
@@ -27,7 +28,7 @@ function daemonForBindings() {
   daemon.runtimeBindingAcks = [];
   daemon.runtimeCodexProfile = null;
   daemon.runtimeClaudeProfile = null;
-  daemon.client = { getRuntimeCodexProfileKey: async (_runtimeId: string, id: string) => { keys.push(id); return `secret-${id}`; } };
+  daemon.client = { reportRuntimeBindingAcks: async () => {}, getRuntimeCodexProfileKey: async (_runtimeId: string, id: string) => { keys.push(id); return `secret-${id}`; } };
   return { daemon, keys };
 }
 
@@ -87,7 +88,7 @@ function stateRepo() {
 }
 
 describe("central execution binding readiness", () => {
-  it("delivers desired bindings only through an authorized Runtime heartbeat and stores its ack", async () => {
+  it("delivers desired bindings through v2 snapshots and accepts authorized compatibility acknowledgements", async () => {
     const { store, repo } = stateRepo();
     const token = await store.createAccessToken({ name: "Daemon A", type: "daemon", workspaceId: "local", daemonId: "daemon-a" });
     const app = createMultiremiApp({ store, authToken: "test-master" });
@@ -97,7 +98,8 @@ describe("central execution binding readiness", () => {
     });
     const first = await heartbeat("rt_a", []);
     expect(first.status).toBe(200);
-    expect((await first.json() as any).runtime_bindings).toEqual([{ generation: expect.any(String), groupId: "group-a", provider: "codex", profileId: null, profileRevision: null, profile: null }]);
+    expect((await first.json() as any).runtime_bindings).toBeUndefined();
+    expect(runtimeInputSnapshot(store, "rt_a").find(frame => frame.type === "runtime.profile")!.payload.runtime_bindings).toEqual([{ generation: expect.any(String), groupId: "group-a", provider: "codex", profileId: null, profileRevision: null, profile: null }]);
     const ack = { ...repo.getRuntimeExecutionBindings("rt_a")[0]!, status: "ready" };
     expect((await heartbeat("rt_b", [ack])).status).toBe(403);
     expect(repo.isRuntimeExecutionBindingReady("group-a", "rt_a", null, null)).toBe(false);

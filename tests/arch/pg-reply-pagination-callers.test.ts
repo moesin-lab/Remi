@@ -19,14 +19,13 @@ test("new message-page callers require a reply-limit exception or a bounded algo
     const visit = (node: ts.Node): void => {
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
         && node.expression.name.text === "getTaskMessagePageRows") {
-        calls.push(`${relative(root, path)}: ${node.expression.getText(source)}`);
+        calls.push(`${relative(root, path).replaceAll("\\", "/")}: ${node.expression.getText(source)}`);
       }
       ts.forEachChild(node, visit);
     };
     visit(source);
   }
   expect(calls.sort()).toEqual([
-    "server/src/api/realtime-fanout.ts: store.getTaskMessagePageRows",
     "server/src/store/repos/tasks-repo.ts: this.getTaskMessagePageRows",
     "server/src/store/store.ts: this.tasks.getTaskMessagePageRows",
   ].sort());

@@ -8,7 +8,7 @@ const storageReference = /uploadRoot|uploadAbsolutePath|uploadRelativePath|uploa
 const writeOperation = /\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?|createWriteStream|copyFile(?:Sync)?|rename(?:Sync)?|open(?:Sync)?)\b|Bun\s*\.\s*write\s*\(/;
 
 function bypassesHelper(path: string, source: string) {
-  return path !== helper && storageReference.test(source) && writeOperation.test(source);
+  return path.replaceAll("\\", "/") !== helper && storageReference.test(source) && writeOperation.test(source);
 }
 
 it("all attachment-directory writers go through the exclusive upload helper", () => {

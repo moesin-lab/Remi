@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { createMultiremiApp } from "@multiremi/api.js";
-import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { version } from "../../../package.json";
+import { createMultiremiApp, startMultiremiServer } from "@multiremi/api.js";
+import { createLocalStore, db, resetMultiremiTestEnv, waitWebSocketOpen, nextWebSocketMessage } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -106,7 +107,7 @@ describe("platform maintenance HTTP write gate", () => {
 
   it("lets running tasks finish and acknowledge the drain before switching starts", async () => {
     const { app, store, operation } = fixture();
-    const runtime = store.registerRuntime({ id: "rt_draining", name: "Drain", provider: "claude", workspaceId: "local" });
+    const runtime = store.registerRuntime({ id: "rt_draining", name: "Drain", provider: "claude", workspaceId: "local", daemonId: "drain-host" });
     const agent = store.createAgent({ name: "Drain Bot", provider: "claude", runtimeId: runtime.id });
     // Start the task before the real drain: the fixture's initial drain is only
     // released here to represent an already-running task when the host arrives.
@@ -117,9 +118,19 @@ describe("platform maintenance HTTP write gate", () => {
     store.beginPlatformDrain({ operationId: operation.id });
     store.reportPlatformOperation(operation.id, { status: "draining" });
 
-    expect((await app.request(`/api/daemon/tasks/${task.id}/complete`, {
-      method: "POST", headers: HEADERS, body: JSON.stringify({ output: "Finished during drain" }),
-    })).status).toBe(200);
+    const server = startMultiremiServer({ store, scheduler: null, backgroundJobs: false, authToken: "master-secret", hostname: "127.0.0.1", port: 0 });
+    const socket = new WebSocket(`ws://127.0.0.1:${server.port}/api/daemon/ws?protocol=2`, { headers: HEADERS } as never);
+    try {
+      await waitWebSocketOpen(socket);
+      const welcome = nextWebSocketMessage(socket);
+      socket.send(JSON.stringify({ v: 2, t: "hello", ts: Date.now(), p: { protocol: 2, daemon_id: "drain-host", cli_version: version,
+        launched_by: null, caps: [], runtimes: [{ runtime_id: runtime.id, provider: "claude", max_concurrency: 1, active_task_ids: [task.id] }] } }));
+      expect(await welcome).toMatchObject({ t: "welcome" });
+      socket.send(JSON.stringify({ v: 2, t: "task.complete", seq: 1, rt: runtime.id, ts: Date.now(),
+        p: { task_id: task.id, runtime_id: runtime.id, output: "Finished during drain" } }));
+      const deadline = performance.now() + 3_000;
+      while (store.getTask(task.id)?.status !== "completed" && performance.now() < deadline) await Bun.sleep(10);
+    } finally { socket.close(); server.stop(true); }
     expect(store.getTask(task.id)?.status).toBe("completed");
     expect((await app.request("/api/daemon/heartbeat", {
       method: "POST", headers: HEADERS,

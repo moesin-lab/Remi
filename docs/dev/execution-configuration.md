@@ -62,7 +62,7 @@ remi runtime group list --json
 
 ## 下发、快照与凭据
 
-[daemon 心跳](../../packages/server/src/api/routers/daemon.ts)下发组 ID、绑定 generation、Profile ID、revision 与非秘密配置。[daemon](../../packages/server/src/worker/daemon.ts)检查 provider、解析配置并取得对应凭据或本机环境变量，随后回报 ready 或 error。[服务端状态存储](../../packages/server/src/store/repos/execution-binding-states-repo.ts)只接受与当前绑定 generation 和 Profile 版本一致的确认，重新注册或修改绑定后拒绝旧确认；[任务调度](../../packages/server/src/store/repos/tasks-repo.ts)要求受管组配置 ready 才能首次领取任务。更新 Profile 后旧 revision 的确认不再满足领取条件。旧 daemon 不能为受管组确认配置。
+[v2 Runtime 快照](../../packages/server/src/api/daemon-protocol/runtime-input-snapshot.ts)通过 `runtime.profile.runtime_bindings` 下发组 ID、绑定 generation、Profile ID、revision 与非秘密配置。[daemon](../../packages/server/src/worker/daemon.ts)检查 provider、解析配置并取得对应凭据或本机环境变量，随后通过持久化上行事件 `runtime.binding_state` 回报 ready 或 error。[服务端状态存储](../../packages/server/src/store/repos/execution-binding-states-repo.ts)只接受与当前绑定 generation 和 Profile 版本一致的确认，重新注册或修改绑定后拒绝旧确认；[任务调度](../../packages/server/src/store/repos/tasks-repo.ts)要求受管组配置 ready 才能首次领取任务。更新 Profile 后旧 revision 的确认不再满足领取条件。旧 daemon 不能为受管组确认配置。
 
 generation 只跟踪实际 Runtime 绑定。能力组改名不会清除已有 ready；只增删成员时，仅新增或移除的成员生成新 generation，未变成员继续可调度。切换 Profile 或把旧组转换为受管组会轮换所有成员的 generation，直到各 Runtime 确认新配置。这样管理元数据和横向扩容不会制造无关的执行中断，同时旧确认仍不能复活已改变的绑定。
 
@@ -86,4 +86,4 @@ Profile 与组的写入要求人类工作区管理员身份；组修改还检查
 
 ## 验证入口
 
-配置与下发可从上述 CLI 的读取结果、Runtime 绑定状态及 daemon 心跳检查。文档检查使用 `npm run docs:test` 与 `npm run docs:check`；这些检查不代表真实模型调用成功。
+配置与下发可从上述 CLI 的读取结果、Runtime 绑定状态及 daemon WebSocket 快照检查；`tests/integration/central-profile-daemon-sync.test.ts` 覆盖真实连接的配置更新、凭据轮换与过期确认拒绝。文档检查使用 `npm run docs:test` 与 `npm run docs:check`；这些检查不代表真实模型调用成功。

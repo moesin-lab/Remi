@@ -268,14 +268,14 @@ describe("application compose stack", () => {
     const section = splitSection(deployReadme);
     const body = section.match(/python3 -c "([\s\S]*?)\n  "/u)?.[1];
     expect(body, "operation pre-check Python script").toBeDefined();
-    const python = spawnSync("python3", ["-c", [
+    const python = spawnSync(process.platform === "win32" ? "python" : "python3", ["-c", [
       "import ast,json,sys,textwrap",
       "tree=ast.parse(textwrap.dedent(sys.stdin.read()))",
       "sets={n.targets[0].id:sorted(ast.literal_eval(n.value)) for n in tree.body",
       "      if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name)",
       "      and n.targets[0].id in ('terminal','non_terminal')}",
       "print(json.dumps(sets))",
-    ].join("\n")], { input: body!.replaceAll('\\"', '"'), encoding: "utf8" });
+    ].join("\n")], { input: body!.replaceAll('\\"', '"').replaceAll('\r\n', '\n'), encoding: "utf8" });
     expect(python.status, python.stderr).toBe(0);
     const documented = JSON.parse(python.stdout) as { terminal: string[]; non_terminal: string[] };
 

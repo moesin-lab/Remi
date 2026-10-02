@@ -32,7 +32,7 @@ interface HostOperationJournal {
 }
 
 /**
- * Source-build driver for repository-external local profiles.
+ * CI-image deployment driver for repository-external local profiles.
  *
  * The child script owns an atomic host journal. inspect() first recovers an
  * interrupted switch, allowing an old API to return before any heartbeat or

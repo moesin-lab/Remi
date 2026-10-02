@@ -987,7 +987,7 @@ async function main() {
       console.error(saved ? `Restore the matching data and configuration from ${saved} before rolling code back.` : 'Start failed; data volumes were retained.');
       throw error;
     }
-    saveJson(join(root, 'active.json'), withImageIdentities(readJson(join(root, 'deployment.json'))));
+    saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
     await status(root);
   } else if (action === 'build') compose(root, 'build', 'api', 'web');
   else if (action === 'up') {

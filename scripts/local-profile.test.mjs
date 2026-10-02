@@ -204,6 +204,14 @@ test('stable deploy pulls verified CI digests before stopping the previous servi
   assert.ok(result.calls.findLastIndex(isAction('pull')) < result.calls.findIndex(isAction('stop')));
   assert.equal(f.readProfile('active.json').apiImage, manifest.apiImage);
   assert.equal(f.readProfile('active.json').imageSource, 'ci');
+  succeeds(f.run('stable', 'up'));
+});
+
+test('explicit local build can be stopped and brought up without a false deployment mismatch', (t) => {
+  const f = fixture(t);
+  succeeds(f.run('stable', 'deploy'));
+  succeeds(f.run('stable', 'stop'));
+  succeeds(f.run('stable', 'up'));
 });
 
 for (const scenario of ['missing', 'hostname', 'pull', 'image_revision']) {

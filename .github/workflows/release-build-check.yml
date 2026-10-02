@@ -5,6 +5,7 @@ on:
     paths:
       - ".github/workflows/release.yml"
       - ".github/workflows/platform-release.yml"
+      - ".github/workflows/platform-images.yml"
       - ".github/workflows/release-build-check.yml"
       - "apps/**"
       - "cli-capabilities.json"
@@ -26,6 +27,7 @@ on:
     paths:
       - ".github/workflows/release.yml"
       - ".github/workflows/platform-release.yml"
+      - ".github/workflows/platform-images.yml"
       - ".github/workflows/release-build-check.yml"
       - "apps/**"
       - "cli-capabilities.json"

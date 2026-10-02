@@ -6,7 +6,7 @@ summary: 在同一台机器运行独立的稳定环境和开发环境，保留�
 
 # 本机双环境
 
-使用 [本机管理脚本](../../scripts/local-profile.mjs)和 [Compose 模板](../../deploy/docker/compose.local.yml)。需要 Node.js 22+、Git、tar 与运行中的 Docker Desktop（Linux 容器）；Windows 固定使用 `desktop-linux` context。Bun 1.3.14 和 Linux 依赖在镜像内安装，不要求宿主安装 Bun，也不使用宿主 Windows 的 node_modules。
+使用 [本机管理脚本](../../scripts/local-profile.mjs)和 [Compose 模板](../../deploy/docker/compose.local.yml)。需要 Node.js 22+、Git、tar 与运行中的 Docker Desktop（Linux 容器）；Windows 固定使用 `desktop-linux` context。stable 默认下载 CI 镜像，还需已登录的 GitHub CLI（`gh auth login`）读取当前 origin 仓库的 Actions 产物；私有 GHCR 镜像需预先 `docker login ghcr.io`，使用有 read:packages 权限的凭据。Bun 1.3.14 和 Linux 依赖在 CI 镜像内安装，不要求宿主安装 Bun，也不使用宿主 Windows 的 node_modules。
 
 | 内容 | stable | dev |
 |---|---|---|
@@ -30,6 +30,20 @@ WebSocket 通过 `NEXT_PUBLIC_WS_URL` 直连所选环境的 API 端口，LAN 模
 
 ## 启动和开发
 
+### CI 日常构建
+
+[Platform images 工作流](../../.github/workflows/platform-images.yml)每天 UTC 20:17（北京时间次日 04:17）构建 `main` 的 API 和 Web，也支持 Actions 页面的 **Run workflow**，输入分支、tag 或提交。工作流须存在于默认分支且保持启用；GitHub 定时任务可能延迟。构建不创建版本号、Git tag 或 Release，也不会自动部署本机。
+
+在仓库 Actions variables 设置 `REMI_STABLE_HOST` 为 stable 的实际内网 IPv4；未设置时使用 `127.0.0.1`。手动构建的 `hostname` 可覆盖该变量。地址会编入 Web 镜像，必须与部署地址一致。可用 GitHub CLI 手动触发（仓库名替换为自己的 fork）：
+
+```powershell
+gh workflow run platform-images.yml --repo OWNER/Remi -f ref=main
+```
+
+CI 固定 Bun 版本并使用公共依赖源，发布唯一 `ci-<提交>-<run>-<attempt>` 镜像 tag；随后按 digest 拉取，验证容器健康、登录 Cookie 和 WebSocket 鉴权。成功运行提供保留 90 天的 `stable-images-<完整提交>` artifact，其中 `stable-images.json` 记录 API/Web digest、提交及访问地址。部署会自动查找当前 origin 仓库中该提交的成功构建；也可显式传 `--image-manifest <下载的文件路径>`。过期或不存在的产物需重新触发构建。下载、提交或地址校验失败时不会停止旧服务，也不会退回本地编译。
+
+仅在明确需要宿主编译时使用 `stable deploy --ref <提交> --build-local true`。dev 仍在本机构建和 watch；stable 的日常构建内存开销由 CI 承担，Docker Desktop 在本机只需运行服务。
+
 从仓库根目录运行：
 
 ```powershell
@@ -48,7 +62,7 @@ stable 只打包已提交的 Git 内容；未提交修改不会进入快照。`-
 node scripts/local-profile.mjs stable deploy --ref HEAD --lan-host 192.168.40.12
 ```
 
-该选项把 stable 的 Web `13000` 和 API `16120` 宿主端口一起绑定到 `0.0.0.0`，但浏览器和 daemon 使用实际内网 IP，不能用 `0.0.0.0` 连接。PostgreSQL 仍不发布端口。dev 不接受该选项，始终绑定 loopback。监听地址和对外地址保存在 profile 的 `deployment.json` / `active.json`，后续省略 `--lan-host` 的 stable 升级保留配置；IP 改变时以新地址重新部署，同时重建内嵌 WebSocket 和登录地址的 Web 镜像。构建失败会恢复原配置，未切换运行中的服务。
+该选项把 stable 的 Web `13000` 和 API `16120` 宿主端口一起绑定到 `0.0.0.0`，但浏览器和 daemon 使用实际内网 IP，不能用 `0.0.0.0` 连接。PostgreSQL 仍不发布端口。dev 不接受该选项，始终绑定 loopback。监听地址和对外地址保存在 profile 的 `deployment.json` / `active.json`，后续省略 `--lan-host` 的 stable 升级保留配置；IP 改变时先以新地址触发 CI 构建，再以新地址部署。镜像准备失败会恢复原配置，未切换运行中的服务。
 
 Windows 防火墙需要允许内网客户端访问这两个端口；只在需要时由管理员创建私有网络规则，例如：
 
@@ -92,7 +106,7 @@ node scripts/local-profile.mjs stable backup
 
 开发流程：在分支修改 → dev 验证 → 运行对应测试和文档检查 → 提交 → 使用具体 commit 更新 stable。stable 的源码和镜像不会跟随开发目录或分支切换自动变化。部署本机提交不等于创建 GitHub Release；正式发版仍遵循 [仓库规则](../../AGENTS.md)。
 
-`deploy` 更新已激活的环境时先构建候选镜像，再停止该环境的 API/Web 写入，保存数据库逻辑备份、API home、旧配置与镜像记录，然后启动并等待健康检查；已经 stop 的环境也保留升级备份步骤。单独 `backup` 同样停止写入，成功后只恢复原本运行的 API/Web。新备份的 `complete.json` 包含每个恢复文件的大小和 SHA-256；旧版只有时间戳的 marker 不满足自动恢复校验。中途失败的目录不能当作可恢复备份。稳定环境升级前还应结束正在执行的 Agent 任务；API 启动会自动迁移数据库，关闭后台任务也不会跳过迁移。
+`deploy` 更新已激活的 stable 时先拉取并核验候选镜像，再停止该环境的 API/Web 写入，保存数据库逻辑备份、API home、旧配置与镜像记录，然后启动并等待健康检查；已经 stop 的环境也保留升级备份步骤。单独 `backup` 同样停止写入，成功后只恢复原本运行的 API/Web。新备份的 `complete.json` 包含每个恢复文件的大小和 SHA-256；旧版只有时间戳的 marker 不满足自动恢复校验。中途失败的目录不能当作可恢复备份。稳定环境升级前还应结束正在执行的 Agent 任务；API 启动会自动迁移数据库，关闭后台任务也不会跳过迁移。
 
 备份保存在 profile 的 `backups/<时间>/`。停止、重建和升级命令保留命名卷；脚本不提供删除卷操作。回滚涉及数据库模式时，先停止该环境 API/Web，恢复匹配备份的 PostgreSQL 和 API home，再使用备份配置启动旧镜像；只切旧代码不能保证与已迁移数据兼容。备份和旧镜像都应保留到升级后的实际使用验证完成。
 
@@ -113,7 +127,7 @@ sequenceDiagram
   API->>DB: 持久化请求与 requestId
   Host->>API: 双凭据领取 operation
   Host->>Host: 持久化原请求、阶段与恢复回执
-  Host->>Docker: 同一提交构建 API + Web
+  Host->>Docker: 拉取并核验同一提交的 CI API + Web 镜像
   Host->>API: drain，等待在途任务结束
   Host->>Host: 关闭业务写入，保存完整备份
   Host->>Docker: 启动目标 API + Web，核验镜像和健康
@@ -122,7 +136,7 @@ sequenceDiagram
   Host->>Host: 回执确认后解除宿主写入闸门
 ```
 
-Windows runner 使用按配置文件路径派生的跨会话互斥锁，手动启动与计划任务重试不能同时运行两个更新器。安装器优先使用已安装的 PowerShell 7，缺少时回退到 Windows PowerShell；可用 `-PowerShellExecutable` 指定经过验证的绝对路径。宿主准备镜像时只构建缺失的 API/Web 镜像；已有固定 commit tag 必须带完全匹配的 `org.opencontainers.image.revision`，否则拒绝覆盖。通过验证的镜像会记录实际 ID，供切换和后续回滚核验。
+Windows runner 使用按配置文件路径派生的跨会话互斥锁，手动启动与计划任务重试不能同时运行两个更新器。安装器优先使用已安装的 PowerShell 7，缺少时回退到 Windows PowerShell；可用 `-PowerShellExecutable` 指定经过验证的绝对路径。`host-stage` 默认同样要求目标提交有成功的 Platform images 构建，宿主执行账户需要 gh 和 GHCR 读取权限。手动调用可传 `--image-manifest`，或用 `--build-local true` 显式构建缺失镜像；已有固定 commit tag 必须带完全匹配的 `org.opencontainers.image.revision`，否则拒绝覆盖。通过验证的镜像会记录实际 ID，供切换和后续回滚核验。
 
 切换期间也拒绝 WebSocket Upgrade 握手，避免 daemon 通过长连接领取命令或写入心跳；原连接在停止 API 时断开。普通 HTTP 读取、健康检查和 updater 控制通道仍可用。
 

@@ -231,7 +231,7 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
     const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
     const { session } = loaded;
-    return c.json({ session, messages: store.listChatMessages(session.id) });
+    return c.json({ session, messages: store.listChatMessagesFromLog(session.id) });
   });
   app.patch("/api/multiremi/chats/:id", async (c) => {
     const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
@@ -244,7 +244,7 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/multiremi/chats/:id/messages", (c) => {
     const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
-    return c.json({ messages: store.listChatMessages(loaded.session.id) });
+    return c.json({ messages: store.listChatMessagesFromLog(loaded.session.id) });
   });
   app.post("/api/multiremi/chats/:id/messages", async (c) => {
     const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
@@ -299,7 +299,7 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/chat/sessions/:sessionId/messages", (c) => {
     const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
     if (loaded instanceof Response) return loaded;
-    const messages = store.listChatMessages(loaded.session.id);
+    const messages = store.listChatMessagesFromLog(loaded.session.id);
     const attachments = store.listAttachmentsForChatMessages(messages.map((message) => message.id));
     return c.json(messages.map((message) => chatMessageCompatibilityResponse(message, attachments.get(message.id) ?? [])));
   });

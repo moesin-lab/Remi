@@ -43,6 +43,12 @@ flowchart LR
 该聚合在批量查询中按 Chat 创建者和 Agent 可见性过滤 Session，再批量读取参与者；
 工作区管理员也不能借 Issue 读取他人的私有 Chat，查询往返次数不随 Session 数量线性增长。
 
+## 统一日志兼容
+
+普通 Chat 消息和工作 Session 事件使用各自稳定 ID 写入统一 conversation log。独立 Chat 所有的 Session 即使没有 Issue，也建立日志头并参与升级回填与对账。Issue 公开评论仍可保留空 `issue_session_id`；内部日志会选择已有 Issue 工作 Session，或通过兼容层建立默认 Session，编辑、删除和解决状态根据实际日志行定位。该日志关联不改变评论的公开范围，也不扩大私有 Chat 的访问权限。
+
+升级时的一次性日志迁移补齐旧 Issue 评论及非 Chat 任务缺失的 Session 关联；普通 Chat 任务继续保留自己的上下文。任务调度和终止后的待办重试以 `issue_session_id` 区分 Session 任务，不能仅凭存在 `chat_session_id` 把它当作普通 Chat 消息轮次。
+
 ## 创建与生命周期
 
 ### Chat 与 Session

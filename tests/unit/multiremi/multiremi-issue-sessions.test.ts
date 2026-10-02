@@ -122,7 +122,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     expect(store.listSessionEvents(legacy.id).at(-1)).toMatchObject({ kind: "session_adopted" });
   });
 
-  it("records comment corrections as append-only Session events", () => {
+  it("records comment corrections as append-only legacy Session events", () => {
     const store = createStore();
     const issue = store.createIssue({ title: "Corrections", workspaceId: "local" });
     const session = store.getOrCreateDefaultIssueSession(issue.id);

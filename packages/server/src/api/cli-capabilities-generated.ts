@@ -2022,19 +2022,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "task.messages": {
-      "command": "remi issue run-messages",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "task.messages",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
     "comment.list": {
       "command": "remi comment list",
       "auth": [
@@ -2302,6 +2289,45 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "session.event.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "session.log.get": {
+      "command": "remi session log get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "session.log.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "session.log.window": {
+      "command": "remi session log window",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "session.log.window",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "session.log.locate": {
+      "command": "remi session log locate",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "session.log.locate",
       "output": [
         "table",
         "json",
@@ -3046,6 +3072,20 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "share.trace.read": {
+      "command": "remi share trace read",
+      "auth": [
+        "human",
+        "share",
+        "task"
+      ],
+      "capability": "share.trace.read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "label.list": {
       "command": "remi label list",
       "auth": [
@@ -3228,13 +3268,13 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "chat.message.list": {
-      "command": "remi chat message list",
+    "chat.message.page": {
+      "command": "remi chat message page",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "chat.message.list",
+      "capability": "chat.message.page",
       "output": [
         "table",
         "json",
@@ -3459,13 +3499,13 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "task.message.list": {
-      "command": "remi task message list",
+    "task.trace.read": {
+      "command": "remi task trace read",
       "auth": [
         "human",
         "task"
       ],
-      "capability": "task.message.list",
+      "capability": "task.trace.read",
       "output": [
         "table",
         "json",

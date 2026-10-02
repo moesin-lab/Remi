@@ -9,7 +9,7 @@ test("production API role parsing and env reads belong only to config and its st
   let resolutions = 0;
   for (const directory of ["apps", "packages"]) {
     for (const file of new Bun.Glob("**/*.ts").scanSync({ cwd: join(root, directory) })) {
-      const relative = `${directory}/${file}`;
+      const relative = `${directory}/${file}`.replaceAll("\\", "/");
       const definition = relative === "packages/server/src/config/api-role.ts";
       const entry = relative === "packages/server/src/config/startup-env.ts";
       const source = ts.createSourceFile(relative, readFileSync(join(root, relative), "utf8"), ts.ScriptTarget.Latest, true);

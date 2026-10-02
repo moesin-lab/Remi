@@ -41,6 +41,7 @@ import {
   cleanString,
   commentCompatibilityResponse,
   currentWorkspaceMember,
+  commentReactionCompatibilityResponse,
   currentTaskAccessToken,
   authenticatedRequestUserId,
   currentRequestUserId,
@@ -1680,10 +1681,90 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!session) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, session.workspaceId);
     if (denied) return denied;
+    const chatDenied = denyLinkedSessionChatOwnerAccess(c, store, session);
+    if (chatDenied) return chatDenied;
     return c.json(issueSessionCompatibilityResponse(
       session,
       store.listSessionParticipants(session.id),
     ));
+  });
+  const logSessionAccess = (c: Context): string | Response => {
+    const sessionId = c.req.param("sessionId") ?? "";
+    const issueSession = store.getIssueSession(sessionId);
+    if (issueSession) {
+      return denyCurrentUserWorkspaceAccess(c, store, issueSession.workspaceId)
+        ?? denyLinkedSessionChatOwnerAccess(c, store, issueSession) ?? sessionId;
+    }
+    const chat = loadChatSessionForCurrentUser(c, store, sessionId);
+    return chat instanceof Response ? chat : chat.session.id;
+  };
+  app.get("/api/sessions/:sessionId/log/locate", (c) => {
+    const sessionId = logSessionAccess(c);
+    if (sessionId instanceof Response) return sessionId;
+    const id = c.req.query("id");
+    if (!id) return c.json({ error: "id is required" }, 400);
+    const location = store.locateConversationLogEntry(sessionId, id);
+    return location ? c.json(location) : c.json({ error: "entry not found" }, 404);
+  });
+  app.get("/api/sessions/:sessionId/log/entry", (c) => {
+    const sessionId = logSessionAccess(c);
+    if (sessionId instanceof Response) return sessionId;
+    const rawSeq = c.req.query("seq");
+    const id = c.req.query("id");
+    if ((rawSeq == null) === (id == null)) return c.json({ error: "exactly one of seq or id is required" }, 400);
+    const seq = rawSeq == null ? store.locateConversationLogEntry(sessionId, id!)?.seq
+      : /^(0|[1-9]\d*)$/.test(rawSeq) ? Number(rawSeq) : NaN;
+    if (rawSeq != null && (!Number.isSafeInteger(seq) || seq! < 0)) return c.json({ error: "invalid seq" }, 400);
+    if (seq == null) return c.json({ error: "entry not found" }, 404);
+    const entry = store.getConversationLogEntry(sessionId, seq);
+    if (!entry || entry.visibility !== "shown" || entry.deleted_at !== null) return c.json({ error: "entry not found" }, 404);
+    const envelope = entry.metadata.envelope;
+    const recipient = envelope?.to;
+    const agentId = envelope?.recipient_agent_id
+      ?? (recipient?.role === "agent" && recipient.issueSessionId === sessionId
+        ? recipient.agentId
+        : recipient?.role === "chat" && recipient.chatSessionId === sessionId ? recipient.agentId : null);
+    const delivered: boolean | null = agentId === null ? null : (
+      store.getSessionAgentMaxCursorSeq(sessionId, agentId) >= entry.seq
+      || store.hasInboxReceiptCovering(sessionId, agentId, entry.seq)
+    );
+    return c.json({ ...entry, delivered });
+  });
+  app.get("/api/sessions/:sessionId/log", (c) => {
+    const sessionId = logSessionAccess(c);
+    if (sessionId instanceof Response) return sessionId;
+    const readNumber = (name: string): number | null | undefined => {
+      const raw = c.req.query(name);
+      if (raw == null) return undefined;
+      const value = Number(raw);
+      return raw !== "" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+    };
+    const anchor = readNumber("anchor");
+    const before = readNumber("before");
+    const after = readNumber("after");
+    if (anchor === null || before === null || after === null || (before ?? 0) + (after ?? 0) > 100) {
+      return c.json({ error: "invalid log window" }, 400);
+    }
+    const window = store.conversationLogWindow(sessionId, { anchor, before, after });
+    if (!store.getIssueSession(sessionId)) {
+      const messageIds = window.entries.filter(entry => entry.kind === "message" || entry.kind === "turn")
+        .map(entry => entry.id);
+      const attachments = store.listAttachmentsForChatMessages(messageIds);
+      return c.json({ ...window, entries: window.entries.map(entry =>
+        entry.kind === "message" || entry.kind === "turn"
+          ? { ...entry, metadata: { ...entry.metadata,
+            attachments: (attachments.get(entry.id) ?? []).map(attachmentCompatibilityResponse),
+          } }
+          : entry) });
+    }
+    const commentIds = window.entries.filter(entry => entry.kind === "message").map(entry => entry.id);
+    const reactions = store.listCommentReactionsForComments(commentIds);
+    const attachments = store.listAttachmentsForComments(commentIds);
+    return c.json({ ...window, entries: window.entries.map(entry => entry.kind === "message"
+      ? { ...entry, metadata: { ...entry.metadata,
+        reactions: (reactions.get(entry.id) ?? []).map(commentReactionCompatibilityResponse),
+        attachments: (attachments.get(entry.id) ?? []).map(attachmentCompatibilityResponse),
+      } } : entry) });
   });
   app.get("/api/sessions/:sessionId/inherited-context", (c) => {
     const session = store.getIssueSession(c.req.param("sessionId"));

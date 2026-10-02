@@ -92,6 +92,9 @@ describe("migration invalidates already-running detached private provider lineag
     expect(store.getTask("tsk_topic_migration_queued")?.executionFingerprint).toBe(CHAT_ISSUE_DECOUPLED_FINGERPRINT);
     store.completeTask("tsk_topic_migration_queued", { output: "B work finished", sessionId: "old_A_provider" });
     expect(store.getChatSession("chat_group_migration")?.sessionId).toBeNull();
+    // The new Issue log relay can enqueue its own topic round on completion.
+    // Settle that notification before checking the next user turn lineage.
+    for (const report of store.listTasks().filter(t => t.status === "queued" && t.wakeSource === "relay")) store.cancelTask(report.id);
     const next = store.sendChatMessage("chat_group_migration", { content: "Continue B" }).task;
     expect(next.issueId).toBe("iss_chat_migration");
     const claim = store.claimTask("rt_legacy")!;

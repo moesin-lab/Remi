@@ -127,6 +127,20 @@ dropped (`active_task_exists`), so a parent could lose reports entirely.
    and reopening a `done`/`cancelled` child lock that same parent before writing.
    This also covers Agent assignment's direct terminal-to-`todo` write, whose
    locks and assignment update commit before task creation opens its transaction.
+   Assignment now triggers the child-status hook in that same unit (MUL-482):
+   an `in_review` parent immediately returns to `in_progress`, with one
+   `parent_status_derived` activity, before the new task is created. The possible
+   ancestor re-derivation chain joins the initial sorted lock set; its relations
+   are re-read under those locks and a changed chain retries as a stale set.
+   Assignment and PATCH reopening retain the same legacy-relation contract:
+   a missing direct parent rejects with `Parent issue not found: <id>`, while
+   a parent in another workspace is ignored. Re-derivation stops at a missing
+   or foreign higher ancestor and never writes outside the child's workspace.
+   Assignment's workspace-scoped discovery still includes that boundary id in
+   its lock set. If a foreign ancestor moves back before locking, its newly
+   reachable ancestors must already be locked or the set is stale.
+   Hook failure rolls back the assignment, parent statuses and audit together;
+   broadcasts and collected follow-ups wait for the assignment's commit.
    Lock order is workspace lifecycle (when required) and, for creation and for
    a move into another workspace, the issue-number lock (MUL-405's W -> N -> D,
    `store/advisory-locks.ts`; a move takes only its target's N), then
@@ -169,13 +183,18 @@ dropped (`active_task_exists`), so a parent could lose reports entirely.
    pairs these paths with each other and with dependency and move writers for
    both id orders, and covers the stale-set retry and its 409.
 
-   **Every guarded path runs at transaction depth 1.** `PostgresSyncDatabase.transaction()`
-   is a bare `BEGIN`/`COMMIT` with no savepoint support, so a nested
-   `transaction()` inside an open one commits the outer transaction early,
-   releases its row locks, and turns the outer `ROLLBACK` into a no-op. The
-   store therefore keeps its `...WithinTransaction` convention: the outermost
-   caller owns the only transaction, and everything under it calls the variant
-   that assumes an open transaction.
+   **Every guarded path runs at transaction depth 1.** When this was decided,
+   `PostgresSyncDatabase.transaction()` was a bare `BEGIN`/`COMMIT`, so a nested
+   `transaction()` inside an open one committed the outer transaction early,
+   released its row locks, and turned the outer `ROLLBACK` into a no-op. Since
+   MUL-405 a nested `transaction()` is a `SAVEPOINT` inside the outer unit on
+   both backends, and `maxTransactionDepth` counts every frame, the `SAVEPOINT`
+   included, so depth 1 still means no nested frame at all (ADR 0011). The
+   store keeps its `...WithinTransaction` convention: the outermost caller owns
+   the only `BEGIN`/`COMMIT`, and everything under it calls the variant that
+   assumes an open transaction. A standalone wrapper publishes its events and
+   replays child-status changes right after its own `transaction()` returns,
+   which for a nested `SAVEPOINT` is still before the owner's `COMMIT`.
    - **The collector and the commit-event queue are required parameters, not
      options.** Every `...WithinTransaction` variant that can move an Issue (the
      Issue-status sync reached from `createTaskWithinTransaction`,
@@ -265,11 +284,15 @@ dropped (`active_task_exists`), so a parent could lose reports entirely.
      failure) rather than a synchronous best-effort call. Tracked as a
      follow-up candidate; the current behaviour is what the round-2/3 QA rounds
      measured, and it is unchanged from the previous commit.
-   - `PostgresSyncDatabase.transaction()` is deliberately left alone. Teaching it
-     savepoints is a platform-level change with its own blast radius (every
+   - This issue left `PostgresSyncDatabase.transaction()` alone. Teaching it
+     savepoints was a platform-level change with its own blast radius (every
      caller, the worker bridge, and the SQLite backend's differing semantics),
-     well outside this issue. The constraint is instead held by the call-site
-     convention above and by the depth-counter regression tests.
+     and it landed later in MUL-405: a nested `transaction()` now sends
+     `SAVEPOINT` and then `RELEASE SAVEPOINT` or `ROLLBACK TO SAVEPOINT` inside
+     the outer unit. The constraint is still held by the call-site convention
+     above and by the depth-counter regression tests, which count every frame,
+     a `SAVEPOINT` included; the Postgres ones also record that no second
+     `BEGIN` or early `COMMIT` is sent (ADR 0011).
    - Two nesting sites remain, both pre-existing on `main` and out of this
      issue's scope: `FeishuBotRepo.submitMessage`'s steer path
      (`feishu-bot-repo.ts`) and `MultiremiStore.updateAgent`'s role-change token
@@ -326,6 +349,32 @@ dropped (`active_task_exists`), so a parent could lose reports entirely.
      report transaction — before it, committing separately — and only its
      returned readiness lines feed the report. Verified on a scratch merge of
      the two branches: the combined path still measures depth 1 on Postgres.
+
+   **MUL-483 / ADR 0012 supplement (2026-09-29).** The post-commit E1/E2
+   report policy above describes the earlier implementation. Under
+   [ADR 0012](0012-unified-inbox-and-single-pending-turn.md), E2 child endings,
+   both E3 notifications, E4 decisions, delegation reports and agent mentions
+   write their inbox entries and pending-turn changes in the transaction that
+   owns the triggering state change. `sendEnvelopeWithinTransaction` delegates
+   to `ensurePendingTurnWithinTransaction`; neither opens a nested transaction.
+   A failure before COMMIT rolls back the state, inbox entry and wake together.
+   This removes the earlier compensation gap for these required reports.
+
+   The collector and commit-event queue remain required. E1 derivation and
+   required parent reports run through `notifyChildStatusChangeWithinTransaction`
+   at depth 1; recursive parent changes use the same transaction. Only E3's
+   durable automatic-start replay and optional notifications remain after the
+   outer COMMIT. The transaction owner publishes realtime events and task
+   enqueue notifications after COMMIT, and drops them on rollback. Optional
+   work must not reintroduce a savepoint inside the required write transaction.
+
+   The SQLite and real PostgreSQL regressions instrument E2, E3 and E4's outer
+   transaction and every task INSERT: `maxDepth === 1`, and each INSERT must
+   occur while the original transaction is open. Crash probes cover the
+   boundary after the inbox INSERT, after the pending-turn write and after
+   COMMIT. Existing parent guards, continuation semantics and Chat user queues
+   keep their contracts; a human comment joins queued work only according to
+   the Q-B constant defined in ADR 0012.
 9. **A batch update is pre-flighted as a whole, then written row by row.** Before
    the first write, `batchUpdateIssues` evaluates guard A (A1 and A4 included)
    for every row and refuses the whole batch if any row would be rejected,

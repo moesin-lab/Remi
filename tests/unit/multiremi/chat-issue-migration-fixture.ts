@@ -1,3 +1,4 @@
+import { CONVERSATION_LOG_BACKFILL_MIGRATION } from "@multiremi/store/conversation-log-backfill.js";
 import { expect } from "bun:test";
 import { AccessTokensRepo } from "@multiremi/store/repos/access-tokens-repo.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -61,7 +62,7 @@ export function seedLegacyChatIssueFixture(db: SqlDatabase, tableForeignKey = fa
   db.run(`INSERT INTO multiremi_feishu_bot_deliveries
     (workspace_id, external_message_id, binding_id, task_id, created_at, updated_at)
     VALUES ('local', 'om_group_migration', 'fcb_chat_group_migration', 'tsk_topic_migration_queued', ?, ?)`, [now, now]);
-  db.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", [CHAT_ISSUE_MIGRATION]);
+  db.run("DELETE FROM multiremi_schema_migrations WHERE id IN (?, ?)", [CHAT_ISSUE_MIGRATION, CONVERSATION_LOG_BACKFILL_MIGRATION]);
 }
 
 interface ClassificationCase {

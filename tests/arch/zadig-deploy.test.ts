@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync as readRawFileSync } from "node:fs";
 import { resolve } from "node:path";
+
+const readFileSync = (path: string, encoding: "utf8") => readRawFileSync(path, encoding).replaceAll("\r\n", "\n");
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const deployRoot = resolve(repoRoot, "deploy/zadig");

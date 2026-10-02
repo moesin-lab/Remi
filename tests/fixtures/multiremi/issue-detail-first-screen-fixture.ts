@@ -73,7 +73,19 @@ export interface IssueDetailFixture {
 }
 
 const WORKSPACE_ID = "local";
-const NOW = Date.UTC(2026, 8, 20, 12, 0, 0);
+const FIXTURE_EPOCH_MS = Date.UTC(2026, 8, 20, 12, 0, 0);
+const NOW = FIXTURE_EPOCH_MS;
+
+/**
+ * Re-anchors the pinned clock and id generator, when installed.
+ *
+ * `installDeterministicIds` ticks once per clock read, so anything that reads
+ * the clock between installing the pin and seeding — store construction, schema
+ * migrations — would otherwise shift every fixture timestamp and invalidate the
+ * golden. Seeding resets both generators before writing the fixture.
+ */
+let activeClockReset: (() => void) | null = null;
+let activeIdReset: (() => void) | null = null;
 
 /** Stable filler so the fixture body sizes do not drift between runs. */
 function filler(prefix: string, index: number, bytes: number): string {
@@ -94,6 +106,8 @@ export function seedIssueDetailFirstScreenFixture(
   store: MultiremiStore,
   options: IssueDetailFixtureOptions = {},
 ): IssueDetailFixture {
+  activeClockReset?.();
+  activeIdReset?.();
   const startedAt = performance.now();
   const rootComments = options.rootComments ?? 105;
   const replies = options.replies ?? 68;
@@ -353,7 +367,7 @@ export function seedIssueDetailFirstScreenFixture(
     // Its historical fixture identity must not depend on IDs consumed while
     // constructing the children's newer Chat-owned Sessions.
     options.run!("UPDATE multiremi_session_participants SET id = ? WHERE session_id = ? AND participant_type = 'agent' AND participant_id = ?",
-      ["spart_85jvtionb0jv", "ises_mul385_04", agent.id]);
+      ["spart_airlrlj11w4t", "ises_mul385_04", agent.id]);
   }
   for (const sessionId of sessionIds) {
     participantCountBySession[sessionId] = store.listSessionParticipants(sessionId, true).length;
@@ -413,7 +427,6 @@ export function fillTaskBodies(
 // ── golden comparison ────────────────────────────────────────────────────────
 
 const ISO_RE = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})/g;
-
 /** Timeline page cursors are `base64url([createdAt, id])` — see `encodeTimelineCursor`. */
 const CURSOR_KEY_RE = /^(?:next|prev)_cursor$/;
 
@@ -461,7 +474,9 @@ function normalizeCursor(cursor: string): string {
  * the cursor still has to decode to the same `[<timestamp>, id]` pair.
  */
 export function normalizeIssueDetailResponse(value: unknown): unknown {
-  if (typeof value === "string") return value.replace(ISO_RE, "<timestamp>");
+  if (typeof value === "string") {
+    return normalizeCursor(value).replace(ISO_RE, "<timestamp>");
+  }
   if (Array.isArray(value)) return value.map((entry) => normalizeIssueDetailResponse(entry));
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
@@ -489,7 +504,7 @@ export function installDeterministicIds(): () => void {
   const RealDate = globalThis.Date;
   // One tick per read, like the route snapshot harness: stable ordering with no
   // ties, and no chance of two rows sharing a timestamp.
-  let clock = Date.UTC(2026, 8, 20, 12, 0, 0);
+  let clock = FIXTURE_EPOCH_MS;
   class FixtureDate extends RealDate {
     constructor(...args: unknown[]) {
       if (args.length === 0) super(clock++);
@@ -500,7 +515,16 @@ export function installDeterministicIds(): () => void {
     }
   }
   (globalThis as { Date: unknown }).Date = FixtureDate;
+  // Seeding re-anchors the clock (see `seedIssueDetailFirstScreenFixture`), so a
+  // migration that reads the clock before the fixture runs cannot shift every
+  // timestamp the golden encodes.
+  activeClockReset = () => {
+    clock = FIXTURE_EPOCH_MS;
+  };
   let state = 0x385_9a71;
+  activeIdReset = () => {
+    state = 0x385_9a71;
+  };
   const nextByte = (): number => {
     state ^= state << 13;
     state ^= state >>> 17;
@@ -515,6 +539,8 @@ export function installDeterministicIds(): () => void {
     return array;
   };
   return () => {
+    activeClockReset = null;
+    activeIdReset = null;
     (globalThis.crypto as { getRandomValues: unknown }).getRandomValues = realGetRandomValues;
     (globalThis as { Date: unknown }).Date = RealDate;
   };

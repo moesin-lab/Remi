@@ -15,7 +15,8 @@
     "plugins": "Plugins",
     "skills": "Skills",
     "settings": "Settings",
-    "chat": "Chat"
+    "chat": "Chat",
+    "execution_groups": "Capability groups"
   },
   "help": {
     "trigger": "Help",

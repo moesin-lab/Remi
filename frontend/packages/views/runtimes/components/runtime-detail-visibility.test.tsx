@@ -95,6 +95,7 @@ vi.mock("@multiremi/core/agents", () => ({
 vi.mock("@multiremi/core/paths", () => ({
   useWorkspacePaths: () => ({
     runtimes: () => "/runtimes",
+    executionGroups: () => "/execution-groups",
     runtimeMachine: (id: string) => `/runtimes?machine=${encodeURIComponent(id)}`,
     agentDetail: () => "/agents",
   }),

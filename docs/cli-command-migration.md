@@ -89,7 +89,12 @@ Use `remi runtime group list` to find groups and their online Runtime counts,
 then `remi runtime model catalog --execution-group <group-id>` to inspect models.
 Create and maintain groups explicitly with `remi runtime group create|update`
 and a JSON body containing `name`, `provider`, `profile_id` (or null), and
-`runtime_ids`. Discovery no longer creates groups. A Runtime can belong to several
+`runtime_ids`. Optional `description` organizes groups; optional `connection`
+contains `name`, `profile`, and a write-only `api_key` to save the provider and
+models atomically with membership. The provider is inherited from the group.
+With `connection`, null `profile_id` creates a reusable connection; an existing
+ID updates that shared connection for all referencing groups. Omitting
+`connection` leaves it unchanged. Discovery no longer creates groups. A Runtime can belong to several
 groups in its workspace; provider compatibility is checked. Existing legacy groups
 and bindings are retained on upgrade. See [execution configuration](dev/execution-configuration.md).
 

@@ -86,7 +86,7 @@ Issue 活动区默认显示普通评论、固定单行的派活和 `workspace_mo
 
 ## 实时更新与性能定位
 
-Runtime 的统一配置页 [execution-config-page.tsx](../../frontend/packages/views/runtimes/components/execution-config-page.tsx)集中管理工作区连接 Profile 与能力组：先建 Claude/Codex Profile，再选择组的 provider、Profile 与 Runtime 成员。Runtime 详情展示组绑定和应用状态，并链接统一入口。查询与 mutation 由 [execution-config.ts](../../frontend/packages/core/runtimes/execution-config.ts)提供，响应通过 [execution-profiles.ts](../../frontend/packages/core/api/schemas/execution-profiles.ts)校验；保存后失效配置、Runtime 和模型目录缓存。API Key 不读回，编辑时留空保留已有密钥；Claude 支持 Bearer / x-api-key。配置状态区分待应用、已应用与失败，不以在线状态代替配置确认。权限、下发和旧数据行为见[执行配置](execution-configuration.md)。
+侧栏的独立执行能力组页 [execution-config-page.tsx](../../frontend/packages/views/runtimes/components/execution-config-page.tsx)集中管理工作区连接 Profile 与能力组：可在组内一次保存 Claude/Codex Provider 连接、默认/可用模型与 Runtime 成员，也可复用已有 Profile。用途说明、名称搜索和引擎筛选用于组织能力组；编辑共享连接时显示受影响的组数。Runtime 详情展示组绑定和应用状态，并链接独立入口。旧 Runtime 配置路径保留兼容。查询与 mutation 由 [execution-config.ts](../../frontend/packages/core/runtimes/execution-config.ts)提供，响应通过 [execution-profiles.ts](../../frontend/packages/core/api/schemas/execution-profiles.ts)校验；保存后失效配置、Runtime 和模型目录缓存。API Key 不读回，编辑时留空保留已有密钥；Claude 支持 Bearer / x-api-key。配置状态区分待应用、已应用与失败，不以在线状态代替配置确认。权限、下发和旧数据行为见[执行配置](execution-configuration.md)。
 
 - [useRealtimeSync](../../frontend/packages/core/realtime/use-realtime-sync.ts)负责订阅生命周期和断线重连后的缓存恢复；领域处理器集中在 [realtime/sync/](../../frontend/packages/core/realtime/sync/)。
 - [issues/ws-updaters.ts](../../frontend/packages/core/issues/ws-updaters.ts)补写可确定的任务列表和详情，对派生列表做失效处理。改任务响应字段时同时检查这里和 mutation 的缓存处理。

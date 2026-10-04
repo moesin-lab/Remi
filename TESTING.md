@@ -35,7 +35,7 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 | `bun run probe:feishu` | [飞书流式卡片](tests/integration/feishu-streaming-probe.ts) | 专用测试会话与飞书凭据 |
 | `bun run replay:coverage` | [ACP fixture 重放检查](tests/integration/replay-coverage.ts) | 仓库内 fixture |
 | `bun run smoke:chat` | 独立 Chat 页面、队列、会话管理和附件；隔离 Next ↔ Bun API ↔ 临时 SQLite，模拟 Agent 输出 | 前端依赖与 Chromium；不调用真实 provider |
-| `bun run tests/integration/smoke-execution-configuration.ts` | [集中配置浏览器冒烟](tests/integration/smoke-execution-configuration.ts)：Profile/能力组增改删、绑定状态、版本失效及移动端；隔离 Next ↔ HTTP API ↔ 临时 SQLite | 前端依赖与 Chromium；使用测试凭据、模拟绑定确认，不调用真实模型 |
+| `bun run tests/integration/smoke-execution-configuration.ts` | [能力组浏览器 E2E](tests/integration/smoke-execution-configuration.ts)：独立入口、组内 Provider/模型原子保存、用途搜索、成员、绑定状态、版本失效、云友与模型联动及移动端；隔离 Next ↔ HTTP API ↔ 临时 SQLite | 前端依赖、Node 和 Chromium；使用测试凭据、模拟绑定确认，不调用真实模型；可用 `EXECUTION_CONFIG_ARTIFACTS` 指定诊断输出目录 |
 
 `frontend/e2e/` 仍有继承的 Playwright 用例和上游登录/数据库假设；[配置](frontend/playwright.config.ts)只指定浏览器与 baseURL，不启动服务。它不能替代根 `e2e:frontend` 对 Remi Bun API 的验证。针对这些用例开发时，先核对 [env.ts](frontend/e2e/env.ts) 和实际 helper。
 
@@ -56,6 +56,8 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 - 发版门禁不变：打 tag 前，目标 main SHA 必须有一次全绿的 main push 运行或 main 上的手动运行（都含后端全套）。合并请求上的绿灯不能代替。检查停用后重新打开时，main 不会自动补跑，用 `gh workflow run release-build-check.yml --ref main` 手动跑一次。
 - main 上后端全套变红时，带头大哥当天定位到对应的合并，修复或回滚。QA 维护测试集的职责不变：测试本身的问题由 QA 修复或暂时隔离，代码问题开单处理。
 - 合并请求作者仍应在本地跑与改动相关的测试文件（`bun test <path>`）。
+
+`execution-configuration` job 在 PR、main push 和手动运行中执行能力组、中央连接、模型选择、CLI 的针对性测试，以及真实 WebSocket/daemon 执行测试和浏览器 E2E。它保留后端全套分片的原有条件，不以这组回归代替全套检查；外部模型使用测试实现。浏览器在 Node 宿主内运行，通过 HTTP 与 Bun API 和隔离夹具通信，并上传桌面/移动端截图和失败诊断。
 
 `release-build-check` 的 `platform-updater` job 在 Linux、Windows 显式运行
 `node --test scripts/local-profile.test.mjs scripts/platform-updater-runner.test.mjs`；Windows 验证宿主互斥并编译 updater，

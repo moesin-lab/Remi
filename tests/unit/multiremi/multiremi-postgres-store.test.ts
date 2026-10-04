@@ -2234,6 +2234,19 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     unsub();
   });
 
+  it("waits for a completed Postgres reply after an early worker notification", () => {
+    const probe = new PostgresSyncDatabase(pgDatabaseUrl(TEST_DB));
+    try {
+      expect(probe.query("SELECT -1 AS answer").get()).toEqual({ answer: -1 });
+      // A notification is not proof that the shared response was published.
+      // Keep the new SQL pending so consuming the previous reply is observable.
+      const wait = spyOn(Atomics, "wait").mockImplementationOnce(() => "ok");
+      try {
+        expect(probe.query("SELECT 42 AS answer FROM pg_sleep(0.05)").get()).toEqual({ answer: 42 });
+      } finally { wait.mockRestore(); }
+    } finally { probe.close(); }
+  });
+
   it.each([false, true])("claims contexts atomically across connections (independent Agents: %s)", async (independent) => {
     const ws = freshWorkspace();
     const firstRuntime = store.registerRuntime({

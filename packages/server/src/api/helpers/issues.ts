@@ -71,7 +71,7 @@ export function denyRestrictedTaskIssueCreation(c: Context, store: MultiremiStor
   if (!code) return null;
   return c.json({
     error: code === FEISHU_SENDER_APPROVAL_REQUIRED_CODE
-      ? "A Feishu account in this conversation needs approval. Ask the space owner to allow it in Settings > Integrations > Feishu account allowlist, then retry creating the Issue in this Chat."
+      ? "A Feishu account in this conversation needs approval. Ask the space owner to allow it in IM platforms > Feishu > Access control > Feishu account allowlist, then retry creating the Issue in this Chat."
       : "This agent must use `remi feishu messages propose-issue`; a human must approve before an Issue is created.",
     code,
   }, 403);

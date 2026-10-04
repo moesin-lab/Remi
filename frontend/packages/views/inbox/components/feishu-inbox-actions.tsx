@@ -191,7 +191,7 @@ export function FeishuInboxActions({ item, onArchive }: { item: InboxItem; onArc
             <Button
               size="sm"
               variant="outline"
-              onClick={() => push(`${wsPaths.settings()}?tab=feishu-messages`)}
+              onClick={() => push(wsPaths.imPlatform("feishu", "ingestion"))}
             >
               <Settings2 className="mr-1.5 h-3.5 w-3.5" />
               {t(($) => $.feishu.open_settings)}

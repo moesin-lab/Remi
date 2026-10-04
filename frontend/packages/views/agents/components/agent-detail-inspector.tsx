@@ -44,7 +44,7 @@ import { SkillAttach } from "./inspector/skill-attach";
 import { ThinkingPropRow } from "./inspector/thinking-prop-row";
 import { supportsThinkingLevel } from "./inspector/thinking-levels";
 import { VisibilityPicker } from "./inspector/visibility-picker";
-import { LarkAgentBindButton } from "../../settings/components/lark-tab";
+import { LarkAgentBindButton } from "../../im-platforms/feishu/lark-tab";
 
 interface InspectorProps {
   agent: Agent;
@@ -300,7 +300,7 @@ export function AgentDetailInspector({
  * Whether the Integrations section has anything to show for this agent.
  *
  * Recomputes the visibility rules `LarkAgentBindButton` applies to itself
- * (`settings/components/lark-tab.tsx`): workspace owner/admin only, then
+ * (`im-platforms/feishu/lark-tab.tsx`): workspace owner/admin only, then
  * either an existing active installation for this agent or a deployment
  * where fresh scan-installs can complete. Without it the section header
  * renders above a button that returned null — an "INTEGRATIONS" heading

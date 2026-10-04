@@ -102,7 +102,7 @@ vi.mock("./inspector/skill-attach", () => ({
   // has no unattached skills to offer.
   SkillAttach: () => null,
 }));
-vi.mock("../../settings/components/lark-tab", () => ({
+vi.mock("../../im-platforms/feishu/lark-tab", () => ({
   LarkAgentBindButton: () => <button type="button">Bind Lark bot</button>,
 }));
 

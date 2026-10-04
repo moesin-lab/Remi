@@ -16,7 +16,7 @@ vi.mock("@multiremi/core/hooks", () => ({ useWorkspaceId: () => "ws-1" }));
 
 vi.mock("@multiremi/core/paths", () => ({
   useWorkspacePaths: () => ({
-    settings: () => "/test/settings",
+    imPlatform: (platform: string, section: string) => `/test/im/${platform}/${section}`,
     issueDetail: (id: string) => `/test/issues/${id}`,
   }),
 }));
@@ -176,7 +176,7 @@ describe("FeishuInboxActions", () => {
     ).toBeTruthy();
   });
 
-  it("links a connection alert to the settings tab and offers no decision", () => {
+  it("links a connection alert to message ingestion and offers no decision", () => {
     renderPanel(
       item({
         type: "feishu_ingest_connection_alert",
@@ -189,7 +189,7 @@ describe("FeishuInboxActions", () => {
     expect(screen.getByText("Error code: unreachable")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: /Open Feishu messages settings/ }));
-    expect(push).toHaveBeenCalledWith("/test/settings?tab=feishu-messages");
+    expect(push).toHaveBeenCalledWith("/test/im/feishu/ingestion");
   });
 
   it("renders the Feishu link only when it is an absolute https URL", () => {

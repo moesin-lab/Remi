@@ -11,6 +11,7 @@ bun test tests/unit/daemon/agent-runtime-send-options.test.ts
 bunx tsc --noEmit
 bun run test:frontend
 bun run typecheck:frontend
+bun run smoke:im                          # 独立 Web/API/SQLite；需 Chromium 和 Node 22.6+
 bun run --filter @multiremi/web dev          # 此脚本依赖 sh
 bun run apps/server/main.ts serve
 bun run apps/remi/main.ts start

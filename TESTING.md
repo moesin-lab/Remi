@@ -34,6 +34,7 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 | `bun run e2e:acp` / `bun run e2e:acp:full` | [ACP 冒烟](tests/integration/acp-e2e.ts) / [场景套件](tests/integration/acp-e2e-full.ts) | 对应 provider CLI 和凭据 |
 | `bun run probe:feishu` | [飞书流式卡片](tests/integration/feishu-streaming-probe.ts) | 专用测试会话与飞书凭据 |
 | `bun run replay:coverage` | [ACP fixture 重放检查](tests/integration/replay-coverage.ts) | 仓库内 fixture |
+| `bun run smoke:im` | [IM 平台浏览器验证](tests/integration/smoke-im-platforms.ts)：侧栏和能力页面、机器人/路由/消息源保存、权限、旧链接、工作区隔离与移动端；独立 Next ↔ HTTP API ↔ 临时 SQLite | 前端依赖与 Chromium（可设 `CHROME_EXECUTABLE`）；模拟飞书外部传输，不发送真实消息 |
 | `bun run smoke:chat` | 独立 Chat 页面、队列、会话管理和附件；隔离 Next ↔ Bun API ↔ 临时 SQLite，模拟 Agent 输出 | 前端依赖与 Chromium；不调用真实 provider |
 | `bun run tests/integration/smoke-execution-configuration.ts` | [集中配置浏览器冒烟](tests/integration/smoke-execution-configuration.ts)：Profile/能力组增改删、绑定状态、版本失效及移动端；隔离 Next ↔ HTTP API ↔ 临时 SQLite | 前端依赖与 Chromium；使用测试凭据、模拟绑定确认，不调用真实模型 |
 
@@ -46,7 +47,7 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 | 工作流 | 实际检查范围 |
 |---|---|
 | [dev-context.yml](.github/workflows/dev-context.yml) | PR / main push；Linux、Windows 上的 Node 检查器测试及默认文档阅读链校验 |
-| [release-build-check.yml](.github/workflows/release-build-check.yml) | 按路径触发；后端套件（仅 main push 和手动运行）、架构、CLI 能力、前端类型/测试、CLI 和容器构建、平台专项检查 |
+| [release-build-check.yml](.github/workflows/release-build-check.yml) | 按路径触发；后端套件（仅 main push 和手动运行）、架构、CLI 能力、前端类型/测试、IM 平台浏览器冒烟、CLI 和容器构建、平台专项检查 |
 | [release.yml](.github/workflows/release.yml) / [platform-release.yml](.github/workflows/platform-release.yml) | 发布前校验依赖准备快照、tag 版本，并要求同一 main 提交有成功的全量 CI（main push 或 main 上的手动运行）；平台发版条件遵循 [AGENTS.md](AGENTS.md) |
 
 `release-build-check.yml` 在合并请求和 main 上跑的内容不同（MUL-516）：

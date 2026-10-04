@@ -56,7 +56,7 @@ env -u MULTIREMI_BOT_AGENT_ID -u FEISHU_APP_ID -u FEISHU_APP_SECRET \
 
 ## 3. 主路径：手填凭据
 
-1. `Workspace Settings → Integrations → 飞书个人机器人`。
+1. `IM 平台 → 飞书 → 机器人 → 飞书个人机器人`。
 2. 选 bot Agent（必须属于本 workspace 且未归档）、选第 2 步那台 Runtime。
 3. 填 App ID、App Secret，domain 选 `feishu`。
 4. 点**测试连接**。凭据对的话返回 ok；故意填错一位再点一次，应该看到一条**脱敏过的**

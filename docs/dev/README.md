@@ -43,6 +43,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 对接 Hub 的 trace 订阅（A-6、飞书 CoT） | [Live Hub 对接说明](live-hub-a6-integration.md) | 调用方式、gap 由谁补读、背压恢复与 `closed` 终态 |
 | 改详情页首屏定位、贴底或 `data-perf-state` 契约 | [ADR 0008](../adr/0008-issue-detail-anchored-reveal-and-stick-to-bottom.md) | 先隐藏后一次定位、贴底状态机与预算口径 |
 | 改项目 Memory/Wiki | [项目知识契约](../project-wiki-memory-spec.md) | 查询、提案、发布、物化与权限 |
+| 改 IM 平台导航或管理页面 | [IM 平台管理](im-platforms.md) | 平台目录、机器人/采集连接、能力页面、工作区权限和旧地址迁移 |
 | 改飞书消息接入 | [消息接入](../feishu-message-ingestion.md) | Connection、Source、消息处理与凭据 |
 | 配置部署或排障 | [部署](../../deploy/README.md)、[本机 stable/dev](../deploy/local-profiles.md)、[daemon 环境](../deploy/66-8-remi-environment.md) | 服务组成、配置和启动条件 |
 | 更新这些开发依据 | [维护方法](context-maintenance.md) | 归属、源码核对和可执行检查 |

@@ -129,7 +129,7 @@ describe("Feishu sender allowlist Issue authorization", () => {
       expect(response.status, path).toBe(403);
       expect(await response.json(), path).toMatchObject({
         code: "feishu_sender_approval_required",
-        error: expect.stringContaining("Settings > Integrations > Feishu account allowlist"),
+        error: expect.stringContaining("IM platforms > Feishu > Access control > Feishu account allowlist"),
       });
     }
     expect(fixture.store.listIssues({ workspaceId: "local" })).toHaveLength(0);

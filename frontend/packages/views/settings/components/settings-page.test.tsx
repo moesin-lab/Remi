@@ -43,7 +43,7 @@ vi.mock("./workspace-tab", () => ({ WorkspaceTab: () => <div /> }));
 vi.mock("./prompts-tab", () => ({ PromptsTab: () => <div /> }));
 vi.mock("./members-tab", () => ({ MembersTab: () => <div /> }));
 vi.mock("./source-control-tab", () => ({ SourceControlTab: () => <div /> }));
-vi.mock("./integrations-tab", () => ({ IntegrationsTab: () => <div /> }));
+
 vi.mock("./model-gateway-tab", () => ({ ModelGatewayTab: () => <div /> }));
 vi.mock("./labs-tab", () => ({ LabsTab: () => <div /> }));
 vi.mock("./storage-cleanup-tab", () => ({ StorageCleanupTab: () => <div /> }));

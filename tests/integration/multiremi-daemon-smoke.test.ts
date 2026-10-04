@@ -1,3 +1,4 @@
+import { disabledSshMeshRuntime } from "../helpers/ssh-mesh-isolation.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
@@ -115,6 +116,7 @@ describe("Bun Multiremi daemon smoke", () => {
     let sends = 0;
     let sideWorkDir: string | null = null;
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`, token: token.token, daemonId: "workspace-laptop", runtimeName: "Local workspace test",
       provider: "claude", workspaceId: "local", daemonPort: 0, pollIntervalMs: 20, gcEnabled: false,
       workspacesRoot: daemonState, repoCacheRoot: join(root, "repo-cache"),
@@ -209,6 +211,7 @@ describe("Bun Multiremi daemon smoke", () => {
     const server = startMultiremiServer({ store, scheduler: null, authToken: "model-refresh-test", hostname: "127.0.0.1", port: 0 });
     let probes = 0;
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`, token: credential.token,
       runtimeName: "periodic-probe", provider: "codex", workspaceId: "local", daemonPort: 0,
       workspacesRoot: join(workDir, "workspaces"), repoCacheRoot: join(workDir, ".repo-cache"),
@@ -246,6 +249,7 @@ describe("Bun Multiremi daemon smoke", () => {
   it("keeps the unsafe in-process model probe restricted to injected test providers", () => {
     workDir = mkdtempSync(join(tmpdir(), "multiremi-daemon-model-probe-guard-"));
     expect(() => new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: "http://127.0.0.1:1",
       workspaceId: "local",
       daemonPort: 0,
@@ -366,6 +370,7 @@ describe("Bun Multiremi daemon smoke", () => {
       };
     };
     const claudeDaemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: claudeDaemonToken.token,
       daemonId: "daemon-relay-probe-claude",
@@ -381,6 +386,7 @@ describe("Bun Multiremi daemon smoke", () => {
       providerFactory: providerFactory("claude"),
     });
     const codexDaemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: codexDaemonToken.token,
       daemonId: "daemon-relay-probe-codex",
@@ -470,6 +476,7 @@ describe("Bun Multiremi daemon smoke", () => {
     });
     let modelProbeCount = 0;
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       runtimeName: "model-probe-disabled-runtime",
@@ -526,6 +533,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeName: "lazy-repo-cache-runtime",
@@ -856,6 +864,7 @@ describe("Bun Multiremi daemon smoke", () => {
     let daemonRun: Promise<void> | null = null;
     try {
       daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         daemonId: "daemon-smoke",
@@ -1104,6 +1113,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       const daemon = pluginDaemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         daemonId: "daemon-plugin",
@@ -1202,6 +1212,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       const daemon = preflightDaemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         daemonId: "daemon-plugin-preflight",
@@ -1274,6 +1285,7 @@ describe("Bun Multiremi daemon smoke", () => {
     });
 
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       runtimeName: "concurrency-runtime",
@@ -1338,6 +1350,7 @@ describe("Bun Multiremi daemon smoke", () => {
     const contexts = new Map<string, string>();
     const homes = new Set<string>();
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`, token: credential.token,
       runtimeName: "parallel", provider: "claude", workspaceId: "local", daemonPort: 0,
       workspacesRoot: join(workDir, "workspaces"), repoCacheRoot: join(workDir, ".repo-cache"),
@@ -1392,6 +1405,7 @@ describe("Bun Multiremi daemon smoke", () => {
     const probeStarted = deferred<void>();
     let closeCount = 0;
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       runtimeName: "model-probe-stop-runtime",
@@ -1473,6 +1487,7 @@ describe("Bun Multiremi daemon smoke", () => {
       },
     });
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       runtimeName: "model-retry-runtime",
@@ -1524,6 +1539,7 @@ describe("Bun Multiremi daemon smoke", () => {
     });
     let modelProbeCount = 0;
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       runtimeName: "model-probe-retry-runtime",
@@ -1621,6 +1637,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeName: "repo-runtime",
@@ -1721,6 +1738,7 @@ describe("Bun Multiremi daemon smoke", () => {
     const now = spyOn(Date, "now").mockImplementation(() => actualNow() + elapsedCooldown);
     const runDaemonOnce = async () => {
       const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       runtimeName: "chat-no-git-runtime",
@@ -1806,6 +1824,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeName: "auto-repo-runtime",
@@ -1877,6 +1896,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeName: "repo-warning-runtime",
@@ -1958,6 +1978,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeName: "intake-degraded-runtime",
@@ -2014,7 +2035,7 @@ describe("Bun Multiremi daemon smoke", () => {
       for (let turn = 0; turn < 2; turn++) {
         const task = store.sendChatMessage(chat.id, { body: "Progress?" }).task;
         expect(task).toMatchObject({ issueId: issue.id, issueSessionId: null, holdsWorkspace: false });
-        const daemon = new MultiremiDaemon({ serverUrl: `http://127.0.0.1:${server.port}`, token: token.token,
+        const daemon = new MultiremiDaemon({ sshMeshManager: disabledSshMeshRuntime(), serverUrl: `http://127.0.0.1:${server.port}`, token: token.token,
           runtimeName: "bound-chat", provider: "claude", workspaceId: "local", once: true, daemonPort: 0,
           workspacesRoot, repoCacheRoot: join(workDir, ".repo-cache"), providerFactory });
         try { await daemon.start(); }
@@ -2111,6 +2132,7 @@ describe("Bun Multiremi daemon smoke", () => {
     const now = spyOn(Date, "now").mockImplementation(() => actualNow() + elapsedCooldown);
     const runDaemonOnce = async () => {
       const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       runtimeName: "chat-resume-runtime",
@@ -2234,8 +2256,18 @@ describe("Bun Multiremi daemon smoke", () => {
       expect(sendOptions[2]?.sessionId).toBe("sess-chat-2");
       expect(sendOptions[3]?.sessionId ?? null).toBeNull();
       expect(prompts[3]).toContain("## Current Session Context");
-      expect(prompts[3]).toContain(`"body":"Start the chat"`);
-      expect(prompts[3]).toContain(`"body":"Second answer"`);
+      expect(prompts[3]).not.toContain(`"body":"Start the chat"`);
+      expect(prompts[3]).not.toContain(`"body":"Second answer"`);
+      expect(prompts[3]).not.toContain("你上次读到");
+      const range = prompts[3]!.match(/remi session log get (\S+) --from (\d+) --to (\d+)/)!;
+      expect(range[1]).toBe(session.id); expect(range[2]).toBe("0");
+      expect(store.getSessionAgentReadProgress(session.id, agent.id)).toEqual({ seq: 0, offset: 0 });
+      const history = await fetch(`http://127.0.0.1:${server.port}/api/sessions/${session.id}/log/entry?from=${range[2]}&to=${range[3]}`,
+        { headers: { Authorization: "Bearer root-chat-resume-secret" } });
+      expect(history.status).toBe(200);
+      const page = await history.json() as any;
+      expect(page.next_cursor).toBeNull();
+      expect(page.entries.map((entry: any) => entry.body_md)).toContain("Start the chat");
       expect(prompts[3]?.match(/Recover from product history/g)).toHaveLength(1);
       expect(prompts[3]).toContain("`remi context`");
       expect(prompts[3]).not.toContain("## Available Repositories");
@@ -2251,6 +2283,12 @@ describe("Bun Multiremi daemon smoke", () => {
         sessionId: "sess-chat-3",
         latestTaskId: retry.id,
       });
+      const continued = store.sendChatMessage(session.id, { body: "Continue after cold recovery" });
+      await runDaemonOnce();
+      expect(store.getTask(continued.task.id)?.status).toBe("completed");
+      expect(sendOptions[4]?.sessionId).toBe("sess-chat-3");
+      expect(prompts[4]).toStartWith("# Delta Prompt");
+      expect(prompts[4]).toContain(`remi session log get ${session.id} --from 0 --to`);
     } finally {
       unsubscribeRetries(); now.mockRestore();
       server.stop(true);
@@ -2302,6 +2340,7 @@ describe("Bun Multiremi daemon smoke", () => {
     let workspaceAtProviderStart: ReturnType<typeof store.getIssueWorkspace> = null;
     try {
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeName: "local-dir-runtime",
@@ -2432,6 +2471,7 @@ describe("Bun Multiremi daemon smoke", () => {
     });
     try {
       daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeName: "codex-home-runtime",
@@ -2513,6 +2553,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeName: "gc-runtime",
@@ -2603,6 +2644,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         daemonId: "daemon-chat-gc",
@@ -2683,6 +2725,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeName: "autopilot-gc-runtime",
@@ -2742,6 +2785,7 @@ describe("Bun Multiremi daemon smoke", () => {
     const server = startMultiremiServer({ store, scheduler: null, authToken: "selected-skill-test", hostname: "127.0.0.1", port: 0 });
     let sends = 0;
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`, token: token.token,
       daemonId: "skill-machine", runtimeName: "Skill directory test", provider: "claude", workspaceId: "local",
       daemonPort: 0, pollIntervalMs: 20, gcEnabled: false,
@@ -2847,6 +2891,7 @@ describe("Bun Multiremi daemon smoke", () => {
     let modelProbeCount = 0;
     try {
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeId,
@@ -3003,6 +3048,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeId,
@@ -3068,6 +3114,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeId,
@@ -3128,6 +3175,7 @@ describe("Bun Multiremi daemon smoke", () => {
     let desktopRun: Promise<void> | undefined;
     try {
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeId,
@@ -3173,6 +3221,7 @@ describe("Bun Multiremi daemon smoke", () => {
       port: 0,
     });
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       runtimeName: "lifecycle-runtime",
@@ -3321,6 +3370,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeName: "runtime-gone-daemon",
@@ -3658,6 +3708,7 @@ describe("Bun Multiremi daemon smoke", () => {
     let modelProbeCount = 0;
     const protocolClock = new ManualDaemonProtocolClock();
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       runtimeId: oldRuntimeId,
@@ -3756,6 +3807,7 @@ describe("Bun Multiremi daemon smoke", () => {
 
     try {
       const daemon = new MultiremiDaemon({
+        sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
         token: daemonToken.token,
         runtimeName: "timeout-runtime",
@@ -3847,6 +3899,7 @@ async function runCompactionFinalizeCase(spec: {
   let traceEvents: TraceEvent[] = [];
   try {
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       daemonId: `daemon-${spec.id}`,
@@ -3910,6 +3963,7 @@ async function runProviderHomeSymlinkProof(kind: "quick" | "chat" | "issue"): Pr
   });
   try {
     const daemon = new MultiremiDaemon({
+      sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
       daemonId,

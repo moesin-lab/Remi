@@ -4197,7 +4197,7 @@ runMigrations(this.db);
   createIssueCommentWithinTransaction(
     issueId: string,
     input: CreateIssueCommentInput,
-    options: { withinTransaction: true; deferredEvents: import("./context.js").CommitEventQueue; deferDispatch?: boolean },
+    options: { withinTransaction: true; deferredEvents: import("./context.js").CommitEventQueue; deferDispatch?: boolean; commentId?: string },
   ): import("./context.js").CreatedIssueComment {
     return this.issues.createIssueCommentWithinTransaction(issueId, input, options);
   }
@@ -4735,6 +4735,10 @@ runMigrations(this.db);
     return this.conversationLog.updateWithinTransaction(sessionId, seq, input);
   }
 
+  getConversationLogAccessScope(sessionId: string) {
+    return this.conversationLog.getAccessScope(sessionId);
+  }
+
   getConversationLogEntry(sessionId: string, seq: number, query?: ConversationLogQuery | null): ConversationLogEntry | null {
     return this.conversationLog.getEntry(sessionId, seq, query);
   }
@@ -4745,6 +4749,18 @@ runMigrations(this.db);
 
   getConversationLogHead(sessionId: string, query?: ConversationLogQuery | null) {
     return this.conversationLog.getHead(sessionId, query);
+  }
+
+  getSessionAgentReadProgress(sessionId: string, agentId: string) {
+    return this.conversationLog.getSessionAgentReadProgress(sessionId, agentId);
+  }
+
+  recordSessionAgentRangeRead(...args: Parameters<ConversationLogRepo["recordSessionAgentRangeRead"]>) {
+    return this.conversationLog.recordSessionAgentRangeRead(...args);
+  }
+
+  recordSessionAgentInlineRead(...args: Parameters<ConversationLogRepo["recordSessionAgentInlineRead"]>) {
+    return this.conversationLog.recordSessionAgentInlineRead(...args);
   }
 
   /** A window of shown entries; hidden markers never appear. */
@@ -4787,6 +4803,10 @@ runMigrations(this.db);
 
   listConversationLogEntriesByTask(taskId: string): ConversationLogEntry[] {
     return this.conversationLog.listByTask(taskId);
+  }
+
+  getTaskWakeSequences(taskId: string): number[] {
+    return this.tasks.getTaskWakeSequences(taskId);
   }
 
   /** The write hook C's Live Hub implements; B1 leaves it empty. */
@@ -4851,14 +4871,20 @@ runMigrations(this.db);
     return this.tasks.listTasksForIssue(issueId);
   }
 
-  isSquadLeaderDelegation(input: {
-    issue: MultiremiIssue;
-    sourceTask: MultiremiTask | null;
-    authorAgentId: string | null;
-    targetAgentId: string;
-    issueSessionId: string | null;
-  }): import("./repos/issues-repo.js").SquadLeaderDelegationDecision {
-    return this.issues.isSquadLeaderDelegation(input);
+  resolveAgentDelegation(input: Parameters<IssuesRepo["resolveAgentDelegation"]>[0]): import("./repos/issues-repo.js").AgentDelegationDecision {
+    return this.issues.resolveAgentDelegation(input);
+  }
+
+  countDelegationPairHops(...args: Parameters<TasksRepo["countDelegationPairHops"]>): number {
+    return this.tasks.countDelegationPairHops(...args);
+  }
+
+  recordDelegationRoundTripLimited(...args: Parameters<TasksRepo["recordDelegationRoundTripLimited"]>): void {
+    this.tasks.recordDelegationRoundTripLimited(...args);
+  }
+
+  recordDelegationRoundTripLimitedWithinTransaction(...args: Parameters<TasksRepo["recordDelegationRoundTripLimitedWithinTransaction"]>): void {
+    this.tasks.recordDelegationRoundTripLimitedWithinTransaction(...args);
   }
 
   getTaskQueueBlocker(taskId: string): MultiremiTaskQueueBlocker | null {
@@ -4963,7 +4989,7 @@ runMigrations(this.db);
     return this.projects.deleteProjectResource(projectId, resourceId);
   }
 
-  listProjectDocs(projectId: string, input: { kind?: string | null } = {}): MultiremiProjectDoc[] {
+  listProjectDocs(projectId: string, input: { kind?: string | null; includeBody?: boolean } = {}): MultiremiProjectDoc[] {
     return this.projects.listProjectDocs(projectId, input);
   }
 
@@ -5051,8 +5077,8 @@ runMigrations(this.db);
     return this.projects.getProjectDocsIndex(projectId);
   }
 
-  listRepositoryWikiDocs(workspaceId: string, repositoryId: string): MultiremiRepositoryWikiDoc[] {
-    return this.repositoryWiki.list(workspaceId, repositoryId);
+  listRepositoryWikiDocs(workspaceId: string, repositoryId: string, input: { includeBody?: boolean } = {}): MultiremiRepositoryWikiDoc[] {
+    return this.repositoryWiki.list(workspaceId, repositoryId, input);
   }
 
   listWorkspaceRepositoryWikiDocs(workspaceId: string): MultiremiRepositoryWikiDoc[] {

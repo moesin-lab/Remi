@@ -42,5 +42,14 @@ for (const linked of [false, true]) {
     expect(decideLogSubscription(subject, sqlFacts).ok).toBe(false);
     const facts = await reader.logFacts(session.id, subject);
     expect(facts.ok && decideLogSubscription(subject, facts.facts).ok).toBe(false);
+    const alice = await store.createAccessToken({ name: "restricted owner", type: "pat", workspaceId: "local", userId: "alice" });
+    for (const logId of [chat.id, session.id]) {
+      for (const suffix of ["log?before=10", "log/entry?seq=1", "log/locate?id=missing"]) {
+        const response = await app.request(`/api/sessions/${logId}/${suffix}`, {
+          headers: { Authorization: `Bearer ${alice.token}` },
+        });
+        expect(response.status).toBe(403);
+      }
+    }
   });
 }

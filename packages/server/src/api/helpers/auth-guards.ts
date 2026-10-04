@@ -389,7 +389,9 @@ export function denyCurrentUserRuntimeWorkspaceAccess(c: Context, store: Multire
   return null;
 }
 
-export function canCurrentUserAccessAgent(c: Context, store: MultiremiStore, agent: MultiremiAgent): boolean {
+type AgentVisibility = Pick<MultiremiAgent, "visibility" | "ownerId" | "workspaceId">;
+
+export function canCurrentUserAccessAgent(c: Context, store: MultiremiStore, agent: AgentVisibility): boolean {
   return agentVisibleToUser(agent, currentRequestUserId(c), (workspaceId) => currentWorkspaceRole(c, store, workspaceId));
 }
 
@@ -417,7 +419,7 @@ export function canCurrentUserAccessAgentChecker(
 }
 
 function agentVisibleToUser(
-  agent: MultiremiAgent,
+  agent: AgentVisibility,
   userId: string,
   roleForWorkspace: (workspaceId: string) => string,
 ): boolean {

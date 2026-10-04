@@ -71,6 +71,7 @@ interface CommentCardProps {
    * its own thread (and for a reply whose parent fell outside the window).
    */
   parentRef?: CommentParentRef;
+  assignmentRef?: { title: string; onOpen: () => void };
   /** Scrolls to + briefly highlights the parent entry. */
   onNavigateToParent?: (parentId: string) => void;
   /** True when some other comment in the session points at this one — the
@@ -94,7 +95,7 @@ interface CommentCardProps {
   onEdit: (commentId: string, content: string, attachmentIds: string[]) => Promise<void>;
   onDelete: (commentId: string) => void;
   onToggleReaction: (commentId: string, emoji: string) => void;
-  /** Toggle the resolved state on this comment. */
+  /** Toggle the resolved state on this comment. Only offered on root comments. */
   onResolveToggle?: (commentId: string, resolved: boolean) => void;
   /**
    * When non-null, this comment is currently a resolved-but-expanded row.
@@ -383,6 +384,7 @@ function CommentCardImpl({
   entry,
   bodyHtml,
   parentRef,
+  assignmentRef,
   onNavigateToParent,
   hasReplies,
   currentUserId,
@@ -436,6 +438,13 @@ function CommentCardImpl({
       )}
       {parentRef && (
         <ParentQuoteLine parentRef={parentRef} onNavigate={onNavigateToParent} />
+      )}
+      {assignmentRef && (
+        <button type="button" onClick={assignmentRef.onOpen} data-assignment-ref
+          className="mb-1 flex h-6 w-full min-w-0 items-center gap-1 border-l-2 border-border pl-2 text-left text-xs text-muted-foreground transition-colors hover:border-brand/40 hover:text-foreground">
+          <Reply className="size-3 shrink-0" aria-hidden="true" />
+          <span className="truncate">{t($ => $.log_event.assignment_response, { title: assignmentRef.title })}</span>
+        </button>
       )}
 
       {/* Header line — who spoke, and when. */}
@@ -586,7 +595,9 @@ function CommentCardImpl({
               <Copy className="h-3.5 w-3.5" />
               {t(($) => $.comment.copy_action)}
             </DropdownMenuItem>
-            {onResolveToggle && (
+            {/* Resolve is a thread-level action: the server only accepts it on
+                the root comment, so a reply never offers it. */}
+            {onResolveToggle && !entry.parent_id && (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => onResolveToggle(entry.id, !entry.resolved_at)}>

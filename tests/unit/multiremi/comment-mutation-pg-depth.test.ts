@@ -11,7 +11,10 @@ describe("comment mutations own exactly one PG transaction", () => {
         store.ensureLocalWorkspace();
         const ctx = (store as unknown as { ctx: StoreContext }).ctx;
         const issue = store.createIssue({ title: "Comment atomicity", workspaceId: "local" });
-        const comment = store.createIssueComment(issue.id, { body: "original", authorType: "member", authorId: "local" });
+        const session = store.getOrCreateDefaultIssueSession(issue.id);
+        const comment = store.createIssueComment(issue.id, {
+          issueSessionId: session.id, body: "original", authorType: "member", authorId: "local",
+        });
         if (operation === "unresolve") store.resolveIssueComment(comment.id);
         const mutate = () => {
           if (operation === "edit") store.updateIssueComment(comment.id, { body: "edited" });

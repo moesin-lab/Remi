@@ -13478,7 +13478,8 @@
             "created_at": "<timestamp>"
           }
         ],
-        "pending_decision_count": 1
+        "pending_decision_count": 1,
+        "blocked_by": []
       }
     },
     {

@@ -62,11 +62,27 @@ WSClient → useRealtimeSync → sync/<领域>.ts
 
 响应解析由各端点负责，目前并非所有历史方法都已调用 schema helper；新增或修改消费逻辑遵循前端规则。[createQueryClient](../../frontend/packages/core/query-client.ts)默认使用 `staleTime: Infinity`，列表是否更新依赖 mutation、WS 和重连处理，排查陈旧数据时应先核对这些路径。
 
+执行时间线的旧消息与 trace 读取路径共用“过滤 usage/execution → 合并文字分片 → 脱敏”处理；合并不会跨越不同的 `meta.parent_tool_call_id`。Chat 在此结果上只额外过滤 compaction。弹窗事件数基于处理后的时间线，上下文标签独立读取 seq 最新的 usage（兼容旧 JSON content），与任务累计 input/output 用量分开显示。验证入口为 [build-timeline.test.ts](../../frontend/packages/views/common/task-transcript/build-timeline.test.ts)、[task-trace-dialog.test.tsx](../../frontend/packages/views/common/task-transcript/task-trace-dialog.test.tsx) 和 [chat-timeline.test.ts](../../frontend/packages/views/chat/lib/chat-timeline.test.ts)。
+
 任务列表包含按状态分页的缓存结构；详情只需要已有列表中的某个对象时，使用 `findCachedIssue`，避免为查缓存额外挂载完整列表查询。列表、看板、我的单的「显示子单」偏好由各自的 view store 持久化，默认关闭；查询键与请求都包含服务端 `top_level_only` 过滤值，不能在客户端裁掉子单。父单进度从服务端 child-progress buckets 显示。工作台复用查询缓存区分待人工输入与待验收，不能只根据单个任务的完成状态自行推导整个 issue 的展示。
+
+Issue 顶部提示只使用详情响应的 `pending_decision_count` 和 `blocked_by`，没有提示时不挂载提示槽。横条渲染不依赖 decisions / dependencies 的响应。侧栏未完成前置单计数和横条共用 `blocked_by`，保留固定高度槽位；兼容详情仅在 backlog 查询未完成前置单，其他状态返回空数组。非子单首屏没有 dependencies 请求；子单允许编辑器发一次，读取包括已完成项的完整依赖列表。负责人自己拍板和已回答记录不触发横条；依赖编辑和强制开始失效详情缓存，WS 的部分更新保留详情独有字段。
+
+Issue 的 seq 0 是标题与描述的例外：[IssueLogHead](../../frontend/packages/views/issues/components/issue-log-head.tsx) 用详情标题渲染只读标题，按同一 head 行的 `metadata.title` 精确移除一次 Markdown 前缀，避免改标题时混用版本。描述交给 `ReadonlyContent`，复用已有附件查询缓存并启用普通代码块复制；冷缓存只在下载点击时加载附件列表，按 URL 找到 ID 后调用已有下载入口刷新签名，首屏不请求附件列表。编辑和保存都只包含描述，不消费带标题的 `body_html`。服务端与 agent 的日志契约不变。
 
 收件箱页面使用 `useInfiniteQuery` 按游标每次读取 50 条；侧栏关注数与页内未读数来自独立的 `/api/inbox/summary`，摘要查询 `staleTime` 为 30 秒，不需要加载完整列表。筛选、日期分组、成功自动运行及同父单通知的折叠应用于已加载页；父单元数据由服务端投影提供，但只投影通知所属工作区内仍存在的父单，组内失败、卡住、待决定通知优先。父单分组头不提供整组归档，展开后逐条归档；行内操作始终保留固定宽度，悬停只改变可见性。链接指向尚未加载的通知时，页面继续加载后续页，读取失败不能当作通知不存在。读/归档 mutation 和 WS 更新同时维护旧列表缓存与分页缓存，并刷新摘要；具体分组和计数契约见[收件箱边界](../inbox-workbench-boundary.md)。
 
 集成设置中的 Issue 话题表单维护工作区 `settings.issueTopics`，与 concierge bot 配置分开：成员可读，owner/admin 可保存启用状态、目标群和项目范围。API 的 `project_ids: null` 表示不限制项目；UI 开启项目限制时要求至少选择一项，服务端仍校验项目归属。保存后失效当前工作区的 `feishu-bot` 查询树；端点经过 schema 解析。验证入口为[表单测试](../../frontend/packages/views/settings/components/issue-topic-section.test.tsx)和[端点测试](../../frontend/packages/core/api/endpoints/feishu-bot.test.ts)。
+
+Issue 活动区默认显示普通评论、固定单行的派活和 `workspace_move_cleared` 动态。派活和被派 agent 的首条回应引用在点击后打开既有任务弹窗，初始停在「输入 Prompt」，评论流内不展开正文。回应关联只用当前窗口中唯一的同 task 派活记录，首次出现时确定，翻页不向已显示的评论追加引用；任务列表只在点击时复用缓存或读取。系统细节开关按用户和工作区在本地同步持久化，渲染前过滤结果发布、信封、收件箱唤醒及未知非评论类型。SSR 列表在本地偏好 hydration 完成前保持隐藏，定位脚本通过 `data-ssr-display-ready` 门禁等待最终显示集合，避免默认集合先显现再变化；用户切换开关时在绘制前保持 released 阅读锚点或 pinned 贴底。打开后 [IssueLogEventRow](../../frontend/packages/views/issues/components/issue-log-event-row.tsx) 显示固定一行人话，发布结果使用已有结果列表并打开右侧结果面板。信封按 `dedupeKey` 来源优先、`kind/to.role` 次之分类，永不使用正文兜底。Chat 永久过滤内部条目，无系统细节开关；普通评论交互和用户/assistant 气泡沿用原路径。
+
+派活和回应引用提供原始 turn 给任务弹窗：输入 Prompt 请求只有返回 404（未记录执行输入）时才显示该 turn 的派活说明，优先使用 `body_html`，缺失时渲染完整 `body_md`，两条路径都使用紧凑正文样式限制标题大小。提示依据 turn 的 `metadata.status`：`queued`、`dispatched` 和等待目录锁的 `waiting_local_directory` 显示「任务尚未开始执行」，其他或未知状态显示「未记录执行输入」；四语言同步。200 仍展示完整审计输入，网络或服务端错误仍保留错误态；没有 turn 的执行过程等入口沿用原空态。验证入口为 [派活弹窗测试](../../frontend/packages/views/issues/components/issue-task-prompt-dialog.test.tsx)、[执行弹窗测试](../../frontend/packages/views/common/task-transcript/task-trace-dialog.test.tsx)和 [输入 Prompt 测试](../../frontend/packages/views/common/task-transcript/agent-transcript-dialog.test.tsx)。
+
+固定摘要通过 `transformEntries` 使用新的行高缓存 `render_version`，不重用旧全文或展开态测量，也不更改副本日志。开关切换由用户触发，弹窗不增加评论流高度，姓名和标题更新只替换单行文字。回归入口为 [摘要测试](../../frontend/packages/views/common/session-log/event-summary.test.ts)、[Issue 日志行测试](../../frontend/packages/views/issues/components/issue-log-event-row.test.tsx)、[偏好测试](../../frontend/packages/core/issues/stores/activity-preferences-store.test.ts)、现有 Chat、任务弹窗及滚动 hook/list 测试；这些测试不代替真实浏览器首屏性能验收。前端隐藏仍占服务端分页条数；补回状态动态和显示层分页属于后续改动。
+
+深链目标属于系统细节时，本次访问临时开启显示且不写偏好，开关显示为开启；目标未加载时揭示门禁继续等待，用户手动切换后以其选择为准并持久化，离开该深链访问后恢复保存值。SSR 与客户端在渲染前使用同一目标分类，首个可见帧即可定位和高亮；验证入口为 [Issue 深链回归](../../frontend/packages/views/issues/components/issue-detail.test.tsx)和 [SSR 定位脚本回归](../../frontend/apps/web/app/issue-log-ssr-position.test.ts)。
+
+`/log/locate` 返回 404 时，已删除或不存在的评论深链回退到该会话尾部；未指定会话时，所有会话均返回 404 才回退到默认会话。回退窗口与缺失目标状态一起就绪，渲染前取消锚点、高亮和临时系统细节，首个可见帧沿用普通浏览的贴底状态。SSR 用 `missingCommentId` 标记尾部 seed；旧 SSR seed 的目标不在窗口时，客户端重新定位后按同一规则回退。网络错误、5xx 和尾部读取失败仍保留错误态与重试。验证入口为 [日志窗口回归](../../frontend/packages/core/session-log/issue-log.test.ts)、上述 Issue 深链回归与 [SSR 读取回归](../../frontend/apps/web/features/issues/server-log.test.ts)。
 
 ## 实时更新与性能定位
 

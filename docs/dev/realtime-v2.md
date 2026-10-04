@@ -67,8 +67,10 @@ A-0 的裸 task id 与 daemon `trace.subscribe` 保持排他游标，Hub 内部�
 
 实现在 [hub/stream-auth.ts](../../packages/server/src/api/hub/stream-auth.ts)，规则只写一次，两种后端各自提供事实：
 
-- `log:` 按会话归属。chat 会话只允许 `creatorId` 本人；issue 会话要求请求者是该会话所属工作区的成员。socket 的 workspace 绑定仍然生效，跨工作区一律拒绝。
-- `trace:` 按 `canUserViewTaskMessages`。chat 任务只允许会话创建者；私有 Agent 的任务只允许其 owner 与工作区 owner/admin；其余任务工作区成员可读。
+- `log:` 按会话归属。Chat 及其工作 Session 只允许 Chat 的 `creatorId` 本人，并检查关联 Agent 的可见性；仅无 Chat 所有者的历史 Issue Session 按工作区成员身份授权。关联 Issue 不扩大私有 Chat 的访问范围，工作区管理员也不能借此读取他人的 Session。socket 的 workspace 绑定仍然生效，跨工作区一律拒绝。
+- `trace:` 按 `canUserViewTaskMessages`。携带 Chat 身份的普通任务和 Session 任务都只允许 Chat 创建者；无 Chat 身份的私有 Agent 任务只允许其 owner 与工作区 owner/admin；其余任务工作区成员可读。
+
+HTTP 日志窗口、定位和单条展开通过 `getConversationLogAccessScope` 一次读取 Session、所属 Chat 和 Agent 可见性，再复用工作区、创建者和 Agent 权限规则，避免鉴权时完整加载 Agent 的配置。收件箱单条展开的查询预算及 SQLite/PostgreSQL 验证入口见 [MUL-491 回归](../../tests/unit/multiremi/mul491-inbox-receipt-query.test.ts)；私有 Session 边界见 [HTTP/订阅回归](../../tests/unit/multiremi/chat-session-log-access.test.ts)。
 
 Postgres 下每条订阅走 C4 只读池一条 `SELECT`（`LOG_STREAM_FACTS_SQL` / `TRACE_STREAM_FACTS_SQL`），不使用同步 bridge；SQLite 与测试退回 store 同步读取。`userId === null`（主令牌/开放模式）保留本地管理员语义。
 

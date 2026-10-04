@@ -233,6 +233,11 @@ describe.skipIf(!pgAvailable)("MUL-438 stream auth on Postgres (integration)", (
     store.createWorkspaceMember({ workspaceId, userId: "creator", name: "Creator", role: "owner" });
     store.createWorkspaceMember({ workspaceId, userId: "member", name: "Member", role: "member" });
     store.createWorkspaceMember({ workspaceId, userId: "admin", name: "Admin", role: "admin" });
+    // Keep the legacy Issue-owned arm explicit. Creating it after an Agent
+    // exists would use the compatibility bridge to create a Chat-owned Session.
+    const issue = store.createIssue({ workspaceId, title: "Streamed" });
+    const session = store.getOrCreateDefaultIssueSession(issue.id, "creator");
+    expect(session.chatId).toBeNull();
     const agent = store.createAgent({ workspaceId, name: "Public agent", provider: "codex", visibility: "workspace" });
     const privateAgent = store.createAgent({
       workspaceId,
@@ -241,9 +246,9 @@ describe.skipIf(!pgAvailable)("MUL-438 stream auth on Postgres (integration)", (
       visibility: "private",
       ownerId: "creator",
     });
-    const issue = store.createIssue({ workspaceId, title: "Streamed" });
-    const session = store.getOrCreateDefaultIssueSession(issue.id, "creator");
     const chat = store.createChatSession({ agentId: agent.id, workspaceId, creatorId: "creator", title: "Chat" });
+    const ownedSession = store.getOrCreateDefaultChatSession(chat.id);
+    const ownedTask = store.createSessionTask(ownedSession.id, { agentId: privateAgent.id, prompt: "private Session task" });
     const task = store.createTask({ agentId: agent.id, workspaceId, prompt: "issue task", issueId: issue.id });
     const chatTask = store.createTask({ agentId: agent.id, workspaceId, prompt: "chat task", chatSessionId: chat.id });
     const privateTask = store.createTask({ agentId: privateAgent.id, workspaceId, prompt: "private task", issueId: issue.id });
@@ -254,6 +259,8 @@ describe.skipIf(!pgAvailable)("MUL-438 stream auth on Postgres (integration)", (
       taskId: task.id,
       chatTaskId: chatTask.id,
       privateTaskId: privateTask.id,
+      ownedSessionId: ownedSession.id,
+      ownedTaskId: ownedTask.id,
     };
   }, 120_000);
 
@@ -301,6 +308,21 @@ describe.skipIf(!pgAvailable)("MUL-438 stream auth on Postgres (integration)", (
     if (!peer.ok) throw new Error("unexpected unavailable");
     expect(decideLogSubscription({ userId: "member", workspaceId }, peer.facts))
       .toEqual({ ok: false, code: "forbidden" });
+  });
+
+  it("keeps Chat-owned work Session logs and traces private even from workspace admins", async () => {
+    const auth = createPostgresStreamAuthReader(pool);
+    for (const userId of ["creator", "member", "admin"]) {
+      const subject = { userId, workspaceId };
+      const log = await auth.logFacts(refs().ownedSessionId!, subject);
+      const trace = await auth.traceFacts(refs().ownedTaskId!, subject);
+      if (!log.ok || !trace.ok) throw new Error("unexpected unavailable");
+      expect(log.facts).toMatchObject({ kind: "chat", creatorId: "creator" });
+      expect(trace.facts).toMatchObject({ chatSessionId: refs().chatSessionId, chatCreatorId: "creator" });
+      const expected = userId === "creator" ? { ok: true } as const : { ok: false, code: "forbidden" } as const;
+      expect(decideLogSubscription(subject, log.facts)).toEqual(expected);
+      expect(decideTraceSubscription(subject, trace.facts)).toEqual(expected);
+    }
   });
 
   it("reports an unknown session as absent rather than inventing facts", async () => {

@@ -1,15 +1,18 @@
 import { api } from "../api";
+import { ApiError } from "../api/http";
 import { openBrowserReplica, type BrowserReplica, type BrowserReplicaOptions } from "../replica/browser";
 import { ReplicaView } from "../replica/view";
 import type { SessionLogEntry } from "../replica/port";
 import type { IssueLogBootstrap, SessionLogRow, SessionLogWindow } from "../api/schemas/session-log";
 import { SessionLogEntrySchema } from "../api/schemas/session-log";
 import type { HubFrame, HubSeqRange } from "@multiremi/contracts/live-hub";
+import { createSafeId } from "../utils";
 
 /** A bounded presentation window over C7; persisted coverage may be sparse. */
 export class IssueLogReplica extends ReplicaView {
   window: SessionLogWindow | null = null;
   headRow: SessionLogRow | null = null;
+  missingCommentId: string | null = null;
   private browser: BrowserReplica | null = null;
   private disconnected = false;
   private from = 0;
@@ -22,6 +25,7 @@ export class IssueLogReplica extends ReplicaView {
     super();
     if (initial?.sessionId === sessionId) {
       this.targetCommentId = initial.targetCommentId ?? null;
+      this.missingCommentId = initial.missingCommentId ?? null;
       this.accept(initial.window, initial.head);
     }
   }
@@ -45,27 +49,46 @@ export class IssueLogReplica extends ReplicaView {
   }
 
   async loadTail(): Promise<void> {
+    await this.readTail();
+  }
+
+  private async readTail(missingCommentId?: string): Promise<void> {
     const [window, head] = await Promise.all([
       api.getSessionLog(this.sessionId, { before: 30 }),
       api.getSessionLog(this.sessionId, { anchor: 0, before: 1 }),
     ]);
-    if (this.disconnected) return;
+    if (this.disconnected || (missingCommentId && this.targetCommentId !== missingCommentId)) return;
     this.targetCommentId = null;
+    if (missingCommentId) this.missingCommentId = missingCommentId;
     this.accept(window, head.entries.find(e => e.seq === 0) ?? null);
     await this.persist(window);
   }
 
   hasWindowFor(commentId?: string): boolean {
-    return this.window !== null && this.targetCommentId === (commentId ?? null);
+    if (!this.window) return false;
+    if (commentId && this.missingCommentId === commentId) return this.targetCommentId === null;
+    return this.targetCommentId === (commentId ?? null) && (!commentId
+      || this.getSnapshot(this.sessionId).entries.some(entry => entry.id === commentId));
   }
 
   async loadAround(commentId: string, preserveWindow = false): Promise<void> {
     this.targetCommentId = commentId;
+    this.missingCommentId = null;
     if (!preserveWindow) {
       this.window = null;
       this.setWindow(this.sessionId, [], { fresh: false, ready: false });
     }
-    const location = await api.locateSessionLogEntry(this.sessionId, commentId);
+    let location;
+    try {
+      location = await api.locateSessionLogEntry(this.sessionId, commentId);
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 404) throw error;
+      if (this.disconnected || this.targetCommentId !== commentId) return;
+      // Publish the missing target together with the ready tail so consumers
+      // choose the bottom anchor before revealing any fallback rows.
+      await this.readTail(commentId);
+      return;
+    }
     const [window, head] = await Promise.all([
       api.getSessionLog(this.sessionId, { anchor: location.seq, before: 15, after: 15 }),
       api.getSessionLog(this.sessionId, { anchor: 0, before: 1 }),
@@ -131,7 +154,7 @@ export class IssueLogReplica extends ReplicaView {
 
   async connect(options: Pick<BrowserReplicaOptions, "userId" | "workspaceId" | "subscribe" | "unsubscribe" | "env">): Promise<() => void> {
     this.disconnected = false;
-    const browser = await openBrowserReplica({ ...options, tabId: crypto.randomUUID(), readRange: (id, range) => this.readRange(id, range) });
+    const browser = await openBrowserReplica({ ...options, tabId: createSafeId(), readRange: (id, range) => this.readRange(id, range) });
     if (this.disconnected) { browser.dispose(); return () => {}; }
     this.browser = browser;
     const update = () => {

@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionLogEntrySchema, type SessionLogWindow } from "../api/schemas/session-log";
+import { ApiError } from "../api/http";
 const mocks = vi.hoisted(() => ({ read: vi.fn(), locate: vi.fn() }));
 vi.mock("../api", () => ({ api: { getSessionLog: mocks.read, locateSessionLogEntry: mocks.locate } }));
 import { IssueLogReplica } from "./issue-log";
@@ -8,6 +9,8 @@ const row = (seq: number, kind = "message") => SessionLogEntrySchema.parse({ ses
   revision: 1, body_md: `body ${seq}`, body_html: `<p>body ${seq}</p>`, render_version: "v", author_type: "member", author_id: "u",
   metadata: { attachments: [{ id: "att" }], reactions: [] } });
 const windowOf = (entries = [row(80), row(81)]): SessionLogWindow => ({ entries, head_seq: 81, log_version: 4, has_more_before: true, has_more_after: false });
+
+afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("Issue log presentation over C7", () => {
   it("imports SSR rows into C7 without a second network read or losing display fields", async () => {
@@ -18,6 +21,21 @@ describe("Issue log presentation over C7", () => {
     expect(replica.getSnapshot("s").fresh).toBe(true);
     expect(SessionLogEntrySchema.parse(replica.getSnapshot("s").entries[1]).author_id).toBe("u");
     cleanup();
+  });
+  it("connects and subscribes over http without crypto.randomUUID or Web Locks", async () => {
+    vi.stubGlobal("crypto", {
+      randomUUID: undefined,
+      getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto),
+    });
+    const subscribe = vi.fn();
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"), window: windowOf() });
+    const cleanup = await replica.connect({ userId: "u", workspaceId: "w", subscribe, unsubscribe: vi.fn(),
+      env: { hasOpfs: false, locks: {} as LockManager } });
+    try {
+      expect(subscribe).toHaveBeenCalledWith("s", 1);
+      expect(replica.getSnapshot("s")).toMatchObject({ ready: true, fresh: true });
+      expect(replica.getSnapshot("s").entries.map(entry => entry.id)).toEqual(["r0", "r80", "r81"]);
+    } finally { cleanup(); }
   });
   it("keeps the head and bounds DOM rows; thread markers cannot render", () => {
     const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"), window: windowOf([
@@ -61,6 +79,67 @@ describe("Issue log presentation over C7", () => {
     expect(mocks.read).toHaveBeenCalledWith("s", { before: 30 });
     expect(replica.getSnapshot("s").entries.map(entry => entry.seq)).toEqual([78, 79, 80, 81, 82]);
     expect(replica.window?.has_more_before).toBe(true);
+  });
+
+  it.each(["deleted-comment", "missing-comment"])("falls back to a ready tail when locate cannot find %s", async commentId => {
+    mocks.locate.mockReset().mockRejectedValue(new ApiError("entry not found", 404, "Not Found"));
+    mocks.read.mockReset().mockImplementation(async (_id, params) => params.anchor === 0
+      ? windowOf([row(0, "head")]) : windowOf());
+    const replica = new IssueLogReplica("s");
+    const readyFrames: Array<string | null> = [];
+    replica.subscribe("s", () => {
+      if (replica.getSnapshot("s").ready) readyFrames.push(replica.missingCommentId);
+    });
+    await replica.loadAround(commentId);
+    expect(replica.getSnapshot("s")).toMatchObject({ ready: true, fresh: true });
+    expect(replica.getSnapshot("s").entries.map(entry => entry.id)).toEqual(["r0", "r80", "r81"]);
+    expect(readyFrames).toEqual([commentId]);
+    expect(replica.hasWindowFor(commentId)).toBe(true);
+    expect(replica.hasWindowFor()).toBe(true);
+    mocks.locate.mockClear();
+    await replica.refreshVisible();
+    expect(mocks.locate).not.toHaveBeenCalled();
+  });
+
+  it.each([new ApiError("server unavailable", 503, "Unavailable"), new TypeError("Failed to fetch")])(
+    "preserves locate errors other than not-found: %s", async error => {
+      mocks.locate.mockReset().mockRejectedValue(error);
+      mocks.read.mockReset();
+      const replica = new IssueLogReplica("s");
+      await expect(replica.loadAround("target")).rejects.toBe(error);
+      expect(mocks.read).not.toHaveBeenCalled();
+      expect(replica.missingCommentId).toBeNull();
+      expect(replica.getSnapshot("s").ready).toBe(false);
+    },
+  );
+
+  it("does not hide a tail read failure after locate returns not-found", async () => {
+    mocks.locate.mockReset().mockRejectedValue(new ApiError("entry not found", 404, "Not Found"));
+    const error = new ApiError("session not found", 404, "Not Found");
+    mocks.read.mockReset().mockRejectedValue(error);
+    const replica = new IssueLogReplica("s");
+    await expect(replica.loadAround("target")).rejects.toBe(error);
+    expect(replica.getSnapshot("s").ready).toBe(false);
+    expect(replica.missingCommentId).toBeNull();
+  });
+
+  it("rechecks an SSR target that is absent from its window, then uses the tail", async () => {
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"),
+      window: windowOf(), targetCommentId: "missing-comment" });
+    expect(replica.hasWindowFor("missing-comment")).toBe(false);
+    mocks.locate.mockReset().mockRejectedValue(new ApiError("entry not found", 404, "Not Found"));
+    mocks.read.mockReset().mockResolvedValue(windowOf());
+    await replica.loadAround("missing-comment");
+    expect(replica.hasWindowFor("missing-comment")).toBe(true);
+    expect(replica.missingCommentId).toBe("missing-comment");
+  });
+
+  it("imports an SSR missing-target fallback without locating it again", () => {
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: null,
+      window: windowOf(), missingCommentId: "missing-comment" });
+    expect(replica.hasWindowFor("missing-comment")).toBe(true);
+    expect(replica.hasWindowFor()).toBe(true);
+    expect(replica.missingCommentId).toBe("missing-comment");
   });
 
   it("hydrates live message metadata before forwarding ordered frames to C7", async () => {

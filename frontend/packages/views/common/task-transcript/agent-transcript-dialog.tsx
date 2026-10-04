@@ -47,6 +47,7 @@ import {
   buildEntries,
   countToolCalls,
   nestEntries,
+  type ContextUsage,
   type TimelineItem,
   type TranscriptEntry,
 } from "./build-timeline";
@@ -71,6 +72,7 @@ interface AgentTranscriptDialogProps {
   items: TimelineItem[];
   agentName: string;
   isLive?: boolean;
+  contextUsage?: ContextUsage | null;
   /**
    * Optional content rendered between the header chips and the event list.
    * Used by autopilot run rows to surface the inbound webhook trigger
@@ -78,6 +80,9 @@ interface AgentTranscriptDialogProps {
    * The dialog stays generic — slot content is the caller's concern.
    */
   headerSlot?: React.ReactNode;
+  /** Assignment content supplied by callers that own a turn, used only on prompt 404. */
+  promptFallback?: React.ReactNode;
+  initialView?: "execution" | "prompt";
   traceResult?: TaskTraceRead | null;
   traceLoading?: boolean;
   traceError?: boolean;
@@ -112,7 +117,10 @@ export function AgentTranscriptDialog({
   items,
   agentName,
   isLive = false,
+  contextUsage,
   headerSlot,
+  promptFallback,
+  initialView = "execution",
   traceResult,
   traceLoading = false,
   traceError = false,
@@ -126,7 +134,7 @@ export function AgentTranscriptDialog({
   const [elapsed, setElapsed] = useState("");
   const [copied, setCopied] = useState(false);
   const [copiedWorkdir, setCopiedWorkdir] = useState(false);
-  const [activeView, setActiveView] = useState<"execution" | "prompt">("execution");
+  const [activeView, setActiveView] = useState<"execution" | "prompt">(initialView);
   const [promptCopied, setPromptCopied] = useState(false);
   const [agentInfo, setAgentInfo] = useState<Agent | null>(null);
   const [runtimeInfo, setRuntimeInfo] = useState<AgentRuntime | null>(null);
@@ -624,13 +632,22 @@ export function AgentTranscriptDialog({
 
             {/* Token usage — input→output when the bridge splits them, else the
                 ACP context total. cost intentionally omitted (not on the wire). */}
-            {usage && (
+            {usage && (usage.inputTokens || usage.outputTokens || !contextUsage) && (
               <MetadataChip icon={<Coins className="h-3 w-3" />}>
                 {usage.inputTokens || usage.outputTokens
                   ? `${formatTokens(usage.inputTokens ?? 0)}→${formatTokens(usage.outputTokens ?? 0)}`
                   : usage.totalTokens
                     ? t(($) => $.transcript.tokens_context, { value: formatTokens(usage.totalTokens) })
                     : null}
+              </MetadataChip>
+            )}
+            {contextUsage && (
+              <MetadataChip>
+                {t(($) => $.transcript.context_usage, {
+                  value: contextUsage.size == null
+                    ? formatTokens(contextUsage.used)
+                    : `${formatTokens(contextUsage.used)} / ${formatTokens(contextUsage.size)}`,
+                })}
               </MetadataChip>
             )}
             <ExecutionModelInfo task={task} usageModel={usage?.model} agentModel={agentInfo?.model} agentThinkingLevel={agentInfo?.thinking_level} />
@@ -673,6 +690,8 @@ export function AgentTranscriptDialog({
             )}
           </div>
         </div>
+
+        {headerSlot && <div className="shrink-0 border-b bg-muted/20 px-4 py-3">{headerSlot}</div>}
 
         {onTraceRetry && (
           <div
@@ -728,6 +747,10 @@ export function AgentTranscriptDialog({
                   </pre>
                 </div>
               </>
+            ) : promptNotRecorded && promptFallback ? (
+              <div className="min-h-0 flex-1 overflow-auto bg-muted/10 p-4">
+                {promptFallback}
+              </div>
             ) : (
               <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">
                 <FileInput className="h-5 w-5" />
@@ -799,13 +822,6 @@ export function AgentTranscriptDialog({
                 );
               })}
             </div>
-          </div>
-        )}
-
-        {/* ── Optional header slot (e.g. webhook payload preview) ── */}
-        {headerSlot && (
-          <div className="border-b px-4 py-3 shrink-0 bg-muted/20">
-            {headerSlot}
           </div>
         )}
 

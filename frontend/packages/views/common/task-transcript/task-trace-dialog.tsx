@@ -6,7 +6,7 @@ import { api, TraceEventSchema, type TaskTraceRead } from "@multiremi/core/api";
 import { useTraceStreamSubscription } from "@multiremi/core/realtime";
 import type { AgentTask } from "@multiremi/core/types/agent";
 import { AgentTranscriptDialog } from "./agent-transcript-dialog";
-import { buildTraceTimeline } from "./build-timeline";
+import { buildTraceTimeline, extractContextUsage } from "./build-timeline";
 
 const ACTIVE_TASK_STATUSES = new Set(["dispatched", "running", "waiting_local_directory", "awaiting_human"]);
 
@@ -21,11 +21,15 @@ export function TaskTraceDialog({
   agentName,
   onOpenChange,
   headerSlot,
+  promptFallback,
+  initialView,
 }: {
   task: AgentTask;
   agentName: string;
   onOpenChange: (open: boolean) => void;
   headerSlot?: React.ReactNode;
+  promptFallback?: React.ReactNode;
+  initialView?: "execution" | "prompt";
 }) {
   const [events, setEvents] = useState<TraceEvent[]>([]);
   const [result, setResult] = useState<TaskTraceRead | null>(null);
@@ -75,15 +79,19 @@ export function TaskTraceDialog({
   }, ACTIVE_TASK_STATUSES.has(task.status) && !result?.closed);
 
   const items = useMemo(() => buildTraceTimeline(events), [events]);
+  const contextUsage = useMemo(() => extractContextUsage(events), [events]);
   return (
     <AgentTranscriptDialog
       open
       onOpenChange={onOpenChange}
       task={task}
       items={items}
+      contextUsage={contextUsage}
       agentName={agentName}
       isLive={ACTIVE_TASK_STATUSES.has(task.status) && !result?.closed}
       headerSlot={headerSlot}
+      promptFallback={promptFallback}
+      initialView={initialView}
       traceResult={result}
       traceLoading={loading}
       traceError={error}

@@ -18,7 +18,8 @@ describe("release workflows", () => {
     expect(gate).toBeGreaterThan(-1);
     expect(gate).toBeLessThan(build);
     expect(steps[gate].run).toContain("release-build-check.yml/runs?head_sha=$SHA");
-    expect(steps[gate].run).toContain("event=push&branch=main&status=success");
+    expect(steps[gate].run).toContain("branch=main&status=success");
+    expect(steps[gate].run).toContain('.event == "push" or .event == "workflow_dispatch"');
     expect(release.jobs.release.permissions.actions).toBe("read");
     expect(JSON.stringify(release)).not.toContain("release:prepare");
     const ci = readWorkflow("release-build-check.yml");
@@ -26,6 +27,12 @@ describe("release workflows", () => {
     expect(ci.jobs.build.steps[0].with["fetch-depth"]).toBe(0);
     expect(ci.jobs["session-archive-platform"].strategy.matrix.os).toEqual(["ubuntu-latest", "macos-latest"]);
     expect(JSON.stringify(ci)).toContain("runtime prepare --provider claude --provider codex");
+    expect(ci.on).toHaveProperty("workflow_dispatch");
+    expect(ci.jobs.backend.strategy.matrix.shard).toEqual([1, 2, 3, 4]);
+    const backend = ci.jobs.backend.steps.find((step: any) => step.name === "Backend test suite");
+    expect(backend.if).toBe("github.event_name != 'pull_request'");
+    expect(backend.run).toBe("bun test --shard=${{ matrix.shard }}/4");
+    expect(ci.jobs.build.steps.some((step: any) => step.name === "Backend test suite")).toBe(false);
   });
 
   test("publishes the platform automatically after the tag release", () => {

@@ -45,6 +45,10 @@ describe("MUL-427 B7: conversation backfill and reconciliation", () => {
           const preservedTables = ["multiremi_issue_sessions", "multiremi_session_events", "multiremi_issue_comments"];
           let commentId: string | undefined;
           if (shape === "deleted Issue session") {
+            // Historical databases could retain an orphan Session. The current
+            // Chat ownership migration installs a FK, so seed the old shape
+            // explicitly in this isolated database before testing backfill.
+            if (backend === "pg") db.exec("ALTER TABLE multiremi_issue_sessions DROP CONSTRAINT multiremi_issue_sessions_issue_id_fkey");
             db.run(`INSERT INTO multiremi_issue_sessions (id, issue_id, created_at, updated_at)
               VALUES ('ises_deleted_issue', 'iss_deleted_history', ?, ?)`, [at, at]);
             db.run(`INSERT INTO multiremi_session_events (id, session_id, seq, author_type, kind, body, metadata, created_at)

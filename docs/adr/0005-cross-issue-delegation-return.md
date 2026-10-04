@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted (MUL-400 S1b, child issue MUL-456). Ships stacked on S2
+Accepted (MUL-400 S1b, child issue MUL-456), updated to the dispatch rules in
+[ADR 0014](0014-every-agent-dispatch-is-a-delegation.md) and the report body and
+result-comment contract in [ADR 0013](0013-deliverable-is-comment-wakeup-is-doorbell.md).
+Ships stacked on S2
 (`docs/adr/0004-issue-dependency-semantics.md`), which ships on S1
 (`docs/adr/0003-parent-status-derived-from-children.md`).
 
@@ -33,14 +36,13 @@ Two further behaviours were decided with the fix's reviewers:
 
 ## Decision
 
-1. **Cross-issue delegation is a squad-leader dispatch within the source
-   issue's tree.** `isSquadLeaderDelegation` returns a discriminated result. The
-   same-issue branch is unchanged. The cross-issue branch requires: the author
-   is the leader of the squad that owns the *source* issue; the target agent is
-   an agent member of that squad and is not the author; the source task has an
-   issue and a main (non-side) Session; and the target issue lies in the source
-   issue's own subtree or in the subtree of the source issue's parent. The walk
-   uses `parent_issue_id` with a visited set and a bound of 16 hops.
+1. **Agent dispatch returns to its source work Session.**
+   `resolveAgentDelegation` derives the source from the authenticated task. The
+   source must have an Issue and a main (non-side) work Session; a Chat owner
+   does not exclude that Session. The target must have an Issue and a different
+   agent. No squad membership, assignee or Issue-tree relation is required.
+   Workspace authorization, Session guards and the pair round-trip limit in
+   ADR 0014 still apply.
 
 2. **`multiremi_tasks` carries the return target and the audit.**
    `delegated_from_issue_session_id` is the delegator's Session at dispatch
@@ -48,8 +50,8 @@ Two further behaviours were decided with the fix's reviewers:
    NULL, which keeps the legacy "return to the task's own Session" behaviour.
    `delegation_skip_reason` records why a task-token dispatch was not a
    delegation (`source_not_issue_task`, `source_side_session`,
-   `source_not_squad_leader`, `target_not_squad_member`,
-   `cross_issue_no_lineage`, `self_dispatch`). Both columns are added by
+   `target_not_issue_task`, `self_dispatch`). Historical squad/tree skip reasons
+   remain readable. Both columns are added by
    `addColumnIfMissing`, so the migration is add-only on SQLite and PostgreSQL
    alike, as are the `delegated_from_issue_session_id` and `wake_source`
    columns added in the same batch. The public task shape strips both the return
@@ -134,15 +136,23 @@ Two further behaviours were decided with the fix's reviewers:
    contains duplicate reports. A cross-issue report without the metadata key
    falls back to the legacy latest-comment lookup for compatibility. New
    cross-issue terminal reports always include the key. No existing event is
-   rewritten and no fallback value is persisted. It is never back-filled: the
-   automatic result comment is posted after that transaction commits, so a
-   report with no in-run comment carries `result_comment_id: null` and the
-   prompt line
-   `Result comment: none at completion (the final reply is posted as a comment
-   after this report; result text follows)`. The report body is always the task
-   result, truncated to 16000 characters, which is the primary content.
-   Same-issue reports keep their pre-MUL-456 assembly: they do not query a
-   result comment and do not render a `Result comment:` line.
+   rewritten and no fallback value is persisted. When the run has no in-run
+   comment, completion writes its final reply, mirrored log row and turn-card
+   pointer in the same terminal transaction before freezing the report. The
+   terminal path reuses its owning transaction without opening another frame
+   (ADR 0011); dispatch, notifications and realtime pushes follow COMMIT. A
+   comment write failure rolls back that terminal attempt and completion then
+   commits once without an automatic reply, with a task-result reading pointer.
+   No partial comment or invented id survives the failed attempt.
+
+   ADR 0013 replaces the former full-result return body for both cross-issue
+   and same-issue reports: a bounded doorbell carries status, a short summary,
+   the conclusion-comment id and reading command, or `remi task get <id>` when
+   there is no comment. The summary is at most 500 characters and the terminal
+   doorbell is capped below 2 KiB in UTF-8 bytes. Cross-issue doorbells retain
+   one short source line, `来源：<Issue key>`, as well as the source issue/task
+   ids in metadata. Same-issue reports also resolve and expose their conclusion
+   comment; they follow the same reading contract rather than copying results.
 
 8. **The dependency gate is unchanged.** A return task is a self-delegation
    (`delegation_id` set, `delegated_by_agent_id === agent_id`) and an E2 round
@@ -158,8 +168,8 @@ Two further behaviours were decided with the fix's reviewers:
   one queued return carrying all five reports, no silent loss and no repeated
   wake-up.
 - Cross-issue dispatches that do not qualify now leave an explicit
-  `delegation_return_skipped` row instead of nothing, and the seven new reasons
-  are localized in the issue timeline for all four languages.
+  `delegation_return_skipped` row instead of nothing, with localized reasons in
+  the issue timeline for all four languages.
 - The task table gains three nullable columns and one index in an add-only
   migration. Existing rows keep their legacy behaviour.
 - An archived return Session keeps receiving the bridge and the queued return:
@@ -169,7 +179,8 @@ Two further behaviours were decided with the fix's reviewers:
 - The return task still relies on the existing delegation machinery: the
   return cannot bounce, a retry chain reports once, and the parent status guard
   does not reopen a closed parent.
-- Residual risk: the automatic result comment is still best-effort and
-  published after commit. When it fails, the return prompt carries the fallback
-  line and the result text; no comment id is invented and no session event is
-  rewritten.
+- Residual risk: the automatic result comment is still best-effort. A write
+  failure falls back to the committed task result and a bounded doorbell with
+  its reading command; no comment id is invented and no session event is
+  rewritten. A dispatch failure after COMMIT retains the comment and terminal
+  state, with a durable dispatch intent for recovery.

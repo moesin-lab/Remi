@@ -1,4 +1,5 @@
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
+import { readSessionLogRange } from "../session-log-range.js";
 import type { Context, Hono } from "hono";
 import { assertRuntimeWorkspaceAccess } from "../helpers/runtime-workspaces.js";
 import {
@@ -88,6 +89,7 @@ import {
 } from "../wire/index.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import { ParentDoneGrantOwnerError } from "@multiremi/store/repos/issues-repo.js";
+import { DelegationRoundTripLimitError } from "@multiremi/store/repos/tasks-repo.js";
 import { hasAnyField, resolveOptionalStringField } from "@multiremi/store/helpers.js";
 import type {
   AddSessionParticipantInput,
@@ -1054,6 +1056,11 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     return c.json({
       ...issueDetailCompatibilityResponse(store, issue, { labelsAlreadyHydrated: true }),
       pending_decision_count: store.countPendingIssueDecisions(issue.id),
+      // The dependency gate only blocks backlog starts. Keep the common
+      // non-backlog detail path at the MUL-385 five-statement budget.
+      blocked_by: issue.status === "backlog"
+        ? store.listUnmetPrerequisites(issue.id).map((row) => row.key)
+        : [],
     });
   });
   app.get("/api/issues/:id/workspace", (c) => {
@@ -1206,6 +1213,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       dependencyForce: human
         ? { source: "rerun", actorMemberId: human.memberId }
         : undefined,
+      authorAgentId: currentTaskAccessToken(c)?.agentId ?? null,
     });
     if ("error" in result) {
       // MUL-400 E3: the task-creation gate reports the same 409 code as the
@@ -1690,13 +1698,30 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   });
   const logSessionAccess = (c: Context): string | Response => {
     const sessionId = c.req.param("sessionId") ?? "";
-    const issueSession = store.getIssueSession(sessionId);
-    if (issueSession) {
-      return denyCurrentUserWorkspaceAccess(c, store, issueSession.workspaceId)
-        ?? denyLinkedSessionChatOwnerAccess(c, store, issueSession) ?? sessionId;
+    const scope = store.getConversationLogAccessScope(sessionId);
+    if (!scope) return c.json({ error: "session not found" }, 404);
+    const denied = denyCurrentUserWorkspaceAccess(c, store, scope.workspaceId);
+    if (denied) return denied;
+    if (scope.chatId) {
+      const chat = scope.chat;
+      if (!chat) return c.json({ error: "chat session not found" }, 404);
+      if (chat.workspaceId !== scope.workspaceId) {
+        const chatDenied = denyCurrentUserWorkspaceAccess(c, store, chat.workspaceId);
+        if (chatDenied) return chatDenied;
+      }
+      if (chat.creatorId !== currentRequestUserId(c)) {
+        return c.json({ error: "not your chat session" }, 403);
+      }
+      if (!chat.agent || chat.agent.workspaceId !== chat.workspaceId
+        || !canCurrentUserAccessAgent(c, store, chat.agent)) {
+        return c.json({ error: "you do not have access to this agent" }, 403);
+      }
     }
-    const chat = loadChatSessionForCurrentUser(c, store, sessionId);
-    return chat instanceof Response ? chat : chat.session.id;
+    return sessionId;
+  };
+  const recordLogRead = (message: string, data: Record<string, unknown>): void => {
+    // Optional read telemetry cannot make an authorized read fail.
+    try { log.info(message, data); } catch {}
   };
   app.get("/api/sessions/:sessionId/log/locate", (c) => {
     const sessionId = logSessionAccess(c);
@@ -1709,6 +1734,35 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/sessions/:sessionId/log/entry", (c) => {
     const sessionId = logSessionAccess(c);
     if (sessionId instanceof Response) return sessionId;
+    if (c.req.query("from") != null || c.req.query("to") != null) {
+      const rawFrom = c.req.query("from");
+      const rawTo = c.req.query("to");
+      const from = Number(rawFrom), to = Number(rawTo);
+      if (!rawFrom || !rawTo || !/^(0|[1-9]\d*)$/.test(rawFrom) || !/^(0|[1-9]\d*)$/.test(rawTo)
+        || !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || to < from
+        || c.req.query("seq") != null || c.req.query("id") != null) return c.json({ error: "invalid log range" }, 400);
+      const token = currentTaskAccessToken(c);
+      try {
+        const page = readSessionLogRange(store, sessionId, from, to, c.req.query("cursor"), token?.agentId);
+        let progress;
+        if (token?.taskId && token.agentId) {
+          try { progress = store.recordSessionAgentRangeRead(sessionId, token.agentId, page.read_start, page.read_end); }
+          catch { recordLogRead("Session unread progress unavailable", { event: "session_log_read_progress_failed", task_id: token.taskId, session_id: sessionId }); }
+        }
+        if (token?.taskId) recordLogRead("Session unread range read", { event: "session_log_range_read",
+          task_id: token.taskId, agent_id: token.agentId, session_id: sessionId, from_seq: from, to_seq: to,
+          complete: page.next_cursor === null, entries: page.entries.length,
+          returned_from_seq: page.entries[0]?.seq ?? null, returned_to_seq: page.entries.at(-1)?.seq ?? null,
+          read_start: page.read_start, read_end: page.read_end, next_cursor: page.next_cursor,
+          read_high_water: progress?.seq ?? null, read_offset: progress?.offset ?? null });
+        return c.json(page);
+      } catch (error) {
+        if (error instanceof SyntaxError || error instanceof Error && error.message.startsWith("Invalid range cursor")) {
+          return c.json({ error: "invalid range cursor" }, 400);
+        }
+        throw error;
+      }
+    }
     const rawSeq = c.req.query("seq");
     const id = c.req.query("id");
     if ((rawSeq == null) === (id == null)) return c.json({ error: "exactly one of seq or id is required" }, 400);
@@ -1718,6 +1772,10 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (seq == null) return c.json({ error: "entry not found" }, 404);
     const entry = store.getConversationLogEntry(sessionId, seq);
     if (!entry || entry.visibility !== "shown" || entry.deleted_at !== null) return c.json({ error: "entry not found" }, 404);
+    const token = currentTaskAccessToken(c);
+    if (token?.taskId) recordLogRead("Session entry expanded", { event: "session_log_entry_expanded",
+      task_id: token.taskId, agent_id: token.agentId, session_id: sessionId, seq: entry.seq,
+      folded_chars: Math.max(0, entry.body_md.length - 8_000) });
     const envelope = entry.metadata.envelope;
     const recipient = envelope?.to;
     const agentId = envelope?.recipient_agent_id
@@ -1982,6 +2040,10 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       });
       return c.json(taskCompatibilityResponse(task), 201);
     } catch (error) {
+      if (error instanceof DelegationRoundTripLimitError) {
+        store.recordDelegationRoundTripLimited(error);
+        return c.json({ error: error.message, code: error.code }, 409);
+      }
       const dependencyResponse = issueDependencyErrorResponse(c, error);
       if (dependencyResponse) return dependencyResponse;
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);

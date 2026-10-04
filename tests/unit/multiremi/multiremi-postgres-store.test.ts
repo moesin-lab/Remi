@@ -3685,7 +3685,11 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const terminalReturn = leaderReturns.find((task) => task.id !== fixture.explicitReturn.id)!;
     expect(terminalReturn.status).toBe("queued");
     const terminalEntry = inboxReportEntry(store, terminalReturn, fixture.childTask.id);
-    expect(terminalEntry.body_md).toContain("Final PG QA result after the explicit report was withdrawn.");
+    // The fresh wake references the persisted conclusion comment (ADR 0013),
+    // even when editing that comment cancelled an earlier explicit wake.
+    expect(terminalEntry.body_md).toContain(`结论评论：${fixture.report.id}`);
+    expect(terminalEntry.body_md).toContain(`remi comment list ${fixture.issue.id} --thread ${fixture.report.id}`);
+    expect(terminalEntry.body_md).toContain("摘要：Intermediate report withdrawn.");
     expect(terminalReturn.prompt).toBe(`读收件箱\n\n${terminalReturn.issueSessionId}:${terminalEntry.seq} (${terminalEntry.id})`);
   });
 

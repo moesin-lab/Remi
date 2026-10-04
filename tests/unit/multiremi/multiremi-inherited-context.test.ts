@@ -91,7 +91,14 @@ describe("persisted inherited context diagnostics", () => {
     expect(own.omitted_events).toBe(0);
     expect(inherited.truncated).toBe(false);
     expect(inherited.omitted_events).toBe(0);
-    expect(inherited.jsonl).toContain('"body_folded":true');
+    // The offer carries a read range for inherited history, not inline bodies.
+    // These are the same Agent's messages, so they are excluded from unread.
+    expect(inherited.jsonl.split("\n").filter(Boolean).map((line: string) => JSON.parse(line)))
+      .toEqual([expect.objectContaining({
+        type: "unread_range", session_id: parent.id, from_seq: 0,
+        to_seq: side.inheritCutoffSeq, unread_count: 0,
+      })]);
+    expect(inherited.jsonl).toContain(`remi session log get ${parent.id} --from 0 --to ${side.inheritCutoffSeq}`);
     expect(inherited.estimated_tokens).not.toBe(own.estimated_tokens);
     const budget = Math.floor(resolveProjectionTokenBudget({ provider: agent.provider, model: agent.model, degradeLevel: 0 }) * 0.4);
     expect(inherited.estimated_tokens).toBeLessThanOrEqual(budget);

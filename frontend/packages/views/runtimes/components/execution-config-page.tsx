@@ -134,9 +134,10 @@ export function ExecutionConfigPage() {
                 {t(($) => $.configuration.all_providers)}
               </NativeSelectOption>
               {[
-                ...new Set(
-                  (groups.data?.groups ?? []).map((group) => group.provider),
-                ),
+                ...new Set([
+                  ...(groups.data?.groups ?? []).map((group) => group.provider),
+                  ...(providerFilter === "all" ? [] : [providerFilter]),
+                ]),
               ]
                 .sort()
                 .map((provider) => (

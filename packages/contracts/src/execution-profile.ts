@@ -21,7 +21,11 @@ export interface ExecutionProfileInput {
 
 export interface ExecutionGroupInput {
   name: string;
+  description?: string;
   provider: string;
   profile_id: string | null;
   runtime_ids: string[];
+  /** Save the group's connection and membership atomically. The engine is inherited
+   * from the group; profile_id selects a shared profile to update, or null creates one. */
+  connection?: Omit<ExecutionProfileInput, "provider">;
 }

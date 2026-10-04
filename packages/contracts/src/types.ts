@@ -6063,6 +6063,7 @@ export interface MultiremiMetricCounter {
 export interface MultiremiExecutionGroup {
   id: string;
   name: string;
+  description: string;
   profileId: string | null;
   profileRevision: number | null;
   managed: boolean;

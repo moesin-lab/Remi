@@ -29,6 +29,7 @@ const WORKSPACE_ROUTE_SEGMENTS = new Set([
   "my-issues",
   "workbench",
   "runtimes",
+  "execution-groups",
   "plugins",
   "skills",
   "settings",

@@ -3269,6 +3269,7 @@ function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): 
     ) WHERE execution_group_id IS NULL AND runtime_id IS NOT NULL`);
   });
   addColumnIfMissing(db, "multiremi_execution_groups", "name TEXT");
+  addColumnIfMissing(db, "multiremi_execution_groups", "description TEXT NOT NULL DEFAULT ''");
   addColumnIfMissing(db, "multiremi_execution_groups", "profile_id TEXT");
   addColumnIfMissing(db, "multiremi_execution_groups", "managed INTEGER NOT NULL DEFAULT 0");
   db.exec(`CREATE TABLE IF NOT EXISTS multiremi_execution_profiles (

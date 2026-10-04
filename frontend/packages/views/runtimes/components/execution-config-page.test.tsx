@@ -176,3 +176,20 @@ it("organizes groups by purpose and engine while members have a read-only view",
   expect(screen.queryByRole("article", { name: "Codex team" })).not.toBeInTheDocument();
   expect(screen.getByRole("article", { name: "Writing" })).toBeInTheDocument();
 });
+
+it("keeps the selected engine visible after deleting its last group", async () => {
+  const otherGroup = { ...group, id: "g2", name: "Writing", provider: "claude", profile_id: "p2" };
+  api.listExecutionGroups.mockResolvedValue({ groups: [group, otherGroup] });
+  api.deleteExecutionGroup.mockResolvedValue(undefined);
+  const user = userEvent.setup();
+  show();
+  await screen.findByRole("article", { name: "Codex team" });
+  const filter = screen.getByRole("combobox", { name: "Filter by engine" });
+  await user.selectOptions(filter, "codex");
+  api.listExecutionGroups.mockResolvedValue({ groups: [otherGroup] });
+  await user.click(within(screen.getByRole("article", { name: "Codex team" })).getByRole("button", { name: "Delete" }));
+  expect(await screen.findByText("No matching groups.")).toBeInTheDocument();
+  expect(filter).toHaveValue("codex");
+  await user.selectOptions(filter, "all");
+  expect(screen.getByRole("article", { name: "Writing" })).toBeInTheDocument();
+});

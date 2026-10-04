@@ -6,7 +6,7 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 
 # 性能热路径与基线采集
 
-本页是 2026-09-05 对当前工作树的静态核查，不是历史架构决议。**本轮基线未测**：本次文档核对没有采集延迟、吞吐、CPU、内存或浏览器性能数据。下文区分已经存在的优化与待测成本；已有报告必须结合其生成时间、提交和环境判断，不能作为当前版本的实测结果。
+本页记录性能相关实现、需要保留的语义和基线采集入口。实现说明不代表当前版本的延迟、吞吐、CPU、内存或浏览器性能实测结果。下文区分已经存在的优化与待测成本；已有报告必须结合其生成时间、提交和环境判断，不能作为当前版本的实测结果。
 
 ## 三条优先关注的热路径
 
@@ -16,6 +16,7 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 - **实现事实：** `fetchAllMyFirstPages` 保留 assignee、creator、involves 三种人员关系的合并顺序和 issue ID 去重，因此“我的全部任务”的状态列表首次执行是 **3 个分组请求**，其他单一关系页签是 1 个。这是查询层请求数，不是页面总请求实测；缓存命中、重试和其他查询会改变网络记录。[MyIssuesPage](../../frontend/packages/views/my-issues/components/my-issues-page.tsx) 的负责人看板使用另一条 assignee grouped 查询分支，不能套用该数量。
 - **实现事实：** 工作区列表显式请求 `include_archived_total=true`，用响应的 `archived_total` 更新原有归档计数缓存；计数订阅本身不发 HTTP。工作区负责人看板在其活跃的 `/api/issues/grouped` 响应中携带同一可选字段，避免订阅隐藏的状态列表。计数是整个工作区的归档总数，不受列表筛选影响；不传参数时服务端不额外 COUNT。API 返回 404 时，一个 API client 会记住不支持 status-pages，使用旧的逐状态请求；新会话重新探测。
 - **实现事实：** [issues router](../../packages/server/src/api/routers/issues.ts) 的列表响应调用 `listIssues` 和 `countIssues`。[PgBridge.request](../../packages/server/src/store/db/postgres.ts) 使用 `Atomics.wait` 等待 worker，worker 以 [Bun.SQL 的 `max: 1`](../../packages/server/src/store/db/pg-worker.ts) 保证事务语句共用连接。该限制是每个桥实例的连接数，不是整个部署只能有一个连接。
+- **同步回包边界：** 唤醒通知不等于当前查询已完成。桥必须循环检查共享状态离开 `pending` 后才解码回包，避免早到或上一轮延迟的通知让新查询读取旧结果；多次唤醒共用原来的 60 秒截止时间。真实 PostgreSQL 的[回归测试](../../tests/unit/multiremi/multiremi-postgres-store.test.ts)让新查询保持等待并注入提前唤醒，验证返回的是新查询结果，同时覆盖跨连接领取和 Chat 队列顺序。
 - **风险推断：** 并行 HTTP 请求无法自动消除主线程同步数据库等待；额外 SQL 往返和较大的响应序列化可能放大排队，影响同进程其他请求。吞吐拐点与 PostgreSQL 网络延迟的影响尚未测量。
 - **采集重点：** 冷/热页面请求数量、单请求 SQL 数与响应 bytes、列表可操作时间，以及 API 并发升高时的 p50/p95、错误率和事件循环延迟。
 

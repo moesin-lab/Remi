@@ -166,7 +166,7 @@ try {
   const fault = `**${apiBase}/feishu/endpoints`;
   await page.route(fault, route => route.fulfill({ status: 503, headers: { "content-type": "application/json", "x-im-smoke-fault": "1" }, body: JSON.stringify({ error: "Injected smoke failure" }) }));
   await page.goto(`${frontend}${base}`);
-  await page.getByRole("alert").waitFor();
+  await page.getByRole("alert").filter({ hasText: "Could not load IM platform data. Try again." }).waitFor();
   await page.unroute(fault);
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await page.getByText("3 connections", { exact: false }).waitFor();

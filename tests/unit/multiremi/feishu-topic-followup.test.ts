@@ -60,8 +60,9 @@ describe("bound Issue continuation prompt", () => {
         expect(prompt).toContain("the target does not share your Chat transcript");
         expect(prompt).toContain("remi task steer <task-id>");
         expect(prompt).toContain("remi session task create <owning-chat-id> <session-id>");
-        expect(prompt).toContain("Ordinary agent comments");
-        expect(prompt).toContain("do not wake the assignee");
+        expect(prompt).toContain("Do not use an ordinary Chat task or a bare comment as a substitute");
+        expect(prompt).toContain("A rich mention from an Issue task delegates to that agent");
+        expect(prompt).toContain("Chat-origin dispatch keeps the existing topic relay reporting path");
         expect(prompt).toContain("remi task get <returned-task-id> --output json");
         expect(prompt).toContain("remi task steer list <target-task-id> --output json");
         expect(prompt).toContain("never describe queued work as running");
@@ -88,7 +89,7 @@ describe("bound Issue continuation prompt", () => {
 });
 
 describe("topic Task credential handoff through existing APIs", () => {
-  it("a comment alone does not dispatch; an explicit Task resumes the owner's Issue lane", async () => {
+  it("a plain comment does not dispatch; an explicit Task resumes the owner's Issue lane", async () => {
     const { store, app, headers, task, owner, remi, issue, session, runtime, chat } = await authenticatedTopic();
     const previous = store.createSessionTask(session.id, { agentId: owner.id, prompt: "Original implementation" });
     expect(store.claimTask(runtime.id)?.id).toBe(previous.id);
@@ -98,7 +99,7 @@ describe("topic Task credential handoff through existing APIs", () => {
 
     const comment = await app.request(`/api/issues/${issue.id}/sessions/${session.id}/messages`, {
       method: "POST", headers,
-      body: JSON.stringify({ content: `[@Issue owner](mention://agent/${owner.id}) Please continue.` }),
+      body: JSON.stringify({ content: "@Issue owner Please continue." }),
     });
     expect(comment.status).toBe(201);
     expect((await comment.json()).author_type).toBe("agent");
@@ -125,6 +126,24 @@ describe("topic Task credential handoff through existing APIs", () => {
     expect(store.getChatSession(chat.id)?.agentId).toBe(remi.id);
     expect(store.listIssueSessions(issue.id)).toHaveLength(1);
     expect(store.getIssue(issue.id)?.assigneeId).toBe(owner.id);
+  });
+
+  it("a task-linked rich mention explicitly dispatches into the work Session", async () => {
+    const { store, app, headers, task, owner, issue, session, chat } = await authenticatedTopic();
+    const before = store.listTasks().map((entry) => entry.id);
+    const response = await app.request(`/api/issues/${issue.id}/sessions/${session.id}/messages`, {
+      method: "POST", headers,
+      body: JSON.stringify({ content: `[@Issue owner](mention://agent/${owner.id}) Please continue.` }),
+    });
+    expect(response.status).toBe(201);
+    const comment = await response.json();
+    const created = store.listTasks().filter((entry) => !before.includes(entry.id));
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({
+      issueId: issue.id, issueSessionId: session.id, agentId: owner.id,
+      chatSessionId: chat.id, parentTaskId: task.id, triggerCommentId: comment.id,
+      status: "queued", delegationId: null, delegationSkipReason: "source_not_issue_task",
+    });
   });
 
   it("amends a running Issue task without creating another task or steering the Chat", async () => {

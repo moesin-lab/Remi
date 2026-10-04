@@ -236,7 +236,10 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
       author_id: agent.id,
     });
 
-    const activityEvent = events.find((e) => e.type === "activity:created");
+    // Completion commits its result comment before the terminal activity, so
+    // comment_created may be the first activity in this transaction.
+    const activityEvent = events.find((e) => e.type === "activity:created"
+      && (e.payload.entry as { action?: string })?.action === "task_completed");
     expect(activityEvent?.payload.issue_id).toBe(issue.id);
     expect(activityEvent?.payload.entry).toMatchObject({
       type: "activity",

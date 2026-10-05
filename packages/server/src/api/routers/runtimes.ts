@@ -500,6 +500,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
       return [{
         members: store.getExecutionGroupMembers(group.id,loaded.workspaceId).filter(member => ["admin","owner"].includes(currentWorkspaceRoleStrict(c,store,loaded.workspaceId) ?? "") || visibleIds.has(member.runtime_id)),
         id: group.id, workspace_id: loaded.workspaceId, provider: group.provider,
+        description: group.description,
         profile_id: group.profileId, profile_revision: group.profileRevision, managed: group.managed,
         name: group.managed ? group.name : group.machineId ? `${machine?.daemonDisplayName ?? machine?.name ?? group.machineId} / ${group.provider}` : group.id,
         runtime_ids: ["admin","owner"].includes(currentWorkspaceRoleStrict(c,store,loaded.workspaceId) ?? "") ? group.runtimeIds : runtimes.map((runtime) => runtime.id),

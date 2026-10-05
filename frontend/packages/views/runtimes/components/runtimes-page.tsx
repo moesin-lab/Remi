@@ -454,7 +454,7 @@ function PageHeaderBar({
         )}
       </div>
       <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-        <AppLink className="text-xs text-primary underline" href={`${paths.runtimes()}/configuration`}>{t($ => $.configuration.title)}</AppLink>
+        <AppLink className="text-xs text-primary underline" href={paths.executionGroups()}>{t($ => $.configuration.title)}</AppLink>
         {mobile ? (
           <DropdownMenu>
             <DropdownMenuTrigger

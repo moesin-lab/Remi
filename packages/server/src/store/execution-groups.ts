@@ -148,6 +148,7 @@ export function getExecutionGroup(
     machine_id: string | null;
     created_at: string;
     name: string | null;
+    description: string;
     profile_id: string | null;
     managed: number;
   } | null;
@@ -168,6 +169,7 @@ export function getExecutionGroup(
     : null;
   return {
     name: row.name ?? row.id,
+    description: row.description ?? "",
     profileId: row.profile_id ?? null,
     profileRevision: profile?.revision ?? null,
     managed: row.managed === 1,
@@ -240,6 +242,8 @@ export function saveExecutionGroup(
     throw new Error("Group name is required (maximum 128 characters)");
   if (!["claude", "codex", "grok", "antigravity"].includes(input.provider))
     throw new Error("Invalid execution provider");
+  if (input.description !== undefined && (typeof input.description !== "string" || input.description.length > 2000))
+    throw new Error("Group description must be text (maximum 2000 characters)");
   if (
     !Array.isArray(input.runtime_ids) ||
     input.runtime_ids.some((id) => typeof id !== "string") ||
@@ -295,8 +299,8 @@ export function saveExecutionGroup(
           ),
         );
     db.run(
-      `INSERT INTO multiremi_execution_groups(id,workspace_id,provider,machine_id,created_at,name,profile_id,managed) VALUES(?,?,?,NULL,?,?,?,1)
-      ON CONFLICT(workspace_id,id) DO UPDATE SET name=excluded.name,profile_id=excluded.profile_id,managed=1,machine_id=NULL`,
+      `INSERT INTO multiremi_execution_groups(id,workspace_id,provider,machine_id,created_at,name,profile_id,managed,description) VALUES(?,?,?,NULL,?,?,?,1,?)
+      ON CONFLICT(workspace_id,id) DO UPDATE SET name=excluded.name,description=excluded.description,profile_id=excluded.profile_id,managed=1,machine_id=NULL`,
       [
         id,
         workspaceId,
@@ -304,6 +308,7 @@ export function saveExecutionGroup(
         new Date().toISOString(),
         input.name.trim(),
         input.profile_id,
+        input.description?.trim() ?? old?.description ?? "",
       ],
     );
     // Generations identify the effective binding, not the group's display

@@ -1106,7 +1106,20 @@ runMigrations(this.db);
   ) {
     return this.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
-      const result = saveExecutionGroup(this.db, workspaceId, id, input);
+      let profileId = input.profile_id;
+      if (input.connection !== undefined) {
+        if (!input.connection || typeof input.connection !== "object" || Array.isArray(input.connection))
+          throw new Error("connection must be a provider connection object");
+        if (input.provider !== "claude" && input.provider !== "codex")
+          throw new Error("Custom connections require Claude or Codex");
+        if (profileId !== null && (typeof profileId !== "string" || !this.getExecutionProfile(profileId, workspaceId)))
+          throw new Error("Profile not found in this workspace");
+        const { name, profile, api_key } = input.connection;
+        profileId = this.executionProfiles.save(workspaceId, {
+          name, provider: input.provider, profile, api_key,
+        }, profileId ?? undefined).id;
+      }
+      const result = saveExecutionGroup(this.db, workspaceId, id, { ...input, profile_id: profileId });
       this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId, actorType: "system", actorId: null, payload: {} });
       return result;
     })();

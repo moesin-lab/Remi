@@ -16,6 +16,13 @@ This document is the user-facing migration contract for the Registry-based Remi 
 The machine-readable source of truth remains `cli-capabilities.json`; CI checks this
 table against that manifest.
 
+`remi issue rerun <issue> --task-id <task>` retries a failed or cancelled execution
+with its original Agent, Session and instructions. The task must belong to the Issue
+and be visible to the caller. An active Issue run returns `409 active_run_exists`;
+unfinished prerequisites return `409 dependencies_unmet`. This explicit retry cannot
+combine `--task-id` with `--agent-id` or `--prompt`, and does not force past prerequisites.
+Without `--task-id`, the existing rerun behavior and overrides remain available.
+
 `remi issue status-pages --statuses todo,in_progress --limit 50
 --include-archived-total --output json` calls `GET /api/issues/status-pages`.
 The response is `{ groups: { [status]: { issues, total, has_more } },

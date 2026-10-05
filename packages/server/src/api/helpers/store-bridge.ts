@@ -6,7 +6,7 @@
 import type { Context } from "hono";
 import { MultiremiStore } from "@multiremi/store/store.js";
 import { IssueDependencyError } from "@multiremi/store/repos/issue-dependencies.js";
-import { DelegationRoundTripLimitError } from "@multiremi/store/repos/tasks-repo.js";
+import { ActiveIssueRunError, DelegationRoundTripLimitError } from "@multiremi/store/repos/tasks-repo.js";
 import { createId } from "@multiremi/ids.js";
 import { IssueLockSetStaleError } from "@multiremi/store/repos/issues-repo.js";
 import { resolveCamelOrSnakeString } from "@multiremi/store/helpers.js";
@@ -584,6 +584,7 @@ export function safeRerunIssue(
   store: MultiremiStore,
   issueId: string,
   body: {
+    task_id?: string;
     agent_id?: string;
     agentId?: string;
     prompt?: string;
@@ -594,7 +595,14 @@ export function safeRerunIssue(
 ): { task: MultiremiTask } | { error: string; status: 400 | 404 | 409; code?: string; unmet?: IssueDependencyError["details"]["unmet"] } {
   const issue = store.getIssue(issueId);
   if (!issue) return { error: "issue not found", status: 404 };
-  const agentId = body.agent_id ?? body.agentId ?? issue.assigneeId;
+  const previous = body.task_id ? store.getTaskByRef(body.task_id, { issueId }) : null;
+  if (body.task_id && (!previous || previous.issueId !== issueId || (previous.chatSessionId && !previous.issueSessionId))) {
+    return { error: "task not found", status: 404 };
+  }
+  if (previous && !["failed", "cancelled"].includes(previous.status)) {
+    return { error: "Only failed or cancelled runs can be retried", status: 409, code: "task_not_retryable" };
+  }
+  const agentId = previous?.agentId ?? body.agent_id ?? body.agentId ?? issue.assigneeId;
   if (!agentId) return { error: "issue has no agent assignee", status: 400 };
   const agent = store.getAgent(agentId);
   if (!agent) return { error: "agent not found", status: 404 };
@@ -610,17 +618,26 @@ export function safeRerunIssue(
     const task = store.createTask({
       agentId,
       issueId: issue.id,
+      ...(previous ? {
+        issueSessionId: previous.issueSessionId,
+        holdsWorkspace: previous.holdsWorkspace,
+        issueCreationRestricted: previous.issueCreationRestricted,
+      } : {}),
       workspaceId: issue.workspaceId,
-      prompt: body.prompt ?? issue.title,
+      prompt: previous?.prompt ?? body.prompt ?? issue.title,
       parentTaskId: body.parentTaskId ?? null,
-      dependencyForce: body.dependencyForce,
+      // A retry of a specific run is not consent to override prerequisites.
+      dependencyForce: previous ? undefined : body.dependencyForce,
       ...(delegation?.ok ? {
         delegationId: createId("dlg"), delegatedByAgentId: sourceTask!.agentId,
         delegatedFromIssueSessionId: delegation.delegatedFromIssueSessionId,
       } : delegation?.reason ? { delegationSkipReason: delegation.reason } : {}),
-    });
+    }, { requireIdleIssue: Boolean(previous) });
     return { task };
   } catch (error) {
+    if (error instanceof ActiveIssueRunError) {
+      return { error: error.message, status: 409, code: "active_run_exists" };
+    }
     if (error instanceof DelegationRoundTripLimitError) {
       store.recordDelegationRoundTripLimited(error);
       return { error: error.message, status: 409, code: error.code };

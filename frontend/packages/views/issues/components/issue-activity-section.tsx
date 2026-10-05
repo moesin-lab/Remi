@@ -24,7 +24,7 @@ import { CommentInput, type ReplyTarget } from "./comment-input";
 import { IssueLogHead } from "./issue-log-head";
 import { ResolvedThreadBar } from "./resolved-thread-bar";
 import { SessionAgentStreamRow } from "./session-agent-stream-row";
-import { TimelineSkeleton, TimelineUnavailable } from "./timeline-states";
+import { NoLinkedSessions, TimelineSkeleton, TimelineUnavailable } from "./timeline-states";
 import { IssueSubscribersControl } from "./issue-subscribers-control";
 import { LocalDirectoryHint } from "../../projects/components/local-directory-hint";
 import { AgentLiveCard } from "./agent-live-card";
@@ -46,6 +46,7 @@ interface IssueActivitySectionProps {
   activeIssueSessionId: string;
   activeIssueSession: IssueSession | null;
   sessionsPending: boolean;
+  sessionsError?: boolean;
   sessionsFetching: boolean;
   onRetrySessions: () => void;
   scrollContainerEl: HTMLDivElement | null;
@@ -69,7 +70,7 @@ export function logRowToComment(row: SessionLogRow): TimelineEntry {
 }
 
 export function IssueActivitySection({ issueId, issueTitle, projectId, members, agents, onShowKeyResults, currentUserId, canModerateComments, activeIssueSessionId: sessionId,
-  activeIssueSession, sessionsPending, sessionsFetching, onRetrySessions, highlightCommentId, initialLog, onScrollRoot, onContentReady,
+  activeIssueSession, sessionsPending, sessionsError = false, sessionsFetching, onRetrySessions, highlightCommentId, initialLog, onScrollRoot, onContentReady,
 }: IssueActivitySectionProps) {
   const { t } = useT("issues");
   const { ready: preferencesReady, showSystemDetails: savedSystemDetails, setShowSystemDetails } = useActivityPreferences(currentUserId);
@@ -192,7 +193,9 @@ export function IssueActivitySection({ issueId, issueTitle, projectId, members, 
     catch { toast.error(t($ => $.comment.update_failed)); }
     finally { setPaging(false); }
   };
-  if (!sessionId) return sessionsPending ? <TimelineSkeleton /> : <TimelineUnavailable onRetry={onRetrySessions} retrying={sessionsFetching} />;
+  if (!sessionId) return sessionsPending ? <TimelineSkeleton /> : sessionsError
+    ? <TimelineUnavailable onRetry={onRetrySessions} retrying={sessionsFetching} />
+    : <NoLinkedSessions />;
   if (error && !snapshot.ready) return <TimelineUnavailable onRetry={refresh} retrying={false} />;
   return <><SessionLogList key={`${sessionId}:${activeCommentId ?? "tail"}`} sessionId={sessionId} replica={replica}
     transformEntries={transformEntries}

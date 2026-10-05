@@ -179,6 +179,20 @@
       "error_daemon_version": "该智能体的守护进程 CLI（{{current}}）低于要求的 {{min}}。请升级守护进程后再使用通过智能体创建。",
       "error_unknown": "提交失败，请重试。",
       "sub_issue_of": "作为 {{identifier}} 的子 issue"
+    },
+    "receipt": {
+      "label": "创建回执",
+      "unknown": "任务单已创建，尚未确认派发状态。请打开任务单查看执行情况。",
+      "intake": "需求已保存并排队，等待智能体整理。打开需求单可查看进度和生成的任务。",
+      "queued": "执行任务已创建并进入队列，可能仍在等待运行机。",
+      "no_assignee": "尚未启动智能体任务。准备好后可在任务单中分配智能体。",
+      "member_assignee": "已分配给成员，未启动智能体任务。",
+      "backlog_status": "已保存在待规划中。准备执行时可将任务单移到待办。",
+      "dependencies_unmet": "正在等待前置任务，满足条件后再开始执行。",
+      "no_runnable_agent": "暂无可接单的智能体，请在任务单中检查负责人和运行时。",
+      "skipped": "任务单已保存，但未派发执行。再次尝试前请打开任务单查看原因。",
+      "view_intake": "查看需求与进度",
+      "create_another": "再建一个"
     }
   }
 }

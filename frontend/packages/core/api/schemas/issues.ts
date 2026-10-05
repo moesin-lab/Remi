@@ -67,6 +67,21 @@ export const IssueDetailSchema = IssueSchema.extend({
   parent_done_grant: IssueParentDoneGrantSchema.nullable(),
 }).loose();
 
+// Older servers omit the acknowledgement. Unknown statuses are displayed as
+// unconfirmed; never infer that execution started from the issue's status.
+export const CreatedIssueSchema = IssueSchema.extend({
+  task_id: z.string().min(1).nullable().optional(),
+  dispatch_status: z.string().optional(),
+  dispatch_skipped_reason: z.string().nullable().optional(),
+}).superRefine((issue, ctx) => {
+  if (issue.dispatch_status === "dispatched" && !issue.task_id) {
+    ctx.addIssue({ code: "custom", message: "Dispatched issue must identify its task", path: ["task_id"] });
+  }
+  if (issue.dispatch_status === "skipped" && issue.task_id) {
+    ctx.addIssue({ code: "custom", message: "Skipped dispatch cannot identify a task", path: ["task_id"] });
+  }
+});
+
 const IssueDecisionKindSchema = z.enum([
   "merge",
   "production_change",

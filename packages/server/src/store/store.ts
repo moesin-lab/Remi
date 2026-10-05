@@ -5646,8 +5646,8 @@ runMigrations(this.db);
     return this.chat.getChatMessage(id);
   }
 
-  createTask(input: CreateTaskInput): MultiremiTask {
-    return this.tasks.createTask(input);
+  createTask(input: CreateTaskInput, options?: { requireIdleIssue?: boolean }): MultiremiTask {
+    return this.tasks.createTask(input, options);
   }
 
   /** Caller owns the transaction and replays the collector after it commits. */

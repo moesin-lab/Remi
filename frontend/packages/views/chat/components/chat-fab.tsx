@@ -1,6 +1,5 @@
 "use client";
 
-import { useSyncExternalStore } from "react";
 import { MessageCircle } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@multiremi/ui/lib/utils";
@@ -18,14 +17,8 @@ import { useNavigation } from "../../navigation";
 import { useT } from "../../i18n";
 
 const logger = createLogger("chat.ui");
-const subscribe = () => () => {};
-const clientSnapshot = () => true;
-const serverSnapshot = () => false;
 
 export function ChatFab() {
-  // The server cannot read a saved minimized preference. Keep its empty FAB
-  // markup through hydration, then render the browser's current preference.
-  const hydrated = useSyncExternalStore(subscribe, clientSnapshot, serverSnapshot);
   const { t } = useT("chat");
   const wsId = useWorkspaceId();
   const isOpen = useChatStore((s) => s.isOpen);
@@ -48,7 +41,9 @@ export function ChatFab() {
     pendingChatTasksOptions(wsId, { enabled: afterFirstScreen }),
   );
 
-  if (!hydrated || isOpen) return null;
+  // The persisted open preference can differ from SSR's default. Wait for the
+  // existing client gate before rendering the minimized button on a reload.
+  if (!afterFirstScreen || isOpen) return null;
 
   const unreadSessionCount = sessions.filter((s) => s.has_unread).length;
   const isRunning = (pending?.tasks ?? []).length > 0;

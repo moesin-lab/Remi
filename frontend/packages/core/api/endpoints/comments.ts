@@ -13,11 +13,10 @@ import type {
   TimelinePage,
 } from "../../types";
 import type { HttpClient } from "../http";
-import { parseWithFallback } from "../schema";
+import { parseStrictResponse, parseWithFallback } from "../schema";
 import {
   CommentsListSchema,
   EMPTY_ISSUE_SESSION,
-  EMPTY_ISSUE_SESSIONS,
   EMPTY_ISSUE_SESSION_TASKS,
   EMPTY_SESSION_EVENTS,
   EMPTY_SESSION_PARTICIPANTS,
@@ -98,7 +97,7 @@ export class CommentsEndpoints {
 
   async listIssueSessions(issueId: string): Promise<IssueSession[]> {
     const raw = await this.http.fetch<unknown>(`/api/issues/${issueId}/sessions`);
-    return parseWithFallback(raw, IssueSessionListSchema, EMPTY_ISSUE_SESSIONS, {
+    return parseStrictResponse<IssueSession[]>(raw, IssueSessionListSchema, {
       endpoint: "GET /api/issues/:id/sessions",
     });
   }

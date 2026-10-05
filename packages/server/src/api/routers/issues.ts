@@ -1205,7 +1205,15 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue) return c.json({ error: "issue not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
-    const body = await readJson<{ agent_id?: string; agentId?: string; prompt?: string }>(c);
+    const body = await readJson<{ task_id?: string; agent_id?: string; agentId?: string; prompt?: string }>(c);
+    if (body.task_id !== undefined && (typeof body.task_id !== "string" || !body.task_id.trim())) {
+      return c.json({ error: "task_id must be a non-empty string" }, 400);
+    }
+    if (body.task_id && (body.agent_id !== undefined || body.agentId !== undefined || body.prompt !== undefined)) {
+      return c.json({ error: "task_id cannot be combined with agent or prompt overrides" }, 400);
+    }
+    const retryTarget = body.task_id ? store.getTaskByRef(body.task_id, { issueId: issue.id }) : null;
+    if (retryTarget && !canCurrentUserAccessChatTask(c, store, retryTarget)) return c.json({ error: "forbidden" }, 403);
     const human = humanRequestActor(c);
     const result = safeRerunIssue(store, issue.id, {
       ...body,

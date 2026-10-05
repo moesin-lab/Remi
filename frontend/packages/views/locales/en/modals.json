@@ -179,6 +179,20 @@
       "error_daemon_version": "This agent's daemon CLI ({{current}}) is below the required {{min}}. Upgrade the daemon to use Create with agent.",
       "error_unknown": "Failed to submit. Try again.",
       "sub_issue_of": "Sub-issue of {{identifier}}"
+    },
+    "receipt": {
+      "label": "Creation receipt",
+      "unknown": "The issue was created. Dispatch was not confirmed; open the issue to check its execution state.",
+      "intake": "Your request was saved and queued for the agent to organize. Open the intake issue to follow progress and generated issues.",
+      "queued": "An execution task was created and queued. It may still be waiting for a runtime.",
+      "no_assignee": "No agent task was started. Assign an agent from the issue when you are ready.",
+      "member_assignee": "Assigned to a person. No agent task was started.",
+      "backlog_status": "Saved in backlog. Move the issue to Todo when you want it to start.",
+      "dependencies_unmet": "Waiting for prerequisite issues. Execution will start when they are satisfied.",
+      "no_runnable_agent": "No available agent could accept this issue. Check the assignee and runtime from the issue.",
+      "skipped": "The issue was saved, but execution was not dispatched. Open the issue to review the reason before trying again.",
+      "view_intake": "View request and progress",
+      "create_another": "Create another"
     }
   }
 }

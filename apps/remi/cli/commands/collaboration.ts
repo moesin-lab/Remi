@@ -169,6 +169,7 @@ function issueCompatibilitySpecs(): CommandSpec[] {
       await mutateAndRender(invocation, "POST", `/api/issues/${encodePath(positional(invocation, 0, "issue"))}/restore`, {});
     }),
     legacySpec("issue.rerun", ["issue", "rerun"], "Rerun an issue", "write", HUMAN, [refPositional("issue")], [
+      { name: "task-id", type: "string", valueName: "id", description: "Retry a failed or cancelled run with its original agent, Session and prompt" },
       { name: "agent-id", type: "string", valueName: "id", description: "Override agent" },
       { name: "prompt", type: "string", valueName: "text", description: "Override prompt" },
     ], ["issue", "rerun"]),

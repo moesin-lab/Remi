@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
   packages: write
   attestations: write
   id-token: write
@@ -149,6 +150,9 @@ jobs:
         with:
           context: .
           file: deploy/docker/Dockerfile.web
+          build-args: |
+            REMI_APP_VERSION=${{ needs.validate.outputs.version }}
+            NEXT_BUILD_CPUS=2
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |

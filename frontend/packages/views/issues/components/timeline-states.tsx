@@ -40,12 +40,17 @@ export function SessionEmptyState() {
   );
 }
 
-/**
- * Every comment and activity hangs off a Session, so an issue whose session
- * list fails (or comes back empty) has no timeline to query at all. Without
- * this state the whole activity area would just stay blank forever, with no
- * hint that anything went wrong and no way to try again.
- */
+/** A saved Issue need not have a linked, visible Session yet. */
+export function NoLinkedSessions() {
+  const { t } = useT("issues");
+  return <div role="status" className="mt-4 flex flex-col items-center gap-2 rounded-lg border border-dashed px-6 py-10 text-center">
+    <MessagesSquare className="h-6 w-6 text-muted-foreground" />
+    <p className="text-sm font-medium">{t(($) => $.detail.no_linked_sessions_title)}</p>
+    <p className="text-xs text-muted-foreground">{t(($) => $.detail.no_linked_sessions_hint)}</p>
+  </div>;
+}
+
+/** A failed Session read offers recovery without pretending its list is empty. */
 export function TimelineUnavailable({
   onRetry,
   retrying,

@@ -135,7 +135,8 @@ export function IssueDetail({
   }, [id, highlightCommentId, matchedSession, resolveDeepLinkSession, sessions.list, sessions.select]);
   const activitySessions = resolveDeepLinkSession
     ? { ...sessions, activeId: matchedSession ?? "", active: sessions.list.find(s => s.id === matchedSession) ?? null,
-        pending: matchedSession === null || sessions.pending,
+        pending: (matchedSession === null && sessions.list.length > 0 && !sessions.error) || sessions.pending,
+        error: sessions.error || matchedSession === "",
         refetch: () => { setLocatedSession(null); sessions.refetch(); } }
     : sessions;
   // Workspace owners and admins moderate any comment authored by anyone

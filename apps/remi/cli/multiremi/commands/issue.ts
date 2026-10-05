@@ -163,10 +163,13 @@ export async function issue(positional: string[], options: CliOptions): Promise<
   }
   if (action === "rerun") {
     const issueId = positional[1]?.trim();
-    if (!issueId) throw new Error("usage: multiremi issue rerun <issue-id> [--agent-id <id>] [--prompt <text>]");
+    if (!issueId) throw new Error("usage: remi issue rerun <issue-id> [--task-id <id>] [--agent-id <id>] [--prompt <text>]");
     const body: Record<string, unknown> = {};
+    const taskId = rawStringOption(options, "task-id");
     const agentId = rawStringOption(options, "agent-id", "agentId");
     const prompt = rawStringOption(options, "prompt");
+    if (taskId && (agentId || prompt)) throw new Error("--task-id cannot be combined with --agent-id or --prompt");
+    if (taskId) body.task_id = taskId;
     if (agentId) body.agent_id = agentId;
     if (prompt) body.prompt = prompt;
     printJson(await multiremiApiRequest("POST", `/api/issues/${encodeURIComponent(issueId)}/rerun`, body, options));

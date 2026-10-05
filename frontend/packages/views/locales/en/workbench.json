@@ -20,5 +20,27 @@
     "minutes": "{{count}}m",
     "hours": "{{count}}h",
     "days": "{{count}}d"
+  },
+  "run": {
+    "label": "Execution and recovery",
+    "loading": "Loading execution state…",
+    "load_failed": "Execution state could not be loaded.",
+    "refresh": "Refresh",
+    "unknown": "Execution state is unknown",
+    "queued": "Queued — waiting to start",
+    "waiting_directory": "Waiting for the working directory",
+    "running": "Agent is working",
+    "awaiting_human": "Waiting for your reply",
+    "failed": "Latest run failed",
+    "cancelled": "Latest run was stopped",
+    "completed": "Latest run completed — ready for review",
+    "active_count": "{{count}} active runs",
+    "view": "View run",
+    "retry": "Retry run",
+    "retrying": "Retrying…",
+    "retry_hint": "Starts a new run with the same agent, Session and instructions. Earlier tool actions are not undone.",
+    "dependencies_unmet": "Prerequisite issues are still pending. Resolve them before retrying.",
+    "active_run_exists": "An active run already exists. Review its progress before retrying.",
+    "retry_failed": "Retry was not confirmed. Refresh and check the runs before trying again."
   }
 }

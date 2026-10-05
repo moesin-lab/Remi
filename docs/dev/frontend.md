@@ -97,6 +97,10 @@ Runtime 的统一配置页 [execution-config-page.tsx](../../frontend/packages/v
 
 ## 验证入口
 
+创建弹窗在成功响应后保留[创建回执](../../frontend/packages/views/modals/issue-creation-receipt.tsx)，区分 Issue 已保存、Task 已派发与未派发原因；派发确认不等于已经执行。快速创建回执链接接单 Issue，便于追踪整理进度和生成的任务。连续创建保留紧凑回执，失败保留输入；创建另一条不会重新填入上一条携带的 prompt。命令响应严格校验，旧服务缺失派发字段时显示未确认。新 Issue 没有可见关联 Session 时展示空状态；Session 读取或深链接定位失败保留重试入口，响应格式错误不降级为成功空列表。
+
+工作台选中 Issue 的执行状态和重试规则见[工作台/收件箱边界](../inbox-workbench-boundary.md#selected-issue-execution-and-recovery)。隔离浏览器验收通过 `bun run tests/integration/smoke-interaction-recovery.ts` 启动临时 API、独立 workspace 和 Next，Node/Playwright 负责浏览器；运行前可用 `node node_modules/playwright-core/cli.js install chromium` 准备浏览器。脚本输出截图及 `result.json` 的临时目录。
+
 浏览器本地副本在 [replica/browser.ts](../../frontend/packages/core/replica/browser.ts)。Web Lock、BroadcastChannel、OPFS SAH pool 名和目录都使用同一个 `(user_id, workspace_id)` 分区键；频道消息再核对该键。leader 持有 Worker 和 socket，follower 通过频道查询；没有 OPFS 或 Web Locks 时，每页的 Memory 副本复用同一个 leader 请求队列和同步语义。
 
 页面句柄显式 open/close，每个 tab 对同一 session 只声明一次兴趣；leader 按 tab 去重，最后一个 close 才退订。新 leader 宣告接管后，各存活页面重新声明，cursor 来自数据库的连续 head。dispose 终止 Worker 并结束 Web Lock 回调，使下一页可以接管。

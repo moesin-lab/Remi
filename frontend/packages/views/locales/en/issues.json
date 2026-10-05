@@ -390,7 +390,9 @@
     "select_all_sub_issues_aria": "Select all sub-issues",
     "timeline_unavailable_title": "Couldn't load Sessions linked to this issue",
     "timeline_unavailable_hint": "Comments and activity are scoped to a Session, so none of them can be shown until the Session list loads.",
-    "timeline_retry": "Try again"
+    "timeline_retry": "Try again",
+    "no_linked_sessions_title": "No linked Sessions to show",
+    "no_linked_sessions_hint": "This issue is saved. Assign an agent from Properties to begin, or return here when a Session is linked."
   },
   "log_event": {
     "envelope_recipient": "Notified {{name}}",

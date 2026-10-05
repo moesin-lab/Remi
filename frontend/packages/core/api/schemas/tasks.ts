@@ -1,5 +1,21 @@
 import { z } from "zod";
 
+const TaskIdentitySchema = z.object({
+  id: z.string().min(1),
+  issue_id: z.string().min(1),
+  agent_id: z.string().min(1),
+  status: z.string(),
+  created_at: z.string(),
+  error: z.string().nullable().optional(),
+  progress_summary: z.string().nullable().optional(),
+  wait_reason: z.string().nullable().optional(),
+}).loose();
+
+export const TaskCommandResponseSchema = TaskIdentitySchema.extend({
+  status: z.enum(["queued", "dispatched", "waiting_local_directory", "running", "awaiting_human", "completed", "failed", "cancelled"]),
+});
+export const IssueTaskListSchema = z.array(TaskIdentitySchema);
+
 export const TaskSteerMessageSchema = z.object({
   id: z.string(),
   taskId: z.string(),

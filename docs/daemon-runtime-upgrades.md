@@ -17,7 +17,7 @@ Claude ACP 使用 @anthropic-ai/claude-agent-sdk 内的 CC 执行文件，Codex 
 
 候选校验包含 ACP 包版本、SDK 包版本、实际执行文件 --version、Codex usage 补丁、Claude wrapper 健康检查及 ACP initialize 协商。任何步骤失败都不改发版文件；此时应处理兼容性问题或等待上游版本对齐，再重新准备。准备命令不创建提交、tag 或 Release，也不重启机器上的 daemon，不创建 Task、不向模型发 prompt。
 
-依赖与版本号同批提交，完整 Release build check 通过后才打 tag。CI 对版本号变更检查对应依赖快照，并在 Linux/macOS 安装固定组合、验证初始化。tag 工作流在发布 CLI 前检查版本一致性、快照和同一 main 提交的完整 CI 成功记录。构建时不再解析 latest，所以检查后上游继续发新版本也不会改变本次发行内容。
+依赖与版本号同批提交，完整 Release build check 通过后才打 tag。CI 对版本号变更检查对应依赖快照，并在 Windows/Linux/macOS 安装固定组合、验证初始化。Windows 使用 Node 启动 JavaScript ACP 入口，安装过程保持在独立候选目录中。tag 工作流在发布 CLI 前检查版本一致性、快照和同一 main 提交的完整 CI 成功记录。构建时不再解析 latest，所以检查后上游继续发新版本也不会改变本次发行内容。
 
 依赖升级不新增发版定时器；夜间发版任务使用同一准备入口。上线机器的依赖更新频率跟随 daemon 发版和升级频率。
 

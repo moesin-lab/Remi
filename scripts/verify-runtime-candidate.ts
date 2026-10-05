@@ -1,4 +1,4 @@
-import { dirname } from "node:path";
+import { delimiter, dirname } from "node:path";
 import { ensureNode, patchCodexUsageBridge } from "../packages/acp/src/provision.js";
 import { installRuntimeBundle, runtimeBundleBridge, runtimeBundlePrefix } from "../packages/acp/src/runtime-bundle.js";
 import { verifyAcpRuntime } from "../packages/acp/src/runtime-verify.js";
@@ -12,7 +12,7 @@ if (import.meta.main) {
   const log = (message: string) => console.error(`[release-runtime] ${message}`);
   const node = ensureNode(log);
   if (!node) throw new Error("Cannot verify release dependencies without Node/npm");
-  process.env.PATH = `${dirname(node.node)}:${process.env.PATH ?? ""}`;
+  process.env.PATH = `${dirname(node.node)}${delimiter}${process.env.PATH ?? ""}`;
   for (const provider of ["claude", "codex"] as const) {
     const versions = snapshot[provider];
     log(`verifying ${provider}: ACP ${versions.acp}, SDK ${versions.sdk}, executable ${versions.executable}`);

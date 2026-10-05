@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { BRIDGE_PACKAGE, RUNTIME_PIN, type RuntimeProvider, type RuntimeVersions } from "./runtime-versions.js";
 import { releaseRuntimeVersions } from "./runtime-versions.js";
 
@@ -118,10 +118,13 @@ export function installRuntimeBundle(
     // as a Link root and loses its overrides on the target dependency tree.
     // Resolve the existing stage before installing so the release pins apply.
     const installRoot = realpathSync(stage);
-    execFileSync(tools.npm, ["install", "--prefix", installRoot, "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund", "--loglevel=error"], {
+    // On Windows --prefix makes npm's local and global roots equal, causing
+    // an implicit install of cwd into itself. Use the canonical cwd instead.
+    const prefixArgs = process.platform === "win32" ? ["--global=false"] : ["--prefix", installRoot];
+    execFileSync(tools.npm, ["install", ...prefixArgs, "--registry=https://registry.npmjs.org", "--no-audit", "--no-fund", "--loglevel=error"], {
       cwd: installRoot,
       timeout: 180_000, stdio: ["ignore", "ignore", "pipe"],
-      env: { ...process.env, PATH: `${dirname(tools.node)}:${process.env.PATH ?? ""}` },
+      env: { ...process.env, PATH: `${dirname(tools.node)}${delimiter}${process.env.PATH ?? ""}` },
     });
     const bridge = runtimeBundleBridge(provider, stage);
     const pkg = JSON.parse(readFileSync(join(bridge, "package.json"), "utf8"));

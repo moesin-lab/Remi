@@ -12,6 +12,8 @@
  *  - Zero runtime deps means this module is safe in Node (tests) and browsers
  */
 
+import type { ImPlatformId, ImSection } from "../im-platforms/catalog";
+
 const encode = (id: string) => encodeURIComponent(id);
 
 function workspaceScoped(slug: string) {
@@ -59,6 +61,9 @@ function workspaceScoped(slug: string) {
     skills: () => `${ws}/skills`,
     skillDetail: (id: string) => `${ws}/skills/${encode(id)}`,
     settings: () => `${ws}/settings`,
+    imPlatforms: () => `${ws}/im`,
+    imPlatform: (platform: ImPlatformId, section: ImSection = "overview") =>
+      `${ws}/im/${encode(platform)}${section === "overview" ? "" : `/${encode(section)}`}`,
     attachmentPreview: (id: string) => `${ws}/attachments/${encode(id)}/preview`,
   };
 }

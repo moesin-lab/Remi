@@ -8,6 +8,8 @@ summary: 当前机器人 Chat/Issue 话题与轮次推送，以及独立的 Mess
 
 本页分别说明机器人对话和 [Messaging Core](../packages/server/src/messaging/index.ts)的 Lark CLI 采集。机器人连接器在[packages/connectors/src/feishu](../packages/connectors/src/feishu)，由[工作区 bot 配置与 Runtime 分配](deploy/66-8-remi-environment.md)驱动；两者的凭据、消息处理和验证不能混用。
 
+Web 入口为主侧栏「IM 平台 → 飞书」，页面划分、连接层级、权限和旧设置地址迁移见 [IM 平台管理](dev/im-platforms.md)。
+
 ## 机器人对话、Issue 话题与更新
 
 [FeishuBotRepo](../packages/server/src/store/repos/feishu-bot-repo.ts)维护飞书传输会话及群 Issue 话题归属。普通 Web Chat 和飞书私聊与 Issue 独立，在其中创建 Issue 不绑定会话，也不继承新 Issue 的项目、仓库、附件或 Wiki。Chat 的 Issue 绑定和订阅 API/CLI 已移除，见[命令迁移](cli-command-migration.md#removed-chat-issue-binding-mul-301)。
@@ -83,7 +85,7 @@ Connection 的 Provider 配置走结构化输入，具体字段以 API 和 CLI h
 
 机器人默认使用 `sender_access_policy=agent`：能与机器人聊天的人，都可以使用回复 Agent 已开放的能力，无需绑定空间成员或单独审批发送人。Agent 自身的提议审批要求以及独立的任务策略仍然有效。升级后已有机器人同样默认采用此规则；已记录账号的 `allowed=false` 不再限制现有 Chat、子任务或由其触发的自动化建单。无需把 owner 或其他账号补进白名单。
 
-需要额外限制发送人时，空间管理者可在设置的「集成」中主动开启白名单（`sender_access_policy=allowlist`）。只有此模式下才检查下面的账号授权。修改访问策略会在下一次 API 请求生效；任务凭证不能修改此配置。普通配置保存省略此字段时保留已选策略。
+需要额外限制发送人时，空间管理者可在「IM 平台 → 飞书 → 访问控制」中主动开启白名单（`sender_access_policy=allowlist`）。只有此模式下才检查下面的账号授权。修改访问策略会在下一次 API 请求生效；任务凭证不能修改此配置。普通配置保存省略此字段时保留已选策略。
 
 机器人收到请求时，按当前应用的 `(app_id, open_id)` 自动记录发送者并去重，保存显示名称、首次和最近请求时间；账号记录不等于建单权限。白名单模式下，新账号默认「待授权」。空间管理者可「加入白名单」或「移出白名单」，不需要关联 Remi 用户，也不创建空间成员。更换机器人应用后按新应用的账号范围重新管理。
 

@@ -47,7 +47,6 @@
     "./search": "./search/index.ts",
     "./chat": "./chat/index.ts",
     "./settings": "./settings/index.ts",
-    "./settings/lark-tab": "./settings/components/lark-tab.tsx",
     "./lark": "./lark/index.ts",
     "./invite": "./invite/index.ts",
     "./invitations": "./invitations/index.ts",
@@ -57,7 +56,9 @@
     "./i18n": "./i18n/index.ts",
     "./attachments": "./attachments/index.ts",
     "./locales": "./locales/index.ts",
-    "./locales/*": "./locales/*"
+    "./locales/*": "./locales/*",
+    "./im-platforms": "./im-platforms/index.ts",
+    "./im-platforms/lark-tab": "./im-platforms/feishu/lark-tab.tsx"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",

@@ -88,6 +88,7 @@ import type { PinnedItem } from "@multiremi/core/types";
 import { useLogout } from "../auth";
 import { ProjectIcon } from "../projects/components/project-icon";
 import { useT } from "../i18n";
+import { ImPlatformSidebarGroup } from "../im-platforms/sidebar-group";
 
 // Top-level nav items stay active when the user is on a child route
 // (e.g. "Projects" stays lit on /:slug/projects/:id). Pinned items keep
@@ -744,6 +745,8 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
+
+          <ImPlatformSidebarGroup />
 
           <SidebarGroup>
             <SidebarGroupLabel>{t(($) => $.sidebar.configure_group)}</SidebarGroupLabel>

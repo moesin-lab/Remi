@@ -119,6 +119,7 @@ vi.mock("@multiremi/core/paths", () => ({
     plugins: () => "/acme/plugins",
     skills: () => "/acme/skills",
     settings: () => "/acme/settings",
+    imPlatform: (platform: string) => `/acme/im/${platform}`,
     issueDetail: (id: string) => `/acme/issues/${id}`,
     projectDetail: (id: string) => `/acme/projects/${id}`,
   }),
@@ -208,6 +209,15 @@ describe("PinRow", () => {
     detail.current = { isPending: false, isError: false, data: { identifier: "MUL-123", title: "Keep this pin", status: "todo" }, error: null };
     render(<AppSidebar />);
     expect(await screen.findByText("MUL-123 Keep this pin")).toBeInTheDocument();
+  });
+});
+
+describe("IM platform navigation", () => {
+  it("keeps the Feishu platform active throughout its child pages", () => {
+    pathname.current = "/acme/im/feishu/ingestion";
+    const { container } = render(<AppSidebar />);
+    expect(container.querySelector('button[data-href="/acme/im/feishu"]')).toHaveAttribute("data-active", "true");
+    expect(container.querySelector('button[data-href="/acme/settings"]')).toHaveAttribute("data-active", "false");
   });
 });
 

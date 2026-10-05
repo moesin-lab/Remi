@@ -33,6 +33,7 @@ const WORKSPACE_ROUTE_SEGMENTS = new Set([
   "plugins",
   "skills",
   "settings",
+  "im",
 ]);
 
 /**

@@ -1,6 +1,7 @@
 import type { LocaleResources, SupportedLocale } from "@multiremi/core/i18n";
 import enCommon from "./en/common.json";
 import enAuth from "./en/auth.json";
+import enImPlatforms from "./en/im-platforms.json";
 import enSettings from "./en/settings.json";
 import enIssues from "./en/issues.json";
 import enAgents from "./en/agents.json";
@@ -28,6 +29,7 @@ import enUi from "./en/ui.json";
 import enSquads from "./en/squads.json";
 import zhHansCommon from "./zh-Hans/common.json";
 import zhHansAuth from "./zh-Hans/auth.json";
+import zhHansImPlatforms from "./zh-Hans/im-platforms.json";
 import zhHansSettings from "./zh-Hans/settings.json";
 import zhHansIssues from "./zh-Hans/issues.json";
 import zhHansAgents from "./zh-Hans/agents.json";
@@ -55,6 +57,7 @@ import zhHansUi from "./zh-Hans/ui.json";
 import zhHansSquads from "./zh-Hans/squads.json";
 import koCommon from "./ko/common.json";
 import koAuth from "./ko/auth.json";
+import koImPlatforms from "./ko/im-platforms.json";
 import koSettings from "./ko/settings.json";
 import koIssues from "./ko/issues.json";
 import koAgents from "./ko/agents.json";
@@ -82,6 +85,7 @@ import koUi from "./ko/ui.json";
 import koSquads from "./ko/squads.json";
 import jaCommon from "./ja/common.json";
 import jaAuth from "./ja/auth.json";
+import jaImPlatforms from "./ja/im-platforms.json";
 import jaSettings from "./ja/settings.json";
 import jaIssues from "./ja/issues.json";
 import jaAgents from "./ja/agents.json";
@@ -116,6 +120,7 @@ export const RESOURCES: Record<SupportedLocale, LocaleResources> = {
     common: enCommon,
     auth: enAuth,
     settings: enSettings,
+    "im-platforms": enImPlatforms,
     issues: enIssues,
     agents: enAgents,
     editor: enEditor,
@@ -145,6 +150,7 @@ export const RESOURCES: Record<SupportedLocale, LocaleResources> = {
     common: zhHansCommon,
     auth: zhHansAuth,
     settings: zhHansSettings,
+    "im-platforms": zhHansImPlatforms,
     issues: zhHansIssues,
     agents: zhHansAgents,
     editor: zhHansEditor,
@@ -174,6 +180,7 @@ export const RESOURCES: Record<SupportedLocale, LocaleResources> = {
     common: koCommon,
     auth: koAuth,
     settings: koSettings,
+    "im-platforms": koImPlatforms,
     issues: koIssues,
     agents: koAgents,
     editor: koEditor,
@@ -203,6 +210,7 @@ export const RESOURCES: Record<SupportedLocale, LocaleResources> = {
     common: jaCommon,
     auth: jaAuth,
     settings: jaSettings,
+    "im-platforms": jaImPlatforms,
     issues: jaIssues,
     agents: jaAgents,
     editor: jaEditor,

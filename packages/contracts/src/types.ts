@@ -5902,6 +5902,7 @@ export type MultiremiPlatformOperationStatus =
   | "preparing"
   | "pulling"
   | "draining"
+  | "backing_up"
   | "switching"
   | "restarting"
   | "verifying"
@@ -5954,6 +5955,8 @@ export interface MultiremiPlatformService {
 }
 
 export interface MultiremiPlatformRelease {
+  /** SHA-256 of the normalized database migration source. Unequal/unknown schemas require manual maintenance. */
+  dataSchema?: string | null;
   version: string;
   ref: string;
   publishedAt: string | null;
@@ -6008,6 +6011,9 @@ export interface MultiremiPlatformAutoUpdateSchedule {
 }
 
 export interface MultiremiPlatformStatus {
+  releaseFeedUrl?: string | null;
+  defaultReleaseFeedUrl?: string | null;
+  preflight?: MultiremiPlatformPreflight | null;
   canManage: boolean;
   driver: MultiremiPlatformDeploymentDriver;
   currentRelease: MultiremiPlatformRelease | null;
@@ -6024,6 +6030,14 @@ export interface MultiremiPlatformStatus {
   lastOperation: MultiremiPlatformOperation | null;
   maintenance: MultiremiPlatformMaintenance;
   recentReleases: MultiremiPlatformRelease[];
+}
+
+export interface MultiremiPlatformPreflight {
+  ready: boolean;
+  checkedAt: string;
+  platform: string;
+  arch: string;
+  checks: Array<{ code: string; ok: boolean; message: string }>;
 }
 
 export interface CreatePlatformOperationInput {

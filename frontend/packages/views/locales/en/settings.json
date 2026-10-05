@@ -457,7 +457,7 @@
     "update_now": "Update now",
     "restart": "Restart services",
     "auto_update": "Automatically install stable releases",
-    "auto_update_hint": "The host updater checks formal GitHub releases at the configured daily time.",
+    "auto_update_hint": "The host updater checks the configured release source at the scheduled daily time.",
     "auto_update_time": "Daily update time",
     "auto_update_timezone": "Time zone",
     "auto_update_browser_timezone_suffix": " (browser)",
@@ -511,7 +511,17 @@
     "confirm_rollback_title": "Rollback platform?",
     "confirm_rollback_desc": "Switch the platform back to {{version}} and restart its services.",
     "cancel": "Cancel",
-    "confirm": "Confirm"
+    "confirm": "Confirm",
+    "update_source": "Update source",
+    "update_source_url": "Release feed URL",
+    "update_source_hint": "Use an HTTPS release feed. Leave empty to use the host default. Changing the source clears previous update checks.",
+    "source_save": "Save update source",
+    "source_reset": "Restore default source",
+    "source_saved": "Update source saved. Run a new update check.",
+    "preflight_title": "Update readiness",
+    "preflight_hint": "Updates wait for every agent to finish, verify backups and data compatibility, then switch API and Web services. Unsafe updates are blocked.",
+    "check_unknown": "Updates have not been verified. Run an update check and resolve any blockers.",
+    "status_backing_up": "Backing up and verifying the database and persistent files"
   },
   "modelGateway": {
     "context_title": "1M context",

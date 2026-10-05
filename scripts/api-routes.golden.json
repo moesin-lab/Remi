@@ -19024,6 +19024,9 @@
       "status": 200,
       "body": {
         "canManage": true,
+        "releaseFeedUrl": null,
+        "defaultReleaseFeedUrl": null,
+        "preflight": null,
         "driver": "systemd_release",
         "currentRelease": null,
         "latestRelease": null,

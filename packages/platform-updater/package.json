@@ -11,7 +11,9 @@
     "./operation-outbox.js": "./src/operation-outbox.ts",
     "./release-feed.js": "./src/release-feed.ts",
     "./systemd-release-driver.js": "./src/systemd-release-driver.ts",
-    "./types.js": "./src/types.ts"
+    "./types.js": "./src/types.ts",
+    "./safety.js": "./src/safety.ts",
+    "./worker.js": "./src/worker.ts"
   },
   "dependencies": {
     "@multiremi/contracts": "workspace:*"

@@ -103,7 +103,8 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
   // (not `isSuccess && …`) keeps the tab visible when a background poll fails
   // while stale data is retained.
   const showPlatformTab =
-    platformStatus.isPending || platformStatus.data?.canManage === true;
+    platformStatus.isPending || platformStatus.data?.canManage === true
+    || (platformStatus.isError && ![401, 403].includes(Number((platformStatus.error as { status?: number } | null)?.status)));
 
   // Whitelist of valid tab values; unknown ?tab=… values silently fall back to
   // the default. Whitelisting also blocks junk like ?tab=<script> from

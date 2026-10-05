@@ -8,6 +8,7 @@ import type {
 } from "@multiremi/contracts";
 import type { PlatformDrainGate } from "./drain.js";
 import type { CommandRunner, PlatformDeploymentDriver, PlatformInspection } from "./types.js";
+import { assertCompatible, DATA_SCHEMA_INPUTS, migrationFingerprint, preflightResult, RecoveryRequiredError } from "./safety.js";
 
 interface LocalProfileConfig {
   repository: string;
@@ -19,6 +20,7 @@ interface LocalProfileConfig {
 }
 
 interface LocalProfileManifest {
+  dataSchema?: string | null;
   version: string;
   ref: string;
   sourceUrl: string;
@@ -27,6 +29,7 @@ interface LocalProfileManifest {
 
 interface HostOperationJournal {
   status?: string;
+  phase?: string;
   error?: string | null;
   resultRelease?: MultiremiPlatformRelease | null;
 }
@@ -42,6 +45,7 @@ export class LocalProfileDriver implements PlatformDeploymentDriver {
   readonly kind = "local_profile" as const;
   private readonly script: string;
   private readonly profileRoot: string;
+  private readonly schemas = new Map<string, string>();
 
   constructor(private readonly config: LocalProfileConfig, private readonly runner: CommandRunner) {
     if (!/^[A-Za-z0-9._-]+$/.test(config.profile)) throw new Error("local profile name is invalid");
@@ -64,6 +68,23 @@ export class LocalProfileDriver implements PlatformDeploymentDriver {
     await this.runHost(["host-finalize", "--operation-id", operationId]);
   }
 
+  async preflight() {
+    const checks: Array<{ code: string; ok: boolean; message: string }> = [];
+    for (const [code, run] of [
+      ["local_profile", () => this.runHost(["host-preflight"])],
+      ["current_release", async () => {
+        const current = await this.readCurrentRelease();
+        assertCompatible(current, current ?? {});
+        const result = await this.compose(["exec", "-T", "api", "cat", ...DATA_SCHEMA_INPUTS.map(path => `/app/${path}`)]);
+        if (result.exitCode !== 0 || !result.stdout || migrationFingerprint(result.stdout) !== current?.dataSchema) throw new Error("Current profile schema does not match the running API");
+      }],
+    ] as const) {
+      try { await run(); checks.push({ code, ok: true, message: `${code} ready` }); }
+      catch (error) { checks.push({ code, ok: false, message: errorMessage(error) }); }
+    }
+    return preflightResult(checks);
+  }
+
   async execute(
     operation: MultiremiPlatformOperation,
     report: (input: ReportPlatformOperationInput) => Promise<void>,
@@ -71,9 +92,19 @@ export class LocalProfileDriver implements PlatformDeploymentDriver {
   ): Promise<MultiremiPlatformRelease | null> {
     if (operation.kind === "check_updates") return (await this.inspect()).currentRelease;
     if (operation.kind === "restart") {
-      await report({ status: "restarting", progress: { message: `Restarting ${this.config.profile} profile services` } });
-      await this.runHost(["restart"]);
-      return (await this.inspect()).currentRelease;
+      if (!drain) throw new Error("local profile restart requires a drain gate");
+      if (["restarting", "verifying"].includes(operation.status)) return this.restartServices();
+      const checks = await this.preflight();
+      if (!checks.ready) throw new Error(checks.checks.filter(check => !check.ok).map(check => check.message).join("; "));
+      await drain.waitUntilDrained(report);
+      await report({ status: "backing_up", progress: { message: "Verifying a complete profile backup" } });
+      await drain.assertReady();
+      // The native backup temporarily stops API/Web, so fence cancellation and
+      // scheduling before it can touch those services.
+      await report({ status: "restarting", progress: { message: `Backing up and restarting ${this.config.profile} profile services` } });
+      try { await this.runHost(["backup"]); }
+      catch (error) { throw new RecoveryRequiredError(`Profile backup needs recovery; scheduling remains paused: ${errorMessage(error)}`); }
+      return this.restartServices();
     }
     if (!drain) throw new Error(`local profile ${operation.kind} requires a drain gate`);
     return operation.kind === "rollback"
@@ -91,21 +122,19 @@ export class LocalProfileDriver implements PlatformDeploymentDriver {
       throw new Error("operation targetVersion does not match the deployment manifest");
     }
     const previous = await this.readCurrentRelease();
+    assertCompatible(previous, manifest);
     await report({ status: "pulling", previousRelease: previous, progress: { message: `Fetching and staging ${manifest.ref}` } });
     await this.runHost([
       "host-stage", "--operation-id", operation.id, "--ref", manifest.ref,
       "--version", manifest.version, "--source-url", manifest.sourceUrl,
       "--source-sha256", manifest.sourceSha256,
+      "--data-schema", manifest.dataSchema!,
     ]);
     await this.throwForTerminalJournal(operation.id);
     await drain.waitUntilDrained(report);
+    await drain.assertReady();
     await report({ status: "switching", previousRelease: previous, progress: { message: "Activating staged profile release" } });
-    try {
-      await this.runHost(["host-activate", "--operation-id", operation.id]);
-    } catch (error) {
-      const journal = await this.readJournal(operation.id);
-      throw new Error(journal?.error || errorMessage(error));
-    }
+    await this.activateHost(operation.id, "host-activate");
     const release = (await this.readJournal(operation.id))?.resultRelease ?? await this.readCurrentRelease();
     if (!release || release.ref !== manifest.ref) throw new Error("host activation did not record the requested release");
     return release;
@@ -120,11 +149,12 @@ export class LocalProfileDriver implements PlatformDeploymentDriver {
     if (!target) throw new Error("rollback target is required");
     const previous = await this.readCurrentRelease();
     await report({ status: "preparing", previousRelease: previous, progress: { message: `Locating complete backup for ${target}` } });
-    await this.runHost(["host-rollback-stage", "--operation-id", operation.id, "--ref", target]);
+    await this.runHost(["host-rollback-stage", "--operation-id", operation.id, "--ref", target, "--preserve-data", "true"]);
     await this.throwForTerminalJournal(operation.id);
     await drain.waitUntilDrained(report);
-    await report({ status: "rolling_back", previousRelease: previous, progress: { message: `Restoring code and data for ${target}` } });
-    await this.runHost(["host-rollback-activate", "--operation-id", operation.id]);
+    await drain.assertReady();
+    await report({ status: "switching", previousRelease: previous, progress: { message: `Restoring code for ${target} while preserving current data` } });
+    await this.activateHost(operation.id, "host-rollback-activate");
     const release = (await this.readJournal(operation.id))?.resultRelease ?? await this.readCurrentRelease();
     if (!release) throw new Error("host rollback did not record a release");
     return release;
@@ -144,7 +174,23 @@ export class LocalProfileDriver implements PlatformDeploymentDriver {
 
   private async readCurrentRelease(): Promise<MultiremiPlatformRelease | null> {
     const active = await readJson<Record<string, unknown>>(join(this.profileRoot, "active.json"));
-    try { return active ? releaseFromDeployment(active) : null; } catch { return null; }
+    if (!active) return null;
+    try {
+      const release = releaseFromDeployment(active);
+      if (!release.dataSchema) {
+        if (!this.schemas.has(release.ref)) {
+          const chunks: string[] = [];
+          for (const path of DATA_SCHEMA_INPUTS) {
+            const result = await this.runner.run("git", ["show", `${release.ref}:${path}`], { cwd: this.config.repository });
+            if (result.exitCode !== 0 || !result.stdout) throw new Error("Current profile schema is unavailable");
+            chunks.push(result.stdout);
+          }
+          this.schemas.set(release.ref, migrationFingerprint(chunks.join("")));
+        }
+        release.dataSchema = this.schemas.get(release.ref)!;
+      }
+      return release;
+    } catch { return releaseFromDeployment(active); }
   }
 
   private async readRecentReleases(current: MultiremiPlatformRelease | null): Promise<MultiremiPlatformRelease[]> {
@@ -167,11 +213,7 @@ export class LocalProfileDriver implements PlatformDeploymentDriver {
   private async inspectServices(): Promise<MultiremiPlatformService[]> {
     const deployment = await readJson<Record<string, unknown>>(join(this.profileRoot, "deployment.json"));
     if (!deployment) return [unknown("api"), unknown("web"), unknown("postgres"), unknown("openviking")];
-    const result = await this.runner.run("docker", [
-      "compose", "-p", `remi-${this.config.profile}`,
-      "--env-file", join(this.profileRoot, "compose.env"),
-      "-f", join(this.profileRoot, "compose.yml"), "ps", "--format", "json",
-    ]);
+    const result = await this.compose(["ps", "--format", "json"]);
     const rows = result.exitCode === 0 ? result.stdout.split("\n").filter(Boolean).flatMap((line) => {
       try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; }
     }) : [];
@@ -181,6 +223,37 @@ export class LocalProfileDriver implements PlatformDeploymentDriver {
       return { id, name: id === "api" ? "API" : id === "web" ? "Web" : "PostgreSQL", status: state === "running" ? "ready" : state === "unknown" ? "unknown" : "stopped", detail: row ? String(row.Status ?? state) : null, version: row ? String(row.Image ?? "") || null : null, checkedAt: new Date().toISOString() };
     });
     return [...managed, unknown("openviking")];
+  }
+
+  private async restartServices(): Promise<MultiremiPlatformRelease | null> {
+    try {
+      await this.runHost(["restart"]);
+      return (await this.inspect()).currentRelease;
+    } catch (error) {
+      throw new RecoveryRequiredError(`Profile restart needs recovery; scheduling remains paused: ${errorMessage(error)}`);
+    }
+  }
+
+  private async activateHost(operationId: string, action: string): Promise<void> {
+    try { await this.runHost([action, "--operation-id", operationId]); }
+    catch (error) {
+      let journal: HostOperationJournal | null;
+      try { journal = await this.readJournal(operationId); }
+      catch { throw new RecoveryRequiredError("Host recovery journal is unreadable; scheduling remains paused"); }
+      if (!journal || journal.status === "recovery_required" || (journal.status === "running"
+        && ["switching", "backup_complete", "activating", "rolling_back", "rollback_backing_up", "rollback_recovering"].includes(journal.phase ?? ""))) {
+        throw new RecoveryRequiredError(journal?.error || `Host switch needs recovery: ${errorMessage(error)}`);
+      }
+      throw new Error(journal.error || errorMessage(error));
+    }
+  }
+
+  private compose(args: string[]) {
+    return this.runner.run("docker", [
+      "compose", "-p", `remi-${this.config.profile}`,
+      "--env-file", join(this.profileRoot, "compose.env"),
+      "-f", join(this.profileRoot, "compose.yml"), ...args,
+    ]);
   }
 
   private readJournal(operationId: string): Promise<HostOperationJournal | null> {
@@ -218,6 +291,7 @@ function releaseFromDeployment(value: Record<string, unknown>): MultiremiPlatfor
   const ref = String(value.ref ?? "");
   if (!/^[a-f0-9]{40}$/i.test(ref)) throw new Error("profile deployment has an invalid ref");
   return {
+    dataSchema: typeof value.dataSchema === "string" ? value.dataSchema : null,
     version: String(value.version ?? ref).split("-stable.")[0]!, ref, publishedAt: null, releaseUrl: null, manifestUrl: null,
     apiImage: typeof value.apiImage === "string" ? value.apiImage : null,
     webImage: typeof value.webImage === "string" ? value.webImage : null,

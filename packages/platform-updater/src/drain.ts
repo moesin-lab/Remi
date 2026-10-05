@@ -36,11 +36,14 @@ export class DrainCancelledError extends DrainAbortedError {
 /**
  * Gate handed to deployment drivers: block until the platform is drained
  * (claims paused everywhere, zero in-flight tasks). The coordinator renews the
- * drain lease on every poll, so an updater crash releases the platform via the
- * server-side TTL. On timeout/cancel the drain is released before throwing;
+ * drain lease on every poll and throughout backup. Before commit, an updater
+ * crash releases the platform via TTL; committed switches stay pinned until
+ * recovery is verified. On timeout/cancel the drain is released before throwing;
  * on success the drain stays held (the switch runs under it) until release().
  */
 export interface PlatformDrainGate {
+  /** Renew and recheck immediately before committing the service switch. */
+  assertReady(): Promise<void>;
   waitUntilDrained(
     report: (input: ReportPlatformOperationInput) => Promise<void>,
   ): Promise<void>;
@@ -58,6 +61,9 @@ export interface PlatformDrainCoordinatorOptions {
 }
 
 export class PlatformDrainCoordinator implements PlatformDrainGate {
+  private keeper: ReturnType<typeof setInterval> | null = null;
+  private renewing: Promise<void> | null = null;
+  private leaseError: Error | null = null;
   private readonly timeoutMs: number;
   private readonly pollMs: number;
   private readonly leaseTtlMs: number;
@@ -104,6 +110,7 @@ export class PlatformDrainCoordinator implements PlatformDrainGate {
         throw new DrainCancelledError();
       }
       if (renewal.status.ready) {
+        this.startKeeper();
         await report({
           status: "draining",
           progress: {
@@ -138,7 +145,35 @@ export class PlatformDrainCoordinator implements PlatformDrainGate {
   }
 
   async release(): Promise<void> {
+    this.stopKeeper();
+    await this.renewing;
     await this.client.drainRelease(this.operationId);
+  }
+
+  /** Stop local timers without releasing a committed, unverified switch. */
+  stopKeeper(): void {
+    if (this.keeper) clearInterval(this.keeper);
+    this.keeper = null;
+  }
+
+  async assertReady(): Promise<void> {
+    if (this.leaseError) throw this.leaseError;
+    const renewal = await this.client.drainRenew(this.operationId, this.leaseTtlMs);
+    if (renewal.cancel_requested) throw new DrainCancelledError();
+    if (!renewal.status.ready || renewal.maintenance.operationId !== this.operationId) {
+      throw new DrainAbortedError("drain is no longer ready; service switch was not executed");
+    }
+  }
+
+  private startKeeper(): void {
+    if (this.keeper) return;
+    this.keeper = setInterval(() => {
+      if (this.renewing) return;
+      this.renewing = this.assertReady().catch((error: unknown) => {
+        this.leaseError = error instanceof Error ? error : new Error(String(error));
+      }).finally(() => { this.renewing = null; });
+    }, Math.max(10, Math.min(this.pollMs, this.leaseTtlMs / 3)));
+    this.keeper.unref();
   }
 }
 

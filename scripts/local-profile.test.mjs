@@ -12,6 +12,8 @@ const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const scriptSource = readFileSync(join(repository, 'scripts/local-profile.mjs'), 'utf8');
 const OLD_REF = 'a'.repeat(40);
 const NEW_REF = 'b'.repeat(40);
+const schemaInputs = JSON.parse(readFileSync(join(repository, 'packages/platform-updater/src/data-schema-inputs.json'), 'utf8'));
+const SCHEMA = createHash('sha256').update('test migration\n'.repeat(schemaInputs.length)).digest('hex');
 
 // Every child runs a copy of the real CLI in a temporary repository. Patch the
 // process boundary before its ESM imports load: no real Git, Docker, tar, or
@@ -39,6 +41,7 @@ childProcess.spawnSync = (command, args, options = {}) => {
   }) + '\n');
   if (command === 'git' && args[0] === 'rev-parse') return succeed(process.env.TEST_COMMIT + '\n');
   if (command === 'git' && args[0] === 'fetch') return succeed();
+  if (command === 'git' && args[0] === 'show') return succeed(process.env.TEST_FAIL === 'schema_changed' && args[1].startsWith(process.env.TEST_NEW_COMMIT) ? 'changed migration\n' : 'test migration\n');
   if (command === 'git' && args[0] === 'remote') return succeed('https://github.com/example/remi.git');
   if (command === 'gh') return succeed(JSON.stringify({ artifacts: [] }));
   if (command === 'git' && args[0] === 'archive') {
@@ -128,6 +131,8 @@ function fixture(t) {
   const log = join(root, 'commands.jsonl');
   mkdirSync(dirname(script), { recursive: true });
   mkdirSync(join(source, 'deploy/docker'), { recursive: true });
+  mkdirSync(join(source, 'packages/platform-updater/src'), { recursive: true });
+  copyFileSync(join(repository, 'packages/platform-updater/src/data-schema-inputs.json'), join(source, 'packages/platform-updater/src/data-schema-inputs.json'));
   writeFileSync(script, scriptSource);
   copyFileSync(join(repository, 'scripts/ci-images.mjs'), join(source, 'scripts/ci-images.mjs'));
   writeFileSync(join(source, 'package.json'), '{"version":"0.2.60"}\n');
@@ -612,6 +617,54 @@ test('explicit host rollback restores the verified matching backup', (t) => {
   const marker = JSON.parse(readFileSync(join(journal.controlPlaneBackupDir, 'complete.json'), 'utf8'));
   assert.ok(marker.files['control-plane.dump'].size > 0);
   assert.ok(readFileSync(join(journal.controlPlaneBackupDir, 'control-plane.dump'), 'utf8').includes(NEW_REF), 'overlay comes from rollback start, not the old business backup');
+});
+
+test('automatic profile update fingerprints exact source bytes and rolls back code without restoring historical data', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const stageArgs = [...hostStageArgs('pop_safe_update'), '--data-schema', SCHEMA];
+  succeeds(f.run('stable', 'host-stage', { args: stageArgs, commit: NEW_REF }));
+  const update = f.run('stable', 'host-activate', { args: ['--operation-id', 'pop_safe_update'], commit: NEW_REF });
+  succeeds(update);
+  const launch = dockerCalls(update).find(call => isAction('up')(call) && call.selectedRef === NEW_REF);
+  assert.deepEqual(launch.args.slice(-3), ['--no-deps', 'api', 'web']);
+  assert.equal(f.readProfile('active.json').dataSchema, SCHEMA);
+  succeeds(f.run('stable', 'host-finalize', { args: ['--operation-id', 'pop_safe_update'] }));
+  succeeds(f.run('stable', 'host-rollback-stage', { args: ['--operation-id', 'pop_safe_rollback', '--ref', OLD_REF, '--preserve-data', 'true'], commit: NEW_REF }));
+  const rollback = f.run('stable', 'host-rollback-activate', { args: ['--operation-id', 'pop_safe_rollback'], commit: NEW_REF });
+  succeeds(rollback);
+  assert.equal(f.readProfile('active.json').ref, OLD_REF);
+  assert.ok(!dockerCalls(rollback).some(call => call.args.includes('pg_restore') || call.args.includes('dropdb') || call.args.some(arg => String(arg).includes('/snapshot/api-home.tar'))));
+  assert.ok(dockerCalls(rollback).some(call => call.args.includes('pg_dump')), 'a fresh rescue backup is still required');
+});
+
+test('automatic profile updates reject a changed schema before activating a candidate', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const stage = f.run('stable', 'host-stage', { args: [...hostStageArgs('pop_schema_changed'), '--data-schema', SCHEMA], commit: NEW_REF, fail: 'schema_changed' });
+  assert.notEqual(stage.status, 0);
+  assert.match(stage.stderr, /schema.*incompatible/iu);
+  assert.equal(f.readProfile('active.json').ref, OLD_REF);
+  assert.ok(!dockerCalls(stage).some(isAction('stop')));
+});
+
+test('automatic host crash recovery restores code while retaining current database and home data', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const operationId = 'pop_safe_crash';
+  succeeds(f.run('stable', 'host-stage', { args: [...hostStageArgs(operationId), '--data-schema', SCHEMA], commit: NEW_REF }));
+  const interrupted = f.run('stable', 'host-activate', { args: ['--operation-id', operationId], commit: NEW_REF, fail: 'crash_activate' });
+  assert.equal(interrupted.status, 91);
+  const recovered = f.run('stable', 'host-recover', { commit: NEW_REF });
+  succeeds(recovered);
+  assert.equal(f.readProfile('active.json').ref, OLD_REF);
+  const journal = JSON.parse(readFileSync(join(f.profileRoot(), 'host-operations', operationId, 'operation.json'), 'utf8'));
+  assert.equal(journal.status, 'rolled_back');
+  assert.ok(existsSync(join(f.profileRoot(), 'host-control', 'write-fence.json')), 'the fence remains until the durable result is acknowledged');
+  assert.ok(!dockerCalls(recovered).some(call => call.args.includes('pg_restore') || call.args.includes('dropdb') || call.args.some(arg => String(arg).includes('/snapshot/api-home.tar'))));
+  const launch = dockerCalls(recovered).find(isAction('up'));
+  assert.ok(launch.args.includes('--no-deps'));
+  assert.deepEqual(launch.args.slice(-2), ['api', 'web']);
 });
 
 test('rollback refuses a backup whose content no longer matches its completion manifest', (t) => {

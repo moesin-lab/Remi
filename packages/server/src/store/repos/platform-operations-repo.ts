@@ -9,6 +9,7 @@ import type {
   MultiremiPlatformOperationStatus,
   MultiremiPlatformRelease,
   MultiremiPlatformService,
+  MultiremiPlatformPreflight,
   ReportPlatformOperationInput,
 } from "@multiremi/contracts/types.js";
 import {
@@ -32,6 +33,7 @@ const CANCELLABLE_STATUSES = new Set<MultiremiPlatformOperationStatus>([
   "preparing",
   "pulling",
   "draining",
+  "backing_up",
 ]);
 
 export function isTerminalPlatformOperationStatus(status: MultiremiPlatformOperationStatus): boolean {
@@ -66,6 +68,9 @@ export interface PlatformOperationReceipt {
 }
 
 export interface PlatformStateRecord {
+  releaseFeedUrl: string | null;
+  defaultReleaseFeedUrl: string | null;
+  preflight: MultiremiPlatformPreflight | null;
   driver: MultiremiPlatformDeploymentDriver;
   currentRelease: MultiremiPlatformRelease | null;
   latestRelease: MultiremiPlatformRelease | null;
@@ -81,6 +86,7 @@ export interface PlatformStateRecord {
 }
 
 export interface PlatformAutoUpdateSettingsInput {
+  releaseFeedUrl?: string | null;
   enabled: boolean;
   time: string;
   timezone: string;
@@ -117,6 +123,12 @@ export class PlatformOperationsRepo {
        WHERE id = 'platform'`,
       [input.enabled ? 1 : 0, input.time, input.timezone, nextCheckAt, now],
     );
+    if (input.releaseFeedUrl !== undefined) {
+      this.db.run(
+        "UPDATE multiremi_platform_state SET release_feed_url = ?, latest_release = NULL, updater_preflight = NULL WHERE id = 'platform'",
+        [input.releaseFeedUrl],
+      );
+    }
     return this.getState();
   }
 
@@ -166,6 +178,9 @@ export class PlatformOperationsRepo {
   }
 
   heartbeat(input: {
+    defaultReleaseFeedUrl?: string | null;
+    releaseFeedUrl?: string | null;
+    preflight?: MultiremiPlatformPreflight | null;
     driver: MultiremiPlatformDeploymentDriver;
     currentRelease?: MultiremiPlatformRelease | null;
     latestRelease?: MultiremiPlatformRelease | null;
@@ -175,6 +190,8 @@ export class PlatformOperationsRepo {
     this.ensureState();
     const current = this.getState();
     const now = nowIso();
+    // Ignore results fetched from a source that changed while the request was in flight.
+    const sourceMatches = input.releaseFeedUrl === undefined || input.releaseFeedUrl === current.releaseFeedUrl;
     this.db.run(
       `UPDATE multiremi_platform_state
        SET driver = ?, current_release = ?, latest_release = ?, recent_releases = ?, services = ?,
@@ -183,13 +200,19 @@ export class PlatformOperationsRepo {
       [
         input.driver,
         toJson(input.currentRelease === undefined ? current.currentRelease : input.currentRelease),
-        toJson(input.latestRelease === undefined ? current.latestRelease : input.latestRelease),
+        toJson(!sourceMatches || input.latestRelease === undefined ? current.latestRelease : input.latestRelease),
         toJson(input.recentReleases ?? current.recentReleases),
         toJson(input.services ?? current.services),
         now,
         now,
       ],
     );
+    if (sourceMatches && input.preflight !== undefined) {
+      this.db.run("UPDATE multiremi_platform_state SET updater_preflight = ? WHERE id = 'platform'", [toJson(input.preflight)]);
+    }
+    if (input.defaultReleaseFeedUrl !== undefined) {
+      this.db.run("UPDATE multiremi_platform_state SET default_release_feed_url = ? WHERE id = 'platform'", [input.defaultReleaseFeedUrl]);
+    }
     return this.getState();
   }
 
@@ -243,7 +266,7 @@ export class PlatformOperationsRepo {
     return this.get(id)!;
   }
 
-  private findByRequestId(requestedBy: string, requestId: string): MultiremiPlatformOperation | null {
+  findByRequestId(requestedBy: string, requestId: string): MultiremiPlatformOperation | null {
     const row = this.db.query(
       "SELECT * FROM multiremi_platform_operations WHERE requested_by = ? AND idempotency_key = ? LIMIT 1",
     ).get(requestedBy, requestId) as Row | null;
@@ -311,10 +334,12 @@ export class PlatformOperationsRepo {
       if (result.changes > 0) return this.get(id)!;
       // Lost the race to the updater's claim — fall through to the flag path.
     }
-    this.db.run(
-      `UPDATE multiremi_platform_operations SET cancel_requested = 1, updated_at = ? WHERE id = ?`,
+    const flagged = this.db.run(
+      `UPDATE multiremi_platform_operations SET cancel_requested = 1, updated_at = ? WHERE id = ?
+       AND status IN ('preparing', 'pulling', 'draining', 'backing_up')`,
       [now, id],
     );
+    if (flagged.changes === 0) throw new PlatformOperationNotCancellableError("operation has entered the switch phase");
     return this.get(id)!;
   }
 
@@ -328,11 +353,11 @@ export class PlatformOperationsRepo {
     if (TERMINAL_STATUSES.has(current.status)) return current;
     const now = nowIso();
     const terminal = TERMINAL_STATUSES.has(input.status);
-    this.db.run(
+    const updated = this.db.run(
       `UPDATE multiremi_platform_operations
        SET status = ?, progress = ?, output = ?, error = ?, previous_release = ?, result_release = ?,
            active_slot = ?, updated_at = ?, finished_at = ?
-       WHERE id = ?`,
+       WHERE id = ?${input.status === "switching" || input.status === "restarting" ? " AND cancel_requested = 0" : ""}`,
       [
         input.status,
         toJson(input.progress ?? current.progress),
@@ -346,6 +371,7 @@ export class PlatformOperationsRepo {
         id,
       ],
     );
+    if (updated.changes === 0) throw new PlatformOperationConflictError("operation was cancelled before switching");
     if (["switching", "restarting", "verifying", "rolling_back"].includes(input.status)) {
       // Older API releases only understand lease expiry. Preserve a fence
       // they understand when this control-plane state survives DB rollback.
@@ -449,6 +475,9 @@ export class PlatformOperationsRepo {
 
 function toState(row: Row): PlatformStateRecord {
   return {
+    releaseFeedUrl: row.release_feed_url ? String(row.release_feed_url) : null,
+    defaultReleaseFeedUrl: row.default_release_feed_url ? String(row.default_release_feed_url) : null,
+    preflight: parseJson<MultiremiPlatformPreflight | null>(row.updater_preflight, null),
     driver: String(row.driver ?? "systemd_release") as MultiremiPlatformDeploymentDriver,
     currentRelease: parseNullableRelease(row.current_release),
     latestRelease: parseNullableRelease(row.latest_release),

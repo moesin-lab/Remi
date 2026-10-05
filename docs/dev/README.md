@@ -46,6 +46,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 改 IM 平台导航或管理页面 | [IM 平台管理](im-platforms.md) | 平台目录、机器人/采集连接、能力页面、工作区权限和旧地址迁移 |
 | 改飞书消息接入 | [消息接入](../feishu-message-ingestion.md) | Connection、Source、消息处理与凭据 |
 | 配置部署或排障 | [部署](../../deploy/README.md)、[本机 stable/dev](../deploy/local-profiles.md)、[daemon 环境](../deploy/66-8-remi-environment.md) | 服务组成、配置和启动条件 |
+| 改版本管理或安全更新 | [更新部署契约](../../deploy/README.md#host-updater)、[Drain 与 Outbox](../design/mul-74-platform-drain-and-daemon-outbox.md) | Web/CLI 更新源、跨平台驱动、备份、兼容检查、切换恢复 |
 | 更新这些开发依据 | [维护方法](context-maintenance.md) | 归属、源码核对和可执行检查 |
 
 文档中的源码链接提供定位依据，测试链接提供验证入口。它们不等于本次测试已通过；性能基线是否已采集以[性能页](performance.md)为准。

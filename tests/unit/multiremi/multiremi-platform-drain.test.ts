@@ -89,6 +89,9 @@ describe("platform maintenance store", () => {
     expect(status).toMatchObject({ ackedDaemons: 1, activeTasks: 1, ready: false });
 
     store.completeTask(task.id, { output: "done" });
+    // Completion can arrive before provider teardown / outbox flush finishes.
+    expect(store.getPlatformDrainStatus().ready).toBe(false);
+    store.recordRuntimeDrainAck(runtime.id, status.maintenance.generation, 0);
     expect(store.getPlatformDrainStatus()).toMatchObject({ ackedDaemons: 1, activeTasks: 0, ready: true });
 
     // A stale ack from a previous generation does not count after re-drain.
@@ -247,8 +250,11 @@ describe("operator cancel", () => {
     expect((await response.json()).operation).toMatchObject({ status: "preparing", cancelRequested: true });
 
     // From the switch phase on, cancellation is rejected.
-    store.reportPlatformOperation(claimed.id, { status: "switching" });
-    response = await app.request(`/api/multiremi/platform/operations/${claimed.id}/cancel`, {
+    expect(() => store.reportPlatformOperation(claimed.id, { status: "switching" })).toThrow();
+    store.reportPlatformOperation(claimed.id, { status: "cancelled" });
+    const switching = store.createPlatformOperation({ kind: "restart" }, "tester");
+    store.reportPlatformOperation(switching.id, { status: "switching" });
+    response = await app.request(`/api/multiremi/platform/operations/${switching.id}/cancel`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer master-secret" },
     });

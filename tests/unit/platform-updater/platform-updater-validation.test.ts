@@ -1,3 +1,4 @@
+import { READY_GATE } from "./helpers.js";
 import { describe, expect, it } from "bun:test";
 import type { MultiremiPlatformOperation } from "@multiremi/contracts";
 import { DockerComposeDriver } from "@remi-platform/updater/compose-driver.js";
@@ -26,7 +27,7 @@ describe("platform updater release validation", () => {
       ref: "release-ref",
       apiImage: "ghcr.io/example/remi-api:latest",
       webImage: `ghcr.io/example/remi-web@sha256:${"a".repeat(64)}`,
-    }), async () => {})).rejects.toThrow("immutable GHCR digest");
+    }), async () => {}, READY_GATE)).rejects.toThrow("immutable registry digest");
   });
 
   it("rejects non-HTTPS systemd release archives", async () => {
@@ -44,7 +45,7 @@ describe("platform updater release validation", () => {
       ref: "release-ref",
       sourceUrl: "http://example.com/release.tar.gz",
       sourceSha256: "a".repeat(64),
-    }), async () => {})).rejects.toThrow("must use HTTPS");
+    }), async () => {}, READY_GATE)).rejects.toThrow("must use HTTPS");
   });
 
   it("rejects an insecure release feed URL before fetching", async () => {

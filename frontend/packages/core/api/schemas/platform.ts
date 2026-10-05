@@ -74,6 +74,15 @@ export const PlatformAutoUpdateScheduleSchema = z.object({
 }).loose();
 
 export const PlatformStatusSchema = z.object({
+  releaseFeedUrl: z.string().nullable().optional(),
+  defaultReleaseFeedUrl: z.string().nullable().optional(),
+  preflight: z.object({
+    ready: z.boolean(),
+    checkedAt: z.string(),
+    platform: z.string(),
+    arch: z.string(),
+    checks: z.array(z.object({ code: z.string(), ok: z.boolean(), message: z.string() })),
+  }).nullable().optional(),
   canManage: z.boolean().default(false),
   driver: z.string().default("systemd_release"),
   currentRelease: PlatformReleaseSchema.nullable().default(null),
@@ -110,6 +119,7 @@ export const PlatformOperationResponseSchema = z.object({
 
 export const PlatformSettingsResponseSchema = z.object({
   state: z.object({
+    releaseFeedUrl: z.string().nullable().optional(),
     autoUpdateStable: z.boolean().default(false),
     autoUpdate: PlatformAutoUpdateScheduleSchema,
   }).loose(),

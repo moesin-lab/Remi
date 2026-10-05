@@ -18,7 +18,7 @@ The pieces have deliberately narrow responsibilities:
 | daemon | Acknowledge drain, stop new task claims and durably queue task reports | Never stops or replaces the control plane |
 | `systemd_release` | Verify archive, atomically switch source symlink, restart systemd units | Restores code symlink only; use only with backward-compatible DB migrations or an external matching DB restore plan |
 | `docker_compose` | Pull immutable image digests and replace owned containers | Restores image/env selection only; it is not a database rollback |
-| `local_profile` | Fetch fixed commit, validate release artifact, build, create verified data/config backup, switch and health-check | Restores PostgreSQL, API home, configuration and old images from the same backup |
+| `local_profile` | Fetch fixed commit, validate source/schema, create verified data/config backup, switch and health-check | Automatic recovery preserves current data and restores application images/configuration; manual disaster recovery can restore a complete snapshot |
 
 `currentRelease`, `latestRelease`, `services` and `updaterStatus` are heartbeat
 projections, not release discovery performed by the API. An installation with
@@ -67,11 +67,81 @@ tag pair fails closed.
 
 ## Host updater
 
-1. Install the repository at a stable updater path.
+1. Install the repository at a stable updater path, outside the releases it switches.
 2. Create `/etc/multiremi/platform-updater.env` from the systemd example with
    mode `0600`. Use a token distinct from `MULTIREMI_TOKEN`.
 3. Install and enable `deploy/systemd/remi-platform-updater.service`.
 4. Add the same `MULTIREMI_PLATFORM_UPDATER_TOKEN` to the API secret env file.
+
+For Windows, macOS and Linux, the default `docker_compose` driver uses Docker
+Compose v2 with Linux containers. Run `bun --env-file=<absolute-updater.env>
+run apps/platform-updater/main.ts` using Bun 1.3.14. Use a user-owned directory
+for `MULTIREMI_PLATFORM_STATE_DIR` (default `~/.remi/platform-updater`), absolute
+Compose/env paths, and `MULTIREMI_PLATFORM_COMPOSE_PROJECT` when the stack was
+started with `-p`. Keep one updater and one state directory per deployment;
+the local PID lock prevents duplicate pollers sharing that directory. A Windows
+Task Scheduler job or macOS launchd job can supervise this same command.
+
+The updater switches **API and Web**, preserving database containers,
+volumes, daemons and the SSH control plane. The full Linux SSH Mesh example
+mounts `/etc/ssh`; use an API/Web Compose stack without that Linux-only sidecar
+on Windows/macOS. Released API/Web images target `linux/amd64` and `linux/arm64`.
+The updater tests run in the release-check matrix on Windows, macOS and Linux;
+adding that matrix does not itself constitute a completed CI run.
+Split application services such as `api-runtime` remain configurable through
+`MULTIREMI_PLATFORM_CORE_SERVICES`. Protected names (`ssh-mesh-control-plane`,
+`daemon`, `postgres`, `openviking`) are excluded even from an explicit list.
+
+Open Web **Settings → System → Version & services** (`?tab=platform`) with the
+local workspace owner/admin account. It exposes update checks, blocking reasons,
+update/restart/rollback, cancellation before switching, and the HTTPS release
+feed address. The saved address overrides `MULTIREMI_PLATFORM_RELEASE_FEED_URL`;
+resetting it to `null` uses the host default. Changing it clears prior discovery
+and preflight results. An unreachable feed does not stop the updater heartbeat.
+Settings, check results and operations are stored on the API, not in the browser.
+
+Before first use, save the actual installed release manifest as
+`<stateDir>/current-release.json` for Compose, or `.platform-release.json` inside
+the current systemd release. Both current and target need a `dataSchema`
+fingerprint from `node scripts/platform-data-schema.mjs <release-source-root>`.
+The release workflow publishes this value. The updater compares both metadata
+and actual API migration source plus its data-transform/storage helpers (listed
+in `packages/platform-updater/src/data-schema-inputs.json`). Changes to migration
+dependencies must update that list too. Unknown or changed fingerprints block automatic
+updates and rollback: perform and verify that migration in a maintenance window
+before registering the new current release. Do not copy a target fingerprint
+onto an older release to bypass the check.
+
+### Required backups
+
+Set `MULTIREMI_PLATFORM_BACKUP_CONFIG` to an absolute, host-owned JSON file
+following [`platform-backup.example.json`](platform-backup.example.json).
+It specifies a consistent database dump command, a restore verification command,
+all persistent state/configuration paths, and a backup directory outside them.
+Commands are argument arrays; they are never accepted from Web or a release feed.
+For PostgreSQL, [`verify-platform-backup.ts`](../scripts/verify-platform-backup.ts)
+restores the dump to a uniquely named temporary database, verifies the restore
+completed, then drops only that database. Its account needs create/drop-database
+permission; missing permission blocks the update. It never restores the live DB.
+
+Windows Docker named volumes can be included through `archives`: each entry has
+a unique `name`, `dumpCommand` and `verifyCommand`. For example run an existing
+pinned utility image with `--rm --network none --read-only --mount
+type=volume,src=<api-home>,dst=/backup,readonly --entrypoint tar <image> -C /backup
+-cf - .`; validate its stdin archive with `docker run --rm -i --network none
+--entrypoint tar <image> -tf -`. Include every persistent API volume and secret
+file; the updater cannot infer application-specific external storage. Bind mounts
+use absolute `dataPaths`. Symlinks require explicitly configured resolved paths.
+
+Backups stream binary data to restrictive files, validate database/volume
+archives, copy persistent files, fsync and recheck SHA-256/size, and only then
+write `complete.json`. A failed backup never reaches service switching. A backup
+is retained for manual disaster recovery; the updater never restores an old
+database automatically and never deletes deployment data volumes.
+
+On startup, committed recovery journals are handled before any control-API
+request, so a failed API image cannot prevent recovery of the old program.
+Prepared journals do not restart services; verified journals only replay results.
 
 The transitional `systemd_release` driver builds a verified release archive in
 a new directory, atomically switches the `current` symlink, restarts API/Web,
@@ -108,7 +178,11 @@ The source release manifest is accepted only with SemVer, a full 40-hex commit,
 an HTTPS URL without credentials, query or fragment, and a SHA-256. Host staging checks
 free space and host/Docker architecture, downloads and hashes the CI-produced
 archive, fetches that exact commit from `origin`, builds candidate images, then
-restores the live configuration. Switching begins only after drain succeeds.
+restores the live configuration. Preflight checks capacity, current images and
+the running API's migration fingerprint. Older profile metadata derives its
+fingerprint from the recorded immutable commit; unavailable source blocks updates.
+Staging compares the current and fetched target migration sources against the
+manifest's `dataSchema`. Switching begins only after drain succeeds and is rechecked.
 
 The browser/CLI creates the operation inside the API container; the host polls
 the published API port with the API and independent updater credentials. It
@@ -120,15 +194,14 @@ Each switch writes an atomic journal under
 prevents concurrent mutation. A v2 backup completion manifest hashes the
 PostgreSQL dump, API-home archive and matching configuration and records the
 recovery command. If the executor dies after writers stop, its next scheduled
-start runs recovery before heartbeat: pre-migration interruptions restart the
-old release; later interruptions restore the matching database, API home,
-configuration and images. Database restoration recreates the database before a
-transactional restore, so tables introduced by the failed version cannot remain.
-Explicit rollback first saves a rescue backup and preserves the current control
-plane separately from the older business snapshot. If target restoration fails,
-the host attempts to restore that rescue backup and otherwise stays fenced for
-recovery. Actual API and Web image IDs and container health are checked together.
-A code-only switch is never reported as database rollback.
+start runs recovery before heartbeat. Automatic updates require identical data
+schemas; recovery and Web/CLI rollback restore application code/configuration
+while retaining the current PostgreSQL and API-home data. Rollback still takes
+a fresh rescue backup, verifies the target schema and checks both images/health.
+The host stays fenced if recovery fails. The separate manual host rollback
+commands retain full snapshot restoration for disaster recovery; omit
+`--preserve-data true` only when intentionally restoring that historical data.
+Legacy operation journals keep their original snapshot recovery semantics.
 
 The host retains request envelopes and terminal receipts outside the database
 under `host-operation-receipts/`. Before any new claim it replays receipts through
@@ -557,7 +630,7 @@ rollback below:
   import json,sys
   from datetime import datetime,timedelta,timezone
   terminal = {'succeeded', 'failed', 'cancelled', 'rolled_back'}
-  non_terminal = {'queued', 'preparing', 'pulling', 'draining', 'switching', 'restarting', 'verifying', 'rolling_back'}
+  non_terminal = {'queued', 'preparing', 'pulling', 'draining', 'backing_up', 'switching', 'restarting', 'verifying', 'rolling_back'}
   operations = json.load(sys.stdin)['operations']
   if not isinstance(operations, list):
       sys.exit('STOP: invalid operations response')
@@ -742,7 +815,7 @@ Compose files (steps 2, 3, 4, 5 and 7).
      the `api` container's `/api/daemon/*` counters fall towards zero (residual
      counts are WebSockets established before the reload, which age out).
 7. **Updater list.** Set
-   `MULTIREMI_PLATFORM_CORE_SERVICES=api,web,ssh-mesh-control-plane,api-runtime`,
+   `MULTIREMI_PLATFORM_CORE_SERVICES=api,web,api-runtime`,
    `MULTIREMI_PLATFORM_EXTRA_HEALTH_URLS=http://127.0.0.1:16121/readyz`, and
    `COMPOSE_PROFILES=split` in the updater env file. `COMPOSE_PROFILES=split` is
    explicit rather than conditional: it is what makes the updater's own `pull`
@@ -1023,8 +1096,8 @@ a longer window.
 
 ## Drain-protected updates (MUL-74)
 
-Update and rollback operations drain the platform before touching containers
-or services; `check_updates` and `restart` do not drain.
+Update, rollback and restart operations require preflight and drain the platform
+before touching running services. `check_updates` only inspects readiness.
 
 Sequence: the updater pulls/stages the release first, then calls
 `POST /api/platform-updater/drain/begin` and polls `drain/renew` (which also
@@ -1032,17 +1105,30 @@ renews the lease and returns aggregated progress). Daemons learn about the
 drain through their next heartbeat ack, stop claiming new tasks, keep running
 tasks and heartbeats alive, and report the acknowledged drain generation plus
 their active task count. Only when every online runtime acked the current
-generation AND the server counts zero in-flight tasks does the updater run the
-container/service switch. The drain is released on success, failure, failed
-health checks, automatic rollback, operator cancellation, and — as a safety
-net — whenever a terminal operation status is reported.
+generation AND the server and Runtime report zero in-flight/local tasks does the
+updater take a backup and prepare the switch. Positive local task counts from a
+disconnected Runtime also block the gate. A timer renews the drain during backup;
+the updater rechecks it immediately before the API commits the switch, which
+also rejects a concurrent cancellation. Preparing/pull/backup failures leave
+current services and their configuration untouched.
+
+A durable host journal records the previous release/configuration and verified
+backup before committing. After switching, readiness checks must pass before
+the result is recorded and scheduling resumes. If verification fails, the driver
+restores the old program release locally before reporting through the API. A
+failed rollback keeps the operation active and scheduling paused. Restarting the
+updater recovers the journal; a recorded successful result is reported again
+without restarting services. A pre-commit journal never triggers a restart.
 
 - The drain state lives in the database (`multiremi_platform_maintenance`),
   so an API restart mid-update does not lose it.
-- During preparation and draining, the lease has a TTL (default 120 s,
-  renewed every poll); an expired lease lets daemons resume claiming. Once
-  switching, restarting, verifying or rolling back begins, expiry and explicit
-  release cannot reopen the gate. Recovery must reach a terminal outcome.
+- The drain lease has a TTL (default 120 s, renewed every poll). If the
+  updater crashes **before switch commit**, it expires and scheduling resumes.
+  Once switching/restarting/verifying/rolling_back is committed, maintenance
+  stays pinned until verification/recovery and a terminal report. This prevents
+  new tasks entering a partially switched deployment. If recovery cannot complete,
+  inspect the operation error, journal and backup, repair/verify API and Web, and
+  then have the updater finish recovery; never force a release under live tasks.
 - The task wait has no deadline by default: `MULTIREMI_PLATFORM_DRAIN_TIMEOUT_MS=0`
   (or unset) waits until existing tasks finish or the operator cancels. New
   tasks remain queued throughout the wait. This does not disable the 120 s
@@ -1053,7 +1139,7 @@ net — whenever a terminal operation status is reported.
   executed, the operation fails, and scheduling resumes. There is no automatic
   force-update. An existing positive override is still honored after upgrading.
 - Operators can cancel an update from the 版本与服务 page until the switch
-  phase begins (`queued/preparing/pulling/draining`).
+  phase begins (`queued/preparing/pulling/draining/backing_up`).
 - Old daemons that do not report a drain ack keep the gate closed: upgrade or
   retire them first, cancel the operation, or configure a finite wait.
 

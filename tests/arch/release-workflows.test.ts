@@ -35,6 +35,16 @@ describe("release workflows", () => {
     expect(ci.jobs.build.steps.some((step: any) => step.name === "Backend test suite")).toBe(false);
   });
 
+
+  test("validates the updater on all host platforms and publishes both container architectures", () => {
+    const check = readWorkflow("release-build-check.yml");
+    expect(check.jobs["platform-updater"].strategy.matrix.os).toEqual(["ubuntu-latest", "windows-latest", "macos-latest"]);
+    const release = readWorkflow("platform-release.yml");
+    const builds = release.jobs.publish.steps.filter((step: any) => step.uses === "docker/build-push-action@v6");
+    expect(builds).toHaveLength(2);
+    for (const build of builds) expect(build.with.platforms).toBe("linux/amd64,linux/arm64");
+    expect(JSON.stringify(release)).toContain("dataSchema");
+  });
   test("publishes the platform automatically after the tag release", () => {
     const release = readWorkflow("release.yml");
     expect(release.on.push.tags).toContain("v*");

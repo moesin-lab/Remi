@@ -152,7 +152,7 @@ export class PlatformMaintenanceRepo {
   drainStatus(nowMs = Date.now()): MultiremiPlatformDrainStatus {
     const maintenance = this.get(nowMs);
     const runtimes = this.db.query(
-      "SELECT id, name, daemon_id, status, last_heartbeat_at, drain_ack_generation FROM multiremi_runtimes",
+      "SELECT id, name, daemon_id, status, last_heartbeat_at, drain_ack_generation, drain_reported_active_tasks FROM multiremi_runtimes",
     ).all() as Row[];
     const online = runtimes.filter((row) => {
       if (String(row.status ?? "") === "offline") return false;
@@ -173,7 +173,10 @@ export class PlatformMaintenanceRepo {
       `SELECT COUNT(*) AS n FROM multiremi_tasks
        WHERE status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')`,
     ).get() as { n?: number } | null;
-    const activeTasks = Number(activeRow?.n ?? 0);
+    // A provider can still be shutting down or flushing its outbox after the
+    // task row is terminal. Both the daemon and server must report zero.
+    const reportedActive = runtimes.reduce((sum, row) => sum + Math.max(0, Number(row.drain_reported_active_tasks ?? 0)), 0);
+    const activeTasks = Math.max(Number(activeRow?.n ?? 0), reportedActive);
     return {
       maintenance,
       onlineDaemons: online.length,

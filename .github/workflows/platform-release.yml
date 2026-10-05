@@ -69,6 +69,7 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.sha }}
 
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -129,7 +130,7 @@ jobs:
           context: .
           file: deploy/docker/Dockerfile.api
           build-args: MULTIREMI_VERSION=${{ inputs.tag }}
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ needs.validate.outputs.owner }}/remi-api:${{ inputs.tag }}
@@ -148,7 +149,7 @@ jobs:
         with:
           context: .
           file: deploy/docker/Dockerfile.web
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ needs.validate.outputs.owner }}/remi-web:${{ inputs.tag }}
@@ -196,6 +197,7 @@ jobs:
           SOURCE_SHA="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
           ASSET_BASE="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
           MANIFEST_URL="$ASSET_BASE/platform-release.json"
+          DATA_SCHEMA="$(node scripts/platform-data-schema.mjs)"
           jq -n \
             --arg version "$VERSION" \
             --arg ref "$SHA" \
@@ -206,7 +208,8 @@ jobs:
             --arg webImage "${REGISTRY}/${OWNER}/remi-web@${WEB_DIGEST}" \
             --arg sourceUrl "$ASSET_BASE/$ARCHIVE" \
             --arg sourceSha256 "$SOURCE_SHA" \
-            '{version:$version,ref:$ref,publishedAt:$publishedAt,releaseUrl:$releaseUrl,manifestUrl:$manifestUrl,apiImage:$apiImage,webImage:$webImage,sourceUrl:$sourceUrl,sourceSha256:$sourceSha256}' \
+            --arg dataSchema "$DATA_SCHEMA" \
+            '{version:$version,ref:$ref,publishedAt:$publishedAt,releaseUrl:$releaseUrl,manifestUrl:$manifestUrl,apiImage:$apiImage,webImage:$webImage,sourceUrl:$sourceUrl,sourceSha256:$sourceSha256,dataSchema:$dataSchema}' \
             > platform-release.json
 
       - name: Upload platform assets to the existing GitHub Release

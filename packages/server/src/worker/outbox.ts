@@ -444,7 +444,8 @@ export class MultiremiTaskReportOutbox {
     }
     if (Number.isFinite(nextWake)) {
       this.timer = setTimeout(() => { this.timer = null; this.ensurePump(""); }, Math.max(1, nextWake));
-      this.timer.unref?.();
+      // Bun on Windows may starve the last unreferenced retry timer. close() clears it.
+      if (process.platform !== "win32") this.timer.unref?.();
     }
   }
 

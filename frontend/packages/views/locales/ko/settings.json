@@ -457,7 +457,7 @@
     "update_now": "지금 업데이트",
     "restart": "서비스 재시작",
     "auto_update": "안정 버전 자동 설치",
-    "auto_update_hint": "호스트 Updater가 설정한 시간에 GitHub 정식 릴리스를 확인합니다.",
+    "auto_update_hint": "호스트 Updater가 매일 예약된 시간에 설정된 업데이트 소스를 확인합니다.",
     "auto_update_time": "매일 업데이트 시간",
     "auto_update_timezone": "시간대",
     "auto_update_browser_timezone_suffix": "(브라우저)",
@@ -510,7 +510,17 @@
     "confirm_rollback_title": "버전을 롤백할까요?",
     "confirm_rollback_desc": "{{version}}으로 전환하고 서비스를 재시작합니다.",
     "cancel": "취소",
-    "confirm": "확인"
+    "confirm": "확인",
+    "update_source": "업데이트 소스",
+    "update_source_url": "릴리스 피드 URL",
+    "update_source_hint": "HTTPS URL을 입력하세요. 비워 두면 호스트 기본값을 사용합니다. 변경 후 다시 확인해야 합니다.",
+    "source_save": "업데이트 소스 저장",
+    "source_reset": "기본 소스 복원",
+    "source_saved": "저장했습니다. 업데이트를 다시 확인하세요.",
+    "preflight_title": "업데이트 준비 확인",
+    "preflight_hint": "모든 에이전트 완료, 백업 및 데이터 호환성을 확인한 뒤 API와 Web을 전환합니다.",
+    "check_unknown": "업데이트가 확인되지 않았습니다. 업데이트를 확인하세요.",
+    "status_backing_up": "데이터베이스와 영구 파일 백업 및 검증 중"
   },
   "modelGateway": {
     "context_title": "1M 컨텍스트",

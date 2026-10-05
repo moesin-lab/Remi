@@ -6,11 +6,44 @@ summary: 工作区集中配置连接、选择 Runtime 成员，并通过版本�
 
 # 能力组与连接 Profile
 
-Runtime 页的统一配置入口管理两个对象。连接 Profile 保存 Claude/Codex 的服务地址、模型和鉴权；能力组选择执行引擎、一个 Profile（或不使用自定义连接）与 Runtime 成员。一个 Profile 可供多个组复用，一个 Runtime 可承载多个组。自动发现只登记引擎与机器状态，不创建能力组。
+侧栏「执行能力组」是独立配置入口（`/{workspaceSlug}/execution-groups`），支持新建、编辑、删除、用途说明、搜索与按引擎筛选。旧 Runtime 配置地址仍可访问同一页面。能力组选择执行引擎、一个连接 Profile（或不使用自定义连接）与 Runtime 成员；组内可以直接设置 Provider 地址、鉴权、默认模型与可用模型，无需先逐台配置机器。一个 Profile 可供多个组复用，一个 Runtime 可承载多个组。自动发现只登记引擎与机器状态，不创建能力组。
 
 [API](../../packages/server/src/api/routers/execution-config.ts)使用 `/api/execution-profiles` 与 `/api/execution-groups`，集合支持 GET/POST，单项支持 GET/PUT/DELETE。连接配置的 provider 只支持 `claude`、`codex`；组还支持 `antigravity`，但其 `profile_id` 必须为 null。组内成员必须同工作区并匹配 provider，`any` Runtime 可承载具体 provider。更新不能更改已有 Profile 或组的 provider。
 
 ## 配置流程
+
+可以直接创建含 Provider 连接的组，Web 和 CLI 使用相同的原子保存接口：
+
+```bash
+remi runtime group create --file group.json --json
+```
+
+```json
+{
+  "name": "团队开发",
+  "description": "开发与代码审查",
+  "provider": "codex",
+  "profile_id": null,
+  "runtime_ids": [],
+  "connection": {
+    "name": "团队网关",
+    "profile": {
+      "name": "team",
+      "base_url": "https://gateway.example/v1",
+      "model": "coding-model",
+      "models": ["coding-model", "fast-model"],
+      "auth_mode": "env",
+      "env_key": "REMI_CODEX_TEAM"
+    }
+  }
+}
+```
+
+`description` 最多 2000 字符；旧客户端省略时保留原说明，空字符串清除。`connection` 省略时只更新组本身；提供时继承组的执行引擎。`profile_id: null` 创建一个中央连接；非空则更新该工作区内的现有连接。连接、凭据版本和组成员在同一事务保存，任一步校验失败全部回滚。组内编辑共用连接会更新所有引用它的组，界面显示受影响的组数；要使用不同地址或模型，选择「配置新的 Provider」。无需更改其他组时，普通用途说明或成员编辑不会产生新的连接版本。
+
+组可先创建，再分配兼容的 Runtime。尚无机器或配置未确认时不能执行；机器就绪后，在云友设置中选择能力组。云友模型为「自动」时使用连接默认模型；指定模型须在该组可用目录中，显式配置 `models` 时受白名单限制。切换组时重新读取该组模型与思考能力，不能沿用另一组的目录。默认模型和模型选择随任务首次领取冻结，不改变运行中的任务。
+
+也可以先建立可复用连接，再由多个组引用：
 
 先检查当前工作区，再创建连接：
 
@@ -87,3 +120,5 @@ Profile 与组的写入要求人类工作区管理员身份；组修改还检查
 ## 验证入口
 
 配置与下发可从上述 CLI 的读取结果、Runtime 绑定状态及 daemon WebSocket 快照检查；`tests/integration/central-profile-daemon-sync.test.ts` 覆盖真实连接的配置更新、凭据轮换与过期确认拒绝。文档检查使用 `npm run docs:test` 与 `npm run docs:check`；这些检查不代表真实模型调用成功。
+
+`tests/unit/multiremi/execution-group-configuration.test.ts` 覆盖组内原子保存、模型约束、回滚、共享连接更新和说明兼容。`tests/integration/execution-group-daemon.test.ts` 通过真实 API、WebSocket 和 daemon 验证 Claude/Codex 的默认与指定模型、凭据和隔离 Home，外部模型使用测试实现。`tests/integration/smoke-execution-configuration.ts` 驱动真实浏览器、Next 和临时数据库，覆盖独立入口、组内连接、搜索、版本确认、云友分组与模型切换及移动端；Windows 通过 Node 浏览器宿主避免 Bun 的 Chromium 管道问题。CI 的 `execution-configuration` job 在 PR 和完整检查中运行这些回归，并上传截图与失败诊断。

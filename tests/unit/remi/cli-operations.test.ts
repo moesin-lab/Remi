@@ -125,6 +125,24 @@ describe("operations CLI contracts", () => {
     expect(bodies).toEqual([{ execution_group_id: "team-code" }, { execution_group_id: null }]);
   });
 
+  it("passes inline group provider configuration through the canonical file-based CLI command", async () => {
+    useCliEnv();
+    const spec = specById("runtime.group.create");
+    const directory = mkdtempSync(join(tmpdir(), "remi-cli-group-"));
+    tempDirectories.push(directory);
+    const file = join(directory, "group.json");
+    const input = { name: "Review", description: "Review services", provider: "codex", profile_id: null, runtime_ids: ["rt_a"], connection: { name: "Review provider", profile: { name: "review", model: "review-model", models: ["review-model", "fast-model"], base_url: "https://example.test/v1", env_key: "REMI_CODEX_REVIEW" } } };
+    writeFileSync(file, JSON.stringify(input));
+    globalThis.fetch = capabilityFetch(spec.id, async request => {
+      expect(request.method).toBe("POST");
+      expect(new URL(request.url).pathname).toBe("/api/execution-groups");
+      expect(await request.json()).toEqual({ ...input, workspace_id: "ws_1" });
+      return Response.json({ group: { id: "eg_review", profile_id: "ep_review" } });
+    });
+    const result = await capture(() => registryFor([spec]).execute(["runtime", "group", "create", "--file", file, "--json"]));
+    expect(JSON.parse(result.stdout).group.profile_id).toBe("ep_review");
+  });
+
   it("sets a Runtime Codex connection from a JSON file and clears it with JSON input", async () => {
     useCliEnv();
     const spec = specById("runtime.codex-profile.set");

@@ -90,6 +90,48 @@ jobs:
           path: ${{ runner.temp }}/im-smoke
           if-no-files-found: ignore
 
+  execution-configuration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Install dependencies from the public registry
+        run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+      # Keep configuration, credentials, model selection and real daemon
+      # dispatch covered on PRs too, where the full backend shards are skipped.
+      - name: Capability group contracts and daemon execution
+        run: >-
+          bun test
+          tests/unit/multiremi/execution-group-configuration.test.ts
+          tests/unit/multiremi/central-execution-profiles.test.ts
+          tests/unit/multiremi/central-profile-task-routing.test.ts
+          tests/unit/multiremi/execution-groups.test.ts
+          tests/unit/multiremi/runtime-execution-bindings.test.ts
+          tests/unit/multiremi/runtime-connection-models.test.ts
+          tests/unit/agent-execution-groups-api.test.ts
+          tests/unit/remi/cli-operations.test.ts
+          tests/integration/central-profile-daemon-sync.test.ts
+          tests/integration/execution-group-daemon.test.ts
+      - name: Install Chromium
+        run: bunx playwright-core install chromium --with-deps
+      - name: Capability group browser E2E
+        env:
+          EXECUTION_CONFIG_ARTIFACTS: ${{ runner.temp }}/execution-configuration
+        run: bun run tests/integration/smoke-execution-configuration.ts
+      - name: Upload capability configuration screenshots and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-configuration
+          path: ${{ runner.temp }}/execution-configuration
+          if-no-files-found: ignore
+
   platform-updater:
     strategy:
       matrix:

@@ -121,7 +121,7 @@ export class RuntimesEndpoints {
 
   async saveExecutionGroup(wsId: string, id: string | undefined, input: ExecutionGroupInput) {
     const raw = await this.http.fetch<unknown>(`/api/execution-groups${id ? `/${encodeURIComponent(id)}` : ""}?workspace_id=${encodeURIComponent(wsId)}`, { method: id ? "PUT" : "POST", body: JSON.stringify({ ...input, workspace_id: wsId }) });
-    return parseStrictResponse(raw, z.object({ group: ExecutionGroupSchema }), { endpoint: "SAVE /api/execution-groups" });
+    return parseStrictResponse<{ group: ExecutionGroupList["groups"][number] }>(raw, z.object({ group: ExecutionGroupSchema }), { endpoint: "SAVE /api/execution-groups" });
   }
 
   async deleteExecutionGroup(wsId: string, id: string) {

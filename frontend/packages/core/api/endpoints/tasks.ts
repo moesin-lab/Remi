@@ -6,12 +6,14 @@ import type {
   TaskPromptArtifact,
 } from "../../types";
 import type { HttpClient } from "../http";
-import { parseStrictResponse, parseWithFallback } from "../schema";
+import { ApiContractError, parseStrictResponse, parseWithFallback } from "../schema";
 import {
   EMPTY_TASK_STEER_LIST,
   TaskSteerListResponseSchema,
   TaskSteerResponseSchema,
   TaskTraceReadSchema,
+  TaskCommandResponseSchema,
+  IssueTaskListSchema,
   type TaskTraceRead,
   type TaskSteerListResponse,
   type TaskSteerResponse,
@@ -100,7 +102,9 @@ export class TasksEndpoints {
   }
 
   async listTasksByIssue(issueId: string): Promise<AgentTask[]> {
-    return this.http.fetch(`/api/issues/${issueId}/task-runs`);
+    const raw = await this.http.fetch<unknown>(`/api/issues/${issueId}/task-runs`);
+    // A malformed execution read must be shown as unavailable, never as "no runs".
+    return parseStrictResponse<AgentTask[]>(raw, IssueTaskListSchema, { endpoint: "GET /api/issues/:id/task-runs" });
   }
 
   async getIssueUsage(issueId: string): Promise<IssueUsageSummary> {
@@ -114,9 +118,12 @@ export class TasksEndpoints {
   }
 
   async rerunIssue(issueId: string, taskId?: string): Promise<AgentTask> {
-    return this.http.fetch(`/api/issues/${issueId}/rerun`, {
+    const raw = await this.http.fetch<unknown>(`/api/issues/${issueId}/rerun`, {
       method: "POST",
       body: JSON.stringify(taskId ? { task_id: taskId } : {}),
     });
+    const task = parseStrictResponse<AgentTask>(raw, TaskCommandResponseSchema, { endpoint: "POST /api/issues/:id/rerun" });
+    if (task.issue_id !== issueId || task.id === taskId) throw new ApiContractError("POST /api/issues/:id/rerun", "Retry did not identify a new run for this issue");
+    return task;
   }
 }

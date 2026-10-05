@@ -8,6 +8,8 @@ import enWorkbench from "../../locales/en/workbench.json";
 
 const TEST_RESOURCES = { en: { common: enCommon, workbench: enWorkbench } };
 
+vi.mock("./workbench-run-panel", () => ({ WorkbenchRunPanel: () => <div data-testid="run-panel" /> }));
+
 const listIssues = vi.hoisted(() => vi.fn());
 const getAgentTaskSnapshot = vi.hoisted(() => vi.fn());
 const navigationState = vi.hoisted(() => ({

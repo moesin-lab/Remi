@@ -147,6 +147,7 @@ function renderMain(
       active: null,
       select: vi.fn(),
       pending: current.sessionsPending ?? false,
+      error: false,
       fetching: false,
       refetch: vi.fn(),
     };

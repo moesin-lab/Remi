@@ -22,6 +22,28 @@ via the `awaiting_human` agent-task snapshot), `blocked`, and `in_progress`
 (`frontend/packages/core/issues/workbench.ts`). Call these the
 **workbench-visible statuses**.
 
+### Selected issue execution and recovery
+
+The selected issue has an [execution panel](../frontend/packages/views/workbench/components/workbench-run-panel.tsx)
+above its history. It shares the existing `issueKeys.tasks(issueId)` query and realtime
+invalidation with execution history; it does not add a task query for every list row.
+Active runs take precedence over the latest terminal run. Queued/dispatched means
+waiting to start; completed means ready for human review, not approval of the issue.
+Unknown or unavailable execution data is explicit, rather than an empty success state.
+
+When no active run exists, a failed or cancelled run exposes **Retry run** alongside
+**View run**. Retry uses `POST /api/issues/:id/rerun` with `task_id`, retaining that run's
+Agent, Session, workspace lease choice and instructions. The server checks Issue and
+Chat access, rejects conflicting overrides, and checks for an active Issue run inside
+the task creation transaction under the workspace lifecycle lock. Dependencies remain
+enforced. A retry starts a new run; prior tool actions are not undone. Failure keeps
+the selected Issue and its context visible; success immediately shows the new run.
+
+The same operation is available as `remi issue rerun <issue> --task-id <task>`.
+The [isolated browser acceptance harness](../tests/integration/smoke-interaction-recovery.ts)
+exercises creation receipts, failure recovery, live status and narrow viewports using
+a temporary workspace. Its worker lifecycle is simulated, not a real model invocation.
+
 ## The rule
 
 Answer the four questions in order. The first `yes` decides the route; nothing downstream

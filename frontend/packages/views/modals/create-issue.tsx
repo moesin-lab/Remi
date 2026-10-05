@@ -10,7 +10,6 @@ import {
   ArrowDown,
   ArrowUp,
   CalendarClock,
-  Check,
   ChevronRight,
   Maximize2,
   Minimize2,
@@ -21,7 +20,7 @@ import {
 } from "lucide-react";
 import { cn } from "@multiremi/ui/lib/utils";
 import { toast } from "sonner";
-import type { Issue, IssueStatus, IssuePriority, IssueAssigneeType } from "@multiremi/core/types";
+import type { CreatedIssue, Issue, IssueStatus, IssuePriority, IssueAssigneeType } from "@multiremi/core/types";
 import {
   DialogContent,
   DialogTitle,
@@ -37,7 +36,7 @@ import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@multi
 import { Button } from "@multiremi/ui/components/ui/button";
 import { Switch } from "@multiremi/ui/components/ui/switch";
 import { ContentEditor, type ContentEditorRef, TitleEditor, useFileDropZone, FileDropOverlay } from "../editor";
-import { StatusIcon, StatusPicker, PriorityPicker, AssigneePicker, StartDatePicker, DueDatePicker } from "../issues/components";
+import { StatusPicker, PriorityPicker, AssigneePicker, StartDatePicker, DueDatePicker } from "../issues/components";
 import { BacklogAgentHintContent } from "../issues/components/backlog-agent-hint-dialog";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multiremi/core/paths";
 import { useWorkspaceId } from "@multiremi/core/hooks";
@@ -59,6 +58,7 @@ import { FileUploadButton } from "@multiremi/ui/components/common/file-upload-bu
 import { PillButton } from "../common/pill-button";
 import { IssuePickerModal } from "./issue-picker-modal";
 import { useT } from "../i18n";
+import { IssueCreationReceipt } from "./issue-creation-receipt";
 
 // ---------------------------------------------------------------------------
 // ManualCreatePanel — manual-mode body of the create-issue dialog. Renders
@@ -111,6 +111,8 @@ export function ManualCreatePanel({
   const [status, setStatus] = useState<IssueStatus>((data?.status as IssueStatus) || draft.status);
   const [priority, setPriority] = useState<IssuePriority>(draft.priority);
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const [receipt, setReceipt] = useState<CreatedIssue | null>(null);
   const [assigneeType, setAssigneeType] = useState<IssueAssigneeType | undefined>(() => {
     if (data && "assignee_type" in data) {
       return (data.assignee_type as IssueAssigneeType | null) ?? undefined;
@@ -252,7 +254,8 @@ export function ManualCreatePanel({
   };
 
   const handleSubmit = async () => {
-    if (!title.trim() || submitting) return;
+    if (!title.trim() || submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       const issue = await createIssueMutation.mutateAsync({
@@ -317,37 +320,9 @@ export function ManualCreatePanel({
 
       if (shouldShowBacklogHint) {
         setBacklogHintIssueId(issue.id);
-      } else if (keepOpen) {
-        resetForNextIssue();
       } else {
-        onClose();
-      }
-
-      if (!shouldShowBacklogHint) {
-        toast.custom((toastId) => (
-          <div className="bg-popover text-popover-foreground border rounded-lg shadow-lg p-4 w-[360px]">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="flex items-center justify-center size-5 rounded-full bg-emerald-500/15 text-emerald-500">
-                <Check className="size-3" />
-              </div>
-              <span className="text-sm font-medium">{t(($) => $.create_issue.toast_created)}</span>
-            </div>
-            <div className="flex items-center gap-2 text-sm text-muted-foreground ml-7">
-              <StatusIcon status={issue.status} className="size-3.5 shrink-0" />
-              <span className="truncate">{issue.identifier} – {issue.title}</span>
-            </div>
-            <button
-              type="button"
-              className="ml-7 mt-2 text-sm text-primary hover:underline cursor-pointer"
-              onClick={() => {
-                router.push(p.issueDetail(issue.id));
-                toast.dismiss(toastId);
-              }}
-            >
-              {t(($) => $.create_issue.view_issue)}
-            </button>
-          </div>
-        ), { duration: 5000 });
+        setReceipt(issue);
+        resetForNextIssue();
       }
     } catch (err) {
       // Duplicate-issue is the only structured 409 the create endpoint
@@ -399,6 +374,7 @@ export function ManualCreatePanel({
           : t(($) => $.create_issue.toast_failed),
       );
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -441,6 +417,8 @@ export function ManualCreatePanel({
       ...(carryParentIdentifier ? { parent_issue_identifier: carryParentIdentifier } : {}),
     });
   };
+
+  if (receipt && !keepOpen && !backlogHintIssueId) return <IssueCreationReceipt issue={receipt} onClose={onClose} onCreateAnother={() => setReceipt(null)} />;
 
   return (
     <>
@@ -515,6 +493,8 @@ export function ManualCreatePanel({
                 </Tooltip>
               </div>
             </div>
+
+            {receipt && <IssueCreationReceipt issue={receipt} compact onClose={onClose} onCreateAnother={() => setReceipt(null)} />}
 
             {/* Title */}
             <div className="px-5 pb-2 shrink-0">

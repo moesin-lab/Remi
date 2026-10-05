@@ -12,6 +12,7 @@ export interface IssueSessionSelection {
   active: IssueSession | null;
   select: (sessionId: string) => void;
   pending: boolean;
+  error: boolean;
   fetching: boolean;
   refetch: () => void;
 }
@@ -64,6 +65,7 @@ export function useIssueSessionSelection(
     active,
     select,
     pending: sessionsQuery.isPending,
+    error: sessionsQuery.isError,
     fetching: sessionsQuery.isFetching,
     refetch: () => void sessionsQuery.refetch(),
   };

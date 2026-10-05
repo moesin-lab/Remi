@@ -41,7 +41,9 @@ export function ChatFab() {
     pendingChatTasksOptions(wsId, { enabled: afterFirstScreen }),
   );
 
-  if (isOpen) return null;
+  // The persisted open preference can differ from SSR's default. Wait for the
+  // existing client gate before rendering the minimized button on a reload.
+  if (!afterFirstScreen || isOpen) return null;
 
   const unreadSessionCount = sessions.filter((s) => s.has_unread).length;
   const isRunning = (pending?.tasks ?? []).length > 0;

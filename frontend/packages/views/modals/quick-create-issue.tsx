@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeftRight, Check, ChevronRight, Maximize2, Minimize2, X as XIcon } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { DialogTitle } from "@multiremi/ui/components/ui/dialog";
 import { Button } from "@multiremi/ui/components/ui/button";
 import { Switch } from "@multiremi/ui/components/ui/switch";
@@ -27,7 +26,7 @@ import {
 } from "@multiremi/core/runtimes";
 import { useFileUpload } from "@multiremi/core/hooks/use-file-upload";
 import { formatShortcut, modKey, enterKey } from "@multiremi/core/platform";
-import type { Agent, Squad } from "@multiremi/core/types";
+import type { Agent, CreatedIssue, Squad } from "@multiremi/core/types";
 import { ActorAvatar } from "../common/actor-avatar";
 import { PillButton } from "../common/pill-button";
 import { WorkLocationPicker } from "../runtimes/components/runtime-workspace-picker";
@@ -49,6 +48,7 @@ import {
 import { FileUploadButton } from "@multiremi/ui/components/common/file-upload-button";
 import { useT } from "../i18n";
 import { matchesPinyin } from "../editor/extensions/pinyin-match";
+import { IssueCreationReceipt } from "./issue-creation-receipt";
 
 type ActorSelection =
   | { type: "agent"; id: string }
@@ -254,13 +254,15 @@ export function AgentCreatePanel({
   );
   const versionBlocked = versionCheck.state !== "ok";
 
-  const initialPrompt = (data?.prompt as string) || promptDraft;
+  const [initialPrompt, setInitialPrompt] = useState(() => (data?.prompt as string) || promptDraft);
   // The editor is uncontrolled — we read the latest markdown via the ref at
   // submit/switch time. `hasContent` mirrors emptiness so the Create button
   // can disable correctly without a controlled-input rerender on every keystroke.
   const editorRef = useRef<ContentEditorRef>(null);
   const [hasContent, setHasContent] = useState(initialPrompt.trim().length > 0);
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const [receipt, setReceipt] = useState<CreatedIssue | null>(null);
   const [justSent, setJustSent] = useState(false);
   const [sentCount, setSentCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -278,20 +280,22 @@ export function AgentCreatePanel({
   });
 
   useEffect(() => {
+    if (receipt && !keepOpen) return;
     // Defer focus so it lands after the dialog's focus trap has settled —
     // otherwise the trap can bounce focus back to the first focusable header
     // button on the next tick.
     const id = requestAnimationFrame(() => editorRef.current?.focus());
     return () => cancelAnimationFrame(id);
-  }, []);
+  }, [receipt, keepOpen]);
 
   const submit = async () => {
     const md = editorRef.current?.getMarkdown()?.trim() ?? "";
-    if (!md || !actor || submitting || versionBlocked || uploading) return;
+    if (!md || !actor || submittingRef.current || versionBlocked || uploading) return;
+    submittingRef.current = true;
     setSubmitting(true);
     setError(null);
     try {
-      await api.quickCreateIssue({
+      const result = await api.quickCreateIssue({
         ...(actor.type === "agent"
           ? { agent_id: actor.id }
           : { squad_id: actor.id }),
@@ -303,20 +307,17 @@ export function AgentCreatePanel({
       setLastActor(actor.type, actor.id);
       clearPrompt();
       setLastMode("agent");
-      toast.success(t(($) => $.create_issue.agent.toast_sent), {
-        duration: 4000,
-      });
+      setInitialPrompt("");
+      setReceipt({ ...result.issue, task_id: result.task_id, dispatch_status: "dispatched" });
+      editorRef.current?.clearContent();
+      setHasContent(false);
       if (keepOpen) {
         // Stay open for continuous creation — clear the editor so the
         // user can immediately type the next prompt.
-        editorRef.current?.clearContent();
-        setHasContent(false);
         setSentCount((c) => c + 1);
         setJustSent(true);
         setTimeout(() => setJustSent(false), 1500);
         requestAnimationFrame(() => editorRef.current?.focus());
-      } else {
-        onClose();
       }
     } catch (e) {
       // Server returns 422 with { code, ... } for the structured rejection
@@ -357,6 +358,7 @@ export function AgentCreatePanel({
           : t(($) => $.create_issue.agent.error_unknown),
       );
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -403,6 +405,8 @@ export function AgentCreatePanel({
     switchToManual();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot fallback on resolved queries
   }, [agentsLoaded, runtimesLoaded, versionBlocked]);
+
+  if (receipt && !keepOpen) return <IssueCreationReceipt issue={receipt} intake onClose={onClose} onCreateAnother={() => setReceipt(null)} />;
 
   return (
     <>
@@ -451,6 +455,8 @@ export function AgentCreatePanel({
                 })}
           </div>
         )}
+
+        {receipt && <IssueCreationReceipt issue={receipt} intake compact onClose={onClose} onCreateAnother={() => setReceipt(null)} />}
 
         {/* Prompt — same rich editor Advanced uses, so paste/drop images,
             mentions, and formatting all work. The dropZone wrapper enables

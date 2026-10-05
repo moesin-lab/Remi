@@ -127,6 +127,39 @@ describe("PlatformTab upgrade lifecycle", () => {
     statusRef.current = platformStatus();
   });
 
+  it("saves a custom update URL and resets to the host default", async () => {
+    const user = userEvent.setup();
+    statusRef.current = platformStatus({ releaseFeedUrl: "https://old.example/feed", defaultReleaseFeedUrl: "https://default.example/feed" });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    const input = screen.getByLabelText("Release feed URL");
+    await user.clear(input);
+    await user.type(input, "https://mirror.example/releases.json");
+    await user.click(screen.getByRole("button", { name: "Save update source" }));
+    expect(settingsMutationRef.mutate).toHaveBeenCalledWith({ releaseFeedUrl: "https://mirror.example/releases.json" }, expect.any(Object));
+    await user.click(screen.getByRole("button", { name: "Restore default source" }));
+    expect(settingsMutationRef.mutate).toHaveBeenCalledWith({ releaseFeedUrl: null }, expect.any(Object));
+  });
+
+  it("blocks update and restart when preflight fails and exposes the reason", () => {
+    statusRef.current = platformStatus({
+      updateAvailable: true,
+      latestRelease: { version: "1.2.3", ref: "new", publishedAt: null, releaseUrl: null, manifestUrl: "https://example.com/manifest", apiImage: null, webImage: null },
+      preflight: { ready: false, checkedAt: new Date().toISOString(), platform: "win32", arch: "x64", checks: [{ code: "backup", ok: false, message: "Database backup is not configured" }] },
+    });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    expect(screen.getByText("Database backup is not configured")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: enSettings.platform.update_now })).toBeDisabled();
+    expect(screen.getByRole("button", { name: enSettings.platform.restart })).toBeDisabled();
+  });
+
+  it("does not claim up-to-date status before a successful check and disables source changes while busy", () => {
+    statusRef.current = platformStatus({ activeOperation: platformOperation({ status: "backing_up" }) });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    expect(screen.queryByText(enSettings.platform.up_to_date)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Release feed URL")).toBeDisabled();
+    expect(screen.getByText(enSettings.platform.status_backing_up)).toBeInTheDocument();
+  });
+
   it("renders daemon acknowledgements and active task drain progress", () => {
     statusRef.current = platformStatus({
       activeOperation: platformOperation({

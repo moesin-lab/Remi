@@ -2,6 +2,7 @@ import type {
   MultiremiPlatformMaintenance,
   MultiremiPlatformOperation,
   MultiremiPlatformRelease,
+  MultiremiPlatformPreflight,
   ReportPlatformOperationInput,
 } from "@multiremi/contracts";
 import type { PlatformInspection } from "./types.js";
@@ -33,14 +34,16 @@ export class PlatformUpdaterClient {
     private readonly updaterToken: string,
   ) {}
 
-  async heartbeat(inspection: PlatformInspection, latestRelease?: MultiremiPlatformRelease | null): Promise<void> {
-    await this.request("/api/platform-updater/heartbeat", {
+  async heartbeat(inspection: PlatformInspection, latestRelease?: MultiremiPlatformRelease | null, update?: { defaultReleaseFeedUrl?: string | null; releaseFeedUrl?: string | null; preflight?: MultiremiPlatformPreflight | null }): Promise<{ releaseFeedUrl: string | null }> {
+    const response = await this.request<{ state: { releaseFeedUrl: string | null } }>("/api/platform-updater/heartbeat", {
+      ...update,
       driver: inspection.driver,
       currentRelease: inspection.currentRelease,
       latestRelease,
       recentReleases: inspection.recentReleases,
       services: inspection.services,
     });
+    return response.state;
   }
 
   async claim(): Promise<MultiremiPlatformOperation | null> {

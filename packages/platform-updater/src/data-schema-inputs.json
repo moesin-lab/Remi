@@ -1,0 +1,9 @@
+[
+  "packages/server/src/store/migrations.ts",
+  "packages/server/src/store/daemon-routing.ts",
+  "packages/server/src/store/db/postgres.ts",
+  "packages/server/src/store/db/pg-worker.ts",
+  "packages/server/src/session-archive/retry-policy.ts",
+  "packages/contracts/src/attachments.ts",
+  "packages/shared/src/db/index.ts"
+]

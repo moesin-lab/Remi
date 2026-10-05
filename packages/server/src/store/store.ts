@@ -728,7 +728,7 @@ runMigrations(this.db);
     return this.platformOperations.setAutoUpdateStable(enabled);
   }
 
-  setPlatformAutoUpdateSettings(input: { enabled: boolean; time: string; timezone: string }, at?: Date) {
+  setPlatformAutoUpdateSettings(input: { enabled: boolean; time: string; timezone: string; releaseFeedUrl?: string | null }, at?: Date) {
     return this.platformOperations.setAutoUpdateSettings(input, at);
   }
 
@@ -741,6 +741,9 @@ runMigrations(this.db);
   }
 
   heartbeatPlatformUpdater(input: {
+    defaultReleaseFeedUrl?: string | null;
+    releaseFeedUrl?: string | null;
+    preflight?: import("@multiremi/contracts/types.js").MultiremiPlatformPreflight | null;
     driver: "systemd_release" | "docker_compose" | "local_profile";
     currentRelease?: MultiremiPlatformRelease | null;
     latestRelease?: MultiremiPlatformRelease | null;
@@ -755,6 +758,10 @@ runMigrations(this.db);
     requestedBy: string,
   ): MultiremiPlatformOperation {
     return this.platformOperations.create(input, requestedBy);
+  }
+
+  findPlatformOperationByRequestId(requestedBy: string, requestId: string) {
+    return this.platformOperations.findByRequestId(requestedBy, requestId);
   }
 
   getPlatformOperation(id: string): MultiremiPlatformOperation | null {

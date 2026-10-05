@@ -74,7 +74,9 @@ describe("platform lifecycle", () => {
     });
     const headers = { Authorization: "Bearer master-secret", "Content-Type": "application/json" };
     const body = JSON.stringify({ kind: "restart", requestId: "MUL-17-retry-01" });
+    store.heartbeatPlatformUpdater({ driver: "local_profile", preflight: readyPreflight() });
     const first = await app.request("/api/multiremi/platform/operations", { method: "POST", headers, body });
+    store.heartbeatPlatformUpdater({ driver: "local_profile", preflight: null });
     const second = await app.request("/api/multiremi/platform/operations", { method: "POST", headers, body });
     expect(first.status).toBe(202);
     expect(second.status).toBe(202);
@@ -101,6 +103,7 @@ describe("platform lifecycle", () => {
     const status = await app.request("/api/multiremi/platform/status", { headers: adminHeaders });
     expect(status.status).toBe(200);
     expect((await status.json()).canManage).toBe(true);
+    store.heartbeatPlatformUpdater({ driver: "docker_compose", preflight: readyPreflight() });
 
     const created = await app.request("/api/multiremi/platform/operations", {
       method: "POST",
@@ -144,6 +147,7 @@ describe("platform lifecycle", () => {
         driver: "docker_compose",
         currentRelease: release("0.2.42"),
         latestRelease: release("0.2.43"),
+        preflight: readyPreflight(),
       }),
     });
 
@@ -331,6 +335,10 @@ describe("platform lifecycle", () => {
     });
   });
 });
+
+function readyPreflight() {
+  return { ready: true, checkedAt: new Date().toISOString(), platform: "linux", arch: "x64", checks: [{ code: "backup", ok: true, message: "Ready" }] };
+}
 
 function release(version: string) {
   return {

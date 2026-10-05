@@ -457,7 +457,7 @@
     "update_now": "今すぐ更新",
     "restart": "サービスを再起動",
     "auto_update": "安定版を自動更新",
-    "auto_update_hint": "ホスト Updater が設定した時刻に GitHub の正式リリースを確認します。",
+    "auto_update_hint": "ホスト Updater が毎日設定した時刻に指定の更新元を確認します。",
     "auto_update_time": "毎日の更新時刻",
     "auto_update_timezone": "タイムゾーン",
     "auto_update_browser_timezone_suffix": "（ブラウザー）",
@@ -510,7 +510,17 @@
     "confirm_rollback_title": "バージョンを戻しますか？",
     "confirm_rollback_desc": "{{version}} に切り替えてサービスを再起動します。",
     "cancel": "キャンセル",
-    "confirm": "確認"
+    "confirm": "確認",
+    "update_source": "更新元",
+    "update_source_url": "リリースフィード URL",
+    "update_source_hint": "HTTPS URL を指定します。空欄はホストの既定値を使用します。変更後は再確認が必要です。",
+    "source_save": "更新元を保存",
+    "source_reset": "既定の更新元に戻す",
+    "source_saved": "更新元を保存しました。更新を再確認してください。",
+    "preflight_title": "更新前の確認",
+    "preflight_hint": "全エージェントの完了、バックアップ、データ互換性を確認してから API と Web を切り替えます。",
+    "check_unknown": "更新を検証できていません。更新を確認してください。",
+    "status_backing_up": "データベースと永続ファイルをバックアップして検証中"
   },
   "modelGateway": {
     "context_title": "1M コンテキスト",

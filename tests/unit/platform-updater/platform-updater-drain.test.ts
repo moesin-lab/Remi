@@ -1,3 +1,4 @@
+import { DATA_SCHEMA, READY_GATE, safetyCommand, testBackup } from "./helpers.js";
 // MUL-74: the drain gate between image pull and container switch.
 // The hard invariants: on timeout or cancel the switch NEVER runs, the env
 // file is restored, and the drain is released; the lease is re-acquired if
@@ -37,7 +38,7 @@ function operation(kind: "update" | "rollback" = "update"): MultiremiPlatformOpe
     driver: "docker_compose",
     targetVersion: "1.2.3",
     targetRef: "ref",
-    targetManifest: { version: "1.2.3", ref: "ref", apiImage: DIGEST, webImage: WEB_DIGEST },
+    targetManifest: { dataSchema: DATA_SCHEMA, version: "1.2.3", ref: "ref", apiImage: DIGEST, webImage: WEB_DIGEST },
     progress: {},
     requestedBy: "tester",
     output: null,
@@ -228,6 +229,7 @@ describe("DockerComposeDriver drain gating", () => {
     const stateDir = join(root, "state");
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, "current-release.json"), JSON.stringify({
+      dataSchema: DATA_SCHEMA,
       version: "1.2.2",
       ref: "previous-ref",
       publishedAt: new Date(0).toISOString(),
@@ -237,8 +239,10 @@ describe("DockerComposeDriver drain gating", () => {
     const commands: string[][] = [];
     let switches = 0;
     const runner: CommandRunner = {
-      async run(command, args) {
+      async run(command, args, runOptions) {
         commands.push([command, ...args]);
+        const safety = safetyCommand(command, args, runOptions);
+        if (safety) return safety;
         if (args.includes("up")) {
           switches += 1;
           if (options.failFirstSwitch && switches === 1) {
@@ -249,7 +253,8 @@ describe("DockerComposeDriver drain gating", () => {
       },
     };
     const driver = new DockerComposeDriver({
-      composeFile,
+      backup: testBackup(root),
+    composeFile,
       envFile,
       stateDir,
       apiHealthUrl: "http://127.0.0.1:1/readyz",
@@ -262,6 +267,7 @@ describe("DockerComposeDriver drain gating", () => {
     const { driver, commands, envFile } = driverBed();
     const originalEnv = readFileSync(envFile, "utf8");
     const gate: PlatformDrainGate = {
+      assertReady: async () => {},
       waitUntilDrained: async () => {
         throw new DrainTimeoutError(null, 10_000);
       },
@@ -279,6 +285,7 @@ describe("DockerComposeDriver drain gating", () => {
     const { driver, commands, envFile } = driverBed();
     const originalEnv = readFileSync(envFile, "utf8");
     const gate: PlatformDrainGate = {
+      assertReady: async () => {},
       waitUntilDrained: async () => {
         throw new DrainCancelledError();
       },
@@ -293,6 +300,7 @@ describe("DockerComposeDriver drain gating", () => {
     const { driver, commands } = driverBed();
     const order: string[] = [];
     const gate: PlatformDrainGate = {
+      assertReady: async () => {},
       waitUntilDrained: async () => {
         order.push("drain");
         // Nothing may have switched before the gate resolves.
@@ -333,8 +341,8 @@ describe("DockerComposeDriver drain gating", () => {
           expect(readFileSync(envFile, "utf8")).toBe(originalEnv);
         }
         reports.push(input);
-      })).rejects.toThrow("simulated switch failure");
-      expect(reports.map((report) => report.status)).toEqual(["pulling", "switching", "rolling_back"]);
+      }, READY_GATE)).rejects.toThrow("simulated switch failure");
+      expect(reports.map((report) => report.status)).toEqual(["pulling", "backing_up", "switching", "rolling_back"]);
     } finally {
       health.stop(true);
     }

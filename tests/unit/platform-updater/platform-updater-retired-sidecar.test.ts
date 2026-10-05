@@ -1,3 +1,4 @@
+import { DATA_SCHEMA, READY_GATE, safetyCommand, testBackup } from "./helpers.js";
 // MUL-205 retired the Feishu ingestion sidecar: lark-cli now runs inside the
 // API container, so the Compose file no longer declares that service. An
 // installation upgrading across that change still has the old container
@@ -17,7 +18,7 @@ const DIGEST = `ghcr.io/grassgod/remi-api@sha256:${"a".repeat(64)}`;
 const WEB_DIGEST = `ghcr.io/grassgod/remi-web@sha256:${"b".repeat(64)}`;
 const OLD_DIGEST = `ghcr.io/grassgod/remi-api@sha256:${"c".repeat(64)}`;
 const OLD_WEB_DIGEST = `ghcr.io/grassgod/remi-web@sha256:${"d".repeat(64)}`;
-const CORE_SERVICES: MultiremiPlatformServiceId[] = ["api", "web", "ssh-mesh-control-plane"];
+const CORE_SERVICES: MultiremiPlatformServiceId[] = ["api", "web"];
 const LEFTOVER_ID = "0f1e2d3c4b5a";
 
 let tempDirs: string[] = [];
@@ -34,7 +35,7 @@ function operation(kind: "update" | "restart" = "update"): MultiremiPlatformOper
     driver: "docker_compose",
     targetVersion: "1.2.3",
     targetRef: "ref",
-    targetManifest: { version: "1.2.3", ref: "ref", apiImage: DIGEST, webImage: WEB_DIGEST },
+    targetManifest: { dataSchema: DATA_SCHEMA, version: "1.2.3", ref: "ref", apiImage: DIGEST, webImage: WEB_DIGEST },
     progress: {},
     requestedBy: "tester",
     output: null,
@@ -70,7 +71,8 @@ function driverBed(options: { leftover: boolean; psRows?: Record<string, unknown
   const stateDir = join(root, "state");
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(join(stateDir, "current-release.json"), JSON.stringify({
-    version: "1.2.2",
+    dataSchema: DATA_SCHEMA,
+      version: "1.2.2",
     ref: "previous-ref",
     publishedAt: new Date(0).toISOString(),
     apiImage: OLD_DIGEST,
@@ -79,8 +81,10 @@ function driverBed(options: { leftover: boolean; psRows?: Record<string, unknown
 
   const commands: string[][] = [];
   const runner: CommandRunner = {
-    async run(command, args) {
+    async run(command, args, runOptions) {
       commands.push([command, ...args]);
+        const safety = safetyCommand(command, args, runOptions);
+        if (safety) return safety;
       const line = args.join(" ");
       if (line.startsWith("ps -aq --filter")) {
         return { exitCode: 0, stdout: options.leftover ? `${LEFTOVER_ID}\n` : "\n", stderr: "" };
@@ -99,6 +103,7 @@ function driverBed(options: { leftover: boolean; psRows?: Record<string, unknown
 
   const health = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ok") });
   const driver = new DockerComposeDriver({
+    backup: testBackup(root),
     composeFile,
     envFile,
     stateDir,
@@ -118,12 +123,12 @@ describe("Docker Compose driver: retired Feishu ingestion sidecar", () => {
   it("removes the leftover container before replacing the API container", async () => {
     const bed = driverBed({ leftover: true });
     try {
-      const release = await bed.driver.execute(operation(), async () => {});
+      const release = await bed.driver.execute(operation(), async () => {}, READY_GATE);
       expect(release?.version).toBe("1.2.3");
 
       const lines = bed.docker();
       const remove = lines.findIndex((line) => line === `docker rm --force ${LEFTOVER_ID}`);
-      const switchIndex = lines.findIndex((line) => line.includes(`up -d --no-deps ${CORE_SERVICES.join(" ")}`));
+      const switchIndex = lines.findIndex((line) => line.includes(`up -d --no-deps --pull never ${CORE_SERVICES.join(" ")}`));
       expect(remove).toBeGreaterThanOrEqual(0);
       // Docker refuses to replace a container whose namespace another running
       // container borrows, so this ordering is load-bearing, not cosmetic.
@@ -139,10 +144,10 @@ describe("Docker Compose driver: retired Feishu ingestion sidecar", () => {
   it("issues no removal on a host that never ran ingestion", async () => {
     const bed = driverBed({ leftover: false });
     try {
-      const release = await bed.driver.execute(operation(), async () => {});
+      const release = await bed.driver.execute(operation(), async () => {}, READY_GATE);
       expect(release?.version).toBe("1.2.3");
       const lines = bed.docker();
-      expect(lines.some((line) => line.includes("up -d --no-deps api web ssh-mesh-control-plane"))).toBe(true);
+      expect(lines.some((line) => line.includes("up -d --no-deps --pull never api web"))).toBe(true);
       expect(lines.filter((line) => line.startsWith("docker rm"))).toEqual([]);
     } finally {
       bed.stop();
@@ -152,7 +157,7 @@ describe("Docker Compose driver: retired Feishu ingestion sidecar", () => {
   it("restarts only the core services, and never names the retired one", async () => {
     const bed = driverBed({ leftover: true });
     try {
-      await bed.driver.execute(operation("restart"), async () => {});
+      await bed.driver.execute(operation("restart"), async () => {}, READY_GATE);
       const lines = bed.docker();
       expect(lines.some((line) => line.includes(`restart ${CORE_SERVICES.join(" ")}`))).toBe(true);
       // A restart keeps the API container, so nothing is blocking and nothing
@@ -178,7 +183,7 @@ describe("Docker Compose driver: retired Feishu ingestion sidecar", () => {
       const services = (await bed.driver.inspect()).services;
       // Even with the old container still on the host, the panel describes the
       // topology this release ships — there is no ingestion service any more.
-      expect(services.map((service) => service.id)).toEqual([...CORE_SERVICES, "postgres", "openviking"]);
+      expect(services.map((service) => service.id)).toEqual([...CORE_SERVICES, "ssh-mesh-control-plane", "postgres", "openviking"]);
     } finally {
       bed.stop();
     }

@@ -46,7 +46,7 @@ type ConfirmAction =
   | { kind: "update"; release: PlatformRelease }
   | { kind: "rollback"; release: PlatformRelease };
 
-const CANCELLABLE_STATUSES = new Set(["queued", "preparing", "pulling", "draining"]);
+const CANCELLABLE_STATUSES = new Set(["queued", "preparing", "pulling", "draining", "backing_up"]);
 const RECENT_OPERATION_WINDOW_MS = 30 * 60_000;
 
 export function PlatformTab() {
@@ -56,12 +56,17 @@ export function PlatformTab() {
   const cancelMutation = useCancelPlatformOperation();
   const settingsMutation = useUpdatePlatformSettings();
   const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
+  const [sourceDraft, setSourceDraft] = useState("");
   const [autoUpdateDraft, setAutoUpdateDraft] = useState({
     enabled: false,
     time: "05:00",
     timezone: "Asia/Shanghai",
   });
   const status = statusQuery.data;
+  useEffect(() => { setSourceDraft(status?.releaseFeedUrl ?? ""); }, [status?.releaseFeedUrl]);
+  const preflightAge = status?.preflight ? Date.now() - Date.parse(status.preflight.checkedAt) : NaN;
+  const checked = Boolean(status?.latestRelease && status?.preflight?.ready && status.updaterStatus === "ready"
+    && preflightAge >= -60_000 && preflightAge <= 360_000 && status.preflight.checks.every((check) => check.ok));
   const active = status?.activeOperation;
   const busy = Boolean(active) || operationMutation.isPending || cancelMutation.isPending;
   const schedule = status?.autoUpdateSchedule;
@@ -175,11 +180,11 @@ export function PlatformTab() {
         <div
           data-testid="platform-operation-status"
           data-state={recentResult.kind}
-          className={recentResult.kind === "timeout"
+          className={recentResult.kind === "timeout" || recentResult.kind === "failed"
             ? "flex items-center gap-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-3 text-destructive"
             : "flex items-center gap-3 rounded-md border bg-muted/40 px-3 py-3"}
         >
-          {recentResult.kind === "timeout"
+          {recentResult.kind === "timeout" || recentResult.kind === "failed"
             ? <CircleAlert className="h-4 w-4" />
             : <Check className="h-4 w-4" />}
           <p className="text-sm font-medium">{recentResult.message}</p>
@@ -194,7 +199,7 @@ export function PlatformTab() {
             <Button
               variant="ghost"
               size="icon-sm"
-              disabled={busy}
+              disabled={busy || status.updaterStatus !== "ready"}
               aria-label={t(($) => $.platform.check_updates)}
               title={t(($) => $.platform.check_updates)}
               onClick={() => void runAction({ kind: "check_updates" })}
@@ -209,16 +214,16 @@ export function PlatformTab() {
               <span className="text-4xl font-semibold tracking-normal">{currentVersion}</span>
               {status.updateAvailable ? (
                 <Badge variant="secondary">{t(($) => $.platform.update_available)}</Badge>
-              ) : (
+              ) : checked ? (
                 <span className="inline-flex size-7 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
                   <Check className="h-4 w-4" />
                 </span>
-              )}
+              ) : <CircleAlert className="h-5 w-5 text-muted-foreground" />}
             </div>
             <p className="mt-3 text-sm text-muted-foreground">
               {status.updateAvailable
                 ? t(($) => $.platform.latest_version, { version: status.latestRelease?.version ?? "" })
-                : t(($) => $.platform.up_to_date)}
+                : checked ? t(($) => $.platform.up_to_date) : t(($) => $.platform.check_unknown)}
             </p>
             {status.currentRelease?.releaseUrl && (
               <a className="mt-4 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground" href={status.currentRelease.releaseUrl} target="_blank" rel="noreferrer">
@@ -230,15 +235,19 @@ export function PlatformTab() {
 
           <div className="flex flex-wrap justify-center gap-2 border-t pt-4">
             {status.updateAvailable && status.latestRelease && (
-              <Button disabled={busy || status.updaterStatus === "offline"} onClick={() => setConfirmAction({ kind: "update", release: status.latestRelease! })}>
+              <Button disabled={busy || !checked} onClick={() => setConfirmAction({ kind: "update", release: status.latestRelease! })}>
                 {t(($) => $.platform.update_now)}
               </Button>
             )}
-            <Button variant="outline" disabled={busy || status.updaterStatus === "offline"} onClick={() => setConfirmAction({ kind: "restart" })}>
+            <Button variant="outline" disabled={busy || !checked} onClick={() => setConfirmAction({ kind: "restart" })}>
               <RefreshCw />
               {t(($) => $.platform.restart)}
             </Button>
           </div>
+
+          {!checked && status.updateAvailable && (
+            <p className="text-center text-sm text-muted-foreground">{t(($) => $.platform.check_unknown)}</p>
+          )}
 
           <div className="space-y-4 border-t pt-4">
             <div className="flex items-start justify-between gap-4">
@@ -314,7 +323,7 @@ export function PlatformTab() {
                       <p className="truncate text-sm font-medium">{release.version}</p>
                       <p className="truncate text-xs text-muted-foreground">{release.ref}</p>
                     </div>
-                    <Button variant="ghost" size="sm" disabled={busy} onClick={() => setConfirmAction({ kind: "rollback", release })}>
+                    <Button variant="ghost" size="sm" disabled={busy || !checked} onClick={() => setConfirmAction({ kind: "rollback", release })}>
                       {t(($) => $.platform.rollback_action)}
                     </Button>
                   </div>
@@ -323,6 +332,36 @@ export function PlatformTab() {
               </div>
             </CollapsibleContent>
           </Collapsible>
+        </CardContent>
+      </Card>
+
+      <Card className="rounded-lg" data-testid="platform-update-source">
+        <CardHeader><CardTitle>{t(($) => $.platform.update_source)}</CardTitle><CardDescription>{t(($) => $.platform.update_source_hint)}</CardDescription></CardHeader>
+        <CardContent className="space-y-3">
+          <Label htmlFor="platform-release-feed">{t(($) => $.platform.update_source_url)}</Label>
+          <Input id="platform-release-feed" type="url" value={sourceDraft} placeholder={status.defaultReleaseFeedUrl ?? "https://example.com/platform-release.json"} disabled={busy || settingsMutation.isPending} onChange={(event) => setSourceDraft(event.target.value)} />
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={busy || settingsMutation.isPending || sourceDraft.trim() === (status.releaseFeedUrl ?? "")} onClick={() => settingsMutation.mutate({ releaseFeedUrl: sourceDraft.trim() || null }, {
+              onSuccess: () => toast.success(t(($) => $.platform.source_saved)),
+              onError: (error) => toast.error(error instanceof Error ? error.message : t(($) => $.platform.operation_failed)),
+            })}>{t(($) => $.platform.source_save)}</Button>
+            <Button variant="outline" disabled={busy || settingsMutation.isPending || !status.releaseFeedUrl} onClick={() => settingsMutation.mutate({ releaseFeedUrl: null }, {
+              onSuccess: () => toast.success(t(($) => $.platform.source_saved)),
+              onError: (error) => toast.error(error instanceof Error ? error.message : t(($) => $.platform.operation_failed)),
+            })}>{t(($) => $.platform.source_reset)}</Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="rounded-lg" data-testid="platform-preflight">
+        <CardHeader><CardTitle>{t(($) => $.platform.preflight_title)}</CardTitle><CardDescription>{t(($) => $.platform.preflight_hint)}</CardDescription></CardHeader>
+        <CardContent className="space-y-2">
+          {!status.preflight && <p className="text-sm text-muted-foreground">{t(($) => $.platform.check_unknown)}</p>}
+          {status.preflight && <p className="text-xs text-muted-foreground">{status.preflight.platform} / {status.preflight.arch} · {formatTimestamp(status.preflight.checkedAt)}</p>}
+          {status.preflight?.checks.map((check) => <div key={check.code} className="flex items-start gap-2 text-sm">
+            {check.ok ? <Check className="mt-0.5 h-4 w-4 shrink-0" /> : <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />}
+            <span className="break-words">{check.message}</span>
+          </div>)}
         </CardContent>
       </Card>
 
@@ -401,6 +440,8 @@ function operationProgressLines(operation: PlatformOperation, t: Translate): str
     }
     case "switching":
       return [t(($) => $.platform.status_switching)];
+    case "backing_up":
+      return [t(($) => $.platform.status_backing_up)];
     case "verifying":
       return [t(($) => $.platform.status_verifying)];
     case "restarting":
@@ -415,7 +456,7 @@ function operationProgressLines(operation: PlatformOperation, t: Translate): str
 function recentOperationResult(
   operation: PlatformOperation | null,
   t: Translate,
-): { kind: "restored" | "timeout" | "cancelled"; message: string } | null {
+): { kind: "restored" | "timeout" | "cancelled" | "failed"; message: string } | null {
   if (!operation?.finishedAt) return null;
   const finishedAt = Date.parse(operation.finishedAt);
   if (!Number.isFinite(finishedAt) || finishedAt < Date.now() - RECENT_OPERATION_WINDOW_MS) return null;
@@ -431,6 +472,7 @@ function recentOperationResult(
   if (operation.status === "failed" && drainTimedOut) {
     return { kind: "timeout", message: t(($) => $.platform.status_drain_timeout) };
   }
+  if (operation.status === "failed") return { kind: "failed", message: operation.error || t(($) => $.platform.operation_failed) };
   return null;
 }
 function driverLabel(driver: string, t: Translate) { return driver === "docker_compose" ? t(($) => $.platform.driver_compose) : t(($) => $.platform.driver_systemd); }

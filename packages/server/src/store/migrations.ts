@@ -2787,6 +2787,9 @@ function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): 
   addColumnIfMissing(db, "multiremi_platform_state", "auto_update_next_check_at TEXT");
   addColumnIfMissing(db, "multiremi_platform_state", "auto_update_last_checked_at TEXT");
   addColumnIfMissing(db, "multiremi_platform_state", "auto_update_last_result TEXT");
+  addColumnIfMissing(db, "multiremi_platform_state", "release_feed_url TEXT");
+  addColumnIfMissing(db, "multiremi_platform_state", "default_release_feed_url TEXT");
+  addColumnIfMissing(db, "multiremi_platform_state", "updater_preflight TEXT");
   addColumnIfMissing(
     db,
     "multiremi_daemon_retirements",

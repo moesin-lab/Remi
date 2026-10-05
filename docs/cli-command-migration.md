@@ -351,6 +351,14 @@ API list contract from [ADR 0002](adr/0002-repository-wiki-list-without-bodies.m
 Pass `--include-body --ids <a,b>` (at most 20 ids per request) to fetch bodies
 for specific documents.
 
+平台更新设置使用 `remi platform settings update --file <settings.json> --yes`，
+文件可包含 `{"releaseFeedUrl":"https://example.com/platform-release.json"}`，
+或 `{"releaseFeedUrl":null}` 恢复主机默认来源。执行
+`remi platform operation create --file <operation.json> --yes`，文件包含
+`{"kind":"check_updates"}`，会刷新版本和可更新性检查；结果通过
+`remi platform status` 读取。更新、回滚和重启均要求更新器在线、预检通过，
+并等待 Runtime 确认空闲。备份与恢复约束见[平台部署](../deploy/README.md)。
+
 ## Current user identity
 
 `remi member get me`, `remi member update me`, and `remi member onboarding ...`

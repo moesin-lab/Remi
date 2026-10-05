@@ -45,10 +45,11 @@ function execute(command, args, options = {}) {
     const pathKey = Object.keys(environment).find((key) => key.toLowerCase() === 'path') || 'Path';
     environment[pathKey] = `${helpers}${delimiter}${environment[pathKey] || ''}`;
   }
-  const result = spawnSync(command, args, { cwd: repository, env: environment, stdio: 'inherit', windowsHide: true, ...options });
+  const { preserveWhitespace = false, ...spawnOptions } = options;
+  const result = spawnSync(command, args, { cwd: repository, env: environment, stdio: 'inherit', windowsHide: true, ...spawnOptions });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} ${args[0] || ''} failed (${result.status})`);
-  return typeof result.stdout === 'string' ? result.stdout.trim() : result.stdout;
+  return typeof result.stdout === 'string' && !preserveWhitespace ? result.stdout.trim() : result.stdout;
 }
 
 function capture(command, args) {
@@ -443,8 +444,17 @@ function validateReleaseArtifactInput(url, expectedSha256) {
   return parsed;
 }
 
+function profileSchema(ref) {
+  if (!/^[a-f0-9]{40}$/iu.test(ref || '')) throw new Error('Data schema requires an immutable commit');
+  const inputs = readJson(join(repository, 'packages/platform-updater/src/data-schema-inputs.json'));
+  const source = inputs.map(path => execute('git', ['show', `${ref}:${path}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], preserveWhitespace: true })).join('').replaceAll('\r\n', '\n');
+  if (!source) throw new Error('Data schema source is unavailable');
+  return createHash('sha256').update(source).digest('hex');
+}
+
 function resultRelease(deployment) {
   return {
+    dataSchema: deployment.dataSchema ?? null,
     version: deployment.version.split('-stable.')[0],
     ref: deployment.ref,
     publishedAt: new Date().toISOString(),
@@ -580,7 +590,7 @@ function checkedBackupDirectory(root, backupDir) {
   return resolvedBackup;
 }
 
-function restoreBackup(root, backupDir, controlPlaneBackupDir = null) {
+function restoreBackup(root, backupDir, controlPlaneBackupDir = null, preserveData = false) {
   backupDir = checkedBackupDirectory(root, backupDir);
   verifyCompleteBackup(backupDir);
   let controlPlaneDump = null;
@@ -601,6 +611,13 @@ function restoreBackup(root, backupDir, controlPlaneBackupDir = null) {
   }
   const deployment = readJson(join(root, 'deployment.json'));
   saveJson(join(root, 'deployment.json'), savedDeployment);
+  if (preserveData) {
+    // Automatic rollback changes application containers only. Current business
+    // data and API-home volumes must never be replaced by a historical snapshot.
+    compose(root, 'up', '-d', '--no-deps', '--wait', '--wait-timeout', '240', 'api', 'web');
+    saveJson(join(root, 'active.json'), savedDeployment);
+    return;
+  }
   compose(root, 'stop', 'web', 'api');
   compose(root, 'up', '-d', '--wait', 'postgres');
   execute('docker', [
@@ -638,6 +655,8 @@ async function hostStage(profile, flags) {
   const operationId = safeOperationId(flags['--operation-id']);
   const ref = flags['--ref'];
   const version = flags['--version'];
+  const dataSchema = flags['--data-schema'];
+  if (dataSchema && !/^[a-f0-9]{64}$/iu.test(dataSchema)) throw new Error('--data-schema must be SHA-256');
   if (!/^[a-f0-9]{40}$/iu.test(ref || '')) throw new Error('--ref must be a full Git commit');
   if (!/^v?\d+\.\d+\.\d+$/u.test(version || '')) throw new Error('--version must be SemVer');
   validateReleaseArtifactInput(flags['--source-url'], flags['--source-sha256']);
@@ -648,7 +667,7 @@ async function hostStage(profile, flags) {
     const path = operationPath(root, operationId);
     let state = existsSync(path) ? readJson(path) : null;
     if (state) {
-      if (state.kind !== 'update' || state.targetRef !== ref || state.targetVersion !== version) {
+      if (state.kind !== 'update' || state.targetRef !== ref || state.targetVersion !== version || state.dataSchema !== dataSchema) {
         throw new Error('Operation ID was already used with different update parameters');
       }
       if (state.status === 'succeeded' || state.phase === 'built') return;
@@ -662,6 +681,7 @@ async function hostStage(profile, flags) {
         phase: 'requested',
         targetRef: ref.toLowerCase(),
         targetVersion: version.replace(/^v/u, ''),
+        dataSchema,
         sourceUrl: flags['--source-url'],
         sourceSha256: flags['--source-sha256']?.toLowerCase(),
         createdAt: new Date().toISOString(),
@@ -681,6 +701,11 @@ async function hostStage(profile, flags) {
       execute('git', ['fetch', '--no-tags', 'origin', ref]);
       const resolved = capture('git', ['rev-parse', '--verify', `${ref}^{commit}`]).toLowerCase();
       if (resolved !== ref.toLowerCase()) throw new Error('Fetched Git object does not match the requested commit');
+      if (dataSchema) {
+        if (profileSchema(ref) !== dataSchema || profileSchema(readJson(join(root, 'active.json')).ref) !== dataSchema) {
+          throw new Error('Data schema is unknown or incompatible; automatic update refused');
+        }
+      }
       state = saveOperation(root, state, { phase: 'fetched' });
       if (!existsSync(join(previous, 'files.json'))) snapshotProfile(root, previous);
       else restoreProfileSnapshot(root, previous);
@@ -691,6 +716,7 @@ async function hostStage(profile, flags) {
       }
       state = saveOperation(root, state, { phase: 'prepared' });
       deployment = prepareDeploymentImages(root, flags);
+      if (dataSchema) deployment.dataSchema = dataSchema;
       saveJson(join(root, 'deployment.json'), withImageIdentities(deployment));
       snapshotProfile(root, candidate);
       restoreProfileSnapshot(root, previous);
@@ -708,10 +734,10 @@ async function rollbackInterruptedUpdate(root, state, reason) {
   const previous = join(directory, 'previous');
   let next = saveOperation(root, state, { status: 'recovery_required', phase: 'rolling_back', error: reason });
   try {
-    if (next.backupDir) restoreBackup(root, next.backupDir);
+    if (next.backupDir) restoreBackup(root, next.backupDir, null, Boolean(next.dataSchema));
     else {
       restoreProfileSnapshot(root, previous);
-      compose(root, 'up', '-d', '--wait', '--wait-timeout', '240');
+      compose(root, 'up', '-d', '--wait', '--wait-timeout', '240', ...(next.dataSchema ? ['--no-deps', 'api', 'web'] : []));
       saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
     }
     await verifyProfileHealth('stable');
@@ -752,7 +778,7 @@ async function hostActivate(profile, flags) {
       state = saveOperation(root, state, { phase: 'backup_complete', backupDir: saved });
       restoreProfileSnapshot(root, candidate);
       state = saveOperation(root, state, { phase: 'activating' });
-      compose(root, 'up', '-d', '--wait', '--wait-timeout', '240');
+      compose(root, 'up', '-d', '--wait', '--wait-timeout', '240', ...(state.dataSchema ? ['--no-deps', 'api', 'web'] : []));
       await verifyProfileHealth(profile);
       const deployment = readJson(join(root, 'deployment.json'));
       saveJson(join(root, 'active.json'), deployment);
@@ -783,6 +809,7 @@ function hostRollbackStage(profile, flags) {
   if (profile !== 'stable') throw new Error('The recoverable host executor only manages the stable profile');
   const operationId = safeOperationId(flags['--operation-id']);
   const target = flags['--ref'];
+  const preserveData = flags['--preserve-data'] === 'true';
   if (!target) throw new Error('--ref is required');
   const root = join(profilesRoot, profile);
   const release = acquireHostLock(root);
@@ -790,17 +817,21 @@ function hostRollbackStage(profile, flags) {
     const path = operationPath(root, operationId);
     if (existsSync(path)) {
       const state = readJson(path);
-      if (state.kind !== 'rollback' || state.targetRef !== target) throw new Error('Operation ID was already used with different rollback parameters');
+      if (state.kind !== 'rollback' || state.targetRef !== target || Boolean(state.preserveData) !== preserveData) throw new Error('Operation ID was already used with different rollback parameters');
       if (state.status === 'succeeded' || state.phase === 'rollback_ready') return;
       throw new Error(state.error || `Host rollback is ${state.status}`);
     }
     validateHostCapacity(root);
     const backupDir = findBackupForTarget(root, target);
+    if (preserveData && profileSchema(readJson(join(root, 'active.json')).ref) !== profileSchema(readJson(join(backupDir, 'active.json')).ref)) {
+      throw new Error('Data schema is incompatible; automatic rollback refused');
+    }
     withImageIdentities(readJson(join(backupDir, 'deployment.json')));
     snapshotProfile(root, join(operationDirectory(root, operationId), 'previous'));
     saveJson(path, {
       schemaVersion: 1, operationId, kind: 'rollback', status: 'running', phase: 'rollback_ready',
       targetRef: target, backupDir, fallbackBackupDir: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      preserveData,
       error: null, resultRelease: null,
     });
   } finally { release(); }
@@ -822,7 +853,7 @@ async function hostRollbackActivate(profile, flags) {
       compose(root, 'up', '-d', '--wait', 'postgres');
       const fallbackBackupDir = backup(root, operationId);
       state = saveOperation(root, state, { phase: 'rolling_back', fallbackBackupDir, controlPlaneBackupDir: fallbackBackupDir });
-      restoreBackup(root, state.backupDir, state.controlPlaneBackupDir);
+      restoreBackup(root, state.backupDir, state.controlPlaneBackupDir, state.preserveData);
       await verifyProfileHealth(profile);
       const deployment = readJson(join(root, 'active.json'));
       saveOperation(root, state, { status: 'succeeded', phase: 'succeeded', resultRelease: resultRelease(deployment) });
@@ -836,10 +867,10 @@ async function hostRollbackActivate(profile, flags) {
 async function recoverFailedRollback(root, state, reason) {
   const next = saveOperation(root, state, { status: 'recovery_required', phase: 'rollback_recovering', error: reason });
   try {
-    if (next.fallbackBackupDir) restoreBackup(root, next.fallbackBackupDir);
+    if (next.fallbackBackupDir) restoreBackup(root, next.fallbackBackupDir, null, next.preserveData);
     else {
       restoreProfileSnapshot(root, join(operationDirectory(root, state.operationId), 'previous'));
-      compose(root, 'up', '-d', '--wait', '--wait-timeout', '240');
+      compose(root, 'up', '-d', '--wait', '--wait-timeout', '240', ...(next.preserveData ? ['--no-deps', 'api', 'web'] : []));
       saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
     }
     await verifyProfileHealth('stable');
@@ -909,7 +940,7 @@ async function status(root) {
 async function main() {
   const [profile, action, ...args] = process.argv.slice(2);
   if (!Object.hasOwn(settings, profile) || !action || action === '--help') {
-    console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|stop|restart|status|logs|watch|backup|token|host-stage|host-activate|host-recover|host-rollback-stage|host-rollback-activate|host-finalize|host-auth-refresh> [options]');
+    console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|stop|restart|status|logs|watch|backup|token|host-preflight|host-stage|host-activate|host-recover|host-rollback-stage|host-rollback-activate|host-finalize|host-auth-refresh> [options]');
     console.log('stable deploy: pull verified CI images for a fixed commit, back up data, then update containers.');
     console.log('--image-manifest <path>: use a downloaded stable-images.json; --build-local true: explicitly compile locally.');
     console.log('dev deploy + dev watch: build current source, then sync changes without touching stable.');
@@ -921,21 +952,22 @@ async function main() {
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index];
     const value = args[index + 1];
-    if (!['--ref', '--lan-host', '--operation-id', '--version', '--source-url', '--source-sha256', '--image-manifest', '--build-local'].includes(key) || !value || value.startsWith('--') || Object.hasOwn(flags, key)) {
+    if (!['--ref', '--lan-host', '--operation-id', '--version', '--source-url', '--source-sha256', '--data-schema', '--preserve-data', '--image-manifest', '--build-local'].includes(key) || !value || value.startsWith('--') || Object.hasOwn(flags, key)) {
       throw new Error('Unsupported, missing, or duplicate --ref/--lan-host/host option');
     }
     flags[key] = value;
   }
   const actionOptions = {
     prepare: ['--ref', '--lan-host'], deploy: ['--ref', '--lan-host', '--image-manifest', '--build-local'],
-    'host-stage': ['--operation-id', '--ref', '--version', '--source-url', '--source-sha256', '--image-manifest', '--build-local'],
+    'host-stage': ['--operation-id', '--ref', '--version', '--source-url', '--source-sha256', '--data-schema', '--image-manifest', '--build-local'],
     'host-activate': ['--operation-id'],
-    'host-rollback-stage': ['--operation-id', '--ref'],
+    'host-rollback-stage': ['--operation-id', '--ref', '--preserve-data'],
     'host-rollback-activate': ['--operation-id'],
     'host-finalize': ['--operation-id'],
   };
   const acceptedOptions = actionOptions[action] || [];
   if (flags['--build-local'] && flags['--build-local'] !== 'true') throw new Error('--build-local only accepts true');
+  if (flags['--preserve-data'] && flags['--preserve-data'] !== 'true') throw new Error('--preserve-data only accepts true');
   if (flags['--image-manifest'] && (profile !== 'stable' || flags['--build-local'])) throw new Error('--image-manifest is for stable CI deployments only');
   if (Object.keys(flags).some((key) => !acceptedOptions.includes(key))) throw new Error(`--ref and --lan-host or host options are not valid with ${action}`);
   if (profile === 'dev' && flags['--ref'] && flags['--ref'] !== 'HEAD') throw new Error('dev runs the working tree; use stable to deploy a fixed ref');
@@ -951,6 +983,12 @@ async function main() {
   else if (action === 'host-rollback-activate') await hostRollbackActivate(profile, flags);
   else if (action === 'host-finalize') hostFinalize(profile, flags);
   else if (action === 'host-auth-refresh') hostAuthRefresh(profile);
+  else if (action === 'host-preflight') {
+    if (profile !== 'stable') throw new Error('The host updater only manages stable');
+    validateHostCapacity(root);
+    withImageIdentities(readJson(join(root, 'active.json')));
+    if (capture('docker', ['info', '--format', '{{.OSType}}']).trim() !== 'linux') throw new Error('Linux containers are required');
+  }
   else if (action === 'prepare') {
     if (existsSync(join(root, 'active.json'))) throw new Error('An activated profile must be upgraded with deploy');
     prepare(profile, flags['--ref'] || 'HEAD', flags['--lan-host']);

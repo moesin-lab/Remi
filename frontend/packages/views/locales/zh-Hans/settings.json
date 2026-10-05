@@ -457,7 +457,7 @@
     "update_now": "立即更新",
     "restart": "重启服务",
     "auto_update": "自动安装稳定版本",
-    "auto_update_hint": "宿主 Updater 每日在计划时间检查正式 GitHub Release。",
+    "auto_update_hint": "宿主 Updater 每日在计划时间检查已配置的更新来源。",
     "auto_update_time": "每日更新时间",
     "auto_update_timezone": "时区",
     "auto_update_browser_timezone_suffix": "（浏览器）",
@@ -511,7 +511,17 @@
     "confirm_rollback_title": "回退平台版本？",
     "confirm_rollback_desc": "将平台切换至 {{version}} 并重启服务。",
     "cancel": "取消",
-    "confirm": "确认"
+    "confirm": "确认",
+    "update_source": "更新来源",
+    "update_source_url": "更新地址",
+    "update_source_hint": "填写 HTTPS 版本源地址，留空使用主机默认来源。修改后会清除之前的更新检查结果。",
+    "source_save": "保存更新地址",
+    "source_reset": "恢复默认来源",
+    "source_saved": "更新地址已保存，请重新检查更新。",
+    "preflight_title": "可更新性检查",
+    "preflight_hint": "更新会等待所有 Agent 完成，验证备份和数据兼容性，再切换 API 与 Web 服务。检查不通过时阻止更新。",
+    "check_unknown": "尚未验证更新，请检查更新并解决阻塞项。",
+    "status_backing_up": "正在备份并校验数据库和持久文件"
   },
   "modelGateway": {
     "context_title": "1M 上下文",

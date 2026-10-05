@@ -3,6 +3,13 @@ import { parseWithFallback } from "../schema";
 import { EMPTY_PLATFORM_STATUS, PlatformStatusSchema } from "./platform";
 
 describe("PlatformStatusSchema", () => {
+  it("retains source settings and blocking checks without coercing an invalid readiness flag", () => {
+    const preflight = { ready: false, checkedAt: "2026-10-05T00:00:00Z", platform: "win32", arch: "x64", checks: [{ code: "backup", ok: false, message: "Backup required" }] };
+    const status = PlatformStatusSchema.parse({ releaseFeedUrl: "https://mirror.example/feed.json", preflight });
+    expect(status.releaseFeedUrl).toBe("https://mirror.example/feed.json");
+    expect(status.preflight).toEqual(preflight);
+    expect(PlatformStatusSchema.safeParse({ preflight: { ...preflight, ready: "false" } }).success).toBe(false);
+  });
   it("falls back when a newer or broken server returns an invalid collection", () => {
     const result = parseWithFallback(
       { canManage: true, services: null, recentReleases: "broken" },

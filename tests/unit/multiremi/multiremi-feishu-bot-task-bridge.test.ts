@@ -783,7 +783,7 @@ describe("Feishu bot standard Task bridge", () => {
       prompt: "first message",
       workDir: null,
       requestingUserName: "Owner from Feishu",
-      requestingUserProfileDescription: "Source: Feishu personal bot\nThe space owner manages account access in Settings > Integrations > Feishu account allowlist.\nApproval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
+      requestingUserProfileDescription: "Source: Feishu personal bot\nThe space owner manages account access in IM platforms > Feishu > Access control > Feishu account allowlist.\nApproval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
       issueCreationRestricted: false,
     });
 
@@ -866,7 +866,7 @@ describe("Feishu bot standard Task bridge", () => {
     expect(submitted.senderAllowed).toBe(false);
     expect(store.getTask(submitted.taskId)).toMatchObject({
       requestingUserName: "External Alice",
-      requestingUserProfileDescription: "Source: Feishu personal bot\nThe space owner manages account access in Settings > Integrations > Feishu account allowlist.\nApproval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
+      requestingUserProfileDescription: "Source: Feishu personal bot\nThe space owner manages account access in IM platforms > Feishu > Access control > Feishu account allowlist.\nApproval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
       issueCreationRestricted: false,
     });
     expect(store.isFeishuBotTaskIssueCreationRestricted(submitted.taskId)).toBe(true);
@@ -895,7 +895,7 @@ describe("Feishu bot standard Task bridge", () => {
     expect(submitted.senderAllowed).toBe(false);
     expect(store.getTask(submitted.taskId)).toMatchObject({
       requestingUserName: "Stale Event Name",
-      requestingUserProfileDescription: "Source: Feishu personal bot\nThe space owner manages account access in Settings > Integrations > Feishu account allowlist.\nApproval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
+      requestingUserProfileDescription: "Source: Feishu personal bot\nThe space owner manages account access in IM platforms > Feishu > Access control > Feishu account allowlist.\nApproval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
       issueCreationRestricted: false,
     });
     expect(store.isFeishuBotTaskIssueCreationRestricted(submitted.taskId)).toBe(true);

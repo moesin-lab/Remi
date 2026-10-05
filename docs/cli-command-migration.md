@@ -577,6 +577,29 @@ legacy dispatchers for byte-compatible arguments, stdout/stderr, and exit codes.
 They are still present in Registry inventory and the capability manifest, so
 they cannot become undocumented bypasses.
 
+## IM platform management
+
+The Web sidebar groups IM capabilities under **IM platforms → Feishu**. This
+navigation change reuses the existing APIs and registered commands; it does not
+introduce another CLI command family or change credential ownership.
+
+| Web capability | Canonical CLI commands |
+| --- | --- |
+| Concierge configuration and status | `remi workspace feishu-bot get\|set\|status\|candidates\|test\|deploy\|stop` |
+| Bot registration and per-Agent installations | `remi workspace feishu-bot register\|register-status\|register-cancel`, `remi lark install begin\|status`, `remi lark installation list\|delete` |
+| Menu editing and publication | `remi workspace bot-menu get\|update\|publish\|publish-status` |
+| Sender access | `remi workspace feishu-bot set`, `remi workspace feishu-bot sender list\|allow\|revoke` |
+| Agent routes and Issue topics | `remi feishu route list\|set\|unset`, `remi workspace issue-topics get\|set` |
+| Message connections and authorization | `remi messaging connection list\|get\|add\|update\|check\|delete`, `remi messaging connection authorization start\|get` |
+| Sources and conversation selection | `remi messaging source list\|get\|add\|update\|status\|delete\|available-conversations` |
+| History and processing | `remi messaging conversation list`, `remi messaging message list\|get\|resolve\|notify\|draft-reply\|propose-issue\|create-issue` |
+
+Use each command's generated `--help` for positional workspace/record references
+and required options. The Web uses Feishu compatibility endpoints where their
+legacy ID contract is required; new automation should use `messaging` for the
+generic connection/source/message model. The bot's app credentials and a
+message-ingestion connection's authorization remain separate.
+
 ## Prompt and documentation migration
 
 The server-injected agent prompt now uses only canonical commands in

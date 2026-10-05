@@ -3461,7 +3461,7 @@ export class FeishuBotRepo {
       "The Agent's own permissions and approval requirements still apply. The API checks the bot's current access policy; do not infer a pending approval from earlier conversation history.",
     ].join("\n") : [
       "Source: Feishu personal bot",
-      "The space owner manages account access in Settings > Integrations > Feishu account allowlist.",
+      "The space owner manages account access in IM platforms > Feishu > Access control > Feishu account allowlist.",
       "Approval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
     ].join("\n");
     return { id: account?.id ?? null, allowed: accessPolicy === "agent" || (account?.allowed ?? false), displayName, actorId, profileDescription };

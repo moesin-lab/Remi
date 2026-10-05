@@ -5,6 +5,7 @@ import "i18next";
 import "@multiremi/ui/i18n-types";
 import type common from "../locales/en/common.json";
 import type auth from "../locales/en/auth.json";
+import type imPlatforms from "../locales/en/im-platforms.json";
 import type settings from "../locales/en/settings.json";
 import type issues from "../locales/en/issues.json";
 import type agents from "../locales/en/agents.json";
@@ -49,6 +50,7 @@ declare global {
     common: typeof common;
     auth: typeof auth;
     settings: typeof settings;
+    "im-platforms": typeof imPlatforms;
     issues: typeof issues;
     agents: typeof agents;
     editor: typeof editor;

@@ -56,7 +56,7 @@ WSClient → useRealtimeSync → sync/<领域>.ts
 | 任务详情与执行会话 | [issue-detail.tsx](../../frontend/packages/views/issues/components/issue-detail.tsx)、[issue-detail-main.tsx](../../frontend/packages/views/issues/components/issue-detail-main.tsx)、[session-mutations.ts](../../frontend/packages/core/issues/session-mutations.ts) |
 | 工作台待输入 / 待验收 / 失败恢复 | [issues/workbench.ts](../../frontend/packages/core/issues/workbench.ts) 的 `workbenchIssuesOptions`、`partitionReviewIssues`；[workbench-page.tsx](../../frontend/packages/views/workbench/components/workbench-page.tsx) |
 | 收件箱的分页、摘要与展示分组 | [inbox/queries.ts](../../frontend/packages/core/inbox/queries.ts) 的 `inboxPageOptions` / `inboxSummaryOptions`、[inbox/grouping.ts](../../frontend/packages/core/inbox/grouping.ts)、[inbox-page.tsx](../../frontend/packages/views/inbox/components/inbox-page.tsx) |
-| Issue 飞书话题设置 | [issue-topic-section.tsx](../../frontend/packages/views/settings/components/issue-topic-section.tsx)、[feishu-bot/queries.ts](../../frontend/packages/core/feishu-bot/queries.ts)、[workspaces router](../../packages/server/src/api/routers/workspaces.ts) 的 `/api/workspaces/:id/issue-topics` |
+| Issue 飞书话题设置 | [issue-topic-section.tsx](../../frontend/packages/views/im-platforms/feishu/issue-topic-section.tsx)、[feishu-bot/queries.ts](../../frontend/packages/core/feishu-bot/queries.ts)、[workspaces router](../../packages/server/src/api/routers/workspaces.ts) 的 `/api/workspaces/:id/issue-topics` |
 | 平铺会话日志（切片、行高缓存、副本端口） | [session-log-list.tsx](../../frontend/packages/views/common/session-log/session-log-list.tsx)、[entry-html.tsx](../../frontend/packages/views/common/session-log/entry-html.tsx)、[use-row-heights.ts](../../frontend/packages/views/common/session-log/use-row-heights.ts)、[core/replica/port.ts](../../frontend/packages/core/replica/port.ts) |
 | 执行过程弹窗 | [task-trace-dialog.tsx](../../frontend/packages/views/common/task-transcript/task-trace-dialog.tsx)、[build-timeline.ts](../../frontend/packages/views/common/task-transcript/build-timeline.ts)、[agent-transcript-dialog.tsx](../../frontend/packages/views/common/task-transcript/agent-transcript-dialog.tsx)；点击后从 task trace API 分页读取，运行中由 trace socket 续传 |
 
@@ -72,7 +72,7 @@ Issue 的 seq 0 是标题与描述的例外：[IssueLogHead](../../frontend/pack
 
 收件箱页面使用 `useInfiniteQuery` 按游标每次读取 50 条；侧栏关注数与页内未读数来自独立的 `/api/inbox/summary`，摘要查询 `staleTime` 为 30 秒，不需要加载完整列表。筛选、日期分组、成功自动运行及同父单通知的折叠应用于已加载页；父单元数据由服务端投影提供，但只投影通知所属工作区内仍存在的父单，组内失败、卡住、待决定通知优先。父单分组头不提供整组归档，展开后逐条归档；行内操作始终保留固定宽度，悬停只改变可见性。链接指向尚未加载的通知时，页面继续加载后续页，读取失败不能当作通知不存在。读/归档 mutation 和 WS 更新同时维护旧列表缓存与分页缓存，并刷新摘要；具体分组和计数契约见[收件箱边界](../inbox-workbench-boundary.md)。
 
-集成设置中的 Issue 话题表单维护工作区 `settings.issueTopics`，与 concierge bot 配置分开：成员可读，owner/admin 可保存启用状态、目标群和项目范围。API 的 `project_ids: null` 表示不限制项目；UI 开启项目限制时要求至少选择一项，服务端仍校验项目归属。保存后失效当前工作区的 `feishu-bot` 查询树；端点经过 schema 解析。验证入口为[表单测试](../../frontend/packages/views/settings/components/issue-topic-section.test.tsx)和[端点测试](../../frontend/packages/core/api/endpoints/feishu-bot.test.ts)。
+「IM 平台 → 飞书 → 群聊与通知」中的 Issue 话题表单维护工作区 `settings.issueTopics`，与 concierge bot 配置分开：成员可读，owner/admin 可保存启用状态、目标群和项目范围。API 的 `project_ids: null` 表示不限制项目；UI 开启项目限制时要求至少选择一项，服务端仍校验项目归属。保存后失效当前工作区的 `feishu-bot` 查询树；端点经过 schema 解析。验证入口为[表单测试](../../frontend/packages/views/im-platforms/feishu/issue-topic-section.test.tsx)和[端点测试](../../frontend/packages/core/api/endpoints/feishu-bot.test.ts)。
 
 Issue 活动区默认显示普通评论、固定单行的派活和 `workspace_move_cleared` 动态。派活和被派 agent 的首条回应引用在点击后打开既有任务弹窗，初始停在「输入 Prompt」，评论流内不展开正文。回应关联只用当前窗口中唯一的同 task 派活记录，首次出现时确定，翻页不向已显示的评论追加引用；任务列表只在点击时复用缓存或读取。系统细节开关按用户和工作区在本地同步持久化，渲染前过滤结果发布、信封、收件箱唤醒及未知非评论类型。SSR 列表在本地偏好 hydration 完成前保持隐藏，定位脚本通过 `data-ssr-display-ready` 门禁等待最终显示集合，避免默认集合先显现再变化；用户切换开关时在绘制前保持 released 阅读锚点或 pinned 贴底。打开后 [IssueLogEventRow](../../frontend/packages/views/issues/components/issue-log-event-row.tsx) 显示固定一行人话，发布结果使用已有结果列表并打开右侧结果面板。信封按 `dedupeKey` 来源优先、`kind/to.role` 次之分类，永不使用正文兜底。Chat 永久过滤内部条目，无系统细节开关；普通评论交互和用户/assistant 气泡沿用原路径。
 
@@ -83,6 +83,12 @@ Issue 活动区默认显示普通评论、固定单行的派活和 `workspace_mo
 深链目标属于系统细节时，本次访问临时开启显示且不写偏好，开关显示为开启；目标未加载时揭示门禁继续等待，用户手动切换后以其选择为准并持久化，离开该深链访问后恢复保存值。SSR 与客户端在渲染前使用同一目标分类，首个可见帧即可定位和高亮；验证入口为 [Issue 深链回归](../../frontend/packages/views/issues/components/issue-detail.test.tsx)和 [SSR 定位脚本回归](../../frontend/apps/web/app/issue-log-ssr-position.test.ts)。
 
 `/log/locate` 返回 404 时，已删除或不存在的评论深链回退到该会话尾部；未指定会话时，所有会话均返回 404 才回退到默认会话。回退窗口与缺失目标状态一起就绪，渲染前取消锚点、高亮和临时系统细节，首个可见帧沿用普通浏览的贴底状态。SSR 用 `missingCommentId` 标记尾部 seed；旧 SSR seed 的目标不在窗口时，客户端重新定位后按同一规则回退。网络错误、5xx 和尾部读取失败仍保留错误态与重试。验证入口为 [日志窗口回归](../../frontend/packages/core/session-log/issue-log.test.ts)、上述 Issue 深链回归与 [SSR 读取回归](../../frontend/apps/web/features/issues/server-log.test.ts)。
+
+## IM 平台导航
+
+[IM 平台管理](im-platforms.md)是与工作区、配置同级的主侧栏分组，当前只支持飞书。平台目录、能力路由和页面实现归属独立的 `core/im-platforms` 与 `views/im-platforms`；机器人与消息采集保留各自的数据和权限。原「集成」「飞书消息」设置地址通过 Web 路由转到新页面，并保留查询参数。
+
+能力导航在切换页面或调整视口后将当前项滚入可见区域。共享 Chat 浮钮复用首屏门禁，待路由内容就绪并完成 hydration 后按本地开关状态显示，避免从 IM 深链刷新时服务器的默认打开状态与浏览器的关闭偏好产生不同的首屏树。
 
 ## 实时更新与性能定位
 

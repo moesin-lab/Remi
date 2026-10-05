@@ -63,6 +63,33 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  im-platform-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Install dependencies from the public registry
+        run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+      - name: Install the repository's Chromium version
+        run: node node_modules/playwright-core/cli.js install chromium --with-deps
+      - name: Verify IM platform user flows with an isolated API and database
+        env:
+          IM_SMOKE_ARTIFACTS: ${{ runner.temp }}/im-smoke
+        run: bun run smoke:im
+      - name: Upload IM smoke report and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: im-platform-smoke
+          path: ${{ runner.temp }}/im-smoke
+          if-no-files-found: ignore
+
   execution-configuration:
     runs-on: ubuntu-latest
     timeout-minutes: 15

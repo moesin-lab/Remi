@@ -7,7 +7,7 @@ import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { larkInstallationsOptions } from "@multiremi/core/lark";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
-import { LarkAgentBindButton } from "../../../settings/components/lark-tab";
+import { LarkAgentBindButton } from "../../../im-platforms/feishu/lark-tab";
 import { useT } from "../../../i18n";
 
 /**
@@ -25,7 +25,7 @@ import { useT } from "../../../i18n";
  */
 export function IntegrationsTab({ agent }: { agent: Agent }) {
   const { t } = useT("agents");
-  const { t: ts } = useT("settings");
+  const { t: ts } = useT("im-platforms");
   const wsId = useWorkspaceId();
   const user = useAuthStore((s) => s.user);
 

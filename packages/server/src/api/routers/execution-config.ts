@@ -105,6 +105,7 @@ export function registerExecutionConfigRoutes(
     id: group.id,
     workspace_id: group.workspaceId,
     name: group.name,
+    description: group.description,
     provider: group.provider,
     profile_id: group.profileId,
     profile_revision: group.profileRevision,

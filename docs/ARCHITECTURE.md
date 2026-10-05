@@ -120,7 +120,7 @@ PostgreSQL 的 `PgBridge.request` 用 `Atomics.wait` 等待 [pg-worker](../packa
 
 ## 云友执行能力组
 
-[执行组存储](../packages/server/src/store/execution-groups.ts)与[中央 Profile 存储](../packages/server/src/store/repos/execution-profiles-repo.ts)分别管理执行成员和连接配置。Profile 属于工作区，保存 Claude/Codex 连接及不可变版本；能力组明确指定 provider、Profile 和 Runtime 成员，同一个 Runtime 可以加入多个组。自动发现只登记机器的引擎与健康状态，不再创建能力组。配置入口、权限与升级兼容见[执行配置](dev/execution-configuration.md)。
+[执行组存储](../packages/server/src/store/execution-groups.ts)与[中央 Profile 存储](../packages/server/src/store/repos/execution-profiles-repo.ts)分别管理执行成员和连接配置。Profile 属于工作区，保存 Claude/Codex 连接及不可变版本；能力组是独立配置对象，包含名称、用途说明、provider、Profile 和 Runtime 成员，同一个 Runtime 可以加入多个组。组内 Provider/模型与成员可在同一事务保存；失败时连接、凭据版本及成员均回滚。自动发现只登记机器的引擎与健康状态，不再创建能力组。配置入口、权限与升级兼容见[执行配置](dev/execution-configuration.md)。
 
 云友通过 `execution_group_id` 选择能力组，也可保留「自动调度」。组内任务领取通过 `runtimeCanRunAgent` 复验成员关系、模型、类型、工作区与归属，并与项目设备和本机目录约束取交集。受管能力组还要求 daemon 对当前 Profile 版本回报 ready；在线数量不代表配置已就绪。无可用成员时排队，不转到组外机器。中央 Profile 的模型用于该组目录，未配置中央 Profile 的路径沿用有效连接目录；目录声明不代表服务连通。
 

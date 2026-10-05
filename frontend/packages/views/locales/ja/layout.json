@@ -15,7 +15,8 @@
     "plugins": "プラグイン",
     "skills": "スキル",
     "settings": "設定",
-    "chat": "チャット"
+    "chat": "チャット",
+    "execution_groups": "実行機能グループ"
   },
   "help": {
     "trigger": "ヘルプ",

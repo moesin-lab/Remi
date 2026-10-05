@@ -115,6 +115,7 @@ vi.mock("@multiremi/core/paths", () => ({
     squads: () => "/acme/squads",
     usage: () => "/acme/usage",
     runtimes: () => "/acme/runtimes",
+    executionGroups: () => "/acme/execution-groups",
     plugins: () => "/acme/plugins",
     skills: () => "/acme/skills",
     settings: () => "/acme/settings",

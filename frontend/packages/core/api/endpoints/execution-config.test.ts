@@ -20,9 +20,24 @@ it("writes an explicit workspace and accepts group members' unknown future state
   vi.stubGlobal("fetch", fetch);
   const endpoint = new RuntimesEndpoints(new HttpClient("https://api.test"));
   const input = { name: "Group", provider: "codex", profile_id: "p", runtime_ids: ["r"] };
-  await endpoint.saveExecutionGroup("ws", "g", input);
+  const saved = await endpoint.saveExecutionGroup("ws", "g", input);
+  expect(saved.group.description).toBe("");
   expect(JSON.parse(fetch.mock.calls[0]![1].body)).toEqual({ ...input, workspace_id: "ws" });
   fetch.mockResolvedValue(response({ group: { id: "g" } }));
+  await expect(endpoint.saveExecutionGroup("ws", "g", input)).rejects.toBeInstanceOf(ApiContractError);
+});
+it("saves inline provider configuration with group metadata and rejects malformed descriptions", async () => {
+  const group = { id: "g", workspace_id: "ws", name: "Review", description: "Review services", provider: "codex", runtime_ids: [], online_runtime_count: 0, profile_id: "p", profile_revision: 1 };
+  const fetch = vi.fn().mockResolvedValue(response({ group }));
+  vi.stubGlobal("fetch", fetch);
+  const endpoint = new RuntimesEndpoints(new HttpClient("https://api.test"));
+  const input = {
+    name: group.name, description: group.description, provider: "codex", profile_id: null, runtime_ids: [],
+    connection: { name: "Gateway", profile: { name: "custom", base_url: "https://model.test", model: "fast", env_key: "REMI_CODEX_REVIEW" } },
+  };
+  expect((await endpoint.saveExecutionGroup("ws", undefined, input)).group.description).toBe(group.description);
+  expect(JSON.parse(fetch.mock.calls[0]![1].body)).toEqual({ ...input, workspace_id: "ws" });
+  fetch.mockResolvedValue(response({ group: { ...group, description: 42 } }));
   await expect(endpoint.saveExecutionGroup("ws", "g", input)).rejects.toBeInstanceOf(ApiContractError);
 });
 it("requires an explicit successful delete response", async () => {

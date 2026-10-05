@@ -75,6 +75,7 @@ export const ExecutionGroupSchema = z.object({
     id: z.string().min(1),
     workspace_id: z.string(),
     name: z.string(),
+    description: z.string().default(""),
     provider: z.string(),
     runtime_ids: z.array(z.string()),
     online_runtime_count: z.number().int().nonnegative(),

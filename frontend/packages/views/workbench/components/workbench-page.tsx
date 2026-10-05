@@ -28,6 +28,7 @@ import { useListPerfMarker } from "../../common/use-list-perf-marker";
 import { useNavigation } from "../../navigation";
 import { useT } from "../../i18n";
 import { WorkbenchListItem } from "./workbench-list-item";
+import { WorkbenchRunPanel } from "./workbench-run-panel";
 
 const FAILURE_SUMMARY_MAX_LENGTH = 160;
 
@@ -239,17 +240,22 @@ export function WorkbenchPage() {
 
   const detailContent = selectedId ? (
     <ErrorBoundary resetKeys={[selectedId]}>
-      <IssueDetail
-        key={selectedId}
-        issueId={selectedId}
-        layoutId="multimira_workbench_issue_detail_layout"
-        initialIssueSessionId={
-          urlIssue === selectedId ? urlSession || undefined : undefined
-        }
-        onIssueSessionChange={handleIssueSessionChange}
-        onDelete={advanceSelection}
-        onDone={advanceSelection}
-      />
+      <div className="flex h-full min-h-0 flex-col">
+        <WorkbenchRunPanel key={selectedId} issueId={selectedId} wsId={wsId} />
+        <div className="flex min-h-0 flex-1 flex-col">
+          <IssueDetail
+            key={selectedId}
+            issueId={selectedId}
+            layoutId="multimira_workbench_issue_detail_layout"
+            initialIssueSessionId={
+              urlIssue === selectedId ? urlSession || undefined : undefined
+            }
+            onIssueSessionChange={handleIssueSessionChange}
+            onDelete={advanceSelection}
+            onDone={advanceSelection}
+          />
+        </div>
+      </div>
     </ErrorBoundary>
   ) : null;
 

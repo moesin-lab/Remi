@@ -95,7 +95,11 @@ vi.mock("@multiremi/core/hooks", () => ({
 
 vi.mock("@multiremi/core/paths", () => ({
   useCurrentWorkspace: () => ({ name: "Test Workspace" }),
+  useWorkspacePaths: () => ({ issueDetail: (id: string) => `/ws-test/issues/${id}` }),
 }));
+
+const mockPush = vi.hoisted(() => vi.fn());
+vi.mock("../navigation", () => ({ useNavigation: () => ({ push: mockPush }) }));
 
 vi.mock("@multiremi/core/workspace/queries", () => ({
   agentListOptions: () => ({ queryKey: ["agents"] }),
@@ -316,7 +320,7 @@ describe("AgentCreatePanel", () => {
     mockProjectsQuery.data = [];
     mockProjectsQuery.isSuccess = true;
     mockSquadsData.list = [];
-    mockQuickCreateIssue.mockResolvedValue(undefined);
+    mockQuickCreateIssue.mockResolvedValue({ task_id: "task-created", issue: { id: "intake-1", identifier: "TES-1", title: "Saved request" } });
     mockSetKeepOpen.mockImplementation((value: boolean) => {
       mockQuickCreateStore.keepOpen = value;
     });
@@ -369,7 +373,20 @@ describe("AgentCreatePanel", () => {
     expect(mockSetLastActor).toHaveBeenCalledWith("agent", "agent-1");
     expect(mockClearPrompt).toHaveBeenCalled();
     expect(mockSetLastMode).toHaveBeenCalledWith("agent");
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("region", { name: "Creation receipt" })).toHaveTextContent("Saved request");
+    await user.click(screen.getByRole("button", { name: "View request and progress" }));
+    expect(mockPush).toHaveBeenCalledWith("/ws-test/issues/intake-1");
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("starts another creation empty without replaying the carried or persisted prompt", async () => {
+    const user = userEvent.setup();
+    renderPanel({ onClose: vi.fn(), data: { prompt: "Carried request" }, isExpanded: false, setIsExpanded: vi.fn() });
+    await user.click(screen.getByRole("button", { name: /^Let agent create \(/i }));
+    await user.click(await screen.findByRole("button", { name: "Create another" }));
+    expect(screen.getByPlaceholderText(/Tell the agent what to do/)).toHaveValue("");
+    expect(screen.getByRole("button", { name: /^Let agent create \(/i })).toBeDisabled();
   });
 
   // Picking a squad routes the submission through `squad_id` (not

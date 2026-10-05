@@ -13,6 +13,7 @@ export type {
 } from "@multiremi/contracts";
 export type {
   Issue,
+  CreatedIssue,
   IssueDependency,
   IssueStatus,
   IssuePriority,

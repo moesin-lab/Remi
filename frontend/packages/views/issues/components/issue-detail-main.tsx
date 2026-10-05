@@ -249,6 +249,7 @@ export function IssueDetailMain({
               activeIssueSessionId={sessions.activeId}
               activeIssueSession={sessions.active}
               sessionsPending={sessions.pending}
+              sessionsError={sessions.error}
               sessionsFetching={sessions.fetching}
               onRetrySessions={sessions.refetch}
               scrollContainerEl={scrollContainerEl}

@@ -18,6 +18,27 @@ afterEach(() => {
 });
 
 describe("Multiremi CLI — issues, attachments, and sessions", () => {
+  test("issue rerun --task-id preserves the selected-run contract and documents the flag", async () => {
+    const bodies: unknown[] = [];
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+      bodies.push(await request.json());
+      return Response.json({ id: "new-task" }, { status: 202 });
+    } });
+    const originalLog = console.log;
+    try {
+      console.log = () => {};
+      const options = ["--server", server.url.toString(), "--token", "fixture", "--task-id", "old-task"];
+      await runMultiremi(["issue", "rerun", "iss_1", ...options]);
+      expect(bodies).toEqual([{ task_id: "old-task" }]);
+      await expect(runMultiremi(["issue", "rerun", "iss_1", ...options, "--prompt", "override"])).rejects.toThrow();
+      expect(bodies).toHaveLength(1);
+      expect(cliCommandHelp(["issue", "rerun"])).toContain("--task-id");
+    } finally {
+      console.log = originalLog;
+      server.stop(true);
+    }
+  });
+
   test("issue list encodes --assignee-type as the plural compatibility parameter", () => {
     const query = new URLSearchParams(buildIssueListQuery({ "assignee-type": "member" }));
     expect(query.get("assignee_types")).toBe("member");

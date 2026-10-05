@@ -36,6 +36,7 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 | `bun run replay:coverage` | [ACP fixture 重放检查](tests/integration/replay-coverage.ts) | 仓库内 fixture |
 | `bun run smoke:im` | [IM 平台浏览器验证](tests/integration/smoke-im-platforms.ts)：侧栏和能力页面、机器人/路由/消息源保存、权限、旧链接、工作区隔离与移动端；独立 Next ↔ HTTP API ↔ 临时 SQLite | 前端依赖与 Chromium（可设 `CHROME_EXECUTABLE`）；模拟飞书外部传输，不发送真实消息 |
 | `bun run smoke:chat` | 独立 Chat 页面、队列、会话管理和附件；隔离 Next ↔ Bun API ↔ 临时 SQLite，模拟 Agent 输出 | 前端依赖与 Chromium；不调用真实 provider |
+| `bun run tests/integration/smoke-interaction-recovery.ts` | 创建/接单回执、失败保留输入、重复提交、工作台重试与状态更新、390px 布局；临时数据库、独立 workspace、独立浏览器 | Node、前端依赖和 Playwright Chromium（`node node_modules/playwright-core/cli.js install chromium`）；默认端口 3348，可用 `--port=` 修改；模拟 worker，不调用真实 provider；输出截图和 `result.json` |
 | `bun run tests/integration/smoke-execution-configuration.ts` | [集中配置浏览器冒烟](tests/integration/smoke-execution-configuration.ts)：Profile/能力组增改删、绑定状态、版本失效及移动端；隔离 Next ↔ HTTP API ↔ 临时 SQLite | 前端依赖与 Chromium；使用测试凭据、模拟绑定确认，不调用真实模型 |
 
 `frontend/e2e/` 仍有继承的 Playwright 用例和上游登录/数据库假设；[配置](frontend/playwright.config.ts)只指定浏览器与 baseURL，不启动服务。它不能替代根 `e2e:frontend` 对 Remi Bun API 的验证。针对这些用例开发时，先核对 [env.ts](frontend/e2e/env.ts) 和实际 helper。

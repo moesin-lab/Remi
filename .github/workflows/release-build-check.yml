@@ -150,6 +150,14 @@ jobs:
         run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
       - name: Verify updater safety and lifecycle
         run: bun test tests/unit/platform-updater tests/unit/multiremi/multiremi-platform-lifecycle.test.ts tests/unit/multiremi/multiremi-platform-drain.test.ts tests/unit/multiremi/multiremi-platform-safety.test.ts tests/unit/daemon/task-report-outbox.test.ts
+      - name: Verify runtime installation and launch portability
+        run: bun test tests/unit/acp/runtime-bundle.test.ts tests/unit/acp/launch.test.ts
+      - name: Verify pinned ACP bridges and bundled runtimes on Windows
+        if: runner.os == 'Windows'
+        env:
+          REMI_HOME: ${{ runner.temp }}/remi-pinned-runtimes
+          REMI_CLAUDE_AGENT_ACP_EXECUTABLE: ${{ github.workspace }}/bin/remi-claude-agent-acp
+        run: bun run apps/remi/main.ts runtime prepare --provider claude --provider codex
       - name: Verify host update and rollback fault recovery
         run: node --test scripts/local-profile.test.mjs scripts/platform-updater-runner.test.mjs
       - name: Compile the Windows host updater

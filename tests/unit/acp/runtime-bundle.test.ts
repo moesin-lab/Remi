@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { installRuntimeBundle, runtimeBundleBridge, runtimeBundlePrefix, verifyRuntimeExecutable } from "@acp/runtime-bundle.js";
 import { BRIDGE_PACKAGE, BRIDGE_PIN, RUNTIME_PIN } from "@acp/runtime-versions.js";
 
@@ -19,7 +19,7 @@ function fixture(options: { fail?: boolean; executableVersion?: string; symlinkH
   process.env.REMI_HOME = root;
   if (options.symlinkHome) {
     mkdirSync(join(root, "real-home", ".remi"), { recursive: true });
-    symlinkSync(join(root, "real-home"), join(root, "linked-home"), "dir");
+    symlinkSync(join(root, "real-home"), join(root, "linked-home"), process.platform === "win32" ? "junction" : "dir");
     process.env.REMI_HOME = join(root, "linked-home", ".remi");
   }
   const destination = runtimeBundlePrefix("codex");
@@ -29,7 +29,8 @@ function fixture(options: { fail?: boolean; executableVersion?: string; symlinkH
   // A local stand-in for npm exercises staging, validation and activation. No network.
   writeFileSync(npm, `#!${node}\n` + (options.fail ? 'throw new Error("registry unavailable");' : `
     const fs = require("node:fs"), path = require("node:path");
-    const prefix = process.argv[process.argv.indexOf("--prefix") + 1];
+    const prefixIndex = process.argv.indexOf("--prefix");
+    const prefix = prefixIndex === -1 ? process.cwd() : process.argv[prefixIndex + 1];
     const manifest = JSON.parse(fs.readFileSync(path.join(prefix, "package.json"), "utf8"));
     if (manifest.overrides["@openai/codex"] !== ${JSON.stringify(RUNTIME_PIN.codex.version)}) throw Error("missing SDK override");
     // npm 10 loses root overrides when --prefix traverses a directory symlink.
@@ -44,14 +45,16 @@ function fixture(options: { fail?: boolean; executableVersion?: string; symlinkH
     fs.writeFileSync(path.join(sdk, "bin", "codex.js"), ${JSON.stringify(`console.log("codex-cli ${options.executableVersion ?? RUNTIME_PIN.codex.executableVersion}");`)});
   `));
   chmodSync(npm, 0o755);
-  return { destination, tools: { node, npm } };
+  const npmCommand = process.platform === "win32" ? join(root, "npm.cmd") : npm;
+  if (npmCommand !== npm) writeFileSync(npmCommand, `@echo off\r\n"${node}" "${npm}" %*\r\n`);
+  return { destination, tools: { node, npm: npmCommand } };
 }
 
 test("a download failure leaves the existing bundle untouched and removes staging files", () => {
   const f = fixture({ fail: true });
   expect(() => installRuntimeBundle("codex", f.tools, () => {})).toThrow();
   expect(readFileSync(join(f.destination, "previous-install"), "utf8")).toBe("keep this working install");
-  expect(readdirSync(join(root, "acp", "bundles"))).toEqual([f.destination.split("/").at(-1)!]);
+  expect(readdirSync(join(root, "acp", "bundles"))).toEqual([basename(f.destination)]);
 });
 
 test("an installation in another live process is not replaced", () => {

@@ -388,7 +388,9 @@
     "select_all_sub_issues_aria": "选择全部子 issue",
     "timeline_unavailable_title": "无法加载与此 Issue 关联的 Sessions",
     "timeline_unavailable_hint": "评论和动态按 Session 划分；Session 列表加载失败时无法显示。",
-    "timeline_retry": "重试"
+    "timeline_retry": "重试",
+    "no_linked_sessions_title": "暂无可查看的关联 Session",
+    "no_linked_sessions_hint": "任务已保存。可在右侧属性中分配智能体开始工作，或在关联 Session 后回到这里查看进展。"
   },
   "log_event": {
     "envelope_recipient": "已通知 {{name}}",

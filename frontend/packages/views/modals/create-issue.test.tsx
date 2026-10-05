@@ -416,13 +416,8 @@ describe("CreateIssueModal", () => {
 
     expect(mockSetLastAssignee).toHaveBeenCalledWith(undefined, undefined);
     expect(mockClearDraft).toHaveBeenCalled();
-    expect(onClose).toHaveBeenCalled();
-    expect(mockToastCustom).toHaveBeenCalledTimes(1);
-
-    const renderToast = mockToastCustom.mock.calls[0]?.[0];
-    expect(typeof renderToast).toBe("function");
-
-    render(renderToast("toast-1"));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("region", { name: "Creation receipt" })).toBeInTheDocument();
 
     expect(screen.getByText("Issue created")).toBeInTheDocument();
     expect(screen.getByText(/TES-123/)).toBeInTheDocument();
@@ -431,7 +426,7 @@ describe("CreateIssueModal", () => {
     await user.click(screen.getByRole("button", { name: "View issue" }));
 
     expect(mockPush).toHaveBeenCalledWith("/ws-test/issues/issue-123");
-    expect(mockToastDismiss).toHaveBeenCalledWith("toast-1");
+    expect(onClose).toHaveBeenCalled();
   });
 
   it("keeps manual mode open and clears content when create another is enabled", async () => {

@@ -20,5 +20,27 @@
     "minutes": "{{count}} 分钟",
     "hours": "{{count}} 小时",
     "days": "{{count}} 天"
+  },
+  "run": {
+    "label": "执行与恢复",
+    "loading": "正在读取执行状态…",
+    "load_failed": "无法读取执行状态。",
+    "refresh": "刷新",
+    "unknown": "执行状态未知",
+    "queued": "已排队，等待开始",
+    "waiting_directory": "正在等待工作目录可用",
+    "running": "智能体正在执行",
+    "awaiting_human": "等待你的回复",
+    "failed": "最近一次执行失败",
+    "cancelled": "最近一次执行已停止",
+    "completed": "最近一次执行已完成，等待验收",
+    "active_count": "{{count}} 个任务执行中",
+    "view": "查看本次执行",
+    "retry": "重试执行",
+    "retrying": "正在重试…",
+    "retry_hint": "使用原智能体、Session 和指令创建新一轮执行；不会撤销之前已执行的工具操作。",
+    "dependencies_unmet": "前置任务尚未完成，请处理后再重试。",
+    "active_run_exists": "已有任务执行中，请先查看当前进度。",
+    "retry_failed": "尚未确认重试成功，请刷新并检查执行记录后再尝试。"
   }
 }

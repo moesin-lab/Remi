@@ -735,6 +735,8 @@ export class BinarySkillFilesUnsupportedError extends Error {
 /** Steer submitted for a task that already reached a terminal state — API contract: 409. */
 export class TaskSteerConflictError extends Error {}
 
+export class ActiveIssueRunError extends Error {}
+
 /** Ordinary Chat cannot opt into Issue execution; a caller input error, not a server failure. */
 export class ChatIssueTaskConflictError extends Error {}
 
@@ -1516,11 +1518,11 @@ export class TasksRepo {
     return agentBlocker ? toTaskQueueBlocker(agentBlocker) : null;
   }
 
-  createTask(input: CreateTaskInput): MultiremiTask {
+  createTask(input: CreateTaskInput, options?: { requireIdleIssue?: boolean }): MultiremiTask {
     const childStatusChanges: ChildStatusChangeCollector = [];
     const deferredEvents = createCommitEventQueue();
     const task = this.ctx.db.transaction(() =>
-      this.createTaskWithinTransaction(input, childStatusChanges, deferredEvents))();
+      this.createTaskWithinTransaction(input, childStatusChanges, deferredEvents, options))();
     this.ctx.notifyTaskEnqueued(task);
     this.runChildStatusChanges(childStatusChanges);
     this.ctx.emitCommitEvents(deferredEvents);
@@ -1570,6 +1572,7 @@ export class TasksRepo {
     input: CreateTaskInput,
     childStatusChanges: ChildStatusChangeCollector,
     deferredEvents: CommitEventQueue,
+    options?: { requireIdleIssue?: boolean },
   ): MultiremiTask {
     const initialAgent = this.ctx.agents().getAgent(input.agentId);
     if (!initialAgent) throw new Error(`Agent not found: ${input.agentId}`);
@@ -1584,6 +1587,14 @@ export class TasksRepo {
     if (currentAgent.archivedAt) throw new Error(`Agent is archived: ${input.agentId}`);
     if (currentAgent.workspaceId !== workspaceId) {
       throw new Error(`Agent workspace changed while creating task: ${input.agentId}`);
+    }
+    // Serialize explicit recovery with all creators and Runtime claims. Checking
+    // only in the HTTP handler permits two API processes to enqueue two retries.
+    if (options?.requireIdleIssue && input.issueId) {
+      const active = this.ctx.db.query(
+        "SELECT id FROM multiremi_tasks WHERE issue_id = ? AND status NOT IN ('completed', 'failed', 'cancelled') LIMIT 1",
+      ).get(input.issueId);
+      if (active) throw new ActiveIssueRunError("This issue already has an active run");
     }
     return this.createTaskWithinWorkspaceLock(input, childStatusChanges, deferredEvents);
   }

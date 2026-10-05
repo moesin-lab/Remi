@@ -1,7 +1,6 @@
 "use client";
 
 import { MessageCircle } from "lucide-react";
-import { useSyncExternalStore } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@multiremi/ui/lib/utils";
 import { useChatStore } from "@multiremi/core/chat";
@@ -18,18 +17,12 @@ import { useNavigation } from "../../navigation";
 import { useT } from "../../i18n";
 
 const logger = createLogger("chat.ui");
-const subscribeHydration = () => () => {};
-const clientHydrated = () => true;
-const serverHydrated = () => false;
 
 export function ChatFab() {
   const { t } = useT("chat");
   const wsId = useWorkspaceId();
   const isOpen = useChatStore((s) => s.isOpen);
   const toggle = useChatStore((s) => s.toggle);
-  // The stored open state can differ from the server default on a full-page
-  // navigation. Render the FAB only after hydration so both initial trees agree.
-  const hydrated = useSyncExternalStore(subscribeHydration, clientHydrated, serverHydrated);
   // MUL-472 b: the FAB is the minimised chat's only surface, and both of its
   // inputs are shell-wide roll-ups: the session list (for the unread badge) and
   // the pending task aggregate (for the running pulse). They wait for the
@@ -48,7 +41,9 @@ export function ChatFab() {
     pendingChatTasksOptions(wsId, { enabled: afterFirstScreen }),
   );
 
-  if (!hydrated || isOpen) return null;
+  // The persisted open preference can differ from SSR's default. Wait for the
+  // existing client gate before rendering the minimized button on a reload.
+  if (!afterFirstScreen || isOpen) return null;
 
   const unreadSessionCount = sessions.filter((s) => s.has_unread).length;
   const isRunning = (pending?.tasks ?? []).length > 0;

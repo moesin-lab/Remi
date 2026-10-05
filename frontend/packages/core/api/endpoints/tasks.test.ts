@@ -73,3 +73,28 @@ describe("TasksEndpoints steer", () => {
     await expect(client.listTaskSteers("task-1")).resolves.toEqual({ messages: [] });
   });
 });
+
+describe("issue run recovery contract", () => {
+  const task = { id: "task-new", issue_id: "issue-1", agent_id: "agent-1", status: "queued", created_at: "2026-10-05T00:00:00Z" };
+  it("posts the selected run and requires a new run acknowledgement", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json(task, { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(new ApiClient("https://api.example.test").rerunIssue("issue-1", "task-old")).resolves.toEqual(task);
+    expect(fetchMock).toHaveBeenCalledWith("https://api.example.test/api/issues/issue-1/rerun", expect.objectContaining({ body: JSON.stringify({ task_id: "task-old" }) }));
+  });
+  it.each([
+    {}, { ...task, id: "task-old" }, { ...task, issue_id: "other" },
+    { ...task, status: "invented" }, { ...task, agent_id: null },
+  ])("rejects unconfirmed retry acknowledgements: %j", async (body) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(body, { status: 202 })));
+    await expect(new ApiClient("https://api.example.test").rerunIssue("issue-1", "task-old")).rejects.toBeInstanceOf(ApiContractError);
+  });
+  it("keeps unknown read statuses but rejects a corrupt execution list", async () => {
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(Response.json([{ ...task, status: "future_state" }]))
+      .mockResolvedValueOnce(Response.json([{ ...task, created_at: 42 }])));
+    const client = new ApiClient("https://api.example.test");
+    expect((await client.listTasksByIssue("issue-1"))[0]?.status).toBe("future_state");
+    await expect(client.listTasksByIssue("issue-1")).rejects.toBeInstanceOf(ApiContractError);
+  });
+});

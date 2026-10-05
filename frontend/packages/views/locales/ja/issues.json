@@ -387,7 +387,9 @@
     "select_all_sub_issues_aria": "すべてのサブイシューを選択",
     "timeline_unavailable_title": "この Issue にリンクされたセッションを読み込めませんでした",
     "timeline_unavailable_hint": "コメントとアクティビティはセッション単位で管理されるため、セッション一覧を読み込めないと表示できません。",
-    "timeline_retry": "再試行"
+    "timeline_retry": "再試行",
+    "no_linked_sessions_title": "表示できる関連セッションはありません",
+    "no_linked_sessions_hint": "課題は保存されました。プロパティでエージェントを割り当てて開始するか、セッションの関連付け後に進捗を確認してください。"
   },
   "log_event": {
     "envelope_recipient": "{{name}} に通知",

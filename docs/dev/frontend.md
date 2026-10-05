@@ -88,7 +88,7 @@ Issue 活动区默认显示普通评论、固定单行的派活和 `workspace_mo
 
 [IM 平台管理](im-platforms.md)是与工作区、配置同级的主侧栏分组，当前只支持飞书。平台目录、能力路由和页面实现归属独立的 `core/im-platforms` 与 `views/im-platforms`；机器人与消息采集保留各自的数据和权限。原「集成」「飞书消息」设置地址通过 Web 路由转到新页面，并保留查询参数。
 
-能力导航在切换页面或调整视口后将当前项滚入可见区域。共享 Chat 浮钮在 hydration 后读取本地开关状态，避免从 IM 深链刷新时服务器的默认打开状态与浏览器的关闭偏好产生不同的首屏树。
+能力导航在切换页面或调整视口后将当前项滚入可见区域。共享 Chat 浮钮复用首屏门禁，待路由内容就绪并完成 hydration 后按本地开关状态显示，避免从 IM 深链刷新时服务器的默认打开状态与浏览器的关闭偏好产生不同的首屏树。
 
 ## 实时更新与性能定位
 
@@ -102,6 +102,10 @@ Runtime 的统一配置页 [execution-config-page.tsx](../../frontend/packages/v
 - 排查慢页面先区分网络请求扇出、API 延迟、缓存失效范围和 React 渲染成本；保留测量场景与前后结果。以上文件提供定位入口，不把静态代码形态直接当成已证实的性能瓶颈。
 
 ## 验证入口
+
+创建弹窗在成功响应后保留[创建回执](../../frontend/packages/views/modals/issue-creation-receipt.tsx)，区分 Issue 已保存、Task 已派发与未派发原因；派发确认不等于已经执行。快速创建回执链接接单 Issue，便于追踪整理进度和生成的任务。连续创建保留紧凑回执，失败保留输入；创建另一条不会重新填入上一条携带的 prompt。命令响应严格校验，旧服务缺失派发字段时显示未确认。新 Issue 没有可见关联 Session 时展示空状态；Session 读取或深链接定位失败保留重试入口，响应格式错误不降级为成功空列表。
+
+工作台选中 Issue 的执行状态和重试规则见[工作台/收件箱边界](../inbox-workbench-boundary.md#selected-issue-execution-and-recovery)。隔离浏览器验收通过 `bun run tests/integration/smoke-interaction-recovery.ts` 启动临时 API、独立 workspace 和 Next，Node/Playwright 负责浏览器；运行前可用 `node node_modules/playwright-core/cli.js install chromium` 准备浏览器。脚本输出截图及 `result.json` 的临时目录。
 
 浏览器本地副本在 [replica/browser.ts](../../frontend/packages/core/replica/browser.ts)。Web Lock、BroadcastChannel、OPFS SAH pool 名和目录都使用同一个 `(user_id, workspace_id)` 分区键；频道消息再核对该键。leader 持有 Worker 和 socket，follower 通过频道查询；没有 OPFS 或 Web Locks 时，每页的 Memory 副本复用同一个 leader 请求队列和同步语义。
 

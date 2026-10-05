@@ -9,6 +9,29 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
+describe("issue creation acknowledgement", () => {
+  it("preserves dispatch outcomes and legacy absence without inferring execution", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ...issue, task_id: "task-new", dispatch_status: "dispatched", dispatch_skipped_reason: null }))
+      .mockResolvedValueOnce(jsonResponse({ ...issue, task_id: null, dispatch_status: "skipped", dispatch_skipped_reason: "no_runnable_agent" }))
+      .mockResolvedValueOnce(jsonResponse(issue));
+    vi.stubGlobal("fetch", fetchMock);
+    const endpoint = new IssuesEndpoints(new HttpClient("https://api.example.test"));
+    expect(await endpoint.createIssue({ title: "Create" })).toMatchObject({ task_id: "task-new", dispatch_status: "dispatched" });
+    expect(await endpoint.createIssue({ title: "Create" })).toMatchObject({ task_id: null, dispatch_status: "skipped", dispatch_skipped_reason: "no_runnable_agent" });
+    expect((await endpoint.createIssue({ title: "Create" })).dispatch_status).toBeUndefined();
+  });
+
+  it.each([
+    { task_id: null, dispatch_status: "dispatched" },
+    { task_id: "task-new", dispatch_status: "skipped" },
+    { task_id: 42, dispatch_status: "dispatched" },
+  ])("rejects contradictory or malformed dispatch responses: %j", async (fields) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ ...issue, ...fields })));
+    await expect(new IssuesEndpoints(new HttpClient("https://api.example.test")).createIssue({ title: "Create" })).rejects.toThrow();
+  });
+});
+
 const workspace = {
   issue_id: "issue-1",
   workspace_id: "ws-1",

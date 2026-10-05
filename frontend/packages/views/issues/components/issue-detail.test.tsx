@@ -1595,15 +1595,14 @@ describe("IssueDetail (shared)", () => {
     });
   });
 
-  it("treats an empty session list as unavailable rather than as an empty timeline", async () => {
-    // No session id means no timeline query can ever run; silently rendering
-    // an empty activity list would claim the issue has no history.
+  it("distinguishes no visible linked Sessions from a failed Session read", async () => {
     mockApiObj.listIssueSessions.mockResolvedValue([]);
     renderIssueDetail();
 
     expect(
-      await screen.findByText("Couldn't load Sessions linked to this issue"),
+      await screen.findByText("No linked Sessions to show"),
     ).toBeInTheDocument();
+    expect(screen.queryByText("Couldn't load Sessions linked to this issue")).not.toBeInTheDocument();
     expect(mockApiObj.getSessionLog).not.toHaveBeenCalled();
   });
 

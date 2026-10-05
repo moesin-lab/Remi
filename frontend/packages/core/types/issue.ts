@@ -14,6 +14,13 @@ export type IssuePriority = "urgent" | "high" | "medium" | "low" | "none";
 
 export type IssueAssigneeType = "member" | "agent" | "squad";
 
+/** Creation acknowledgement; a dispatched task may still be waiting to start. */
+export type CreatedIssue = Issue & {
+  task_id?: string | null;
+  dispatch_status?: string;
+  dispatch_skipped_reason?: string | null;
+};
+
 export interface IssueReaction {
   id: string;
   issue_id: string;

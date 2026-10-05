@@ -1,6 +1,7 @@
 import type {
   AnswerIssueDecisionInput,
   CreateIssueRequest,
+  CreatedIssue,
   GroupedIssuesResponse,
   Issue,
   IssueDependency,
@@ -33,6 +34,7 @@ import {
   IssueDecisionListSchema,
   IssueDecisionMutationResponseSchema,
   IssueDetailSchema,
+  CreatedIssueSchema,
   IssueSchema,
   IssueParentDoneGrantMutationResponseSchema,
   QuickCreateIssueResponseSchema,
@@ -280,12 +282,14 @@ export class IssuesEndpoints {
     );
   }
 
-  async createIssue(data: CreateIssueRequest): Promise<Issue> {
+  async createIssue(data: CreateIssueRequest): Promise<CreatedIssue> {
     const raw = await this.http.fetch<unknown>("/api/issues", {
       method: "POST",
       body: JSON.stringify(data),
     });
-    return parseIssueMutation(raw, "POST /api/issues", data);
+    const result = parseStrictResponse<CreatedIssue>(raw, CreatedIssueSchema, { endpoint: "POST /api/issues" });
+    parseIssueMutation(result, "POST /api/issues", data);
+    return result;
   }
 
   async quickCreateIssue(data: {

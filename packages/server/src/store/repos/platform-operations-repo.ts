@@ -10,6 +10,7 @@ import type {
   MultiremiPlatformRelease,
   MultiremiPlatformService,
   MultiremiPlatformPreflight,
+  MultiremiPlatformUpdateMode,
   ReportPlatformOperationInput,
 } from "@multiremi/contracts/types.js";
 import {
@@ -68,6 +69,7 @@ export interface PlatformOperationReceipt {
 }
 
 export interface PlatformStateRecord {
+  updateMode: MultiremiPlatformUpdateMode | null;
   releaseFeedUrl: string | null;
   defaultReleaseFeedUrl: string | null;
   preflight: MultiremiPlatformPreflight | null;
@@ -181,6 +183,7 @@ export class PlatformOperationsRepo {
   }
 
   heartbeat(input: {
+    updateMode?: MultiremiPlatformUpdateMode | null;
     defaultReleaseFeedUrl?: string | null;
     releaseFeedUrl?: string | null;
     preflight?: MultiremiPlatformPreflight | null;
@@ -192,23 +195,34 @@ export class PlatformOperationsRepo {
   }): PlatformStateRecord {
     const current = this.getState();
     const now = nowIso();
-    // Ignore results fetched from a source that changed while the request was in flight.
-    const sourceMatches = input.releaseFeedUrl === undefined || input.releaseFeedUrl === current.releaseFeedUrl;
+    // A legacy full inspection cannot attest to a mode. A keepalive must not erase it.
+    const fullInspection = input.currentRelease !== undefined || input.services !== undefined;
+    const updateMode = input.updateMode !== undefined ? input.updateMode
+      : fullInspection || input.driver !== current.driver ? null : current.updateMode;
+    const defaultFeed = input.defaultReleaseFeedUrl === undefined ? current.defaultReleaseFeedUrl : input.defaultReleaseFeedUrl;
+    const invalidate = input.driver !== current.driver || updateMode !== current.updateMode
+      || (current.releaseFeedUrl === null && defaultFeed !== current.defaultReleaseFeedUrl);
+    // Ignore results fetched from a source that changed while the request was in flight,
+    // including a changed default URL after restarting the updater.
+    const sourceMatches = (input.releaseFeedUrl === undefined || input.releaseFeedUrl === current.releaseFeedUrl)
+      && (!input.preflight?.source || input.preflight.source.url === (current.releaseFeedUrl ?? defaultFeed));
+    const preflight = sourceMatches && input.preflight !== undefined ? input.preflight : invalidate ? null : current.preflight;
     const row = this.db.query(
       `UPDATE multiremi_platform_state
-       SET driver = ?, current_release = ?, latest_release = ?, recent_releases = ?, services = ?,
-           updater_heartbeat_at = ?, updated_at = ?, updater_preflight = ?, default_release_feed_url = ?
+       SET driver = ?, update_mode = ?, updater_preflight = ?, current_release = ?, latest_release = ?, recent_releases = ?, services = ?,
+           updater_heartbeat_at = ?, updated_at = ?, default_release_feed_url = ?
        WHERE id = 'platform' RETURNING *`,
     ).get(
         input.driver,
+        updateMode,
+        toJson(preflight),
         toJson(input.currentRelease === undefined ? current.currentRelease : input.currentRelease),
-        toJson(!sourceMatches || input.latestRelease === undefined ? current.latestRelease : input.latestRelease),
+        toJson(sourceMatches && input.latestRelease !== undefined ? input.latestRelease : invalidate ? null : current.latestRelease),
         toJson(input.recentReleases ?? current.recentReleases),
         toJson(input.services ?? current.services),
         now,
         now,
-        toJson(!sourceMatches || input.preflight === undefined ? current.preflight : input.preflight),
-        input.defaultReleaseFeedUrl === undefined ? current.defaultReleaseFeedUrl : input.defaultReleaseFeedUrl,
+        defaultFeed,
     ) as Row;
     return toState(row);
   }
@@ -472,6 +486,7 @@ export class PlatformOperationsRepo {
 
 function toState(row: Row): PlatformStateRecord {
   return {
+    updateMode: row.update_mode ? String(row.update_mode) as MultiremiPlatformUpdateMode : null,
     releaseFeedUrl: row.release_feed_url ? String(row.release_feed_url) : null,
     defaultReleaseFeedUrl: row.default_release_feed_url ? String(row.default_release_feed_url) : null,
     preflight: parseJson<MultiremiPlatformPreflight | null>(row.updater_preflight, null),

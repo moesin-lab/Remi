@@ -1,0 +1,18 @@
+ARG BUN_IMAGE=oven/bun:1.3.14
+ARG POSTGRES_IMAGE=pgvector/pgvector:pg17
+FROM ${BUN_IMAGE} AS bun
+FROM ${POSTGRES_IMAGE}
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+WORKDIR /updater
+COPY packages/platform-updater ./packages/platform-updater
+COPY apps/platform-updater ./apps/platform-updater
+COPY deploy/docker/internal-updater-entrypoint.sh /usr/local/bin/remi-internal-updater
+RUN mkdir -p node_modules/@remi-platform /remi-program /remi-control /remi-state /remi-seeds/api /remi-seeds/web /remi-data \
+  && ln -s /updater/packages/platform-updater node_modules/@remi-platform/updater \
+  && (getent passwd 1000 >/dev/null || useradd --uid 1000 --home-dir /tmp --no-create-home remi-updater) \
+  && chown 1000:1000 /remi-program /remi-control /remi-state /remi-seeds/api /remi-seeds/web \
+  && chmod 0755 /usr/local/bin/remi-internal-updater \
+  && command -v flock && bun --version && pg_dump --version
+USER 1000:1000
+ENTRYPOINT ["/usr/local/bin/remi-internal-updater"]
+CMD ["internal"]

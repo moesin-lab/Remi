@@ -5894,6 +5894,17 @@ export interface MultiremiAgentActivityBucket {
 
 export type MultiremiPlatformDeploymentDriver = "systemd_release" | "docker_compose" | "local_profile";
 
+/** Execution mode reported by the updater; changing a UI selection cannot change deployment topology. */
+export type MultiremiPlatformUpdateMode = "images" | "host_application" | "internal_application" | "systemd_release";
+
+export interface MultiremiPlatformSourceCapabilities {
+  url: string;
+  manifestUrl: string | null;
+  /** Artifact availability only. Host/runtime and data compatibility still require preflight. */
+  modes: Array<{ mode: MultiremiPlatformUpdateMode; available: boolean; missing: string[] }>;
+  error: string | null;
+}
+
 export type MultiremiPlatformOperationKind =
   | "check_updates"
   | "restart"
@@ -5958,7 +5969,7 @@ export interface MultiremiPlatformService {
 }
 
 export interface MultiremiPlatformRelease {
-  /** SHA-256 of the normalized database migration source. Unequal/unknown schemas require manual maintenance. */
+  /** Migration-source identity; application bundles also declare and rehearse backward compatibility. */
   dataSchema?: string | null;
   version: string;
   ref: string;
@@ -6014,6 +6025,7 @@ export interface MultiremiPlatformAutoUpdateSchedule {
 }
 
 export interface MultiremiPlatformStatus {
+  updateMode?: MultiremiPlatformUpdateMode | null;
   releaseFeedUrl?: string | null;
   defaultReleaseFeedUrl?: string | null;
   preflight?: MultiremiPlatformPreflight | null;
@@ -6036,6 +6048,7 @@ export interface MultiremiPlatformStatus {
 }
 
 export interface MultiremiPlatformPreflight {
+  source?: MultiremiPlatformSourceCapabilities | null;
   ready: boolean;
   checkedAt: string;
   platform: string;

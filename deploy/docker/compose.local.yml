@@ -24,6 +24,7 @@ services:
       dockerfile: deploy/docker/Dockerfile.api
       args:
         MULTIREMI_VERSION: ${REMI_APP_VERSION:?set REMI_APP_VERSION}
+        REMI_APPLICATION_BASE_REF: ${REMI_BUILD_REF:?set REMI_BUILD_REF}
       labels:
         org.opencontainers.image.revision: ${REMI_BUILD_REF:?set REMI_BUILD_REF}
     init: true
@@ -83,6 +84,7 @@ services:
       args:
         REMOTE_API_URL: http://api:6120
         REMI_APP_VERSION: ${REMI_APP_VERSION:?set REMI_APP_VERSION}
+        REMI_APPLICATION_BASE_REF: ${REMI_BUILD_REF:?set REMI_BUILD_REF}
         NEXT_BUILD_CPUS: ${REMI_NEXT_BUILD_CPUS:-2}
         NEXT_PUBLIC_SITE_URL: ${REMI_PUBLIC_URL:?set REMI_PUBLIC_URL to this environment's browser origin}
         NEXT_PUBLIC_LOCAL_PROFILE: ${REMI_PROFILE:?set REMI_PROFILE to stable or dev}

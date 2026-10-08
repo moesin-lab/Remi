@@ -4,11 +4,13 @@ import type {
   MultiremiPlatformRelease,
   MultiremiPlatformService,
   MultiremiPlatformPreflight,
+  MultiremiPlatformUpdateMode,
   ReportPlatformOperationInput,
 } from "@multiremi/contracts";
 import type { PlatformDrainGate } from "./drain.js";
 
 export interface PlatformInspection {
+  updateMode?: MultiremiPlatformUpdateMode;
   driver: MultiremiPlatformDeploymentDriver;
   currentRelease: MultiremiPlatformRelease | null;
   recentReleases: MultiremiPlatformRelease[];
@@ -16,11 +18,18 @@ export interface PlatformInspection {
 }
 
 export interface PlatformDeploymentDriver {
+  readonly updateMode?: MultiremiPlatformUpdateMode;
   readonly kind: MultiremiPlatformDeploymentDriver;
   /** Recover committed host changes before depending on the control API. */
   recoverInterrupted?(): Promise<void>;
   inspect(): Promise<PlatformInspection>;
   preflight(): Promise<MultiremiPlatformPreflight>;
+  /** Validate a target's artifacts and runtime/migration contract, if applicable. */
+  validateRelease?(manifest: unknown): Promise<void>;
+  /** Release a host-owned write fence only after reporting and drain release. */
+  finalize?(operationId: string): Promise<void>;
+  /** Replay a terminal outcome after a crash between report and fence release. */
+  pendingFinalization?(): Promise<{ operationId: string; report: ReportPlatformOperationInput } | null>;
   execute(
     operation: MultiremiPlatformOperation,
     report: (input: ReportPlatformOperationInput) => Promise<void>,
@@ -45,7 +54,7 @@ export interface CommandRunner {
 
 export interface CommandOptions {
   cwd?: string;
-  env?: Record<string, string>;
+  env?: Record<string, string | undefined>;
   stdoutFile?: string;
   stdinFile?: string;
 }

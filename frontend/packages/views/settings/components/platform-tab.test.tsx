@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nProvider } from "@multiremi/core/i18n/react";
 import type { PlatformOperation, PlatformStatus } from "@multiremi/core/platform-lifecycle";
@@ -140,6 +140,90 @@ describe("PlatformTab upgrade lifecycle", () => {
     expect(settingsMutationRef.mutate).toHaveBeenCalledWith({ releaseFeedUrl: null }, expect.any(Object));
   });
 
+  it('shows the reported execution mode and previews migration without changing it or the source', async () => {
+    const user = userEvent.setup();
+    statusRef.current = platformStatus({ updateMode: 'images' });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    expect(screen.getByTestId('platform-current-mode')).toHaveTextContent(enSettings.platform.update_modes.images.label);
+    await user.click(screen.getByRole('button', { name: enSettings.platform.mode_guide }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText(enSettings.platform.update_modes.internal_application.migration)).toBeInTheDocument();
+    expect(within(dialog).getByText(enSettings.platform.mode_source_shared)).toBeInTheDocument();
+    within(dialog).getByRole('combobox').focus();
+    await user.keyboard('[ArrowDown]');
+    await user.click(await screen.findByRole('option', { name: enSettings.platform.update_modes.host_application.label }));
+    expect(within(dialog).getByText(enSettings.platform.update_modes.host_application.migration)).toBeInTheDocument();
+    expect(createMutationRef.mutateAsync).not.toHaveBeenCalled();
+    expect(settingsMutationRef.mutate).not.toHaveBeenCalled();
+    expect(screen.getByTestId('platform-current-mode')).toHaveTextContent(enSettings.platform.update_modes.images.label);
+  });
+
+  it('does not infer a mode from docker_compose, including offline or future updater reports', () => {
+    statusRef.current = platformStatus({ updateMode: 'future_mode', updaterStatus: 'offline' });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    expect(screen.getByTestId('platform-current-mode')).toHaveTextContent(enSettings.platform.mode_unknown);
+    expect(screen.getByText(enSettings.platform.mode_offline)).toBeInTheDocument();
+  });
+
+  it('shows migration blockers without offering an unsafe switch action', async () => {
+    const user = userEvent.setup();
+    statusRef.current = platformStatus({ updateMode: 'images', activeOperation: platformOperation({ status: 'switching' }) });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    await user.click(screen.getByRole('button', { name: enSettings.platform.mode_guide }));
+    expect(within(screen.getByRole('dialog')).getByRole('alert')).toHaveTextContent(enSettings.platform.mode_busy);
+    expect(settingsMutationRef.mutate).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes available images from missing application bundles and checks the saved source', async () => {
+    const user = userEvent.setup();
+    statusRef.current = platformStatus({ updateMode: 'internal_application', releaseFeedUrl: 'https://images.example/feed', preflight: {
+      ready: false, checkedAt: new Date().toISOString(), platform: 'linux', arch: 'x64', checks: [],
+      source: { url: 'https://images.example/feed', manifestUrl: null, error: null, modes: [
+        { mode: 'images', available: true, missing: [] }, { mode: 'internal_application', available: false, missing: ['application_bundle'] },
+      ] },
+    } });
+    createMutationRef.mutateAsync.mockResolvedValue(platformOperation({ kind: 'check_updates' }));
+    render(<PlatformTab />, { wrapper: Wrapper });
+    const source = screen.getByTestId('platform-source-capabilities');
+    expect(within(source).getByText(enSettings.platform.source_available)).toBeInTheDocument();
+    expect(within(source).getByText(enSettings.platform.missing_artifacts.application_bundle)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: enSettings.platform.source_check }));
+    expect(createMutationRef.mutateAsync).toHaveBeenCalledWith({ kind: 'check_updates', targetVersion: null, targetRef: null });
+    await user.type(screen.getByLabelText('Release feed URL'), '/edited');
+    expect(screen.getByText(enSettings.platform.source_unsaved)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: enSettings.platform.source_check })).toBeDisabled();
+  });
+
+  it.each(['expired', 'different_source', 'offline'])('does not show stale capabilities as current when %s', reason => {
+    statusRef.current = platformStatus({ releaseFeedUrl: 'https://new.example/feed', updaterStatus: reason === 'offline' ? 'offline' : 'ready', preflight: {
+      ready: true, checkedAt: new Date(Date.now() - (reason === 'expired' ? 361_000 : 0)).toISOString(), platform: 'linux', arch: 'x64', checks: [],
+      source: { url: reason === 'different_source' ? 'https://old.example/feed' : 'https://new.example/feed', manifestUrl: null, error: null, modes: [{ mode: 'images', available: true, missing: [] }] },
+    } });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    expect(screen.getByText(enSettings.platform.source_unchecked)).toBeInTheDocument();
+    expect(screen.queryByText(enSettings.platform.source_available)).not.toBeInTheDocument();
+  });
+
+  it("queues the advertised update from the settings confirmation without host commands", async () => {
+    const user = userEvent.setup();
+    statusRef.current = platformStatus({
+      updateAvailable: true,
+      latestRelease: { version: "1.2.3", ref: "release-commit", publishedAt: null, releaseUrl: null, manifestUrl: "https://mirror.example/releases.json", apiImage: null, webImage: null },
+      preflight: { ready: true, checkedAt: new Date().toISOString(), platform: "win32", arch: "x64", checks: [{ code: "host", ok: true, message: "ready" }] },
+    });
+    createMutationRef.mutateAsync.mockResolvedValue(platformOperation());
+    render(<PlatformTab />, { wrapper: Wrapper });
+    await user.click(screen.getByRole("button", { name: enSettings.platform.check_updates }));
+    expect(createMutationRef.mutateAsync).toHaveBeenCalledWith({ kind: "check_updates", targetVersion: null, targetRef: null });
+    createMutationRef.mutateAsync.mockClear();
+    await user.click(screen.getByRole("button", { name: enSettings.platform.update_now }));
+    expect(createMutationRef.mutateAsync).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: enSettings.platform.confirm }));
+    await waitFor(() => expect(createMutationRef.mutateAsync).toHaveBeenCalledWith({
+      kind: "update", targetVersion: "1.2.3", targetRef: "https://mirror.example/releases.json",
+    }));
+  });
+
   it("blocks update and restart when preflight fails and exposes the reason", () => {
     statusRef.current = platformStatus({
       updateAvailable: true,
@@ -188,7 +272,7 @@ describe("PlatformTab upgrade lifecycle", () => {
   it.each([
     ["queued", "Preparing update"],
     ["preparing", "Preparing update"],
-    ["pulling", "Pulling images"],
+    ["pulling", "Downloading update"],
     ["switching", "Switching services"],
     ["verifying", "Verifying"],
   ])("renders the %s upgrade stage", (operationStatus, expectedLabel) => {

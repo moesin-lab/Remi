@@ -988,3 +988,23 @@ test('credential refresh is explicit and cannot replace an in-flight operation c
   assert.match(refused.stderr, /during a fenced operation/u);
   assert.ok(readFileSync(authPath, 'utf8') === before);
 });
+
+test('internal updates persist across up and block competing host deployment or backup commands', (t) => {
+  const f = fixture(t); f.activate();
+  const overlay = join(f.profileRoot(), 'compose.internal-updates.yml');
+  writeFileSync(overlay, 'services: {}\n');
+  const resumed = f.run('stable', 'up'); succeeds(resumed);
+  assert.ok(resumed.calls.find(call => call.args.includes('up')).args.includes(overlay));
+  const before = readFileSync(join(f.profileRoot(), 'compose.env'), 'utf8');
+  for (const action of ['deploy', 'restart', 'backup', 'host-recover', 'host-preflight']) {
+    const refused = f.run('stable', action);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /uses internal updates/);
+    assert.equal(refused.calls.length, 0);
+  }
+  assert.equal(readFileSync(join(f.profileRoot(), 'compose.env'), 'utf8'), before);
+  writeFileSync(join(f.profileRoot(), 'compose.application.json'), '{}');
+  const conflicting = f.run('stable', 'up');
+  assert.notEqual(conflicting.status, 0);
+  assert.match(conflicting.stderr, /cannot be combined/);
+});

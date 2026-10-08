@@ -15,7 +15,7 @@ export function validateCiImages(manifest, { ref, hostname, repository }) {
       || typeof manifest.version !== 'string' || !/^\d+\.\d+\.\d+-stable\.[a-f0-9]{8}$/u.test(manifest.version)) {
     throw new Error('CI manifest repository, commit, profile, platform, version, or baked Web hostname does not match this deployment');
   }
-  for (const service of ['api', 'web']) {
+  for (const service of ['api', 'web', ...(manifest.updaterImage === undefined ? [] : ['updater'])]) {
     const prefix = `ghcr.io/${owner}/remi-${service}@sha256:`;
     const image = manifest[`${service}Image`];
     if (typeof image !== 'string' || !image.startsWith(prefix) || !/^[a-f0-9]{64}$/u.test(image.slice(prefix.length))) {

@@ -65,9 +65,31 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 
 `execution-configuration` job 在 PR、main push 和手动运行中执行能力组、中央连接、模型选择、CLI 的针对性测试，以及真实 WebSocket/daemon 执行测试和浏览器 E2E。它保留后端全套分片的原有条件，不以这组回归代替全套检查；外部模型使用测试实现。浏览器在 Node 宿主内运行，通过 HTTP 与 Bun API 和隔离夹具通信，并上传桌面/移动端截图和失败诊断。
 
-`release-build-check` 的 `platform-updater` job 在 Linux、Windows 显式运行
+`release-build-check` 的 `platform-updater` job 在 Linux、Windows、macOS 显式运行
 `node --test scripts/local-profile.test.mjs scripts/platform-updater-runner.test.mjs`；Windows 验证宿主互斥并编译 updater，
-Linux 设置 `MULTIREMI_TEST_DOCKER_RECOVERY=1` 运行隔离的 PostgreSQL 17 恢复和回执对账测试。
+Linux 设置 `MULTIREMI_TEST_DOCKER_RECOVERY=1` 运行隔离的 PostgreSQL 17 恢复和回执对账测试，
+并运行 `bun run tests/integration/platform-application-smoke.ts`：从 Web 代理调用真实鉴权 API、
+PostgreSQL 队列、worker 和 drain，验证运行中任务阻止切换、API 重启后的操作记录与幂等重试、
+首次复用镜像接入、后续保留容器 ID、
+故障回退、新增数据保留、独立测试 daemon 不中断，以及 Web/WebSocket 恢复。该脚本需要缓存的
+`oven/bun:1.3.14`、`node:22-bookworm-slim` 和 `pgvector/pgvector:pg17` 镜像；只操作随机命名的
+独立 Compose 项目，不访问真实 provider 或生产数据。支持 `MULTIREMI_TEST_BUN_IMAGE`、
+`MULTIREMI_TEST_NODE_IMAGE`、`MULTIREMI_TEST_PG_IMAGE` 指定兼容的本地测试镜像。
+API 从当前源码打包，业务迁移和 Web 页面使用隔离夹具；浏览器点击由 `platform-tab.test.tsx`
+覆盖，不将这个 Docker 脚本当作完整 Next.js 浏览器端到端验证。
+同一 job 还执行 `bun run tests/integration/platform-application-smoke.ts --internal`，
+额外需要 `oven/bun:1.3.13`、`node:22.13.1-bookworm-slim` 两个旧运行时镜像。
+此模式从真实 HTTPS 测试源下载应用包，实际内部 updater/监管/演练容器运行完整流程；
+校验应用从持久卷执行不同版本的 Bun/Node，API/Web 容器启动时间和监管 PID 不变，
+坏版本回退及显式回滚均保留新增数据。单测另外覆盖损坏日志、提交间隙、失败恢复后
+写入闸门、CPU/ABI/运行时契约以及长操作心跳。测试只证明这些隔离场景，不等于
+正式发布、生产迁移或真实 provider 验证。
+`bun run tests/integration/smoke-platform-settings.ts` 启动隔离的 Next、真实 API/SQLite
+和更新 worker，使用模拟 HTTPS 发布内容及只读部署驱动，验证模式上报、迁移指引、
+自定义源保存/恢复、缺包阻塞、源不可用、旧更新器降级与 390px 布局。需要 Node、前端依赖和
+Chromium（可设置 `CHROME_EXECUTABLE`）；默认端口 3349，可用 `--port=` 调整。
+截图和报告写入临时目录，或由 `PLATFORM_SETTINGS_ARTIFACTS` 指定；不操作真实部署。
+
 这些脚本不会由普通 `bun test` 自动覆盖；Docker 恢复测试未设置开关时跳过。
 
 完整后端套件使用 Bun 原生 `--shard=1/4` 至 `--shard=4/4` 分片，每片有独立 runner、PostgreSQL 17

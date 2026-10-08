@@ -71,6 +71,7 @@ interface ComposeJournal {
 
 export class DockerComposeDriver implements PlatformDeploymentDriver {
   readonly kind = "docker_compose" as const;
+  readonly updateMode = "images" as const;
 
   private readonly coreServices: readonly string[];
   private readonly pullServices: readonly string[];
@@ -162,7 +163,7 @@ export class DockerComposeDriver implements PlatformDeploymentDriver {
     const [currentRelease, recentReleases, services] = await Promise.all([
       this.readCurrentRelease(), this.readRecentReleases(), this.inspectServices(),
     ]);
-    return { driver: this.kind, currentRelease, recentReleases, services };
+    return { driver: this.kind, updateMode: this.updateMode, currentRelease, recentReleases, services };
   }
 
   async execute(

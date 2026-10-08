@@ -41,6 +41,90 @@ function fixture() {
 }
 
 describe("platform updater worker", () => {
+  it('reports source artifacts and blocks a new internal updater against an image-only source', async () => {
+    const test = fixture();
+    Object.assign(test.driver, { updateMode: 'internal_application' });
+    await test.worker.tick();
+    const check = test.inspections.find(item => item.preflight)?.preflight;
+    expect(check?.ready).toBe(false);
+    expect(check?.source?.url).toBe('https://default.example/release.json');
+    expect(check?.source?.modes.find(mode => mode.mode === 'internal_application')).toMatchObject({ available: false, missing: ['application_bundle'] });
+    expect(check?.checks.find(item => item.code === 'release_artifacts')?.ok).toBe(false);
+  });
+  it('keeps failed source discovery explicit instead of retaining supported modes', async () => {
+    const test = fixture();
+    await test.worker.tick();
+    test.state.source = 'https://broken.example/feed';
+    fetchSpy!.mockImplementation(async () => { throw new Error('unreachable'); });
+    await test.worker.tick();
+    const check = test.inspections.filter(item => item.preflight).at(-1)?.preflight;
+    expect(check?.source).toEqual({ url: test.state.source, manifestUrl: null, modes: [], error: 'unreachable' });
+    expect(check?.ready).toBe(false);
+  });
+  it('rejects capabilities from a manifest that does not match the feed identity', async () => {
+    const test = fixture();
+    fetchSpy!.mockImplementation(async (input: Parameters<typeof fetch>[0]) => Response.json(String(input).endsWith('/manifest')
+      ? { version: '9.0.0', ref: 'other' }
+      : { version: '1.0.1', ref: 'old', manifestUrl: 'https://default.example/manifest' }));
+    await test.worker.tick();
+    const check = test.inspections.find(item => item.preflight)?.preflight;
+    expect(check?.ready).toBe(false);
+    expect(check?.source?.modes).toEqual([]);
+    expect(check?.source?.error).toContain('identities differ');
+  });
+  it('handles an internal check queued before the first host heartbeat registers the driver', async () => {
+    const test = fixture();
+    test.state.claim = { ...test.operation, kind: 'check_updates', driver: 'systemd_release' };
+    await test.worker.tick();
+    expect(test.state.executed).toBe(1);
+    expect(test.reports.at(-1)?.status).toBe('succeeded');
+  });
+  it.each(['url', 'ref', 'version'] as const)('resolves a wrapped custom feed for an internal update by %s', async target => {
+    const test = fixture();
+    const manifest = { version: '1.0.1', ref: '2'.repeat(40), dataSchema: DATA_SCHEMA, application: { format: 1 } };
+    fetchSpy!.mockImplementation(async () => Response.json({ latest: manifest }));
+    test.state.claim = { ...test.operation, kind: 'update', targetVersion: 'v1.0.1',
+      targetRef: target === 'url' ? 'https://default.example/release.json' : target === 'ref' ? manifest.ref : null };
+    let executed = false;
+    test.driver.execute = async operation => { executed = true; expect(operation.targetManifest).toEqual(manifest); return null; };
+    await test.worker.tick();
+    expect(executed).toBe(true);
+    expect(test.reports.at(-1)?.status).toBe('succeeded');
+  });
+  it.each(['version', 'ref'] as const)('rejects a custom feed whose %s changes after the internal request', async changed => {
+    const test = fixture();
+    await test.worker.tick();
+    test.state.claim = { ...test.operation, kind: 'update', targetVersion: '1.0.1', targetRef: 'https://default.example/release.json' };
+    fetchSpy!.mockImplementation(async () => Response.json({ latest: { version: changed === 'version' ? '1.0.2' : '1.0.1', ref: changed === 'ref' ? 'other' : 'old' } }));
+    await test.worker.tick();
+    expect(test.state.executed).toBe(0);
+    expect(test.reports.at(-1)?.status).toBe('failed');
+    expect(test.reports.at(-1)?.error).toContain('check updates again');
+  });
+  it('replays a durable application outcome and releases its fence before claiming more work', async () => {
+    const test = fixture();
+    test.driver.pendingFinalization = async () => ({ operationId: 'pop_finished', report: { status: 'succeeded' } });
+    test.driver.finalize = async id => { expect(id).toBe('pop_finished'); expect(test.state.released).toBe(1); test.state.events.push('finalize'); };
+    await test.worker.tick();
+    expect(test.reports[0]?.status).toBe('succeeded');
+    expect(test.state.events.indexOf('finalize')).toBeLessThan(test.state.events.indexOf('heartbeat'));
+  });
+  it('delegates application manifest compatibility checks to the application driver', async () => {
+    const test = fixture();
+    let validated = false;
+    test.driver.validateRelease = async manifest => { expect((manifest as { version: string }).version).toBe('1.0.1'); validated = true; };
+    await test.worker.tick();
+    expect(validated).toBe(true);
+  });
+  it('validates an application manifest inside a custom latest wrapper', async () => {
+    const test = fixture();
+    const manifest = { version: '1.0.1', ref: '2'.repeat(40), application: { format: 1 } };
+    fetchSpy!.mockImplementation(async () => Response.json({ latest: manifest }));
+    let validated = false;
+    test.driver.validateRelease = async value => { expect(value).toEqual(manifest); validated = true; };
+    await test.worker.tick();
+    expect(validated).toBe(true);
+  });
   it("reconciles a durable local-profile result before retrying a claim after API recovery", async () => {
     const root = await mkdtemp(join(tmpdir(), "remi-worker-receipt-"));
     try {

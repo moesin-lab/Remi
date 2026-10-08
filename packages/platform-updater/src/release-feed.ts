@@ -2,11 +2,11 @@ import type { MultiremiPlatformRelease } from "@multiremi/contracts";
 
 export async function fetchReleaseFeed(url: string | null): Promise<MultiremiPlatformRelease | null> {
   if (!url) return null;
-  const body = await fetchReleaseJson(url) as { latest?: unknown } | MultiremiPlatformRelease;
-  if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("release feed is invalid");
-  const candidate = "latest" in body ? body.latest : body;
-  if (!candidate || typeof candidate !== "object") throw new Error("release feed has no latest release");
-  const value = candidate as Record<string, unknown>;
+  return parseReleaseFeed(await fetchReleaseJson(url), url);
+}
+
+export function parseReleaseFeed(body: unknown, url: string): MultiremiPlatformRelease {
+  const value = unwrapReleaseManifest(body);
   if (typeof value.version !== "string" || typeof value.ref !== "string") {
     throw new Error("release feed latest release is invalid");
   }
@@ -18,10 +18,19 @@ export async function fetchReleaseFeed(url: string | null): Promise<MultiremiPla
     ref: value.ref,
     publishedAt: stringOrNull(value.publishedAt),
     releaseUrl: stringOrNull(value.releaseUrl),
-    manifestUrl: stringOrNull(value.manifestUrl),
+    // A feed may itself be the manifest (directly or inside `latest`). Keep a
+    // usable address for Web/CLI and scheduled updates in either form.
+    manifestUrl: stringOrNull(value.manifestUrl) ?? url,
     apiImage: stringOrNull(value.apiImage),
     webImage: stringOrNull(value.webImage),
   };
+}
+
+export function unwrapReleaseManifest(body: unknown): Record<string, unknown> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("release feed is invalid");
+  const candidate = "latest" in body ? body.latest : body;
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw new Error("release feed has no latest release");
+  return candidate as Record<string, unknown>;
 }
 
 export function assertHttpsUrl(value: string, label: string): void {
@@ -49,8 +58,8 @@ export async function fetchReleaseJson(url: string): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-export async function fetchReleaseResponse(url: string): Promise<Response> {
-  const signal = AbortSignal.timeout(120_000);
+export async function fetchReleaseResponse(url: string, timeoutMs = 120_000): Promise<Response> {
+  const signal = AbortSignal.timeout(timeoutMs);
   for (let redirects = 0; redirects < 6; redirects++) {
     assertHttpsUrl(url, "release URL");
     const response = await fetch(url, { redirect: "manual", signal });

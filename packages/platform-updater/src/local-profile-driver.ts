@@ -43,6 +43,7 @@ interface HostOperationJournal {
  */
 export class LocalProfileDriver implements PlatformDeploymentDriver {
   readonly kind = "local_profile" as const;
+  readonly updateMode = "images" as const;
   private readonly script: string;
   private readonly profileRoot: string;
   private readonly schemas = new Map<string, string>();
@@ -58,6 +59,7 @@ export class LocalProfileDriver implements PlatformDeploymentDriver {
     const currentRelease = await this.readCurrentRelease();
     return {
       driver: this.kind,
+      updateMode: this.updateMode,
       currentRelease,
       recentReleases: await this.readRecentReleases(currentRelease),
       services: await this.inspectServices(),

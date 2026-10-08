@@ -87,6 +87,14 @@ describe("operations CLI contracts", () => {
     report.by_model[0]!.actual_total_tokens = 7;
     await expect(capture(() => registryFor([spec]).execute(["dashboard", "usage", "reconcile", "--days", "all", "--runtime", "runtime-old", "--json"]))).rejects.toThrow("do not reconcile");
   });
+  it('returns the reported update mode and source requirements through platform status', async () => {
+    useCliEnv();
+    const spec = specById('platform.status');
+    const status = { updateMode: 'internal_application', preflight: { source: { modes: [{ mode: 'internal_application', available: false, missing: ['application_bundle'] }] } } };
+    globalThis.fetch = capabilityFetch(spec.id, () => Response.json(status));
+    const output = await capture(() => registryFor([spec]).execute(['platform', 'status', '--json']));
+    expect(JSON.parse(output.stdout)).toEqual(status);
+  });
   it("returns an agent's capability states and model default without losing metadata", async () => {
     useCliEnv();
     const spec = specById("runtime.model.catalog");

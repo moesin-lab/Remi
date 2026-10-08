@@ -41,9 +41,17 @@ describe("release workflows", () => {
     expect(check.jobs["platform-updater"].strategy.matrix.os).toEqual(["ubuntu-latest", "windows-latest", "macos-latest"]);
     const release = readWorkflow("platform-release.yml");
     const builds = release.jobs.publish.steps.filter((step: any) => step.uses === "docker/build-push-action@v6");
-    expect(builds).toHaveLength(2);
+    expect(builds).toHaveLength(3);
     for (const build of builds) expect(build.with.platforms).toBe("linux/amd64,linux/arm64");
     expect(JSON.stringify(release)).toContain("dataSchema");
+    const packaging = release.jobs.publish.steps.findIndex((step: any) => step.run?.includes('package-platform-application.mjs'));
+    const upload = release.jobs.publish.steps.findIndex((step: any) => step.run?.includes('gh release upload'));
+    expect(packaging).toBeGreaterThan(-1);
+    expect(packaging).toBeLessThan(upload);
+    expect(release.jobs.publish.steps[upload].run).toContain('platform-application-*.tar.gz');
+    expect(builds.some((step: any) => step.with.file === 'deploy/docker/Dockerfile.updater')).toBe(true);
+    expect(JSON.stringify(release)).toContain('updaterImage');
+    expect(JSON.stringify(check.jobs['platform-updater'])).toContain('platform-application-smoke.ts --internal');
   });
   test("publishes the platform automatically after the tag release", () => {
     const release = readWorkflow("release.yml");

@@ -40,6 +40,7 @@ import {
 } from "@multiremi/core/platform-lifecycle";
 import { useT } from "../../i18n";
 import { TimezoneSelect } from "../../common/timezone-select";
+import { PlatformSourceCapabilities, PlatformUpdateModeCard } from "./platform-update-mode";
 
 type ConfirmAction =
   | { kind: "restart" }
@@ -86,6 +87,7 @@ export function PlatformTab() {
     || autoUpdateDraft.time !== schedule?.time
     || autoUpdateDraft.timezone !== schedule?.timezone
   );
+  const sourceDirty = sourceDraft.trim() !== (status?.releaseFeedUrl ?? "");
 
   async function runAction(action: ConfirmAction | { kind: "check_updates" }) {
     try {
@@ -335,6 +337,8 @@ export function PlatformTab() {
         </CardContent>
       </Card>
 
+      <PlatformUpdateModeCard status={status} />
+
       <Card className="rounded-lg" data-testid="platform-update-source">
         <CardHeader><CardTitle>{t(($) => $.platform.update_source)}</CardTitle><CardDescription>{t(($) => $.platform.update_source_hint)}</CardDescription></CardHeader>
         <CardContent className="space-y-3">
@@ -349,7 +353,11 @@ export function PlatformTab() {
               onSuccess: () => toast.success(t(($) => $.platform.source_saved)),
               onError: (error) => toast.error(error instanceof Error ? error.message : t(($) => $.platform.operation_failed)),
             })}>{t(($) => $.platform.source_reset)}</Button>
+            <Button variant="outline" disabled={busy || settingsMutation.isPending || sourceDirty || status.updaterStatus !== "ready" || !status.canManage} onClick={() => void runAction({ kind: "check_updates" })}>
+              {t($ => $.platform.source_check)}
+            </Button>
           </div>
+          <PlatformSourceCapabilities status={status} dirty={sourceDirty} />
         </CardContent>
       </Card>
 

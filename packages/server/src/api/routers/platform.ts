@@ -8,6 +8,7 @@ import type {
   MultiremiPlatformRelease,
   MultiremiPlatformService,
   MultiremiPlatformPreflight,
+  MultiremiPlatformUpdateMode,
   ReportPlatformOperationInput,
 } from "@multiremi/contracts/types.js";
 import {
@@ -36,6 +37,7 @@ const OPERATION_STATUSES = new Set<MultiremiPlatformOperationStatus>([
   "succeeded", "failed", "cancelled", "rolling_back", "rolled_back",
 ]);
 const DRIVERS = new Set<MultiremiPlatformDeploymentDriver>(["systemd_release", "docker_compose", "local_profile"]);
+const UPDATE_MODES = new Set<MultiremiPlatformUpdateMode>(["images", "host_application", "internal_application", "systemd_release"]);
 
 export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
@@ -62,6 +64,7 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
       defaultReleaseFeedUrl: state.defaultReleaseFeedUrl,
       preflight: state.preflight,
       driver: state.driver,
+      updateMode: state.updateMode,
       currentRelease: state.currentRelease,
       latestRelease: state.latestRelease,
       updateAvailable: isReleaseNewer(state.latestRelease, state.currentRelease),
@@ -146,8 +149,10 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJson<{
       autoUpdateStable?: boolean;
       releaseFeedUrl?: string | null;
+      updateMode?: unknown;
       autoUpdate?: { enabled?: boolean; time?: string; timezone?: string };
     }>(c);
+    if (body.updateMode !== undefined) return c.json({ error: "updateMode is reported by the updater; follow the deployment migration steps to change it" }, 400);
     const current = store.getPlatformState();
     const enabled = body.autoUpdate?.enabled ?? body.autoUpdateStable ?? current.autoUpdateStable;
     const time = clean(body.autoUpdate?.time) ?? current.autoUpdateTime;
@@ -174,6 +179,7 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyUpdater(c, deps);
     if (denied) return denied;
     const body = await readJson<{
+      updateMode?: MultiremiPlatformUpdateMode | null;
       defaultReleaseFeedUrl?: string | null;
       releaseFeedUrl?: string | null;
       preflight?: MultiremiPlatformPreflight | null;
@@ -184,7 +190,17 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
       services?: MultiremiPlatformService[];
     }>(c);
     if (!body.driver || !DRIVERS.has(body.driver)) return c.json({ error: "valid driver is required" }, 400);
+    if (body.updateMode != null && (!UPDATE_MODES.has(body.updateMode)
+      || (body.updateMode === "systemd_release") !== (body.driver === "systemd_release")
+      || (body.updateMode === "internal_application" && body.driver !== "docker_compose"))) {
+      return c.json({ error: "updateMode does not match the updater driver" }, 400);
+    }
+    const previous = body.updateMode ? store.getPlatformState() : null;
+    if (previous?.updateMode && previous.updateMode !== body.updateMode && store.getActivePlatformOperation()) {
+      return c.json({ error: "finish or recover the current operation before changing updater modes" }, 409);
+    }
     let state = store.heartbeatPlatformUpdater({
+      updateMode: body.updateMode,
       defaultReleaseFeedUrl: body.defaultReleaseFeedUrl,
       releaseFeedUrl: body.releaseFeedUrl,
       preflight: body.preflight,

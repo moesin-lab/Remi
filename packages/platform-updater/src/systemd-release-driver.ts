@@ -42,6 +42,7 @@ interface SystemdJournal {
 
 export class SystemdReleaseDriver implements PlatformDeploymentDriver {
   readonly kind = "systemd_release" as const;
+  readonly updateMode = "systemd_release" as const;
 
   private readonly healthTimeoutMs: number;
 
@@ -111,6 +112,7 @@ export class SystemdReleaseDriver implements PlatformDeploymentDriver {
     ]);
     return {
       driver: this.kind,
+      updateMode: this.updateMode,
       currentRelease,
       recentReleases,
       services: [api, web, unknownDependency("postgres", "PostgreSQL"), unknownDependency("openviking", "OpenViking")],

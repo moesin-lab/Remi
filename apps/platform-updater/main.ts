@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { PlatformUpdaterClient } from "@remi-platform/updater/client.js";
 import { DockerComposeDriver } from "@remi-platform/updater/compose-driver.js";
+import { ContainerApplicationDriver } from "@remi-platform/updater/application-driver.js";
 import { resolveDrainTimeoutMs } from "@remi-platform/updater/drain.js";
 import { SystemdReleaseDriver } from "@remi-platform/updater/systemd-release-driver.js";
 import { BunCommandRunner, type PlatformDeploymentDriver } from "@remi-platform/updater/types.js";
@@ -52,6 +53,24 @@ function createDriver(): PlatformDeploymentDriver {
     apiHealthUrl: process.env.MULTIREMI_PLATFORM_API_HEALTH_URL ?? `${apiUrl.replace(/\/$/, "")}/readyz`,
     webHealthUrl: process.env.MULTIREMI_PLATFORM_WEB_HEALTH_URL ?? "http://127.0.0.1:3000/login",
   };
+  const updateMode = process.env.MULTIREMI_PLATFORM_UPDATE_MODE ?? 'application';
+  if (!['application', 'images'].includes(updateMode)) throw new Error('Unsupported platform update mode');
+  if (updateMode === 'application' && (kind === 'docker_compose' || kind === 'local_profile')) {
+    const profile = process.env.MULTIREMI_LOCAL_PROFILE_NAME ?? 'stable';
+    if (kind === 'local_profile' && profile !== 'stable') throw new Error('Application updates only manage the stable profile');
+    const profileRoot = kind === 'local_profile' ? join(requiredEnv('MULTIREMI_LOCAL_PROFILE_ROOT'), profile) : undefined;
+    return new ContainerApplicationDriver({
+      ...common, kind, stateDir, profileRoot,
+      composeFile: profileRoot ? join(profileRoot, 'compose.yml') : resolve(requiredEnv('MULTIREMI_PLATFORM_COMPOSE_FILE')),
+      envFile: profileRoot ? join(profileRoot, 'compose.env') : resolve(requiredEnv('MULTIREMI_PLATFORM_COMPOSE_ENV_FILE')),
+      projectName: profileRoot ? `remi-${profile}` : optionalEnv('MULTIREMI_PLATFORM_COMPOSE_PROJECT') ?? undefined,
+      webHealthUrl: process.env.MULTIREMI_PLATFORM_WEB_HEALTH_URL ?? (profileRoot ? 'http://127.0.0.1:13000/login' : common.webHealthUrl),
+      coreServices: optionalEnv('MULTIREMI_PLATFORM_CORE_SERVICES')?.split(',').map(value => value.trim()).filter(Boolean),
+      extraHealthUrls: optionalEnv('MULTIREMI_PLATFORM_EXTRA_HEALTH_URLS')?.split(',').map(value => value.trim()).filter(Boolean),
+      postgresContainer: optionalEnv('MULTIREMI_PLATFORM_POSTGRES_CONTAINER') ?? undefined,
+      minimumFreeBytes: Math.max(1, Number(process.env.MULTIREMI_PLATFORM_MIN_FREE_BYTES) || 5 * 1024 ** 3),
+    }, runner);
+  }
   if (kind === "docker_compose") return new DockerComposeDriver({
     ...common,
     composeFile: resolve(requiredEnv("MULTIREMI_PLATFORM_COMPOSE_FILE")),

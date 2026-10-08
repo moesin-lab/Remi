@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { buildTaskPrompt } from "@multiremi/prompt.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
+import type { MultiremiStore } from "@multiremi/store.js";
 import { createStore, resetMultiremiTestEnv } from "./helpers.js";
+import { conversationLogPgAdminUrl, withConversationLogStore } from "./fixtures/conversation-log-store.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -752,8 +754,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     expect(created.task_id).toBe(task.id);
   });
 
-  it("keeps a task token inside its Session while exposing published sibling results", async () => {
-    const store = createStore();
+  const checkSessionTaskAccess = async (store: MultiremiStore) => {
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const agent = store.createAgent({ name: "Scoped agent", provider: "claude" });
     const issue = store.createIssue({ title: "Session auth", workspaceId: "local" });
@@ -768,10 +769,17 @@ describe("Issue sessions and per-agent projection lanes", () => {
     });
     const siblingTask = store.createSessionTask(sibling.id, {
       agentId: agent.id,
-      prompt: "Private sibling task prompt",
+      prompt: "Public sibling task prompt",
     });
+    const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local", creatorId: "local" });
+    const privateSession = store.createIssueSession(issue.id, { chatId: chat.id, title: "Private work" });
+    const privateTask = store.createSessionTask(privateSession.id, { agentId: agent.id, prompt: "Private Chat task prompt" });
+    expect(privateSession.ownerType).toBe("chat");
+    expect(privateTask.chatSessionId).toBe(chat.id);
+    store.publishSessionResult(privateSession.id, { title: "Private result", body: "Private Chat result" });
     store.appendTaskMessages(task.id, [{ type: "assistant", content: "Own raw execution log" }]);
     store.appendTaskMessages(siblingTask.id, [{ type: "assistant", content: "Sibling raw execution log" }]);
+    store.appendTaskMessages(privateTask.id, [{ type: "assistant", content: "Private Chat raw execution log" }]);
     const token = await store.createTaskAccessToken(task, "local");
     const headers = { Authorization: `Bearer ${token.token}` };
 
@@ -807,7 +815,10 @@ describe("Issue sessions and per-agent projection lanes", () => {
     const detail = await detailResponse.json();
     expect(detail.comments.map((comment: { body: string }) => comment.body)).toContain("Visible current context");
     expect(detail.comments.map((comment: { body: string }) => comment.body)).toContain("Hidden sibling context");
-    expect(detail.issue.tasks.map((item: { id: string }) => item.id)).toEqual([task.id]);
+    const publicTaskIds = [task.id, siblingTask.id].sort();
+    expect(detail.issue.tasks.map((item: { id: string }) => item.id).sort()).toEqual(publicTaskIds);
+    expect(detail.issue.tasks.map((item: { id: string }) => item.id)).not.toContain(privateTask.id);
+    expect(JSON.stringify(detail.issue.tasks)).not.toContain("Private Chat task prompt");
 
     const searchResponse = await app.request(
       `/api/issues/search?q=${encodeURIComponent("Hidden sibling context")}`,
@@ -818,22 +829,32 @@ describe("Issue sessions and per-agent projection lanes", () => {
 
     const taskRunsResponse = await app.request(`/api/issues/${issue.id}/task-runs`, { headers });
     expect(taskRunsResponse.status).toBe(200);
-    expect((await taskRunsResponse.json()).map((item: { id: string }) => item.id)).toEqual([task.id]);
+    expect((await taskRunsResponse.json()).map((item: { id: string }) => item.id).sort()).toEqual(publicTaskIds);
     const rawTasksResponse = await app.request("/api/multiremi/tasks", { headers });
     expect(rawTasksResponse.status).toBe(200);
-    expect((await rawTasksResponse.json()).tasks.map((item: { id: string }) => item.id)).toEqual([task.id]);
-    expect((await app.request(`/api/multiremi/tasks/${siblingTask.id}`, { headers })).status).toBe(403);
+    expect((await rawTasksResponse.json()).tasks.map((item: { id: string }) => item.id).sort()).toEqual(publicTaskIds);
+    expect((await app.request(`/api/multiremi/tasks/${siblingTask.id}`, { headers })).status).toBe(200);
     expect((await app.request(`/api/tasks/${siblingTask.id}/cancel`, {
       method: "POST",
       headers,
+    })).status).toBe(200);
+    expect(store.getTask(siblingTask.id)?.status).toBe("cancelled");
+    expect((await app.request(`/api/multiremi/tasks/${privateTask.id}`, { headers })).status).toBe(403);
+    expect((await app.request(`/api/tasks/${privateTask.id}/cancel`, {
+      method: "POST",
+      headers,
     })).status).toBe(403);
+    expect(store.getTask(privateTask.id)?.status).toBe("queued");
     expect((await app.request("/api/multiremi/tasks", {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({ agentId: agent.id, issueId: issue.id, prompt: "Bypass Session route" }),
     })).status).toBe(201);
     expect((await app.request(`/api/tasks/${task.id}/messages`, { headers })).status).toBe(200);
-    expect((await app.request(`/api/tasks/${siblingTask.id}/messages`, { headers })).status).toBe(403);
+    expect((await app.request(`/api/tasks/${siblingTask.id}/messages`, { headers })).status).toBe(200);
+    const privateMessages = await app.request(`/api/tasks/${privateTask.id}/messages`, { headers });
+    expect(privateMessages.status).toBe(403);
+    expect(await privateMessages.text()).not.toContain("Private Chat raw execution log");
 
     const agentCommentResponse = await app.request(`/api/issues/${issue.id}/comments`, {
       method: "POST",
@@ -860,11 +881,21 @@ describe("Issue sessions and per-agent projection lanes", () => {
 
     const resultsResponse = await app.request(`/api/issues/${issue.id}/session-results`, { headers });
     expect(resultsResponse.status).toBe(200);
-    expect(await resultsResponse.json()).toEqual(expect.arrayContaining([
+    const results = await resultsResponse.json();
+    expect(results).toEqual(expect.arrayContaining([
       expect.objectContaining({
         source_session_id: sibling.id,
         body: "Safe shared result",
       }),
     ]));
-  });
+    expect(JSON.stringify(results)).not.toContain("Private Chat result");
+  };
+
+  for (const backend of ["sqlite", "pg"] as const) {
+    it.skipIf(backend === "pg" && !conversationLogPgAdminUrl)(
+      `${backend}: scopes Session content and private Tasks while exposing public Tasks and sibling results`,
+      async () => { await withConversationLogStore(backend, checkSessionTaskAccess); },
+      60_000,
+    );
+  }
 });

@@ -44,6 +44,7 @@ const redact = (value: string) => pat ? value.split(pat).join("[redacted]") : va
 // load host data or background integrations; fixtures below provide all state.
 for (const key of Object.keys(process.env)) if (key.startsWith("MULTIREMI_")) delete process.env[key];
 process.env.MULTIREMI_UPLOAD_DIR = join(root, "uploads");
+process.env.MULTIREMI_SESSION_ARCHIVE_ROOT = join(root, "session-archives");
 process.env.NODE_ENV = "test";
 process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 

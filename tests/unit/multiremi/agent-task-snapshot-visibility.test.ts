@@ -139,7 +139,9 @@ test("both snapshot routes return the same creator-scoped public contract", asyn
     } });
     expect(response.status).toBe(200);
     const tasks = await response.json() as Array<{ id: string }>;
-    expect(tasks.map((task) => task.id)).toEqual(binding.taskId === ownTask.id && binding.agentId === ownTask.agentId ? [ownTask.id] : []);
+    const publicIds = f.store.listWorkspaceAgentTaskSnapshot("local").filter(task => !task.chatSessionId).map(task => task.id);
+    const expected = [...publicIds, ...(binding.taskId === ownTask.id && binding.agentId === ownTask.agentId ? [ownTask.id] : [])];
+    expect(tasks.map((task) => task.id).sort()).toEqual(expected.sort());
   }
   f.db.run("UPDATE multiremi_tasks SET status = 'cancelled'");
   const emptyCredential = await f.store.createAccessToken({ name: "empty snapshot fixture", type: "pat", userId: f.seed.readerUserId, workspaceId: "local" });

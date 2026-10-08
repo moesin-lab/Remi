@@ -53,7 +53,9 @@ Chat 路径 `/api/multiremi/chats/:chatId/sessions` 管理该 Chat 的 Sessions�
 Issue 路径 `/api/issues/:issueId/sessions` 创建 Issue-owned Session，并列出 Issue-owned 与有权访问的
 Chat-owned 工作投影。该聚合按 Chat 创建者和 Agent 可见性过滤私有投影，再批量读取参与者；工作区管理员
 也不能借 Issue 读取他人的私有 Chat。通用 `/api/sessions/:sessionId`、日志与继承诊断按实际 owner 鉴权，
-Task 凭据通常只读取自身绑定的 Session、控制自身 Task；继承与已验证飞书 Topic 协调有下述受限例外。
+Task 凭据读取 Session 内容时限于自身绑定的 Session；继承与已验证飞书 Topic 协调有下述受限例外。
+私有 Chat-owned Task 的读取与控制限于本 Task；公开 Issue-owned 或没有 Chat 的 Task 路由保留既有
+Workspace、owner 与各路由权限，不新增统一的本 Task 限制。
 
 ## 统一日志兼容
 
@@ -109,11 +111,12 @@ Task 凭据通常只读取自身绑定的 Session、控制自身 Task；继承�
 - Task 凭据在同工作区跨 Issue 评论时保留来源 Task 作为作者审计，但不自动带入来源 Session；显式指定的
   Session 仍须当前关联目标 Issue，避免把另一个 Issue 的私有会话接到评论中。
 - 旁聊 Task 可通过 `/log/entry?from=X&to=Y` 读取同 owner、同 Workspace 的直接父 Session，范围不得超过当前 Task 已持久化的继承截止 seq，且必须已有继承领取记录。这个例外只开放范围读取，不开放父 Session metadata、任意日志窗口或尾部；范围响应清空可能携带后续可变结果的 entry metadata，也不推进父会话已读游标。
-- 经服务端验证 binding 的飞书群 Issue Topic 普通 Chat Task 可协调绑定 Issue 的 Session：读取 Session metadata、列出或创建 Session Task，并读取交接 Task 的安全 metadata 或追加 steer。Chat-owned 目标须属于同一 Topic Chat，Issue-owned 目标须属于绑定 Issue；协调响应不含 prompt、result、error 或 progress 正文。Topic 协调任务还可向绑定 Issue-owned Session 主动 POST message，沿用公开 Issue 评论写入；Chat-owned 工作投影的 message 写入仍受本 Session 限制。该例外不开放其他 Session 的 events、logs、trace、messages 读取，也不允许取消或 inspection 其他 Task。监督者 organizer redispatch 仍须通过既有身份、授权及审计检查。
-- 通用任务派发允许按实际 Issue owner 与 Workspace 权限向同工作区的其他 Issue-owned Session 创建委派任务，仍须通过既有 delegation、父 Task 血统、交接及旁聊派发检查；创建成功不授予来源 Task 凭据读取或控制新 Task 的权限。Chat-owned 目标继续遵循私有 Session 或已验证 Topic 协调边界。
+- 经服务端验证 binding 的飞书群 Issue Topic 普通 Chat Task 可协调绑定 Issue 的 Session：读取 Session metadata、列出或创建 Session Task，并读取交接 Task 的安全 metadata 或追加 steer。Chat-owned 目标须属于同一 Topic Chat，Issue-owned 目标须属于绑定 Issue；协调专用响应不含 prompt、result、error 或 progress 正文。Topic 协调任务还可向绑定 Issue-owned Session 主动 POST message，沿用公开 Issue 评论写入；Chat-owned 工作投影的 message 写入仍受本 Session 限制。该例外不开放其他 Session 的 events、logs、trace、messages 读取，也不额外授予取消或 inspection 其他私有 Task 的权限；公开 Issue Task 路由仍按既有权限判断。监督者 organizer redispatch 仍须通过既有身份、授权及审计检查。
+- 通用任务派发与 Issue 嵌套的 Session Task 创建都按实际 Issue owner 与 Workspace 权限向同工作区的其他 Issue-owned Session 创建委派任务，仍须通过既有 Agent、delegation、父 Task 血统、交接次数及旁聊派发检查。创建本身不额外授予 Session 内容或 Task 读取、控制权限：公开 Issue Task 路由沿用既有基线，私有 Chat-owned Task 保持本 Task 限制。Chat-owned 创建目标继续遵循当前 Session 或已验证 Topic 协调边界。
 - Issue 触发的 Autopilot 使用 Issue-owned Session，不创建或隐式 adopt Chat；`reuse_latest` 只复用同 Issue 的 active Issue-owned Session，不选择 Chat-owned 工作投影。
 - Task 输出或完整 transcript 不自动成为成果。只有显式 publish 才创建 Session Result；跨 Session 复用
   应使用成果，而不是读取来源 Session 的私有事件。
+- 委派返回的 Inbox 摘要按真正接收 Session 的 owner 落盘：Chat-owned 写入私有 Session system log，沿用事件通知、去重及已读回执，不生成公开 Issue 评论；Issue-owned 保留公开 Issue 评论镜像。关联 Issue 不会把 Chat-owned 返回摘要公开。
 - daemon 注入的 provider 历史按 Session owner 过滤：Issue-owned 只使用同一 Issue 拥有的 Sessions，Chat-owned 只使用同一 Chat 拥有的 Sessions。Issue 的归档或删除不收集或清理 Chat-owned 工作投影的 provider home。
 - provider 目录归属以 `gc.json` 中明确的 `chat_session_id` 为准：`null` 表示 Issue-owned，Chat ID 表示该 Chat。旧早期 trace 目录缺少这个字段时保留数据，不注入 prompt，也不纳入 Issue archive/GC；它与数据库 Session 的已知 owner 迁移是不同边界。
 

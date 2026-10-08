@@ -41,8 +41,16 @@ describe("agent assignment rederives reopened child parents", () => {
             workspaceId: ancestor === "foreign" ? foreignWorkspace.id : "local" });
           const parent = store.createIssue({ title: "Local parent", status: "in_review" });
           const child = store.createIssue({ title: "Settled child", parentIssueId: parent.id, status: "done" });
+          if (ancestor === "deleted") {
+            const main = store.getOrCreateDefaultIssueSession(grandparent.id);
+            expect(store.deleteIssue(grandparent.id)).toBe(true);
+            expect(store.getIssueSession(main.id)).toBeNull();
+            expect(store.listConversationLogEntries(main.id)).toEqual([]);
+            expect(db.query("SELECT 1 FROM multiremi_conversation_heads WHERE session_id = ?").get(main.id)).toBeNull();
+          }
+          // Construct only the legacy dangling ancestry. Owner deletion must
+          // first use its lifecycle path so the default Session cannot orphan.
           db.run("UPDATE multiremi_issues SET parent_issue_id = ? WHERE id = ?", [grandparent.id, parent.id]);
-          if (ancestor === "deleted") db.run("DELETE FROM multiremi_issues WHERE id = ?", [grandparent.id]);
           expect(store.getIssue(parent.id)?.parentIssueId).toBe(grandparent.id);
           const beforeGrandparentActivity = store.listIssueActivity(grandparent.id);
           const derived = () => store.listIssueActivity(parent.id).filter(a => a.type === "parent_status_derived");
@@ -89,7 +97,14 @@ describe("agent assignment rederives reopened child parents", () => {
         const agent = store.createAgent({ name: "Missing parent worker", provider: "claude" });
         const parent = store.createIssue({ title: "Parent", status: "in_review" });
         const child = store.createIssue({ title: "Settled child", parentIssueId: parent.id, status: "done" });
-        db.run("DELETE FROM multiremi_issues WHERE id = ?", [parent.id]);
+        const main = store.getOrCreateDefaultIssueSession(parent.id);
+        expect(store.deleteIssue(parent.id)).toBe(true);
+        expect(store.getIssueSession(main.id)).toBeNull();
+        expect(store.listConversationLogEntries(main.id)).toEqual([]);
+        expect(db.query("SELECT 1 FROM multiremi_conversation_heads WHERE session_id = ?").get(main.id)).toBeNull();
+        // Preserve the intentionally invalid pre-upgrade parent relation after
+        // the real owner and its Session history have been removed safely.
+        db.run("UPDATE multiremi_issues SET parent_issue_id = ? WHERE id = ?", [parent.id, child.id]);
         expect(store.getIssue(child.id)?.parentIssueId).toBe(parent.id);
         const beforeActivity = store.listIssueActivity(child.id);
         const received: WorkspaceEvent[] = [];

@@ -407,6 +407,16 @@ export class IssueSessionsRepo {
     return row ? toIssueSession(row) : null;
   }
 
+  getIssueSessionWithOwnerScope(id: string): { session: MultiremiIssueSession; ownerWorkspaceId: string | null } | null {
+    const row = this.ctx.db.query(`SELECT scoped.*,
+        CASE WHEN scoped.chat_id IS NOT NULL THEN chat.workspace_id ELSE issue.workspace_id END AS owner_workspace_id
+      FROM (${SESSION_SELECT} WHERE s.id = ?) scoped
+      LEFT JOIN multiremi_chat_sessions chat ON chat.id = scoped.chat_id
+      LEFT JOIN multiremi_issues issue ON issue.id = scoped.issue_id`).get(id) as Row | null;
+    if (!row) return null;
+    return { session: toIssueSession(row), ownerWorkspaceId: nullableString(row.owner_workspace_id) };
+  }
+
   getSessionInheritedContext(sessionId: string): MultiremiSessionInheritedContext | null {
     const session = this.getIssueSession(sessionId);
     if (!session) return null;

@@ -66,22 +66,28 @@ from a Chat-owned projection, even when viewing it inside an Issue.
 
 `remi session show <session>`, `remi session log window|get|locate <session>` and
 `remi session inherited-context <session>` resolve either owner by Session ID.
-Task credentials normally read their bound Session and control their own Task.
+Task credentials read their bound Session with the limited exceptions below.
+Private Chat-owned Task reads and controls require the credential's own Task;
+public Issue-owned or no-Chat Task routes retain their existing workspace,
+owner and route-specific permissions rather than a universal own-Task limit.
 A side Session Task may read a range from its direct parent with the same owner
 and workspace, only after an inherited projection is recorded and only through
 that Task's persisted cutoff. Use `remi session log get <parent> --from X --to Y`;
 this exception does not grant parent metadata, arbitrary windows or tail reads.
 A verified Feishu group Issue-topic Chat Task may read bound Session metadata,
 list/create Session Tasks, and read safe handoff Task metadata or steer those
-Tasks. It cannot use that authority for private events/logs/transcripts, another
-Task's cancellation or inspection. Chat-owned targets must share the Topic Chat;
+Tasks. That coordination authority does not grant private events/logs/transcripts
+or another private Task's cancellation or inspection; public Issue Task routes
+still apply their existing permissions. Chat-owned targets must share the Topic Chat;
 Issue-owned targets must share the bound Issue. It may actively post a message
 to that Issue-owned Session through the existing public Issue-comment path;
 this does not grant another Session's message history or Chat-owned writes.
-Generic task dispatch can create delegated work in another Issue-owned Session
-in the same workspace after owner, lineage and side-Session dispatch checks;
-creation does not grant the source credential access to the new Task's content
-or control. Chat-owned dispatch retains its private Session boundary.
+Generic dispatch and Issue-nested Session Task creation can create delegated work
+in another Issue-owned Session in the same workspace after owner, Agent, lineage,
+round-trip and side-Session dispatch checks. Creation grants no additional Session
+content or Task access/control rights: public Issue Task routes retain their
+existing baseline, and private Chat-owned Tasks require the credential's own Task.
+Chat-owned dispatch requires the current Session or verified Topic coordination.
 Organizer redispatch retains its
 explicit supervisor authorization and audit checks. The complete boundaries are
 in [the conversation model](conversation-model.md).

@@ -26,11 +26,15 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 | task 凭据 | [auth-guards.ts](../../packages/server/src/api/helpers/auth-guards.ts)将其限制在绑定工作区，并继承所属用户的业务权限，包括环境值与 SCM 配置等。`taskTokenHardDenyCategory` 另外阻止凭据签发/揭示、身份、工作区生命周期、权限配置等敏感操作；它不是只读令牌。 |
 | daemon 凭据 | 同一 guard 文件中的请求允许列表和 `denyNonDaemonOperationalAccess` 区分机器控制面与人类操作；daemon 绑定、runtime/task 归属及 owner 成员资格另有检查。旧 CLI PAT 升级、注册和特定 SCM 请求存在明确例外，应按实现核对。 |
 | 私有资源与实时消息 | Agent、运行时、附件、会话和 transcript 有各自的权限检查。[realtime.ts](../../packages/server/src/api/realtime.ts)处理浏览器/daemon WebSocket 鉴权与接收范围，不能只验证 HTTP 路径。 |
-| Session 所有权 | Session 恰好由一个 Chat 或 Issue 拥有，guard 从实际 owner 校验工作区与内容权限。Chat-owned 的 Issue 工作投影不扩大创建者和 Agent 的可见范围，Issue 公开分享不包含其私有 Session 事件、输入或成果。Task 凭据通常读取本 Session、控制本 Task；同 owner 直接父会话的已记录继承范围，以及已验证飞书 Topic 的 metadata/派发/steer 协调是受限例外，详见[会话模型](../conversation-model.md)。 |
+| Session 所有权 | Session 恰好由一个 Chat 或 Issue 拥有，guard 从实际 owner 校验工作区与内容权限。Chat-owned 的 Issue 工作投影不扩大创建者和 Agent 的可见范围，Issue 公开分享不包含其私有 Session 事件、输入或成果。Task 凭据读取 Session 内容限于本 Session；同 owner 直接父会话的已记录继承范围，以及已验证飞书 Topic 的 metadata/派发/steer 协调是受限例外。私有 Chat-owned Task 限于本 Task，公开 Issue-owned 或无 Chat 的 Task 路由保留既有 Workspace、owner 及各路由权限，详见[会话模型](../conversation-model.md)。 |
 
 修改路由时，从请求实际指向的资源解析 workspace，再调用对应 guard；不要仅凭客户端传入的 ID 或“已经登录”认定有权限。[server.ts](../../packages/server/src/api/server.ts)中的 daemon 前缀中间件必须注册在对应 handler 之前，Hono 的注册顺序会影响覆盖范围。
 
 [denyTaskChatContentAccess](../../packages/server/src/api/helpers/auth-guards.ts)把 Session Task 与所有者 Chat 的普通内容权限分开：真实 Session Task 不能通过 Chat ID 或创建者回退读取、发送普通消息、访问 Chat root log 或操作队列。普通 Chat 轴须有真实执行分类和持久化用户消息来源，重试只沿服务端保存的 attempt 血统继承来源；Topic transport 须通过实际 binding 分类。调用方指定 `kind` 不构成普通聊天授权。合法普通 Chat/Topic Task 的既有创建者回退、工作区与 Agent 检查保持原规则，工作 Session metadata 管理不授予普通聊天正文权限。
+
+公开 Issue-owned 或无 Chat 的 Task 路由沿用既有 Workspace、owner、Agent 及各路由权限，不统一限制为来源凭据的本 Task。经验证的旧 Task 凭据在 raw Task 列表缺少 `workspaceId`（`null`/`undefined`）时保留原兼容筛选；这不跳过其他路由对目标工作区的检查。Session events、logs 与 messages 仍采用本 Session 内容守卫。通用派发与 Issue 嵌套 Session Task 创建对公开 Issue-owned 目标沿用 owner/Workspace 基线，保留 Agent、旁聊、delegation 血统及交接次数检查；创建本身不额外授予读取内容或控制任务的权限。私有 Chat-owned 目标继续使用当前 Session 或已验证 Topic 创建边界，私有 Task 读取与控制要求本 Task。
+
+[InboxRepo](../../packages/server/src/store/repos/inbox-repo.ts)按真正接收 Session 的 owner 写入委派返回摘要：Chat-owned 写入私有 Session system log 并沿用去重、事件通知与已读回执，不镜像为公开 Issue 评论；Issue-owned 保留公开评论镜像，Issue 工作投影不改变这个范围。
 
 [TasksRepo](../../packages/server/src/store/repos/tasks-repo.ts)在任务创建锁内拒绝归档 Session 的普通新任务；只有既有 `delegation_return` 与 turn-end `re_ring` 的内部收尾路径，在重读 source 并核对父 Task、return Session、Workspace、Agent 和执行 scope 后可继续。内部收尾授权不暴露为 `CreateTaskInput` 或 API 字段，system 作者、wake source 或 delegation 字段本身不授予越过归档的权限。
 

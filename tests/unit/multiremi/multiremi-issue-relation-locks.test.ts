@@ -345,8 +345,14 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
     for (const action of ["reopen", "assign"] as const) {
       it(`S3: ${action} of a done child refuses a deleted parent and ignores a parent moved away`, () => {
         const gone = family();
-        // parent_issue_id has no foreign key, so a parent row can vanish under its children.
-        db.run("DELETE FROM multiremi_issues WHERE id = ?", [gone.parent.id]);
+        const main = store.getOrCreateDefaultIssueSession(gone.parent.id);
+        expect(store.deleteIssue(gone.parent.id)).toBe(true);
+        expect(store.getIssueSession(main.id)).toBeNull();
+        expect(store.listConversationLogEntries(main.id)).toEqual([]);
+        expect(db.query("SELECT 1 FROM multiremi_conversation_heads WHERE session_id = ?").get(main.id)).toBeNull();
+        // Preserve only the legacy dangling relation after the real owner
+        // lifecycle has removed the parent and its Session history.
+        db.run("UPDATE multiremi_issues SET parent_issue_id = ? WHERE id = ?", [gone.parent.id, gone.child.id]);
         expect(store.getIssue(gone.child.id)?.parentIssueId).toBe(gone.parent.id);
         expect(thrown(() => reopenOrAssign(action, gone.child.id, gone.agent.id)).message)
           .toBe(`Parent issue not found: ${gone.parent.id}`);

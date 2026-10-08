@@ -46,12 +46,15 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
     const discussionResponse = await app.request(`/api/issues/${issue.id}/sessions`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chat.id, title: "Discussion", holds_workspace: false }),
+      body: JSON.stringify({ title: "Discussion", holds_workspace: false }),
     });
     expect(discussionResponse.status).toBe(201);
     expect(await discussionResponse.json()).toMatchObject({
       title: "Discussion",
       holds_workspace: false,
+      owner_type: "issue",
+      owner_id: issue.id,
+      chat_id: null,
     });
 
     const response = await app.request(`/api/issues/${issue.id}/task-runs`, { headers });

@@ -161,9 +161,7 @@ describe.skipIf(!pgAvailable)("MUL-448 credential identity on PostgreSQL", () =>
     expect(activity[0]!.actorType).toBe("member");
     expect(activity[0]!.actorId).toBe(fixture.ownerId);
 
-    const source = store.createTask({
-      agentId: fixture.agentId, issueId: issue.id, prompt: "Source run", workspaceId: fixture.workspaceId,
-    });
+    const source = store.createSessionTask(session.id, { agentId: fixture.agentId, prompt: "Source run" });
     const taskToken = await store.createTaskAccessToken(store.getTask(source.id)!, fixture.ownerId);
     const tokenHeaders = {
       "Content-Type": "application/json",
@@ -180,6 +178,25 @@ describe.skipIf(!pgAvailable)("MUL-448 credential identity on PostgreSQL", () =>
     expect(tokenAssigned).toHaveLength(1);
     expect(tokenAssigned[0]!.authorType).toBe("agent");
     expect(tokenAssigned[0]!.authorId).toBe(fixture.agentId);
+
+    const chat = store.createChatSession({ agentId: fixture.agentId, creatorId: fixture.ownerId, workspaceId: fixture.workspaceId });
+    const otherSession = store.createIssueSession(issue.id, { chatId: chat.id, title: "Private credential scope" });
+    const crossSession = await fixture.app.request(sessionsPath + "/" + otherSession.id + "/tasks", {
+      method: "POST", headers: tokenHeaders,
+      body: JSON.stringify({ agent_id: fixture.agentId, prompt: "Cross-Session run" }),
+    });
+    expect(crossSession.status).toBe(403);
+    expect(store.listTasksForIssue(issue.id).filter((task) => task.issueSessionId === otherSession.id)).toHaveLength(0);
+
+    const publicSession = store.createIssueSession(issue.id, { title: "Public dispatch scope" });
+    const dispatched = await fixture.app.request(sessionsPath + "/" + publicSession.id + "/tasks", {
+      method: "POST", headers: tokenHeaders,
+      body: JSON.stringify({ agent_id: fixture.agentId, prompt: "Public cross-Session run" }),
+    });
+    expect(dispatched.status).toBe(201);
+    const publicTaskId = ((await dispatched.json()) as any).id as string;
+    expect(assignmentEvents(publicSession.id, publicTaskId)[0]).toMatchObject({ authorType: "agent", authorId: fixture.agentId });
+    expect((await fixture.app.request("/api/sessions/" + publicSession.id + "/log", { headers: tokenHeaders })).status).toBe(403);
   });
 
   it("B2: member evaluations are rejected and only the leader records one", async () => {

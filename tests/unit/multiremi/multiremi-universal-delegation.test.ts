@@ -59,10 +59,11 @@ function fixture(store: MultiremiStore, humanAssigned = false) {
   const wrong = store.getOrCreateDefaultIssueSession(a.id);
   const s1 = store.createIssueSession(b.id, { title: "Target execution S1" });
   const source = store.createTask({ agentId: qa!.id, issueId: a.id, issueSessionId: s0.id, prompt: "Coordinate." });
-  // Delegation must work for the current Chat-owned Session model as well as
-  // retaining the legacy Issue Session return destination.
-  expect(s0.chatId).toStartWith("chat_");
-  expect(source.chatSessionId).toBe(s0.chatId);
+  // Public cross-Issue delegation uses native Issue-owned Sessions and never
+  // allocates a private Chat as a side effect.
+  expect(s0.ownerType).toBe("issue");
+  expect(s0.chatId).toBeNull();
+  expect(source.chatSessionId).toBeNull();
   start(store, source);
   return { qa: qa!, atlas: atlas!, leader: leader!, a, b, s0, s1, wrong, source };
 }
@@ -144,6 +145,34 @@ function chain(store: MultiremiStore, f: ReturnType<typeof fixture>, hops: numbe
 for (const backend of ["sqlite", "postgres"] as const) {
   const timeout = backend === "postgres" ? 60_000 : 15_000;
   describe.skipIf(backend === "postgres" && !pgAdminUrl)(`MUL-510 universal delegation (${backend})`, () => {
+    it("returns a same-Chat private delegation without publishing its terminal body to the Issue", async () => {
+      await withStore(backend, async store => {
+        const f = fixture(store);
+        store.completeTask(f.source.id, { output: "Public setup completed." });
+        const chat = store.createChatSession({ agentId: f.qa.id, creatorId: "local" });
+        const session = store.createIssueSession(f.a.id, { chatId: chat.id, title: "Private delegation" });
+        const source = store.createSessionTask(session.id, { agentId: f.qa.id, prompt: "Private coordinator" });
+        start(store, source);
+        const child = await dispatch(store, source, f.a, f.atlas.id, "task", session.id);
+        expect(child).toMatchObject({ chatSessionId: chat.id, issueSessionId: session.id,
+          delegatedFromIssueSessionId: session.id, parentTaskId: source.id });
+        store.completeTask(source.id, { output: "PRIVATE_COORDINATOR_TERMINAL" });
+        start(store, child);
+        store.completeTask(child.id, { output: "PRIVATE_CHILD_TERMINAL" });
+        const returned = store.getTask(store.getTask(child.id)!.delegationReturnTaskId!)!;
+        const entry = inboxReportEntry(store, returned, child.id);
+        expect(entry.kind).toBe("system");
+        expect(entry.body_md).toContain("PRIVATE_CHILD_TERMINAL");
+        start(store, returned);
+        expect(store.buildTaskSessionProjection(returned.id)?.jsonl).toContain("PRIVATE_CHILD_TERMINAL");
+        store.completeTask(returned.id, { output: "PRIVATE_REVIEW_TERMINAL" });
+        expect(store.hasInboxReceiptCovering(session.id, f.qa.id, entry.seq)).toBe(true);
+        expect(JSON.stringify(store.listIssueComments(f.a.id))).not.toContain("PRIVATE_");
+        expect(JSON.stringify(store.listIssueActivity(f.a.id))).not.toContain("PRIVATE_");
+        expect(inboxReportEntry(store, returned, child.id).id).toBe(entry.id);
+      });
+    }, timeout);
+
     for (const entry of ["task", "session", "rerun"] as const) {
       for (const terminal of ["completed", "failed", "cancelled"] as const) {
         it(`${entry}: returns ${terminal} from B/S1 to an unassigned A/S0 exactly once (C1/C1'/C2/C3)`,

@@ -46,9 +46,8 @@ async function setup() {
     provider: "codex",
     workspaceId: "local",
   });
-  // Preserve the owner-parity contract for upgraded Issue-owned rows. Create
-  // these Sessions before Agents exist so the compatibility bridge cannot
-  // convert the fixture into private Chats; Chat isolation is covered below.
+  // Public Issue-owned Sessions preserve the workspace owner's Task authority;
+  // private Chat-owned Sessions are created explicitly in the isolation test.
   const targetIssue = store.createIssue({ title: "Target issue", workspaceId: "local" });
   const patrolIssue = store.createIssue({ title: "Organizer patrol", workspaceId: "local" });
   store.getOrCreateDefaultIssueSession(targetIssue.id);
@@ -276,9 +275,14 @@ describe("Organizer supervisor privilege layer", () => {
     const supervisorToken = await grantSupervisor(fixture);
     const normalTaskToken = await fixture.store.createTaskAccessToken(fixture.targetTask, "owner");
     const issue = fixture.store.createIssue({ title: "Private Chat work", workspaceId: "local" });
-    const privateTask = fixture.store.createTask({
-      agentId: fixture.targetAgent.id, issueId: issue.id, prompt: "Private Chat prompt",
+    const chat = fixture.store.createChatSession({
+      agentId: fixture.targetAgent.id, workspaceId: "local", creatorId: "owner",
     });
+    const session = fixture.store.createIssueSession(issue.id, { chatId: chat.id, title: "Private work" });
+    const privateTask = fixture.store.createSessionTask(session.id, {
+      agentId: fixture.targetAgent.id, prompt: "Private Chat prompt",
+    });
+    expect(session.ownerType).toBe("chat");
     expect(privateTask.chatSessionId).not.toBeNull();
     for (const token of [supervisorToken, normalTaskToken]) {
       for (const path of [

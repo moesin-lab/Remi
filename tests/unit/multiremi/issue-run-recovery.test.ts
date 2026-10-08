@@ -3,14 +3,17 @@ import { createMultiremiApp } from "@multiremi/api.js";
 import { createLocalStore, resetMultiremiTestEnv } from "./helpers.js";
 afterEach(resetMultiremiTestEnv);
 
-async function fixture() {
+async function fixture(privateChat = false) {
   const store = createLocalStore();
   const user = store.getOrCreateUser({ name: "Run creator", email: "recovery-creator@example.test" });
   store.createWorkspaceMember({ workspaceId: "local", userId: user.id, name: user.name, role: "member" });
   const original = store.createAgent({ name: "Original agent", provider: "codex", ownerId: user.id });
   const replacement = store.createAgent({ name: "New assignee", provider: "codex", ownerId: user.id });
   const issue = store.createIssue({ title: "Recover context", assigneeType: "agent", assigneeId: replacement.id, workspaceId: "local" });
-  const previous = store.createTask({ agentId: original.id, issueId: issue.id, prompt: "Original detailed instructions", maxAttempts: 1, assignmentAuthorType: "member", assignmentAuthorId: user.id, issueCreationRestricted: true });
+  const chat = privateChat ? store.createChatSession({ agentId: original.id, creatorId: user.id }) : null;
+  const session = chat ? store.createIssueSession(issue.id, { chatId: chat.id, title: "Private recovery" }) : null;
+  const previous = store.createTask({ agentId: original.id, issueId: issue.id, issueSessionId: session?.id,
+    prompt: "Original detailed instructions", maxAttempts: 1, assignmentAuthorType: "member", assignmentAuthorId: user.id, issueCreationRestricted: true });
   store.cancelTask(previous.id);
   const app = createMultiremiApp({ store, authToken: "recovery-fixture-token" });
   const pat = await store.createAccessToken({ name: "Creator token", type: "pat", workspaceId: "local", userId: user.id });
@@ -51,7 +54,9 @@ describe("specific run recovery", () => {
   });
 
   it("keeps linked Chat recovery within its creator boundary", async () => {
-    const f = await fixture();
+    const f = await fixture(true);
+    expect(f.previous.chatSessionId).not.toBeNull();
+    expect(f.store.getIssueSession(f.previous.issueSessionId!)?.ownerType).toBe("chat");
     const member = f.store.getOrCreateUser({ name: "Other member", email: "recovery-other-member@example.test" });
     f.store.createWorkspaceMember({ workspaceId: "local", userId: member.id, name: member.name, role: "member" });
     const pat = await f.store.createAccessToken({ name: "Other member", type: "pat", workspaceId: "local", userId: member.id });

@@ -123,27 +123,35 @@ describe("Session Task dual ownership", () => {
       .toThrow("Chat session is archived");
   });
 
-  it("limits active Issue and workspace snapshots to the exact authenticated Task for both owners", () => {
+  it("keeps public Issue snapshots visible while restricting private Chat rows to the authenticated Task", () => {
     const { store, agent, issue, chat, session } = fixture("chat", true);
     const issueSession = store.getOrCreateDefaultIssueSession(issue!.id);
     const siblingSession = store.createIssueSession(issue!.id, { title: "Issue sibling" });
     const siblingAgent = store.createAgent({ name: "Snapshot sibling", provider: "claude" });
     const ownChatTask = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Private snapshot task" });
     const ownIssueTask = store.createSessionTask(issueSession.id, { agentId: agent.id, prompt: "Issue snapshot task" });
-    store.createSessionTask(siblingSession.id, { agentId: siblingAgent.id, prompt: "Sibling snapshot task" });
+    const siblingTask = store.createSessionTask(siblingSession.id, { agentId: siblingAgent.id, prompt: "Sibling snapshot task" });
     store.createTask({ agentId: agent.id, chatSessionId: chat!.id, prompt: "Ordinary Chat snapshot task" });
 
+    const publicIds = [ownIssueTask.id, siblingTask.id].sort();
     for (const task of [ownChatTask, ownIssueTask]) {
       const access = { userId: null, taskToken: { taskId: task.id, agentId: task.agentId, workspaceId: task.workspaceId } };
-      expect(store.listActiveTasksForIssue(issue!.id, access).map(entry => entry.id)).toEqual([task.id]);
-      expect(store.listWorkspaceAgentTaskSnapshot("local", access).map(entry => entry.id)).toEqual([task.id]);
+      const expected = [...publicIds, ...(task === ownChatTask ? [task.id] : [])].sort();
+      expect(store.listActiveTasksForIssue(issue!.id, access).map(entry => entry.id).sort()).toEqual(expected);
+      expect(store.listWorkspaceAgentTaskSnapshot("local", access).map(entry => entry.id).sort()).toEqual(expected);
       const wrongAgent = { ...access, taskToken: { ...access.taskToken, agentId: siblingAgent.id } };
-      expect(store.listActiveTasksForIssue(issue!.id, wrongAgent)).toEqual([]);
-      expect(store.listWorkspaceAgentTaskSnapshot("local", wrongAgent)).toEqual([]);
+      expect(store.listActiveTasksForIssue(issue!.id, wrongAgent).map(entry => entry.id).sort()).toEqual(publicIds);
+      expect(store.listWorkspaceAgentTaskSnapshot("local", wrongAgent).map(entry => entry.id).sort()).toEqual(publicIds);
       const wrongWorkspace = { ...access, taskToken: { ...access.taskToken, workspaceId: "another-workspace" } };
-      expect(store.listActiveTasksForIssue(issue!.id, wrongWorkspace)).toEqual([]);
-      expect(store.listWorkspaceAgentTaskSnapshot("local", wrongWorkspace)).toEqual([]);
+      expect(store.listActiveTasksForIssue(issue!.id, wrongWorkspace).map(entry => entry.id).sort()).toEqual(publicIds);
+      expect(store.listWorkspaceAgentTaskSnapshot("local", wrongWorkspace).map(entry => entry.id).sort()).toEqual(publicIds);
     }
+    // A damaged Task pointer cannot turn its actual private Session into a
+    // public Issue Task in either SQL entry point.
+    db!.run("UPDATE multiremi_tasks SET chat_session_id = NULL WHERE id = ?", [ownChatTask.id]);
+    const access = { userId: null, taskToken: { taskId: ownIssueTask.id, agentId: agent.id, workspaceId: "local" } };
+    expect(store.listActiveTasksForIssue(issue!.id, access).map(entry => entry.id).sort()).toEqual(publicIds);
+    expect(store.listWorkspaceAgentTaskSnapshot("local", access).map(entry => entry.id).sort()).toEqual(publicIds);
   });
 
   for (const firstSurface of ["ordinary", "session-a", "session-b", "topic"] as const) {

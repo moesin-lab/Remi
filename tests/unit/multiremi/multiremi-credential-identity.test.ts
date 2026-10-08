@@ -170,13 +170,24 @@ describe("MUL-448 B1: X-Agent-ID cannot outrank a member credential", () => {
     expect(assigned[0]!.authorType).toBe("agent");
     expect(assigned[0]!.authorId).toBe(agentId);
 
-    const otherSession = store.createIssueSession(issue.id, { title: "Other credential scope" });
+    const chat = store.createChatSession({ agentId, creatorId: "local" });
+    const otherSession = store.createIssueSession(issue.id, { chatId: chat.id, title: "Private credential scope" });
     const denied = await app.request(`/api/issues/${issue.id}/sessions/${otherSession.id}/tasks`, {
       method: "POST", headers: runHeaders,
       body: JSON.stringify({ agent_id: agentId, prompt: "Cross-Session run" }),
     });
     expect(denied.status).toBe(403);
     expect(store.listTasksForIssue(issue.id).filter((task) => task.issueSessionId === otherSession.id)).toHaveLength(0);
+
+    const publicSession = store.createIssueSession(issue.id, { title: "Public dispatch scope" });
+    const dispatched = await app.request(`/api/issues/${issue.id}/sessions/${publicSession.id}/tasks`, {
+      method: "POST", headers: runHeaders,
+      body: JSON.stringify({ agent_id: agentId, prompt: "Public cross-Session run" }),
+    });
+    expect(dispatched.status).toBe(201);
+    const publicTaskId = (await dispatched.json()).id as string;
+    expect(assignmentEvents(store, publicSession.id, publicTaskId)[0]).toMatchObject({ authorType: "agent", authorId: agentId });
+    expect((await app.request(`/api/sessions/${publicSession.id}/log`, { headers: runHeaders })).status).toBe(403);
   });
 });
 

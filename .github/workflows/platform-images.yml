@@ -61,7 +61,9 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ghcr.io/${{ steps.meta.outputs.owner }}/remi-api:${{ steps.meta.outputs.tag }}
-          build-args: MULTIREMI_VERSION=${{ steps.meta.outputs.version }}
+          build-args: |
+            MULTIREMI_VERSION=${{ steps.meta.outputs.version }}
+            REMI_APPLICATION_BASE_REF=${{ steps.meta.outputs.sha }}
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
@@ -80,6 +82,7 @@ jobs:
           build-args: |
             REMOTE_API_URL=http://api:6120
             REMI_APP_VERSION=${{ steps.meta.outputs.version }}
+            REMI_APPLICATION_BASE_REF=${{ steps.meta.outputs.sha }}
             NEXT_BUILD_CPUS=2
             NEXT_PUBLIC_SITE_URL=http://${{ steps.meta.outputs.hostname }}:13000
             NEXT_PUBLIC_LOCAL_PROFILE=stable
@@ -91,11 +94,27 @@ jobs:
             io.remi.local-profile.hostname=${{ steps.meta.outputs.hostname }}
           cache-from: type=gha,scope=stable-web
           cache-to: type=gha,scope=stable-web,mode=max
+      - name: Build internal updater
+        id: updater
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.updater
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ steps.meta.outputs.owner }}/remi-updater:${{ steps.meta.outputs.tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=stable-updater
+          cache-to: type=gha,scope=stable-updater,mode=max
       - name: Write immutable deployment manifest
         env:
           BUILD_HOSTNAME: ${{ steps.meta.outputs.hostname }}
           API_DIGEST: ${{ steps.api.outputs.digest }}
           WEB_DIGEST: ${{ steps.web.outputs.digest }}
+          UPDATER_DIGEST: ${{ steps.updater.outputs.digest }}
         run: node scripts/ci-image-metadata.mjs --manifest
       - name: Verify pull-based deployment and authentication
         env:

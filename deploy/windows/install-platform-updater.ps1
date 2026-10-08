@@ -21,12 +21,16 @@ foreach ($path in @($UpdaterExecutable, $Config, $sourceRunner)) {
 $required = @(
   "MULTIREMI_API_URL", "MULTIREMI_TOKEN", "MULTIREMI_PLATFORM_UPDATER_TOKEN",
   "MULTIREMI_PLATFORM_DRIVER", "MULTIREMI_PLATFORM_RELEASE_FEED_URL",
-  "MULTIREMI_LOCAL_PROFILE_REPOSITORY", "MULTIREMI_LOCAL_PROFILE_ROOT",
-  "MULTIREMI_PLATFORM_NODE"
+  "MULTIREMI_LOCAL_PROFILE_ROOT"
 )
 $configured = @{}
 foreach ($line in Get-Content -LiteralPath $Config) {
   if ($line -match '^([A-Z][A-Z0-9_]*)=(.*)$') { $configured[$matches[1]] = $matches[2] }
+}
+if ($configured["MULTIREMI_PLATFORM_UPDATE_MODE"] -eq "images") {
+  $required += @("MULTIREMI_LOCAL_PROFILE_REPOSITORY", "MULTIREMI_PLATFORM_NODE")
+} elseif ($configured["MULTIREMI_PLATFORM_UPDATE_MODE"] -and $configured["MULTIREMI_PLATFORM_UPDATE_MODE"] -ne "application") {
+  throw "MULTIREMI_PLATFORM_UPDATE_MODE must be application or images"
 }
 foreach ($name in $required) {
   if (-not $configured.ContainsKey($name) -or -not $configured[$name] -or $configured[$name] -like 'replace-*') {

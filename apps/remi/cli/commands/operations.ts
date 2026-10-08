@@ -1167,7 +1167,7 @@ function platformSpecs(): CommandSpec[] {
       ["platform.ready", ["platform", "ready"], "/readyz", "Get platform readiness"],
       ["platform.realtime", ["platform", "realtime"], "/health/realtime", "Get realtime transport health"],
       ["platform.config", ["platform", "config"], "/api/multiremi/platform/config", "Get effective platform configuration and degradation status"],
-      ["platform.status", ["platform", "status"], "/api/multiremi/platform/status", "Get platform deployment status"],
+      ["platform.status", ["platform", "status"], "/api/multiremi/platform/status", "Get platform status, reported updateMode and preflight.source artifact availability by mode"],
       ["platform.operation.list", ["platform", "operation", "list"], "/api/multiremi/platform/operations", "List platform operations"],
       ["platform.feedback.list", ["platform", "feedback", "list"], "/api/multiremi/feedback", "List product feedback"],
       ["platform.release.version", ["platform", "release", "version"], "/api/remi/releases/latest/version", "Get the latest CLI release version"],

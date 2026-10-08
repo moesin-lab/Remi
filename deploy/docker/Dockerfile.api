@@ -2,8 +2,10 @@ FROM oven/bun:1.3.14 AS runtime
 
 WORKDIR /app
 ARG MULTIREMI_VERSION=dev
+ARG REMI_APPLICATION_BASE_REF=unknown
 ENV NODE_ENV=production
 ENV MULTIREMI_VERSION=$MULTIREMI_VERSION
+ENV REMI_APPLICATION_BASE_VERSION=$MULTIREMI_VERSION REMI_APPLICATION_BASE_REF=$REMI_APPLICATION_BASE_REF
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl git gosu openssh-client passwd \
@@ -38,6 +40,10 @@ COPY . .
 RUN bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts \
   && rm -rf /root/.bun/install/cache \
   && chmod 0755 /app/deploy/docker/api-entrypoint.sh
+
+RUN mkdir -p /usr/local/lib/remi /remi-control /remi-program /remi-seed \
+  && cp /app/packages/platform-updater/src/supervisor.mjs /app/packages/platform-updater/src/container-runtime.mjs /app/deploy/docker/host-write-fence.ts /usr/local/lib/remi/ \
+  && chown 1000:1000 /remi-control /remi-program /remi-seed
 
 EXPOSE 6120
 ENTRYPOINT ["/app/deploy/docker/api-entrypoint.sh"]

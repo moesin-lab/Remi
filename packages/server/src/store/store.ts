@@ -751,6 +751,7 @@ runMigrations(this.db);
   }
 
   heartbeatPlatformUpdater(input: {
+    updateMode?: import("@multiremi/contracts/types.js").MultiremiPlatformUpdateMode | null;
     defaultReleaseFeedUrl?: string | null;
     releaseFeedUrl?: string | null;
     preflight?: import("@multiremi/contracts/types.js").MultiremiPlatformPreflight | null;

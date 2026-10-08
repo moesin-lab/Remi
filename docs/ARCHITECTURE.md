@@ -15,7 +15,7 @@ summary: 从 CLI、Web 和飞书入口追踪到 API、存储与 Agent 执行，�
 |---|---|---|
 | `apps/remi` | `remi` CLI、登录、服务生命周期和平台命令 | [main.ts](../apps/remi/main.ts)、[CommandRegistry](../apps/remi/cli/core/command-registry.ts) |
 | `apps/server` | 平台 CLI 入口，复用服务端启动分发 | [main.ts](../apps/server/main.ts)、[multiremi.ts](../apps/remi/cli/multiremi.ts) |
-| `apps/platform-updater` | API/daemon 之外的宿主更新循环；通过 systemd、Compose 或可恢复 local-profile driver 执行持久化 operation | [main.ts](../apps/platform-updater/main.ts)、[部署说明](../deploy/README.md#host-updater) |
+| `apps/platform-updater` | 独立更新循环；Compose 内部更新器经共享卷监管 API/Web 子进程，应用包携带 Bun/Node；另保留宿主应用包、systemd 与镜像驱动 | [内部入口](../apps/platform-updater/internal.ts)、[内部驱动](../packages/platform-updater/src/internal-driver.ts)、[监管进程](../packages/platform-updater/src/supervisor.mjs)、[部署说明](../deploy/README.md#internal-compose-updater) |
 | `frontend/apps/web` | Next.js Web 入口；主侧栏含工作区、[IM 平台](dev/im-platforms.md)和配置分组 | [应用目录](../frontend/apps/web)、[前端地图](dev/frontend.md) |
 | `packages/server` | Hono API、wire 序列化、领域存储、平台 worker | [API 组合与服务启动](../packages/server/src/api/server.ts)、[Store](../packages/server/src/store/store.ts) |
 | `packages/daemon` | 共享 AgentRuntime、工作目录/插件/MCP/提示词组装、lane 和定时调度 | [runtime.ts](../packages/daemon/src/agent-runtime/runtime.ts)、[orchestrator.ts](../packages/daemon/src/orchestrator.ts)、[scheduler.ts](../packages/daemon/src/scheduler.ts) |

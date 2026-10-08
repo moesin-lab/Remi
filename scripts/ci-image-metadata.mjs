@@ -17,6 +17,7 @@ if (process.argv.includes('--manifest')) {
     profile: 'stable', platform: 'linux/amd64',
     apiImage: `ghcr.io/${owner}/remi-api@${process.env.API_DIGEST}`,
     webImage: `ghcr.io/${owner}/remi-web@${process.env.WEB_DIGEST}`,
+    updaterImage: `ghcr.io/${owner}/remi-updater@${process.env.UPDATER_DIGEST}`,
   }, { repository, ref, hostname });
   writeFileSync('stable-images.json', JSON.stringify(manifest, null, 2) + '\n');
   appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Built ${ref} for ${hostname}. Download the stable-images-${ref} artifact for immutable image references. No local environment is upgraded automatically.\n`);

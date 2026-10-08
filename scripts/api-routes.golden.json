@@ -20817,6 +20817,7 @@
         "defaultReleaseFeedUrl": null,
         "preflight": null,
         "driver": "systemd_release",
+        "updateMode": null,
         "currentRelease": null,
         "latestRelease": null,
         "updateAvailable": false,

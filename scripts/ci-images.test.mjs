@@ -29,3 +29,11 @@ test('failed builds and artifacts from other workflows cannot deploy and never f
     assert.equal(calls.length, 3);
   }
 });
+
+test('internal updater image is optional on legacy manifests and must have the same registry ownership and a digest', () => {
+  const updaterImage = `ghcr.io/example/remi-updater@sha256:${'d'.repeat(64)}`;
+  assert.equal(validateCiImages({ ...manifest, updaterImage }, expected).updaterImage, updaterImage);
+  for (const image of ['ghcr.io/example/remi-updater:latest', manifest.apiImage, null]) {
+    assert.throws(() => validateCiImages({ ...manifest, updaterImage: image }, expected), /updater image must be pinned/);
+  }
+});

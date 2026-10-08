@@ -120,6 +120,11 @@ function composeArgs(root, ...args) {
   const flags = ['compose', '-p', `remi-${deployment.profile}`, '--env-file', join(root, 'compose.env'), '-f', join(root, 'compose.yml')];
   if (deployment.profile === 'dev') flags.push('-f', join(root, 'compose.dev.yml'));
   if (deployment.profile === 'stable' && existsSync(join(root, 'compose.host-control.yml'))) flags.push('-f', join(root, 'compose.host-control.yml'));
+  if (deployment.profile === 'stable' && existsSync(join(root, 'compose.application.json'))) flags.push('-f', join(root, 'compose.application.json'));
+  if (deployment.profile === 'stable' && existsSync(join(root, 'compose.internal-updates.yml'))) {
+    if (existsSync(join(root, 'compose.application.json')) || existsSync(join(root, 'compose.host-control.yml'))) throw new Error('Internal updates cannot be combined with host updater overlays');
+    flags.push('-f', join(root, 'compose.internal-updates.yml'));
+  }
   if (deployment.profile === 'stable' && args[0] === 'up' && !args.includes('--build')) args = [args[0], '--no-build', ...args.slice(1)];
   return [...flags, ...args];
 }
@@ -976,6 +981,10 @@ async function main() {
     validateLanHost(flags['--lan-host']);
   }
   const root = join(profilesRoot, profile);
+  if (profile === 'stable' && existsSync(join(root, 'compose.internal-updates.yml'))
+    && (action.startsWith('host-') || ['prepare', 'deploy', 'build', 'restart', 'backup'].includes(action))) {
+    throw new Error('This profile uses internal updates. Use Web settings or remi platform operation create for updates, restart and backups; base-image maintenance requires an explicit migration.');
+  }
   if (action === 'host-stage') await hostStage(profile, flags);
   else if (action === 'host-activate') await hostActivate(profile, flags);
   else if (action === 'host-recover') await hostRecover(profile);
@@ -993,6 +1002,7 @@ async function main() {
     if (existsSync(join(root, 'active.json'))) throw new Error('An activated profile must be upgraded with deploy');
     prepare(profile, flags['--ref'] || 'HEAD', flags['--lan-host']);
   } else if (action === 'deploy') {
+    if (profile === 'stable' && existsSync(join(root, 'compose.application.json'))) throw new Error('This profile uses application bundles. Update through Web settings or remi platform operation create; base-image maintenance requires reconciling the application installation.');
     const oldFiles = new Map();
     for (const name of ['deployment.json', 'compose.env', 'compose.yml', 'compose.dev.yml']) {
       if (existsSync(join(root, name))) oldFiles.set(name, readFileSync(join(root, name)));

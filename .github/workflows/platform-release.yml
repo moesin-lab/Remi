@@ -123,6 +123,27 @@ jobs:
             exit 1
           fi
 
+      - name: Plan internal updater image publication
+        id: updater-plan
+        env:
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ needs.validate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          VERSION_IMAGE="${REGISTRY}/${OWNER}/remi-updater:$TAG"
+          SOURCE_IMAGE="${REGISTRY}/${OWNER}/remi-updater:sha-$SHA"
+          version_digest="$(docker buildx imagetools inspect "$VERSION_IMAGE" --format '{{json .Manifest}}' 2>/dev/null | jq -er '.digest' || true)"
+          source_digest="$(docker buildx imagetools inspect "$SOURCE_IMAGE" --format '{{json .Manifest}}' 2>/dev/null | jq -er '.digest' || true)"
+          if [[ -z "$version_digest" && -z "$source_digest" ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$version_digest" && "$version_digest" = "$source_digest" ]]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Refusing ambiguous updater image state for $TAG" >&2
+            exit 1
+          fi
+
       - name: Build and publish API image
         id: api
         if: steps.api-plan.outputs.build == 'true'
@@ -130,7 +151,9 @@ jobs:
         with:
           context: .
           file: deploy/docker/Dockerfile.api
-          build-args: MULTIREMI_VERSION=${{ inputs.tag }}
+          build-args: |
+            MULTIREMI_VERSION=${{ inputs.tag }}
+            REMI_APPLICATION_BASE_REF=${{ needs.validate.outputs.sha }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
@@ -152,6 +175,7 @@ jobs:
           file: deploy/docker/Dockerfile.web
           build-args: |
             REMI_APP_VERSION=${{ needs.validate.outputs.version }}
+            REMI_APPLICATION_BASE_REF=${{ needs.validate.outputs.sha }}
             NEXT_BUILD_CPUS=2
           platforms: linux/amd64,linux/arm64
           push: true
@@ -164,6 +188,25 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=platform-web
           cache-to: type=gha,scope=platform-web,mode=max
+
+      - name: Build and publish internal updater image
+        id: updater
+        if: steps.updater-plan.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.updater
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ needs.validate.outputs.owner }}/remi-updater:${{ inputs.tag }}
+            ${{ env.REGISTRY }}/${{ needs.validate.outputs.owner }}/remi-updater:sha-${{ needs.validate.outputs.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.validate.outputs.sha }}
+            org.opencontainers.image.version=${{ needs.validate.outputs.version }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha,scope=platform-updater
+          cache-to: type=gha,scope=platform-updater,mode=max
 
       - name: Verify published image identity
         id: images
@@ -185,6 +228,7 @@ jobs:
           }
           echo "api_digest=$(verify_image remi-api)" >> "$GITHUB_OUTPUT"
           echo "web_digest=$(verify_image remi-web)" >> "$GITHUB_OUTPUT"
+          echo "updater_digest=$(verify_image remi-updater)" >> "$GITHUB_OUTPUT"
 
       - name: Build deployment manifest
         env:
@@ -193,6 +237,7 @@ jobs:
           SHA: ${{ needs.validate.outputs.sha }}
           API_DIGEST: ${{ steps.images.outputs.api_digest }}
           WEB_DIGEST: ${{ steps.images.outputs.web_digest }}
+          UPDATER_DIGEST: ${{ steps.images.outputs.updater_digest }}
         run: |
           set -euo pipefail
           OWNER="${GITHUB_REPOSITORY_OWNER,,}"
@@ -210,17 +255,21 @@ jobs:
             --arg manifestUrl "$MANIFEST_URL" \
             --arg apiImage "${REGISTRY}/${OWNER}/remi-api@${API_DIGEST}" \
             --arg webImage "${REGISTRY}/${OWNER}/remi-web@${WEB_DIGEST}" \
+            --arg updaterImage "${REGISTRY}/${OWNER}/remi-updater@${UPDATER_DIGEST}" \
             --arg sourceUrl "$ASSET_BASE/$ARCHIVE" \
             --arg sourceSha256 "$SOURCE_SHA" \
             --arg dataSchema "$DATA_SCHEMA" \
-            '{version:$version,ref:$ref,publishedAt:$publishedAt,releaseUrl:$releaseUrl,manifestUrl:$manifestUrl,apiImage:$apiImage,webImage:$webImage,sourceUrl:$sourceUrl,sourceSha256:$sourceSha256,dataSchema:$dataSchema}' \
+            '{version:$version,ref:$ref,publishedAt:$publishedAt,releaseUrl:$releaseUrl,manifestUrl:$manifestUrl,apiImage:$apiImage,webImage:$webImage,updaterImage:$updaterImage,sourceUrl:$sourceUrl,sourceSha256:$sourceSha256,dataSchema:$dataSchema}' \
             > platform-release.json
+
+      - name: Package API and Web application bundles for existing base images
+        run: node scripts/package-platform-application.mjs platform-release.json
 
       - name: Upload platform assets to the existing GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
-        run: gh release upload "$TAG" platform-release.json "platform-systemd-$TAG.tar.gz" --clobber
+        run: gh release upload "$TAG" platform-release.json "platform-systemd-$TAG.tar.gz" platform-application-*.tar.gz --clobber
 
       - name: Attest API image
         uses: actions/attest-build-provenance@v2
@@ -234,4 +283,11 @@ jobs:
         with:
           subject-name: ${{ env.REGISTRY }}/${{ needs.validate.outputs.owner }}/remi-web
           subject-digest: ${{ steps.images.outputs.web_digest }}
+          push-to-registry: true
+
+      - name: Attest internal updater image
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ needs.validate.outputs.owner }}/remi-updater
+          subject-digest: ${{ steps.images.outputs.updater_digest }}
           push-to-registry: true

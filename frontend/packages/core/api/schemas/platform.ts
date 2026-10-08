@@ -73,10 +73,19 @@ export const PlatformAutoUpdateScheduleSchema = z.object({
   lastResult: z.string().nullable().default(null),
 }).loose();
 
+export const PlatformSourceCapabilitiesSchema = z.object({
+  url: z.string(),
+  manifestUrl: z.string().nullable(),
+  modes: z.array(z.object({ mode: z.string(), available: z.boolean(), missing: z.array(z.string()) })),
+  error: z.string().nullable(),
+});
+
 export const PlatformStatusSchema = z.object({
+  updateMode: z.string().nullable().optional().catch(null),
   releaseFeedUrl: z.string().nullable().optional(),
   defaultReleaseFeedUrl: z.string().nullable().optional(),
   preflight: z.object({
+    source: PlatformSourceCapabilitiesSchema.nullable().optional().catch(null),
     ready: z.boolean(),
     checkedAt: z.string(),
     platform: z.string(),

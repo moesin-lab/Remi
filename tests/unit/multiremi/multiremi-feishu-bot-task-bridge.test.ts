@@ -1141,7 +1141,7 @@ describe("Feishu bot standard Task bridge", () => {
             outputTokens: 3,
             cacheReadTokens: 0,
             cacheWriteTokens: 0,
-            totalTokens: 0,
+            totalTokens: 15,
           }],
         },
       });

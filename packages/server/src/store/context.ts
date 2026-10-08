@@ -9,6 +9,7 @@
 // expose publicly (today: the analytics recorders) are instead registered on this object by the
 // facade's constructor and resolved at call time.
 import { selectChatLocalDirectory } from "@multiremi/contracts/chat-local-directory.js";
+import { issueActivityDetails } from "@multiremi/contracts";
 import { resolveChatWorkspace } from "@multiremi/store/chat-workspace.js";
 import { afterCommit, type SqlDatabase } from "@multiremi/store/db/postgres.js";
 import { createId, nowIso } from "@multiremi/ids.js";
@@ -479,6 +480,7 @@ export interface AnalyticsSurface {
 }
 
 export interface WorkspacesSurface {
+  getUserRoleInWorkspace(userId: string | null | undefined, workspaceId: string): string | null;
   getUser(id: string): MultiremiUser | null;
   getUserByFeishuUnionId(unionId: string | null | undefined): MultiremiUser | null;
   /** MUL-412: the users-table row a Feishu open_id belongs to, if any. */
@@ -845,6 +847,7 @@ export interface RuntimesSurface {
   executionBindingStatesRepo(): import("@multiremi/store/repos/execution-binding-states-repo.js").ExecutionBindingStatesRepo;
   getAgentExecutionProfile(runtimeId: string|null, agent: MultiremiAgent): import("@multiremi/contracts/runtime-connection.js").RuntimeConnectionProfile|null;
   executionProfilesRepo(): import("@multiremi/store/repos/execution-profiles-repo.js").ExecutionProfilesRepo;
+  isDaemonRetired(workspaceId: string, daemonId: string): boolean;
   getRuntimeCodexProfile(id: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntimeExecutionProfile(id: string, provider: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntime(id: string): MultiremiRuntime | null;
@@ -1460,7 +1463,7 @@ export class StoreContext {
             actor_id: input.actorId ?? null,
             created_at: now,
             action: input.type,
-            details: input.data ?? (input.body == null ? null : { body: input.body }),
+            details: issueActivityDetails(input.data, input.body ?? null),
           },
         },
       };

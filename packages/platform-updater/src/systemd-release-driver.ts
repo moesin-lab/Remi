@@ -8,6 +8,7 @@ import type {
   ReportPlatformOperationInput,
 } from "@multiremi/contracts";
 import { type PlatformDrainGate } from "./drain.js";
+import { resolveHealthTimeoutMs, waitForHealthyUrl } from "./health-check.js";
 import type { CommandRunner, PlatformDeploymentDriver, PlatformInspection } from "./types.js";
 import { assertCompatible, atomicJson, checkBackup, createBackup, isWithin, migrationFingerprint, preflightResult, readMigrationSource, readRecoveryJournal, RecoveryRequiredError, type BackupConfig } from "./safety.js";
 import { fetchReleaseResponse } from "./release-feed.js";
@@ -20,6 +21,7 @@ interface SystemdReleaseConfig {
   apiHealthUrl: string;
   webHealthUrl: string;
   bunExecutable: string;
+  healthTimeoutMs?: number;
 }
 
 interface SystemdManifest {
@@ -41,7 +43,11 @@ interface SystemdJournal {
 export class SystemdReleaseDriver implements PlatformDeploymentDriver {
   readonly kind = "systemd_release" as const;
 
-  constructor(private readonly config: SystemdReleaseConfig, private readonly runner: CommandRunner) {}
+  private readonly healthTimeoutMs: number;
+
+  constructor(private readonly config: SystemdReleaseConfig, private readonly runner: CommandRunner) {
+    this.healthTimeoutMs = resolveHealthTimeoutMs(config.healthTimeoutMs ?? process.env.MULTIREMI_PLATFORM_HEALTH_TIMEOUT_MS);
+  }
 
   async recoverInterrupted(): Promise<void> {
     let entries: string[];
@@ -237,7 +243,7 @@ export class SystemdReleaseDriver implements PlatformDeploymentDriver {
 
   private async restartAndVerify(): Promise<void> {
     await this.mustRun("systemctl", ["restart", this.config.apiService, this.config.webService]);
-    await Promise.all([verifyUrl(this.config.apiHealthUrl), verifyUrl(this.config.webHealthUrl)]);
+    await Promise.all([this.config.apiHealthUrl, this.config.webHealthUrl].map(url => waitForHealthyUrl(url, this.healthTimeoutMs)));
   }
 
   private async switchCurrent(target: string): Promise<void> {
@@ -326,21 +332,6 @@ function ensureChild(parent: string, child: string): string {
   const candidate = resolve(child);
   if (!isWithin(parent, candidate) || resolve(parent) === candidate) throw new Error("release path escapes platform root");
   return candidate;
-}
-
-async function verifyUrl(url: string): Promise<void> {
-  let lastError = "health check failed";
-  for (let attempt = 0; attempt < 24; attempt += 1) {
-    try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
-      if (response.ok) return;
-      lastError = `${url} returned ${response.status}`;
-    } catch (error) {
-      lastError = errorMessage(error);
-    }
-    await Bun.sleep(2_500);
-  }
-  throw new Error(lastError);
 }
 
 function unknownDependency(id: "postgres" | "openviking", name: string): MultiremiPlatformService {

@@ -1,1115 +1,646 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { BarChart3, ChevronDown, ChevronRight, AlertCircle } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
-import { Skeleton } from "@multiremi/ui/components/ui/skeleton";
-import { Button } from "@multiremi/ui/components/ui/button";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@multiremi/ui/components/ui/collapsible";
+import { AlertCircle, ChevronRight } from "lucide-react";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import type { AgentRuntime } from "@multiremi/core/types";
+import type { UsageReport } from "@multiremi/contracts/usage-accounting";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { agentListOptions } from "@multiremi/core/workspace/queries";
-import type { RuntimeUsage, AgentRuntime } from "@multiremi/core/types";
 import {
-  runtimeUsageOptions,
-  runtimeUsageByAgentOptions,
-} from "@multiremi/core/runtimes/queries";
-import { useCustomPricingStore } from "@multiremi/core/runtimes/custom-pricing-store";
-import { useUsageDiagnosticsStore } from "@multiremi/core/runtimes/usage-diagnostics-store";
+  usageDayModelOptions,
+  usageReportOptions,
+} from "@multiremi/core/usage/queries";
+import {
+  compareCost,
+  modelKey,
+  nullableValue,
+  trendRows,
+} from "@multiremi/core/usage/view-model";
+import { Button } from "@multiremi/ui/components/ui/button";
+import { Skeleton } from "@multiremi/ui/components/ui/skeleton";
+import { ActorAvatar } from "../../common/actor-avatar";
+import { formatTokens } from "../../common/format";
 import { useViewingTimezone } from "../../common/use-viewing-timezone";
 import {
-  formatTokens,
-  estimateCost,
-  estimateCacheSavings,
-  aggregateByDate,
-  aggregateByWeek,
-  aggregateCostByAgent,
-  aggregateCostByModel,
-  collectUnmappedModels,
-  getSplitTokens,
-  getTotalOnlyTokens,
-  hasUnpricedCacheReads,
-  hasUnpricedTokens,
-  pctChange,
-  sliceWindow,
-  type CostByKey,
-} from "../utils";
+  CurrencyControl,
+  PeriodControl,
+  Segmented,
+  TokenBreakdownHint,
+  UsageDiagnostics,
+  UsageMore,
+  useUsageCalendar,
+  useUsageKpiLabel,
+  type UsagePeriod,
+} from "../../usage/experience-controls";
+import { ModelLabel } from "../../usage/model-label";
 import { KpiCard } from "./shared";
-import { ActorAvatar } from "../../common/actor-avatar";
-import {
-  DailyCostChart,
-  DailyTokensChart,
-  WeeklyCostChart,
-  WeeklyTokensChart,
-  ActivityHeatmap,
-} from "./charts";
-import { CustomPricingDialog } from "./custom-pricing-dialog";
+import { ActivityHeatmap, UsageChart, UsageChartLegend } from "./charts";
+import { UsagePricingDialog } from "./custom-pricing-dialog";
 import { useT } from "../../i18n";
 
-// Single source of truth for the period selector. KPIs, the When-chart, the
-// Cost-by tabs, and the CSV export all read from the same `days` value so
-// the labels ("· 30D") and the data slice never disagree.
-//
-// `dims` declares which dimensions each range is allowed in. 7 days at the
-// weekly grain is one bar, so 7d is daily-only; 180d is weekly-only because
-// 180 daily bars are visually unreadable.
-const TIME_RANGES = [
-  { label: "7d", days: 7, dims: ["daily"] as const },
-  { label: "30d", days: 30, dims: ["daily", "weekly"] as const },
-  { label: "90d", days: 90, dims: ["daily", "weekly"] as const },
-  { label: "180d", days: 180, dims: ["weekly"] as const },
-] as const;
-
-type TimeRange = (typeof TIME_RANGES)[number]["days"];
-type WhenTab = "daily" | "weekly" | "heatmap";
-
-// Default time range per dimension. Switching dimensions resets the period
-// to its default rather than keeping a now-invalid value.
-const DEFAULT_DAYS_BY_DIM: Record<Exclude<WhenTab, "heatmap">, TimeRange> = {
-  daily: 30,
-  weekly: 90,
-};
-
-function rangesForDim(dim: Exclude<WhenTab, "heatmap">) {
-  return TIME_RANGES.filter((r) =>
-    (r.dims as readonly string[]).includes(dim),
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Local segmented control. shadcn's Tabs is wired for full tab pages with
-// keyboard nav and ARIA semantics that a compact toolbar pill doesn't need.
-// Visual: light-grey track + white "raised" active pill.
-// ---------------------------------------------------------------------------
-
-function Segmented<T extends string | number>({
-  value,
-  onChange,
-  options,
-  disabled,
-}: {
-  value: T;
-  onChange: (v: T) => void;
-  options: readonly { label: string; value: T }[];
-  disabled?: boolean;
-}) {
-  return (
-    <div
-      className={`inline-flex items-center gap-0.5 rounded-md bg-muted p-0.5 ${
-        disabled ? "opacity-50" : ""
-      }`}
-    >
-      {options.map((o) => (
-        <button
-          key={String(o.value)}
-          type="button"
-          disabled={disabled}
-          onClick={() => onChange(o.value)}
-          className={`rounded-sm px-2.5 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed ${
-            o.value === value
-              ? "bg-background text-foreground shadow-sm"
-              : "text-muted-foreground hover:text-foreground"
-          }`}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function fmtMoney(n: number): string {
-  if (n >= 100) return `$${n.toFixed(0)}`;
-  return `$${n.toFixed(2)}`;
-}
-
-// ---------------------------------------------------------------------------
-// Top-level orchestrator. Owns the time window, fetches a 180-day usage
-// cache once, slices it into "current" / "prior" windows for delta math,
-// and threads everything into the four visual blocks below.
-//
-// 180 days (vs the older 90) is sized for the Heatmap tab — it shows 26
-// weeks (~6 months) so the long view actually looks long. The 7d/30d/90d
-// period selector slices client-side; the prior-window delta on the Cost
-// KPI also benefits from having extra history available.
-// ---------------------------------------------------------------------------
-
 export function UsageSection({ runtime }: { runtime: AgentRuntime }) {
-  const { t } = useT("runtimes");
-  const runtimeId = runtime.id;
-  // Reports render in the viewer's timezone — the backend slices the UTC
-  // hourly rollup on the same `tz` we pass here, so every frontend window
-  // calculation shares one axis with the server.
-  const tz = useViewingTimezone();
-  const {
-    data: usage = [],
-    isLoading: loading,
-    isError,
-    refetch,
-  } = useQuery(runtimeUsageOptions(runtimeId, 180, tz));
-  const [dim, setDim] = useState<Exclude<WhenTab, "heatmap">>("daily");
-  const [days, setDays] = useState<TimeRange>(30);
-  // Subscribe so the KPI cards (which call estimateCost at render-time, not
-  // through a memo) re-evaluate when the user saves a custom rate. The
-  // aggregate sub-components (WhenChart, CostByBlock, ActivityHeatmap) each
-  // subscribe on their own and pass pricings as a memo dep there.
-  useCustomPricingStore((s) => s.pricings);
-
-  if (loading) return <UsageSkeleton />;
-  // Failed fetch is NOT "no usage" — zeros here would be fabricated (MUL-93).
-  // Surface the failure and give the user a retry entry point.
-  if (isError) return <UsageError onRetry={() => refetch()} />;
-  if (usage.length === 0) return <UsageEmpty />;
-
-  // Slice the cached 180-day window into the user's selected sub-window AND
-  // the immediately prior window of equal length. The KPI delta ("+18% vs
-  // prev") then compares like-for-like ranges instead of "this period vs
-  // all of history". Tz-aware so the cutoff lands on the same calendar
-  // boundary the backend used when bucketing rows.
-  const { filtered, prevFiltered } = sliceWindow(usage, days, tz);
-
-  const allowedRanges = rangesForDim(dim);
-  const handleDimChange = (next: Exclude<WhenTab, "heatmap">) => {
-    setDim(next);
-    const stillAllowed = (rangesForDim(next) as readonly { days: number }[]).some(
-      (r) => r.days === days,
-    );
-    if (!stillAllowed) {
-      setDays(DEFAULT_DAYS_BY_DIM[next]);
-    }
-  };
-  const totals = computeTotals(filtered);
-  const prevTotals = computeTotals(prevFiltered);
-
-  // Split tokens are the priceable dimension; total-only tokens are real
-  // usage the daemon recorded before MUL-92 without an input/output/cache
-  // breakdown. The Tokens KPI reports BOTH (the user wants the true volume,
-  // and the token chart already stacks a total-only segment), while every
-  // dollar figure below derives from split tokens alone.
-  const splitTokensTotal =
-    totals.input + totals.output + totals.cacheRead + totals.cacheWrite;
-  const tokensTotal = splitTokensTotal + totals.totalOnly;
-  const cacheableTokens = totals.input + totals.cacheRead;
-  const cacheHitRate =
-    cacheableTokens > 0 ? Math.round((totals.cacheRead / cacheableTokens) * 100) : 0;
-
-  const costDelta = pctChange(totals.cost, prevTotals.cost);
-
-  // Cost is a client-side derivation from the pricing table. When a $0
-  // total includes tokens from unpriced models, the figure is underivable —
-  // declare it unavailable instead of showing a fabricated $0.00 (MUL-93).
-  // Both checks key on unpriced models' actual token CONTRIBUTION to the
-  // metric's dimension: a zero-token unpriced row, or an unpriced model
-  // with no cache reads, must not poison a real $0.00 from priced
-  // free-tier models.
-  const costUnpriced =
-    tokensTotal > 0 && totals.cost === 0 && hasUnpricedTokens(filtered);
-  // Every recorded token lacks a billable dimension. The model may well be
-  // priced (claude-fable-5 is), so `hasUnpricedTokens` says nothing here —
-  // yet $0.00 next to millions of tokens is still a fabricated figure.
-  // Mirrors the dashboard's `costTotalOnly`.
-  const costTotalOnly = tokensTotal > 0 && totals.totalOnly === tokensTotal;
-  const costUnavailable = costUnpriced || costTotalOnly;
-  // Cache-savings semantics are unchanged — they only ever describe split
-  // data. But with no split tokens at all there is nothing to describe, so
-  // "$0.00 · 0% hit · 0 reads" would assert a cache miss we never measured.
-  const cacheTotalOnly = tokensTotal > 0 && splitTokensTotal === 0;
-  const cacheSavingsUnavailable =
-    cacheTotalOnly ||
-    (totals.cacheSavings === 0 && hasUnpricedCacheReads(filtered));
-
-  // The pricing CTA can only help rows with billable splits: a total-only
-  // row stays unpriceable even after the user saves a custom model rate.
-  // Filter per ROW, not per model — a model with both split and total-only
-  // rows still belongs in the notice. Matches the dashboard.
-  const splitFiltered = filtered.filter((row) => getSplitTokens(row) > 0);
-
-  return (
-    <div className="space-y-5">
-      {/* Page-wide period selector. Lives at the top because it controls
-          basically everything below: the KPI numbers and labels, the
-          daily / weekly chart window, and the cost-by aggregations. The
-          Heatmap tab is the only sub-view that ignores it (always shows
-          26 weeks), and its tab disables this control to telegraph that. */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <span className="text-xs uppercase tracking-wider text-muted-foreground">
-            {t(($) => $.usage.dimension_label)}
-          </span>
-          <Segmented
-            value={dim}
-            onChange={handleDimChange}
-            options={
-              [
-                { label: t(($) => $.usage.when_tab_daily), value: "daily" },
-                { label: t(($) => $.usage.when_tab_weekly), value: "weekly" },
-              ] as const
-            }
-          />
-        </div>
-        <div className="flex items-center gap-3">
-          <span className="text-xs uppercase tracking-wider text-muted-foreground">
-            {t(($) => $.usage.period_label)}
-          </span>
-          <Segmented
-            value={days}
-            onChange={setDays}
-            options={allowedRanges.map((r) => ({
-              label: r.label,
-              value: r.days,
-            }))}
-          />
-        </div>
-      </div>
-
-      {/* Pricing-gap banner. Sits above the KPI grid so a *partial* unmapping
-          (some priced + some unpriced models in the same window) still has
-          a visible entry point into the manual-pricing dialog — otherwise
-          the chart would render normally and the unmapped tokens would silently
-          contribute $0 to totals. Total-only rows are excluded: the dialog's
-          CTA cannot make them priceable. */}
-      <UsageDiagnosticsNotice usage={splitFiltered} />
-
-      <div className="grid grid-cols-3 divide-x rounded-lg border bg-card">
-        <KpiCard
-          label={t(($) => $.usage.kpi_cost_label, { days })}
-          value={costUnavailable ? "—" : fmtMoney(totals.cost)}
-          hint={
-            costUnpriced ? (
-              <span>{t(($) => $.usage.kpi_cost_unpriced)}</span>
-            ) : costTotalOnly ? (
-              <span>{t(($) => $.usage.kpi_cost_total_only)}</span>
-            ) : costDelta == null ? undefined : (
-              <span
-                className={
-                  costDelta > 0
-                    ? "text-warning"
-                    : costDelta < 0
-                      ? "text-success"
-                      : ""
-                }
-              >
-                {t(($) => $.usage.kpi_cost_delta, {
-                  sign: costDelta > 0 ? "+" : "",
-                  pct: costDelta,
-                })}
-              </span>
-            )
-          }
-        />
-        <KpiCard
-          label={t(($) => $.usage.kpi_cache_label, { days })}
-          value={cacheSavingsUnavailable ? "—" : fmtMoney(totals.cacheSavings)}
-          accent={totals.cacheSavings > 0 ? "success" : "default"}
-          hint={
-            cacheTotalOnly ? (
-              <span>{t(($) => $.usage.kpi_cache_total_only)}</span>
-            ) : cacheSavingsUnavailable ? (
-              <span>{t(($) => $.usage.kpi_cache_unpriced)}</span>
-            ) : (
-              <span>
-                {t(($) => $.usage.kpi_cache_hint, {
-                  pct: cacheHitRate,
-                  reads: formatTokens(totals.cacheRead),
-                })}
-              </span>
-            )
-          }
-        />
-        <KpiCard
-          label={t(($) => $.usage.kpi_tokens_label, { days })}
-          value={formatTokens(tokensTotal)}
-          // The hint must ACCOUNT for the headline number. Listing only
-          // in/out left users reconciling "Tokens 26.2M" against "in 0 ·
-          // out 0", which is exactly the "the numbers don't add up"
-          // complaint in MUL-123. Cache read + write are folded into one
-          // segment to keep three tiles readable; the total-only remainder
-          // gets named explicitly whenever it exists.
-          hint={
-            <span>
-              {totals.totalOnly > 0
-                ? t(($) => $.usage.kpi_tokens_hint_total_only, {
-                    input: formatTokens(totals.input),
-                    output: formatTokens(totals.output),
-                    cache: formatTokens(totals.cacheRead + totals.cacheWrite),
-                    totalOnly: formatTokens(totals.totalOnly),
-                  })
-                : t(($) => $.usage.kpi_tokens_hint, {
-                    input: formatTokens(totals.input),
-                    output: formatTokens(totals.output),
-                    cache: formatTokens(totals.cacheRead + totals.cacheWrite),
-                  })}
-            </span>
-          }
-        />
-      </div>
-
-      {/* Layer 2 — WHEN chart. Dimension (Daily / Weekly) is owned by the
-          parent so the period selector at the top can react to it. The
-          Heatmap is an independent toggle inside this card — it ignores
-          the period selector by design (it's a fixed 26-week long-view). */}
-      <WhenChart
-        usage={usage}
-        filtered={filtered}
-        days={days}
-        dim={dim}
-        tz={tz}
-      />
-
-      {/* Layer 3 — WHO/WHAT burned the spend. */}
-      <CostByBlock runtimeId={runtimeId} days={days} usage={filtered} tz={tz} />
-
-      {/* Layer 4 — Folded raw view. The Heatmap used to live here too; it
-          was promoted into the WHEN chart's toggle, leaving only the
-          breakdown table behind. */}
-      <FoldedRow usage={filtered} />
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// WhenChart — answers "WHEN was this runtime spending money?".
-// Dimension (Daily / Weekly) is owned by the parent so the page-level
-// period selector can react to it. Heatmap is an independent view toggled
-// inside this card; it ignores both the dimension and the period selector,
-// always showing the long 26-week view.
-// ---------------------------------------------------------------------------
-
-type Dim = Exclude<WhenTab, "heatmap">;
-type DailyMetric = "cost" | "tokens";
-
-function WhenChart({
-  usage,
-  filtered,
-  days,
-  dim,
-  tz,
-}: {
-  usage: RuntimeUsage[];
-  filtered: RuntimeUsage[];
-  days: TimeRange;
-  dim: Dim;
-  tz: string;
-}) {
-  const { t } = useT("runtimes");
-  // Heatmap is the "independent" sibling — toggled here, not part of the
-  // page-level dimension segmented (per the RFC).
-  const [showHeatmap, setShowHeatmap] = useState(false);
-  // Daily and Weekly share a Cost-vs-Tokens metric toggle.
-  const [chartMetric, setChartMetric] = useState<DailyMetric>("cost");
-  // Memo dep — the aggregates below run `estimateCost`, which now consults
-  // the user override store. Without listing pricings here the memos cache
-  // pre-override totals when query data hasn't changed.
-  const pricings = useCustomPricingStore((s) => s.pricings);
-
-  const { dailyCostStack, dailyTokens } = useMemo(
-    () => aggregateByDate(filtered),
-    [filtered, pricings],
-  );
-  // Weekly aggregation builds exactly N trailing calendar weeks anchored at
-  // today (in the runtime tz). Buckets are pre-zeroed inside aggregateByWeek
-  // so weeks with no usage render as empty bars; rows outside the window are
-  // dropped. This avoids the earlier bug where slicing on a sparse 180-day
-  // aggregate surfaced old populated weeks instead of in-range empty ones.
-  const weekCount = Math.max(1, Math.ceil(days / 7));
-  const { weeklyTokens, weeklyCostStack } = useMemo(
-    () => aggregateByWeek(usage, tz, weekCount),
-    [usage, tz, weekCount, pricings],
-  );
-
-  const metricToggleVisible = !showHeatmap;
-  const legendIncludesCacheRead = !showHeatmap && chartMetric === "tokens";
-  const legendIncludesTotalOnly =
-    legendIncludesCacheRead &&
-    (dim === "daily" ? dailyTokens : weeklyTokens).some((row) => row.totalOnly > 0);
-
-  return (
-    <div className="rounded-lg border bg-card p-4">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <h4 className="text-sm font-semibold">{t(($) => $.usage.when_title)}</h4>
-          {/* Cost / Tokens metric toggle — only meaningful when the chart
-              actually has two series-types to switch between. */}
-          {metricToggleVisible && (
-            <Segmented
-              value={chartMetric}
-              onChange={setChartMetric}
-              options={
-                [
-                  { label: t(($) => $.usage.daily_metric_cost), value: "cost" },
-                  { label: t(($) => $.usage.daily_metric_tokens), value: "tokens" },
-                ] as const
-              }
-            />
-          )}
-          {/* Heatmap toggle — independent of the page-level dim segmented.
-              "On" puts the card into a fixed 26-week long-view that ignores
-              the period selector. */}
-          <button
-            type="button"
-            onClick={() => setShowHeatmap((v) => !v)}
-            className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
-              showHeatmap
-                ? "border-foreground bg-foreground text-background"
-                : "border-border text-muted-foreground hover:text-foreground"
-            }`}
-            aria-pressed={showHeatmap}
-          >
-            {t(($) => $.usage.when_tab_heatmap)}
-          </button>
-        </div>
-        {!showHeatmap && (
-          <ChartLegend
-            includeCacheRead={legendIncludesCacheRead}
-            includeTotalOnly={legendIncludesTotalOnly}
-          />
-        )}
-      </div>
-
-      {showHeatmap && (
-        <p className="mb-2 text-center text-xs text-muted-foreground">
-          {t(($) => $.usage.heatmap_caption)}
-        </p>
-      )}
-
-      <div className="min-h-[260px]">
-        {showHeatmap ? (
-          <ActivityHeatmap usage={usage} tz={tz} />
-        ) : dim === "daily" ? (
-          <DailyTab
-            metric={chartMetric}
-            costData={dailyCostStack}
-            tokensData={dailyTokens}
-            usage={filtered}
-          />
-        ) : (
-          <WeeklyTab
-            metric={chartMetric}
-            costData={weeklyCostStack}
-            tokensData={weeklyTokens}
-            usage={filtered}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-function DailyTab({
-  metric,
-  costData,
-  tokensData,
-  usage,
-}: {
-  metric: DailyMetric;
-  costData: Parameters<typeof DailyCostChart>[0]["data"];
-  tokensData: Parameters<typeof DailyTokensChart>[0]["data"];
-  usage: RuntimeUsage[];
-}) {
-  if (metric === "tokens") {
-    // Token chart fires its own empty state: if no tokens were recorded the
-    // chart is genuinely empty (independent of pricing — unmapped models
-    // still contribute raw token counts).
-    const totalTokens = tokensData.reduce(
-      (s, d) => s + d.input + d.output + d.cacheRead + d.cacheWrite + d.totalOnly,
-      0,
-    );
-    if (totalTokens === 0) return <EmptyChartState usage={usage} />;
-    return <DailyTokensChart data={tokensData} />;
-  }
-  const totalCost = costData.reduce((s, d) => s + d.total, 0);
-  if (totalCost === 0) return <EmptyChartState usage={usage} />;
-  return <DailyCostChart data={costData} />;
-}
-
-function WeeklyTab({
-  metric,
-  costData,
-  tokensData,
-  usage,
-}: {
-  metric: DailyMetric;
-  costData: Parameters<typeof WeeklyCostChart>[0]["data"];
-  tokensData: Parameters<typeof WeeklyTokensChart>[0]["data"];
-  usage: RuntimeUsage[];
-}) {
-  if (metric === "tokens") {
-    const totalTokens = tokensData.reduce(
-      (s, d) => s + d.input + d.output + d.cacheRead + d.cacheWrite + d.totalOnly,
-      0,
-    );
-    if (totalTokens === 0) return <EmptyChartState usage={usage} />;
-    return <WeeklyTokensChart data={tokensData} />;
-  }
-  const totalCost = costData.reduce((s, d) => s + d.total, 0);
-  if (totalCost === 0) return <EmptyChartState usage={usage} />;
-  return <WeeklyCostChart data={costData} />;
-}
-
-// ---------------------------------------------------------------------------
-// EmptyChartState — drop-in replacement for "the chart would render empty".
-// Two cases worth distinguishing:
-//   1. No tokens at all → "no usage" (genuinely nothing happened).
-//   2. Tokens present but cost is $0 → almost always means the model name
-//      reported by the daemon isn't in our pricing table. List the offenders
-//      so a developer can update MODEL_PRICING in one go.
-// ---------------------------------------------------------------------------
-
-function EmptyChartState({ usage }: { usage: RuntimeUsage[] }) {
-  const { t } = useT("runtimes");
-  const hasTokens = usage.some(
-    (u) =>
-      u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens >
-      0,
-  );
-  const unmapped = collectUnmappedModels(usage);
-
-  return (
-    <div className="flex aspect-[3/1] flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/20 p-6 text-center">
-      <BarChart3 className="h-5 w-5 text-muted-foreground/50" />
-      {!hasTokens ? (
-        <p className="text-xs text-muted-foreground">
-          {t(($) => $.usage.empty_no_usage)}
-        </p>
-      ) : unmapped.length > 0 ? (
-        // CTA lives in the page-level UsageDiagnosticsNotice above. Keep the
-        // chart-area copy descriptive only so the two surfaces don't bicker.
-        <>
-          <p className="text-xs text-muted-foreground">
-            {t(($) => $.usage.empty_pricing_missing)}
-          </p>
-          <p className="font-mono text-[11px] text-foreground">
-            {unmapped.join(", ")}
-          </p>
-          <p className="text-[11px] text-muted-foreground/70">
-            {t(($) => $.usage.empty_pricing_hint)}
-          </p>
-        </>
-      ) : (
-        <p className="text-xs text-muted-foreground">
-          {t(($) => $.usage.empty_zero_cost)}
-        </p>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// UsageDiagnosticsNotice — the single "why are some tokens missing from the
-// cost total?" strip shown above the KPI grid. It merges the two reasons a
-// token can be counted but not costed:
-//
-//   * the model has no maintained rate (fixable — the custom-pricing dialog
-//     lives here), and
-//   * the row is pre-0.2.49 total-only history with no input/output split
-//     (not fixable, and therefore permanent — that notice would never clear
-//     on its own).
-//
-// Both reasons are long-lived, so rendering them as two stacked open banners
-// left the usage dashboard's first screen permanently two-thirds diagnostic
-// (MUL-168). Collapsed, the header still names both reasons and is itself
-// the entry point to the full explanation; the open/closed choice persists
-// across refreshes via useUsageDiagnosticsStore.
-//
-// Covers the partial-unmapping case where the chart still renders (so
-// EmptyChartState never fires) but some tokens are silently contributing $0
-// to totals.
-//
-// Exported for the workspace dashboard, which prices the same per-(date,
-// model) shape client-side and has the same silent-$0 failure mode. The
-// `usage` prop is the minimal priceable row, so both RuntimeUsage and
-// DashboardUsageDaily rows fit. `totalOnly` is optional because the runtime
-// detail view has no total-only aggregate to report; its `description`
-// arrives already translated so the sentence stays in the `usage` namespace
-// that owns it.
-// ---------------------------------------------------------------------------
-
-type PriceableUsageRow = Pick<
-  RuntimeUsage,
-  "model" | "input_tokens" | "output_tokens" | "cache_read_tokens" | "cache_write_tokens"
->;
-
-export function UsageDiagnosticsNotice({
-  usage,
-  totalOnly,
-}: {
-  usage: readonly PriceableUsageRow[];
-  totalOnly?: { tokens: number; description: string };
-}) {
-  const { t } = useT("runtimes");
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const expanded = useUsageDiagnosticsStore((s) => s.expanded);
-  const setExpanded = useUsageDiagnosticsStore((s) => s.setExpanded);
-
-  const unmapped = collectUnmappedModels(usage);
-  const totalOnlyGap = totalOnly && totalOnly.tokens > 0 ? totalOnly : undefined;
-  if (unmapped.length === 0 && !totalOnlyGap) return null;
-
-  // One summary line, one clause per cause. Joined here rather than in the
-  // bundle so no locale needs a key per combination of the two.
-  const reasons: string[] = [];
-  if (unmapped.length > 0) {
-    reasons.push(
-      t(($) => $.usage.diagnostics.reason_unpriced, { count: unmapped.length }),
-    );
-  }
-  if (totalOnlyGap) {
-    reasons.push(
-      t(($) => $.usage.diagnostics.reason_total_only, {
-        tokens: formatTokens(totalOnlyGap.tokens),
-      }),
-    );
-  }
-
-  return (
-    <Collapsible open={expanded} onOpenChange={setExpanded}>
-      <div
-        role="alert"
-        className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs"
-      >
-        <CollapsibleTrigger className="flex w-full cursor-pointer items-center gap-3 text-left">
-          <AlertCircle className="h-4 w-4 shrink-0 text-warning" />
-          <span className="min-w-0 flex-1 truncate text-foreground">
-            {t(($) => $.usage.diagnostics.summary, { reasons: reasons.join(" · ") })}
-          </span>
-          <span className="shrink-0 text-muted-foreground">
-            {expanded
-              ? t(($) => $.usage.diagnostics.hide_detail)
-              : t(($) => $.usage.diagnostics.show_detail)}
-          </span>
-          <ChevronDown
-            className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
-              expanded ? "rotate-180" : ""
-            }`}
-          />
-        </CollapsibleTrigger>
-        <CollapsibleContent>
-          <div className="space-y-3 pt-2 pl-7">
-            {unmapped.length > 0 && (
-              <div className="space-y-1">
-                <p className="text-foreground">
-                  {t(($) => $.usage.unmapped_notice, { count: unmapped.length })}
-                </p>
-                <p className="break-all font-mono text-[11px] text-muted-foreground">
-                  {unmapped.join(", ")}
-                </p>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setDialogOpen(true)}
-                >
-                  {t(($) => $.usage.custom_pricing.open_button)}
-                </Button>
-              </div>
-            )}
-            {totalOnlyGap && (
-              <p className="text-foreground">{totalOnlyGap.description}</p>
-            )}
-          </div>
-        </CollapsibleContent>
-      </div>
-      {/* Sibling of the panel, not a child: collapsing the strip must not
-          unmount an open pricing dialog. */}
-      <CustomPricingDialog
-        open={dialogOpen}
-        onOpenChange={setDialogOpen}
-        unmappedModels={unmapped}
-      />
-    </Collapsible>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Chart legend — three coloured dots + labels, rendered in WhenChart's
-// header so the chart body keeps its full vertical real estate.
-// ---------------------------------------------------------------------------
-
-function ChartLegend({
-  includeCacheRead = false,
-  includeTotalOnly = false,
-}: {
-  includeCacheRead?: boolean;
-  includeTotalOnly?: boolean;
-}) {
-  const { t } = useT("runtimes");
-  // Token-stack mode adds cache-read and total-only pips to match the
-  // five-segment stack of DailyTokensChart. The cost chart drops
-  // cache-read because at typical pricing it'd be ~0 px tall in the stack.
-  const items = [
-    { label: t(($) => $.usage.legend_input), color: "var(--color-chart-1)" },
-    { label: t(($) => $.usage.legend_output), color: "var(--color-chart-2)" },
-    ...(includeCacheRead
-      ? [{ label: t(($) => $.usage.legend_cache_read), color: "var(--color-chart-4)" }]
-      : []),
-    { label: t(($) => $.usage.legend_cache_write), color: "var(--color-chart-3)" },
-    ...(includeTotalOnly
-      ? [{ label: t(($) => $.usage.legend_total_only), color: "var(--color-chart-5)" }]
-      : []),
-  ];
-  return (
-    <div className="flex items-center gap-3 text-xs text-muted-foreground">
-      {items.map((it) => (
-        <span key={it.label} className="inline-flex items-center gap-1.5">
-          <span
-            className="h-2 w-2 rounded-sm"
-            style={{ background: it.color }}
-          />
-          {it.label}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Cost-by block: two-tab attribution view (by agent / by model).
-// ---------------------------------------------------------------------------
-
-function CostByBlock({
-  runtimeId,
-  days,
-  usage,
-  tz,
-}: {
-  runtimeId: string;
-  days: number;
-  usage: RuntimeUsage[];
-  tz: string;
-}) {
-  const { t } = useT("runtimes");
-  const [tab, setTab] = useState<"agent" | "model">("agent");
-  // Memo dep — same reason as WhenChart: aggregateCostBy{Agent,Model} call
-  // estimateCost, which now reads the override store.
-  const pricings = useCustomPricingStore((s) => s.pricings);
-
-  // by-agent is server-side aggregation (fetched lazily on tab activation).
-  // by-model derives from the daily cache the parent already has — free.
-  const {
-    data: byAgentRows = [],
-    isError: byAgentFailed,
-    refetch: refetchByAgent,
-  } = useQuery({
-    ...runtimeUsageByAgentOptions(runtimeId, days, tz),
-    enabled: tab === "agent",
-  });
-
   const wsId = useWorkspaceId();
-  const { data: agents = [] } = useQuery(agentListOptions(wsId));
-
-  const byAgent = useMemo(
-    () => aggregateCostByAgent(byAgentRows),
-    [byAgentRows, pricings],
-  );
-  const byModel = useMemo(
-    () => aggregateCostByModel(usage),
-    [usage, pricings],
-  );
-
-  const caption =
-    tab === "agent"
-      ? t(($) => $.usage.cost_by_caption_agent, { count: byAgent.length })
-      : t(($) => $.usage.cost_by_caption_model, { count: byModel.length });
-
   return (
-    <div>
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
-        <div className="flex items-center gap-3">
-          <h4 className="text-sm font-semibold">
-            {tab === "agent"
-              ? t(($) => $.usage.cost_by_title_agent)
-              : t(($) => $.usage.cost_by_title_model)}
-          </h4>
-          <Segmented
-            value={tab}
-            onChange={setTab}
-            options={
-              [
-                { label: t(($) => $.usage.cost_by_tab_agent), value: "agent" },
-                { label: t(($) => $.usage.cost_by_tab_model), value: "model" },
-              ] as const
-            }
-          />
-        </div>
-        <span className="text-xs text-muted-foreground">{caption}</span>
-      </div>
-      <div className="pt-4">
-        {/* A failed by-agent fetch must not read as "no agent spent
-            anything" (MUL-93) — CostByList's empty copy would be a
-            fabricated conclusion. */}
-        {tab === "agent" && byAgentFailed && (
-          <div
-            role="alert"
-            className="flex flex-col items-center gap-2 py-4 text-center"
-          >
-            <AlertCircle className="h-4 w-4 text-warning" />
-            <p className="text-xs text-muted-foreground">
-              {t(($) => $.usage.error_body)}
-            </p>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => refetchByAgent()}
-            >
-              {t(($) => $.usage.retry)}
-            </Button>
-          </div>
-        )}
-        {tab === "agent" && !byAgentFailed && (
-          <CostByList
-            rows={byAgent}
-            renderKey={(key) => {
-              const agent = agents.find((a) => a.id === key);
-              return (
-                <div className="flex min-w-0 items-center gap-2">
-                  <ActorAvatar actorType="agent" actorId={key} size={22} enableHoverCard />
-                  <span className="cursor-pointer truncate text-sm font-medium">
-                    {agent?.name ?? key}
-                  </span>
-                </div>
-              );
-            }}
-          />
-        )}
-        {tab === "model" && (
-          <CostByList
-            rows={byModel}
-            renderKey={(key) => (
-              <span className="truncate font-mono text-xs text-foreground">
-                {key}
-              </span>
-            )}
-          />
-        )}
-      </div>
-    </div>
+    <RuntimeUsageContent
+      key={`${wsId}:${runtime.id}`}
+      wsId={wsId}
+      runtimeId={runtime.id}
+    />
   );
 }
-
-// Generic horizontal-bar list shared by both Cost-by tabs. Each row scales
-// its bar relative to the heaviest row in the set, so the visual ranking
-// is always 0..max and the biggest spender visually fills the column.
-function CostByList({
-  rows,
-  renderKey,
-  emptyHint,
+function RuntimeUsageContent({
+  wsId,
+  runtimeId,
 }: {
-  rows: CostByKey[];
-  renderKey: (key: string) => React.ReactNode;
-  emptyHint?: string;
+  wsId: string;
+  runtimeId: string;
 }) {
-  const { t } = useT("runtimes");
-  if (rows.length === 0) {
-    return (
-      <p className="py-4 text-center text-xs text-muted-foreground">
-        {emptyHint ?? t(($) => $.usage.empty_no_usage)}
-      </p>
-    );
-  }
-  const maxCost = rows.reduce((m, r) => Math.max(m, r.cost), 0);
+  const { t } = useT("usage"),
+    tz = useViewingTimezone();
+  const [days, setDays] = useState<UsagePeriod>(30),
+    [weekly, setWeekly] = useState(false),
+    [metric, setMetric] = useState<"tokens" | "cost">("cost");
+  const [heatmap, setHeatmap] = useState(false),
+    [breakdown, setBreakdown] = useState(false),
+    [costBy, setCostBy] = useState<"agent" | "model">("agent"),
+    [currency, setCurrency] = useState("USD"),
+    [heatmapCurrency, setHeatmapCurrency] = useState("USD");
+  const [pricing, setPricing] = useState<{
+    initial?: {
+      provider: string;
+      model: string | null;
+      connection_id: string | null;
+      requested_model_alias: boolean;
+    };
+  } | null>(null);
+  const windows = useUsageCalendar(days, tz);
+  const kpiLabel = useUsageKpiLabel(days);
+  const query = useQuery(
+    usageReportOptions(wsId, {
+      days,
+      tz,
+      runtime_id: runtimeId,
+      ...windows.current,
+    }),
+  );
+  const report = query.data;
+  const previous = useQuery({
+    ...usageReportOptions(wsId, {
+      tz,
+      runtime_id: runtimeId,
+      ...windows.previous,
+    }),
+    enabled: Boolean(wsId) && !!windows.previous && !!report,
+  });
+  const longView = useQuery({
+    ...usageReportOptions(wsId, {
+      tz,
+      runtime_id: runtimeId,
+      ...windows.heatmap,
+    }),
+    enabled: Boolean(wsId) && heatmap && !!report,
+  });
+  const detail = useInfiniteQuery(
+    usageDayModelOptions(
+      wsId,
+      { days, tz, runtime_id: runtimeId, ...windows.current },
+      breakdown,
+    ),
+  );
+  const agents = useQuery(agentListOptions(wsId)).data ?? [];
+  const effectiveCurrency =
+    report && !(currency in report.summary.known_cost_by_currency)
+      ? (Object.keys(report.summary.known_cost_by_currency).sort()[0] ??
+        currency)
+      : currency;
+  const effectiveHeatmapCurrency =
+    longView.data &&
+    !(heatmapCurrency in longView.data.summary.known_cost_by_currency)
+      ? (Object.keys(longView.data.summary.known_cost_by_currency).sort()[0] ??
+        heatmapCurrency)
+      : heatmapCurrency;
+  const data = useMemo(
+    () => (report ? trendRows(report, weekly, effectiveCurrency) : []),
+    [report, weekly, effectiveCurrency],
+  );
+  const changePeriod = (next: UsagePeriod) => {
+    setDays(next);
+    if (next === "all" || next >= 180) setWeekly(true);
+  };
+  const changeDimension = (next: "daily" | "weekly") => {
+    setWeekly(next === "weekly");
+    if (
+      days !== "all" &&
+      days !== 365 &&
+      ((next === "weekly" && days < 30) || (next === "daily" && days > 90))
+    )
+      setDays(next === "weekly" ? 90 : 30);
+  };
+  const models =
+    report?.by_model.map((m) => ({
+      provider: m.provider,
+      model: m.model ?? m.requested_model,
+      connection_id: m.connection_id,
+      requested_model_alias: m.model === null,
+    })) ?? [];
+  const cost = report
+      ? nullableValue(report.summary, "cost", effectiveCurrency)
+      : null,
+    tokens = report ? nullableValue(report.summary, "tokens") : null;
+  const delta =
+    report && previous.data
+      ? compareCost(report, previous.data, effectiveCurrency)
+      : null;
+  const canDraw = data.some((row) =>
+    metric === "cost" ? row.cost !== null : row.input !== null,
+  );
+  const detailRows =
+    detail.data?.pages.flatMap((page) => page.day_model?.rows ?? []) ?? [];
   return (
-    <div className="space-y-2">
-      {rows.map((row) => {
-        const pct = maxCost > 0 ? (row.cost / maxCost) * 100 : 0;
-        return (
-          <div
-            key={row.key}
-            className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)_5rem_5rem] items-center gap-3 py-1"
+    <div className="min-w-0 space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-xs uppercase tracking-wider text-muted-foreground">
+            {t(($) => $.experience.dimension)}
+          </span>
+          <Segmented
+            value={weekly ? "weekly" : "daily"}
+            onChange={changeDimension}
+            options={[
+              { label: t(($) => $.experience.daily), value: "daily" },
+              { label: t(($) => $.experience.weekly), value: "weekly" },
+            ]}
+            label={t(($) => $.experience.dimension)}
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <PeriodControl
+            days={days}
+            weekly={weekly}
+            onChange={changePeriod}
+            runtime
+          />
+          <UsageMore
+            report={report}
+            onPeriod={changePeriod}
+            onPrice={() => setPricing({})}
+            onRefresh={() => query.refetch()}
+            fetching={query.isFetching}
+          />
+        </div>
+      </div>
+      {query.isLoading ? (
+        <div className="space-y-5">
+          <Skeleton className="h-28" />
+          <Skeleton className="h-56" />
+          <Skeleton className="h-32" />
+        </div>
+      ) : query.isError ? (
+        <div
+          role="alert"
+          className="rounded-lg border border-dashed py-8 text-center"
+        >
+          <AlertCircle className="mx-auto h-5 w-5 text-warning" />
+          <p className="mt-2 text-xs">{t(($) => $.error.body)}</p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-3"
+            onClick={() => query.refetch()}
           >
-            <div className="min-w-0">{renderKey(row.key)}</div>
-            <div className="relative h-2 overflow-hidden rounded-full bg-muted">
-              <div
-                className="h-full rounded-full bg-chart-1"
-                style={{ width: `${pct}%` }}
+            {t(($) => $.error.retry)}
+          </Button>
+        </div>
+      ) : (
+        report && (
+          <>
+            <UsageDiagnostics report={report} onPrice={() => setPricing({})} />
+            <div data-testid="runtime-usage-kpis" className="grid grid-cols-3 divide-x rounded-lg border bg-card">
+              <KpiCard
+                compact
+                label={kpiLabel(t(($) => $.experience.cost))}
+                value={
+                  cost?.value === null || !cost
+                    ? "—"
+                    : `${effectiveCurrency} ${cost.value.toFixed(2)}`
+                }
+                hint={
+                  <>
+                    {cost?.state === "subtotal" && (
+                      <span>{t(($) => $.experience.subtotal)} · </span>
+                    )}
+                    {delta !== null && (
+                      <span
+                        className={
+                          delta > 0
+                            ? "text-warning"
+                            : delta < 0
+                              ? "text-success"
+                              : ""
+                        }
+                      >
+                        {t(($) => $.experience.compare, {
+                          sign: delta > 0 ? "+" : "",
+                          pct: Math.round(delta),
+                        })}{" "}
+                        ·{" "}
+                      </span>
+                    )}
+                    {t(($) => $.experience.including_today)}
+                  </>
+                }
+              />
+              <KpiCard
+                compact
+                label={kpiLabel(t(($) => $.experience.cache))}
+                value="—"
+                hint={
+                  <>
+                    {t(($) => $.experience.cache_unknown)}
+                    <span className="block">
+                      {t(($) => $.experience.cache_read, {
+                        tokens:
+                          tokens?.state === "unknown"
+                            ? "—"
+                            : formatTokens(
+                                report.summary.actual_cache_read_tokens,
+                              ),
+                      })}
+                    </span>
+                  </>
+                }
+              />
+              <KpiCard
+                compact
+                label={kpiLabel(t(($) => $.experience.tokens))}
+                value={
+                  tokens?.value === null || !tokens
+                    ? "—"
+                    : formatTokens(tokens.value)
+                }
+                hint={<TokenBreakdownHint metrics={report.summary} />}
               />
             </div>
-            <div className="text-right text-xs tabular-nums text-muted-foreground">
-              {formatTokens(row.tokens)}
+            <div className="min-w-0 rounded-lg border bg-card p-4">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-3">
+                  <h4 className="text-sm font-semibold">
+                    {t(($) => $.experience.trend)}
+                  </h4>
+                  {!heatmap && (
+                    <Segmented
+                      value={metric}
+                      onChange={setMetric}
+                      options={[
+                        { label: t(($) => $.experience.cost), value: "cost" },
+                        {
+                          label: t(($) => $.experience.tokens),
+                          value: "tokens",
+                        },
+                      ]}
+                      label={t(($) => $.trend.title)}
+                    />
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setHeatmap((v) => !v)}
+                    aria-pressed={heatmap}
+                    className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${heatmap ? "border-foreground bg-foreground text-background" : "border-border text-muted-foreground hover:text-foreground"}`}
+                  >
+                    {t(($) => $.experience.heatmap)}
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  {!heatmap && (
+                    <UsageChartLegend
+                      metric={metric}
+                      currency={effectiveCurrency}
+                      unsplit={data.some((row) => (row.unsplit ?? 0) > 0)}
+                    />
+                  )}
+                  <CurrencyControl
+                    report={heatmap ? longView.data : report}
+                    value={
+                      heatmap ? effectiveHeatmapCurrency : effectiveCurrency
+                    }
+                    onChange={heatmap ? setHeatmapCurrency : setCurrency}
+                  />
+                </div>
+              </div>
+              {heatmap && (
+                <p className="mb-2 text-center text-xs text-muted-foreground">
+                  {t(($) => $.experience.heatmap_caption)}
+                </p>
+              )}
+              <div className="min-h-[260px]">
+                {heatmap ? (
+                  longView.isLoading ? (
+                    <Skeleton className="h-56" />
+                  ) : longView.isError ? (
+                    <div role="alert" className="py-10 text-center text-xs">
+                      {t(($) => $.error.body)}{" "}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => longView.refetch()}
+                      >
+                        {t(($) => $.error.retry)}
+                      </Button>
+                    </div>
+                  ) : (
+                    longView.data && (
+                      <ActivityHeatmap
+                        report={longView.data}
+                        windows={windows}
+                        currency={effectiveHeatmapCurrency}
+                      />
+                    )
+                  )
+                ) : canDraw ? (
+                  <UsageChart
+                    data={data}
+                    metric={metric}
+                    weekly={weekly}
+                    currency={effectiveCurrency}
+                  />
+                ) : (
+                  <p className="flex aspect-[3/1] items-center justify-center rounded-md border border-dashed bg-muted/20 p-6 text-center text-xs text-muted-foreground">
+                    {metric === "cost"
+                      ? t(($) => $.experience.cost_unknown)
+                      : report.summary.unknown_task_count
+                        ? t(($) => $.experience.not_collected)
+                        : t(($) => $.experience.empty)}
+                  </p>
+                )}
+              </div>
             </div>
-            {/* $0.00 for a row whose tokens are all unpriced would be a
-                fabricated figure — render "—" instead (MUL-93). */}
-            <div className="text-right text-sm font-medium tabular-nums">
-              {row.tokens > 0 && row.cost === 0 && row.unpricedTokens > 0
-                ? "—"
-                : `$${row.cost.toFixed(2)}`}
+            <div>
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b pb-3">
+                <div className="flex items-center gap-3">
+                  <h4 className="text-sm font-semibold">
+                    {costBy === "agent"
+                      ? t(($) => $.experience.by_agent)
+                      : t(($) => $.experience.by_model)}
+                  </h4>
+                  <Segmented
+                    value={costBy}
+                    onChange={setCostBy}
+                    label={t(($) => $.experience.ranking)}
+                    options={[
+                      {
+                        label: t(($) => $.experience.by_agent),
+                        value: "agent",
+                      },
+                      {
+                        label: t(($) => $.experience.by_model),
+                        value: "model",
+                      },
+                    ]}
+                  />
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  {t(($) => $.experience.subtotal)} · {effectiveCurrency}
+                </span>
+              </div>
+              <CostByList
+                report={report}
+                tab={costBy}
+                agents={agents}
+                currency={effectiveCurrency}
+                onPrice={(m) =>
+                  setPricing({
+                    initial: {
+                      provider: m.provider,
+                      model: m.model ?? m.requested_model,
+                      connection_id: m.connection_id,
+                      requested_model_alias: m.model === null,
+                    },
+                  })
+                }
+              />
             </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Folded row — single chevron-toggle link revealing the raw breakdown
-// table. The Activity heatmap used to live here too; it was promoted to a
-// WhenChart toggle, leaving only the breakdown table behind.
-// ---------------------------------------------------------------------------
-
-function FoldedRow({ usage }: { usage: RuntimeUsage[] }) {
-  const { t } = useT("runtimes");
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="border-t pt-3">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ChevronRight
-          className={`h-3 w-3 transition-transform ${open ? "rotate-90" : ""}`}
+            <div className="border-t pt-3">
+              <button
+                type="button"
+                aria-expanded={breakdown}
+                onClick={() => setBreakdown((v) => !v)}
+                className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+              >
+                <ChevronRight
+                  className={`h-3 w-3 transition-transform ${breakdown ? "rotate-90" : ""}`}
+                />
+                {t(($) => $.experience.daily_detail)}
+              </button>
+              {breakdown && (
+                <div className="mt-3 space-y-3 rounded-md border p-4">
+                  {detail.isLoading ? (
+                    <Skeleton className="h-32" />
+                  ) : detail.isError ? (
+                    <div role="alert" className="text-xs">
+                      {t(($) => $.error.body)}{" "}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => detail.refetch()}
+                      >
+                        {t(($) => $.error.retry)}
+                      </Button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="max-h-64 overflow-auto">
+                        <table className="w-full min-w-[640px] text-xs">
+                          <thead className="border-b">
+                            <tr>
+                              {[
+                                t(($) => $.views.daily),
+                                t(($) => $.price.model),
+                                t(($) => $.table.input),
+                                t(($) => $.table.output),
+                                t(($) => $.table.cache_read),
+                                t(($) => $.table.cache_write),
+                                t(($) => $.table.unsplit),
+                              ].map((label) => (
+                                <th
+                                  key={label}
+                                  className="px-3 py-2 text-left font-medium text-muted-foreground"
+                                >
+                                  {label}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {detailRows.map((row) => (
+                              <tr
+                                key={`${row.date}:${modelKey(row)}`}
+                                className="border-b last:border-0"
+                              >
+                                <td className="whitespace-nowrap px-3 py-2">
+                                  {row.date}
+                                </td>
+                                <td className="max-w-64 px-3 py-2">
+                                  <ModelLabel model={row} />
+                                </td>
+                                {[
+                                  row.actual_input_tokens,
+                                  row.actual_output_tokens,
+                                  row.actual_cache_read_tokens,
+                                  row.actual_cache_write_tokens,
+                                  row.actual_unsplit_tokens,
+                                ].map((n, i) => (
+                                  <td key={i} className="px-3 py-2 font-mono">
+                                    {n === 0 && row.unknown_task_count > 0
+                                      ? "—"
+                                      : formatTokens(n)}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      {detailRows.length === 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          {t(($) => $.experience.empty)}
+                        </p>
+                      )}
+                      <p className="text-[11px] text-muted-foreground">
+                        {t(($) => $.experience.loaded_only)}
+                      </p>
+                      {detail.hasNextPage && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={detail.isFetchingNextPage}
+                          onClick={() => detail.fetchNextPage()}
+                        >
+                          {t(($) => $.experience.load_more)}
+                        </Button>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </>
+        )
+      )}
+      {pricing && (
+        <UsagePricingDialog
+          wsId={wsId}
+          models={models}
+          initial={pricing.initial}
+          onClose={() => setPricing(null)}
         />
-        {t(($) => $.usage.daily_breakdown_toggle)}
-      </button>
-      {open && (
-        <div className="mt-3 rounded-md border p-4">
-          <DailyBreakdownTable usage={usage} />
-        </div>
       )}
     </div>
   );
 }
 
-function DailyBreakdownTable({ usage }: { usage: RuntimeUsage[] }) {
-  const { t } = useT("runtimes");
-  const byDate = new Map<string, RuntimeUsage[]>();
-  for (const u of usage) {
-    const existing = byDate.get(u.date) ?? [];
-    existing.push(u);
-    byDate.set(u.date, existing);
-  }
+function CostByList({
+  report,
+  tab,
+  agents,
+  currency,
+  onPrice,
+}: {
+  report: UsageReport;
+  tab: "agent" | "model";
+  agents: { id: string; name: string }[];
+  currency: string;
+  onPrice: (model: UsageReport["by_model"][number]) => void;
+}) {
+  const { t } = useT("usage");
+  const rows = (tab === "agent" ? report.by_agent : report.by_model)
+    .map((metrics) => ({
+      metrics,
+      value: nullableValue(metrics, "cost", currency),
+    }))
+    .sort((a, b) =>
+      a.value.value === null
+        ? b.value.value === null
+          ? 0
+          : 1
+        : b.value.value === null
+          ? -1
+          : b.value.value - a.value.value,
+    );
+  const max = Math.max(0, ...rows.map((r) => r.value.value ?? 0));
   return (
-    <div className="rounded-lg border">
-      <div className="grid grid-cols-[100px_1fr_80px_80px_80px_80px] gap-2 border-b px-3 py-2 text-xs font-medium text-muted-foreground">
-        <div>{t(($) => $.usage.table_date)}</div>
-        <div>{t(($) => $.usage.table_model)}</div>
-        <div className="text-right">{t(($) => $.usage.table_input)}</div>
-        <div className="text-right">{t(($) => $.usage.table_output)}</div>
-        <div className="text-right">{t(($) => $.usage.table_cache_r)}</div>
-        <div className="text-right">{t(($) => $.usage.table_cache_w)}</div>
-      </div>
-      <div className="max-h-64 overflow-y-auto divide-y">
-        {[...byDate.entries()].map(([date, rows]) =>
-          rows.map((row, i) => (
-            <div
-              key={`${date}-${row.model}-${i}`}
-              className="grid grid-cols-[100px_1fr_80px_80px_80px_80px] gap-2 px-3 py-1.5 text-xs"
-            >
-              <div className="text-muted-foreground">{date}</div>
-              <div className="truncate font-mono">{row.model}</div>
-              <div className="text-right tabular-nums">
-                {formatTokens(row.input_tokens)}
-              </div>
-              <div className="text-right tabular-nums">
-                {formatTokens(row.output_tokens)}
-              </div>
-              <div className="text-right tabular-nums">
-                {formatTokens(row.cache_read_tokens)}
-              </div>
-              <div className="text-right tabular-nums">
-                {formatTokens(row.cache_write_tokens)}
-              </div>
+    <div className="pt-4">
+      <div className="space-y-2">
+        {rows.map(({ metrics, value }) => (
+          <div
+            key={"agent_id" in metrics ? metrics.agent_id : modelKey(metrics)}
+            data-testid="cost-ranking-row"
+            className="grid grid-cols-[minmax(0,1fr)_6rem] items-center gap-x-3 gap-y-1 py-1 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_5rem_6rem] sm:gap-3"
+          >
+            <div className="col-start-1 row-start-1 min-w-0">
+              {"agent_id" in metrics ? (
+                <div className="flex min-w-0 items-center gap-2">
+                  <ActorAvatar
+                    actorType="agent"
+                    actorId={metrics.agent_id}
+                    size={22}
+                    enableHoverCard
+                  />
+                  <span className="truncate text-sm font-medium">
+                    {agents.find((a) => a.id === metrics.agent_id)?.name ??
+                      metrics.agent_id}
+                  </span>
+                </div>
+              ) : (
+                <>
+                  <ModelLabel model={metrics} />
+                  {(metrics.model ?? metrics.requested_model) && (
+                    <button
+                      type="button"
+                      className="mt-1 text-[11px] text-brand hover:underline"
+                      onClick={() => onPrice(metrics)}
+                    >
+                      {t(($) => $.price.open)}
+                    </button>
+                  )}
+                </>
+              )}
             </div>
-          )),
+            <div className="relative col-start-1 row-start-2 h-2 overflow-hidden rounded-full bg-muted sm:col-start-2 sm:row-start-1">
+              {value.value !== null && (
+                <div
+                  className="h-full rounded-full bg-chart-1"
+                  style={{
+                    width: `${max > 0 ? (value.value / max) * 100 : 0}%`,
+                  }}
+                />
+              )}
+            </div>
+            <div className="col-start-2 row-start-2 text-right text-xs tabular-nums text-muted-foreground sm:col-start-3 sm:row-start-1">
+              {nullableValue(metrics, "tokens").value === null
+                ? "—"
+                : formatTokens(metrics.actual_total_tokens)}
+            </div>
+            <div
+              className="col-start-2 row-start-1 text-right text-sm font-medium tabular-nums sm:col-start-4"
+              title={
+                value.state === "subtotal"
+                  ? t(($) => $.experience.subtotal)
+                  : undefined
+              }
+            >
+              {value.value === null
+                ? "—"
+                : `${currency} ${value.value.toFixed(2)}`}
+            </div>
+          </div>
+        ))}
+        {rows.length === 0 && (
+          <p className="py-4 text-center text-xs text-muted-foreground">
+            {t(($) => $.experience.empty)}
+          </p>
         )}
       </div>
     </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Loading + empty states
-// ---------------------------------------------------------------------------
-
-function UsageSkeleton() {
-  return (
-    <div className="space-y-5">
-      <Skeleton className="h-28 rounded-lg" />
-      <Skeleton className="h-56 rounded-lg" />
-      <Skeleton className="h-32" />
-    </div>
-  );
-}
-
-function UsageEmpty() {
-  const { t } = useT("runtimes");
-  return (
-    <div className="flex flex-col items-center rounded-lg border border-dashed py-8">
-      <BarChart3 className="h-5 w-5 text-muted-foreground/40" />
-      <p className="mt-2 text-xs text-muted-foreground">
-        {t(($) => $.usage.no_data)}
-      </p>
-    </div>
-  );
-}
-
-// Distinct from UsageEmpty on purpose: "we couldn't load the data" must
-// never be presented as "there is no data" (MUL-93).
-function UsageError({ onRetry }: { onRetry: () => void }) {
-  const { t } = useT("runtimes");
-  return (
-    <div
-      role="alert"
-      className="flex flex-col items-center rounded-lg border border-dashed py-8"
-    >
-      <AlertCircle className="h-5 w-5 text-warning" />
-      <p className="mt-2 text-xs font-medium">{t(($) => $.usage.error_title)}</p>
-      <p className="mt-1 max-w-md text-center text-xs text-muted-foreground">
-        {t(($) => $.usage.error_body)}
-      </p>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="mt-3"
-        onClick={onRetry}
-      >
-        {t(($) => $.usage.retry)}
-      </Button>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-interface UsageTotals {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  /** Tokens from rows that reported a context total with no input/output/
-   *  cache split. They are real usage and count toward the Tokens KPI, but
-   *  they can never be priced — `cost` and `cacheSavings` ignore them. */
-  totalOnly: number;
-  cost: number;
-  cacheSavings: number;
-}
-
-function computeTotals(rows: RuntimeUsage[]): UsageTotals {
-  return rows.reduce<UsageTotals>(
-    (acc, u) => ({
-      input: acc.input + u.input_tokens,
-      output: acc.output + u.output_tokens,
-      cacheRead: acc.cacheRead + u.cache_read_tokens,
-      cacheWrite: acc.cacheWrite + u.cache_write_tokens,
-      totalOnly: acc.totalOnly + getTotalOnlyTokens(u),
-      cost: acc.cost + estimateCost(u),
-      cacheSavings: acc.cacheSavings + estimateCacheSavings(u),
-    }),
-    {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalOnly: 0,
-      cost: 0,
-      cacheSavings: 0,
-    },
   );
 }

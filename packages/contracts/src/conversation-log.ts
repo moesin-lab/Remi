@@ -269,6 +269,10 @@ export interface ConversationLogWindow {
    */
   before_visible_count?: number;
   before_visible_count_capped?: boolean;
+  /** Lower boundary of the activity span, inclusive. */
+  prev_entry_created_at?: string | null;
+  activities?: import("./issue-activity.js").IssueActivityEntry[];
+  activities_truncated?: boolean;
 }
 
 /** Upper bound the window query returns for `before_visible_count`. */

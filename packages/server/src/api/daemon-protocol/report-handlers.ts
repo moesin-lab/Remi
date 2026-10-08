@@ -1,7 +1,7 @@
 import type { MultiremiStore } from "@multiremi/store/store.js";
-import { normalizeTaskUsageEntries } from "@multiremi/store/helpers.js";
+import { UsageValidationError, validateUsageSnapshot } from "@multiremi/store/usage-accounting.js";
 import { isDeepStrictEqual } from "node:util";
-import { TaskSteerPendingError } from "@multiremi/store/repos/tasks-repo.js";
+import { TaskDaemonReportError, TaskSteerPendingError } from "@multiremi/store/repos/tasks-repo.js";
 import type { MultiremiIssueWorkspaceRepo, MultiremiIssueWorkspaceStatus, ReportAgentPluginRuntimeStateInput,
   ReportRuntimeUpdateInput, ReportRuntimeCommandInput, ReportRuntimeModelListInput,
   ReportRuntimeLocalSkillListInput, ReportRuntimeLocalSkillImportInput, ReportRuntimeDirectoryScanInput,
@@ -107,6 +107,7 @@ export function authorizeReportTask(store: MultiremiStore, session: DaemonProtoc
   if (!task) reject("task_not_found");
   if (!task.runtimeId || (runtimeId && runtimeId !== task.runtimeId)) reject("authority_revoked");
   authorizeReportRuntime(store, session, task.runtimeId);
+  if ((store.getRuntimeLite(task.runtimeId)?.workspaceId ?? "local") !== task.workspaceId) reject("authority_revoked");
   return task;
 }
 
@@ -119,15 +120,42 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
       if (frame.type.startsWith("task.")) {
         const taskId = string(p.task_id);
         if (!taskId) reject();
-        const task = authorizeReportTask(store, session, taskId, frame.rt);
+        let task;
+        let reportingRuntimeId: string | null = null;
+        if ((frame.type === "task.usage" && p.usageSnapshot !== undefined) || (frame.type === "task.start" && p.usage_run_id !== undefined)) {
+          let runId: string;
+          if (frame.type === "task.usage") {
+            try { runId = validateUsageSnapshot(p.usageSnapshot).runId; }
+            catch (error) { if (error instanceof UsageValidationError) reject(); throw error; }
+          } else {
+            if (typeof p.usage_run_id !== "string" || !p.usage_run_id.trim() || p.usage_run_id.length > 256) reject();
+            runId = p.usage_run_id;
+          }
+          const owner = store.getTaskUsageRunRuntime(taskId, runId);
+          if (owner) {
+            reportingRuntimeId = owner;
+            if (frame.rt && frame.rt !== owner) reject("authority_revoked");
+            authorizeReportRuntime(store, session, owner);
+            task = store.getTask(taskId);
+            if (!task) reject("task_not_found");
+          } else task = authorizeReportTask(store, session, taskId, frame.rt);
+        } else task = authorizeReportTask(store, session, taskId, frame.rt);
+        const authority = { runtimeId: reportingRuntimeId ?? task.runtimeId!, workspaceId: task.workspaceId,
+          daemonId: session.daemonId, userId: session.ownerAccessToken?.userId };
         const isCompletion = frame.type === "task.complete" || frame.type === "task.fail";
         const fields = isCompletion ? completionFields(p, taskId) : null;
         const traceEventCount = isCompletion ? completionTraceEventCount(p.trace, taskId) : undefined;
         switch (frame.type) {
-          case "task.start":
-            if (task.status !== "dispatched" && task.status !== "waiting_local_directory") return { ok: true, code: "start_replayed" };
-            store.startTask(taskId);
+          case "task.start": {
+            const runId = typeof p.usage_run_id === "string" ? p.usage_run_id : undefined;
+            let outcome: "started" | "replayed";
+            try { outcome = store.startTaskFromDaemon(taskId, authority, runId); }
+            catch (error) { if (error instanceof UsageValidationError) reject("authority_revoked"); throw error; }
+            const permission = runId ? { execution_authorized: store.isTaskUsageExecutionAuthorized(taskId, runId, authority.runtimeId) } : {};
+            if (outcome === "replayed") return { ok: true, code: "start_replayed", ...permission };
+            if (runId) return { ok: true, ...permission };
             break;
+          }
           case "task.prompt":
             if (!["bootstrap", "delta"].includes(string(p.mode)) || typeof p.prompt !== "string" || typeof p.sha256 !== "string") reject();
             try { store.recordTaskPrompt(taskId, { mode: p.mode as "bootstrap" | "delta", prompt: p.prompt, sha256: p.sha256 }); }
@@ -149,12 +177,16 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
             break;
           }
           case "task.usage": {
+            if (p.usageSnapshot !== undefined) {
+              try { store.reportTaskUsageSnapshot(taskId, validateUsageSnapshot(p.usageSnapshot), authority); }
+              catch (error) { if (error instanceof UsageValidationError) reject(); throw error; }
+              break;
+            }
             const usage = daemonTaskUsageEntries(p.usage);
-            const keyed = (entries: unknown) => new Map(normalizeTaskUsageEntries(entries)
-              .map(entry => [JSON.stringify([entry.provider, entry.model]), entry]));
-            const current = keyed(task.usage);
-            if ([...keyed(usage)].every(([key, entry]) => isDeepStrictEqual(current.get(key), entry))) break;
-            store.reportTaskUsage(taskId, usage);
+            // The ingestion boundary performs replay checks and rejects JSON
+            // drift against its protected historical source checkpoint.
+            try { store.reportTaskUsage(taskId, usage); }
+            catch (error) { if (error instanceof UsageValidationError) reject(); throw error; }
             break;
           }
           case "task.workspace": {
@@ -181,21 +213,17 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
             break;
           }
           case "task.complete":
-            if (task.status === "running") {
-              try { store.completeTask(taskId, { output: string(p.output), traceEventCount, branchName: nullable(p.pr_url),
-                sessionId: nullable(p.session_id), workDir: nullable(p.work_dir), completionFields: fields }); }
-              catch (error) {
-                if (error instanceof TaskSteerPendingError) return { ok: false, code: "steer_pending", retryable: false };
-                throw error;
-              }
+            try { store.completeTaskFromDaemon(taskId, { output: string(p.output), traceEventCount, branchName: nullable(p.pr_url),
+              sessionId: nullable(p.session_id), workDir: nullable(p.work_dir), completionFields: fields }, authority); }
+            catch (error) {
+              if (error instanceof TaskSteerPendingError) return { ok: false, code: "steer_pending", retryable: false };
+              throw error;
             }
             break;
           case "task.fail":
-            if (["dispatched", "running", "waiting_local_directory"].includes(task.status)) {
-              store.failTask(taskId, {
-                error: string(p.error) || "Task failed", traceEventCount,
-                sessionId: nullable(p.session_id), workDir: nullable(p.work_dir), failureReason: nullable(p.failure_reason), completionFields: fields });
-            }
+            store.failTaskFromDaemon(taskId, {
+              error: string(p.error) || "Task failed", traceEventCount,
+              sessionId: nullable(p.session_id), workDir: nullable(p.work_dir), failureReason: nullable(p.failure_reason), completionFields: fields }, authority);
             break;
           default: reject();
         }
@@ -303,7 +331,8 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
           }
           break;
         }
-        case "concierge.status": {
+        case "concierge.status":
+        case "concierge.status_report": {
           if (!["stopped", "starting", "online", "failed"].includes(string(p.state))) reject();
           const revision = Number(p.applied_revision);
           store.reportFeishuBotRuntimeStatus(store.getRuntimeLite(runtimeId)!.workspaceId ?? "local", runtimeId, {
@@ -317,6 +346,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
       }
       return { ok: true };
     } catch (error) {
+      if (error instanceof TaskDaemonReportError) return { ok: false, code: error.code, retryable: error.retryable };
       if (error instanceof ReportRejection) return { ok: false, code: error.code, retryable: false };
       throw error;
     }
@@ -325,6 +355,8 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
     "runtime.binding_state", "runtime.update_result", "runtime.command_result", "runtime.model_list_result", "runtime.local_skills_result", "runtime.directory_scan_result",
     "runtime.local_skill_import_result", "runtime.bot_menu_result", "feishu.outbound_result", "plugin.state"]) layer.registerEventHandler(type, handle);
   layer.registerBestEffortHandler("concierge.status", handle);
+  // Keep the legacy best-effort frame for older daemons during a rolling upgrade.
+  layer.registerRpcHandler("concierge.status_report", handle);
 }
 
 export function registerDaemonMaintenanceHandlers(layer: DaemonProtocolLayer, store: MultiremiStore, archives: SessionArchiveService): void {

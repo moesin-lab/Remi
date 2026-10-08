@@ -1,4 +1,5 @@
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
+import { ISSUE_ACTIVITY_TYPES } from "@multiremi/contracts";
 import { readSessionLogRange } from "../session-log-range.js";
 import type { Context, Hono } from "hono";
 import { assertRuntimeWorkspaceAccess } from "../helpers/runtime-workspaces.js";
@@ -1164,9 +1165,12 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue) return c.json({ error: "issue not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
-    const tasks = store.listTasksForIssue(issue.id)
-      .filter((task) => canCurrentUserAccessChatTask(c, store, task))
-      .filter((task) => isActiveTaskStatus(task.status))
+    const tasks = store.listActiveTasksForIssue(issue.id, {
+      userId: currentRequestUserId(c), taskToken: currentTaskAccessToken(c) ?? undefined,
+    // The route already authorized this workspace; SQL checked Chat existence,
+    // creator/task capability. Retain the old guard for inconsistent legacy
+    // rows whose task workspace differs from their issue's workspace.
+    }).filter((task) => task.workspaceId === issue.workspaceId || canCurrentUserAccessChatTask(c, store, task))
       .map((task) => taskCompatibilityResponse(
         task,
         null,
@@ -1707,7 +1711,10 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   const logSessionAccess = (c: Context): string | Response => {
     const sessionId = c.req.param("sessionId") ?? "";
     const scope = store.getConversationLogAccessScope(sessionId);
-    if (!scope) return c.json({ error: "session not found" }, 404);
+    if (!scope) {
+      const chat = loadChatSessionForCurrentUser(c, store, sessionId);
+      return chat instanceof Response ? chat : chat.session.id;
+    }
     const denied = denyCurrentUserWorkspaceAccess(c, store, scope.workspaceId);
     if (denied) return denied;
     if (scope.chatId) {
@@ -1716,6 +1723,14 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       if (chat.workspaceId !== scope.workspaceId) {
         const chatDenied = denyCurrentUserWorkspaceAccess(c, store, chat.workspaceId);
         if (chatDenied) return chatDenied;
+      }
+      const token = currentTaskAccessToken(c);
+      if (token?.taskId && scope.chatId === sessionId) {
+        const task = store.getTask(token.taskId);
+        // Feishu Chat creators differ from runtime owners; authorize the bound Task.
+        if (task?.chatSessionId === sessionId
+          && task.workspaceId === chat.workspaceId
+          && token.workspaceId === chat.workspaceId) return sessionId;
       }
       if (chat.creatorId !== currentRequestUserId(c)) {
         return c.json({ error: "not your chat session" }, 403);
@@ -1812,7 +1827,15 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       return c.json({ error: "invalid log window" }, 400);
     }
     const window = store.conversationLogWindow(sessionId, { anchor, before, after });
-    if (!store.getIssueSession(sessionId)) {
+    const issueSession = store.getIssueSession(sessionId);
+    if (c.req.query("with_activity") === "1" && issueSession?.isDefault && issueSession.issueId) {
+      Object.assign(window, store.listIssueActivityBetween(issueSession.issueId, {
+        fromInclusive: window.prev_entry_created_at,
+        toExclusive: window.has_more_after ? window.entries.at(-1)?.created_at : null,
+        types: ISSUE_ACTIVITY_TYPES, limit: 200,
+      }));
+    }
+    if (!issueSession) {
       const messageIds = window.entries.filter(entry => entry.kind === "message" || entry.kind === "turn")
         .map(entry => entry.id);
       const attachments = store.listAttachmentsForChatMessages(messageIds);

@@ -21,11 +21,11 @@ trace 事件的唯一定义在 [`packages/contracts/src/trace.ts`](../packages/c
 | `packages/contracts/src/trace.ts` | `TraceEvent`、`KNOWN_TRACE_EVENT_TYPES` | A-0 落地 |
 | `packages/shared/src/trace-sanitize.ts` | 字段截断与消隐（唯一 sanitize 点） | A-0 落地，A-6 接入 |
 | `packages/shared/src/trace-derive.ts` | `deriveFinalReply` / 直方图 / 取模型 | A-0 落地，A-5、A-8 接入 |
-| `packages/server/src/worker/trace-store.ts` | `TraceStore` 接口 + 内存实现 | A-0 接口，B3 文件版 |
+| `packages/server/src/worker/trace-store.ts`、`trace-file-store.ts` | `TraceStore` 接口、测试内存实现与生产文件实现 | daemon 已接线，文件恢复归属和有界分页 |
 | `packages/server/src/api/trace/trace-sink.ts` | `TraceSink` 接口 + 内存实现 | A-0 接口，C 的 Hub 实现 |
 | `packages/server/src/api/trace/daemon-trace-reader.ts` | `DaemonTraceReader` 接口 + 内存假实现 | A-0 接口，A-6 真实现 |
 | `packages/server/src/api/daemon-protocol/` | 服务端握手、注册表、hb、ack 与 RPC 分发 | A-1 落地 |
-| `packages/server/src/worker/daemon-protocol-client.ts` | 进程级 socket、定时器、RPC、去重接口与升级等待 | A-2 接线，业务泵待 A-3 至 A-6 |
+| `packages/server/src/worker/daemon-protocol-client.ts` | 进程级 socket、定时器、RPC、去重接口与升级等待 | 下行、可靠 outbox 与 trace 泵已接线 |
 | `tests/integration/daemon-protocol-v2/` | 真实 daemon/API/SQLite 与断线、重启、服务端入站 ledger | A-2 脚手架 |
 
 ### MUL-498：评论交付、门铃唤醒与按需输入
@@ -165,15 +165,17 @@ JSON 文本帧，不用二进制：
 | 类别 | 帧 | 可靠性与重放 |
 |---|---|---|
 | `handshake` | `hello` / `welcome` / `reject` | 每连接一次 |
-| `best_effort` | `hb`、`runtime.ready`、`concierge.status` | 不带 `seq`，不重放；`hb` 的服务端答复是 `res`（见 §4） |
+| `best_effort` | `hb`、`runtime.ready`、旧版 `concierge.status` | 不带 `seq`，不重放；`hb` 的服务端答复是 `res`（见 §4） |
 | `event` | 见下 §1.4 | 带 `seq`，未确认前重放 |
 | `rpc` | 见下 §1.5 | 按 `id`/`re` 配对，由调用方重试 |
 | `reply` | `res` | 答复某个 rpc |
 | `ack` | `ack` | 独立累计确认 |
 
 设计初稿曾把这些压成五类，把 `res` 并进 rpc、把 `hb` 当作唯一的尽力而为帧。两者在代码里都不成立：
-应答与请求的校验路径不同，而 `runtime.ready` 与 `concierge.status` 之所以尽力而为，与 `hb`
-是同一个理由——它们都能从本地状态重算，丢一帧没有代价。
+应答与请求的校验路径不同。`runtime.ready` 可由本地状态重算；旧版 `concierge.status`
+虽也能重算，但丢失 `online` 会阻塞飞书出站领取，故新版改为收到持久化确认才算成功的
+`concierge.status_report` RPC。旧帧仍接受以支持 API 先升级、daemon 后升级；新 daemon 遇到
+旧服务端的 `unknown_frame` 时暂时回退到旧帧，并持续随心跳补报。
 
 `best_effort` 与 `rpc` 都不参与滑动窗口，也不带 `seq`。
 trace 组不是窗口可靠帧：上行 `trace.append` 用 RPC 的 `id`/`re` 关联，可靠性来自 task trace
@@ -200,7 +202,7 @@ head 续传与事件 seq 幂等，不来自外层 `seq`；下行 `trace.push` �
 
 ### 1.5 RPC 清单
 
-**daemon → server**：`steer.consume`、`human_request.create`、`human_request.get`、`human_request.expire`、`plugin.desired`、
+**daemon → server**：`concierge.status_report`、`steer.consume`、`human_request.create`、`human_request.get`、`human_request.expire`、`plugin.desired`、
 `trace.append`、`trace.head`、`trace.subscribe`、`trace.unsubscribe`、`trace.fetch`、`gc.check_issue`、
 `gc.check_chat_session`、`gc.check_autopilot_run`、`gc.check_task`、`gc.workspace_cleaned`。
 
@@ -208,6 +210,12 @@ head 续传与事件 seq 幂等，不来自外层 `seq`；下行 `trace.push` �
 
 RPC 应答的 `t` 固定为 `res`，`p` 为 `{ "ok": true, ... }` 或
 `{ "ok": false, "code": <错误码>, "message": "人话", "retryable": <bool> }`。
+
+`concierge.status_report` 使用原 `concierge.status` 的无凭据载荷，成功应答表示控制面已持久化状态。
+daemon 每次状态变化立即上报，并在心跳确认后独立于配置下发定期补报；超时或断线保留本地
+connector，下一次心跳重试当前状态。服务端在同一条连接里对不变的 `feishu.directive` 只下发
+一次，不能把它当作周期性状态上报的触发器。部署时仍应先升级支持新 RPC 的 API，再升级 daemon，
+以避免回退窗口只有尽力而为保证。
 
 `human_request.get` 是只读 RPC，请求 `p:{task_id,request_id}`，成功应答 `p:{ok:true,request}`，
 其中 `request` 与原 GET 的 HTTP 200 载荷相同。执行端、绑定 Chat 的 bot host、Issue concierge
@@ -244,7 +252,7 @@ offer 与派活 5 个、trace 与传输 6 个、服务端故障 1 个（`server_
 | 404 task not found | `task_not_found` |
 | 401 / 403 / 410 | `authority_revoked` |
 | 其他确定性 4xx | `invalid_report` |
-| `start` 的 400「已离开 dispatched」（原本就是成功） | `start_replayed` |
+| `start` 对已经运行、等待人工或已终态任务的幂等重放 | `start_replayed` |
 | 409 `steer_pending` | `steer_pending` |
 
 close code。协议**只显式列出四个终态码**，其余一律默认重连：
@@ -402,10 +410,10 @@ daemon 按实体 id 去重（`activeTaskIds`、`runtimeModelListRequests`、stee
 
 | 帧 | 幂等键 | 重复到达时 |
 |---|---|---|
-| `task.start` | task id | 已离开 dispatched 视为成功（`start_replayed`） |
+| `task.start` | task id + 可选 `usage_run_id` | 同 Runtime 的真实 sent offer 可以从网络回队恢复并原子绑定 run；已有 run 或已运行/等待人工/终态返回 `start_replayed`，`execution_authorized` 决定现代 daemon 是否可启动 provider |
 | `task.progress` | task id | 覆盖写；终态的 `final:true` 尾帧相同内容即 ok，不重复写 |
 | `task.session_pin` / `task.workspace` | task id | 覆盖写；终态的 workspace 尾帧相同内容即 ok，不重复写 |
-| `task.usage` | task id + provider + model | 合并 |
+| `task.usage` | task id + run id + unit id/revision | 规范化标量单位幂等更新；旧客户端 provider/model 上报仅在入口转换，统计统一读新表 |
 | `task.complete` / `task.fail` | task id | 已终态即 ok |
 | `runtime.*_result` | request id | 状态机 pending→running→completed/failed 只能前进 |
 | `feishu.outbound_result` | delivery id + claim_token | 租约已不是当前的即 ok（不写库，记 warn），应答带 `lease_lost:true`，在等结果的发送方据此停止；相同终态和没有推进的 streaming 检查点也吸收，不带 `lease_lost`。`prepared` 成功应答带 `mention_open_id`（open_id 或 null） |
@@ -413,6 +421,15 @@ daemon 按实体 id 去重（`activeTaskIds`、`runtimeModelListRequests`、stee
 | `runtime.archive_sessions` | request id | 状态机 pending→sent→acked→completed/failed 只能前进 |
 | `runtime.archive_sessions_result` | request id | 已终态即 ok；重复结果被幂等吸收 |
 | `trace.append` | `(task_id, trace_seq)` | Hub 丢弃 `≤ head` |
+
+任务状态回报在工作区生命周期锁内复核 task / Runtime / workspace / daemon 归属和成员权限。
+`task.start`、`task.complete`、`task.fail` 的 `ok:true` 只表示状态已提交，或当前任务已经处于允许吸收重放的状态。
+任务曾实际发送给当前 Runtime、因未收到接单确认而重新入队时，保留的 `offered_at` 允许该 Runtime 的
+可靠 start 或终态回报恢复原执行；不需要等待下一次 offer，所以升级 drain 暂停派发时也能收口。
+只有 Runtime 偏好、尚未真正发送过 offer 的 queued 任务没有这项恢复资格；缺少证据或状态暂不允许时
+返回 `server_error` 且 `retryable:true`，outbox 保留记录。Runtime、工作区、Daemon 归属或成员权限已变更时
+返回 `authority_revoked`，不覆盖新归属。已取消、失败或完成的任务吸收终态重放，不再次创建评论、轮次结果、
+委派回叫或重试任务。恢复的开始时间使用服务器确认时间，不伪造此前未记录的实际开工时刻。
 
 ## 3. 推送派活
 
@@ -433,17 +450,26 @@ Chat 恢复、Issue workspace 归属/清理、维护 drain 释放都在写入后
 泵每次跑现有 `store.claimTask(runtimeId)`：选任务、置 `dispatched`、**只 hydrate 选中的任务**
 （MUL-389 的原样保留），把今天 claim 响应的内容（含 `auth_token`）作为 `task.offer` 载荷推出。
 
-daemon 收到 offer：有空位且未暂停 → `res{ok:true}` 即 accept，随后照常发 `task.start`
+daemon 收到 offer：有空位且未暂停 → `res{ok:true}` 即 accept，随后发送携带稳定 `usage_run_id` 的 `task.start`，收到 `execution_authorized:true` ACK 才进入 provider；超时、取消、永久拒绝或 false ACK 不执行模型
 （start 仍是独立可靠帧，因为 workspace 准备可能先进入 `wait_local_directory`）；否则
 `res{ok:false, code}`，code 取 `capacity` / `claims_paused` / `draining` /
 `binary_skill_files_unsupported`。
+daemon 停止时立即取消尚未获授权的 start 等待；在发送 start 前、获 ACK 后、异步摘要配置与工作区准备后以及首次 provider 调用前复查停止信号，停止后不再新启动 provider。尚未进入 provider 的启动被停机取消时，关闭可选摘要器而不发起终态摘要请求，释放其用量完成范围，保留 durable fail 与已接受 run。已进入 provider 的执行仍使用原任务信号并按原有规则排空，包含辅助摘要及其迟到用量，不因取消启动等待而中断。服务端已提交 start 但 ACK 丢失时，停机仅取消本地等待，已绑定的 run 与未确认的 outbox start 记录保留用于重放。
 
-reject、30 s 未应答、或连接断开 → 服务端把任务 `dispatched→queued`，并对该 runtime 冷却 30 s
+reject、30 s 未应答、或未确认 offer 的连接断开 → 服务端把任务 `dispatched→queued`，并对该 runtime 冷却 30 s
 （内存态）。仅 `capacity` 拒绝可提前结束冷却：daemon 释放本地任务槽位后立即补发已有的
 `hb` 帧；服务端发现 `active_task_count` 变化且当前冷却原因为 `capacity` 时清理计时器并 kick。
 该补发使用常规 hb 负载（含 drain ACK 与运行时状态），同时重置正常 15 s 心跳计时；丢帧仍由
 30 s 冷却兜底。`claims_paused`、`draining`、超时和断线均保持 30 s，不用 `runtime.ready`
 作为槽位释放信号。`CLAIM_RESPONSE_RECOVERY_MS`（90 s）的重领逻辑保留为最终兜底。
+
+接收结果不明的网络回队清除本次 `accepted_at`，但保留实际发送成功时记录的 `offered_at`；明确拒收则清除
+offer/accept 证据，恢复普通可编辑的排队任务。迟到的可靠执行回报因此能够
+证明自己属于已经派发的任务；初次排队只有 Runtime 绑定不等于已派发。新的 offer 仍覆盖这两个时间字段。
+已有发送证据的网络回队任务保留原输入，不能通过排队编辑覆盖它。Issue 的新信封留在收件箱，旧任务终态后
+通过 re-ring 创建新 task ID；Chat 的新系统信封走已有 steer 与完成屏障。尚未发送的普通排队任务仍可编辑和合并。
+工作位置、引擎/所有者、Runtime 归属改变或行政重新入池时清除旧 offer/accept 证据；已冻结
+任务按现有规则取消的路径仍保持取消，不通过迟到回报恢复。客户端对重复 task ID 的 offer 继续只确认、不重跑。
 
 ### 3.2 并发上限、租约与断线
 
@@ -466,6 +492,9 @@ daemon 断线期间：queued 留在队列；dispatched 未 accept 的按 §3.1 �
 - `created → offered`：只统计 offer 触发时该 runtime 有空位的任务；
 - `offered → accepted`：**纯唤醒分量，这是验收口径的 p95**；
 - `accepted → started`。
+
+断线恢复时 `offered_at` 可以早于回队和重连，`accepted_at` 可能为空；这是真实发送与确认事实，
+不能把缺失接单确认补造为新的发送时间。派发延迟统计仅使用实际具备对应时间字段的样本。
 
 另加 `tests/manual/measure-dispatch-latency.ts`：真实 daemon + API + SQLite，在空闲 runtime 上注入
 200 个 no-op 任务，输出三段 p50/p95，前后各跑一次。
@@ -618,17 +647,16 @@ U+FFFD、追加 `… [truncated]`）也逐字一致。实现是 `packages/shared
 `seq` 与 `ts` 都由它分配（实时路径按本地时钟盖章；回填路径用事件自带的
 `ts = task_messages.created_at`，见 §5.1），已写入的 seq 永不重写。
 
-今天 `TaskMessageBatcher` 合并时会沿用首片 seq、留下空洞；**这个旧 seq 在 v2 里作废**。
+`TaskMessageBatcher` 只合并相邻且同阶段、同父工具的文本，写出时由 store 重新分配 seq；输入中的旧 seq 不参与新序列。
 seq 连续是 Hub「丢弃 `≤ head` 的事件」这条规则成立的前提，也是「`first_seq..head` 连续无洞」
 这条断言能成立的原因（该断言只适用于新写的实时 trace，见下）。
 
 **不允许「同一个 seq 后写覆盖」。**读端遇到重复 seq 视为数据损坏：取先出现的一条，不做后写覆盖。
-写盘 crash 留下的半行（无换行结尾）读端丢弃。v2 里这个容忍的成因已消失——今天的同 seq 重写来自
-outbox 跨 record 重新 coalesce 后再发，而 trace 不进 outbox。
+写盘 crash 留下的半行（无换行结尾）读端丢弃，下一次追加先截掉该半行。
+新 trace 不进 outbox，也不允许重写已有 seq；文件恢复仍兼容未封口的重复记录，保留首次出现的一条。
 
-这两条（半行丢弃、重复取先）是**文件读端**的规则，由 B3 的 `trace-file-store.ts` 实现：
-A-0 的内存 store 自己分配 seq，不可能产出重复 seq 或半行。内存实现只保证「已 close 不再接受追加」
-与「seq 从 1 连续」，文件版要额外满足上面两条，B3 的验收里包含它们。
+这两条由生产 `trace-file-store.ts` 实现；内存 store 仅用于隔离测试。
+重复记录或不完整尾部不能证明 `closed`：存在歧义的 trailer 会被拒绝。
 
 事件本身不带 `task_id`，由外层容器（`trace.append` 的 `p.task_id`、文件头、订阅）携带。
 
@@ -645,7 +673,7 @@ A-0 的内存 store 自己分配 seq，不可能产出重复 seq 或半行。内
 
 | 接口 | 归属 | 实现者 |
 |---|---|---|
-| `TraceStore`（`worker/trace-store.ts`） | A 定义 | A-0 内存版；B 的 `trace-file-store.ts` 实现文件版 |
+| `TraceStore`（`worker/trace-store.ts`） | daemon 存储契约 | 生产 `trace-file-store.ts`；测试内存实现 |
 | `TraceSink`（`api/trace/trace-sink.ts`） | A 定义 | A-0 内存版；C 的 Live Hub 实现真实版 |
 | `DaemonTraceReader`（`api/trace/daemon-trace-reader.ts`） | A 定义 | A-6 |
 
@@ -666,20 +694,36 @@ seq/ts 与截断都在这里做；`read(taskId, afterSeq, limit, maxBytes) → {
 B 的 `cursor` 就是本接口的 `after_seq`，B 的 `not_found` 对应 `trace_not_hot`，
 B 的 `unreachable` 对应其余三种错误。
 
-### 5.4 daemon 侧改造
+### 5.4 daemon 写入与存储
 
-`TaskMessageBatcher` 的出口从 outbox 改为 `TraceStore.append`，随后 `TraceStreamer` 按 head 读游标
+`TaskMessageBatcher` 的出口调用 `TraceFileStore.append`，随后 `TraceStreamer` 按 head 读游标
 发 `trace.append`。daemon 上只有一份数据：trace 文件既是被上传的内容，也是重放缓冲。
 `trace.append` 的外层信封用 `id`/`re`，不带 `seq`，应答仍捎带 `hub_head`；带 `seq`、
 不带 `id` 的误用按 RPC 拒绝为 `protocol_violation`，不追加事件。丢失应答后按服务端 head
 重发，服务端按 task 内事件 seq 幂等，不使用 outbox 或滑动窗口。
 
-**trace 不进 outbox。**B 已经要写规范化 trace 文件，再进 outbox 就是双写，而且这个量级
-（线上 4.9M 行）会把 SQLite outbox 变成瓶颈。
+**trace 不进 outbox。**规范化 JSONL 文件是持久来源，可靠业务报告才进入 outbox；
+旧 outbox 残留的 `messages` 行仅在恢复时转换成本地 trace。
 
-`trace.append` 每帧 ≤ 256 条或 ≤ 256 KiB，**但至少 1 条**。单条事件最坏约 640 KiB
-（content 256 + input 256 + output 64 + meta 64 KiB），在 1 MiB 协议帧上限内，也远低于
-`maxPayloadLength` 4 MiB。`TaskMessageBatcher` 现有 200 ms / 16 KiB 触发与 64 KiB 合并上限保持
+文件位于 `<workspacesRoot>/.runtime/<session_id>/traces/<task_id>.jsonl`，一次性任务以 task id 作 session id。
+首行保存 task、Session、Agent、provider、开始时间与 `runtime_id`，末行为不占 seq 的 trailer。
+多个 Runtime 共用进程 transport 与一份文件 store，任务上下文在执行前注册；恢复后只允许原 Runtime 读取。
+旧文件缺少 `runtime_id` 时不猜测 ACL，文件仍可用于归档，但新进程不能把它自动注册为可读热 trace。
+
+完整 `writeSync` 写入先于 head 更新和发送；header 与 terminal trailer 使用 `fsync`，
+活跃追加不逐 token 刷盘。本契约保证本版本已写入记录的进程重启恢复，不承诺断电时未刷盘尾部保留。
+启动扫描采用 64 KiB 缓冲，仅保存每条记录的 seq/文件偏移，不缓存事件正文；
+读页二分定位并按记录数和序列化字节停止，默认最多 200 条，硬上限 500 条及 2 MiB，
+单条超预算事件仍返回。文件恢复的单行硬上限为 4 MiB；新 append 的事件 JSON 上限为 4 MiB−8 KiB，
+为 RPC/push 信封预留空间，以容纳规范化字符串的 JSON 转义而不产生成功写盘却不能传输的事件。
+
+`trace.append` 每帧 ≤ 256 条或 ≤ 256 KiB，**但至少 1 条**；字节预算按实际序列化载荷计算。
+字段值预算与 JSON 帧预算是两层约束，控制字符转义会扩大实际传输大小。
+正常帧继续执行 1 MiB 上限；`trace.append`、`trace.push` 与 `res` 仅在载荷包含一条有效 TraceEvent 时
+允许使用现有 socket 的 4 MiB 硬上限。多事件页不享受该例外，单事件超出 4 MiB 也明确拒绝。
+该例外同时覆盖反向 `trace.read` 与 `trace.fetch` 的应答，不丢字段或再次截断；
+下行单条超预算 trace.push 可独占窗口，ack 后才继续发送，普通窗口仍为 64 帧或 1 MiB。
+`TaskMessageBatcher` 使用 200 ms / 16 KiB 触发与 64 KiB 合并上限
 （那是合并上限，不是截断上限）。
 
 ### 5.4b 完成帧的轮次卡字段
@@ -689,7 +733,7 @@ B 的 `unreachable` 对应其余三种错误。
 ```ts
 trace: {
   head: number; event_count: number; closed: true;
-  tool_call_count: number;                                        // tool_use 事件数
+  tool_call_count: number;                                        // 唯一工具调用 id 数，加无 id 的 tool_use 数
   type_histogram: Array<{ type: string; tool: string | null; count: number }>;
 };
 final_reply_md: string | null;
@@ -698,8 +742,8 @@ model: { provider: string; model: string } | null;                // 最后一�
 
 - `type_histogram` 按 `(type, tool)` 分桶，`tool` 只在 `tool_use` / `tool_result` 上非空（A11）；
   organizer 今天就是这么算的（`api/helpers/organizer.ts:52-58`），只按 type 会让它丢掉工具维度。
-- `final_reply_md` 由 `deriveFinalReply(events)` 产出，规则见 §5.4c。服务端收到即写轮次卡；
-  字段缺失或畸形时，终态照常生效，卡片留空并打日志；卡片字段永不阻塞终态。不去读 trace 补算。
+- `final_reply_md` 与 `deriveFinalReply(events)` 使用相同规则，见 §5.4c；它不替代任务 `output`。
+  轮次卡最终正文仍使用任务上报结果，详见 [ADR 0006](adr/0006-conversation-log-and-daemon-owned-traces.md)。
 - `output` 字段保持原样：它是全部顶层 text 的拼接（`worker/daemon.ts:4416`），不随本改动变化。
 - `head` 与 `event_count` 分开：新写的 trace 两者相等，**回填的历史 trace 是稀疏的**，
   `head ≠ event_count`（A11）。
@@ -712,31 +756,40 @@ B5 只读取其中的 `event_count`：非负安全整数才有效，非法值按
 
 ### 5.4c `deriveFinalReply` 与直方图
 
-`packages/shared/src/trace-derive.ts` 提供三个纯函数，daemon 完成时与 B8 回填**共用**，
+`packages/shared/src/trace-derive.ts` 提供共享派生函数及增量 accumulator，daemon 与历史回填共用，
 新卡片与历史卡片才对得上：
 
-- `deriveFinalReply(events)`：从 `connectors/src/feishu/cot-timeline.ts:47-58` 与 `:32` 抽出。
-  顶层（无 `meta.parent_tool_call_id`）`text` 里 `meta.phase === "final"` 的追加到 `final`；
+- `deriveFinalReply(events)`：规则位于 `shared/trace-semantics.ts`。
+  顶层（无 `meta.parent_tool_call_id`）`text` 的 `final` / `final_answer` 阶段追加到 `final`；
   `phase === "commentary"` 的只结束候选段、自身不参与回答；其他顶层 `text` 追加到 `candidate`；
   `thinking / tool_use / permission_request / question_request / plan / compaction` 这六种
   事件结束候选段；嵌套事件既不贡献也不结束。`final` 非空白则用它，否则用 `candidate`，结果 trim。
-- `traceTypeHistogram(events)` / `countToolCalls(events)`：给完成帧与回填算同一份直方图与计数。
+- `traceTypeHistogram(events)` / `countToolCalls(events)`：原始事件直方图与工具调用数；同一调用 id 的 refinements 只计一次，只有 `tool_result` 的 id 也计一次，无 id 的历史 `tool_use` 各计一次。
 - `deriveTraceModel(events)`：取最后一条同时带 provider 与 model 的 `execution` 事件。
 
-**这里有一处与裁决措辞的偏差，需要指出**：裁决 5 把第二条规则描述为「取最后一个非 text 事件之后的
-顶层 text 连续段」。按代码实测，`cot-timeline.ts:56` 只在上面那六种类型上 flush 候选段；
-`tool_result`、`usage`、`execution`、`steer`、`*_response` 都**不**结束候选段
-（`text → usage → text` 是一段，`text → tool_use → text` 才是两段）。另外嵌套事件在
-`:42-46` 提前 return，所以它们也不 flush。我按**代码**实现，并写了逐事件对照的等价用例；
-如果裁决想要的是「任何非 text 都断开」，那是一行改动，但会让新卡片与现有飞书卡片不一致。
+`tool_result`、`usage`、`execution`、`steer`、`*_response` 不结束候选段，嵌套事件也不结束顶层候选段。
+正常执行在 append 时更新小摘要，完成与 outbox 重试不重新全量扫描文件；
+恢复后的任务首次需要摘要时按有界页重建并缓存。活跃摘要仅保留答案文本、工具 id 集合与直方图，不保留完整事件；
+close 后释放工具 id 集合，仅缓存最近 128 个完成结果。GC 后剔除明确已删除文件的 offset 索引、归属与回放游标。
 
 ### 5.5 续传与冷启动
 
 `welcome.trace_heads[task_id]` 给出服务端已知 head，daemon 从 `head + 1` 读文件续传。
+daemon 启动从本版本 JSONL 恢复 head、closed 与 Runtime 归属，只自动追踪未关闭任务；
+已关闭历史按需 `trace.read`，不会每次启动把全部历史重新上传。
 
-服务端重启后 head 归零，daemon 只回放**尾部至多 2 MiB 或 2,000 条**，Hub 记录 `first_seq`；
+服务端重启后 head 归零，daemon 只回放尾部至多 2,000 条，2 MiB 是软字节预算，允许一条超预算事件（整帧仍须满足 4 MiB）；Hub 记录 `first_seq`；
 更早的部分由页面走 `trace.read`（§6）或 B 的归档补齐。这是有意的降级：重启后把整个 trace
 全量推一遍会把一次部署变成一次流量尖峰。
+
+一次性任务完成后同步保存 `.runtime/<task_id>/.multiremi/archive-pending.json` 意图，
+后台队列调用同一 Session Archive 生命周期锁，每 30 秒重试，并遵守服务端 backoff/exhausted 状态。
+重启会恢复原 Runtime 的未完成意图，同一 subject 在上传期间再次入队会保留下一次快照需求。
+上传不阻塞任务释放；GC 的 ready archive 与删除前物理验证屏障保持有效。
+停机主动取消后台上传，最多等待 5 秒；保留意图和未清理的排除目录 staging，旧任务在每次写入前校验取消与 root 所有权。
+Issue trace 写入 canonical `.runtime/<ises_*>` root，早期准备失败也补建 GC 归属，保证 Issue 归档发现该文件；
+Chat 和一次性任务的早期 trace-only root 同样补建 subject GC 归属，不能绕过 archive barrier 作为普通 orphan 删除。
+旧仅内存版本的升级限制见 [Daemon 升级](daemon-runtime-upgrades.md)。
 
 ### 5.6 daemon 侧飞书 connector 的订阅帧
 
@@ -925,15 +978,16 @@ v2 显式设置：
 
 | 项 | 值 | 理由 |
 |---|---|---|
-| `Bun.serve.maxPayloadLength` | 4 MiB | 高于协议上限，违规帧要能完整到达才能回 `protocol_violation` |
-| 协议单帧上限 | 1 MiB | |
+| `Bun.serve.maxPayloadLength` | 4 MiB | socket 硬上限，超限由 WebSocket 拒绝 |
+| 普通协议单帧上限 | 1 MiB | 保持普通帧与多事件 trace 页预算 |
+| 单条 trace 事件帧上限 | 4 MiB | 仅 `trace.append` / `trace.push` / 单事件 `res`，见 §5.4 |
 | `backpressureLimit` | 4 MiB | |
 | `closeOnBackpressureLimit` | false | 背压时暂停，不断连 |
 | `idleTimeout` | 120 s | 保持现状 |
 | `perMessageDeflate` | 不开 | 内网单跳，nginx 的 gzip_types 也是注释状态，压缩换不到收益；要开另开单测 |
 
-**上行超限帧怎么处理（不能只关连接）。** `maxPayloadLength` 取 4 MiB 的意义就是让超过协议上限
-（1 MiB）的帧**完整到达**，能回一个 `protocol_violation` 而不是被截断。关连接在这里是错的：daemon
+**上行超限帧怎么处理（不能只关连接）。** socket 允许 4 MiB，普通帧超过 1 MiB 时仍能完整到达，
+服务端可回 `protocol_violation`；单事件 trace 使用 §5.4 的例外。关连接代替可寻址错误会让 daemon
 重连后会重放同一条未确认的 outbox 行，同一条超限帧再被断开，形成无限循环。规则是：
 
 | 超限帧 | 处理 |

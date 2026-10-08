@@ -26,6 +26,159 @@ no supervised updater (the historical local-profile default), no independent
 updater token, or no release feed therefore correctly shows an offline updater,
 null releases and an empty service list even while API/Web containers run.
 
+## Usage accounting startup cutover
+
+API startup automatically migrates the required legacy task usage scalars after
+the global schema migration lock has been released. Both `api` and `api-runtime`
+wait for this gate before starting jobs or opening the HTTP listener, including
+`/readyz`. Container updates require no manual migration command. The CLI yields
+between batches; embedded `startMultiremiServer` retains its synchronous API and
+waits for the same gate.
+
+The default batch size is 500 tasks (maximum 5000), controlled by
+`MULTIREMI_USAGE_MIGRATION_BATCH_SIZE`. Each task commits independently. A durable
+keyset cursor and per-task source checkpoints resume interrupted startup without
+repeating the completed prefix. `MULTIREMI_USAGE_MIGRATION_TIMEOUT_MS` defaults
+to 300000 ms and must be positive; the deadline is checked between database
+operations/batches, so an in-flight database operation can extend elapsed time.
+Migration errors or deadline expiry fail startup, and the next container attempt
+resumes the committed work. Logs include counts, never legacy JSON or credentials.
+Compose/systemd updater readiness uses a 360000 ms wall-clock deadline, controlled
+by `MULTIREMI_PLATFORM_HEALTH_TIMEOUT_MS` in the **host updater environment**.
+Requests allow at most 5000 ms and probes sleep at most 2500 ms; both are capped
+by the remaining deadline. API, Web and configured extra readiness URLs are
+checked in parallel. Persistent failures after the container switch still trigger
+local rollback.
+
+Compose has its own startup window. For each enabled core service `api` or
+`api-runtime`, keep these three times aligned (all comparisons use milliseconds):
+
+```text
+required = MULTIREMI_USAGE_MIGRATION_TIMEOUT_MS + 60000 startup margin
+healthcheck.start_period >= required
+MULTIREMI_PLATFORM_HEALTH_TIMEOUT_MS >= healthcheck.start_period
+MULTIREMI_PLATFORM_HEALTH_TIMEOUT_MS >= required
+defaults: 300000 + 60000 <= 360000 (360s) <= 360000
+```
+
+Both deployment templates use `start_period: 360s`, with the existing 10 s
+interval, 5 s probe timeout and 12 retries. During that start period Docker does
+not count failed probes toward unhealthy status; `web`'s
+`depends_on: api: condition: service_healthy` waits for API readiness. The
+additional retry window after the start period is not part of the migration
+budget. These templates do not require Docker's newer `start_interval` option.
+
+Every Compose `update` first renders `docker compose config --format json` and
+checks the effective migration budget, including values merged from the API
+`env_file`. The updater rejects all inconsistent budgets before changing the
+image env file, pulling images or switching containers, and does not roll back
+that rejected attempt. Absent/disabled Docker healthchecks skip the start-period
+comparisons, but the updater deadline must still cover `required`. Only API
+services present in both the updater core list and the rendered config are
+checked. `rollback`, `restart` and `check_updates` skip the startup-budget
+validation; `rollback` and `restart` still run the general safety preflight.
+
+**Upgrade the host Compose file first, then install and restart the new host
+updater, then update API/Web.** Host Compose files are not replaced by a platform
+release. Add the start period to both API healthchecks in the host copy of
+`compose.application.yml` or `compose.platform.yml` first. An older updater can
+use this configuration. Reversing this order causes the new updater to reject
+updates against the old file; this is a safe failure that leaves containers and
+image env files untouched. Updating only the API image also does not replace an
+older updater's fixed 24-probe readiness window; setting the new timeout variable
+on that older implementation does not extend it.
+
+For a large dataset, prepare the scalar migration with the **new API image** and
+the installation's normal database environment before requesting the update:
+
+```bash
+bun run scripts/migrate-usage-accounting.ts --execute
+```
+
+This preparation commits task checkpoints but does not establish startup
+readiness; the new API still rechecks changed sources on startup. On host 209,
+preparing the remaining 5,090 tasks took 77 s on 2026-10-07. If increasing
+`MULTIREMI_USAGE_MIGRATION_TIMEOUT_MS`, increase both API healthcheck start periods
+and `MULTIREMI_PLATFORM_HEALTH_TIMEOUT_MS` in the host `updater.env` together.
+
+On an isolated restored copy with 11320 task rows,
+Bun 1.3.14/PostgreSQL 17.11 measured schema setup at 8.343 s and scalar migration
+at 138.350 s (2026-10-06), exceeding the old roughly 60 s connection-refused
+window. This separate clone measurement is not production throughput.
+
+The `Platform Compose startup` GitHub Actions workflow runs
+`scripts/check-compose-startup.ts` with real Docker: both API roles delay
+`/readyz` for 150 s, using the application's template healthcheck unchanged.
+The update-style `up -d --no-deps api web api-runtime` must succeed after more
+than 120 s; a fresh control project with only `start_period` removed must fail
+with `is unhealthy`. It runs only for deployment Docker files, updater code or
+that script, and can also be dispatched manually.
+
+PostgreSQL uses a dedicated usage migration advisory mutex for schema/checkpoints
+and each bounded batch. It does not hold the global schema lock while migrating
+data. SQLite uses immediate per-task writer transactions. The final readiness
+check and marker share one transaction; PostgreSQL briefly locks task/run tables
+against writes during that final check. Empty databases pass this gate too.
+Subsequent ready startups check the marker and query pending task IDs inside the
+database. They detect source changes from old writers or an image rollback
+without loading old JSON payloads into the process. Null or default `[]`
+deprecated fields for new v2-only tasks do not create empty legacy runs.
+An empty first-attempt queued task with no dispatch/start/terminal evidence is
+audited without a phantom execution run, so its later complete v2 usage remains
+complete. Actual retries create new task IDs. A matching direct parent chain
+with a complete, Runtime-bound live v2 parent run keeps prior consumption on the
+parent; restart does not manufacture an old execution on its child. An attempt
+ordinal without that attribution evidence still retains unknown coverage,
+without inventing any additional tokens.
+
+An optional `scripts/migrate-usage-accounting.ts --execute` preparation retains
+the original audit and all observed source versions, but does not write the
+startup cutover marker. The first new startup detects JSON/time changes made by
+old servers after preparation, replaces only its provisional legacy aggregate,
+and preserves modern live runs and evidence-verified recovered facts. Totals with
+ambiguous semantics remain reported evidence, without invented actual/context
+tokens. Startup never scans archives or raw telemetry; normal reports read only
+the canonical ledger. See the [usage contract](../docs/usage-accounting.md).
+
+Keep the updater's drain-protected switch: stop the old API writers before
+allowing the new processes to finish cutover. Running an old image against the
+database after the startup marker has been established can still write JSON
+without updating the ledger. A new startup detects such changes. If the task
+already has counted native facts under any run, including ordinary authenticated
+v2 and recovered historical runs, it commits a source-conflict audit,
+revokes readiness and fails without advancing the processed source or changing
+those facts. The deprecated ingestion entry likewise rejects changed aggregates
+as nonretryable `invalid_report`; identical processed snapshots remain idempotent.
+An audit can describe a rejected observation and is never acceptance proof,
+even beside an existing legacy run. A pre-checkpoint preparation or ingress
+snapshot may establish a checkpoint only if its normalized nonempty legacy
+units exactly match persisted unit identities and facts (excluding revisions
+and task lifecycle occurrence times).
+Empty execution shells and context-only history do not block proven legacy
+consumption. Resolving an overlap requires reviewed evidence, not an automatic
+sum, maximum, or replacement.
+
+Production schema preparation may precede the switch. Evidence recovery must
+wait until old writers have stopped, old reports have drained and new code has
+completed its startup cutover. Generate and review a fresh source cohort and
+plan after that fence. A clone rehearsal or merged source does not establish
+that deployment or production recovery has happened.
+
+Validation: `tests/unit/multiremi/usage-startup-migration.test.ts` covers fresh and
+existing databases, checkpoints/restart, source changes, modern/recovered facts,
+failed readiness, unchanged ready startup, and two processes sharing an isolated
+SQLite file. `tests/unit/multiremi/usage-startup-postgres.test.ts` creates and
+deletes an isolated database through `MULTIREMI_TEST_POSTGRES_URL` and exercises
+fresh/restart/prepared cutover and two real UI/runtime startup processes. The
+PostgreSQL and SQLite startup tests were run with Bun 1.3.14 against disposable
+databases. Updater deadline tests cover readiness beyond 60 s/300 s, finite
+failure deadlines, request time, extra runtime readiness and rollback. The clone
+benchmark completed all 11320 checkpoints in 23 batches; the separate-process
+earlier marker-only warm migration check took 0.984 ms and executed zero batches
+(Store schema setup still took 8.309 s). That measurement predates the required
+pending-source check and is not a timing claim for the current warm gate. The
+benchmark started no jobs, HTTP listener or providers.
+
 ## Release pipeline
 
 Prepare every release, including nightly releases, with Bun 1.3.14:
@@ -515,7 +668,9 @@ installation. It happens in **two stages**:
 
 Both stages are outside the release path and only touch the Compose file, the
 Compose env file, Nginx, the updater env file, and the `api-runtime` container.
-Neither stage writes to the database.
+These topology edits do not directly write business data. Starting either API
+role still runs the required [usage cutover](#usage-accounting-startup-cutover),
+which can write migration checkpoints and the canonical usage ledger.
 
 ### Paths and the Compose prefix
 
@@ -600,6 +755,10 @@ rollback below:
 
 ### Prerequisites
 
+- First align the host API healthcheck start periods and updater timeout with
+  the [usage startup budget](#usage-accounting-startup-cutover). Prepare the
+  host Compose healthchecks before replacing the updater binary; keep this
+  prepared configuration when taking the rollback backup below.
 - **Only operate inside the authorized window, and only when the updater is
   idle.** B1 authorizes 09:30-11:30 and 15:00-17:00 on the switch day. The
   updater is a separate long-running process that can claim a release at any
@@ -823,16 +982,17 @@ Compose files (steps 2, 3, 4, 5 and 7).
    relying on the version treating an explicitly named service as
    profile-enabling.
 
-   Before restarting the updater, verify what it resolved — **do not begin if the
-   list is not the four services**:
+   Before restarting the updater, verify both lists. The updater core list is
+   the three application services; Compose also contains the protected SSH
+   control-plane sidecar, which the updater does not switch:
 
    ```bash
    set -a; . /etc/multiremi/platform-updater.env; set +a
    echo "$MULTIREMI_PLATFORM_CORE_SERVICES" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | sort
-   # must print: api, api-runtime, ssh-mesh-control-plane, web  (one per line)
+   # must print: api, api-runtime, web  (one per line)
    docker compose --env-file "$COMPOSE_ENV" -f "$COMPOSE_FILE" --profile split \
      config --services | sort
-   # must list the same four services
+   # must list: api, api-runtime, ssh-mesh-control-plane, web
    ```
 
    Then:
@@ -1059,9 +1219,11 @@ docker compose --env-file "$COMPOSE_ENV" -f "$COMPOSE_FILE" --profile split \
 
 To restore the previous updater binary instead (only if the updater itself
 misbehaves), copy the file back from `bin/pre-<tag>.<rand>/` and restart
-`remi-platform-updater`; that is 2 commands and no edit. No business or platform
-state write is triggered by these rollback steps, so no data layer needs rolling
-back; the pre-check's authentication bookkeeping follows the exception above.
+`remi-platform-updater`; that is 2 commands and no edit. These commands restore
+topology, not database state; any API startup can still run the usage cutover.
+Keep the [usage rollback boundary](#usage-accounting-startup-cutover) when choosing
+an older image. The pre-check's authentication bookkeeping follows the exception
+above.
 
 ### Rehearsal checklist (MUL-463 stage 2, non-209)
 

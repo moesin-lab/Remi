@@ -1798,7 +1798,7 @@ export interface TaskUsageEntry {
   outputTokens: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
-  /** Total context tokens consumed, for bridges (ACP `used`) that report no input/output split. */
+  /** Actual consumption across input/output/cache/unsplit. Context is diagnostic only. */
   totalTokens?: number;
 }
 
@@ -4609,6 +4609,8 @@ export type FeishuBotOutboundBodyOrigin = "issue" | "agent";
 
 /** Delivery state only. Task messages and human responses remain authoritative. */
 export interface FeishuPresentationCheckpoint {
+  /** Invocation IDs whose native START is deferred until display arguments arrive. */
+  deferredToolIds?: string[];
   version: "native_cot_v1";
   startedAt: number;
   throughSeq: number;
@@ -5821,9 +5823,7 @@ export interface MultiremiUsageDaily {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
-  // Pre-0.2.49 ACP bridges only reported the context-occupancy total, so
-  // historical rows carry totalTokens with zero splits; keep it in the
-  // aggregate so that history is not silently erased.
+  /** Canonical actual input/output/cache/unsplit sum; legacy totals remain audit evidence. */
   totalTokens: number;
   taskCount: number;
 }

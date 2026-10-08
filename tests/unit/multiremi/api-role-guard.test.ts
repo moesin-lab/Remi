@@ -14,7 +14,7 @@
  *   ④ `role` reaches both metrics events and the health payloads.
  *
  * The matrix drives the same inventory the API snapshot does
- * (`scripts/api-routes.golden.json`, 768 patterns) instead of a hand-picked list,
+ * (`scripts/api-routes.golden.json`) instead of a hand-picked list,
  * so a route added later under either prefix is covered without editing this file.
  */
 import { afterEach, describe, expect, it } from "bun:test";
@@ -59,6 +59,7 @@ function captureConsoleLog<T>(run: () => Promise<T> | T): Promise<{ lines: strin
 
 const GOLDEN_PATH = join(import.meta.dir, "../../../scripts/api-routes.golden.json");
 const GOLDEN = JSON.parse(readFileSync(GOLDEN_PATH, "utf8")) as { routes: string[] };
+const UI_USAGE_ROUTES = ["GET /api/usage/report", "GET /api/usage/prices", "POST /api/usage/prices", "PATCH /api/usage/prices/:id"];
 
 /**
  * What the plan's guard table says, written out literally.
@@ -388,6 +389,10 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
     expect(misdirected).toContain("POST /api/daemon/tasks/:taskId/human-requests/:requestId/card");
     expect(misdirected).not.toContain("POST /api/issues/:id/workspace/abandon");
     expect(misdirected).not.toContain("GET /api/sessions/:sessionId/log/entry");
+    for (const route of UI_USAGE_ROUTES) {
+      expect(statuses.has(route)).toBe(true);
+      expect(statuses.get(route), `${route} belongs to the browser/CLI process`).not.toBe(421);
+    }
     expect(misdirected, routeCountHint("ui")).toHaveLength(63);
     // daemon/ws and trace/ws are tested as real upgrades below.
     expect(misdirected.length + 2, routeCountHint("ui")).toBe(65);
@@ -401,38 +406,20 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(status === 421, `${pattern} -> ${status}`).toBe(expectedRefusal("runtime", path));
       if (status === 421) refused += 1;
     }
-    // The two browser upgrade routes
-    // (`GET /ws`, `GET /api/realtime/ws`) are upgrade-only, so the full-inventory
-    // total is 696. Every browser route main added before MUL-462 sits outside
-    // the runtime allowlist (no /api/daemon/, /health/, /internal/ prefix and no bare
-    // health path), so each one is refused here and served by ui: MUL-410's five
-    // /api/issues/:id/decisions* routes took this count 682 -> 687, and MUL-457's
-    // four /api[/multiremi]/issues/:id/parent-done-grant routes took it 687 -> 691.
-    // MUL-438 adds `GET /api/trace/ws` to the literal allowlist above, and it is
-    // upgrade-only, so it changes neither number: the swept refusals stay at 691
-    // (the inventory grew by one, but the new path is not swept) and the two
-    // refused upgrade routes are still `GET /ws` and `GET /api/realtime/ws` —
-    // `GET /api/daemon/ws` and the new trace socket are served by this role.
-    // MUL-479's context-window PUT is workspace admin/browser traffic, outside
-    // every runtime allowlist prefix; ui serves it and runtime refuses it.
-    // MUL-395: /api/issues/status-pages is browser/CLI traffic, outside the
-    // runtime allowlist. UI serves it; runtime refuses this one new route.
-    // MUL-462's two /internal/peer/* routes increase the swept inventory by two,
-    // but runtime serves both, so the refusal totals remain 692/694.
-    // MUL-444 adds two browser log reads: runtime refusals rise from 692 to 694;
-    // its 14 daemon archive routes and two trace reads are served by runtime.
-    // MUL-479 adds one browser context-window PUT, bringing refusals to 695.
-    // Retain the two downstream Chat GET routes plus 24 downstream Session,
-    // execution configuration and updater browser routes; workspace abandonment adds one.
-    // The v2-A merge removes three daemon HTTP request routes and adds two
-    // runtime-only upgrade/claim routes; neither changes runtime refusals.
+    // The merged golden contains 799 routes; this HTTP sweep omits four
+    // WebSocket upgrades. Browser/CLI routes, including Chat-owned Sessions,
+    // execution configuration, updater reconciliation and all four usage routes,
+    // sit outside runtime's daemon/health/peer/trace allowlist: 725 are refused.
+    // GET /ws and GET /api/realtime/ws add two refused upgrades to the total;
+    // GET /api/daemon/ws and GET /api/trace/ws remain runtime-owned.
     const mintRoute = "POST /api/daemon/tasks/:taskId/human-requests/:requestId/card";
     expect(statuses.has(mintRoute)).toBe(true);
     expect(statuses.get(mintRoute)).not.toBe(421);
     expect(statuses.get("POST /api/issues/:id/workspace/abandon")).toBe(421);
     expect(statuses.get("POST /api/platform-updater/operations/reconcile")).toBe(421);
-    expect(refused, routeCountHint("runtime")).toBe(721);
-    expect(refused + 2, routeCountHint("runtime")).toBe(723);
+    for (const route of UI_USAGE_ROUTES) expect(statuses.get(route), `${route} belongs to ui`).toBe(421);
+    expect(refused, routeCountHint("runtime")).toBe(725);
+    expect(refused + 2, routeCountHint("runtime")).toBe(727);
   });
 
   it("answers 421 with the misdirected body, the role header, and a real route still reachable", async () => {

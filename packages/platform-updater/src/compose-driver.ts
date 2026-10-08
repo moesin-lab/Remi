@@ -7,6 +7,8 @@ import type {
   ReportPlatformOperationInput,
 } from "@multiremi/contracts";
 import { type PlatformDrainGate } from "./drain.js";
+import { resolveHealthTimeoutMs, waitForHealthyUrl } from "./health-check.js";
+import { validateComposeStartupBudgets } from "./startup-budget.js";
 import type { CommandRunner, PlatformDeploymentDriver, PlatformInspection } from "./types.js";
 import { assertCompatible, atomicJson, checkBackup, createBackup, DATA_SCHEMA_INPUTS, migrationFingerprint, preflightResult, readRecoveryJournal, RecoveryRequiredError, type BackupConfig } from "./safety.js";
 
@@ -18,6 +20,7 @@ interface ComposeConfig {
   stateDir: string;
   apiHealthUrl: string;
   webHealthUrl: string;
+  healthTimeoutMs?: number;
   /**
    * Overrides `MULTIREMI_PLATFORM_CORE_SERVICES` for tests and embedders.
    * `null`/absent means the environment decides.
@@ -72,8 +75,10 @@ export class DockerComposeDriver implements PlatformDeploymentDriver {
   private readonly coreServices: readonly string[];
   private readonly pullServices: readonly string[];
   private readonly extraHealthUrls: readonly string[];
+  private readonly healthTimeoutMs: number;
 
   constructor(private readonly config: ComposeConfig, private readonly runner: CommandRunner) {
+    this.healthTimeoutMs = resolveHealthTimeoutMs(config.healthTimeoutMs ?? process.env.MULTIREMI_PLATFORM_HEALTH_TIMEOUT_MS);
     // Keep split application services configurable, while leaving agent
     // connectivity and persistent data containers outside every switch.
     const configured = config.coreServices ?? parseServiceList(process.env.MULTIREMI_PLATFORM_CORE_SERVICES);
@@ -184,7 +189,12 @@ export class DockerComposeDriver implements PlatformDeploymentDriver {
     if (["switching", "restarting", "verifying", "rolling_back"].includes(operation.status)) {
       throw new RecoveryRequiredError("Committed operation has no local recovery journal; inspect deployment before releasing maintenance");
     }
-    if (operation.kind === "update") parseComposeManifest(operation.targetManifest);
+    if (operation.kind === "update") {
+      parseComposeManifest(operation.targetManifest);
+      // Rendered environment contains secrets; validate with redacted errors
+      // before the general preflight and any host changes.
+      await this.validateStartupBudgets();
+    }
     const preflight = await this.preflight();
     if (!preflight.ready) throw new Error(preflight.checks.filter((check) => !check.ok).map((check) => check.message).join("; "));
     if (operation.kind === "restart") {
@@ -400,7 +410,29 @@ export class DockerComposeDriver implements PlatformDeploymentDriver {
 
   private async verify(): Promise<void> {
     const urls = [this.config.apiHealthUrl, this.config.webHealthUrl, ...this.extraHealthUrls];
-    await Promise.all(urls.map((url) => verifyUrl(url)));
+    await Promise.all(urls.map((url) => waitForHealthyUrl(url, this.healthTimeoutMs)));
+  }
+
+  private async validateStartupBudgets(): Promise<void> {
+    let result;
+    try {
+      result = await this.compose(["config", "--format", "json"]);
+    } catch {
+      throw new Error(`docker compose config failed; fix ${this.config.composeFile} and its env files. See deploy/README.md#usage-accounting-startup-cutover.`);
+    }
+    // Do not include stdout, stderr or JSON parser errors: env_file is expanded.
+    if (result.exitCode !== 0) {
+      throw new Error(`docker compose config failed (exit ${result.exitCode}); fix ${this.config.composeFile} and its env files. See deploy/README.md#usage-accounting-startup-cutover.`);
+    }
+    let rendered: unknown;
+    try { rendered = JSON.parse(result.stdout); } catch {
+      throw new Error(`docker compose config returned invalid JSON; fix ${this.config.composeFile}. See deploy/README.md#usage-accounting-startup-cutover.`);
+    }
+    validateComposeStartupBudgets(rendered, {
+      coreServices: this.coreServices,
+      healthTimeoutMs: this.healthTimeoutMs,
+      composeFile: this.config.composeFile,
+    });
   }
 
   private async compose(args: string[], envFile = this.config.envFile) {
@@ -452,14 +484,6 @@ function toRelease(value: ComposeManifest): MultiremiPlatformRelease {
 
 async function readRelease(path: string): Promise<MultiremiPlatformRelease | null> {
   try { return JSON.parse(await readFile(path, "utf8")) as MultiremiPlatformRelease; } catch { return null; }
-}
-
-async function verifyUrl(url: string): Promise<void> {
-  for (let attempt = 0; attempt < 24; attempt += 1) {
-    try { const response = await fetch(url, { signal: AbortSignal.timeout(5_000) }); if (response.ok) return; } catch {}
-    await Bun.sleep(2_500);
-  }
-  throw new Error(`${url} did not become healthy`);
 }
 
 function safeFile(value: string): string {

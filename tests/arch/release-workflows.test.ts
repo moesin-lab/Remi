@@ -19,7 +19,7 @@ describe("release workflows", () => {
     expect(gate).toBeLessThan(build);
     expect(steps[gate].run).toContain("release-build-check.yml/runs?head_sha=$SHA");
     expect(steps[gate].run).toContain("branch=main&status=success");
-    expect(steps[gate].run).toContain('.event == "push" or .event == "workflow_dispatch"');
+    expect(steps[gate].run).toContain('select(.event == "push" or .event == "workflow_dispatch")');
     expect(release.jobs.release.permissions.actions).toBe("read");
     expect(JSON.stringify(release)).not.toContain("release:prepare");
     const ci = readWorkflow("release-build-check.yml");
@@ -31,7 +31,7 @@ describe("release workflows", () => {
     expect(ci.jobs.backend.strategy.matrix.shard).toEqual([1, 2, 3, 4]);
     const backend = ci.jobs.backend.steps.find((step: any) => step.name === "Backend test suite");
     expect(backend.if).toBe("github.event_name != 'pull_request'");
-    expect(backend.run).toBe("bun test --shard=${{ matrix.shard }}/4");
+    expect(backend.run).toBe("bun run test --shard=${{ matrix.shard }}/4");
     expect(ci.jobs.build.steps.some((step: any) => step.name === "Backend test suite")).toBe(false);
   });
 
@@ -59,6 +59,10 @@ describe("release workflows", () => {
     const platform = readWorkflow("platform-release.yml");
     expect(platform.on.workflow_call.inputs.tag.type).toBe("string");
     expect(platform.on.workflow_dispatch.inputs.tag.type).toBe("string");
+
+    const gate = platform.jobs.validate.steps.find((step: any) => step.run?.includes("release-build-check.yml/runs"));
+    expect(gate?.run).toContain("release-build-check.yml/runs?head_sha=$SHA&branch=main&status=success");
+    expect(gate?.run).toContain('select(.event == "push" or .event == "workflow_dispatch")');
 
     const serialized = JSON.stringify(platform);
     expect(serialized).toContain("remi-api:sha-${{ needs.validate.outputs.sha }}");

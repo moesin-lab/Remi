@@ -17,7 +17,7 @@ interface LoggedEntry {
   params?: Record<string, any>;
 }
 
-function fakeGrok(options: { configOptions?: boolean } = {}): { executable: string; entries(): LoggedEntry[] } {
+function fakeGrok(options: { configOptions?: boolean; costUsdTicks?: number } = {}): { executable: string; entries(): LoggedEntry[] } {
   const dir = mkdtempSync(join(tmpdir(), "remi-grok-acp-"));
   const logPath = join(dir, "requests.jsonl");
   const executable = join(dir, "grok");
@@ -130,7 +130,7 @@ rl.on("line", (line) => {
             cachedReadTokens: 20,
             cachedWriteTokens: 5,
             totalTokens: 150,
-            costUsdTicks: 98_765,
+            costUsdTicks: ${options.costUsdTicks ?? 98_765},
           },
         },
       });
@@ -207,9 +207,115 @@ describe("Grok ACP provider", () => {
       outputTokens: 30,
       cacheReadInputTokens: 20,
       cacheCreateInputTokens: 5,
-      totalTokens: 150,
+      totalTokens: 155,
       costUsd: 0.0000098765,
     });
+    const units = response!.metadata!.usageUnits as Array<Record<string, any>>;
+    const tokens = units.find(unit => unit.evidenceRef === "acp_prompt_settle")!;
+    const monetary = units.find(unit => unit.costAmount != null)!;
+    expect(tokens).toMatchObject({
+      provider: "grok", model: "grok-4.6", modelSource: "provider_reported", requestedModel: "grok-4.6",
+      inputTokens: 100, outputTokens: 30, cacheReadTokens: 20, cacheWriteTokens: 5,
+      reportedTotalTokens: 150, actualUnsplitTokens: 0, accuracy: "partial",
+    });
+    expect(monetary).toMatchObject({
+      provider: "grok", scope: "turn", costAmount: 0.0000098765, costCurrency: "USD", costSource: "provider_reported",
+      coveredUnitIds: [tokens.unitId], inputTokens: null, outputTokens: null, actualUnsplitTokens: null,
+    });
+  });
+
+  it("retains reported zero cost and the settled actual model when it differs from the requested model", async () => {
+    const agent = fakeGrok({ costUsdTicks: 0 });
+    const provider = new AcpProvider({
+      agentType: "grok",
+      executable: agent.executable,
+      cwd: mkdtempSync(join(tmpdir(), "remi-grok-cwd-")),
+      env: { XAI_API_KEY: "xai-test" },
+      getMcpServers: () => [],
+    });
+
+    await drain(provider.sendStream("ping", { chatId: "chat-metering", model: "grok-4.5" }));
+    const response = provider.getLastResponse();
+    await provider.close();
+
+    expect(response).toMatchObject({ model: "grok-4.6", costUsd: 0 });
+    const units = response!.metadata!.usageUnits as Array<Record<string, any>>;
+    const tokens = units.find(unit => unit.evidenceRef === "acp_prompt_settle")!;
+    expect(tokens).toMatchObject({ model: "grok-4.6", modelSource: "provider_reported", requestedModel: "grok-4.5" });
+    expect(units.find(unit => unit.costAmount != null)).toMatchObject({
+      costAmount: 0, costSource: "provider_reported", coveredUnitIds: [tokens.unitId],
+    });
+  });
+
+  it("keeps independent request models and leaves the unsettled turn remainder unattributed", async () => {
+    const provider = new AcpProvider({ agentType: "grok" });
+    const client = {
+      _options: { onSessionUpdate: (_event: any) => {} },
+      prompt: async () => {
+        client._options.onSessionUpdate({
+          sessionId: "grok-streamed",
+          update: {
+            sessionUpdate: "usage_update",
+            _meta: { remiTokenUsage: {
+              id: "first-request", model: "grok-4.5", scope: "request_snapshot",
+              inputTokens: 20, outputTokens: 5, cachedInputTokens: 0, totalTokens: 25,
+            } },
+          },
+        });
+        return { stopReason: "end_turn", _meta: {
+          modelId: "grok-4.6", usage: { inputTokens: 100, outputTokens: 30, totalTokens: 130, costUsdTicks: 98_765 },
+        } };
+      },
+    };
+    (provider as any)._ensureSession = async () => ({ client, acpSessionId: "grok-streamed" });
+
+    await drain(provider.sendStream("ping"));
+
+    const units = provider.getLastResponse()!.metadata!.usageUnits as Array<Record<string, any>>;
+    const request = units.find(unit => unit.source === "provider_request")!;
+    const remainder = units.find(unit => unit.evidenceRef === "acp_prompt_unattributed_remainder")!;
+    expect(request).toMatchObject({ model: "grok-4.5", modelSource: "provider_reported", inputTokens: 20, outputTokens: 5 });
+    expect(remainder).toMatchObject({ model: null, actualUnsplitTokens: 105, accuracy: "unknown" });
+    expect(units.find(unit => unit.costAmount != null)).toMatchObject({
+      costAmount: 0.0000098765, costSource: "provider_reported",
+      coveredUnitIds: [request.unitId, remainder.unitId].sort(),
+    });
+  });
+
+  it("does not replace a subsequent turn's response with a late normalized settlement", async () => {
+    const provider = new AcpProvider({ agentType: "grok" });
+    let settleFirst: (value: any) => void = () => {};
+    let turn = 0;
+    const client = {
+      _options: { onSessionUpdate: (_event: any) => {} },
+      prompt: async () => {
+        if (turn++ > 0) return { stopReason: "end_turn", _meta: {
+          modelId: "grok-4.6", usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12, costUsdTicks: 0 },
+        } };
+
+        client._options.onSessionUpdate({
+          sessionId: "grok-late",
+          update: { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "first partial" }] },
+        });
+        return new Promise(resolve => { settleFirst = resolve; });
+      },
+    };
+    const entry = { client, acpSessionId: "grok-late" };
+    (provider as any)._ensureSession = async () => entry;
+
+    const first = provider.sendStream("first");
+    await first.next();
+    await first.return(undefined);
+    await drain(provider.sendStream("second"));
+    const second = provider.getLastResponse();
+    settleFirst({ stopReason: "end_turn", _meta: {
+      modelId: "grok-4.5", usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120, costUsdTicks: 98_765 },
+    } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(provider.getLastResponse()).toBe(second);
+    expect(second).toMatchObject({ model: "grok-4.6", totalTokens: 12, costUsd: 0 });
   });
 
   it("authenticates with the cached login and restores through session/load", async () => {

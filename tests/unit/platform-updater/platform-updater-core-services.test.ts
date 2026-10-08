@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { MultiremiPlatformOperation } from "@multiremi/contracts";
 import { DockerComposeDriver } from "@remi-platform/updater/compose-driver.js";
 import type { CommandRunner } from "@remi-platform/updater/types.js";
+import { validComposeConfigResult } from "../../fixtures/platform-updater/compose-config.js";
 
 import { DATA_SCHEMA, READY_GATE, safetyCommand, testBackup } from "./helpers.js";
 
@@ -82,6 +83,7 @@ function driverBed(sharedHealthPort?: number): Bed {
       const safe = safetyCommand(command, args, options);
       if (safe) return safe;
       const line = args.join(" ");
+      if (args.includes("config")) return validComposeConfigResult;
       if (line.startsWith("ps -aq --filter")) return { exitCode: 0, stdout: "\n", stderr: "" };
       if (line.includes("ps --format json")) return { exitCode: 0, stdout: "", stderr: "" };
       if (command === "find") return { exitCode: 1, stdout: "", stderr: "" };

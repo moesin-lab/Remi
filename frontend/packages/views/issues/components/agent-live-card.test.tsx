@@ -134,13 +134,13 @@ function fireEvent(event: string, payload: unknown) {
   for (const h of handlers) h(payload);
 }
 
-function renderCard(issueId = "issue-1", issueSessionId?: string, seededTasks?: AgentTask[]) {
+function renderCard(issueId = "issue-1", issueSessionId?: string, seededTasks?: AgentTask[], reconcileEnabled = true) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   if (seededTasks) qc.setQueryData(issueKeys.tasks(issueId), seededTasks);
   const view = render(
     <QueryClientProvider client={qc}>
       <I18nProvider locale="en" resources={TEST_RESOURCES}>
-        <AgentLiveCard issueId={issueId} issueSessionId={issueSessionId} />
+        <AgentLiveCard issueId={issueId} issueSessionId={issueSessionId} reconcileEnabled={reconcileEnabled} />
       </I18nProvider>
     </QueryClientProvider>,
   );
@@ -161,6 +161,18 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("AgentLiveCard reconcile race", () => {
+  it("shows cached tasks and suppresses mount/reconnect/event reads until reveal", async () => {
+    const task = makeTask("task-1", { issue_session_id: "session-1" });
+    mockApi.getActiveTasksForIssue.mockResolvedValue({ tasks: [task] });
+    const view = renderCard("issue-1", "session-1", [task], false);
+    expect(screen.getByText(/Agent agent-1 is working/)).toBeInTheDocument();
+    act(() => { for (const cb of wsReconnectCallbacks) cb(); fireEvent("task:running", { issue_id: "issue-1" }); });
+    expect(mockApi.getActiveTasksForIssue).not.toHaveBeenCalled();
+    view.rerender(<QueryClientProvider client={view.qc}><I18nProvider locale="en" resources={TEST_RESOURCES}>
+      <AgentLiveCard issueId="issue-1" issueSessionId="session-1" reconcileEnabled />
+    </I18nProvider></QueryClientProvider>);
+    await waitFor(() => expect(mockApi.getActiveTasksForIssue).toHaveBeenCalledExactlyOnceWith("issue-1"));
+  });
   it("renders a cached running task before the reconciliation request returns", () => {
     const response = deferred<{ tasks: AgentTask[] }>();
     mockApi.getActiveTasksForIssue.mockReturnValue(response.promise);
@@ -182,23 +194,11 @@ describe("AgentLiveCard reconcile race", () => {
     await screen.findByText("3 running");
   });
 
-  it("counts tool calls from the hydrated trace", async () => {
-    const hydration = deferred<{ events: Array<{ seq: number; ts: string; type: string; tool?: string }>; eof: boolean; state: string; next_after_seq: number }>();
-    mockApi.getActiveTasksForIssue.mockResolvedValue({ tasks: [makeTask("task-1")] });
-    mockApi.getTaskTrace.mockReturnValue(hydration.promise);
-
+  it("uses task progress and keeps trace loading behind the transcript action", async () => {
+    mockApi.getActiveTasksForIssue.mockResolvedValue({ tasks: [makeTask("task-1", { progress_summary: "Checking trace lifecycle" })] });
     renderCard();
-    await waitFor(() => expect(mockApi.getTaskTrace).toHaveBeenCalledWith("task-1", 0));
-
-    await act(async () => {
-      hydration.resolve({ events: [
-        { seq: 1, ts: "2026-01-01T00:00:00Z", type: "tool_use", tool: "Bash" },
-        { seq: 2, ts: "2026-01-01T00:00:00Z", type: "tool_result" },
-        { seq: 3, ts: "2026-01-01T00:00:00Z", type: "text" },
-        { seq: 4, ts: "2026-01-01T00:00:00Z", type: "tool_use", tool: "Bash" },
-      ], eof: true, state: "ok", next_after_seq: 4 });
-    });
-    await screen.findByText("2 tools");
+    await screen.findByText("Checking trace lifecycle");
+    expect(mockApi.getTaskTrace).not.toHaveBeenCalled();
     expect(screen.getByTestId("transcript-button")).toBeInTheDocument();
   });
 

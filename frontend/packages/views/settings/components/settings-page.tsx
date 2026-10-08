@@ -137,6 +137,7 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
 
   return (
     <Tabs
+      data-perf-scroll="list"
       value={activeTab}
       onValueChange={handleTabChange}
       orientation="vertical"

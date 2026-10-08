@@ -39,6 +39,9 @@ const DRIVERS = new Set<MultiremiPlatformDeploymentDriver>(["systemd_release", "
 
 export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+  // App-local, successful decisions only. Cheap live fingerprints also observe a daemon
+  // arriving at an unchanged release and pending manual updates completing.
+  let reconciledCliKey: string | undefined;
 
   app.get("/api/multiremi/platform/config", (c) => {
     const requester = loadCurrentWorkspaceRole(c, store, "local", ["owner", "admin"]);
@@ -181,7 +184,7 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
       services?: MultiremiPlatformService[];
     }>(c);
     if (!body.driver || !DRIVERS.has(body.driver)) return c.json({ error: "valid driver is required" }, 400);
-    const state = store.heartbeatPlatformUpdater({
+    let state = store.heartbeatPlatformUpdater({
       defaultReleaseFeedUrl: body.defaultReleaseFeedUrl,
       releaseFeedUrl: body.releaseFeedUrl,
       preflight: body.preflight,
@@ -191,17 +194,25 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
       recentReleases: body.recentReleases,
       services: body.services,
     });
-    const due = store.claimDuePlatformAutoUpdateCheck();
+    const dueAt = state.autoUpdateNextCheckAt;
+    const due = state.autoUpdateStable && (!dueAt || !Number.isFinite(Date.parse(dueAt)) || Date.parse(dueAt) <= Date.now())
+      ? store.claimDuePlatformAutoUpdateCheck() : null;
     if (due) {
-      store.setPlatformAutoUpdateResult(runScheduledUpdateDecision(store, due));
+      state = store.setPlatformAutoUpdateResult(runScheduledUpdateDecision(store, due));
+    } else if (state.autoUpdateStable && (!dueAt || !Number.isFinite(Date.parse(dueAt)))) {
+      state = store.getPlatformState();
     }
     // A successful platform switch is observed here as currentRelease. Reconcile
     // daemons only after that switch is complete, and never compete with a release
     // operation that is still draining or replacing the API.
     if (!store.getActivePlatformOperation() && state.currentRelease?.version) {
-      store.reconcileRuntimeCliRelease(state.currentRelease.version);
+      const key = store.runtimeCliReleaseReconciliationKey(state.currentRelease.version);
+      if (key !== reconciledCliKey) {
+        store.reconcileRuntimeCliRelease(state.currentRelease.version);
+        reconciledCliKey = key;
+      }
     }
-    return c.json({ state: store.getPlatformState() });
+    return c.json({ state });
   });
 
   app.post("/api/platform-updater/operations/claim", (c) => {

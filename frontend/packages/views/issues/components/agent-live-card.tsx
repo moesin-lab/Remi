@@ -11,12 +11,7 @@ import { toast } from "sonner";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { LIVE_TIMER, formatElapsedSince } from "../../common/format";
 import { useActorName } from "@multiremi/core/workspace/hooks";
-import {
-  TranscriptButton,
-  countToolCalls,
-} from "../../common/task-transcript";
-import { buildTraceTimeline } from "../../common/task-transcript/build-timeline";
-import { useTaskTrace } from "../../common/task-transcript/use-task-trace";
+import { TranscriptButton } from "../../common/task-transcript";
 import { useT } from "../../i18n";
 import { TerminateTaskConfirmDialog } from "./terminate-task-confirm-dialog";
 import { AgentAvatarStack } from "../../agents/components/agent-avatar-stack";
@@ -43,9 +38,10 @@ interface AgentLiveCardProps {
   issueId: string;
   issueSessionId?: string;
   onInitialReconcile?: () => void;
+  reconcileEnabled?: boolean;
 }
 
-export function AgentLiveCard({ issueId, issueSessionId, onInitialReconcile }: AgentLiveCardProps) {
+export function AgentLiveCard({ issueId, issueSessionId, onInitialReconcile, reconcileEnabled = true }: AgentLiveCardProps) {
   const qc = useQueryClient();
   const { t } = useT("issues");
   const { getActorName } = useActorName();
@@ -92,6 +88,7 @@ export function AgentLiveCard({ issueId, issueSessionId, onInitialReconcile }: A
   // cancelled event was lost during a WS reconnect window), and tasks
   // still active keep their identity; each row reads its live trace directly.
   const reconcile = useCallback(() => {
+    if (!reconcileEnabled) return;
     const mySeq = ++reconcileSeq.current;
     api.getActiveTasksForIssue(issueId).then(({ tasks: issueTasks }) => {
       if (!mountedRef.current) return;
@@ -107,7 +104,7 @@ export function AgentLiveCard({ issueId, issueSessionId, onInitialReconcile }: A
       setTaskStates(new Map(tasks.map((task) => [task.id, { task }])));
       onInitialReconcile?.();
     }).catch(error => { console.error(error); onInitialReconcile?.(); });
-  }, [issueId, issueSessionId, onInitialReconcile, qc]);
+  }, [issueId, issueSessionId, onInitialReconcile, qc, reconcileEnabled]);
 
   // Initial fetch on mount / issueId change.
   useEffect(() => {
@@ -324,9 +321,6 @@ interface AgentLiveRowProps {
 function AgentLiveRow({ task, agentName, onRequestCancel, cancelling }: AgentLiveRowProps) {
   const { t } = useT("issues");
   const [elapsed, setElapsed] = useState("");
-  const traceActive = ["dispatched", "running", "waiting_local_directory", "awaiting_human"].includes(task.status);
-  const events = useTaskTrace(task.id, traceActive, traceActive);
-  const items = buildTraceTimeline(events);
 
   const isQueued = task.status === "queued";
   const queuedWaitReason = isQueued && typeof task.wait_reason === "string" ? task.wait_reason.trim() : "";
@@ -358,8 +352,6 @@ function AgentLiveRow({ task, agentName, onRequestCancel, cancelling }: AgentLiv
     const interval = setInterval(() => setElapsed(formatElapsedSince(startRef, Date.now(), LIVE_TIMER)), 1000);
     return () => clearInterval(interval);
   }, [isParked, task.started_at, task.dispatched_at, task.created_at]);
-
-  const toolCount = countToolCalls(items);
 
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-muted-foreground">
@@ -394,9 +386,6 @@ function AgentLiveRow({ task, agentName, onRequestCancel, cancelling }: AgentLiv
               : t(($) => $.agent_live.queued_elapsed_prefix, { elapsed })
             : elapsed}
         </span>
-        {!isParked && toolCount > 0 && (
-          <span className="text-muted-foreground shrink-0">{t(($) => $.agent_live.tool_count, { count: toolCount })}</span>
-        )}
       </div>
       {/* LLM progress summary — a human-readable one-liner refreshed while the
           task runs. `basis-full` wraps it onto its own line inside the flex row. */}

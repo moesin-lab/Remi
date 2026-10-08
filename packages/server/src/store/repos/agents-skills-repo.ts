@@ -324,13 +324,13 @@ export class AgentsSkillsRepo {
         const rt = this.ctx.runtimes().getRuntimeByDaemonAndProvider(daemonId, agent.provider);
         const newRuntimeId = rt ? rt.id : daemonRuntimeId(daemonId, agent.provider);
         this.ctx.db.run(
-          "UPDATE multiremi_tasks SET runtime_id = ?, session_id = NULL, updated_at = ? WHERE id = ?",
+          "UPDATE multiremi_tasks SET runtime_id = ?, session_id = NULL, offered_at = NULL, accepted_at = NULL, updated_at = ? WHERE id = ?",
           [newRuntimeId, now, String(row.id)],
         );
       } else {
         // Session/other pin: the old session is void — re-pool it.
         this.ctx.db.run(
-          "UPDATE multiremi_tasks SET runtime_id = NULL, session_id = NULL, work_dir = NULL, updated_at = ? WHERE id = ?",
+          "UPDATE multiremi_tasks SET runtime_id = NULL, session_id = NULL, work_dir = NULL, offered_at = NULL, accepted_at = NULL, updated_at = ? WHERE id = ?",
           [now, String(row.id)],
         );
       }
@@ -648,6 +648,24 @@ export class AgentsSkillsRepo {
     return mergeAgentSkills(agent.skills, structured);
   }
 
+  /** Compatibility lists ship summaries, never Skill files; preserve join order and inline fallback. */
+  listAgentSkillSummaries(agents: readonly MultiremiAgent[]): Map<string, MultiremiSkill[]> {
+    const structured = new Map<string, MultiremiSkill[]>();
+    for (let offset = 0; offset < agents.length; offset += AGENT_LOOKUP_BATCH_SIZE) {
+      const batch = agents.slice(offset, offset + AGENT_LOOKUP_BATCH_SIZE);
+      const rows = this.ctx.db.query(`SELECT aks.agent_id AS linked_agent_id, s.*
+        FROM multiremi_skills s JOIN multiremi_agent_skills aks ON aks.skill_id = s.id
+        WHERE aks.agent_id IN (${batch.map(() => "?").join(", ")}) AND s.archived_at IS NULL
+        ORDER BY aks.created_at ASC, s.name ASC`).all(...batch.map(agent => agent.id)) as Row[];
+      for (const row of rows) {
+        const id = String(row.linked_agent_id);
+        const skills = structured.get(id) ?? [];
+        skills.push(toSkill(row, [])); structured.set(id, skills);
+      }
+    }
+    return new Map(agents.map(agent => [agent.id, mergeAgentSkills(agent.skills, structured.get(agent.id) ?? [])]));
+  }
+
   setAgentSkills(agentId: string, input: SetAgentSkillsInput | string[]): MultiremiSkill[] {
     if (!this.ctx.db.query("SELECT id FROM multiremi_agents WHERE id = ?").get(agentId)) throw new Error(`Agent not found: ${agentId}`);
     const skillIds = Array.isArray(input) ? input : input.skillIds ?? input.skill_ids ?? [];
@@ -807,6 +825,13 @@ export class AgentsSkillsRepo {
     const rows = this.ctx.db.query(options.includeArchived
       ? "SELECT * FROM multiremi_agents ORDER BY created_at ASC"
       : "SELECT * FROM multiremi_agents WHERE archived_at IS NULL ORDER BY created_at ASC").all() as Row[];
+    return rows.map(toAgent);
+  }
+
+  listAgentCompatibilityCandidates(workspaceId: string, options: { includeArchived?: boolean } = {}): MultiremiAgent[] {
+    const rows = this.ctx.db.query(`SELECT * FROM multiremi_agents
+      WHERE workspace_id = ? ${options.includeArchived ? "" : "AND archived_at IS NULL"}
+      ORDER BY created_at ASC`).all(workspaceId) as Row[];
     return rows.map(toAgent);
   }
 

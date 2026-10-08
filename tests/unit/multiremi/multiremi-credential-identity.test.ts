@@ -151,7 +151,7 @@ describe("MUL-448 B1: X-Agent-ID cannot outrank a member credential", () => {
     const { store, app, headers, agentId, otherAgentId } = await fixture();
     const issue = store.createIssue({ title: "MUL-448 B1 task token" });
     const session = store.createIssueSession(issue.id, { title: "B1 task token session" });
-    const source = store.createTask({ agentId, issueId: issue.id, prompt: "Source run" });
+    const source = store.createSessionTask(session.id, { agentId, prompt: "Source run" });
     const taskToken = await store.createTaskAccessToken(store.getTask(source.id)!, "local");
     const runHeaders = {
       ...headers,
@@ -169,6 +169,14 @@ describe("MUL-448 B1: X-Agent-ID cannot outrank a member credential", () => {
     expect(assigned).toHaveLength(1);
     expect(assigned[0]!.authorType).toBe("agent");
     expect(assigned[0]!.authorId).toBe(agentId);
+
+    const otherSession = store.createIssueSession(issue.id, { title: "Other credential scope" });
+    const denied = await app.request(`/api/issues/${issue.id}/sessions/${otherSession.id}/tasks`, {
+      method: "POST", headers: runHeaders,
+      body: JSON.stringify({ agent_id: agentId, prompt: "Cross-Session run" }),
+    });
+    expect(denied.status).toBe(403);
+    expect(store.listTasksForIssue(issue.id).filter((task) => task.issueSessionId === otherSession.id)).toHaveLength(0);
   });
 });
 

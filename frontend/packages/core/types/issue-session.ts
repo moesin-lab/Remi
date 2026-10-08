@@ -16,10 +16,11 @@ export interface SessionParticipant {
   updated_at: string;
 }
 
-/** Core product Session owned by a Chat; Issue linkage is optional. */
+/** Persistent work Session owned by either a Chat or an Issue. */
 export interface Session {
   id: string;
-  /** Null only for legacy Issue-owned Sessions awaiting adoption. */
+  owner_type: "chat" | "issue";
+  owner_id: string;
   chat_id?: string | null;
   issue_id: string | null;
   workspace_id: string;
@@ -88,7 +89,8 @@ export interface CreateSessionTaskRequest {
   priority?: number;
 }
 
-export interface SessionTask extends AgentTask {
+export interface SessionTask extends Omit<AgentTask, "issue_id"> {
+  issue_id: string | null;
   issue_session_id: string;
 }
 

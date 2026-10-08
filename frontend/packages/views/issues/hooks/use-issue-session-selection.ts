@@ -19,8 +19,8 @@ export interface IssueSessionSelection {
 
 /**
  * Owns which of the issue's parallel sessions is on screen. Resolution order
- * is explicit selection → the default session → the first one, so a freshly
- * loaded issue always lands on something real.
+ * is explicit selection → the Issue's own Main → another default → the first
+ * one. Associated Chat Sessions retain their own default Session.
  */
 export function useIssueSessionSelection(
   issueId: string,
@@ -36,6 +36,7 @@ export function useIssueSessionSelection(
 
   const activeId =
     list.find((session) => session.id === selectedId)?.id
+    ?? list.find((session) => session.owner_type === "issue" && session.owner_id === issueId && session.is_default)?.id
     ?? list.find((session) => session.is_default)?.id
     ?? list[0]?.id
     ?? "";

@@ -49,7 +49,7 @@ describe("toSafeErrorDetails", () => {
 describe("ApiClient", () => {
   it("sends the parent session in snake case and preserves side-chat metadata", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      id: "sess_side",
+      id: "sess_side", owner_type: "issue", owner_id: "issue_1",
       issue_id: "issue_1",
       workspace_id: "ws_1",
       title: "Review",

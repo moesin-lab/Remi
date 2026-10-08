@@ -13,10 +13,9 @@ import type {
   TimelinePage,
 } from "../../types";
 import type { HttpClient } from "../http";
-import { parseStrictResponse, parseWithFallback } from "../schema";
+import { ApiContractError, parseStrictResponse, parseWithFallback } from "../schema";
 import {
   CommentsListSchema,
-  EMPTY_ISSUE_SESSION,
   EMPTY_ISSUE_SESSION_TASKS,
   EMPTY_SESSION_EVENTS,
   EMPTY_SESSION_PARTICIPANTS,
@@ -107,9 +106,16 @@ export class CommentsEndpoints {
       method: "POST",
       body: JSON.stringify(input),
     });
-    return parseWithFallback(raw, IssueSessionSchema, EMPTY_ISSUE_SESSION, {
+    const session = parseStrictResponse<IssueSession>(raw, IssueSessionSchema, {
       endpoint: "POST /api/issues/:id/sessions",
     });
+    if (!session.id || session.owner_type !== "issue" || session.owner_id !== issueId
+      || session.issue_id !== issueId || session.chat_id != null || session.title !== input.title.trim()
+      || session.parent_session_id !== (input.parent_session_id ?? null)
+      || (input.holds_workspace !== undefined && session.holds_workspace !== input.holds_workspace)) {
+      throw new ApiContractError("POST /api/issues/:id/sessions", "Server did not retain the requested Session owner");
+    }
+    return session;
   }
 
   async listSessionParticipants(issueId: string, sessionId: string): Promise<SessionParticipant[]> {

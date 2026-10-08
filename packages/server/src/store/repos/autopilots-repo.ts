@@ -1566,42 +1566,16 @@ export class AutopilotsRepo {
           }
         }
         const reusableSession = autopilot.sessionPolicy === "reuse_latest"
-          ? this.ctx.db.query(
-            `SELECT s.id, s.chat_id FROM multiremi_issue_sessions s
-             JOIN multiremi_chat_sessions c ON c.id = s.chat_id
-             WHERE s.issue_id = ? AND s.status = 'active'
-               AND c.agent_id = ? AND c.status = 'active'
-             ORDER BY s.updated_at DESC, s.id DESC LIMIT 1`,
-          ).get(issue.id, agent.id) as { id?: string; chat_id?: string } | null
+          ? this.ctx.issueSessions().getLatestActiveIssueSession(issue.id)
           : null;
-        const chat = reusableSession?.chat_id
-          ? this.ctx.chat().getChatSession(reusableSession.chat_id)!
-          : this.ctx.chat().createChatSessionWithinTransaction({
-            workspaceId: issue.workspaceId,
-            creatorId: agent.ownerId,
-            agentId: agent.id,
-            projectId: issue.projectId,
-            title: `${autopilot.title} · ${issue.key}`,
-          });
-        const issueSession = reusableSession?.id
-          ? this.ctx.issueSessions().getIssueSession(reusableSession.id)!
-          : autopilot.sessionPolicy === "reuse_latest"
-            ? this.ctx.issueSessions().createIssueSessionWithinTransaction(issue.id, {
-              chatId: chat.id,
-              title: "Main",
-              createdByType: "agent",
-              createdById: agent.id,
-              participantAgentIds: [agent.id],
-            })
-            : this.ctx.issueSessions().createIssueSessionWithinTransaction(issue.id, {
-            chatId: chat.id,
-            title: `${autopilot.title} · ${issue.key}`,
+        const issueSession = reusableSession
+          ?? this.ctx.issueSessions().createIssueSessionWithinTransaction(issue.id, {
+            title: autopilot.sessionPolicy === "reuse_latest" ? "Main" : `${autopilot.title} · ${issue.key}`,
             createdByType: "agent",
             createdById: agent.id,
             participantAgentIds: [agent.id],
           });
         issueSessionId = issueSession.id;
-        chatSessionId = chat.id;
       }
 
       let task: MultiremiTask;

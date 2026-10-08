@@ -5,7 +5,7 @@ import type { AgentTask } from "@multiremi/core/types";
 import { useT } from "../../i18n";
 
 export function ExecutionModelInfo({ task, agentModel, agentThinkingLevel, usageModel }: {
-  task: AgentTask;
+  task: Omit<AgentTask, "issue_id">;
   agentModel?: string | null;
   agentThinkingLevel?: string | null;
   usageModel?: string | null;

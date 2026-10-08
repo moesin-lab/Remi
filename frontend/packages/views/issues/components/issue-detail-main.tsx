@@ -18,6 +18,7 @@ import { IssueActivitySection } from "./issue-activity-section";
 import { IssueDetailHeader } from "./issue-detail-header";
 import { IssueDecisionPanel } from "./issue-decision-panel";
 import { IssueSessionList } from "./issue-session-list";
+import { NewSessionDialog } from "./issue-session-bar";
 import { Sheet, SheetContent } from "@multiremi/ui/components/ui/sheet";
 import { useT } from "../../i18n";
 import { useNavigation } from "../../navigation";
@@ -98,6 +99,7 @@ export function IssueDetailMain({
   canForceStart = false,
 }: IssueDetailMainProps) {
   const { t } = useT("issues");
+  const [createSessionOpen, setCreateSessionOpen] = useState(false);
   const { pathname } = useNavigation();
   const readyKey = `${issueId}:${sessions.activeId}:${highlightCommentId ?? ""}`;
   const [readiness, setReadiness] = useState({ key: readyKey, ready: false });
@@ -260,6 +262,7 @@ export function IssueDetailMain({
               sessionsError={sessions.error}
               sessionsFetching={sessions.fetching}
               onRetrySessions={sessions.refetch}
+              onCreateSession={() => setCreateSessionOpen(true)}
               scrollContainerEl={scrollContainerEl}
               highlightCommentId={highlightCommentId}
               initialLog={initialLog}
@@ -268,6 +271,13 @@ export function IssueDetailMain({
             />
         </div>
       </div>
+      <NewSessionDialog
+        issueId={issueId}
+        sessions={sessions.list}
+        open={createSessionOpen}
+        onOpenChange={setCreateSessionOpen}
+        onCreated={sessions.select}
+      />
     </div>
   );
 }

@@ -67,6 +67,13 @@ Runtime 可持有独立的[持久化工作区](dev/runtime-workspaces.md)：绑�
 
 Chat 与 Issue 独立，Chat 创建时保存项目或本机目录选择；Runtime 本机目录不附加项目仓库；项目聊天优先采用项目所选的 `local_directory`，否则在托管 Chat 目录自动准备项目显式声明的仓库，后续复用已有 worktree。未选工作位置时使用自动 Chat 目录。在 Chat 中创建 Issue 不绑定会话，也不继承新 Issue 的上下文；普通私聊不接收 Issue 播报。飞书群 Issue 话题的归属由 [FeishuBotRepo](../packages/server/src/store/repos/feishu-bot-repo.ts)维护，投递和任务领取检查绑定、Issue、工作区、Chat 与 Agent 一致性；归属不明的旧关联按[迁移手册](migrations/chat-issue-decoupling.md)审计恢复。[claim wire](../packages/server/src/api/wire/tasks.ts)保留有预算的会话 projection，仅向已确认的 Issue 话题附加按 `relay:<chat_session_id>` 游标读取的 Issue 日志（最多 100 条，并给出续读位置）；转述任务完成才推进游标。详见 [Chat 契约](chat.md)。
 
+产品 Session 恰好由一个 Chat 或 Issue 拥有，二者创建时都在同一事务内建立自己的 `Main`。
+[IssueSessionsRepo](../packages/server/src/store/repos/issue-sessions-repo.ts)以非空 `chat_id` 判定 Chat owner，
+否则以非空 `issue_id` 判定 Issue owner；Chat-owned 的 `issue_id` 只是可选工作投影。
+API wire 显式提供 `owner_type`、`owner_id`，读取、继承、派发与删除遵循真实 owner 的权限和生命周期。
+Issue-owned Session Task 不需要 Chat；普通 Chat 输入仍使用 Chat Task。
+字段、迁移、Web 与 CLI 入口见[对话与工作会话模型](conversation-model.md)。
+
 **飞书聊天**：[controlPlaneConciergeHost / createFeishuTaskHandler](../apps/remi/cli/multiremi.ts)启动 connector；普通消息经 daemon client 提交平台 Chat/Task，再走上面的任务执行链。connector 从 task 事件流回复；去重、运行中 steering、取消与人工请求也使用平台 task。当前 foreground 不实例化 `packages/remi` 的 `Remi` core，不能以该库的 `_process()` 作为当前 bot 入口。
 工作区的 [Feishu bot 配置](../packages/server/src/store/repos/feishu-bot-repo.ts)指定 Agent 和 Runtime；
 bot 控制指令携带版本和期望状态。[concierge supervisor](../packages/server/src/worker/feishu-concierge.ts)经鉴权接口拉取 assignment 后串行协调 connector 的启动、停止与重试，应用凭据不随心跳下发。持久化出站投递使用 `feishu.outbound`，发出后收到 ACK 才领取原有租约；断连前未确认的投递由 DB 快照重推，不改变投递数据模型。自动 Issue 话题及负责人轮次完成推送见[飞书接入契约](feishu-message-ingestion.md)。

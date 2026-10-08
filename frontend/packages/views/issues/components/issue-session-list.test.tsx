@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { I18nProvider } from "@multiremi/core/i18n/react";
 import type { Agent, IssueSession } from "@multiremi/core/types";
 import enCommon from "../../locales/en/common.json";
@@ -11,11 +11,17 @@ const TEST_RESOURCES = { en: { common: enCommon, issues: enIssues } };
 // by every row, so `isPending` alone can't say *which* row is in flight.
 const addParticipantState = vi.hoisted(() => ({
   mutate: vi.fn(),
+  createIssueSession: vi.fn(),
+  createChatWorkSession: vi.fn(),
   isPending: false,
   variables: undefined as { participantType: string; participantId: string } | undefined,
 }));
 vi.mock("@multiremi/core/issues", () => ({
   useAddSessionParticipant: () => addParticipantState,
+  useCreateIssueSession: (issueId: string) => ({ isPending: false, mutateAsync: (input: unknown) => addParticipantState.createIssueSession(issueId, input) }),
+}));
+vi.mock("@multiremi/core/chat/work-sessions", () => ({
+  useCreateChatWorkSession: (chatId: string) => ({ isPending: false, mutateAsync: (input: unknown) => addParticipantState.createChatWorkSession(chatId, input) }),
 }));
 
 vi.mock("../../common/actor-avatar", () => ({
@@ -49,6 +55,8 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
 function makeSession(overrides: Partial<IssueSession> = {}): IssueSession {
   return {
     id: "session-main",
+    owner_type: "issue",
+    owner_id: "issue-1",
     issue_id: "issue-1",
     workspace_id: "ws-1",
     title: "Main",
@@ -102,16 +110,57 @@ beforeEach(() => {
 });
 
 describe("IssueSessionList rail", () => {
+  it("distinguishes associated Chat Main from the Issue Main", () => {
+    renderRail([
+      makeSession({ id: "chat-main", owner_type: "chat", owner_id: "chat-1", chat_id: "chat-1" }), makeSession(),
+    ]);
+    expect(screen.getByRole("button", { name: "Main (Chat)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Main (Issue)" })).toBeInTheDocument();
+  });
+
+  it.each(["issue", "chat"] as const)("creates side chat through its %s parent owner", async ownerType => {
+    const parent = makeSession({
+      owner_type: ownerType, owner_id: ownerType === "chat" ? "chat-1" : "issue-1",
+      chat_id: ownerType === "chat" ? "chat-1" : null,
+    });
+    const onSelect = vi.fn();
+    const mutation = ownerType === "chat" ? addParticipantState.createChatWorkSession : addParticipantState.createIssueSession;
+    mutation.mockResolvedValue(makeSession({ ...parent, id: "side-1", title: "Review", parent_session_id: parent.id }));
+    renderRail([parent], [], { onSelectSession: onSelect });
+    fireEvent.click(screen.getByRole("button", { name: "Session actions" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Side chat" }));
+    fireEvent.change(await screen.findByLabelText("Session name"), { target: { value: "Review" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(mutation).toHaveBeenCalledWith(parent.owner_id, {
+      title: "Review", holds_workspace: false, parent_session_id: parent.id,
+    }));
+    expect(ownerType === "chat" ? addParticipantState.createIssueSession : addParticipantState.createChatWorkSession).not.toHaveBeenCalled();
+    expect(onSelect).toHaveBeenCalledWith("side-1");
+  });
+
+  it("preserves the selected Session and side-chat input when creation fails", async () => {
+    const onSelect = vi.fn();
+    addParticipantState.createIssueSession.mockRejectedValue(new Error("Creation failed"));
+    renderRail(SESSIONS, [], { onSelectSession: onSelect });
+    fireEvent.click(screen.getAllByRole("button", { name: "Session actions" })[0]!);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Side chat" }));
+    fireEvent.change(await screen.findByLabelText("Session name"), { target: { value: "Keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith("Creation failed"));
+    expect(screen.getByLabelText("Session name")).toHaveValue("Keep this draft");
+    expect(onSelect).not.toHaveBeenCalled();
+  });
   it("renders a single session as one highlighted row, header included", () => {
     renderRail([makeSession()]);
 
     // The rail is not conditional on having something to switch to.
-    expect(screen.getByText("Linked Sessions")).toBeInTheDocument();
+    expect(screen.getByText("Sessions")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Main/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "New session" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New session" })).toBeInTheDocument();
   });
 
-  it("keeps the linked Issue projection read-only apart from participants", async () => {
+  it("offers participants and side chat for root Sessions", async () => {
     // Publishing a result and delegating a task used to sit here too. Both are
     // agent-side actions driven from the CLI — members never used the buttons,
     // so the page no longer shows them (MUL-204).
@@ -119,7 +168,7 @@ describe("IssueSessionList rail", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Session actions" })[0]!);
 
     const items = await screen.findAllByRole("menuitem");
-    expect(items.map((item) => item.textContent)).toEqual(["Session participants"]);
+    expect(items.map((item) => item.textContent)).toEqual(["Session participants", "Side chat"]);
   });
 
   it("does not offer side chat from an existing side session", async () => {
@@ -193,9 +242,9 @@ describe("IssueSessionList rail", () => {
   it("carries the scope as a tooltip so the narrow header can stay one word", () => {
     renderRail(SESSIONS);
 
-    expect(screen.getByText("Linked Sessions")).toHaveAttribute(
+    expect(screen.getByText("Sessions")).toHaveAttribute(
       "title",
-      "Sessions currently associated with this Issue",
+      "Sessions owned by or associated with this Issue",
     );
   });
 

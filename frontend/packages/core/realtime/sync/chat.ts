@@ -2,6 +2,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import { createLogger } from "../../logger";
 import { getCurrentWsId } from "../../platform/workspace-storage";
 import { chatKeys } from "../../chat/queries";
+import { chatWorkSessionKeys } from "../../chat/work-sessions";
 import { issueKeys } from "../../issues/queries";
 import { removeChatSessionFromCache, updateChatSessionInCache } from "../../chat/session-cache";
 import { useChatStore } from "../../chat";
@@ -81,6 +82,23 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
     invalidateSessionLists();
     invalidateSession(sessionId);
   };
+  const invalidateWorkSessionTask = (payload: {
+    issue_session_id?: string;
+    chat_session_id?: string;
+  }): boolean => {
+    if (!payload.issue_session_id) return false;
+
+    const wsId = getCurrentWsId();
+    if (wsId && payload.chat_session_id) {
+      void qc.invalidateQueries({
+        queryKey: chatWorkSessionKeys.tasks(wsId, payload.chat_session_id, payload.issue_session_id),
+      });
+    }
+
+    // A SessionTask may also identify its owning Chat. It never belongs to
+    // the ordinary Chat queue, including when no workspace is selected.
+    return true;
+  };
 
   return {
     handlers: {
@@ -115,6 +133,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       // id; this handler upgrades it without replacing a running queue head.
       "task:queued": (p) => {
         const payload = p as TaskQueuedPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
@@ -136,6 +155,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       // taskMessages → "Thinking · Ns".
       "task:dispatch": (p) => {
         const payload = p as TaskDispatchPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
@@ -158,6 +178,10 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
         // Issue, so invalidate active detail/decision surfaces in this
         // workspace and let their authoritative endpoints resolve ancestry.
         invalidateIssueDecisionSurfaces();
+        if (invalidateWorkSessionTask(payload)) {
+          void qc.invalidateQueries({ queryKey: chatKeys.humanRequests(payload.task_id) });
+          return;
+        }
         if (!payload.chat_session_id) return;
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
@@ -174,6 +198,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       "task:progress": (p) => {
         if (!p || typeof p !== "object") return;
         const payload = p as TaskProgressPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (typeof payload.chat_session_id !== "string" || typeof payload.task_id !== "string"
           || (typeof payload.progress_summary !== "string" && payload.progress_summary !== null)) return;
         qc.setQueryData<ChatPendingTask>(
@@ -190,6 +215,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       // a stale "Starting / Thinking" frame.
       "task:waiting_local_directory": (p) => {
         const payload = p as TaskWaitingLocalDirectoryPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
@@ -207,6 +233,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
         const payload = p as TaskAwaitingHumanPayload;
         void qc.invalidateQueries({ queryKey: chatKeys.humanRequests(payload.task_id) });
         invalidateIssueDecisionSurfaces();
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
@@ -220,6 +247,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
       // Cancellation can target the head or a follow-up. Retain every other task.
       "task:cancelled": (p) => {
         const payload = p as TaskCancelledPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
         chatWsLogger.info("task:cancelled (global, chat)", {
           task_id: payload.task_id,
@@ -231,6 +259,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
 
       "task:completed": (p) => {
         const payload = p as TaskCompletedPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return; // issue tasks handled elsewhere
         chatWsLogger.info("task:completed (global, chat)", {
           task_id: payload.task_id,
@@ -243,6 +272,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
 
       "task:failed": (p) => {
         const payload = p as TaskFailedPayload;
+        if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
         chatWsLogger.warn("task:failed (global, chat)", {
           task_id: payload.task_id,

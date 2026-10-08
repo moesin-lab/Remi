@@ -30,6 +30,7 @@ export interface TraceTaskContext {
   startedAt: string;
   runtimeId?: string;
   issueId?: string | null;
+  chatSessionId?: string | null;
   /** Production subject identity for archive-gated collection of early failures. */
   subjectKind?: "chat" | "task";
 }
@@ -271,7 +272,7 @@ export class TraceFileStore implements TraceStore {
       if (!existsSync(gcPath)) {
         const fd = openSync(gcPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
         const metadata = context.issueId
-          ? { version: 2, kind: "issue_runtime", issue_id: context.issueId }
+          ? { version: 2, kind: "issue_runtime", issue_id: context.issueId, chat_session_id: context.chatSessionId ?? null }
           : context.subjectKind === "chat"
             ? { version: 1, kind: "chat", chat_session_id: sessionId, task_id: taskId }
             : { version: 1, kind: "quick_create", task_id: taskId };

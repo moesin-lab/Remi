@@ -189,7 +189,6 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     expect(Object.keys(pendingBody[0]).sort()).toEqual([
       "agent_id",
       "attempt",
-      "chat_session_id",
       "claude_profile",
       "codex_profile",
       "completed_at",
@@ -219,7 +218,6 @@ describe("Multiremi store — Go daemon wire shapes", () => {
       agent_id: boundAgent.id,
       runtime_id: runtime.id,
       issue_id: issue.id,
-      chat_session_id: high.chatSessionId,
       issue_session_id: high.issueSessionId,
       issue_session_generation: 1,
       // The daemon reads this to pick between the shared Issue root and a
@@ -245,6 +243,14 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     expect(pendingBody[1].kind).toBe("quick_create");
     expect(pendingBody.some((item: any) => item.id === eligibleUnbound.id)).toBe(false);
     expect(pendingBody.some((item: any) => item.id === otherBound.id)).toBe(false);
+    expect(high.chatSessionId).toBeNull();
+    expect(pendingBody[0]).not.toHaveProperty("chat_session_id");
+
+    const chat = store.createChatSession({ agentId: boundAgent.id });
+    const session = store.listChatOwnedSessions(chat.id)[0]!;
+    const chatWork = store.createSessionTask(session.id, { agentId: boundAgent.id, prompt: "Chat work" });
+    const chatOffer = pendingTaskWireSnapshot(store, runtime.id).find((item: any) => item.id === chatWork.id);
+    expect(chatOffer).toMatchObject({ chat_session_id: chat.id, issue_session_id: session.id });
   });
 
   it("serves daemon claim responses in Go wire shape and normalizes them for the Bun daemon", async () => {

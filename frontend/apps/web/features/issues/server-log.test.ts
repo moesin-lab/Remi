@@ -50,18 +50,18 @@ describe("Issue SSR missing-comment fallback", () => {
     creator_type: "member", creator_id: "u", parent_issue_id: null, project_id: null, position: 0,
     start_date: null, due_date: null, created_at: "", updated_at: "", pending_decision_count: 0, parent_done_grant: null });
   const sessions = ["side", "main"].map(id => IssueSessionSchema.parse({ id, issue_id: "issue", workspace_id: "w",
-    title: id, status: "active", is_default: id === "main", created_at: "", updated_at: "" }));
+    owner_type: "issue", owner_id: "issue", title: id, status: "active", is_default: id === "main", created_at: "", updated_at: "" }));
   const row = (id: string, seq: number) => SessionLogEntrySchema.parse({ id, seq, session_id: "main", revision: 1,
     kind: seq === 0 ? "head" : "message", body_md: id, body_html: null, render_version: null });
   const window = (entries = [row("retained", 1)]) => ({ entries, head_seq: 1, log_version: 1, has_more_before: false, has_more_after: false });
-  function mockReads(locate: (session: string) => Response | Promise<Response>) {
+  function mockReads(locate: (session: string) => Response | Promise<Response>, sessionList = sessions) {
     cookie.value = "synthetic";
     const fetcher = vi.fn(async (input: unknown) => {
       const url = new URL(String(input));
       const path = url.pathname;
       if (path.endsWith("/log/locate")) return locate(path.split("/")[3]!);
       if (path.endsWith("/log")) return Response.json(window(url.searchParams.get("anchor") === "0" ? [row("head", 0)] : undefined));
-      if (path.endsWith("/sessions")) return Response.json(sessions);
+      if (path.endsWith("/sessions")) return Response.json(sessionList);
       if (path.endsWith("/members") || path.endsWith("/task-runs")) return Response.json([]);
       if (path.endsWith("/children")) return Response.json({ issues: [] });
       return Response.json(issue);
@@ -112,5 +112,22 @@ describe("Issue SSR missing-comment fallback", () => {
   it("does not seed a fallback when another session could not be checked", async () => {
     mockReads(session => new Response("unavailable", { status: session === "side" ? 503 : 404 }));
     expect(await readIssueLogBootstrap("test", "issue", undefined, "target")).toBeNull();
+  });
+
+  it.each([undefined, "missing-comment"])("prefers the Issue Main with an associated Chat Main first (comment: %s)", async commentId => {
+    const chatMain = IssueSessionSchema.parse({ ...sessions[1], id: "chat-main", owner_type: "chat", owner_id: "chat", chat_id: "chat" });
+    const fetcher = mockReads(() => new Response("entry not found", { status: 404 }), [chatMain, ...sessions]);
+    const bootstrap = await readIssueLogBootstrap("test", "issue", undefined, commentId);
+    expect(bootstrap?.log.sessionId).toBe("main");
+    expect(fetcher.mock.calls.some(([url]) => String(url).endsWith("/sessions/main/log?before=30&with_activity=1"))).toBe(true);
+  });
+
+  it("preserves an explicit Chat Main without merging Issue activities", async () => {
+    const chatMain = IssueSessionSchema.parse({ ...sessions[1], id: "chat-main", owner_type: "chat", owner_id: "chat", chat_id: "chat" });
+    const fetcher = mockReads(() => new Response("entry not found", { status: 404 }), [chatMain, ...sessions]);
+    const bootstrap = await readIssueLogBootstrap("test", "issue", "chat-main");
+    expect(bootstrap?.log.sessionId).toBe("chat-main");
+    expect(fetcher.mock.calls.some(([url]) => String(url).endsWith("/sessions/chat-main/log?before=30"))).toBe(true);
+    expect(fetcher.mock.calls.some(([url]) => new URL(String(url)).searchParams.has("with_activity"))).toBe(false);
   });
 });

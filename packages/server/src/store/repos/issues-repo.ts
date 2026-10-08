@@ -1060,6 +1060,7 @@ export class IssuesRepo {
         now,
       ],
     );
+    this.ctx.issueSessions().getOrCreateDefaultIssueSessionWithinTransaction(id, createdBy);
     this.linkReferencedAttachmentsToIssue(id, input.description);
     for (const otherId of blockedByIds) {
       this.createIssueDependencyWithLockedEndpoints(id, otherId, { dependsOnIssueId: otherId, type: "blocked_by" }, {
@@ -1649,16 +1650,16 @@ export class IssuesRepo {
     // leave a retirement blocker or orphaned archive metadata.
     this.ctx.db.run("DELETE FROM multiremi_session_archives WHERE issue_id = ?", [id]);
     this.ctx.db.run("DELETE FROM multiremi_issue_workspaces WHERE issue_id = ?", [id]);
-    // Sessions and their published results are owned by Chats. Issue deletion
-    // removes only the optional work-management projection, including in
-    // SQLite test/dev stores where foreign-key enforcement may be disabled.
+    this.ctx.issueSessions().deleteOwnedSessionsWithinTransaction("issue", id);
+    // Chat-owned Sessions retain their owner and only lose this projection.
     this.ctx.db.run("UPDATE multiremi_issue_sessions SET issue_id = NULL WHERE issue_id = ?", [id]);
     this.ctx.db.run("UPDATE multiremi_session_results SET issue_id = NULL WHERE issue_id = ?", [id]);
+    this.ctx.db.run("UPDATE multiremi_tasks SET issue_id = NULL WHERE issue_id = ?", [id]);
     const removed = this.ctx.db.run("DELETE FROM multiremi_issues WHERE id = ?", [id]);
     if (issue.projectId) {
       this.ctx.db.run("UPDATE multiremi_projects SET updated_at = ? WHERE id = ?", [nowIso(), issue.projectId]);
     }
-    return removed.changes === 1;
+    return removed.changes > 0;
   }
 
   /**
@@ -2821,6 +2822,18 @@ export class IssuesRepo {
       ],
     );
     if (moving) {
+      this.ctx.db.run(
+        "UPDATE multiremi_issue_sessions SET workspace_id = ? WHERE issue_id = ? AND chat_id IS NULL",
+        [nextWorkspaceId, id],
+      );
+      this.ctx.db.run(
+        "UPDATE multiremi_session_results SET issue_id = NULL WHERE issue_id = ? AND chat_id IS NOT NULL",
+        [id],
+      );
+      this.ctx.db.run(
+        "UPDATE multiremi_issue_sessions SET issue_id = NULL WHERE issue_id = ? AND chat_id IS NOT NULL",
+        [id],
+      );
       const foreignLabels = this.listLabelsForExistingIssue(id).filter(label => label.workspaceId !== nextWorkspaceId);
       for (const label of foreignLabels) {
         this.ctx.db.run("DELETE FROM multiremi_issue_to_labels WHERE issue_id = ? AND label_id = ?", [id, label.id]);

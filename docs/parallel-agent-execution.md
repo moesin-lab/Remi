@@ -3,11 +3,13 @@
 ## Scheduling
 
 - A continuous Agent context is serialized by Session and Agent. Each Session is
-  owned by exactly one Chat and may optionally associate with an Issue. Leader
+  owned by exactly one Chat or Issue. A Chat-owned Session may optionally associate
+  with an Issue without changing its owner. Leader
   turns and delegation-return turns use this continuous context.
 - Each independent delegation has its own execution scope, derived from the
   existing delegation ID. Different delegations can run together, including
-  multiple delegations to the same Agent. Retries keep their delegation scope.
+  multiple delegations to the same Agent, subject to workspace leases and the
+  shared Chat checkout rule below. Retries keep their delegation scope.
 - A rich mention continues the delegation that teammate already owns in the
   Session. It reuses that delegation's scope, provider session, cursor and
   runtime affinity, so an established teammate receives a delta instead of a
@@ -32,6 +34,14 @@
 - Tasks bound to the same [Runtime workspace](dev/runtime-workspaces.md) remain
   serialized across Agents and Sessions. Explicit Chat project selections keep
   their device routing even though Chat tasks do not hold an Issue workspace.
+- Ordinary Chat Tasks, including Topic transport, and Chat-owned Session Tasks
+  without an Issue projection share that Chat's checkout. Claims serialize this
+  directory across Agents and Sessions while their message queues remain separate.
+  An unknown offer with `offered_at` still reserves the directory; rejection
+  releases it. An already reserved ordinary Chat offer may be reclaimed and resent
+  ahead of a later higher-priority message. Unreserved queue ordering and steer
+  behavior remain unchanged. Issue-owned and Issue-projected Session work use
+  their corresponding execution directories; Runtime workspaces keep their own lease.
 - A child result can immediately queue a Leader turn; other children do not
   delay it. Unclaimed returns coalesce, but a frozen prompt gets a later turn.
 - Scheduled Wiki targets fill available Agent slots. Builds for the same
@@ -70,6 +80,15 @@ private execution directory under `.runtime/<session>/<agent>/.../work`.
 Delegations add `delegations/<delegation-id>` to the provider generation path.
 Prompts report absolute repository and session-history paths; the platform
 continues to report the shared code workspace as the Issue workspace.
+Provider-history discovery follows the actual product Session owner: Issue-owned
+work sees only the same Issue's owned Sessions, while Chat-owned work sees only
+the same Chat's owned Sessions. An Issue work projection does not grant another
+owner's provider history. Issue archive and deletion do not collect or remove
+Chat-owned projection provider homes.
+Provider roots with missing `gc.json.chat_session_id` have unknown ownership:
+they are retained, excluded from prompt history, and excluded from Issue
+archive/GC. Explicit null marks an Issue-owned root; an explicit Chat ID marks
+that Chat's root. Database Session migrations have their own known-owner rules.
 
 Executions hold shared lifecycle locks. Final archive, cleanup and workspace
 migration still require exclusive ownership. Only repository preparation is

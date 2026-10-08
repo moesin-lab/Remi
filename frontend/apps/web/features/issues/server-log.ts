@@ -67,7 +67,9 @@ export async function readIssueLogBootstrap(slug: string, issueId: string, selec
     readWithSessionCookie<Issue>({ cookie, slug, signal, path: prefix, schema: IssueDetailSchema }),
     readWithSessionCookie<IssueSession[]>({ cookie, slug, signal, path: `${prefix}/sessions`, schema: IssueSessionListSchema }),
   ]);
-  let session = selectedSessionId ? sessions?.find(s => s.id === selectedSessionId) : sessions?.find(s => s.is_default) ?? sessions?.[0];
+  let session = selectedSessionId ? sessions?.find(s => s.id === selectedSessionId)
+    : sessions?.find(s => s.owner_type === "issue" && s.owner_id === issueId && s.is_default)
+      ?? sessions?.find(s => s.is_default) ?? sessions?.[0];
   if (!issue || !sessions || !session) return null;
   let targetSeq: number | undefined;
   if (commentId) {
@@ -89,7 +91,7 @@ export async function readIssueLogBootstrap(slug: string, issueId: string, selec
   const [window, headWindow, parentIssue, members, children, tasks] = await Promise.all([
     readWithSessionCookie<IssueLogBootstrap["window"]>({ cookie, slug, signal,
       path: (targetSeq === undefined ? `${logPath}?before=30` : `${logPath}?anchor=${targetSeq}&before=15&after=15`)
-        + (session.is_default ? "&with_activity=1" : ""),
+        + (session.owner_type === "issue" && session.owner_id === issueId && session.is_default ? "&with_activity=1" : ""),
       schema: SessionLogWindowSchema }),
     readWithSessionCookie<IssueLogBootstrap["window"]>({ cookie, slug, signal, path: `${logPath}?anchor=0&before=1`, schema: SessionLogWindowSchema }),
     issue.parent_issue_id ? readWithSessionCookie<Issue>({ cookie, slug, signal, path: `/api/issues/${encodeURIComponent(issue.parent_issue_id)}`, schema: IssueDetailSchema }) : null,

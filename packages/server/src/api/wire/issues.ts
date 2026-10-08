@@ -20,6 +20,7 @@ import type {
   MultiremiSessionResult,
   MultiremiTimelineEntry,
   MultiremiTimelinePage,
+  MultiremiTask,
   CreateSessionTaskInput,
   QuickCreateIssueInput,
   UpdateIssueInput,
@@ -116,6 +117,8 @@ export function issueSessionCompatibilityResponse(
 ): Record<string, unknown> {
   return {
     id: session.id,
+    owner_type: session.ownerType,
+    owner_id: session.ownerId,
     chat_id: session.chatId,
     issue_id: session.issueId,
     workspace_id: session.workspaceId,
@@ -135,6 +138,28 @@ export function issueSessionCompatibilityResponse(
     created_at: session.createdAt,
     updated_at: session.updatedAt,
     participants: participants.map(sessionParticipantCompatibilityResponse),
+  };
+}
+
+export function sessionTaskMetadataResponse(task: MultiremiTask): Record<string, unknown> {
+  return {
+    id: task.id,
+    status: task.status,
+    agentId: task.agentId,
+    agent_id: task.agentId,
+    workspaceId: task.workspaceId,
+    workspace_id: task.workspaceId,
+    issueId: task.issueId,
+    issue_id: task.issueId,
+    chatSessionId: task.chatSessionId,
+    chat_session_id: task.chatSessionId,
+    issueSessionId: task.issueSessionId,
+    issue_session_id: task.issueSessionId,
+    parentTaskId: task.parentTaskId,
+    parent_task_id: task.parentTaskId,
+    session_id: task.sessionId,
+    created_at: task.createdAt,
+    updated_at: task.updatedAt,
   };
 }
 
@@ -636,8 +661,7 @@ export function issueTimelineResponse(
     ? store.listIssueSessions(issueId, false, { skipExistenceCheck: true })
     : null;
   if (sessionsForDefault) {
-    issueSessionId = sessionsForDefault.find((session) => session.isDefault)?.id
-      ?? sessionsForDefault[0]?.id
+    issueSessionId = sessionsForDefault.find((session) => session.isDefault && !session.chatId && session.issueId === issueId)?.id
       ?? null;
   }
   if (issueSessionId) {

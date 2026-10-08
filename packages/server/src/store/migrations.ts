@@ -44,6 +44,7 @@ const FEISHU_BOT_AGENT_ROUTE_DEFAULT_UNIQUENESS_MIGRATION =
   "20260909_feishu_bot_agent_route_default_uniqueness";
 const CHAT_ISSUE_DECOUPLING_MIGRATION = "20260916_chat_issue_decoupling";
 const CHAT_OWNED_SESSIONS_MIGRATION = "20260913_chat_owned_sessions";
+const DUAL_OWNED_SESSIONS_MIGRATION = "20261008_dual_owned_sessions";
 const AGENT_PAGE_QUERY_INDEXES_MIGRATION = "20260910_agent_page_query_indexes";
 const TASK_FALLBACK_MODEL_MIGRATION = "20260919_task_fallback_model";
 const GATEWAY_MODEL_REASONING_MIGRATION = "20260919_gateway_model_reasoning";
@@ -857,8 +858,8 @@ function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): 
       FOREIGN KEY(parent_issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL
     );
 
-    -- Core product Sessions. chat_id is the owner; issue_id is a nullable
-    -- work-management projection and is not a generic Chat binding.
+    -- A Session is owned by chat_id when present, otherwise by issue_id.
+    -- Chat-owned Sessions retain issue_id as an optional work projection.
     -- The physical table name is retained for upgrade compatibility.
     CREATE TABLE IF NOT EXISTS multiremi_issue_sessions (
       id TEXT PRIMARY KEY,
@@ -2256,7 +2257,6 @@ function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): 
       FOREIGN KEY(agent_id) REFERENCES multiremi_agents(id),
       FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id),
       FOREIGN KEY(issue_session_id) REFERENCES multiremi_issue_sessions(id) ON DELETE SET NULL,
-      FOREIGN KEY(chat_session_id) REFERENCES multiremi_chat_sessions(id) ON DELETE SET NULL,
       FOREIGN KEY(trigger_comment_id) REFERENCES multiremi_issue_comments(id) ON DELETE SET NULL
     );
 
@@ -2979,6 +2979,7 @@ function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): 
   // is still available as a safe, one-time backfill hint. The following
   // migration intentionally removes that generic Chat-to-Issue binding.
   migrateChatOwnedSessions(db, dialect);
+  migrateDualOwnedSessions(db, dialect);
   // SQLite cannot change foreign_keys inside a transaction. Disable it only
   // around this atomic table rebuild, then restore the caller's setting.
   const chatSchema = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'multiremi_chat_sessions'")
@@ -3835,6 +3836,10 @@ function migrateChatOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
   }
 
   const foreignKeysEnabled = Number((db.query("PRAGMA foreign_keys").get() as { foreign_keys?: number } | null)?.foreign_keys ?? 0) === 1;
+  const sessionHasChatId = (db.query("PRAGMA table_info(multiremi_issue_sessions)").all() as Array<{ name: string }>)
+    .some((column) => column.name === "chat_id");
+  const resultHasChatId = (db.query("PRAGMA table_info(multiremi_session_results)").all() as Array<{ name: string }>)
+    .some((column) => column.name === "chat_id");
   db.exec("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;");
   try {
     db.transaction(() => {
@@ -3879,7 +3884,7 @@ function migrateChatOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
           inherited_tokens_total, follow_frozen_seq, with_code, code_runtime_id,
           summary, created_by_type, created_by_id, created_at, updated_at
         )
-        SELECT id, NULL, issue_id, workspace_id, title, status, is_default,
+        SELECT id, ${sessionHasChatId ? "chat_id" : "NULL"}, issue_id, workspace_id, title, status, is_default,
           holds_workspace, parent_session_id, inherit_mode, inherit_cutoff_seq,
           inherited_tokens_total, follow_frozen_seq, with_code, code_runtime_id,
           summary, created_by_type, created_by_id, created_at, updated_at
@@ -3917,7 +3922,7 @@ function migrateChatOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
           id, chat_id, issue_id, source_session_id, title, body, metadata,
           published_by_type, published_by_id, created_at
         )
-        SELECT id, NULL, issue_id, source_session_id, title, body, metadata,
+        SELECT id, ${resultHasChatId ? "chat_id" : "NULL"}, issue_id, source_session_id, title, body, metadata,
           published_by_type, published_by_id, created_at
         FROM multiremi_session_results_issue_owned;
         DROP TABLE multiremi_session_results_issue_owned;
@@ -3929,10 +3934,14 @@ function migrateChatOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
           ON multiremi_session_results(source_session_id, created_at);
       `);
       backfillChatOwnedSessions(db);
+      assertSessionForeignKeys(db);
     })();
   } finally {
     db.exec(`PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ${foreignKeysEnabled ? "ON" : "OFF"};`);
   }
+}
+
+function assertSessionForeignKeys(db: SqlDatabase): void {
   // Existing installations can contain an unrelated legacy violation which a
   // later migration repairs. Fail only for tables whose references can be
   // affected by rebuilding the Session/result parents here.
@@ -3950,48 +3959,143 @@ function migrateChatOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
   if (violations.length > 0) throw new Error(`Chat-owned Session migration left ${violations.length} foreign-key violation(s)`);
 }
 
+function migrateDualOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect): void {
+  if (db.query("SELECT 1 FROM multiremi_schema_migrations WHERE id = ?").get(DUAL_OWNED_SESSIONS_MIGRATION)) return;
+  const migrate = () => {
+    const invalid = db.query(
+      `SELECT s.id FROM multiremi_issue_sessions s
+       LEFT JOIN multiremi_chat_sessions chat ON chat.id = s.chat_id
+       LEFT JOIN multiremi_issues issue ON issue.id = s.issue_id
+       WHERE (s.chat_id IS NULL AND s.issue_id IS NULL)
+          OR (s.chat_id IS NOT NULL AND (chat.id IS NULL OR chat.workspace_id <> s.workspace_id))
+          OR (s.chat_id IS NULL AND issue.id IS NULL)
+       ORDER BY s.id LIMIT 1`,
+    ).get() as { id: string } | null;
+    if (invalid) throw new Error(`Dual-owned Session migration: invalid or missing owner for Session ${invalid.id}`);
+    // Older Issue moves left Session.workspace_id behind. The Issue owner is
+    // still known, so carry its Sessions with it and detach foreign projections.
+    db.run(`UPDATE multiremi_issue_sessions SET workspace_id = (
+        SELECT issue.workspace_id FROM multiremi_issues issue WHERE issue.id = multiremi_issue_sessions.issue_id
+      ) WHERE chat_id IS NULL AND workspace_id <> (
+        SELECT issue.workspace_id FROM multiremi_issues issue WHERE issue.id = multiremi_issue_sessions.issue_id)`);
+    const foreignProjections = `SELECT s.id FROM multiremi_issue_sessions s
+      LEFT JOIN multiremi_issues issue ON issue.id = s.issue_id
+      WHERE s.chat_id IS NOT NULL AND s.issue_id IS NOT NULL
+        AND (issue.id IS NULL OR issue.workspace_id <> s.workspace_id)`;
+    db.run(`UPDATE multiremi_session_results SET issue_id = NULL WHERE source_session_id IN (${foreignProjections})`);
+    db.run(`UPDATE multiremi_issue_sessions SET issue_id = NULL WHERE id IN (${foreignProjections})`);
+    const invalidParent = db.query(
+      `SELECT s.id FROM multiremi_issue_sessions s
+       LEFT JOIN multiremi_issue_sessions parent ON parent.id = s.parent_session_id
+       WHERE s.parent_session_id IS NOT NULL AND (parent.id IS NULL
+         OR COALESCE(s.chat_id, '') <> COALESCE(parent.chat_id, '')
+         OR (s.chat_id IS NULL AND s.issue_id <> parent.issue_id))
+       ORDER BY s.id LIMIT 1`,
+    ).get() as { id: string } | null;
+    if (invalidParent) throw new Error(`Dual-owned Session migration: parent has a different owner for Session ${invalidParent.id}`);
+    const duplicate = db.query(
+      `SELECT MIN(id) AS id FROM multiremi_issue_sessions WHERE is_default = 1
+       GROUP BY chat_id, CASE WHEN chat_id IS NULL THEN issue_id ELSE NULL END
+       HAVING COUNT(*) > 1 LIMIT 1`,
+    ).get() as { id: string } | null;
+    if (duplicate) throw new Error(`Dual-owned Session migration: duplicate Main for Session ${duplicate.id}`);
+
+    if (dialect === "postgres") {
+      db.exec("ALTER TABLE multiremi_tasks DROP CONSTRAINT IF EXISTS multiremi_tasks_chat_session_id_fkey");
+      db.exec(`ALTER TABLE multiremi_issue_sessions
+        DROP CONSTRAINT IF EXISTS multiremi_issue_sessions_owner_check;
+        ALTER TABLE multiremi_issue_sessions ADD CONSTRAINT multiremi_issue_sessions_owner_check
+          CHECK(chat_id IS NOT NULL OR issue_id IS NOT NULL);`);
+    } else {
+      // chat_session_id on retained audits is a privacy tombstone. Clearing it
+      // on owner deletion would expose private transcripts as Issue-only work.
+      const taskSchema = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'multiremi_tasks'")
+        .get() as { sql: string };
+      const taskReplacement = taskSchema.sql.replace(/,\s*FOREIGN KEY\s*\(chat_session_id\)\s*REFERENCES\s*["`]?multiremi_chat_sessions["`]?\(id\)\s*ON DELETE SET NULL/iu, "");
+      if (taskReplacement !== taskSchema.sql) {
+        const taskIndexes = db.query("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'multiremi_tasks' AND sql IS NOT NULL")
+          .all() as Array<{ sql: string }>;
+        db.exec(taskReplacement.replace(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`]?multiremi_tasks["`]?/i,
+          "CREATE TABLE multiremi_tasks_dual_owned"));
+        db.exec(`INSERT INTO multiremi_tasks_dual_owned SELECT * FROM multiremi_tasks;
+          DROP TABLE multiremi_tasks;
+          ALTER TABLE multiremi_tasks_dual_owned RENAME TO multiremi_tasks;`);
+        for (const index of taskIndexes) db.exec(index.sql);
+      }
+      const schema = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'multiremi_issue_sessions'")
+        .get() as { sql: string };
+      const indexes = db.query("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'multiremi_issue_sessions' AND sql IS NOT NULL")
+        .all() as Array<{ sql: string }>;
+      let replacement = schema.sql.replace(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`]?multiremi_issue_sessions["`]?/i,
+        "CREATE TABLE multiremi_issue_sessions_dual_owned");
+      if (!replacement.includes("multiremi_issue_sessions_owner_check")) {
+        replacement = replacement.replace(/\)\s*$/u,
+          ", CONSTRAINT multiremi_issue_sessions_owner_check CHECK(chat_id IS NOT NULL OR issue_id IS NOT NULL))");
+      }
+      db.exec(replacement);
+      db.exec(`INSERT INTO multiremi_issue_sessions_dual_owned SELECT * FROM multiremi_issue_sessions;
+        DROP TABLE multiremi_issue_sessions;
+        ALTER TABLE multiremi_issue_sessions_dual_owned RENAME TO multiremi_issue_sessions;`);
+      for (const index of indexes) db.exec(index.sql);
+    }
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_multiremi_issue_sessions_default
+      ON multiremi_issue_sessions(chat_id) WHERE is_default = 1 AND chat_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_multiremi_issue_sessions_issue_default
+      ON multiremi_issue_sessions(issue_id) WHERE is_default = 1 AND chat_id IS NULL;`);
+    db.run(`INSERT INTO multiremi_issue_sessions (
+        id, chat_id, issue_id, workspace_id, title, status, is_default,
+        created_by_type, created_by_id, created_at, updated_at
+      )
+      SELECT 'ises_issue_' || issue.id, NULL, issue.id, issue.workspace_id, 'Main', 'active', 1,
+        'system', NULL, issue.created_at, issue.updated_at FROM multiremi_issues issue
+      WHERE NOT EXISTS (SELECT 1 FROM multiremi_issue_sessions s
+        WHERE s.chat_id IS NULL AND s.issue_id = issue.id AND s.is_default = 1)
+      ON CONFLICT DO NOTHING`);
+    const missingMain = db.query(`SELECT issue.id FROM multiremi_issues issue
+      WHERE NOT EXISTS (SELECT 1 FROM multiremi_issue_sessions s
+        WHERE s.chat_id IS NULL AND s.issue_id = issue.id AND s.is_default = 1) LIMIT 1`).get() as { id: string } | null;
+    if (missingMain) throw new Error(`Dual-owned Session migration: Main id collision for Issue ${missingMain.id}`);
+
+    // Existing instances have already run the conversation backfill. Supply
+    // heads only for missing Issue Main logs without replaying old events.
+    if (existingTableNames(db).has("multiremi_conversation_log")) {
+      db.run(`INSERT INTO multiremi_conversation_log (
+          session_id, seq, id, kind, visibility, author_type, body_md, metadata, created_at, updated_at
+        ) SELECT s.id, 0, 'head_' || s.id, 'head', 'shown', 'system',
+          CASE WHEN LENGTH(TRIM(COALESCE(issue.description, ''))) > 0
+            THEN issue.title || '\n\n' || TRIM(issue.description) ELSE issue.title END,
+          '{}', s.created_at, s.updated_at FROM multiremi_issue_sessions s
+        JOIN multiremi_issues issue ON issue.id = s.issue_id
+        WHERE s.chat_id IS NULL AND s.is_default = 1 AND NOT EXISTS (
+          SELECT 1 FROM multiremi_conversation_log entry WHERE entry.session_id = s.id AND entry.seq = 0)
+        ON CONFLICT DO NOTHING`);
+      db.run(`INSERT INTO multiremi_conversation_heads (session_id, head_seq, log_version, updated_at)
+        SELECT s.id, 0, 1, s.updated_at FROM multiremi_issue_sessions s
+        WHERE s.chat_id IS NULL AND s.is_default = 1 AND NOT EXISTS (
+          SELECT 1 FROM multiremi_conversation_heads head WHERE head.session_id = s.id)
+        ON CONFLICT DO NOTHING`);
+    }
+    if (dialect === "sqlite") assertSessionForeignKeys(db);
+  };
+  if (dialect === "postgres") {
+    runMigrationOnce(db, DUAL_OWNED_SESSIONS_MIGRATION, migrate);
+    return;
+  }
+  const foreignKeysEnabled = Number((db.query("PRAGMA foreign_keys").get() as { foreign_keys?: number } | null)?.foreign_keys ?? 0) === 1;
+  db.exec("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;");
+  try {
+    runMigrationOnce(db, DUAL_OWNED_SESSIONS_MIGRATION, migrate);
+  } finally {
+    db.exec(`PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ${foreignKeysEnabled ? "ON" : "OFF"};`);
+  }
+}
+
 function backfillChatOwnedSessions(db: SqlDatabase): void {
   const now = new Date().toISOString();
-  // A legacy Issue Session can be adopted without ambiguity only when its Issue
-  // has exactly one Chat. Ambiguous rows remain readable through the deprecated
-  // Issue API until a caller explicitly adopts them into a Chat.
+  // Preserve the stored owner. An Issue Session never becomes Chat-owned merely
+  // because a Chat or a transport binding happens to reference that Issue.
   const chatHasLegacyIssueId = (db.query("PRAGMA table_info(multiremi_chat_sessions)").all() as Array<{ name: string }>)
     .some((column) => column.name === "issue_id");
-  if (chatHasLegacyIssueId) {
-    db.run(
-      `UPDATE multiremi_issue_sessions
-       SET chat_id = (
-         SELECT MIN(c.id) FROM multiremi_chat_sessions c
-         WHERE c.issue_id = multiremi_issue_sessions.issue_id
-       )
-       WHERE chat_id IS NULL AND issue_id IS NOT NULL
-         AND 1 = (
-           SELECT COUNT(*) FROM multiremi_chat_sessions c
-           WHERE c.issue_id = multiremi_issue_sessions.issue_id
-         )`,
-    );
-  } else {
-    // Installations that already ran MUL-301 no longer have Chat.issue_id.
-    // Only a validated Feishu binding is acceptable migration evidence.
-    db.run(
-      `UPDATE multiremi_issue_sessions
-       SET chat_id = (
-         SELECT MIN(binding.chat_session_id)
-         FROM multiremi_feishu_bot_chat_bindings binding
-         JOIN multiremi_chat_sessions chat ON chat.id = binding.chat_session_id
-         WHERE binding.issue_id = multiremi_issue_sessions.issue_id
-           AND chat.workspace_id = multiremi_issue_sessions.workspace_id
-       )
-       WHERE chat_id IS NULL AND issue_id IS NOT NULL
-         AND 1 = (
-           SELECT COUNT(DISTINCT binding.chat_session_id)
-           FROM multiremi_feishu_bot_chat_bindings binding
-           JOIN multiremi_chat_sessions chat ON chat.id = binding.chat_session_id
-           WHERE binding.issue_id = multiremi_issue_sessions.issue_id
-             AND chat.workspace_id = multiremi_issue_sessions.workspace_id
-         )`,
-    );
-  }
   // Every Chat owns a default Main Session. Creating it does not route Chat
   // messages through Session Tasks; that interaction remains a separate layer.
   const projectedIssueId = chatHasLegacyIssueId
@@ -6384,7 +6488,7 @@ function backfillLegacyIssueLogSources(db: SqlDatabase): void {
      FROM multiremi_issues i
      WHERE NOT EXISTS (
        SELECT 1 FROM multiremi_issue_sessions s
-       WHERE s.issue_id = i.id AND s.is_default = 1
+       WHERE s.chat_id IS NULL AND s.issue_id = i.id AND s.is_default = 1
      )
      ON CONFLICT DO NOTHING`,
   );
@@ -6392,7 +6496,7 @@ function backfillLegacyIssueLogSources(db: SqlDatabase): void {
     `UPDATE multiremi_issue_comments
      SET issue_session_id = (
        SELECT s.id FROM multiremi_issue_sessions s
-       WHERE s.issue_id = multiremi_issue_comments.issue_id AND s.is_default = 1
+       WHERE s.chat_id IS NULL AND s.issue_id = multiremi_issue_comments.issue_id AND s.is_default = 1
        LIMIT 1
      )
      WHERE issue_session_id IS NULL`,
@@ -6401,7 +6505,7 @@ function backfillLegacyIssueLogSources(db: SqlDatabase): void {
     `UPDATE multiremi_tasks
      SET issue_session_id = (
        SELECT s.id FROM multiremi_issue_sessions s
-       WHERE s.issue_id = multiremi_tasks.issue_id AND s.is_default = 1
+       WHERE s.chat_id IS NULL AND s.issue_id = multiremi_tasks.issue_id AND s.is_default = 1
        LIMIT 1
      )
      WHERE issue_id IS NOT NULL AND issue_session_id IS NULL AND chat_session_id IS NULL`,

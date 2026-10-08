@@ -44,6 +44,7 @@ import {
 import { api, type TaskTraceRead } from "@multiremi/core/api";
 import { useTranscriptViewStore } from "@multiremi/core/agents/stores";
 import type { AgentTask, Agent, AgentRuntime } from "@multiremi/core/types/agent";
+import type { SessionTask } from "@multiremi/core/types";
 import { redactString } from "./redact";
 import {
   buildEntries,
@@ -70,7 +71,7 @@ import { ExecutionModelInfo } from "./execution-model-info";
 interface AgentTranscriptDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  task: AgentTask;
+  task: AgentTask | SessionTask;
   items: TimelineItem[];
   agentName: string;
   isLive?: boolean;

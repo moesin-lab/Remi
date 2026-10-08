@@ -138,7 +138,8 @@ export function IssueDetail({
       const failed = !found && results.some(result => result.status === "rejected");
       const missing = !found && !failed;
       const sessionId = found?.status === "fulfilled" ? found.value! : failed ? ""
-        : sessions.list.find(session => session.is_default)?.id ?? sessions.list[0]!.id;
+        : sessions.list.find(session => session.owner_type === "issue" && session.owner_id === id && session.is_default)?.id
+          ?? sessions.list.find(session => session.is_default)?.id ?? sessions.list[0]!.id;
       setLocatedSession({ issueId: id, commentId: highlightCommentId, sessionId, missing });
       if (sessionId) sessions.select(sessionId);
     });
@@ -154,7 +155,8 @@ export function IssueDetail({
   // children queries still hold the existing render gates closed.
   const log = useIssueLog(activitySessions.activeId, initialLog,
     resolution?.missing || initialLog?.missingCommentId === highlightCommentId ? undefined : highlightCommentId,
-    false, true, activitySessions.active?.is_default === true);
+    false, true, activitySessions.active?.owner_type === "issue"
+      && activitySessions.active.owner_id === id && activitySessions.active.is_default === true);
   // Same key/policy as the sidebar: one request independent of the log read.
   useQuery({ queryKey: issueKeys.tasks(id), queryFn: () => api.listTasksByIssue(id),
     staleTime: 30_000, refetchOnWindowFocus: true });

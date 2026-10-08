@@ -146,7 +146,9 @@ export class InboxRepo {
                 assignmentAuthorId: null,
               } : {}),
               ...(lane.kind === "chat" ? { holdsWorkspace: false, requestingUserName: "Multiremi" } : {}),
-            }, collector, deferredEvents, undefined, recipient.executionScope);
+            }, collector, deferredEvents, undefined, recipient.executionScope,
+            env.to.role === "delegator" && sourceTask
+              ? { kind: "delegation_return", sourceTaskId: sourceTask.id } : undefined);
           },
         });
       if (turn.action === "created") deferredEvents.enqueuedTasks.push(turn.task!);

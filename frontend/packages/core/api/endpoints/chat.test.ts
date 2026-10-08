@@ -12,6 +12,15 @@ const session = {
 const queuedTask = {
   task_id: "task-2", content: "follow up", attachment_ids: ["attachment-1"], created_at: session.created_at,
 };
+const workSession = {
+  id: "work-1", owner_type: "chat", owner_id: "chat-1", chat_id: "chat-1", issue_id: null,
+  workspace_id: "ws-1", title: "Investigation", status: "active", is_default: false,
+  parent_session_id: null, inherit_mode: "none", created_at: session.created_at, updated_at: session.updated_at,
+};
+const workTask = {
+  id: "task-work-1", agent_id: "agent-1", runtime_id: null, issue_id: null,
+  chat_session_id: "chat-1", issue_session_id: "work-1", status: "queued", created_at: session.created_at,
+};
 
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -23,6 +32,42 @@ function endpointsWithResponse(body: unknown): ChatEndpoints {
 }
 
 afterEach(() => vi.unstubAllGlobals());
+
+describe("Chat work Session contracts", () => {
+  it("reads the native envelope and keeps product Sessions distinct from Chat history", async () => {
+    const endpoints = endpointsWithResponse({ sessions: [workSession] });
+    await expect(endpoints.listChatWorkSessions("chat-1")).resolves.toMatchObject([workSession]);
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/multiremi/chats/chat-1/sessions?include_archived=true", expect.any(Object));
+    await expect(endpointsWithResponse([workSession]).listChatWorkSessions("chat-1")).rejects.toBeInstanceOf(ApiContractError);
+  });
+
+  it("requires an explicit consistent owner on Session reads and commands", async () => {
+    for (const invalid of [
+      { ...workSession, owner_type: undefined, owner_id: undefined },
+      { ...workSession, owner_type: "issue", owner_id: "issue-1", issue_id: "issue-1" },
+      { ...workSession, owner_id: "chat-2", chat_id: "chat-2" },
+    ]) {
+      await expect(endpointsWithResponse({ sessions: [invalid] }).listChatWorkSessions("chat-1")).rejects.toBeInstanceOf(ApiContractError);
+      await expect(endpointsWithResponse({ session: invalid }).createChatWorkSession("chat-1", { title: "Investigation" })).rejects.toBeInstanceOf(ApiContractError);
+    }
+  });
+
+  it("creates a side Session in the chosen Chat without introducing Issue ownership", async () => {
+    const input = { title: "Review", holds_workspace: false, parent_session_id: "work-1" };
+    const side = { ...workSession, id: "side-1", title: "Review", holds_workspace: false, parent_session_id: "work-1", inherit_mode: "snapshot" };
+    await expect(endpointsWithResponse({ session: side }).createChatWorkSession("chat-1", input)).resolves.toMatchObject(side);
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/multiremi/chats/chat-1/sessions", expect.objectContaining({ method: "POST", body: JSON.stringify(input) }));
+  });
+
+  it("creates and reads explicit SessionTasks through their destination", async () => {
+    const input = { agent_id: "agent-1", prompt: "Investigate" };
+    await expect(endpointsWithResponse({ task: workTask }).createChatWorkSessionTask("chat-1", "work-1", input)).resolves.toMatchObject(workTask);
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/multiremi/chats/chat-1/sessions/work-1/tasks", expect.objectContaining({ method: "POST", body: JSON.stringify(input) }));
+    await expect(endpointsWithResponse({ tasks: [workTask] }).listChatWorkSessionTasks("chat-1", "work-1")).resolves.toMatchObject([workTask]);
+    await expect(endpointsWithResponse({ task: { ...workTask, issue_session_id: "other" } }).createChatWorkSessionTask("chat-1", "work-1", input)).rejects.toBeInstanceOf(ApiContractError);
+    await expect(endpointsWithResponse({ tasks: [{ ...workTask, chat_session_id: "other" }] }).listChatWorkSessionTasks("chat-1", "work-1")).rejects.toBeInstanceOf(ApiContractError);
+  });
+});
 
 describe("ChatEndpoints contracts", () => {
   it("creates sessions through the upstream agent/title contract and validates the acknowledgement", async () => {

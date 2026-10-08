@@ -6,6 +6,7 @@ import {
   denyAttachmentAccess,
   denyAttachmentCreationAccess,
   denyCurrentUserCommentAccess,
+  denyTaskChatContentAccess,
   detectContentTypeFromFilename,
   loadChatSessionForCurrentUser,
   issueMutationActor,
@@ -32,6 +33,8 @@ export function registerAttachmentRoutes(app: Hono, deps: RouterDeps): void {
     if (!task?.chatSessionId || task.workspaceId !== token.workspaceId) {
       return c.json({ error: "current task is not a Chat task" }, 403);
     }
+    const contentDenied = denyTaskChatContentAccess(c, store, task.chatSessionId);
+    if (contentDenied) return contentDenied;
     const form = await c.req.formData();
     const files = form.getAll("file");
     if (!files.length || files.length > 10 || files.some(file => !(file instanceof File))) {

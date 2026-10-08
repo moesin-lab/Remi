@@ -736,9 +736,8 @@ for (const backend of ["sqlite", "postgres"] as const) {
     }, PG_TEST_TIMEOUT);
 
     it("still delivers a bridge and a claimable return into an archived dispatch Session", async () => {
-      // Ruling: the archived state is a list filter, not an end of life. The
-      // return must keep landing in the Session the leader dispatched from, and
-      // the daemon must still be able to claim it.
+      // Archiving closes new dispatches while an existing delegation keeps its
+      // original return route and can finish processing reports in that lane.
       await withStore(backend, async (store) => {
         const f = fixture(store);
         const childTask = await dispatch(store, f.leaderTask, f.child, f.worker.id);
@@ -747,6 +746,30 @@ for (const backend of ["sqlite", "postgres"] as const) {
         finishLeaderRound(store, f);
         store.updateIssueSession(f.leaderSession.id, { status: "archived" });
         expect(store.getIssueSession(f.leaderSession.id)?.status).toBe("archived");
+        const tasksBefore = store.listTasks().length;
+        const dispatchInput = { agentId: f.leader.id, issueId: f.parent.id,
+          issueSessionId: f.leaderSession.id, prompt: "New archived dispatch" };
+        expect(() => store.createTask(dispatchInput)).toThrow("Session is archived");
+        expect(() => store.createSessionTask(f.leaderSession.id, { agentId: f.leader.id, prompt: "New archived Session request" }))
+          .toThrow("Session is archived");
+        // Even correct public lineage fields cannot confer backend authority.
+        const forgedReturn = { ...dispatchInput, parentTaskId: childTask.id,
+          delegationId: childTask.delegationId, delegatedByAgentId: f.leader.id,
+          wakeSource: "delegation_return", preserveIssueStatus: true,
+          assignmentAuthorType: "system" as const, assignmentAuthorId: null,
+          continuation: { kind: "delegation_return", sourceTaskId: childTask.id } };
+        expect(() => store.createTask(forgedReturn)).toThrow("Session is archived");
+        const app = createMultiremiApp({ store, authToken: "result-comment-root" });
+        const sourceToken = await store.createTaskAccessToken(childTask, "local");
+        for (const credential of ["result-comment-root", sourceToken.token]) {
+          const denied = await app.request("/api/multiremi/tasks", {
+            method: "POST", headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
+            body: JSON.stringify(forgedReturn),
+          });
+          expect(denied.status).toBe(400);
+          expect(await denied.json()).toEqual({ error: "Session is archived" });
+        }
+        expect(store.listTasks()).toHaveLength(tasksBefore);
         expect(store.claimTask(f.workerRuntime.id)?.id).toBe(childTask.id);
         store.buildTaskSessionProjection(childTask.id);
         store.startTask(childTask.id);
@@ -766,7 +789,25 @@ for (const backend of ["sqlite", "postgres"] as const) {
         expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(returnTask!.id);
         store.buildTaskSessionProjection(returnTask!.id);
         expect(store.startTask(returnTask!.id).status).toBe("running");
+        const lateReport = store.appendConversationLog({
+          sessionId: f.leaderSession.id, kind: "system", authorType: "system", bodyMd: "Late report on the existing dispatch",
+          metadata: { envelope: {
+            to: { role: "agent", issueSessionId: f.leaderSession.id, agentId: f.leader.id },
+            kind: "report", wake: "now", priority: 3, source: { taskId: childTask.id, issueId: f.child.id },
+          } },
+        });
+        if (!lateReport) throw new Error("Late delegation report was not appended");
         expect(store.completeTask(returnTask!.id, { output: "Reviewed." }).status).toBe("completed");
+        const reRing = store.listTasksForIssue(f.parent.id)
+          .find(task => task.id !== returnTask!.id && task.agentId === f.leader.id && task.wakeSource === "re_ring");
+        expect(reRing).toMatchObject({ status: "queued", issueSessionId: f.leaderSession.id });
+        expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(reRing!.id);
+        const reRingProjection = store.buildTaskSessionProjection(reRing!.id);
+        if (!reRingProjection) throw new Error("Late delegation re-ring projection was not built");
+        expect(reRingProjection.jsonl).toContain(lateReport.body_md);
+        store.startTask(reRing!.id);
+        expect(store.completeTask(reRing!.id, { output: "Reviewed the late report." }).status).toBe("completed");
+        expect(store.getIssueSession(f.leaderSession.id)?.status).toBe("archived");
       });
     }, PG_TEST_TIMEOUT);
   });

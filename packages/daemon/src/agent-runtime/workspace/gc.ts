@@ -850,7 +850,8 @@ function issueRuntimeRoots(root: string, issueId: string): string[] {
     if (!entry.isDirectory()) continue;
     const sessionRoot = join(runtimeRoot, entry.name);
     const meta = readGcMeta(sessionRoot);
-    if (meta?.kind === "issue_runtime" && stringField(meta.issue_id) === issueId) {
+    if (meta?.kind === "issue_runtime" && stringField(meta.issue_id) === issueId
+      && meta.chat_session_id === null) {
       roots.push(sessionRoot);
     }
   }

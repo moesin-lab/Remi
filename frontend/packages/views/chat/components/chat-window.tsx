@@ -60,6 +60,7 @@ import { ChatInput } from "./chat-input";
 import { AgentDropdown } from "./agent-dropdown";
 import { ProjectDisplay } from "./project-dropdown";
 import { SessionDropdown } from "./session-dropdown";
+import { ChatWorkSessionsDialog } from "./chat-work-sessions-dialog";
 import { EmptyState } from "./chat-empty-state";
 import { ChatResizeHandles } from "./chat-resize-handles";
 import { useChatContextItems } from "./use-chat-context-items";
@@ -232,6 +233,7 @@ export function ChatWindow({
   const markRead = useMarkChatSessionRead();
   const updateSession = useUpdateChatSession();
   const [actionError, setActionError] = useState(false);
+  const [workSessionsOpen, setWorkSessionsOpen] = useState(false);
 
   const currentMember = members.find((m) => m.user_id === user?.id);
   const memberRole = currentMember?.role;
@@ -585,6 +587,9 @@ export function ChatWindow({
             onSelectSession={handleSelectSession}
             onSessionDeleted={() => setActiveSession(null)}
           />
+          {activeSessionId && <Button variant="ghost" size="sm" onClick={() => setWorkSessionsOpen(true)}>
+            {t($ => $.work_sessions.title)}
+          </Button>}
         </div>
         {!isPage && (
           <div className="flex items-center gap-0.5 shrink-0">
@@ -777,6 +782,11 @@ export function ChatWindow({
         }
         contextItems={contextItems}
       />
+      {activeSessionId && <ChatWorkSessionsDialog
+        wsId={wsId} chatId={activeSessionId} agentId={currentSession?.agent_id ?? activeAgent?.id ?? ""}
+        agents={availableAgents} chatArchived={isSessionArchived} open={workSessionsOpen}
+        onOpenChange={setWorkSessionsOpen}
+      />}
     </>
   );
 

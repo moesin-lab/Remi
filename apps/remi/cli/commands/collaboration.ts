@@ -15,6 +15,7 @@ import {
   type CommandSpec,
 } from "../core/index.js";
 import { parseArgs, type CliOptions } from "../multiremi/options.js";
+import { sessionResultMetadata } from "../multiremi/commands/issue.js";
 import {
   multiremiApiUploadFile,
   detectCliContentTypeFromFilename,
@@ -227,11 +228,11 @@ function commentCommandSpecs(): CommandSpec[] {
 }
 
 function sessionCommandSpecs(): CommandSpec[] {
-  return [
+  const specs = [
     groupSpec("session", "Manage Sessions and published results"),
     nativeSpec("session.list", ["session", "list"], "List Sessions owned by a Chat", "read", HUMAN_TASK, [refPositional("chat")], [], async (invocation) => {
-      await getAndRender(invocation, `/api/multiremi/chats/${encodePath(positional(invocation, 0, "chat"))}/sessions`, ["sessions"]);
-    }, [compatAlias(["issue", "session", "list"], "remi session list")]),
+      await getAndRender(invocation, sessionCollectionPath(invocation), ["sessions"]);
+    }),
     nativeSpec("session.get", ["session", "get"], "Get a Session owned by a Chat", "read", HUMAN_TASK, [refPositional("chat"), refPositional("session")], [], async (invocation) => {
       await getAndRender(invocation, sessionPath(invocation));
     }),
@@ -249,6 +250,8 @@ function sessionCommandSpecs(): CommandSpec[] {
           { header: "ID", value: (row) => row.id },
           { header: "TITLE", value: (row) => row.title },
           { header: "STATUS", value: (row) => row.status },
+          { header: "OWNER TYPE", value: (row) => row.owner_type },
+          { header: "OWNER ID", value: (row) => row.owner_id },
           { header: "PARENT", value: (row) => row.parent_session_id ?? "-" },
           { header: "WITH CODE", value: (row) => row.with_code ?? false },
           { header: "CODE RUNTIME", value: (row) => row.code_runtime_id ?? "-" },
@@ -305,9 +308,9 @@ function sessionCommandSpecs(): CommandSpec[] {
         inherit_mode: stringOption(invocation, "inherit-mode") ?? undefined,
         with_code: invocation.options["with-code"] === true ? true : undefined,
       });
-      await mutateAndRender(invocation, "POST", `/api/multiremi/chats/${encodePath(positional(invocation, 0, "chat"))}/sessions`, body);
+      await mutateAndRender(invocation, "POST", sessionCollectionPath(invocation), body);
     }),
-    nativeSpec("session.adopt", ["session", "adopt"], "Adopt a legacy Issue-owned Session into a Chat", "write", HUMAN, [refPositional("chat"), refPositional("session")], [], async (invocation) => {
+    nativeSpec("session.adopt", ["session", "adopt"], "Adopt an Issue-owned Session into a Chat", "write", HUMAN, [refPositional("chat"), refPositional("session")], [], async (invocation) => {
       await mutateAndRender(invocation, "POST", `${sessionPath(invocation)}/adopt`, {});
     }),
     nativeSpec("session.update", ["session", "update"], "Update a Session", "write", HUMAN, [refPositional("chat"), refPositional("session")], [...INPUT_OPTIONS, ...titleStatusOptions()], async (invocation) => {
@@ -416,9 +419,19 @@ function sessionCommandSpecs(): CommandSpec[] {
     }),
     nativeSpec("session.result.list", ["session", "result", "list"], "List results published by a Session", "read", HUMAN_TASK, [refPositional("chat"), refPositional("session")], [], async (invocation) => {
       await getAndRender(invocation, `${sessionPath(invocation)}/results`, ["results"]);
-    }, [compatAlias(["issue", "session", "result", "list"], "remi session result list")]),
+    }),
     nativeSpec("session.result.publish", ["session", "result", "publish"], "Publish a reusable Session result", "write", HUMAN_TASK, [refPositional("chat"), refPositional("session")], SESSION_RESULT_OPTIONS, async (invocation) => {
       const body = await contentOption(invocation);
+      if (invocation.spec.id === "issue.session.result.publish") {
+        if (!body?.trim()) throw new CliError("usage", "result body is required");
+        const metadata = sessionResultMetadata(invocation.options as CliOptions);
+        await mutateAndRender(invocation, "POST", `${sessionPath(invocation)}/results`, {
+          title: stringOption(invocation, "title") ?? "",
+          body,
+          ...(metadata ? { metadata } : {}),
+        });
+        return;
+      }
       await mutateAndRender(invocation, "POST", `${sessionPath(invocation)}/results`, {
         body,
         title: stringOption(invocation, "title") ?? undefined,
@@ -427,7 +440,7 @@ function sessionCommandSpecs(): CommandSpec[] {
           refs: invocation.options.ref ?? [],
         },
       });
-    }, [compatAlias(["issue", "session", "result", "publish"], "remi session result publish")]),
+    }),
     legacySpec("session.archive.list", ["session", "archive", "list"], "List provider session archives for an issue", "read", HUMAN, [refPositional("issue")], [], ["issue", "archive", "list"], [compatAlias(["issue", "archive", "list"], "remi session archive list")]),
     legacySpec("session.archive.status", ["session", "archive", "status"], "Show provider session archive status", "read", HUMAN, [refPositional("issue")], [], ["issue", "archive", "status"], [compatAlias(["issue", "archive", "status"], "remi session archive status")]),
     legacySpec("session.archive.verify", ["session", "archive", "verify"], "Verify a provider session archive", "write", HUMAN, [refPositional("issue"), optionalPositional("archive")], [], ["issue", "archive", "verify"], [compatAlias(["issue", "archive", "verify"], "remi session archive verify")]),
@@ -439,6 +452,38 @@ function sessionCommandSpecs(): CommandSpec[] {
       await mutateAndRender(invocation, "PUT", `/api/workspaces/${encodePath(positional(invocation, 0, "workspace"))}/session-archive`, await requestBody(invocation));
     }),
   ];
+  return [...specs, ...issueSessionCommandSpecs(specs)];
+}
+
+function issueSessionCommandSpecs(specs: readonly CommandSpec[]): CommandSpec[] {
+  const commands = specs
+    .filter((spec) => spec.positionals?.[0]?.name === "chat" && spec.id !== "session.adopt")
+    .map((spec): CommandSpec => ({
+      ...spec,
+      id: `issue.${spec.id}`,
+      capability: `issue.${spec.id}`,
+      path: ["issue", ...spec.path],
+      description: spec.description.replace("a Chat", "an Issue"),
+      positionals: [refPositional("issue"), ...(spec.positionals?.slice(1) ?? [])],
+    }));
+  const resultList = commands.find((spec) => spec.id === "issue.session.result.list")!;
+  resultList.description = "List results published by Sessions owned by an Issue";
+  resultList.positionals = [refPositional("issue")];
+  resultList.options = commandOptions([SESSION_RESULT_OPTIONS[0]!], PAGE_OPTIONS);
+  resultList.run = async (invocation) => {
+    const client = await clientFor(invocation);
+    const response = await client.request({ method: "GET", path: issueSubpath(invocation, "session-results") });
+    const sessionId = stringOption(invocation, "session");
+    const data = sessionId
+      ? extractRecords(response.data, ["results"]).filter((row) => (row.source_session_id ?? row.sourceSessionId) === sessionId)
+      : response.data;
+    renderResource(invocation, data, ["results"]);
+  };
+
+  const resultPublish = commands.find((spec) => spec.id === "issue.session.result.publish")!;
+  resultPublish.positionals = [refPositional("issue"), optionalPositional("session")];
+  resultPublish.description = "Publish an Issue Session result (requires <session> or --session)";
+  return commands;
 }
 
 function issueExtendedSpecs(): CommandSpec[] {
@@ -1178,8 +1223,17 @@ async function contentOption(invocation: CommandInvocation): Promise<string | un
   return undefined;
 }
 
+function sessionCollectionPath(invocation: CommandInvocation): string {
+  return invocation.spec.path[0] === "issue"
+    ? issueSubpath(invocation, "sessions")
+    : `/api/multiremi/chats/${encodePath(positional(invocation, 0, "chat"))}/sessions`;
+}
+
 function sessionPath(invocation: CommandInvocation): string {
-  return `/api/multiremi/chats/${encodePath(positional(invocation, 0, "chat"))}/sessions/${encodePath(positional(invocation, 1, "session"))}`;
+  const sessionId = invocation.spec.id === "issue.session.result.publish"
+    ? positionalOrOption(invocation, 1, "session", "session")
+    : positional(invocation, 1, "session");
+  return `${sessionCollectionPath(invocation)}/${encodePath(sessionId)}`;
 }
 
 function issueSubpath(invocation: CommandInvocation, tail: string): string {

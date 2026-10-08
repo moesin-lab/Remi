@@ -34,10 +34,16 @@ export class PlatformUpdaterClient {
     private readonly updaterToken: string,
   ) {}
 
+  /** Keep the updater online during downloads/drain without overwriting release projections. */
+  async keepAlive(driver: PlatformInspection['driver']): Promise<void> {
+    await this.request('/api/platform-updater/heartbeat', { driver });
+  }
+
   async heartbeat(inspection: PlatformInspection, latestRelease?: MultiremiPlatformRelease | null, update?: { defaultReleaseFeedUrl?: string | null; releaseFeedUrl?: string | null; preflight?: MultiremiPlatformPreflight | null }): Promise<{ releaseFeedUrl: string | null }> {
     const response = await this.request<{ state: { releaseFeedUrl: string | null } }>("/api/platform-updater/heartbeat", {
       ...update,
       driver: inspection.driver,
+      updateMode: inspection.updateMode,
       currentRelease: inspection.currentRelease,
       latestRelease,
       recentReleases: inspection.recentReleases,

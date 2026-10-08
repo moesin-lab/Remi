@@ -3,6 +3,14 @@ import { parseWithFallback } from "../schema";
 import { EMPTY_PLATFORM_STATUS, PlatformStatusSchema } from "./platform";
 
 describe("PlatformStatusSchema", () => {
+  it('preserves reported modes and source capabilities without guessing modes for legacy servers', () => {
+    const source = { url: 'https://example.com/feed', manifestUrl: null, error: null, modes: [{ mode: 'internal_application', available: false, missing: ['application_bundle'] }] };
+    const preflight = { ready: false, checkedAt: new Date().toISOString(), platform: 'linux', arch: 'x64', checks: [], source };
+    expect(PlatformStatusSchema.parse({ updateMode: 'internal_application', preflight })).toMatchObject({ updateMode: 'internal_application', preflight: { source } });
+    expect(PlatformStatusSchema.parse({ driver: 'docker_compose' }).updateMode).toBeUndefined();
+    expect(PlatformStatusSchema.parse({ updateMode: 'future_mode' }).updateMode).toBe('future_mode');
+    expect(PlatformStatusSchema.parse({ updateMode: 42, preflight: { ...preflight, source: { ...source, modes: [{ mode: 'images', available: 'false', missing: [] }] } } })).toMatchObject({ updateMode: null, preflight: { source: null } });
+  });
   it("retains source settings and blocking checks without coercing an invalid readiness flag", () => {
     const preflight = { ready: false, checkedAt: "2026-10-05T00:00:00Z", platform: "win32", arch: "x64", checks: [{ code: "backup", ok: false, message: "Backup required" }] };
     const status = PlatformStatusSchema.parse({ releaseFeedUrl: "https://mirror.example/feed.json", preflight });

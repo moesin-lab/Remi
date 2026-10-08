@@ -2,23 +2,26 @@
 
 For two isolated environments on one development computer, use the
 [local stable/dev guide](../docs/deploy/local-profiles.md). It runs separate
-API/Web/PostgreSQL projects. A stable profile can opt into the repository-
-external host updater; dev never shares that updater or its state.
+API/Web/PostgreSQL projects. A stable profile can opt into the internal Compose
+updater or retain its existing host updater; dev never shares their state.
 
-The API records lifecycle operations. A host-owned `remi-platform-updater`
-service executes them through one deployment driver. The API container never
-receives the Docker socket and cannot invoke `systemctl`.
+The API records lifecycle operations. An independent updater executes them even
+while the API is unavailable. In internal Compose mode it runs inside the project
+and controls API/Web application children through shared volumes, without Docker
+access. Existing host drivers remain available for other deployments.
 
 The pieces have deliberately narrow responsibilities:
 
 | Piece | Responsibility | Recovery boundary |
 |---|---|---|
 | platform operation/release API | Persist request, safe cancellation flag, progress, release metadata and updater heartbeat | Survives API restarts in PostgreSQL; it does not execute host commands |
-| `remi-platform-updater` | Claim/resume the active operation, coordinate drain and invoke one host driver | Must be supervised outside Remi API and daemon |
+| updater worker | Claim/resume the active operation, coordinate drain and invoke one driver | Runs independently of Remi API and daemon |
+| internal Compose updater | Stage API/Web plus Bun/Node, back up data and command stable supervisors through shared volumes | Container and supervisor stay running; retained code/runtime can recover without the API or Docker socket |
+| isolated rehearsal service | Restore a backup and run target/previous migrations in scratch PostgreSQL | No production network, credentials or writable application/backup mount |
 | daemon | Acknowledge drain, stop new task claims and durably queue task reports | Never stops or replaces the control plane |
 | `systemd_release` | Verify archive, atomically switch source symlink, restart systemd units | Restores code symlink only; use only with backward-compatible DB migrations or an external matching DB restore plan |
-| `docker_compose` | Pull immutable image digests and replace owned containers | Restores image/env selection only; it is not a database rollback |
-| `local_profile` | Fetch fixed commit, validate source/schema, create verified data/config backup, switch and health-check | Automatic recovery preserves current data and restores application images/configuration; manual disaster recovery can restore a complete snapshot |
+| host `docker_compose` | Download API/Web application bundles into a persistent version volume; reuse installed base images | Restore the application selection and restart only API/Web containers; never restore the live database |
+| `local_profile` | Same application executor, with profile metadata and automatic standard-profile backup configuration | Preserve current PostgreSQL, API home and agent processes; retain code and host journals outside the API |
 
 `currentRelease`, `latestRelease`, `services` and `updaterStatus` are heartbeat
 projections, not release discovery performed by the API. An installation with
@@ -198,8 +201,16 @@ both files unchanged. The command does not create commits, tags or releases.
 Push a formal SemVer tag only after the tag commit's `Release build check` run
 on `main` succeeds. The tag-triggered `Release` workflow publishes the daemon
 CLI GitHub Release first, then calls the reusable `Platform release` workflow
-to publish the API/Web images and attach the platform manifest and systemd
-archive to the same release.
+to publish images for fresh installations and attach the platform manifest,
+systemd source archive and `platform-application-v<VERSION>-linux-{x64,arm64}.tar.gz`
+bundles. Existing installations update from the application archives without
+pulling the new images. Each archive contains API source and Linux dependencies,
+built Next standalone Web output, executable Bun/Node runtimes, and their
+runtime/migration contract. API, Web and the bootstrap `remi-updater` image are
+published for amd64/arm64; `updaterImage` in the manifest is an immutable digest
+for initial installation. Daily CI image artifacts also include that image.
+Packaging
+round-trips each archive through the updater's extractor before publishing it.
 
 Select a new, unused SemVer version only for an explicitly requested release;
 the package version, tag, and GitHub Release must agree. See [repository release
@@ -217,6 +228,94 @@ release mirror configuration.
 both the version tag and a `sha-<commit>` tag. A retry reuses an existing image
 only when both tags resolve to the same digest; a conflicting or incomplete
 tag pair fails closed.
+
+## Internal Compose updater
+
+[compose.internal-updates.yml](docker/compose.internal-updates.yml) extends the
+standard [local Compose topology](docker/compose.local.yml). It works with Linux
+containers on Windows Docker Desktop, macOS Docker Desktop and Linux. It does
+not cover a split `api-runtime`/IM deployment or additional persistent mounts;
+those installations must extend the supervisor/backup topology first or retain
+their existing host driver. Never run both updater modes against one project.
+
+API/Web start a small image-owned [supervisor](../packages/platform-updater/src/supervisor.mjs).
+The separate [updater](../apps/platform-updater/internal.ts) runs
+[InternalApplicationDriver](../packages/platform-updater/src/internal-driver.ts),
+which claims the existing admin-created operation queue. It downloads verified
+application archives to the `program` volume, executes candidate Bun/Node
+`--version` probes inside the target containers, waits for agent drain, commits
+a recovery journal and write fence, and stops only the application children.
+It then backs up PostgreSQL/API home, asks the network-isolated
+[rehearsal service](../apps/platform-updater/rehearsal.ts) to restore and test the
+backup, and starts the selected code with its bundled runtimes. API/Web are
+temporarily unavailable during backup, rehearsal and child startup. Their
+containers, supervisors, PostgreSQL container and independent agents stay alive.
+
+The image does not need to contain each future Bun or Node version. The archive
+provides both executables; compatibility checks require the same container CPU,
+glibc and native-tool contract, supervisor protocol 1, reviewed migration
+compatibility, and successful executable/health probes. Bun changes alone do
+not invalidate `application.nativeTools`. OS libraries, lark-cli, the supervisor
+and updater bootstrap remain image-owned and need explicit base maintenance.
+This is not an OS/package-manager update path.
+
+For a **new installation**, before its first `up`:
+
+1. Use API/Web images built from a commit containing supervisor v1. For an
+   explicit local build, run `node scripts/local-profile.mjs stable prepare --ref
+   <commit>` and `node scripts/local-profile.mjs stable build` before activation,
+   then build `deploy/docker/Dockerfile.updater` from that same source snapshot.
+   For a CI-deployed profile, use its artifact's immutable `updaterImage` and
+   follow the existing-installation adoption boundary below; a formal release
+   provides the same field in `platform-release.json`.
+2. Copy [internal-updater.env.example](docker/internal-updater.env.example) to a
+   private file outside Git. Its `MULTIREMI_TOKEN` must match `api.env`; put the
+   same independently generated `MULTIREMI_PLATFORM_UPDATER_TOKEN` in both files.
+   Configure the actual HTTPS release feed. Keep these files backed up separately;
+   updates do not alter them, and the updater never mounts the host configuration.
+3. Copy the internal Compose overlay into the profile as
+   `compose.internal-updates.yml`. Append `REMI_UPDATER_IMAGE=<immutable digest>`
+   and `REMI_UPDATER_ENV_FILE=<absolute external env path>` to its `compose.env`.
+   The existing profile already supplies `REMI_SOURCE_DIR`, public URLs and DB
+   credentials. Pull the selected updater image once before startup.
+4. Run `node scripts/local-profile.mjs stable up`. The manager always includes
+   the saved overlay on subsequent `up`, `status`, `logs` and `stop`. Plain Docker
+   commands must likewise retain both `-f compose.yml -f compose.internal-updates.yml`
+   and the original project name/`--env-file`.
+5. Wait for both seed copies to complete, then use **Settings → System → Version
+   & services** to check updates. First-run checks remain blocked until the
+   supervisors and isolated rehearsal service are ready. CI base identities such
+   as `0.2.x-stable.<sha>` are retained for rollback; incoming updates require
+   formal versions. No hand-written `current-release.json` is necessary.
+
+An **existing installation** needs a one-time, controlled adoption of the base
+images and overlay before its internal update path exists. Complete all previous
+update/recovery operations and disable the host updater first. During a drained
+maintenance window, back up the external configuration, PostgreSQL and API home,
+then adopt matching supervisor images without changing the project name or
+deleting its existing volumes. An installation with `compose.application.json`
+or `compose.host-control.yml` requires explicit migration of that old installation;
+the manager rejects stacking those overlays with internal mode. This change does
+not automatically migrate a running stable instance. After adoption, ordinary
+updates and runtime changes no longer invoke the host Docker CLI.
+
+The project owns `program` (all retained code/runtime versions), `api-seed` and
+`web-seed` (base recovery copies), `update-control` (commands, status, write fence)
+and `update-state` (journals and checksummed backups). Only the updater writes
+`program`; the application mounts it read-only. Rehearsal runs PostgreSQL 17 in
+its private `/tmp` with `network_mode: none`, no API/production DB credentials
+and read-only program/backups. Its scratch budget defaults to 2 GiB; size it for
+the database before use. Disk exhaustion or restore failure blocks the switch.
+
+Failure recovers the retained **code and runtimes**, never an old live database
+or file snapshot. On process/container restart, committed journals recover
+before the updater contacts the API; verified outcomes are replayed before
+releasing drain and deleting the durable fence. Recovery failure leaves writes
+and scheduling blocked. Normal updates retain all versions and backups; plan
+storage accordingly. `stable deploy`, direct `restart`/`backup` and host update
+commands are blocked in this mode to prevent competing writers; use platform
+operations (a restart also takes a verified backup). Existing Web/CLI source,
+check, update, restart, rollback and cancellation commands are unchanged.
 
 ## Host updater
 
@@ -242,8 +341,59 @@ on Windows/macOS. Released API/Web images target `linux/amd64` and `linux/arm64`
 The updater tests run in the release-check matrix on Windows, macOS and Linux;
 adding that matrix does not itself constitute a completed CI run.
 Split application services such as `api-runtime` remain configurable through
-`MULTIREMI_PLATFORM_CORE_SERVICES`. Protected names (`ssh-mesh-control-plane`,
-`daemon`, `postgres`, `openviking`) are excluded even from an explicit list.
+`MULTIREMI_PLATFORM_CORE_SERVICES=api,web,api-runtime`. Application mode accepts
+only these application services and requires both `api` and `web`.
+
+### Host-managed application updates inside existing containers
+
+`MULTIREMI_PLATFORM_UPDATE_MODE=application` is the default for `docker_compose`
+and `local_profile`. The existing admin-only
+`POST /api/multiremi/platform/operations` endpoint accepts `kind: "update"`,
+`targetVersion`, a manifest URL in `targetRef`, and an optional retry `requestId`.
+The API persists the request; the independent host updater executes it. No
+Docker socket, shell command or background self-restart is added to the API.
+The same endpoint is exposed as `remi platform operation create --file update.json --yes`.
+
+On the first application update the updater copies the installed API/Web code
+into `<compose-project>_application-releases`, then installs
+`compose.application.json` beside the original Compose file. It recreates only
+API/Web **once using their existing image IDs**, adding read-only code/bootstrap
+mounts. Later updates atomically replace the volume's `current.json` selection
+and stop/start the same containers; container and image IDs must stay unchanged.
+Keep that overlay in manual Compose commands (`-f compose.application.json`);
+the local-profile manager includes it automatically. Do not delete the version
+volume, host updater state or retained base images during cleanup.
+
+The API and Web share one selected release. Downloads are bounded, SHA-256 checked
+and extracted into a new directory with path/link traversal protection. Staging
+does not change the current selection. CPU, Bun, Node and glibc requirements are
+checked against the installed runtimes. The API Dockerfile and entrypoint are
+fingerprinted as `application.apiBase` as well, so changes to image-owned tools
+such as lark-cli cannot silently pass as a code-only update. A different base runtime blocks normal
+application updates and needs explicit base-image maintenance.
+
+The updater waits for drain, durably commits the operation, stops API/Web writers,
+backs up data, and rehearses target and previous migrations in a **separate
+PostgreSQL container with no production network or credentials**. It switches
+the program only after rehearsal passes. API/Web are unavailable during this
+backup/rehearsal interval; daemon/provider processes remain independent. Each
+migration pass has a five-minute timeout; timeout triggers code recovery. Readiness
+and the actual service process working directory must match the selected code.
+Failure switches back to the retained code, preserving current data. If recovery
+fails, scheduling and a host-owned write fence remain closed. A crash after the
+terminal API report replays the durable outcome before removing that fence.
+
+Web deployment values can be supplied at runtime through `REMI_WEB_LOCAL_PROFILE`,
+`REMI_WEB_SITE_URL`, `REMI_WEB_WS_URL` and `REMI_WEB_API_URL`; only this public
+allowlist and the selected application version cross to the browser. Local
+profiles derive them from their existing settings, so each LAN address does not
+need its own application bundle.
+
+`MULTIREMI_PLATFORM_UPDATE_MODE=images` selects the earlier image executor for
+installations that have not adopted the application overlay. Complete any active
+legacy operation with its original updater before changing modes. Base-image
+maintenance of an application installation must reconcile its recorded runtime
+and overlay; silently changing image tags underneath it is refused.
 
 Open Web **Settings → System → Version & services** (`?tab=platform`) with the
 local workspace owner/admin account. It exposes update checks, blocking reasons,
@@ -253,6 +403,32 @@ resetting it to `null` uses the host default. Changing it clears prior discovery
 and preflight results. An unreachable feed does not stop the updater heartbeat.
 Settings, check results and operations are stored on the API, not in the browser.
 
+The **Update mode** card displays the execution mode explicitly reported by the
+updater: host image updates (`images`), host application updates
+(`host_application`), in-container application updates (`internal_application`),
+or systemd releases (`systemd_release`). A deployment driver such as
+`docker_compose` does not identify the execution mode. Old updaters show an
+unknown mode; disconnected updaters show their last report with an offline notice.
+The **View mode switching steps** dialog selects a target for migration guidance,
+including operation/maintenance blockers and target-source requirements. It does
+not change environment variables, recreate containers, or switch modes through
+the API. Existing installations still need the controlled adoption described
+above. Run only one updater, complete/recover its operations before changing
+mode, and verify the new reported mode before resuming scheduled updates.
+
+The **Update source** card shows the effective saved/default URL and the fetched
+manifest's artifacts for each mode. A unified `platform-release.json` can contain
+both immutable image digests and application/runtime archives; modes share one
+saved address and selecting a migration target does not replace it. Image-only
+sources explicitly lack application bundles; unsupported architectures, missing
+supervisor/runtime contracts and malformed metadata are listed. A complete
+manifest is only an artifact check: downloads, host compatibility, migration
+rehearsal, backups and drain still have to pass. Save an edited URL before using
+**Check update source**; default/source changes and reported-mode changes clear
+old preflight results. Unreachable or stale sources do not appear compatible.
+The nullable `multiremi_platform_state.update_mode` column stores observational
+metadata only; older application versions can ignore it without changing data.
+
 Before first use, save the actual installed release manifest as
 `<stateDir>/current-release.json` for Compose, or `.platform-release.json` inside
 the current systemd release. Both current and target need a `dataSchema`
@@ -260,10 +436,15 @@ fingerprint from `node scripts/platform-data-schema.mjs <release-source-root>`.
 The release workflow publishes this value. The updater compares both metadata
 and actual API migration source plus its data-transform/storage helpers (listed
 in `packages/platform-updater/src/data-schema-inputs.json`). Changes to migration
-dependencies must update that list too. Unknown or changed fingerprints block automatic
-updates and rollback: perform and verify that migration in a maintenance window
-before registering the new current release. Do not copy a target fingerprint
-onto an older release to bypass the check.
+dependencies must update that list too. Unknown fingerprints block updates.
+Application releases with different fingerprints additionally require a reviewed
+`application.rollbackSafeFrom` declaration in both the feed and archive and a
+successful target/previous migration rehearsal. Existing columns must remain
+compatible. Release packaging checks
+[`platform-application-compatibility.json`](platform-application-compatibility.json)
+against the actual migration fingerprint; maintain that policy when migrations
+change. Never copy a new fingerprint onto old code. The explicit image and
+systemd executors retain their stricter equal-fingerprint requirement.
 
 ### Required backups
 
@@ -302,101 +483,49 @@ and restores the old symlink if health checks fail.
 
 ### Windows stable local-profile host
 
-The `local_profile` driver is the Windows-first self-update path. It reuses the
-same persisted API operation and drain protocol, but stages a fixed Git commit
-and the checksum-pinned release source before touching the running profile.
-The updater executable, task wrapper, secrets, operation journals and profile
-data all live outside the source checkout and the API containers.
+The `local_profile` application executor reads the existing stable profile and
+manages the same API/Web application bundles as generic Compose. The updater,
+configuration, backup and recovery state live outside API containers.
 
-1. From the exact reviewed updater commit, build the standalone executable with
-   `bun run platform-updater:compile:windows`. Release CI must attest or retain
-   that executable; do not compile unreviewed source on the production host.
-2. Keep a dedicated host checkout at `MULTIREMI_LOCAL_PROFILE_REPOSITORY`.
-   Updating fetches Git objects but never checks out over the running updater.
-3. Copy [`windows/platform-updater.env.example`](windows/platform-updater.env.example)
-   outside Git, replace every placeholder, and use an updater token distinct
-   from the API administrator token.
-4. In an elevated PowerShell, install the executable and configuration with
-   `deploy/windows/install-platform-updater.ps1 -UpdaterExecutable <path> -Config <path>`.
-   The installer copies them below ProgramData, restricts the ACL to the current
-   user and SYSTEM, and registers a highest-privilege logon scheduled task with
-   one-minute restart-on-failure. Docker Desktop must run in that same user
-   session; the task is deliberately not attached to the Remi daemon or API.
-5. Put the same `MULTIREMI_PLATFORM_UPDATER_TOKEN` in stable `api.env`, restart
-   stable once using the existing manual runbook, then verify `platform status`
-   reports driver `local_profile`, a current release, services and a fresh
-   heartbeat before enabling updates.
+1. Build the reviewed updater with `bun run platform-updater:compile:windows`.
+   This embeds the independent launcher and recovery helper. Keep its executable
+   and state directory outside any checkout being updated.
+2. Copy [the Windows environment example](windows/platform-updater.env.example)
+   outside Git. Set `MULTIREMI_PLATFORM_DRIVER=local_profile`,
+   `MULTIREMI_PLATFORM_UPDATE_MODE=application`, the profile root and distinct
+   API/updater credentials. Git, gh, host Node and a source checkout are not
+   required by application mode.
+3. Run `deploy/windows/install-platform-updater.ps1 -UpdaterExecutable <path> -Config <path>`
+   in elevated PowerShell. The installer copies files, restricts their ACL and
+   creates a supervised logon task. Docker Desktop must run in that user session.
+4. Ensure the API already accepts the same independent updater token. Finish
+   any active operation using its original updater before replacing the host
+   binary. Verify `remi platform status --json` before enabling scheduled updates.
 
-The source release manifest is accepted only with SemVer, a full 40-hex commit,
-an HTTPS URL without credentials, query or fragment, and a SHA-256. Host staging checks
-free space and host/Docker architecture, downloads and hashes the CI-produced
-archive, fetches that exact commit from `origin`, builds candidate images, then
-restores the live configuration. Preflight checks capacity, current images and
-the running API's migration fingerprint. Older profile metadata derives its
-fingerprint from the recorded immutable commit; unavailable source blocks updates.
-Staging compares the current and fetched target migration sources against the
-manifest's `dataSchema`. Switching begins only after drain succeeds and is rechecked.
+The standard local-profile backup covers PostgreSQL, the complete API-home
+volume and external configuration/credentials. Nonstandard additional storage
+requires an explicit `MULTIREMI_PLATFORM_BACKUP_CONFIG`. Backups are stored in
+`<profile>/application-backups`; application state lives in
+`MULTIREMI_PLATFORM_STATE_DIR`:
 
-The browser/CLI creates the operation inside the API container; the host polls
-the published API port with the API and independent updater credentials. It
-builds and switches **both API and Web** from the same immutable commit. No
-Docker socket or host command channel is exposed to the browser or API container.
+- `application-installation.json`: existing base image identities and runtime.
+- `application-current.json`, `application-history/`: retained program versions.
+- `application-operation-<id>.json`: committed/verified/recovered outcomes.
+- `application-control/write-fence.json`: write protection until acknowledgement.
 
-Each switch writes an atomic journal under
-`<profiles-root>/stable/host-operations/<operation-id>/`. The global host lock
-prevents concurrent mutation. A v2 backup completion manifest hashes the
-PostgreSQL dump, API-home archive and matching configuration and records the
-recovery command. If the executor dies after writers stop, its next scheduled
-start runs recovery before heartbeat. Automatic updates require identical data
-schemas; recovery and Web/CLI rollback restore application code/configuration
-while retaining the current PostgreSQL and API-home data. Rollback still takes
-a fresh rescue backup, verifies the target schema and checks both images/health.
-The host stays fenced if recovery fails. The separate manual host rollback
-commands retain full snapshot restoration for disaster recovery; omit
-`--preserve-data true` only when intentionally restoring that historical data.
-Legacy operation journals keep their original snapshot recovery semantics.
+Windows uses the same application executor as macOS/Linux. The scheduled-task
+runner holds a named mutex per configuration and prefers PowerShell 7; macOS
+can supervise the source/compiled updater with launchd and Linux with systemd.
+The updater's own host lock protects its state directory.
 
-The host retains request envelopes and terminal receipts outside the database
-under `host-operation-receipts/`. Before any new claim it replays receipts through
-the updater-only `/api/platform-updater/operations/reconcile` endpoint. Restoring
-a DB cannot silently erase the operation audit or replay a previously completed
-update. For old APIs without that endpoint, the preserved control-plane rows can
-be acknowledged through the existing report protocol; missing or conflicting
-outcomes keep the fence closed.
-
-During switching, an external `host-control/write-fence.json` and a host-pinned
-Bun preload block business mutations even when restoring an older API image.
-WebSocket handshakes are also rejected: daemon heartbeats can claim commands
-and update runtime state. HTTP reads/health and the authenticated updater
-channel remain available.
-Switch-phase maintenance cannot expire automatically; writes reopen only after
-both containers (or recovery) are verified and the API acknowledges the durable
-terminal receipt. Interrupted or incomplete recovery remains closed.
-
-The host also retains the effective API/updater credentials in
-`host-control/updater-auth.env`, loaded after the business snapshot's `api.env`.
-Retries of the same operation reuse that capture so older credentials cannot
-break acknowledgement after rollback. To rotate them deliberately, update the
-host configuration and profile `api.env`, run
-`node scripts/local-profile.mjs stable host-auth-refresh`, then recreate API and
-restart the updater. Refresh is rejected while a host write fence is active.
-
-The installer prefers an installed PowerShell 7 executable, falls back to
-Windows PowerShell, and accepts `-PowerShellExecutable` for an explicit path.
-The Windows runner holds a named mutex for its configuration path across logon
-sessions, so a manual runner and scheduled-task retry cannot overlap. Staging
-reuses fixed-commit images only when their OCI revision labels exactly match;
-missing services are built, and conflicting existing tags are never overwritten.
-
-Repeated API creates can carry `requestId`; repeated creates with the
-same caller/key/payload return the same operation, and the host stages/activates
-the resulting operation ID at most once.
-
-macOS and Linux may reuse `local_profile` with launchd/systemd plus the same
-environment contract, but only the Windows scheduled-task installer is shipped
-here. Non-profile Linux deployments continue to use `systemd_release` or
-`docker_compose`; their storage and migration rollback boundaries are not
-interchangeable with local-profile backups.
+For installations deliberately retaining `MULTIREMI_PLATFORM_UPDATE_MODE=images`,
+the [legacy local-profile executor](../packages/platform-updater/src/local-profile-driver.ts)
+still requires the dedicated Git checkout and host Node settings. Its
+`host-operations/`, `host-operation-receipts/`, `host-control/` and manual
+snapshot recovery commands retain their existing format. Complete their recovery
+before adopting application mode. Automatic rollback preserves data; manually
+omitting `--preserve-data true` from the old disaster-recovery command restores
+historical data and can discard later writes. Application updates never call it.
 
 ## Docker Compose control plane
 
@@ -474,8 +603,9 @@ docker compose --env-file /etc/multiremi/application.env \
 The credential lands in the container's home directory, which is the
 `REMI_HOME_DIR` bind mount, so it survives image upgrades and never enters
 Compose, an env file, or Git. An installation upgrading from the retired
-`feishu-sidecar` needs no action: the updater removes that leftover container
-before it replaces the API container, and leaves its named data volumes alone.
+`feishu-sidecar` must retire it before enabling application updates; preflight
+rejects that configuration. The explicit legacy image updater removes that
+leftover container during its migration and leaves named data volumes alone.
 See [`docs/feishu-message-ingestion.md`](../docs/feishu-message-ingestion.md)
 for the connection model, the rollout runbook, and rollback.
 
@@ -655,7 +785,7 @@ with health payloads that are byte-for-byte what they are today.
 
 The switch is an operator action, not a release action. The Compose file, the
 Nginx configuration, and the updater binary are host files: the daily release
-only replaces images, so merging the templates does not move a running
+changes application code (or images in explicit legacy mode), so merging the templates does not move a running
 installation. It happens in **two stages**:
 
 - **Stage A (route the traffic)** moves the daemon surface to `api-runtime` via
@@ -737,13 +867,17 @@ the API `env_file`; it defaults to `MULTIREMI_TOKEN` when unset.
 
 ### What the updater rewrites, and what it does not
 
-The updater rewrites `$COMPOSE_ENV` on every update and rollback:
-`writeImageEnv()` reads the file, replaces `REMI_API_IMAGE` and `REMI_WEB_IMAGE`,
-and atomically renames the result back over it
-(`packages/platform-updater/src/compose-driver.ts:197-213`). It does **not** write
-the Compose file, which it only passes to `docker compose` as `-f`
-(ibid., line 284), and it never touches Nginx. Two consequences shape the
-rollback below:
+The default application updater preserves `$COMPOSE_ENV`, the base Compose file
+and Nginx configuration. First adoption writes `compose.application.json` beside
+the base Compose file with the existing image IDs, application volume and launcher.
+Include this overlay as the last `-f` in every manual Compose command below after
+adoption; removing it would bypass the selected application. Keep the running
+`api-runtime` in `MULTIREMI_PLATFORM_CORE_SERVICES=api,api-runtime,web`.
+
+Only explicit `MULTIREMI_PLATFORM_UPDATE_MODE=images` uses `writeImageEnv()` in
+`packages/platform-updater/src/compose-driver.ts` to replace `REMI_API_IMAGE` and
+`REMI_WEB_IMAGE` in `$COMPOSE_ENV`. Neither executor edits Nginx or the base Compose
+file. Two consequences shape the role rollback below:
 
 - **Never restore a whole backup of `$COMPOSE_ENV`.** That backup can predate
   later releases, and restoring it would roll `REMI_API_IMAGE` and
@@ -763,9 +897,8 @@ rollback below:
   idle.** B1 authorizes 09:30-11:30 and 15:00-17:00 on the switch day. The
   updater is a separate long-running process that can claim a release at any
   time, so this runbook does not run at all while one is queued or in flight:
-  the steps below edit the same Compose env file the updater rewrites
-  (`writeImageEnv`, see "What the updater rewrites"), and an update landing in
-  the middle of a manual edit can interleave with it. The pre-check is
+  the steps below edit configuration used by either updater mode, and a release
+  switch in the middle of a manual edit can interleave with it. The pre-check is
   `remi platform operation list`: its GET `/api/multiremi/platform/operations`
   calls `PlatformOperationsRepo.list()`, a pure SELECT, without the maintenance
   getter. The pre-check must not trigger any business or platform state writes.
@@ -1268,14 +1401,17 @@ drain through their next heartbeat ack, stop claiming new tasks, keep running
 tasks and heartbeats alive, and report the acknowledged drain generation plus
 their active task count. Only when every online runtime acked the current
 generation AND the server and Runtime report zero in-flight/local tasks does the
-updater take a backup and prepare the switch. Positive local task counts from a
-disconnected Runtime also block the gate. A timer renews the drain during backup;
-the updater rechecks it immediately before the API commits the switch, which
-also rejects a concurrent cancellation. Preparing/pull/backup failures leave
-current services and their configuration untouched.
+updater prepare the switch. Positive local task counts from a disconnected Runtime
+also block the gate. A timer renews drain until the API commits the switch, which
+also rejects concurrent cancellation. Download, validation and drain failures leave
+services running. The application driver commits maintenance and its host journal,
+sets the write fence, then stops API/Web before consistent backup and isolated
+migration rehearsal. A backup/rehearsal failure recovers the old application and
+verifies it before reopening writes; this phase can temporarily interrupt API/Web.
 
 A durable host journal records the previous release/configuration and verified
-backup before committing. After switching, readiness checks must pass before
+backup location as it becomes available. After switching, readiness and the actual
+running application directory must both be verified before
 the result is recorded and scheduling resumes. If verification fails, the driver
 restores the old program release locally before reporting through the API. A
 failed rollback keeps the operation active and scheduling paused. Restarting the

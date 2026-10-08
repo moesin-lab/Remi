@@ -1,0 +1,65 @@
+# Overlay for compose.local.yml. Requires API/Web images with supervisor v1.
+# Use the same project name to retain the existing PostgreSQL and API home volumes.
+# No service receives Docker's socket or host process namespace.
+services:
+  api:
+    command: ["bun", "/usr/local/lib/remi/supervisor.mjs"]
+    environment:
+      REMI_SUPERVISOR_ROLE: api
+    volumes:
+      - program:/remi-program:ro
+      - update-control:/remi-control
+      - api-seed:/remi-seed
+  web:
+    command: ["node", "/usr/local/lib/remi/supervisor.mjs"]
+    environment:
+      REMI_SUPERVISOR_ROLE: web
+      REMI_WEB_LOCAL_PROFILE: ${REMI_PROFILE:?set REMI_PROFILE}
+      REMI_WEB_SITE_URL: ${REMI_PUBLIC_URL:?set REMI_PUBLIC_URL}
+      REMI_WEB_WS_URL: ${REMI_PUBLIC_WS_URL:?set REMI_PUBLIC_WS_URL}
+    volumes:
+      - program:/remi-program:ro
+      - update-control:/remi-control
+      - web-seed:/remi-seed
+  updater:
+    image: ${REMI_UPDATER_IMAGE:?set REMI_UPDATER_IMAGE}
+    restart: unless-stopped
+    init: true
+    build:
+      context: ${REMI_SOURCE_DIR:?set REMI_SOURCE_DIR}
+      dockerfile: deploy/docker/Dockerfile.updater
+    env_file:
+      - ${REMI_UPDATER_ENV_FILE:?set REMI_UPDATER_ENV_FILE to an external env file}
+    environment:
+      MULTIREMI_API_URL: http://api:6120
+      MULTIREMI_PLATFORM_WEB_HEALTH_URL: http://web:3000/login
+      MULTIREMI_DATABASE_URL: postgresql://multiremi:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/multiremi
+    volumes:
+      - program:/remi-program
+      - update-control:/remi-control
+      - update-state:/remi-state
+      - api-seed:/remi-seeds/api:ro
+      - web-seed:/remi-seeds/web:ro
+      - api-home:/remi-data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+  rehearsal:
+    image: ${REMI_UPDATER_IMAGE:?set REMI_UPDATER_IMAGE}
+    restart: unless-stopped
+    init: true
+    command: ["rehearsal"]
+    network_mode: none
+    # Deliberately no env_file, DB URL, API token or production data mount.
+    volumes:
+      - program:/remi-program:ro
+      - update-control:/remi-control
+      - update-state:/remi-state:ro
+    tmpfs:
+      - /tmp:rw,nosuid,size=2g,mode=1777
+volumes:
+  program:
+  update-control:
+  update-state:
+  api-seed:
+  web-seed:

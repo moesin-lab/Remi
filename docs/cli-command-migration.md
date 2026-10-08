@@ -458,7 +458,10 @@ for specific documents.
 或 `{"releaseFeedUrl":null}` 恢复主机默认来源。执行
 `remi platform operation create --file <operation.json> --yes`，文件包含
 `{"kind":"check_updates"}`，会刷新版本和可更新性检查；结果通过
-`remi platform status` 读取。更新、回滚和重启均要求更新器在线、预检通过，
+`remi platform status` 读取。`--json` 输出中的 `updateMode` 是更新器实际报告的模式，
+`preflight.source` 列出当前源对各模式提供的发布内容及缺失项；未知模式不能从 `driver` 推断。
+模式改变需要部署迁移，settings 接口只更改更新源和计划，不执行模式切换。
+更新、回滚和重启均要求更新器在线、预检通过，
 并等待 Runtime 确认空闲。备份与恢复约束见[平台部署](../deploy/README.md)。
 
 ## Current user identity

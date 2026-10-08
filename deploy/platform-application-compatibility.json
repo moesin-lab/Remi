@@ -1,0 +1,7 @@
+{
+  "dataSchema": "8cb9f38263f7770f637d7256a4a049c762614d01e816195e4d15a24e1f175aa8",
+  "rollbackSafeFrom": [
+    "6c5a69821d11ff3bdab9dd16bf024cb2b6b4fab11a65929aeaa9b5c666522bec"
+  ],
+  "reason": "From f16c4642a: one nullable update_mode column stores updater observations only; existing columns and data are unchanged and the previous code ignores this metadata. Older schema fingerprints are not attested after integrating main's usage and session migrations. Backup restore and target/previous migration rehearsal remain required."
+}

@@ -1,7 +1,8 @@
 import type { MultiremiPlatformOperation, MultiremiPlatformRelease } from "@multiremi/contracts";
 import type { PlatformUpdaterClient } from "./client.js";
 import { DrainCancelledError, PlatformDrainCoordinator } from "./drain.js";
-import { fetchReleaseFeed, fetchReleaseJson } from "./release-feed.js";
+import { parseReleaseFeed, fetchReleaseJson, unwrapReleaseManifest } from "./release-feed.js";
+import { releaseCapabilities } from "./release-capabilities.js";
 import { assertCompatible, RecoveryRequiredError } from "./safety.js";
 import type { PlatformDeploymentDriver } from "./types.js";
 import type { LocalProfileOperationOutbox } from "./operation-outbox.js";
@@ -19,6 +20,12 @@ export class PlatformUpdateWorker {
     const inspection = await this.driver.inspect();
     // A database restore can resurrect requests; reconcile durable host outcomes before claiming.
     await this.outbox?.reconcile(this.client, this.finalize);
+    const pending = await this.driver.pendingFinalization?.();
+    if (pending) {
+      await this.client.report(pending.operationId, pending.report);
+      await this.client.drainRelease(pending.operationId);
+      await this.driver.finalize?.(pending.operationId);
+    }
     // Always heartbeat and consume settings even when the feed is unreachable.
     const settings = await this.client.heartbeat(inspection, undefined, { defaultReleaseFeedUrl: this.defaultFeedUrl });
     const nextFeed = settings.releaseFeedUrl ?? this.defaultFeedUrl;
@@ -33,14 +40,29 @@ export class PlatformUpdateWorker {
   private async check(): Promise<void> {
     this.checkedAt = Date.now();
     const preflight = await this.driver.preflight();
+    preflight.source = this.feedUrl ? { url: this.feedUrl, manifestUrl: null, modes: [], error: null } : null;
     try {
       this.latest = null;
       if (!this.feedUrl) throw new Error("Configure a release feed URL in Web settings");
-      this.latest = await fetchReleaseFeed(this.feedUrl);
+      const feed = await fetchReleaseJson(this.feedUrl);
+      this.latest = parseReleaseFeed(feed, this.feedUrl);
+      const manifestUrl = this.latest.manifestUrl ?? this.feedUrl;
+      const manifest = unwrapReleaseManifest(manifestUrl === this.feedUrl ? feed : await fetchReleaseJson(manifestUrl));
+      if (manifest.ref !== this.latest.ref || String(manifest.version).replace(/^v/, '') !== this.latest.version.replace(/^v/, '')) {
+        throw new Error('Release feed and manifest identities differ; check updates again');
+      }
+      preflight.source = { url: this.feedUrl, manifestUrl, modes: releaseCapabilities(manifest, preflight.arch, this.driver.kind), error: null };
       preflight.checks.push({ code: "release_feed", ok: true, message: "Release feed is reachable" });
-      assertCompatible((await this.driver.inspect()).currentRelease, this.latest ?? {});
+      const artifacts = preflight.source.modes.find(item => item.mode === this.driver.updateMode);
+      if (artifacts) preflight.checks.push({ code: 'release_artifacts', ok: artifacts.available,
+        message: artifacts.available ? 'Release contains the artifacts for the active update mode'
+          : `Release is missing or has invalid artifacts for ${artifacts.mode}: ${artifacts.missing.join(', ')}` });
+      if (this.driver.validateRelease) {
+        await this.driver.validateRelease(manifest);
+      } else assertCompatible((await this.driver.inspect()).currentRelease, this.latest ?? {});
       preflight.checks.push({ code: "data_schema", ok: true, message: "Release data schema is compatible" });
     } catch (error) {
+      if (preflight.source && preflight.source.modes.length === 0) preflight.source.error = error instanceof Error ? error.message : String(error);
       preflight.checks.push({ code: "release_feed_or_schema", ok: false, message: error instanceof Error ? error.message : String(error) });
     }
     preflight.ready = preflight.checks.every((check) => check.ok);
@@ -50,7 +72,9 @@ export class PlatformUpdateWorker {
   private async execute(operation: MultiremiPlatformOperation): Promise<void> {
     // A differently configured updater cannot decide that another driver's
     // committed operation failed and release its maintenance gate.
-    if (operation.driver !== this.driver.kind) throw new Error("Operation driver does not match this updater; operation left untouched");
+    // An initial check may be queued before the host's first heartbeat has
+    // registered its driver. Checks are read-only and must unblock that setup.
+    if (operation.kind !== "check_updates" && operation.driver !== this.driver.kind) throw new Error("Operation driver does not match this updater; operation left untouched");
     const drain = operation.kind === "check_updates" ? null : new PlatformDrainCoordinator(this.client, operation.id, {
       timeoutMs: this.drainTimeoutMs,
       reason: `platform ${operation.kind} ${operation.targetVersion ?? ""}`.trim(),
@@ -92,17 +116,28 @@ export class PlatformUpdateWorker {
       releaseDrain = true;
     } finally {
       drain?.stopKeeper();
-      if (releaseDrain && drain) await drain.release();
+      if (releaseDrain && drain) {
+        await drain.release();
+        await this.driver.finalize?.(operation.id);
+      }
     }
   }
 
   private async resolveManifest(operation: MultiremiPlatformOperation): Promise<MultiremiPlatformOperation> {
     if (["switching", "restarting", "verifying", "rolling_back"].includes(operation.status)) return operation;
     if (operation.kind !== "update" || Object.keys(operation.targetManifest).length > 0) return operation;
-    const url = operation.targetRef ?? this.latest?.manifestUrl;
+    const targetIsUrl = operation.targetRef?.startsWith("https://");
+    if (operation.targetRef && !targetIsUrl && operation.targetRef !== this.latest?.ref) {
+      throw new Error("Requested release is no longer advertised; check updates again or provide its manifest URL");
+    }
+    const url = targetIsUrl ? operation.targetRef : this.latest?.manifestUrl;
     if (!url) throw new Error("Update has no manifest URL");
-    const manifest = await fetchReleaseJson(url);
-    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) throw new Error("Invalid deployment manifest");
-    return { ...operation, targetManifest: manifest as Record<string, unknown> };
+    const manifest = unwrapReleaseManifest(await fetchReleaseJson(url));
+    if (operation.targetVersion && operation.targetVersion.replace(/^v/, "") !== String(manifest.version).replace(/^v/, "")) {
+      throw new Error("Requested version does not match the release manifest; check updates again");
+    }
+    const expectedRef = !targetIsUrl ? operation.targetRef : url === this.latest?.manifestUrl ? this.latest.ref : null;
+    if (expectedRef && expectedRef !== manifest.ref) throw new Error("Requested release ref does not match the manifest; check updates again");
+    return { ...operation, targetManifest: manifest };
   }
 }

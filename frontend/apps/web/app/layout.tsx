@@ -8,6 +8,7 @@ import { WebProviders } from "@/components/web-providers";
 import type { SupportedLocale } from "@multiremi/core/i18n";
 import { RESOURCES } from "@multiremi/views/locales";
 import { getRequestLocale } from "@/lib/request-locale";
+import { publicWebRuntime } from "@/config/public-runtime";
 import "./globals.css";
 
 // Inter is the Latin UI face. next/font produces a hashed family (`__Inter_xxx`)
@@ -100,6 +101,7 @@ const HTML_LANG: Record<SupportedLocale, string> = {
   ja: "ja-JP",
 };
 
+
 export default async function RootLayout({
   children,
 }: {
@@ -155,7 +157,7 @@ export default async function RootLayout({
       </head>
       <body className="h-full overflow-hidden">
         <ThemeProvider>
-          <WebProviders locale={locale} resources={resources}>
+          <WebProviders locale={locale} resources={resources} runtime={publicWebRuntime(process.env)}>
             {children}
           </WebProviders>
           <Toaster />

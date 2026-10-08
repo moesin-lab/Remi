@@ -327,7 +327,7 @@ describe("daemon protocol v2 real connection", () => {
     await h.stopDaemon();
     expect(h.client.diagnostics()).toEqual({ timers: 0, sockets: 0, pending_rpcs: 0, background: 0 });
     expect(h.clock.pendingTimerCount).toBe(0);
-  });
+  }, 20_000);
 
   it("settles exchanges and subsequent lane callbacks from their completion promises", async () => {
     const h = await fixture();

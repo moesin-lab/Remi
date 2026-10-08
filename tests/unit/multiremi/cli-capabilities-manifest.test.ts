@@ -2,6 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { cliCommandHelp, cliCommandInventory } from "../../../apps/remi/cli/index.js";
+import { collaborationCommandSpecs } from "../../../apps/remi/cli/commands/collaboration.js";
+import { CommandRegistry } from "../../../apps/remi/cli/core/index.js";
 import { CLI_CAPABILITIES_RUNTIME } from "../../../packages/server/src/api/cli-capabilities-generated.js";
 import {
   cliCoverageReport,
@@ -166,6 +168,50 @@ describe("CLI capabilities manifest", () => {
     }
   });
 
+  it("retains former Issue Session alias paths as native commands with their Issue arguments", () => {
+    const registry = new CommandRegistry();
+    for (const spec of collaborationCommandSpecs()) registry.register(spec);
+    const cases = [
+      {
+        id: "issue.session.list",
+        argv: ["issue", "session", "list", "MUL-1"],
+        route: "GET /api/issues/:id/sessions",
+      },
+      {
+        id: "issue.session.result.list",
+        argv: ["issue", "session", "result", "list", "MUL-1", "--session", "ises_1"],
+        route: "GET /api/issues/:id/session-results",
+      },
+      {
+        id: "issue.session.result.publish",
+        argv: ["issue", "session", "result", "publish", "MUL-1", "--session", "ises_1", "--content", "Done"],
+        route: "POST /api/issues/:id/sessions/:sessionId/results",
+      },
+    ];
+    for (const { id, argv, route } of cases) {
+      const invocation = registry.resolve(argv);
+      expect(invocation, id).not.toBeNull();
+      expect(invocation!.spec.id, id).toBe(id);
+      expect(invocation!.alias, id).toBeNull();
+      expect(invocation!.positionals, id).toEqual(["MUL-1"]);
+      expect(invocation!.spec.positionals?.[0]?.name, id).toBe("issue");
+      if (id !== "issue.session.list") expect(invocation!.options.session, id).toBe("ises_1");
+
+      const commandPath = `remi ${invocation!.spec.path.join(" ")}`;
+      expect(manifest.commands[id], id).toMatchObject({
+        command: commandPath,
+        aliases: [],
+        capability: id,
+        auth: ["human", "task"],
+        migration_status: "native",
+      });
+      expect(manifest.aliases[commandPath], id).toBeUndefined();
+      expect(manifest.routes[route], id).toEqual({ command: id });
+      expect(cliCommandHelp(invocation!.spec.path), id).toContain("<issue>");
+      expect(cliCommandHelp(invocation!.spec.path), id).not.toContain("<chat>");
+    }
+  });
+
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
     // The merged 799-route inventory retains downstream Session, execution
     // configuration and updater commands and maps the four usage report/price
@@ -287,7 +333,9 @@ describe("CLI capabilities manifest", () => {
       deprecated_since: "0.3.0",
     });
     expect(Object.values(manifest.routes).filter((route) => "planned_command" in route)).toEqual([]);
-    expect(Object.keys(manifest.aliases)).toHaveLength(50);
+    // The three Issue Session paths above remain executable as native commands,
+    // so only the remaining deprecated paths belong in the alias inventory.
+    expect(Object.keys(manifest.aliases)).toHaveLength(47);
     for (const [legacy, alias] of Object.entries(manifest.aliases)) {
       expect(migrationDoc, legacy).toContain(`| \`${legacy}\` | \`${alias.replacement}\` |`);
     }

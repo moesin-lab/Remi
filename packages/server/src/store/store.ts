@@ -4650,6 +4650,10 @@ runMigrations(this.db);
     return this.sessions.getIssueSession(id);
   }
 
+  getIssueSessionWithOwnerScope(id: string): { session: MultiremiIssueSession; ownerWorkspaceId: string | null } | null {
+    return this.sessions.getIssueSessionWithOwnerScope(id);
+  }
+
   getSessionInheritedContext(sessionId: string): MultiremiSessionInheritedContext | null {
     return this.sessions.getSessionInheritedContext(sessionId);
   }

@@ -46,7 +46,7 @@ interface FanoutFixture {
   chatSessionId: string | null;
 }
 
-function createDelegationFixture(): DelegationFixture {
+function createDelegationFixture(owner: "chat" | "issue" = "chat"): DelegationFixture {
   const store = createStore();
   const leaderRuntime = store.registerRuntime({
     id: "rt_delegation_leader",
@@ -80,8 +80,8 @@ function createDelegationFixture(): DelegationFixture {
     assigneeType: "squad",
     assigneeId: squad.id,
   });
-  const chat = store.createChatSession({ agentId: leader.id });
-  const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Delegation" });
+  const chat = owner === "chat" ? store.createChatSession({ agentId: leader.id }) : null;
+  const session = store.createIssueSession(issue.id, { chatId: chat?.id, title: "Delegation" });
   const leaderTask = store.createSessionTask(session.id, {
     agentId: leader.id,
     prompt: "Lead the implementation.",
@@ -99,7 +99,7 @@ function createDelegationFixture(): DelegationFixture {
   const childTask = store.listTasksForIssue(issue.id).find((task) => task.agentId === qa.id)!;
   expect(childTask).toMatchObject({
     delegatedByAgentId: leader.id,
-    chatSessionId: chat.id,
+    chatSessionId: chat?.id ?? null,
     issueSessionId: session.id,
     status: "queued",
   });
@@ -268,9 +268,42 @@ function countFeishuRoundPushes(): number {
 }
 
 describe("task-level agent delegation return", () => {
+  it("keeps a private Chat delegation reply and receipt in its Session while the return remains claimable", async () => {
+    const f = createDelegationFixture("chat");
+    const output = "PRIVATE_DELEGATION_TERMINAL_BODY";
+    f.store.completeTask(f.childTask.id, { output });
+    const returned = f.store.getTask(f.store.getTask(f.childTask.id)!.delegationReturnTaskId!)!;
+    const entry = inboxReportEntry(f.store, returned, f.childTask.id);
+    expect(entry.kind).toBe("system");
+    expect(entry.body_md).toContain(output);
+    expect(returned.chatSessionId).toBe(f.childTask.chatSessionId);
+    expect(f.store.listIssueComments(f.issue.id).some(comment => comment.body.includes(output))).toBe(false);
+    expect(JSON.stringify(f.store.listIssueActivity(f.issue.id))).not.toContain(output);
+    expect(f.store.claimTask(f.leaderRuntime.id)?.id).toBe(returned.id);
+    expect(f.store.buildTaskSessionProjection(returned.id)?.jsonl).toContain(output);
+    f.store.startTask(returned.id);
+    f.store.completeTask(returned.id, { output: "PRIVATE_DELEGATION_REVIEW_BODY" });
+    expect(f.store.hasInboxReceiptCovering(returned.issueSessionId!, f.leader.id, entry.seq)).toBe(true);
+    expect(inboxReportEntry(f.store, returned, f.childTask.id).id).toBe(entry.id);
+
+    const app = createMultiremiApp({ store: f.store, authToken: "private-delegation-master", shareSecret: "private-delegation-share" });
+    const shareResponse = await app.request(`/api/issues/${f.issue.id}/share`, {
+      method: "POST", headers: { Authorization: "Bearer private-delegation-master" },
+    });
+    expect(shareResponse.status).toBe(201);
+    const shared = await shareResponse.json() as { share: { token: string } };
+    const shareRead = await app.request(`/api/shares/${shared.share.token}`, {
+      headers: { "X-Remi-Share": shared.share.token },
+    });
+    expect(shareRead.status).toBe(200);
+    const body = await shareRead.text();
+    expect(body).not.toContain(output);
+    expect(body).not.toContain("PRIVATE_DELEGATION_REVIEW_BODY");
+  });
+
   for (const commented of [false, true]) {
     it(`MUL-498 rings a bounded doorbell pointing to the ${commented ? "agent" : "automatic"} reply`, () => {
-      const f = createDelegationFixture();
+      const f = createDelegationFixture("issue");
       try {
         const output = "长过程文字".repeat(25_000);
         const authored = commented ? f.store.createIssueComment(f.issue.id, {
@@ -294,7 +327,7 @@ describe("task-level agent delegation return", () => {
   }
 
   it("keeps completion and a task-result pointer when the automatic comment write fails", () => {
-    const f = createDelegationFixture();
+    const f = createDelegationFixture("issue");
     const run = db!.run.bind(db!);
     const failure = spyOn(db!, "run").mockImplementation((sql: string, ...parameters: any[]) => {
       if (sql.includes("INSERT INTO multiremi_issue_comments") && parameters[0]?.[3] === "agent") {

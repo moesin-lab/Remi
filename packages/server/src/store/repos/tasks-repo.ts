@@ -1523,9 +1523,8 @@ export class TasksRepo {
   listActiveTasksForIssue(issueId: string, access: TaskSnapshotAccess): MultiremiTask[] {
     const params: Array<string | null> = [issueId, ...ACTIVE_TASK_STATUSES];
     let chatIdentity = "";
-    let taskIdentity = "";
     if (access.taskToken) {
-      taskIdentity = " AND task.id = ? AND task.agent_id = ? AND task.workspace_id = ?";
+      chatIdentity = " AND task.id = ? AND task.agent_id = ? AND task.workspace_id = ?";
       params.push(access.taskToken.taskId, access.taskToken.agentId, access.taskToken.workspaceId);
     } else if (access.userId !== null) {
       chatIdentity = " AND COALESCE(chat.creator_id, 'local') = ?";
@@ -1534,9 +1533,12 @@ export class TasksRepo {
     const rows = this.ctx.db.query(`SELECT ${SNAPSHOT_PUBLIC_COLUMNS.map(column => `task.${column}`).join(", ")}
       FROM multiremi_tasks task
       WHERE task.issue_id = ? AND task.status IN (${ACTIVE_TASK_STATUSES.map(() => "?").join(", ")})
-        AND (task.chat_session_id IS NULL OR task.chat_session_id = '' OR EXISTS (
+        AND (((task.chat_session_id IS NULL OR task.chat_session_id = '') AND NOT EXISTS (
+          SELECT 1 FROM multiremi_issue_sessions session
+          WHERE session.id = task.issue_session_id AND session.chat_id IS NOT NULL
+        )) OR EXISTS (
           SELECT 1 FROM multiremi_chat_sessions chat WHERE chat.id = task.chat_session_id${chatIdentity}
-        ))${taskIdentity}
+        ))
       ORDER BY task.created_at DESC`).all(...params) as Row[];
     // listTasksForIssue does not attach autopilot-run summaries; preserve that shape.
     return this.toTasks(rows);
@@ -3156,17 +3158,19 @@ export class TasksRepo {
     const activePlaceholders = ACTIVE_TASK_STATUSES.map(() => "?").join(", ");
     const identityParams: Array<string | null> = [];
     let chatAccess = "";
-    let taskAccess = "";
     if (access) {
       let sessionAccess = "";
       if (access.taskToken) {
-        taskAccess = " AND task.id = ? AND task.agent_id = ? AND task.workspace_id = ?";
+        sessionAccess = " AND task.id = ? AND task.agent_id = ? AND task.workspace_id = ?";
         identityParams.push(access.taskToken.taskId, access.taskToken.agentId, access.taskToken.workspaceId);
       } else if (access.userId !== null) {
         sessionAccess = " AND COALESCE(chat.creator_id, 'local') = ?";
         identityParams.push(access.userId);
       }
-      chatAccess = ` AND (task.chat_session_id IS NULL OR task.chat_session_id = '' OR EXISTS (
+      chatAccess = ` AND (((task.chat_session_id IS NULL OR task.chat_session_id = '') AND NOT EXISTS (
+        SELECT 1 FROM multiremi_issue_sessions session
+        WHERE session.id = task.issue_session_id AND session.chat_id IS NOT NULL
+      )) OR EXISTS (
         SELECT 1 FROM multiremi_chat_sessions chat WHERE chat.id = task.chat_session_id${sessionAccess}
       ))`;
     }
@@ -3187,7 +3191,7 @@ export class TasksRepo {
        )
        SELECT ${columns} FROM multiremi_tasks task
        JOIN candidates ON candidates.id = task.id
-       WHERE 1 = 1${chatAccess}${taskAccess}
+       WHERE 1 = 1${chatAccess}
        ORDER BY task.updated_at DESC`,
     ).all(workspaceId, workspaceId, ...ACTIVE_TASK_STATUSES, ...identityParams) as Row[];
     // Visibility is applied after ranking: an invisible newest outcome must not

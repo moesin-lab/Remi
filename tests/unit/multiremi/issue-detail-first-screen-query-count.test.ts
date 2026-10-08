@@ -109,7 +109,6 @@ describe("MUL-385 issue detail first-screen response shape", () => {
     const { store, db } = createStore();
     const app = createMultiremiApp({ store, authToken: AUTH_TOKEN });
     const fixture = seedIssueDetailFirstScreenFixture(store, {
-      legacyIssueSessions: true,
       run: (sql, params) => { runPinned(db, sql, params); },
     });
 
@@ -246,6 +245,8 @@ describe("MUL-385 issue detail first-screen query counts", () => {
     const publicAgent = store.createAgent({ id: "agt_first_screen_public", name: "Shared", provider: "codex", ownerId: "alice", visibility: "workspace" });
     const privateAgent = store.createAgent({ id: "agt_first_screen_private", name: "Private", provider: "codex", ownerId: "bob", visibility: "private" });
     const issue = store.createIssue({ id: "iss_first_screen_access", title: "Shared issue", workspaceId: "local" });
+    const main = store.getOrCreateDefaultIssueSession(issue.id);
+    expect(main).toMatchObject({ ownerType: "issue", ownerId: issue.id, chatId: null });
     const addChat = (id: string, creatorId: string, agentId = publicAgent.id) => {
       const chat = store.createChatSession({ id, agentId, creatorId, workspaceId: "local" });
       const session = store.getOrCreateDefaultChatSession(chat.id, creatorId);
@@ -281,29 +282,31 @@ describe("MUL-385 issue detail first-screen query counts", () => {
     // the comparison against later requests with the same credential.
     await read(aliceHeaders);
     probe.reset();
-    expect((await read(aliceHeaders)).map((session) => session.id)).toEqual([aliceVisible]);
+    const initialSessions = await read(aliceHeaders);
+    expect(initialSessions.map((session) => session.id).sort()).toEqual([main.id, aliceVisible].sort());
+    expect(initialSessions.find((session) => session.id === main.id)?.participants).toEqual([]);
     const initialCount = probe.statements;
-    expect((await read(await headersFor("bob"))).map((session) => session.id)).toEqual([bobVisible]);
+    expect((await read(await headersFor("bob"))).map((session) => session.id).sort()).toEqual([main.id, bobVisible].sort());
     // Admin may access a private Agent, but remains restricted to their own Chat.
-    expect((await read(await headersFor("admin"))).map((session) => session.id)).toEqual([adminVisible]);
-    expect((await read(AUTH_HEADERS)).map((session) => session.id)).toEqual([]);
+    expect((await read(await headersFor("admin"))).map((session) => session.id).sort()).toEqual([main.id, adminVisible].sort());
+    expect((await read(AUTH_HEADERS)).map((session) => session.id)).toEqual([main.id]);
     const outsiders = await headersFor("outsider");
     expect((await app.request(path, { headers: outsiders })).status).toBe(404);
     for (let index = 0; index < 12; index += 1) addChat(`chat_first_screen_extra_${index}`, "alice");
     probe.reset();
     const expanded = await read(aliceHeaders);
-    expect(expanded).toHaveLength(13);
-    expect(expanded.every((session) => session.participants.length > 0)).toBe(true);
+    expect(expanded).toHaveLength(initialSessions.length + 12);
+    expect(expanded.filter((session) => session.id !== main.id).every((session) => session.participants.length > 0)).toBe(true);
     expect(expanded.some((session) => session.id === alicePrivate)).toBe(false);
     expect(expanded.some((session) => session.id === inconsistentChat)).toBe(false);
     expect(expanded.some((session) => session.id === foreignSession.id)).toBe(false);
     expect(probe.statements).toBe(initialCount);
     expect([...probe.bySql.keys()].filter((sql) => sql.includes("FROM multiremi_session_participants"))).toHaveLength(1);
-    const task = store.createTask({ id: "tsk_first_screen_access", agentId: publicAgent.id, prompt: "Credential scope" });
+    const task = store.createSessionTask(aliceVisible, { agentId: publicAgent.id, prompt: "Credential scope" });
     const taskCredential = await store.createAccessToken({ name: "Task", type: "task", userId: "alice",
       agentId: publicAgent.id, taskId: task.id, workspaceId: "local" });
     const taskSessions = await read({ Authorization: `Bearer ${taskCredential.token}` });
-    expect(taskSessions.map((session) => session.id).sort()).toEqual(expanded.map((session) => session.id).sort());
+    expect(taskSessions.map((session) => session.id)).toEqual([aliceVisible]);
     // Private-Agent ownership changes are evaluated afresh on each request.
     store.updateAgent(privateAgent.id, { ownerId: "alice" });
     expect((await read(aliceHeaders)).some((session) => session.id === alicePrivate)).toBe(true);

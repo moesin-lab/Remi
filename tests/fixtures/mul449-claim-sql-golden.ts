@@ -1,6 +1,7 @@
 // Byte-exact claim statement: MUL-449 preserves the captured SELECT predicates;
 // only ordinary Chat tasks participate in the legacy Chat queue. Report recovery
-// preserves offer authority only when the Runtime matches.
+// preserves offer authority only when the Runtime matches. Shared Chat checkout
+// leases include outstanding offers, whose recovery may bypass a newer head.
 export const MUL449_CLAIM_SQL_GOLDEN = String.raw`UPDATE multiremi_tasks
        SET offered_at = CASE WHEN runtime_id = ? THEN offered_at ELSE NULL END,
            accepted_at = CASE WHEN runtime_id = ? THEN accepted_at ELSE NULL END,
@@ -17,7 +18,7 @@ export const MUL449_CLAIM_SQL_GOLDEN = String.raw`UPDATE multiremi_tasks
            AND (t.next_retry_at IS NULL OR t.next_retry_at <= ?)
            AND a.archived_at IS NULL
            AND (t.chat_session_id IS NULL OR project_chat.status = 'active')
-           AND (t.issue_session_id IS NOT NULL OR NOT EXISTS (
+           AND (t.issue_session_id IS NOT NULL OR t.offered_at IS NOT NULL OR NOT EXISTS (
              SELECT 1 FROM multiremi_tasks earlier WHERE earlier.chat_session_id = t.chat_session_id
                AND earlier.issue_session_id IS NULL
                AND earlier.status = 'queued' AND (
@@ -192,6 +193,17 @@ export const MUL449_CLAIM_SQL_GOLDEN = String.raw`UPDATE multiremi_tasks
     OR (t.issue_id IS NOT NULL AND t.issue_session_id IS NULL
       AND active.issue_id = t.issue_id AND active.issue_session_id IS NULL)
   )))
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM multiremi_tasks active
+             WHERE active.id <> t.id
+               AND (active.status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
+                 OR (active.status = 'queued' AND active.offered_at IS NOT NULL))
+               AND (t.chat_session_id IS NOT NULL
+    AND active.chat_session_id = t.chat_session_id
+    AND t.runtime_workspace_id IS NULL AND active.runtime_workspace_id IS NULL
+    AND (t.issue_session_id IS NULL OR t.issue_id IS NULL)
+    AND (active.issue_session_id IS NULL OR active.issue_id IS NULL))
            )
            AND t.codex_profile IS NULL
            AND t.claude_profile IS NULL

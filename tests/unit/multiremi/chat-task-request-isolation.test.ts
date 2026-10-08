@@ -23,12 +23,9 @@ async function fixture(topic = false) {
   const session = topic
     ? defaultSession
     : store.createIssueSession(issue.id, { title: "Original task session" });
-  const task = store.createTask({
-    agentId: agent.id,
-    chatSessionId: chat.id,
-    prompt: "Continue the conversation",
-    ...(topic ? { issueId: issue.id, issueSessionId: session.id } : {}),
-  });
+  const task = topic
+    ? store.createSessionTask(session.id, { agentId: agent.id, prompt: "Continue the topic's work Session" })
+    : store.sendChatMessage(chat.id, { body: "Continue the conversation" }).task;
   // Model the persisted audit row of a task already running when the migration
   // detaches its ordinary Chat. The task credential remains valid for this run.
   db!.run(`UPDATE multiremi_tasks SET status = 'running', issue_id = ?, issue_session_id = ? WHERE id = ?`,
@@ -173,7 +170,12 @@ describe("Chat task request isolation", () => {
   });
 
   it("accepts matching Feishu topic transport tasks and rejects a different Issue with 400", async () => {
-    const { store, app, headers, agent, chat, issue } = await fixture(true);
+    const { store, app, agent, chat, issue } = await fixture(true);
+    const source = store.sendChatMessage(chat.id, { body: "Continue the topic conversation" }).task;
+    expect(store.getTaskChatExecutionKind(source)).toBe("topic");
+    expect(source.issueSessionId).toBeNull();
+    const token = await store.createTaskAccessToken(source, "local");
+    const headers = { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" };
     const other = store.createIssue({ title: "Unrelated Issue" });
     for (const [issueId, status] of [[issue.id, 201], [other.id, 400]] as const) {
       const before = store.listTasks().length;

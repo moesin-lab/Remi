@@ -547,20 +547,31 @@ export function canCurrentUserAccessChatTask(
   memo?: TaskAuthMemo,
 ): boolean {
   const token = currentAccessToken(c);
-  if (token?.type === "task" && (token.taskId !== task.id
-    || token.agentId !== task.agentId || token.workspaceId !== task.workspaceId)) return false;
   if (task.issueSessionId) {
     if (memo && !memo.sessions.has(task.issueSessionId)) {
       memo.sessions.set(task.issueSessionId, store.getIssueSession(task.issueSessionId));
     }
     const session = memo ? memo.sessions.get(task.issueSessionId) : store.getIssueSession(task.issueSessionId);
-    if (!session || session.workspaceId !== task.workspaceId || session.chatId !== task.chatSessionId
-      || denySessionOwnerAccess(c, store, session, memo)) return false;
+    if (!session || session.workspaceId !== task.workspaceId || session.chatId !== task.chatSessionId) return false;
+    if (session.chatId) {
+      if (denySessionOwnerAccess(c, store, session, memo)) return false;
+    } else {
+      if (session.issueId && memo && !memo.issues.has(session.issueId)) {
+        memo.issues.set(session.issueId, store.getIssue(session.issueId));
+      }
+      const issue = session.issueId
+        ? memo ? memo.issues.get(session.issueId) : store.getIssue(session.issueId)
+        : null;
+      if (!issue || issue.workspaceId !== session.workspaceId) return false;
+    }
   }
+  // Public Issue tasks retain the route's workspace/owner baseline. Session
+  // content has its own stricter guard; exact-task capability checks apply to
+  // private Chat tasks, including historical Chat ids kept after deletion.
   if (!task.chatSessionId) return true;
   if (!currentUserWorkspaceAccessAllowed(c, store, memo, task.workspaceId)) return false;
   const session = memoizedChatSession(store, memo, task.chatSessionId);
-  if (!session) return false;
+  if (!session || session.workspaceId !== task.workspaceId) return false;
   if (token?.type === "task") return token.taskId === task.id
     && token.agentId === task.agentId && token.workspaceId === task.workspaceId;
   return canUserViewTaskMessages(store, currentRequestUserId(c), task, memo);
@@ -746,9 +757,13 @@ export function denySessionOwnerAccess(
   store: MultiremiStore,
   session: MultiremiIssueSession,
   memo?: TaskAuthMemo,
+  ownerScope?: { ownerWorkspaceId: string | null },
 ): Response | null {
   if (!currentUserWorkspaceAccessAllowed(c, store, memo, session.workspaceId)) {
     return denyCurrentUserWorkspaceAccess(c, store, session.workspaceId);
+  }
+  if (ownerScope && ownerScope.ownerWorkspaceId !== session.workspaceId) {
+    return c.json({ error: "session not found" }, 404);
   }
   if (session.chatId) {
     const chat = memoizedChatSession(store, memo, session.chatId);
@@ -765,6 +780,9 @@ export function denySessionOwnerAccess(
     return agent && agent.workspaceId === chat.workspaceId && canCurrentUserAccessAgent(c, store, agent)
       ? null : c.json({ error: "you do not have access to this agent" }, 403);
   }
+  // The log route reads this scope with the Session in one server-side query.
+  // Other callers still resolve and validate the Issue below.
+  if (ownerScope) return null;
   if (session.issueId && memo && !memo.issues.has(session.issueId)) {
     memo.issues.set(session.issueId, store.getIssue(session.issueId));
   }
@@ -780,8 +798,9 @@ export function denySessionAccess(
   c: Context,
   store: MultiremiStore,
   session: MultiremiIssueSession,
+  ownerScope?: { ownerWorkspaceId: string | null },
 ): Response | null {
-  const ownerDenied = denySessionOwnerAccess(c, store, session);
+  const ownerDenied = denySessionOwnerAccess(c, store, session, undefined, ownerScope);
   if (ownerDenied) return ownerDenied;
   const token = currentAccessToken(c);
   if (token?.type === "task") {

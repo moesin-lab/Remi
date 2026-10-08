@@ -38,7 +38,6 @@ try {
   const store = new MultiremiStore(db);
   const app = createMultiremiApp({ store, authToken: AUTH_TOKEN });
   const fixture = seedIssueDetailFirstScreenFixture(store, {
-    legacyIssueSessions: true,
     run: (sql, params) => { runPinned(db, sql, params); },
   });
 
@@ -52,7 +51,7 @@ try {
   const golden = {
     name: "MUL-385 issue detail first-screen responses",
     capturedAt: "<timestamp>",
-    source: "pre-optimization implementation (parent commit of agent/MUL-385)",
+    source: "dual-owned Session contract (20261008)",
     fixture: {
       issueId: fixture.issueId,
       issueKey: fixture.issueKey,

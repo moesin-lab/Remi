@@ -1696,9 +1696,10 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   });
   const logSessionAccess = (c: Context): { sessionId: string; inheritedParentRange?: true } | Response => {
     const sessionId = c.req.param("sessionId") ?? "";
-    const workSession = store.getIssueSession(sessionId);
-    if (workSession) {
-      const denied = denySessionAccess(c, store, workSession);
+    const workScope = store.getIssueSessionWithOwnerScope(sessionId);
+    if (workScope) {
+      const workSession = workScope.session;
+      const denied = denySessionAccess(c, store, workSession, workScope);
       if (denied && c.req.path.endsWith("/log/entry") && c.req.query("from") != null && c.req.query("to") != null
         && c.req.query("seq") == null && c.req.query("id") == null
         && canTaskReadInheritedSessionRange(c, store, workSession, Number(c.req.query("from")), Number(c.req.query("to")))) {
@@ -2060,11 +2061,13 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
-    const coordinating = canTaskCoordinateSession(c, store, session);
-    const sessionDenied = coordinating ? null : denySessionAccess(c, store, session);
-    if (sessionDenied) return sessionDenied;
     const dispatchDenied = denySideSessionAgentDispatch(c, store);
     if (dispatchDenied) return dispatchDenied;
+    const coordinating = canTaskCoordinateSession(c, store, session);
+    const sessionDenied = coordinating ? null : session.chatId
+      ? denySessionAccess(c, store, session)
+      : denySessionOwnerAccess(c, store, session);
+    if (sessionDenied) return sessionDenied;
     const body = await readJson<CreateSessionTaskInput>(c);
     const agentId = cleanString(body.agentId ?? body.agent_id);
     const agent = agentId ? store.getAgent(agentId) : null;

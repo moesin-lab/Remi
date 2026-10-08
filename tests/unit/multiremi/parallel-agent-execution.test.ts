@@ -5,7 +5,7 @@ import { runMigrations } from "@multiremi/store/migrations.js";
 
 afterEach(resetMultiremiTestEnv);
 
-function fixture() {
+function fixture(owner: "chat" | "issue" = "chat") {
   const store = createStore();
   const runtime = store.registerRuntime({ id: "parallel", name: "parallel", provider: "claude", maxConcurrency: 6,
     metadata: { parallel_agent_execution: 1, cli_version: "0.2.66" } });
@@ -13,8 +13,8 @@ function fixture() {
   const worker = store.createAgent({ name: "Worker", provider: "claude" });
   const qa = store.createAgent({ name: "QA", provider: "claude" });
   const issue = store.createIssue({ title: "Concurrent delivery" });
-  const chat = store.createChatSession({ agentId: leader.id });
-  const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Concurrent delivery" });
+  const chat = owner === "chat" ? store.createChatSession({ agentId: leader.id }) : null;
+  const session = store.createIssueSession(issue.id, { chatId: chat?.id, title: "Concurrent delivery" });
   const main = store.createTask({ agentId: leader.id, issueId: issue.id, issueSessionId: session.id, prompt: "coordinate" });
   expect(store.claimTask(runtime.id)?.id).toBe(main.id);
   store.buildTaskSessionProjection(main.id);
@@ -52,7 +52,7 @@ describe("parallel agent execution", () => {
   });
 
   it("keeps one task's comment from suppressing another task's final answer", () => {
-    const f = fixture();
+    const f = fixture("issue");
     const first = f.delegate(f.worker.id, "dlg_first");
     const second = f.delegate(f.worker.id, "dlg_second");
     f.store.claimTask(f.runtime.id);

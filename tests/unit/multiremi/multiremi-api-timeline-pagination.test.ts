@@ -163,12 +163,18 @@ describe("issue timeline reverse pagination", () => {
     expect(scoped.entries.map((entry) => entry.type)).toEqual(["comment"]);
   });
 
-  it("resolves @default to the default, then the first session, then aggregate", async () => {
+  it("resolves @default only to the Issue Main and otherwise uses aggregate without adopting another Session", async () => {
     const { store, db } = createStore();
     const app = createMultiremiApp({ store, authToken: AUTH_TOKEN });
     const issue = store.createIssue({ title: "Default primer", workspaceId: "local" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const sibling = store.createIssueSession(issue.id, { title: "Sibling" });
+    const agent = store.createAgent({ name: "Private worker", provider: "claude" });
+    const chat = store.createChatSession({ agentId: agent.id });
+    const projected = store.getOrCreateDefaultChatSession(chat.id);
+    db.run("UPDATE multiremi_issue_sessions SET issue_id = ? WHERE id = ?", [issue.id, projected.id]);
+    store.appendSessionEvent(projected.id, { authorType: "member", body: "PRIVATE_DEFAULT_MARKER" });
+    const before = store.listIssueSessions(issue.id, true).map((session) => session.id).sort();
 
     const withDefault = await (await app.request(
       `/api/issues/${issue.id}/timeline?issue_session_id=%40default&limit=40`,
@@ -176,22 +182,25 @@ describe("issue timeline reverse pagination", () => {
     )).json();
     expect(withDefault.issue_session_id).toBe(main.id);
 
-    db.run("UPDATE multiremi_issue_sessions SET is_default = 0 WHERE issue_id = ?", [issue.id]);
-    const expectedFirst = store.listIssueSessions(issue.id)[0]!.id;
+    db.run("UPDATE multiremi_issue_sessions SET is_default = 0 WHERE id = ?", [main.id]);
     const withoutDefault = await (await app.request(
       `/api/issues/${issue.id}/timeline?issue_session_id=%40default&limit=40`,
       { headers: AUTH_HEADERS },
     )).json();
-    expect(withoutDefault.issue_session_id).toBe(expectedFirst);
-    expect([main.id, sibling.id]).toContain(expectedFirst);
+    expect(withoutDefault.issue_session_id).toBeNull();
+    expect(withoutDefault.entries.some((entry: { type: string }) => entry.type === "activity")).toBe(true);
+    expect(JSON.stringify(withoutDefault)).not.toContain("PRIVATE_DEFAULT_MARKER");
 
-    db.run("DELETE FROM multiremi_issue_sessions WHERE issue_id = ?", [issue.id]);
-    const withoutSession = await (await app.request(
+    db.run("UPDATE multiremi_issue_sessions SET is_default = 1, status = 'archived' WHERE id = ?", [main.id]);
+    const withoutActiveMain = await (await app.request(
       `/api/issues/${issue.id}/timeline?issue_session_id=%40default&limit=40`,
       { headers: AUTH_HEADERS },
     )).json();
-    expect(withoutSession.issue_session_id).toBeNull();
-    expect(withoutSession.entries.some((entry: { type: string }) => entry.type === "activity")).toBe(true);
+    expect(withoutActiveMain.issue_session_id).toBeNull();
+    expect(JSON.stringify(withoutActiveMain)).not.toContain("PRIVATE_DEFAULT_MARKER");
+    expect(store.listIssueSessions(issue.id, true).map((session) => session.id).sort()).toEqual(before);
+    expect(store.getIssueSession(sibling.id)?.isDefault).toBe(false);
+    expect(store.getIssueSession(projected.id)).toMatchObject({ ownerType: "chat", ownerId: chat.id, isDefault: true });
   });
 
   it("rejects invalid limits and cursors", async () => {

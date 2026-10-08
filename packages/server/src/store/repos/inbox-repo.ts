@@ -86,12 +86,20 @@ export class InboxRepo {
               ? { recipient_agent_id: recipient.agentId } : {}),
           } };
           if (recipient.issueSessionId) {
-            const comment = this.ctx.issues().createSystemIssueCommentWithinTransaction(
-              recipient.issueId!, recipientBody, { type: "envelope", ...metadata }, deferredEvents,
-              null, recipient.issueSessionId, id,
-            );
-            deferredEvents.workspace.push({ type: "comment:created", workspaceId: recipient.workspaceId,
-              actorType: "system", actorId: comment.authorId, payload: { comment } });
+            const session = this.ctx.issueSessions().getIssueSession(recipient.issueSessionId);
+            if (session?.chatId) {
+              this.ctx.conversationLog().appendWithinTransaction({
+                sessionId, id, kind: "system", authorType: "system", bodyMd: recipientBody,
+                metadata: { type: "envelope", ...metadata },
+              });
+            } else {
+              const comment = this.ctx.issues().createSystemIssueCommentWithinTransaction(
+                recipient.issueId!, recipientBody, { type: "envelope", ...metadata }, deferredEvents,
+                null, recipient.issueSessionId, id,
+              );
+              deferredEvents.workspace.push({ type: "comment:created", workspaceId: recipient.workspaceId,
+                actorType: "system", actorId: comment.authorId, payload: { comment } });
+            }
           } else {
             const written = this.ctx.chat().createPendingAgentIssueUpdateWithinTransaction(sessionId, recipientBody, { id, metadata: { ...metadata } });
             afterCommit(this.ctx.db, () => this.ctx.emitChatEvent(written.session, "chat:message", { message: written.message }, {
@@ -182,7 +190,7 @@ export class InboxRepo {
       throw new Error("Envelope Issue session does not belong to the recipient Issue");
     }
     return { workspaceId: issue.workspaceId, agentId: agent.id, issueId: issue.id,
-      issueSessionId: session.id, chatSessionId: null, executionScope };
+      issueSessionId: session.id, chatSessionId: session.chatId, executionScope };
   }
 
   private resolveRecipients(env: Envelope): EnvelopeRecipient[] {

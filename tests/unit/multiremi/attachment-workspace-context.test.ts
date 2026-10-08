@@ -94,7 +94,12 @@ describe("native attachment workspace context", () => {
   });
 
   it("allows an attachment to the caller's chat in the authorized workspace", async () => {
-    const { app, headers, workspace, chat } = await fixture();
+    const { store, app, user, workspace, chat } = await fixture();
+    const sent = store.sendChatMessage(chat.id, { body: "Upload a file to this conversation" });
+    expect(sent.message.taskId).toBe(sent.task.id);
+    expect(store.getTaskChatExecutionKind(sent.task)).toBe("ordinary");
+    const token = await store.createTaskAccessToken(sent.task, user.id);
+    const headers = { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" };
     const response = await app.request("/api/multiremi/attachments", {
       method: "POST", headers,
       body: JSON.stringify({ ...file, workspaceId: workspace.id, chat_session_id: chat.id }),

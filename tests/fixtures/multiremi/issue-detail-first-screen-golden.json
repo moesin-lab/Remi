@@ -1,7 +1,7 @@
 {
   "name": "MUL-385 issue detail first-screen responses",
   "capturedAt": "<timestamp>",
-  "source": "pre-optimization implementation (parent commit of agent/MUL-385)",
+  "source": "dual-owned Session contract (20261008)",
   "fixture": {
     "issueId": "iss_mul385_long",
     "issueKey": "MUL-1",
@@ -198,7 +198,9 @@
   },
   "sessions": [
     {
-      "id": "ises_3ru5sqbftvq8",
+      "id": "ises_ph300b157ctf",
+      "owner_type": "issue",
+      "owner_id": "iss_mul385_long",
       "chat_id": null,
       "issue_id": "iss_mul385_long",
       "workspace_id": "local",
@@ -213,14 +215,14 @@
       "inherit_cutoff_seq": null,
       "inherited_event_count": 0,
       "summary": null,
-      "created_by_type": "member",
+      "created_by_type": "system",
       "created_by_id": "local",
       "created_at": "<timestamp>",
       "updated_at": "<timestamp>",
       "participants": [
         {
           "id": "spart_miygz5gchbu5",
-          "session_id": "ises_3ru5sqbftvq8",
+          "session_id": "ises_ph300b157ctf",
           "participant_type": "member",
           "participant_id": "local",
           "role": "participant",
@@ -230,7 +232,7 @@
         },
         {
           "id": "spart_nzew8h25l32x",
-          "session_id": "ises_3ru5sqbftvq8",
+          "session_id": "ises_ph300b157ctf",
           "participant_type": "agent",
           "participant_id": "agt_mul385",
           "role": "participant",
@@ -240,7 +242,7 @@
         },
         {
           "id": "spart_zf54eap4ytor",
-          "session_id": "ises_3ru5sqbftvq8",
+          "session_id": "ises_ph300b157ctf",
           "participant_type": "agent",
           "participant_id": "agt_mul385_p1",
           "role": "leader",
@@ -252,6 +254,8 @@
     },
     {
       "id": "ises_mul385_04",
+      "owner_type": "issue",
+      "owner_id": "iss_mul385_long",
       "chat_id": null,
       "issue_id": "iss_mul385_long",
       "workspace_id": "local",
@@ -315,6 +319,8 @@
     },
     {
       "id": "ises_mul385_03",
+      "owner_type": "issue",
+      "owner_id": "iss_mul385_long",
       "chat_id": null,
       "issue_id": "iss_mul385_long",
       "workspace_id": "local",
@@ -368,6 +374,8 @@
     },
     {
       "id": "ises_mul385_02",
+      "owner_type": "issue",
+      "owner_id": "iss_mul385_long",
       "chat_id": null,
       "issue_id": "iss_mul385_long",
       "workspace_id": "local",
@@ -441,6 +449,8 @@
     },
     {
       "id": "ises_mul385_01",
+      "owner_type": "issue",
+      "owner_id": "iss_mul385_long",
       "chat_id": null,
       "issue_id": "iss_mul385_long",
       "workspace_id": "local",
@@ -504,6 +514,8 @@
     },
     {
       "id": "ises_mul385_00",
+      "owner_type": "issue",
+      "owner_id": "iss_mul385_long",
       "chat_id": null,
       "issue_id": "iss_mul385_long",
       "workspace_id": "local",
@@ -561,7 +573,7 @@
       {
         "type": "comment",
         "id": "cmt_dqblx6mg1pxa",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -605,7 +617,7 @@
       {
         "type": "comment",
         "id": "cmt_5gi2fkj46tar",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -657,7 +669,7 @@
       {
         "type": "comment",
         "id": "cmt_d12gsjq7pfgy",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "agent",
         "actor_id": "agt_mul385",
         "created_at": "<timestamp>",
@@ -701,7 +713,7 @@
       {
         "type": "comment",
         "id": "cmt_h237a486xn1p",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -745,7 +757,7 @@
       {
         "type": "comment",
         "id": "cmt_eg8koluf1w1g",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -797,7 +809,7 @@
       {
         "type": "comment",
         "id": "cmt_zzayz9hbhj1q",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -841,7 +853,7 @@
       {
         "type": "comment",
         "id": "cmt_nm1xyvg02pip",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -885,7 +897,7 @@
       {
         "type": "comment",
         "id": "cmt_i8na7jz3210h",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "agent",
         "actor_id": "agt_mul385",
         "created_at": "<timestamp>",
@@ -937,7 +949,7 @@
       {
         "type": "comment",
         "id": "cmt_kkvfcju6i3an",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -981,7 +993,7 @@
       {
         "type": "comment",
         "id": "cmt_dy008s48wm79",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1025,7 +1037,7 @@
       {
         "type": "comment",
         "id": "cmt_anoxwltntyhc",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1077,7 +1089,7 @@
       {
         "type": "comment",
         "id": "cmt_dm1f5air8x2v",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1121,7 +1133,7 @@
       {
         "type": "comment",
         "id": "cmt_lymsctir34pq",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "agent",
         "actor_id": "agt_mul385",
         "created_at": "<timestamp>",
@@ -1165,7 +1177,7 @@
       {
         "type": "comment",
         "id": "cmt_pxpkc2e2p0sw",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1217,7 +1229,7 @@
       {
         "type": "comment",
         "id": "cmt_30zo61rh1epo",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1261,7 +1273,7 @@
       {
         "type": "comment",
         "id": "cmt_z15k0mt6k1k7",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1305,7 +1317,7 @@
       {
         "type": "comment",
         "id": "cmt_q3ijv0xot2p9",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "agent",
         "actor_id": "agt_mul385",
         "created_at": "<timestamp>",
@@ -1323,7 +1335,7 @@
       {
         "type": "comment",
         "id": "cmt_swc4tvc03o56",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1341,7 +1353,7 @@
       {
         "type": "comment",
         "id": "cmt_9f45er2ef05x",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1359,7 +1371,7 @@
       {
         "type": "comment",
         "id": "cmt_53pn5ktmyoz0",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1377,7 +1389,7 @@
       {
         "type": "comment",
         "id": "cmt_run1fhzbztsr",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "agent",
         "actor_id": "agt_mul385",
         "created_at": "<timestamp>",
@@ -1395,7 +1407,7 @@
       {
         "type": "comment",
         "id": "cmt_rr274brf2d4l",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1413,7 +1425,7 @@
       {
         "type": "comment",
         "id": "cmt_pbz1t5vzqmw6",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1431,7 +1443,7 @@
       {
         "type": "comment",
         "id": "cmt_c0cvgo8n2l54",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1449,7 +1461,7 @@
       {
         "type": "comment",
         "id": "cmt_u7xore5gptpw",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "agent",
         "actor_id": "agt_mul385",
         "created_at": "<timestamp>",
@@ -1467,7 +1479,7 @@
       {
         "type": "comment",
         "id": "cmt_ula3mog4nlrw",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1485,7 +1497,7 @@
       {
         "type": "comment",
         "id": "cmt_c7j533htowa2",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1503,7 +1515,7 @@
       {
         "type": "comment",
         "id": "cmt_yta1fxc2befg",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1521,7 +1533,7 @@
       {
         "type": "comment",
         "id": "cmt_ent3du727iqr",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "agent",
         "actor_id": "agt_mul385",
         "created_at": "<timestamp>",
@@ -1539,7 +1551,7 @@
       {
         "type": "comment",
         "id": "cmt_e6eickjbh8w7",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1557,7 +1569,7 @@
       {
         "type": "comment",
         "id": "cmt_29eshnwlpevp",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1575,7 +1587,7 @@
       {
         "type": "comment",
         "id": "cmt_jy1ro8hcxny1",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1593,7 +1605,7 @@
       {
         "type": "comment",
         "id": "cmt_qtx02v4vqg0z",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "agent",
         "actor_id": "agt_mul385",
         "created_at": "<timestamp>",
@@ -1611,7 +1623,7 @@
       {
         "type": "comment",
         "id": "cmt_lh0fnhwn14ho",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1629,7 +1641,7 @@
       {
         "type": "comment",
         "id": "cmt_o4w7avhl1n5g",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1647,7 +1659,7 @@
       {
         "type": "comment",
         "id": "cmt_wgs3of20fmep",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1665,7 +1677,7 @@
       {
         "type": "comment",
         "id": "cmt_hzj07ujmmzwj",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "agent",
         "actor_id": "agt_mul385",
         "created_at": "<timestamp>",
@@ -1683,7 +1695,7 @@
       {
         "type": "comment",
         "id": "cmt_aedcs558bg53",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1701,7 +1713,7 @@
       {
         "type": "comment",
         "id": "cmt_eo04tgbxstpx",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1719,7 +1731,7 @@
       {
         "type": "comment",
         "id": "cmt_u90gtdnpxwcr",
-        "issue_session_id": "ises_3ru5sqbftvq8",
+        "issue_session_id": "ises_ph300b157ctf",
         "actor_type": "member",
         "actor_id": "local",
         "created_at": "<timestamp>",
@@ -1741,6 +1753,6 @@
     "has_more": true,
     "has_more_before": true,
     "has_more_after": false,
-    "issue_session_id": "ises_3ru5sqbftvq8"
+    "issue_session_id": "ises_ph300b157ctf"
   }
 }

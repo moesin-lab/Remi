@@ -56,9 +56,9 @@ Issue 列表可能包含有权访问的 Chat-owned 工作投影；先读返回�
 
 `remi session show <session>` 查看会话，`remi session log window <session>` 查看日志，`remi session inherited-context <session>` 查看最近一次领取记录的继承诊断；这些按 Session ID 访问的命令支持两种所有者。事件数量是截断前计数，实际上下文可能受 token 预算截断，尚未领取时不能声称继承内容已全部送入模型。
 
-Task 凭据通常只读取当前 Session。旁聊可用 `remi session log get <parent> --from X --to Y` 读取同所有者的直接父会话，但必须已有继承领取记录，且不能超过该 Task 持久化的继承截止 seq；不要改用父会话的 window/tail 读取绕过限制。经验证的飞书群 Issue Topic 协调任务可以读取相关 Session/Task metadata、列出或派发 Task、追加 steer，协调响应不含私有正文；向绑定 Issue-owned Session 主动发消息仍沿用公开 Issue 评论写入，Chat-owned 工作投影没有这项写入例外。这不授权读取其他 Session 的日志或 transcript，也不授权取消或 inspection 其他 Task。organizer redispatch 仍按明确监督者权限与审计约束执行。
+Task 凭据读取 Session 内容限于当前 Session；私有 Chat-owned Task 的读取与控制限于本 Task，公开 Issue-owned 或没有 Chat 的 Task 路由保留既有工作区、owner 与各路由权限。旁聊可用 `remi session log get <parent> --from X --to Y` 读取同所有者的直接父会话，但必须已有继承领取记录，且不能超过该 Task 持久化的继承截止 seq；不要改用父会话的 window/tail 读取绕过限制。经验证的飞书群 Issue Topic 协调任务可以读取相关 Session/Task metadata、列出或派发 Task、追加 steer，协调专用响应不含私有正文；向绑定 Issue-owned Session 主动发消息仍沿用公开 Issue 评论写入，Chat-owned 工作投影没有这项写入例外。该协调身份不额外授予其他 Session 私有内容或其他私有 Task 的取消、inspection 权限；公开 Issue Task 路由另按既有权限判断。organizer redispatch 仍按明确监督者权限与审计约束执行。
 
-向同工作区其他 Issue-owned Session 派发委派任务须满足实际 owner 权限、Task 血统及旁聊限制；不要把成功创建当作来源凭据可以读取或控制新 Task。Issue 触发的 Autopilot 使用 Issue-owned Session，`reuse_latest` 不复用 Chat-owned 工作投影。
+通用派发和 Issue 嵌套的 Session Task 创建可向同工作区其他 Issue-owned Session 派发委派任务，须满足实际 owner、工作区、Agent、Task 血统、交接次数及旁聊限制。成功创建不额外授予 Session 内容或 Task 读取、控制权限；公开 Issue Task 路由沿用既有基线，私有 Chat-owned Task 仍限于本 Task，Chat-owned 创建目标须是当前 Session 或已验证 Topic 协调目标。Issue 触发的 Autopilot 使用 Issue-owned Session，`reuse_latest` 不复用 Chat-owned 工作投影。
 
 `session archive verify/retry` 会执行校验或重试归档，不是单纯读取；先看 status 和 list，针对已有失败记录处理。Issue run-messages 接收的是 **Task ID**，也可直接使用 `task message list` 查询执行消息。
 

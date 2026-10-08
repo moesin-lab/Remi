@@ -155,8 +155,9 @@ describe("MUL-427 B7: conversation backfill and reconciliation", () => {
         const result = db.transaction(() => backfillConversationLogWithinTransaction(db))();
         expect(result.mismatches).toEqual([]);
         expect(result.counts.commentTaskIdsFilled).toBe(2);
-        // Two retained comments plus the three existing Chat/Session heads.
-        expect(result.counts.existingRowsSkipped).toBe(5);
+        // Two retained comments plus two subscription Session heads. Native
+        // Issue-owned Main does not implicitly allocate a Chat head.
+        expect(result.counts.existingRowsSkipped).toBe(4);
         expect(result.counts.orphanCommentsAppended).toBe(1);
         expect(result.counts.orphanCommentsSkipped).toBe(1);
         expect(result.counts.deletedComments).toBe(1);

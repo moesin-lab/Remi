@@ -91,34 +91,77 @@ describe("Session owner API boundaries", () => {
     expect(afterCompletion).not.toContain("PRIVATE_TERMINAL_OUTPUT");
   });
 
-  it("scopes an Issue Task credential to its own Session and own Task controls", async () => {
+  it("keeps public Issue Task authority while isolating Session content and private Chat Tasks", async () => {
     const f = await fixture();
     const main = f.store.createIssueSession(f.issue.id, { title: "Own" });
     const sibling = f.store.createIssueSession(f.issue.id, { title: "Sibling" });
-    db!.run("UPDATE multiremi_issue_sessions SET chat_id = NULL WHERE id IN (?, ?)", [main.id, sibling.id]);
     const task = f.store.createSessionTask(main.id, { agentId: f.agent.id, prompt: "Own task" });
     const siblingTask = f.store.createSessionTask(sibling.id, { agentId: f.agent.id, prompt: "Sibling task" });
-    db!.run("UPDATE multiremi_tasks SET chat_session_id = NULL WHERE id IN (?, ?)", [task.id, siblingTask.id]);
-    db!.run("UPDATE multiremi_issue_sessions SET chat_id = NULL WHERE id IN (?, ?)", [main.id, sibling.id]);
+    const privateTask = f.store.createSessionTask(f.linked.id, { agentId: f.agent.id, prompt: "Private task" });
+    const privateSibling = f.store.createSessionTask(f.linked.id, { agentId: f.agent.id, prompt: "Private sibling" });
     const token = await f.store.createTaskAccessToken(f.store.getTask(task.id)!, "alice");
     const headers = { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" };
     for (const tail of ["", "/log", "/inherited-context"]) {
       expect((await f.app.request(`/api/sessions/${main.id}${tail}`, { headers })).status).toBe(200);
       expect((await f.app.request(`/api/sessions/${sibling.id}${tail}`, { headers })).status).toBe(403);
     }
-    for (const [method, tail] of [["GET", ""], ["GET", "/messages"], ["POST", "/cancel"]] as const) {
-      const response = await f.app.request(`/api/multiremi/tasks/${siblingTask.id}${tail}`, { method, headers });
-      expect(response.status, `${method} ${tail}`).toBe(403);
+    for (const [method, tail] of [["GET", "/events"], ["POST", "/messages"]] as const) {
+      expect((await f.app.request(`/api/issues/${f.issue.id}/sessions/${sibling.id}${tail}`, {
+        method, headers, body: method === "POST" ? JSON.stringify({ body: "Cross-Session write" }) : undefined,
+      })).status).toBe(403);
     }
-    expect(f.store.getTask(siblingTask.id)?.status).toBe("queued");
+    const siblingDetail = await f.app.request(`/api/multiremi/tasks/${siblingTask.id}`, { headers });
+    expect(siblingDetail.status).toBe(200);
+    expect((await siblingDetail.json()).task.prompt).toBe("Sibling task");
     const listed = await (await f.app.request("/api/multiremi/tasks", { headers })).json();
-    expect(listed.tasks.map((entry: { id: string }) => entry.id)).toEqual([task.id]);
+    expect(listed.tasks.map((entry: { id: string }) => entry.id).sort()).toEqual([task.id, siblingTask.id].sort());
     const active = await (await f.app.request(`/api/issues/${f.issue.id}/active-task`, { headers })).json();
-    expect(active.tasks.map((entry: { id: string }) => entry.id)).toEqual([task.id]);
-    expect(JSON.stringify(active)).not.toContain("Sibling task");
+    expect(active.tasks.map((entry: { id: string }) => entry.id).sort()).toEqual([task.id, siblingTask.id].sort());
+    expect(JSON.stringify(active)).not.toContain("Private task");
+    expect(JSON.stringify(active)).not.toContain("Private sibling");
+    const privateToken = await f.store.createTaskAccessToken(privateTask, "alice");
+    const privateHeaders = { Authorization: `Bearer ${privateToken.token}`, "Content-Type": "application/json" };
+    expect((await f.app.request(`/api/multiremi/tasks/${privateTask.id}`, { headers: privateHeaders })).status).toBe(200);
+    for (const privateTarget of [privateTask, privateSibling]) {
+      for (const [method, tail] of [["GET", ""], ["GET", "/messages"], ["POST", "/cancel"]] as const) {
+        expect((await f.app.request(`/api/multiremi/tasks/${privateTarget.id}${tail}`, { method, headers })).status).toBe(403);
+        if (privateTarget.id !== privateTask.id) {
+          expect((await f.app.request(`/api/multiremi/tasks/${privateTarget.id}${tail}`, {
+            method, headers: privateHeaders,
+          })).status).toBe(403);
+        }
+      }
+      expect(f.store.getTask(privateTarget.id)?.status).toBe("queued");
+    }
+    expect((await f.app.request(`/api/multiremi/tasks/${siblingTask.id}/cancel`, { method: "POST", headers })).status).toBe(200);
+    expect(f.store.getTask(siblingTask.id)?.status).toBe("cancelled");
   });
 
-  it("allows generic delegation into another Issue owner without granting private Chat or Task access", async () => {
+  it("does not extend public Issue Task authority beyond its credential workspace", async () => {
+    const f = await fixture();
+    const sourceSession = f.store.getOrCreateDefaultIssueSession(f.issue.id);
+    const source = f.store.createSessionTask(sourceSession.id, { agentId: f.agent.id, prompt: "Own workspace" });
+    const foreign = f.store.createWorkspace({ name: "Foreign tasks", slug: "foreign-tasks", issuePrefix: "FTK" });
+    f.store.createWorkspaceMember({ workspaceId: foreign.id, userId: "alice", name: "alice", role: "member" });
+    const agent = f.store.createAgent({ name: "Foreign worker", provider: "claude", workspaceId: foreign.id, ownerId: "alice" });
+    const issue = f.store.createIssue({ title: "Foreign public work", workspaceId: foreign.id });
+    const task = f.store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Foreign task" });
+    expect(task.chatSessionId).toBeNull();
+    const token = await f.store.createTaskAccessToken(source, "alice");
+    const headers = { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" };
+    for (const [method, tail] of [["GET", ""], ["GET", "/inspection"], ["POST", "/cancel"], ["POST", "/steer"]] as const) {
+      const prefix = tail === "" ? "/api/multiremi/tasks" : "/api/tasks";
+      expect((await f.app.request(`${prefix}/${task.id}${tail}`, {
+        method, headers, body: method === "POST" ? JSON.stringify({ content: "Cross-workspace action" }) : undefined,
+      })).status).toBe(404);
+    }
+    const listed = await (await f.app.request("/api/multiremi/tasks", { headers })).json();
+    expect(listed.tasks.map((entry: { id: string }) => entry.id)).toEqual([source.id]);
+    expect(f.store.getTask(task.id)?.status).toBe("queued");
+    expect(f.store.listTaskSteerMessages(task.id)).toHaveLength(0);
+  });
+
+  it("allows public Issue delegation without granting cross-Session content or private Chat access", async () => {
     const f = await fixture();
     const sourceSession = f.store.getOrCreateDefaultIssueSession(f.issue.id);
     const source = f.store.createSessionTask(sourceSession.id, { agentId: f.agent.id, prompt: "Delegate work" });
@@ -137,9 +180,13 @@ describe("Session owner API boundaries", () => {
     expect(delegated).toMatchObject({ issueId: otherIssue.id, issueSessionId: targetSession.id, chatSessionId: null,
       parentTaskId: source.id, delegatedByAgentId: f.agent.id, delegatedFromIssueSessionId: sourceSession.id });
     expect(delegated.execution_scope).not.toBe(source.execution_scope);
-    expect((await f.app.request(`/api/multiremi/tasks/${delegated.id}`, { headers })).status).toBe(403);
+    expect((await f.app.request(`/api/multiremi/tasks/${delegated.id}`, { headers })).status).toBe(200);
+    expect((await f.app.request(`/api/sessions/${targetSession.id}/log`, { headers })).status).toBe(403);
     const delegatedToken = await f.store.createTaskAccessToken(delegated, "alice");
     expect((await f.app.request(`/api/multiremi/tasks/${source.id}`, {
+      headers: { Authorization: `Bearer ${delegatedToken.token}` },
+    })).status).toBe(200);
+    expect((await f.app.request(`/api/sessions/${sourceSession.id}/log`, {
       headers: { Authorization: `Bearer ${delegatedToken.token}` },
     })).status).toBe(403);
     const before = f.store.listTasksForIssue(f.issue.id).length;

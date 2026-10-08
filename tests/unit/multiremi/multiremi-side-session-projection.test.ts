@@ -76,10 +76,12 @@ describe("side Session snapshots", () => {
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const side = store.createIssueSession(issue.id, { parentSessionId: main.id });
     const before = store.listIssueSessions(issue.id).length;
+    const otherBefore = store.listIssueSessions(other.id).length;
     expect(() => store.createIssueSession(issue.id, { parentSessionId: "missing" })).toThrow("Parent session not found");
-    expect(() => store.createIssueSession(other.id, { parentSessionId: main.id })).toThrow("same issue");
+    expect(() => store.createIssueSession(other.id, { parentSessionId: main.id })).toThrow("same Issue owner");
     expect(() => store.createIssueSession(issue.id, { parentSessionId: side.id })).toThrow("chained forks");
     expect(store.listIssueSessions(issue.id)).toHaveLength(before);
+    expect(store.listIssueSessions(other.id)).toHaveLength(otherBefore);
   });
 
   it("uses cutoff zero for an empty parent and never inherits later events", () => {

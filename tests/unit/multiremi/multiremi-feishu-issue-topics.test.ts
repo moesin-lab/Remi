@@ -116,6 +116,11 @@ describe("Feishu Issue topics", () => {
           ...(boundIssue ? { issueId: boundIssue.id } : {}),
           ...(chat ? { chatSessionId: chat.id } : {}),
         });
+        if (scenario === "cross-issue") {
+          // Issue work can carry its topic Chat transport without becoming a Chat reply.
+          expect(task.issueSessionId).toBeTruthy();
+          expect(task.chatSessionId).toBeTruthy();
+        }
         db!.run("UPDATE multiremi_tasks SET status = 'running', runtime_id = 'rt_bot' WHERE id = ?", [task.id]);
         const targets = [issue, ...(second ? [second] : []), ...(third ? [third] : [])];
         for (const target of targets) {

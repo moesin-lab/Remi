@@ -6542,9 +6542,10 @@ ${placementAfter.sql}
     }
 
     // Standalone/scheduled work can report on Issues without being bound to
-    // them. Ring those topics in this terminal transaction too. Chat replies
+    // them. Issue Session work may also carry a topic Chat transport. Ring
+    // those topics in this terminal transaction too; ordinary Chat replies
     // must never ring their own relay (or another topic) back into a loop.
-    if (!task.chatSessionId) {
+    if (!ordinaryChatTask) {
       const commentedIssues = this.ctx.db.query(
         `SELECT DISTINCT issue_id FROM multiremi_issue_comments
          WHERE task_id = ? AND issue_id <> ?`,

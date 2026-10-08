@@ -41,12 +41,13 @@ export function SessionEmptyState() {
 }
 
 /** A saved Issue need not have a linked, visible Session yet. */
-export function NoLinkedSessions() {
+export function NoLinkedSessions({ onCreate }: { onCreate: () => void }) {
   const { t } = useT("issues");
   return <div role="status" className="mt-4 flex flex-col items-center gap-2 rounded-lg border border-dashed px-6 py-10 text-center">
     <MessagesSquare className="h-6 w-6 text-muted-foreground" />
     <p className="text-sm font-medium">{t(($) => $.detail.no_linked_sessions_title)}</p>
     <p className="text-xs text-muted-foreground">{t(($) => $.detail.no_linked_sessions_hint)}</p>
+    <Button variant="outline" size="sm" onClick={onCreate}>{t(($) => $.detail.new_session)}</Button>
   </div>;
 }
 

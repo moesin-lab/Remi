@@ -156,6 +156,7 @@ export function taskRealtimePayload(task: MultiremiTask): Record<string, unknown
     updated_at: task.updatedAt,
   };
   if (task.chatSessionId) payload.chat_session_id = task.chatSessionId;
+  if (task.issueSessionId) payload.issue_session_id = task.issueSessionId;
   if (task.autopilotRunId) payload.autopilot_run_id = task.autopilotRunId;
   if (task.waitReason) payload.wait_reason = task.waitReason;
   if (task.sessionId) payload.session_id = task.sessionId;
@@ -502,12 +503,23 @@ export function daemonTaskClaimResponse(
         if (lane) response.issue_session_generation = lane.generation;
       }
     }
-    if (task.issueId) {
+    if (issueSession) {
       const since = projectionMode === "delta"
         ? latestRecordedPromptForLane(store, task)?.assembledAt ?? null
         : null;
-      response.issue_session_results = store.listIssueSessionResults(task.issueId)
+      const results = [
+        ...(task.issueId ? store.listIssueSessionResults(task.issueId) : []),
+        ...(issueSession.chatId ? store.listChatSessionResults(issueSession.chatId) : []),
+      ];
+      response.issue_session_results = [...new Map(results.map(result => [result.id, result])).values()]
         .filter((result) => result.sourceSessionId !== task.issueSessionId)
+        .filter((result) => {
+          const source = store.getIssueSession(result.sourceSessionId);
+          if (!source || source.workspaceId !== task.workspaceId) return false;
+          return source.chatId
+            ? source.chatId === issueSession?.chatId
+            : source.issueId === task.issueId;
+        })
         // Millisecond timestamps can tie. Re-sending one result is safer than
         // dropping a result published at the exact prompt assembly instant.
         .filter((result) => !since || result.createdAt >= since)

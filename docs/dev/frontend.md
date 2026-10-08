@@ -62,6 +62,7 @@ WSClient → useRealtimeSync → sync/<领域>.ts
 | 任务列表、分页、详情缓存 | [issues/queries.ts](../../frontend/packages/core/issues/queries.ts) 的 `issueKeys`、`issueListOptions`、`findCachedIssue`；[issues/mutations.ts](../../frontend/packages/core/issues/mutations.ts) 的 `useLoadMoreByStatus` |
 | 任务列表 UI | [issues-page.tsx](../../frontend/packages/views/issues/components/issues-page.tsx) 的 `IssuesPage`，以及同目录 `board-view.tsx`、`list-view.tsx`、`swimlane-view.tsx` |
 | 任务详情与执行会话 | [issue-detail.tsx](../../frontend/packages/views/issues/components/issue-detail.tsx)、[issue-detail-main.tsx](../../frontend/packages/views/issues/components/issue-detail-main.tsx)、[session-mutations.ts](../../frontend/packages/core/issues/session-mutations.ts) |
+| Session 新建与旁聊、Chat 工作会话 | [issue-session-bar.tsx](../../frontend/packages/views/issues/components/issue-session-bar.tsx)、[issue-session-list.tsx](../../frontend/packages/views/issues/components/issue-session-list.tsx)、[chat-work-sessions-dialog.tsx](../../frontend/packages/views/chat/components/chat-work-sessions-dialog.tsx)、[chat/work-sessions.ts](../../frontend/packages/core/chat/work-sessions.ts) |
 | 工作台待输入 / 待验收 / 失败恢复 | [issues/workbench.ts](../../frontend/packages/core/issues/workbench.ts) 的 `workbenchIssuesOptions`、`partitionReviewIssues`；[workbench-page.tsx](../../frontend/packages/views/workbench/components/workbench-page.tsx) |
 | 收件箱的分页、摘要与展示分组 | [inbox/queries.ts](../../frontend/packages/core/inbox/queries.ts) 的 `inboxPageOptions` / `inboxSummaryOptions`、[inbox/grouping.ts](../../frontend/packages/core/inbox/grouping.ts)、[inbox-page.tsx](../../frontend/packages/views/inbox/components/inbox-page.tsx) |
 | Issue 飞书话题设置 | [issue-topic-section.tsx](../../frontend/packages/views/im-platforms/feishu/issue-topic-section.tsx)、[feishu-bot/queries.ts](../../frontend/packages/core/feishu-bot/queries.ts)、[workspaces router](../../packages/server/src/api/routers/workspaces.ts) 的 `/api/workspaces/:id/issue-topics` |
@@ -123,15 +124,19 @@ query key 包含 workspace、明确的半开日历窗口、项目、Runtime 和�
 - [useRealtimeSync](../../frontend/packages/core/realtime/use-realtime-sync.ts)负责订阅生命周期和断线重连后的缓存恢复；领域处理器集中在 [realtime/sync/](../../frontend/packages/core/realtime/sync/)。
 - [issues/ws-updaters.ts](../../frontend/packages/core/issues/ws-updaters.ts)补写可确定的任务列表和详情，对派生列表做失效处理。改任务响应字段时同时检查这里和 mutation 的缓存处理。
 - [prefix-refresh.ts](../../frontend/packages/core/realtime/sync/prefix-refresh.ts)按事件前缀合并刷新；`SPECIFIC_EVENTS` 排除已有精确处理器的事件，避免重复失效。
+- Session 响应在 [schemas/comments.ts](../../frontend/packages/core/api/schemas/comments.ts) 校验 `owner_type/owner_id`，创建表单据实际 owner 选择 Chat 或 Issue 端点，父会话候选限于同 owner。Chat 工作 Session 的列表与任务缓存键包含 workspace、Chat 和 Session 身份；[chat 实时处理器](../../frontend/packages/core/realtime/sync/chat.ts)按 `issue_session_id` 分流任务事件，刷新工作 Session 而不替换普通 Chat 的当前任务或队列。
 - 浮动 Chat 在 [FloatingPanelLayout](../../frontend/packages/views/layout/floating-panel-layout.tsx) 中预留展开的 Issue 属性栏宽度；右栏缩放和折叠通过 ResizeObserver 更新布局，普通与展开的浮窗均限制在剩余文档区域，不提高属性按钮层级。
 - Chat/Issue 正文由 [SessionReplica](../../frontend/packages/core/replica/browser.ts) 的 `log:` 流驱动；打开的执行过程窗口和 Chat 可见的运行时间线按需订阅 `trace:`。关闭窗口只移除该消费者，最后一个消费者离开才关闭 trace socket；结束任务只读分页结果。
 - 排查慢页面先区分网络请求扇出、API 延迟、缓存失效范围和 React 渲染成本；保留测量场景与前后结果。以上文件提供定位入口，不把静态代码形态直接当成已证实的性能瓶颈。
 
 ## 验证入口
 
-创建弹窗在成功响应后保留[创建回执](../../frontend/packages/views/modals/issue-creation-receipt.tsx)，区分 Issue 已保存、Task 已派发与未派发原因；派发确认不等于已经执行。快速创建回执链接接单 Issue，便于追踪整理进度和生成的任务。连续创建保留紧凑回执，失败保留输入；创建另一条不会重新填入上一条携带的 prompt。命令响应严格校验，旧服务缺失派发字段时显示未确认。新 Issue 没有可见关联 Session 时展示空状态；Session 读取或深链接定位失败保留重试入口，响应格式错误不降级为成功空列表。
+创建弹窗在成功响应后保留[创建回执](../../frontend/packages/views/modals/issue-creation-receipt.tsx)，区分 Issue 已保存、Task 已派发与未派发原因；派发确认不等于已经执行。快速创建回执链接接单 Issue，便于追踪整理进度和生成的任务。连续创建保留紧凑回执，失败保留输入；创建另一条不会重新填入上一条携带的 prompt。命令响应严格校验，旧服务缺失派发字段时显示未确认。新 Issue 同事务建立自己的 Main；若列表没有可见 Session，空状态保留新建入口，创建成功选择返回会话。Issue 会话列表提供新建与旁聊，Chat 顶部「工作 Sessions」管理独立工作会话、显式派发、日志、人类请求和执行过程。Session 读取或深链接定位失败保留重试入口，响应格式错误不降级为成功空列表。
 
 工作台选中 Issue 的执行状态和重试规则见[工作台/收件箱边界](../inbox-workbench-boundary.md#selected-issue-execution-and-recovery)。隔离浏览器验收通过 `bun run tests/integration/smoke-interaction-recovery.ts` 启动临时 API、独立 workspace 和 Next，Node/Playwright 负责浏览器；运行前可用 `node node_modules/playwright-core/cli.js install chromium` 准备浏览器。脚本输出截图及 `result.json` 的临时目录。
+
+双所有权 Web 入口的浏览器验收使用 `bun run tests/integration/smoke-session-dual-ownership.ts`。
+该脚本运行真实 React 组件、Vite 和 Chromium，配合隔离 HTTP mock，覆盖 8 个场景：Issue 空态创建及失败输入保留、Issue-owned 旁聊、Issue 中 Chat-owned 投影按 Chat 创建旁聊、Chat 工作会话终态日志、执行过程弹窗、Chat 旁聊、Chat Session 创建与显式派发、普通 Chat 消息路径。它验证浏览器交互与端点接线，不连接真实 backend 或模型，不能代替数据库、API 权限与真实执行验收。可用 `NODE_EXECUTABLE` 和 `CHROME_EXECUTABLE` 指定本机兼容运行时；脚本打印包含 `result.json` 与截图的临时产物目录。这是可运行的验收入口，具体通过结果以该次运行产物为准。
 
 浏览器本地副本在 [replica/browser.ts](../../frontend/packages/core/replica/browser.ts)。Web Lock、BroadcastChannel、OPFS SAH pool 名和目录都使用同一个 `(user_id, workspace_id)` 分区键；频道消息再核对该键。leader 持有 Worker 和 socket，follower 通过频道查询；没有 OPFS 或 Web Locks 时，每页的 Memory 副本复用同一个 leader 请求队列和同步语义。
 

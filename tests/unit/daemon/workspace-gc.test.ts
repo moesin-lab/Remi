@@ -30,7 +30,7 @@ describe("Issue workspace GC", () => {
         const runtime = join(root, ".runtime", sessionId!);
         mkdirSync(join(runtime, ".multiremi"), { recursive: true });
         writeFileSync(join(runtime, ".multiremi", "gc.json"), JSON.stringify({
-          version: 2, kind: "issue_runtime", issue_id: issueId, issue_session_id: sessionId,
+          version: 2, kind: "issue_runtime", issue_id: issueId, issue_session_id: sessionId, chat_session_id: null,
         }));
       }
       const make = (sessionId: string) => new TraceFileStore({
@@ -65,7 +65,7 @@ describe("Issue workspace GC", () => {
     const runtime = join(root, ".runtime", "ises_trace_open");
     mkdirSync(join(runtime, ".multiremi"), { recursive: true });
     writeFileSync(join(runtime, ".multiremi", "gc.json"), JSON.stringify({
-      version: 2, kind: "issue_runtime", issue_id: "iss_trace_open", issue_session_id: "ises_trace_open",
+      version: 2, kind: "issue_runtime", issue_id: "iss_trace_open", issue_session_id: "ises_trace_open", chat_session_id: null,
     }));
     const trace = new TraceFileStore({
       workspacesRoot: root,
@@ -183,6 +183,7 @@ describe("Issue workspace GC", () => {
       kind: "issue_runtime",
       issue_id: "iss_clean",
       issue_session_id: "ises_clean",
+      chat_session_id: null,
     }));
     writeFileSync(join(runtime, "history.jsonl"), "archived history\n");
     mkdirSync(join(workspace, ".remi-runtime", "plugins", "abc"), { recursive: true });
@@ -215,6 +216,7 @@ describe("Issue workspace GC", () => {
       kind: "issue_runtime",
       issue_id: "iss_missing_runtime",
       issue_session_id: "ises_missing",
+      chat_session_id: null,
     }));
     const client = gcClient();
     client.getIssueGcCheck = async () => { throw new Error("404 issue not found"); };

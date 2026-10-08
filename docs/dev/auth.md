@@ -26,8 +26,13 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 | task 凭据 | [auth-guards.ts](../../packages/server/src/api/helpers/auth-guards.ts)将其限制在绑定工作区，并继承所属用户的业务权限，包括环境值与 SCM 配置等。`taskTokenHardDenyCategory` 另外阻止凭据签发/揭示、身份、工作区生命周期、权限配置等敏感操作；它不是只读令牌。 |
 | daemon 凭据 | 同一 guard 文件中的请求允许列表和 `denyNonDaemonOperationalAccess` 区分机器控制面与人类操作；daemon 绑定、runtime/task 归属及 owner 成员资格另有检查。旧 CLI PAT 升级、注册和特定 SCM 请求存在明确例外，应按实现核对。 |
 | 私有资源与实时消息 | Agent、运行时、附件、会话和 transcript 有各自的权限检查。[realtime.ts](../../packages/server/src/api/realtime.ts)处理浏览器/daemon WebSocket 鉴权与接收范围，不能只验证 HTTP 路径。 |
+| Session 所有权 | Session 恰好由一个 Chat 或 Issue 拥有，guard 从实际 owner 校验工作区与内容权限。Chat-owned 的 Issue 工作投影不扩大创建者和 Agent 的可见范围，Issue 公开分享不包含其私有 Session 事件、输入或成果。Task 凭据通常读取本 Session、控制本 Task；同 owner 直接父会话的已记录继承范围，以及已验证飞书 Topic 的 metadata/派发/steer 协调是受限例外，详见[会话模型](../conversation-model.md)。 |
 
 修改路由时，从请求实际指向的资源解析 workspace，再调用对应 guard；不要仅凭客户端传入的 ID 或“已经登录”认定有权限。[server.ts](../../packages/server/src/api/server.ts)中的 daemon 前缀中间件必须注册在对应 handler 之前，Hono 的注册顺序会影响覆盖范围。
+
+[denyTaskChatContentAccess](../../packages/server/src/api/helpers/auth-guards.ts)把 Session Task 与所有者 Chat 的普通内容权限分开：真实 Session Task 不能通过 Chat ID 或创建者回退读取、发送普通消息、访问 Chat root log 或操作队列。普通 Chat 轴须有真实执行分类和持久化用户消息来源，重试只沿服务端保存的 attempt 血统继承来源；Topic transport 须通过实际 binding 分类。调用方指定 `kind` 不构成普通聊天授权。合法普通 Chat/Topic Task 的既有创建者回退、工作区与 Agent 检查保持原规则，工作 Session metadata 管理不授予普通聊天正文权限。
+
+[TasksRepo](../../packages/server/src/store/repos/tasks-repo.ts)在任务创建锁内拒绝归档 Session 的普通新任务；只有既有 `delegation_return` 与 turn-end `re_ring` 的内部收尾路径，在重读 source 并核对父 Task、return Session、Workspace、Agent 和执行 scope 后可继续。内部收尾授权不暴露为 `CreateTaskInput` 或 API 字段，system 作者、wake source 或 delegation 字段本身不授予越过归档的权限。
 
 [MultiremiStore.updateAgent](../../packages/server/src/store/store.ts)的角色更新和所属任务凭据撤销共用一个外层事务；仓储调用 `updateAgentWithinTransaction`，保留排序后的 workspace 锁、plugin workspace 锁与 Agent 行锁，不在撤销之前另行提交。`setAgentRole`、`setAgentSupervisor` 同样在角色变化时撤销任务凭据。整体回滚与正常提交的真 PG 对照见 [事务边界用例](../../tests/unit/multiremi/multiremi-existing-pg-transaction-boundaries.test.ts)。
 
@@ -35,7 +40,9 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 
 跨工作区移动时，请求未显式提供的经办人（Agent、成员、小组）、项目及标签按原 ID 核验目标工作区归属；不存在或不属于目标的经办人和项目清空，外部标签关联移除，不按名称映射。每项清空各写一条 `workspace_move_cleared` 活动，与移动共用事务，内容只含字段、原名字及经办人类型，不附带来源对象 ID、颜色或邮箱；移动前的历史活动保持原样。显式提供的经办人和项目沿用校验，目标值保留，来源值报错，显式清空不写移动清空活动；单个和批量更新遵循同一规则，CLI 可用 `remi issue batch-update --data` 传单个或多个 ID（MUL-480）。提交后沿用来源 `issue:deleted`、目标 `issue:updated` 及 `issue_labels:changed` 事件刷新工作区列表、详情和标签缓存，活动事件同样只在提交后发出。
 
-每个移动清空项还在默认 Session 写入一条系统评论，同事务镜像为 v2 conversation log 的 `kind=system` 行；metadata 仅含 `type/field/name` 和经办人的 `assignee_type`。英文 Markdown body 对名称转义，当前详情按 metadata 渲染本地化纯文本；目标工作区的 `comment:created` 在提交后触发刷新，不产生任务或 pending turn。旧时间线保留活动、系统评论及其 `comment_created` 审计，不去重。此写入不迁移默认 Session 的工作区归属，Log 读取仍遵循 Session 的既有权限边界。
+每个移动清空项还在 Issue-owned 默认 Session 写入一条系统评论，同事务镜像为 v2 conversation log 的 `kind=system` 行；metadata 仅含 `type/field/name` 和经办人的 `assignee_type`。英文 Markdown body 对名称转义，当前详情按 metadata 渲染本地化纯文本；目标工作区的 `comment:created` 在提交后触发刷新，不产生任务或 pending turn。旧时间线保留活动、系统评论及其 `comment_created` 审计，不去重。
+
+通过现有移动权限和状态检查后，同一事务把该 Issue 拥有的全部 Sessions 移到目标工作区；统一日志、日志头和成果通过 Session 归属跟随访问范围，这些表没有独立的工作区字段。Chat-owned Session 保留其 Chat 和工作区，只清空 Session 与成果上失效的 Issue 工作投影。旧 Task 保留原工作区审计快照，历史参与者不删除；后续读取和操作重新按当前 owner 的目标工作区权限核验，不能借历史记录访问原工作区的私有资源。存在未完成 Task 时沿用既有守卫，拒绝移动。
 
 [IssuesRepo](../../packages/server/src/store/repos/issues-repo.ts)的父子和依赖内容读取只认可同工作区关系，依赖行自身的 `workspace_id` 也必须与两端一致。旧的跨工作区关系在详情、列表、收件箱、分享、决策、父单状态推导和依赖自动开工中视为不存在；子单序列化仍保留不透明的 `parent_issue_id`，不附带对方标题、key 或状态。旧的跨工作区子单因此不再阻止父单结束；本规则不修改或迁移存量关系。
 

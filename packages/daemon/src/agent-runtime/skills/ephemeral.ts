@@ -101,7 +101,7 @@ export function writeTaskGcContext(
     task_id: task.id,
     issue_id: task.issueId,
     issue_session_id: task.issueSessionId ?? task.issue_session_id,
-    chat_session_id: task.chatSessionId,
+    chat_session_id: task.chatSessionId ?? task.chat_session_id ?? null,
     autopilot_run_id: task.autopilotRunId,
     completed_at: task.completedAt,
     created_at: task.createdAt,

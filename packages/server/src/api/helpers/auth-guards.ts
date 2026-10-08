@@ -6,6 +6,7 @@ import type { Context } from "hono";
 import { resolveRequestWorkspaceId } from "./workspace-context.js";
 import { MultiremiStore } from "@multiremi/store/store.js";
 import { daemonRuntimeId } from "@multiremi/store/helpers.js";
+import { ChatIssueTaskConflictError } from "@multiremi/store/repos/tasks-repo.js";
 import {
   authenticatedRequestUserId,
   cleanString,
@@ -24,6 +25,8 @@ import type {
   MultiremiAgent,
   MultiremiAttachment,
   MultiremiChatSession,
+  MultiremiIssueSession,
+  MultiremiIssue,
   MultiremiRuntime,
   MultiremiWorkspaceMember,
 } from "@multiremi/contracts/types.js";
@@ -465,6 +468,7 @@ export interface TaskVisibilitySubject {
   id: string;
   workspaceId: string;
   chatSessionId: string | null;
+  issueSessionId?: string | null;
   agentId: string;
 }
 
@@ -472,10 +476,12 @@ export interface TaskAuthMemo {
   workspaceAccess: Map<string, boolean>;
   chatSessions: Map<string, MultiremiChatSession | null>;
   agents: Map<string, MultiremiAgent | null>;
+  sessions: Map<string, MultiremiIssueSession | null>;
+  issues: Map<string, MultiremiIssue | null>;
 }
 
 export function createTaskAuthMemo(): TaskAuthMemo {
-  return { workspaceAccess: new Map(), chatSessions: new Map(), agents: new Map() };
+  return { workspaceAccess: new Map(), chatSessions: new Map(), agents: new Map(), sessions: new Map(), issues: new Map() };
 }
 
 function memoizedChatSession(
@@ -540,11 +546,21 @@ export function canCurrentUserAccessChatTask(
   task: TaskVisibilitySubject,
   memo?: TaskAuthMemo,
 ): boolean {
+  const token = currentAccessToken(c);
+  if (token?.type === "task" && (token.taskId !== task.id
+    || token.agentId !== task.agentId || token.workspaceId !== task.workspaceId)) return false;
+  if (task.issueSessionId) {
+    if (memo && !memo.sessions.has(task.issueSessionId)) {
+      memo.sessions.set(task.issueSessionId, store.getIssueSession(task.issueSessionId));
+    }
+    const session = memo ? memo.sessions.get(task.issueSessionId) : store.getIssueSession(task.issueSessionId);
+    if (!session || session.workspaceId !== task.workspaceId || session.chatId !== task.chatSessionId
+      || denySessionOwnerAccess(c, store, session, memo)) return false;
+  }
   if (!task.chatSessionId) return true;
   if (!currentUserWorkspaceAccessAllowed(c, store, memo, task.workspaceId)) return false;
   const session = memoizedChatSession(store, memo, task.chatSessionId);
   if (!session) return false;
-  const token = currentAccessToken(c);
   if (token?.type === "task") return token.taskId === task.id
     && token.agentId === task.agentId && token.workspaceId === task.workspaceId;
   return canUserViewTaskMessages(store, currentRequestUserId(c), task, memo);
@@ -656,12 +672,22 @@ export function loadChatSessionForCurrentUser(
   c: Context,
   store: MultiremiStore,
   sessionId: string,
-  options: { requireAgentAccess?: boolean } = {},
+  options: { requireAgentAccess?: boolean; scope?: "owner" | "content" } = {},
 ): { session: MultiremiChatSession } | Response {
   const session = store.getChatSession(sessionId);
   if (!session) return c.json({ error: "chat session not found" }, 404);
   const denied = denyCurrentUserWorkspaceAccess(c, store, session.workspaceId);
   if (denied) return denied;
+  if (options.scope !== "owner") {
+    const contentDenied = denyTaskChatContentAccess(c, store, session.id);
+    if (contentDenied) return contentDenied;
+  } else {
+    const token = currentAccessToken(c);
+    const task = token?.type === "task" && token.taskId ? store.getTask(token.taskId) : null;
+    if (token?.type === "task" && (!task || task.chatSessionId !== session.id
+      || task.workspaceId !== session.workspaceId || token.workspaceId !== session.workspaceId
+      || token.agentId !== task.agentId)) return c.json({ error: "forbidden outside current Chat owner" }, 403);
+  }
   if ((session.creatorId ?? "local") !== currentRequestUserId(c)) {
     return c.json({ error: "not your chat session" }, 403);
   }
@@ -669,6 +695,138 @@ export function loadChatSessionForCurrentUser(
     return c.json({ error: "you do not have access to this agent" }, 403);
   }
   return { session };
+}
+
+/** Work Session capabilities do not include their owner's ordinary Chat axis. */
+export function denyTaskChatContentAccess(c: Context, store: MultiremiStore, chatId: string): Response | null {
+  const token = currentAccessToken(c);
+  if (token?.type !== "task") return null;
+  const forbidden = () => c.json({ error: "forbidden outside current Chat content" }, 403);
+  const task = token.taskId ? store.getTask(token.taskId) : null;
+  const chat = chatId ? store.getChatSession(chatId) : null;
+  const sourceChat = task?.chatSessionId ? store.getChatSession(task.chatSessionId) : null;
+  if (!task || !chat || !sourceChat || task.workspaceId !== sourceChat.workspaceId
+    || token.workspaceId !== sourceChat.workspaceId || token.agentId !== task.agentId
+    || chat.workspaceId !== sourceChat.workspaceId) return forbidden();
+  if (sourceChat.id !== chat.id && (chat.creatorId ?? "local") !== currentRequestUserId(c)) {
+    return c.json({ error: "not your chat session" }, 403);
+  }
+  let executionKind;
+  try {
+    executionKind = store.getTaskChatExecutionKind(task);
+  } catch (error) {
+    if (error instanceof ChatIssueTaskConflictError) return forbidden();
+    throw error;
+  }
+  if (executionKind === "session") return forbidden();
+  if (executionKind === "topic") return null;
+
+  // Ordinary sends have a durable user message. Retries inherit that evidence
+  // only through server-owned attempt ancestry, never caller-selected kind.
+  const userTaskIds = new Set(store.listChatMessages(sourceChat.id)
+    .filter((message) => message.role === "user" && message.taskId)
+    .map((message) => message.taskId));
+  const visited = new Set<string>();
+  let current = task;
+  while (!visited.has(current.id)) {
+    if (userTaskIds.has(current.id)) return null;
+    visited.add(current.id);
+    const parent = current.parentTaskId ? store.getTask(current.parentTaskId) : null;
+    if (!parent || current.attempt <= 1 || current.attempt !== parent.attempt + 1
+      || current.workspaceId !== parent.workspaceId || current.agentId !== parent.agentId
+      || current.chatSessionId !== parent.chatSessionId || current.taskKind !== parent.taskKind) break;
+    current = parent;
+  }
+  return forbidden();
+}
+
+/** Owner permissions also govern Issue projections and explicit published results. */
+export function denySessionOwnerAccess(
+  c: Context,
+  store: MultiremiStore,
+  session: MultiremiIssueSession,
+  memo?: TaskAuthMemo,
+): Response | null {
+  if (!currentUserWorkspaceAccessAllowed(c, store, memo, session.workspaceId)) {
+    return denyCurrentUserWorkspaceAccess(c, store, session.workspaceId);
+  }
+  if (session.chatId) {
+    const chat = memoizedChatSession(store, memo, session.chatId);
+    if (!chat || chat.workspaceId !== session.workspaceId) return c.json({ error: "session not found" }, 404);
+    const token = currentAccessToken(c);
+    if (token?.type === "task") {
+      const task = token.taskId ? store.getTask(token.taskId) : null;
+      return task?.chatSessionId === chat.id && task.workspaceId === chat.workspaceId
+        && token.workspaceId === chat.workspaceId && token.agentId === task.agentId
+        ? null : c.json({ error: "forbidden outside current Chat" }, 403);
+    }
+    if ((chat.creatorId ?? "local") !== currentRequestUserId(c)) return c.json({ error: "not your chat session" }, 403);
+    const agent = memoizedAgent(store, memo, chat.agentId);
+    return agent && agent.workspaceId === chat.workspaceId && canCurrentUserAccessAgent(c, store, agent)
+      ? null : c.json({ error: "you do not have access to this agent" }, 403);
+  }
+  if (session.issueId && memo && !memo.issues.has(session.issueId)) {
+    memo.issues.set(session.issueId, store.getIssue(session.issueId));
+  }
+  const issue = session.issueId
+    ? memo ? memo.issues.get(session.issueId) : store.getIssue(session.issueId)
+    : null;
+  return issue && issue.workspaceId === session.workspaceId
+    ? null : c.json({ error: "session not found" }, 404);
+}
+
+/** Private Session content is limited to the Session bound to a task credential. */
+export function denySessionAccess(
+  c: Context,
+  store: MultiremiStore,
+  session: MultiremiIssueSession,
+): Response | null {
+  const ownerDenied = denySessionOwnerAccess(c, store, session);
+  if (ownerDenied) return ownerDenied;
+  const token = currentAccessToken(c);
+  if (token?.type === "task") {
+    const task = token.taskId ? store.getTask(token.taskId) : null;
+    if (!task || task.issueSessionId !== session.id || task.workspaceId !== session.workspaceId
+      || token.workspaceId !== session.workspaceId || token.agentId !== task.agentId) {
+      return c.json({ error: "forbidden outside current Session" }, 403);
+    }
+  }
+  return null;
+}
+
+export function canTaskReadInheritedSessionRange(
+  c: Context,
+  store: MultiremiStore,
+  parent: MultiremiIssueSession,
+  from: number,
+  to: number,
+): boolean {
+  const token = currentAccessToken(c);
+  const task = token?.type === "task" && token.taskId ? store.getTask(token.taskId) : null;
+  const child = task?.issueSessionId ? store.getIssueSession(task.issueSessionId) : null;
+  if (!task || !child || task.agentId !== token?.agentId || task.workspaceId !== token?.workspaceId
+    || task.workspaceId !== parent.workspaceId || child.workspaceId !== parent.workspaceId
+    || child.parentSessionId !== parent.id || child.inheritMode === "none"
+    || child.ownerType !== parent.ownerType || child.ownerId !== parent.ownerId
+    || task.inheritedProjectionRecordedAt == null || task.inheritedProjectionToSeq == null
+    || !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to < from
+    || to > task.inheritedProjectionToSeq) return false;
+  return denySessionOwnerAccess(c, store, parent) == null;
+}
+
+/** A verified Issue topic may coordinate work without reading Session content. */
+export function canTaskCoordinateSession(c: Context, store: MultiremiStore, session: MultiremiIssueSession): boolean {
+  const token = currentAccessToken(c);
+  const source = token?.type === "task" && token.taskId ? store.getTask(token.taskId) : null;
+  if (!source || source.issueSessionId || !source.chatSessionId || !session.issueId
+    || source.agentId !== token?.agentId || source.workspaceId !== token?.workspaceId
+    || source.workspaceId !== session.workspaceId || source.issueId !== session.issueId) return false;
+  const chat = store.getChatSession(source.chatSessionId);
+  const issue = store.getIssue(session.issueId);
+  return Boolean(chat && issue && chat.workspaceId === session.workspaceId && issue.workspaceId === session.workspaceId
+    && chat.agentId === source.agentId
+    && store.getVerifiedFeishuIssueIdForChatSession(chat.id) === issue.id
+    && (!session.chatId || session.chatId === chat.id));
 }
 
 export function canCurrentUserAccessChatSessionAgent(
@@ -698,7 +856,8 @@ export function denyAttachmentAccess(c: Context, store: MultiremiStore, attachme
       if ((c.req.method === "GET" || c.req.method === "HEAD")
         && task?.chatSessionId === attachment.chatSessionId
         && task.workspaceId === attachment.workspaceId
-        && token.workspaceId === attachment.workspaceId) return null;
+        && token.workspaceId === attachment.workspaceId
+        && !denyTaskChatContentAccess(c, store, attachment.chatSessionId)) return null;
       return c.json({ error: "attachment not available" }, 404);
     }
     const loaded = loadChatSessionForCurrentUser(c, store, attachment.chatSessionId, { requireAgentAccess: false });

@@ -27,7 +27,8 @@ semantics and executable maintenance commands are in
 [Unified usage and prices](usage-accounting.md).
 
 `remi session log window <session> --with-activity --json` adds an activity
-sidecar for the default Issue session. The same log-window response includes
+sidecar for the Issue-owned default Session. A Chat-owned Session associated
+with that Issue is not its default Session. The same log-window response includes
 `activities`, `activities_truncated`, and `prev_entry_created_at`; activities
 do not consume log sequence numbers or change pagination counts. Each window
 returns the latest 200 matching activities in chronological order, bounded by
@@ -35,6 +36,65 @@ the previous log entry's timestamp (inclusive) and the window's last entry
 (exclusive, except the open-ended tail). Side sessions and Chat ignore the
 flag. Without it, the response remains a log-only window. The JSON sidecar
 includes system activities; display preferences are applied by the frontend.
+
+## Session ownership and command paths
+
+Each product Session has exactly one owner: a Chat or an Issue. Chat-owned
+Sessions may have an optional Issue work projection; it does not change their
+owner or grant Issue readers access to private Chat content. Session responses
+include `owner_type` and `owner_id`. Issue-owned Sessions have a null `chat_id`
+and can execute Tasks without creating or adopting a Chat.
+
+Both owner paths are canonical Registry commands. They are not interchangeable
+aliases with different meanings for the same positional argument:
+
+| Operation | Chat-owned path | Issue-owned path |
+| --- | --- | --- |
+| List or create | `remi session list\|create <chat>` | `remi issue session list\|create <issue>` |
+| Read or update | `remi session get\|update <chat> <session>` | `remi issue session get\|update <issue> <session>` |
+| Participants | `remi session participant list\|add <chat> <session>` | `remi issue session participant list\|add <issue> <session>` |
+| Events or messages | `remi session event list <chat> <session>`, `remi session message create <chat> <session>` | `remi issue session event list <issue> <session>`, `remi issue session message create <issue> <session>` |
+| Tasks | `remi session task list\|create <chat> <session>` | `remi issue session task list\|create <issue> <session>` |
+| Results | `remi session result list\|publish <chat> <session>` | `remi issue session result list <issue> [--session <session>]`, `remi issue session result publish <issue> <session>` |
+
+Issue Session and result lists include only accessible Issue-owned work and
+Chat-owned work projections. For Issue result publication, `--session <session>`
+also selects the source Session; `--session-id` remains accepted. Creation supports
+`--discussion`, `--from`, `--inherit-mode` and `--with-code`. A parent and its side
+Session must share their actual owner and workspace: use the Chat path to branch
+from a Chat-owned projection, even when viewing it inside an Issue.
+
+`remi session show <session>`, `remi session log window|get|locate <session>` and
+`remi session inherited-context <session>` resolve either owner by Session ID.
+Task credentials normally read their bound Session and control their own Task.
+A side Session Task may read a range from its direct parent with the same owner
+and workspace, only after an inherited projection is recorded and only through
+that Task's persisted cutoff. Use `remi session log get <parent> --from X --to Y`;
+this exception does not grant parent metadata, arbitrary windows or tail reads.
+A verified Feishu group Issue-topic Chat Task may read bound Session metadata,
+list/create Session Tasks, and read safe handoff Task metadata or steer those
+Tasks. It cannot use that authority for private events/logs/transcripts, another
+Task's cancellation or inspection. Chat-owned targets must share the Topic Chat;
+Issue-owned targets must share the bound Issue. It may actively post a message
+to that Issue-owned Session through the existing public Issue-comment path;
+this does not grant another Session's message history or Chat-owned writes.
+Generic task dispatch can create delegated work in another Issue-owned Session
+in the same workspace after owner, lineage and side-Session dispatch checks;
+creation does not grant the source credential access to the new Task's content
+or control. Chat-owned dispatch retains its private Session boundary.
+Organizer redispatch retains its
+explicit supervisor authorization and audit checks. The complete boundaries are
+in [the conversation model](conversation-model.md).
+
+`remi session adopt <chat> <session>` is an
+explicit transfer of an Issue-owned Session to a Chat, rejected for active Tasks
+or a parent/child relationship. Task creation never adopts implicitly.
+
+Provider archives retain `remi session archive ... <issue>` and workspace archive
+settings retain `remi session config get|update <workspace>`. These are separate
+from product Session ownership. Use generated `--help` for options and required
+arguments. The product lifecycle and migration rules are in
+[Topic, Chat and Session](conversation-model.md).
 
 `remi issue decision request <source-issue> --kind <kind> --title <title>
 [--body-stdin] [--option <choice>...]` records a non-blocking decision on the
@@ -585,9 +645,6 @@ remove any alias.
 | `remi issue comment delete` | `remi comment delete` | One-release compatibility alias |
 | `remi issue comment resolve` | `remi comment resolve` | One-release compatibility alias |
 | `remi issue comment unresolve` | `remi comment unresolve` | One-release compatibility alias |
-| `remi issue session list` | `remi session list` | Compatibility form takes `<issue>`; canonical form takes `<chat>` |
-| `remi issue session result list` | `remi session result list` | Compatibility form aggregates by Issue; canonical form takes `<chat> <session>` |
-| `remi issue session result publish` | `remi session result publish` | Canonical form takes `<chat> <session>` and follows Chat ownership |
 | `remi issue archive list` | `remi session archive list` | One-release compatibility alias |
 | `remi issue archive status` | `remi session archive status` | One-release compatibility alias |
 | `remi issue archive verify` | `remi session archive verify` | One-release compatibility alias |
@@ -616,7 +673,7 @@ remove any alias.
 | `remi update` | `remi platform operation create` | Byte-compatible local updater alias |
 | `remi multiremi` | `remi <command>` | Hidden compatibility entry |
 
-Nested Issue aliases and the local lifecycle aliases intentionally keep their
+The remaining nested Issue aliases and the local lifecycle aliases intentionally keep their
 legacy dispatchers for byte-compatible arguments, stdout/stderr, and exit codes.
 They are still present in Registry inventory and the capability manifest, so
 they cannot become undocumented bypasses.
@@ -650,8 +707,8 @@ The server-injected agent prompt now uses only canonical commands in
 `packages/daemon/src/agent-runtime/prompts/ephemeral.ts`:
 
 - `remi comment list|add`
-- `remi session result publish`
-- `remi session log get <session> <seq|entry-id>` reads one complete entry. `remi session log get <session> --from X --to Y` reads the complete unread range `X < seq ≤ Y`, automatically follows pages and rejoins long bodies; task credentials omit the requesting agent's own history. These use the existing log-entry endpoint. `remi session event list` forwards `--since-seq` and `--to-seq` to the server.
+- `remi session result publish <chat> <session>` or `remi issue session result publish <issue> <session>`, selected by the actual Session owner.
+- `remi session log get <session> <seq|entry-id>` reads one complete entry for either owner. `remi session log get <session> --from X --to Y` reads the complete unread range `X < seq ≤ Y`, automatically follows pages and rejoins long bodies; task credentials omit the requesting agent's own history. These use the existing log-entry endpoint. Both owner paths' `session event list` commands forward `--since-seq` and `--to-seq` to the server.
 - `remi memory search|get|create|update`
 
 The matching durable command examples use canonical commands in

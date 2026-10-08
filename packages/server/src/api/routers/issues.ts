@@ -7,8 +7,15 @@ import {
   assigneeFrequencyQuery,
   canCurrentUserAccessAgent,
   canCurrentUserAccessChatTask,
+  canTaskCoordinateSession,
+  canTaskReadInheritedSessionRange,
+  createTaskAuthMemo,
   currentTaskParentId,
   denyCurrentUserWorkspaceAccess,
+  denySessionAccess,
+  denySessionOwnerAccess,
+  denyTaskChatContentAccess,
+  denySideSessionAgentDispatch,
   denyRestrictedTaskIssueCreation,
   isActiveTaskStatus,
   isJsonApiError,
@@ -65,6 +72,7 @@ import {
   issueSearchCompatibilityResponse,
   issueSearchErrorResponse,
   issueSessionCompatibilityResponse,
+  sessionTaskMetadataResponse,
   issueSessionsCompatibilityResponse,
   issueSubscriberCompatibilityResponse,
   issueSubscriberTargetErrorResponse,
@@ -136,17 +144,6 @@ function decisionActor(c: Context, store: MultiremiStore, workspaceId: string): 
 function decisionError(c: Context, error: unknown): Response {
   if (error instanceof IssueDecisionError) return c.json({ error: error.message }, error.status);
   throw error;
-}
-
-// Check trusted caller lineage before an Issue mutation can cancel existing
-// work, change assignment, or create a new Issue and then dispatch an agent.
-function denySideSessionAgentDispatch(c: Context, store: MultiremiStore): Response | null {
-  const sourceTaskId = currentTaskAccessToken(c)?.taskId;
-  const sourceTask = sourceTaskId ? store.getTask(sourceTaskId) : null;
-  const sourceSession = sourceTask?.issueSessionId ? store.getIssueSession(sourceTask.issueSessionId) : null;
-  return sourceSession && sourceSession.inheritMode !== "none"
-    ? c.json({ error: "Agent delegation is not allowed from side sessions" }, 403)
-    : null;
 }
 
 function denySideSessionAssigneeDispatch(
@@ -248,14 +245,7 @@ function denyLinkedSessionChatAccess(
   store: MultiremiStore,
   session: MultiremiIssueSession,
 ): Response | null {
-  const taskAccess = currentTaskAccessToken(c);
-  if (taskAccess?.taskId) {
-    const task = store.getTask(taskAccess.taskId);
-    if (task?.issueSessionId && task.issueSessionId !== session.id) {
-      return c.json({ error: "forbidden outside current Session" }, 403);
-    }
-  }
-  return denyLinkedSessionChatOwnerAccess(c, store, session);
+  return denySessionAccess(c, store, session);
 }
 
 function denyLinkedSessionChatOwnerAccess(
@@ -263,9 +253,7 @@ function denyLinkedSessionChatOwnerAccess(
   store: MultiremiStore,
   session: MultiremiIssueSession,
 ): Response | null {
-  if (!session.chatId) return null; // legacy Issue-owned compatibility row
-  const loaded = loadChatSessionForCurrentUser(c, store, session.chatId);
-  return loaded instanceof Response ? loaded : null;
+  return denySessionOwnerAccess(c, store, session);
 }
 
 export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
@@ -1165,12 +1153,10 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue) return c.json({ error: "issue not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
+    const memo = createTaskAuthMemo();
     const tasks = store.listActiveTasksForIssue(issue.id, {
       userId: currentRequestUserId(c), taskToken: currentTaskAccessToken(c) ?? undefined,
-    // The route already authorized this workspace; SQL checked Chat existence,
-    // creator/task capability. Retain the old guard for inconsistent legacy
-    // rows whose task workspace differs from their issue's workspace.
-    }).filter((task) => task.workspaceId === issue.workspaceId || canCurrentUserAccessChatTask(c, store, task))
+    }).filter((task) => task.workspaceId === issue.workspaceId && canCurrentUserAccessChatTask(c, store, task, memo))
       .map((task) => taskCompatibilityResponse(
         task,
         null,
@@ -1701,19 +1687,29 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!session) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, session.workspaceId);
     if (denied) return denied;
-    const chatDenied = denyLinkedSessionChatOwnerAccess(c, store, session);
+    const chatDenied = canTaskCoordinateSession(c, store, session) ? null : denySessionAccess(c, store, session);
     if (chatDenied) return chatDenied;
     return c.json(issueSessionCompatibilityResponse(
       session,
       store.listSessionParticipants(session.id),
     ));
   });
-  const logSessionAccess = (c: Context): string | Response => {
+  const logSessionAccess = (c: Context): { sessionId: string; inheritedParentRange?: true } | Response => {
     const sessionId = c.req.param("sessionId") ?? "";
+    const workSession = store.getIssueSession(sessionId);
+    if (workSession) {
+      const denied = denySessionAccess(c, store, workSession);
+      if (denied && c.req.path.endsWith("/log/entry") && c.req.query("from") != null && c.req.query("to") != null
+        && c.req.query("seq") == null && c.req.query("id") == null
+        && canTaskReadInheritedSessionRange(c, store, workSession, Number(c.req.query("from")), Number(c.req.query("to")))) {
+        return { sessionId, inheritedParentRange: true };
+      }
+      return denied ?? { sessionId };
+    }
     const scope = store.getConversationLogAccessScope(sessionId);
     if (!scope) {
       const chat = loadChatSessionForCurrentUser(c, store, sessionId);
-      return chat instanceof Response ? chat : chat.session.id;
+      return chat instanceof Response ? chat : { sessionId: chat.session.id };
     }
     const denied = denyCurrentUserWorkspaceAccess(c, store, scope.workspaceId);
     if (denied) return denied;
@@ -1725,12 +1721,14 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
         if (chatDenied) return chatDenied;
       }
       const token = currentTaskAccessToken(c);
+      const contentDenied = denyTaskChatContentAccess(c, store, scope.chatId);
+      if (contentDenied) return contentDenied;
       if (token?.taskId && scope.chatId === sessionId) {
         const task = store.getTask(token.taskId);
         // Feishu Chat creators differ from runtime owners; authorize the bound Task.
         if (task?.chatSessionId === sessionId
           && task.workspaceId === chat.workspaceId
-          && token.workspaceId === chat.workspaceId) return sessionId;
+          && token.workspaceId === chat.workspaceId) return { sessionId };
       }
       if (chat.creatorId !== currentRequestUserId(c)) {
         return c.json({ error: "not your chat session" }, 403);
@@ -1740,23 +1738,25 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
         return c.json({ error: "you do not have access to this agent" }, 403);
       }
     }
-    return sessionId;
+    return { sessionId };
   };
   const recordLogRead = (message: string, data: Record<string, unknown>): void => {
     // Optional read telemetry cannot make an authorized read fail.
     try { log.info(message, data); } catch {}
   };
   app.get("/api/sessions/:sessionId/log/locate", (c) => {
-    const sessionId = logSessionAccess(c);
-    if (sessionId instanceof Response) return sessionId;
+    const access = logSessionAccess(c);
+    if (access instanceof Response) return access;
+    const { sessionId } = access;
     const id = c.req.query("id");
     if (!id) return c.json({ error: "id is required" }, 400);
     const location = store.locateConversationLogEntry(sessionId, id);
     return location ? c.json(location) : c.json({ error: "entry not found" }, 404);
   });
   app.get("/api/sessions/:sessionId/log/entry", (c) => {
-    const sessionId = logSessionAccess(c);
-    if (sessionId instanceof Response) return sessionId;
+    const access = logSessionAccess(c);
+    if (access instanceof Response) return access;
+    const { sessionId } = access;
     if (c.req.query("from") != null || c.req.query("to") != null) {
       const rawFrom = c.req.query("from");
       const rawTo = c.req.query("to");
@@ -1768,7 +1768,9 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       try {
         const page = readSessionLogRange(store, sessionId, from, to, c.req.query("cursor"), token?.agentId);
         let progress;
-        if (token?.taskId && token.agentId) {
+        const readingTask = token?.taskId ? store.getTask(token.taskId) : null;
+        if (token?.agentId && !access.inheritedParentRange && (readingTask?.issueSessionId === sessionId
+          || readingTask?.chatSessionId === sessionId)) {
           try { progress = store.recordSessionAgentRangeRead(sessionId, token.agentId, page.read_start, page.read_end); }
           catch { recordLogRead("Session unread progress unavailable", { event: "session_log_read_progress_failed", task_id: token.taskId, session_id: sessionId }); }
         }
@@ -1778,7 +1780,9 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
           returned_from_seq: page.entries[0]?.seq ?? null, returned_to_seq: page.entries.at(-1)?.seq ?? null,
           read_start: page.read_start, read_end: page.read_end, next_cursor: page.next_cursor,
           read_high_water: progress?.seq ?? null, read_offset: progress?.offset ?? null });
-        return c.json(page);
+        return c.json(access.inheritedParentRange
+          ? { ...page, entries: page.entries.map((entry) => ({ ...entry, metadata: {} })) }
+          : page);
       } catch (error) {
         if (error instanceof SyntaxError || error instanceof Error && error.message.startsWith("Invalid range cursor")) {
           return c.json({ error: "invalid range cursor" }, 400);
@@ -1812,8 +1816,9 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     return c.json({ ...entry, delivered });
   });
   app.get("/api/sessions/:sessionId/log", (c) => {
-    const sessionId = logSessionAccess(c);
-    if (sessionId instanceof Response) return sessionId;
+    const access = logSessionAccess(c);
+    if (access instanceof Response) return access;
+    const { sessionId } = access;
     const readNumber = (name: string): number | null | undefined => {
       const raw = c.req.query(name);
       if (raw == null) return undefined;
@@ -1828,7 +1833,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     }
     const window = store.conversationLogWindow(sessionId, { anchor, before, after });
     const issueSession = store.getIssueSession(sessionId);
-    if (c.req.query("with_activity") === "1" && issueSession?.isDefault && issueSession.issueId) {
+    if (c.req.query("with_activity") === "1" && issueSession?.isDefault && !issueSession.chatId && issueSession.issueId) {
       Object.assign(window, store.listIssueActivityBetween(issueSession.issueId, {
         fromInclusive: window.prev_entry_created_at,
         toExclusive: window.has_more_after ? window.entries.at(-1)?.created_at : null,
@@ -1858,7 +1863,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/sessions/:sessionId/inherited-context", (c) => {
     const session = store.getIssueSession(c.req.param("sessionId"));
     if (!session) return c.json({ error: "session not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, session.workspaceId);
+    const denied = denySessionAccess(c, store, session);
     if (denied) return denied;
     return c.json(store.getSessionInheritedContext(session.id));
   });
@@ -1867,13 +1872,14 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue) return c.json({ error: "issue not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
+    const taskToken = currentTaskAccessToken(c);
     const sessions = store.listIssueSessions(issue.id, c.req.query("include_archived") === "true", {
       skipExistenceCheck: true,
-      chatAccess: {
+      ...(!taskToken ? { chatAccess: {
         userId: currentRequestUserId(c),
         roleWithoutMembership: issue.workspaceId === "local" && authenticatedRequestUserId(c) === null ? "owner" : "member",
-      },
-    });
+      } as const } : {}),
+    }).filter((session) => !taskToken || canTaskCoordinateSession(c, store, session) || !denySessionAccess(c, store, session));
     const participants = store.listSessionParticipantsForSessions(sessions.map((session) => session.id));
     return c.json(sessions.map((session) => issueSessionCompatibilityResponse(
       session,
@@ -1886,6 +1892,9 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
     const body = await readJson<CreateIssueSessionInput & { inheritMode?: unknown; inherit_mode?: unknown }>(c);
+    if ("chatId" in body || "chat_id" in body) {
+      return c.json({ error: "Issue Sessions are owned by the Issue; create Chat-owned Sessions through the Chat endpoint" }, 400);
+    }
     const creator = issueSubscriberCaller(c);
     const hasMemberActor = creator.actorType !== "member"
       || Boolean(currentWorkspaceMember(c, store, issue.workspaceId));
@@ -1916,10 +1925,10 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/issues/:id/sessions/:sessionId", (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
     const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
+    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
-    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
+    const chatDenied = canTaskCoordinateSession(c, store, session) ? null : denyLinkedSessionChatAccess(c, store, session);
     if (chatDenied) return chatDenied;
     return c.json(issueSessionCompatibilityResponse(
       session,
@@ -1929,7 +1938,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   app.patch("/api/issues/:id/sessions/:sessionId", async (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
     const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
+    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
     const chatDenied = denyLinkedSessionChatAccess(c, store, session);
@@ -1947,7 +1956,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/issues/:id/sessions/:sessionId/participants", (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
     const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
+    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
     const chatDenied = denyLinkedSessionChatAccess(c, store, session);
@@ -1957,7 +1966,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/issues/:id/sessions/:sessionId/participants", async (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
     const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
+    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
     const chatDenied = denyLinkedSessionChatAccess(c, store, session);
@@ -1980,7 +1989,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   app.delete("/api/issues/:id/sessions/:sessionId/participants/:participantType/:participantId", (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
     const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
+    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
     const chatDenied = denyLinkedSessionChatAccess(c, store, session);
@@ -1991,7 +2000,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/issues/:id/sessions/:sessionId/events", (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
     const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
+    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
     const chatDenied = denyLinkedSessionChatAccess(c, store, session);
@@ -2007,10 +2016,11 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/issues/:id/sessions/:sessionId/messages", async (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
     const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
+    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
-    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
+    const chatDenied = !session.chatId && canTaskCoordinateSession(c, store, session)
+      ? null : denyLinkedSessionChatAccess(c, store, session);
     if (chatDenied) return chatDenied;
     const body = await readJson<CreateIssueCommentInput>(c);
     try {
@@ -2025,17 +2035,18 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/issues/:id/sessions/:sessionId/tasks", (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
     const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
+    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
-    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
+    const coordinating = canTaskCoordinateSession(c, store, session);
+    const chatDenied = coordinating ? null : denyLinkedSessionChatAccess(c, store, session);
     if (chatDenied) return chatDenied;
     return c.json(store.listTasksForIssue(issue.id)
       // The Session-level guard above already proves access to the owning
       // Chat. Return task metadata for every participant in this Session;
       // transcript routes retain their stricter per-task visibility checks.
       .filter((task) => task.issueSessionId === session.id)
-      .map((task) => taskCompatibilityResponse(
+      .map((task) => coordinating ? sessionTaskMetadataResponse(task) : taskCompatibilityResponse(
         task,
         null,
         task.status === "queued" || task.status === "dispatched"
@@ -2046,9 +2057,12 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/issues/:id/sessions/:sessionId/tasks", async (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
     const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
+    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
+    const coordinating = canTaskCoordinateSession(c, store, session);
+    const sessionDenied = coordinating ? null : denySessionAccess(c, store, session);
+    if (sessionDenied) return sessionDenied;
     const dispatchDenied = denySideSessionAgentDispatch(c, store);
     if (dispatchDenied) return dispatchDenied;
     const body = await readJson<CreateSessionTaskInput>(c);
@@ -2069,7 +2083,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
         createdById: creator.actorId,
         parentTaskId: currentTaskParentId(c),
       });
-      return c.json(taskCompatibilityResponse(task), 201);
+      return c.json(coordinating ? sessionTaskMetadataResponse(task) : taskCompatibilityResponse(task), 201);
     } catch (error) {
       if (error instanceof DelegationRoundTripLimitError) {
         store.recordDelegationRoundTripLimited(error);
@@ -2095,7 +2109,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/issues/:id/sessions/:sessionId/results", async (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
     const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id) return c.json({ error: "session not found" }, 404);
+    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
     const chatDenied = denyLinkedSessionChatAccess(c, store, session);

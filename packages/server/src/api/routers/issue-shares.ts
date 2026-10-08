@@ -101,7 +101,8 @@ export function registerIssueShareRoutes(app: Hono, deps: RouterDeps): void {
     const taskSession = task?.issueSessionId ? store.getIssueSession(task.issueSessionId) : null;
     if (!issue || issue.workspaceId !== share.workspaceId || !task
       || task.issueId !== issue.id || task.workspaceId !== share.workspaceId || task.chatSessionId
-      || (task.issueSessionId && taskSession?.issueId !== issue.id)) {
+      || (task.issueSessionId && (!taskSession || taskSession.chatId
+        || taskSession.issueId !== issue.id || taskSession.workspaceId !== issue.workspaceId))) {
       return c.json({ error: "trace not found" }, 404);
     }
     const window = parseTraceWindow(c);
@@ -176,7 +177,10 @@ function buildSharedIssueBundle(
 
   const timeline = store.listIssueTimeline(issue.id, { ascending: true })
     .map((entry) => sharedTimelineEntry(token, entry));
-  const sessions = store.listIssueSessions(issue.id, true).map((session) => ({
+  const publicSessions = store.listIssueSessions(issue.id, true)
+    .filter((session) => !session.chatId && session.issueId === issue.id && session.workspaceId === issue.workspaceId);
+  const publicSessionIds = new Set(publicSessions.map((session) => session.id));
+  const sessions = publicSessions.map((session) => ({
     ...issueSessionCompatibilityResponse(session, store.listSessionParticipants(session.id)),
     events: store.listSessionEvents(session.id).map(sessionEventCompatibilityResponse),
     tasks: store.listTasksForIssue(issue.id)
@@ -203,7 +207,9 @@ function buildSharedIssueBundle(
     dependencies: issue.dependencies.map(issueDependencyCompatibilityResponse),
     timeline,
     sessions,
-    session_results: store.listIssueSessionResults(issue.id).map(sessionResultCompatibilityResponse),
+    session_results: store.listIssueSessionResults(issue.id)
+      .filter((result) => publicSessionIds.has(result.sourceSessionId))
+      .map(sessionResultCompatibilityResponse),
     tasks: unscopedTasks,
     issue_workspace: issueWorkspace ? {
       issue_id: issueWorkspace.issueId,

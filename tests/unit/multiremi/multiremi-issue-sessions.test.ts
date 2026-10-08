@@ -24,7 +24,9 @@ describe("Issue sessions and per-agent projection lanes", () => {
 
     const issue = store.createIssue({ title: "Optional anchor", workspaceId: "local" });
     const issueWork = store.createIssueSession(issue.id, { chatId: chat.id, title: "Issue work" });
-    expect(store.listIssueSessions(issue.id).map((session) => session.id)).toEqual([issueWork.id]);
+    expect(store.listIssueSessions(issue.id).map((session) => session.id)).toEqual([
+      store.getOrCreateDefaultIssueSession(issue.id).id, issueWork.id,
+    ]);
     expect(store.getSessionResult(result.id)?.issueId).toBeNull();
     expect(store.getTask(beforeLink.id)?.issueId).toBeNull();
 
@@ -191,7 +193,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     expect(firstPrompt).toContain("Historical transcripts are supporting evidence");
     expect(firstPrompt).toContain("## Current Request\nImplement the projection.");
     expect(firstPrompt).toContain(
-      `remi session result publish ${session.chatId} ${session.id}`,
+      `remi issue session result publish ${session.issueId} ${session.id}`,
     );
     // The result taxonomy is only useful if the agent is told it exists.
     expect(firstPrompt).toContain("--type mr|report|deploy|decision|doc|other");

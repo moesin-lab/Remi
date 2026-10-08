@@ -77,6 +77,7 @@ import type {
   MultiremiRuntime,
   MultiremiRuntimeCommandRequest,
   MultiremiSessionEvent,
+  MultiremiSessionResult,
   MultiremiSessionParticipant,
   MultiremiSystemEvent,
   MultiremiSquad,
@@ -578,8 +579,7 @@ export interface TasksSurface {
   countDelegationPairHops: import("./repos/tasks-repo.js").TasksRepo["countDelegationPairHops"];
   recordDelegationRoundTripLimitedWithinTransaction: import("./repos/tasks-repo.js").TasksRepo["recordDelegationRoundTripLimitedWithinTransaction"];
   ensurePendingTurnWithinTransaction(input: import("./repos/tasks-repo.js").EnsurePendingTurnInput): import("./repos/tasks-repo.js").EnsurePendingTurnResult;
-  createTaskWithinWorkspaceLock(input: CreateTaskInput, childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
-    deferredEvents: CommitEventQueue, gateIssueBeforeReplacement?: MultiremiIssue | null, executionScopeOverride?: string): MultiremiTask;
+  createTaskWithinWorkspaceLock: import("./repos/tasks-repo.js").TasksRepo["createTaskWithinWorkspaceLock"];
   createTask(input: CreateTaskInput): MultiremiTask;
   /**
    * Internal primitive for a caller that already owns a database transaction.
@@ -813,6 +813,8 @@ export interface IssueSessionsSurface {
   createSession(chatId: string, input?: CreateIssueSessionInput): MultiremiIssueSession;
   listChatOwnedSessions(chatId: string, includeArchived?: boolean): MultiremiIssueSession[];
   adoptLegacySession(chatId: string, sessionId: string): MultiremiIssueSession;
+  deleteOwnedSessionsWithinTransaction(ownerType: "chat" | "issue", ownerId: string): void;
+  listChatSessionResults(chatId: string): MultiremiSessionResult[];
   getOrCreateDefaultIssueSession(issueId: string, createdById?: string | null): MultiremiIssueSession;
   /** For callers that already own the transaction: never opens a nested frame. */
   getOrCreateDefaultIssueSessionWithinTransaction(issueId: string, createdById?: string | null): MultiremiIssueSession;

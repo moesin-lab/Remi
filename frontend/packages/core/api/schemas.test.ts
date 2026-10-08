@@ -690,7 +690,7 @@ describe("IssueSessionListSchema", () => {
     const parsed = parseWithFallback([
       {
         id: "sess_1",
-        issue_id: "issue_1",
+        issue_id: "issue_1", owner_type: "issue", owner_id: "issue_1",
         workspace_id: "ws_1",
         title: "Main",
         status: "active",
@@ -713,7 +713,7 @@ describe("IssueSessionListSchema", () => {
 
   it("preserves the code snapshot opt-in and its Runtime without making it a held workspace", () => {
     const parsed = parseWithFallback([{
-      id: "sess_code", issue_id: "issue_1", workspace_id: "ws_1", title: "Read code", status: "active",
+      id: "sess_code", issue_id: "issue_1", owner_type: "issue", owner_id: "issue_1", workspace_id: "ws_1", title: "Read code", status: "active",
       holds_workspace: false, with_code: true, code_runtime_id: "rt_parent",
       parent_session_id: "sess_main", inherit_mode: "follow", inherit_cutoff_seq: 42,
       created_at: "2026-09-18T00:00:00Z", updated_at: "2026-09-18T00:00:00Z",
@@ -727,7 +727,7 @@ describe("IssueSessionListSchema", () => {
     const parsed = parseWithFallback([
       {
         id: "sess_side",
-        issue_id: "issue_1",
+        issue_id: "issue_1", owner_type: "issue", owner_id: "issue_1",
         workspace_id: "ws_1",
         title: "Review",
         status: "active",
@@ -755,7 +755,7 @@ describe("IssueSessionListSchema", () => {
     const parsed = parseWithFallback([
       {
         id: "sess_side",
-        issue_id: "issue_1",
+        issue_id: "issue_1", owner_type: "issue", owner_id: "issue_1",
         workspace_id: "ws_1",
         title: "Review",
         status: "active",

@@ -242,37 +242,9 @@ export class ChatRepo {
       this.ctx.db.run("DELETE FROM multiremi_attachments WHERE chat_session_id = ?", [id]);
       this.ctx.db.run("DELETE FROM multiremi_chat_messages WHERE chat_session_id = ?", [id]);
       this.ctx.notificationChannels().deleteAgentChatNotificationChannel(id);
-      // Session event/result data belongs to the Chat and follows its explicit
-      // destructive deletion. Keep already-published Issue comments as Issue
-      // audit history; only remove their link to the deleted Session. Task rows
-      // likewise retain their audit record, while their Session reference is
-      // cleared before the Session rows are removed.
-      this.ctx.db.run(
-        `UPDATE multiremi_issue_comments
-         SET issue_session_id = NULL
-         WHERE issue_session_id IN (
-           SELECT id FROM multiremi_issue_sessions WHERE chat_id = ?
-         )`,
-        [id],
-      );
-      this.ctx.db.run(
-        `UPDATE multiremi_tasks
-         SET issue_session_id = NULL, issue_session_generation = NULL
-         WHERE issue_session_id IN (
-           SELECT id FROM multiremi_issue_sessions WHERE chat_id = ?
-         )`,
-        [id],
-      );
-      this.ctx.db.run("DELETE FROM multiremi_session_results WHERE chat_id = ?", [id]);
-      for (const table of ["multiremi_session_events", "multiremi_session_participants", "multiremi_session_agent_lanes"]) {
-        this.ctx.db.run(
-          `DELETE FROM ${table} WHERE session_id IN (
-             SELECT id FROM multiremi_issue_sessions WHERE chat_id = ?
-           )`,
-          [id],
-        );
-      }
-      this.ctx.db.run("DELETE FROM multiremi_issue_sessions WHERE chat_id = ?", [id]);
+      this.ctx.issueSessions().deleteOwnedSessionsWithinTransaction("chat", id);
+      this.ctx.db.run("DELETE FROM multiremi_conversation_log WHERE session_id = ?", [id]);
+      this.ctx.db.run("DELETE FROM multiremi_conversation_heads WHERE session_id = ?", [id]);
       const deleted = this.ctx.db.run("DELETE FROM multiremi_chat_sessions WHERE id = ?", [id]).changes > 0;
       return { current, cancelled, deleted };
     })();

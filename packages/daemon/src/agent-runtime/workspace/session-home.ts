@@ -170,10 +170,11 @@ export function resolveIssueSessionProviderHome(
   };
 }
 
-/** Find the runtime Session roots that belong to one Issue without following links. */
+/** Find one owner's runtime Session roots associated with an Issue, without following links. */
 export function listIssueSessionRuntimeRoots(
   workspacesRoot: string,
   issueId: string,
+  ownerChatId: string | null = null,
 ): IssueSessionRuntimeRoot[] {
   const runtimeRoot = join(resolve(workspacesRoot), ".runtime");
   let rootInfo;
@@ -196,7 +197,10 @@ export function listIssueSessionRuntimeRoots(
       const metadataInfo = lstatSync(metadataPath);
       if (!metadataInfo.isFile() || metadataInfo.isSymbolicLink()) continue;
       const metadata = JSON.parse(readFileSync(metadataPath, "utf8")) as Record<string, unknown>;
-      if (metadata.kind === "issue_runtime" && metadata.issue_id === issueId) {
+      // Older early-trace metadata omitted the owner. Retain those roots
+      // without exposing them as Issue history or guessing a Chat owner.
+      if (metadata.kind === "issue_runtime" && metadata.issue_id === issueId
+        && metadata.chat_session_id === ownerChatId) {
         roots.push({ sessionId: entry.name, root: sessionRoot });
       }
     } catch (error) {

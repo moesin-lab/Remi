@@ -226,6 +226,7 @@ const mockApiObj = vi.hoisted(() => ({
   getIssue: vi.fn(),
   listIssueSessions: vi.fn().mockResolvedValue([{
     id: "session-main",
+    owner_type: "issue", owner_id: "issue-1",
     issue_id: "issue-1",
     workspace_id: "ws-1",
     title: "Main",
@@ -620,6 +621,7 @@ describe("IssueDetail (shared)", () => {
     ]);
     mockApiObj.listIssueSessions.mockResolvedValue([{
       id: "session-main",
+      owner_type: "issue", owner_id: mockIssue.id,
       issue_id: mockIssue.id,
       workspace_id: "ws-1",
       title: "Main",
@@ -1019,6 +1021,7 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {
         id: "session-main",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Main",
@@ -1033,6 +1036,7 @@ describe("IssueDetail (shared)", () => {
       },
       {
         id: "session-review",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Review",
@@ -1084,17 +1088,17 @@ describe("IssueDetail (shared)", () => {
     expect(mockNavigationReplace).not.toHaveBeenCalled();
   });
 
-  it("keeps the linked-session rail mounted on a single-session issue without an Issue-owned create control", async () => {
+  it("keeps the linked-session rail mounted on a single-session issue with an Issue-owned create control", async () => {
     // Default fixture: one default "Main" session. The rail still mounts —
     // it is where linked Sessions are selected, so hiding it on the
     // single-session case would hide the relationship from most users.
     renderIssueDetail();
 
-    await screen.findByText("Linked Sessions");
+    await screen.findByText("Sessions");
     expect(screen.getByRole("button", { name: /^Main/ })).toBeInTheDocument();
 
-    // Session creation belongs to the owning Chat, not this Issue projection.
-    expect(screen.queryByRole("button", { name: "New session" })).not.toBeInTheDocument();
+    // Issue-owned creation stays reachable even when there is only Main.
+    expect(screen.getByRole("button", { name: "New session" })).toBeInTheDocument();
 
   });
 
@@ -1109,7 +1113,7 @@ describe("IssueDetail (shared)", () => {
     // multi-session case uses, so the reading column never shifts when a
     // second session appears.
     expect(scrollRoot!.parentElement!.parentElement!.previousElementSibling).toContainElement(
-      screen.getByText("Linked Sessions"),
+      screen.getByText("Sessions"),
     );
   });
 
@@ -1117,17 +1121,18 @@ describe("IssueDetail (shared)", () => {
     renderIssueDetail();
 
     // The header identifies this as an Issue-scoped projection; the tooltip
-    // makes clear that the Sessions are owned by linked Chats.
-    const railLabel = await screen.findByText("Linked Sessions");
+    // distinguishes owned Sessions from associated Chat Sessions.
+    const railLabel = await screen.findByText("Sessions");
     expect(railLabel).toHaveAttribute(
       "title",
-      "Sessions currently associated with this Issue",
+      "Sessions owned by or associated with this Issue",
     );
   });
 
   it("shows the localized default-session name instead of the stored title", async () => {
     mockApiObj.listIssueSessions.mockResolvedValue([{
       id: "session-main",
+      owner_type: "issue", owner_id: mockIssue.id,
       issue_id: mockIssue.id,
       workspace_id: "ws-1",
       // Server-side constant nobody typed — it must never reach the screen.
@@ -1152,6 +1157,7 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {
         id: "session-main",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Main-RAW",
@@ -1166,6 +1172,7 @@ describe("IssueDetail (shared)", () => {
       },
       {
         id: "session-review",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Review",
@@ -1194,10 +1201,11 @@ describe("IssueDetail (shared)", () => {
     expect(mockNavigationReplace).not.toHaveBeenCalled();
   });
 
-  it("renders one rail row per linked Session without an Issue-owned create control", async () => {
+  it("renders one rail row per linked Session with an Issue-owned create control", async () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {
         id: "session-main",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Main",
@@ -1212,6 +1220,7 @@ describe("IssueDetail (shared)", () => {
       },
       {
         id: "session-review",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Review",
@@ -1227,10 +1236,10 @@ describe("IssueDetail (shared)", () => {
     ]);
     renderIssueDetail();
 
-    expect(await screen.findByText("Linked Sessions")).toBeInTheDocument();
+    expect(await screen.findByText("Sessions")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Main/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Review/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "New session" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New session" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Session actions" })).toHaveLength(2);
   });
 
@@ -1238,6 +1247,7 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {
         id: "session-main",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Main",
@@ -1252,6 +1262,7 @@ describe("IssueDetail (shared)", () => {
       },
       {
         id: "session-review",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Review",
@@ -1267,7 +1278,7 @@ describe("IssueDetail (shared)", () => {
     ]);
     renderIssueDetail();
 
-    const sessionsLabel = await screen.findByText("Linked Sessions");
+    const sessionsLabel = await screen.findByText("Sessions");
     const scrollRoot = document.querySelector<HTMLElement>("[data-tab-scroll-root]");
     expect(scrollRoot).not.toBeNull();
     // Rendering the column inside the scroll container (its previous home,
@@ -1284,6 +1295,7 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {
         id: "session-main",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Main",
@@ -1298,6 +1310,7 @@ describe("IssueDetail (shared)", () => {
       },
       {
         id: "session-review",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Review",
@@ -1351,6 +1364,7 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.listIssueSessions.mockResolvedValue([
       {
         id: "session-main",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Main",
@@ -1365,6 +1379,7 @@ describe("IssueDetail (shared)", () => {
       },
       {
         id: "session-review",
+        owner_type: "issue", owner_id: mockIssue.id,
         issue_id: mockIssue.id,
         workspace_id: "ws-1",
         title: "Review",
@@ -1407,6 +1422,33 @@ describe("IssueDetail (shared)", () => {
     expect(screen.getByRole("switch", { name: "Show system details" })).toHaveAttribute("aria-checked", "false");
     expect(activityPreferencesStore("user-1", "ws-1").getState().showSystemDetails).toBe(false);
     expect(mockApiObj.getSessionLog).toHaveBeenCalledWith("session-main", { before: 30, with_activity: 1 });
+  });
+
+  it.each([undefined, "missing-comment"])("opens the Issue Main before an associated Chat Main (comment: %s)", async highlightCommentId => {
+    const [main] = await mockApiObj.listIssueSessions("issue-1");
+    mockApiObj.listIssueSessions.mockResolvedValue([
+      { ...main, id: "chat-main", owner_type: "chat", owner_id: "chat-1", chat_id: "chat-1" }, main,
+    ]);
+    mockApiObj.locateSessionLogEntry.mockRejectedValue(new ApiError("entry not found", 404, "Not Found"));
+    render(<I18nProvider locale="en" resources={TEST_RESOURCES}>
+      <QueryClientProvider client={createTestQueryClient()}>
+        <IssueDetail issueId="issue-1" highlightCommentId={highlightCommentId} />
+      </QueryClientProvider>
+    </I18nProvider>);
+    await waitForReveal();
+    expect(mockApiObj.getSessionLog).toHaveBeenCalledWith("session-main", { before: 30, with_activity: 1 });
+    expect(mockApiObj.getSessionLog.mock.calls.some(([sessionId]) => sessionId === "chat-main")).toBe(false);
+  });
+
+  it("opens an explicitly selected Chat Main without Issue activities", async () => {
+    const [main] = await mockApiObj.listIssueSessions("issue-1");
+    mockApiObj.listIssueSessions.mockResolvedValue([
+      { ...main, id: "chat-main", owner_type: "chat", owner_id: "chat-1", chat_id: "chat-1" }, main,
+    ]);
+    renderIssueDetail("issue-1", "chat-main");
+    await waitForReveal();
+    expect(mockApiObj.getSessionLog).toHaveBeenCalledWith("chat-main", { before: 30 });
+    expect(mockApiObj.getSessionLog.mock.calls.some(([sessionId, params]) => sessionId === "chat-main" && params?.with_activity)).toBe(false);
   });
 
   it.each(["session-main", undefined])("keeps a failed locate retryable (session: %s)", async sessionId => {
@@ -1648,7 +1690,7 @@ describe("IssueDetail (shared)", () => {
     renderIssueDetail();
 
     expect(
-      await screen.findByText("No linked Sessions to show"),
+      await screen.findByText("No Sessions yet"),
     ).toBeInTheDocument();
     expect(screen.queryByText("Couldn't load Sessions linked to this issue")).not.toBeInTheDocument();
     expect(mockApiObj.getSessionLog).not.toHaveBeenCalled();
@@ -1811,10 +1853,10 @@ describe("IssueDetail (shared)", () => {
     expect(screen.queryByText("Properties")).not.toBeInTheDocument();
     const sessionsToggle = screen.getByRole("button", { name: "Toggle sessions" });
     expect(sessionsToggle).toHaveAttribute("aria-pressed", "false");
-    expect(screen.queryByText("Linked Sessions")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sessions")).not.toBeInTheDocument();
 
     fireEvent.click(sessionsToggle);
-    expect(await screen.findByText("Linked Sessions")).toBeInTheDocument();
+    expect(await screen.findByText("Sessions")).toBeInTheDocument();
     expect(sessionsToggle).toHaveAttribute("aria-pressed", "true");
   });
 
@@ -1939,7 +1981,7 @@ describe("IssueDetail (shared)", () => {
         author_type: "system", body_md: "Event " + seq, body_html: null, render_version: "test", metadata: {}, ...extra });
     }
     function renderActivityRows(entries: SessionLogRow[], userId: string, options: { target?: string; missing?: string; ssr?: boolean;
-      activities?: IssueActivityEntry[]; truncated?: boolean; side?: boolean } = {}) {
+      activities?: IssueActivityEntry[]; truncated?: boolean; side?: boolean; chatOwned?: boolean } = {}) {
       const queryClient = createTestQueryClient();
       let target = options.target;
       let activities = options.activities;
@@ -1950,8 +1992,9 @@ describe("IssueDetail (shared)", () => {
           <IssueActivitySection issueId={mockIssue.id} issueTitle={mockIssue.title} projectId={null}
             members={[]} agents={[{ id: "agent-1", name: "QA" } as any]} currentUserId={userId}
             canModerateComments={false} activeIssueSessionId="session-main" activeIssueSession={options.activities
-              ? { id: "session-main", is_default: !options.side } as any : null}
-            sessionsPending={false} sessionsFetching={false} onRetrySessions={vi.fn()} scrollContainerEl={null}
+              ? { id: "session-main", owner_type: options.chatOwned ? "chat" : "issue",
+                owner_id: options.chatOwned ? "chat-1" : mockIssue.id, is_default: !options.side } as any : null}
+            sessionsPending={false} sessionsFetching={false} onRetrySessions={vi.fn()} onCreateSession={vi.fn()} scrollContainerEl={null}
             onScrollRoot={vi.fn()} onShowKeyResults={vi.fn()} highlightCommentId={target}
             initialLog={{ sessionId: "session-main", head: null, targetCommentId: options.missing ? undefined : target,
               missingCommentId: options.missing,
@@ -2049,13 +2092,16 @@ describe("IssueDetail (shared)", () => {
       expect(view.container.querySelector("[data-tab-scroll-root]")).toHaveAttribute("data-ssr-display-ready", "1");
     });
 
-    it("filters side-session activities and toggles third-layer audits while showing the cap hint", async () => {
+    it("filters side-session and Chat Main activities and toggles third-layer audits while showing the cap hint", async () => {
       const activities = [audit("second", 1, "issue_created"), audit("system", 2, "decision_requested"),
         audit("comment", 3, "comment_created"), audit("mention", 4, "comment_mention_skipped"), audit("duplicate", 5, "workspace_move_cleared")];
       const head = activityRow(0, "head");
       const side = renderActivityRows([head], "side-activity", { activities, side: true });
       expect(side.container.querySelector("[data-issue-activity]")).toBeNull();
       side.unmount();
+      const chatMain = renderActivityRows([head], "chat-main-activity", { activities, chatOwned: true });
+      expect(chatMain.container.querySelector("[data-issue-activity]")).toBeNull();
+      chatMain.unmount();
       const view = renderActivityRows([head], "main-activity", { activities, truncated: true });
       expect(view.container.querySelectorAll("[data-issue-activity]")).toHaveLength(1);
       expect(view.container).toHaveTextContent("Showing the latest 200 activities");
@@ -2274,7 +2320,7 @@ describe("IssueDetail (shared)", () => {
           <QueryClientProvider client={createTestQueryClient()}>
             <IssueActivitySection issueId={mockIssue.id} issueTitle={mockIssue.title} projectId={null} members={[]} agents={[]}
               canModerateComments={false} activeIssueSessionId="session-main" activeIssueSession={null}
-              sessionsPending={false} sessionsFetching={false} onRetrySessions={vi.fn()}
+              sessionsPending={false} sessionsFetching={false} onRetrySessions={vi.fn()} onCreateSession={vi.fn()}
               scrollContainerEl={null} onScrollRoot={vi.fn()} onShowKeyResults={vi.fn()}
               onContentReady={onContentReady} />
           </QueryClientProvider>
@@ -2300,7 +2346,7 @@ describe("IssueDetail (shared)", () => {
         <QueryClientProvider client={queryClient}>
           <IssueActivitySection issueId={mockIssue.id} issueTitle={mockIssue.title} projectId={null} members={[]} agents={[]}
             canModerateComments={false} activeIssueSessionId={sessionId} activeIssueSession={null}
-            sessionsPending={false} sessionsFetching={false} onRetrySessions={vi.fn()}
+            sessionsPending={false} sessionsFetching={false} onRetrySessions={vi.fn()} onCreateSession={vi.fn()}
             scrollContainerEl={null} onScrollRoot={vi.fn()} onShowKeyResults={vi.fn()}
             onContentReady={onContentReady} />
         </QueryClientProvider>
@@ -2372,7 +2418,7 @@ describe("IssueDetail (shared)", () => {
             <IssueActivitySection issueId={mockIssue.id} issueTitle={mockIssue.title} projectId={null} members={[]} agents={[]}
               currentUserId="user-1" canModerateComments activeIssueSessionId="session-main"
               activeIssueSession={session} sessionsPending={false} sessionsFetching={false}
-              onRetrySessions={vi.fn()} highlightCommentId="reply-1"
+              onRetrySessions={vi.fn()} onCreateSession={vi.fn()} highlightCommentId="reply-1"
               initialLog={{ sessionId: "session-main", window: {
                 entries: [], head_seq: 2, log_version: 1, has_more_before: false, has_more_after: false,
               }, head: null }} onScrollRoot={vi.fn()} onShowKeyResults={vi.fn()}

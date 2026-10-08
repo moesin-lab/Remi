@@ -754,6 +754,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const agent = store.createAgent({ name: "Wiki maintainer", provider: "codex" });
     const project = store.createProject({ title: "Knowledge project" });
     const issue = store.createIssue({ title: "Ship feature", projectId: project.id, status: "in_review" });
+    const main = store.getOrCreateDefaultIssueSession(issue.id);
     const autopilot = store.createAutopilot({
       title: "Maintain Wiki",
       projectId: project.id,
@@ -823,9 +824,14 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     });
     expect(runs[0].issueSessionId).toBeString();
     expect(store.getTask(runs[0].taskId!)?.issueSessionId).toBe(runs[0].issueSessionId);
+    expect(store.getTask(runs[0].taskId!)?.chatSessionId).toBeNull();
+    expect(store.getIssueSession(runs[0].issueSessionId!)).toMatchObject({ ownerType: "issue", ownerId: issue.id, chatId: null });
+    expect(runs[0].issueSessionId).not.toBe(main.id);
+    expect(store.getOrCreateDefaultIssueSession(issue.id)).toMatchObject({ id: main.id, ownerType: "issue", ownerId: issue.id });
+    expect(store.listChatSessions("local")).toEqual([]);
     expect(store.getTask(runs[0].taskId!)?.prompt).toBe("Inspect the completed work and reconcile the Wiki");
     expect(store.getIssue(issue.id)?.status).toBe("done");
-    expect(store.listIssueSessions(issue.id, true)).toHaveLength(1);
+    expect(store.listIssueSessions(issue.id, true)).toHaveLength(2);
     expect(store.getSystemEvent(eventRow.id)?.status).toBe("processed");
 
     expect(scheduler.tickSystemEvents()).toEqual([]);
@@ -892,6 +898,8 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.completeTask(task.id, { output: "reviewed" });
+    expect(store.listIssueComments(issue.id).some((comment) => comment.taskId === task.id && comment.body === "reviewed"))
+      .toBe(true);
 
     // queued/running/completed lifecycle transitions stay auditable in the
     // outbox, but none may recursively create another automation task.
@@ -907,16 +915,24 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(store.listAutopilotRuns(autopilot.id)).toHaveLength(2);
   });
 
-  it("reuses the most recently updated active Session when configured", () => {
+  it("reuses the most recently updated active Issue-owned Session and ignores newer private projections", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Wiki maintainer", provider: "claude" });
     const issue = store.createIssue({ title: "Reuse session", status: "in_review" });
+    const main = store.getOrCreateDefaultIssueSession(issue.id);
+    const latest = store.createIssueSession(issue.id, { title: "Latest shared context" });
     const chat = store.createChatSession({ agentId: agent.id });
-    const latest = store.createIssueSession(issue.id, { chatId: chat.id, title: "Latest context" });
+    const privateProjection = store.createIssueSession(issue.id, { chatId: chat.id, title: "Private latest context" });
+    const archived = store.createIssueSession(issue.id, { title: "Archived newer context" });
+    store.updateIssueSession(archived.id, { status: "archived" });
     db!.run(
       "UPDATE multiremi_issue_sessions SET updated_at = ? WHERE id = ?",
       ["2099-01-01T00:00:00.000Z", latest.id],
     );
+    db!.run("UPDATE multiremi_issue_sessions SET updated_at = ? WHERE id = ?",
+      ["2100-01-01T00:00:00.000Z", privateProjection.id]);
+    db!.run("UPDATE multiremi_issue_sessions SET updated_at = ? WHERE id = ?",
+      ["2101-01-01T00:00:00.000Z", archived.id]);
     const autopilot = store.createAutopilot({
       title: "Reuse Wiki session",
       assigneeId: agent.id,
@@ -935,7 +951,28 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     store.updateIssue(issue.id, { status: "done" });
     const [run] = store.dispatchPendingSystemEvents();
     expect(run.issueSessionId).toBe(latest.id);
+    expect(store.getTask(run.taskId!)?.chatSessionId).toBeNull();
+    expect(store.getIssueSession(run.issueSessionId!)).toMatchObject({ ownerType: "issue", ownerId: issue.id, chatId: null });
+    expect(store.getOrCreateDefaultIssueSession(issue.id).id).toBe(main.id);
+    expect(store.listIssueSessions(issue.id, true)).toHaveLength(4);
+    expect(store.listChatSessions("local").map((entry) => entry.id)).toEqual([chat.id]);
+    expect(store.listTasks().filter((task) => task.chatSessionId === chat.id)).toEqual([]);
+  });
+
+  it("reuses the independent Issue Main without implicitly creating a Chat", () => {
+    const store = createStore();
+    const agent = store.createAgent({ name: "Main worker", provider: "claude" });
+    const issue = store.createIssue({ title: "Reuse Main" });
+    const main = store.getOrCreateDefaultIssueSession(issue.id);
+    const autopilot = store.createAutopilot({ title: "Main automation", assigneeId: agent.id,
+      executionMode: "trigger_issue", sessionPolicy: "reuse_latest" });
+
+    const run = store.runAutopilot(autopilot.id, { triggerIssueId: issue.id });
+    expect(run.issueSessionId).toBe(main.id);
+    expect(store.getTask(run.taskId!)).toMatchObject({ issueSessionId: main.id, issueId: issue.id, chatSessionId: null });
+    expect(store.getOrCreateDefaultIssueSession(issue.id)).toMatchObject({ id: main.id, ownerType: "issue", ownerId: issue.id });
     expect(store.listIssueSessions(issue.id, true)).toHaveLength(1);
+    expect(store.listChatSessions("local")).toEqual([]);
   });
 
   it("claims each pending system event once across sqlite connections", () => {

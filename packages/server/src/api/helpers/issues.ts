@@ -59,6 +59,15 @@ export function currentTaskParentId(c: Context): string | null {
   return currentTaskAccessToken(c)?.taskId ?? null;
 }
 
+export function denySideSessionAgentDispatch(c: Context, store: MultiremiStore): Response | null {
+  const sourceTaskId = currentTaskAccessToken(c)?.taskId;
+  const sourceTask = sourceTaskId ? store.getTask(sourceTaskId) : null;
+  const sourceSession = sourceTask?.issueSessionId ? store.getIssueSession(sourceTask.issueSessionId) : null;
+  return sourceSession && sourceSession.inheritMode !== "none"
+    ? c.json({ error: "Agent delegation is not allowed from side sessions" }, 403)
+    : null;
+}
+
 /** A human request is identified only from trusted request credentials. */
 export function humanRequestActor(c: Context): { memberId: string } | null {
   if (currentTaskAccessToken(c)) return null;

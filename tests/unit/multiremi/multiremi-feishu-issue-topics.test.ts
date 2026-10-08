@@ -101,25 +101,32 @@ describe("Feishu Issue topics", () => {
       return issue;
     }
 
-    for (const scenario of ["bound", "standalone", "cross-issue", "active", "chat"] as const) {
+    for (const scenario of ["bound", "standalone", "cross-issue", "cross-issue-chat", "active", "chat"] as const) {
       it(`${scenario}: reports each eligible topic once, with the existing relay dedupe key`, () => {
         const { store } = scaffold();
         configureTopics(store);
         const worker = store.createAgent({ name: "Leader", provider: "codex", workspaceId: "local" });
         const issue = issueWithTopic(store, worker.id, "Review X");
-        const second = scenario === "standalone" || scenario === "cross-issue"
+        const crossIssue = scenario === "cross-issue" || scenario === "cross-issue-chat";
+        const second = scenario === "standalone" || crossIssue
           ? issueWithTopic(store, worker.id, "Review Y") : null;
-        const third = scenario === "cross-issue" ? issueWithTopic(store, worker.id, "Review Z") : null;
-        const boundIssue = scenario === "bound" || scenario === "cross-issue" ? issue : null;
-        const chat = scenario === "chat" ? store.createChatSession({ agentId: worker.id }) : null;
+        const third = crossIssue ? issueWithTopic(store, worker.id, "Review Z") : null;
+        const boundIssue = scenario === "bound" || crossIssue ? issue : null;
+        const chat = scenario === "chat" || scenario === "cross-issue-chat" ? store.createChatSession({ agentId: worker.id }) : null;
+        const projectedSession = scenario === "cross-issue-chat"
+          ? store.createIssueSession(issue.id, { chatId: chat!.id, title: "Chat-owned Issue work" }) : null;
         const task = store.createTask({ agentId: worker.id, workspaceId: "local", prompt: "Review work",
           ...(boundIssue ? { issueId: boundIssue.id } : {}),
           ...(chat ? { chatSessionId: chat.id } : {}),
+          ...(projectedSession ? { issueSessionId: projectedSession.id } : {}),
         });
-        if (scenario === "cross-issue") {
+        if (scenario === "cross-issue-chat") {
           // Issue work can carry its topic Chat transport without becoming a Chat reply.
           expect(task.issueSessionId).toBeTruthy();
           expect(task.chatSessionId).toBeTruthy();
+        } else if (scenario === "cross-issue") {
+          expect(task.issueSessionId).toBe(store.getOrCreateDefaultIssueSession(issue.id).id);
+          expect(task.chatSessionId).toBeNull();
         }
         db!.run("UPDATE multiremi_tasks SET status = 'running', runtime_id = 'rt_bot' WHERE id = ?", [task.id]);
         const targets = [issue, ...(second ? [second] : []), ...(third ? [third] : [])];
@@ -536,10 +543,10 @@ describe("Feishu Issue topics", () => {
       configureTopics(store);
       const wake = prepareReport(store);
       const issue = store.getIssue(wake.issueId!)!;
-      // Session tasks also belong to a Chat; complete the previous work round
+      // The Issue-owned work round is independent of the topic Chat; complete it
       // through the store so it cannot keep the next round's active-task gate closed.
       const previousLeader = store.listTasks().find(task => task.issueId === issue.id && task.issueSessionId)!;
-      expect(previousLeader.chatSessionId).not.toBeNull();
+      expect(previousLeader.chatSessionId).toBeNull();
       db!.run("UPDATE multiremi_tasks SET status = 'running' WHERE id = ?", [previousLeader.id]);
       expect(store.completeTask(previousLeader.id, { output: "Previous round result" }).status).toBe("completed");
       expect(store.getTask(wake.id)!.status).toBe("queued");

@@ -2489,6 +2489,10 @@ runMigrations(this.db);
     return this.feishuBot.getIssueIdForChatSession(chatSessionId);
   }
 
+  getVerifiedFeishuIssueIdForChatSession(chatSessionId: string): string | null {
+    return this.feishuBot.getVerifiedIssueIdForChatSession(chatSessionId);
+  }
+
   isFeishuTransportChatSession(chatSessionId: string): boolean {
     return this.feishuBot.isTransportChatSession(chatSessionId);
   }
@@ -4621,6 +4625,10 @@ runMigrations(this.db);
     return this.sessions.adoptLegacySession(chatId, sessionId);
   }
 
+  deleteOwnedSessionsWithinTransaction(ownerType: "chat" | "issue", ownerId: string): void {
+    this.sessions.deleteOwnedSessionsWithinTransaction(ownerType, ownerId);
+  }
+
   /** For callers that already own the transaction (Senior ruling cmt_96e1yqxgifms §2). */
   getOrCreateDefaultIssueSessionWithinTransaction(issueId: string, createdById: string | null = null): MultiremiIssueSession {
     return this.sessions.getOrCreateDefaultIssueSessionWithinTransaction(issueId, createdById);
@@ -4948,6 +4956,10 @@ runMigrations(this.db);
 
   listIssueSessionResults(issueId: string): MultiremiSessionResult[] {
     return this.sessions.listIssueSessionResults(issueId);
+  }
+
+  listChatSessionResults(chatId: string): MultiremiSessionResult[] {
+    return this.sessions.listChatSessionResults(chatId);
   }
 
   listSessionResults(sessionId: string): MultiremiSessionResult[] {

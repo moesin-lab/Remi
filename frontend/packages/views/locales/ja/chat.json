@@ -186,5 +186,21 @@
     "new_messages_other": "新着メッセージ {{count}} 件",
     "new_messages_overflow": "新着メッセージ 99+ 件",
     "new_messages_jump": "末尾へ移動、新着メッセージ {{count}} 件"
+  },
+  "work_sessions": {
+    "title": "作業 Sessions",
+    "description": "この Chat に作業 Session を作成し、タスクを依頼して進捗と結果を確認します。",
+    "empty": "作業 Session はありません。作成して開始してください。",
+    "load_failed": "作業 Sessions を読み込めませんでした。",
+    "task_failed": "タスクを作成できませんでした。入力は保存されています。",
+    "log_failed": "Session ログを読み込めませんでした。",
+    "tasks_failed": "Session のタスクを読み込めませんでした。",
+    "archived": "アーカイブ済み",
+    "archived_hint": "アーカイブ済み Session は閲覧専用です。所有する Chat または Session を復元してからタスクを依頼してください。",
+    "prompt": "タスクの指示",
+    "agent": "実行エージェント",
+    "run": "タスクを依頼",
+    "trace": "実行の詳細",
+    "unknown_status": "不明な状態"
   }
 }

@@ -1114,6 +1114,23 @@ export class FeishuBotRepo {
     return nullableString(row?.issue_id);
   }
 
+  getVerifiedIssueIdForChatSession(chatSessionId: string): string | null {
+    const row = this.ctx.db.query(
+      `SELECT binding.issue_id FROM multiremi_feishu_bot_chat_bindings binding
+       JOIN multiremi_chat_sessions chat ON chat.id = binding.chat_session_id
+         AND chat.workspace_id = binding.workspace_id
+       JOIN multiremi_issues issue ON issue.id = binding.issue_id
+         AND issue.workspace_id = binding.workspace_id
+       JOIN multiremi_agents agent ON agent.id = binding.agent_id
+         AND agent.id = chat.agent_id AND agent.workspace_id = binding.workspace_id
+       WHERE binding.chat_session_id = ? AND LENGTH(TRIM(COALESCE(binding.chat_id, ''))) > 0
+         AND LENGTH(TRIM(COALESCE(binding.thread_id, ''))) > 0
+         AND binding.external_session_key = binding.chat_id || ':thread:' || binding.thread_id
+       ORDER BY binding.created_at ASC, binding.id ASC LIMIT 1`,
+    ).get(chatSessionId) as Row | null;
+    return nullableString(row?.issue_id);
+  }
+
   /**
    * A binding row exists only for Chats the connector created as Feishu
    * transport, whether or not they ever grew an Issue. Both kinds live in

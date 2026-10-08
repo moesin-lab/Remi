@@ -43,6 +43,8 @@ export const EMPTY_SESSION_PARTICIPANTS: SessionParticipant[] = [];
 
 export const IssueSessionSchema = z.object({
   id: z.string(),
+  owner_type: z.enum(["chat", "issue"]),
+  owner_id: z.string().min(1),
   chat_id: z.string().nullable().default(null),
   issue_id: z.string().nullable().default(null),
   workspace_id: z.string(),
@@ -62,7 +64,10 @@ export const IssueSessionSchema = z.object({
   created_at: z.string(),
   updated_at: z.string(),
   participants: z.array(SessionParticipantSchema).default([]),
-}).loose();
+}).loose().refine(session => session.owner_type === "chat"
+  ? session.chat_id === session.owner_id
+  : session.chat_id === null && session.issue_id === session.owner_id,
+{ message: "Session owner does not match its Chat or Issue identity" });
 
 export const IssueSessionListSchema = z.array(IssueSessionSchema);
 
@@ -70,6 +75,8 @@ export const EMPTY_ISSUE_SESSIONS: IssueSession[] = [];
 
 export const EMPTY_ISSUE_SESSION: IssueSession = {
   id: "",
+  owner_type: "issue",
+  owner_id: "",
   chat_id: null,
   issue_id: null,
   workspace_id: "",
@@ -135,9 +142,10 @@ export const EMPTY_SESSION_RESULTS: SessionResult[] = [];
 export const IssueSessionTaskSchema = z.object({
   id: z.string(),
   agent_id: z.string(),
-  runtime_id: z.preprocess((value) => value ?? "", z.string()),
+  runtime_id: z.string().nullable().default(null),
   issue_id: z.string().nullable(),
   issue_session_id: z.string(),
+  chat_session_id: z.string().nullable().optional(),
   holds_workspace: z.boolean().default(true),
   queue_blocker: z.object({
     task_id: z.string(),

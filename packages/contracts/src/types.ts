@@ -2720,10 +2720,13 @@ export interface MultiremiSession {
   codeRuntimeId?: string | null;
   code_runtime_id?: string | null;
   id: string;
-  /** Owning Chat. Null is emitted only for unmigrated legacy Issue Sessions. */
+  /** Exactly one owner: a Chat, or an Issue when chatId is null. */
+  ownerType: "chat" | "issue";
+  ownerId: string;
+  /** Owning Chat, or null for an Issue-owned Session. */
   chatId: string | null;
   chat_id?: string | null;
-  /** Current optional Issue work-management projection. */
+  /** Issue owner when chatId is null; optional work-management projection otherwise. */
   issueId: string | null;
   issue_id?: string | null;
   workspaceId: string;

@@ -2,8 +2,10 @@ import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatPendingTask, ChatSession } from "../../types";
 import { chatKeys, pendingChatTasksOptions } from "../../chat/queries";
+import { chatWorkSessionKeys } from "../../chat/work-sessions";
 import { issueKeys } from "../../issues/queries";
 import { applyChatDoneToCache, createChatHandlers } from "./chat";
+import { createPrefixRefresh } from "./prefix-refresh";
 
 vi.mock("../../platform/workspace-storage", () => ({ getCurrentWsId: () => "ws-1" }));
 const store = vi.hoisted(() => ({ setActiveSession: vi.fn(), clearInputDraft: vi.fn() }));
@@ -31,6 +33,96 @@ beforeEach(() => {
 afterEach(() => qc.clear());
 
 describe("chat queue realtime", () => {
+  it.each([
+    "task:queued", "task:dispatch", "task:running", "task:progress",
+    "task:waiting_local_directory", "task:awaiting_human",
+    "task:completed", "task:failed", "task:cancelled",
+  ] as const)("routes %s for a work Session without changing the owning Chat queue", event => {
+    const taskKey = chatWorkSessionKeys.tasks("ws-1", "chat-1", "session-1");
+    const otherSessionKey = chatWorkSessionKeys.tasks("ws-1", "chat-1", "session-2");
+    const otherWorkspaceKey = chatWorkSessionKeys.tasks("ws-2", "chat-1", "session-1");
+    qc.setQueryData(taskKey, [{ id: "task-1", status: "queued" }]);
+    qc.setQueryData(otherSessionKey, []);
+    qc.setQueryData(otherWorkspaceKey, []);
+    qc.setQueryData(chatKeys.pendingTasks("ws-1"), [{ task_id: "task-1" }]);
+    const pending = qc.getQueryData(chatKeys.pendingTask("chat-1"));
+
+    handlers[event]?.({
+      task_id: "task-1",
+      agent_id: "agent-1",
+      chat_session_id: "chat-1",
+      issue_session_id: "session-1",
+      progress_summary: "Preparing work Session",
+    });
+
+    expect(qc.getQueryData(chatKeys.pendingTask("chat-1"))).toBe(pending);
+    expect(qc.getQueryState(chatKeys.pendingTask("chat-1"))?.isInvalidated).toBe(false);
+    expect(qc.getQueryState(chatKeys.pendingTasks("ws-1"))?.isInvalidated).toBe(false);
+    expect(qc.getQueryState(chatKeys.sessions("ws-1"))?.isInvalidated).toBe(false);
+    expect(qc.getQueryState(chatKeys.session("ws-1", "chat-1"))?.isInvalidated).toBe(false);
+    expect(qc.getQueryState(taskKey)?.isInvalidated).toBe(true);
+    expect(qc.getQueryState(otherSessionKey)?.isInvalidated).toBe(false);
+    expect(qc.getQueryState(otherWorkspaceKey)?.isInvalidated).toBe(false);
+  });
+
+  it("refetches a mounted work Session task list when its task changes", async () => {
+    const tasksKey = chatWorkSessionKeys.tasks("ws-1", "chat-1", "session-1");
+    const issueTasksKey = issueKeys.sessionTasks("issue-1", "session-1");
+    qc.setQueryData(issueTasksKey, []);
+    const listTasks = vi.fn(async () => [{ id: "session-task", status: "queued" }]);
+    const observer = new QueryObserver(qc, {
+      queryKey: tasksKey, queryFn: listTasks, staleTime: Infinity,
+    });
+    const unsubscribe = observer.subscribe(() => {});
+    const prefix = createPrefixRefresh({ qc } as Parameters<typeof createPrefixRefresh>[0]);
+    try {
+      await observer.refetch();
+      expect(listTasks).toHaveBeenCalledTimes(1);
+      const payload = {
+        task_id: "session-task", chat_session_id: "chat-1", issue_session_id: "session-1",
+      };
+      handlers["task:completed"]?.(payload);
+      prefix.onAny({ type: "task:completed", payload });
+      await vi.waitFor(() => expect(listTasks).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(qc.getQueryState(issueTasksKey)?.isInvalidated).toBe(true));
+      expect(listTasks).toHaveBeenCalledTimes(2);
+    } finally {
+      prefix.dispose();
+      unsubscribe();
+    }
+  });
+
+  it("keeps Issue-owned SessionTask refreshes on the existing Issue query path", async () => {
+    const issueTasksKey = issueKeys.sessionTasks("issue-1", "session-1");
+    const workTasksKey = chatWorkSessionKeys.tasks("ws-1", "chat-1", "session-1");
+    qc.setQueryData(issueTasksKey, []);
+    qc.setQueryData(workTasksKey, []);
+    const pending = qc.getQueryData(chatKeys.pendingTask("chat-1"));
+    const prefix = createPrefixRefresh({ qc } as Parameters<typeof createPrefixRefresh>[0]);
+    try {
+      const payload = { task_id: "task-1", issue_id: "issue-1", issue_session_id: "session-1" };
+      handlers["task:completed"]?.(payload);
+      prefix.onAny({ type: "task:completed", payload });
+      await vi.waitFor(() => expect(qc.getQueryState(issueTasksKey)?.isInvalidated).toBe(true));
+      expect(qc.getQueryData(chatKeys.pendingTask("chat-1"))).toBe(pending);
+      expect(qc.getQueryState(chatKeys.pendingTask("chat-1"))?.isInvalidated).toBe(false);
+      expect(qc.getQueryState(workTasksKey)?.isInvalidated).toBe(false);
+    } finally {
+      prefix.dispose();
+    }
+  });
+
+  it.each(["task:awaiting_human", "task:running"] as const)(
+    "refreshes work Session human requests when %s changes their state",
+    event => {
+      qc.setQueryData(chatKeys.humanRequests("session-task"), []);
+      handlers[event]?.({
+        task_id: "session-task", chat_session_id: "chat-1", issue_session_id: "session-1",
+      });
+      expect(qc.getQueryState(chatKeys.humanRequests("session-task"))?.isInvalidated).toBe(true);
+    },
+  );
+
   it("refetches queued reason changes, including recovery events that omit the cleared reason", async () => {
     let pending: ChatPendingTask = {
       task_id: "task-1", status: "queued", wait_reason: "Waiting for model support", supports_queue: true, queued_tasks: [queued],

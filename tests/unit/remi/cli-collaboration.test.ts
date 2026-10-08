@@ -56,6 +56,92 @@ afterEach(() => {
 });
 
 describe("native collaboration CLI contracts", () => {
+  it("routes every owner-scoped Session command to its declared owner", async () => {
+    useCliEnv();
+    const cases: Array<{ id: string; args: string[]; method: string; tail: string; body?: unknown }> = [
+      { id: "list", args: [], method: "GET", tail: "" },
+      { id: "create", args: ["--title", "Side", "--from", "ises_parent", "--inherit-mode", "follow", "--with-code"], method: "POST", tail: "", body: { title: "Side", holds_workspace: false, parent_session_id: "ises_parent", inherit_mode: "follow", with_code: true } },
+      { id: "get", args: ["ises_1"], method: "GET", tail: "/ises_1" },
+      { id: "update", args: ["ises_1", "--title", "Renamed", "--status", "archived"], method: "PATCH", tail: "/ises_1", body: { title: "Renamed", status: "archived" } },
+      { id: "participant.list", args: ["ises_1"], method: "GET", tail: "/ises_1/participants" },
+      { id: "participant.add", args: ["ises_1", "--type", "agent", "--id", "agt_1"], method: "POST", tail: "/ises_1/participants", body: { participant_type: "agent", participant_id: "agt_1" } },
+      { id: "participant.remove", args: ["ises_1", "agent", "agt_1", "--yes"], method: "DELETE", tail: "/ises_1/participants/agent/agt_1" },
+      { id: "event.list", args: ["ises_1", "--since-seq", "3", "--to-seq", "9"], method: "GET", tail: "/ises_1/events?since_seq=3&to_seq=9" },
+      { id: "message.create", args: ["ises_1", "--content", "Continue"], method: "POST", tail: "/ises_1/messages", body: { content: "Continue" } },
+      { id: "task.list", args: ["ises_1"], method: "GET", tail: "/ises_1/tasks" },
+      { id: "task.create", args: ["ises_1", "--agent", "agt_1", "--prompt", "Check"], method: "POST", tail: "/ises_1/tasks", body: { agent_id: "agt_1", prompt: "Check" } },
+      { id: "result.publish", args: ["ises_1", "--content", "Complete"], method: "POST", tail: "/ises_1/results" },
+    ];
+    const registry = registryFor(specs);
+    for (const owner of ["chat", "issue"] as const) {
+      for (const entry of cases) {
+        const id = `${owner === "issue" ? "issue." : ""}session.${entry.id}`;
+        const spec = specById(id);
+        const ownerRef = owner === "issue" ? "MUL-1" : "chat_1";
+        const base = owner === "issue" ? "/api/issues/MUL-1/sessions" : "/api/multiremi/chats/chat_1/sessions";
+        let requests = 0;
+        globalThis.fetch = capabilityFetch(id, async (request) => {
+          requests++;
+          const url = new URL(request.url);
+          expect(`${url.pathname}${url.search}`, id).toBe(`${base}${entry.tail}`);
+          expect(request.method, id).toBe(entry.method);
+          if (entry.body) expect(await request.json(), id).toEqual(entry.body);
+          return Response.json({ id: "ises_1", owner_type: owner, owner_id: ownerRef });
+        });
+        const result = await capture(() => registry.execute([...spec.path, ownerRef, ...entry.args, "--json"]));
+        expect(JSON.parse(result.stdout), id).toMatchObject({ owner_type: owner, owner_id: ownerRef });
+        expect(requests, id).toBe(1);
+        expect(spec.positionals?.[0]?.name, id).toBe(owner);
+        expect(spec.aliases, id).toEqual([]);
+        expect(spec.auth, id).toEqual(specById(`session.${entry.id}`).auth);
+        expect(registry.renderHelp(spec.path), id).toContain(`<${owner}>`);
+      }
+    }
+    expect(registry.resolve(["issue", "session", "adopt", "MUL-1", "ises_1"])).toBeNull();
+  });
+
+  it("keeps Issue result aggregation and the historical --session publish form executable", async () => {
+    useCliEnv();
+    const list = specById("issue.session.result.list");
+    globalThis.fetch = capabilityFetch(list.id, (request) => {
+      expect(new URL(request.url).pathname).toBe("/api/issues/MUL-1/session-results");
+      return Response.json([{ id: "sres_1", source_session_id: "ises_1" }, { id: "sres_2", source_session_id: "ises_2" }]);
+    });
+    const registry = registryFor(specs);
+    const filtered = await capture(() => registry.execute([...list.path, "MUL-1", "--session-id", "ises_1", "--json"]));
+    expect(JSON.parse(filtered.stdout)).toEqual([{ id: "sres_1", source_session_id: "ises_1" }]);
+    const all = await capture(() => registry.execute([...list.path, "MUL-1", "--json"]));
+    expect(JSON.parse(all.stdout)).toHaveLength(2);
+
+    const publish = specById("issue.session.result.publish");
+    globalThis.fetch = capabilityFetch(publish.id, async (request) => {
+      expect(new URL(request.url).pathname).toBe("/api/issues/MUL-1/sessions/ises_1/results");
+      expect(await request.json()).toEqual({ title: "Report", body: "Done", metadata: { kind: "report", refs: [{ type: "url", value: "https://example.test/report" }] } });
+      return Response.json({ id: "sres_1" });
+    });
+    await capture(() => registry.execute([...publish.path, "MUL-1", "--session", "ises_1", "--title", "Report", "--type", "report", "--ref", "url:https://example.test/report", "--content", "Done", "--json"]));
+    expect(registry.renderHelp(publish.path)).toContain("[<session>]");
+    expect(registry.renderHelp(publish.path)).toContain("--session, --session-id <session-id>");
+  });
+
+  it("rejects incomplete Issue Session writes before requesting capabilities or mutation", async () => {
+    useCliEnv();
+    let requests = 0;
+    globalThis.fetch = (async () => { requests++; throw new Error("Unexpected API call"); }) as unknown as typeof fetch;
+    const registry = registryFor(specs);
+    for (const argv of [
+      ["issue", "session", "create"],
+      ["issue", "session", "participant", "remove", "MUL-1", "ises_1", "agent", "agt_1"],
+      ["issue", "session", "task", "create", "MUL-1", "ises_1"],
+      ["issue", "session", "result", "publish", "MUL-1", "ises_1"],
+      ["issue", "session", "result", "publish", "MUL-1", "--content", "Done"],
+      ["issue", "session", "result", "publish", "MUL-1", "ises_1", "--content", "Done", "--type", "unknown"],
+    ]) {
+      await expect(capture(() => registry.execute(argv)), argv.join(" ")).rejects.toThrow();
+    }
+    expect(requests).toBe(0);
+  });
+
   it("reads an unread range in one command and joins paginated long entries", async () => {
     useCliEnv();
     const get = specById("session.log.get");
@@ -880,7 +966,7 @@ describe("native collaboration CLI contracts", () => {
     }
   });
 
-  it("injects canonical daemon prompt paths while preserving legacy issue dispatch", () => {
+  it("injects canonical daemon prompt paths while preserving legacy comment dispatch", () => {
     const daemonSource = readFileSync(resolve(root, "packages/daemon/src/agent-runtime/prompts/ephemeral.ts"), "utf8");
     const canonicalPromptPaths = [
       "comment list",
@@ -896,10 +982,10 @@ describe("native collaboration CLI contracts", () => {
       expect(daemonSource, path).toContain(`remi ${path}`);
     }
     expect(daemonSource).toContain("remi issue session list");
+    expect(daemonSource).toContain("remi issue session result publish");
     const compatibilityPaths = [
       "issue comment list",
       "issue comment add",
-      "issue session result publish",
     ];
     for (const path of compatibilityPaths) {
       expect(daemonSource, path).not.toContain(`remi ${path}`);
@@ -913,13 +999,17 @@ describe("native collaboration CLI contracts", () => {
     const cases = [
       ["issue", "comment", "list", "iss_1", "--thread", "cmt_1", "--output", "json"],
       ["issue", "comment", "add", "iss_1", "--parent", "cmt_1", "--content-stdin"],
-      ["issue", "session", "result", "publish", "iss_1", "--session", "ises_1", "--content-stdin"],
     ];
     for (const argv of cases) {
       const invocation = registry.resolve(argv);
       expect(invocation?.spec.id, argv.join(" ")).toBe(`legacy.${argv[0]}`);
       expect(invocation?.rawArgs, argv.join(" ")).toEqual(argv.slice(1));
     }
+    const issuePublish = registry.resolve(["issue", "session", "result", "publish", "iss_1", "--session", "ises_1", "--content-stdin"]);
+    expect(issuePublish?.spec.id).toBe("issue.session.result.publish");
+    expect(issuePublish?.positionals).toEqual(["iss_1"]);
+    expect(issuePublish?.options.session).toBe("ises_1");
+    expect(BOOTSTRAP_COMPATIBILITY_PATHS).toContain("issue session result publish");
 
     const attachmentDownload = registry.resolve(["attachment", "download", "att_1", "--output-dir", "/tmp"]);
     expect(attachmentDownload?.spec.id).toBe("issue.attachment.download");
@@ -1150,6 +1240,29 @@ describe("native collaboration CLI contracts", () => {
       "/api/sessions/ises_side/inherited-context",
     ]);
     expect(registryFor(specs).resolve(["session", "get", "chat-312", "ises_side"])?.spec.id).toBe("session.get");
+  });
+
+  it("shows explicit ownership for both owners through the generic Session command", async () => {
+    useCliEnv();
+    const spec = specById("session.show");
+    const registry = registryFor([spec]);
+    for (const owner of ["chat", "issue"] as const) {
+      const session = { id: `ises_${owner}`, title: "Side", owner_type: owner, owner_id: `${owner}_1`, status: "active" };
+      globalThis.fetch = capabilityFetch(spec.id, (request) => {
+        const path = new URL(request.url).pathname;
+        if (path === `/api/sessions/${session.id}/inherited-context`) return Response.json({});
+        expect(path).toBe(`/api/sessions/${session.id}`);
+        return Response.json(session);
+      });
+      for (const mode of ["json", "jsonl"]) {
+        const result = await capture(() => registry.execute([...spec.path, session.id, "--output", mode]));
+        expect(JSON.parse(result.stdout)).toEqual(session);
+      }
+      const table = await capture(() => registry.execute([...spec.path, session.id]));
+      expect(table.stdout).toContain("OWNER TYPE");
+      expect(table.stdout).toContain("OWNER ID");
+      expect(table.stdout).toContain(session.owner_id);
+    }
   });
 
   it("creates follow Sessions with an explicit inheritance mode", async () => {

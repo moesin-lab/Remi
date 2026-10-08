@@ -190,5 +190,21 @@
     "new_messages_other": "{{count}} new messages",
     "new_messages_overflow": "99+ new messages",
     "new_messages_jump": "Jump to the end, {{count}} new messages"
+  },
+  "work_sessions": {
+    "title": "Work Sessions",
+    "description": "Create a work Session in this Chat, then delegate tasks and read its progress and results.",
+    "empty": "No work Sessions yet. Create one to begin.",
+    "load_failed": "Could not load work Sessions.",
+    "task_failed": "Could not create the task. Your input is saved.",
+    "log_failed": "Could not load the Session log.",
+    "tasks_failed": "Could not load Session tasks.",
+    "archived": "Archived",
+    "archived_hint": "Archived Sessions are read-only. Restore the owning Chat or Session before starting another task.",
+    "prompt": "Task instructions",
+    "agent": "Task agent",
+    "run": "Delegate task",
+    "trace": "Execution details",
+    "unknown_status": "Unknown status"
   }
 }

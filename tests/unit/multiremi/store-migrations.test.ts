@@ -238,36 +238,34 @@ describe("store migrations", () => {
     ]));
   });
 
-  it("adopts an unambiguous legacy Session before removing Chat issue ownership", () => {
+  it("preserves Issue Session ownership when removing the old Chat Issue binding", () => {
     const database = freshDb();
     const store = new MultiremiStore(database as unknown as SqlDatabase);
     const agent = store.createAgent({ name: "Migration worker", provider: "claude" });
     const issue = store.createIssue({ title: "Legacy Session owner" });
     const chat = store.createChatSession({ agentId: agent.id });
-    const session = store.getOrCreateDefaultChatSession(chat.id);
-    database.run("UPDATE multiremi_issue_sessions SET issue_id = ? WHERE id = ?", [issue.id, session.id]);
+    const session = store.getOrCreateDefaultIssueSession(issue.id);
     const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Preserve ownership" });
     const result = store.publishSessionResult(session.id, { body: "Preserve result ownership" });
 
     database.exec("ALTER TABLE multiremi_chat_sessions ADD COLUMN issue_id TEXT");
     database.run("UPDATE multiremi_chat_sessions SET issue_id = ? WHERE id = ?", [issue.id, chat.id]);
-    database.run("UPDATE multiremi_issue_sessions SET chat_id = NULL WHERE id = ?", [session.id]);
     database.run("UPDATE multiremi_session_results SET chat_id = NULL WHERE id = ?", [result.id]);
     database.run("UPDATE multiremi_tasks SET chat_session_id = NULL WHERE id = ?", [task.id]);
     database.run(
-      "DELETE FROM multiremi_schema_migrations WHERE id IN (?, ?)",
-      ["20260913_chat_owned_sessions", "20260916_chat_issue_decoupling"],
+      "DELETE FROM multiremi_schema_migrations WHERE id IN (?, ?, ?)",
+      ["20260913_chat_owned_sessions", "20260916_chat_issue_decoupling", "20261008_dual_owned_sessions"],
     );
 
     migrate(database);
 
     expect(columnNames(database, "multiremi_chat_sessions")).not.toContain("issue_id");
     expect(database.query("SELECT chat_id, issue_id FROM multiremi_issue_sessions WHERE id = ?").get(session.id))
-      .toEqual({ chat_id: chat.id, issue_id: issue.id });
+      .toEqual({ chat_id: null, issue_id: issue.id });
     expect(database.query("SELECT chat_session_id, issue_session_id, issue_id FROM multiremi_tasks WHERE id = ?").get(task.id))
-      .toEqual({ chat_session_id: chat.id, issue_session_id: session.id, issue_id: issue.id });
+      .toEqual({ chat_session_id: null, issue_session_id: session.id, issue_id: issue.id });
     expect(database.query("SELECT chat_id, issue_id FROM multiremi_session_results WHERE id = ?").get(result.id))
-      .toEqual({ chat_id: chat.id, issue_id: issue.id });
+      .toEqual({ chat_id: null, issue_id: issue.id });
   });
 
   it("adds continuation lineage to an existing task table idempotently without losing rows", () => {
@@ -1753,6 +1751,7 @@ describe("store migrations", () => {
         // SQLite preserves the new binding FK and its delete semantics.
         database.exec("PRAGMA foreign_keys = ON");
         database.run("UPDATE multiremi_tasks SET issue_id = NULL WHERE issue_id = 'iss_chat_migration'");
+        database.run("DELETE FROM multiremi_issue_sessions WHERE chat_id IS NULL AND issue_id = 'iss_chat_migration'");
         database.run("DELETE FROM multiremi_issues WHERE id = 'iss_chat_migration'");
         expect(database.query("SELECT COUNT(*) AS count FROM multiremi_feishu_bot_chat_bindings WHERE issue_id IS NOT NULL").get()).toEqual({ count: 0 });
       });

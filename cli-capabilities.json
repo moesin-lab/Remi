@@ -3027,9 +3027,7 @@
     },
     "session.list": {
       "command": "remi session list",
-      "aliases": [
-        "remi issue session list"
-      ],
+      "aliases": [],
       "auth": [
         "human",
         "task"
@@ -3320,9 +3318,7 @@
     },
     "session.result.list": {
       "command": "remi session result list",
-      "aliases": [
-        "remi issue session result list"
-      ],
+      "aliases": [],
       "auth": [
         "human",
         "task"
@@ -3339,9 +3335,7 @@
     },
     "session.result.publish": {
       "command": "remi session result publish",
-      "aliases": [
-        "remi issue session result publish"
-      ],
+      "aliases": [],
       "auth": [
         "human",
         "task"
@@ -3457,6 +3451,227 @@
         "task"
       ],
       "capability": "session.config.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.list": {
+      "command": "remi issue session list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.get": {
+      "command": "remi issue session get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.create": {
+      "command": "remi issue session create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.update": {
+      "command": "remi issue session update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.participant.list": {
+      "command": "remi issue session participant list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.participant.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.participant.add": {
+      "command": "remi issue session participant add",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.participant.add",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.participant.remove": {
+      "command": "remi issue session participant remove",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.participant.remove",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.event.list": {
+      "command": "remi issue session event list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.event.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.message.create": {
+      "command": "remi issue session message create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.message.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.task.list": {
+      "command": "remi issue session task list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.task.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.task.create": {
+      "command": "remi issue session task create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.task.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.result.list": {
+      "command": "remi issue session result list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.result.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "issue.session.result.publish": {
+      "command": "remi issue session result publish",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.session.result.publish",
       "mutation": "write",
       "output": [
         "table",
@@ -10107,28 +10322,10 @@
       "replacement": "remi comment unresolve",
       "hidden": false
     },
-    "remi issue session list": {
-      "command": "session.list",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi session list",
-      "hidden": false
-    },
     "remi chat message list": {
       "command": "session.log.window",
       "deprecated_since": "0.3.0",
       "replacement": "remi session log window",
-      "hidden": false
-    },
-    "remi issue session result list": {
-      "command": "session.result.list",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi session result list",
-      "hidden": false
-    },
-    "remi issue session result publish": {
-      "command": "session.result.publish",
-      "deprecated_since": "0.3.0",
-      "replacement": "remi session result publish",
       "hidden": false
     },
     "remi issue archive list": {
@@ -10344,7 +10541,7 @@
       "command": "issue.reaction.remove"
     },
     "DELETE /api/issues/:id/sessions/:sessionId/participants/:participantType/:participantId": {
-      "command": "session.participant.remove"
+      "command": "issue.session.participant.remove"
     },
     "DELETE /api/issues/:id/share": {
       "command": "share.delete"
@@ -10835,22 +11032,22 @@
       "command": "issue.reaction.list"
     },
     "GET /api/issues/:id/session-results": {
-      "command": "session.result.list"
+      "command": "issue.session.result.list"
     },
     "GET /api/issues/:id/sessions": {
-      "command": "session.list"
+      "command": "issue.session.list"
     },
     "GET /api/issues/:id/sessions/:sessionId": {
-      "command": "session.get"
+      "command": "issue.session.get"
     },
     "GET /api/issues/:id/sessions/:sessionId/events": {
-      "command": "session.event.list"
+      "command": "issue.session.event.list"
     },
     "GET /api/issues/:id/sessions/:sessionId/participants": {
-      "command": "session.participant.list"
+      "command": "issue.session.participant.list"
     },
     "GET /api/issues/:id/sessions/:sessionId/tasks": {
-      "command": "session.task.list"
+      "command": "issue.session.task.list"
     },
     "GET /api/issues/:id/share": {
       "command": "share.get"
@@ -11628,7 +11825,7 @@
       "command": "issue.update"
     },
     "PATCH /api/issues/:id/sessions/:sessionId": {
-      "command": "session.update"
+      "command": "issue.session.update"
     },
     "PATCH /api/me": {
       "command": "member.update"
@@ -12073,19 +12270,19 @@
       "command": "issue.restore"
     },
     "POST /api/issues/:id/sessions": {
-      "command": "session.create"
+      "command": "issue.session.create"
     },
     "POST /api/issues/:id/sessions/:sessionId/messages": {
-      "command": "session.message.create"
+      "command": "issue.session.message.create"
     },
     "POST /api/issues/:id/sessions/:sessionId/participants": {
-      "command": "session.participant.add"
+      "command": "issue.session.participant.add"
     },
     "POST /api/issues/:id/sessions/:sessionId/results": {
-      "command": "session.result.publish"
+      "command": "issue.session.result.publish"
     },
     "POST /api/issues/:id/sessions/:sessionId/tasks": {
-      "command": "session.task.create"
+      "command": "issue.session.task.create"
     },
     "POST /api/issues/:id/share": {
       "command": "share.create"

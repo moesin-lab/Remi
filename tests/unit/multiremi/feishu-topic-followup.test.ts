@@ -16,7 +16,7 @@ function scaffold() {
   const issue = store.createIssue({ title: "Continue existing work", workspaceId: "local", assigneeType: "agent", assigneeId: owner.id });
   const chat = store.createChatSession({ agentId: remi.id, workspaceId: "local" });
   bindFeishuTopicFixture(store, db!, chat.id, issue.id);
-  const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Topic work" });
+  const session = store.getOrCreateDefaultIssueSession(issue.id);
   const task = store.sendChatMessage(chat.id, { body: "Continue the implementation and verify it." }).task;
   return { store, remi, owner, runtime, issue, session, chat, task };
 }
@@ -114,7 +114,7 @@ describe("topic Task credential handoff through existing APIs", () => {
     const next = await created.json();
     expect(next).toMatchObject({
       issue_id: issue.id, issue_session_id: session.id, agent_id: owner.id,
-      chat_session_id: chat.id, parent_task_id: task.id, status: "queued", session_id: "acp_issue_owner",
+      chat_session_id: null, parent_task_id: task.id, status: "queued", session_id: "acp_issue_owner",
     });
     const verified = await app.request(`/api/multiremi/tasks/${next.id}`, { headers });
     expect(verified.status).toBe(200);
@@ -143,7 +143,7 @@ describe("topic Task credential handoff through existing APIs", () => {
     expect(created).toHaveLength(1);
     expect(created[0]).toMatchObject({
       issueId: issue.id, issueSessionId: session.id, agentId: owner.id,
-      chatSessionId: chat.id, parentTaskId: task.id, triggerCommentId: comment.id,
+      chatSessionId: null, parentTaskId: task.id, triggerCommentId: comment.id,
       status: "queued", delegationId: null, delegationSkipReason: "source_not_issue_task",
     });
     const mentioned = created[0]!;
@@ -206,5 +206,38 @@ describe("topic Task credential handoff through existing APIs", () => {
       expect(await failed.json()).toHaveProperty("error");
       expect(store.listTasks()).toHaveLength(before);
     }
+  });
+
+  it("coordinates a projected Chat-owned Session without posting or exposing its private content", async () => {
+    const { store, app, headers, owner, issue, chat } = await authenticatedTopic();
+    const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Topic private work" });
+    store.appendSessionEvent(session.id, { authorType: "member", body: "PRIVATE_TOPIC_SESSION_BODY" });
+    const comment = await app.request(`/api/issues/${issue.id}/sessions/${session.id}/messages`, {
+      method: "POST", headers, body: JSON.stringify({ content: "PRIVATE_TOPIC_COMMENT" }),
+    });
+    expect(comment.status).toBe(403);
+    expect(store.listIssueComments(issue.id).some(entry => entry.body === "PRIVATE_TOPIC_COMMENT")).toBe(false);
+    const created = await app.request(`/api/issues/${issue.id}/sessions/${session.id}/tasks`, {
+      method: "POST", headers, body: JSON.stringify({ agent_id: owner.id, prompt: "PRIVATE_TOPIC_TASK_PROMPT" }),
+    });
+    expect(created.status).toBe(201);
+    const task = await created.json();
+    expect(task).toMatchObject({ chat_session_id: chat.id, issue_session_id: session.id, agent_id: owner.id });
+    expect(task).not.toHaveProperty("prompt");
+    for (const path of [`/api/multiremi/tasks/${task.id}`, `/api/issues/${issue.id}/sessions/${session.id}/tasks`]) {
+      const read = await app.request(path, { headers });
+      expect(read.status).toBe(200);
+      expect(await read.text()).not.toContain("PRIVATE_TOPIC_TASK_PROMPT");
+    }
+    for (const path of [
+      `/api/sessions/${session.id}/log`, `/api/issues/${issue.id}/sessions/${session.id}/events`,
+      `/api/tasks/${task.id}/messages`, `/api/tasks/${task.id}/trace`,
+    ]) {
+      const denied = await app.request(path, { headers });
+      expect([403, 404]).toContain(denied.status);
+      expect(await denied.text()).not.toContain("PRIVATE_TOPIC_SESSION_BODY");
+    }
+    expect((await app.request(`/api/tasks/${task.id}/cancel`, { method: "POST", headers })).status).toBe(403);
+    expect(store.getTask(task.id)?.status).toBe("queued");
   });
 });

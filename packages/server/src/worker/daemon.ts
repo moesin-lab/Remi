@@ -3293,6 +3293,7 @@ export class MultiremiDaemon {
       agentId: task.agent?.id ?? "unknown", provider: task.agent?.provider ?? "unknown",
       startedAt: new Date().toISOString(), runtimeId: this.options.runtimeId ?? undefined,
       issueId: task.issueId,
+      chatSessionId: task.chatSessionId,
       subjectKind: task.issueId ? undefined : task.chatSessionId ? "chat" : "task",
     });
     this.activeTaskIds.add(task.id);
@@ -4455,7 +4456,7 @@ export class MultiremiDaemon {
         chatRepoAutoCheckout,
         issueWorkspacePath: codeWorkDir,
         sessionHistoryPaths: task.issueId && this.options.workspacesRoot
-          ? listIssueSessionRuntimeRoots(this.options.workspacesRoot, task.issueId).map((root) => root.root)
+          ? listIssueSessionRuntimeRoots(this.options.workspacesRoot, task.issueId, task.chatSessionId).map((root) => root.root)
           : undefined,
       });
       this.enqueueTaskReport(task.id, "prompt", {

@@ -26,6 +26,20 @@ Web Chat 和飞书一对一私聊不接收 Issue 活动播报；飞书群里的 
 Chat 支持重命名、置顶、归档、恢复和删除。归档会停止未完成的运行并禁止继续发送，恢复后可继续聊天。
 删除会移除 Chat 及消息，并取消未完成运行。列表提供最新消息、未读数及运行状态；置顶 Chat 优先。
 
+## 工作 Sessions
+
+Chat 创建时同时建立自己的 `Main` Session。顶部「工作 Sessions」入口管理这个 Chat 的工作会话：
+查看或新建 Session、从同一 Chat 的 Session 建立旁聊、选择云友和 prompt 显式派发 Task，并查看日志、
+任务状态、人类请求和执行过程。任务创建成功只表示已入队，执行状态以返回的 Task 和后续更新为准。
+
+这些 Sessions 由当前 Chat 拥有，可以独立于 Issue 工作；关联 Issue 只提供工作投影，私聊权限仍跟随 Chat。
+Issue 也有自己的 `Main` 与额外 Sessions，从 Issue 入口创建工作无需先建 Chat。两种所有权及生命周期详见
+[对话与工作会话模型](conversation-model.md)。
+
+普通 Chat 输入框仍创建或 steer Chat Task，历史、附件和队列沿用普通聊天路径。工作 Session 的日志与任务
+单独读取；其完成、失败或取消更新不会替换普通 Chat 的当前任务或队列状态。
+没有 Issue 工作投影的工作 Session 与普通 Chat 共用 checkout，领取执行时跨云友串行预约目录；独立队列不代表可以同时修改同一目录。未知 offer 保留预约，确认拒绝后释放；Runtime 工作区沿用自己的目录预约。
+
 ## 项目仓库与工作目录
 
 显式选择 Runtime 工作区时，Chat 使用注册的本机目录，不附加 Project 仓库，也不自动 clone、fetch 或切换分支。
@@ -123,6 +137,10 @@ remi chat pin <chat>
 remi chat unpin <chat>
 remi chat archive <chat>
 remi chat restore <chat>
+remi session list <chat>
+remi session create <chat> --title <title>
+remi session task create <chat> <session> --agent <agent-id> --prompt <prompt>
+remi session log window <session> --json
 remi chat queue list <chat>
 remi chat queue update <chat> <task> --content-file <path>
 remi chat queue remove <chat> <task>

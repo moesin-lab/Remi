@@ -64,6 +64,8 @@ import {
 const SESSIONS: IssueSession[] = [
   {
     id: "session-main",
+    owner_type: "issue",
+    owner_id: "issue-1",
     issue_id: "issue-1",
     workspace_id: "ws-1",
     title: "Main",

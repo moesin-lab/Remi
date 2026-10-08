@@ -39,8 +39,7 @@ async function writer(h: Pr2Harness, kind: "ordinary" | "task" | "daemon") {
     return h.app.request("/api/upload-file", { method: "POST", headers: h.headers, body: form });
   };
   if (kind === "task") {
-    const task = h.store.createTask({ agentId: h.fixture.agentIds[0]!,
-      chatSessionId: h.fixture.sessionIds[0]!, prompt: "send an attachment" });
+    const task = h.store.sendChatMessage(h.fixture.sessionIds[0]!, { body: "send an attachment" }).task;
     const credential = await h.store.createTaskAccessToken(task, "local");
     return async () => {
       const form = new FormData();

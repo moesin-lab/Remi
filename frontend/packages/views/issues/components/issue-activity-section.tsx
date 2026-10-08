@@ -53,6 +53,7 @@ interface IssueActivitySectionProps {
   sessionsError?: boolean;
   sessionsFetching: boolean;
   onRetrySessions: () => void;
+  onCreateSession: () => void;
   scrollContainerEl: HTMLDivElement | null;
   highlightCommentId?: string;
   initialLog?: IssueLogBootstrap;
@@ -74,13 +75,14 @@ export function logRowToComment(row: SessionLogRow): TimelineEntry {
 }
 
 export function IssueActivitySection({ issueId, issueTitle, projectId, members, agents, onShowKeyResults, currentUserId, canModerateComments, activeIssueSessionId: sessionId,
-  log, activeIssueSession, sessionsPending, sessionsError = false, sessionsFetching, onRetrySessions, highlightCommentId, initialLog, onScrollRoot, onContentReady,
+  log, activeIssueSession, sessionsPending, sessionsError = false, sessionsFetching, onRetrySessions, onCreateSession, highlightCommentId, initialLog, onScrollRoot, onContentReady,
 }: IssueActivitySectionProps) {
   const { t } = useT("issues");
   const { ready: preferencesReady, showSystemDetails: savedSystemDetails, setShowSystemDetails } = useActivityPreferences(currentUserId);
   const [requestedCommentId, setActiveCommentId] = useState(highlightCommentId ?? null);
   useEffect(() => setActiveCommentId(highlightCommentId ?? null), [highlightCommentId]);
-  const withActivity = activeIssueSession?.is_default === true;
+  const withActivity = activeIssueSession?.owner_type === "issue"
+    && activeIssueSession.owner_id === issueId && activeIssueSession.is_default === true;
   const fallbackLog = useIssueLog(log ? "" : sessionId, log ? undefined : initialLog,
     requestedCommentId ?? undefined, false, !log, withActivity);
   const { replica, snapshot, error } = log ?? fallbackLog;
@@ -275,7 +277,7 @@ export function IssueActivitySection({ issueId, issueTitle, projectId, members, 
   const renderLogEntry = useCallback(({ entry }: { entry: SessionLogEntry }) => renderedRows.get(entry.id), [renderedRows]);
   if (!sessionId) return sessionsPending ? <TimelineSkeleton /> : sessionsError
     ? <TimelineUnavailable onRetry={onRetrySessions} retrying={sessionsFetching} />
-    : <NoLinkedSessions />;
+    : <NoLinkedSessions onCreate={onCreateSession} />;
   if (error && !snapshot.ready) return <TimelineUnavailable onRetry={refresh} retrying={false} />;
   return <><SessionLogList key={`${sessionId}:${activeCommentId ?? "tail"}`} sessionId={sessionId} replica={replica}
     transformEntries={transformEntries}

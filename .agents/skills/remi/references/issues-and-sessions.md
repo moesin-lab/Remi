@@ -2,7 +2,7 @@
 
 ## 查找、创建和派单
 
-Issue 跟踪目标与状态，Session 组织 Issue 内的参与者、消息和成果，Task 记录一次实际执行。先定位已有工作，避免把“继续这个问题”变成重复创建。
+Issue 跟踪目标与状态，Session 组织参与者、消息和成果，Task 记录一次实际执行。每个 Session 恰好由一个 Issue 或 Chat 拥有；Chat-owned Session 关联 Issue 不会改变所有者。先定位已有工作，避免把“继续这个问题”变成重复创建。
 
 ```sh
 remi issue list --json
@@ -40,19 +40,25 @@ remi comment add <issue-id> --content-file <comment.md> --json
 ## Session、成果和归档
 
 ```sh
-remi session list <issue-id> --json
-remi session get <issue-id> <session-id> --json
-remi session task list <issue-id> <session-id> --json
-remi session result list <issue-id> --json
-remi session result publish <issue-id> --session <session-id> --type report --title "<result-title>" --content-file <result.md> --json
+remi issue session list <issue-id> --json
+remi issue session get <issue-id> <session-id> --json
+remi issue session task list <issue-id> <session-id> --json
+remi issue session result list <issue-id> --json
+remi issue session result publish <issue-id> <session-id> --type report --title "<result-title>" --content-file <result.md> --json
 remi session archive status <issue-id> --json
 ```
 
-Session get 等命令同时需要 Issue ID 和 Session ID；成果 publish 的 Session 则是选项。成果类型为 `mr|report|deploy|decision|doc|other`，发布可复用结论并附实际证据，不把未完成的运行写成成果。参与者、消息、配置从 `session participant/message/config` 按需操作。
+Issue 创建时已有自己的 Main；从 Issue 派发无需另建 Chat。Issue 路径的 get、task、message 等命令同时需要 Issue ID 和 Session ID；成果 publish 也接受 `--session <session-id>`。成果类型为 `mr|report|deploy|decision|doc|other`，发布可复用结论并附实际证据，不把未完成的运行写成成果。参与者和消息从 `issue session participant/message` 按需操作。`session config get/update <workspace>` 配置 provider 归档，不是单个产品 Session 配置。
 
-需要基于既有讨论另开侧会话时，用 `remi session create <issue> --from <parent-session> --title <title>`；父会话须属于同一 Issue，侧会话不能继续派生。它冻结创建时的父会话快照，后续父消息不自动进入；继承内容只作参考，当前请求和后续本会话输入才是执行指令。侧会话不占用 Issue 工作区，Agent 不得从其中委派子任务；文件、Git 或配置修改须由用户在该侧会话明确提出。
+Issue 列表可能包含有权访问的 Chat-owned 工作投影；先读返回的 `owner_type/owner_id`。Chat-owned 的管理和派发使用 `remi session ... <chat-id> <session-id>`；不能把 Issue ID 传给这组 Chat 命令。没有 Chat ID 的 Issue-owned Session 可以直接执行，不需要 adopt。
 
-`remi session show <session>` 查看会话，`remi session inherited-context <session>` 查看最近一次领取记录的继承诊断。事件数量是截断前计数，实际上下文可能受 token 预算截断，尚未领取时不能声称继承内容已全部送入模型。
+需要基于既有讨论另开侧会话时，Issue-owned 用 `remi issue session create <issue> --from <parent-session> --title <title>`，Chat-owned 用 `remi session create <chat> --from <parent-session> --title <title>`；父会话须属于同一所有者和工作区，侧会话不能继续派生。默认 snapshot 冻结创建时的父会话快照，后续父消息不自动进入；继承内容只作参考，当前请求和后续本会话输入才是执行指令。侧会话不占用 Issue 工作区，Agent 不得从其中委派子任务；需要代码的讨论按 `--with-code` 当前帮助及执行限制操作。
+
+`remi session show <session>` 查看会话，`remi session log window <session>` 查看日志，`remi session inherited-context <session>` 查看最近一次领取记录的继承诊断；这些按 Session ID 访问的命令支持两种所有者。事件数量是截断前计数，实际上下文可能受 token 预算截断，尚未领取时不能声称继承内容已全部送入模型。
+
+Task 凭据通常只读取当前 Session。旁聊可用 `remi session log get <parent> --from X --to Y` 读取同所有者的直接父会话，但必须已有继承领取记录，且不能超过该 Task 持久化的继承截止 seq；不要改用父会话的 window/tail 读取绕过限制。经验证的飞书群 Issue Topic 协调任务可以读取相关 Session/Task metadata、列出或派发 Task、追加 steer，协调响应不含私有正文；向绑定 Issue-owned Session 主动发消息仍沿用公开 Issue 评论写入，Chat-owned 工作投影没有这项写入例外。这不授权读取其他 Session 的日志或 transcript，也不授权取消或 inspection 其他 Task。organizer redispatch 仍按明确监督者权限与审计约束执行。
+
+向同工作区其他 Issue-owned Session 派发委派任务须满足实际 owner 权限、Task 血统及旁聊限制；不要把成功创建当作来源凭据可以读取或控制新 Task。Issue 触发的 Autopilot 使用 Issue-owned Session，`reuse_latest` 不复用 Chat-owned 工作投影。
 
 `session archive verify/retry` 会执行校验或重试归档，不是单纯读取；先看 status 和 list，针对已有失败记录处理。Issue run-messages 接收的是 **Task ID**，也可直接使用 `task message list` 查询执行消息。
 

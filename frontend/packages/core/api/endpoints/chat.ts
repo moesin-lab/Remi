@@ -1,4 +1,8 @@
 import type {
+  CreateSessionRequest,
+  CreateSessionTaskRequest,
+  Session,
+  SessionTask,
   CreateChatSessionInput,
   ChatPendingTask,
   ChatSession,
@@ -8,6 +12,7 @@ import type {
   SendChatMessageResponse,
   UpdateChatSessionInput,
 } from "../../types";
+import { z } from "zod";
 import type { HttpClient } from "../http";
 import { ApiContractError, parseStrictResponse } from "../schema";
 import {
@@ -16,9 +21,65 @@ import {
   PrioritizeChatQueuedTaskResponseSchema, PendingChatTasksResponseSchema,
   ChatNoContentSchema, ChatCancelledTaskSchema,
 } from "../schemas/chat";
+import { IssueSessionSchema, IssueSessionTaskSchema } from "../schemas/comments";
+
+const WorkSessionResponseSchema = z.object({ session: IssueSessionSchema });
+const WorkSessionsResponseSchema = z.object({ sessions: z.array(IssueSessionSchema) });
+const WorkTaskResponseSchema = z.object({ task: IssueSessionTaskSchema });
+const WorkTasksResponseSchema = z.object({ tasks: z.array(IssueSessionTaskSchema) });
 
 export class ChatEndpoints {
   constructor(readonly http: HttpClient) {}
+
+  async listChatWorkSessions(chatId: string): Promise<Session[]> {
+    const raw = await this.http.fetch<unknown>(`/api/multiremi/chats/${encodeURIComponent(chatId)}/sessions?include_archived=true`);
+    const { sessions } = parseStrictResponse<{ sessions: Session[] }>(raw, WorkSessionsResponseSchema, {
+      endpoint: "GET /api/multiremi/chats/:id/sessions",
+    });
+    if (sessions.some(session => session.owner_type !== "chat" || session.owner_id !== chatId || session.chat_id !== chatId)) {
+      throw new ApiContractError("GET /api/multiremi/chats/:id/sessions", "Session owner did not match the requested Chat");
+    }
+    return sessions;
+  }
+
+  async createChatWorkSession(chatId: string, input: CreateSessionRequest): Promise<Session> {
+    const raw = await this.http.fetch<unknown>(`/api/multiremi/chats/${encodeURIComponent(chatId)}/sessions`, {
+      method: "POST", body: JSON.stringify(input),
+    });
+    const { session } = parseStrictResponse<{ session: Session }>(raw, WorkSessionResponseSchema, {
+      endpoint: "POST /api/multiremi/chats/:id/sessions",
+    });
+    if (!session.id || session.owner_type !== "chat" || session.owner_id !== chatId || session.chat_id !== chatId
+      || session.title !== input.title.trim() || session.parent_session_id !== (input.parent_session_id ?? null)
+      || (input.holds_workspace !== undefined && session.holds_workspace !== input.holds_workspace)) {
+      throw new ApiContractError("POST /api/multiremi/chats/:id/sessions", "Server did not retain the requested Session owner");
+    }
+    return session;
+  }
+
+  async listChatWorkSessionTasks(chatId: string, sessionId: string): Promise<SessionTask[]> {
+    const raw = await this.http.fetch<unknown>(`/api/multiremi/chats/${encodeURIComponent(chatId)}/sessions/${encodeURIComponent(sessionId)}/tasks`);
+    const { tasks } = parseStrictResponse<{ tasks: SessionTask[] }>(raw, WorkTasksResponseSchema, {
+      endpoint: "GET /api/multiremi/chats/:id/sessions/:sessionId/tasks",
+    });
+    if (tasks.some(task => task.issue_session_id !== sessionId || task.chat_session_id !== chatId)) {
+      throw new ApiContractError("GET /api/multiremi/chats/:id/sessions/:sessionId/tasks", "Task destination did not match the requested Session");
+    }
+    return tasks;
+  }
+
+  async createChatWorkSessionTask(chatId: string, sessionId: string, input: CreateSessionTaskRequest): Promise<SessionTask> {
+    const raw = await this.http.fetch<unknown>(`/api/multiremi/chats/${encodeURIComponent(chatId)}/sessions/${encodeURIComponent(sessionId)}/tasks`, {
+      method: "POST", body: JSON.stringify(input),
+    });
+    const { task } = parseStrictResponse<{ task: SessionTask }>(raw, WorkTaskResponseSchema, {
+      endpoint: "POST /api/multiremi/chats/:id/sessions/:sessionId/tasks",
+    });
+    if (!task.id || task.issue_session_id !== sessionId || task.chat_session_id !== chatId || task.agent_id !== input.agent_id) {
+      throw new ApiContractError("POST /api/multiremi/chats/:id/sessions/:sessionId/tasks", "Server did not retain the requested task destination");
+    }
+    return task;
+  }
 
   // Chat Sessions
   async listChatSessions(params?: { status?: string }): Promise<ChatSession[]> {

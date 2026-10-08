@@ -335,20 +335,21 @@ it("deleted Chat logs stay inaccessible to retained task credentials without adv
   const allowed = await f.app.request(`/api/sessions/${own.chat.id}/log/entry?from=0&to=${seq}`, { headers: own.headers });
   expect(allowed.status).toBe(200);
   expect((await allowed.json()).entries).toContainEqual(expect.objectContaining({ body_md: "FIRST_UNREAD" }));
-  const progress = f.store.getSessionAgentReadProgress(own.chat.id, f.agent.id);
-  expect(progress).toEqual({ seq, offset: 0 });
-  expect(progress.seq).toBeLessThan(to);
+  const previousProgress = f.store.getSessionAgentReadProgress(own.chat.id, f.agent.id);
+  expect(previousProgress).toEqual({ seq, offset: 0 });
+  expect(previousProgress.seq).toBeLessThan(to);
 
   expect(f.store.deleteChatSession(own.chat.id)).toBe(true);
   expect(f.store.getChatSession(own.chat.id)).toBeNull();
   const retainedTask = f.store.getTask(own.task.id)!;
   expect(retainedTask).toMatchObject({ chatSessionId: own.chat.id, agentId: f.agent.id, workspaceId: own.chat.workspaceId });
-  expect(f.store.getConversationLogEntry(own.chat.id, seq)).toMatchObject({ id: own.first.message.id, body_md: "FIRST_UNREAD" });
-  expect(f.store.getConversationLogEntry(own.chat.id, to)).toMatchObject({ body_md: "SECOND_UNREAD" });
-  expect(f.store.getSessionAgentReadProgress(own.chat.id, f.agent.id)).toEqual(progress);
+  expect(f.store.getConversationLogEntry(own.chat.id, seq)).toBeNull();
+  expect(f.store.getConversationLogEntry(own.chat.id, to)).toBeNull();
+  const progress = f.store.getSessionAgentReadProgress(own.chat.id, f.agent.id);
+  expect(progress).toEqual({ seq: 0, offset: 0 });
   expect(await f.store.verifyAccessToken(own.headers.Authorization.slice("Bearer ".length), ["task"])).toBeNull();
 
-  // A fresh valid token proves the retained log is blocked by the Chat guard.
+  // A fresh valid token cannot recreate the deleted owner's log or advance reads.
   const credential = await f.store.createTaskAccessToken(retainedTask, f.runtime.ownerId!);
   expect(await f.store.verifyAccessToken(credential.token, ["task"]))
     .toMatchObject({ taskId: retainedTask.id, agentId: f.agent.id, workspaceId: own.chat.workspaceId });

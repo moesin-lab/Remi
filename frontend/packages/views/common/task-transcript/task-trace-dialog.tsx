@@ -5,6 +5,7 @@ import type { TraceEvent } from "@multiremi/contracts/trace";
 import { api, TraceEventSchema, mergeTraceWindow, TRACE_VIEW_WINDOW_SIZE, TRACE_LIVE_WINDOW_SIZE, TRACE_HISTORY_WINDOW_BYTES, TRACE_LIVE_WINDOW_BYTES, type TaskTraceRead } from "@multiremi/core/api";
 import { useTraceStreamSubscription } from "@multiremi/core/realtime";
 import type { AgentTask } from "@multiremi/core/types/agent";
+import type { SessionTask } from "@multiremi/core/types";
 import { AgentTranscriptDialog } from "./agent-transcript-dialog";
 import { buildTraceTimeline, extractContextUsage } from "./build-timeline";
 
@@ -17,7 +18,7 @@ export function TaskTraceDialog(props: TaskTraceDialogProps) {
 }
 
 interface TaskTraceDialogProps {
-  task: AgentTask;
+  task: AgentTask | SessionTask;
   agentName: string;
   onOpenChange: (open: boolean) => void;
   headerSlot?: React.ReactNode;

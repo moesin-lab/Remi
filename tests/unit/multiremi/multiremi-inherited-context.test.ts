@@ -21,22 +21,24 @@ const diagnosticColumns = [
   "inherited_projection_recorded_at",
 ] as const;
 
-function fixture(largeParent = false, parentAuthorType: "agent" | "member" = "agent") {
+function fixture(largeParent = false, parentAuthorType: "agent" | "member" = "agent", owner: "chat" | "issue" = "issue") {
   const store = createLocalStore();
   const runtime = store.registerRuntime({ name: "Inherited diagnostics", provider: "claude", workspaceId: "local" });
   const agent = store.createAgent({ name: "Reader", provider: "claude", workspaceId: "local", runtimeId: runtime.id });
   const issue = store.createIssue({ title: "Inherited diagnostics", workspaceId: "local" });
-  const parent = store.getOrCreateDefaultIssueSession(issue.id);
+  const chat = owner === "chat" ? store.createChatSession({ agentId: agent.id, creatorId: "local" }) : null;
+  const parent = chat ? store.getOrCreateDefaultChatSession(chat.id) : store.getOrCreateDefaultIssueSession(issue.id);
   for (let index = 0; index < (largeParent ? 24 : 2); index++) {
     store.appendSessionEvent(parent.id, {
       authorType: parentAuthorType, authorId: parentAuthorType === "agent" ? agent.id : "local",
       body: `Parent ${index}: ${largeParent ? "历史".repeat(4_000) : "Reference decision"}`,
     });
   }
-  const side = store.createIssueSession(issue.id, { title: "Side", parentSessionId: parent.id });
+  const side = chat ? store.createSession(chat.id, { title: "Side", parentSessionId: parent.id })
+    : store.createIssueSession(issue.id, { title: "Side", parentSessionId: parent.id });
   const task = store.createSessionTask(side.id, { agentId: agent.id, prompt: "Explain the decision" });
   const app = createMultiremiApp({ store, authToken: "MASTER" });
-  return { store, runtime, agent, issue, parent, side, task, app };
+  return { store, runtime, agent, issue, chat, parent, side, task, app };
 }
 
 function persistedDiagnostics(taskId: string) {
@@ -56,6 +58,49 @@ function expectNullDiagnostics(store: ReturnType<typeof createLocalStore>, taskI
 }
 
 describe("persisted inherited context diagnostics", () => {
+  it("inherits a completed Chat Session reply only when its immutable message precedes the snapshot cutoff", async () => {
+    const { store, runtime, agent, chat, parent, task: initialTask, app } = fixture(false, "member", "chat");
+    store.cancelTask(initialTask.id);
+    const parentTask = store.createSessionTask(parent.id, { agentId: agent.id, prompt: "Produce a durable finding" });
+    const claimed = store.claimTask(runtime.id)!;
+    expect(claimed.id).toBe(parentTask.id);
+    store.startTask(parentTask.id);
+    const early = store.createSession(chat!.id, { title: "Early snapshot", parentSessionId: parent.id });
+    const output = "private-completed-parent-finding";
+    store.completeTask(parentTask.id, { output });
+    const late = store.createSession(chat!.id, { title: "Late snapshot", parentSessionId: parent.id });
+    const reader = store.createAgent({ name: "Snapshot reader", provider: "claude" });
+    const finalReply = store.findTurnEntry(parentTask.id)!.metadata.final_entry_id;
+    expect(store.listSessionEvents(parent.id).find(event => event.id === finalReply)?.body).toBe(output);
+    for (const [snapshot, expected] of [[early, false], [late, true]] as const) {
+      const task = store.createSessionTask(snapshot.id, { agentId: reader.id, prompt: "Read only this snapshot" });
+      store.buildTaskSessionProjection(task.id);
+      const token = await store.createTaskAccessToken(task, "local");
+      const response = await app.request(`/api/sessions/${parent.id}/log/entry?from=0&to=${snapshot.inheritCutoffSeq}`, {
+        headers: { Authorization: `Bearer ${token.token}` },
+      });
+      expect(response.status).toBe(200);
+      expect(JSON.stringify(await response.json()).includes(output)).toBe(expected);
+    }
+  });
+
+  for (const owner of ["chat", "issue"] as const) {
+    it(`lets a ${owner}-owned child task read its frozen same-owner parent context`, async () => {
+      const { store, runtime, issue, chat, parent, side, task, app } = fixture(false, "member", owner);
+      const response = await taskOfferResponse(store, runtime.id, { headers, authToken: "MASTER" });
+      expect(response.status).toBe(200);
+      const claimed = (await response.json()).task;
+      expect(claimed).toMatchObject({ id: task.id, issue_session_id: side.id });
+      expect(claimed.inherited_session_projection).toMatchObject({ session_id: parent.id, to_seq: side.inheritCutoffSeq });
+      expect(store.getIssueSession(side.id)).toMatchObject({ ownerType: owner, ownerId: chat?.id ?? issue.id });
+      const parentLog = await app.request(`/api/sessions/${parent.id}/log/entry?from=0&to=${side.inheritCutoffSeq}`, {
+        headers: { Authorization: `Bearer ${claimed.auth_token}` },
+      });
+      expect(parentLog.status).toBe(200);
+      expect(JSON.stringify(await parentLog.json())).toContain("Parent 0: Reference decision");
+    });
+  }
+
   it("upgrades existing tasks with six nullable columns and preserves null through the mapper", () => {
     const { store, task } = fixture();
     for (const column of diagnosticColumns) db!.exec(`ALTER TABLE multiremi_tasks DROP COLUMN ${column}`);

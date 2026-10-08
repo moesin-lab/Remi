@@ -12,7 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { delimiter, join } from "node:path";
-import { cliCommandInventory, dispatch } from "../../../apps/remi/cli/index.js";
+import { cliCommandHelp, cliCommandInventory, dispatch } from "../../../apps/remi/cli/index.js";
 import { detectMultiremiProviders } from "../../../apps/remi/cli/multiremi.js";
 
 interface DispatchResult {
@@ -146,6 +146,45 @@ describe("remi CLI dispatcher", () => {
     expect(inventory.filter((entry) => entry.id.startsWith("chat.issue"))).toEqual([]);
     for (const id of ["chat.create", "chat.message.create", "chat.queue.list", "chat.pin", "chat.archive", "chat.restore"]) {
       expect(inventory.some((entry) => entry.id === id), id).toBe(true);
+    }
+  });
+
+  it("registers Issue-owned Sessions as executable commands with owner-specific help", async () => {
+    const inventory = cliCommandInventory();
+    const actions = ["list", "create", "get", "update", "participant.list", "participant.add", "participant.remove", "event.list", "message.create", "task.list", "task.create", "result.list", "result.publish"];
+    for (const action of actions) {
+      const entry = inventory.find((candidate) => candidate.id === `issue.session.${action}`)!;
+      expect(entry, action).toBeDefined();
+      expect(entry.path, action).toEqual(["issue", "session", ...action.split(".")]);
+      expect(entry.aliases, action).toEqual([]);
+      expect(entry.positionals[0]?.name, action).toBe("issue");
+      const chatEntry = inventory.find((candidate) => candidate.id === `session.${action}`);
+      expect(chatEntry, action).toBeDefined();
+      expect(entry.auth, action).toEqual(chatEntry!.auth);
+      const help = cliCommandHelp(entry.path);
+      expect(help, action).toContain("<issue>");
+      expect(help, action).not.toContain("<chat>");
+    }
+    expect(cliCommandHelp(["session", "create"])).toContain("<chat>");
+
+    const realFetch = globalThis.fetch;
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path === "/api/cli/capabilities") {
+        return Response.json({ commands: [{ id: "issue.session.create", allowed: true }] });
+      }
+      calls.push({ method: request.method, path, body: await request.json() });
+      return Response.json({ id: "ises_issue", owner_type: "issue", owner_id: "MUL-1" });
+    }) as typeof fetch;
+    try {
+      const result = await runDispatch(["issue", "session", "create", "MUL-1", "--title", "Design", "--discussion", "--server", "https://cli.example.test", "--token", "fixture", "--json"]);
+      expect(result.error).toBeNull();
+      expect(result.stderr).toEqual([]);
+      expect(calls).toEqual([{ method: "POST", path: "/api/issues/MUL-1/sessions", body: { title: "Design", holds_workspace: false } }]);
+    } finally {
+      globalThis.fetch = realFetch;
     }
   });
 

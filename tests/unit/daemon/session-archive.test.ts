@@ -71,7 +71,7 @@ describe("Session archive v2 writer", () => {
     const issueRoot = join(storage, "issues", "MUL-TRACE");
     mkdirSync(issueRoot, { recursive: true });
     const store = new TraceFileStore({ workspacesRoot: storage, resolveTask: () => ({
-      sessionId: "ises_trace", agentId: "agt_trace", provider: "codex", runtimeId: "rt_trace", issueId: "iss_trace",
+      sessionId: "ises_trace", agentId: "agt_trace", provider: "codex", runtimeId: "rt_trace", issueId: "iss_trace", chatSessionId: null,
       startedAt: "2026-10-05T00:00:00Z" }) });
     store.append("tsk_trace", [{ type: "text", content: "preparation failed" }]);
     store.close("tsk_trace", { status: "failed", ended_at: "2026-10-05T00:00:01Z" });

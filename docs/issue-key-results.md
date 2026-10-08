@@ -1,19 +1,23 @@
 # Issue key results — metadata contract
 
-A session result (`POST /api/issues/:id/sessions/:sessionId/results`) carries a free-form
+A Session result (`POST /api/issues/:id/sessions/:sessionId/results` or
+`POST /api/multiremi/chats/:chatId/sessions/:sessionId/results`) carries a free-form
 `metadata` object. Two keys inside it are a *convention*, not a constraint: the store persists
 whatever is sent and every reader degrades instead of failing.
+The source Session has one Chat or Issue owner. Results follow that source's access
+permissions; an Issue work projection does not make a private Chat result public.
 
 ## `metadata.kind`
 
 One of `mr` | `branch` | `report` | `deploy` | `decision` | `doc` | `other`.
 
 - Absent or unknown value → readers treat it as `other` (generic icon, generic label).
-- The CLI (`remi session result publish <chat> <session> --type <kind>`) rejects a value outside the list
+- Both owner paths (`remi session result publish <chat> <session> --type <kind>` and
+  `remi issue session result publish <issue> <session> --type <kind>`) reject a value outside the supported CLI kinds
   with a usage error that names the valid kinds — the agent gets told, the API stays open.
-- `branch` is not offered by the CLI: the daemon publishes it itself after auto-checking-out an
-  issue task's repos (worker/daemon.ts `publishBranchArtifact`), with the worktree branch as the
-  title and a `metadata.worktrees` list of `{ repo_url, branch, path }`.
+- `branch` is recognized by the UI but is not offered by the CLI. A branch result can carry
+  a `metadata.worktrees` list of `{ repo_url, branch, path }`; this convention does not promise
+  that every repository checkout publishes a result automatically.
 
 ## `metadata.refs`
 
@@ -27,7 +31,7 @@ One of `mr` | `branch` | `report` | `deploy` | `decision` | `doc` | `other`.
 
 ## Where it is read
 
-- `packages/core/issues/session-results.ts` — `sessionResultKind()` / `sessionResultRefs()`,
+- [session-results.ts](../frontend/packages/core/issues/session-results.ts) — `sessionResultKind()` / `sessionResultRefs()`,
   the lenient readers used by the UI.
-- `packages/views/issues/components/issue-key-results-section.tsx` — 关键结果 panel section
+- [issue-key-results-section.tsx](../frontend/packages/views/issues/components/issue-key-results-section.tsx) — 关键结果 panel section
   (icon by kind, refs as badges).

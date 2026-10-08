@@ -62,6 +62,7 @@ describe("bound Issue continuation prompt", () => {
         expect(prompt).toContain("remi session task create <owning-chat-id> <session-id>");
         expect(prompt).toContain("Do not use an ordinary Chat task or a bare comment as a substitute");
         expect(prompt).toContain("A rich mention from an Issue task delegates to that agent");
+        expect(prompt).toContain("its result returns automatically to the dispatching Session");
         expect(prompt).toContain("Chat-origin dispatch keeps the existing topic relay reporting path");
         expect(prompt).toContain("remi task get <returned-task-id> --output json");
         expect(prompt).toContain("remi task steer list <target-task-id> --output json");
@@ -118,6 +119,7 @@ describe("topic Task credential handoff through existing APIs", () => {
     const verified = await app.request(`/api/multiremi/tasks/${next.id}`, { headers });
     expect(verified.status).toBe(200);
     expect((await verified.json()).task).toMatchObject({ id: next.id, issueSessionId: session.id, agentId: owner.id, status: "queued" });
+    expect(store.getTask(next.id)).toMatchObject({ delegationId: null, delegationSkipReason: "source_not_issue_task" });
     const listed = await app.request(`/api/issues/${issue.id}/sessions/${session.id}/tasks`, { headers });
     expect(listed.status).toBe(200);
     expect((await listed.json()).some((entry: { id: string }) => entry.id === next.id)).toBe(true);
@@ -128,8 +130,8 @@ describe("topic Task credential handoff through existing APIs", () => {
     expect(store.getIssue(issue.id)?.assigneeId).toBe(owner.id);
   });
 
-  it("a task-linked rich mention explicitly dispatches into the work Session", async () => {
-    const { store, app, headers, task, owner, issue, session, chat } = await authenticatedTopic();
+  it("a task-linked rich mention dispatches into the work Session without a delegation return to Chat", async () => {
+    const { store, app, headers, task, owner, issue, session, chat, runtime } = await authenticatedTopic();
     const before = store.listTasks().map((entry) => entry.id);
     const response = await app.request(`/api/issues/${issue.id}/sessions/${session.id}/messages`, {
       method: "POST", headers,
@@ -144,6 +146,20 @@ describe("topic Task credential handoff through existing APIs", () => {
       chatSessionId: chat.id, parentTaskId: task.id, triggerCommentId: comment.id,
       status: "queued", delegationId: null, delegationSkipReason: "source_not_issue_task",
     });
+    const mentioned = created[0]!;
+    expect(store.claimTask(runtime.id)?.id).toBe(mentioned.id);
+    store.startTask(mentioned.id);
+    store.completeTask(mentioned.id, { output: "Rich mention follow-up verified." });
+    expect(store.getTask(mentioned.id)?.delegationReturnTaskId).toBeNull();
+    expect(store.listIssueActivity(issue.id)).toContainEqual(expect.objectContaining({
+      type: "delegation_return_skipped",
+      data: expect.objectContaining({
+        reason: "source_not_issue_task", sourceTaskId: mentioned.id, terminalStatus: "completed",
+      }),
+    }));
+    expect(store.listTasks()).toHaveLength(before.length + 1);
+    expect(store.listTasks().filter((entry) => entry.chatSessionId === chat.id && entry.issueSessionId === null)
+      .map((entry) => entry.id)).toEqual([task.id]);
   });
 
   it("amends a running Issue task without creating another task or steering the Chat", async () => {

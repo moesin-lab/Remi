@@ -57,7 +57,10 @@ export interface SqlDatabase {
   prepare(sql: string): SqlStatement;
   run(sql: string, ...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
   exec(sql: string): void;
-  transaction<T>(fn: (...args: any[]) => T): (...args: any[]) => T;
+  transaction<T>(fn: (...args: any[]) => T): ((...args: any[]) => T) & {
+    /** SQLite read snapshots can opt out of the default immediate writer lock. */
+    deferred?: (...args: any[]) => T;
+  };
   /** Isolate an optional operation inside the current transaction without owning a new transaction. */
   savepoint?<T>(fn: () => T): T;
   /**
@@ -415,6 +418,8 @@ class PgBridge {
       const deadline = performance.now() + QUERY_TIMEOUT_MS;
       // A wakeup alone does not publish a reply. Recheck the worker's status
       // before reading the buffer, and retain one deadline across early wakes.
+      // A prior reply can set DONE before its notify arrives. If the next
+      // request is already waiting, that late notify must not expose old bytes.
       while (Atomics.load(this.ctl, 0) === STATUS_PENDING) {
         const remaining = deadline - performance.now();
         if (remaining <= 0) throw new Error("postgres bridge timed out");

@@ -1,306 +1,195 @@
 import { useMemo } from "react";
-import type { RuntimeUsage } from "@multiremi/core/types";
-import { useCustomPricingStore } from "@multiremi/core/runtimes/custom-pricing-store";
-import { addDaysIso, estimateCost, todayIso, weekStartIso } from "../../utils";
+import type { UsageReport } from "@multiremi/contracts/usage-accounting";
+import {
+  heatmapRows,
+  type UsageCalendarWindows,
+} from "@multiremi/core/usage/view-model";
 import { useT } from "../../../i18n";
 
-// 26 weeks (~6 months) gives the heatmap real presence in the wider chart
-// card and turns "long-view" into a meaningful tab — a 13-week strip looked
-// cramped. Cells at 16px (vs GitHub's 11) keep the calendar-square density
-// readable at this scale.
-const HEATMAP_WEEKS = 26;
-const CELL_SIZE = 16;
-const CELL_GAP = 3;
-// Monday-first row order, matching ISO 8601 and the rest of the Weekly
-// aggregation (see #MUL-2382). Rows labelled Mon / Wed / Fri keep the
-// density readable.
-const DAY_LABELS = ["Mon", "", "Wed", "", "Fri", "", ""];
-const WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-
-// Cells use the brand-derived chart-1 hue with descending opacity instead
-// of a neutral foreground fade, so the heatmap reads as part of the same
-// visual family as Daily cost (chart-1 stack) rather than a separate
-// monochrome surface. Level 0 stays neutral muted to clearly mean "no
-// activity" (not "very faint activity").
-function getHeatmapColor(level: number): string {
-  if (level === 0) return "var(--color-muted)";
-  const opacities = ["20%", "45%", "70%", "100%"];
-  return `color-mix(in oklch, var(--color-chart-1) ${opacities[level - 1]}, transparent)`;
-}
-
-function fmtMoney(n: number): string {
-  if (n >= 100) return `$${n.toFixed(0)}`;
-  return `$${n.toFixed(2)}`;
-}
-
-function fmtDate(iso: string): string {
-  return new Date(iso + "T00:00:00").toLocaleString("en", {
-    month: "short",
-    day: "numeric",
-  });
-}
-
-interface Insights {
-  busiestDay: { date: string; cost: number } | null;
-  busyDayName: string | null;
-  busyDayAvg: number;
-  quietDayName: string | null;
-  quietDayAvg: number;
-  totalCost: number;
-  windowDays: number;
-}
-
+const CELL_SIZE = 16,
+  GAP = 3,
+  LABEL_WIDTH = 28;
 export function ActivityHeatmap({
-  usage,
-  tz,
+  report,
+  windows,
+  currency,
 }: {
-  usage: RuntimeUsage[];
-  tz: string;
+  report: UsageReport;
+  windows: UsageCalendarWindows;
+  currency: string;
 }) {
-  const { t } = useT("runtimes");
-  // Memo dep — estimateCost (called inside the body below) consults the
-  // user-override store, so saving a custom rate must invalidate the cells.
-  const pricings = useCustomPricingStore((s) => s.pricings);
-  const { cells, monthLabels, insights } = useMemo(() => {
-    // Sum priced cost per day. Cost (not tokens) gives the colour scale a
-    // financial meaning that lines up with the rest of the page — a "hot"
-    // square here means the same thing as a tall bar in Daily cost.
-    const dateCost = new Map<string, number>();
-    for (const u of usage) {
-      dateCost.set(u.date, (dateCost.get(u.date) ?? 0) + estimateCost(u));
-    }
-
-    // Anchor the grid on the Monday of the week containing "today" in the
-    // viewer's tz, then walk back HEATMAP_WEEKS-1 weeks. All dates are
-    // string-based YYYY-MM-DD so the host browser's tz can't shift a column.
-    // We stop drawing cells once we pass `today` so the in-progress week is
-    // partial (cells for "tomorrow onward" aren't rendered) — matches the
-    // Weekly chart's partial-week treatment.
-    const today = todayIso(tz);
-    const lastWeekStart = weekStartIso(today);
-    const startDate = addDaysIso(lastWeekStart, -(HEATMAP_WEEKS - 1) * 7);
-    const todayIndex = (HEATMAP_WEEKS - 1) * 7 + ((() => {
-      // Monday-based weekday of `today`: 0 = Mon ... 6 = Sun. Computed via
-      // string subtraction so the host timezone can't shift the value.
-      const [y, m, d] = today.split("-").map(Number);
-      const dt = new Date(Date.UTC(y ?? 1970, (m ?? 1) - 1, d ?? 1));
-      return (dt.getUTCDay() + 6) % 7;
-    })());
-
-    const allCells: {
-      date: string;
-      dayOfWeek: number; // 0 = Mon ... 6 = Sun
-      week: number;
-      cost: number;
-    }[] = [];
-    for (let i = 0; i <= todayIndex; i++) {
-      const dateStr = addDaysIso(startDate, i);
-      const dayOfWeek = i % 7;
-      const week = Math.floor(i / 7);
-      allCells.push({
-        date: dateStr,
-        dayOfWeek,
-        week,
-        cost: dateCost.get(dateStr) ?? 0,
-      });
-    }
-
-    const nonZero = allCells.filter((c) => c.cost > 0).map((c) => c.cost);
-    nonZero.sort((a, b) => a - b);
-    const getLevel = (cost: number) => {
-      if (cost === 0) return 0;
-      if (nonZero.length <= 1) return 4;
-      const p = nonZero.indexOf(cost) / (nonZero.length - 1);
-      if (p <= 0.25) return 1;
-      if (p <= 0.5) return 2;
-      if (p <= 0.75) return 3;
-      return 4;
+  const { t } = useT("usage");
+  const cells = useMemo(
+    () => heatmapRows(report, windows, currency),
+    [report, windows, currency],
+  );
+  const values = cells
+    .flatMap((c) => (c.value !== null && c.value > 0 ? [c.value] : []))
+    .sort((a, b) => a - b);
+  const known = cells.filter((c) => !c.future && c.value !== null);
+  const complete = cells
+    .filter((c) => !c.future)
+    .every((c) => c.state === "known");
+  const total = known.reduce((n, c) => n + c.value!, 0);
+  const busiest = known.reduce<(typeof known)[number] | null>(
+    (best, c) => (!best || c.value! > best.value! ? c : best),
+    null,
+  );
+  const weekday = Array.from({ length: 7 }, (_, i) => {
+    const days = known.filter((c) => c.dayOfWeek === i);
+    return {
+      index: i,
+      amount: days.length
+        ? days.reduce((n, c) => n + c.value!, 0) / days.length
+        : null,
     };
-
-    const cellsWithLevel = allCells.map((c) => ({
-      ...c,
-      level: getLevel(c.cost),
-    }));
-
-    const months: { label: string; week: number }[] = [];
-    let lastMonth = -1;
-    for (const c of cellsWithLevel) {
-      const month = new Date(c.date + "T00:00:00").getMonth();
-      if (month !== lastMonth && c.dayOfWeek === 0) {
-        months.push({
-          label: new Date(c.date + "T00:00:00").toLocaleString("en", {
-            month: "short",
-          }),
-          week: c.week,
-        });
-        lastMonth = month;
-      }
-    }
-
-    // Insights derived from the same cells so the colour scale, the busiest
-    // square, and the side-panel numbers can never disagree.
-    let busiestDay: { date: string; cost: number } | null = null;
-    let totalCost = 0;
-    const weekdaySum = [0, 0, 0, 0, 0, 0, 0];
-    const weekdayCount = [0, 0, 0, 0, 0, 0, 0];
-    for (const c of allCells) {
-      totalCost += c.cost;
-      weekdaySum[c.dayOfWeek] = (weekdaySum[c.dayOfWeek] ?? 0) + c.cost;
-      weekdayCount[c.dayOfWeek] = (weekdayCount[c.dayOfWeek] ?? 0) + 1;
-      if (c.cost > 0 && (!busiestDay || c.cost > busiestDay.cost)) {
-        busiestDay = { date: c.date, cost: c.cost };
-      }
-    }
-    const weekdayAvg = weekdaySum.map((s, i) => {
-      const count = weekdayCount[i] ?? 0;
-      return count > 0 ? s / count : 0;
-    });
-    let busyDayName: string | null = null;
-    let busyDayAvg = 0;
-    let quietDayName: string | null = null;
-    let quietDayAvg = Number.POSITIVE_INFINITY;
-    weekdayAvg.forEach((avg, i) => {
-      const name = WEEKDAY_NAMES[i] ?? "";
-      if (avg > busyDayAvg) {
-        busyDayAvg = avg;
-        busyDayName = name;
-      }
-      if (avg < quietDayAvg) {
-        quietDayAvg = avg;
-        quietDayName = name;
-      }
-    });
-    if (quietDayAvg === Number.POSITIVE_INFINITY) quietDayAvg = 0;
-    // When the window has no spend at all, the busy / quiet weekday picks
-    // are noise (every weekday averaged to 0). Suppress them.
-    if (totalCost === 0) {
-      busyDayName = null;
-      quietDayName = null;
-    }
-
-    const insights: Insights = {
-      busiestDay,
-      busyDayName,
-      busyDayAvg,
-      quietDayName,
-      quietDayAvg,
-      totalCost,
-      windowDays: allCells.length,
-    };
-
-    return { cells: cellsWithLevel, monthLabels: months, insights };
-  }, [usage, pricings, tz]);
-
-  const labelWidth = 28;
-  const svgWidth = labelWidth + HEATMAP_WEEKS * (CELL_SIZE + CELL_GAP);
-  const svgHeight = 14 + 7 * (CELL_SIZE + CELL_GAP);
-
-  // Vertical stack: heatmap centered up top, insights as a 4-cell stat
-  // strip below (separated by a hairline). Stacking guarantees the parent
-  // card width is decided entirely by its own grid cell — never by the
-  // SVG's intrinsic 249px or by the insight labels — and switching to /
-  // from this tab no longer changes the card's apparent width.
+  });
+  const sortedWeekdays = weekday
+    .filter((c) => c.amount !== null)
+    .sort((a, b) => b.amount! - a.amount!);
+  const weekName = (i: number) =>
+    new Intl.DateTimeFormat(undefined, {
+      weekday: "short",
+      timeZone: "UTC",
+    }).format(new Date(Date.UTC(2026, 0, 5 + i)));
+  const money = (v: number) => `${currency} ${v.toFixed(2)}`;
+  const color = (c: (typeof cells)[number]) => {
+    if (c.future) return "transparent";
+    if (c.state === "empty") return "none";
+    if (c.value === null) return "var(--color-warning)";
+    if (c.value === 0) return "var(--color-muted)";
+    const level =
+      values.length <= 1
+        ? 3
+        : Math.min(
+            3,
+            Math.floor((values.indexOf(c.value) / values.length) * 4),
+          );
+    return `color-mix(in oklch, var(--color-chart-1) ${["20%", "45%", "70%", "100%"][level]}, transparent)`;
+  };
+  const caption = (c: (typeof cells)[number]) =>
+    c.future
+      ? t(($) => $.experience.future)
+      : c.state === "empty"
+        ? t(($) => $.experience.no_record)
+        : c.value === null
+          ? t(($) => $.experience.unknown)
+          : `${money(c.value)}${c.state === "subtotal" ? ` · ${t(($) => $.experience.subtotal)}` : c.value === 0 ? ` · ${t(($) => $.experience.zero)}` : ""}`;
+  const months = cells.filter(
+    (c) =>
+      c.dayOfWeek === 0 &&
+      !c.future &&
+      (c.week === 0 ||
+        c.date.slice(5, 7) !== cells[(c.week - 1) * 7]?.date.slice(5, 7)),
+  );
+  const unknown = t(($) => $.experience.insight_unknown);
   return (
-    <div className="space-y-4">
-      <div className="flex flex-col items-center gap-2">
-        <div className="overflow-x-auto">
-          <svg width={svgWidth} height={svgHeight} className="block">
-            {monthLabels.map((m) => (
+    <div className="min-w-0 space-y-4" data-testid="activity-heatmap">
+      <div className="flex min-w-0 flex-col items-center gap-2">
+        <div className="max-w-full overflow-x-auto">
+          <svg
+            role="img"
+            aria-label={t(($) => $.experience.heatmap)}
+            width={LABEL_WIDTH + 26 * (CELL_SIZE + GAP)}
+            height={14 + 7 * (CELL_SIZE + GAP)}
+            className="block"
+          >
+            {months.map((c) => (
               <text
-                key={`${m.label}-${m.week}`}
-                x={labelWidth + m.week * (CELL_SIZE + CELL_GAP)}
+                key={c.date}
+                x={LABEL_WIDTH + c.week * (CELL_SIZE + GAP)}
                 y={10}
                 className="fill-muted-foreground"
                 fontSize={9}
               >
-                {m.label}
+                {new Intl.DateTimeFormat(undefined, {
+                  month: "short",
+                  timeZone: "UTC",
+                }).format(new Date(`${c.date}T00:00:00Z`))}
               </text>
             ))}
-            {DAY_LABELS.map((label, i) =>
-              label ? (
-                <text
-                  key={i}
-                  x={0}
-                  y={14 + i * (CELL_SIZE + CELL_GAP) + CELL_SIZE - 1}
-                  className="fill-muted-foreground"
-                  fontSize={9}
-                >
-                  {label}
-                </text>
-              ) : null,
-            )}
+            {[0, 2, 4].map((i) => (
+              <text
+                key={i}
+                x={0}
+                y={14 + i * (CELL_SIZE + GAP) + CELL_SIZE - 1}
+                className="fill-muted-foreground"
+                fontSize={9}
+              >
+                {weekName(i)}
+              </text>
+            ))}
             {cells.map((c) => (
               <rect
                 key={c.date}
-                x={labelWidth + c.week * (CELL_SIZE + CELL_GAP)}
-                y={14 + c.dayOfWeek * (CELL_SIZE + CELL_GAP)}
+                data-state={c.future ? "future" : c.state}
+                data-date={c.date}
+                x={LABEL_WIDTH + c.week * (CELL_SIZE + GAP)}
+                y={14 + c.dayOfWeek * (CELL_SIZE + GAP)}
                 width={CELL_SIZE}
                 height={CELL_SIZE}
                 rx={3}
-                fill={getHeatmapColor(c.level)}
-                className="transition-colors"
+                fill={color(c)}
+                stroke={
+                  c.state === "empty" && !c.future
+                    ? "var(--color-border)"
+                    : undefined
+                }
+                strokeDasharray={
+                  c.state === "empty" && !c.future ? "2 2" : undefined
+                }
+                fillOpacity={
+                  c.value === null && c.state === "unknown" ? 0.35 : 1
+                }
               >
                 <title>
-                  {c.date}:{" "}
-                  {c.cost > 0 ? `$${c.cost.toFixed(2)}` : "No activity"}
+                  {c.date}: {caption(c)}
                 </title>
               </rect>
             ))}
           </svg>
         </div>
-        <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
-          <span>{t(($) => $.charts.heatmap_less)}</span>
-          {[0, 1, 2, 3, 4].map((level) => (
-            <div
-              key={level}
-              className="h-[10px] w-[10px] rounded-[2px]"
-              style={{ backgroundColor: getHeatmapColor(level) }}
-            />
-          ))}
-          <span>{t(($) => $.charts.heatmap_more)}</span>
+        <div className="flex flex-wrap justify-center gap-3 text-[10px] text-muted-foreground">
+          <span>□ {t(($) => $.experience.no_record)}</span>
+          <span>■ {t(($) => $.experience.zero)}</span>
+          <span className="text-warning">
+            ■ {t(($) => $.experience.unknown)}
+          </span>
+          <span className="text-brand">
+            ■ {t(($) => $.experience.subtotal)}
+          </span>
         </div>
       </div>
-
-      <InsightsRow insights={insights} />
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-3 border-t pt-3 sm:grid-cols-4">
+        <Insight
+          label={t(($) => $.experience.busiest)}
+          value={complete && busiest ? busiest.date : unknown}
+          sub={complete && busiest ? money(busiest.value!) : undefined}
+        />
+        <Insight
+          label={t(($) => $.experience.busy_weekday)}
+          value={
+            complete && sortedWeekdays[0]
+              ? weekName(sortedWeekdays[0].index)
+              : unknown
+          }
+        />
+        <Insight
+          label={t(($) => $.experience.quiet_weekday)}
+          value={
+            complete && sortedWeekdays.at(-1)
+              ? weekName(sortedWeekdays.at(-1)!.index)
+              : unknown
+          }
+        />
+        <Insight
+          label={t(($) => $.experience.known_total)}
+          value={known.length ? money(total) : "—"}
+        />
+      </dl>
     </div>
   );
 }
-
-// Horizontal stat strip beneath the heatmap. Mirrors the page-top KPI
-// hero pattern (label → big value → sub) but at smaller scale to stay
-// secondary. 4 columns on desktop, 2 on narrow screens.
-function InsightsRow({ insights }: { insights: Insights }) {
-  const {
-    busiestDay,
-    busyDayName,
-    busyDayAvg,
-    quietDayName,
-    quietDayAvg,
-    totalCost,
-    windowDays,
-  } = insights;
-  return (
-    <dl className="grid grid-cols-2 gap-x-4 gap-y-3 border-t pt-3 sm:grid-cols-4">
-      <Insight
-        label="Busiest day"
-        value={busiestDay ? fmtDate(busiestDay.date) : "—"}
-        sub={busiestDay ? fmtMoney(busiestDay.cost) : null}
-      />
-      <Insight
-        label="Most active weekday"
-        value={busyDayName ?? "—"}
-        sub={busyDayName ? `avg ${fmtMoney(busyDayAvg)}` : null}
-      />
-      <Insight
-        label="Quietest weekday"
-        value={quietDayName ?? "—"}
-        sub={quietDayName ? `avg ${fmtMoney(quietDayAvg)}` : null}
-      />
-      <Insight label={`${windowDays}-day total`} value={fmtMoney(totalCost)} />
-    </dl>
-  );
-}
-
 function Insight({
   label,
   value,
@@ -308,21 +197,15 @@ function Insight({
 }: {
   label: string;
   value: string;
-  sub?: string | null;
+  sub?: string;
 }) {
   return (
-    <div className="min-w-0">
-      <dt className="truncate text-[11px] uppercase tracking-wider text-muted-foreground">
+    <div>
+      <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">
         {label}
       </dt>
-      <dd className="mt-0.5 truncate text-sm font-medium tabular-nums">
-        {value}
-        {sub != null && (
-          <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-            {sub}
-          </span>
-        )}
-      </dd>
+      <dd className="mt-1 text-sm font-medium">{value}</dd>
+      {sub && <div className="text-[10px] text-muted-foreground">{sub}</div>}
     </div>
   );
 }

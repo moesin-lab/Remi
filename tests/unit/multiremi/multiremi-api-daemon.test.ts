@@ -1124,6 +1124,7 @@ describe("Multiremi API — daemon endpoints", () => {
 
     const failingTask = store.createTask({ agentId: agent.id, prompt: "fail me" });
     expect(store.claimTask(runtime.id)?.id).toBe(failingTask.id);
+    store.recordTaskOffered(failingTask.id, runtime.id);
     const fail = await reportFrame(store, "task.fail", { task_id: failingTask.id, error: "boom",
         failure_reason: "codex_semantic_inactivity",
         session_id: "sess-fail",
@@ -1144,6 +1145,7 @@ describe("Multiremi API — daemon endpoints", () => {
 
     const camelReasonTask = store.createTask({ agentId: agent.id, prompt: "camel reason should not work" });
     expect(store.claimTask(runtime.id)?.id).toBe(camelReasonTask.id);
+    store.recordTaskOffered(camelReasonTask.id, runtime.id);
     const camelReasonFail = await reportFrame(store, "task.fail", { task_id: camelReasonTask.id, error: "camel boom", failureReason: "codex_semantic_inactivity" }, { headers: { "Content-Type": "application/json" }, authToken: "" });
     expect(camelReasonFail.ok).toBe(true);
     const camelReasonBody = daemonTaskWireResponse(store.getTask(camelReasonTask.id)!);
@@ -1308,15 +1310,11 @@ describe("Multiremi API — daemon endpoints", () => {
 
     const usageFirst = await reportFrame(store, "task.usage", { task_id: task.id, usage: [{ provider: "codex", model: "gpt-5", inputTokens: 10, outputTokens: 5 }] }, { headers: { "Content-Type": "application/json" }, authToken: "" });
     expect(usageFirst).toEqual({ ok: true });
-    expect(store.getTask(task.id)!.usage).toEqual([{
-      provider: "codex",
-      model: "gpt-5",
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      totalTokens: 0,
-    }]);
+    // Unsupported camel-case transport fields are missing observations, not zero consumption.
+    expect(store.getTask(task.id)!.usage).toEqual([]);
+    expect(db!.query("SELECT accuracy,input_tokens,output_tokens FROM multiremi_usage_units WHERE task_id=?").get(task.id)).toEqual({
+      accuracy: "unknown", input_tokens: null, output_tokens: null,
+    });
     const usageSecond = await reportFrame(store, "task.usage", { task_id: task.id, usage: [
           { provider: "codex", model: "gpt-5", input_tokens: 12, output_tokens: 6, cache_read_tokens: 3 },
           { provider: "claude", model: "sonnet", input_tokens: 2, output_tokens: 1 },

@@ -1,5 +1,41 @@
 # CLI command migration
 
+Unified usage uses `remi dashboard usage report` with `--days n|all`,
+`--since`, `--until`, `--tz`, `--project` and `--runtime`.
+`--include day_model` adds one genuine consumption-date × model detail page;
+`--detail-limit 1..500` defaults to 200 and `--detail-cursor <next_cursor>`
+continues the same workspace, filters, resolved range, timezone and price
+revision. Detail rows omit lifecycle duration/status; distinct related task
+counts are not additive. A stale or invalid cursor returns an error and must
+restart at the first page. Default reports omit this lazy projection.
+JSON output preserves explicit accounting token counters as nonnegative safe
+integers or null, and `coverage.token_ratio` as a finite ratio or null.
+Credential fields remain filtered; strings or objects disguised as token
+statistics do not bypass that filter.
+`remi dashboard usage prices list|set|close` reads or appends exact
+provider/model/connection price versions (`set --file <json>`,
+`close <price-id> --effective-to <ISO>`). Price writes are human/admin only.
+`remi dashboard usage reconcile` checks additive metrics and each currency
+across one report snapshot; distinct model/day/Runtime task counts are not
+summed. All commands use the selected workspace. Legacy statistical paths
+remain available as normalized-fact compatibility projections, while Web
+uses the unified report. Schema-only startup gates historical installations
+with HTTP 503 until explicit resumable backfill completes. Database migration
+and evidence recovery are internal maintenance scripts, with explicit DB
+environment and reviewed apply plans, not ordinary API writes. Current
+semantics and executable maintenance commands are in
+[Unified usage and prices](usage-accounting.md).
+
+`remi session log window <session> --with-activity --json` adds an activity
+sidecar for the default Issue session. The same log-window response includes
+`activities`, `activities_truncated`, and `prev_entry_created_at`; activities
+do not consume log sequence numbers or change pagination counts. Each window
+returns the latest 200 matching activities in chronological order, bounded by
+the previous log entry's timestamp (inclusive) and the window's last entry
+(exclusive, except the open-ended tail). Side sessions and Chat ignore the
+flag. Without it, the response remains a log-only window. The JSON sidecar
+includes system activities; display preferences are applied by the frontend.
+
 `remi issue decision request <source-issue> --kind <kind> --title <title>
 [--body-stdin] [--option <choice>...]` records a non-blocking decision on the
 source issue's parent (or on the source issue itself when it has no parent).

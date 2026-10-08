@@ -18,6 +18,7 @@ import {
 } from "@remi-platform/updater/drain.js";
 import { PlatformDrainLostError, type PlatformDrainRenewResponse, type PlatformUpdaterClient } from "@remi-platform/updater/client.js";
 import type { CommandRunner } from "@remi-platform/updater/types.js";
+import { validComposeConfigResult } from "../../fixtures/platform-updater/compose-config.js";
 
 let tempDirs: string[] = [];
 afterEach(() => {
@@ -237,10 +238,18 @@ describe("DockerComposeDriver drain gating", () => {
       webImage: OLD_WEB_DIGEST,
     }));
     const commands: string[][] = [];
+    const composeConfigResult = {
+      ...validComposeConfigResult,
+      stdout: JSON.stringify({
+        name: "test-project",
+        services: { ...JSON.parse(validComposeConfigResult.stdout).services, web: {} },
+      }),
+    };
     let switches = 0;
     const runner: CommandRunner = {
       async run(command, args, runOptions) {
         commands.push([command, ...args]);
+        if (args.includes("config")) return composeConfigResult;
         const safety = safetyCommand(command, args, runOptions);
         if (safety) return safety;
         if (args.includes("up")) {
@@ -254,7 +263,7 @@ describe("DockerComposeDriver drain gating", () => {
     };
     const driver = new DockerComposeDriver({
       backup: testBackup(root),
-    composeFile,
+      composeFile,
       envFile,
       stateDir,
       apiHealthUrl: "http://127.0.0.1:1/readyz",

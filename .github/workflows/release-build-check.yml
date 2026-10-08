@@ -107,7 +107,7 @@ jobs:
       # dispatch covered on PRs too, where the full backend shards are skipped.
       - name: Capability group contracts and daemon execution
         run: >-
-          bun test
+          bun run test
           tests/unit/multiremi/execution-group-configuration.test.ts
           tests/unit/multiremi/central-execution-profiles.test.ts
           tests/unit/multiremi/central-profile-task-routing.test.ts
@@ -149,9 +149,9 @@ jobs:
       - name: Install dependencies from the public registry
         run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
       - name: Verify updater safety and lifecycle
-        run: bun test tests/unit/platform-updater tests/unit/multiremi/multiremi-platform-lifecycle.test.ts tests/unit/multiremi/multiremi-platform-drain.test.ts tests/unit/multiremi/multiremi-platform-safety.test.ts tests/unit/daemon/task-report-outbox.test.ts
+        run: bun run test tests/unit/platform-updater tests/unit/multiremi/multiremi-platform-lifecycle.test.ts tests/unit/multiremi/multiremi-platform-drain.test.ts tests/unit/multiremi/multiremi-platform-safety.test.ts tests/unit/daemon/task-report-outbox.test.ts
       - name: Verify runtime installation and launch portability
-        run: bun test tests/unit/acp/runtime-bundle.test.ts tests/unit/acp/launch.test.ts
+        run: bun run test tests/unit/acp/runtime-bundle.test.ts tests/unit/acp/launch.test.ts
       - name: Verify pinned ACP bridges and bundled runtimes on Windows
         if: runner.os == 'Windows'
         env:
@@ -172,7 +172,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           MULTIREMI_TEST_DOCKER_RECOVERY: "1"
-        run: bun test tests/integration/platform-recovery-postgres.test.ts
+        run: bun run test tests/integration/platform-recovery-postgres.test.ts
 
   session-archive-platform:
     strategy:
@@ -191,7 +191,7 @@ jobs:
         run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
 
       - name: Verify native Provider Session Archive traversal
-        run: bun test tests/unit/daemon/session-archive.test.ts
+        run: bun run test tests/unit/daemon/session-archive.test.ts
 
       - name: Verify pinned ACP bridges and bundled agent runtimes
         env:
@@ -245,7 +245,7 @@ jobs:
         env:
           MULTIREMI_TEST_POSTGRES_URL: postgres://multimira:multimira@localhost:5432/postgres
           MULTIREMI_TEST_LOCK_ORDER_SENTINEL: "1"
-        run: bun test --shard=${{ matrix.shard }}/4
+        run: bun run test --shard=${{ matrix.shard }}/4
 
   build:
     runs-on: ubuntu-latest
@@ -281,7 +281,7 @@ jobs:
       # test is the first gate that catches it). These files run again as part
       # of the backend shards; the duplication buys the fast failure.
       - name: Architecture guard tests
-        run: bun test tests/arch/
+        run: bun run test tests/arch/
 
       # This workflow path-filters on `frontend/**` but used to build only the
       # server/CLI, so a broken web app went green. These two steps are the

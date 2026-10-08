@@ -239,13 +239,15 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     // Completion commits its result comment before the terminal activity, so
     // comment_created may be the first activity in this transaction.
     const activityEvent = events.find((e) => e.type === "activity:created"
-      && (e.payload.entry as { action?: string })?.action === "task_completed");
+      && (e.payload.entry as { action?: string } | undefined)?.action === "task_completed");
+    expect(activityEvent?.workspaceId).toBe("local");
     expect(activityEvent?.payload.issue_id).toBe(issue.id);
     expect(activityEvent?.payload.entry).toMatchObject({
       type: "activity",
       action: "task_completed",
       actor_type: "agent",
       actor_id: agent.id,
+      details: expect.objectContaining({ taskId: task.id }),
     });
 
     const issueEvent = events.find((e) => e.type === "issue:updated");

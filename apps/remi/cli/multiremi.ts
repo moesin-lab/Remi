@@ -29,7 +29,9 @@ import type { IncomingMessage, TaskStreamingHandler, TaskStreamEvent } from "@co
 import { MultiremiCliUpdateCoordinator } from "@multiremi/worker/cli-update-coordinator.js";
 import { DaemonProtocolClient } from "@multiremi/worker/daemon-protocol-client.js";
 import { locksForRole, startHubRoleGuard } from "@multiremi/api/hub/hub-role-guard.js";
-import { resolveStartupApiRole } from "@multiremi/config/startup-env.js";
+import { evaluateStartupEnv, resolveStartupApiRole } from "@multiremi/config/startup-env.js";
+import { prepareUsageAccountingStartup } from "@multiremi/store/usage-migration.js";
+import { openMultiremiDatabase } from "@multiremi/store/db/postgres.js";
 import { createLogger, setLogLevel } from "@shared/logger.js";
 
 const log = createLogger("multiremi-cli");
@@ -209,11 +211,29 @@ async function serve(options: CliOptions): Promise<void> {
   // compose's `restart: unless-stopped` starts a fresh attempt. The local SQLite
   // arm has no cross-process fan-out, so the guard is a no-op there.
   const apiRoleConfiguration = resolveStartupApiRole(process.env);
+  const startupConfig = evaluateStartupEnv({ ...process.env, ...(token !== undefined ? { MULTIREMI_TOKEN: token ?? undefined } : {}) }, apiRoleConfiguration);
+  if (startupConfig.missingRequired.length) throw new Error(`Missing required production environment variables: ${startupConfig.missingRequired.join(", ")}`);
   const roleGuard = await startHubRoleGuard({
     databaseUrl: process.env.MULTIREMI_DATABASE_URL,
     locks: locksForRole(apiRoleConfiguration.role, Boolean(process.env.MULTIREMI_PEER_URL?.trim())),
   });
-  const server = startMultiremiServer({ port, hostname: host, authToken: token, apiRoleConfiguration });
+  let server: ReturnType<typeof startMultiremiServer>;
+  try {
+    const database = openMultiremiDatabase();
+    try {
+      const store = new MultiremiStore(database); // Constructor releases the schema migration lock.
+      await prepareUsageAccountingStartup(database, {
+        onBatch: batch => log.info("usage_startup_migration", batch),
+      });
+      server = startMultiremiServer({ store, port, hostname: host, authToken: token, apiRoleConfiguration });
+    } catch (error) {
+      database.close();
+      throw error;
+    }
+  } catch (error) {
+    await roleGuard?.close();
+    throw error;
+  }
   console.log(`Bun Multiremi API listening on ${formatListenUrls(host, server.port ?? port).join(", ")}`);
   await waitForShutdown(async () => {
     server.stop(true);
@@ -734,7 +754,10 @@ export function controlPlaneConciergeHost(deps: {
         const threadId = delivery.threadId ?? delivery.replyToMessageId;
         const sessionKey = threadId ? `${delivery.chatId}:thread:${threadId}` : delivery.chatId;
         return handle.streamProactiveTask(delivery.chatId, sessionKey,
-          subscribeFeishuTask(daemon, taskId, options.signal, delivery.presentation?.throughSeq ?? 0), {
+          // Replay the canonical prefix to reconstruct held final/candidate
+          // text and metadata. Presentation throughSeq suppresses native sends;
+          // the subscription's live reconnect cursor still resumes incrementally.
+          subscribeFeishuTask(daemon, taskId, options.signal), {
             // `null` until the first snapshot pins the provider session, so the
             // card opens as "刚醒来的 <agent>" instead of a bare agent name.
             taskId, displayName, sessionId: null, signal: options.signal,
@@ -925,10 +948,11 @@ export async function sendDecisionLane(
     });
   }
   const degrade = async (reason: FeishuDecisionDegradeReason, openId: string | null) => {
+    const body = envelope?.fallback_text?.trim() || delivery.body;
     const sent = await handle.sendProactiveThreadReply({
       chatId: delivery.chatId,
       replyToMessageId: delivery.replyToMessageId ?? undefined,
-      body: envelope?.fallback_text?.trim() || delivery.body,
+      body: reason === "send_failed" && openId ? `${formatMentionForCard({ openId, name: "", key: "" })} ${body}` : body,
       idempotencyKey: delivery.idempotencyKey,
     });
     await options?.onDecisionSent?.({ messageId: sent.messageId, interactionOpenId: openId, degraded: reason });
@@ -1016,10 +1040,11 @@ export async function sendIssueDecisionLane(
     });
   }
   const degrade = async (reason: FeishuDecisionDegradeReason, openId: string | null) => {
+    const body = envelope?.fallback_text?.trim() || delivery.body;
     const sent = await handle.sendProactiveThreadReply({
       chatId: delivery.chatId,
       replyToMessageId: delivery.replyToMessageId ?? undefined,
-      body: envelope?.fallback_text?.trim() || delivery.body,
+      body: reason === "send_failed" && openId ? `${formatMentionForCard({ openId, name: "", key: "" })} ${body}` : body,
       idempotencyKey: delivery.idempotencyKey,
     });
     await options?.onDecisionSent?.({ messageId: sent.messageId, interactionOpenId: openId, degraded: reason });
@@ -1410,22 +1435,39 @@ export async function* subscribeFeishuTask(
   signal?: AbortSignal,
   throughSeq = 0,
 ): AsyncGenerator<TaskStreamEvent> {
-  const batches: Array<{ events: TraceEvent[]; closed: boolean }> = [];
+  const batches: Array<{ events: TraceEvent[]; closed: boolean; consumed: () => void }> = [];
+  const pendingAcks = new Set<() => void>();
   let wake: (() => void) | undefined;
   let active = true;
   let unsubscribe: (() => Promise<void>) | undefined;
+  let subscriptionFailed = false;
+  let subscriptionError: unknown;
+  let subscribing: Promise<void> | undefined;
   const onAbort = () => wake?.();
   signal?.throwIfAborted();
   signal?.addEventListener("abort", onAbort, { once: true });
   try {
     // A-0's cursor is exclusive. Reconnects and gap filling belong to subscribeTrace.
-    unsubscribe = await daemon.subscribeTrace(taskId, throughSeq, (events, closed) => {
+    // Await consumption of each bounded batch before gap fill fetches another
+    // page. Subscribe concurrently: implementations may deliver before their
+    // subscribeTrace promise returns, so awaiting it here could deadlock.
+    subscribing = daemon.subscribeTrace(taskId, throughSeq, (events, closed) => {
       if (!active) return;
-      batches.push({ events, closed });
+      const consumed = new Promise<void>(resolve => {
+        const release = () => { pendingAcks.delete(release); resolve(); };
+        pendingAcks.add(release);
+        batches.push({ events, closed, consumed: release });
+      });
+      wake?.();
+      return consumed;
+    }).then(stop => { unsubscribe = stop; }, error => {
+      subscriptionFailed = true;
+      subscriptionError = error;
       wake?.();
     });
     for (;;) {
       signal?.throwIfAborted();
+      if (subscriptionFailed) throw subscriptionError;
       const batch = batches.shift();
       if (!batch) {
         await new Promise<void>(resolve => { wake = resolve; });
@@ -1436,6 +1478,7 @@ export async function* subscribeFeishuTask(
         signal?.throwIfAborted();
         yield { kind: "message", message };
       }
+      batch.consumed();
       if (batch.closed) {
         // One final read supplies display metadata; closed alone ends the subscription.
         signal?.throwIfAborted();
@@ -1447,7 +1490,9 @@ export async function* subscribeFeishuTask(
     }
   } finally {
     active = false;
+    for (const release of [...pendingAcks]) release();
     signal?.removeEventListener("abort", onAbort);
+    await subscribing;
     await unsubscribe?.();
   }
 }

@@ -780,6 +780,11 @@ describe("Bun Multiremi daemon smoke", () => {
       customEnv: { SMOKE_ENV: "1" },
     });
     const task = store.createTask({ agentId: agent.id, prompt: "Say smoke from the daemon" });
+    store.setUsagePrice("local", {
+      provider: "claude", model: "claude-smoke", connection_id: "workspace:local:relay:claude", requested_model_alias: true,
+      currency: "USD", input_per_million: 1, output_per_million: 1, cache_read_per_million: 1, cache_write_per_million: 1,
+      unsplit_per_million: null, source: "configured", source_url: null, effective_from: "2000-01-01T00:00:00.000Z", effective_to: null,
+    });
     const daemonToken = await store.createAccessToken({
       name: "Smoke daemon",
       type: "daemon",
@@ -851,6 +856,13 @@ describe("Bun Multiremi daemon smoke", () => {
             model: "claude-smoke",
             inputTokens: 7,
             outputTokens: 3,
+            _meta: { remiUsageUnits: [{
+              unitId: "context-smoke", revision: 1, provider: "claude", model: null,
+              scope: "turn", source: "context_snapshot", accuracy: "unknown",
+              inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheWriteTokens: null,
+              actualUnsplitTokens: null, reportedTotalTokens: null, contextTokens: 11, contextWindow: 200_000,
+              costAmount: null, costCurrency: null, occurredAt: new Date().toISOString(),
+            }] },
           } as any;
         },
         getLastResponse: () => response,
@@ -962,7 +974,7 @@ describe("Bun Multiremi daemon smoke", () => {
         { seq: 1, type: "execution", tool: null, content: null, input: null, output: null },
         { seq: 2, type: "thinking", tool: null, content: "Thinking", input: null, output: null },
         { seq: 3, type: "tool_use", tool: "Read", content: null, input: { path: "README.md" }, output: null },
-        { seq: 4, type: "tool_result", tool: "Read", content: null, input: null, output: "{\"content\":\"file body\"}" },
+        { seq: 4, type: "tool_result", tool: "Read", content: null, input: { path: "README.md" }, output: "{\"content\":\"file body\"}" },
         { seq: 5, type: "text", tool: null, content: "Smoke completed", input: null, output: null },
         { seq: 6, type: "usage", tool: null, content: null, input: null, output: null },
         { seq: 7, type: "execution", tool: null, content: null, input: null, output: null },
@@ -997,8 +1009,20 @@ describe("Bun Multiremi daemon smoke", () => {
         outputTokens: 3,
         cacheReadTokens: 2,
         cacheWriteTokens: 1,
-        totalTokens: 11,
+        totalTokens: 13,
       });
+      // Actual disjoint splits sum to 13. The inconsistent upstream total 11
+      // and an independent context occupancy 11 remain separate evidence.
+      expect(db!.query(`SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+        reported_total_tokens, context_tokens FROM multiremi_usage_units WHERE task_id = ? AND source = 'provider_turn'`).get(task.id))
+        .toMatchObject({ input_tokens: 7, output_tokens: 3, cache_read_tokens: 2, cache_write_tokens: 1, reported_total_tokens: 11, context_tokens: null });
+      expect(db!.query(`SELECT input_tokens, output_tokens, reported_total_tokens, context_tokens
+        FROM multiremi_usage_units WHERE task_id = ? AND source = 'context_snapshot'`).get(task.id))
+        .toEqual({ input_tokens: null, output_tokens: null, reported_total_tokens: null, context_tokens: 11 });
+      const accounting = store.getUsageReport({ workspaceId: "local", days: null, runtimeId: expectedRuntimeId });
+      expect(accounting.summary).toMatchObject({ actual_input_tokens: 7, actual_output_tokens: 3, actual_cache_read_tokens: 2,
+        actual_cache_write_tokens: 1, actual_unsplit_tokens: 0, actual_total_tokens: 13, context_peak_tokens: 11, priced_tokens: 13, unpriced_tokens: 0 });
+      expect(accounting.summary.known_cost_by_currency.USD).toBeCloseTo(13 / 1_000_000, 12);
       // Runtime identity and machine display name are separate fields.
       const registeredRuntime = store.listRuntimes()[0]!;
       expect(registeredRuntime).toMatchObject({
@@ -1157,7 +1181,8 @@ describe("Bun Multiremi daemon smoke", () => {
 
       void daemon.start();
       await waitForCondition(() => store.getTask(task.id)?.status === "completed"
-        && store.listAgentPluginRuntimeStates({ runtimeId: expectedRuntimeId }).some(state => state.status === "ready"), 5_000);
+        && store.listAgentPluginRuntimeStates({ runtimeId: expectedRuntimeId }).some(state => state.status === "ready")
+        && store.listSessionArchivesForSubject("task", task.id).some(archive => archive.status === "ready"), 5_000);
       await daemon.stopAndDrainTestWork();
       expect(store.getTask(task.id)).toMatchObject({ status: "completed", result: "Plugin completed" });
       expect(store.listAgentPluginRuntimeStates({ runtimeId: expectedRuntimeId })).toMatchObject([{
@@ -2296,6 +2321,10 @@ describe("Bun Multiremi daemon smoke", () => {
   });
 
   it("ignores a legacy local_directory when resolving an Issue workspace", async () => {
+    // This test exercises workspace routing with a fake relay credential, not
+    // the optional summary CLI or a live gateway. Summary usage has its own
+    // local-server integration coverage in daemon-usage-accounting/terminal-tails.
+    const previousSummaryDisabled = process.env.MULTIREMI_PROGRESS_SUMMARY_DISABLED;
     const { store, workDir } = daemonTestBed("multiremi-daemon-local-dir-");
     store.upsertRelayConfig("local", "claude", {
       fragment: JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://ai.openremi.fun" } }),
@@ -2339,6 +2368,7 @@ describe("Bun Multiremi daemon smoke", () => {
     let providerOptions: AcpProviderOptions | null = null;
     let workspaceAtProviderStart: ReturnType<typeof store.getIssueWorkspace> = null;
     try {
+      process.env.MULTIREMI_PROGRESS_SUMMARY_DISABLED = "1";
       const daemon = new MultiremiDaemon({
         sshMeshManager: disabledSshMeshRuntime(),
         serverUrl: `http://127.0.0.1:${server.port}`,
@@ -2407,6 +2437,8 @@ describe("Bun Multiremi daemon smoke", () => {
       });
       expect(JSON.parse(readFileSync(join(executionWorkDir, ".multiremi", "project", "resources.json"), "utf8")).resources).toEqual([]);
     } finally {
+      if (previousSummaryDisabled === undefined) delete process.env.MULTIREMI_PROGRESS_SUMMARY_DISABLED;
+      else process.env.MULTIREMI_PROGRESS_SUMMARY_DISABLED = previousSummaryDisabled;
       server.stop(true);
     }
   });
@@ -3962,7 +3994,7 @@ async function runProviderHomeSymlinkProof(kind: "quick" | "chat" | "issue"): Pr
     port: 0,
   });
   try {
-    const daemon = new MultiremiDaemon({
+    expect(() => new MultiremiDaemon({
       sshMeshManager: disabledSshMeshRuntime(),
       serverUrl: `http://127.0.0.1:${server.port}`,
       token: daemonToken.token,
@@ -3978,13 +4010,9 @@ async function runProviderHomeSymlinkProof(kind: "quick" | "chat" | "issue"): Pr
       providerFactory: () => {
         throw new Error("symlinked Provider Home must fail before provider creation");
       },
-    });
-    await daemon.start();
+    })).toThrow(`Unsafe trace directory: ${join(workspacesRoot, ".runtime")}`);
 
-    expect(store.getTask(task.id)).toMatchObject({
-      status: "failed",
-      error: expect.stringContaining("must be a real directory"),
-    });
+    expect(store.getTask(task.id)?.status).toBe("queued");
     expect(existsSync(externalGc)).toBe(false);
     if (receipt) expect(readFileSync(receipt, "utf8")).toBe("keep-receipt\n");
   } finally {

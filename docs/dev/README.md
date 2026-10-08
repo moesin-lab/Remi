@@ -18,6 +18,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 判断能力是否存在 | [能力定位](../MULTIREMI_PARITY_MATRIX.md) | 当前实现和验证入口；不从旧完成标记推断 |
 | 运行测试、验证回归 | [测试](../../TESTING.md) | 测试发现范围与真实服务前提 |
 | 新增 API 或 CLI 能力 | [CLI 命令契约](../cli-command-migration.md) | canonical 命令、注册与能力检查 |
+| 改用量采集、统计报表或模型价格 | [统一用量与价格](../usage-accounting.md)、[公开参考价格导入](../usage-reference-prices.md) | actual/context/unknown、run 幂等、执行归属、双时轴和受控历史迁移 |
 | 通过 CLI 使用、管理或排查 Remi | [Remi Skill](../../.agents/skills/remi/SKILL.md) | 任务协作、项目知识、云友与模型、集成、权限和运行维护 |
 | 改能力组、连接 Profile 或配置下发 | [执行配置](execution-configuration.md) | 集中配置、成员关系、版本确认与旧数据兼容 |
 | 改 Runtime 工作区、执行目录或本地上下文 | [Runtime 持久化工作区](runtime-workspaces.md) | daemon 归属、绑定、目录和上下文保留、调度约束 |

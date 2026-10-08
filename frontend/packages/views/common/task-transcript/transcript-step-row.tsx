@@ -65,6 +65,7 @@ export const TranscriptStepRow = ({
   const runningSummary = activelyRunning && !summary ? formatRunningToolSummary(step.tool, step.meta) : "";
   const commandMissing = isBashCommandMissing(step.tool, step.input, running);
   const failed = step.status === "failed";
+  const cancelled = step.status === "cancelled";
   const children = step.children ?? [];
   const isSelected =
     selectedSeq === step.seq ||
@@ -118,6 +119,8 @@ export const TranscriptStepRow = ({
               <Loader2 className="h-3.5 w-3.5 text-blue-500 animate-spin" />
             ) : failed ? (
               <XCircle className="h-3.5 w-3.5 text-destructive" />
+            ) : cancelled ? (
+              <XCircle className="h-3.5 w-3.5 text-muted-foreground" />
             ) : (
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
             )}

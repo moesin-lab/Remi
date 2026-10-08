@@ -27,12 +27,98 @@ function fixture() {
   };
 }
 
+function usageState(db: Database, taskId: string) {
+  const tables = ["multiremi_usage_runs", "multiremi_usage_units", "multiremi_usage_unit_receipts",
+    "multiremi_usage_task_scopes", "multiremi_usage_run_scopes", "multiremi_usage_legacy_audit",
+    "multiremi_usage_legacy_versions", "multiremi_usage_legacy_sources"];
+  return { task: db.query("SELECT * FROM multiremi_tasks WHERE id=?").get(taskId) as Record<string, unknown>,
+    ledger: Object.fromEntries(tables.map(table => [table,
+      db.query("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table)
+        ? db.query(`SELECT * FROM ${table} WHERE task_id=? ORDER BY rowid`).all(taskId) : []])) };
+}
+
 describe("v2 reports", () => {
-  it("absorbs identical progress and normalized usage subset replays before Store writes", async () => {
-    const { store, task, report } = fixture();
+  it("restores a queued sent offer and binds a modern run before authorizing execution", async () => {
+    const { db, store, task, runtime, report } = fixture();
+    store.recordTaskOffered(task.id, runtime.id);
+    expect(store.requeueTaskOffer(task.id, runtime.id)).toBe(true);
+    expect(await report("task.start", { usage_run_id: "recovered-run" })).toEqual({ ok: true, execution_authorized: true });
+    expect(store.getTask(task.id)?.status).toBe("running");
+    expect(db.query("SELECT runtime_id,workspace_id FROM multiremi_usage_run_scopes WHERE task_id=? AND run_id=?").get(task.id, "recovered-run"))
+      .toEqual({ runtime_id: runtime.id, workspace_id: "local" });
+  });
+
+  it("rejects a bound runtime moved to a different workspace before late usage", async () => {
+    const { db, store, task, runtime, report } = fixture();
+    expect(await report("task.start", { usage_run_id: "bound-run" })).toMatchObject({ execution_authorized: true });
+    store.createWorkspace({ id: "moved-workspace", name: "Moved", slug: "moved-workspace" });
+    db.run("UPDATE multiremi_runtimes SET workspace_id=? WHERE id=?", ["moved-workspace", runtime.id]);
+    expect(await report("task.usage", { usageSnapshot: { version: 2, runId: "bound-run", revision: 1, complete: false, units: [] } }))
+      .toEqual({ ok: false, code: "authority_revoked", retryable: false });
+    expect(db.query("SELECT revision FROM multiremi_usage_runs WHERE task_id=? AND run_id=?").get(task.id, "bound-run")).toEqual({ revision: 0 });
+  });
+
+  it("rechecks bound late-usage daemon identity under the workspace lock", async () => {
+    const { db, store, task, runtime, report } = fixture();
+    expect(await report("task.start", { usage_run_id: "bound-run" })).toMatchObject({ execution_authorized: true });
+    const ctx = (store as unknown as { ctx: { lockWorkspaceRuntimeLifecycle: (workspaceId: string) => void } }).ctx;
+    const lock = ctx.lockWorkspaceRuntimeLifecycle.bind(ctx);
+    const changed = spyOn(ctx, "lockWorkspaceRuntimeLifecycle").mockImplementationOnce(workspaceId => {
+      lock(workspaceId);
+      db.run("UPDATE multiremi_runtimes SET daemon_id=? WHERE id=?", ["replacement-daemon", runtime.id]);
+    });
+    try {
+      expect(await report("task.usage", { usageSnapshot: { version: 2, runId: "bound-run", revision: 1, complete: false, units: [] } }))
+        .toEqual({ ok: false, code: "authority_revoked", retryable: false });
+      expect(db.query("SELECT revision FROM multiremi_usage_runs WHERE task_id=? AND run_id=?").get(task.id, "bound-run")).toEqual({ revision: 0 });
+    } finally { changed.mockRestore(); }
+  });
+
+  it("freezes an authenticated run at start and accepts only its original runtime's late usage", async () => {
+    const { db, store, task, runtime, report } = fixture();
+    expect(await report("task.start", { usage_run_id: "accepted-run" })).toEqual({ ok: true, execution_authorized: true });
+    expect(await report("task.start", { usage_run_id: "accepted-run" })).toEqual({ ok: true, code: "start_replayed", execution_authorized: true });
+    const other = store.registerRuntime({ id: "other", name: "retry", provider: "claude", daemonId: "other-daemon" });
+    db.run("UPDATE multiremi_tasks SET runtime_id=? WHERE id=?", [other.id, task.id]);
+    expect(await report("task.start", { usage_run_id: "accepted-run" })).toEqual({ ok: true, code: "start_replayed", execution_authorized: false });
+    const usageSnapshot = { version: 2, runId: "accepted-run", revision: 1, complete: true, units: [{
+      unitId: "request", revision: 1, provider: "claude", model: "opus", scope: "request", source: "provider_request", accuracy: "exact",
+      inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, actualUnsplitTokens: 0, reportedTotalTokens: 12,
+      contextTokens: null, contextWindow: null, costAmount: null, costCurrency: null, occurredAt: "2026-10-01T00:00:00Z",
+    }] };
+    expect(await report("task.usage", { usageSnapshot })).toEqual({ ok: true });
+    expect(db.query("SELECT runtime_id FROM multiremi_usage_units WHERE task_id=?").get(task.id)).toEqual({ runtime_id: runtime.id });
+    expect(await reportFrame(store, "task.usage", { task_id: task.id, usageSnapshot }, { runtimeId: other.id })).toEqual({ ok: false, code: "authority_revoked", retryable: false });
+    expect(store.getRuntime(runtime.id)?.inputTokens).toBe(10);
+    expect(store.getRuntime(other.id)?.inputTokens).toBe(0);
+    expect(store.getTask(task.id)?.usage[0]?.totalTokens).toBe(12);
+    expect(store.getTaskStatusSnapshot(task.id)?.usage[0]?.totalTokens).toBe(12);
+  });
+
+  it("makes infrastructure failures retryable while rejecting malformed snapshots", async () => {
+    const { store, report } = fixture();
+    const usageSnapshot = { version: 2, runId: "run", revision: 1, complete: false, units: [] };
+    const write = spyOn(store, "reportTaskUsageSnapshot").mockImplementation(() => { throw new Error("temporary database outage"); });
+    try {
+      expect(await report("task.usage", { usageSnapshot })).toMatchObject({ ok: false, code: "server_error", retryable: true });
+      expect(await report("task.usage", { usageSnapshot: { ...usageSnapshot, revision: -1 } })).toEqual({ ok: false, code: "invalid_report", retryable: false });
+    } finally { write.mockRestore(); }
+  });
+
+  it("keeps normalized usage subset replays side-effect free after Store source verification", async () => {
+    const { db, store, task, report } = fixture();
     store.startTask(task.id);
     const progress = spyOn(store, "reportProgress");
-    const usage = spyOn(store, "reportTaskUsage");
+    const realUsage = store.reportTaskUsage.bind(store);
+    const changed: ReturnType<typeof usageState>[] = [];
+    const usage = spyOn(store, "reportTaskUsage").mockImplementation((id, entries) => {
+      const before = usageState(db, id);
+      const result = realUsage(id, entries);
+      const after = usageState(db, id);
+      if (before.task.usage === after.task.usage) expect(after).toEqual(before);
+      else changed.push(after);
+      return result;
+    });
     try {
       for (let index = 0; index < 2; index++) {
         expect(await report("task.progress", { summary: "first", step: 1, total: 2 })).toEqual({ ok: true });
@@ -45,7 +131,17 @@ describe("v2 reports", () => {
       for (const entries of [[a], [b], [a], [b], [{ ...a, input_tokens: 999 }, a]]) {
         expect(await report("task.usage", { usage: entries })).toEqual({ ok: true });
       }
-      expect(usage).toHaveBeenCalledTimes(2);
+      // Source/canonical verification may run on every replay. Only the first
+      // two distinct aggregates may change persisted facts or revision receipts.
+      const settled = usageState(db, task.id);
+      for (let index = 0; index < 120; index++) {
+        expect(await report("task.usage", { usage: index % 2 ? [a] : [b] })).toEqual({ ok: true });
+      }
+      expect(usageState(db, task.id)).toEqual(settled);
+      expect(changed).toHaveLength(2);
+      expect(db.query("SELECT revision FROM multiremi_usage_runs WHERE task_id=? AND run_id='legacy'").get(task.id)).toEqual({ revision: 2 });
+      expect(db.query(`SELECT COUNT(*) AS units,SUM(input_tokens) AS input_tokens,SUM(output_tokens) AS output_tokens,MAX(revision) AS revision
+        FROM multiremi_usage_units WHERE task_id=? AND run_id='legacy'`).get(task.id)).toEqual({ units: 2, input_tokens: 12, output_tokens: 5, revision: 2 });
       expect(store.getTask(task.id)?.usage.map(entry => [entry.model, entry.inputTokens, entry.outputTokens])).toEqual([
         ["a", 5, 2], ["b", 7, 3],
       ]);
@@ -174,21 +270,18 @@ describe("v2 reports", () => {
   ] as const) {
     it(`calls the round-card hook once for ${type} from ${initialStatus}, despite two replays`, async () => {
       const { store, task, runtime } = fixture();
+      store.recordTaskOffered(task.id, runtime.id);
       if (initialStatus === "running") store.startTask(task.id);
       if (initialStatus === "waiting_local_directory") store.markTaskWaitingLocalDirectory(task.id, "fixture");
       expect(store.getTask(task.id)?.status).toBe(initialStatus);
       const received: unknown[] = [];
-      const write = spyOn(store, type === "task.complete" ? "completeTask" : "failTask");
-      try {
-        for (let attempt = 0; attempt < 3; attempt++) {
-          expect(await reportFrame(store, type, { task_id: task.id, output: "done", error: "failed", ...cardFields }, {
-            runtimeId: runtime.id, onRoundCard: (id, fields) => received.push({ id, fields }),
-          })).toEqual({ ok: true });
-        }
-        expect(store.getTask(task.id)?.status).toBe(type === "task.complete" ? "completed" : "failed");
-        expect(write).toHaveBeenCalledTimes(1);
-        expect(received).toEqual([{ id: task.id, fields: cardFields }]);
-      } finally { write.mockRestore(); }
+      for (let attempt = 0; attempt < 3; attempt++) {
+        expect(await reportFrame(store, type, { task_id: task.id, output: "done", error: "failed", ...cardFields }, {
+          runtimeId: runtime.id, onRoundCard: (id, fields) => received.push({ id, fields }),
+        })).toEqual({ ok: true });
+      }
+      expect(store.getTask(task.id)?.status).toBe(type === "task.complete" ? "completed" : "failed");
+      expect(received).toEqual([{ id: task.id, fields: cardFields }]);
     });
   }
 

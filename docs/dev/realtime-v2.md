@@ -36,10 +36,11 @@ B5 的 `GET /api/tasks/:id/trace` 和 `GET /api/shares/:token/tasks/:task_id/tra
 | 帧 | 载荷 |
 |---|---|
 | `auth_ack` | 无 |
-| `stream.ack` | `{stream, id, first_seq, head_seq, log_version, gap}` |
+| `stream.ack` | `{stream, id, first_seq, head_seq, log_version, gap, closed?}`；trace 带完整性状态 |
 | `stream.data` | `{stream, id, frames:[{seq, kind, payload}]}`，按 `seq` 升序 |
 | `stream.gap` | `{stream, id, from, to}`，订阅期间掉队，需自行补读 |
 | `stream.error` | `{stream, id, code}` |
+| `stream.closed` | `{stream, id, head_seq}`；本订阅可投递的 trace 帧已发送，执行记录结束 |
 | `resync` | 无 |
 | `pong` | 无 |
 
@@ -51,7 +52,10 @@ B5 的 `GET /api/tasks/:id/trace` 和 `GET /api/shares/:token/tasks/:task_id/tra
 将运行中的缺口（含晚到 revision）发送为 `stream.gap`。Bun 的 `drain` 回调恢复该 socket 的订阅；
 ack 发送前的 data 和 gap 按到达顺序缓冲，ack 后才发给客户端。
 
+trace 结束时，Hub 在最后一批数据之后发 `stream.closed`；零事件、结束后才订阅和背压恢复也走同一规则。带历史数据的 `ack.closed` 不替代后续数据和结束帧，客户端不能在 ack 时提前退订丢掉回放。缺失区间仍通过 HTTP 分页补齐；closed 表示生产端结束，不代表浏览器已经加载全部历史。旧客户端可忽略新增帧，继续使用 HTTP 的 `closed`。
+
 keyed Hub 与 `subscribeWithSink` 同样回放 `[fromSeq, head]`，低于流起点的请求被截断（log 为 0，trace 为 1）。
+Issue 日志首开先接受 SSR `initialLog` 或等待 CSR/locate 窗口，再以 `max(本地续传游标, window.head_seq + 1)` 订阅；窗口 head 是全流 head，不是定位窗口末行。窗口读取与订阅之间的缺口仍由 `onGap` 补读。message/turn 帧按 session、seq、id、revision 和 log_version 复用当前/已知窗口的完整读侧元数据；未命中行在单窗容量内合并为范围读取，重置或断开后丢弃旧异步水合结果。
 A-0 的裸 task id 与 daemon `trace.subscribe` 保持排他游标，Hub 内部以 `fromSeq + 1` 适配。
 真实 Hub 的空 log 使用 `head=-1`、`first_seq=0`；实际接收 seq 0 后 head 才为 0。
 

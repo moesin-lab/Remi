@@ -15,7 +15,7 @@ bun run release:prepare --version <下一版本>
 
 Claude ACP 使用 @anthropic-ai/claude-agent-sdk 内的 CC 执行文件，Codex ACP 使用 @openai/codex；这条链路没有独立的 @openai/codex-sdk。通过 npm overrides 固定实际 SDK，包括桥接包的嵌套依赖。若最新 Claude SDK 携带的 CC 尚未跟上独立 CC 的 latest，真实版本验证会失败，阻止发布不一致的组合。
 
-候选校验包含 ACP 包版本、SDK 包版本、实际执行文件 --version、Codex usage 补丁、Claude wrapper 健康检查及 ACP initialize 协商。任何步骤失败都不改发版文件；此时应处理兼容性问题或等待上游版本对齐，再重新准备。准备命令不创建提交、tag 或 Release，也不重启机器上的 daemon，不创建 Task、不向模型发 prompt。
+候选校验包含 ACP 包版本、SDK 包版本、实际执行文件 --version、Codex 与 Claude usage 补丁、Claude wrapper 健康检查及 ACP initialize 协商。任何步骤失败都不改发版文件；此时应处理兼容性问题或等待上游版本对齐，再重新准备。准备命令不创建提交、tag 或 Release，也不重启机器上的 daemon，不创建 Task、不向模型发 prompt。
 
 依赖与版本号同批提交，完整 Release build check 通过后才打 tag。CI 对版本号变更检查对应依赖快照，并在 Windows/Linux/macOS 安装固定组合、验证初始化。Windows 使用 Node 启动 JavaScript ACP 入口，安装过程保持在独立候选目录中。tag 工作流在发布 CLI 前检查版本一致性、快照和同一 main 提交的完整 CI 成功记录。构建时不再解析 latest，所以检查后上游继续发新版本也不会改变本次发行内容。
 
@@ -147,6 +147,22 @@ install -m 0755 "$snapshot/launcher" "$launcher"
 release tarball 时返回 404 `release_catalog_empty`，错误会明确提示配置该目录或使用
 GitHub installer。要启用管理式镜像，发布流程必须把同一版本的各架构 tarball 放入
 该目录并持久挂载；这与修复客户端 GitHub 来源是两个独立动作。
+
+## Trace 持久化升级边界
+
+本版本 daemon 将规范化过程记录写入 `<workspacesRoot>/.runtime/<session_id>/traces/<task_id>.jsonl`。
+保留同一工作区根与 Runtime 身份重启时，恢复文件的 head、closed 和读取归属；已关闭历史按需读取，
+未结束任务按 Hub head 续传。这只保证本版本已写入文件的记录，活跃追加未逐条 fsync，不承诺断电尾部保留。
+
+旧版本只有进程内存中的 trace，新进程不能自动找回；原始 provider 日志也不能可靠重建全部 Remi 事件。
+旧 daemon 停止前，需通过现有 `trace.read` 分页保存仍需保留的记录，或确认对应 Session Archive 已达到 ready 后再交接。
+保存的导出只是人工备份：本 PR 不提供导入命令，也不保证把它自动恢复到新 daemon 的热指针。
+已停止且没有归档/备份的旧内存记录不可恢复，不能把升级后的空或不可达历史解释为本版本恢复成功。
+
+新文件头保存 `runtime_id`；缺少该字段的旧文件不猜测热读权限，可继续走已有归档流程。
+一次性任务的后台归档意图也保存在该 Runtime 的 `.runtime` root，上传失败或重启不会授权提前删除源文件；
+GC 仍需 ready archive 和删除前物理验证。停止会取消后台上传并最多等待 5 秒，下一进程按持久意图重试；
+被取消的 staging 留在排除目录，旧实例不在所有权交接后继续清理。实现及读页上限见 [daemon 协议 v2](daemon-protocol-v2.md)。
 
 ## 本地准备与验证
 

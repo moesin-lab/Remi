@@ -3,6 +3,9 @@
 // (the facade delegates every public method here).
 import { createHash } from "node:crypto";
 import { getExecutionGroup } from "@multiremi/store/execution-groups.js";
+import { hasProtectedNativeUsage, legacyUsageSnapshot, matchesAcceptedLegacyFacts, UsageValidationError, writeUsageSnapshot } from "@multiremi/store/usage-accounting.js";
+import type { TaskUsageSnapshot } from "@multiremi/contracts/usage-accounting.js";
+import { taskUsageProjection } from "@multiremi/store/usage-projection.js";
 import { assertQuestionCardToken, hashQuestionCardToken, QuestionCardTokenError, type QuestionCardCredential } from "@multiremi/store/question-card-token.js";
 import type { DaemonTaskCompletionFields } from "@multiremi/contracts/daemon-protocol.js";
 import { agentAtTaskTarget, taskExecutionScope, taskExecutionTarget, RELAY_EXECUTION_SCOPE_PREFIX } from "@multiremi/contracts/task-execution.js";
@@ -717,7 +720,32 @@ export interface TaskListCandidate {
   createdAt: string;
 }
 
-/** Lightweight identity column set for "does any task match?" guards. */
+/** Request identity for the snapshot's creator-only Chat rows. */
+export interface TaskSnapshotAccess {
+  userId: string | null;
+  taskToken?: { taskId: string | null; agentId: string | null; workspaceId: string | null };
+}
+
+// All columns consumed by toTask's public wire shape. Large private execution
+// profiles/delegation state are deliberately absent; public prompt/result remain
+// and public usage comes from the canonical batched projection.
+const SNAPSHOT_PUBLIC_COLUMNS = [
+  "result", "id", "task_kind", "agent_id", "runtime_id",
+  "runtime_workspace_id", "provider", "plugin_snapshot", "execution_fingerprint", "execution_model",
+  "execution_thinking_level", "fallback_switched", "switch_reason", "next_retry_at", "issue_id",
+  "issue_session_id", "issue_session_generation", "holds_workspace", "chat_session_id", "trigger_comment_id",
+  "trigger_summary", "requesting_user_name", "requesting_user_profile_description", "workspace_id", "status",
+  "priority", "prompt", "attempt", "max_attempts", "parent_task_id",
+  "continued_from_task_id", "assignment_event_id", "assignment_source_event_id", "projection_from_seq", "projection_to_seq",
+  "projection_mode", "projection_degrade_level", "projection_truncated", "projection_omitted_events", "projection_estimated_tokens",
+  "inherited_projection_truncated", "inherited_projection_omitted_events", "inherited_projection_estimated_tokens", "inherited_projection_to_seq", "inherited_projection_token_budget",
+  "inherited_projection_recorded_at", "error", "failure_reason", "branch_name", "session_id",
+  "work_dir", "progress_summary", "progress_step", "progress_total", "wait_reason",
+  // Canonical usage is batched by visible task IDs in toTasks; legacy JSON is unused.
+  "created_at", "updated_at", "dispatched_at", "offered_at",
+  "accepted_at", "started_at", "completed_at", "failed_at", "cancelled_at",
+];
+
 export interface TaskRef {
   id: string;
   status: MultiremiTaskStatus;
@@ -752,6 +780,13 @@ class InvalidChatTaskDestinationError extends ChatIssueTaskConflictError {
  * was accepted before the run ended would be silently stranded.
  */
 export class TaskSteerPendingError extends Error {}
+
+export interface TaskDaemonReportAuthority { runtimeId: string; workspaceId: string; daemonId: string; userId?: string | null }
+
+/** A reliable report must either change state, be a terminal replay, or remain pending. */
+export class TaskDaemonReportError extends Error {
+  constructor(readonly code: "authority_revoked" | "server_error", readonly retryable: boolean) { super(code); }
+}
 
 class AgentReplyCommentError extends Error {}
 
@@ -1194,11 +1229,11 @@ export class TasksRepo {
     this.ctx.db.run(`UPDATE multiremi_tasks SET status = 'cancelled', completed_at = ?,
       updated_at = ? WHERE id = ? AND status = 'dispatched'`, [at, at, taskId]);
     this.ctx.conversationLog().updateTurnCardWithinTransaction(taskId, { status: "cancelled" });
-    appendPendingTurnAuditWithinTransaction(this.ctx.db, toTask(row), "pending_turn_skipped", {
+    appendPendingTurnAuditWithinTransaction(this.ctx.db, this.toTasks([row])[0]!, "pending_turn_skipped", {
       reason: "pending_turn_coalesced", kept_task_id: partner.id,
       wake_source: row.wake_source, wake_seq: Number(row.wake_seq ?? 0),
     }, at);
-    appendPendingTurnAuditWithinTransaction(this.ctx.db, toTask(partner), "pending_turn_coalesced", {
+    appendPendingTurnAuditWithinTransaction(this.ctx.db, this.toTasks([partner])[0]!, "pending_turn_coalesced", {
       reason: "offer_requeued", merged_task_id: taskId, seq,
       wake_source: row.wake_source, commentId: row.trigger_comment_id ?? null,
     }, at);
@@ -1206,7 +1241,7 @@ export class TasksRepo {
     return true;
   }
 
-  requeueTaskOffer(taskId: string, runtimeId: string): boolean {
+  requeueTaskOffer(taskId: string, runtimeId: string, outcome: "unknown" | "rejected" = "unknown"): boolean {
     this.acceptedOfferLeases.delete(taskId);
     const run = () => {
       // No pre-lock read snapshot on SQLite, no recover-after-UNIQUE on PG.
@@ -1216,12 +1251,15 @@ export class TasksRepo {
         AND runtime_id = ? AND status = 'dispatched' AND started_at IS NULL`).get(taskId, runtimeId);
       if (!offered) return false;
       if (this.coalesceDispatchedTurnWithinTransaction(taskId)) return true;
+      // Preserve a sent offer when the receipt is unknown. An explicit refusal
+      // proves this offer did not authorize execution and restores an editable queue.
       const row = this.ctx.db.query(
         `UPDATE multiremi_tasks SET status = 'queued', dispatched_at = NULL,
-           offered_at = NULL, accepted_at = NULL, updated_at = ?
+           offered_at = CASE WHEN ? = 1 THEN NULL ELSE offered_at END,
+           accepted_at = NULL, updated_at = ?
          WHERE id = ? AND runtime_id = ? AND status = 'dispatched' AND started_at IS NULL RETURNING *`,
-      ).get(nowIso(), taskId, runtimeId) as Row | null;
-      if (row) this.ctx.notifyTaskEnqueued(toTask(row));
+      ).get(outcome === "rejected" ? 1 : 0, nowIso(), taskId, runtimeId) as Row | null;
+      if (row) this.ctx.notifyTaskEnqueued(this.toTasks([row])[0]!);
       return Boolean(row);
     };
     return this.ctx.db.inTransaction ? run() : this.ctx.db.transaction(run)();
@@ -1455,7 +1493,29 @@ export class TasksRepo {
     const rows = this.ctx.db.query(
       "SELECT * FROM multiremi_tasks WHERE issue_id = ? ORDER BY created_at DESC",
     ).all(issueId) as Row[];
-    return rows.map(toTask);
+    return this.toTasks(rows);
+  }
+
+  /** Public compatibility fields only, after active/Chat visibility selection. */
+  listActiveTasksForIssue(issueId: string, access: TaskSnapshotAccess): MultiremiTask[] {
+    const params: Array<string | null> = [issueId, ...ACTIVE_TASK_STATUSES];
+    let identity = "";
+    if (access.taskToken) {
+      identity = " AND task.id = ? AND task.agent_id = ? AND task.workspace_id = ?";
+      params.push(access.taskToken.taskId, access.taskToken.agentId, access.taskToken.workspaceId);
+    } else if (access.userId !== null) {
+      identity = " AND COALESCE(chat.creator_id, 'local') = ?";
+      params.push(access.userId);
+    }
+    const rows = this.ctx.db.query(`SELECT ${SNAPSHOT_PUBLIC_COLUMNS.map(column => `task.${column}`).join(", ")}
+      FROM multiremi_tasks task
+      WHERE task.issue_id = ? AND task.status IN (${ACTIVE_TASK_STATUSES.map(() => "?").join(", ")})
+        AND (task.chat_session_id IS NULL OR task.chat_session_id = '' OR EXISTS (
+          SELECT 1 FROM multiremi_chat_sessions chat WHERE chat.id = task.chat_session_id${identity}
+        ))
+      ORDER BY task.created_at DESC`).all(...params) as Row[];
+    // listTasksForIssue does not attach autopilot-run summaries; preserve that shape.
+    return this.toTasks(rows);
   }
 
   getTaskQueueBlocker(taskId: string): MultiremiTaskQueueBlocker | null {
@@ -1631,12 +1691,16 @@ export class TasksRepo {
       pending = this.ctx.chat().getPendingChatTask(lane.chatSessionId);
       if (pending && (pending.issueId !== lane.issueId || pending.workspaceId !== agent.workspaceId
         || pending.agentId !== lane.agentId)) pending = null;
-      if (pending && pending.status !== "queued") {
+      if (pending && (pending.status !== "queued" || pending.offeredAt)) {
         this.createTaskSteerMessageWithinTransaction({ taskId: pending.id, kind: "steer",
           content: input.steerBody ?? "", authorType: "system", authorId: null });
         return { task: pending, action: "steered" };
       }
     }
+    // A network-requeued sent turn is still executing its original projection.
+    // Keep later Issue envelopes unread so terminal re-ring creates a new task
+    // ID; re-offering this ID would be deduplicated by the daemon.
+    if (pending?.offeredAt && lane.kind === "issue") return { task: null, action: "none" };
     if (pending) {
       const seq = wake.seq ?? 0;
       const updated = this.ctx.db.run(`UPDATE multiremi_tasks SET updated_at = ?,
@@ -2367,6 +2431,7 @@ export class TasksRepo {
         const frozen = source.executionFingerprint;
         this.ctx.db.run(`UPDATE multiremi_tasks
           SET status = 'queued', session_id = NULL, work_dir = NULL, dispatched_at = NULL,
+              offered_at = NULL, accepted_at = NULL,
               runtime_id = (SELECT runtime_id FROM multiremi_agents WHERE id = multiremi_tasks.agent_id),
               execution_fingerprint = ?
           WHERE id = ?`, [frozen ? chatWorkspaceTransitionFingerprint(workspace.fingerprint(frozen), source.runtimeId) : null, String(task.id)]);
@@ -2495,9 +2560,14 @@ export class TasksRepo {
       );
   }
 
+  private toTasks(rows: Row[]): MultiremiTask[] {
+    const usage = taskUsageProjection(this.ctx.db, rows.map(row => String(row.id)));
+    return rows.map(row => toTask(row, usage.get(String(row.id)) ?? []));
+  }
+
   getTask(id: string): MultiremiTask | null {
     const row = this.readTaskRow(id);
-    return row ? this.withTaskAutopilotRun(toTask(row)) : null;
+    return row ? this.withTaskAutopilotRun(this.toTasks([row])[0]!) : null;
   }
 
   /**
@@ -2556,10 +2626,18 @@ export class TasksRepo {
    * {@link toTask} applies.
    */
   getTaskStatusSnapshot(id: string): TaskStatusSnapshot | null {
-    const row = this.ctx.db.query(
-      `SELECT id, workspace_id, status, result, error, session_id, work_dir, usage, started_at, completed_at
-       FROM multiremi_tasks WHERE id = ?`,
-    ).get(id) as Row | null;
+    const rows = this.ctx.db.query(
+      `SELECT t.id,t.workspace_id,t.status,t.result,t.error,t.session_id,t.work_dir,t.started_at,t.completed_at,
+        u.provider,COALESCE(u.model,u.requested_model,'unknown') AS model,
+        SUM(COALESCE(u.input_tokens,0)) AS input_tokens,SUM(COALESCE(u.output_tokens,0)) AS output_tokens,
+        SUM(COALESCE(u.cache_read_tokens,0)) AS cache_read_tokens,SUM(COALESCE(u.cache_write_tokens,0)) AS cache_write_tokens,
+        SUM(COALESCE(u.input_tokens,0)+COALESCE(u.output_tokens,0)+COALESCE(u.cache_read_tokens,0)+COALESCE(u.cache_write_tokens,0)+COALESCE(u.actual_unsplit_tokens,0)) AS total_tokens
+       FROM multiremi_tasks t LEFT JOIN multiremi_usage_units u ON u.task_id=t.id AND u.source<>'context_snapshot'
+        AND (u.input_tokens IS NOT NULL OR u.output_tokens IS NOT NULL OR u.cache_read_tokens IS NOT NULL OR u.cache_write_tokens IS NOT NULL OR u.actual_unsplit_tokens IS NOT NULL)
+       WHERE t.id=? GROUP BY t.id,t.workspace_id,t.status,t.result,t.error,t.session_id,t.work_dir,t.started_at,t.completed_at,u.provider,COALESCE(u.model,u.requested_model,'unknown')
+       ORDER BY u.provider,model`,
+    ).all(id) as Row[];
+    const row = rows[0];
     if (!row) return null;
     const storedResult = normalizeStoredTaskResult(row.result);
     return {
@@ -2570,7 +2648,8 @@ export class TasksRepo {
       error: nullableString(row.error),
       sessionId: nullableString(row.session_id) ?? storedResult.sessionId,
       workDir: nullableString(row.work_dir) ?? storedResult.workDir,
-      usage: parseJson<TaskUsageEntry[]>(row.usage, []),
+      usage: rows.filter(unit => unit.provider !== null).map(unit => ({ provider: String(unit.provider), model: String(unit.model),
+        inputTokens: Number(unit.input_tokens), outputTokens: Number(unit.output_tokens), cacheReadTokens: Number(unit.cache_read_tokens), cacheWriteTokens: Number(unit.cache_write_tokens), totalTokens: Number(unit.total_tokens) })),
       startedAt: nullableString(row.started_at),
       completedAt: nullableString(row.completed_at),
     };
@@ -2586,7 +2665,7 @@ export class TasksRepo {
       ? this.ctx.db.query("SELECT * FROM multiremi_tasks WHERE issue_id = ? AND id LIKE ? ORDER BY created_at DESC").all(input.issueId, `${value}%`) as Row[]
       : this.ctx.db.query("SELECT * FROM multiremi_tasks WHERE id LIKE ? ORDER BY created_at DESC").all(`${value}%`) as Row[];
     if (rows.length !== 1) return null;
-    return this.withTaskAutopilotRun(toTask(rows[0]!));
+    return this.withTaskAutopilotRun(this.toTasks([rows[0]!])[0]!);
   }
 
   /** Live transport provenance, independent of migration/audit records. A
@@ -2869,7 +2948,7 @@ export class TasksRepo {
     const rows = status
       ? this.ctx.db.query("SELECT * FROM multiremi_tasks WHERE status = ? ORDER BY created_at DESC").all(status) as Row[]
       : this.ctx.db.query("SELECT * FROM multiremi_tasks ORDER BY created_at DESC").all() as Row[];
-    return this.withTaskAutopilotRuns(rows.map(toTask));
+    return this.withTaskAutopilotRuns(this.toTasks(rows));
   }
 
   /**
@@ -2887,7 +2966,7 @@ export class TasksRepo {
       `SELECT * FROM multiremi_tasks WHERE runtime_id = ? AND status IN (${placeholders})
        ORDER BY created_at DESC`,
     ).all(runtimeId, ...statuses) as Row[];
-    return this.withTaskAutopilotRuns(rows.map(toTask));
+    return this.withTaskAutopilotRuns(this.toTasks(rows));
   }
 
   /**
@@ -2998,7 +3077,7 @@ export class TasksRepo {
     // The IN (…) read does not preserve request order, and the page order is a
     // contract, so order by the caller's list rather than by whatever the
     // backend returned.
-    const byId = new Map(rows.map((row) => [String(row.id), toTask(row)]));
+    const byId = new Map(rows.map((row) => [String(row.id), this.toTasks([row])[0]!]));
     const ordered = ids.map((id) => byId.get(id)).filter((task): task is MultiremiTask => task != null);
     return this.withTaskAutopilotRuns(ordered);
   }
@@ -3008,11 +3087,27 @@ export class TasksRepo {
     const rows = this.ctx.db.query(
       "SELECT * FROM multiremi_tasks WHERE agent_id = ? ORDER BY created_at DESC",
     ).all(agentId) as Row[];
-    return this.withTaskAutopilotRuns(rows.map(toTask));
+    return this.withTaskAutopilotRuns(this.toTasks(rows));
   }
 
-  listWorkspaceAgentTaskSnapshot(workspaceId = "local"): MultiremiTask[] {
+  listWorkspaceAgentTaskSnapshot(workspaceId = "local", access?: TaskSnapshotAccess): MultiremiTask[] {
     const activePlaceholders = ACTIVE_TASK_STATUSES.map(() => "?").join(", ");
+    const identityParams: Array<string | null> = [];
+    let chatAccess = "";
+    if (access) {
+      let sessionAccess = "";
+      if (access.taskToken) {
+        sessionAccess = " AND task.id = ? AND task.agent_id = ? AND task.workspace_id = ?";
+        identityParams.push(access.taskToken.taskId, access.taskToken.agentId, access.taskToken.workspaceId);
+      } else if (access.userId !== null) {
+        sessionAccess = " AND COALESCE(chat.creator_id, 'local') = ?";
+        identityParams.push(access.userId);
+      }
+      chatAccess = ` AND (task.chat_session_id IS NULL OR task.chat_session_id = '' OR EXISTS (
+        SELECT 1 FROM multiremi_chat_sessions chat WHERE chat.id = task.chat_session_id${sessionAccess}
+      ))`;
+    }
+    const columns = access ? SNAPSHOT_PUBLIC_COLUMNS.map((column) => `task.${column}`).join(", ") : "task.*";
     const rows = this.ctx.db.query(
       `WITH ranked_outcomes AS (
          SELECT id,
@@ -3022,18 +3117,19 @@ export class TasksRepo {
                 ) AS outcome_rank
          FROM multiremi_tasks
          WHERE workspace_id = ? AND status IN ('completed', 'failed')
+       ), candidates AS (
+         SELECT id FROM multiremi_tasks
+         WHERE workspace_id = ? AND status IN (${activePlaceholders})
+         UNION SELECT id FROM ranked_outcomes WHERE outcome_rank = 1
        )
-       SELECT task.*
-       FROM multiremi_tasks task
-       WHERE task.workspace_id = ? AND task.status IN (${activePlaceholders})
-       UNION
-       SELECT task.*
-       FROM multiremi_tasks task
-       JOIN ranked_outcomes outcome ON outcome.id = task.id
-       WHERE outcome.outcome_rank = 1
-       ORDER BY updated_at DESC`,
-    ).all(workspaceId, workspaceId, ...ACTIVE_TASK_STATUSES) as Row[];
-    return this.withTaskAutopilotRuns(rows.map(toTask));
+       SELECT ${columns} FROM multiremi_tasks task
+       JOIN candidates ON candidates.id = task.id
+       WHERE 1 = 1${chatAccess}
+       ORDER BY task.updated_at DESC`,
+    ).all(workspaceId, workspaceId, ...ACTIVE_TASK_STATUSES, ...identityParams) as Row[];
+    // Visibility is applied after ranking: an invisible newest outcome must not
+    // promote an older outcome that the old route would have filtered out.
+    return this.withTaskAutopilotRuns(this.toTasks(rows));
   }
 
   listWorkspaceAgentRunCounts(workspaceId = "local", days = 30): MultiremiAgentRunCount[] {
@@ -3860,7 +3956,7 @@ ${routing.sql}
        RETURNING *`,
     ).get(reason, new Date(now).toISOString(), row.id, ...(row.wait_reason === null ? [] : [row.wait_reason])) as Row | null;
     if (!updatedRow) return false;
-    this.ctx.notifyTaskEvent("task:queued", toTask(updatedRow));
+    this.ctx.notifyTaskEvent("task:queued", this.toTasks([updatedRow])[0]!);
     return true;
   }
 
@@ -4022,7 +4118,8 @@ ${routing.sql}
         if (this.coalesceDispatchedTurnWithinTransaction(String(row.id))) return;
         this.ctx.db.run(
           `UPDATE multiremi_tasks SET status = 'queued', runtime_id = NULL, session_id = NULL,
-             work_dir = NULL, dispatched_at = NULL, projection_from_seq = NULL, projection_to_seq = NULL,
+             work_dir = NULL, dispatched_at = NULL, offered_at = NULL, accepted_at = NULL,
+             projection_from_seq = NULL, projection_to_seq = NULL,
              projection_mode = NULL, projection_truncated = 0, projection_omitted_events = 0,
              projection_estimated_tokens = 0, inherited_projection_truncated = NULL,
              inherited_projection_omitted_events = NULL, inherited_projection_estimated_tokens = NULL,
@@ -4044,7 +4141,8 @@ ${routing.sql}
         if (this.coalesceDispatchedTurnWithinTransaction(String(row.id))) return null;
         this.ctx.db.run(
           `UPDATE multiremi_tasks SET status = 'queued', runtime_id = ?, session_id = NULL,
-             dispatched_at = NULL, projection_from_seq = NULL, projection_to_seq = NULL,
+             dispatched_at = NULL, offered_at = NULL, accepted_at = NULL,
+             projection_from_seq = NULL, projection_to_seq = NULL,
              projection_mode = NULL, projection_truncated = 0, projection_omitted_events = 0,
              projection_estimated_tokens = 0, inherited_projection_truncated = NULL,
              inherited_projection_omitted_events = NULL, inherited_projection_estimated_tokens = NULL,
@@ -4122,7 +4220,7 @@ ${routing.sql}
       if (!workspaceConflict && !routingRefused && !runtimeUnusable) continue;
       const updated = this.ctx.db.run(
         `UPDATE multiremi_tasks
-         SET runtime_id = ?, session_id = NULL, work_dir = NULL,
+         SET runtime_id = ?, session_id = NULL, work_dir = NULL, offered_at = NULL, accepted_at = NULL,
              ${OBSERVER_WAIT_REASON_CLEAR_SQL},
              updated_at = ?
          WHERE id = ? AND status = 'queued' AND execution_fingerprint IS NULL`,
@@ -4190,7 +4288,7 @@ ${routing.sql}
       // Re-pooling abandons the lineage, so any device-routing text the
       // observer had written about the old pin is stale immediately rather
       // than only after the next sweep (MUL-449).
-      this.ctx.db.run(`UPDATE multiremi_tasks SET runtime_id = ?, session_id = ?, work_dir = ?,
+      this.ctx.db.run(`UPDATE multiremi_tasks SET runtime_id = ?, session_id = ?, work_dir = ?, offered_at = NULL, accepted_at = NULL,
           ${OBSERVER_WAIT_REASON_CLEAR_SQL}
         WHERE id = ? AND status = 'queued' AND execution_fingerprint IS NULL`,
         [runtimeId, inherit ? chat.sessionId : null, inherit ? chat.workDir : null,
@@ -4213,6 +4311,8 @@ ${routing.sql}
     const deviceRouting = deviceRoutingSql(this.ctx, runtime);
     const placementAfter = placementAfterRoutingSql(runtime);
     const params = [
+      runtime.id,
+      runtime.id,
       runtime.id,
       now,
       now,
@@ -4241,7 +4341,9 @@ ${routing.sql}
     // in an in-string `--` comment corrupts the sqlite→pg placeholder scanner.
     const claimOne = (): Row | null => this.ctx.db.query(
       `UPDATE multiremi_tasks
-       SET status = 'dispatched', runtime_id = ?, dispatched_at = ?, wait_reason = NULL, updated_at = ?
+       SET offered_at = CASE WHEN runtime_id = ? THEN offered_at ELSE NULL END,
+           accepted_at = CASE WHEN runtime_id = ? THEN accepted_at ELSE NULL END,
+           status = 'dispatched', runtime_id = ?, dispatched_at = ?, wait_reason = NULL, updated_at = ?
        WHERE id = (
          SELECT t.id
          ${TASK_CLAIM_FROM_SQL}
@@ -4366,7 +4468,7 @@ ${placementAfter.sql}
     }
   }
 
-  startTask(taskId: string): MultiremiTask {
+  startTask(taskId: string, usageRunId?: string, expectedRuntimeId?: string): MultiremiTask {
     const childStatusChanges: ChildStatusChangeCollector = [];
     const deferredEvents = createCommitEventQueue();
     const startWithinTransaction = () => {
@@ -4376,11 +4478,15 @@ ${placementAfter.sql}
       const result = this.ctx.db.run(
         `UPDATE multiremi_tasks
          SET status = 'running', started_at = COALESCE(started_at, ?), wait_reason = NULL, updated_at = ?
-         WHERE id = ? AND status IN ('dispatched', 'waiting_local_directory')`,
-        [now, now, taskId],
+         WHERE id = ? AND status IN ('dispatched', 'waiting_local_directory') ${expectedRuntimeId ? "AND runtime_id=?" : ""}`,
+        [now, now, taskId, ...(expectedRuntimeId ? [expectedRuntimeId] : [])],
       );
-      if (result.changes === 0) throw new Error(`Task not found or not dispatched: ${taskId}`);
+      if (result.changes === 0) {
+        if (expectedRuntimeId && this.getTask(taskId)?.runtimeId !== expectedRuntimeId) throw new UsageValidationError("Execution runtime changed before start acceptance");
+        throw new Error(`Task not found or not dispatched: ${taskId}`);
+      }
       const started = this.getTask(taskId)!;
+      if (usageRunId) writeUsageSnapshot(this.ctx.db, taskId, { version: 2, runId: usageRunId, revision: 0, complete: false, units: [] });
       if (started.runtimeId) this.ctx.taskTraces().markTaskTraceDaemon(taskId, started.runtimeId);
       // The card moves queued -> running in place and bumps `revision`; no marker
       // row, because the seq axis must keep `cursor_seq` meanings intact.
@@ -4393,9 +4499,65 @@ ${placementAfter.sql}
       return started;
     };
     const task = this.ctx.db.inTransaction ? startWithinTransaction() : this.ctx.db.transaction(startWithinTransaction)();
-    this.ctx.notifyTaskEvent("task:running", task);
-    afterCommit(this.ctx.db, () => this.runChildStatusChanges(childStatusChanges));
-    this.ctx.emitCommitEvents(deferredEvents);
+    afterCommit(this.ctx.db, () => {
+      this.ctx.notifyTaskEvent("task:running", task);
+      this.runChildStatusChanges(childStatusChanges);
+      this.ctx.emitCommitEvents(deferredEvents);
+    });
+    return task;
+  }
+
+  /** Network requeue keeps the actual offer receipt; fresh affinity is not execution authority. */
+  startTaskFromDaemon(taskId: string, authority: TaskDaemonReportAuthority, usageRunId?: string): "started" | "replayed" {
+    const startWithinTransaction = (): "started" | "replayed" => {
+      const task = this.lockTaskDaemonReport(taskId, authority, usageRunId);
+      // A bound run can acknowledge its history after reassignment, never restart it.
+      if (usageRunId && this.ctx.db.query("SELECT run_id FROM multiremi_usage_run_scopes WHERE task_id=? AND run_id=?").get(taskId, usageRunId)) return "replayed";
+      if (["running", "awaiting_human", "completed", "failed", "cancelled"].includes(task.status)) return "replayed";
+      if (task.status === "queued") {
+        if (!task.offeredAt) throw new TaskDaemonReportError("server_error", true);
+        const restored = this.ctx.db.run(`UPDATE multiremi_tasks SET status = 'dispatched'
+          WHERE id = ? AND runtime_id = ? AND workspace_id = ? AND status = 'queued' AND offered_at IS NOT NULL`,
+        [taskId, authority.runtimeId, authority.workspaceId]);
+        if (!restored.changes) throw new TaskDaemonReportError("server_error", true);
+      } else if (task.status !== "dispatched" && task.status !== "waiting_local_directory") {
+        throw new TaskDaemonReportError("server_error", true);
+      }
+      this.startTask(taskId, usageRunId, authority.runtimeId);
+      return "started";
+    };
+    return this.ctx.db.inTransaction ? startWithinTransaction() : this.ctx.db.transaction(startWithinTransaction)();
+  }
+
+  completeTaskFromDaemon(taskId: string, input: Parameters<TasksRepo["completeTask"]>[1], authority: TaskDaemonReportAuthority): MultiremiTask {
+    return this.completeTask(taskId, input, authority);
+  }
+
+  failTaskFromDaemon(taskId: string, input: Parameters<TasksRepo["failTask"]>[1], authority: TaskDaemonReportAuthority): MultiremiTask {
+    return this.failTask(taskId, input, authority);
+  }
+
+  writeTaskUsageSnapshotFromDaemon(taskId: string, snapshot: TaskUsageSnapshot, authority: TaskDaemonReportAuthority): boolean {
+    const write = () => {
+      this.lockTaskDaemonReport(taskId, authority, snapshot.runId);
+      return writeUsageSnapshot(this.ctx.db, taskId, snapshot);
+    };
+    return this.ctx.db.inTransaction ? write() : this.ctx.db.transaction(write)();
+  }
+
+  private lockTaskDaemonReport(taskId: string, authority: TaskDaemonReportAuthority, usageRunId?: string): MultiremiTask {
+    this.ctx.lockWorkspaceRuntimeLifecycle(authority.workspaceId);
+    const task = this.getTask(taskId);
+    const runtime = this.ctx.runtimes().getRuntime(authority.runtimeId);
+    const bound = usageRunId ? this.ctx.db.query("SELECT runtime_id,workspace_id FROM multiremi_usage_run_scopes WHERE task_id=? AND run_id=?").get(taskId, usageRunId) as Row | null : null;
+    if (!task || (bound?.runtime_id ?? task.runtimeId) !== authority.runtimeId || task.workspaceId !== authority.workspaceId
+      || (bound && bound.workspace_id !== authority.workspaceId)
+      || !runtime || (runtime.workspaceId ?? "local") !== authority.workspaceId
+      || (runtime.daemonId && runtime.daemonId !== authority.daemonId)
+      || this.ctx.runtimes().isDaemonRetired(authority.workspaceId, authority.daemonId)
+      || (authority.userId && authority.userId !== "local" && !this.ctx.workspaces().getUserRoleInWorkspace(authority.userId, authority.workspaceId))) {
+      throw new TaskDaemonReportError("authority_revoked", false);
+    }
     return task;
   }
 
@@ -4926,17 +5088,31 @@ ${placementAfter.sql}
     branchName?: string | null;
     sessionId?: string | null;
     workDir?: string | null;
-  }): MultiremiTask {
+  }, daemonAuthority?: TaskDaemonReportAuthority): MultiremiTask {
     const initial = this.getTask(taskId);
-    if (!initial || !isActiveTaskStatus(initial.status)) throw new Error(`Task not found or terminal: ${taskId}`);
+    if (!initial || (!daemonAuthority && !isActiveTaskStatus(initial.status))) throw new Error(`Task not found or terminal: ${taskId}`);
     const childStatusChanges: ChildStatusChange[] = [];
     let deferredEvents = createCommitEventQueue();
     const ownsTransaction = !this.ctx.db.inTransaction;
     let skipAutoReply = false;
     const completeWithinTransaction = () => {
-      this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
-      const current = this.getTask(taskId);
-      if (!current || !isActiveTaskStatus(current.status) || current.workspaceId !== initial.workspaceId) throw new Error(`Task not found or terminal: ${taskId}`);
+      if (!daemonAuthority) this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
+      const current = daemonAuthority ? this.lockTaskDaemonReport(taskId, daemonAuthority) : this.getTask(taskId);
+      if (current && daemonAuthority) {
+        if (["completed", "failed", "cancelled"].includes(current.status)) return { task: current, followUps: null };
+        if (current.status !== "running") {
+          if (!["queued", "dispatched"].includes(current.status) || !current.offeredAt) {
+            throw new TaskDaemonReportError("server_error", true);
+          }
+          const restored = this.ctx.db.run(`UPDATE multiremi_tasks SET status = 'dispatched',
+            started_at = COALESCE(started_at, ?)
+            WHERE id = ? AND runtime_id = ? AND workspace_id = ? AND status IN ('queued', 'dispatched') AND offered_at IS NOT NULL`,
+          [nowIso(), taskId, daemonAuthority.runtimeId, daemonAuthority.workspaceId]);
+          if (!restored.changes) throw new TaskDaemonReportError("server_error", true);
+        }
+      }
+      if (!current || (!isActiveTaskStatus(current.status) && !(daemonAuthority && current.status === "queued"))
+        || current.workspaceId !== initial.workspaceId) throw new Error(`Task not found or terminal: ${taskId}`);
       this.assertTaskRuntimeAvailableWithinWorkspaceLock(current);
       this.getTaskChatExecutionKind(current);
       this.lockTaskIssueSessionsWithinWorkspaceLock([current]);
@@ -4987,16 +5163,18 @@ ${placementAfter.sql}
       terminal = this.ctx.db.transaction(completeWithinTransaction)();
     }
     const task = terminal.task;
+    const followUps = terminal.followUps;
+    if (!followUps) return task;
     // Chat's turn card is the assistant reply, so it exists only after the
     // terminal transaction. Issue turn cards already receive their receipt at claim.
     afterCommit(this.ctx.db, () => {
       this.recordChatInboxDeliveryAfterReply(task);
       this.runChildStatusChanges(childStatusChanges);
       this.ctx.emitCommitEvents(deferredEvents);
-      for (const delegationReturn of terminal.followUps.delegationReturns) {
+      for (const delegationReturn of followUps.delegationReturns) {
         this.ctx.notifyTaskEnqueued(delegationReturn);
       }
-      for (const roundPushTask of terminal.followUps.roundPushTasks) this.ctx.notifyTaskEnqueued(roundPushTask);
+      for (const roundPushTask of followUps.roundPushTasks) this.ctx.notifyTaskEnqueued(roundPushTask);
       this.ctx.notifyTaskEvent("task:completed", task);
     });
     return task;
@@ -5010,15 +5188,29 @@ ${placementAfter.sql}
     workDir?: string | null;
     failureReason?: string | null;
     failure_reason?: string | null;
-  }): MultiremiTask {
+  }, daemonAuthority?: TaskDaemonReportAuthority): MultiremiTask {
     const initial = this.getTask(taskId);
-    if (!initial || !isActiveTaskStatus(initial.status)) throw new Error(`Task not found or terminal: ${taskId}`);
+    if (!initial || (!daemonAuthority && !isActiveTaskStatus(initial.status))) throw new Error(`Task not found or terminal: ${taskId}`);
     const childStatusChanges: ChildStatusChange[] = [];
     const deferredEvents = createCommitEventQueue();
     const failWithinTransaction = () => {
-      this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
-      const current = this.getTask(taskId);
-      if (!current || !isActiveTaskStatus(current.status) || current.workspaceId !== initial.workspaceId) throw new Error(`Task not found or terminal: ${taskId}`);
+      if (!daemonAuthority) this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
+      const current = daemonAuthority ? this.lockTaskDaemonReport(taskId, daemonAuthority) : this.getTask(taskId);
+      if (current && daemonAuthority) {
+        if (["completed", "failed", "cancelled"].includes(current.status)) return { task: current, followUps: null };
+        if (current.status === "dispatched" && !current.offeredAt) throw new TaskDaemonReportError("server_error", true);
+        if (current.status === "queued") {
+          if (!current.offeredAt) throw new TaskDaemonReportError("server_error", true);
+          const restored = this.ctx.db.run(`UPDATE multiremi_tasks SET status = 'dispatched'
+            WHERE id = ? AND runtime_id = ? AND workspace_id = ? AND status = 'queued' AND offered_at IS NOT NULL`,
+          [taskId, daemonAuthority.runtimeId, daemonAuthority.workspaceId]);
+          if (!restored.changes) throw new TaskDaemonReportError("server_error", true);
+        } else if (!["dispatched", "running", "waiting_local_directory", "awaiting_human"].includes(current.status)) {
+          throw new TaskDaemonReportError("server_error", true);
+        }
+      }
+      if (!current || (!isActiveTaskStatus(current.status) && !(daemonAuthority && current.status === "queued"))
+        || current.workspaceId !== initial.workspaceId) throw new Error(`Task not found or terminal: ${taskId}`);
       this.assertTaskRuntimeAvailableWithinWorkspaceLock(current);
       this.getTaskChatExecutionKind(current);
       this.lockTaskIssueSessionsWithinWorkspaceLock([current]);
@@ -5046,18 +5238,20 @@ ${placementAfter.sql}
       return { task: failed, followUps };
     };
     const terminal = this.ctx.db.inTransaction ? failWithinTransaction() : this.ctx.db.transaction(failWithinTransaction)();
+    const followUps = terminal.followUps;
+    if (!followUps) return terminal.task;
     afterCommit(this.ctx.db, () => {
       this.runChildStatusChanges(childStatusChanges);
       this.ctx.emitCommitEvents(deferredEvents);
       if (
-        !terminal.followUps.retry
+        !followUps.retry
         && terminal.task.issueId
         && terminal.task.failureReason === "agent_error.context_overflow"
       ) {
         this.postContextOverflowSystemComment(terminal.task);
       }
-      if (terminal.followUps.retry) this.ctx.notifyTaskEnqueued(terminal.followUps.retry);
-      for (const delegationReturn of terminal.followUps.delegationReturns) {
+      if (followUps.retry) this.ctx.notifyTaskEnqueued(followUps.retry);
+      for (const delegationReturn of followUps.delegationReturns) {
         this.ctx.notifyTaskEnqueued(delegationReturn);
       }
       this.ctx.notifyTaskEvent("task:failed", terminal.task);
@@ -5193,7 +5387,7 @@ ${placementAfter.sql}
          )
        ORDER BY created_at ASC, id ASC`,
     ).all(workspaceId, ...uniqueCommentIds, ...recoveryIds) as Row[];
-    const tasks = rows.map(toTask).filter(task => {
+    const tasks = this.toTasks(rows).filter(task => {
       const snapshot = recovered.get(task.id);
       if (snapshot && (snapshot.agentId !== task.agentId || snapshot.issueSessionId !== task.issueSessionId
         || snapshot.executionScope !== taskExecutionScope(task))) return false;
@@ -5250,20 +5444,50 @@ ${placementAfter.sql}
   }
 
   reportTaskUsage(taskId: string, usage: TaskUsageEntry[]): MultiremiTask {
-    const task = this.getTask(taskId);
-    if (!task) throw new Error(`Task not found: ${taskId}`);
-    const merged = new Map<string, RuntimeUsageEntry>();
-    for (const entry of parseTaskUsageEntries(task.usage)) {
-      merged.set(`${entry.provider}\u0000${entry.model}`, entry);
-    }
-    for (const entry of normalizeTaskUsageEntries(usage)) {
-      merged.set(`${entry.provider}\u0000${entry.model}`, entry);
-    }
-    this.ctx.db.run(
-      "UPDATE multiremi_tasks SET usage = ?, updated_at = ? WHERE id = ?",
-      [toJson([...merged.values()]), nowIso(), taskId],
-    );
-    return this.getTask(taskId)!;
+    return this.ctx.db.transaction(() => {
+      // Serialize deprecated snapshots too: receipt timestamps can collide or go backwards.
+      this.ctx.db.run("UPDATE multiremi_tasks SET updated_at=updated_at WHERE id=?", [taskId]);
+      const task = this.getTask(taskId);
+      if (!task) throw new Error(`Task not found: ${taskId}`);
+      const merged = new Map<string, RuntimeUsageEntry>();
+      // Only the deprecated ingestion boundary may read the prior legacy snapshot.
+      const legacy = this.ctx.db.query("SELECT usage FROM multiremi_tasks WHERE id=?").get(taskId) as Row;
+      for (const entry of parseTaskUsageEntries(legacy.usage)) {
+        merged.set(`${entry.provider}\u0000${entry.model}`, entry);
+      }
+      for (const entry of normalizeTaskUsageEntries(usage)) {
+        merged.set(`${entry.provider}\u0000${entry.model}`, entry);
+      }
+      const keyed = (raw: unknown) => [...parseTaskUsageEntries(raw)].sort((a, b) => `${a.provider}\u0000${a.model}`.localeCompare(`${b.provider}\u0000${b.model}`));
+      const previousEntries = toJson(keyed(legacy.usage));
+      const unchanged = previousEntries === toJson(keyed(toJson([...merged.values()])));
+      if (hasProtectedNativeUsage(this.ctx.db, taskId)) {
+        if (!unchanged) throw new UsageValidationError("Changed legacy usage cannot replace or add to native evidence; use reviewed reconciliation");
+        const baseline = this.ctx.db.query("SELECT source_usage FROM multiremi_usage_legacy_sources WHERE task_id=?").get(taskId) as Row | null;
+        if (baseline ? previousEntries !== toJson(keyed(baseline.source_usage))
+          : previousEntries !== "[]" && !matchesAcceptedLegacyFacts(this.ctx.db, taskId, legacy.usage, nowIso())) {
+          throw new UsageValidationError("Changed legacy usage cannot replace or add to native evidence; use reviewed reconciliation");
+        }
+        // Identical old snapshots acknowledge without touching facts, clocks,
+        // revision receipts, or the historical aggregate's audit checkpoint.
+        return task;
+      }
+      if (unchanged) return task;
+      this.ctx.db.run(
+        "UPDATE multiremi_tasks SET usage = ?, updated_at = ? WHERE id = ?",
+        [toJson([...merged.values()]), nowIso(), taskId],
+      );
+      const snapshot = legacyUsageSnapshot(taskId, [...merged.values()], nowIso());
+      const previous = this.ctx.db.query("SELECT revision FROM multiremi_usage_runs WHERE task_id=? AND run_id='legacy'").get(taskId) as Row | null;
+      const receipts = this.ctx.db.query("SELECT MAX(revision) AS revision FROM multiremi_usage_unit_receipts WHERE task_id=? AND run_id='legacy'").get(taskId) as Row;
+      snapshot.revision = Math.max(Number(previous?.revision ?? 0), Number(receipts.revision ?? 0)) + 1;
+      for (const unit of snapshot.units) {
+        if (this.ctx.db.query("SELECT unit_id FROM multiremi_usage_units WHERE task_id=? AND run_id='legacy' AND unit_id=? AND source<>'legacy_task'").get(taskId, unit.unitId)) unit.unitId = `legacy-aggregate:${unit.unitId}`;
+        unit.revision = snapshot.revision;
+      }
+      writeUsageSnapshot(this.ctx.db, taskId, snapshot);
+      return this.getTask(taskId)!;
+    })();
   }
 
   recoverOrphans(runtimeId: string, activeTaskIds?: readonly string[]): { orphaned: number; retried: number } {
@@ -5292,7 +5516,7 @@ ${placementAfter.sql}
       }
 
       const now = nowIso();
-      this.lockTaskIssueSessionsWithinWorkspaceLock(orphanRows.map(toTask));
+      this.lockTaskIssueSessionsWithinWorkspaceLock(this.toTasks(orphanRows));
       const orphanIds = orphanRows.map((row) => String(row.id));
       const placeholders = orphanIds.map(() => "?").join(", ");
       this.ctx.db.run(
@@ -5308,7 +5532,7 @@ ${placementAfter.sql}
         [now, now, now, ...orphanIds],
       );
       const failedRows = this.ctx.db.query(`SELECT * FROM multiremi_tasks WHERE id IN (${placeholders})`).all(...orphanIds) as Row[];
-      const failedTasks = this.withTaskAutopilotRuns(failedRows.map(toTask));
+      const failedTasks = this.withTaskAutopilotRuns(this.toTasks(failedRows));
       const retries: MultiremiTask[] = [];
       const delegationReturns: MultiremiTask[] = [];
       const childStatusChanges: ChildStatusChange[] = [];
@@ -5837,7 +6061,7 @@ ${placementAfter.sql}
        ORDER BY task.completed_at ASC, task.created_at ASC, task.id ASC`,
     ).all(issueSessionId) as Row[];
     const reports = reportRows.map((row): DelegationTerminalReport => {
-      const source = toTask(row);
+      const source = this.toTasks([row])[0]!;
       const isTrigger = trigger?.source.id === source.id;
       const terminalStatus = isTrigger
         ? trigger.terminalStatus
@@ -6092,7 +6316,27 @@ ${placementAfter.sql}
       );
     }
     const delegationReturns: MultiremiTask[] = [];
-    let roundPushTasks: MultiremiTask[] = [];
+    const roundPushTasks: MultiremiTask[] = [];
+    const reportIssueRound = (issue: MultiremiIssue) => {
+      const issueSession = this.ctx.issueSessions().getOrCreateDefaultIssueSession(issue.id);
+      const head = this.ctx.conversationLog().getConversationLogHead(issueSession.id)?.headSeq ?? 0;
+      const outcome = status === "completed" ? "done" : status;
+      const reason = envelopeSummary(status === "failed" ? (body ?? task.failureReason ?? "unknown") : body);
+      const envelopeBody = `${issue.key} 有新日志：会话 ${issueSession.id}，seq ({{cursor}}, ${head}]；本次轮次 ${task.id} 状态 ${status}`
+        + (reason ? `，原因 ${reason}` : "");
+      const deliveries: EnvelopeDelivery[] = this.ctx.inbox().sendEnvelopeWithinTransaction({
+        to: { role: "relay", issueId: issue.id }, kind: "report", outcome,
+        wake: "now", dedupeKey: `relay:${issue.id}:${task.id}`,
+        body: envelopeBody, source: { issueId: issue.id, taskId: task.id },
+      }, childStatusChanges, deferredEvents);
+      roundPushTasks.push(...this.ctx.feishuBot().prepareFeishuIssueRoundPushesWithinTransaction({
+        issue,
+        leaderTask: task,
+        envelopeDeliveries: deliveries,
+        childStatusChanges,
+        deferredEvents,
+      }));
+    };
     this.ctx.accessTokens().revokeTaskAccessTokens(task.id);
     if (status === "completed" && task.chatSessionId) this.promoteRelayIssueLogCursorWithinTransaction(task);
     if (status === "completed" && ordinaryChatTask && task.chatSessionId) {
@@ -6293,24 +6537,23 @@ ${placementAfter.sql}
       }
       if (issue?.projectId) this.ctx.db.run("UPDATE multiremi_projects SET updated_at = ? WHERE id = ?", [now, issue.projectId]);
       if (issue && this.shouldReportIssueRound(task, status, issue)) {
-        const issueSession = this.ctx.issueSessions().getOrCreateDefaultIssueSession(issue.id);
-        const head = this.ctx.conversationLog().getConversationLogHead(issueSession.id)?.headSeq ?? 0;
-        const outcome = status === "completed" ? "done" : status;
-        const reason = envelopeSummary(status === "failed" ? (body ?? task.failureReason ?? "unknown") : body);
-        const envelopeBody = `${issue.key} 有新日志：会话 ${issueSession.id}，seq ({{cursor}}, ${head}]；本次轮次 ${task.id} 状态 ${status}`
-          + (reason ? `，原因 ${reason}` : "");
-        const deliveries: EnvelopeDelivery[] = this.ctx.inbox().sendEnvelopeWithinTransaction({
-          to: { role: "relay", issueId: issue.id }, kind: "report", outcome,
-          wake: "now", dedupeKey: `relay:${issue.id}:${task.id}`,
-          body: envelopeBody, source: { issueId: issue.id, taskId: task.id },
-        }, childStatusChanges, deferredEvents);
-        roundPushTasks = this.ctx.feishuBot().prepareFeishuIssueRoundPushesWithinTransaction({
-          issue,
-          leaderTask: task,
-          envelopeDeliveries: deliveries,
-          childStatusChanges,
-          deferredEvents,
-        });
+        reportIssueRound(issue);
+      }
+    }
+
+    // Standalone/scheduled work can report on Issues without being bound to
+    // them. Ring those topics in this terminal transaction too. Chat replies
+    // must never ring their own relay (or another topic) back into a loop.
+    if (!task.chatSessionId) {
+      const commentedIssues = this.ctx.db.query(
+        `SELECT DISTINCT issue_id FROM multiremi_issue_comments
+         WHERE task_id = ? AND issue_id <> ?`,
+      ).all(task.id, task.issueId ?? "") as { issue_id: string }[];
+      for (const row of commentedIssues) {
+        const issue = this.ctx.issues().getIssue(row.issue_id);
+        if (issue && issue.workspaceId === task.workspaceId && !this.hasActiveTaskForIssue(issue.id)) {
+          reportIssueRound(issue);
+        }
       }
     }
 
@@ -7305,7 +7548,7 @@ function toTaskMessageFanoutSubject(row: Row): TaskMessageFanoutSubject {
   };
 }
 
-function toTask(row: Row): MultiremiTask {
+function toTask(row: Row, usage: TaskUsageEntry[]): MultiremiTask {
   const taskResult = normalizeStoredTaskResult(row.result);
   return {
     id: String(row.id),
@@ -7411,7 +7654,7 @@ function toTask(row: Row): MultiremiTask {
     progressTotal: row.progress_total == null ? null : Number(row.progress_total),
     waitReason: nullableString(row.wait_reason),
     wait_reason: nullableString(row.wait_reason),
-    usage: parseJson(row.usage, []),
+    usage,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     dispatchedAt: nullableString(row.dispatched_at),

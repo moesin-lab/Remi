@@ -5,6 +5,7 @@ import { DockerComposeDriver } from "@remi-platform/updater/compose-driver.js";
 import { fetchReleaseFeed } from "@remi-platform/updater/release-feed.js";
 import { SystemdReleaseDriver } from "@remi-platform/updater/systemd-release-driver.js";
 import type { CommandRunner } from "@remi-platform/updater/types.js";
+import { validComposeConfigResult } from "../../fixtures/platform-updater/compose-config.js";
 
 const unusedRunner: CommandRunner = {
   async run() {
@@ -20,7 +21,10 @@ describe("platform updater release validation", () => {
       stateDir: "/tmp/platform-state",
       apiHealthUrl: "http://127.0.0.1:6120/readyz",
       webHealthUrl: "http://127.0.0.1:3000/login",
-    }, unusedRunner);
+    }, { async run(command, args) {
+      if (command === "docker" && args.includes("config")) return validComposeConfigResult;
+      return unusedRunner.run(command, args);
+    } });
 
     await expect(driver.execute(operation({
       version: "0.2.43",

@@ -1,6 +1,6 @@
 {
   "name": "remi",
-  "version": "0.2.86",
+  "version": "0.2.88",
   "packageManager": "bun@1.3.14",
   "description": "Remi - Multiremi agent runtime with multi-connector messaging and ACP provider integration.",
   "type": "module",
@@ -38,7 +38,7 @@
     "release:prepare": "bun run scripts/release-runtime.ts prepare",
     "release:check": "bun run scripts/release-runtime.ts check",
     "lock:clean": "bun run scripts/clean-lockfile.ts",
-    "test": "bun test",
+    "test": "bun run scripts/run-tests.ts",
     "docs:check": "node scripts/check-dev-context.mjs",
     "docs:test": "node --test scripts/check-dev-context.test.mjs",
     "cli:capabilities:generate": "bun run scripts/generate-cli-capabilities.ts",

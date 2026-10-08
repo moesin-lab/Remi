@@ -355,7 +355,7 @@ describe("control-plane Feishu concierge host", () => {
     ]);
   });
 
-  it("passes the saved presentation checkpoint unchanged to the trace subscription", async () => {
+  it("replays canonical trace from zero while retaining the presentation checkpoint", async () => {
     const fake = fakeDaemon();
     const cursors: number[] = [];
     const received: number[] = [];
@@ -379,8 +379,8 @@ describe("control-plane Feishu concierge host", () => {
       replyToMessageId: "om_root", body: "", bodyOrigin: "agent", taskId: "tsk_resume", resumeMessageId: "om_existing",
       idempotencyKey: "fbo_resume", presentation: { version: "native_cot_v1", startedAt: 1, throughSeq: 7, interactions: {} } },
       { signal: new AbortController().signal, onStarted: async () => {} });
-    expect(cursors).toEqual([7]);
-    expect(received).toEqual([8]);
+    expect(cursors).toEqual([0]);
+    expect(received).toEqual([1]);
   });
 
   it("applies live no-mention settings to exactly the configured group", async () => {
@@ -556,7 +556,7 @@ describe("control-plane Feishu concierge host", () => {
     });
 
     expect(sent).toEqual({ messageId: "om_fallback" });
-    expect(replies).toEqual(["**MUL-1 - 问题**\n\n1. 继续"]);
+    expect(replies).toEqual(["<at id=ou_group_owner></at> **MUL-1 - 问题**\n\n1. 继续"]);
     // The control plane must learn it degraded, or it would later PATCH a card
     // that does not exist.
     expect(receipts).toEqual([{ messageId: "om_fallback", interactionOpenId: "ou_group_owner", degraded: "send_failed" }]);

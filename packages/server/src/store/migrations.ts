@@ -1,6 +1,7 @@
 import { migrateLegacyExecutionProfiles } from "@multiremi/store/execution-profile-migration.js";
 import { CHAT_ISSUE_DECOUPLED_FINGERPRINT, chatTaskRetryParentSql } from "@multiremi/store/helpers.js";
 import { backfillRuntimeExecutionGroups } from "@multiremi/store/execution-groups.js";
+import { ensureUsageAccountingSchema } from "@multiremi/store/usage-accounting.js";
 import { createHash } from "node:crypto";
 import { attachmentIdsFromText } from "@multiremi/contracts/attachments.js";
 import { type SqlDatabase, type SqlDatabaseDialect } from "@multiremi/store/db/postgres.js";
@@ -3548,6 +3549,7 @@ function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): 
     addColumnIfMissing(db, "multiremi_conversation_heads", "agent_read_state TEXT");
   });
   ensureIssueNumberUniqueness(db, legacyGithubTables);
+  ensureUsageAccountingSchema(db);
 }
 
 /**

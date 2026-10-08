@@ -3703,6 +3703,8 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     expect(terminalEntry.body_md).toContain(`结论评论：${fixture.report.id}`);
     expect(terminalEntry.body_md).toContain(`remi comment list ${fixture.issue.id} --thread ${fixture.report.id}`);
     expect(terminalEntry.body_md).toContain("摘要：Intermediate report withdrawn.");
+    expect(terminalEntry.body_md).not.toContain("Final PG QA result after the explicit report was withdrawn.");
+    expect(store.getTask(fixture.childTask.id)?.result).toBe("Final PG QA result after the explicit report was withdrawn.");
     expect(terminalReturn.prompt).toBe(`读收件箱\n\n${terminalReturn.issueSessionId}:${terminalEntry.seq} (${terminalEntry.id})`);
   });
 

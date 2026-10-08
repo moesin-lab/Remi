@@ -108,7 +108,7 @@ describe("MultiremiTaskReportOutbox", () => {
       known_cost_by_currency: { USD: 0.25 }, complete: true });
     expect(store.getTask(task.id)?.status).toBe("completed");
   }, 30_000);
-  // The real SQLite replay of 3500 persisted deltas exceeds 30s on Windows CI.
+  // The real SQLite replay of 3500 persisted deltas can exceed 30s on CI.
   // This recovery test verifies correctness; its timeout is not a throughput budget.
   it("replays over 3000 request facts after an outage with bounded final chunks and delivers terminal last", async () => {
     const store = createLocalStore();
@@ -139,7 +139,7 @@ describe("MultiremiTaskReportOutbox", () => {
     const report = store.getUsageReport({ workspaceId: "local", days: null });
     expect(report.summary.actual_total_tokens).toBe(7000);
     expect(report.by_model.map(row => row.actual_total_tokens).sort()).toEqual([3500, 3500]);
-  }, process.platform === "win32" ? 90_000 : 30_000);
+  }, 90_000);
   it("keeps v2 usage through cancellation and restart without discarding deltas behind a complete marker", async () => {
     const path = tempPath();
     const first = track(new MultiremiTaskReportOutbox({ path, backoffScheduleMs: [60_000],

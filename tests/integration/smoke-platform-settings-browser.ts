@@ -7,6 +7,7 @@ import { chromium, type Browser, type Page } from 'playwright-core';
 
 const { frontend, apiToken, updaterToken, control, artifacts } = JSON.parse(readFileSync(0, 'utf8')) as Record<string, string>;
 const text = JSON.parse(readFileSync(new URL('../../frontend/packages/views/locales/en/settings.json', import.meta.url), 'utf8')).platform;
+const zhText = JSON.parse(readFileSync(new URL('../../frontend/packages/views/locales/zh-Hans/settings.json', import.meta.url), 'utf8')).platform;
 const checks: string[] = [], jsErrors: string[] = [], failures: string[] = [], mutations: string[] = [];
 const redact = (value: string) => [apiToken!, updaterToken!].reduce((result, token) => result.split(token).join('[redacted]'), value);
 const check = (name: string) => { checks.push(name); console.log(`PASS ${name}`); };
@@ -62,6 +63,37 @@ try {
   await input.waitFor();
   assert.equal(await input.inputValue(), 'https://releases.platform.test/images.json');
   check('custom source and incompatibility survive reload');
+
+  await context.addCookies([{ name: 'multimira-locale', value: 'zh-Hans', url: frontend! }]);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  const preflight = page.getByTestId('platform-preflight');
+  await preflight.getByText(zhText.preflight_bundle_unsupported, { exact: true }).waitFor();
+  for (const code of ['container_supervisors', 'isolated_rehearsal', 'backup', 'postgresql', 'program_storage', 'release_feed']) {
+    assert(await preflight.getByText(zhText.preflight_checks[code].label, { exact: true }).isVisible());
+  }
+  assert.equal(await preflight.getByText('Release feed is reachable', { exact: true }).count(), 0);
+  assert(!/\b(?:AM|PM)\b/.test(await preflight.innerText()), 'Chinese readiness dates must use the UI locale');
+  assert(await page.getByRole('button', { name: zhText.update_now, exact: true }).isDisabled());
+  await preflight.scrollIntoViewIfNeeded();
+  await preflight.screenshot({ path: join(artifacts!, 'preflight-zh-desktop.png'), animations: 'disabled' });
+  const cardRadius = await preflight.evaluate(element => getComputedStyle(element).borderRadius);
+  for (const id of ['platform-update-mode', 'platform-update-source']) {
+    assert.equal(await page.getByTestId(id).evaluate(element => getComputedStyle(element).borderRadius), cardRadius);
+  }
+  check('Chinese readiness checks and missing-bundle guidance use the shared card style and keep updates blocked');
+  await preflight.getByRole('button', { name: zhText.preflight_diagnostics, exact: true }).click();
+  await preflight.getByText('container_supervisors', { exact: true }).waitFor();
+  assert(await preflight.getByText('This release has no supported application bundle; image-only releases cannot be applied in application mode', { exact: true }).isVisible());
+  await preflight.getByRole('button', { name: zhText.preflight_diagnostics, exact: true }).click();
+  check('original check codes and failures remain available in expandable diagnostic details');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await preflight.scrollIntoViewIfNeeded();
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Readiness checks overflow at 390px');
+  await page.screenshot({ path: join(artifacts!, 'preflight-zh-mobile.png'), animations: 'disabled' });
+  check('Chinese check labels, badges and failure guidance fit a 390px viewport');
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await context.addCookies([{ name: 'multimira-locale', value: 'en', url: frontend! }]);
+  await page.reload({ waitUntil: 'domcontentloaded' });
 
   await input.fill('https://releases.platform.test/offline.json');
   await page.getByRole('button', { name: text.source_save, exact: true }).click();

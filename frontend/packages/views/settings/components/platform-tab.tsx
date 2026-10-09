@@ -41,6 +41,7 @@ import {
 import { useT } from "../../i18n";
 import { TimezoneSelect } from "../../common/timezone-select";
 import { PlatformSourceCapabilities, PlatformUpdateModeCard } from "./platform-update-mode";
+import { PlatformPreflightCard } from "./platform-preflight";
 
 type ConfirmAction =
   | { kind: "restart" }
@@ -147,7 +148,7 @@ export function PlatformTab() {
       </div>
 
       {statusQuery.isRefetchError && (
-        <div className="flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
+        <div className="flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
           <RefreshCw className="h-4 w-4 animate-spin" />
           {t(($) => $.platform.reconnecting)}
         </div>
@@ -193,7 +194,7 @@ export function PlatformTab() {
         </div>
       )}
 
-      <Card className="rounded-lg">
+      <Card>
         <CardHeader className="border-b">
           <CardTitle>{t(($) => $.platform.current_version)}</CardTitle>
           <CardDescription>{driverLabel(status.driver, t)}</CardDescription>
@@ -217,7 +218,7 @@ export function PlatformTab() {
               {status.updateAvailable ? (
                 <Badge variant="secondary">{t(($) => $.platform.update_available)}</Badge>
               ) : checked ? (
-                <span className="inline-flex size-7 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                <span className="inline-flex size-7 items-center justify-center rounded-full bg-success/10 text-success">
                   <Check className="h-4 w-4" />
                 </span>
               ) : <CircleAlert className="h-5 w-5 text-muted-foreground" />}
@@ -339,8 +340,8 @@ export function PlatformTab() {
 
       <PlatformUpdateModeCard status={status} />
 
-      <Card className="rounded-lg" data-testid="platform-update-source">
-        <CardHeader><CardTitle>{t(($) => $.platform.update_source)}</CardTitle><CardDescription>{t(($) => $.platform.update_source_hint)}</CardDescription></CardHeader>
+      <Card data-testid="platform-update-source">
+        <CardHeader className="border-b"><CardTitle>{t(($) => $.platform.update_source)}</CardTitle><CardDescription>{t(($) => $.platform.update_source_hint)}</CardDescription></CardHeader>
         <CardContent className="space-y-3">
           <Label htmlFor="platform-release-feed">{t(($) => $.platform.update_source_url)}</Label>
           <Input id="platform-release-feed" type="url" value={sourceDraft} placeholder={status.defaultReleaseFeedUrl ?? "https://example.com/platform-release.json"} disabled={busy || settingsMutation.isPending} onChange={(event) => setSourceDraft(event.target.value)} />
@@ -361,19 +362,9 @@ export function PlatformTab() {
         </CardContent>
       </Card>
 
-      <Card className="rounded-lg" data-testid="platform-preflight">
-        <CardHeader><CardTitle>{t(($) => $.platform.preflight_title)}</CardTitle><CardDescription>{t(($) => $.platform.preflight_hint)}</CardDescription></CardHeader>
-        <CardContent className="space-y-2">
-          {!status.preflight && <p className="text-sm text-muted-foreground">{t(($) => $.platform.check_unknown)}</p>}
-          {status.preflight && <p className="text-xs text-muted-foreground">{status.preflight.platform} / {status.preflight.arch} · {formatTimestamp(status.preflight.checkedAt)}</p>}
-          {status.preflight?.checks.map((check) => <div key={check.code} className="flex items-start gap-2 text-sm">
-            {check.ok ? <Check className="mt-0.5 h-4 w-4 shrink-0" /> : <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />}
-            <span className="break-words">{check.message}</span>
-          </div>)}
-        </CardContent>
-      </Card>
+      <PlatformPreflightCard status={status} />
 
-      <Card className="rounded-lg">
+      <Card>
         <CardHeader className="border-b">
           <CardTitle>{t(($) => $.platform.services)}</CardTitle>
           <CardDescription>{t(($) => $.platform.updater_status, { status: updaterLabel(status.updaterStatus, t) })}</CardDescription>

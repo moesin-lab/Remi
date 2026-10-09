@@ -221,10 +221,81 @@ describe("PlatformTab upgrade lifecycle", () => {
     createMutationRef.mutateAsync.mockClear();
     await user.click(screen.getByRole("button", { name: enSettings.platform.update_now }));
     expect(createMutationRef.mutateAsync).not.toHaveBeenCalled();
+    const dialog = within(screen.getByRole("alertdialog"));
+    expect(dialog.getByRole("heading")).toHaveTextContent(enSettings.platform.confirm_update_title.replace("{{version}}", "1.2.3"));
+    expect(dialog.getByText(enSettings.platform.confirm_update_desc)).toBeVisible();
+    expect(dialog.getByText(enSettings.platform.update_target_ref.replace("{{ref}}", "release-commit"))).toBeVisible();
     await user.click(screen.getByRole("button", { name: enSettings.platform.confirm }));
     await waitFor(() => expect(createMutationRef.mutateAsync).toHaveBeenCalledWith({
       kind: "update", targetVersion: "1.2.3", targetRef: "https://mirror.example/releases.json",
     }));
+  });
+
+  it("keeps the Web and API update entry visible before any release is discovered", () => {
+    render(<PlatformTab />, { wrapper: Wrapper });
+    expect(screen.getByRole("button", { name: enSettings.platform.update_now })).toBeVisible();
+    expect(screen.getByRole("button", { name: enSettings.platform.update_now })).toBeDisabled();
+    expect(screen.getByText(enSettings.platform.update_scope)).toBeVisible();
+    expect(screen.getByText(enSettings.platform.update_check_required)).toBeVisible();
+    expect(screen.getByRole("button", { name: enSettings.platform.check_updates })).toBeEnabled();
+  });
+
+  it("keeps the update button visible and explains when this source is already installed", async () => {
+    const user = userEvent.setup();
+    statusRef.current = platformStatus({
+      latestRelease: platformStatus().currentRelease,
+      preflight: { ready: true, checkedAt: new Date().toISOString(), platform: "linux", arch: "x64", checks: [{ code: "backup", ok: true, message: "ready" }] },
+    });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    const button = screen.getByRole("button", { name: enSettings.platform.update_now });
+    expect(button).toBeVisible(); expect(button).toBeDisabled();
+    expect(button).toHaveAccessibleDescription(enSettings.platform.update_no_new_release);
+    await user.click(button);
+    expect(createMutationRef.mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it.each(["offline", "expired", "permission", "maintenance"])("explains a blocked update for %s without hiding the entry", reason => {
+    statusRef.current = platformStatus({
+      updateAvailable: true,
+      latestRelease: { ...platformStatus().currentRelease!, ref: "new" },
+      updaterStatus: reason === "offline" ? "offline" : "ready",
+      canManage: reason !== "permission",
+      maintenance: { ...platformStatus().maintenance, mode: reason === "maintenance" ? "draining" : "normal" },
+      preflight: { ready: true, checkedAt: new Date(Date.now() - (reason === "expired" ? 7 * 60_000 : 0)).toISOString(), platform: "linux", arch: "x64", checks: [{ code: "backup", ok: true, message: "ready" }] },
+    });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    const button = screen.getByRole("button", { name: enSettings.platform.update_now });
+    expect(button).toBeVisible(); expect(button).toBeDisabled();
+    const hint = reason === "offline" ? enSettings.platform.update_updater_unavailable
+      : reason === "permission" ? enSettings.platform.update_permission_required
+      : reason === "maintenance" ? enSettings.platform.mode_busy : enSettings.platform.update_check_required;
+    expect(button).toHaveAccessibleDescription(hint);
+  });
+
+  it("does not claim an older advertised target is installed", () => {
+    statusRef.current = platformStatus({
+      latestRelease: { ...platformStatus().currentRelease!, version: "v0.2.45", ref: "older" },
+      preflight: { ready: true, checkedAt: new Date().toISOString(), platform: "linux", arch: "x64", checks: [{ code: "backup", ok: true, message: "ready" }] },
+    });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    expect(screen.getByRole("button", { name: enSettings.platform.update_now })).toHaveAccessibleDescription(enSettings.platform.update_no_newer_release);
+    expect(screen.queryByText(enSettings.platform.update_no_new_release)).not.toBeInTheDocument();
+  });
+
+  it("blocks an open confirmation if the advertised target changes", async () => {
+    const user = userEvent.setup();
+    statusRef.current = platformStatus({
+      updateAvailable: true,
+      latestRelease: { ...platformStatus().currentRelease!, ref: "first-target" },
+      preflight: { ready: true, checkedAt: new Date().toISOString(), platform: "linux", arch: "x64", checks: [{ code: "backup", ok: true, message: "ready" }] },
+    });
+    const view = render(<PlatformTab />, { wrapper: Wrapper });
+    await user.click(screen.getByRole("button", { name: enSettings.platform.update_now }));
+    statusRef.current = { ...statusRef.current, latestRelease: { ...statusRef.current.latestRelease!, ref: "new-target" } };
+    view.rerender(<PlatformTab />);
+    const confirm = within(screen.getByRole("alertdialog")).getByRole("button", { name: enSettings.platform.confirm });
+    expect(confirm).toBeDisabled(); await user.click(confirm);
+    expect(createMutationRef.mutateAsync).not.toHaveBeenCalled();
   });
 
   it("blocks update and restart when preflight fails and retains the original reason in diagnostics", async () => {

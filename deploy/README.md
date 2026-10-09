@@ -426,6 +426,11 @@ manifest is only an artifact check: downloads, host compatibility, migration
 rehearsal, backups and drain still have to pass. Save an edited URL before using
 **Check update source**; default/source changes and reported-mode changes clear
 old preflight results. Unreachable or stale sources do not appear compatible.
+The **Update readiness** card uses localized check names, result badges and
+failure guidance. Missing artifacts are explained from the reported mode's
+structured requirements. Original updater check codes and messages remain
+available under **Diagnostic details**, including unknown checks from newer
+updaters. These presentation changes do not change the update safety gates.
 The nullable `multiremi_platform_state.update_mode` column stores observational
 metadata only; older application versions can ignore it without changing data.
 

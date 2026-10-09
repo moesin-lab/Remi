@@ -5807,6 +5807,7 @@ runMigrations(this.db);
   cancelTurn(...args: Parameters<InboxRepo["operations"]["cancelTurn"]>) { return this.inbox.operations.cancelTurn(...args); }
   wrapUpTurn(...args: Parameters<InboxRepo["operations"]["wrapUpTurn"]>) { return this.inbox.operations.wrapUpTurn(...args); }
   retryTurn(...args: Parameters<InboxRepo["operations"]["retryTurn"]>) { return this.inbox.operations.retryTurn(...args); }
+  retryTurnAsMember(...args: Parameters<InboxRepo["operations"]["retryTurnAsMember"]>) { return this.inbox.operations.retryTurnAsMember(...args); }
   issueMessageCardToken(...args: Parameters<InboxRepo["operations"]["issueMessageCardToken"]>) { return this.inbox.operations.issueMessageCardToken(...args); }
   answerMessageDecision(...args: Parameters<InboxRepo["operations"]["answerMessageDecision"]>) { return this.inbox.operations.answerMessageDecision(...args); }
   getMessage(...args: Parameters<InboxRepo["getMessage"]>) { return this.inbox.getMessage(...args); }
@@ -6159,7 +6160,7 @@ runMigrations(this.db);
     replacementTask: MultiremiTask | null;
     message: MultiremiTaskSteerMessage | null;
     audit: MultiremiOrganizerAction;
-    comment: MultiremiIssueComment;
+    comment: MultiremiIssueComment | import("@multiremi/contracts/unified-model.js").UnifiedMessage;
   } {
     const childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChange[] = [];
     // MUL-400 S1 (QA round 3): the audit comment is written inside this
@@ -6209,6 +6210,17 @@ runMigrations(this.db);
           409,
         );
       }
+      const sourceTurn = this.getTurnForAttempt(supervisorTask.id);
+      const sourceScope = sourceTurn ? this.getIssueSessionWithOwnerScope(sourceTurn.session_id) : null;
+      if (!sourceTurn || !sourceScope || sourceScope.ownerWorkspaceId !== supervisorTask.workspaceId
+        || sourceScope.session.workspaceId !== supervisorTask.workspaceId
+        || !sourceScope.session.chatId && sourceScope.session.issueId !== reportIssue.id) {
+        throw new OrganizerActionError(
+          "organizer_report_issue_required",
+          "the supervisor report conversation must have a current owner in this workspace",
+          409,
+        );
+      }
       const reason = input.reason.trim();
       if (!reason) throw new OrganizerActionError("organizer_reason_required", "reason is required", 400);
       if (reason.length > 2_000) throw new OrganizerActionError("organizer_reason_too_long", "reason must be at most 2000 characters", 400);
@@ -6248,34 +6260,54 @@ runMigrations(this.db);
         action: input.action,
         reason,
       });
-      const comment = this.issues.createIssueComment(reportIssue.id, {
-        authorType: "agent",
-        authorId: supervisorAgent.id,
-        taskId: supervisorTask.id,
-        body: [
-          `Organizer action: ${input.action}`,
-          `Target task: ${target.id}`,
-          ...(target.issueId ? [`Target issue: ${target.issueId}`] : []),
-          ...(replacementTask ? [`Replacement task: ${replacementTask.id}`] : []),
-          `Criterion: ${reason}`,
-          `Audit record: ${audit.id}`,
-        ].join("\n"),
-      }, { withinTransaction: true, deferredEvents, childStatusChanges });
-      if (supervisorTask.delegatedByAgentId && supervisorTask.delegatedByAgentId !== supervisorAgent.id) {
-        const sourceTurn=this.getTurnForAttempt(supervisorTask.id);
-        this.inbox.sendMessageWithinTransaction({id:comment.id,session_id:comment.issueSessionId!,
-          sender:{type:'agent',id:supervisorAgent.id},source_turn_id:sourceTurn?.id,
-          to:{type:'agent',ref:supervisorTask.delegatedByAgentId},message_kind:'report',wake_requested:'now',
-          body_md:comment.body},deferredEvents);
+      const reportBody = [
+        `Organizer action: ${input.action}`,
+        `Target task: ${target.id}`,
+        ...(target.issueId ? [`Target issue: ${target.issueId}`] : []),
+        ...(replacementTask ? [`Replacement task: ${replacementTask.id}`] : []),
+        `Criterion: ${reason}`,
+        `Audit record: ${audit.id}`,
+      ].join("\n");
+      const delegatorId = supervisorTask.delegatedByAgentId !== supervisorAgent.id
+        ? supervisorTask.delegatedByAgentId : null;
+      let comment: MultiremiIssueComment | import("@multiremi/contracts/unified-model.js").UnifiedMessage;
+      if (sourceScope.session.chatId) {
+        // The Issue is only a projection for a Chat-owned patrol. Its report
+        // remains on the private conversation, including when the audit pointer is missing.
+        comment = this.inbox.sendMessageWithinTransaction({
+          session_id: sourceScope.session.id,
+          sender: { type: "agent", id: supervisorAgent.id },
+          source_turn_id: sourceTurn.id,
+          to: delegatorId ? { type: "agent", ref: delegatorId } : { type: "none" },
+          message_kind: "report",
+          wake_requested: delegatorId ? "now" : "inbox_only",
+          body_md: reportBody,
+        }, deferredEvents).message;
+      } else {
+        comment = this.issues.createIssueComment(reportIssue.id, {
+          issueSessionId: sourceScope.session.id,
+          authorType: "agent",
+          authorId: supervisorAgent.id,
+          taskId: supervisorTask.id,
+          body: reportBody,
+        }, { withinTransaction: true, deferredEvents, childStatusChanges });
+        if (delegatorId) {
+          this.inbox.sendMessageWithinTransaction({
+            id: comment.id, session_id: comment.issueSessionId!,
+            sender: { type: "agent", id: supervisorAgent.id }, source_turn_id: sourceTurn.id,
+            to: { type: "agent", ref: delegatorId }, message_kind: "report", wake_requested: "now",
+            body_md: comment.body,
+          }, deferredEvents);
+        }
+        this.issues.notifyOrganizerAction(reportIssue, comment.body, "agent", supervisorAgent.id, {
+          organizer_action_id: audit.id,
+          action: input.action,
+          target_task_id: target.id,
+          target_issue_id: target.issueId,
+          replacement_task_id: replacementTask?.id ?? null,
+          comment_id: comment.id,
+        });
       }
-      this.issues.notifyOrganizerAction(reportIssue, comment.body, "agent", supervisorAgent.id, {
-        organizer_action_id: audit.id,
-        action: input.action,
-        target_task_id: target.id,
-        target_issue_id: target.issueId,
-        replacement_task_id: replacementTask?.id ?? null,
-        comment_id: comment.id,
-      });
       return { task, replacementTask, message, audit, comment };
     })();
     afterCommit(this.db,()=>{

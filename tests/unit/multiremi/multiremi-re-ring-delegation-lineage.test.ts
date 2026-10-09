@@ -46,6 +46,11 @@ pendingTurnBackendTests("MUL-492 recovered nested delegation lineage", fixture =
         to: { role: "delegator", delegationId: "dlg_worker_scope" }, kind: "report",
         wake: "now", body: "Surviving report", source: { taskId: workerTask.id },
       }, [], createCommitEventQueue()))[0]!;
+      expect(f.store.getMessage(delivery.entry.id)).toMatchObject({
+        session_id: session.id, sender_type: "platform", message_kind: "report",
+        to_agent_id: agent.id, wake_applied: "now", wake_reason: "platform_to_owner",
+        task_id: workerTask.turn_id,
+      });
       // These historical terminal sources have already reported. Without the
       // return stamps, the terminal drain correctly recovers their reports too,
       // which would no longer isolate this lane's recovered delegation.
@@ -72,7 +77,7 @@ pendingTurnBackendTests("MUL-492 recovered nested delegation lineage", fixture =
       const recovered = f.store.listTasksForIssue(issue.id).find(t => t.status === "queued" && t.agentId === agent.id)!;
       expect(f.store.getMessage(f.store.getTurn(recovered.turn_id!)!.trigger_message_id!)?.task_id).toBe(workerTask.turn_id);
       expect(recovered).toMatchObject({ execution_scope: "dlg_recipient_scope", delegatedByAgentId: upstream.id,
-        delegationId: "dlg_recipient_scope", wakeSource: "platform_to_owner", chatSessionId: null });
+        delegationId: "dlg_recipient_scope", wakeSource: periodic ? "platform_to_owner" : "re_ring", chatSessionId: null });
       // Edit/delete and original completion may have returned the old source.
       // Keep those rows for the no-extra-mutation assertion while freeing claim.
       runTurnExecutionMutation(f.db as unknown as UnifiedFixtureDatabase, "UPDATE multiremi_turn_execution_records SET status = 'cancelled' WHERE issue_id = ? AND agent_id <> ? AND status = 'queued'", [issue.id, agent.id]);

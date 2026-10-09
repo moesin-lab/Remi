@@ -145,8 +145,11 @@ describe.skipIf(!pgAvailable)("Task list pagination on PostgreSQL (MUL-357)", ()
     for (const status of [undefined, "running", "pending"]) {
       recorder.statements.length = 0;
       store.listTurns({ workspace_id:"local", status, limit:200 });
-      const statement = recorder.statements.find(s => s.includes("ORDER BY created_at DESC,id DESC"))!;
-      expect(statement).toBeDefined();
+      const pages = recorder.statements.filter(statement => statement.includes(
+        "ORDER BY multiremi_turns.created_at DESC,multiremi_turns.id DESC LIMIT ?",
+      ));
+      expect(pages).toHaveLength(1);
+      const statement = pages[0]!;
       const plan = await explain(statement, status ? ["local",status,200] : ["local",200]);
       expect(/Seq Scan on multiremi_turns/.test(plan.text)).toBe(false);
       if (status !== "pending") {

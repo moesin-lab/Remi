@@ -744,6 +744,17 @@ function appendDaemonClaimBoundIssueLog(
     const session = store.getOrCreateDefaultIssueSession(task.issueId);
     const lane = store.getSessionAgentLane(session.id, task.agentId, `${RELAY_EXECUTION_SCOPE_PREFIX}${task.chatSessionId}`);
     const fromSeq = lane?.cursorSeq ?? 0;
+    const turn = store.getTurnForAttempt(task.id);
+    const actualSession = turn ? store.getIssueSession(turn.session_id) : null;
+    const chatOwned = actualSession ? Boolean(actualSession.chatId)
+      : Boolean(turn && store.getChatSession(turn.session_id) || task.chatSessionId);
+    if (chatOwned && turn?.session_id !== session.id) {
+      response.bound_issue_log = {
+        session_id: session.id, from_seq: fromSeq, to_seq: toSeq,
+        content_jsonl: "", next_seq: fromSeq, has_more: false,
+      };
+      return;
+    }
     const shown = store.listConversationLogShown(session.id, { sinceSeq: fromSeq, toSeq, limit: 101 });
     const entries = shown.slice(0, 100);
     const projection = buildSessionProjection({

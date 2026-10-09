@@ -25,6 +25,9 @@ import type { SqlDatabase as UnifiedFixtureDatabase } from '@multiremi/store/db/
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { createHmac } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { StoreContext } from "@multiremi/store/context.js";
@@ -216,6 +219,46 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
 
   beforeEach(() => counter.reset());
   afterEach(() => counter.assertTransactionControl());
+
+  it("keeps the prepared Lane projection and column shape stable across a second Store startup", async () => {
+    const database = `${TEST_DB}_lane_shape`;
+    const reportDirectory = mkdtempSync(join(tmpdir(), "remi-lane-reopen-"));
+    const previousReportDirectory = process.env.MULTIREMI_MIGRATION_REPORT_DIR;
+    let first: PostgresSyncDatabase | undefined;
+    let second: PostgresSyncDatabase | undefined;
+
+    await admin.unsafe(`CREATE DATABASE ${database}`);
+    try {
+      process.env.MULTIREMI_MIGRATION_REPORT_DIR = resolveMigrationReportDirectory(reportDirectory);
+      first = new PostgresSyncDatabase(pgDatabaseUrl(database));
+      new MultiremiStore(first).ensureLocalWorkspace();
+
+      const laneRead = first.query(
+        "SELECT * FROM multiremi_agent_lane_records WHERE session_id = ? AND agent_id = ? AND execution_scope = ?",
+      );
+      expect(laneRead.get("none", "none", "")).toBeNull();
+      const columnsSql = `SELECT column_name, data_type, udt_name, ordinal_position
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'multiremi_agent_lane_records'
+        ORDER BY ordinal_position`;
+      const columnsBefore = first.query(columnsSql).all();
+
+      second = new PostgresSyncDatabase(pgDatabaseUrl(database));
+      new MultiremiStore(second).ensureLocalWorkspace();
+      const columnsAfter = second.query(columnsSql).all();
+
+      expect(() => laneRead.get("none", "none", "")).not.toThrow();
+      expect(columnsAfter).toEqual(columnsBefore);
+      expect(columnsBefore.map(column => column.column_name)).toContain("cursor_offset");
+    } finally {
+      first?.close();
+      second?.close();
+      if (previousReportDirectory === undefined) delete process.env.MULTIREMI_MIGRATION_REPORT_DIR;
+      else process.env.MULTIREMI_MIGRATION_REPORT_DIR = previousReportDirectory;
+      await admin.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
+      rmSync(reportDirectory, { recursive: true, force: true });
+    }
+  });
 
   /** A fresh workspace per case, so issue numbering and locks stay isolated. */
   function freshWorkspace(): { workspaceId: string; agent: string; runtime: string } {

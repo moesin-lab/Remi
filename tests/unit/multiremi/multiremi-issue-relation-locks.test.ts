@@ -217,7 +217,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
       expect(thrown(() => store.assignIssue(moved.child.id, { assigneeType: "agent", assigneeId: moved.agent.id })).message)
         .toBe(`Agent not found: ${moved.agent.id}`);
       expect(thrown(() => store.createTask({ agentId: moved.agent.id, issueId: moved.child.id, workspaceId: moved.source, prompt: "Late" })).message)
-        .toBe("Issue workspace does not match agent workspace");
+        .toBe("Message sender is not an active workspace member");
       expect(store.getIssue(moved.child.id)?.assigneeId).toBeNull();
       expect(taskIds(moved.child.id)).toEqual([]);
 
@@ -274,7 +274,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
       });
       try {
         expect(thrown(() => store.assignIssue(f.child.id, { assigneeType: "agent", assigneeId: f.agent.id })).message)
-          .toBe("Issue workspace does not match agent workspace");
+          .toBe("Message recipient belongs to another workspace");
       } finally { spy.mockRestore(); }
       const child = store.getIssue(f.child.id)!;
       expect(moved).toBe(true);
@@ -345,7 +345,11 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
 
     for (const action of ["reopen", "assign"] as const) {
       it(`S3: ${action} of a done child refuses a deleted parent and ignores a parent moved away`, () => {
-        const gone = family();
+        // A pristine parent can be hard-deleted without a cleanup archive.
+        // Finish its unrelated child first, then restore only the legacy
+        // dangling relation after deleting the real owner and its Main.
+        const gone = fixture();
+        store.updateIssue(gone.child.id, { status: "done" });
         const main = store.getOrCreateDefaultIssueSession(gone.parent.id);
         expect(store.deleteIssue(gone.parent.id)).toBe(true);
         expect(store.getIssueSession(main.id)).toBeNull();
@@ -485,7 +489,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
       await hold({ mode: "hold-move", role: "move", issueId: f.child.id, otherId: f.parent.id,
         sourceWorkspace: f.source, targetWorkspace: f.target }, () => {
         expect(thrown(() => store.createTask({ agentId: f.agent.id, issueId: f.child.id, workspaceId: f.source, prompt: "Waiting" })).message)
-          .toBe("Issue workspace does not match agent workspace");
+          .toBe("Issue moved to another workspace");
       });
       expect(store.getIssue(f.child.id)?.workspaceId).toBe(f.target);
       expect(taskIds(f.child.id)).toEqual([]);
@@ -581,7 +585,10 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         ]);
         expect(results.filter((result) => result.ok)).toHaveLength(1);
         const [move, task] = results;
-        if (move!.ok) expect(task!.error).toBe("Issue workspace does not match agent workspace");
+        // The move may commit before the Session lookup or while its Issue
+        // lock is awaited; both canonical guards reject the foreign request.
+        if (move!.ok) expect(task).toMatchObject({ ok: false,
+          error: expect.stringMatching(/^(?:Message sender is not an active workspace member|Issue moved to another workspace)$/) });
         else expect(move!.code).toBe("workspace_move_blocked");
       }
     }, 120_000);

@@ -114,22 +114,27 @@ describe("platform maintenance HTTP write gate", () => {
     store.releasePlatformDrain(operation.id);
     const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "Finish this" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    const input = store.getDaemonTurnBridge().offerInput(store.getTaskWithAgent(task.id)!);
     store.startTask(task.id);
     store.beginPlatformDrain({ operationId: operation.id });
     store.reportPlatformOperation(operation.id, { status: "draining" });
 
     const server = startMultiremiServer({ store, scheduler: null, backgroundJobs: false, authToken: "master-secret", hostname: "127.0.0.1", port: 0 });
     const socket = new WebSocket(`ws://127.0.0.1:${server.port}/api/daemon/ws?protocol=2`, { headers: HEADERS } as never);
+    const frames: Array<{ t: string; re?: string; p: Record<string, unknown> }> = [];
+    socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
     try {
       await waitWebSocketOpen(socket);
       const welcome = nextWebSocketMessage(socket);
       socket.send(JSON.stringify({ v: 2, t: "hello", ts: Date.now(), p: { protocol: 2, daemon_id: "drain-host", cli_version: version,
         launched_by: null, caps: [], runtimes: [{ runtime_id: runtime.id, provider: "claude", max_concurrency: 1, active_task_ids: [task.id] }] } }));
       expect(await welcome).toMatchObject({ t: "welcome" });
-      socket.send(JSON.stringify({ v: 2, t: "task.complete", seq: 1, rt: runtime.id, ts: Date.now(),
-        p: { task_id: task.id, runtime_id: runtime.id, output: "Finished during drain" } }));
+      socket.send(JSON.stringify({ v: 2, t: "turn.complete", seq: 1, rt: runtime.id, ts: Date.now(),
+        p: { turn_id: input.turn_id, attempt_id: task.id, input_to_seq: input.input_to_seq,
+          reply: { body_md: "Finished during drain", message_kind: "final" } } }));
       const deadline = performance.now() + 3_000;
-      while (store.getTask(task.id)?.status !== "completed" && performance.now() < deadline) await Bun.sleep(10);
+      while (!frames.some(frame => frame.t === "res" && frame.re === "1") && performance.now() < deadline) await Bun.sleep(10);
+      expect(frames.find(frame => frame.t === "res" && frame.re === "1")).toMatchObject({ p: { ok: true } });
     } finally { socket.close(); server.stop(true); }
     expect(store.getTask(task.id)?.status).toBe("completed");
     expect((await app.request("/api/daemon/heartbeat", {

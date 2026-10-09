@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { MultiremiStore } from "@multiremi/store.js";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { DaemonProtocolLayer } from "@multiremi/api/daemon-protocol/index.js";
-import { DaemonTaskOffers } from "@multiremi/api/daemon-protocol/task-offers.js";
+import { DaemonTaskOffers, daemonTurnOfferPayload } from "@multiremi/api/daemon-protocol/task-offers.js";
 import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.js";
 import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
 
@@ -33,7 +33,10 @@ describe.skipIf(!adminUrl)("A-3 task offers on real PostgreSQL", () => {
     const agent = store.createAgent({ name: id, runtimeId: id, provider: "claude", workspaceId: "local" });
     const clock = new ManualDaemonProtocolClock(Date.now());
     const layer = new DaemonProtocolLayer({ store });
-    const offers = new DaemonTaskOffers({ store, layer, clock, prepare: prepare ?? (async task => ({ id: task.id, prompt: task.prompt })) });
+    const offers = new DaemonTaskOffers({ store, layer, clock, prepare: async task => {
+      const execution = prepare ? await prepare(task) : { runtime_id: task.runtimeId };
+      return daemonTurnOfferPayload(execution, store.getDaemonTurnBridge().offerInput(task));
+    } });
     const frames: Record<string, any>[] = [];
     const session = layer.openSession({ send: text => { frames.push(JSON.parse(text)); return text.length; }, close() {} }, { masterToken: true, accessToken: null });
     const send = async (t: string, p: unknown, fields = {}) => { await session.handleMessage(JSON.stringify({ v: 2, t, p, ...fields })); await layer.drain(); };
@@ -68,7 +71,7 @@ describe.skipIf(!adminUrl)("A-3 task offers on real PostgreSQL", () => {
       h.clock.advance(29_999); await h.layer.drain();
       expect(h.frames.filter(frame => frame.t === "task.offer")).toHaveLength(1);
       h.clock.advance(1); await h.layer.drain();
-      expect(h.frames.filter(frame => frame.t === "task.offer").map(frame => frame.p.id)).toEqual([task.id, task.id]);
+      expect(h.frames.filter(frame => frame.t === "task.offer").map(frame => frame.p.attempt_id)).toEqual([task.id, task.id]);
     } finally { await h.close(); }
   });
   it("shapes an oversized offer and then dispatches the next PostgreSQL queue row", async () => {
@@ -76,13 +79,17 @@ describe.skipIf(!adminUrl)("A-3 task offers on real PostgreSQL", () => {
     try {
       const huge = h.task("x".repeat(1_048_576)); const next = h.task(); await h.hello();
       const first = h.frames.find(frame => frame.t === "task.offer")!;
-      expect(first.p.id).toBe(huge.id);
+      expect(first.p.attempt_id).toBe(huge.id);
+      expect(first.p.turn_id).toBe(store.getTurnForAttempt(huge.id)!.id);
+      const message = first.p.input_messages[0];
+      expect(message.body_md).toContain(`remi message list ${message.session_id} --from ${message.seq - 1} --to ${message.seq}`);
+      expect(store.getMessage(message.id)!.body_md).toBe(huge.prompt);
       expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(512 * 1024);
       expect(store.getTask(huge.id)).toMatchObject({ status: "dispatched", failureReason: null });
       await h.send("res", { ok: true }, { re: String(first.seq), ack: first.seq });
       store.startTask(huge.id); store.completeTask(huge.id, { output: "done" });
       h.offers.kick(); await h.layer.drain();
-      expect(h.frames.filter(frame => frame.t === "task.offer").map(frame => frame.p.id)).toEqual([huge.id, next.id]);
+      expect(h.frames.filter(frame => frame.t === "task.offer").map(frame => frame.p.attempt_id)).toEqual([huge.id, next.id]);
     } finally { await h.close(); }
   });
   it("reports irreducible PostgreSQL offers once and continues without blocking the Issue", async () => {
@@ -95,7 +102,7 @@ describe.skipIf(!adminUrl)("A-3 task offers on real PostgreSQL", () => {
       expect(store.getTask(huge.id)).toMatchObject({ status: "failed", failureReason: "offer_too_large" });
       expect(store.getTask(huge.id)!.error).toContain("parts=repos:");
       expect(store.getIssue(issue.id)!.status).not.toBe("blocked");
-      expect(h.frames.filter(frame => frame.t === "task.offer").map(frame => frame.p.id)).toEqual([next.id]);
+      expect(h.frames.filter(frame => frame.t === "task.offer").map(frame => frame.p.attempt_id)).toEqual([next.id]);
     } finally { await h.close(); }
   });
   it("persists independent per-agent unread high-water and partial-page offsets on PostgreSQL", async () => {

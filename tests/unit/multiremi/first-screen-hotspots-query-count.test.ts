@@ -1,4 +1,4 @@
-// MUL-473 (S9-2, PR1): guards for `GET /api/chat/pending-tasks` and the
+// MUL-473 (S9-2, PR1): guards for canonical pending Turn lists and the
 // assignee filter resolver behind `GET /api/issues`.
 //
 // Both routes were slow because they ran one statement per row, not because of
@@ -6,7 +6,7 @@
 // could quietly give back:
 //
 //   1. the response does not drift — each route's body is compared against a
-//      golden captured from the pre-optimization implementation
+//      golden captured from the canonical Turn implementation
 //      (`tests/fixtures/multiremi/first-screen-hotspots-golden.json`), which
 //      covers ordering, counts and field presence;
 //   2. the statement count and the bridged bytes do not grow with the number of
@@ -172,7 +172,7 @@ async function getJson(
 }
 
 describe("MUL-473 first-screen hotspot response shapes", () => {
-  it("matches the pre-optimization golden for pending-tasks and the three assignee filters", async () => {
+  it("matches the canonical golden for pending turns and the three assignee filters", async () => {
     // A capture in the same process (same pinned clock and PRNG) is what makes a
     // golden comparison meaningful: `installFirstScreenHotspotIds` is what the
     // capture script uses.
@@ -260,15 +260,19 @@ describe("MUL-473 first-screen hotspot query counts", () => {
   }, 20000);
 
   it("loads no Skill body on the pending-tasks path", async () => {
+    const referenceHarness = await createHarness({ skillBodyBytes: 0 });
+    const reference = await getJson(referenceHarness, "/api/turns?status=pending&limit=500");
     const harness = await createHarness({ skillBodyBytes: 64_000 });
     const baseline = await getJson(harness, "/api/turns?status=pending&limit=500");
     // Each fixture Agent carries a 64 KB Skill file. A hydrated Agent load would
-    // pull all 20 across the bridge; the lite projection keeps it to the row.
-    expect(baseline.bytes).toBeLessThan(40_000);
+    // pull all 20 across the bridge. Canonical Turn lists include current Attempt
+    // metadata; increasing Skill bodies must add no bytes or queries at all.
+    expect(baseline.bytes).toBe(reference.bytes);
+    expect(baseline.statements).toBe(reference.statements);
     const skillSql = [...harness.probe.bySql.keys()].filter((statement) =>
       /multiremi_skill_files/i.test(statement));
     expect(skillSql).toEqual([]);
-  }, 20000);
+  }, 90000); // Both full PG fixtures are outside the measured reads.
 
   it("keeps my-issues' statement count flat for id-shaped assignee filters", async () => {
     const byUserId: number[] = [];

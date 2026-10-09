@@ -1,5 +1,6 @@
 import type { SqlDatabase } from "../db/postgres.js";
 import { nowIso } from "@multiremi/ids.js";
+import { createTurnExecutionReadProjection } from "../turn-execution-records.js";
 
 export const FOLD_AGENT_READ_STATE_MIGRATION = "20261005_fold_agent_read_state";
 
@@ -26,6 +27,9 @@ export function foldAgentReadState(db: SqlDatabase): void {
       }
     }
     db.run("UPDATE multiremi_turns SET trigger_message_id=trigger_comment_id WHERE trigger_comment_id IS NOT NULL");
+    // PostgreSQL expands l.* when the view is created. Include the final lane
+    // columns before any caller can prepare a query on the first startup.
+    createTurnExecutionReadProjection(db);
     db.run("INSERT INTO multiremi_schema_migrations(id,applied_at) VALUES(?,?)", [FOLD_AGENT_READ_STATE_MIGRATION, at]);
   })();
 }

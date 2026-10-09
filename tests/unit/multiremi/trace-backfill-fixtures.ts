@@ -32,8 +32,9 @@ export function insertSyntheticTask(db: SqlDatabase, task: SyntheticTask): void 
       sessionId, task.issueId, task.createdAt, task.createdAt);
   }
   db.run(`INSERT INTO multiremi_turns(id,session_id,seq,agent_id,status,current_attempt_id,issue_id,workspace_id,
-    legacy_prompt,created_at,started_at,ended_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-    task.id, sessionId, seq, task.agentId, status, task.id, task.issueId ?? null, workspace, "synthetic",
+    chat_session_id,issue_session_id,legacy_prompt,created_at,started_at,ended_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    task.id, sessionId, seq, task.agentId, status, task.id, task.issueId ?? null, workspace,
+    task.chatSessionId ?? null, task.issueSessionId ?? null, "synthetic",
     task.createdAt, task.startedAt ?? null, ended);
   db.run(`INSERT INTO multiremi_turn_attempts(id,turn_id,attempt_no,status,runtime_id,provider,created_at,updated_at,
     accepted_at,started_at,ended_at) VALUES(?,?,1,?,?,?,?,?,?,?,?)`,

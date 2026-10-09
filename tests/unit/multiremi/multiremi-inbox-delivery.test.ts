@@ -90,7 +90,8 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           else store.cancelTask(task.id);
           const queued = store.listTasksForIssue(issue.id).filter(row => row.status === "queued");
           expect(queued).toHaveLength(1);
-          expect(queued[0]).toMatchObject({ wakeSource: "platform_to_owner", triggerCommentId: entry.id });
+          expect(queued[0]).toMatchObject({ wakeSource: "re_ring", triggerCommentId: entry.id });
+          expect(store.getMessage(entry.id)?.wake_reason).toBe("platform_to_owner");
           expect(queued[0]!.prompt).toBe(entry.body_md);
           const wakeSeq = Number(db.query("SELECT wake_seq FROM multiremi_turn_execution_records WHERE id = ?").get(queued[0]!.id).wake_seq);
           expect(wakeSeq).toBe(entry.seq);
@@ -227,7 +228,8 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         store.completeTask(source.id, { output: "Report", sessionId: "provider_delegate" });
         const queued = store.listTasksForIssue(issue.id).filter(task => task.status === "queued" && task.agentId === leader.id);
         expect(queued).toHaveLength(1);
-        expect(queued[0]!.wakeSource).toBe("platform_to_owner");
+        expect(queued[0]!.wakeSource).toBe("delegation_return");
+        expect(store.getMessage(store.getTurnForAttempt(queued[0]!.id)!.trigger_message_id!)?.wake_reason).toBe("platform_to_owner");
         expect(store.claimTask(runtime.id)?.id).toBe(queued[0]!.id);
         expect(db.query("SELECT id FROM multiremi_issue_activity WHERE issue_id = ? AND type = 'wake_downgraded' AND data LIKE '%already_covered%'").all(issue.id))
           .toHaveLength(0);
@@ -296,7 +298,8 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           else store.cancelTask(source.id);
           const returns = store.listTasksForIssue(issue.id).filter(row => row.status === "queued" && row.agentId === leader.id);
           expect(returns).toHaveLength(1);
-          expect(returns[0]).toMatchObject({ issueSessionId: session.id, wakeSource: "platform_to_owner" });
+          expect(returns[0]).toMatchObject({ issueSessionId: session.id, wakeSource: "delegation_return" });
+          expect(store.getMessage(store.getTurnForAttempt(returns[0]!.id)!.trigger_message_id!)?.wake_reason).toBe("platform_to_owner");
           expect(store.getTask(source.id)?.delegationReturnTaskId).toBe(returns[0]!.id);
           expect(store.listConversationLogShown(session.id).filter(row => row.metadata.message_source && (row.metadata.message_source as {taskId?:string}).taskId === source.id))
             .toHaveLength(1);
@@ -430,7 +433,10 @@ describe("MUL-484 inbox delivery and pending turns", () => {
               pendingId = delivered[0]!.task!.id;
             }
             const pending = store.getTask(pendingId)!;
-            expect(pending.wakeSource).toBe(source==="mention"?"human_sender":"platform_to_owner");
+            expect(pending.wakeSource).toBe(source === "mention" ? "human_sender"
+              : source === "re_ring" || source === "delegation_return" ? source : "platform_to_owner");
+            expect(store.getMessage(store.getTurnForAttempt(pendingId)!.trigger_message_id!)?.wake_reason)
+              .toBe(source === "mention" ? "human_sender" : "platform_to_owner");
             const seq = wakeSeq(db, pendingId);
             expect(seq).toBeGreaterThan(0);
             const later = store.appendConversationLog({ sessionId: session.id, kind: "system", authorType: "system",
@@ -660,7 +666,8 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         store.completeTask(main.id, { output: "Task completed.", sessionId: "main_provider" });
         const rings = store.listTasksForIssue(issue.id).filter(row => row.status === "queued" && row.agentId === agent.id);
         expect(rings).toHaveLength(1);
-        expect(rings[0]).toMatchObject({ wakeSource: "platform_to_owner", execution_scope: "" });
+        expect(rings[0]).toMatchObject({ wakeSource: "re_ring", execution_scope: "" });
+        expect(store.getMessage(unread.id)?.wake_reason).toBe("platform_to_owner");
         expect(store.listTasks().filter(row => row.chatSessionId === chat.id && row.status === "queued"))
           .toHaveLength(0);
         expect(store.getConversationLogEntryById(unread.id)?.body_md).toBe("Default scope only");
@@ -825,7 +832,8 @@ describe("MUL-484 inbox delivery and pending turns", () => {
         store.failTask(task.id, { error: "Disconnected", failureReason: "runtime_offline", sessionId: "provider_safe" });
         const queued = store.listTasksForIssue(issue.id).filter(row => row.status === "queued");
         expect(queued).toHaveLength(1);
-        expect(queued[0]).toMatchObject({ wakeSource: "platform_to_owner", triggerCommentId: unread.id });
+        expect(queued[0]).toMatchObject({ wakeSource: "re_ring", triggerCommentId: unread.id });
+        expect(store.getMessage(unread.id)?.wake_reason).toBe("platform_to_owner");
         expect(wakeSeq(db, queued[0]!.id)).toBe(unread.seq);
         expect(store.getSessionAgentLane(session.id, agent.id)?.cursorSeq).toBe(0);
         expect(store.getConversationLogEntryById(unread.id)?.body_md).toBe(unread.body_md);
@@ -858,13 +866,14 @@ describe("MUL-484 inbox delivery and pending turns", () => {
           if (steers.length) store.consumeTaskSteerMessages(task.id, steers.map(row => row.id));
           store.completeTask(task.id, { output: "Task completed.", sessionId: "chat_provider" });
           expect(store.listTasks().filter(row => row.chatSessionId === chat.id && row.wakeSource === "re_ring"))
-            .toHaveLength(0);
+            .toHaveLength(wake === "now" ? 1 : 0);
           const pending = store.listTasks().filter(row => row.chatSessionId === chat.id && row.status === "queued");
           expect(pending).toHaveLength(wake === "now" ? 1 : 0);
           if (wake === "now") {
             expect(pending[0]!.issueId).toBeNull();
             expect(store.getTurnForAttempt(pending[0]!.id)?.session_id).toBe(chat.id);
             expect(pending[0]!.prompt).toBe("Chat report");
+            expect(store.getMessage(store.getTurnForAttempt(pending[0]!.id)!.trigger_message_id!)?.wake_reason).toBe("platform_to_owner");
           }
         });
       }, 30_000);

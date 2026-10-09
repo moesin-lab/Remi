@@ -206,6 +206,8 @@ describe("MUL-464 serialized platform-operation invariants", () => {
   });
 
   test("report maps every contract status to its terminal or active slot", () => {
+    // Each status owns a fresh fully migrated store. The complete matrix took
+    // 5.9s on CI; its budget includes fixture migration, not only report().
     for (const status of contractStatuses) {
       const f = repoFixture();
       try {
@@ -216,7 +218,7 @@ describe("MUL-464 serialized platform-operation invariants", () => {
         expect(row.finished_at, status).toBe(isTerminalPlatformOperationStatus(status) ? row.updated_at : null);
       } finally { f.close(); }
     }
-  });
+  }, 15_000);
 
   test("a terminal operation ignores subsequent reports for every contract status", () => {
     for (const terminal of terminalStatuses) {

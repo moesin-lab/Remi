@@ -37,7 +37,8 @@ store 的四路实时事件由 [realtime-fanout](../packages/server/src/api/real
 两个 API 进程之间用 [peer channel](../packages/server/src/api/peer/peer-channel.ts)（`POST /internal/peer/events`）互转，`MULTIREMI_PEER_URL` 不设即完全关闭。
 协议、消息引用、字节预算与角色解析链见 [Realtime peer channel](dev/realtime-peer.md)。
 
-**任务执行**：issue/chat/autopilot 产生 task → [任务存储](../packages/server/src/store/repos/tasks-repo.ts) →
+**任务执行**：issue/chat/autopilot 经[统一消息入口](../packages/server/src/store/inbox/send-message.ts)写 Message →
+[lane 状态机](../packages/server/src/store/inbox/lane-machine.ts)创建或合并 Turn → current attempt →
 [服务端 offer 泵](../packages/server/src/api/daemon-protocol/task-offers.ts) 推送 →
 [worker loop](../packages/server/src/worker/daemon.ts) accept 并执行 →
 [AgentRuntime](../packages/daemon/src/agent-runtime/runtime.ts) 组装执行上下文 → ACP 或原生 agy provider → 消息、usage 和终态上报。
@@ -103,7 +104,7 @@ PostgreSQL 的 `PgBridge.request` 用 `Atomics.wait` 等待 [pg-worker](../packa
 [统一存储](../packages/server/src/store/unified-model-schema.ts)把消息头放到日志列，工作身份放到 turns，执行放到 turn_attempts，agent/member 游标共用 session_lanes。
 [启动迁移](../packages/server/src/store/unified-model-migration.ts)预检后一次切换；运行路径不再读写三张退役对话表。
 执行消费者使用 [只读投影](../packages/server/src/store/turn-execution-records.ts)，写入口更新规范表；轮卡由 [轮和当前尝试](../packages/server/src/store/turn-attempts.ts)投影，统计及最终回复不再镜像到日志 turn 行。
-重试、redispatch 与孤儿恢复只替换尝试，不写 Issue 状态。自动化账本引用轮，在 `auto_*` 对话保留 timer 输入与运行消息。
+自动重试、监督者 redispatch 与孤儿恢复只替换尝试，不写 Issue 状态。成员经 canonical Turn retry 恢复 failed/cancelled 轮时保留同一 Turn、Agent、Session 和输入；公开 Issue 按 pending 规则单次推导状态，Chat-owned 工作投影不推导，done/cancelled Issue 不重开。授权与事务边界见[统一收件箱 Store](dev/inbox-store.md)。自动化账本引用轮，在 `auto_*` 对话保留 timer 输入与运行消息。
 [sendMessageWithinTransaction](../packages/server/src/store/inbox/send-message.ts)是唯一消息写入口，领域 producer 与执行投影均经它落库；[lane 状态机](../packages/server/src/store/inbox/lane-machine.ts)负责 pending 合并、运行中插话、补铃和兜底扫描。人的收件箱使用 member lane；提问与决定及其一次性令牌保存在消息。Issue 只由轮和未答 decision 推导，子单变化发送父单 status。Daemon 适配器与用户接口所需 Store facade 已提供，传输/CLI/页面由消费者集成；接口和事务边界见[统一收件箱 Store](dev/inbox-store.md)。
 完整边界见 [ADR 0016](adr/0016-unified-message-inbox-and-turn.md)及[切换手册](deploy/unified-model-cutover.md)。
 

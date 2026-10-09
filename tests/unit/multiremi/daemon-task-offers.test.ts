@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, spyOn, setSystemTime } from "bun:test";
 import { DaemonProtocolLayer } from "@multiremi/api/daemon-protocol/index.js";
-import { DaemonTaskOffers } from "@multiremi/api/daemon-protocol/task-offers.js";
+import { DaemonTaskOffers, daemonTurnOfferPayload } from "@multiremi/api/daemon-protocol/task-offers.js";
 import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.js";
 import { DAEMON_MIN_CLI_VERSION, DAEMON_OFFER_COOLDOWN_MS, DAEMON_OFFER_TIMEOUT_MS } from "@multiremi/contracts/daemon-protocol.js";
 import type { MultiremiTaskWithAgent } from "@multiremi/contracts/types.js";
@@ -26,7 +26,11 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
   const layer = new DaemonProtocolLayer({ store });
   layers.push(layer);
   const offers = new DaemonTaskOffers({ store, layer, clock, sweepMs,
-    prepare: prepare ?? (async task => ({ id: task.id, prompt: task.prompt, runtime_id: task.runtimeId, auth_token: "fixture-capability" })) });
+    prepare: async task => {
+      const execution = prepare ? await prepare(task)
+        : { runtime_id: task.runtimeId, auth_token: "fixture-capability" };
+      return execution ? daemonTurnOfferPayload(execution, store.getDaemonTurnBridge().offerInput(task)) : null;
+    } });
   const frames: Record<string, any>[] = [];
   let sendStatus: number | null = null;
   const session = layer.openSession({ send: text => { frames.push(JSON.parse(text)); return sendStatus ?? text.length; }, close() {} },
@@ -51,7 +55,7 @@ describe("A-3 task offers", () => {
   it("dispatches irreducible structure that exceeds the soft budget but fits the actual protocol hard limit", async () => {
     const h = fixture(async task => ({ id: task.id, prompt: task.prompt, repos: new Array(300_000).fill(0) }));
     const task = h.task(); await h.hello();
-    expect(h.offered()[0]!.p.id).toBe(task.id);
+    expect(h.offered()[0]!.p.attempt_id).toBe(task.id);
     expect(Buffer.byteLength(JSON.stringify(h.offered()[0]))).toBeGreaterThan(512 * 1024);
     expect(Buffer.byteLength(JSON.stringify(h.offered()[0]))).toBeLessThan(1_048_576);
     expect(h.store.getTask(task.id)).toMatchObject({ status: "dispatched", failureReason: null });
@@ -62,14 +66,14 @@ describe("A-3 task offers", () => {
       agent: { id: task.agentId }, repos: [{ url: task.prompt === "huge" ? "x".repeat(1_100_000) : "https://github.com/example/repo.git" }] }));
     const huge = h.task(0, "huge"); const next = h.task();
     await h.hello();
-    expect(h.offered()[0]!.p.id).toBe(huge.id);
+    expect(h.offered()[0]!.p.attempt_id).toBe(huge.id);
     expect(h.offered()[0]!.p.repos[0].url).toContain("还有");
     expect(h.offered()[0]!.p.auth_token).toBe("fixture-capability");
     expect(h.offered()[0]!.p.agent.id).toBe(huge.agentId);
     expect(Buffer.byteLength(JSON.stringify(h.offered()[0]))).toBeLessThan(1_048_576);
     await h.accept(); h.store.startTask(huge.id); h.store.completeTask(huge.id, { output: "done" });
     h.offers.kick(); await h.layer.drain();
-    expect(h.offered().map(frame => frame.p.id)).toEqual([huge.id, next.id]);
+    expect(h.offered().map(frame => frame.p.attempt_id)).toEqual([huge.id, next.id]);
   });
 
   it("fails only irreducible structure with size diagnostics and continues the same runtime queue", async () => {
@@ -81,10 +85,10 @@ describe("A-3 task offers", () => {
     expect(h.store.getTask(huge.id)).toMatchObject({ status: "failed", failureReason: "offer_too_large" });
     expect(h.store.getTask(huge.id)!.error).toContain("parts=repos:");
     expect(h.store.getIssue(issue.id)!.status).not.toBe("blocked");
-    expect(h.offered().map(frame => frame.p.id)).toEqual([next.id]);
+    expect(h.offered().map(frame => frame.p.attempt_id)).toEqual([next.id]);
     await h.accept();
     h.clock.advance(120_000); h.offers.kick(); await h.layer.drain();
-    expect(h.offered().map(frame => frame.p.id)).toEqual([next.id]);
+    expect(h.offered().map(frame => frame.p.attempt_id)).toEqual([next.id]);
     expect(h.store.listTasks().filter(task => task.issueId === issue.id)).toHaveLength(1);
   });
 
@@ -93,7 +97,7 @@ describe("A-3 task offers", () => {
       issue: { id: task.issueId, description: "description".repeat(100_000) },
       repository_wiki_contexts: [{ docs: [{ body: "wiki".repeat(200_000) }] }] }));
     const issue = h.store.createIssue({ title: "Oversized offer" });
-    const task = h.store.createTask({ agentId: h.agentIds[0]!, issueId: issue.id, prompt: "work" });
+    const task = h.store.createTask({ agentId: h.agentIds[0]!, issueId: issue.id, prompt: "触发".repeat(200_000) });
     await h.hello();
     expect(h.offered()).toHaveLength(1);
     expect(Buffer.byteLength(JSON.stringify(h.offered()[0]))).toBeLessThan(512 * 1024);
@@ -110,7 +114,7 @@ describe("A-3 task offers", () => {
     expect(h.store.getTask(task.id)).toMatchObject({ status: "queued", offeredAt: null, acceptedAt: null });
     expect(h.offered()).toHaveLength(1);
     await h.send("hb", { active_task_count: 0 }); await h.layer.drain();
-    expect(h.offered().map(frame => frame.p.id)).toEqual([task.id, task.id]);
+    expect(h.offered().map(frame => frame.p.attempt_id)).toEqual([task.id, task.id]);
     expect(h.clock.now()).toBeLessThan(Date.now() + DAEMON_OFFER_COOLDOWN_MS);
   });
 
@@ -190,7 +194,7 @@ describe("A-3 task offers", () => {
     try {
       h.clock.advance(59_999); await h.layer.drain(); expect(h.offered()).toHaveLength(0);
       h.clock.advance(1); await h.layer.drain();
-      expect(h.offered()[0]!.p.id).toBe(task.id); expect(metric).toHaveBeenCalledTimes(1);
+      expect(h.offered()[0]!.p.attempt_id).toBe(task.id); expect(metric).toHaveBeenCalledTimes(1);
       expect(JSON.parse(warn.mock.calls[0]![0] as string)).toEqual({
         event: "daemon_offer_sweep_recovered", runtime_id: h.runtimeIds[0], task_id: task.id,
       });
@@ -204,7 +208,12 @@ describe("A-3 task offers", () => {
   it("hello offers the existing queue, with the claim payload and capability intact", async () => {
     const h = fixture(); const task = h.task(); await h.hello();
     expect(h.offered()).toHaveLength(1);
-    expect(h.offered()[0]!.p).toMatchObject({ id: task.id, prompt: task.prompt, auth_token: "fixture-capability" });
+    expect(h.offered()[0]!.p).toMatchObject({ turn_id: h.store.getTurnForAttempt(task.id)!.id,
+      attempt_id: task.id, auth_token: "fixture-capability" });
+    expect(h.offered()[0]!.p.input_messages).toHaveLength(1);
+    expect(h.offered()[0]!.p.input_messages[0].body_md).toContain(task.prompt);
+    expect(h.offered()[0]!.p).not.toHaveProperty("id");
+    expect(h.offered()[0]!.p).not.toHaveProperty("prompt");
     expect(h.store.getTask(task.id)?.offeredAt).not.toBeNull();
     await h.accept();
     expect(h.store.getTask(task.id)?.acceptedAt).not.toBeNull();
@@ -233,7 +242,7 @@ describe("A-3 task offers", () => {
       await h.hello(); expect(h.store.getTask(task.id)?.status).toBe("queued");
       expect(h.offered()).toHaveLength(0); failed = false;
       h.clock.advance(30_000); await h.layer.drain();
-      expect(h.offered()[0]!.p.id).toBe(task.id);
+      expect(h.offered()[0]!.p.attempt_id).toBe(task.id);
     } finally { warn.mockRestore(); }
   });
 
@@ -245,7 +254,7 @@ describe("A-3 task offers", () => {
     await h.hello(); expect(h.offered()).toHaveLength(1); await h.accept();
     h.store.startTask(first.id); h.store.completeTask(first.id, { output: "done" });
     h.offers.terminal(first.id, h.runtimeIds[0]!); await h.layer.drain();
-    expect(h.offered().at(-1)!.p.id).toBe(next.id);
+    expect(h.offered().at(-1)!.p.attempt_id).toBe(next.id);
     expect(h.offered().at(-1)!.rt).toBe(h.runtimeIds[1]);
   });
 
@@ -258,7 +267,7 @@ describe("A-3 task offers", () => {
       await h.hello(); expect(h.offered()).toHaveLength(0);
       setSystemTime(now + 9_999); h.clock.advance(9_999); await h.layer.drain(); expect(h.offered()).toHaveLength(0);
       setSystemTime(now + 10_000); h.clock.advance(1); await h.layer.drain();
-      expect(h.offered()[0]!.p.id).toBe(task.id);
+      expect(h.offered()[0]!.p.attempt_id).toBe(task.id);
     } finally { setSystemTime(); }
   });
 
@@ -269,7 +278,7 @@ describe("A-3 task offers", () => {
     const next = h.task(); h.offers.kick(h.runtimeIds[0]); await h.layer.drain();
     expect(h.offered()).toHaveLength(1);
     h.store.completeTask(first.id, { output: "done" }); h.offers.terminal(first.id, h.runtimeIds[0]!); await h.layer.drain();
-    expect(h.offered().at(-1)!.p.id).toBe(next.id);
+    expect(h.offered().at(-1)!.p.attempt_id).toBe(next.id);
   });
 
   it("keeps work queued during platform drain and wakes at the lease deadline without a sweep", async () => {
@@ -284,7 +293,7 @@ describe("A-3 task offers", () => {
       setSystemTime(now + remaining - 1); h.clock.advance(remaining - 1); await h.layer.drain();
       expect(h.offered()).toHaveLength(0);
       setSystemTime(now + remaining + 1); h.clock.advance(2); await h.layer.drain();
-      expect(h.offered()[0]!.p.id).toBe(task.id);
+      expect(h.offered()[0]!.p.attempt_id).toBe(task.id);
     } finally { setSystemTime(); }
   });
 
@@ -295,7 +304,7 @@ describe("A-3 task offers", () => {
     await h.send("hb", { active_task_count: 0 }, { id: "hb2" }); await h.layer.drain();
     expect(h.offered()).toHaveLength(0);
     await h.send("hb", { active_task_count: 1 }, { id: "hb3" }); await h.layer.drain();
-    expect(h.offered()[0]!.p.id).toBe(task.id);
+    expect(h.offered()[0]!.p.attempt_id).toBe(task.id);
   });
 
   it("requeues an unanswered offer at 30s and cools that runtime for another 30s", async () => {
@@ -309,11 +318,11 @@ describe("A-3 task offers", () => {
 
   it("reject cools only the rejecting runtime on a shared daemon", async () => {
     const h = fixture(undefined, 2); const first = h.task(0); const second = h.task(1); await h.hello();
-    const rejected = h.offered().find(frame => frame.p.id === first.id)!;
+    const rejected = h.offered().find(frame => frame.p.attempt_id === first.id)!;
     await h.send("res", { ok: false, code: "capacity" }, { re: String(rejected.seq), ack: rejected.seq });
     await h.layer.drain();
     expect(h.store.getTask(first.id)?.status).toBe("queued");
-    await h.accept(h.offered().find(frame => frame.p.id === second.id)!);
+    await h.accept(h.offered().find(frame => frame.p.attempt_id === second.id)!);
     expect(h.store.getTask(second.id)?.acceptedAt).not.toBeNull();
     h.offers.kick(); await h.layer.drain(); expect(h.offered()).toHaveLength(2);
   });
@@ -339,12 +348,16 @@ describe("A-3 task offers", () => {
     expect(h.store.getTask(huge.id)?.status).toBe("dispatched");
     expect(h.store.getTask(huge.id)?.error).toBeNull();
     expect(h.offered()).toHaveLength(1);
-    expect(h.offered()[0]!.p.id).toBe(huge.id);
-    expect(h.offered()[0]!.p.prompt).toContain("还有");
+    expect(h.offered()[0]!.p.attempt_id).toBe(huge.id);
+    const message = h.offered()[0]!.p.input_messages[0];
+    expect(message.body_md).toContain("还有");
+    expect(message.body_md).toContain(`remi message list ${message.session_id} --from ${message.seq - 1} --to ${message.seq}`);
+    expect(message.body_md).not.toContain("undefined");
+    expect(h.store.getMessage(message.id)!.body_md).toBe(huge.prompt);
     expect(Buffer.byteLength(JSON.stringify(h.offered()[0]))).toBeLessThan(512 * 1024);
     await h.accept(); h.store.startTask(huge.id); h.store.completeTask(huge.id, { output: "done" });
     h.offers.kick(); await h.layer.drain();
-    expect(h.offered()[1]!.p.id).toBe(next.id);
+    expect(h.offered()[1]!.p.attempt_id).toBe(next.id);
   });
 
   it("dispatches huge agent instructions and then the next task on the same runtime", async () => {
@@ -367,7 +380,7 @@ describe("A-3 task offers", () => {
     expect(Buffer.byteLength(JSON.stringify(h.offered()[0]))).toBeLessThan(512 * 1024);
     await h.accept(); h.store.startTask(task.id); h.store.completeTask(task.id, { output: "done" });
     h.offers.kick(); await h.layer.drain();
-    expect(h.offered()[1]!.p.id).toBe(next.id);
+    expect(h.offered()[1]!.p.attempt_id).toBe(next.id);
   });
 
   it("does not reset an accepted Chat dispatch through the stale workspace recovery path", async () => {
@@ -391,14 +404,14 @@ describe("A-3 task offers", () => {
     for (let i = 0; i < 64; i++) expect(h.session.sendEvent({ t: "plugin.desired_revision", p: { revision: i } }).ok).toBe(true);
     const task = h.task(); h.offers.kick(h.runtimeIds[0]); await h.layer.drain();
     expect(h.store.getTask(task.id)?.status).toBe("queued"); expect(h.offered()).toHaveLength(0);
-    await h.send("ack", { ack: 64 }); await h.layer.drain(); expect(h.offered()[0]!.p.id).toBe(task.id);
+    await h.send("ack", { ack: 64 }); await h.layer.drain(); expect(h.offered()[0]!.p.attempt_id).toBe(task.id);
   });
 
   it("waits for drain when the socket is paused", async () => {
     const h = fixture(); await h.hello(); h.setSendStatus(-1);
     h.session.sendEvent({ t: "plugin.desired_revision", p: { revision: 1 } }); h.setSendStatus(null);
     const task = h.task(); h.offers.kick(h.runtimeIds[0]); await h.layer.drain(); expect(h.offered()).toHaveLength(0);
-    h.session.handleDrain(); await h.layer.drain(); expect(h.offered()[0]!.p.id).toBe(task.id);
+    h.session.handleDrain(); await h.layer.drain(); expect(h.offered()[0]!.p.attempt_id).toBe(task.id);
   });
 
   it("runtime.ready cancels terminal active tasks, recovers missing running tasks and preserves active ones", async () => {

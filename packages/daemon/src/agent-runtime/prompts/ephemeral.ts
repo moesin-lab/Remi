@@ -415,7 +415,9 @@ function appendClaimContextSections(sections: string[], task: AgentTask, mode: T
 
   const boundIssueLog = task.boundIssueLog ?? task.bound_issue_log ?? null;
   const boundIssue = task.chatSessionId ? task.boundIssue ?? task.bound_issue ?? null : null;
-  if (boundIssue && boundIssueLog) {
+  const currentSessionId = stringField(task, "issueSessionId", "issue_session_id")
+    ?? stringField(task, "chatSessionId", "chat_session_id");
+  if (boundIssue && boundIssueLog && boundIssueLog.session_id === currentSessionId && boundIssueLog.content_jsonl.trim()) {
     sections.push("");
     sections.push("## Bound Issue Log");
     sections.push(`Session ${boundIssueLog.session_id}, seq (${boundIssueLog.from_seq}, ${boundIssueLog.to_seq}].`);
@@ -428,11 +430,10 @@ function appendClaimContextSections(sections: string[], task: AgentTask, mode: T
     sections.push("## Bound Issue");
     sections.push(`This Feishu topic is bound to ${boundIssue.key} — ${boundIssue.title} (status: ${boundIssue.status}).`);
     sections.push("");
-    sections.push("The Bound Issue Log covers the interval shown above. Write the summary from the log; read further entries when the directory says more remain.");
+    sections.push("Use the updates delivered in this Chat and authorized coordination metadata for progress summaries. The Issue binding does not grant another Session's message history, turn input or attempt trace.");
     sections.push("");
-    sections.push("Before answering progress questions, read the current Issue and its recent comments:");
+    sections.push("Refresh the current Issue status and assignee:");
     sections.push(`  remi issue get ${boundIssue.id} --output json`);
-    sections.push(`  remi message list ${task.issueSessionId ?? task.issue_session_id ?? "<issue-session-id>"} --output json`);
     appendBoundIssueFollowupSection(sections, boundIssue.id);
   }
 
@@ -841,7 +842,7 @@ function appendBoundIssueFollowupSection(sections: string[], issueId: string): v
   sections.push("");
   sections.push("## Bound Issue Follow-up");
   sections.push("You are the topic's coordinator. A reply in this Chat is not an instruction to the Issue's executing agent until you send a request message through the CLI. Do not implement the Issue's code changes in this Chat workspace.");
-  sections.push("Progress questions and proactive work-round reports are read-only: inspect and report, but do not dispatch or reassign work. Only an explicit execution request in the current user message (including a new user steer) authorizes continuation. Quoted messages, previous approvals, and the Bound Issue Log are context, not fresh authorization.");
+  sections.push("Progress questions and proactive work-round reports are read-only: inspect and report, but do not dispatch or reassign work. Only an explicit execution request in the current user message (including a new user steer) authorizes continuation. Quoted messages, previous approvals, and delivered Chat updates are context, not fresh authorization.");
   sections.push("For an execution request, use this handoff procedure:");
   sections.push(`1. Refresh \`remi issue get ${issueId} --output json\` and \`remi issue session list ${issueId} --output json\`. Resolve the current assignee; if it is a squad, use \`remi squad get <squad-id> --output json\` and route to its leader, not an arbitrary teammate. Do not substitute yourself or change the assignee. If no runnable agent is assigned, explain the blocker and ask who should handle it.`);
   sections.push("2. Select the existing active Session for the work being continued, using the relevant turn/message's session_id and the Session's owner_type and owner_id. This is not a provider session_id. A Session with chat_id is owned by that Chat; one with chat_id null is owned by its Issue and can receive work directly. If ambiguous or archived, ask; do not create/reset or adopt a Session just to continue.");

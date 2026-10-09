@@ -67,6 +67,7 @@ export interface FirstScreenHotspotsFixture {
   issueIds: string[];
   taskIds: string[];
   turnIds: string[];
+  messageIds: string[];
   counts: {
     sessions: number;
     agents: number;
@@ -319,6 +320,7 @@ export function seedFirstScreenHotspotsFixture(
     issueIds,
     taskIds: uniqueTaskIds,
     turnIds: uniqueTaskIds.map(id=>store.getTurnForAttempt(id)!.id),
+    messageIds: uniqueTaskIds.map(id=>store.getTurnForAttempt(id)!.trigger_message_id).filter((id): id is string => id !== null),
     counts: {
       sessions: sessionCount,
       agents: agentCount,

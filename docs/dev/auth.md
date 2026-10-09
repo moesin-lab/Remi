@@ -34,7 +34,13 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 
 公开 Issue-owned 或无 Chat 的 Task 路由沿用既有 Workspace、owner、Agent 及各路由权限，不统一限制为来源凭据的本 Task。经验证的旧 Task 凭据在 raw Task 列表缺少 `workspaceId`（`null`/`undefined`）时保留原兼容筛选；这不跳过其他路由对目标工作区的检查。Session events、logs 与 messages 仍采用本 Session 内容守卫。通用派发与 Issue 嵌套 Session Task 创建对公开 Issue-owned 目标沿用 owner/Workspace 基线，保留 Agent、旁聊、delegation 血统及交接次数检查；创建本身不额外授予读取内容或控制任务的权限。私有 Chat-owned 目标继续使用当前 Session 或已验证 Topic 创建边界，私有 Task 读取与控制要求本 Task。
 
+[统一 Turn 路由](../../packages/server/src/api/routers/unified.ts)的 `GET /api/turns/:id?input=true` 先验证真实 current attempt 的内容权限。原生无 owner 任务的 `auto_orphan_*` 输入还要求来源任务无 Issue、Session 或 Chat 归属，与 Turn 同工作区，实际不存在 Issue Session 或 Chat，且有持久化会话头；`auto_orphan_inbox_*` 不属于这个分支。Task 凭据的当前 Turn 必须属于同一 Session，名称前缀本身不授予权限。其他会话继续通过内容守卫；缺失来源 attempt 时 Turn 仅投影 metadata，完整 input 被拒绝，不以历史 prompt 回退。已验证 Topic 的协调权限只提供限定 metadata 和定向消息入口，不授予私有 Session 的 input、attempts 或 trace；公开 Issue-owned Task 的既有读取基线保持不变。
+
 [InboxRepo](../../packages/server/src/store/repos/inbox-repo.ts)按真正接收 Session 的 owner，通过统一消息入口写入委派返回的 status/report，沿用去重、事件通知与已读回执。Chat-owned 返回内容仅保存在私有 Session，Issue-owned 返回内容在对应 Issue Session 中可见；Issue 工作投影不改变这个范围。Chat 删除前按实际 owner 保留执行历史的 Chat 归属，缺失审计指针不能使私有历史转为公开内容。
+
+[performOrganizerAction](../../packages/server/src/store/store.ts)按巡查来源 Turn 的实际 Session owner 写入报告：Chat-owned 报告留在同一私有 Session，即使 Task 的 Chat 审计指针缺失，也不写 Issue 的公开活动或成员通知；Issue-owned 报告写入来源 Issue 的对应 Session，并沿用其通知。动作、审计和报告共用事务，事件在最外层提交后发送。
+
+成员凭据通过 `POST /api/turns/:id/retry` 恢复指定的 failed/cancelled Turn；管理员仍须通过实际 owner 工作区、Chat 创建者和 Agent 可见性检查，daemon 凭据拒绝。[retryTurnAsMember](../../packages/server/src/store/inbox/operations.ts)在工作区锁内重读实际 owner，写前回调重新验证会话与 current attempt 内容权限，不依赖请求入口的旧快照。Task 凭据继续走原监督者或关联控制者的 organizer 身份、模式、旁聊与审计检查，不因成员入口放宽。参数与两种返回值见[Turn HTTP 契约](message-api.md#turn)，活动轮、依赖及状态推导边界见[统一收件箱 Store](inbox-store.md#store-消费接口)。
 
 [TasksRepo](../../packages/server/src/store/repos/tasks-repo.ts)在任务创建锁内拒绝归档 Session 的普通新任务；只有既有 `delegation_return` 与 turn-end `re_ring` 的内部收尾路径，在重读 source 并核对父 Task、return Session、Workspace、Agent 和执行 scope 后可继续。内部收尾授权不暴露为 `CreateTaskInput` 或 API 字段，system 作者、wake source 或 delegation 字段本身不授予越过归档的权限。
 
@@ -82,6 +88,7 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 | 密码账号预配、会话身份、错误凭据、重设及并发边界 | [password-auth.test.ts](../../tests/unit/multiremi/password-auth.test.ts) |
 | Bearer/Cookie、task 权限、daemon 边界与迁移例外 | [multiremi-api-auth.test.ts](../../tests/unit/multiremi/multiremi-api-auth.test.ts) |
 | Agent 操作、私有资源和配置脱敏 | [multiremi-store-agent-authz.test.ts](../../tests/unit/multiremi/multiremi-store-agent-authz.test.ts) |
+| 成员指定轮恢复、Chat 创建者与 Agent 权限、依赖及 PG 并发边界 | [issue-run-recovery.test.ts](../../tests/unit/multiremi/issue-run-recovery.test.ts) |
 | Issue 移动、存量父子/依赖隔离、单工作区 PAT 和 CLI | [multiremi-issue-workspace-boundaries.test.ts](../../tests/unit/multiremi/multiremi-issue-workspace-boundaries.test.ts) |
 | 飞书 Issue 决策卡片、旧跨工作区来源/目标、终态回调与出站隔离 | [multiremi-issue-decision-card-workspace.test.ts](../../tests/unit/multiremi/multiremi-issue-decision-card-workspace.test.ts) |
 | 关系写入锁序、锁后重读及 PG 双连接竞态 | [multiremi-issue-relation-locks.test.ts](../../tests/unit/multiremi/multiremi-issue-relation-locks.test.ts)、[读取限定架构检查](../../tests/arch/issue-relation-reads-workspace-scoped.test.ts) |

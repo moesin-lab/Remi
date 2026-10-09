@@ -14,6 +14,7 @@ import { BunCommandRunner, type CommandRunner } from '@remi-platform/updater/typ
 import { DATA_SCHEMA_INPUTS, isWithin, migrationFingerprint } from '@remi-platform/updater/safety.js';
 import { API_BASE_INPUTS, type ApplicationManifest } from '@remi-platform/updater/application-manifest.js';
 import type { MultiremiPlatformOperation, MultiremiPlatformStatus } from '@multiremi/contracts';
+import { UNIFIED_MODEL_MIGRATION } from '@multiremi/store/unified-model-schema.js';
 import { baseFingerprints } from '../../packages/platform-updater/src/supervisor.mjs';
 
 const internal = process.argv.includes('--internal');
@@ -34,7 +35,7 @@ const calls: string[][] = [];
 const traced: CommandRunner = { async run(command, args, options) {
   calls.push(args);
   const result = await runner.run(command, args, options);
-  if (result.exitCode !== 0 && !args.includes('pg_isready')) console.error('isolated fixture command failed:', args[0], result.stderr.slice(-1800));
+  if (result.exitCode !== 0 && !args.includes('pg_isready')) console.error('isolated fixture command failed:', args[0], redactFixtureLogs(result.stderr).slice(-1800));
   return result;
 } };
 async function docker(args: string[]) {
@@ -56,6 +57,8 @@ globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestIni
   return path ? new Response(Bun.file(path)) : originalFetch(input, init);
 }) as typeof fetch;
 let started = false, builtApi = false, builtWeb = false, builtUpdater = false;
+let fixtureTokens: string[] = [];
+function redactFixtureLogs(text: string) { return fixtureTokens.reduce((value, token) => value.replaceAll(token, '<redacted>'), text); }
 try {
   for (const image of new Set([bunBase, nodeBase, pgBase, apiBaseImage, webBaseImage])) await docker(['image', 'inspect', '--format', '{{.Id}}', image]);
   const apiRoot = join(root, 'api');
@@ -104,6 +107,7 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
   const persistent = join(root, 'persistent'); await mkdir(persistent); await chmod(persistent, 0o777); await save(join(persistent, 'transcript.txt'), 'agent transcript must survive');
   const pgName = project + '-postgres-1';
   const adminToken = randomUUID(), updaterToken = randomUUID();
+  fixtureTokens = [adminToken, updaterToken];
   const portProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('fixture') });
   const reservedApiPort = portProbe.port; portProbe.stop(true);
   const webProbe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('fixture') });
@@ -111,7 +115,7 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
   await save(envFile, '');
   const model = { services: {
     postgres: { image: pgBase, environment: { POSTGRES_HOST_AUTH_METHOD: 'trust', POSTGRES_USER: 'fixture', POSTGRES_DB: 'fixture' }, volumes: ['db:/var/lib/postgresql/data'], healthcheck: { test: ['CMD-SHELL', 'pg_isready -U fixture -d fixture'], interval: '1s', retries: 30 } },
-    api: { image: apiImage, init: true, environment: { MULTIREMI_DATABASE_URL: 'postgresql://fixture@postgres:5432/fixture', MULTIREMI_HOME: '/srv/multiremi', FIXTURE_ADMIN_TOKEN: adminToken, FIXTURE_UPDATER_TOKEN: updaterToken }, ports: [`127.0.0.1:${reservedApiPort}:6120`], volumes: [{ type: 'bind', source: persistent, target: '/srv/multiremi' }], depends_on: { postgres: { condition: 'service_healthy' } } },
+    api: { image: apiImage, init: true, environment: { MULTIREMI_DATABASE_URL: 'postgresql://fixture@postgres:5432/fixture', HOME: '/srv/multiremi', FIXTURE_ADMIN_TOKEN: adminToken, FIXTURE_UPDATER_TOKEN: updaterToken }, ports: [`127.0.0.1:${reservedApiPort}:6120`], volumes: [{ type: 'bind', source: persistent, target: '/srv/multiremi' }], depends_on: { postgres: { condition: 'service_healthy' } } },
     web: { image: webImage, init: true, ports: [`127.0.0.1:${reservedWebPort}:3000`] },
     daemon: { image: bunBase, init: true, command: ['bun', '-e', 'setInterval(()=>Bun.write("/tmp/heartbeat",String(Date.now())),50)'] },
   }, volumes: { db: {} } } as { services: Record<string, any>; volumes: Record<string, object> };
@@ -140,8 +144,19 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
   const apiUrl = `http://127.0.0.1:${apiPort}`, webUrl = `http://127.0.0.1:${webPort}`;
   for (let attempt = 0; ; attempt++) {
     try { if ((await originalFetch(apiUrl + '/readyz')).ok) break; } catch {}
-    if (attempt > 120) { console.error(await docker(['logs', '--tail', '50', apiId])); throw new Error('Fixture API did not start'); } await Bun.sleep(250);
+    if (attempt > 120) { console.error(redactFixtureLogs(await docker(['logs', '--tail', '50', apiId]))); throw new Error('Fixture API did not start'); } await Bun.sleep(250);
   }
+  // Production Compose persists HOME. A durable DB cutover marker requires its
+  // original before/after reports to survive container replacement and rollback.
+  const migrationReports = ['before', 'after'].map(phase => `/srv/multiremi/reports/migrations/${UNIFIED_MODEL_MIGRATION}-${phase}.json`);
+  async function readMigrationReports() {
+    return Promise.all(migrationReports.map(async path => {
+      const result = await traced.run('docker', ['exec', `${project}-api-1`, 'cat', path]);
+      check(result.exitCode === 0, 'Could not read the persistent migration report');
+      return result.stdout;
+    }));
+  }
+  const originalReports = await readMigrationReports();
   const sql = (query: string) => docker(['exec', pgName, 'psql', '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-U', 'fixture', '-d', 'fixture', '-c', query]);
   await sql("INSERT INTO sentinel VALUES(1,'original business data')");
   const schemaAt = async (path: string) => migrationFingerprint((await Promise.all(DATA_SCHEMA_INPUTS.map(file => readFile(join(path, file), 'utf8')))).join(''));
@@ -187,7 +202,10 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
     archives.set(url, path); return manifest;
   }
   const driver = new ContainerApplicationDriver({ kind: 'docker_compose', projectName: project, composeFile, envFile, stateDir: root, apiHealthUrl: apiUrl + '/readyz', webHealthUrl: webUrl + '/login', minimumFreeBytes: 1, verificationTimeoutMs: 10_000,
-    backup: { directory: join(root, 'backups'), dataPaths: [persistent, composeFile, envFile], databaseDumpCommand: ['docker', 'exec', pgName, 'pg_dump', '-U', 'fixture', '-d', 'fixture', '-Fc'], databaseVerifyCommand: ['docker', 'run', '--rm', '-i', '--pull=never', '--network', 'none', '--entrypoint', 'pg_restore', pgBase, '--list'] },
+    // Match production's container-side HOME archive: migration reports are
+    // private files and Bun's runtime cache can contain symlinks.
+    backup: { directory: join(root, 'backups'), dataPaths: [composeFile, envFile], databaseDumpCommand: ['docker', 'exec', pgName, 'pg_dump', '-U', 'fixture', '-d', 'fixture', '-Fc'], databaseVerifyCommand: ['docker', 'run', '--rm', '-i', '--pull=never', '--network', 'none', '--entrypoint', 'pg_restore', pgBase, '--list'],
+      archives: [{ name: 'api-home', dumpCommand: ['docker', 'run', '--rm', '--pull=never', '--network', 'none', '--read-only', '--mount', `type=bind,src=${persistent},dst=/backup,readonly`, '--entrypoint', 'tar', installedApi, '-C', '/backup', '-cf', '-', '.'], verifyCommand: ['docker', 'run', '--rm', '-i', '--pull=never', '--network', 'none', '--entrypoint', 'tar', installedApi, '-tf', '-'] }] },
   }, traced);
   const client = new PlatformUpdaterClient(apiUrl, adminToken, updaterToken);
   const worker = new PlatformUpdateWorker(client, driver, feedUrl);
@@ -204,8 +222,8 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
       } catch {} // API and Web children restart; the updater container continues.
       await Bun.sleep(250);
     }
-    console.error(await docker(['logs', '--tail', '80', `${project}-updater-1`]));
-    console.error(await docker(['logs', '--tail', '30', `${project}-rehearsal-1`]));
+    console.error(redactFixtureLogs(await docker(['logs', '--tail', '80', `${project}-updater-1`])));
+    console.error(redactFixtureLogs(await docker(['logs', '--tail', '30', `${project}-rehearsal-1`])));
     throw new Error('Internal updater failed to complete the queued operation');
   }
   async function queue(body: Record<string, unknown>) {
@@ -216,6 +234,7 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
   const originalReport = client.report.bind(client);
   client.report = async (id, value) => {
     console.log('application phase:', value.status);
+    if (value.error) console.error('application operation failed:', redactFixtureLogs(value.error));
     if (['succeeded', 'failed'].includes(value.status) && (await driver.pendingFinalization())?.operationId === id) {
       check((await originalFetch(apiUrl + '/write', { method: 'POST' })).status === 503, 'Writes were admitted before terminal reporting');
     }
@@ -327,6 +346,11 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
     }
   }
   check(await readFile(join(persistent, 'transcript.txt'), 'utf8') === 'agent transcript must survive', 'Persistent transcript changed');
+  const retainedReports = await readMigrationReports();
+  check(retainedReports.every((report, index) => report === originalReports[index]), 'Application update or rollback lost the original migration reports');
+  console.log('persistent migration reports:', JSON.stringify(retainedReports.map((report, index) => ({
+    phase: index === 0 ? 'before' : 'after', bytes: Buffer.byteLength(report), sha256: createHash('sha256').update(report).digest('hex'), unchanged: true,
+  }))));
   check(Number(await docker(['exec', `${project}-daemon-1`, 'cat', '/tmp/heartbeat'])) > Date.now() - 5000, 'Agent heartbeat stopped');
   await new Promise<void>((ok, fail) => {
     const ws = new WebSocket(apiUrl.replace('http:', 'ws:') + '/ws');
@@ -336,6 +360,15 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
   });
   check(!calls.some(args => args[0] === 'pull'), 'Updater pulled an image');
   console.log(JSON.stringify({ socketFreeInternalUpdater: internal, bundledRuntimesVerified: internal, runtimeVersionsChanged: internal, explicitRuntimeRollbackVerified: internal, unchangedSupervisors: internal, internalApiTriggerVerified: true, operationSurvivedApiRestart: true, activeTaskDrainVerified: true, applicationUpdated: true, unchangedBaseImages: true, unchangedContainersAfterBootstrap: true, failedReleaseRolledBack: true, postUpdateWritesPreserved: true, agentProcessUninterrupted: true, databaseContainerUninterrupted: true, webAndWebSocketVerified: true }));
+} catch (error) {
+  if (started) {
+    for (const service of ['api', 'web']) {
+      const result = await traced.run('docker', ['logs', '--tail', '80', `${project}-${service}-1`]);
+      const logs = redactFixtureLogs(`${result.stdout}\n${result.stderr}`);
+      console.error(`isolated ${service} failure logs:\n${logs}`);
+    }
+  }
+  throw error;
 } finally {
   globalThis.fetch = originalFetch;
   if (started) await compose(['down', '--volumes', '--remove-orphans']).catch(() => {});

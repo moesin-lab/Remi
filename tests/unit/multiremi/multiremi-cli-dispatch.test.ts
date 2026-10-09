@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { delimiter, join } from "node:path";
 import { cliCommandHelp, cliCommandInventory, dispatch } from "../../../apps/remi/cli/index.js";
 import { detectMultiremiProviders } from "../../../apps/remi/cli/multiremi.js";
+import { RETIRED_CLI_COMMANDS } from "../../../apps/remi/cli/core/retired-commands.js";
 
 interface DispatchResult {
   error: unknown;
@@ -151,7 +152,7 @@ describe("remi CLI dispatcher", () => {
 
   it("registers Issue-owned Sessions as executable commands with owner-specific help", async () => {
     const inventory = cliCommandInventory();
-    const actions = ["list", "create", "get", "update", "participant.list", "participant.add", "participant.remove", "event.list", "message.create", "task.list", "task.create", "result.list", "result.publish"];
+    const actions = ["list", "create", "get", "update", "participant.list", "participant.add", "participant.remove", "result.list", "result.publish"];
     for (const action of actions) {
       const entry = inventory.find((candidate) => candidate.id === `issue.session.${action}`)!;
       expect(entry, action).toBeDefined();
@@ -164,6 +165,12 @@ describe("remi CLI dispatcher", () => {
       const help = cliCommandHelp(entry.path);
       expect(help, action).toContain("<issue>");
       expect(help, action).not.toContain("<chat>");
+    }
+    for (const action of ["event list", "message create", "task list", "task create"]) {
+      const path = ["issue", "session", ...action.split(" ")];
+      const entry = inventory.find(candidate => candidate.path.join(" ") === path.join(" "))!;
+      expect(entry.retired?.replacement, action).toBe(RETIRED_CLI_COMMANDS[path.join(" ")]);
+      expect(entry.capability, action).toBeNull();
     }
     expect(cliCommandHelp(["session", "create"])).toContain("<chat>");
 

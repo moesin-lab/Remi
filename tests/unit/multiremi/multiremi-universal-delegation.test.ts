@@ -187,13 +187,15 @@ for (const backend of ["sqlite", "postgres"] as const) {
         start(store, source);
         const child = await dispatch(store, source, f.a, f.atlas.id, "task", session.id);
         expect(child).toMatchObject({ chatSessionId: chat.id, issueSessionId: session.id,
-          delegatedFromIssueSessionId: session.id, parentTaskId: source.id });
+          delegatedFromIssueSessionId: session.id, parentTaskId: null });
+        expect(sourceTaskId(store, child)).toBe(store.getTurnForAttempt(source.id)!.id);
         store.completeTask(source.id, { output: "PRIVATE_COORDINATOR_TERMINAL" });
         start(store, child);
         store.completeTask(child.id, { output: "PRIVATE_CHILD_TERMINAL" });
         const returned = store.getTask(store.getTask(child.id)!.delegationReturnTaskId!)!;
         const entry = inboxReportEntry(store, returned, child.id);
-        expect(entry.kind).toBe("system");
+        expect(entry).toMatchObject({ kind: "message", author_type: "system", session_id: session.id });
+        expect(store.getMessage(entry.id)).toMatchObject({ sender_type: "platform", message_kind: "report", to_agent_id: f.qa.id });
         expect(entry.body_md).toContain("PRIVATE_CHILD_TERMINAL");
         start(store, returned);
         expect(store.buildTaskSessionProjection(returned.id)?.jsonl).toContain("PRIVATE_CHILD_TERMINAL");
@@ -317,7 +319,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
     }
 
     it("cross-Issue rich mentions coalesce only the same dispatcher and return Session; return @ stays a report",
-      async () => withStore(backend, async store => {
+      async () => withStore(backend, async (store, db) => {
         const f = fixture(store);
         expect((await mention(store, f.source, f.b, f.s1.id, f.atlas.id)).status).toBe(200);
         const child = store.listTasksForIssue(f.b.id)[0]!;
@@ -334,15 +336,163 @@ for (const backend of ["sqlite", "postgres"] as const) {
         store.completeTask(f.source.id, { output: "Waiting." });
         start(store, child);
         const before = store.listTasks().length;
-        const reply = await request(store, child, `/api/sessions/${f.s1.id}/messages`, {
+        const trigger = store.getTurnForAttempt(child.id)!.trigger_message_id!;
+        const body = {
           body_md: `Report [@QA](mention://agent/${f.qa.id})`, message_kind: "reply",
-          reply_to_id: store.getTurn(child.id)!.trigger_message_id,
-          to: { type: "role", ref: "delegator" }, wake_requested: "now" });
+          reply_to_id: trigger, to: { type: "role", ref: "delegator" }, wake_requested: "now" };
+        const app = createMultiremiApp({ store, authToken: "test-root" });
+        const token = await store.createTaskAccessToken(child, "local");
+        const headers = { Authorization: `Bearer ${token.token}` };
+        for (const path of [`/api/sessions/${f.s0.id}/messages`, `/api/turns/${f.source.id}?input=true`]) {
+          const response = await app.request(path, { headers });
+          expect(response.status).toBe(403);
+          expect(await response.text()).not.toContain("Coordinate.");
+        }
+        const otherReply = store.sendMessage({ session_id: f.s1.id, sender: { type: "agent", id: f.leader.id },
+          to: { type: "none" }, body_md: "OTHER_AGENT_REPLY", message_kind: "report", wake_requested: "inbox_only" }).message;
+        const messageCount = store.listMessages(f.s0.id).length + store.listMessages(f.s1.id).length;
+        const denied = async (overrides: object = {}, status = 403) => {
+          const response = await request(store, child, `/api/sessions/${f.s1.id}/messages`, {
+            ...body, body_md: "FORBIDDEN_DELEGATOR_WRITE", ...overrides });
+          expect(response.status).toBe(status);
+          expect(store.listTasks()).toHaveLength(before);
+          expect(store.listMessages(f.s0.id).length + store.listMessages(f.s1.id).length).toBe(messageCount);
+          expect(JSON.stringify(store.listMessages(f.s0.id))).not.toContain("FORBIDDEN_DELEGATOR_WRITE");
+        };
+        db.run("UPDATE multiremi_turns SET delegation_id=NULL WHERE id=?", [child.id]);
+        await denied();
+        db.run("UPDATE multiremi_turns SET delegation_id=? WHERE id=?", [child.delegationId, child.id]);
+        db.run("UPDATE multiremi_turns SET delegated_from_issue_session_id=? WHERE id=?", [otherSourceSession.id, child.id]);
+        await denied();
+        db.run("UPDATE multiremi_turns SET delegated_from_issue_session_id=? WHERE id=?", [f.s0.id, child.id]);
+        db.run("UPDATE multiremi_turns SET delegated_by_agent_id=? WHERE id=?", [f.leader.id, child.id]);
+        await denied();
+        db.run("UPDATE multiremi_turns SET delegated_by_agent_id=? WHERE id=?", [f.qa.id, child.id]);
+        db.run("UPDATE multiremi_turns SET issue_id=? WHERE id=?", [f.b.id, f.source.id]);
+        await denied();
+        db.run("UPDATE multiremi_turns SET issue_id=? WHERE id=?", [f.a.id, f.source.id]);
+        const forgedChat = store.createChatSession({ agentId: f.qa.id, creatorId: "local" });
+        db.run("UPDATE multiremi_turns SET chat_session_id=? WHERE id=?", [forgedChat.id, f.source.id]);
+        await denied();
+        db.run("UPDATE multiremi_turns SET chat_session_id=NULL WHERE id=?", [f.source.id]);
+        const foreignWorkspace = store.createWorkspace({ name: "Foreign return owner", slug: "foreign-return-owner", issuePrefix: "FOR" });
+        db.run("UPDATE multiremi_turns SET workspace_id=? WHERE id=?", [foreignWorkspace.id, f.source.id]);
+        await denied();
+        db.run("UPDATE multiremi_turns SET workspace_id='local' WHERE id=?", [f.source.id]);
+        db.run("UPDATE multiremi_issues SET workspace_id=? WHERE id=?", [foreignWorkspace.id, f.a.id]);
+        await denied({}, 400);
+        expect((await app.request(`/api/sessions/${f.s0.id}/messages`, { headers })).status).toBe(404);
+        db.run("UPDATE multiremi_issues SET workspace_id='local' WHERE id=?", [f.a.id]);
+        await denied({ reply_to_id: otherReply.id });
+        await denied({ options: [] }, 400);
+        for (const status of ["completed", "failed", "cancelled"] as const) {
+          db.run("UPDATE multiremi_turns SET status=? WHERE id=?", [status, child.id]);
+          await denied();
+          db.run("UPDATE multiremi_turns SET status='running' WHERE id=?", [child.id]);
+          db.run("UPDATE multiremi_turn_attempts SET status=? WHERE id=?", [status, child.id]);
+          await denied();
+          db.run("UPDATE multiremi_turn_attempts SET status='running' WHERE id=?", [child.id]);
+        }
+        const reply = await request(store, child, `/api/sessions/${f.s1.id}/messages`, body);
         expect(reply.status).toBe(200);
-        const report = sentTask(store, await reply.json());
+        const payload = await reply.json();
+        expect(payload.message).not.toHaveProperty("body_md");
+        expect(payload.message).not.toHaveProperty("metadata");
+        expect(payload.message).not.toHaveProperty("options");
+        const report = sentTask(store, payload);
         expect(report).toMatchObject({ agentId: f.qa.id, issueSessionId: f.s0.id,
           delegationId: child.delegationId, delegatedByAgentId: f.qa.id });
         expect(store.listTasks().length).toBe(before + 1);
+      }), timeout);
+
+    it("delegator returns use the actual private Chat owner with NULL audit and reject missing or mismatched owners",
+      async () => withStore(backend, async (store, db) => {
+        const f = fixture(store);
+        store.completeTask(f.source.id, { output: "Public setup completed." });
+        const chat = store.createChatSession({ agentId: f.qa.id, creatorId: "local" });
+        const sourceSession = store.createIssueSession(f.a.id, { chatId: chat.id, title: "Private dispatcher" });
+        const targetSession = store.createIssueSession(f.a.id, { chatId: chat.id, title: "Private worker" });
+        const source = store.createSessionTask(sourceSession.id, { agentId: f.qa.id, prompt: "PRIVATE_DISPATCHER_INPUT" });
+        start(store, source);
+        const child = sentTask(store, store.sendMessage({ session_id: targetSession.id,
+          source_turn_id: store.getTurnForAttempt(source.id)!.id, sender: { type: "agent", id: f.qa.id },
+          to: { type: "agent", ref: f.atlas.id }, body_md: "PRIVATE_WORKER_REQUEST", message_kind: "request", wake_requested: "now" }));
+        expect(child).toMatchObject({ delegatedByAgentId: f.qa.id, delegatedFromIssueSessionId: sourceSession.id });
+        store.completeTask(source.id, { output: "PRIVATE_DISPATCHER_TERMINAL" });
+        start(store, child);
+        const sourceTurn = store.getTurnForAttempt(source.id)!;
+        const childTurn = store.getTurnForAttempt(child.id)!;
+        db.run("UPDATE multiremi_turns SET chat_session_id=NULL WHERE id=?", [sourceTurn.id]);
+        expect(store.getIssueSession(sourceTurn.session_id)).toMatchObject({ ownerType: "chat", chatId: chat.id });
+        const body = { body_md: "PRIVATE_DELEGATOR_REPORT", message_kind: "report",
+          to: { type: "role", ref: "delegator" }, reply_to_id: childTurn.trigger_message_id, wake_requested: "now" };
+        const app = createMultiremiApp({ store, authToken: "test-root" });
+        const credential = await store.createTaskAccessToken(child, "local");
+        const headers = { Authorization: `Bearer ${credential.token}` };
+        for (const path of [`/api/sessions/${sourceSession.id}/messages`, `/api/turns/${sourceTurn.id}?input=true`]) {
+          const response = await app.request(path, { headers });
+          expect(response.status).toBe(403);
+          expect(await response.text()).not.toContain("PRIVATE_");
+        }
+        const beforeTasks = store.listTasks().length;
+        const beforeMessages = store.listMessages(sourceSession.id).length;
+        const denied = async () => {
+          const response = await request(store, child, `/api/sessions/${targetSession.id}/messages`, body);
+          expect(response.status).toBe(403);
+          expect(store.listTasks()).toHaveLength(beforeTasks);
+          expect(store.listMessages(sourceSession.id)).toHaveLength(beforeMessages);
+        };
+        const otherChat = store.createChatSession({ agentId: f.qa.id, creatorId: "local" });
+        db.run("UPDATE multiremi_turns SET chat_session_id=? WHERE id=?", [otherChat.id, sourceTurn.id]);
+        await denied();
+        db.run("UPDATE multiremi_turns SET chat_session_id=NULL WHERE id=?", [sourceTurn.id]);
+        const otherWorkspace = store.createWorkspace({ name: "Other owner workspace", slug: "other-owner-workspace", issuePrefix: "OTH" });
+        db.run("UPDATE multiremi_chat_sessions SET workspace_id=? WHERE id=?", [otherWorkspace.id, chat.id]);
+        const wrongWorkspace = await request(store, child, `/api/sessions/${targetSession.id}/messages`, body);
+        expect(wrongWorkspace.status).toBe(404);
+        expect(store.listTasks()).toHaveLength(beforeTasks);
+        expect(store.listMessages(sourceSession.id)).toHaveLength(beforeMessages);
+        db.run("UPDATE multiremi_chat_sessions SET workspace_id='local' WHERE id=?", [chat.id]);
+        const response = await request(store, child, `/api/sessions/${targetSession.id}/messages`, body);
+        expect(response.status).toBe(200);
+        const result = await response.json();
+        expect(result.message).toMatchObject({ session_id: sourceSession.id });
+        expect(result.message).not.toHaveProperty("body_md");
+        expect(result.message).not.toHaveProperty("metadata");
+        expect(store.getMessage(result.message.id)?.body_md).toBe("PRIVATE_DELEGATOR_REPORT");
+        expect(result).toMatchObject({ wake_applied: "next_turn", wake_reason: "agent_pair_not_privileged" });
+        expect(store.listTasks()).toHaveLength(beforeTasks);
+        expect(JSON.stringify(store.listIssueComments(f.a.id))).not.toContain("PRIVATE_");
+        expect(JSON.stringify(store.listIssueActivity(f.a.id))).not.toContain("PRIVATE_");
+        db.run("DELETE FROM multiremi_chat_sessions WHERE id=?", [chat.id]);
+        expect(store.getChatSession(chat.id)).toBeNull();
+        // A dangling Chat-owned Session is not found; a cascaded Session falls
+        // through to the task's forbidden Chat-content path. Both preserve privacy.
+        const targetAfterDelete = store.getIssueSession(targetSession.id);
+        if (targetAfterDelete) {
+          expect(targetAfterDelete.chatId).toBe(chat.id);
+          expect(store.getIssueSessionWithOwnerScope(targetSession.id)?.ownerWorkspaceId).toBeNull();
+        }
+        const retainedMessages = store.listMessages(sourceSession.id).length;
+        const tables = db.query(backend === "postgres"
+          ? "SELECT tablename AS name FROM pg_tables WHERE schemaname=current_schema() AND tablename LIKE 'multiremi_%'"
+          : "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'multiremi_%'").all() as Array<{ name: string }>;
+        const snapshot = () => Object.fromEntries(tables.map(({ name }) => {
+          expect(name).toMatch(/^multiremi_[a-z0-9_]+$/);
+          return [name, db.query(`SELECT * FROM ${name}`).all().map(row => JSON.stringify(row)).sort()];
+        }));
+        const afterDelete = snapshot();
+        const missingOwner = await app.request(`/api/sessions/${targetSession.id}/messages`, {
+          method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        expect(missingOwner.status).toBe(targetAfterDelete ? 404 : 403);
+        expect(await missingOwner.text()).not.toContain("PRIVATE_");
+        expect(store.listMessages(sourceSession.id)).toHaveLength(retainedMessages);
+        expect(snapshot()).toEqual(afterDelete);
+        const hidden = await app.request(`/api/sessions/${sourceSession.id}/messages`, { headers });
+        expect(hidden.status).toBe(store.getIssueSession(sourceSession.id) ? 404 : 403);
+        expect(await hidden.text()).not.toContain("PRIVATE_");
+        expect(snapshot()).toEqual(afterDelete);
+        expect(JSON.stringify(store.listIssueComments(f.a.id))).not.toContain("PRIVATE_");
       }), timeout);
 
     for (const leaderEntry of ["task", "mention"] as const) {
@@ -618,11 +768,17 @@ for (const backend of ["sqlite", "postgres"] as const) {
         const orphanPath = taskRequestPath(store, {});
         rawDbForOrphan(store).run("UPDATE multiremi_conversation_heads SET workspace_id='local' WHERE session_id='auto_orphan_inbox_local'");
         const response = await request(store, f.source, orphanPath, requestMessageBody(store, { agentId: f.atlas.id, prompt: "No target Issue" }));
-        expect(response.status).toBe(200);
-        const result = await response.json();
-        expect(result).toMatchObject({ wake_applied: "next_turn", wake_reason: "no_issue_target" });
-        expect(store.getMessage(result.message.id)?.task_id).toBe(f.source.id);
+        expect(response.status).toBe(403);
+        expect(store.listMessages("auto_orphan_inbox_local").some(message => message.body_md === "No target Issue")).toBe(false);
         expect(store.listTasks()).toHaveLength(before);
+        const ownSource = store.createTask({ agentId: f.qa.id, conversationSessionId: "auto_orphan_inbox_local", prompt: "Own synthetic source" });
+        const ownCount = store.listTasks().length;
+        const ownResponse = await request(store, ownSource, orphanPath, requestMessageBody(store, { agentId: f.atlas.id, prompt: "Own no-target request" }));
+        expect(ownResponse.status).toBe(200);
+        const result = await ownResponse.json();
+        expect(result).toMatchObject({ wake_applied: "next_turn", wake_reason: "no_issue_target" });
+        expect(store.getMessage(result.message.id)?.task_id).toBe(store.getTurnForAttempt(ownSource.id)!.id);
+        expect(store.listTasks()).toHaveLength(ownCount);
       }), timeout);
 
     it("canonical requests derive lineage from credentials and ignore forged continuation IDs",

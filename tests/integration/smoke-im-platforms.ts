@@ -55,6 +55,7 @@ class SimulatedFeishu {
 // Isolate the standalone process from deployment config and real credentials.
 for (const key of Object.keys(process.env)) if (/^(MULTIREMI_|REMI_|FEISHU_)/.test(key)) delete process.env[key];
 process.env.NODE_ENV = "test";
+process.env.MULTIREMI_STATE_DIR = join(root, "state");
 process.env.MULTIREMI_UPLOAD_DIR = join(root, "uploads");
 process.env.MULTIREMI_SESSION_ARCHIVE_ROOT = join(root, "session-archives");
 process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");

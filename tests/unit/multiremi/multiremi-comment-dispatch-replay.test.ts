@@ -99,6 +99,10 @@ pendingTurnBackendTests("MUL-492 comment intent replay", (fixture, backend) => {
     const original = f.store.listTasksForIssue(f.issue.id)[0]!;
     const report = f.transaction(() => f.store.sendEnvelopeWithinTransaction({ to: { role: "issue_owner", issueId: f.issue.id },
       kind: "report", wake: "now", source: {}, body: "Surviving report" }, [], createCommitEventQueue()))[0]!;
+    expect(f.store.getMessage(report.entry.id)).toMatchObject({
+      session_id: f.session.id, sender_type: "platform", message_kind: "report",
+      to_agent_id: f.agent.id, wake_applied: "now", wake_reason: "platform_to_owner",
+    });
     const mutable = f.repo as unknown as {
       updateIssueCommentWithinTransaction(id: string, input: UpdateIssueCommentInput, events: CommitEventQueue): { dispatchIntentId: string };
       deleteIssueCommentWithinTransaction(id: string, events: CommitEventQueue): { dispatchIntentId: string };
@@ -122,7 +126,9 @@ pendingTurnBackendTests("MUL-492 comment intent replay", (fixture, backend) => {
     expect(f.store.getTask(original.id)!.status).toBe("cancelled");
     const queued = tasks.filter(t => t.status === "queued");
     expect(queued).toHaveLength(1);
-    expect(queued[0]).toMatchObject({ wakeSource: "platform_to_owner", triggerCommentId: report.entry.id, chatSessionId: null });
+    // Recovery provenance belongs to the new turn; the original Message keeps
+    // its platform wake policy and identity.
+    expect(queued[0]).toMatchObject({ wakeSource: "re_ring", triggerCommentId: report.entry.id, chatSessionId: null });
     expect(Number(f.db.query("SELECT wake_seq FROM multiremi_turn_execution_records WHERE id = ?").get(queued[0]!.id)!.wake_seq)).toBe(report.entry.seq);
     expect(f.store.listIssueActivity(f.issue.id).filter(a => a.type === "re_ring").map(a => a.data))
       .toEqual([expect.objectContaining({ origin: "trigger_comment_changed" })]);

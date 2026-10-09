@@ -445,6 +445,8 @@ describe("Feishu bot standard Task bridge", () => {
     expect(store.claimTask("rt_bot")?.id).toBe(roundTask.id);
     const wire = daemonTaskClaimResponse(store, store.getTaskWithAgent(roundTask.id)!);
     expect((wire.bound_issue_log as { content_jsonl: string } | undefined)?.content_jsonl)
+      .toBe("");
+    expect(store.listChatMessages(inbound.chatSessionId).map(message => message.body).join("\n"))
       .toContain("The implementation and migration are complete.");
     store.startTask(roundTask.id);
     store.failTask(roundTask.id, {
@@ -474,7 +476,10 @@ describe("Feishu bot standard Task bridge", () => {
     expect(store.claimTask("rt_bot")?.id).toBe(retryTask.id);
     const retryWire = daemonTaskClaimResponse(store, store.getTaskWithAgent(retryTask.id)!);
     expect((retryWire.bound_issue_log as { content_jsonl: string } | undefined)?.content_jsonl)
-      .toContain("The implementation and migration are complete.");
+      .toBe("");
+    expect(store.listChatMessages(inbound.chatSessionId).filter(message =>
+      message.role === "system" && message.body.includes("The implementation and migration are complete.")))
+      .toHaveLength(1);
     store.startTask(retryTask.id);
     store.completeTask(retryTask.id, {
       output: "MUL work is complete and ready for review.",
@@ -761,9 +766,12 @@ describe("Feishu bot standard Task bridge", () => {
     } as any);
 
     expect(secondPrompt).toContain(`## Issue\nKey: ${issue.key}`);
-    expect(secondPrompt).toContain("## Bound Issue Log");
+    expect(secondPrompt).not.toContain("## Bound Issue Log");
     const issueSession = store.getOrCreateDefaultIssueSession(issue.id);
-    expect(secondPrompt).toContain(`remi message list ${issueSession.id} --from 0 --to 1`);
+    expect(secondWire.bound_issue_log).toMatchObject({ session_id: issueSession.id, content_jsonl: "", has_more: false });
+    expect(secondPrompt).not.toContain(`remi message list ${issueSession.id} --from 0 --to 1`);
+    expect(secondPrompt).not.toContain("The Feishu reviewer approved the bound Issue.");
+    expect(JSON.stringify(secondWire)).not.toContain("The Feishu reviewer approved the bound Issue.");
     expect(store.listMessages(issueSession.id).map(message => message.body_md))
       .toEqual(["The Feishu reviewer approved the bound Issue."]);
     expect(secondPrompt.match(/second Feishu request/g)).toHaveLength(1);

@@ -250,7 +250,50 @@ describe.skipIf(!pgAvailable)("MUL-458 human dependency force (PostgreSQL)", () 
     expect(forces(rerun.issue.id)).toHaveLength(1);
     expect(forces(rerun.issue.id)[0]).toMatchObject({ actorType: "member", actorId: rerun.userId });
     expect(forces(rerun.issue.id)[0]!.data).toMatchObject({ source: "comment", agentId: override.id, assigneeDispatched: false });
+  });
 
+  it("canonical retry keeps the existing Turn without recording another human dependency force", async () => {
+    const f = await fixture("pat", "retry-no-force");
+    const started = await f.app.request(issueMessagesPath(store, f.issue.id), {
+      method: "POST", headers: f.headers,
+      body: JSON.stringify(requestMessageBody(store, { body: "Start despite unfinished prerequisites" }, { type: "role", ref: "issue_owner" })),
+    });
+    expect(started.status).toBe(200);
+    const original = store.getTurnForAttempt(store.listTasksForIssue(f.issue.id)[0]!.id)!;
+    const originalForce = forces(f.issue.id);
+    expect(originalForce).toHaveLength(1);
+    expect(originalForce[0]).toMatchObject({ actorType: "member", actorId: f.userId });
+
+    store.updateIssue(f.issue.id, { status: "backlog" });
+    expect(store.getIssue(f.issue.id)?.status).toBe("backlog");
+    expect(store.listUnmetPrerequisites(f.issue.id).map(row => row.dependsOnIssueId)).toEqual([f.prerequisite.id]);
+    const supervisorAgent = store.createAgent({ name: `PG retry supervisor ${counter}`, provider: "claude", visibility: "workspace" });
+    store.setAgentRole(supervisorAgent.id, "supervisor");
+    const patrol = store.createIssue({ title: `PG retry patrol ${counter}`, assigneeType: "agent", assigneeId: supervisorAgent.id });
+    const supervisorTask = store.createTask({ agentId: supervisorAgent.id, issueId: patrol.id, prompt: "Supervise the existing Turn" });
+    const supervisor = await store.createTaskAccessToken(supervisorTask, f.userId);
+    store.updateWorkspace("local", { settings: { ...store.getWorkspace("local")!.settings, organizer: { mode: "act" } } });
+
+    const retried = await f.app.request(`/api/turns/${original.id}/retry`, {
+      method: "POST", headers: { Authorization: `Bearer ${supervisor.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ cold: true }),
+    });
+    const result = await retried.json();
+    expect(retried.status, JSON.stringify(result)).toBe(200);
+    const replacement = store.getTurn(original.id)!;
+    expect(replacement).toMatchObject({ id: original.id, session_id: original.session_id, trigger_message_id: original.trigger_message_id });
+    expect(replacement.current_attempt_id).not.toBe(original.current_attempt_id);
+    expect(store.getTask(original.current_attempt_id!)?.status).toBe("cancelled");
+    expect(store.getTask(replacement.current_attempt_id!)?.status).toBe("queued");
+    expect(store.listTurns({ workspace_id: "local", issue_id: f.issue.id })).toHaveLength(1);
+    expect(store.listTurnAttempts(original.id)).toHaveLength(2);
+    expect(forces(f.issue.id)).toEqual(originalForce);
+    const exemptions = store.listIssueActivity(f.issue.id).filter(entry => entry.type === "dependency_gate_exempted");
+    expect(exemptions).toHaveLength(1);
+    expect(exemptions[0]!.data).toMatchObject({ source: "redispatch", taskId: replacement.current_attempt_id,
+      previousTaskId: original.current_attempt_id, unmet: [{ dependsOnIssueId: f.prerequisite.id }] });
+    expect(store.listMessages(original.session_id).filter(message => message.sender_type === "member" && message.message_kind === "request"))
+      .toHaveLength(1);
   });
 
   it("rejects task identity and strips both public force marker spellings on PG", async () => {

@@ -26,21 +26,25 @@ afterEach(() => {
 });
 
 describe("Multiremi CLI — issues, attachments, and sessions", () => {
-  test("issue rerun --task-id preserves the selected-run contract and documents the flag", async () => {
-    const bodies: unknown[] = [];
+  test("canonical turn retry preserves the selected-run contract and retired issue rerun sends nothing", async () => {
+    const requests: unknown[] = [];
     const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
-      bodies.push(await request.json());
-      return Response.json({ id: "new-task" }, { status: 202 });
+      if (new URL(request.url).pathname === "/api/cli/capabilities") return Response.json({ commands: [{ id: "turn.retry", allowed: true }] });
+      requests.push({ method: request.method, path: new URL(request.url).pathname, body: await request.json() });
+      return Response.json({ turn: { id: "turn_selected", status: "pending" } });
     } });
     const originalLog = console.log;
     try {
       console.log = () => {};
-      const options = ["--server", server.url.toString(), "--token", "fixture", "--task-id", "old-task"];
-      await runMultiremi(["issue", "rerun", "iss_1", ...options]);
-      expect(bodies).toEqual([{ task_id: "old-task" }]);
-      await expect(runMultiremi(["issue", "rerun", "iss_1", ...options, "--prompt", "override"])).rejects.toThrow();
-      expect(bodies).toHaveLength(1);
-      expect(cliCommandHelp(["issue", "rerun"])).toContain("--task-id");
+      const options = ["--server", server.url.toString(), "--token", "fixture", "--output", "json"];
+      await runConversationCli(["turn", "retry", "turn_selected", "--cold", "--reason", "Retry this failed run", "--yes", ...options]);
+      expect(requests).toEqual([{ method: "POST", path: "/api/turns/turn_selected/retry", body: { cold: true, reason: "Retry this failed run" } }]);
+      await expect(runConversationCli(["turn", "retry", "turn_selected", ...options])).rejects.toThrow("--yes");
+      await expect(runMultiremi(["issue", "rerun", "iss_1", "--task-id", "old-task", ...options])).rejects.toThrow("已移除");
+      expect(requests).toHaveLength(1);
+      expect(unifiedCommandSpecs().find(spec => spec.id === "turn.retry")?.auth).toEqual(["human", "task"]);
+      expect(cliCommandHelp(["turn", "retry"])).toContain("failed/cancelled");
+      expect(cliCommandHelp(["turn", "retry"])).toContain("--cold");
     } finally {
       console.log = originalLog;
       server.stop(true);
@@ -129,50 +133,49 @@ describe("Multiremi CLI — issues, attachments, and sessions", () => {
     }
   });
 
-  test("issue task steer posts steer/force-answer payloads and steers lists them", async () => {
+  test("canonical message steering, turn wrap-up and unread messages replace retired task steer commands", async () => {
     const requests: Array<{ method: string; path: string; body?: any }> = [];
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       async fetch(request) {
         const url = new URL(request.url);
-        const entry: { method: string; path: string; body?: any } = { method: request.method, path: url.pathname };
+        if (url.pathname === "/api/cli/capabilities") return Response.json({ commands: ["message.send", "turn.wrap-up", "message.list"].map(id => ({ id, allowed: true })) });
+        const entry: { method: string; path: string; body?: any } = { method: request.method, path: `${url.pathname}${url.search}` };
         if (request.method === "POST") entry.body = await request.json();
         requests.push(entry);
         if (request.method === "GET") {
-          return Response.json({ messages: [{ id: "steer_1", task_id: "tsk_1", kind: "steer", content: "改用中文", consumed_at: null }] });
+          return Response.json({ messages: [{ id: "msg_1", session_id: "ises_1", message_kind: "request", body_md: "改用中文输出", wake_applied: "now" }] });
         }
-        return new Response(JSON.stringify({ message: { id: "steer_1", task_id: "tsk_1", ...entry.body } }), { status: 201 });
+        return Response.json(url.pathname.endsWith("/wrap-up") ? { turn: { id: "turn_1", wrap_up_requested_at: "2026-10-09T00:00:00Z" } }
+          : { message: { id: "msg_1", session_id: "ises_1", ...entry.body }, wake_applied: "now", wake_reason: "human_sender", turn_id: "turn_1" });
       },
     });
     const logs: string[] = [];
     const originalLog = console.log;
     try {
       console.log = (value?: unknown) => { logs.push(String(value)); };
-      const serverUrl = `http://127.0.0.1:${server.port}`;
-
-      await runMultiremi(["issue", "task", "steer", "tsk_1", "--server", serverUrl, "--token", "tok_cli", "--content", "改用中文输出", "--output", "json"], { programName: "multiremi" });
-      await runMultiremi(["issue", "task", "steer", "tsk_1", "--server", serverUrl, "--token", "tok_cli", "--force-answer", "--output", "json"], { programName: "multiremi" });
-      await runMultiremi(["issue", "task", "steer", "tsk_1", "--server", serverUrl, "--token", "tok_cli", "--force-answer", "--content", "先给结论", "--output", "json"], { programName: "multiremi" });
-      await runMultiremi(["issue", "task", "steers", "tsk_1", "--server", serverUrl, "--token", "tok_cli", "--output", "json"], { programName: "multiremi" });
+      const options = ["--server", server.url.toString(), "--token", "tok_cli", "--output", "json"];
+      await runConversationCli(["message", "send", "ises_1", "--to", "agt_1", "--kind", "request", "--content", "改用中文输出", ...options]);
+      await runConversationCli(["turn", "wrap-up", "turn_1", ...options]);
+      await runConversationCli(["turn", "wrap-up", "turn_1", "--reason", "先给结论", ...options]);
+      await runConversationCli(["message", "list", "ises_1", "--unread-by", "agt_1", ...options]);
 
       expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
-        "POST /api/tasks/tsk_1/steer",
-        "POST /api/tasks/tsk_1/steer",
-        "POST /api/tasks/tsk_1/steer",
-        "GET /api/tasks/tsk_1/steer",
+        "POST /api/sessions/ises_1/messages",
+        "POST /api/turns/turn_1/wrap-up",
+        "POST /api/turns/turn_1/wrap-up",
+        "GET /api/sessions/ises_1/messages?unread_by=agt_1",
       ]);
-      expect(requests[0].body).toEqual({ kind: "steer", content: "改用中文输出" });
-      // --force-answer without content lets the server fill its default directive.
-      expect(requests[1].body).toEqual({ kind: "force_answer" });
-      expect(requests[2].body).toEqual({ kind: "force_answer", content: "先给结论" });
-      expect(JSON.parse(logs[0]).message.kind).toBe("steer");
-      expect(JSON.parse(logs[3]).messages[0].id).toBe("steer_1");
+      expect(requests[0].body).toEqual({ body_md: "改用中文输出", message_kind: "request", to: { type: "agent", ref: "agt_1" }, wake_requested: "now", reply_to_id: null, dedupe_key: null });
+      expect(requests[1].body).toEqual({});
+      expect(requests[2].body).toEqual({ reason: "先给结论" });
+      expect(JSON.parse(logs[0]).message.message_kind).toBe("request");
+      expect(JSON.parse(logs[3]).messages[0].id).toBe("msg_1");
 
-      // Plain steer without content must fail before any request is sent.
-      await expect(
-        runMultiremi(["issue", "task", "steer", "tsk_1", "--server", serverUrl, "--token", "tok_cli"], { programName: "multiremi" }),
-      ).rejects.toThrow(/--content/);
+      await expect(runConversationCli(["message", "send", "ises_1", "--to", "agt_1", ...options])).rejects.toThrow("requires content");
+      await expect(runMultiremi(["issue", "task", "steer", "tsk_1", "--content", "改用中文输出", ...options])).rejects.toThrow("已移除");
+      await expect(runMultiremi(["issue", "task", "steers", "tsk_1", ...options])).rejects.toThrow("已移除");
       expect(requests).toHaveLength(4);
     } finally {
       console.log = originalLog;

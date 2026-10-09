@@ -280,13 +280,27 @@ describe("remaining workspace authorization", () => {
     const inbox = seedInbox(store, workspace.id, user.id);
     const otherInbox = seedInbox(store, first.id, user.id);
     const agent = store.createAgent({ workspaceId: workspace.id, name: "Task agent", provider: "claude", ownerId: user.id });
-    const task = store.createTask({ workspaceId: workspace.id, agentId: agent.id, prompt: "Fixture" });
+    const issue = store.createIssue({ workspaceId: workspace.id, title: "Task inbox" });
+    const session = store.getOrCreateDefaultIssueSession(issue.id);
+    const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Fixture" });
+    const own = store.sendMessage({ session_id: session.id, sender: { type: "member", id: inbox.member.id },
+      to: { type: "agent", ref: agent.id }, message_kind: "report", wake_requested: "inbox_only", body_md: "Own task inbox" }).message;
     const { token } = await store.createAccessToken({ workspaceId: workspace.id, userId: user.id, name: "Task", type: "task", purpose: "task", taskId: task.id, agentId: agent.id, expiresInDays: 1 });
     const taskHeaders = { ...headers, Authorization: `Bearer ${token}`, "X-Workspace-ID": workspace.id };
     const listed = await app.request("/api/inbox", { headers: taskHeaders });
     expect(listed.status).toBe(200);
-    expect((await listed.json()).items.map((item: { id: string }) => item.id)).not.toContain(inbox.item.id);
-    expect((await app.request("/api/inbox/read", { method: "POST", headers: taskHeaders , body: JSON.stringify({ session_id: store.getMessage(inbox.item.id)?.session_id ?? inbox.item.id }) })).status).toBe(200);
+    const items = (await listed.json()).items.map((item: { id: string }) => item.id);
+    expect(items).toContain(own.id);
+    expect(items).not.toContain(inbox.item.id);
+    const foreignSessionId = store.getMessage(inbox.item.id)!.session_id;
+    const foreignProgress = store.getSessionAgentReadProgress(foreignSessionId, agent.id);
+    expect((await app.request("/api/inbox/read", { method: "POST", headers: taskHeaders,
+      body: JSON.stringify({ session_id: foreignSessionId }) })).status).toBe(403);
+    expect(store.getSessionAgentReadProgress(foreignSessionId, agent.id)).toEqual(foreignProgress);
+    expect(store.countUnreadInboxItems(inbox.member.id)).toBe(1);
+    expect((await app.request("/api/inbox/read", { method: "POST", headers: taskHeaders,
+      body: JSON.stringify({ session_id: session.id }) })).status).toBe(200);
+    expect(store.getSessionAgentReadProgress(session.id, agent.id).seq).toBeGreaterThanOrEqual(own.seq);
     expect(store.countUnreadInboxItems(inbox.member.id)).toBe(1);
     const escapedHeaders = { ...taskHeaders, "X-Workspace-ID": first.id };
     expect((await app.request("/api/inbox", { headers: escapedHeaders })).status).toBe(404);

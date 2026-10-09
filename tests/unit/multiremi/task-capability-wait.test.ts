@@ -815,13 +815,17 @@ describe("queued task model capability waits", () => {
     const patrol = store.createIssue({ title: "Organizer patrol" });
     const supervisorTask = store.createTask({ agentId: supervisor.id, issueId: patrol.id, prompt: "organize" });
     const supervisorToken = await store.createTaskAccessToken(supervisorTask, "owner");
+    const taskBeforeDenied = store.getTask(task.id);
+    const turnBeforeDenied = store.getTurnForAttempt(task.id);
     const denied = await app.request(turnApiPath(store, task.id, "/retry"), {
       method: "POST",
       headers: { Authorization: `Bearer ${supervisorToken.token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ cold: true }),
     });
     expect(denied.status).toBe(403);
-    expect((await denied.json()).error).toBe("not your chat session"); // #6: conversation privacy rejects before Turn control.
+    expect(await denied.json()).toEqual({ error: "forbidden" });
+    expect(store.getTask(task.id)).toEqual(taskBeforeDenied);
+    expect(store.getTurnForAttempt(task.id)).toEqual(turnBeforeDenied);
 
     const rebound = await app.request(`/api/multiremi/agents/${command![1]}`, {
       method: "PATCH", headers, body: JSON.stringify({ runtime_id: command![2] }),

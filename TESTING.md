@@ -85,8 +85,10 @@ API 从当前源码打包，业务迁移和 Web 页面使用隔离夹具；浏�
 写入闸门、CPU/ABI/运行时契约以及长操作心跳。测试只证明这些隔离场景，不等于
 正式发布、生产迁移或真实 provider 验证。
 `bun run tests/integration/smoke-platform-settings.ts` 启动隔离的 Next、真实 API/SQLite
-和更新 worker，使用模拟 HTTPS 发布内容及只读部署驱动，验证模式上报、迁移指引、
-自定义源保存/恢复、缺包阻塞、源不可用、旧更新器降级与 390px 布局。需要 Node、前端依赖和
+和更新 worker，使用模拟 HTTPS 发布内容和部署执行，验证模式上报、迁移指引、
+自定义源保存/恢复、缺包阻塞、源不可用、旧更新器降级与 390px 布局。同时验证 Web/API
+更新按钮常驻、目标版本与提交确认、取消无写入，以及确认后经真实 API/worker 排空任务、
+在夹具中模拟切换并恢复为已安装状态。需要 Node、前端依赖和
 Chromium（可设置 `CHROME_EXECUTABLE`）；默认端口 3349，可用 `--port=` 调整。
 截图和报告写入临时目录，或由 `PLATFORM_SETTINGS_ARTIFACTS` 指定；不操作真实部署。
 

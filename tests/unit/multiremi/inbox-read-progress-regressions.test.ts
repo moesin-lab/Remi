@@ -33,7 +33,9 @@ pendingTurnBackendTests('MUL-506 actual reader and provider checkpoints', fixtur
     const head = f.store.getConversationLogHead(f.session.id)!.headSeq;
     f.db.run("UPDATE multiremi_session_lanes SET cursor_seq=? WHERE session_id=? AND reader_id=?", [head, f.session.id, f.agent.id]);
     f.db.run('UPDATE multiremi_conversation_heads SET agent_read_state=? WHERE session_id=?', [JSON.stringify({ [f.agent.id]: { seq: 0, offset: 32_000 } }), f.session.id]);
-    f.db.run('DELETE FROM multiremi_schema_migrations WHERE id IN (?,?)', ['20261005_fold_agent_read_state', '20261005_separate_lane_provider_progress']);
+    // Restore the historical schema before folding; PostgreSQL's final lane view retains column dependencies.
+    f.db.exec('DROP VIEW IF EXISTS multiremi_agent_lane_records');
+    f.db.run('DELETE FROM multiremi_schema_migrations WHERE id IN (?,?,?)', ['20261005_fold_agent_read_state', '20261005_separate_lane_provider_progress', '20261009_stable_execution_read_projection']);
     f.db.exec('ALTER TABLE multiremi_session_lanes DROP COLUMN cursor_offset');
     f.db.exec('ALTER TABLE multiremi_turns DROP COLUMN trigger_message_id');
     new MultiremiStore(f.db);

@@ -27,7 +27,9 @@ pendingTurnBackendTests('MUL-506 Issue derivation and read progress',fixture=>{
     f.db.run("UPDATE multiremi_turns SET status='running' WHERE id=?",[f.sent.turn_id!]);f.derive();const inbox=f.store.listMessageInbox('mem_local_local','local').items;
     expect(inbox.filter(m=>m.message_kind==='status'&&m.to_ref==='parent_owner'&&m.metadata.child_issue_id===f.issue.id)).toHaveLength(1);f.derive();expect(f.store.listMessageInbox('mem_local_local','local').items).toHaveLength(inbox.length);});
   it('folds maximum lane/read-state sequence and offset exactly once, survives removal',()=>{const f=setup();
-    f.db.run('DELETE FROM multiremi_schema_migrations WHERE id=?',[FOLD_AGENT_READ_STATE_MIGRATION]);
+    // Restore the historical schema before folding; PostgreSQL's final lane view retains column dependencies.
+    f.db.exec('DROP VIEW IF EXISTS multiremi_agent_lane_records');
+    f.db.run('DELETE FROM multiremi_schema_migrations WHERE id IN (?,?)',[FOLD_AGENT_READ_STATE_MIGRATION,'20261009_stable_execution_read_projection']);
     f.db.exec('ALTER TABLE multiremi_session_lanes DROP COLUMN cursor_offset');f.db.exec('ALTER TABLE multiremi_turns DROP COLUMN trigger_message_id');
     f.db.run('UPDATE multiremi_conversation_heads SET agent_read_state=? WHERE session_id=?',[JSON.stringify({[f.agent.id]:{seq:4,offset:19}}),f.session.id]);
     f.db.run("UPDATE multiremi_session_lanes SET cursor_seq=3 WHERE session_id=? AND reader_id=?",[f.session.id,f.agent.id]);foldAgentReadState(f.db);

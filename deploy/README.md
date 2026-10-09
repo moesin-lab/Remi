@@ -375,7 +375,9 @@ application updates and needs explicit base-image maintenance.
 The updater waits for drain, durably commits the operation, stops API/Web writers,
 backs up data, and rehearses target and previous migrations in a **separate
 PostgreSQL container with no production network or credentials**. It switches
-the program only after rehearsal passes. API/Web are unavailable during this
+the program only after rehearsal passes. The scratch database must answer
+`SELECT 1` over loopback TCP before restore starts; the image's temporary
+initialization socket server does not establish readiness. API/Web are unavailable during this
 backup/rehearsal interval; daemon/provider processes remain independent. Each
 migration pass has a five-minute timeout; timeout triggers code recovery. Readiness
 and the actual service process working directory must match the selected code.

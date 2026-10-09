@@ -1,21 +1,21 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 810,
+    "routeCount": 812,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 568,
+      "compat": 570,
       "root": 16
     },
-    "getRoutes": 349,
-    "getRoutesWithBody": 345,
+    "getRoutes": 350,
+    "getRoutesWithBody": 346,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /api/trace/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 461,
+    "mutationRoutes": 462,
     "mutationRoutesCovered": 274,
     "flows": [
       "agents-compat",
@@ -439,6 +439,7 @@
     "GET /api/workspaces/:id/feishu-bot/routes",
     "GET /api/workspaces/:id/feishu-bot/senders",
     "GET /api/workspaces/:id/feishu-bot/status",
+    "GET /api/workspaces/:id/feishu-bots",
     "GET /api/workspaces/:id/invitations",
     "GET /api/workspaces/:id/issue-archive",
     "GET /api/workspaces/:id/issue-topics",
@@ -776,6 +777,7 @@
     "POST /api/workspaces/:id/feishu-bot/registration",
     "POST /api/workspaces/:id/feishu-bot/stop",
     "POST /api/workspaces/:id/feishu-bot/test",
+    "POST /api/workspaces/:id/feishu-bots",
     "POST /api/workspaces/:id/lark/install/begin",
     "POST /api/workspaces/:id/leave",
     "POST /api/workspaces/:id/members",
@@ -1229,6 +1231,7 @@
     "GET /api/workspaces/:id/feishu-bot/routes",
     "GET /api/workspaces/:id/feishu-bot/senders",
     "GET /api/workspaces/:id/feishu-bot/status",
+    "GET /api/workspaces/:id/feishu-bots",
     "GET /api/workspaces/:id/invitations",
     "GET /api/workspaces/:id/issue-archive",
     "GET /api/workspaces/:id/issue-topics",
@@ -3994,6 +3997,8 @@
       "status": 200,
       "body": {
         "configured": true,
+        "bot_id": "default",
+        "name": "",
         "workspace_id": "local",
         "agent_id": "agt_snapshot",
         "agent_name": "Snapshot Agent",
@@ -4026,6 +4031,8 @@
       "status": 200,
       "body": {
         "configured": true,
+        "bot_id": "default",
+        "name": "",
         "workspace_id": "local",
         "agent_id": "agt_snapshot",
         "agent_name": "Snapshot Agent",
@@ -4103,7 +4110,7 @@
         "runtime_id": "rt_snapshot",
         "runtime_name": "dmn_snapshot",
         "runtime_online": true,
-        "applied_revision": null,
+        "applied_revision": 0,
         "bot_name": null,
         "last_heartbeat_at": "<timestamp>",
         "error_code": null,
@@ -4134,6 +4141,8 @@
       "status": 200,
       "body": {
         "configured": false,
+        "bot_id": "default",
+        "name": "",
         "workspace_id": "local",
         "agent_id": null,
         "agent_name": null,
@@ -11387,6 +11396,17 @@
             "allowed": true
           },
           {
+            "id": "workspace.feishu-bot.create",
+            "command": "remi workspace feishu-bot create",
+            "capability": "workspace.feishu-bot.create",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "workspace.feishu-bot.delete",
             "command": "remi workspace feishu-bot delete",
             "capability": "workspace.feishu-bot.delete",
@@ -11412,6 +11432,17 @@
             "id": "workspace.feishu-bot.get",
             "command": "remi workspace feishu-bot get",
             "capability": "workspace.feishu-bot.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "workspace.feishu-bot.list",
+            "command": "remi workspace feishu-bot list",
+            "capability": "workspace.feishu-bot.list",
             "outputs": [
               "table",
               "json",
@@ -22324,6 +22355,8 @@
       "status": 200,
       "body": {
         "configured": false,
+        "bot_id": "default",
+        "name": "",
         "workspace_id": "local",
         "agent_id": null,
         "agent_name": null,
@@ -22381,7 +22414,8 @@
             "daemon_id": "dmn_snapshot",
             "online": true,
             "supports_config": true,
-            "last_heartbeat_at": "<timestamp>"
+            "last_heartbeat_at": "<timestamp>",
+            "assigned_bot_id": null
           }
         ],
         "encryption_available": true
@@ -22445,6 +22479,15 @@
         "error_code": null,
         "error_message": null,
         "stale_runtime_ids": []
+      }
+    },
+    {
+      "key": "get-sweep GET /api/workspaces/:id/feishu-bots",
+      "route": "GET /api/workspaces/:id/feishu-bots",
+      "path": "/api/workspaces/local/feishu-bots",
+      "status": 200,
+      "body": {
+        "bots": []
       }
     },
     {

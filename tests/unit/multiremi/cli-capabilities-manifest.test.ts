@@ -216,12 +216,14 @@ describe("CLI capabilities manifest", () => {
 
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
     expect(cliCoverageReport(manifest)).toEqual({
-      mapped: 641,
+      mapped: 643,
       exempt: 169,
       missing: 0,
-      total: 810,
+      total: 812,
     });
     for (const [route, command] of Object.entries({
+      "GET /api/workspaces/:id/feishu-bots": "workspace.feishu-bot.list",
+      "POST /api/workspaces/:id/feishu-bots": "workspace.feishu-bot.create",
       "POST /api/sessions/:sessionId/messages": "message.send",
       "GET /api/messages/:id": "message.get",
       "PATCH /api/messages/:id": "message.edit",

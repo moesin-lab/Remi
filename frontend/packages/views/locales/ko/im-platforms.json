@@ -33,7 +33,7 @@
     },
     "bot": {
       "title": "봇",
-      "description": "봇, 응답 에이전트, 런타임 및 메뉴를 설정합니다."
+      "description": "워크스페이스의 여러 봇, 응답 Agent, 호스트 Runtime 및 앱 자격 증명을 관리합니다."
     },
     "access": {
       "title": "접근 제어",
@@ -247,7 +247,7 @@
     },
     "concierge": {
       "title": "Feishu 컨시어지 봇",
-      "description": "이 workspace 전용 Feishu 봇 하나를 운영합니다. 응답할 Agent, 이를 호스팅할 머신, 로그인에 사용할 앱 자격 증명을 여기서 지정하세요. daemon 머신의 환경 변수를 고칠 필요가 없습니다.",
+      "description": "이 봇의 응답 Agent, 호스트 Runtime 및 Feishu 앱 자격 증명을 선택합니다. 각 봇의 설정, 시작과 중지, 대화 라우팅은 독립적입니다.",
       "member_available": "{{name}}이(가) 온라인입니다. Feishu에서 메시지를 보내면 이 workspace로 전달됩니다.",
       "member_unnamed_bot": "컨시어지 봇",
       "member_unavailable": "컨시어지 봇이 설정되어 있지만 지금은 연결할 수 없습니다.",
@@ -549,5 +549,17 @@
     "install_error_session_lost": "설치 세션이 만료되었거나 유실되었어요. 다시 스캔해 처음부터 진행하세요.",
     "install_error_forbidden": "이 워크스페이스에 Lark 봇을 설치할 권한이 더 이상 없어요. 워크스페이스 관리자에게 문의하세요.",
     "install_error_generic": "설치에 실패했어요. 다시 시도하세요."
+  },
+  "bots": {
+    "select": "봇 선택",
+    "add": "봇 추가",
+    "name": "봇 이름",
+    "empty": "첫 번째 봇 설정",
+    "loading": "봇 불러오는 중…",
+    "runtimeHint": "각 봇은 별도의 Feishu 앱과 Runtime을 사용합니다. 현재 Runtime 하나는 봇 하나를 호스팅합니다.",
+    "runtimeAssigned": "다른 봇에 할당됨",
+    "missing": "이 봇은 삭제되었거나 존재하지 않습니다.",
+    "legacy": "기본 봇",
+    "shared": "아래 워크스페이스 설정은 기본 봇이 게시합니다."
   }
 }

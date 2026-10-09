@@ -1,3 +1,4 @@
+import { FEISHU_BOT_OPTION, feishuBotPath } from "./feishu-bot-scope.js";
 import {
   AsyncOperationController,
   CliError,
@@ -770,7 +771,8 @@ function feishuSpecs(): CommandSpec[] {
       path: ["feishu", "route", "list"],
       description: "List Feishu concierge Agent routes",
       method: "GET",
-      apiPath: (i) => `${botBase(i)}/routes`,
+      apiPath: (i) => feishuBotPath(`${botBase(i)}/routes`, i),
+      options: [FEISHU_BOT_OPTION],
       auth: HUMAN,
       collections: ["routes"],
     }),
@@ -781,7 +783,8 @@ function feishuSpecs(): CommandSpec[] {
       path: ["feishu", "chat", "list"],
       description: "List groups joined by the Feishu concierge bot",
       method: "GET",
-      apiPath: (i) => `${botBase(i)}/chats`,
+      apiPath: (i) => feishuBotPath(`${botBase(i)}/chats`, i),
+      options: [FEISHU_BOT_OPTION],
       auth: HUMAN,
       collections: ["chats"],
     }),
@@ -972,7 +975,7 @@ function feishuSpecs(): CommandSpec[] {
       mutation: "write",
       outputs: ["table", "json", "jsonl"],
       positionals: [ref("scope")],
-      options: commandOptions([], [
+      options: commandOptions([FEISHU_BOT_OPTION], [], [
         ...(set ? [{
           name: "agent",
           type: "string" as const,
@@ -993,7 +996,7 @@ function feishuSpecs(): CommandSpec[] {
         if (scope !== "chat" && chatId) throw new CliError("usage", "--chat is only valid for scope=chat");
 
         const client = await clientFor(invocation);
-        const path = `${botBase(invocation)}/routes`;
+        const path = feishuBotPath(`${botBase(invocation)}/routes`, invocation);
         const current = await client.request({ method: "GET", path });
         const routes = extractRecords(current.data, ["routes"]).map(routeWriteView);
         const target = (route: Record<string, unknown>) => route.scope === scope

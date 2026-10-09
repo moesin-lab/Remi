@@ -1,4 +1,5 @@
 "use client";
+import { useFeishuBotSelection } from "./bot-selection";
 
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -46,9 +47,10 @@ export function FeishuBotRoutes({
   candidatesPending,
 }: FeishuBotRoutesProps) {
   const { t } = useT("im-platforms");
-  const routesQuery = useQuery(feishuBotRoutesOptions(workspaceId));
-  const issueTopicsQuery = useQuery(issueTopicConfigOptions(workspaceId));
-  const save = useSaveFeishuBotRoutes(workspaceId);
+  const { botId } = useFeishuBotSelection();
+  const routesQuery = useQuery(feishuBotRoutesOptions(workspaceId, true, botId));
+  const issueTopicsQuery = useQuery(issueTopicConfigOptions(workspaceId, botId === "default"));
+  const save = useSaveFeishuBotRoutes(workspaceId, botId);
   const [routes, setRoutes] = useState<FeishuBotAgentRoute[]>([]);
   const [dirty, setDirty] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -63,7 +65,7 @@ export function FeishuBotRoutes({
   const p2pRoute = routes.find((route) => route.scope === "p2p_default") ?? null;
   const groupRoute = routes.find((route) => route.scope === "group_default") ?? null;
   const chatRoutes = routes.filter((route) => route.scope === "chat");
-  const issueTopicChatId = issueTopicsQuery.data?.config.chat_id?.trim() || null;
+  const issueTopicChatId = botId !== "default" ? null : issueTopicsQuery.data?.config.chat_id?.trim() || null;
   const issueTopicRoute = issueTopicChatId
     ? chatRoutes.find((route) => route.chat_id === issueTopicChatId) ?? null
     : null;
@@ -314,6 +316,7 @@ export function FeishuBotRoutes({
       </div>
 
       <AgentRouteDialog
+        botId={botId}
         workspaceId={workspaceId}
         open={dialogOpen}
         onOpenChange={setDialogOpen}

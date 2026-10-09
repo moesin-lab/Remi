@@ -76,7 +76,7 @@ Issue-owned Session Task 不需要 Chat；普通 Chat 输入仍使用 Chat Task�
 字段、迁移、Web 与 CLI 入口见[对话与工作会话模型](conversation-model.md)。
 
 **飞书聊天**：[controlPlaneConciergeHost / createFeishuTaskHandler](../apps/remi/cli/multiremi.ts)启动 connector；普通消息经 daemon client 提交平台 Chat/Task，再走上面的任务执行链。connector 从 task 事件流回复；去重、运行中 steering、取消与人工请求也使用平台 task。当前 foreground 不实例化 `packages/remi` 的 `Remi` core，不能以该库的 `_process()` 作为当前 bot 入口。
-工作区的 [Feishu bot 配置](../packages/server/src/store/repos/feishu-bot-repo.ts)指定 Agent 和 Runtime；
+工作区可保存多个 [Feishu bot 配置](../packages/server/src/store/repos/feishu-bot-repo.ts)，以 `workspace_id + bot_id` 标识，各自指定 Agent 和独立 Runtime；Runtime v1 协议仍为单 connector，绑定和停止确认防止重复分配。旧配置迁移为 `default`，路由、发送者、入站去重及审计按机器人隔离；
 bot 控制指令携带版本和期望状态。[concierge supervisor](../packages/server/src/worker/feishu-concierge.ts)经鉴权接口拉取 assignment 后串行协调 connector 的启动、停止与重试，应用凭据不随心跳下发。持久化出站投递使用 `feishu.outbound`，发出后收到 ACK 才领取原有租约；断连前未确认的投递由 DB 快照重推，不改变投递数据模型。自动 Issue 话题及负责人轮次完成推送见[飞书接入契约](feishu-message-ingestion.md)。
 
 ## 存储与事务

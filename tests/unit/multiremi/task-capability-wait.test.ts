@@ -1004,12 +1004,14 @@ describe("queued task model capability waits", () => {
     });
   }, 120_000);
 
-  it("executes placement remedies across Chat and Issue binding combinations", () => {
+  // Keep all 204 combinations, but give each independent conversation kind its
+  // own test budget instead of timing the entire migration-heavy matrix as one.
+  for (const kind of ["chat", "issue", "chat-no-project"] as const)
+  it(`executes placement remedies across Chat and Issue binding combinations (${kind})`, () => {
     const counts = new Map<string, number>();
     const alternatives = new Map<string, number>();
     const noMechanical: string[] = [];
     let cells = 0;
-    for (const kind of ["chat", "issue", "chat-no-project"] as const)
       for (const frozen of [false, true])
         for (const binding of ["A", "B", "none"] as const)
           for (const dataOnA of [false, true])
@@ -1135,11 +1137,11 @@ describe("queued task model capability waits", () => {
               expect(claimed?.prompt, coordinate).toBe(prompt);
               }
             }
-    expect(cells).toBe(204);
+    expect(cells).toBe(kind === "chat-no-project" ? 12 : 96);
     expect(cells).toBe([...counts.values()].reduce((sum, count) => sum + count, 0));
     expect(noMechanical, noMechanical.join("\n")).toEqual([]);
-    expect([...alternatives.values()].reduce((sum, count) => sum + count, 0)).toBeGreaterThan(0);
-    console.log(`remedy matrix: ${cells} cells, primary=${JSON.stringify(Object.fromEntries(counts))}, alternatives=${JSON.stringify(Object.fromEntries(alternatives))}, no mechanical=${JSON.stringify(noMechanical)}`);
+    if (kind !== "chat-no-project") expect([...alternatives.values()].reduce((sum, count) => sum + count, 0)).toBeGreaterThan(0);
+    console.log(`remedy matrix (${kind}): ${cells} cells, primary=${JSON.stringify(Object.fromEntries(counts))}, alternatives=${JSON.stringify(Object.fromEntries(alternatives))}, no mechanical=${JSON.stringify(noMechanical)}`);
   }, 120_000);
 
   it("names conflicting data constraints as a fourth-tier remedy", () => {

@@ -12,6 +12,7 @@ import { MultiremiStore } from '@multiremi/store.js';
 import { startMultiremiServer } from '@multiremi/api.js';
 import { PlatformUpdaterClient } from '@remi-platform/updater/client.js';
 import { PlatformUpdateWorker } from '@remi-platform/updater/worker.js';
+import { parseApplicationManifest } from '@remi-platform/updater/application-manifest.js';
 import type { PlatformDeploymentDriver } from '@remi-platform/updater/types.js';
 import type { MultiremiPlatformUpdateMode } from '@multiremi/contracts';
 
@@ -26,6 +27,7 @@ const artifacts = process.env.PLATFORM_SETTINGS_ARTIFACTS ? resolve(process.env.
 mkdirSync(artifacts, { recursive: true });
 for (const key of Object.keys(process.env)) if (/^(MULTIREMI_|REMI_|FEISHU_)/.test(key)) delete process.env[key];
 process.env.NODE_ENV = 'test';
+process.env.MULTIREMI_STATE_DIR = join(root, 'state');
 process.env.MULTIREMI_UPLOAD_DIR = join(root, 'uploads');
 process.env.MULTIREMI_SESSION_ARCHIVE_ROOT = join(root, 'session-archives');
 const apiToken = randomUUID(), updaterToken = randomUUID();
@@ -63,7 +65,11 @@ try {
   const driver: PlatformDeploymentDriver = {
     kind: 'docker_compose', get updateMode() { return mode; },
     async inspect() { return { driver: this.kind, updateMode: mode, currentRelease: current, recentReleases: [current], services: [] }; },
-    async preflight() { return { ready: true, checkedAt: new Date().toISOString(), platform: 'linux', arch: 'x64', checks: [] }; },
+    async preflight() { return { ready: true, checkedAt: new Date().toISOString(), platform: 'linux', arch: 'x64',
+      checks: (mode === 'internal_application' ? ['container_supervisors', 'isolated_rehearsal', 'backup', 'postgresql', 'program_storage'] : ['compose', 'backup'])
+        .map(code => ({ code, ok: true, message: `${code} ready` })),
+    }; },
+    async validateRelease(manifest) { if (mode === 'internal_application' || mode === 'host_application') parseApplicationManifest(manifest); },
     async execute(operation) { assert.equal(operation.kind, 'check_updates', 'Fixture must never change services'); return current; },
   };
   const client = new PlatformUpdaterClient(backend, apiToken, updaterToken);

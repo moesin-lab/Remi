@@ -6,6 +6,8 @@ import { I18nProvider } from "@multiremi/core/i18n/react";
 import type { PlatformOperation, PlatformStatus } from "@multiremi/core/platform-lifecycle";
 import enCommon from "../../locales/en/common.json";
 import enSettings from "../../locales/en/settings.json";
+import zhCommon from "../../locales/zh-Hans/common.json";
+import zhSettings from "../../locales/zh-Hans/settings.json";
 
 const statusRef = vi.hoisted(() => ({
   current: null as PlatformStatus | null,
@@ -40,6 +42,7 @@ vi.mock("@multiremi/core/platform-lifecycle", () => ({
   useUpdatePlatformSettings: () => settingsMutationRef,
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock("../../common/use-viewing-timezone", () => ({ useViewingTimezone: () => "Asia/Shanghai" }));
 
 import { PlatformTab } from "./platform-tab";
 
@@ -224,16 +227,69 @@ describe("PlatformTab upgrade lifecycle", () => {
     }));
   });
 
-  it("blocks update and restart when preflight fails and exposes the reason", () => {
+  it("blocks update and restart when preflight fails and retains the original reason in diagnostics", async () => {
+    const user = userEvent.setup();
     statusRef.current = platformStatus({
       updateAvailable: true,
       latestRelease: { version: "1.2.3", ref: "new", publishedAt: null, releaseUrl: null, manifestUrl: "https://example.com/manifest", apiImage: null, webImage: null },
       preflight: { ready: false, checkedAt: new Date().toISOString(), platform: "win32", arch: "x64", checks: [{ code: "backup", ok: false, message: "Database backup is not configured" }] },
     });
     render(<PlatformTab />, { wrapper: Wrapper });
-    expect(screen.getByText("Database backup is not configured")).toBeInTheDocument();
+    expect(screen.getByText(enSettings.platform.preflight_checks.backup.failure)).toBeVisible();
+    expect(screen.queryByText("Database backup is not configured")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: enSettings.platform.update_now })).toBeDisabled();
     expect(screen.getByRole("button", { name: enSettings.platform.restart })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: enSettings.platform.preflight_diagnostics }));
+    expect(screen.getByText("Database backup is not configured")).toBeVisible();
+  });
+
+  it("renders the internal updater checks and missing application bundle in Chinese without weakening the update gate", async () => {
+    const user = userEvent.setup();
+    const sourceUrl = "https://example.test/releases.json";
+    const readyCodes = ["container_supervisors", "isolated_rehearsal", "backup", "postgresql", "program_storage", "release_feed"] as const;
+    const bundleError = "This release has no supported application bundle; image-only releases cannot be applied in application mode";
+    statusRef.current = platformStatus({
+      updateMode: "internal_application", releaseFeedUrl: sourceUrl, updateAvailable: true,
+      latestRelease: { version: "1.2.3", ref: "new", publishedAt: null, releaseUrl: null, manifestUrl: sourceUrl, apiImage: null, webImage: null },
+      preflight: { ready: false, checkedAt: new Date().toISOString(), platform: "linux", arch: "x64",
+        checks: [
+          ...readyCodes.map(code => ({ code, ok: true, message: code === "release_feed" ? "Release feed is reachable" : `${code} ready` })),
+          { code: "release_artifacts", ok: false, message: "Release is missing or has invalid artifacts for internal_application: application_bundle" },
+          { code: "release_feed_or_schema", ok: false, message: bundleError },
+        ],
+        source: { url: sourceUrl, manifestUrl: null, error: null, modes: [{ mode: "internal_application", available: false, missing: ["application_bundle"] }] },
+      },
+    });
+    render(<I18nProvider locale="zh-Hans" resources={{ "zh-Hans": { common: zhCommon, settings: zhSettings } }}><PlatformTab /></I18nProvider>);
+    const preflight = within(screen.getByTestId("platform-preflight"));
+    expect(preflight.getByText(/Linux \/ x64/).textContent).not.toMatch(/\b(?:AM|PM)\b/);
+    for (const code of readyCodes) expect(preflight.getByText(zhSettings.platform.preflight_checks[code].label)).toBeVisible();
+    expect(preflight.getAllByText("通过", { exact: true })).toHaveLength(6);
+    expect(preflight.getAllByText("未通过", { exact: true })).toHaveLength(2);
+    expect(preflight.getByText(zhSettings.platform.preflight_bundle_unsupported)).toBeVisible();
+    expect(preflight.getByText(zhSettings.platform.missing_artifacts.application_bundle)).toBeVisible();
+    expect(preflight.queryByText(bundleError)).not.toBeInTheDocument();
+    expect(preflight.queryByText("Release feed is reachable")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: zhSettings.platform.update_now })).toBeDisabled();
+    expect(screen.getByRole("button", { name: zhSettings.platform.restart })).toBeDisabled();
+    await user.click(preflight.getByRole("button", { name: zhSettings.platform.preflight_diagnostics }));
+    expect(preflight.getByText(bundleError)).toBeVisible();
+    expect(preflight.getByText("container_supervisors")).toBeVisible();
+  });
+
+  it("shows a translated fallback for a future check and preserves its code and error", async () => {
+    const user = userEvent.setup();
+    statusRef.current = platformStatus({ preflight: {
+      ready: false, checkedAt: new Date().toISOString(), platform: "linux", arch: "x64",
+      checks: [{ code: "future_driver_check", ok: false, message: "Unexpected mount layout: /very/long/path" }],
+    } });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    expect(screen.getByText(enSettings.platform.preflight_unknown_check)).toBeVisible();
+    expect(screen.getByText(enSettings.platform.preflight_unknown_failure)).toBeVisible();
+    expect(screen.queryByText("Unexpected mount layout: /very/long/path")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: enSettings.platform.preflight_diagnostics }));
+    expect(screen.getByText("future_driver_check")).toBeVisible();
+    expect(screen.getByText("Unexpected mount layout: /very/long/path")).toBeVisible();
   });
 
   it("does not claim up-to-date status before a successful check and disables source changes while busy", () => {

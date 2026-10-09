@@ -26,6 +26,7 @@ import { AppLink } from "../../navigation";
 import { useT } from "../../i18n";
 import { ProfileForm } from "./execution-profile-form";
 import { GroupForm } from "./execution-group-form";
+import { RuntimeMemberIdentity } from "./runtime-member-identity";
 
 type Group = ExecutionGroupList["groups"][number];
 
@@ -255,12 +256,13 @@ export function ExecutionConfigPage() {
               )}
               {group.runtime_ids.map((id) => (
                 <div
-                  className="flex items-center justify-between gap-3 text-sm"
+                  className="flex min-w-0 items-start justify-between gap-3 text-sm"
                   key={id}
                 >
-                  <span className="truncate">
-                    {runtimes.data?.find((r) => r.id === id)?.name ?? id}
-                  </span>
+                  <RuntimeMemberIdentity
+                    runtime={runtimes.data?.find((r) => r.id === id)}
+                    runtimeId={id}
+                  />
                   <BindingState group={group} runtimeId={id} />
                 </div>
               ))}

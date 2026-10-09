@@ -4,7 +4,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
 
-const { frontend, workspace, runtime, pat, controlUrl, artifacts, chrome } =
+const { frontend, workspace, runtime, runtimeChoices, pat, controlUrl, artifacts, chrome } =
   JSON.parse(process.env.EXECUTION_SMOKE_INPUT!);
 const checks: string[] = [],
   apiFailures: string[] = [],
@@ -133,6 +133,20 @@ try {
     name: "Capability groups",
     exact: true,
   });
+  assert.equal(await form.getByRole("checkbox").count(), 3);
+  for (const member of runtimeChoices) {
+    assert(await form.getByText(member.id, { exact: true }).isVisible());
+    assert(await form.getByText(member.deviceInfo.split(" · ", 1)[0], { exact: true }).isVisible());
+    assert.equal(await form.getByRole("checkbox", { name: new RegExp(member.id) }).count(), 1);
+  }
+  assert(await form.getByText("Offline", { exact: true }).isVisible());
+  await page.screenshot({ path: join(artifacts, "runtime-member-picker-desktop.png"), fullPage: false });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForFunction(() => document.documentElement.scrollWidth <= window.innerWidth);
+  await form.getByText(runtimeChoices[2].id, { exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(artifacts, "runtime-member-picker-mobile.png"), fullPage: false });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  check("three same-name Codex runtimes expose machine, status and distinct IDs; long names fit 390px");
   await form.getByLabel("Name", { exact: true }).fill("Group A");
   await form
     .getByLabel("Purpose and organization", { exact: true })
@@ -147,8 +161,14 @@ try {
   await form.getByLabel("Model ID", { exact: true }).fill("model-a");
   await form.getByLabel(/Allowed model IDs/).fill("model-fast");
   await form.getByLabel("API key", { exact: true }).fill("synthetic-smoke-key");
-  await form.getByLabel(runtime.name, { exact: true }).check();
+  await form.getByRole("checkbox", { name: new RegExp(runtime.id) }).check();
   const ga = (await submit("POST", "/api/execution-groups", 201)).group;
+  assert.deepEqual(ga.runtime_ids, [runtime.id]);
+  const memberRow = page.getByRole("article", { name: "Group A", exact: true });
+  await memberRow.getByText(runtime.id, { exact: true }).waitFor();
+  assert(await memberRow.getByText("Design Mac", { exact: true }).isVisible());
+  assert.equal(await memberRow.getByText(runtimeChoices[0].id, { exact: true }).count(), 0);
+  check("saving the second Codex binds its exact Runtime ID and keeps the machine visible in the group");
   assert(!JSON.stringify(ga).includes("synthetic-smoke-key"));
   const a = (await state()).profiles.find(
     (profile: any) => profile.id === ga.profile_id,
@@ -173,10 +193,10 @@ try {
       .getByRole("combobox", { name: /^Provider connection/ })
       .selectOption(profileId);
     assert.equal(
-      await form.getByLabel("Other Claude machine", { exact: true }).count(),
+      await form.getByRole("checkbox", { name: /Other Claude machine/ }).count(),
       0,
     );
-    await form.getByLabel(runtime.name, { exact: true }).check();
+    await form.getByRole("checkbox", { name: new RegExp(runtime.id) }).check();
     return (await submit("POST", "/api/execution-groups", 201)).group;
   };
   const gb = await createGroup("Group B", b.id);
@@ -217,6 +237,9 @@ try {
     .getByRole("article", { name: "Group A", exact: true })
     .getByRole("button", { name: "Edit", exact: true })
     .click();
+  assert(await page.getByRole("checkbox", { name: new RegExp(runtime.id) }).isChecked());
+  assert.equal(await page.getByRole("checkbox", { name: new RegExp(runtimeChoices[0].id) }).isChecked(), false);
+  check("reopening the group retains the selected Codex without checking another same-name Runtime");
   await page
     .getByRole("button", { name: "Edit provider and models", exact: true })
     .click();

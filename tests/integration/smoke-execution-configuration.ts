@@ -57,10 +57,19 @@ try {
   const user = store.getOrCreateUser({ name: "Configuration smoke user", email: "configuration-smoke@example.test" });
   const workspace = store.createWorkspace({ name: "Configuration smoke", slug: "configuration-smoke" }, user.id);
   assert.notEqual(workspace.id, "local");
-  const runtime = store.registerRuntime({ name: "Simulated worker (no provider)", provider: "codex", workspaceId: workspace.id, ownerId: user.id, status: "online", maxConcurrency: 1 });
+  const runtimeChoices = [
+    store.registerRuntime({ id: "rt_member-shared-prefix-one", name: "Codex", deviceInfo: "Windows desktop · Windows", provider: "codex", workspaceId: workspace.id, ownerId: user.id, status: "online", maxConcurrency: 1 }),
+    store.registerRuntime({ id: "rt_member-shared-prefix-two", name: "Codex", deviceInfo: "Design Mac · macOS (arm64)", provider: "codex", workspaceId: workspace.id, ownerId: user.id, status: "online", maxConcurrency: 1 }),
+    store.registerRuntime({ id: "rt_member-shared-prefix-three", name: "Codex", deviceInfo: `${"remote-linux-worker-".repeat(8)} · Linux`, provider: "codex", workspaceId: workspace.id, ownerId: user.id, status: "offline", maxConcurrency: 1 }),
+  ] as const;
+  // Select the second of three identical engine names to catch accidental
+  // selection of the first matching label. No real provider is started.
+  const runtime = runtimeChoices[1];
   pat = (await store.createAccessToken({ name: "Isolated browser smoke", type: "pat", workspaceId: workspace.id, userId: user.id })).token;
   server = startMultiremiServer({ store, authToken: randomUUID(), hostname: "127.0.0.1", port: 0, backgroundJobs: false, scheduler: null, scmPolling: null, messaging: null, controlPlaneSshMesh: null });
-  heartbeat = setInterval(() => store.heartbeatRuntime(runtime.id, { claimPending: false }), 10_000);
+  heartbeat = setInterval(() => {
+    for (const member of runtimeChoices.filter(member => member.status === "online")) store.heartbeatRuntime(member.id, { claimPending: false });
+  }, 10_000);
   const backend = `http://127.0.0.1:${server.port}`;
   const env = { ...process.env, NODE_ENV: "development", NEXT_TELEMETRY_DISABLED: "1", REMOTE_API_URL: backend, NEXT_PUBLIC_API_URL: "", NEXT_PUBLIC_WS_URL: "", FRONTEND_PORT: String(port) };
   next = spawn("node", [require.resolve("next/dist/bin/next"), "dev", "--webpack", "--hostname", "127.0.0.1", "--port", String(port)], { cwd: webRoot, env, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
@@ -84,7 +93,7 @@ try {
   } });
   browserHost = spawn("node", ["--experimental-strip-types", join(repo, "tests/integration/execution-configuration-browser.ts")], {
     cwd: repo, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, EXECUTION_SMOKE_INPUT: JSON.stringify({ frontend, workspace, runtime, pat, controlUrl: `http://127.0.0.1:${control.port}`, artifacts, chrome: resolveChrome() }) },
+    env: { ...process.env, EXECUTION_SMOKE_INPUT: JSON.stringify({ frontend, workspace, runtime, runtimeChoices, pat, controlUrl: `http://127.0.0.1:${control.port}`, artifacts, chrome: resolveChrome() }) },
   });
   for (const stream of [browserHost.stdout, browserHost.stderr]) stream?.on("data", chunk => process.stdout.write(redact(String(chunk))));
   const code = await new Promise<number | null>((resolve, reject) => { browserHost!.once("error", reject); browserHost!.once("exit", resolve); });

@@ -1,9 +1,13 @@
 {
   "version": "0.2.88",
-  "ref": "277a43bef475b690b13d713cd9175222095f2767",
+  "ref": "b87a4e247bd1998e85c98965a9733a107ccb2de7",
+  "publishedAt": "2026-10-09T18:01:29.255Z",
+  "releaseUrl": "https://github.com/moesin-lab/Remi/tree/b87a4e247bd1998e85c98965a9733a107ccb2de7",
+  "manifestUrl": "https://raw.githubusercontent.com/moesin-lab/Remi/codex/stable-application-feed-20261010/deployment-artifacts/stable-application.json",
   "dataSchema": "8cb9f38263f7770f637d7256a4a049c762614d01e816195e4d15a24e1f175aa8",
-  "apiImage": "ghcr.io/moesin-lab/remi-api@sha256:32dc56ddb7110f57b206a0fdad77fcbe4f16e495b89e456496ec256272f97d21",
-  "webImage": "ghcr.io/moesin-lab/remi-web@sha256:88dbf258f5d0c18387c09b076fcd09f08a2726fc65339036fcc717ae11cddb09",
+  "apiImage": "ghcr.io/moesin-lab/remi-api@sha256:346319ecb0f55c951767990ea5f60d38a09a0ec379319511fbd90f43881cebc9",
+  "webImage": "ghcr.io/moesin-lab/remi-web@sha256:cf816a01324c6669a9d1d6d947bed7920a5d0f6fc9e9c6786f7b24cf6c8034e9",
+  "updaterImage": "ghcr.io/moesin-lab/remi-updater@sha256:06496cb758cea79f812744c1081af7acefc8da369593d441706c3f94407b8986",
   "application": {
     "format": 1,
     "supervisor": 1,
@@ -12,8 +16,8 @@
     ],
     "assets": {
       "linux-x64": {
-        "url": "https://github.com/moesin-lab/Remi/releases/download/v0.2.86/platform-application-277a43bef475b690b13d713cd9175222095f2767-linux-x64.tar.gz",
-        "sha256": "5193dd26f135fffc84728253e364503a5fda10ed976ded96ea759fdb9860258e"
+        "url": "https://github.com/moesin-lab/Remi/releases/download/v0.2.86/platform-application-b87a4e247bd1998e85c98965a9733a107ccb2de7-linux-x64.tar.gz",
+        "sha256": "6723f544e4569109989e7c275de771bff306233fa80a9d8a92ea5364e2c2f2df"
       }
     },
     "apiLibc": "glibc 2.41",
@@ -23,8 +27,5 @@
     "nodeMajor": 22,
     "apiBase": "f2b313f1ba7d78e5b49a79d471c0ea54eb8a9d4b86500ddc63419b9216cf4950",
     "nativeTools": "99f7d78380d7eb541a5b364bb884b366b26c7d88841035addfcbfbdef9e027b9"
-  },
-  "releaseUrl": "https://github.com/moesin-lab/Remi/tree/277a43bef475b690b13d713cd9175222095f2767",
-  "publishedAt": "2026-10-09T15:44:07.374Z",
-  "manifestUrl": "https://raw.githubusercontent.com/moesin-lab/Remi/codex/stable-application-feed-20261010/deployment-artifacts/stable-application.json"
+  }
 }

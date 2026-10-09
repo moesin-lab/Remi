@@ -4110,7 +4110,7 @@
         "runtime_id": "rt_snapshot",
         "runtime_name": "dmn_snapshot",
         "runtime_online": true,
-        "applied_revision": null,
+        "applied_revision": 0,
         "bot_name": null,
         "last_heartbeat_at": "<timestamp>",
         "error_code": null,
@@ -11396,6 +11396,17 @@
             "allowed": true
           },
           {
+            "id": "workspace.feishu-bot.create",
+            "command": "remi workspace feishu-bot create",
+            "capability": "workspace.feishu-bot.create",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "workspace.feishu-bot.delete",
             "command": "remi workspace feishu-bot delete",
             "capability": "workspace.feishu-bot.delete",
@@ -11421,6 +11432,17 @@
             "id": "workspace.feishu-bot.get",
             "command": "remi workspace feishu-bot get",
             "capability": "workspace.feishu-bot.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "workspace.feishu-bot.list",
+            "command": "remi workspace feishu-bot list",
+            "capability": "workspace.feishu-bot.list",
             "outputs": [
               "table",
               "json",

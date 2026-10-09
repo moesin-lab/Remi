@@ -59,6 +59,7 @@ export function registerMessageCardRoutes(app: Hono, { store }: RouterDeps): voi
     const appId = loaded.request
       ? store.feishuBotFor().forTask(loaded.request.taskId).getConfig(loaded.workspaceId)?.appId
       : store.getFeishuIssueDecisionCardContext(loaded.workspaceId, loaded.message.id)?.appId;
+    if (!loaded.request && !appId) return c.json({ error: "Decision card context not found" }, 404);
     const operator = appId ? store.resolveFeishuDecisionOperatorMember(loaded.workspaceId, appId, credential.operatorOpenId) : null;
     if (operator?.status !== "resolved") return c.json({ error: "card operator is not an active workspace member", code: operator?.status === "ambiguous" ? "decision_member_ambiguous" : "decision_member_unmapped" }, 403);
     const answer = typeof input.answer === "string" ? cleanString(input.answer) : null;

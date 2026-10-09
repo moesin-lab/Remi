@@ -554,6 +554,73 @@
       "internal_application": { "label": "In-container application updates", "description": "An updater inside Compose switches API/Web and bundled Bun/Node while their containers stay running.", "migration": "Adopt matching API/Web images with supervisor support. Add compose.internal-updates.yml, set REMI_UPDATER_IMAGE and REMI_UPDATER_ENV_FILE, and configure matching API/updater credentials and an HTTPS feed. Start the updater and isolated rehearsal services together with the overlay; wait for supervisors and seed copies to become ready." },
       "systemd_release": { "label": "Systemd release updates", "description": "A host updater switches release directories and restarts managed systemd services.", "migration": "Prepare the Linux release directory, managed API/Web systemd units and complete backups. Configure MULTIREMI_PLATFORM_DRIVER=systemd_release and a source archive feed. Moving from Docker requires a separate data and service deployment migration." }
     },
+    "preflight_ready": "Checks passed",
+    "preflight_blocked": "Checks failed",
+    "preflight_passed": "Passed",
+    "preflight_failed": "Failed",
+    "preflight_unknown_check": "Additional check",
+    "preflight_unknown_failure": "This check failed. Open diagnostic details, resolve the issue and check again.",
+    "preflight_diagnostics": "Diagnostic details",
+    "preflight_diagnostics_hint": "Original updater messages are retained here for troubleshooting.",
+    "preflight_bundle_unsupported": "This release has no valid application bundle. Image-only releases cannot be installed in application update mode.",
+    "preflight_checks": {
+      "host": {
+        "label": "Host environment",
+        "failure": "The host, services or required tools are not ready. Check the deployment environment."
+      },
+      "compose": {
+        "label": "Container deployment",
+        "failure": "Container configuration or the Docker engine is not ready. Check the deployment configuration."
+      },
+      "application_runtime": {
+        "label": "Application runtime",
+        "failure": "The installed application runtime is unavailable or incompatible. Check the base images and runtime configuration."
+      },
+      "local_profile": {
+        "label": "Local deployment",
+        "failure": "The local deployment did not pass its environment checks. Check the profile and running services."
+      },
+      "container_supervisors": {
+        "label": "Service supervisors",
+        "failure": "The API or Web supervisor is not ready. Check its heartbeat and application process."
+      },
+      "isolated_rehearsal": {
+        "label": "Isolated migration rehearsal",
+        "failure": "The isolated migration rehearsal service is unavailable. Restore it and check again."
+      },
+      "backup": {
+        "label": "Data backup configuration",
+        "failure": "Backup configuration or validation failed. Confirm the database and persistent files can be backed up completely."
+      },
+      "postgresql": {
+        "label": "Database connection",
+        "failure": "The database is unavailable for backup. Restore the connection and check again."
+      },
+      "program_storage": {
+        "label": "Application storage",
+        "failure": "The program directory is not writable or has insufficient space. Check permissions and available disk space."
+      },
+      "current_release": {
+        "label": "Installed release",
+        "failure": "Installed release metadata is missing or does not match the running service. Verify the current release."
+      },
+      "release_feed": {
+        "label": "Update source connection",
+        "failure": "The update source could not be read. Check its address and network connection."
+      },
+      "release_artifacts": {
+        "label": "Release contents",
+        "failure": "The release lacks valid content required by this update mode. Use a compatible update source."
+      },
+      "data_schema": {
+        "label": "Data compatibility",
+        "failure": "The target data schema is incompatible. Verify its migration and rollback declarations."
+      },
+      "release_feed_or_schema": {
+        "label": "Release and data compatibility",
+        "failure": "The update source, release manifest or data compatibility failed validation. Resolve the issue shown in diagnostic details."
+      }
+    },
     "missing_artifacts": {
       "release_identity": "A valid release version and commit identity are required.",
       "source_archive": "An HTTPS source archive and SHA-256 checksum are required.",

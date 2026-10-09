@@ -1,5 +1,5 @@
 import { expect, it } from "bun:test";
-import { migrateFeishuMultipleBots } from "@multiremi/store/feishu-multiple-bots.js";
+import { migrateFeishuMultipleBots } from "@multiremi/store/migrations.js";
 import { unifiedModelBackendTests } from "./unified-model-test-backends.js";
 
 unifiedModelBackendTests("Feishu multiple-bot migration", fixture => {

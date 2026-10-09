@@ -167,7 +167,10 @@ describe('socket-free internal application updates', () => {
     const f = await fixture(); await f.journal('committed');
     await f.driver.recoverInterrupted();
     expect((await f.driver.pendingFinalization())?.report.status).toBe('failed');
-    expect(f.events).toEqual(['api:stop', 'web:stop', 'api:run', 'web:run']);
+    // Supervisors observe their files independently; both must stop before
+    // either restarts, but there is no ordering contract within each phase.
+    expect(f.events.slice(0, 2).sort()).toEqual(['api:stop', 'web:stop']);
+    expect(f.events.slice(2).sort()).toEqual(['api:run', 'web:run']);
     expect(f.calls).toEqual([]);
   });
   it('leaves recovery and writes blocked if the retained application is unhealthy', async () => {

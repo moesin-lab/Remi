@@ -33,7 +33,7 @@
     },
     "bot": {
       "title": "机器人",
-      "description": "配置机器人、回复智能体、运行设备和机器人菜单。"
+      "description": "管理工作区内的多个机器人、应答云友、承载 Runtime 和应用凭据。"
     },
     "access": {
       "title": "访问控制",
@@ -247,7 +247,7 @@
     },
     "concierge": {
       "title": "飞书个人机器人",
-      "description": "为当前 workspace 运行一个飞书机器人。在这里选择应答的 Agent、承载它的机器，以及登录用的应用凭据——不需要再登录 daemon 机器改环境变量。",
+      "description": "为当前机器人选择应答的云友、承载它的 Runtime 和飞书应用凭据。每个机器人独立保存、启停和设置会话路由。",
       "member_available": "{{name}} 在线。在飞书里私聊它即可访问当前 workspace。",
       "member_unnamed_bot": "机器人",
       "member_unavailable": "机器人已配置，但当前不可用。",
@@ -549,5 +549,17 @@
     "install_error_session_lost": "安装会话已失效或丢失，请重新扫码。",
     "install_error_forbidden": "你已没有在此工作区安装飞书 Bot 的权限，请联系工作区管理员。",
     "install_error_generic": "安装失败，请重试。"
+  },
+  "bots": {
+    "select": "选择机器人",
+    "add": "添加机器人",
+    "name": "机器人名称",
+    "empty": "配置第一个机器人",
+    "loading": "正在加载机器人…",
+    "runtimeHint": "每个机器人使用独立的飞书应用和 Runtime。当前一个 Runtime 只能承载一个机器人。",
+    "runtimeAssigned": "已分配给其他机器人",
+    "missing": "这个机器人已被删除或不存在。",
+    "legacy": "默认机器人",
+    "shared": "以下为工作区设置，由默认机器人发布。"
   }
 }

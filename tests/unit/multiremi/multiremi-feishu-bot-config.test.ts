@@ -478,6 +478,8 @@ describe("workspace Feishu bot config permissions", () => {
       ["/api/workspaces/local/feishu-bot/chats", { headers: memberHeaders }],
       ["/api/workspaces/local/feishu-bot/routes", { method: "PUT", headers: memberHeaders, body: '{"routes":[]}' }],
       ["/api/workspaces/local/feishu-bot", { method: "PUT", headers: memberHeaders, body: configBody(agentId) }],
+      ["/api/workspaces/local/feishu-bots", { headers: memberHeaders }],
+      ["/api/workspaces/local/feishu-bots", { method: "POST", headers: memberHeaders, body: configBody(agentId) }],
       ["/api/workspaces/local/feishu-bot", { method: "DELETE", headers: memberHeaders }],
       ["/api/workspaces/local/feishu-bot/deploy", { method: "POST", headers: memberHeaders }],
       ["/api/workspaces/local/feishu-bot/stop", { method: "POST", headers: memberHeaders }],
@@ -505,6 +507,8 @@ describe("workspace Feishu bot config permissions", () => {
 
     for (const [path, init] of [
       ["/api/workspaces/local/feishu-bot", { headers }],
+      ["/api/workspaces/local/feishu-bots", { headers }],
+      ["/api/workspaces/local/feishu-bots", { method: "POST", headers, body: configBody(agentId) }],
       ["/api/workspaces/local/feishu-bot/status", { headers }],
       ["/api/workspaces/local/feishu-bot/routes", { headers }],
       ["/api/workspaces/local/feishu-bot/chats", { headers }],

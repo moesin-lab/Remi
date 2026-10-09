@@ -48,7 +48,7 @@ describe("Feishu bot sender allowlist mutations", () => {
       request = result.current.mutateAsync({ senderId: "sender-1", allowed });
       await Promise.resolve();
     });
-    expect(updateFeishuBotSender).toHaveBeenCalledWith("ws-a", "sender-1", { allowed });
+    expect(updateFeishuBotSender).toHaveBeenCalledWith("ws-a", "sender-1", { allowed }, "default");
     expect(queryClient.getQueryData(feishuBotKeys.senders("ws-a"))).toEqual(original);
     expect(invalidateQueries).not.toHaveBeenCalled();
 
@@ -102,7 +102,7 @@ describe("Feishu bot sender allowlist mutations", () => {
       await request;
     });
 
-    expect(updateFeishuBotSender).toHaveBeenCalledWith("ws-a", "sender-1", { allowed: false });
+    expect(updateFeishuBotSender).toHaveBeenCalledWith("ws-a", "sender-1", { allowed: false }, "default");
     expect(invalidateQueries).toHaveBeenCalledExactlyOnceWith({
       queryKey: feishuBotKeys.senders("ws-a"),
     });

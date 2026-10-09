@@ -92,7 +92,7 @@ export function taskTokenHardDenyCategory(request: Request): TaskTokenHardDenyCa
     // The Feishu concierge surface carries the workspace's app secret and can
     // repoint which Agent answers Feishu messages, so the whole subtree — reads
     // included — stays outside what a task credential may reach.
-    || /^\/api\/workspaces\/[^/]+\/feishu-bot(?:\/.*)?$/.test(path)) {
+    || /^\/api\/workspaces\/[^/]+\/feishu-bots?(?:\/.*)?$/.test(path)) {
     return "access_credentials";
   }
   if (path === "/api/me" || path.startsWith("/api/me/")

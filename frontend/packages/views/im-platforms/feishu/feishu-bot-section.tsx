@@ -54,6 +54,7 @@ import { cn } from "@multiremi/ui/lib/utils";
 import { useT } from "../../i18n";
 import { useTimeAgo } from "../../i18n/use-time-ago";
 import { FeishuBotRegistrationDialog, type ClaimedRegistration } from "./feishu-bot-registration-dialog";
+import { useFeishuBotSelection } from "./bot-selection";
 import { ImLoadError } from "../load-error";
 
 /**
@@ -74,6 +75,8 @@ import { ImLoadError } from "../load-error";
  *   last action the admin took.
  */
 export function FeishuBotSection() {
+  const { botId } = useFeishuBotSelection();
+  const creating = botId === "new";
   const { t } = useT("im-platforms");
   const workspaceId = useWorkspaceId();
   const user = useAuthStore((state) => state.user);
@@ -83,13 +86,13 @@ export function FeishuBotSection() {
   const role = members.find((member) => member.user_id === user?.id)?.role;
   const canManage = role === "owner" || role === "admin";
 
-  const botQuery = useQuery(feishuBotOptions(workspaceId));
+  const botQuery = useQuery(feishuBotOptions(workspaceId, !creating, botId));
   // The admin-only queries stay disabled for members so the page does not fire
   // three requests it already knows will come back 403.
-  const statusQuery = useQuery(feishuBotStatusOptions(workspaceId, canManage));
+  const statusQuery = useQuery(feishuBotStatusOptions(workspaceId, canManage && !creating, botId));
   const candidatesQuery = useQuery(feishuBotCandidatesOptions(workspaceId, canManage));
 
-  if (membersQuery.isPending || botQuery.isPending) {
+  if (membersQuery.isPending || (!creating && botQuery.isPending)) {
     return <div className="h-32 animate-pulse rounded border bg-muted/30" />;
   }
 
@@ -128,6 +131,7 @@ export function FeishuBotSection() {
 
   return (
     <FeishuBotAdminPanel
+      key={botId}
       workspaceId={workspaceId}
       config={botQuery.data?.config ?? null}
       status={statusQuery.data ?? null}
@@ -150,6 +154,7 @@ function SectionHeader() {
 }
 
 interface Draft {
+  name: string;
   agentId: string;
   runtimeId: string;
   appId: string;
@@ -160,6 +165,7 @@ interface Draft {
 }
 
 const EMPTY_DRAFT: Draft = {
+  name: "",
   agentId: "",
   runtimeId: "",
   appId: "",
@@ -172,6 +178,7 @@ function draftFromConfig(config: FeishuBotConfig | null): Draft {
   if (!config?.configured) return EMPTY_DRAFT;
   return {
     ...EMPTY_DRAFT,
+    name: config.name ?? "",
     agentId: config.agent_id ?? "",
     runtimeId: config.runtime_id ?? "",
     appId: config.app_id,
@@ -193,16 +200,17 @@ function FeishuBotAdminPanel({
   candidatesPending: boolean;
 }) {
   const { t } = useT("im-platforms");
+  const { botId, selectBot } = useFeishuBotSelection();
   const [draft, setDraft] = useState<Draft>(() => draftFromConfig(config));
   const [dirty, setDirty] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const save = useSaveFeishuBot(workspaceId);
-  const remove = useDeleteFeishuBot(workspaceId);
-  const deploy = useDeployFeishuBot(workspaceId);
-  const stop = useStopFeishuBot(workspaceId);
-  const test = useTestFeishuBot(workspaceId);
+  const save = useSaveFeishuBot(workspaceId, botId);
+  const remove = useDeleteFeishuBot(workspaceId, botId);
+  const deploy = useDeployFeishuBot(workspaceId, botId);
+  const stop = useStopFeishuBot(workspaceId, botId);
+  const test = useTestFeishuBot(workspaceId, botId);
 
   // A refetch must not stomp on half-typed input, so the server's copy only
   // seeds the form while the admin has not touched it.
@@ -242,6 +250,7 @@ function FeishuBotAdminPanel({
 
   function buildRequest(): UpsertFeishuBotRequest {
     const request: UpsertFeishuBotRequest = {
+      name: draft.name.trim(),
       agent_id: draft.agentId,
       runtime_id: draft.runtimeId,
       app_id: draft.appId.trim(),
@@ -265,7 +274,8 @@ function FeishuBotAdminPanel({
   async function handleSave() {
     if (!canSave) return;
     try {
-      await save.mutateAsync(buildRequest());
+      const saved = await save.mutateAsync(buildRequest());
+      if (botId === "new" && saved.bot_id) selectBot(saved.bot_id);
       // Drop every typed secret the moment it is stored: the form must not go
       // on holding plaintext an admin can no longer see anyway.
       setDraft((current) => ({
@@ -324,6 +334,11 @@ function FeishuBotAdminPanel({
 
       <Card>
         <CardContent className="space-y-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="feishu-bot-name">{t($ => $.bots.name)}</Label>
+            <Input id="feishu-bot-name" value={draft.name} maxLength={100} disabled={busy} onChange={event => edit({ name: event.target.value })} />
+          </div>
+          <p className="text-xs text-muted-foreground">{t($ => $.bots.runtimeHint)}</p>
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label>{t(($) => $.feishu.concierge.agent_label)}</Label>
@@ -379,8 +394,9 @@ function FeishuBotAdminPanel({
                     // A Runtime that has not advertised the capability is shown
                     // but not selectable: hiding it would leave an admin
                     // wondering why their daemon is missing from the list.
-                    <SelectItem key={runtime.id} value={runtime.id} disabled={!runtime.supports_config}>
+                    <SelectItem key={runtime.id} value={runtime.id} disabled={!runtime.supports_config || (!!runtime.assigned_bot_id && runtime.assigned_bot_id !== botId)}>
                       {runtime.name}
+                      {!!runtime.assigned_bot_id && runtime.assigned_bot_id !== botId ? ` — ${t($ => $.bots.runtimeAssigned)}` : ""}
                       {!runtime.supports_config
                         ? ` — ${t(($) => $.feishu.concierge.runtime_unsupported)}`
                         : !runtime.online
@@ -525,7 +541,7 @@ function FeishuBotAdminPanel({
               onClick={() => {
                 setConfirmDelete(false);
                 void run(
-                  () => remove.mutateAsync(),
+                  () => remove.mutateAsync().then(result => { selectBot("default"); return result; }),
                   t(($) => $.feishu.concierge.toast_delete_failed),
                 );
               }}

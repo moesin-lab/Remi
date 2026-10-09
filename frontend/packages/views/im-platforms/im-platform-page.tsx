@@ -6,7 +6,7 @@ import { getImPlatform, type ImPlatformId, type ImSection } from "@multiremi/cor
 import { useCurrentWorkspace, useWorkspacePaths } from "@multiremi/core/paths";
 import { cn } from "@multiremi/ui/lib/utils";
 import { BreadcrumbHeader } from "../layout/breadcrumb-header";
-import { AppLink } from "../navigation";
+import { AppLink, useNavigation } from "../navigation";
 import { useT } from "../i18n";
 import { FeishuOverview } from "./feishu/overview";
 import { FeishuBotPanel, FeishuAccessPanel, FeishuConversationsPanel } from "./feishu/bot-panels";
@@ -23,6 +23,8 @@ export function ImPlatformPage({ platformId, section }: { platformId: ImPlatform
   const { t } = useT("im-platforms");
   const paths = useWorkspacePaths();
   const workspace = useCurrentWorkspace();
+  const selectedBot = useNavigation().searchParams.get("bot");
+  const botSections: ImSection[] = ["bot", "access", "conversations"];
   const platform = getImPlatform(platformId)!;
   const View = PLATFORM_VIEWS[platformId][section];
   const navigation = useRef<HTMLElement>(null);
@@ -40,7 +42,7 @@ export function ImPlatformPage({ platformId, section }: { platformId: ImPlatform
     <nav ref={navigation} aria-label={t($ => $.page.activity)} className="flex shrink-0 gap-1 overflow-x-auto border-b px-4 pt-2 md:px-6">
       {platform.sections.map(item => {
         const Icon = SECTION_ICONS[item];
-        return <AppLink key={item} href={paths.imPlatform(platformId, item)} aria-current={section === item ? "page" : undefined} className={cn("flex shrink-0 items-center gap-2 border-b-2 px-3 py-3 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-ring", section === item ? "border-primary font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>
+        return <AppLink key={item} href={paths.imPlatform(platformId, item) + (selectedBot && selectedBot !== "new" && botSections.includes(item) ? `?bot=${encodeURIComponent(selectedBot)}` : "")} aria-current={section === item ? "page" : undefined} className={cn("flex shrink-0 items-center gap-2 border-b-2 px-3 py-3 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-ring", section === item ? "border-primary font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>
           <Icon className="size-4" />{t($ => $.sections[item].title)}
         </AppLink>;
       })}

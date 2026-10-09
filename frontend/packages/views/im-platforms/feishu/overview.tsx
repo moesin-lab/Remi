@@ -4,7 +4,7 @@ import { ArrowRight, Bot, Plug, ShieldCheck, Waypoints, ScrollText } from "lucid
 import { useQuery } from "@tanstack/react-query";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useWorkspacePaths } from "@multiremi/core/paths";
-import { feishuBotOptions, feishuBotStatusOptions } from "@multiremi/core/feishu-bot/queries";
+import { feishuBotOptions, feishuBotsOptions } from "@multiremi/core/feishu-bot/queries";
 import { feishuEndpointsOptions, feishuSourcesOptions } from "@multiremi/core/feishu";
 import { AppLink } from "../../navigation";
 import { useT } from "../../i18n";
@@ -17,28 +17,33 @@ export function FeishuOverview() {
   const paths = useWorkspacePaths();
   const wsId = useWorkspaceId();
   const access = useImWorkspaceAccess(wsId);
-  const bot = useQuery(feishuBotOptions(wsId));
-  const status = useQuery(feishuBotStatusOptions(wsId, access.canManage));
+  const bot = useQuery(feishuBotOptions(wsId, !access.canManage));
+  const bots = useQuery(feishuBotsOptions(wsId, access.canManage));
   const connections = useQuery(feishuEndpointsOptions(wsId, access.canManage));
   const sources = useQuery(feishuSourcesOptions(wsId, access.canManage));
   if (access.isError) return <ImLoadError retry={() => void access.refetch()} />;
   if (access.isPending) return <p role="status">{t($ => $.page.loading)}</p>;
-  const config = bot.data?.role === "admin" ? bot.data.config : undefined;
   const availability = bot.data?.role === "member" ? bot.data.availability : undefined;
   return <div className="space-y-6">
     {!access.canManage && <p className="rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">{t($ => $.page.readOnly)}</p>}
     <div className="grid gap-4 lg:grid-cols-2">
       <section className="flex flex-col gap-4 rounded-xl border bg-card p-5">
         <div className="flex items-start justify-between gap-3"><h2 className="flex items-center gap-2 font-medium"><Bot className="size-4" />{t($ => $.page.botConnection)}</h2>
-          {status.data && !status.isError && <FeishuBotStatusBadge status={status.data.status} />}
         </div>
         <p className="text-sm text-muted-foreground">{t($ => $.page.botHint)}</p>
-        {bot.isError || (access.canManage && status.isError) ? <ImLoadError retry={() => { void bot.refetch(); if (access.canManage) void status.refetch(); }} />
-          : bot.isPending || (access.canManage && status.isPending) ? <p role="status" className="text-sm">{t($ => $.page.loading)}</p>
-          : <div className="min-w-0 space-y-1 text-sm">
-            <p className="truncate font-medium">{config?.bot_name || availability?.bot_name || t($ => (config?.configured || availability?.configured) ? $.page.configured : $.page.notConfigured)}</p>
-            {config?.configured && <p className="truncate text-muted-foreground">{config.agent_name} · {config.runtime_name}</p>}
-          </div>}
+        {access.canManage ? bots.isError ? <ImLoadError retry={() => void bots.refetch()} />
+          : bots.isPending ? <p role="status" className="text-sm">{t($ => $.page.loading)}</p>
+          : !bots.data?.bots.length ? <p className="text-sm text-muted-foreground">{t($ => $.page.notConfigured)}</p>
+          : <ul className="space-y-3">{bots.data.bots.map(config => <li key={config.bot_id}>
+            <AppLink href={`${paths.imPlatform("feishu", "bot")}?bot=${encodeURIComponent(config.bot_id)}`} className="flex min-w-0 items-center justify-between gap-3 rounded-lg border p-3 hover:bg-accent/40">
+              <span className="min-w-0 text-sm"><span className="block truncate font-medium">{config.name || config.bot_name || config.app_id}</span>
+                <span className="block truncate text-muted-foreground">{config.agent_name} · {config.runtime_name}</span></span>
+              <FeishuBotStatusBadge status={config.status} />
+            </AppLink>
+          </li>)}</ul>
+          : bot.isError ? <ImLoadError retry={() => void bot.refetch()} />
+          : bot.isPending ? <p role="status" className="text-sm">{t($ => $.page.loading)}</p>
+          : <p className="truncate text-sm font-medium">{availability?.bot_name || t($ => availability?.configured ? $.page.configured : $.page.notConfigured)}</p>}
         <AppLink href={paths.imPlatform("feishu", "bot")} className="mt-auto inline-flex items-center gap-2 text-sm font-medium text-primary">{t($ => $.sections.bot.title)}<ArrowRight className="size-4" /></AppLink>
       </section>
       <section className="flex flex-col gap-4 rounded-xl border bg-card p-5">

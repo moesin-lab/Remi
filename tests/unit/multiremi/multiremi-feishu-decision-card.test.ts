@@ -722,6 +722,12 @@ describe("Feishu decision cards for Issue human requests", () => {
       message_id: "om_recoverable",
       recipient_open_id: "ou_the_person",
     }]);
+    store.registerRuntime({ id: "rt_other_bot", name: "Another bot", provider: "claude", workspaceId: "local", daemonId: "another-bot-host" });
+    store.heartbeatRuntime("rt_other_bot", { supportsFeishuBotConfig: true, supportsDecisionCard: true });
+    store.feishuBotFor("bot_other").upsertConfig("local", {
+      agentId, runtimeId: "rt_other_bot", appId: "cli_other_bot", appSecret: "fixture-only", appSecretOp: "set", domain: "feishu", enabled: true,
+    });
+    expect(store.listFeishuBotLiveDecisionCards("local", "rt_other_bot")).toEqual([]);
     // A settled request is no longer clickable, so it drops out.
     store.respondTaskHumanRequest(request.id, { response: { answers: { "Continue?": "Yes" } } });
     expect(store.listFeishuBotLiveDecisionCards("local", "rt_bot")).toEqual([]);
@@ -1759,12 +1765,12 @@ describe("Feishu decision card heartbeat delivery", () => {
     expect(store.reportFeishuBotOutbound("local", "rt_bot", card.id, {
       claimToken: card.claimToken, status: "sent", externalMessageId: "om_text",
       interactionOpenId: "ou_the_person", degraded: "send_failed",
-    })).toBe(true);
+    })).toBe(false);
 
-    // The delivery itself records the outcome...
+    // Without a binding, the reporting Runtime cannot prove bot ownership.
     expect(db!.query("SELECT degraded FROM multiremi_feishu_bot_outbound_deliveries WHERE id = ?").get(card.id))
-      .toEqual({ degraded: "send_failed" });
-    // ...but no activity lands on the other workspace's Issue.
+      .toEqual({ degraded: null });
+    // No activity lands on the other workspace's Issue.
     expect(store.listIssueActivity(otherIssue.id).filter((a) => a.type === "decision_card_degraded"))
       .toHaveLength(0);
 

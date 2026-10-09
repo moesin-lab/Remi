@@ -1,3 +1,4 @@
+import { migrateFeishuMultipleBots } from "./feishu-multiple-bots.js";
 import { migrateLegacyExecutionProfiles } from "@multiremi/store/execution-profile-migration.js";
 import { ensureTurnListIndexes } from './turn-list-indexes.js';
 import { openSqliteDatabase } from './db/sqlite.js';
@@ -88,7 +89,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
     if (tables.has("multiremi_feishu_bot_configs")) {
       addColumnIfMissing(db, "multiremi_feishu_bot_configs", "sender_access_policy TEXT NOT NULL DEFAULT 'agent'");
     }
-    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);return;}
+    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);return;}
     // Inspect the existing snapshot before bootstrap migrations can touch it.
     const checks=unifiedModelPreflight(db);
     if(checks.some(c=>!c.ok)){
@@ -97,7 +98,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
     }
     runMigrationsForDialect(db,resolveSqlDialect(db,options.dialect));
     runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});
-    separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureUsageAccountingSchema(db);
+    separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);
   });
   // SQLite schema rebuilds toggle foreign_keys outside their transactions.
   // Hold a separate SQLite writer lock across that entire sequence so another

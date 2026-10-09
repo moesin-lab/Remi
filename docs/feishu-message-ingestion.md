@@ -10,6 +10,16 @@ summary: 当前机器人 Chat/Issue 话题与轮次推送，以及独立的 Mess
 
 Web 入口为主侧栏「IM 平台 → 飞书」，页面划分、连接层级、权限和旧设置地址迁移见 [IM 平台管理](dev/im-platforms.md)。
 
+## 多机器人与兼容边界
+
+同一工作区可保存多个机器人，每个机器人有独立应用、Agent、Runtime、路由、访问策略和审计。机器人类型仍是飞书；企业分组和平台实例在后续扩展。当前一个 Runtime 只承载一个机器人，应用与 Runtime 不能被同一工作区的两个机器人重复分配。
+
+原配置迁移为 `default`。管理集合为 `GET/POST /api/workspaces/:id/feishu-bots`，原 `/feishu-bot` 子资源接受可选 `bot_id` 查询参数；省略时始终指向 `default`。未知机器人不回退。迁移保留凭据密文、发送者授权、Chat/Task/投递关系和历史审计；相同外部消息 ID 在不同机器人下独立去重。后台从已鉴权 Runtime 的绑定解析机器人身份，不使用浏览器的选择。
+
+工作区级菜单和自动 Issue 话题暂由默认机器人发布。新增机器人支持普通私聊/群聊、独立会话路由、发送者授权及持久回复，不自动继承默认机器人的群话题设置。删除或切换仍需旧 Runtime 停止确认，未回报的启动也保留停止确认记录。
+
+CLI 使用 `remi workspace feishu-bot list|create <workspace>`，读写、启停、删除和发送者命令增加 `--bot <id>`；群路由与群列表为 `remi feishu route list|set|unset --bot <id>`、`remi feishu chat list --bot <id>`。不传 `--bot` 保持原行为。浏览器入口见 [IM 平台管理](dev/im-platforms.md)。
+
 ## 机器人对话、Issue 话题与更新
 
 [FeishuBotRepo](../packages/server/src/store/repos/feishu-bot-repo.ts)维护飞书传输会话及群 Issue 话题归属。普通 Web Chat 和飞书私聊与 Issue 独立，在其中创建 Issue 不绑定会话，也不继承新 Issue 的项目、仓库、附件或 Wiki。Chat 的 Issue 绑定和订阅 API/CLI 已移除，见[命令迁移](cli-command-migration.md#removed-chat-issue-binding-mul-301)。

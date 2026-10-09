@@ -683,6 +683,7 @@ introduce another CLI command family or change credential ownership.
 
 | Web capability | Canonical CLI commands |
 | --- | --- |
+| Bot list and creation | `remi workspace feishu-bot list\|create <workspace>` |
 | Concierge configuration and status | `remi workspace feishu-bot get\|set\|status\|candidates\|test\|deploy\|stop` |
 | Bot registration and per-Agent installations | `remi workspace feishu-bot register\|register-status\|register-cancel`, `remi lark install begin\|status`, `remi lark installation list\|delete` |
 | Menu editing and publication | `remi workspace bot-menu get\|update\|publish\|publish-status` |
@@ -691,6 +692,8 @@ introduce another CLI command family or change credential ownership.
 | Message connections and authorization | `remi messaging connection list\|get\|add\|update\|check\|delete`, `remi messaging connection authorization start\|get` |
 | Sources and conversation selection | `remi messaging source list\|get\|add\|update\|status\|delete\|available-conversations` |
 | History and processing | `remi messaging conversation list`, `remi messaging message list\|get\|resolve\|notify\|draft-reply\|propose-issue\|create-issue` |
+
+Multiple Feishu bots share the workspace domain. Use `workspace feishu-bot list` to obtain a bot ID, then pass `--bot <id>` to configuration, status, test, deploy, stop, delete, audit and sender commands. `feishu route list|set|unset` and `feishu chat list` accept the same option. Omitting it retains the original `default` bot. `workspace feishu-bot create <workspace> --name <name> --agent <id> --runtime <id> --app-id <id> --app-secret <secret> --disabled` creates an additional bot with a separate application and Runtime; secrets may also be supplied via input JSON. Workspace menus and automatic Issue topics remain with the default bot in this phase.
 
 Use each command's generated `--help` for positional workspace/record references
 and required options. The Web uses Feishu compatibility endpoints where their

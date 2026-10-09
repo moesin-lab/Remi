@@ -668,7 +668,9 @@ export class FeishuBotRepo {
       now,
       cleanOptionalString(input.actor),
     );
-    if (existing && (String(existing.runtime_id) !== runtimeId || !input.enabled)) this.reserveStoppedAcknowledgement(workspaceId, existing);
+    if (existing && (String(existing.runtime_id) !== runtimeId || String(existing.app_id) !== appId || !input.enabled)) {
+      this.reserveStoppedAcknowledgement(workspaceId, existing);
+    }
     this.publishDownlinkChange(workspaceId);
     return this.getConfig(workspaceId)!;
   }
@@ -676,7 +678,10 @@ export class FeishuBotRepo {
   private reserveStoppedAcknowledgement(workspaceId: string, config: Row): void {
     if (!Number(config.enabled)) return;
     this.ctx.db.run(`INSERT INTO multiremi_feishu_bot_runtime_states (workspace_id, bot_id, runtime_id, reported_at, release_pending, stopping_app_id)
-      VALUES (?, ?, ?, ?, 1, ?) ON CONFLICT(workspace_id, bot_id, runtime_id) DO UPDATE SET release_pending = 1, stopping_app_id = excluded.stopping_app_id`,
+      VALUES (?, ?, ?, ?, 1, ?) ON CONFLICT(workspace_id, bot_id, runtime_id) DO UPDATE SET
+        stopping_app_id = CASE WHEN multiremi_feishu_bot_runtime_states.release_pending = 1
+          THEN multiremi_feishu_bot_runtime_states.stopping_app_id ELSE excluded.stopping_app_id END,
+        release_pending = 1`,
       [workspaceId, this.botId, String(config.runtime_id), nowIso(), String(config.app_id)]);
   }
 
@@ -3860,6 +3865,11 @@ export class FeishuBotRepo {
     if (!Number(row.enabled ?? 0)) {
       return { revision, desired_state: "stopped", config_available: false };
     }
+    // Changing applications on the same host also needs a stop acknowledgement.
+    // Keep the previous app reserved until this connector has actually stopped.
+    if (this.getRuntimeStatus(workspaceId, runtimeId)?.releasePending) {
+      return { revision, desired_state: "stopped", config_available: false };
+    }
     const blockers = this.liveForeignRuntimeIds(workspaceId, runtimeId);
     if (blockers.length > 0) {
       // Hold the new host at `stopped` until the previous one lets go.
@@ -4102,7 +4112,7 @@ export class FeishuBotRepo {
     const runtimeOnline = Boolean(runtime && isRuntimeEffectivelyOnline(runtime));
     const reported = this.getRuntimeStatus(workspaceId, config.runtimeId);
     const staleRuntimeIds = this.liveForeignRuntimeIds(workspaceId, config.runtimeId);
-    const desiredState: FeishuBotDesiredState = config.enabled && staleRuntimeIds.length === 0
+    const desiredState: FeishuBotDesiredState = config.enabled && !reported?.releasePending && staleRuntimeIds.length === 0
       ? "running"
       : "stopped";
 

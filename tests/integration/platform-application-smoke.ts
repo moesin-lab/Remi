@@ -35,7 +35,8 @@ const calls: string[][] = [];
 const traced: CommandRunner = { async run(command, args, options) {
   calls.push(args);
   const result = await runner.run(command, args, options);
-  if (result.exitCode !== 0 && !args.includes('pg_isready')) console.error('isolated fixture command failed:', args[0], redactFixtureLogs(result.stderr).slice(-1800));
+  const readinessProbe = args[0] === 'exec' && args[1]?.startsWith('remi-rehearsal-') && args.includes('psql') && args.at(-1) === 'SELECT 1';
+  if (result.exitCode !== 0 && !args.includes('pg_isready') && !readinessProbe) console.error('isolated fixture command failed:', args[0], redactFixtureLogs(result.stderr).slice(-1800));
   return result;
 } };
 async function docker(args: string[]) {
@@ -57,6 +58,7 @@ globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestIni
   return path ? new Response(Bun.file(path)) : originalFetch(input, init);
 }) as typeof fetch;
 let started = false, builtApi = false, builtWeb = false, builtUpdater = false;
+let failed = false;
 let fixtureTokens: string[] = [];
 function redactFixtureLogs(text: string) { return fixtureTokens.reduce((value, token) => value.replaceAll(token, '<redacted>'), text); }
 try {
@@ -361,6 +363,7 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
   check(!calls.some(args => args[0] === 'pull'), 'Updater pulled an image');
   console.log(JSON.stringify({ socketFreeInternalUpdater: internal, bundledRuntimesVerified: internal, runtimeVersionsChanged: internal, explicitRuntimeRollbackVerified: internal, unchangedSupervisors: internal, internalApiTriggerVerified: true, operationSurvivedApiRestart: true, activeTaskDrainVerified: true, applicationUpdated: true, unchangedBaseImages: true, unchangedContainersAfterBootstrap: true, failedReleaseRolledBack: true, postUpdateWritesPreserved: true, agentProcessUninterrupted: true, databaseContainerUninterrupted: true, webAndWebSocketVerified: true }));
 } catch (error) {
+  failed = true;
   if (started) {
     for (const service of ['api', 'web']) {
       const result = await traced.run('docker', ['logs', '--tail', '80', `${project}-${service}-1`]);
@@ -371,13 +374,21 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
   throw error;
 } finally {
   globalThis.fetch = originalFetch;
-  if (started) await compose(['down', '--volumes', '--remove-orphans']).catch(() => {});
-  const volume = project + '_application-releases';
-  const found = await docker(['volume', 'ls', '--format', '{{.Name}}', '--filter', `name=^${volume}$`]);
-  if (found === volume) await docker(['volume', 'rm', volume]);
-  if (builtApi) await docker(['image', 'rm', apiImage]).catch(() => {});
-  if (builtWeb) await docker(['image', 'rm', webImage]).catch(() => {});
-  if (builtUpdater) await docker(['image', 'rm', updaterImage]).catch(() => {});
-  if (!isWithin(await realpath(tmpdir()), await realpath(root)) || !root.includes('remi-application-smoke-')) throw new Error('Refusing to clean unexpected fixture directory');
-  await rm(root, { recursive: true, force: true });
+  try {
+    if (started) await compose(['down', '--volumes', '--remove-orphans']).catch(() => {});
+    const volume = project + '_application-releases';
+    const found = await docker(['volume', 'ls', '--format', '{{.Name}}', '--filter', `name=^${volume}$`]);
+    if (found === volume) await docker(['volume', 'rm', volume]);
+    if (!isWithin(await realpath(tmpdir()), await realpath(root)) || !root.includes('remi-application-smoke-')) throw new Error('Refusing to clean unexpected fixture directory');
+    // Linux bind mounts retain the container UID on private HOME files. Remove
+    // only this fixture's HOME with its writer privileges before host cleanup.
+    if (started) await docker(['run', '--rm', '--pull=never', '--network', 'none', '--read-only', '--user', '0:0', '--mount', `type=bind,src=${root},dst=/fixture`, '--entrypoint', 'rm', bunBase, '-rf', '--', '/fixture/persistent']);
+    if (builtApi) await docker(['image', 'rm', apiImage]).catch(() => {});
+    if (builtWeb) await docker(['image', 'rm', webImage]).catch(() => {});
+    if (builtUpdater) await docker(['image', 'rm', updaterImage]).catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  } catch (error) {
+    if (!failed) throw error;
+    console.error('isolated fixture cleanup failed:', redactFixtureLogs(error instanceof Error ? error.message : String(error)).slice(-1800));
+  }
 }

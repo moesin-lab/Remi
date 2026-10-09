@@ -43,6 +43,7 @@ const redact = (value: string) => pat ? value.split(pat).join("[redacted]") : va
 // This is a standalone process. Ignore host deployment knobs so its API cannot
 // load host data or background integrations; fixtures below provide all state.
 for (const key of Object.keys(process.env)) if (key.startsWith("MULTIREMI_")) delete process.env[key];
+process.env.MULTIREMI_STATE_DIR = join(root, "state");
 process.env.MULTIREMI_UPLOAD_DIR = join(root, "uploads");
 process.env.MULTIREMI_SESSION_ARCHIVE_ROOT = join(root, "session-archives");
 process.env.NODE_ENV = "test";

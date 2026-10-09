@@ -15,7 +15,7 @@ import {
 import { toast } from "sonner";
 import { Badge } from "@multiremi/ui/components/ui/badge";
 import { Button } from "@multiremi/ui/components/ui/button";
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@multiremi/ui/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@multiremi/ui/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@multiremi/ui/components/ui/collapsible";
 import { Input } from "@multiremi/ui/components/ui/input";
 import { Label } from "@multiremi/ui/components/ui/label";
@@ -139,6 +139,15 @@ export function PlatformTab() {
   const currentVersion = status.currentRelease?.version || t(($) => $.platform.unknown_version);
   const progressLines = active ? operationProgressLines(active, t) : [];
   const recentResult = !active ? recentOperationResult(status.lastOperation, t) : null;
+  const maintenanceBlocked = status.maintenance.mode !== "normal";
+  const canUpdate = status.canManage && !busy && !maintenanceBlocked && checked
+    && status.updateAvailable && Boolean(status.latestRelease);
+  const updateHint = !status.canManage ? t($ => $.platform.update_permission_required)
+    : busy || maintenanceBlocked ? t($ => $.platform.mode_busy)
+    : status.updaterStatus !== "ready" ? t($ => $.platform.update_updater_unavailable)
+    : !checked ? t($ => $.platform.update_check_required)
+    : !status.updateAvailable ? (status.currentRelease?.ref === status.latestRelease?.ref
+      ? t($ => $.platform.update_no_new_release) : t($ => $.platform.update_no_newer_release)) : null;
 
   return (
     <div className="space-y-6">
@@ -198,18 +207,6 @@ export function PlatformTab() {
         <CardHeader className="border-b">
           <CardTitle>{t(($) => $.platform.current_version)}</CardTitle>
           <CardDescription>{driverLabel(status.driver, t)}</CardDescription>
-          <CardAction>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              disabled={busy || status.updaterStatus !== "ready"}
-              aria-label={t(($) => $.platform.check_updates)}
-              title={t(($) => $.platform.check_updates)}
-              onClick={() => void runAction({ kind: "check_updates" })}
-            >
-              <RefreshCw className={operationMutation.isPending ? "animate-spin" : ""} />
-            </Button>
-          </CardAction>
         </CardHeader>
         <CardContent className="space-y-5">
           <div className="py-3 text-center">
@@ -236,21 +233,32 @@ export function PlatformTab() {
             )}
           </div>
 
-          <div className="flex flex-wrap justify-center gap-2 border-t pt-4">
-            {status.updateAvailable && status.latestRelease && (
-              <Button disabled={busy || !checked} onClick={() => setConfirmAction({ kind: "update", release: status.latestRelease! })}>
+          <div className="space-y-3 border-t pt-4" data-testid="platform-service-update">
+            <p className="text-center text-sm font-medium">{t($ => $.platform.update_scope)}</p>
+            {status.latestRelease && <p className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
+              <span>{t($ => $.platform.update_target, { version: status.latestRelease!.version })}</span>
+              <code className="break-all text-xs" title={status.latestRelease.ref}>{status.latestRelease.ref.slice(0, 8)}</code>
+            </p>}
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button
+                data-testid="platform-update-services"
+                disabled={!canUpdate}
+                aria-describedby={updateHint ? "platform-service-update-hint" : undefined}
+                onClick={() => status.latestRelease && setConfirmAction({ kind: "update", release: status.latestRelease })}
+              >
                 {t(($) => $.platform.update_now)}
               </Button>
-            )}
-            <Button variant="outline" disabled={busy || !checked} onClick={() => setConfirmAction({ kind: "restart" })}>
-              <RefreshCw />
-              {t(($) => $.platform.restart)}
-            </Button>
+              <Button variant="outline" disabled={busy || !status.canManage || status.updaterStatus !== "ready"} onClick={() => void runAction({ kind: "check_updates" })}>
+                <RefreshCw />
+                {t($ => $.platform.check_updates)}
+              </Button>
+              <Button variant="outline" disabled={busy || !status.canManage || maintenanceBlocked || !checked} onClick={() => setConfirmAction({ kind: "restart" })}>
+                <RefreshCw />
+                {t(($) => $.platform.restart)}
+              </Button>
+            </div>
+            {updateHint && <p id="platform-service-update-hint" role="status" className="text-center text-sm text-muted-foreground">{updateHint}</p>}
           </div>
-
-          {!checked && status.updateAvailable && (
-            <p className="text-center text-sm text-muted-foreground">{t(($) => $.platform.check_unknown)}</p>
-          )}
 
           <div className="space-y-4 border-t pt-4">
             <div className="flex items-start justify-between gap-4">
@@ -326,7 +334,7 @@ export function PlatformTab() {
                       <p className="truncate text-sm font-medium">{release.version}</p>
                       <p className="truncate text-xs text-muted-foreground">{release.ref}</p>
                     </div>
-                    <Button variant="ghost" size="sm" disabled={busy || !checked} onClick={() => setConfirmAction({ kind: "rollback", release })}>
+                    <Button variant="ghost" size="sm" disabled={busy || !status.canManage || maintenanceBlocked || !checked} onClick={() => setConfirmAction({ kind: "rollback", release })}>
                       {t(($) => $.platform.rollback_action)}
                     </Button>
                   </div>
@@ -387,11 +395,16 @@ export function PlatformTab() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{confirmTitle(confirmAction, t)}</AlertDialogTitle>
-            <AlertDialogDescription>{confirmDescription(confirmAction, t)}</AlertDialogDescription>
+            <AlertDialogDescription>
+              {confirmDescription(confirmAction, t)}
+              {confirmAction?.kind === "update" && <span className="mt-3 block break-all font-mono text-xs">
+                {t($ => $.platform.update_target_ref, { ref: confirmAction.release.ref })}
+              </span>}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>{t(($) => $.platform.cancel)}</AlertDialogCancel>
-            <AlertDialogAction onClick={() => confirmAction && void runAction(confirmAction)}>
+            <AlertDialogAction disabled={busy || !status.canManage || maintenanceBlocked || !checked || (confirmAction?.kind === "update" && (!canUpdate || confirmAction.release.ref !== status.latestRelease?.ref))} onClick={() => confirmAction && void runAction(confirmAction)}>
               {t(($) => $.platform.confirm)}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -490,5 +503,5 @@ function autoUpdateResultLabel(result: string | null, t: Translate): string {
   if (result === "blocked") return t(($) => $.platform.auto_update_result_blocked);
   return t(($) => $.platform.auto_update_result_failed);
 }
-function confirmTitle(action: ConfirmAction | null, t: Translate) { return action?.kind === "restart" ? t(($) => $.platform.confirm_restart_title) : action?.kind === "rollback" ? t(($) => $.platform.confirm_rollback_title) : t(($) => $.platform.confirm_update_title); }
+function confirmTitle(action: ConfirmAction | null, t: Translate) { return action?.kind === "restart" ? t(($) => $.platform.confirm_restart_title) : action?.kind === "rollback" ? t(($) => $.platform.confirm_rollback_title) : t(($) => $.platform.confirm_update_title, { version: action && "release" in action ? action.release.version : "" }); }
 function confirmDescription(action: ConfirmAction | null, t: Translate) { return action?.kind === "restart" ? t(($) => $.platform.confirm_restart_desc) : action?.kind === "rollback" ? t(($) => $.platform.confirm_rollback_desc, { version: action.release.version }) : t(($) => $.platform.confirm_update_desc, { version: action && "release" in action ? action.release.version : "" }); }

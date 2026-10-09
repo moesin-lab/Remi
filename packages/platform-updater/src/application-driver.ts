@@ -351,7 +351,9 @@ export class ContainerApplicationDriver implements PlatformDeploymentDriver {
       await this.mustDocker(['run', '--detach', '--pull=never', '--name', name, '--label', 'io.remi.application.rehearsal=true', '--label', `io.remi.application.project=${installation.project}`, '--label', `io.remi.application.operation=${operationId}`, '--network', 'none', '--env', 'POSTGRES_HOST_AUTH_METHOD=trust', '--env', 'POSTGRES_USER=remi_rehearsal', '--env', 'POSTGRES_DB=remi_update_rehearsal', installation.postgresImage]);
       created = true;
       for (let attempt = 0; ; attempt++) {
-        if ((await this.runner.run('docker', ['exec', name, 'pg_isready', '-U', 'remi_rehearsal', '-d', 'remi_update_rehearsal'])).exitCode === 0) break;
+        // The image's temporary socket server accepts connections before the
+        // target DB exists. Require the initialized server and database over TCP.
+        if ((await this.runner.run('docker', ['exec', name, 'psql', '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-h', '127.0.0.1', '-U', 'remi_rehearsal', '-d', 'remi_update_rehearsal', '-c', 'SELECT 1'])).exitCode === 0) break;
         if (attempt >= 40) throw new Error('Isolated migration database did not become ready');
         await Bun.sleep(500);
       }

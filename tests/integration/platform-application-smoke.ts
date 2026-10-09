@@ -34,7 +34,8 @@ const calls: string[][] = [];
 const traced: CommandRunner = { async run(command, args, options) {
   calls.push(args);
   const result = await runner.run(command, args, options);
-  if (result.exitCode !== 0 && !args.includes('pg_isready')) console.error('isolated fixture command failed:', args[0], result.stderr.slice(-1800));
+  const readinessProbe = args[0] === 'exec' && args[1]?.startsWith('remi-rehearsal-') && args.includes('psql') && args.at(-1) === 'SELECT 1';
+  if (result.exitCode !== 0 && !args.includes('pg_isready') && !readinessProbe) console.error('isolated fixture command failed:', args[0], result.stderr.slice(-1800));
   return result;
 } };
 async function docker(args: string[]) {

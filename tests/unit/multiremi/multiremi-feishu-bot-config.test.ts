@@ -336,10 +336,12 @@ describe("workspace Feishu bot config API", () => {
     const deployed = await app.request("/api/workspaces/local/feishu-bot/deploy", { method: "POST", headers: MASTER, body: "{}" });
     expect(deployed.status).toBe(200);
     const status = await deployed.json();
-    expect(status).toMatchObject({ enabled: true, desired_state: "running" });
-    // Runtime has never reported, so it is still rolling out rather than online.
+    expect(status).toMatchObject({ enabled: true, desired_state: "stopped" });
+    // Even an unreported start must finish stopping before a new deployment.
     expect(status.status).toBe("deploying");
     expect(status.revision).toBeGreaterThan(savedRevision);
+    store.reportFeishuBotRuntimeStatus("local", "rt_bot", { state: "stopped", appliedRevision: status.revision });
+    expect(store.feishuBotDirectiveForRuntime("local", "rt_bot")?.desired_state).toBe("running");
     expect(store.revealFeishuBotSecrets("local")?.appSecret).toBe(APP_SECRET);
   });
 

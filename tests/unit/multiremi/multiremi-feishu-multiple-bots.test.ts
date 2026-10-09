@@ -126,6 +126,25 @@ describe("multiple Feishu bots", () => {
     expect((await request("feishu-bots", "POST", body(1))).status).toBe(201);
   });
 
+  it("waits for the old application to stop across repeated configuration changes", async () => {
+    const { store, body, request } = setup();
+    await request("feishu-bot", "PUT", body(0));
+    store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "online", appliedRevision: 1 });
+    for (const appId of ["cli_replacement", "cli_latest"]) {
+      expect((await request("feishu-bot", "PUT", { ...body(0), app_id: appId })).status).toBe(200);
+      expect(store.feishuBotDirectiveForRuntime("local", "rt_one")?.desired_state).toBe("stopped");
+      expect(store.getFeishuBotDaemonConfig("local", "rt_one")).toBeNull();
+      const refused = await request("feishu-bots", "POST", { ...body(1), app_id: "cli_0" });
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toMatchObject({ code: "app_bot_stopping" });
+    }
+    store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "online", appliedRevision: 1 });
+    expect(store.feishuBotDirectiveForRuntime("local", "rt_one")?.desired_state).toBe("stopped");
+    store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "stopped", appliedRevision: 3 });
+    expect(store.getFeishuBotDaemonConfig("local", "rt_one")?.app_id).toBe("cli_latest");
+    expect((await request("feishu-bots", "POST", { ...body(1), app_id: "cli_0" })).status).toBe(201);
+  });
+
   it("only lets each connector claim and acknowledge its own reply", async () => {
     const { store, body, request } = setup();
     await request("feishu-bot", "PUT", body(0));

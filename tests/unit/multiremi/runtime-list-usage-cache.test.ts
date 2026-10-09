@@ -52,26 +52,47 @@ function expectedSummary(db: SqlDatabase, runtimeId: string) {
   return expected;
 }
 
-test("runtime list/detail uses canonical facts across repeated reads, revisions, transactions and isolated runtimes", async () => {
-  const database = await openHotspotDatabase();
-  const db = database.db;
-  const store = new MultiremiStore(db);
-  try {
-    store.ensureLocalWorkspace();
-    const agent = store.createAgent({ name: "usage golden", provider: "codex" });
-    for (const id of ["rt_usage_a", "rt_usage_b", "rt_usage_empty"]) store.registerRuntime({ id, name: id, provider: "codex" });
-    const statuses = ["queued", "dispatched", "running", "waiting_local_directory", "awaiting_human", "completed", "failed", "cancelled"];
-    let sequence = 0;
-    const insert = (runtimeId: string, status: string, usage: string | null) => {
-      const id = `tsk_list_usage_${sequence++}`;
-      seedUsageAttempt(db, id, agent.id, runtimeId, status, usage);
-      persist(db, id, usage ?? "[]");
-      return id;
-    };
-    db.transaction(() => {
-      for (const status of statuses) for (const usage of usages) insert("rt_usage_a", status, usage);
-      insert("rt_usage_b", "completed", '[{"inputTokens":19}]');
-    })();
+describe("runtime list canonical-usage fixture", () => {
+  let database: Awaited<ReturnType<typeof openHotspotDatabase>> | undefined;
+  let db: SqlDatabase;
+  let store: MultiremiStore;
+  let insert: (runtimeId: string, status: string, usage: string | null) => string;
+  const disposeFixture = async () => {
+    const resource = database;
+    database = undefined;
+    await resource?.dispose();
+  };
+
+  // Creating a disposable PG database, installing its schema and seeding fixed
+  // samples is fixture setup, independent of the list/read and mutation checks.
+  beforeAll(async () => {
+    try {
+      database = await openHotspotDatabase();
+      db = database.db;
+      store = new MultiremiStore(db);
+      store.ensureLocalWorkspace();
+      const agent = store.createAgent({ name: "usage golden", provider: "codex" });
+      for (const id of ["rt_usage_a", "rt_usage_b", "rt_usage_empty"]) store.registerRuntime({ id, name: id, provider: "codex" });
+      const statuses = ["queued", "dispatched", "running", "waiting_local_directory", "awaiting_human", "completed", "failed", "cancelled"];
+      let sequence = 0;
+      insert = (runtimeId: string, status: string, usage: string | null) => {
+        const id = `tsk_list_usage_${sequence++}`;
+        seedUsageAttempt(db, id, agent.id, runtimeId, status, usage);
+        persist(db, id, usage ?? "[]");
+        return id;
+      };
+      db.transaction(() => {
+        for (const status of statuses) for (const usage of usages) insert("rt_usage_a", status, usage);
+        insert("rt_usage_b", "completed", '[{"inputTokens":19}]');
+      })();
+    } catch (error) {
+      await disposeFixture();
+      throw error;
+    }
+  }, 30_000);
+  afterAll(disposeFixture);
+
+  test("runtime list/detail uses canonical facts across repeated reads, revisions, transactions and isolated runtimes", () => {
     const compare = () => {
       const runtimes = store.listRuntimesForWorkspace("local");
       for (const runtime of runtimes) {
@@ -99,7 +120,7 @@ test("runtime list/detail uses canonical facts across repeated reads, revisions,
     })()).toThrow("rollback");
     compare();
     db.run("DELETE FROM multiremi_turn_attempts WHERE id = ?", changed); compare();
-  } finally { await database.dispose(); }
+  });
 });
 
 describe("runtime list open-usage fixture", () => {
@@ -112,30 +133,30 @@ describe("runtime list open-usage fixture", () => {
     await resource?.dispose();
   };
 
-  // Creating a disposable PG database and installing the full platform schema
-  // is fixture setup, independent of the list/read and mutation checks below.
+  // Creating a disposable PG database, installing its schema and seeding fixed
+  // samples is fixture setup, independent of the list/read and mutation checks.
   beforeAll(async () => {
     try {
       database = await openHotspotDatabase();
       db = database.db;
       store = new MultiremiStore(db);
+      store.ensureLocalWorkspace();
+      const agent = store.createAgent({ name: "open usage golden", provider: "codex" });
+      for (let i = 0; i < 10; i++) store.registerRuntime({ id: `rt_open_${i}`, name: `open ${i}`, provider: "codex", maxConcurrency: 32 });
+      db.transaction(() => {
+        for (let i = 0; i < 200; i++) { seedUsageAttempt(db, `tsk_open_${i}`, agent.id, `rt_open_${i % 10}`, "running", JSON.stringify([{ inputTokens: 1234, output_tokens: 567,
+            cacheReadTokens: 89, cache_write_tokens: 10, model: "m".repeat(300) }]));
+          persist(db, `tsk_open_${i}`, JSON.stringify([{ inputTokens: 1234, outputTokens: 567, cacheReadTokens: 89, cacheWriteTokens: 10 }]));
+        }
+      })();
     } catch (error) {
       await disposeFixture();
       throw error;
     }
-  });
+  }, 30_000);
   afterAll(disposeFixture);
 
   test("unchanged open usage has bounded bridge bytes and mutations remain immediately visible", () => {
-    store.ensureLocalWorkspace();
-    const agent = store.createAgent({ name: "open usage golden", provider: "codex" });
-    for (let i = 0; i < 10; i++) store.registerRuntime({ id: `rt_open_${i}`, name: `open ${i}`, provider: "codex", maxConcurrency: 32 });
-    db.transaction(() => {
-      for (let i = 0; i < 200; i++) { seedUsageAttempt(db, `tsk_open_${i}`, agent.id, `rt_open_${i % 10}`, "running", JSON.stringify([{ inputTokens: 1234, output_tokens: 567,
-          cacheReadTokens: 89, cache_write_tokens: 10, model: "m".repeat(300) }]));
-        persist(db, `tsk_open_${i}`, JSON.stringify([{ inputTokens: 1234, outputTokens: 567, cacheReadTokens: 89, cacheWriteTokens: 10 }]));
-      }
-    })();
     const compare = () => {
       const before = readProcessDbCounters();
       const runtimes = store.listRuntimesForWorkspace("local");

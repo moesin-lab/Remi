@@ -1,3 +1,4 @@
+import { issueMessagesPath, requestMessageBody, taskRequestPath, sentTask, mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { bindFeishuTopicFixture } from "./feishu-topic-fixture.js";
@@ -17,19 +18,14 @@ async function fixture(topic = false) {
   const issue = store.createIssue({ title: "Former Chat Issue", projectId: project.id, issueKind: "intake" });
   const chat = store.createChatSession({ agentId: agent.id, creatorId: "local" });
   if (topic) bindFeishuTopicFixture(store, db!, chat.id, issue.id);
-  const defaultSession = topic
-    ? store.createIssueSession(issue.id, { chatId: chat.id, title: "Topic work" })
-    : store.getOrCreateDefaultIssueSession(issue.id);
-  const session = topic
-    ? defaultSession
-    : store.createIssueSession(issue.id, { title: "Original task session" });
-  const task = topic
-    ? store.createSessionTask(session.id, { agentId: agent.id, prompt: "Continue the topic's work Session" })
-    : store.sendChatMessage(chat.id, { body: "Continue the conversation" }).task;
+  const defaultSession = store.getOrCreateDefaultIssueSession(issue.id);
+  const session = store.createIssueSession(issue.id, { title: "Original task session" });
+  const task = store.sendChatMessage(chat.id, { body: "Continue the conversation" }).task;
   // Model the persisted audit row of a task already running when the migration
   // detaches its ordinary Chat. The task credential remains valid for this run.
-  db!.run(`UPDATE multiremi_tasks SET status = 'running', issue_id = ?, issue_session_id = ? WHERE id = ?`,
-    [issue.id, session.id, task.id]);
+  // A retained Chat turn has one canonical session; its old Issue is audit data.
+  db!.run("UPDATE multiremi_turns SET status='running',issue_id=?,session_id=? WHERE current_attempt_id=?", [issue.id,chat.id,task.id]);
+  db!.run("UPDATE multiremi_turn_attempts SET status='running' WHERE id=?",[task.id]);
   const token = await store.createTaskAccessToken(store.getTask(task.id)!, "local");
   const app = createMultiremiApp({ store, authToken: "request-isolation-root" });
   const headers = { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" };
@@ -37,15 +33,15 @@ async function fixture(topic = false) {
 }
 
 describe("Chat task request isolation", () => {
-  it("returns 400 for an ordinary Chat plus an explicit Issue without creating a task", async () => {
+  it("uses the Chat conversation and ignores a body-supplied Issue without creating a turn", async () => {
     const { store, app, headers, agent, issue, chat } = await fixture();
     const before = store.listTasks().length;
-    const response = await app.request("/api/multiremi/tasks", {
+    const response = await app.request(taskRequestPath(store, { chatSessionId: chat.id, issueId: issue.id }), {
       method: "POST", headers,
-      body: JSON.stringify({ agentId: agent.id, chatSessionId: chat.id, prompt: "Try attaching an Issue", issueId: issue.id }),
+      body: JSON.stringify(requestMessageBody(store, { agentId: agent.id, chatSessionId: chat.id, prompt: "Try attaching an Issue", issueId: issue.id })),
     });
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: "Only Feishu Issue topics can create Chat transport tasks with an Issue" });
+    expect(response.status).toBe(200);
+    expect((await response.json()).message).toMatchObject({session_id:chat.id,wake_reason:"self"});
     expect(store.listTasks()).toHaveLength(before);
   });
 
@@ -56,27 +52,26 @@ describe("Chat task request isolation", () => {
     // removes the old path where a body could pull an Issue into a Chat task.
     const comment = store.createIssueComment(issue.id, { authorType: "member", authorId: "local", body: "Issue trigger" });
     for (const spelling of ["triggerCommentId", "trigger_comment_id"] as const) {
-      const response = await app.request("/api/multiremi/tasks", {
+      const response = await app.request(taskRequestPath(store, { chatSessionId: chat.id }), {
         method: "POST", headers,
-        body: JSON.stringify({
+        body: JSON.stringify(requestMessageBody(store, {
           agentId: agent.id,
           chatSessionId: chat.id,
           prompt: "Try attaching an Issue",
           [spelling]: comment.id,
-        }),
+        })),
       });
-      expect(response.status).toBe(201);
-      const created = (await response.json()).task as { id: string };
-      const task = store.getTask(created.id)!;
-      expect(task.triggerCommentId).toBeNull();
-      expect(task.issueId).toBeNull();
-      expect(task.chatSessionId).toBe(chat.id);
+      expect(response.status).toBe(200);
+      const result = await response.json();
+      expect(result.message).toMatchObject({session_id:chat.id,wake_reason:"self"});
+      expect(result.message.reply_to_id).toBeNull();
+      expect(result.turn_id).toBeUndefined();
     }
   });
 
   it("keeps the old running audit row but exposes no Issue or Issue Session through CLI context", async () => {
     const { store, app, headers, issue, session, chat, task } = await fixture();
-    expect(store.getTask(task.id)).toMatchObject({ status: "running", issueId: issue.id, issueSessionId: session.id });
+    expect(store.getTask(task.id)).toMatchObject({ status: "running", issueId: issue.id, issueSessionId: null });
 
     const response = await app.request("/api/cli/context", { headers });
     expect(response.status).toBe(200);
@@ -87,7 +82,7 @@ describe("Chat task request isolation", () => {
       project: null,
       chat: { id: chat.id },
     });
-    expect(store.getTask(task.id)).toMatchObject({ issueId: issue.id, issueSessionId: session.id });
+    expect(store.getTask(task.id)).toMatchObject({ issueId: issue.id, issueSessionId: null });
   });
 
   it("does not inherit the old intake Issue, project, or project assignee when the running Chat creates an Issue", async () => {
@@ -118,14 +113,17 @@ describe("Chat task request isolation", () => {
     });
   });
 
-  it("does not reuse the old Issue Session for an explicit comment", async () => {
-    const { app, headers, issue, session } = await fixture();
-    const response = await app.request(`/api/issues/${issue.id}/comments`, {
-      method: "POST", headers, body: JSON.stringify({ content: "An explicit new comment from Chat" }),
-    });
-    expect(response.status).toBe(201);
-    const body = await response.json();
-    expect(body.issue_session_id).not.toBe(session.id);
+  it("does not grant Issue message access from historical audit data or forged Topic fields", async () => {
+    const { store, app, headers, issue, defaultSession } = await fixture();
+    const before = store.listMessages(defaultSession.id);
+    for (const forged of [{}, { kind: "topic", task_kind: "topic", source_turn_id: "forged", issue_id: issue.id }]) {
+      const response = await app.request(issueMessagesPath(store, issue.id), {
+        method: "POST", headers,
+        body: JSON.stringify({ body_md: "FORBIDDEN_AUDIT_ISSUE_WRITE", to: { type: "none" }, ...forged }),
+      });
+      expect(response.status).toBe(403);
+      expect(store.listMessages(defaultSession.id)).toEqual(before);
+    }
   });
 
   it("cannot reuse the old Issue project as implicit knowledge write scope", async () => {
@@ -143,8 +141,8 @@ describe("Chat task request isolation", () => {
     const context = await app.request("/api/cli/context", { headers });
     expect(context.status).toBe(200);
     expect((await context.json()).current).toMatchObject({
-      task: { id: task.id, issue_id: issue.id, session_id: session.id, chat_id: chat.id },
-      issue: { id: issue.id }, session: { id: session.id }, project: { id: project.id },
+      task: { id: task.id, issue_id: issue.id, session_id: null, chat_id: chat.id },
+      issue: { id: issue.id }, session: null, project: { id: project.id },
     });
 
     const response = await app.request("/api/issues", {
@@ -155,11 +153,11 @@ describe("Chat task request isolation", () => {
       project_id: project.id, source_issue_id: issue.id, assignee_type: "agent", assignee_id: executor.id,
     });
 
-    const comment = await app.request(`/api/issues/${issue.id}/comments`, {
-      method: "POST", headers, body: JSON.stringify({ content: "Topic comment stays on its session" }),
+    const comment = await app.request(issueMessagesPath(store, issue.id), {
+      method: "POST", headers, body: JSON.stringify(requestMessageBody(store, { agent_id: executor.id, content: "Topic request stays on its session" })),
     });
-    expect(comment.status).toBe(201);
-    expect((await comment.json()).issue_session_id).toBe(session.id);
+    expect(comment.status).toBe(200);
+    expect((await comment.json()).message.session_id).toBe(store.getOrCreateDefaultIssueSession(issue.id).id);
 
     const knowledge = await app.request(`/api/projects/${project.id}/docs`, {
       method: "POST", headers, body: JSON.stringify({ kind: "memory", title: "Topic finding", body: "Scoped to the topic Issue" }),
@@ -169,23 +167,19 @@ describe("Chat task request isolation", () => {
     expect(store.getKnowledgeSubmission(knowledgeBody.submission_id)?.sourceIssueId).toBe(issue.id);
   });
 
-  it("accepts matching Feishu topic transport tasks and rejects a different Issue with 400", async () => {
-    const { store, app, agent, chat, issue } = await fixture(true);
-    const source = store.sendChatMessage(chat.id, { body: "Continue the topic conversation" }).task;
-    expect(store.getTaskChatExecutionKind(source)).toBe("topic");
-    expect(source.issueSessionId).toBeNull();
-    const token = await store.createTaskAccessToken(source, "local");
-    const headers = { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" };
+  it("ignores transport Issue overrides and keeps the persisted Feishu topic binding", async () => {
+    const { store, app, headers, agent, chat, issue, task } = await fixture(true);
     const other = store.createIssue({ title: "Unrelated Issue" });
-    for (const [issueId, status] of [[issue.id, 201], [other.id, 400]] as const) {
+    for (const issueId of [issue.id, other.id]) {
       const before = store.listTasks().length;
-      const response = await app.request("/api/multiremi/tasks", {
-        method: "POST", headers,
-        body: JSON.stringify({ agentId: agent.id, chatSessionId: chat.id, issueId, prompt: "Topic transport" }),
+      const response = await app.request(`/api/sessions/${chat.id}/messages`, {
+        method: "POST",headers,
+        body:JSON.stringify(requestMessageBody(store,{agentId:agent.id,issueId,prompt:"Topic transport"})),
       });
-      expect(response.status).toBe(status);
-      expect(store.listTasks()).toHaveLength(before + (status === 201 ? 1 : 0));
-      if (status === 201) expect((await response.json()).task).toMatchObject({ issueId, chatSessionId: chat.id });
+      expect(response.status).toBe(200);
+      expect((await response.json()).message).toMatchObject({session_id:chat.id,wake_reason:"self"});
+      expect(store.listTasks()).toHaveLength(before);
+      expect(store.getTask(task.id)?.issueId).toBe(issue.id);
     }
   });
 });

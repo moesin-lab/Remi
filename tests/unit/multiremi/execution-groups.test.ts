@@ -1,7 +1,12 @@
+import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { executionGroupModelCatalog } from "@multiremi/api/helpers/agents.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
+import { historicalWriters } from "./unified-model-test-backends.js";
+import { migrateLegacyExecutionProfiles } from "@multiremi/store/execution-profile-migration.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -134,7 +139,7 @@ describe("Execution groups", () => {
     const task = store.createTask({ agentId: agent.id, prompt: "Lost claim" });
     expect(store.claimTask(first.id)?.id).toBe(task.id);
     legacyGroup(store, "original", [second.id]);
-    db!.run("UPDATE multiremi_tasks SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
+    runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
     expect(store.claimTask(first.id)).toBeNull();
     expect(store.getTask(task.id)?.status).toBe("queued");
     expect(store.claimTask(second.id)?.id).toBe(task.id);
@@ -150,6 +155,7 @@ describe("Execution groups", () => {
     const task = store.createTask({ agentId: agent.id, prompt: "Not started" });
     expect(store.claimTask(first.id)?.id).toBe(task.id);
     store.updateAgent(agent.id, { executionGroupId: "target" });
+    runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
     expect(store.getTask(task.id)?.status).toBe("cancelled");
     expect(store.claimTask(first.id)).toBeNull();
     expect(store.claimTask(second.id)).toBeNull();
@@ -166,7 +172,7 @@ describe("Execution groups", () => {
         store.setRuntimeCodexProfile(runtime.id, { name: "legacy", base_url: "https://legacy.example/v1", model: "custom", auth_mode: authMode, env_key: "REMI_CODEX_KEY" }, authMode === "api_key" ? "old-key" : undefined);
         store.updateRuntimeModels(runtime.id, [{ id: "custom", label: "Custom", provider: "codex", default: true, thinking: { supportedLevels: [{ value: "high", label: "High" }] } }], store.getRuntimeCodexProfile(runtime.id));
         const agent = store.createAgent({ name: "Reasoner", provider: "codex", executionGroupId: "old", model: "custom", thinkingLevel: "high" });
-        db!.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", ["central_execution_profiles_legacy_v1"]);
+        migrateLegacyExecutionProfiles(db!);
         const migrated = new MultiremiStore(db!);
         const profile = migrated.getGroupExecutionProfile("old", "local")!;
         expect(migrated.getExecutionGroup("old")?.managed).toBe(true);
@@ -191,13 +197,24 @@ describe("Execution groups", () => {
     });
   }
 
-  it("backfills legacy pins during migration without changing their owner or machine pin", () => {
-    const store = createStore();
-    const runtime = store.registerRuntime({ name: "Legacy", provider: "codex", daemonId: "machine", executionGroupId: "old-group" });
-    const agent = store.createAgent({ name: "Pinned", provider: "codex", runtimeId: runtime.id });
-    db!.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", ["execution_groups_v1"]);
-    const reopened = new MultiremiStore(db!);
-    expect(reopened.getAgent(agent.id)).toMatchObject({ runtimeId: runtime.id, executionGroupId: "old-group", ownerId: "local" });
-    expect(reopened.getExecutionGroup("old-group")?.managed).toBe(false);
+  it("backfills historical pins during cutover without changing their owner or machine pin", () => {
+    const database = openSqliteDatabase(":memory:");
+    try {
+      bootstrapPreUnifiedSchema(database);
+      const history = historicalWriters(database);
+      const agent = history.createAgent({ name: "Pinned", provider: "codex" });
+      const runtimeId = "rt_historical_pin";
+      const at = "2026-10-01T00:00:00.000Z";
+      database.run(`INSERT INTO multiremi_runtimes
+        (id, name, provider, workspace_id, daemon_id, owner_id, execution_group_id, created_at, updated_at)
+        VALUES (?, 'Legacy', 'codex', 'local', 'machine', 'local', 'old-group', ?, ?)`, [runtimeId, at, at]);
+      database.run("UPDATE multiremi_agents SET runtime_id = ? WHERE id = ?", [runtimeId, agent.id]);
+      database.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", ["execution_groups_v1"]);
+      const reopened = new MultiremiStore(database);
+      expect(reopened.getAgent(agent.id)).toMatchObject({ runtimeId, executionGroupId: "old-group", ownerId: "local" });
+      expect(reopened.getExecutionGroup("old-group")?.managed).toBe(false);
+    } finally {
+      database.close();
+    }
   });
 });

@@ -210,7 +210,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
       assignment_source_event_id: _assignmentSourceEventIdSnake,
       // MUL-400 E3 (QA round 2, blocker 1): the dependency gate treats these as
       // structural exemptions, so they must never come from a request body — a
-      // caller that sets `attempt: 2` or `preserveIssueStatus: true` would
+      // caller that sets an arbitrary attempt number would
       // otherwise start a waiting issue without the audited force. Both are set
       // only by server paths (retry/redispatch and the E2 parent wake-up), and no
       // HTTP caller sends them.
@@ -223,8 +223,6 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
       // server owns — the next gate that reads it would inherit a hole. Strip it
       // with its camelCase twin.
       max_attempts: _maxAttemptsSnake,
-      preserveIssueStatus: _preserveIssueStatus,
-      preserve_issue_status: _preserveIssueStatusSnake,
       dependencyForce: _dependencyForce,
       dependency_force: _dependencyForceSnake,
       assignmentEventId: _assignmentEventId,
@@ -291,17 +289,8 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
         return c.json({ error: "requested Session does not match the continued task" }, 400);
       }
     }
-    let delegation: ReturnType<typeof store.resolveAgentDelegation> | null = null;
-    try {
-      if (taskToken && sourceTask) delegation = store.resolveAgentDelegation({
-        targetIssue: continuedTask ? store.getIssue(continuedTask.issueId!) : issue,
-        sourceTask, authorAgentId: taskToken.agentId, targetAgentId: agent.id,
-      });
-    } catch (error) {
-      if (!(error instanceof DelegationRoundTripLimitError)) throw error;
-      store.recordDelegationRoundTripLimited(error);
-      return c.json({ error: error.message, code: error.code }, 409);
-    }
+    const delegation=taskToken&&sourceTask?store.resolveAgentDelegation({targetIssue:continuedTask?store.getIssue(continuedTask.issueId!):issue,
+      sourceTask,authorAgentId:taskToken.agentId,targetAgentId:agent.id}):null;
     // Keep continuation ancestry on the current Leader turn. A same-agent,
     // same-delegation successor of the previous child is reserved for retry /
     // self-continuation and intentionally suppresses that child's return in
@@ -353,6 +342,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
       const task = store.createTask(createInput);
       return c.json({ task: coordinatingSession ? sessionTaskMetadataResponse(task) : taskPublicResponse(task) }, 201);
     } catch (error) {
+      if((error as any)?.message_result)return c.json({task:null,...(error as any).message_result},200);
       if (error instanceof ChatIssueTaskConflictError || error instanceof TaskSessionArchivedError) {
         return c.json({ error: error.message }, 400);
       }

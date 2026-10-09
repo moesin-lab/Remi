@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { mutateExecutionFixture, requestMessageBody, sentTask, turnApiPath } from "./unified-test-paths.js";
 import { bindFeishuTopicFixture } from "./feishu-topic-fixture.js";
 
 afterEach(resetMultiremiTestEnv);
@@ -37,11 +38,11 @@ describe("Session owner API boundaries", () => {
     const session = await response.json();
     expect(session).toMatchObject({ owner_type: "issue", owner_id: f.issue.id, chat_id: null, issue_id: f.issue.id });
     expect(f.store.listChatSessions("local", { includeArchived: true }).map(chat => chat.id)).toEqual(chatIds);
-    const taskResponse = await f.app.request(`/api/issues/${f.issue.id}/sessions/${session.id}/tasks`, {
-      method: "POST", headers: f.bob, body: JSON.stringify({ agent_id: f.agent.id, prompt: "Independent work" }),
+    const taskResponse = await f.app.request(`/api/sessions/${session.id}/messages`, {
+      method: "POST", headers: f.bob, body: JSON.stringify(requestMessageBody(f.store, { agent_id: f.agent.id, prompt: "Independent work" })),
     });
-    expect(taskResponse.status).toBe(201);
-    expect(f.store.getTask((await taskResponse.json()).id)?.chatSessionId).toBeNull();
+    expect(taskResponse.status).toBe(200);
+    expect(sentTask(f.store, await taskResponse.json()).chatSessionId).toBeNull();
     expect(f.store.getIssueSession(session.id)?.chatId).toBeNull();
     expect(f.store.listChatSessions("local", { includeArchived: true }).map(chat => chat.id)).toEqual(chatIds);
   });
@@ -64,13 +65,13 @@ describe("Session owner API boundaries", () => {
       `/api/sessions/${f.linked.id}`,
       `/api/sessions/${f.linked.id}/inherited-context`,
       `/api/sessions/${f.linked.id}/log`,
-      `/api/issues/${f.issue.id}/sessions/${f.linked.id}/events`,
+      `/api/sessions/${f.linked.id}/messages`,
     ]) {
       expect((await f.app.request(path, { headers: f.bob })).status, path).toBe(403);
       expect((await f.app.request(path, { headers: f.alice })).status, path).toBe(200);
     }
-    const taskResponse = await f.app.request(`/api/issues/${f.issue.id}/sessions/${f.linked.id}/tasks`, {
-      method: "POST", headers: f.bob, body: JSON.stringify({ agent_id: f.agent.id, prompt: "Intrusion" }),
+    const taskResponse = await f.app.request(`/api/sessions/${f.linked.id}/messages`, {
+      method: "POST", headers: f.bob, body: JSON.stringify(requestMessageBody(f.store, { agent_id: f.agent.id, prompt: "Intrusion" })),
     });
     expect(taskResponse.status).toBe(403);
     const sessions = await (await f.app.request(`/api/issues/${f.issue.id}/sessions`, { headers: f.bob })).json();
@@ -84,7 +85,7 @@ describe("Session owner API boundaries", () => {
     expect(shared).not.toContain("PRIVATE_SESSION_EVENT");
     expect(shared).not.toContain("PRIVATE_SESSION_RESULT");
     const privateTask = f.store.createSessionTask(f.linked.id, { agentId: f.agent.id, prompt: "PRIVATE_SESSION_TASK" });
-    db!.run("UPDATE multiremi_tasks SET status = 'running' WHERE id = ?", [privateTask.id]);
+    mutateExecutionFixture(f.store, "UPDATE multiremi_turn_execution_records SET status = 'running' WHERE id = ?", [privateTask.id]);
     f.store.completeTask(privateTask.id, { output: "PRIVATE_TERMINAL_OUTPUT" });
     const afterCompletion = await (await f.app.request(`/api/shares/${minted.share.token}`, { headers: f.bob })).text();
     expect(afterCompletion).not.toContain("PRIVATE_SESSION_TASK");
@@ -98,42 +99,43 @@ describe("Session owner API boundaries", () => {
     const task = f.store.createSessionTask(main.id, { agentId: f.agent.id, prompt: "Own task" });
     const siblingTask = f.store.createSessionTask(sibling.id, { agentId: f.agent.id, prompt: "Sibling task" });
     const privateTask = f.store.createSessionTask(f.linked.id, { agentId: f.agent.id, prompt: "Private task" });
-    const privateSibling = f.store.createSessionTask(f.linked.id, { agentId: f.agent.id, prompt: "Private sibling" });
+    const privateWorker = f.store.createAgent({ name: "Private sibling worker", provider: "claude", visibility: "workspace", ownerId: "alice" });
+    const privateSibling = f.store.createSessionTask(f.linked.id, { agentId: privateWorker.id, prompt: "Private sibling" });
     const token = await f.store.createTaskAccessToken(f.store.getTask(task.id)!, "alice");
     const headers = { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" };
     for (const tail of ["", "/log", "/inherited-context"]) {
       expect((await f.app.request(`/api/sessions/${main.id}${tail}`, { headers })).status).toBe(200);
       expect((await f.app.request(`/api/sessions/${sibling.id}${tail}`, { headers })).status).toBe(403);
     }
-    for (const [method, tail] of [["GET", "/events"], ["POST", "/messages"]] as const) {
-      expect((await f.app.request(`/api/issues/${f.issue.id}/sessions/${sibling.id}${tail}`, {
-        method, headers, body: method === "POST" ? JSON.stringify({ body: "Cross-Session write" }) : undefined,
+    for (const [method, tail] of [["GET", "/messages"], ["POST", "/messages"]] as const) {
+      expect((await f.app.request(`/api/sessions/${sibling.id}${tail}`, {
+        method, headers, body: method === "POST" ? JSON.stringify({ body_md: "Cross-Session write", to: { type: "none" } }) : undefined,
       })).status).toBe(403);
     }
-    const siblingDetail = await f.app.request(`/api/multiremi/tasks/${siblingTask.id}`, { headers });
+    const siblingDetail = await f.app.request(turnApiPath(f.store, siblingTask.id), { headers });
     expect(siblingDetail.status).toBe(200);
-    expect((await siblingDetail.json()).task.prompt).toBe("Sibling task");
-    const listed = await (await f.app.request("/api/multiremi/tasks", { headers })).json();
-    expect(listed.tasks.map((entry: { id: string }) => entry.id).sort()).toEqual([task.id, siblingTask.id].sort());
-    const active = await (await f.app.request(`/api/issues/${f.issue.id}/active-task`, { headers })).json();
-    expect(active.tasks.map((entry: { id: string }) => entry.id).sort()).toEqual([task.id, siblingTask.id].sort());
+    expect((await siblingDetail.json()).turn.legacy_prompt).toBe("Sibling task");
+    const listed = await (await f.app.request("/api/turns", { headers })).json();
+    expect(listed.turns.map((entry: { current_attempt_id: string }) => entry.current_attempt_id).sort()).toEqual([task.id, siblingTask.id].sort());
+    const active = await (await f.app.request(`/api/turns?issue=${f.issue.id}`, { headers })).json();
+    expect(active.turns.map((entry: { current_attempt_id: string }) => entry.current_attempt_id).sort()).toEqual([task.id, siblingTask.id].sort());
     expect(JSON.stringify(active)).not.toContain("Private task");
     expect(JSON.stringify(active)).not.toContain("Private sibling");
     const privateToken = await f.store.createTaskAccessToken(privateTask, "alice");
     const privateHeaders = { Authorization: `Bearer ${privateToken.token}`, "Content-Type": "application/json" };
-    expect((await f.app.request(`/api/multiremi/tasks/${privateTask.id}`, { headers: privateHeaders })).status).toBe(200);
+    expect((await f.app.request(turnApiPath(f.store, privateTask.id), { headers: privateHeaders })).status).toBe(200);
     for (const privateTarget of [privateTask, privateSibling]) {
-      for (const [method, tail] of [["GET", ""], ["GET", "/messages"], ["POST", "/cancel"]] as const) {
-        expect((await f.app.request(`/api/multiremi/tasks/${privateTarget.id}${tail}`, { method, headers })).status).toBe(403);
+      for (const [method, tail] of [["GET", ""], ["GET", "/trace"], ["POST", "/cancel"]] as const) {
+        expect((await f.app.request(turnApiPath(f.store, privateTarget.id, tail), { method, headers })).status).toBe(403);
         if (privateTarget.id !== privateTask.id) {
-          expect((await f.app.request(`/api/multiremi/tasks/${privateTarget.id}${tail}`, {
+          expect((await f.app.request(turnApiPath(f.store, privateTarget.id, tail), {
             method, headers: privateHeaders,
           })).status).toBe(403);
         }
       }
       expect(f.store.getTask(privateTarget.id)?.status).toBe("queued");
     }
-    expect((await f.app.request(`/api/multiremi/tasks/${siblingTask.id}/cancel`, { method: "POST", headers })).status).toBe(200);
+    expect((await f.app.request(turnApiPath(f.store, siblingTask.id, "/cancel"), { method: "POST", headers })).status).toBe(200);
     expect(f.store.getTask(siblingTask.id)?.status).toBe("cancelled");
   });
 
@@ -149,14 +151,18 @@ describe("Session owner API boundaries", () => {
     expect(task.chatSessionId).toBeNull();
     const token = await f.store.createTaskAccessToken(source, "alice");
     const headers = { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" };
-    for (const [method, tail] of [["GET", ""], ["GET", "/inspection"], ["POST", "/cancel"], ["POST", "/steer"]] as const) {
-      const prefix = tail === "" ? "/api/multiremi/tasks" : "/api/tasks";
-      expect((await f.app.request(`${prefix}/${task.id}${tail}`, {
-        method, headers, body: method === "POST" ? JSON.stringify({ content: "Cross-workspace action" }) : undefined,
+    for (const [method, tail] of [["GET", ""], ["GET", "?attempts=true"], ["POST", "/cancel"]] as const) {
+      expect((await f.app.request(turnApiPath(f.store, task.id, tail), {
+        method, headers, body: method === "POST" ? "{}" : undefined,
       })).status).toBe(404);
     }
-    const listed = await (await f.app.request("/api/multiremi/tasks", { headers })).json();
-    expect(listed.tasks.map((entry: { id: string }) => entry.id)).toEqual([source.id]);
+    expect((await f.app.request(`/api/sessions/${task.issueSessionId}/messages`, {
+      method: "POST", headers, body: JSON.stringify(requestMessageBody(f.store, {
+        agentId: agent.id, prompt: "Cross-workspace action",
+      })),
+    })).status).toBe(404);
+    const listed = await (await f.app.request("/api/turns", { headers })).json();
+    expect(listed.turns.map((entry: { current_attempt_id: string }) => entry.current_attempt_id)).toEqual([source.id]);
     expect(f.store.getTask(task.id)?.status).toBe("queued");
     expect(f.store.listTaskSteerMessages(task.id)).toHaveLength(0);
   });
@@ -170,30 +176,32 @@ describe("Session owner API boundaries", () => {
     const targetSession = f.store.getOrCreateDefaultIssueSession(otherIssue.id);
     const token = await f.store.createTaskAccessToken(source, "alice");
     const headers = { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" };
-    const response = await f.app.request("/api/multiremi/tasks", {
-      method: "POST", headers, body: JSON.stringify({
-        agentId: worker.id, issueId: otherIssue.id, issue_session_id: targetSession.id, prompt: "Independent delegated task",
-      }),
+    const response = await f.app.request(`/api/sessions/${targetSession.id}/messages`, {
+      method: "POST", headers, body: JSON.stringify(requestMessageBody(f.store, {
+        agentId: worker.id, prompt: "Independent delegated task",
+      })),
     });
-    expect(response.status).toBe(201);
-    const delegated = f.store.getTask((await response.json()).task.id)!;
+    expect(response.status).toBe(200);
+    const delegated = sentTask(f.store, await response.json());
     expect(delegated).toMatchObject({ issueId: otherIssue.id, issueSessionId: targetSession.id, chatSessionId: null,
-      parentTaskId: source.id, delegatedByAgentId: f.agent.id, delegatedFromIssueSessionId: sourceSession.id });
+      delegatedByAgentId: f.agent.id, delegatedFromIssueSessionId: sourceSession.id });
+    const dispatch = f.store.getMessage(f.store.getTurnForAttempt(delegated.id)!.trigger_message_id!)!;
+    expect(dispatch.task_id).toBe(f.store.getTurnForAttempt(source.id)!.id);
     expect(delegated.execution_scope).not.toBe(source.execution_scope);
-    expect((await f.app.request(`/api/multiremi/tasks/${delegated.id}`, { headers })).status).toBe(200);
+    expect((await f.app.request(turnApiPath(f.store, delegated.id), { headers })).status).toBe(200);
     expect((await f.app.request(`/api/sessions/${targetSession.id}/log`, { headers })).status).toBe(403);
     const delegatedToken = await f.store.createTaskAccessToken(delegated, "alice");
-    expect((await f.app.request(`/api/multiremi/tasks/${source.id}`, {
+    expect((await f.app.request(turnApiPath(f.store, source.id), {
       headers: { Authorization: `Bearer ${delegatedToken.token}` },
     })).status).toBe(200);
     expect((await f.app.request(`/api/sessions/${sourceSession.id}/log`, {
       headers: { Authorization: `Bearer ${delegatedToken.token}` },
     })).status).toBe(403);
     const before = f.store.listTasksForIssue(f.issue.id).length;
-    const denied = await f.app.request("/api/multiremi/tasks", {
-      method: "POST", headers, body: JSON.stringify({
-        agentId: worker.id, issueId: f.issue.id, issue_session_id: f.linked.id, prompt: "Private projection injection",
-      }),
+    const denied = await f.app.request(`/api/sessions/${f.linked.id}/messages`, {
+      method: "POST", headers, body: JSON.stringify(requestMessageBody(f.store, {
+        agentId: worker.id, prompt: "Private projection injection",
+      })),
     });
     expect(denied.status).toBe(403);
     expect(f.store.listTasksForIssue(f.issue.id)).toHaveLength(before);
@@ -216,36 +224,36 @@ describe("Session owner API boundaries", () => {
       `/api/sessions/${f.chat.id}/log/entry?id=${ordinary.message.id}`,
       `/api/sessions/${f.chat.id}/log/locate?id=${ordinary.message.id}`,
       `/api/multiremi/chats/${f.chat.id}`,
-      `/api/multiremi/chats/${f.chat.id}/messages`,
+      `/api/sessions/${f.chat.id}/messages`,
       `/api/chat/sessions/${f.chat.id}`,
-      `/api/chat/sessions/${f.chat.id}/messages`,
-      `/api/chat/sessions/${f.chat.id}/messages/page`,
-      `/api/chat/sessions/${f.chat.id}/pending-task`,
-      "/api/multiremi/chats", "/api/chat/sessions", "/api/chat/pending-tasks",
+      `/api/turns?session_id=${f.chat.id}`,
+      "/api/multiremi/chats", "/api/chat/sessions",
     ]) {
       const response = await f.app.request(path, { headers });
-      expect(response.status, path).toBe(403);
+      expect(response.status, path).toBe(path.startsWith("/api/turns?") ? 400 : 403);
       expect(await response.text()).not.toContain("ORDINARY_PRIVATE_MARKER");
     }
     for (const [method, path, body] of [
-      ["POST", `/api/multiremi/chats/${f.chat.id}/messages`, { body: "Wrong axis send" }],
-      ["POST", `/api/chat/sessions/${f.chat.id}/messages`, { content: "Wrong axis send" }],
-      ["PATCH", `/api/chat/sessions/${f.chat.id}/queue/${ordinary.task.id}`, { content: "Wrong axis edit" }],
-      ["DELETE", `/api/chat/sessions/${f.chat.id}/queue/${ordinary.task.id}`, {}],
-      ["DELETE", `/api/chat/sessions/${f.chat.id}/queue`, {}],
-      ["POST", `/api/chat/sessions/${f.chat.id}/queue/${ordinary.task.id}/prioritize`, {}],
-      ["POST", `/api/chat/sessions/${f.chat.id}/read`, {}],
+      ["POST", `/api/sessions/${f.chat.id}/messages`, { body_md: "Wrong axis send", to: { type: "agent", ref: f.agent.id } }],
+      ["PATCH", `/api/messages/${ordinary.message.id}`, { body_md: "Wrong axis edit" }],
+      ["DELETE", `/api/messages/${ordinary.message.id}`, {}],
+      ["POST", turnApiPath(f.store, ordinary.task.id, "/cancel"), {}],
+      ["POST", "/api/inbox/read", { session_id: f.chat.id }],
       ["PATCH", `/api/multiremi/chats/${f.chat.id}`, { title: "Wrong axis metadata" }],
       ["PATCH", `/api/chat/sessions/${f.chat.id}`, { title: "Wrong axis metadata" }],
       ["DELETE", `/api/chat/sessions/${f.chat.id}`, {}],
-      ["POST", "/api/multiremi/tasks", { agentId: f.agent.id, chatSessionId: f.chat.id, prompt: "Wrong axis dispatch", kind: "chat" }],
     ] as const) {
       expect((await f.app.request(path, { method, headers, body: JSON.stringify(body) })).status, `${method} ${path}`).toBe(403);
     }
-    expect((await f.app.request("/api/chat/attachments/send", { method: "POST", headers })).status).toBe(403);
     const attachment = f.store.createAttachment({ workspaceId: "local", chatSessionId: f.chat.id,
       chatMessageId: ordinary.message.id, filename: "ordinary-private.txt", url: "https://example.test/private.txt" });
     expect((await f.app.request(`/api/multiremi/attachments/${attachment.id}`, { headers })).status).toBe(404);
+    const upload = new FormData();
+    upload.set("message", JSON.stringify({ body_md: "Wrong axis attachment", to: { type: "agent", ref: f.agent.id } }));
+    upload.append("file", new File(["PRIVATE_UPLOAD"], "private.txt", { type: "text/plain" }));
+    expect((await f.app.request(`/api/sessions/${f.chat.id}/messages`, {
+      method: "POST", headers: { Authorization: headers.Authorization }, body: upload,
+    })).status).toBe(403);
     expect(f.store.getChatSession(f.chat.id)).toEqual(before);
     expect(f.store.getTask(ordinary.task.id)?.prompt).toBe("ORDINARY_PRIVATE_MARKER");
     expect(f.store.getTask(ordinary.task.id)?.status).toBe("queued");
@@ -255,43 +263,61 @@ describe("Session owner API boundaries", () => {
       `/api/multiremi/chats/${f.chat.id}/sessions`,
       `/api/multiremi/chats/${f.chat.id}/sessions/${f.linked.id}`,
       `/api/multiremi/chats/${f.chat.id}/sessions/${f.linked.id}/results`,
-      `/api/multiremi/chats/${f.chat.id}/sessions/${f.linked.id}/tasks`,
+      `/api/sessions/${f.linked.id}/messages`,
     ]) expect((await f.app.request(path, { headers })).status, path).toBe(200);
     const created = await f.app.request(`/api/multiremi/chats/${f.chat.id}/sessions`, {
       method: "POST", headers, body: JSON.stringify({ title: "Same owner metadata creation" }),
     });
     expect(created.status).toBe(201);
     expect((await created.json()).session).toMatchObject({ owner_type: "chat", owner_id: f.chat.id });
-    expect((await f.app.request(`/api/multiremi/chats/${f.chat.id}/sessions/${f.linked.id}/tasks`, {
-      method: "POST", headers, body: JSON.stringify({ agent_id: f.agent.id, prompt: "Own Session dispatch" }),
-    })).status).toBe(201);
+    expect((await f.app.request(`/api/sessions/${f.linked.id}/messages`, {
+      method: "POST", headers, body: JSON.stringify(requestMessageBody(f.store, { agent_id: f.agent.id, prompt: "Own Session dispatch" })),
+    })).status).toBe(200);
     const issueTask = f.store.createSessionTask(f.store.getOrCreateDefaultIssueSession(f.issue.id).id, {
       agentId: f.agent.id, prompt: "Issue-owned work cannot use a creator fallback",
     });
     const issueToken = await f.store.createTaskAccessToken(issueTask, "alice");
-    for (const path of [`/api/sessions/${f.chat.id}/log`, `/api/multiremi/chats/${f.chat.id}/messages`]) {
+    for (const path of [`/api/sessions/${f.chat.id}/log`, `/api/sessions/${f.chat.id}/messages`]) {
       expect((await f.app.request(path, { headers: { Authorization: `Bearer ${issueToken.token}` } })).status).toBe(403);
     }
   });
 
-  it("does not turn a generic kind injection into evidence of an ordinary Chat request", async () => {
+  it("does not turn a kind or Chat pointer injection into ordinary Chat authority", async () => {
     const f = await fixture();
     f.store.sendChatMessage(f.chat.id, { body: "ORDINARY_AXIS_SECRET" });
-    const response = await f.app.request("/api/multiremi/tasks", {
-      method: "POST", headers: f.alice, body: JSON.stringify({
-        agentId: f.agent.id, chatSessionId: f.chat.id, prompt: "Generic task without a user message", kind: "chat",
-      }),
+    const response = await f.app.request(`/api/sessions/${f.linked.id}/messages`, {
+      method: "POST", headers: f.alice, body: JSON.stringify(requestMessageBody(f.store, {
+        agentId: f.agent.id, chatSessionId: f.chat.id, prompt: "Generic request inside a Session", kind: "chat",
+      })),
     });
-    expect(response.status).toBe(201);
-    const task = f.store.getTask((await response.json()).task.id)!;
-    expect(f.store.getTaskChatExecutionKind(task)).toBe("ordinary");
+    expect(response.status).toBe(200);
+    const task = sentTask(f.store, await response.json());
+    expect(f.store.getTaskChatExecutionKind(task)).toBe("session");
+    expect(task.issueSessionId).toBe(f.linked.id);
     expect(f.store.listChatMessages(f.chat.id).some(message => message.role === "user" && message.taskId === task.id)).toBe(false);
     const token = await f.store.createTaskAccessToken(task, "alice");
     const headers = { Authorization: `Bearer ${token.token}` };
-    for (const path of [`/api/sessions/${f.chat.id}/log`, `/api/multiremi/chats/${f.chat.id}/messages`]) {
+    for (const path of [`/api/sessions/${f.chat.id}/log`, `/api/sessions/${f.chat.id}/messages`]) {
       const denied = await f.app.request(path, { headers });
       expect(denied.status, path).toBe(403);
       expect(await denied.text()).not.toContain("ORDINARY_AXIS_SECRET");
+    }
+  });
+
+  it("requires a durable human root request before a Chat-kind Task can use the ordinary axis", async () => {
+    const f = await fixture();
+    const ordinary = f.store.sendChatMessage(f.chat.id, { body: "ORDINARY_EVIDENCE_SECRET" });
+    f.store.cancelTask(ordinary.task.id);
+    const input = { agentId: f.agent.id, chatSessionId: f.chat.id,
+      assignmentAuthorType: "system" as const, prompt: "Platform request with forged Chat kind", kind: "chat" };
+    const task = f.store.createTask(input);
+    expect(f.store.getTaskChatExecutionKind(task)).toBe("ordinary");
+    expect(f.store.listChatMessages(f.chat.id).some(message => message.role === "user" && message.taskId === task.id)).toBe(false);
+    const token = await f.store.createTaskAccessToken(task, "alice");
+    for (const path of [`/api/sessions/${f.chat.id}/log`, `/api/sessions/${f.chat.id}/messages`]) {
+      const denied = await f.app.request(path, { headers: { Authorization: `Bearer ${token.token}` } });
+      expect(denied.status, path).toBe(403);
+      expect(await denied.text()).not.toContain("ORDINARY_EVIDENCE_SECRET");
     }
   });
 
@@ -310,7 +336,8 @@ describe("Session owner API boundaries", () => {
     const f = await fixture();
     const main = f.store.getOrCreateDefaultIssueSession(f.issue.id);
     f.store.createIssueComment(f.issue.id, { issueSessionId: main.id, body: "ISSUE_MAIN_COMMENT" });
-    f.store.createIssueComment(f.issue.id, { issueSessionId: f.linked.id, body: "CHAT_MAIN_COMMENT" });
+    f.store.sendMessage({ session_id: f.linked.id, sender: { type: "member", id: f.store.findWorkspaceMemberForUser("alice", "local")!.id },
+      to: { type: "none" }, message_kind: "report", wake_requested: "inbox_only", body_md: "CHAT_MAIN_COMMENT" });
     f.store.appendIssueActivity(f.issue.id, { actorType: "member", actorId: "alice", type: "issue_updated", body: "ISSUE_ACTIVITY" });
     db!.run("UPDATE multiremi_issue_sessions SET updated_at = '2099-01-01T00:00:00.000Z' WHERE id = ?", [f.linked.id]);
     const timeline = await (await f.app.request(`/api/issues/${f.issue.id}/timeline?issue_session_id=@default&limit=10`, {
@@ -332,7 +359,7 @@ describe("Session owner API boundaries", () => {
     const issue = f.store.createIssue({ title: "Foreign Issue", workspaceId: foreign.id, createdBy: "alice" });
     db!.run("UPDATE multiremi_issue_sessions SET issue_id = ? WHERE id = ?", [issue.id, f.linked.id]);
     expect((await f.app.request(`/api/sessions/${f.linked.id}`, { headers: f.alice })).status).toBe(200);
-    for (const tail of ["", "/tasks", "/events", "/messages", "/results", "/participants"]) {
+    for (const tail of ["", "/participants"]) {
       expect((await f.app.request(`/api/issues/${issue.id}/sessions/${f.linked.id}${tail}`, {
         headers: f.alice,
       })).status, tail).toBe(404);
@@ -347,14 +374,16 @@ describe("Session owner API boundaries", () => {
     f.store.deleteChatSession(f.chat.id);
     const retained = f.store.getTask(task.id)!;
     expect(retained).toMatchObject({ chatSessionId: f.chat.id, issueSessionId: null });
-    expect((await f.app.request(`/api/multiremi/tasks/${task.id}`, {
+    expect((await f.app.request(turnApiPath(f.store, task.id), {
       headers: { Authorization: `Bearer ${previousToken.token}` },
     })).status).toBe(401);
     const retainedToken = await f.store.createTaskAccessToken(retained, "alice");
     for (const headers of [f.bob, { Authorization: `Bearer ${retainedToken.token}` }]) {
-      expect((await f.app.request(`/api/multiremi/tasks/${task.id}`, { headers })).status).toBe(403);
-      expect((await f.app.request(`/api/tasks/${task.id}/messages`, { headers })).status).toBe(403);
-      expect((await f.app.request(`/api/sessions/${f.linked.id}/log`, { headers })).status).toBe(404);
+      expect((await f.app.request(turnApiPath(f.store, task.id), { headers })).status).toBe(403);
+      expect((await f.app.request(turnApiPath(f.store, task.id, "/trace"), { headers })).status).toBe(403);
+      const deletedLog = await f.app.request(`/api/sessions/${f.linked.id}/log`, { headers });
+      expect([403, 404]).toContain(deletedLog.status);
+      expect(await deletedLog.text()).not.toContain("DELETED_PRIVATE_TASK");
     }
     const mint = await (await f.app.request(`/api/issues/${f.issue.id}/share`, { method: "POST", headers: f.bob })).json();
     expect(await (await f.app.request(`/api/shares/${mint.share.token}`, { headers: f.bob })).text())
@@ -374,34 +403,40 @@ describe("Session owner API boundaries", () => {
     expect(f.store.listSessionParticipants(issueSession.id)).toEqual(participants);
   });
 
-  it("requires a verified topic binding for public coordination and denies private or foreign owners", async () => {
+  it("keeps public dispatch authority while requiring a verified topic binding for Session coordination", async () => {
     const f = await fixture();
     const publicSession = f.store.getOrCreateDefaultIssueSession(f.issue.id);
     const source = f.store.sendChatMessage(f.chat.id, { body: "Coordinate work" }).task;
-    db!.run("UPDATE multiremi_tasks SET issue_id = ? WHERE id = ?", [f.issue.id, source.id]);
+    mutateExecutionFixture(f.store, "UPDATE multiremi_turn_execution_records SET issue_id = ? WHERE id = ?", [f.issue.id, source.id]);
     const token = await f.store.createTaskAccessToken(f.store.getTask(source.id)!, "alice");
     const headers = { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" };
-    const path = `/api/issues/${f.issue.id}/sessions/${publicSession.id}`;
-    const post = () => f.app.request(`${path}/messages`, {
-      method: "POST", headers, body: JSON.stringify({ content: "Public coordination comment" }),
+    const path = `/api/sessions/${publicSession.id}`;
+    const metadataPath = `/api/issues/${f.issue.id}/sessions/${publicSession.id}`;
+    const post = (dispatch = true) => f.app.request(`${path}/messages`, {
+      method: "POST", headers, body: JSON.stringify({ body_md: "Public coordination comment", message_kind: "request",
+        to: dispatch ? { type: "agent", ref: f.agent.id } : { type: "none" } }),
     });
-    expect((await post()).status).toBe(403);
-    expect((await f.app.request(`${path}/tasks`, { headers })).status).toBe(403);
+    // Ordinary Chat requests retain public dispatch authority, while content
+    // and coordination metadata require their own verified Session authority.
+    expect((await post(false)).status).toBe(403);
+    expect((await post()).status).toBe(200);
+    expect((await f.app.request(metadataPath, { headers })).status).toBe(403);
     bindFeishuTopicFixture(f.store, db!, f.chat.id, f.issue.id);
-    expect((await post()).status).toBe(201);
-    expect((await f.app.request(`${path}/tasks`, { headers })).status).toBe(200);
+    expect((await post()).status).toBe(200);
+    expect((await post(false)).status).toBe(403);
+    expect((await f.app.request(metadataPath, { headers })).status).toBe(200);
     const otherIssue = f.store.createIssue({ title: "Unbound", workspaceId: "local" });
     const otherSession = f.store.getOrCreateDefaultIssueSession(otherIssue.id);
-    expect((await f.app.request(`/api/issues/${otherIssue.id}/sessions/${otherSession.id}/messages`, {
-      method: "POST", headers, body: JSON.stringify({ content: "Cross-Issue intrusion" }),
+    expect((await f.app.request(`/api/sessions/${otherSession.id}/messages`, {
+      method: "POST", headers, body: JSON.stringify({ body_md: "Cross-Issue intrusion", message_kind: "request", to: { type: "agent", ref: f.agent.id } }),
     })).status).toBe(403);
     const otherChat = f.store.createChatSession({ agentId: f.agent.id, creatorId: "bob" });
     const privateProjection = f.store.createIssueSession(f.issue.id, { chatId: otherChat.id });
-    expect((await f.app.request(`/api/issues/${f.issue.id}/sessions/${privateProjection.id}/tasks`, { headers })).status).toBe(403);
+    expect((await f.app.request(`/api/sessions/${privateProjection.id}/messages`, { headers })).status).toBe(403);
     const foreign = f.store.createWorkspace({ name: "Foreign", slug: "foreign-topic", issuePrefix: "FRN" });
     db!.run("UPDATE multiremi_feishu_bot_chat_bindings SET workspace_id = ? WHERE chat_session_id = ?", [foreign.id, f.chat.id]);
     expect((await post()).status).toBe(403);
-    expect((await f.app.request(`${path}/tasks`, { headers })).status).toBe(403);
+    expect((await f.app.request(metadataPath, { headers })).status).toBe(403);
     expect(f.store.listIssueComments(otherIssue.id)).toHaveLength(0);
   });
 
@@ -409,16 +444,16 @@ describe("Session owner API boundaries", () => {
     it(`limits inherited ${owner} parent reads to the persisted range without consuming parent cursors`, async () => {
       const f = await fixture();
       const parent = owner === "chat" ? f.linked : f.store.getOrCreateDefaultIssueSession(f.issue.id);
-      f.store.appendSessionEvent(parent.id, { authorType: "member", authorId: "alice", body: "Frozen reference" });
+      const frozen = f.store.appendSessionEvent(parent.id, { authorType: "member", authorId: "alice", body: "Frozen reference" });
       const child = owner === "chat"
         ? f.store.createSession(f.chat.id, { parentSessionId: parent.id })
         : f.store.createIssueSession(f.issue.id, { parentSessionId: parent.id });
       const task = f.store.createSessionTask(child.id, { agentId: f.agent.id, prompt: "Read inherited context" });
       const token = await f.store.createTaskAccessToken(task, "alice");
       const headers = { Authorization: `Bearer ${token.token}` };
-      const fromParent = `/api/sessions/${parent.id}/log/entry?from=0&to=${child.inheritCutoffSeq}`;
+      const fromParent = `/api/sessions/${parent.id}/messages?from=0&to=${child.inheritCutoffSeq}`;
       expect((await f.app.request(fromParent, { headers })).status).toBe(403);
-      db!.run(`UPDATE multiremi_tasks SET inherited_projection_to_seq = ?, inherited_projection_recorded_at = ? WHERE id = ?`,
+      mutateExecutionFixture(f.store, `UPDATE multiremi_turn_execution_records SET inherited_projection_to_seq = ?, inherited_projection_recorded_at = ? WHERE id = ?`,
         [child.inheritCutoffSeq, new Date().toISOString(), task.id]);
       f.store.appendSessionEvent(parent.id, { authorType: "member", authorId: "alice", body: "FUTURE_PARENT_BODY" });
       const before = f.store.getSessionAgentReadProgress(parent.id, f.agent.id);
@@ -426,11 +461,12 @@ describe("Session owner API boundaries", () => {
       expect(allowed.status).toBe(200);
       expect(await allowed.text()).not.toContain("FUTURE_PARENT_BODY");
       expect(f.store.getSessionAgentReadProgress(parent.id, f.agent.id)).toEqual(before);
-      for (const tail of ["/log", "/log/entry?seq=1", `/log/entry?from=0&to=${child.inheritCutoffSeq! + 1}`]) {
+      for (const tail of ["", "/log", "/messages", `/messages?from=0&to=${child.inheritCutoffSeq! + 1}`]) {
         expect((await f.app.request(`/api/sessions/${parent.id}${tail}`, { headers })).status).toBe(403);
       }
+      expect((await f.app.request(`/api/messages/${frozen.id}`, { headers })).status).toBe(403);
       const own = f.store.appendSessionEvent(child.id, { authorType: "member", authorId: "alice", body: "Own context" });
-      expect((await f.app.request(`/api/sessions/${child.id}/log/entry?from=0&to=${own.seq}`, { headers })).status).toBe(200);
+      expect((await f.app.request(`/api/sessions/${child.id}/messages?from=0&to=${own.seq}`, { headers })).status).toBe(200);
       expect(f.store.getSessionAgentReadProgress(child.id, f.agent.id)).toEqual({ seq: own.seq, offset: 0 });
     });
   }

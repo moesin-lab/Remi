@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { runMigrations } from "@multiremi/store/migrations.js";
+import { bootstrapPreUnifiedSchema, runMigrations } from "@multiremi/store/migrations.js";
+import { MultiremiStore } from "@multiremi/store.js";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
+import { historicalWriters } from "./unified-model-test-backends.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 import { createStore, db, readyArchiveBinding, resetMultiremiTestEnv } from "./helpers.js";
 
@@ -72,7 +75,7 @@ describe("Session dual ownership store", () => {
     const issue = store.createIssue({ title: "Atomic publication" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const before = store.listConversationLogEntries(main.id);
-    db!.exec(`CREATE TRIGGER reject_result_event BEFORE INSERT ON multiremi_session_events
+    db!.exec(`CREATE TRIGGER reject_result_event BEFORE INSERT ON multiremi_conversation_log
       WHEN NEW.kind = 'result_published' BEGIN SELECT RAISE(ABORT, 'injected publication failure'); END`);
 
     expect(() => store.publishSessionResult(main.id, { body: "Must not survive" })).toThrow("injected publication failure");
@@ -110,7 +113,7 @@ describe("Session dual ownership store", () => {
       expect(store.getTask(ownedTask.id)).toMatchObject({ status: "cancelled", issueId: null, issueSessionId: null });
       expect(store.getIssueSession(projected.id)).toMatchObject({ ownerType: "chat", ownerId: chat.id, issueId: null });
       expect(store.getSessionResult(projectedResult.id)).toMatchObject({ chatId: chat.id, issueId: null });
-      for (const table of ["multiremi_session_events", "multiremi_session_participants", "multiremi_session_agent_lanes",
+      for (const table of ["multiremi_session_participants", "multiremi_session_lanes",
         "multiremi_conversation_log", "multiremi_conversation_heads"]) {
         expect(count(table, "session_id", main.id)).toBe(0);
       }
@@ -208,8 +211,8 @@ describe("Session dual ownership store", () => {
     store.cancelTask(task.id);
     const result = store.publishSessionResult(main.id, { body: "Owned result" });
     const projectedResult = store.publishSessionResult(projected.id, { body: "Private result" });
-    const events = db!.query("SELECT * FROM multiremi_session_events ORDER BY id").all();
-    const audit = db!.query("SELECT * FROM multiremi_tasks WHERE id = ?").get(task.id);
+    const events = db!.query("SELECT * FROM multiremi_conversation_log ORDER BY id").all();
+    const audit = db!.query("SELECT * FROM multiremi_turn_execution_records WHERE id = ?").get(task.id);
     db!.run("UPDATE multiremi_issues SET workspace_id = ? WHERE id = ?", [target.id, issue.id]);
     db!.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", [migrationId]);
 
@@ -219,8 +222,8 @@ describe("Session dual ownership store", () => {
     expect(store.getIssueSession(projected.id)).toMatchObject({ id: projected.id, ownerId: chat.id, workspaceId: "local", issueId: null });
     expect(store.getSessionResult(result.id)).toMatchObject({ id: result.id, issueId: issue.id });
     expect(store.getSessionResult(projectedResult.id)).toMatchObject({ id: projectedResult.id, chatId: chat.id, issueId: null });
-    expect(db!.query("SELECT * FROM multiremi_session_events ORDER BY id").all()).toEqual(events);
-    expect(db!.query("SELECT * FROM multiremi_tasks WHERE id = ?").get(task.id)).toEqual(audit);
+    expect(db!.query("SELECT * FROM multiremi_conversation_log ORDER BY id").all()).toEqual(events);
+    expect(db!.query("SELECT * FROM multiremi_turn_execution_records WHERE id = ?").get(task.id)).toEqual(audit);
     expect(db!.query("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 
@@ -241,35 +244,42 @@ describe("Session dual ownership store", () => {
     expect(db!.query("SELECT 1 FROM multiremi_schema_migrations WHERE id = ?").get(migrationId)).toBeNull();
   });
 
-  it("removes the legacy Task Chat FK while preserving every Task column and index", () => {
-    const store = createStore();
-    const agent = store.createAgent({ name: "Worker", provider: "claude" });
-    const chat = store.createChatSession({ agentId: agent.id });
-    const task = store.createSessionTask(store.getOrCreateDefaultChatSession(chat.id).id,
-      { agentId: agent.id, prompt: "Private audit" });
-    db!.exec("ALTER TABLE multiremi_tasks ADD COLUMN fixture_extra TEXT");
-    db!.run("UPDATE multiremi_tasks SET fixture_extra = 'preserve' WHERE id = ?", [task.id]);
-    db!.exec("CREATE INDEX fixture_task_priority ON multiremi_tasks(priority, fixture_extra)");
-    const schema = db!.query("SELECT sql FROM sqlite_master WHERE name = 'multiremi_tasks'").get() as { sql: string };
-    const indexes = db!.query("SELECT sql FROM sqlite_master WHERE tbl_name = 'multiremi_tasks' AND type = 'index' AND sql IS NOT NULL")
-      .all() as Array<{ sql: string }>;
-    const before = db!.query("SELECT * FROM multiremi_tasks WHERE id = ?").get(task.id);
-    db!.exec("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON");
-    db!.exec(schema.sql.replace(/CREATE TABLE\s+["`]?multiremi_tasks["`]?/i, "CREATE TABLE legacy_tasks")
-      .replace(/\)\s*$/u, ", FOREIGN KEY(chat_session_id) REFERENCES multiremi_chat_sessions(id) ON DELETE SET NULL)"));
-    db!.exec("INSERT INTO legacy_tasks SELECT * FROM multiremi_tasks; DROP TABLE multiremi_tasks; ALTER TABLE legacy_tasks RENAME TO multiremi_tasks");
-    for (const index of indexes) db!.exec(index.sql);
-    db!.exec("PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON");
-    db!.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", [migrationId]);
+  it("removes the historical Task Chat FK while preserving every Task column and index before cutover", () => {
+    const historicalDb = openSqliteDatabase(":memory:", { create: true }) as unknown as SqlDatabase;
+    try {
+      bootstrapPreUnifiedSchema(historicalDb);
+      const historical = historicalWriters(historicalDb);
+      const agent = historical.createAgent({ name: "Worker", provider: "claude" });
+      const chat = historical.createChatSession({ agentId: agent.id });
+      const task = historical.createTask({ agentId: agent.id, chatSessionId: chat.id, prompt: "Private audit", status: "cancelled" });
+      historicalDb.exec("ALTER TABLE multiremi_tasks ADD COLUMN fixture_extra TEXT");
+      historicalDb.run("UPDATE multiremi_tasks SET fixture_extra = 'preserve' WHERE id = ?", [task.id]);
+      historicalDb.exec("CREATE INDEX fixture_task_priority ON multiremi_tasks(priority, fixture_extra)");
+      const schema = historicalDb.query("SELECT sql FROM sqlite_master WHERE name = 'multiremi_tasks'").get() as { sql: string };
+      const indexes = historicalDb.query("SELECT sql FROM sqlite_master WHERE tbl_name = 'multiremi_tasks' AND type = 'index' AND sql IS NOT NULL")
+        .all() as Array<{ sql: string }>;
+      const before = historicalDb.query("SELECT * FROM multiremi_tasks WHERE id = ?").get(task.id);
+      historicalDb.exec("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON");
+      historicalDb.exec(schema.sql.replace(/CREATE TABLE\s+["`]?multiremi_tasks["`]?/i, "CREATE TABLE legacy_tasks")
+        .replace(/\)\s*$/u, ", FOREIGN KEY(chat_session_id) REFERENCES multiremi_chat_sessions(id) ON DELETE SET NULL)"));
+      historicalDb.exec("INSERT INTO legacy_tasks SELECT * FROM multiremi_tasks; DROP TABLE multiremi_tasks; ALTER TABLE legacy_tasks RENAME TO multiremi_tasks");
+      for (const index of indexes) historicalDb.exec(index.sql);
+      historicalDb.exec("PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON");
+      historicalDb.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", [migrationId]);
 
-    migrateAgain();
-    expect(db!.query("SELECT * FROM multiremi_tasks WHERE id = ?").get(task.id)).toEqual(before);
-    expect(db!.query("SELECT sql FROM sqlite_master WHERE name = 'fixture_task_priority'").get()).toEqual({ sql: indexes.find(
-      (index) => index.sql.includes("fixture_task_priority"),
-    )!.sql });
-    expect(db!.query("PRAGMA foreign_key_list(multiremi_tasks)").all().some((fk: any) => fk.from === "chat_session_id")).toBe(false);
-    expect(store.deleteChatSession(chat.id)).toBe(true);
-    expect(store.getTask(task.id)?.chatSessionId).toBe(chat.id);
-    expect(db!.query("PRAGMA foreign_key_check").all()).toEqual([]);
+      bootstrapPreUnifiedSchema(historicalDb);
+      expect(historicalDb.query("SELECT * FROM multiremi_tasks WHERE id = ?").get(task.id)).toEqual(before);
+      expect(historicalDb.query("SELECT sql FROM sqlite_master WHERE name = 'fixture_task_priority'").get()).toEqual({ sql: indexes.find(
+        (index) => index.sql.includes("fixture_task_priority"),
+      )!.sql });
+      expect(historicalDb.query("PRAGMA foreign_key_list(multiremi_tasks)").all().some((fk: any) => fk.from === "chat_session_id")).toBe(false);
+
+      const current = new MultiremiStore(historicalDb);
+      expect(current.deleteChatSession(chat.id)).toBe(true);
+      expect(current.getTask(task.id)?.chatSessionId).toBe(chat.id);
+      expect(historicalDb.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    } finally {
+      historicalDb.close();
+    }
   });
 });

@@ -1,3 +1,4 @@
+import { issueMessagesPath, requestMessageBody } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -5,7 +6,7 @@ import { join } from "node:path";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { signIssueShareId } from "@multiremi/api/helpers/issue-share-tokens.js";
 import { SessionArchiveService } from "@multiremi/session-archive/service.js";
-import { createStore, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore as createStore, resetMultiremiTestEnv } from "./helpers.js";
 
 let archiveRoot: string | undefined;
 afterEach(() => {
@@ -49,16 +50,16 @@ describe("collaboration CLI authorization boundaries", () => {
       expect(response.status, `${method} ${path}`).toBe(200);
     }
 
-    const crossIssueComment = await app.request(`/api/issues/${sibling.id}/comments`, {
+    const crossIssueComment = await app.request(issueMessagesPath(store, sibling.id), {
       method: "POST",
       headers,
-      body: JSON.stringify({ content: "Cross-issue coordination remains allowed" }),
+      body: JSON.stringify(requestMessageBody(store, { content: "Cross-issue coordination remains allowed" }, { type: "role", ref: "issue_owner" })),
     });
-    expect(crossIssueComment.status).toBe(201);
+    expect(crossIssueComment.status).toBe(200);
     const crossIssueCommentBody = await crossIssueComment.json();
-    const storedComment = store.getIssueComment(crossIssueCommentBody.id)!;
-    expect(storedComment.taskId).toBe(task.id);
-    expect(storedComment.issueSessionId).toBeNull();
+    const storedMessage = store.getMessage(crossIssueCommentBody.message.id)!;
+    expect(storedMessage.task_id).toBe(store.getTurnForAttempt(task.id)!.id);
+    expect(storedMessage.session_id).toBe(store.getOrCreateDefaultIssueSession(sibling.id).id);
     const child = await app.request("/api/issues", {
       method: "POST",
       headers,

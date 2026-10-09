@@ -4,6 +4,7 @@ import { buildTaskPrompt } from "@daemon/agent-runtime/prompts/ephemeral.js";
 import { resolveWorkDir } from "@daemon/agent-runtime/workspace/persistent.js";
 import { resolveIssueSessionProviderHome } from "@daemon/agent-runtime/workspace/session-home.js";
 import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { bindFeishuTopicFixture } from "./feishu-topic-fixture.js";
 
 afterEach(resetMultiremiTestEnv);
@@ -51,9 +52,10 @@ describe("Session Task dual ownership", () => {
         expect(store.listChatSessions("local", { includeArchived: true })).toHaveLength(chatsBefore);
         if (chat) expect(store.listChatMessages(chat.id)).toHaveLength(0);
         if (status === "completed") {
-          const turn = store.findTurnEntry(task.id)!;
-          if (issue) expect(store.getIssueComment(String(turn.metadata.final_entry_id))?.body).toBe("Durable result");
-          else expect(turn.metadata.final_reply_md).toBe("Durable result");
+          const turn = store.getTurnForAttempt(task.id)!;
+          expect(store.getMessage(turn.reply_message_id!)).toMatchObject({ session_id: session.id,
+            message_kind: "reply", body_md: "Durable result" });
+          if (issue) expect(store.getIssueComment(turn.reply_message_id!)?.body).toBe("Durable result");
           expect(store.getSessionAgentLane(session.id, agent.id)).toMatchObject({ providerSessionId: "provider_result", lastTaskId: task.id });
           expect(() => store.completeTask(task.id, { output: "Duplicate reply" })).toThrow("Task not found or terminal");
           expect(store.listSessionEvents(session.id).filter(event => event.taskId === task.id && event.kind === "task_completed")).toHaveLength(1);
@@ -86,7 +88,8 @@ describe("Session Task dual ownership", () => {
       expect(JSON.stringify(publicActivity)).not.toContain(privateBody);
       const turn = store.findTurnEntry(task.id)!;
       expect(turn).toMatchObject({ session_id: session.id, metadata: { status } });
-      if (status === "completed") expect(turn.metadata.final_reply_md).toBe(privateBody);
+      if (status === "completed") expect(store.getMessage(store.getTurnForAttempt(task.id)!.reply_message_id!))
+        .toMatchObject({ session_id: session.id, message_kind: "reply", body_md: privateBody });
       else expect(store.listSessionEvents(session.id).find(event => event.taskId === task.id && event.kind === `task_${status}`)?.body)
         .toBe(privateBody);
     });
@@ -105,7 +108,7 @@ describe("Session Task dual ownership", () => {
       { agentId: agent.id, issueSessionId: issueOwned.id, chatSessionId: chat!.id },
       { agentId: agent.id, issueSessionId: session.id, issueId: otherIssue.id },
       { agentId: foreignAgent.id, issueSessionId: session.id },
-    ]) expect(() => store.createTask({ ...input, prompt: "Invalid owner" })).toThrow();
+    ]) expect(() => store.createTask({ ...input, prompt: "Invalid owner" }), JSON.stringify(input)).toThrow();
     expect(store.listTasks()).toHaveLength(tasksBefore);
     expect(store.getSessionAgentLane(session.id, agent.id)).toBeNull();
     expect(store.getSessionAgentLane(issueOwned.id, agent.id)).toBeNull();
@@ -148,7 +151,7 @@ describe("Session Task dual ownership", () => {
     }
     // A damaged Task pointer cannot turn its actual private Session into a
     // public Issue Task in either SQL entry point.
-    db!.run("UPDATE multiremi_tasks SET chat_session_id = NULL WHERE id = ?", [ownChatTask.id]);
+    mutateExecutionFixture(store, "UPDATE multiremi_turn_execution_records SET chat_session_id = NULL WHERE id = ?", [ownChatTask.id]);
     const access = { userId: null, taskToken: { taskId: ownIssueTask.id, agentId: agent.id, workspaceId: "local" } };
     expect(store.listActiveTasksForIssue(issue!.id, access).map(entry => entry.id).sort()).toEqual(publicIds);
     expect(store.listWorkspaceAgentTaskSnapshot("local", access).map(entry => entry.id).sort()).toEqual(publicIds);
@@ -246,9 +249,11 @@ describe("Session Task dual ownership", () => {
       expect(store.claimTask(runtime.id)?.id).toBe(offered.id);
       expect(store.recordTaskOffered(offered.id, runtime.id)).toBe(true);
       expect(store.requeueTaskOffer(offered.id, runtime.id, "unknown")).toBe(true);
-      const newer = store.createTask({ agentId: agent.id, chatSessionId: chat!.id, prompt: "New higher priority Chat request", priority: 100 });
-      // The existing reservation must be replayable even while the ordinary
-      // queue head is the newer request, which cannot take its occupied root.
+      const workSession = store.createSession(chat!.id, { title: "New higher priority Chat work" });
+      const newer = store.createSessionTask(workSession.id, { agentId: agent.id, prompt: "New higher priority Chat request", priority: 100 });
+      expect(newer.id).not.toBe(offered.id);
+      // A different Session has its own pending turn but shares this checkout.
+      // Its higher priority cannot take the ordinary offer's occupied root.
       expect(store.claimTask(runtime.id)?.id).toBe(offered.id);
       expect(store.claimTask(runtime.id)).toBeNull();
       expect(store.getTask(newer.id)?.status).toBe("queued");

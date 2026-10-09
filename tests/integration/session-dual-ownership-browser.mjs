@@ -35,16 +35,29 @@ const row = (sessionId, seq, body, extra = {}) => ({ session_id: sessionId, seq,
   task_id: null, parent_id: null, body_md: body, body_html: `<p>${body}</p>`, render_version: "fixture",
   metadata: {}, created_at: now, updated_at: now, deleted_at: null, ...extra });
 const task = (id, sessionId, status, extra = {}) => ({ id, agent_id: agent.id, runtime_id: "", issue_id: null,
-  issue_session_id: sessionId, chat_session_id: chat.id, holds_workspace: true, status, priority: 0,
+  turn_id: `turn_${id}`, issue_session_id: sessionId, chat_session_id: chat.id, holds_workspace: true, status, priority: 0,
   dispatched_at: now, started_at: now, completed_at: now, result: null, error: null, created_at: now, ...extra });
 const completed = task("tsk_persisted", chatRoot.id, "completed", { prompt: "Persistent delegated task instructions" });
 const failed = task("tsk_failed", chatRoot.id, "failed", { error: "Fixture failure evidence" });
 tasks.push(completed, failed);
 
+const turnWire = currentTask => ({ id: currentTask.turn_id, session_id: currentTask.issue_session_id,
+  seq: 1, agent_id: currentTask.agent_id, status: currentTask.status, current_attempt_id: currentTask.id,
+  input_from_seq: 0, input_to_seq: 1, created_at: now, started_at: now, ended_at: now,
+  ended_reason: null, legacy_prompt: currentTask.prompt ?? null,
+  current_attempt: { id: currentTask.id, status: currentTask.status, runtime_id: null, provider: "codex",
+    error: currentTask.error, failure_reason: null, progress_summary: null, progress_step: null, progress_total: null } });
+const messageWire = (sessionId, seq, body, toAgent = agent.id) => ({
+  ...row(sessionId, seq, body, { author_type: "member", author_id: "usr_smoke" }),
+  sender_type: "member", sender_id: "mem_smoke", to_type: "agent", to_ref: toAgent,
+  to_agent_id: toAgent, to_member_id: null, message_kind: "request", wake_requested: "now",
+  wake_applied: "now", wake_reason: "started", reply_to_id: null, dedupe_key: null, options: null,
+});
+
 function completedLogRows(currentTask, result, fromSeq) {
   const sessionId = currentTask.issue_session_id;
   const reply = row(sessionId, fromSeq + 1, result, { task_id: currentTask.id });
-  const turn = row(sessionId, fromSeq, currentTask.prompt, { kind: "turn", task_id: currentTask.id,
+  const turn = row(sessionId, fromSeq, currentTask.prompt, { id: currentTask.turn_id, kind: "turn", task_id: currentTask.id,
     metadata: { status: "completed", final_entry_id: reply.id, final_reply_md: result } });
   return [turn, reply];
 }
@@ -76,17 +89,23 @@ async function fixtureApi(req, res, next) {
   if (path === "/api/projects") return send({ projects: [] });
   if (["/api/runtimes", "/api/agent-task-snapshot", "/api/runtime-workspaces", "/api/attachments"].includes(path)) return send([]);
   if (path === "/api/chat/sessions") return send([chat]);
-  if (path === "/api/chat/pending-tasks") return send({ tasks: [] });
-  if (/^\/api\/tasks\/[^/]+\/human-requests$/.test(path)) return send({ requests: [] });
-  if (path === `/api/chat/sessions/${chat.id}/pending-task`) return send({ supports_queue: true, queued_tasks: [] });
-  if (path === `/api/chat/sessions/${chat.id}/messages` && req.method === "POST") {
-    assert.equal(typeof body.content, "string");
+  if (path === `/api/chat/sessions/${chat.id}` && req.method === "GET") return send(chat);
+  if (path === "/api/turns") {
+    const sessionId = url.searchParams.get("session_id");
+    const status = url.searchParams.get("status");
+    return send({ turns: tasks.filter(current => (!sessionId || current.issue_session_id === sessionId)
+      && (!status || current.status === status)).map(turnWire), next_cursor: null });
+  }
+  if (path === `/api/sessions/${chat.id}/messages` && req.method === "POST") {
+    assert.equal(typeof body.body_md, "string");
     const entries = logs.get(chat.id) ?? [];
-    entries.push(row(chat.id, entries.length + 1, body.content, { author_type: "member", author_id: "usr_smoke", metadata: { client_id: body.client_id } }));
+    const message = messageWire(chat.id, entries.length + 1, body.body_md);
+    entries.push(message);
     logs.set(chat.id, entries);
-    return send({ task_id: "tsk_ordinary", message_id: "msg_ordinary", created_at: now, supports_queue: true, queued: false });
+    return send({ message, wake_applied: "now", wake_reason: "started" });
   }
   if (path === `/api/chat/sessions/${chat.id}/read`) return send(undefined, 204);
+  if (path === "/api/inbox/read") return send({ session_id: body.session_id, cursor_seq: 0 });
   const issueSessions = path.match(/^\/api\/issues\/(iss_smoke_empty|iss_smoke_linked)\/sessions$/);
   const chatSessions = path.match(/^\/api\/multiremi\/chats\/chat_smoke\/sessions$/);
   if (issueSessions || chatSessions) {
@@ -110,19 +129,22 @@ async function fixtureApi(req, res, next) {
       return send(issueSessions ? created : { session: created }, 201);
     }
   }
-  const sessionTasks = path.match(/^\/api\/multiremi\/chats\/chat_smoke\/sessions\/([^/]+)\/tasks$/);
-  if (sessionTasks) {
-    const sessionId = sessionTasks[1];
-    if (req.method === "GET") return send({ tasks: tasks.filter(current => current.issue_session_id === sessionId) });
+  const sessionMessages = path.match(/^\/api\/sessions\/([^/]+)\/messages$/);
+  if (sessionMessages) {
+    const sessionId = sessionMessages[1];
+    if (req.method === "GET") return send({ messages: [], next_cursor: null });
     if (req.method === "POST") {
-      assert.equal(body.agent_id, agent.id);
-      assert.equal(typeof body.prompt, "string");
-      const created = task(`tsk_created_${++count}`, sessionId, "completed", { prompt: body.prompt });
+      assert.equal(body.to.ref, agent.id);
+      assert.equal(body.message_kind, "request");
+      assert.equal(body.wake_requested, "now");
+      assert.equal(typeof body.body_md, "string");
+      const created = task(`tsk_created_${++count}`, sessionId, "completed", { prompt: body.body_md });
       tasks.push(created);
       const entries = logs.get(sessionId) ?? [];
       entries.push(...completedLogRows(created, "Browser delegated task result", entries.length + 1));
       logs.set(sessionId, entries);
-      return send({ task: created }, 201);
+      return send({ message: messageWire(sessionId, entries.length + 1, body.body_md),
+        turn_id: created.turn_id, wake_applied: "now", wake_reason: "started" }, 201);
     }
   }
   const log = path.match(/^\/api\/sessions\/([^/]+)\/log$/);
@@ -134,7 +156,14 @@ async function fixtureApi(req, res, next) {
     const selected = anchor === null ? entries : entries.filter(entry => entry.seq >= Number(anchor) - before && entry.seq <= Number(anchor) + after);
     return send({ entries: selected, head_seq: entries.at(-1)?.seq ?? 0, log_version: 1, has_more_before: false, has_more_after: false });
   }
-  if (/^\/api\/tasks\/[^/]+\/trace$/.test(path)) return send({ events: [], head: 0, next_after_seq: 0, eof: true, closed: true, source: "archive", state: "ok" });
+  if (/^\/api\/turns\/[^/]+\/trace$/.test(path)) return send({ events: [], head: 0, next_after_seq: 0, eof: true, closed: true, source: "archive", state: "ok" });
+  const turnDetail = path.match(/^\/api\/turns\/([^/]+)$/);
+  if (turnDetail) {
+    const current = tasks.find(current => current.turn_id === turnDetail[1]);
+    assert(current, "Turn detail must use a persisted Turn ID");
+    return send({ turn: turnWire(current), input: { from_seq: 0, to_seq: 1,
+      messages: [], legacy_prompt: current.prompt ?? null } });
+  }
   unknownRequests.push({ method: req.method, path });
   return send({ error: "Unknown fixture request: " + path }, 404);
 }
@@ -217,12 +246,12 @@ try {
   await page.getByText("Persistent failed Session result", { exact: true }).waitFor();
   await page.getByText("Fixture failure evidence", { exact: true }).waitFor();
   checks.push("Chat work Session reads persisted completed and failed log results");
-  const traceRead = page.waitForResponse(response => new URL(response.url()).pathname === `/api/tasks/${completed.id}/trace`);
+  const traceRead = page.waitForResponse(response => new URL(response.url()).pathname === `/api/turns/${completed.turn_id}/trace`);
   await page.getByRole("button", { name: "Execution details", exact: true }).first().click();
   assert.equal((await traceRead).status(), 200);
   await page.getByRole("dialog").last().waitFor();
   await page.waitForFunction(() => document.querySelectorAll('[role="dialog"]').length === 2);
-  assert(requests.some(request => request.path === `/api/tasks/${completed.id}/trace`), "Trace action must load its task trace");
+  assert(requests.some(request => request.path === `/api/turns/${completed.turn_id}/trace`), "Trace action must load its Turn trace");
   await page.screenshot({ path: join(artifacts, "chat-task-trace.png"), fullPage: true });
   await page.keyboard.press("Escape");
   checks.push("Work Session trace entry opens the real task trace dialog");
@@ -244,21 +273,21 @@ try {
   assert.equal(await page.getByText("Browser delegated task result", { exact: true }).count(), 1,
     "New final body must render once when the turn references its independent agent message");
   await page.getByText("Run the isolated browser task", { exact: true }).waitFor();
-  assert(requests.some(request => request.method === "POST" && request.path === `/api/multiremi/chats/${chat.id}/sessions/${chatWork.id}/tasks`
-    && request.body.prompt === "Run the isolated browser task"), "Delegate must use explicit SessionTask POST");
-  checks.push("Chat Session creation, explicit task POST and terminal log rendering");
+  assert(requests.some(request => request.method === "POST" && request.path === `/api/sessions/${chatWork.id}/messages`
+    && request.body.body_md === "Run the isolated browser task"), "Delegate must address the selected Session through the canonical message API");
+  checks.push("Chat Session creation, canonical request message and terminal log rendering");
   await page.screenshot({ path: join(artifacts, "chat-work-result.png"), fullPage: true });
   await page.keyboard.press("Escape");
   const editor = page.locator('[contenteditable="true"]').first();
   await editor.fill("Ordinary Chat keeps its queue path");
   const ordinarySend = page.waitForResponse(response => response.request().method() === "POST"
-    && new URL(response.url()).pathname === `/api/chat/sessions/${chat.id}/messages`);
+    && new URL(response.url()).pathname === `/api/sessions/${chat.id}/messages`);
   await page.getByRole("button", { name: "Send", exact: true }).click();
   assert.equal((await ordinarySend).status(), 200);
   await page.waitForFunction(() => document.body.textContent.includes("Ordinary Chat keeps its queue path"));
-  assert(requests.some(request => request.method === "POST" && request.path === `/api/chat/sessions/${chat.id}/messages`
-    && request.body.content.includes("Ordinary Chat keeps its queue path")), "Ordinary Chat must retain its existing message endpoint");
-  checks.push("Ordinary Chat sends through the existing ChatTask message endpoint");
+  assert(requests.some(request => request.method === "POST" && request.path === `/api/sessions/${chat.id}/messages`
+    && request.body.body_md.includes("Ordinary Chat keeps its queue path")), "Ordinary Chat must address its own conversation");
+  checks.push("Ordinary Chat sends through its own canonical message endpoint");
   await page.screenshot({ path: join(artifacts, "ordinary-chat.png"), fullPage: true });
   assert.deepEqual(pageErrors, [], "Browser runtime errors");
   assert.deepEqual(unknownRequests, [], "Fixture must explicitly cover every requested API");

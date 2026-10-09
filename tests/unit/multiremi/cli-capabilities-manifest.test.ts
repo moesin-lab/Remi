@@ -5,6 +5,8 @@ import { cliCommandHelp, cliCommandInventory } from "../../../apps/remi/cli/inde
 import { collaborationCommandSpecs } from "../../../apps/remi/cli/commands/collaboration.js";
 import { CommandRegistry } from "../../../apps/remi/cli/core/index.js";
 import { CLI_CAPABILITIES_RUNTIME } from "../../../packages/server/src/api/cli-capabilities-generated.js";
+import { RETIRED_CLI_COMMANDS } from "../../../apps/remi/cli/core/retired-commands.js";
+import { RETIRED_CLI_ROUTES } from "../../../packages/server/src/api/retired-cli-routes.js";
 import {
   cliCoverageReport,
   cliRuntimeCapabilities,
@@ -213,18 +215,33 @@ describe("CLI capabilities manifest", () => {
   });
 
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
-    // The merged 799-route inventory retains downstream Session, execution
-    // configuration and updater commands and maps the four usage report/price
-    // routes. Daemon/peer protocols and WebSocket transports remain exempt.
     expect(cliCoverageReport(manifest)).toEqual({
-      mapped: 712,
-      exempt: 87,
+      mapped: 641,
+      exempt: 169,
       missing: 0,
-      total: 799,
+      total: 810,
     });
-    expect(manifest.aliases["remi chat message list"]?.command).toBe("session.log.window");
-    expect(manifest.aliases["remi issue run-messages"]?.command).toBe("task.trace.read");
-    expect(manifest.aliases["remi task message list"]?.command).toBe("task.trace.read");
+    for (const [route, command] of Object.entries({
+      "POST /api/sessions/:sessionId/messages": "message.send",
+      "GET /api/messages/:id": "message.get",
+      "PATCH /api/messages/:id": "message.edit",
+      "DELETE /api/messages/:id": "message.delete",
+      "POST /api/messages/:id/resolve": "message.resolve",
+      "POST /api/messages/:id/reactions": "message.react",
+      "GET /api/inbox": "inbox",
+      "POST /api/inbox/read": "inbox.read",
+      "GET /api/turns": "turn.list",
+      "GET /api/turns/:id": "turn.get",
+      "POST /api/turns/:id/cancel": "turn.cancel",
+      "POST /api/turns/:id/wrap-up": "turn.wrap-up",
+      "POST /api/turns/:id/retry": "turn.retry",
+      "GET /api/turns/:id/trace": "turn.trace.read",
+    })) expect(manifest.routes[route]).toEqual({ command });
+    expect(manifest.routes["GET /api/sessions/:sessionId/messages"]).toEqual({ command: "message.list" });
+    for (const path of ["chat message list", "issue run-messages", "task message list"]) {
+      expect(manifest.aliases[`remi ${path}`]).toBeUndefined();
+      expect(manifest.retired[`remi ${path}`]?.replacement).toBe(RETIRED_CLI_COMMANDS[path]);
+    }
     expect(manifest.routes["POST /api/daemon/tasks/:id/messages"]).toBeUndefined();
     expect(manifest.routes["GET /api/daemon/runtimes/:runtimeId/feishu-bot/decision-cards"])
       .toMatchObject({ cli_exempt: true, category: "daemon_internal_protocol" });
@@ -234,7 +251,8 @@ describe("CLI capabilities manifest", () => {
         category: "daemon_internal_protocol",
         reason: "Read-only v1 daemon upgrade bridge for plugin desired state is machine-to-server traffic, not a user CLI command.",
       });
-    expect(manifest.routes["POST /api/daemon/tasks/:taskId/human-requests/:requestId/card"])
+    expect(manifest.routes["POST /api/daemon/tasks/:taskId/human-requests/:requestId/card"]).toBeUndefined();
+    expect(manifest.routes["POST /api/daemon/messages/:id/card"])
       .toMatchObject({ cli_exempt: true, category: "daemon_internal_protocol" });
     expect(manifest.max_planned_routes).toBe(0);
     expect(manifest.routes["POST /api/issues/:id/workspace/abandon"])
@@ -245,7 +263,7 @@ describe("CLI capabilities manifest", () => {
       ["POST /api/issues/:id/decisions/:decisionId/answer", "issue.decision.answer"],
       ["POST /api/issues/:id/decisions/:decisionId/escalate", "issue.decision.escalate"],
       ["POST /api/issues/:id/decisions/:decisionId/withdraw", "issue.decision.withdraw"],
-    ]) expect(manifest.routes[route!]).toEqual({ command });
+    ]) expect(manifest.routes[route!]).toMatchObject({ cli_exempt: true, category: "retired_route" });
     expect(manifest.routes["POST /api/workspaces/:id/relay-config/:engine/probe"])
       .toEqual({ command: "workspace.relay.probe" });
     expect(manifest.commands["workspace.relay.probe"]).toMatchObject({
@@ -278,8 +296,8 @@ describe("CLI capabilities manifest", () => {
       mutation: "read",
       output: ["table", "json", "jsonl"],
     });
-    expect(manifest.routes["POST /api/chat/attachments/send"]).toEqual({ command: "chat.attachment.send" });
-    expect(manifest.commands["chat.attachment.send"]?.auth).toEqual(["task"]);
+    expect(manifest.routes["POST /api/chat/attachments/send"]).toMatchObject({ cli_exempt: true, category: "retired_route" });
+    expect(manifest.commands["message.send"]?.auth).toEqual(["human", "task"]);
     expect(manifest.routes["POST /api/daemon/runtimes/:runtimeId/feishu-bot/attachments"])
       .toMatchObject({ cli_exempt: true, category: "daemon_internal_protocol" });
     expect(cliCoverageReport(manifest).missing).toBeLessThanOrEqual(manifest.max_planned_routes);
@@ -333,9 +351,7 @@ describe("CLI capabilities manifest", () => {
       deprecated_since: "0.3.0",
     });
     expect(Object.values(manifest.routes).filter((route) => "planned_command" in route)).toEqual([]);
-    // The three Issue Session paths above remain executable as native commands,
-    // so only the remaining deprecated paths belong in the alias inventory.
-    expect(Object.keys(manifest.aliases)).toHaveLength(47);
+    expect(Object.keys(manifest.aliases)).toHaveLength(37);
     for (const [legacy, alias] of Object.entries(manifest.aliases)) {
       expect(migrationDoc, legacy).toContain(`| \`${legacy}\` | \`${alias.replacement}\` |`);
     }
@@ -347,5 +363,34 @@ describe("CLI capabilities manifest", () => {
     expect(validateCliCapabilities(golden.routes, overBudget, cliCommandInventory())).toContain(
       "planned route count 1 exceeds ratchet 0",
     );
+  });
+
+  it("records every retired path without executable capability or alias", () => {
+    for (const suffix of ["", "/entry", "/locate"]) {
+      expect(manifest.routes[`GET /api/sessions/:sessionId/log${suffix}`]).toMatchObject({ cli_exempt: true, category: "pure_ui" });
+    }
+    for (const [path, replacement] of Object.entries(RETIRED_CLI_COMMANDS)) {
+      const entry = manifest.retired[`remi ${path}`]!;
+      expect(entry.replacement).toBe(replacement);
+      expect(manifest.commands[entry.command]).toMatchObject({ capability: null, aliases: [], hidden: true });
+    }
+    for (const route of Object.keys(RETIRED_CLI_ROUTES)) {
+      expect(manifest.routes[route]).toMatchObject({ cli_exempt: true, category: "retired_route" });
+    }
+  });
+  it("rejects missing replacements, missing retired entries and retired exemptions on live routes", () => {
+    const inventory = cliCommandInventory();
+    const blank = structuredClone(manifest);
+    blank.retired["remi task create"]!.replacement = "";
+    expect(validateCliCapabilities(golden.routes, blank, inventory)).toContain("remi task create retired replacement is required");
+    const missing = structuredClone(manifest);
+    delete missing.retired["remi task create"];
+    expect(validateCliCapabilities(golden.routes, missing, inventory)).toContain("remi task create retired entry differs from Registry");
+    const alias = structuredClone(manifest);
+    alias.commands[alias.retired["remi task create"]!.command]!.capability = "task.create";
+    expect(validateCliCapabilities(golden.routes, alias, inventory)).toContain("remi task create retired command must be registered without capability or aliases");
+    const exempt = structuredClone(manifest);
+    exempt.routes["GET /api/turns"] = { cli_exempt: true, category: "retired_route", reason: "wrong" };
+    expect(validateCliCapabilities([...golden.routes, "GET /api/turns"], exempt, inventory)).toContain("GET /api/turns retired_route classification differs from the retired HTTP inventory");
   });
 });

@@ -60,11 +60,10 @@ import { registerLabelRoutes } from "./routers/labels.js";
 import { registerPinRoutes } from "./routers/pins.js";
 import { registerIssueRoutes } from "./routers/issues.js";
 import { registerIssueShareRoutes } from "./routers/issue-shares.js";
-import { registerInboxRoutes } from "./routers/inbox.js";
-import { registerCommentRoutes } from "./routers/comments.js";
+import { registerUnifiedRoutes } from "./routers/unified.js";
+import { registerMessageCardRoutes } from "./routers/message-cards.js";
 import { registerAttachmentRoutes } from "./routers/attachments.js";
 import { registerChatRoutes } from "./routers/chat.js";
-import { registerTaskRoutes } from "./routers/tasks.js";
 import { registerPlatformRoutes } from "./routers/platform.js";
 import {
   evaluateStartupEnv,
@@ -73,6 +72,7 @@ import {
 } from "../config/startup-env.js";
 import { CLI_SHARE_HEADER, registerCliRoutes } from "./routers/cli.js";
 import { registerCliLatestVersionRoutes } from "./routers/cli-latest-version.js";
+import { registerRetiredCliRoutes } from "./retired-cli-routes.js";
 import {
   createHub,
   type HubFillReader,
@@ -163,7 +163,9 @@ import {
   type DaemonProtocolSocket,
 } from "./daemon-protocol/index.js";
 import { DaemonTaskOffers, prepareTaskOffer } from "./daemon-protocol/task-offers.js";
+import type { DaemonTurnBridge } from "./daemon-protocol/turn-bridge.js";
 import { DaemonDownlinks } from "./daemon-protocol/downlinks.js";
+import { wakeDaemonWorkspaceEvent } from "./daemon-protocol/workspace-wakeups.js";
 import { taskInputSnapshot } from "./daemon-protocol/task-input-snapshot.js";
 import { registerTaskInputRpcs } from "./daemon-protocol/task-input-rpcs.js";
 import { runtimeInputSnapshot } from "./daemon-protocol/runtime-input-snapshot.js";
@@ -213,6 +215,7 @@ import {
 import type { StreamAuthReader } from "@multiremi/api/hub/stream-auth.js";
 import { createReadPool } from "@multiremi/store/db/read-pool.js";
 import { createConversationLogFillReader } from "./hub/conversation-log-fill-reader.js";
+import { createBrowserLogProjection } from "./hub/browser-log-projection.js";
 import { stopHubReadResources } from "./hub/hub-lifecycle.js";
 import { isPostgresConfigured, openMultiremiDatabase } from "@multiremi/store/db/postgres.js";
 import {
@@ -305,12 +308,19 @@ function recordTaskTokenWrite(
   });
 }
 
+function parseBearerToken(header: string | undefined): string {
+  const parts = header?.trim().split(/\s+/);
+  return parts?.length === 2 && parts[0]!.toLowerCase() === "bearer" ? parts[1]! : "";
+}
+
 function envEnabled(value: string | undefined, fallback = true): boolean {
   if (value === undefined) return fallback;
   return !["0", "false", "no", "off"].includes(value.trim().toLowerCase());
 }
 
 export interface MultiremiApiOptions {
+  /** Override the Store-owned turn bridge for protocol integration tests. */
+  daemonTurnBridge?: DaemonTurnBridge;
   /** Transport injection for protocol integration tests; no store subscriptions. */
   onDaemonProtocol?: (layer: DaemonProtocolLayer) => void;
   store?: MultiremiStore;
@@ -603,15 +613,15 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
         await next();
         return;
       }
-      const header = c.req.header("Authorization") ?? "";
-      let token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+      const header = c.req.header("Authorization");
+      let token = parseBearerToken(header);
       // Native browser loads (<img src="/api/attachments/…/content">, file
       // downloads) can't attach an Authorization header. Accept the HttpOnly
       // auth cookie set at login — mirroring the Go server's multimira_auth —
       // but only for safe methods, so cookie auth can never mutate state and
       // no CSRF machinery is needed. Only when the header is entirely absent:
       // a malformed or non-Bearer Authorization must fail, not fall back.
-      if (!header && (c.req.method === "GET" || c.req.method === "HEAD")) {
+      if (header === undefined && (c.req.method === "GET" || c.req.method === "HEAD")) {
         token = getCookie(c, AUTH_COOKIE_NAME) ?? "";
       }
       if (token === authToken) {
@@ -658,8 +668,8 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
     // Open dashboard mode still needs to recognize an explicitly supplied
     // daemon/task token. Runtime-observed Plugin state has a strict daemon
     // identity boundary, and treating every request as anonymous would make a
-    // locally hosted daemon unable to report its own state. Missing or unknown
-    // credentials retain the historical anonymous-admin behavior.
+    // locally hosted daemon unable to report its own state. Only requests
+    // without credentials retain the historical anonymous-admin behavior.
     app.use("*", async (c, next) => {
       // MUL-462: the peer routes authenticate themselves with a shared secret.
       // Without this a peer secret that happens to collide with a task token
@@ -669,9 +679,10 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
         await next();
         return;
       }
-      const header = c.req.header("Authorization") ?? "";
-      const rawToken = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+      const header = c.req.header("Authorization");
+      const rawToken = parseBearerToken(header);
       const accessToken = rawToken ? await store.verifyAccessToken(rawToken) : null;
+      if (header !== undefined && !accessToken) return c.json({ error: "unauthorized" }, 401);
       if (accessToken) {
         if (accessToken.type === "daemon" && !isDaemonTokenAllowedRequest(c.req.raw)) {
           return c.json({ error: "forbidden for daemon token" }, 403);
@@ -784,6 +795,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
     analytics_environment: process.env.NODE_ENV ?? "development",
   }));
   registerCliRoutes(app, deps);
+  registerRetiredCliRoutes(app);
   registerCliLatestVersionRoutes(app, deps);
   registerAuthRoutes(app, deps);
   app.get("/health/realtime", (c) => c.json({
@@ -972,18 +984,17 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
 
   registerPinRoutes(app, deps);
 
+  registerUnifiedRoutes(app, deps);
+  registerMessageCardRoutes(app, deps);
   registerIssueRoutes(app, deps);
   registerIssueShareRoutes(app, deps);
 
 
-  registerInboxRoutes(app, deps);
 
-  registerCommentRoutes(app, deps);
   registerAttachmentRoutes(app, deps);
 
   registerChatRoutes(app, deps);
 
-  registerTaskRoutes(app, deps);
 
   for (const { method, path } of RETIRED_DAEMON_HTTP_ROUTES) {
     app.on(method, path, retiredDaemonRouteHandler);
@@ -1170,21 +1181,23 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     metrics: wsFrameMetricsFromHttp(requestMetricsOptions),
     dbCounters: () => readProcessDbCounters(),
   });
+  const daemonTurnBridge = options.daemonTurnBridge ?? store.getDaemonTurnBridge();
   const offerProjectKnowledge = options.projectKnowledge ?? createProjectKnowledgeServiceFromEnv(store);
   const offers = new DaemonTaskOffers({ store, layer: daemonProtocol,
-    prepare: (task, supportsWikiFetch) => prepareTaskOffer(store, task, offerProjectKnowledge, repositoryWiki, supportsWikiFetch),
+    prepare: (task, supportsWikiFetch) => prepareTaskOffer(store, task, offerProjectKnowledge, repositoryWiki,
+      supportsWikiFetch, daemonTurnBridge.offerInput(task)),
     onRuntimeReady: (rt, ids) => downlinks.runtimeReady(rt, ids) });
   const downlinks: DaemonDownlinks = new DaemonDownlinks({ layer: daemonProtocol,
     nextWakeAt: rt => store.nextFeishuBotOutboundWakeAt(rt),
-    snapshot: (rt, session, activeIds) => [...runtimeInputSnapshot(store, rt, session),
+    snapshot: (rt, session, activeIds) => withRequestReadCache(() => [...runtimeInputSnapshot(store, rt, session),
       ...sessionArchiveRequestSnapshot(store, rt),
-      ...taskInputSnapshot(store, rt, session.daemonId, activeIds, id => downlinks.forgetTask(rt, id))] });
-  registerTaskInputRpcs(daemonProtocol, store, rt => downlinks.kick(rt));
+      ...taskInputSnapshot(store, rt, session.daemonId, activeIds, id => downlinks.forgetTask(rt, id), daemonTurnBridge)]) });
+  registerTaskInputRpcs(daemonProtocol, store, rt => downlinks.kick(rt), daemonTurnBridge);
   const browserWebSockets: BrowserWebSocketRegistry = new Map();
   const daemonTrace = registerDaemonTraceHandlers(daemonProtocol, store,
     effectiveApiRole !== "ui" && options.liveHub === undefined && options.hub === undefined
       ? createHubTraceSink(liveHub as HubImpl) : undefined);
-  registerDaemonReportHandlers(daemonProtocol, store, (taskId, head, runtimeId) => daemonTrace.close(taskId, head, runtimeId));
+  registerDaemonReportHandlers(daemonProtocol, store, (taskId, head, runtimeId) => daemonTrace.close(taskId, head, runtimeId), daemonTurnBridge);
   registerDaemonMaintenanceHandlers(daemonProtocol, store, sessionArchives);
   registerSessionArchiveRequestHandlers(daemonProtocol, store);
   options.onDaemonProtocol?.(daemonProtocol);
@@ -1197,6 +1210,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     hub: liveHub,
     auth: streamAuth,
     endpoint: "log",
+    projectLogFrames: createBrowserLogProjection(store, readPool),
   });
   const traceStreams: BrowserStreamHandler = createBrowserStreamHandler({
     hub: liveHub,
@@ -1226,14 +1240,8 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
         downlinks.kickWorkspace(task.workspaceId, rt => store.getRuntimeLite(rt)?.workspaceId ?? "local");
       }
     },
-    onDaemonWorkspaceEvent: (event) => {
-      downlinks.kickWorkspace(event.workspaceId, rt => store.getRuntimeLite(rt)?.workspaceId ?? "local");
-      if (event.type === "daemon:models_updated") {
-        offers.kick(typeof event.payload.runtime_id === "string" ? event.payload.runtime_id : null);
-      } else if (/^(agent:|agent_plugin:|runtime:|project:|execution_group:|daemon:|issue:)/.test(event.type)) {
-        offers.kickWorkspace(event.workspaceId);
-      }
-    },
+    onDaemonWorkspaceEvent: event => wakeDaemonWorkspaceEvent(event, { downlinks, offers,
+      runtimeWorkspace: rt => store.getRuntimeLite(rt)?.workspaceId ?? null }),
   });
   const server = Bun.serve<MultiremiWebSocketData>({
     port,

@@ -377,7 +377,7 @@ function TaskRow({
     if (cancelling) return;
     setCancelling(true);
     try {
-      await api.cancelTaskById(task.id);
+      await api.cancelTaskById(task.turn_id ?? task.id);
       // No manual invalidate needed — the task:cancelled WS event flows
       // through useRealtimeSync's `task:` prefix path which already
       // invalidates snapshot + per-agent + per-issue task lists.

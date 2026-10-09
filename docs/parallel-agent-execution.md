@@ -10,37 +10,25 @@
   existing delegation ID. Different delegations can run together, including
   multiple delegations to the same Agent, subject to workspace leases and the
   shared Chat checkout rule below. Retries keep their delegation scope.
-- A rich mention continues the delegation that teammate already owns in the
-  Session. It reuses that delegation's scope, provider session, cursor and
-  runtime affinity, so an established teammate receives a delta instead of a
-  cold bootstrap; a teammate that has never been delegated to, or whose lane
-  was reset, still starts cold. The server resolves the target from the
-  delegator, Agent, Issue and Session — never from prose.
-- Continued Tasks in one execution scope are serialized, so mentioning a
-  teammate that is still working queues behind it instead of running beside it.
-  Queued rich mentions may coalesce only with ordinary mention-created work; an
-  explicit continuation is marked by `continued_from_task_id` and is never a
-  coalescing candidate for an independent mention.
-- Independent work needs an independent lane. `remi task create` starts a new
-  scope that can run in parallel with the teammate's current conversation, and
-  `remi task continue <task-id> --prompt <request>` reaches a specific earlier
-  lane instead of the most recent one. If the prior provider session or
-  execution fingerprint is no longer resumable, the existing lane reset path
-  cold-bootstraps only that scope and records a `session_agent_lane_reset` Issue
-  activity with the recovery reason.
+- Directed messages use `remi message send <conversation> --to <agent> --kind request`.
+  The running turn receives immediate messages; pending messages merge into one
+  pending turn per lane. Provider context, cursor and scope belong to that lane.
+  Use a separate Session for independent work and `remi turn get <turn> --input`
+  to inspect an authorized input range. Retries create attempts inside the same turn.
 - Issue-free one-shot tasks (including Wiki builds) are independent. Private
   Chat turns remain serialized. Existing Agent and Runtime capacity limits,
   project device routing, permissions and workspace affinity still apply.
-- Tasks bound to the same [Runtime workspace](dev/runtime-workspaces.md) remain
+- Attempts bound to the same [Runtime workspace](dev/runtime-workspaces.md) remain
   serialized across Agents and Sessions. Explicit Chat project selections keep
   their device routing even though Chat tasks do not hold an Issue workspace.
-- Ordinary Chat Tasks, including Topic transport, and Chat-owned Session Tasks
+- Ordinary Chat attempts, including Topic transport, and Chat-owned Session attempts
   without an Issue projection share that Chat's checkout. Claims serialize this
   directory across Agents and Sessions while their message queues remain separate.
   An unknown offer with `offered_at` still reserves the directory; rejection
   releases it. An already reserved ordinary Chat offer may be reclaimed and resent
-  ahead of a later higher-priority message. Unreserved queue ordering and steer
-  behavior remain unchanged. Issue-owned and Issue-projected Session work use
+  while canonical input continues to follow message sequence order. Pending input
+  and interruptions stay in their own conversation; the unified model has no
+  prioritize command. Issue-owned and Issue-projected Session work use
   their corresponding execution directories; Runtime workspaces keep their own lease.
 - A child result can immediately queue a Leader turn; other children do not
   delay it. Unclaimed returns coalesce, but a frozen prompt gets a later turn.

@@ -17,6 +17,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Label } from "@multiremi/ui/components/ui/label";
 import { NativeSelect, NativeSelectOption } from "@multiremi/ui/components/ui/native-select";
 import { Textarea } from "@multiremi/ui/components/ui/textarea";
+import { MessageHeader } from "../../common/message-header";
 import { EntryHtml } from "../../common/session-log/entry-html";
 import { SessionLogList } from "../../common/session-log/session-log-list";
 import { TaskTraceDialog } from "../../common/task-transcript/task-trace-dialog";
@@ -145,17 +146,20 @@ function WorkSessionView({ wsId, chatId, session, agentId, agents, disabled }: {
     </div> : <SessionLogList sessionId={session.id} replica={log.replica} className="min-h-28 flex-1"
       transformEntries={entries => entries.filter(entry => {
         const row = entry as SessionLogRow;
-        return !row.metadata?.envelope && (row.kind === "message" || row.kind === "turn" || row.seq === 0);
+        return row.visibility !== "hidden" && !row.deleted_at
+          && (!row.metadata?.envelope || typeof row.message_kind === "string")
+          && (row.kind === "message" || row.kind === "turn" || row.seq === 0);
       })}
       header={log.replica.window?.has_more_before && <Button size="sm" variant="ghost" onClick={() => void log.replica.earlier()}>
         {t($ => $.message_list.expand_older)}
       </Button>}
       renderEntry={({ entry }) => {
         const row = entry as SessionLogRow;
-        const task = tasks.find(task => task.id === row.task_id);
+        const task = tasks.find(task => task.id === row.task_id || task.turn_id === row.task_id || task.turn_id === row.id);
         const hasReplyMessage = typeof row.metadata.final_entry_id === "string" && Boolean(row.metadata.final_entry_id);
         const finalReply = !hasReplyMessage && typeof row.metadata.final_reply_md === "string" ? row.metadata.final_reply_md : undefined;
         return <div className="space-y-1 text-sm">
+          {row.kind === "message" && <MessageHeader message={row} getActorName={(type, id) => type === "agent" ? agents.find(agent => agent.id === id)?.name ?? id : id} />}
           {row.kind === "turn" && task && <Button size="sm" variant="ghost" onClick={() => setTraceTask(task)}>
             {agents.find(agent => agent.id === task.agent_id)?.name ?? task.agent_id} · {statusLabel(task.status)} · {t($ => $.work_sessions.trace)}
           </Button>}
@@ -176,10 +180,10 @@ function WorkSessionView({ wsId, chatId, session, agentId, agents, disabled }: {
         </div>
         <Button size="sm" variant="ghost" onClick={() => setTraceTask(task)}>{t($ => $.work_sessions.trace)}</Button>
         {ACTIVE_STATUSES.has(task.status) && <Button size="sm" variant="ghost" disabled={cancelTask.isPending}
-          onClick={() => cancelTask.mutate(task.id, { onError: error => setTaskError(error.message) })}>{t($ => $.input.stop_tooltip)}</Button>}
+          onClick={() => cancelTask.mutate(task.turn_id ?? task.id, { onError: error => setTaskError(error.message) })}>{t($ => $.input.stop_tooltip)}</Button>}
       </div>)}
     </div>
-    {tasks.filter(task => task.status === "awaiting_human").map(task => <HumanRequestDock key={task.id} taskId={task.id} />)}
+    {tasks.filter(task => task.status === "awaiting_human").map(task => <HumanRequestDock key={task.id} taskId={task.id} sessionId={session.id} turnId={task.turn_id} />)}
     <div className="shrink-0 space-y-2 border-t pt-2">
       {disabled && <p className="text-xs text-muted-foreground">{t($ => $.work_sessions.archived_hint)}</p>}
       <Label htmlFor={`work-prompt-${session.id}`}>{t($ => $.work_sessions.prompt)}</Label>

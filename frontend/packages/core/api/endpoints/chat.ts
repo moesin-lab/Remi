@@ -1,3 +1,7 @@
+import { MessagesEndpoints } from "./messages";
+import { InboxEndpoints } from "./inbox";
+import { turnToTask } from "../turn-task";
+import { TurnDetailSchema } from "../schemas/messages";
 import type {
   CreateSessionRequest,
   CreateSessionTaskRequest,
@@ -6,9 +10,7 @@ import type {
   CreateChatSessionInput,
   ChatPendingTask,
   ChatSession,
-  ChatQueuedTask,
   PendingChatTasksResponse,
-  PrioritizeChatQueuedTaskResponse,
   SendChatMessageResponse,
   UpdateChatSessionInput,
 } from "../../types";
@@ -16,17 +18,12 @@ import { z } from "zod";
 import type { HttpClient } from "../http";
 import { ApiContractError, parseStrictResponse } from "../schema";
 import {
-  ChatSessionSchema, ChatSessionListSchema, ChatSessionUpdateResponseSchema, ChatQueuedTaskSchema,
-  ChatPendingTaskSchema, SendChatMessageResponseSchema,
-  PrioritizeChatQueuedTaskResponseSchema, PendingChatTasksResponseSchema,
-  ChatNoContentSchema, ChatCancelledTaskSchema,
+  ChatSessionSchema, ChatSessionListSchema, ChatSessionUpdateResponseSchema, ChatNoContentSchema,
 } from "../schemas/chat";
-import { IssueSessionSchema, IssueSessionTaskSchema } from "../schemas/comments";
+import { IssueSessionSchema } from "../schemas/comments";
 
 const WorkSessionResponseSchema = z.object({ session: IssueSessionSchema });
 const WorkSessionsResponseSchema = z.object({ sessions: z.array(IssueSessionSchema) });
-const WorkTaskResponseSchema = z.object({ task: IssueSessionTaskSchema });
-const WorkTasksResponseSchema = z.object({ tasks: z.array(IssueSessionTaskSchema) });
 
 export class ChatEndpoints {
   constructor(readonly http: HttpClient) {}
@@ -58,39 +55,53 @@ export class ChatEndpoints {
   }
 
   async listChatWorkSessionTasks(chatId: string, sessionId: string): Promise<SessionTask[]> {
-    const raw = await this.http.fetch<unknown>(`/api/multiremi/chats/${encodeURIComponent(chatId)}/sessions/${encodeURIComponent(sessionId)}/tasks`);
-    const { tasks } = parseStrictResponse<{ tasks: SessionTask[] }>(raw, WorkTasksResponseSchema, {
-      endpoint: "GET /api/multiremi/chats/:id/sessions/:sessionId/tasks",
-    });
-    if (tasks.some(task => task.issue_session_id !== sessionId || task.chat_session_id !== chatId)) {
-      throw new ApiContractError("GET /api/multiremi/chats/:id/sessions/:sessionId/tasks", "Task destination did not match the requested Session");
-    }
+    const messages = new MessagesEndpoints(this.http);
+    const tasks: SessionTask[] = [];
+    let cursor: string | undefined;
+
+    do {
+      const page = await messages.listTurns({ session_id: sessionId, cursor, limit: 100 });
+      if (page.turns.some(turn => turn.session_id !== sessionId
+        || turn.chat_session_id !== undefined && turn.chat_session_id !== chatId)) {
+        throw new ApiContractError("GET /api/turns", "Turn destination did not match the requested Session");
+      }
+      tasks.push(...page.turns.map(turn => ({
+        ...turnToTask(turn),
+        chat_session_id: chatId,
+        issue_id: typeof turn.issue_id === "string" ? turn.issue_id : null,
+        issue_session_id: sessionId,
+      })));
+      cursor = page.next_cursor ?? undefined;
+    } while (cursor);
+
     return tasks;
   }
 
-  async createChatWorkSessionTask(chatId: string, sessionId: string, input: CreateSessionTaskRequest): Promise<SessionTask> {
-    const raw = await this.http.fetch<unknown>(`/api/multiremi/chats/${encodeURIComponent(chatId)}/sessions/${encodeURIComponent(sessionId)}/tasks`, {
-      method: "POST", body: JSON.stringify(input),
+  async createChatWorkSessionTask(_chatId: string, sessionId: string, input: CreateSessionTaskRequest) {
+    // A committed message remains successful even when dispatch is deferred.
+    // The scoped turn query supplies the current attempt after reconciliation.
+    const result = await new MessagesEndpoints(this.http).sendMessage(sessionId, {
+      body_md: input.prompt,
+      message_kind: "request",
+      to: { type: "agent", ref: input.agent_id },
+      wake_requested: "now",
     });
-    const { task } = parseStrictResponse<{ task: SessionTask }>(raw, WorkTaskResponseSchema, {
-      endpoint: "POST /api/multiremi/chats/:id/sessions/:sessionId/tasks",
-    });
-    if (!task.id || task.issue_session_id !== sessionId || task.chat_session_id !== chatId || task.agent_id !== input.agent_id) {
-      throw new ApiContractError("POST /api/multiremi/chats/:id/sessions/:sessionId/tasks", "Server did not retain the requested task destination");
+    if (result.message.session_id !== sessionId || result.message.to_agent_id !== input.agent_id) {
+      throw new ApiContractError("POST /api/sessions/:id/messages", "Server did not retain the requested Session or agent");
     }
-    return task;
+    return result;
   }
 
   // Chat Sessions
   async listChatSessions(params?: { status?: string }): Promise<ChatSession[]> {
     const query = params?.status ? `?status=${params.status}` : "";
     const raw = await this.http.fetch<unknown>(`/api/chat/sessions${query}`);
-    return parseStrictResponse(raw, ChatSessionListSchema, { endpoint: "GET /api/chat/sessions" });
+    return parseStrictResponse<ChatSession[]>(raw, ChatSessionListSchema, { endpoint: "GET /api/chat/sessions" });
   }
 
   async getChatSession(id: string): Promise<ChatSession> {
     const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${id}`);
-    return parseStrictResponse(raw, ChatSessionSchema, { endpoint: "GET /api/chat/sessions/:id" });
+    return parseStrictResponse<ChatSession>(raw, ChatSessionSchema, { endpoint: "GET /api/chat/sessions/:id" });
   }
 
   async createChatSession(data: CreateChatSessionInput): Promise<ChatSession> {
@@ -110,7 +121,7 @@ export class ChatEndpoints {
 
   async deleteChatSession(id: string): Promise<void> {
     const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${id}`, { method: "DELETE" });
-    parseStrictResponse(raw, ChatNoContentSchema, { endpoint: "DELETE /api/chat/sessions/:id" });
+    parseStrictResponse<z.infer<typeof ChatNoContentSchema>>(raw, ChatNoContentSchema, { endpoint: "DELETE /api/chat/sessions/:id" });
   }
 
   async updateChatSession(id: string, data: UpdateChatSessionInput): Promise<ChatSession> {
@@ -126,64 +137,48 @@ export class ChatEndpoints {
     return session;
   }
 
-  async sendChatMessage(
-    sessionId: string,
-    content: string,
-    attachmentIds?: string[],
-    clientId?: string,
-  ): Promise<SendChatMessageResponse> {
-    const body: { content: string; attachment_ids?: string[]; client_id?: string } = { content };
-    if (attachmentIds && attachmentIds.length > 0) {
-      body.attachment_ids = attachmentIds;
-    }
-    if (clientId) body.client_id = clientId;
-    const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${sessionId}/messages`, {
-      method: "POST",
-      body: JSON.stringify(body),
+  async sendChatMessage(sessionId: string, content: string, attachmentIds?: string[], clientId?: string): Promise<SendChatMessageResponse> {
+    const session = await this.getChatSession(sessionId);
+    const result = await new MessagesEndpoints(this.http).sendMessage(sessionId, {
+      body_md: content, message_kind: "request", to: { type: "agent", ref: session.agent_id },
+      attachment_ids: attachmentIds?.length ? attachmentIds : undefined, dedupe_key: clientId,
     });
-    return parseStrictResponse(raw, SendChatMessageResponseSchema, { endpoint: "POST /api/chat/sessions/:id/messages" });
+    // The message is committed. A supplemental read must not turn it into a failed send.
+    // Pending-turn polling reconciles the optimistic identity if this read is unavailable.
+    const detail = result.turn_id ? await new MessagesEndpoints(this.http).getTurn(result.turn_id).catch(() => null) : null;
+    return { message_id: result.message.id, task_id: detail?.turn.current_attempt_id ?? result.turn_id ?? "",
+      turn_id: result.turn_id, created_at: detail?.turn.created_at ?? result.message.created_at,
+      supports_queue: true, queued: detail?.turn.status === "running" || detail?.turn.status === "awaiting_human" };
   }
 
+  private async activeTurns(sessionId?: string) {
+    const messages = new MessagesEndpoints(this.http);
+    const pages = await Promise.all(["pending", "running", "awaiting_human"].map(async status => {
+      const turns = [];
+      let cursor: string | undefined;
+      do { const page = await messages.listTurns({ session_id: sessionId, status, cursor, limit: 100 }); turns.push(...page.turns); cursor = page.next_cursor ?? undefined; } while (cursor);
+      return turns;
+    }));
+    return pages.flat().sort((a, b) => a.created_at.localeCompare(b.created_at));
+  }
   async getPendingChatTask(sessionId: string): Promise<ChatPendingTask> {
-    const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${sessionId}/pending-task`);
-    return parseStrictResponse(raw, ChatPendingTaskSchema, { endpoint: "GET /api/chat/sessions/:id/pending-task" });
+    const turn = (await this.activeTurns(sessionId))[0];
+    return turn ? { task_id: turn.current_attempt_id ?? turn.id, turn_id: turn.id,
+      status: turn.status === "pending" ? "queued" : turn.status, created_at: turn.created_at, supports_queue: true }
+      : { supports_queue: true };
   }
-
   async listPendingChatTasks(): Promise<PendingChatTasksResponse> {
-    const raw = await this.http.fetch<unknown>(`/api/chat/pending-tasks`);
-    return parseStrictResponse(raw, PendingChatTasksResponseSchema, { endpoint: "GET /api/chat/pending-tasks" });
+    return { tasks: (await this.activeTurns()).filter(turn => turn.session_id.startsWith("chat_"))
+      .map(turn => ({ task_id: turn.current_attempt_id ?? turn.id, status: turn.status === "pending" ? "queued" : turn.status, chat_session_id: turn.session_id })) };
   }
 
   async markChatSessionRead(sessionId: string): Promise<void> {
-    const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${sessionId}/read`, { method: "POST" });
-    parseStrictResponse(raw, ChatNoContentSchema, { endpoint: "POST /api/chat/sessions/:id/read" });
+    await new InboxEndpoints(this.http).markInboxRead({ session_id: sessionId });
   }
 
-  async editQueuedChatMessage(sessionId: string, taskId: string, content: string): Promise<ChatQueuedTask> {
-    const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${sessionId}/queue/${taskId}`, {
-      method: "PATCH", body: JSON.stringify({ content }),
-    });
-    return parseStrictResponse(raw, ChatQueuedTaskSchema, { endpoint: "PATCH /api/chat/sessions/:id/queue/:taskId" });
-  }
-
-  async removeQueuedChatMessage(sessionId: string, taskId: string): Promise<void> {
-    const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${sessionId}/queue/${taskId}`, { method: "DELETE" });
-    parseStrictResponse(raw, ChatNoContentSchema, { endpoint: "DELETE /api/chat/sessions/:id/queue/:taskId" });
-  }
-
-  async clearChatQueue(sessionId: string): Promise<void> {
-    const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${sessionId}/queue`, { method: "DELETE" });
-    parseStrictResponse(raw, ChatNoContentSchema, { endpoint: "DELETE /api/chat/sessions/:id/queue" });
-  }
-
-  async prioritizeQueuedChatMessage(sessionId: string, taskId: string): Promise<PrioritizeChatQueuedTaskResponse> {
-    const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${sessionId}/queue/${taskId}/prioritize`, { method: "POST" });
-    return parseStrictResponse(raw, PrioritizeChatQueuedTaskResponseSchema, { endpoint: "POST /api/chat/sessions/:id/queue/:taskId/prioritize" });
-  }
-
-  async cancelTaskById(taskId: string): Promise<void> {
-    const raw = await this.http.fetch<unknown>(`/api/tasks/${taskId}/cancel`, { method: "POST" });
-    const task = parseStrictResponse<{ id: string }>(raw, ChatCancelledTaskSchema, { endpoint: "POST /api/tasks/:id/cancel" });
-    if (task.id !== taskId) throw new ApiContractError("POST /api/tasks/:id/cancel", "Server returned a different task");
+  async cancelTaskById(turnId: string): Promise<void> {
+    const path = `/api/turns/${encodeURIComponent(turnId)}/cancel`;
+    const response = parseStrictResponse<z.infer<typeof TurnDetailSchema>>(await this.http.fetch<unknown>(path, { method: "POST", body: "{}" }), TurnDetailSchema, { endpoint: path });
+    if (response.turn.id !== turnId) throw new ApiContractError(path, "Server returned a different turn");
   }
 }

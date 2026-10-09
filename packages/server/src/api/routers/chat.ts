@@ -149,26 +149,8 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
       ),
     }));
   });
-  app.get("/api/multiremi/chats/:id/sessions/:sessionId/events", (c) => {
-    const session = loadWorkSession(c);
-    if (session instanceof Response) return session;
-    const sinceSeq = Number(c.req.query("since_seq") ?? 0);
-    return c.json({ events: store.listSessionEvents(session.id, { sinceSeq }).map(sessionEventCompatibilityResponse) });
-  });
-  app.post("/api/multiremi/chats/:id/sessions/:sessionId/messages", async (c) => {
-    const session = loadWorkSession(c);
-    if (session instanceof Response) return session;
-    const body = await readJson<{ body?: string; content?: string }>(c);
-    const content = (body.body ?? body.content ?? "").trim();
-    if (!content) return c.json({ error: "message body is required" }, 400);
-    const actor = sessionMutationActor(c);
-    return c.json({ event: sessionEventCompatibilityResponse(store.appendSessionEvent(session.id, {
-      authorType: actor.actorType,
-      authorId: actor.actorId,
-      kind: "message",
-      body: content,
-    })) }, 201);
-  });
+
+
   app.get("/api/multiremi/chats/:id/sessions/:sessionId/participants", (c) => {
     const session = loadWorkSession(c);
     if (session instanceof Response) return session;
@@ -194,36 +176,8 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
     store.removeSessionParticipant(session.id, c.req.param("participantType"), c.req.param("participantId"));
     return c.body(null, 204);
   });
-  app.get("/api/multiremi/chats/:id/sessions/:sessionId/tasks", (c) => {
-    const session = loadWorkSession(c, true);
-    if (session instanceof Response) return session;
-    const coordinating = canTaskCoordinateSession(c, store, session);
-    return c.json({ tasks: store.listTasks().filter((task) => task.issueSessionId === session.id)
-      .map((task) => coordinating ? sessionTaskMetadataResponse(task) : taskPublicResponse(task)) });
-  });
-  app.post("/api/multiremi/chats/:id/sessions/:sessionId/tasks", async (c) => {
-    const session = loadWorkSession(c, true);
-    if (session instanceof Response) return session;
-    const dispatchDenied = denySideSessionAgentDispatch(c, store);
-    if (dispatchDenied) return dispatchDenied;
-    const body = await readJson<CreateSessionTaskInput>(c);
-    const agentId = body.agentId ?? body.agent_id;
-    const agent = agentId ? store.getAgent(agentId) : null;
-    if (!agent) return c.json({ error: "agent not found" }, 404);
-    if (!canCurrentUserAccessAgent(c, store, agent)) return c.json({ error: "you do not have access to this agent" }, 403);
-    const actor = sessionMutationActor(c);
-    const coordinating = canTaskCoordinateSession(c, store, session);
-    return sessionMutation(c, () => {
-      const task = store.createSessionTask(session.id, {
-        ...stripServerOwnedSessionTaskFields(body),
-        agentId,
-        createdByType: actor.actorType,
-        createdById: actor.actorId,
-        parentTaskId: currentTaskParentId(c),
-      });
-      return c.json({ task: coordinating ? sessionTaskMetadataResponse(task) : taskPublicResponse(task) }, 201);
-    });
-  });
+
+
   app.get("/api/multiremi/chats/:id/sessions/:sessionId/results", (c) => {
     const session = loadWorkSession(c);
     if (session instanceof Response) return session;
@@ -254,25 +208,6 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
     const invalid = invalidChatUpdate(c, body);
     if (invalid) return invalid;
     return chatMutation(c, () => c.json({ session: store.updateChatSession(loaded.session.id, body) }));
-  });
-  app.get("/api/multiremi/chats/:id/messages", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
-    if (loaded instanceof Response) return loaded;
-    return c.json({ messages: store.listChatMessagesFromLog(loaded.session.id) });
-  });
-  app.post("/api/multiremi/chats/:id/messages", async (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("id"));
-    if (loaded instanceof Response) return loaded;
-    const body = await readJson<SendChatMessageInput>(c);
-    const message = normalizeSendChatMessageInput(c, body);
-    if (message instanceof Response) return message;
-    return chatMutation(c, () => {
-      const result = store.sendChatMessage(loaded.session.id, {
-        ...message,
-        parentTaskId: currentTaskAccessToken(c)?.taskId ?? null,
-      });
-      return c.json({ ...result, supports_queue: true, task: taskPublicResponse(result.task) }, 201);
-    });
   });
   app.get("/api/chat/sessions", (c) => {
     const workspaceId = requestedChatWorkspaceId(c, store);
@@ -312,144 +247,6 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
     const deleted = store.deleteChatSession(loaded.session.id);
     if (!deleted) return c.json({ error: "chat session not found" }, 404);
     return c.body(null, 204);
-  });
-  app.get("/api/chat/sessions/:sessionId/messages", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    const messages = store.listChatMessagesFromLog(loaded.session.id);
-    const attachments = store.listAttachmentsForChatMessages(messages.map((message) => message.id));
-    return c.json(messages.map((message) => chatMessageCompatibilityResponse(message, attachments.get(message.id) ?? [])));
-  });
-  app.get("/api/chat/sessions/:sessionId/messages/page", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    const rawLimit = c.req.query("limit");
-    let limit = 50;
-    if (rawLimit != null && rawLimit !== "") {
-      const parsedLimit = Number(rawLimit);
-      if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
-        return c.json({ error: "invalid limit" }, 400);
-      }
-      limit = parsedLimit;
-    }
-    const beforeCreatedAt = c.req.query("before_created_at");
-    const beforeId = c.req.query("before_id");
-    if ((!beforeCreatedAt && beforeId) || (beforeCreatedAt && !beforeId)) {
-      return c.json({ error: "invalid cursor" }, 400);
-    }
-    if (beforeCreatedAt && Number.isNaN(Date.parse(beforeCreatedAt))) {
-      return c.json({ error: "invalid cursor" }, 400);
-    }
-    return chatMutation(c, () => {
-      const page = store.listChatMessagesPage(loaded.session.id, {
-        limit,
-        before: beforeCreatedAt && beforeId ? { createdAt: beforeCreatedAt, id: beforeId } : undefined,
-      });
-      const attachments = store.listAttachmentsForChatMessages(page.messages.map((message) => message.id));
-      const messages = page.messages.map((message) => chatMessageCompatibilityResponse(message, attachments.get(message.id) ?? []));
-      return c.json({
-        messages,
-        limit,
-        has_more: page.hasMore,
-        next_cursor: page.hasMore && messages[0]
-          ? { created_at: messages[0].created_at, id: messages[0].id }
-          : null,
-      });
-    });
-  });
-  app.post("/api/chat/sessions/:sessionId/messages", async (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    const body = await readJson<SendChatMessageInput>(c);
-    const message = normalizeSendChatMessageInput(c, body);
-    if (message instanceof Response) return message;
-    return chatMutation(c, () => c.json(sendChatMessageCompatibilityResponse(store.sendChatMessage(loaded.session.id, {
-      ...message,
-      parentTaskId: currentTaskAccessToken(c)?.taskId ?? null,
-    })), 201));
-  });
-  app.get("/api/chat/sessions/:sessionId/pending-task", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    const task = store.getPendingChatTask(loaded.session.id);
-    return c.json({
-      ...(task ? { task_id: task.id, status: task.status, created_at: task.createdAt } : {}),
-      ...(task?.waitReason ? { wait_reason: task.waitReason } : {}),
-      ...(task && !task.issueId && loaded.session.projectId && task.progressSummary
-        ? { progress_summary: task.progressSummary } : {}),
-      supports_queue: true,
-      queued_tasks: store.listQueuedChatTasks(loaded.session.id),
-    });
-  });
-  app.patch("/api/chat/sessions/:sessionId/queue/:taskId", async (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    const body = await readJson<{ content?: unknown }>(c);
-    if (typeof body.content !== "string" || !body.content.trim()) return c.json({ error: "content is required" }, 400);
-    return chatMutation(c, () => c.json(store.updateQueuedChatTask(loaded.session.id, c.req.param("taskId"), body.content as string)));
-  });
-  app.delete("/api/chat/sessions/:sessionId/queue/:taskId", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    return chatMutation(c, () => {
-      store.removeQueuedChatTasks(loaded.session.id, c.req.param("taskId"));
-      return c.body(null, 204);
-    });
-  });
-  app.delete("/api/chat/sessions/:sessionId/queue", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    return chatMutation(c, () => {
-      store.removeQueuedChatTasks(loaded.session.id);
-      return c.body(null, 204);
-    });
-  });
-  app.post("/api/chat/sessions/:sessionId/queue/:taskId/prioritize", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    return chatMutation(c, () => c.json(store.prioritizeQueuedChatTask(loaded.session.id, c.req.param("taskId"))));
-  });
-  app.post("/api/chat/sessions/:sessionId/read", (c) => {
-    const loaded = loadChatSessionForCurrentUser(c, store, c.req.param("sessionId"));
-    if (loaded instanceof Response) return loaded;
-    store.markChatSessionRead(loaded.session.id);
-    return c.body(null, 204);
-  });
-  app.get("/api/chat/pending-tasks", (c) => {
-    const workspaceId = requestedChatWorkspaceId(c, store);
-    if (workspaceId instanceof Response) return workspaceId;
-    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
-    if (denied) return denied;
-    const taskToken = currentTaskAccessToken(c);
-    const task = taskToken?.taskId ? store.getTask(taskToken.taskId) : null;
-    if (taskToken && !task?.chatSessionId) return c.json({ tasks: [] });
-    const contentDenied = denyTaskChatContentAccess(c, store, task?.chatSessionId ?? "");
-    if (contentDenied) return contentDenied;
-    // MUL-473: the candidates arrive ranked per Session by SQL, with the Feishu
-    // transport Chats excluded there, so the route no longer re-reads each Chat
-    // and each winner. The remaining rule — the Session's Agent must be reachable
-    // by this caller — costs one query for the Agents in play instead of one per
-    // task, and the lite projection avoids pulling Skill bodies for a visibility
-    // decision that never reads one.
-    const candidates = store.listPendingChatTaskCandidates(workspaceId, {
-      creatorId: currentRequestUserId(c),
-      excludeTransportSessions: true,
-    }).filter((candidate) => !task || candidate.chatSessionId === task.chatSessionId);
-    if (!candidates.length) return c.json({ tasks: [] });
-    const agentsById = new Map(store.listAgentsLiteByIds(candidates.map((candidate) => candidate.sessionAgentId))
-      .map((agent) => [agent.id, agent]));
-    const canAccessAgent = canCurrentUserAccessAgentChecker(c, store);
-    const tasks = candidates
-      .filter((candidate) => {
-        const agent = agentsById.get(candidate.sessionAgentId);
-        return Boolean(agent && agent.workspaceId === candidate.sessionWorkspaceId && canAccessAgent(agent));
-      })
-      .map((candidate) => ({
-        task_id: candidate.taskId,
-        status: candidate.status,
-        chat_session_id: candidate.chatSessionId,
-      }));
-    return c.json({ tasks });
   });
 }
 

@@ -1,4 +1,15 @@
 import { migrateLegacyExecutionProfiles } from "@multiremi/store/execution-profile-migration.js";
+import { ensureTurnListIndexes } from './turn-list-indexes.js';
+import { openSqliteDatabase } from './db/sqlite.js';
+import { widenAttemptCounters,separateLaneProviderProgress } from './inbox/attempt-counters.js';
+import { migrateAttemptInput } from './inbox/attempt-input.js';
+import { createMemberInboxReadProjection } from './inbox/member-records.js';
+import { runUnifiedModelMigration, unifiedModelPreflight, UnifiedModelPreflightError, collectUnifiedBeforeReport, writeUnifiedModelReport } from "./unified-model-migration.js";
+import { UNIFIED_LANE_SWEEP_INDEX, UNIFIED_MODEL_MIGRATION } from "./unified-model-schema.js";
+import { prepareMigrationReportDirectory, resolveMigrationReportDirectory } from "./migration-report-directory.js";
+import { foldDecisionRecords } from './inbox/decision-migration.js';
+import { createDecisionReadProjections } from "./inbox/decision-records.js";
+import { foldAgentReadState } from "./inbox/lane-migration.js";
 import { CHAT_ISSUE_DECOUPLED_FINGERPRINT, chatTaskRetryParentSql } from "@multiremi/store/helpers.js";
 import { backfillRuntimeExecutionGroups } from "@multiremi/store/execution-groups.js";
 import { ensureUsageAccountingSchema } from "@multiremi/store/usage-accounting.js";
@@ -62,13 +73,49 @@ const CONVERSATION_LOG_MIGRATION = "20260927_conversation_log";
 const DEFAULT_OWNER_OPEN_ID = "ou_e6b7ffc662b392317275b817295c0b44";
 
 export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseDialect } = {}): void {
+  const reportDir = resolveMigrationReportDirectory();
+  // Refuse an unwritable report directory before creating the SQLite lock file.
+  prepareMigrationReportDirectory(reportDir);
   // MUL-405: the lock spans the entire run, so a second process either waits for
   // a finished migration or proceeds exactly as before (SQLite, where the lock
   // is a no-op). It releases on throw as well as on return, so a failed
   // migration cannot strand it.
-  advisoryLock(db, MIGRATION_ADVISORY_LOCK_KEY, () =>
-    runMigrationsForDialect(db, resolveSqlDialect(db, options.dialect)));
+  const migrate = () => advisoryLock(db, MIGRATION_ADVISORY_LOCK_KEY, () => {
+    // The directory may have become unwritable while waiting for the lock.
+    prepareMigrationReportDirectory(reportDir);
+    const tables=existingTableNames(db);
+    if(tables.has("multiremi_users"))backfillOwnerExternalId(db);
+    if (tables.has("multiremi_feishu_bot_configs")) {
+      addColumnIfMissing(db, "multiremi_feishu_bot_configs", "sender_access_policy TEXT NOT NULL DEFAULT 'agent'");
+    }
+    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);return;}
+    // Inspect the existing snapshot before bootstrap migrations can touch it.
+    const checks=unifiedModelPreflight(db);
+    if(checks.some(c=>!c.ok)){
+      writeUnifiedModelReport(reportDir,'before',collectUnifiedBeforeReport(db));
+      throw new UnifiedModelPreflightError(checks);
+    }
+    runMigrationsForDialect(db,resolveSqlDialect(db,options.dialect));
+    runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});
+    separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureUsageAccountingSchema(db);
+  });
+  // SQLite schema rebuilds toggle foreign_keys outside their transactions.
+  // Hold a separate SQLite writer lock across that entire sequence so another
+  // startup cannot inspect a half-migrated schema. SQLite releases it on exit.
+  const filename = (db as SqlDatabase & { filename?: string }).filename;
+  if (resolveSqlDialect(db, options.dialect) !== 'sqlite' || !filename || filename === ':memory:') return migrate();
+  const lock = openSqliteDatabase(`${filename}.migration-lock`, { create: true });
+  try {
+    lock.exec('PRAGMA busy_timeout=30000; BEGIN IMMEDIATE');
+    migrate();
+  } finally {
+    if (lock.inTransaction) lock.exec('ROLLBACK');
+    lock.close();
+  }
 }
+
+/** Historical schema bootstrap used by offline migration fixtures, never a runtime read path. */
+export function bootstrapPreUnifiedSchema(db:SqlDatabase):void { runMigrationsForDialect(db,resolveSqlDialect(db,db.dialect)); }
 
 /**
  * The migration body. The dialect is resolved once, up front, from declared
@@ -3551,7 +3598,6 @@ function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): 
     addColumnIfMissing(db, "multiremi_conversation_heads", "agent_read_state TEXT");
   });
   ensureIssueNumberUniqueness(db, legacyGithubTables);
-  ensureUsageAccountingSchema(db);
 }
 
 /**
@@ -3792,7 +3838,7 @@ function normalizeSquadLeaderRoles(db: SqlDatabase): void {
   );
 }
 
-function migrateChatOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect): void {
+function migrateChatOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect, legacyBackfill = true): void {
   const applied = db.query("SELECT 1 AS applied FROM multiremi_schema_migrations WHERE id = ?").get(
     CHAT_OWNED_SESSIONS_MIGRATION,
   );
@@ -3831,7 +3877,7 @@ function migrateChatOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
         CREATE INDEX IF NOT EXISTS idx_multiremi_session_results_chat
           ON multiremi_session_results(chat_id, created_at);
       `);
-      backfillChatOwnedSessions(db);
+      backfillChatOwnedSessions(db, legacyBackfill);
     });
     return;
   }
@@ -3934,7 +3980,7 @@ function migrateChatOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
         CREATE INDEX idx_multiremi_session_results_source
           ON multiremi_session_results(source_session_id, created_at);
       `);
-      backfillChatOwnedSessions(db);
+      backfillChatOwnedSessions(db, legacyBackfill);
       assertSessionForeignKeys(db);
     })();
   } finally {
@@ -3989,6 +4035,7 @@ function migrateDualOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
       `SELECT s.id FROM multiremi_issue_sessions s
        LEFT JOIN multiremi_issue_sessions parent ON parent.id = s.parent_session_id
        WHERE s.parent_session_id IS NOT NULL AND (parent.id IS NULL
+         OR s.workspace_id <> parent.workspace_id
          OR COALESCE(s.chat_id, '') <> COALESCE(parent.chat_id, '')
          OR (s.chat_id IS NULL AND s.issue_id <> parent.issue_id))
        ORDER BY s.id LIMIT 1`,
@@ -4002,7 +4049,7 @@ function migrateDualOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
     if (duplicate) throw new Error(`Dual-owned Session migration: duplicate Main for Session ${duplicate.id}`);
 
     if (dialect === "postgres") {
-      db.exec("ALTER TABLE multiremi_tasks DROP CONSTRAINT IF EXISTS multiremi_tasks_chat_session_id_fkey");
+      if (existingTableNames(db).has("multiremi_tasks")) db.exec("ALTER TABLE multiremi_tasks DROP CONSTRAINT IF EXISTS multiremi_tasks_chat_session_id_fkey");
       db.exec(`ALTER TABLE multiremi_issue_sessions
         DROP CONSTRAINT IF EXISTS multiremi_issue_sessions_owner_check;
         ALTER TABLE multiremi_issue_sessions ADD CONSTRAINT multiremi_issue_sessions_owner_check
@@ -4011,9 +4058,9 @@ function migrateDualOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
       // chat_session_id on retained audits is a privacy tombstone. Clearing it
       // on owner deletion would expose private transcripts as Issue-only work.
       const taskSchema = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'multiremi_tasks'")
-        .get() as { sql: string };
-      const taskReplacement = taskSchema.sql.replace(/,\s*FOREIGN KEY\s*\(chat_session_id\)\s*REFERENCES\s*["`]?multiremi_chat_sessions["`]?\(id\)\s*ON DELETE SET NULL/iu, "");
-      if (taskReplacement !== taskSchema.sql) {
+        .get() as { sql: string } | null;
+      const taskReplacement = taskSchema?.sql.replace(/,\s*FOREIGN KEY\s*\(chat_session_id\)\s*REFERENCES\s*["`]?multiremi_chat_sessions["`]?\(id\)\s*ON DELETE SET NULL/iu, "");
+      if (taskSchema && taskReplacement && taskReplacement !== taskSchema.sql) {
         const taskIndexes = db.query("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'multiremi_tasks' AND sql IS NOT NULL")
           .all() as Array<{ sql: string }>;
         db.exec(taskReplacement.replace(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`]?multiremi_tasks["`]?/i,
@@ -4060,9 +4107,10 @@ function migrateDualOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
     // Existing instances have already run the conversation backfill. Supply
     // heads only for missing Issue Main logs without replaying old events.
     if (existingTableNames(db).has("multiremi_conversation_log")) {
+      const unifiedLog = (db.query('PRAGMA table_info(multiremi_conversation_log)').all() as Array<{name:string}>).some(column => column.name === 'sender_type');
       db.run(`INSERT INTO multiremi_conversation_log (
-          session_id, seq, id, kind, visibility, author_type, body_md, metadata, created_at, updated_at
-        ) SELECT s.id, 0, 'head_' || s.id, 'head', 'shown', 'system',
+          session_id, seq, id, kind, visibility, ${unifiedLog ? 'sender_type' : 'author_type'}, body_md, metadata, created_at, updated_at
+        ) SELECT s.id, 0, 'head_' || s.id, 'head', 'shown', '${unifiedLog ? 'platform' : 'system'}',
           CASE WHEN LENGTH(TRIM(COALESCE(issue.description, ''))) > 0
             THEN issue.title || '\n\n' || TRIM(issue.description) ELSE issue.title END,
           '{}', s.created_at, s.updated_at FROM multiremi_issue_sessions s
@@ -4075,6 +4123,21 @@ function migrateDualOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
         WHERE s.chat_id IS NULL AND s.is_default = 1 AND NOT EXISTS (
           SELECT 1 FROM multiremi_conversation_heads head WHERE head.session_id = s.id)
         ON CONFLICT DO NOTHING`);
+      const headHasWorkspace = (db.query("PRAGMA table_info(multiremi_conversation_heads)").all() as Array<{ name: string }>)
+        .some(column => column.name === "workspace_id");
+      if (headHasWorkspace) {
+        db.run(`UPDATE multiremi_conversation_heads SET workspace_id = (
+          SELECT session.workspace_id FROM multiremi_issue_sessions session
+          WHERE session.id = multiremi_conversation_heads.session_id)
+          WHERE session_id IN (SELECT id FROM multiremi_issue_sessions WHERE chat_id IS NULL)`);
+      }
+      db.run(`UPDATE multiremi_comment_reactions SET workspace_id = (
+        SELECT session.workspace_id FROM multiremi_conversation_log message
+        JOIN multiremi_issue_sessions session ON session.id = message.session_id
+        WHERE message.id = multiremi_comment_reactions.comment_id)
+        WHERE comment_id IN (SELECT message.id FROM multiremi_conversation_log message
+          JOIN multiremi_issue_sessions session ON session.id = message.session_id
+          WHERE session.chat_id IS NULL)`);
     }
     if (dialect === "sqlite") assertSessionForeignKeys(db);
   };
@@ -4091,7 +4154,7 @@ function migrateDualOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
   }
 }
 
-function backfillChatOwnedSessions(db: SqlDatabase): void {
+function backfillChatOwnedSessions(db: SqlDatabase, legacyBackfill = true): void {
   const now = new Date().toISOString();
   // Preserve the stored owner. An Issue Session never becomes Chat-owned merely
   // because a Chat or a transport binding happens to reference that Issue.
@@ -4118,6 +4181,7 @@ function backfillChatOwnedSessions(db: SqlDatabase): void {
      )
      ON CONFLICT DO NOTHING`,
   );
+  if (!legacyBackfill) return;
   db.run(
     `UPDATE multiremi_tasks
      SET chat_session_id = (

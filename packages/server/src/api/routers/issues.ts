@@ -2,6 +2,7 @@ import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 import { ISSUE_ACTIVITY_TYPES } from "@multiremi/contracts";
 import { readSessionLogRange } from "../session-log-range.js";
 import type { Context, Hono } from "hono";
+import { loadConversation, messageResponse, conversationEntryVisibility } from "../helpers/conversations.js";
 import { assertRuntimeWorkspaceAccess } from "../helpers/runtime-workspaces.js";
 import {
   assigneeFrequencyQuery,
@@ -98,7 +99,6 @@ import {
 } from "../wire/index.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import { ParentDoneGrantOwnerError } from "@multiremi/store/repos/issues-repo.js";
-import { DelegationRoundTripLimitError } from "@multiremi/store/repos/tasks-repo.js";
 import { hasAnyField, resolveOptionalStringField } from "@multiremi/store/helpers.js";
 import type {
   AddSessionParticipantInput,
@@ -1148,39 +1148,6 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!response) return c.json({ error: "issue not found" }, 404);
     return c.json(response);
   });
-  app.get("/api/issues/:id/active-task", (c) => {
-    const issue = issueFromParam(store, c, "id", "compat");
-    if (!issue) return c.json({ error: "issue not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    const memo = createTaskAuthMemo();
-    const tasks = store.listActiveTasksForIssue(issue.id, {
-      userId: currentRequestUserId(c), taskToken: currentTaskAccessToken(c) ?? undefined,
-    }).filter((task) => task.workspaceId === issue.workspaceId && canCurrentUserAccessChatTask(c, store, task, memo))
-      .map((task) => taskCompatibilityResponse(
-        task,
-        null,
-        task.status === "queued" || task.status === "dispatched"
-          ? store.getTaskQueueBlocker(task.id)
-          : null,
-      ));
-    return c.json({ tasks });
-  });
-  app.get("/api/issues/:id/task-runs", (c) => {
-    const issue = issueFromParam(store, c, "id", "compat");
-    if (!issue) return c.json({ error: "issue not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    return c.json(store.listTasksForIssue(issue.id)
-      .filter((task) => canCurrentUserAccessChatTask(c, store, task))
-      .map((task) => taskCompatibilityResponse(
-        task,
-        null,
-        task.status === "queued" || task.status === "dispatched"
-          ? store.getTaskQueueBlocker(task.id)
-          : null,
-      )));
-  });
   app.get("/api/issues/:id/usage", (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
     if (!issue) return c.json({ error: "issue not found" }, 404);
@@ -1189,8 +1156,6 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     return c.json(issueUsageResponse(store, issue));
   });
   app.post("/api/issues/:id/rerun", async (c) => {
-    const dispatchDenied = denySideSessionAgentDispatch(c, store);
-    if (dispatchDenied) return dispatchDenied;
     const issue = issueFromParam(store, c, "id", "compat");
     if (!issue) return c.json({ error: "issue not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
@@ -1220,6 +1185,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
         ? c.json({ error: result.error, code: result.code, unmet: result.unmet ?? [] }, result.status)
         : c.json({ error: result.error }, result.status);
     }
+    if(!result.task)return c.json(result,200);
     return c.json(taskCompatibilityResponse(result.task), 202);
   });
   app.post("/api/issues/:id/tasks/:taskId/cancel", async (c) => {
@@ -1310,69 +1276,6 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       })),
       total: children.length,
     });
-  });
-  app.get("/api/issues/:id/decisions", (c) => {
-    const issue = issueFromParam(store, c, "id", "compat");
-    if (!issue) return c.json({ error: "issue not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    return c.json(store.listIssueDecisions(issue.id));
-  });
-  app.post("/api/issues/:id/decisions", async (c) => {
-    const source = issueFromParam(store, c, "id", "compat");
-    if (!source) return c.json({ error: "issue not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, source.workspaceId);
-    if (denied) return denied;
-    const actor = decisionActor(c, store, source.workspaceId);
-    if (!actor) return c.json({ error: "member or issue task credential required" }, 403);
-    const body = await readJsonStrict<CreateIssueDecisionInput>(c);
-    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
-    try {
-      const input: CreateIssueDecisionInput = {
-        kind: body.kind, title: body.title, body: body.body,
-        options: body.options,
-      };
-      return c.json({ decision: store.createIssueDecision(source.id, input, actor) }, 201);
-    } catch (error) { return decisionError(c, error); }
-  });
-  app.post("/api/issues/:id/decisions/:decisionId/answer", async (c) => {
-    const issue = issueFromParam(store, c, "id", "compat");
-    if (!issue) return c.json({ error: "issue not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    const actor = decisionActor(c, store, issue.workspaceId);
-    if (!actor) return c.json({ error: "member or parent owner task credential required" }, 403);
-    const body = await readJsonStrict<Record<string, unknown>>(c);
-    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
-    try {
-      return c.json({ decision: store.answerIssueDecision(issue.id, c.req.param("decisionId"), {
-        answer: String(body.answer ?? body.text ?? ""),
-        reason: String(body.reason ?? ""),
-        overturn: String(body.overturn ?? body.how_to_overturn ?? ""),
-      }, actor) });
-    } catch (error) { return decisionError(c, error); }
-  });
-  app.post("/api/issues/:id/decisions/:decisionId/escalate", (c) => {
-    const issue = issueFromParam(store, c, "id", "compat");
-    if (!issue) return c.json({ error: "issue not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    const actor = decisionActor(c, store, issue.workspaceId);
-    if (!actor) return c.json({ error: "member or parent owner task credential required" }, 403);
-    try {
-      return c.json({ decision: store.escalateIssueDecision(issue.id, c.req.param("decisionId"), actor) });
-    } catch (error) { return decisionError(c, error); }
-  });
-  app.post("/api/issues/:id/decisions/:decisionId/withdraw", (c) => {
-    const issue = issueFromParam(store, c, "id", "compat");
-    if (!issue) return c.json({ error: "issue not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    const actor = decisionActor(c, store, issue.workspaceId);
-    if (!actor) return c.json({ error: "member or requesting task credential required" }, 403);
-    try {
-      return c.json({ decision: store.withdrawIssueDecision(issue.id, c.req.param("decisionId"), actor) });
-    } catch (error) { return decisionError(c, error); }
   });
   app.get("/api/multiremi/issues/:id/dependencies", (c) => {
     const issue = issueFromParam(store, c);
@@ -1700,47 +1603,19 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (workScope) {
       const workSession = workScope.session;
       const denied = denySessionAccess(c, store, workSession, workScope);
-      if (denied && c.req.path.endsWith("/log/entry") && c.req.query("from") != null && c.req.query("to") != null
+      if (denied && c.req.path.endsWith("/messages") && c.req.query("from") != null && c.req.query("to") != null
         && c.req.query("seq") == null && c.req.query("id") == null
         && canTaskReadInheritedSessionRange(c, store, workSession, Number(c.req.query("from")), Number(c.req.query("to")))) {
         return { sessionId, inheritedParentRange: true };
       }
       return denied ?? { sessionId };
     }
-    const scope = store.getConversationLogAccessScope(sessionId);
-    if (!scope) {
-      const chat = loadChatSessionForCurrentUser(c, store, sessionId);
-      return chat instanceof Response ? chat : { sessionId: chat.session.id };
-    }
-    const denied = denyCurrentUserWorkspaceAccess(c, store, scope.workspaceId);
-    if (denied) return denied;
-    if (scope.chatId) {
-      const chat = scope.chat;
-      if (!chat) return c.json({ error: "chat session not found" }, 404);
-      if (chat.workspaceId !== scope.workspaceId) {
-        const chatDenied = denyCurrentUserWorkspaceAccess(c, store, chat.workspaceId);
-        if (chatDenied) return chatDenied;
-      }
-      const token = currentTaskAccessToken(c);
-      const contentDenied = denyTaskChatContentAccess(c, store, scope.chatId);
-      if (contentDenied) return contentDenied;
-      if (token?.taskId && scope.chatId === sessionId) {
-        const task = store.getTask(token.taskId);
-        // Feishu Chat creators differ from runtime owners; authorize the bound Task.
-        if (task?.chatSessionId === sessionId
-          && task.workspaceId === chat.workspaceId
-          && token.workspaceId === chat.workspaceId) return { sessionId };
-      }
-      if (chat.creatorId !== currentRequestUserId(c)) {
-        return c.json({ error: "not your chat session" }, 403);
-      }
-      if (!chat.agent || chat.agent.workspaceId !== chat.workspaceId
-        || !canCurrentUserAccessAgent(c, store, chat.agent)) {
-        return c.json({ error: "you do not have access to this agent" }, 403);
-      }
-    }
-    return { sessionId };
+    const conversation = loadConversation(c, store, sessionId);
+    return conversation instanceof Response ? conversation : { sessionId: conversation.id };
   };
+  const denyLogRange = (c: Context) => c.req.query("from") != null || c.req.query("to") != null
+    ? c.json({ error: "log is display-only; use remi message list <conversation> --from <seq> --to <seq>" }, 400)
+    : null;
   const recordLogRead = (message: string, data: Record<string, unknown>): void => {
     // Optional read telemetry cannot make an authorized read fail.
     try { log.info(message, data); } catch {}
@@ -1749,77 +1624,70 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const access = logSessionAccess(c);
     if (access instanceof Response) return access;
     const { sessionId } = access;
+    const deniedRange = denyLogRange(c);
+    if (deniedRange) return deniedRange;
     const id = c.req.query("id");
     if (!id) return c.json({ error: "id is required" }, 400);
     const location = store.locateConversationLogEntry(sessionId, id);
-    return location ? c.json(location) : c.json({ error: "entry not found" }, 404);
+    const entry = location ? store.getConversationLogEntry(sessionId, location.seq) : null;
+    return entry && conversationEntryVisibility(c, store)(entry) ? c.json(location) : c.json({ error: "entry not found" }, 404);
   });
-  app.get("/api/sessions/:sessionId/log/entry", (c) => {
+  app.get("/api/sessions/:sessionId/log/entry", c => {
     const access = logSessionAccess(c);
     if (access instanceof Response) return access;
     const { sessionId } = access;
-    if (c.req.query("from") != null || c.req.query("to") != null) {
-      const rawFrom = c.req.query("from");
-      const rawTo = c.req.query("to");
-      const from = Number(rawFrom), to = Number(rawTo);
-      if (!rawFrom || !rawTo || !/^(0|[1-9]\d*)$/.test(rawFrom) || !/^(0|[1-9]\d*)$/.test(rawTo)
-        || !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || to < from
-        || c.req.query("seq") != null || c.req.query("id") != null) return c.json({ error: "invalid log range" }, 400);
-      const token = currentTaskAccessToken(c);
-      try {
-        const page = readSessionLogRange(store, sessionId, from, to, c.req.query("cursor"), token?.agentId);
-        let progress;
-        const readingTask = token?.taskId ? store.getTask(token.taskId) : null;
-        if (token?.agentId && !access.inheritedParentRange && (readingTask?.issueSessionId === sessionId
-          || readingTask?.chatSessionId === sessionId)) {
-          try { progress = store.recordSessionAgentRangeRead(sessionId, token.agentId, page.read_start, page.read_end); }
-          catch { recordLogRead("Session unread progress unavailable", { event: "session_log_read_progress_failed", task_id: token.taskId, session_id: sessionId }); }
-        }
-        if (token?.taskId) recordLogRead("Session unread range read", { event: "session_log_range_read",
-          task_id: token.taskId, agent_id: token.agentId, session_id: sessionId, from_seq: from, to_seq: to,
-          complete: page.next_cursor === null, entries: page.entries.length,
-          returned_from_seq: page.entries[0]?.seq ?? null, returned_to_seq: page.entries.at(-1)?.seq ?? null,
-          read_start: page.read_start, read_end: page.read_end, next_cursor: page.next_cursor,
-          read_high_water: progress?.seq ?? null, read_offset: progress?.offset ?? null });
-        return c.json(access.inheritedParentRange
-          ? { ...page, entries: page.entries.map((entry) => ({ ...entry, metadata: {} })) }
-          : page);
-      } catch (error) {
-        if (error instanceof SyntaxError || error instanceof Error && error.message.startsWith("Invalid range cursor")) {
-          return c.json({ error: "invalid range cursor" }, 400);
-        }
-        throw error;
-      }
-    }
-    const rawSeq = c.req.query("seq");
-    const id = c.req.query("id");
+    const deniedRange = denyLogRange(c);
+    if (deniedRange) return deniedRange;
+    const rawSeq = c.req.query("seq"), id = c.req.query("id");
     if ((rawSeq == null) === (id == null)) return c.json({ error: "exactly one of seq or id is required" }, 400);
-    const seq = rawSeq == null ? store.locateConversationLogEntry(sessionId, id!)?.seq
-      : /^(0|[1-9]\d*)$/.test(rawSeq) ? Number(rawSeq) : NaN;
+    const seq = rawSeq == null ? store.locateConversationLogEntry(sessionId, id!)?.seq : /^(0|[1-9]\d*)$/.test(rawSeq) ? Number(rawSeq) : NaN;
     if (rawSeq != null && (!Number.isSafeInteger(seq) || seq! < 0)) return c.json({ error: "invalid seq" }, 400);
-    if (seq == null) return c.json({ error: "entry not found" }, 404);
-    const entry = store.getConversationLogEntry(sessionId, seq);
-    if (!entry || entry.visibility !== "shown" || entry.deleted_at !== null) return c.json({ error: "entry not found" }, 404);
+    const entry = seq == null ? null : store.getConversationLogEntry(sessionId, seq);
+    if (!entry || entry.visibility !== "shown" || entry.deleted_at || !conversationEntryVisibility(c, store)(entry)) return c.json({ error: "entry not found" }, 404);
+    // The canonical log row already includes the recipient header.
+    const recipient = (entry as typeof entry & { to_agent_id: string | null }).to_agent_id;
+    const delivered = recipient ? store.getSessionAgentMaxCursorSeq(sessionId, recipient) >= entry.seq || store.hasInboxReceiptCovering(sessionId, recipient, entry.seq) : null;
+    return c.json({ ...messageResponse(entry), delivered });
+  });
+  app.get("/api/sessions/:sessionId/messages", (c) => {
+    const access = logSessionAccess(c);
+    if (access instanceof Response) return access;
+    const { sessionId } = access;
+    const rawFrom = c.req.query("from");
+    const rawTo = c.req.query("to");
+    const from = Number(rawFrom), to = Number(rawTo);
+    if (!rawFrom || !rawTo || !/^(0|[1-9]\d*)$/.test(rawFrom) || !/^(0|[1-9]\d*)$/.test(rawTo)
+      || !Number.isSafeInteger(from) || !Number.isSafeInteger(to) || to < from
+      || ["seq", "id", "after_seq", "limit", "thread", "message_kind", "unread_by", "query"].some(key => c.req.query(key) != null)) return c.json({ error: "invalid message range" }, 400);
     const token = currentTaskAccessToken(c);
-    if (token?.taskId) recordLogRead("Session entry expanded", { event: "session_log_entry_expanded",
-      task_id: token.taskId, agent_id: token.agentId, session_id: sessionId, seq: entry.seq,
-      folded_chars: Math.max(0, entry.body_md.length - 8_000) });
-    const envelope = entry.metadata.envelope;
-    const recipient = envelope?.to;
-    const agentId = envelope?.recipient_agent_id
-      ?? (recipient?.role === "agent" && recipient.issueSessionId === sessionId
-        ? recipient.agentId
-        : recipient?.role === "chat" && recipient.chatSessionId === sessionId ? recipient.agentId : null);
-    const delivered: boolean | null = agentId === null ? null : (
-      store.getSessionAgentMaxCursorSeq(sessionId, agentId) >= entry.seq
-      || store.hasInboxReceiptCovering(sessionId, agentId, entry.seq)
-    );
-    return c.json({ ...entry, delivered });
+    try {
+      const page = readSessionLogRange(store, sessionId, from, to, c.req.query("cursor"), token?.agentId, access.inheritedParentRange ? undefined : conversationEntryVisibility(c, store));
+      let progress;
+      if (token?.taskId && token.agentId && !access.inheritedParentRange) {
+        try { progress = store.recordSessionAgentRangeRead(sessionId, token.agentId, page.read_start, page.read_end, token.taskId); }
+        catch { recordLogRead("Session unread progress unavailable", { event: "session_log_read_progress_failed", task_id: token.taskId, session_id: sessionId }); }
+      }
+      if (token?.taskId) recordLogRead("Session unread range read", { event: "session_log_range_read",
+        task_id: token.taskId, agent_id: token.agentId, session_id: sessionId, from_seq: from, to_seq: to,
+        complete: page.next_cursor === null, entries: page.entries.length,
+        returned_from_seq: page.entries[0]?.seq ?? null, returned_to_seq: page.entries.at(-1)?.seq ?? null,
+        read_start: page.read_start, read_end: page.read_end, next_cursor: page.next_cursor,
+        read_high_water: progress?.seq ?? null, read_offset: progress?.offset ?? null });
+      return c.json({ ...page, entries: page.entries.map(entry => messageResponse(access.inheritedParentRange
+        ? { ...entry, metadata: {} } : entry)) });
+    } catch (error) {
+      if (error instanceof SyntaxError || error instanceof Error && error.message.startsWith("Invalid range cursor")) {
+        return c.json({ error: "invalid range cursor" }, 400);
+      }
+      throw error;
+    }
   });
   app.get("/api/sessions/:sessionId/log", (c) => {
     const access = logSessionAccess(c);
     if (access instanceof Response) return access;
     const { sessionId } = access;
+    const deniedRange = denyLogRange(c);
+    if (deniedRange) return deniedRange;
     const readNumber = (name: string): number | null | undefined => {
       const raw = c.req.query(name);
       if (raw == null) return undefined;
@@ -1833,11 +1701,13 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       return c.json({ error: "invalid log window" }, 400);
     }
     const window = store.conversationLogWindow(sessionId, { anchor, before, after });
+    const activityTo = window.has_more_after ? window.entries.at(-1)?.created_at : null;
+    window.entries = window.entries.filter(conversationEntryVisibility(c, store)).map(entry => messageResponse(entry));
     const issueSession = store.getIssueSession(sessionId);
     if (c.req.query("with_activity") === "1" && issueSession?.isDefault && !issueSession.chatId && issueSession.issueId) {
       Object.assign(window, store.listIssueActivityBetween(issueSession.issueId, {
         fromInclusive: window.prev_entry_created_at,
-        toExclusive: window.has_more_after ? window.entries.at(-1)?.created_at : null,
+        toExclusive: activityTo,
         types: ISSUE_ACTIVITY_TYPES, limit: 200,
       }));
     }
@@ -1998,105 +1868,10 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     store.removeSessionParticipant(session.id, c.req.param("participantType"), c.req.param("participantId"));
     return c.body(null, 204);
   });
-  app.get("/api/issues/:id/sessions/:sessionId/events", (c) => {
-    const issue = issueFromParam(store, c, "id", "compat");
-    const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    const chatDenied = denyLinkedSessionChatAccess(c, store, session);
-    if (chatDenied) return chatDenied;
-    // Task-scoped agents may read their current Session, but cannot use this
-    // endpoint to pull sibling transcripts. Cross-session agent access is via
-    // the explicit published-results endpoint below.
-    const sinceSeq = Number(c.req.query("since_seq") ?? 0);
-    const rawToSeq = c.req.query("to_seq");
-    const toSeq = rawToSeq == null ? null : Number(rawToSeq);
-    return c.json(store.listSessionEvents(session.id, { sinceSeq, toSeq }).map(sessionEventCompatibilityResponse));
-  });
-  app.post("/api/issues/:id/sessions/:sessionId/messages", async (c) => {
-    const issue = issueFromParam(store, c, "id", "compat");
-    const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    const chatDenied = !session.chatId && canTaskCoordinateSession(c, store, session)
-      ? null : denyLinkedSessionChatAccess(c, store, session);
-    if (chatDenied) return chatDenied;
-    const body = await readJson<CreateIssueCommentInput>(c);
-    try {
-      return c.json(commentCompatibilityResponse(store.createIssueComment(issue.id, {
-        ...issueCommentCreateInput(c, body, store, issue.id),
-        issueSessionId: session.id,
-      })), 201);
-    } catch (error) {
-      return issueCommentMutationErrorResponse(c, error);
-    }
-  });
-  app.get("/api/issues/:id/sessions/:sessionId/tasks", (c) => {
-    const issue = issueFromParam(store, c, "id", "compat");
-    const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    const coordinating = canTaskCoordinateSession(c, store, session);
-    const chatDenied = coordinating ? null : denyLinkedSessionChatAccess(c, store, session);
-    if (chatDenied) return chatDenied;
-    return c.json(store.listTasksForIssue(issue.id)
-      // The Session-level guard above already proves access to the owning
-      // Chat. Return task metadata for every participant in this Session;
-      // transcript routes retain their stricter per-task visibility checks.
-      .filter((task) => task.issueSessionId === session.id)
-      .map((task) => coordinating ? sessionTaskMetadataResponse(task) : taskCompatibilityResponse(
-        task,
-        null,
-        task.status === "queued" || task.status === "dispatched"
-          ? store.getTaskQueueBlocker(task.id)
-          : null,
-      )));
-  });
-  app.post("/api/issues/:id/sessions/:sessionId/tasks", async (c) => {
-    const issue = issueFromParam(store, c, "id", "compat");
-    const session = store.getIssueSession(c.req.param("sessionId"));
-    if (!issue || !session || session.issueId !== issue.id || session.workspaceId !== issue.workspaceId) return c.json({ error: "session not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    const dispatchDenied = denySideSessionAgentDispatch(c, store);
-    if (dispatchDenied) return dispatchDenied;
-    const coordinating = canTaskCoordinateSession(c, store, session);
-    const sessionDenied = coordinating ? null : session.chatId
-      ? denySessionAccess(c, store, session)
-      : denySessionOwnerAccess(c, store, session);
-    if (sessionDenied) return sessionDenied;
-    const body = await readJson<CreateSessionTaskInput>(c);
-    const agentId = cleanString(body.agentId ?? body.agent_id);
-    const agent = agentId ? store.getAgent(agentId) : null;
-    if (!agent) return c.json({ error: "agent not found" }, 404);
-    if (!canCurrentUserAccessAgent(c, store, agent)) {
-      return c.json({ error: "you do not have access to this agent" }, 403);
-    }
-    const creator = issueSubscriberCaller(c);
-    try {
-      const task = store.createSessionTask(session.id, {
-        ...stripServerOwnedSessionTaskFields(body),
-        // Non-null past the `if (!agent) return 404` guard above; cleanString's
-        // null just has to become the `agentId?: string` field's undefined.
-        agentId: agentId ?? undefined,
-        createdByType: creator.actorType,
-        createdById: creator.actorId,
-        parentTaskId: currentTaskParentId(c),
-      });
-      return c.json(coordinating ? sessionTaskMetadataResponse(task) : taskCompatibilityResponse(task), 201);
-    } catch (error) {
-      if (error instanceof DelegationRoundTripLimitError) {
-        store.recordDelegationRoundTripLimited(error);
-        return c.json({ error: error.message, code: error.code }, 409);
-      }
-      const dependencyResponse = issueDependencyErrorResponse(c, error);
-      if (dependencyResponse) return dependencyResponse;
-      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
-    }
-  });
+
+
+
+
   app.get("/api/issues/:id/session-results", (c) => {
     const issue = issueFromParam(store, c, "id", "compat");
     if (!issue) return c.json({ error: "issue not found" }, 404);
@@ -2128,57 +1903,6 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       })), 201);
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
-    }
-  });
-  app.get("/api/multiremi/issues/:id/comments", (c) => {
-    const issue = issueFromParam(store, c);
-    if (!issue) return c.json({ error: "issue not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    const parsedInput = parseIssueCommentListQuery(c);
-    if ("error" in parsedInput) return c.json({ error: parsedInput.error }, parsedInput.status);
-    try {
-      const result = store.listIssueCommentsForGoCli(issue.id, parsedInput);
-      setIssueCommentCursorHeaders(c, result);
-      return c.json({ comments: result.comments });
-    } catch (err) {
-      return issueCommentListErrorResponse(c, err);
-    }
-  });
-  app.get("/api/issues/:id/comments", (c) => {
-    const issue = issueFromParam(store, c, "id", "compat");
-    if (!issue) return c.json({ error: "issue not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    const parsedInput = parseIssueCommentListQuery(c);
-    if ("error" in parsedInput) return c.json({ error: parsedInput.error }, parsedInput.status);
-    try {
-      const result = store.listIssueCommentsForGoCli(issue.id, parsedInput);
-      setIssueCommentCursorHeaders(c, result);
-      return c.json(result.comments.map(commentCompatibilityResponse));
-    } catch (err) {
-      return issueCommentListErrorResponse(c, err);
-    }
-  });
-  app.post("/api/multiremi/issues/:id/comments", async (c) => {
-    const issue = issueFromParam(store, c);
-    if (!issue) return c.json({ error: "issue not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    const body = await readJson<CreateIssueCommentInput>(c);
-    return c.json({ comment: store.createIssueComment(issue.id, issueCommentCreateInput(c, body, store, issue.id)) }, 201);
-  });
-  app.post("/api/issues/:id/comments", async (c) => {
-    const issue = issueFromParam(store, c, "id", "compat");
-    if (!issue) return c.json({ error: "issue not found" }, 404);
-    const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
-    if (denied) return denied;
-    const body = await readJsonStrict<CreateIssueCommentInput>(c);
-    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
-    try {
-      return c.json(commentCompatibilityResponse(store.createIssueComment(issue.id, issueCommentCreateInput(c, body, store, issue.id))), 201);
-    } catch (error) {
-      return issueCommentMutationErrorResponse(c, error);
     }
   });
   app.get("/api/multiremi/issues/:id/reactions", (c) => {

@@ -11,13 +11,24 @@ function prefix(body: string, limit: number): string {
   return body.slice(0, limit);
 }
 
+function turnInputCommand(response: Payload): string {
+  return typeof response.turn_id === "string" && response.turn_id
+    ? `remi turn get ${response.turn_id} --input` : "";
+}
+
+function triggerMessageCommand(sessionId: string, entry: Payload): string {
+  return typeof entry.id === "string" && entry.id
+    ? `remi message get ${entry.id}`
+    : `remi message list ${sessionId} --from ${entry.seq - 1} --to ${entry.seq}`;
+}
+
 /** Normal routing values stay intact; the emergency pass also folds pathological URLs/paths. */
 function truncateOfferStrings(response: Payload, runtimeId: string, budget: number, emergency = false): void {
   const protectedKey = /^(?:id|.*[Ii]d|.*_id|auth_token|.*[Tt]oken|.*_token|.*[Pp]ath|.*_path|.*[Uu]rl|.*_url|provider|model|status|type|kind|expand|expand_hint|command|version|created_at|updated_at)$/;
   const identityKey = /^(?:id|.*[Ii]d|.*_id|.*[Tt]oken|.*_token|execution_scope|executionScope|execution_fingerprint|executionFingerprint)$/;
   const candidates: { owner: Payload; key: string; body: string; command: string }[] = [];
   const projections: { owner: Payload; key: string; entries: Payload[] }[] = [];
-  const taskCommand = `remi task get ${response.id}`;
+  const taskCommand = turnInputCommand(response);
   const visit = (value: any, command: string, executionBinding = false) => {
     if (!value || typeof value !== "object") return;
     for (const [key, child] of Object.entries(value)) {
@@ -25,8 +36,10 @@ function truncateOfferStrings(response: Payload, runtimeId: string, budget: numb
         const entries = child.split("\n").filter(Boolean).map(line => JSON.parse(line));
         projections.push({ owner: value, key, entries });
         for (const entry of entries) {
-          if (entry.type === "triggering_message") visit(entry, entry.expand ?? `remi session log get ${value.session_id} ${entry.seq}`);
+          if (entry.type === "triggering_message") visit(entry, entry.expand ?? triggerMessageCommand(value.session_id, entry));
         }
+      } else if (key === "input_messages" && Array.isArray(child)) {
+        for (const message of child) visit(message, triggerMessageCommand(response.issue_session_id ?? response.chat_session_id, message));
       } else if (typeof child === "string" && (!protectedKey.test(key) && !identityKey.test(key) && !executionBinding
         && !["work_dir", "workDir", "prior_work_dir", "priorWorkDir", "branch_name", "branchName", "branch", "executable"].includes(key)
         || emergency && !identityKey.test(key) && child.length > TRIGGER_MESSAGE_INLINE_CHARS
@@ -48,6 +61,7 @@ function truncateOfferStrings(response: Payload, runtimeId: string, budget: numb
     sync();
     const excess = taskOfferBytes(response, runtimeId) - budget;
     if (excess <= 0) return;
+    if (!command) throw new Error("canonical turn id is required to recover folded offer content");
     const folded = (limit: number) => {
       const start = prefix(body, limit);
       return `${start}\n${expandHint(body.length - start.length, command)}`;
@@ -87,7 +101,7 @@ export function useTaskSessionInput(store: MultiremiStore, task: MultiremiTaskWi
   for (const entry of entries) {
     if (!triggers.size && entry.kind === "turn" && entry.task_id === task.id) triggers.add(entry.seq);
   }
-  const readSeq = store.getSessionAgentReadProgress(projection.session_id, task.agentId).seq;
+  const readSeq = store.getSessionAgentReadProgress(projection.session_id, task.agentId, task.id).seq;
   const coldStart = projection.mode === "bootstrap";
   projection.jsonl = taskSessionInput({ sessionId: projection.session_id, agentId: task.agentId,
     fromSeq: coldStart ? 0 : Math.min(readSeq, projection.to_seq),
@@ -106,7 +120,7 @@ export function useTaskSessionInput(store: MultiremiStore, task: MultiremiTaskWi
   const bound = response.bound_issue_log;
   if (bound?.session_id) {
     bound.content_jsonl = taskSessionInput({ sessionId: bound.session_id, agentId: task.agentId,
-      fromSeq: Math.min(store.getSessionAgentReadProgress(bound.session_id, task.agentId).seq, bound.to_seq), toSeq: bound.to_seq,
+      fromSeq: Math.min(store.getSessionAgentReadProgress(bound.session_id, task.agentId, task.id).seq, bound.to_seq), toSeq: bound.to_seq,
       entries: store.listConversationLogEntries(bound.session_id, { toSeq: bound.to_seq }),
       triggerSeqs: new Set() });
   }
@@ -122,9 +136,12 @@ export function fitTaskOfferToBudget(response: Payload, runtimeId: string, budge
 } {
   const steps: string[] = [];
   const warnings = response.knowledge_warnings = [...(response.knowledge_warnings ?? [])];
-  const fold = (body: string, command: string, limit: number): string => body.length <= limit ? body
-    : `${prefix(body, limit)}\n${expandHint(body.length - prefix(body, limit).length, command)}`;
-  const promptCommand = `remi task get ${response.id}`;
+  const fold = (body: string, command: string, limit: number): string => {
+    if (body.length <= limit) return body;
+    if (!command) throw new Error("canonical turn id is required to recover folded offer content");
+    return `${prefix(body, limit)}\n${expandHint(body.length - prefix(body, limit).length, command)}`;
+  };
+  const promptCommand = turnInputCommand(response);
   const originalPrompt = response.prompt;
   if (typeof response.prompt === "string") response.prompt = fold(response.prompt,
     promptCommand, TRIGGER_MESSAGE_INLINE_CHARS);
@@ -165,7 +182,7 @@ export function fitTaskOfferToBudget(response: Payload, runtimeId: string, budge
         entry.body_omitted_chars = (entry.body_omitted_chars ?? 0) + entry.body.length - start.length;
         entry.body = start;
         entry.body_folded = true;
-        entry.expand = `remi session log get ${projection.session_id} ${entry.seq}`;
+        entry.expand = triggerMessageCommand(projection.session_id, entry);
         entry.expand_hint = expandHint(entry.body_omitted_chars, entry.expand);
         return JSON.stringify(entry);
       }).join("\n");

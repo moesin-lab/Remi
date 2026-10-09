@@ -2,7 +2,7 @@ import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query
 import { api } from "../api";
 import { getCurrentWsId } from "../platform/workspace-storage";
 import { issueKeys } from "../issues/queries";
-import type { CreateSessionRequest, CreateSessionTaskRequest, Session, SessionTask } from "../types";
+import type { CreateSessionRequest, CreateSessionTaskRequest, Session } from "../types";
 
 export const chatWorkSessionKeys = {
   all: (wsId: string) => ["chat-work-sessions", wsId] as const,
@@ -51,10 +51,6 @@ export function useCreateChatWorkSessionTask(wsId: string, chatId: string, sessi
   return useMutation({
     onMutate: () => ({ wsId, chatId, sessionId }),
     mutationFn: (input: CreateSessionTaskRequest) => api.createChatWorkSessionTask(chatId, sessionId, input),
-    onSuccess: (task, _input, { wsId, chatId, sessionId }) => {
-      qc.setQueryData<SessionTask[]>(chatWorkSessionKeys.tasks(wsId, chatId, sessionId), (old = []) =>
-        old.some(item => item.id === task.id) ? old : [...old, task]);
-    },
     onSettled: (_task, _error, _input, context) => qc.invalidateQueries({
       queryKey: chatWorkSessionKeys.tasks(context?.wsId ?? wsId, context?.chatId ?? chatId, context?.sessionId ?? sessionId),
     }),

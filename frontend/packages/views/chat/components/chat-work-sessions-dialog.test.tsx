@@ -9,13 +9,14 @@ import type { SessionLogListProps } from "../../common/session-log/session-log-l
 import enChat from "../../locales/en/chat.json";
 import enIssues from "../../locales/en/issues.json";
 import enCommon from "../../locales/en/common.json";
+import enMessages from "../../locales/en/messages.json";
 
 const backend = vi.hoisted(() => ({
   sessions: [] as Session[],
   tasks: {} as Record<string, SessionTask[]>,
   rows: {} as Record<string, SessionLogRow[]>,
   listSessions: vi.fn(), listTasks: vi.fn(), createSession: vi.fn(), createTask: vi.fn(),
-  sendChatMessage: vi.fn(), cancelTask: vi.fn(), readLog: vi.fn(), refreshLog: vi.fn(),
+  listMessages: vi.fn(), sendMessage: vi.fn(), sendChatMessage: vi.fn(), cancelTask: vi.fn(), readLog: vi.fn(), refreshLog: vi.fn(),
 }));
 const mockToast = vi.hoisted(() => ({ error: vi.fn() }));
 
@@ -27,6 +28,8 @@ vi.mock("@multiremi/core/api", async importOriginal => {
     createChatWorkSession: backend.createSession,
     createChatWorkSessionTask: backend.createTask,
     sendChatMessage: backend.sendChatMessage,
+    listMessages: backend.listMessages,
+    sendMessage: backend.sendMessage,
     cancelTaskById: backend.cancelTask,
   } };
 });
@@ -119,7 +122,7 @@ function mount(props: Partial<ComponentProps<typeof ChatWorkSessionsDialog>> = {
   } });
   clients.push(client);
   return render(<QueryClientProvider client={client}>
-    <I18nProvider locale="en" resources={{ en: { chat: enChat, issues: enIssues, common: enCommon } }}>
+    <I18nProvider locale="en" resources={{ en: { chat: enChat, issues: enIssues, common: enCommon, messages: enMessages } }}>
       <ChatWorkSessionsDialog wsId="ws-1" chatId="chat-1" agentId="agent-1" agents={agents}
         chatArchived={false} open={true} onOpenChange={vi.fn()} {...props} />
     </I18nProvider>
@@ -143,6 +146,8 @@ beforeEach(() => {
   backend.listSessions.mockImplementation(async () => backend.sessions);
   backend.listTasks.mockImplementation(async (_chatId: string, sessionId: string) => backend.tasks[sessionId] ?? []);
   backend.refreshLog.mockResolvedValue(undefined);
+  backend.listMessages.mockResolvedValue({ messages: [], next_cursor: null });
+  backend.sendMessage.mockResolvedValue({});
 });
 
 afterEach(() => {
@@ -338,6 +343,31 @@ describe("ChatWorkSessionsDialog", () => {
     expect(await screen.findByText("Investigate the build failure")).toBeInTheDocument();
     expect(screen.getAllByText("single final result")).toHaveLength(1);
     expect(await screen.findByRole("button", { name: "Alpha · Completed · Execution details" })).toBeInTheDocument();
+  });
+
+  it("keeps canonical messages carrying envelope metadata and omits deleted bodies", async () => {
+    backend.rows["session-1"] = [
+      makeRow({ id: "canonical", message_kind: "request", sender_type: "member", metadata: { envelope: { recipient: "agent-1" } }, body_md: "Canonical work message", body_html: null }),
+      makeRow({ id: "deleted", deleted_at: timestamp, body_md: "Deleted private body", body_html: null }),
+      makeRow({ id: "hidden", visibility: "hidden", body_md: "Hidden private body", body_html: null }),
+    ];
+    mount();
+    expect(await screen.findByText("Canonical work message")).toBeInTheDocument();
+    expect(screen.queryByText("Deleted private body")).not.toBeInTheDocument();
+    expect(screen.queryByText("Hidden private body")).not.toBeInTheDocument();
+  });
+
+  it("answers a paused work turn in its actual Session instead of the owning Chat", async () => {
+    backend.tasks["session-1"] = [makeTask({ status: "awaiting_human", turn_id: "turn-1" })];
+    const request = { kind: "permission", payload: { tool_call: { title: "Run scoped build" }, options: [{ optionId: "allow", kind: "allow_once", name: "Allow once" }] } };
+    backend.listMessages.mockResolvedValue({ messages: [{ id: "decision-1", task_id: "turn-1", created_at: timestamp, resolved_at: null, metadata: { human_request: request } }], next_cursor: null });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Allow once" }));
+    await waitFor(() => expect(backend.sendMessage).toHaveBeenCalledWith("session-1", {
+      body_md: "allow", message_kind: "reply", reply_to_id: "decision-1", response: { option_id: "allow" },
+    }));
+    expect(backend.listMessages).toHaveBeenCalledWith("session-1", { message_kind: "decision", cursor: undefined });
+    expect(backend.sendChatMessage).not.toHaveBeenCalled();
   });
 
   it.each(["chat", "session"] as const)("disables task submission for an archived %s", async archived => {

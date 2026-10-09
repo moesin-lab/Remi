@@ -1,209 +1,120 @@
 # Inbox vs. Workbench — routing and reading boundaries
 
-This document describes the current routing rules, stored-event boundaries, paginated
-reading model, and badge counts. Implementation entry points are the
-[routing registry](../packages/server/src/store/inbox-routing.ts),
-[inbox API](../packages/server/src/api/routers/inbox.ts), and
-[frontend grouping](../frontend/packages/core/inbox/grouping.ts).
-
-## The two surfaces
+Workbench answers what work needs action now. Inbox answers which visible messages
+were addressed to the current identity and remain unread. They share Issue and
+conversation context, but have separate state and counts.
 
 | | Workbench (工作台) | Inbox (收件箱) |
-|---|---|---|
-| Question it answers | *What is waiting on me right now?* | *What happened while I wasn't looking?* |
-| Storage | none — live query over `GET /api/issues?status=…` | `multiremi_inbox_items`, durable rows |
-| Read state | none | read / archived per row |
-| Freshness | real-time, self-clearing when the issue moves on | durable events, with read/archive state changed by the human |
-| Grain | one row per **issue** | one row per **event** |
-| Attention cost | primary badge, meant to be checked continuously | secondary, meant to be checked periodically |
+| --- | --- | --- |
+| Grain | one row per Issue | one row per canonical message |
+| Storage | live Issue queries, no separate workbench rows | conversation log |
+| Read state | none | monotonic member or agent lane cursor per conversation |
+| Counts | Issue status partitions | visible addressed messages after the cursor |
 
-The workbench sections are `in_review` (split into *awaiting reply* / *awaiting review*
-via the `awaiting_human` agent-task snapshot), `blocked`, and `in_progress`
-(`frontend/packages/core/issues/workbench.ts`). Call these the
-**workbench-visible statuses**.
+Current entry points are the [routing registry](../packages/server/src/store/inbox-routing.ts),
+[unified API](../packages/server/src/api/routers/unified.ts),
+[inbox Store](dev/inbox-store.md), and [page](../frontend/packages/views/inbox/components/inbox-page.tsx).
+The HTTP wire contract is [Message / Inbox / Turn](dev/message-api.md).
 
-### Selected issue execution and recovery
+## Selected issue execution and recovery
 
-The selected issue has an [execution panel](../frontend/packages/views/workbench/components/workbench-run-panel.tsx)
-above its history. It shares the existing `issueKeys.tasks(issueId)` query and realtime
-invalidation with execution history; it does not add a task query for every list row.
-Active runs take precedence over the latest terminal run. Queued/dispatched means
-waiting to start; completed means ready for human review, not approval of the issue.
-Unknown or unavailable execution data is explicit, rather than an empty success state.
+The selected Issue's [execution panel](../frontend/packages/views/workbench/components/workbench-run-panel.tsx)
+shares `issueKeys.tasks(issueId)` with the execution history rather than querying
+every list row. Active work takes precedence over the latest terminal round.
+Queued/dispatched means waiting to start; completed means ready for review, not
+approval of the Issue. Loading and failed reads are explicit states.
 
-When no active run exists, a failed or cancelled run exposes **Retry run** alongside
-**View run**. Retry uses `POST /api/issues/:id/rerun` with `task_id`, retaining that run's
-Agent, Session, workspace lease choice and instructions. The server checks Issue and
-Chat access, rejects conflicting overrides, and checks for an active Issue run inside
-the task creation transaction under the workspace lifecycle lock. Dependencies remain
-enforced. A retry starts a new run; prior tool actions are not undone. Failure keeps
-the selected Issue and its context visible; success immediately shows the new run.
+Execution queries and controls use turns. `remi turn get <turn> --input --attempts`
+reads authorized input and attempts; attempt trace is separate execution evidence.
+`remi turn retry <turn>` adds an attempt to the same turn and requires an explicit
+supervisor or related controller task credential, with the organizer mode and audit
+checks. Human credentials alone do not grant that operation. Follow-up work is a
+new directed request to the existing Session. The old Issue rerun route returns 410;
+prior tool actions are not undone by cancellation, retry or a new request.
 
-The same operation is available as `remi issue rerun <issue> --task-id <task>`.
-The [isolated browser acceptance harness](../tests/integration/smoke-interaction-recovery.ts)
-exercises creation receipts, failure recovery, live status and narrow viewports using
-a temporary workspace. Its worker lifecycle is simulated, not a real model invocation.
+## Routing intent
 
-## The rule
+The `INBOX_ROUTING` registry retains these producer decisions:
 
-Answer the four questions in order. The first `yes` decides the route; nothing downstream
-gets a second vote.
+1. A personally addressed assignment, mention or decision belongs in the inbox.
+2. Broadcast progress for an Issue already visible in the workbench stays in its
+   activity/conversation context. It should not mint a duplicate personal notification.
+3. Automation conclusions and failures are durable reports to the appropriate
+   recipients, even when no human processing queue owns the work.
+4. Other events remain activity only unless a producer explicitly addresses a message.
 
-**R1 — Is the event *addressed to me personally*?**
-(assigned to me, `@`-mentioned me, review requested from me)
-→ **Inbox, action lane.** Unconditional. The workbench works at issue grain and can only
-say "this issue is waiting"; it can never say *who called your name and why*. A directed
-event is never absorbed by issue-level visibility.
+The registry supplies the route and severity for legacy producer adapters; those
+adapters now emit messages through the unified transaction. They do not recreate
+`inbox_items`, per-item archive state or a second unread store. Unregistered types
+remain activity-only. New producers must declare routing and use the canonical
+message entry point; state, notification and realtime effects are committed together.
 
-**R2 — Is it a broadcast about the state or progress of an issue that is currently in a
-workbench-visible status?**
-→ **Workbench only. Do not write an inbox row.** The workbench already shows that issue,
-live, and opening it shows the full context. An inbox row here is pure duplication — it is
-the thing this issue set out to remove. The event still lands in the issue activity feed,
-the session timeline, and the `comment:created` realtime event; nothing is lost, it just
-stops competing for attention twice.
+Automations have `auto_*` conversations. Issue-mode execution still belongs to the
+Issue's Session, with status messages back to the automation conversation. Reports
+carry their source identifiers and result evidence; a failed run must remain a
+failure, not be collapsed into a success summary.
 
-**R3 — Is it the *conclusion of an automated run* that belongs to no human processing
-queue?**
-(autopilot / scheduled-task terminal status, inspection-bot report, system anomaly)
-→ **Inbox, ledger lane.** This is the inbox's headline job: the user asked to be able to
-confirm "did the scheduled job run, and how did it go" without opening the workbench.
+## Inbox visibility and counts
 
-**R4 — Anything else**
-→ **Activity feed only.** No inbox row, no badge.
+`GET /api/inbox` returns `{items,unread_count,attention_count,next_cursor}` together.
+Human credentials read their workspace member lane; task credentials read their
+current agent lane. Neither can choose an unrelated reader. Items are visible,
+addressed messages after that reader's cursor, ordered by `created_at DESC, id DESC`.
+Counts cover all eligible messages and do not depend on the loaded page size.
 
-### Registering a new source
+Attention counts non-`inbox_only`, unresolved decisions, member requests, failed or
+cancelled status, and failed/blocked/cancelled results. Resolving is separate from
+reading. The sidebar uses these server counts; old severity-based summaries,
+date/Issue deduplication and `/api/inbox/summary` are not the current count contract.
+Workbench badge arithmetic remains its own Issue-state calculation.
 
-Every inbox `type` must have a row in `INBOX_ROUTING`
-(`packages/server/src/store/inbox-routing.ts`) naming its lane and the rule that put it
-there. `inboxRouteFor()` returns `activity_only` for an unregistered type, so a producer
-added without a registry entry is silently dropped rather than silently spamming — and a
-unit test enumerates every `createInboxItem` call site to make that failure loud in CI.
-The registry also owns the default severity used by `createInboxItem`; any explicit
-producer override is tested against that registered value.
+Every inbox list, detail and count applies the same source visibility checks as
+message reads. Chat-owned Sessions retain Chat privacy even when projected into an
+Issue. Deleted Chat execution history does not become public through a retained
+attempt, turn or message ID. Cross-workspace decisions and unavailable protected
+sources are hidden rather than exposed as a fallback.
 
-Routes that depend on the issue's status at emit time (R2) pass it in:
-`inboxRouteFor(type, { issueStatus })`.
+## Reading and browsing
 
-## Where the existing producers landed
+The page loads 50 messages at a time via [inbox queries](../frontend/packages/core/inbox/queries.ts)
+and follows the opaque `next_cursor`; the API allows up to 500. Selecting a message
+loads its canonical detail, including attachments and decision controls. A deep link
+may read the message directly even when it is outside loaded inbox pages. Errors
+retain a retry state. The page no longer archives individual notifications or groups.
 
-| Producer | Site | Rule | Route | Why |
-|---|---|---|---|---|
-| `comment_created` | `issues-repo.ts` `notifySubscribedMembers` | R2 | **removed from inbox** when the issue is workbench-visible | The issue creator is auto-subscribed to every issue they create, so in the single-operator setup *every* agent progress comment minted an inbox row — for an issue sitting in the workbench's *in progress* / *awaiting review* section at that exact moment. This is the duplication the user felt. Falls back to R1/R4 otherwise: a **human** comment on an issue in a non-workbench status (`todo`, `backlog`, `done`) still notifies, because nothing else would. |
-| `issue_assigned` | `issues-repo.ts` `assignIssue` | R1 | **kept**, severity `info` | Re-checked against the code: assigning to a *member* leaves the issue in its current status (only an agent assignee forces `todo`), and none of `todo`/`backlog` is a workbench section — so the workbench does **not** cover this today. It is a directed, low-urgency "you now own this". Kept, but demoted so it no longer drives the badge. |
-| `comment_mention` | `issues-repo.ts` `triggerMemberMentions` | R1 | **kept** | Directed at a person, at comment grain. The workbench cannot express it at any status. |
-| `autopilot_paused` | `autopilots-repo.ts` `emitAutopilotPausedNotifications` | R3 | **kept**, severity `attention` | A durable automation event. |
+`POST /api/inbox/read` with `{session_id,to_seq?}` advances only to the final visible
+message addressed to that identity within the requested upper bound. It never moves
+backward or beyond the log head. `{all:true}` reads all visible conversations; it is
+mutually exclusive with a single-conversation request. A conversation containing only
+hidden rows is neither counted as read nor advanced. Agent lanes remain scope-specific.
+Ordinary message lists and display log windows do not mark messages read.
 
-## Automation outcomes (R3)
+CLI equivalents are `remi inbox`, `remi inbox read <conversation> --to <seq>` and
+`remi inbox read-all`. Old item IDs and per-item read/archive commands are retired.
+Old list/page/summary/notification routes return 410 except the reused unified paths.
 
-Emitted from the autopilot-run terminal handler in
-`packages/server/src/store/repos/tasks-repo.ts` (`afterTaskTerminal`, the block that flips
-`multiremi_autopilot_runs.status`), so every scheduled and event-triggered run reports its
-own conclusion:
+## Realtime and invariants
 
-- `autopilot_run_completed` — severity `info`. Title carries the autopilot name and the
-  outcome; body carries duration, trigger kind and a result summary.
-- `autopilot_run_failed` — severity `attention`. Body carries the failure reason.
+Committed messages emit workspace-level `inbox:new` with `{index_only:true}`. Single
+and all-conversation reads emit `inbox:read` and `inbox:batch-read`. Index events carry
+no private body or conversation identity. The client refreshes inbox and message-detail
+queries; it cannot infer counts or visibility from an event payload. Decision events
+also refresh message detail so external answers update an open card.
 
-Both put `autopilot_id`, `autopilot_title`, `run_id`, `task_id`, `trigger`,
-`duration_seconds` and `issue_id` in `details`, so the list row is self-explanatory without
-opening it.
-
-`autopilot_run_overdue` (scheduled window elapsed without a run reaching a terminal state)
-is registered in `INBOX_ROUTING` as an R3 ledger type but has **no producer yet** — it needs
-the inspection bot, which is a separate issue. The registry entry is the seam it plugs into.
-
-## Attention budget
-
-The two badges must not mean the same thing.
-
-- **Workbench badge** — unchanged: `in_review.total + blocked.total`, primary style. "Do
-  something now."
-- **Inbox badge** — counts unread visible notifications at severity
-  `attention` or higher only, rendered in a muted style. `info` rows (run completed,
-  assignment) still show as unread inside the page but never raise a badge. "Read this when
-  you get around to it."
-
-Both inbox counts come from `GET /api/inbox/summary`, independently of loaded pages.
-`attention` counts unread `attention` / `action_required` entries after issue-level
-deduplication. `unread` additionally collapses successful runs of the same autopilot
-within each date group, counting the group as unread if any covered event is unread.
-The client sends its `Date.getTimezoneOffset()` value as `timezone_offset` for date
-grouping. The [summary query](../frontend/packages/core/inbox/queries.ts) has a 30-second
-stale time; mutations and realtime events invalidate the relevant cache. The legacy
-`/api/inbox/unread-count` endpoint counts raw rows and is not the sidebar's count source.
-
-## Browsing model
-
-The [inbox page](../frontend/packages/views/inbox/components/inbox-page.tsx) reads
-`GET /api/inbox/page?limit=50&cursor=…` through an infinite query. The API returns
-`items`, `limit`, `has_more`, and `next_cursor`; the server caps the page size at 100
-and uses `created_at DESC, id DESC` cursor order. The original `/api/inbox` full-list
-endpoint remains for compatibility. A Load more button appends pages.
-
-Display transformations apply to the loaded pages:
-
-- rows grouped by day (Today / Yesterday / This week / Earlier);
-- a source filter (All / Message stream / Automation / Mentions / Assignments);
-- **mark this group read** in addition to the existing mark-all-read;
-- R3 ledger events retain one stored row and selection identity per event. Successful
-  runs of the same autopilot within a date group collapse into one display entry;
-  failures remain separate. R1/R2 action notifications retain the latest row per issue;
-- notifications for children of the same parent collapse after deduplication within a date
-  group. The server supplies the parent id, key, and title only while that parent still
-  exists in the notification's workspace; missing, deleted, and cross-workspace parents
-  project all three fields as `null`. Failed or blocked child terminal events and
-  `decision_requested` rank ahead of ordinary entries in that date group;
-- a parent-group header has no whole-group archive action. Expanding it exposes per-event
-  archive actions; action slots keep fixed dimensions and hover changes visibility only;
-- every row shows a one-line self-contained summary from `details`, so a sweep down the
-  list is enough to know what happened.
-
-Reading or archiving a collapsed entry updates every loaded event represented by it;
-date-group operations likewise use loaded items. Mark-all and archive-all operations
-act on the member's full server-side inbox. Source filters do not query unseen pages,
-so an empty filtered view does not prove the full inbox has no matching notification.
-
-Links to entries beyond the loaded pages trigger further page reads before deciding
-the entry is unavailable. A failed page request does not trigger a missing-item redirect.
-After all pages are exhausted, an unresolved `?issue=` link can fall back to the issue
-page; an unresolved `?item=` link remains in the inbox with an unavailable state.
-[Mutations](../frontend/packages/core/inbox/mutations.ts) and
-[WS updaters](../frontend/packages/core/inbox/ws-updaters.ts) maintain both the legacy
-list cache and paginated cache, and refresh summary counts.
-
-## Issue deletion lifecycle
-
-Deleting an issue must not erase the automation history that the ledger exists to retain.
-The service handles inbox rows explicitly instead of relying on database foreign-key
-cascades: R3 ledger rows remain, their live `issue_id` link is set to `NULL`, and the
-original source id remains in `details.issue_id` as historical context. R1/R2 action rows
-are deleted because their target no longer exists and they have no standalone ledger
-value. Realtime cache updates apply the same rule, so rows do not disappear and reappear
-after a refetch. A detached ledger row renders its self-contained title, type, time and
-body without offering a broken issue link.
-
-## Invariants
-
-- The workbench stays a storage-free, read-state-free live query. No inbox row, read state,
-  or badge logic may leak into `frontend/packages/core/issues/workbench.ts` or
-  `workbench-page.tsx`. Sections, ordering and badge arithmetic are unchanged.
-- Inbox changes must preserve `nextIssueStatusAfterTaskTerminal`
-  (`packages/server/src/store/repos/tasks-repo.ts`) and issue-status transition semantics.
-- `member_id` on an inbox row is a **member** id (`mem_<workspace>_<user>`), while the auth
-  context carries a **user** id. Every read and write converts explicitly — see
-  `resolveWorkspaceMemberForNotification` and the note in `api/helpers/auth-guards.ts`.
+- Workbench remains a live Issue query without inbox storage or read cursors.
+- Issue status is derived from turns and unanswered decisions, not attempt failures
+  or retries; parent/child and dependency guards retain their own rules.
+- Auth carries a user identity, while a human reader lane uses the active workspace
+  member identity; producers and readers resolve that mapping explicitly.
+- Session ownership, Issue aggregation and lifecycle follow [the conversation model](conversation-model.md).
+  A Chat-owned report or delegation return does not become public merely because its
+  Session has an Issue projection.
 
 ## Verification
 
-The [API tests](../tests/unit/multiremi/multiremi-api-search-inbox.test.ts) cover cursor
-pages and summary counts; [page tests](../frontend/packages/views/inbox/components/inbox-page.test.tsx)
-and [mutation tests](../frontend/packages/core/inbox/mutations.test.tsx) cover loading
-and operations on represented rows. These are verification entry points, not a claim
-that they ran during this documentation update. Performance limits and measurement
-conditions are documented in [the performance guide](dev/performance.md).
-
-## Out of scope
-
-Outbound delivery (Lark, email) and per-channel routing in the notification preferences —
-tracked separately. This change only decides *what earns a row* and *how it is read*.
+Verification entry points include [unified API tests](../tests/unit/multiremi/unified-api.test.ts),
+[source visibility parity](../tests/unit/multiremi/unified-access-consistency.test.ts),
+[page tests](../frontend/packages/views/inbox/components/inbox-page.test.tsx) and
+[mutation tests](../frontend/packages/core/inbox/mutations.test.tsx). Listed tests are
+methods, not evidence of execution. Performance measurements and real service/browser
+prerequisites follow [TESTING.md](../TESTING.md) and [the performance guide](dev/performance.md).

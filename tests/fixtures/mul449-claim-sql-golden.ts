@@ -2,13 +2,13 @@
 // only ordinary Chat tasks participate in the legacy Chat queue. Report recovery
 // preserves offer authority only when the Runtime matches. Shared Chat checkout
 // leases include outstanding offers, whose recovery may bypass a newer head.
-export const MUL449_CLAIM_SQL_GOLDEN = String.raw`UPDATE multiremi_tasks
+export const MUL449_CLAIM_SQL_GOLDEN = String.raw`UPDATE multiremi_turn_execution_records
        SET offered_at = CASE WHEN runtime_id = ? THEN offered_at ELSE NULL END,
            accepted_at = CASE WHEN runtime_id = ? THEN accepted_at ELSE NULL END,
            status = 'dispatched', runtime_id = ?, dispatched_at = ?, wait_reason = NULL, updated_at = ?
        WHERE id = (
          SELECT t.id
-         FROM multiremi_tasks t
+         FROM multiremi_turn_execution_records t
          JOIN multiremi_agents a ON a.id = t.agent_id
          LEFT JOIN multiremi_chat_sessions project_chat ON project_chat.id = t.chat_session_id
          LEFT JOIN multiremi_issues project_issue ON project_issue.id = t.issue_id
@@ -19,7 +19,7 @@ export const MUL449_CLAIM_SQL_GOLDEN = String.raw`UPDATE multiremi_tasks
            AND a.archived_at IS NULL
            AND (t.chat_session_id IS NULL OR project_chat.status = 'active')
            AND (t.issue_session_id IS NOT NULL OR t.offered_at IS NOT NULL OR NOT EXISTS (
-             SELECT 1 FROM multiremi_tasks earlier WHERE earlier.chat_session_id = t.chat_session_id
+             SELECT 1 FROM multiremi_turn_execution_records earlier WHERE earlier.chat_session_id = t.chat_session_id
                AND earlier.issue_session_id IS NULL
                AND earlier.status = 'queued' AND (
                  earlier.priority > t.priority
@@ -31,7 +31,7 @@ export const MUL449_CLAIM_SQL_GOLDEN = String.raw`UPDATE multiremi_tasks
            AND a.workspace_id = t.workspace_id
            AND (
              SELECT COUNT(*)
-             FROM multiremi_tasks runtime_active
+             FROM multiremi_turn_execution_records runtime_active
              WHERE runtime_active.runtime_id = ?
                AND runtime_active.status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
            ) < ?
@@ -177,12 +177,12 @@ export const MUL449_CLAIM_SQL_GOLDEN = String.raw`UPDATE multiremi_tasks
            )
            AND (
              SELECT COUNT(*)
-             FROM multiremi_tasks running
+             FROM multiremi_turn_execution_records running
              WHERE running.agent_id = t.agent_id
                AND running.status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
            ) < a.max_concurrent_tasks
            AND NOT EXISTS (
-             SELECT 1 FROM multiremi_tasks active
+             SELECT 1 FROM multiremi_turn_execution_records active
              WHERE active.status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
                AND ((t.runtime_workspace_id IS NOT NULL AND active.runtime_workspace_id = t.runtime_workspace_id)
     OR (active.agent_id = t.agent_id AND (
@@ -195,7 +195,7 @@ export const MUL449_CLAIM_SQL_GOLDEN = String.raw`UPDATE multiremi_tasks
   )))
            )
            AND NOT EXISTS (
-             SELECT 1 FROM multiremi_tasks active
+             SELECT 1 FROM multiremi_turn_execution_records active
              WHERE active.id <> t.id
                AND (active.status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
                  OR (active.status = 'queued' AND active.offered_at IS NOT NULL))

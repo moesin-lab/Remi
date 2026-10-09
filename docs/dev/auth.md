@@ -14,7 +14,7 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 - [localAuthResponse](../../packages/server/src/api/helpers/login.ts)签发包含真实 `userId` 的 30 天 PAT，`purpose` 为 `session`。该文件中的邮箱验证码与 Google fallback 共用 `MULTIREMI_ALLOW_EMAIL_CODE_LOGIN`，默认关闭；启用后验证码直接出现在响应中，Google fallback 也不校验 Google 凭据，不能把它们描述成生产邮件发送或 Google OAuth。当前 `sendLocalAuthCode` 在校验验证码前就调用 `store.updateCurrentUser` 修改旧 current user 的姓名/邮箱，启用此路径时需要单独检查这个副作用。
 - 密码登录使用独立的 `MULTIREMI_ALLOW_PASSWORD_LOGIN` 开关，默认关闭；本机 profile 显式开启。`POST /auth/password` 验证预配账号，再为已确认的真实用户签发 30 天 session PAT，不按邮箱重新创建身份。[私有凭据仓储](../../packages/server/src/store/repos/password-accounts-repo.ts)保存唯一登录邮箱和 Argon2id 哈希，哈希不进入公开 User 类型。`POST /api/auth/password-accounts` 仅允许部署主令牌或显式无鉴权本地模式配置账号及指定工作区 owner 成员；它不是用户自助注册接口，不接受旧 `local` 身份作为密码账号。普通 PAT、JWT、task 和 daemon 均不能调用。
 - `/api/me` 的读取、资料与 onboarding 写入沿用已认证用户，`/api/cli-token` 交接也保留同一用户身份；部署主令牌和原有本地模式仍回退到 `local`。密码登录和刷新页面必须保持同一用户身份，不能把请求身份替换成全局 current user。Web 退出调用 `/auth/logout` 撤销 session PAT 并清理 HttpOnly Cookie，原生 token 客户端的退出行为保持不变。
-- [API 中间件](../../packages/server/src/api/server.ts)在开启鉴权时识别部署主令牌、持久化访问令牌和 JWT。普通 API 优先使用 Bearer；仅在缺少整个 `Authorization` 头且方法为 GET/HEAD 时接受 `multimira_auth` Cookie。公开登录、健康、下载、Webhook 等路径有显式例外，应同时检查各路由自己的验证。
+- [API 中间件](../../packages/server/src/api/server.ts)在开启鉴权时识别部署主令牌、持久化访问令牌和 JWT。普通 API 优先使用 Bearer，scheme 不区分大小写并规范化头部空白；仅在缺少整个 `Authorization` 头且方法为 GET/HEAD 时接受 `multimira_auth` Cookie。无部署主令牌的本地模式只允许未带凭据的请求回退管理员，显式 `Authorization` 校验失败一律返回 401。公开登录、健康、下载、Webhook 等路径有显式例外，应同时检查各路由自己的验证。
 - [MultiremiRequestAuth](../../packages/server/src/api/wire/context.ts)保存解析后的访问令牌及用户身份，不缓存统一的 workspace/role。部署主令牌和无鉴权本地模式保留无真实用户、回退 `local` 管理员的兼容路径；不能将这种路径的行为当作普通用户授权结果。
 
 ## 工作区与凭据边界
@@ -34,7 +34,7 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 
 公开 Issue-owned 或无 Chat 的 Task 路由沿用既有 Workspace、owner、Agent 及各路由权限，不统一限制为来源凭据的本 Task。经验证的旧 Task 凭据在 raw Task 列表缺少 `workspaceId`（`null`/`undefined`）时保留原兼容筛选；这不跳过其他路由对目标工作区的检查。Session events、logs 与 messages 仍采用本 Session 内容守卫。通用派发与 Issue 嵌套 Session Task 创建对公开 Issue-owned 目标沿用 owner/Workspace 基线，保留 Agent、旁聊、delegation 血统及交接次数检查；创建本身不额外授予读取内容或控制任务的权限。私有 Chat-owned 目标继续使用当前 Session 或已验证 Topic 创建边界，私有 Task 读取与控制要求本 Task。
 
-[InboxRepo](../../packages/server/src/store/repos/inbox-repo.ts)按真正接收 Session 的 owner 写入委派返回摘要：Chat-owned 写入私有 Session system log 并沿用去重、事件通知与已读回执，不镜像为公开 Issue 评论；Issue-owned 保留公开评论镜像，Issue 工作投影不改变这个范围。
+[InboxRepo](../../packages/server/src/store/repos/inbox-repo.ts)按真正接收 Session 的 owner，通过统一消息入口写入委派返回的 status/report，沿用去重、事件通知与已读回执。Chat-owned 返回内容仅保存在私有 Session，Issue-owned 返回内容在对应 Issue Session 中可见；Issue 工作投影不改变这个范围。Chat 删除前按实际 owner 保留执行历史的 Chat 归属，缺失审计指针不能使私有历史转为公开内容。
 
 [TasksRepo](../../packages/server/src/store/repos/tasks-repo.ts)在任务创建锁内拒绝归档 Session 的普通新任务；只有既有 `delegation_return` 与 turn-end `re_ring` 的内部收尾路径，在重读 source 并核对父 Task、return Session、Workspace、Agent 和执行 scope 后可继续。内部收尾授权不暴露为 `CreateTaskInput` 或 API 字段，system 作者、wake source 或 delegation 字段本身不授予越过归档的权限。
 
@@ -44,9 +44,9 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 
 跨工作区移动时，请求未显式提供的经办人（Agent、成员、小组）、项目及标签按原 ID 核验目标工作区归属；不存在或不属于目标的经办人和项目清空，外部标签关联移除，不按名称映射。每项清空各写一条 `workspace_move_cleared` 活动，与移动共用事务，内容只含字段、原名字及经办人类型，不附带来源对象 ID、颜色或邮箱；移动前的历史活动保持原样。显式提供的经办人和项目沿用校验，目标值保留，来源值报错，显式清空不写移动清空活动；单个和批量更新遵循同一规则，CLI 可用 `remi issue batch-update --data` 传单个或多个 ID（MUL-480）。提交后沿用来源 `issue:deleted`、目标 `issue:updated` 及 `issue_labels:changed` 事件刷新工作区列表、详情和标签缓存，活动事件同样只在提交后发出。
 
-每个移动清空项还在 Issue-owned 默认 Session 写入一条系统评论，同事务镜像为 v2 conversation log 的 `kind=system` 行；metadata 仅含 `type/field/name` 和经办人的 `assignee_type`。英文 Markdown body 对名称转义，当前详情按 metadata 渲染本地化纯文本；目标工作区的 `comment:created` 在提交后触发刷新，不产生任务或 pending turn。旧时间线保留活动、系统评论及其 `comment_created` 审计，不去重。
+每个移动清空项还在 Issue-owned 默认 Session 的统一日志写入一条 `kind=system` 系统消息，评论读取由该消息投影；metadata 仅含 `type/field/name` 和经办人的 `assignee_type`。正文中的名称使用 HTML 实体转义，当前详情按 metadata 渲染本地化纯文本；目标工作区的 `comment:created` 在提交后触发刷新，不产生任务或 pending turn。旧时间线保留活动、系统评论及其 `comment_created` 审计，不去重。
 
-通过现有移动权限和状态检查后，同一事务把该 Issue 拥有的全部 Sessions 移到目标工作区；统一日志、日志头和成果通过 Session 归属跟随访问范围，这些表没有独立的工作区字段。Chat-owned Session 保留其 Chat 和工作区，只清空 Session 与成果上失效的 Issue 工作投影。旧 Task 保留原工作区审计快照，历史参与者不删除；后续读取和操作重新按当前 owner 的目标工作区权限核验，不能借历史记录访问原工作区的私有资源。存在未完成 Task 时沿用既有守卫，拒绝移动。
+通过现有移动权限和状态检查后，同一事务把该 Issue 拥有的全部 Sessions、对应会话头及消息反应的工作区改为目标工作区；统一日志和成果通过 Session 归属跟随访问范围。Chat-owned Session、会话头及消息反应保留其 Chat 工作区，只清空 Session 与成果上失效的 Issue 工作投影。旧 Task 保留原工作区审计快照，历史参与者不删除；后续读取和操作重新按当前 owner 的目标工作区权限核验，不能借历史记录访问原工作区的私有资源。存在未完成 Task 时沿用既有守卫，拒绝移动。
 
 [IssuesRepo](../../packages/server/src/store/repos/issues-repo.ts)的父子和依赖内容读取只认可同工作区关系，依赖行自身的 `workspace_id` 也必须与两端一致。旧的跨工作区关系在详情、列表、收件箱、分享、决策、父单状态推导和依赖自动开工中视为不存在；子单序列化仍保留不透明的 `parent_issue_id`，不附带对方标题、key 或状态。旧的跨工作区子单因此不再阻止父单结束；本规则不修改或迁移存量关系。
 

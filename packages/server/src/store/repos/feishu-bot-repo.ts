@@ -2,9 +2,9 @@ import { patchDecisionRecord } from "../inbox/decision-records.js";
 /**
  * Workspace Feishu concierge bot configuration (MUL-206).
  *
- * Owns `multiremi_feishu_bot_configs` (one row per workspace) and
+ * Owns `multiremi_feishu_bot_configs` (one row per workspace and bot) and
  * `multiremi_feishu_bot_runtime_states` (one row per Runtime that has ever
- * reported on this workspace's connector).
+ * reported on this bot's connector).
  *
  * Two invariants drive the shape of this repo:
  *
@@ -248,7 +248,57 @@ export class FeishuBotConfigError extends Error {
 
 export class FeishuBotRepo {
   private replayingOutboundOperation = false;
-  constructor(private readonly ctx: StoreContext) {}
+  constructor(private readonly ctx: StoreContext, readonly botId = "default") {}
+
+  forBot(botId = "default"): FeishuBotRepo {
+    return botId === this.botId ? this : new FeishuBotRepo(this.ctx, botId);
+  }
+
+  listConfigs(workspaceId: string): MultiremiFeishuBotConfig[] {
+    return (this.ctx.db.query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? ORDER BY created_at, bot_id")
+      .all(workspaceId) as Row[]).map(mapConfig);
+  }
+
+  /** The v1 Runtime has one connector slot. Keep ownership after deletion or
+   * handover until the old host acknowledges stopped. */
+  forRuntime(workspaceId: string, runtimeId: string): FeishuBotRepo {
+    const cache = activeRequestReadCache();
+    const configKey = cacheKey("multiremi_feishu_bot_configs", "runtime", workspaceId, runtimeId);
+    let configured = cache?.get<Row | null>(configKey);
+    if (configured === undefined) {
+      configured = this.ctx.db.query("SELECT bot_id FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND runtime_id = ?")
+        .get(workspaceId, runtimeId) as Row | null;
+      cache?.set(configKey, configured ?? null);
+    }
+    if (configured) return this.forBot(String(configured.bot_id));
+    const stateKey = cacheKey("multiremi_feishu_bot_runtime_states", "owner", workspaceId, runtimeId);
+    let previous = cache?.get<Row | null>(stateKey);
+    if (previous === undefined) {
+      previous = this.ctx.db.query("SELECT bot_id FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND runtime_id = ? AND (state <> 'stopped' OR release_pending = 1) ORDER BY reported_at DESC LIMIT 1")
+        .get(workspaceId, runtimeId) as Row | null;
+      cache?.set(stateKey, previous ?? null);
+    }
+    return this.forBot(String(previous?.bot_id ?? "default"));
+  }
+
+  forTask(taskId: string): FeishuBotRepo {
+    const row = this.ctx.db.query("SELECT b.bot_id FROM multiremi_feishu_bot_chat_bindings b JOIN multiremi_turn_execution_records t ON t.chat_session_id = b.chat_session_id AND t.workspace_id = b.workspace_id WHERE t.id = ?")
+      .get(taskId) as Row | null;
+    return this.forBot(String(row?.bot_id ?? "default"));
+  }
+
+  private assertAssignmentAvailable(workspaceId: string, runtimeId: string, appId: string): void {
+    const conflict = this.ctx.db.query("SELECT runtime_id, app_id FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id <> ? AND (runtime_id = ? OR app_id = ?) LIMIT 1")
+      .get(workspaceId, this.botId, runtimeId, appId) as Row | null;
+    if (conflict?.app_id === appId) throw new FeishuBotConfigError("this Feishu application already belongs to another bot", 409, "app_already_assigned");
+    if (conflict) throw new FeishuBotConfigError("each Runtime currently hosts one bot; select another Runtime", 409, "runtime_already_assigned");
+    if (this.ctx.db.query("SELECT 1 FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND bot_id <> ? AND stopping_app_id = ? AND release_pending = 1 LIMIT 1").get(workspaceId, this.botId, appId)) {
+      throw new FeishuBotConfigError("wait for the previous bot to confirm stopped before reusing this application", 409, "app_bot_stopping");
+    }
+    if (this.ctx.db.query("SELECT 1 FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND runtime_id = ? AND bot_id <> ? AND (state <> 'stopped' OR release_pending = 1) LIMIT 1").get(workspaceId, runtimeId, this.botId)) {
+      throw new FeishuBotConfigError("wait for the previous bot to confirm stopped before reusing this Runtime", 409, "runtime_bot_stopping");
+    }
+  }
 
   /** A host claim may replay durable intent even on a process with timers disabled. */
   private canWriteOutbound(): boolean {
@@ -258,7 +308,7 @@ export class FeishuBotRepo {
   listTaskReceiptMessageIds(workspaceId: string, taskId: string): string[] {
     return (this.ctx.db.query(`SELECT d.external_message_id FROM multiremi_feishu_bot_deliveries d
       JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id
-      JOIN multiremi_feishu_bot_configs c ON c.workspace_id = d.workspace_id AND c.app_id = b.app_id
+      JOIN multiremi_feishu_bot_configs c ON c.workspace_id = d.workspace_id AND c.bot_id = b.bot_id AND c.app_id = b.app_id
       WHERE d.workspace_id = ? AND d.task_id = ?
       ORDER BY d.created_at, d.external_message_id`).all(workspaceId, taskId) as Row[])
       .map(row => String(row.external_message_id));
@@ -269,9 +319,9 @@ export class FeishuBotRepo {
     if (!config) return [];
     return (this.ctx.db.query(
       `SELECT * FROM multiremi_feishu_bot_senders
-       WHERE workspace_id = ? AND app_id = ?
+       WHERE workspace_id = ? AND bot_id = ? AND app_id = ?
        ORDER BY allowed ASC, last_seen_at DESC, id ASC`,
-    ).all(workspaceId, config.appId) as Row[]).map(toSender);
+    ).all(workspaceId, this.botId, config.appId) as Row[]).map(toSender);
   }
 
   listSenderProfileSources(workspaceId: string, before: string) {
@@ -281,12 +331,12 @@ export class FeishuBotRepo {
         (SELECT d.external_message_id FROM multiremi_feishu_bot_deliveries d
          WHERE d.sender_id = s.id ORDER BY d.created_at DESC, d.external_message_id DESC LIMIT 1) AS message_id
       FROM multiremi_feishu_bot_senders s
-      WHERE s.workspace_id = ? AND s.app_id = ?
+      WHERE s.workspace_id = ? AND s.bot_id = ? AND s.app_id = ?
         AND s.open_id IS NOT NULL
         AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_deliveries d WHERE d.sender_id = s.id)
         AND (s.profile_checked_at IS NULL OR s.profile_checked_at < ?)
       ORDER BY s.profile_checked_at ASC, s.last_seen_at DESC, s.id ASC LIMIT 10`
-    ).all(workspaceId, config.appId, before) as Row[];
+    ).all(workspaceId, this.botId, config.appId, before) as Row[];
     return rows.flatMap(row => row.message_id ? [{ id: String(row.id), appId: String(row.app_id),
       openId: String(row.open_id), messageId: String(row.message_id) }] : []);
   }
@@ -310,8 +360,8 @@ export class FeishuBotRepo {
       const config = this.getConfig(workspaceId);
       if (!config) return null;
       const row = this.ctx.db.query(
-        `SELECT * FROM multiremi_feishu_bot_senders WHERE id = ? AND workspace_id = ? AND app_id = ?`,
-      ).get(senderId, workspaceId, config.appId) as Row | null;
+        `SELECT * FROM multiremi_feishu_bot_senders WHERE id = ? AND workspace_id = ? AND bot_id = ? AND app_id = ?`,
+      ).get(senderId, workspaceId, this.botId, config.appId) as Row | null;
       if (!row) return null;
       if (Boolean(Number(row.allowed)) !== allowed) {
         this.ctx.db.run("UPDATE multiremi_feishu_bot_senders SET allowed = ? WHERE id = ?", [allowed ? 1 : 0, senderId]);
@@ -341,7 +391,7 @@ export class FeishuBotRepo {
        )
        SELECT 1 AS restricted FROM multiremi_feishu_bot_deliveries d
        JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id
-       JOIN multiremi_feishu_bot_configs c ON c.workspace_id = d.workspace_id
+       JOIN multiremi_feishu_bot_configs c ON c.workspace_id = d.workspace_id AND c.bot_id = b.bot_id AND c.app_id = b.app_id
        LEFT JOIN multiremi_feishu_bot_senders s ON s.id = d.sender_id
        WHERE c.sender_access_policy = 'allowlist' AND d.sender_recorded = 1
          AND (d.task_id IN (SELECT a.id FROM multiremi_turn_attempts a JOIN lineage l ON l.id=a.turn_id)
@@ -353,8 +403,8 @@ export class FeishuBotRepo {
 
   getConfig(workspaceId: string): MultiremiFeishuBotConfig | null {
     const row = this.ctx.db
-      .query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ?")
-      .get(workspaceId) as Row | null;
+      .query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?")
+      .get(workspaceId, this.botId) as Row | null;
     return row ? mapConfig(row) : null;
   }
 
@@ -363,13 +413,13 @@ export class FeishuBotRepo {
       `SELECT r.*, a.name AS agent_name, a.archived_at AS agent_archived_at
        FROM multiremi_feishu_bot_agent_routes r
        LEFT JOIN multiremi_agents a ON a.id = r.agent_id
-       WHERE r.workspace_id = ?
+       WHERE r.workspace_id = ? AND r.bot_id = ?
        ORDER BY CASE r.scope
          WHEN 'p2p_default' THEN 0
          WHEN 'group_default' THEN 1
          ELSE 2
        END, r.chat_name ASC, r.chat_id ASC, r.id ASC`,
-    ).all(workspaceId) as Row[];
+    ).all(workspaceId, this.botId) as Row[];
     return rows.map(mapRoute);
   }
 
@@ -403,10 +453,10 @@ export class FeishuBotRepo {
           const id = createId("fbr");
           this.ctx.db.run(
             `INSERT INTO multiremi_feishu_bot_agent_routes (
-               id, workspace_id, scope, chat_id, chat_name, agent_id,
+               id, workspace_id, bot_id, scope, chat_id, chat_name, agent_id,
                created_at, updated_at, updated_by
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [id, workspaceId, route.scope, route.chatId, route.chatName, route.agentId, now, now, updatedBy],
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, workspaceId, this.botId, route.scope, route.chatId, route.chatName, route.agentId, now, now, updatedBy],
           );
           retainedIds.add(id);
           continue;
@@ -433,9 +483,9 @@ export class FeishuBotRepo {
     this.ctx.db.run(
       `UPDATE multiremi_feishu_bot_agent_routes
        SET chat_name = ?, updated_at = ?
-       WHERE workspace_id = ? AND scope = 'chat' AND chat_id = ?
+       WHERE workspace_id = ? AND bot_id = ? AND scope = 'chat' AND chat_id = ?
          AND COALESCE(chat_name, '') <> COALESCE(?, '')`,
-      [cleanOptionalString(chatName), nowIso(), workspaceId, chatId, cleanOptionalString(chatName)],
+      [cleanOptionalString(chatName), nowIso(), workspaceId, this.botId, chatId, cleanOptionalString(chatName)],
     );
   }
 
@@ -452,9 +502,9 @@ export class FeishuBotRepo {
                 a.archived_at AS agent_archived_at
          FROM multiremi_feishu_bot_agent_routes r
          LEFT JOIN multiremi_agents a ON a.id = r.agent_id
-         WHERE r.workspace_id = ? AND r.scope = 'chat' AND r.chat_id = ?
+         WHERE r.workspace_id = ? AND r.bot_id = ? AND r.scope = 'chat' AND r.chat_id = ?
          ORDER BY r.updated_at DESC, r.id DESC LIMIT 1`,
-      ).get(workspaceId, normalizedChatId) as Row | null;
+      ).get(workspaceId, this.botId, normalizedChatId) as Row | null;
       if (exact) candidates.push(exact);
     }
     const typeDefault = this.ctx.db.query(
@@ -462,9 +512,9 @@ export class FeishuBotRepo {
               a.archived_at AS agent_archived_at
        FROM multiremi_feishu_bot_agent_routes r
        LEFT JOIN multiremi_agents a ON a.id = r.agent_id
-       WHERE r.workspace_id = ? AND r.scope = ? AND r.chat_id IS NULL
+       WHERE r.workspace_id = ? AND r.bot_id = ? AND r.scope = ? AND r.chat_id IS NULL
        ORDER BY r.updated_at DESC, r.id DESC LIMIT 1`,
-    ).get(workspaceId, chatType === "p2p" ? "p2p_default" : "group_default") as Row | null;
+    ).get(workspaceId, this.botId, chatType === "p2p" ? "p2p_default" : "group_default") as Row | null;
     if (typeDefault) candidates.push(typeDefault);
 
     for (const candidate of candidates) {
@@ -501,11 +551,18 @@ export class FeishuBotRepo {
   }
 
   /**
-   * Create or replace the workspace's config. Secret columns follow the
+   * Create or replace this bot's config. Secret columns follow the
    * caller's per-field op so a PUT that only changes the domain cannot wipe an
    * app secret the admin never re-typed.
    */
   upsertConfig(workspaceId: string, input: UpsertFeishuBotConfigInput): MultiremiFeishuBotConfig {
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      return this.upsertConfigWithinTransaction(workspaceId, input);
+    })();
+  }
+
+  private upsertConfigWithinTransaction(workspaceId: string, input: UpsertFeishuBotConfigInput): MultiremiFeishuBotConfig {
     const agentId = cleanOptionalString(input.agentId);
     const runtimeId = cleanOptionalString(input.runtimeId);
     const appId = cleanOptionalString(input.appId);
@@ -534,7 +591,10 @@ export class FeishuBotRepo {
     }
     if (input.enabled) this.requireDeployableRuntime(workspaceId, runtimeId);
 
+    this.assertAssignmentAvailable(workspaceId, runtimeId, appId);
     const existing = this.rawConfigRow(workspaceId);
+    const name = input.name === undefined ? String(existing?.name ?? "") : input.name.trim();
+    if (name.length > 100) throw new FeishuBotConfigError("name must be at most 100 characters", 400, "invalid_name");
     const senderAccessPolicy = input.senderAccessPolicy ?? existing?.sender_access_policy ?? "agent";
     if (senderAccessPolicy !== "agent" && senderAccessPolicy !== "allowlist") {
       throw new FeishuBotConfigError("sender_access_policy must be agent or allowlist", 400, "invalid_sender_access_policy");
@@ -563,13 +623,14 @@ export class FeishuBotRepo {
 
     this.ctx.db.run(
       `INSERT INTO multiremi_feishu_bot_configs (
-         workspace_id, agent_id, runtime_id, app_id,
+         workspace_id, bot_id, name, agent_id, runtime_id, app_id,
          app_secret_encrypted, app_secret_hint,
          domain, enabled, sender_access_policy, revision,
          bot_name, bot_open_id, last_tested_at, last_test_error, last_test_error_code,
          created_at, updated_at, updated_by
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(workspace_id) DO UPDATE SET
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(workspace_id, bot_id) DO UPDATE SET
+         name = excluded.name,
          agent_id = excluded.agent_id,
          runtime_id = excluded.runtime_id,
          app_id = excluded.app_id,
@@ -587,6 +648,8 @@ export class FeishuBotRepo {
          updated_at = excluded.updated_at,
          updated_by = excluded.updated_by`,
       workspaceId,
+      this.botId,
+      name,
       agentId,
       runtimeId,
       appId,
@@ -605,14 +668,35 @@ export class FeishuBotRepo {
       now,
       cleanOptionalString(input.actor),
     );
+    if (existing && (String(existing.runtime_id) !== runtimeId || String(existing.app_id) !== appId || !input.enabled)) {
+      this.reserveStoppedAcknowledgement(workspaceId, existing);
+    }
     this.publishDownlinkChange(workspaceId);
     return this.getConfig(workspaceId)!;
   }
 
+  private reserveStoppedAcknowledgement(workspaceId: string, config: Row): void {
+    if (!Number(config.enabled)) return;
+    this.ctx.db.run(`INSERT INTO multiremi_feishu_bot_runtime_states (workspace_id, bot_id, runtime_id, reported_at, release_pending, stopping_app_id)
+      VALUES (?, ?, ?, ?, 1, ?) ON CONFLICT(workspace_id, bot_id, runtime_id) DO UPDATE SET
+        stopping_app_id = CASE WHEN multiremi_feishu_bot_runtime_states.release_pending = 1
+          THEN multiremi_feishu_bot_runtime_states.stopping_app_id ELSE excluded.stopping_app_id END,
+        release_pending = 1`,
+      [workspaceId, this.botId, String(config.runtime_id), nowIso(), String(config.app_id)]);
+  }
+
   deleteConfig(workspaceId: string): boolean {
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      return this.deleteConfigWithinTransaction(workspaceId);
+    })();
+  }
+
+  private deleteConfigWithinTransaction(workspaceId: string): boolean {
     const existing = this.rawConfigRow(workspaceId);
     if (!existing) return false;
-    this.ctx.db.run("DELETE FROM multiremi_feishu_bot_configs WHERE workspace_id = ?", workspaceId);
+    this.reserveStoppedAcknowledgement(workspaceId, existing);
+    this.ctx.db.run("DELETE FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?", [workspaceId, this.botId]);
     // Reported states are intentionally kept: a Runtime that is still hosting
     // the connector must keep appearing here until it confirms it stopped, so
     // `directiveForRuntime` can go on telling it to stop after the row is gone.
@@ -625,20 +709,25 @@ export class FeishuBotRepo {
    * nothing is configured so callers can 404 rather than create a config.
    */
   setEnabled(workspaceId: string, enabled: boolean, actor?: string | null): MultiremiFeishuBotConfig | null {
-    const existing = this.rawConfigRow(workspaceId);
-    if (!existing) return null;
-    if (enabled) this.requireDeployableRuntime(workspaceId, String(existing.runtime_id));
-    this.ctx.db.run(
-      `UPDATE multiremi_feishu_bot_configs
-          SET enabled = ?, revision = revision + 1, updated_at = ?, updated_by = ?
-        WHERE workspace_id = ?`,
-      enabled ? 1 : 0,
-      nowIso(),
-      cleanOptionalString(actor),
-      workspaceId,
-    );
-    this.publishDownlinkChange(workspaceId);
-    return this.getConfig(workspaceId);
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const existing = this.rawConfigRow(workspaceId);
+      if (!existing) return null;
+      if (enabled) this.requireDeployableRuntime(workspaceId, String(existing.runtime_id));
+      else this.reserveStoppedAcknowledgement(workspaceId, existing);
+      this.ctx.db.run(
+        `UPDATE multiremi_feishu_bot_configs
+            SET enabled = ?, revision = revision + 1, updated_at = ?, updated_by = ?
+          WHERE workspace_id = ? AND bot_id = ?`,
+        enabled ? 1 : 0,
+        nowIso(),
+        cleanOptionalString(actor),
+        workspaceId,
+        this.botId,
+      );
+      this.publishDownlinkChange(workspaceId);
+      return this.getConfig(workspaceId);
+    })();
   }
 
   /**
@@ -651,10 +740,11 @@ export class FeishuBotRepo {
     this.ctx.db.run(
       `UPDATE multiremi_feishu_bot_configs
           SET revision = revision + 1, updated_at = ?, updated_by = ?
-        WHERE workspace_id = ?`,
+        WHERE workspace_id = ? AND bot_id = ?`,
       nowIso(),
       cleanOptionalString(actor),
       workspaceId,
+      this.botId,
     );
     this.publishDownlinkChange(workspaceId);
     return this.getConfig(workspaceId);
@@ -674,7 +764,7 @@ export class FeishuBotRepo {
       `UPDATE multiremi_feishu_bot_configs
           SET bot_name = ?, bot_open_id = ?, last_tested_at = ?,
               last_test_error = ?, last_test_error_code = ?, updated_at = ?
-        WHERE workspace_id = ?`,
+        WHERE workspace_id = ? AND bot_id = ?`,
       cleanOptionalString(result.botName),
       cleanOptionalString(result.botOpenId),
       nowIso(),
@@ -682,6 +772,7 @@ export class FeishuBotRepo {
       normalizeFeishuBotErrorCode(result.errorCode),
       nowIso(),
       workspaceId,
+      this.botId,
     );
     return this.getConfig(workspaceId);
   }
@@ -750,8 +841,8 @@ export class FeishuBotRepo {
         issueId: null, commentId: null, chatSessionId: null, chatMessageId: null,
         uploaderType: "daemon", uploaderId: runtimeId });
       this.ctx.db.run(`INSERT INTO multiremi_feishu_bot_inbound_attachments
-        (attachment_id, workspace_id, runtime_id, app_id, revision, external_session_key, external_message_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`, [attachment.id, workspaceId, runtimeId, config.appId,
+        (attachment_id, workspace_id, bot_id, runtime_id, app_id, revision, external_session_key, external_message_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [attachment.id, workspaceId, this.botId, runtimeId, config.appId,
           scope.revision, scope.externalSessionKey.trim(), scope.externalMessageId.trim()]);
       return attachment;
     })();
@@ -852,7 +943,7 @@ export class FeishuBotRepo {
       ? null : cleanOptionalString(input.replyToMessageId) ?? externalMessageId;
     const routeAgent = this.resolveRouteAgent(workspaceId, chatType, chatId)!;
     const workspace = this.ctx.workspaces().getWorkspace(workspaceId);
-    const topicConfig = workspace ? readWorkspaceIssueTopicsLenient(workspace.settings, () => {
+    const topicConfig = workspace && this.botId === "default" ? readWorkspaceIssueTopicsLenient(workspace.settings, () => {
       log.warn(`Feishu inbound message: ignoring an invalid issueTopics config for ${workspaceId}`);
     }) : null;
     let enqueuedTask: MultiremiTask | null = null;
@@ -871,8 +962,8 @@ export class FeishuBotRepo {
       const sender = this.resolveSender(workspaceId, config.appId, input, config.senderAccessPolicy);
       let binding = this.ctx.db.query(
         `SELECT * FROM multiremi_feishu_bot_chat_bindings
-          WHERE workspace_id = ? AND app_id = ? AND agent_id = ? AND external_session_key = ?`,
-      ).get(workspaceId, config.appId, routeAgent.agentId, externalSessionKey) as Row | null;
+          WHERE workspace_id = ? AND bot_id = ? AND app_id = ? AND agent_id = ? AND external_session_key = ?`,
+      ).get(workspaceId, this.botId, config.appId, routeAgent.agentId, externalSessionKey) as Row | null;
       const autoCreateGroupIssue = sender.allowed
         && !this.ctx.agents().getAgent(routeAgent.agentId)?.issueCreationRequiresProposal
         && chatType === "group"
@@ -901,8 +992,8 @@ export class FeishuBotRepo {
            JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id
            LEFT JOIN multiremi_agents a ON a.id = b.agent_id
            JOIN multiremi_turn_execution_records t ON t.id = d.task_id
-          WHERE d.workspace_id = ? AND d.external_message_id = ?`,
-      ).get(workspaceId, externalMessageId) as Row | null;
+          WHERE d.workspace_id = ? AND d.bot_id = ? AND d.external_message_id = ?`,
+      ).get(workspaceId, this.botId, externalMessageId) as Row | null;
       if (duplicate) {
         return {
           chatSessionId: String(duplicate.chat_session_id),
@@ -921,10 +1012,10 @@ export class FeishuBotRepo {
       for (const attachmentId of attachmentIds) {
         const upload = this.ctx.db.query(`SELECT a.id FROM multiremi_feishu_bot_inbound_attachments u
           JOIN multiremi_attachments a ON a.id = u.attachment_id
-          WHERE u.attachment_id = ? AND u.workspace_id = ? AND u.runtime_id = ? AND u.app_id = ?
+          WHERE u.attachment_id = ? AND u.workspace_id = ? AND u.bot_id = ? AND u.runtime_id = ? AND u.app_id = ?
             AND u.revision = ? AND u.external_session_key = ? AND u.external_message_id = ?
             AND a.chat_message_id IS NULL AND a.chat_session_id IS NULL`)
-          .get(attachmentId, workspaceId, runtimeId, config.appId, input.revision, externalSessionKey, externalMessageId);
+          .get(attachmentId, workspaceId, this.botId, runtimeId, config.appId, input.revision, externalSessionKey, externalMessageId);
         if (!upload) throw new FeishuBotConfigError("attachment does not belong to this inbound message", 403, "invalid_attachment");
       }
 
@@ -941,12 +1032,13 @@ export class FeishuBotRepo {
         this.assertChatHasNoBinding(chat.id, bindingId);
         this.ctx.db.run(
           `INSERT INTO multiremi_feishu_bot_chat_bindings (
-             id, workspace_id, app_id, agent_id, external_session_key,
+             id, workspace_id, bot_id, app_id, agent_id, external_session_key,
              chat_session_id, issue_id, chat_id, thread_id, reply_to_message_id,
              created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           bindingId,
           workspaceId,
+          this.botId,
           config.appId,
           routeAgent.agentId,
           externalSessionKey,
@@ -1053,10 +1145,11 @@ export class FeishuBotRepo {
       } : null;
       this.ctx.db.run(
         `INSERT INTO multiremi_feishu_bot_deliveries (
-           workspace_id, external_message_id, binding_id, task_id,
+           workspace_id, bot_id, external_message_id, binding_id, task_id,
            reply_to_message_id, created_at, updated_at, sender_id, sender_recorded, outbound_requested, outbound_context
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
         workspaceId,
+        this.botId,
         externalMessageId,
         String(binding.id),
         task.id,
@@ -1162,7 +1255,7 @@ export class FeishuBotRepo {
     return this.ctx.db.query(`SELECT 1 AS present
       FROM multiremi_feishu_bot_configs c
       JOIN multiremi_runtimes r ON r.id = c.runtime_id AND r.workspace_id = c.workspace_id
-      JOIN multiremi_feishu_bot_chat_bindings b ON b.workspace_id = c.workspace_id AND b.app_id = c.app_id
+      JOIN multiremi_feishu_bot_chat_bindings b ON b.workspace_id = c.workspace_id AND b.bot_id = c.bot_id AND b.app_id = c.app_id
       JOIN multiremi_turn_execution_records t ON t.chat_session_id = b.chat_session_id
         AND t.workspace_id = b.workspace_id AND t.agent_id = b.agent_id
       WHERE c.workspace_id = ? AND c.enabled = 1 AND r.daemon_id = ? AND t.id = ? LIMIT 1`)
@@ -1181,7 +1274,7 @@ export class FeishuBotRepo {
     return this.ctx.db.query(`SELECT 1 AS present
       FROM multiremi_feishu_bot_configs c
       JOIN multiremi_runtimes r ON r.id = c.runtime_id AND r.workspace_id = c.workspace_id
-      JOIN multiremi_feishu_bot_chat_bindings b ON b.workspace_id = c.workspace_id AND b.app_id = c.app_id
+      JOIN multiremi_feishu_bot_chat_bindings b ON b.workspace_id = c.workspace_id AND b.bot_id = c.bot_id AND b.app_id = c.app_id
       JOIN multiremi_chat_sessions s ON s.id = b.chat_session_id AND s.status = 'active'
       JOIN multiremi_turn_execution_records t ON t.issue_id = b.issue_id AND t.workspace_id = b.workspace_id
       WHERE c.workspace_id = ? AND c.enabled = 1 AND r.daemon_id = ?
@@ -1272,13 +1365,14 @@ export class FeishuBotRepo {
       this.assertChatHasNoBinding(chat.id, bindingId);
       this.ctx.db.run(
         `INSERT INTO multiremi_feishu_bot_chat_bindings (
-           id, workspace_id, app_id, agent_id, external_session_key,
+           id, workspace_id, bot_id, app_id, agent_id, external_session_key,
            chat_session_id, issue_id, chat_id, thread_id, reply_to_message_id,
            created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
         [
           bindingId,
           issue.workspaceId,
+          this.botId,
           bot.config!.appId,
           routeAgent.agentId,
           `pending:${issue.id}`,
@@ -1355,10 +1449,11 @@ export class FeishuBotRepo {
         `SELECT b.* FROM multiremi_feishu_bot_chat_bindings b
          JOIN multiremi_chat_sessions c ON c.id = b.chat_session_id
          WHERE b.workspace_id = ? AND b.issue_id = ? AND c.status = 'active'
+           AND b.bot_id = ? AND b.app_id = ?
            AND b.chat_id = ?
          ORDER BY b.updated_at DESC, b.created_at DESC, b.id DESC
          LIMIT 1`,
-      ).get(issue.workspaceId, issue.id, topics.chatId) as Row | null;
+      ).get(issue.workspaceId, issue.id, this.botId, botConfig.appId, topics.chatId) as Row | null;
       if (!binding) return null;
       const bindingId = String(binding.id);
       const existing = this.ctx.db.query(
@@ -1661,7 +1756,7 @@ export class FeishuBotRepo {
       const request = this.ctx.tasks().getTaskHumanRequest(requestId);
       const task = request ? this.ctx.tasks().getTask(request.taskId) : null;
       if (!request || !task || request.status !== "pending") return null;
-      return this.rotatedQuestionCard({ human_request_id: requestId, workspace_id: task.workspaceId }, recipientOpenId);
+      return this.forTask(task.id).rotatedQuestionCard({ human_request_id: requestId, workspace_id: task.workspaceId }, recipientOpenId);
     })();
   }
 
@@ -1722,10 +1817,11 @@ export class FeishuBotRepo {
       `SELECT b.* FROM multiremi_feishu_bot_chat_bindings b
        JOIN multiremi_chat_sessions c ON c.id = b.chat_session_id
        WHERE b.workspace_id = ? AND b.issue_id = ? AND c.status = 'active'
+         AND b.bot_id = ? AND b.app_id = ?
          AND b.chat_id = ?
        ORDER BY b.updated_at DESC, b.created_at DESC, b.id DESC
        LIMIT 1`,
-    ).get(issue.workspaceId, issue.id, topics.chatId) as Row | null;
+    ).get(issue.workspaceId, issue.id, this.botId, botConfig.appId, topics.chatId) as Row | null;
     if (!binding) return;
     const bindingId = String(binding.id);
     const replyToMessageId = cleanOptionalString(binding.reply_to_message_id);
@@ -1900,13 +1996,15 @@ export class FeishuBotRepo {
          AND issue.workspace_id = ?
          AND (
            SELECT o.sent_at FROM multiremi_feishu_bot_outbound_deliveries o
+           JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id
            WHERE o.kind = 'decision_card' AND o.decision_id = decision.id
+             AND b.bot_id = ?
              AND o.status = 'sent' AND o.external_message_id IS NOT NULL
              AND o.degraded IS NULL AND o.sent_at IS NOT NULL
            ORDER BY o.created_at DESC, o.id DESC LIMIT 1
          ) <= ?
        ORDER BY decision.id ASC`,
-    ).all(workspaceId, threshold) as Row[];
+    ).all(workspaceId, this.botId, threshold) as Row[];
   }
 
   private materializeIssueDecisionRemindersWithinTransaction(
@@ -1990,6 +2088,8 @@ export class FeishuBotRepo {
     recipient_open_id: string;
   }> {
     if (!this.supportsIssueDecisionCard(workspaceId, runtimeId)) return [];
+    const config = this.getConfig(workspaceId);
+    if (!config?.enabled || config.runtimeId !== runtimeId) return [];
     const rows = this.ctx.db.query(
       `SELECT o.decision_id, o.chat_id, o.external_message_id, o.interaction_open_id,
               decision.issue_id
@@ -2001,11 +2101,12 @@ export class FeishuBotRepo {
        JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id
          AND b.workspace_id = o.workspace_id AND b.issue_id = decision.issue_id
        WHERE o.workspace_id = ? AND o.kind = 'decision_card' AND o.status = 'sent'
+         AND b.bot_id = ? AND b.app_id = ?
          AND o.decision_id IS NOT NULL AND o.external_message_id IS NOT NULL
          AND o.interaction_open_id IS NOT NULL AND o.degraded IS NULL
          AND decision.status = 'escalated'
        ORDER BY o.created_at ASC, o.id ASC`,
-    ).all(workspaceId) as Row[];
+    ).all(workspaceId, this.botId, config.appId) as Row[];
     return rows.map((row) => ({
       decision_id: String(row.decision_id),
       issue_id: String(row.issue_id),
@@ -2028,7 +2129,7 @@ export class FeishuBotRepo {
     return this.ctx.db.query(`SELECT 1 AS present
       FROM multiremi_feishu_bot_configs c
       JOIN multiremi_runtimes r ON r.id = c.runtime_id AND r.workspace_id = c.workspace_id
-      JOIN multiremi_feishu_bot_chat_bindings b ON b.workspace_id = c.workspace_id AND b.app_id = c.app_id
+      JOIN multiremi_feishu_bot_chat_bindings b ON b.workspace_id = c.workspace_id AND b.bot_id = c.bot_id AND b.app_id = c.app_id
       JOIN multiremi_chat_sessions s ON s.id = b.chat_session_id AND s.status = 'active'
       JOIN multiremi_issues i ON i.id = b.issue_id AND i.workspace_id = b.workspace_id
       WHERE c.workspace_id = ? AND c.enabled = 1 AND r.daemon_id = ?
@@ -2255,12 +2356,14 @@ export class FeishuBotRepo {
          AND task.issue_id IS NOT NULL AND task.workspace_id = ?
          AND (
            SELECT COUNT(*) FROM multiremi_feishu_bot_outbound_deliveries o
+           JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id
            WHERE o.kind = 'decision_card' AND o.human_request_id = request.id
+             AND b.bot_id = ?
              AND o.status = 'sent' AND o.external_message_id IS NOT NULL
              AND o.degraded IS NULL
          ) > 0
        ORDER BY request.expires_at ASC, request.id ASC`,
-    ).all(new Date(now.getTime() + ISSUE_DECISION_REMINDER_MIN_REMAINING_MS).toISOString(), workspaceId) as Row[];
+    ).all(new Date(now.getTime() + ISSUE_DECISION_REMINDER_MIN_REMAINING_MS).toISOString(), workspaceId, this.botId) as Row[];
     for (const row of due) {
       // A reminder is due once the deadline is within its lead. The lead is
       // half the request's lifetime, capped at ten minutes, so a five-minute
@@ -2361,18 +2464,22 @@ export class FeishuBotRepo {
     recipient_open_id: string;
   }> {
     if (!this.supportsDecisionCard(workspaceId, runtimeId)) return [];
+    const config = this.getConfig(workspaceId);
+    if (!config?.enabled || config.runtimeId !== runtimeId) return [];
     const rows = this.ctx.db.query(
       `SELECT o.human_request_id, o.human_request_task_id, o.chat_id,
               o.external_message_id, o.interaction_open_id
        FROM multiremi_feishu_bot_outbound_deliveries o
+       JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id AND b.workspace_id = o.workspace_id
        JOIN multiremi_message_question_records request
          ON request.id = o.human_request_id AND request.status = 'pending'
        WHERE o.workspace_id = ? AND o.kind = 'decision_card' AND o.status = 'sent'
+         AND b.bot_id = ? AND b.app_id = ?
          AND o.human_request_id IS NOT NULL AND o.human_request_task_id IS NOT NULL
          AND o.external_message_id IS NOT NULL AND o.interaction_open_id IS NOT NULL
          AND o.degraded IS NULL
        ORDER BY o.created_at ASC, o.id ASC`,
-    ).all(workspaceId) as Row[];
+    ).all(workspaceId, this.botId, config.appId) as Row[];
     return rows.map((row) => ({
       // Snake_case, like every other field the daemon protocol carries. The
       // client parser reads exactly these keys; emitting camelCase here
@@ -2423,14 +2530,14 @@ export class FeishuBotRepo {
           EXISTS (
             SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries o
             JOIN multiremi_feishu_bot_chat_bindings b
-              ON b.id = o.binding_id AND b.workspace_id = c.workspace_id AND b.app_id = c.app_id
+              ON b.id = o.binding_id AND b.workspace_id = c.workspace_id AND b.bot_id = c.bot_id AND b.app_id = c.app_id
             WHERE o.workspace_id = c.workspace_id AND o.human_request_id = request.id
               AND o.human_request_task_id = request.task_id AND o.kind = 'decision_card'
               AND o.status = 'sent' AND o.degraded IS NULL AND o.external_message_id IS NOT NULL
           )
           OR (request.responded_at >= ? AND EXISTS (
             SELECT 1 FROM multiremi_feishu_bot_chat_bindings b
-            WHERE b.workspace_id = c.workspace_id AND b.app_id = c.app_id
+            WHERE b.workspace_id = c.workspace_id AND b.bot_id = c.bot_id AND b.app_id = c.app_id
               AND b.chat_session_id = task.chat_session_id AND b.agent_id = task.agent_id
           ))
         )
@@ -2589,11 +2696,11 @@ export class FeishuBotRepo {
     const rows = this.ctx.db.query(
       `SELECT b.* FROM multiremi_feishu_bot_chat_bindings b
        JOIN multiremi_chat_sessions c ON c.id = b.chat_session_id
-       WHERE b.workspace_id = ? AND b.app_id = ?
+       WHERE b.workspace_id = ? AND b.bot_id = ? AND b.app_id = ?
          AND b.issue_id = ? AND c.status = 'active'
          AND b.chat_id IS NOT NULL AND b.reply_to_message_id IS NOT NULL
        ORDER BY b.updated_at DESC, b.created_at DESC, b.id DESC`,
-    ).all(input.issue.workspaceId, config.appId, input.issue.id) as Row[];
+    ).all(input.issue.workspaceId, this.botId, config.appId, input.issue.id) as Row[];
     const enqueued: MultiremiTask[] = [];
     const seenBindings = new Set<string>();
     for (const binding of rows) {
@@ -2775,7 +2882,7 @@ export class FeishuBotRepo {
       ON CONFLICT(workspace_id, kind, unit_key) DO UPDATE SET operation = excluded.operation,
         status = 'pending', claim_token = NULL, leased_until = NULL,
         available_at = excluded.available_at, updated_at = excluded.updated_at`,
-      [createId('fop'), workspaceId, operation.kind, unitKey, toJson(operation), now, now, now]);
+      [createId('fop'), workspaceId, operation.kind, this.botId === 'default' ? unitKey : `${this.botId}:${unitKey}`, toJson({ ...operation, botId: this.botId }), now, now, now]);
   }
 
   private drainOutboundOperations(workspaceId: string, now: Date): void {
@@ -2791,34 +2898,35 @@ export class FeishuBotRepo {
         WHERE id = ? AND operation = ? AND ((status = 'pending' AND available_at <= ?) OR (status = 'processing' AND leased_until <= ?))`,
         [token, new Date(now.getTime() + 120_000).toISOString(), row.id, row.operation, at, at]).changes !== 1) continue;
       try {
-        const op = parseJson<DeferredOutboundOperation | null>(row.operation, null);
+        const op = parseJson<(DeferredOutboundOperation & { botId?: string }) | null>(row.operation, null);
         if (!op) throw new Error('Deferred outbound operation is invalid');
         // Replay synchronously through the established writers. Without this
         // scope, jobs=0 would re-defer the same intent instead of materializing
         // it. Restore the scope on failures; no global scheduler flag changes.
-        this.replayingOutboundOperation = true;
+        const owner = this.forBot(op.botId);
+        owner.replayingOutboundOperation = true;
         try {
           switch (op.kind) {
             case 'topic':
-              if (this.ctx.issues().getIssue(op.issue.id)) this.prepareIssueTopicWithinTransaction(op.issue);
+              if (owner.ctx.issues().getIssue(op.issue.id)) owner.prepareIssueTopicWithinTransaction(op.issue);
               break;
             case 'human_request': {
-              const request = this.ctx.tasks().getTaskHumanRequest(op.request.id);
-              if (request?.status === 'pending') this.prepareHumanRequestPush(request);
+              const request = owner.ctx.tasks().getTaskHumanRequest(op.request.id);
+              if (request?.status === 'pending') owner.prepareHumanRequestPush(request);
               break;
             }
             case 'decision_patch': {
-              const request = this.ctx.tasks().getTaskHumanRequest(op.request.id);
-              if (request) this.enqueueDecisionCardPatch(request);
+              const request = owner.ctx.tasks().getTaskHumanRequest(op.request.id);
+              if (request) owner.enqueueDecisionCardPatch(request);
               break;
             }
-            case 'round': this.prepareIssueRoundPushes({ issue: op.issue, leaderTask: op.leaderTask }); break;
-            case 'retarget': this.ctx.db.transaction(() => this.retargetRoundPushTaskWithinTransaction(op.fromTaskId, op.toTaskId))(); break;
-            case 'round_delivery': this.ctx.db.transaction(() => this.upsertRoundPushDeliveryWithinTransaction(op.task, op.body))(); break;
-            case 'attachments': this.ctx.db.transaction(() => this.writeAttachmentDeliveriesWithinTransaction(workspaceId, op))(); break;
+            case 'round': owner.prepareIssueRoundPushes({ issue: op.issue, leaderTask: op.leaderTask }); break;
+            case 'retarget': owner.ctx.db.transaction(() => owner.retargetRoundPushTaskWithinTransaction(op.fromTaskId, op.toTaskId))(); break;
+            case 'round_delivery': owner.ctx.db.transaction(() => owner.upsertRoundPushDeliveryWithinTransaction(op.task, op.body))(); break;
+            case 'attachments': owner.ctx.db.transaction(() => owner.writeAttachmentDeliveriesWithinTransaction(workspaceId, op))(); break;
           }
-        } finally { this.replayingOutboundOperation = false; }
-        this.ctx.db.run(`UPDATE multiremi_feishu_bot_outbound_operations SET status = 'done', claim_token = NULL,
+        } finally { owner.replayingOutboundOperation = false; }
+        owner.ctx.db.run(`UPDATE multiremi_feishu_bot_outbound_operations SET status = 'done', claim_token = NULL,
           leased_until = NULL, updated_at = ? WHERE id = ? AND claim_token = ?`, [at, row.id, token]);
       } catch {
         this.ctx.db.run(`UPDATE multiremi_feishu_bot_outbound_operations SET status = 'pending', claim_token = NULL,
@@ -2896,7 +3004,7 @@ export class FeishuBotRepo {
     }
     const receiptMessages = this.ctx.db.query(`SELECT d.external_message_id FROM multiremi_feishu_bot_deliveries d
       JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id
-      JOIN multiremi_feishu_bot_configs c ON c.workspace_id = d.workspace_id AND c.app_id = b.app_id
+      JOIN multiremi_feishu_bot_configs c ON c.workspace_id = d.workspace_id AND c.bot_id = b.bot_id AND c.app_id = b.app_id
       WHERE d.workspace_id = ? AND COALESCE(d.outbound_task_id, d.task_id) = ?
       ORDER BY d.created_at, d.external_message_id`).all(task.workspaceId, taskId) as Row[];
     for (const receipt of receiptMessages) {
@@ -2944,9 +3052,10 @@ export class FeishuBotRepo {
       const nowIsoValue = now.toISOString();
       const exhaustedCandidates = this.ctx.db.query(`SELECT id, kind FROM multiremi_feishu_bot_outbound_deliveries
         WHERE workspace_id = ? AND delivery_mode = 'split' AND attempt_count >= 6
+          AND binding_id IN (SELECT id FROM multiremi_feishu_bot_chat_bindings WHERE workspace_id = ? AND bot_id = ?)
           AND ((status = 'pending' AND available_at <= ?)
             OR (status = 'sending' AND leased_until <= ?))`
-      ).all(workspaceId, nowIsoValue, nowIsoValue) as Row[];
+      ).all(workspaceId, workspaceId, this.botId, nowIsoValue, nowIsoValue) as Row[];
       if (exhaustedCandidates.some((row) => row.kind === 'receipt')) {
         this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
         advisoryXactLock(this.ctx.db, numberAllocationLockKey(`feishu-bot-audit:${workspaceId}`));
@@ -2990,7 +3099,7 @@ export class FeishuBotRepo {
       const row = this.ctx.db.query(
         `SELECT o.* FROM multiremi_feishu_bot_outbound_deliveries o
          JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id
-         WHERE o.workspace_id = ? AND b.app_id = ?
+         WHERE o.workspace_id = ? AND b.bot_id = ? AND b.app_id = ?
            ${decisionFilter}
            AND (? = 1 OR o.delivery_mode IS NULL OR o.delivery_mode = 'legacy')
            AND (o.decision_id IS NULL OR EXISTS (
@@ -3030,7 +3139,7 @@ export class FeishuBotRepo {
            AND ((o.status = 'pending' AND o.available_at <= ?)
              OR (o.status = 'sending' AND o.leased_until IS NOT NULL AND o.leased_until <= ?))
          ORDER BY o.created_at ASC, o.id ASC LIMIT 1`,
-      ).get(workspaceId, config.appId, supportsKinds ? 1 : 0, supportsTaskStream ? 1 : 0, supportsNativeCot ? 1 : 0,
+      ).get(workspaceId, this.botId, config.appId, supportsKinds ? 1 : 0, supportsTaskStream ? 1 : 0, supportsNativeCot ? 1 : 0,
         supportsAttachments ? 1 : 0, ...(typeof downlink === "object" ? [downlink.id] : []), nowIsoValue, nowIsoValue) as Row | null;
       if (!row) return null;
       const carrier = row.task_id && (!row.kind || row.kind === 'cot') && row.unit_key === '';
@@ -3147,8 +3256,15 @@ export class FeishuBotRepo {
     ).all(nowIsoValue, workspaceId, ...ids, nowIsoValue, nowIsoValue) as Row[];
   }
 
+  private ownsOutbound(workspaceId: string, deliveryId: string): boolean {
+    return !!this.ctx.db.query(`SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries o
+      JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id AND b.workspace_id = o.workspace_id
+      JOIN multiremi_feishu_bot_configs c ON c.workspace_id = b.workspace_id AND c.bot_id = b.bot_id AND c.app_id = b.app_id
+      WHERE o.workspace_id = ? AND o.id = ? AND b.bot_id = ?`).get(workspaceId, deliveryId, this.botId);
+  }
+
   discardPendingOutbound(workspaceId: string, runtimeId: string, deliveryId: string): void {
-    if (this.getConfig(workspaceId)?.runtimeId !== runtimeId) return;
+    if (this.getConfig(workspaceId)?.runtimeId !== runtimeId || !this.ownsOutbound(workspaceId, deliveryId)) return;
     this.ctx.db.run(`UPDATE multiremi_feishu_bot_outbound_deliveries
       SET status = 'failed', last_error = ?, updated_at = ?
       WHERE id = ? AND workspace_id = ? AND status = 'pending'`,
@@ -3198,8 +3314,8 @@ export class FeishuBotRepo {
          JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id
          WHERE o.id = ? AND o.workspace_id = ? AND o.status = 'sending'
            AND o.claim_token = ? AND o.leased_until > ? AND o.task_id IS NOT NULL
-           AND b.app_id = ? AND b.agent_id = ?`,
-      ).get(deliveryId, workspaceId, claimToken, now, config.appId, config.agentId) as Row | null;
+           AND b.bot_id = ? AND b.app_id = ? AND b.agent_id = ?`,
+      ).get(deliveryId, workspaceId, claimToken, now, this.botId, config.appId, config.agentId) as Row | null;
       if (!row) return null;
       const mention = parseOutboundMention(parseJson(row.mention_snapshot, null));
       if (!mention) return null;
@@ -3231,8 +3347,8 @@ export class FeishuBotRepo {
       `SELECT o.body, o.attachments FROM multiremi_feishu_bot_outbound_deliveries o
        JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id
        WHERE o.id = ? AND o.workspace_id = ? AND o.status = 'sending' AND o.claim_token = ?
-         AND o.leased_until > ? AND b.app_id = ?`,
-    ).get(deliveryId, workspaceId, claimToken, nowIso(), config.appId) as Row | null;
+         AND o.leased_until > ? AND b.bot_id = ? AND b.app_id = ?`,
+    ).get(deliveryId, workspaceId, claimToken, nowIso(), this.botId, config.appId) as Row | null;
     if (!delivery) return null;
     const attachment = this.ctx.issues().getAttachment(attachmentId);
     if (!attachment || attachment.workspaceId !== workspaceId) return null;
@@ -3252,7 +3368,7 @@ export class FeishuBotRepo {
       `SELECT status, claim_token, leased_until FROM multiremi_feishu_bot_outbound_deliveries
        WHERE id = ? AND workspace_id = ?`,
     ).get(deliveryId, workspaceId) as Row | null;
-    const currentRuntime = config?.runtimeId === runtimeId;
+    const currentRuntime = config?.runtimeId === runtimeId && this.ownsOutbound(workspaceId, deliveryId);
     return { status: row ? String(row.status) : "deleted", currentRuntime,
       currentLease: currentRuntime && row?.status === "sending" && row.claim_token === claimToken
         && String(row.leased_until ?? "") > nowIso() };
@@ -3280,7 +3396,7 @@ export class FeishuBotRepo {
     nowInput: string | Date = new Date(),
   ): boolean {
     const config = this.getConfig(workspaceId);
-    if (!config || config.runtimeId !== runtimeId) return false;
+    if (!config || config.runtimeId !== runtimeId || !this.ownsOutbound(workspaceId, deliveryId)) return false;
     const now = nowInput instanceof Date ? nowInput : new Date(nowInput);
     if (!Number.isFinite(now.getTime())) throw new Error("now must be a valid date");
     if (input.status === "streaming") {
@@ -3474,17 +3590,17 @@ export class FeishuBotRepo {
       const now = nowIso();
       this.ctx.db.run(
         `INSERT INTO multiremi_feishu_bot_senders
-           (id, workspace_id, app_id, open_id, union_id, display_name, allowed, first_seen_at, last_seen_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
-         ON CONFLICT(workspace_id, app_id, open_id) DO UPDATE SET
+           (id, workspace_id, bot_id, app_id, open_id, union_id, display_name, allowed, first_seen_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+         ON CONFLICT(workspace_id, bot_id, app_id, open_id) DO UPDATE SET
            union_id = COALESCE(excluded.union_id, multiremi_feishu_bot_senders.union_id),
            display_name = COALESCE(?, multiremi_feishu_bot_senders.display_name),
            last_seen_at = excluded.last_seen_at`,
-        [createId("fbs"), workspaceId, appId, openId, unionId, eventName ?? "Feishu user", now, now, eventName],
+        [createId("fbs"), workspaceId, this.botId, appId, openId, unionId, eventName ?? "Feishu user", now, now, eventName],
       );
       account = toSender(this.ctx.db.query(
-        "SELECT * FROM multiremi_feishu_bot_senders WHERE workspace_id = ? AND app_id = ? AND open_id = ?",
-      ).get(workspaceId, appId, openId) as Row);
+        "SELECT * FROM multiremi_feishu_bot_senders WHERE workspace_id = ? AND bot_id = ? AND app_id = ? AND open_id = ?",
+      ).get(workspaceId, this.botId, appId, openId) as Row);
     }
     const displayName = account?.display_name ?? eventName ?? "Feishu user";
     const actorId = (openId ? `feishu:open:${appId}:${openId}` : null)
@@ -3511,9 +3627,10 @@ export class FeishuBotRepo {
       `UPDATE multiremi_feishu_bot_chat_bindings
           SET external_session_key = external_session_key || ':closed:' || id,
               updated_at = ?
-        WHERE workspace_id = ? AND app_id = ? AND external_session_key = ?`,
+        WHERE workspace_id = ? AND bot_id = ? AND app_id = ? AND external_session_key = ?`,
       nowIso(),
       workspaceId,
+      this.botId,
       config.appId,
       key,
     );
@@ -3564,9 +3681,9 @@ export class FeishuBotRepo {
 
     const bindings = this.ctx.db.query(
       `SELECT chat_session_id FROM multiremi_feishu_bot_chat_bindings
-        WHERE workspace_id = ? AND app_id = ? AND external_session_key = ?
+        WHERE workspace_id = ? AND bot_id = ? AND app_id = ? AND external_session_key = ?
         ORDER BY updated_at DESC, id DESC`,
-    ).all(workspaceId, config.appId, key) as Row[];
+    ).all(workspaceId, this.botId, config.appId, key) as Row[];
     const sessionTargets: ResolvedCancelTarget[] = [];
     const seenSessions = new Set<string>();
     for (const binding of bindings) {
@@ -3639,10 +3756,10 @@ export class FeishuBotRepo {
     const rows = this.ctx.db.query(
       `SELECT b.chat_session_id
          FROM multiremi_feishu_bot_chat_bindings b
-        WHERE b.workspace_id = ? AND b.app_id = ? AND b.chat_id = ?
+        WHERE b.workspace_id = ? AND b.bot_id = ? AND b.app_id = ? AND b.chat_id = ?
           AND b.external_session_key NOT LIKE '%:closed:%'
         ORDER BY b.updated_at DESC, b.id DESC`,
-    ).all(workspaceId, appId, chatId) as Row[];
+    ).all(workspaceId, this.botId, appId, chatId) as Row[];
     const seen = new Set(excludedChatSessionIds);
     const targets: ResolvedCancelTarget[] = [];
     for (const row of rows) {
@@ -3698,9 +3815,9 @@ export class FeishuBotRepo {
       `SELECT b.chat_session_id, b.agent_id, a.name AS agent_name
        FROM multiremi_feishu_bot_chat_bindings b
        LEFT JOIN multiremi_agents a ON a.id = b.agent_id
-       WHERE b.workspace_id = ? AND b.app_id = ? AND b.external_session_key = ?
+       WHERE b.workspace_id = ? AND b.bot_id = ? AND b.app_id = ? AND b.external_session_key = ?
        ORDER BY b.updated_at DESC, b.id DESC LIMIT 1`,
-    ).get(workspaceId, config.appId, key) as Row | null;
+    ).get(workspaceId, this.botId, config.appId, key) as Row | null;
     if (!binding) return { chatSessionId: null, agentId: null, agentName: null, task: null };
 
     const chatSessionId = String(binding.chat_session_id);
@@ -3738,7 +3855,7 @@ export class FeishuBotRepo {
       // config was just deleted) must be told to stop. One that already
       // reports stopped needs no directive at all.
       const reported = this.getRuntimeStatus(workspaceId, runtimeId);
-      if (!reported || reported.state === "stopped") return null;
+      if (!reported || (reported.state === "stopped" && !reported.releasePending)) return null;
       return { revision: 0, desired_state: "stopped", config_available: false };
     }
     const revision = Number(row.revision ?? 0);
@@ -3746,6 +3863,11 @@ export class FeishuBotRepo {
       return { revision, desired_state: "stopped", config_available: false };
     }
     if (!Number(row.enabled ?? 0)) {
+      return { revision, desired_state: "stopped", config_available: false };
+    }
+    // Changing applications on the same host also needs a stop acknowledgement.
+    // Keep the previous app reserved until this connector has actually stopped.
+    if (this.getRuntimeStatus(workspaceId, runtimeId)?.releasePending) {
       return { revision, desired_state: "stopped", config_available: false };
     }
     const blockers = this.liveForeignRuntimeIds(workspaceId, runtimeId);
@@ -3761,27 +3883,27 @@ export class FeishuBotRepo {
     const topics = readWorkspaceIssueTopicsForDelivery(
       this.ctx.workspaces().getWorkspace(workspaceId)?.settings ?? {});
     return { revision, desired_state: "running", config_available: true,
-      no_mention_chat_ids: topics.enabled && topics.chatId ? [topics.chatId] : [],
+      no_mention_chat_ids: this.botId === "default" && topics.enabled && topics.chatId ? [topics.chatId] : [],
     };
   }
 
   getRuntimeStatus(workspaceId: string, runtimeId: string): MultiremiFeishuBotRuntimeStatus | null {
     // Read once for the runtime directive and once for the outbound claim in the same heartbeat.
     const cache = activeRequestReadCache();
-    const key = cacheKey("multiremi_feishu_bot_runtime_states", "row", workspaceId, runtimeId);
+    const key = cacheKey("multiremi_feishu_bot_runtime_states", "row", workspaceId, this.botId, runtimeId);
     const cached = cache?.get<Row | null>(key);
     if (cached !== undefined) return cached ? mapRuntimeStatus(cached) : null;
     const row = this.ctx.db
-      .query("SELECT * FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND runtime_id = ?")
-      .get(workspaceId, runtimeId) as Row | null;
+      .query("SELECT * FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND bot_id = ? AND runtime_id = ?")
+      .get(workspaceId, this.botId, runtimeId) as Row | null;
     cache?.set(key, row);
     return row ? mapRuntimeStatus(row) : null;
   }
 
   listRuntimeStatuses(workspaceId: string): MultiremiFeishuBotRuntimeStatus[] {
     const rows = this.ctx.db
-      .query("SELECT * FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ?")
-      .all(workspaceId) as Row[];
+      .query("SELECT * FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND bot_id = ?")
+      .all(workspaceId, this.botId) as Row[];
     return rows.map(mapRuntimeStatus);
   }
 
@@ -3795,18 +3917,20 @@ export class FeishuBotRepo {
     const now = nowIso();
     this.ctx.db.run(
       `INSERT INTO multiremi_feishu_bot_runtime_states (
-         workspace_id, runtime_id, applied_revision, state,
+         workspace_id, bot_id, runtime_id, applied_revision, state,
          bot_name, bot_open_id, error_code, error_message, reported_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(workspace_id, runtime_id) DO UPDATE SET
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(workspace_id, bot_id, runtime_id) DO UPDATE SET
          applied_revision = excluded.applied_revision,
          state = excluded.state,
          bot_name = excluded.bot_name,
          bot_open_id = excluded.bot_open_id,
          error_code = excluded.error_code,
          error_message = excluded.error_message,
-         reported_at = excluded.reported_at`,
+         reported_at = excluded.reported_at,
+         release_pending = CASE WHEN excluded.state = 'stopped' THEN 0 ELSE multiremi_feishu_bot_runtime_states.release_pending END`,
       workspaceId,
+      this.botId,
       runtimeId,
       Number.isSafeInteger(input.appliedRevision) && input.appliedRevision >= 0 ? input.appliedRevision : 0,
       state,
@@ -3819,7 +3943,8 @@ export class FeishuBotRepo {
     const current = this.getRuntimeStatus(workspaceId, runtimeId)!;
     if (!previous || previous.appliedRevision !== current.appliedRevision || previous.state !== current.state
       || previous.botName !== current.botName || previous.botOpenId !== current.botOpenId
-      || previous.errorCode !== current.errorCode || previous.errorMessage !== current.errorMessage) {
+      || previous.errorCode !== current.errorCode || previous.errorMessage !== current.errorMessage
+      || previous.releasePending !== current.releasePending) {
       this.publishDownlinkChange(workspaceId, runtimeId);
     }
     return current;
@@ -3869,10 +3994,11 @@ export class FeishuBotRepo {
         .get(workspaceId) as { seq?: number } | null)?.seq ?? 0,
     ) + 1;
     this.ctx.db.run(
-      `INSERT INTO multiremi_feishu_bot_audit (id, workspace_id, seq, action, actor_type, actor_id, details, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO multiremi_feishu_bot_audit (id, workspace_id, bot_id, seq, action, actor_type, actor_id, details, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       workspaceId,
+      this.botId,
       seq,
       action,
       input.actorType ?? "member",
@@ -3895,11 +4021,11 @@ export class FeishuBotRepo {
     const rows = this.ctx.db
       .query(
         `SELECT * FROM multiremi_feishu_bot_audit
-          WHERE workspace_id = ?
+          WHERE workspace_id = ? AND bot_id = ?
           ORDER BY seq DESC
           LIMIT ?`,
       )
-      .all(workspaceId, Math.max(1, Math.min(200, Math.trunc(limit) || 50))) as Row[];
+      .all(workspaceId, this.botId, Math.max(1, Math.min(200, Math.trunc(limit) || 50))) as Row[];
     return rows.map((row) => ({
       id: String(row.id ?? ""),
       workspaceId: String(row.workspace_id ?? ""),
@@ -3923,44 +4049,46 @@ export class FeishuBotRepo {
    */
   disableConfigsReferencingAgent(agentId: string, actor?: string | null): string[] {
     const routedWorkspaces = this.ctx.db.query(
-      `SELECT workspace_id, scope, chat_id
+      `SELECT workspace_id, bot_id, scope, chat_id
        FROM multiremi_feishu_bot_agent_routes
        WHERE agent_id = ?
        ORDER BY workspace_id, scope, chat_id`,
     ).all(agentId) as Row[];
     for (const workspaceId of new Set(routedWorkspaces.map((row) => String(row.workspace_id)))) {
-      const affected = routedWorkspaces
-        .filter((row) => String(row.workspace_id) === workspaceId)
-        .map((row) => ({ scope: String(row.scope), chat_id: nullableString(row.chat_id) }));
-      // Keep the rows so the settings page can show which choices became
-      // invalid. Resolution ignores archived Agents and falls through.
-      this.recordAudit(workspaceId, "updated", {
-        actorType: "system",
-        actorId: actor ?? null,
-        details: { routes: true, reason: "agent_archived", agent_id: agentId, affected },
-      });
+      for (const botId of new Set(routedWorkspaces.filter(row => row.workspace_id === workspaceId).map(row => String(row.bot_id)))) {
+        const affected = routedWorkspaces
+          .filter((row) => String(row.workspace_id) === workspaceId && String(row.bot_id) === botId)
+          .map((row) => ({ scope: String(row.scope), chat_id: nullableString(row.chat_id) }));
+        // Keep the rows so the settings page can show which choices became
+        // invalid. Resolution ignores archived Agents and falls through.
+        this.forBot(botId).recordAudit(workspaceId, "updated", {
+          actorType: "system",
+          actorId: actor ?? null,
+          details: { routes: true, reason: "agent_archived", agent_id: agentId, affected },
+        });
+      }
     }
     const disabled = this.disableWhere("agent_id = ? AND enabled = 1", agentId, actor);
-    for (const workspaceId of disabled) {
-      this.recordAudit(workspaceId, "disabled", {
+    for (const { workspaceId, botId } of disabled) {
+      this.forBot(botId).recordAudit(workspaceId, "disabled", {
         actorType: "system",
         actorId: actor ?? null,
         details: { reason: "agent_archived", agent_id: agentId },
       });
     }
-    return disabled;
+    return [...new Set(disabled.map(bot => bot.workspaceId))];
   }
 
   disableConfigsReferencingRuntime(runtimeId: string, actor?: string | null): string[] {
     const disabled = this.disableWhere("runtime_id = ? AND enabled = 1", runtimeId, actor);
-    for (const workspaceId of disabled) {
-      this.recordAudit(workspaceId, "disabled", {
+    for (const { workspaceId, botId } of disabled) {
+      this.forBot(botId).recordAudit(workspaceId, "disabled", {
         actorType: "system",
         actorId: actor ?? null,
         details: { reason: "runtime_removed", runtime_id: runtimeId },
       });
     }
-    return disabled;
+    return [...new Set(disabled.map(bot => bot.workspaceId))];
   }
 
   /** Everything the settings page and the status route need, in one read. */
@@ -3984,7 +4112,7 @@ export class FeishuBotRepo {
     const runtimeOnline = Boolean(runtime && isRuntimeEffectivelyOnline(runtime));
     const reported = this.getRuntimeStatus(workspaceId, config.runtimeId);
     const staleRuntimeIds = this.liveForeignRuntimeIds(workspaceId, config.runtimeId);
-    const desiredState: FeishuBotDesiredState = config.enabled && staleRuntimeIds.length === 0
+    const desiredState: FeishuBotDesiredState = config.enabled && !reported?.releasePending && staleRuntimeIds.length === 0
       ? "running"
       : "stopped";
 
@@ -4058,12 +4186,12 @@ export class FeishuBotRepo {
     // A heartbeat reads this for the runtime directive and again when it claims an outbound
     // message. Any write to the table clears the entry.
     const cache = activeRequestReadCache();
-    const key = cacheKey("multiremi_feishu_bot_configs", "workspace", workspaceId);
+    const key = cacheKey("multiremi_feishu_bot_configs", "workspace", workspaceId, this.botId);
     const cached = cache?.get<Row | null>(key);
     if (cached !== undefined) return cached;
     const row = this.ctx.db
-      .query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ?")
-      .get(workspaceId) as Row | null;
+      .query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?")
+      .get(workspaceId, this.botId) as Row | null;
     cache?.set(key, row);
     return row;
   }
@@ -4076,7 +4204,7 @@ export class FeishuBotRepo {
     const cutoff = Date.now() - RUNTIME_STATE_STALE_MS;
     return this.listRuntimeStatuses(workspaceId)
       .filter((entry) => entry.runtimeId !== selfRuntimeId)
-      .filter((entry) => entry.state === "online" || entry.state === "starting")
+      .filter((entry) => entry.releasePending || entry.state === "online" || entry.state === "starting")
       .filter((entry) => {
         const reportedAt = Date.parse(entry.reportedAt);
         return Number.isFinite(reportedAt) && reportedAt >= cutoff;
@@ -4084,12 +4212,12 @@ export class FeishuBotRepo {
       .map((entry) => entry.runtimeId);
   }
 
-  private disableWhere(clause: string, param: string, actor?: string | null): string[] {
+  private disableWhere(clause: string, param: string, actor?: string | null): Array<{ workspaceId: string; botId: string }> {
     const rows = this.ctx.db
-      .query(`SELECT workspace_id FROM multiremi_feishu_bot_configs WHERE ${clause}`)
+      .query(`SELECT * FROM multiremi_feishu_bot_configs WHERE ${clause}`)
       .all(param) as Row[];
-    const workspaceIds = rows.map((row) => String(row.workspace_id ?? "")).filter(Boolean);
-    if (!workspaceIds.length) return [];
+    if (!rows.length) return [];
+    for (const row of rows) this.forBot(String(row.bot_id)).reserveStoppedAcknowledgement(String(row.workspace_id), row);
     this.ctx.db.run(
       `UPDATE multiremi_feishu_bot_configs
           SET enabled = 0, revision = revision + 1, updated_at = ?, updated_by = ?
@@ -4098,7 +4226,7 @@ export class FeishuBotRepo {
       cleanOptionalString(actor),
       param,
     );
-    return workspaceIds;
+    return rows.map(row => ({ workspaceId: String(row.workspace_id), botId: String(row.bot_id) }));
   }
 }
 
@@ -4209,6 +4337,8 @@ function normalizeDomain(value: unknown): FeishuBotDomain {
 
 function mapConfig(row: Row): MultiremiFeishuBotConfig {
   return {
+    botId: String(row.bot_id ?? "default"),
+    name: String(row.name ?? ""),
     workspaceId: String(row.workspace_id ?? ""),
     agentId: String(row.agent_id ?? ""),
     runtimeId: String(row.runtime_id ?? ""),
@@ -4236,6 +4366,7 @@ function mapRuntimeStatus(row: Row): MultiremiFeishuBotRuntimeStatus {
     workspaceId: String(row.workspace_id ?? ""),
     runtimeId: String(row.runtime_id ?? ""),
     appliedRevision: Number(row.applied_revision ?? 0),
+    releasePending: Boolean(Number(row.release_pending ?? 0)),
     state: RUNTIME_STATES.has(state as FeishuBotRuntimeState) ? (state as FeishuBotRuntimeState) : "stopped",
     botName: nullableString(row.bot_name),
     botOpenId: nullableString(row.bot_open_id),

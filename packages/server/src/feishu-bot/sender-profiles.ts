@@ -11,22 +11,24 @@ export class FeishuBotSenderProfiles {
 
   constructor(private readonly fetchImpl: typeof fetch = fetch) {}
 
-  refresh(store: MultiremiStore, workspaceId: string): Promise<void> {
-    const existing = this.pending.get(workspaceId);
+  refresh(store: MultiremiStore, workspaceId: string, botId = "default"): Promise<void> {
+    const key = `${workspaceId}:${botId}`;
+    const existing = this.pending.get(key);
     if (existing) return existing;
-    const refresh = this.refreshOnce(store, workspaceId).finally(() => this.pending.delete(workspaceId));
-    this.pending.set(workspaceId, refresh);
+    const refresh = this.refreshOnce(store, workspaceId, botId).finally(() => this.pending.delete(key));
+    this.pending.set(key, refresh);
     return refresh;
   }
 
-  private async refreshOnce(store: MultiremiStore, workspaceId: string): Promise<void> {
+  private async refreshOnce(store: MultiremiStore, workspaceId: string, botId: string): Promise<void> {
+    const bot = store.feishuBotFor(botId);
     const checkedAt = new Date().toISOString();
-    const sources = store.listFeishuBotSenderProfileSources(workspaceId,
+    const sources = bot.listSenderProfileSources(workspaceId,
       new Date(Date.now() - REFRESH_INTERVAL_MS).toISOString());
     if (!sources.length) return;
     const profiles = new Map<string, { name: string; nameEn: string | null }>();
     try {
-      const credentials = store.revealFeishuBotSecrets(workspaceId);
+      const credentials = bot.revealSecrets(workspaceId);
       if (!credentials) return;
       const base = feishuBotApiBase(credentials.domain);
       // One deadline covers token exchange and the batch; no network I/O occurs
@@ -63,7 +65,7 @@ export class FeishuBotSenderProfiles {
       // the allowlist, leak upstream credentials, or erase a previously known name.
     } finally {
       for (const source of sources) {
-        store.updateFeishuBotSenderProfile(workspaceId, source.appId, source.id,
+        bot.updateSenderProfile(workspaceId, source.appId, source.id,
           profiles.get(source.id) ?? null, checkedAt);
       }
     }

@@ -79,6 +79,8 @@ export interface UpdateIssueTopicConfigRequest {
 }
 
 export interface FeishuBotConfig {
+  bot_id?: string;
+  name?: string;
   configured: boolean;
   workspace_id: string;
   agent_id: string | null;
@@ -139,6 +141,7 @@ export interface FeishuBotAgentCandidate {
 }
 
 export interface FeishuBotRuntimeCandidate {
+  assigned_bot_id?: string | null;
   id: string;
   name: string;
   provider: string;
@@ -265,6 +268,7 @@ export interface FeishuBotRegistrationSession {
 
 /** Request body for `PUT /api/workspaces/:id/feishu-bot`. */
 export interface UpsertFeishuBotRequest {
+  name?: string;
   agent_id: string;
   runtime_id: string;
   app_id: string;

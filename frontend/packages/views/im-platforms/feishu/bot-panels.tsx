@@ -12,12 +12,22 @@ import { LarkTab } from "./lark-tab";
 import { FeishuSenderAllowlistSection } from "./feishu-sender-allowlist-section";
 import { FeishuBotRoutes } from "./feishu-bot-routes";
 import { IssueTopicSection } from "./issue-topic-section";
+import { FeishuBotSelection, useFeishuBotSelection } from "./bot-selection";
 
 export function FeishuBotPanel() {
-  return <div className="space-y-8"><FeishuBotSection /><BotMenuSection /><LarkTab /></div>;
+  return <FeishuBotSelection allowCreate><FeishuBotPanelContent /></FeishuBotSelection>;
+}
+
+function FeishuBotPanelContent() {
+  const { botId } = useFeishuBotSelection();
+  return <div className="space-y-8"><FeishuBotSection />{botId === "default" && <><BotMenuSection /><LarkTab /></>}</div>;
 }
 
 export function FeishuAccessPanel() {
+  return <FeishuBotSelection><FeishuAccessPanelContent /></FeishuBotSelection>;
+}
+
+function FeishuAccessPanelContent() {
   const { t } = useT("im-platforms");
   const access = useImWorkspaceAccess(useWorkspaceId());
   if (access.isPending) return <p role="status">{t($ => $.page.loading)}</p>;
@@ -27,6 +37,11 @@ export function FeishuAccessPanel() {
 }
 
 export function FeishuConversationsPanel() {
+  return <FeishuBotSelection><FeishuConversationsPanelContent /></FeishuBotSelection>;
+}
+
+function FeishuConversationsPanelContent() {
+  const { botId } = useFeishuBotSelection();
   const { t } = useT("im-platforms");
   const wsId = useWorkspaceId();
   const access = useImWorkspaceAccess(wsId);
@@ -38,6 +53,6 @@ export function FeishuConversationsPanel() {
       ? <ImLoadError retry={() => void candidates.refetch()} />
       : <FeishuBotRoutes workspaceId={wsId} candidates={candidates.data ?? null} candidatesPending={candidates.isPending} />
       : <p className="text-sm text-muted-foreground">{t($ => $.page.readOnly)}</p>}
-    <IssueTopicSection />
+    {botId === "default" && <IssueTopicSection />}
   </div>;
 }

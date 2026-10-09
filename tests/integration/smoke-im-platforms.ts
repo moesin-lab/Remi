@@ -78,8 +78,13 @@ try {
   const agent = store.createAgent({ workspaceId: workspace.id, ownerId: owner.id, name: "IM Concierge", provider: "codex" });
   const specialist = store.createAgent({ workspaceId: workspace.id, ownerId: owner.id, name: "Group Specialist", provider: "codex" });
   const runtime = store.registerRuntime({ name: "Smoke bot host", provider: "codex", workspaceId: workspace.id, ownerId: owner.id, daemonId: "im-smoke-daemon", status: "online" });
+  const secondRuntime = store.registerRuntime({ name: "Second bot host", provider: "codex", workspaceId: workspace.id, ownerId: owner.id, daemonId: "im-second-daemon", status: "online" });
   store.heartbeatRuntime(runtime.id, { supportsFeishuBotConfig: true });
-  heartbeat = setInterval(() => store.heartbeatRuntime(runtime.id, { supportsFeishuBotConfig: true }), 10_000);
+  store.heartbeatRuntime(secondRuntime.id, { supportsFeishuBotConfig: true });
+  heartbeat = setInterval(() => {
+    store.heartbeatRuntime(runtime.id, { supportsFeishuBotConfig: true });
+    store.heartbeatRuntime(secondRuntime.id, { supportsFeishuBotConfig: true });
+  }, 10_000);
   const botSecret = "synthetic-im-bot-secret";
   store.upsertFeishuBotConfig(workspace.id, { agentId: agent.id, runtimeId: runtime.id, appId: "cli_im_smoke", domain: "feishu", enabled: false, appSecret: botSecret, appSecretOp: "set" });
   const now = new Date().toISOString(), earlier = new Date(Date.now() - 86_400_000).toISOString();

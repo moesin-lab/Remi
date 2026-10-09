@@ -448,6 +448,30 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "workspace.feishu-bot.list": {
+      "command": "remi workspace feishu-bot list",
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.feishu-bot.create": {
+      "command": "remi workspace feishu-bot create",
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "workspace.feishu-bot.get": {
       "command": "remi workspace feishu-bot get",
       "auth": [

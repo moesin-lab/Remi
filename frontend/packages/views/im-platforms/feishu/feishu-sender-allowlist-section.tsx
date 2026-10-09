@@ -1,4 +1,5 @@
 "use client";
+import { useFeishuBotSelection } from "./bot-selection";
 
 import { useQuery } from "@tanstack/react-query";
 import { LoaderCircle, RefreshCw } from "lucide-react";
@@ -15,15 +16,16 @@ import { useT } from "../../i18n";
 import { absoluteTime } from "./ingestion/shared";
 
 export function FeishuSenderAllowlistSection() {
+  const { botId } = useFeishuBotSelection();
   const { t } = useT("im-platforms");
   const workspaceId = useWorkspaceId();
-  const botQuery = useQuery(feishuBotOptions(workspaceId));
+  const botQuery = useQuery(feishuBotOptions(workspaceId, true, botId));
   const bot = botQuery.data?.role === "admin" ? botQuery.data.config : undefined;
   const enabled = bot?.configured === true && bot.app_id.length > 0 && !botQuery.isError;
   const agentAccess = bot?.sender_access_policy === "agent";
-  const sendersQuery = useQuery(feishuBotSendersOptions(workspaceId, enabled && !agentAccess));
-  const update = useUpdateFeishuBotSender(workspaceId);
-  const saveBot = useSaveFeishuBot(workspaceId);
+  const sendersQuery = useQuery(feishuBotSendersOptions(workspaceId, enabled && !agentAccess, botId));
+  const update = useUpdateFeishuBotSender(workspaceId, botId);
+  const saveBot = useSaveFeishuBot(workspaceId, botId);
 
   if (botQuery.data?.role === "member" && !botQuery.isError) return null;
 

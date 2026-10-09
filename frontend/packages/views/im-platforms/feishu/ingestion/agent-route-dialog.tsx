@@ -45,6 +45,7 @@ export interface PendingFeishuBotChatRoute {
 }
 
 interface AgentRouteDialogProps {
+  botId?: string;
   workspaceId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -57,6 +58,7 @@ interface AgentRouteDialogProps {
 }
 
 export function AgentRouteDialog({
+  botId = "default",
   workspaceId,
   open,
   onOpenChange,
@@ -68,7 +70,7 @@ export function AgentRouteDialog({
   onAdd,
 }: AgentRouteDialogProps) {
   const { t } = useT("im-platforms");
-  const chatsQuery = useQuery(feishuBotChatsOptions(workspaceId, open));
+  const chatsQuery = useQuery(feishuBotChatsOptions(workspaceId, open, botId));
   const chats = chatsQuery.data?.chats ?? [];
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState("");

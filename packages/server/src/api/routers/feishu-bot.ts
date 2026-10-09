@@ -1,3 +1,4 @@
+import { createId } from "@multiremi/ids.js";
 /**
  * Workspace Feishu concierge bot routes (MUL-206).
  *
@@ -80,39 +81,78 @@ export function registerFeishuBotRoutes(
   const { store } = deps;
   const senderProfiles = new FeishuBotSenderProfiles();
 
+  app.get("/api/workspaces/:id/feishu-bots", (c) => {
+    const workspaceId = c.req.param("id");
+    const denied = requireWorkspaceAdmin(c, store, workspaceId);
+    if (denied) return denied;
+    if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
+    c.header("Cache-Control", "no-store");
+    return c.json({ bots: store.feishuBotFor().listConfigs(workspaceId).map(bot => ({
+      ...configView(store, workspaceId, bot.botId), status: statusView(store, workspaceId, bot.botId).status,
+    })) });
+  });
+
+  app.post("/api/workspaces/:id/feishu-bots", async (c) => {
+    const workspaceId = c.req.param("id");
+    const denied = requireWorkspaceAdmin(c, store, workspaceId);
+    if (denied) return denied;
+    if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
+    const body = await readJsonStrict<FeishuBotConfigBody>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    const parsed = parseConfigBody(body, workspaceId, registrations);
+    if ("error" in parsed) return c.json({ error: parsed.error }, 400);
+    const botId = createId("bot");
+    try {
+      store.feishuBotFor(botId).upsertConfig(workspaceId, parsed.input);
+      store.feishuBotFor(botId).recordAudit(workspaceId, "configured", { actorId: currentRequestUserId(c) });
+      c.header("Cache-Control", "no-store");
+      return c.json(configView(store, workspaceId, botId), 201);
+    } catch (error) { return configErrorResponse(c, error); }
+  });
+
   // ── Read ────────────────────────────────────────────────────────────────
   app.get("/api/workspaces/:id/feishu-bot", (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
     c.header("Cache-Control", "no-store");
     // A plain member is told whether a concierge is available and nothing else:
     // the app id and the host Runtime are deployment detail they cannot change.
     if (requireWorkspaceAdmin(c, store, workspaceId)) {
-      return c.json(availabilityView(store.feishuBotStatusSnapshot(workspaceId)));
+      return c.json(availabilityView(bot.statusSnapshot(workspaceId)));
     }
-    return c.json(configView(store, workspaceId));
+    return c.json(configView(store, workspaceId, botId));
   });
 
   app.get("/api/workspaces/:id/feishu-bot/status", (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
     c.header("Cache-Control", "no-store");
-    return c.json(statusView(store, workspaceId));
+    return c.json(statusView(store, workspaceId, botId));
   });
 
   /** Agent and Runtime pickers, with the reasons an option cannot be chosen. */
   app.get("/api/workspaces/:id/feishu-bot/candidates", (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
     const agents = store.listAgents()
       .filter((agent) => agent.workspaceId === workspaceId && !agent.archivedAt)
       .map((agent) => ({ id: agent.id, name: agent.name, provider: agent.provider }));
+    const assignedBots = new Map(store.feishuBotFor().listConfigs(workspaceId).map(bot => [bot.runtimeId, bot.botId]));
     const runtimes = store.listRuntimes()
       .filter((runtime) => runtime.workspaceId === workspaceId)
       .map((runtime) => ({
@@ -125,6 +165,7 @@ export function registerFeishuBotRoutes(
         online: isRuntimeEffectivelyOnline(runtime),
         supports_config: runtimeSupportsFeishuBotConfig(runtime),
         last_heartbeat_at: runtime.lastHeartbeatAt,
+        assigned_bot_id: assignedBots.get(runtime.id) ?? null,
       }));
     return c.json({
       workspace_id: workspaceId,
@@ -136,29 +177,35 @@ export function registerFeishuBotRoutes(
 
   app.get("/api/workspaces/:id/feishu-bot/audit", (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     const limit = Number(c.req.query("limit") ?? "50");
     return c.json({
       workspace_id: workspaceId,
-      entries: store.listFeishuBotAudit(workspaceId, Number.isFinite(limit) ? limit : 50),
+      entries: bot.listAudit(workspaceId, Number.isFinite(limit) ? limit : 50),
     });
   });
 
   app.get("/api/workspaces/:id/feishu-bot/routes", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
 
     let memberCounts = new Map<string, number | null>();
-    if (store.listFeishuBotAgentRoutes(workspaceId).some((route) => route.scope === "chat")) {
-      const credentials = safeRevealSecrets(store, workspaceId);
+    if (bot.listRoutes(workspaceId).some((route) => route.scope === "chat")) {
+      const credentials = safeRevealSecrets(store, workspaceId, botId);
       if (credentials) {
         try {
           const chats = await listFeishuBotChats(credentials);
           memberCounts = new Map(chats.map((chat) => [chat.chatId, chat.memberCount]));
-          for (const chat of chats) store.updateFeishuBotRouteChatName(workspaceId, chat.chatId, chat.name);
+          for (const chat of chats) bot.updateRouteChatName(workspaceId, chat.chatId, chat.name);
         } catch {
           // Route settings remain readable with the last known group name when
           // Feishu is temporarily unavailable. The dedicated chat endpoint
@@ -169,7 +216,7 @@ export function registerFeishuBotRoutes(
     c.header("Cache-Control", "no-store");
     return c.json({
       workspace_id: workspaceId,
-      routes: store.listFeishuBotAgentRoutes(workspaceId).map((route) => routeView(
+      routes: bot.listRoutes(workspaceId).map((route) => routeView(
         route,
         route.chatId ? memberCounts.get(route.chatId) ?? null : null,
       )),
@@ -178,13 +225,16 @@ export function registerFeishuBotRoutes(
 
   app.get("/api/workspaces/:id/feishu-bot/chats", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
-    if (!store.getFeishuBotConfig(workspaceId)) {
+    if (!bot.getConfig(workspaceId)) {
       return c.json({ error: "feishu bot is not configured", code: "bot_not_configured" }, 404);
     }
-    const credentials = safeRevealSecrets(store, workspaceId);
+    const credentials = safeRevealSecrets(store, workspaceId, botId);
     if (!credentials) {
       return c.json({ error: "feishu bot credentials are unavailable", code: "credentials_unavailable" }, 422);
     }
@@ -214,20 +264,23 @@ export function registerFeishuBotRoutes(
   // ── Write ───────────────────────────────────────────────────────────────
   app.put("/api/workspaces/:id/feishu-bot/routes", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
     const body = await readJsonStrict<{ routes?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const parsed = parseRoutesBody(body.routes);
     if ("error" in parsed) return c.json({ error: parsed.error, code: parsed.code }, 400);
     try {
-      const routes = store.replaceFeishuBotAgentRoutes(
+      const routes = bot.replaceRoutes(
         workspaceId,
         parsed.routes,
         currentRequestUserId(c),
       );
-      store.recordFeishuBotAudit(workspaceId, "updated", {
+      bot.recordAudit(workspaceId, "updated", {
         actorId: currentRequestUserId(c),
         details: { routes: true, route_count: routes.length },
       });
@@ -243,22 +296,28 @@ export function registerFeishuBotRoutes(
 
   app.get("/api/workspaces/:id/feishu-bot/senders", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
     c.header("Cache-Control", "no-store");
-    await senderProfiles.refresh(store, workspaceId);
-    return c.json({ senders: store.listFeishuBotSenders(workspaceId) });
+    await senderProfiles.refresh(store, workspaceId, botId);
+    return c.json({ senders: bot.listSenders(workspaceId) });
   });
 
   app.put("/api/workspaces/:id/feishu-bot/senders/:senderId", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     const body = await readJsonStrict<{ allowed?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     if (typeof body.allowed !== "boolean") return c.json({ error: "allowed must be a boolean" }, 400);
-    const sender = store.setFeishuBotSenderAllowed(workspaceId, c.req.param("senderId"), body.allowed, currentRequestUserId(c));
+    const sender = bot.setSenderAllowed(workspaceId, c.req.param("senderId"), body.allowed, currentRequestUserId(c));
     if (!sender) return c.json({ error: "Feishu sender not found" }, 404);
     c.header("Cache-Control", "no-store");
     return c.json(sender);
@@ -266,26 +325,29 @@ export function registerFeishuBotRoutes(
 
   app.put("/api/workspaces/:id/feishu-bot", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
     const body = await readJsonStrict<FeishuBotConfigBody>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
 
-    const existed = store.getFeishuBotConfig(workspaceId) !== null;
+    const existed = bot.getConfig(workspaceId) !== null;
     const parsed = parseConfigBody(body, workspaceId, registrations);
     if ("error" in parsed) return c.json({ error: parsed.error }, 400);
 
     c.header("Cache-Control", "no-store");
     try {
-      const saved = store.upsertFeishuBotConfig(workspaceId, parsed.input);
+      const saved = bot.upsertConfig(workspaceId, parsed.input);
       if (parsed.registrationUsed) {
-        store.recordFeishuBotAudit(workspaceId, "registration_used", {
+        bot.recordAudit(workspaceId, "registration_used", {
           actorId: currentRequestUserId(c),
           details: { app_id: saved.appId },
         });
       }
-      store.recordFeishuBotAudit(workspaceId, existed ? "updated" : "configured", {
+      bot.recordAudit(workspaceId, existed ? "updated" : "configured", {
         actorId: currentRequestUserId(c),
         details: {
           agent_id: saved.agentId,
@@ -299,7 +361,7 @@ export function registerFeishuBotRoutes(
           app_secret_op: parsed.input.appSecretOp,
         },
       });
-      return c.json(configView(store, workspaceId));
+      return c.json(configView(store, workspaceId, botId));
     } catch (error) {
       return configErrorResponse(c, error);
     }
@@ -307,37 +369,43 @@ export function registerFeishuBotRoutes(
 
   app.delete("/api/workspaces/:id/feishu-bot", (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
-    if (!store.deleteFeishuBotConfig(workspaceId)) {
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
+    if (!bot.deleteConfig(workspaceId)) {
       return c.json({ error: "feishu bot is not configured" }, 404);
     }
     // The connector is not stopped here: the next heartbeat hands the hosting
     // Runtime a `stopped` directive, and the row it reported keeps that
     // directive flowing until it confirms.
-    store.recordFeishuBotAudit(workspaceId, "deleted", { actorId: currentRequestUserId(c) });
+    bot.recordAudit(workspaceId, "deleted", { actorId: currentRequestUserId(c) });
     c.header("Cache-Control", "no-store");
-    return c.json(configView(store, workspaceId));
+    return c.json(configView(store, workspaceId, botId));
   });
 
   app.post("/api/workspaces/:id/feishu-bot/deploy", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     const body = await readJsonStrictAllowEmpty<Record<string, never>>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
-    const config = store.getFeishuBotConfig(workspaceId);
+    const config = bot.getConfig(workspaceId);
     if (!config) return c.json({ error: "feishu bot is not configured" }, 404);
     // Deploy means "run, and pick up whatever is stored now" — enabling and
     // bumping the revision together covers both a cold start and a redeploy.
     try {
-      const enabled = store.setFeishuBotEnabled(workspaceId, true, currentRequestUserId(c));
-      store.recordFeishuBotAudit(workspaceId, config.enabled ? "redeployed" : "enabled", {
+      const enabled = bot.setEnabled(workspaceId, true, currentRequestUserId(c));
+      bot.recordAudit(workspaceId, config.enabled ? "redeployed" : "enabled", {
         actorId: currentRequestUserId(c),
         details: { runtime_id: config.runtimeId, revision: enabled?.revision ?? config.revision },
       });
       c.header("Cache-Control", "no-store");
-      return c.json(statusView(store, workspaceId));
+      return c.json(statusView(store, workspaceId, botId));
     } catch (error) {
       return configErrorResponse(c, error);
     }
@@ -345,18 +413,21 @@ export function registerFeishuBotRoutes(
 
   app.post("/api/workspaces/:id/feishu-bot/stop", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     const body = await readJsonStrictAllowEmpty<Record<string, never>>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
-    const stopped = store.setFeishuBotEnabled(workspaceId, false, currentRequestUserId(c));
+    const stopped = bot.setEnabled(workspaceId, false, currentRequestUserId(c));
     if (!stopped) return c.json({ error: "feishu bot is not configured" }, 404);
-    store.recordFeishuBotAudit(workspaceId, "disabled", {
+    bot.recordAudit(workspaceId, "disabled", {
       actorId: currentRequestUserId(c),
       details: { runtime_id: stopped.runtimeId, revision: stopped.revision },
     });
     c.header("Cache-Control", "no-store");
-    return c.json(statusView(store, workspaceId));
+    return c.json(statusView(store, workspaceId, botId));
   });
 
   /**
@@ -366,8 +437,11 @@ export function registerFeishuBotRoutes(
    */
   app.post("/api/workspaces/:id/feishu-bot/test", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
     const body = await readJsonStrictAllowEmpty<{
       app_id?: unknown;
@@ -377,7 +451,7 @@ export function registerFeishuBotRoutes(
     }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
 
-    const stored = safeRevealSecrets(store, workspaceId);
+    const stored = safeRevealSecrets(store, workspaceId, botId);
     const registrationSessionId = optionalString(body.registration_session_id);
     // Peek, do not consume: a test must not burn the session the admin still
     // needs in order to save.
@@ -394,20 +468,20 @@ export function registerFeishuBotRoutes(
       return c.json({ error: "app_id and app_secret are required to test" }, 400);
     }
 
-    const snapshot = store.feishuBotStatusSnapshot(workspaceId);
+    const snapshot = bot.statusSnapshot(workspaceId);
     const runtime = snapshot.config ? store.getRuntime(snapshot.config.runtimeId) : null;
     const verified = await verifyFeishuBotCredentials({ appId, appSecret, domain });
     // Only persist against the stored credentials — a probe of some other app
     // must not overwrite the recorded profile of the configured one.
     if (stored && appId === stored.appId && appSecret === stored.appSecret) {
-      store.recordFeishuBotTestResult(workspaceId, {
+      bot.recordTestResult(workspaceId, {
         botName: verified.botName,
         botOpenId: verified.botOpenId,
         errorCode: verified.errorCode,
         errorMessage: verified.errorMessage,
       });
     }
-    store.recordFeishuBotAudit(workspaceId, "tested", {
+    bot.recordAudit(workspaceId, "tested", {
       actorId: currentRequestUserId(c),
       details: { app_id: appId, domain, ok: verified.ok, error_code: verified.errorCode },
     });
@@ -429,8 +503,11 @@ export function registerFeishuBotRoutes(
   // ── Scan-to-create registration (optional credential fill) ──────────────
   app.post("/api/workspaces/:id/feishu-bot/registration", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
     const body = await readJsonStrictAllowEmpty<{ brand?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
@@ -439,7 +516,7 @@ export function registerFeishuBotRoutes(
     c.header("Cache-Control", "no-store");
     try {
       const session = await registrations.begin(workspaceId, brand);
-      store.recordFeishuBotAudit(workspaceId, "registration_started", {
+      bot.recordAudit(workspaceId, "registration_started", {
         actorId: currentRequestUserId(c),
         details: { brand, session_id: session.session_id },
       });
@@ -453,8 +530,11 @@ export function registerFeishuBotRoutes(
 
   app.get("/api/workspaces/:id/feishu-bot/registration/:sessionId", (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     const session = registrations.get(workspaceId, c.req.param("sessionId"));
     if (!session) return c.json({ error: "registration session not found" }, 404);
     c.header("Cache-Control", "no-store");
@@ -463,8 +543,11 @@ export function registerFeishuBotRoutes(
 
   app.delete("/api/workspaces/:id/feishu-bot/registration/:sessionId", (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
+    const bot = store.feishuBotFor(botId);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
+    if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     registrations.cancel(workspaceId, c.req.param("sessionId"));
     return c.body(null, 204);
   });
@@ -514,6 +597,7 @@ function routeView(
 }
 
 interface FeishuBotConfigBody {
+  name?: unknown;
   agent_id?: unknown;
   runtime_id?: unknown;
   app_id?: unknown;
@@ -530,6 +614,7 @@ function parseConfigBody(
   workspaceId: string,
   registrations: FeishuBotRegistrationService,
 ): { input: UpsertFeishuBotConfigInput; registrationUsed: boolean } | { error: string } {
+  if (body.name !== undefined && (typeof body.name !== "string" || body.name.trim().length > 100)) return { error: "name must be a string of at most 100 characters" };
   const domain = parseDomain(body.domain);
   if (!domain) return { error: "domain must be feishu, lark, or bytedance" };
   if (typeof body.enabled !== "boolean") return { error: "enabled must be explicitly true or false" };
@@ -558,6 +643,7 @@ function parseConfigBody(
 
   return {
     input: {
+      name: typeof body.name === "string" ? body.name.trim() : undefined,
       agentId: optionalString(body.agent_id) ?? "",
       runtimeId: optionalString(body.runtime_id) ?? "",
       appId,
@@ -614,20 +700,22 @@ function peekRegistrationSecret(
 }
 
 /** A missing encryption key must surface as a setup problem, not a 500. */
-function safeRevealSecrets(store: MultiremiStore, workspaceId: string): ReturnType<MultiremiStore["revealFeishuBotSecrets"]> {
+function safeRevealSecrets(store: MultiremiStore, workspaceId: string, botId = "default"): ReturnType<MultiremiStore["revealFeishuBotSecrets"]> {
   try {
-    return store.revealFeishuBotSecrets(workspaceId);
+    return store.feishuBotFor(botId).revealSecrets(workspaceId);
   } catch {
     return null;
   }
 }
 
-export function configView(store: MultiremiStore, workspaceId: string): FeishuBotConfigView {
-  const snapshot = store.feishuBotStatusSnapshot(workspaceId);
+export function configView(store: MultiremiStore, workspaceId: string, botId = "default"): FeishuBotConfigView {
+  const snapshot = store.feishuBotFor(botId).statusSnapshot(workspaceId);
   const config = snapshot.config;
   if (!config) {
     return {
       configured: false,
+      bot_id: botId,
+      name: "",
       workspace_id: workspaceId,
       agent_id: null,
       agent_name: null,
@@ -657,6 +745,8 @@ export function configView(store: MultiremiStore, workspaceId: string): FeishuBo
   const runtime = store.getRuntime(config.runtimeId);
   return {
     configured: true,
+    bot_id: config.botId,
+    name: config.name,
     workspace_id: workspaceId,
     agent_id: config.agentId,
     agent_name: agent?.name ?? null,
@@ -683,8 +773,8 @@ export function configView(store: MultiremiStore, workspaceId: string): FeishuBo
   };
 }
 
-export function statusView(store: MultiremiStore, workspaceId: string): FeishuBotStatusView {
-  const snapshot = store.feishuBotStatusSnapshot(workspaceId);
+export function statusView(store: MultiremiStore, workspaceId: string, botId = "default"): FeishuBotStatusView {
+  const snapshot = store.feishuBotFor(botId).statusSnapshot(workspaceId);
   const runtime = snapshot.config ? store.getRuntime(snapshot.config.runtimeId) : null;
   return {
     status: snapshot.status,

@@ -33,7 +33,7 @@
     },
     "bot": {
       "title": "ボット",
-      "description": "ボット、返信エージェント、ランタイム、メニューを設定します。"
+      "description": "ワークスペース内の複数のボット、応答 Agent、Runtime、アプリ認証情報を管理します。"
     },
     "access": {
       "title": "アクセス制御",
@@ -247,7 +247,7 @@
     },
     "concierge": {
       "title": "Feishu コンシェルジュ Bot",
-      "description": "この workspace 用の Feishu Bot を 1 つ動かします。応答する Agent、ホストするマシン、ログインに使うアプリ資格情報をここで指定します。daemon マシンの環境変数を書き換える必要はありません。",
+      "description": "このボットの応答 Agent、ホスト Runtime、飛書アプリの認証情報を設定します。設定、起動と停止、会話ルートはボットごとに独立しています。",
       "member_available": "{{name}} はオンラインです。Feishu で DM するとこの workspace に届きます。",
       "member_unnamed_bot": "コンシェルジュ Bot",
       "member_unavailable": "コンシェルジュ Bot は設定済みですが、現在は接続できません。",
@@ -549,5 +549,17 @@
     "install_error_session_lost": "設置セッションが期限切れまたは失われました。もう一度スキャンしてやり直してください。",
     "install_error_forbidden": "このワークスペースに Lark ボットを設置する権限がなくなりました。ワークスペース管理者にお問い合わせください。",
     "install_error_generic": "設置に失敗しました。もう一度お試しください。"
+  },
+  "bots": {
+    "select": "ボットを選択",
+    "add": "ボットを追加",
+    "name": "ボット名",
+    "empty": "最初のボットを設定",
+    "loading": "ボットを読み込み中…",
+    "runtimeHint": "各ボットは個別の飛書アプリと Runtime を使用します。現在、1つの Runtime が担当するボットは1つです。",
+    "runtimeAssigned": "他のボットに割り当て済み",
+    "missing": "このボットは削除されたか、存在しません。",
+    "legacy": "デフォルトボット",
+    "shared": "以下はデフォルトボットが公開するワークスペース設定です。"
   }
 }

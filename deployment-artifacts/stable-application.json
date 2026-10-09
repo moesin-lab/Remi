@@ -1,0 +1,30 @@
+{
+  "version": "0.2.88",
+  "ref": "277a43bef475b690b13d713cd9175222095f2767",
+  "dataSchema": "8cb9f38263f7770f637d7256a4a049c762614d01e816195e4d15a24e1f175aa8",
+  "apiImage": "ghcr.io/moesin-lab/remi-api@sha256:32dc56ddb7110f57b206a0fdad77fcbe4f16e495b89e456496ec256272f97d21",
+  "webImage": "ghcr.io/moesin-lab/remi-web@sha256:88dbf258f5d0c18387c09b076fcd09f08a2726fc65339036fcc717ae11cddb09",
+  "application": {
+    "format": 1,
+    "supervisor": 1,
+    "rollbackSafeFrom": [
+      "6c5a69821d11ff3bdab9dd16bf024cb2b6b4fab11a65929aeaa9b5c666522bec"
+    ],
+    "assets": {
+      "linux-x64": {
+        "url": "https://github.com/moesin-lab/Remi/releases/download/v0.2.86/platform-application-277a43bef475b690b13d713cd9175222095f2767-linux-x64.tar.gz",
+        "sha256": "5193dd26f135fffc84728253e364503a5fda10ed976ded96ea759fdb9860258e"
+      }
+    },
+    "apiLibc": "glibc 2.41",
+    "bun": "1.3.14",
+    "webLibc": "glibc 2.36",
+    "node": "22.23.3",
+    "nodeMajor": 22,
+    "apiBase": "f2b313f1ba7d78e5b49a79d471c0ea54eb8a9d4b86500ddc63419b9216cf4950",
+    "nativeTools": "99f7d78380d7eb541a5b364bb884b366b26c7d88841035addfcbfbdef9e027b9"
+  },
+  "releaseUrl": "https://github.com/moesin-lab/Remi/tree/277a43bef475b690b13d713cd9175222095f2767",
+  "publishedAt": "2026-10-09T15:44:07.374Z",
+  "manifestUrl": "https://raw.githubusercontent.com/moesin-lab/Remi/codex/stable-application-feed-20261010/deployment-artifacts/stable-application.json"
+}

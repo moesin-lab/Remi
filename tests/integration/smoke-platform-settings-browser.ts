@@ -99,8 +99,9 @@ try {
   await page.getByRole('button', { name: text.source_save, exact: true }).click();
   await page.getByRole('button', { name: text.source_check, exact: true }).click();
   await page.getByTestId('platform-source-capabilities').getByText(/Fixture source unavailable/).waitFor();
-  assert(await page.getByRole('button', { name: text.update_now, exact: true }).count() === 0 || await page.getByRole('button', { name: text.update_now, exact: true }).isDisabled());
-  check('an unreachable source has an explicit error and no stale availability');
+  assert(await page.getByRole('button', { name: text.update_now, exact: true }).isVisible());
+  assert(await page.getByRole('button', { name: text.update_now, exact: true }).isDisabled());
+  check('an unreachable source leaves the explicit Web/API update button visible and blocked');
 
   await page.getByRole('button', { name: text.source_reset, exact: true }).click();
   await page.getByRole('button', { name: text.source_check, exact: true }).click();
@@ -109,6 +110,30 @@ try {
   assert.equal(await capabilities.getByText(text.source_available, { exact: true }).count(), 4);
   assert.equal(await input.inputValue(), '');
   check('restoring the default source rediscovers the unified release for all four modes');
+  const updates = page.getByTestId('platform-service-update');
+  const update = updates.getByRole('button', { name: text.update_now, exact: true });
+  await updates.getByText(text.update_scope, { exact: true }).waitFor();
+  await update.click();
+  const confirmation = page.getByRole('alertdialog');
+  await confirmation.getByRole('heading', { name: text.confirm_update_title.replace('{{version}}', '1.0.1'), exact: true }).waitFor();
+  assert((await confirmation.innerText()).includes(text.confirm_update_desc));
+  await confirmation.getByText(text.update_target_ref.replace('{{ref}}', 'c'.repeat(40)), { exact: true }).waitFor();
+  const beforeCancel = mutations.length;
+  await confirmation.getByRole('button', { name: text.cancel, exact: true }).click();
+  assert.equal(mutations.length, beforeCancel);
+  check('the update confirmation names Web/API and the exact target; cancellation sends no operation');
+  await update.click();
+  const updateResponse = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith('/api/multiremi/platform/operations'));
+  await confirmation.getByRole('button', { name: text.confirm, exact: true }).click();
+  const response = await updateResponse;
+  assert.equal(response.status(), 202);
+  const payload = response.request().postDataJSON();
+  assert.equal(payload.kind, 'update'); assert.equal(payload.targetVersion, '1.0.1');
+  assert.equal(payload.targetRef, 'https://releases.platform.test/complete.json');
+  await updates.getByText(text.update_no_new_release, { exact: true }).waitFor();
+  assert(await update.isVisible()); assert(await update.isDisabled());
+  check('the confirmed button reaches the real API and worker, simulates a drained switch, and stays visible after update');
+  await updates.screenshot({ path: join(artifacts!, 'web-api-update-entry.png'), animations: 'disabled' });
   await capabilities.scrollIntoViewIfNeeded();
   await page.screenshot({ path: join(artifacts!, 'update-source-desktop.png'), animations: 'disabled' });
 

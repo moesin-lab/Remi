@@ -403,6 +403,17 @@ resetting it to `null` uses the host default. Changing it clears prior discovery
 and preflight results. An unreachable feed does not stop the updater heartbeat.
 Settings, check results and operations are stored on the API, not in the browser.
 
+The current-version card always exposes **Update Web and API**, a text **Check
+for updates** action and the existing restart action. The update action installs
+Web and API together from the saved source. It stays visible when no new release
+exists, with an explanation for an installed target, missing/expired checks,
+offline updater, missing management permission or active maintenance. The
+confirmation names both services, the target version and commit, and explains
+agent drain, backups, compatibility verification and recovery. Only a fresh,
+successful preflight and an advertised update enable confirmation; a changed
+target invalidates an open confirmation. The Web uses the existing platform
+operation API, also available through `remi platform operation create`.
+
 The **Update mode** card displays the execution mode explicitly reported by the
 updater: host image updates (`images`), host application updates
 (`host_application`), in-container application updates (`internal_application`),

@@ -46,7 +46,7 @@ it("uses Agent capabilities without presenting pending sender approvals", async 
   await waitFor(() => expect(mockApi.saveFeishuBot).toHaveBeenCalledWith("workspace-1", {
     agent_id: "agent-1", runtime_id: "runtime-1", app_id: "cli_bot", domain: "feishu", enabled: true,
     app_secret_op: "keep", sender_access_policy: "allowlist",
-  }));
+  }, "default"));
 });
 
 function renderSection() {
@@ -105,7 +105,7 @@ describe("FeishuSenderAllowlistSection", () => {
     expect(within(screen.getByRole("listitem", { name: "Bob" })).getByText("Allowed")).toBeInTheDocument();
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    expect(mockApi.listFeishuBotSenders).toHaveBeenCalledWith("workspace-1");
+    expect(mockApi.listFeishuBotSenders).toHaveBeenCalledWith("workspace-1", "default");
   });
 
   it("waits for authorization to succeed before refreshing the account state", async () => {
@@ -115,7 +115,7 @@ describe("FeishuSenderAllowlistSection", () => {
     renderSection();
     await screen.findByText("Alice");
     await user.click(within(screen.getByRole("listitem", { name: "Alice" })).getByRole("button", { name: "Add to allowlist" }));
-    expect(mockApi.updateFeishuBotSender).toHaveBeenCalledWith("workspace-1", "sender-1", { allowed: true });
+    expect(mockApi.updateFeishuBotSender).toHaveBeenCalledWith("workspace-1", "sender-1", { allowed: true }, "default");
     expect(within(screen.getByRole("listitem", { name: "Alice" })).getByText("Pending authorization")).toBeInTheDocument();
     expect(toast.success).not.toHaveBeenCalled();
     mockApi.listFeishuBotSenders.mockResolvedValue({ senders: [{ ...PENDING, allowed: true }, ALLOWED] });
@@ -131,7 +131,7 @@ describe("FeishuSenderAllowlistSection", () => {
     mockApi.updateFeishuBotSender.mockResolvedValue({ ...ALLOWED, allowed: false });
     mockApi.listFeishuBotSenders.mockResolvedValue({ senders: [PENDING, { ...ALLOWED, allowed: false }] });
     await user.click(within(screen.getByRole("listitem", { name: "Bob" })).getByRole("button", { name: "Remove from allowlist" }));
-    expect(mockApi.updateFeishuBotSender).toHaveBeenCalledWith("workspace-1", "sender-2", { allowed: false });
+    expect(mockApi.updateFeishuBotSender).toHaveBeenCalledWith("workspace-1", "sender-2", { allowed: false }, "default");
     await waitFor(() => expect(within(screen.getByRole("listitem", { name: "Bob" })).getByText("Pending authorization")).toBeInTheDocument());
   });
 
@@ -212,6 +212,6 @@ describe("FeishuSenderAllowlistSection", () => {
     view.rerender(<FeishuSenderAllowlistSection />);
     expect(screen.queryByText("Alice")).not.toBeInTheDocument();
     expect(await screen.findByText("Carol")).toBeInTheDocument();
-    expect(mockApi.listFeishuBotSenders).toHaveBeenLastCalledWith("workspace-2");
+    expect(mockApi.listFeishuBotSenders).toHaveBeenLastCalledWith("workspace-2", "default");
   });
 });

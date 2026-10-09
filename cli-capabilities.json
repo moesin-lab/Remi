@@ -648,6 +648,38 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "workspace.feishu-bot.list": {
+      "command": "remi workspace feishu-bot list",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.feishu-bot.create": {
+      "command": "remi workspace feishu-bot create",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.feishu-bot.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "workspace.feishu-bot.get": {
       "command": "remi workspace feishu-bot get",
       "aliases": [],
@@ -11871,6 +11903,9 @@
     "GET /api/workspaces/:id/feishu-bot/status": {
       "command": "workspace.feishu-bot.status"
     },
+    "GET /api/workspaces/:id/feishu-bots": {
+      "command": "workspace.feishu-bot.list"
+    },
     "GET /api/workspaces/:id/invitations": {
       "command": "invite.list"
     },
@@ -13069,6 +13104,9 @@
     },
     "POST /api/workspaces/:id/feishu-bot/test": {
       "command": "workspace.feishu-bot.test"
+    },
+    "POST /api/workspaces/:id/feishu-bots": {
+      "command": "workspace.feishu-bot.create"
     },
     "POST /api/workspaces/:id/lark/install/begin": {
       "command": "lark.install.begin"

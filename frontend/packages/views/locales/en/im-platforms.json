@@ -35,7 +35,7 @@
     },
     "bot": {
       "title": "Bot",
-      "description": "Configure the bot, its reply agent, host runtime and menu."
+      "description": "Manage workspace bots, their responding Agents, host Runtimes and app credentials."
     },
     "access": {
       "title": "Access control",
@@ -249,7 +249,7 @@
     },
     "concierge": {
       "title": "Feishu concierge bot",
-      "description": "Run one Feishu bot for this workspace. Pick the Agent that answers, the machine that hosts it, and the app credentials it signs in with — no environment variables on the daemon machine.",
+      "description": "Choose the responding Agent, host Runtime and Feishu app credentials for this bot. Each bot has its own configuration, lifecycle and conversation routes.",
       "member_available": "{{name}} is online. Message it in Feishu to reach this workspace.",
       "member_unnamed_bot": "The concierge bot",
       "member_unavailable": "The concierge bot is configured but not reachable right now.",
@@ -551,5 +551,17 @@
     "install_error_session_lost": "Install session expired or was lost. Scan again to start over.",
     "install_error_forbidden": "You no longer have permission to install Lark Bots in this workspace. Ask a workspace admin to continue.",
     "install_error_generic": "Install failed. Try again."
+  },
+  "bots": {
+    "select": "Select bot",
+    "add": "Add bot",
+    "name": "Bot name",
+    "empty": "Set up your first bot",
+    "loading": "Loading bots…",
+    "runtimeHint": "Each bot uses its own Feishu app and Runtime. A Runtime currently hosts one bot.",
+    "runtimeAssigned": "Assigned to another bot",
+    "missing": "This bot was deleted or does not exist.",
+    "legacy": "Default bot",
+    "shared": "Workspace settings below are published by the default bot."
   }
 }

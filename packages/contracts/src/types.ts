@@ -4479,7 +4479,7 @@ export interface ReportBotMenuPublishInput {
 /**
  * Workspace Feishu concierge bot (MUL-206).
  *
- * One bot per workspace: `multiremi_feishu_bot_configs` is keyed by workspace
+ * Multiple bots per workspace: `multiremi_feishu_bot_configs` is keyed by workspace and bot
  * so the control plane, not a daemon machine's environment, owns which Agent
  * answers Feishu messages and which Runtime hosts the connector.
  */
@@ -4731,6 +4731,8 @@ export type FeishuBotErrorCode =
 
 /** Server-side config row. Secrets live only in the `*Encrypted` fields. */
 export interface MultiremiFeishuBotConfig {
+  botId: string;
+  name: string;
   workspaceId: string;
   agentId: string;
   runtimeId: string;
@@ -4758,6 +4760,8 @@ export interface MultiremiFeishuBotConfig {
  * short hint; the plaintext never leaves the server.
  */
 export interface FeishuBotConfigView {
+  bot_id?: string;
+  name?: string;
   configured: boolean;
   workspace_id: string;
   agent_id: string | null;
@@ -4820,6 +4824,7 @@ export interface FeishuBotStatusView {
 export type FeishuBotSecretOp = "keep" | "set" | "clear";
 
 export interface UpsertFeishuBotConfigInput {
+  name?: string;
   agentId: string;
   runtimeId: string;
   appId: string;
@@ -4833,6 +4838,7 @@ export interface UpsertFeishuBotConfigInput {
 
 /** Per-Runtime reported state, used to derive status and detect double-runs. */
 export interface MultiremiFeishuBotRuntimeStatus {
+  releasePending?: boolean;
   workspaceId: string;
   runtimeId: string;
   appliedRevision: number;

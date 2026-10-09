@@ -56,8 +56,10 @@ export function registerMessageCardRoutes(app: Hono, { store }: RouterDeps): voi
       if (error instanceof QuestionCardTokenError) return c.json({ error: error.message, code: error.code }, 403);
       throw error;
     }
-    const config = store.getFeishuBotConfig(loaded.workspaceId);
-    const operator = config ? store.resolveFeishuDecisionOperatorMember(loaded.workspaceId, config.appId, credential.operatorOpenId) : null;
+    const appId = loaded.request
+      ? store.feishuBotFor().forTask(loaded.request.taskId).getConfig(loaded.workspaceId)?.appId
+      : store.getFeishuIssueDecisionCardContext(loaded.workspaceId, loaded.message.id)?.appId;
+    const operator = appId ? store.resolveFeishuDecisionOperatorMember(loaded.workspaceId, appId, credential.operatorOpenId) : null;
     if (operator?.status !== "resolved") return c.json({ error: "card operator is not an active workspace member", code: operator?.status === "ambiguous" ? "decision_member_ambiguous" : "decision_member_unmapped" }, 403);
     const answer = typeof input.answer === "string" ? cleanString(input.answer) : null;
     const response = input.response && typeof input.response === "object" && !Array.isArray(input.response) ? input.response as Record<string, unknown> : undefined;

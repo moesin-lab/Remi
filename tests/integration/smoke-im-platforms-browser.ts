@@ -70,6 +70,55 @@ try {
   await saveResponse("PUT", `${apiBase}/bot-menu`, () => menu.getByRole("button", { name: "Save", exact: true }).click());
   check("bot menu saves through the relocated page without publishing to Feishu");
 
+  await page.getByRole("button", { name: "Add bot", exact: true }).click();
+  await page.waitForURL(/bot=new/);
+  await page.getByLabel("Bot name", { exact: true }).fill("Second concierge");
+  await botSection.getByRole("combobox").nth(0).click();
+  await page.getByRole("option", { name: "Group Specialist", exact: true }).click();
+  await botSection.getByRole("combobox").nth(1).click();
+  await page.getByRole("option", { name: "im-second-daemon", exact: true }).click();
+  await page.getByLabel("App ID", { exact: true }).fill("cli_second_bot");
+  await page.getByLabel("App Secret", { exact: true }).fill("second-synthetic-secret");
+  const createdBot = await saveResponse("POST", `${apiBase}/feishu-bots`, () => botSection.getByRole("button", { name: "Save", exact: true }).click());
+  assert(createdBot.bot_id && createdBot.bot_id !== "default");
+  await page.waitForURL(new RegExp(`bot=${createdBot.bot_id}`));
+  await page.reload();
+  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_second_bot", 20_000, "second bot after reload");
+  assert.equal(await page.getByLabel("App Secret", { exact: true }).inputValue(), "");
+  await page.getByRole("combobox", { name: "Select bot", exact: true }).selectOption("default");
+  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_im_updated", 20_000, "original bot unchanged");
+  await page.getByRole("combobox", { name: "Select bot", exact: true }).selectOption(createdBot.bot_id);
+  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_second_bot", 20_000, "second bot selection");
+  await page.screenshot({ path: join(artifacts, "im-multiple-bots-desktop.png") });
+  check("second bot is created through the form, survives refresh and switches without overwriting original credentials");
+
+  await page.goto(`${frontend}${base}`);
+  await page.getByRole("link", { name: /Second concierge/ }).waitFor();
+  await page.getByRole("link", { name: /cli_im_updated/ }).waitFor();
+  await page.getByRole("link", { name: /Second concierge/ }).click();
+  await page.waitForURL(new RegExp(`bot=${createdBot.bot_id}`));
+  check("overview lists both bots and opens the selected bot");
+
+  await page.getByRole("navigation", { name: "Manage platform capabilities" }).getByRole("link", { name: "Access control", exact: true }).click();
+  await page.waitForURL(new RegExp(`/access\\?bot=${createdBot.bot_id}`));
+  const scopedSave = await saveResponse("PUT", `${apiBase}/feishu-bot`, () => page!.getByRole("switch").click());
+  assert.equal(scopedSave.bot_id, createdBot.bot_id);
+  assert.equal(scopedSave.sender_access_policy, "allowlist");
+  await page.getByRole("combobox", { name: "Select bot", exact: true }).selectOption("default");
+  await page.getByRole("heading", { name: "Bot capability access", exact: true }).waitFor();
+  check("bot selection persists between capability pages and isolates sender access policy");
+
+  await page.goto(`${frontend}${base}/bot?bot=${createdBot.bot_id}`);
+  await page.getByLabel("App ID", { exact: true }).waitFor();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await poll(() => page!.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 10_000, "multi-bot mobile overflow");
+  await page.screenshot({ path: join(artifacts, "im-multiple-bots-mobile.png") });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await botSection.getByRole("button", { name: "Delete", exact: true }).click();
+  await saveResponse("DELETE", `${apiBase}/feishu-bot`, () => page!.getByRole("alertdialog").getByRole("button", { name: "Delete", exact: true }).click());
+  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_im_updated", 20_000, "original bot after second deletion");
+  check("deleting the second bot preserves the original bot; multi-bot UI fits mobile");
+
   await navigate("access", "Access control");
   await saveResponse("PUT", `${apiBase}/feishu-bot`, () => page!.getByRole("switch").click());
   await page.getByRole("heading", { name: "Feishu account allowlist" }).waitFor();
@@ -77,7 +126,7 @@ try {
   check("access policy switches between agent capabilities and sender allowlist");
 
   await navigate("conversations", "Chats & notifications");
-  await page.getByRole("combobox").first().click();
+  await page.getByRole("combobox", { name: "Direct messages use", exact: true }).click();
   await page.getByRole("option", { name: "Group Specialist", exact: true }).click();
   await saveResponse("PUT", `${apiBase}/feishu-bot/routes`, () => page!.getByRole("button", { name: "Save routes", exact: true }).click());
   const topics = page.locator("section").filter({ has: page.getByRole("heading", { name: "Issue topics", exact: true }) });

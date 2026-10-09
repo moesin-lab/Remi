@@ -1,3 +1,4 @@
+import { FEISHU_BOT_OPTION, feishuBotPath } from "./feishu-bot-scope.js";
 import {
   CliError,
   CliRenderer,
@@ -57,6 +58,7 @@ const RUNTIME_PROVISION_FIELDS: readonly CliOptionSpec[] = [
  * which is the only safe default for a partial update.
  */
 const FEISHU_BOT_FIELDS: readonly CliOptionSpec[] = [
+  { name: "name", type: "string", valueName: "name", description: "Bot display name" },
   { name: "sender-access-policy", type: "string", valueName: "agent|allowlist", description: "Use Agent permissions (default) or require a sender allowlist" },
   { name: "agent", type: "string", valueName: "agent-id", description: "Agent that answers concierge messages" },
   { name: "runtime", type: "string", valueName: "runtime-id", description: "Runtime that hosts the connector" },
@@ -68,7 +70,7 @@ const FEISHU_BOT_FIELDS: readonly CliOptionSpec[] = [
 ];
 
 export function workspaceCommandSpecs(): CommandSpec[] {
-  return [
+  const specs: CommandSpec[] = [
     groupSpec(),
     readSpec("workspace.list", ["workspace", "list"], "List workspaces", [], async (invocation) => {
       const client = await clientFor(invocation);
@@ -239,6 +241,8 @@ export function workspaceCommandSpecs(): CommandSpec[] {
         renderResource(invocation, response.data);
       },
     ),
+    scopedRead("workspace.feishu-bot.list", ["workspace", "feishu-bot", "list"], "List all Feishu bots in a workspace", "/feishu-bots"),
+    scopedWrite("workspace.feishu-bot.create", ["workspace", "feishu-bot", "create"], "Create an additional Feishu bot with its own app and Runtime", "/feishu-bots", "POST", FEISHU_BOT_FIELDS, feishuBotBody),
     scopedRead("workspace.feishu-bot.get", ["workspace", "feishu-bot", "get"], "Read the workspace Feishu concierge configuration", "/feishu-bot"),
     scopedRead("workspace.feishu-bot.status", ["workspace", "feishu-bot", "status"], "Read Feishu concierge runtime status", "/feishu-bot/status"),
     scopedRead("workspace.feishu-bot.candidates", ["workspace", "feishu-bot", "candidates"], "List Agents and Runtimes the concierge can use", "/feishu-bot/candidates"),
@@ -253,7 +257,7 @@ export function workspaceCommandSpecs(): CommandSpec[] {
         const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
         const response = await client.request({
           method: "GET",
-          path: `/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot/senders`,
+          path: feishuBotPath(`/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot/senders`, invocation),
         });
         renderFeishuBotSenders(invocation, response.data);
       },
@@ -312,7 +316,7 @@ export function workspaceCommandSpecs(): CommandSpec[] {
     destructiveSpec("workspace.feishu-bot.delete", ["workspace", "feishu-bot", "delete"], "Delete the workspace Feishu concierge configuration", [refPositional("workspace")], async (invocation) => {
       const client = await clientFor(invocation);
       const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
-      const response = await client.request({ method: "DELETE", path: `/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot` });
+      const response = await client.request({ method: "DELETE", path: feishuBotPath(`/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot`, invocation) });
       renderResource(invocation, response.data);
     }),
     scopedRead("workspace.prompt.get", ["workspace", "prompt", "get"], "Read workspace prompt appendices", "/prompts"),
@@ -328,6 +332,8 @@ export function workspaceCommandSpecs(): CommandSpec[] {
       { name: "sweep-interval-ms", type: "integer", valueName: "ms", description: "Archive sweep interval" },
     ], issueArchiveBody),
   ];
+  return specs.map(spec => spec.path[1] === "feishu-bot" && !["list", "create", "register", "register-status", "register-cancel"].includes(spec.path[2] ?? "")
+    ? { ...spec, options: [...(spec.options ?? []), FEISHU_BOT_OPTION] } : spec);
 }
 
 export async function resolveWorkspace(
@@ -443,7 +449,7 @@ function scopedRead(
     const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
     const engine = extra.length ? positional(invocation, 1, extra[0]!.name) : "";
     const scopedSuffix = suffix.replace(":engine", encodePath(engine));
-    const response = await client.request({ method: "GET", path: `/api/workspaces/${encodePath(String(workspace.id))}${scopedSuffix}` });
+    const response = await client.request({ method: "GET", path: feishuBotPath(`/api/workspaces/${encodePath(String(workspace.id))}${scopedSuffix}`, invocation) });
     renderResource(invocation, response.data);
   });
 }
@@ -466,7 +472,7 @@ function feishuBotSenderAccessSpec(action: "allow" | "revoke", allowed: boolean)
       const senderId = positional(invocation, 1, "sender");
       const response = await client.request({
         method: "PUT",
-        path: `/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot/senders/${encodePath(senderId)}`,
+        path: feishuBotPath(`/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot/senders/${encodePath(senderId)}`, invocation),
         body: { allowed },
       });
       renderFeishuBotSenders(invocation, response.data);
@@ -516,7 +522,7 @@ function scopedWrite(
       const engine = positionalFields.length ? positional(invocation, 1, positionalFields[0]!.name) : "";
       const scopedSuffix = suffix.replace(":engine", encodePath(engine));
       const body = await bodyBuilder(invocation);
-      const response = await client.request({ method, path: `/api/workspaces/${encodePath(String(workspace.id))}${scopedSuffix}`, body });
+      const response = await client.request({ method, path: feishuBotPath(`/api/workspaces/${encodePath(String(workspace.id))}${scopedSuffix}`, invocation), body });
       renderResource(invocation, response.data);
     },
   };
@@ -616,6 +622,7 @@ function feishuBotRegistrationPath(workspaceId: string, sessionId: string): stri
 
 async function feishuBotBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
   const body = await requestBody(invocation, {
+    name: stringOption(invocation, "name") ?? undefined,
     sender_access_policy: stringOption(invocation, "sender-access-policy") ?? undefined,
     agent_id: stringOption(invocation, "agent") ?? undefined,
     runtime_id: stringOption(invocation, "runtime") ?? undefined,

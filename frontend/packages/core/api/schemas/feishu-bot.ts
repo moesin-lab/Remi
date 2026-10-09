@@ -39,6 +39,8 @@ export const FeishuBotSenderListSchema = z.object({
 // ---------------------------------------------------------------------------
 
 export const FeishuBotConfigSchema = z.object({
+  bot_id: z.string().optional(),
+  name: z.string().optional(),
   sender_access_policy: z.enum(["agent", "allowlist"]).optional().catch(undefined),
   configured: z.boolean().default(false),
   workspace_id: z.string().default(""),
@@ -71,6 +73,10 @@ export const FeishuBotConfigSchema = z.object({
  * The member shape is a strict subset, so the discriminator is `workspace_id` —
  * present for admins, absent for members — rather than a server-sent flag.
  */
+export const FeishuBotListSchema = z.object({
+  bots: z.array(FeishuBotConfigSchema.extend({ bot_id: z.string().min(1), status: z.string() })),
+});
+
 export const FeishuBotAvailabilitySchema = z.object({
   configured: z.boolean().default(false),
   available: z.boolean().default(false),
@@ -120,6 +126,7 @@ export const FeishuBotCandidatesSchema = z.object({
     daemon_id: z.string().nullable().default(null),
     online: z.boolean().default(false),
     supports_config: z.boolean().default(false),
+    assigned_bot_id: z.string().nullable().optional(),
     last_heartbeat_at: z.string().nullable().default(null),
   }).loose()).default([]),
   encryption_available: z.boolean().default(false),

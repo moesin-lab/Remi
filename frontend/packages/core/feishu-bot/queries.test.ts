@@ -9,6 +9,18 @@ afterEach(() => {
 });
 
 describe("Feishu bot sender queries", () => {
+  it("keeps two bots in the same workspace in separate cache entries", async () => {
+    const listFeishuBotSenders = vi.fn(async (_workspaceId: string, botId: string) => ({ senders: [{ id: botId }] }));
+    setApiInstance({ listFeishuBotSenders } as unknown as ApiClient);
+    const client = new QueryClient();
+    try {
+      await client.fetchQuery(feishuBotSendersOptions("ws-a", true, "bot-one"));
+      await client.fetchQuery(feishuBotSendersOptions("ws-a", true, "bot-two"));
+      expect(client.getQueryData(feishuBotKeys.senders("ws-a", "bot-one"))).toEqual({ senders: [{ id: "bot-one" }] });
+      expect(client.getQueryData(feishuBotKeys.senders("ws-a", "bot-two"))).toEqual({ senders: [{ id: "bot-two" }] });
+      expect(listFeishuBotSenders).toHaveBeenCalledTimes(2);
+    } finally { client.clear(); }
+  });
   it("keeps sender data isolated by workspace", async () => {
     const listFeishuBotSenders = vi.fn()
       .mockResolvedValueOnce({ senders: [{ id: "sender-a" }] })
@@ -20,7 +32,7 @@ describe("Feishu bot sender queries", () => {
       await queryClient.fetchQuery(feishuBotSendersOptions("ws-b"));
 
       expect(feishuBotKeys.senders("ws-a")).toEqual(["feishu-bot", "ws-a", "senders"]);
-      expect(listFeishuBotSenders.mock.calls).toEqual([["ws-a"], ["ws-b"]]);
+      expect(listFeishuBotSenders.mock.calls).toEqual([["ws-a", "default"], ["ws-b", "default"]]);
       expect(queryClient.getQueryData(feishuBotKeys.senders("ws-a")))
         .toEqual({ senders: [{ id: "sender-a" }] });
       expect(queryClient.getQueryData(feishuBotKeys.senders("ws-b")))

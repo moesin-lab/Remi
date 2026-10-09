@@ -18,7 +18,7 @@ Issue 决定及其答复在消息、日志和收件箱读取中统一检查来�
 
 没有来源轮的普通成员 decision，其选项和结构化 response 答复按会话权限可见。`metadata.human_response` 本身不代表私有 task 来源；答复关联的原提问有来源任务时仍沿来源鉴权，受保护来源无法解析时仍隐藏。
 
-消息响应为 UnifiedMessage 的字段，加 `attachments` 和 `reactions`；不返回任何 `card_token_*` 字段。附件与反应沿用 Store 的 camelCase 对象，附件下载使用 `/api/attachments/:id/download`，内联内容使用 `/api/attachments/:id/content`。`task_id` 是统一轮 ID，执行 trace 使用 attempt ID。失败返回 `{error}`，参数错误 400，权限错误 403，不可见或不存在 404，已消费编辑、普通 decision 或 human request 的重复回答和非法轮状态 409。
+具有正文权限的消息响应为 UnifiedMessage 的字段，加 `attachments` 和 `reactions`；不返回任何 `card_token_*` 字段。Topic 协调发送，以及经持久化委派谱系验证、跨 Session 发给 `delegator` 的 reply/report，其发送响应的 `message` 只含 `{id,session_id,seq,message_kind,created_at}`，不返回正文、附件或反应，也不授予目标 Session 的历史读取权限。委派返回核对当前运行 attempt，并由原触发 request 关联派活来源轮，再核对目标 Agent、实际 owner、回程 Session 和工作区；不能由客户端指定来源或任意目标替代。附件与反应沿用 Store 的 camelCase 对象，附件下载使用 `/api/attachments/:id/download`，内联内容使用 `/api/attachments/:id/content`。`task_id` 是统一轮 ID，执行 trace 使用 attempt ID。失败返回 `{error}`，参数错误 400，权限错误 403，不可见或不存在 404，已消费编辑、普通 decision 或 human request 的重复回答和非法轮状态 409。
 
 task token 在统一鉴权入口核对绑定的 attempt 是否仍是所属轮的 current_attempt_id，并核对 agent 和工作区；替换 attempt 时在同一事务撤销旧 token，旧 token 的所有入口返回 401。parent_owner 只解析同工作区父单；最终会话或 Issue 不属于发送工作区时拒绝并回滚全部写入。
 
@@ -87,12 +87,16 @@ SSR 和本地副本继续使用只读展示协议：`GET /api/sessions/:sessionI
 | `GET /api/turns/:id` | `input=true`、`attempts=true`，默认均不展开 | `{turn,input?,attempts?}` |
 | `POST /api/turns/:id/cancel` | `{}` | `{turn}`；丢弃本轮已绑定输入并取消，已终态幂等 |
 | `POST /api/turns/:id/wrap-up` | `{}` | `{turn}`；仅 running/awaiting_human，设置 wrap_up_requested_at |
-| `POST /api/turns/:id/retry` | `{cold?:boolean,reason?:string}` | `{turn,organizer_action,comment_id}`；原 turn.id，新 current_attempt_id，cold 清续接缓存 |
+| `POST /api/turns/:id/retry` | `{cold?:boolean,reason?:string}` | 成员返回 `{turn}`；Task 监督者或关联控制者返回 `{turn,organizer_action,comment_id}`；原 turn.id，新 current_attempt_id，cold 清续接缓存 |
 | `GET /api/turns/:id/trace` | `attempt_id` 缺省 current_attempt_id；`after_seq`、`limit` 沿用 TraceReader 协议 | `{turn_id,attempt_id,...TraceReadResult}` |
 
-input 为 `{from_seq,to_seq,messages,legacy_prompt}`，读取完整绑定范围，不因超过 1000 条而截断。attempts 按 attempt_no 升序。status 为 pending/running/awaiting_human/completed/failed/cancelled。列表 limit 默认100、上限500；cursor 为 opaque 字符串。retry 接受带 organizer:supervisor scope 的当前 supervisor task 凭证，也接受同工作区组长或父单负责人对组员轮的控制；旁支会话不能重试，其他跨 agent 操作返回 403。retry 沿用 organizer 的 report_only/act 设置、巡查评论和审计，提交后发布事件；返回同一 turn、新 attempt，以及 organizer_action/comment_id。cold=false 保留 provider 缓存，cold=true 清缓存。cancel/wrap-up 同样允许这些相关控制者。retry 不新增轮、不改变 Issue；不可重试状态返回409。trace attempt 必须属于指定轮，原 TraceReadResult 的可用性、分页及断档字段保留；runtime/all 角色提供此入口，ui 角色继续返回 421。
+input 为 `{from_seq,to_seq,messages,legacy_prompt}`，读取完整绑定范围，不因超过 1000 条而截断。attempts 按 attempt_no 升序。status 为 pending/running/awaiting_human/completed/failed/cancelled。列表 limit 默认100、上限500；cursor 为 opaque 字符串。
 
-AgentTask 的 `id` 仍为 attempt ID；既有 `/api/agent-task-snapshot` 和 `/api/agents/:id/tasks`（含 native 对应端点）同批返回 `turn_id`。快照的精简列清单也包含该字段，直接来自 execution read projection 的 canonical turn 映射，不额外逐条查询。全局任务日志使用 `/api/turns/:turn_id/trace?attempt_id=:id`，历史 attempt 也保留所属 turn_id，不可把两类 ID 互换。旧 `/api/issues/:id/active-task` 已退役并返回 410；Issue 的轮列表使用 `GET /api/turns?issue_id=:id` 或 `remi turn list --issue <issue>`。
+成员 retry 仅恢复指定的 failed/cancelled Turn，沿实际 owner 的工作区、Chat 创建者和 Agent 可见性授权；管理员不绕过这些检查，daemon 凭据返回 403。请求只接受 `cold` 布尔值和不超过 2000 字符的 `reason` 字符串，旧 selector 或 Agent、Session、prompt 覆盖字段返回 400。Store 在工作区锁内重读 owner 并重验权限；公开 Issue 上任意活动轮或私有会话中本 Session 的活动轮阻止恢复，归档会话与不可用 Agent 同样拒绝。依赖闸门生效且 backlog Issue 有未满足前置项时拒绝，不授予 force。成功原子保留同一 Turn、Agent、Session、prompt 和创建限制，只新增一次 attempt 并将同轮排回 pending，返回 `{turn}`；公开 Issue 单次推导可从 blocked 回到 todo，但 done/cancelled 不重开，Chat-owned 工作投影不推导。
+
+Task retry 接受带 organizer:supervisor scope 的当前 supervisor task 凭证，也接受同工作区组长或父单负责人对组员轮的控制；旁支会话不能发起监督者重试，其他跨 agent 操作返回 403。此分支沿用 organizer 的 report_only/act 设置、巡查报告和审计，提交后发布事件；返回同一 turn、新 attempt，以及 organizer_action/comment_id，replacement 不推导 Issue。cold=false 保留 provider 缓存，cold=true 清缓存。cancel/wrap-up 同样允许这些相关控制者。retry 不新增轮；不可重试状态返回409。trace attempt 必须属于指定轮，原 TraceReadResult 的可用性、分页及断档字段保留；runtime/all 角色提供此入口，ui 角色继续返回 421。
+
+AgentTask 的 `id` 仍为 attempt ID；既有 `/api/agent-task-snapshot` 和 `/api/agents/:id/tasks`（含 native 对应端点）同批返回 `turn_id`。快照的精简列清单也包含该字段，直接来自 execution read projection 的 canonical turn 映射，不额外逐条查询。全局任务日志使用 `/api/turns/:turn_id/trace?attempt_id=:id`，历史 attempt 也保留所属 turn_id，不可把两类 ID 互换。旧 `/api/issues/:id/active-task` 已退役并返回 410；Issue 的轮列表使用 `GET /api/turns?issue=:id` 或 `remi turn list --issue <issue>`。
 
 `autopilot run-now` 仍使用既有 trigger API/CLI，写入 auto_* 对话的 request，并复用 Store 创建执行轮；Issue 执行模式在实际 Issue 会话执行，auto_* request 带关联 turn/session，供历史展示。
 

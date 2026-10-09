@@ -15,6 +15,8 @@ function sideSessionFixture(inheritMode: "snapshot" | "follow" = "snapshot") {
   const issue = store.createIssue({ title: "Side conversation", assigneeType: "squad", assigneeId: squad.id });
   const main = store.getOrCreateDefaultIssueSession(issue.id);
   const side = store.createIssueSession(issue.id, { title: "Side", parentSessionId: main.id, inheritMode });
+  expect(side.ownerType).toBe("issue");
+  expect(side.chatId).toBeNull();
   const sideTask = store.createTask({
     agentId: leader.id,
     issueId: issue.id,
@@ -110,6 +112,7 @@ describe("Side session delegation boundary", () => {
     const app = createMultiremiApp({ store, authToken: "test-root-token" });
     for (const targetSessionId of [side.id, main.id, undefined]) {
       for (const targetAgentId of [teammate.id, leader.id]) {
+        const messagesBefore = store.listMessages(targetSessionId ?? main.id);
         const response = await app.request(taskRequestPath(store, { issueId: issue.id, issueSessionId: targetSessionId }), {
           method: "POST",
           headers: { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" },
@@ -120,11 +123,9 @@ describe("Side session delegation boundary", () => {
             prompt: "Dispatch another task.",
           })),
         });
-        expect(response.status).toBe(200);
-        const data=await response.json();
-        expect(data.message.wake_applied).toBe(targetAgentId===sideTask.agentId?"inbox_only":"next_turn");
-        expect(data.message.wake_reason).toBe(targetAgentId===sideTask.agentId?"self":"source_side_session");
-        expect(data.turn_id).toBeUndefined();
+        expect(response.status).toBe(403);
+        expect(await response.json()).toEqual({ error: "Agent delegation is not allowed from side sessions" });
+        expect(store.listMessages(targetSessionId ?? main.id)).toEqual(messagesBefore);
       }
     }
     expect(store.listTasksForIssue(issue.id)).toHaveLength(1);
@@ -151,18 +152,20 @@ describe("Side session delegation boundary", () => {
     expect(store.claimTask(runtime.id)?.id).toBe(sideTask.id);
   });
 
-  it("rejects same-agent child tasks through the session-task API", async () => {
+  it("rejects same-agent requests through the canonical Session message API", async () => {
     const { store, leader, issue, main, side, sideTask } = sideSessionFixture();
     const token = await store.createTaskAccessToken(sideTask, "local");
     const app = createMultiremiApp({ store, authToken: "test-root-token" });
     for (const targetSession of [side, main]) {
+      const messagesBefore = store.listMessages(targetSession.id);
       const response = await app.request(`/api/sessions/${targetSession.id}/messages`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" },
         body: JSON.stringify(requestMessageBody(store, { agentId: leader.id, prompt: "Start another copy of me." }, { type: "role", ref: "issue_owner" })),
       });
-      expect(response.status).toBe(200);
-      expect((await response.json()).message.wake_reason).toBe("self");
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: "Agent delegation is not allowed from side sessions" });
+      expect(store.listMessages(targetSession.id)).toEqual(messagesBefore);
     }
     expect(store.listTasksForIssue(issue.id)).toHaveLength(1);
   });
@@ -221,13 +224,8 @@ describe("Side session delegation boundary", () => {
         headers: { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" },
         body: JSON.stringify(request.body),
       });
-      if(request.path.endsWith("/messages")){
-        expect(response.status).toBe(200);
-        expect((await response.json()).turn_id).toBeUndefined();
-      }else{
-        expect(response.status).toBe(403);
-        expect(await response.json()).toEqual({error:"Agent delegation is not allowed from side sessions"});
-      }
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: "Agent delegation is not allowed from side sessions" });
       expect(store.getIssue(issue.id)).toEqual(before);
       expect(store.getTask(sideTask.id)?.status).toBe("running");
       expect(store.listTasksForIssue(issue.id).map((task) => task.id)).toEqual([sideTask.id]);
@@ -333,9 +331,12 @@ describe("Side session delegation boundary", () => {
     const discussion = await app.request(`/api/sessions/${side.id}/messages`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(requestMessageBody(store, { body: "The tradeoff is worth discussing." }, { type: "role", ref: "issue_owner" })),
+      body: JSON.stringify({ body_md: "The tradeoff is worth discussing.", message_kind: "request", to: { type: "none" }, wake_requested: "inbox_only" }),
     });
     expect(discussion.status).toBe(200);
+    const discussionResult = await discussion.json();
+    expect(discussionResult.message).toMatchObject({ body_md: "The tradeoff is worth discussing.", to_type: "none", sender_type: "agent", sender_id: sideTask.agentId });
+    expect(discussionResult.turn_id).toBeUndefined();
     expect(store.listTasksForIssue(issue.id)).toHaveLength(1);
 
     const humanRequest = await app.request(`/api/sessions/${side.id}/messages`, {

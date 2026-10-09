@@ -194,6 +194,11 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         it.each(["escalated", "answered", "withdrawn"] as const)(`${direction}: foreign ${endpoint} decisions are hidden from card reads and %s callbacks`, async status => {
           const f = await fixture(reverse);
           send(f);
+          const sessionId = store.getMessage(f.decision.id)!.session_id;
+          const memberHeaders = { Authorization: `Bearer ${f.pat}` };
+          const intact = await f.app.request(`/api/sessions/${sessionId}/messages?message_kind=decision`, { headers: memberHeaders });
+          expect(intact.status).toBe(200);
+          expect(await intact.text()).toContain(f.decision.title);
           move(f);
           patchDecision(f.decision.id, { status });
           const before = snapshot();
@@ -206,18 +211,17 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
             expect(store.getIssueDecisionAnywhere(f.decision.id)).toBeNull();
             expect(store.getFeishuIssueDecisionCardContext(f.workspaceId, f.decision.id)).toBeNull();
             expect(await transport(f, f.path)).toEqual([404, 404]);
-            const sessionId = store.getMessage(f.decision.id)!.session_id;
             const memberRead = await f.app.request(`/api/sessions/${sessionId}/messages?message_kind=decision`, {
-              headers: { Authorization: `Bearer ${f.pat}` },
+              headers: memberHeaders,
             });
-            // B4 A: Session workspace grants access; decision rows retain their relationship filter.
-            expect(memberRead.status).toBe(200);
+            // A moved target invalidates its actual Issue-owned Session. A
+            // foreign source only hides the decision inside the intact target.
+            expect(memberRead.status).toBe(endpoint === "target" ? 404 : 200);
             expect(await memberRead.text()).not.toContain(f.decision.title);
-            const memberHeaders = { Authorization: `Bearer ${f.pat}` };
             expect((await f.app.request(`/api/messages/${f.decision.id}`, { headers: memberHeaders })).status).toBe(404);
             const logPath = `/api/sessions/${sessionId}/log`;
             const log = await f.app.request(logPath, { headers: memberHeaders });
-            expect(log.status).toBe(200);
+            expect(log.status).toBe(endpoint === "target" ? 404 : 200);
             expect(await log.text()).not.toContain(f.decision.title);
             expect((await f.app.request(`${logPath}/entry?id=${f.decision.id}`, { headers: memberHeaders })).status).toBe(404);
             if (endpoint === "target") {

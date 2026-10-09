@@ -33,7 +33,10 @@ const EXTRA_FIELDS: Record<string,string> = {
     WHEN a.status='offered' THEN 'queued' WHEN a.status='accepted' THEN 'dispatched' WHEN a.status='lost' THEN 'failed' ELSE a.status END`,
 };
 
+const EXECUTION_READ_PROJECTION_MIGRATION = "20261009_stable_execution_read_projection";
+
 export function createTurnExecutionReadProjection(db: SqlDatabase): void {
+  if (db.query("SELECT id FROM multiremi_schema_migrations WHERE id=?").get(EXECUTION_READ_PROJECTION_MIGRATION)) return;
   for (const name of ["multiremi_agent_lane_records", "multiremi_issue_message_records", "multiremi_turn_execution_records"]) {
     db.exec(`DROP VIEW IF EXISTS ${name}`);
   }
@@ -60,6 +63,12 @@ export function createTurnExecutionReadProjection(db: SqlDatabase): void {
         ? "(SELECT (COALESCE(m.metadata::jsonb->'task_result','{}'::jsonb)||jsonb_build_object('output',m.body_md))::text FROM multiremi_conversation_log m WHERE m.id=t.reply_message_id)"
         : "(SELECT json_patch(COALESCE(json_extract(m.metadata,'$.task_result'),'{}'),json_object('output',m.body_md)) FROM multiremi_conversation_log m WHERE m.id=t.reply_message_id)") : expr} AS ${c}`)].join(",\n")}
     FROM multiremi_turn_attempts a JOIN multiremi_turns t ON t.id=a.turn_id`);
+  // The cutover first builds these views before the read-state fold adds its
+  // final lane column. Mark only that completed shape, then leave live views
+  // untouched on reopen: their DDL locks can deadlock concurrent writers.
+  if (db.query("PRAGMA table_info(multiremi_session_lanes)").all().some(column => column.name === "cursor_offset")) {
+    db.run("INSERT INTO multiremi_schema_migrations(id,applied_at) VALUES(?,?)", [EXECUTION_READ_PROJECTION_MIGRATION, nowIso()]);
+  }
 }
 
 export function splitExecutionSql(sql: string, delimiter: string): string[] {

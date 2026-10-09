@@ -153,12 +153,16 @@ describe("MUL-427 B7: conversation backfill and reconciliation", () => {
     it.skipIf(backend === "pg" && !pgAdminUrl)(`${backend}: complete fixture, pre-③ gaps and B1 NULL task links reconcile without mismatches`, async () => {
       await withStore(backend, (store, db) => {
         const { edited, deleted, root, child, chat, session, topic, preserved, preservedSystem } = prepareConversationBackfillFixture(store, db);
+        const retained = db.query("SELECT id, kind FROM multiremi_conversation_log ORDER BY id").all();
+        expect(retained).toEqual([preserved, preservedSystem].map(row => ({ id: row.id, kind: row.kind }))
+          .sort((left, right) => left.id.localeCompare(right.id)));
         const result = db.transaction(() => backfillConversationLogWithinTransaction(db))();
         expect(result.mismatches).toEqual([]);
         expect(result.counts.commentTaskIdsFilled).toBe(2);
-        // Two retained comments plus two subscription Session heads. Native
-        // Issue-owned Main does not implicitly allocate a Chat head.
-        expect(result.counts.existingRowsSkipped).toBe(4);
+        // The historical fixture retains these two comments and deletes every
+        // head log row before backfill; current Chat subscription heads are not
+        // part of this pre-unified database.
+        expect(result.counts.existingRowsSkipped).toBe(retained.length);
         expect(result.counts.orphanCommentsAppended).toBe(1);
         expect(result.counts.orphanCommentsSkipped).toBe(1);
         expect(result.counts.deletedComments).toBe(1);

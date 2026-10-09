@@ -6,26 +6,22 @@
  * implementation-agnostic, so running it here on the optimized route produces
  * the same bytes whenever the response shape did not drift.
  *
- * Reproduce the checked-in `first-screen-hotspots-golden.json` byte for byte by
- * running this on the merge state (`620fc94f`) or anywhere later on this branch,
- * with the fixture and `first-screen-hotspots-normalize.ts` from the same
- * revision:
+ * Reproduce the checked-in `first-screen-hotspots-golden.json` using this
+ * revision's canonical Turn API, fixture and normalization:
  *
  *   bun run tests/fixtures/multiremi/capture-first-screen-hotspots-golden.ts \
  *     --baseline --out tests/fixtures/multiremi/first-screen-hotspots-golden.json
  *
- * The response bodies are the contract of the pre-optimization implementation,
- * but they are recorded *after* merging main, so each issue carries the
- * `parent_done_grant_at/by/agent_id` fields MUL-457 added to the response. The
- * capture therefore has to happen on the merge state, not on the pre-MUL-473
- * commit on its own: that commit's responses predate those three fields.
- * `--source <label>` overrides the header label when capturing anywhere else.
+ * The Turn list includes current Attempt metadata and Chat ownership. Issue
+ * assignee responses retain their existing contract. `--source <label>`
+ * overrides the header label for an independent comparison.
  *
  * The golden records only the routes PR1 touches. `GET /api/inbox/summary` and
  * `GET /api/attachments/:id/content` are captured by their own PR2 files.
  */
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -38,15 +34,8 @@ import { seedFirstScreenHotspotsFixture, type FirstScreenHotspotsFixture } from 
 const DEFAULT_OUT = join(import.meta.dir, "first-screen-hotspots-golden.json");
 const AUTH_TOKEN = "mul473-hotspot-token";
 
-/**
- * The response contract this file records predates the optimization, so the
- * label names that implementation rather than a capture date or a commit of the
- * branch being reviewed. Re-running the capture on any later main yields the
- * same bytes, because the routes' response shape did not drift.
- */
 const FIRST_SCREEN_GOLDEN_SOURCE =
-  "pre-optimization implementation (593ff2ba) re-captured after merging origin/main d6714966 "
-  + "(MUL-457 added the parent_done_grant_* fields)";
+  "MUL-493 canonical Turn list with current Attempt metadata; unchanged Issue assignee filters";
 
 export interface FirstScreenHotspotGolden {
   name: string;
@@ -67,6 +56,9 @@ export interface FirstScreenHotspotGolden {
 
 export async function captureFirstScreenHotspotGolden(source: string): Promise<FirstScreenHotspotGolden> {
   const restoreIds = installFirstScreenHotspotIds();
+  const reportRoot = mkdtempSync(join(tmpdir(), "mul473-golden-reports-"));
+  const previousReportDir = process.env.MULTIREMI_MIGRATION_REPORT_DIR;
+  process.env.MULTIREMI_MIGRATION_REPORT_DIR = reportRoot;
   const db = openSqliteDatabase(":memory:");
   try {
     const store = new MultiremiStore(db);
@@ -124,6 +116,9 @@ export async function captureFirstScreenHotspotGolden(source: string): Promise<F
   } finally {
     restoreIds();
     db.close();
+    if (previousReportDir === undefined) delete process.env.MULTIREMI_MIGRATION_REPORT_DIR;
+    else process.env.MULTIREMI_MIGRATION_REPORT_DIR = previousReportDir;
+    rmSync(reportRoot, { recursive: true, force: true });
   }
 }
 

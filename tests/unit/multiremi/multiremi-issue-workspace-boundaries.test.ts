@@ -501,7 +501,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         expect(subscribers.some((row: { user_id: string }) => row.user_id === f.auth.sourceMember)).toBe(true);
       });
 
-      it(`${direction}: moved Issue status notifications use the target orphan inbox without creating or moving a Session`, async () => {
+      it(`${direction}: moved Issue status notifications use its migrated Issue-owned Main in the target workspace`, async () => {
         const f = await moveFixture("member");
         const oldSession = store.getOrCreateDefaultIssueSession(f.issue.id);
         store.addIssueSubscriber(f.issue.id, f.auth.sourceMember);
@@ -511,18 +511,20 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         const prerequisite = store.createIssue({ title: "Target prerequisite", workspaceId: f.target, status: "todo" });
         store.createIssueDependency(f.issue.id, { dependsOnIssueId: prerequisite.id, type: "blocked_by" });
         store.updateIssue(f.issue.id, { status: "backlog" });
-        const sourceLog = store.listConversationLogEntries(oldSession.id);
+        const beforeStatusLog = store.listConversationLogEntries(oldSession.id);
         const targetBefore = store.listInboxItems(f.auth.targetMember).length;
 
         expect(() => store.updateIssue(prerequisite.id, { status: "done" })).not.toThrow();
         const notifications = store.listInboxItems(f.auth.targetMember);
         expect(notifications).toHaveLength(targetBefore + 1);
         const notification = notifications.find(item => item.type === "dependency_satisfied")!;
-        expect(store.getMessage(notification.id)).toMatchObject({ session_id: `auto_orphan_inbox_${f.target}`,
+        expect(store.getMessage(notification.id)).toMatchObject({ session_id: oldSession.id,
           message_kind: "status", to_member_id: f.auth.targetMember });
-        expect(store.getIssueSession(oldSession.id)?.workspaceId).toBe(f.source);
+        expect(store.getIssueSession(oldSession.id)).toMatchObject({ ownerType: "issue", ownerId: f.issue.id, workspaceId: f.target });
+        expect(db.query("SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id = ?").get(oldSession.id))
+          .toEqual({ workspace_id: f.target });
         expect(store.listIssueSessions(f.issue.id, true).map(session => session.id)).toEqual([oldSession.id]);
-        expect(store.listConversationLogEntries(oldSession.id)).toEqual(sourceLog);
+        expect(store.listConversationLogEntries(oldSession.id).filter(row => row.id !== notification.id)).toEqual(beforeStatusLog);
         expect(store.listInboxItems(f.auth.sourceMember)).toEqual(sourceInbox);
       });
 

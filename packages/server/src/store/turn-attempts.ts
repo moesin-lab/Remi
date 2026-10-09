@@ -16,6 +16,8 @@ export function createReplacementAttemptWithinTransaction(db: SqlDatabase, turnI
   reason: string;
   cold?: boolean;
   allowCancelledTurn?: boolean;
+  /** A member's explicit recovery queues the same work identity for a fresh claim. */
+  turnStatus?: "pending";
   id?: string;
   now?: string;
 }): { turn_id: string; attempt_id: string; attempt_no: number } {
@@ -49,8 +51,9 @@ export function createReplacementAttemptWithinTransaction(db: SqlDatabase, turnI
   Object.assign(value,{id,turn_id:turnId,attempt_no:attemptNo,status:"offered" satisfies TurnAttemptStatus,created_at:now,updated_at:now});
   const keys=Object.keys(value);
   db.run(`INSERT INTO multiremi_turn_attempts(${keys.join(",")}) VALUES(${keys.map(()=>"?").join(",")})`,keys.map(k=>value[k] ?? null));
-  db.run(`UPDATE multiremi_turns SET current_attempt_id=?,status=CASE WHEN status IN ('failed','cancelled') THEN 'running' ELSE status END,
-    ended_at=NULL,ended_reason=NULL WHERE id=?`,[id,turnId]);
+  db.run(`UPDATE multiremi_turns SET current_attempt_id=?,status=CASE WHEN ?='pending' THEN 'pending'
+    WHEN status IN ('failed','cancelled') THEN 'running' ELSE status END,
+    ended_at=NULL,ended_reason=NULL WHERE id=?`,[id,input.turnStatus??null,turnId]);
   notifyTurnChanged(db,turnId);
   return {turn_id:turnId,attempt_id:id,attempt_no:attemptNo};
 }

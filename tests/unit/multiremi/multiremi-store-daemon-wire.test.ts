@@ -235,10 +235,12 @@ describe("Multiremi store — Go daemon wire shapes", () => {
       "trigger_comment_id",
       "trigger_summary",
       "trigger_thread_id",
+      "turn_id",
       "workspace_id",
     ]);
     expect(pendingBody[0]).toMatchObject({
       id: high.id,
+      turn_id: store.getTurnForAttempt(high.id)!.id,
       codex_profile: null,
       claude_profile: null,
       agent_id: boundAgent.id,
@@ -886,7 +888,7 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ?, execution_fingerprint = ? WHERE id = ?",
       ["2020-01-01T00:00:00.000Z", CHAT_ISSUE_DECOUPLED_FINGERPRINT, pending.task.id]);
     db!.run("UPDATE multiremi_conversation_log SET metadata = ? WHERE id = ?", [
-      JSON.stringify({ historical_issue_id: issue.id,
+      JSON.stringify({ ...store.getMessage(pending.message.id)!.metadata, historical_issue_id: issue.id,
         historical_issue_session_id: legacyIssueSession ? store.getOrCreateDefaultIssueSession(issue.id).id : null }), pending.message.id,
     ]);
     db!.run(`UPDATE multiremi_chat_sessions
@@ -1008,6 +1010,7 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     const runtime = store.registerRuntime({ id: "rt_topic_identity", name: "topic identity", provider: "codex", workspaceId: "local" });
     const agent = store.createAgent({ name: "Caller ID agent", provider: "codex" });
     const issue = store.createIssue({ title: "Caller ID issue", workspaceId: "local" });
+    store.createIssueComment(issue.id, { body: "FOREIGN_TOPIC_ISSUE_BODY_MUST_NOT_SHIP" });
     const boundChat = prepareIssueTopic(store, { runtimeId: runtime.id, agentId: agent.id, issueId: issue.id });
     const boundChatTask = store.sendChatMessage(boundChat.id, { body: "What is the status?" }).task;
     const boundTask = store.getTaskWithAgent(boundChatTask.id)!;
@@ -1025,9 +1028,12 @@ describe("Multiremi store — Go daemon wire shapes", () => {
     } as any);
     expect(boundPrompt).toContain("## Bound Issue");
     expect(boundPrompt).toContain(`This Feishu topic is bound to ${issue.key} — ${issue.title} (status: ${issue.status}).`);
-    expect(boundPrompt).toContain("The Bound Issue Log covers the interval shown above.");
+    expect(boundPrompt).toContain("Use the updates delivered in this Chat and authorized coordination metadata");
     expect(boundPrompt).toContain(`remi issue get ${issue.id} --output json`);
-    expect(boundPrompt).toContain("remi message list <issue-session-id> --output json");
+    expect(boundPrompt).not.toContain("remi message list <issue-session-id> --output json");
+    expect(boundWire.bound_issue_log).toBeUndefined();
+    expect(JSON.stringify(boundWire)).not.toContain("FOREIGN_TOPIC_ISSUE_BODY_MUST_NOT_SHIP");
+    expect(boundPrompt).not.toContain("FOREIGN_TOPIC_ISSUE_BODY_MUST_NOT_SHIP");
     expect(boundPrompt).not.toContain("--tail");
 
     const unboundChat = store.createChatSession({ agentId: agent.id, workspaceId: "local", title: "Unbound topic" });

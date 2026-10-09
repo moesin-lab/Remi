@@ -98,7 +98,7 @@ round-trip and side-Session dispatch checks. Creation grants no additional Sessi
 content or Task access/control rights: public Issue Task routes retain their
 existing baseline, and private Chat-owned Tasks require the credential's own Task.
 Chat-owned dispatch requires the current Session or verified Topic coordination.
-`remi turn retry` retains its
+With task credentials, `remi turn retry` retains its
 explicit supervisor authorization and audit checks. The complete boundaries are
 in [the conversation model](conversation-model.md).
 
@@ -123,12 +123,16 @@ This document is the user-facing migration contract for the Registry-based Remi 
 The machine-readable source of truth remains `cli-capabilities.json`; CI checks this
 table against that manifest.
 
-`remi turn retry <turn>` adds an attempt to the same work turn. It requires an
-explicit supervisor or related controller task credential and retains the audit
-checks; a human credential alone is insufficient. `--cold` requests a fresh
-provider context. Retrying does not undo prior tool actions. To ask for separate
-follow-up work, send a new directed request to the original Session instead.
-The old Issue rerun command and route are retired.
+`remi turn retry <turn> --yes` adds an attempt to the same work turn. Human
+credentials may recover a failed or cancelled turn after workspace, actual owner,
+Chat creator and Agent access checks; the Turn, Agent, Session and prompt stay the
+same. Task credentials retain explicit supervisor or related controller authority
+and organizer mode and audit checks. `--cold` requests a fresh provider context;
+`--reason` supplies the optional reason. Retrying does not undo prior tool actions.
+See [the Turn API](dev/message-api.md#turn) for active-run and dependency guards,
+state changes and the two response shapes. To ask for separate follow-up work,
+send a new directed request to the original Session instead. The old Issue rerun
+command and route are retired.
 
 `remi issue status-pages --statuses todo,in_progress --limit 50
 --include-archived-total --output json` calls `GET /api/issues/status-pages`.

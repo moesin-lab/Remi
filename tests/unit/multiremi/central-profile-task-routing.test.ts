@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore, resetMultiremiTestEnv } from "./helpers.js";
+import { mutateExecutionFixture } from "./unified-test-paths.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -129,7 +130,8 @@ describe("central profile task routing", () => {
       name: first.name, provider: "codex",
       profile: { ...first.profile, base_url: "https://next.example/v1", model: "next-model" },
     }, first.id);
-    db!.run("UPDATE multiremi_tasks SET dispatched_at = ? WHERE id = ?", ["2000-01-01T00:00:00.000Z", task.id]);
+    mutateExecutionFixture(store, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?",
+      ["2000-01-01T00:00:00.000Z", task.id]);
     const recovered = store.claimTask(runtime.id)!;
     expect(recovered.id).toBe(task.id);
     expect(recovered.codexProfile).toEqual(original.codexProfile);

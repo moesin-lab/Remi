@@ -7,14 +7,14 @@ import { compatibilityInboxScope, denyAttachmentAccess, denyCurrentUserWorkspace
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 import { loadConversation, messageActor, messageResponse, canAccessConversationTask, conversationEntryVisibility } from "../helpers/conversations.js";
 import { persistUploadedAttachments, detectContentTypeFromFilename, safeFilename, uploadedAttachmentPath } from "../helpers/uploads.js";
-import { currentTaskAccessToken, currentRequestUserId } from "../wire/context.js";
+import { currentAccessToken, currentTaskAccessToken, currentRequestUserId } from "../wire/context.js";
 import { parseTraceWindow } from "../trace/request.js";
 import type { RouterDeps } from "./deps.js";
 import { IssueDecisionError } from "@multiremi/store/repos/issues-repo.js";
 import { supervisorTaskIdentity } from "../helpers/organizer.js";
 import { denySideSessionAgentDispatch, issueCommentCreateInput, issueMutationActor } from "../helpers/issues.js";
 import { OrganizerActionError } from "../../organizer/settings.js";
-import { ChatIssueTaskConflictError } from "@multiremi/store/repos/tasks-repo.js";
+import { ActiveIssueRunError, ChatIssueTaskConflictError, TaskSessionArchivedError } from "@multiremi/store/repos/tasks-repo.js";
 import { IssueDependencyError } from "@multiremi/store/repos/issue-dependencies.js";
 import { issueDependencyErrorResponse } from "../wire/issues.js";
 
@@ -59,6 +59,8 @@ async function action(c: Context, run: () => unknown | Promise<unknown>): Promis
   try { const result = await run(); return result instanceof Response ? result : c.json(result); }
   catch (error) {
     if (error instanceof ChatIssueTaskConflictError) return c.json({ error: "forbidden" }, 403);
+    if (error instanceof ActiveIssueRunError) return c.json({ error: error.message, code: "active_run_exists" }, 409);
+    if (error instanceof TaskSessionArchivedError) return c.json({ error: error.message, code: "session_archived" }, 409);
     if (error instanceof InputError) return c.json({ error: error.message }, 400);
     if (error instanceof IssueDecisionError) return c.json({ error: error.message }, error.status);
     if (error instanceof OrganizerActionError) return c.json({ error: error.message, code: error.code }, error.status);
@@ -219,10 +221,37 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
       const authorizeRecipient = (agent: Parameters<typeof canCurrentUserAccessAgent>[2]) => {
         if (!canCurrentUserAccessAgent(c, store, agent)) throw new IssueDecisionError(403, "you do not have access to this agent");
       };
+      let returningToDelegator = false;
+      const delegatedReturn = (sessionId: string, targetAgent: NonNullable<ReturnType<typeof store.getAgent>> | null) => {
+        const token = currentTaskAccessToken(c);
+        if (!token?.taskId || !targetAgent || targetAgent.archivedAt || to.type !== "role" || to.ref !== "delegator"
+          || !["reply", "report"].includes(kind) || input.options || input.attachment_ids?.length || files.length) return null;
+        const current = store.getTurnForAttempt(token.taskId);
+        const sourceTask = store.getTask(token.taskId);
+        const trigger = current?.trigger_message_id ? store.getMessage(current.trigger_message_id) : null;
+        const origin = trigger?.task_id ? store.getTurn(trigger.task_id) : null;
+        if (!current?.delegation_id || current.current_attempt_id !== token.taskId || current.session_id !== conversation.id
+          || !["running", "awaiting_human"].includes(current.status)
+          || !sourceTask || !["running", "awaiting_human"].includes(sourceTask.status)
+          || current.delegated_by_agent_id !== targetAgent.id || current.workspace_id !== conversation.workspaceId
+          || !trigger || trigger.deleted_at || trigger.session_id !== current.session_id
+          || trigger.sender_type !== "agent" || trigger.sender_id !== targetAgent.id
+          || !origin || origin.agent_id !== targetAgent.id || origin.workspace_id !== current.workspace_id
+          || origin.session_id !== sessionId || current.delegated_from_issue_session_id !== sessionId
+          || input.reply_to_id && input.reply_to_id !== trigger.id) return null;
+        const scope = store.getIssueSessionWithOwnerScope(sessionId);
+        if (!scope || scope.ownerWorkspaceId !== current.workspace_id || scope.session.workspaceId !== current.workspace_id
+          || origin.chat_session_id && scope.session.chatId !== origin.chat_session_id
+          || !scope.session.chatId && scope.session.issueId !== origin.issue_id) return null;
+        return { id: sessionId, workspaceId: scope.session.workspaceId, issueId: scope.session.issueId,
+          chatId: scope.session.chatId, workSession: scope.session };
+      };
       const send = (uploads: Parameters<typeof store.sendMessage>[1] = []) => {
         try { return store.sendMessage(sendInput, uploads, authorizeRecipient, (sessionId, targetAgent) => {
           const dispatchAllowed = dispatch && targetAgent != null && !targetAgent.archivedAt;
-          const target = loadConversation(c, store, sessionId, { scope: dispatchAllowed ? "owner" : "content", allowCoordination: dispatchAllowed });
+          const returnTarget = delegatedReturn(sessionId, targetAgent);
+          const target = returnTarget ?? loadConversation(c, store, sessionId, { scope: dispatchAllowed ? "owner" : "content", allowCoordination: dispatchAllowed });
+          returningToDelegator = returnTarget != null && sessionId !== conversation.id;
           if (!(target instanceof Response) && currentTaskAccessToken(c)
             && !("workSession" in target) && !target.chatId) {
             const content = loadConversation(c, store, sessionId);
@@ -251,7 +280,7 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
           return sent;
         }) : send();
       await Promise.all(unusedUploads.map(upload => unlink(uploadedAttachmentPath(upload))));
-      return { ...result, message: coordinating ? coordinatedMessage(result.message) : publicMessage(result.message) };
+      return { ...result, message: coordinating || returningToDelegator ? coordinatedMessage(result.message) : publicMessage(result.message) };
     });
   });
   app.get("/api/messages/:id", c => {
@@ -400,10 +429,25 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
       const coordinating = coordinatedTurn(c, turn);
       if (coordinating && (c.req.query("input") === "true" || c.req.query("attempts") === "true")) return c.json({ error: "forbidden" }, 403);
       if (c.req.query("input") === "true") {
-        const content = loadConversation(c, store, turn.session_id);
-        if (content instanceof Response) return content;
+        if (!source || !canAccessConversationTask(c, store, source)) return c.json({ error: "forbidden" }, 403);
+        // Native tasks without an owner have a persisted orphan conversation,
+        // rather than an Issue, Chat or configured autopilot Session.
+        const nativeOrphan = turn.session_id.startsWith("auto_orphan_")
+          && !turn.session_id.startsWith("auto_orphan_inbox_")
+          && !turn.issue_id && !turn.chat_session_id
+          && !source.issueId && !source.issueSessionId && !source.chatSessionId
+          && source.workspaceId === turn.workspace_id
+          && !store.getIssueSession(turn.session_id) && !store.getChatSession(turn.session_id)
+          && Boolean(store.getConversationLogHead(turn.session_id));
+        if (nativeOrphan) {
+          const token = currentTaskAccessToken(c);
+          const current = token?.taskId ? store.getTurnForAttempt(token.taskId) : null;
+          if (token && current?.session_id !== turn.session_id) return c.json({ error: "forbidden outside current Session" }, 403);
+        } else {
+          const content = loadConversation(c, store, turn.session_id);
+          if (content instanceof Response) return content;
+        }
       }
-      if (c.req.query("input") === "true" && (!source || !canAccessConversationTask(c, store, source))) return c.json({error:"forbidden"},403);
       const input = c.req.query("input") === "true" ? store.getTurnInput(turn.id) : null;
       return { turn: coordinating || !source ? turnMetadata(turn) : turn, ...(input ? { input: { ...input, messages: publicMessages(input.messages.filter(conversationEntryVisibility(c, store))) } } : {}),
         ...(c.req.query("attempts") === "true" ? { attempts: store.listTurnAttempts(turn.id) } : {}) };
@@ -418,7 +462,8 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
     if (target && !canAccessConversationTask(c,store,target)) return c.json({error:"turn not found"},404);
     const related = !!token?.agentId && !!target && isRelatedTurnController(store, token.agentId, target);
     if (operation === "retry") {
-      if (!supervisor && !related) return c.json({ error: "supervisor or related controller task credential required", code: "organizer_supervisor_required" }, 403);
+      if (currentAccessToken(c)?.type === "daemon") return c.json({ error: "member or controller task credential required" }, 403);
+      if (token && !supervisor && !related) return c.json({ error: "supervisor or related controller task credential required", code: "organizer_supervisor_required" }, 403);
       const controller = supervisor?.task ?? (token?.taskId ? store.getTask(token.taskId) : null);
       const sourceSession = controller?.issueSessionId ? store.getIssueSession(controller.issueSessionId) : null;
       if (sourceSession && sourceSession.inheritMode !== "none") return c.json({ error: "Agent delegation is not allowed from side sessions" }, 403);
@@ -428,10 +473,21 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
     return action(c, async () => {
       const input = await body(c);
       if (operation === "retry") {
-        boolean(input.cold, false);
+        const cold = boolean(input.cold, false);
         if (!turn.current_attempt_id) throw new InputError("attempt not found");
+        if (!token) {
+          if (Object.keys(input).some(key => !["cold", "reason"].includes(key))) throw new InputError("retry accepts only cold and reason");
+          if (input.reason != null && (typeof input.reason !== "string" || input.reason.length > 2_000)) throw new InputError("invalid retry reason");
+          return { turn: store.retryTurnAsMember(turn.id, cold, sessionId => {
+            const conversation = loadConversation(c, store, sessionId, { scope: "owner" });
+            if (conversation instanceof Response) throw new IssueDecisionError(conversation.status === 404 ? 404 : 403, "conversation not available");
+            const current = store.getTurn(turn.id);
+            const source = current?.current_attempt_id ? store.getTask(current.current_attempt_id) : null;
+            if (!source || !canAccessConversationTask(c, store, source)) throw new IssueDecisionError(403, "forbidden");
+          }) };
+        }
         const result = store.performOrganizerAction({ supervisorTaskId: supervisor?.task.id ?? token!.taskId!, supervisorAgentId: supervisor?.agentId ?? token!.agentId!,
-          targetTaskId: turn.current_attempt_id, action: "redispatch", reason: input.reason ?? "Retry requested through turn API", cold: boolean(input.cold,false) });
+          targetTaskId: turn.current_attempt_id, action: "redispatch", reason: input.reason ?? "Retry requested through turn API", cold });
         return { turn: store.getTurn(turn.id), organizer_action: result.audit, comment_id: result.comment.id };
       }
       return { turn: operation === "cancel" ? store.cancelTurn(turn.id) : store.wrapUpTurn(turn.id) };

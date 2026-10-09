@@ -14,6 +14,8 @@ import { mintQuestionCardToken,hashQuestionCardToken,type QuestionCardCredential
 import { patchDecisionRecord } from './decision-records.js';
 import { lockLane } from './lane-machine.js';
 import { IssueDecisionError } from '../repos/issues-repo.js';
+import { ActiveIssueRunError, ChatIssueTaskConflictError, TaskSessionArchivedError } from '../repos/tasks-repo.js';
+import { dependencyGateEnabled, IssueDependencyError } from '../repos/issue-dependencies.js';
 
 type InboxQuery = {access?:InboxAccess;limit?:number;cursor?:{created_at:string;id:string};visible?:(sessionId:string)=>boolean;
   visibleMessage?:(message:Pick<UnifiedMessage,'id'|'session_id'|'reply_to_id'|'kind'|'task_id'|'metadata'>)=>boolean};
@@ -310,6 +312,71 @@ export class InboxOperations {
       if(cold)this.ctx.db.run(`UPDATE multiremi_session_lanes SET provider_session_id=NULL,runtime_id=NULL,provider=NULL,work_dir=NULL,execution_fingerprint=NULL
         WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?`,[turn.session_id,turn.agent_id,turn.execution_scope]);
       const task=this.ctx.tasks().getTask(result.attempt_id);if(task)events.enqueuedTasks.push(task);return this.getTurn(id)!;});
+  }
+  retryTurnAsMember(id:string,cold=false,authorizeConversation?:(sessionId:string)=>void):MultiremiTurn {
+    return this.transaction(events=>{
+      const initial=this.getTurn(id);
+      if(!initial)throw new IssueDecisionError(404,'Turn not found');
+      this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspace_id);
+
+      const turn=this.getTurn(id);
+      if(!turn || turn.workspace_id!==initial.workspace_id || !turn.current_attempt_id)throw new IssueDecisionError(404,'Turn not found');
+      if(['pending','running','awaiting_human'].includes(turn.status))throw new ActiveIssueRunError('This turn already has an active run');
+      if(!['failed','cancelled'].includes(turn.status))throw new IssueDecisionError(409,'Only failed or cancelled turns can be retried');
+
+      const scoped=this.ctx.issueSessions().getIssueSessionWithOwnerScope(turn.session_id);
+      const chat=scoped
+        ?scoped.session.chatId?this.ctx.chat().getChatSession(scoped.session.chatId):null
+        :this.ctx.chat().getChatSession(turn.session_id);
+      const agent=this.ctx.agents().getAgent(turn.agent_id);
+      if(!agent || agent.archivedAt || agent.workspaceId!==turn.workspace_id)throw new IssueDecisionError(409,'Retry agent is unavailable');
+      if(scoped){
+        if(scoped.ownerWorkspaceId!==turn.workspace_id || scoped.session.workspaceId!==turn.workspace_id
+          || scoped.session.issueId!==turn.issue_id
+          || turn.chat_session_id && turn.chat_session_id!==scoped.session.chatId)throw new ChatIssueTaskConflictError('Retry conversation owner changed');
+        if(scoped.session.status==='archived')throw new TaskSessionArchivedError('Session is archived');
+        this.ctx.db.run('UPDATE multiremi_issue_sessions SET updated_at=updated_at WHERE id=?',[turn.session_id]);
+      }else if(!chat || turn.issue_id || chat.agentId!==turn.agent_id || turn.chat_session_id && turn.chat_session_id!==chat.id){
+        throw new ChatIssueTaskConflictError('Retry conversation owner not found');
+      }
+      if(chat && (chat.workspaceId!==turn.workspace_id || chat.status==='archived')){
+        if(chat.status==='archived')throw new TaskSessionArchivedError('Chat session is archived');
+        throw new ChatIssueTaskConflictError('Retry conversation belongs to another workspace');
+      }
+      authorizeConversation?.(turn.session_id);
+
+      const issue=turn.issue_id?this.ctx.issues().getIssue(turn.issue_id):null;
+      if(turn.issue_id && (!issue || issue.workspaceId!==turn.workspace_id))throw new ChatIssueTaskConflictError('Retry Issue belongs to another workspace');
+      if(!chat && issue?.archivedAt)throw new TaskSessionArchivedError('Issue is archived');
+      // Public Issue recovery keeps the existing any-active-run exclusion.
+      // A projected private Session has its own work axis, independent of the Issue.
+      const active=chat
+        ?this.ctx.db.query("SELECT 1 FROM multiremi_turns WHERE session_id=? AND status IN ('pending','running','awaiting_human') LIMIT 1").get(turn.session_id)
+        :this.ctx.db.query("SELECT 1 FROM multiremi_turns WHERE issue_id=? AND status IN ('pending','running','awaiting_human') LIMIT 1").get(turn.issue_id);
+      if(active)throw new ActiveIssueRunError('This conversation already has an active run');
+      if(issue && dependencyGateEnabled() && issue.status==='backlog'){
+        const unmet=this.ctx.issues().listUnmetPrerequisites(issue.id);
+        if(unmet.length)throw new IssueDependencyError('dependencies_unmet',`${issue.key} is waiting on unfinished prerequisites`,{unmet});
+      }
+
+      lockLane(this.ctx,turn.session_id,turn.agent_id,turn.execution_scope);
+      const previous=this.ctx.db.query('SELECT status,failure_reason FROM multiremi_turn_attempts WHERE id=? AND turn_id=?').get(turn.current_attempt_id,id);
+      if(!previous)throw new IssueDecisionError(404,'Current attempt not found');
+      if(!['failed','cancelled','lost'].includes(previous.status))throw new IssueDecisionError(409,'Only a terminal current attempt can be retried');
+      this.ctx.db.run("UPDATE multiremi_turns SET wake_source='human_sender' WHERE id=?",[id]);
+      const result=createReplacementAttemptWithinTransaction(this.ctx.db,id,{
+        previousStatus:previous.status==='lost'?'lost':turn.status as 'failed'|'cancelled',
+        reason:previous.failure_reason??'manual_retry',cold,allowCancelledTurn:true,turnStatus:'pending',
+      });
+      this.ctx.db.run('UPDATE multiremi_turns SET max_attempts=CASE WHEN max_attempts<? THEN ? ELSE max_attempts END WHERE id=?',
+        [result.attempt_no,result.attempt_no,id]);
+      if(cold)this.ctx.db.run(`UPDATE multiremi_session_lanes SET provider_session_id=NULL,runtime_id=NULL,provider=NULL,work_dir=NULL,execution_fingerprint=NULL
+        WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?`,[turn.session_id,turn.agent_id,turn.execution_scope]);
+      if(issue && !chat)deriveIssueStatusWithinTransaction(this.ctx,issue.id,events);
+      const task=this.ctx.tasks().getTask(result.attempt_id);
+      if(task)events.enqueuedTasks.push(task);
+      return this.getTurn(id)!;
+    });
   }
   issueMessageCardToken(id:string,recipient:string|null):string {
     return this.transaction(()=>{const message=getMessage(this.ctx,id);if(!message||message.message_kind!=='decision')throw new Error('Decision not found');this.lockMessage(message);

@@ -398,8 +398,9 @@ describe("MUL-412 issue decision cards", () => {
       delegatedByAgentId: null,
       delegatedFromIssueSessionId: null,
       delegationSkipReason: null,
-      wakeSource: "platform_to_owner",
+      wakeSource: "re_ring",
     });
+    expect(store.getMessage(store.getTurnForAttempt(sourceOwnerTask!.id)!.trigger_message_id!)?.wake_reason).toBe("platform_to_owner");
     const inbox = store.listMessageInbox(member.id, "local");
     expect(inbox.items).toHaveLength(1);
     expect(inbox.items[0]).toMatchObject({

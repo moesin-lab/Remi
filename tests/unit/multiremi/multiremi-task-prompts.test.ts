@@ -70,6 +70,24 @@ describe("assembled task prompt audit", () => {
     expect(input.turn.status).toBe("pending");
     expect(input.input.messages.map((m: any) => m.body_md)).toEqual(["Wait"]);
     expect(store.getTaskPrompt(task.id)).toBeNull();
+
+    const credential = await store.createTaskAccessToken(task, "local");
+    const headers = { Authorization: `Bearer ${credential.token}` };
+    const ownInput = await app.request(turnApiPath(store, task.id, "?input=true"), { headers });
+    expect(ownInput.status).toBe(200);
+    expect((await ownInput.json()).input.messages.map((message: any) => message.body_md)).toEqual(["Wait"]);
+    const other = store.createTask({ agentId: agent.id, prompt: "PRIVATE_OTHER_NATIVE_INPUT" });
+    expect(store.getTurnForAttempt(other.id)!.session_id).not.toBe(store.getTurnForAttempt(task.id)!.session_id);
+    const crossInput = await app.request(turnApiPath(store, other.id, "?input=true"), { headers });
+    expect(crossInput.status).toBe(403);
+    expect(await crossInput.text()).not.toContain("PRIVATE_OTHER_NATIVE_INPUT");
+
+    const otherTurn = store.getTurnForAttempt(other.id)!;
+    db!.run("UPDATE multiremi_turns SET session_id = ? WHERE id = ?", ["auto_missing", otherTurn.id]);
+    expect(store.getTurn(otherTurn.id)?.current_attempt_id).toBe(other.id);
+    const unknownOwnerInput = await app.request(`/api/turns/${otherTurn.id}?input=true`);
+    expect(unknownOwnerInput.status).toBe(404);
+    expect(await unknownOwnerInput.text()).not.toContain("PRIVATE_OTHER_NATIVE_INPUT");
   });
 
   it("keeps sibling results out of bootstrap and delta offers while preserving authorized result reads", async () => {

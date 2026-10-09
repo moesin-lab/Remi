@@ -258,6 +258,8 @@ function verifyBestEffortWorkspaceLookups(db: SqlDatabase, backend: "sqlite" | "
   const issue = store.createIssue({ title: "Best effort lookups", workspaceId: "local" });
   const session = store.getOrCreateDefaultIssueSession(issue.id);
   const context = (store as unknown as { ctx: { issueWorkspaceId: (id: string) => string | null } }).ctx;
+  const originalWorkspaceId = context.issueWorkspaceId.bind(context);
+  let lookups = 0;
   const previousReplyLimit = process.env.MULTIREMI_PG_REPLY_MAX_BYTES;
   const previousEnforce = process.env.MULTIREMI_PG_REPLY_ENFORCE;
   const replyExceptions = DB_REPLY_TRANSITION_EXCEPTIONS as Set<string>;
@@ -266,6 +268,9 @@ function verifyBestEffortWorkspaceLookups(db: SqlDatabase, backend: "sqlite" | "
     process.env.MULTIREMI_PG_REPLY_ENFORCE = "1";
     resetDbReplyLimitForTest();
     context.issueWorkspaceId = (id) => {
+      // Ownership validation is required; only the following activity/comment
+      // broadcast lookups are best-effort.
+      if (++lookups === 1) return originalWorkspaceId(id);
       // The limit is narrowed for this one statement and restored in `finally`,
       // so only the lookup overflows the bridge — the rest of the transaction
       // keeps the default and the failure stays a single reply-level one.
@@ -280,7 +285,10 @@ function verifyBestEffortWorkspaceLookups(db: SqlDatabase, backend: "sqlite" | "
       }
     };
   } else {
-    context.issueWorkspaceId = (id) => db.query("SELECT missing_workspace_column FROM multiremi_issues WHERE id = ?").get(id);
+    context.issueWorkspaceId = (id) => {
+      if (++lookups === 1) return originalWorkspaceId(id);
+      return db.query("SELECT missing_workspace_column FROM multiremi_issues WHERE id = ?").get(id);
+    };
   }
   const warnings: string[] = [];
   const originalWarn = console.warn;
@@ -299,6 +307,7 @@ function verifyBestEffortWorkspaceLookups(db: SqlDatabase, backend: "sqlite" | "
     }
     expect(store.getIssueComment(comment.id)?.body).toBe("system survives query error");
     expect(store.getConversationLogEntryById(comment.id)?.body_md).toBe("system survives query error");
+    expect(lookups).toBe(3);
     expect(warnings.some((line) => line.includes("activity:created broadcast skipped"))).toBe(true);
     expect(warnings.some((line) => line.includes("comment:created broadcast skipped"))).toBe(true);
   } finally {
@@ -775,8 +784,15 @@ describe("conversation log multi-process allocation (MUL-405)", () => {
       const issue = store.createIssue({ title: "Outer transaction lookup", workspaceId: "local" });
       const session = store.getOrCreateDefaultIssueSession(issue.id);
       const context = (store as unknown as { ctx: { issueWorkspaceId: (id: string) => string | null } }).ctx;
+      const originalWorkspaceId = context.issueWorkspaceId.bind(context);
+      let lookups = 0;
       let failedQueries = 0;
+      let writtenBeforeFailure = false;
       context.issueWorkspaceId = (id) => {
+        if (++lookups === 1) return originalWorkspaceId(id);
+        if (!failedQueries) {
+          writtenBeforeFailure = db.query("SELECT id FROM multiremi_issue_message_records WHERE issue_id = ?").all(id).length === 1;
+        }
         failedQueries += 1;
         return db.query("SELECT missing_workspace_column FROM multiremi_issues WHERE id = ?").get(id);
       };
@@ -790,8 +806,9 @@ describe("conversation log multi-process allocation (MUL-405)", () => {
         store.createTaskFailureSystemComment(issue.id, session.id, "tsk_outer_lookup", "system must not survive");
       })()).toThrow(/unrecovered statement failure|current transaction is aborted/);
       expect(failedQueries).toBeGreaterThan(0);
+      expect(writtenBeforeFailure).toBe(true);
       expect(db.inTransaction).toBe(false);
-      expect(db.query("SELECT id FROM multiremi_issue_comments WHERE issue_id = ?").all(issue.id)).toEqual([]);
+      expect(db.query("SELECT id FROM multiremi_issue_message_records WHERE issue_id = ?").all(issue.id)).toEqual([]);
       // The session's head counter row (`head_…`) is written before the
       // transaction and is not part of the atomic unit; every mirrored entry
       // would carry the comment's `cmt_…` id.
@@ -895,6 +912,46 @@ describe("conversation log multi-process allocation (MUL-405)", () => {
   }, 30_000);
   it.skipIf(!pgAdminUrl)("Postgres: restart continues canonical issue and chat sequences, including concurrent first writes", async () => {
     await withPostgres((db, url) => verifyLegacyFirstWrites(db, "pg", url));
+  }, 30_000);
+  it.skipIf(!pgAdminUrl)("Postgres: an unchanged restart preserves live message and execution projections without DDL locks", async () => {
+    await withPostgres(async (db) => {
+      const store = new MultiremiStore(db);
+      const issue = store.createIssue({ title: "Live projections", workspaceId: "local" });
+      const session = store.getOrCreateDefaultIssueSession(issue.id);
+      const comment = store.createIssueComment(issue.id, { issueSessionId: session.id, body: "Before restart" });
+      const views = [
+        "multiremi_agent_lane_records", "multiremi_issue_message_records",
+        "multiremi_chat_message_records", "multiremi_turn_execution_records",
+      ];
+      const identities = () => db.query(`SELECT relname, oid::text AS oid FROM pg_class
+        WHERE relnamespace = current_schema()::regnamespace AND relname IN (?, ?, ?, ?) ORDER BY relname`).all(...views);
+      const beforeIdentities = identities();
+      expect(beforeIdentities).toHaveLength(views.length);
+      // These are existing clients' prepared reads, which must remain valid
+      // while another process starts up against the already-migrated database.
+      const reads = views.map((view) => db.prepare(`SELECT * FROM ${view} ORDER BY 1 LIMIT 1`));
+      const beforeReads = reads.map((read) => read.all());
+      const projectionDdl: string[] = [];
+      const exec = db.exec.bind(db);
+      db.exec = (sql) => {
+        if (/^\s*(?:CREATE(?:\s+OR\s+REPLACE)?|DROP)\s+VIEW\b/i.test(sql)
+          && views.some((view) => sql.includes(view))) projectionDdl.push(sql);
+        return exec(sql);
+      };
+      try {
+        const restarted = new MultiremiStore(db);
+        // Rebuilding these live views takes locks also held by comment writers;
+        // the migration advisory lock alone does not serialize normal writes.
+        expect(projectionDdl).toEqual([]);
+        expect(identities()).toEqual(beforeIdentities);
+        expect(reads.map((read) => read.all())).toEqual(beforeReads);
+        expect(restarted.getIssueComment(comment.id)?.body).toBe("Before restart");
+        const next = restarted.createIssueComment(issue.id, { issueSessionId: session.id, body: "After restart" });
+        expect(restarted.listSessionEvents(session.id).map((event) => event.id)).toEqual([comment.id, next.id]);
+      } finally {
+        db.exec = exec;
+      }
+    });
   }, 30_000);
   it("SQLite: four processes cold-start the migration", async () => {
     await withSqlite(async (db, path) => {

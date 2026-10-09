@@ -201,7 +201,7 @@ export class ExecutionProfilesRepo {
       );
     const tasks = this.ctx.db
       .query(
-        "SELECT codex_profile,claude_profile FROM multiremi_tasks WHERE runtime_id=? AND status IN ('dispatched','running','awaiting_human','waiting_local_directory')",
+        "SELECT codex_profile,claude_profile FROM multiremi_turn_execution_records WHERE runtime_id=? AND status IN ('dispatched','running','awaiting_human','waiting_local_directory')",
       )
       .all(runtimeId) as {
       codex_profile: string | null;

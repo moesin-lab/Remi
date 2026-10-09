@@ -211,8 +211,10 @@ describe("historical reconciliation checkpoints", () => {
     for (const [index, task] of [first, second].entries()) {
       const turn = db!.query("SELECT turn_id FROM multiremi_turn_attempts WHERE id=?").get(task.id) as { turn_id: string };
       db!.run("UPDATE multiremi_conversation_log SET session_id=?,seq=? WHERE id=?", [chat.id, index + 1, turn.turn_id]);
-      db!.run("UPDATE multiremi_turns SET session_id=?,seq=? WHERE id=?", [chat.id, index + 1, turn.turn_id]);
+      db!.run("UPDATE multiremi_turns SET session_id=?,chat_session_id=?,seq=? WHERE id=?", [chat.id, chat.id, index + 1, turn.turn_id]);
     }
+    expect([first, second].map(task => store.getTask(task.id)?.chatSessionId)).toEqual([chat.id, chat.id]);
+    expect(new Set([first.id, second.id]).size).toBe(2);
     db!.run("UPDATE multiremi_conversation_heads SET head_seq=2 WHERE session_id=?", [chat.id]);
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET started_at='2026-10-01T00:00:00Z',completed_at='2026-10-01T02:00:00Z' WHERE workspace_id='local'");
     const root = mkdtempSync(join(tmpdir(), "usage-ownership-test-"));

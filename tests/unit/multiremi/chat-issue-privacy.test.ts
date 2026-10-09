@@ -22,19 +22,21 @@ async function setup() {
   mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET issue_id = ? WHERE id = ?", [issue.id, privateTask.id]);
   store.appendTaskMessages(privateTask.id, [{ type: "text", content: "PRIVATE_CHAT_TRANSCRIPT" }]);
   const publicTask = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Public issue work" });
-  // This fixture exercises historical Issue-only tasks. New Session Tasks also
-  // belong to a private Chat and must not become visible to every Issue reader.
-  db!.run("UPDATE multiremi_tasks SET chat_session_id = NULL, issue_session_id = NULL WHERE id = ?", [publicTask.id]);
+  // Retain the missing historical audit pointers while the canonical Session
+  // still establishes this public Task's Issue owner.
+  mutateExecutionFixture(store, "UPDATE multiremi_turn_execution_records SET chat_session_id = NULL, issue_session_id = NULL WHERE id = ?", [publicTask.id]);
+  expect(store.getTask(publicTask.id)).toMatchObject({ chatSessionId: null, issueSessionId: null });
+  expect(store.getIssueSession(store.getTurnForAttempt(publicTask.id)!.session_id))
+    .toMatchObject({ ownerType: "issue", ownerId: issue.id });
   const app = createMultiremiApp({ store, authToken: "test-root", shareSecret: "test-share-secret" });
   return { store, app, issue, chat, privateTask, publicTask, alice: { Authorization: `Bearer ${alice.token}` }, bob: { Authorization: `Bearer ${bob.token}` } };
 }
 
 describe("Chat privacy for historical Issue-linked tasks", () => {
-  it("filters private tasks from another member's Issue reads and refuses the nested cancel route", async () => {
+  it("filters private tasks from another member's Issue reads and refuses its Turn cancel route", async () => {
     const { store, app, issue, privateTask, publicTask, alice, bob } = await setup();
     for (const path of [
       `/api/multiremi/issues/${issue.id}`,
-      `/api/turns?issue=${issue.id}`,
       `/api/turns?issue=${issue.id}`,
     ]) {
       const response = await app.request(path, { headers: bob });
@@ -58,7 +60,11 @@ describe("Chat privacy for historical Issue-linked tasks", () => {
     expect(minted.status).toBe(201);
     const { share } = await minted.json();
     for (const deleted of [false, true]) {
-      if (deleted) store.deleteChatSession(chat.id);
+      if (deleted) {
+        expect(store.deleteChatSession(chat.id)).toBe(true);
+        expect(store.getTask(privateTask.id)?.chatSessionId).toBe(chat.id);
+        expect(store.getTurnForAttempt(privateTask.id)?.chat_session_id).toBe(chat.id);
+      }
       const response = await app.request(`/api/shares/${share.token}`, { headers: bob });
       expect(response.status).toBe(200);
       const bundle = await response.json();

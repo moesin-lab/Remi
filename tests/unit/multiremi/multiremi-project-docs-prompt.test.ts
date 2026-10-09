@@ -131,13 +131,16 @@ describe("bootstrap and delta task prompts", () => {
       } as any);
 
       expect(prompt).toContain(`Key: ${issue.key}`);
-      expect(prompt).toContain("## Bound Issue Log");
-      expect(prompt).toContain("Latest topic activity");
+      expect(prompt).not.toContain("## Bound Issue Log");
+      expect(prompt).not.toContain("Latest topic activity");
+      expect(prompt).toContain("Use the updates delivered in this Chat and authorized coordination metadata");
       expect(prompt).toContain("## Bound Issue Follow-up");
       expect(prompt).toContain("Topic conversation");
       expect(prompt).not.toContain("## Remi Context");
       expect(prompt).not.toContain("## Available Repositories");
       if (mode === "bootstrap") expect(prompt).toContain("## Project Context");
+
+      expect(prompt).toContain("## Current Session Context");
     });
   }
 

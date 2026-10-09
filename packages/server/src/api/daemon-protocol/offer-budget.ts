@@ -87,6 +87,17 @@ function truncateOfferStrings(response: Payload, runtimeId: string, budget: numb
 }
 
 export function useTaskSessionInput(store: MultiremiStore, task: MultiremiTaskWithAgent, response: Payload): void {
+  const bound = response.bound_issue_log;
+  const turn = bound?.session_id ? store.getTurnForAttempt(task.id) : null;
+  const actualSession = turn ? store.getIssueSession(turn.session_id) : null;
+  const chatOwned = actualSession ? Boolean(actualSession.chatId)
+    : Boolean(turn && store.getChatSession(turn.session_id) || task.chatSessionId);
+  const foreignBound = Boolean(bound?.session_id && chatOwned && bound.session_id !== turn?.session_id);
+  if (foreignBound) {
+    bound.content_jsonl = "";
+    bound.next_seq = bound.from_seq;
+    bound.has_more = false;
+  }
   const projection = response.session_projection;
   if (!projection?.session_id) return;
   const entries = store.listConversationLogEntries(projection.session_id, { toSeq: projection.to_seq });
@@ -117,8 +128,7 @@ export function useTaskSessionInput(store: MultiremiStore, task: MultiremiTaskWi
       entries: store.listConversationLogEntries(inherited.session_id, { toSeq: inherited.to_seq }),
       triggerSeqs: new Set() });
   }
-  const bound = response.bound_issue_log;
-  if (bound?.session_id) {
+  if (bound?.session_id && !foreignBound) {
     bound.content_jsonl = taskSessionInput({ sessionId: bound.session_id, agentId: task.agentId,
       fromSeq: Math.min(store.getSessionAgentReadProgress(bound.session_id, task.agentId, task.id).seq, bound.to_seq), toSeq: bound.to_seq,
       entries: store.listConversationLogEntries(bound.session_id, { toSeq: bound.to_seq }),

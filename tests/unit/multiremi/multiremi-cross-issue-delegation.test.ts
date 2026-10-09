@@ -233,7 +233,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       expect(returned.id).not.toBe(store.getTurnForAttempt(statusTurn.id)!.id);
       expect(store.listTasksForIssue(f.parent.id).filter(task=>task.status==="queued")).toHaveLength(2);
       expect(inboxReportBody(store,store.getTask(returned.current_attempt_id!)!,child.id)).toContain("Finished after closing the child.");
-    }));
+    }), pgScenarioTimeout);
 
     it("ignores a spoofed wake_source and trigger comment on a manual wakeup", async () => withStore(backend, async (store) => {
       const f = fixture(store);
@@ -262,7 +262,9 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const returned = store.getTask(store.getTask(childTask.id)!.delegationReturnTaskId!)!;
       expect(returned.id).not.toBe(manualId);
       expect(returned).toMatchObject({ agentId: f.leader.id,
-        issueSessionId: f.leaderSession.id, wakeSource: "platform_to_owner" });
+        issueSessionId: f.leaderSession.id, wakeSource: "delegation_return" });
+      expect(store.getTurnForAttempt(returned.id)?.execution_scope).toBe(store.getTurnForAttempt(f.leaderTask.id)?.execution_scope);
+      expect(store.getTurnForAttempt(returned.id)?.execution_scope).not.toBe(store.getTurnForAttempt(manualId)?.execution_scope);
       expect(inboxReportBody(store, returned, childTask.id)).toContain("Status: cancelled");
       expect(store.listTasksForIssue(f.parent.id)
         .filter((task) => task.agentId === f.leader.id).map((task) => task.id).sort())

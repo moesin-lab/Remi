@@ -20,6 +20,10 @@ pendingTurnBackendTests("D1 T6 comment edit recovery", fixture => {
         dedupeKey: "later-report", body: "A teammate report committed after the human comment", source: {},
       }, [], events)[0]!)();
       (store as unknown as { ctx: StoreContext }).ctx.emitCommitEvents(events);
+      expect(store.getMessage(result.entry.id)).toMatchObject({
+        session_id: session.id, sender_type: "platform", message_kind: "report",
+        to_agent_id: agent.id, wake_applied: "now", wake_reason: "platform_to_owner",
+      });
       return result;
     };
     return { db, store, agent, member, issue, comment, task, session, send };
@@ -36,7 +40,7 @@ pendingTurnBackendTests("D1 T6 comment edit recovery", fixture => {
     expect(f.store.getTask(f.task.id)!.status).toBe("cancelled");
     const queued = f.store.listTasksForIssue(f.issue.id).filter(task => task.status === "queued");
     expect(queued).toHaveLength(1);
-    expect(queued[0]!.wakeSource).toBe("platform_to_owner");
+    expect(queued[0]!.wakeSource).toBe("re_ring");
     expect(queued[0]!.triggerCommentId).toBe(delivery.entry.id);
     expect(inboxWakeSeq(f.db, queued[0]!.id)).toBe(delivery.entry.seq);
     expect(queued[0]!.prompt).toBe(delivery.entry.body_md);
@@ -58,7 +62,7 @@ pendingTurnBackendTests("D1 T6 comment edit recovery", fixture => {
     expect(f.store.getTask(f.task.id)!.status).toBe("cancelled");
     const queued = f.store.listTasksForIssue(f.issue.id).filter(task => task.status === "queued");
     expect(queued).toHaveLength(1);
-    expect(queued[0]!.wakeSource).toBe("platform_to_owner");
+    expect(queued[0]!.wakeSource).toBe("re_ring");
     expect(queued[0]!.triggerCommentId).toBe(delivery.entry.id);
     expect(inboxWakeSeq(f.db, queued[0]!.id)).toBe(delivery.entry.seq);
     expect(queued[0]!.prompt).toBe(delivery.entry.body_md);
@@ -86,7 +90,7 @@ pendingTurnBackendTests("D1 T6 comment edit recovery", fixture => {
     expect(f.store.getTask(f.task.id)!.status).toBe("cancelled");
     const queued = f.store.listTasksForIssue(f.issue.id).filter(task => task.status === "queued");
     expect(queued).toHaveLength(1);
-    expect(queued[0]).toMatchObject({ wakeSource: "platform_to_owner", triggerCommentId: delivery.entry.id });
+    expect(queued[0]).toMatchObject({ wakeSource: "re_ring", triggerCommentId: delivery.entry.id });
     expect(inboxWakeSeq(f.db, queued[0]!.id)).toBe(delivery.entry.seq);
     expect(f.store.getConversationLogEntryById(delivery.entry.id)!.body_md).toBe(delivery.entry.body_md);
     expect(f.store.listIssueActivity(f.issue.id).filter(row => row.type === "re_ring")).toHaveLength(1);
@@ -143,7 +147,11 @@ pendingTurnBackendTests("D1 T6 comment edit recovery", fixture => {
       expect(store.getTask(running.id)?.status).toBe('completed');
       const replacements=store.listTasksForIssue(issue.id).filter(task=>task.status==='queued');
       expect(replacements).toHaveLength(1);
-      expect(replacements[0]).toMatchObject({wakeSource:'platform_to_owner',triggerCommentId:now.entry.id});
+      expect(replacements[0]).toMatchObject({wakeSource:'re_ring',triggerCommentId:now.entry.id});
+      expect(store.getMessage(now.entry.id)).toMatchObject({
+        sender_type: 'platform', message_kind: 'report', to_agent_id: agent.id,
+        wake_applied: 'now', wake_reason: 'platform_to_owner',
+      });
       expect(store.getConversationLogEntryById(now.entry.id)?.body_md).toBe(now.entry.body_md);
       expect(store.listIssueActivity(issue.id).filter(row=>row.type==='re_ring')).toHaveLength(1);
       expect(store.claimTask(runtime.id)?.id).toBe(replacements[0]!.id);

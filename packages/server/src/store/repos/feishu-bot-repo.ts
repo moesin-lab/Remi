@@ -4251,8 +4251,8 @@ function roundPushPrompt(
   omittedCount = 0,
 ): string {
   const lines = [
-    `${issue.key} - ${issue.title} has a new work-round result in its Issue log.`,
-    "Read the Bound Issue Log and report the current result to the users in this Feishu topic.",
+    `${issue.key} - ${issue.title} has a new work-round result for this Feishu topic.`,
+    "Read the delivered updates in your current Chat conversation and report the result to the users in this Feishu topic. Use the bound Issue's permitted metadata for coordination.",
   ];
   if (updates.length) {
     lines.push("", "Updates delivered while the current Chat task was already active:", ...updates);

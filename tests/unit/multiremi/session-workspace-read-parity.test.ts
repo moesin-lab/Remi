@@ -11,27 +11,30 @@ import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
 pendingTurnBackendTests("MUL-509 moved Issue Session read parity", (fixture, backend) => {
   afterEach(() => fixture().store.stopNotificationDeliverySweeper());
 
-  it("HTTP messages/log and WS log facts retain the Session workspace after updateIssue moves the Issue", async () => {
+  it("HTTP messages/log and WS log facts follow the moved Issue-owned Session", async () => {
     const { store, db, databaseUrl } = fixture();
     const w1 = store.ensureLocalWorkspace();
     const w2 = store.createWorkspace({ name: "W2", slug: "session-read-w2" });
     const callers = [];
-    for (const [workspace, readable] of [[w1, true], [w2, false]] as const) {
+    for (const [workspace, readable] of [[w1, false], [w2, true]] as const) {
       const user = store.getOrCreateUser({ externalId: `session-reader-${workspace.id}`, name: workspace.name });
       const member = store.createWorkspaceMember({ workspaceId: workspace.id, userId: user.id, name: user.name, role: "member" });
       const access = await store.createAccessToken({ type: "pat", name: user.name, userId: user.id, workspaceId: workspace.id });
       callers.push({ user, member, workspace, readable, token: access.token });
     }
-    const issue = store.createIssue({ workspaceId: w1.id, title: "Move without migrating history",
+    const issue = store.createIssue({ workspaceId: w1.id, title: "Move without replacing history",
       assigneeType: "member", assigneeId: callers[0]!.member.id });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
     const history = store.sendMessage({ session_id: session.id, sender: { type: "member", id: callers[0]!.member.id },
       to: { type: "none" }, body_md: "W1 conversation history", message_kind: "status", wake_requested: "inbox_only" }).message;
 
-    // Exercise the real move transaction, including its W1 Session audit row.
+    // The Issue owns this Session: the real move retains its id and history,
+    // but moves its workspace and therefore the HTTP/WS membership boundary.
     store.updateIssue(issue.id, { workspaceId: w2.id });
     expect(store.getIssue(issue.id)?.workspaceId).toBe(w2.id);
-    expect(store.getOrCreateDefaultIssueSession(issue.id)).toMatchObject({ id: session.id, workspaceId: w1.id });
+    expect(store.getOrCreateDefaultIssueSession(issue.id)).toMatchObject({
+      id: session.id, workspaceId: w2.id, ownerType: "issue", ownerId: issue.id,
+    });
     const head = store.getConversationLogHead(session.id)!.headSeq;
     const audit = store.conversationLogWindow(session.id).entries.find(entry => entry.metadata.type === "workspace_move_cleared")!;
     expect(audit).toMatchObject({ author_type: "system", message_kind: "status", metadata: { field: "assignee" } });
@@ -54,13 +57,13 @@ pendingTurnBackendTests("MUL-509 moved Issue Session read parity", (fixture, bac
       for (const caller of callers) {
         const subject = { userId: caller.user.id, workspaceId: caller.workspace.id };
         const facts = await auth.logFacts(session.id, subject);
-        expect(facts).toEqual({ ok: true, facts: { kind: "issue", workspaceId: w1.id,
+        expect(facts).toEqual({ ok: true, facts: { kind: "issue", workspaceId: w2.id,
           creatorId: null, requesterIsMember: caller.readable } });
         if (!facts.ok) throw new Error("WS log facts unavailable");
         const decision = decideLogSubscription(subject, facts.facts);
         expect(decision).toEqual(caller.readable ? { ok: true } : { ok: false, code: "forbidden" });
-        // Even if W2-only could bind a W1 socket, membership still denies it.
-        expect(decideLogSubscription({ ...subject, workspaceId: w1.id }, facts.facts).ok).toBe(caller.readable);
+        // Binding a W2 socket cannot grant the W1-only caller membership.
+        expect(decideLogSubscription({ ...subject, workspaceId: w2.id }, facts.facts).ok).toBe(caller.readable);
         for (const route of routes) {
           const response = await app.request(route, { headers: { Authorization: `Bearer ${caller.token}` } });
           expect(response.status, `${caller.workspace.name}: ${route}`).toBe(caller.readable ? 200 : 404);
@@ -80,7 +83,7 @@ pendingTurnBackendTests("MUL-509 moved Issue Session read parity", (fixture, bac
         const before = store.getConversationLogHead(session.id)!.headSeq;
         const sent = await app.request(`/api/sessions/${session.id}/messages`, { method: "POST",
           headers: { Authorization: `Bearer ${caller.token}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ to: { type: "none" }, body_md: "Follow-up in W1", message_kind: "status", wake_requested: "inbox_only" }) });
+          body: JSON.stringify({ to: { type: "none" }, body_md: "Follow-up in W2", message_kind: "status", wake_requested: "inbox_only" }) });
         expect(sent.status).toBe(caller.readable ? 200 : 404);
         expect(store.getConversationLogHead(session.id)!.headSeq).toBe(before + (caller.readable ? 1 : 0));
       }

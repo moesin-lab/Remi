@@ -96,7 +96,10 @@ describe("native attachment workspace context", () => {
   it("allows an attachment to the caller's chat in the authorized workspace", async () => {
     const { store, app, user, workspace, chat } = await fixture();
     const sent = store.sendChatMessage(chat.id, { body: "Upload a file to this conversation" });
-    expect(sent.message.taskId).toBe(sent.task.id);
+    const turn = store.getTurnForAttempt(sent.task.id)!;
+    expect(turn).toMatchObject({ session_id: chat.id, trigger_message_id: sent.message.id });
+    expect(store.getMessage(sent.message.id)?.metadata.delivery_turn_id).toBe(turn.id);
+    expect(sent.message.taskId).toBeNull();
     expect(store.getTaskChatExecutionKind(sent.task)).toBe("ordinary");
     const token = await store.createTaskAccessToken(sent.task, user.id);
     const headers = { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" };

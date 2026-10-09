@@ -72,11 +72,18 @@ export async function createPr2Harness(options: { inboxRows?: number; runtimes?:
     privatePrimaryAgent:false,
     run: (sql, params) => { db.run(sql, ...params); },
   });
+  const issueSessionIds = new Map<string, string>();
+  const inboxIssueId = fixture.issueIds[0];
+  if (inboxIssueId) {
+    const session = store.getOrCreateDefaultIssueSession(inboxIssueId);
+    issueSessionIds.set(session.id, `<issue-session:${inboxIssueId}>`);
+  }
   // #4: independent canonical conversations replace notification archive/fold
   // sentinels. A lane cursor reads one; a message tombstone hides another.
   for (let index=0;index<6;index++) {
     const issue=store.createIssue({title:`PR2 sentinel ${index}`});
     const session=store.getOrCreateDefaultIssueSession(issue.id);
+    issueSessionIds.set(session.id, `<issue-session:pr2-sentinel:${index}>`);
     const message=store.sendMessage({id:`cmt_pr2_sentinel_${index}`,session_id:session.id,
       sender:{type:'platform',id:null},to:{type:'member',ref:fixture.readerMemberId},
       message_kind:'status',wake_requested:'now',body_md:'PR2 sentinel',
@@ -136,7 +143,7 @@ export async function createPr2Harness(options: { inboxRows?: number; runtimes?:
   const viewerHeaders = await headersFor(viewer.id);
   const app = createMultiremiApp({ store, authToken: "pr2-fixture-auth" });
   return {
-    db, store, fixture, probe, app, headers, viewerHeaders, attachmentId, privateAttachmentId, attachmentBytes, runtimeIds,
+    db, store, fixture, probe, app, headers, viewerHeaders, attachmentId, privateAttachmentId, attachmentBytes, runtimeIds, issueSessionIds,
     async dispose() {
       if (previousUploadDir === undefined) delete process.env.MULTIREMI_UPLOAD_DIR;
       else process.env.MULTIREMI_UPLOAD_DIR = previousUploadDir;
@@ -197,7 +204,13 @@ export async function capturePr2Responses() {
     const runtimes = await json("/api/runtimes");
     const owned = await json("/api/runtimes?owner=me");
     const hydrated = harness.runtimeIds.map(id => harness.store.getRuntime(id));
-    const normalize = (value: unknown) => JSON.parse(JSON.stringify(value).replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g, "<timestamp>"));
+    const normalize = (value: unknown) => {
+      let wire = JSON.stringify(value).replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g, "<timestamp>");
+      // SQLite and PG bootstrap consume different IDs. Pin only the actual
+      // fixture-owned Sessions, preserving their distinct owners and wire order.
+      for (const [id, placeholder] of harness.issueSessionIds) wire = wire.replaceAll(id, placeholder);
+      return JSON.parse(wire);
+    };
     return normalize({ source: "MUL-493 canonical inbox; unchanged attachment/runtime wire contracts", fixture: { sessions: fixture.counts.sessions,
       agents: fixture.counts.agents, inboxRows: fixture.counts.inboxRows + 6 }, inbox, attachment, denied, unauthorized, runtimes, owned, hydrated });
   } finally { await harness.dispose(); restore(); }

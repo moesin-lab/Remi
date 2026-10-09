@@ -26,8 +26,9 @@ function fixture() {
     assigneeType: "squad",
     assigneeId: squad.id,
   });
-  const chat = store.createChatSession({ agentId: leader.id });
-  const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Coordination" });
+  const session = store.createIssueSession(issue.id, { title: "Coordination" });
+  expect(session.ownerType).toBe("issue");
+  expect(session.chatId).toBeNull();
   const main = store.createSessionTask(session.id, { agentId: leader.id, prompt: "Coordinate." });
   expect(main.issueSessionId).toBeTruthy();
   expect(store.claimTask(runtime.id)?.id).toBe(main.id);
@@ -48,6 +49,28 @@ function fixture() {
 }
 
 describe("rich mention continuation", () => {
+  it("does not publish a Chat-owned Session's private mention into the Issue", () => {
+    const f = fixture();
+    const chat = f.store.createChatSession({ agentId: f.leader.id });
+    const session = f.store.createIssueSession(f.issue.id, { chatId: chat.id, title: "Private coordination" });
+    const task = f.store.createSessionTask(session.id, { agentId: f.leader.id, prompt: "Private coordination." });
+    const privateBody = `PRIVATE_CHAT_MENTION [@Teammate](mention://agent/${f.teammate.id})`;
+    const before = f.store.listMessages(session.id);
+    expect(session.ownerType).toBe("chat");
+
+    expect(() => f.store.createIssueComment(f.issue.id, {
+      authorType: "agent",
+      authorId: f.leader.id,
+      taskId: task.id,
+      issueSessionId: session.id,
+      body: privateBody,
+    })).toThrow("Session is not currently linked to this Issue");
+    expect(f.store.listMessages(session.id)).toEqual(before);
+    expect(JSON.stringify(f.store.listIssueComments(f.issue.id))).not.toContain("PRIVATE_CHAT_MENTION");
+    expect(JSON.stringify(f.store.listIssueActivity(f.issue.id))).not.toContain("PRIVATE_CHAT_MENTION");
+    expect(f.delegated()).toEqual([]);
+  });
+
   it("bootstraps the first mention for a teammate with no lane yet", () => {
     const f = fixture();
     f.mention("Kick off the work.");

@@ -4,6 +4,7 @@ import { createMultiremiApp } from "@multiremi/api.js";
 import { InMemoryDaemonTraceReader } from "@multiremi/api/trace/daemon-trace-reader.js";
 import { InMemoryTraceStore } from "@multiremi/worker/trace-store.js";
 import { createLocalStore as createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { conversationLogPgAdminUrl, withConversationLogStore } from "./fixtures/conversation-log-store.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -12,8 +13,7 @@ const headers = (token: string) => ({
   "Content-Type": "application/json",
 });
 
-async function setup() {
-  const store = createStore();
+async function setup(store = createStore()) {
   store.ensureLocalWorkspace();
   const owner = store.createWorkspaceMember({
     id: "mem_owner",
@@ -204,7 +204,7 @@ describe("Organizer supervisor privilege layer", () => {
     expect(revokedOldToken.status).toBe(401);
   });
 
-  it("exposes transcript-free inspection metadata while preserving legacy Issue owner parity", async () => {
+  it("exposes transcript-free inspection metadata while keeping cross-Session input scoped", async () => {
     const fixture = await setup();
     fixture.store.markTaskTraceDaemon(fixture.targetTask.id, fixture.runtime.id);
     const supervisorToken = await grantSupervisor(fixture);
@@ -232,13 +232,17 @@ describe("Organizer supervisor privilege layer", () => {
       fixture.supervisorTask.id,
       fixture.targetTask.id,
     ]));
-    // MUL-357 trims `prompt` from list entries, so the same cross-task content
-    // parity is asserted on the detail route, which keeps the full shape.
+    // Metadata authority does not grant another Session's input messages.
     const targetDetail = await fixture.app.request(turnApiPath(fixture.store, fixture.targetTask.id,"?input=true"), {
       headers: headers(supervisorToken.token),
     });
-    expect(targetDetail.status).toBe(200);
-    expect(JSON.stringify((await targetDetail.json()).input)).toContain("TOP SECRET target prompt");
+    expect(targetDetail.status).toBe(403);
+    expect(await targetDetail.text()).not.toContain("TOP SECRET");
+    const ownInput = await fixture.app.request(turnApiPath(fixture.store, fixture.targetTask.id, "?input=true"), {
+      headers: headers(normalTaskToken.token),
+    });
+    expect(ownInput.status).toBe(200);
+    expect(JSON.stringify((await ownInput.json()).input)).toContain("TOP SECRET target prompt");
 
     const normalList = await fixture.app.request("/api/turns", {
       headers: headers(normalTaskToken.token),
@@ -270,28 +274,38 @@ describe("Organizer supervisor privilege layer", () => {
     expect(privateTask.chatSessionId).not.toBeNull();
     for (const token of [supervisorToken, normalTaskToken]) {
       for (const path of [
-        `/api/tasks/${privateTask.id}/inspection`,
-        `/api/multiremi/tasks/${privateTask.id}`,
+        turnApiPath(fixture.store, privateTask.id),
+        turnApiPath(fixture.store, privateTask.id, "?attempts=true"),
+        turnApiPath(fixture.store, privateTask.id, "?input=true"),
+        turnApiPath(fixture.store, privateTask.id, "/trace"),
       ]) {
-        expect((await fixture.app.request(path, { headers: headers(token.token) })).status).toBe(403);
-      }
-      for (const action of ["steer", "cancel"]) {
-        const response = await fixture.app.request(`/api/tasks/${privateTask.id}/${action}`, {
-          method: "POST", headers: headers(token.token), body: JSON.stringify({ content: "Cross-Chat action" }),
-        });
+        const response = await fixture.app.request(path, { headers: headers(token.token) });
         expect(response.status).toBe(403);
+        expect(await response.text()).not.toContain("Private Chat prompt");
       }
-      const list = await fixture.app.request("/api/multiremi/tasks", { headers: headers(token.token) });
-      expect((await list.json()).tasks.map((task: any) => task.id)).not.toContain(privateTask.id);
+      const cancel = await fixture.app.request(turnApiPath(fixture.store, privateTask.id, "/cancel"), {
+        method: "POST", headers: headers(token.token), body: JSON.stringify({}),
+      });
+      expect(cancel.status).toBe(403);
+      const steer = await fixture.app.request(`/api/sessions/${session.id}/messages`, {
+        method: "POST", headers: headers(token.token),
+        body: JSON.stringify({ body_md: "Cross-Chat action", message_kind: "request", wake_requested: "now",
+          to: { type: "agent", ref: fixture.targetAgent.id } }),
+      });
+      expect(steer.status).toBe(403);
+      expect(fixture.store.listMessages(session.id).some(message => message.body_md === "Cross-Chat action")).toBe(false);
+      const list = await fixture.app.request("/api/turns", { headers: headers(token.token) });
+      expect((await list.json()).turns.map((turn: any) => turn.id)).not.toContain(fixture.store.getTurnForAttempt(privateTask.id)!.id);
     }
     expect(fixture.store.getTask(privateTask.id)?.status).toBe("queued");
     expect(fixture.store.listOrganizerActionsForTask(privateTask.id)).toHaveLength(0);
     const ownToken = await fixture.store.createTaskAccessToken(privateTask, "owner");
     for (const token of [fixture.ownerToken, ownToken]) {
-      const ownRead = await fixture.app.request(`/api/tasks/${privateTask.id}/inspection`, {
+      const ownRead = await fixture.app.request(turnApiPath(fixture.store, privateTask.id, "?input=true&attempts=true"), {
         headers: headers(token.token),
       });
       expect(ownRead.status).toBe(200);
+      expect(JSON.stringify((await ownRead.json()).input)).toContain("Private Chat prompt");
     }
   });
 
@@ -308,9 +322,11 @@ describe("Organizer supervisor privilege layer", () => {
     expect(self.status).toBe(403);
     expect((await self.json()).code).toBe("organizer_self_action_forbidden");
 
+    const ordinarySession = fixture.store.createIssueSession(fixture.targetIssue.id, { title: "Ordinary cancellation" });
     const ordinaryTarget = fixture.store.createTask({
       agentId: fixture.targetAgent.id,
       issueId: fixture.targetIssue.id,
+      issueSessionId: ordinarySession.id,
       workspaceId: "local",
       prompt: "ordinary owner action",
     });
@@ -699,70 +715,89 @@ describe("Organizer supervisor privilege layer", () => {
     expect(events[0]?.inTransaction).toBe(false);
   });
 
-  it("dispatches rich organizer comment mentions within the outer transaction", async () => {
-    const fixture = await setup();
-    await grantSupervisor(fixture);
-    await setMode(fixture, "act");
-    const leader = fixture.store.createAgent({
-      name: "Squad leader",
-      provider: "codex",
-      workspaceId: "local",
-      ownerId: "owner",
-    });
-    const squad = fixture.store.createSquad({
-      name: "Organizer squad",
-      leaderId: leader.id,
-      memberIds: [fixture.supervisorAgent.id],
-    });
-    const delegatedIssue = fixture.store.createIssue({
-      title: "Delegated organizer patrol",
-      workspaceId: "local",
-      assigneeType: "squad",
-      assigneeId: squad.id,
-    });
-    const delegatedChat = fixture.store.createChatSession({
-      agentId: leader.id,
-      workspaceId: "local",
-    });
-    const delegatedSession = fixture.store.createIssueSession(delegatedIssue.id, {
-      chatId: delegatedChat.id,
-      title: "Delegated organizer work",
-    });
-    const delegatedSupervisorTask = fixture.store.createTask({
-      agentId: fixture.supervisorAgent.id,
-      issueId: delegatedIssue.id,
-      issueSessionId: delegatedSession.id,
-      workspaceId: "local",
-      prompt: "inspect delegated tasks",
-      delegationId: "dlg_organizer_return",
-      delegatedByAgentId: leader.id,
-    });
-    const supervisorToken = await fixture.store.createTaskAccessToken(delegatedSupervisorTask, "owner");
-    const enqueueTransactionStates: boolean[] = [];
-    const unsubscribe = fixture.store.onTaskEnqueued((task) => {
-      if (task.agentId === leader.id) {
-        enqueueTransactionStates.push(db!.inTransaction);
-      }
-    });
+  for (const backend of ["sqlite", "pg"] as const) {
+    for (const owner of ["issue", "chat", "chat-null-audit"] as const) {
+      it.skipIf(backend === "pg" && !conversationLogPgAdminUrl)(`${backend}: keeps the ${owner} organizer report on its actual Session and enqueues the delegator after commit`, async () => {
+        await withConversationLogStore(backend, async (store, database) => {
+          const fixture = await setup(store);
+          await grantSupervisor(fixture);
+          await setMode(fixture, "act");
+          const leader = fixture.store.createAgent({
+            name: "Squad leader",
+            provider: "codex",
+            workspaceId: "local",
+            ownerId: "owner",
+          });
+          const squad = fixture.store.createSquad({
+            name: "Organizer squad",
+            leaderId: leader.id,
+            memberIds: [fixture.supervisorAgent.id],
+          });
+          const delegatedIssue = fixture.store.createIssue({
+            title: "Delegated organizer patrol",
+            workspaceId: "local",
+            assigneeType: "squad",
+            assigneeId: squad.id,
+          });
+          const delegatedChat = fixture.store.createChatSession({
+            agentId: leader.id,
+            workspaceId: "local",
+          });
+          const delegatedSession = fixture.store.createIssueSession(delegatedIssue.id, {
+            chatId: owner === "issue" ? undefined : delegatedChat.id,
+            title: "Delegated organizer work",
+          });
+          const delegatedSupervisorTask = fixture.store.createTask({
+            agentId: fixture.supervisorAgent.id,
+            issueId: delegatedIssue.id,
+            issueSessionId: delegatedSession.id,
+            workspaceId: "local",
+            prompt: "inspect delegated tasks",
+            delegationId: "dlg_organizer_return",
+            delegatedByAgentId: leader.id,
+          });
+          if (owner === "chat-null-audit") {
+            database.run("UPDATE multiremi_turns SET chat_session_id = NULL WHERE id = ?", [fixture.store.getTurnForAttempt(delegatedSupervisorTask.id)!.id]);
+            expect(fixture.store.getIssueSession(delegatedSession.id)?.ownerType).toBe("chat");
+            expect(fixture.store.getTask(delegatedSupervisorTask.id)?.chatSessionId).toBeNull();
+          }
+          const supervisorToken = await fixture.store.createTaskAccessToken(delegatedSupervisorTask, "owner");
+          const enqueueTransactionStates: Array<boolean | undefined> = [];
+          const unsubscribe = fixture.store.onTaskEnqueued((task) => {
+            if (task.agentId === leader.id) {
+              enqueueTransactionStates.push(database.inTransaction);
+            }
+          });
 
-    try {
-      const response = await fixture.app.request(turnApiPath(fixture.store, fixture.targetTask.id, "/retry"), {
-        method: "POST",
-        headers: headers(supervisorToken.token),
-        body: JSON.stringify({ cold: true }),
-      });
-      expect(response.status).toBe(200);
-    } finally {
-      unsubscribe();
+          try {
+            const response = await fixture.app.request(turnApiPath(fixture.store, fixture.targetTask.id, "/retry"), {
+              method: "POST",
+              headers: headers(supervisorToken.token),
+              body: JSON.stringify({ cold: true }),
+            });
+            expect(response.status).toBe(200);
+          } finally {
+            unsubscribe();
+          }
+
+          // #9: the patrol comment itself is addressed to the delegator.
+          const report=fixture.store.listMessages(delegatedSupervisorTask.issueSessionId!).find(message=>
+            message.body_md.startsWith('Organizer action:') && message.to_agent_id===leader.id);
+          expect(report).toMatchObject({message_kind:'report',wake_applied:'now',
+            task_id:fixture.store.getTurnForAttempt(delegatedSupervisorTask.id)!.id});
+          expect(report!.session_id).toBe(delegatedSession.id);
+          if (owner === "issue") {
+            expect(fixture.store.getIssueComment(report!.id)?.body).toBe(report!.body_md);
+            expect(fixture.store.listIssueComments(delegatedIssue.id).filter(comment => comment.body.startsWith("Organizer action:"))).toHaveLength(1);
+          } else {
+            expect(fixture.store.getIssueComment(report!.id)).toBeNull();
+            expect(fixture.store.listIssueComments(delegatedIssue.id).some(comment => comment.body.startsWith("Organizer action:"))).toBe(false);
+            expect(JSON.stringify(fixture.store.listIssueActivity(delegatedIssue.id))).not.toContain(report!.body_md);
+          }
+          expect(enqueueTransactionStates).toEqual([false]);
+          expect(fixture.store.listTasksForIssue(delegatedIssue.id).find(task=>task.agentId===leader.id)?.parentTaskId).toBeNull();
+        });
+      }, 30_000);
     }
-
-    // #9: the patrol comment itself is addressed to the delegator.
-    const report=fixture.store.listMessages(delegatedSupervisorTask.issueSessionId!).find(message=>
-      message.body_md.startsWith('Organizer action:') && message.to_agent_id===leader.id);
-    expect(report).toMatchObject({message_kind:'report',wake_applied:'now',
-      task_id:fixture.store.getTurnForAttempt(delegatedSupervisorTask.id)!.id});
-    expect(enqueueTransactionStates).toEqual([false]);
-    expect(fixture.store.listTasksForIssue(delegatedIssue.id).find(task=>task.agentId===leader.id)?.parentTaskId).toBeNull();
-
-  });
+  }
 });

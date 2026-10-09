@@ -64,11 +64,13 @@ export function normalizeFirstScreenHotspotResponse(
 ): unknown {
   const taskIds = new Map(fixture.taskIds.map((id, index) => [id, `<task:${index}>`]));
   const turnIds = new Map([...new Set(fixture.turnIds)].map((id,index)=>[id,`<turn:${index}>`]));
+  const messageIds = new Map([...new Set(fixture.messageIds)].map((id, index) => [id, `<message:${index}>`]));
   const scrub = (input: unknown, key: string | null): unknown => {
     if (typeof input === "string") {
       const placeholder = taskIds.get(input);
       if (placeholder && (key === "task_id" || key === "id" || key === "current_attempt_id")) return placeholder;
       if(turnIds.has(input)) return turnIds.get(input)!;
+      if (messageIds.has(input)) return messageIds.get(input)!;
       return input.replace(ISO_RE, "<timestamp>");
     }
     if (Array.isArray(input)) return input.map((entry) => scrub(entry, null));

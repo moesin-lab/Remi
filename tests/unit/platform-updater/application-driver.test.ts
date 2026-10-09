@@ -26,7 +26,7 @@ async function fixture() {
   const manifest: ApplicationManifest = { ...previous, version: '1.0.1', ref: '2'.repeat(40), application: { format: 1, bun: '1.3.14', nodeMajor: 22, apiLibc: 'glibc 2.36', webLibc: 'glibc 2.36', apiBase: BASE, rollbackSafeFrom: [], assets: { 'linux-x64': { url: 'https://releases.example/application.tar.gz', sha256: hash } } } };
   const calls: Array<{ command: string; args: string[] }> = [];
   const events: string[] = [];
-  const state = { selected: '', volume: false, failMigration: false, loseColumns: false, failRecovery: false, drainReady: true, running: '', rehearsalContainers: '' };
+  const state = { selected: '', volume: false, failMigration: false, loseColumns: false, failRecovery: false, drainReady: true, running: '', rehearsalContainers: '', rehearsalReadyAfter: 0, rehearsalProbes: 0 };
   const runner: CommandRunner = {
     async run(command: string, args: string[], options?: CommandOptions) {
       calls.push({ command, args });
@@ -57,6 +57,12 @@ async function fixture() {
         if (args.includes('process.versions.node.split(".")[0]')) return ok('22');
         if (args.includes('GNU_LIBC_VERSION')) return ok('glibc 2.36');
         if (args.includes('pg_restore')) events.push('restore-scratch');
+        if (args.includes('psql') && args.includes('SELECT 1')) {
+          state.rehearsalProbes++;
+          if (state.rehearsalProbes <= state.rehearsalReadyAfter) return { exitCode: 2, stdout: '', stderr: 'database "remi_update_rehearsal" does not exist' };
+          events.push('rehearsal-ready');
+          return ok('1');
+        }
         if (args.includes('psql')) return ok(state.loseColumns && events.includes('migrate') ? '' : 'public.messages.id:integer:int4:NO');
         return ok();
       }
@@ -160,6 +166,33 @@ describe('container application updates', () => {
     expect((await f.driver.inspect()).currentRelease?.version).toBe('1.0.0');
     expect((await f.driver.pendingFinalization())?.report.status).toBe('failed');
     expect(f.calls.some(call => call.args.includes('pg_restore') && call.args.includes('postgres-container'))).toBe(false);
+  });
+
+  it('waits for the rehearsal database over TCP before restoring into it', async () => {
+    const f = await fixture(); f.state.rehearsalReadyAfter = 2;
+    await f.driver.execute(f.operation, f.report, f.gate);
+    const probes = f.calls.filter(call => call.args.includes('SELECT 1'));
+    expect(probes).toHaveLength(3);
+    expect(probes.every(call => call.args[0] === 'exec' && call.args[1]?.startsWith('remi-rehearsal-')
+      && call.args.includes('127.0.0.1') && call.args.includes('remi_update_rehearsal'))).toBe(true);
+    expect(f.events.indexOf('restore-scratch')).toBeGreaterThan(f.events.indexOf('rehearsal-ready'));
+    expect(f.events.filter(event => event === 'restore-scratch')).toHaveLength(1);
+  });
+
+  it('keeps the rehearsal readiness budget and never restores when its database stays unavailable', async () => {
+    const f = await fixture(); f.state.rehearsalReadyAfter = 41;
+    const sleep = spyOn(Bun, 'sleep').mockImplementation(async () => {});
+    try {
+      await expect(f.driver.execute(f.operation, f.report, f.gate)).rejects.toThrow('Isolated migration database did not become ready');
+      expect(f.state.rehearsalProbes).toBe(41);
+      expect(sleep.mock.calls).toEqual(Array.from({ length: 40 }, () => [500]));
+      expect(f.events).not.toContain('restore-scratch');
+      expect(f.events).not.toContain('migrate');
+      const removals = f.calls.filter(call => call.args[0] === 'rm');
+      expect(removals).toHaveLength(1);
+      expect(removals[0]!.args.at(-1)).toMatch(/^remi-rehearsal-pop_app-[a-f0-9]{8}$/);
+      expect((await f.driver.pendingFinalization())?.report.status).toBe('failed');
+    } finally { sleep.mockRestore(); }
   });
 
   it('recovers code after migration failure without restoring or deleting live data', async () => {

@@ -722,7 +722,7 @@ describe("Feishu decision cards for Issue human requests", () => {
       message_id: "om_recoverable",
       recipient_open_id: "ou_the_person",
     }]);
-    store.registerRuntime({ id: "rt_other_bot", name: "Another bot", provider: "claude", workspaceId: "local", daemonId: "another-bot-host" });
+    store.registerRuntime({ id: "rt_other_bot", name: "Another bot", provider: "codex", workspaceId: "local", daemonId: "another-bot-host" });
     store.heartbeatRuntime("rt_other_bot", { supportsFeishuBotConfig: true, supportsDecisionCard: true });
     store.feishuBotFor("bot_other").upsertConfig("local", {
       agentId, runtimeId: "rt_other_bot", appId: "cli_other_bot", appSecret: "fixture-only", appSecretOp: "set", domain: "feishu", enabled: true,

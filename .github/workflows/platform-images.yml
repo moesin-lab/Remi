@@ -1,141 +1,73 @@
-name: Platform images
+name: Platform application transport
 
 on:
-  schedule:
-    # 04:17 Asia/Shanghai; avoid the busy top of the hour.
-    - cron: '17 20 * * *'
   workflow_dispatch:
-    inputs:
-      ref:
-        description: Branch, tag or commit to build (no release is created)
-        default: main
-        type: string
-      hostname:
-        description: Stable LAN IPv4; defaults to REMI_STABLE_HOST repository variable or 127.0.0.1
-        type: string
 
 permissions:
   contents: read
-
-concurrency:
-  group: platform-images-${{ inputs.ref || 'main' }}
-  cancel-in-progress: false
+  packages: write
 
 jobs:
-  build:
+  package:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      packages: write
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || 'main' }}
-          fetch-depth: 0
+          ref: 277a43bef475b690b13d713cd9175222095f2767
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Validate deployment tooling
-        run: |
-          node --test scripts/ci-images.test.mjs scripts/local-profile.test.mjs
-          npm run docs:test
-          npm run docs:check
-      - name: Resolve image identity
-        id: meta
-        env:
-          BUILD_HOSTNAME: ${{ inputs.hostname || vars.REMI_STABLE_HOST || '127.0.0.1' }}
-        run: node scripts/ci-image-metadata.mjs
-      - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build API
-        id: api
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/Dockerfile.api
-          platforms: linux/amd64
-          push: true
-          tags: ghcr.io/${{ steps.meta.outputs.owner }}/remi-api:${{ steps.meta.outputs.tag }}
-          build-args: |
-            MULTIREMI_VERSION=${{ steps.meta.outputs.version }}
-            REMI_APPLICATION_BASE_REF=${{ steps.meta.outputs.sha }}
-          labels: |
-            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=gha,scope=stable-api
-          cache-to: type=gha,scope=stable-api,mode=max
-      - name: Build Web
-        id: web
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/Dockerfile.web
-          platforms: linux/amd64
-          push: true
-          tags: ghcr.io/${{ steps.meta.outputs.owner }}/remi-web:${{ steps.meta.outputs.tag }}
-          build-args: |
-            REMOTE_API_URL=http://api:6120
-            REMI_APP_VERSION=${{ steps.meta.outputs.version }}
-            REMI_APPLICATION_BASE_REF=${{ steps.meta.outputs.sha }}
-            NEXT_BUILD_CPUS=2
-            NEXT_PUBLIC_SITE_URL=http://${{ steps.meta.outputs.hostname }}:13000
-            NEXT_PUBLIC_LOCAL_PROFILE=stable
-            NEXT_PUBLIC_WS_URL=ws://${{ steps.meta.outputs.hostname }}:16120/ws
-          labels: |
-            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            io.remi.local-profile.hostname=${{ steps.meta.outputs.hostname }}
-          cache-from: type=gha,scope=stable-web
-          cache-to: type=gha,scope=stable-web,mode=max
-      - name: Build internal updater
-        id: updater
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/Dockerfile.updater
-          platforms: linux/amd64
-          push: true
-          tags: ghcr.io/${{ steps.meta.outputs.owner }}/remi-updater:${{ steps.meta.outputs.tag }}
-          labels: |
-            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          cache-from: type=gha,scope=stable-updater
-          cache-to: type=gha,scope=stable-updater,mode=max
-      - name: Write immutable deployment manifest
-        env:
-          BUILD_HOSTNAME: ${{ steps.meta.outputs.hostname }}
-          API_DIGEST: ${{ steps.api.outputs.digest }}
-          WEB_DIGEST: ${{ steps.web.outputs.digest }}
-          UPDATER_DIGEST: ${{ steps.updater.outputs.digest }}
-        run: node scripts/ci-image-metadata.mjs --manifest
-      - name: Verify pull-based deployment and authentication
-        env:
-          REMI_PROFILES_ROOT: ${{ runner.temp }}/remi-profiles
-          BUILD_HOSTNAME: ${{ steps.meta.outputs.hostname }}
+      - name: Package the tested x64 application from immutable CI images
         run: |
-          args=()
-          if [[ "$BUILD_HOSTNAME" != '127.0.0.1' ]]; then args=(--lan-host "$BUILD_HOSTNAME"); fi
-          node scripts/local-profile.mjs stable deploy --ref HEAD --image-manifest stable-images.json "${args[@]}"
-          node scripts/smoke-local-profile.mjs
+          set -euo pipefail
+          mkdir -p bundle
+          cat > bundle/platform-release.json <<'JSON'
+          {
+            "version": "0.2.88",
+            "ref": "277a43bef475b690b13d713cd9175222095f2767",
+            "dataSchema": "8cb9f38263f7770f637d7256a4a049c762614d01e816195e4d15a24e1f175aa8",
+            "manifestUrl": "https://github.com/moesin-lab/Remi/tree/277a43bef475b690b13d713cd9175222095f2767/platform-release.json",
+            "apiImage": "ghcr.io/moesin-lab/remi-api@sha256:32dc56ddb7110f57b206a0fdad77fcbe4f16e495b89e456496ec256272f97d21",
+            "webImage": "ghcr.io/moesin-lab/remi-web@sha256:88dbf258f5d0c18387c09b076fcd09f08a2726fc65339036fcc717ae11cddb09"
+          }
+          JSON
+          node --input-type=module <<'JS'
+          import {readFileSync, writeFileSync} from 'node:fs';
+          const source = readFileSync('scripts/package-platform-application.mjs', 'utf8');
+          const architectures = "[['x64', 'amd64'], ['arm64', 'arm64']]";
+          if (!source.includes(architectures)) throw new Error('Packaging contract changed');
+          writeFileSync('scripts/package-deployment-application.mjs', source.replace(architectures, "[['x64', 'amd64']]"));
+          JS
+          node scripts/package-deployment-application.mjs bundle/platform-release.json bundle
+      - name: Publish the application as an immutable transport layer
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/moesin-lab/remi-api:application-bundle-277a43be-${GITHUB_RUN_ID}"
+          mkdir -p transport
+          cp bundle/platform-application-v0.2.88-linux-x64.tar.gz transport/
+          cat > transport/Dockerfile <<'DOCKERFILE'
+          FROM scratch
+          LABEL io.remi.artifact.kind="application_bundle"
+          LABEL org.opencontainers.image.revision="277a43bef475b690b13d713cd9175222095f2767"
+          ADD platform-application-v0.2.88-linux-x64.tar.gz /
+          DOCKERFILE
+          docker build --provenance=false -t "$IMAGE" transport
+          docker push "$IMAGE"
+          docker buildx imagetools inspect --raw "$IMAGE" > transport-manifest.json
+          jq -e '.layers | length == 1' transport-manifest.json
+          jq -e '.layers[0].mediaType | endswith(".tar+gzip") or endswith(".tar.gzip")' transport-manifest.json
+          jq --arg image "$IMAGE" '{image: $image, layer: .layers[0]}' transport-manifest.json > application-transport.json
       - uses: actions/upload-artifact@v4
         with:
-          name: stable-images-${{ steps.meta.outputs.sha }}
-          path: stable-images.json
+          name: application-transport-277a43be
+          path: |
+            application-transport.json
+            bundle/platform-release.json
           if-no-files-found: error
           retention-days: 90
-      - name: Stop smoke environment
-        if: always()
-        env:
-          REMI_PROFILES_ROOT: ${{ runner.temp }}/remi-profiles
-        run: |
-          if [[ -f "$REMI_PROFILES_ROOT/stable/compose.env" ]]; then
-            node scripts/local-profile.mjs stable stop
-          fi

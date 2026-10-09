@@ -3,8 +3,9 @@ import type { ReactNode } from "react";
 import { act, renderHook } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { Session, SessionTask } from "../types";
+import type { Session } from "../types";
 import { issueKeys } from "../issues/queries";
+import { messageFixture } from "../api/unified.fixture";
 import { chatKeys } from "./queries";
 import { chatWorkSessionKeys, useCreateChatWorkSession, useCreateChatWorkSessionTask } from "./work-sessions";
 
@@ -17,11 +18,9 @@ const session: Session = {
   inherited_event_count: 5, summary: null, created_by_type: "member", created_by_id: "user-1",
   created_at: "2026-10-08T00:00:00Z", updated_at: "2026-10-08T00:00:00Z", participants: [],
 };
-const task: SessionTask = {
-  id: "task-1", agent_id: "agent-1", runtime_id: null, issue_id: null,
-  chat_session_id: "chat-1", issue_session_id: "side-1", status: "queued", priority: 0,
-  dispatched_at: null, started_at: null, completed_at: null, result: null, error: null,
-  created_at: session.created_at,
+const receipt: Awaited<ReturnType<typeof import("../api")["api"]["createChatWorkSessionTask"]>> = {
+  message: messageFixture({ session_id: "side-1", to_agent_id: "agent-1" }),
+  wake_applied: "next_turn", wake_reason: "active_turn", turn_id: "turn-1",
 };
 let qc: QueryClient;
 function wrapper({ children }: { children: ReactNode }) {
@@ -57,19 +56,21 @@ it("keeps late Session creation in its originating workspace and Chat", async ()
   expect(qc.getQueryData(chatWorkSessionKeys.list("ws-2", "chat-2"))).toBeUndefined();
 });
 
-it("keeps a late SessionTask in its destination and leaves the ordinary Chat queue unchanged", async () => {
-  let resolve!: (task: SessionTask) => void;
-  mock.createChatWorkSessionTask.mockReturnValue(new Promise<SessionTask>(complete => { resolve = complete; }));
+it("reconciles a late work message in its destination and leaves the ordinary Chat queue unchanged", async () => {
+  let resolve!: (result: typeof receipt) => void;
+  mock.createChatWorkSessionTask.mockReturnValue(new Promise<typeof receipt>(complete => { resolve = complete; }));
+  qc.setQueryData(chatWorkSessionKeys.tasks("ws-1", "chat-1", "side-1"), []);
   const pendingChat = { task_id: "ordinary-1", status: "running", queued_tasks: [] };
   qc.setQueryData(chatKeys.pendingTask("chat-1"), pendingChat);
   const { result, rerender } = renderHook(({ wsId, chatId, sessionId }) => useCreateChatWorkSessionTask(wsId, chatId, sessionId), {
     wrapper, initialProps: { wsId: "ws-1", chatId: "chat-1", sessionId: "side-1" },
   });
-  let pending!: Promise<SessionTask>;
+  let pending!: Promise<typeof receipt>;
   await act(async () => { pending = result.current.mutateAsync({ agent_id: "agent-1", prompt: "Review" }); });
   rerender({ wsId: "ws-2", chatId: "chat-2", sessionId: "side-2" });
-  await act(async () => { resolve(task); await pending; });
-  expect(qc.getQueryData(chatWorkSessionKeys.tasks("ws-1", "chat-1", "side-1"))).toEqual([task]);
+  await act(async () => { resolve(receipt); await pending; });
+  expect(qc.getQueryData(chatWorkSessionKeys.tasks("ws-1", "chat-1", "side-1"))).toEqual([]);
+  expect(qc.getQueryState(chatWorkSessionKeys.tasks("ws-1", "chat-1", "side-1"))?.isInvalidated).toBe(true);
   expect(qc.getQueryData(chatWorkSessionKeys.tasks("ws-2", "chat-2", "side-2"))).toBeUndefined();
   expect(qc.getQueryData(chatKeys.pendingTask("chat-1"))).toBe(pendingChat);
 });

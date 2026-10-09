@@ -1,8 +1,13 @@
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
+import { MultiremiStore } from "@multiremi/store.js";
+import { historicalWriters } from "./unified-model-test-backends.js";
+import { runTurnExecutionMutation } from '@multiremi/store/turn-execution-records.js';
+import type { SqlDatabase as UnifiedFixtureDatabase } from '@multiremi/store/db/postgres.js';
 import { reportFrame } from "../../fixtures/report-session.js";
 import { afterEach, describe, expect, it, setSystemTime, spyOn } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { taskOfferResponse } from "../../fixtures/task-offer.js";
-import { runMigrations } from "@multiremi/store/migrations.js";
+import { runMigrations, bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
 import { resolveProjectionTokenBudget } from "@multiremi/store/session-projection-budget.js";
 import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
@@ -42,7 +47,7 @@ function fixture(largeParent = false, parentAuthorType: "agent" | "member" = "ag
 }
 
 function persistedDiagnostics(taskId: string) {
-  return db!.query(`SELECT ${diagnosticColumns.join(", ")} FROM multiremi_tasks WHERE id = ?`).get(taskId);
+  return db!.query(`SELECT ${diagnosticColumns.join(", ")} FROM multiremi_turn_execution_records WHERE id = ?`).get(taskId);
 }
 
 function expectNullDiagnostics(store: ReturnType<typeof createLocalStore>, taskId: string) {
@@ -70,13 +75,13 @@ describe("persisted inherited context diagnostics", () => {
     store.completeTask(parentTask.id, { output });
     const late = store.createSession(chat!.id, { title: "Late snapshot", parentSessionId: parent.id });
     const reader = store.createAgent({ name: "Snapshot reader", provider: "claude" });
-    const finalReply = store.findTurnEntry(parentTask.id)!.metadata.final_entry_id;
+    const finalReply = store.getTurnForAttempt(parentTask.id)!.reply_message_id;
     expect(store.listSessionEvents(parent.id).find(event => event.id === finalReply)?.body).toBe(output);
     for (const [snapshot, expected] of [[early, false], [late, true]] as const) {
       const task = store.createSessionTask(snapshot.id, { agentId: reader.id, prompt: "Read only this snapshot" });
       store.buildTaskSessionProjection(task.id);
       const token = await store.createTaskAccessToken(task, "local");
-      const response = await app.request(`/api/sessions/${parent.id}/log/entry?from=0&to=${snapshot.inheritCutoffSeq}`, {
+      const response = await app.request(`/api/sessions/${parent.id}/messages?from=0&to=${snapshot.inheritCutoffSeq}`, {
         headers: { Authorization: `Bearer ${token.token}` },
       });
       expect(response.status).toBe(200);
@@ -90,28 +95,69 @@ describe("persisted inherited context diagnostics", () => {
       const response = await taskOfferResponse(store, runtime.id, { headers, authToken: "MASTER" });
       expect(response.status).toBe(200);
       const claimed = (await response.json()).task;
-      expect(claimed).toMatchObject({ id: task.id, issue_session_id: side.id });
+      expect(claimed).toMatchObject({ attempt_id: task.id, issue_session_id: side.id });
       expect(claimed.inherited_session_projection).toMatchObject({ session_id: parent.id, to_seq: side.inheritCutoffSeq });
       expect(store.getIssueSession(side.id)).toMatchObject({ ownerType: owner, ownerId: chat?.id ?? issue.id });
-      const parentLog = await app.request(`/api/sessions/${parent.id}/log/entry?from=0&to=${side.inheritCutoffSeq}`, {
+      const parentLog = await app.request(`/api/sessions/${parent.id}/messages?from=0&to=${side.inheritCutoffSeq}`, {
         headers: { Authorization: `Bearer ${claimed.auth_token}` },
       });
       expect(parentLog.status).toBe(200);
       expect(JSON.stringify(await parentLog.json())).toContain("Parent 0: Reference decision");
+      const parentProgress = store.getSessionAgentReadProgress(parent.id, task.agentId);
+      expect(parentProgress).toEqual({ seq: 0, offset: 0 });
+
+      store.appendSessionEvent(parent.id, { authorType: "member", authorId: "local", body: "FUTURE_PARENT_CONTEXT" });
+      const taskHeaders = { Authorization: `Bearer ${claimed.auth_token}` };
+      for (const path of [
+        `/api/sessions/${parent.id}`,
+        `/api/sessions/${parent.id}/log`,
+        `/api/sessions/${parent.id}/messages`,
+        `/api/sessions/${parent.id}/messages?from=0&to=${side.inheritCutoffSeq! + 1}`,
+      ]) {
+        const denied = await app.request(path, { headers: taskHeaders });
+        expect(denied.status, path).toBe(403);
+        expect(await denied.text()).not.toContain("FUTURE_PARENT_CONTEXT");
+        expect(store.getSessionAgentReadProgress(parent.id, task.agentId)).toEqual(parentProgress);
+      }
+      const write = await app.request(`/api/sessions/${parent.id}/messages`, {
+        method: "POST", headers: { ...taskHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ body_md: "FORBIDDEN_PARENT_WRITE", to: { type: "none" } }),
+      });
+      expect(write.status).toBe(403);
+      expect(store.listMessages(parent.id).some(message => message.body_md === "FORBIDDEN_PARENT_WRITE")).toBe(false);
+      store.sendMessage({ session_id: parent.id, sender: { type: "member", id: "mem_local_local" },
+        to: { type: "agent", ref: task.agentId }, body_md: "FUTURE_PARENT_INBOX_CONTEXT", message_kind: "request", wake_requested: "inbox_only" });
+      const inbox = await app.request("/api/inbox", { headers: taskHeaders });
+      expect(inbox.status).toBe(200);
+      const inboxBody = await inbox.json();
+      expect(inboxBody.items.every((item: { session_id: string }) => item.session_id === side.id)).toBe(true);
+      expect(JSON.stringify(inboxBody)).not.toContain("FUTURE_PARENT_INBOX_CONTEXT");
+      expect(inboxBody.unread_count).toBe(inboxBody.items.length);
+      const readAll = await app.request("/api/inbox/read", { method: "POST", headers: { ...taskHeaders, "Content-Type": "application/json" }, body: JSON.stringify({ all: true }) });
+      expect(readAll.status).toBe(200);
+      expect(store.getSessionAgentReadProgress(parent.id, task.agentId)).toEqual(parentProgress);
     });
   }
 
   it("upgrades existing tasks with six nullable columns and preserves null through the mapper", () => {
-    const { store, task } = fixture();
-    for (const column of diagnosticColumns) db!.exec(`ALTER TABLE multiremi_tasks DROP COLUMN ${column}`);
-    runMigrations(db!);
-    runMigrations(db!);
-    const columns = db!.query("PRAGMA table_info(multiremi_tasks)").all();
+    const legacyDb = openSqliteDatabase(":memory:");
+    bootstrapPreUnifiedSchema(legacyDb);
+    const historical = historicalWriters(legacyDb);
+    const agent = historical.createAgent({name:"Historical diagnostics",provider:"claude"});
+    const issue = historical.createIssue({title:"Historical diagnostics"});
+    const task = historical.createTask({agentId:agent.id,issueId:issue.id,prompt:"Historical input"});
+    for (const column of diagnosticColumns) legacyDb.exec(`ALTER TABLE multiremi_tasks DROP COLUMN ${column}`);
+    runMigrations(legacyDb);
+    runMigrations(legacyDb);
+    const columns = legacyDb.query("PRAGMA table_info(multiremi_turn_attempts)").all();
     for (const column of diagnosticColumns) {
       const type = column === "inherited_projection_recorded_at" ? "TEXT" : "INTEGER";
       expect(columns).toContainEqual(expect.objectContaining({ name: column, type, notnull: 0, dflt_value: null }));
     }
-    expectNullDiagnostics(store, task.id);
+    const store = new MultiremiStore(legacyDb);
+    expect(legacyDb.query(`SELECT ${diagnosticColumns.join(", ")} FROM multiremi_turn_execution_records WHERE id=?`).get(task.id)).toEqual(Object.fromEntries(diagnosticColumns.map(column=>[column,null])));
+    expect(store.getTask(task.id)).toMatchObject({inheritedProjectionRecordedAt:null,inheritedProjectionToSeq:null});
+    legacyDb.close();
   });
 
   it("reports null before claim, then the actual inherited claim values rather than the untruncated own projection", async () => {
@@ -129,23 +175,23 @@ describe("persisted inherited context diagnostics", () => {
     const claim = await taskOfferResponse(store, runtime.id, { headers, authToken: "MASTER" });
     expect(claim.status).toBe(200);
     const claimed = (await claim.json()).task;
-    expect(claimed.id).toBe(task.id);
+    expect(claimed.attempt_id).toBe(task.id);
     const inherited = claimed.inherited_session_projection;
     const own = claimed.session_projection;
     expect(own.truncated).toBe(false);
     expect(own.omitted_events).toBe(0);
     expect(inherited.truncated).toBe(false);
     expect(inherited.omitted_events).toBe(0);
-    // The offer carries the complete frozen range, excluding this Agent's own bodies.
-    expect(side.inheritCutoffSeq).toBe(24);
-    expect(inherited.jsonl.split("\n").filter(Boolean).map((line: string) => JSON.parse(line)))
-      .toEqual([expect.objectContaining({
-        type: "unread_range", session_id: parent.id, from_seq: 0,
-        to_seq: side.inheritCutoffSeq, unread_count: 0,
-        instruction: expect.stringContaining(`remi session log get ${parent.id} --from 0 --to ${side.inheritCutoffSeq}`),
-      })]);
+    // MUL-498/ADR 0013 offers range metadata, excluding this agent's own history.
+    // The range spans all 24 seqs even though none requires an unread body.
+    expect(inherited.jsonl.split("\n").map((line: string) => JSON.parse(line))).toEqual([
+      expect.objectContaining({
+        type: "unread_range", session_id: parent.id, from_seq: 0, to_seq: 24, unread_count: 0,
+        instruction: expect.stringContaining(`remi message list ${parent.id} --from 0 --to 24`),
+      }),
+    ]);
     expect(inherited.jsonl).not.toContain("Parent 0:");
-    const ownRange = await app.request(`/api/sessions/${parent.id}/log/entry?from=0&to=${side.inheritCutoffSeq}`, {
+    const ownRange = await app.request(`/api/sessions/${parent.id}/messages?from=0&to=24`, {
       headers: { Authorization: `Bearer ${claimed.auth_token}` },
     });
     expect(ownRange.status).toBe(200);
@@ -189,7 +235,7 @@ describe("persisted inherited context diagnostics", () => {
     const claim = await taskOfferResponse(store, runtime.id, { headers, authToken: "MASTER" });
     expect(claim.status).toBe(200);
     const claimed = (await claim.json()).task;
-    expect(claimed.id).toBe(task.id);
+    expect(claimed.attempt_id).toBe(task.id);
     const inherited = claimed.inherited_session_projection;
     expect(inherited.jsonl.split("\n").map((line: string) => JSON.parse(line))).toEqual([
       expect.objectContaining({ type: "unread_range", session_id: parent.id, from_seq: 0, to_seq: 24, unread_count: 24 }),
@@ -199,7 +245,7 @@ describe("persisted inherited context diagnostics", () => {
     let cursor: string | null = null;
     let pages = 0;
     do {
-      const response = await app.request(`/api/sessions/${parent.id}/log/entry?from=0&to=24${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, {
+      const response = await app.request(`/api/sessions/${parent.id}/messages?from=0&to=24${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`, {
         headers: { Authorization: `Bearer ${claimed.auth_token}` },
       });
       expect(response.status).toBe(200);
@@ -217,7 +263,7 @@ describe("persisted inherited context diagnostics", () => {
   it("persists the model and degradation dependent 40 percent budget with the returned projection", () => {
     const { store, agent, task } = fixture(true);
     store.updateAgent(agent.id, { model: "claude-sonnet-4" });
-    db!.run("UPDATE multiremi_tasks SET projection_degrade_level = 2 WHERE id = ?", [task.id]);
+    runTurnExecutionMutation(db! as unknown as UnifiedFixtureDatabase, "UPDATE multiremi_turn_execution_records SET projection_degrade_level = 2 WHERE id = ?", [task.id]);
     const inherited = store.buildTaskSessionProjection(task.id)!.inheritedSessionProjection!;
     const budget = Math.floor(resolveProjectionTokenBudget({ provider: agent.provider, model: "claude-sonnet-4", degradeLevel: 2 }) * 0.4);
     expect(persistedDiagnostics(task.id)).toEqual({
@@ -310,7 +356,8 @@ describe("persisted inherited context diagnostics", () => {
     setSystemTime(new Date(recordedAt));
     const selected = store.buildTaskSessionProjection(task.id)!.inheritedSessionProjection!;
     setSystemTime(new Date("2026-09-17T04:00:00.000Z"));
-    const pending = store.createSessionTask(side.id, { agentId: agent.id, prompt: "Not yet claimed" });
+    const pendingAgent = store.createAgent({name:"Unclaimed reader",provider:"claude"});
+    const pending = store.createSessionTask(side.id, { agentId: pendingAgent.id, prompt: "Not yet claimed" });
     const otherSide = store.createIssueSession(issue.id, { parentSessionId: parent.id });
     const otherTask = store.createSessionTask(otherSide.id, { agentId: agent.id, prompt: "Other Session" });
     store.buildTaskSessionProjection(otherTask.id);
@@ -332,7 +379,7 @@ describe("persisted inherited context diagnostics", () => {
     const firstClaim = await taskOfferResponse(store, runtime.id, { headers, authToken: "MASTER" });
     expect(firstClaim.status).toBe(200);
     const first = (await firstClaim.json()).task;
-    expect(first.id).toBe(firstTask.id);
+    expect(first.attempt_id).toBe(firstTask.id);
     expect(store.getTask(firstTask.id)!.inheritedProjectionRecordedAt).toBe(firstRecordedAt);
 
     setSystemTime(new Date(secondRecordedAt));
@@ -342,7 +389,7 @@ describe("persisted inherited context diagnostics", () => {
     const secondClaim = await taskOfferResponse(store, secondRuntime.id, { headers, authToken: "MASTER" });
     expect(secondClaim.status).toBe(200);
     const second = (await secondClaim.json()).task;
-    expect(second.id).toBe(secondTask.id);
+    expect(second.attempt_id).toBe(secondTask.id);
     const inherited = second.inherited_session_projection;
     expect(inherited.omitted_events).toBe(0);
     expect(first.inherited_session_projection.omitted_events).toBe(0);

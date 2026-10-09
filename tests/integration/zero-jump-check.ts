@@ -67,7 +67,7 @@ import {
   type ZeroJumpViolation,
 } from "../../frontend/scripts/perf/lib/zero-jump-verdict";
 import { measureLogRender, type RenderMeasurement } from "../../frontend/scripts/perf/lib/render-measurement";
-import { seedZeroJumpFixture, type ZeroJumpFixture } from "./zero-jump-fixture";
+import { markTaskRunning, seedZeroJumpFixture, type ZeroJumpFixture } from "./zero-jump-fixture";
 import { seedImageCases, installImageBarrier, imageObservationFailure, type ImageCase, type ImageObservation } from "./zero-jump-image-cases";
 import { computeInFlightWaves, preRevealWaveFailure } from "./zero-jump-waves";
 
@@ -177,6 +177,7 @@ function findFreePort(start: number): number {
 }
 
 interface Scenario {
+  layoutCheck?: boolean;
   /** F398 also verifies that all deferred rows remain reachable inside the slot. */
   queuedTasks?: number;
   activityPreference?: boolean;
@@ -197,7 +198,7 @@ interface Scenario {
   expectIssueId: string | null;
 }
 
-function buildScenarios(fixture: ZeroJumpFixture, options: Options, imageCases: ImageCase[] = []): Scenario[] {
+function buildScenarios(fixture: ZeroJumpFixture, options: Options, imageCases: ImageCase[] = [], layoutIssueId?: string): Scenario[] {
   const detail = (key: string, issueId: string, extra: Partial<Scenario> = {}): Scenario[] => [
     {
       key,
@@ -245,19 +246,20 @@ function buildScenarios(fixture: ZeroJumpFixture, options: Options, imageCases: 
     ...detail("detail-long", fixture.longIssueId),
     ...detail("detail-xlong", fixture.xlongIssueId),
     ...detail("detail-running", fixture.runningIssueId),
+    ...(layoutIssueId ? detail("detail-layout", layoutIssueId, { layoutCheck: true }).filter(row => row.mode === "cold") : []),
     ...(options.only.includes("detail-running-empty-cache") ? detail("detail-running-empty-cache", fixture.runningIssueId, { taskCacheEmpty: true }).filter(row => row.mode === "cold") : []),
-    // The deep link is the shape a notification produces, and its cold round
+    // The deep link selects a canonical inbox message, and its cold round
     // *is* the deep link: the URL has to be the inbox one, because that is where
-    // the comment highlight and the target anchor come from. Navigating to
-    // `/issues/:id` instead would measure the ordinary detail page and the
-    // `target-comment` anchor would never exist.
+    // the selected message and its target anchor come from. Navigating to
+    // `/issues/:id` instead would measure the ordinary detail page and
+    // the message anchor would never exist.
     ...detail("detail-deeplink", fixture.longIssueId, {
-      path: `/inbox?issue=${encodeURIComponent(fixture.longIssueId)}&session=${encodeURIComponent(fixture.longDefaultSessionId)}`,
+      path: `/inbox?item=${encodeURIComponent(fixture.inboxItemId)}`,
       entry: "inbox",
       clickIssueId: null,
       inboxItemId: fixture.inboxItemId,
       targetCommentId: fixture.deepLinkCommentId,
-      expectIssueId: fixture.longIssueId,
+      expectIssueId: null,
     }),
     // Its own key on purpose: a sidebar restored from localStorage after the
     // first frame is a different mechanism from the detail page's own reveal, so
@@ -288,6 +290,7 @@ function buildScenarios(fixture: ZeroJumpFixture, options: Options, imageCases: 
 
 /** Per-round outcome: the structural facts, before the allowlist is consulted. */
 interface RoundResult extends RenderMeasurement {
+  issueLayout?: unknown;
   streamObservation?: {
     samples: Array<{ t: number; height: number; rows: number; state: string | null }>;
     rows: number;
@@ -305,6 +308,7 @@ interface RoundResult extends RenderMeasurement {
   waveGate: "blocking" | "record-only";
   attachmentReads: Record<string, number>;
   settled: boolean;
+  hubAckType: "auth_ack" | "stream.ack";
   hubAckSeen: boolean;
   revealDispatchMs: number | null;
   fetchPhases: Array<{ path: string; t: number; state: string | null; fresh: string | null }>;
@@ -485,13 +489,15 @@ async function runRound(input: {
   // actually shows.
   const profile: PerfProfileConfig = profileFor({
     mode: "contract",
-    shape: "issue-detail",
+    shape: scenario.entry === "inbox" ? "inbox" : "issue-detail",
     targetCommentId: scenario.targetCommentId,
     requireAgentStream: scenario.key.startsWith("detail-running"),
   });
   const targetUrl = `${webOrigin}/${slug}${scenario.path}`;
   const result: RoundResult = {
     requests: [], preRevealOptional: [], preRevealWaves: null, preRevealWaveRows: [], preRevealWaveChain: [], waveGate: scenario.mode === "warm" && !(["detail-running", "detail-deeplink"].includes(scenario.key)) ? "blocking" : "record-only", attachmentReads: {}, settled: false, hubAckSeen: false, revealDispatchMs: null, fetchPhases: [],
+    // Inbox message detail uses HTTP + workspace events, without a log stream.
+    hubAckType: scenario.entry === "inbox" ? "auth_ack" : "stream.ack",
     renderMs: null, renderSource: "unobserved", renderReason: "not measured", windowResponseEndMs: null,
     logSingleRowReads: 0,
     logRequests: [],
@@ -524,6 +530,13 @@ async function runRound(input: {
 
   const ssrCookie = input.ssrCookie && !scenario.taskCacheEmpty;
   const context: BrowserContext = await mktContext(browser, token, [], webOrigin, ssrCookie);
+  // Fulfilling the document below loses Chromium's loopback address-space
+  // classification. Permit this isolated local origin's real API/WebSocket
+  // traffic; otherwise the CSR fixture fails with ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS.
+  if (!ssrCookie) await context.grantPermissions(["local-network-access"], { origin: webOrigin });
+  if (scenario.layoutCheck) await context.addInitScript(() => {
+    window.localStorage.setItem("multimira:chat:isOpen", "false");
+  });
   if (scenario.activityPreference !== undefined) await context.addInitScript(({ key, value }) => {
     window.localStorage.setItem(key, JSON.stringify({ state: { showSystemDetails: value }, version: 0 }));
   }, { key: `multimira_issue_activity:${input.userId}:${input.workspaceId}`, value: scenario.activityPreference });
@@ -591,15 +604,15 @@ async function runRound(input: {
     const samples: NonNullable<RoundResult["cardSamples"]> = [];
     (window as unknown as { __s7CardSamples: typeof samples }).__s7CardSamples = samples;
     const observe = () => new MutationObserver(() => {
-      const slot = document.querySelector<HTMLElement>("[data-agent-card-slot]");
       const root = document.querySelector<HTMLElement>('[data-perf-scroll="issue-detail"]');
-      if (!slot || !root || root.getAttribute("data-perf-state") !== "ready") return;
+      if (!root || root.getAttribute("data-perf-state") !== "ready") return;
+      const card = root.querySelector<HTMLElement>("[data-agent-live-card]");
       const anchor = root.querySelector<HTMLElement>('[data-perf-anchor="latest-comment"]');
-      const sample = { t: performance.now(), height: slot.getBoundingClientRect().height,
-        contentHeight: slot.firstElementChild?.getBoundingClientRect().height ?? 0,
-        textLength: slot.textContent?.trim().length ?? 0, state: root.getAttribute("data-perf-state"),
+      const sample = { t: performance.now(), height: card?.getBoundingClientRect().height ?? 0,
+        contentHeight: card?.getBoundingClientRect().height ?? 0,
+        textLength: card?.textContent?.trim().length ?? 0, state: root.getAttribute("data-perf-state"),
         scrollTop: root.scrollTop, anchorTop: anchor?.getBoundingClientRect().top ?? null };
-      if (sample.height > 0 && (!samples.length || samples.at(-1)!.textLength !== sample.textLength)) samples.push(sample);
+      if (!samples.length || samples.at(-1)!.textLength !== sample.textLength) samples.push(sample);
     }).observe(document.documentElement, { childList: true, subtree: true, attributes: true });
     if (document.documentElement) observe(); else document.addEventListener("DOMContentLoaded", observe, { once: true });
   });
@@ -624,7 +637,7 @@ async function runRound(input: {
   page.on("websocket", socket => socket.on("framereceived", ({ payload }) => {
     if (!["/ws", "/api/realtime/ws"].includes(new URL(socket.url()).pathname)) return;
     lastHubChange = performance.now();
-    try { const frame = JSON.parse(String(payload)); if (frame.type === "stream.ack") result.hubAckSeen = true; } catch {}
+    try { const frame = JSON.parse(String(payload)); if (frame.type === result.hubAckType) result.hubAckSeen = true; } catch {}
   }));
   const seedReads: Promise<void>[] = [];
   page.on("response", response => {
@@ -645,11 +658,11 @@ async function runRound(input: {
   const collectors = attachCollectors(page, round, scenario.key, [slug], { inboxTarget });
   if (scenario.taskCacheEmpty) await page.route("**/api/issues/*/task-runs", async route => {
     // Functional fault injection only: hold the real task response until the
-    // first normal reveal has exposed the empty card. Then resume the same
-    // request so the genuine running task also reaches the stream row.
+    // first normal reveal has the independently reconciled active card. Then
+    // resume the same request so the running task also reaches the stream row.
     await page.waitForFunction(() => (window as unknown as {
       __s7CardSamples: NonNullable<RoundResult["cardSamples"]>;
-    }).__s7CardSamples?.some(sample => sample.textLength === 0));
+    }).__s7CardSamples?.some(sample => sample.textLength > 0));
     await route.continue();
   });
   const observeImage = scenario.imageCase ? await installImageBarrier(page, scenario.imageCase) : null;
@@ -761,7 +774,9 @@ async function runRound(input: {
   result.fetchPhases = phases.fetches.filter(fetch => fetch.t >= navStartMs);
   const revealAt = result.revealDispatchMs;
   const preReveal = revealAt === null ? [] : result.requests.filter(request => request.startMs < revealAt);
-  result.preRevealOptional = result.fetchPhases.filter(request => /\/(active-task|subscribers|resources)$/.test(request.path) && (request.state !== "ready" || request.fresh !== "1")).map(request => request.path);
+  // A cache-miss active-task response now determines the natural first-paint
+  // height. Subscribers and directory resources remain optional/deferred.
+  result.preRevealOptional = result.fetchPhases.filter(request => /\/(subscribers|resources)$/.test(request.path) && (request.state !== "ready" || request.fresh !== "1")).map(request => request.path);
   const waves = computeInFlightWaves(preReveal.map((request, index) => ({ ...request, index })));
   result.preRevealWaves = revealAt === null ? null : waves.serialDepth;
   result.preRevealWaveRows = waves.rows;
@@ -780,7 +795,6 @@ async function runRound(input: {
   result.preRevealWaveRows = result.preRevealWaveRows.map(request => ({ ...request, path: attachmentPath(request.path) }));
   result.fetchPhases = result.fetchPhases.map(request => ({ ...request, path: attachmentPath(request.path) }));
   if (scenario.taskCacheEmpty) result.cardSamples = await page.evaluate(() => (window as unknown as { __s7CardSamples: NonNullable<RoundResult["cardSamples"]> }).__s7CardSamples);
-  const emptyCard = result.cardSamples?.find(sample => sample.textLength === 0);
   const filledCard = result.cardSamples?.find(sample => sample.textLength > 0);
   if (observeImage) result.imageObservation = await observeImage().catch(() => undefined);
   if (scenario.queuedTasks) result.streamObservation = await page.evaluate(() => {
@@ -802,15 +816,25 @@ async function runRound(input: {
       || stream.scrollHeight <= stream.clientHeight || !stream.lastRowReachable)
       ? "deferred queued stream changed slot height, dropped rows or made the last row unreachable" : null,
     scenario.imageCase ? result.imageObservation ? imageObservationFailure(result.imageObservation) : "image observation missing" : null,
-    scenario.taskCacheEmpty && (!emptyCard || !filledCard || filledCard.contentHeight <= 0 || emptyCard.height !== filledCard.height
-      || (emptyCard.anchorTop !== null && filledCard.anchorTop !== null && Math.abs(emptyCard.anchorTop - filledCard.anchorTop) > .5))
-      ? "cache-miss agent card changed its reserved slot / anchor or was not observed" : null,
+    // A real initial state replaces the former blank reservation. No ready
+    // frame may precede the active card; the frame recorder also requires no jumps.
+    scenario.taskCacheEmpty && (!filledCard || filledCard.contentHeight <= 0
+      || result.cardSamples?.some(sample => sample.textLength === 0))
+      ? "cache-miss agent card was missing from a ready frame" : null,
     result.anchorVisibleMs !== result.readyMs ? `anchorVisibleMs ${result.anchorVisibleMs} != readyMs ${result.readyMs}` : null,
     result.preRevealOptional.length ? `optional before reveal: ${result.preRevealOptional.join(", ")}` : null,
     preRevealWaveFailure(result.waveGate, result.preRevealWaves),
     Object.values(result.attachmentReads).some(count => count > 1) ? `duplicate attachment content: ${JSON.stringify(result.attachmentReads)}` : null,
   ].filter(Boolean);
   if (failures.length) result.error = [result.error, ...failures].filter(Boolean).join("; ");
+  if (scenario.layoutCheck) {
+    try {
+      const { assertIssueDetailLayout } = await import("./issue-detail-layout-assertions.js");
+      result.issueLayout = await assertIssueDetailLayout(page);
+    } catch (error) {
+      result.error = [result.error, error instanceof Error ? error.message : String(error)].filter(Boolean).join("; ");
+    }
+  }
   if (violationsForRound(result).length > 0) {
     const shotDir = process.env[SHOT_DIR_ENV] ?? join(tmpdir(), "mul394-zero-jump");
     ensureDir(shotDir);
@@ -848,12 +872,11 @@ async function clickEntryRow(page: Page, scenario: Scenario, slug: string): Prom
         // warm round measures the detail page rather than a chunk fetch.
         await page.waitForTimeout(150);
         await row.click({ timeout: 5_000 });
-        // The click only counts once the app has selected the intended issue:
-        // the inbox commits its selection inside `startTransition`, so the URL
-        // updates a tick after the click. Without this the round could measure
-        // whatever page it happened to be on.
+        // Start measurement only after the URL selects the intended message or issue.
         const expected = scenario.expectIssueId;
-        if (expected) {
+        if (isInbox) {
+          await page.waitForURL(url => url.searchParams.get("item") === scenario.inboxItemId, { timeout: ENTRY_TIMEOUT_MS });
+        } else if (expected) {
           await page.waitForURL((url) => url.href.includes(expected), { timeout: ENTRY_TIMEOUT_MS });
         } else if (scenario.entry === "issues-list") {
           await page.waitForURL(
@@ -901,6 +924,24 @@ async function main(): Promise<void> {
   database = openSqliteDatabase(":memory:");
   const store = new MultiremiStore(database);
   const fixture = await seedZeroJumpFixture(store);
+  let layoutIssueId: string | undefined;
+  if (!options.only.length || options.only.includes("detail-layout")) {
+    const issue = store.createIssue({ title: "Issue layout regression", description: "Description above the activity divider.", status: "in_progress" });
+    layoutIssueId = issue.id;
+    const session = store.getOrCreateDefaultIssueSession(issue.id, fixture.userId);
+    for (let index = 0; index < 18; index++) store.createIssueComment(issue.id, {
+      issueSessionId: session.id, authorType: "member", authorId: fixture.userId,
+      body: `Layout regression comment ${index + 1}\n\n${"Synthetic content for scrolling. ".repeat(15)}`,
+    });
+    for (let index = 0; index < 3; index++) {
+      // Distinct lanes preserve the multi-task fixture under pending-turn coalescing.
+      const agent = store.createAgent({ name: `Layout agent ${index + 1}`, provider: "codex",
+        workspaceId: fixture.workspaceId, ownerId: fixture.userId, visibility: "workspace" });
+      const created = store.createTask({ agentId: agent.id, issueId: issue.id,
+        issueSessionId: session.id, prompt: `Layout fixture ${index + 1}` });
+      if (index === 0) markTaskRunning(store, created.id);
+    }
+  }
   const minted = await store.createAccessToken({
     name: "MUL-394 zero-jump check",
     type: "pat",
@@ -970,7 +1011,7 @@ async function main(): Promise<void> {
 
   // ── browser ──────────────────────────────────────────────────────────────
   browser = await launchBrowser();
-  const scenarios = buildScenarios(fixture, options, imageCases);
+  const scenarios = buildScenarios(fixture, options, imageCases, layoutIssueId);
   const rounds: RoundResult[] = [];
   for (const scenario of scenarios) {
     for (let round = 1; round <= options.rounds; round += 1) {

@@ -88,7 +88,7 @@ const RUNTIME_ALLOWED_EXACT = [
 /** Independent re-implementation of §3.2, used as the oracle. */
 function expectedRefusal(role: ApiRole, pathname: string): boolean {
   if (role === "all") return false;
-  const traceRead = /^\/api\/tasks\/[^/]+\/trace$/.test(pathname)
+  const traceRead = /^\/api\/(?:tasks|turns)\/[^/]+\/trace$/.test(pathname)
     || /^\/api\/shares\/[^/]+\/tasks\/[^/]+\/trace$/.test(pathname);
   if (role === "ui") return pathname.startsWith("/api/daemon/") || traceRead || pathname === "/api/trace/ws";
   if (traceRead) return false;
@@ -338,6 +338,7 @@ describe("MUL-461 api role — env resolution", () => {
       { path: "/internal/peer/health", ui: false, runtime: false },
       { path: "/api/trace/ws", ui: true, runtime: false },
       { path: "/api/tasks/task_1/trace", ui: true, runtime: false },
+      { path: "/api/turns/turn_1/trace", ui: true, runtime: false },
       { path: "/api/shares/share_1/tasks/task_1/trace", ui: true, runtime: false },
     ];
     for (const entry of cases) {
@@ -386,7 +387,7 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
     // Fixed counts, derived from the literal rule above (not from the guard).
     // The three human-request HTTP routes have moved to daemon RPC.
     expect(GOLDEN.routes).not.toContain("POST /api/daemon/tasks/:id/messages");
-    expect(misdirected).toContain("POST /api/daemon/tasks/:taskId/human-requests/:requestId/card");
+    expect(misdirected).toContain("GET /api/daemon/runtimes/:runtimeId/feishu-bot/decision-cards");
     expect(misdirected).not.toContain("POST /api/issues/:id/workspace/abandon");
     expect(misdirected).not.toContain("GET /api/sessions/:sessionId/log/entry");
     for (const route of UI_USAGE_ROUTES) {
@@ -406,20 +407,17 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(status === 421, `${pattern} -> ${status}`).toBe(expectedRefusal("runtime", path));
       if (status === 421) refused += 1;
     }
-    // The merged golden contains 799 routes; this HTTP sweep omits four
-    // WebSocket upgrades. Browser/CLI routes, including Chat-owned Sessions,
-    // execution configuration, updater reconciliation and all four usage routes,
-    // sit outside runtime's daemon/health/peer/trace allowlist: 725 are refused.
-    // GET /ws and GET /api/realtime/ws add two refused upgrades to the total;
-    // GET /api/daemon/ws and GET /api/trace/ws remain runtime-owned.
-    const mintRoute = "POST /api/daemon/tasks/:taskId/human-requests/:requestId/card";
+    // The merged inventory has 810 routes. Runtime owns
+    // daemon/health/peer/trace routes; 736 HTTP routes and two browser upgrades
+    // are refused. The independent literal oracle checks every route above.
+    const mintRoute = "GET /api/daemon/runtimes/:runtimeId/feishu-bot/decision-cards";
     expect(statuses.has(mintRoute)).toBe(true);
     expect(statuses.get(mintRoute)).not.toBe(421);
     expect(statuses.get("POST /api/issues/:id/workspace/abandon")).toBe(421);
     expect(statuses.get("POST /api/platform-updater/operations/reconcile")).toBe(421);
     for (const route of UI_USAGE_ROUTES) expect(statuses.get(route), `${route} belongs to ui`).toBe(421);
-    expect(refused, routeCountHint("runtime")).toBe(725);
-    expect(refused + 2, routeCountHint("runtime")).toBe(727);
+    expect(refused, routeCountHint("runtime")).toBe(736);
+    expect(refused + 2, routeCountHint("runtime")).toBe(738);
   });
 
   it("answers 421 with the misdirected body, the role header, and a real route still reachable", async () => {

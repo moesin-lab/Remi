@@ -122,8 +122,9 @@ export default async function RootLayout({
           const position=e=>{
             const target=e.dataset.ssrAnchorId&&document.getElementById(e.dataset.ssrAnchorId);
             if(target&&e.contains(target)){
-              const offset=target.getBoundingClientRect().top-e.getBoundingClientRect().top+e.scrollTop;
-              e.scrollTop=Math.max(0,offset-(e.clientHeight-target.offsetHeight)/2);
+              const rect=target.getBoundingClientRect();
+              const offset=rect.top-e.getBoundingClientRect().top+e.scrollTop;
+              e.scrollTop=Math.max(0,rect.height>e.clientHeight?offset:offset-(e.clientHeight-rect.height)/2);
             }else e.scrollTop=e.scrollHeight;
           };
           const place=()=>document.querySelectorAll('[data-session-log-scroll][data-ssr-initial]').forEach(e=>{
@@ -157,7 +158,7 @@ export default async function RootLayout({
       </head>
       <body className="h-full overflow-hidden">
         <ThemeProvider>
-          <WebProviders locale={locale} resources={resources} runtime={publicWebRuntime(process.env)}>
+          <WebProviders locale={locale} resources={resources} runtime={publicWebRuntime(process.env)} renderedAt={Date.now()}>
             {children}
           </WebProviders>
           <Toaster />

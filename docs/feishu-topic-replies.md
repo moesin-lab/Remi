@@ -52,7 +52,7 @@ can decrease it, model changes clear stale samples, and absent limits display
 failure, and durable replay keep the same rendering rules and PATCH transport.
 
 These display events use the existing Task message API and CLI:
-`remi task message list <taskId> --json`. No new Provider execution path is
+`remi turn trace read <turnId> --json`. No new Provider execution path is
 required. Upgrade the executing daemon as well as the
 bot-hosting daemon to get model metadata; older Task transcripts omit missing
 metadata rather than guessing. Billing and cost accounting are unchanged.
@@ -249,8 +249,9 @@ only; older v4 daemons ignore the optional mention plan. Upgrade the API and
 bot-hosting daemon together to enable proactive mentions and final-only timing.
 
 Issue-associated Chat tasks keep their Chat directory and provider session.
-Only genuine Session discussion tasks require a Session lifecycle lock. Each
-Session belongs to a Chat and may or may not associate with an Issue.
+Only genuine Session discussion attempts require a Session lifecycle lock. Each
+Session is owned by exactly one Chat or Issue. A Chat-owned Session may carry an
+Issue work projection; the association does not make private content public.
 
 ## 真人验收步骤
 
@@ -376,7 +377,7 @@ the decision's workspace and target Issue.
 前置条件与上一节相同，另加两条：decision 挂在**父单**上（子单里 `remi issue
 decision request` 出来的是子单自己的父单），且 bot host 的 heartbeat 报
 `feishu_issue_decision_card = 1`。清单里的「网页」指父单详情页的「待你决定」
-区域，或 `remi issue decision list <parent>`。
+区域，或 `remi message list <parent> --kind decision`。
 
 第 2 步的「第二个人」必须先由**第二个人本人**建立可信映射：任选其一，用飞书
 SSO 登录一次 Remi 网页端，或先在本次测试话题给 bot 发一条消息。操作员随后在
@@ -422,11 +423,11 @@ WHERE member.workspace_id = $1
 
 | # | 谁来操作 | 操作 | 飞书上看到什么 | 预期活动 / 数据 |
 |---|---|---|---|---|
-| 1 | 发起人 | 在子单里提一个 `production_change`（`remi issue decision request <child> --kind production_change --title "..." --option 是 --option 否`），或让父单负责人 agent 把一个 `merge` 上交给人 | 父单话题里出现一张**独立卡片**：标题、正文、编号选项、自定义回答框、提交按钮，并 @ 被问的人 | 父单活动 `decision_escalated` 与 `decision_card_queued`（`kind=decision_card`）；投递行 `decision.degraded` 为 NULL |
+| 1 | 发起人 | 在子单里提一个 `production_change`（`remi message send <parent> --to <member> --kind decision --content "..." --option 是 --option 否`），或让父单负责人 agent 把一个 `merge` 上交给人 | 父单话题里出现一张**独立卡片**：标题、正文、编号选项、自定义回答框、提交按钮，并 @ 被问的人 | 父单活动 `decision_escalated` 与 `decision_card_queued`（`kind=decision_card`）；投递行 `decision.degraded` 为 NULL |
 | 2 | 第二个人 | 点卡片上的提交 | 第二个人只看到 toast「本次没有提交：这条只能由卡片上点名的人回答。请转告对方在卡片上回答；如果你也是这张单的负责人，可以到网页端回答。」，卡片不变、问题仍在 | 不写任何活动；decision 仍为 `escalated` |
 | 3 | 贺华杰（被问的人） | 在卡片里选一项或填自定义回答并提交 | 提示「已提交」，**同一张卡片原地**变成终态：答案、答者、时间，不新增消息 | decision 变 `answered`，压入一条 `history`；父单 `decision_answered`、来源单 `decision_received` 各一条；来源单负责人的排队任务被唤醒；投递走后一条 `decision_card_patch` |
 | 4 | 发起人 | 另提一个 decision，然后在 Remi 工作台网页答掉 | 飞书那张卡片同样**原地**变终态（答案与答者取自网页那次回答） | 与第 3 步相同的一组活动；`decision_card_patch` 只有一条 |
-| 5 | 发起人 | 再提一个 decision，然后撤回（`remi issue decision withdraw <parent> <decision>`） | 卡片**原地**变成「已撤回」，不出现「已超时」字样，也不再可点 | decision 变 `withdrawn`；同样一条 `decision_card_patch`；没有任何 timeout 状态写入 |
+| 5 | 发起人 | 再提一个 decision，然后撤回（`remi message delete <message> --yes`） | 卡片**原地**变成「已撤回」，不出现「已超时」字样，也不再可点 | decision 变 `withdrawn`；同样一条 `decision_card_patch`；没有任何 timeout 状态写入 |
 | 6 | 发起人 | 提一个 decision，确认卡片实际发出后再从该发出时刻计时 50 分钟，全程不答 | 话题里出现**一条 @ 被问的人**的文字提醒，且只出现一次；卡片仍是等待回答，不会超时 | 以成功投递行的 `sent_at + 50 分钟` 为到期点；decision 行 `reminder_sent_at` 写入一次；父单活动 `decision_card_reminder` 恰一条；再等不会出现第二条 |
 | 7 | 发起人 | 删掉/改掉话题配置使该话题没有 seed（或在没有 seed 的新单上提 decision）；另将 `remi workspace issue-topics set --notify none` 后提一个 decision | 前者话题里**什么也不出现**；后者只出现**文字**（标题、正文、编号选项、父单网页链接），不出卡片、不 @ 任何人 | 前者 `decision_card_skipped`（`reason=no_topic`）；后者 `decision_card_degraded`（`reason=notify_none`）且投递行 `degraded=notify_none`；两者 decision 本身照常出现在网页与收件箱 |
 
@@ -447,27 +448,31 @@ Questions and reports remain read-only. Quoted approvals are not fresh authority
 
 For an execution request, Remi refreshes the Issue, resolves its responsible
 agent (the leader for a squad), and identifies an accessible active Session that
-is associated with the Issue and owned by a Chat.
-It lists that Session's tasks, excluding Chat/report tasks, before choosing:
+belongs to the Issue or is an accessible Chat-owned work projection. It checks
+`owner_type/owner_id` and lists safe turn metadata for that Session, excluding the
+ordinary Chat/reporting conversation, before choosing:
 
-- Amend existing work: `remi task steer <task> --content "<instruction>"`.
+- Amend existing work: `remi message send <session> --to <agent> --content "<instruction>"`.
 - Continue after completion or queue separate next-round work:
-  `remi session task create <chat> <session> --agent <agent> --prompt "<request>"`.
+  `remi message send <session> --to <agent> --kind request --content "<request>"`.
 
 The handoff includes the user's constraints and artifact references because the
 Issue executor does not share the topic's Chat transcript. It must not silently
 change the assignee, reset/create a Session, or perform the code work in the Chat
 directory. Missing/ambiguous assignees or Sessions require clarification.
 
-Remi reads back the created Task (and the directive ID for a steer) before saying
-work was arranged. Its reply identifies the Issue, executing agent, Task ID, and
-actual queued/running/terminal state. Ordinary Agent comments do not dispatch
-work and cannot serve as a successful handoff. Permission failures are reported;
-unknown write outcomes are reconciled by reading before any retry.
+Remi verifies the message receipt and safely readable turn metadata before saying
+work was arranged. Its reply identifies the Issue, executing agent, message and
+turn IDs, and actual queued/running/terminal state. Coordination authority does
+not grant another Session's message history, turn input or attempt trace. A request
+uses a stable dedupe key; permission failures are reported and unknown outcomes
+are reconciled within the permitted metadata scope before any retry. A saved
+message whose wake was downgraded is not reported as a running turn.
 
 After handoff, Remi finishes its Chat turn. The existing responsible-agent round
 completion path reports back to the same topic; no new polling or notification
 channel is added. These are prompt instructions using existing CLI/API behavior,
 not an automatic intent parser or a transactional exactly-once handoff service.
 They apply to bootstrap and delta prompts after upgrading the bot-hosting daemon;
-no database or historical Session migration is needed.
+the unified storage and Session-owner migrations follow their own startup gates;
+these prompt changes do not authorize production cutover.

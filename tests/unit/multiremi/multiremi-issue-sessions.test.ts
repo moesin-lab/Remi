@@ -1,9 +1,10 @@
+import { issueMessagesPath, requestMessageBody, taskRequestPath, turnApiPath, sentTask, mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { buildTaskPrompt } from "@multiremi/prompt.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
-import type { MultiremiStore } from "@multiremi/store.js";
-import { createStore, resetMultiremiTestEnv } from "./helpers.js";
+import { MultiremiStore } from "@multiremi/store.js";
+import { createLocalStore as createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 import { conversationLogPgAdminUrl, withConversationLogStore } from "./fixtures/conversation-log-store.js";
 
 afterEach(resetMultiremiTestEnv);
@@ -81,16 +82,16 @@ describe("Issue sessions and per-agent projection lanes", () => {
     });
 
     const posted = await app.request(
-      `/api/multiremi/chats/${chat.id}/sessions/${createdBody.session.id}/messages`,
+      `/api/sessions/${createdBody.session.id}/messages`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: "Keep the actor explicit" }),
+        body: JSON.stringify({ body_md: "Keep the actor explicit", to: { type: "none" } }),
       },
     );
-    expect(posted.status).toBe(201);
+    expect(posted.status).toBe(200);
     expect(await posted.json()).toMatchObject({
-      event: { author_type: "system", author_id: null, body: "Keep the actor explicit" },
+      message: { sender_type: "member", sender_id: "mem_local_local", body_md: "Keep the actor explicit" },
     });
 
     const wrongOwner = await app.request(
@@ -124,6 +125,19 @@ describe("Issue sessions and per-agent projection lanes", () => {
 
     expect(adopted).toMatchObject({ id: legacy.id, chatId: chat.id, issueId: issue.id, isDefault: false });
     expect(store.listSessionEvents(legacy.id).at(-1)).toMatchObject({ kind: "session_adopted" });
+  });
+
+  // #3/#9: destructive pre-S4 shadow-table fixture belongs to migration tests.
+  it("reopens normalized sessions without losing canonical comments or turns",()=>{
+    const store=createStore(),agent=store.createAgent({name:"Reopen",provider:"claude"});
+    const issue=store.createIssue({title:"Reopen"}),session=store.getOrCreateDefaultIssueSession(issue.id);
+    const comment=store.createIssueComment(issue.id,{body:"Canonical comment"});
+    const task=store.createTask({agentId:agent.id,issueId:issue.id,prompt:"Canonical task"});
+    const migrated=new MultiremiStore(db!);
+    expect(migrated.listIssueSessions(issue.id)).toHaveLength(1);
+    expect(migrated.getIssueComment(comment.id)?.issueSessionId).toBe(session.id);
+    expect(migrated.getTurnForAttempt(task.id)?.session_id).toBe(session.id);
+    expect(migrated.listMessages(session.id).map(message=>message.body_md)).toEqual(["Canonical comment","Canonical task"]);
   });
 
   it("records comment corrections as append-only legacy Session events", () => {
@@ -179,13 +193,14 @@ describe("Issue sessions and per-agent projection lanes", () => {
       prompt: "Implement the projection.",
     });
 
+    expect(store.claimTask(runtime.id)?.id).toBe(firstTask.id);
     const firstProjection = store.buildTaskSessionProjection(firstTask.id)!;
     expect(firstProjection.mode).toBe("bootstrap");
     expect(firstProjection.jsonl).toContain('"perspective":"external_agent"');
     expect(firstProjection.jsonl).toContain('"author_name":"Agent A"');
     expect(firstProjection.jsonl).toContain(`"source_comment_id":"${agentAComment.id}"`);
     expect(firstProjection.jsonl).toContain('"perspective":"assistant_history"');
-    expect(firstProjection.jsonl).not.toContain("Implement the projection.");
+    expect(firstProjection.jsonl).toContain("Implement the projection.");
     const firstPrompt = buildTaskPrompt({
       ...store.getTaskWithAgent(firstTask.id)!,
       issueSession: session,
@@ -201,7 +216,6 @@ describe("Issue sessions and per-agent projection lanes", () => {
     expect(firstPrompt).toContain("--type mr|report|deploy|decision|doc|other");
     expect(firstPrompt).toContain("--ref issue:<id>");
 
-    expect(store.claimTask(runtime.id)?.id).toBe(firstTask.id);
     store.startTask(firstTask.id);
     store.completeTask(firstTask.id, {
       output: "Projection implemented.",
@@ -215,7 +229,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
       providerSessionId: "acp_b_1",
       runtimeId: runtime.id,
       provider: "claude",
-      cursorSeq: committedFirst.projectionToSeq,
+
       lastTaskId: firstTask.id,
     });
 
@@ -233,51 +247,25 @@ describe("Issue sessions and per-agent projection lanes", () => {
 
     const secondProjection = store.buildTaskSessionProjection(secondTask.id)!;
     expect(secondProjection.mode).toBe("delta");
-    expect(secondProjection.fromSeq).toBe(lane.cursorSeq);
+    expect(secondProjection.fromSeq).toBe(committedFirst.projectionToSeq ?? 0);
     expect(secondProjection.jsonl).toContain("Please add deterministic ordering.");
-    expect(secondProjection.jsonl).not.toContain("Add deterministic ordering.");
+    expect(secondProjection.jsonl).toContain("Add deterministic ordering.");
     expect(secondProjection.jsonl).not.toContain("Projection implemented.");
   });
 
-  it("rebinds a queued task to the lane promoted while it was waiting", () => {
-    const store = createStore();
-    const runtime = store.registerRuntime({
-      id: "rt_queued_lane",
-      name: "Queued lane runtime",
-      provider: "claude",
-      workspaceId: "local",
-    });
-    const agent = store.createAgent({ name: "Queued lane agent", provider: "claude" });
-    const issue = store.createIssue({ title: "Queued lane race", workspaceId: "local" });
-    const session = store.getOrCreateDefaultIssueSession(issue.id);
-    store.createIssueComment(issue.id, { issueSessionId: session.id, body: "Initial context" });
-
-    const first = store.createSessionTask(session.id, { agentId: agent.id, prompt: "First turn" });
-    expect(store.claimTask(runtime.id)?.id).toBe(first.id);
-    expect(store.buildTaskSessionProjection(first.id)?.mode).toBe("bootstrap");
-    store.startTask(first.id);
-
-    // This task is queued while the first run owns the Issue. At enqueue time
-    // the lane is still empty, so only claim-time rebinding can see the ACP
-    // session promoted by the first completion.
-    const queued = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Second turn" });
-    expect(queued.sessionId).toBeNull();
-    expect(queued.issueSessionGeneration).toBe(1);
-
-    store.completeTask(first.id, {
-      output: "First result",
-      sessionId: "acp_promoted_while_queued",
-      workDir: "/tmp/queued-lane",
-    });
-
-    const claimed = store.claimTask(runtime.id);
-    expect(claimed).toMatchObject({
-      id: queued.id,
-      sessionId: "acp_promoted_while_queued",
-      workDir: "/tmp/queued-lane",
-      issueSessionGeneration: 1,
-    });
-    expect(store.buildTaskSessionProjection(queued.id)?.mode).toBe("delta");
+  it("#3: running requests merge and the following round resumes the promoted provider",()=>{
+    const store=createStore(),runtime=store.registerRuntime({name:"Merge runtime",provider:"claude"});
+    const agent=store.createAgent({name:"Merge",provider:"claude"}),issue=store.createIssue({title:"Merge"});
+    const session=store.getOrCreateDefaultIssueSession(issue.id);
+    const first=store.createSessionTask(session.id,{agentId:agent.id,prompt:"First"});
+    expect(store.claimTask(runtime.id)?.id).toBe(first.id);store.buildTaskSessionProjection(first.id);store.startTask(first.id);
+    const merged=store.createSessionTask(session.id,{agentId:agent.id,prompt:"Second"});
+    expect(merged.id).toBe(first.id);
+    store.completeTask(first.id,{output:"Combined",sessionId:"acp_promoted",workDir:"/tmp/merged"});
+    const next=store.createSessionTask(session.id,{agentId:agent.id,prompt:"Third"});
+    expect(next.id).not.toBe(first.id);
+    expect(store.claimTask(runtime.id)).toMatchObject({id:next.id,sessionId:"acp_promoted",workDir:"/tmp/merged"});
+    expect(store.buildTaskSessionProjection(next.id)?.mode).toBe("delta");
   });
 
   it("freezes the claimed lane generation and rejects a late promotion after reset", () => {
@@ -341,7 +329,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
       sessionId: "dead_acp_session",
     });
 
-    const retry = store.listTasksForIssue(issue.id).find((task) => task.parentTaskId === stale.id);
+    const retry = store.getTask(store.getTurnForAttempt(stale.id)!.current_attempt_id!);
     expect(retry).toBeDefined();
     expect(retry).toMatchObject({
       issueSessionId: session.id,
@@ -427,7 +415,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
 
     expect(store.listTasksForIssue(issue.id).some((task) => task.parentTaskId === third.id)).toBe(false);
     const systemComment = store.listIssueComments(issue.id)
-      .find((comment) => comment.authorType === "system" && comment.taskId === third.id);
+      .find((comment) => comment.authorType === "system" && comment.taskId === store.getTurnForAttempt(third.id)!.id);
     expect(systemComment?.type).toBe("system");
     expect(systemComment?.issueSessionId).toBe(session.id);
     expect(systemComment?.body).toContain("progressively smaller Session projections");
@@ -487,8 +475,9 @@ describe("Issue sessions and per-agent projection lanes", () => {
     store.buildTaskSessionProjection(first.id);
     store.completeTask(first.id, { output: "Warm result", sessionId: "acp_cancel_lane" });
     const warm = store.getSessionAgentLane(session.id, agent.id)!;
+    const warmProviderCursorSeq = Number((db!.query("SELECT provider_cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_id=?").get(session.id,agent.id) as {provider_cursor_seq:number}).provider_cursor_seq);
     expect(warm.providerSessionId).toBe("acp_cancel_lane");
-    expect(warm.cursorSeq).toBeGreaterThan(0);
+    expect(Number((db!.query("SELECT provider_cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_id=?").get(session.id,agent.id) as {provider_cursor_seq:number})?.provider_cursor_seq)).toBeGreaterThan(0);
 
     // Events the cancelled task will project but the provider may never consume.
     store.appendSessionEvent(session.id, { authorType: "member", authorId: null, kind: "message", body: "mid-flight one" });
@@ -513,7 +502,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     expect(next.sessionId).toBe("acp_cancel_lane");
     const projection = store.buildTaskSessionProjection(next.id)!;
     expect(projection.mode).toBe("delta");
-    expect(projection.fromSeq).toBe(warm.cursorSeq);
+    expect(projection.fromSeq).toBe(warmProviderCursorSeq);
     expect(projection.jsonl).toContain("mid-flight one");
     expect(projection.jsonl).toContain("mid-flight two");
   });
@@ -637,18 +626,16 @@ describe("Issue sessions and per-agent projection lanes", () => {
     });
 
     const createdMessage = await app.request(
-      `/api/issues/${issue.id}/sessions/${review.id}/messages`,
+      `/api/sessions/${review.id}/messages`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: "One more review note" }),
+        body: JSON.stringify(requestMessageBody(store, { content: "One more review note" }, { type: "role", ref: "issue_owner" })),
       },
     );
-    expect(createdMessage.status).toBe(201);
+    expect(createdMessage.status).toBe(200);
     expect(await createdMessage.json()).toMatchObject({
-      issue_id: issue.id,
-      issue_session_id: review.id,
-      content: "One more review note",
+      message:{session_id:review.id,body_md:"One more review note"},
     });
 
     const publishedResult = await app.request(
@@ -740,18 +727,52 @@ describe("Issue sessions and per-agent projection lanes", () => {
     const spoofedTask = store.createSessionTask(main.id, { agentId: agent.id, prompt: "Different run" });
     const token = await store.createTaskAccessToken(task, "local");
 
-    const res = await app.request(`/api/issues/${issue.id}/comments`, {
+    const res = await app.request(issueMessagesPath(store, issue.id), {
       method: "POST",
       headers: { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ body: "In-run reply", task_id: spoofedTask.id }),
+      body: JSON.stringify(requestMessageBody(store, { body: "In-run reply", task_id: spoofedTask.id }, { type: "role", ref: "issue_owner" })),
     });
-    expect(res.status).toBe(201);
-    const created = (await res.json()) as { author_type: string; task_id: string | null };
-    expect(created.author_type).toBe("agent");
+    expect(res.status).toBe(200);
+    const created = (await res.json()).message as { sender_type: string; task_id: string | null };
+    expect(created.sender_type).toBe("agent");
     // The linkage the per-reply transcript button depends on: the comment
     // carries the run that wrote it even when the agent posts via its tool
     // (the auto-reply path already recorded it; this is the task-token path).
-    expect(created.task_id).toBe(task.id);
+    expect(created.task_id).toBe(store.getTurnForAttempt(task.id)!.id);
+  });
+
+  it("denies Turn input when its current source attempt is missing while retaining safe metadata", async () => {
+    const store = createStore();
+    const agent = store.createAgent({ name: "Unknown source", provider: "claude", visibility: "workspace" });
+    const issue = store.createIssue({ title: "Unknown input source" });
+    const session = store.getOrCreateDefaultIssueSession(issue.id);
+    const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "PRIVATE_SOURCE_MESSAGE" });
+    const turn = store.getTurnForAttempt(task.id)!;
+    const user = store.getOrCreateUser({ externalId: "unknown-source-reader", name: "Reader" });
+    store.createWorkspaceMember({ userId: user.id, name: user.name, role: "member" });
+    const credential = await store.createAccessToken({ type: "pat", name: "Reader", userId: user.id, workspaceId: "local" });
+    const app = createMultiremiApp({ store, authToken: "unknown-source-root" });
+    (store as unknown as { db: import("@multiremi/store/db/postgres.js").SqlDatabase }).db.run(
+      "UPDATE multiremi_turns SET current_attempt_id = NULL, legacy_prompt = ? WHERE id = ?", ["PRIVATE_LEGACY_PROMPT", turn.id],
+    );
+    const headers = { Authorization: `Bearer ${credential.token}` };
+    const metadata = await app.request(`/api/turns/${turn.id}`, { headers });
+    expect(metadata.status).toBe(200);
+    const metadataBody = await metadata.text();
+    expect(JSON.parse(metadataBody).turn).toMatchObject({ id: turn.id, session_id: session.id, current_attempt_id: null });
+    expect(metadataBody).not.toContain("PRIVATE_LEGACY_PROMPT");
+    expect(metadataBody).not.toContain("PRIVATE_SOURCE_MESSAGE");
+    const input = await app.request(`/api/turns/${turn.id}?input=true`, { headers });
+    expect(input.status).toBe(403);
+    const inputBody = await input.text();
+    expect(inputBody).not.toContain("PRIVATE_LEGACY_PROMPT");
+    expect(inputBody).not.toContain("PRIVATE_SOURCE_MESSAGE");
+    const historicalTrace = await app.request(`/api/turns/${turn.id}/trace?attempt_id=${task.id}`, { headers });
+    expect(historicalTrace.status).toBe(200);
+    expect(await historicalTrace.json()).toMatchObject({ turn_id: turn.id, attempt_id: task.id });
+    const unknownTrace = await app.request(`/api/turns/${turn.id}/trace?attempt_id=unknown`, { headers });
+    expect(unknownTrace.status).toBe(404);
+    expect(store.getTurn(turn.id)).not.toBeNull();
   });
 
   const checkSessionTaskAccess = async (store: MultiremiStore) => {
@@ -780,15 +801,47 @@ describe("Issue sessions and per-agent projection lanes", () => {
     store.appendTaskMessages(task.id, [{ type: "assistant", content: "Own raw execution log" }]);
     store.appendTaskMessages(siblingTask.id, [{ type: "assistant", content: "Sibling raw execution log" }]);
     store.appendTaskMessages(privateTask.id, [{ type: "assistant", content: "Private Chat raw execution log" }]);
+    // The actual Session owner remains private even if a damaged audit pointer is null.
+    mutateExecutionFixture(store, "UPDATE multiremi_turn_execution_records SET chat_session_id = NULL WHERE id = ?", privateTask.id);
     const token = await store.createTaskAccessToken(task, "local");
     const headers = { Authorization: `Bearer ${token.token}` };
+    const autoSessionId = "auto_orphan_inbox_local";
+    store.ensureSessionHeadWithinTransaction(autoSessionId, { bodyMd: "" });
+    (store as unknown as { db: import("@multiremi/store/db/postgres.js").SqlDatabase }).db.run(
+      "UPDATE multiremi_conversation_heads SET workspace_id = ? WHERE session_id = ?", ["local", autoSessionId],
+    );
+    for (const [sessionId, body] of [[main.id, "VISIBLE_ISSUE_INBOX"], [sibling.id, "HIDDEN_SIBLING_INBOX"], [autoSessionId, "HIDDEN_AUTO_INBOX"]]) {
+      store.sendMessage({ session_id: sessionId!, sender: { type: "member", id: "mem_local_local" },
+        to: { type: "agent", ref: agent.id }, body_md: body!, message_kind: "request", wake_requested: "inbox_only" });
+    }
+    const protectedProgress = [sibling.id, autoSessionId].map(sessionId => store.getSessionAgentReadProgress(sessionId, agent.id));
+    const inbox = await app.request("/api/inbox", { headers });
+    expect(inbox.status).toBe(200);
+    const inboxBody = await inbox.json();
+    expect(inboxBody.items.every((item: { session_id: string }) => item.session_id === main.id)).toBe(true);
+    expect(inboxBody.items.some((item: { body_md: string }) => item.body_md === "VISIBLE_ISSUE_INBOX")).toBe(true);
+    expect(inboxBody.unread_count).toBe(inboxBody.items.length);
+    expect(JSON.stringify(inboxBody)).not.toContain("HIDDEN_SIBLING_INBOX");
+    expect(JSON.stringify(inboxBody)).not.toContain("HIDDEN_AUTO_INBOX");
+    const autoWrite = await app.request(`/api/sessions/${autoSessionId}/messages`, {
+      method: "POST", headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ body_md: "PRIVATE_FORBIDDEN_AUTO_WRITE", to: { type: "agent", ref: agent.id },
+        message_kind: "request", wake_requested: "now" }),
+    });
+    expect(autoWrite.status).toBe(403);
+    expect(store.listMessages(autoSessionId).some(message => message.body_md === "PRIVATE_FORBIDDEN_AUTO_WRITE")).toBe(false);
+    const readAll = await app.request("/api/inbox/read", { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ all: true }) });
+    expect(readAll.status).toBe(200);
+    expect((await readAll.json()).conversations_read).toBe(1);
+    expect([sibling.id, autoSessionId].map(sessionId => store.getSessionAgentReadProgress(sessionId, agent.id))).toEqual(protectedProgress);
+
 
     expect((await app.request(
-      `/api/issues/${issue.id}/sessions/${main.id}/events`,
+      `/api/sessions/${main.id}/messages`,
       { headers },
     )).status).toBe(200);
     expect((await app.request(
-      `/api/issues/${issue.id}/sessions/${sibling.id}/events`,
+      `/api/sessions/${sibling.id}/messages`,
       { headers },
     )).status).toBe(403);
     expect((await app.request(
@@ -804,11 +857,14 @@ describe("Issue sessions and per-agent projection lanes", () => {
       { headers },
     )).status).toBe(200);
 
-    const scopedCommentsResponse = await app.request(`/api/issues/${issue.id}/comments`, { headers });
+    const scopedCommentsResponse = await app.request(issueMessagesPath(store, issue.id), { headers });
     expect(scopedCommentsResponse.status).toBe(200);
-    const scopedComments = await scopedCommentsResponse.json();
-    expect(scopedComments.map((comment: { content: string }) => comment.content)).toContain("Visible current context");
-    expect(scopedComments.map((comment: { content: string }) => comment.content)).toContain("Hidden sibling context");
+    const scopedComments = (await scopedCommentsResponse.json()).messages;
+    expect(scopedComments.map((comment: { body_md: string }) => comment.body_md)).toContain("Visible current context");
+    expect(scopedComments.map((comment: { body_md: string }) => comment.body_md)).not.toContain("Hidden sibling context");
+    const siblingComments = await app.request(`/api/sessions/${sibling.id}/messages`, { headers });
+    expect(siblingComments.status).toBe(403);
+    expect(await siblingComments.text()).not.toContain("Hidden sibling context");
 
     const detailResponse = await app.request(`/api/multiremi/issues/${issue.id}`, { headers });
     expect(detailResponse.status).toBe(200);
@@ -827,51 +883,45 @@ describe("Issue sessions and per-agent projection lanes", () => {
     expect(searchResponse.status).toBe(200);
     expect((await searchResponse.json()).issues).toEqual([expect.objectContaining({ id: issue.id })]);
 
-    const taskRunsResponse = await app.request(`/api/issues/${issue.id}/task-runs`, { headers });
+    const taskRunsResponse = await app.request(`/api/turns?workspace_id=local&issue=${issue.id}`, { headers });
     expect(taskRunsResponse.status).toBe(200);
-    expect((await taskRunsResponse.json()).map((item: { id: string }) => item.id).sort()).toEqual(publicTaskIds);
-    const rawTasksResponse = await app.request("/api/multiremi/tasks", { headers });
+    expect((await taskRunsResponse.json()).turns.map((item: { id: string }) => item.id).sort()).toEqual([task, siblingTask].map(task => store.getTurnForAttempt(task.id)!.id).sort());
+    const rawTasksResponse = await app.request("/api/turns", { headers });
     expect(rawTasksResponse.status).toBe(200);
-    expect((await rawTasksResponse.json()).tasks.map((item: { id: string }) => item.id).sort()).toEqual(publicTaskIds);
-    expect((await app.request(`/api/multiremi/tasks/${siblingTask.id}`, { headers })).status).toBe(200);
-    expect((await app.request(`/api/tasks/${siblingTask.id}/cancel`, {
+    expect((await rawTasksResponse.json()).turns.map((item: { id: string }) => item.id).sort()).toEqual([task, siblingTask].map(task => store.getTurnForAttempt(task.id)!.id).sort());
+    expect((await app.request(turnApiPath(store, siblingTask.id), { headers })).status).toBe(200);
+    expect((await app.request(turnApiPath(store, privateTask.id), { headers })).status).toBe(403);
+    expect((await app.request(turnApiPath(store, privateTask.id, "/cancel"), { method: "POST", headers })).status).toBe(403);
+    expect(store.getTask(privateTask.id)?.status).toBe("queued");
+    expect((await app.request(turnApiPath(store, siblingTask.id, "/cancel"), {
       method: "POST",
       headers,
     })).status).toBe(200);
-    expect(store.getTask(siblingTask.id)?.status).toBe("cancelled");
-    expect((await app.request(`/api/multiremi/tasks/${privateTask.id}`, { headers })).status).toBe(403);
-    expect((await app.request(`/api/tasks/${privateTask.id}/cancel`, {
-      method: "POST",
-      headers,
-    })).status).toBe(403);
-    expect(store.getTask(privateTask.id)?.status).toBe("queued");
-    expect((await app.request("/api/multiremi/tasks", {
+    expect((await app.request(taskRequestPath(store, { issueId: issue.id }), {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ agentId: agent.id, issueId: issue.id, prompt: "Bypass Session route" }),
-    })).status).toBe(201);
-    expect((await app.request(`/api/tasks/${task.id}/messages`, { headers })).status).toBe(200);
-    expect((await app.request(`/api/tasks/${siblingTask.id}/messages`, { headers })).status).toBe(200);
-    const privateMessages = await app.request(`/api/tasks/${privateTask.id}/messages`, { headers });
-    expect(privateMessages.status).toBe(403);
-    expect(await privateMessages.text()).not.toContain("Private Chat raw execution log");
+      body: JSON.stringify(requestMessageBody(store, { agentId: agent.id, issueId: issue.id, prompt: "Bypass Session route" })),
+    })).status).toBe(200);
+    expect((await app.request(turnApiPath(store, task.id, "/trace"), { headers })).status).toBe(200);
+    expect((await app.request(turnApiPath(store, siblingTask.id, "/trace"), { headers })).status).toBe(200);
+    const privateTrace = await app.request(turnApiPath(store, privateTask.id, "/trace"), { headers });
+    expect(privateTrace.status).toBe(403);
+    expect(await privateTrace.text()).not.toContain("Private Chat raw execution log");
 
-    const agentCommentResponse = await app.request(`/api/issues/${issue.id}/comments`, {
+    const agentCommentResponse = await app.request(issueMessagesPath(store, issue.id), {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ content: "Current Session agent note" }),
+      body: JSON.stringify(requestMessageBody(store, { content: "Current Session agent note" }, { type: "role", ref: "issue_owner" })),
     });
-    expect(agentCommentResponse.status).toBe(201);
-    expect(await agentCommentResponse.json()).toMatchObject({
-      issue_session_id: main.id,
-      author_type: "agent",
-      author_id: agent.id,
+    expect(agentCommentResponse.status).toBe(200);
+    expect((await agentCommentResponse.json()).message).toMatchObject({
+      session_id: main.id, sender_type: "agent", sender_id: agent.id,
     });
 
-    expect((await app.request(`/api/issues/${issue.id}/sessions/${sibling.id}/messages`, {
+    expect((await app.request(`/api/sessions/${sibling.id}/messages`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ content: "Forbidden sibling write" }),
+      body: JSON.stringify(requestMessageBody(store, { content: "Forbidden sibling write" }, { type: "role", ref: "issue_owner" })),
     })).status).toBe(403);
     expect((await app.request(`/api/issues/${issue.id}/sessions/${sibling.id}/results`, {
       method: "POST",

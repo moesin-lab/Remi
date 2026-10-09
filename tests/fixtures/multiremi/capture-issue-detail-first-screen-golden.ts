@@ -13,8 +13,9 @@
  */
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import {
@@ -26,6 +27,9 @@ import {
 const OUT_PATH = join(import.meta.dir, "issue-detail-first-screen-golden.json");
 const AUTH_TOKEN = "mul385-first-screen-token";
 const AUTH_HEADERS = { Authorization: `Bearer ${AUTH_TOKEN}` };
+const reportDirectory = mkdtempSync(join(tmpdir(), "remi-first-screen-migration-"));
+const previousReportDirectory = process.env.MULTIREMI_MIGRATION_REPORT_DIR;
+process.env.MULTIREMI_MIGRATION_REPORT_DIR = reportDirectory;
 
 /** Bind the fixture's pinned `joined_at` writes without tripping the binder types. */
 function runPinned(db: Database, sql: string, params: unknown[]): void {
@@ -51,7 +55,7 @@ try {
   const golden = {
     name: "MUL-385 issue detail first-screen responses",
     capturedAt: "<timestamp>",
-    source: "dual-owned Session contract (20261008)",
+    source: "Unified Turn/message projection with Chat or Issue Session ownership",
     fixture: {
       issueId: fixture.issueId,
       issueKey: fixture.issueKey,
@@ -67,4 +71,7 @@ try {
 } finally {
   restoreIds();
   db.close();
+  if (previousReportDirectory === undefined) delete process.env.MULTIREMI_MIGRATION_REPORT_DIR;
+  else process.env.MULTIREMI_MIGRATION_REPORT_DIR = previousReportDirectory;
+  rmSync(reportDirectory, { recursive: true, force: true });
 }

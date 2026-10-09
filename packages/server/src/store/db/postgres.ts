@@ -285,11 +285,9 @@ export function translateSqliteToPg(sql: string): string {
   // `ON CONFLICT(col)` → `ON CONFLICT (col)`.
   s = s.replace(/ON\s+CONFLICT\(/gi, "ON CONFLICT (");
 
-  // Strip inline FOREIGN KEY clauses from SQLite CREATE TABLE statements. SQLite
-  // runs with foreign_keys OFF and Postgres may reject forward references during
-  // initial schema creation. Explicit ALTER TABLE constraints added by later
-  // Postgres migrations must remain intact.
-  if (/CREATE\s+TABLE/i.test(s) && /FOREIGN\s+KEY/i.test(s)) {
+  // Historical bootstrap tables can reference tables created later. Only
+  // strip those CREATE clauses; explicit ALTER constraints must be enforced.
+  if (/^\s*CREATE\s+TABLE/i.test(s) && /FOREIGN\s+KEY/i.test(s)) {
     s = s.replace(
       /FOREIGN\s+KEY\s*\([^)]*\)\s*REFERENCES\s+[A-Za-z0-9_]+\s*\([^)]*\)(\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|RESTRICT|NO\s+ACTION|SET\s+NULL|SET\s+DEFAULT))*/gi,
       "",

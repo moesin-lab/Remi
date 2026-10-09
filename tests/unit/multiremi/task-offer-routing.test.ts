@@ -13,7 +13,7 @@ test("large instructions preserve Project-bound Chat execution directory and pro
   const root = mkdtempSync(join(tmpdir(), "mul498-chat-route-")); roots.push(root);
   const path = join(root, "project"); mkdirSync(path);
   const payload: Record<string, any> = {
-    id: "task", prompt: "continue", workspace_id: "local", runtime_id: "runtime", auth_token: "fixture-capability",
+    id: "attempt", turn_id: "turn", attempt_id: "attempt", prompt: "continue", workspace_id: "local", runtime_id: "runtime", auth_token: "fixture-capability",
     chat_session_id: "chat", chat_project_id: "project", execution_scope: "delegation:bound-chat",
     session_id: "provider-current", prior_session_id: "provider-prior", work_dir: path, prior_work_dir: path,
     branch_name: "agent/MUL-498", execution_fingerprint: "chat-workspace:bound:local:hash",
@@ -54,7 +54,7 @@ test("large instructions preserve Project-bound Chat execution directory and pro
 test("even an irreducible offer retains Runtime workspace, branch and resume bindings for failure diagnostics", () => {
   const workspace = { id: "workspace", daemonId: "owner", rootPath: "/tmp/root", cwd: "subdirectory",
     status: "active", hydration: "existing", branchName: "main", archivedAt: null };
-  const payload: Record<string, any> = { id: "task", prompt: "run", runtime_workspace_id: "workspace",
+  const payload: Record<string, any> = { id: "attempt", turn_id: "turn", attempt_id: "attempt", prompt: "run", runtime_workspace_id: "workspace",
     runtime_workspace: workspace, prior_session_id: "provider", prior_work_dir: "/tmp/root/subdirectory",
     execution_scope: "workspace:workspace", execution_fingerprint: "FINGERPRINT".repeat(20), plugin_snapshot: [],
     claude_profile: { name: "connection", env_key: "REMI_CLAUDE_" + "KEY".repeat(30), base_url: "https://example.com", model: "model" },

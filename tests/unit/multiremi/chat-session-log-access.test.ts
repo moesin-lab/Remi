@@ -56,6 +56,55 @@ for (const linked of [false, true]) {
   });
 }
 
+it("a Chat-owned work Session task cannot inherit its owner Chat or a sibling Session's content", async () => {
+  const store = createLocalStore();
+  const agent = store.createAgent({ name: "Private Session worker", provider: "codex" });
+  const chat = store.createChatSession({ agentId: agent.id, creatorId: "local" });
+  const own = store.getOrCreateDefaultChatSession(chat.id);
+  const sibling = store.createSession(chat.id, { title: "Private sibling" });
+  store.appendSessionEvent(sibling.id, { authorType: "member", body: "PRIVATE_SIBLING_CONTEXT" });
+  store.sendChatMessage(chat.id, { body: "PRIVATE_OWNER_CHAT_CONTEXT" });
+  const task = store.createSessionTask(own.id, { agentId: agent.id, prompt: "Read only the work Session" });
+  const credential = await store.createTaskAccessToken(task, "local");
+  const app = createMultiremiApp({ store, authToken: "private-session-fixture" });
+  const headers = { Authorization: `Bearer ${credential.token}` };
+  for (const [target, body] of [[own.id, "VISIBLE_WORK_INBOX_CONTEXT"], [sibling.id, "PRIVATE_SIBLING_INBOX_CONTEXT"]]) {
+    store.sendMessage({ session_id: target!, sender: { type: "member", id: "mem_local_local" },
+      to: { type: "agent", ref: agent.id }, body_md: body!, message_kind: "request", wake_requested: "inbox_only" });
+  }
+  const protectedProgress = [chat.id, sibling.id].map(target => store.getSessionAgentReadProgress(target, agent.id));
+  const inbox = await app.request("/api/inbox", { headers });
+  expect(inbox.status).toBe(200);
+  const inboxBody = await inbox.json();
+  expect(inboxBody.items.every((item: { session_id: string }) => item.session_id === own.id)).toBe(true);
+  expect(inboxBody.items.some((item: { body_md: string }) => item.body_md === "VISIBLE_WORK_INBOX_CONTEXT")).toBe(true);
+  expect(inboxBody.unread_count).toBe(inboxBody.items.length);
+  expect(JSON.stringify(inboxBody)).not.toContain("PRIVATE_OWNER_CHAT_CONTEXT");
+  expect(JSON.stringify(inboxBody)).not.toContain("PRIVATE_SIBLING_INBOX_CONTEXT");
+  const readAll = await app.request("/api/inbox/read", { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ all: true }) });
+  expect(readAll.status).toBe(200);
+  expect((await readAll.json()).conversations_read).toBe(1);
+  expect([chat.id, sibling.id].map(target => store.getSessionAgentReadProgress(target, agent.id))).toEqual(protectedProgress);
+  expect((await app.request(`/api/sessions/${own.id}/messages`, { headers })).status).toBe(200);
+  for (const target of [chat.id, sibling.id]) {
+    const before = store.getSessionAgentReadProgress(target, agent.id);
+    for (const suffix of ["messages", "messages?from=0&to=1", "log", "log/entry?seq=1"]) {
+      const denied = await app.request(`/api/sessions/${target}/${suffix}`, { headers });
+      expect(denied.status).toBe(403);
+      const body = await denied.text();
+      expect(body).not.toContain("PRIVATE_OWNER_CHAT_CONTEXT");
+      expect(body).not.toContain("PRIVATE_SIBLING_CONTEXT");
+      expect(store.getSessionAgentReadProgress(target, agent.id)).toEqual(before);
+    }
+    const write = await app.request(`/api/sessions/${target}/messages`, {
+      method: "POST", headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ body_md: "FORBIDDEN_SESSION_WRITE", to: { type: "none" } }),
+    });
+    expect(write.status).toBe(403);
+    expect(store.listMessages(target).some(message => message.body_md === "FORBIDDEN_SESSION_WRITE")).toBe(false);
+  }
+});
+
 function fixture() {
   const store = createLocalStore();
   const creator = store.getOrCreateUser({ email: "chat-reader@example.test", name: "Chat creator" });
@@ -69,16 +118,18 @@ function fixture() {
 async function ownChat(f: ReturnType<typeof fixture>, creatorId = f.creator.id) {
   const chat = f.store.createChatSession({ agentId: f.agent.id, creatorId });
   const first = f.store.sendChatMessage(chat.id, { body: "FIRST_UNREAD" });
-  f.store.sendChatMessage(chat.id, { body: "SECOND_UNREAD" });
+  const second = f.store.sendChatMessage(chat.id, { body: "SECOND_UNREAD" });
   const task = f.store.claimTask(f.runtime.id)!;
   expect(task.id).toBe(first.task.id);
   const credential = await f.store.createTaskAccessToken(task, f.runtime.ownerId!);
-  return { chat, first, task, headers: { Authorization: `Bearer ${credential.token}` } };
+  return { chat, first, second, task, headers: { Authorization: `Bearer ${credential.token}` } };
 }
 
 function logPaths(chatId: string, messageId: string, to: number) {
   return [
-    `/api/sessions/${chatId}/log/entry?from=0&to=${to}`,
+    `/api/sessions/${chatId}/messages`,
+    `/api/messages/${messageId}`,
+    `/api/sessions/${chatId}/messages?from=0&to=${to}`,
     `/api/sessions/${chatId}/log/entry?id=${messageId}`,
     `/api/sessions/${chatId}/log/locate?id=${messageId}`,
     `/api/sessions/${chatId}/log?before=20&after=0`,
@@ -89,6 +140,14 @@ async function verifyExpansions(f: ReturnType<typeof fixture>, chatId: string, m
   body: string, headers: { Authorization: string }) {
   const location = f.store.locateConversationLogEntry(chatId, messageId)!;
   const progress = f.store.getSessionAgentReadProgress(chatId, f.agent.id);
+  const listed = await f.app.request(`/api/sessions/${chatId}/messages`, { headers });
+  expect(listed.status).toBe(200);
+  expect((await listed.json()).messages).toContainEqual(expect.objectContaining({ id: messageId, body_md: body }));
+  expect(f.store.getSessionAgentReadProgress(chatId, f.agent.id)).toEqual(progress);
+  const message = await f.app.request(`/api/messages/${messageId}`, { headers });
+  expect(message.status).toBe(200);
+  expect((await message.json()).message).toMatchObject({ id: messageId, body_md: body });
+  expect(f.store.getSessionAgentReadProgress(chatId, f.agent.id)).toEqual(progress);
   const located = await f.app.request(`/api/sessions/${chatId}/log/locate?id=${messageId}`, { headers });
   expect(located.status).toBe(200);
   expect(await located.json()).toEqual({ id: messageId, seq: location.seq, head_seq: location.head_seq });
@@ -111,7 +170,7 @@ async function verifyExpansions(f: ReturnType<typeof fixture>, chatId: string, m
 
 for (const creator of ["runtime-owner", "other-user"] as const) it(`a task reads its bound web Chat (${creator}) and records only its agent's unread progress`, async () => {
   const f = fixture();
-  const { chat, first, task, headers } = await ownChat(f, creator === "runtime-owner" ? f.runtime.ownerId! : f.creator.id);
+  const { chat, first, second, task, headers } = await ownChat(f, creator === "runtime-owner" ? f.runtime.ownerId! : f.creator.id);
   expect(chat.creatorId).toBe(creator === "runtime-owner" ? f.runtime.ownerId! : f.creator.id);
   expect(task.chatSessionId).toBe(chat.id);
   const offer = daemonTaskClaimResponse(f.store, task, f.store.getTaskTriggerMetadata(task));
@@ -120,20 +179,23 @@ for (const creator of ["runtime-owner", "other-user"] as const) it(`a task reads
   const to = f.store.getConversationLogHead(chat.id)!.headSeq;
   expect(f.store.getSessionAgentReadProgress(chat.id, f.agent.id)).toEqual({ seq: 0, offset: 0 });
   await verifyExpansions(f, chat.id, first.message.id, "FIRST_UNREAD", headers);
-  const response = await f.app.request(`/api/sessions/${chat.id}/log/entry?from=0&to=${to}`, { headers });
+  const response = await f.app.request(`/api/sessions/${chat.id}/messages?from=0&to=${to}`, { headers });
   expect(response.status).toBe(200);
   const page = await response.json();
   expect(page).toMatchObject({ session_id: chat.id, from_seq: 0, to_seq: to });
   expect(page.from_seq).toBeLessThanOrEqual(inputRange.from_seq);
   expect(page.to_seq).toBeGreaterThanOrEqual(inputRange.to_seq);
-  expect(page.entries.map((entry: { seq: number }) => entry.seq)).toEqual([1, 2]);
+  // Turn rows share the canonical log, so message sequences need not be adjacent.
+  const firstSeq = f.store.locateConversationLogEntry(chat.id, first.message.id)!.seq;
+  const secondSeq = f.store.locateConversationLogEntry(chat.id, second.message.id)!.seq;
+  expect(page.entries.map((entry: { seq: number }) => entry.seq)).toEqual([firstSeq, secondSeq]);
   expect(page.entries.map((entry: { body_md: string }) => entry.body_md)).toEqual(["FIRST_UNREAD", "SECOND_UNREAD"]);
   expect(page.next_cursor).toBeNull();
   expect(f.store.getSessionAgentReadProgress(chat.id, f.agent.id)).toEqual({ seq: to, offset: 0 });
   const otherAgent = f.store.createAgent({ name: "Independent reader", provider: "codex" });
   expect(f.store.getSessionAgentReadProgress(chat.id, otherAgent.id)).toEqual({ seq: 0, offset: 0 });
 
-  const tail = await f.app.request(`/api/sessions/${chat.id}/log/entry?from=1&to=2`, { headers });
+  const tail = await f.app.request(`/api/sessions/${chat.id}/messages?from=${firstSeq}&to=${secondSeq}`, { headers });
   expect(tail.status).toBe(200);
   expect((await tail.json()).entries.map((entry: { body_md: string }) => entry.body_md)).toEqual(["SECOND_UNREAD"]);
   expect(f.store.getSessionAgentReadProgress(chat.id, f.agent.id)).toEqual({ seq: to, offset: 0 });
@@ -166,7 +228,7 @@ it("a personal Feishu bot task reads its bound Chat with the real external creat
     const to = f.store.getConversationLogHead(chat.id)!.headSeq;
     const firstMessage = f.store.listChatMessages(chat.id)[0]!;
     await verifyExpansions(f, chat.id, firstMessage.id, "FEISHU_FIRST_UNREAD", headers);
-    const read = await f.app.request(`/api/sessions/${chat.id}/log/entry?from=0&to=${to}`, { headers });
+    const read = await f.app.request(`/api/sessions/${chat.id}/messages?from=0&to=${to}`, { headers });
     expect(read.status).toBe(200);
     expect((await read.json()).entries.map((entry: { body_md: string }) => entry.body_md))
       .toEqual(["FEISHU_FIRST_UNREAD", "FEISHU_SECOND_UNREAD"]);
@@ -197,6 +259,16 @@ it("a personal Feishu bot task reads its bound Chat with the real external creat
     }
     expect(f.store.getSessionAgentReadProgress(otherChat.id, f.agent.id)).toEqual({ seq: 0, offset: 0 });
     expect(f.store.getSessionAgentReadProgress(chat.id, f.agent.id)).toEqual({ seq: to, offset: 0 });
+
+    const ownerChat = f.store.createChatSession({ agentId: f.agent.id, creatorId: f.runtime.ownerId! });
+    const ownerMessage = f.store.sendChatMessage(ownerChat.id, { body: "PRIVATE_RUNTIME_OWNER_MESSAGE" });
+    for (const path of logPaths(ownerChat.id, ownerMessage.message.id, f.store.getConversationLogHead(ownerChat.id)!.headSeq)) {
+      const denied = await f.app.request(path, { headers: nextHeaders });
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toEqual({ error: "not your chat session" });
+    }
+    expect(f.store.getSessionAgentReadProgress(ownerChat.id, f.agent.id)).toEqual({ seq: 0, offset: 0 });
+    expect(f.store.getSessionAgentReadProgress(chat.id, f.agent.id)).toEqual({ seq: to, offset: 0 });
   } finally {
     if (previousKey === undefined) delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
     else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousKey;
@@ -219,7 +291,7 @@ for (const creator of ["same", "other"] as const) it(`a task cannot read another
   expect(f.store.getSessionAgentReadProgress(chat.id, f.agent.id)).toEqual({ seq: 0, offset: 0 });
 });
 
-for (const mismatch of ["task", "token", "chat"] as const) it(`a bound Chat does not bypass a ${mismatch} workspace mismatch`, async () => {
+for (const mismatch of ["task", "token", "chat"] as const) it(`a bound Chat does not bypass a ${mismatch} workspace mismatch after authentication`, async () => {
   const f = fixture();
   const own = await ownChat(f);
   const other = f.store.createWorkspace({ name: "Other workspace", slug: "other-reader" });
@@ -228,9 +300,23 @@ for (const mismatch of ["task", "token", "chat"] as const) it(`a bound Chat does
     const credential = await f.store.createTaskAccessToken({ ...own.task, workspaceId: other.id }, f.runtime.ownerId!);
     headers = { Authorization: `Bearer ${credential.token}` };
   } else if (mismatch === "task") {
-    db!.run("UPDATE multiremi_tasks SET workspace_id = ? WHERE id = ?", [other.id, own.task.id]);
+    db!.run("UPDATE multiremi_turns SET workspace_id = ? WHERE current_attempt_id = ?", [other.id, own.task.id]);
   } else {
     db!.run("UPDATE multiremi_chat_sessions SET workspace_id = ? WHERE id = ?", [other.id, own.chat.id]);
+  }
+  if (mismatch !== "chat") {
+    const verify = f.store.verifyAccessToken.bind(f.store);
+    // Authenticate a real current attempt, then introduce the route's mismatch.
+    // Pre-existing credential mismatches are independently rejected below.
+    f.store.verifyAccessToken = async (rawToken, allowedTypes) => {
+      db!.run("UPDATE multiremi_turns SET workspace_id = ? WHERE current_attempt_id = ?",
+        [mismatch === "token" ? other.id : "local", own.task.id]);
+      const verified = await verify(rawToken, allowedTypes);
+      expect(verified).not.toBeNull();
+      db!.run("UPDATE multiremi_turns SET workspace_id = ? WHERE current_attempt_id = ?",
+        [mismatch === "task" ? other.id : "local", own.task.id]);
+      return verified;
+    };
   }
   const to = f.store.getConversationLogHead(own.chat.id)!.headSeq;
   for (const path of logPaths(own.chat.id, own.first.message.id, to)) {
@@ -238,6 +324,25 @@ for (const mismatch of ["task", "token", "chat"] as const) it(`a bound Chat does
     expect(response.status).toBe(mismatch === "task" ? 403 : 404);
   }
   expect(f.store.getSessionAgentReadProgress(own.chat.id, f.agent.id)).toEqual({ seq: 0, offset: 0 });
+});
+
+for (const mismatch of ["task", "token"] as const) it(`authentication rejects an existing ${mismatch} workspace mismatch before reading Chat logs`, async () => {
+  const f = fixture();
+  const own = await ownChat(f);
+  const other = f.store.createWorkspace({ name: "Credential mismatch", slug: "credential-mismatch" });
+  let headers = own.headers;
+  if (mismatch === "task") {
+    db!.run("UPDATE multiremi_turns SET workspace_id = ? WHERE current_attempt_id = ?", [other.id, own.task.id]);
+  } else {
+    const credential = await f.store.createTaskAccessToken({ ...own.task, workspaceId: other.id }, f.runtime.ownerId!);
+    headers = { Authorization: `Bearer ${credential.token}` };
+  }
+  for (const path of logPaths(own.chat.id, own.first.message.id, f.store.getConversationLogHead(own.chat.id)!.headSeq)) {
+    const denied = await f.app.request(path, { headers });
+    expect(denied.status).toBe(401);
+    expect(await denied.json()).toEqual({ error: "unauthorized" });
+    expect(f.store.getSessionAgentReadProgress(own.chat.id, f.agent.id)).toEqual({ seq: 0, offset: 0 });
+  }
 });
 
 for (const credentialType of ["pat", "jwt"] as const) it(`human ${credentialType} log access remains creator-scoped`, async () => {
@@ -279,7 +384,7 @@ it("bound Chat range pagination records partial offsets and repeated reads never
   do {
     const params = new URLSearchParams({ from: "0", to: String(to) });
     if (cursor) params.set("cursor", cursor);
-    const response = await f.app.request(`/api/sessions/${chat.id}/log/entry?${params}`, { headers });
+    const response = await f.app.request(`/api/sessions/${chat.id}/messages?${params}`, { headers });
     expect(response.status).toBe(200);
     const page = await response.json();
     expect(page.entries).toHaveLength(1);
@@ -290,7 +395,7 @@ it("bound Chat range pagination records partial offsets and repeated reads never
       .toEqual(cursor ? { seq: 0, offset: text.length } : { seq: to, offset: 0 });
   } while (cursor);
   expect(text).toBe(body);
-  const repeated = await f.app.request(`/api/sessions/${chat.id}/log/entry?from=0&to=${to}`, { headers });
+  const repeated = await f.app.request(`/api/sessions/${chat.id}/messages?from=0&to=${to}`, { headers });
   expect(repeated.status).toBe(200);
   expect((await repeated.json()).next_cursor).not.toBeNull();
   expect(f.store.getSessionAgentReadProgress(chat.id, f.agent.id)).toEqual({ seq: to, offset: 0 });
@@ -316,14 +421,27 @@ it("bound Chat log reads retain parameter validation and missing-entry errors", 
   const f = fixture();
   const own = await ownChat(f);
   for (const query of ["", "seq=-1", "seq=1&id=missing", "from=0", "from=2&to=1"]) {
-    expect((await f.app.request(`/api/sessions/${own.chat.id}/log/entry?${query}`, { headers: own.headers })).status).toBe(400);
+    const endpoint = query.startsWith("from=") ? "messages" : "log/entry";
+    expect((await f.app.request(`/api/sessions/${own.chat.id}/${endpoint}?${query}`, { headers: own.headers })).status).toBe(400);
+  }
+  for (const endpoint of ["log", "log/entry", "log/locate"]) {
+    const retired = await f.app.request(`/api/sessions/${own.chat.id}/${endpoint}?from=0&to=2`, { headers: own.headers });
+    expect(retired.status).toBe(400);
+    expect(await retired.json()).toEqual({ error: "log is display-only; use remi message list <conversation> --from <seq> --to <seq>" });
   }
   for (const path of ["log/entry?id=missing", "log/entry?seq=999", "log/locate?id=missing"]) {
     expect((await f.app.request(`/api/sessions/${own.chat.id}/${path}`, { headers: own.headers })).status).toBe(404);
   }
   expect((await f.app.request(`/api/sessions/${own.chat.id}/log/locate`, { headers: own.headers })).status).toBe(400);
   expect((await f.app.request(`/api/sessions/${own.chat.id}/log?before=100&after=1`, { headers: own.headers })).status).toBe(400);
-  expect((await f.app.request("/api/sessions/chat_missing/log/entry?from=0&to=1", { headers: own.headers })).status).toBe(404);
+  for (const path of logPaths("chat_missing", "missing", 1)) {
+    if (path.startsWith("/api/messages/")) continue;
+    const denied = await f.app.request(path, { headers: own.headers });
+    expect(denied.status).toBe(403);
+    const body = await denied.text();
+    expect(JSON.parse(body)).toHaveProperty("error");
+    expect(body).not.toContain("FIRST_UNREAD");
+  }
   expect(f.store.getSessionAgentReadProgress(own.chat.id, f.agent.id)).toEqual({ seq: 0, offset: 0 });
 });
 
@@ -332,7 +450,7 @@ it("deleted Chat logs stay inaccessible to retained task credentials without adv
   const own = await ownChat(f);
   const seq = f.store.locateConversationLogEntry(own.chat.id, own.first.message.id)!.seq;
   const to = f.store.getConversationLogHead(own.chat.id)!.headSeq;
-  const allowed = await f.app.request(`/api/sessions/${own.chat.id}/log/entry?from=0&to=${seq}`, { headers: own.headers });
+  const allowed = await f.app.request(`/api/sessions/${own.chat.id}/messages?from=0&to=${seq}`, { headers: own.headers });
   expect(allowed.status).toBe(200);
   expect((await allowed.json()).entries).toContainEqual(expect.objectContaining({ body_md: "FIRST_UNREAD" }));
   const previousProgress = f.store.getSessionAgentReadProgress(own.chat.id, f.agent.id);
@@ -364,20 +482,59 @@ it("deleted Chat logs stay inaccessible to retained task credentials without adv
     expect(f.store.getSessionAgentReadProgress(own.chat.id, f.agent.id)).toEqual(progress);
 
     const denied = await f.app.request(path, { headers });
-    expect(denied.status, path).toBe(404);
-    expect(await denied.json()).toEqual({ error: "chat session not found" });
+    expect([403, 404], path).toContain(denied.status);
+    const body = await denied.text();
+    expect(JSON.parse(body)).toHaveProperty("error");
+    expect(body).not.toContain("FIRST_UNREAD");
+    expect(body).not.toContain("SECOND_UNREAD");
     expect(f.store.getSessionAgentReadProgress(own.chat.id, f.agent.id)).toEqual(progress);
   }
 });
 
-it("an unbound task retains the existing creator fallback", async () => {
+for (const creator of ["runtime-owner", "other-user"] as const) it(`a task cannot inherit creator access to another Chat (${creator} source)`, async () => {
   const f = fixture();
-  const { headers } = await ownChat(f);
+  const own = await ownChat(f, creator === "runtime-owner" ? f.runtime.ownerId! : f.creator.id);
+  const { headers } = own;
   const chat = f.store.createChatSession({ agentId: f.agent.id, creatorId: f.runtime.ownerId! });
   const sent = f.store.sendChatMessage(chat.id, { body: "RUNTIME_OWNER_CHAT" });
-  for (const path of logPaths(chat.id, sent.message.id, f.store.getConversationLogHead(chat.id)!.headSeq)) {
-    expect((await f.app.request(path, { headers })).status).toBe(200);
+  const turn = f.store.getTurnForAttempt(sent.task.id)!;
+  const otherAgent = f.store.createAgent({ name: "Other lane", provider: "codex" });
+  const snapshot = () => ({
+    rows: ["multiremi_conversation_log", "multiremi_turns", "multiremi_turn_attempts", "multiremi_attachments", "multiremi_conversation_heads"]
+      .map(table => Number((db!.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n)),
+    sourceHead: f.store.getConversationLogHead(own.chat.id),
+    targetHead: f.store.getConversationLogHead(chat.id),
+    turn: f.store.getTurn(turn.id),
+    progress: [own.chat.id, chat.id].flatMap(id => [f.agent.id, otherAgent.id]
+      .map(agentId => f.store.getSessionAgentReadProgress(id, agentId))),
+  });
+  const before = snapshot();
+  const seq = f.store.locateConversationLogEntry(chat.id, sent.message.id)!.seq;
+  const paths = [...logPaths(chat.id, sent.message.id, f.store.getConversationLogHead(chat.id)!.headSeq),
+    `/api/sessions/${chat.id}/log/entry?seq=${seq}`, `/api/turns/${turn.id}`];
+  for (const path of paths) {
+    const denied = await f.app.request(path, { headers });
+    expect(denied.status, path).toBe(403);
+    const body = await denied.text();
+    expect(JSON.parse(body)).toHaveProperty("error");
+    expect(body).not.toContain("RUNTIME_OWNER_CHAT");
+    expect(snapshot()).toEqual(before);
   }
+  for (const path of [`/api/sessions/${chat.id}/messages`, `/api/turns/${turn.id}/cancel`]) {
+    const denied = await f.app.request(path, {
+      method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ body_md: "Forbidden" }),
+    });
+    expect(denied.status, path).toBe(403);
+    expect(snapshot()).toEqual(before);
+  }
+  const form = new FormData();
+  form.set("message", JSON.stringify({ body_md: "Forbidden upload" }));
+  form.append("file", new File(["private bytes"], "denied.txt"));
+  expect((await f.app.request(`/api/sessions/${chat.id}/messages`, { method: "POST", headers, body: form })).status).toBe(403);
+  const inbox = await f.app.request("/api/inbox", { headers });
+  expect(inbox.status).toBe(200);
+  expect((await inbox.text())).not.toContain("RUNTIME_OWNER_CHAT");
+  expect(snapshot()).toEqual(before);
 });
 
 it("Issue task credentials still read Issue ranges and persist unread progress", async () => {
@@ -390,7 +547,7 @@ it("Issue task credentials still read Issue ranges and persist unread progress",
   expect(claimed.id).toBe(task.id);
   const credential = await f.store.createTaskAccessToken(claimed, f.runtime.ownerId!);
   const to = f.store.getConversationLogHead(session.id)!.headSeq;
-  const response = await f.app.request(`/api/sessions/${session.id}/log/entry?from=0&to=${to}`,
+  const response = await f.app.request(`/api/sessions/${session.id}/messages?from=0&to=${to}`,
     { headers: { Authorization: `Bearer ${credential.token}` } });
   expect(response.status).toBe(200);
   expect((await response.json()).entries).toContainEqual(expect.objectContaining({ body_md: "ISSUE_UNREAD" }));
@@ -398,7 +555,7 @@ it("Issue task credentials still read Issue ranges and persist unread progress",
   const workspace = f.store.createWorkspace({ name: "Foreign issues", slug: "foreign-issues" });
   const foreignIssue = f.store.createIssue({ workspaceId: workspace.id, title: "Foreign unread issue" });
   const foreignSession = f.store.getOrCreateDefaultIssueSession(foreignIssue.id);
-  const denied = await f.app.request(`/api/sessions/${foreignSession.id}/log/entry?from=0&to=1`,
+  const denied = await f.app.request(`/api/sessions/${foreignSession.id}/messages?from=0&to=1`,
     { headers: { Authorization: `Bearer ${credential.token}` } });
   expect(denied.status).toBe(404);
   expect(await denied.json()).toEqual({ error: "workspace not found" });

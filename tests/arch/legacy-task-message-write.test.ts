@@ -32,6 +32,8 @@ function legacyReferences(source: string): number[] {
 }
 
 describe("legacy task-message writer boundary", () => {
+  // This parses every production source file; its deadline is a correctness
+  // harness budget, separate from request or query performance guards.
   it("forbids production references outside the two Store implementation files", () => {
     const files = ["apps", "packages", "frontend/apps", "frontend/packages"].flatMap((dir) => sources(join(ROOT, dir)));
     expect(files.length).toBeGreaterThan(500);
@@ -40,7 +42,7 @@ describe("legacy task-message writer boundary", () => {
       return IMPLEMENTATIONS.has(path) ? [] : legacyReferences(readFileSync(file, "utf8")).map((line) => `${path}:${line}`);
     });
     expect(violations).toEqual([]);
-  });
+  }, 15_000);
 
   it("catches calls, computed access and detached aliases without matching comments", () => {
     for (const source of [

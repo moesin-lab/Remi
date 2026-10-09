@@ -69,22 +69,28 @@ pendingTurnBackendTests("MUL-508 access consistency", (fixture, backend) => {
     return { pool, auth, allowed, project };
   }
 
-  it("B1: retry requires supervisor role and scope, preserves source visibility, and rejects side sessions", async () => {
+  it("B1: member retry rejects active turns; task retry requires supervisor role, scope and visible main-session source", async () => {
     const f = await scaffold(), target = f.running();
     const normal = await f.store.createTaskAccessToken(target.task, "local");
-    for (const credential of [f.pat.token, "access-master"]) {
-      const capabilities = await f.request("/api/cli/capabilities", "GET", undefined, credential);
-      expect(capabilities.data.commands.find((command: any) => command.id === "turn.retry")?.allowed).toBe(false);
-    }
     const capabilities = await f.request("/api/cli/capabilities", "GET", undefined, normal.token);
     expect(capabilities.data.commands.find((command: any) => command.id === "turn.retry")?.allowed).toBe(true);
-    const before = f.snapshot();
-    for (const credential of [f.pat.token, "access-master", normal.token]) {
-      f.store.updateWorkspace("local", {settings:{...f.store.getWorkspace("local")!.settings,organizer:{mode:"act"}}});
-    const result = await f.request(`/api/turns/${target.turn.id}/retry`, "POST", {}, credential);
-      expect(result.status).toBe(403); expect(result.data.code).toBe("organizer_supervisor_required");
-      expect(f.snapshot()).toEqual(before);
+    f.store.updateWorkspace("local", {settings:{...f.store.getWorkspace("local")!.settings,organizer:{mode:"act"}}});
+    const retrySnapshot = () => ({
+      rows: f.snapshot(), turn: f.store.getTurn(target.turn.id), attempts: f.store.listTurnAttempts(target.turn.id),
+      lanes: f.db.query("SELECT * FROM multiremi_session_lanes WHERE session_id=? ORDER BY reader_type,reader_id,execution_scope").all(target.turn.session_id),
+      tokens: f.db.query("SELECT * FROM multiremi_access_tokens WHERE task_id=? ORDER BY id").all(target.task.id),
+    });
+    const before = retrySnapshot();
+    for (const credential of [f.pat.token, "access-master"]) {
+      const capabilities = await f.request("/api/cli/capabilities", "GET", undefined, credential);
+      expect(capabilities.data.commands.find((command: any) => command.id === "turn.retry")?.allowed).toBe(true);
+      const result = await f.request(`/api/turns/${target.turn.id}/retry`, "POST", {}, credential);
+      expect(result.status).toBe(409); expect(result.data.code).toBe("active_run_exists");
+      expect(retrySnapshot()).toEqual(before);
     }
+    const normalResult = await f.request(`/api/turns/${target.turn.id}/retry`, "POST", {}, normal.token);
+    expect(normalResult.status).toBe(403); expect(normalResult.data.code).toBe("organizer_supervisor_required");
+    expect(retrySnapshot()).toEqual(before);
     f.db.run("UPDATE multiremi_access_tokens SET scopes=? WHERE id=?", ['["organizer:supervisor"]', normal.id]);
     expect((await f.request(`/api/turns/${target.turn.id}/retry`, "POST", {}, normal.token)).status).toBe(403);
     const supervisor = f.store.createAgent({ name: "Supervisor", provider: "codex", role: "supervisor", visibility: "workspace" });

@@ -67,6 +67,8 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 
 `release-build-check` 的 `platform-updater` job 在 Linux、Windows、macOS 显式运行
 `node --test scripts/local-profile.test.mjs scripts/platform-updater-runner.test.mjs`；Windows 验证宿主互斥并编译 updater，
+Windows 互斥夹具允许 PowerShell 冷启动用时 30 秒，完整生命周期仍有 90 秒上限；
+对创建、迁移并删除独立 PostgreSQL 数据库的会话日志用例，使用 30 秒集成测试上限，保留全部事务与数据断言。
 Linux 设置 `MULTIREMI_TEST_DOCKER_RECOVERY=1` 运行隔离的 PostgreSQL 17 恢复和回执对账测试，
 并运行 `bun run tests/integration/platform-application-smoke.ts`：从 Web 代理调用真实鉴权 API、
 PostgreSQL 队列、worker 和 drain，验证运行中任务阻止切换、API 重启后的操作记录与幂等重试、

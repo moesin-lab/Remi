@@ -25,6 +25,7 @@ import {
   readJsonStrict,
   readJsonStrictAllowEmpty,
   requireWorkspaceAdmin,
+  requireHumanWorkspaceAdmin,
 } from "../helpers.js";
 import { currentRequestUserId } from "../wire/index.js";
 import type { RouterDeps } from "./deps.js";
@@ -83,7 +84,7 @@ export function registerFeishuBotRoutes(
 
   app.get("/api/workspaces/:id/feishu-bots", (c) => {
     const workspaceId = c.req.param("id");
-    const denied = requireWorkspaceAdmin(c, store, workspaceId);
+    const denied = requireHumanWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
     c.header("Cache-Control", "no-store");
@@ -94,7 +95,7 @@ export function registerFeishuBotRoutes(
 
   app.post("/api/workspaces/:id/feishu-bots", async (c) => {
     const workspaceId = c.req.param("id");
-    const denied = requireWorkspaceAdmin(c, store, workspaceId);
+    const denied = requireHumanWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
     const body = await readJsonStrict<FeishuBotConfigBody>(c);
@@ -103,7 +104,7 @@ export function registerFeishuBotRoutes(
     if ("error" in parsed) return c.json({ error: parsed.error }, 400);
     const botId = createId("bot");
     try {
-      store.feishuBotFor(botId).upsertConfig(workspaceId, parsed.input);
+      store.feishuBotFor(botId).upsertConfig(workspaceId, { ...parsed.input, actor: currentRequestUserId(c) });
       store.feishuBotFor(botId).recordAudit(workspaceId, "configured", { actorId: currentRequestUserId(c) });
       c.header("Cache-Control", "no-store");
       return c.json(configView(store, workspaceId, botId), 201);
@@ -122,7 +123,7 @@ export function registerFeishuBotRoutes(
     c.header("Cache-Control", "no-store");
     // A plain member is told whether a concierge is available and nothing else:
     // the app id and the host Runtime are deployment detail they cannot change.
-    if (requireWorkspaceAdmin(c, store, workspaceId)) {
+    if (requireHumanWorkspaceAdmin(c, store, workspaceId)) {
       return c.json(availabilityView(bot.statusSnapshot(workspaceId)));
     }
     return c.json(configView(store, workspaceId, botId));
@@ -327,7 +328,7 @@ export function registerFeishuBotRoutes(
     const workspaceId = c.req.param("id");
     const botId = c.req.query("bot_id") ?? "default";
     const bot = store.feishuBotFor(botId);
-    const denied = requireWorkspaceAdmin(c, store, workspaceId);
+    const denied = requireHumanWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
@@ -340,7 +341,7 @@ export function registerFeishuBotRoutes(
 
     c.header("Cache-Control", "no-store");
     try {
-      const saved = bot.upsertConfig(workspaceId, parsed.input);
+      const saved = bot.upsertConfig(workspaceId, { ...parsed.input, actor: currentRequestUserId(c) });
       if (parsed.registrationUsed) {
         bot.recordAudit(workspaceId, "registration_used", {
           actorId: currentRequestUserId(c),
@@ -356,6 +357,7 @@ export function registerFeishuBotRoutes(
           domain: saved.domain,
           enabled: saved.enabled,
           sender_access_policy: saved.senderAccessPolicy,
+          responsible_member_id:saved.responsibleMemberId??null,
           revision: saved.revision,
           // Which secrets moved, never what they became.
           app_secret_op: parsed.input.appSecretOp,
@@ -371,10 +373,10 @@ export function registerFeishuBotRoutes(
     const workspaceId = c.req.param("id");
     const botId = c.req.query("bot_id") ?? "default";
     const bot = store.feishuBotFor(botId);
-    const denied = requireWorkspaceAdmin(c, store, workspaceId);
+    const denied = requireHumanWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     if (botId !== "default" && !bot.getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
-    if (!bot.deleteConfig(workspaceId)) {
+    if (!bot.deleteConfig(workspaceId, currentRequestUserId(c))) {
       return c.json({ error: "feishu bot is not configured" }, 404);
     }
     // The connector is not stopped here: the next heartbeat hands the hosting
@@ -604,6 +606,7 @@ interface FeishuBotConfigBody {
   domain?: unknown;
   enabled?: unknown;
   sender_access_policy?: unknown;
+  responsible_member_id?: unknown;
   app_secret?: unknown;
   app_secret_op?: unknown;
   registration_session_id?: unknown;
@@ -620,6 +623,9 @@ function parseConfigBody(
   if (typeof body.enabled !== "boolean") return { error: "enabled must be explicitly true or false" };
   if (body.sender_access_policy !== undefined && body.sender_access_policy !== "agent" && body.sender_access_policy !== "allowlist") {
     return { error: "sender_access_policy must be agent or allowlist" };
+  }
+  if (body.responsible_member_id !== undefined && body.responsible_member_id !== null && typeof body.responsible_member_id !== "string") {
+    return { error: "responsible_member_id must be a member id or null" };
   }
 
   let appId = optionalString(body.app_id) ?? "";
@@ -650,6 +656,7 @@ function parseConfigBody(
       domain,
       enabled: body.enabled,
       senderAccessPolicy: body.sender_access_policy,
+      responsibleMemberId: body.responsible_member_id,
       appSecretOp,
       appSecret,
     },
@@ -759,6 +766,7 @@ export function configView(store: MultiremiStore, workspaceId: string, botId = "
     domain: config.domain,
     enabled: config.enabled,
     sender_access_policy: config.senderAccessPolicy,
+    responsible_member_id:config.responsibleMemberId??null,
     revision: config.revision,
     app_secret_configured: config.hasAppSecret,
     app_secret_hint: config.appSecretHint,

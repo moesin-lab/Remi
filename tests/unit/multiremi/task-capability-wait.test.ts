@@ -1,7 +1,9 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, turnApiPath, sentTask, mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { MultiremiRuntimeModel } from "@multiremi/contracts/types.js";
 import { MultiremiStore } from "@multiremi/store.js";
+import { deserializeSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { deviceRoutingRepair, placementWaitReason } from "@multiremi/store/task-wait-reason.js";
 import { canRepoolQueuedTaskPin, REPOOLABLE_QUEUED_TASK_SQL } from "@multiremi/store/repos/tasks-repo.js";
@@ -57,8 +59,8 @@ function fixture(binding: "automatic" | "runtime" | "group" | "task" = "automati
   return { store, runtime, agent, task, now, fail, recover };
 }
 
-function ageTask(taskId: string, ageMs: number, now: number) {
-  mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET created_at = ? WHERE id = ?", [new Date(now - ageMs).toISOString(), taskId]);
+function ageTask(taskId: string, ageMs: number, now: number, database = db!) {
+  mutateExecutionFixture(database, "UPDATE multiremi_turn_execution_records SET created_at = ? WHERE id = ?", [new Date(now - ageMs).toISOString(), taskId]);
 }
 
 async function redispatchAsSupervisor(store: MultiremiStore, taskId: string, reason: string) {
@@ -69,7 +71,7 @@ async function redispatchAsSupervisor(store: MultiremiStore, taskId: string, rea
   } });
   const supervisor = store.createAgent({ name: "Organizer", provider: "claude", role: "supervisor" });
   store.setAgentSupervisor(supervisor.id, true);
-  const patrol = store.createIssue({ title: "Organizer patrol" });
+  const patrol = createResponsibleTestIssue(store, { title: "Organizer patrol" });
   const supervisorTask = store.createTask({ agentId: supervisor.id, issueId: patrol.id, prompt: "organize" });
   const token = await store.createTaskAccessToken(supervisorTask, "owner");
   const app = createMultiremiApp({ store, authToken: "root-secret" });
@@ -402,7 +404,7 @@ describe("queued task model capability waits", () => {
     const agent = store.createAgent({ name: "Device waiter", provider: "codex", workspaceId: "local" });
     const project = store.createProject({ title: "Bound then moved", workspaceId: "local" });
     store.createProjectDevice(project.id, { daemonId: "device-routing-a" });
-    const issue = store.createIssue({ title: "Device issue", projectId: project.id, workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Device issue", projectId: project.id, workspaceId: "local" });
     const parent = store.createIssueSession(issue.id, { title: "Main", holdsWorkspace: true });
     const seed = store.createTask({ agentId: agent.id, issueId: issue.id, issueSessionId: parent.id, prompt: "seed" });
     store.claimTask(devbox.id);
@@ -562,7 +564,7 @@ describe("queued task model capability waits", () => {
       resources: [{ resourceType: "local_directory", resourceRef: { local_path: "/abs/unreg", daemon_id: "dev-unreg-missing" } }],
     });
     store.createProjectDevice(project.id, { daemonId: "dev-unreg-b" });
-    const issue = store.createIssue({ title: "Unregistered issue", projectId: project.id, workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Unregistered issue", projectId: project.id, workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "wait for its machine" });
 
     const now = Date.now();
@@ -638,7 +640,7 @@ describe("queued task model capability waits", () => {
     const agent = store.createAgent({ name: "Lease-free issue", provider: "codex", workspaceId: "local" });
     const project = store.createProject({ title: "Lease-free project", workspaceId: "local" });
     store.createProjectDevice(project.id, { daemonId: "dev-label-issue-a" });
-    const issue = store.createIssue({ title: "Lease-free issue", projectId: project.id, workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Lease-free issue", projectId: project.id, workspaceId: "local" });
     // `holds_workspace = 1` (the Issue default) but no workspace row exists yet,
     // so the pin is provider lineage rather than a lease on one machine.
     const session = store.createIssueSession(issue.id, { title: "Work", holdsWorkspace: true });
@@ -682,7 +684,7 @@ describe("queued task model capability waits", () => {
     const project = store.createProject({ title: "Conflict project", workspaceId: "local" });
     store.createProjectDevice(project.id, { daemonId: providers.codex });
     store.createProjectDevice(project.id, { daemonId: providers.other });
-    const issue = store.createIssue({ title: "Conflict issue", projectId: project.id, workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Conflict issue", projectId: project.id, workspaceId: "local" });
     return { store, a, b, agent, project, issue };
   }
 
@@ -718,7 +720,7 @@ describe("queued task model capability waits", () => {
     });
     const agent = store.createAgent({ name: "Bound M", provider: "codex", workspaceId: "local", runtimeId: m.id });
     const project = store.createProject({ title: "Mixed placement", workspaceId: "local" });
-    const issue = store.createIssue({ title: "Mixed issue", projectId: project.id, workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Mixed issue", projectId: project.id, workspaceId: "local" });
     const workspace = (store as unknown as {
       runtimeWorkspaces: { create(runtimeId: string, input: { name: string; root_path: string }): { id: string } };
     }).runtimeWorkspaces.create(m.id, { name: "Unregistered U", root_path: "/tmp/mixed-u" });
@@ -812,7 +814,7 @@ describe("queued task model capability waits", () => {
     store.updateWorkspace("local", { settings: { ...workspace.settings, organizer: { mode: "act" } } });
     const supervisor = store.createAgent({ name: "Organizer", provider: "claude", role: "supervisor" });
     store.setAgentSupervisor(supervisor.id, true);
-    const patrol = store.createIssue({ title: "Organizer patrol" });
+    const patrol = createResponsibleTestIssue(store, { title: "Organizer patrol" });
     const supervisorTask = store.createTask({ agentId: supervisor.id, issueId: patrol.id, prompt: "organize" });
     const supervisorToken = await store.createTaskAccessToken(supervisorTask, "owner");
     const taskBeforeDenied = store.getTask(task.id);
@@ -898,7 +900,7 @@ describe("queued task model capability waits", () => {
     const agent = store.createAgent({ name: "Bound B", provider: "codex", runtimeId: b.id });
     const project = store.createProject({ title: "B only" });
     store.createProjectDevice(project.id, { daemonId: "rebind-rejected-b" });
-    const issue = store.createIssue({ title: "Snapshot A", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Snapshot A", projectId: project.id });
     const parent = store.createIssueSession(issue.id, { title: "Parent", holdsWorkspace: true });
     const seed = store.createTask({ agentId: agent.id, issueId: issue.id, issueSessionId: parent.id, prompt: "seed" });
     // A historical parent lane supplies the snapshot while Project routing now refuses A.
@@ -1004,14 +1006,21 @@ describe("queued task model capability waits", () => {
     });
   }, 120_000);
 
-  // Keep all 204 combinations, but give each independent conversation kind its
-  // own test budget instead of timing the entire migration-heavy matrix as one.
+  // Keep all 204 combinations in independent conversation-kind groups.
+  // Each group retains its original deadline and each cell has its own database.
   for (const kind of ["chat", "issue", "chat-no-project"] as const)
   it(`executes placement remedies across Chat and Issue binding combinations (${kind})`, () => {
-    const counts = new Map<string, number>();
-    const alternatives = new Map<string, number>();
-    const noMechanical: string[] = [];
-    let cells = 0;
+    // Bootstrap the empty schema once, as in the placement invariant matrix.
+    // Each case restores an independent database and runs the real Store constructor.
+    createLocalStore();
+    const template = db!.serialize();
+    resetMultiremiTestEnv();
+    let matrixDb: ReturnType<typeof deserializeSqliteDatabase> | undefined;
+    try {
+      const counts = new Map<string, number>();
+      const alternatives = new Map<string, number>();
+      const noMechanical: string[] = [];
+      let cells = 0;
       for (const frozen of [false, true])
         for (const binding of ["A", "B", "none"] as const)
           for (const dataOnA of [false, true])
@@ -1022,7 +1031,9 @@ describe("queued task model capability waits", () => {
               if (option === "remove-dedicated" && (!dedicated || devices !== "none" || kind === "chat-no-project")) continue;
               const coordinate = `${kind}/${frozen ? "frozen" : "plain"}/${binding}/${dataOnA ? "data-A" : "no-data"}/${devices}/${dedicated ? "dedicated" : "shared"}`;
               if (option === "primary") cells++;
-              const store = createLocalStore();
+              matrixDb?.close();
+              matrixDb = deserializeSqliteDatabase(template);
+              const store = new MultiremiStore(matrixDb);
               const key = `${cells}_${option}`.replace(/-/g, "_");
               const a = store.registerRuntime({ id: `rt_matrix_a_${key}`, name: "A", provider: "codex", daemonId: `matrix-a-${key}` });
               const b = store.registerRuntime({ id: `rt_matrix_b_${key}`, name: "B", provider: "codex", daemonId: `matrix-b-${key}` });
@@ -1033,7 +1044,7 @@ describe("queued task model capability waits", () => {
               let issue: ReturnType<typeof store.createIssue> | null = null;
               let issueSessionId: string | null = null;
               if (kind === "issue") {
-                issue = store.createIssue({ title: "Matrix issue", projectId: project!.id });
+                issue = createResponsibleTestIssue(store, { title: "Matrix issue", projectId: project!.id });
                 if (dataOnA) {
                   const parent = store.createIssueSession(issue.id, { title: "Parent", holdsWorkspace: true });
                   const seed = store.createTask({ agentId: agent.id, issueId: issue.id, issueSessionId: parent.id, prompt: "seed" });
@@ -1060,9 +1071,9 @@ describe("queued task model capability waits", () => {
                 ...(project ? { projectId: project.id } : {}) }) : null;
               const task = chat ? store.sendChatMessage(chat.id, { body: prompt }).task
                 : store.createTask({ agentId: agent.id, issueId: issue!.id, issueSessionId: issueSessionId!, prompt });
-              if (frozen) mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET execution_fingerprint = ? WHERE id = ?", [`fp-${cells}`, task.id]);
+              if (frozen) mutateExecutionFixture(matrixDb, "UPDATE multiremi_turn_execution_records SET execution_fingerprint = ? WHERE id = ?", [`fp-${cells}`, task.id]);
               const now = Date.now();
-              ageTask(task.id, GRACE_MS, now);
+              ageTask(task.id, GRACE_MS, now, matrixDb);
               store.refreshQueuedCapabilityWaitReasons(now);
               const reason = store.getTask(task.id)?.waitReason ?? "";
               const offersBoth = reason.includes("加回项目的设备绑定") && reason.includes("取消")
@@ -1099,7 +1110,7 @@ describe("queued task model capability waits", () => {
                   store.updateWorkspace("local", { settings: { ...workspace.settings, organizer: { mode: "act" } } });
                   const supervisor = store.createAgent({ name: "Supervisor", provider: "claude", role: "supervisor" });
                   store.setAgentSupervisor(supervisor.id, true);
-                  const patrol = store.createIssue({ title: "Patrol" });
+                  const patrol = createResponsibleTestIssue(store, { title: "Patrol" });
                   const supervisorTask = store.createTask({ agentId: supervisor.id, issueId: patrol.id, prompt: "patrol" });
                   const retried=store.retryTurn(store.getTurnForAttempt(task.id)!.id,true);
                   replacement=store.getTask(retried.current_attempt_id!)!;
@@ -1137,11 +1148,12 @@ describe("queued task model capability waits", () => {
               expect(claimed?.prompt, coordinate).toBe(prompt);
               }
             }
-    expect(cells).toBe(kind === "chat-no-project" ? 12 : 96);
-    expect(cells).toBe([...counts.values()].reduce((sum, count) => sum + count, 0));
-    expect(noMechanical, noMechanical.join("\n")).toEqual([]);
-    if (kind !== "chat-no-project") expect([...alternatives.values()].reduce((sum, count) => sum + count, 0)).toBeGreaterThan(0);
-    console.log(`remedy matrix (${kind}): ${cells} cells, primary=${JSON.stringify(Object.fromEntries(counts))}, alternatives=${JSON.stringify(Object.fromEntries(alternatives))}, no mechanical=${JSON.stringify(noMechanical)}`);
+      expect(cells).toBe(kind === "chat-no-project" ? 12 : 96);
+      expect(cells).toBe([...counts.values()].reduce((sum, count) => sum + count, 0));
+      expect(noMechanical, noMechanical.join("\n")).toEqual([]);
+      if (kind !== "chat-no-project") expect([...alternatives.values()].reduce((sum, count) => sum + count, 0)).toBeGreaterThan(0);
+      console.log(`remedy matrix (${kind}): ${cells} cells, primary=${JSON.stringify(Object.fromEntries(counts))}, alternatives=${JSON.stringify(Object.fromEntries(alternatives))}, no mechanical=${JSON.stringify(noMechanical)}`);
+    } finally { matrixDb?.close(); }
   }, 120_000);
 
   it("names conflicting data constraints as a fourth-tier remedy", () => {
@@ -1152,7 +1164,7 @@ describe("queued task model capability waits", () => {
     const project = store.createProject({ title: "Data conflict", resources: [
       { resourceType: "local_directory", resourceRef: { local_path: "/abs/on-b", daemon_id: "data-conflict-b" } },
     ] });
-    const issue = store.createIssue({ title: "Data conflict", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Data conflict", projectId: project.id });
     const workspace = (store as unknown as {
       runtimeWorkspaces: { create(runtimeId: string, input: { name: string; root_path: string }): { id: string } };
     }).runtimeWorkspaces.create(a.id, { name: "Workspace on A", root_path: "/abs/on-a" });
@@ -1200,7 +1212,7 @@ describe("queued task model capability waits", () => {
     });
     const agent = store.createAgent({ name: "Claude", provider: "claude" });
     const project = store.createProject({ title: "Multi alias" });
-    const issue = store.createIssue({ title: "Multi alias", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Multi alias", projectId: project.id });
     store.reportIssueWorkspace({ issueId: issue.id, runtimeId: codex.id,
       rootPath: "/tmp/MUL-1", branchName: "agent/MUL-1", status: "ready", repos: [] });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work" });
@@ -1231,13 +1243,13 @@ describe("queued task model capability waits", () => {
     }));
     const agent = store.createAgent({ name: "Batch", provider: "codex", runtimeId: runtimes[0]!.id });
     const project = store.createProject({ title: "Batch" });
-    const issue = store.createIssue({ title: "Batch", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Batch", projectId: project.id });
     store.reportIssueWorkspace({ issueId: issue.id, runtimeId: runtimes[1]!.id,
       rootPath: "/tmp/MUL-1", branchName: "agent/MUL-1", status: "ready", repos: [] });
     const now = Date.now();
     for (let index = 0; index < 12; index++) {
       // #3: distinct Sessions retain twelve pending Turns instead of merging a single lane.
-      const batchIssue=store.createIssue({title:`Batch ${index}`,projectId:project.id});
+      const batchIssue=createResponsibleTestIssue(store, {title:`Batch ${index}`,projectId:project.id});
       store.reportIssueWorkspace({issueId:batchIssue.id,runtimeId:runtimes[1]!.id,rootPath:`/tmp/${batchIssue.key}`,branchName:`agent/${batchIssue.key}`,status:"ready",repos:[]});
       const task = store.createTask({ agentId: agent.id, issueId: batchIssue.id, prompt: `batch ${index}` });
       ageTask(task.id, GRACE_MS, now);
@@ -1310,7 +1322,7 @@ describe("queued task model capability waits", () => {
     // The Project only knows the NEW daemon name, but the sibling Runtime
     // carries the workspace's old daemon as a legacy alias, so it can claim.
     store.createProjectDevice(project.id, { daemonId: "daemon-new" });
-    const issue = store.createIssue({ title: "Legacy issue", projectId: project.id, workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Legacy issue", projectId: project.id, workspaceId: "local" });
     store.reportIssueWorkspace({
       issueId: issue.id, runtimeId: old.id, rootPath: "/tmp/MUL-1", branchName: "agent/MUL-1", status: "ready", repos: [],
     });

@@ -1,3 +1,4 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { attemptMessagesPath, requestMessageBody, turnApiPath } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -49,8 +50,8 @@ async function setup(store = createStore()) {
   });
   // Public Issue-owned Sessions preserve the workspace owner's Task authority;
   // private Chat-owned Sessions are created explicitly in the isolation test.
-  const targetIssue = store.createIssue({ title: "Target issue", workspaceId: "local" });
-  const patrolIssue = store.createIssue({ title: "Organizer patrol", workspaceId: "local" });
+  const targetIssue = createResponsibleTestIssue(store, { title: "Target issue", workspaceId: "local" });
+  const patrolIssue = createResponsibleTestIssue(store, { title: "Organizer patrol", workspaceId: "local" });
   store.getOrCreateDefaultIssueSession(targetIssue.id);
   store.getOrCreateDefaultIssueSession(patrolIssue.id);
   const supervisorAgent = store.createAgent({
@@ -141,7 +142,7 @@ describe("Organizer supervisor privilege layer", () => {
     const fixture = await setup();
     const supervisorToken = await grantSupervisor(fixture);
     await setMode(fixture, "act");
-    const prerequisite = fixture.store.createIssue({ title: "Still open", status: "in_progress" });
+    const prerequisite = createResponsibleTestIssue(fixture.store, { title: "Still open", status: "in_progress" });
     fixture.store.createIssueDependency(fixture.targetIssue.id, {
       dependsOnIssueId: prerequisite.id, type: "blocked_by",
     });
@@ -262,7 +263,7 @@ describe("Organizer supervisor privilege layer", () => {
     const fixture = await setup();
     const supervisorToken = await grantSupervisor(fixture);
     const normalTaskToken = await fixture.store.createTaskAccessToken(fixture.targetTask, "owner");
-    const issue = fixture.store.createIssue({ title: "Private Chat work", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(fixture.store, { title: "Private Chat work", workspaceId: "local" });
     const chat = fixture.store.createChatSession({
       agentId: fixture.targetAgent.id, workspaceId: "local", creatorId: "owner",
     });
@@ -391,7 +392,7 @@ describe("Organizer supervisor privilege layer", () => {
     fixture.store.setAgentSupervisor(protectedAgent.id, true);
     const protectedTask = fixture.store.createTask({
       agentId: protectedAgent.id,
-      issueId: fixture.store.createIssue({ title: "Protected", workspaceId: "local" }).id,
+      issueId: createResponsibleTestIssue(fixture.store, { title: "Protected", workspaceId: "local" }).id,
       workspaceId: "local",
       prompt: "patrol",
     });
@@ -504,7 +505,7 @@ describe("Organizer supervisor privilege layer", () => {
     expect((disclosure!.metadata.inbox_item as any)?.severity).toBe("attention");
     expect(disclosure!.body_md).toContain(steeredBody.organizer_action.id);
 
-    const cancelIssue = fixture.store.createIssue({ title: "Cancel target", workspaceId: "local" });
+    const cancelIssue = createResponsibleTestIssue(fixture.store, { title: "Cancel target", workspaceId: "local" });
     const cancelTask = fixture.store.createTask({
       agentId: fixture.targetAgent.id,
       issueId: cancelIssue.id,
@@ -523,7 +524,7 @@ describe("Organizer supervisor privilege layer", () => {
     expect(fixture.store.listOrganizerActionsForTask(cancelTask.id)).toHaveLength(1);
     expect(fixture.store.listIssueComments(fixture.patrolIssue.id).at(-1)?.body).toContain("Organizer action: cancel");
 
-    const redispatchIssue = fixture.store.createIssue({ title: "Redispatch target", workspaceId: "local" });
+    const redispatchIssue = createResponsibleTestIssue(fixture.store, { title: "Redispatch target", workspaceId: "local" });
     const continuedFromTask = fixture.store.createTask({
       agentId: fixture.targetAgent.id,
       issueId: redispatchIssue.id,
@@ -733,7 +734,7 @@ describe("Organizer supervisor privilege layer", () => {
             leaderId: leader.id,
             memberIds: [fixture.supervisorAgent.id],
           });
-          const delegatedIssue = fixture.store.createIssue({
+          const delegatedIssue = createResponsibleTestIssue(fixture.store, {
             title: "Delegated organizer patrol",
             workspaceId: "local",
             assigneeType: "squad",

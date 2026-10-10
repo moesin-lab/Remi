@@ -55,6 +55,7 @@ export type FeishuBotErrorCode =
 export type FeishuBotSecretOp = "keep" | "set" | "clear" | "registration";
 
 export interface IssueTopicConfig {
+  responsible_member_id?: string | null;
   enabled: boolean;
   chat_id: string;
   /** Null means every project, including projectless Issues. */
@@ -71,6 +72,7 @@ export interface IssueTopicConfigResponse {
 }
 
 export interface UpdateIssueTopicConfigRequest {
+  responsible_member_id?: string | null;
   enabled: boolean;
   chat_id: string;
   project_ids: string[] | null;
@@ -81,6 +83,7 @@ export interface UpdateIssueTopicConfigRequest {
 export interface FeishuBotConfig {
   bot_id?: string;
   name?: string;
+  responsible_member_id?: string | null;
   configured: boolean;
   workspace_id: string;
   agent_id: string | null;
@@ -269,6 +272,7 @@ export interface FeishuBotRegistrationSession {
 /** Request body for `PUT /api/workspaces/:id/feishu-bot`. */
 export interface UpsertFeishuBotRequest {
   name?: string;
+  responsible_member_id?: string | null;
   agent_id: string;
   runtime_id: string;
   app_id: string;

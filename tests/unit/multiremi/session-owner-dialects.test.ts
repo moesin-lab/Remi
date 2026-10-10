@@ -3,6 +3,7 @@ import { createMultiremiApp } from "@multiremi/api.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { mutateExecutionFixture, turnApiPath } from "./unified-test-paths.js";
 import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
+import { createResponsibleTestIssue } from "./helpers.js";
 
 const migrationId = "20261008_dual_owned_sessions";
 
@@ -27,7 +28,7 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     store.startTask(ordinary.id);
     expect(store.claimTask(runtime.id)?.id).toBe(independent.id);
     store.cancelTask(independent.id);
-    const issue = store.createIssue({ title: "Independent Issue checkout" });
+    const issue = createResponsibleTestIssue(store, { title: "Independent Issue checkout" });
     const issueTask = store.createSessionTask(store.getOrCreateDefaultIssueSession(issue.id).id, {
       agentId: agents[3]!.id, prompt: "Issue work",
     });
@@ -47,7 +48,7 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     const { db, store } = fixture();
     const runtime = store.registerRuntime({ name: "Private terminal executor", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "Private terminal worker", provider: "claude", runtimeId: runtime.id });
-    const issue = store.createIssue({ title: "Public projection" });
+    const issue = createResponsibleTestIssue(store, { title: "Public projection" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const chat = store.createChatSession({ agentId: agent.id, creatorId: "local" });
     const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Private projected work" });
@@ -106,7 +107,7 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     it(`cancels a pending private Session Task with a missing Chat audit pointer when its Chat is ${lifecycle}`, () => {
       const { store } = fixture();
       const agent = store.createAgent({ name: "Private lifecycle worker", provider: "claude" });
-      const issue = store.createIssue({ title: "Public lifecycle projection" });
+      const issue = createResponsibleTestIssue(store, { title: "Public lifecycle projection" });
       const main = store.getOrCreateDefaultIssueSession(issue.id);
       const chat = store.createChatSession({ agentId: agent.id, creatorId: "local" });
       const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Private lifecycle work" });
@@ -137,9 +138,9 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     });
   }
 
-  it("moves Issue conversation workspace facts without moving Chat projections or historical Task audit", () => {
+  it("rotates the Issue Main while freezing source history, Chat projections and historical Task audit", () => {
     const { db, store } = fixture();
-    const issue = store.createIssue({ title: "Move canonical conversation" });
+    const issue = createResponsibleTestIssue(store, { title: "Move canonical conversation" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const side = store.createIssueSession(issue.id, { title: "Owned sibling", parentSessionId: main.id });
     store.appendSessionEvent(side.id, { authorType: "system", body: "Owned sibling history" });
@@ -158,31 +159,49 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     const human = store.listWorkspaceMembers(target.id).find(member => member.role === "owner" && !member.archivedAt)
       ?? store.createWorkspaceMember({ workspaceId: target.id, userId: "local", name: "Target human", role: "owner" });
 
-    store.updateIssue(issue.id, { workspaceId: target.id });
+    const sourceHistory = [main.id, side.id].map(id =>
+      db.query("SELECT * FROM multiremi_conversation_log WHERE session_id = ? ORDER BY seq").all(id));
 
+    store.updateIssue(issue.id, { workspaceId: target.id, responsibleMemberId: human.id, actorType: "member", actorId: "mem_local_local" });
+
+    const targetMain = store.getOrCreateDefaultIssueSession(issue.id);
+    expect(targetMain.id).not.toBe(main.id);
+    expect(targetMain).toMatchObject({ ownerType: "issue", ownerId: issue.id, workspaceId: target.id,
+      isDefault: true, parentSessionId: null, inheritMode: "none" });
+    expect(store.listIssueSessions(issue.id, true).map(session => session.id)).toEqual([targetMain.id]);
     for (const id of [main.id, side.id]) {
-      expect(store.getIssueSession(id)?.workspaceId).toBe(target.id);
-      expect(db.query("SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id = ?").get(id)?.workspace_id).toBe(target.id);
+      expect(store.getIssueSession(id)).toMatchObject({ workspaceId: "local", isDefault: false });
+      expect(db.query("SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id = ?").get(id)?.workspace_id).toBe("local");
+      expect(store.getIssueSessionWithOwnerScope(id)).toMatchObject({ ownerWorkspaceId: null, historicalWorkspaceId: "local" });
     }
+    expect([main.id, side.id].map(id =>
+      db.query("SELECT * FROM multiremi_conversation_log WHERE session_id = ? ORDER BY seq").all(id))).toEqual(sourceHistory);
     expect(store.getIssueSession(projected.id)).toMatchObject({ ownerType: "chat", ownerId: chat.id,
       workspaceId: "local", issueId: null });
     expect(db.query("SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id = ?").get(projected.id)?.workspace_id).toBe("local");
     expect(store.getTask(historicTask.id)?.workspaceId).toBe("local");
     expect(db.query("SELECT workspace_id FROM multiremi_turns WHERE current_attempt_id = ?").get(historicTask.id)?.workspace_id).toBe("local");
-    expect(db.query("SELECT workspace_id FROM multiremi_comment_reactions WHERE comment_id = ?").get(oldMessage.id)?.workspace_id).toBe(target.id);
+    expect(db.query("SELECT workspace_id FROM multiremi_comment_reactions WHERE comment_id = ?").get(oldMessage.id)?.workspace_id).toBe("local");
     expect(db.query("SELECT workspace_id FROM multiremi_comment_reactions WHERE comment_id = ?").get(privateMessage.id)?.workspace_id).toBe("local");
 
     const runtime = store.registerRuntime({ name: "Target executor", provider: "claude", workspaceId: target.id });
     const agent = store.createAgent({ name: "Target worker", provider: "claude", workspaceId: target.id, runtimeId: runtime.id });
-    const task = store.createSessionTask(main.id, { agentId: agent.id, createdByType: "system", prompt: "New target work" });
+    const task = store.createSessionTask(targetMain.id, { agentId: agent.id, createdByType: "system", prompt: "New target work" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const question = store.createTaskHumanRequest({ taskId: task.id, kind: "question", payload: { title: "TARGET_QUESTION_AFTER_MOVE" } });
     expect(store.getMessage(question.id)?.to_member_id).toBe(human.id);
+    expect(store.getMessage(question.id)?.wake_applied).toBe("inbox_only");
+    expect(store.resolveIssueResponsibility(issue.id).rootHuman).toMatchObject({ type: "member", id: human.id, issueId: issue.id });
+    expect(store.listIssueQuestions(issue.id).find(item => item.id === question.id)).toMatchObject({
+      id: question.id, session_id: targetMain.id, workspace_id: target.id, stage: "human",
+      current_handler: { type: "member", id: human.id },
+    });
     const inbox = store.listMessageInbox(human.id, target.id, { access: { userId: "local", admin: true } });
     expect(inbox.items.map(message => message.id)).toContain(question.id);
-    expect(inbox.attention_count).toBeGreaterThan(0);
-    const report = store.sendMessage({ session_id: main.id, sender: { type: "platform", id: null },
+    expect(inbox.unread_count).toBeGreaterThan(0);
+    expect(inbox.attention_count).toBe(0);
+    const report = store.sendMessage({ session_id: targetMain.id, sender: { type: "platform", id: null },
       to: { type: "member", ref: human.id }, message_kind: "report", wake_requested: "inbox_only", body_md: "Target report" }).message;
     store.reactMessage(report.id, { emoji: "+1" });
     expect(db.query("SELECT workspace_id FROM multiremi_comment_reactions WHERE comment_id = ?").get(report.id)?.workspace_id).toBe(target.id);
@@ -190,7 +209,7 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
 
   it("preserves both owners, results and Task audit through an upgrade and restart", () => {
     const { db, store } = fixture();
-    const issue = store.createIssue({ title: "Issue owner" });
+    const issue = createResponsibleTestIssue(store, { title: "Issue owner" });
     const agent = store.createAgent({ name: "Owner agent", provider: "claude" });
     const chat = store.createChatSession({ agentId: agent.id });
     const issueMain = store.getOrCreateDefaultIssueSession(issue.id);
@@ -226,7 +245,7 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
 
   it("repairs old Issue moves without transferring a Chat owner or rewriting Task audit", () => {
     const { db, store } = fixture();
-    const issue = store.createIssue({ title: "Old moved issue" });
+    const issue = createResponsibleTestIssue(store, { title: "Old moved issue" });
     const target = store.createWorkspace({ name: "Target workspace" });
     const agent = store.createAgent({ name: "Owner agent", provider: "claude" });
     const chat = store.createChatSession({ agentId: agent.id });
@@ -249,8 +268,8 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
 
   it("rolls back deterministic move repairs when a legacy parent has another owner", () => {
     const { db, store } = fixture();
-    const issue = store.createIssue({ title: "Moved owner" });
-    const other = store.createIssue({ title: "Other owner" });
+    const issue = createResponsibleTestIssue(store, { title: "Moved owner" });
+    const other = createResponsibleTestIssue(store, { title: "Other owner" });
     const target = store.createWorkspace({ name: "Move target" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const child = store.createIssueSession(issue.id, { title: "Child", parentSessionId: main.id });
@@ -271,7 +290,7 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
 
   it("rejects an ownerless legacy row without deleting it or writing a migration marker", () => {
     const { db, store } = fixture();
-    const issue = store.createIssue({ title: "Valid owner" });
+    const issue = createResponsibleTestIssue(store, { title: "Valid owner" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     if (backend === "PostgreSQL") {
       db.exec("ALTER TABLE multiremi_issue_sessions DROP CONSTRAINT multiremi_issue_sessions_owner_check");

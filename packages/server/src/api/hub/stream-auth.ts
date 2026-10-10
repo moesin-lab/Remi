@@ -9,7 +9,8 @@
  *   belong to their workspace. This is the same
  *   boundary the transcript routes draw (`denyCurrentUserWorkspaceAccess` plus
  *   `canUserViewTaskMessages`, `api/helpers/auth-guards.ts`), expressed here as
- *   one query per subscription instead of a hydrated store read, because C4's
+ *   one query for ordinary subscriptions plus owner facts for rotated Issues,
+ *   instead of a hydrated store read, because C4's
  *   binding constraint is that new server-side read paths must not go through the
  *   synchronous Postgres bridge (MUL-383 `cmt_u3fltd47w6r0`).
  * - `trace:<task_id>` — `canUserViewTaskMessages`: a chat task is creator-only
@@ -21,8 +22,8 @@
  * membership answers a subscription needs. Each backend supplies the facts its
  * own way:
  *
- * - Postgres → one `SELECT` per subscription through {@link ReadPool}, which is
- *   where C4's read-only pool and its SQL gate live.
+ * - Postgres → one `SELECT` for ordinary subscriptions through {@link ReadPool}.
+ *   Rotated Issues also read immutable owner and move facts through that pool.
  * - SQLite → the store's synchronous handles, which is what the local profile and
  *   the existing test suite use. `bun:sqlite` is in-process, so wrapping it in a
  *   queue would add latency without bounding anything.
@@ -37,6 +38,7 @@ import { createReadPool, type ReadPool } from "@multiremi/store/db/read-pool.js"
 import { isPostgresConfigured } from "@multiremi/store/db/postgres.js";
 import type { ApiRole } from "@multiremi/config/api-role.js";
 import { canUserViewTaskMessageFacts, canUserAccessChatSessionFacts, canUserAccessAgentByUserId } from "../helpers/auth-guards.js";
+import { auditedIssueSessionHistory, issueSessionHistoryFactsSql, type IssueSessionHistoryFact } from "../../store/issue-session-owner-scope.js";
 
 /** The codes a refused `stream.subscribe` can carry (see the C0 contract). */
 export type StreamSubscribeDenialCode = "invalid_payload" | "forbidden" | "wrong_endpoint" | "unavailable";
@@ -56,7 +58,7 @@ export interface StreamAuthSubject {
  * What a `log:` subscription needs to know about its session.
  *
  * `requesterIsMember` is answered in the same query as the session row so the
- * Postgres path stays at one statement.
+ * ordinary Postgres path stays at one statement.
  */
 export interface LogStreamAuthFacts {
   kind: "chat" | "issue" | "auto";
@@ -138,7 +140,7 @@ export function decideTraceSubscription(
 }
 
 /**
- * The one statement a `log:` subscription costs in Postgres, written in the
+ * The ordinary `log:` subscription statement in Postgres, written in the
  * sqlite dialect the store uses (the pool translates it before it reaches the
  * server).
  *
@@ -155,7 +157,8 @@ SELECT 'chat' AS kind, s.workspace_id AS workspace_id, COALESCE(s.creator_id, 'l
          WHERE m.workspace_id = s.workspace_id AND m.user_id = r.user_id AND m.archived_at IS NULL) AS is_member,
        CASE WHEN a.id IS NOT NULL AND (r.user_id IS NULL OR a.visibility <> 'private' OR a.owner_id = r.user_id
          OR EXISTS (SELECT 1 FROM multiremi_workspace_members m WHERE m.workspace_id = s.workspace_id
-           AND m.user_id = r.user_id AND m.archived_at IS NULL AND m.role IN ('owner', 'admin'))) THEN 1 ELSE 0 END AS can_access_agent
+           AND m.user_id = r.user_id AND m.archived_at IS NULL AND m.role IN ('owner', 'admin'))) THEN 1 ELSE 0 END AS can_access_agent,
+       NULL AS work_session_id, NULL AS issue_id, NULL AS owner_workspace_id, NULL AS parent_session_id, NULL AS has_rotation
   FROM multiremi_chat_sessions s CROSS JOIN requester r
   LEFT JOIN multiremi_agents a ON a.id = s.agent_id AND a.workspace_id = s.workspace_id
  WHERE s.id = r.session_id
@@ -166,22 +169,36 @@ SELECT CASE WHEN s.chat_id IS NULL THEN 'issue' ELSE 'chat' END AS kind,
          WHERE m.workspace_id = s.workspace_id AND m.user_id = r.user_id AND m.archived_at IS NULL) AS is_member,
        CASE WHEN s.chat_id IS NULL OR (a.id IS NOT NULL AND (r.user_id IS NULL OR a.visibility <> 'private' OR a.owner_id = r.user_id
          OR EXISTS (SELECT 1 FROM multiremi_workspace_members m WHERE m.workspace_id = s.workspace_id
-           AND m.user_id = r.user_id AND m.archived_at IS NULL AND m.role IN ('owner', 'admin')))) THEN 1 ELSE 0 END AS can_access_agent
+           AND m.user_id = r.user_id AND m.archived_at IS NULL AND m.role IN ('owner', 'admin')))) THEN 1 ELSE 0 END AS can_access_agent,
+       s.id AS work_session_id, s.issue_id,
+       CASE WHEN s.chat_id IS NULL THEN i.workspace_id ELSE c.workspace_id END AS owner_workspace_id,
+       s.parent_session_id,
+       CASE WHEN s.chat_id IS NULL AND EXISTS (SELECT 1 FROM multiremi_issue_activity activity
+         WHERE activity.issue_id = s.issue_id AND activity.type = 'issue_main_session_rotated')
+         THEN 1 ELSE 0 END AS has_rotation
   FROM multiremi_issue_sessions s CROSS JOIN requester_session r
   LEFT JOIN multiremi_chat_sessions c ON c.id = s.chat_id AND c.workspace_id = s.workspace_id
   LEFT JOIN multiremi_agents a ON a.id = c.agent_id AND a.workspace_id = s.workspace_id
+  LEFT JOIN multiremi_issues i ON i.id = s.issue_id
+  LEFT JOIN multiremi_issue_sessions parent ON parent.id = s.parent_session_id
+  LEFT JOIN multiremi_conversation_heads h ON h.session_id = s.id
  WHERE s.id = r.session_id
-   AND ((s.chat_id IS NOT NULL AND c.id IS NOT NULL) OR (s.chat_id IS NULL AND EXISTS
-     (SELECT 1 FROM multiremi_issues i WHERE i.id = s.issue_id AND i.workspace_id = s.workspace_id)))
+   AND (h.workspace_id IS NULL OR h.workspace_id = s.workspace_id)
+   AND (s.parent_session_id IS NULL OR (parent.id IS NOT NULL AND parent.workspace_id = s.workspace_id
+     AND COALESCE(parent.chat_id, '') = COALESCE(s.chat_id, '')
+     AND (s.chat_id IS NOT NULL OR parent.issue_id = s.issue_id)))
+   AND ((s.chat_id IS NOT NULL AND c.id IS NOT NULL) OR (s.chat_id IS NULL AND i.id IS NOT NULL))
 UNION ALL
 SELECT 'auto' AS kind, a.workspace_id, NULL AS creator_id,
        (SELECT count(*) FROM multiremi_workspace_members m WHERE m.workspace_id=a.workspace_id
-         AND m.user_id=r.user_id AND m.archived_at IS NULL) AS is_member, NULL AS can_access_agent
+         AND m.user_id=r.user_id AND m.archived_at IS NULL) AS is_member, NULL AS can_access_agent,
+       NULL AS work_session_id, NULL AS issue_id, NULL AS owner_workspace_id, NULL AS parent_session_id, NULL AS has_rotation
   FROM multiremi_autopilots a JOIN requester r ON r.session_id='auto_' || a.id
 UNION ALL
 SELECT 'auto' AS kind, w.id AS workspace_id, NULL AS creator_id,
        (SELECT count(*) FROM multiremi_workspace_members m WHERE m.workspace_id=w.id
-         AND m.user_id=r.user_id AND m.archived_at IS NULL) AS is_member, NULL AS can_access_agent
+         AND m.user_id=r.user_id AND m.archived_at IS NULL) AS is_member, NULL AS can_access_agent,
+       NULL AS work_session_id, NULL AS issue_id, NULL AS owner_workspace_id, NULL AS parent_session_id, NULL AS has_rotation
   FROM multiremi_workspaces w JOIN requester r ON r.session_id='auto_orphan_inbox_' || w.id
   JOIN multiremi_conversation_heads h ON h.session_id=r.session_id`;
 
@@ -214,6 +231,11 @@ interface LogFactsRow {
   creator_id?: unknown;
   is_member?: unknown;
   can_access_agent?: unknown;
+  work_session_id?: unknown;
+  issue_id?: unknown;
+  owner_workspace_id?: unknown;
+  parent_session_id?: unknown;
+  has_rotation?: unknown;
 }
 
 interface TraceFactsRow {
@@ -284,6 +306,19 @@ export function createPostgresStreamAuthReader(pool: ReadPool): StreamAuthReader
           subject.userId,
           sessionId,
         ]);
+        if (row?.kind === 'issue' && text(row.work_session_id)) {
+          let historical = false;
+          let retired = false;
+          let retiredParent = false;
+          if (flag(row.has_rotation) && text(row.issue_id)) {
+            const facts = await pool.query<IssueSessionHistoryFact>(issueSessionHistoryFactsSql(), [row.issue_id, row.issue_id]);
+            const history = auditedIssueSessionHistory(facts);
+            historical = history.historicalWorkspaceIds.get(String(row.work_session_id)) === row.workspace_id;
+            retired = history.retiredSessionIds.has(String(row.work_session_id));
+            retiredParent = !!text(row.parent_session_id) && history.retiredSessionIds.has(String(row.parent_session_id));
+          }
+          if (!historical && (row.owner_workspace_id !== row.workspace_id || retired || retiredParent)) return { ok: true, facts: null };
+        }
         return { ok: true, facts: logFactsFromRow(row) };
       } catch {
         return { ok: false, code: "unavailable" };
@@ -365,6 +400,9 @@ export function createSqliteStreamAuthReader(store: MultiremiStore): StreamAuthR
             && (!store.getWorkspace(workspaceId) || !store.getConversationLogHead(sessionId))) return { ok: true, facts: null };
           return { ok: true, facts: { kind: "auto", workspaceId, creatorId: null, requesterIsMember: isMember(subject.userId, workspaceId) } };
         }
+        const scoped = store.getIssueSessionWithOwnerScope(sessionId);
+        if (!scoped || scoped.ownerWorkspaceId !== issueSession.workspaceId
+          && scoped.historicalWorkspaceId !== issueSession.workspaceId) return { ok: true, facts: null };
         if (issueSession.chatId) {
           const owner = store.getChatSession(issueSession.chatId);
           const agent = owner ? store.getAgent(owner.agentId) : null;
@@ -374,7 +412,6 @@ export function createSqliteStreamAuthReader(store: MultiremiStore): StreamAuthR
             requesterCanAccessAgent: !!agent && agent.workspaceId === owner.workspaceId
               && canUserAccessAgentByUserId(store, subject.userId, agent) } };
         }
-        if (!issueSession.issueId || store.getIssue(issueSession.issueId)?.workspaceId !== issueSession.workspaceId) return { ok: true, facts: null };
         return {
           ok: true,
           facts: {

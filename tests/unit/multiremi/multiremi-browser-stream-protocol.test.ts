@@ -1,3 +1,4 @@
+import { createResponsibleTestIssue } from './helpers.js';
 // MUL-438 / C3: the browser WebSocket's v2 stream protocol.
 //
 // These are the acceptance cases the sub-issue names for the server side:
@@ -111,9 +112,9 @@ function seedWorld(store: MultiremiStore): SeededWorld {
   const workspace = store.ensureLocalWorkspace();
   store.createWorkspaceMember({ workspaceId: workspace.id, userId: "creator", name: "Creator", role: "owner" });
   store.createWorkspaceMember({ workspaceId: workspace.id, userId: "member", name: "Member", role: "member" });
-  const issue = store.createIssue({ title: "Streamed issue", workspaceId: workspace.id });
+  const issue = createResponsibleTestIssue(store, { title: "Streamed issue", workspaceId: workspace.id });
   const session = store.getOrCreateDefaultIssueSession(issue.id, "creator");
-  const otherIssue = store.createIssue({ title: "Second issue", workspaceId: workspace.id });
+  const otherIssue = createResponsibleTestIssue(store, { title: "Second issue", workspaceId: workspace.id });
   const otherSession = store.getOrCreateDefaultIssueSession(otherIssue.id, "creator");
   const agent = store.createAgent({ name: "Public agent", provider: "codex", workspaceId: workspace.id, visibility: "workspace" });
   const privateAgent = store.createAgent({

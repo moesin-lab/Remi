@@ -1,3 +1,4 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
@@ -15,7 +16,7 @@ for (const linked of [false, true]) {
     }
     const agent = store.createAgent({ name: "Log owner", provider: "codex", visibility: "workspace", ownerId: "alice" });
     const chat = store.createChatSession({ agentId: agent.id, creatorId: "alice" });
-    const issue = linked ? store.createIssue({ title: "Shared management anchor" }) : null;
+    const issue = linked ? createResponsibleTestIssue(store, { title: "Shared management anchor" }) : null;
     const session = issue
       ? store.createIssueSession(issue.id, { chatId: chat.id, title: "Private work" })
       : store.getOrCreateDefaultChatSession(chat.id);
@@ -539,7 +540,7 @@ for (const creator of ["runtime-owner", "other-user"] as const) it(`a task canno
 
 it("Issue task credentials still read Issue ranges and persist unread progress", async () => {
   const f = fixture();
-  const issue = f.store.createIssue({ title: "Issue regression" });
+  const issue = createResponsibleTestIssue(f.store, { title: "Issue regression" });
   const session = f.store.getOrCreateDefaultIssueSession(issue.id);
   f.store.createIssueComment(issue.id, { authorType: "member", authorId: "local", body: "ISSUE_UNREAD" });
   const task = f.store.createTask({ agentId: f.agent.id, issueId: issue.id, prompt: "Read issue" });
@@ -553,7 +554,7 @@ it("Issue task credentials still read Issue ranges and persist unread progress",
   expect((await response.json()).entries).toContainEqual(expect.objectContaining({ body_md: "ISSUE_UNREAD" }));
   expect(f.store.getSessionAgentReadProgress(session.id, f.agent.id)).toEqual({ seq: to, offset: 0 });
   const workspace = f.store.createWorkspace({ name: "Foreign issues", slug: "foreign-issues" });
-  const foreignIssue = f.store.createIssue({ workspaceId: workspace.id, title: "Foreign unread issue" });
+  const foreignIssue = createResponsibleTestIssue(f.store, { workspaceId: workspace.id, title: "Foreign unread issue" });
   const foreignSession = f.store.getOrCreateDefaultIssueSession(foreignIssue.id);
   const denied = await f.app.request(`/api/sessions/${foreignSession.id}/messages?from=0&to=1`,
     { headers: { Authorization: `Bearer ${credential.token}` } });

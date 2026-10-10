@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { I18nProvider } from "@multiremi/core/i18n/react";
 import enCommon from "../../locales/en/common.json";
 import enSettings from "../../locales/en/im-platforms.json";
+import enIssues from "../../locales/en/issues.json";
 
 type MemberRole = "owner" | "admin" | "member" | "guest";
 
@@ -24,6 +25,7 @@ const issueTopicsQueryRef = vi.hoisted(() => ({
   },
 }));
 const pendingRef = vi.hoisted(() => ({ members: false, bot: false }));
+const botSelectionRef = vi.hoisted(() => ({ botId: "default" }));
 
 const mockSave = vi.hoisted(() => vi.fn());
 const mockDelete = vi.hoisted(() => vi.fn());
@@ -31,6 +33,11 @@ const mockDeploy = vi.hoisted(() => vi.fn());
 const mockStop = vi.hoisted(() => vi.fn());
 const mockTest = vi.hoisted(() => vi.fn());
 const mockSaveRoutes = vi.hoisted(() => vi.fn());
+const mockSaveHook = vi.hoisted(() => vi.fn());
+
+vi.mock("./bot-selection", () => ({
+  useFeishuBotSelection: () => ({ botId: botSelectionRef.botId, selectBot: vi.fn() }),
+}));
 
 vi.mock("@tanstack/react-query", () => ({
   useQuery: (opts: { queryKey: unknown[]; enabled?: boolean }) => {
@@ -103,7 +110,10 @@ vi.mock("@multiremi/core/feishu-bot/queries", () => ({
 }));
 
 vi.mock("@multiremi/core/feishu-bot/mutations", () => ({
-  useSaveFeishuBot: () => ({ mutateAsync: mockSave, isPending: false }),
+  useSaveFeishuBot: (workspaceId: string, botId: string) => {
+    mockSaveHook(workspaceId, botId);
+    return { mutateAsync: mockSave, isPending: false };
+  },
   useDeleteFeishuBot: () => ({ mutateAsync: mockDelete, isPending: false }),
   useDeployFeishuBot: () => ({ mutateAsync: mockDeploy, isPending: false }),
   useStopFeishuBot: () => ({ mutateAsync: mockStop, isPending: false }),
@@ -140,7 +150,7 @@ vi.mock("react-qr-code", () => {
 import { FeishuBotSection } from "./feishu-bot-section";
 import { toast } from "sonner";
 
-const TEST_RESOURCES = { en: { common: enCommon, "im-platforms": enSettings } };
+const TEST_RESOURCES = { en: { common: enCommon, "im-platforms": enSettings, issues: enIssues } };
 
 function Wrapper({ children }: { children: ReactNode }) {
   return (
@@ -204,6 +214,7 @@ function resetFixtures() {
   candidatesRef.current = CANDIDATES;
   pendingRef.members = false;
   pendingRef.bot = false;
+  botSelectionRef.botId = "default";
   mockSave.mockResolvedValue(CONFIGURED.config);
   mockDeploy.mockResolvedValue({});
   mockStop.mockResolvedValue({});
@@ -276,6 +287,25 @@ describe("FeishuBotSection (loading)", () => {
 describe("FeishuBotSection (admin form)", () => {
   beforeEach(resetFixtures);
 
+  it("saves and clears the selected bot's explicit human without inferring the workspace owner", async () => {
+    botSelectionRef.botId = "bot-2";
+    membersRef.current = [{ user_id: "user-1", role: "owner", id: "human", name: "Confirmed human" } as typeof membersRef.current[number]];
+    botRef.current = { role: "admin", config: { ...CONFIGURED.config, bot_id: "bot-2", name: "Second bot" } };
+    const user = userEvent.setup();
+    renderSection();
+
+    const human = screen.getByRole("combobox", { name: "Designated human" });
+    expect(human).toHaveValue("");
+    expect(mockSaveHook).toHaveBeenCalledWith("workspace-1", "bot-2");
+    await user.selectOptions(human, "human");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(mockSave).toHaveBeenLastCalledWith(expect.objectContaining({ name: "Second bot", responsible_member_id: "human", app_secret_op: "keep" }));
+
+    await user.selectOptions(human, "");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(mockSave).toHaveBeenLastCalledWith(expect.objectContaining({ responsible_member_id: null }));
+  });
+
   it("seeds the form from the stored config and never renders a secret", () => {
     renderSection();
     expect(screen.getByLabelText("App ID")).toHaveValue("cli_abc123");
@@ -288,7 +318,7 @@ describe("FeishuBotSection (admin form)", () => {
   it("shows the Agent name and machine name without exposing provider engines", () => {
     renderSection();
     expect(screen.getByText("Default Agent")).toBeInTheDocument();
-    const selectors = screen.getAllByRole("combobox");
+    const selectors = screen.getAllByRole("combobox").filter(element => element.getAttribute("aria-label") !== "Designated human");
     expect(selectors[0]).toHaveTextContent("Remi");
     expect(selectors[1]).toHaveTextContent("mac-mini");
     expect(selectors[1]).not.toHaveTextContent(/claude|codex/i);

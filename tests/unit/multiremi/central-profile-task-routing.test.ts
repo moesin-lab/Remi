@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { createLocalStore, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore, createResponsibleTestIssue, resetMultiremiTestEnv } from "./helpers.js";
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 
 afterEach(resetMultiremiTestEnv);
@@ -85,7 +85,7 @@ describe("central profile task routing", () => {
     store.updateRuntimeModels(runtime.id, [{ id: "native-model", label: "Native", provider: "codex", default: true }]);
     store.updateAgent(agentA.id, { model: "native-model" });
     ready(a.id);
-    const task = store.createTask({ agentId: agentA.id, issueId: store.createIssue({ title: "Native retry" }).id, prompt: "Original" });
+    const task = store.createTask({ agentId: agentA.id, issueId: createResponsibleTestIssue(store, { title: "Native retry" }).id, prompt: "Original" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     store.failTask(task.id, { error: "Runtime unavailable", failureReason: "runtime_offline" });

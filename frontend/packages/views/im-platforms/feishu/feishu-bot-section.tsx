@@ -52,6 +52,7 @@ import {
 } from "@multiremi/ui/components/ui/alert-dialog";
 import { cn } from "@multiremi/ui/lib/utils";
 import { useT } from "../../i18n";
+import { RootHumanPicker } from "../../issues/components/root-human-picker";
 import { useTimeAgo } from "../../i18n/use-time-ago";
 import { FeishuBotRegistrationDialog, type ClaimedRegistration } from "./feishu-bot-registration-dialog";
 import { useFeishuBotSelection } from "./bot-selection";
@@ -155,6 +156,7 @@ function SectionHeader() {
 
 interface Draft {
   name: string;
+  responsibleMemberId: string | null;
   agentId: string;
   runtimeId: string;
   appId: string;
@@ -166,6 +168,7 @@ interface Draft {
 
 const EMPTY_DRAFT: Draft = {
   name: "",
+  responsibleMemberId: null,
   agentId: "",
   runtimeId: "",
   appId: "",
@@ -180,6 +183,7 @@ function draftFromConfig(config: FeishuBotConfig | null): Draft {
     ...EMPTY_DRAFT,
     name: config.name ?? "",
     agentId: config.agent_id ?? "",
+    responsibleMemberId: config.responsible_member_id ?? null,
     runtimeId: config.runtime_id ?? "",
     appId: config.app_id,
     domain: config.domain,
@@ -252,6 +256,7 @@ function FeishuBotAdminPanel({
     const request: UpsertFeishuBotRequest = {
       name: draft.name.trim(),
       agent_id: draft.agentId,
+      responsible_member_id: draft.responsibleMemberId,
       runtime_id: draft.runtimeId,
       app_id: draft.appId.trim(),
       domain: draft.domain,
@@ -339,6 +344,7 @@ function FeishuBotAdminPanel({
             <Input id="feishu-bot-name" value={draft.name} maxLength={100} disabled={busy} onChange={event => edit({ name: event.target.value })} />
           </div>
           <p className="text-xs text-muted-foreground">{t($ => $.bots.runtimeHint)}</p>
+          <RootHumanPicker value={draft.responsibleMemberId} onChange={id => edit({ responsibleMemberId: id })} onClear={() => edit({ responsibleMemberId: null })} disabled={busy} automation />
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label>{t(($) => $.feishu.concierge.agent_label)}</Label>

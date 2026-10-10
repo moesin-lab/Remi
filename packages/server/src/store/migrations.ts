@@ -1,5 +1,6 @@
 import { migrateLegacyExecutionProfiles } from "@multiremi/store/execution-profile-migration.js";
 import { ensureTurnListIndexes } from './turn-list-indexes.js';
+import { ensureQuestionQueryIndexes } from './inbox/question-indexes.js';
 import { openSqliteDatabase } from './db/sqlite.js';
 import { widenAttemptCounters,separateLaneProviderProgress } from './inbox/attempt-counters.js';
 import { migrateAttemptInput } from './inbox/attempt-input.js';
@@ -14,6 +15,7 @@ import { CHAT_ISSUE_DECOUPLED_FINGERPRINT, chatTaskRetryParentSql } from "@multi
 import { backfillRuntimeExecutionGroups } from "@multiremi/store/execution-groups.js";
 import { ensureUsageAccountingSchema } from "@multiremi/store/usage-accounting.js";
 import { createHash } from "node:crypto";
+import { readAuditedIssueSessionHistory } from "./issue-session-owner-scope.js";
 import { attachmentIdsFromText } from "@multiremi/contracts/attachments.js";
 import { type SqlDatabase, type SqlDatabaseDialect } from "@multiremi/store/db/postgres.js";
 import {
@@ -87,8 +89,13 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
     if(tables.has("multiremi_users"))backfillOwnerExternalId(db);
     if (tables.has("multiremi_feishu_bot_configs")) {
       addColumnIfMissing(db, "multiremi_feishu_bot_configs", "sender_access_policy TEXT NOT NULL DEFAULT 'agent'");
+      addColumnIfMissing(db, "multiremi_feishu_bot_configs", "responsible_member_id TEXT");
     }
-    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);return;}
+    // Additive responsibility upgrade must also run for an already unified snapshot.
+    if(tables.has('multiremi_issues'))addColumnIfMissing(db,'multiremi_issues','responsible_member_id TEXT');
+    if(tables.has('multiremi_autopilots'))addColumnIfMissing(db,'multiremi_autopilots','responsible_member_id TEXT');
+    if(tables.has('multiremi_issue_activity'))addColumnIfMissing(db,'multiremi_issue_activity','workspace_id TEXT');
+    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);return;}
     // Inspect the existing snapshot before bootstrap migrations can touch it.
     const checks=unifiedModelPreflight(db);
     if(checks.some(c=>!c.ok)){
@@ -97,7 +104,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
     }
     runMigrationsForDialect(db,resolveSqlDialect(db,options.dialect));
     runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});
-    separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);
+    separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);
   });
   // SQLite schema rebuilds toggle foreign_keys outside their transactions.
   // Hold a separate SQLite writer lock across that entire sequence so another
@@ -1051,6 +1058,7 @@ function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): 
     CREATE TABLE IF NOT EXISTS multiremi_issue_activity (
       id TEXT PRIMARY KEY,
       issue_id TEXT NOT NULL,
+      workspace_id TEXT,
       actor_type TEXT NOT NULL DEFAULT 'system',
       actor_id TEXT,
       type TEXT NOT NULL,
@@ -2895,6 +2903,8 @@ function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): 
   // close that single parent once its children are finished. Three nullable
   // columns, add-only: NULL means "no grant" and matches the pre-S1c behaviour.
   addColumnIfMissing(db, "multiremi_issues", "parent_done_grant_at TEXT");
+  // No guessed backfill: legacy roots remain visibly unresolved until explicitly assigned.
+  addColumnIfMissing(db, "multiremi_issues", "responsible_member_id TEXT");
   addColumnIfMissing(db, "multiremi_issues", "parent_done_grant_by TEXT");
   addColumnIfMissing(db, "multiremi_issues", "parent_done_grant_agent_id TEXT");
   const issueCompletedAtAdded = addColumnIfMissing(db, "multiremi_issues", "completed_at TEXT");
@@ -3014,6 +3024,7 @@ function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): 
   addColumnIfMissing(db, "multiremi_feishu_bot_chat_bindings", "reply_to_message_id TEXT");
   addColumnIfMissing(db, "multiremi_feishu_bot_deliveries", "sender_id TEXT");
   addColumnIfMissing(db, "multiremi_feishu_bot_configs", "sender_access_policy TEXT NOT NULL DEFAULT 'agent'");
+  addColumnIfMissing(db, "multiremi_feishu_bot_configs", "responsible_member_id TEXT");
   addColumnIfMissing(db, "multiremi_feishu_bot_senders", "name_en TEXT");
   addColumnIfMissing(db, "multiremi_feishu_bot_senders", "profile_checked_at TEXT");
   db.exec(`CREATE INDEX IF NOT EXISTS idx_multiremi_feishu_bot_delivery_sender
@@ -3125,6 +3136,7 @@ function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): 
   runMigrationOnce(db, MARKDOWN_ATTACHMENT_OWNERSHIP_MIGRATION, () => backfillMarkdownAttachmentOwnership(db));
   addColumnIfMissing(db, "multiremi_autopilots", "created_by_type TEXT NOT NULL DEFAULT 'member'");
   addColumnIfMissing(db, "multiremi_autopilots", "created_by_id TEXT NOT NULL DEFAULT 'local'");
+  addColumnIfMissing(db, "multiremi_autopilots", "responsible_member_id TEXT");
   addColumnIfMissing(db, "multiremi_autopilots", "session_policy TEXT NOT NULL DEFAULT 'new'");
   addColumnIfMissing(db, "multiremi_autopilots", "workspace_policy TEXT NOT NULL DEFAULT 'reuse_issue'");
   addColumnIfMissing(db, "multiremi_autopilot_triggers", "event_filters TEXT");
@@ -4019,12 +4031,27 @@ function migrateDualOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
        ORDER BY s.id LIMIT 1`,
     ).get() as { id: string } | null;
     if (invalid) throw new Error(`Dual-owned Session migration: invalid or missing owner for Session ${invalid.id}`);
-    // Older Issue moves left Session.workspace_id behind. The Issue owner is
-    // still known, so carry its Sessions with it and detach foreign projections.
-    db.run(`UPDATE multiremi_issue_sessions SET workspace_id = (
-        SELECT issue.workspace_id FROM multiremi_issues issue WHERE issue.id = multiremi_issue_sessions.issue_id
-      ) WHERE chat_id IS NULL AND workspace_id <> (
-        SELECT issue.workspace_id FROM multiremi_issues issue WHERE issue.id = multiremi_issue_sessions.issue_id)`);
+    // Repair the pre-rotation move shape only. An actual Main-rotation receipt
+    // freezes source history, including old independent sides whose identity
+    // is insufficient to grant reads. Never move those bodies into the target.
+    const movedSessions = db.query(`SELECT s.id, s.issue_id, s.workspace_id, issue.workspace_id AS owner_workspace_id
+      FROM multiremi_issue_sessions s JOIN multiremi_issues issue ON issue.id = s.issue_id
+      WHERE s.chat_id IS NULL AND s.workspace_id <> issue.workspace_id ORDER BY s.id`)
+      .all() as Array<{ id: string; issue_id: string; workspace_id: string; owner_workspace_id: string }>;
+    const sourceWorkspaces = new Map<string, Set<string>>();
+    const repairedSessions: Array<{ id: string; workspaceId: string }> = [];
+    for (const session of movedSessions) {
+      if (!sourceWorkspaces.has(session.issue_id)) {
+        // Pre-unified snapshots do not yet have head.workspace_id. Only the
+        // owner identities and immutable receipt decide preservation here;
+        // runtime reads additionally require the real head's source workspace.
+        sourceWorkspaces.set(session.issue_id, readAuditedIssueSessionHistory(db, session.issue_id, false).sourceWorkspaceIds);
+      }
+      if (!sourceWorkspaces.get(session.issue_id)!.has(session.workspace_id)) {
+        db.run("UPDATE multiremi_issue_sessions SET workspace_id = ? WHERE id = ?", [session.owner_workspace_id, session.id]);
+        repairedSessions.push({ id: session.id, workspaceId: session.owner_workspace_id });
+      }
+    }
     const foreignProjections = `SELECT s.id FROM multiremi_issue_sessions s
       LEFT JOIN multiremi_issues issue ON issue.id = s.issue_id
       WHERE s.chat_id IS NOT NULL AND s.issue_id IS NOT NULL
@@ -4125,19 +4152,15 @@ function migrateDualOwnedSessions(db: SqlDatabase, dialect: SqlDatabaseDialect):
         ON CONFLICT DO NOTHING`);
       const headHasWorkspace = (db.query("PRAGMA table_info(multiremi_conversation_heads)").all() as Array<{ name: string }>)
         .some(column => column.name === "workspace_id");
-      if (headHasWorkspace) {
-        db.run(`UPDATE multiremi_conversation_heads SET workspace_id = (
-          SELECT session.workspace_id FROM multiremi_issue_sessions session
-          WHERE session.id = multiremi_conversation_heads.session_id)
-          WHERE session_id IN (SELECT id FROM multiremi_issue_sessions WHERE chat_id IS NULL)`);
+      for (const session of repairedSessions) {
+        if (headHasWorkspace) {
+          db.run("UPDATE multiremi_conversation_heads SET workspace_id = ? WHERE session_id = ?",
+            [session.workspaceId, session.id]);
+        }
+        db.run(`UPDATE multiremi_comment_reactions SET workspace_id = ?
+          WHERE comment_id IN (SELECT message.id FROM multiremi_conversation_log message
+            WHERE message.session_id = ?)`, [session.workspaceId, session.id]);
       }
-      db.run(`UPDATE multiremi_comment_reactions SET workspace_id = (
-        SELECT session.workspace_id FROM multiremi_conversation_log message
-        JOIN multiremi_issue_sessions session ON session.id = message.session_id
-        WHERE message.id = multiremi_comment_reactions.comment_id)
-        WHERE comment_id IN (SELECT message.id FROM multiremi_conversation_log message
-          JOIN multiremi_issue_sessions session ON session.id = message.session_id
-          WHERE session.chat_id IS NULL)`);
     }
     if (dialect === "sqlite") assertSessionForeignKeys(db);
   };

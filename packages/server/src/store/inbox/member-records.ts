@@ -3,12 +3,14 @@ import type {SqlDatabase} from '../db/postgres.js';
 /** Human notification cards are projections of messages and member lane cursors. */
 export function createMemberInboxReadProjection(db:SqlDatabase):void {
   const cols=db.query('PRAGMA table_info(multiremi_conversation_heads)').all().map(row=>row.name);
-  if(!cols.includes('workspace_id'))db.exec('ALTER TABLE multiremi_conversation_heads ADD COLUMN workspace_id TEXT');
-  db.exec(`UPDATE multiremi_conversation_heads SET workspace_id=COALESCE(
-    (SELECT workspace_id FROM multiremi_issue_sessions s WHERE s.id=multiremi_conversation_heads.session_id),
-    (SELECT workspace_id FROM multiremi_chat_sessions c WHERE c.id=multiremi_conversation_heads.session_id),
-    (SELECT workspace_id FROM multiremi_autopilots a WHERE a.session_id=multiremi_conversation_heads.session_id),
-    (SELECT workspace_id FROM multiremi_turns t WHERE t.session_id=multiremi_conversation_heads.session_id LIMIT 1)) WHERE workspace_id IS NULL`);
+  if(!cols.includes('workspace_id')){
+    db.exec('ALTER TABLE multiremi_conversation_heads ADD COLUMN workspace_id TEXT');
+    db.exec(`UPDATE multiremi_conversation_heads SET workspace_id=COALESCE(
+      (SELECT workspace_id FROM multiremi_issue_sessions s WHERE s.id=multiremi_conversation_heads.session_id),
+      (SELECT workspace_id FROM multiremi_chat_sessions c WHERE c.id=multiremi_conversation_heads.session_id),
+      (SELECT workspace_id FROM multiremi_autopilots a WHERE a.session_id=multiremi_conversation_heads.session_id),
+      (SELECT workspace_id FROM multiremi_turns t WHERE t.session_id=multiremi_conversation_heads.session_id LIMIT 1)) WHERE workspace_id IS NULL`);
+  }
   const json=(key:string)=>db.dialect==='postgres'?`m.metadata::jsonb #>> '{inbox_item,${key}}'`:`json_extract(m.metadata,'$.inbox_item.${key}')`;
   db.exec(`${db.dialect==='postgres'?'CREATE OR REPLACE VIEW':'CREATE VIEW IF NOT EXISTS'} multiremi_member_inbox_records AS
     SELECT m.id,h.workspace_id,s.issue_id,m.to_member_id AS member_id,'member' AS recipient_type,m.to_member_id AS recipient_id,

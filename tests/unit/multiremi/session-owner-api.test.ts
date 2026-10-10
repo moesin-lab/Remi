@@ -144,9 +144,9 @@ describe("Session owner API boundaries", () => {
     const sourceSession = f.store.getOrCreateDefaultIssueSession(f.issue.id);
     const source = f.store.createSessionTask(sourceSession.id, { agentId: f.agent.id, prompt: "Own workspace" });
     const foreign = f.store.createWorkspace({ name: "Foreign tasks", slug: "foreign-tasks", issuePrefix: "FTK" });
-    f.store.createWorkspaceMember({ workspaceId: foreign.id, userId: "alice", name: "alice", role: "member" });
+    const human = f.store.createWorkspaceMember({ workspaceId: foreign.id, userId: "alice", name: "alice", role: "member" });
     const agent = f.store.createAgent({ name: "Foreign worker", provider: "claude", workspaceId: foreign.id, ownerId: "alice" });
-    const issue = f.store.createIssue({ title: "Foreign public work", workspaceId: foreign.id });
+    const issue = f.store.createIssue({ title: "Foreign public work", workspaceId: foreign.id, responsibleMemberId: human.id });
     const task = f.store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Foreign task" });
     expect(task.chatSessionId).toBeNull();
     const token = await f.store.createTaskAccessToken(source, "alice");
@@ -425,7 +425,7 @@ describe("Session owner API boundaries", () => {
     expect((await post()).status).toBe(200);
     expect((await post(false)).status).toBe(403);
     expect((await f.app.request(metadataPath, { headers })).status).toBe(200);
-    const otherIssue = f.store.createIssue({ title: "Unbound", workspaceId: "local" });
+    const otherIssue = f.store.createIssue({ title: "Unbound", workspaceId: "local", responsibleMemberId: f.issue.responsibleMemberId });
     const otherSession = f.store.getOrCreateDefaultIssueSession(otherIssue.id);
     expect((await f.app.request(`/api/sessions/${otherSession.id}/messages`, {
       method: "POST", headers, body: JSON.stringify({ body_md: "Cross-Issue intrusion", message_kind: "request", to: { type: "agent", ref: f.agent.id } }),

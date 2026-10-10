@@ -4,7 +4,7 @@ import { MultiremiStore } from "@multiremi/store.js";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { historicalWriters } from "./unified-model-test-backends.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
-import { createStore, db, readyArchiveBinding, resetMultiremiTestEnv } from "./helpers.js";
+import { createResponsibleTestIssue, createStore, db, readyArchiveBinding, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -16,13 +16,14 @@ const count = (table: string, field: string, id: string) =>
 describe("Session dual ownership store", () => {
   it("creates an Issue Main without an Agent or Chat and preserves external creator audit", () => {
     const store = createStore();
-    const issue = store.createIssue({ title: "Independent work", createdBy: "feishu:open:test:creator" });
+    const issue = createResponsibleTestIssue(store, { title: "Independent work", createdBy: "feishu:open:test:creator" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const side = store.createIssueSession(issue.id, { parentSessionId: main.id, title: "Review" });
 
     expect(main).toMatchObject({ ownerType: "issue", ownerId: issue.id, chatId: null, issueId: issue.id, isDefault: true });
     expect(side).toMatchObject({ ownerType: "issue", ownerId: issue.id, chatId: null, parentSessionId: main.id, holdsWorkspace: false });
     expect(store.getOrCreateDefaultIssueSession(issue.id).id).toBe(main.id);
+    expect(issue.createdBy).toBe("feishu:open:test:creator");
     expect(store.listChatSessions("local")).toEqual([]);
     expect(store.listSessionParticipants(main.id)).toEqual([]);
   });
@@ -30,7 +31,7 @@ describe("Session dual ownership store", () => {
   it("keeps projected Chat Sessions distinct from the Issue Main and refuses cross-owner forks and ids", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Worker", provider: "claude" });
-    const issue = store.createIssue({ title: "Shared anchor" });
+    const issue = createResponsibleTestIssue(store, { title: "Shared anchor" });
     const chat = store.createChatSession({ agentId: agent.id });
     const projected = store.createIssueSession(issue.id, { chatId: chat.id, title: "Private work" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
@@ -51,7 +52,7 @@ describe("Session dual ownership store", () => {
   it("executes Issue-owned Sessions without adoption and protects explicit transfers", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Worker", provider: "claude" });
-    const issue = store.createIssue({ title: "Run directly" });
+    const issue = createResponsibleTestIssue(store, { title: "Run directly" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const task = store.createSessionTask(main.id, { agentId: agent.id, prompt: "Work" });
 
@@ -72,7 +73,7 @@ describe("Session dual ownership store", () => {
 
   it("rolls a Result publication back when its Session event fails", () => {
     const store = createStore();
-    const issue = store.createIssue({ title: "Atomic publication" });
+    const issue = createResponsibleTestIssue(store, { title: "Atomic publication" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const before = store.listConversationLogEntries(main.id);
     db!.exec(`CREATE TRIGGER reject_result_event BEFORE INSERT ON multiremi_conversation_log
@@ -89,7 +90,7 @@ describe("Session dual ownership store", () => {
       const store = createStore();
       db!.exec(`PRAGMA foreign_keys = ${foreignKeys ? "ON" : "OFF"}`);
       const agent = store.createAgent({ name: "Worker", provider: "claude" });
-      const issue = store.createIssue({ title: "Mixed work" });
+      const issue = createResponsibleTestIssue(store, { title: "Mixed work" });
       const main = store.getOrCreateDefaultIssueSession(issue.id);
       const ownedTask = store.createSessionTask(main.id, { agentId: agent.id, prompt: "Owned round" });
       const ownedResult = store.publishSessionResult(main.id, { body: "Owned result" });
@@ -126,7 +127,7 @@ describe("Session dual ownership store", () => {
       const store = createStore();
       db!.exec(`PRAGMA foreign_keys = ${foreignKeys ? "ON" : "OFF"}`);
       const agent = store.createAgent({ name: "Worker", provider: "claude" });
-      const issue = store.createIssue({ title: "Retained Issue" });
+      const issue = createResponsibleTestIssue(store, { title: "Retained Issue" });
       const issueMain = store.getOrCreateDefaultIssueSession(issue.id);
       const chat = store.createChatSession({ agentId: agent.id });
       const projected = store.createIssueSession(issue.id, { chatId: chat.id });
@@ -146,11 +147,12 @@ describe("Session dual ownership store", () => {
     });
   }
 
-  it("moves Issue-owned history and detaches Chat projections atomically", () => {
+  it("rotates the Issue Main while preserving source history and detaching Chat projections atomically", () => {
     const store = createStore();
     const target = store.createWorkspace({ name: "Target" });
+    const human = store.createWorkspaceMember({ workspaceId: target.id, name: "Target human", role: "member" });
     const agent = store.createAgent({ name: "Worker", provider: "claude" });
-    const issue = store.createIssue({ title: "Move with history" });
+    const issue = createResponsibleTestIssue(store, { title: "Move with history" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const side = store.createIssueSession(issue.id, { parentSessionId: main.id });
     store.appendSessionEvent(main.id, { authorType: "system", body: "Keep history" });
@@ -159,28 +161,42 @@ describe("Session dual ownership store", () => {
     const projected = store.createIssueSession(issue.id, { chatId: chat.id });
     const projectedResult = store.publishSessionResult(projected.id, { body: "Projected result" });
     const task = store.createSessionTask(main.id, { agentId: agent.id, prompt: "Active work" });
-    expect(() => store.updateIssue(issue.id, { workspaceId: target.id })).toThrow("workspace");
+    const move = { workspaceId: target.id, responsibleMemberId: human.id,
+      actorType: "member" as const, actorId: issue.responsibleMemberId };
+    expect(() => store.updateIssue(issue.id, move)).toThrow("workspace");
     expect(store.getIssueSession(main.id)?.workspaceId).toBe("local");
     expect(store.getIssueSession(projected.id)?.issueId).toBe(issue.id);
     store.cancelTask(task.id);
-    const before = store.listConversationLogEntries(main.id);
-    store.updateIssue(issue.id, { workspaceId: target.id });
+    const before = [main.id, side.id].map(id => store.listConversationLogEntries(id));
+    const headsBefore = [main.id, side.id].map(id => db!.query(
+      "SELECT * FROM multiremi_conversation_heads WHERE session_id = ?",
+    ).get(id));
+    store.updateIssue(issue.id, move);
     for (const sessionId of [main.id, side.id]) {
-      expect(store.getIssueSession(sessionId)).toMatchObject({ ownerId: issue.id, workspaceId: target.id });
+      expect(store.getIssueSession(sessionId)).toMatchObject({ ownerId: issue.id, workspaceId: "local", isDefault: false });
     }
-    expect(store.listConversationLogEntries(main.id).slice(0, before.length)).toEqual(before);
+    expect([main.id, side.id].map(id => db!.query(
+      "SELECT * FROM multiremi_conversation_heads WHERE session_id = ?",
+    ).get(id))).toEqual(headsBefore);
+    expect([main.id, side.id].map(id => store.listConversationLogEntries(id))).toEqual(before);
+    const nextMain = store.getOrCreateDefaultIssueSession(issue.id);
+    expect(nextMain.id).not.toBe(main.id);
+    expect(nextMain).toMatchObject({ ownerType: "issue", ownerId: issue.id, workspaceId: target.id,
+      isDefault: true, parentSessionId: null, inheritMode: "none" });
     expect(store.getSessionResult(ownedResult.id)?.issueId).toBe(issue.id);
     expect(store.getIssueSession(projected.id)).toMatchObject({ ownerId: chat.id, workspaceId: "local", issueId: null });
     expect(store.getSessionResult(projectedResult.id)?.issueId).toBeNull();
     expect(store.getTask(task.id)?.workspaceId).toBe("local");
-    const empty = store.createIssue({ title: "Empty Main can move" });
-    store.updateIssue(empty.id, { workspaceId: target.id });
+    const empty = createResponsibleTestIssue(store, { title: "Empty Main can move" });
+    const previousEmptyMain = store.getOrCreateDefaultIssueSession(empty.id);
+    store.updateIssue(empty.id, { ...move, actorId: empty.responsibleMemberId });
+    expect(store.getOrCreateDefaultIssueSession(empty.id).id).not.toBe(previousEmptyMain.id);
     expect(store.getOrCreateDefaultIssueSession(empty.id).workspaceId).toBe(target.id);
   });
 
   it("rejects ownerless upgrades without changing history, schema or the migration marker", () => {
     const store = createStore();
-    const issue = store.createIssue({ title: "Orphaned before upgrade" });
+    const issue = createResponsibleTestIssue(store, { title: "Orphaned before upgrade" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     store.appendSessionEvent(main.id, { authorType: "system", body: "Preserve" });
     const result = store.publishSessionResult(main.id, { body: "Preserve result" });
@@ -203,7 +219,7 @@ describe("Session dual ownership store", () => {
     const store = createStore();
     const target = store.createWorkspace({ name: "Target" });
     const agent = store.createAgent({ name: "Worker", provider: "claude" });
-    const issue = store.createIssue({ title: "Legacy moved work" });
+    const issue = createResponsibleTestIssue(store, { title: "Legacy moved work" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const chat = store.createChatSession({ agentId: agent.id });
     const projected = store.createIssueSession(issue.id, { chatId: chat.id });
@@ -230,8 +246,8 @@ describe("Session dual ownership store", () => {
   it("rolls legacy workspace repairs back when a parent belongs to another owner", () => {
     const store = createStore();
     const target = store.createWorkspace({ name: "Target" });
-    const issue = store.createIssue({ title: "Old moved work" });
-    const other = store.createIssue({ title: "Other owner" });
+    const issue = createResponsibleTestIssue(store, { title: "Old moved work" });
+    const other = createResponsibleTestIssue(store, { title: "Other owner" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const otherMain = store.getOrCreateDefaultIssueSession(other.id);
     db!.run("UPDATE multiremi_issues SET workspace_id = ? WHERE id = ?", [target.id, issue.id]);

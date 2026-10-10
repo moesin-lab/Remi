@@ -16,6 +16,7 @@ import { buildSessionProjection } from "@multiremi/store/session-projection.js";
 import { conversationLogProjectionEvents } from "@multiremi/store/conversation-log-projection.js";
 import { resolveFollowDeltaRatio, resolveFollowTokenLimit, resolveProjectionTokenBudget } from "@multiremi/store/session-projection-budget.js";
 import { createLogger } from "@shared/logger.js";
+import { readAuditedIssueSessionHistory } from "@multiremi/store/issue-session-owner-scope.js";
 import type {
   AddSessionParticipantInput,
   CreateIssueSessionInput,
@@ -210,7 +211,12 @@ export class IssueSessionsRepo {
     return this.ctx.db.transaction(() => {
       const initialChat = this.ctx.chat().getChatSession(chatId);
       if (!initialChat) throw new Error(`Chat not found: ${chatId}`);
+      const initialSession = this.getIssueSession(sessionId);
+      if (!initialSession) throw new Error(`Session not found: ${sessionId}`);
       this.ctx.lockWorkspaceRuntimeLifecycle(initialChat.workspaceId);
+      if (!initialSession.chatId && initialSession.issueId) {
+        this.ctx.lockIssueArchiveLifecycle(initialSession.issueId);
+      }
       const chat = this.ctx.chat().getChatSession(chatId);
       if (!chat) throw new Error(`Chat not found: ${chatId}`);
       this.ctx.db.run("UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?", [sessionId]);
@@ -221,6 +227,12 @@ export class IssueSessionsRepo {
         return session;
       }
       if (session.workspaceId !== chat.workspaceId) throw new Error("Session belongs to another workspace");
+      if (session.issueId !== initialSession.issueId || session.workspaceId !== initialSession.workspaceId) {
+        throw new Error("Session owner changed during adoption");
+      }
+      if (session.issueId && this.getIssueSessionWithOwnerScope(session.id)?.ownerWorkspaceId !== session.workspaceId) {
+        throw new Error(`Session owner is unavailable: ${sessionId}`);
+      }
       if (session.parentSessionId || this.ctx.db.query(
         "SELECT id FROM multiremi_issue_sessions WHERE parent_session_id = ? LIMIT 1",
       ).get(session.id)) {
@@ -253,6 +265,19 @@ export class IssueSessionsRepo {
         body: `Session adopted by Chat ${chat.id}`,
         metadata: { chat_id: chat.id, issue_id: issueId },
       });
+      if (session.issueId) {
+        const head = this.ctx.db.query("SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id = ?")
+          .get(session.id) as { workspace_id: string | null } | null;
+        if (!head || head.workspace_id !== null && head.workspace_id !== session.workspaceId) {
+          throw new Error("Session head workspace changed during adoption");
+        }
+        this.ctx.appendIssueActivity(session.issueId, {
+          actorType: "system", actorId: null, type: "issue_session_owner_transferred", body: null,
+          data: { sessionId: session.id, issueId: session.issueId, workspaceId: session.workspaceId, chatId: chat.id,
+            isDefault: session.isDefault, parentSessionId: session.parentSessionId,
+            inheritMode: session.inheritMode, headWorkspaceId: head.workspace_id },
+        }, undefined, session.workspaceId);
+      }
       if (session.isDefault && session.issueId) {
         this.getOrCreateDefaultIssueSessionWithinTransaction(session.issueId);
       }
@@ -342,6 +367,9 @@ export class IssueSessionsRepo {
       if (parent.chatId || parent.issueId !== issue.id || parent.workspaceId !== issue.workspaceId) {
         throw new Error("Parent session must belong to the same Issue owner");
       }
+      if (this.getIssueSessionWithOwnerScope(parent.id)?.ownerWorkspaceId !== issue.workspaceId) {
+        throw new Error("Parent session owner is unavailable");
+      }
       if (parent.inheritMode !== "none") throw new Error("Cannot inherit from a side session (chained forks are not supported)");
       inheritCutoffSeq = this.parentMaxSeq(parentSessionId);
       if (withCode) {
@@ -405,14 +433,41 @@ export class IssueSessionsRepo {
     return row ? toIssueSession(row) : null;
   }
 
-  getIssueSessionWithOwnerScope(id: string): { session: MultiremiIssueSession; ownerWorkspaceId: string | null } | null {
+  getIssueSessionWithOwnerScope(id: string): { session: MultiremiIssueSession; ownerWorkspaceId: string | null; historicalWorkspaceId: string | null } | null {
     const row = this.ctx.db.query(`SELECT scoped.*,
-        CASE WHEN scoped.chat_id IS NOT NULL THEN chat.workspace_id ELSE issue.workspace_id END AS owner_workspace_id
+        CASE WHEN scoped.chat_id IS NOT NULL THEN chat.workspace_id ELSE issue.workspace_id END AS owner_workspace_id,
+        head.workspace_id AS head_workspace_id,
+        CASE WHEN scoped.parent_session_id IS NULL OR (parent.id IS NOT NULL
+          AND parent.workspace_id = scoped.workspace_id
+          AND COALESCE(parent.chat_id, '') = COALESCE(scoped.chat_id, '')
+          AND (scoped.chat_id IS NOT NULL OR parent.issue_id = scoped.issue_id)) THEN 1 ELSE 0 END AS parent_owner_valid,
+        CASE WHEN scoped.chat_id IS NULL AND EXISTS (SELECT 1 FROM multiremi_issue_activity activity
+          WHERE activity.issue_id = scoped.issue_id AND activity.type = 'issue_main_session_rotated')
+          THEN 1 ELSE 0 END AS has_rotation
       FROM (${SESSION_SELECT} WHERE s.id = ?) scoped
       LEFT JOIN multiremi_chat_sessions chat ON chat.id = scoped.chat_id
-      LEFT JOIN multiremi_issues issue ON issue.id = scoped.issue_id`).get(id) as Row | null;
-    if (!row) return null;
-    return { session: toIssueSession(row), ownerWorkspaceId: nullableString(row.owner_workspace_id) };
+      LEFT JOIN multiremi_issues issue ON issue.id = scoped.issue_id
+      LEFT JOIN multiremi_issue_sessions parent ON parent.id = scoped.parent_session_id
+      LEFT JOIN multiremi_conversation_heads head ON head.session_id = scoped.id`).get(id) as Row | null;
+    if (!row || row.chat_id == null && row.issue_id == null) return null;
+
+    const session = toIssueSession(row);
+    const actualOwnerWorkspaceId = nullableString(row.owner_workspace_id);
+    // Canonical creation leaves the head unbound until its first message.
+    // Any explicitly bound head must agree with the Session's workspace.
+    const structureValid = Number(row.parent_owner_valid) === 1
+      && (row.head_workspace_id == null || row.head_workspace_id === session.workspaceId);
+    let ownerWorkspaceId = structureValid && actualOwnerWorkspaceId === session.workspaceId ? actualOwnerWorkspaceId : null;
+    let historicalWorkspaceId: string | null = null;
+    if (!session.chatId && actualOwnerWorkspaceId && structureValid && Number(row.has_rotation) === 1) {
+      const history = readAuditedIssueSessionHistory(this.ctx.db, session.issueId!);
+      historicalWorkspaceId = history.historicalWorkspaceIds.get(session.id) ?? null;
+      if (history.retiredSessionIds.has(session.id) || session.parentSessionId && history.retiredSessionIds.has(session.parentSessionId)) {
+        ownerWorkspaceId = null;
+      }
+    }
+
+    return { session, ownerWorkspaceId, historicalWorkspaceId };
   }
 
   getSessionInheritedContext(sessionId: string): MultiremiSessionInheritedContext | null {
@@ -1044,10 +1099,9 @@ export class IssueSessionsRepo {
       throw new Error("Session owner changed during the write");
     }
 
-    const ownerTable = current.ownerType === "chat" ? "multiremi_chat_sessions" : "multiremi_issues";
-    const owner = this.ctx.db.query(`SELECT workspace_id FROM ${ownerTable} WHERE id = ?`)
-      .get(current.ownerId) as { workspace_id: string } | null;
-    if (!owner || owner.workspace_id !== current.workspaceId) throw new Error(`Session owner is unavailable: ${sessionId}`);
+    if (this.getIssueSessionWithOwnerScope(sessionId)?.ownerWorkspaceId !== current.workspaceId) {
+      throw new Error(`Session owner is unavailable: ${sessionId}`);
+    }
     return current;
   }
 
@@ -1071,8 +1125,10 @@ export class IssueSessionsRepo {
     if (!this.ctx.issues().getIssue(issueId)) throw new Error(`Issue not found: ${issueId}`);
     const rows = this.ctx.db.query(
       `SELECT * FROM multiremi_session_results
-       WHERE issue_id = ? ORDER BY created_at ASC`,
-    ).all(issueId) as Row[];
+       WHERE issue_id = ? AND source_session_id IN (SELECT s.id FROM multiremi_issue_sessions s
+         JOIN multiremi_issues issue ON issue.id = s.issue_id AND issue.workspace_id = s.workspace_id
+         WHERE s.issue_id = ?) ORDER BY created_at ASC`,
+    ).all(issueId, issueId) as Row[];
     return rows.map(toSessionResult);
   }
 

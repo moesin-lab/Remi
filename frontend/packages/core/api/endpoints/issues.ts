@@ -265,6 +265,7 @@ export class IssuesEndpoints {
   }
 
   async quickCreateIssue(data: {
+    responsible_member_id?: string | null;
     runtime_workspace_id?: string | null;
     agent_id?: string;
     squad_id?: string;

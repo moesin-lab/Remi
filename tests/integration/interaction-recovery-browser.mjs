@@ -125,7 +125,7 @@ try {
   // Finish setup through store primitives: no worker or model process is started.
   await store.cancelTask(assigned.task_id);
   await store.cancelTask(quick.task_id);
-  const blocked = await store.createIssue({ title: "MUL8 recover original run", workspaceId: workspace.id, assigneeType: "agent", assigneeId: changedAssignee.id, status: "todo" });
+  const blocked = await store.createIssue({ title: "MUL8 recover original run", workspaceId: workspace.id, createdBy: user.id, assigneeType: "agent", assigneeId: changedAssignee.id, status: "todo" });
   const previous = await store.createTask({ agentId: agent.id, issueId: blocked.id, prompt: "ORIGINAL RECOVERY INSTRUCTIONS: retain Session and tool context.", maxAttempts: 1, assignmentAuthorType: "member", assignmentAuthorId: user.id });
   assert.equal((await store.claimTask(runtime.id))?.id, previous.id);
   await store.startTask(previous.id);

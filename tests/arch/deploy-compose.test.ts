@@ -306,7 +306,7 @@ describe("application compose stack", () => {
     const section = splitSection(deployReadme);
     const body = section.match(/python3 -c "([\s\S]*?)\n  "/u)?.[1];
     expect(body, "operation pre-check Python script").toBeDefined();
-    const python = spawnSync(process.platform === "win32" ? "python" : "python3", ["-c", [
+    const python = spawnSync(process.platform === "win32" ? "python" : "python3", ["-B", "-c", [
       "import ast,json,sys,textwrap",
       "tree=ast.parse(textwrap.dedent(sys.stdin.read()))",
       "sets={n.targets[0].id:sorted(ast.literal_eval(n.value)) for n in tree.body",

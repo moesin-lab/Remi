@@ -65,6 +65,8 @@ Workspace、owner 与各路由权限，不新增统一的本 Task 限制。
 
 普通 Chat 和工作 Session 保留各自的对话 ID 与消息序列，通过唯一 `sendMessageWithinTransaction` 入口写入 canonical conversation log。两种所有权的 Session 都建立日志头；没有 Issue 的 Chat-owned Session 同样保存消息和执行终态。Issue 的缺省消息目标是该 Issue 自己的 `Main`，不把 Chat-owned 工作投影当作默认会话。编辑、删除和解决状态根据实际消息定位，不能扩大私有 Chat 的访问权限。
 
+新建 Session 的日志头可以是尚未绑定工作区的 `NULL` 占位头，首次 canonical 消息按实际 live owner 绑定；创建与成果等隐藏 marker 不完成该绑定。工作区列已经存在时，重启保持占位头，不能借启动回填为退休 Session 补出历史读取证据。退休身份的拒写不依赖日志头绑定，历史读取仍要求原 Session 及真实父链的日志头匹配来源空间；已绑定但工作区冲突的日志头不作为合法占位头。
+
 `multiremi_turns` 保存工作轮，`multiremi_turn_attempts` 保存执行尝试。页面只读 `/log` 窗口从新消息与轮投影卡片；CLI 与执行输入范围使用 `message list`。旧评论、Session task/message/event、Chat queue 及任务控制写入口退役，不能通过兼容名字重新执行。旧任务视图保留 daemon 执行形状，调度仍须区分工作 Session 与普通 Chat；不能仅凭 `chat_session_id` 判定普通 Chat 身份。统一模型迁移保留 attempt ID 及 trace 外键，生产切换须另走[切换手册](deploy/unified-model-cutover.md)。
 
 ## 创建与生命周期
@@ -78,6 +80,7 @@ Workspace、owner 与各路由权限，不新增统一的本 Task 限制。
   与工作 Session 轮；恢复 Chat 后，未单独归档的 Session 可继续使用。
 - 删除 Chat 时删除它拥有的 Sessions、事件、参与者、lane、成果及统一日志与日志头；Task 审计行保留，清空失效的 Session 引用，并保留原 Chat 身份作为私聊权限标识，避免删除后暴露历史 transcript。
 - 删除 Issue 时删除它拥有的 Sessions 及上述附属数据，并保留 Task 审计。对 Chat-owned Session 只清空该 Issue 的工作投影，不删除 Chat、Session 或成果。解绑工作投影也不删除 Chat-owned Session。
+- 显式跨 Workspace 移动 Issue 时，在同一事务建立目标空间的新 Issue-owned `Main`，并记录 `issue_main_session_rotated`。审计中的 `previousSessionIds` 精确记录原空间的 Issue-owned Sessions，`retiredTargetSessionIds` 记录新 Main 创建前目标空间已经存在的 Issue-owned Sessions，防止移回原空间时旧 Session 恢复执行权限。旧 Sessions、conversation head、正文、Q、lane 与 provider 历史保留原空间；已证实来源的旧 Session 直接读取按原空间鉴权，迁移不会把已审计历史搬到目标空间。旧版审计仅记录 Main 时，只能按真实父链证明 side 的历史来源；目标空间退休快照不会替未知 side 授予历史读取。旧评论只读，旧 Q、凭据、派活与控制权限不会因仍持有原 scope 恢复。Chat-owned 工作投影仅解绑，Chat 所有权及其 Main 不变。目标 Issue 聚合按当前空间过滤来源，不携带其它空间的旧正文。
 
 ### 关联到 Issue
 
@@ -118,10 +121,11 @@ Workspace、owner 与各路由权限，不新增统一的本 Task 限制。
 
 - 已有非空 `chat_id` 的 Session 保持 Chat-owned；`chat_id = null` 且 `issue_id` 非空的 Session 是完整可执行的 Issue-owned Session。旧 Chat 外键或飞书 binding 不作为自动换 owner 的依据。
 - 为没有默认会话的 Chat 和 Issue 补建各自的 `Main`；Issue 默认查询只接受 Issue-owned Session，不从 Chat-owned 工作投影中挑选。
-- `20261008_dual_owned_sessions` 在事务中核验 owner 存在、父子同 owner 以及 Main 唯一性，再建立所有者非空约束与两类 Main 的部分唯一索引。旧 Issue 移动遗留的 Issue-owned Session 工作区跟随已知 Issue owner 修正；Chat-owned 的跨工作区或失效 Issue 工作投影及其成果投影解除，Chat owner 保持不变。
+- `20261008_dual_owned_sessions` 在事务中核验 owner 存在、父子同 owner 以及 Main 唯一性，再建立所有者非空约束与两类 Main 的部分唯一索引。未经实际 Main 轮换审计证实的旧 Issue 移动遗留 Session 工作区跟随已知 Issue owner 修正；已有真实轮换审计的源空间 Sessions 保留原工作区，即使旧独立 side 缺少历史读取所需的身份记录也不会搬到目标空间。Chat-owned 的跨工作区或失效 Issue 工作投影及其成果投影解除，Chat owner 保持不变。
+- 仅首次为旧日志头增加 `workspace_id` 列时，按各自 Session 的已知工作区初始化来源。双所有权迁移只为本次实际修复的旧 Session 同步日志头与 reaction 的工作区，不重写其它现存日志头或已审计历史。
 - 历史 Session 若同时缺少 Chat 和 Issue，迁移明确报错并回滚，不删除数据、不猜归属、不记录该迁移完成标记；错误数据须先按实际所有者核实处理。无法确定的 owner、Chat owner 工作区冲突、父子归属或默认会话冲突同样阻止迁移；上述有确定 owner 的旧移动修复也随失败回滚。
 - SQLite 重建 Session 表并在提交前检查外键；PostgreSQL 添加约束。失败不记录双所有权迁移完成标记。
-- `remi session adopt <chat> <session>` 是用户显式把 Issue-owned Session 转入 Chat 的操作；有未完成 Task、父 Session 或子 Session 时拒绝。执行入口不会自动 adopt。
+- `remi session adopt <chat> <session>` 是用户显式把 Issue-owned Session 转入 Chat 的操作；转移前在 Workspace → Issue 生命周期锁内重核实际 live 所有权，退休历史 Session、失效所有者、有未完成 Task、父 Session 或子 Session 时拒绝。合法转移在原 Issue 保存 `issue_session_owner_transferred` 身份审计；若该 Session 曾是工作区移动后的新 Main，这条审计保证 Chat 工作投影解绑或 Chat 删除后，原空间的 Session 历史仍可按原来源读取，迁移仍保留其工作区。审计不保存 Chat 正文，也不把 Chat-owned Session 纳入 Issue 历史读取授权。执行入口不会自动 adopt。
 - `IssueSession` 类型保留为兼容别名。Chat 与 Issue 的嵌套 REST、CLI 都是一等入口；无归属依赖需要通过伪造占位 Issue 或 Chat 解决。
 
 ## Web 与 CLI 入口

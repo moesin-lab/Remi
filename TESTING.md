@@ -23,6 +23,13 @@ bun run test tests/arch/
 
 API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api-issues.test.ts)的进程内 `app.request()`，共享夹具在 [helpers.ts](tests/unit/multiremi/helpers.ts)。需要真实服务的测试应在自身入口明确配置和隔离方式，不能把本地凭据或生产数据作为普通单测前提。
 
+普通合成根 Issue 使用 `createResponsibleTestIssue(store, input)`，显式建立命名测试人类；
+合成自动化配置使用 `createResponsibleTestAutopilot`，按实际 workspace 建立同样明确的测试人类，
+避免调度、Webhook 或事件派活借 Runtime owner 创建根责任。已给出的责任字段（包括显式 null）保留原事实。
+子单仍继承根责任，显式空责任和生产创建负向用例直接调用原 Store，不能覆盖 Store 方法。
+闭环用例明确配置 Agent/团队执行归属，并用 `acceptTestIssueDelivery` 提交、验收实际交付。
+历史升级 fixture 使用其原表形状和历史 writer，不能借合成工厂提前写入新责任字段或验收收据。
+
 [公开参考价格 PG/CLI 回归](tests/unit/scripts/usage-reference-prices.test.ts)沿用 CI 的 `MULTIREMI_TEST_POSTGRES_URL`；可用 `MULTIREMI_TEST_REFERENCE_DATABASE_URL` 单独覆盖。所选测试连接必须具有创建测试库的权限，两条用例各创建随机命名的独立数据库，所有并发 writer 与 CLI 只连接该库，完成后仅删除本次成功创建的数据库。不要指向生产；连接或清理失败会使测试失败，不会跳过或强制删除公共表。
 
 ## 真实服务与手动验证
@@ -59,7 +66,8 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 
 - 合并请求只跑快检查：架构守卫、CLI 能力、前端类型/测试、CLI 和容器构建、平台专项检查。四个 `backend` 分片 job 的「Backend test suite」显示为跳过（skipped），job 仍正常报告结果。同一个合并请求推送新提交时，未跑完的旧运行会被自动取消。
 - 后端全套 `bun run test` 在合入 main 后的 push 运行里跑。main 上的运行互不取消，每个 main 提交都有自己的完整结果。
-- 发版门禁不变：打 tag 前，目标 main SHA 必须有一次全绿的 main push 运行或 main 上的手动运行（都含后端全套）。合并请求上的绿灯不能代替。检查停用后重新打开时，main 不会自动补跑，用 `gh workflow run release-build-check.yml --ref main` 手动跑一次。
+- 打 tag 前，目标 main SHA 必须有一次全绿的 main push 运行或 main 上的手动运行，包含完整四个后端分片；合并请求上的绿灯不能代替。检查停用后重新打开时，main 不会自动补跑，用 `gh workflow run release-build-check.yml --ref main` 手动跑一次。
+- 完整后端套件已经跑完且仅后端用例失败时，可以用 `gh workflow run release-build-check.yml --ref main -f retry_backend_run_id=<完整运行 ID>` 追加失败文件诊断。本 fork 仍执行完整四个后端分片，诊断通过不能清除完整套件的失败。入口支持上游 `build` 中的完整套件及本 fork 的四分片基准，核验每个后端 job 的完整日志、汇总、用例与文件数量、HOME 清理和其他 job 全绿；原 SHA 必须是目标 SHA 的祖先，差异只能是重跑入口、其脚本/测试和本说明，业务源码、依赖与原有测试必须完全相同。每个分片只诊断其原失败文件；上游单 job 基准由第一分片诊断。诊断还运行入口自身的测试，保持每个用例的原有期限，不设置全局宽限。取消或中断的套件、源码变化、部分测试和诊断运行本身不能作为基准。报告必须分别说明原完整运行的失败、诊断复跑的结果与当前完整运行的结果，不能把部分绿灯称为全量通过。
 - main 上后端全套变红时，带头大哥当天定位到对应的合并，修复或回滚。QA 维护测试集的职责不变：测试本身的问题由 QA 修复或暂时隔离，代码问题开单处理。
 - 合并请求作者仍应在本地跑与改动相关的测试文件（`bun run test <path>`）。
 
@@ -102,7 +110,7 @@ CLI、前端和 API/Web 镜像构建并行执行，便于尽早发现构建错�
 
 `bun test` 通过 [bunfig.toml](bunfig.toml) 的 preload 在测试模块加载前执行 [hermetic-env.ts](tests/setup/hermetic-env.ts)，清除继承的产品配置和凭据。精确范围以纯模块 [hermetic-env-policy.ts](tests/setup/hermetic-env-policy.ts) 为准：清除 `MULTIREMI_*`、`REMI_*`、`ANTHROPIC_*`、`FEISHU_*` 及列明的独立变量，保留 `MULTIREMI_TEST_*`、`FEISHU_TEST_*` 测试输入。测试需要的环境变量由测试自己设置并还原；显式指定的测试数据库连接失败不能当作未配置而跳过。
 
-清理后，preload 每次创建独立临时根，覆盖 `MULTIREMI_TEST_RUN_ROOT`（不信任继承值），并把 `HERMETIC_ENV_RUN_ROOT_PATHS` 中的八个现有路径开关指向该根：state、workspaces、session archives、plugin cache、uploads、config 文件、REMI_HOME 和 REMI_PLUGINS_DIR。CLI 插件发现显式读取临时 plugins 目录，避免帮助与命令清单加载宿主已安装的扩展；插件测试仍可设置自己的 fixture 目录并还原。退出时尝试删除自己的根；测试保存还原 env 时应恢复这些动态值。子进程 helper 再次 scrub 后必须转发这些路径开关。新增写入默认路径应优先挂在现有开关下，并登记到该表；只有 setter/构造参数的模块必须由测试显式注入临时路径，不新增生产开关。
+清理后，preload 每次创建独立临时根，覆盖 `MULTIREMI_TEST_RUN_ROOT`（不信任继承值），并把 `HERMETIC_ENV_RUN_ROOT_PATHS` 中的九个现有路径开关指向该根：state、workspaces、session archives、plugin cache、uploads、migration reports、config 文件、REMI_HOME 和 REMI_PLUGINS_DIR。CLI 插件发现显式读取临时 plugins 目录，避免帮助与命令清单加载宿主已安装的扩展；插件测试仍可设置自己的 fixture 目录并还原。退出时尝试删除自己的根；测试保存还原 env 时应恢复这些动态值。子进程 helper 再次 scrub 后必须转发这些路径开关。新增写入默认路径应优先挂在现有开关下，并登记到该表；只有 setter/构造参数的模块必须由测试显式注入临时路径，不新增生产开关。
 
 两类跨进程工作区锁必须由同一宿主 HOME 下的 daemon 共用，不能跟随各自的 MULTIREMI_STATE_DIR：生产 runtime lease 仍为 `join(homedir(), ".multiremi", "runtime-workspace-leases")`，supervisor 及活跃 owner 枚举仍为 `join(userInfo().homedir, ".multiremi", "workspace-supervisors")`。仅在 NODE_ENV=test 时，[共享锁路径](packages/shared/src/home-paths.ts)指向 `MULTIREMI_TEST_RUN_ROOT/shared-locks/` 的对应子目录，缺少运行根抛 real_home_default_in_test。测试子进程必须转发 MULTIREMI_TEST_RUN_ROOT；outbox 继续使用各自的 state 开关。[真实双进程回归](tests/unit/daemon/workspace-shared-locks.test.ts)以临时启动 HOME 验证不同 STATE_DIR 的竞争、活跃 owner 枚举与释放后重获。
 

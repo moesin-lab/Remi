@@ -229,6 +229,16 @@ both the version tag and a `sha-<commit>` tag. A retry reuses an existing image
 only when both tags resolve to the same digest; a conflicting or incomplete
 tag pair fails closed.
 
+The publication job uses Docker 28.0.4 with the containerd image store enabled
+before QEMU/Buildx setup. Application packaging pulls both architectures of the
+same immutable API/Web index; the default runner's classic image store cannot
+retain both under that digest. See Docker's [multi-platform runner setup](https://docs.docker.com/build/ci/github-actions/multi-platform/#build-and-load-multi-platform-images).
+After a runner/workflow repair, recover the missing platform assets with
+`gh workflow run platform-release.yml --repo moesin-lab/Remi --ref main -f tag=<existing-tag>`.
+The workflow definition comes from `main`, but application source, the schema
+policy and image identities still come from the existing tag's verified commit.
+Keep that tag unchanged; recovery does not prepare or publish a new version.
+
 ## Internal Compose updater
 
 [compose.internal-updates.yml](docker/compose.internal-updates.yml) extends the

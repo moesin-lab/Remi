@@ -137,6 +137,7 @@ describe.skipIf(!pgAvailable)("MUL-458 human dependency force (PostgreSQL)", () 
       app: createMultiremiApp({ store, authToken: "mul458-pg-root" }),
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       userId: user.id,
+      member,
       runtime,
       agent,
       prerequisite,
@@ -274,7 +275,8 @@ describe.skipIf(!pgAvailable)("MUL-458 human dependency force (PostgreSQL)", () 
     expect(store.listUnmetPrerequisites(f.issue.id).map(row => row.dependsOnIssueId)).toEqual([f.prerequisite.id]);
     const supervisorAgent = store.createAgent({ name: `PG retry supervisor ${counter}`, provider: "claude", visibility: "workspace" });
     store.setAgentRole(supervisorAgent.id, "supervisor");
-    const patrol = store.createIssue({ title: `PG retry patrol ${counter}`, assigneeType: "agent", assigneeId: supervisorAgent.id });
+    const patrol = store.createIssue({ title: `PG retry patrol ${counter}`, assigneeType: "agent", assigneeId: supervisorAgent.id,
+      responsibleMemberId: f.member.id });
     const supervisorTask = store.createTask({ agentId: supervisorAgent.id, issueId: patrol.id, prompt: "Supervise the existing Turn" });
     const supervisor = await store.createTaskAccessToken(supervisorTask, f.userId);
     store.updateWorkspace("local", { settings: { ...store.getWorkspace("local")!.settings, organizer: { mode: "act" } } });

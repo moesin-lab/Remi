@@ -24,6 +24,8 @@ summary: 原会话中的唯一问题、责任路由、答复版本与provider等
 
 原生等待有进程内 nonce，随 `hello.runtimes[].active_question_waits` 和 `runtime.ready` 的清单声明。短暂断线保留同一 nonce；新进程没有旧回调清单，服务端在恢复普通孤儿任务前分离该等待并取消旧 attempt 权限。若答案已保存，自动安排唯一新消费者。数据库中的 `running` 或 `awaiting_human` 只用于检查 attempt 仍有效，不能证明退出进程的回调存在；兼容入口没有 nonce 时直接为 `detached/native_wait_unverified`，正常答复走受控续接，不回填不存在的回调。保存答复与实际消费是两个不同状态。
 
+没有 Chat 或 Issue 所有者的执行会话只按真实原生登记校验等待来源：持久 Q、原 Turn/attempt、提问 Agent、工作区、execution scope 和非空 head 必须相符，还须证明原始请求分配的 orphan 会话身份，或 Autopilot 与 run 的实际 Turn 绑定。已声明但失效的 Session 所有者不能进入这个分支；历史 decision 的来源引用也不能代替原生登记。超时、完成或替换 attempt 后保留原 Q 的等待历史，不恢复旧回调，不因此补造人类责任或授予普通消息读取权。回归入口为 [`issue-free-native-question-ownership.test.ts`](../../tests/unit/multiremi/issue-free-native-question-ownership.test.ts)。
+
 任务终止只取消原 provider 等待：同一事务中重复取消只产生一次提交后的 `HumanRequestEvent.cancelled`，回滚不发通知。该事件表示宿主等待已释放，业务 Q 仍为 `pending/detached`，不能显示为已撤回；只有显式关闭才结束业务 Q。
 
 问题查询和表达式索引使用同一安全字段提取；历史损坏 metadata 不产生 Q 事实，也不妨碍旧日志更新或启动。合法 JSON 的无关字段含 PostgreSQL 不可表示的字符时，只读取所需路径，保留原始文本和正常的 Q 引用。启动按固定名称移除旧无保护索引并幂等安装 v2 索引，不改写历史数据。

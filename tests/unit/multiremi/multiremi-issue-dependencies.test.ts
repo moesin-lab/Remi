@@ -486,7 +486,8 @@ describe("MUL-452 E3 replay", () => {
     const query = db!.query.bind(db!);
     let failed = false;
     const failure = spyOn(db!, "query").mockImplementation((sql) => {
-      if (!failed && sql.includes("SELECT 1 FROM multiremi_issue_activity")) {
+      if (!failed && sql.includes("SELECT 1 FROM multiremi_issue_activity")
+        && sql.includes("type = 'dependency_auto_start_skipped'")) {
         failed = true;
         throw new Error("injected replay infrastructure failure");
       }

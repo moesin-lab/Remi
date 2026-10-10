@@ -243,6 +243,25 @@ async function respond(store: MultiremiStore, baseUrl: string, taskId: string, r
   });
 }
 
+function expectNativeQuestionSource(h: Harness, request: MultiremiTaskHumanRequest) {
+  const task = h.store.getTask(h.taskId)!;
+  const turn = h.store.getTurnForAttempt(h.taskId)!;
+  const attempt = h.store.listTurnAttempts(turn.id).find(item => item.id === h.taskId)!;
+  const message = h.store.getMessage(request.id)!;
+  const record = message.metadata.question as { wait: { wait_id: string } };
+
+  expect(message).toMatchObject({ task_id: turn.id, session_id: turn.session_id, sender_type: "agent", sender_id: task.agentId });
+  expect(turn).toMatchObject({ current_attempt_id: task.id, agent_id: task.agentId, workspace_id: task.workspaceId });
+  expect(attempt).toMatchObject({ id: task.id, turn_id: turn.id, runtime_id: task.runtimeId });
+  expect(task.runtimeId).toBeTruthy();
+  expect(db!.query("SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id=?").get(turn.session_id))
+    .toMatchObject({ workspace_id: task.workspaceId });
+  expect(message.metadata.question).toMatchObject({ workspace_id: task.workspaceId, source_attempt_id: task.id,
+    wait: { runtime_id: attempt.runtime_id } });
+  expect(typeof record.wait.wait_id).toBe("string");
+  expect(record.wait.wait_id.length).toBeGreaterThan(0);
+}
+
 describe("Multiremi approval routing e2e", () => {
   it("drains a pending approval before closing the server", async () => {
     const h = await startHarness();
@@ -392,6 +411,7 @@ describe("Multiremi approval routing e2e", () => {
         () => h.store.listTaskHumanRequests(h.taskId).find((r) => r.status === "pending"),
         "pending unattended permission request",
       );
+      expectNativeQuestionSource(h, pending);
 
       await h.run;
       expect(h.outcomes).toEqual([{ outcome: "cancelled" }]);
@@ -436,6 +456,7 @@ describe("Multiremi approval routing e2e", () => {
         () => h.store.listTaskHumanRequests(h.taskId).find((r) => r.kind === "question" && r.status === "pending"),
         "pending unattended question request",
       );
+      expectNativeQuestionSource(h, pending);
 
       await h.run;
       expect(h.elicitationResults).toEqual([{ action: "cancel" }]);

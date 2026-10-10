@@ -26,7 +26,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
     const result = store.publishSessionResult(main.id, { body: "Durable finding" });
     expect(result).toMatchObject({ chatId: chat.id, issueId: null, sourceSessionId: main.id });
 
-    const issue = store.createIssue({ title: "Optional anchor", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Optional anchor", workspaceId: "local" });
     const issueWork = store.createIssueSession(issue.id, { chatId: chat.id, title: "Issue work" });
     expect(store.listIssueSessions(issue.id).map((session) => session.id)).toEqual([
       store.getOrCreateDefaultIssueSession(issue.id).id, issueWork.id,
@@ -118,7 +118,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
 
   it("adopts an unambiguous legacy Issue Session without changing its identity", () => {
     const store = createStore();
-    const issue = store.createIssue({ title: "Legacy issue", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Legacy issue", workspaceId: "local" });
     const legacy = store.createIssueSession(issue.id, { title: "Legacy" });
     const agent = store.createAgent({ name: "Legacy worker", provider: "claude" });
     const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local", creatorId: "local" });
@@ -745,7 +745,7 @@ describe("Issue sessions and per-agent projection lanes", () => {
   it("denies Turn input when its current source attempt is missing while retaining safe metadata", async () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Unknown source", provider: "claude", visibility: "workspace" });
-    const issue = store.createIssue({ title: "Unknown input source" });
+    const issue = createResponsibleTestIssue(store, { title: "Unknown input source" });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
     const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "PRIVATE_SOURCE_MESSAGE" });
     const turn = store.getTurnForAttempt(task.id)!;

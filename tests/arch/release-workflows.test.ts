@@ -74,6 +74,15 @@ describe("release workflows", () => {
     for (const build of builds) expect(build.with.platforms).toBe("linux/amd64,linux/arm64");
     expect(JSON.stringify(release)).toContain("dataSchema");
     const packaging = release.jobs.publish.steps.findIndex((step: any) => step.run?.includes('package-platform-application.mjs'));
+    // Packaging pulls the same immutable index for both architectures. The
+    // classic Docker store cannot retain both under that digest.
+    const storage = release.jobs.publish.steps.findIndex((step: any) => step.uses?.startsWith('docker/setup-docker-action@'));
+    const qemu = release.jobs.publish.steps.findIndex((step: any) => step.uses === 'docker/setup-qemu-action@v3');
+    expect(storage).toBeGreaterThan(-1);
+    expect(storage).toBeLessThan(qemu);
+    expect(storage).toBeLessThan(packaging);
+    expect(release.jobs.publish.steps[storage].with.version).toMatch(/^v\d+\.\d+\.\d+$/);
+    expect(JSON.parse(release.jobs.publish.steps[storage].with['daemon-config']).features['containerd-snapshotter']).toBe(true);
     const upload = release.jobs.publish.steps.findIndex((step: any) => step.run?.includes('gh release upload'));
     expect(packaging).toBeGreaterThan(-1);
     expect(packaging).toBeLessThan(upload);
@@ -96,6 +105,7 @@ describe("release workflows", () => {
     const platform = readWorkflow("platform-release.yml");
     expect(platform.on.workflow_call.inputs.tag.type).toBe("string");
     expect(platform.on.workflow_dispatch.inputs.tag.type).toBe("string");
+    expect(platform.jobs.publish.steps[0].with.ref).toBe("${{ needs.validate.outputs.sha }}");
 
     const gate = platform.jobs.validate.steps.find((step: any) => step.run?.includes("release-build-check.yml/runs"));
     expect(gate?.run).toContain("release-build-check.yml/runs?head_sha=$SHA&branch=main&status=success");

@@ -454,7 +454,15 @@
     "latest_version": "可更新至 {{version}}",
     "up_to_date": "已是最新版本",
     "view_release": "查看发布",
-    "update_now": "立即更新",
+    "update_scope": "同时更新 Web 界面与 API 服务。",
+    "update_target": "目标版本：{{version}}",
+    "update_target_ref": "目标提交：{{ref}}",
+    "update_no_new_release": "当前更新源中的 Web 与 API 版本已安装。",
+    "update_no_newer_release": "当前更新源没有更高版本的 Web 与 API 可供升级。",
+    "update_check_required": "请先检查更新，并通过可更新性检查。",
+    "update_updater_unavailable": "更新器未就绪，请恢复连接后再检查更新。",
+    "update_permission_required": "需要平台管理权限才能更新 Web 与 API。",
+    "update_now": "更新 Web 与 API",
     "restart": "重启服务",
     "auto_update": "自动安装稳定版本",
     "auto_update_hint": "更新器每日在计划时间检查已配置的更新来源。",
@@ -506,8 +514,8 @@
     "cancel_requested": "已请求取消升级",
     "confirm_restart_title": "重启平台服务？",
     "confirm_restart_desc": "API 和 Web 服务会短暂不可用。",
-    "confirm_update_title": "安装 {{version}}？",
-    "confirm_update_desc": "Updater 将启用 {{version}} 并重启服务；健康检查失败时会自动恢复上一版本。",
+    "confirm_update_title": "将 Web 与 API 更新到 {{version}}？",
+    "confirm_update_desc": "等待正在运行的 Agent 完成、备份数据并验证兼容性后，同时更新 Web 与 API。期间两项服务会短暂不可用，更新失败时恢复上一应用版本。",
     "confirm_rollback_title": "回退平台版本？",
     "confirm_rollback_desc": "将平台切换至 {{version}} 并重启服务。",
     "cancel": "取消",
@@ -553,6 +561,73 @@
       "host_application": { "label": "宿主应用更新", "description": "由宿主更新器下载应用包，复用已有基础镜像。", "migration": "准备宿主更新器、Docker 访问、完整备份和隔离迁移演练。沿用 docker_compose 或 local_profile 配置，设置 MULTIREMI_PLATFORM_UPDATE_MODE=application。此模式仍依赖宿主更新器。" },
       "internal_application": { "label": "容器内部应用更新", "description": "由 Compose 内更新器切换 API/Web 及包内 Bun/Node，容器持续运行。", "migration": "接入配套且支持监管程序的 API/Web 镜像，添加 compose.internal-updates.yml，设置 REMI_UPDATER_IMAGE 和 REMI_UPDATER_ENV_FILE，配置与 API 一致的鉴权信息及 HTTPS 更新源。带上覆盖文件启动更新器和隔离演练服务，等待监管程序和初始副本就绪。" },
       "systemd_release": { "label": "Systemd 发布目录更新", "description": "由宿主更新器切换发布目录并重启所管理的 systemd 服务。", "migration": "准备 Linux 发布目录、受管理的 API/Web systemd 服务和完整备份。配置 MULTIREMI_PLATFORM_DRIVER=systemd_release 及包含源码归档的更新源。从 Docker 转入此模式还需要单独迁移数据和服务部署。" }
+    },
+    "preflight_ready": "检查通过",
+    "preflight_blocked": "检查未通过",
+    "preflight_passed": "通过",
+    "preflight_failed": "未通过",
+    "preflight_unknown_check": "其他检查项",
+    "preflight_unknown_failure": "此项检查未通过，请展开诊断详情查看原因，解决后重新检查。",
+    "preflight_diagnostics": "诊断详情",
+    "preflight_diagnostics_hint": "这里保留更新器返回的原始信息，供排查问题时使用。",
+    "preflight_bundle_unsupported": "这个版本未提供有效的应用包。只有镜像的版本无法通过应用更新模式安装。",
+    "preflight_checks": {
+      "host": {
+        "label": "主机环境",
+        "failure": "主机、服务或所需工具尚未就绪，请检查部署环境。"
+      },
+      "compose": {
+        "label": "容器部署环境",
+        "failure": "容器配置或 Docker 引擎尚未就绪，请检查部署配置。"
+      },
+      "application_runtime": {
+        "label": "应用运行环境",
+        "failure": "已安装的应用运行环境不可用或不兼容，请检查基础镜像和运行时配置。"
+      },
+      "local_profile": {
+        "label": "本机部署环境",
+        "failure": "本机部署未通过环境检查，请确认部署配置和服务状态。"
+      },
+      "container_supervisors": {
+        "label": "服务监管程序",
+        "failure": "API 或 Web 监管程序尚未就绪，请检查其心跳和应用进程。"
+      },
+      "isolated_rehearsal": {
+        "label": "隔离迁移演练",
+        "failure": "隔离迁移演练服务不可用，请恢复服务后重新检查。"
+      },
+      "backup": {
+        "label": "数据备份配置",
+        "failure": "备份配置或校验未通过，请先确认数据库和持久文件能够完整备份。"
+      },
+      "postgresql": {
+        "label": "数据库连接",
+        "failure": "数据库暂时无法用于备份，请恢复连接后重新检查。"
+      },
+      "program_storage": {
+        "label": "程序存储空间",
+        "failure": "程序目录无法写入或空间不足，请检查目录权限并释放磁盘空间。"
+      },
+      "current_release": {
+        "label": "当前安装版本",
+        "failure": "当前版本信息缺失或与运行中的服务不一致，请核对已安装的版本。"
+      },
+      "release_feed": {
+        "label": "更新源连接",
+        "failure": "无法读取更新源，请检查更新地址和网络连接。"
+      },
+      "release_artifacts": {
+        "label": "发布内容完整性",
+        "failure": "当前更新模式所需的发布内容缺失或无效，请使用兼容的更新源。"
+      },
+      "data_schema": {
+        "label": "数据兼容性",
+        "failure": "目标版本的数据结构不兼容，请核对迁移和回退声明。"
+      },
+      "release_feed_or_schema": {
+        "label": "版本与数据兼容性",
+        "failure": "更新源、发布清单或数据兼容性未通过验证，请解决诊断详情中的问题。"
+      }
     },
     "missing_artifacts": {
       "release_identity": "缺少有效的版本号或发布提交标识。",

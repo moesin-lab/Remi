@@ -375,7 +375,9 @@ application updates and needs explicit base-image maintenance.
 The updater waits for drain, durably commits the operation, stops API/Web writers,
 backs up data, and rehearses target and previous migrations in a **separate
 PostgreSQL container with no production network or credentials**. It switches
-the program only after rehearsal passes. API/Web are unavailable during this
+the program only after rehearsal passes. The scratch database must answer
+`SELECT 1` over loopback TCP before restore starts; the image's temporary
+initialization socket server does not establish readiness. API/Web are unavailable during this
 backup/rehearsal interval; daemon/provider processes remain independent. Each
 migration pass has a five-minute timeout; timeout triggers code recovery. Readiness
 and the actual service process working directory must match the selected code.
@@ -403,6 +405,17 @@ resetting it to `null` uses the host default. Changing it clears prior discovery
 and preflight results. An unreachable feed does not stop the updater heartbeat.
 Settings, check results and operations are stored on the API, not in the browser.
 
+The current-version card always exposes **Update Web and API**, a text **Check
+for updates** action and the existing restart action. The update action installs
+Web and API together from the saved source. It stays visible when no new release
+exists, with an explanation for an installed target, missing/expired checks,
+offline updater, missing management permission or active maintenance. The
+confirmation names both services, the target version and commit, and explains
+agent drain, backups, compatibility verification and recovery. Only a fresh,
+successful preflight and an advertised update enable confirmation; a changed
+target invalidates an open confirmation. The Web uses the existing platform
+operation API, also available through `remi platform operation create`.
+
 The **Update mode** card displays the execution mode explicitly reported by the
 updater: host image updates (`images`), host application updates
 (`host_application`), in-container application updates (`internal_application`),
@@ -426,6 +439,11 @@ manifest is only an artifact check: downloads, host compatibility, migration
 rehearsal, backups and drain still have to pass. Save an edited URL before using
 **Check update source**; default/source changes and reported-mode changes clear
 old preflight results. Unreachable or stale sources do not appear compatible.
+The **Update readiness** card uses localized check names, result badges and
+failure guidance. Missing artifacts are explained from the reported mode's
+structured requirements. Original updater check codes and messages remain
+available under **Diagnostic details**, including unknown checks from newer
+updaters. These presentation changes do not change the update safety gates.
 The nullable `multiremi_platform_state.update_mode` column stores observational
 metadata only; older application versions can ignore it without changing data.
 
@@ -443,8 +461,16 @@ successful target/previous migration rehearsal. Existing columns must remain
 compatible. Release packaging checks
 [`platform-application-compatibility.json`](platform-application-compatibility.json)
 against the actual migration fingerprint; maintain that policy when migrations
-change. Never copy a new fingerprint onto old code. The explicit image and
+change. The [release architecture guard](../tests/arch/release-workflows.test.ts)
+also checks this policy against the tracked source before publication. Never
+copy a new fingerprint onto old code. The explicit image and
 systemd executors retain their stricter equal-fingerprint requirement.
+
+The unified message/turn/lane release has an empty `rollbackSafeFrom` policy.
+It can publish application bundles for fresh installations and same-schema
+updates, but does not attest code-only rollback from the legacy storage model.
+Legacy deployments must follow the [controlled cutover](../docs/deploy/unified-model-cutover.md)
+before adopting this schema; publication alone does not authorize that migration.
 
 ### Required backups
 

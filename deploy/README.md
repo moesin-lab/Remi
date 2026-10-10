@@ -461,8 +461,16 @@ successful target/previous migration rehearsal. Existing columns must remain
 compatible. Release packaging checks
 [`platform-application-compatibility.json`](platform-application-compatibility.json)
 against the actual migration fingerprint; maintain that policy when migrations
-change. Never copy a new fingerprint onto old code. The explicit image and
+change. The [release architecture guard](../tests/arch/release-workflows.test.ts)
+also checks this policy against the tracked source before publication. Never
+copy a new fingerprint onto old code. The explicit image and
 systemd executors retain their stricter equal-fingerprint requirement.
+
+The unified message/turn/lane release has an empty `rollbackSafeFrom` policy.
+It can publish application bundles for fresh installations and same-schema
+updates, but does not attest code-only rollback from the legacy storage model.
+Legacy deployments must follow the [controlled cutover](../docs/deploy/unified-model-cutover.md)
+before adopting this schema; publication alone does not authorize that migration.
 
 ### Required backups
 

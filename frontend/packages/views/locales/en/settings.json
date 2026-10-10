@@ -454,7 +454,15 @@
     "latest_version": "{{version}} is available",
     "up_to_date": "You're on the latest version",
     "view_release": "View release",
-    "update_now": "Update now",
+    "update_scope": "Update the Web interface and API service together.",
+    "update_target": "Target version: {{version}}",
+    "update_target_ref": "Target commit: {{ref}}",
+    "update_no_new_release": "The Web and API version in this update source is already installed.",
+    "update_no_newer_release": "This update source does not offer a newer version of Web and API.",
+    "update_check_required": "Check for updates and pass the update readiness checks first.",
+    "update_updater_unavailable": "The updater is not ready. Restore its connection before checking for updates.",
+    "update_permission_required": "Platform management permission is required to update Web and API.",
+    "update_now": "Update Web and API",
     "restart": "Restart services",
     "auto_update": "Automatically install stable releases",
     "auto_update_hint": "The updater checks the configured release source at the scheduled daily time.",
@@ -506,8 +514,8 @@
     "cancel_requested": "Upgrade cancellation requested",
     "confirm_restart_title": "Restart platform services?",
     "confirm_restart_desc": "The API and web service will be briefly unavailable.",
-    "confirm_update_title": "Install {{version}}?",
-    "confirm_update_desc": "The updater will activate {{version}}, restart services, and automatically restore the previous release if health checks fail.",
+    "confirm_update_title": "Update Web and API to {{version}}?",
+    "confirm_update_desc": "Wait for running agents to finish, back up data and verify compatibility, then update Web and API together. Both services will be briefly unavailable. A failed update restores the previous application version.",
     "confirm_rollback_title": "Rollback platform?",
     "confirm_rollback_desc": "Switch the platform back to {{version}} and restart its services.",
     "cancel": "Cancel",
@@ -553,6 +561,73 @@
       "host_application": { "label": "Host application updates", "description": "A host updater installs application bundles using the existing base images.", "migration": "Prepare the host updater, Docker access, complete backups and isolated migration rehearsal. Set MULTIREMI_PLATFORM_UPDATE_MODE=application with the existing docker_compose or local_profile configuration. This still requires a host updater." },
       "internal_application": { "label": "In-container application updates", "description": "An updater inside Compose switches API/Web and bundled Bun/Node while their containers stay running.", "migration": "Adopt matching API/Web images with supervisor support. Add compose.internal-updates.yml, set REMI_UPDATER_IMAGE and REMI_UPDATER_ENV_FILE, and configure matching API/updater credentials and an HTTPS feed. Start the updater and isolated rehearsal services together with the overlay; wait for supervisors and seed copies to become ready." },
       "systemd_release": { "label": "Systemd release updates", "description": "A host updater switches release directories and restarts managed systemd services.", "migration": "Prepare the Linux release directory, managed API/Web systemd units and complete backups. Configure MULTIREMI_PLATFORM_DRIVER=systemd_release and a source archive feed. Moving from Docker requires a separate data and service deployment migration." }
+    },
+    "preflight_ready": "Checks passed",
+    "preflight_blocked": "Checks failed",
+    "preflight_passed": "Passed",
+    "preflight_failed": "Failed",
+    "preflight_unknown_check": "Additional check",
+    "preflight_unknown_failure": "This check failed. Open diagnostic details, resolve the issue and check again.",
+    "preflight_diagnostics": "Diagnostic details",
+    "preflight_diagnostics_hint": "Original updater messages are retained here for troubleshooting.",
+    "preflight_bundle_unsupported": "This release has no valid application bundle. Image-only releases cannot be installed in application update mode.",
+    "preflight_checks": {
+      "host": {
+        "label": "Host environment",
+        "failure": "The host, services or required tools are not ready. Check the deployment environment."
+      },
+      "compose": {
+        "label": "Container deployment",
+        "failure": "Container configuration or the Docker engine is not ready. Check the deployment configuration."
+      },
+      "application_runtime": {
+        "label": "Application runtime",
+        "failure": "The installed application runtime is unavailable or incompatible. Check the base images and runtime configuration."
+      },
+      "local_profile": {
+        "label": "Local deployment",
+        "failure": "The local deployment did not pass its environment checks. Check the profile and running services."
+      },
+      "container_supervisors": {
+        "label": "Service supervisors",
+        "failure": "The API or Web supervisor is not ready. Check its heartbeat and application process."
+      },
+      "isolated_rehearsal": {
+        "label": "Isolated migration rehearsal",
+        "failure": "The isolated migration rehearsal service is unavailable. Restore it and check again."
+      },
+      "backup": {
+        "label": "Data backup configuration",
+        "failure": "Backup configuration or validation failed. Confirm the database and persistent files can be backed up completely."
+      },
+      "postgresql": {
+        "label": "Database connection",
+        "failure": "The database is unavailable for backup. Restore the connection and check again."
+      },
+      "program_storage": {
+        "label": "Application storage",
+        "failure": "The program directory is not writable or has insufficient space. Check permissions and available disk space."
+      },
+      "current_release": {
+        "label": "Installed release",
+        "failure": "Installed release metadata is missing or does not match the running service. Verify the current release."
+      },
+      "release_feed": {
+        "label": "Update source connection",
+        "failure": "The update source could not be read. Check its address and network connection."
+      },
+      "release_artifacts": {
+        "label": "Release contents",
+        "failure": "The release lacks valid content required by this update mode. Use a compatible update source."
+      },
+      "data_schema": {
+        "label": "Data compatibility",
+        "failure": "The target data schema is incompatible. Verify its migration and rollback declarations."
+      },
+      "release_feed_or_schema": {
+        "label": "Release and data compatibility",
+        "failure": "The update source, release manifest or data compatibility failed validation. Resolve the issue shown in diagnostic details."
+      }
     },
     "missing_artifacts": {
       "release_identity": "A valid release version and commit identity are required.",

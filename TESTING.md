@@ -75,6 +75,9 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 
 `release-build-check` 的 `platform-updater` job 在 Linux、Windows、macOS 显式运行
 `node --test scripts/local-profile.test.mjs scripts/platform-updater-runner.test.mjs`；Windows 验证宿主互斥并编译 updater，
+Windows 互斥夹具允许 PowerShell 冷启动用时 30 秒，完整生命周期仍有 90 秒上限；
+对创建、迁移并删除独立 PostgreSQL 数据库的会话日志用例，使用 30 秒集成测试上限，保留全部事务与数据断言。
+发版快照门禁用例创建真实 Git 仓库并执行多个子进程，使用 30 秒夹具期限，保留未准备依赖时阻止发版的全部断言。
 Linux 设置 `MULTIREMI_TEST_DOCKER_RECOVERY=1` 运行隔离的 PostgreSQL 17 恢复和回执对账测试，
 并运行 `bun run tests/integration/platform-application-smoke.ts`：从 Web 代理调用真实鉴权 API、
 PostgreSQL 队列、worker 和 drain，验证运行中任务阻止切换、API 重启后的操作记录与幂等重试、
@@ -93,8 +96,10 @@ API 从当前源码打包，业务迁移和 Web 页面使用隔离夹具；浏�
 写入闸门、CPU/ABI/运行时契约以及长操作心跳。测试只证明这些隔离场景，不等于
 正式发布、生产迁移或真实 provider 验证。
 `bun run tests/integration/smoke-platform-settings.ts` 启动隔离的 Next、真实 API/SQLite
-和更新 worker，使用模拟 HTTPS 发布内容及只读部署驱动，验证模式上报、迁移指引、
-自定义源保存/恢复、缺包阻塞、源不可用、旧更新器降级与 390px 布局。需要 Node、前端依赖和
+和更新 worker，使用模拟 HTTPS 发布内容和部署执行，验证模式上报、迁移指引、
+自定义源保存/恢复、缺包阻塞、源不可用、旧更新器降级与 390px 布局。同时验证 Web/API
+更新按钮常驻、目标版本与提交确认、取消无写入，以及确认后经真实 API/worker 排空任务、
+在夹具中模拟切换并恢复为已安装状态。需要 Node、前端依赖和
 Chromium（可设置 `CHROME_EXECUTABLE`）；默认端口 3349，可用 `--port=` 调整。
 截图和报告写入临时目录，或由 `PLATFORM_SETTINGS_ARTIFACTS` 指定；不操作真实部署。
 

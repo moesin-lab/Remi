@@ -3,6 +3,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multiremi/core/i18n/react";
+import type { AgentRuntime } from "@multiremi/core/types";
 import en from "../../locales/en/runtimes.json";
 import { ExecutionConfigPage, RuntimeExecutionBindings } from "./execution-config-page";
 
@@ -15,13 +16,21 @@ vi.mock("../../navigation", () => ({ AppLink: ({ children, href }: { children: R
 vi.mock("../../layout/breadcrumb-header", () => ({ BreadcrumbHeader: ({ leaf }: { leaf: React.ReactNode }) => <h1>{leaf}</h1> }));
 const profile = { id: "p1", workspace_id: "ws", name: "Aiden", provider: "codex", revision: 1, profile: { name: "custom", base_url: "https://example.test", model: "test-model", env_key: "", auth_mode: "api_key", credential_id: "cred" }, created_at: "now", updated_at: "now" };
 const group = { id: "g1", workspace_id: "ws", name: "Codex team", description: "Build and review", provider: "codex", profile_id: "p1", runtime_ids: ["r1"], online_runtime_count: 1, members: [{ runtime_id: "r1", status: "ready" }] };
+function makeRuntime(id: string, name: string, provider = "codex", overrides: Partial<AgentRuntime> = {}): AgentRuntime {
+  return {
+    id, name, provider, workspace_id: "ws", daemon_id: null, runtime_mode: "local",
+    launch_header: "", status: "online", device_info: "", metadata: {}, owner_id: "owner",
+    visibility: "private", last_seen_at: null, created_at: "now", updated_at: "now",
+    ...overrides,
+  };
+}
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
   api.listMembers.mockResolvedValue([{ user_id: "owner", role: "owner" }]);
   api.listExecutionProfiles.mockResolvedValue({ profiles: [profile, { ...profile, id: "p2", provider: "claude", name: "Claude only" }] });
   api.listExecutionGroups.mockResolvedValue({ groups: [group] });
-  api.listRuntimes.mockResolvedValue([{ id: "r1", name: "Devbox Codex", provider: "codex" }, { id: "r2", name: "Local Codex", provider: "codex" }, { id: "r3", name: "Claude runtime", provider: "claude" }]);
+  api.listRuntimes.mockResolvedValue([makeRuntime("r1", "Devbox Codex"), makeRuntime("r2", "Local Codex"), makeRuntime("r3", "Claude runtime", "claude")]);
   api.saveExecutionGroup.mockResolvedValue({ group });
   api.saveExecutionProfile.mockResolvedValue({ profile });
 });
@@ -36,12 +45,67 @@ it("creates another group with the same Runtime and restricts profiles and runti
   await user.click(await screen.findByRole("button", { name: "Add group" }));
   await user.type(screen.getByLabelText("Name"), "Second group");
   expect(screen.queryByRole("option", { name: "Claude only" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("checkbox", { name: "Claude runtime" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("checkbox", { name: /Claude runtime/ })).not.toBeInTheDocument();
   await user.selectOptions(screen.getByLabelText("Provider connection"), "p1");
-  await user.click(screen.getByRole("checkbox", { name: "Devbox Codex" }));
-  await user.click(screen.getByRole("checkbox", { name: "Local Codex" }));
+  await user.click(screen.getByRole("checkbox", { name: /Devbox Codex/ }));
+  await user.click(screen.getByRole("checkbox", { name: /Local Codex/ }));
   await user.click(screen.getByRole("button", { name: "Save group" }));
   await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", undefined, { name: "Second group", description: "", provider: "codex", profile_id: "p1", runtime_ids: ["r1", "r2"] }));
+});
+
+it("distinguishes three same-name Codex runtimes and preserves the chosen ID through save and edit", async () => {
+  const runtimes = [
+    makeRuntime("rt_shared-prefix-first", "Codex", "codex", { daemon_display_name: "Office machine", device_info: "old-host · Windows" }),
+    makeRuntime("rt_shared-prefix-second", "Codex", "codex", { device_info: "Office machine · Windows" }),
+    makeRuntime("rt_shared-prefix-third", "Codex", "codex", { device_info: "Linux server · Linux", status: "offline" }),
+  ] as const;
+  api.listRuntimes.mockResolvedValue(runtimes);
+  api.listExecutionGroups.mockResolvedValue({ groups: [] });
+  const user = userEvent.setup();
+  show();
+  await user.click(await screen.findByRole("button", { name: "Add group" }));
+  const form = screen.getByRole("form", { name: "Capability groups" });
+  for (const runtime of runtimes) {
+    expect(within(form).getByText(runtime.id)).toBeVisible();
+    expect(within(form).getByRole("checkbox", { name: new RegExp(runtime.id) })).not.toBeChecked();
+  }
+  expect(within(form).getAllByText("Office machine")).toHaveLength(2);
+  expect(within(form).queryByText(/old-host/)).not.toBeInTheDocument();
+  const offline = within(form).getByRole("checkbox", { name: /rt_shared-prefix-third/ });
+  expect(offline).not.toBeDisabled();
+  expect(within(offline.closest("label")!).getByText("Offline")).toBeVisible();
+  await user.type(within(form).getByLabelText("Name"), "Chosen machine");
+  await user.click(within(form).getByRole("checkbox", { name: /rt_shared-prefix-second/ }));
+  const saved = { ...group, name: "Chosen machine", profile_id: null, runtime_ids: [runtimes[1].id] };
+  api.saveExecutionGroup.mockResolvedValue({ group: saved });
+  api.listExecutionGroups.mockResolvedValue({ groups: [saved] });
+  await user.click(within(form).getByRole("button", { name: "Save group" }));
+  await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", undefined, expect.objectContaining({ runtime_ids: [runtimes[1].id] })));
+  await waitFor(() => expect(screen.queryByRole("form")).not.toBeInTheDocument());
+  const row = within(screen.getByRole("article", { name: "Chosen machine" }));
+  expect(row.getByText("Office machine")).toBeVisible();
+  expect(row.getByText(runtimes[1].id)).toBeVisible();
+  expect(row.queryByText(runtimes[0].id)).not.toBeInTheDocument();
+  await user.click(row.getByRole("button", { name: "Edit" }));
+  expect(screen.getByRole("checkbox", { name: /rt_shared-prefix-second/ })).toBeChecked();
+  expect(screen.getByRole("checkbox", { name: /rt_shared-prefix-first/ })).not.toBeChecked();
+  expect(screen.getByRole("checkbox", { name: /rt_shared-prefix-third/ })).not.toBeChecked();
+});
+
+it("keeps unidentified and unavailable members visible by ID and allows removing the unavailable one", async () => {
+  const unavailable = "rt_member-no-longer-visible";
+  api.listExecutionGroups.mockResolvedValue({ groups: [{ ...group, runtime_ids: ["r1", unavailable] }] });
+  const user = userEvent.setup();
+  show();
+  const row = within(await screen.findByRole("article", { name: group.name }));
+  expect(row.getByText("Registered machine")).toBeVisible();
+  expect(row.getByText("r1")).toBeVisible();
+  expect(row.getByText(unavailable)).toBeVisible();
+  await user.click(row.getByRole("button", { name: "Edit" }));
+  expect(screen.getByRole("checkbox", { name: /Devbox Codex.*r1/ })).toBeChecked();
+  await user.click(screen.getByRole("checkbox", { name: unavailable }));
+  await user.click(screen.getByRole("button", { name: "Save group" }));
+  await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", group.id, expect.objectContaining({ runtime_ids: ["r1"] })));
 });
 
 it("retains an existing credential when editing a profile without a new key", async () => {
@@ -102,7 +166,7 @@ it("configures provider credentials and models inside a new group with a single 
   await user.type(screen.getByLabelText("Model ID"), "default-model");
   await user.type(screen.getByLabelText(/Allowed model IDs/), "fast-model");
   await user.type(screen.getByLabelText("API key"), "synthetic-key");
-  await user.click(screen.getByRole("checkbox", { name: "Local Codex" }));
+  await user.click(screen.getByRole("checkbox", { name: /Local Codex/ }));
   await user.click(screen.getByRole("button", { name: "Save group" }));
   await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", undefined, {
     name: "Review pool", description: "Review services", provider: "codex", profile_id: null, runtime_ids: ["r2"],
@@ -136,10 +200,10 @@ it("clears connection, secret, model and membership drafts when changing engines
   await user.selectOptions(screen.getByLabelText("Provider connection"), "new");
   await user.type(screen.getByLabelText("API key"), "codex-only-key");
   await user.type(screen.getByLabelText("Model ID"), "codex-only-model");
-  await user.click(screen.getByRole("checkbox", { name: "Local Codex" }));
+  await user.click(screen.getByRole("checkbox", { name: /Local Codex/ }));
   await user.selectOptions(screen.getByLabelText("Execution engine"), "claude");
   expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
-  expect(screen.queryByRole("checkbox", { name: "Local Codex" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("checkbox", { name: /Local Codex/ })).not.toBeInTheDocument();
   await user.selectOptions(screen.getByLabelText("Provider connection"), "new");
   expect(screen.getByLabelText("API key")).toHaveValue("");
   expect(screen.getByLabelText("Model ID")).toHaveValue("");

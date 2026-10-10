@@ -36,8 +36,8 @@ export function PlatformUpdateModeCard({ status }: { status: PlatformStatus }) {
   const capability = source?.modes.find(item => item.mode === target);
 
   return (
-    <Card data-testid="platform-update-mode" className="rounded-lg">
-      <CardHeader>
+    <Card data-testid="platform-update-mode">
+      <CardHeader className="border-b">
         <CardTitle>{t($ => $.platform.mode_title)}</CardTitle>
         <CardDescription>{t($ => $.platform.mode_reported)}</CardDescription>
       </CardHeader>
@@ -100,11 +100,11 @@ export function PlatformSourceCapabilities({ status, dirty }: { status: Platform
       : source.error ? <p role="alert" className="break-words text-sm text-destructive">{t($ => $.platform.source_check_failed, { error: source.error })}</p>
         : <>
           <p className="text-sm font-medium">{t($ => $.platform.source_contents)}</p>
-          <ul className="space-y-3">{source.modes.map(capability => <li key={capability.mode} className="space-y-1">
+          <ul className="divide-y">{source.modes.map(capability => <li key={capability.mode} className="space-y-1 py-3 first:pt-0 last:pb-0">
             <div className="flex flex-wrap items-center gap-2 text-sm">
               <span>{modeLabel(capability.mode, t)}</span>
               {capability.mode === status.updateMode && <Badge variant="outline">{t($ => $.platform.mode_current)}</Badge>}
-              <Badge variant={capability.available ? "secondary" : "outline"}>{capability.available ? t($ => $.platform.source_available) : t($ => $.platform.source_missing)}</Badge>
+              <Badge variant={capability.available ? "secondary" : "outline"} className={capability.available ? "bg-success/10 text-success" : "border-destructive/30 text-destructive"}>{capability.available ? t($ => $.platform.source_available) : t($ => $.platform.source_missing)}</Badge>
             </div>
             <MissingArtifacts missing={capability.missing} />
           </li>)}</ul>
@@ -113,7 +113,7 @@ export function PlatformSourceCapabilities({ status, dirty }: { status: Platform
   </div>;
 }
 
-function MissingArtifacts({ missing }: { missing: string[] }) {
+export function MissingArtifacts({ missing }: { missing: string[] }) {
   const { t } = useT("settings");
   const known = ["release_identity", "source_archive", "api_image", "web_image", "application_bundle", "application_metadata", "architecture_bundle", "supervisor", "bundled_runtimes", "native_tools"] as const;
   return missing.length > 0 && <ul className="list-disc space-y-1 pl-5 text-xs text-muted-foreground">{missing.map(issue => {

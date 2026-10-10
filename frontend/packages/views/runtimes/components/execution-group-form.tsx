@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import type { AgentRuntime } from "@multiremi/core/types";
 import type {
   ExecutionGroupList,
   ExecutionGroupInput,
@@ -13,6 +14,7 @@ import {
   NativeSelectOption,
 } from "@multiremi/ui/components/ui/native-select";
 import { useT } from "../../i18n";
+import { RuntimeMemberIdentity } from "./runtime-member-identity";
 import {
   ConnectionFields,
   connectionDraft,
@@ -33,7 +35,7 @@ export function GroupForm({
   initial?: Group;
   profiles: ExecutionProfile[];
   groups: Group[];
-  runtimes: Array<{ id: string; name: string; provider: string }>;
+  runtimes: AgentRuntime[];
   pending: boolean;
   onSave: (input: ExecutionGroupInput) => void;
   onCancel: () => void;
@@ -247,9 +249,10 @@ export function GroupForm({
             </p>
           )}
           {compatibleRuntimes.map((runtime) => (
-            <label className="flex items-center gap-2 text-sm" key={runtime.id}>
+            <label className="flex min-w-0 cursor-pointer items-start gap-3 rounded-md border p-3 text-sm" key={runtime.id}>
               <input
                 type="checkbox"
+                className="mt-1 shrink-0"
                 checked={input.runtime_ids.includes(runtime.id)}
                 onChange={(e) =>
                   setInput({
@@ -260,15 +263,14 @@ export function GroupForm({
                   })
                 }
               />
-              <span className="truncate" title={runtime.id}>
-                {runtime.name}
-              </span>
+              <RuntimeMemberIdentity runtime={runtime} runtimeId={runtime.id} />
             </label>
           ))}
           {missingMembers.map((id) => (
-            <label className="flex items-center gap-2 text-sm" key={id}>
+            <label className="flex min-w-0 cursor-pointer items-start gap-3 rounded-md border p-3 text-sm" key={id}>
               <input
                 type="checkbox"
+                className="mt-1 shrink-0"
                 checked
                 onChange={() =>
                   setInput({
@@ -279,7 +281,7 @@ export function GroupForm({
                   })
                 }
               />
-              <span className="break-all">{id}</span>
+              <RuntimeMemberIdentity runtimeId={id} />
             </label>
           ))}
           <p className="text-xs text-muted-foreground">

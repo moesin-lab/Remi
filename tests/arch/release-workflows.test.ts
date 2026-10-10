@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse } from "yaml";
+import { migrationFingerprint } from "../../packages/platform-updater/src/safety.js";
+import schemaInputs from "../../packages/platform-updater/src/data-schema-inputs.json";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 
@@ -10,6 +12,14 @@ function readWorkflow(name: string): Record<string, any> {
 }
 
 describe("release workflows", () => {
+  test("application publication policy matches the migration source included in bundles", () => {
+    const policy = JSON.parse(readFileSync(resolve(repoRoot, "deploy/platform-application-compatibility.json"), "utf8"));
+    const source = schemaInputs.map(path => readFileSync(resolve(repoRoot, path), "utf8")).join("");
+    expect(policy.dataSchema).toBe(migrationFingerprint(source));
+    expect(Array.isArray(policy.rollbackSafeFrom)).toBe(true);
+    for (const fingerprint of policy.rollbackSafeFrom) expect(fingerprint).toMatch(/^[a-f0-9]{64}$/);
+  });
+
   test("release publication uses a prepared snapshot and exact-commit full CI before building", () => {
     const release = readWorkflow("release.yml");
     const steps = release.jobs.release.steps;

@@ -6,6 +6,8 @@ import { I18nProvider } from "@multiremi/core/i18n/react";
 import type { PlatformOperation, PlatformStatus } from "@multiremi/core/platform-lifecycle";
 import enCommon from "../../locales/en/common.json";
 import enSettings from "../../locales/en/settings.json";
+import zhCommon from "../../locales/zh-Hans/common.json";
+import zhSettings from "../../locales/zh-Hans/settings.json";
 
 const statusRef = vi.hoisted(() => ({
   current: null as PlatformStatus | null,
@@ -40,6 +42,7 @@ vi.mock("@multiremi/core/platform-lifecycle", () => ({
   useUpdatePlatformSettings: () => settingsMutationRef,
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock("../../common/use-viewing-timezone", () => ({ useViewingTimezone: () => "Asia/Shanghai" }));
 
 import { PlatformTab } from "./platform-tab";
 
@@ -218,22 +221,146 @@ describe("PlatformTab upgrade lifecycle", () => {
     createMutationRef.mutateAsync.mockClear();
     await user.click(screen.getByRole("button", { name: enSettings.platform.update_now }));
     expect(createMutationRef.mutateAsync).not.toHaveBeenCalled();
+    const dialog = within(screen.getByRole("alertdialog"));
+    expect(dialog.getByRole("heading")).toHaveTextContent(enSettings.platform.confirm_update_title.replace("{{version}}", "1.2.3"));
+    expect(dialog.getByText(enSettings.platform.confirm_update_desc)).toBeVisible();
+    expect(dialog.getByText(enSettings.platform.update_target_ref.replace("{{ref}}", "release-commit"))).toBeVisible();
     await user.click(screen.getByRole("button", { name: enSettings.platform.confirm }));
     await waitFor(() => expect(createMutationRef.mutateAsync).toHaveBeenCalledWith({
       kind: "update", targetVersion: "1.2.3", targetRef: "https://mirror.example/releases.json",
     }));
   });
 
-  it("blocks update and restart when preflight fails and exposes the reason", () => {
+  it("keeps the Web and API update entry visible before any release is discovered", () => {
+    render(<PlatformTab />, { wrapper: Wrapper });
+    expect(screen.getByRole("button", { name: enSettings.platform.update_now })).toBeVisible();
+    expect(screen.getByRole("button", { name: enSettings.platform.update_now })).toBeDisabled();
+    expect(screen.getByText(enSettings.platform.update_scope)).toBeVisible();
+    expect(screen.getByText(enSettings.platform.update_check_required)).toBeVisible();
+    expect(screen.getByRole("button", { name: enSettings.platform.check_updates })).toBeEnabled();
+  });
+
+  it("keeps the update button visible and explains when this source is already installed", async () => {
+    const user = userEvent.setup();
+    statusRef.current = platformStatus({
+      latestRelease: platformStatus().currentRelease,
+      preflight: { ready: true, checkedAt: new Date().toISOString(), platform: "linux", arch: "x64", checks: [{ code: "backup", ok: true, message: "ready" }] },
+    });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    const button = screen.getByRole("button", { name: enSettings.platform.update_now });
+    expect(button).toBeVisible(); expect(button).toBeDisabled();
+    expect(button).toHaveAccessibleDescription(enSettings.platform.update_no_new_release);
+    await user.click(button);
+    expect(createMutationRef.mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it.each(["offline", "expired", "permission", "maintenance"])("explains a blocked update for %s without hiding the entry", reason => {
+    statusRef.current = platformStatus({
+      updateAvailable: true,
+      latestRelease: { ...platformStatus().currentRelease!, ref: "new" },
+      updaterStatus: reason === "offline" ? "offline" : "ready",
+      canManage: reason !== "permission",
+      maintenance: { ...platformStatus().maintenance, mode: reason === "maintenance" ? "draining" : "normal" },
+      preflight: { ready: true, checkedAt: new Date(Date.now() - (reason === "expired" ? 7 * 60_000 : 0)).toISOString(), platform: "linux", arch: "x64", checks: [{ code: "backup", ok: true, message: "ready" }] },
+    });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    const button = screen.getByRole("button", { name: enSettings.platform.update_now });
+    expect(button).toBeVisible(); expect(button).toBeDisabled();
+    const hint = reason === "offline" ? enSettings.platform.update_updater_unavailable
+      : reason === "permission" ? enSettings.platform.update_permission_required
+      : reason === "maintenance" ? enSettings.platform.mode_busy : enSettings.platform.update_check_required;
+    expect(button).toHaveAccessibleDescription(hint);
+  });
+
+  it("does not claim an older advertised target is installed", () => {
+    statusRef.current = platformStatus({
+      latestRelease: { ...platformStatus().currentRelease!, version: "v0.2.45", ref: "older" },
+      preflight: { ready: true, checkedAt: new Date().toISOString(), platform: "linux", arch: "x64", checks: [{ code: "backup", ok: true, message: "ready" }] },
+    });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    expect(screen.getByRole("button", { name: enSettings.platform.update_now })).toHaveAccessibleDescription(enSettings.platform.update_no_newer_release);
+    expect(screen.queryByText(enSettings.platform.update_no_new_release)).not.toBeInTheDocument();
+  });
+
+  it("blocks an open confirmation if the advertised target changes", async () => {
+    const user = userEvent.setup();
+    statusRef.current = platformStatus({
+      updateAvailable: true,
+      latestRelease: { ...platformStatus().currentRelease!, ref: "first-target" },
+      preflight: { ready: true, checkedAt: new Date().toISOString(), platform: "linux", arch: "x64", checks: [{ code: "backup", ok: true, message: "ready" }] },
+    });
+    const view = render(<PlatformTab />, { wrapper: Wrapper });
+    await user.click(screen.getByRole("button", { name: enSettings.platform.update_now }));
+    statusRef.current = { ...statusRef.current, latestRelease: { ...statusRef.current.latestRelease!, ref: "new-target" } };
+    view.rerender(<PlatformTab />);
+    const confirm = within(screen.getByRole("alertdialog")).getByRole("button", { name: enSettings.platform.confirm });
+    expect(confirm).toBeDisabled(); await user.click(confirm);
+    expect(createMutationRef.mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("blocks update and restart when preflight fails and retains the original reason in diagnostics", async () => {
+    const user = userEvent.setup();
     statusRef.current = platformStatus({
       updateAvailable: true,
       latestRelease: { version: "1.2.3", ref: "new", publishedAt: null, releaseUrl: null, manifestUrl: "https://example.com/manifest", apiImage: null, webImage: null },
       preflight: { ready: false, checkedAt: new Date().toISOString(), platform: "win32", arch: "x64", checks: [{ code: "backup", ok: false, message: "Database backup is not configured" }] },
     });
     render(<PlatformTab />, { wrapper: Wrapper });
-    expect(screen.getByText("Database backup is not configured")).toBeInTheDocument();
+    expect(screen.getByText(enSettings.platform.preflight_checks.backup.failure)).toBeVisible();
+    expect(screen.queryByText("Database backup is not configured")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: enSettings.platform.update_now })).toBeDisabled();
     expect(screen.getByRole("button", { name: enSettings.platform.restart })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: enSettings.platform.preflight_diagnostics }));
+    expect(screen.getByText("Database backup is not configured")).toBeVisible();
+  });
+
+  it("renders the internal updater checks and missing application bundle in Chinese without weakening the update gate", async () => {
+    const user = userEvent.setup();
+    const sourceUrl = "https://example.test/releases.json";
+    const readyCodes = ["container_supervisors", "isolated_rehearsal", "backup", "postgresql", "program_storage", "release_feed"] as const;
+    const bundleError = "This release has no supported application bundle; image-only releases cannot be applied in application mode";
+    statusRef.current = platformStatus({
+      updateMode: "internal_application", releaseFeedUrl: sourceUrl, updateAvailable: true,
+      latestRelease: { version: "1.2.3", ref: "new", publishedAt: null, releaseUrl: null, manifestUrl: sourceUrl, apiImage: null, webImage: null },
+      preflight: { ready: false, checkedAt: new Date().toISOString(), platform: "linux", arch: "x64",
+        checks: [
+          ...readyCodes.map(code => ({ code, ok: true, message: code === "release_feed" ? "Release feed is reachable" : `${code} ready` })),
+          { code: "release_artifacts", ok: false, message: "Release is missing or has invalid artifacts for internal_application: application_bundle" },
+          { code: "release_feed_or_schema", ok: false, message: bundleError },
+        ],
+        source: { url: sourceUrl, manifestUrl: null, error: null, modes: [{ mode: "internal_application", available: false, missing: ["application_bundle"] }] },
+      },
+    });
+    render(<I18nProvider locale="zh-Hans" resources={{ "zh-Hans": { common: zhCommon, settings: zhSettings } }}><PlatformTab /></I18nProvider>);
+    const preflight = within(screen.getByTestId("platform-preflight"));
+    expect(preflight.getByText(/Linux \/ x64/).textContent).not.toMatch(/\b(?:AM|PM)\b/);
+    for (const code of readyCodes) expect(preflight.getByText(zhSettings.platform.preflight_checks[code].label)).toBeVisible();
+    expect(preflight.getAllByText("通过", { exact: true })).toHaveLength(6);
+    expect(preflight.getAllByText("未通过", { exact: true })).toHaveLength(2);
+    expect(preflight.getByText(zhSettings.platform.preflight_bundle_unsupported)).toBeVisible();
+    expect(preflight.getByText(zhSettings.platform.missing_artifacts.application_bundle)).toBeVisible();
+    expect(preflight.queryByText(bundleError)).not.toBeInTheDocument();
+    expect(preflight.queryByText("Release feed is reachable")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: zhSettings.platform.update_now })).toBeDisabled();
+    expect(screen.getByRole("button", { name: zhSettings.platform.restart })).toBeDisabled();
+    await user.click(preflight.getByRole("button", { name: zhSettings.platform.preflight_diagnostics }));
+    expect(preflight.getByText(bundleError)).toBeVisible();
+    expect(preflight.getByText("container_supervisors")).toBeVisible();
+  });
+
+  it("shows a translated fallback for a future check and preserves its code and error", async () => {
+    const user = userEvent.setup();
+    statusRef.current = platformStatus({ preflight: {
+      ready: false, checkedAt: new Date().toISOString(), platform: "linux", arch: "x64",
+      checks: [{ code: "future_driver_check", ok: false, message: "Unexpected mount layout: /very/long/path" }],
+    } });
+    render(<PlatformTab />, { wrapper: Wrapper });
+    expect(screen.getByText(enSettings.platform.preflight_unknown_check)).toBeVisible();
+    expect(screen.getByText(enSettings.platform.preflight_unknown_failure)).toBeVisible();
+    expect(screen.queryByText("Unexpected mount layout: /very/long/path")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: enSettings.platform.preflight_diagnostics }));
+    expect(screen.getByText("future_driver_check")).toBeVisible();
+    expect(screen.getByText("Unexpected mount layout: /very/long/path")).toBeVisible();
   });
 
   it("does not claim up-to-date status before a successful check and disables source changes while busy", () => {

@@ -10,7 +10,7 @@ const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const runner = join(repository, 'deploy/windows/run-platform-updater.ps1');
 const powershell = join(process.env.SystemRoot || 'C:/Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe');
 
-test('Windows updater runners share one configuration mutex and release it after the child exits', { skip: process.platform !== 'win32', timeout: 30_000 }, async (t) => {
+test('Windows updater runners share one configuration mutex and release it after the child exits', { skip: process.platform !== 'win32', timeout: 90_000 }, async (t) => {
   const temporaryParent = realpathSync(tmpdir());
   const root = mkdtempSync(join(temporaryParent, 'remi-runner-mutex-test-'));
   const fixture = join(root, 'mock-updater.ps1');
@@ -30,7 +30,7 @@ test('Windows updater runners share one configuration mutex and release it after
   });
   writeFileSync(fixture, [
     '[IO.File]::AppendAllText($env:TEST_UPDATER_MARKER, "started`n")',
-    '$deadline = (Get-Date).AddSeconds(15)',
+    '$deadline = (Get-Date).AddSeconds(60)',
     'while (-not (Test-Path -LiteralPath $env:TEST_UPDATER_RELEASE)) {',
     '  if ((Get-Date) -gt $deadline) { exit 99 }',
     '  Start-Sleep -Milliseconds 20',
@@ -56,7 +56,9 @@ test('Windows updater runners share one configuration mutex and release it after
   }
 
   const first = start(config);
-  const deadline = Date.now() + 10_000;
+  // Cold Windows PowerShell startup can exceed 10 seconds on hosted runners.
+  // Keep the fixture alive long enough to prove exclusivity and subsequent release.
+  const deadline = Date.now() + 30_000;
   while (!existsSync(marker) && Date.now() < deadline) {
     if (first.child.exitCode !== null) break;
     await new Promise((resolveWait) => setTimeout(resolveWait, 30));

@@ -15,7 +15,7 @@ import {
 import { toast } from "sonner";
 import { Badge } from "@multiremi/ui/components/ui/badge";
 import { Button } from "@multiremi/ui/components/ui/button";
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@multiremi/ui/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@multiremi/ui/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@multiremi/ui/components/ui/collapsible";
 import { Input } from "@multiremi/ui/components/ui/input";
 import { Label } from "@multiremi/ui/components/ui/label";
@@ -41,6 +41,7 @@ import {
 import { useT } from "../../i18n";
 import { TimezoneSelect } from "../../common/timezone-select";
 import { PlatformSourceCapabilities, PlatformUpdateModeCard } from "./platform-update-mode";
+import { PlatformPreflightCard } from "./platform-preflight";
 
 type ConfirmAction =
   | { kind: "restart" }
@@ -138,6 +139,15 @@ export function PlatformTab() {
   const currentVersion = status.currentRelease?.version || t(($) => $.platform.unknown_version);
   const progressLines = active ? operationProgressLines(active, t) : [];
   const recentResult = !active ? recentOperationResult(status.lastOperation, t) : null;
+  const maintenanceBlocked = status.maintenance.mode !== "normal";
+  const canUpdate = status.canManage && !busy && !maintenanceBlocked && checked
+    && status.updateAvailable && Boolean(status.latestRelease);
+  const updateHint = !status.canManage ? t($ => $.platform.update_permission_required)
+    : busy || maintenanceBlocked ? t($ => $.platform.mode_busy)
+    : status.updaterStatus !== "ready" ? t($ => $.platform.update_updater_unavailable)
+    : !checked ? t($ => $.platform.update_check_required)
+    : !status.updateAvailable ? (status.currentRelease?.ref === status.latestRelease?.ref
+      ? t($ => $.platform.update_no_new_release) : t($ => $.platform.update_no_newer_release)) : null;
 
   return (
     <div className="space-y-6">
@@ -147,7 +157,7 @@ export function PlatformTab() {
       </div>
 
       {statusQuery.isRefetchError && (
-        <div className="flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
+        <div className="flex items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
           <RefreshCw className="h-4 w-4 animate-spin" />
           {t(($) => $.platform.reconnecting)}
         </div>
@@ -193,22 +203,10 @@ export function PlatformTab() {
         </div>
       )}
 
-      <Card className="rounded-lg">
+      <Card>
         <CardHeader className="border-b">
           <CardTitle>{t(($) => $.platform.current_version)}</CardTitle>
           <CardDescription>{driverLabel(status.driver, t)}</CardDescription>
-          <CardAction>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              disabled={busy || status.updaterStatus !== "ready"}
-              aria-label={t(($) => $.platform.check_updates)}
-              title={t(($) => $.platform.check_updates)}
-              onClick={() => void runAction({ kind: "check_updates" })}
-            >
-              <RefreshCw className={operationMutation.isPending ? "animate-spin" : ""} />
-            </Button>
-          </CardAction>
         </CardHeader>
         <CardContent className="space-y-5">
           <div className="py-3 text-center">
@@ -217,7 +215,7 @@ export function PlatformTab() {
               {status.updateAvailable ? (
                 <Badge variant="secondary">{t(($) => $.platform.update_available)}</Badge>
               ) : checked ? (
-                <span className="inline-flex size-7 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                <span className="inline-flex size-7 items-center justify-center rounded-full bg-success/10 text-success">
                   <Check className="h-4 w-4" />
                 </span>
               ) : <CircleAlert className="h-5 w-5 text-muted-foreground" />}
@@ -235,21 +233,32 @@ export function PlatformTab() {
             )}
           </div>
 
-          <div className="flex flex-wrap justify-center gap-2 border-t pt-4">
-            {status.updateAvailable && status.latestRelease && (
-              <Button disabled={busy || !checked} onClick={() => setConfirmAction({ kind: "update", release: status.latestRelease! })}>
+          <div className="space-y-3 border-t pt-4" data-testid="platform-service-update">
+            <p className="text-center text-sm font-medium">{t($ => $.platform.update_scope)}</p>
+            {status.latestRelease && <p className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
+              <span>{t($ => $.platform.update_target, { version: status.latestRelease!.version })}</span>
+              <code className="break-all text-xs" title={status.latestRelease.ref}>{status.latestRelease.ref.slice(0, 8)}</code>
+            </p>}
+            <div className="flex flex-wrap justify-center gap-2">
+              <Button
+                data-testid="platform-update-services"
+                disabled={!canUpdate}
+                aria-describedby={updateHint ? "platform-service-update-hint" : undefined}
+                onClick={() => status.latestRelease && setConfirmAction({ kind: "update", release: status.latestRelease })}
+              >
                 {t(($) => $.platform.update_now)}
               </Button>
-            )}
-            <Button variant="outline" disabled={busy || !checked} onClick={() => setConfirmAction({ kind: "restart" })}>
-              <RefreshCw />
-              {t(($) => $.platform.restart)}
-            </Button>
+              <Button variant="outline" disabled={busy || !status.canManage || status.updaterStatus !== "ready"} onClick={() => void runAction({ kind: "check_updates" })}>
+                <RefreshCw />
+                {t($ => $.platform.check_updates)}
+              </Button>
+              <Button variant="outline" disabled={busy || !status.canManage || maintenanceBlocked || !checked} onClick={() => setConfirmAction({ kind: "restart" })}>
+                <RefreshCw />
+                {t(($) => $.platform.restart)}
+              </Button>
+            </div>
+            {updateHint && <p id="platform-service-update-hint" role="status" className="text-center text-sm text-muted-foreground">{updateHint}</p>}
           </div>
-
-          {!checked && status.updateAvailable && (
-            <p className="text-center text-sm text-muted-foreground">{t(($) => $.platform.check_unknown)}</p>
-          )}
 
           <div className="space-y-4 border-t pt-4">
             <div className="flex items-start justify-between gap-4">
@@ -325,7 +334,7 @@ export function PlatformTab() {
                       <p className="truncate text-sm font-medium">{release.version}</p>
                       <p className="truncate text-xs text-muted-foreground">{release.ref}</p>
                     </div>
-                    <Button variant="ghost" size="sm" disabled={busy || !checked} onClick={() => setConfirmAction({ kind: "rollback", release })}>
+                    <Button variant="ghost" size="sm" disabled={busy || !status.canManage || maintenanceBlocked || !checked} onClick={() => setConfirmAction({ kind: "rollback", release })}>
                       {t(($) => $.platform.rollback_action)}
                     </Button>
                   </div>
@@ -339,8 +348,8 @@ export function PlatformTab() {
 
       <PlatformUpdateModeCard status={status} />
 
-      <Card className="rounded-lg" data-testid="platform-update-source">
-        <CardHeader><CardTitle>{t(($) => $.platform.update_source)}</CardTitle><CardDescription>{t(($) => $.platform.update_source_hint)}</CardDescription></CardHeader>
+      <Card data-testid="platform-update-source">
+        <CardHeader className="border-b"><CardTitle>{t(($) => $.platform.update_source)}</CardTitle><CardDescription>{t(($) => $.platform.update_source_hint)}</CardDescription></CardHeader>
         <CardContent className="space-y-3">
           <Label htmlFor="platform-release-feed">{t(($) => $.platform.update_source_url)}</Label>
           <Input id="platform-release-feed" type="url" value={sourceDraft} placeholder={status.defaultReleaseFeedUrl ?? "https://example.com/platform-release.json"} disabled={busy || settingsMutation.isPending} onChange={(event) => setSourceDraft(event.target.value)} />
@@ -361,19 +370,9 @@ export function PlatformTab() {
         </CardContent>
       </Card>
 
-      <Card className="rounded-lg" data-testid="platform-preflight">
-        <CardHeader><CardTitle>{t(($) => $.platform.preflight_title)}</CardTitle><CardDescription>{t(($) => $.platform.preflight_hint)}</CardDescription></CardHeader>
-        <CardContent className="space-y-2">
-          {!status.preflight && <p className="text-sm text-muted-foreground">{t(($) => $.platform.check_unknown)}</p>}
-          {status.preflight && <p className="text-xs text-muted-foreground">{status.preflight.platform} / {status.preflight.arch} · {formatTimestamp(status.preflight.checkedAt)}</p>}
-          {status.preflight?.checks.map((check) => <div key={check.code} className="flex items-start gap-2 text-sm">
-            {check.ok ? <Check className="mt-0.5 h-4 w-4 shrink-0" /> : <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />}
-            <span className="break-words">{check.message}</span>
-          </div>)}
-        </CardContent>
-      </Card>
+      <PlatformPreflightCard status={status} />
 
-      <Card className="rounded-lg">
+      <Card>
         <CardHeader className="border-b">
           <CardTitle>{t(($) => $.platform.services)}</CardTitle>
           <CardDescription>{t(($) => $.platform.updater_status, { status: updaterLabel(status.updaterStatus, t) })}</CardDescription>
@@ -396,11 +395,16 @@ export function PlatformTab() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{confirmTitle(confirmAction, t)}</AlertDialogTitle>
-            <AlertDialogDescription>{confirmDescription(confirmAction, t)}</AlertDialogDescription>
+            <AlertDialogDescription>
+              {confirmDescription(confirmAction, t)}
+              {confirmAction?.kind === "update" && <span className="mt-3 block break-all font-mono text-xs">
+                {t($ => $.platform.update_target_ref, { ref: confirmAction.release.ref })}
+              </span>}
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>{t(($) => $.platform.cancel)}</AlertDialogCancel>
-            <AlertDialogAction onClick={() => confirmAction && void runAction(confirmAction)}>
+            <AlertDialogAction disabled={busy || !status.canManage || maintenanceBlocked || !checked || (confirmAction?.kind === "update" && (!canUpdate || confirmAction.release.ref !== status.latestRelease?.ref))} onClick={() => confirmAction && void runAction(confirmAction)}>
               {t(($) => $.platform.confirm)}
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -499,5 +503,5 @@ function autoUpdateResultLabel(result: string | null, t: Translate): string {
   if (result === "blocked") return t(($) => $.platform.auto_update_result_blocked);
   return t(($) => $.platform.auto_update_result_failed);
 }
-function confirmTitle(action: ConfirmAction | null, t: Translate) { return action?.kind === "restart" ? t(($) => $.platform.confirm_restart_title) : action?.kind === "rollback" ? t(($) => $.platform.confirm_rollback_title) : t(($) => $.platform.confirm_update_title); }
+function confirmTitle(action: ConfirmAction | null, t: Translate) { return action?.kind === "restart" ? t(($) => $.platform.confirm_restart_title) : action?.kind === "rollback" ? t(($) => $.platform.confirm_rollback_title) : t(($) => $.platform.confirm_update_title, { version: action && "release" in action ? action.release.version : "" }); }
 function confirmDescription(action: ConfirmAction | null, t: Translate) { return action?.kind === "restart" ? t(($) => $.platform.confirm_restart_desc) : action?.kind === "rollback" ? t(($) => $.platform.confirm_rollback_desc, { version: action.release.version }) : t(($) => $.platform.confirm_update_desc, { version: action && "release" in action ? action.release.version : "" }); }

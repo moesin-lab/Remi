@@ -155,8 +155,9 @@ export function taskIssueResponsibleMember(c: Context, store: MultiremiStore): s
 /** Record the verified automation configuration at creation, never use audit data as authority. */
 export function taskIssueResponsibilitySourceAudit(c: Context, store: MultiremiStore): CreateIssueInput['responsibilitySourceAudit'] {
   const source=taskIssueCreationSource(c,store);
-  if(!source || source.issueId || source.chatId || !source.task.autopilotRunId)return null;
+  if(!source || source.issueId || source.chatId)return null;
   const task=source.task;
+  if(!task.autopilotRunId)return null;
   const human=taskIssueResponsibleMember(c,store);
   const run=human?store.getAutopilotRun(task.autopilotRunId):null;
   return run && human ? {kind:'autopilot_run',taskId:task.id,runId:run.id,autopilotId:run.autopilotId,responsibleMemberId:human} : null;

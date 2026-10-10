@@ -481,6 +481,73 @@
       "internal_application": { "label": "コンテナー内部のアプリ更新", "description": "Compose 内のアップデーターが API/Web と同梱 Bun/Node を切り替え、コンテナーは稼働を続けます。", "migration": "監視プログラム対応の API/Web イメージを揃えます。compose.internal-updates.yml を追加し、REMI_UPDATER_IMAGE と REMI_UPDATER_ENV_FILE、API と一致する認証情報、HTTPS 更新元を設定します。オーバーレイを含めてアップデーターと隔離テストサービスを起動し、監視と初期コピーの準備完了を待ちます。" },
       "systemd_release": { "label": "Systemd リリース更新", "description": "ホストのアップデーターがリリースディレクトリを切り替え systemd サービスを再起動します。", "migration": "Linux のリリースディレクトリ、管理対象 API/Web systemd サービス、完全なバックアップを用意します。MULTIREMI_PLATFORM_DRIVER=systemd_release とソースアーカイブの更新元を設定します。Docker からはデータとサービス配置の別途移行も必要です。" }
     },
+    "preflight_ready": "チェック成功",
+    "preflight_blocked": "チェック失敗",
+    "preflight_passed": "成功",
+    "preflight_failed": "失敗",
+    "preflight_unknown_check": "その他のチェック",
+    "preflight_unknown_failure": "このチェックに失敗しました。診断の詳細を開き、問題を解決して再確認してください。",
+    "preflight_diagnostics": "診断の詳細",
+    "preflight_diagnostics_hint": "トラブルシューティング用に更新プログラムの元のメッセージを保持しています。",
+    "preflight_bundle_unsupported": "このリリースには有効なアプリパッケージがありません。イメージのみのリリースはアプリ更新モードではインストールできません。",
+    "preflight_checks": {
+      "host": {
+        "label": "ホスト環境",
+        "failure": "ホスト、サービス、または必要なツールの準備ができていません。配置環境を確認してください。"
+      },
+      "compose": {
+        "label": "コンテナ配置環境",
+        "failure": "コンテナ設定または Docker エンジンの準備ができていません。配置設定を確認してください。"
+      },
+      "application_runtime": {
+        "label": "アプリ実行環境",
+        "failure": "インストール済みの実行環境が利用できないか互換性がありません。ベースイメージと設定を確認してください。"
+      },
+      "local_profile": {
+        "label": "ローカル配置環境",
+        "failure": "ローカル配置の環境チェックに失敗しました。設定とサービス状態を確認してください。"
+      },
+      "container_supervisors": {
+        "label": "サービス監視プログラム",
+        "failure": "API または Web の監視プログラムの準備ができていません。ハートビートとアプリのプロセスを確認してください。"
+      },
+      "isolated_rehearsal": {
+        "label": "隔離された移行リハーサル",
+        "failure": "移行リハーサル用のサービスを利用できません。復旧してから再確認してください。"
+      },
+      "backup": {
+        "label": "データバックアップ設定",
+        "failure": "バックアップの設定または検証に失敗しました。データベースと永続ファイルを完全にバックアップできることを確認してください。"
+      },
+      "postgresql": {
+        "label": "データベース接続",
+        "failure": "バックアップ用のデータベースを利用できません。接続を復旧して再確認してください。"
+      },
+      "program_storage": {
+        "label": "プログラム保存領域",
+        "failure": "プログラムの保存先に書き込めないか、空き容量が不足しています。権限と空き容量を確認してください。"
+      },
+      "current_release": {
+        "label": "インストール済みバージョン",
+        "failure": "現在のバージョン情報がないか、実行中のサービスと一致しません。インストール済みバージョンを確認してください。"
+      },
+      "release_feed": {
+        "label": "更新元への接続",
+        "failure": "更新元を読み込めません。アドレスとネットワーク接続を確認してください。"
+      },
+      "release_artifacts": {
+        "label": "リリース内容",
+        "failure": "この更新モードに必要な内容がないか無効です。互換性のある更新元を使用してください。"
+      },
+      "data_schema": {
+        "label": "データ互換性",
+        "failure": "対象のデータ構造に互換性がありません。移行とロールバックの宣言を確認してください。"
+      },
+      "release_feed_or_schema": {
+        "label": "リリースとデータの互換性",
+        "failure": "更新元、リリース定義、またはデータ互換性の検証に失敗しました。診断の詳細に表示された問題を解決してください。"
+      }
+    },
     "missing_artifacts": {
       "release_identity": "有効なバージョンとコミット識別子が必要です。",
       "source_archive": "HTTPS ソースアーカイブと SHA-256 が必要です。",
@@ -502,7 +569,15 @@
     "latest_version": "{{version}} が利用できます",
     "up_to_date": "最新バージョンです",
     "view_release": "リリースを表示",
-    "update_now": "今すぐ更新",
+    "update_scope": "Web 画面と API サービスを同時に更新します。",
+    "update_target": "更新先バージョン：{{version}}",
+    "update_target_ref": "更新先コミット：{{ref}}",
+    "update_no_new_release": "この更新元の Web と API のバージョンはインストール済みです。",
+    "update_no_newer_release": "この更新元には Web と API の新しいバージョンがありません。",
+    "update_check_required": "先に更新を確認し、更新準備チェックを通過してください。",
+    "update_updater_unavailable": "更新プログラムの準備ができていません。接続を復旧してから更新を確認してください。",
+    "update_permission_required": "Web と API の更新にはプラットフォーム管理権限が必要です。",
+    "update_now": "Web と API を更新",
     "restart": "サービスを再起動",
     "auto_update": "安定版を自動更新",
     "auto_update_hint": "アップデーターが毎日設定した時刻に指定の更新元を確認します。",
@@ -553,8 +628,8 @@
     "cancel_requested": "アップグレードのキャンセルをリクエストしました",
     "confirm_restart_title": "サービスを再起動しますか？",
     "confirm_restart_desc": "API と Web が一時的に利用できなくなります。",
-    "confirm_update_title": "{{version}} をインストールしますか？",
-    "confirm_update_desc": "{{version}} を有効化してサービスを再起動します。失敗時は自動的に元に戻します。",
+    "confirm_update_title": "Web と API を {{version}} に更新しますか？",
+    "confirm_update_desc": "実行中の Agent の完了を待ち、データのバックアップと互換性の検証後に Web と API を同時に更新します。その間、両サービスは一時的に利用できなくなります。更新に失敗した場合は以前のアプリケーションバージョンに戻します。",
     "confirm_rollback_title": "バージョンを戻しますか？",
     "confirm_rollback_desc": "{{version}} に切り替えてサービスを再起動します。",
     "cancel": "キャンセル",

@@ -808,7 +808,7 @@ describe("conversation log multi-process allocation (MUL-405)", () => {
   });
   it.skipIf(!pgAdminUrl)("Postgres: Issue comments do not enter the legacy update queue", async () => {
     await withPostgres(async (db) => verifyLegacyIssueUpdateQueueIsUnused(db));
-  });
+  }, 30_000); // Includes creating, migrating and dropping a scratch database.
   it("SQLite: round aggregation stays before an in-transaction flush", async () => {
     await withSqlite(async (db) => verifyQueueBeforeFlush(db));
   });
@@ -820,7 +820,7 @@ describe("conversation log multi-process allocation (MUL-405)", () => {
   });
   it.skipIf(!pgAdminUrl)("Postgres: failed best-effort workspace queries keep a system comment", async () => {
     await withPostgres(async (db) => verifyBestEffortWorkspaceLookups(db, "pg"));
-  });
+  }, 30_000);
   it.skipIf(!pgAdminUrl)("Postgres: a real workspace SQL error inside an outer transaction fails the write", async () => {
     await withPostgres(async (db) => {
       const store = new MultiremiStore(db);
@@ -1067,5 +1067,5 @@ describe("conversation log multi-process allocation (MUL-405)", () => {
       expect(store.getIssueComment(commentId)).toBeNull();
       expect(store.getConversationLogEntryById(commentId)).toBeNull();
     });
-  });
+  }, 30_000);
 });

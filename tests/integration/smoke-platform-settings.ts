@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /** Isolated Next -> real API/store -> real update worker. Release transport and
- * deployment inspection are fixtures; this harness never updates a deployment. */
+ * deployment execution are fixtures; this harness never updates a real deployment. */
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -12,8 +12,9 @@ import { MultiremiStore } from '@multiremi/store.js';
 import { startMultiremiServer } from '@multiremi/api.js';
 import { PlatformUpdaterClient } from '@remi-platform/updater/client.js';
 import { PlatformUpdateWorker } from '@remi-platform/updater/worker.js';
+import { parseApplicationManifest } from '@remi-platform/updater/application-manifest.js';
 import type { PlatformDeploymentDriver } from '@remi-platform/updater/types.js';
-import type { MultiremiPlatformUpdateMode } from '@multiremi/contracts';
+import type { MultiremiPlatformRelease, MultiremiPlatformUpdateMode } from '@multiremi/contracts';
 
 const args = process.argv.slice(2);
 if (args.includes('--help')) { console.log('bun run tests/integration/smoke-platform-settings.ts [--port=3349]'); process.exit(0); }
@@ -26,6 +27,7 @@ const artifacts = process.env.PLATFORM_SETTINGS_ARTIFACTS ? resolve(process.env.
 mkdirSync(artifacts, { recursive: true });
 for (const key of Object.keys(process.env)) if (/^(MULTIREMI_|REMI_|FEISHU_)/.test(key)) delete process.env[key];
 process.env.NODE_ENV = 'test';
+process.env.MULTIREMI_STATE_DIR = join(root, 'state');
 process.env.MULTIREMI_UPLOAD_DIR = join(root, 'uploads');
 process.env.MULTIREMI_SESSION_ARCHIVE_ROOT = join(root, 'session-archives');
 const apiToken = randomUUID(), updaterToken = randomUUID();
@@ -44,7 +46,7 @@ try {
     hostname: '127.0.0.1', port: 0, backgroundJobs: false, scheduler: null, scmPolling: null, messaging: null, controlPlaneSshMesh: null });
   const backend = `http://127.0.0.1:${api.port}`;
   const defaultFeed = 'https://releases.platform.test/complete.json';
-  const current = { version: '1.0.0', ref: 'a'.repeat(40), dataSchema: 'b'.repeat(64), publishedAt: null, releaseUrl: null, manifestUrl: null, apiImage: null, webImage: null };
+  let current: MultiremiPlatformRelease = { version: '1.0.0', ref: 'a'.repeat(40), dataSchema: 'b'.repeat(64), publishedAt: null, releaseUrl: null, manifestUrl: null, apiImage: null, webImage: null };
   const complete = { ...current, version: '1.0.1', ref: 'c'.repeat(40),
     apiImage: `ghcr.io/test/api@sha256:${'a'.repeat(64)}`, webImage: `ghcr.io/test/web@sha256:${'b'.repeat(64)}`,
     sourceUrl: 'https://releases.platform.test/source.tar.gz', sourceSha256: 'c'.repeat(64),
@@ -63,8 +65,20 @@ try {
   const driver: PlatformDeploymentDriver = {
     kind: 'docker_compose', get updateMode() { return mode; },
     async inspect() { return { driver: this.kind, updateMode: mode, currentRelease: current, recentReleases: [current], services: [] }; },
-    async preflight() { return { ready: true, checkedAt: new Date().toISOString(), platform: 'linux', arch: 'x64', checks: [] }; },
-    async execute(operation) { assert.equal(operation.kind, 'check_updates', 'Fixture must never change services'); return current; },
+    async preflight() { return { ready: true, checkedAt: new Date().toISOString(), platform: 'linux', arch: 'x64',
+      checks: (mode === 'internal_application' ? ['container_supervisors', 'isolated_rehearsal', 'backup', 'postgresql', 'program_storage'] : ['compose', 'backup'])
+        .map(code => ({ code, ok: true, message: `${code} ready` })),
+    }; },
+    async validateRelease(manifest) { if (mode === 'internal_application' || mode === 'host_application') parseApplicationManifest(manifest); },
+    async execute(operation, report, drain) {
+      if (operation.kind === 'check_updates') return current;
+      assert.equal(operation.kind, 'update'); assert.equal(operation.targetVersion, complete.version);
+      assert.equal(operation.targetRef, defaultFeed); assert.equal(operation.targetManifest.ref, complete.ref);
+      parseApplicationManifest(operation.targetManifest);
+      assert(drain); await drain.waitUntilDrained(report); await drain.assertReady();
+      await report({ status: 'switching', progress: { message: 'Simulated Web/API switch in isolated fixture' } });
+      current = { ...complete, manifestUrl: defaultFeed }; return current;
+    },
   };
   const client = new PlatformUpdaterClient(backend, apiToken, updaterToken);
   let worker = new PlatformUpdateWorker(client, driver, defaultFeed), pending: Promise<void> | null = null;
@@ -105,7 +119,10 @@ try {
   browser.stdin!.end(JSON.stringify({ frontend, apiToken, updaterToken, control: `http://127.0.0.1:${control.port}`, artifacts }));
   assert.equal(await completed, 0, 'Browser smoke failed');
   assert.equal(store.getPlatformState().releaseFeedUrl, null, 'Default source restored in persistent state');
-  assert(store.listPlatformOperations(100).every(operation => operation.kind === 'check_updates'), 'No deployment mutation requested');
+  const operations = store.listPlatformOperations(100);
+  assert.equal(operations.filter(operation => operation.kind === 'update' && operation.status === 'succeeded').length, 1);
+  assert(operations.every(operation => operation.kind === 'check_updates' || operation.kind === 'update'));
+  assert.equal(store.getPlatformState().currentRelease?.ref, complete.ref);
 } catch (error) { failure = error; console.error(redact(String(error))); }
 finally {
   if (timer) clearInterval(timer);
@@ -118,5 +135,5 @@ finally {
   try { rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch { console.warn(`Fixture retained: ${root}`); }
   writeFileSync(join(artifacts, 'server.log'), redact(logs));
 }
-console.log(JSON.stringify({ ok: failure === null, artifacts, sourceTransport: 'fixture', deploymentDriver: 'read-only fixture', liveApiAndWorker: true }));
+console.log(JSON.stringify({ ok: failure === null, artifacts, sourceTransport: 'fixture', deploymentDriver: 'simulated Web/API switch', liveApiAndWorker: true }));
 process.exit(failure === null ? 0 : 1);

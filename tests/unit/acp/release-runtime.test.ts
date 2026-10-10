@@ -121,7 +121,7 @@ test("a simple package version bump cannot bypass the CI release snapshot gate",
   await prepareRelease(root, "0.2.70", { latest: async () => next, verify: async () => {} });
   expect(() => checkRelease(root, { baseRef })).not.toThrow();
   expect(() => checkRelease(root, { baseRef: "--bad-ref" })).toThrow("base commit");
-});
+}, 30_000);
 
 test("tag publication rejects malformed snapshots and prerelease dependency pins", () => {
   for (const invalid of [

@@ -36,7 +36,7 @@ describe("agent Issue proposal policy", () => {
       headers: fixture.ordinaryHeaders,
       body: JSON.stringify({ title: "Delegated child remains supported", parent_issue_id: fixture.current.id }),
     });
-    expect(ordinary.status).toBe(201);
+    expect(ordinary.status, await ordinary.clone().text()).toBe(201);
     expect((await ordinary.json()).title).toBe("Delegated child remains supported");
 
     const delegated = await fixture.app.request(issueMessagesPath(fixture.store, fixture.current.id), {
@@ -563,10 +563,8 @@ async function policyFixture() {
   const ordinary = store.createAgent({ name: "Ordinary collaborator", provider: "codex" });
   const worker = store.createAgent({ name: "Quick-create worker", provider: "codex" });
   const current = createResponsibleTestIssue(store, { title: "Current work", workspaceId: "local", assigneeType: "agent", assigneeId: ordinary.id });
-  const restrictedChat = store.createChatSession({ agentId: restricted.id });
-  const ordinaryChat = store.createChatSession({ agentId: ordinary.id });
-  const restrictedSession = store.createIssueSession(current.id, { chatId: restrictedChat.id, title: "Restricted work" });
-  const ordinarySession = store.createIssueSession(current.id, { chatId: ordinaryChat.id, title: "Collaboration" });
+  const restrictedSession = store.createIssueSession(current.id, { title: "Restricted work" });
+  const ordinarySession = store.createIssueSession(current.id, { title: "Collaboration" });
   const restrictedTask = store.createTask({
     agentId: restricted.id,
     issueId: current.id,
@@ -579,6 +577,12 @@ async function policyFixture() {
     issueSessionId: ordinarySession.id,
     prompt: "collaborate",
   });
+
+  for (const [task, session] of [[restrictedTask, restrictedSession], [ordinaryTask, ordinarySession]] as const) {
+    expect(store.getTask(task.id)).toMatchObject({ issueId: current.id, issueSessionId: session.id, chatSessionId: null });
+    expect(store.getIssueSession(session.id)).toMatchObject({ issueId: current.id, chatId: null });
+  }
+
   const restrictedCredential = await store.createTaskAccessToken(restrictedTask, "local");
   const ordinaryCredential = await store.createTaskAccessToken(ordinaryTask, "local");
   const app = createMultiremiApp({ store, authToken: "root-secret" });

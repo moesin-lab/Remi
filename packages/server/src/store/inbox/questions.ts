@@ -142,10 +142,40 @@ export class Questions {
   }
   private integrity(message: UnifiedMessage, record: QuestionRecord): boolean {
     const scoped = this.ctx.issueSessions().getIssueSessionWithOwnerScope(message.session_id);
-    if (scoped ? scoped.ownerWorkspaceId !== record.workspace_id || scoped.session.workspaceId !== record.workspace_id
-      : this.ctx.chat().getChatSession(message.session_id)?.workspaceId !== record.workspace_id) return false;
+    if (scoped) {
+      if (scoped.ownerWorkspaceId !== record.workspace_id || scoped.session.workspaceId !== record.workspace_id) return false;
+    } else {
+      if (this.ctx.issueSessions().getIssueSession(message.session_id)) return false;
+      const chat = this.ctx.chat().getChatSession(message.session_id);
+      if (chat ? chat.workspaceId !== record.workspace_id : !this.nativeAutomationSource(message, record)) return false;
+    }
     const facts = this.ctx.db.query('SELECT h.workspace_id,i.workspace_id AS source_workspace FROM multiremi_conversation_heads h LEFT JOIN multiremi_issues i ON i.id=? WHERE h.session_id=?').get(record.source_issue_id, message.session_id);
     return facts?.workspace_id === record.workspace_id && (!record.source_issue_id || facts?.source_workspace === record.workspace_id);
+  }
+  private nativeAutomationSource(message: UnifiedMessage, record: QuestionRecord): boolean {
+    const native = message.metadata.question as QuestionRecord | undefined;
+    const request = message.metadata.human_request as { kind?: string } | undefined;
+    if (native?.version !== 1 || !request || !['permission', 'question'].includes(String(request.kind))
+      || record.source_issue_id !== null
+      || !message.task_id || !record.source_attempt_id || message.sender_type !== 'agent') return false;
+    const source = this.ctx.db.query(`SELECT t.id,t.session_id,t.workspace_id,t.agent_id,t.execution_scope,
+        t.issue_id,t.issue_session_id,t.chat_session_id,origin.id AS origin_attempt_id
+      FROM multiremi_turns t
+      JOIN multiremi_turn_attempts attempt ON attempt.turn_id=t.id AND attempt.id=?
+      LEFT JOIN multiremi_turn_attempts origin ON origin.turn_id=t.id AND origin.id=t.id AND origin.attempt_no=1
+      WHERE t.id=?`).get(record.source_attempt_id, message.task_id);
+    if (!source || source.session_id !== message.session_id || source.workspace_id !== record.workspace_id
+      || source.agent_id !== message.sender_id || source.issue_id !== null || source.issue_session_id !== null
+      || source.chat_session_id !== null || String(source.execution_scope ?? '') !== String(message.metadata.execution_scope ?? '')) return false;
+
+    // These are separate product conversations, not missing Chat/Issue owners.
+    // The original request allocated an orphan ID from its first Turn/attempt;
+    // an Autopilot conversation additionally has a persisted run binding.
+    if (source.origin_attempt_id === source.id && message.session_id === `auto_orphan_${source.id}`) return true;
+    return !!this.ctx.db.query(`SELECT a.id FROM multiremi_autopilots a
+      JOIN multiremi_autopilot_runs run ON run.autopilot_id=a.id AND run.turn_id=?
+      WHERE a.session_id=? AND a.workspace_id=? AND run.issue_id IS NULL AND run.issue_session_id IS NULL`)
+      .get(source.id, message.session_id, record.workspace_id);
   }
   private waiting(message: UnifiedMessage, record: QuestionRecord): QuestionRecord['wait'] {
     if (record.wait.status !== 'waiting') return record.wait;

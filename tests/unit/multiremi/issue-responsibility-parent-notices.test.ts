@@ -16,8 +16,9 @@ for(const backend of ['sqlite','pg'] as const)describe(`Unresolved parent notice
         const memberId=store.resolveIssueResponsibility(parent.id).rootHuman!.id;
         const session=store.getOrCreateDefaultIssueSession(parent.id);
         const parentMessages=store.listMessages(session.id),inbox=store.listInboxItems(memberId);
+        // Clean the ancestor's owned Sessions before seeding the dangling historical parent link.
+        if(ancestor==='deleted')expect(store.deleteIssue(grandparent.id)).toBe(true);
         db.run('UPDATE multiremi_issues SET parent_issue_id=? WHERE id=?',[grandparent.id,parent.id]);
-        if(ancestor==='deleted')db.run('DELETE FROM multiremi_issues WHERE id=?',[grandparent.id]);
         const before=store.listIssueActivity(grandparent.id);
         const agent=store.createAgent({name:'Notice current executor',provider:'codex'});
         const assigned=store.assignIssue(child.id,{assigneeType:'agent',assigneeId:agent.id});

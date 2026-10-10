@@ -125,6 +125,20 @@ describe.skipIf(!pgAvailable)("MUL-465 atomic PostgreSQL boundaries", () => {
     const task = store.createTask({ agentId: agent.id, workspaceId, runtimeId: runtime.id, prompt: "Wait" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
     const request = nativeQuestion(task.id);
+    const sourceTurn = store.getTurnForAttempt(task.id)!;
+    const sourceAttempt = store.listTurnAttempts(sourceTurn.id).find(item => item.id === task.id)!;
+    const originalMessage = store.getMessage(request.id)!;
+
+    expect(sourceTurn).toMatchObject({ session_id: originalMessage.session_id, current_attempt_id: task.id,
+      agent_id: agent.id, workspace_id: workspaceId });
+    expect(sourceAttempt).toMatchObject({ id: task.id, turn_id: sourceTurn.id, runtime_id: runtime.id, status: "running" });
+    expect(originalMessage).toMatchObject({ task_id: sourceTurn.id, sender_type: "agent", sender_id: agent.id });
+    expect(db.query("SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id=?").get(sourceTurn.session_id))
+      .toMatchObject({ workspace_id: workspaceId });
+    expect(originalMessage.metadata.question).toMatchObject({ workspace_id: workspaceId, source_attempt_id: task.id,
+      wait: { status: "waiting", reason: null, wait_id: `pg-boundary:${task.id}`, runtime_id: runtime.id } });
+    expect(store.getQuestion(request.id)?.wait_status).toBe("waiting");
+
     const events: Array<{ type: string; inTransaction: boolean }> = [];
     const offWorkspace = store.onWorkspaceEvent(event => {
       if (event.payload.task_id === task.id) events.push({ type: event.type, inTransaction: db.inTransaction === true });
@@ -141,6 +155,9 @@ describe.skipIf(!pgAvailable)("MUL-465 atomic PostgreSQL boundaries", () => {
         throw new Error("rollback cancellation");
       })()).toThrow("rollback cancellation");
       expect(store.getTaskHumanRequest(request.id)?.status).toBe("pending");
+      expect(store.getMessage(request.id)).toEqual(originalMessage);
+      expect(store.getTurnForAttempt(task.id)).toEqual(sourceTurn);
+      expect(store.listTurnAttempts(sourceTurn.id).find(item => item.id === task.id)).toEqual(sourceAttempt);
       expect(store.getQuestion(request.id)?.wait_status).toBe('waiting');
       expect(events).toEqual([]);
       db.transaction(() => {

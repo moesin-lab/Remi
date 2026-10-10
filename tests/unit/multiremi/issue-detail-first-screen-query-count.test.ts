@@ -265,7 +265,8 @@ describe("MUL-385 issue detail first-screen query counts", () => {
     }
     const publicAgent = store.createAgent({ id: "agt_first_screen_public", name: "Shared", provider: "codex", ownerId: "alice", visibility: "workspace" });
     const privateAgent = store.createAgent({ id: "agt_first_screen_private", name: "Private", provider: "codex", ownerId: "bob", visibility: "private" });
-    const issue = store.createIssue({ id: "iss_first_screen_access", title: "Shared issue", workspaceId: "local" });
+    const issue = store.createIssue({ id: "iss_first_screen_access", title: "Shared issue", workspaceId: "local",
+      responsibleMemberId: "mem_first_screen_alice" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     expect(main).toMatchObject({ ownerType: "issue", ownerId: issue.id, chatId: null });
     const addChat = (id: string, creatorId: string, agentId = publicAgent.id) => {

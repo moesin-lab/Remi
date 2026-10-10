@@ -1,3 +1,4 @@
+import { createResponsibleTestIssue } from './helpers.js';
 /**
  * MUL-438 strict verification: the browser stream's subscription checks against a
  * real PostgreSQL database, through C4's read-only pool.
@@ -132,7 +133,7 @@ describe("MUL-438 stream auth SQL, executed through the read pool", () => {
     store.createWorkspaceMember({ workspaceId, userId: "creator", name: "Creator", role: "owner" });
     store.createWorkspaceMember({ workspaceId, userId: "member", name: "Member", role: "member" });
     store.createWorkspaceMember({ workspaceId, userId: "admin", name: "Admin", role: "admin" });
-    const issue = store.createIssue({ workspaceId, title: "SQL issue" });
+    const issue = createResponsibleTestIssue(store, { workspaceId, title: "SQL issue" });
     const session = store.getOrCreateDefaultIssueSession(issue.id, "creator");
     const agent = store.createAgent({ workspaceId, name: "Public", provider: "codex", visibility: "workspace" });
     const privateAgent = store.createAgent({
@@ -236,7 +237,7 @@ describe.skipIf(!pgAvailable)("MUL-438 stream auth on Postgres (integration)", (
     store.createWorkspaceMember({ workspaceId, userId: "admin", name: "Admin", role: "admin" });
     // Keep the legacy Issue-owned arm explicit. Creating it after an Agent
     // exists would use the compatibility bridge to create a Chat-owned Session.
-    const issue = store.createIssue({ workspaceId, title: "Streamed" });
+    const issue = createResponsibleTestIssue(store, { workspaceId, title: "Streamed" });
     const session = store.getOrCreateDefaultIssueSession(issue.id, "creator");
     expect(session.chatId).toBeNull();
     const agent = store.createAgent({ workspaceId, name: "Public agent", provider: "codex", visibility: "workspace" });

@@ -1,4 +1,5 @@
 import { sendMessageWithinTransaction } from './inbox/send-message.js';
+import { resolveIssueResponsibility } from './issue-responsibility.js';
 // Cross-domain shared surface for MultiremiStore and its domain repositories.
 // Holds the db handle, the realtime listener registries, the analytics/metric buffers and the
 // private helpers that more than one domain calls. Every member here was moved verbatim out of
@@ -623,6 +624,7 @@ export interface TasksSurface {
    * {@link getTask}; the row is cached for the rest of the request.
    */
   getTaskIdentity(id: string): import("./repos/tasks-repo.js").MultiremiTaskIdentity | null;
+  getTaskChatExecutionKind: import("./repos/tasks-repo.js").TasksRepo["getTaskChatExecutionKind"];
   /** MUL-474: the `status` route's fields, without the prompt column. */
   getTaskStatusSnapshot(id: string): import("./repos/tasks-repo.js").TaskStatusSnapshot | null;
   listTaskMessages(taskId: string, sinceSeq?: number | null): import("@multiremi/contracts/types.js").MultiremiTaskMessage[];
@@ -650,7 +652,7 @@ export interface TasksSurface {
   getTaskHumanRequest(requestId: string): import("@multiremi/contracts/types.js").MultiremiTaskHumanRequest | null;
   respondTaskHumanRequest: import("./repos/tasks-repo.js").TasksRepo["respondTaskHumanRequest"];
   cancelPendingHumanRequestsWithinTransaction(taskId: string, now: string): void;
-  cancelTask(taskId: string): MultiremiTask;
+  cancelTask(taskId: string, options?: { replacementPlanned?: boolean }): MultiremiTask;
   cancelTaskWithinTransaction(
     taskId: string,
     childStatusChanges: import("./repos/tasks-repo.js").ChildStatusChangeCollector,
@@ -836,7 +838,7 @@ export interface IssueSessionsSurface {
   getOrCreateDefaultIssueSessionWithinTransaction(issueId: string, createdById?: string | null): MultiremiIssueSession;
   createIssueSessionWithinTransaction(issueId: string, input?: CreateIssueSessionInput): MultiremiIssueSession;
   getLatestActiveIssueSession(issueId: string): MultiremiIssueSession | null;
-  getIssueSessionWithOwnerScope(id: string): { session: MultiremiIssueSession; ownerWorkspaceId: string | null } | null;
+  getIssueSessionWithOwnerScope(id: string): { session: MultiremiIssueSession; ownerWorkspaceId: string | null; historicalWorkspaceId: string | null } | null;
   addSessionParticipant(sessionId: string, input: AddSessionParticipantInput): MultiremiSessionParticipant;
   getOrCreateSessionAgentLane(sessionId: string, agentId: string, executionScope?: string): MultiremiSessionAgentLane;
   getSessionAgentLane(sessionId: string, agentId: string, executionScope?: string): MultiremiSessionAgentLane | null;
@@ -902,6 +904,11 @@ export interface RuntimesSurface {
  * than leave a workspace pointing at something that no longer exists.
  */
 export interface FeishuBotSurface {
+  isFeishuTransportChatSession(chatSessionId: string): boolean;
+  enqueueQuestionPresentationWithinTransaction: import('./repos/feishu-bot-repo.js').FeishuBotRepo['enqueueQuestionPresentationWithinTransaction'];
+  getFeishuBotConfig: import('./repos/feishu-bot-repo.js').FeishuBotRepo['getConfig'];
+  getFeishuBotConfigForSession: import('./repos/feishu-bot-repo.js').FeishuBotRepo['getConfigForSession'];
+  prepareFeishuBotHumanRequestPush: import('./repos/feishu-bot-repo.js').FeishuBotRepo['prepareHumanRequestPush'];
   enqueueDecisionCardPatch(request: import("@multiremi/contracts/types.js").MultiremiTaskHumanRequest): void;
   getFeishuIssueIdForChatSession(chatSessionId: string): string | null;
   isFeishuBotTaskIssueCreationRestricted(taskId: string): boolean;
@@ -1439,15 +1446,17 @@ export class StoreContext {
     type: string;
     body?: string | null;
     data?: unknown | null;
-  }, deferredEvents?: CommitEventQueue): void {
+  }, deferredEvents?: CommitEventQueue, knownWorkspaceId?: string): void {
     const id = createId("act");
     const now = nowIso();
+    const workspaceId = knownWorkspaceId ?? this.issueWorkspaceId(issueId);
     this.db.run(
-      `INSERT INTO multiremi_issue_activity (id, issue_id, actor_type, actor_id, type, body, data, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO multiremi_issue_activity (id, issue_id, workspace_id, actor_type, actor_id, type, body, data, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         issueId,
+        workspaceId,
         input.actorType,
         input.actorId ?? null,
         input.type,
@@ -1468,7 +1477,6 @@ export class StoreContext {
       // transaction, so the only remaining failure is a real SQL error, and a
       // broken schema must fail the write rather than be swallowed.
       // Basis: Senior ruling cmt_96e1yqxgifms §2.
-      const workspaceId = this.issueWorkspaceId(issueId);
       if (!workspaceId) return;
       const event: WorkspaceEvent = {
         type: "activity:created",
@@ -1497,6 +1505,10 @@ export class StoreContext {
 
   // Cross-domain: the agent that actually runs work for an assignee ref. Called by the tasks,
   // autopilots and analytics bands, so it lives here rather than in any one of them.
+  resolveIssueResponsibility(issueId: string): import('@multiremi/contracts').IssueResponsibility {
+    return resolveIssueResponsibility(this, issueId);
+  }
+
   resolveRunnableAgentForAssignee(assigneeType: MultiremiAssigneeType, assigneeId: string): MultiremiAgent | null {
     if (assigneeType === "agent") {
       const agent = this.agents().getAgent(assigneeId);
@@ -1508,11 +1520,7 @@ export class StoreContext {
     if (squad.archivedAt) return null;
     if (squad.leaderId) {
       const leader = this.agents().getAgent(squad.leaderId);
-      if (leader && !leader.archivedAt) return leader;
-    }
-    for (const member of this.squads().listSquadMembers(squad.id).filter((m) => m.memberType === "agent")) {
-      const agent = this.agents().getAgent(member.memberId);
-      if (agent && !agent.archivedAt) return agent;
+      if (leader && !leader.archivedAt && leader.workspaceId === squad.workspaceId) return leader;
     }
     return null;
   }

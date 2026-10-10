@@ -3,7 +3,7 @@ import { daemonTaskClaimResponse, taskRealtimePayload } from "@multiremi/api/wir
 import { buildTaskPrompt } from "@daemon/agent-runtime/prompts/ephemeral.js";
 import { resolveWorkDir } from "@daemon/agent-runtime/workspace/persistent.js";
 import { resolveIssueSessionProviderHome } from "@daemon/agent-runtime/workspace/session-home.js";
-import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore, createResponsibleTestIssue, db, resetMultiremiTestEnv } from "./helpers.js";
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { bindFeishuTopicFixture } from "./feishu-topic-fixture.js";
 
@@ -13,7 +13,7 @@ function fixture(owner: "chat" | "issue", projected = false) {
   const store = createLocalStore();
   const runtime = store.registerRuntime({ name: "Session executor", provider: "claude", workspaceId: "local" });
   const agent = store.createAgent({ name: "Session worker", provider: "claude", runtimeId: runtime.id });
-  const issue = owner === "issue" || projected ? store.createIssue({ title: "Session work" }) : null;
+  const issue = owner === "issue" || projected ? createResponsibleTestIssue(store, { title: "Session work" }) : null;
   const chat = owner === "chat" ? store.createChatSession({ agentId: agent.id, creatorId: "local" }) : null;
   const session = chat
     ? projected ? store.createIssueSession(issue!.id, { chatId: chat.id, title: "Projected work" })
@@ -99,7 +99,7 @@ describe("Session Task dual ownership", () => {
     const { store, agent, issue, chat, session } = fixture("chat", true);
     const otherChat = store.createChatSession({ agentId: agent.id });
     const issueOwned = store.getOrCreateDefaultIssueSession(issue!.id);
-    const otherIssue = store.createIssue({ title: "Another Issue" });
+    const otherIssue = createResponsibleTestIssue(store, { title: "Another Issue" });
     const workspace = store.createWorkspace({ name: "Other workspace", slug: "other-workspace" });
     const foreignAgent = store.createAgent({ name: "Foreign worker", provider: "claude", workspaceId: workspace.id });
     const tasksBefore = store.listTasks().length;
@@ -166,7 +166,7 @@ describe("Session Task dual ownership", () => {
       const chat = store.createChatSession({ agentId: agents[0]!.id });
       const sessionA = store.getOrCreateDefaultChatSession(chat.id);
       const sessionB = store.createSession(chat.id, { title: "Independent Session B" });
-      const issue = store.createIssue({ title: "Independent Issue owner" });
+      const issue = createResponsibleTestIssue(store, { title: "Independent Issue owner" });
       if (firstSurface === "topic") bindFeishuTopicFixture(store, db!, chat.id, issue.id);
       const ordinary = store.createTask({ agentId: agents[0]!.id, chatSessionId: chat.id,
         ...(firstSurface === "topic" ? { issueId: issue.id, holdsWorkspace: false } : {}),

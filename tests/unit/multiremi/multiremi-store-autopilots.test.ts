@@ -1,3 +1,5 @@
+import { createResponsibleTestAutopilot } from './helpers.js';
+import { createResponsibleTestIssue, createHistoricalTestIssue, acceptTestIssueDelivery } from './helpers.js';
 import { taskOfferResponse } from "../../fixtures/task-offer.js";
 // Autopilot run state, cron scheduling and trigger claiming, the failure-rate
 // auto-pause, analytics, and webhook delivery.
@@ -20,7 +22,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
       const store = createStore();
       store.ensureLocalWorkspace();
       const agent = store.createAgent({ name: "Create issue owner", provider: "claude" });
-      const autopilot = store.createAutopilot({
+      const autopilot = createResponsibleTestAutopilot(store, {
         title: "Queued audit run", assigneeId: agent.id, executionMode: "create_issue",
       });
       const events: boolean[] = [];
@@ -53,7 +55,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const store = createStore();
     store.ensureLocalWorkspace();
     const agent = store.createAgent({ name: "Archive observer", provider: "codex" });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Done observer",
       assigneeId: agent.id,
       executionMode: "trigger_issue",
@@ -66,7 +68,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
         conditions: [{ field: "status", operator: "becomes", value: "done" }],
       },
     });
-    const issue = store.createIssue({ title: "Already done", status: "done" });
+    const issue = createHistoricalTestIssue(store, { title: "Already done", status: "done" });
     db!.run(
       "UPDATE multiremi_issues SET completed_at = ? WHERE id = ?",
       ["2026-08-18T00:00:00.000Z", issue.id],
@@ -90,7 +92,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const agent = store.createAgent({ name: "Claude", provider: "claude", ownerId: owner.id });
     const runtime = store.registerRuntime({ name: "local-claude", provider: "claude", ownerId: owner.id });
     const project = store.createProject({ title: "Core" });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Regression sweep",
       projectId: project.id,
       assigneeId: agent.id,
@@ -106,7 +108,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const comment = store.createIssueComment(run.issueId!, { body: "Looks important" });
     expect(comment.body).toBe("Looks important");
     expect(store.listIssueActivity(run.issueId!).map(entry => entry.type)).toEqual([
-      "issue_created", "turn_created", "comment_created",
+      "issue_created", "turn_created", "comment_created", "turn_merged",
     ]);
 
     store.updateIssue(run.issueId!, { status: "in_progress" });
@@ -114,10 +116,10 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     store.startTask(run.taskId!);
     store.completeTask(run.taskId!, { output: "fixed" });
 
-    // §3.4 uses the Issue owner's last turn; an unassigned Issue has no owner terminal to derive from.
-    expect(store.getIssue(run.issueId!)?.assigneeId).toBeNull();
+    // Automation config owns execution; a finished turn waits for formal human acceptance.
+    expect(store.getIssue(run.issueId!)?.assigneeId).toBe(agent.id);
     expect(store.getTurn(run.taskId!)?.status).toBe("completed");
-    expect(store.getIssue(run.issueId!)?.status).toBe("in_progress");
+    expect(store.getIssue(run.issueId!)?.status).toBe("in_review");
     expect(store.getProject(project.id)?.doneCount).toBe(0);
     expect(store.listAutopilotRuns(autopilot.id)[0]?.status).toBe("completed");
     // Completion appends task_completed, then the agent-reply comment_created.
@@ -147,14 +149,14 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
       runtimeId: runtime.id,
       ownerId: owner.id,
     });
-    const completedAutopilot = store.createAutopilot({
+    const completedAutopilot = createResponsibleTestAutopilot(store, {
       title: "Daily summary",
       assigneeId: agent.id,
       executionMode: "run_only",
       createdByType: "member",
       createdById: creator.id,
     });
-    const failedAutopilot = store.createAutopilot({
+    const failedAutopilot = createResponsibleTestAutopilot(store, {
       title: "Dependency audit",
       assigneeId: agent.id,
       executionMode: "run_only",
@@ -244,7 +246,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Autopilot Claude", provider: "claude" });
     const runtime = store.registerRuntime({ name: "autopilot-runtime", provider: "claude" });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Autopilot payload",
       assigneeId: agent.id,
       executionMode: "run_only",
@@ -268,7 +270,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Atomic Codex", provider: "codex" });
     const runtime = store.registerRuntime({ name: "atomic-runtime", provider: "codex" });
-    const issue = store.createIssue({ title: "Atomic task transition", status: "backlog" });
+    const issue = createResponsibleTestIssue(store, { title: "Atomic task transition", status: "backlog" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Run atomically" });
     expect(store.getIssue(issue.id)?.status).toBe("todo");
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
@@ -295,7 +297,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
   it("schedules active cron autopilots and unschedules inactive ones", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Scheduled triage",
       assigneeId: agent.id,
       triggerKind: "schedule",
@@ -321,7 +323,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
   it("claims due schedule triggers and recovers lost next_run_at like Go", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Trigger scheduled triage",
       assigneeId: agent.id,
       triggerKind: "manual",
@@ -368,7 +370,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
   it("requires event ids to identify a trigger while allowing eventless trigger executions", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Trigger invariant worker", provider: "codex" });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Trigger invariant",
       assigneeId: agent.id,
       executionMode: "run_only",
@@ -411,7 +413,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
       const storeA = new MultiremiStore(dbA);
       const storeB = new MultiremiStore(dbB);
       const agent = storeA.createAgent({ name: "Codex", provider: "codex" });
-      const autopilot = storeA.createAutopilot({
+      const autopilot = createResponsibleTestAutopilot(storeA, {
         title: "Atomic trigger claim",
         assigneeId: agent.id,
         triggerKind: "manual",
@@ -443,28 +445,28 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const creator = store.createWorkspaceMember({ id: "mem_failure_creator", name: "Failure Creator", workspaceId: "local" });
     const owner = store.createWorkspaceMember({ id: "mem_failure_owner", name: "Failure Owner", workspaceId: "local" });
     const agent = store.createAgent({ name: "Codex", provider: "codex", ownerId: owner.id });
-    const offender = store.createAutopilot({
+    const offender = createResponsibleTestAutopilot(store, {
       title: "Failure loop",
       assigneeId: agent.id,
       executionMode: "run_only",
       createdByType: "member",
       createdById: creator.id,
     });
-    const skippedDiluted = store.createAutopilot({
+    const skippedDiluted = createResponsibleTestAutopilot(store, {
       title: "Failure loop with skips",
       assigneeId: agent.id,
       executionMode: "run_only",
       createdByType: "agent",
       createdById: agent.id,
     });
-    const outsideLookback = store.createAutopilot({
+    const outsideLookback = createResponsibleTestAutopilot(store, {
       title: "Old failures",
       assigneeId: agent.id,
       executionMode: "run_only",
       createdByType: "member",
       createdById: creator.id,
     });
-    const belowThreshold = store.createAutopilot({
+    const belowThreshold = createResponsibleTestAutopilot(store, {
       title: "Mixed outcomes",
       assigneeId: agent.id,
       executionMode: "run_only",
@@ -557,7 +559,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const store = createStore();
     const runtime = store.registerRuntime({ id: "rt_autopilot_analytics", name: "Autopilot analytics", provider: "codex" });
     const agent = store.createAgent({ name: "Analytics Codex", provider: "codex", runtimeId: runtime.id });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Analytics autopilot",
       assigneeId: agent.id,
       executionMode: "run_only",
@@ -608,7 +610,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(metricValue(store, "multiremi_autopilot_run_started_total", { cadence: "webhook", trigger_kind: "webhook" })).toBe(1);
     expect(metricValue(store, "multiremi_autopilot_run_terminal_total", { cadence: "webhook", trigger_kind: "webhook", terminal_status: "completed" })).toBe(1);
 
-    const failingAutopilot = store.createAutopilot({
+    const failingAutopilot = createResponsibleTestAutopilot(store, {
       title: "Failing analytics autopilot",
       assigneeId: agent.id,
       executionMode: "run_only",
@@ -645,7 +647,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
   it("records, deduplicates, ignores, rejects, and replays webhook deliveries", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Webhook delivery",
       assigneeId: agent.id,
       triggerKind: "webhook",
@@ -769,9 +771,9 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Wiki maintainer", provider: "codex" });
     const project = store.createProject({ title: "Knowledge project" });
-    const issue = store.createIssue({ title: "Ship feature", projectId: project.id, status: "in_review" });
+    const issue = createResponsibleTestIssue(store, { title: "Ship feature", projectId: project.id, status: "in_review",assigneeType:'agent',assigneeId:agent.id });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Maintain Wiki",
       projectId: project.id,
       assigneeId: agent.id,
@@ -810,7 +812,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
       kind: "webhook",
     })).toThrow("trigger_issue execution does not support schedule or webhook triggers");
 
-    const scheduled = store.createAutopilot({
+    const scheduled = createResponsibleTestAutopilot(store, {
       title: "Scheduled run",
       assigneeId: agent.id,
       executionMode: "run_only",
@@ -822,9 +824,9 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(() => store.updateAutopilot(scheduled.id, { executionMode: "trigger_issue" }))
       .toThrow("trigger_issue execution does not support schedule or webhook triggers");
 
-    store.updateIssue(issue.id, { status: "done" });
+    acceptTestIssueDelivery(store,issue.id);
     const eventRow = db!.query(
-      "SELECT id FROM multiremi_system_events WHERE resource_id = ? AND status = 'pending'",
+      "SELECT id FROM multiremi_system_events WHERE resource_id = ? AND status = 'pending' AND event='status_changed' AND json_extract(payload,'$.status')='done'",
     ).get(issue.id) as { id: string };
     const scheduler = new MultiremiScheduler({ store, pollIntervalMs: 60_000 });
     const runs = scheduler.tickSystemEvents();
@@ -859,23 +861,23 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     });
     expect(duplicate.id).toBe(runs[0].id);
     expect(store.listAutopilotRuns(autopilot.id)).toHaveLength(1);
-    expect(store.listTasksForIssue(issue.id)).toHaveLength(1);
+    expect(store.listTasksForIssue(issue.id)).toHaveLength(2);
   });
 
   it("U7 does not match dependency_auto_start_check to a done autopilot", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Done checker", provider: "claude" });
-    const issue = store.createIssue({ title: "Completed prerequisite", status: "in_progress" });
-    const autopilot = store.createAutopilot({ title: "Observe done", assigneeId: agent.id, executionMode: "trigger_issue" });
+    const issue = createResponsibleTestIssue(store, { title: "Completed prerequisite", status: "in_progress",assigneeType:'agent',assigneeId:agent.id });
+    const autopilot = createResponsibleTestAutopilot(store, { title: "Observe done", assigneeId: agent.id, executionMode: "trigger_issue" });
     store.createAutopilotTrigger(autopilot.id, {
       kind: "system_event", eventConfig: { resource: "issue", event: "status_changed",
         conditions: [{ field: "status", operator: "becomes", value: "done" }] },
     });
-    store.updateIssue(issue.id, { status: "done" });
+    acceptTestIssueDelivery(store,issue.id);
     const rows = db!.query("SELECT id FROM multiremi_system_events WHERE resource_id = ?").all(issue.id) as Array<{ id: string }>;
     const events = rows.map(({ id }) => store.getSystemEvent(id)!);
     const check = events.find((event) => event.event === "dependency_auto_start_check")!;
-    const status = events.find((event) => event.event === "status_changed")!;
+    const status = events.find((event) => event.event === "status_changed" && event.payload.status==='done')!;
     const first = store.dispatchPendingSystemEvents(new Date(check.availableAt));
     expect(first).toHaveLength(1);
     expect(first[0]?.eventId).toBe(status.id);
@@ -888,8 +890,8 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Review maintainer", provider: "codex" });
     const runtime = store.registerRuntime({ name: "review-runtime", provider: "codex" });
-    const issue = store.createIssue({ title: "Review without a loop", status: "todo" });
-    const autopilot = store.createAutopilot({
+    const issue = createResponsibleTestIssue(store, { title: "Review without a loop", status: "todo" });
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Review on in_review",
       assigneeId: agent.id,
       executionMode: "trigger_issue",
@@ -934,7 +936,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
   it("reuses the most recently updated active Issue-owned Session and ignores newer private projections", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Wiki maintainer", provider: "claude" });
-    const issue = store.createIssue({ title: "Reuse session", status: "in_review" });
+    const issue = createResponsibleTestIssue(store, { title: "Reuse session", status: "in_review", assigneeType: "agent", assigneeId: agent.id });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
     const latest = store.createIssueSession(issue.id, { title: "Latest shared context" });
     const chat = store.createChatSession({ agentId: agent.id });
@@ -949,7 +951,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
       ["2100-01-01T00:00:00.000Z", privateProjection.id]);
     db!.run("UPDATE multiremi_issue_sessions SET updated_at = ? WHERE id = ?",
       ["2101-01-01T00:00:00.000Z", archived.id]);
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Reuse Wiki session",
       assigneeId: agent.id,
       executionMode: "trigger_issue",
@@ -964,7 +966,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
       },
     });
 
-    store.updateIssue(issue.id, { status: "done" });
+    acceptTestIssueDelivery(store,issue.id);
     const [run] = store.dispatchPendingSystemEvents();
     expect(run.issueSessionId).toBe(latest.id);
     expect(store.getTask(run.taskId!)?.chatSessionId).toBeNull();
@@ -978,9 +980,9 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
   it("reuses the independent Issue Main without implicitly creating a Chat", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Main worker", provider: "claude" });
-    const issue = store.createIssue({ title: "Reuse Main" });
+    const issue = createResponsibleTestIssue(store, { title: "Reuse Main" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
-    const autopilot = store.createAutopilot({ title: "Main automation", assigneeId: agent.id,
+    const autopilot = createResponsibleTestAutopilot(store, { title: "Main automation", assigneeId: agent.id,
       executionMode: "trigger_issue", sessionPolicy: "reuse_latest" });
 
     const run = store.runAutopilot(autopilot.id, { triggerIssueId: issue.id });
@@ -999,8 +1001,10 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     try {
       const storeA = new MultiremiStore(dbA);
       const storeB = new MultiremiStore(dbB);
-      const issue = storeA.createIssue({ title: "Atomic event claim", status: "in_review" });
-      storeA.updateIssue(issue.id, { status: "done" });
+      storeA.ensureLocalWorkspace();
+      const owner=storeA.createAgent({name:'Atomic event owner',provider:'codex'});
+      const issue = createResponsibleTestIssue(storeA,{ title: "Atomic event claim", status: "in_review",assigneeType:'agent',assigneeId:owner.id });
+      acceptTestIssueDelivery(storeA,issue.id);
 
       const event = dbA.query(
         "SELECT id FROM multiremi_system_events WHERE resource_id = ? AND status = 'pending'",
@@ -1022,8 +1026,8 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
   it("requeues a system event when its trigger execution fails", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Wiki maintainer", provider: "codex" });
-    const issue = store.createIssue({ title: "Retry missing Issue", status: "in_review" });
-    const autopilot = store.createAutopilot({
+    const issue = createResponsibleTestIssue(store, { title: "Retry missing Issue", status: "in_review",assigneeType:'agent',assigneeId:agent.id });
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Retry Wiki maintenance",
       assigneeId: agent.id,
       executionMode: "trigger_issue",
@@ -1037,10 +1041,11 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
       },
     });
 
-    store.updateIssue(issue.id, { status: "done" });
+    acceptTestIssueDelivery(store,issue.id);
     const event = db!.query(
-      "SELECT id FROM multiremi_system_events WHERE resource_id = ? AND status = 'pending'",
+      "SELECT id FROM multiremi_system_events WHERE resource_id = ? AND status = 'pending' AND event='status_changed' AND json_extract(payload,'$.status')='done'",
     ).get(issue.id) as { id: string };
+    const originalTaskIds=store.listTasks().map(task=>task.id);
     db!.run("DELETE FROM multiremi_issues WHERE id = ?", [issue.id]);
 
     expect(store.dispatchPendingSystemEvents()).toEqual([]);
@@ -1050,7 +1055,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     expect(retried.lastError).toContain("Issue not found");
     expect(new Date(retried.availableAt).getTime()).toBeGreaterThan(Date.now());
     expect(store.listAutopilotRuns(autopilot.id)).toEqual([]);
-    expect(store.listTasks()).toEqual([]);
+    expect(store.listTasks().map(task=>task.id)).toEqual(originalTaskIds);
   });
 
   it("dedupes repository Wiki build runs by active build and pinned-revision key", () => {
@@ -1149,7 +1154,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     });
 
     // Runs without repository scoping (every other autopilot) never dedupe.
-    const other = store.createAutopilot({
+    const other = createResponsibleTestAutopilot(store, {
       title: "Not a wiki autopilot",
       assigneeId: agent.id,
       executionMode: "run_only",
@@ -1166,7 +1171,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     store.ensureLocalWorkspace();
     const atlas = store.createAgent({ name: "Atlas · LLM Wiki", provider: "claude", role: "maintainer" });
     const userAgent = store.createAgent({ name: "User Wiki", provider: "claude" });
-    const userOwned = store.createAutopilot({
+    const userOwned = createResponsibleTestAutopilot(store, {
       title: "Atlas · Repository Wiki",
       assigneeId: userAgent.id,
       executionMode: "run_only",
@@ -1314,7 +1319,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
   it("rolls back the reserved run when trigger_issue has no triggering Issue", () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Wiki maintainer", provider: "codex" });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Missing Issue",
       assigneeId: agent.id,
       executionMode: "trigger_issue",

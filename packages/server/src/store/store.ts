@@ -3,7 +3,11 @@ import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-bin
 import { ExecutionProfilesRepo } from "@multiremi/store/repos/execution-profiles-repo.js";
 import { getExecutionGroup, listExecutionGroups, saveExecutionGroup, deleteExecutionGroup } from "@multiremi/store/execution-groups.js";
 import { isRelatedTurnController } from './turn-controls.js';
+import { listIssueDeliveries, submitIssueDelivery, respondIssueDelivery, authorizeIssueDelivery, type IssueDeliveryActor } from './issue-deliveries.js';
+import { listIssueResponsibilityMigration, mapIssueResponsibility } from './issue-responsibility-migration.js';
 import { DaemonTurnBridge } from './inbox/daemon-turn-bridge.js';
+import { questionNotificationIdentity, questionNotificationFactsSql, canReadQuestionNotificationFacts } from './inbox/question-notification-visibility.js';
+import type { InboxAccess } from './inbox/inbox-visibility.js';
 import type { QuestionCardCredential } from "@multiremi/store/question-card-token.js";
 import type { RuntimeConnectionProfile } from "@multiremi/contracts/runtime-connection";
 import { afterCommit, type SqlDatabase, openMultiremiDatabase } from "@multiremi/store/db/postgres.js";
@@ -1706,6 +1710,16 @@ runMigrations(this.db);
     return this.workspaces.findWorkspaceMemberForUser(userId, workspaceId);
   }
 
+  canReadQuestionNotification(id: string, access: InboxAccess): boolean {
+    const entry = this.getMessage(id);
+    if (!entry) return false;
+    const original = typeof entry.metadata.root_question_id === 'string' ? this.getMessage(entry.metadata.root_question_id) : null;
+    const identity = questionNotificationIdentity(entry, original);
+    if (!identity) return false;
+    const query = questionNotificationFactsSql(identity, entry, access);
+    return canReadQuestionNotificationFacts(identity, entry, access, this.db.query(query.sql).get(...query.params));
+  }
+
   listWorkspacesForUser(userId: string | null | undefined): MultiremiWorkspace[] {
     return this.workspaces.listWorkspacesForUser(userId);
   }
@@ -2428,6 +2442,10 @@ runMigrations(this.db);
     return this.feishuBot.getConfig(workspaceId);
   }
 
+  getFeishuBotConfigForSession(workspaceId: string, sessionId: string): MultiremiFeishuBotConfig | null {
+    return this.feishuBot.getConfigForSession(workspaceId, sessionId);
+  }
+
   listFeishuBotAgentRoutes(workspaceId: string): ReturnType<FeishuBotRepo["listRoutes"]> {
     return this.feishuBot.listRoutes(workspaceId);
   }
@@ -2456,8 +2474,8 @@ runMigrations(this.db);
     return this.feishuBot.upsertConfig(workspaceId, input);
   }
 
-  deleteFeishuBotConfig(workspaceId: string): boolean {
-    return this.feishuBot.deleteConfig(workspaceId);
+  deleteFeishuBotConfig(workspaceId: string, actorId?:string): boolean {
+    return this.feishuBot.deleteConfig(workspaceId,actorId);
   }
 
   setFeishuBotEnabled(workspaceId: string, enabled: boolean, actor?: string | null): MultiremiFeishuBotConfig | null {
@@ -3909,6 +3927,23 @@ runMigrations(this.db);
     return this.issues.getIssue(id);
   }
 
+  resolveIssueResponsibility(issueId: string): import('@multiremi/contracts').IssueResponsibility {
+    return this.ctx.resolveIssueResponsibility(issueId);
+  }
+
+  listIssueDeliveries(issueId: string, input?: import('@multiremi/contracts').ListIssueDeliveriesInput) { return listIssueDeliveries(this.ctx,issueId,input); }
+  listIssueResponsibilityMigration(workspaceId:string,input?:{limit?:number;offset?:number}) {return listIssueResponsibilityMigration(this.ctx,workspaceId,input);}
+  mapIssueResponsibility(workspaceId:string,input:import('@multiremi/contracts').MapIssueResponsibilityInput,actor:IssueDeliveryActor) {return mapIssueResponsibility(this.ctx,workspaceId,input,actor);}
+  authorizeIssueDelivery(issueId: string, deliveryId: string, agentId: string | null, revision: string, actor: IssueDeliveryActor) {
+    return authorizeIssueDelivery(this.ctx,issueId,deliveryId,agentId,revision,actor);
+  }
+  submitIssueDelivery(issueId: string, input: import('@multiremi/contracts').SubmitIssueDeliveryInput, actor: IssueDeliveryActor) {
+    return submitIssueDelivery(this.ctx,issueId,input,actor);
+  }
+  respondIssueDelivery(issueId: string, deliveryId: string, input: import('@multiremi/contracts').RespondIssueDeliveryInput, actor: IssueDeliveryActor) {
+    return respondIssueDelivery(this.ctx,issueId,deliveryId,input,actor);
+  }
+
   getIssueDecision(issueId: string, decisionId: string): MultiremiIssueDecision | null {
     return this.issues.getIssueDecision(issueId, decisionId);
   }
@@ -4130,6 +4165,10 @@ runMigrations(this.db);
     return this.updateIssueWithOutcome(id, input, options).issue;
   }
 
+  updateIssueAndDispatch(id: string, input: UpdateIssueInput): ReturnType<IssuesRepo['updateIssueAndDispatch']> {
+    return this.issues.updateIssueAndDispatch(id,input);
+  }
+
   updateIssueWithOutcome(
     id: string,
     input: UpdateIssueInput,
@@ -4330,6 +4369,10 @@ runMigrations(this.db);
 
   unresolveIssueComment(id: string): MultiremiIssueComment {
     return this.issues.unresolveIssueComment(id);
+  }
+
+  getIssueCommentSourceWorkspaceId(commentId: string): string | null {
+    return this.issues.getIssueCommentSourceWorkspaceId(commentId);
   }
 
   getIssueComment(id: string): MultiremiIssueComment | null {
@@ -4665,7 +4708,7 @@ runMigrations(this.db);
     return this.sessions.getIssueSession(id);
   }
 
-  getIssueSessionWithOwnerScope(id: string): { session: MultiremiIssueSession; ownerWorkspaceId: string | null } | null {
+  getIssueSessionWithOwnerScope(id: string): { session: MultiremiIssueSession; ownerWorkspaceId: string | null; historicalWorkspaceId: string | null } | null {
     return this.sessions.getIssueSessionWithOwnerScope(id);
   }
 
@@ -5814,6 +5857,17 @@ runMigrations(this.db);
   retryTurnAsMember(...args: Parameters<InboxRepo["operations"]["retryTurnAsMember"]>) { return this.inbox.operations.retryTurnAsMember(...args); }
   issueMessageCardToken(...args: Parameters<InboxRepo["operations"]["issueMessageCardToken"]>) { return this.inbox.operations.issueMessageCardToken(...args); }
   answerMessageDecision(...args: Parameters<InboxRepo["operations"]["answerMessageDecision"]>) { return this.inbox.operations.answerMessageDecision(...args); }
+  getQuestion(...args: Parameters<Questions['get']>) { return new Questions(this.ctx).get(...args); }
+  canAccessQuestionFromTurn(...args: Parameters<Questions['canAccessFromTurn']>) { return new Questions(this.ctx).canAccessFromTurn(...args); }
+  listIssueQuestions(...args: Parameters<Questions['list']>) { return new Questions(this.ctx).list(...args); }
+  answerQuestion(...args: Parameters<Questions['answer']>) { return new Questions(this.ctx).answer(...args); }
+  escalateQuestion(...args: Parameters<Questions['escalate']>) { return new Questions(this.ctx).escalate(...args); }
+  transferQuestion(...args: Parameters<Questions['transfer']>) { return new Questions(this.ctx).transfer(...args); }
+  presentQuestion(...args: Parameters<Questions['present']>) { return new Questions(this.ctx).present(...args); }
+  enqueueQuestionPresentationWithinTransaction(id: string) { return this.feishuBot.enqueueQuestionPresentationWithinTransaction(id); }
+  continueQuestion(...args: Parameters<Questions['continue']>) { return new Questions(this.ctx).continue(...args); }
+  closeQuestion(...args: Parameters<Questions['close']>) { return new Questions(this.ctx).close(...args); }
+  reconcileQuestionWaits(...args: Parameters<Questions['reconcileRuntimeWaits']>) { return new Questions(this.ctx).reconcileRuntimeWaits(...args); }
   getMessage(...args: Parameters<InboxRepo["getMessage"]>) { return this.inbox.getMessage(...args); }
   getDaemonTurnBridge() {return new DaemonTurnBridge(this.ctx);}
   sendMessage(input:import("@multiremi/contracts/unified-model.js").SendMessageInput, uploads: CreateAttachmentInput[] = [],
@@ -6084,10 +6138,10 @@ runMigrations(this.db);
 
   respondTaskHumanRequest(
     requestId: string,
-    input: { response: Record<string, unknown>; respondedBy?: string | null; cardCredential?: QuestionCardCredential },
+    input: { response: Record<string, unknown>; respondedBy?: string | null; cardCredential?: QuestionCardCredential; expectedRouteRevision?: number },
   ): MultiremiTaskHumanRequest | null {
     const request = this.tasks.respondTaskHumanRequest(requestId, input);
-    if (request) this.feishuBot.enqueueDecisionCardPatch(request);
+    // Questions.answer persists the card update intent in the answer transaction.
     if (request) this.notifyHumanRequest("responded", request);
     return request;
   }
@@ -6114,7 +6168,7 @@ runMigrations(this.db);
     type: "created" | "responded" | "expired" | "cancelled",
     request: MultiremiTaskHumanRequest,
   ): void {
-    const task = this.tasks.getTask(request.taskId);
+    const task = this.tasks.getTaskIdentity(request.taskId);
     if (!task) return;
     this.ctx.notifyHumanRequest({ type, request, workspaceId: task.workspaceId });
   }
@@ -6388,8 +6442,8 @@ runMigrations(this.db);
     this.tasks.notifyCancelledTask(result);
   }
 
-  cancelTask(taskId: string): MultiremiTask {
-    return this.tasks.cancelTask(taskId);
+  cancelTask(taskId: string, options: { replacementPlanned?: boolean } = {}): MultiremiTask {
+    return this.tasks.cancelTask(taskId, options);
   }
 
   cancelTasksByTriggerComments(workspaceId: string, commentIds: string[]): number {
@@ -6415,3 +6469,4 @@ runMigrations(this.db);
     return this.tasks.recoverOrphans(runtimeId, activeTaskIds);
   }
 }
+import { Questions } from './inbox/questions.js';

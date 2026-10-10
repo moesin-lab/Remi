@@ -1,3 +1,4 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { turnApiPath, mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -21,7 +22,7 @@ describe("Multiremi API - issue sharing", () => {
         store.ensureLocalWorkspace();
         const trace = new InMemoryTraceStore(() => TRACE_BUDGET_FIXTURE_TS);
         const runtime = store.registerRuntime({ id: "rt_budget", name: "Budget runtime", provider: "codex", workspaceId: "local" });
-        const issue = store.createIssue({ title: "Budget issue", workspaceId: "local" });
+        const issue = createResponsibleTestIssue(store, { title: "Budget issue", workspaceId: "local" });
         store.getOrCreateDefaultIssueSession(issue.id); // Public legacy Issue lane for share trace reads.
         const agent = store.createAgent({ name: "Budget agent", provider: "codex", workspaceId: "local" });
         const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "Budget" });
@@ -61,7 +62,7 @@ describe("Multiremi API - issue sharing", () => {
       const store = createStore();
       store.ensureLocalWorkspace();
       const trace = new InMemoryTraceStore(() => TRACE_BUDGET_FIXTURE_TS);
-      const issue = store.createIssue({ title: "Mixed trace", workspaceId: "local" });
+      const issue = createResponsibleTestIssue(store, { title: "Mixed trace", workspaceId: "local" });
       store.getOrCreateDefaultIssueSession(issue.id); // Public legacy Issue lane for share trace reads.
       const agent = store.createAgent({ name: "Mixed trace agent", provider: "codex", workspaceId: "local" });
       const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "Mixed trace" });
@@ -96,7 +97,7 @@ describe("Multiremi API - issue sharing", () => {
       const store = createStore();
       store.ensureLocalWorkspace();
       const trace = new InMemoryTraceStore(() => TRACE_BUDGET_FIXTURE_TS);
-      const issue = store.createIssue({ title: "Multi-event budget", workspaceId: "local" });
+      const issue = createResponsibleTestIssue(store, { title: "Multi-event budget", workspaceId: "local" });
       store.getOrCreateDefaultIssueSession(issue.id); // Public legacy Issue lane for share trace reads.
       const agent = store.createAgent({ name: "Budget agent", provider: "codex", workspaceId: "local" });
       const task = store.createTask({ agentId: agent.id, issueId: issue.id, workspaceId: "local", prompt: "Budget" });
@@ -129,8 +130,8 @@ describe("Multiremi API - issue sharing", () => {
     const store = createStore();
     store.ensureLocalWorkspace();
     const agent = store.createAgent({ name: "Share task agent", provider: "codex", workspaceId: "local" });
-    const taskIssue = store.createIssue({ title: "Task source", workspaceId: "local", createdBy: "local" });
-    const siblingIssue = store.createIssue({ title: "Sibling target", workspaceId: "local", createdBy: "local" });
+    const taskIssue = createResponsibleTestIssue(store, { title: "Task source", workspaceId: "local", createdBy: "local" });
+    const siblingIssue = createResponsibleTestIssue(store, { title: "Sibling target", workspaceId: "local", createdBy: "local" });
     const task = store.createTask({
       agentId: agent.id,
       issueId: taskIssue.id,
@@ -195,7 +196,7 @@ describe("Multiremi API - issue sharing", () => {
       workspaceId: "local",
       instructions: "INTERNAL_AGENT_RULE_DO_NOT_SHARE",
     });
-    const issue = store.createIssue({
+    const issue = createResponsibleTestIssue(store, {
       title: "Shared launch plan",
       description: "Everything visible on the issue page",
       workspaceId: "local",
@@ -219,7 +220,7 @@ describe("Multiremi API - issue sharing", () => {
       branchName: `agent/${issue.key}`,
       status: "ready",
     });
-    const otherIssue = store.createIssue({
+    const otherIssue = createResponsibleTestIssue(store, {
       title: "Unrelated confidential issue",
       workspaceId: "local",
       createdBy: "local",
@@ -402,7 +403,7 @@ describe("Multiremi API - issue sharing", () => {
       authToken: "root-secret",
       shareSecret: "test-share-secret",
     });
-    const issue = store.createIssue({ title: "Login gate", workspaceId: "local", createdBy: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Login gate", workspaceId: "local", createdBy: "local" });
     const owner = await store.createAccessToken({
       name: "Owner session",
       workspaceId: "local",

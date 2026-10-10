@@ -20,6 +20,16 @@ const manifest = JSON.parse(readFileSync(resolve(root, "cli-capabilities.json"),
 const migrationDoc = readFileSync(resolve(root, "docs/cli-command-migration.md"), "utf8");
 
 describe("CLI capabilities manifest", () => {
+  it("maps the exact responsibility migration router paths to human commands", () => {
+    for (const [route, command] of [
+      ["GET /api/workspaces/:workspaceId/issue-responsibility-migration", "issue.responsibility-unassigned.list"],
+      ["POST /api/workspaces/:workspaceId/issue-responsibility-migration/map", "issue.responsibility-unassigned.map"],
+    ] as const) {
+      expect(golden.routes).toContain(route);
+      expect(manifest.routes[route]).toEqual({ command });
+      expect(manifest.commands[command]?.auth).toEqual(["human"]);
+    }
+  });
   it("matches golden routes in both directions and Registry commands in both directions", () => {
     expect(validateCliCapabilities(golden.routes, manifest, cliCommandInventory())).toEqual([]);
     expect(new Set(Object.keys(manifest.routes))).toEqual(new Set(golden.routes));
@@ -216,10 +226,10 @@ describe("CLI capabilities manifest", () => {
 
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
     expect(cliCoverageReport(manifest)).toEqual({
-      mapped: 643,
+      mapped: 658,
       exempt: 169,
       missing: 0,
-      total: 812,
+      total: 827,
     });
     for (const [route, command] of Object.entries({
       "GET /api/workspaces/:id/feishu-bots": "workspace.feishu-bot.list",

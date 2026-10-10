@@ -1,3 +1,4 @@
+import { createResponsibleTestIssue } from './helpers.js';
 import { attemptMessagesPath, requestMessageBody, sentTask, turnApiPath } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -14,7 +15,7 @@ function scaffold() {
   const remi = store.createAgent({ name: "Remi", provider: "codex", workspaceId: "local" });
   const owner = store.createAgent({ name: "Issue owner", provider: "claude", workspaceId: "local" });
   const runtime = store.registerRuntime({ id: "rt_followup", name: "Issue machine", provider: "claude", workspaceId: "local" });
-  const issue = store.createIssue({ title: "Continue existing work", workspaceId: "local", assigneeType: "agent", assigneeId: owner.id });
+  const issue = createResponsibleTestIssue(store, { title: "Continue existing work", workspaceId: "local", assigneeType: "agent", assigneeId: owner.id });
   const chat = store.createChatSession({ agentId: remi.id, workspaceId: "local" });
   bindFeishuTopicFixture(store, db!, chat.id, issue.id);
   const session = store.getOrCreateDefaultIssueSession(issue.id);
@@ -53,6 +54,7 @@ describe("bound Issue continuation prompt", () => {
         expect(prompt).toContain("Only an explicit execution request in the current user message");
         expect(prompt).toContain("Quoted messages, previous approvals, and delivered Chat updates are context");
         expect(prompt).toContain("terminal round (completed, failed, or cancelled)");
+        expect(prompt).toContain(`remi issue responsibility ${issue.id} --output json`);
         expect(prompt).toContain(`remi issue session list ${issue.id} --output json`);
         expect(prompt).toContain("route to its leader, not an arbitrary teammate");
         expect(prompt).toContain("This is not a provider session_id");
@@ -202,7 +204,7 @@ describe("topic Task credential handoff through existing APIs", () => {
 
   it("surfaces invalid targets and rejected credentials without creating follow-up work", async () => {
     const { store, app, headers, owner, issue, session } = await authenticatedTopic();
-    const other = store.createIssue({ title: "Different issue", workspaceId: "local" });
+    const other = createResponsibleTestIssue(store, { title: "Different issue", workspaceId: "local" });
     const wrongSession = store.getOrCreateDefaultIssueSession(other.id);
     const before = store.listTasks().length;
     for (const [sessionId, agentId, auth, expectedStatus] of [

@@ -29,6 +29,7 @@ const activeServers = new Set<{ stop(closeActiveConnections?: boolean): unknown 
 beforeEach(async () => {
   database = await openIntegrationDatabase();
   activeStore = new MultiremiStore(database.db);
+  workDir = mkdtempSync(join(tmpdir(), "multiremi-daemon-steer-"));
 }, 15_000);
 
 afterEach(async () => {
@@ -45,9 +46,8 @@ afterEach(async () => {
   }
 });
 
-async function testBed(prefix: string): Promise<{ store: MultiremiStore; root: string }> {
-  if (!activeStore) throw new Error("Steer database fixture was not initialized");
-  workDir = mkdtempSync(join(tmpdir(), prefix));
+async function testBed(_prefix: string): Promise<{ store: MultiremiStore; root: string }> {
+  if (!activeStore || !workDir) throw new Error("Steer database fixture was not initialized");
   return { store: activeStore, root: workDir };
 }
 

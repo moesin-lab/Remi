@@ -76,6 +76,7 @@ interface AgentTranscriptDialogProps {
   agentName: string;
   isLive?: boolean;
   contextUsage?: ContextUsage | null;
+  traceModel?: string | null;
   /**
    * Optional content rendered between the header chips and the event list.
    * Used by autopilot run rows to surface the inbound webhook trigger
@@ -125,6 +126,7 @@ export function AgentTranscriptDialog({
   agentName,
   isLive = false,
   contextUsage,
+  traceModel,
   headerSlot,
   promptFallback,
   initialView = "execution",
@@ -652,7 +654,7 @@ export function AgentTranscriptDialog({
                 })}
               </MetadataChip>
             )}
-            <ExecutionModelInfo task={task} usageModel={usage?.model} agentModel={agentInfo?.model} agentThinkingLevel={agentInfo?.thinking_level} />
+            <ExecutionModelInfo task={task} traceModel={traceModel} agentModel={agentInfo?.model} agentThinkingLevel={agentInfo?.thinking_level} />
 
             {/* Working directory — server-derived display path. Falls back to
                 nothing when older backends omit the field rather than rendering

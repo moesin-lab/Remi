@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@multiremi/core/i18n/react";
 import type { Agent, CreateSessionRequest, CreateSessionTaskRequest, Session, SessionTask } from "@multiremi/core/types";
 import type { SessionLogRow } from "@multiremi/core/api/schemas/session-log";
+import type { QuestionView } from "@multiremi/core/api/schemas";
 import type { SessionLogListProps } from "../../common/session-log/session-log-list";
 import enChat from "../../locales/en/chat.json";
 import enIssues from "../../locales/en/issues.json";
@@ -17,6 +18,7 @@ const backend = vi.hoisted(() => ({
   rows: {} as Record<string, SessionLogRow[]>,
   listSessions: vi.fn(), listTasks: vi.fn(), createSession: vi.fn(), createTask: vi.fn(),
   listMessages: vi.fn(), sendMessage: vi.fn(), sendChatMessage: vi.fn(), cancelTask: vi.fn(), readLog: vi.fn(), refreshLog: vi.fn(),
+  getQuestion: vi.fn(), actOnQuestion: vi.fn(),
 }));
 const mockToast = vi.hoisted(() => ({ error: vi.fn() }));
 
@@ -31,7 +33,18 @@ vi.mock("@multiremi/core/api", async importOriginal => {
     listMessages: backend.listMessages,
     sendMessage: backend.sendMessage,
     cancelTaskById: backend.cancelTask,
+    getQuestion: backend.getQuestion,
+    actOnQuestion: backend.actOnQuestion,
   } };
+});
+vi.mock("@multiremi/core/hooks", () => ({ useWorkspaceId: () => "ws-1" }));
+vi.mock("@multiremi/core/paths", async importOriginal => {
+  const actual = await importOriginal<typeof import("@multiremi/core/paths")>();
+  return { ...actual, useWorkspaceSlug: () => "ws-1", useWorkspacePaths: () => actual.paths.workspace("ws-1") };
+});
+vi.mock("../../navigation", async importOriginal => {
+  const actual = await importOriginal<typeof import("../../navigation")>();
+  return { ...actual, AppLink: (props: ComponentProps<"a">) => <a {...props} /> };
 });
 vi.mock("sonner", () => ({ toast: mockToast }));
 vi.mock("@multiremi/core/config", () => ({
@@ -361,12 +374,41 @@ describe("ChatWorkSessionsDialog", () => {
     backend.tasks["session-1"] = [makeTask({ status: "awaiting_human", turn_id: "turn-1" })];
     const request = { kind: "permission", payload: { tool_call: { title: "Run scoped build" }, options: [{ optionId: "allow", kind: "allow_once", name: "Allow once" }] } };
     backend.listMessages.mockResolvedValue({ messages: [{ id: "decision-1", task_id: "turn-1", created_at: timestamp, resolved_at: null, metadata: { human_request: request } }], next_cursor: null });
+    const question: QuestionView = {
+      id: "decision-1", kind: "permission", session_id: "session-1", workspace_id: "ws-1",
+      source_issue_id: null, source_agent_id: "agent-1", source_turn_id: "turn-1", source_attempt_id: "task-1",
+      original_questions: [], original_message: "Run scoped build", original_context: null,
+      options: [{ label: "Allow once", value: "allow" }], summary: null,
+      current_handler: { type: "member", id: "member-1" }, stage: "human", route_revision: 7,
+      answer_revision: 0, status: "pending", wait_status: "waiting", wait_reason: null, answer: null,
+      history: [{ type: "created", actor: null, at: timestamp, route_revision: 7 }], actions: { allowed: ["answer"] },
+    };
+    backend.getQuestion.mockResolvedValue(question);
+    const answered: QuestionView = {
+      ...question, status: "answered", answer_revision: 1, actions: { allowed: [] },
+      answer: { response: { option_id: "allow" }, body_md: "Allow once", actor: { type: "member", id: "member-1" },
+        at: timestamp, reply_message_id: "answer-1" },
+    };
+    backend.actOnQuestion.mockResolvedValue(answered);
+
     mount();
+    const viewQuestion = await screen.findByRole("button", { name: "View question" });
+    expect(backend.getQuestion).not.toHaveBeenCalled();
+    fireEvent.click(viewQuestion);
     fireEvent.click(await screen.findByRole("button", { name: "Allow once" }));
-    await waitFor(() => expect(backend.sendMessage).toHaveBeenCalledWith("session-1", {
-      body_md: "allow", message_kind: "reply", reply_to_id: "decision-1", response: { option_id: "allow" },
-    }));
+    fireEvent.click(screen.getByRole("button", { name: /History and details/ }));
+    expect(screen.getByRole("link", { name: "Source · session-1" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Source · chat-1" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Answer" }));
+
+    await waitFor(() => expect(backend.actOnQuestion).toHaveBeenCalledWith("decision-1", "answer", expect.objectContaining({
+      expected_route_revision: 7, response: { option_id: "allow" },
+    })));
     expect(backend.listMessages).toHaveBeenCalledWith("session-1", { message_kind: "decision", cursor: undefined });
+    expect(backend.listMessages).not.toHaveBeenCalledWith("chat-1", expect.anything());
+    expect(backend.getQuestion).toHaveBeenCalledWith("decision-1");
+    await expect(backend.getQuestion.mock.results[0]?.value).resolves.toMatchObject({ session_id: "session-1", source_turn_id: "turn-1" });
+    expect(backend.sendMessage).not.toHaveBeenCalled();
     expect(backend.sendChatMessage).not.toHaveBeenCalled();
   });
 

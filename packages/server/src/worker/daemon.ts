@@ -1162,6 +1162,7 @@ export class MultiremiDaemon {
         provider: this.options.provider,
         max_concurrency: this.options.maxConcurrency,
         active_task_ids: [...new Set([...this.activeTaskIds, ...(this.outbox?.taskIdsWithPendingTerminal(this.options.runtimeId) ?? [])])],
+        active_question_waits: this.taskDownlinks.activeQuestionWaits(),
         capabilities: this.runtimeCapabilities(),
       } : null,
       heartbeat: () => ({
@@ -1205,7 +1206,7 @@ export class MultiremiDaemon {
       onConnected: () => {
         const runtime = this.protocolLane.runtime();
         if (runtime) this.protocolClient.send({ t: "runtime.ready",
-          rt: runtime.runtime_id, p: { active_task_ids: runtime.active_task_ids } });
+          rt: runtime.runtime_id, p: { active_task_ids: runtime.active_task_ids, active_question_waits: runtime.active_question_waits ?? [] } });
         if (this.options.once && !this.onceTaskAccepted && this.onceOfferTimer === null) {
           this.onceOfferTimer = setTimeout(() => { this.onceOfferTimer = null; this.stop(); }, this.options.onceOfferTimeoutMs);
         }
@@ -1307,7 +1308,7 @@ export class MultiremiDaemon {
 
   answerFeishuIssueDecision(
     decisionId: string,
-    input: { answer: string; operatorOpenId: string; token?: string },
+    input: { answer: string; operatorOpenId: string; token?: string; routeRevision?: number },
   ): Promise<MultiremiIssueDecision> {
     return this.client.answerFeishuIssueDecision(decisionId, input);
   }
@@ -1345,7 +1346,7 @@ export class MultiremiDaemon {
   respondFeishuBotHumanRequest(
     requestId: string,
     response: Record<string, unknown>,
-    credential?: { token: string; operatorOpenId: string },
+    credential?: { token: string; operatorOpenId: string; routeRevision?: number },
   ): Promise<MultiremiTaskHumanRequest> {
     return this.client.respondTaskHumanRequest(requestId, response, credential);
   }
@@ -4083,8 +4084,11 @@ export class MultiremiDaemon {
         try {
           const toolTitle = params.toolCall?.title ?? "tool call";
           // S2 creates the decision message and sets awaiting_human atomically.
+          const questionId = `question_${randomUUID()}`, waitId = randomUUID();
+          this.taskDownlinks.beginQuestionWait?.(task.id, questionId, waitId);
           const result = await this.taskDownlinks.rpc("turn.decision", {
             ...this.taskDownlinks.turnInput(task.id),
+            message_id: questionId, wait_id: waitId,
             dedupe_key: `permission:${task.id}:${randomUUID()}`,
             body_md: `Permission requested: ${toolTitle}`,
             options: params.options.map(option => ({ label: option.name, value: option.optionId, description: option.kind })),
@@ -4108,7 +4112,10 @@ export class MultiremiDaemon {
               message_id: decision.id, reply_message_id: reply?.id ?? null,
               option_id: chosen?.optionId ?? null, responded_by: reply?.sender_id ?? null,
             });
-          if (reply) this.taskDownlinks.confirmDecisionReply(task.id, reply);
+          if (reply) {
+            if (reply.metadata.question_closed !== true) await this.taskDownlinks.rpc('turn.decision.consume', { ...this.taskDownlinks.turnInput(task.id), message_id: decision.id, reply_message_id: reply.id, wait_id: waitId });
+            this.taskDownlinks.confirmDecisionReply(task.id, reply);
+          }
           return chosen ? { outcome: "selected", optionId: chosen.optionId } : { outcome: "cancelled" };
         } catch (err) {
           // Conservative deny when the routing infrastructure itself fails.
@@ -4139,8 +4146,11 @@ export class MultiremiDaemon {
           elicitationContextOffset = sliced.offset;
           context = sliced.context;
         }
+        const questionId = `question_${randomUUID()}`, waitId = randomUUID();
+        this.taskDownlinks.beginQuestionWait?.(task.id, questionId, waitId);
         const result = await this.taskDownlinks.rpc("turn.decision", {
           ...this.taskDownlinks.turnInput(task.id),
+          message_id: questionId, wait_id: waitId,
           dedupe_key: `elicitation:${task.id}:${randomUUID()}`,
           body_md: [params.message, ...questions.map(({ question }) => question.question)].filter(Boolean).join("\n\n"),
           options: questions.flatMap(({ fieldKey, question }) => question.options.map(option => ({
@@ -4163,7 +4173,7 @@ export class MultiremiDaemon {
           questions,
         });
         const reply = await this.awaitDecisionReply(task.id, decision.id, signal, humanRequestTimeoutMs);
-        const answers = reply ? decisionReplyAnswers(reply, questions) : null;
+        const answers = reply && reply.metadata.question_closed !== true ? decisionReplyAnswers(reply, questions) : null;
         await this.reportHumanRequestMessage(
           task.id,
           nextSeq(),
@@ -4171,7 +4181,10 @@ export class MultiremiDaemon {
           answers ? Object.entries(answers).map(([q, a]) => `${q}: ${a}`).join("; ") : "Question cancelled or timed out",
           { message_id: decision.id, reply_message_id: reply?.id ?? null, answers, responded_by: reply?.sender_id ?? null },
         );
-        if (reply) this.taskDownlinks.confirmDecisionReply(task.id, reply);
+        if (reply) {
+          if (reply.metadata.question_closed !== true) await this.taskDownlinks.rpc('turn.decision.consume', { ...this.taskDownlinks.turnInput(task.id), message_id: decision.id, reply_message_id: reply.id, wait_id: waitId });
+          this.taskDownlinks.confirmDecisionReply(task.id, reply);
+        }
         if (!answers) return { action: "cancel" };
         return { action: "accept", content: answersToElicitationContent(questions, answers) };
       } catch (err) {

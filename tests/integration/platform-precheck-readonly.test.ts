@@ -205,20 +205,16 @@ describe("MUL-464 serialized platform-operation invariants", () => {
     } finally { f.close(); }
   });
 
-  test("report maps every contract status to its terminal or active slot", () => {
-    // Each status owns a fresh fully migrated store. The complete matrix took
-    // 5.9s on CI; its budget includes fixture migration, not only report().
-    for (const status of contractStatuses) {
-      const f = repoFixture();
-      try {
-        const operation = f.repo.create({ kind: "restart" }, "local");
-        expect(f.repo.report(operation.id, { status })?.status, status).toBe(status);
-        const row = f.row(operation.id);
-        expect(row.active_slot, status).toBe(isTerminalPlatformOperationStatus(status) ? null : 1);
-        expect(row.finished_at, status).toBe(isTerminalPlatformOperationStatus(status) ? row.updated_at : null);
-      } finally { f.close(); }
-    }
-  }, 15_000);
+  test.each(contractStatuses)("report maps contract status %s to its terminal or active slot", status => {
+    const f = repoFixture();
+    try {
+      const operation = f.repo.create({ kind: "restart" }, "local");
+      expect(f.repo.report(operation.id, { status })?.status, status).toBe(status);
+      const row = f.row(operation.id);
+      expect(row.active_slot, status).toBe(isTerminalPlatformOperationStatus(status) ? null : 1);
+      expect(row.finished_at, status).toBe(isTerminalPlatformOperationStatus(status) ? row.updated_at : null);
+    } finally { f.close(); }
+  });
 
   test("a terminal operation ignores subsequent reports for every contract status", () => {
     for (const terminal of terminalStatuses) {

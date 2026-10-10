@@ -3,7 +3,7 @@ import { createMultiremiApp } from "@multiremi/api.js";
 import type { MultiremiStore } from "@multiremi/store.js";
 import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
 import { turnApiPath } from "./unified-test-paths.js";
-import { resetMultiremiTestEnv } from "./helpers.js";
+import { resetMultiremiTestEnv, seedHistoricalIssueFacts } from "./helpers.js";
 afterEach(resetMultiremiTestEnv);
 
 async function fixture(store: MultiremiStore, privateChat = false, options: { publicSession?: boolean; failed?: boolean } = {}) {
@@ -11,7 +11,8 @@ async function fixture(store: MultiremiStore, privateChat = false, options: { pu
   const member = store.createWorkspaceMember({ workspaceId: "local", userId: user.id, name: user.name, role: "member" });
   const original = store.createAgent({ name: "Original agent", provider: "codex", ownerId: user.id });
   const replacement = store.createAgent({ name: "New assignee", provider: "codex", ownerId: user.id });
-  const issue = store.createIssue({ title: "Recover context", assigneeType: "agent", assigneeId: replacement.id, workspaceId: "local" });
+  const issue = store.createIssue({ title: "Recover context", assigneeType: "agent", assigneeId: replacement.id,
+    workspaceId: "local", responsibleMemberId: member.id });
   const chat = privateChat ? store.createChatSession({ agentId: original.id, creatorId: user.id }) : null;
   const session = chat ? store.createIssueSession(issue.id, { chatId: chat.id, title: "Private recovery" })
     : options.publicSession ? store.getOrCreateDefaultIssueSession(issue.id) : null;
@@ -29,7 +30,7 @@ async function fixture(store: MultiremiStore, privateChat = false, options: { pu
   const pat = await store.createAccessToken({ name: "Creator token", type: "pat", workspaceId: "local", userId: user.id });
   const headers = { Authorization: `Bearer ${pat.token}`, "Content-Type": "application/json" };
   const retry = (taskId: string, body: Record<string, unknown> = {}) => app.request(turnApiPath(store, taskId, "/retry"), { method: "POST", headers, body: JSON.stringify(body) });
-  return { store, original, replacement, issue, previous, retry, app, user, headers, chat, session, pat };
+  return { store, original, replacement, issue, previous, retry, app, user, member, headers, chat, session, pat };
 }
 
 pendingTurnBackendTests("specific run recovery", (current, backend) => {
@@ -53,7 +54,7 @@ pendingTurnBackendTests("specific run recovery", (current, backend) => {
 
   it("rejects an Issue override and leaves the selected Turn on its original Issue", async () => {
     const f = await fixture(current().store);
-    const other = f.store.createIssue({ title: "Other issue", workspaceId: "local" });
+    const other = f.store.createIssue({ title: "Other issue", workspaceId: "local", responsibleMemberId: f.member.id });
     expect((await f.retry(f.previous.id, { issue_id: other.id })).status).toBe(400);
     const retired = await f.app.request(`/api/issues/${other.id}/rerun`, {
       method: "POST", headers: f.headers, body: JSON.stringify({ task_id: f.previous.id }),
@@ -109,7 +110,7 @@ pendingTurnBackendTests("specific run recovery", (current, backend) => {
 
   it("does not interpret a member's specific retry as a force-start past dependencies", async () => {
     const f = await fixture(current().store);
-    const prerequisite = f.store.createIssue({ title: "Pending prerequisite", workspaceId: "local" });
+    const prerequisite = f.store.createIssue({ title: "Pending prerequisite", workspaceId: "local", responsibleMemberId: f.member.id });
     f.store.updateIssue(f.issue.id, { status: "backlog" });
     f.store.createIssueDependency(f.issue.id, { dependsOnIssueId: prerequisite.id, type: "blocked_by" });
     expect(f.store.listUnmetPrerequisites(f.issue.id)).toHaveLength(1);
@@ -155,7 +156,8 @@ pendingTurnBackendTests("specific run recovery", (current, backend) => {
     for (const status of ["blocked", "done", "cancelled"] as const) {
       const f = await fixture(current().store, false, { publicSession: true });
       expect(f.session?.ownerType).toBe("issue");
-      f.store.updateIssue(f.issue.id, { status });
+      if (status === "done") seedHistoricalIssueFacts(f.store, f.issue.id, { status });
+      else f.store.updateIssue(f.issue.id, { status });
       expect((await f.retry(f.previous.id)).status).toBe(200);
       expect(f.store.getIssue(f.issue.id)?.status).toBe(status === "blocked" ? "todo" : status);
     }

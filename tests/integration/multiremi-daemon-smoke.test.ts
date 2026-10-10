@@ -1,3 +1,4 @@
+import { createResponsibleTestIssue, createResponsibleTestAutopilot } from "../unit/multiremi/helpers.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { disabledSshMeshRuntime } from "../helpers/ssh-mesh-isolation.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
@@ -150,14 +151,14 @@ describe("Bun Multiremi daemon smoke", () => {
       for (const surface of ["chat", "issue"] as const) {
         const task = surface === "chat"
           ? store.sendChatMessage(store.createChatSession({ agentId: agent.id, runtime_workspace_id: workspace.id }).id, { body: "Inspect local files" }).task
-          : store.createTask({ agentId: agent.id, issueId: store.createIssue({ title: "Reuse local state", runtime_workspace_id: workspace.id }).id, prompt: "Inspect again" });
+          : store.createTask({ agentId: agent.id, issueId: createResponsibleTestIssue(store, { title: "Reuse local state", runtime_workspace_id: workspace.id }).id, prompt: "Inspect again" });
         await waitForCondition(() => ["completed", "failed"].includes(store.getTask(task.id)?.status ?? ""), 10_000);
         expect(store.getTask(task.id)?.error).toBeNull();
         expect(store.getTask(task.id)?.status).toBe("completed");
         expect(store.getTask(task.id)?.workDir).toBe(cwd);
       }
       expect(sends).toBe(2);
-      const sideIssue = store.createIssue({ title: "Discuss outside the user directory", runtime_workspace_id: workspace.id });
+      const sideIssue = createResponsibleTestIssue(store, { title: "Discuss outside the user directory", runtime_workspace_id: workspace.id });
       const parent = store.getOrCreateDefaultIssueSession(sideIssue.id);
       const side = store.createIssueSession(sideIssue.id, { title: "Side", parentSessionId: parent.id });
       sideWorkDir = join(daemonState, ".runtime", side.id, agent.id, "1", "work");
@@ -1362,7 +1363,7 @@ describe("Bun Multiremi daemon smoke", () => {
     const { store, workDir } = daemonTestBed("multiremi-issue-parallel-");
     const leader = store.createAgent({ name: "Leader", provider: "claude" });
     const worker = store.createAgent({ name: "Worker", provider: "claude" });
-    const issue = store.createIssue({ title: "Parallel Issue" });
+    const issue = createResponsibleTestIssue(store, { title: "Parallel Issue" });
     const chat = store.createChatSession({ agentId: worker.id, workspaceId: "local" });
     const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Parallel work" });
     const tasks = ["one", "two"].map((scope) => store.createTask({
@@ -1713,7 +1714,7 @@ describe("Bun Multiremi daemon smoke", () => {
     const chat = store.createChatSession({ agentId: agent.id, title: "No Git" });
     const hello = store.sendChatMessage(chat.id, { body: "你好" });
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET priority = 100 WHERE id = ?", [hello.task.id]);
-    const issue = store.createIssue({ title: "Still checkout" });
+    const issue = createResponsibleTestIssue(store, { title: "Still checkout" });
     const issueTask = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Use the repository", priority: 50 });
     const daemonToken = await store.createAccessToken({
       name: "Chat no-git daemon",
@@ -1830,7 +1831,7 @@ describe("Bun Multiremi daemon smoke", () => {
     });
     // Issue work is always materialized in the canonical Issue workspace.
     const agent = store.createAgent({ name: "Repo Claude", provider: "claude" });
-    const issue = store.createIssue({ title: "Auto checkout issue" });
+    const issue = createResponsibleTestIssue(store, { title: "Auto checkout issue" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Work in the repo" });
     const daemonToken = await store.createAccessToken({
       name: "Auto repo daemon",
@@ -1909,7 +1910,7 @@ describe("Bun Multiremi daemon smoke", () => {
       ],
     });
     const agent = store.createAgent({ name: "Repo Claude", provider: "claude" });
-    const issue = store.createIssue({ title: "Unavailable checkout issue" });
+    const issue = createResponsibleTestIssue(store, { title: "Unavailable checkout issue" });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Inspect the repo" });
     const daemonToken = await store.createAccessToken({
       name: "Repo warning daemon",
@@ -1991,7 +1992,7 @@ describe("Bun Multiremi daemon smoke", () => {
       ],
     });
     const agent = store.createAgent({ name: "Intake Claude", provider: "claude" });
-    const issue = store.createIssue({ title: "Degraded intake", issueKind: "intake", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Degraded intake", issueKind: "intake", projectId: project.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Triage the request" });
     const daemonToken = await store.createAccessToken({
       name: "Intake degraded daemon",
@@ -2047,7 +2048,7 @@ describe("Bun Multiremi daemon smoke", () => {
   it("runs Feishu Issue-topic replies without a Discussion Session and resumes their Chat context", async () => {
     const { store, workDir } = daemonTestBed("multiremi-bound-chat-");
     const agent = store.createAgent({ name: "Remi", provider: "claude" });
-    const issue = store.createIssue({ title: "Bound Issue", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Bound Issue", workspaceId: "local" });
     const topicRuntime = store.registerRuntime({ id: "rt_topic_setup", name: "Topic setup", provider: "claude", workspaceId: "local" });
     const chat = prepareFeishuIssueTopic(store, { agentId: agent.id, issueId: issue.id, runtimeId: topicRuntime.id });
     const originalIssueSessions = store.listIssueSessions(issue.id).map(session => session.id);
@@ -2356,7 +2357,7 @@ describe("Bun Multiremi daemon smoke", () => {
       name: "Local Claude",
       provider: "claude",
     });
-    const issue = store.createIssue({ title: "Use local directory", projectId: project.id });
+    const issue = createResponsibleTestIssue(store, { title: "Use local directory", projectId: project.id });
     const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local", projectId: project.id });
     const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Local directory work" });
     const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Read the local project" });
@@ -2484,7 +2485,7 @@ describe("Bun Multiremi daemon smoke", () => {
       name: "Issue Codex",
       provider: "codex",
     });
-    const issue = store.createIssue({ title: "Capture Codex home", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Capture Codex home", workspaceId: "local" });
     const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local" });
     const session = store.createIssueSession(issue.id, { chatId: chat.id, title: "Provider environment" });
     const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Capture the provider environment" });
@@ -2572,14 +2573,14 @@ describe("Bun Multiremi daemon smoke", () => {
       name: "GC Claude",
       provider: "claude",
     });
-    const completedIssue = store.createIssue({ title: "GC completed issue", workspaceId: "local" });
+    const completedIssue = createResponsibleTestIssue(store, { title: "GC completed issue", workspaceId: "local" });
     const completedTask = store.createTask({
       agentId: agent.id,
       issueId: completedIssue.id,
       workspaceId: "local",
       prompt: "Create a daemon-owned directory",
     });
-    const activeIssue = store.createIssue({ title: "GC active issue", workspaceId: "local" });
+    const activeIssue = createResponsibleTestIssue(store, { title: "GC active issue", workspaceId: "local" });
     const deletedChat = store.createChatSession({ agentId: agent.id, workspaceId: "local", title: "Deleted GC chat" });
     const daemonToken = await store.createAccessToken({
       name: "GC daemon",
@@ -2747,7 +2748,7 @@ describe("Bun Multiremi daemon smoke", () => {
       name: "Autopilot GC Claude",
       provider: "claude",
     });
-    const autopilot = store.createAutopilot({
+    const autopilot = createResponsibleTestAutopilot(store, {
       title: "Autopilot GC",
       assigneeId: agent.id,
       executionMode: "run_only",
@@ -3907,7 +3908,7 @@ async function runCompactionFinalizeCase(spec: {
     name: `Claude ${spec.id}`,
     provider: "claude",
   });
-  const issue = store.createIssue({ title: `Compaction finalize ${spec.id}`, workspaceId: "local" });
+  const issue = createResponsibleTestIssue(store, { title: `Compaction finalize ${spec.id}`, workspaceId: "local" });
   const task = store.createTask({
     agentId: agent.id,
     issueId: issue.id,
@@ -3986,7 +3987,7 @@ async function runProviderHomeSymlinkProof(kind: "quick" | "chat" | "issue"): Pr
     task = store.sendChatMessage(session.id, { body: "must fail before GC" }).task;
     externalGc = join(workspacesRoot, "chats", session.id, ".multiremi", "gc.json");
   } else {
-    const issue = store.createIssue({ title: "Issue symlink proof", workspaceId: "local" });
+    const issue = createResponsibleTestIssue(store, { title: "Issue symlink proof", workspaceId: "local" });
     receipt = join(outside, "session-archive-receipt.json");
     writeFileSync(receipt, "keep-receipt\n");
     task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "must fail before GC" });

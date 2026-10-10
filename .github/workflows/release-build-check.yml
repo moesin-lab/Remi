@@ -48,9 +48,15 @@ on:
   # it when a later commit lands, and the release gate needs a run on the exact
   # SHA it tags. Runs the backend suite like a main push (MUL-516).
   workflow_dispatch:
+    inputs:
+      retry_backend_run_id:
+        description: "Completed full main run with only backend failures; retry those files after verifying unchanged source"
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 # MUL-516: a new push to a pull request cancels that pull request's run still in
 # progress — only the latest head is worth checking. Runs on main never cancel
@@ -241,6 +247,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
@@ -255,6 +263,18 @@ jobs:
           MULTIREMI_TEST_POSTGRES_URL: postgres://multimira:multimira@localhost:5432/postgres
           MULTIREMI_TEST_LOCK_ORDER_SENTINEL: "1"
         run: bun run test --shard=${{ matrix.shard }}/4
+
+      # A requested retry is extra diagnostic evidence. The complete shard above
+      # still runs, and its failure cannot be cleared by a successful retry.
+      - name: Verify baseline and retry failed backend files
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.retry_backend_run_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RETRY_BACKEND_RUN_ID: ${{ inputs.retry_backend_run_id }}
+          RETRY_BACKEND_SHARD: ${{ matrix.shard }}
+          MULTIREMI_TEST_POSTGRES_URL: postgres://multimira:multimira@localhost:5432/postgres
+          MULTIREMI_TEST_LOCK_ORDER_SENTINEL: "1"
+        run: bun run scripts/retry-failed-backend-tests.ts "$RETRY_BACKEND_RUN_ID" "$RETRY_BACKEND_SHARD"
 
   build:
     runs-on: ubuntu-latest

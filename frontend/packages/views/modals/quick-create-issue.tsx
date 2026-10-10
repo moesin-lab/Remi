@@ -49,6 +49,7 @@ import { FileUploadButton } from "@multiremi/ui/components/common/file-upload-bu
 import { useT } from "../i18n";
 import { matchesPinyin } from "../editor/extensions/pinyin-match";
 import { IssueCreationReceipt } from "./issue-creation-receipt";
+import { RootHumanPicker } from "../issues/components/issue-responsibility-section";
 
 type ActorSelection =
   | { type: "agent"; id: string }
@@ -209,6 +210,7 @@ export function AgentCreatePanel({
   // Identifier is best-effort display context only — the UUID is the
   // authoritative reference the backend/agent uses for `--parent <uuid>`.
   const parentIssueId = (data?.parent_issue_id as string | undefined) ?? undefined;
+  const [responsibleMemberId, setResponsibleMemberId] = useState<string | null>((data?.responsible_member_id as string) || null);
   const parentIssueIdentifier =
     (data?.parent_issue_identifier as string | undefined) ?? undefined;
 
@@ -303,6 +305,7 @@ export function AgentCreatePanel({
         project_id: projectId ?? null,
         runtime_workspace_id: runtimeWorkspaceId,
         parent_issue_id: parentIssueId,
+        ...(parentIssueId ? {} : { responsible_member_id: responsibleMemberId }),
       });
       setLastActor(actor.type, actor.id);
       clearPrompt();
@@ -386,6 +389,7 @@ export function AgentCreatePanel({
     const carry: Record<string, unknown> = {};
     if (projectId) carry.project_id = projectId;
     if (runtimeWorkspaceId) carry.runtime_workspace_id = runtimeWorkspaceId;
+    if (!parentIssueId && responsibleMemberId) carry.responsible_member_id = responsibleMemberId;
     if (parentIssueId) carry.parent_issue_id = parentIssueId;
     if (parentIssueIdentifier) carry.parent_issue_identifier = parentIssueIdentifier;
     onSwitchMode?.(Object.keys(carry).length > 0 ? carry : null);
@@ -517,6 +521,7 @@ export function AgentCreatePanel({
           <WorkLocationPicker wsId={wsId} projectId={projectId} value={runtimeWorkspaceId}
             onChange={location => { setProjectId(location.project_id); setRuntimeWorkspaceId(location.runtime_workspace_id); }}
             disabled={submitting} triggerRender={<PillButton />} />
+          {!parentIssueId && <RootHumanPicker value={responsibleMemberId} onChange={setResponsibleMemberId} defaultSelf disabled={submitting} />}
           {parentIssueId && (
             <span
               data-testid="agent-sub-issue-chip"

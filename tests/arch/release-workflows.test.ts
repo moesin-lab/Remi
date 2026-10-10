@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { parse } from "yaml";
 import { migrationFingerprint } from "../../packages/platform-updater/src/safety.js";
 import schemaInputs from "../../packages/platform-updater/src/data-schema-inputs.json";
+import { DAEMON_MIN_CLI_VERSION } from "../../packages/contracts/src/daemon-protocol.js";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 
@@ -11,7 +12,25 @@ function readWorkflow(name: string): Record<string, any> {
   return parse(readFileSync(resolve(repoRoot, ".github/workflows", name), "utf8"));
 }
 
+function protocolMinimums(value: unknown): unknown[] {
+  if (typeof value === "string") {
+    const body = value.trim();
+    if (!body.startsWith("{") && !body.startsWith("[")) return [];
+    try { return protocolMinimums(JSON.parse(body)); } catch { return []; }
+  }
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, child]) => key === "min_version" ? [child] : protocolMinimums(child));
+}
+
 describe("release workflows", () => {
+  for (const path of ["scripts/api-routes.golden.json", "tests/fixtures/multiremi/first-screen-hotspots-pr2-golden.json"]) {
+    test(`${path} publishes the current daemon minimum version`, () => {
+      const minimums = protocolMinimums(JSON.parse(readFileSync(resolve(repoRoot, path), "utf8")));
+      expect(minimums.length).toBeGreaterThan(0);
+      expect(new Set(minimums)).toEqual(new Set([DAEMON_MIN_CLI_VERSION]));
+    });
+  }
+
   test("application publication policy matches the migration source included in bundles", () => {
     const policy = JSON.parse(readFileSync(resolve(repoRoot, "deploy/platform-application-compatibility.json"), "utf8"));
     const source = schemaInputs.map(path => readFileSync(resolve(repoRoot, path), "utf8")).join("");

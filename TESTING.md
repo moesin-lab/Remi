@@ -54,6 +54,8 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 
 全路由 golden 捕获是功能契约检查，单次测试限时 60 秒；其限时不作为 API 延迟或查询性能预算。页面首屏、SQL 查询次数和读取字节边界仍由对应性能 guard 独立验证。
 
+调整 `DAEMON_MIN_CLI_VERSION` 时，用 `bun run scripts/snapshot-api-routes.ts` 和 `bun run tests/fixtures/multiremi/capture-first-screen-hotspots-pr2-golden.ts` 重新捕获响应基准，并核对差异仅包含批准的契约变更。[发版架构守卫](tests/arch/release-workflows.test.ts)在 PR 的快速检查中核对两份基准的最低版本；完整响应一致性仍由对应 golden 测试验证。
+
 ## CI 覆盖
 
 | 工作流 | 实际检查范围 |

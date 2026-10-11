@@ -20,7 +20,7 @@ export function FeishuBotPanel() {
 
 function FeishuBotPanelContent() {
   const { botId } = useFeishuBotSelection();
-  return <div className="space-y-8"><FeishuBotSection />{botId === "default" && <><BotMenuSection /><LarkTab /></>}</div>;
+  return <div className="space-y-6"><FeishuBotSection />{botId === "default" && <><BotMenuSection /><LarkTab /></>}</div>;
 }
 
 export function FeishuAccessPanel() {

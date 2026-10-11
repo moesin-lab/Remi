@@ -39,6 +39,10 @@ try {
     assert(response.ok(), `${path}: ${response.status()} ${await response.text()}`);
     return response.json();
   };
+  const selectBot = async (name: string) => {
+    await page!.getByRole("combobox", { name: "Select bot", exact: true }).click();
+    await page!.getByRole("option", { name, exact: true }).click();
+  };
   await page.goto(`${frontend}${base}`, { waitUntil: "domcontentloaded", timeout: 90_000 });
   await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
   await page.getByTestId("im-platforms-sidebar").getByRole("link", { name: "Feishu", exact: true }).waitFor();
@@ -72,6 +76,8 @@ try {
   await menu.getByRole("button", { name: "Add item", exact: true }).first().click();
   await menu.getByPlaceholder("Menu label").first().fill("Smoke menu");
   await saveResponse("PUT", `${apiBase}/bot-menu`, () => menu.getByRole("button", { name: "Save", exact: true }).click());
+  await menu.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(artifacts, "im-bot-menu-desktop.png") });
   check("bot menu saves through the relocated page without publishing to Feishu");
 
   await page.getByRole("button", { name: "Add bot", exact: true }).click();
@@ -91,12 +97,28 @@ try {
   await page.reload();
   await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_second_bot" && await designatedHuman.inputValue() === memberIds.member, 20_000, "second bot after reload");
   assert.equal(await page.getByLabel("App Secret", { exact: true }).inputValue(), "");
-  await page.getByRole("combobox", { name: "Select bot", exact: true }).selectOption("default");
+  await selectBot("cli_im_updated");
   await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_im_updated" && await designatedHuman.inputValue() === memberIds.owner, 20_000, "original bot unchanged");
-  await page.getByRole("combobox", { name: "Select bot", exact: true }).selectOption(createdBot.bot_id);
+  await selectBot("Second concierge");
   await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_second_bot" && await designatedHuman.inputValue() === memberIds.member, 20_000, "second bot selection");
   await page.screenshot({ path: join(artifacts, "im-multiple-bots-desktop.png") });
   check("second bot is created through the form, survives refresh and switches without overwriting original credentials");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await poll(() => page!.evaluate(() => document.documentElement.classList.contains("dark")), 5000, "dark bot page");
+  await page.screenshot({ path: join(artifacts, "im-multiple-bots-dark.png") });
+  await page.emulateMedia({ colorScheme: "light" });
+  await poll(() => page!.evaluate(() => !document.documentElement.classList.contains("dark")), 5000, "light bot page");
+  const botSelector = page.getByRole("combobox", { name: "Select bot", exact: true });
+  const selectorBox = await botSelector.boundingBox();
+  const addBotBox = await page.getByRole("button", { name: "Add bot", exact: true }).boundingBox();
+  assert(selectorBox && addBotBox && Math.abs(selectorBox.y + selectorBox.height - addBotBox.y - addBotBox.height) <= 1, "Bot picker and Add bot must align");
+  await botSelector.click();
+  await page.getByRole("option", { name: "cli_im_updated", exact: true }).waitFor();
+  await page.screenshot({ path: join(artifacts, "im-bot-selector-desktop.png") });
+  await page.keyboard.press("Escape");
+  assert(await botSelector.evaluate(element => element === document.activeElement), "Closing the bot picker must restore focus");
+  assert.equal(await page.getByLabel("App ID", { exact: true }).inputValue(), "cli_second_bot");
+  check("bot picker supports keyboard dismissal without switching bots; light and dark pages render");
 
   await page.goto(`${frontend}${base}`);
   await page.getByRole("link", { name: /Second concierge/ }).waitFor();
@@ -111,15 +133,30 @@ try {
   assert.equal(scopedSave.bot_id, createdBot.bot_id);
   assert.equal(scopedSave.sender_access_policy, "allowlist");
   assert.equal(scopedSave.responsible_member_id, memberIds.member);
-  await page.getByRole("combobox", { name: "Select bot", exact: true }).selectOption("default");
+  await selectBot("cli_im_updated");
   await page.getByRole("heading", { name: "Bot capability access", exact: true }).waitFor();
   check("bot selection persists between capability pages and isolates sender access policy");
 
   await page.goto(`${frontend}${base}/bot?bot=${createdBot.bot_id}`);
   await page.getByLabel("App ID", { exact: true }).waitFor();
+  const longBotName = "Second concierge — Customer support and workspace automation for the regional operations team";
+  await page.getByLabel("Bot name", { exact: true }).fill(longBotName);
+  await saveResponse("PUT", `${apiBase}/feishu-bot`, () => botSection.getByRole("button", { name: "Save", exact: true }).click());
   await page.setViewportSize({ width: 390, height: 844 });
   await poll(() => page!.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 10_000, "multi-bot mobile overflow");
   await page.screenshot({ path: join(artifacts, "im-multiple-bots-mobile.png") });
+  await botSelector.click();
+  await page.getByRole("option", { name: "cli_im_updated", exact: true }).waitFor();
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "Bot options must fit the mobile viewport");
+  assert(await page.getByRole("option", { name: longBotName, exact: true }).evaluate(option => {
+    const text = document.createRange();
+    text.selectNodeContents(option);
+    return text.getBoundingClientRect().right <= option.getBoundingClientRect().right;
+  }), "The complete bot name must fit inside its option");
+  await page.screenshot({ path: join(artifacts, "im-bot-selector-mobile.png") });
+  await page.keyboard.press("Escape");
+  await botSection.getByRole("button", { name: "Save", exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: join(artifacts, "im-bot-actions-mobile.png") });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await botSection.getByRole("button", { name: "Delete", exact: true }).click();
   await saveResponse("DELETE", `${apiBase}/feishu-bot`, () => page!.getByRole("alertdialog").getByRole("button", { name: "Delete", exact: true }).click());

@@ -14,7 +14,7 @@ import { ChevronRight, ExternalLink, RefreshCw, Trash2 } from "lucide-react";
 import { QRCode } from "react-qr-code";
 import { cn } from "@multiremi/ui/lib/utils";
 import { Button } from "@multiremi/ui/components/ui/button";
-import { Card, CardContent } from "@multiremi/ui/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@multiremi/ui/components/ui/card";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -103,15 +103,13 @@ export function LarkTab() {
   if (isLoading || installations.length === 0) return null;
 
   return (
-    <div className="space-y-8">
-      <section className="space-y-3">
-        <div className="space-y-1">
-          <h2 className="text-sm font-semibold">{t(($) => $.lark.connected_bots)}</h2>
-          <p className="max-w-2xl text-sm text-muted-foreground">
-            {t(($) => $.lark.legacy_description)}
-          </p>
-        </div>
+    <div>
+      <section>
         <Card>
+          <CardHeader className="border-b">
+            <CardTitle><h2>{t(($) => $.lark.connected_bots)}</h2></CardTitle>
+            <CardDescription>{t(($) => $.lark.legacy_description)}</CardDescription>
+          </CardHeader>
           <CardContent className="divide-y">
             {installations.map((inst) => (
               <InstallationRow

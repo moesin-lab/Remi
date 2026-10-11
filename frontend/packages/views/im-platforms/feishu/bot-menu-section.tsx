@@ -36,6 +36,7 @@ import type {
   MemberWithUser,
 } from "@multiremi/core/types";
 import { Button } from "@multiremi/ui/components/ui/button";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@multiremi/ui/components/ui/card";
 import { Input } from "@multiremi/ui/components/ui/input";
 import { Label } from "@multiremi/ui/components/ui/label";
 import {
@@ -158,14 +159,78 @@ export function BotMenuSection() {
   }
 
   return (
-    <section className="space-y-6 border-t pt-8">
-      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-1">
-          <h2 className="text-sm font-semibold">{t(($) => $.feishu.botMenu.title)}</h2>
-          <p className="max-w-2xl text-sm text-muted-foreground">{t(($) => $.feishu.botMenu.description)}</p>
-        </div>
+    <section>
+      <Card>
+        <CardHeader className="border-b">
+          <CardTitle><h2>{t(($) => $.feishu.botMenu.title)}</h2></CardTitle>
+          <CardDescription>{t(($) => $.feishu.botMenu.description)}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          {!canManage && (
+            <p className="rounded-lg bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+              {t(($) => $.feishu.botMenu.read_only)}
+            </p>
+          )}
+
+          <MenuEditor
+            title={t(($) => $.feishu.botMenu.default_title)}
+            items={draft.default}
+            disabled={!canManage}
+            onChange={(items) => change({ ...draft, default: items })}
+          />
+
+          <div className="space-y-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="text-sm font-medium">{t(($) => $.feishu.botMenu.audiences_title)}</h3>
+                <p className="text-xs text-muted-foreground">{t(($) => $.feishu.botMenu.audiences_description)}</p>
+              </div>
+              {canManage && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => change({
+                    ...draft,
+                    users: [...draft.users, newAudience(members)],
+                  })}
+                >
+                  <Plus className="size-4" />
+                  {t(($) => $.feishu.botMenu.add_audience)}
+                </Button>
+              )}
+            </div>
+
+            {draft.users.length === 0 ? (
+              <p className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
+                {t(($) => $.feishu.botMenu.no_audiences)}
+              </p>
+            ) : draft.users.map((audience, index) => (
+              <AudienceEditor
+                key={audience._id}
+                audience={audience}
+                members={members}
+                disabled={!canManage}
+                onChange={(next) => change({
+                  ...draft,
+                  users: draft.users.map((entry, candidate) => candidate === index ? next : entry),
+                })}
+                onDelete={() => change({ ...draft, users: draft.users.filter((_, candidate) => candidate !== index) })}
+              />
+            ))}
+          </div>
+
+          {publishRequest && (
+            <div className={cn(
+              "rounded-lg border px-3 py-2 text-sm",
+              publishRequest.status === "completed" ? "border-emerald-500/40 bg-emerald-500/5" :
+                publishRequest.status === "failed" || publishRequest.status === "timeout" ? "border-destructive/40 bg-destructive/5" : "bg-muted/30",
+            )}>
+              {publishStatusText(publishRequest, t)}
+            </div>
+          )}
+        </CardContent>
         {canManage && (
-          <div className="flex flex-wrap gap-2">
+          <CardFooter className="flex-wrap gap-2">
             <Button variant="outline" size="sm" disabled={saving || Boolean(publishing)} onClick={() => void save()}>
               {saving ? t(($) => $.feishu.botMenu.saving) : t(($) => $.feishu.botMenu.save)}
             </Button>
@@ -177,72 +242,9 @@ export function BotMenuSection() {
               <Send className="size-4" />
               {publishing === "live" ? t(($) => $.feishu.botMenu.publishing) : t(($) => $.feishu.botMenu.publish)}
             </Button>
-          </div>
+          </CardFooter>
         )}
-      </header>
-
-      {!canManage && (
-        <p className="rounded border px-3 py-2 text-sm text-muted-foreground">
-          {t(($) => $.feishu.botMenu.read_only)}
-        </p>
-      )}
-
-      <MenuEditor
-        title={t(($) => $.feishu.botMenu.default_title)}
-        items={draft.default}
-        disabled={!canManage}
-        onChange={(items) => change({ ...draft, default: items })}
-      />
-
-      <div className="space-y-4">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-medium">{t(($) => $.feishu.botMenu.audiences_title)}</h3>
-            <p className="text-xs text-muted-foreground">{t(($) => $.feishu.botMenu.audiences_description)}</p>
-          </div>
-          {canManage && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => change({
-                ...draft,
-                users: [...draft.users, newAudience(members)],
-              })}
-            >
-              <Plus className="size-4" />
-              {t(($) => $.feishu.botMenu.add_audience)}
-            </Button>
-          )}
-        </div>
-
-        {draft.users.length === 0 ? (
-          <p className="border-y py-6 text-center text-sm text-muted-foreground">
-            {t(($) => $.feishu.botMenu.no_audiences)}
-          </p>
-        ) : draft.users.map((audience, index) => (
-          <AudienceEditor
-            key={audience._id}
-            audience={audience}
-            members={members}
-            disabled={!canManage}
-            onChange={(next) => change({
-              ...draft,
-              users: draft.users.map((entry, candidate) => candidate === index ? next : entry),
-            })}
-            onDelete={() => change({ ...draft, users: draft.users.filter((_, candidate) => candidate !== index) })}
-          />
-        ))}
-      </div>
-
-      {publishRequest && (
-        <div className={cn(
-          "rounded border px-3 py-2 text-sm",
-          publishRequest.status === "completed" ? "border-emerald-500/40 bg-emerald-500/5" :
-            publishRequest.status === "failed" || publishRequest.status === "timeout" ? "border-destructive/40 bg-destructive/5" : "bg-muted/30",
-        )}>
-          {publishStatusText(publishRequest, t)}
-        </div>
-      )}
+      </Card>
 
       <AlertDialog open={confirmLive} onOpenChange={setConfirmLive}>
         <AlertDialogContent>
@@ -269,7 +271,7 @@ function AudienceEditor({ audience, members, disabled, onChange, onDelete }: {
 }) {
   const { t } = useT("im-platforms");
   return (
-    <div className="space-y-4 rounded border p-4">
+    <div className="space-y-4 rounded-lg border p-4">
       <div className="flex items-start gap-3">
         <div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2">
           <div className="space-y-1.5">

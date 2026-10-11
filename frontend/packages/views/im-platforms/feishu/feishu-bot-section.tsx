@@ -30,7 +30,7 @@ import type {
 } from "@multiremi/core/types";
 import { Badge } from "@multiremi/ui/components/ui/badge";
 import { Button } from "@multiremi/ui/components/ui/button";
-import { Card, CardContent } from "@multiremi/ui/components/ui/card";
+import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@multiremi/ui/components/ui/card";
 import { Input } from "@multiremi/ui/components/ui/input";
 import { Label } from "@multiremi/ui/components/ui/label";
 import {
@@ -106,9 +106,9 @@ export function FeishuBotSection() {
       ? botQuery.data.availability
       : { configured: false, available: false, bot_name: null };
     return (
-      <section className="space-y-3">
-        <SectionHeader />
+      <section>
         <Card>
+          <SectionHeader />
           <CardContent className="space-y-1">
             <p className="text-sm font-medium">
               {availability.available
@@ -142,15 +142,14 @@ export function FeishuBotSection() {
   );
 }
 
-function SectionHeader() {
+function SectionHeader({ status }: { status?: string }) {
   const { t } = useT("im-platforms");
   return (
-    <div className="space-y-1">
-      <h2 className="text-sm font-semibold">{t(($) => $.feishu.concierge.title)}</h2>
-      <p className="max-w-2xl text-sm text-muted-foreground">
-        {t(($) => $.feishu.concierge.description)}
-      </p>
-    </div>
+    <CardHeader className="border-b">
+      <CardTitle><h2>{t(($) => $.feishu.concierge.title)}</h2></CardTitle>
+      <CardDescription>{t($ => $.bots.runtimeHint)}</CardDescription>
+      {status && <CardAction><FeishuBotStatusBadge status={status} /></CardAction>}
+    </CardHeader>
   );
 }
 
@@ -325,29 +324,23 @@ function FeishuBotAdminPanel({
   }
 
   return (
-    <section className="space-y-5">
-      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <SectionHeader />
-        <FeishuBotStatusBadge status={status?.status ?? (configured ? "stopped" : "not_configured")} />
-      </header>
-
+    <section className="space-y-4">
       {!encryptionAvailable && (
         <Notice tone="danger" text={t(($) => $.feishu.concierge.encryption_unavailable)} />
       )}
 
-      <StatusPanel status={status} config={config} />
-
       <Card>
+        <SectionHeader status={status?.status ?? (configured ? "stopped" : "not_configured")} />
+        {status && <CardContent><StatusPanel status={status} config={config} /></CardContent>}
         <CardContent className="space-y-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="feishu-bot-name">{t($ => $.bots.name)}</Label>
-            <Input id="feishu-bot-name" value={draft.name} maxLength={100} disabled={busy} onChange={event => edit({ name: event.target.value })} />
-          </div>
-          <p className="text-xs text-muted-foreground">{t($ => $.bots.runtimeHint)}</p>
-          <RootHumanPicker value={draft.responsibleMemberId} onChange={id => edit({ responsibleMemberId: id })} onClear={() => edit({ responsibleMemberId: null })} disabled={busy} automation />
           <div className="grid gap-4 sm:grid-cols-2">
+            <div className="min-w-0 space-y-1.5">
+              <Label htmlFor="feishu-bot-name">{t($ => $.bots.name)}</Label>
+              <Input id="feishu-bot-name" value={draft.name} maxLength={100} disabled={busy} onChange={event => edit({ name: event.target.value })} />
+            </div>
+            <RootHumanPicker value={draft.responsibleMemberId} onChange={id => edit({ responsibleMemberId: id })} onClear={() => edit({ responsibleMemberId: null })} disabled={busy} automation />
             <div className="space-y-1.5">
-              <Label>{t(($) => $.feishu.concierge.agent_label)}</Label>
+              <Label htmlFor="feishu-bot-agent">{t(($) => $.feishu.concierge.agent_label)}</Label>
               <Select
                 disabled={candidatesPending || busy}
                 value={draft.agentId}
@@ -366,7 +359,7 @@ function FeishuBotAdminPanel({
                   edit({ agentId: value, runtimeId: matchingRuntime?.id ?? "" });
                 }}
               >
-                <SelectTrigger className="w-full min-w-0">
+                <SelectTrigger id="feishu-bot-agent" className="w-full min-w-0">
                   <SelectValue>
                     {() => selectedAgent?.name ?? t(($) => $.feishu.concierge.agent_placeholder)}
                   </SelectValue>
@@ -384,13 +377,13 @@ function FeishuBotAdminPanel({
             </div>
 
             <div className="space-y-1.5">
-              <Label>{t(($) => $.feishu.concierge.runtime_label)}</Label>
+              <Label htmlFor="feishu-bot-runtime">{t(($) => $.feishu.concierge.runtime_label)}</Label>
               <Select
                 disabled={candidatesPending || busy}
                 value={draft.runtimeId}
                 onValueChange={(value) => value && edit({ runtimeId: value })}
               >
-                <SelectTrigger className="w-full min-w-0">
+                <SelectTrigger id="feishu-bot-runtime" className="w-full min-w-0">
                   <SelectValue>
                     {() => selectedMachine?.name ?? t(($) => $.feishu.concierge.runtime_placeholder)}
                   </SelectValue>
@@ -414,7 +407,8 @@ function FeishuBotAdminPanel({
               </Select>
               <p className="text-xs text-muted-foreground">{t(($) => $.feishu.concierge.runtime_hint)}</p>
             </div>
-
+          </div>
+          <div className="grid gap-4 border-t pt-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="feishu-bot-app-id">{t(($) => $.feishu.concierge.app_id_label)}</Label>
               <Input
@@ -428,13 +422,13 @@ function FeishuBotAdminPanel({
             </div>
 
             <div className="space-y-1.5">
-              <Label>{t(($) => $.feishu.concierge.domain_label)}</Label>
+              <Label htmlFor="feishu-bot-domain">{t(($) => $.feishu.concierge.domain_label)}</Label>
               <Select
                 disabled={busy}
                 value={draft.domain}
                 onValueChange={(value) => value && edit({ domain: value as FeishuBotDomain })}
               >
-                <SelectTrigger className="w-full min-w-0"><SelectValue /></SelectTrigger>
+                <SelectTrigger id="feishu-bot-domain" className="w-full min-w-0"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="feishu">{t(($) => $.feishu.concierge.domain_feishu)}</SelectItem>
                   <SelectItem value="lark">{t(($) => $.feishu.concierge.domain_lark)}</SelectItem>
@@ -460,8 +454,9 @@ function FeishuBotAdminPanel({
               text={t(($) => $.feishu.concierge.registration_pending_save, { appId: draft.registration.appId })}
             />
           )}
-
-          <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+        </CardContent>
+        <CardFooter className="flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-2">
             <Button size="sm" disabled={!canSave} onClick={() => void handleSave()}>
               {save.isPending ? t(($) => $.feishu.concierge.saving) : t(($) => $.feishu.concierge.save)}
             </Button>
@@ -478,7 +473,8 @@ function FeishuBotAdminPanel({
               <QrCode className="size-4" />
               {t(($) => $.feishu.concierge.scan_to_create)}
             </Button>
-            <div className="grow" />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
               size="sm"
@@ -517,8 +513,7 @@ function FeishuBotAdminPanel({
               {t(($) => $.feishu.concierge.delete)}
             </Button>
           </div>
-
-        </CardContent>
+        </CardFooter>
       </Card>
 
       <FeishuBotRegistrationDialog
@@ -614,11 +609,11 @@ function StatusPanel({
 
   return (
     <div className="space-y-3">
-      <dl className="grid gap-3 rounded border px-4 py-3 text-sm sm:grid-cols-4">
+      <dl className="grid grid-cols-2 gap-4 rounded-lg bg-muted/50 p-3 text-sm sm:grid-cols-4">
         {rows.map((row) => (
-          <div key={row.label} className="space-y-0.5">
+          <div key={row.label} className="min-w-0 space-y-1">
             <dt className="text-xs text-muted-foreground">{row.label}</dt>
-            <dd className="truncate font-medium">{row.value}</dd>
+            <dd className="truncate font-medium" title={row.value}>{row.value}</dd>
           </div>
         ))}
       </dl>
@@ -724,14 +719,14 @@ function Notice({ tone, text }: { tone: "warning" | "danger" | "progress"; text:
   return (
     <p
       className={cn(
-        "flex items-start gap-2 rounded border px-3 py-2 text-xs",
+        "flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed",
         tone === "danger" && "border-destructive/40 bg-destructive/5 text-destructive",
         tone === "warning" && "border-amber-500/40 bg-amber-500/5 text-amber-700 dark:text-amber-400",
         tone === "progress" && "border-sky-500/40 bg-sky-500/5 text-sky-700 dark:text-sky-400",
       )}
     >
       <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-      <span>{text}</span>
+      <span className="min-w-0 break-words">{text}</span>
     </p>
   );
 }

@@ -1,10 +1,13 @@
 "use client";
 
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useId, type ReactNode } from "react";
+import { Bot, Plus } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { feishuBotsOptions } from "@multiremi/core/feishu-bot/queries";
 import { Button } from "@multiremi/ui/components/ui/button";
+import { Label } from "@multiremi/ui/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@multiremi/ui/components/ui/select";
 import { useNavigation } from "../../navigation";
 import { useT } from "../../i18n";
 import { useImWorkspaceAccess } from "../workspace-access";
@@ -17,6 +20,7 @@ export function useFeishuBotSelection() { return useContext(BotSelection); }
  * query cache; remounting the editor discards unsaved credentials on switch. */
 export function FeishuBotSelection({ children, allowCreate = false }: { children: ReactNode; allowCreate?: boolean }) {
   const { t } = useT("im-platforms");
+  const selectorId = useId();
   const workspaceId = useWorkspaceId();
   const access = useImWorkspaceAccess(workspaceId);
   const navigation = useNavigation();
@@ -24,6 +28,7 @@ export function FeishuBotSelection({ children, allowCreate = false }: { children
   const bots = query.data?.bots ?? [];
   const requested = navigation.searchParams.get("bot");
   const botId = requested ?? (bots.find(bot => bot.bot_id === "default")?.bot_id ?? bots[0]?.bot_id ?? "default");
+  const selectedBot = bots.find(bot => bot.bot_id === botId);
   function selectBot(id: string) {
     const params = new URLSearchParams(navigation.searchParams);
     if (id === "default") params.delete("bot");
@@ -36,17 +41,28 @@ export function FeishuBotSelection({ children, allowCreate = false }: { children
   const missing = requested && requested !== "new" && !bots.some(bot => bot.bot_id === requested);
   return <BotSelection.Provider value={{ botId, selectBot }}>
     <div className="space-y-6">
-      <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-card p-4">
-        <label className="min-w-48 flex-1 space-y-2 text-sm font-medium">
-          <span>{t($ => $.bots.select)}</span>
-          <select aria-label={t($ => $.bots.select)} value={botId} onChange={event => selectBot(event.target.value)} className="block h-9 w-full rounded-md border bg-background px-3 text-sm">
-            {bots.length === 0 && <option value="default">{t($ => $.bots.empty)}</option>}
-            {bots.map(bot => <option key={bot.bot_id} value={bot.bot_id}>{bot.name || bot.bot_name || bot.app_id}</option>)}
-            {botId === "new" && <option value="new">{t($ => $.bots.add)}</option>}
-            {missing && <option value={botId}>{t($ => $.bots.missing)}</option>}
-          </select>
-        </label>
-        {allowCreate && bots.length > 0 && <Button variant="outline" disabled={botId === "new"} onClick={() => selectBot("new")}>{t($ => $.bots.add)}</Button>}
+      <div className="flex items-end gap-3">
+        <div className="grid min-w-0 flex-1 gap-1.5 sm:max-w-sm">
+          <Label htmlFor={selectorId}>{t($ => $.bots.select)}</Label>
+          <Select value={botId} onValueChange={value => { if (value) selectBot(value); }}>
+            <SelectTrigger id={selectorId} className="w-full min-w-0">
+              <Bot className="size-4 text-muted-foreground" />
+              <SelectValue className="min-w-0">
+                <span className="min-w-0 flex-1 truncate">
+                  {selectedBot?.name || selectedBot?.bot_name || selectedBot?.app_id
+                    || t($ => botId === "new" ? $.bots.add : missing ? $.bots.missing : $.bots.empty)}
+                </span>
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {bots.length === 0 && <SelectItem value="default">{t($ => $.bots.empty)}</SelectItem>}
+              {bots.map(bot => <SelectItem key={bot.bot_id} value={bot.bot_id}><span className="min-w-0 whitespace-normal break-words">{bot.name || bot.bot_name || bot.app_id}</span></SelectItem>)}
+              {botId === "new" && <SelectItem value="new">{t($ => $.bots.add)}</SelectItem>}
+              {missing && <SelectItem value={botId}>{t($ => $.bots.missing)}</SelectItem>}
+            </SelectContent>
+          </Select>
+        </div>
+        {allowCreate && bots.length > 0 && <Button variant="outline" className="shrink-0" disabled={botId === "new"} onClick={() => selectBot("new")}><Plus className="size-4" />{t($ => $.bots.add)}</Button>}
       </div>
       {missing || (botId === "new" && !allowCreate)
         ? <p className="text-sm text-muted-foreground">{t($ => $.bots.missing)}</p>

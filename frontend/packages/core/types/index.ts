@@ -96,8 +96,6 @@ export type {
   BotMenuUserIdType,
   BotMenuBehavior,
   BotMenuItem,
-  BotMenuTarget,
-  BotMenuAudience,
   BotMenuConfig,
   BotMenuResponse,
   BotMenuPublishResponse,

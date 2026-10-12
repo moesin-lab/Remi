@@ -1,3 +1,4 @@
+import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { createLogger } from "@shared/logger.js";
 import { DAEMON_MIN_CLI_VERSION, DAEMON_PROTOCOL_VERSION, meetsDaemonMinCliVersion } from "@multiremi/contracts/daemon-protocol.js";
@@ -1954,9 +1955,9 @@ export class RuntimesRepo {
       const now = nowIso();
       this.ctx.db.run(
         `INSERT INTO multiremi_bot_menu_publish_requests (
-          id, runtime_id, workspace_id, config, dry_run, status, created_by, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
-        [id, runtimeId, input.workspaceId, toJson(input.config), input.dryRun ? 1 : 0, input.createdBy ?? null, now, now],
+          id, runtime_id, workspace_id, bot_id, config, dry_run, status, created_by, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+        [id, runtimeId, input.workspaceId, input.botId ?? "default", toJson(input.config), input.dryRun ? 1 : 0, input.createdBy ?? null, now, now],
       );
       return this.getBotMenuPublishRequest(runtimeId, id)!;
     });
@@ -2038,8 +2039,21 @@ export class RuntimesRepo {
       { id: request.id, skill_key: request.skillKey, ...(request.root ? { root: request.root } : {}) });
     for (const request of this.commandQueue.pending(runtimeId)) add("command", request.id,
       { id: request.id, command: request.command, args: request.args, timeout_ms: request.timeoutMs });
-    for (const request of this.botMenuPublishQueue.pending(runtimeId)) add("bot_menu", request.id,
-      { id: request.id, config: request.config, dry_run: request.dryRun });
+    for (const request of this.botMenuPublishQueue.pending(runtimeId)) {
+      const target = request.config.target;
+      const bot = this.ctx.db.query(`SELECT app_id, domain, revision, runtime_id
+        FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?`)
+        .get(request.workspaceId, request.botId) as Row | null;
+      if (target && (!bot || target.botId !== request.botId || bot.runtime_id !== runtimeId
+        || target.appId !== bot.app_id || target.domain !== bot.domain || target.revision !== Number(bot.revision)
+        || Number(runtime.metadata.feishu_bot_menu_protocol ?? 0) < BOT_MENU_PROTOCOL_VERSION)) {
+        this.reportBotMenuPublishResult(runtimeId, request.id, {
+          status: "failed", error: "bot configuration changed; publish the menu again",
+        });
+        continue;
+      }
+      add("bot_menu", request.id, { id: request.id, config: request.config, dry_run: request.dryRun });
+    }
     return inputs;
   }
 
@@ -2072,6 +2086,7 @@ export class RuntimesRepo {
     supportsSkillDirectory?: boolean;
     agentPluginProtocol?: number;
     supportsBotMenu?: boolean;
+    botMenuProtocol?: number;
     supportsFeishuBotConfig?: boolean;
     supportsDecisionCard?: boolean;
     supportsIssueDecisionCard?: boolean;
@@ -2090,7 +2105,10 @@ export class RuntimesRepo {
     if (options.supportsBatchImport !== undefined) metadataPatch.supports_batch_import = options.supportsBatchImport;
     if (options.supportsDirectoryScan !== undefined) metadataPatch.supports_directory_scan = options.supportsDirectoryScan;
     if (options.supportsSkillDirectory !== undefined) metadataPatch.supports_skill_directory = options.supportsSkillDirectory;
-    if (options.supportsBotMenu !== undefined) metadataPatch.feishu_bot_menu = options.supportsBotMenu;
+    if (options.supportsBotMenu !== undefined) {
+      metadataPatch.feishu_bot_menu = options.supportsBotMenu;
+      metadataPatch.feishu_bot_menu_protocol = options.botMenuProtocol ?? 0;
+    }
     if (options.supportsFeishuBotConfig !== undefined) {
       metadataPatch[FEISHU_CONCIERGE_CONFIG_CAPABILITY] = options.supportsFeishuBotConfig;
     }
@@ -2978,6 +2996,7 @@ function toBotMenuPublishRequest(row: Row): MultiremiBotMenuPublishRequest {
     id: String(row.id),
     runtimeId: String(row.runtime_id),
     workspaceId: String(row.workspace_id),
+    botId: String(row.bot_id ?? "default"),
     config: parseJson(row.config, {}),
     dryRun: Number(row.dry_run ?? 1) !== 0,
     status: normalizeBotMenuPublishStatus(row.status),

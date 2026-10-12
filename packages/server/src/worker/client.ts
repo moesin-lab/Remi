@@ -1,3 +1,4 @@
+import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
 import type { RuntimeExecutionBinding, RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection";
 import { createReadStream } from "node:fs";
 import { DaemonProtocolRpcError } from "./daemon-protocol-client.js";
@@ -395,6 +396,7 @@ export class MultiremiDaemonClient {
         supports_directory_scan: true,
         supports_skill_directory: true,
         supports_bot_menu: supportsBotMenu,
+        bot_menu_protocol: supportsBotMenu ? BOT_MENU_PROTOCOL_VERSION : 0,
         agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
         ssh_mesh_protocol: MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
         ...(sshMeshStatus ? { ssh_mesh_status: sshMeshStatus } : {}),

@@ -17,7 +17,7 @@ export const workspaceKeys = {
     ["workspaces", wsId, "squads", squadId, "members-status"] as const,
   skills: (wsId: string) => ["workspaces", wsId, "skills"] as const,
   assigneeFrequency: (wsId: string) => ["workspaces", wsId, "assignee-frequency"] as const,
-  botMenu: (wsId: string) => ["workspaces", wsId, "bot-menu"] as const,
+  botMenu: (wsId: string, botId = "default") => ["workspaces", wsId, "bot-menu", botId] as const,
 };
 
 export function workspaceListOptions() {
@@ -27,10 +27,10 @@ export function workspaceListOptions() {
   });
 }
 
-export function botMenuOptions(wsId: string) {
+export function botMenuOptions(wsId: string, botId = "default") {
   return queryOptions({
-    queryKey: workspaceKeys.botMenu(wsId),
-    queryFn: () => api.getBotMenu(wsId),
+    queryKey: workspaceKeys.botMenu(wsId, botId),
+    queryFn: () => api.getBotMenu(wsId, botId),
     enabled: !!wsId,
   });
 }

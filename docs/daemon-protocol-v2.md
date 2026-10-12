@@ -900,7 +900,7 @@ concierge 走 WS rpc `trace.fetch`，**不保留** daemon 侧的 HTTP 读路由�
 daemon → hello   { protocol: 2, daemon_id, cli_version, launched_by,
                    runtimes: [{ runtime_id, provider, max_concurrency, active_task_ids,
                                 capabilities: { supports_batch_import, supports_directory_scan,
-                                  supports_skill_directory, supports_bot_menu,
+                                  supports_skill_directory, supports_bot_menu, bot_menu_protocol,
                                   agent_plugin_protocol, feishu_concierge_protocol,
                                   feishu_decision_card, feishu_issue_decision_card } }],
                    caps: ["offer", "turn.message", "trace.read", "trace.subscribe"] }
@@ -1058,3 +1058,16 @@ v2 显式设置：
 暂停 outbox 泵与 trace 泵，降到 512 KiB 以下恢复；trace 泵优先级低于 outbox 泵。
 
 `hb` 每 15 s，远小于 Bun 的 120 s 与 nginx 的 1 h。
+
+### Bot menu identity scope
+
+`bot_menu_protocol: 2` advertises bot-scoped menu publishing. `runtime.bot_menu`
+keeps its existing envelope and includes `config.target` with `botId`, `appId`,
+`domain`, and `revision`. The control plane verifies the current bot-to-Runtime
+binding before delivery; the connector host verifies its running assignment
+before calling Feishu. A changed target fails the request and requires a new
+publish. Unscoped legacy requests cannot execute on the new host.
+`config.clearUsers` lists historical personalized menus to delete after publishing
+the shared menu. Missing legacy identity mappings are reported as
+`unresolvedLegacyTargetCount` without preventing shared menu publication.
+See [IM platform management](dev/im-platforms.md#机器人菜单) for persistence and UI scope.

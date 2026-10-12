@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { createMultiremiApp } from "@multiremi/api.js";
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { openRuntimeDownlinks } from "../../fixtures/runtime-downlinks.js";
@@ -48,6 +50,50 @@ describe.skipIf(!adminUrl)("A-4 pending state machines on real PostgreSQL", () =
   afterAll(async () => {
     db?.close(); await admin?.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`); await admin?.end();
   });
+  it("upgrades existing menu publish rows idempotently without discarding work", () => {
+    const runtime = store.registerRuntime({ name: "Legacy menu publisher", provider: "codex", workspaceId: "local", metadata: { feishu_bot_menu: true } });
+    const request = store.createBotMenuPublishRequest(runtime.id, { workspaceId: "local", config: { default: [{ name: "Preserved" }] }, dryRun: true });
+    db.exec("ALTER TABLE multiremi_bot_menu_publish_requests DROP COLUMN bot_id");
+    runMigrations(db);
+    runMigrations(db);
+    expect(store.getBotMenuPublishRequest(runtime.id, request.id)).toMatchObject({
+      botId: "default", status: "pending", config: { default: [{ name: "Preserved" }] },
+    });
+  });
+
+  it("isolates simultaneous menu updates and publisher identities on PostgreSQL", async () => {
+    const previousKey = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
+    process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 17).toString("base64");
+    try {
+      const agent = store.createAgent({ name: "Menu test", provider: "codex", workspaceId: "local" });
+      for (const botId of ["menu-a", "menu-b"]) {
+        store.registerRuntime({ id: `rt_${botId}`, name: botId, provider: "codex", workspaceId: "local",
+          metadata: { feishu_bot_menu: true, feishu_bot_menu_protocol: 2, feishu_concierge_config_v1: true } });
+        store.feishuBotFor(botId).upsertConfig("local", { agentId: agent.id, runtimeId: `rt_${botId}`,
+          appId: `cli_${botId}`, appSecretOp: "set", appSecret: "fixture-menu-secret", domain: "feishu", enabled: true });
+      }
+      const app = createMultiremiApp({ store, authToken: "MASTER" });
+      const headers = { Authorization: "Bearer MASTER", "content-type": "application/json" };
+      const responses = await Promise.all(["menu-a", "menu-b"].map(botId => app.request(`/api/workspaces/local/bot-menu?bot_id=${botId}`, {
+        method: "PUT", headers, body: JSON.stringify({ bot_menu: { default: [{ name: botId }] } }),
+      })));
+      expect(responses.map(response => response.status)).toEqual([200, 200]);
+      for (const botId of ["menu-a", "menu-b"]) {
+        const menu = await app.request(`/api/workspaces/local/bot-menu?bot_id=${botId}`, { headers });
+        expect((await menu.json()).bot_menu).toEqual({ default: [{ name: botId }] });
+        const publish = await app.request(`/api/workspaces/local/bot-menu/publish?bot_id=${botId}`, {
+          method: "POST", headers, body: JSON.stringify({ dry_run: true }),
+        });
+        expect(publish.status).toBe(202);
+        const request = await publish.json();
+        expect(store.getBotMenuPublishRequest(`rt_${botId}`, request.id)?.config.target).toMatchObject({ botId, appId: `cli_${botId}` });
+      }
+    } finally {
+      if (previousKey === undefined) delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
+      else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousKey;
+    }
+  });
+
   for (const family of families) it(`${family.kind}: pre-ACK pending, disconnect, replay, claim and one result`, async () => {
     const rt = `rt_pg_downlink_${family.kind}`;
     store.registerRuntime({ id: rt, name: rt, provider: "claude", workspaceId: "local", daemonId: rt,

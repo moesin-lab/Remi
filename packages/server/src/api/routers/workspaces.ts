@@ -1,3 +1,4 @@
+import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
 import type { Context, Hono } from "hono";
 import {
   backfillWorkspaceRepositoryDefaultBranches,
@@ -106,7 +107,8 @@ import { sanitizeWorkspaceProgressSummarySettings } from "@daemon/agent-runtime/
 import { sanitizeIssueAutoTitleSettings } from "@multiremi/issue-title/settings.js";
 import {
   BotMenuConfigError,
-  parseBotMenuConfig,
+  parseUnifiedBotMenuConfig,
+  botMenuView,
   readWorkspaceBotMenu,
   resolveBotMenuConfig,
 } from "../../bot-menu/config.js";
@@ -327,54 +329,59 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   });
   app.get("/api/workspaces/:id/bot-menu", (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
+    if (botId !== "default" && !store.feishuBotFor(botId).getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     try {
-      return c.json({ workspace_id: workspaceId, bot_menu: readWorkspaceBotMenu(workspace.settings) });
+      return c.json({ workspace_id: workspaceId, bot_id: botId, ...botMenuView(workspace.settings, botId) });
     } catch (error) {
       return botMenuError(c, error);
     }
   });
   app.put("/api/workspaces/:id/bot-menu", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId)
       ?? requireHumanWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
+    if (botId !== "default" && !store.feishuBotFor(botId).getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     const body = await readJsonStrict<{ bot_menu?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
-      const botMenu = parseBotMenuConfig(body.bot_menu);
-      const updated = store.updateWorkspace(workspaceId, {
-        settings: { ...workspace.settings, botMenu },
-      });
+      const botMenu = parseUnifiedBotMenuConfig(body.bot_menu);
+      const updated = store.updateBotMenu(workspaceId, botId, botMenu);
+      if (!updated) return c.json({ error: "bot or workspace not found" }, 404);
       publishWorkspaceEvent(c, store, "workspace:updated", workspaceId, { workspace: updated });
-      return c.json({ workspace_id: workspaceId, bot_menu: botMenu });
+      return c.json({ workspace_id: workspaceId, bot_id: botId, ...botMenuView(updated.settings, botId) });
     } catch (error) {
       return botMenuError(c, error);
     }
   });
   app.post("/api/workspaces/:id/bot-menu/publish", async (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId)
       ?? requireHumanWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
+    if (botId !== "default" && !store.feishuBotFor(botId).getConfig(workspaceId)) return c.json({ error: "bot not found" }, 404);
     const body = await readJsonStrict<{ dry_run?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     if (typeof body.dry_run !== "boolean") {
       return c.json({ error: "dry_run must be explicitly true or false" }, 400);
     }
     try {
-      const botMenu = readWorkspaceBotMenu(workspace.settings);
+      const botMenu = readWorkspaceBotMenu(workspace.settings, botId);
       const resolved = resolveBotMenuConfig(
         botMenu,
         workspaceId,
-        store.listWorkspaceMembers(workspaceId),
+        store.listWorkspaceMembers(workspaceId, { includeArchived: true }),
         (userId) => store.getUser(userId),
       );
       const publishers = store.listRuntimes()
@@ -386,7 +393,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         .sort((a, b) => String(b.lastHeartbeatAt ?? "").localeCompare(String(a.lastHeartbeatAt ?? "")));
       // Publish only through the machine that owns this workspace's configured
       // bot credentials. There is no environment-driven concierge fallback.
-      const conciergeRuntimeId = store.getFeishuBotConfig(workspaceId)?.runtimeId ?? null;
+      const bot = store.feishuBotFor(botId).getConfig(workspaceId);
+      const conciergeRuntimeId = bot?.runtimeId ?? null;
       if (!conciergeRuntimeId) {
         return c.json({ error: "no Feishu concierge is configured for this workspace" }, 409);
       }
@@ -394,8 +402,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       if (!runtime) {
         return c.json({ error: "the machine hosting the Feishu concierge is not online" }, 503);
       }
+      if (Number(runtime.metadata.feishu_bot_menu_protocol ?? 0) < BOT_MENU_PROTOCOL_VERSION) {
+        return c.json({ error: "update the bot Runtime before publishing bot-scoped menus", code: "bot_menu_runtime_upgrade_required" }, 409);
+      }
+      resolved.target = { botId, appId: bot!.appId, domain: bot!.domain, revision: bot!.revision };
       const request = store.createBotMenuPublishRequest(runtime.id, {
         workspaceId,
+        botId,
         config: resolved,
         dryRun: body.dry_run,
         createdBy: currentRequestUserId(c),
@@ -407,11 +420,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   });
   app.get("/api/workspaces/:id/bot-menu/publish/:requestId", (c) => {
     const workspaceId = c.req.param("id");
+    const botId = c.req.query("bot_id") ?? "default";
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId)
       ?? requireHumanWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     const request = store.findBotMenuPublishRequest(workspaceId, c.req.param("requestId"));
-    if (!request) return c.json({ error: "bot menu publish request not found" }, 404);
+    if (!request || request.botId !== botId) return c.json({ error: "bot menu publish request not found" }, 404);
     return c.json(botMenuPublishResponse(request));
   });
   app.get("/api/workspaces/:id/prompts", (c) => {
@@ -1630,6 +1644,7 @@ function botMenuPublishResponse(request: MultiremiBotMenuPublishRequest): Record
   return {
     id: request.id,
     workspace_id: request.workspaceId,
+    bot_id: request.botId,
     dry_run: request.dryRun,
     status: request.status,
     result: request.result,

@@ -619,7 +619,7 @@ export class FeishuBotRepo {
     const name = input.name === undefined ? String(existing?.name ?? "") : input.name.trim();
     if (name.length > 100) throw new FeishuBotConfigError("name must be at most 100 characters", 400, "invalid_name");
     const responsibleMemberId=input.responsibleMemberId===undefined?nullableString(existing?.responsible_member_id):cleanOptionalString(input.responsibleMemberId);
-    if(responsibleMemberId) {
+    if(input.responsibleMemberId !== undefined && responsibleMemberId) {
       const human=this.ctx.workspaces().getWorkspaceMember(responsibleMemberId);
       if(!human||human.archivedAt||human.workspaceId!==workspaceId)throw new FeishuBotConfigError('responsible_member_id must name an active human in this workspace',400,'invalid_config');
     }
@@ -1008,8 +1008,7 @@ export class FeishuBotRepo {
       const configuredHumanId=topicConfig?.responsibleMemberId??config.responsibleMemberId;
       const configuredHuman=configuredHumanId?this.ctx.workspaces().getWorkspaceMember(configuredHumanId):null;
       const humanAvailable=!!configuredHuman&&!configuredHuman.archivedAt&&configuredHuman.workspaceId===workspaceId;
-      const autoCreateGroupIssue=groupIssueRequested&&humanAvailable;
-      const responsibilityUnavailableReason=groupIssueRequested&&!humanAvailable?'Configure an active root human in Feishu bot or Issue topic settings before automatically creating an Issue':null;
+      const autoCreateGroupIssue=groupIssueRequested;
       const createGroupIssue = () => this.ctx.issues().createIssueWithinTransaction({
         title: issueTitleFromFeishuMessage(text),
         description: text,
@@ -1019,7 +1018,7 @@ export class FeishuBotRepo {
         assigneeType: "agent",
         assigneeId: routeAgent.agentId,
         createdBy: sender.actorId,
-        responsibleMemberId:configuredHuman!.id,
+        responsibleMemberId:humanAvailable ? configuredHuman!.id : null,
         contextRefs: [{
           type: "feishu_bot_message",
           message_id: externalMessageId,
@@ -1132,9 +1131,6 @@ export class FeishuBotRepo {
       );
 
       const chatSessionId = String(binding.chat_session_id);
-      if(responsibilityUnavailableReason)sendMessageWithinTransaction(this.ctx,{session_id:chatSessionId,sender:{type:'platform',id:null},
-        to:{type:'none'},message_kind:'status',wake_requested:'inbox_only',body_md:responsibilityUnavailableReason,
-        metadata:{issue_responsibility_unresolved:true,reason:'explicit_root_human_required',external_message_id:externalMessageId}},submitEvents);
       const activeTask = this.ctx.chat().getPendingChatTask(chatSessionId);
       let task;
       let steered = false;
@@ -1231,7 +1227,6 @@ export class FeishuBotRepo {
         steered,
         ...(input.deliveryMode === "native_cot_v1" && chatId ? { deliveryQueued: true } : {}),
         senderAllowed: sender.allowed,
-        ...(responsibilityUnavailableReason?{responsibilityUnavailableReason}:{}),
       };
     })();
     if (enqueuedTask) this.ctx.notifyTaskEnqueued(enqueuedTask);

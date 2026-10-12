@@ -10,8 +10,8 @@ pendingTurnBackendTests('explicit responsibility migration and authenticated sou
     const agent=store.createAgent({name:'Explicit execution',provider:'codex'});
     const issue=createIssue({title:'Explicit synthetic responsibility',assigneeType:'agent',assigneeId:agent.id});
     expect(store.resolveIssueResponsibility(issue.id).rootHuman?.id).toBe('test_root_human_local');
-    expect(()=>store.createIssue({title:'Production unresolved'})).toThrow('explicit responsible_member_id');
-    expect(()=>createIssue({title:'Negative explicit null',responsibleMemberId:null})).toThrow('explicit responsible_member_id');
+    expect(store.createIssue({title:'Production unresolved'}).responsibleMemberId).toBeNull();
+    expect(createIssue({title:'Explicit null',responsibleMemberId:null}).responsibleMemberId).toBeNull();
     expect(createIssue({title:'Unassigned fixture'}).assigneeId).toBeNull();
     expect(acceptTestIssueDelivery(store,issue.id).status).toBe('done');
   });
@@ -85,10 +85,10 @@ pendingTurnBackendTests('explicit responsibility migration and authenticated sou
       const batch=await app.request(`${prefix}/issues/batch-update`,{method:'POST',headers:taskHeaders,body:JSON.stringify({issue_ids:[differentRoot.id],updates:{responsible_member_id:member.id}})});
       expect(batch.status).toBe(403);expect(store.getIssue(differentRoot.id)?.responsibleMemberId).toBe(other.id);
       const reparent=await app.request(`${prefix}/issues/${root.id}`,{method:'PATCH',headers:taskHeaders,body:JSON.stringify({parent_issue_id:differentRoot.id})});
-      expect(reparent.status).toBe(403);expect(store.getIssue(root.id)?.parentIssueId).toBeNull();
+      expect(reparent.status).toBe(200);expect(store.getIssue(root.id)?.parentIssueId).toBe(differentRoot.id);
     }
     const taskChild=await app.request('/api/issues',{method:'POST',headers:taskHeaders,body:JSON.stringify({title:'Task child inherited',parent_issue_id:root.id,responsible_member_id:null})});
-    expect(taskChild.status).toBe(201);const taskChildBody=await taskChild.json();expect(store.resolveIssueResponsibility(taskChildBody.id).rootHuman?.id).toBe(member.id);
+    expect(taskChild.status).toBe(201);const taskChildBody=await taskChild.json();expect(store.resolveIssueResponsibility(taskChildBody.id).rootHuman?.id).toBe(other.id);
     const review=await app.request('/api/workspaces/local/issue-responsibility-migration?limit=101',{headers});expect(review.status).toBe(400);
     const before=store.listIssues().length;
     const memberExecution=await app.request('/api/multiremi/issues',{method:'POST',headers,body:JSON.stringify({title:'Invalid member execution',assignee_type:'member',assignee_id:member.id})});
@@ -157,13 +157,15 @@ pendingTurnBackendTests('explicit responsibility migration and authenticated sou
       expect(fault).toHaveBeenCalledTimes(1);
     } finally {fault.mockRestore();}
   });
-  it('requires explicit automation responsibility and never infers historical creator during a run',async()=>{
+  it('runs automation without human responsibility and never infers a historical creator',async()=>{
     const f=fixture();const {store}=f;
     const agent=store.createAgent({name:'Automation execution',provider:'codex'});
     const human=store.createWorkspaceMember({name:'Explicit automation human'});
     const legacy=store.createAutopilot({title:'Historical automation',assigneeId:agent.id,executionMode:'create_issue',createdByType:'member',createdById:'local'});
-    expect(()=>store.runAutopilot(legacy.id)).toThrow('explicit responsible_member_id');
-    expect(store.listIssues().some(issue=>issue.title==='Historical automation')).toBeFalse();
+    const unassigned=store.runAutopilot(legacy.id);
+    expect(store.getIssue(unassigned.issueId!)?.responsibleMemberId).toBeNull();
+    expect(store.getIssue(unassigned.issueId!)?.assigneeId).toBe(agent.id);
+    store.cancelTask(unassigned.taskId!);
     store.updateAutopilot(legacy.id,{responsibleMemberId:human.id});
     const run=store.runAutopilot(legacy.id);
     expect(store.getIssue(run.issueId!)?.responsibleMemberId).toBe(human.id);expect(store.getIssue(run.issueId!)?.assigneeId).toBe(agent.id);
@@ -178,7 +180,7 @@ pendingTurnBackendTests('explicit responsibility migration and authenticated sou
       expect(f.store.getAutopilot(id)?.createdById).toBe(user.id);expect(f.store.getAutopilot(id)?.responsibleMemberId).toBe(member.id);
     }
   });
-  it('retains unconfigured Feishu groups as Chat and requires explicit private transport responsibility',async()=>{
+  it('creates group and private Feishu issues without a human or Runtime owner fallback',async()=>{
     const f=fixture();const {store,db}=f;
     const oldKey=process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
     process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY=Buffer.alloc(32,11).toString('base64');
@@ -188,17 +190,18 @@ pendingTurnBackendTests('explicit responsibility migration and authenticated sou
       store.heartbeatRuntime('rt_source',{supportsFeishuBotConfig:true});
       const config=store.upsertFeishuBotConfig('local',{agentId:agent.id,runtimeId:'rt_source',appId:'cli_source',appSecretOp:'set',appSecret:'synthetic-test-secret',domain:'feishu',enabled:true});
       store.updateWorkspace('local',{settings:{issueTopics:{enabled:true,chatId:'oc_source'}}});
-      const inbound=store.submitFeishuBotMessage('local','rt_source',{revision:config.revision,externalSessionKey:'oc_source',chatType:'group',chatId:'oc_source',externalMessageId:'om_missing_human',senderOpenId:'ou_unmapped_external',text:'Keep my request and show responsibility gap'});
-      expect(inbound.responsibilityUnavailableReason).toContain('root human');
-      expect(store.getChatSession(inbound.chatSessionId)).not.toBeNull();expect(store.getFeishuIssueIdForChatSession(inbound.chatSessionId)).toBeNull();expect(store.listIssues()).toHaveLength(0);
-      expect(db.query("SELECT 1 AS present FROM multiremi_conversation_log WHERE session_id=? AND message_kind='status'").get(inbound.chatSessionId)).not.toBeNull();
+      const inbound=store.submitFeishuBotMessage('local','rt_source',{revision:config.revision,externalSessionKey:'oc_source',chatType:'group',chatId:'oc_source',externalMessageId:'om_missing_human',senderOpenId:'ou_unmapped_external',text:'Create and execute my request without a designated human'});
+      expect(inbound).not.toHaveProperty('responsibilityUnavailableReason');
+      expect(store.getChatSession(inbound.chatSessionId)).not.toBeNull();expect(store.getFeishuIssueIdForChatSession(inbound.chatSessionId)).toBeTruthy();expect(store.listIssues()).toHaveLength(1);
+      expect(store.listIssues()[0]?.responsibleMemberId).toBeNull();
+      expect(store.listMessages(inbound.chatSessionId).some(message=>message.metadata.issue_responsibility_unresolved)).toBeFalse();
       const privateInbound=store.submitFeishuBotMessage('local','rt_source',{revision:config.revision,externalSessionKey:'oc_private_source',chatType:'p2p',chatId:'oc_private_source',externalMessageId:'om_private_source',senderOpenId:'ou_unmapped_external',text:'Private request'});
       // Even a transport Chat carrying the Runtime owner's member id is technical attribution.
       db.run('UPDATE multiremi_chat_sessions SET creator_id=? WHERE id=?',['mem_local_local',privateInbound.chatSessionId]);
       const token=await store.createTaskAccessToken(store.getTask(privateInbound.taskId)!,'local');
       const app=createMultiremiApp({store,authToken:'test-secret'});
       const request=()=>app.request('/api/issues',{method:'POST',headers:{Authorization:`Bearer ${token.token}`,'Content-Type':'application/json'},body:JSON.stringify({title:'Root from technical Chat'})});
-      const denied=await request();expect(denied.status).toBe(409);expect(await denied.text()).toContain('explicit responsible_member_id');
+      const unassigned=await request();expect(unassigned.status).toBe(201);expect(store.getIssue((await unassigned.json()).id)?.responsibleMemberId).toBeNull();
       const human=store.createWorkspaceMember({name:'Verified external responsibility'});
       store.upsertFeishuBotConfig('local',{...config,appSecretOp:'keep',responsibleMemberId:human.id});
       const created=await request();expect(created.status).toBe(201);const body=await created.json();expect(store.getIssue(body.id)?.responsibleMemberId).toBe(human.id);
@@ -219,7 +222,7 @@ pendingTurnBackendTests('explicit responsibility migration and authenticated sou
     expect(upgraded.getIssueComment(comment.id)?.body).toBe('Snapshot evidence');
     expect(upgraded.listIssueResponsibilityMigration('local').total).toBe(1);
   });
-  it('rejects technical credentials for config, mapping and root acceptance despite their human token owner',async()=>{
+  it('rejects technical human impersonation while the actual root execution Agent can accept',async()=>{
     const f=fixture();const {store}=f;
     const user=store.getOrCreateUser({email:'actual-reviewer@example.test',name:'Actual reviewer'});
     const human=store.createWorkspaceMember({userId:user.id,name:'Actual reviewer',role:'admin'});
@@ -235,7 +238,7 @@ pendingTurnBackendTests('explicit responsibility migration and authenticated sou
     const {delivery}=await submitted.json();
     for(const token of [taskToken.token,daemon.token]) {
       expect((await app.request('/api/workspaces/local/issue-responsibility-migration',{headers:{Authorization:`Bearer ${token}`}})).status).toBe(403);
-      expect((await post(`/api/issues/${issue.id}/deliveries/${delivery.id}/respond`,token,{action:'accept',revision:delivery.responsibilityRevision,actor_type:'member',actor_id:human.id})).status).toBe(403);
+      if(token===daemon.token)expect((await post(`/api/issues/${issue.id}/deliveries/${delivery.id}/respond`,token,{action:'accept',revision:delivery.responsibilityRevision,actor_type:'member',actor_id:human.id})).status).toBe(403);
       expect((await post('/api/workspaces/local/issue-responsibility-migration/map',token,{reason:'Borrow owner',mappings:[]})).status).toBe(403);
       expect((await post('/api/workspaces/local/feishu-bot',token,{responsible_member_id:human.id},'PUT')).status).toBe(403);
       expect((await post('/api/workspaces/local/issue-topics',token,{enabled:false,chat_id:'',responsible_member_id:human.id},'PUT')).status).toBe(403);
@@ -243,8 +246,9 @@ pendingTurnBackendTests('explicit responsibility migration and authenticated sou
       expect((await post('/api/autopilots',token,{title:'Borrow owner',assignee_id:agent.id,execution_mode:'create_issue',responsible_member_id:human.id})).status).toBe(403);
     }
     expect(store.getIssue(issue.id)?.status).toBe('in_review');
-    const accepted=await post(`/api/issues/${issue.id}/deliveries/${delivery.id}/respond`,actual.token,{action:'accept',revision:delivery.responsibilityRevision});
+    const accepted=await post(`/api/issues/${issue.id}/deliveries/${delivery.id}/respond`,taskToken.token,{action:'accept',revision:delivery.responsibilityRevision,actor_type:'member',actor_id:human.id});
     expect(accepted.status).toBe(200);expect(store.getIssue(issue.id)?.status).toBe('done');
+    const receipt=store.listIssueDeliveries(issue.id)[0]!;expect(store.getMessage(receipt.responseMessageId!)?.sender_id).toBe(agent.id);
   });
   it('uses the real human message approver and refuses external senders or task-owned Runtime attribution',async()=>{
     const f=fixture();const {store}=f;

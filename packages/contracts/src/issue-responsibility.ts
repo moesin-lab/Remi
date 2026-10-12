@@ -14,7 +14,9 @@ export interface IssueResponsibility {
   issueId: string;
   workspaceId: string | null;
   executionOwner: IssueResponsibleActor | null;
+  /** Direct parent execution owner, or this Issue's execution owner for a root. */
   reviewOwner: IssueResponsibleActor | null;
+  /** Optional legacy contact; absence never blocks creation, delivery or closure. */
   rootHuman: IssueResponsibleActor | null;
   rootIssueId: string | null;
   /** From the current Issue to the root, retaining repeated owners for audit. */

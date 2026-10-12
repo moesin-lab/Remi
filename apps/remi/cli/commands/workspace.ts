@@ -59,7 +59,7 @@ const RUNTIME_PROVISION_FIELDS: readonly CliOptionSpec[] = [
  */
 const FEISHU_BOT_FIELDS: readonly CliOptionSpec[] = [
   { name: "name", type: "string", valueName: "name", description: "Bot display name" },
-  { name: "responsible-member", type: "string", description: "Explicit designated human for root issues created from inbound conversations", conflictsWith: ["clear-responsible"] },
+  { name: "responsible-member", type: "string", description: "Optional legacy contact for root issues from inbound conversations", conflictsWith: ["clear-responsible"] },
   { name: "clear-responsible", type: "boolean", description: "Clear the human configuration; inbound conversations remain but automatic root creation stops", conflictsWith: ["responsible-member"] },
   { name: "sender-access-policy", type: "string", valueName: "agent|allowlist", description: "Use Agent permissions (default) or require a sender allowlist" },
   { name: "agent", type: "string", valueName: "agent-id", description: "Agent that answers concierge messages" },
@@ -164,7 +164,7 @@ export function workspaceCommandSpecs(): CommandSpec[] {
       "PUT",
       [
         { name: "chat-id", type: "string", valueName: "chat-id", description: "Feishu group chat ID" },
-        { name: "responsible-member", type: "string", description: "Explicit designated human for roots created from this topic", conflictsWith: ["inherit-bot-responsible"] },
+        { name: "responsible-member", type: "string", description: "Optional legacy contact for roots created from this topic", conflictsWith: ["inherit-bot-responsible"] },
         { name: "inherit-bot-responsible", type: "boolean", description: "Clear topic override and inherit the explicit bot human", conflictsWith: ["responsible-member"] },
         { name: "notify", type: "string", valueName: "group_owner|person|none", description: "Proactive report mention target (default: group_owner)" },
         { name: "notify-open-id", type: "string", valueName: "open-id", description: "Bot-scoped recipient open ID for --notify person" },

@@ -97,13 +97,14 @@ pendingTurnBackendTests('explicit responsibility mutation hooks',fixture => {
     f.store.archiveAgent(f.owner.id);
     expect(f.store.getQuestion(f.id)?.route_revision).toBe(before+1);
   });
-  it('makes an archived root human visibly unavailable without substituting a workspace owner',()=>{
+  it('keeps execution available after an optional human contact is archived',()=>{
     const f=setup(fixture());const human=f.store.createWorkspaceMember({id:'human-to-archive',name:'Specific human'});
     f.store.updateIssue(f.root.id,{responsibleMemberId:human.id,actorType:'member',actorId:'mem_local_local'});
     f.store.archiveWorkspaceMember(human.id);
     const responsibility=f.store.resolveIssueResponsibility(f.root.id);
     expect(responsibility.rootHuman).toBeNull();
-    expect(responsibility.unresolved).toContainEqual({issueId:f.root.id,reason:'human_unavailable'});
+    expect(responsibility.unresolved).toEqual([]);
+    expect(responsibility.reviewOwner?.type).toBe('agent');
     expect(f.store.getQuestion(f.id)?.route_revision).toBe(3);
     expect(f.db.query('SELECT card_token_hash FROM multiremi_conversation_log WHERE id=?').get(f.id)?.card_token_hash).toBeNull();
   });

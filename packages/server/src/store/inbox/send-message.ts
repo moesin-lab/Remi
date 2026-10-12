@@ -89,7 +89,7 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
     if(!responsibility.unresolved.length && responsibility.executionOwner){recipientType='agent';recipientId=responsibility.executionOwner.id;return;}
     input={...input,metadata:{...input.metadata,responsibility_unresolved:responsibility.unresolved}};
     if(responsibility.rootHuman){recipientType='member';recipientId=responsibility.rootHuman.id;return;}
-    throw new Error('Issue owner responsibility is unresolved; configure its execution owner and root human');
+    throw new Error('Issue owner responsibility is unresolved; configure its execution owner');
   };
   if(input.to.type==='agent'||input.to.type==='member'){recipientType=input.to.type;recipientId=input.to.ref;}
   else if(input.to.type==='role'){

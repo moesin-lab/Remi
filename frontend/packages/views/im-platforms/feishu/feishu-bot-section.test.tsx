@@ -287,23 +287,15 @@ describe("FeishuBotSection (loading)", () => {
 describe("FeishuBotSection (admin form)", () => {
   beforeEach(resetFixtures);
 
-  it("saves and clears the selected bot's explicit human without inferring the workspace owner", async () => {
+  it("saves the selected bot without asking for a designated human", async () => {
     botSelectionRef.botId = "bot-2";
-    membersRef.current = [{ user_id: "user-1", role: "owner", id: "human", name: "Confirmed human" } as typeof membersRef.current[number]];
     botRef.current = { role: "admin", config: { ...CONFIGURED.config, bot_id: "bot-2", name: "Second bot" } };
-    const user = userEvent.setup();
-    renderSection();
-
-    const human = screen.getByRole("combobox", { name: "Designated human" });
-    expect(human).toHaveValue("");
+    const user = userEvent.setup(); renderSection();
+    expect(screen.queryByRole("combobox", { name: "Designated human" })).not.toBeInTheDocument();
     expect(mockSaveHook).toHaveBeenCalledWith("workspace-1", "bot-2");
-    await user.selectOptions(human, "human");
     await user.click(screen.getByRole("button", { name: "Save" }));
-    expect(mockSave).toHaveBeenLastCalledWith(expect.objectContaining({ name: "Second bot", responsible_member_id: "human", app_secret_op: "keep" }));
-
-    await user.selectOptions(human, "");
-    await user.click(screen.getByRole("button", { name: "Save" }));
-    expect(mockSave).toHaveBeenLastCalledWith(expect.objectContaining({ responsible_member_id: null }));
+    expect(mockSave).toHaveBeenLastCalledWith(expect.objectContaining({ name: "Second bot", app_secret_op: "keep" }));
+    expect(mockSave.mock.calls.at(-1)?.[0]).not.toHaveProperty("responsible_member_id");
   });
 
   it("seeds the form from the stored config and never renders a secret", () => {

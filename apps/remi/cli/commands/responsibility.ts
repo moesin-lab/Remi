@@ -16,6 +16,8 @@ const issuePath = (i: CommandInvocation) => `/api/issues/${encodePath(positional
 const questionPath = (i: CommandInvocation) => `/api/messages/${encodePath(positional(i, 0, "question"))}/question`;
 export function responsibilityCommandSpecs(): CommandSpec[] {
   return [
+    spec(["issue", "responsible", "clear"], "Clear the optional legacy root contact without blocking execution or review", "write", [ref("issue")], [], i => request(i, "PATCH", issuePath(i), { responsible_member_id: null }), "human"),
+    spec(["autopilot", "responsible", "clear"], "Clear the optional legacy contact; automatic issue creation remains available", "write", [ref("autopilot")], [], i => request(i, "PATCH", `/api/autopilots/${encodePath(positional(i, 0, "autopilot"))}`, { responsible_member_id: null }), "human"),
     spec(["issue", "responsibility-unassigned", "list"], "Inspect historical responsibility, original facts and unconfirmed candidates as a workspace admin", "read", [ref("workspace")], [{ name: "offset", type: "integer", description: "Offset returned by nextOffset" }], i => {
       const limit = integerOption(i, "limit") ?? 100, offset = integerOption(i, "offset") ?? 0;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0) throw new CliError("usage", "Use --limit 1..100 and --offset >=0");
@@ -26,9 +28,9 @@ export function responsibilityCommandSpecs(): CommandSpec[] {
       if (typeof body.reason !== "string" || !body.reason.trim() || !Array.isArray(body.mappings) || !body.mappings.length || body.mappings.some((entry: unknown) => !entry || typeof entry !== "object" || Array.isArray(entry) || ["issueId", "memberId", "revision"].some(key => typeof (entry as Record<string, unknown>)[key] !== "string" || !(entry as Record<string, string>)[key]?.trim()))) throw new CliError("usage", "Mapping requires reason and non-empty mappings [{issueId,memberId,revision}]");
       await request(i, "POST", `/api/workspaces/${encodePath(positional(i, 0, "workspace"))}/issue-responsibility-migration/map`, body);
     }, "human"),
-    spec(["autopilot", "responsible", "set"], "Configure the designated human for future automatic root issues", "write", [ref("autopilot")], [{ name: "member", type: "string", required: true }], i => request(i, "PATCH", `/api/autopilots/${encodePath(positional(i, 0, "autopilot"))}`, { responsible_member_id: stringOption(i, "member") }), "human"),
-    spec(["issue", "responsibility"], "Resolve execution, parent reviewer and designated root human", "read", [ref("issue")], [], i => request(i, "GET", `${issuePath(i)}/responsibility`)),
-    spec(["issue", "responsible", "set"], "Explicitly assign or transfer the root human; retains audit history", "write", [ref("issue")], [{ name: "member", type: "string", required: true, description: "Workspace member ID" }], i => request(i, "PATCH", issuePath(i), { responsible_member_id: stringOption(i, "member") }), "human"),
+    spec(["autopilot", "responsible", "set"], "Set an optional legacy contact for future automatic root issues", "write", [ref("autopilot")], [{ name: "member", type: "string", required: true }], i => request(i, "PATCH", `/api/autopilots/${encodePath(positional(i, 0, "autopilot"))}`, { responsible_member_id: stringOption(i, "member") }), "human"),
+    spec(["issue", "responsibility"], "Resolve execution and review owners; root Issues are reviewed by their execution Agent", "read", [ref("issue")], [], i => request(i, "GET", `${issuePath(i)}/responsibility`)),
+    spec(["issue", "responsible", "set"], "Set an optional legacy root contact; retains audit history", "write", [ref("issue")], [{ name: "member", type: "string", required: true, description: "Workspace member ID" }], i => request(i, "PATCH", issuePath(i), { responsible_member_id: stringOption(i, "member") }), "human"),
     spec(["issue", "question", "list"], "List all original questions and routing/answer history", "read", [ref("issue")], [], async i => {
       const client = await clientFor(i);
       const questions = new Map<string, unknown>();
@@ -48,7 +50,7 @@ export function responsibilityCommandSpecs(): CommandSpec[] {
       if (limit != null && (limit < 1 || limit > 100)) throw new CliError("usage", "delivery list --limit must be between 1 and 100");
       return request(i, "GET", `${issuePath(i)}/deliveries`, undefined, ["deliveries"], { limit, before: stringOption(i, "cursor") ?? undefined });
     }),
-    spec(["issue", "delivery", "authorize"], "Designated human explicitly authorizes or revokes Agent acceptance of one delivery", "write", [ref("issue"), ref("delivery")], [{ name: "revision", type: "string", required: true, description: "Delivery responsibilityRevision" }, { name: "agent", type: "string", conflictsWith: ["revoke"], description: "Current execution coordinator Agent ID" }, { name: "revoke", type: "boolean", conflictsWith: ["agent"], description: "Revoke this delivery-specific authorization" }], async i => {
+    spec(["issue", "delivery", "authorize"], "Manage legacy delivery grant metadata; root execution Agents can already accept without a grant", "write", [ref("issue"), ref("delivery")], [{ name: "revision", type: "string", required: true, description: "Delivery responsibilityRevision" }, { name: "agent", type: "string", conflictsWith: ["revoke"], description: "Current execution coordinator Agent ID" }, { name: "revoke", type: "boolean", conflictsWith: ["agent"], description: "Revoke this delivery-specific authorization" }], async i => {
       const agentId = stringOption(i, "agent");
       if (!agentId && i.options.revoke !== true) throw new CliError("usage", "delivery authorize requires --agent or --revoke");
       await request(i, "POST", `${issuePath(i)}/deliveries/${encodePath(positional(i, 1, "delivery"))}/authorize`, { agentId: i.options.revoke === true ? null : agentId, revision: stringOption(i, "revision") });

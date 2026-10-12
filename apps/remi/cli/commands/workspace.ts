@@ -212,18 +212,18 @@ export function workspaceCommandSpecs(): CommandSpec[] {
       ],
       contextWindowBody,
     ),
-    scopedRead("workspace.bot-menu.get", ["workspace", "bot-menu", "get"], "Read the workspace Feishu bot menu", "/bot-menu"),
+    scopedRead("workspace.bot-menu.get", ["workspace", "bot-menu", "get"], "Read the selected Feishu bot menu", "/bot-menu"),
     scopedWrite(
       "workspace.bot-menu.update",
       ["workspace", "bot-menu", "update"],
-      "Replace the workspace Feishu bot menu",
+      "Replace the selected Feishu bot menu",
       "/bot-menu",
       "PUT",
     ),
     scopedWrite(
       "workspace.bot-menu.publish",
       ["workspace", "bot-menu", "publish"],
-      "Validate or publish the workspace Feishu bot menu",
+      "Validate or publish the selected Feishu bot menu",
       "/bot-menu/publish",
       "POST",
       [{ name: "live", type: "boolean", description: "Publish to Feishu instead of dry-run validation" }],
@@ -240,7 +240,7 @@ export function workspaceCommandSpecs(): CommandSpec[] {
         const requestId = positional(invocation, 1, "request");
         const response = await client.request({
           method: "GET",
-          path: `/api/workspaces/${encodePath(String(workspace.id))}/bot-menu/publish/${encodePath(requestId)}`,
+          path: feishuBotPath(`/api/workspaces/${encodePath(String(workspace.id))}/bot-menu/publish/${encodePath(requestId)}`, invocation),
         });
         renderResource(invocation, response.data);
       },
@@ -336,7 +336,7 @@ export function workspaceCommandSpecs(): CommandSpec[] {
       { name: "sweep-interval-ms", type: "integer", valueName: "ms", description: "Archive sweep interval" },
     ], issueArchiveBody),
   ];
-  return specs.map(spec => spec.path[1] === "feishu-bot" && !["list", "create", "register", "register-status", "register-cancel"].includes(spec.path[2] ?? "")
+  return specs.map(spec => (spec.path[1] === "bot-menu" || spec.path[1] === "feishu-bot" && !["list", "create", "register", "register-status", "register-cancel"].includes(spec.path[2] ?? ""))
     ? { ...spec, options: [...(spec.options ?? []), FEISHU_BOT_OPTION] } : spec);
 }
 

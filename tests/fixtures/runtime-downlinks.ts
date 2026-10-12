@@ -23,6 +23,7 @@ function configuredRuntimeCapabilities(metadata: Record<string, unknown>): Daemo
     supports_directory_scan: metadata.supports_directory_scan === true,
     supports_skill_directory: metadata.supports_skill_directory === true,
     supports_bot_menu: metadata.feishu_bot_menu === true,
+    bot_menu_protocol: Number(metadata.feishu_bot_menu_protocol) || 0,
     agent_plugin_protocol: Number(metadata.agent_plugin_protocol) || 0,
     feishu_concierge_protocol: metadata[FEISHU_CONCIERGE_CONFIG_CAPABILITY] === true
       ? FEISHU_CONCIERGE_PROTOCOL_VERSION : 0,

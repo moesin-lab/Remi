@@ -86,4 +86,29 @@ describe("Feishu bot menu publisher", () => {
       bot_menu: { bot_menu_items: [{ name: "Personal", i18n_name: { en_us: "Personal" }, behaviors: [{ type: "send_message" }] }] },
     });
   });
+  it("clears known personalized menus and publishes an explicitly empty shared menu", async () => {
+    const requests: Array<{ method: string; body: unknown; url: string }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ method: init?.method ?? "GET", body: JSON.parse(String(init?.body)), url: String(url) });
+      return Response.json(String(url).includes("tenant_access_token")
+        ? { code: 0, tenant_access_token: "fixture-token", expire: 7200 } : { code: 0 });
+    }) as typeof globalThis.fetch;
+    const config = { default: [], clearUsers: [{ userId: "known-union", userIdType: "union_id" as const }], unresolvedLegacyTargetCount: 1 };
+    const syncer = new MenuSyncer({ appId: "fixture-app", appSecret: "fixture-secret" });
+    await syncer.syncAll(config, { dryRun: true });
+    expect(requests).toEqual([]);
+    expect(await syncer.syncAll(config)).toEqual({ dryRun: false, defaultPublished: true, userMenuCount: 0, clearedUserMenuCount: 1, unresolvedLegacyTargetCount: 1 });
+    expect(requests.filter(request => request.url.includes("/bot/v3/bot_menu"))).toEqual([
+      { method: "POST", body: { bot_menu: { bot_menu_items: [] } }, url: expect.stringContaining("user_id_type=open_id") },
+      { method: "DELETE", body: { user_id: "known-union" }, url: expect.stringContaining("user_id_type=union_id") },
+    ]);
+  });
+
+  it("reports a failed legacy cleanup instead of claiming publication succeeded", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => Response.json(String(url).includes("tenant_access_token")
+      ? { code: 0, tenant_access_token: "fixture-token" } : { code: 999, msg: "permission denied" })) as typeof globalThis.fetch;
+    const syncer = new MenuSyncer({ appId: "fixture-app", appSecret: "fixture-secret" });
+    await expect(syncer.syncAll({ clearUsers: [{ userId: "known", userIdType: "open_id" }] })).rejects.toThrow("cleanup failed");
+  });
+
 });

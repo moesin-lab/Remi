@@ -1,3 +1,4 @@
+import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
 import { runtimeConnectionModels, type RuntimeExecutionBinding, type RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection";
 import { createHash, randomUUID } from "node:crypto";
 import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
@@ -1380,6 +1381,7 @@ export class MultiremiDaemon {
       supports_directory_scan: true,
       supports_skill_directory: true,
       supports_bot_menu: this.botMenuPublisher !== null,
+      bot_menu_protocol: this.botMenuPublisher ? BOT_MENU_PROTOCOL_VERSION : 0,
       agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
       feishu_concierge_protocol: concierge ? FEISHU_CONCIERGE_ATTACHMENT_PROTOCOL_VERSION : 0,
       feishu_decision_card: concierge ? FEISHU_DECISION_CARD_PROTOCOL_VERSION : 0,

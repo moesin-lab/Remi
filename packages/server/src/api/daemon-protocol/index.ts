@@ -62,6 +62,7 @@ function runtimeCapabilityOptions(capabilities: DaemonRuntimeCapabilities | unde
     supportsDirectoryScan: reported.supports_directory_scan === true,
     supportsSkillDirectory: reported.supports_skill_directory === true,
     supportsBotMenu: reported.supports_bot_menu === true,
+    botMenuProtocol: version(reported.bot_menu_protocol),
     agentPluginProtocol: version(reported.agent_plugin_protocol),
     supportsFeishuBotConfig: version(reported.feishu_concierge_protocol) >= FEISHU_CONCIERGE_PROTOCOL_VERSION,
     supportsDecisionCard: version(reported.feishu_decision_card) >= FEISHU_DECISION_CARD_PROTOCOL_VERSION,

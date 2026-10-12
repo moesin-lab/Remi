@@ -13,6 +13,7 @@ import { basename, join, resolve, sep } from "node:path";
 import type { Database } from "bun:sqlite";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { startMultiremiServer } from "@multiremi/api.js";
+import { MenuSyncer } from "@connectors/feishu/menu-sync.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { MessageProviderRegistry } from "@multiremi/messaging/index.js";
 import type { CanonicalMessage, MessageProviderManifest } from "@multiremi/contracts/messaging.js";
@@ -81,11 +82,29 @@ try {
   const specialist = store.createAgent({ workspaceId: workspace.id, ownerId: owner.id, name: "Group Specialist", provider: "codex" });
   const runtime = store.registerRuntime({ name: "Smoke bot host", provider: "codex", workspaceId: workspace.id, ownerId: owner.id, daemonId: "im-smoke-daemon", status: "online" });
   const secondRuntime = store.registerRuntime({ name: "Second bot host", provider: "codex", workspaceId: workspace.id, ownerId: owner.id, daemonId: "im-second-daemon", status: "online" });
-  store.heartbeatRuntime(runtime.id, { supportsFeishuBotConfig: true });
-  store.heartbeatRuntime(secondRuntime.id, { supportsFeishuBotConfig: true });
-  heartbeat = setInterval(() => {
-    store.heartbeatRuntime(runtime.id, { supportsFeishuBotConfig: true });
-    store.heartbeatRuntime(secondRuntime.id, { supportsFeishuBotConfig: true });
+  store.heartbeatRuntime(runtime.id, { supportsFeishuBotConfig: true, supportsBotMenu: true, botMenuProtocol: 2 });
+  store.heartbeatRuntime(secondRuntime.id, { supportsFeishuBotConfig: true, supportsBotMenu: true, botMenuProtocol: 2 });
+  heartbeat = setInterval(async () => {
+    store.heartbeatRuntime(runtime.id, { supportsFeishuBotConfig: true, supportsBotMenu: true, botMenuProtocol: 2 });
+    store.heartbeatRuntime(secondRuntime.id, { supportsFeishuBotConfig: true, supportsBotMenu: true, botMenuProtocol: 2 });
+    // The fake Runtime consumes the real durable menu queue; dry-run uses the
+    // real connector serializer but cannot contact Feishu.
+    for (const host of [runtime, secondRuntime]) {
+      for (const input of store.pendingRuntimeRequests(host.id)) {
+        if (input.kind !== "bot_menu") continue;
+        const request = store.getBotMenuPublishRequest(host.id, input.id)!;
+        try {
+          assert.equal(request.dryRun, true, "E2E must never publish a live menu");
+          const bot = store.feishuBotFor(request.botId).getConfig(workspace.id)!;
+          assert.equal(request.config.target?.appId, bot.appId);
+          store.claimAcknowledgedRuntimeRequest(host.id, "bot_menu", request.id);
+          const result = await new MenuSyncer({ appId: bot.appId, appSecret: "unused-fixture" }).syncAll(request.config, { dryRun: true });
+          store.reportBotMenuPublishResult(host.id, request.id, { status: "completed", result });
+        } catch (error) {
+          store.reportBotMenuPublishResult(host.id, request.id, { status: "failed", error: String(error) });
+        }
+      }
+    }
   }, 10_000);
   const botSecret = "synthetic-im-bot-secret";
   store.upsertFeishuBotConfig(workspace.id, { agentId: agent.id, runtimeId: runtime.id, appId: "cli_im_smoke", domain: "feishu", enabled: false, appSecret: botSecret, appSecretOp: "set" });

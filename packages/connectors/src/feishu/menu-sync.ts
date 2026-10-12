@@ -50,7 +50,6 @@ async function callFsopenApi(
 ): Promise<Record<string, unknown>> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  timer.unref?.();
   try {
     let res: Response;
     let body: string;
@@ -151,17 +150,21 @@ export class MenuSyncer {
   }
 
   async syncAll(config: ResolvedBotMenuConfig, options: { dryRun?: boolean } = {}): Promise<BotMenuPublishResult> {
-    const defaultPublished = Boolean(config.default?.length);
+    const defaultPublished = config.default !== undefined;
     const users = config.users ?? [];
-    if (!defaultPublished && users.length === 0) {
+    const clearUsers = config.clearUsers ?? [];
+    if (!defaultPublished && users.length === 0 && clearUsers.length === 0) {
       log.info("no bot_menu config found, skipping sync");
       return { dryRun: Boolean(options.dryRun), defaultPublished: false, userMenuCount: 0 };
     }
-    if (!options.dryRun && config.default?.length) {
+    if (!options.dryRun && config.default) {
       await this._postMenu({ bot_menu: { bot_menu_items: config.default.map(menuItemToApi) } });
       log.info(`synced default menu (${config.default.length} items)`);
     }
     if (!options.dryRun) {
+      for (const user of clearUsers) {
+        await this.deleteUserMenu(user.userId, user.userIdType);
+      }
       for (const user of users) {
         await this._postMenu(
           { user_id: user.userId, bot_menu: { bot_menu_items: user.items.map(menuItemToApi) } },
@@ -170,7 +173,11 @@ export class MenuSyncer {
         log.info(`synced personalized menu (${user.items.length} items)`);
       }
     }
-    return { dryRun: Boolean(options.dryRun), defaultPublished, userMenuCount: users.length };
+    return {
+      dryRun: Boolean(options.dryRun), defaultPublished, userMenuCount: users.length,
+      ...(clearUsers.length ? { clearedUserMenuCount: clearUsers.length } : {}),
+      ...(config.unresolvedLegacyTargetCount ? { unresolvedLegacyTargetCount: config.unresolvedLegacyTargetCount } : {}),
+    };
   }
 
   async getMenu(userId?: string, userIdType = "open_id"): Promise<any> {
@@ -191,7 +198,7 @@ export class MenuSyncer {
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8" },
       body: JSON.stringify({ user_id: userId }),
     }, "DELETE bot menu", this._timeoutMs);
-    if (apiCode(data) !== 0) log.warn(`DELETE menu for ${userId} failed: ${apiMessage(data)}`);
+    if (apiCode(data) !== 0) throw new Error(`Bot menu cleanup failed: ${apiMessage(data)}`);
   }
 
   private async _token(): Promise<string> {

@@ -41,6 +41,7 @@ describe("multiple Feishu bots", () => {
     expect(second.bot_id).toStartWith("bot_");
     expect(second.name).toBe("Bot 1");
     const bot = store.feishuBotFor(second.bot_id);
+    expect(store.getFeishuBotDaemonConfig("local", "rt_two")?.bot_id).toBe(second.bot_id);
     expect(store.getFeishuBotDaemonConfig("local", "rt_one")?.app_secret).toBe("test-secret-0");
     expect(store.getFeishuBotDaemonConfig("local", "rt_two")?.app_secret).toBe("test-secret-1");
     store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "online", appliedRevision: 1 });

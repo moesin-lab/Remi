@@ -4461,7 +4461,20 @@ export interface ResolvedBotMenuUserConfig {
 
 export interface ResolvedBotMenuConfig {
   default?: BotMenuItemConfig[];
+  /** Legacy personalized menus; new control-plane publishes only use clearUsers. */
   users?: ResolvedBotMenuUserConfig[];
+  clearUsers?: Array<{ userId: string; userIdType: BotMenuUserIdType }>;
+  unresolvedLegacyTargetCount?: number;
+  target?: BotMenuPublishTarget;
+}
+
+export const BOT_MENU_PROTOCOL_VERSION = 2;
+
+export interface BotMenuPublishTarget {
+  botId: string;
+  appId: string;
+  domain: string;
+  revision: number;
 }
 
 export type MultiremiBotMenuPublishRequestStatus = "pending" | "running" | "completed" | "failed" | "timeout";
@@ -4470,12 +4483,15 @@ export interface BotMenuPublishResult {
   dryRun: boolean;
   defaultPublished: boolean;
   userMenuCount: number;
+  clearedUserMenuCount?: number;
+  unresolvedLegacyTargetCount?: number;
 }
 
 export interface MultiremiBotMenuPublishRequest {
   id: string;
   runtimeId: string;
   workspaceId: string;
+  botId: string;
   config: ResolvedBotMenuConfig;
   dryRun: boolean;
   status: MultiremiBotMenuPublishRequestStatus;
@@ -4489,6 +4505,7 @@ export interface MultiremiBotMenuPublishRequest {
 
 export interface CreateBotMenuPublishRequestInput {
   workspaceId: string;
+  botId?: string;
   config: ResolvedBotMenuConfig;
   dryRun: boolean;
   createdBy?: string | null;
@@ -4903,6 +4920,8 @@ export interface MultiremiFeishuBotDirective {
 
 /** Runtime-scoped payload returned to the daemon. Contains decrypted secrets. */
 export interface MultiremiFeishuBotDaemonConfig {
+  /** Older control planes omit this for the original bot. */
+  bot_id?: string;
   workspace_id: string;
   runtime_id: string;
   agent_id: string;

@@ -1,6 +1,7 @@
 // Workspaces / members / users / invitations / notification preferences domain, plus the
 // workspace-scoped model-gateway relay config. Extracted verbatim from MultiremiStore
 // (the facade delegates every public method here).
+import { writeWorkspaceBotMenu } from "@multiremi/bot-menu/config.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { refreshResponsibilityEntityChange } from '../issue-responsibility-changes.js';
 import {
@@ -15,6 +16,7 @@ import {
 import { type StoreContext } from "@multiremi/store/context.js";
 import { activeRequestReadCache, cacheKey } from "@multiremi/store/request-read-cache.js";
 import type {
+  BotMenuConfig,
   CreateWorkspaceInput,
   CreateWorkspaceInvitationInput,
   CreateWorkspaceMemberInput,
@@ -161,16 +163,17 @@ export class WorkspacesRepo {
     );
   }
 
-  listWorkspaceMembers(workspaceId?: string | null): MultiremiWorkspaceMember[] {
+  listWorkspaceMembers(workspaceId?: string | null, options: { includeArchived?: boolean } = {}): MultiremiWorkspaceMember[] {
     // `findWorkspaceMemberForUser` re-lists this table for every role check, and one heartbeat
     // makes that check twice. Membership writes invalidate the table's entries.
     const cache = workspaceId ? activeRequestReadCache() : null;
-    const key = cacheKey("multiremi_workspace_members", "list", workspaceId ?? "");
+    const key = cacheKey("multiremi_workspace_members", options.includeArchived ? "list-archived" : "list", workspaceId ?? "");
     const cached = cache?.get<MultiremiWorkspaceMember[]>(key);
     if (cached !== undefined) return cached;
+    const activeOnly = options.includeArchived ? "1 = 1" : "archived_at IS NULL";
     const rows = workspaceId
-      ? this.ctx.db.query("SELECT * FROM multiremi_workspace_members WHERE workspace_id = ? AND archived_at IS NULL ORDER BY name ASC").all(workspaceId) as Row[]
-      : this.ctx.db.query("SELECT * FROM multiremi_workspace_members WHERE archived_at IS NULL ORDER BY workspace_id ASC, name ASC").all() as Row[];
+      ? this.ctx.db.query(`SELECT * FROM multiremi_workspace_members WHERE workspace_id = ? AND ${activeOnly} ORDER BY name ASC`).all(workspaceId) as Row[]
+      : this.ctx.db.query(`SELECT * FROM multiremi_workspace_members WHERE ${activeOnly} ORDER BY workspace_id ASC, name ASC`).all() as Row[];
     const members = rows.map(toWorkspaceMember);
     cache?.set(key, members);
     return members;
@@ -565,6 +568,19 @@ export class WorkspacesRepo {
     }
     this.ctx.db.run("UPDATE multiremi_users SET onboarded_at = COALESCE(onboarded_at, ?), updated_at = ? WHERE id = ?", [now, now, user.id]);
     return this.getWorkspace(id)!;
+  }
+
+  updateBotMenu(workspaceId: string, botId: string, menu: BotMenuConfig): MultiremiWorkspace | null {
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const workspace = this.getWorkspace(workspaceId);
+      if (!workspace || (botId !== "default" && !this.ctx.db.query(
+        "SELECT bot_id FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?",
+      ).get(workspaceId, botId))) return null;
+      return this.updateWorkspace(workspaceId, {
+        settings: writeWorkspaceBotMenu(workspace.settings, botId, menu),
+      });
+    })();
   }
 
   updateWorkspace(id: string, input: Partial<CreateWorkspaceInput>): MultiremiWorkspace {

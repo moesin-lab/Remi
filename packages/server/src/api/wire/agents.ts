@@ -5,8 +5,10 @@ import type { MultiremiAgent, MultiremiSkill } from "@multiremi/contracts/types.
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import {
   cleanString,
+  currentAccessToken,
   currentRequestUserId,
   currentWorkspaceRoleStrict,
+  isHumanOperatorRequest,
   workspaceAlwaysRedactSecrets,
 } from "./context.js";
 import { agentSkillCompatibilitySummary, daemonClaimSkillResponse } from "./skills.js";
@@ -66,7 +68,7 @@ export function agentCompatibilityResponses(store: MultiremiStore, agents: Multi
       else {
         let access = secretAccess.get(agent.workspaceId);
         if (!access) {
-          const role = currentWorkspaceRoleStrict(c, store, agent.workspaceId);
+          const role = agentSecretRole(c, store, agent.workspaceId);
           access = { alwaysRedact: workspaceAlwaysRedactSecrets(store.getWorkspace(agent.workspaceId)?.settings), admin: role === "owner" || role === "admin" };
           secretAccess.set(agent.workspaceId, access);
         }
@@ -96,11 +98,19 @@ function agentMcpConfigForRequest(
   if (!c) return { value: agent.mcpConfig, redacted: false };
   if (cleanString(c.req?.header?.("X-Agent-ID"))) return { value: null, redacted: true };
   if (workspaceAlwaysRedactSecrets(store.getWorkspace(agent.workspaceId)?.settings)) return { value: null, redacted: true };
-  const role = currentWorkspaceRoleStrict(c, store, agent.workspaceId);
+  const role = agentSecretRole(c, store, agent.workspaceId);
   if (role === "owner" || role === "admin" || agent.ownerId === currentRequestUserId(c)) {
     return { value: agent.mcpConfig, redacted: false };
   }
   return { value: null, redacted: true };
+}
+
+function agentSecretRole(c: any, store: MultiremiStore, workspaceId: string): string | null {
+  if (isHumanOperatorRequest(c)) return currentWorkspaceRoleStrict(c, store, workspaceId);
+  if (currentAccessToken(c)?.workspaceId !== workspaceId) return null;
+  // Shared business authority must not promote a task's original credential
+  // into an administrator of another Agent's sensitive MCP configuration.
+  return store.getUserRoleInWorkspace(currentRequestUserId(c), workspaceId);
 }
 
 export function agentEnvResponse(agentId: string, env: Record<string, string>): {

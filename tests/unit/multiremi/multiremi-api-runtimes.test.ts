@@ -431,7 +431,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     });
   });
 
-  it("scopes runtime console APIs by workspace and owner permissions", async () => {
+  it("shares runtime console controls within existing workspaces and preserves historical ownership", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "alice", userId: "alice", name: "Alice", role: "member" });
     store.createWorkspaceMember({ id: "bob", userId: "bob", name: "Bob", role: "member" });
@@ -481,9 +481,9 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     });
 
     const bobOwnedList = await app.request("/api/runtimes?owner=me", { headers: authHeaders(bobToken.token) });
-    expect((await bobOwnedList.json()).map((runtime: any) => runtime.id)).toEqual([bobPublic.id]);
+    expect((await bobOwnedList.json()).map((runtime: any) => runtime.id).sort()).toEqual([alicePrivate.id, bobPublic.id].sort());
     const bobOwnedNativeList = await app.request("/api/multiremi/runtimes?owner=me", { headers: authHeaders(bobToken.token) });
-    expect((await bobOwnedNativeList.json()).runtimes.map((runtime: any) => runtime.id)).toEqual([bobPublic.id]);
+    expect((await bobOwnedNativeList.json()).runtimes.map((runtime: any) => runtime.id).sort()).toEqual([alicePrivate.id, bobPublic.id].sort());
 
     const bobDetail = await app.request(`/api/runtimes/${alicePrivate.id}`, { headers: authHeaders(bobToken.token) });
     expect(bobDetail.status).toBe(200);
@@ -491,7 +491,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
 
     const remoteDetail = await app.request(`/api/runtimes/${remoteRuntime.id}`, { headers: authHeaders(aliceToken.token) });
     expect(remoteDetail.status).toBe(404);
-    expect(await remoteDetail.json()).toEqual({ error: "runtime not found" });
+    expect(await remoteDetail.json()).toEqual({ error: "workspace not found" });
 
     const bobUsage = await app.request(`/api/runtimes/${alicePrivate.id}/usage`, { headers: authHeaders(bobToken.token) });
     expect(bobUsage.status).toBe(200);
@@ -508,23 +508,15 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
       headers: jsonHeaders(bobToken.token),
       body: JSON.stringify({ models: [{ id: "blocked", label: "Blocked" }] }),
     });
-    expect(bobModelCatalogWrite.status).toBe(403);
-    expect(await bobModelCatalogWrite.json()).toEqual({ error: "you can only edit your own runtimes" });
+    expect(bobModelCatalogWrite.status).toBe(200);
 
     const bobPatch = await app.request(`/api/runtimes/${alicePrivate.id}`, {
       method: "PATCH",
       headers: jsonHeaders(bobToken.token),
       body: JSON.stringify({ visibility: "public" }),
     });
-    expect(bobPatch.status).toBe(403);
-    expect(await bobPatch.json()).toEqual({ error: "you can only edit your own runtimes" });
-
-    const bobDelete = await app.request(`/api/runtimes/${alicePrivate.id}`, {
-      method: "DELETE",
-      headers: authHeaders(bobToken.token),
-    });
-    expect(bobDelete.status).toBe(403);
-    expect(await bobDelete.json()).toEqual({ error: "you can only delete your own runtimes" });
+    expect(bobPatch.status).toBe(200);
+    expect(store.getRuntime(alicePrivate.id)?.ownerId).toBe("alice");
 
     const alicePatch = await app.request(`/api/runtimes/${alicePrivate.id}`, {
       method: "PATCH",
@@ -549,8 +541,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
       method: "POST",
       headers: authHeaders(adminToken.token),
     });
-    expect(adminLocalSkills.status).toBe(403);
-    expect(await adminLocalSkills.json()).toEqual({ error: "you can only access local skills from your own runtimes" });
+    expect(adminLocalSkills.status).toBe(200);
 
     const aliceLocalSkills = await app.request(`/api/runtimes/${alicePrivate.id}/local-skills`, {
       method: "POST",
@@ -558,6 +549,12 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     });
     expect(aliceLocalSkills.status).toBe(200);
     expect((await aliceLocalSkills.json()).status).toBe("pending");
+    const bobDelete = await app.request(`/api/runtimes/${alicePrivate.id}`, {
+      method: "DELETE", headers: authHeaders(bobToken.token),
+    });
+    expect(bobDelete.status).toBe(200);
+    expect(await bobDelete.json()).toMatchObject({ status: "ok" });
+    expect(store.getRuntime(alicePrivate.id)).toBeNull();
   });
 
   it("matches Go runtime delete cascade contracts", async () => {

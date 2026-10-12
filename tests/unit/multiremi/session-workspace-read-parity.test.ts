@@ -1,6 +1,7 @@
 import { createHistoricalTestIssue } from './helpers.js';
 import { afterEach, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
+import { authorizeBrowserWebSocketToken } from "@multiremi/api/realtime.js";
 import { createReadPool } from "@multiremi/store/db/read-pool.js";
 import {
   createPostgresStreamAuthReader,
@@ -12,7 +13,7 @@ import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
 pendingTurnBackendTests("MUL-509 moved Issue Session read parity", (fixture, backend) => {
   afterEach(() => fixture().store.stopNotificationDeliverySweeper());
 
-  it("HTTP and WS read frozen source history in W1 and the current Main in W2", async () => {
+  it("shares historical HTTP reads across humans while each socket remains bound to its selected workspace", async () => {
     const { store, db, databaseUrl } = fixture();
     const w1 = store.ensureLocalWorkspace();
     const w2 = store.createWorkspace({ name: "W2", slug: "session-read-w2" });
@@ -67,10 +68,13 @@ pendingTurnBackendTests("MUL-509 moved Issue Session read parity", (fixture, bac
         `/api/sessions/${session.id}/log/locate?id=${history.id}`,
       ];
       for (const caller of callers) {
-        const subject = { userId: caller.user.id, workspaceId: caller.workspace.id };
+        const verified = await authorizeBrowserWebSocketToken(caller.token, store, 'fixture-master', caller.workspace.id);
+        if ('error' in verified) throw new Error(verified.error);
+        expect(verified.userId).toBe('local');
+        const subject = { userId: verified.userId, workspaceId: caller.workspace.id };
         const facts = await auth.logFacts(session.id, subject);
         expect(facts).toEqual({ ok: true, facts: { kind: "issue", workspaceId: w1.id,
-          creatorId: null, requesterIsMember: caller.readable } });
+          creatorId: null, requesterIsMember: true } });
         if (!facts.ok) throw new Error("WS log facts unavailable");
         const decision = decideLogSubscription(subject, facts.facts);
         expect(decision).toEqual(caller.readable ? { ok: true } : { ok: false, code: "forbidden" });
@@ -78,18 +82,15 @@ pendingTurnBackendTests("MUL-509 moved Issue Session read parity", (fixture, bac
         expect(decideLogSubscription({ ...subject, workspaceId: w2.id }, facts.facts).ok).toBe(false);
         for (const route of routes) {
           const response = await app.request(route, { headers: { Authorization: `Bearer ${caller.token}` } });
-          expect(response.status, `${caller.workspace.name}: ${route}`).toBe(caller.readable ? 200 : 404);
-          expect(response.status === 200).toBe(decision.ok);
+          expect(response.status, `${caller.workspace.name}: ${route}`).toBe(200);
           const body = await response.json();
-          if (caller.readable && route.endsWith("/messages")) {
+          if (route.endsWith("/messages")) {
             expect(body).toMatchObject({ messages: expect.arrayContaining([expect.objectContaining({ id: history.id, body_md: history.body_md })]) });
-          } else if (caller.readable && route.endsWith("/log")) {
+          } else if (route.endsWith("/log")) {
             expect(body.entries.some((entry: { id: string }) => entry.id === audit.id)).toBe(false);
             expect(body).toMatchObject({ entries: expect.arrayContaining([
               expect.objectContaining({ id: history.id, body_md: history.body_md }),
             ]) });
-          } else if (!caller.readable) {
-            expect(JSON.stringify(body)).not.toContain(history.body_md);
           }
         }
         const sent = await app.request(`/api/sessions/${session.id}/messages`, { method: "POST",
@@ -100,24 +101,24 @@ pendingTurnBackendTests("MUL-509 moved Issue Session read parity", (fixture, bac
         expect(store.getConversationLogHead(session.id)).toEqual(sourceHead);
         expect(store.listConversationLogEntries(session.id)).toEqual(sourceLog);
 
-        const targetSubject = { userId: caller.user.id, workspaceId: caller.workspace.id };
+        const targetSubject = subject;
         const targetFacts = await auth.logFacts(targetMain.id, targetSubject);
         expect(targetFacts).toEqual({ ok: true, facts: { kind: 'issue', workspaceId: w2.id,
-          creatorId: null, requesterIsMember: !caller.readable } });
+          creatorId: null, requesterIsMember: true } });
         if (!targetFacts.ok) throw new Error('Target WS log facts unavailable');
         expect(decideLogSubscription(targetSubject, targetFacts.facts).ok).toBe(!caller.readable);
         for (const route of [`/api/sessions/${targetMain.id}/log`,
           `/api/sessions/${targetMain.id}/log/entry?id=${audit.id}`, `/api/messages/${audit.id}`]) {
           const response = await app.request(route, { headers: { Authorization: `Bearer ${caller.token}` } });
-          expect(response.status, `${caller.workspace.name}: ${route}`).toBe(caller.readable ? 404 : 200);
+          expect(response.status, `${caller.workspace.name}: ${route}`).toBe(200);
           expect(await response.text()).not.toContain(history.body_md);
         }
         const targetHead = store.getConversationLogHead(targetMain.id)!.headSeq;
         const targetWrite = await app.request(`/api/sessions/${targetMain.id}/messages`, { method: "POST",
           headers: { Authorization: `Bearer ${caller.token}`, "Content-Type": "application/json" },
           body: JSON.stringify({ to: { type: "none" }, body_md: "Follow-up in W2", message_kind: "status", wake_requested: "inbox_only" }) });
-        expect(targetWrite.status).toBe(caller.readable ? 404 : 200);
-        expect(store.getConversationLogHead(targetMain.id)!.headSeq).toBe(targetHead + (caller.readable ? 0 : 1));
+        expect(targetWrite.status).toBe(200);
+        expect(store.getConversationLogHead(targetMain.id)!.headSeq).toBe(targetHead + 1);
         expect(store.getConversationLogHead(session.id)).toEqual(sourceHead);
         expect(store.listConversationLogEntries(session.id)).toEqual(sourceLog);
       }

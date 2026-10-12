@@ -201,7 +201,9 @@ describe("Runtime Claude profiles", () => {
     const request = (path: string, token: string, body?: unknown) => app.request(path, { method: body ? "PUT" : "GET", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
     const path = `/api/runtimes/${runtime.id}/claude-profile`;
     const body = { profile: apiProfile, api_key: "super-private-provider-key" };
-    expect((await request(path, member.token, body)).status).toBe(403);
+    const memberSaved = await request(path, member.token, body);
+    expect(memberSaved.status).toBe(200);
+    expect(JSON.stringify(await memberSaved.json())).not.toContain(body.api_key);
     expect((await request(path, taskToken.token, body)).status).toBe(403);
     expect((await request(path, daemon.token, body)).status).toBe(403);
     const saved = await request(path, owner.token, body);

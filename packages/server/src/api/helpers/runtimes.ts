@@ -206,14 +206,16 @@ export function loadRuntimeForCurrentOwner(c: Context, store: MultiremiStore, ru
 }
 
 export function canCurrentUserEditRuntime(c: Context, store: MultiremiStore, runtime: MultiremiRuntime): boolean {
-  const role = currentWorkspaceRole(c, store, runtimeWorkspaceId(runtime));
+  if (isHumanOperatorRequest(c)) return true;
+  const role = store.getUserRoleInWorkspace(currentRequestUserId(c), runtimeWorkspaceId(runtime));
   if (role === "owner" || role === "admin") return true;
   return runtimeOwnerId(runtime) === currentRequestUserId(c);
 }
 
 export function canCurrentUserUseRuntime(c: Context, store: MultiremiStore, runtime: MultiremiRuntime): boolean {
+  if (isHumanOperatorRequest(c)) return true;
   const workspaceId = runtime.workspaceId ?? "local";
-  const role = currentWorkspaceRole(c, store, workspaceId);
+  const role = store.getUserRoleInWorkspace(currentRequestUserId(c), workspaceId);
   if (role === "owner" || role === "admin") return true;
   if (runtime.visibility === "public") return true;
   return runtime.ownerId === currentRequestUserId(c);

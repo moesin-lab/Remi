@@ -288,7 +288,7 @@ describe("Multiremi API — agent plugins", () => {
     }]);
   });
 
-  it("does not reveal cross-workspace Plugin ids through Git version imports", async () => {
+  it("rejects cross-workspace Plugin/source combinations before resolving Git", async () => {
     const store = createStore();
     const owner = store.getOrCreateUser({
       externalId: "plugin-owner",
@@ -330,10 +330,10 @@ describe("Multiremi API — agent plugins", () => {
         throw new Error("resolver must not run");
       },
     });
-    const request = (id: string) => app.request("/api/multiremi/agent-plugins/import", {
+    const request = (id: string, credential = token.token) => app.request("/api/multiremi/agent-plugins/import", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${token.token}`,
+        Authorization: `Bearer ${credential}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -346,16 +346,20 @@ describe("Multiremi API — agent plugins", () => {
 
     const known = await request(plugin.id);
     const unknown = await request("apl_does_not_exist");
-    expect(known.status).toBe(404);
+    expect(known.status).toBe(400);
     expect(unknown.status).toBe(404);
     expect(await known.json()).toEqual({
-      error: "plugin not found",
-      code: "plugin_not_found",
+      error: "plugin and import source must belong to the same workspace",
+      code: "workspace_mismatch",
     });
     expect(await unknown.json()).toEqual({
       error: "plugin not found",
       code: "plugin_not_found",
     });
+    const scoped = await store.createAccessToken({
+      name: "Workspace-scoped integration", type: "pat", workspaceId: callerWorkspace.id, userId: "local",
+    });
+    expect((await request(plugin.id, scoped.token)).status).toBe(404);
     expect(resolverCalls).toBe(0);
   });
 
@@ -544,7 +548,7 @@ describe("Multiremi API — agent plugins", () => {
     expect((await list.json()).plugins[0]).toMatchObject({ id: plugin.id, bindingCount: 1 });
   });
 
-  it("requires access to an Agent move's target workspace", async () => {
+  it("allows human Agent moves across workspaces while enforcing scoped credentials", async () => {
     const store = createStore();
     const user = store.getOrCreateUser({
       externalId: "plugin-move-user",
@@ -575,6 +579,16 @@ describe("Multiremi API — agent plugins", () => {
     });
     const app = createMultiremiApp({ store, authToken: "root-secret" });
 
+    const scoped = await store.createAccessToken({
+      name: "Workspace-scoped integration", type: "pat", workspaceId: source.id, userId: "local",
+    });
+    const denied = await app.request(`/api/multiremi/agents/${agent.id}`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${scoped.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId: target.id }),
+    });
+    expect(denied.status).toBe(404);
+    expect(store.getAgent(agent.id)?.workspaceId).toBe(source.id);
     const response = await app.request(`/api/multiremi/agents/${agent.id}`, {
       method: "PATCH",
       headers: {
@@ -583,9 +597,8 @@ describe("Multiremi API — agent plugins", () => {
       },
       body: JSON.stringify({ workspaceId: target.id }),
     });
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: "workspace not found" });
-    expect(store.getAgent(agent.id)?.workspaceId).toBe(source.id);
+    expect(response.status).toBe(200);
+    expect(store.getAgent(agent.id)?.workspaceId).toBe(target.id);
   });
 
   it("rejects Plugin connection and config values until Runtime injection exists", async () => {
@@ -651,6 +664,7 @@ describe("Multiremi API — agent plugins", () => {
       daemonId: "daemon-local",
       workspaceId: "local",
     });
+    store.createWorkspace({ id: "remote", name: "Remote", slug: "remote" });
     const remoteToken = await store.createAccessToken({
       name: "Remote daemon",
       type: "daemon",

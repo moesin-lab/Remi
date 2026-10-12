@@ -420,8 +420,8 @@ export async function authorizeBrowserWebSocketToken(
     if (accessToken.type === "daemon") return { error: "forbidden for daemon token", status: 403 };
     if (accessToken.type === "task") return { error: "forbidden for task token", status: 403 };
     const userId = accessToken.userId || "local";
-    // Membership is the sole authority — a token being bound to this workspace
-    // does not by itself make its user a member.
+    // Human login accounts share existing workspaces. Legacy local PATs keep
+    // their explicit workspace binding unless they represent a login session.
     if (!store.getWorkspace(workspaceId)
       || userId === "local" && accessToken.purpose !== "session" && accessToken.workspaceId !== workspaceId) {
       return { error: "workspace not available to this credential", status: 403 };

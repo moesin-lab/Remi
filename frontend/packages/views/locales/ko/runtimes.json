@@ -155,7 +155,7 @@
     "manage_only_title": "SSH 연결이 제한됨",
     "manage_only_hint": "워크스페이스 소유자와 관리자만 보거나 변경할 수 있습니다.",
     "permission_load_failed_title": "SSH 연결 권한을 확인하지 못했습니다",
-    "permission_load_failed_hint": "워크스페이스 구성원 정보를 불러오지 못했습니다. 연결을 확인하고 다시 시도하세요.",
+    "permission_load_failed_hint": "워크스페이스 정보를 불러오지 못했습니다. 연결을 확인하고 다시 시도하세요.",
     "load_failed_title": "SSH 연결을 불러오지 못했습니다",
     "load_failed_hint": "서버 연결을 확인하고 다시 시도하세요.",
     "retry": "다시 시도",

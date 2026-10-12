@@ -66,7 +66,7 @@
     "members_label": "Additional Members",
     "members_optional": "(optional)",
     "members_hint": "Members the leader can delegate sub-tasks to. Can be added later.",
-    "members_placeholder": "Add agents or workspace members",
+    "members_placeholder": "Add agents",
     "members_selected_count_one": "{{count}} selected",
     "members_selected_count_other": "{{count}} selected",
     "members_more_count": "+{{count}}",

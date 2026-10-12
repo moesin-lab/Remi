@@ -167,8 +167,9 @@ describe.skipIf(!pgAvailable)("MUL-458 human dependency force (PostgreSQL)", () 
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.prompt).toContain("unfinished prerequisites");
     expect(forces(f.issue.id)).toHaveLength(1);
-    expect(forces(f.issue.id)[0]).toMatchObject({ actorType: "member", actorId: f.userId });
+    expect(forces(f.issue.id)[0]).toMatchObject({ actorType: "member", actorId: "local" });
     expect(forces(f.issue.id)[0]!.data).toMatchObject({ source: "comment", taskId: tasks[0]!.id });
+    expect(store.getWorkspaceMember(f.member.id)?.userId).toBe(f.userId);
   });
 
   it("covers mention, rerun, repeated comments, parent derivation and kill switch on PG", async () => {
@@ -254,7 +255,7 @@ describe.skipIf(!pgAvailable)("MUL-458 human dependency force (PostgreSQL)", () 
     expect(store.listTasksForIssue(rerun.issue.id)[0]!.agentId).toBe(override.id);
     expect(store.getIssue(rerun.issue.id)?.status).toBe("todo");
     expect(forces(rerun.issue.id)).toHaveLength(1);
-    expect(forces(rerun.issue.id)[0]).toMatchObject({ actorType: "member", actorId: rerun.userId });
+    expect(forces(rerun.issue.id)[0]).toMatchObject({ actorType: "member", actorId: "local" });
     expect(forces(rerun.issue.id)[0]!.data).toMatchObject({ source: "comment", agentId: override.id, assigneeDispatched: false });
   });
 
@@ -268,7 +269,7 @@ describe.skipIf(!pgAvailable)("MUL-458 human dependency force (PostgreSQL)", () 
     const original = store.getTurnForAttempt(store.listTasksForIssue(f.issue.id)[0]!.id)!;
     const originalForce = forces(f.issue.id);
     expect(originalForce).toHaveLength(1);
-    expect(originalForce[0]).toMatchObject({ actorType: "member", actorId: f.userId });
+    expect(originalForce[0]).toMatchObject({ actorType: "member", actorId: "local" });
 
     store.updateIssue(f.issue.id, { status: "backlog" });
     expect(store.getIssue(f.issue.id)?.status).toBe("backlog");
@@ -361,7 +362,7 @@ describe.skipIf(!pgAvailable)("MUL-458 human dependency force (PostgreSQL)", () 
       expect(tasks).toHaveLength(1);
       expect(store.getIssue(target.issue.id)?.status).toBe("todo");
       expect(forces(target.issue.id)).toHaveLength(1);
-      expect(forces(target.issue.id)[0]).toMatchObject({ actorType: "member", actorId: target.userId });
+      expect(forces(target.issue.id)[0]).toMatchObject({ actorType: "member", actorId: "local" });
       expect(forces(target.issue.id)[0]!.data).toMatchObject({
         source: "comment", agentId: target.agent.id, taskId: tasks[0]!.id,
         assigneeDispatched: true, unmet: [{ dependsOnIssueId: target.prerequisite.id }],

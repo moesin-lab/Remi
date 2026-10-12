@@ -143,11 +143,13 @@ export function registerAttachmentRoutes(app: Hono, deps: RouterDeps): void {
     if (!existing) return c.json({ ok: true });
     const denied = denyAttachmentAccess(c, store, existing);
     if (denied) return denied;
-    // Go file.go DeleteAttachment: only the uploader or a workspace admin/owner may
-    // delete a non-chat attachment. Chat attachments are already creator-gated by
-    // denyAttachmentAccess above (the creator is the uploader).
+    // Humans share workspace authority. A task still needs to be the uploader
+    // or carry its original actor's admin/owner role for non-Chat attachments.
     if (!existing.chatSessionId) {
-      const role = currentWorkspaceRole(c, store, existing.workspaceId);
+      const taskToken = currentTaskAccessToken(c);
+      const role = taskToken
+        ? store.getUserRoleInWorkspace(taskToken.userId ?? "local", existing.workspaceId)
+        : currentWorkspaceRole(c, store, existing.workspaceId);
       const caller = issueMutationActor(c);
       const isUploader = existing.uploaderType === caller.actorType && existing.uploaderId === caller.actorId;
       const isAdmin = role === "owner" || role === "admin";

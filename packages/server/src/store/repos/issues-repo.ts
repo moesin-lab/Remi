@@ -3193,7 +3193,7 @@ export class IssuesRepo {
     const outcome = reported === "blocked" && options.taskTerminalStatus === "failed" ? "failed" : reported;
     if(changed&&!['done','cancelled'].includes(parent.status)){
       const responsibility=this.ctx.resolveIssueResponsibility(parent.id);
-      if(responsibility.unresolved.length&&!responsibility.rootHuman){
+      if(responsibility.unresolved.length&&!responsibility.rootHuman&&!responsibility.rootIssueId){
         this.ctx.appendIssueActivity(parent.id,{actorType:'system',actorId:SYSTEM_AUTHOR_ID,
           type:'child_done_parent_skipped',body:'Parent notice requires a complete responsibility chain; repair the parent execution chain',
           data:{reason:'responsibility_unresolved',childIssueId:issue.id,child_issue_id:issue.id,
@@ -3205,7 +3205,8 @@ export class IssuesRepo {
       }
       const session=this.ctx.issueSessions().getOrCreateDefaultIssueSessionWithinTransaction(issue.id);
       const details = { childIssueId: issue.id, child_issue_id: issue.id, childIssueKey: issue.key,
-        child_issue_key: issue.key, childStatus: issue.status, child_status: issue.status, outcome };
+        child_issue_key: issue.key, childStatus: issue.status, child_status: issue.status, outcome,
+        ...(outcome && !parent.assigneeId ? { noAssignee: true, no_assignee: true } : {}) };
       const body = outcome ? childStatusSystemCommentBody({mentionPrefix:this.parentAssigneeMentionPrefix(parent),
         childKey:issue.key,childId:issue.id,childTitle:issue.title,outcome,childStatus:issue.status,readinessLines})
         : `${issue.key} ${issue.title}: ${previous.status} → ${issue.status}`;
@@ -3219,7 +3220,7 @@ export class IssuesRepo {
             details,title:`${parent.key}: ${issue.key} ${outcome ? childOutcomeLabel(outcome) : issue.status}`}}},deferredEvents);
       if (outcome && !parent.assigneeId) {
         this.notifyParentSubscribersOfChildOutcome(parent, issue, outcome, deferredEvents,
-          this.getIssueComment(delivered.message.id)!);
+          this.getIssueComment(delivered.message.id)!, delivered.message.to_member_id);
       } else if (outcome && !this.parentNotificationAgent(parent) && parent.assigneeType !== 'member') {
         this.recordChildDoneParentSkipped(parent, this.getIssueComment(delivered.message.id)!,
           parent.assigneeType === 'squad' ? 'squad_leader_unavailable' : 'agent_unavailable',
@@ -4008,6 +4009,7 @@ export class IssuesRepo {
     outcome: ChildTerminalOutcome,
     deferredEvents: CommitEventQueue,
     existingComment?: MultiremiIssueComment,
+    notifiedMemberId?: string | null,
   ): MultiremiIssueComment {
     const comment = existingComment ?? this.createSystemIssueCommentWithinTransaction(parent.id, childStatusSystemCommentBody({
       mentionPrefix: "",
@@ -4026,8 +4028,15 @@ export class IssuesRepo {
       child_status: child.status,
     }, deferredEvents);
     this.recordChildDoneParentSkipped(parent, comment, "no_assignee", { outcome }, deferredEvents);
+    const notifiedMember = notifiedMemberId ? this.ctx.workspaces().getWorkspaceMember(notifiedMemberId) : null;
+    const notifiedOperatorId = notifiedMember?.workspaceId === parent.workspaceId
+      ? this.ctx.workspaces().getWorkspaceOperator(parent.workspaceId)?.id ?? notifiedMemberId
+      : null;
     for (const subscriber of this.listIssueSubscribers(parent.id)) {
       if (subscriber.userType !== "member") continue;
+      // The parent-owner message may already reach this same shared operator.
+      // Deduplicate only this delivery, so later child events remain observable.
+      if (subscriber.userId === notifiedOperatorId) continue;
       this.ctx.createInboxItem({
         issueId: parent.id,
         memberId: subscriber.userId,

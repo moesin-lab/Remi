@@ -399,7 +399,8 @@ type AgentVisibility = Pick<MultiremiAgent, "visibility" | "ownerId" | "workspac
 
 export function canCurrentUserAccessAgent(c: Context, store: MultiremiStore, agent: AgentVisibility): boolean {
   if (isHumanOperatorRequest(c)) return denyCurrentUserWorkspaceAccess(c, store, agent.workspaceId) === null;
-  return agentVisibleToUser(agent, currentRequestUserId(c), (workspaceId) => currentWorkspaceRole(c, store, workspaceId));
+  const userId = currentRequestUserId(c);
+  return agentVisibleToUser(agent, userId, (workspaceId) => store.getUserRoleInWorkspace(userId, workspaceId) ?? "member");
 }
 
 /**
@@ -417,7 +418,11 @@ export function canCurrentUserAccessAgentChecker(
   return (agent) => agentVisibleToUser(agent, userId, (workspaceId) => {
     const cached = rolesByWorkspace.get(workspaceId);
     if (cached !== undefined) return cached;
-    const role = currentWorkspaceRole(c, store, workspaceId);
+    // Workspace operator roles apply to human requests. A task retains its
+    // credential actor's private-Agent access, including in batched lists.
+    const role = isHumanOperatorRequest(c)
+      ? currentWorkspaceRole(c, store, workspaceId)
+      : store.getUserRoleInWorkspace(userId, workspaceId) ?? "member";
     rolesByWorkspace.set(workspaceId, role);
     return role;
   });

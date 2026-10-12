@@ -17,8 +17,7 @@ const headers = (token: string) => ({ Authorization: `Bearer ${token}`, "Content
 
 /**
  * `taskCount` tasks on the local workspace, every Nth on another workspace.
- * The other workspace's tasks are invisible to `usr_reader`, who is a plain
- * member of `local` only.
+ * The selected local workspace excludes the other workspace's tasks.
  */
 async function fixture(taskCount = 10, foreignEvery = 5) {
   const store = createStore();
@@ -156,11 +155,7 @@ describe("Task list pagination", () => {
     // limit=2. Paging must produce the same set the rules allow -- not one task
     // more (a leak) and not one fewer (an invisible task eating page budget).
     //
-    // The expected per-identity sets below were dumped from this same fixture on
-    // the parent commit (tests/manual/vis-equivalence-evidence.ts) and are
-    // byte-identical with the pagination change: the page moves, the rule does
-    // not. Ordinary tasks stay workspace-visible on this route; Chat tasks stay
-    // creator-only.
+    // Human accounts page the same local tasks, including historical Chat creators.
     const store = createStore();
     store.ensureLocalWorkspace();
     store.createWorkspace({ id: "ws_other", name: "Other", slug: "other", issuePrefix: "OTH" });
@@ -187,16 +182,17 @@ describe("Task list pagination", () => {
     const sharedBobChat = chat(shared.id, "usr_bob", "bob on shared agent");
     const alicePrivateBobChat = chat(mine.id, "usr_bob", "bob on alice's private agent");
 
-    const expectedForAlice = new Set([sharedOrdinary, alicePrivateOrdinary, bobPrivateOrdinary, sharedAliceChat]);
+    const expectedForAlice = new Set([sharedOrdinary, alicePrivateOrdinary, bobPrivateOrdinary, sharedAliceChat, sharedBobChat, alicePrivateBobChat]);
     const expectedForBob = new Set([
       sharedOrdinary,
       alicePrivateOrdinary,
       bobPrivateOrdinary,
+      sharedAliceChat,
       sharedBobChat,
       alicePrivateBobChat,
     ]);
     expect(expectedForAlice.has(foreignOrdinary)).toBe(false);
-    expect(expectedForBob.has(sharedAliceChat)).toBe(false);
+    expect(expectedForBob.has(foreignOrdinary)).toBe(false);
 
     for (const [identity, token, expected] of [
       ["alice", alice.token, expectedForAlice],

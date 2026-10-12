@@ -832,7 +832,7 @@
     "delete_failed": "删除 issue 失败",
     "delete_dialog_title_other": "删除 {{count}} 个 issue？",
     "delete_dialog_desc_other": "此操作无法撤销，所选 issue 及其全部关联数据都会被永久删除。",
-    "delete_dialog_warning": "任何工作区成员都可以删除 issue。",
+    "delete_dialog_warning": "删除后，所有操作者都将无法再访问这些事项。",
     "cancel": "取消"
   },
   "card": {

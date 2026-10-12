@@ -268,25 +268,26 @@ describe("Bun Multiremi runtime directory scan", () => {
     expect(await compatOffline.json()).toEqual({ error: "runtime is offline" });
   });
 
-  it("forbids initiating a directory scan on another owner's runtime", async () => {
+  it("shares directory scan initiation across historical runtime owners", async () => {
     const store = createStore();
     const runtime = store.registerRuntime({ id: "rt_dirscan_owned", name: "Owned runtime", provider: "codex", workspaceId: "local", ownerId: "someone-else" });
     const app = createMultiremiApp({ store });
 
-    const forbidden = await app.request(`/api/multiremi/runtimes/${runtime.id}/directory-scans`, {
+    const shared = await app.request(`/api/multiremi/runtimes/${runtime.id}/directory-scans`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
-    expect(forbidden.status).toBe(403);
-    expect(await forbidden.json()).toEqual({ error: "you can only access directory scans from your own runtimes" });
+    expect(shared.status).toBe(200);
+    expect(await shared.json()).toMatchObject({ runtimeId: runtime.id, status: "pending" });
 
-    const forbiddenCompat = await app.request(`/api/runtimes/${runtime.id}/directory-scans`, {
+    const sharedCompat = await app.request(`/api/runtimes/${runtime.id}/directory-scans`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
-    expect(forbiddenCompat.status).toBe(403);
+    expect(sharedCompat.status).toBe(200);
+    expect(await sharedCompat.json()).toMatchObject({ runtime_id: runtime.id, status: "pending" });
   });
 
   it("embeds the browse mode in params and the heartbeat ack", async () => {

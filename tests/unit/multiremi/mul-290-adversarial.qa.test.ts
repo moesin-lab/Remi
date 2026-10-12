@@ -28,7 +28,7 @@ async function postNode(app: ReturnType<typeof createMultiremiApp>, headers: Hea
 }
 
 describe("MUL-290 independent adversarial QA", () => {
-  it.each(["personal", "cli", "session"])("keeps a demoted authenticated local user scoped when using a %s PAT", async (purpose) => {
+  it.each(["personal", "cli", "session"])("shares human control regardless of historical role when using a %s PAT", async (purpose) => {
     const store = createStore();
     store.ensureLocalWorkspace();
     const replacementOwner = store.getOrCreateUser({ name: "Replacement owner", email: `replacement-${purpose}@example.test` });
@@ -57,7 +57,6 @@ describe("MUL-290 independent adversarial QA", () => {
       .toEqual({ userId: "local", purpose, workspaceId: "local" });
     const listed = await app.request(root, { headers: patHeaders });
     const listedBody = await listed.json() as Array<{ id: string }>;
-    const before = store.getCloudRuntimeNode(foreignNode.id);
     const deleteNode = spyOn(store, "deleteCloudRuntimeNode");
     const setStatus = spyOn(store, "setCloudRuntimeNodeStatus");
     const execNode = spyOn(store, "execCloudRuntimeNode");
@@ -76,31 +75,28 @@ describe("MUL-290 independent adversarial QA", () => {
 
     if (minted) expect(minted.status).toBe(201);
     expect(listed.status).toBe(200);
-    expect(listedBody).toEqual([]);
-    expect(changed.status).toBe(404);
-    expect(stored).toMatchObject(foreignNode);
-    expect(stored).toEqual(before);
-    expect(await changed.json()).toEqual({ error: "cloud runtime node not found" });
+    expect(listedBody).toEqual([foreignNode]);
+    expect(changed.status).toBe(200);
+    expect(stored).toMatchObject({ id: foreignNode.id, ownerId: "local", status: "maintenance" });
 
     for (const [method, path] of [
-      ["DELETE", ""],
       ["POST", "/start"],
       ["POST", "/stop"],
       ["POST", "/reboot"],
       ["POST", "/exec"],
+      ["DELETE", ""],
     ]) {
-      const denied = await app.request(`${root}${path}`, {
+      const allowed = await app.request(`${root}${path}`, {
         method,
         headers: patHeaders,
-        body: JSON.stringify({ id: foreignNode.id, command: "echo forbidden" }),
+        body: JSON.stringify({ id: foreignNode.id, command: "echo shared" }),
       });
-      expect(denied.status, `${purpose} ${method} ${path}`).toBe(404);
-      expect(await denied.json()).toEqual({ error: "cloud runtime node not found" });
-      expect(store.getCloudRuntimeNode(foreignNode.id)).toEqual(before);
+      expect(allowed.status, `${purpose} ${method} ${path}`).toBe(method === "DELETE" ? 204 : 200);
     }
-    expect(deleteNode).not.toHaveBeenCalled();
-    expect(setStatus).not.toHaveBeenCalled();
-    expect(execNode).not.toHaveBeenCalled();
+    expect(store.getCloudRuntimeNode(foreignNode.id)).toBeNull();
+    expect(deleteNode).toHaveBeenCalledTimes(1);
+    expect(setStatus).toHaveBeenCalled();
+    expect(execNode).toHaveBeenCalledTimes(1);
   });
 
   it("normalizes a logged-in member's requested session purpose to personal when minting a PAT", async () => {
@@ -175,7 +171,7 @@ describe("MUL-290 independent adversarial QA", () => {
     console.log("QA_LEGACY_PAT stored_user_id=local deployment_role=owner list=200 managed_foreign=true");
   });
 
-  it("keeps owner filtering ahead of malformed pagination and ignores forged ownership fields", async () => {
+  it("shares pagination safely and ignores forged ownership fields", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
     const alice = store.getOrCreateUser({ name: "Alice", email: "qa-alice@example.test" });
@@ -191,12 +187,12 @@ describe("MUL-290 independent adversarial QA", () => {
       owner_id: bob.id,
       metadata: { ownerId: bob.id, owner_id: bob.id },
     });
-    await postNode(app, aliceHeaders, { instance_type: "qa.alice-second" });
-    await postNode(app, bobHeaders, { instance_type: "qa.bob" });
+    const second = await postNode(app, aliceHeaders, { instance_type: "qa.alice-second" });
+    const third = await postNode(app, bobHeaders, { instance_type: "qa.bob" });
 
-    expect(forged.ownerId).toBe(alice.id);
-    expect(forged.owner_id).toBe(alice.id);
-    expect(store.getCloudRuntimeNode(forged.id)?.ownerId).toBe(alice.id);
+    expect(forged.ownerId).toBe("local");
+    expect(forged.owner_id).toBe("local");
+    expect(store.getCloudRuntimeNode(forged.id)?.ownerId).toBe("local");
 
     const queries = [
       "",
@@ -212,13 +208,14 @@ describe("MUL-290 independent adversarial QA", () => {
     for (const query of queries) {
       const response = await app.request(`${root}${query}`, { headers: aliceHeaders });
       expect(response.status, query).toBe(200);
-      const nodes = await response.json() as Array<{ ownerId: string }>;
-      expect(nodes.every((node) => node.ownerId === alice.id), query).toBe(true);
+      const nodes = await response.json() as Array<{ id: string; ownerId: string }>;
+      expect(nodes.every((node) => node.ownerId === "local" && [forged.id, second.id, third.id].includes(node.id)), query).toBe(true);
+      if (!query) expect(nodes).toHaveLength(3);
     }
-    console.log(`QA_INPUTS variants=${queries.length} forged_owner_ignored=true cross_owner_rows=0`);
+    console.log(`QA_INPUTS variants=${queries.length} forged_owner_ignored=true shared_operator_rows=3`);
   });
 
-  it("uses explicit local-workspace user links for administrator detection", async () => {
+  it("does not derive human control from historical membership ids or roles", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
     const owner = store.getOrCreateUser({ name: "Node owner", email: "qa-node-owner@example.test" });
@@ -232,16 +229,16 @@ describe("MUL-290 independent adversarial QA", () => {
     const callerHeaders = await sessionHeaders(store, caller.id);
     const node = await postNode(app, ownerHeaders, { instance_type: "qa.identity" });
 
-    const deniedList = await app.request(root, { headers: callerHeaders });
-    const deniedAction = await app.request(`${root}/start`, {
+    const sharedList = await app.request(root, { headers: callerHeaders });
+    const sharedAction = await app.request(`${root}/start`, {
       method: "POST",
       headers: callerHeaders,
       body: JSON.stringify({ nodeId: node.id }),
     });
-    expect(deniedList.status).toBe(200);
-    expect(await deniedList.json()).toEqual([]);
-    expect(deniedAction.status).toBe(404);
-    expect(store.getCloudRuntimeNode(node.id)).toMatchObject(node);
+    expect(sharedList.status).toBe(200);
+    expect(await sharedList.json()).toEqual([node]);
+    expect(sharedAction.status).toBe(200);
+    expect(store.getCloudRuntimeNode(node.id)).toMatchObject({ id: node.id, ownerId: "local", status: "running" });
 
     store.createWorkspaceMember({ workspaceId: "local", userId: caller.id, name: caller.name, role: "admin" });
     const allowedList = await app.request(root, { headers: callerHeaders });
@@ -254,6 +251,6 @@ describe("MUL-290 independent adversarial QA", () => {
     expect((await allowedList.json() as Array<{ id: string }>).some((item) => item.id === node.id)).toBe(true);
     expect(allowedAction.status).toBe(200);
     expect(store.getCloudRuntimeNode(node.id)?.status).toBe("running");
-    console.log("QA_MEMBER_LINK forged_member_id_denied=true explicit_admin_user_link_allowed=true");
+    console.log("QA_MEMBER_LINK historical_member_id_and_role_do_not_partition_human_control=true");
   });
 });

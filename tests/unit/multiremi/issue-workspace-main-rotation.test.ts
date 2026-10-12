@@ -77,7 +77,9 @@ pendingTurnBackendTests('explicit Issue workspace Main rotation', (fixture, back
       expect(store.listTasksForIssue(issue.id)).toHaveLength(1);
       expect(store.listTasksForIssue(issue.id)[0]).toMatchObject({ agentId: targetAgent.id, workspaceId: target.id, issueSessionId: main.id });
       expect(store.listIssueActivity(issue.id).filter(entry => entry.type === 'issue_main_session_rotated')).toHaveLength(1);
-      const targetToken = await store.createAccessToken({ type: 'pat', name: 'Target reader PAT', workspaceId: target.id, userId: targetUser.id });
+      const targetToken = await store.createAccessToken({ type: 'pat', name: 'Target workspace PAT', workspaceId: target.id });
+      const humanToken = await store.createAccessToken({ type: 'pat', name: 'Shared human reader', workspaceId: target.id, userId: targetUser.id });
+      expect((await app.request(`/api/sessions/${sourceMain.id}/messages`, { headers: { Authorization: `Bearer ${humanToken.token}` } })).status).toBe(200);
       const targetHeaders = { Authorization: `Bearer ${targetToken.token}` };
       for (const path of [`/api/multiremi/issues/${issue.id}`, `/api/issues/${issue.id}/sessions?include_archived=true`,
         `/api/issues/${issue.id}/timeline`, `/api/issues/${issue.id}/timeline?limit=100`, `/api/issues/${issue.id}/deliveries`]) {
@@ -139,7 +141,7 @@ pendingTurnBackendTests('explicit Issue workspace Main rotation', (fixture, back
     expect(db.query('SELECT workspace_id,member_id FROM multiremi_member_inbox_records WHERE id=?').get(sourceMessage.id))
       .toEqual({ workspace_id: 'local', member_id: 'mem_local_local' });
     expect(db.query('SELECT workspace_id,member_id FROM multiremi_member_inbox_records WHERE id=?').get(chatMessage.id))
-      .toEqual({ workspace_id: target.id, member_id: human.id });
+      .toEqual({ workspace_id: target.id, member_id: store.getWorkspaceOperator(target.id)!.id });
     expect(store.listMessageInbox('mem_local_local', 'local').items.map(message => message.id)).toContain(sourceMessage.id);
     expect(store.listMessageInbox(human.id, target.id).items.map(message => message.id)).toContain(chatMessage.id);
     expect(log()).toEqual(before);
@@ -524,7 +526,7 @@ pendingTurnBackendTests('explicit Issue workspace Main rotation', (fixture, back
     const human = store.createWorkspaceMember({ workspaceId: target.id, userId: user.id, name: 'Destination human', role: 'owner' });
     store.updateIssue(issue.id, { workspaceId: target.id, responsibleMemberId: human.id, actorType: 'member', actorId: 'mem_local_local' });
     const sourceToken = await store.createAccessToken({ type: 'pat', name: 'Source history reader', workspaceId: 'local', userId: 'local' });
-    const targetToken = await store.createAccessToken({ type: 'pat', name: 'Destination reader', workspaceId: target.id, userId: user.id });
+    const targetToken = await store.createAccessToken({ type: 'pat', name: 'Destination workspace reader', workspaceId: target.id });
     const sourceHeaders = { Authorization: `Bearer ${sourceToken.token}` }, targetHeaders = { Authorization: `Bearer ${targetToken.token}` };
     const app = createMultiremiApp({ store, authToken: 'attachment-origin-master', shareSecret: 'attachment-origin-share' });
     for (const attachment of oldAttachments) {

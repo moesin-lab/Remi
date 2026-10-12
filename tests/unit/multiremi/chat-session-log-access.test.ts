@@ -9,7 +9,7 @@ import { createLocalStore, db, resetMultiremiTestEnv, signTestJwt } from "./help
 afterEach(resetMultiremiTestEnv);
 
 for (const linked of [false, true]) {
-  it(`keeps ${linked ? "Issue-linked" : "independent"} Chat work Session logs private across HTTP and stream readers`, async () => {
+  it(`shares ${linked ? "Issue-linked" : "independent"} Chat work Session logs across human HTTP and stream readers`, async () => {
     const store = createLocalStore();
     for (const [userId, role] of [["alice", "member"], ["bob", "admin"]] as const) {
       store.createWorkspaceMember({ workspaceId: "local", userId, name: userId, role });
@@ -28,30 +28,30 @@ for (const linked of [false, true]) {
       for (const path of [`/api/sessions/${session.id}`, `/api/sessions/${session.id}/log?before=10`,
         `/api/sessions/${session.id}/log/entry?seq=1`, `/api/sessions/${session.id}/log/locate?id=missing`]) {
         const response = await app.request(path, { headers: { Authorization: `Bearer ${token.token}` } });
-        if (userId === "bob") expect(response.status).toBe(403);
-        else expect([200, 404]).toContain(response.status);
+        expect(response.status, path).toBe(path.includes("/locate?") || linked && path.includes("/entry?") ? 404 : 200);
       }
-      const subject = { userId, workspaceId: "local" };
+      const subject = { userId: "local", workspaceId: "local" };
       const facts = await reader.logFacts(session.id, subject);
       expect(facts.ok).toBe(true);
       if (!facts.ok) throw new Error("facts unavailable");
-      const sqlFacts = logFactsFromRow(db!.query(LOG_STREAM_FACTS_SQL).get(userId, session.id, userId, session.id) as any);
+      const sqlFacts = logFactsFromRow(db!.query(LOG_STREAM_FACTS_SQL).get(subject.userId, session.id, subject.userId, session.id) as any);
       expect(sqlFacts).toEqual(facts.facts);
-      expect(decideLogSubscription(subject, sqlFacts).ok).toBe(userId === "alice");
+      expect(decideLogSubscription(subject, sqlFacts).ok).toBe(true);
+      expect(decideLogSubscription({ ...subject, workspaceId: "other" }, sqlFacts).ok).toBe(false);
     }
     store.updateAgent(agent.id, { visibility: "private", ownerId: "bob" });
-    const subject = { userId: "alice", workspaceId: "local" };
-    const sqlFacts = logFactsFromRow(db!.query(LOG_STREAM_FACTS_SQL).get("alice", session.id, "alice", session.id) as any);
-    expect(decideLogSubscription(subject, sqlFacts).ok).toBe(false);
+    const subject = { userId: "local", workspaceId: "local" };
+    const sqlFacts = logFactsFromRow(db!.query(LOG_STREAM_FACTS_SQL).get(subject.userId, session.id, subject.userId, session.id) as any);
+    expect(decideLogSubscription(subject, sqlFacts).ok).toBe(true);
     const facts = await reader.logFacts(session.id, subject);
-    expect(facts.ok && decideLogSubscription(subject, facts.facts).ok).toBe(false);
+    expect(facts.ok && decideLogSubscription(subject, facts.facts).ok).toBe(true);
     const alice = await store.createAccessToken({ name: "restricted owner", type: "pat", workspaceId: "local", userId: "alice" });
     for (const logId of [chat.id, session.id]) {
       for (const suffix of ["log?before=10", "log/entry?seq=1", "log/locate?id=missing"]) {
         const response = await app.request(`/api/sessions/${logId}/${suffix}`, {
           headers: { Authorization: `Bearer ${alice.token}` },
         });
-        expect(response.status).toBe(403);
+        expect([200, 404]).toContain(response.status);
       }
     }
   });
@@ -346,7 +346,7 @@ for (const mismatch of ["task", "token"] as const) it(`authentication rejects an
   }
 });
 
-for (const credentialType of ["pat", "jwt"] as const) it(`human ${credentialType} log access remains creator-scoped`, async () => {
+for (const credentialType of ["pat", "jwt"] as const) it(`human ${credentialType} log access uses the shared operator independently of historical membership`, async () => {
   const f = fixture();
   const own = await ownChat(f);
   const tokenFor = async (userId: string) => credentialType === "jwt"
@@ -359,13 +359,12 @@ for (const credentialType of ["pat", "jwt"] as const) it(`human ${credentialType
   const to = f.store.getConversationLogHead(own.chat.id)!.headSeq;
   for (const path of logPaths(own.chat.id, own.first.message.id, to)) {
     expect((await f.app.request(path, { headers: { Authorization: `Bearer ${ownerToken}` } })).status).toBe(200);
-    const denied = await f.app.request(path, { headers: { Authorization: `Bearer ${strangerToken}` } });
-    expect(denied.status).toBe(403);
-    expect(await denied.json()).toEqual({ error: "not your chat session" });
+    const shared = await f.app.request(path, { headers: { Authorization: `Bearer ${strangerToken}` } });
+    expect(shared.status).toBe(200);
   }
   db!.run("DELETE FROM multiremi_workspace_members WHERE workspace_id = ? AND user_id = ?", ["local", other.id]);
   for (const path of logPaths(own.chat.id, own.first.message.id, to)) {
-    expect((await f.app.request(path, { headers: { Authorization: `Bearer ${strangerToken}` } })).status).toBe(404);
+    expect((await f.app.request(path, { headers: { Authorization: `Bearer ${strangerToken}` } })).status).toBe(200);
   }
   expect(f.store.getSessionAgentReadProgress(own.chat.id, f.agent.id)).toEqual({ seq: 0, offset: 0 });
 });

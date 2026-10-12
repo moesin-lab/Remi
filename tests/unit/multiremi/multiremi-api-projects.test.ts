@@ -243,7 +243,7 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
       instructions: "Use Bun.\nRun focused tests.",
       deltaInstructions: "Review new comments.\nKeep context compact.",
       instructionsRevision: 1,
-      instructionsUpdatedBy: userId,
+      instructionsUpdatedBy: "local",
     });
     expect(createdBody.project.instructionsUpdatedAt).toBeString();
 
@@ -254,7 +254,7 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
       delta_instructions: "Review new comments.\nKeep context compact.",
       instructions_revision: 1,
       instructions_updated_at: createdBody.project.instructionsUpdatedAt,
-      instructions_updated_by: userId,
+      instructions_updated_by: "local",
     });
 
     const missingExpectedRevision = await app.request(`/api/multiremi/projects/${createdBody.project.id}`, {
@@ -323,7 +323,7 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
       instructions: "Prefer focused tests.",
       deltaInstructions: "Read only the latest delta.",
       instructionsRevision: 2,
-      instructionsUpdatedBy: userId,
+      instructionsUpdatedBy: "local",
     });
 
     const expectedConflict = {
@@ -402,7 +402,7 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
       instructions: "Ship carefully.",
       instructions_revision: 1,
       instructions_updated_at: expect.any(String),
-      instructions_updated_by: userId,
+      instructions_updated_by: "local",
     });
 
     const tooLongCreate = await app.request("/api/multiremi/projects", {
@@ -463,8 +463,11 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
     });
     const taskToken = await store.createTaskAccessToken(task, "local");
     const app = createMultiremiApp({ store, authToken: "root-secret" });
+    const workspaceToken = await store.createAccessToken({
+      name: "Local workspace credential", type: "pat", workspaceId: "local", userId: "local",
+    });
     const outsiderHeaders = {
-      Authorization: `Bearer ${outsiderToken.token}`,
+      Authorization: `Bearer ${workspaceToken.token}`,
       "Content-Type": "application/json",
     };
     const taskHeaders = {
@@ -476,6 +479,7 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
       `/api/multiremi/projects/${project.id}`,
       `/api/projects/${project.id}`,
     ]) {
+      expect((await app.request(path, { headers: { Authorization: `Bearer ${outsiderToken.token}` } })).status).toBe(200);
       expect((await app.request(path, { headers: outsiderHeaders })).status).toBe(404);
     }
     expect((await app.request(`/api/multiremi/projects/${project.id}`, {
@@ -599,6 +603,7 @@ describe("Multiremi API — projects, squads, and workspace objects", () => {
       payload: { project: { id: projectBody.id, workspace_id: "local", lead_type: "agent", lead_id: agent.id } },
     });
 
+    store.createWorkspace({ id: "remote", name: "Remote", slug: "remote" });
     const remoteProject = store.createProject({ title: "Remote Compatibility Project", workspaceId: "remote" });
     const projectListBody = await (await app.request("/api/projects")).json();
     expect(projectListBody.projects[0].id).toBe(projectBody.id);

@@ -266,7 +266,7 @@ describe("Multiremi store — task message ingress, completion, and capacity", (
     const agent = store.createAgent({ name: "Diagram Bot", provider: "claude", runtimeId: runtime.id });
     // Production shape: the request identity is a user id ("local"), while the
     // workspace member row is keyed mem_<ws>_<userId> with a user_id link.
-    store.createWorkspaceMember({ id: "mem_local_local", userId: "local", name: "贺华杰", workspaceId: "local" });
+    expect(store.getWorkspaceOperator("local")?.id).toBe("mem_local_local");
     const issue = createResponsibleTestIssue(store, { title: "架构图", workspaceId: "local", createdBy: "local" });
 
     const subscribersAfterCreate = store.listIssueSubscribers(issue.id);

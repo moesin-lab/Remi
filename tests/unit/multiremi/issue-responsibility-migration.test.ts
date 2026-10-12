@@ -59,12 +59,12 @@ pendingTurnBackendTests('explicit responsibility migration and authenticated sou
     const headers={Authorization:`Bearer ${pat.token}`,'Content-Type':'application/json'};
     const rootResponse=await app.request('/api/issues',{method:'POST',headers,body:JSON.stringify({title:'Human root',created_by:other.id})});
     expect(rootResponse.status).toBe(201);const root=await rootResponse.json();
-    expect(store.getIssue(root.id)?.responsibleMemberId).toBe(member.id);expect(store.getIssue(root.id)?.createdBy).toBe(user.id);
+    expect(store.getIssue(root.id)?.responsibleMemberId).toBe('mem_local_local');expect(store.getIssue(root.id)?.createdBy).toBe('local');
     const child=await app.request('/api/issues',{method:'POST',headers,body:JSON.stringify({title:'Inherited child',parent_issue_id:root.id,responsible_member_id:other.id})});
     expect(child.status).toBe(400);expect(await child.text()).toContain('inherited');
     const validChild=await app.request('/api/issues',{method:'POST',headers,body:JSON.stringify({title:'Inherited child',parent_issue_id:root.id})});
     expect(validChild.status).toBe(201);const childBody=await validChild.json();expect(store.getIssue(childBody.id)?.responsibleMemberId).toBeNull();
-    expect(store.resolveIssueResponsibility(childBody.id).rootHuman?.id).toBe(member.id);
+    expect(store.resolveIssueResponsibility(childBody.id).rootHuman?.id).toBe('mem_local_local');
     const agent=store.createAgent({name:'Task migration caller',provider:'codex'});
     const task=store.createTask({agentId:agent.id,issueId:root.id,prompt:'Try mapping'});
     const token=await store.createTaskAccessToken(task,user.id);
@@ -76,8 +76,8 @@ pendingTurnBackendTests('explicit responsibility migration and authenticated sou
     for(const path of ['/api/issues','/api/multiremi/issues']) {
       const wrong=await app.request(path,{method:'POST',headers:taskHeaders,body:JSON.stringify({title:'Forged responsibility',responsible_member_id:other.id,createdByType:'member',created_by_type:'member',created_by:'local'})});
       expect(wrong.status).toBe(403);
-      const same=await app.request(path,{method:'POST',headers:taskHeaders,body:JSON.stringify({title:'Same verified responsibility',responsible_member_id:member.id,createdByType:'member',created_by_type:'member',created_by:'local'})});
-      expect(same.status).toBe(201);const body=await same.json();expect(store.getIssue(body.issue?.id??body.id)?.responsibleMemberId).toBe(member.id);expect(store.getIssue(body.issue?.id??body.id)?.createdBy).not.toBe('local');
+      const same=await app.request(path,{method:'POST',headers:taskHeaders,body:JSON.stringify({title:'Same verified responsibility',responsible_member_id:'mem_local_local',createdByType:'member',created_by_type:'member',created_by:'local'})});
+      expect(same.status).toBe(201);const body=await same.json();expect(store.getIssue(body.issue?.id??body.id)?.responsibleMemberId).toBe('mem_local_local');expect(store.getIssue(body.issue?.id??body.id)?.createdBy).not.toBe('local');
     }
     const changed=await app.request(`/api/issues/${root.id}`,{method:'PATCH',headers:taskHeaders,body:JSON.stringify({responsible_member_id:other.id})});expect(changed.status).toBe(403);
     const differentRoot=f.createIssue({title:'Different confirmed root',responsibleMemberId:other.id,assigneeType:'agent',assigneeId:agent.id});
@@ -125,16 +125,16 @@ pendingTurnBackendTests('explicit responsibility migration and authenticated sou
     expect(store.getQuestion(id)?.route_revision).toBe(1);expect(store.getMessage(id)?.card_token_hash).toBe('legacy-card');
     const mapped=await map(mappings);expect(mapped.status).toBe(200);
     expect(store.getIssue(root.id)?.responsibleMemberId).toBe(human.id);expect(store.getIssue(other.id)?.responsibleMemberId).toBe(human.id);
-    expect(store.getQuestion(id)?.current_handler).toEqual({type:'member',id:human.id});expect(store.getQuestion(id)?.route_revision).toBe(2);
-    expect(store.getQuestion(id)?.history.findLast(event=>event.reason==='issue_responsibility_transferred')?.actor).toEqual({type:'member',id:admin.id});
+    expect(store.getQuestion(id)?.current_handler).toEqual({type:'member',id:'mem_local_local'});expect(store.getQuestion(id)?.route_revision).toBe(2);
+    expect(store.getQuestion(id)?.history.findLast(event=>event.reason==='issue_responsibility_transferred')?.actor).toEqual({type:'member',id:'mem_local_local'});
     expect(store.getMessage(id)?.card_token_hash).toBeNull();expect(store.getMessage(id)?.session_id).toBe(original.session_id);expect(store.getMessage(id)?.task_id).toBe(original.task_id);
-    expect(store.listIssueActivity(root.id).find(item=>(item.data as {migration?:boolean})?.migration)?.actorId).toBe(admin.id);
+    expect(store.listIssueActivity(root.id).find(item=>(item.data as {migration?:boolean})?.migration)?.actorId).toBe('mem_local_local');
     const readerUser=store.getOrCreateUser({email:'migration-ordinary-reader@example.test',name:'Ordinary workspace human'});
     store.createWorkspaceMember({userId:readerUser.id,name:'Ordinary workspace human',role:'member'});
     const readerToken=await store.createAccessToken({userId:readerUser.id,name:'Ordinary member login',type:'pat',purpose:'session'});
     const readerHeaders={...headers,Authorization:`Bearer ${readerToken.token}`};
-    expect((await app.request('/api/workspaces/local/issue-responsibility-migration',{headers:readerHeaders})).status).toBe(403);
-    expect((await app.request('/api/workspaces/local/issue-responsibility-migration/map',{method:'POST',headers:readerHeaders,body:JSON.stringify({reason:'Ordinary member cannot administer mapping',mappings})})).status).toBe(403);
+    expect((await app.request('/api/workspaces/local/issue-responsibility-migration',{headers:readerHeaders})).status).toBe(200);
+    expect((await app.request('/api/workspaces/local/issue-responsibility-migration/map',{method:'POST',headers:readerHeaders,body:JSON.stringify({reason:'Shared operator still cannot reuse a stale mapping',mappings})})).status).toBe(409);
     f.reopen();expect(f.store.getQuestion(id)?.route_revision).toBe(2);expect(f.store.getMessage(id)?.session_id).toBe(original.session_id);
   });
   it('keeps native and compat reassignment transactional and rolls dispatch failures back',async()=>{
@@ -218,7 +218,7 @@ pendingTurnBackendTests('explicit responsibility migration and authenticated sou
     f.reopen();
     const upgraded=f.databaseUrl?f.store:new (f.store.constructor as typeof import('@multiremi/store.js').MultiremiStore)(f.db);
     expect(upgraded.getIssue(issue.id)?.responsibleMemberId).toBeNull();
-    expect(upgraded.listIssueResponsibilityMigration('local').items[0]?.candidates).toContainEqual({memberId:'mem_local_local',name:'Local User',source:'historical_creator',available:true});
+    expect(upgraded.listIssueResponsibilityMigration('local').items[0]?.candidates).toContainEqual({memberId:'mem_local_local',name:'Operator',source:'historical_creator',available:true});
     expect(upgraded.getIssueComment(comment.id)?.body).toBe('Snapshot evidence');
     expect(upgraded.listIssueResponsibilityMigration('local').total).toBe(1);
   });
@@ -269,7 +269,7 @@ pendingTurnBackendTests('explicit responsibility migration and authenticated sou
     const taskToken=await store.createTaskAccessToken(task,'local');
     const request=(token:string)=>app.request(path,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({title:'Human-approved external Issue',createdBy:'local',created_by:'local'})});
     expect((await request(taskToken.token)).status).toBe(403);
-    const response=await request(pat.token);expect(response.status).toBe(201);const body=await response.json();expect(store.getIssue(body.issue.id)?.responsibleMemberId).toBe(human.id);expect(store.getIssue(body.issue.id)?.createdBy).toBe(humanUser.id);
+    const response=await request(pat.token);expect(response.status).toBe(201);const body=await response.json();expect(store.getIssue(body.issue.id)?.responsibleMemberId).toBe('mem_local_local');expect(store.getIssue(body.issue.id)?.createdBy).toBe('local');
     expect((await request(pat.token)).status).toBe(200);expect(store.listIssues()).toHaveLength(1);
   });
 });

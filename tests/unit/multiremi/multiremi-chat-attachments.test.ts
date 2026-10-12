@@ -65,7 +65,7 @@ function sendForm(files: File[], content = "") {
 }
 
 
-  it("links inbound bytes before claim, serves CJK filenames to only that Chat task, and retains active steer attachments", async () => {
+  it("links inbound bytes before claim, shares CJK files with humans while binding task access, and retains active steer attachments", async () => {
     const f = await fixture();
     const response = await f.upload();
     expect(response.status).toBe(201);
@@ -99,7 +99,7 @@ function sendForm(files: File[], content = "") {
     for (const method of ["GET", "HEAD"]) {
       for (const [token, status] of [
         [credential.token, 200], [otherCredential.token, 404], [foreignCredential.token, 404],
-        [creatorCredential.token, 200], [peerCredential.token, 403],
+        [creatorCredential.token, 200], [peerCredential.token, 200],
       ] as const) {
         expect((await f.app.request(`/api/attachments/${attachment.id}/download`, {
           method, headers: { Authorization: `Bearer ${token}` },
@@ -186,7 +186,7 @@ function sendForm(files: File[], content = "") {
     expect(Number(db!.query("SELECT COUNT(*) AS n FROM multiremi_attachments").get().n)).toBe(0);
     expect(Number(db!.query("SELECT COUNT(*) AS n FROM multiremi_feishu_bot_outbound_deliveries").get().n)).toBe(0);
     expect(existsSync(uploadRoot()) ? readdirSync(uploadRoot(), { recursive: true }) : []).toHaveLength(0);
-    expect((await send([new File(["x"], "x.html")], "MASTER")).status).toBe(403);
+    expect((await send([new File(["x"], "x.html")], "MASTER")).status).toBe(200);
     const nonChat = f.store.createTask({ agentId: f.agent.id, prompt: "issue task" });
     const nonChatToken = await f.store.createTaskAccessToken(nonChat, "local");
     expect((await send([new File(["x"], "x.html")], nonChatToken.token)).status).toBe(403);

@@ -198,7 +198,8 @@ for (const dialect of ["sqlite", "postgres"] as const) {
               store.grantParentDone(parent.id, "local");
               store.createIssueComment(parent.id, { body: "Final parent summary", authorType: "agent", authorId: ownerId });
               const prepared=prepareTestIssueDelivery(store,parent.id);
-              store.authorizeIssueDelivery(parent.id,prepared.delivery.id,ownerId,prepared.delivery.responsibilityRevision,prepared.actor);
+              store.authorizeIssueDelivery(parent.id,prepared.delivery.id,ownerId,prepared.delivery.responsibilityRevision,
+                {type:'member',id:store.resolveIssueResponsibility(parent.id).rootHuman!.id});
               // Both competing status writers must perform a real transition;
               // submitting the concrete report already parked this parent at in_review.
               store.updateIssue(parent.id,{status:'in_progress'});

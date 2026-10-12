@@ -172,6 +172,13 @@ export function humanRequestActor(c: Context): { memberId: string } | null {
 }
 
 export function denyRestrictedTaskIssueCreation(c: Context, store: MultiremiStore): Response | null {
+  // Source integrity is required even when no optional human contact is inherited.
+  if (currentTaskAccessToken(c) && !taskIssueCreationSource(c, store)) {
+    return c.json({
+      error: 'The Task source Session must match its current workspace and product owner',
+      code: 'issue_creation_source_invalid',
+    }, 403);
+  }
   const code = currentTaskIssueCreationRestrictionCode(c, store);
   if (!code) return null;
   return c.json({

@@ -15,6 +15,11 @@ import { createLocalStore as createStore, db, metricValue, resetMultiremiTestEnv
 
 afterEach(resetMultiremiTestEnv);
 
+async function expectRetired(response: Response, code = "workspace_members_retired") {
+  expect(response.status).toBe(410);
+  expect(await response.json()).toMatchObject({ code, error: expect.any(String) });
+}
+
 describe("Multiremi API — Go server compatibility endpoints", () => {
   it("includes the direct blocker on queued Issue task responses", async () => {
     const store = createStore();
@@ -536,8 +541,7 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ role: "admin" }),
     });
-    expect(lastOwnerDemote.status).toBe(400);
-    expect(await lastOwnerDemote.json()).toEqual({ error: "workspace must have at least one owner" });
+    await expectRetired(lastOwnerDemote);
 
     const backupOwner = store.createWorkspaceMember({
       workspaceId: createdBody.id,
@@ -550,41 +554,27 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: "Ignored by Go role contract" }),
     });
-    expect(missingRoleUpdate.status).toBe(400);
-    expect(await missingRoleUpdate.json()).toEqual({ error: "role is required" });
+    await expectRetired(missingRoleUpdate);
 
     const invalidRoleUpdate = await app.request(`/api/workspaces/${encodeURIComponent(createdBody.id)}/members/${encodeURIComponent(membersBody[0].id)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ role: "reviewer" }),
     });
-    expect(invalidRoleUpdate.status).toBe(400);
-    expect(await invalidRoleUpdate.json()).toEqual({ error: "invalid member role" });
+    await expectRetired(invalidRoleUpdate);
 
     const updatedMember = await app.request(`/api/workspaces/${encodeURIComponent(createdBody.id)}/members/${encodeURIComponent(membersBody[0].id)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ role: "admin" }),
     });
-    expect(updatedMember.status).toBe(200);
-    const updatedMemberBody = await updatedMember.json();
-    expect(updatedMemberBody).toMatchObject({
-      id: membersBody[0].id,
-      workspace_id: createdBody.id,
-      user_id: "local",
-      role: "admin",
-      name: expect.any(String),
-      email: "local@multiremi.local",
-      avatar_url: null,
-    });
-    expect(updatedMemberBody.workspaceId).toBeUndefined();
-    expect(updatedMemberBody.createdAt).toBeUndefined();
+    await expectRetired(updatedMember);
+    expect(store.getWorkspaceMember(membersBody[0].id)?.role).toBe('owner');
 
     const deleteOnlyOwner = await app.request(`/api/workspaces/${encodeURIComponent(createdBody.id)}/members/${encodeURIComponent(backupOwner.id)}`, {
       method: "DELETE",
     });
-    expect(deleteOnlyOwner.status).toBe(403);
-    expect(await deleteOnlyOwner.json()).toEqual({ error: "insufficient permissions" });
+    await expectRetired(deleteOnlyOwner);
 
     const githubConnect = await app.request(`/api/workspaces/${encodeURIComponent(createdBody.id)}/github/connect`);
     expect(githubConnect.status).toBe(404);
@@ -594,10 +584,12 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
     const deletedMember = await app.request(`/api/workspaces/${encodeURIComponent(createdBody.id)}/members/${encodeURIComponent(membersBody[0].id)}`, {
       method: "DELETE",
     });
-    expect(deletedMember.status).toBe(204);
+    await expectRetired(deletedMember);
+    expect(store.getWorkspaceMember(membersBody[0].id)?.archivedAt).toBeNull();
+    expect(store.getWorkspaceMember(backupOwner.id)?.archivedAt).toBeNull();
 
     const invitations = await app.request("/api/invitations");
-    expect(await invitations.json()).toEqual([]);
+    await expectRetired(invitations, "workspace_invitations_retired");
   });
 
   it("serves workspace, runtime, auth, webhook, and setup compatibility fallbacks", async () => {
@@ -619,15 +611,15 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ member_id: `mem_${workspace.id}_local` }),
     });
-    expect(leave.status).toBe(400);
-    expect(await leave.json()).toEqual({ error: "workspace must have at least one owner" });
+    await expectRetired(leave);
     store.createWorkspaceMember({ workspaceId: workspace.id, name: "Leave Backup Owner", email: "leave-owner@example.com", role: "owner" });
     const leaveWithBackup = await app.request(`/api/workspaces/${workspace.id}/leave`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ member_id: `mem_${workspace.id}_local` }),
     });
-    expect(leaveWithBackup.status).toBe(204);
+    await expectRetired(leaveWithBackup);
+    expect(store.getWorkspaceMember(`mem_${workspace.id}_local`)?.archivedAt).toBeNull();
 
     const sentCode = await app.request("/auth/send-code", {
       method: "POST",
@@ -674,7 +666,7 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
     delete process.env.MULTIREMI_ALLOW_EMAIL_CODE_LOGIN;
   });
 
-  it("serves local workspace invitation compatibility endpoints", async () => {
+  it("keeps retired invitation compatibility endpoints inert for pending and expired history", async () => {
     const store = createStore();
     const app = createMultiremiApp({ store });
     const workspace = store.createWorkspace({ name: "Invite Team", slug: "invite-team" });
@@ -684,41 +676,34 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ role: "member" }),
     });
-    expect(invalid.status).toBe(400);
+    await expectRetired(invalid);
 
     const created = await app.request(`/api/workspaces/${workspace.id}/members`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: "teammate@example.com", role: "admin" }),
     });
-    const createdBody = await created.json();
-    expect(created.status).toBe(201);
-    expect(createdBody).toMatchObject({
-      workspace_id: workspace.id,
-      inviter_id: "local",
-      invitee_email: "teammate@example.com",
-      role: "admin",
-      status: "pending",
-      workspace_name: "Invite Team",
-      inviter_email: "local@multiremi.local",
-    });
+    await expectRetired(created);
+    // Seed a persisted invitation from the old release, not through the retired API.
+    const createdBody = store.createWorkspaceInvitation(workspace.id, {email:'teammate@example.com',role:'admin'});
+    const originalInvitation = store.getInvitation(createdBody.id);
 
     const duplicate = await app.request(`/api/workspaces/${workspace.id}/members`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: "teammate@example.com", role: "member" }),
     });
-    expect(duplicate.status).toBe(409);
+    await expectRetired(duplicate);
 
     const workspaceInvitations = await app.request(`/api/workspaces/${workspace.id}/invitations`);
-    const workspaceInvitationsBody = await workspaceInvitations.json();
-    expect(workspaceInvitationsBody[0].id).toBe(createdBody.id);
+    await expectRetired(workspaceInvitations, "workspace_invitations_retired");
 
     const fetched = await app.request(`/api/invitations/${createdBody.id}`);
-    expect((await fetched.json()).invitee_email).toBe("teammate@example.com");
+    await expectRetired(fetched, "workspace_invitations_retired");
 
     const revoked = await app.request(`/api/workspaces/${workspace.id}/invitations/${createdBody.id}`, { method: "DELETE" });
-    expect(revoked.status).toBe(204);
+    await expectRetired(revoked, "workspace_invitations_retired");
+    expect(store.getInvitation(createdBody.id)).toEqual(originalInvitation);
 
     db!.run(
       `INSERT INTO multiremi_workspace_invitations (
@@ -727,15 +712,14 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
       ["inv_stale_pending", workspace.id, "2026-06-04T00:00:00.000Z", "2026-05-28T00:00:00.000Z", "2026-05-28T00:00:00.000Z"],
     );
     const pendingWithoutExpired = await app.request(`/api/workspaces/${workspace.id}/invitations`);
-    expect((await pendingWithoutExpired.json()).map((invitation: any) => invitation.id)).not.toContain("inv_stale_pending");
+    await expectRetired(pendingWithoutExpired, "workspace_invitations_retired");
     const reinvitedAfterExpiry = await app.request(`/api/workspaces/${workspace.id}/members`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: "expired@example.com", role: "member" }),
     });
-    expect(reinvitedAfterExpiry.status).toBe(201);
-    expect(store.getInvitation("inv_stale_pending")?.status).toBe("expired");
-    expect((await reinvitedAfterExpiry.json()).status).toBe("pending");
+    await expectRetired(reinvitedAfterExpiry);
+    expect(store.getInvitation("inv_stale_pending")?.status).toBe("pending");
 
     db!.run(
       `INSERT INTO multiremi_workspaces (
@@ -772,36 +756,32 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
       ) VALUES ('inv_expired_accept', 'ws_external_invite', 'local', 'local@multiremi.local', 'local', 'member', 'pending', '2026-06-04T00:00:00.000Z', '2026-05-28T00:00:00.000Z', '2026-05-28T00:00:00.000Z')`,
     );
     const expiredAccept = await app.request("/api/invitations/inv_expired_accept/accept", { method: "POST" });
-    expect(expiredAccept.status).toBe(410);
-    expect(await expiredAccept.json()).toEqual({ error: "invitation has expired" });
+    await expectRetired(expiredAccept, "workspace_invitations_retired");
+    expect(store.getInvitation("inv_expired_accept")?.status).toBe("pending");
 
     const acceptInvite = await authedApp.request("/api/workspaces/ws_external_invite/members", {
       method: "POST",
       headers: authedJsonHeaders(externalAdminToken.token),
       body: JSON.stringify({ email: "local@multiremi.local", role: "member" }),
     });
-    const acceptInviteBody = await acceptInvite.json();
+    await expectRetired(acceptInvite);
+    const acceptInviteBody = store.createWorkspaceInvitation('ws_external_invite', {email:'local@multiremi.local',role:'member'});
+    const beforeAcceptMembers = store.listWorkspaceMembers('ws_external_invite', {includeArchived:true});
     const myInvites = await authedApp.request("/api/invitations", { headers: authedHeaders(localInviteeToken.token) });
-    expect((await myInvites.json())[0].id).toBe(acceptInviteBody.id);
+    await expectRetired(myInvites, "workspace_invitations_retired");
 
     const accepted = await authedApp.request(`/api/invitations/${acceptInviteBody.id}/accept`, {
       method: "POST",
       headers: authedHeaders(localInviteeToken.token),
     });
-    expect(accepted.status).toBe(200);
-    const acceptedBody = await accepted.json();
-    expect(acceptedBody).toMatchObject({
-      workspace_id: "ws_external_invite",
-      user_id: "local",
-      role: "member",
-      name: "Local User",
-      email: "local@multiremi.local",
-      avatar_url: null,
+    await expectRetired(accepted, "workspace_invitations_retired");
+    expect(store.getInvitation(acceptInviteBody.id)?.status).toBe('pending');
+    expect(store.listWorkspaceMembers('ws_external_invite', {includeArchived:true})).toEqual(beforeAcceptMembers);
+    const declined = await authedApp.request(`/api/invitations/${acceptInviteBody.id}/decline`, {
+      method:'POST',headers:authedHeaders(localInviteeToken.token),
     });
-    expect(typeof acceptedBody.created_at).toBe("string");
-    expect(acceptedBody.status).toBeUndefined();
-    expect(acceptedBody.workspaceId).toBeUndefined();
-    expect(store.listWorkspaceMembers("ws_external_invite").some((member) => member.email === "local@multiremi.local")).toBe(true);
+    await expectRetired(declined, 'workspace_invitations_retired');
+    expect(store.getInvitation(acceptInviteBody.id)?.status).toBe('pending');
 
     db!.run(
       `INSERT INTO multiremi_workspace_invitations (
@@ -809,8 +789,7 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
       ) VALUES ('inv_already_member_accept', 'ws_external_invite', 'local', 'local@multiremi.local', 'local', 'member', 'pending', '2030-06-04T00:00:00.000Z', '2026-06-04T00:00:00.000Z', '2026-06-04T00:00:00.000Z')`,
     );
     const alreadyMemberAccept = await app.request("/api/invitations/inv_already_member_accept/accept", { method: "POST" });
-    expect(alreadyMemberAccept.status).toBe(409);
-    expect(await alreadyMemberAccept.json()).toEqual({ error: "you are already a member of this workspace" });
+    await expectRetired(alreadyMemberAccept, "workspace_invitations_retired");
     expect(store.getInvitation("inv_already_member_accept")?.status).toBe("pending");
 
     const existingMemberInvite = await authedApp.request("/api/workspaces/ws_external_invite/members", {
@@ -818,10 +797,10 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
       headers: authedJsonHeaders(externalAdminToken.token),
       body: JSON.stringify({ email: "local@multiremi.local", role: "admin" }),
     });
-    expect(existingMemberInvite.status).toBe(409);
+    await expectRetired(existingMemberInvite);
   });
 
-  it("gates Go-compatible workspace member and invitation mutations by actor role", async () => {
+  it("retires Go-compatible member and invitation mutations for every historical role", async () => {
     const store = createStore();
     const workspace = store.createWorkspace({ name: "Guard Team", slug: "guard-team" });
     const owner = store.getWorkspaceMember(`mem_${workspace.id}_local`)!;
@@ -857,80 +836,83 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
 
     const memberList = await app.request(`/api/workspaces/${workspace.id}/members`, { headers: authHeaders(memberToken.token) });
     expect(memberList.status).toBe(200);
+    expect((await memberList.json()).map((item:any)=>item.id)).toEqual([owner.id]);
+    const historicalMembers = store.listWorkspaceMembers(workspace.id,{includeArchived:true});
+    const history = await app.request(`/api/workspaces/${workspace.id}/members?include_history=true`,{headers:authHeaders(memberToken.token)});
+    expect((await history.json()).map((item:any)=>item.id).sort()).toEqual(historicalMembers.map(item=>item.id).sort());
 
     const memberInvite = await app.request(`/api/workspaces/${workspace.id}/members`, {
       method: "POST",
       headers: jsonHeaders(memberToken.token),
       body: JSON.stringify({ email: "member-invite@example.com", role: "member" }),
     });
-    expect(memberInvite.status).toBe(403);
-    expect(await memberInvite.json()).toEqual({ error: "insufficient permissions" });
+    await expectRetired(memberInvite, "workspace_members_retired");
 
     const adminInvite = await app.request(`/api/workspaces/${workspace.id}/members`, {
       method: "POST",
       headers: jsonHeaders(adminToken.token),
       body: JSON.stringify({ email: "admin-invite@example.com", role: "member" }),
     });
-    expect(adminInvite.status).toBe(201);
-    const adminInviteBody = await adminInvite.json();
+    await expectRetired(adminInvite, "workspace_members_retired");
+    const adminInviteBody = store.createWorkspaceInvitation(workspace.id,{email:'admin-invite@example.com',role:'member'});
 
     const memberRevoke = await app.request(`/api/workspaces/${workspace.id}/invitations/${adminInviteBody.id}`, {
       method: "DELETE",
       headers: authHeaders(memberToken.token),
     });
-    expect(memberRevoke.status).toBe(403);
-    expect(await memberRevoke.json()).toEqual({ error: "insufficient permissions" });
+    await expectRetired(memberRevoke, "workspace_invitations_retired");
 
     const memberUpdate = await app.request(`/api/workspaces/${workspace.id}/members/${target.id}`, {
       method: "PATCH",
       headers: jsonHeaders(memberToken.token),
       body: JSON.stringify({ role: "admin" }),
     });
-    expect(memberUpdate.status).toBe(403);
+    await expectRetired(memberUpdate, "workspace_members_retired");
 
     const adminPromoteOwner = await app.request(`/api/workspaces/${workspace.id}/members/${target.id}`, {
       method: "PATCH",
       headers: jsonHeaders(adminToken.token),
       body: JSON.stringify({ role: "owner" }),
     });
-    expect(adminPromoteOwner.status).toBe(403);
-    expect(await adminPromoteOwner.json()).toEqual({ error: "insufficient permissions" });
+    await expectRetired(adminPromoteOwner, "workspace_members_retired");
 
     const ownerDeleteOnlyOwner = await app.request(`/api/workspaces/${workspace.id}/members/${owner.id}`, {
       method: "DELETE",
       headers: authHeaders(ownerToken.token),
     });
-    expect(ownerDeleteOnlyOwner.status).toBe(400);
-    expect(await ownerDeleteOnlyOwner.json()).toEqual({ error: "workspace must have at least one owner" });
+    await expectRetired(ownerDeleteOnlyOwner, "workspace_members_retired");
 
     const adminDeleteOwner = await app.request(`/api/workspaces/${workspace.id}/members/${owner.id}`, {
       method: "DELETE",
       headers: authHeaders(adminToken.token),
     });
-    expect(adminDeleteOwner.status).toBe(403);
-    expect(await adminDeleteOwner.json()).toEqual({ error: "insufficient permissions" });
+    await expectRetired(adminDeleteOwner, "workspace_members_retired");
 
     const adminUpdateMember = await app.request(`/api/workspaces/${workspace.id}/members/${target.id}`, {
       method: "PATCH",
       headers: jsonHeaders(adminToken.token),
       body: JSON.stringify({ role: "admin" }),
     });
-    expect(adminUpdateMember.status).toBe(200);
+    await expectRetired(adminUpdateMember, "workspace_members_retired");
 
     const ownerRevoke = await app.request(`/api/workspaces/${workspace.id}/invitations/${adminInviteBody.id}`, {
       method: "DELETE",
       headers: authHeaders(ownerToken.token),
     });
-    expect(ownerRevoke.status).toBe(204);
+    await expectRetired(ownerRevoke, "workspace_invitations_retired");
 
     const forgedLeave = await app.request(`/api/workspaces/${workspace.id}/leave`, {
       method: "POST",
       headers: jsonHeaders(memberToken.token),
       body: JSON.stringify({ member_id: owner.id }),
     });
-    expect(forgedLeave.status).toBe(204);
+    await expectRetired(forgedLeave, "workspace_members_retired");
     expect(store.getWorkspaceMember(owner.id)?.archivedAt).toBeNull();
-    expect(store.getWorkspaceMember(plain.id)?.archivedAt).toBeString();
+    expect(store.getWorkspaceMember(plain.id)?.archivedAt).toBeNull();
+    expect(store.listWorkspaceMembers(workspace.id,{includeArchived:true})).toEqual(historicalMembers);
+    expect(store.getInvitation(adminInviteBody.id)?.status).toBe('pending');
+    // Compatibility retirement never bypasses the outer account gate.
+    expect((await app.request(`/api/workspaces/${workspace.id}/members`,{method:'POST'})).status).toBe(401);
   });
 
   it("serves config, cli token, logout, and onboarding bootstrap compatibility endpoints", async () => {
@@ -1127,7 +1109,7 @@ describe("Multiremi API — Go server compatibility endpoints", () => {
     expect(await subscribe.json()).toEqual({ subscribed: true });
     const subscribers = await app.request(`/api/issues/${issue.id}/subscribers`);
     const subscribersBody = await subscribers.json();
-    expect(subscribersBody.some((item: any) => item.user_id === member.id && item.user_type === "member")).toBe(true);
+    expect(subscribersBody.some((item: any) => item.user_id === store.getWorkspaceOperator("local")!.id && item.user_type === "member")).toBe(true);
     expect(subscribersBody[0].memberId).toBeUndefined();
     const unsubscribe = await app.request(`/api/issues/${issue.id}/unsubscribe`, {
       method: "POST",

@@ -287,17 +287,17 @@ describe("Repository Wiki snapshot restoration", () => {
     expect(f.client.writeAttempts).toBe(writes);
   });
 
-  it("enforces admin human membership and scoped publishing tasks before accessing snapshots", async () => {
+  it("shares human publishing while enforcing task scope before accessing snapshots", async () => {
     const f = await fixture();
-    const writes = f.client.writeAttempts;
     const user = f.store.getOrCreateUser({ email: "restore-member@example.test", name: "Reader" });
     f.store.createWorkspaceMember({ workspaceId: "local", userId: user.id, name: "Reader", role: "member" });
     const pat = await f.store.createAccessToken({ workspaceId: "local", userId: user.id, name: "Reader", type: "pat", purpose: "session" });
-    expect((await f.request({ targets: f.targets, dry_run: false }, pat.token)).status).toBe(403);
+    expect((await f.request({ targets: f.targets, dry_run: false }, pat.token)).status).toBe(200);
     const outsider = f.store.getOrCreateUser({ email: "restore-outsider@example.test", name: "Outsider" });
     const outsidePat = await f.store.createAccessToken({ workspaceId: "local", userId: outsider.id, name: "Outsider", type: "pat", purpose: "session" });
-    // Existing workspace middleware hides non-member workspace existence.
-    expect((await f.request({ targets: f.targets, dry_run: false }, outsidePat.token)).status).toBe(404);
+    expect((await f.request({ targets: f.targets, dry_run: false }, outsidePat.token)).status).toBe(200);
+    const writes = f.client.writeAttempts;
+    const compilationRuns = f.store.listKnowledgeCompilationRuns({ workspaceId: "local", repositoryId: "repo_restore" });
     expect((await f.request({ targets: f.targets, dry_run: false }, "invalid-token")).status).toBe(401);
     const { autopilot } = configureRepositoryWikiAutomation(f.store);
     const run = f.store.runAutopilot(autopilot.id, { source: "scm_event", repositoryId: "repo_other", dedupeKey: "repo_other:incremental_update:restore", payload: { repository_wiki_repository_id: "repo_other" } });
@@ -315,7 +315,7 @@ describe("Repository Wiki snapshot restoration", () => {
     expect(noPublish.status).toBe(403);
     expect((await noPublish.json() as any).error).toBe("knowledge publish capability is required");
     expect(f.client.writeAttempts).toBe(writes);
-    expect(f.store.listKnowledgeCompilationRuns({ workspaceId: "local", repositoryId: "repo_restore" })).toEqual([]);
+    expect(f.store.listKnowledgeCompilationRuns({ workspaceId: "local", repositoryId: "repo_restore" })).toEqual(compilationRuns);
     const scopedRun = f.store.runAutopilot(autopilot.id, { source: "scm_event", repositoryId: "repo_restore", dedupeKey: "repo_restore:incremental_update:restore", payload: { repository_wiki_repository_id: "repo_restore" } });
     const scoped = await f.store.createTaskAccessToken(f.store.getTask(scopedRun.taskId!)!, "local");
     expect((await f.request({ targets: f.targets, dry_run: false }, scoped.token)).status).toBe(200);

@@ -197,7 +197,7 @@ describe("Runtime skill directories", () => {
     expect(heartbeat.pending_local_skill_import!.root).toBe(root);
   });
 
-  it("keeps private skill directories restricted to the runtime owner within a workspace", async () => {
+  it("shares skill directory controls among human operators while preserving daemon binding", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "alice", userId: "alice", name: "Alice", role: "member" });
     store.createWorkspaceMember({ id: "bob", userId: "bob", name: "Bob", role: "admin" });
@@ -213,10 +213,14 @@ describe("Runtime skill directories", () => {
     const scanResponse = await request(`/api/runtimes/${runtime.id}/local-skills`, alice.token, { root: "/private/skills" });
     expect(scanResponse.status).toBe(200);
     const scan = await scanResponse.json();
+    const completed = store.createRuntimeLocalSkillListRequest(runtime.id, { root: "/shared/skills" });
+    store.reportRuntimeLocalSkillListResult(runtime.id, completed.id, { status: "completed", root: "/shared/skills", skills: [summary] });
     for (const prefix of ["/api/runtimes", "/api/multiremi/runtimes"]) {
-      expect((await request(`${prefix}/${runtime.id}/local-skills`, bob.token, { root: "/private/skills" })).status).toBe(403);
-      expect((await request(`${prefix}/${runtime.id}/local-skills/import`, bob.token, { scan_request_id: scan.id, skill_key: "." })).status).toBe(403);
-      expect((await app.request(`${prefix}/${runtime.id}/local-skills/${scan.id}`, { headers: { Authorization: `Bearer ${bob.token}` } })).status).toBe(403);
+      expect((await request(`${prefix}/${runtime.id}/local-skills`, bob.token, { root: "/private/skills" })).status).toBe(200);
+      expect((await request(`${prefix}/${runtime.id}/local-skills/import`, bob.token, { scan_request_id: completed.id, skill_key: "." })).status).toBe(200);
+      const sharedScan = await app.request(`${prefix}/${runtime.id}/local-skills/${scan.id}`, { headers: { Authorization: `Bearer ${bob.token}` } });
+      expect(sharedScan.status).toBe(200);
+      expect(await sharedScan.json()).toMatchObject({ id: scan.id, root: "/private/skills" });
     }
     const claim = `/api/daemon/runtimes/${runtime.id}/local-skills/claim?supports_skill_directory=true`;
     expect((await request(claim, wrongDaemon.token)).status).toBe(403);

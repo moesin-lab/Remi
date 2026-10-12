@@ -21,12 +21,14 @@
   },
   "add_member_dialog": {
     "title": "添加成员",
-    "description": "添加工作区成员或智能体到这个小队。",
+    "description": "向此小队添加工作区 Agent。",
     "label_member": "成员",
     "label_role": "角色",
     "label_optional": "（可选）",
     "placeholder_role_inline": "添加角色…",
-    "cancel": "取消"
+    "cancel": "取消",
+    "placeholder_agent": "选择 Agent",
+    "search_agents": "搜索 Agent..."
   },
   "description_dialog": {
     "title": "编辑描述",

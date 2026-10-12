@@ -79,7 +79,7 @@ describe("authenticated issue mutation actors", () => {
           expect(response.status).toBe(200);
           const body = await response.json();
           const comment = body.message;
-          expect(comment.sender_id).toBe(members[0]!.id);
+          expect(comment.sender_id).toBe(store.getWorkspaceOperator(issue.workspaceId)!.id);
           expect(comment.sender_type).toBe("member");
         }
       }
@@ -106,7 +106,7 @@ describe("authenticated issue mutation actors", () => {
     }
   });
 
-  it("preserves task agents and trusted explicit actors while binding JWT callers to their user", async () => {
+  it("preserves task agents and trusted explicit actors while binding JWT callers to the operator", async () => {
     const { app, store, workspace, issue, users, members } = await fixture();
     useUploadDir();
     const agent = store.createAgent({ workspaceId: workspace.id, name: "Worker", provider: "claude" });
@@ -114,7 +114,7 @@ describe("authenticated issue mutation actors", () => {
     const taskToken = await store.createTaskAccessToken(task, users[0]!.id);
     const cases = [
       { app, token: taskToken.token, expectedType: "agent", expectedId: agent.id },
-      { app, token: signTestJwt({ sub: users[0]!.id, exp: Math.floor(Date.now() / 1000) + 60 }), expectedType: "member", expectedId: users[0]!.id },
+      { app, token: signTestJwt({ sub: users[0]!.id, exp: Math.floor(Date.now() / 1000) + 60 }), expectedType: "member", expectedId: "local" },
       { app, token: "root-secret", expectedType: "agent", expectedId: "trusted-agent" },
       { app: createMultiremiApp({ store, authToken: null }), token: null, expectedType: "agent", expectedId: "trusted-agent" },
     ];
@@ -151,7 +151,7 @@ describe("authenticated issue mutation actors", () => {
     }
   });
 
-  it("resolves as the logged-in user and accepts an empty JSON request", async () => {
+  it("resolves as the shared operator and accepts an empty JSON request", async () => {
     const { app, issue, comment, headers, users, store, members } = await fixture();
     const invalid = await app.request(`/api/messages/${comment.id}/resolve`, {
       method: "POST", headers: headers[0], body: "{",
@@ -161,7 +161,7 @@ describe("authenticated issue mutation actors", () => {
       method: "POST", headers: headers[0],
     });
     expect(response.status).toBe(200);
-    expect((await response.json()).message).toMatchObject({ resolved_by_type: "member", resolved_by_id: users[0]!.id });
+    expect((await response.json()).message).toMatchObject({ resolved_by_type: "member", resolved_by_id: "local" });
     for (const prefix of ["/api", "/api/multiremi"]) {
       const thread = store.createIssueComment(issue.id, { body: "Another thread", authorType: "member", authorId: users[0]!.id });
       const forged = await app.request(`/api/messages/${thread.id}/resolve`, {
@@ -171,12 +171,12 @@ describe("authenticated issue mutation actors", () => {
       expect(forged.status).toBe(200);
       const body = await forged.json();
       const resolved = body.message;
-      expect(resolved.resolved_by_id).toBe(users[1]!.id);
+      expect(resolved.resolved_by_id).toBe("local");
       expect(resolved.resolvedByType ?? resolved.resolved_by_type).toBe("member");
     }
   });
 
-  it("uses the authenticated uploader for both native attachment creation routes", async () => {
+  it("uses the shared operator for both native attachment creation routes", async () => {
     const { app, issue, workspace, users, headers, members } = await fixture();
     for (const endpoint of ["/api/multiremi/attachments", `/api/multiremi/issues/${issue.id}/attachments`]) {
       const response = await app.request(endpoint, {
@@ -187,11 +187,11 @@ describe("authenticated issue mutation actors", () => {
         }),
       });
       expect(response.status).toBe(201);
-      expect((await response.json()).attachment).toMatchObject({ uploaderType: "member", uploaderId: users[0]!.id });
+      expect((await response.json()).attachment).toMatchObject({ uploaderType: "member", uploaderId: "local" });
     }
   });
 
-  it("attributes uploads to their authenticated owner, who can delete them", async () => {
+  it("shares uploaded files across authenticated accounts", async () => {
     const { app, issue, users, headers, members } = await fixture();
     useUploadDir();
     const form = new FormData();
@@ -204,16 +204,16 @@ describe("authenticated issue mutation actors", () => {
     });
     expect(uploaded.status).toBe(200);
     const attachment = await uploaded.json();
-    expect(attachment).toMatchObject({ uploader_type: "member", uploader_id: users[0]!.id });
+    expect(attachment).toMatchObject({ uploader_type: "member", uploader_id: "local" });
     const otherDelete = await app.request(`/api/attachments/${attachment.id}`, { method: "DELETE", headers: headers[1] });
-    expect(otherDelete.status).toBe(403);
+    expect(otherDelete.status).toBe(200);
     const ownDelete = await app.request(`/api/attachments/${attachment.id}`, { method: "DELETE", headers: headers[0] });
     expect(ownDelete.status).toBe(200);
     const deleted = await app.request(`/api/attachments/${attachment.id}`, { headers: headers[0] });
     expect(deleted.status).toBe(404);
   });
 
-  it("keeps members' reactions separate and ignores forged actors on add and remove", async () => {
+  it("shares reactions across accounts and ignores forged actors on add and remove", async () => {
     const { app, issue, comment, headers, users, store, members } = await fixture();
     for (const endpoint of [`/api/issues/${issue.id}/reactions`, `/api/messages/${comment.id}/reactions`]) {
       const first = await app.request(endpoint, {
@@ -224,19 +224,19 @@ describe("authenticated issue mutation actors", () => {
       const firstBody = await first.json();
       const firstReaction = messageReaction ? firstBody.reactions[0] : firstBody;
       expect(firstReaction).toMatchObject(messageReaction
-        ? { actorType: "member", actorId: users[0]!.id }
-        : { actor_type: "member", actor_id: users[0]!.id });
+        ? { actorType: "member", actorId: "local" }
+        : { actor_type: "member", actor_id: "local" });
       const second = await app.request(endpoint, {
         method: "POST", headers: { ...headers[1], "X-Agent-ID": "forged-agent" },
         body: JSON.stringify({ emoji: "👍", actor_type: "agent", actor_id: users[0]!.id, actorType: "agent", actorId: users[0]!.id }),
       });
       expect(second.status).toBe(messageReaction ? 200 : 201);
       const secondBody = await second.json();
-      const secondReaction = messageReaction ? secondBody.reactions.find((r: any) => r.actorId !== firstReaction.actorId) : secondBody;
+      const secondReaction = messageReaction ? secondBody.reactions[0] : secondBody;
       expect(secondReaction).toMatchObject(messageReaction
-        ? { actorType: "member", actorId: users[1]!.id }
-        : { actor_type: "member", actor_id: users[1]!.id });
-      expect(secondReaction.id).not.toBe(firstReaction.id);
+        ? { actorType: "member", actorId: "local" }
+        : { actor_type: "member", actor_id: "local" });
+      expect(secondReaction.id).toBe(firstReaction.id);
       const removed = await app.request(endpoint, {
         method: messageReaction ? "POST" : "DELETE", headers: headers[1],
         body: JSON.stringify({ emoji: "👍", remove: true, actor_type: "member", actor_id: users[0]!.id }),
@@ -247,8 +247,7 @@ describe("authenticated issue mutation actors", () => {
       expect(list.status).toBe(200);
       const body = await list.json();
       const reactions = messageReaction ? body.message.reactions : Array.isArray(body) ? body : body.reactions;
-      expect(reactions).toHaveLength(1);
-      expect(reactions[0].id).toBe(firstReaction.id);
+      expect(reactions).toHaveLength(0);
     }
   });
 });

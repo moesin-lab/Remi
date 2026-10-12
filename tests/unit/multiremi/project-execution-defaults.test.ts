@@ -39,7 +39,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const app = createMultiremiApp({ store, authToken: "synthetic-project-defaults-master" });
       const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
       const request = (path: string, method: string, body?: unknown) => app.request(path, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-      return { human, agent, squad, request };
+      return { human, operator: store.getWorkspaceOperator("local")!, agent, squad, request };
     }
 
     it("rejects explicit and inferred member defaults on both APIs, while Agent/Squad defaults reach real Issue creation", () => run(async (store) => {
@@ -63,7 +63,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
           const issueResponse = await f.request("/api/issues", "POST", { title: `${type} project Issue`, project_id: projectId, status: "backlog" });
           expect(issueResponse.status).toBe(201);
           const issue = await issueResponse.json() as any;
-          expect(issue).toMatchObject({ assignee_type: type, assignee_id: id, responsible_member_id: f.human.id });
+          expect(issue).toMatchObject({ assignee_type: type, assignee_id: id, responsible_member_id: f.operator.id, creator_id: "local" });
           expect(store.resolveIssueResponsibility(issue.id).executionOwner?.id).toBe(f.agent.id);
         }
       }
@@ -92,7 +92,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
         const inherited = await f.request("/api/issues", "POST", { title: "Legacy default needs configuration", project_id: project.id, status: "backlog" });
         expect(inherited.status).toBe(201);
         const issue = await inherited.json() as any;
-        expect(issue).toMatchObject({ assignee_type: null, assignee_id: null, responsible_member_id: f.human.id });
+        expect(issue).toMatchObject({ assignee_type: null, assignee_id: null, responsible_member_id: f.operator.id, creator_id: "local" });
         expect(store.resolveIssueResponsibility(issue.id).unresolved).toContainEqual({ issueId: issue.id, reason: "execution_owner_missing" });
         const cleared = await f.request(path, method, { default_assignee_type: null, default_assignee_id: null });
         expect(cleared.status).toBe(200);
@@ -101,7 +101,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
         expect(configured.status).toBe(200);
         const restored = await f.request("/api/issues", "POST", { title: "Configured execution", project_id: project.id, status: "backlog" });
         expect(restored.status).toBe(201);
-        expect(await restored.json()).toMatchObject({ assignee_type: "agent", assignee_id: f.agent.id, responsible_member_id: f.human.id });
+        expect(await restored.json()).toMatchObject({ assignee_type: "agent", assignee_id: f.agent.id, responsible_member_id: f.operator.id, creator_id: "local" });
       }
     }));
   });

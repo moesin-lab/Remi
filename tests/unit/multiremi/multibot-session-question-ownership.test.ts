@@ -93,12 +93,12 @@ function present(h: ReturnType<typeof multibotFixture>, questionId: string) {
 }
 
 pendingTurnBackendTests("multibot Question Session ownership", fixture => {
-  it("uses the second bot's human, notification presenter, app-scoped recipient and card token", () => {
+  it("uses the shared operator with the second bot's presenter, app-scoped recipient and card token", () => {
     const h = multibotFixture(fixture());
     const first = h.bots[0]!, second = h.bots[1]!;
     const question = ask(h);
     expect(question).toMatchObject({ session_id: h.session.id, source_issue_id: null, source_agent_id: h.worker.id,
-      stage: "human", current_handler: { type: "member", id: h.humans[1]!.id }, wait_status: "waiting", route_revision: 1 });
+      stage: "human", current_handler: { type: "member", id: "mem_local_local" }, wait_status: "waiting", route_revision: 1 });
     expect(h.store.getFeishuBotConfigForSession("local", h.session.id)).toMatchObject({ botId: second.config.botId,
       appId: second.config.appId, agentId: second.agent.id, responsibleMemberId: h.humans[1]!.id });
     expect(h.store.getQuestion(question.id, { type: "agent", id: first.agent.id })!.actions.allowed).not.toContain("present");
@@ -128,7 +128,7 @@ pendingTurnBackendTests("multibot Question Session ownership", fixture => {
     expect(protectedMessage.card_token_recipient).toBe(second.openId);
     expect(protectedMessage.card_token_hash).toBeTruthy();
     expect(() => h.store.answerQuestion(question.id, { expected_route_revision: 1, response: { answers: { direction: "A" } } },
-      { type: "member", id: h.humans[0]!.id })).toThrow("question_handler_required");
+      { type: "member", id: h.humans[0]!.id }, undefined, { token: "wrong-token", operatorOpenId: first.openId, routeRevision: 1 })).toThrow("token_invalid");
     expect(h.store.getMessage(question.id)!.card_token_hash).toBe(protectedMessage.card_token_hash);
     expect(h.store.getQuestion(question.id)).toMatchObject({ status: "pending", session_id: h.session.id, wait_status: "waiting",
       summary: { agent_id: second.agent.id, body_md: "Read the original second-bot options" } });
@@ -168,7 +168,7 @@ pendingTurnBackendTests("multibot Question Session ownership", fixture => {
       if (missingAudit) h.db.run("UPDATE multiremi_turns SET issue_id=NULL WHERE id=?", h.turn.id);
       const question = ask(h);
       expect(question).toMatchObject({ session_id: h.session.id, source_issue_id: null,
-        current_handler: { type: "member", id: h.humans[1]!.id }, wait_status: "waiting" });
+        current_handler: { type: "member", id: "mem_local_local" }, wait_status: "waiting" });
       present(h, question.id);
       expect(first.bot.statusSnapshot("local").status).toBe("online");
       const request = h.store.getTaskHumanRequest(question.id)!;

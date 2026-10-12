@@ -135,7 +135,7 @@ describe("side Session API", () => {
     });
   });
 
-  it("authenticates direct Session reads and hides other workspaces from humans and task tokens", async () => {
+  it("authenticates shared human Session reads and hides other workspaces from task tokens", async () => {
     const store = createLocalStore();
     const issue = createResponsibleTestIssue(store, { title: "Visible", workspaceId: "local" });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
@@ -152,9 +152,9 @@ describe("side Session API", () => {
     for (const token of [member.token, taskToken.token]) {
       const asReader = { Authorization: `Bearer ${token}` };
       expect((await app.request(`/api/sessions/${session.id}`, { headers: asReader })).status).toBe(200);
-      const denied = await app.request(`/api/sessions/${privateSession.id}`, { headers: asReader });
-      expect(denied.status).toBe(404);
-      expect(await denied.text()).not.toContain("Hidden");
+      const otherWorkspace = await app.request(`/api/sessions/${privateSession.id}`, { headers: asReader });
+      expect(otherWorkspace.status).toBe(token === member.token ? 200 : 404);
+      if (token === taskToken.token) expect(await otherWorkspace.text()).not.toContain("Hidden");
     }
     expect((await app.request("/api/sessions/ises_missing", { headers })).status).toBe(404);
   });

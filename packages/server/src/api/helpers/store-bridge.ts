@@ -480,20 +480,20 @@ export function safeRuntimeOnboardingBootstrap(
   const provider = runtime.provider === "claude" || runtime.provider === "codex" || runtime.provider === "grok"
     ? runtime.provider
     : "codex";
-  const before = store.getDefaultAgent(workspaceId, provider, bootstrapUserId);
+  const before = store.getDefaultAgent(workspaceId, provider, "local");
   const isFirstAgent = isFirstAgentInWorkspace(store, workspaceId);
   const agent = store.ensureDefaultAgent(provider, {
     workspaceId,
-    ownerId: bootstrapUserId,
+    ownerId: "local",
   });
   if (!before) {
     recordSystemAgentCreatedAnalytics(store, agent, runtime, {
-      actorId: bootstrapUserId,
+      actorId: "local",
       template: "multiremi_helper",
       isFirstAgentInWorkspace: isFirstAgent,
     });
   }
-  const issue = createOnboardingIssue(store, workspaceId, "Connect your local runtime", `Use ${runtime.name} to run your first task.`, bootstrapUserId);
+  const issue = createOnboardingIssue(store, workspaceId, "Connect your local runtime", `Use ${runtime.name} to run your first task.`, "local");
   store.createTask({
     agentId: agent.id,
     issueId: issue.id,
@@ -517,7 +517,7 @@ export function safeNoRuntimeOnboardingBootstrap(
     workspaceId,
     "Install a local runtime",
     "Install and register a local Claude or Codex runtime to start running tasks.",
-    bootstrapUserId,
+    "local",
   );
   store.markCurrentUserOnboarded(bootstrapUserId);
   return { workspace_id: workspaceId, issue_id: issue.id };

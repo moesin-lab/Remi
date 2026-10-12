@@ -16,6 +16,7 @@ import {
   currentRequestUserId,
   currentWorkspaceMember,
   currentWorkspaceRoleStrict,
+  isHumanOperatorRequest,
   runtimeWorkspaceId,
 } from "../wire/index.js";
 import type { MultiremiRequestAuth } from "../wire/index.js";
@@ -188,21 +189,24 @@ export function isDaemonOwnerWorkspaceMember(
   token: Pick<MultiremiAccessToken, "type" | "userId" | "workspaceId"> | null,
 ): boolean {
   if (!token || token.type !== "daemon") return true;
-  const ownerUserId = cleanString(token.userId);
-  return !ownerUserId
-    || ownerUserId === "local"
-    || Boolean(store.getUserRoleInWorkspace(ownerUserId, token.workspaceId));
+  // Machine authority comes from its bound workspace/daemon, not a retired
+  // human membership. Registration and resource guards still verify that binding.
+  return Boolean(store.getWorkspace(token.workspaceId));
 }
 
 export function denyDaemonOwnerWorkspaceMembership(
   c: Context,
   store: MultiremiStore,
 ): Response | null {
-  if (isDaemonOwnerWorkspaceMember(store, currentAccessToken(c))) return null;
+  const token = currentAccessToken(c);
+  // HTTP authentication already checked existence in the token lookup. Other
+  // callers must still validate it; a token-shaped auth context is not proof.
+  if (token?.type === "daemon" && c.get("multiremiVerifiedDaemonWorkspaceId") === token.workspaceId) return null;
+  if (isDaemonOwnerWorkspaceMember(store, token)) return null;
   return c.json(
     {
-      error: "daemon owner is no longer a workspace member",
-      code: "daemon_owner_membership_required",
+      error: "daemon workspace is no longer available",
+      code: "daemon_workspace_unavailable",
     },
     403,
   );
@@ -365,40 +369,26 @@ export function compatibilityInboxScope(
 ): { memberId: string; workspaceId: string } | Response {
   const workspaceId = resolveRequestWorkspaceId(c, store, c.req.query("workspaceId") ?? c.req.query("workspace_id"));
   if (workspaceId instanceof Response) return workspaceId;
-  const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+  const denied = denyCredentialWorkspaceAccess(c, workspaceId);
   if (denied) return denied;
-  const userId = authenticatedRequestUserId(c);
-  const requested = cleanString(requestedMemberId);
-  const raw = requested ?? userId ?? "local";
-  // Inbox rows use member ids. Resolve only inside the selected workspace,
-  // and never let a human/task credential select another member's inbox.
-  // Keep the workspace in the scope: a moved member can retain older inbox rows.
-  const own=currentWorkspaceMember(c,store,workspaceId);
-  const exact=requested ? store.getWorkspaceMember(raw) ?? (raw===userId||raw===own?.userId ? own : null) : own;
-  const member=(exact?.workspaceId===workspaceId ? exact : null)
-    ?? (own?.userId===raw ? own : null)
-    ?? (requested ? store.listWorkspaceMembers(workspaceId).find(candidate=>candidate.userId===raw) : null)
-    ?? exact;
-  if (member && (member.workspaceId !== workspaceId
-    || (userId && member.userId !== userId))) {
-    return c.json({ error: "inbox not found" }, 404);
-  }
-  if (userId && !member) return c.json({ error: "inbox not found" }, 404);
-  return { memberId: member?.id ?? raw, workspaceId };
+  // The operator read joins the owning workspace, so it also proves existence.
+  const operator = store.getWorkspaceOperator(workspaceId);
+  if (!operator) return c.json({ error: "inbox not found" }, 404);
+  return { memberId: operator.id, workspaceId };
 }
 
 export function denyCurrentUserRuntimeWorkspaceAccess(c: Context, store: MultiremiStore, runtime: MultiremiRuntime): Response | null {
   const workspaceId = runtimeWorkspaceId(runtime);
   const token = currentAccessToken(c);
   if (token?.type === "daemon") return c.json({ error: "forbidden for daemon token" }, 403);
+  if (isHumanOperatorRequest(c)) return denyCurrentUserWorkspaceAccess(c, store, workspaceId);
   const userId = authenticatedRequestUserId(c);
-  // Same rule as denyCurrentUserWorkspaceAccess: a human's login PAT is not
-  // workspace-scoped — membership decides which runtimes they can see.
+  // Machine capabilities remain bound to their original workspace.
   const humanPat = token?.type === "pat" && userId && (userId !== "local" || token.purpose === "session");
   if (!humanPat && token?.workspaceId && token.workspaceId !== workspaceId) {
     return c.json({ error: "runtime not found" }, 404);
   }
-  // A logged-in human who is not a member of the runtime's workspace can't see it.
+  // Non-human compatibility credentials still require their original actor context.
   if (token?.type !== "task" && userId && (userId !== "local" || humanPat || !token) && !currentWorkspaceMember(c, store, workspaceId)) {
     return c.json({ error: "runtime not found" }, 404);
   }
@@ -408,16 +398,16 @@ export function denyCurrentUserRuntimeWorkspaceAccess(c: Context, store: Multire
 type AgentVisibility = Pick<MultiremiAgent, "visibility" | "ownerId" | "workspaceId">;
 
 export function canCurrentUserAccessAgent(c: Context, store: MultiremiStore, agent: AgentVisibility): boolean {
-  return agentVisibleToUser(agent, currentRequestUserId(c), (workspaceId) => currentWorkspaceRole(c, store, workspaceId));
+  if (isHumanOperatorRequest(c)) return denyCurrentUserWorkspaceAccess(c, store, agent.workspaceId) === null;
+  const userId = currentRequestUserId(c);
+  return agentVisibleToUser(agent, userId, (workspaceId) => store.getUserRoleInWorkspace(userId, workspaceId) ?? "member");
 }
 
 /**
  * Batched twin of {@link canCurrentUserAccessAgent} for list routes (MUL-473).
  *
- * The rule is identical — a private Agent is reachable by its owner and by
- * workspace owners/admins — but the caller's role is resolved at most once per
- * workspace instead of once per Agent. Without this a route that checks N
- * private Agents issued N membership reads for one answer.
+ * Human requests resolve to the shared operator. Machine and compatibility
+ * identities retain their actor checks, with one role lookup per workspace.
  */
 export function canCurrentUserAccessAgentChecker(
   c: Context,
@@ -428,7 +418,11 @@ export function canCurrentUserAccessAgentChecker(
   return (agent) => agentVisibleToUser(agent, userId, (workspaceId) => {
     const cached = rolesByWorkspace.get(workspaceId);
     if (cached !== undefined) return cached;
-    const role = currentWorkspaceRole(c, store, workspaceId);
+    // Workspace operator roles apply to human requests. A task retains its
+    // credential actor's private-Agent access, including in batched lists.
+    const role = isHumanOperatorRequest(c)
+      ? currentWorkspaceRole(c, store, workspaceId)
+      : store.getUserRoleInWorkspace(userId, workspaceId) ?? "member";
     rolesByWorkspace.set(workspaceId, role);
     return role;
   });
@@ -448,6 +442,7 @@ function agentVisibleToUser(
 // Store-only twin of canCurrentUserAccessAgent — no request Context, so it can
 // gate WS recipients (client.data.userId) as well as HTTP callers.
 export function canUserAccessAgentByUserId(store: MultiremiStore, userId: string | null, agent: MultiremiAgent): boolean {
+  if (userId === "local") return store.getWorkspace(agent.workspaceId) !== null;
   if (agent.visibility !== "private") return true;
   if (userId && agent.ownerId === userId) return true;
   // No verified identity (master token / open mode) acts as admin.
@@ -456,11 +451,9 @@ export function canUserAccessAgentByUserId(store: MultiremiStore, userId: string
   return role === "owner" || role === "admin";
 }
 
-// Whether a user may read a task's transcript messages. Transcript rows carry
-// raw tool input/diffs/output, so they inherit the task's visibility: chat
-// tasks are creator-only, and a private agent's task is owner/admin-only.
-// Workspace membership itself is enforced by the caller (registry keying /
-// route guard). userId null = no-identity admin path.
+// Human requests use the shared local operator. Non-human identities retain
+// creator/agent visibility checks; every caller still enforces workspace and
+// task capability boundaries before consulting these transcript facts.
 /**
  * MUL-357: request-scoped memo for the task-visibility guards. A list request
  * checks one workspace/session/agent set per candidate task, so without this
@@ -564,7 +557,7 @@ export function canUserViewTaskMessageFacts(userId: string | null, facts: {
   requesterIsWorkspaceAdmin: boolean;
 }): boolean {
   if (facts.chatSessionId && facts.chatCreatorId == null) return false;
-  if (userId == null) return true;
+  if (userId == null || userId === "local") return true;
   if (facts.chatSessionId) return facts.chatCreatorId === userId;
   return facts.agentVisibility !== "private" || facts.agentOwnerId === userId || facts.requesterIsWorkspaceAdmin;
 }
@@ -610,12 +603,7 @@ export function canCurrentUserAccessChatTask(
 }
 
 export function currentWorkspaceRole(c: Context, store: MultiremiStore, workspaceId: string): string {
-  const member = currentWorkspaceMember(c, store, workspaceId);
-  if (member) return member.role;
-  // No real member: only the no-identity admin path (master token / open mode)
-  // is treated as local owner. A logged-in non-member is NOT auto-"member".
-  if (workspaceId === "local" && authenticatedRequestUserId(c) === null) return "owner";
-  return "member";
+  return currentWorkspaceRoleStrict(c, store, workspaceId) ?? "member";
 }
 
 /**
@@ -625,6 +613,7 @@ export function currentWorkspaceRole(c: Context, store: MultiremiStore, workspac
  */
 export function callerCanReceiveRelay(c: Context, store: MultiremiStore, workspaceId: string): boolean {
   if (currentAccessToken(c)?.type === "task") return false;
+  if (currentAccessToken(c)?.type === "daemon") return currentAccessToken(c)?.workspaceId === workspaceId && !!store.getWorkspace(workspaceId);
   const role = currentWorkspaceRoleStrict(c, store, workspaceId);
   return role === "owner" || role === "admin";
 }
@@ -632,6 +621,8 @@ export function callerCanReceiveRelay(c: Context, store: MultiremiStore, workspa
 /** owner/admin actor gate for workspace-scoped configuration. */
 export function requireWorkspaceAdmin(c: Context, store: MultiremiStore, workspaceId: string): Response | null {
   if (currentAccessToken(c)?.type === "daemon") return c.json({ error: "forbidden for daemon token" }, 403);
+  const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+  if (denied) return denied;
   const role = currentWorkspaceRoleStrict(c, store, workspaceId);
   if (role === "owner" || role === "admin") return null;
   return c.json({ error: "insufficient permissions" }, 403);
@@ -678,34 +669,31 @@ export function loadCurrentWorkspaceRole(
 }
 
 export function denyCurrentUserWorkspaceAccess(c: Context, store: MultiremiStore, workspaceId: string): Response | null {
+  const denied = denyCredentialWorkspaceAccess(c, workspaceId);
+  if (denied) return denied;
+  return store.hasWorkspace(workspaceId) ? null : c.json({ error: "workspace not found" }, 404);
+}
+
+function denyCredentialWorkspaceAccess(c: Context, workspaceId: string): Response | null {
   const token = currentAccessToken(c);
   if (token?.type === "daemon") return c.json({ error: "forbidden for daemon token" }, 403);
   const userId = authenticatedRequestUserId(c);
   // Tokens bound to one workspace (task tokens, user-less workspace PATs) can't
   // reach others. A human's login PAT is minted under "local" but is a session
-  // credential, not a scope — the membership check below is the authority for
-  // real users, otherwise they could never open a workspace created after login.
+  // credential, not a scope. Human operators may select any existing workspace.
   // The migrated deployment owner keeps userId=local; session purpose separates
   // that login from legacy ownerless workspace credentials.
   const humanPat = token?.type === "pat" && userId && (userId !== "local" || token.purpose === "session");
   if (!humanPat && token?.workspaceId && token.workspaceId !== workspaceId) {
     return c.json({ error: "workspace not found" }, 404);
   }
-  // Any authenticated human (login PAT or JWT) must be a member of the workspace;
-  // non-members get 404 (existence hidden). No user id (or the synthetic "local"
-  // admin identity carried by user-less workspace access tokens) => master token /
-  // open mode => full admin access.
-  if (token?.type !== "task" && userId && (userId !== "local" || humanPat || !token) && !currentWorkspaceMember(c, store, workspaceId)) {
-    return c.json({ error: "workspace not found" }, 404);
-  }
   return null;
 }
 
-// Pins are private to their owner. When the request is authenticated as a real
-// user, the pin's user id must equal that user — nobody can read or mutate
-// another person's pins. Master-token / open mode (no authenticated user id)
-// keeps full access.
+// Human pins belong to the shared operator. Machine compatibility callers
+// cannot override their credential actor.
 export function denyPinOwnerAccess(c: Context, userId: string): Response | null {
+  if (isHumanOperatorRequest(c) && userId === "local") return null;
   const authUser = authenticatedRequestUserId(c);
   if (authUser && userId !== authUser) return c.json({ error: "forbidden" }, 403);
   return null;
@@ -731,7 +719,7 @@ export function loadChatSessionForCurrentUser(
       || task.workspaceId !== session.workspaceId || token.workspaceId !== session.workspaceId
       || token.agentId !== task.agentId)) return c.json({ error: "forbidden outside current Chat owner" }, 403);
   }
-  if ((session.creatorId ?? "local") !== currentRequestUserId(c)) {
+  if (!isHumanOperatorRequest(c) && (session.creatorId ?? "local") !== currentRequestUserId(c)) {
     return c.json({ error: "not your chat session" }, 403);
   }
   if (!canUserAccessChatSessionFacts(currentRequestUserId(c), {
@@ -820,7 +808,7 @@ export function denySessionOwnerAccess(
         && token.workspaceId === chat.workspaceId && token.agentId === task.agentId
         ? null : c.json({ error: "forbidden outside current Chat" }, 403);
     }
-    if ((chat.creatorId ?? "local") !== currentRequestUserId(c)) return c.json({ error: "not your chat session" }, 403);
+    if (!isHumanOperatorRequest(c) && (chat.creatorId ?? "local") !== currentRequestUserId(c)) return c.json({ error: "not your chat session" }, 403);
     const agent = memoizedAgent(store, memo, chat.agentId);
     return agent && agent.workspaceId === chat.workspaceId && canCurrentUserAccessAgent(c, store, agent)
       ? null : c.json({ error: "you do not have access to this agent" }, 403);
@@ -884,13 +872,13 @@ export function canTaskCoordinateSession(c: Context, store: MultiremiStore, sess
     && (!session.chatId || session.chatId === chat.id));
 }
 
-/** HTTP and log subscriptions share the creator, membership and agent boundary. */
+/** The shared operator reads workspace Chats; other identities retain creator checks. */
 export function canUserAccessChatSessionFacts(userId: string | null, facts: {
   creatorId: string | null;
   requesterIsMember: boolean;
   requesterCanAccessAgent?: boolean;
 }): boolean {
-  return (facts.creatorId ?? "local") === (userId ?? "local")
+  return (userId === "local" || (facts.creatorId ?? "local") === (userId ?? "local"))
     && (userId == null || facts.requesterIsMember) && facts.requesterCanAccessAgent === true;
 }
 
@@ -904,7 +892,7 @@ export function canCurrentUserAccessChatSessionAgent(
 }
 
 // Go-style access boundary for reading/serving/deleting an attachment file. Chat
-// attachments are private to the chat creator like the chat session itself; issue,
+// attachments follow their Chat or Session capability; issue,
 // comment, and free-standing attachments are scoped to the attachment workspace.
 // Returns a denial Response when access is forbidden, or null when allowed.
 export function denyAttachmentAccess(c: Context, store: MultiremiStore, attachment: MultiremiAttachment): Response | null {
@@ -979,7 +967,7 @@ export function denyAttachmentCreationAccess(
 }
 
 export function hasJwtWorkspaceAccess(store: MultiremiStore, userId: string, workspaceId: string): boolean {
-  return store.getUserRoleInWorkspace(userId, workspaceId) !== null;
+  return Boolean(store.getUser(userId) && store.getWorkspace(workspaceId));
 }
 
 export type DaemonWorkspaceDenyOptions = {

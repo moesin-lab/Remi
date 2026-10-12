@@ -1,5 +1,7 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -33,7 +35,6 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@multiremi/ui/components/ui/dialog";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
 import { useActorName } from "@multiremi/core/workspace/hooks";
@@ -67,7 +68,7 @@ export function LarkTab() {
   const { t } = useT("im-platforms");
   const wsId = useWorkspaceId();
   const qc = useQueryClient();
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
 
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const currentMember = members.find((m) => m.user_id === user?.id) ?? null;
@@ -257,7 +258,7 @@ export function LarkAgentBindButton({
 }) {
   const { t } = useT("im-platforms");
   const wsId = useWorkspaceId();
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
   // dialogRegion carries two pieces of state in one variable: which
   // cloud the dialog should target (drives the device-flow `begin`
   // host and the dialog copy), AND whether the dialog is open at all

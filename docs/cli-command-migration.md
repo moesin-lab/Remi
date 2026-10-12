@@ -1,5 +1,35 @@
 # CLI command migration
 
+## Shared workspace operator and login account
+
+| Old command | Canonical command |
+| --- | --- |
+| `remi member list` | `remi workspace operator` |
+| `remi member get me` | `remi account get` |
+| `remi member update me` | `remi account update` |
+| `remi member onboarding update` | `remi account onboarding update` |
+| `remi member onboarding complete` | `remi account onboarding complete` |
+| `remi member onboarding cloud-waitlist` | `remi account onboarding cloud-waitlist` |
+| `remi member onboarding runtime-bootstrap` | `remi account onboarding runtime-bootstrap` |
+| `remi member onboarding no-runtime-bootstrap` | `remi account onboarding no-runtime-bootstrap` |
+
+Every authenticated human operates the same workspace identity and can enter all
+workspaces. `remi workspace operator` reads its stable internal identity. Use
+`remi account get`, `remi account update --name <name>` and
+`remi account onboarding ...` for the actual platform login account.
+`member list`, `member get me`, `member update me` and `member onboarding ...`
+remain deprecated aliases for one release cycle. Historical attribution can still
+be inspected by ID with the hidden compatibility `member get <id>` command.
+`member create`, `member delete`, workspace invitations and `workspace leave`
+are retired; they return guidance without a mutation. Updating a historical member
+is rejected. Workspaces no longer need member invitations or roles.
+
+Login and token management remain account-bound. Task/daemon credentials retain
+their workspace, runtime and execution restrictions. Historical creator/owner IDs
+remain audit data; human Chat access, inbox reads, pins and notification preferences
+are shared within each workspace. See [authentication](dev/auth.md).
+
+
 Communication uses `remi message`, addressed unread messages use `remi inbox`,
 and execution uses `remi turn`. Sessions retain their Chat or Issue owner;
 ordinary Chat and Autopilot conversations keep their own conversation identities.
@@ -344,8 +374,8 @@ mean Feishu has acknowledged delivery. The current conversation comes from CLI c
 ```text
 remi context
 remi workspace
-remi member
-remi invite
+remi account
+remi workspace operator
 remi token
 
 remi project

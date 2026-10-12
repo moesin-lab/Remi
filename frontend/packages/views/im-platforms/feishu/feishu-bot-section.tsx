@@ -1,10 +1,11 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { AlertTriangle, Play, QrCode, RefreshCw, Square, Trash2 } from "lucide-react";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
 import {
@@ -79,7 +80,7 @@ export function FeishuBotSection() {
   const creating = botId === "new";
   const { t } = useT("im-platforms");
   const workspaceId = useWorkspaceId();
-  const user = useAuthStore((state) => state.user);
+  const user = workspaceOperatorUser;
 
   const membersQuery = useQuery(memberListOptions(workspaceId));
   const members = membersQuery.data ?? [];

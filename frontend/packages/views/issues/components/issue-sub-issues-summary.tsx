@@ -1,10 +1,11 @@
 "use client";
 
+import { WORKSPACE_OPERATOR_USER_ID } from "@multiremi/core/workspace/operator";
+
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { ApiError, IssueStatusHeldErrorSchema } from "@multiremi/core/api";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useModalStore } from "@multiremi/core/modals";
 import { childIssuesOptions } from "@multiremi/core/issues/queries";
@@ -42,7 +43,7 @@ export function IssueSubIssuesSummary({
   const open = sections.isOpen("subIssues");
   const { data: childIssues = [], isPending } = useQuery(childIssuesOptions(wsId, issueId));
   const updateIssue = useUpdateIssue();
-  const memberId = useAuthStore((state) => state.user?.id);
+  const memberId = WORKSPACE_OPERATOR_USER_ID;
   const openModal = useModalStore((state) => state.open);
   const doneCount = childIssues.filter((child) => child.status === "done").length;
   const sortedChildren = childIssues.toSorted((a, b) => childRank(a) - childRank(b) || a.position - b.position);

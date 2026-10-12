@@ -78,8 +78,8 @@ describe("Issue sessions and per-agent projection lanes", () => {
       issue_id: null,
       title: "Research",
       is_default: false,
-      created_by_type: "system",
-      created_by_id: null,
+      created_by_type: "member",
+      created_by_id: "local",
     });
 
     const posted = await app.request(

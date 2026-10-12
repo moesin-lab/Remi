@@ -22,7 +22,7 @@ for (const point of [0, 1, 2]) {
   }, 90000);
 }
 
-it("authorizes private attachments before comparing even a correct ETag", async () => {
+it("shares historical Chat attachments but still authenticates before comparing an ETag", async () => {
   const harness = await createPr2Harness();
   try {
     const path = `/api/attachments/${harness.privateAttachmentId}/content`;
@@ -31,17 +31,16 @@ it("authorizes private attachments before comparing even a correct ETag", async 
     const etag = allowed.headers.get("etag");
     expect(etag).toBe(`"${harness.privateAttachmentId}"`);
     await allowed.arrayBuffer();
-    const baseline = JSON.parse(readFileSync(`${fixtureDir}/first-screen-hotspots-pr2-golden.json`, "utf8"));
-    const denied = await harness.app.request(path, { headers: { ...harness.viewerHeaders, "If-None-Match": etag! } });
-    expect({ status: denied.status, body: await denied.text() }).toEqual(baseline.denied);
-    expect(denied.headers.get("etag")).toBeNull();
+    const shared = await harness.app.request(path, { headers: { ...harness.viewerHeaders, "If-None-Match": etag! } });
+    expect({ status: shared.status, body: await shared.text() }).toEqual({ status: 304, body: "" });
+    expect(shared.headers.get("etag")).toBe(etag);
     const cookieHeaders = (credentials: typeof harness.headers) => ({
       Cookie: `${AUTH_COOKIE_NAME}=${encodeURIComponent(credentials.Authorization.slice(7))}`,
       "X-Workspace-ID": credentials["X-Workspace-ID"], "If-None-Match": etag!,
     });
-    const cookieDenied = await harness.app.request(path, { headers: cookieHeaders(harness.viewerHeaders) });
-    expect({ status: cookieDenied.status, body: await cookieDenied.text() }).toEqual(baseline.denied);
-    expect(cookieDenied.headers.get("etag")).toBeNull();
+    const cookieShared = await harness.app.request(path, { headers: cookieHeaders(harness.viewerHeaders) });
+    expect({ status: cookieShared.status, body: await cookieShared.text() }).toEqual({ status: 304, body: "" });
+    expect(cookieShared.headers.get("etag")).toBe(etag);
     const cookieAllowed = await harness.app.request(path, { headers: cookieHeaders(harness.headers) });
     expect(cookieAllowed.status).toBe(304);
     expect(await cookieAllowed.text()).toBe("");

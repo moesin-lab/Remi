@@ -25,6 +25,9 @@ async function setup() {
   const user = store.getOrCreateUser({ email: "boundary-member@example.test", name: "Member B" });
   const workspaceA = store.createWorkspace({ name: "Workspace A", slug: "boundary-a" }, owner.id);
   const workspaceB = store.createWorkspace({ name: "Workspace B", slug: "boundary-b" }, owner.id);
+  for (const workspace of [workspaceA, workspaceB]) {
+    store.createWorkspaceMember({ workspaceId: workspace.id, userId: owner.id, name: owner.name, role: "owner" });
+  }
   store.createWorkspaceMember({ workspaceId: workspaceB.id, userId: user.id, name: user.name, role: "member" });
   expect(store.getUserRoleInWorkspace(user.id, workspaceA.id)).toBeNull();
   expect(store.getUserRoleInWorkspace(user.id, workspaceB.id)).toBe("member");
@@ -39,8 +42,10 @@ async function setup() {
   };
   const foreign = createRecords(workspaceA.id, "Foreign");
   const own = createRecords(workspaceB.id, "Own");
+  // Human accounts share workspace access. Keep these anti-enumeration and
+  // all-or-nothing mutation cases on a credential explicitly bound to B.
   const { token } = await store.createAccessToken({
-    workspaceId: "local", userId: user.id, name: "Member B session", type: "pat", purpose: "session",
+    workspaceId: workspaceB.id, userId: "local", name: "Workspace B credential", type: "pat", purpose: "personal",
   });
   const app = createMultiremiApp({ store, authToken: masterToken });
   return { store, app, owner, user, workspaceA, workspaceB, foreign, own, headers: authHeaders(token) };
@@ -343,13 +348,13 @@ for (const { prefix, issueIdsKey } of issueRoutes) {
       const otherForeignParent = createResponsibleTestIssue(store, { workspaceId: workspaceA.id, title: "Other foreign parent" });
       const otherOwnParent = createResponsibleTestIssue(store, { workspaceId: workspaceB.id, title: "Other own parent" });
       createResponsibleTestIssue(store, { workspaceId: workspaceB.id, title: "Other own child", parentIssueId: otherOwnParent.id });
-      const membership = spyOn(store, "findWorkspaceMemberForUser");
+      const workspaceLookup = spyOn(store, "hasWorkspace");
       const parentIds = [foreign.parent.id, own.parent.id, otherForeignParent.id, otherOwnParent.id];
       const response = await app.request(`${prefix}/children?parent_ids=${parentIds.join(",")}`, { headers });
       expect(response.status).toBe(200);
       expect((await response.json()).total).toBe(2);
-      expect(membership.mock.calls.filter((call) => call[1] === workspaceA.id)).toHaveLength(1);
-      expect(membership.mock.calls.filter((call) => call[1] === workspaceB.id)).toHaveLength(1);
+      expect(workspaceLookup.mock.calls.filter((call) => call[0] === workspaceA.id)).toHaveLength(0);
+      expect(workspaceLookup.mock.calls.filter((call) => call[0] === workspaceB.id)).toHaveLength(1);
     });
 
     it("rejects a foreign issue without persisting priority or status changes", async () => {
@@ -506,7 +511,7 @@ describe("ordinary task workspace boundaries", () => {
     expect(response.status).toBe(200);
     expect((await response.json()).turns.map((task: { id: string }) => task.id).sort()).toEqual([own.task.id, secondOwn.id].sort());
     expect(membership.mock.calls.filter((call) => call[1] === workspaceA.id)).toHaveLength(0);
-    expect(membership.mock.calls.filter((call) => call[1] === workspaceB.id)).toHaveLength(1);
+    expect(membership.mock.calls.filter((call) => call[1] === workspaceB.id)).toHaveLength(0);
   });
 
   it("keeps task-token workspace scoping even when its owner belongs to both workspaces", async () => {

@@ -13,7 +13,7 @@ async function setup() {
   });
   // Real agents authenticate as the workspace owner (a PAT for the "local" owner).
   const owner = await store.createAccessToken({ workspaceId: "local", type: "pat", name: "agent", userId: "local" });
-  // A non-admin member of the same workspace must never receive the fleet secret.
+  // A second human account has the same workspace configuration authority.
   store.createWorkspaceMember({ id: "mem_local_bob", workspaceId: "local", userId: "bob", name: "Bob", email: "bob@example.com", role: "member" });
   const member = await store.createAccessToken({ workspaceId: "local", type: "pat", name: "bob", userId: "bob" });
   const app = createMultiremiApp({ store, authToken: "MASTER" });
@@ -33,17 +33,16 @@ function register(
 }
 
 describe("relay config API — security", () => {
-  it("gives the plaintext relay token to an owner/admin daemon but not a non-admin member", async () => {
+  it("gives provisioned daemons the shared workspace relay while preserving account bindings", async () => {
     const { app, ownerToken, memberToken } = await setup();
 
     // The agent (owner PAT) legitimately needs the token to configure its CLIs.
     const asOwner = await (await register(app, ownerToken)).json();
     expect(asOwner.relay?.claude?.auth_token).toBe("TOPSECRET");
 
-    // A non-admin member's token must NOT leak the fleet secret.
+    // The second account can provision its own daemon using the same configuration.
     const asMember = await (await register(app, memberToken, "d2")).json();
-    expect(JSON.stringify(asMember.relay)).not.toContain("TOPSECRET");
-    expect(asMember.relay?.claude ?? null).toBeNull();
+    expect(asMember.relay?.claude?.auth_token).toBe("TOPSECRET");
   });
 
   it("the discovery toggle route is reachable (not shadowed by /:engine)", async () => {

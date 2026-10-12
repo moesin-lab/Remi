@@ -34,7 +34,7 @@ Organizer 巡查报告按来源 Turn 的实际 Session owner 路由。Chat-owned
 
 成员通知的 `createInboxItem` 优先使用 `details.issue_session_id` 指定的触发 Session，要求它属于当前 Issue 及其当前工作区；否则尝试同工作区的默认 Session，再退到 `auto_orphan_inbox_${workspaceId}`。Issue 移动时，Issue-owned Session、会话头及消息反应同事务迁到目标工作区；Chat-owned Session 保留 Chat 工作区并解除 Issue 工作投影。评论和状态通知不能向其他工作区 Session 写入目标工作区成员的通知。
 
-类型及参数的事实来源为 [unified-model.ts](../../packages/contracts/src/unified-model.ts)、[InboxOperations](../../packages/server/src/store/inbox/operations.ts) 和 [Store facade](../../packages/server/src/store/store.ts)。HTTP/CLI 调用方负责鉴权、身份解析和参数校验；Store 同时校验消息源、收件人、对话与成员工作区边界。匿名旧领域评论允许 member/null，新用户入口应传入实际成员身份。
+类型及参数的事实来源为 [unified-model.ts](../../packages/contracts/src/unified-model.ts)、[InboxOperations](../../packages/server/src/store/inbox/operations.ts) 和 [Store facade](../../packages/server/src/store/store.ts)。HTTP/CLI 调用方负责鉴权、身份解析和参数校验；Store 同时校验消息源、收件人、对话与成员工作区边界。匿名旧领域评论允许 member/null，新的人类入口应传入目标工作区的共享 operator；历史作者身份保持原样。
 
 消息列表和完整 turn input 从查询行直接批量投影，不再逐 ID 重新读取。HTTP 按页批量加载附件和反应。inbox 在 SQL 中应用会话和受保护来源权限，分页与计数使用同一规则；可见性缓存只在当前请求内使用，隐藏提问不计入未读和 attention 数。
 
@@ -44,7 +44,7 @@ Organizer 巡查报告按来源 Turn 的实际 Session owner 路由。Chat-owned
 |---|---|---|
 | 消息发送、读取 | `sendMessage(input)`、`getMessage(id)`、`listMessages(sessionId,{from,to,limit,thread,unread_by})` | seq 范围为 `(from,to]`；发送返回实际 wake；读取过滤 tombstone |
 | 编辑、删除、解决、反应 | `editMessage(id,{body_md})`、`deleteMessage(id)`、`resolveMessage(id,actor,resolved)`、`reactMessage(id,input)` | 已消费或部分已消费内容不能编辑或删除；删除保留 tombstone；反应幂等 |
-| 人的收件箱 | `listMessageInbox(memberId,workspaceId,{limit})`、`readMessageInbox(memberId,sessionId,toSeq)`、`readAllMessageInbox(memberId,workspaceId)` | member lane，计数不受分页影响；未解决且非 inbox_only 的 decision、成员 request、`lifecycle_event=task_failed/task_cancelled` 的 status、`message_outcome=failed/blocked/cancelled` 的 report 或 final 进入 attention；读到哪只前进 |
+| 人的收件箱 | `listMessageInbox(memberId,workspaceId,{limit})`、`readMessageInbox(memberId,sessionId,toSeq)`、`readAllMessageInbox(memberId,workspaceId)` | 工作区共享游标，计数不受分页影响；未解决且非 inbox_only 的 decision、成员 request、`lifecycle_event=task_failed/task_cancelled` 的 status、`message_outcome=failed/blocked/cancelled` 的 report 或 final 进入 attention；读到哪只前进 |
 | 轮与尝试 | `getTurn(id)`、`listTurns(input)`、`getTurnInput(id)`、`listTurnAttempts(id)`、`getTurnTrace(id)` | trace 定位 current_attempt_id；历史输入范围保留 legacy_prompt |
 | 轮控制 | `cancelTurn(id)`、`wrapUpTurn(id)`、`retryTurn(id,cold)`、`retryTurnAsMember(id,cold,authorizeConversation)` | wrap-up 是标记；retry 同轮新 attempt，cold 清 provider 续接缓存；成员恢复公开 Issue 时按上述规则推导状态 |
 | 卡片答复 | `issueMessageCardToken(id,recipient)`、`answerMessageDecision(id,input)` | hash/binding/consumed 在消息行，答复 CAS 与 reply 同事务；decision 在发送时持久化 pending，答复绑定来源轮和 scope，跨 Issue 恢复后同事务推导来源 Issue；宿主负责把答复者映射到成员 |
@@ -56,13 +56,21 @@ Organizer 巡查报告按来源 Turn 的实际 Session owner 路由。Chat-owned
 
 [server 启动](../../packages/server/src/api/server.ts) 默认调用 `Store.getDaemonTurnBridge()`，同一实例用于 offer、下行快照、RPC 和完成报告；测试可用 `daemonTurnBridge` 显式覆盖。传输接入已在此分支完成，生产切换和 212 真机验收另行执行。定向集成验证入口为 `tests/unit/daemon/task-downlinks.test.ts` 的 Store bridge 用例，以及 `decision-callback-integration.test.ts` 的双后端真实 callback、未读范围和附件下载/注入用例。
 
+## 人类共享已读状态
+
+`multiremi_workspace_read_cursors` 按工作区与 Session 保存所有操作者共用的读取位置。旧 member lanes 与原消息收件人保留，每条历史消息结合自己原收件人的游标和新的共享游标判定是否已读；不能合并所有旧成员游标的最大值。读较早位置不会把其他收件人的未读吞掉，也不会让原已读消息重新出现。Agent lane 的执行范围与游标约束保持独立。
+
+同工作区的历史人类提及先解析原成员，再合并为一个操作者收件人；多个名字不会重复通知。人类向人类的评论视为自身操作，不新增自我通知；Agent 提及仍可通知共享操作者。外部工作区或未知成员 ID 不会被映射为本地操作者。
+
+旧 inbox 视图和兼容接口投影到统一 operator；原始消息 `to_member_id` 不改写。终态回复、通知及人工问题使用工作区 operator。待答问题启动切换有按工作区的持久标记，同一事务保留转交历史并失效旧人工卡片，重复启动不重复路由或通知。参考[问题契约](questions.md)。
+
 ## 状态与迁移
 
-人工强制启动的活动审计沿用认证用户 ID；消息头的 sender_id 使用工作区成员 ID。Chat 终态发布复用该轮已暂存的 reply_message_id，日志只保留一条回复。Chat、Issue、未绑定 Issue 的 direct 与 run_only 共用未读 now 补铃规则，后继轮保持原 execution_scope；确认输入必须通过规范消息读取及 turn.input 收据。Topic Chat 或 Chat-owned 工作 Session 的绑定 Issue 日志不属于当前会话时，claim/offer 只保留安全绑定与范围 metadata，`content_jsonl` 为空、`has_more=false`、`next_seq=from_seq`；不读取或注入外部 Session 正文，不标记该范围已投递。提示词只允许注入与实际当前 Session 相同的日志。既有内部 relay lane 不构成 Topic 凭据读取外部 Issue Session 正文的授权。
+人工强制启动的活动审计使用共享操作者用户 ID `local`；新消息头的 sender_id 使用该工作区的 operator 成员 ID。历史活动和消息作者不回写。Chat 终态发布复用该轮已暂存的 reply_message_id，日志只保留一条回复。Chat、Issue、未绑定 Issue 的 direct 与 run_only 共用未读 now 补铃规则，后继轮保持原 execution_scope；确认输入必须通过规范消息读取及 turn.input 收据。Topic Chat 或 Chat-owned 工作 Session 的绑定 Issue 日志不属于当前会话时，claim/offer 只保留安全绑定与范围 metadata，`content_jsonl` 为空、`has_more=false`、`next_seq=from_seq`；不读取或注入外部 Session 正文，不标记该范围已投递。提示词只允许注入与实际当前 Session 相同的日志。既有内部 relay lane 不构成 Topic 凭据读取外部 Issue Session 正文的授权。
 
 [deriveIssueStatusWithinTransaction](../../packages/server/src/store/inbox/issue-status.ts) 按 running、awaiting_human/负责人未答 decision、pending、业务轮终态的顺序推导。建轮或随后合并的消息包含 human_sender 或 agent_dispatch 时，pending 为 todo，纯平台 pending 保持原状态。执行单的负责人最后一轮 completed/failed/cancelled 分别为 in_review/blocked/todo；无负责人时，不以其它 agent 的终态替代这条规则。intake 不要求负责人，按最后结束的业务轮推导：正常结束且有生成单为 done，并保存 completed_at；没有生成单为 in_review，失败为 blocked，取消为 todo。活跃轮、未答复负责人 decision 和父子守卫优先于 intake 终态。尝试失败、lost、换机、自动重试及监督者 replacement 不推导 Issue；成员明确恢复公开 Issue 的指定轮时按上述 pending 规则单次推导。领取只用已完成业务轮的输入边界淘汰已覆盖的旧叫醒；同轮 replacement 不参与这项淘汰。
 
-依赖闸门遵循 `MULTIREMI_DEPENDENCY_GATE`。成员发给 agent 的 now request 一律由服务端产生 force 标记，同事务保留 `dependency_force_started` 的真实成员、来源、消息/尝试、目标 agent、assigneeDispatched 和前置项审计。实际 rich mention 记录 source=mention，其余统一 request 记录 source=comment；新的执行请求使用 message send，指定执行恢复使用 turn retry，不从正文推测独立 rerun 意图。HTTP 不接受 force 标记，agent 来信仍降为 next_turn；显式 next_turn/inbox_only 不提升。结构性平台交差绕过依赖门禁，立即叫醒派活人；依赖满足后的自动开工以平台身份发 request，触发消息保留来源轮，避免误判为 agent 自发自收；timer 自动化继续受门禁约束。审计失败回滚消息、轮、状态和事件。Guard A/B、依赖及终态父单边界继续适用；子单状态每次变化向父单负责人发一条 status，已关闭父单只留原状态活动。成员负责人在 member lane 收到 status，失败和阻塞仍显示 warning；无负责人父单保留状态消息及 skip 活动，终态告警仍送给订阅者。
+依赖闸门遵循 `MULTIREMI_DEPENDENCY_GATE`。成员发给 agent 的 now request 一律由服务端产生 force 标记，同事务保留 `dependency_force_started` 的共享操作者、来源、消息/尝试、目标 agent、assigneeDispatched 和前置项审计。实际 rich mention 记录 source=mention，其余统一 request 记录 source=comment；新的执行请求使用 message send，指定执行恢复使用 turn retry，不从正文推测独立 rerun 意图。HTTP 不接受 force 标记，agent 来信仍降为 next_turn；显式 next_turn/inbox_only 不提升。结构性平台交差绕过依赖门禁，立即叫醒派活人；依赖满足后的自动开工以平台身份发 request，触发消息保留来源轮，避免误判为 agent 自发自收；timer 自动化继续受门禁约束。审计失败回滚消息、轮、状态和事件。Guard A/B、依赖及终态父单边界继续适用；子单状态每次变化向父单负责人发一条 status，已关闭父单只留原状态活动。人工接收者通过共享 Inbox 收到 status，失败和阻塞仍显示 warning；无执行负责人且父链完整的父单即使没有历史人类联系人，也通知现有工作区 operator，保留状态消息及 skip 活动。同一事件已向 operator 投递时不再追加订阅副本；后续状态事件仍独立通知，损坏或跨工作区父链继续只留不可解析审计。
 
 `20261005_separate_lane_provider_progress` 先保留旧 provider 检查点；`20261005_fold_agent_read_state` 再把 head 上的实际 seq/offset 搬到默认 agent lane，不把其它 scope 的检查点当成读取回执。`20261005_fold_decision_records` 将历史提问与决定的状态、选项和一次性令牌搬到消息，消息令牌使用部分唯一索引。领域消费者读取只投影新消息的 question/decision/member-inbox views。`20261005_attempt_input_receipts` 为 attempt 增加确认、正文读取和原始输入确认字段，并补齐历史公共 decision 的持久状态；`20261005_separate_lane_provider_progress` 分开 provider 续接位置；turn 列表在 authoritative turns 表保留 workspace/created_at/id 和 workspace/status/created_at/id 两个索引，权限条件在 LIMIT 前执行；列表不传 legacy_prompt，完整正文通过 get --input 读取。`20261005_attempt_counters_bigint` 将既有 PG attempts 的 event_count/tool_call_count 扩为 BIGINT，新库直接使用 BIGINT，保持 JavaScript 安全整数范围。SQLite 的整数行为不变。原提问、决定、插话表仍留作物理删除的备份窗口，但运行代码不读取它们。退役脚本 mul493 组同时列出 head.agent_read_state，执行前验证折叠迁移已完成。
 

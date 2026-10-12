@@ -306,7 +306,11 @@ function loadHumanWorkspaceAccess(
   }
   const denied = denyCurrentUserWorkspaceAccess(c, deps.store, workspaceId);
   if (denied) return denied;
-  const role = currentWorkspaceRoleStrict(c, deps.store, workspaceId);
+  // Human operators share machine management; task credentials keep their
+  // original owner's authority over daemon metadata and archive requests.
+  const role = accessToken?.type === "task"
+    ? deps.store.getUserRoleInWorkspace(currentRequestUserId(c), workspaceId)
+    : currentWorkspaceRoleStrict(c, deps.store, workspaceId);
   if (!role) return c.json({ error: "workspace not found" }, 404);
   return { isManager: role === "owner" || role === "admin" };
 }

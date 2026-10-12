@@ -386,8 +386,13 @@ async function verifyChatProjectionAndAccess(store: MultiremiStore): Promise<voi
     }
   }
   const path = `/api/sessions/${chatId}/log/entry?id=${messageId}`;
-  const denied = await app.request(path, { headers: { Authorization: `Bearer ${bob.token}` } });
-  expect(denied.status).not.toBe(200);
+  const shared = await app.request(path, { headers: { Authorization: `Bearer ${bob.token}` } });
+  expect(shared.status).toBe(200);
+  expect((await shared.json()).body_md).toBe(plan);
+  const unrelated=store.createTask({agentId:agent.id,prompt:'Unrelated Chat expansion'});
+  const credential=await store.createTaskAccessToken(unrelated,'mul485_alice');
+  const denied=await app.request(path,{headers:{Authorization:`Bearer ${credential.token}`}});
+  expect(denied.status).toBe(403);
 }
 
 async function verifyIssueWorkspaceAccess(store: MultiremiStore): Promise<void> {
@@ -404,8 +409,17 @@ async function verifyIssueWorkspaceAccess(store: MultiremiStore): Promise<void> 
   const allowed = await app.request(path, { headers: { Authorization: `Bearer ${reader.token}` } });
   expect(allowed.status).toBe(200);
   expect((await allowed.json()).body_md).toBe(plan);
-  const denied = await app.request(path, { headers: { Authorization: `Bearer ${outsider.token}` } });
-  expect(denied.status).not.toBe(200);
+  const shared = await app.request(path, { headers: { Authorization: `Bearer ${outsider.token}` } });
+  expect(shared.status).toBe(200);
+  expect((await shared.json()).body_md).toBe(plan);
+  const bound=await store.createAccessToken({name:'MUL485 workspace-scoped PAT',type:'pat',workspaceId:'local'});
+  const otherAgent=store.createAgent({name:'MUL485 other workspace Agent',provider:'codex',workspaceId:'local'});
+  const otherTask=store.createTask({agentId:otherAgent.id,prompt:'Bound workspace expansion'});
+  const task=await store.createTaskAccessToken(otherTask,'mul485_reader');
+  for(const credential of [bound,task]) {
+    const denied=await app.request(path,{headers:{Authorization:`Bearer ${credential.token}`}});
+    expect(denied.status).toBe(404);
+  }
 }
 
 afterEach(resetMultiremiTestEnv);
@@ -420,11 +434,11 @@ describe("MUL-485 SQLite", () => {
     verifyPriorityAndCompatibility();
   });
 
-  it("folds a private Chat and denies another member the expanded body", async () => {
+  it("folds a Chat, shares human expansion, and denies unrelated task expansion", async () => {
     await verifyChatProjectionAndAccess(createStore());
   });
 
-  it("limits issue entry expansion to its workspace", async () => {
+  it("shares human issue expansion and enforces credential workspace bounds", async () => {
     await verifyIssueWorkspaceAccess(createStore());
   });
 
@@ -576,11 +590,11 @@ describe.skipIf(!pgAdminUrl)("MUL-485 PostgreSQL", () => {
     verifyPriorityAndCompatibility();
   });
 
-  it("folds a private Chat and enforces creator access on real PostgreSQL", async () => {
+  it("folds a Chat, shares human expansion, and denies unrelated task expansion on real PostgreSQL", async () => {
     await verifyChatProjectionAndAccess(store);
   });
 
-  it("limits issue entry expansion to its workspace on real PostgreSQL", async () => {
+  it("shares human issue expansion and enforces credential workspace bounds on real PostgreSQL", async () => {
     await verifyIssueWorkspaceAccess(store);
   });
 

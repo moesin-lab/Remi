@@ -166,7 +166,8 @@
     "change_logo_aria": "ワークスペースのロゴを変更",
     "click_logo_hint": "ロゴをクリックして新しい画像をアップロード",
     "toast_logo_updated": "ワークスペースのロゴを更新しました",
-    "toast_logo_failed": "ワークスペースのロゴをアップロードできませんでした"
+    "toast_logo_failed": "ワークスペースのロゴをアップロードできませんでした",
+    "shared_operator_description": "すべての操作者が同じワークスペース ID を使用します。チャット、受信トレイの状態、設定は共有されます。"
   },
   "prompts": {
     "title": "エージェントプロンプト",
@@ -476,10 +477,26 @@
     "source_capabilities_hint": "アップデーターのアーキテクチャに必要なマニフェスト内容を確認します。ダウンロードや現在の環境との互換性を保証するものではありません。すべての事前チェックが必要です。",
     "source_unknown_requirement": "不明な要件：{{requirement}}",
     "update_modes": {
-      "images": { "label": "ホストによるイメージ更新", "description": "ホストのアップデーターがイメージを取得し API/Web コンテナーを再作成します。", "migration": "ホストのアップデーターと互換性のある API/Web イメージダイジェストを準備します。非公開設定に MULTIREMI_PLATFORM_UPDATE_MODE=images を指定し、既存の Compose プロジェクトとバックアップ設定を使います。既存アプリオーバーレイは事前に移行してください。" },
-      "host_application": { "label": "ホストによるアプリ更新", "description": "ホストのアップデーターが既存ベースイメージにアプリパッケージを導入します。", "migration": "ホストのアップデーター、Docker アクセス、完全なバックアップ、隔離移行テストを準備します。既存の docker_compose または local_profile 設定で MULTIREMI_PLATFORM_UPDATE_MODE=application を指定します。ホストのアップデーターは引き続き必要です。" },
-      "internal_application": { "label": "コンテナー内部のアプリ更新", "description": "Compose 内のアップデーターが API/Web と同梱 Bun/Node を切り替え、コンテナーは稼働を続けます。", "migration": "監視プログラム対応の API/Web イメージを揃えます。compose.internal-updates.yml を追加し、REMI_UPDATER_IMAGE と REMI_UPDATER_ENV_FILE、API と一致する認証情報、HTTPS 更新元を設定します。オーバーレイを含めてアップデーターと隔離テストサービスを起動し、監視と初期コピーの準備完了を待ちます。" },
-      "systemd_release": { "label": "Systemd リリース更新", "description": "ホストのアップデーターがリリースディレクトリを切り替え systemd サービスを再起動します。", "migration": "Linux のリリースディレクトリ、管理対象 API/Web systemd サービス、完全なバックアップを用意します。MULTIREMI_PLATFORM_DRIVER=systemd_release とソースアーカイブの更新元を設定します。Docker からはデータとサービス配置の別途移行も必要です。" }
+      "images": {
+        "label": "ホストによるイメージ更新",
+        "description": "ホストのアップデーターがイメージを取得し API/Web コンテナーを再作成します。",
+        "migration": "ホストのアップデーターと互換性のある API/Web イメージダイジェストを準備します。非公開設定に MULTIREMI_PLATFORM_UPDATE_MODE=images を指定し、既存の Compose プロジェクトとバックアップ設定を使います。既存アプリオーバーレイは事前に移行してください。"
+      },
+      "host_application": {
+        "label": "ホストによるアプリ更新",
+        "description": "ホストのアップデーターが既存ベースイメージにアプリパッケージを導入します。",
+        "migration": "ホストのアップデーター、Docker アクセス、完全なバックアップ、隔離移行テストを準備します。既存の docker_compose または local_profile 設定で MULTIREMI_PLATFORM_UPDATE_MODE=application を指定します。ホストのアップデーターは引き続き必要です。"
+      },
+      "internal_application": {
+        "label": "コンテナー内部のアプリ更新",
+        "description": "Compose 内のアップデーターが API/Web と同梱 Bun/Node を切り替え、コンテナーは稼働を続けます。",
+        "migration": "監視プログラム対応の API/Web イメージを揃えます。compose.internal-updates.yml を追加し、REMI_UPDATER_IMAGE と REMI_UPDATER_ENV_FILE、API と一致する認証情報、HTTPS 更新元を設定します。オーバーレイを含めてアップデーターと隔離テストサービスを起動し、監視と初期コピーの準備完了を待ちます。"
+      },
+      "systemd_release": {
+        "label": "Systemd リリース更新",
+        "description": "ホストのアップデーターがリリースディレクトリを切り替え systemd サービスを再起動します。",
+        "migration": "Linux のリリースディレクトリ、管理対象 API/Web systemd サービス、完全なバックアップを用意します。MULTIREMI_PLATFORM_DRIVER=systemd_release とソースアーカイブの更新元を設定します。Docker からはデータとサービス配置の別途移行も必要です。"
+      }
     },
     "preflight_ready": "チェック成功",
     "preflight_blocked": "チェック失敗",

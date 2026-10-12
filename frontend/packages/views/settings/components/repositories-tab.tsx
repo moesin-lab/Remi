@@ -1,5 +1,7 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useEffect, useState } from "react";
 import { Save, Plus, Trash2, Pencil, X } from "lucide-react";
 import { Input } from "@multiremi/ui/components/ui/input";
@@ -7,7 +9,6 @@ import { Button } from "@multiremi/ui/components/ui/button";
 import { Card, CardContent } from "@multiremi/ui/components/ui/card";
 import { toast } from "sonner";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useCurrentWorkspace } from "@multiremi/core/paths";
 import { memberListOptions, workspaceKeys } from "@multiremi/core/workspace/queries";
@@ -31,7 +32,7 @@ function isDirty(local: WorkspaceRepo[], saved: WorkspaceRepo[]): boolean {
 
 export function RepositoriesTab() {
   const { t } = useT("settings");
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
   const workspace = useCurrentWorkspace();
   const wsId = useWorkspaceId();
   const qc = useQueryClient();

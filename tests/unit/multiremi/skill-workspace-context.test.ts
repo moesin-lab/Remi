@@ -39,7 +39,7 @@ describe("skill workspace request context", () => {
         const result = await created.json();
         const skill = result.skill ?? result;
         expect(skill.workspaceId ?? skill.workspace_id).toBe(workspace.id);
-        expect(skill.createdBy ?? skill.created_by).toBe(user.id);
+        expect(skill.createdBy ?? skill.created_by).toBe("local");
         const listed = await app.request(route, { headers: selected });
         expect(listed.status).toBe(200);
         const list = await listed.json();
@@ -51,23 +51,25 @@ describe("skill workspace request context", () => {
       });
     }
 
-    it(`does not expose other workspaces' skill summaries: ${route}`, async () => {
+    it(`keeps skill summaries scoped to the selected workspace: ${route}`, async () => {
       const { store, other, headers, app } = await fixture();
       store.createSkill({ workspaceId: "local", name: "Local secret", description: "Private summary" });
       store.createSkill({ workspaceId: other.id, name: "Other secret", description: "Foreign summary" });
       const inferred = await app.request(`${route}/search?q=secret`, { headers });
       expect(inferred.status).toBe(200);
       const inferredResult = await inferred.json();
-      expect(inferredResult.skills ?? inferredResult).toEqual([]);
+      expect((inferredResult.skills ?? inferredResult).map((item: { name: string }) => item.name)).toEqual(["Local secret"]);
       const contexts: Record<string, string>[] = [{ "X-Workspace-Slug": other.slug }, { "X-Workspace-ID": other.id }];
       for (const context of contexts) {
         const response = await app.request(`${route}/search?q=secret`, { headers: { ...headers, ...context } });
-        expect(response.status).toBe(404);
-        expect(await response.json()).toEqual({ error: "workspace not found" });
+        expect(response.status).toBe(200);
+        const selected = await response.json();
+        expect((selected.skills ?? selected).map((item: { name: string }) => item.name)).toEqual(["Other secret"]);
       }
       const explicit = await app.request(`${route}/search?q=secret&workspace_id=${other.id}`, { headers });
-      expect(explicit.status).toBe(404);
-      expect(await explicit.json()).toEqual({ error: "workspace not found" });
+      expect(explicit.status).toBe(200);
+      const selected = await explicit.json();
+      expect((selected.skills ?? selected).map((item: { name: string }) => item.name)).toEqual(["Other secret"]);
     });
 
     it(`authorizes existing skills from their resource workspace: ${route}`, async () => {

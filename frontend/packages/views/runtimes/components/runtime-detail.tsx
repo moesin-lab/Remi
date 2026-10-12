@@ -1,11 +1,12 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useEffect, useState } from "react";
 import {
   Trash2,
   ChevronRight,
   Cpu,
-  Globe,
   Lock,
   Copy,
   Check,
@@ -19,12 +20,10 @@ import { toast } from "sonner";
 import { useQuery } from "@tanstack/react-query";
 import type { AgentRuntime, Agent, MemberWithUser } from "@multiremi/core/types";
 import { RuntimeProtocolLine } from "./runtime-protocol-line";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { memberListOptions, agentListOptions } from "@multiremi/core/workspace/queries";
 import {
   useUpdateDaemonDedicated,
-  useUpdateRuntime,
 } from "@multiremi/core/runtimes/mutations";
 import { daemonRoutingOptions } from "@multiremi/core/runtimes/queries";
 import { deriveRuntimeHealth } from "@multiremi/core/runtimes";
@@ -134,7 +133,7 @@ export function RuntimeDetail({ runtime }: { runtime: AgentRuntime }) {
     runtime.runtime_mode === "local"
       ? getMetaString(runtime.metadata, "acp_version")
       : null;
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
   const wsId = useWorkspaceId();
   const paths = useWorkspacePaths();
   const navigation = useNavigation();
@@ -271,7 +270,7 @@ export function RuntimeDetail({ runtime }: { runtime: AgentRuntime }) {
           <RuntimePluginsTab runtime={runtime} canManage={!!canDelete} />
         </TabsContent>
         <TabsContent value="workspaces" className="min-h-0 flex-1 overflow-y-auto">
-          <RuntimeWorkspacesTab runtime={runtime} canManage={!!isRuntimeOwner || (!user && runtime.owner_id === "local")} />
+          <RuntimeWorkspacesTab runtime={runtime} canManage={isAdmin || !!isRuntimeOwner} />
         </TabsContent>
 
 
@@ -413,7 +412,6 @@ function HeroCard({
   runtime,
   health,
   lastSeen,
-  ownerMember,
   cliVersion,
   daemonShort,
   canEdit,
@@ -459,22 +457,7 @@ function HeroCard({
       {/* User-visible facts — Owner / Device / Runtime, each labelled.
           Replaces the older dense `·`-separated meta strip that mixed
           everything (including dev-only IDs) at the same visual weight. */}
-      <dl className="grid grid-cols-1 divide-y sm:grid-cols-3 sm:divide-x sm:divide-y-0">
-        <Fact label="Owner">
-          {ownerMember ? (
-            <span className="inline-flex min-w-0 items-center gap-1.5">
-              <ActorAvatar
-                actorType="member"
-                actorId={ownerMember.user_id}
-                size={18}
-                enableHoverCard
-              />
-              <span className="cursor-pointer truncate text-sm">{ownerMember.name}</span>
-            </span>
-          ) : (
-            <span className="text-sm text-muted-foreground">—</span>
-          )}
-        </Fact>
+      <dl className="grid grid-cols-1 divide-y sm:grid-cols-2 sm:divide-x sm:divide-y-0">
         <Fact label="Device">
           {device?.hostname ? (
             <Tooltip>
@@ -671,16 +654,6 @@ function DiagnosticsCard({
         <span className="text-xs font-semibold">{t(($) => $.detail.diagnostics_title)}</span>
       </div>
       <div className="space-y-3 p-4">
-        <div>
-          <div className="mb-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">
-            {t(($) => $.detail.diagnostics_visibility)}
-          </div>
-          {canDelete ? (
-            <VisibilityEditor runtime={runtime} />
-          ) : (
-            <VisibilityReadout runtime={runtime} />
-          )}
-        </div>
         <RuntimeExecutionBindings runtimeId={runtime.id} />
         {isLocal && (
           <div className="border-t pt-3">
@@ -759,118 +732,9 @@ function DiagnosticsCard({
 // it now lives in the hover tooltip so the Diagnostics column stays compact
 // and matches the surrounding sections. Older backends that omit the field
 // render as "Private" to match the strict default.
-function VisibilityReadout({ runtime }: { runtime: AgentRuntime }) {
-  const { t } = useT("runtimes");
-  const visibility = runtime.visibility === "public" ? "public" : "private";
-  const Icon = visibility === "public" ? Globe : Lock;
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <span className="inline-flex items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1.5 text-xs">
-            <Icon className="h-3 w-3 text-muted-foreground" />
-            <span className="font-medium">
-              {t(($) => $.detail.visibility_label[visibility])}
-            </span>
-          </span>
-        }
-      />
-      <TooltipContent>
-        {t(($) => $.detail.visibility_hint[visibility])}
-      </TooltipContent>
-    </Tooltip>
-  );
-}
 
 // VisibilityEditor lets the runtime owner (or workspace admin) flip
 // public↔private. The PATCH endpoint also re-checks; this is a UI gate, not
 // a security boundary. Per-choice description text lives in the hover
 // tooltip so the two buttons stay a tight icon+label pair instead of the
 // previous two-line block that competed with the surrounding cards.
-function VisibilityEditor({ runtime }: { runtime: AgentRuntime }) {
-  const { t } = useT("runtimes");
-  const wsId = useWorkspaceId();
-  const updateRuntime = useUpdateRuntime(wsId);
-  const current = runtime.visibility === "public" ? "public" : "private";
-
-  const flip = (next: "private" | "public") => {
-    if (next === current) return;
-    updateRuntime.mutate(
-      { runtimeId: runtime.id, patch: { visibility: next } },
-      {
-        onSuccess: () =>
-          toast.success(
-            t(($) => $.detail.visibility_toast_updated, {
-              visibility: t(($) => $.detail.visibility_label[next]),
-            }),
-          ),
-        onError: (err) =>
-          toast.error(
-            err instanceof Error && err.message
-              ? err.message
-              : t(($) => $.detail.visibility_toast_failed),
-          ),
-      },
-    );
-  };
-
-  return (
-    <div className="inline-flex items-center gap-0.5 rounded-md bg-muted p-0.5">
-      <VisibilityChoice
-        active={current === "private"}
-        icon={<Lock className="h-3 w-3" />}
-        label={t(($) => $.detail.visibility_label.private)}
-        tooltip={t(($) => $.detail.visibility_hint.private)}
-        disabled={updateRuntime.isPending}
-        onClick={() => flip("private")}
-      />
-      <VisibilityChoice
-        active={current === "public"}
-        icon={<Globe className="h-3 w-3" />}
-        label={t(($) => $.detail.visibility_label.public)}
-        tooltip={t(($) => $.detail.visibility_hint.public)}
-        disabled={updateRuntime.isPending}
-        onClick={() => flip("public")}
-      />
-    </div>
-  );
-}
-
-function VisibilityChoice({
-  active,
-  icon,
-  label,
-  tooltip,
-  disabled,
-  onClick,
-}: {
-  active: boolean;
-  icon: React.ReactNode;
-  label: string;
-  tooltip: string;
-  disabled: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <button
-            type="button"
-            onClick={onClick}
-            disabled={disabled}
-            className={`inline-flex items-center gap-1.5 rounded px-2 py-1 text-xs font-medium transition-colors ${
-              active
-                ? "bg-background text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground"
-            } ${disabled ? "cursor-not-allowed opacity-60" : ""}`}
-          >
-            <span className="shrink-0">{icon}</span>
-            <span>{label}</span>
-          </button>
-        }
-      />
-      <TooltipContent>{tooltip}</TooltipContent>
-    </Tooltip>
-  );
-}

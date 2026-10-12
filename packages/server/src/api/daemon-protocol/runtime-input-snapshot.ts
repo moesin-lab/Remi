@@ -37,8 +37,7 @@ export function runtimeInputSnapshot(store: MultiremiStore, runtimeId: string, s
       entities.push(config("plugin.desired_revision", { revision: desired.revision }));
     }
     const token = session?.ownerAccessToken;
-    const role = token?.userId ? store.getUserRoleInWorkspace(token.userId, workspaceId)
-      : workspaceId === "local" || !token ? "owner" : null;
+    const role = !token || token.type === "daemon" && token.workspaceId === workspaceId ? "owner" : null;
     const workspace = workspaceReposResponse(store, runtime.workspaceId ?? "local", role === "owner" || role === "admin");
     if (workspace) entities.push(config("workspace.settings", { settings: workspace.settings }), config("workspace.relay", { relay: workspace.relay }));
     const directive = store.feishuBotDirectiveForRuntime(workspaceId, runtimeId);

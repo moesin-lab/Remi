@@ -207,7 +207,7 @@ describe("Multiremi API — issue endpoints", () => {
     });
   });
 
-  it("gives an owner task token delete parity while rejecting daemon and member credentials", async () => {
+  it("gives shared human and owner task credentials delete parity while rejecting daemons", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
     const target = createResponsibleTestIssue(store, { title: "Human-admin delete only", workspaceId: "local" });
@@ -260,7 +260,7 @@ describe("Multiremi API — issue endpoints", () => {
     })).status).toBe(200);
     expect(store.getIssue(taskBatchTarget.id)).toBeNull();
 
-    for (const token of [daemonToken.token, memberToken.token]) {
+    for (const token of [daemonToken.token]) {
       const single = await app.request(`/api/issues/${target.id}`, {
         method: "DELETE",
         headers: { Authorization: `Bearer ${token}` },
@@ -279,24 +279,28 @@ describe("Multiremi API — issue endpoints", () => {
       expect(batch.status).toBe(403);
       expect(store.getIssue(target.id)?.id).toBe(target.id);
     }
+    expect((await app.request(`/api/issues/${target.id}`, {
+      method: "DELETE", headers: { Authorization: `Bearer ${memberToken.token}` },
+    })).status).toBe(204);
+    expect(store.getIssue(target.id)).toBeNull();
+    const memberBatchTarget = createResponsibleTestIssue(store, { title: "Shared human batch delete", workspaceId: "local" });
+    expect((await app.request("/api/issues/batch-delete", {
+      method: "POST", headers: { Authorization: `Bearer ${memberToken.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ issue_ids: [memberBatchTarget.id] }),
+    })).status).toBe(200);
+    expect(store.getIssue(memberBatchTarget.id)).toBeNull();
   });
 
-  it("preflights batch-delete workspace access before deleting any Issue", async () => {
+  it("preflights a bound credential's batch-delete workspace access before deleting any Issue", async () => {
     const store = createStore();
+    store.createWorkspace({ id: "remote", name: "Remote", slug: "remote" });
     const local = createResponsibleTestIssue(store, { title: "Local batch delete", workspaceId: "local" });
     const remote = createResponsibleTestIssue(store, { title: "Remote batch delete", workspaceId: "remote" });
-    store.createWorkspaceMember({
-      id: "mem_batch_owner",
-      workspaceId: "local",
-      userId: "usr_batch_owner",
-      name: "Batch owner",
-      role: "owner",
-    });
     const token = await store.createAccessToken({
       name: "local-only",
       type: "pat",
       workspaceId: "local",
-      userId: "usr_batch_owner",
+      userId: "local",
     });
     const app = createMultiremiApp({ store, authToken: "root-secret" });
 
@@ -400,6 +404,7 @@ describe("Multiremi API — issue endpoints", () => {
       position: 1,
     });
     createResponsibleTestIssue(store, { title: "Other workspace", workspaceId: "other", status: "open" });
+    store.createWorkspace({ id: "remote", name: "Remote", slug: "remote" });
     const remoteIssue = createResponsibleTestIssue(store, { title: "Remote workspace issue", workspaceId: "remote", status: "open" });
     const label = store.createLabel({ name: "Batch label", color: "#22c55e" });
     store.attachLabelToIssue(first.id, label.id);
@@ -976,6 +981,7 @@ describe("Multiremi API — issue endpoints", () => {
       parentIssueId: parent.id, total: 1, done: 1, cancelled: 0, blocked: 0, waiting: 0, active: 0,
     }]);
 
+    store.createWorkspace({ id: "remote", name: "Remote", slug: "remote" });
     const remoteParent = createResponsibleTestIssue(store, { title: "Remote API parent", workspaceId: "remote" });
     const remoteChild = createResponsibleTestIssue(store, { title: "Remote API child", workspaceId: "remote", parentIssueId: remoteParent.id });
 
@@ -1181,6 +1187,7 @@ describe("Multiremi API — issue endpoints", () => {
     expect(compatibilityListBody.labels[0].workspace_id).toBe("local");
     expect(compatibilityListBody.labels[0].workspaceId).toBeUndefined();
 
+    store.createWorkspace({ id: "remote", name: "Remote", slug: "remote" });
     const remoteLabel = store.createLabel({ name: "Remote Label", color: "#112244", workspaceId: "remote" });
     const camelWorkspaceLabelList = await app.request("/api/labels?workspaceId=remote");
     const camelWorkspaceLabelListBody = await camelWorkspaceLabelList.json();

@@ -1,5 +1,5 @@
 import type { CommandInventoryEntry } from "../apps/remi/cli/core/command-registry.js";
-import { RETIRED_CLI_ROUTES } from "../packages/server/src/api/retired-cli-routes.js";
+import { RETIRED_CLI_ROUTES, WORKSPACE_OPERATOR_RETIRED_ROUTES } from "../packages/server/src/api/retired-cli-routes.js";
 
 export const CLI_EXEMPT_CATEGORIES = [
   "daemon_internal_protocol",
@@ -119,7 +119,7 @@ export function validateCliCapabilities(
   const exemptCategories = new Set<string>(CLI_EXEMPT_CATEGORIES);
   for (const [route, mapping] of Object.entries(manifest.routes)) {
     const retiredRoute = "cli_exempt" in mapping && mapping.category === "retired_route";
-    if (Boolean(RETIRED_CLI_ROUTES[route]) !== retiredRoute) {
+    if (Boolean(RETIRED_CLI_ROUTES[route] ?? WORKSPACE_OPERATOR_RETIRED_ROUTES[route]) !== retiredRoute) {
       errors.push(`${route} retired_route classification differs from the retired HTTP inventory`);
     }
     const discriminators = ["command", "planned_command", "cli_exempt"]

@@ -99,9 +99,9 @@ function flow() {
 /** A real native Q in the original transport Chat, with one explicitly mapped human. */
 function questionFlow() {
   const store = createLocalStore();
-  const member = store.getWorkspaceMember("mem_local_local")!;
+  const operator = store.getWorkspaceOperator("local")!;
   const user = store.getOrCreateUser({ externalId: "ou_kind_owner", name: "Kind question human" });
-  db!.run("UPDATE multiremi_workspace_members SET user_id=? WHERE id=?", [user.id, member.id]);
+  const member = store.createWorkspaceMember({ id: "mem_kind_human", workspaceId: "local", userId: user.id, name: user.name });
   db!.run("UPDATE multiremi_users SET feishu_union_id=? WHERE id=?", ["on_kind_owner", user.id]);
   const seen = new Date().toISOString();
   db!.run(`INSERT INTO multiremi_feishu_bot_senders(id,workspace_id,app_id,open_id,union_id,display_name,allowed,first_seen_at,last_seen_at)
@@ -120,11 +120,11 @@ function questionFlow() {
     expect(created.ok).toBe(true);
     const request = store.getTaskHumanRequest(String(created.message_id))!;
     expect(store.getQuestion(request.id)).toMatchObject({ session_id: turn.session_id, wait_status: "waiting",
-      current_handler: { type: "member", id: member.id } });
+      current_handler: { type: "member", id: operator.id } });
     return request;
   };
   const respond = (id: string) => store.respondTaskHumanRequest(id, {
-    response: { answers: { "Continue?": "Yes" } }, respondedBy: member.id,
+    response: { answers: { "Continue?": "Yes" } }, respondedBy: operator.id,
     expectedRouteRevision: store.getQuestion(id)!.route_revision,
   });
   const interaction = () => {
@@ -352,9 +352,9 @@ describe("C5 full fake-channel delivery", () => {
     expect(text[0]).toContain(`/inbox?item=${request.id}&question=${request.id}`);
     expect(text[0]).not.toContain("/chat?session=");
     const human = await f.store.createAccessToken({ type: "pat", name: "Specified question human", workspaceId: "local",
-      userId: f.store.getWorkspaceMember("mem_local_local")!.userId! });
+      userId: f.store.getWorkspaceMember("mem_kind_human")!.userId! });
     const api = createMultiremiApp({ store: f.store, authToken: "fallback-master" }), headers = { Authorization: `Bearer ${human.token}` };
-    expect((await api.request(`/api/sessions/${f.store.getQuestion(request.id)!.session_id}/messages`, { headers })).status).toBe(403);
+    expect((await api.request(`/api/sessions/${f.store.getQuestion(request.id)!.session_id}/messages`, { headers })).status).toBe(200);
     expect((await api.request(`/api/messages/${request.id}/question`, { headers })).status).toBe(200);
     expect(f.store.getQuestion(request.id)?.status).toBe("pending");
   });
@@ -398,7 +398,7 @@ describe("C5 full fake-channel delivery", () => {
     expect(f.store.getQuestion(request.id)?.summary?.body_md).toBe("Read the worker's original options");
   });
 
-  it("moves presentation to a private Chat for the new human and revokes the old Remi notification lane", async () => {
+  it("refreshes the external contact route in the shared presentation Chat and rejects stale presentation revisions", async () => {
     const f = await notifiedWorkerQuestion("handoff_lane"), { request, original, record, app, headers } = f;
     expect((await app.request(`/api/messages/${request.id}/question`, { headers })).status).toBe(200);
     const nextUser = f.store.getOrCreateUser({ externalId: "kind-next-human", name: "New responsible human" });
@@ -406,18 +406,19 @@ describe("C5 full fake-channel delivery", () => {
     f.store.upsertFeishuBotConfig("local", { agentId: f.agent.id, runtimeId: f.runtimeId, appId: f.config.appId,
       appSecretOp: "keep", domain: "feishu", enabled: true, responsibleMemberId: next.id });
     const moved = f.store.getQuestion(request.id)!;
-    expect(moved.current_handler).toEqual({ type: "member", id: next.id });
+    expect(moved.current_handler).toEqual({ type: "member", id: f.store.getWorkspaceOperator("local")!.id });
+    expect(moved.route_revision).toBe(original.route_revision + 1);
     expect(moved.session_id).toBe(original.session_id);
     const newRecord = f.store.getMessage(request.id)!.metadata.question as { presentation_session_id: string };
-    expect(newRecord.presentation_session_id).not.toBe(record.presentation_session_id);
-    expect(f.store.getChatSession(newRecord.presentation_session_id)).toMatchObject({ creatorId: nextUser.id, agentId: f.agent.id, workspaceId: "local" });
-    expect((await app.request(`/api/messages/${request.id}/question`, { headers })).status).toBe(403);
+    expect(newRecord.presentation_session_id).toBe(record.presentation_session_id);
+    expect(f.store.getChatSession(newRecord.presentation_session_id)).toMatchObject({ creatorId: "local", agentId: f.agent.id, workspaceId: "local" });
+    expect((await app.request(`/api/messages/${request.id}/question`, { headers })).status).toBe(200);
     expect((await app.request(`/api/messages/${request.id}/question/present`, { method: "POST", headers,
-      body: JSON.stringify({ expected_route_revision: moved.route_revision, summary: "Old notification" }) })).status).toBe(403);
+      body: JSON.stringify({ expected_route_revision: original.route_revision, summary: "Old notification" }) })).status).toBe(409);
     const oldHuman = await f.store.createAccessToken({ type: "pat", name: "Previous human", workspaceId: "local",
-      userId: f.store.getWorkspaceMember("mem_local_local")!.userId! });
+      userId: f.store.getWorkspaceMember("mem_kind_human")!.userId! });
     expect((await app.request(`/api/sessions/${newRecord.presentation_session_id}/messages`,
-      { headers: { Authorization: `Bearer ${oldHuman.token}` } })).status).toBe(403);
+      { headers: { Authorization: `Bearer ${oldHuman.token}` } })).status).toBe(200);
   });
 
   it("records a permanently rejected native CoT as failed while the independent result handler still delivers", async () => {

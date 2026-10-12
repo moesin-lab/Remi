@@ -1,19 +1,19 @@
 ---
-title: 身份与工作区授权
+title: 平台登录与共享工作区身份
 status: active
-summary: 定位当前登录、请求身份、工作区成员及 task/daemon 凭据边界，说明鉴权修改的验证入口。
+summary: 区分平台登录账号与统一工作区操作者，说明历史数据、机器凭据和验证边界。
 ---
 
-# 身份与工作区授权
+# 平台登录与共享工作区身份
 
-Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。请求身份在中间件解析；工作区、角色和资源权限由对应路由与 guard 判断。本页描述实现契约，不代表已完成所有路由的安全审计或生产登录验证。
+Remi 的平台入口保留独立登录账号和分类型访问凭据；登录后的人类操作者共享全部工作区。工作区内统一使用 `local` 操作身份，每个工作区有一个稳定的内部 operator 记录，成员角色不再决定人类权限。本页描述实现契约，不代表已完成所有路由的安全审计或生产登录验证。
 
 ## 登录与请求身份
 
 - [登录路由](../../packages/server/src/api/routers/auth.ts)把飞书 `open_id`、`union_id` 交给 [WorkspacesRepo.getOrCreateUser](../../packages/server/src/store/repos/workspaces-repo.ts)。身份按 `union_id`、`open_id` 解析；兼容邮箱匹配时不会复用已绑定其他外部身份的用户；否则创建独立用户记录。
 - [localAuthResponse](../../packages/server/src/api/helpers/login.ts)签发包含真实 `userId` 的 30 天 PAT，`purpose` 为 `session`。该文件中的邮箱验证码与 Google fallback 共用 `MULTIREMI_ALLOW_EMAIL_CODE_LOGIN`，默认关闭；启用后验证码直接出现在响应中，Google fallback 也不校验 Google 凭据，不能把它们描述成生产邮件发送或 Google OAuth。当前 `sendLocalAuthCode` 在校验验证码前就调用 `store.updateCurrentUser` 修改旧 current user 的姓名/邮箱，启用此路径时需要单独检查这个副作用。
-- 密码登录使用独立的 `MULTIREMI_ALLOW_PASSWORD_LOGIN` 开关，默认关闭；本机 profile 显式开启。`POST /auth/password` 验证预配账号，再为已确认的真实用户签发 30 天 session PAT，不按邮箱重新创建身份。[私有凭据仓储](../../packages/server/src/store/repos/password-accounts-repo.ts)保存唯一登录邮箱和 Argon2id 哈希，哈希不进入公开 User 类型。`POST /api/auth/password-accounts` 仅允许部署主令牌或显式无鉴权本地模式配置账号及指定工作区 owner 成员；它不是用户自助注册接口，不接受旧 `local` 身份作为密码账号。普通 PAT、JWT、task 和 daemon 均不能调用。
-- `/api/me` 的读取、资料与 onboarding 写入沿用已认证用户，`/api/cli-token` 交接也保留同一用户身份；部署主令牌和原有本地模式仍回退到 `local`。密码登录和刷新页面必须保持同一用户身份，不能把请求身份替换成全局 current user。Web 退出调用 `/auth/logout` 撤销 session PAT 并清理 HttpOnly Cookie，原生 token 客户端的退出行为保持不变。
+- 密码登录使用独立的 `MULTIREMI_ALLOW_PASSWORD_LOGIN` 开关，默认关闭；本机 profile 显式开启。`POST /auth/password` 验证预配账号，再为已确认的真实用户签发 30 天 session PAT，不按邮箱重新创建身份。[私有凭据仓储](../../packages/server/src/store/repos/password-accounts-repo.ts)保存唯一登录邮箱和 Argon2id 哈希，哈希不进入公开 User 类型。`POST /api/auth/password-accounts` 仅允许部署主令牌或显式无鉴权本地模式配置账号；工作区使用统一 operator；它不是用户自助注册接口，不接受旧 `local` 身份作为密码账号。普通 PAT、JWT、task 和 daemon 均不能调用。
+- `/api/me` 的读取、资料与 onboarding 写入沿用已认证用户，`/api/cli-token` 交接也保留同一用户身份；部署主令牌和原有本地模式仍回退到 `local`。密码登录、刷新页面、账号资料和凭据管理保持真实登录账号；工作区业务通过 `currentRequestUserId` 使用统一操作者，不能把两种身份混用。Web 退出调用 `/auth/logout` 撤销 session PAT 并清理 HttpOnly Cookie，原生 token 客户端的退出行为保持不变。
 - [API 中间件](../../packages/server/src/api/server.ts)在开启鉴权时识别部署主令牌、持久化访问令牌和 JWT。普通 API 优先使用 Bearer，scheme 不区分大小写并规范化头部空白；仅在缺少整个 `Authorization` 头且方法为 GET/HEAD 时接受 `multimira_auth` Cookie。无部署主令牌的本地模式只允许未带凭据的请求回退管理员，显式 `Authorization` 校验失败一律返回 401。公开登录、健康、下载、Webhook 等路径有显式例外，应同时检查各路由自己的验证。
 - [MultiremiRequestAuth](../../packages/server/src/api/wire/context.ts)保存解析后的访问令牌及用户身份，不缓存统一的 workspace/role。部署主令牌和无鉴权本地模式保留无真实用户、回退 `local` 管理员的兼容路径；不能将这种路径的行为当作普通用户授权结果。
 
@@ -21,16 +21,16 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 
 | 边界 | 当前行为与源码 |
 |---|---|
-| 人类用户的工作区权限 | [denyCurrentUserWorkspaceAccess](../../packages/server/src/api/helpers/auth-guards.ts)按成员关系判断；真实用户的 PAT 可访问其加入的多个工作区，不以登录时写入的 `workspaceId: local` 限制工作区。非成员通常返回 404 隐藏存在性。[工作区路由](../../packages/server/src/api/routers/workspaces.ts)也据此过滤列表。 |
-| 成员与角色 | [WorkspacesRepo](../../packages/server/src/store/repos/workspaces-repo.ts)读取成员 `userId`，兼容旧成员 ID 形式。[成员 wire](../../packages/server/src/api/wire/workspaces.ts)的 `user_id` 同样优先使用真实 `userId`，仅在缺失时按旧成员 ID 推导；成员记录 `id` 与用户 ID 不可混用，否则 Web 无法识别已有角色。[currentWorkspaceRoleStrict](../../packages/server/src/api/wire/context.ts)可返回无角色；带默认值的 `currentWorkspaceRole` 不能单独证明成员资格。管理员操作使用相应的 admin guard。 |
-| task 凭据 | [auth-guards.ts](../../packages/server/src/api/helpers/auth-guards.ts)将其限制在绑定工作区，并继承所属用户的业务权限，包括环境值与 SCM 配置等。`taskTokenHardDenyCategory` 另外阻止凭据签发/揭示、身份、工作区生命周期、权限配置等敏感操作；它不是只读令牌。 |
-| daemon 凭据 | 同一 guard 文件中的请求允许列表和 `denyNonDaemonOperationalAccess` 区分机器控制面与人类操作；daemon 绑定、runtime/task 归属及 owner 成员资格另有检查。旧 CLI PAT 升级、注册和特定 SCM 请求存在明确例外，应按实现核对。 |
+| 人类操作者的工作区权限 | [denyCurrentUserWorkspaceAccess](../../packages/server/src/api/helpers/auth-guards.ts)允许已通过入口鉴权的人类访问所有现存工作区。资源仍必须属于请求所指向的工作区，未知资源返回 404。匿名请求在开启登录保护时仍返回 401。 |
+| 操作身份与历史成员 | [WorkspacesRepo](../../packages/server/src/store/repos/workspaces-repo.ts)提供稳定 operator；工作区 API 的 `operator` 返回 `userId` 和 `memberId`。成员列表默认仅返回 operator，`include_history=true` 只供历史作者显示。旧用户、成员、作者和外部账号映射保留，不提供邀请、角色修改、成员增删或退出工作区功能；旧写接口返回 410。底层历史成员查找不能改成无条件返回 operator，否则会破坏飞书身份核验。 |
+| task 凭据 | [auth-guards.ts](../../packages/server/src/api/helpers/auth-guards.ts)将其限制在绑定工作区，并保留该工作区内的业务能力，包括环境值与 SCM 配置等，不依赖旧人类成员角色。`taskTokenHardDenyCategory` 另外阻止凭据签发/揭示、身份、工作区生命周期、权限配置等敏感操作；它不是只读令牌。 |
+| daemon 凭据 | 同一 guard 文件中的请求允许列表和 `denyNonDaemonOperationalAccess` 区分机器控制面与人类操作；daemon 绑定与 runtime/task 归属仍独立检查；机器凭据检查绑定工作区存在，不再依赖旧人类成员资格。旧 CLI PAT 升级、注册和特定 SCM 请求存在明确例外，应按实现核对。 |
 | 私有资源与实时消息 | Agent、运行时、附件、会话和 transcript 有各自的权限检查。[realtime.ts](../../packages/server/src/api/realtime.ts)处理浏览器/daemon WebSocket 鉴权与接收范围，不能只验证 HTTP 路径。 |
-| Session 所有权 | Session 恰好由一个 Chat 或 Issue 拥有，guard 从实际 owner 校验工作区与内容权限。Chat-owned 的 Issue 工作投影不扩大创建者和 Agent 的可见范围，Issue 公开分享不包含其私有 Session 事件、输入或成果。Task 凭据读取 Session 内容限于本 Session；同 owner 直接父会话的已记录继承范围，以及已验证飞书 Topic 的 metadata/派发/steer 协调是受限例外。私有 Chat-owned Task 限于本 Task，公开 Issue-owned 或无 Chat 的 Task 路由保留既有 Workspace、owner 及各路由权限，详见[会话模型](../conversation-model.md)。 |
+| Session 所有权 | Session 恰好由一个 Chat 或 Issue 拥有，guard 从实际 owner 校验工作区与内容权限。Chat-owned 的 Issue 工作投影不扩大任务凭据和外部分享的可见范围，Issue 公开分享不包含其私有 Session 事件、输入或成果。Task 凭据读取 Session 内容限于本 Session；同 owner 直接父会话的已记录继承范围，以及已验证飞书 Topic 的 metadata/派发/steer 协调是受限例外。私有 Chat-owned Task 限于本 Task，公开 Issue-owned 或无 Chat 的 Task 路由保留既有 Workspace、owner 及各路由权限，详见[会话模型](../conversation-model.md)。 |
 
 修改路由时，从请求实际指向的资源解析 workspace，再调用对应 guard；不要仅凭客户端传入的 ID 或“已经登录”认定有权限。[server.ts](../../packages/server/src/api/server.ts)中的 daemon 前缀中间件必须注册在对应 handler 之前，Hono 的注册顺序会影响覆盖范围。
 
-[denyTaskChatContentAccess](../../packages/server/src/api/helpers/auth-guards.ts)把 Session Task 与所有者 Chat 的普通内容权限分开：真实 Session Task 不能通过 Chat ID 或创建者回退读取、发送普通消息、访问 Chat root log 或操作队列。普通 Chat 轴须有真实执行分类和持久化用户消息来源，重试只沿服务端保存的 attempt 血统继承来源；Topic transport 须通过实际 binding 分类。调用方指定 `kind` 不构成普通聊天授权。合法普通 Chat/Topic Task 的既有创建者回退、工作区与 Agent 检查保持原规则，工作 Session metadata 管理不授予普通聊天正文权限。
+[denyTaskChatContentAccess](../../packages/server/src/api/helpers/auth-guards.ts)把 Session Task 与所有者 Chat 的普通内容权限分开：真实 Session Task 不能通过 Chat ID 或创建者回退读取、发送普通消息、访问 Chat root log 或操作队列。普通 Chat 轴须有真实执行分类和持久化用户消息来源，重试只沿服务端保存的 attempt 血统继承来源；Topic transport 须通过实际 binding 分类。调用方指定 `kind` 不构成普通聊天授权。合法普通 Chat/Topic Task 的来源、工作区与 Agent 检查保持独立规则，工作 Session metadata 管理不授予普通聊天正文权限。
 
 公开 Issue-owned 或无 Chat 的 Task 路由沿用既有 Workspace、owner、Agent 及各路由权限，不统一限制为来源凭据的本 Task。经验证的旧 Task 凭据在 raw Task 列表缺少 `workspaceId`（`null`/`undefined`）时保留原兼容筛选；这不跳过其他路由对目标工作区的检查。Session events、logs 与 messages 仍采用本 Session 内容守卫。通用派发与 Issue 嵌套 Session Task 创建对公开 Issue-owned 目标沿用 owner/Workspace 基线，保留 Agent、旁聊、delegation 血统及交接次数检查；创建本身不额外授予读取内容或控制任务的权限。私有 Chat-owned 目标继续使用当前 Session 或已验证 Topic 创建边界，私有 Task 读取与控制要求本 Task。
 
@@ -40,11 +40,25 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 
 [performOrganizerAction](../../packages/server/src/store/store.ts)按巡查来源 Turn 的实际 Session owner 写入报告：Chat-owned 报告留在同一私有 Session，即使 Task 的 Chat 审计指针缺失，也不写 Issue 的公开活动或成员通知；Issue-owned 报告写入来源 Issue 的对应 Session，并沿用其通知。动作、审计和报告共用事务，事件在最外层提交后发送。
 
-成员凭据通过 `POST /api/turns/:id/retry` 恢复指定的 failed/cancelled Turn；管理员仍须通过实际 owner 工作区、Chat 创建者和 Agent 可见性检查，daemon 凭据拒绝。[retryTurnAsMember](../../packages/server/src/store/inbox/operations.ts)在工作区锁内重读实际 owner，写前回调重新验证会话与 current attempt 内容权限，不依赖请求入口的旧快照。Task 凭据继续走原监督者或关联控制者的 organizer 身份、模式、旁聊与审计检查，不因成员入口放宽。参数与两种返回值见[Turn HTTP 契约](message-api.md#turn)，活动轮、依赖及状态推导边界见[统一收件箱 Store](inbox-store.md#store-消费接口)。
+人类凭据通过 `POST /api/turns/:id/retry` 恢复指定的 failed/cancelled Turn；操作者仍须通过实际 owner 工作区检查；Chat 对平台操作者共享，机器凭据继续独立验证 Agent 与会话边界，daemon 凭据拒绝。[retryTurnAsMember](../../packages/server/src/store/inbox/operations.ts)在工作区锁内重读实际 owner，写前回调重新验证会话与 current attempt 内容权限，不依赖请求入口的旧快照。Task 凭据继续走原监督者或关联控制者的 organizer 身份、模式、旁聊与审计检查，不因成员入口放宽。参数与两种返回值见[Turn HTTP 契约](message-api.md#turn)，活动轮、依赖及状态推导边界见[统一收件箱 Store](inbox-store.md#store-消费接口)。
 
 [TasksRepo](../../packages/server/src/store/repos/tasks-repo.ts)在任务创建锁内拒绝归档 Session 的普通新任务；只有既有 `delegation_return` 与 turn-end `re_ring` 的内部收尾路径，在重读 source 并核对父 Task、return Session、Workspace、Agent 和执行 scope 后可继续。内部收尾授权不暴露为 `CreateTaskInput` 或 API 字段，system 作者、wake source 或 delegation 字段本身不授予越过归档的权限。
 
 [MultiremiStore.updateAgent](../../packages/server/src/store/store.ts)的角色更新和所属任务凭据撤销共用一个外层事务；仓储调用 `updateAgentWithinTransaction`，保留排序后的 workspace 锁、plugin workspace 锁与 Agent 行锁，不在撤销之前另行提交。`setAgentRole`、`setAgentSupervisor` 同样在角色变化时撤销任务凭据。整体回滚与正常提交的真 PG 对照见 [事务边界用例](../../tests/unit/multiremi/multiremi-existing-pg-transaction-boundaries.test.ts)。
+
+## 共享状态与数据保留
+
+历史 Chat、云友和 Runtime 的 creator/owner 字段保留审计用途。人类读取、编辑与实时订阅不再按这些字段分区；执行调度也不再因历史人类 owner 不同拒绝同工作区的 Runtime。机器注册的 daemon ID、凭据绑定、Agent 执行范围和跨工作区资源关系仍需核验。
+
+Runtime 列表的旧 `owner=me` 人类筛选参数兼容为整个工作区的共享 Runtime 列表；机器凭据仍受原有 daemon 和工作区绑定限制。
+
+daemon 的 HTTP token 校验同时验证工作区仍存在，工作区删除后下一次请求返回 401；已连接的 WebSocket 在下一次心跳撤销权限。历史人类成员归档或移动不会撤销机器权限。
+
+人的消息已读状态由工作区和 Session 共同标识；旧 member lane 继续作为逐条历史消息的已读依据，不能取全部旧游标最大值来丢弃其他收件人的未读。待回答问题转给统一操作者，旧路由版本及卡片失效；飞书卡片仍必须验证 bot/app/open_id 和一次性 token。实现与验证见[收件箱](inbox-store.md)和[问题](questions.md)。
+
+收藏按工作区合并，同一目标只显示一次，读取不删除历史行；重排同步同目标旧行，明确取消收藏时才删除这些行。通知配置由工作区共同管理，历史个人通知渠道参与共享路由，task 凭据仍不能配置外部目的地。通知偏好优先使用 operator 已保存值，再用旧工作区默认值，最后使用最近一次历史设置；首次保存后统一生效，原历史设置保留。
+
+`/api/me`、密码/SSO 登录、PAT 签发与撤销仍绑定实际账号。共享工作区不授予其他登录账号的凭据管理权，也不把 task/daemon 变成人类操作者。CLI 使用 `remi account get|update|onboarding` 管理入口账号，`remi workspace operator` 查看内部操作身份；详见[CLI 契约](../cli-command-migration.md)。
 
 ## Issue 关系与跨工作区移动
 
@@ -58,7 +72,7 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 
 飞书 Issue 决策卡片沿用同一限定：决策行、来源 Issue 和目标 Issue 的工作区必须一致。按决策 ID 读取、卡片入队、回执补丁、消息领取、重启恢复和提醒均过滤失效关系；回调包括终态回放都返回 404；目标 Issue 已移出时，bot host 的 daemon 访问本工作区记录的该决策同样返回 404，其他外部 Issue 仍返回 403。已有出站行不迁移，领取时过滤且不阻塞后面的有效消息；旧消息已发到飞书时无法撤回其既有内容。回执与提醒还要求原始卡片、绑定和目标 Issue 属于决策工作区。
 
-移动检查使用原始关系列。有父单、子单、任意类型依赖或未结束任务（`queued`、`dispatched`、`running` 等非 `completed`/`failed`/`cancelled` 状态）的 Issue 均返回 `409 workspace_move_blocked`；必须先单独清除父关系、移除子关系、删除依赖，或取消任务、取消指派、等任务结束，再移动。任务留在原工作区会继续写入该 Issue，所以与父子和依赖同样阻止移动；这是 MUL-476 的 API 行为变化。即使请求同时清父单和移动，也仍拒绝。`relations.parent`、`children` 和 `dependencies` 只列同工作区的 key，`relations.tasks` 只列同工作区任务的 `id` 与 `status`，外部关系仅计入 `relations.hidden`。无关系 Issue 仍可移动；[路由](../../packages/server/src/api/routers/issues.ts)先检查来源成员资格，再检查目标成员资格，无权限返回 404。空目标返回 404；`null` 沿用 store 的 `local` 目标规则。`remi issue batch-update --data` 使用同样的规则，CLI 保留该错误码。
+移动检查使用原始关系列。有父单、子单、任意类型依赖或未结束任务（`queued`、`dispatched`、`running` 等非 `completed`/`failed`/`cancelled` 状态）的 Issue 均返回 `409 workspace_move_blocked`；必须先单独清除父关系、移除子关系、删除依赖，或取消任务、取消指派、等任务结束，再移动。任务留在原工作区会继续写入该 Issue，所以与父子和依赖同样阻止移动；这是 MUL-476 的 API 行为变化。即使请求同时清父单和移动，也仍拒绝。`relations.parent`、`children` 和 `dependencies` 只列同工作区的 key，`relations.tasks` 只列同工作区任务的 `id` 与 `status`，外部关系仅计入 `relations.hidden`。无关系 Issue 仍可移动；[路由](../../packages/server/src/api/routers/issues.ts)先检查来源与目标工作区的凭据边界；已登录人类可以访问所有现存工作区，绑定凭据不能借移动跨越其范围。空目标返回 404；`null` 沿用 store 的 `local` 目标规则。`remi issue batch-update --data` 使用同样的规则，CLI 保留该错误码。
 
 移动到另一个工作区时，Issue 在目标工作区取下一个号（目标的最大号加 1），`number` 与 `key` 一起改变；MUL-405 的 `(workspace_id, issue_number)` 唯一索引不允许沿用原号，这也是 MUL-476 的 API 行为变化。原 key 此后不再指向该 Issue，评论、分支名等外部写下的旧 key 不会随之更新；源工作区的这个号只有在它是当前最大号时才会被新建 Issue 再次使用。取号先拿目标工作区的编号锁，再拿 Issue 行锁；批量移动逐行取号。
 
@@ -69,6 +83,8 @@ Remi 当前使用独立用户、工作区成员关系和分类型访问凭据。
 批量在写入前预检全部 Issue，发现关系冲突则整批拒绝并返回 `issue_ids`。逐行写入仍各自提交；预检后并发新增关系可能使后续行拒绝，先前行不会回滚。该并发边界不允许形成跨工作区关系，也不代表批量具备整批事务原子性。
 
 创建子单、改父单、添加依赖、移动、把已结束子单改回未结束以及派给 Agent 重开已结束子单，都在一个事务内经 [issue-row-lock](../../packages/server/src/store/issue-row-lock.ts) 一次性按 ID 升序锁完所需的现有 Issue 行，锁后重读再校验；创建时父单与所有 `blocked_by` 端点一起加锁，改回未结束与 Agent 派单把当前父单一起入集。锁集由输入加一次不加锁的本单读取决定；锁后重读发现还需要一行没锁到的 Issue（等锁期间父单或结束状态变了），或 Issue 已被别人移走、这次变成需要移动却没拿编号锁，都由事务所有者回滚重来一次，再过期或事务由调用方持有时返回 `409 issue_relation_changed`，任何情况下都不在持有行锁后补锁。沿用已有工作区锁且先于 Issue 行锁（创建时和移到其他工作区时，MUL-405 的编号锁也在 Issue 行锁之前，即 W → N → D；移动只拿目标工作区的编号锁），不新增工作区锁，不在获得 Issue 行锁后再拿工作区锁，不改为 `REPEATABLE READ`。删除依赖、清父关系不增加关系行锁。任务创建在工作区锁之后先锁所属 Issue 行，再校验 Issue 与 Agent 同工作区，所以与移动互斥：移动先提交则建任务报 `Issue workspace does not match agent workspace`，任务先提交则移动返回 `409`。派给 Agent 或成员时，锁后重读若发现 Issue 已移到别的工作区，就在新工作区重新解析经办人，报与先移动后派单相同的错误（如 `Agent not found`）且不写入。派单写经办人与建任务仍是两个事务，两者之间插入的移动按 MUL-480 清空来源经办人，后续来源任务创建因工作区不匹配被拒绝。完整顺序见 [ADR 0003](../adr/0003-parent-status-derived-from-children.md) 第 8 条。
+
+Task 凭据的私有 Agent 访问与定向派发、Runtime 使用/编辑、非 Chat 附件删除使用凭据原 `userId` 的历史 owner/admin 权限，不使用共享 operator 的 owner 角色；附件还保留上传 Agent 的删除权限，Agent 单对象与批量列表守卫保持一致。显式选择能力组和读取其模型目录时，机器凭据须能使用全部候选 Runtime，不能通过混合组绕过私有 Runtime 守卫。普通人类 PAT/JWT 仍可操作同工作区全部历史私有资源，机器绑定工作区和 Session 内容边界不变。
 
 ## 启动条件
 
@@ -84,11 +100,11 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 
 | 变更 | 已有测试 |
 |---|---|
-| 多人登录、成员隔离、邀请、运行时归属 | [multiremi-multiuser-auth.test.ts](../../tests/unit/multiremi/multiremi-multiuser-auth.test.ts) |
+| 独立登录凭据、共享工作区及退役成员接口 | [multiremi-multiuser-auth.test.ts](../../tests/unit/multiremi/multiremi-multiuser-auth.test.ts) |
 | 密码账号预配、会话身份、错误凭据、重设及并发边界 | [password-auth.test.ts](../../tests/unit/multiremi/password-auth.test.ts) |
 | Bearer/Cookie、task 权限、daemon 边界与迁移例外 | [multiremi-api-auth.test.ts](../../tests/unit/multiremi/multiremi-api-auth.test.ts) |
 | Agent 操作、私有资源和配置脱敏 | [multiremi-store-agent-authz.test.ts](../../tests/unit/multiremi/multiremi-store-agent-authz.test.ts) |
-| 成员指定轮恢复、Chat 创建者与 Agent 权限、依赖及 PG 并发边界 | [issue-run-recovery.test.ts](../../tests/unit/multiremi/issue-run-recovery.test.ts) |
+| 操作者指定轮恢复、共享 Chat、任务权限、依赖及 PG 并发边界 | [issue-run-recovery.test.ts](../../tests/unit/multiremi/issue-run-recovery.test.ts) |
 | Issue 移动、存量父子/依赖隔离、单工作区 PAT 和 CLI | [multiremi-issue-workspace-boundaries.test.ts](../../tests/unit/multiremi/multiremi-issue-workspace-boundaries.test.ts) |
 | 飞书 Issue 决策卡片、旧跨工作区来源/目标、终态回调与出站隔离 | [multiremi-issue-decision-card-workspace.test.ts](../../tests/unit/multiremi/multiremi-issue-decision-card-workspace.test.ts) |
 | 关系写入锁序、锁后重读及 PG 双连接竞态 | [multiremi-issue-relation-locks.test.ts](../../tests/unit/multiremi/multiremi-issue-relation-locks.test.ts)、[读取限定架构检查](../../tests/arch/issue-relation-reads-workspace-scoped.test.ts) |

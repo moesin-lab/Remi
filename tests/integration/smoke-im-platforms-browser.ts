@@ -8,9 +8,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 
-const { frontend, workspace, other, memberIds, memberToken, ownerToken, artifacts, message } = JSON.parse(readFileSync(0, "utf8")) as {
+const { frontend, workspace, other, sharedInbox, memberToken, ownerToken, artifacts, message } = JSON.parse(readFileSync(0, "utf8")) as {
   frontend: string; workspace: { id: string; slug: string }; other: { slug: string };
-  memberIds: { owner: string; member: string };
+  sharedInbox: { id: string; seq: number; previouslyRead: string[] };
   memberToken: string; ownerToken: string; artifacts: string; message: { text: string };
 };
 const checks: string[] = [], jsErrors: string[] = [], apiFailures: string[] = [];
@@ -23,7 +23,7 @@ try {
   page = await context.newPage();
   page.setDefaultTimeout(20_000);
   page.setDefaultNavigationTimeout(90_000);
-  page.on("pageerror", error => jsErrors.push(redact(error.message)));
+  page.on("pageerror", error => jsErrors.push(redact(error.stack ?? error.message)));
   page.on("response", response => {
     if (response.url().startsWith(`${frontend}/api/`) && response.status() >= 500 && response.headers()["x-im-smoke-fault"] !== "1") apiFailures.push(`${new URL(response.url()).pathname} ${response.status()}`);
   });
@@ -272,17 +272,46 @@ try {
   const memberContext = await authenticatedContext(browser, memberToken, workspace.slug);
   const memberPage = await memberContext.newPage(); memberPage.setDefaultTimeout(20_000);
   memberPage.setDefaultNavigationTimeout(90_000);
-  const forbiddenRequests: string[] = [];
-  memberPage.on("request", request => { if (/\/feishu\/(endpoints|sources)|\/feishu-bot\/(status|candidates|routes|senders)/.test(request.url())) forbiddenRequests.push(request.url()); });
+  memberPage.on("pageerror", error => jsErrors.push(redact(error.stack ?? error.message)));
   for (const section of ["", "/bot", "/access", "/conversations", "/ingestion", "/messages"]) {
     await memberPage.goto(`${frontend}${base}${section}`);
     await memberPage.getByRole("heading", { level: 1 }).waitFor();
     if (section === "/messages") await memberPage.getByText(message.text, { exact: true }).waitFor();
+    if (section === "/bot") {
+      await memberPage.getByRole("button", { name: "Add bot", exact: true }).waitFor();
+      assert.equal(await memberPage.getByLabel("App ID", { exact: true }).inputValue(), "cli_im_updated");
+    }
+    if (section === "/ingestion") await memberPage.getByRole("button", { name: "Add connection", exact: true }).waitFor();
   }
-  assert.equal(await memberPage.getByRole("button", { name: "Add connection" }).count(), 0);
-  assert.deepEqual(forbiddenRequests, []);
+  await memberPage.goto(`${frontend}${base}/bot`);
+  await memberPage.getByLabel("App ID", { exact: true }).fill("cli_shared_operator");
+  const memberBot = memberPage.locator("section").filter({ has: memberPage.getByRole("heading", { name: "Feishu concierge bot", exact: true }) });
+  const saved = memberPage.waitForResponse(response => response.request().method() === "PUT" && new URL(response.url()).pathname === `${apiBase}/feishu-bot`);
+  await memberBot.getByRole("button", { name: "Save", exact: true }).click();
+  assert((await saved).ok());
+  await page.goto(`${frontend}${base}/bot`);
+  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_shared_operator", 20_000, "second account saved shared bot");
+  await page.getByLabel("App ID", { exact: true }).fill("cli_im_updated");
+  await saveResponse("PUT", `${apiBase}/feishu-bot`, () => botSection.getByRole("button", { name: "Save", exact: true }).click());
+  await memberPage.screenshot({ path: join(artifacts, "im-shared-operator.png") });
+  check("a second login account has the same six capability pages and edits the same bot configuration");
+
+  const inboxRow = (target: Page, id: string) => target.locator(`button[data-perf-item="inbox"][data-perf-key="${id}"]`);
+  for (const target of [page, memberPage]) {
+    await target.goto(`${frontend}/${workspace.slug}/inbox`);
+    await inboxRow(target, sharedInbox.id).waitFor();
+    for (const id of sharedInbox.previouslyRead) assert.equal(await inboxRow(target, id).count(), 0);
+  }
+  await inboxRow(memberPage, sharedInbox.id).click();
+  await memberPage.getByRole("button", { name: `Read through #${sharedInbox.seq}`, exact: true }).click();
+  await poll(async () => await inboxRow(memberPage, sharedInbox.id).count() === 0, 10_000, "shared receipt saved");
+  await page.reload();
+  await page.getByRole("heading", { name: /^Inbox/ }).waitFor();
+  await poll(async () => await inboxRow(page!, sharedInbox.id).count() === 0, 10_000, "shared receipt visible to first account");
+  for (const id of sharedInbox.previouslyRead) assert.equal(await inboxRow(page, id).count(), 0);
+  await page.screenshot({ path: join(artifacts, "workspace-shared-inbox.png") });
+  check("both accounts share historical unread notifications and subsequent reads without resurrecting old receipts");
   await memberContext.close();
-  check("members can read history and never issue operator-only requests across all six pages");
 
   await page.goto(`${frontend}/${other.slug}/im/feishu/ingestion`);
   await page.getByRole("button", { name: "Add connection", exact: true }).waitFor();

@@ -926,7 +926,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
         responsibilitySourceAudit:taskIssueResponsibilitySourceAudit(c,store),
         blockedBy: body.blockedBy ?? body.blocked_by,
         workspaceId,
-        createdBy: currentTaskAccessToken(c) || currentAccessToken(c)?.type==='daemon' ? null : authenticatedRequestUserId(c) ?? currentRequestUserId(c),
+        createdBy: currentTaskAccessToken(c) || currentAccessToken(c)?.type==='daemon' ? null : currentRequestUserId(c),
         responsibleMemberId: body.responsibleMemberId ?? body.responsible_member_id
           ?? (!(body.parentIssueId ?? body.parent_issue_id) && currentTaskAccessToken(c) ? taskIssueResponsibleMember(c,store) : undefined),
         assigneeType: null,
@@ -1079,7 +1079,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       responsibilitySourceAudit:taskIssueResponsibilitySourceAudit(c,store),
       workspaceId,
       responsibleMemberId:body.responsibleMemberId??body.responsible_member_id??(!(body.parentIssueId??body.parent_issue_id)&&currentTaskAccessToken(c)?taskIssueResponsibleMember(c,store):undefined),
-      requesterId: currentTaskAccessToken(c) || currentAccessToken(c)?.type==='daemon' ? null : authenticatedRequestUserId(c) ?? currentRequestUserId(c),
+      requesterId: currentTaskAccessToken(c) || currentAccessToken(c)?.type==='daemon' ? null : currentRequestUserId(c),
     });
     if ("error" in result) return c.json({ error: result.error, ...('code' in result ? {code:result.code} : {}) }, 'status' in result ? result.status ?? 400 : 400);
     return c.json({
@@ -1103,7 +1103,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       responsibilitySourceAudit:taskIssueResponsibilitySourceAudit(c,store),
       workspaceId,
       responsibleMemberId:body.responsibleMemberId??body.responsible_member_id??(!(body.parentIssueId??body.parent_issue_id)&&currentTaskAccessToken(c)?taskIssueResponsibleMember(c,store):undefined),
-      requesterId: currentTaskAccessToken(c) || currentAccessToken(c)?.type==='daemon' ? null : authenticatedRequestUserId(c) ?? currentRequestUserId(c),
+      requesterId: currentTaskAccessToken(c) || currentAccessToken(c)?.type==='daemon' ? null : currentRequestUserId(c),
     };
     const denied = denyCurrentUserWorkspaceAccess(c, store, input.workspaceId ?? input.workspace_id ?? "local");
     if (denied) return denied;
@@ -1484,7 +1484,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
         return c.json({ error: "Only a member can authorize parent closure", code: "parent_done_grant_requires_member" }, 403);
       }
       try {
-        const updated = store.grantParentDone(issue.id, authenticatedRequestUserId(c) ?? currentRequestUserId(c));
+        const updated = store.grantParentDone(issue.id, currentRequestUserId(c));
         return c.json({ issue: updated, parent_done_grant: store.issueParentDoneGrantView(updated) });
       } catch (error) {
         if (error instanceof ParentDoneGrantOwnerError) return c.json({ error: error.message, code: error.code }, 409);
@@ -1499,7 +1499,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       if (issueMutationActivity(c).actorType !== "member" || currentTaskAccessToken(c)) {
         return c.json({ error: "Only a member can revoke parent closure", code: "parent_done_grant_requires_member" }, 403);
       }
-      const updated = store.revokeParentDone(issue.id, authenticatedRequestUserId(c) ?? currentRequestUserId(c));
+      const updated = store.revokeParentDone(issue.id, currentRequestUserId(c));
       return c.json({ issue: updated, parent_done_grant: store.issueParentDoneGrantView(updated) });
     });
   }
@@ -2179,7 +2179,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const body = await readJson<{ memberId?: string; reason?: unknown }>(c);
     return c.json({
-      subscriber: store.addIssueSubscriber(issue.id, body.memberId ?? "", normalizeSubscriptionReason(body.reason)),
+      subscriber: store.addIssueSubscriber(issue.id, store.getWorkspaceOperator(issue.workspaceId)!.id, normalizeSubscriptionReason(body.reason)),
     }, 201);
   });
   app.post("/api/issues/:id/subscribe", async (c) => {
@@ -2188,7 +2188,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
     const body = await readJson<{ member_id?: string; user_id?: string; user_type?: string; reason?: unknown }>(c);
-    const target = issueSubscriberTarget(c, body);
+    const target = issueSubscriberTarget(c, body, store.getWorkspaceOperator(issue.workspaceId)!.id);
     if ("error" in target) return c.json({ error: target.error }, target.status);
     try {
       store.addTypedIssueSubscriber(issue.id, target.userType, target.userId, normalizeSubscriptionReason(body.reason));
@@ -2215,7 +2215,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
     const body = await readJson<{ member_id?: string; user_id?: string; user_type?: string }>(c);
-    const target = issueSubscriberTarget(c, body);
+    const target = issueSubscriberTarget(c, body, store.getWorkspaceOperator(issue.workspaceId)!.id);
     if ("error" in target) return c.json({ error: target.error }, target.status);
     try {
       store.removeTypedIssueSubscriber(issue.id, target.userType, target.userId);
@@ -2241,7 +2241,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     if (!issue) return c.json({ error: "issue not found" }, 404);
     const denied = denyCurrentUserWorkspaceAccess(c, store, issue.workspaceId);
     if (denied) return denied;
-    store.removeIssueSubscriber(issue.id, c.req.param("memberId"));
+    store.removeIssueSubscriber(issue.id, store.getWorkspaceOperator(issue.workspaceId)!.id);
     return c.json({ ok: true });
   });
   app.get("/api/multiremi/issues/:id/metadata", (c) => {

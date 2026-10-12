@@ -75,6 +75,11 @@ try {
   const oldMigration = 'export async function runMigrations(db){await db.unsafe("CREATE TABLE IF NOT EXISTS sentinel(id integer PRIMARY KEY, value text NOT NULL)")}';
   const newMigration = 'export async function runMigrations(db){await db.unsafe("CREATE TABLE IF NOT EXISTS sentinel(id integer PRIMARY KEY, value text NOT NULL)");await db.unsafe("ALTER TABLE sentinel ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT \'\'")}';
   await save(join(apiRoot, 'packages/server/src/store/migrations.ts'), oldMigration);
+  // The updater rehearses the full store startup, including data migrations.
+  // This fixture uses async SQL, so finish its schema before exposing the ctor.
+  await save(join(apiRoot, 'packages/server/src/store/store.ts'), `import {openMultiremiDatabase} from './db/postgres.ts';
+import {runMigrations} from './migrations.ts';const db=openMultiremiDatabase();
+try{await runMigrations(db)}finally{await db.close()};export class MultiremiStore {}`);
   const apiSource = `import {app} from './platform-application-api-fixture.js';
 import {openMultiremiDatabase} from '../../packages/server/src/store/db/postgres.ts';
 import {runMigrations} from '../../packages/server/src/store/migrations.ts';

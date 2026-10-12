@@ -119,11 +119,12 @@ function scaffold(options: {
   notifyOpenId?: string;
 } = {}) {
   const store = createLocalStore();
-  const member = store.findWorkspaceMemberForUser("local", "local")!;
   const user = store.getOrCreateUser({
     externalId: CARD_OPEN_ID, feishuUnionId: "on_card_person", name: "Synthetic card human", email: "card-human@example.com",
   });
-  db!.run("UPDATE multiremi_workspace_members SET user_id = ? WHERE id = ?", [user.id, member.id]);
+  // Keep the shared operator intact; the Feishu recipient is a retained external identity.
+  const member = store.createWorkspaceMember({ id: "mem_card_person", workspaceId: "local", userId: user.id, name: user.name });
+  expect(store.getWorkspaceOperator("local")?.userId).toBe("local");
   const parentRuntime = store.registerRuntime({ name: "Parent owner host", provider: "codex", workspaceId: "local", daemonId: "parent-owner-host" });
   const agentId = store.createAgent({ name: "Concierge", provider: "codex", workspaceId: "local", runtimeId: parentRuntime.id }).id;
   store.registerRuntime({ id: "rt_bot", name: "Bot host", provider: "codex", workspaceId: "local", daemonId: "bot-host", maxConcurrency: 16 });
@@ -157,7 +158,7 @@ function scaffold(options: {
 /** An Issue whose topic root message has been sent, so replies have a seed. */
 function issueWithTopic(store: MultiremiStore, title = "Decision parent", assignee?: { type: "agent"; id: string }) {
   const issue = createResponsibleTestIssue(store, {
-    title, workspaceId: "local", responsibleMemberId: "mem_local_local",
+    title, workspaceId: "local", responsibleMemberId: "mem_card_person",
     ...(assignee ? { assigneeType: assignee.type, assigneeId: assignee.id } : {}),
   });
   store.prepareFeishuIssueTopicWithinTransaction(issue);
@@ -1107,7 +1108,8 @@ describe("MUL-412 issue decision cards", () => {
     });
     expect(response.status, await response.clone().text()).toBe(200);
     const reply = (await response.json()).message;
-    expect(store.getMessage(reply.id)).toMatchObject({ reply_to_id: decision.id, body_md: "Hold for QA", sender_id: member.id });
+    expect(store.getMessage(reply.id)).toMatchObject({ reply_to_id: decision.id, body_md: "Hold for QA", sender_id: store.getWorkspaceOperator("local")!.id });
+    expect(store.getWorkspaceMember(member.id)?.userId).not.toBe("local");
     expect(store.getIssueDecision(parent.id, decision.id)?.history).toHaveLength(2);
     const patches = db.query("SELECT body,target_message_id FROM multiremi_feishu_bot_outbound_deliveries WHERE kind='decision_card_patch' AND decision_id=?").all(decision.id);
     expect(patches).toHaveLength(2);

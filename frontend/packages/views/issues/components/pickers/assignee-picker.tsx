@@ -1,10 +1,11 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useMemo, useState } from "react";
-import { Lock, UserMinus } from "lucide-react";
+import { UserMinus } from "lucide-react";
 import type { Agent, IssueAssigneeType, UpdateIssueRequest } from "@multiremi/core/types";
 import { useQuery } from "@tanstack/react-query";
-import { useAuthStore } from "@multiremi/core/auth";
 import { canAssignAgentToIssue } from "@multiremi/core/permissions";
 import { useActorName } from "@multiremi/core/workspace/hooks";
 import { useWorkspaceId } from "@multiremi/core/hooks";
@@ -69,7 +70,7 @@ export function AssigneePicker({
   const open = controlledOpen ?? internalOpen;
   const setOpen = controlledOnOpenChange ?? setInternalOpen;
   const [filter, setFilter] = useState("");
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
   const wsId = useWorkspaceId();
   const { pathname } = useNavigation();
   const afterFirstScreen = useAfterFirstScreen({ routeKey: pathname });
@@ -185,9 +186,6 @@ export function AssigneePicker({
               >
                 <ActorAvatar actorType="agent" actorId={a.id} size={18} showStatusDot />
                 <span className={`truncate ${allowed ? "" : "text-muted-foreground"}`}>{a.name}</span>
-                {a.visibility === "private" && (
-                  <Lock className="ml-auto h-3 w-3 text-muted-foreground" />
-                )}
               </PickerItem>
             );
           })}

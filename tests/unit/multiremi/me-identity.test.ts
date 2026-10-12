@@ -139,7 +139,7 @@ describe("current-user profile and onboarding identity", () => {
     const local = store.getCurrentUser();
     for (const path of ["runtime-bootstrap", "no-runtime-bootstrap"]) {
       const response = await request(app, first.token, "POST", `/api/me/onboarding/${path}`, {
-        workspace_id: privateWorkspace.id, runtime_id: runtime.id,
+        workspace_id: "missing-workspace", runtime_id: runtime.id,
       });
       expect(response.status).toBe(404);
     }
@@ -152,8 +152,8 @@ describe("current-user profile and onboarding identity", () => {
     });
     expect(withRuntime.status).toBe(200);
     const bootstrap = await withRuntime.json();
-    expect(store.getAgent(bootstrap.agent_id)?.ownerId).toBe(first.user.id);
-    expect(store.getIssue(bootstrap.issue_id)?.createdBy).toBe(first.user.id);
+    expect(store.getAgent(bootstrap.agent_id)?.ownerId).toBe("local");
+    expect(store.getIssue(bootstrap.issue_id)?.createdBy).toBe("local");
     expect(store.getUser(first.user.id)?.onboardedAt).toEqual(expect.any(String));
     expect(store.getUser(second.user.id)).toEqual(second.user);
     const firstAfter = store.getUser(first.user.id);
@@ -162,13 +162,13 @@ describe("current-user profile and onboarding identity", () => {
       workspace_id: "local", userId: first.user.id, user_id: first.user.id,
     });
     expect(withoutRuntime.status).toBe(200);
-    expect(store.getIssue((await withoutRuntime.json()).issue_id)?.createdBy).toBe(second.user.id);
+    expect(store.getIssue((await withoutRuntime.json()).issue_id)?.createdBy).toBe("local");
     expect(store.getUser(second.user.id)?.onboardedAt).toEqual(expect.any(String));
     expect(store.getUser(first.user.id)).toEqual(firstAfter);
     expect(store.getCurrentUser()).toEqual(local);
   });
 
-  it("preserves each user's identity and workspace permissions when issuing CLI tokens", async () => {
+  it("preserves each account identity while CLI tokens share workspace access", async () => {
     const { app, store, first, second } = await setup();
     const firstWorkspace = store.createWorkspace({ name: "First workspace", slug: "identity-first" }, first.user.id);
     const secondWorkspace = store.createWorkspace({ name: "Second workspace", slug: "identity-second" }, second.user.id);
@@ -185,10 +185,10 @@ describe("current-user profile and onboarding identity", () => {
       expect((await me.json()).id).toBe(actor.user.id);
       const workspaces = await request(app, token, "GET", "/api/workspaces");
       expect(workspaces.status).toBe(200);
-      expect((await workspaces.json()).map((workspace: { id: string }) => workspace.id)).toEqual([owned.id]);
+      expect((await workspaces.json()).map((workspace: { id: string }) => workspace.id)).toEqual(expect.arrayContaining([owned.id, forbidden.id, "local"]));
       expect((await request(app, token, "GET", `/api/workspaces/${owned.id}`)).status).toBe(200);
-      expect((await request(app, token, "GET", `/api/workspaces/${forbidden.id}`)).status).toBe(404);
-      expect((await request(app, token, "GET", "/api/workspaces/local")).status).toBe(404);
+      expect((await request(app, token, "GET", `/api/workspaces/${forbidden.id}`)).status).toBe(200);
+      expect((await request(app, token, "GET", "/api/workspaces/local")).status).toBe(200);
     }
   });
 

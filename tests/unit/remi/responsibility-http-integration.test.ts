@@ -48,8 +48,17 @@ it("uses the browser client against real HTTP to configure future automatic resp
     const entry = list.items.find(item => item.issueId === root.id)!;
     expect(entry.assigneeId).toBe(human.id); expect(entry.createdById).toBe(responsibleUser.id); expect(entry.responsibleMemberId).toBeNull(); expect(entry.candidates.map(item => item.source).sort()).toEqual(["historical_creator", "legacy_member_assignee"]);
     const input = { reason: "Confirmed with the original human", mappings: [{ issueId: root.id, memberId: human.id, revision: entry.revision }] };
-    client.setToken(memberPat.token); await expect(client.mapIssueResponsibility("local", input)).rejects.toThrow();
-    client.setToken(pat.token); await expect(client.mapIssueResponsibility("local", { ...input, mappings: [{ ...input.mappings[0]!, revision: "stale" }] })).rejects.toThrow();
+    const task = store.createTask({ agentId: agent.id, issueId: root.id, prompt: 'Check technical mapping boundary' });
+    const taskToken = await store.createTaskAccessToken(task, user.id);
+    const daemonToken = await store.createAccessToken({ type: 'daemon', workspaceId: 'local', userId: user.id, name: 'Synthetic configuration daemon' });
+    for (const credential of [taskToken, daemonToken]) {
+      client.setToken(credential.token);
+      await expect(client.mapIssueResponsibility('local', input)).rejects.toThrow();
+      expect(store.getIssue(root.id)?.responsibleMemberId).toBeNull();
+    }
+    client.setToken(memberPat.token);
+    expect((await client.listIssueResponsibilityMigration('local')).items.some(item => item.issueId === root.id)).toBe(true);
+    await expect(client.mapIssueResponsibility("local", { ...input, mappings: [{ ...input.mappings[0]!, revision: "stale" }] })).rejects.toThrow();
     expect(store.getIssue(root.id)?.responsibleMemberId).toBeNull();
     expect(await client.mapIssueResponsibility("local", input)).toEqual({ mappedIssueIds: [root.id] });
     expect(store.getIssue(root.id)?.assigneeType).toBe("member"); expect(store.getIssue(root.id)?.responsibleMemberId).toBe(human.id);
@@ -104,12 +113,13 @@ it("uses the browser API client against authenticated HTTP for creation, Q routi
     await expect(client.getTurn(sourceTurn.id)).rejects.toThrow();
     await expect(client.getMessage(initial.id)).rejects.toThrow();
     const escalated = await client.actOnQuestion(initial.id, "escalate", { expected_route_revision: initial.route_revision, reason: "Human decision needed" });
-    expect(escalated.current_handler).toEqual({ type: "member", id: human.id });
+    expect(escalated.current_handler).toEqual({ type: "member", id: store.getWorkspaceOperator('local')!.id });
+    // The Agent may route to humans, but cannot borrow its Runtime owner's human authority.
+    await expect(client.actOnQuestion(initial.id, "answer", { expected_route_revision: escalated.route_revision, response: { answer: "Agent impersonation" } })).rejects.toThrow();
     client.setToken(otherPat.token);
-    await expect(client.actOnQuestion(initial.id, "answer", { expected_route_revision: escalated.route_revision, response: { answer: "Impostor" } })).rejects.toThrow();
-    client.setToken(pat.token);
     const answered = await client.actOnQuestion(initial.id, "answer", { expected_route_revision: escalated.route_revision, response: { answers: { "Choose approaches?": "A, B", "Why?": "Evidence" } } });
     expect(answered.status).toBe("answered"); expect(answered.answer_revision).toBe(1);
+    expect(answered.answer?.actor).toEqual({ type: 'member', id: store.getWorkspaceOperator('local')!.id });
     expect(store.getMessage(answered.answer!.reply_message_id)?.session_id).toBe(initial.session_id);
     expect(store.getMessage(answered.answer!.reply_message_id)?.reply_to_id).toBe(initial.id);
     const consumed = store.getDaemonTurnBridge().rpc("turn.decision.consume", { turn_id: sourceTurn.id, attempt_id: sourceTask.id, message_id: initial.id, reply_message_id: answered.answer!.reply_message_id, wait_id: "http-provider-wait" }, { runtimeId: runtime.id, daemonId: "http-fixture-daemon", workspaceId: "local" });
@@ -119,6 +129,7 @@ it("uses the browser API client against authenticated HTTP for creation, Q routi
     expect(consumedQuestion.recovery?.consumer_attempt_id).toBe(sourceTask.id);
     expect(consumedQuestion.recovery?.consumer_turn_id).toBe(sourceTurn.id);
     expect(consumedQuestion.recovery?.reply_message_id).toBe(answered.answer!.reply_message_id);
+    client.setToken(pat.token);
     const revised = await client.actOnQuestion(initial.id, "answer", { expected_route_revision: answered.route_revision, expected_answer_revision: answered.answer_revision, revise: true, reason: "New evidence", response: { answers: { "Choose approaches?": "B", "Why?": "Revised evidence" } } });
     expect(revised.answer_revision).toBe(2); expect((await client.listIssueQuestions(root.id)).some(q => q.id === initial.id)).toBe(true);
     store.updateAgent(worker.id, { visibility: "workspace", ownerId: user.id });

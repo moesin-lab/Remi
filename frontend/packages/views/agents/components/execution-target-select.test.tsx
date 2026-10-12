@@ -99,12 +99,12 @@ describe("ExecutionTargetSelect", () => {
     show(<ExecutionTargetSelect wsId="ws" value={{ executionGroupId: "", provider: "" }} onChange={vi.fn()} />);
     expect(await screen.findByText(enAgents.execution_target.error)).toBeInTheDocument();
   });
-  it("filters private runtimes against the agent owner, not the current viewer", async () => {
+  it("includes historical private runtimes for the shared workspace operator", async () => {
     state.runtimes = [runtime("mine"), { ...runtime("owner"), owner_id: "owner" }, { ...runtime("public"), visibility: "public" }];
     show(<ExecutionTargetSelect wsId="ws" ownerId="owner" value={{ executionGroupId: "", provider: "" }} onChange={vi.fn()} />);
     expect(await screen.findByRole("button", { name: /Machine owner \/ Codex/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Machine public \/ Codex/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Machine mine \/ Codex/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /Machine mine \/ Codex/ })).toBeInTheDocument();
   });
   it("shows one option for a shared group and keeps its id as the selection", async () => {
     state.shared = true;

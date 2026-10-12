@@ -45,7 +45,8 @@ describe("agent workspace request context", () => {
         expect(actual.status).toBe(200);
         expect(await actual.json()).toEqual(await control.json());
         const foreign = await app.request(path, { headers: { ...headers, [header]: "local" } });
-        expect(foreign.status).toBe(404);
+        expect(foreign.status).toBe(200);
+        expect(JSON.stringify(await foreign.json())).not.toContain(agent.id);
         const unknown = await app.request(path, { headers: { ...headers, "X-Workspace-Slug": "missing-team" } });
         expect(unknown.status).toBe(404);
       });
@@ -55,7 +56,7 @@ describe("agent workspace request context", () => {
   for (const path of creationPaths) {
     it(`creates in the selected workspace using only the web slug header: ${path}`, async () => {
       const { store, user, workspace, app, headers } = await setup();
-      // A normal login token names local, but the user only belongs to their team.
+      // Account credentials remain independent of workspace operator records.
       expect(store.getUserRoleInWorkspace(user.id, "local")).toBeNull();
       const response = await app.request(path, {
         method: "POST",
@@ -66,7 +67,7 @@ describe("agent workspace request context", () => {
       const body = await response.json();
       const agent = store.getAgent((body.agent ?? body).id);
       expect(agent?.workspaceId).toBe(workspace.id);
-      expect(agent?.ownerId).toBe(user.id);
+      expect(agent?.ownerId).toBe("local");
       expect(store.listAgents().filter((item) => item.workspaceId === "local")).toHaveLength(0);
     });
 
@@ -123,16 +124,16 @@ describe("agent workspace request context", () => {
     expect(store.getAgent((await response.json()).id)?.workspaceId).toBe(workspace.id);
   });
 
-  it("does not grant membership when a user selects a foreign workspace", async () => {
-    const { store, app, headers } = await setup();
+  it("allows a login account to select another existing workspace without adding membership", async () => {
+    const { store, user, app, headers } = await setup();
     const response = await app.request("/api/agents", {
       method: "POST",
       headers: { ...headers, "X-Workspace-Slug": "local" },
-      body: JSON.stringify({ name: "Unauthorized" }),
+      body: JSON.stringify({ name: "Shared operator Agent" }),
     });
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: "workspace not found" });
-    expect(store.listAgents()).toHaveLength(0);
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({ workspace_id: "local", owner_id: "local" });
+    expect(store.findWorkspaceMemberForUser(user.id, "local")).toBeNull();
   });
 
   it("keeps a user-less credential bound to its workspace despite a selected header", async () => {
@@ -146,5 +147,12 @@ describe("agent workspace request context", () => {
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ error: "workspace not found" });
     expect(store.listAgents()).toHaveLength(0);
+    const listed = await app.request("/api/workspaces", { headers: { Authorization: `Bearer ${token}` } });
+    expect((await listed.json()).map((item: { id: string }) => item.id)).toEqual(["local"]);
+    const issue = store.createIssue({ title: "Other workspace share", workspaceId: workspace.id });
+    const share = await app.request(`/api/issues/${issue.id}/share`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(share.status).toBe(404);
   });
 });

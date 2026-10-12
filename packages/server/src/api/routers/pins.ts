@@ -1,7 +1,6 @@
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 import type { Hono } from "hono";
 import {
-  compatibilityUserId,
   denyCurrentUserWorkspaceAccess,
   denyPinOwnerAccess,
   isJsonApiError,
@@ -20,7 +19,7 @@ export function registerPinRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const userId = c.req.query("userId") ?? currentRequestUserId(c);
+    const userId = currentRequestUserId(c);
     const ownerDenied = denyPinOwnerAccess(c, userId);
     if (ownerDenied) return ownerDenied;
     const pins = store.listPinnedItems(workspaceId, userId);
@@ -32,7 +31,7 @@ export function registerPinRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const userId = body.userId ?? body.user_id ?? currentRequestUserId(c);
+    const userId = currentRequestUserId(c);
     const ownerDenied = denyPinOwnerAccess(c, userId);
     if (ownerDenied) return ownerDenied;
     return c.json({ pin: store.createPinnedItem({ ...body, workspaceId, userId }) }, 201);
@@ -43,7 +42,7 @@ export function registerPinRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const userId = body.userId ?? body.user_id ?? currentRequestUserId(c);
+    const userId = currentRequestUserId(c);
     const ownerDenied = denyPinOwnerAccess(c, userId);
     if (ownerDenied) return ownerDenied;
     const pins = store.reorderPinnedItems(workspaceId, userId, body.items ?? []);
@@ -54,7 +53,7 @@ export function registerPinRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const userId = c.req.query("userId") ?? currentRequestUserId(c);
+    const userId = currentRequestUserId(c);
     const ownerDenied = denyPinOwnerAccess(c, userId);
     if (ownerDenied) return ownerDenied;
     store.deletePinnedItem(workspaceId, userId, c.req.param("itemType"), c.req.param("itemId"));
@@ -66,7 +65,7 @@ export function registerPinRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const userId = compatibilityUserId(c);
+    const userId = currentRequestUserId(c);
     const ownerDenied = denyPinOwnerAccess(c, userId);
     if (ownerDenied) return ownerDenied;
     return c.json(store.listPinnedItems(workspaceId, userId).map(pinCompatibilityResponse));
@@ -78,7 +77,7 @@ export function registerPinRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const userId = cleanString(body.user_id) ?? compatibilityUserId(c);
+    const userId = currentRequestUserId(c);
     const ownerDenied = denyPinOwnerAccess(c, userId);
     if (ownerDenied) return ownerDenied;
     try {
@@ -101,7 +100,7 @@ export function registerPinRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const userId = body.user_id ?? compatibilityUserId(c);
+    const userId = currentRequestUserId(c);
     const ownerDenied = denyPinOwnerAccess(c, userId);
     if (ownerDenied) return ownerDenied;
     const pins = store.reorderPinnedItems(workspaceId, userId, body.items ?? []);
@@ -112,7 +111,7 @@ export function registerPinRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const userId = compatibilityUserId(c);
+    const userId = currentRequestUserId(c);
     const ownerDenied = denyPinOwnerAccess(c, userId);
     if (ownerDenied) return ownerDenied;
     store.deletePinnedItem(workspaceId, userId, c.req.param("itemType"), c.req.param("itemId"));

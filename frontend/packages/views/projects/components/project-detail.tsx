@@ -1,14 +1,15 @@
 "use client";
 
+import { WORKSPACE_OPERATOR_USER_ID } from "@multiremi/core/workspace/operator";
+
 import { useMemo, useState, useCallback, useRef, useEffect } from "react";
 import { useDefaultLayout, usePanelRef } from "react-resizable-panels";
-import { AlertCircle, Archive, Link2, ListTodo, MoreHorizontal, PanelRight, Pin, PinOff, Plus, RotateCcw, UserMinus } from "lucide-react";
+import { AlertCircle, Archive, Link2, ListTodo, MoreHorizontal, PanelRight, Pin, PinOff, Plus, RotateCcw } from "lucide-react";
 import { useQuery, type QueryKey } from "@tanstack/react-query";
 import { cn } from "@multiremi/ui/lib/utils";
 import { copyText } from "@multiremi/ui/lib/clipboard";
 import { toast } from "sonner";
 import type { Issue, IssueAssigneeGroup, UpdateIssueRequest } from "@multiremi/core/types";
-import { useAuthStore } from "@multiremi/core/auth";
 import { projectDetailOptions } from "@multiremi/core/projects/queries";
 import { useArchiveProject, useRestoreProject, useUpdateProject } from "@multiremi/core/projects/mutations";
 import { pinListOptions } from "@multiremi/core/pins";
@@ -24,7 +25,6 @@ import {
 } from "@multiremi/core/issues/queries";
 import { useUpdateIssue } from "@multiremi/core/issues/mutations";
 import { useModalStore } from "@multiremi/core/modals";
-import { memberListOptions } from "@multiremi/core/workspace/queries";
 import { agentTaskSnapshotOptions } from "@multiremi/core/agents";
 import { useAfterFirstScreen } from "@multiremi/core/platform/use-after-first-screen";
 import { useWorkspaceId } from "@multiremi/core/hooks";
@@ -40,12 +40,6 @@ import { getProjectIssueMetrics } from "./project-issue-metrics";
 import { filterRunningAssigneeGroups } from "./project-issue-filters";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { TitleEditor, ContentEditor, ReadonlyContent, type ContentEditorRef } from "../../editor";
-import {
-  PickerEmpty,
-  PickerItem,
-  PickerSection,
-  PropertyPicker,
-} from "../../issues/components/pickers/property-picker";
 import { AssigneePicker } from "../../issues/components/pickers/assignee-picker";
 import { ProjectResourcesSection } from "./project-resources-section";
 import { ProjectRunLocationSection } from "./project-run-location-section";
@@ -83,7 +77,6 @@ import { EmojiPicker } from "@multiremi/ui/components/common/emoji-picker";
 import { BreadcrumbHeader } from "../../layout/breadcrumb-header";
 import { PropRow } from "../../common/prop-row";
 import { useT } from "../../i18n";
-import { matchesPinyin } from "../../editor/extensions/pinyin-match";
 
 // ---------------------------------------------------------------------------
 // Project Issues — reuses the existing issues list/board components
@@ -459,7 +452,7 @@ export function ProjectDetail({
   const { t } = useT("projects");
   const wsId = useWorkspaceId();
   const wsPaths = useWorkspacePaths();
-  const userId = useAuthStore((s) => s.user?.id);
+  const userId = WORKSPACE_OPERATOR_USER_ID;
   const { pathname } = useNavigation();
   const afterFirstScreen = useAfterFirstScreen({ routeKey: pathname });
   const { data: project, isLoading } = useQuery(projectDetailOptions(wsId, projectId));
@@ -480,7 +473,6 @@ export function ProjectDetail({
     () => ({ project_id: projectId }),
     [projectId],
   );
-  const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { getActorName } = useActorName();
   const updateProject = useUpdateProject();
   const archiveProject = useArchiveProject();
@@ -517,10 +509,6 @@ export function ProjectDetail({
   }, [isMobile]);
 
   // Lead popover
-  const [leadOpen, setLeadOpen] = useState(false);
-  const [leadFilter, setLeadFilter] = useState("");
-  const leadQuery = leadFilter.toLowerCase();
-  const filteredMembers = members.filter((m) => m.name.toLowerCase().includes(leadQuery) || matchesPinyin(m.name, leadQuery));
 
   const handleUpdateField = useCallback(
     (data: Parameters<typeof updateProject.mutate>[0] extends { id: string } & infer R ? R : never) => {
@@ -627,65 +615,6 @@ export function ProjectDetail({
       </div>
 
       <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
-        <PropRow label={t(($) => $.table.lead)}>
-          {isArchived ? (
-            <span className="inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-              {project.lead_type && project.lead_id ? (
-                <>
-                  <ActorAvatar actorType={project.lead_type} actorId={project.lead_id} size={16} enableHoverCard />
-                  <span className="truncate">{getActorName(project.lead_type, project.lead_id)}</span>
-                </>
-              ) : t(($) => $.lead.no_lead)}
-            </span>
-          ) : <PropertyPicker
-              open={leadOpen}
-              onOpenChange={setLeadOpen}
-              width="w-52"
-              align="start"
-              searchable
-              searchPlaceholder={t(($) => $.lead.assign_placeholder)}
-              onSearchChange={setLeadFilter}
-              triggerRender={
-                <button type="button" className="inline-flex items-center gap-1.5 text-xs hover:text-foreground transition-colors" />
-              }
-              trigger={
-                project.lead_type && project.lead_id ? (
-                  <>
-                    <ActorAvatar actorType={project.lead_type} actorId={project.lead_id} size={16} enableHoverCard showStatusDot />
-                    <span className="cursor-pointer">{getActorName(project.lead_type, project.lead_id)}</span>
-                  </>
-                ) : (
-                  <span className="text-muted-foreground">{t(($) => $.lead.no_lead)}</span>
-                )
-              }
-            >
-              <PickerItem
-                selected={!project.lead_type || !project.lead_id}
-                onClick={() => { handleUpdateField({ lead_type: null, lead_id: null }); setLeadOpen(false); }}
-              >
-                <UserMinus className="h-3.5 w-3.5 text-muted-foreground" />
-                <span className="text-muted-foreground">{t(($) => $.lead.no_lead)}</span>
-              </PickerItem>
-              {filteredMembers.length > 0 && (
-                <PickerSection label={t(($) => $.lead.members_group)}>
-                  {filteredMembers.map((m) => (
-                    <PickerItem
-                      key={m.user_id}
-                      selected={project.lead_type === "member" && project.lead_id === m.user_id}
-                      onClick={() => { handleUpdateField({ lead_type: "member", lead_id: m.user_id }); setLeadOpen(false); }}
-                    >
-                      <ActorAvatar actorType="member" actorId={m.user_id} size={16} />
-                      <span className="truncate">{m.name}</span>
-                    </PickerItem>
-                  ))}
-                </PickerSection>
-              )}
-              {filteredMembers.length === 0 && leadFilter && (
-                <PickerEmpty />
-              )}
-          </PropertyPicker>}
-        </PropRow>
-
         {/* Default Agent/Squad execution assignment; historical member values
             stay visible until explicitly cleared or replaced. */}
         <PropRow label={t(($) => $.default_assignee.label)}>

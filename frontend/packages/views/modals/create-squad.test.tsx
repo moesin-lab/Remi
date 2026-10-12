@@ -307,24 +307,14 @@ describe("CreateSquadModal", () => {
     expect(screen.getByTestId("char-counter").textContent).toMatch(/^12\//);
   });
 
-  it("renders the leader picker with 'My Agents' before 'Workspace Agents'", () => {
-    renderModal();
-    // The leader group headers come from the LeaderPicker — agent name "MineAgentOne"
-    // appears under the My Agents section, "OtherAgentOne" under Workspace Agents.
-    const myGroupLabels = screen.getAllByText("My Agents");
-    const wsGroupLabels = screen.getAllByText("Workspace Agents");
-    expect(myGroupLabels.length).toBeGreaterThanOrEqual(1);
-    expect(wsGroupLabels.length).toBeGreaterThanOrEqual(1);
-
-    // Verify ordering: the first occurrence of My Agents appears before the
-    // first occurrence of Workspace Agents in the DOM (leader picker shows
-    // both sections; the additional-members picker also has them, but both
-    // pickers follow the same order so the assertion holds either way).
-    const all = Array.from(document.querySelectorAll("*"));
-    const myIdx = all.findIndex((n) => n.textContent === "My Agents");
-    const wsIdx = all.findIndex((n) => n.textContent === "Workspace Agents");
-    expect(myIdx).toBeLessThan(wsIdx);
-  });
+  it("offers all agents together without personal ownership groups", () => {
+  renderModal();
+  expect(screen.queryByText("My Agents")).not.toBeInTheDocument();
+  expect(screen.getAllByText("Workspace Agents").length).toBeGreaterThan(0);
+  expect(firstMatch("MineAgentOne")).toBeInTheDocument();
+  expect(firstMatch("OtherAgentOne")).toBeInTheDocument();
+  expect(screen.queryByText("Workspace Pal")).not.toBeInTheDocument();
+});
 
   it("keeps pool-model agents selectable without a runtime binding and excludes archived agents", async () => {
     const poolAgent = makeAgent({
@@ -473,7 +463,7 @@ describe("CreateSquadModal", () => {
     // Add two additional members: the workspace pal (member) + OtherAgentOne (agent).
     // Locate them in the additional-members picker (last occurrence of each).
     fireEvent.click(lastMatch("OtherAgentOne"));
-    fireEvent.click(lastMatch("Workspace Pal"));
+    fireEvent.click(lastMatch("MineAgentTwo"));
 
     mocks.createSquad.mockResolvedValue(makeSquad({ id: "sq-2", leader_id: "agent-mine-1" }));
     mocks.addSquadMember

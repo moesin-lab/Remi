@@ -29,6 +29,13 @@ pendingTurnBackendTests("MUL-508 stage 1 regressions", (fixture) => {
     };
     return { store, db, user, agent, issue, session, app, headers, owner, path, request };
   }
+  async function taskAuthForOtherAgent(f: Awaited<ReturnType<typeof scaffold>>, inSourceSession = false) {
+    const agent = f.store.createAgent({ name: "Ordinary task caller", provider: "codex", visibility: "workspace", ownerId: f.user.id });
+    const issue = inSourceSession ? f.issue : f.store.createIssue({ title: "Unrelated task work", assigneeType: "agent", assigneeId: agent.id });
+    const task = f.store.createTask({ agentId: agent.id, issueId: issue.id, ...(inSourceSession ? { issueSessionId: f.session.id } : {}), prompt: "Work within task grants" });
+    const token = await f.store.createTaskAccessToken(task, f.user.id);
+    return { agent, task, headers: { Authorization: `Bearer ${token.token}` } };
+  }
   function runningRequest(store: MultiremiStore, db: SqlDatabase, agentId: string, issueId: string, kind: "permission" | "question", payload: Record<string, unknown>) {
     const runtime = store.registerRuntime({ name: "Stage 1 native source", provider: "codex", daemonId: "stage1-native", maxConcurrency: 16 });
     store.updateAgent(agentId, { runtimeId: runtime.id });
@@ -53,9 +60,10 @@ pendingTurnBackendTests("MUL-508 stage 1 regressions", (fixture) => {
   const permission = { options: [{ optionId: "allow_once", kind: "allow_once", name: "Allow once" }, { optionId: "reject_once", kind: "reject_once", name: "Reject" }] };
   const question = { questions: [{ question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] }] };
 
-  it("B1: rejects direct and final role private-agent dispatch, rolling back uploads and all writes", async () => {
-    const f = await scaffold();
-    expect((await f.request(`/api/agents/${f.agent.id}`)).status).toBe(403);
+  it("B1: rejects task direct and final role private-agent dispatch, rolling back uploads and all writes", async () => {
+    const f = await scaffold(), taskCaller = await taskAuthForOtherAgent(f, true);
+    expect((await f.request(f.path, "GET", undefined, taskCaller.headers)).status).toBe(200);
+    expect((await f.request(`/api/agents/${f.agent.id}`, "GET", undefined, taskCaller.headers)).status).toBe(403);
     const dir = mkdtempSync(join(tmpdir(), "mul508-denied-")), previous = process.env.MULTIREMI_UPLOAD_DIR;
     process.env.MULTIREMI_UPLOAD_DIR = dir;
     const snapshot = () => ["multiremi_conversation_log", "multiremi_turns", "multiremi_turn_attempts", "multiremi_attachments", "multiremi_conversation_heads"].map(table => Number(f.db.query(`SELECT COUNT(*) AS n FROM ${table}`).get().n));
@@ -66,11 +74,11 @@ pendingTurnBackendTests("MUL-508 stage 1 regressions", (fixture) => {
     const unsubscribe = f.store.onTaskEnqueued(() => { enqueued++; });
     try {
       for (const to of [{ type: "agent", ref: f.agent.id }, { type: "role", ref: "issue_owner" }, { type: "role", ref: "parent_owner" }]) {
-        expect((await f.request(f.path, "POST", { body_md: "Forbidden work", to })).status).toBe(403);
+        expect((await f.request(f.path, "POST", { body_md: "Forbidden work", to }, taskCaller.headers)).status).toBe(403);
         const form = new FormData();
         form.set("message", JSON.stringify({ body_md: "Forbidden upload", to }));
         form.append("file", new File(["private bytes"], "denied.txt"));
-        expect((await f.app.request(f.path, { method: "POST", headers: f.headers, body: form })).status).toBe(403);
+        expect((await f.app.request(f.path, { method: "POST", headers: taskCaller.headers, body: form })).status).toBe(403);
         expect(snapshot()).toEqual(before);
       }
       expect(enqueued).toBe(0);
@@ -80,68 +88,82 @@ pendingTurnBackendTests("MUL-508 stage 1 regressions", (fixture) => {
       if (previous === undefined) delete process.env.MULTIREMI_UPLOAD_DIR; else process.env.MULTIREMI_UPLOAD_DIR = previous;
       rmSync(dir, { recursive: true, force: true });
     }
-    expect((await f.request(f.path, "POST", { body_md: "Owner work", to: { type: "agent", ref: f.agent.id } }, f.owner)).status).toBe(200);
+    expect((await f.request(f.path, "POST", { body_md: "Shared human work", to: { type: "agent", ref: f.agent.id } }, f.headers)).status).toBe(200);
   });
 
-  for (const kind of ["permission", "question"] as const) it(`B2: hides private-agent ${kind} across read protocols and refuses answers without consuming`, async () => {
+  for (const kind of ["permission", "question"] as const) it(`B2: hides private-agent ${kind} from another Agent's task across read protocols and refuses answers without consuming`, async () => {
     const f = await scaffold(), q = runningRequest(f.store, f.db, f.agent.id, f.issue.id, kind, kind === "permission" ? permission : question);
-    expect((await f.request(`/api/agents/${f.agent.id}`)).status).toBe(403);
-    expect((await f.request(`/api/turns/${q.turn.id}`)).status).toBe(404);
-    expect((await f.request(`/api/messages/${q.request.id}`)).status).toBe(404);
-    expect((await f.request(f.path)).data.messages).toHaveLength(1);
+    // Grant the original Session so the assertions exercise private-source filtering,
+    // independently of the outer Task Session capability check.
+    const taskCaller = await taskAuthForOtherAgent(f, true);
+    const request = (path: string, method = "GET", body?: unknown) => f.request(path, method, body, taskCaller.headers);
+    expect((await request(`/api/agents/${f.agent.id}`)).status).toBe(403);
+    expect((await request(`/api/turns/${q.turn.id}`)).status).toBe(404);
+    expect((await request(`/api/messages/${q.request.id}`)).status).toBe(404);
+    const visibleMessages = await request(f.path);
+    expect(visibleMessages.status).toBe(200);
+    expect(visibleMessages.data.messages).toHaveLength(2); // Both task prompts, without the private Q.
+    expect(visibleMessages.data.messages.some((message: any) => message.id === q.request.id)).toBe(false);
     const log = `/api/sessions/${f.session.id}/log`;
-    expect((await f.request(`${log}/entry?id=${q.request.id}`)).status).toBe(404);
-    expect((await f.request(`${log}/locate?id=${q.request.id}`)).status).toBe(404);
-    const range = await f.request(`${f.path}?from=0&to=${f.store.getConversationLogHead(f.session.id)!.headSeq}`);
+    expect((await request(`${log}/entry?id=${q.request.id}`)).status).toBe(404);
+    expect((await request(`${log}/locate?id=${q.request.id}`)).status).toBe(404);
+    const range = await request(`${f.path}?from=0&to=${f.store.getConversationLogHead(f.session.id)!.headSeq}`);
     expect(range.data.entries.some((e: any) => e.id === q.request.id)).toBe(false);
-    expect((await f.request(log)).data.entries.some((e: any) => e.id === q.request.id)).toBe(false);
-    // Include the pending question in this member's inbox to exercise counts.
-    const member = f.store.getWorkspaceMemberByRef(f.user.id, "local")!;
-    f.db.run("UPDATE multiremi_conversation_log SET to_member_id=? WHERE id=?", [member.id, q.request.id]);
-    const inbox = await f.request("/api/inbox");
-    expect(inbox.data.items).toEqual([]); expect(inbox.data.unread_count).toBe(0); expect(inbox.data.attention_count).toBe(0);
+    expect((await request(log)).data.entries.some((e: any) => e.id === q.request.id)).toBe(false);
+    const inboxBeforeRecipientChange = await request("/api/inbox");
+    expect(inboxBeforeRecipientChange.status).toBe(200);
+    // A retained recipient row must not bypass the private source check for a task.
+    f.db.run("UPDATE multiremi_conversation_log SET to_agent_id=?,to_member_id=NULL WHERE id=?", [taskCaller.agent.id, q.request.id]);
+    const inbox = await request("/api/inbox");
+    expect(inbox.status).toBe(200);
+    expect(inbox.data.items).toEqual(inboxBeforeRecipientChange.data.items);
+    expect(inbox.data.unread_count).toBe(inboxBeforeRecipientChange.data.unread_count);
+    expect(inbox.data.attention_count).toBe(inboxBeforeRecipientChange.data.attention_count);
     const before = f.store.getConversationLogHead(f.session.id)!.headSeq;
-    expect((await f.request(f.path, "POST", { reply_to_id: q.request.id, body_md: "allow", response: { allow: true } })).status).toBe(404);
+    expect((await request(f.path, "POST", { reply_to_id: q.request.id, body_md: "allow", response: { allow: true } })).status).toBe(404);
     expect(f.store.getTaskHumanRequest(q.request.id)?.status).toBe("pending");
     expect(f.store.getTurn(q.turn.id)?.status).toBe("awaiting_human");
     expect(f.store.getConversationLogHead(f.session.id)?.headSeq).toBe(before);
     expect((await f.request(f.path, "POST", { reply_to_id: q.request.id, expected_route_revision: q.revision,
-      response: kind === "permission" ? { option_id: "allow_once" } : { answers: { "Continue?": "Yes" } } }, f.owner)).status).toBe(200);
-    expect((await f.request(f.path)).data.messages.some((m: any) => m.reply_to_id === q.request.id)).toBe(false);
+      response: kind === "permission" ? { option_id: "allow_once" } : { answers: { "Continue?": "Yes" } } }, f.headers)).status).toBe(200);
+    expect((await request(f.path)).data.messages.some((m: any) => m.reply_to_id === q.request.id)).toBe(false);
   });
 
-  it("B2: shared-agent visibility does not authorize a different member to answer the specified human's Q", async () => {
+  it("B2: shared-agent visibility never authorizes a task to answer a human Q", async () => {
     const f = await scaffold(); f.store.updateAgent(f.agent.id, { visibility: "workspace" });
     const q = runningRequest(f.store, f.db, f.agent.id, f.issue.id, "question", question);
-    expect((await f.request(`/api/messages/${q.request.id}`)).status).toBe(200);
+    const taskToken = await f.store.createTaskAccessToken(q.task, f.user.id);
+    const taskAuth = { Authorization: `Bearer ${taskToken.token}` };
+    expect((await f.request(`/api/messages/${q.request.id}`, "GET", undefined, taskAuth)).status).toBe(200);
     expect((await f.request(f.path, "POST", { reply_to_id: q.request.id, expected_route_revision: q.revision,
-      metadata: { selected_options: ["Yes"] } })).status).toBe(403);
+      metadata: { selected_options: ["Yes"] } }, taskAuth)).status).toBe(403);
     expect(f.store.getTaskHumanRequest(q.request.id)?.status).toBe("pending");
     expect(f.store.getTurn(q.turn.id)?.status).toBe("awaiting_human");
     expect((await f.request(f.path, "POST", { reply_to_id: q.request.id, expected_route_revision: q.revision,
-      metadata: { selected_options: ["Yes"] } }, f.owner)).status).toBe(200);
+      metadata: { selected_options: ["Yes"] } }, f.headers)).status).toBe(200);
     expect(f.store.getTaskHumanRequest(q.request.id)?.response).toMatchObject({ answers: { "Continue?": "Yes" } });
   });
 
-  for (const kind of ["permission", "question"] as const) it(`B2: the specified human can read and answer private ${kind} only through the original Q surface`, async () => {
+  for (const kind of ["permission", "question"] as const) it(`B2: humans share private ${kind} access and answer as the operator through the original Q surface`, async () => {
     const f = await scaffold(), member = f.store.findWorkspaceMemberForUser(f.user.id, "local")!;
     f.store.updateIssue(f.issue.id, { responsibleMemberId: member.id, actorType: "member", actorId: "mem_local_local" });
     const q = runningRequest(f.store, f.db, f.agent.id, f.issue.id, kind, kind === "permission" ? permission : question);
-    expect((await f.request(`/api/messages/${q.request.id}`)).status).toBe(404);
-    expect((await f.request(`/api/turns/${q.turn.id}`)).status).toBe(404);
-    expect((await f.request(`/api/turns/${q.turn.id}/trace`)).status).toBe(404);
+    expect((await f.request(`/api/messages/${q.request.id}`)).status).toBe(200);
+    expect((await f.request(`/api/turns/${q.turn.id}`)).status).toBe(200);
+    expect((await f.request(`/api/turns/${q.turn.id}/trace`)).status).toBe(200);
     const view = await f.request(`/api/messages/${q.request.id}/question`);
-    expect(view.status).toBe(200); expect(view.data.question.current_handler).toEqual({ type: "member", id: member.id });
+    expect(view.status).toBe(200); expect(view.data.question.current_handler).toEqual({ type: "member", id: f.store.getWorkspaceOperator("local")!.id });
     const response = kind === "permission" ? { option_id: "allow_once" } : { answers: { "Continue?": "Yes" } };
     expect((await f.request(`/api/messages/${q.request.id}/question/answer`, "POST",
       { expected_route_revision: q.revision, response })).status).toBe(200);
-    expect(f.store.getQuestion(q.request.id)?.answer?.actor).toEqual({ type: "member", id: member.id });
+    expect(f.store.getQuestion(q.request.id)?.answer?.actor).toEqual({ type: "member", id: f.store.getWorkspaceOperator("local")!.id });
     expect(f.store.getQuestion(q.request.id)?.wait_status).toBe("waiting");
+    expect(f.store.getIssue(f.issue.id)?.responsibleMemberId).toBe(member.id);
     const consumed = f.store.getDaemonTurnBridge().rpc("turn.decision.consume", { turn_id: q.turn.id, attempt_id: q.task.id,
       message_id: q.request.id, wait_id: q.waitId, reply_message_id: f.store.getQuestion(q.request.id)!.answer!.reply_message_id },
       { runtimeId: q.runtime.id, daemonId: q.runtime.daemonId!, workspaceId: "local" });
     expect(consumed.ok).toBe(true); expect(f.store.getQuestion(q.request.id)?.wait_status).toBe("consumed");
-    expect((await f.request(`/api/messages/${q.request.id}`)).status).toBe(404);
+    expect((await f.request(`/api/messages/${q.request.id}`)).status).toBe(200);
   });
 
   it("B3: accepts only the exact current Chat task capability throughout message, range, inbox and turn", async () => {
@@ -174,7 +196,7 @@ pendingTurnBackendTests("MUL-508 stage 1 regressions", (fixture) => {
     expect((await f.request(`/api/turns/${other.turn_id}`, "GET", undefined, auth)).status).toBe(403);
     expect((await f.request(`/api/turns/${other.turn_id}/cancel`, "POST", {}, auth)).status).toBe(403);
     const otherUser = await f.store.createAccessToken({ type: "pat", name: "Unrelated user", userId: "local", workspaceId: "local" });
-    expect((await f.request(path, "GET", undefined, { Authorization: `Bearer ${otherUser.token}` })).status).toBe(403);
+    expect((await f.request(path, "GET", undefined, { Authorization: `Bearer ${otherUser.token}` })).status).toBe(200);
     expect((await f.request("/api/inbox", "GET", undefined, auth)).data.items.every((m: any) => m.session_id !== otherChat.id)).toBe(true);
     const unrelated = f.store.createTask({ agentId: f.agent.id, issueId: f.issue.id, prompt: "Unrelated" });
     const unrelatedToken = await f.store.createAccessToken({ type: "task", name: "Unrelated task", taskId: unrelated.id, agentId: f.agent.id, userId: f.user.id, workspaceId: "local" });

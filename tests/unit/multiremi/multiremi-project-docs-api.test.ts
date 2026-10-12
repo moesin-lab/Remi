@@ -517,20 +517,24 @@ describe("Bun Multiremi project docs API", () => {
     });
   });
 
-  it("hides docs from non-members of the project workspace", async () => {
+  it("shares project docs with human operators while workspace-bound credentials remain scoped", async () => {
     const store = createStore();
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const workspace = store.createWorkspace({ name: "Private", slug: "private" });
     const project = store.createProject({ title: "Private docs", workspaceId: workspace.id });
-    store.createProjectDoc(project.id, { kind: "wiki", title: "Secret" });
+    const doc = store.createProjectDoc(project.id, { kind: "wiki", title: "Shared knowledge" });
     const outsider = store.getOrCreateUser({ externalId: "outsider", name: "Outsider" });
     const pat = await store.createAccessToken({ name: "outsider pat", type: "pat", userId: outsider.id });
 
     const listed = await app.request(`/api/projects/${project.id}/docs`, {
       headers: { Authorization: `Bearer ${pat.token}` },
     });
-    expect(listed.status).toBe(404);
-    expect(await listed.json()).toEqual({ error: "workspace not found" });
+    expect(listed.status).toBe(200);
+    expect((await listed.json()).docs).toEqual(expect.arrayContaining([expect.objectContaining({ id: doc.id })]));
+    const scoped = await store.createAccessToken({ name: "Legacy local scope", type: "pat", userId: "local", workspaceId: "local" });
+    const denied = await app.request(`/api/projects/${project.id}/docs`, { headers: { Authorization: `Bearer ${scoped.token}` } });
+    expect(denied.status).toBe(404);
+    expect(await denied.json()).toEqual({ error: "workspace not found" });
   });
 
   it("lists workspace-wide docs with project titles and passes filters through", async () => {
@@ -569,20 +573,28 @@ describe("Bun Multiremi project docs API", () => {
     expect(await badKind.json()).toEqual({ error: "unknown kind: notes" });
   });
 
-  it("hides the workspace doc listing from non-members", async () => {
+  it("shares the selected workspace doc listing with humans while task tokens remain in their workspace", async () => {
     const store = createStore();
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const workspace = store.createWorkspace({ name: "Private", slug: "private" });
     const project = store.createProject({ title: "Private docs", workspaceId: workspace.id });
-    store.createProjectDoc(project.id, { kind: "wiki", title: "Secret" });
+    const doc = store.createProjectDoc(project.id, { kind: "wiki", title: "Shared knowledge" });
     const outsider = store.getOrCreateUser({ externalId: "outsider", name: "Outsider" });
     const pat = await store.createAccessToken({ name: "outsider pat", type: "pat", userId: outsider.id });
 
     const listed = await app.request(`/api/project-docs?workspace_id=${workspace.id}`, {
       headers: { Authorization: `Bearer ${pat.token}` },
     });
-    expect(listed.status).toBe(404);
-    expect(await listed.json()).toEqual({ error: "workspace not found" });
+    expect(listed.status).toBe(200);
+    expect((await listed.json()).docs).toEqual(expect.arrayContaining([expect.objectContaining({ id: doc.id, project_id: project.id })]));
+    const agent = store.createAgent({ name: "Local knowledge reader", provider: "codex" });
+    const task = store.createTask({ agentId: agent.id, prompt: "Read local docs" });
+    const taskToken = await store.createTaskAccessToken(task, outsider.id);
+    for (const path of [`/api/project-docs?workspace_id=${workspace.id}`, `/api/projects/${project.id}/docs`]) {
+      const denied = await app.request(path, { headers: { Authorization: `Bearer ${taskToken.token}` } });
+      expect(denied.status).toBe(404);
+      expect(await denied.json()).toEqual({ error: "workspace not found" });
+    }
   });
 
   it("lets an owner task token list workspace project docs", async () => {

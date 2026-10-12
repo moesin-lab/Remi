@@ -97,7 +97,7 @@ export async function readIssueLogBootstrap(slug: string, issueId: string, selec
       schema: SessionLogWindowSchema }),
     readWithSessionCookie<IssueLogBootstrap["window"]>({ cookie, slug, signal, path: `${logPath}?anchor=0&before=1`, schema: SessionLogWindowSchema }),
     issue.parent_issue_id ? readWithSessionCookie<Issue>({ cookie, slug, signal, path: `/api/issues/${encodeURIComponent(issue.parent_issue_id)}`, schema: IssueDetailSchema }) : null,
-    readWithSessionCookie<MemberWithUser[]>({ cookie, slug, signal, path: `/api/workspaces/${encodeURIComponent(issue.workspace_id)}/members`, schema: MemberListSchema }),
+    readWithSessionCookie<MemberWithUser[]>({ cookie, slug, signal, path: `/api/workspaces/${encodeURIComponent(issue.workspace_id)}/members?include_history=true`, schema: MemberListSchema }),
     readWithSessionCookie<{ issues: Issue[] }>({ cookie, slug, signal, path: `${prefix}/children`, schema: ChildIssuesResponseSchema }),
     readWithSessionCookie<z.infer<typeof TurnsPageSchema>>({ cookie, slug, signal, path: `/api/turns?issue=${encodeURIComponent(issueId)}&limit=100`, schema: TurnsPageSchema }),
   ]);

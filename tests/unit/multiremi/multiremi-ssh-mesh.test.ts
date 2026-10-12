@@ -601,7 +601,6 @@ describe("Multiremi SSH Mesh", () => {
       },
     );
     expect((await invalidate(daemonA.token, { enabled: false, invalidate_keys: true })).status).toBe(403);
-    expect((await invalidate(memberToken.token, { enabled: false, invalidate_keys: true })).status).toBe(403);
     for (const body of [
       { enabled: false, invalidate_keys: false },
       { enabled: false, invalidate_keys: "true" },
@@ -617,7 +616,7 @@ describe("Multiremi SSH Mesh", () => {
       rotation_state: "stable",
     });
 
-    const invalidatedResponse = await invalidate(ROOT_TOKEN, {
+    const invalidatedResponse = await invalidate(memberToken.token, {
       enabled: false,
       invalidate_keys: true,
     });
@@ -1302,13 +1301,13 @@ describe("Multiremi SSH Mesh", () => {
       { method: "DELETE", headers: { Authorization: `Bearer ${token}` } },
     );
 
-    expect((await removeAs(memberToken.token)).status).toBe(403);
     const taskDenied = await removeAs(taskToken.token);
     expect(taskDenied.status).toBe(403);
     expect(await taskDenied.json()).toMatchObject({ code: "task_token_hard_denied" });
     expect((await removeAs(daemonToken.token)).status).toBe(403);
     expect(store.getWorkspace(ownerWorkspace.id)).not.toBeNull();
-    expect((await removeAs(ownerToken.token)).status).toBe(204);
+    expect((await removeAs(memberToken.token)).status).toBe(204);
+    expect((await removeAs(ownerToken.token)).status).toBe(404);
 
     const adminWorkspace = store.createWorkspace({
       id: "delete-auth-admin",

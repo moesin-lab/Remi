@@ -1,6 +1,5 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useAuthStore } from "../auth";
 import type { AgentRuntime } from "../types";
 import { runtimeListOptions, latestCliVersionOptions } from "./queries";
 
@@ -23,11 +22,8 @@ function isNewer(latest: string, current: string): boolean {
 function runtimeNeedsUpdate(
   rt: AgentRuntime,
   latestVersion: string,
-  userId: string,
 ): boolean {
   if (rt.runtime_mode !== "local") return false;
-  // Only show to the user who owns this runtime.
-  if (rt.owner_id !== userId) return false;
   // Desktop-managed runtimes are updated by the Desktop app's own auto-updater;
   // the platform should not surface CLI update prompts for them.
   if (rt.metadata && rt.metadata.launched_by === "desktop") {
@@ -42,7 +38,7 @@ function runtimeNeedsUpdate(
 }
 
 /**
- * Returns true if the current user has any local runtime with an outdated CLI version.
+ * Returns true if the workspace has any local runtime with an outdated CLI version.
  * Accepts wsId as parameter so callers outside WorkspaceIdProvider can use it safely.
  */
 export function useMyRuntimesNeedUpdate(
@@ -50,7 +46,6 @@ export function useMyRuntimesNeedUpdate(
   /** MUL-472 b: `false` defers `cli/latest-version` until the route is past its first screen. */
   latestVersionEnabled = true,
 ): boolean {
-  const userId = useAuthStore((s) => s.user?.id);
   const { data: runtimes } = useQuery({
     ...runtimeListOptions(wsId ?? ""),
     enabled: !!wsId,
@@ -59,13 +54,13 @@ export function useMyRuntimesNeedUpdate(
     latestCliVersionOptions({ enabled: latestVersionEnabled }),
   );
 
-  if (!runtimes || !latestVersion || !userId) return false;
+  if (!runtimes || !latestVersion) return false;
 
-  return runtimes.some((rt) => runtimeNeedsUpdate(rt, latestVersion, userId));
+  return runtimes.some((rt) => runtimeNeedsUpdate(rt, latestVersion));
 }
 
 /**
- * Returns a Set of runtime IDs that belong to the current user and have updates available.
+ * Returns the workspace runtime IDs that have CLI updates available.
  * Accepts wsId as parameter so callers outside WorkspaceIdProvider can use it safely.
  */
 export function useUpdatableRuntimeIds(
@@ -73,7 +68,6 @@ export function useUpdatableRuntimeIds(
   /** MUL-472 b: the runtimes page is already past the shell gate when it asks. */
   latestVersionEnabled = true,
 ): Set<string> {
-  const userId = useAuthStore((s) => s.user?.id);
   const { data: runtimes } = useQuery({
     ...runtimeListOptions(wsId ?? ""),
     enabled: !!wsId,
@@ -83,13 +77,13 @@ export function useUpdatableRuntimeIds(
   );
 
   return useMemo(() => {
-    if (!runtimes || !latestVersion || !userId) return new Set<string>();
+    if (!runtimes || !latestVersion) return new Set<string>();
     const ids = new Set<string>();
     for (const rt of runtimes) {
-      if (runtimeNeedsUpdate(rt, latestVersion, userId)) {
+      if (runtimeNeedsUpdate(rt, latestVersion)) {
         ids.add(rt.id);
       }
     }
     return ids;
-  }, [runtimes, latestVersion, userId]);
+  }, [runtimes, latestVersion]);
 }

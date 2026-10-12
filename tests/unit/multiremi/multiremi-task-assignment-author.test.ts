@@ -120,7 +120,7 @@ describe("MUL-448 task assignment author comes from the credential", () => {
     const events = assignmentEvents(store, session.id, created.id);
     expect(events).toHaveLength(1);
     expect(events[0]!.authorType).toBe("member");
-    expect(events[0]!.authorId).toBe(store.findWorkspaceMemberForUser(owner.id,"local")!.id); // #7: the sender is the current member row.
+    expect(events[0]!.authorId).toBe(store.getWorkspaceOperator("local")!.id); // The sender is the shared workspace operator.
   });
 
   it("strips task provenance the server owns from every task-create caller", async () => {
@@ -307,9 +307,8 @@ describe("MUL-448 identity aliases on the remaining write routes", () => {
     const { store, app, agentId, headers, owner } = await fixture();
     const decoy = store.getOrCreateUser({ email: "mul448-decoy@example.test", name: "MUL448 Decoy" });
 
-    // Both surfaces derive creator and implicit root-human responsibility from
-    // the real member credential. Forged creator/requester body fields never win.
-    const actualMember = store.findWorkspaceMemberForUser(owner.id, "local")!;
+    // Both surfaces use the shared operator without requiring a human owner.
+    // Forged creator/requester body fields never win.
     for (const [label, prefix] of [
       ["compat", "/api"],
       ["native", "/api/multiremi"],
@@ -321,9 +320,9 @@ describe("MUL-448 identity aliases on the remaining write routes", () => {
       expect(created.status).toBe(201);
       const createdBody = (await created.json()) as any;
       const issueId = createdBody.id ?? createdBody.issue?.id;
-      expect(store.getIssue(issueId)!.createdBy).toBe(owner.id);
+      expect(store.getIssue(issueId)!.createdBy).toBe("local");
       expect(store.getIssue(issueId)!.createdBy).not.toBe(decoy.id);
-      expect(store.getIssue(issueId)!.responsibleMemberId).toBe(actualMember.id);
+      expect(store.getIssue(issueId)!.responsibleMemberId).toBe(store.getWorkspaceOperator("local")!.id);
 
       const quick = await app.request(`${prefix}/issues/quick-create`, {
         method: "POST", headers,
@@ -336,9 +335,9 @@ describe("MUL-448 identity aliases on the remaining write routes", () => {
       });
       expect(quick.status).toBe(202);
       const quickBody = (await quick.json()) as any;
-      expect(store.getIssue(quickBody.issue.id)!.createdBy).toBe(owner.id);
+      expect(store.getIssue(quickBody.issue.id)!.createdBy).toBe("local");
       expect(store.getIssue(quickBody.issue.id)!.createdBy).not.toBe(decoy.id);
-      expect(store.getIssue(quickBody.issue.id)!.responsibleMemberId).toBe(actualMember.id);
+      expect(store.getIssue(quickBody.issue.id)!.responsibleMemberId).toBe(store.getWorkspaceOperator("local")!.id);
     }
   });
 

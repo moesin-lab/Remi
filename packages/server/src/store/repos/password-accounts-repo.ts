@@ -63,12 +63,7 @@ export class PasswordAccountsRepo {
       // Reconfiguration invalidates browser sessions without revoking personal
       // automation credentials or changing any other user's account.
       this.db.run("UPDATE multiremi_access_tokens SET revoked_at = ? WHERE user_id = ? AND type = 'pat' AND purpose = 'session' AND revoked_at IS NULL", [now, user.id]);
-      const member = this.workspaces.findWorkspaceMemberForUser(user.id, workspaceId);
-      if (member) {
-        if (member.role !== "owner") this.workspaces.updateWorkspaceMember(member.id, { role: "owner" });
-      } else {
-        this.workspaces.createWorkspaceMember({ workspaceId, userId: user.id, name: user.name, email: user.email, role: "owner" });
-      }
+      this.workspaces.ensureWorkspaceOperator(workspaceId);
       return { user, workspaceId, role: "owner" as const };
     })();
   }

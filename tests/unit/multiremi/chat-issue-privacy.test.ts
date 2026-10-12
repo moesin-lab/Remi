@@ -34,8 +34,10 @@ async function setup() {
 }
 
 describe("Chat privacy for historical Issue-linked tasks", () => {
-  it("filters private tasks from another member's Issue reads and refuses its Turn cancel route", async () => {
+  it("shares historical Chat tasks between humans but keeps unrelated task capabilities scoped", async () => {
     const { store, app, issue, privateTask, publicTask, alice, bob } = await setup();
+    const credential=await store.createTaskAccessToken(publicTask,'alice');
+    const taskHeaders={Authorization:`Bearer ${credential.token}`};
     for (const path of [
       `/api/multiremi/issues/${issue.id}`,
       `/api/turns?issue=${issue.id}`,
@@ -43,16 +45,21 @@ describe("Chat privacy for historical Issue-linked tasks", () => {
       const response = await app.request(path, { headers: bob });
       expect(response.status, path).toBe(200);
       const body = await response.text();
-      expect(body, path).not.toContain("PRIVATE_CHAT_PROMPT");
-      expect(body, path).not.toContain(privateTask.id);
+      expect(body, path).toContain(privateTask.id);
       expect(body, path).toContain(publicTask.id);
       const own = await app.request(path, { headers: alice });
       expect(await own.text(), path).toContain(privateTask.id);
+      const limited=await app.request(path,{headers:taskHeaders});
+      expect(limited.status,path).toBe(200);
+      const scoped=await limited.text();
+      expect(scoped,path).not.toContain(privateTask.id);
+      expect(scoped,path).not.toContain('PRIVATE_CHAT_PROMPT');
     }
     const cancelPath = turnApiPath(store, privateTask.id, "/cancel");
-    expect((await app.request(cancelPath, { method: "POST", headers: bob })).status).toBe(403);
+    expect((await app.request(cancelPath, { method: "POST", headers: taskHeaders })).status).toBe(403);
     expect(store.getTask(privateTask.id)?.status).toBe("queued");
-    expect((await app.request(cancelPath, { method: "POST", headers: alice })).status).toBe(200);
+    expect((await app.request(cancelPath, { method: "POST", headers: bob })).status).toBe(200);
+    expect(store.getTask(privateTask.id)?.status).toBe('cancelled');
   });
 
   it("keeps private Chat inputs and transcripts out of signed Issue shares, including after deletion", async () => {

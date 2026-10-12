@@ -14,7 +14,7 @@ export function registerNotificationPreferenceRoutes(app: Hono, deps: RouterDeps
     if (denied) return denied;
     return c.json(store.getNotificationPreferences({
       workspaceId,
-      memberId: c.req.query("memberId") ?? c.req.query("member_id"),
+      memberId: store.ensureWorkspaceOperator(workspaceId).id,
     }));
   });
   app.put("/api/multiremi/notification-preferences", async (c) => {
@@ -25,7 +25,7 @@ export function registerNotificationPreferenceRoutes(app: Hono, deps: RouterDeps
     if (denied) return denied;
     return c.json(store.updateNotificationPreferences({
       workspaceId,
-      memberId: body.memberId ?? body.member_id,
+      memberId: store.ensureWorkspaceOperator(workspaceId).id,
       preferences: body.preferences ?? {},
     }));
   });
@@ -36,7 +36,7 @@ export function registerNotificationPreferenceRoutes(app: Hono, deps: RouterDeps
     if (denied) return denied;
     return c.json(store.getNotificationPreferences({
       workspaceId,
-      memberId: c.req.query("memberId") ?? c.req.query("member_id"),
+      memberId: store.ensureWorkspaceOperator(workspaceId).id,
     }));
   });
   app.put("/api/notification-preferences", async (c) => {
@@ -47,7 +47,7 @@ export function registerNotificationPreferenceRoutes(app: Hono, deps: RouterDeps
     if (denied) return denied;
     return c.json(store.updateNotificationPreferences({
       workspaceId,
-      memberId: body.memberId ?? body.member_id,
+      memberId: store.ensureWorkspaceOperator(workspaceId).id,
       preferences: body.preferences ?? body,
     }));
   });

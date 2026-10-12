@@ -240,7 +240,7 @@ describe("task human requests (store)", () => {
 });
 
 pendingTurnBackendTests("Human Request unified API", fixture => {
-  it("guards Human Request read and response with task transcript visibility", async () => {
+  it("shares human request access while keeping unrelated task credentials outside the source Chat", async () => {
     const { store } = fixture();
     const aliceMember = store.createWorkspaceMember({ workspaceId: "local", userId: "alice", name: "Alice", role: "member" });
     store.createWorkspaceMember({ workspaceId: "local", userId: "bob", name: "Bob", role: "member" });
@@ -283,10 +283,15 @@ pendingTurnBackendTests("Human Request unified API", fixture => {
     const aliceAuth = { Authorization: `Bearer ${aliceToken.token}` };
     const bobAuth = { Authorization: `Bearer ${bobToken.token}` };
 
-    expect((await app.request(`/api/messages/${request.id}`, { headers: bobAuth })).status).toBe(403);
+    expect((await app.request(`/api/messages/${request.id}`, { headers: bobAuth })).status).toBe(200);
+    const otherChat = store.createChatSession({ agentId: agent.id, creatorId: "bob" });
+    const otherTask = store.createTask({ agentId: agent.id, chatSessionId: otherChat.id, prompt: "Unrelated work" });
+    const otherToken = await store.createTaskAccessToken(otherTask, "bob");
+    const otherAuth = { Authorization: `Bearer ${otherToken.token}` };
+    expect((await app.request(`/api/messages/${request.id}`, { headers: otherAuth })).status).toBe(403);
     expect((await app.request(attemptMessagesPath(store, task.id), {
       method: "POST",
-      headers: { ...bobAuth, "Content-Type": "application/json" },
+      headers: { ...otherAuth, "Content-Type": "application/json" },
       body: JSON.stringify({ response: { answers: { "Proceed?": "yes" } }, reply_to_id: request.id, message_kind: "reply",
         expected_route_revision: store.getQuestion(request.id)!.route_revision }),
     })).status).toBe(403);
@@ -297,12 +302,13 @@ pendingTurnBackendTests("Human Request unified API", fixture => {
     expect((await visible.json()).message).toMatchObject({ id: request.id, metadata: { human_request: { status: "pending" } } });
     const responded = await app.request(attemptMessagesPath(store, task.id), {
       method: "POST",
-      headers: { ...aliceAuth, "Content-Type": "application/json" },
+      headers: { ...bobAuth, "Content-Type": "application/json" },
       body: JSON.stringify({ response: { answers: { "Proceed?": "yes" } }, reply_to_id: request.id, message_kind: "reply",
         expected_route_revision: store.getQuestion(request.id)!.route_revision }),
     });
     expect(responded.status).toBe(200);
     expect(store.getTaskHumanRequest(request.id)?.status).toBe("responded");
-    expect(store.getTaskHumanRequest(request.id)?.respondedBy).toBe(aliceMember.id);
+    expect(store.getTaskHumanRequest(request.id)?.respondedBy).toBe(store.getWorkspaceOperator("local")!.id);
+    expect(store.getWorkspaceMember(aliceMember.id)?.userId).toBe("alice");
   });
 });

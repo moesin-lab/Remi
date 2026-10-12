@@ -20,7 +20,7 @@ vi.mock("@multiremi/core/api", async importOriginal => ({
   api: {
     getSessionLog: backend.read, listMessages: backend.listMessages, deleteMessage: backend.deleteMessage,
     listAgents: async () => [{ id: "agent-a", name: "Alpha", archived_at: null, owner_id: "user-a" }],
-    listMembers: async () => [{ id: "member-a", user_id: "user-a", role: "owner" }],
+    listMembers: async () => [{ id: "member-a", user_id: "local", role: "owner" }],
     listProjects: async () => ({ projects: [] }),
     listChatSessions: async () => [session],
     getPendingChatTask: async () => ({}),

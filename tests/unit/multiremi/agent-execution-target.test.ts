@@ -85,7 +85,7 @@ describe("Agent execution target", () => {
     expect(store.getTask(projectTask.id)?.status).toBe("queued");
   });
 
-  it("allows metadata edits after the selected Runtime becomes private without releasing its target", () => {
+  it("keeps the selected Runtime usable after its legacy visibility becomes private", () => {
     const { store, second } = fixture();
     const shared = store.registerRuntime({ name: "Shared", provider: "codex", visibility: "public", ownerId: "other" });
     const agent = store.createAgent({ name: "Shared target", provider: "codex", runtimeId: shared.id });
@@ -93,17 +93,21 @@ describe("Agent execution target", () => {
     store.updateRuntime(shared.id, { visibility: "private" });
     const renamed = store.updateAgent(agent.id, { name: "Renamed", provider: agent.provider });
     expect(renamed).toMatchObject({ name: "Renamed", runtimeId: shared.id });
-    expect(store.claimTask(shared.id)).toBeNull();
+    expect(store.claimTask(shared.id)?.id).toBe(task.id);
     expect(store.claimTask(second.id)).toBeNull();
-    expect(store.getTask(task.id)?.status).toBe("queued");
+    expect(store.getTask(task.id)?.status).toBe("dispatched");
   });
 
-  it("validates provider and owner and prevents deletion from silently removing the target", () => {
+  it("validates provider and workspace and prevents deletion from silently removing the target", () => {
     const { store, first, agent } = fixture();
     const claude = store.registerRuntime({ name: "Claude", provider: "claude" });
     const privateRuntime = store.registerRuntime({ name: "Other owner", provider: "codex", ownerId: "other" });
     expect(() => store.updateAgent(agent.id, { runtimeId: claude.id })).toThrow("provider");
-    expect(() => store.updateAgent(agent.id, { runtimeId: privateRuntime.id })).toThrow("owner");
+    expect(store.updateAgent(agent.id, { runtimeId: privateRuntime.id })?.runtimeId).toBe(privateRuntime.id);
+    store.updateAgent(agent.id, { runtimeId: first.id });
+    const otherWorkspace = store.createWorkspace({ name: "Other", slug: "other-runtime" });
+    const foreignRuntime = store.registerRuntime({ name: "Other workspace", provider: "codex", workspaceId: otherWorkspace.id });
+    expect(() => store.updateAgent(agent.id, { runtimeId: foreignRuntime.id })).toThrow("Runtime not found");
     expect(() => store.createAgent({ name: "Invalid", provider: "claude", runtimeId: first.id })).toThrow("provider");
     store.registerRuntime({ name: "First Claude", daemonId: first.daemonId!, provider: "claude" });
     expect(store.deleteRuntime(first.id)).toBe(false);

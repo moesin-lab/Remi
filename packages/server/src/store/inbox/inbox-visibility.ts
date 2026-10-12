@@ -8,6 +8,8 @@ export interface InboxAccess { userId: string | null; admin: boolean; attemptId?
 export function inboxVisibilitySql(db: SqlDatabase, access: InboxAccess,
   source: { from: string; params: unknown[] }) {
   const params: unknown[] = [];
+  // Match the candidate query's ownership fallback for historical unstamped heads.
+  const workspace = 'COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)';
   const json = (alias: string, path: string) => db.dialect === 'postgres'
     ? `${alias}.metadata::jsonb #>> '{${path.replaceAll('.', ',')}}'`
     : `json_extract(${alias}.metadata,'$.${path}')`;
@@ -19,18 +21,18 @@ export function inboxVisibilitySql(db: SqlDatabase, access: InboxAccess,
     ${sourceNotification(alias)} AND ${next}.id=${json(alias, 'root_question_id')})`;
   const chatGuard = (chat: string, turn: string) => {
     if (access.attemptId) { params.push(access.attemptId); return `${turn}.current_attempt_id=?`; }
-    if (access.userId) { params.push(access.userId); return `${chat}.creator_id=?`; }
     return '1=1';
   };
-  const conversation = `((s.id IS NOT NULL AND s.chat_id IS NULL OR a.id IS NOT NULL OR m.session_id='auto_orphan_inbox_'||h.workspace_id)
-    OR c.id IS NOT NULL AND c.workspace_id=h.workspace_id AND ${access.attemptId
+  const conversation = `((s.id IS NOT NULL AND s.chat_id IS NULL OR a.id IS NOT NULL OR m.session_id='auto_orphan_inbox_'||${workspace})
+    OR c.id IS NOT NULL AND c.workspace_id=${workspace} AND ${access.attemptId
       ? (params.push(access.attemptId), "EXISTS (SELECT 1 FROM multiremi_turns own WHERE own.session_id=m.session_id AND own.current_attempt_id=?)")
-      : access.userId ? (params.push(access.userId), "COALESCE(c.creator_id,'local')=?") : '1=1'})`;
+      : '1=1'})`;
   const sourceChatGuard = chatGuard('sc', 't');
-  const sourceAgentGuard = access.userId && !access.admin
+  // Human operators share source visibility; task credentials keep the same
+  // private-Agent source boundary as the single-message HTTP reader.
+  const sourceAgentGuard = access.attemptId && access.userId && access.userId !== 'local' && !access.admin
     ? (params.push(access.userId), "(ag.visibility<>'private' OR ag.owner_id=?)") : '1=1';
-  const conversationAgentGuard = access.userId && !access.admin && !access.attemptId
-    ? (params.push(access.userId), "(c.id IS NULL OR EXISTS (SELECT 1 FROM multiremi_agents ca WHERE ca.id=c.agent_id AND (ca.visibility<>'private' OR ca.owner_id=?)))") : '1=1';
+  const conversationAgentGuard = '1=1';
   const protectedSource = `(d.kind='turn' OR ${json('d', 'human_request')} IS NOT NULL
     OR ${json('d', 'human_response')} IS NOT NULL AND d.task_id IS NOT NULL)`;
   const sourceIssue = `COALESCE(${json('d', 'decision_record.source_issue_id')},${json('d', 'source_issue_id')})`;
@@ -60,17 +62,17 @@ export function inboxVisibilitySql(db: SqlDatabase, access: InboxAccess,
     LEFT JOIN multiremi_issues di ON di.id=ds.issue_id
     LEFT JOIN multiremi_issues si ON si.id=${sourceIssue}
     WHERE d.root_id=m.id AND d.source_inherited=1 AND (
-      ${protectedSource} AND (t.id IS NULL OR t.workspace_id<>h.workspace_id
-        OR (COALESCE(ts.chat_id,t.chat_session_id) IS NOT NULL OR sc.id IS NOT NULL) AND (sc.id IS NULL OR sc.workspace_id<>h.workspace_id OR NOT (${sourceChatGuard}))
+      ${protectedSource} AND (t.id IS NULL OR t.workspace_id<>${workspace}
+        OR (COALESCE(ts.chat_id,t.chat_session_id) IS NOT NULL OR sc.id IS NOT NULL) AND (sc.id IS NULL OR sc.workspace_id<>${workspace} OR NOT (${sourceChatGuard}))
         OR COALESCE(ts.chat_id,t.chat_session_id,sc.id) IS NULL AND NOT (${sourceAgentGuard}))
       OR ${json('d', 'human_response')} IS NOT NULL AND d.task_id IS NULL AND NOT EXISTS (
         SELECT 1 FROM multiremi_conversation_log n WHERE ${related('d', 'n')})
       OR ${sourceNotification('d')} AND NOT EXISTS (
         SELECT 1 FROM multiremi_conversation_log n WHERE n.id=${json('d', 'root_question_id')})
-      OR ${sourceIssue} IS NOT NULL AND (di.id IS NULL OR si.id IS NULL OR di.workspace_id<>h.workspace_id OR si.workspace_id<>h.workspace_id)
+      OR ${sourceIssue} IS NOT NULL AND (di.id IS NULL OR si.id IS NULL OR di.workspace_id<>${workspace} OR si.workspace_id<>${workspace})
       OR d.depth=4 AND ${inherits('d')}
     )) AND ${conversationAgentGuard}`;
-  const notification = questionNotificationVisibilitySql(db, access, 'notification');
+  const notification = questionNotificationVisibilitySql(db, access, 'notification', workspace);
   return { cte, cteParams: source.params, where: `${where} AND NOT EXISTS (SELECT 1 FROM ancestors notification
     WHERE notification.root_id=m.id AND NOT (${notification.where}))`, params: [...params, ...notification.params] };
 }

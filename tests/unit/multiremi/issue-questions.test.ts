@@ -55,13 +55,14 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     const answer = (credential:string) => app.request(`/api/messages/${h.q.id}/question/answer`, {
       method:'POST',headers:{Authorization:`Bearer ${credential}`,'Content-Type':'application/json'},
       body:JSON.stringify({expected_route_revision:1,response:{option_id:'A'}})});
-    expect(h.q).toMatchObject({current_handler:null,stage:'human',route_reason:null});
+    expect(h.q).toMatchObject({current_handler:{type:'member',id:'mem_local_local'},stage:'human',route_reason:null});
     expect(h.store.getQuestion(h.q.id,{type:'member',id:member.id})?.actions.allowed).toContain('answer');
-    expect((await answer(outsideToken.token)).status).toBe(404);
+    // Any authenticated account operates this workspace; task credentials remain scoped.
+    expect((await app.request(`/api/messages/${h.q.id}/question`, { headers: { Authorization: `Bearer ${outsideToken.token}` } })).status).toBe(200);
     expect((await answer(agentToken.token)).status).toBe(403);
     expect((await answer(token.token)).status).toBe(200);
     const answered = h.store.getQuestion(h.q.id)!;
-    expect(answered.answer?.actor).toEqual({type:'member',id:member.id});
+    expect(answered.answer?.actor).toEqual({type:'member',id:'mem_local_local'});
     expect(h.bridge.rpc('turn.decision.consume',{turn_id:h.turn.id,attempt_id:h.task.id,message_id:h.q.id,
       reply_message_id:answered.answer!.reply_message_id,wait_id:`wait_nonce_${h.task.id}`},h.scope)).toEqual({ok:true});
     expect(h.store.getQuestion(h.q.id)?.wait_status).toBe('consumed');
@@ -335,9 +336,9 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     expect(moved.actions.allowed).toContain('continue');
     expect(h.db.query("SELECT COUNT(*) AS count FROM multiremi_conversation_log WHERE to_agent_id=? AND dedupe_key LIKE 'question-route:%'").get(h.leader.id).count).toBe(beforeNotifications);
     const notice = h.db.query('SELECT * FROM multiremi_conversation_log WHERE dedupe_key=?').get(`question-recovery-route:${h.q.id}:2`);
-    expect(notice.to_member_id).toBe(human.id); expect(notice.session_id).not.toBe(h.q.session_id); expect(notice.reply_to_id).toBeNull();
+    expect(notice.to_member_id).toBe('mem_local_local'); expect(notice.session_id).not.toBe(h.q.session_id); expect(notice.reply_to_id).toBeNull();
     expect(JSON.parse(notice.metadata).root_question_id).toBe(h.q.id);
-    expect(() => h.store.continueQuestion(h.q.id, { expected_route_revision: 2 }, { type: 'member', id: 'mem_local_local' })).toThrow('question_continuation_human_required');
+    expect(h.store.getQuestion(h.q.id, {type:'member',id:'mem_local_local'})!.actions.allowed).toContain('continue');
     h.store.restoreAgent(h.worker.id);
     const resumed = h.store.continueQuestion(h.q.id, { expected_route_revision: 2 }, { type: 'member', id: human.id });
     expect(resumed.wait_status).toBe('continuation_pending'); expect(resumed.answer_revision).toBe(1);

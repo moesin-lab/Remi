@@ -59,7 +59,7 @@ describe("Session owner API boundaries", () => {
     expect(f.store.listIssueSessions(f.issue.id, true)).toHaveLength(before);
   });
 
-  it("does not expand private Chat permissions through a linked Issue", async () => {
+  it("shares linked Chat content between humans while keeping it out of public Issue shares", async () => {
     const f = await fixture();
     for (const path of [
       `/api/sessions/${f.linked.id}`,
@@ -67,17 +67,17 @@ describe("Session owner API boundaries", () => {
       `/api/sessions/${f.linked.id}/log`,
       `/api/sessions/${f.linked.id}/messages`,
     ]) {
-      expect((await f.app.request(path, { headers: f.bob })).status, path).toBe(403);
+      expect((await f.app.request(path, { headers: f.bob })).status, path).toBe(200);
       expect((await f.app.request(path, { headers: f.alice })).status, path).toBe(200);
     }
     const taskResponse = await f.app.request(`/api/sessions/${f.linked.id}/messages`, {
-      method: "POST", headers: f.bob, body: JSON.stringify(requestMessageBody(f.store, { agent_id: f.agent.id, prompt: "Intrusion" })),
+      method: "POST", headers: f.bob, body: JSON.stringify(requestMessageBody(f.store, { agent_id: f.agent.id, prompt: "Shared follow-up" })),
     });
-    expect(taskResponse.status).toBe(403);
+    expect(taskResponse.status).toBe(200);
     const sessions = await (await f.app.request(`/api/issues/${f.issue.id}/sessions`, { headers: f.bob })).json();
-    expect(sessions.some((session: { id: string }) => session.id === f.linked.id)).toBe(false);
+    expect(sessions.some((session: { id: string }) => session.id === f.linked.id)).toBe(true);
     const results = await (await f.app.request(`/api/issues/${f.issue.id}/session-results`, { headers: f.bob })).text();
-    expect(results).not.toContain("PRIVATE_SESSION_RESULT");
+    expect(results).toContain("PRIVATE_SESSION_RESULT");
     const mintResponse = await f.app.request(`/api/issues/${f.issue.id}/share`, { method: "POST", headers: f.alice });
     expect(mintResponse.status).toBe(201);
     const minted = await mintResponse.json();

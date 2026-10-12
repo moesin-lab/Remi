@@ -51,8 +51,9 @@ export function canReadQuestionNotificationFacts(identity: NotificationIdentity,
     && facts.own_workspace === identity.workspaceId && facts.agent_workspace === identity.workspaceId && !facts.agent_archived
     && facts.own_agent === entry.to_agent_id && facts.own_session === entry.session_id
     && String(facts.own_scope ?? '') === String(entry.metadata.execution_scope ?? '');
-  return !access.userId || access.admin || facts.administrator === true || facts.administrator === 1
-    || facts.human_user === access.userId || facts.human_id === access.userId;
+  // HTTP/stream authorization already checked the workspace boundary. Humans
+  // operate the same workspace identity, including historical addressed Qs.
+  return true;
 }
 
 /** The Q grant applies only to this notification, never to its whole lane. */
@@ -78,13 +79,7 @@ export function questionNotificationVisibilitySql(db: Pick<SqlDatabase, 'dialect
       AND own.workspace_id=${workspace} AND ag.workspace_id=${workspace} AND ag.archived_at IS NULL
       AND own.agent_id=${alias}.to_agent_id AND own.session_id=${alias}.session_id
       AND COALESCE(own.execution_scope,'')=COALESCE(${text(alias, 'execution_scope')},''))`;
-  } else if (!access.userId || access.admin) actor = '1=1';
-  else {
-    params.push(access.userId, access.userId, access.userId, access.userId);
-    actor = `(human.user_id=? OR human.id=? OR EXISTS (SELECT 1 FROM multiremi_workspace_members admin
-      WHERE admin.workspace_id=${workspace} AND admin.archived_at IS NULL AND (admin.role IN ('owner','admin') OR ${workspaceQueue})
-      AND (admin.user_id=? OR admin.id=?)))`;
-  }
+  } else actor = '1=1';
   // CASE keeps the correlated Q lookup out of ordinary-message reads. An OR
   // lets PostgreSQL plan/evaluate that lookup before the notification flag.
   const where = `(CASE WHEN COALESCE(${notification},FALSE) THEN EXISTS (

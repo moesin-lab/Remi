@@ -1,5 +1,7 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -14,7 +16,6 @@ import { Button } from "@multiremi/ui/components/ui/button";
 import { Card, CardContent } from "@multiremi/ui/components/ui/card";
 import { Label } from "@multiremi/ui/components/ui/label";
 import { Switch } from "@multiremi/ui/components/ui/switch";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multiremi/core/paths";
 import { deriveScmSettings } from "@multiremi/core/scm";
@@ -38,7 +39,7 @@ export function SourceControlTab() {
   const queryClient = useQueryClient();
   const navigation = useNavigation();
   const workspacePaths = useWorkspacePaths();
-  const user = useAuthStore((state) => state.user);
+  const user = workspaceOperatorUser;
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const currentMember = members.find((member) => member.user_id === user?.id) ?? null;
   const canManage = currentMember?.role === "owner" || currentMember?.role === "admin";

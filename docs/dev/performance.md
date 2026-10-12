@@ -13,7 +13,7 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 ### 1. 任务列表：页面请求展开 → 列表与计数 → PostgreSQL 同步桥
 
 - **实现事实：** [issues/queries.ts](../../frontend/packages/core/issues/queries.ts) 的 `fetchFirstPages` 用一次 `GET /api/issues/status-pages` 请求当前 [BOARD_STATUSES](../../frontend/packages/core/issues/config/status.ts) 的 6 个状态，每状态各 50 条、各自 total。各桶来自同一服务端读快照，第二页及以后仍用单状态列表和已加载条数作为 offset。[Store](../../packages/server/src/store/repos/issues-repo.ts) 在 SQLite 下显式使用 deferred 读事务，使其他连接可在 WAL 模式下提交写入；[事务包装](../../packages/server/src/store/request-read-cache.ts)仍为写路径默认使用 immediate，并为读事务保留缓存、提交后回调和回滚处理。PostgreSQL 使用 repeatable-read read-only 事务。列表 query key 与 `{ byStatus }` 缓存形状不变，失效后也使用分组首页。
-- **实现事实：** `fetchAllMyFirstPages` 保留 assignee、creator、involves 三种人员关系的合并顺序和 issue ID 去重，因此“我的全部任务”的状态列表首次执行是 **3 个分组请求**，其他单一关系页签是 1 个。这是查询层请求数，不是页面总请求实测；缓存命中、重试和其他查询会改变网络记录。[MyIssuesPage](../../frontend/packages/views/my-issues/components/my-issues-page.tsx) 的负责人看板使用另一条 assignee grouped 查询分支，不能套用该数量。
+- **实现事实：** `fetchAllMyFirstPages` 作为兼容查询工具保留 assignee、creator、involves 三种历史关系的合并与 issue ID 去重，一次调用发出 3 个分组请求。[MyIssuesPage](../../frontend/packages/views/my-issues/components/my-issues-page.tsx) 已跳转到工作区事项页，当前首屏不再执行个人关系页签；这些工具测试用于保持旧调用兼容，不代表当前页面请求数。
 - **实现事实：** 工作区列表显式请求 `include_archived_total=true`，用响应的 `archived_total` 更新原有归档计数缓存；计数订阅本身不发 HTTP。工作区负责人看板在其活跃的 `/api/issues/grouped` 响应中携带同一可选字段，避免订阅隐藏的状态列表。计数是整个工作区的归档总数，不受列表筛选影响；不传参数时服务端不额外 COUNT。API 返回 404 时，一个 API client 会记住不支持 status-pages，使用旧的逐状态请求；新会话重新探测。
 - **实现事实：** [issues router](../../packages/server/src/api/routers/issues.ts) 的列表响应调用 `listIssues` 和 `countIssues`。[PgBridge.request](../../packages/server/src/store/db/postgres.ts) 使用 `Atomics.wait` 等待 worker，worker 以 [Bun.SQL 的 `max: 1`](../../packages/server/src/store/db/pg-worker.ts) 保证事务语句共用连接。该限制是每个桥实例的连接数，不是整个部署只能有一个连接。
 - **同步回包边界：** 唤醒通知不等于当前查询已完成。桥必须循环检查共享状态离开 `pending` 后才解码回包，避免早到或上一轮延迟的通知让新查询读取旧结果；多次唤醒共用原来的 60 秒截止时间。真实 PostgreSQL 的[回归测试](../../tests/unit/multiremi/multiremi-postgres-store.test.ts)让新查询保持等待并注入提前唤醒，验证返回的是新查询结果，同时覆盖跨连接领取和 Chat 队列顺序。
@@ -61,6 +61,14 @@ Daemon 报告的 Runtime 身份校验使用 `getRuntimeLite`，不附带历史�
 容量释放后在冷却到期前重试且只检查同一 daemon。默认 SQLite，显式
 `MULTIREMI_TEST_POSTGRES_URL` 则创建并清理独立 PostgreSQL 测试库，连接失败不回落。
 这是 SQL 成本与行为检查，不提供生产延迟、吞吐或恢复时间结论。
+
+## Issue 详情首屏的工作区读取
+
+Issue 详情首屏的三个只读 GET 路由（详情、Sessions、timeline）启用请求级读取缓存。
+Issue 查询同时读取所属工作区是否存在，鉴权复用这项事实，不增加独立工作区查询。
+存在性缓存使用工作区表的失效规则：工作区写入、事务边界与锁后的读取不复用旧事实；
+其他 Issue 路由和后台异步工作不因此启用缓存。查询次数、响应和跨工作区/任务凭据边界见
+[首屏回归](../../tests/unit/multiremi/issue-detail-first-screen-query-count.test.ts)。
 
 ## 收件箱已具备的加载边界
 

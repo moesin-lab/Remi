@@ -72,7 +72,7 @@ pendingTurnBackendTests("specific run recovery", (current, backend) => {
     expect(f.store.listTasksForIssue(f.issue.id).filter((task) => task.status === "queued")).toHaveLength(1);
   });
 
-  it("keeps linked Chat recovery within its creator boundary", async () => {
+  it("shares linked Chat recovery across human accounts without changing its Session", async () => {
     const f = await fixture(current().store, true);
     expect(f.previous.chatSessionId).not.toBeNull();
     expect(f.store.getIssueSession(f.previous.issueSessionId!)?.ownerType).toBe("chat");
@@ -80,11 +80,11 @@ pendingTurnBackendTests("specific run recovery", (current, backend) => {
     f.store.createWorkspaceMember({ workspaceId: "local", userId: member.id, name: member.name, role: "member" });
     const pat = await f.store.createAccessToken({ name: "Other member", type: "pat", workspaceId: "local", userId: member.id });
     const response = await f.app.request(turnApiPath(f.store, f.previous.id, "/retry"), { method: "POST", headers: { Authorization: `Bearer ${pat.token}`, "Content-Type": "application/json" }, body: "{}" });
-    expect(response.status).toBe(403);
-    expect(f.store.listTasksForIssue(f.issue.id)).toHaveLength(1);
+    expect(response.status).toBe(200);
+    expect((await response.json()).turn.session_id).toBe(f.previous.issueSessionId);
+    expect(f.store.listTasksForIssue(f.issue.id)).toHaveLength(2);
     const own = await f.retry(f.previous.id);
-    expect(own.status).toBe(200);
-    expect((await own.json()).turn.session_id).toBe(f.previous.issueSessionId);
+    expect(own.status).toBe(409);
   });
 
   it("does not retry an active task or an invalid reference", async () => {
@@ -96,11 +96,11 @@ pendingTurnBackendTests("specific run recovery", (current, backend) => {
     expect((await f.retry(f.previous.id, { task_id: "" })).status).toBe(400);
   });
 
-  it("rejects workspace outsiders and conflicting overrides", async () => {
+  it("rejects workspace-bound foreign credentials and conflicting overrides", async () => {
     const f = await fixture(current().store);
     const user = f.store.getOrCreateUser({ name: "Other workspace", email: "recovery-outsider@example.test" });
     const other = f.store.createWorkspace({ name: "Other", slug: "recovery-other" }, user.id);
-    const pat = await f.store.createAccessToken({ name: "Other workspace token", type: "pat", workspaceId: other.id, userId: user.id });
+    const pat = await f.store.createAccessToken({ name: "Other workspace token", type: "pat", workspaceId: other.id });
     const response = await f.app.request(turnApiPath(f.store, f.previous.id, "/retry"), { method: "POST", headers: { Authorization: `Bearer ${pat.token}`, "Content-Type": "application/json" }, body: "{}" });
     expect(response.status).toBe(404);
     const conflict = await f.app.request(turnApiPath(f.store, f.previous.id, "/retry"), { method: "POST", headers: { Authorization: "Bearer recovery-fixture-token", "Content-Type": "application/json" }, body: JSON.stringify({ prompt: "replace instructions" }) });
@@ -198,7 +198,7 @@ pendingTurnBackendTests("specific run recovery", (current, backend) => {
     expect(privateRun.store.getTurnForAttempt(privateRun.previous.id)?.session_id).toBe(privateRun.session!.id);
   });
 
-  it("rechecks private creator and workspace inside the retry transaction and rolls back all writes", async () => {
+  it("rechecks workspace inside the retry transaction but does not partition humans by historical creator", async () => {
     const f = await fixture(current().store, true);
     const db = current().db;
     const turnId = f.store.getTurnForAttempt(f.previous.id)!.id;
@@ -214,7 +214,7 @@ pendingTurnBackendTests("specific run recovery", (current, backend) => {
     const unchanged = snapshot();
     const retry = f.store.retryTurnAsMember.bind(f.store);
     try {
-      for (const [column, value] of [["creator_id", outsider.id], ["workspace_id", foreign.id]] as const) {
+      for (const [column, value] of [["workspace_id", foreign.id]] as const) {
         f.store.retryTurnAsMember = (id, cold, authorize) => retry(id, cold, sessionId => {
           db.run(`UPDATE multiremi_chat_sessions SET ${column}=? WHERE id=?`, [value, f.chat!.id]);
           authorize!(sessionId);
@@ -222,6 +222,13 @@ pendingTurnBackendTests("specific run recovery", (current, backend) => {
         expect([403, 404]).toContain((await f.retry(f.previous.id)).status);
         expect(snapshot()).toEqual(unchanged);
       }
+      f.store.retryTurnAsMember = (id, cold, authorize) => retry(id, cold, sessionId => {
+        db.run('UPDATE multiremi_chat_sessions SET creator_id=? WHERE id=?', [outsider.id, f.chat!.id]);
+        authorize!(sessionId);
+      });
+      expect((await f.retry(f.previous.id)).status).toBe(200);
+      expect(f.store.getChatSession(f.chat!.id)?.creatorId).toBe(outsider.id);
+      expect(f.store.listTurnAttempts(turnId)).toHaveLength(2);
     } finally {
       f.store.retryTurnAsMember = retry;
     }

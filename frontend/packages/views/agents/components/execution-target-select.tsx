@@ -3,7 +3,6 @@
 import { useId, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { executionGroupListOptions, runtimeListOptions } from "@multiremi/core/runtimes";
-import { useAuthStore } from "@multiremi/core/auth";
 import { Label } from "@multiremi/ui/components/ui/label";
 import { ProviderLogo } from "../../runtimes/components/provider-logo";
 import { PickerItem, PropertyPicker } from "../../issues/components/pickers";
@@ -17,7 +16,7 @@ export interface ExecutionTarget {
 }
 
 /** Agents can use the workspace pool or a stable group with editable Runtime membership. */
-export function ExecutionTargetSelect({ wsId, value, onChange, compact = false, canEdit = true, ownerId, agentId, legacyRuntimeId }: {
+export function ExecutionTargetSelect({ wsId, value, onChange, compact = false, canEdit = true, agentId, legacyRuntimeId }: {
   wsId: string;
   value: ExecutionTarget;
   onChange: (target: ExecutionTarget) => void | Promise<void>;
@@ -28,15 +27,11 @@ export function ExecutionTargetSelect({ wsId, value, onChange, compact = false, 
   legacyRuntimeId?: string | null;
 }) {
   const { t } = useT("agents");
-  const currentUserId = useAuthStore((state) => state.user?.id);
-  const agentOwnerId = (ownerId === undefined ? currentUserId : ownerId) ?? "local";
   const labelId = useId();
   const [open, setOpen] = useState(false);
   const query = useQuery({ ...executionGroupListOptions(wsId, agentId), enabled: !!wsId });
   const runtimesQuery = useQuery({ ...runtimeListOptions(wsId), enabled: !!wsId });
-  const eligibleRuntimes = (runtimesQuery.data ?? []).filter((runtime) =>
-    runtime.visibility === "public" || (runtime.owner_id ?? "local") === agentOwnerId,
-  );
+  const eligibleRuntimes = runtimesQuery.data ?? [];
   const eligibleRuntimeIds = new Set(eligibleRuntimes.map((runtime) => runtime.id));
   const modelRoutingTargets = ENGINES.map((provider) => {
     const members = eligibleRuntimes.filter((runtime) => runtime.provider === provider || runtime.provider === "any");

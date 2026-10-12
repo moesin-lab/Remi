@@ -212,9 +212,9 @@ describe("MUL-473 first-screen hotspot response shapes", () => {
     expect(bySession.get(ranking.prioritizedSessionId!)).toMatchObject({
       current_attempt_id: ranking.prioritizedWinnerTaskId!,status: "pending",
     });
-    // Each Session contributes at most one task, and only the reader's Sessions do.
+    // Each Session contributes at most one task, including historical creators.
     expect(new Set(tasks.turns.map((task) => task.session_id)).size).toBe(tasks.turns.length);
-    expect(tasks.turns.every((task) => fixture.sessionIds.includes(task.session_id))).toBe(true);
+    expect(tasks.turns.every((task) => fixture.sessionIds.includes(task.session_id) || task.session_id === "chat_hotspot_foreign")).toBe(true);
   }, 20000);
 });
 
@@ -226,8 +226,8 @@ describe("MUL-473 first-screen hotspot query counts", () => {
       const harness = await createHarness({ sessions, rankingCases: false, inboxRows: 0, issues: 0, privatePrimaryAgent: false });
       const body = await getJson(harness, "/api/turns?status=pending&limit=500");
       const tasks = (body.body as { turns: unknown[] }).turns;
-      // One task per Chat: the fixture gives every Session exactly one pending turn.
-      expect(tasks.length).toBe(sessions);
+      // Include the fixture's additional Chat created by another historical user.
+      expect(tasks.length).toBe(sessions + 1);
       measurements.push({ sessions, statements: body.statements, bytes: body.bytes, tasks: tasks.length });
     }
     // 1 token read + 1 `last_used_at` write + 1 membership read + the ranked
@@ -371,16 +371,14 @@ describe("MUL-473 first-screen hotspot query counts", () => {
     expect((unknown.body as { total: number }).total).toBe(0);
   }, 20000);
 
-  it("keeps the private-Agent rule: only its owner and workspace admins see its tasks", async () => {
+  it("shares historical private-Agent tasks without rewriting the Agent owner", async () => {
     const harness = await createHarness({ sessions: 6, inboxRows: 0, issues: 0 });
     const { fixture } = harness;
     const privateAgent = harness.store.getAgentLite(fixture.primaryAgentId)!;
     expect(privateAgent.visibility).toBe("private");
     expect(privateAgent.ownerId).toBe(fixture.ownerUserId);
 
-    // Two Chats on the owner's private Agent: one the reader created, one the
-    // owner created. Creator scoping alone would let the first through, so the
-    // Agent rule is exactly what the reader view is asserting.
+    // Two historical creators now read the same workspace's pending work.
     const readerSession = harness.store.createChatSession({
       id: "chat_hotspot_private_reader",
       agentId: fixture.primaryAgentId,
@@ -399,10 +397,9 @@ describe("MUL-473 first-screen hotspot query counts", () => {
     const readerView = await getJson(harness, "/api/turns?status=pending&limit=500");
     const readerSessions = (readerView.body as { turns: Array<{ session_id: string }> }).turns
       .map((task) => task.session_id);
-    expect(readerSessions).not.toContain(readerSession.id);
-    expect(readerSessions).not.toContain(ownerSession.id);
+    expect(readerSessions).toContain(readerSession.id);
+    expect(readerSessions).toContain(ownerSession.id);
 
-    // The owner owns the Agent, so their own Chat shows up.
     const ownerCredential = await harness.store.createAccessToken({
       name: "MUL-473 owner",
       type: "pat",
@@ -415,7 +412,8 @@ describe("MUL-473 first-screen hotspot query counts", () => {
       "X-Workspace-ID": fixture.workspaceId,
     });
     expect((ownerView.body as { turns: Array<{ session_id: string }> }).turns
-      .map((task) => task.session_id)).toContain(ownerSession.id);
+      .map((task) => task.session_id)).toEqual(readerSessions);
+    expect(harness.store.getAgentLite(fixture.primaryAgentId)?.ownerId).toBe(fixture.ownerUserId);
   }, 20000);
 });
 

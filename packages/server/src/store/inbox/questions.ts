@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { questionMetadataText } from './question-indexes.js';
 import { RuntimeWorkspaceError } from '../repos/runtime-workspaces-repo.js';
 
-// A null human handler is the Issue's workspace review queue, not a synthetic member.
+// Historical null human handlers denote the shared workspace review queue.
 type RouteStep = { handler: QuestionActor | null; issue_id: string | null; stage: QuestionStage };
 export type ChatQuestionResponsibilityFilter = { transportOnly?: boolean; botId?: string; memberId?: string; agentId?: string };
 interface QuestionRecord {
@@ -57,18 +57,16 @@ export class Questions {
       const chat = validOwner && sessionId ? this.ctx.chat().getChatSession(scoped?.session.chatId ?? sessionId) : null;
       const transport = !!chat && this.ctx.feishuBot().isFeishuTransportChatSession(chat.id);
       const config = chat && sessionId ? this.ctx.feishuBot().getFeishuBotConfigForSession(chat.workspaceId, sessionId) : null;
-      const ref = transport ? config?.responsibleMemberId : chat?.creatorId;
-      const member = ref && chat ? transport ? this.ctx.workspaces().getWorkspaceMember(ref)
-        : this.ctx.workspaces().getWorkspaceMember(ref) ?? this.ctx.workspaces().findWorkspaceMemberForUser(ref, chat.workspaceId) : null;
+      const member = chat ? this.ctx.workspaces().getWorkspaceOperator(chat.workspaceId) : null;
       const remi = config?.agentId ? this.ctx.agents().getAgent(config.agentId) : null;
       const source = sourceAgent ? this.ctx.agents().getAgent(sourceAgent) : null;
       const revision = createHash('sha256').update(JSON.stringify({ sessionId, workspaceId, chatWorkspace: chat?.workspaceId,
-        transport, ref: ref ?? null, member: member ? [member.id, member.workspaceId, member.archivedAt] : null,
+        transport, operator: true, deliveryTarget: transport ? config?.responsibleMemberId ?? null : null, member: member ? [member.id, member.workspaceId, member.archivedAt] : null,
         source: source ? [source.id, source.workspaceId, source.archivedAt] : null,
         remi: transport && remi ? [remi.id, remi.workspaceId, remi.archivedAt] : null })).digest('hex');
       if (!chat || chat.workspaceId !== workspaceId) return { steps: [], revision, reason: 'source_workspace_changed' };
       return member && !member.archivedAt && member.workspaceId === workspaceId ? { steps: [{ handler: { type: 'member', id: member.id }, issue_id: null, stage: 'human' }], revision, reason: null }
-        : { steps: [], revision, reason: 'explicit_human_responsibility_required' };
+        : { steps: [], revision, reason: 'workspace_operator_unavailable' };
     }
     const responsibility = this.ctx.resolveIssueResponsibility(issueId);
     if (workspaceId && responsibility.workspaceId !== workspaceId) return { steps: [], revision: responsibility.revision, reason: 'source_workspace_changed' };
@@ -83,14 +81,14 @@ export class Questions {
       seen.add(`${actor.type}:${actor.id}`);
       steps.push({ handler: { type: actor.type, id: actor.id }, issue_id: node.issueId, stage: index === 0 ? 'issue_owner' : 'parent_owner' });
     }
-    const human = responsibility.rootHuman;
+    const human = responsibility.workspaceId ? this.ctx.workspaces().getWorkspaceOperator(responsibility.workspaceId) : null;
     if (human) steps.push({ handler: { type: 'member', id: human.id }, issue_id: responsibility.rootIssueId, stage: 'human' });
     else steps.push({ handler: null, issue_id: responsibility.rootIssueId, stage: 'human' });
-    return { steps, revision: responsibility.revision, reason: reason ?? (steps.length ? null : 'responsibility_unavailable') };
+    return { steps, revision: createHash('sha256').update(JSON.stringify([responsibility.revision, human?.id ?? null, 'shared-operator'])).digest('hex'), reason: reason ?? (steps.length ? null : 'responsibility_unavailable') };
   }
   private handles(record: QuestionRecord, step: RouteStep | undefined, actor?: QuestionActor): boolean {
     if (same(step?.handler, actor)) return true;
-    if (!actor || actor.type !== 'member' || !record.source_issue_id || step?.stage !== 'human' || step.handler !== null) return false;
+    if (!actor || actor.type !== 'member' || step?.stage !== 'human') return false;
     const member = this.ctx.workspaces().getWorkspaceMember(actor.id);
     return !!member && !member.archivedAt && member.workspaceId === record.workspace_id;
   }
@@ -674,6 +672,41 @@ export class Questions {
       dedupe_key: `question-recovery-route:${message.id}:${record.route_revision}`,
       body_md: `问题 ${message.id} 已保存答案，后续执行仍待恢复（${record.wait.reason ?? 'detached'}）。使用 remi message question get ${message.id} 核对；执行条件恢复后可显式 continue。`,
       metadata: { root_question_id: message.id, question_route_revision: record.route_revision, question_notification: true } }, events);
+  }
+  /** Explicit startup transition; GET never rewrites a historical question. */
+  refreshWorkspaceOperatorWithinTransaction(workspaceId: string, events: CommitEventQueue) {
+    this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+    const migrationId = `workspace-operator-questions-v1:${workspaceId}`;
+    if (this.ctx.db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(migrationId)) return;
+    const rows = this.ctx.db.query(`SELECT m.id FROM multiremi_conversation_log m
+      JOIN multiremi_conversation_heads h ON h.session_id=m.session_id
+      WHERE h.workspace_id=? AND m.kind='message' AND m.message_kind='decision' AND m.deleted_at IS NULL
+        AND CAST(${this.jsonText('m', 'question.version')} AS TEXT)='1'
+        AND (${this.jsonText('m', 'question.status')}='pending' OR
+          (${this.jsonText('m', 'question.status')}='answered' AND ${this.jsonText('m', 'question.wait.status')}='detached'))`).all(workspaceId);
+    for (const row of rows) {
+      const loaded = this.read(row.id);
+      if (!loaded || !this.integrity(loaded.message, loaded.record)) continue;
+      const { message, record } = loaded;
+      const route = this.route(record.source_issue_id, message.sender_id, record.human_required, message.session_id, workspaceId);
+      if (route.revision === record.responsibility_revision) continue;
+      const index = this.transferredIndex(record, route.steps);
+      const previous = record.route[record.route_index];
+      // An Agent already answering keeps its notification and execution scope.
+      // Only the changed human handoff rotates the live route/card revision.
+      const activeAgentUnchanged = previous?.handler?.type === 'agent'
+        && same(previous.handler, route.steps[index]?.handler);
+      record.route = route.steps; record.route_index = index;
+      if (!activeAgentUnchanged) record.route_revision++;
+      record.responsibility_revision = route.revision; record.route_reason = route.reason;
+      if (!activeAgentUnchanged) { record.summary = null; record.summary_wait_until = null; }
+      this.event(record, 'transfer', null, { reason: 'workspace_operator_unified', handler: record.route[index]?.handler ?? null });
+      if (!activeAgentUnchanged) this.ctx.db.run('UPDATE multiremi_conversation_log SET card_token_hash=NULL,card_token_recipient=NULL,card_token_consumed_at=NULL WHERE id=?', [message.id]);
+      if (record.status === 'pending' && !activeAgentUnchanged) this.notify(message, record, events);
+      this.save(message, record, events, false);
+      if (!activeAgentUnchanged) this.notifyRecoveryOwner(message, record, events);
+    }
+    this.ctx.db.run('INSERT INTO multiremi_schema_migrations(id,applied_at) VALUES(?,?) ON CONFLICT(id) DO NOTHING', [migrationId, nowIso()]);
   }
   refreshWithinTransaction(issueId: string, events: CommitEventQueue, actor?: QuestionActor, reason = 'issue_responsibility_transferred') {
     const issue = this.ctx.issues().getIssue(issueId); if (!issue) return;

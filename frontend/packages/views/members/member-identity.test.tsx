@@ -41,7 +41,7 @@ const member: MemberWithUser = {
 
 function renderMember(component: React.ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-  qc.setQueryData(workspaceKeys.members("ws-1"), [member]);
+  qc.setQueryData(workspaceKeys.historicalActors("ws-1"), [member]);
   qc.setQueryData(workspaceKeys.agents("ws-1"), [
     { id: "agt_owned", name: "Owned agent", owner_id: member.user_id, archived_at: null },
     { id: "agt_other", name: "Other agent", owner_id: "usr_other", archived_at: null },

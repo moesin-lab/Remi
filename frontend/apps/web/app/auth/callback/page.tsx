@@ -68,22 +68,6 @@ function CallbackContent() {
           return;
         }
 
-        // 2. Un-onboarded users may have pending invitations on their email.
-        //    Route them to the batch /invitations page so they can auto-join
-        //    (invitations are keyed by the company email Feishu returns).
-        if (!onboarded) {
-          try {
-            const invites = await api.listMyInvitations();
-            if (invites.length > 0) {
-              qc.setQueryData(workspaceKeys.myInvitations(), invites);
-              router.push(paths.invitations());
-              return;
-            }
-          } catch {
-            // Non-fatal: fall through to the normal post-auth destination.
-          }
-        }
-
         // 3. Default: onboarding for first-timers, first workspace for
         //    returning users, /workspaces/new for onboarded users with none.
         router.push(resolvePostAuthDestination(wsList, onboarded));

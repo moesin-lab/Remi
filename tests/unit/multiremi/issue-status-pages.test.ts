@@ -65,7 +65,7 @@ describe(`MUL-395 status pages (${process.env.MULTIREMI_TEST_POSTGRES_URL ? "Pos
     expect(withCount.dbq).toBe(without.dbq + 1);
     expect(single.body).not.toHaveProperty("archived_total");
   });
-  it("visibility: never returns or counts another workspace's issue", async () => {
+  it("keeps counts in the selected workspace while shared humans can select another", async () => {
     const grouped = await h.request("/api/issues/status-pages?statuses=todo&include_archived_total=true");
     const bucket = grouped.body.groups.todo;
     expect(bucket.issues.some((issue: any) => issue.id.startsWith("iss_hidden"))).toBe(false);
@@ -73,8 +73,11 @@ describe(`MUL-395 status pages (${process.env.MULTIREMI_TEST_POSTGRES_URL ? "Pos
     expect(bucket.total).toBe(h.store.countIssues({ workspaceId: "local", statuses: ["todo"] }));
     for (const path of ["/api/issues", "/api/issues/status-pages"]) {
       const response = await h.request(`${path}?workspace_id=foreign`);
-      expect(response.status).toBe(404);
-      expect(response.body).toEqual({ error: "workspace not found" });
+      expect(response.status).toBe(200);
+      const issues = path.endsWith('status-pages')
+        ? Object.values(response.body.groups).flatMap((group: any) => group.issues)
+        : response.body.issues;
+      expect(issues.every((issue: any) => issue.workspace_id === 'foreign')).toBe(true);
     }
   });
   it("assignee boards opt into the same workspace archive count without changing default responses", async () => {
@@ -88,7 +91,9 @@ describe(`MUL-395 status pages (${process.env.MULTIREMI_TEST_POSTGRES_URL ? "Pos
       expect(groups).toEqual(without.body);
       expect(archived_total).toBe(21);
       expect(withCount.dbq).toBe(without.dbq + 1);
-      expect((await h.request(`${path}&workspace_id=foreign&include_archived_total=true`)).status).toBe(404);
+      const foreign = await h.request(`${path}&workspace_id=foreign&include_archived_total=true`);
+      expect(foreign.status).toBe(200);
+      expect(foreign.body.archived_total).toBe(h.store.countIssues({ workspaceId: 'foreign', archivedOnly: true }));
     }
   });
   it("dbq golden: stays constant across 1/4/7 statuses and 1/60/300 issues per status", async () => {

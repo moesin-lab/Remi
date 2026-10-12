@@ -6,8 +6,8 @@ import { createResponsibleTestIssue } from './helpers.js';
  * environment and into a workspace row, so the tests that matter are the ones
  * about who may touch that row and what comes back out of it: an App Secret
  * that goes in must never come back, a form that leaves the secret field blank
- * must not wipe it, and a member who is not an admin must learn nothing beyond
- * whether a bot answers at all.
+ * must not wipe it, and all human operators share management while task and
+ * daemon credentials retain their restricted surfaces.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
@@ -459,8 +459,9 @@ describe("workspace Feishu bot config API", () => {
 });
 
 describe("workspace Feishu bot config permissions", () => {
-  it("tells an ordinary member only whether a bot is available", async () => {
+  it("shares bot management with human operators while keeping the secret masked", async () => {
     const { store, app, agentId } = scaffold();
+    mockFetch(() => jsonResponse({ code: 0, tenant_access_token: "fixture-token", expire: 7200, data: { items: [], has_more: false } }));
     await save(app, agentId);
     store.recordFeishuBotTestResult("local", { botName: "Reception" });
     const user = store.getOrCreateUser({ externalId: "member-ext", email: "member@example.test", name: "Member" });
@@ -470,8 +471,9 @@ describe("workspace Feishu bot config permissions", () => {
 
     const view = await app.request("/api/workspaces/local/feishu-bot", { headers: memberHeaders });
     expect(view.status).toBe(200);
-    // Availability only: no app id, no Runtime, no error text, no hint.
-    expect(await view.json()).toEqual({ configured: true, available: false, bot_name: "Reception" });
+    const config = await view.json();
+    expect(config).toMatchObject({ configured: true, app_id: "cli_a1b2c3d4e5f6g7h8", app_secret_configured: true });
+    expect(JSON.stringify(config)).not.toContain(APP_SECRET);
 
     for (const [path, init] of [
       ["/api/workspaces/local/feishu-bot/status", { headers: memberHeaders }],
@@ -482,15 +484,32 @@ describe("workspace Feishu bot config permissions", () => {
       ["/api/workspaces/local/feishu-bot/routes", { method: "PUT", headers: memberHeaders, body: '{"routes":[]}' }],
       ["/api/workspaces/local/feishu-bot", { method: "PUT", headers: memberHeaders, body: configBody(agentId) }],
       ["/api/workspaces/local/feishu-bots", { headers: memberHeaders }],
-      ["/api/workspaces/local/feishu-bots", { method: "POST", headers: memberHeaders, body: configBody(agentId) }],
-      ["/api/workspaces/local/feishu-bot", { method: "DELETE", headers: memberHeaders }],
       ["/api/workspaces/local/feishu-bot/deploy", { method: "POST", headers: memberHeaders }],
       ["/api/workspaces/local/feishu-bot/stop", { method: "POST", headers: memberHeaders }],
-      ["/api/workspaces/local/feishu-bot/test", { method: "POST", headers: memberHeaders, body: "{}" }],
+      ["/api/workspaces/local/feishu-bot", { method: "DELETE", headers: memberHeaders }],
     ] as const) {
       const response = await app.request(path, init as RequestInit);
-      expect([path, response.status]).toEqual([path, 403]);
+      expect([path, response.status]).toEqual([path, 200]);
+      expect(await response.text()).not.toContain(APP_SECRET);
     }
+    // Empty test input is now authorized and reaches validation without making
+    // an external request after the stored configuration has been deleted.
+    const validation = await app.request("/api/workspaces/local/feishu-bot/test", {
+      method: "POST", headers: memberHeaders, body: "{}",
+    });
+    expect(validation.status).toBe(400);
+    const stoppingHost = await app.request("/api/workspaces/local/feishu-bots", {
+      method: "POST", headers: memberHeaders, body: configBody(agentId, { app_id: "cli_shared_new_bot" }),
+    });
+    expect(stoppingHost.status).toBe(409);
+    expect(await stoppingHost.json()).toMatchObject({ code: "runtime_bot_stopping" });
+    store.registerRuntime({ id: "rt_new_bot", name: "Second bot host", provider: "codex", workspaceId: "local", daemonId: "daemon-new-bot" });
+    store.heartbeatRuntime("rt_new_bot", { supportsFeishuBotConfig: true });
+    const created = await app.request("/api/workspaces/local/feishu-bots", {
+      method: "POST", headers: memberHeaders, body: configBody(agentId, { app_id: "cli_shared_new_bot", runtime_id: "rt_new_bot" }),
+    });
+    expect(created.status).toBe(201);
+    expect(await created.text()).not.toContain(APP_SECRET);
   });
 
   it("denies the whole subtree to a task token, reads included", async () => {

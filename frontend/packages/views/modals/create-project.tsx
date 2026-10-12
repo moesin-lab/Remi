@@ -8,17 +8,13 @@ import {
   Minimize2,
   Search,
   X as XIcon,
-  UserMinus,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useCreateProject } from "@multiremi/core/projects/mutations";
 import { useProjectDraftStore } from "@multiremi/core/projects";
-import { useAuthStore } from "@multiremi/core/auth";
 import { repositoryListOptions } from "@multiremi/core/repositories";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multiremi/core/paths";
-import { memberListOptions } from "@multiremi/core/workspace/queries";
-import { useActorName } from "@multiremi/core/workspace/hooks";
 import type { IssueAssigneeType, WorkspaceRepository } from "@multiremi/core/types";
 import { cn } from "@multiremi/ui/lib/utils";
 import { toast } from "sonner";
@@ -29,12 +25,10 @@ import { Button } from "@multiremi/ui/components/ui/button";
 import { Input } from "@multiremi/ui/components/ui/input";
 import { EmojiPicker } from "@multiremi/ui/components/common/emoji-picker";
 import { ContentEditor, type ContentEditorRef, TitleEditor } from "../editor";
-import { ActorAvatar } from "../common/actor-avatar";
 import { RepositoryOptionRow } from "../repositories/repository-option-row";
 import { AssigneePicker } from "../issues/components/pickers/assignee-picker";
 import { useNavigation } from "../navigation";
 import { useT } from "../i18n";
-import { matchesPinyin } from "../editor/extensions/pinyin-match";
 
 const EMPTY_REPOSITORIES: WorkspaceRepository[] = [];
 
@@ -65,13 +59,10 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
   const workspaceName = workspace?.name;
   const wsPaths = useWorkspacePaths();
   const wsId = useWorkspaceId();
-  const userId = useAuthStore((state) => state.user?.id ?? null);
-  const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { data: repositoryResponse, isLoading: repositoriesLoading } = useQuery(
     repositoryListOptions(wsId),
   );
   const repositories = repositoryResponse?.repositories ?? EMPTY_REPOSITORIES;
-  const { getActorName } = useActorName();
 
   const draft = useProjectDraftStore((s) => s.draft);
   const setDraft = useProjectDraftStore((s) => s.setDraft);
@@ -79,12 +70,6 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
 
   const [title, setTitle] = useState(draft.title);
   const descEditorRef = useRef<ContentEditorRef>(null);
-  const [leadType, setLeadType] = useState<"member" | null>(
-    draft.leadType === undefined ? (userId ? "member" : null) : draft.leadType,
-  );
-  const [leadId, setLeadId] = useState<string | null>(
-    draft.leadId === undefined ? userId : draft.leadId,
-  );
   const [defaultAssigneeType, setDefaultAssigneeType] = useState<"agent" | "squad" | null>(
     draft.defaultAssigneeType ?? null,
   );
@@ -119,10 +104,6 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
 
   // Sync field changes to draft store
   const updateTitle = (v: string) => { setTitle(v); setDraft({ title: v }); };
-  const updateLead = (type: "member" | null, id: string | null) => {
-    setLeadType(type); setLeadId(id);
-    setDraft({ leadType: type, leadId: id });
-  };
   const updateDefaultAssignee = (type: IssueAssigneeType | null, id: string | null) => {
     if (type === "member") return;
     setDefaultAssigneeType(type);
@@ -131,14 +112,8 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
   };
   const updateIcon = (v: string | undefined) => { setIcon(v); setDraft({ icon: v }); };
 
-  const [leadOpen, setLeadOpen] = useState(false);
-  const [leadFilter, setLeadFilter] = useState("");
 
-  const leadQuery = leadFilter.toLowerCase();
-  const filteredMembers = members.filter((m) => m.name.toLowerCase().includes(leadQuery) || matchesPinyin(m.name, leadQuery));
 
-  const leadLabel =
-    leadType && leadId ? getActorName(leadType, leadId) : t(($) => $.create_project.lead);
 
   const createProject = useCreateProject();
 
@@ -159,8 +134,8 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
         title: title.trim(),
         description: descEditorRef.current?.getMarkdown()?.trim() || undefined,
         icon,
-        lead_type: leadType,
-        lead_id: leadId,
+        lead_type: null,
+        lead_id: null,
         default_assignee_type: defaultAssigneeType,
         default_assignee_id: defaultAssigneeId,
         // Server attaches these in the same transaction as the project.
@@ -359,79 +334,6 @@ export function CreateProjectModal({ onClose }: { onClose: () => void }) {
 
         <div className="flex items-center justify-between gap-2 px-4 py-3 border-t shrink-0">
           <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-          <Popover
-            open={leadOpen}
-            onOpenChange={(v) => {
-              setLeadOpen(v);
-              if (!v) setLeadFilter("");
-            }}
-          >
-            <PopoverTrigger
-              render={
-                <PillButton>
-                  {leadType && leadId ? (
-                    <>
-                      <ActorAvatar actorType={leadType} actorId={leadId} size={16} showStatusDot />
-                      <span>{leadLabel}</span>
-                    </>
-                  ) : (
-                    <span className="text-muted-foreground">{t(($) => $.create_project.lead)}</span>
-                  )}
-                </PillButton>
-              }
-            />
-            <PopoverContent align="start" className="w-52 p-0">
-              <div className="px-2 py-1.5 border-b">
-                <input
-                  type="text"
-                  value={leadFilter}
-                  onChange={(e) => setLeadFilter(e.target.value)}
-                  placeholder={t(($) => $.create_project.lead_placeholder)}
-                  className="w-full bg-transparent text-sm placeholder:text-muted-foreground outline-none"
-                />
-              </div>
-              <div className="p-1 max-h-60 overflow-y-auto">
-                <button
-                  type="button"
-                  onClick={() => {
-                    updateLead(null, null);
-                    setLeadOpen(false);
-                  }}
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent transition-colors"
-                >
-                  <UserMinus className="h-3.5 w-3.5 text-muted-foreground" />
-                  <span className="text-muted-foreground">{t(($) => $.create_project.no_lead)}</span>
-                </button>
-                {filteredMembers.length > 0 && (
-                  <>
-                    <div className="px-2 pt-2 pb-1 text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                      {t(($) => $.create_project.members_group)}
-                    </div>
-                    {filteredMembers.map((m) => (
-                      <button
-                        type="button"
-                        key={m.user_id}
-                        onClick={() => {
-                          updateLead("member", m.user_id);
-                          setLeadOpen(false);
-                        }}
-                        className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent transition-colors"
-                      >
-                        <ActorAvatar actorType="member" actorId={m.user_id} size={16} />
-                        <span>{m.name}</span>
-                      </button>
-                    ))}
-                  </>
-                )}
-                {filteredMembers.length === 0 && leadFilter && (
-                    <div className="px-2 py-3 text-center text-sm text-muted-foreground">
-                      {t(($) => $.create_project.no_results)}
-                    </div>
-                  )}
-              </div>
-            </PopoverContent>
-          </Popover>
-
           <AssigneePicker
             assigneeType={defaultAssigneeType}
             assigneeId={defaultAssigneeId}

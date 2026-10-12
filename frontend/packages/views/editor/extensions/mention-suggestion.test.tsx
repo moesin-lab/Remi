@@ -108,9 +108,9 @@ describe("createMentionSuggestion", () => {
     Element.prototype.scrollIntoView = vi.fn();
   });
 
-  it("returns members and agents synchronously without waiting for the server search", () => {
+  it("returns agents synchronously without listing workspace people without waiting for the server search", () => {
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "owner" }],
       agents: [
         {
           id: "a1",
@@ -130,7 +130,7 @@ describe("createMentionSuggestion", () => {
     // Must be synchronous: a plain array, not a Promise.
     expect(Array.isArray(result)).toBe(true);
     const items = result as MentionItem[];
-    expect(items.some((i) => i.type === "member" && i.label === "Alice")).toBe(true);
+    expect(items.some((i) => i.type === "member" && i.label === "Alice")).toBe(false);
     expect(items.some((i) => i.type === "agent" && i.label === "Aegis")).toBe(true);
   });
 
@@ -209,10 +209,10 @@ describe("createMentionSuggestion", () => {
     ).toBe(true);
   });
 
-  it("hides personal agents owned by someone else from a regular member", () => {
+  it("includes historical private agents for the shared operator", () => {
     const qc = fakeQc({
       members: [
-        { user_id: "u1", name: "Alice", role: "member" },
+        { user_id: "local", name: "Alice", role: "owner" },
         { user_id: "u2", name: "Bob", role: "member" },
       ],
       agents: [
@@ -250,7 +250,7 @@ describe("createMentionSuggestion", () => {
 
     expect(items.some((i) => i.type === "agent" && i.label === "Athena")).toBe(true);
     expect(items.some((i) => i.type === "agent" && i.label === "Aether")).toBe(true);
-    expect(items.some((i) => i.type === "agent" && i.label === "Atlas")).toBe(false);
+    expect(items.some((i) => i.type === "agent" && i.label === "Atlas")).toBe(true);
   });
 
   it("shows everyone's personal agents to a workspace admin", () => {
@@ -259,7 +259,7 @@ describe("createMentionSuggestion", () => {
     // to assign anyone's personal agent, so the @mention list mirrors that.
     const qc = fakeQc({
       members: [
-        { user_id: "u1", name: "Alice", role: "admin" },
+        { user_id: "local", name: "Alice", role: "admin" },
         { user_id: "u2", name: "Bob", role: "member" },
       ],
       agents: [
@@ -299,7 +299,7 @@ describe("createMentionSuggestion", () => {
 
   it("does not inject current/recent chat context into the normal @ results", () => {
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "owner" }],
       issues: [{ id: "i1", identifier: "MUL-1", title: "Login bug", status: "todo" }],
     });
     searchIssuesMock.mockReturnValue(new Promise(() => {}));
@@ -308,14 +308,14 @@ describe("createMentionSuggestion", () => {
     const result = config.items!({ query: "", editor: {} as never }) as MentionItem[];
 
     expect(result.some((item) => item.group === "current" || item.group === "recent")).toBe(false);
-    expect(result.map((item) => `${item.type}:${item.id}`)).toContain("member:u1");
+    expect(result.map((item) => `${item.type}:${item.id}`)).not.toContain("member:u1");
     expect(result.map((item) => `${item.type}:${item.id}`)).toContain("issue:i1");
   });
 
 
   it("shows only current/recent chat context before the user types a query", () => {
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "owner" }],
       agents: [{ id: "a1", name: "Aegis", archived_at: null, visibility: "workspace", owner_id: null }],
       issues: [{ id: "i-cache", identifier: "MUL-9", title: "Cached", status: "todo" }],
     });
@@ -336,7 +336,7 @@ describe("createMentionSuggestion", () => {
 
   it("prepends current/recent chat context without removing normal mention targets after the user types", () => {
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "owner" }],
       agents: [{ id: "a1", name: "Aegis", archived_at: null, visibility: "workspace", owner_id: null }],
       issues: [{ id: "i-cache", identifier: "MUL-9", title: "Cached", status: "todo" }],
     });
@@ -352,7 +352,7 @@ describe("createMentionSuggestion", () => {
     const result = config.items!({ query: "a", editor: {} as never }) as MentionItem[];
 
     expect(result.map((item) => `${item.type}:${item.id}`).slice(0, 2)).toEqual(["issue:i1", "project:p1"]);
-    expect(result.some((item) => item.type === "member" && item.label === "Alice")).toBe(true);
+    expect(result.some((item) => item.type === "member" && item.label === "Alice")).toBe(false);
     expect(result.some((item) => item.type === "agent" && item.label === "Aegis")).toBe(true);
   });
 
@@ -378,7 +378,7 @@ describe("createMentionSuggestion", () => {
 
   it("includes all non-archived squads in the mention list", () => {
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "owner" }],
       squads: [
         { id: "s1", name: "Jiayuan's Coding Team", archived_at: null },
         { id: "s2", name: "独立团", archived_at: null },
@@ -399,7 +399,7 @@ describe("createMentionSuggestion", () => {
 
   it("returns no squads when the squads cache is empty (not yet fetched)", () => {
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "owner" }],
       // squads not provided — simulates cache miss
     });
     searchIssuesMock.mockReturnValue(new Promise(() => {}));
@@ -411,44 +411,25 @@ describe("createMentionSuggestion", () => {
     expect(items.filter((i) => i.type === "squad")).toHaveLength(0);
   });
 
-  it("matches Chinese names by full pinyin", () => {
-    const qc = fakeQc({
-      members: [
-        { user_id: "u1", name: "Alice", role: "member" },
-        { user_id: "u2", name: "李云龙", role: "member" },
-      ],
-    });
-    searchIssuesMock.mockReturnValue(new Promise(() => {}));
+  it("matches Chinese names by full pinyin for executable agents", () => {
+  const qc = fakeQc({ members: [{ user_id: "local", name: "Operator", role: "owner" }],
+    agents: [{ id: "agent-chinese", name: "李云龙", visibility: "workspace", owner_id: null, archived_at: null }] });
+  const items = createMentionSuggestion(qc).items!({ query: "liyunlong", editor: {} as never }) as MentionItem[];
+  expect(items.some(item => item.type === "agent" && item.label === "李云龙")).toBe(true);
+  expect(items.some(item => item.type === "member")).toBe(false);
+});
 
-    const config = createMentionSuggestion(qc);
-    const result = config.items!({ query: "liyunlong", editor: {} as never });
-
-    const items = result as MentionItem[];
-    expect(items.some((i) => i.type === "member" && i.label === "李云龙")).toBe(true);
-    expect(items.some((i) => i.type === "member" && i.label === "Alice")).toBe(false);
-  });
-
-  it("matches Chinese names by pinyin initials", () => {
-    const qc = fakeQc({
-      members: [
-        { user_id: "u1", name: "Alice", role: "member" },
-        { user_id: "u2", name: "李云龙", role: "member" },
-        { user_id: "u3", name: "张大彪", role: "member" },
-      ],
-    });
-    searchIssuesMock.mockReturnValue(new Promise(() => {}));
-
-    const config = createMentionSuggestion(qc);
-    const result = config.items!({ query: "lyl", editor: {} as never });
-
-    const items = result as MentionItem[];
-    expect(items.some((i) => i.type === "member" && i.label === "李云龙")).toBe(true);
-    expect(items.some((i) => i.type === "member" && i.label === "张大彪")).toBe(false);
-  });
+  it("matches Chinese names by pinyin initials for executable agents", () => {
+  const qc = fakeQc({ members: [{ user_id: "local", name: "Operator", role: "owner" }],
+    agents: [{ id: "agent-chinese", name: "李云龙", visibility: "workspace", owner_id: null, archived_at: null }] });
+  const items = createMentionSuggestion(qc).items!({ query: "lyl", editor: {} as never }) as MentionItem[];
+  expect(items.some(item => item.type === "agent" && item.label === "李云龙")).toBe(true);
+  expect(items.some(item => item.type === "member")).toBe(false);
+});
 
   it("matches Chinese agent names by pinyin", () => {
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "owner" }],
       agents: [
         { id: "a1", name: "魏和尚", archived_at: null, visibility: "workspace", owner_id: null },
       ],

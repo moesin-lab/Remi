@@ -39,7 +39,7 @@ flowchart LR
 | Turn | 一轮可调度、可取消、可审计的工作。 | 记录对话、Agent、execution scope 与输入范围；每条 lane 至多一个 pending 轮。普通 Chat 对话和工作 Session 使用各自的对话身份。 |
 | Attempt | 一轮工作的执行尝试。 | 保留原 `tsk_` ID，承载 trace、provider、用量、附件与归档引用；重试在同一 Turn 新建 Attempt。兼容 Task 形状记录尝试及当时的 owner 上下文，Issue-owned 的 `chat_session_id` 为空。 |
 | Session Result | Session 显式发布的不可变成果。 | 记录来源 Session，可选记录来源 Task；Chat-owned 来源记录 Chat，Issue-owned 来源记录 Issue。Issue 聚合遵循来源 Session 的访问权限。 |
-| Lane | 对话中某个 reader 在 execution scope 下的读进度与续接状态。 | Agent 与 member 使用同一 lane 机制；人的 lane 不包含 provider 状态，Agent lane 分开保存实际读取高水位与 provider 续接位置。 |
+| Lane | 对话中某个 reader 在 execution scope 下的读进度与续接状态。 | Agent lane 保存实际读取高水位与 provider 续接位置；历史 member lane 保留原收件人的已读事实，新的人类阅读写入 workspace/session 共享游标。 |
 | provider session | Codex/Claude 等后端的上下文续接标识。 | Agent lane 保存 provider 续接状态；它不是产品 Session。 |
 
 数据库表 `multiremi_issue_sessions`、列 `issue_session_id` 和兼容类型 `MultiremiIssueSession` 是历史命名，
@@ -55,8 +55,7 @@ flowchart LR
 
 Chat 路径 `/api/multiremi/chats/:chatId/sessions` 管理该 Chat 的 Sessions。
 Issue 路径 `/api/issues/:issueId/sessions` 创建 Issue-owned Session，并列出 Issue-owned 与有权访问的
-Chat-owned 工作投影。该聚合按 Chat 创建者和 Agent 可见性过滤私有投影，再批量读取参与者；工作区管理员
-也不能借 Issue 读取他人的私有 Chat。通用 `/api/sessions/:sessionId`、日志与继承诊断按实际 owner 鉴权，
+Chat-owned 工作投影。所有已登录人类共享当前工作区的 Chat 和投影，不再按历史创建者或 Agent 的个人可见性过滤；Task 凭据仍按自身绑定的 Chat/Session 过滤。通用 `/api/sessions/:sessionId`、日志与继承诊断按实际 owner 鉴权，
 Task 凭据读取 Session 内容时限于自身绑定的 Session；继承与已验证飞书 Topic 协调有下述受限例外。
 私有 Chat-owned Task 的读取与控制限于本 Task；公开 Issue-owned 或没有 Chat 的 Task 路由保留既有
 Workspace、owner 与各路由权限，不新增统一的本 Task 限制。

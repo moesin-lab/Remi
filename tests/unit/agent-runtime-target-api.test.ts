@@ -114,12 +114,12 @@ describe("agent machine/type execution targets", () => {
     expect((await custom.json()).providers[0].models.map((model: { id: string }) => model.id)).toEqual(["private-model"]);
   });
 
-  it("rejects an admin assigning another owner's agent to an incompatible private target", async () => {
+  it("assigns a historical owner's agent to a compatible private target in the shared workspace", async () => {
     const { store, runtime, request } = setup();
     const agent = store.createAgent({ name: "Another owner", provider: "codex", ownerId: "other" });
     const response = await request(`/api/agents/${agent.id}`, { runtime_id: runtime.id }, "PUT");
-    expect(response.status).toBe(403);
-    expect(store.getAgent(agent.id)?.runtimeId).toBeNull();
+    expect(response.status).toBe(200);
+    expect(store.getAgent(agent.id)).toMatchObject({ runtimeId: runtime.id, ownerId: "other" });
   });
 
   it("allows a normal edit with the unchanged provider after a bound public target becomes private", async () => {

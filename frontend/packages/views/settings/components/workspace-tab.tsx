@@ -1,5 +1,7 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useEffect, useState } from "react";
 import { Save, LogOut } from "lucide-react";
 import { Input } from "@multiremi/ui/components/ui/input";
@@ -19,8 +21,7 @@ import {
 } from "@multiremi/ui/components/ui/alert-dialog";
 import { toast } from "sonner";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useAuthStore } from "@multiremi/core/auth";
-import { useLeaveWorkspace, useDeleteWorkspace } from "@multiremi/core/workspace/mutations";
+import { useDeleteWorkspace } from "@multiremi/core/workspace/mutations";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import {
   memberListOptions,
@@ -46,12 +47,11 @@ import { useT } from "../../i18n";
 
 export function WorkspaceTab() {
   const { t } = useT("settings");
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
   const workspace = useCurrentWorkspace();
   const wsId = useWorkspaceId();
   const { data: members = [], isFetched: membersFetched } = useQuery(memberListOptions(wsId));
   const qc = useQueryClient();
-  const leaveWorkspace = useLeaveWorkspace();
   const deleteWorkspace = useDeleteWorkspace();
   const navigation = useNavigation();
   const hasOnboarded = useHasOnboarded();
@@ -117,14 +117,6 @@ export function WorkspaceTab() {
   const currentMember = members.find((m) => m.user_id === user?.id) ?? null;
   const canManageWorkspace = currentMember?.role === "owner" || currentMember?.role === "admin";
   const isOwner = currentMember?.role === "owner";
-  // Mirror the backend invariant (server/internal/handler/workspace.go:569):
-  // a workspace must always have at least one owner, so the sole owner can't
-  // leave. Pre-flight here instead of letting the 400 round-trip become a
-  // confusing toast — disable Leave and tell the user what they need to do.
-  const ownerCount = members.filter((m) => m.role === "owner").length;
-  const isSoleOwner = isOwner && ownerCount <= 1;
-  const isSoleMember = members.length <= 1;
-
   // Reset form state only when the user switches to a different workspace.
   // Keying on workspace?.id (not the object ref) avoids wiping unsaved edits
   // when an unrelated mutation — e.g. avatar/logo upload — replaces the
@@ -202,26 +194,6 @@ export function WorkspaceTab() {
     );
   };
 
-  const handleLeaveWorkspace = () => {
-    if (!workspace) return;
-    setConfirmAction({
-      title: t(($) => $.workspace.leave_confirm_title),
-      description: t(($) => $.workspace.leave_confirm_description, { name: workspace.name }),
-      variant: "destructive",
-      onConfirm: async () => {
-        setActionId("leave");
-        navigateAwayFromCurrentWorkspace();
-        try {
-          await leaveWorkspace.mutateAsync(workspace.id);
-        } catch (e) {
-          toast.error(e instanceof Error ? e.message : t(($) => $.workspace.toast_leave_failed));
-        } finally {
-          setActionId(null);
-        }
-      },
-    });
-  };
-
   const handleConfirmDelete = async () => {
     if (!workspace) return;
     setActionId("delete-workspace");
@@ -249,6 +221,7 @@ export function WorkspaceTab() {
       {/* Workspace settings */}
       <section className="space-y-4">
         <h2 className="text-sm font-semibold">{t(($) => $.workspace.section_general)}</h2>
+        <p className="text-sm text-muted-foreground">{t(($) => $.workspace.shared_operator_description)}</p>
 
         <Card>
           <CardContent className="space-y-3">
@@ -373,29 +346,8 @@ export function WorkspaceTab() {
 
         <Card>
           <CardContent className="space-y-3">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p className="text-sm font-medium">{t(($) => $.workspace.leave_title)}</p>
-                <p className="text-xs text-muted-foreground">
-                  {isSoleOwner
-                    ? isSoleMember
-                      ? t(($) => $.workspace.leave_sole_member)
-                      : t(($) => $.workspace.leave_sole_owner)
-                    : t(($) => $.workspace.leave_default)}
-                </p>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleLeaveWorkspace}
-                disabled={actionId === "leave" || isSoleOwner}
-              >
-                {actionId === "leave" ? t(($) => $.workspace.leaving) : t(($) => $.workspace.leave_button)}
-              </Button>
-            </div>
-
             {isOwner && (
-              <div className="flex flex-col gap-2 border-t pt-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <p className="text-sm font-medium text-destructive">{t(($) => $.workspace.delete_title)}</p>
                   <p className="text-xs text-muted-foreground">

@@ -190,9 +190,9 @@ export class DaemonProtocolLayer {
    *
    * A v1 upgrade has to name its runtimes up front, so its whole check happens
    * against a known list. A v2 socket does not know its runtimes until it sends
-   * `hello`, so the upgrade can only settle identity and membership here; the
+   * `hello`, so the upgrade can only settle identity and workspace existence here; the
    * per-runtime rules run in {@link authorizeRuntime} once the list arrives. Both
-   * halves reuse the HTTP daemon identity and membership rules.
+   * halves reuse the HTTP daemon identity and workspace rules.
    */
   async resolveIdentity(
     req: Request,
@@ -220,11 +220,11 @@ export class DaemonProtocolLayer {
           ),
         };
       }
-      if (!isOwnerStillMember(this.store, accessToken)) {
+      if (!hasDaemonWorkspace(this.store, accessToken)) {
         return {
           response: Response.json(
             {
-              error: "daemon owner is no longer a workspace member",
+              error: "daemon workspace is no longer available",
               code: "daemon_owner_membership_required",
             },
             { status: 403 },
@@ -329,7 +329,7 @@ export class DaemonProtocolLayer {
    *     runtimes and reports this one as `runtime_gone` on the next heartbeat.
    *
    * The daemon-level checks run first and key on the credential's workspace, not
-   * the runtime's: retirement and membership are facts about the daemon named by
+   * the runtime's: retirement and workspace existence are facts about the daemon named by
    * the token, so a runtime hint must not be able to redirect them.
    */
   private async authorizeRuntime(
@@ -372,17 +372,16 @@ export class DaemonProtocolLayer {
           message: "hello daemon_id does not match the credential's daemon identity",
         };
       }
-      // Membership is re-read rather than trusted from the upgrade: a credential
-      // can survive its owner's removal from the workspace, and the terminal close
-      // code exists so the daemon stops reconnecting instead of retrying forever.
-      if (!isOwnerStillMember(this.store, token)) {
+      // A deleted workspace revokes a bound machine credential even if the
+      // credential row survives. Historical human membership has no effect.
+      if (!hasDaemonWorkspace(this.store, token)) {
         return {
           runtimeId,
           ok: false,
           scope: "daemon",
           status: 401,
           code: "daemon_owner_membership_required",
-          message: "daemon owner is no longer a workspace member",
+          message: "daemon workspace is no longer available",
         };
       }
     }
@@ -542,7 +541,7 @@ export class DaemonProtocolLayer {
   }
 
   /**
-   * Re-check retirement, credential validity and owner membership on each hb.
+   * Re-check retirement, credential validity and workspace existence on each hb.
    *
    * The v1 path made this check per message; v2 keeps the property without paying
    * it per frame, because the only thing a stale credential can still do before
@@ -561,19 +560,13 @@ export class DaemonProtocolLayer {
       session.closeWithCode(DAEMON_PROTOCOL_CLOSE_CODES.authority_revoked, "authority_revoked");
       return true;
     }
-    if (isOwnerStillMember(this.store, token)) return false;
-    session.closeWithCode(
-      DAEMON_PROTOCOL_CLOSE_CODES.authority_revoked,
-      "daemon owner is no longer a workspace member",
-    );
-    return true;
+    return false;
   }
 }
 
 
-function isOwnerStillMember(store: MultiremiStore, token: MultiremiAccessToken): boolean {
-  const owner = token.userId?.trim();
-  return !owner || owner === "local" || Boolean(store.getUserRoleInWorkspace(owner, token.workspaceId));
+function hasDaemonWorkspace(store: MultiremiStore, token: MultiremiAccessToken): boolean {
+  return Boolean(store.getWorkspace(token.workspaceId));
 }
 
 function readNonNegativeInteger(value: unknown): number | null {

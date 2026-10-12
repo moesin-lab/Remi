@@ -18,6 +18,7 @@ import {
   type OutboundNotificationSender,
 } from "@multiremi/notifications/types.js";
 import { MultiremiStore } from "@multiremi/store.js";
+import type { StoreContext } from "@multiremi/store/context.js";
 
 let db: Database | null = null;
 let store: MultiremiStore | null = null;
@@ -46,7 +47,7 @@ describe("Multiremi notification channels", () => {
     expect(sent).toEqual([]);
   });
 
-  it("mirrors a personal channel only for its own member", async () => {
+  it("shares a legacy personal channel across workspace operators", async () => {
     const sent: OutboundNotification[] = [];
     const current = createTestStore(capturingSender(sent));
     const owner = current.listWorkspaceMembers("local")[0]!;
@@ -60,14 +61,13 @@ describe("Multiremi notification channels", () => {
 
     createCommentNotificationIssue(current, "Someone else's item", other);
     await Bun.sleep(10);
-    expect(current.listNotificationDeliveries({ workspaceId: "local" })).toEqual([]);
-    expect(sent).toEqual([]);
+    expect(current.listNotificationDeliveries({ workspaceId: "local" })).toHaveLength(1);
 
     createCommentNotificationIssue(current, "The owner's own item", owner);
     const pending = current.listNotificationDeliveries({ workspaceId: "local" });
-    expect(pending).toHaveLength(1);
-    await waitForDelivery(current, pending[0]!.id, "sent");
-    expect(sent.map((notification) => notification.chatId)).toEqual(["oc_owner_group"]);
+    expect(pending).toHaveLength(2);
+    await Promise.all(pending.map(delivery => waitForDelivery(current, delivery.id, "sent")));
+    expect(sent.map((notification) => notification.chatId)).toEqual(["oc_owner_group", "oc_owner_group"]);
   });
 
   it("keeps mirroring a workspace-level channel for every member", async () => {
@@ -551,7 +551,7 @@ describe("Multiremi notification channels", () => {
     expect(failed.lastError).not.toContain(appSecret.trim());
   });
 
-  it("forbids non-admin members from creating workspace-level outbound channels", async () => {
+  it("lets every authenticated operator configure workspace outbound channels", async () => {
     const current = createTestStore(capturingSender([]));
     current.createWorkspaceMember({
       workspaceId: "local",
@@ -580,11 +580,11 @@ describe("Multiremi notification channels", () => {
       }),
     });
 
-    expect(response.status).toBe(403);
-    expect(current.listNotificationChannels("local")).toEqual([]);
+    expect(response.status).toBe(201);
+    expect(current.listNotificationChannels("local")).toHaveLength(1);
   });
 
-  it("lets a plain member own a personal channel and defaults to that scope", async () => {
+  it("creates a shared workspace channel by default", async () => {
     const current = createTestStore(capturingSender([]));
     const member = current.createWorkspaceMember({
       workspaceId: "local",
@@ -614,7 +614,7 @@ describe("Multiremi notification channels", () => {
 
     expect(response.status).toBe(201);
     const { channel } = await response.json() as { channel: { memberId: string | null } };
-    expect(channel.memberId).toBe(member.id);
+    expect(channel.memberId).toBeNull();
   });
 
   it("rejects a scope that is only a scope after coercion", async () => {
@@ -691,7 +691,7 @@ describe("Multiremi notification channels", () => {
     expect(current.listNotificationChannels("local")).toEqual([]);
   });
 
-  it("hides another member's personal channel and its delivery trail", async () => {
+  it("shares historical personal channels and delivery trails between operators", async () => {
     const sent: OutboundNotification[] = [];
     const current = createTestStore(capturingSender(sent));
     const admin = current.listWorkspaceMembers("local")[0]!;
@@ -725,15 +725,15 @@ describe("Multiremi notification channels", () => {
       { headers: jsonHeaders(nosyToken.token) },
     );
     const channels = await channelsResponse.json() as { channels: MultiremiNotificationChannel[] };
-    expect(channels.channels.map((channel) => channel.name)).toEqual(["Shared"]);
-    expect(JSON.stringify(channels)).not.toContain("oc_private_group");
+    expect(channels.channels.map((channel) => channel.name).sort()).toEqual(["Admin private", "Shared"]);
+    expect(JSON.stringify(channels)).toContain("oc_private_group");
 
     const deliveriesResponse = await app.request(
       "/api/multiremi/notification-deliveries?workspaceId=local",
       { headers: jsonHeaders(nosyToken.token) },
     );
     const deliveries = await deliveriesResponse.json() as { deliveries: MultiremiNotificationDelivery[] };
-    expect(deliveries.deliveries.map((delivery) => delivery.targetLabel)).toEqual(["Shared"]);
+    expect(deliveries.deliveries.map((delivery) => delivery.targetLabel).sort()).toEqual(["Admin private", "Shared"]);
     expect(nosy.id).not.toBe(admin.id);
   });
 
@@ -768,7 +768,7 @@ describe("Multiremi notification channels", () => {
     expect(body.deliveries.map((delivery) => delivery.targetLabel)).toEqual(["Shared"]);
   });
 
-  it("refuses a member retrying another member's personal delivery", async () => {
+  it("lets another operator retry a historical personal delivery", async () => {
     const sender: OutboundNotificationSender = {
       async send(): Promise<void> {
         throw new PermanentNotificationDeliveryError("permanent outbound failure");
@@ -799,8 +799,8 @@ describe("Multiremi notification channels", () => {
       { method: "POST", headers: jsonHeaders(outsiderToken.token) },
     );
 
-    expect(response.status).toBe(403);
-    expect(current.getNotificationDelivery(failed.id)!.status).toBe("failed");
+    expect(response.status).toBe(202);
+    expect((await response.json() as { delivery: { id: string } }).delivery.id).toBe(failed.id);
   });
 
   it("hard-denies task credentials from configuring an outbound target", async () => {
@@ -1148,8 +1148,12 @@ function createChannel(
 function createCommentNotificationIssue(current: MultiremiStore, title: string, recipient?: MultiremiWorkspaceMember) {
   const member = recipient ?? current.findWorkspaceMemberForUser('local','local')!;
   const issue = current.createIssue({ title, workspaceId: "local",responsibleMemberId:member.id,createdBy:member.id });
-  const author=current.createWorkspaceMember({name:'Notification comment author',workspaceId:issue.workspaceId});
-  current.createIssueComment(issue.id,{authorType:'member',authorId:author.id,body:title});
+  // Replay an already-recorded historical human notification. New human
+  // comments are self operations; this suite tests durable channel fanout.
+  const context = (current as unknown as { ctx: StoreContext }).ctx;
+  expect(context.createInboxItem({ issueId: issue.id, memberId: member.id,
+    type: "comment_created", title: `${issue.key}: New issue comment`, body: title,
+    actorType: "member", actorId: member.id, issueStatus: "backlog" })).not.toBeNull();
   return { issue, member };
 }
 

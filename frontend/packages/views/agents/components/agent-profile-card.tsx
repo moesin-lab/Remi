@@ -12,7 +12,6 @@ import { Skeleton } from "@multiremi/ui/components/ui/skeleton";
 import { AppLink } from "../../navigation";
 import { ProviderLogo } from "../../runtimes/components/provider-logo";
 import { availabilityConfig } from "../presence";
-import { VisibilityBadge } from "./visibility-badge";
 import { useT } from "../../i18n";
 
 interface AgentProfileCardProps {
@@ -24,7 +23,7 @@ export function AgentProfileCard({ agentId }: AgentProfileCardProps) {
   const wsId = useWorkspaceId();
   const p = useWorkspacePaths();
   const { data: agents = [], isLoading: agentsLoading } = useQuery(agentListOptions(wsId));
-  const { data: members = [] } = useQuery(memberListOptions(wsId));
+  useQuery(memberListOptions(wsId));
   const { data: runtimes = [] } = useQuery(runtimeListOptions(wsId));
 
   const agent = agents.find((a) => a.id === agentId);
@@ -47,9 +46,6 @@ export function AgentProfileCard({ agentId }: AgentProfileCardProps) {
     );
   }
 
-  const owner = agent.owner_id
-    ? members.find((m) => m.user_id === agent.owner_id) ?? null
-    : null;
   // Pool model: the agent carries an engine; legacy rows fall back to the
   // bound runtime's provider.
   const engine =
@@ -85,7 +81,6 @@ export function AgentProfileCard({ agentId }: AgentProfileCardProps) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <p className="truncate text-sm font-semibold">{agent.name}</p>
-            {!isArchived && <VisibilityBadge value={agent.visibility} compact />}
             {isArchived && (
               <span className="rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                 {t(($) => $.row.archived)}
@@ -121,7 +116,6 @@ export function AgentProfileCard({ agentId }: AgentProfileCardProps) {
         {agent.skills.length > 0 && (
           <SkillsRow skills={agent.skills.map((s) => s.name)} />
         )}
-        {owner && <MetaRow label={t(($) => $.profile_card.owner_label)} value={owner.name} />}
       </div>
     </div>
   );
@@ -167,24 +161,6 @@ function EngineRow({ engine }: { engine: string }) {
   );
 }
 
-function MetaRow({
-  label,
-  value,
-  mono,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-}) {
-  return (
-    <div className="flex items-center gap-1.5">
-      <span className="w-12 shrink-0 text-muted-foreground">{label}</span>
-      <span className={`truncate ${mono ? "font-mono text-[11px]" : ""}`} title={value}>
-        {value}
-      </span>
-    </div>
-  );
-}
 
 function SkillsRow({ skills }: { skills: string[] }) {
   const { t } = useT("agents");

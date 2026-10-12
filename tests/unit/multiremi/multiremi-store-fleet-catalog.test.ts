@@ -122,7 +122,7 @@ describe("Multiremi store — fleet engine and model catalog", () => {
     expect(body.providers.find((entry: any) => entry.provider === "openai")).toBeUndefined();
   });
 
-  it("counts only the caller's usable runtimes in the fleet catalog", async () => {
+  it("shares historical private runtimes within the selected workspace fleet", async () => {
     const store = createStore();
     store.createWorkspaceMember({ workspaceId: "local", userId: "alice", name: "Alice", role: "member" });
     store.createWorkspaceMember({ workspaceId: "local", userId: "bob", name: "Bob", role: "member" });
@@ -131,13 +131,19 @@ describe("Multiremi store — fleet engine and model catalog", () => {
     store.registerRuntime({ id: "rt_cap_alice", name: "alice codex", provider: "codex", workspaceId: "local", ownerId: "alice", visibility: "private" });
     store.registerRuntime({ id: "rt_cap_bob", name: "bob codex", provider: "codex", workspaceId: "local", ownerId: "bob", visibility: "private" });
     store.registerRuntime({ id: "rt_cap_pub", name: "shared codex", provider: "codex", workspaceId: "local", ownerId: "bob", visibility: "public" });
+    const foreign = store.createWorkspace({ name: "Other fleet" });
+    store.registerRuntime({ id: "rt_cap_foreign", name: "foreign codex", provider: "codex", workspaceId: foreign.id, ownerId: "alice" });
     const app = createMultiremiApp({ store, authToken: "root-secret" });
 
     const response = await app.request("/api/models", { headers: { Authorization: `Bearer ${aliceToken.token}` } });
     const body = await response.json();
     const codex = body.providers.find((entry: any) => entry.provider === "codex");
-    // Alice sees her own private + the public one, NOT bob's private one.
-    expect(codex.online_runtime_count).toBe(2);
+    // Historical ownership no longer divides this workspace's human fleet.
+    expect(response.status).toBe(200);
+    expect(codex.online_runtime_count).toBe(3);
+    const bobToken = await store.createAccessToken({ name: "Bob", type: "pat", workspaceId: "local", userId: "bob" });
+    const bobResponse = await app.request("/api/models", { headers: { Authorization: `Bearer ${bobToken.token}` } });
+    expect(await bobResponse.json()).toEqual(body);
   });
 
   it("serves the fleet model catalog grouped by provider", async () => {

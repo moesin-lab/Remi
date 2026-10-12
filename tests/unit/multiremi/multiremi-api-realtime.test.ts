@@ -375,7 +375,7 @@ describe("Multiremi API — realtime websockets", () => {
     }
   });
 
-  it("routes chat lifecycle events privately to the chat creator", async () => {
+  it("shares chat lifecycle events with operators in the same workspace", async () => {
     const store = createStore();
     const agent = store.createAgent({ name: "Chat Claude", provider: "claude", workspaceId: "local" });
     const runtime = store.registerRuntime({ id: "rt_chat_realtime", name: "chat runtime", provider: "claude", workspaceId: "local" });
@@ -427,13 +427,7 @@ describe("Multiremi API — realtime websockets", () => {
       expect(first("chat:session_deleted")).toMatchObject({ type: "chat:session_deleted", payload: { chat_session_id: chat.id } });
       // Chat-linked task lifecycle (which carries the assistant result text) stays on the private chat scope.
       expect(first("task:completed")?.payload).toMatchObject({ task_id: sent.task.id, chat_session_id: chat.id, result: "all done" });
-      // The workspace peer must never receive any private chat session traffic.
-      // Two requests and one terminal reply refresh the index. Deleting the
-      // second message no longer cancels a separate queued task/notification.
-      expect(peerMessages).toEqual([
-        ...Array.from({ length: 3 }, () => ({ type: "inbox:new", actor_id: null, actor_type: "system", payload: { index_only: true } })),
-        { type: "inbox:read", actor_id: null, actor_type: "system", payload: { index_only: true } },
-      ]);
+      expect(peerMessages).toEqual(creatorMessages);
     } finally {
       creator.close();
       peer.close();
@@ -441,197 +435,20 @@ describe("Multiremi API — realtime websockets", () => {
     }
   });
 
-  it("routes workspace member and invitation realtime events like Go", async () => {
+  it("retired membership mutations preserve rows and emit no membership events", async () => {
     const store = createStore();
-    const localWorkspace = store.ensureLocalWorkspace();
-    const localOwner = store.getWorkspaceMember(`mem_${localWorkspace.id}_local`)!;
-    store.createWorkspaceMember({
-      id: "mem_browser_realtime_backup",
-      workspaceId: localWorkspace.id,
-      name: "Browser Realtime Backup",
-      email: "browser-realtime-backup@example.com",
-      role: "owner",
-    });
-    const remoteWorkspace = store.createWorkspace({ id: "ws_browser_events_remote", name: "Browser Events Remote", slug: "browser-events-remote" });
-    store.createWorkspaceMember({
-      id: `mem_${remoteWorkspace.id}_admin-user`,
-      userId: "admin-user",
-      workspaceId: remoteWorkspace.id,
-      name: "Remote Admin",
-      email: "remote-admin@example.com",
-      role: "owner",
-    });
-    db!.run("DELETE FROM multiremi_workspace_members WHERE id = ?", [`mem_${remoteWorkspace.id}_local`]);
-    const localToken = await store.createAccessToken({ name: "Local browser events", type: "pat", workspaceId: localWorkspace.id });
-    const remoteToken = await store.createAccessToken({
-      name: "Remote browser events",
-      type: "pat",
-      workspaceId: remoteWorkspace.id,
-      userId: "admin-user",
-    });
+    const member = store.getWorkspaceOperator("local")!;
     const server = startMultiremiServer({ store, scheduler: null, authToken: "test-root", port: 0, hostname: "127.0.0.1" });
-    const local = new WebSocket(`ws://127.0.0.1:${server.port}/ws?workspace_id=${localWorkspace.id}`);
-    const remote = new WebSocket(`ws://127.0.0.1:${server.port}/ws?workspace_id=${remoteWorkspace.id}`);
-    const baseUrl = `http://127.0.0.1:${server.port}`;
+    const browser = new WebSocket(`ws://127.0.0.1:${server.port}/ws?workspace_id=local`);
     try {
-      await authenticateBrowserWebSocket(local, localToken.token);
-      await authenticateBrowserWebSocket(remote, remoteToken.token);
-
-      const updatedEvent = nextWebSocketMessage(local);
-      const updated = await fetch(`${baseUrl}/api/workspaces/${localWorkspace.id}/members/${localOwner.id}`, {
-        method: "PATCH",
-        headers: {
-          Authorization: `Bearer ${localToken.token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ role: "admin" }),
-      });
-      expect(updated.status).toBe(200);
-      expect(await updatedEvent).toMatchObject({
-        type: "member:updated",
-        payload: {
-          member: {
-            id: localOwner.id,
-            workspace_id: localWorkspace.id,
-            user_id: "local",
-            role: "admin",
-          },
-        },
-        actor_id: "local",
-        actor_type: "member",
-      });
-      await expectNoWebSocketMessage(remote);
-
-      const invited = await fetch(`${baseUrl}/api/workspaces/${localWorkspace.id}/members`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${localToken.token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ email: "browser-invite@example.com", role: "member" }),
-      });
-      expect(invited.status).toBe(201);
-      const invitedBody = await invited.json();
-      await expectNoWebSocketMessage(local);
-      await expectNoWebSocketMessage(remote);
-
-      const revoked = await fetch(`${baseUrl}/api/workspaces/${localWorkspace.id}/invitations/${invitedBody.id}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${localToken.token}` },
-      });
-      expect(revoked.status).toBe(204);
-      await expectNoWebSocketMessage(local);
-      await expectNoWebSocketMessage(remote);
-
-      const localInviteCreatedEvent = nextWebSocketMessage(local);
-      const localInviteCreated = await fetch(`${baseUrl}/api/workspaces/${remoteWorkspace.id}/members`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${remoteToken.token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ email: store.getCurrentUser().email, role: "member" }),
-      });
-      expect(localInviteCreated.status).toBe(201);
-      const localInviteBody = await localInviteCreated.json();
-      expect(await localInviteCreatedEvent).toMatchObject({
-        type: "invitation:created",
-        payload: {
-          invitation: {
-            id: localInviteBody.id,
-            workspace_id: remoteWorkspace.id,
-            invitee_email: store.getCurrentUser().email,
-            invitee_user_id: "local",
-            role: "member",
-            status: "pending",
-          },
-          workspace_name: remoteWorkspace.name,
-        },
-        actor_id: "admin-user",
-        actor_type: "member",
-      });
-      await expectNoWebSocketMessage(remote);
-
-      const localInviteRevokedEvent = nextWebSocketMessage(local);
-      const localInviteRevoked = await fetch(`${baseUrl}/api/workspaces/${remoteWorkspace.id}/invitations/${localInviteBody.id}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${remoteToken.token}` },
-      });
-      expect(localInviteRevoked.status).toBe(204);
-      expect(await localInviteRevokedEvent).toMatchObject({
-        type: "invitation:revoked",
-        payload: {
-          invitation_id: localInviteBody.id,
-          invitee_email: store.getCurrentUser().email,
-          invitee_user_id: "local",
-        },
-        actor_id: "admin-user",
-        actor_type: "member",
-      });
-      await expectNoWebSocketMessage(remote);
-
-      const acceptedInviteCreatedEvent = nextWebSocketMessage(local);
-      const acceptedInviteCreated = await fetch(`${baseUrl}/api/workspaces/${remoteWorkspace.id}/members`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${remoteToken.token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ email: store.getCurrentUser().email, role: "member" }),
-      });
-      expect(acceptedInviteCreated.status).toBe(201);
-      const acceptedInviteBody = await acceptedInviteCreated.json();
-      expect(await acceptedInviteCreatedEvent).toMatchObject({ type: "invitation:created" });
-      await expectNoWebSocketMessage(remote);
-
-      const localMemberAddedEvent = nextWebSocketMessage(local);
-      const remoteAcceptedEvents = nextWebSocketMessages(remote, 2);
-      const accepted = await fetch(`${baseUrl}/api/invitations/${acceptedInviteBody.id}/accept`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${localToken.token}` },
-      });
-      expect(accepted.status).toBe(200);
-      expect(await localMemberAddedEvent).toMatchObject({
-        type: "member:added",
-        payload: {
-          member: {
-            workspace_id: remoteWorkspace.id,
-            user_id: "local",
-            role: "member",
-          },
-          workspace_name: remoteWorkspace.name,
-        },
-        actor_id: "local",
-        actor_type: "member",
-      });
-      const [remoteMemberAddedEvent, remoteInvitationAcceptedEvent] = await remoteAcceptedEvents;
-      expect(remoteMemberAddedEvent).toMatchObject({
-        type: "member:added",
-        payload: {
-          member: {
-            workspace_id: remoteWorkspace.id,
-            user_id: "local",
-            role: "member",
-          },
-          workspace_name: remoteWorkspace.name,
-        },
-      });
-      expect(remoteInvitationAcceptedEvent).toMatchObject({
-        type: "invitation:accepted",
-        payload: {
-          invitation_id: acceptedInviteBody.id,
-          member: {
-            workspace_id: remoteWorkspace.id,
-            user_id: "local",
-          },
-        },
-      });
-      await expectNoWebSocketMessage(local);
-    } finally {
-      local.close();
-      remote.close();
-      server.stop(true);
-    }
+      await authenticateBrowserWebSocket(browser, "test-root");
+      for (const [method, path] of [["PATCH", `/api/workspaces/local/members/${member.id}`], ["POST", "/api/workspaces/local/members"], ["POST", "/api/invitations/missing/accept"], ["POST", "/api/workspaces/local/leave"]]) {
+        const response = await fetch(`http://127.0.0.1:${server.port}${path}`, { method, headers: { Authorization: "Bearer test-root", "Content-Type": "application/json" }, body: JSON.stringify({ role: "member", email: "example@example.test" }) });
+        expect(response.status).toBe(410);
+      }
+      await expectNoWebSocketMessage(browser);
+      expect(store.getWorkspaceMember(member.id)?.archivedAt).toBeNull();
+    } finally { browser.close(); server.stop(true); }
   });
 
   it("scopes daemon websocket upgrades to authorized runtime workspaces", async () => {

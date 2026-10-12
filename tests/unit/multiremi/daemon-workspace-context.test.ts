@@ -16,7 +16,7 @@ async function setup() {
 
 for (const selector of ["X-Workspace-ID", "X-Workspace-Slug"]) {
   for (const method of ["GET", "POST"]) {
-    test(`daemon install ${method} honors ${selector} and membership`, async () => {
+    test(`daemon install ${method} honors ${selector} for every authenticated operator`, async () => {
       const { store, user, workspace, app, token } = await setup();
       const value = selector === "X-Workspace-ID" ? workspace.id : workspace.slug;
       const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json", [selector]: value };
@@ -26,7 +26,8 @@ for (const selector of ["X-Workspace-ID", "X-Workspace-Slug"]) {
       expect((await response.json()).workspaceId).toBe(workspace.id);
       expect(store.getUserRoleInWorkspace(user.id, "local")).toBeNull();
       const foreign = await app.request("/api/multiremi/install/daemon", { ...options, headers: { ...headers, [selector]: "local" } });
-      expect(foreign.status).toBe(404);
+      expect(foreign.status).toBe(200);
+      expect((await foreign.json()).workspaceId).toBe("local");
     });
   }
 

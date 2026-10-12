@@ -153,7 +153,7 @@ describe.skipIf(!pgAvailable)("MUL-448 task attribution on PostgreSQL", () => {
     const memberEvents=store.listSessionEvents(session.id).filter(event=>event.id===message.id);
     expect(memberEvents).toHaveLength(1);
     expect(memberEvents[0]!.authorType).toBe("member");
-    expect(store.getWorkspaceMember(memberEvents[0]!.authorId!)?.userId).toBe(fixture.ownerId);
+    expect(store.getWorkspaceMember(memberEvents[0]!.authorId!)?.userId).toBe("local");
   });
 
   it("strips trigger and lineage provenance from the task row", async () => {

@@ -108,12 +108,8 @@ pendingTurnBackendTests("MUL-508 browser log source visibility", fixture => {
       noCredentials(nested);
     }
   }
-  function privateRowsHidden(frames: any[], ids: string[]) {
-    const text = JSON.stringify(frames);
-    for (const id of ids) expect(frames.some(frame => frame.payload.id === id || frame.payload.task_id === id)).toBe(false);
-    expect(text).not.toContain("Private turn prompt");
-    expect(text).not.toContain("Private request payload");
-    expect(text).not.toContain("Private updated body");
+  function sharedRowsVisible(frames: any[], ids: string[]) {
+    for (const id of ids) expect(frames.some(frame => frame.payload.id === id || frame.payload.task_id === id)).toBe(true);
     noCredentials(frames);
   }
 
@@ -210,7 +206,7 @@ pendingTurnBackendTests("MUL-508 browser log source visibility", fixture => {
     } finally { await f.close(); }
   });
 
-  for (const kind of ["permission", "question"] as const) it(`M1: answered private task ${kind} remains hidden in HTTP and WS replay`, async () => {
+  for (const kind of ["permission", "question"] as const) it(`M1: answered historical private task ${kind} is shared in HTTP and WS replay`, async () => {
     const f = await scaffold();
     try {
       const q = f.question(kind); f.start();
@@ -222,38 +218,35 @@ pendingTurnBackendTests("MUL-508 browser log source visibility", fixture => {
       const reply = answered.data.message;
       expect(reply.reply_to_id).toBe(q.request.id);
       expect(f.store.getTaskHumanRequest(q.request.id)?.status).toBe("responded");
-      await readReply(f, q.request.id, f.member.token, false);
-      await readReply(f, reply.id, f.member.token, false);
+      await readReply(f, q.request.id, f.member.token, true);
+      await readReply(f, reply.id, f.member.token, true);
       await readReply(f, reply.id, f.owner.token, true);
       const member = await f.connect(f.member.token), owner = await f.connect(f.owner.token);
       await member.subscribe(1); await owner.subscribe(1);
       await member.through(reply.seq); await owner.through(reply.seq);
-      privateRowsHidden(member.frames(), [q.request.id, q.turn.id, q.task.id, reply.id]);
-      expect(member.frames().find(frame => frame.seq === reply.seq)?.payload).toEqual({
-        session_id: f.session.id, seq: reply.seq, revision: reply.revision, visibility: "hidden",
-      });
+      sharedRowsVisible(member.frames(), [q.request.id, q.turn.id, reply.id]);
+      expect(member.frames().find(frame => frame.seq === reply.seq)?.payload.id).toBe(reply.id);
       expect(owner.frames().find(frame => frame.seq === reply.seq)?.payload.id).toBe(reply.id);
       noCredentials(owner.frames());
     } finally { await f.close(); }
   });
 
-  it('the designated human can read and answer the private native Q while generic messages, trace and replay remain hidden', async () => {
+  it('human accounts share native Q content and answers regardless of the historical contact', async () => {
     const f = await scaffold();
     try {
       f.store.updateIssue(f.issue.id, { responsibleMemberId: f.recipient.id, actorType: 'member', actorId: f.sourceHuman.id });
       const q = f.question('permission'); f.start();
       expect((await f.request(`/api/messages/${q.request.id}/question`, f.member.token)).status).toBe(200);
-      await readReply(f, q.request.id, f.member.token, false);
-      expect((await f.request(`/api/turns/${q.turn.id}/trace`, f.member.token)).status).toBe(404);
+      await readReply(f, q.request.id, f.member.token, true);
+      expect((await f.request(`/api/turns/${q.turn.id}/trace`, f.member.token)).status).toBe(200);
       const browser = await f.connect(f.member.token); await browser.subscribe(); await browser.through(q.row.seq);
-      privateRowsHidden(browser.frames(), [q.request.id, q.turn.id, q.task.id]);
+      sharedRowsVisible(browser.frames(), [q.request.id, q.turn.id]);
       const input = { expected_route_revision: f.store.getQuestion(q.request.id)!.route_revision, response: { option_id: 'allow_once' } };
-      expect((await f.request(`/api/messages/${q.request.id}/question/answer`, f.owner.token, input)).status).toBe(403);
-      expect(f.store.getQuestion(q.request.id)?.status).toBe('pending');
-      const answer = await f.request(`/api/messages/${q.request.id}/question/answer`, f.member.token, input);
+      const answer = await f.request(`/api/messages/${q.request.id}/question/answer`, f.owner.token, input);
       expect(answer.status, JSON.stringify(answer.data)).toBe(200);
+      expect((await f.request(`/api/messages/${q.request.id}/question/answer`, f.member.token, input)).status).toBe(409);
       const replyId = f.store.getQuestion(q.request.id)!.answer!.reply_message_id;
-      await readReply(f, replyId, f.member.token, false);
+      await readReply(f, replyId, f.member.token, true);
       expect(f.store.getDaemonTurnBridge().rpc('turn.decision.consume', { turn_id: q.turn.id, attempt_id: q.task.id,
         message_id: q.request.id, wait_id: `browser:${q.task.id}`, reply_message_id: replyId },
         { runtimeId: f.runtime.id, daemonId: f.runtime.daemonId!, workspaceId: 'local' }).ok).toBe(true);
@@ -261,7 +254,7 @@ pendingTurnBackendTests("MUL-508 browser log source visibility", fixture => {
     } finally { await f.close(); }
   });
 
-  for (const kind of ["permission", "question"] as const) it(`cold replay hides private ${kind} and turn; owner sees credential-free rows`, async () => {
+  for (const kind of ["permission", "question"] as const) it(`cold replay shares historical private ${kind} and turn without exposing card credentials`, async () => {
     const f = await scaffold();
     try {
       const q = f.question(kind);
@@ -271,10 +264,8 @@ pendingTurnBackendTests("MUL-508 browser log source visibility", fixture => {
       await member.subscribe(); await owner.subscribe();
       const head = f.store.getConversationLogHead(f.session.id)!.headSeq;
       await member.through(head); await owner.through(head);
-      privateRowsHidden(member.frames(), [q.request.id, q.turn.id, q.task.id]);
-      expect(member.frames().find(frame => frame.seq === q.row.seq)?.payload).toEqual({
-        session_id: f.session.id, seq: q.row.seq, revision: q.row.revision, visibility: "hidden",
-      });
+      sharedRowsVisible(member.frames(), [q.request.id, q.turn.id]);
+      expect(member.frames().find(frame => frame.seq === q.row.seq)?.payload.id).toBe(q.request.id);
       const rows = owner.frames().map(frame => frame.payload);
       expect(rows.find(row => row.id === q.request.id)?.metadata.human_request.kind).toBe(kind);
       expect(rows.find(row => row.id === q.turn.id)?.metadata.status).toBe("awaiting_human");
@@ -284,7 +275,7 @@ pendingTurnBackendTests("MUL-508 browser log source visibility", fixture => {
     } finally { await f.close(); }
   });
 
-  for (const via of ["live", "peer fill"] as const) it(`${via} filters entries, turn patches, response and edit markers per recipient`, async () => {
+  for (const via of ["live", "peer fill"] as const) it(`${via} shares entries, turn patches, responses and edit markers with human accounts`, async () => {
     const f = await scaffold();
     try {
       f.start();
@@ -299,7 +290,7 @@ pendingTurnBackendTests("MUL-508 browser log source visibility", fixture => {
       if (via === "peer fill") await f.hub.applyRemoteHead(`log:${f.session.id}`, head);
       f.hub.flushNow();
       await member.through(head); await owner.through(head);
-      privateRowsHidden(member.frames(), [q.request.id, q.turn.id, q.task.id]);
+      sharedRowsVisible(member.frames(), [q.request.id, q.turn.id]);
       expect(owner.frames().some(frame => frame.payload.id === q.request.id)).toBe(true);
       const version = q.row.revision + 1;
       fixture().transaction(() => f.store.updateConversationLogWithinTransaction(f.session.id, q.row.seq, {
@@ -312,30 +303,30 @@ pendingTurnBackendTests("MUL-508 browser log source visibility", fixture => {
         throw new Error(JSON.stringify({ expected_revision: version, stored_revision: f.store.getConversationLogEntryById(q.request.id)!.revision,
           frames: owner.frames().filter(frame => frame.seq === q.row.seq).map(frame => ({ kind: frame.kind, revision: frame.payload.revision })) }));
       }
-      await waitFor(() => member.frames().some(frame => frame.seq === q.row.seq && frame.payload.revision === version), "redacted patch marker");
+      await waitFor(() => member.frames().some(frame => frame.seq === q.row.seq && frame.payload.revision === version), "shared patch marker");
       const edited = f.store.appendConversationLog({ sessionId: f.session.id, kind: "message_edited", authorType: "system",
         metadata: { target_seq: q.row.seq, previous_body: "Private request payload", body: "Private updated body" } });
       await member.through(edited.seq); await owner.through(edited.seq);
-      expect(member.frames().find(frame => frame.seq === edited.seq)?.payload.visibility).toBe("hidden");
+      expect(member.frames().find(frame => frame.seq === edited.seq)?.payload.id).toBe(edited.id);
       const reply = f.store.answerMessageDecision(q.request.id, { sender: { type: 'member', id: f.sourceHuman.id },
         expected_route_revision: f.store.getQuestion(q.request.id)!.route_revision, body_md: 'Private response',
         response: { option_id: 'allow_once' } }).message;
       await member.through(reply.seq); await owner.through(reply.seq);
-      privateRowsHidden(member.frames(), [q.request.id, q.turn.id, q.task.id, reply.id]);
-      expect(JSON.stringify(member.frames())).not.toContain("Private response");
+      sharedRowsVisible(member.frames(), [q.request.id, q.turn.id, reply.id]);
+      expect(member.frames().find(frame => frame.payload.id === reply.id)?.payload.metadata.human_response).toEqual({ option_id: "allow_once" });
       expect(owner.frames().some(frame => frame.payload.id === reply.id)).toBe(true);
       const responseEdit = f.store.appendConversationLog({ sessionId: f.session.id, kind: "message_edited", authorType: "system",
         metadata: { target_seq: reply.seq, previous_body: "Private response" } });
       await member.through(responseEdit.seq); await owner.through(responseEdit.seq);
-      expect(member.frames().find(frame => frame.seq === responseEdit.seq)?.payload.visibility).toBe("hidden");
+      expect(member.frames().find(frame => frame.seq === responseEdit.seq)?.payload.id).toBe(responseEdit.id);
       expect(owner.frames().some(frame => frame.payload.id === responseEdit.id)).toBe(true);
       noCredentials(owner.frames());
-      expect(member.events.filter(event => event.type.startsWith("task:")).length).toBe(0);
+      expect(member.events.some(event => event.type.startsWith("task:"))).toBe(true);
       expect(owner.events.some(event => event.type.startsWith("task:"))).toBe(true);
     } finally { await f.close(); }
   });
 
-  it("shared sources remain visible and permission changes and archiving apply to retained replay", async () => {
+  it("historical privacy changes and archiving preserve human access to retained replay", async () => {
     const f = await scaffold(true);
     try {
       const q = f.question("question"); f.start();
@@ -346,11 +337,11 @@ pendingTurnBackendTests("MUL-508 browser log source visibility", fixture => {
       f.store.updateAgent(f.agent.id, { visibility: "private" });
       member.events.length = 0;
       await member.subscribe(q.row.seq); await member.through(q.row.seq);
-      privateRowsHidden(member.frames(), [q.request.id, q.turn.id, q.task.id]);
+      sharedRowsVisible(member.frames(), [q.request.id]);
       f.db.run("UPDATE multiremi_agents SET archived_at=? WHERE id=?", [new Date().toISOString(), f.agent.id]);
       member.events.length = 0;
       await member.subscribe(q.row.seq); await member.through(q.row.seq);
-      privateRowsHidden(member.frames(), [q.request.id, q.turn.id, q.task.id]);
+      sharedRowsVisible(member.frames(), [q.request.id]);
       const owner = await f.connect(f.owner.token);
       await owner.subscribe(q.row.seq); await owner.through(q.row.seq);
       expect(owner.frames().some(frame => frame.payload.id === q.request.id)).toBe(true);

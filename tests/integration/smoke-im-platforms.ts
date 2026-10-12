@@ -71,14 +71,26 @@ try {
   const owner = store.getOrCreateUser({ name: "IM owner", email: "im-owner@example.test" });
   const workspace = store.createWorkspace({ name: "IM smoke workspace", slug: "im-smoke" }, owner.id);
   const other = store.createWorkspace({ name: "Other workspace", slug: "im-other" }, owner.id);
-  const ownerMember = store.listWorkspaceMembers(workspace.id).find(item => item.userId === owner.id);
-  assert(ownerMember, "Workspace owner must have an active membership");
+  const ownerMember = store.ensureWorkspaceOperator(workspace.id);
+  assert(ownerMember, "Workspace must have a shared operator");
   const member = store.getOrCreateUser({ name: "IM member", email: "im-member@example.test" });
   const workspaceMember = store.createWorkspaceMember({ workspaceId: workspace.id, userId: member.id, name: member.name, role: "member" });
   const ownerToken = (await store.createAccessToken({ workspaceId: workspace.id, userId: owner.id, name: "IM browser smoke", type: "pat" })).token;
   const memberToken = (await store.createAccessToken({ workspaceId: workspace.id, userId: member.id, name: "IM member smoke", type: "pat" })).token;
   tokens.push(ownerToken, memberToken);
   const agent = store.createAgent({ workspaceId: workspace.id, ownerId: owner.id, name: "IM Concierge", provider: "codex" });
+  const historicalOwner = store.createWorkspaceMember({ workspaceId: workspace.id, userId: owner.id, name: owner.name });
+  const sharedChat = store.createChatSession({ workspaceId: workspace.id, agentId: agent.id, creatorId: owner.id, title: "Historical shared chat" });
+  const sendReceipt = (memberId: string, body: string) => store.sendMessage({ session_id: sharedChat.id,
+    sender: { type: "platform", id: null }, to: { type: "member", ref: memberId },
+    message_kind: "status", wake_requested: "inbox_only", body_md: body }).message;
+  const oldRead = sendReceipt(historicalOwner.id, "Previously read owner notification");
+  const sharedUnread = sendReceipt(workspaceMember.id, "Historical notification shared across accounts");
+  const laterRead = sendReceipt(historicalOwner.id, "Later already read owner notification");
+  const receiptAt = new Date().toISOString();
+  db.run(`INSERT INTO multiremi_session_lanes(session_id,reader_type,reader_id,execution_scope,cursor_seq,created_at,updated_at)
+    VALUES(?,'member',?,'',?,?,?) ON CONFLICT(session_id,reader_type,reader_id,execution_scope)
+    DO UPDATE SET cursor_seq=excluded.cursor_seq`, [sharedChat.id, historicalOwner.id, laterRead.seq, receiptAt, receiptAt]);
   const specialist = store.createAgent({ workspaceId: workspace.id, ownerId: owner.id, name: "Group Specialist", provider: "codex" });
   const runtime = store.registerRuntime({ name: "Smoke bot host", provider: "codex", workspaceId: workspace.id, ownerId: owner.id, daemonId: "im-smoke-daemon", status: "online" });
   const secondRuntime = store.registerRuntime({ name: "Second bot host", provider: "codex", workspaceId: workspace.id, ownerId: owner.id, daemonId: "im-second-daemon", status: "online" });
@@ -157,7 +169,7 @@ try {
     browserWorker!.once("error", reject);
     browserWorker!.once("close", done);
   });
-  browserWorker.stdin!.end(JSON.stringify({ frontend, workspace: { id: workspace.id, slug: workspace.slug }, other: { slug: other.slug }, memberIds: { owner: ownerMember.id, member: workspaceMember.id }, memberToken, ownerToken, artifacts, message: { text: message.text } }));
+  browserWorker.stdin!.end(JSON.stringify({ frontend, workspace: { id: workspace.id, slug: workspace.slug }, other: { slug: other.slug }, memberToken, ownerToken, artifacts, message: { text: message.text }, sharedInbox: { id: sharedUnread.id, seq: sharedUnread.seq, previouslyRead: [oldRead.id, laterRead.id] } }));
   const exitCode = await browserResult;
   const browserReport = JSON.parse(readFileSync(join(artifacts, "browser-report.json"), "utf8"));
   checks.push(...browserReport.checks); jsErrors.push(...browserReport.jsErrors); apiFailures.push(...browserReport.apiFailures);
@@ -168,6 +180,9 @@ try {
   assert.equal(store.getFeishuBotConfig(workspace.id)?.senderAccessPolicy, "agent");
   assert.equal(store.getFeishuBotConfig(workspace.id)?.responsibleMemberId, null);
   assert(store.listFeishuBotAgentRoutes(workspace.id).some(route => route.agentId === specialist.id));
+  assert.equal(store.getChatSession(sharedChat.id)?.unreadCount, 0);
+  assert.equal(store.getChatSession(sharedChat.id)?.creatorId, owner.id);
+  assert.equal(store.getMessage(sharedUnread.id)?.to_member_id, workspaceMember.id);
   check("database retains saved bot, write-only secret, sender policy and agent route");
 } catch (error) {
   failure = error;

@@ -1,7 +1,7 @@
 {
   "name": "MUL-473 first-screen hotspot responses",
   "capturedAt": "<timestamp>",
-  "source": "MUL-493 canonical Turn list with current Attempt metadata; unchanged Issue assignee filters",
+  "source": "Shared workspace Turn list; historical Issue assignee filters preserved",
   "fixture": {
     "sessions": 50,
     "agents": 20,
@@ -11,6 +11,52 @@
   },
   "chatPendingTasks": {
     "turns": [
+      {
+        "id": "<task:50>",
+        "session_id": "chat_hotspot_foreign",
+        "seq": 2,
+        "agent_id": "agt_hotspot_0",
+        "execution_scope": "",
+        "status": "pending",
+        "wake_source": "human_sender",
+        "wake_seq": 1,
+        "trigger_message_id": "<message:50>",
+        "input_from_seq": null,
+        "input_to_seq": null,
+        "waiting_on_message_id": null,
+        "reply_message_id": null,
+        "wrap_up_requested_at": null,
+        "current_attempt_id": "<task:50>",
+        "chat_session_id": "chat_hotspot_foreign",
+        "delegation_id": null,
+        "delegated_by_agent_id": null,
+        "delegation_return_turn_id": null,
+        "delegated_from_issue_session_id": null,
+        "delegation_skip_reason": null,
+        "continued_from_turn_id": null,
+        "holds_workspace": true,
+        "priority": 0,
+        "requesting_user_name": null,
+        "requesting_user_profile_description": null,
+        "issue_id": null,
+        "workspace_id": "local",
+        "created_at": "<timestamp>",
+        "started_at": null,
+        "ended_at": null,
+        "ended_reason": null,
+        "legacy_prompt": null,
+        "current_attempt": {
+          "id": "<task:50>",
+          "status": "offered",
+          "runtime_id": "rt_hotspot",
+          "provider": null,
+          "error": null,
+          "failure_reason": null,
+          "progress_summary": null,
+          "progress_step": null,
+          "progress_total": null
+        }
+      },
       {
         "id": "<task:49>",
         "session_id": "chat_hotspot_49",
@@ -415,6 +461,52 @@
         "legacy_prompt": null,
         "current_attempt": {
           "id": "<task:41>",
+          "status": "offered",
+          "runtime_id": "rt_hotspot",
+          "provider": null,
+          "error": null,
+          "failure_reason": null,
+          "progress_summary": null,
+          "progress_step": null,
+          "progress_total": null
+        }
+      },
+      {
+        "id": "<task:40>",
+        "session_id": "chat_hotspot_40",
+        "seq": 2,
+        "agent_id": "agt_hotspot_0",
+        "execution_scope": "",
+        "status": "pending",
+        "wake_source": "human_sender",
+        "wake_seq": 1,
+        "trigger_message_id": "<message:40>",
+        "input_from_seq": null,
+        "input_to_seq": null,
+        "waiting_on_message_id": null,
+        "reply_message_id": null,
+        "wrap_up_requested_at": null,
+        "current_attempt_id": "<task:40>",
+        "chat_session_id": "chat_hotspot_40",
+        "delegation_id": null,
+        "delegated_by_agent_id": null,
+        "delegation_return_turn_id": null,
+        "delegated_from_issue_session_id": null,
+        "delegation_skip_reason": null,
+        "continued_from_turn_id": null,
+        "holds_workspace": true,
+        "priority": 0,
+        "requesting_user_name": null,
+        "requesting_user_profile_description": null,
+        "issue_id": null,
+        "workspace_id": "local",
+        "created_at": "<timestamp>",
+        "started_at": null,
+        "ended_at": null,
+        "ended_reason": null,
+        "legacy_prompt": null,
+        "current_attempt": {
+          "id": "<task:40>",
           "status": "offered",
           "runtime_id": "rt_hotspot",
           "provider": null,
@@ -1300,6 +1392,52 @@
         }
       },
       {
+        "id": "<task:20>",
+        "session_id": "chat_hotspot_20",
+        "seq": 2,
+        "agent_id": "agt_hotspot_0",
+        "execution_scope": "",
+        "status": "pending",
+        "wake_source": "human_sender",
+        "wake_seq": 1,
+        "trigger_message_id": "<message:20>",
+        "input_from_seq": null,
+        "input_to_seq": null,
+        "waiting_on_message_id": null,
+        "reply_message_id": null,
+        "wrap_up_requested_at": null,
+        "current_attempt_id": "<task:20>",
+        "chat_session_id": "chat_hotspot_20",
+        "delegation_id": null,
+        "delegated_by_agent_id": null,
+        "delegation_return_turn_id": null,
+        "delegated_from_issue_session_id": null,
+        "delegation_skip_reason": null,
+        "continued_from_turn_id": null,
+        "holds_workspace": true,
+        "priority": 0,
+        "requesting_user_name": null,
+        "requesting_user_profile_description": null,
+        "issue_id": null,
+        "workspace_id": "local",
+        "created_at": "<timestamp>",
+        "started_at": null,
+        "ended_at": null,
+        "ended_reason": null,
+        "legacy_prompt": null,
+        "current_attempt": {
+          "id": "<task:20>",
+          "status": "offered",
+          "runtime_id": "rt_hotspot",
+          "provider": null,
+          "error": null,
+          "failure_reason": null,
+          "progress_summary": null,
+          "progress_step": null,
+          "progress_total": null
+        }
+      },
+      {
         "id": "<task:19>",
         "session_id": "chat_hotspot_19",
         "seq": 2,
@@ -2126,6 +2264,52 @@
           "progress_step": null,
           "progress_total": null
         }
+      },
+      {
+        "id": "<task:0>",
+        "session_id": "chat_hotspot_0",
+        "seq": 2,
+        "agent_id": "agt_hotspot_0",
+        "execution_scope": "",
+        "status": "pending",
+        "wake_source": "human_sender",
+        "wake_seq": 1,
+        "trigger_message_id": "<message:0>",
+        "input_from_seq": null,
+        "input_to_seq": null,
+        "waiting_on_message_id": null,
+        "reply_message_id": null,
+        "wrap_up_requested_at": null,
+        "current_attempt_id": "<task:0>",
+        "chat_session_id": "chat_hotspot_0",
+        "delegation_id": null,
+        "delegated_by_agent_id": null,
+        "delegation_return_turn_id": null,
+        "delegated_from_issue_session_id": null,
+        "delegation_skip_reason": null,
+        "continued_from_turn_id": null,
+        "holds_workspace": true,
+        "priority": 0,
+        "requesting_user_name": null,
+        "requesting_user_profile_description": null,
+        "issue_id": null,
+        "workspace_id": "local",
+        "created_at": "<timestamp>",
+        "started_at": null,
+        "ended_at": null,
+        "ended_reason": null,
+        "legacy_prompt": null,
+        "current_attempt": {
+          "id": "<task:0>",
+          "status": "offered",
+          "runtime_id": "rt_hotspot",
+          "provider": null,
+          "error": null,
+          "failure_reason": null,
+          "progress_summary": null,
+          "progress_step": null,
+          "progress_total": null
+        }
       }
     ],
     "next_cursor": null
@@ -2146,6 +2330,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2161,8 +2346,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_52",
@@ -2178,6 +2362,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2193,8 +2378,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_48",
@@ -2210,6 +2394,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2225,8 +2410,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_44",
@@ -2242,6 +2426,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2257,8 +2442,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_40",
@@ -2274,6 +2458,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2289,8 +2474,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_36",
@@ -2306,6 +2490,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2321,8 +2506,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_32",
@@ -2338,6 +2522,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2353,8 +2538,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_28",
@@ -2370,6 +2554,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2385,8 +2570,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_24",
@@ -2402,6 +2586,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2417,8 +2602,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_20",
@@ -2434,6 +2618,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2449,8 +2634,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_16",
@@ -2466,6 +2650,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2481,8 +2666,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_12",
@@ -2498,6 +2682,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2513,8 +2698,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_8",
@@ -2530,6 +2714,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2545,8 +2730,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_4",
@@ -2562,6 +2746,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2577,8 +2762,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_0",
@@ -2594,6 +2778,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2609,8 +2794,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       }
     ],
     "total": 15
@@ -2631,6 +2815,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2646,8 +2831,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_52",
@@ -2663,6 +2847,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2678,8 +2863,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_48",
@@ -2695,6 +2879,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2710,8 +2895,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_44",
@@ -2727,6 +2911,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2742,8 +2927,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_40",
@@ -2759,6 +2943,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2774,8 +2959,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_36",
@@ -2791,6 +2975,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2806,8 +2991,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_32",
@@ -2823,6 +3007,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2838,8 +3023,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_28",
@@ -2855,6 +3039,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2870,8 +3055,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_24",
@@ -2887,6 +3071,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2902,8 +3087,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_20",
@@ -2919,6 +3103,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2934,8 +3119,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_16",
@@ -2951,6 +3135,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2966,8 +3151,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_12",
@@ -2983,6 +3167,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -2998,8 +3183,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_8",
@@ -3015,6 +3199,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -3030,8 +3215,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_4",
@@ -3047,6 +3231,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -3062,8 +3247,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_0",
@@ -3079,6 +3263,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -3094,8 +3279,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       }
     ],
     "total": 15
@@ -3116,6 +3300,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -3131,8 +3316,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_25",
@@ -3148,6 +3332,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -3163,8 +3348,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       },
       {
         "id": "iss_hotspot_5",
@@ -3180,6 +3364,7 @@
         "creator_type": "member",
         "creator_id": "usr_pughmr0aj2qa",
         "parent_issue_id": null,
+        "responsible_member_id": "mem_local_usr_pughmr0aj2qa",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -3195,8 +3380,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "labels": [],
-        "responsible_member_id": "mem_local_usr_pughmr0aj2qa"
+        "labels": []
       }
     ],
     "total": 3

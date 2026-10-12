@@ -573,6 +573,15 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   // what it was measured on: async work a handler starts without awaiting inherits the scope
   // through AsyncLocalStorage, and outside these routes nobody has checked what such work reads.
   app.use("/api/daemon/*", async (_c, next) => withRequestReadCache(() => next()));
+  // These read-only first-screen routes share the workspace existence fact
+  // carried by their Issue lookup. Other Issue routes can enqueue background
+  // work and deliberately do not inherit this request cache.
+  app.use("/api/issues/*", async (c, next) => {
+    if (c.req.method === "GET" && /^\/api\/issues\/[^/]+(?:\/sessions|\/timeline)?$/.test(c.req.path)) {
+      return withRequestReadCache(() => next());
+    }
+    await next();
+  });
   app.use("*", cors());
   // Server-rendered dashboard removed in D11 — the UI is now the Next.js app in frontend/.
   app.get("/", (c) => c.json({ service: "multiremi-api", ui: "frontend/apps/web" }));
@@ -639,6 +648,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
       if (accessToken.type === "daemon" && !isDaemonTokenAllowedRequest(c.req.raw)) {
         return c.json({ error: "forbidden for daemon token" }, 403);
       }
+      if (accessToken.type === "daemon") c.set("multiremiVerifiedDaemonWorkspaceId", accessToken.workspaceId);
       if (accessToken.type === "task") {
         const denyCategory = taskTokenHardDenyCategory(c.req.raw);
         if (denyCategory) {
@@ -687,6 +697,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
         if (accessToken.type === "daemon" && !isDaemonTokenAllowedRequest(c.req.raw)) {
           return c.json({ error: "forbidden for daemon token" }, 403);
         }
+        if (accessToken.type === "daemon") c.set("multiremiVerifiedDaemonWorkspaceId", accessToken.workspaceId);
         if (accessToken.type === "task") {
           const denyCategory = taskTokenHardDenyCategory(c.req.raw);
           if (denyCategory) {

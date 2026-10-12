@@ -104,15 +104,15 @@ describe("CallbackPage", () => {
   // to the /onboarding wizard. An un-onboarded user with no pending invitations
   // and no workspace therefore lands on the create-workspace page. See
   // `@multiremi/core/paths/resolve.ts` (and its resolve.test.ts).
-  it("unonboarded user with no next= and no pending invitations lands on /workspaces/new", async () => {
+  it("new account without a workspace lands on /workspaces/new", async () => {
     render(<CallbackPage />);
     await waitFor(() => {
       expect(mockPush).toHaveBeenCalledWith(paths.newWorkspace());
     });
-    expect(mockListMyInvitations).toHaveBeenCalled();
+    expect(mockListMyInvitations).not.toHaveBeenCalled();
   });
 
-  it("unonboarded user with pending invitations lands on /invitations", async () => {
+  it("ignores retired invitations when choosing the default destination", async () => {
     mockListMyInvitations.mockResolvedValue([
       {
         id: "inv-1",
@@ -124,7 +124,8 @@ describe("CallbackPage", () => {
     ]);
     render(<CallbackPage />);
     await waitFor(() => {
-      expect(mockPush).toHaveBeenCalledWith(paths.invitations());
+      expect(mockPush).toHaveBeenCalledWith(paths.newWorkspace());
+      expect(mockListMyInvitations).not.toHaveBeenCalled();
     });
   });
 
@@ -151,8 +152,7 @@ describe("CallbackPage", () => {
     await waitFor(() => {
       expect(mockPush).toHaveBeenCalledWith(paths.workspace("acme").issues());
     });
-    // Already-onboarded users skip the listMyInvitations check; new invites
-    // surface in the sidebar instead of the wall.
+    // Workspace access no longer depends on invitations.
     expect(mockListMyInvitations).not.toHaveBeenCalled();
   });
 

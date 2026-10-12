@@ -218,7 +218,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       expect(store.getIssueWorkspace(issue.id)?.status).toBe("ready");
     });
 
-    it("enforces Issue write permissions for cross-workspace credentials, nonmembers and daemons", async () => {
+    it("shares human Issue writes while rejecting cross-workspace credentials and daemons", async () => {
       const source = runtime();
       const issue = issueOn(source.id);
       db.run("UPDATE multiremi_issue_workspaces SET runtime_id = NULL, status = 'runtime_offline' WHERE issue_id = ?", [issue.id]);
@@ -231,14 +231,16 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       const daemon = await store.createAccessToken({ type: "daemon", workspaceId, daemonId: "other-daemon", name: "Daemon" });
       const app = createMultiremiApp({ store, authToken: "mul467-root" });
       const path = `/api/issues/${issue.id}/workspace/abandon`;
-      for (const [credential, expectedStatus] of [[deniedUser, 404], [crossWorkspace, 404], [daemon, 403]] as const) {
+      for (const [credential, expectedStatus] of [[crossWorkspace, 404], [daemon, 403]] as const) {
         const response = await app.request(path, { method: "POST", headers: { Authorization: `Bearer ${credential.token}` } });
         expect(response.status).toBe(expectedStatus);
         expect(store.getIssueWorkspace(issue.id)?.status).toBe("runtime_offline");
       }
       expect(store.abandonIssueWorkspace(issue.id, "local")).toEqual({ status: "not_found" });
-      const response = await app.request(path, { method: "POST", headers: { Authorization: `Bearer ${allowed.token}` } });
-      expect(response.status).toBe(200);
+      for (const credential of [deniedUser, allowed]) {
+        const response = await app.request(path, { method: "POST", headers: { Authorization: `Bearer ${credential.token}` } });
+        expect(response.status).toBe(200);
+      }
       assertNoOrphanedWorkspaces();
     });
   });

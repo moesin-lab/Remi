@@ -25,12 +25,12 @@ it("binds native credentials to the requester across identity aliases and token 
     const { token } = await response.json();
     expect(token.userId).toBe(alice.id);
     if (token.type === "pat") {
-      expect((await app.request(`/api/workspaces/${b.id}`, { headers: { Authorization: `Bearer ${token.token}` } })).status).toBe(404);
+      expect((await app.request(`/api/workspaces/${b.id}`, { headers: { Authorization: `Bearer ${token.token}` } })).status).toBe(200);
     }
   }
 });
 
-it("lets a historical local login session access only workspaces it belongs to", async () => {
+it("lets a historical local login session share workspaces while legacy workspace PATs stay bound", async () => {
   const store = createLocalStore();
   const mine = store.createWorkspace({ name: "Mine", slug: "mine" }, "local");
   const other = store.getOrCreateUser({ email: "other@example.invalid", name: "Other" });
@@ -44,9 +44,9 @@ it("lets a historical local login session access only workspaces it belongs to",
       : await store.createAccessToken({ workspaceId: "local", userId: "local", name: purpose, type: "pat", purpose });
     const headers = { Authorization: `Bearer ${token.token}` };
     expect((await app.request(`/api/workspaces/${mine.id}`, { headers })).status).toBe(purpose === "session" ? 200 : 404);
-    expect((await app.request(`/api/workspaces/${theirs.id}`, { headers })).status).toBe(404);
+    expect((await app.request(`/api/workspaces/${theirs.id}`, { headers })).status).toBe(purpose === "session" ? 200 : 404);
     expect((await app.request("/api/multiremi/runtimes/rt_mine", { headers })).status).toBe(purpose === "session" ? 200 : 404);
-    expect((await app.request("/api/multiremi/runtimes/rt_theirs", { headers })).status).toBe(404);
+    expect((await app.request("/api/multiremi/runtimes/rt_theirs", { headers })).status).toBe(purpose === "session" ? 200 : 404);
   }
 });
 

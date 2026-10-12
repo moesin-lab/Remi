@@ -66,4 +66,36 @@ describe("IssueSessionsRepo", () => {
     repo.removeSessionParticipant(session.id, "agent", agent.id);
     expect(repo.listSessionParticipants(session.id)).toEqual([]);
   });
+
+  it("shares human participation while preserving historical rows and independent Agent state", () => {
+    const repo = createRepo();
+    const issue = createResponsibleTestIssue(store!, { title: "Shared participants", workspaceId: "local" });
+    const session = repo.getOrCreateDefaultIssueSession(issue.id);
+    const first = store!.createWorkspaceMember({ name: "Historical A", userId: "old-a" });
+    const second = store!.createWorkspaceMember({ name: "Historical B" });
+    const agent = store!.createAgent({ name: "Independent participant", provider: "codex" });
+    repo.addSessionParticipant(session.id, { participantType: "agent", participantId: agent.id });
+    for (const member of [first, second]) db!.run(`INSERT INTO multiremi_session_participants
+      (id,session_id,participant_type,participant_id,role,status,joined_at,updated_at)
+      VALUES(?,?,'member',?,'participant','active',?,?)`, [`spart_${member.id}`, session.id, member.userId ?? member.id,
+        "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]);
+    const history = repo.listSessionParticipants(session.id, true);
+    const shared = repo.listSessionParticipants(session.id);
+    expect(shared.filter(row => row.participantType === "member").map(row => row.participantId)).toEqual(["local"]);
+    expect(repo.listSessionParticipantsForSessions([session.id]).get(session.id)).toEqual(shared);
+    expect(repo.listSessionParticipantsForSessions([session.id], true).get(session.id)).toEqual(history);
+    const elsewhere = store!.createWorkspace({ name: "Other workspace" });
+    const outside = store!.getWorkspaceOperator(elsewhere.id)!;
+    expect(() => repo.removeSessionParticipant(session.id, "member", outside.id)).toThrow("another workspace");
+    expect(repo.listSessionParticipants(session.id, true)).toEqual(history);
+    repo.removeSessionParticipant(session.id, "member", first.id);
+    expect(repo.listSessionParticipants(session.id).map(row => row.participantId)).toEqual([agent.id]);
+    expect(repo.listSessionParticipants(session.id, true).filter(row => row.participantType === "member")
+      .map(row => ({ id: row.participantId, status: row.status })).sort((a,b) => a.id.localeCompare(b.id))).toEqual([
+        { id: "old-a", status: "left" }, { id: second.id, status: "left" },
+      ].sort((a,b) => a.id.localeCompare(b.id)));
+    repo.addSessionParticipant(session.id, { participantType: "member", participantId: second.id });
+    expect(repo.listSessionParticipants(session.id).filter(row => row.participantType === "member").map(row => row.participantId)).toEqual(["local"]);
+    expect(repo.listSessionParticipants(session.id, true).filter(row => row.participantType === "member")).toHaveLength(3);
+  });
 });

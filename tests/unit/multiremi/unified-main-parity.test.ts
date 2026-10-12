@@ -144,20 +144,25 @@ pendingTurnBackendTests('MUL-508 main parity', fixture => {
     const input={body_md:'Author audit',message_kind:'report',authorType:'agent',authorId:f.controller.id,to:{type:'none'}};
     expect((await f.request(path,input,'parity-master')).data.message).toMatchObject({sender_type:'agent',sender_id:f.controller.id});
     const user=f.store.getOrCreateUser({externalId:'parity-member',name:'Member'});
-    const member=f.store.createWorkspaceMember({userId:user.id,name:user.name,role:'member'});
+    f.store.createWorkspaceMember({userId:user.id,name:user.name,role:'member'});
     const pat=await f.store.createAccessToken({type:'pat',name:'Member',workspaceId:'local',userId:user.id,purpose:'session'});
-    expect((await f.request(path,input,pat.token)).data.message).toMatchObject({sender_type:'member',sender_id:member.id});
+    expect((await f.request(path,input,pat.token)).data.message).toMatchObject({sender_type:'member',sender_id:f.store.getWorkspaceOperator('local')!.id});
   });
 
-  it('#6: private agent metadata stays readable while its input and trace stay protected',async()=>{
+  it('#6: historical private Agent input and trace are shared with humans but protected from other tasks',async()=>{
     const f=await scaffold();f.store.updateAgent(f.worker.id,{visibility:'private',ownerId:'another-user'});
     const user=f.store.getOrCreateUser({externalId:'reader',name:'Reader'});
     f.store.createWorkspaceMember({userId:user.id,name:user.name,role:'member'});
     const pat=await f.store.createAccessToken({type:'pat',name:'Reader',workspaceId:'local',userId:user.id,purpose:'session'});
     expect((await f.request(`/api/turns/${f.turn.id}`,undefined,pat.token)).status).toBe(200);
-    expect((await f.request(`/api/turns/${f.turn.id}?input=true`,undefined,pat.token)).status).toBe(403);
-    expect((await f.request(`/api/turns/${f.turn.id}/trace`,undefined,pat.token)).status).toBe(404);
+    expect((await f.request(`/api/turns/${f.turn.id}?input=true`,undefined,pat.token)).status).toBe(200);
+    expect((await f.request(`/api/turns/${f.turn.id}/trace`,undefined,pat.token)).status).toBe(200);
     expect((await f.request('/api/turns?limit=500',undefined,pat.token)).data.turns.map((row:any)=>row.id)).toContain(f.turn.id);
+    // Use the same account for both credential kinds. A task must not inherit
+    // the human PAT's shared operator rights or the fixture's local admin grant.
+    const taskCredential=await f.store.createTaskAccessToken(f.patrol,user.id);
+    expect((await f.request(`/api/turns/${f.turn.id}?input=true`,undefined,taskCredential.token)).status).toBe(403);
+    expect((await f.request(`/api/turns/${f.turn.id}/trace`,undefined,taskCredential.token)).status).toBe(404);
   });
 
   it('#10: runtime/all serve turn traces while the UI role retains 421',async()=>{
@@ -235,8 +240,9 @@ pendingTurnBackendTests('MUL-508 main parity', fixture => {
     const other=store.getOrCreateUser({name:'Other reader',email:'other-chat@example.test'});
     store.createWorkspaceMember({name:'Other reader',userId:other.id});
     const token=await store.createAccessToken({name:'Other reader',type:'pat',workspaceId:'local',userId:other.id});
-    const denied=await app.request('/api/inbox/read',{method:'POST',headers:{Authorization:`Bearer ${token.token}`,'Content-Type':'application/json'},body:JSON.stringify({session_id:chat.id})});
-    expect(denied.status).toBe(403);
+    const shared=await app.request('/api/inbox/read',{method:'POST',headers:{Authorization:`Bearer ${token.token}`,'Content-Type':'application/json'},body:JSON.stringify({session_id:chat.id})});
+    expect(shared.status).toBe(200);
+    expect(store.getChatSession(chat.id)?.unreadCount).toBe(0);
   });
 
   it('#6: restricted delegation inherits the source Turn even when a pending lane already exists',async()=>{

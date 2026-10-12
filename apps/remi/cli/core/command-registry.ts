@@ -91,6 +91,7 @@ interface RegisteredPath {
 }
 
 const TASK_PARITY_DENIED_COMMAND_IDS = new Set([
+  "workspace.operator",
   "issue.responsibility-unassigned.list",
   "issue.responsibility-unassigned.map",
   "issue.responsible.set",
@@ -162,6 +163,7 @@ const TASK_PARITY_DENIED_COMMAND_IDS = new Set([
 ]);
 
 const TASK_PARITY_DENIED_COMMAND_PREFIXES = [
+  "account.",
   "billing.",
   "context.auth.",
   "feishu.chat.",

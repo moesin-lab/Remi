@@ -2044,7 +2044,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(store.claimTask(anyRuntime.id)?.id).toBe(thirdTask.id);
   });
 
-  it("keeps private runtimes from claiming other members' agent tasks", () => {
+  it("shares historical private Runtimes across Agent owners within the workspace", () => {
     const store = createStore();
     const bobPrivate = store.registerRuntime({
       id: "rt_own_bob_private",
@@ -2066,23 +2066,23 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const issueA = createResponsibleTestIssue(store, { title: "alice a", workspaceId: "local" });
     const task = store.createTask({ agentId: aliceAgent.id, issueId: issueA.id, prompt: "alice work", workspaceId: "local" });
 
-    // Bob's private machine must not receive alice's agent (custom_env /
-    // mcp_config ride along with a claim); his public one may.
-    expect(store.claimTask(bobPrivate.id)).toBeNull();
-    expect(store.claimTask(bobPublic.id)?.id).toBe(task.id);
+    expect(store.claimTask(bobPrivate.id)?.id).toBe(task.id);
+    store.startTask(task.id);
+    store.completeTask(task.id, { output: "done" });
 
-    // A stamp is NOT an escape hatch: the unauthenticated /tasks API lets any
-    // member stamp an arbitrary agent+runtime, so bob stamping alice's private
-    // agent to his own private runtime must still be refused at claim time.
+    // Explicit Runtime placement still selects that machine within the workspace.
     const issueB = createResponsibleTestIssue(store, { title: "alice b", workspaceId: "local" });
-    store.createTask({
+    const pinned = store.createTask({
       agentId: aliceAgent.id,
       issueId: issueB.id,
       prompt: "stamped-steal",
       workspaceId: "local",
       runtimeId: bobPrivate.id,
     });
-    expect(store.claimTask(bobPrivate.id)).toBeNull();
+    expect(store.claimTask(bobPublic.id)).toBeNull();
+    expect(store.claimTask(bobPrivate.id)?.id).toBe(pinned.id);
+    store.startTask(pinned.id);
+    store.completeTask(pinned.id, { output: "done" });
 
     // Bob's own agents still flow to his private machine.
     const bobAgent = store.createAgent({ name: "Bob codex", provider: "codex", workspaceId: "local", ownerId: "bob" });
@@ -2090,7 +2090,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(store.claimTask(bobPrivate.id)?.id).toBe(bobTask.id);
   });
 
-  it("pairs an owner-null private runtime with local agents but not multi-user ones", () => {
+  it("pairs an owner-null historical private Runtime with all workspace Agents", () => {
     const store = createStore();
     // Single-machine shape: runtime registered without auth (owner null),
     // default agent owner "local" — must still pair.
@@ -2103,11 +2103,10 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     store.startTask(localTask.id);
     store.completeTask(localTask.id, { output: "done" });
 
-    // Multi-user shape: a real member's agent must NOT be swept up by the same
-    // owner-null private runtime.
+    // Historical human ownership does not divide the workspace execution fleet.
     const aliceAgent = store.createAgent({ name: "Alice codex", provider: "codex", ownerId: "alice" });
-    store.createTask({ agentId: aliceAgent.id, prompt: "alice work" });
-    expect(store.claimTask(localRuntime.id)).toBeNull();
+    const aliceTask = store.createTask({ agentId: aliceAgent.id, prompt: "alice work" });
+    expect(store.claimTask(localRuntime.id)?.id).toBe(aliceTask.id);
   });
 
   it("re-pools and abandons the session when the chat runtime can no longer run the agent", () => {
@@ -2289,7 +2288,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(store.claimTask(codexB.id)?.id).toBe(followUp.id);
   });
 
-  it("re-pools a queued task when its pinned runtime turns private under another owner", () => {
+  it("preserves queued Chat placement when its Runtime historical visibility changes", () => {
     const store = createStore();
     const shared = store.registerRuntime({ id: "rt_flip", name: "shared", provider: "codex", ownerId: "bob", visibility: "public" });
     const codexOther = store.registerRuntime({ id: "rt_flip_other", name: "other", provider: "codex" });
@@ -2302,12 +2301,11 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const followUp = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "again" });
     expect(followUp.runtimeId).toBe(shared.id);
 
-    // Bob makes the runtime private → alice's pinned task must re-pool, not hang.
+    // Historical visibility does not invalidate the provider session's machine.
     store.updateRuntime(shared.id, { visibility: "private" });
-    expect(store.getTask(followUp.id)?.runtimeId).toBeNull();
-    // codexOther (owner null → 'local' ... vs alice) can't run it, but a public
-    // machine could; here it stays unclaimable by the now-private one.
-    expect(store.claimTask(shared.id)).toBeNull();
+    expect(store.getTask(followUp.id)?.runtimeId).toBe(shared.id);
+    expect(store.claimTask(codexOther.id)).toBeNull();
+    expect(store.claimTask(shared.id)).toMatchObject({ id: followUp.id, sessionId: "sess_flip", workDir: "/tmp/flip" });
   });
 
   it("keeps a NULL-workspace runtime from claiming other workspaces' tasks", () => {

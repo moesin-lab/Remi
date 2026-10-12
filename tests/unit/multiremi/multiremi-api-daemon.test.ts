@@ -235,6 +235,7 @@ describe("Multiremi API — daemon endpoints", () => {
 
   it("serves Multiremi daemon install commands and mints daemon tokens", async () => {
     const store = createStore();
+    store.createWorkspace({ id: "ws_1", name: "Install target", slug: "install-target" });
     const app = createMultiremiApp({ store });
 
     const preview = await app.request("/api/multiremi/install/daemon?server_url=https%3A%2F%2Fremi.example&workspace_id=ws_1&token=tok_123&provider=codex&version=v1.2.3");
@@ -335,7 +336,7 @@ describe("Multiremi API — daemon endpoints", () => {
     });
   });
 
-  it("does not let a workspace member choose a daemon identity", async () => {
+  it("lets a shared human operator provision a new account-bound daemon identity", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "daemon-member", userId: "daemon-member", name: "Daemon Member", role: "member" });
     const memberToken = await store.createAccessToken({
@@ -356,17 +357,15 @@ describe("Multiremi API — daemon endpoints", () => {
       body: JSON.stringify({
         workspace_id: "local",
         daemon_id: "member-chosen-daemon",
-        token_name: "Must not be created",
+        token_name: "Shared operator daemon",
       }),
     });
 
-    expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({ code: "workspace_admin_required" });
-    expect(store.listAccessTokens("local").map((token) => token.id)).toEqual(tokenIdsBefore);
-    expect(store.getDaemonIdentityOwnerUserId("local", "member-chosen-daemon")).toBeNull();
-    expect(
-      store.listDaemonInventory("local").some((entry) => entry.daemonId === "member-chosen-daemon"),
-    ).toBe(false);
+    expect(response.status).toBe(201);
+    const created = await response.json();
+    expect(store.listAccessTokens("local")).toHaveLength(tokenIdsBefore.length + 1);
+    expect(store.getAccessToken(created.tokenId)).toMatchObject({ type: "daemon", userId: "daemon-member", daemonId: "member-chosen-daemon" });
+    expect(store.getDaemonIdentityOwnerUserId("local", "member-chosen-daemon")).toBe("daemon-member");
   });
 
   it("lets a workspace member provision an owner-bound daemon that can register and read desired plugins", async () => {
@@ -791,7 +790,7 @@ describe("Multiremi API — daemon endpoints", () => {
     expect(store.getRuntime(runtimeId)).toMatchObject({ daemonId, ownerId: "legacy-owner" });
   });
 
-  it("requires admin recovery for ownerless daemons and rejects human Runtime spoofing", async () => {
+  it("allows shared operator recovery for ownerless daemons and rejects spoofing a bound Runtime", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "runtime-attacker", userId: "runtime-attacker", name: "Runtime attacker", role: "member" });
     store.createWorkspaceMember({ id: "runtime-victim", userId: "runtime-victim", name: "Runtime victim", role: "member" });
@@ -832,9 +831,8 @@ describe("Multiremi API — daemon endpoints", () => {
         runtimes: [{ type: "claude", name: "TAKEN OVER" }],
       }),
     });
-    expect(ownerlessTakeover.status).toBe(403);
-    expect(await ownerlessTakeover.json()).toMatchObject({ code: "daemon_owner_recovery_required" });
-    expect(store.getDaemonIdentityOwnerUserId("local", "daemon-ownerless-recovery")).toBeNull();
+    expect(ownerlessTakeover.status).toBe(200);
+    expect(store.getDaemonIdentityOwnerUserId("local", "daemon-ownerless-recovery")).toBe("runtime-attacker");
     expect(store.getRuntime(ownerless.id)?.name).toBe("Ownerless recovery Runtime");
 
     const spoof = await app.request("/api/multiremi/runtimes", {
@@ -860,7 +858,7 @@ describe("Multiremi API — daemon endpoints", () => {
     expect(await humanHeartbeat.json()).toMatchObject({ code: "daemon_token_required" });
   });
 
-  it("requires daemon retirement before its owner leaves the workspace", async () => {
+  it("revokes retired daemon tokens while historical member archival does not revoke login accounts", async () => {
     const store = createStore();
     const member = store.createWorkspaceMember({ id: "removed-daemon-owner", userId: "removed-daemon-owner", name: "Removed owner", role: "member" });
     const memberToken = await store.createAccessToken({
@@ -967,9 +965,9 @@ describe("Multiremi API — daemon endpoints", () => {
         runtimes: [{ type: "claude" }],
       }),
     });
-    expect(rejectedUnboundDaemon.status).toBe(403);
-    expect(store.getAccessToken(unboundDaemonToken.id)?.daemonId).toBeNull();
-    expect(store.getDaemonIdentityOwnerUserId("local", "daemon-removed-unbound")).toBeNull();
+    expect(rejectedUnboundDaemon.status).toBe(200);
+    expect(store.getAccessToken(unboundDaemonToken.id)?.daemonId).toBe("daemon-removed-unbound");
+    expect(store.getDaemonIdentityOwnerUserId("local", "daemon-removed-unbound")).toBe(member.id);
 
     const rejectedPersonal = await app.request("/api/daemon/register", {
       method: "POST",
@@ -980,10 +978,10 @@ describe("Multiremi API — daemon endpoints", () => {
         runtimes: [{ type: "codex" }],
       }),
     });
-    expect(rejectedPersonal.status).toBe(403);
+    expect(rejectedPersonal.status).toBe(200);
     expect(store.listRuntimes().some((runtime) => runtime.daemonId === "daemon-removed-personal"))
-      .toBe(false);
-    expect(store.getDaemonIdentityOwnerUserId("local", "daemon-removed-personal")).toBeNull();
+      .toBe(true);
+    expect(store.getDaemonIdentityOwnerUserId("local", "daemon-removed-personal")).toBe(member.id);
 
     const legacyRegister = await app.request("/api/daemon/register", {
       method: "POST",
@@ -994,8 +992,8 @@ describe("Multiremi API — daemon endpoints", () => {
         runtimes: [{ type: "codex" }],
       }),
     });
-    expect(legacyRegister.status).toBe(404);
-    expect(store.getAccessToken(legacyToken.id)).toMatchObject({ type: "pat", purpose: "cli" });
+    expect(legacyRegister.status).toBe(200);
+    expect(store.getAccessToken(legacyToken.id)).toMatchObject({ type: "daemon", daemonId: "daemon-removed-legacy", userId: member.id });
   });
 
   it("keeps one daemon id bound to one owner while allowing same-owner providers and tokens", async () => {

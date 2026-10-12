@@ -294,20 +294,18 @@ describe("MUL-417 daemon protocol layer — per-runtime authorization", () => {
     expect(session.unavailableRuntimeIds).toEqual([]);
   });
 
-  it("closes 4401 when the daemon owner is not a workspace member", async () => {
+  it("accepts the bound daemon credential without historical human membership", async () => {
     const { store } = fixture();
     store.registerRuntime({ id: "rt_own", name: "own", provider: "codex", daemonId: "dmn_a", workspaceId: "local" });
-    // A daemon credential whose owner has no membership: the token itself is
-    // valid and bound to the right daemon, so this is purely the membership
-    // rule, which is the one that used to answer HTTP 403.
+    // Machine authority comes from the credential and daemon binding.
     const token = await store.createAccessToken({
       name: "daemon a", type: "daemon", workspaceId: "local", daemonId: "dmn_a", userId: "ghost-1",
     });
     expect(store.getUserRoleInWorkspace("ghost-1", "local")).toBeNull();
     const layer = new DaemonProtocolLayer({ store, serverVersion: "0.2.83" });
     const { socket } = await runHello(layer, { daemonId: "dmn_a", runtimeIds: ["rt_own"], accessToken: token });
-    expect(socket.lastOfType("welcome")).toBeNull();
-    expect(socket.closed[0]!.code).toBe(DAEMON_PROTOCOL_CLOSE_CODES.authority_revoked);
+    expect(socket.lastOfType("welcome")).not.toBeNull();
+    expect(socket.closed).toEqual([]);
   });
 
   it("closes 4410 for a retired daemon even on the master credential", async () => {
@@ -320,7 +318,7 @@ describe("MUL-417 daemon protocol layer — per-runtime authorization", () => {
     expect(socket.closed[0]!.code).toBe(DAEMON_PROTOCOL_CLOSE_CODES.daemon_retired);
   });
 
-  it("closes 4401 mid-connection when the owner loses membership at the next heartbeat", async () => {
+  it("retains a daemon after historical member archival but revokes it when its workspace disappears", async () => {
     const { store } = fixture();
     store.registerRuntime({ id: "rt_own", name: "own", provider: "codex", daemonId: "dmn_a", workspaceId: "local" });
     const token = await store.createAccessToken({
@@ -352,13 +350,15 @@ describe("MUL-417 daemon protocol layer — per-runtime authorization", () => {
     await session.handleMessage(JSON.stringify({ v: 2, t: "hb", ts: 2, p: { active_task_count: 0 } }));
     expect(session.isClosed).toBe(false);
 
-    // The store refuses to archive a member who still owns a live daemon (that
-    // invariant is what keeps the two in step), so the removal is simulated the
-    // way it actually arrives: out of band, while the socket is already open.
+    // Historical human rows do not control an already bound machine credential.
     databaseFor(store).run("UPDATE multiremi_workspace_members SET archived_at = ? WHERE user_id = 'owner-1'", [new Date().toISOString()]);
     expect(store.getUserRoleInWorkspace("owner-1", "local")).toBeNull();
 
     await session.handleMessage(JSON.stringify({ v: 2, t: "hb", ts: 3, p: { active_task_count: 0 } }));
+    expect(session.isClosed).toBe(false);
+
+    databaseFor(store).run("DELETE FROM multiremi_workspaces WHERE id = 'local'");
+    await session.handleMessage(JSON.stringify({ v: 2, t: "hb", ts: 4, p: { active_task_count: 0 } }));
     expect(session.isClosed).toBe(true);
     expect(socket.closed.at(-1)!.code).toBe(DAEMON_PROTOCOL_CLOSE_CODES.authority_revoked);
   });

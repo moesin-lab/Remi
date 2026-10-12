@@ -71,9 +71,9 @@ for (const backend of ["SQLite", "Postgres"] as const) {
       const workspace = store.createWorkspace({ name: `MUL487 ${n}`, slug: `mul487-${n}` });
       const workspaceId = workspace.id;
       const recipient = `ou_mul487_${n}`;
-      const member = store.listWorkspaceMembers(workspaceId).find(item => item.role === "owner")!;
       const user = store.getOrCreateUser({ externalId: recipient, name: "Token recipient", email: `mul487-${n}@example.com` });
-      db.run("UPDATE multiremi_workspace_members SET user_id = ? WHERE id = ?", [user.id, member.id]);
+      const member = store.createWorkspaceMember({ workspaceId, userId: user.id, name: user.name });
+      expect(store.getWorkspaceOperator(workspaceId)?.userId).toBe("local");
       seedQuestionHumanMapping(db, workspaceId, 'cli_mul487', user.id, recipient);
       const agent = store.createAgent({ name: "Question bot", provider: "codex", workspaceId });
       const runtimeId = `rt_mul487_${n}`;
@@ -463,6 +463,7 @@ for (const backend of ["SQLite", "Postgres"] as const) {
           body_md: "No", response: { answers: { "Continue?": "No" } } }),
       });
       expect(frResponse.status).toBe(200);
+      expect(store.getQuestion(fr.request.id)?.answer?.actor).toEqual({ type: "member", id: store.getWorkspaceOperator(fr.workspaceId)!.id });
       const fd = await setup("fd");
       const memberToken = await store.createAccessToken({ name: "Member answer", type: "pat", workspaceId: fd.workspaceId, userId: fd.user.id });
       const fdResponse = await fd.api.request(`/api/messages/${fd.request.id}/question/answer`, {
@@ -470,6 +471,7 @@ for (const backend of ["SQLite", "Postgres"] as const) {
         body: JSON.stringify({ expected_route_revision: store.getQuestion(fd.request.id)!.route_revision, body_md: "No", response: { answer: 'No' } }),
       });
       expect(fdResponse.status).toBe(200);
+      expect(store.getQuestion(fd.request.id)?.answer?.actor).toEqual({ type: "member", id: store.getWorkspaceOperator(fd.workspaceId)!.id });
       expect(fd.row().status).toBe("answered");
       expect(typeof fd.row().token_consumed_at).toBe('string');
       expect((await fd.respond()).status).toBe(403);

@@ -1,5 +1,5 @@
 {
-  "dataSchema": "739b3ad98e4970231f23355e9ffa6867e92c58ab63fa59d5160c9c447ab79d31",
+  "dataSchema": "ae57926e0b89f41ba25478061bbb6d395b10629633c4940ef0fb3556a6dfa789",
   "rollbackSafeFrom": [],
   "reason": "The unified message, turn and lane model changes the storage contract. Shared workspace operators add workspace/session read cursors and migrate active human Question routes while preserving historical receipts and completed audit records. No earlier schema fingerprint is attested for code-only rollback. Existing legacy deployments require the controlled cutover in docs/deploy/unified-model-cutover.md; publishing this bundle does not authorize a production migration. Same-schema updates still require backup verification and target/previous migration rehearsal."
 }

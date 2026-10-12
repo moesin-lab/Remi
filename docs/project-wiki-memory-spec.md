@@ -23,6 +23,8 @@ summary: 当前知识存储、按需读取、任务 Wiki 工作副本、发布�
 
 发布权来自[平台能力配置](../packages/server/src/knowledge/capability.ts)：角色至少为 maintainer，且绑定并启用了允许的 `code-to-wiki` 插件。显示名称不授予权限；代码中的 Atlas 发布流程也受此检查。任务 token 绑定的 issue/project/repository 范围必须匹配目标。
 
+Repository Wiki 连续受阻告警沿用自动化运行结果通知；当历史创建者不可解析时，由工作区共享操作者接收。每次告警事件只生成一条通知，不按历史管理员复制；后续失败运行保留各自的运行引用和告警。行为由 [结构化结果回归](../tests/unit/multiremi/repository-wiki-outcome.test.ts)覆盖。
+
 ## Agent 实际读取流程
 
 [任务提示词](../packages/daemon/src/agent-runtime/prompts/ephemeral.ts)的 `appendProjectKnowledgeSections` 给出按需读取入口：

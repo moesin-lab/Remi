@@ -5845,7 +5845,13 @@ ${placementAfter.sql}
     if (parent.chatSessionId && !parent.issueId && input.resetProviderSession) {
       const agent = this.ctx.agents().getAgent(parent.agentId);
       const chat = this.ctx.chat().getChatSession(parent.chatSessionId);
-      if (agent && chat) {
+      // A cold provider session can still own Runtime-local credentials. Keep
+      // their validated host pin while the Chat workspace lineage is current;
+      // changed workspace assignments must keep using the rerouting path.
+      const retainsRuntimeProfile = input.runtimeId && input.executionFingerprint
+        && (input.codexProfile || input.claudeProfile)
+        && chatWorkspaceLineageCurrent(this.ctx, chat, parent);
+      if (agent && chat && !retainsRuntimeProfile) {
         const coldChat = { ...chat, sessionId: null, workDir: null, sessionRuntimeId: null };
         input = { ...input, runtimeId: this.resolveTaskAffinity(agent, coldChat, null,
           parent.holdsWorkspace, input.executionFingerprint ?? "", Boolean(parent.pluginSnapshot?.length)).runtimeId };
@@ -6648,12 +6654,10 @@ ${placementAfter.sql}
           : autopilot.title;
         const title = wikiAlert ? `Wiki blocked ${wikiAlert.count} consecutive runs · ${baseTitle}` : baseTitle;
         const recipients = this.ctx.resolveAutopilotNotificationRecipients(autopilot);
-        // Seeded/orphaned automations may have no resolvable creator. A Wiki
-        // health alert must still reach the workspace's human administrators.
+        // Seeded/orphaned automations still notify the shared operator once.
         if (wikiAlert && recipients.length === 0) {
-          recipients.push(...this.ctx.workspaces().listWorkspaceMembers(autopilot.workspaceId)
-            .filter(member => !member.archivedAt && (member.role === "owner" || member.role === "admin"))
-            .map(member => member.id));
+          const operator = this.ctx.workspaces().getWorkspaceOperator(autopilot.workspaceId);
+          if (operator) recipients.push(operator.id);
         }
         for (const recipientId of recipients) {
           if (runStatus === "completed") {

@@ -130,7 +130,6 @@ export const MUL449_CLAIM_SQL_GOLDEN = String.raw`UPDATE multiremi_turn_executio
                AND gm.workspace_id = a.workspace_id AND gm.group_id = a.execution_group_id
            ))
            AND (? = 'any' OR a.provider = ?)
-           AND (? = 'public' OR COALESCE(CAST(? AS TEXT), 'local') = COALESCE(a.owner_id, 'local'))
            AND NOT EXISTS (
              SELECT 1
              FROM multiremi_task_plugin_snapshots task_plugin

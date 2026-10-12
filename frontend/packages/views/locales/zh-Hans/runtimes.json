@@ -143,7 +143,7 @@
     "manage_only_title": "无权管理 SSH 互联",
     "manage_only_hint": "只有工作区所有者和管理员可以查看或修改 SSH 互联。",
     "permission_load_failed_title": "无法确认 SSH 互联权限",
-    "permission_load_failed_hint": "无法读取工作区成员信息，请检查连接后重试。",
+    "permission_load_failed_hint": "无法读取工作区信息，请检查连接后重试。",
     "load_failed_title": "无法读取 SSH 互联",
     "load_failed_hint": "请检查服务端连接后重试。",
     "retry": "重试",

@@ -1284,6 +1284,8 @@ describe("MUL-400 E2 — child endings notify the parent owner", () => {
     const items = store.listInboxItems(subscriber.id).filter((item) => item.type === "child_issue_terminal");
     expect(items).toHaveLength(1);
     expect(items[0]?.severity).toBe("warning");
+    expect(items[0]?.id).toBe(childStatusMessages(store, parent.id)[0]!.id);
+    expect(items[0]?.memberId).toBe(store.getWorkspaceOperator("local")!.id);
     expect(items[0]?.details).toMatchObject({ outcome: "blocked", noAssignee: true } as Record<string, unknown>);
   });
 });

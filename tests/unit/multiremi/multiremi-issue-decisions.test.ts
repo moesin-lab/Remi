@@ -317,7 +317,7 @@ async function exerciseAnsweredWindow(store: MultiremiStore): Promise<void> {
   expect(merges.some((entry) => entry.id === decisions[1]!.id)).toBe(true);
 }
 
-/** Explicit contacts keep private routing; missing contacts use the workspace review queue. */
+/** Historical contacts do not partition the shared human question handler or inbox. */
 async function exerciseDecisionRecipientFallback(store: MultiremiStore): Promise<void> {
   store.ensureLocalWorkspace();
   const workspaceOwner = store.getWorkspaceMember('mem_local_local')!;
@@ -341,7 +341,8 @@ async function exerciseDecisionRecipientFallback(store: MultiremiStore): Promise
     return store.getQuestion(String(created.message_id))!;
   };
   const questionNotifications = (id: string, memberId: string) => decisionInbox(store, memberId).filter(message =>
-    message.metadata.question_notification === true && message.metadata.root_question_id === id);
+    message.metadata.question_notification === true && message.metadata.root_question_id === id
+      && message.metadata.question_route_revision === store.getQuestion(id)!.route_revision);
   const eventTypes: string[] = [];
   const off = store.onWorkspaceEvent(event => eventTypes.push(event.type));
   try {
@@ -349,31 +350,35 @@ async function exerciseDecisionRecipientFallback(store: MultiremiStore): Promise
       assigneeType: 'agent', assigneeId: sourceAgent.id, responsibleMemberId: bystander.id });
     store.addIssueSubscriber(probe.id, creator.id);
     const explicit = ask(probe.id, 'production_change');
-    expect(explicit).toMatchObject({ stage: 'human', current_handler: { type: 'member', id: bystander.id } });
+    expect(explicit).toMatchObject({ stage: 'human', current_handler: { type: 'member', id: workspaceOwner.id } });
     expect(questionNotifications(explicit.id, bystander.id)).toHaveLength(1);
-    expect(questionNotifications(explicit.id, creator.id)).toHaveLength(0);
-    expect(questionNotifications(explicit.id, workspaceOwner.id)).toHaveLength(0);
+    expect(questionNotifications(explicit.id, creator.id)).toHaveLength(1);
+    expect(questionNotifications(explicit.id, workspaceOwner.id)).toHaveLength(1);
     expect(eventTypes).toContain('inbox:new');
+    expect(store.getIssue(probe.id)?.responsibleMemberId).toBe(bystander.id);
+    expect(questionNotifications(explicit.id, creator.id).map(message => message.id))
+      .toEqual(questionNotifications(explicit.id, workspaceOwner.id).map(message => message.id));
 
     const agentCreated = store.createIssue({ title: 'Agent creator with explicit human', createdBy: agentless.id,
       assigneeType: 'agent', assigneeId: sourceAgent.id, responsibleMemberId: creator.id });
     const agentQ = ask(agentCreated.id, 'production_change');
-    expect(agentQ.current_handler).toEqual({ type: 'member', id: creator.id });
-    expect(questionNotifications(agentQ.id, workspaceOwner.id)).toHaveLength(0);
+    expect(agentQ.current_handler).toEqual({ type: 'member', id: workspaceOwner.id });
+    expect(questionNotifications(agentQ.id, workspaceOwner.id)).toHaveLength(1);
 
     const archived = store.createWorkspaceMember({ workspaceId: 'local', name: 'Archived explicit human', role: 'member' });
     const unavailableIssue = store.createIssue({ title: 'Human unavailable', createdBy: creator.id,
       assigneeType: 'agent', assigneeId: sourceAgent.id, responsibleMemberId: archived.id });
     const unavailable = ask(unavailableIssue.id, 'production_change');
     store.archiveWorkspaceMember(archived.id);
-    expect(store.getQuestion(unavailable.id)).toMatchObject({ status: 'pending', stage: 'human', current_handler: null });
-    expect(questionNotifications(unavailable.id, creator.id)).toHaveLength(0);
-    expect(questionNotifications(unavailable.id, workspaceOwner.id)).toHaveLength(0);
+    expect(store.getQuestion(unavailable.id)).toMatchObject({ status: 'pending', stage: 'human', current_handler: { type: 'member', id: workspaceOwner.id } });
+    expect(questionNotifications(unavailable.id, creator.id)).toHaveLength(1);
+    expect(questionNotifications(unavailable.id, workspaceOwner.id)).toHaveLength(1);
     const response = { expected_route_revision: store.getQuestion(unavailable.id)!.route_revision, response: { answer: 'Yes' } };
     expect(() => store.answerQuestion(unavailable.id, response, { type: 'member', id: archived.id })).toThrow();
     expect(() => store.answerQuestion(unavailable.id, response, { type: 'agent', id: sourceAgent.id })).toThrow();
     store.answerQuestion(unavailable.id, response, { type: 'member', id: workspaceOwner.id });
-    expect(store.getQuestion(unavailable.id)?.status).toBe('answered');
+    expect(store.getQuestion(unavailable.id)).toMatchObject({ status: 'answered', answer: { actor: { type: 'member', id: workspaceOwner.id } } });
+    expect(store.getIssue(unavailableIssue.id)?.responsibleMemberId).toBe(archived.id);
 
     const parent = store.createIssue({ title: 'Ownerless parent', createdBy: bystander.id,
       assigneeType: 'agent', assigneeId: agentless.id, responsibleMemberId: creator.id });
@@ -395,10 +400,10 @@ async function exerciseDecisionRecipientFallback(store: MultiremiStore): Promise
     const turn = store.getTurnForAttempt(handler.id)!;
     const escalated = store.escalateQuestion(pending.id, { expected_route_revision: 1, reason: 'Need the specified human' },
       { type: 'agent', id: agentless.id }, turn.id);
-    expect(escalated).toMatchObject({ stage: 'human', current_handler: { type: 'member', id: creator.id }, route_revision: 2 });
+    expect(escalated).toMatchObject({ stage: 'human', current_handler: { type: 'member', id: workspaceOwner.id }, route_revision: 2 });
     expect(questionNotifications(pending.id, creator.id)).toHaveLength(1);
-    expect(questionNotifications(pending.id, bystander.id)).toHaveLength(0);
-    expect(questionNotifications(pending.id, workspaceOwner.id)).toHaveLength(0);
+    expect(questionNotifications(pending.id, bystander.id)).toHaveLength(1);
+    expect(questionNotifications(pending.id, workspaceOwner.id)).toHaveLength(1);
   } finally { off(); }
 }
 
@@ -411,7 +416,7 @@ describe("MUL-400 S4 decisions on SQLite", () => {
     await exerciseAnsweredWindow(createStore());
   });
 
-  it("keeps explicit contacts private and uses the workspace review queue when a contact is unavailable", async () => {
+  it("uses the shared operator for every human question while retaining historical contacts", async () => {
     await exerciseDecisionRecipientFallback(createStore());
   });
 });
@@ -521,7 +526,7 @@ describe.skipIf(!pgAvailable)("MUL-400 S4 decisions on PostgreSQL", () => {
     await exerciseAnsweredWindow(store);
   }, 15_000);
 
-  it("keeps explicit contacts private and uses the workspace review queue when a contact is unavailable", async () => {
+  it("uses the shared operator for every human question while retaining historical contacts", async () => {
     await exerciseDecisionRecipientFallback(store);
   });
 });

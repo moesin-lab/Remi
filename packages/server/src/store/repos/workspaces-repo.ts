@@ -135,9 +135,11 @@ export class WorkspacesRepo {
     const ready = this.getWorkspaceOperator(workspaceId);
     const stored = ready ? this.getWorkspaceMember(ready.id) : null;
     if (ready && stored?.role === "owner" && !stored.archivedAt) return ready;
-    this.getCurrentUser();
     return this.ctx.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      // Legacy databases may not have the shared user yet. Acquire the
+      // workspace lifecycle lock before inserting any operator identity rows.
+      this.getCurrentUser();
       const existing = this.getWorkspaceOperator(workspaceId);
       if (existing) {
         this.ctx.db.run("UPDATE multiremi_workspace_members SET role = 'owner', archived_at = NULL WHERE id = ?", [existing.id]);

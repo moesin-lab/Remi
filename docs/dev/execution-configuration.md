@@ -107,6 +107,8 @@ ready 表示配置与凭据解析成功，不表示已调用远端模型。Runti
 
 首次 claim 冻结完整连接配置和凭据版本，加入执行指纹。运行中任务继续使用自己的快照，daemon 按任务构造隔离配置；同一 Runtime 上不同组的任务不会互相覆盖全局 provider 设置。已冻结任务重领继续使用旧连接；显式修改云友模型或 thinking 参数时，已冻结但尚未启动的任务取消，运行中任务继续原执行。重试与会话隔离约束见各 provider 接入文档。
 
+旧 Runtime 自定义 Profile 的冻结凭据仍绑定原机器。Chat 冷启动重试若保留该快照且工作目录归属未变化，必须保留原 Runtime 绑定；历史 owner 改变不清除绑定。provider 不兼容或工作目录归属变化继续走原有重新分配流程，不能把旧机器密钥交给无法解析它的 Runtime。
+
 Profile 与组的写入要求人类工作区管理员身份；组修改还检查受影响 Runtime 的编辑权限。task/daemon token 不能管理中央配置。API 不回显明文密钥；中央凭据使用现有 AES-256-GCM 机制，作用域绑定工作区、Profile ID 与不可变 credential ID。密钥配置及轮换变量见 [Codex 凭据说明](../design/acp-codex-via-codex-acp.md#runtime-自定义连接)。删除 Profile 只隐藏当前配置，保留历史版本和加密凭据，支持既有任务快照。
 
 环境变量模式不在平台存密钥：Codex 使用 `REMI_CODEX_*`，Claude 使用 `REMI_CLAUDE_*`。变量必须存在于每台承载机器的 daemon 进程环境；仅在运行管理 CLI 的终端设置无效。

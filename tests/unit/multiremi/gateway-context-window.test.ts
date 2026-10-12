@@ -77,7 +77,7 @@ describe("gateway context declarations", () => {
     expect((await app.request(path, { method: "PUT", headers, body: "{" })).status).toBe(400);
   });
 
-  it("requires workspace admin and never writes a refused declaration", async () => {
+  it("shares human configuration and never writes a daemon's refused declaration", async () => {
     const { store } = setup();
     store.createWorkspaceMember({ id: "member-bob", workspaceId: "local", userId: "bob", name: "Bob", email: "bob@example.test", role: "member" });
     const member = await store.createAccessToken({ workspaceId: "local", type: "pat", name: "bob", userId: "bob" });
@@ -85,8 +85,13 @@ describe("gateway context declarations", () => {
     expect((await app.request(path, {
       method: "PUT", headers: { ...headers, Authorization: `Bearer ${member.token}` },
       body: JSON.stringify({ model: "m", one_million: true }),
-    })).status).toBe(403);
-    expect(store.listGatewayModelContext("local", "claude")).toEqual([]);
+    })).status).toBe(200);
+    const before = store.listGatewayModelContext("local", "claude");
+    expect(before).toHaveLength(1);
+    const daemon = await store.createAccessToken({ workspaceId: 'local', type: 'daemon', name: 'Bound daemon', daemonId: 'context-config' });
+    expect((await app.request(path, { method: 'PUT', headers: { ...headers, Authorization: `Bearer ${daemon.token}` },
+      body: JSON.stringify({ model: 'refused-model', one_million: true }) })).status).toBe(403);
+    expect(store.listGatewayModelContext("local", "claude")).toEqual(before);
   });
 
   it("delivers current declarations on register, v2 workspace relay and repository refresh", async () => {

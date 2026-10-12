@@ -51,7 +51,9 @@ pendingTurnBackendTests("MUL-508 access consistency", (fixture, backend) => {
     };
     const snapshot = () => ["multiremi_issue_sessions", "multiremi_conversation_heads", "multiremi_conversation_log", "multiremi_turns", "multiremi_turn_attempts", "multiremi_attachments"]
       .map(table => Number(db.query(`SELECT COUNT(*) AS n FROM ${table}`).get().n));
-    const lane = (id: string, type = "member", reader = member.id, scope = "") => Number(db.query(
+    const lane = (id: string, type = "member", reader = member.id, scope = "") => type === "member" ? Number(db.query(
+      "SELECT cursor_seq FROM multiremi_workspace_read_cursors WHERE session_id=? AND workspace_id='local'",
+    ).get(id)?.cursor_seq ?? 0) : Number(db.query(
       "SELECT cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_type=? AND reader_id=? AND execution_scope=?",
     ).get(id, type, reader, scope)?.cursor_seq ?? 0);
     return { store, db, databaseUrl, user, member, agent, runtime, issue, session, pat, app, request, send, running, question, snapshot, lane };
@@ -61,10 +63,12 @@ pendingTurnBackendTests("MUL-508 access consistency", (fixture, backend) => {
     expect(pool.postgres).toBe(backend === "PostgreSQL");
     const auth = pool.postgres ? createPostgresStreamAuthReader(pool) : createSqliteStreamAuthReader(f.store);
     const client = (userId: string | null, workspaceId = "local"): MultiremiWebSocketClient => ({
-      data: { kind: "browser", authenticated: true, connectedAt: new Date().toISOString(), userId, workspaceId, accessToken: null },
+      data: { kind: "browser", authenticated: true, connectedAt: new Date().toISOString(), userId: userId == null ? null : "local", workspaceId, accessToken: null },
       sendText() {}, close() {},
     });
     const allowed = async (id: string, userId: string | null, workspaceId = "local") => {
+      // Browser authentication canonicalizes every logged-in account first.
+      userId = userId == null ? null : "local";
       const facts = await auth.logFacts(id, { userId, workspaceId });
       expect(facts.ok).toBe(true);
       if (!facts.ok) throw new Error("stream facts unavailable");
@@ -126,7 +130,7 @@ pendingTurnBackendTests("MUL-508 access consistency", (fixture, backend) => {
     expect(result.data.turn.current_attempt_id).not.toBe(target.task.id);
     expect(f.store.listTurnAttempts(target.turn.id)).toHaveLength(2);
   });
-  for (const historical of [false, true]) it(`ordinary ${historical ? 'retained status-only' : 'new message_choice'} keeps recipient-only reply and replay protection without a Q`, async () => {
+  for (const historical of [false, true]) it(`ordinary ${historical ? 'retained status-only' : 'new message_choice'} shares human replies and keeps machine and replay protection without a Q`, async () => {
     const f = await scaffold();
     const q = f.store.sendMessage({ session_id: f.session.id, sender: { type: 'agent', id: f.agent.id },
       to: { type: 'member', ref: f.member.id }, message_kind: 'decision', wake_requested: 'inbox_only', body_md: 'Ordinary choice',
@@ -138,9 +142,11 @@ pendingTurnBackendTests("MUL-508 access consistency", (fixture, backend) => {
     expect((await f.request(`/api/messages/${q.id}/question`)).status).toBe(404);
     const body = { message_kind: 'reply', reply_to_id: q.id, metadata: { selected_options: ['yes'] } };
     const path = `/api/sessions/${f.session.id}/messages`;
-    expect((await f.request(path, 'POST', body, 'access-master')).status).toBe(403);
+    const machine = f.running();
+    const token = await f.store.createTaskAccessToken(machine.task, f.user.id);
+    expect((await f.request(path, 'POST', body, token.token)).status).toBe(403);
     expect(f.store.getMessage(q.id)?.resolved_at).toBeNull();
-    const reply = await f.request(path, 'POST', body);
+    const reply = await f.request(path, 'POST', body, 'access-master');
     expect(reply.status, JSON.stringify(reply.data)).toBe(200);
     expect(reply.data.message.reply_to_id).toBe(q.id);
     expect(reply.data.message.metadata.human_response.selected_options).toEqual(['yes']);
@@ -229,31 +235,32 @@ pendingTurnBackendTests("MUL-508 access consistency", (fixture, backend) => {
     const attachment = f.store.createAttachment({ workspaceId: "local", chatSessionId: chat.id, chatMessageId: message.id,
       filename: "chat.txt", contentType: "text/plain", sizeBytes: 4, url: "https://example.invalid/chat.txt" });
     try {
-      for (const visible of [true, false, true]) {
-        f.store.updateAgent(f.agent.id, { visibility: visible ? "workspace" : "private", ownerId: "local" });
-        f.db.run("UPDATE multiremi_session_lanes SET cursor_seq=0 WHERE session_id=? AND reader_type='member'", [chat.id]);
-        expect((await f.request(`/api/sessions/${chat.id}/messages`)).status).toBe(visible ? 200 : 403);
-        expect((await f.request(`/api/sessions/${chat.id}/log`)).status).toBe(visible ? 200 : 403);
-        expect(await s.allowed(chat.id, f.user.id)).toBe(visible);
-        expect(await s.allowed(chat.id, "local")).toBe(false);
+      for (const visibility of ["workspace", "private", "workspace"] as const) {
+        f.store.updateAgent(f.agent.id, { visibility, ownerId: "historical-owner" });
+        f.db.run("DELETE FROM multiremi_workspace_read_cursors WHERE session_id=?", [chat.id]);
+        expect((await f.request(`/api/sessions/${chat.id}/messages`)).status).toBe(200);
+        expect((await f.request(`/api/sessions/${chat.id}/log`)).status).toBe(200);
+        expect(await s.allowed(chat.id, f.user.id)).toBe(true);
+        expect(await s.allowed(chat.id, "local")).toBe(true);
         const frames = await s.project(chat.id, message.id, f.user.id);
-        expect(JSON.stringify(frames).includes("Chat body")).toBe(visible);
+        expect(JSON.stringify(frames).includes("Chat body")).toBe(true);
         for (const suffix of ["", "/download", "/content"]) {
           const response = await f.app.request(`/api/attachments/${attachment.id}${suffix}`, { headers: { Authorization: `Bearer ${f.pat.token}` } });
-          expect(response.status).toBe(visible ? suffix ? 302 : 200 : 403);
+          expect(response.status).toBe(suffix ? 302 : 200);
         }
         const page = await f.request("/api/inbox?limit=1");
-        expect(page.data.items.map((m: any) => m.id)).toEqual(visible ? [message.id] : []);
-        expect(page.data.unread_count).toBe(visible ? 1 : 0); expect(page.data.next_cursor).toBeNull();
-        expect((await f.request("/api/inbox/read", "POST", { all: true })).data.conversations_read).toBe(visible ? 1 : 0);
-        expect(f.lane(chat.id)).toBe(visible ? message.seq : 0);
+        expect(page.data.items.map((m: any) => m.id)).toEqual([message.id]);
+        expect(page.data.unread_count).toBe(1); expect(page.data.next_cursor).toBeNull();
+        expect((await f.request("/api/inbox/read", "POST", { all: true })).data.conversations_read).toBe(1);
+        expect(f.lane(chat.id)).toBe(message.seq);
       }
-      // Owning the private agent cannot replace active membership.
+      // Archiving a historical member does not remove shared human access.
       f.store.updateAgent(f.agent.id, { visibility: "private", ownerId: f.user.id });
       f.db.run("UPDATE multiremi_workspace_members SET archived_at=? WHERE id=?", [new Date().toISOString(), f.member.id]);
-      expect((await f.request(`/api/sessions/${chat.id}/messages`)).status).toBe(404);
-      expect(await s.allowed(chat.id, f.user.id)).toBe(false);
-      expect(await s.project(chat.id, message.id, f.user.id)).toEqual([]);
+      expect((await f.request(`/api/sessions/${chat.id}/messages`)).status).toBe(200);
+      expect(await s.allowed(chat.id, f.user.id)).toBe(true);
+      expect(JSON.stringify(await s.project(chat.id, message.id, f.user.id))).toContain("Chat body");
+      expect(await s.allowed(chat.id, f.user.id, "other_workspace")).toBe(false);
     } finally { await s.pool.close(); }
   });
 
@@ -345,7 +352,7 @@ pendingTurnBackendTests("MUL-508 access consistency", (fixture, backend) => {
     } finally { await s.pool.close(); }
   });
 
-  it("historical cross-session source returns inherit the original private Q and missing references fail closed", async () => {
+  it("shares historical cross-session source returns while missing original Q references fail closed", async () => {
     const f = await scaffold(), s = await stream(f);
     const q = f.question(f.running(), 'permission');
     f.store.updateAgent(f.agent.id, { visibility: 'private', ownerId: 'local' });
@@ -356,13 +363,14 @@ pendingTurnBackendTests("MUL-508 access consistency", (fixture, backend) => {
       body_md: `PRIVATE source return ${suffix}`, metadata: { question_source_notification: true, root_question_id: root } }).message;
     const linked = notify(q.id, 'linked'), missing = notify('cmt_missing_original_question', 'missing');
     try {
-      for (const row of [linked, missing]) {
+      for (const row of [missing]) {
         expect((await f.request(`/api/messages/${row.id}`)).status).toBe(404);
         const projected = await s.project(session.id, row.id, f.user.id);
         expect(projected[0]?.payload).toMatchObject({ visibility: 'hidden' });
         expect(JSON.stringify(projected)).not.toContain('PRIVATE');
       }
-      expect((await f.request(`/api/sessions/${session.id}/messages`)).data.messages).toEqual([]);
+      expect((await f.request(`/api/messages/${linked.id}`)).status).toBe(200);
+      expect((await f.request(`/api/sessions/${session.id}/messages`)).data.messages.map((message: any) => message.id)).toEqual([linked.id]);
       const inbox = await f.request('/api/inbox?limit=1');
       expect(inbox.data.items.some((row: any) => [linked.id, missing.id].includes(row.id))).toBe(false);
       expect((await f.request(`/api/messages/${linked.id}`, 'GET', undefined, 'access-master')).status).toBe(200);
@@ -443,11 +451,11 @@ pendingTurnBackendTests("MUL-508 access consistency", (fixture, backend) => {
       await subscribe(chat.id, true);
       await wait(() => events.some(e => JSON.stringify(e).includes("WS chat body")));
       f.store.updateAgent(f.agent.id, { visibility: "private", ownerId: "local" });
-      expect((await f.request(`/api/sessions/${chat.id}/messages`)).status).toBe(403);
-      await subscribe(chat.id, false);
+      expect((await f.request(`/api/sessions/${chat.id}/messages`)).status).toBe(200);
+      await subscribe(chat.id, true);
       for (const id of [`auto_${auto.id}`, orphan]) {
         expect((await f.request(`/api/sessions/${id}/messages`)).status).toBe(200);
-        expect(await s.allowed(id, f.user.id)).toBe(true); expect(await s.allowed(id, "outside")).toBe(false);
+        expect(await s.allowed(id, f.user.id)).toBe(true); expect(await s.allowed(id, "outside")).toBe(true);
         expect(await s.allowed(id, f.user.id, "other_workspace")).toBe(false);
         await subscribe(id, true);
       }

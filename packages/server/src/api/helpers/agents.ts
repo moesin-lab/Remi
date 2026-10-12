@@ -1113,7 +1113,8 @@ export function resolveAgentRequestProvider(
     if (!group) return c.json({ error: "invalid execution_group_id" }, 400);
     const requestedProvider = cleanString(typeof input.provider === "string" ? input.provider : null);
     if (requestedProvider && requestedProvider !== group.provider) return c.json({ error: "provider does not match the selected execution group" }, 400);
-    if (!executionGroupRuntimes(store, workspaceId, groupId, agentOwnerId).length) {
+    const runtimes = executionGroupRuntimes(store, workspaceId, groupId, agentOwnerId);
+    if (!runtimes.length || runtimes.some(runtime => !canCurrentUserUseRuntime(c, store, runtime))) {
       return c.json({ error: "no execution group member is available in this workspace" }, 403);
     }
     return group.provider;

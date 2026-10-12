@@ -17,14 +17,15 @@ it("keeps a renewed local JWT a human session and preserves master and open-mode
   const denied = await app.request("/api/tokens/current/renew", {
     method: "POST", headers, body: JSON.stringify({ workspace_id: theirs.id }),
   });
-  expect(denied.status).toBe(404);
+  expect(denied.status).toBe(201);
+  expect(await denied.json()).toMatchObject({ userId: 'local', workspaceId: theirs.id, purpose: 'session' });
   const response = await app.request("/api/tokens/current/renew", { method: "POST", headers });
   expect(response.status).toBe(201);
   const credential = await response.json();
   expect(credential).toMatchObject({ userId: "local", type: "pat", purpose: "session" });
   const renewedHeaders = { Authorization: `Bearer ${credential.access_token}` };
   expect((await app.request(`/api/workspaces/${mine.id}`, { headers: renewedHeaders })).status).toBe(200);
-  expect((await app.request(`/api/workspaces/${theirs.id}`, { headers: renewedHeaders })).status).toBe(404);
+  expect((await app.request(`/api/workspaces/${theirs.id}`, { headers: renewedHeaders })).status).toBe(200);
   for (const authToken of ["root-secret", null]) {
     const trustedApp = createMultiremiApp({ store, authToken });
     const trustedHeaders: Record<string, string> = { "Content-Type": "application/json" };
@@ -38,7 +39,7 @@ it("keeps a renewed local JWT a human session and preserves master and open-mode
   }
 });
 
-it("binds JWT renewal to the user and workspace without accepting privileged token types", async () => {
+it("retains the real JWT account across shared workspaces without accepting privileged token types", async () => {
   const store = createLocalStore();
   const alice = store.getOrCreateUser({ email: "renew-alice@example.test", name: "Alice" });
   const bob = store.getOrCreateUser({ email: "renew-bob@example.test", name: "Bob" });
@@ -49,18 +50,19 @@ it("binds JWT renewal to the user and workspace without accepting privileged tok
     Authorization: `Bearer ${signTestJwt({ sub: alice.id, exp: Math.floor(Date.now() / 1000) + 60 })}`,
     "Content-Type": "application/json",
   };
-  for (const [slug, expected] of [[mine.slug, 201], [theirs.slug, 404], ["missing", 404]] as const) {
+  for (const [slug, expected] of [[mine.slug, 201], [theirs.slug, 201], ["missing", 404]] as const) {
     const selected = await app.request("/api/tokens/current/renew", {
       method: "POST", headers: { ...headers, "X-Workspace-Slug": slug },
     });
     expect(selected.status).toBe(expected);
-    if (expected === 201) expect(await selected.json()).toMatchObject({ workspaceId: mine.id, userId: alice.id });
+    if (expected === 201) expect(await selected.json()).toMatchObject({ workspaceId: slug === mine.slug ? mine.id : theirs.id, userId: alice.id });
   }
   for (const workspaceKey of ["workspaceId", "workspace_id"]) {
     const denied = await app.request("/api/tokens/current/renew", {
       method: "POST", headers, body: JSON.stringify({ [workspaceKey]: theirs.id }),
     });
-    expect(denied.status).toBe(404);
+    expect(denied.status).toBe(201);
+    expect(await denied.json()).toMatchObject({ workspaceId: theirs.id, userId: alice.id });
     for (const type of ["pat", "daemon", "task", ["daemon"]]) {
       const response = await app.request("/api/tokens/current/renew", {
         method: "POST", headers,
@@ -71,7 +73,7 @@ it("binds JWT renewal to the user and workspace without accepting privileged tok
       expect(credential).toMatchObject({ workspaceId: mine.id, userId: alice.id, type: "pat", purpose: "personal", token_type: "bearer" });
       const renewedHeaders = { Authorization: `Bearer ${credential.access_token}` };
       expect((await app.request(`/api/workspaces/${mine.id}`, { headers: renewedHeaders })).status).toBe(200);
-      expect((await app.request(`/api/workspaces/${theirs.id}`, { headers: renewedHeaders })).status).toBe(404);
+      expect((await app.request(`/api/workspaces/${theirs.id}`, { headers: renewedHeaders })).status).toBe(200);
     }
   }
 });

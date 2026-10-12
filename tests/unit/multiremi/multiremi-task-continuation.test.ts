@@ -165,5 +165,8 @@ describe("delegated conversation continuation",()=>{
     const ws=f.store.createWorkspace({name:"Remote"}),remote=f.store.createAgent({name:"Remote worker",provider:"claude",workspaceId:ws.id});
     expect((await request(remote.id)).status).toBe(400);
     expect(f.store.listTasks()).toHaveLength(before);
+    const human=await f.store.createAccessToken({type:"pat",name:"Shared human",workspaceId:"local",userId:"leader_user"});
+    const shared=await f.app.request(taskRequestPath(f.store,{issueId:f.issue.id}),{method:"POST",headers:{...headers,Authorization:`Bearer ${human.token}`},body:JSON.stringify(requestMessageBody(f.store,{agentId:f.privateWorker.id,prompt:"Shared operator continuation"}))});
+    expect(shared.status).toBe(200);
   });
 });

@@ -177,7 +177,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     store.failTask(failedRun.taskId!, { error: "Dependency service unavailable", failureReason: "agent_error" });
 
     const completed = store.listInboxItems(creator.id).find((item) => item.type === "autopilot_run_completed")!;
-    expect(completed.memberId).toBe(creator.id);
+    expect(completed.memberId).toBe(store.getWorkspaceOperator("local")!.id);
     expect(completed.severity).toBe("info");
     expect(completed.title).toMatch(/^Daily summary · Scheduled \d{2}:\d{2} UTC$/);
     expect(completed.body).toContain("Published 12 project updates. No blockers.");
@@ -208,7 +208,8 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     });
 
     const failed = store.listInboxItems(owner.id).find((item) => item.type === "autopilot_run_failed")!;
-    expect(failed.memberId).toBe(owner.id);
+    expect(failed.memberId).toBe(store.getWorkspaceOperator("local")!.id);
+    expect(store.listInboxItems(creator.id)).toEqual(store.listInboxItems(owner.id));
     expect(failed.severity).toBe("attention");
     expect(failed.title).toBe("Dependency audit");
     expect(failed.body).toContain("Dependency service unavailable.");
@@ -536,9 +537,11 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const inboxEvents = events.filter((event) => event.type === "inbox:new"
       && (event.payload.item as { type?: string } | undefined)?.type === "autopilot_paused");
     expect(inboxEvents).toHaveLength(2);
-    expect(inboxEvents.map((event) => (event.payload.item as { memberId: string }).memberId).sort()).toEqual([creator.id, owner.id].sort());
+    expect(inboxEvents.map((event) => (event.payload.item as { memberId: string }).memberId))
+      .toEqual([store.getWorkspaceOperator("local")!.id, store.getWorkspaceOperator("local")!.id]);
 
-    const creatorInbox = store.listInboxItems(creator.id).find((item) => item.type === "autopilot_paused")!;
+    expect(store.listInboxItems(creator.id)).toEqual(store.listInboxItems(owner.id));
+    const creatorInbox = store.listInboxItems(creator.id).find((item) => item.type === "autopilot_paused" && (item.details as { autopilot_id?: string } | null)?.autopilot_id === offender.id)!;
     expect(creatorInbox.issueId).toBeNull();
     expect(creatorInbox.severity).toBe("attention");
     expect(creatorInbox.details).toMatchObject({
@@ -549,7 +552,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
       threshold_fail_ratio: 0.9,
       reason: "auto_paused_high_failure_rate",
     });
-    const ownerInbox = store.listInboxItems(owner.id).find((item) => item.type === "autopilot_paused")!;
+    const ownerInbox = store.listInboxItems(owner.id).find((item) => item.type === "autopilot_paused" && (item.details as { autopilot_id?: string } | null)?.autopilot_id === skippedDiluted.id)!;
     expect(ownerInbox.issueId).toBeNull();
     expect(ownerInbox.details).toMatchObject({ autopilot_id: skippedDiluted.id, failed_runs: 9, total_runs: 10 });
     expect(scheduler.runFailureMonitorOnce({ since: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000), minRuns: 10 })).toEqual([]);

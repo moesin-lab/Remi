@@ -76,9 +76,9 @@ function scaffold(options: {
   notifyOpenId?: string;
 } = {}) {
   const store = createLocalStore();
-  const member = store.getWorkspaceMember('mem_local_local')!;
   const person = store.getOrCreateUser({ externalId: 'ou_the_person', name: 'Explicit question human' });
-  db.run('UPDATE multiremi_workspace_members SET user_id=? WHERE id=?', [person.id, member.id]);
+  const member = store.getWorkspaceMember('mem_card_contact') ?? store.createWorkspaceMember({ id: 'mem_card_contact', workspaceId: 'local', userId: person.id, name: person.name });
+  expect(store.getWorkspaceOperator('local')?.userId).toBe('local');
   db.run('UPDATE multiremi_users SET feishu_union_id=? WHERE id=?', ['on_the_person', person.id]);
   const seen = new Date().toISOString();
   db.run(`INSERT INTO multiremi_feishu_bot_senders(id,workspace_id,app_id,open_id,union_id,display_name,allowed,first_seen_at,last_seen_at)
@@ -118,7 +118,7 @@ function scaffold(options: {
 
 /** An Issue whose topic root message has been sent, so replies have a seed. */
 function issueWithTopic(store: MultiremiStore, agentId: string, title = "Decision card issue") {
-  const issue = createResponsibleTestIssue(store, { title, workspaceId: "local", assigneeType: "agent", assigneeId: agentId, responsibleMemberId: 'mem_local_local' });
+  const issue = createResponsibleTestIssue(store, { title, workspaceId: "local", assigneeType: "agent", assigneeId: agentId, responsibleMemberId: 'mem_card_contact' });
   store.prepareFeishuIssueTopicWithinTransaction(issue);
   const root = store.claimFeishuBotOutbound("local", "rt_bot")!;
   store.reportFeishuBotOutbound("local", "rt_bot", root.id, {
@@ -384,7 +384,7 @@ describe("Feishu decision cards for Issue human requests", () => {
 
   it("skips the topic entirely when the Issue has no seed and records why", () => {
     const { store, agentId } = scaffold();
-    const issue = createResponsibleTestIssue(store, { title: "No topic yet", workspaceId: "local", responsibleMemberId: 'mem_local_local' });
+    const issue = createResponsibleTestIssue(store, { title: "No topic yet", workspaceId: "local", responsibleMemberId: 'mem_card_contact' });
     db!.run(`INSERT INTO multiremi_feishu_bot_chat_bindings
       (id, workspace_id, app_id, agent_id, external_session_key, chat_session_id, issue_id, chat_id, thread_id, created_at, updated_at)
       VALUES ('fcb_no_seed', 'local', 'cli_decision_card', ?, 'pending:no_seed',

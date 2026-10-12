@@ -100,7 +100,7 @@ it("gets, edits, resolves, reacts and tombstones a message", async () => {
   expect((await request(`/api/messages/${id}`, "DELETE")).status).toBe(200);
   expect((await request(path())).data.messages).toHaveLength(0);
 });
-it("uses the authenticated member PAT for reactions despite an explicit forged actor", async () => {
+it("uses the shared operator for human PAT reactions despite an explicit forged actor", async () => {
   const id = (await send("reaction")).data.message.id;
   const user = store.getOrCreateUser({ externalId: "reaction-member", name: "Reaction member" });
   store.createWorkspaceMember({ workspaceId: "local", userId: user.id, name: user.name, role: "member" });
@@ -110,7 +110,7 @@ it("uses the authenticated member PAT for reactions despite an explicit forged a
   for (let i = 0; i < 2; i++) {
     const result = await request(`/api/messages/${id}/reactions`, "POST", { emoji: "+1", actorId: "forged" }, headers);
     expect(result.status).toBe(200);
-    expect(result.data.reactions).toEqual([expect.objectContaining({ commentId: id, actorId: user.id, actorType: "member", emoji: "+1" })]);
+    expect(result.data.reactions).toEqual([expect.objectContaining({ commentId: id, actorId: "local", actorType: "member", emoji: "+1" })]);
     expect((await request(`/api/messages/${id}`, "GET", undefined, headers)).data.message.reactions).toEqual(result.data.reactions);
   }
   const removed = await request(`/api/messages/${id}/reactions`, "POST", { emoji: "+1", actorId: "forged", remove: true }, headers);
@@ -223,7 +223,9 @@ it("rejects cross workspace resources and malformed sends without writes", async
   expect((await request(path(), "POST", { body_md: "foreign", to: { type: "agent", ref: foreignAgent.id } }, headers)).status).toBe(400);
   expect((await request(path(), "POST", { body_md: "invalid", wake_requested: "invalid" }, headers)).status).toBe(400);
   const foreignIssue = createResponsibleTestIssue(store, { title: "Foreign", workspaceId: workspace.id }), foreignSession = store.getOrCreateDefaultIssueSession(foreignIssue.id);
-  expect((await request(`/api/sessions/${foreignSession.id}/messages`, "GET", undefined, headers)).status).toBe(404);
+  expect((await request(`/api/sessions/${foreignSession.id}/messages`, "GET", undefined, headers)).status).toBe(200);
+  const scoped = await store.createAccessToken({ name: "Local workspace scope", type: "pat", userId: "local", workspaceId: "local" });
+  expect((await request(`/api/sessions/${foreignSession.id}/messages`, "GET", undefined, { Authorization: `Bearer ${scoped.token}` })).status).toBe(404);
   expect(store.listMessages(session.id)).toHaveLength(0);
 });
 it("sends atomic multipart attachments and cleans files on validation failure", async () => {
@@ -255,7 +257,7 @@ it("sends atomic multipart attachments and cleans files on validation failure", 
     expect(delivered.message.attachments[0]).toMatchObject({ commentId: delivered.message.id, issueId: parent.id });
   } finally { if (previous === undefined) delete process.env.MULTIREMI_UPLOAD_DIR; else process.env.MULTIREMI_UPLOAD_DIR = previous; rmSync(dir, { recursive: true, force: true }); }
 });
-it("filters private conversations before inbox counts, pagination and read-all", async () => {
+it("shares historical private conversations in inbox counts, pagination and read-all", async () => {
   const user = store.getOrCreateUser({ externalId: "private-chat-owner", name: "Private" });
   const chat = store.createChatSession({ agentId: agent.id, creatorId: user.id });
   store.sendMessage({ session_id: chat.id, sender: { type: "agent", id: agent.id }, to: { type: "member", ref: "mem_local_local" }, message_kind: "decision", wake_requested: "now", body_md: "Private" });
@@ -264,9 +266,12 @@ it("filters private conversations before inbox counts, pagination and read-all",
   const token = await store.createAccessToken({ name: "local", type: "pat", userId: "local", workspaceId: "local" });
   const headers = { Authorization: `Bearer ${token.token}` };
   const page = await request("/api/inbox?limit=1", "GET", undefined, headers);
-  expect(page.data.items.map((m: any) => m.id)).toEqual([shown.id]); expect(page.data.unread_count).toBe(1); expect(page.data.next_cursor).toBeNull();
-  expect((await request("/api/inbox/read", "POST", { all: true }, headers)).data.conversations_read).toBe(1);
-  expect(store.listMessageInbox("mem_local_local", "local").unread_count).toBe(1);
+  expect(page.data.items.map((m: any) => m.id)).toEqual([shown.id]); expect(page.data.unread_count).toBe(2); expect(page.data.next_cursor).toBeString();
+  const next = await request(`/api/inbox?limit=1&cursor=${page.data.next_cursor}`, "GET", undefined, headers);
+  expect(next.data.items[0].session_id).toBe(chat.id);
+  expect(next.data.next_cursor).toBeNull();
+  expect((await request("/api/inbox/read", "POST", { all: true }, headers)).data.conversations_read).toBe(2);
+  expect(store.listMessageInbox("mem_local_local", "local").unread_count).toBe(0);
 });
 it("lets the addressed agent answer a decision once through its authenticated message sender", async () => {
   const { question } = nativeQuestion(other, true);

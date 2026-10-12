@@ -66,7 +66,7 @@
     "members_label": "追加メンバー",
     "members_optional": "（任意）",
     "members_hint": "リーダーがサブタスクを委任できるメンバーです。後から追加できます。",
-    "members_placeholder": "エージェントまたはワークスペースメンバーを追加",
+    "members_placeholder": "エージェントを追加",
     "members_selected_count_other": "{{count}} 件選択中",
     "members_more_count": "+{{count}}",
     "members_remove_aria": "{{name}} を削除",

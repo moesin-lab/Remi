@@ -66,7 +66,7 @@
     "members_label": "附加成员",
     "members_optional": "（可选）",
     "members_hint": "Leader 可以委派子任务的成员。也可稍后再加。",
-    "members_placeholder": "添加 Agent 或工作区成员",
+    "members_placeholder": "添加 Agent",
     "members_selected_count_one": "已选 {{count}} 人",
     "members_selected_count_other": "已选 {{count}} 人",
     "members_more_count": "+{{count}}",

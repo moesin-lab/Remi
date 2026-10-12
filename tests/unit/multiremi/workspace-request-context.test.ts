@@ -68,10 +68,11 @@ describe("web workspace request context", () => {
   });
 
   for (const endpoint of reads) {
-    it(`${endpoint} uses the selected workspace and rejects stale or inaccessible context`, async () => {
+    it(`${endpoint} uses any selected workspace for humans and rejects stale context`, async () => {
       const { app, headers, workspace } = await fixture();
       expect((await app.request(endpoint, { headers })).status).toBe(200);
-      expect((await app.request(endpoint, { headers: { ...headers, "X-Workspace-Slug": "local" } })).status).toBe(404);
+      expect((await app.request(endpoint, { headers: { ...headers, "X-Workspace-Slug": "local" } })).status).toBe(200);
+      expect((await app.request(endpoint, { headers: { ...headers, "X-Workspace-Slug": "missing" } })).status).toBe(404);
       expect((await app.request(endpoint, { headers: { ...headers, Authorization: "Bearer root-secret", "X-Workspace-Slug": "missing" } })).status).toBe(404);
       const explicit = `${endpoint}${endpoint.includes("?") ? "&" : "?"}workspace_id=${workspace.id}`;
       expect((await app.request(explicit, { headers: { ...headers, "X-Workspace-Slug": "missing" } })).status).toBe(200);

@@ -88,7 +88,10 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
     const responsibility=ctx.resolveIssueResponsibility(ownerIssue.id);
     if(!responsibility.unresolved.length && responsibility.executionOwner){recipientType='agent';recipientId=responsibility.executionOwner.id;return;}
     input={...input,metadata:{...input.metadata,responsibility_unresolved:responsibility.unresolved}};
-    if(responsibility.rootHuman){recipientType='member';recipientId=responsibility.rootHuman.id;return;}
+    // A complete same-workspace parent chain can notify the shared operator
+    // without a legacy contact. This never supplies an execution/review Agent.
+    const human = responsibility.rootHuman ?? (responsibility.rootIssueId ? ctx.workspaces().getWorkspaceOperator(workspaceId) : null);
+    if(human){recipientType='member';recipientId=human.id;return;}
     throw new Error('Issue owner responsibility is unresolved; configure its execution owner');
   };
   if(input.to.type==='agent'||input.to.type==='member'){recipientType=input.to.type;recipientId=input.to.ref;}

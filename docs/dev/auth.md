@@ -84,6 +84,8 @@ daemon 的 HTTP token 校验同时验证工作区仍存在，工作区删除后�
 
 创建子单、改父单、添加依赖、移动、把已结束子单改回未结束以及派给 Agent 重开已结束子单，都在一个事务内经 [issue-row-lock](../../packages/server/src/store/issue-row-lock.ts) 一次性按 ID 升序锁完所需的现有 Issue 行，锁后重读再校验；创建时父单与所有 `blocked_by` 端点一起加锁，改回未结束与 Agent 派单把当前父单一起入集。锁集由输入加一次不加锁的本单读取决定；锁后重读发现还需要一行没锁到的 Issue（等锁期间父单或结束状态变了），或 Issue 已被别人移走、这次变成需要移动却没拿编号锁，都由事务所有者回滚重来一次，再过期或事务由调用方持有时返回 `409 issue_relation_changed`，任何情况下都不在持有行锁后补锁。沿用已有工作区锁且先于 Issue 行锁（创建时和移到其他工作区时，MUL-405 的编号锁也在 Issue 行锁之前，即 W → N → D；移动只拿目标工作区的编号锁），不新增工作区锁，不在获得 Issue 行锁后再拿工作区锁，不改为 `REPEATABLE READ`。删除依赖、清父关系不增加关系行锁。任务创建在工作区锁之后先锁所属 Issue 行，再校验 Issue 与 Agent 同工作区，所以与移动互斥：移动先提交则建任务报 `Issue workspace does not match agent workspace`，任务先提交则移动返回 `409`。派给 Agent 或成员时，锁后重读若发现 Issue 已移到别的工作区，就在新工作区重新解析经办人，报与先移动后派单相同的错误（如 `Agent not found`）且不写入。派单写经办人与建任务仍是两个事务，两者之间插入的移动按 MUL-480 清空来源经办人，后续来源任务创建因工作区不匹配被拒绝。完整顺序见 [ADR 0003](../adr/0003-parent-status-derived-from-children.md) 第 8 条。
 
+Task 凭据的私有 Agent 访问与定向派发、Runtime 使用/编辑、非 Chat 附件删除使用凭据原 `userId` 的历史 owner/admin 权限，不使用共享 operator 的 owner 角色；附件还保留上传 Agent 的删除权限，Agent 单对象与批量列表守卫保持一致。显式选择能力组和读取其模型目录时，机器凭据须能使用全部候选 Runtime，不能通过混合组绕过私有 Runtime 守卫。普通人类 PAT/JWT 仍可操作同工作区全部历史私有资源，机器绑定工作区和 Session 内容边界不变。
+
 ## 启动条件
 
 Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性/编辑权限，task token 对整个配置路由为 hard deny；直接填写的 API Key 经服务端 AES-256-GCM 加密并版本化。只允许绑定机器身份的 daemon token 从专用 `codex-profile-key` / `claude-profile-key` 路由读取对应 Runtime 的凭据，浏览器响应和任务公共响应不含密钥。加密配置、轮换和执行快照见 [Codex Runtime](../design/acp-codex-via-codex-acp.md#runtime-自定义连接)，Claude 的字段和请求头见 [Claude Code Runtime](../design/acp-claude-via-claude-agent-acp.md)，权限回归见 [runtime-codex-profile.test.ts](../../tests/unit/multiremi/runtime-codex-profile.test.ts)。

@@ -75,15 +75,16 @@ pendingTurnBackendTests('explicit responsibility mutation hooks',fixture => {
     expect(f.store.getQuestion(f.id)?.current_handler?.id).toBe(f.owner.id);
     expect(f.store.getQuestion(f.id)?.route_revision).toBe(3);
   });
-  it('moves human-required pending Q to the new explicit root human',()=>{
+  it('keeps the shared operator while an external contact change refreshes the pending Q',()=>{
     const f=setup(fixture());const human=f.store.createWorkspaceMember({id:'new-root-human',name:'New human'});
     const ownerTurn=f.db.query("SELECT id FROM multiremi_turns WHERE agent_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1").get(f.owner.id)!;
     f.db.run("UPDATE multiremi_turns SET status='running' WHERE id=?",[ownerTurn.id]);
     f.store.escalateQuestion(f.id,{expected_route_revision:1,reason:'Need human'},{type:'agent',id:f.owner.id},String(ownerTurn.id));
     f.store.updateIssue(f.root.id,{responsibleMemberId:human.id,actorType:'member',actorId:'mem_local_local'});
     const q=f.store.getQuestion(f.id)!;
-    // Transfer re-evaluates the existing Q against the current responsibility facts.
-    expect(q.current_handler).toEqual({type:'member',id:human.id});
+    // The historical contact can change card routing, never the Web operator.
+    expect(f.store.getIssue(f.root.id)?.responsibleMemberId).toBe(human.id);
+    expect(q.current_handler).toEqual({type:'member',id:f.store.getWorkspaceOperator('local')!.id});
     expect(q.history.filter(event=>event.type==='transfer' && event.reason === 'issue_responsibility_transferred')).toHaveLength(1);
     expect(q.route_revision).toBe(3);
   });

@@ -404,7 +404,9 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
     const scope = inboxScope(c);
     if (scope instanceof Response) return scope;
     return action(c, () => {
-      const role=currentWorkspaceRole(c,store,scope.workspaceId);
+      // Human scope already authorized the shared operator. Machine source
+      // visibility must still use its credential owner's historical role.
+      const role=scope.type==='member'?'owner':store.getUserRoleInWorkspace(currentRequestUserId(c),scope.workspaceId);
       const options = { limit: limit(c), cursor: cursor(c), access: {
         userId: currentRequestUserId(c), admin: role==='owner'||role==='admin',
         attemptId: currentTaskAccessToken(c)?.taskId ?? undefined,

@@ -803,7 +803,7 @@ describe("MUL-338 gateway reasoning declarations: the write endpoint", () => {
     expect(badEngine.status).toBe(400);
   });
 
-  it("requires a workspace administrator", async () => {
+  it("shares gateway reasoning configuration across human accounts", async () => {
     const store = createLocalStore();
     store.createWorkspaceMember({ id: "mem_local_bob", workspaceId: "local", userId: "bob", name: "Bob", email: "bob@example.com", role: "member" });
     const member = await store.createAccessToken({ workspaceId: "local", type: "pat", name: "bob", userId: "bob" });
@@ -814,12 +814,12 @@ describe("MUL-338 gateway reasoning declarations: the write endpoint", () => {
       headers: { Authorization: `Bearer ${member.token}`, ...headers },
       body: JSON.stringify({ model: "deepseek-v4-flash", levels: ["low"] }),
     });
-    expect(asMember.status).toBe(403);
+    expect(asMember.status).toBe(200);
 
     const readAsMember = await app.request("/api/workspaces/local/relay-config/claude/reasoning-levels", {
       headers: { Authorization: `Bearer ${member.token}` },
     });
-    expect(readAsMember.status).toBe(403);
+    expect(readAsMember.status).toBe(200);
 
     const asAdmin = await app.request("/api/workspaces/local/relay-config/claude/reasoning-levels", {
       method: "PUT",
@@ -827,7 +827,7 @@ describe("MUL-338 gateway reasoning declarations: the write endpoint", () => {
       body: JSON.stringify({ model: "deepseek-v4-flash", levels: ["low"] }),
     });
     expect(asAdmin.status).toBe(200);
-    // A refused request must not have written anything on its way out.
+    // Both accounts operate on the same stored declaration.
     expect(store.getGatewayModelReasoning("local", "claude", "deepseek-v4-flash")?.levels).toEqual(["low"]);
   });
 });

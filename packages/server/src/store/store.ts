@@ -1760,6 +1760,10 @@ runMigrations(this.db);
     return this.workspaces.listWorkspaces();
   }
 
+  hasWorkspace(id: string): boolean {
+    return this.workspaces.hasWorkspace(id);
+  }
+
   getWorkspace(id: string): MultiremiWorkspace | null {
     return this.workspaces.getWorkspace(id);
   }

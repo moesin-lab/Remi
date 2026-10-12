@@ -134,11 +134,11 @@ async function fixture(scenario: Scenario) {
   audit.recording = true;
   return {
     raw, audit, store, before, snapshot, activeId, requests, server,
-    async request(path: string) {
+    async request(path: string, expectedStatus = 200) {
       const response = await fetch(new URL(path, server.url), {
         headers: { Authorization: `Bearer ${credential.token}` },
       });
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(expectedStatus);
       return response.json();
     },
     async cli() {
@@ -262,23 +262,17 @@ describe("MUL-464 serialized platform-operation invariants", () => {
 });
 
 describe("MUL-464 operation pre-check over real loopback HTTP and SQLite", () => {
-  test("missing local workspace triggers business INSERT and UPDATE during authentication", async () => {
+  test("missing local workspace returns 404 without recreating business state during authentication", async () => {
     const f = await fixture("missing-local");
     try {
       expect(f.raw.query("SELECT id FROM multiremi_workspaces WHERE id = 'local'").get()).toBeNull();
       expect(f.raw.query("SELECT id FROM multiremi_workspace_members WHERE workspace_id = 'local'").get())
         .not.toBeNull();
-      await f.request("/api/multiremi/platform/operations?limit=100");
-      expect(f.audit.writes).toHaveLength(3);
+      await f.request("/api/multiremi/platform/operations?limit=100", 404);
+      expect(f.audit.writes).toHaveLength(1);
       expect(f.audit.writes[0]).toEqual({ sql: authWrite, changes: 1 });
-      expect(f.audit.writes[1]).toMatchObject({ changes: 1 });
-      expect(f.audit.writes[1]!.sql).toMatch(/^INSERT INTO multiremi_workspaces /u);
-      expect(f.audit.writes[2]).toEqual({
-        sql: "UPDATE multiremi_users SET onboarded_at = COALESCE(onboarded_at, ?), updated_at = ? WHERE id = ?",
-        changes: 1,
-      });
       expect(f.raw.query("SELECT id, issue_prefix FROM multiremi_workspaces WHERE id = 'local'").get())
-        .toEqual({ id: "local", issue_prefix: "MUL" });
+        .toBeNull();
       expect(f.snapshot()).toEqual(f.before);
       console.info(JSON.stringify({ endpoint: "operations", scenario: "missing-local", writes: f.audit.writes }));
     } finally { f.close(); }

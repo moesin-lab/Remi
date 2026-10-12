@@ -50,6 +50,10 @@ Remi 的平台入口保留独立登录账号和分类型访问凭据；登录后
 
 历史 Chat、云友和 Runtime 的 creator/owner 字段保留审计用途。人类读取、编辑与实时订阅不再按这些字段分区；执行调度也不再因历史人类 owner 不同拒绝同工作区的 Runtime。机器注册的 daemon ID、凭据绑定、Agent 执行范围和跨工作区资源关系仍需核验。
 
+Runtime 列表的旧 `owner=me` 人类筛选参数兼容为整个工作区的共享 Runtime 列表；机器凭据仍受原有 daemon 和工作区绑定限制。
+
+daemon 的 HTTP token 校验同时验证工作区仍存在，工作区删除后下一次请求返回 401；已连接的 WebSocket 在下一次心跳撤销权限。历史人类成员归档或移动不会撤销机器权限。
+
 人的消息已读状态由工作区和 Session 共同标识；旧 member lane 继续作为逐条历史消息的已读依据，不能取全部旧游标最大值来丢弃其他收件人的未读。待回答问题转给统一操作者，旧路由版本及卡片失效；飞书卡片仍必须验证 bot/app/open_id 和一次性 token。实现与验证见[收件箱](inbox-store.md)和[问题](questions.md)。
 
 收藏按工作区合并，同一目标只显示一次，读取不删除历史行；重排同步同目标旧行，明确取消收藏时才删除这些行。通知配置由工作区共同管理，历史个人通知渠道参与共享路由，task 凭据仍不能配置外部目的地。通知偏好优先使用 operator 已保存值，再用旧工作区默认值，最后使用最近一次历史设置；首次保存后统一生效，原历史设置保留。
@@ -94,11 +98,11 @@ Runtime 的 Codex / Claude Code 自定义连接 GET/PUT 使用 Runtime 可见性
 
 | 变更 | 已有测试 |
 |---|---|
-| 多人登录、成员隔离、邀请、运行时归属 | [multiremi-multiuser-auth.test.ts](../../tests/unit/multiremi/multiremi-multiuser-auth.test.ts) |
+| 独立登录凭据、共享工作区及退役成员接口 | [multiremi-multiuser-auth.test.ts](../../tests/unit/multiremi/multiremi-multiuser-auth.test.ts) |
 | 密码账号预配、会话身份、错误凭据、重设及并发边界 | [password-auth.test.ts](../../tests/unit/multiremi/password-auth.test.ts) |
 | Bearer/Cookie、task 权限、daemon 边界与迁移例外 | [multiremi-api-auth.test.ts](../../tests/unit/multiremi/multiremi-api-auth.test.ts) |
 | Agent 操作、私有资源和配置脱敏 | [multiremi-store-agent-authz.test.ts](../../tests/unit/multiremi/multiremi-store-agent-authz.test.ts) |
-| 成员指定轮恢复、Chat 创建者与 Agent 权限、依赖及 PG 并发边界 | [issue-run-recovery.test.ts](../../tests/unit/multiremi/issue-run-recovery.test.ts) |
+| 操作者指定轮恢复、共享 Chat、任务权限、依赖及 PG 并发边界 | [issue-run-recovery.test.ts](../../tests/unit/multiremi/issue-run-recovery.test.ts) |
 | Issue 移动、存量父子/依赖隔离、单工作区 PAT 和 CLI | [multiremi-issue-workspace-boundaries.test.ts](../../tests/unit/multiremi/multiremi-issue-workspace-boundaries.test.ts) |
 | 飞书 Issue 决策卡片、旧跨工作区来源/目标、终态回调与出站隔离 | [multiremi-issue-decision-card-workspace.test.ts](../../tests/unit/multiremi/multiremi-issue-decision-card-workspace.test.ts) |
 | 关系写入锁序、锁后重读及 PG 双连接竞态 | [multiremi-issue-relation-locks.test.ts](../../tests/unit/multiremi/multiremi-issue-relation-locks.test.ts)、[读取限定架构检查](../../tests/arch/issue-relation-reads-workspace-scoped.test.ts) |

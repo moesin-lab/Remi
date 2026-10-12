@@ -24,7 +24,7 @@ Agent 或团队，成员写入返回 `409 project_execution_owner_required`。�
 
 创建根单不要求 `responsible_member_id`，空值可直接创建；普通建单、快捷建单、Agent 新建根单、
 飞书群消息自动建单和 Autopilot `create_issue` 使用同一规则。网页不再展示人类责任人选择器。
-HTTP 创建人仍来自真实凭据；可选历史联系人只允许继承已验证的实际 Issue、普通 Chat 创建者、
+HTTP 人类创建人使用共享 operator，任务创建人仍来自已验证的执行身份；可选历史联系人只允许继承已验证的实际 Issue、普通 Chat 创建者、
 配置的 bot/topic 或 active Autopilot run。不存在有效来源时保存 null，不猜测 Runtime owner、
 workspace owner 或外部发送者身份。伪造 body 的 run ID、创建人和审计字段不提供来源权限。
 
@@ -39,7 +39,7 @@ Task 创建根单可以不传联系人，也可继承真实来源；不能冒用
 普通与快捷建单独立校验 Task 的实际 Session、工作区和产品归属；来源跨工作区或 Task 审计归属与
 实际 Session 冲突时返回 `403 issue_creation_source_invalid`，不创建事项或派活。该校验不依赖联系人是否存在。
 改父单不再按根联系人是否相同审批，仍执行工作区、父链循环及现有会话/任务授权校验。
-消息转 Issue 必须由真实成员确认；飞书外部发送人或 Runtime owner 不冒充审批成员。
+消息转 Issue 必须由通过入口鉴权的人类确认，并记录共享 operator；飞书外部发送人或 Runtime owner 不冒充人工批准。
 入门引导从已验证 bootstrap 用户创建；显式 QA seed 和测试工厂使用有名称的合成成员。
 历史根单迁移新增 nullable 字段，包含已经 unified 的快照升级，不猜测回填；缺少可选联系人不阻止关闭。
 更新根人类、父单、执行指派保留 `issue_responsibility_transferred` 审计。
@@ -50,7 +50,7 @@ Task 创建根单可以不传联系人，也可继承真实来源；不能冒用
 活动新增 nullable `workspace_id` 保存审计发生时的来源。旧未知活动不猜回填；首次显式移动
 在原事务冻结来源，已有评论/Task 的空间事实优先，其余沿当时 Issue 归属。原正文和数据
 保留；目标聚合只读目标来源，跨空间历史中未知来源的活动也不能因 null 越权显示。
-附件读取同样核对附件和原评论 conversation head 的来源；原空间成员可读历史附件，
+附件读取同样核对附件和原评论 conversation head 的来源；工作区操作者可读来源明确的历史附件，
 旧评论在移动后只读，目标空间不能用已知旧评论/附件 ID 上传、重新关联或通过新分享取文件。
 显式派活的取消、责任转交、Task/轮创建和派生状态共享调用方事务；gate 与 unassign 也不
 另开事务。派活失败全部回滚，事件及子状态副作用统一在提交后处理一次。
@@ -59,15 +59,16 @@ Task 请求在选择会话前沿 W→I 锁定并重新核对 Issue 与 Agent 的
 复用当前同步调用持有的 Issue 锁，调用结束或失败即释放复用标记，不跨事务缓存。
 同事务刷新受影响父链的未解决 Q、保留转交历史并失效旧卡凭据。团队 Leader 变更、移除或归档，
 执行 Agent 的工作区移动/归档/恢复，以及根人类工作区移动/归档也执行相同刷新；普通资料编辑不移交问题。
-无 Issue 的 Chat 问题在 bot 配置变更/删除及来源 Agent、明确成员的工作区或可用性变更时，
-也在原变更事务刷新。移动实体同时核对旧工作区，避免原 Chat 遗留有效旧卡。配置的人类变更
-保留实际成员操作人；密钥、域名等不改变责任事实的编辑不旋转问题版本。
+无 Issue 的 Chat 问题在 bot 配置变更/删除及来源 Agent 的工作区或可用性变更时，
+在原变更事务重新核验路由；飞书外部投递目标改变会失效旧卡，人工处理者始终为工作区 operator。
+普通 Chat 历史创建者的移动或归档不改变人工路由，也不旋转卡片。人类配置修改记录共享 operator；
+密钥、域名等不改变责任事实的编辑不旋转问题版本。
 
 父单执行负责人持续接收子单状态及正式交付通知，包含阻塞、失败、取消与结果。
 历史父链缺父或跨工作区而无法解析执行关系时，普通子单状态变更在本工作区父单记录
 `child_done_parent_skipped`（`reason: responsibility_unresolved`）及具体缺口；不创建通知或唤醒轮。
 本空间结构状态派生与合法重开仍在同一事务执行，正式交付和验收继续拒绝未配置责任链。
-负责人不可用时保留未送达原因，并向明确根人类呈现责任缺口。普通派活报告仍回到实际
+负责人不可用时保留未送达原因，并向工作区操作者呈现责任缺口。普通派活报告仍回到实际
 派活人的原 Session 和 execution scope，跨团队不改变 Issue 责任。
 
 # 正式交付与验收
@@ -75,7 +76,7 @@ Task 请求在选择会话前沿 W→I 锁定并重新核对 Issue 与 Agent 的
 [交付服务](../../packages/server/src/store/issue-deliveries.ts)将正式交付放在统一消息的
 `issue_delivery` 元数据中，回复通过原会话 `reply_to_id` 引用交付，不建立另一套工作流表。
 执行负责人使用自己的 Task 凭据提交非空总结，Issue 进入 `in_review`，生成可定位的交付对象。子单由直接父单执行 Agent 验收；
-顶层由本单执行 Agent 验收，无需人类授权。当前工作区的有效成员也可主动验收或退回顶层交付。
+顶层由本单执行 Agent 验收，无需人类授权。人类操作者也可主动验收或退回顶层交付。
 所有路径均核对当前交付及责任 revision；人工操作是可选入口。
 
 验收同事务写入回复、交付收据、Issue `done` 和审计；任何一项失败均回滚。
@@ -144,12 +145,12 @@ SQLite 使用内存库；设置 `MULTIREMI_TEST_POSTGRES_URL` 后每个测试创
 # 历史归属复核
 
 `GET /api/workspaces/:workspaceId/issue-responsibility-migration?limit=50&offset=0`
-可选兼容工具：仅真实 workspace 管理员可分页复核缺失或失效历史联系人的根单，返回 `total`、`rootCount`、`legacyMemberExecutionCount`、
+可选兼容工具：已通过入口鉴权的人类操作者可分页复核缺失或失效历史联系人的根单，返回 `total`、`rootCount`、`legacyMemberExecutionCount`、
 `items` 和 `nextOffset`。每项保留原执行指派、创建人 ID、resolver revision 和 unresolved。
 旧 member 指派及可解析历史创建人只作为有来源、带可用性标志的候选；读取不写入责任。
 未知记录保留空候选，历史评论、消息与父链不受影响。
 
-真实 workspace 管理员使用 `POST /api/workspaces/:workspaceId/issue-responsibility-migration/map`，
+人类操作者使用 `POST /api/workspaces/:workspaceId/issue-responsibility-migration/map`，
 提交 `{ reason, mappings: [{ issueId, memberId, revision }] }`，返回 `{ mappedIssueIds }`。
 每批 1–100 个唯一根单，必须明确选人并解释依据；跨工作区、归档成员、子单或过期 revision
 使整批回滚。责任字段、审计和未解决 Q 的移交在同一事务提交；Task/daemon 不可借技术 owner
@@ -164,6 +165,6 @@ SQLite 使用内存库；设置 `MULTIREMI_TEST_POSTGRES_URL` 后每个测试创
 
 [`responsibility-http-integration.test.ts`](../../tests/unit/remi/responsibility-http-integration.test.ts)
 用 Web ApiClient 通过实际鉴权 HTTP 路由验证创建、子单交付/父单验收、根单 Agent 验收及可选成员验收，
-以及自动化、bot/topic 配置和历史显式映射；普通成员映射和过期 revision 都被拒绝。
+以及自动化、bot/topic 配置和历史显式映射；人类账号共享操作权限，Task/daemon 映射和过期 revision 被拒绝。
 API 快照脚本对责任与问题流程显式检查预期状态，包括原等待消费、Remi 总结、授权/撤销、
 退回和验收，历史夹具使用单独的明确 SQL 构造。这些验证不代替真实浏览器或 PPE 验收。

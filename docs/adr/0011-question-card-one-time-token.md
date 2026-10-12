@@ -13,16 +13,19 @@ Every card delivery mints a random token. Only its hash, designated recipient
 The plaintext travels once in the action value with `message_id` and
 `route_revision`. It must never appear in activities or logs.
 
-The server validates the configured bot transport, resolves the operator to one
-active member of the Q's frozen workspace, then requires the current handler,
-current responsibility facts, expected route revision and unused token. One
-transaction saves the answer, original-session reply and card consumption.
+The server validates the configured bot transport and resolves the external
+`open_id` to one active historical identity in the Q's frozen workspace. It
+requires the actual delivery recipient, the current human stage, current
+responsibility facts, expected route revision and unused token. Web callers use
+the shared workspace operator; this does not replace external recipient proof
+or erase the verified external respondent from answer history. One transaction
+saves the answer, original-session reply and card consumption.
 Redelivery and responsibility transfer rotate credentials; old cards fail closed.
 
 The bot host forwards the action. Its optional in-memory registry only supports
 card patching; native callbacks work after a host restart by rereading the
-persisted original Q. Group owners and workspace owners do not substitute for
-its designated human. Ambiguous identity mapping produces a text reminder with
+persisted original Q. Group owners and workspace operator access do not substitute
+for its external delivery recipient. Ambiguous identity mapping produces a text reminder with
 its original Q and workbench link.
 
 Remi reads and summarizes the same Q before normal card delivery. Unavailable

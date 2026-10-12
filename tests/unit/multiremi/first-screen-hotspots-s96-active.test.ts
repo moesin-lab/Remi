@@ -76,10 +76,13 @@ describe("S9-6 active-task SQL selection / public projection", () => {
       for (const id of [issue, fixture.issueIds[1]!, foreignIssue.id, "iss_nonexistent"]) {
         const headers = { Authorization: `Bearer ${token}`, "X-Workspace-ID": "local" };
         const invalidBinding = taskTokens.slice(1).includes(token);
+        // The fixture's local PAT retains its legacy workspace binding; real
+        // account PATs share workspace access, while task credentials stay scoped.
+        const workspaceBound = taskTokens.includes(token) || token === owner.token;
         const workspaceId = id === foreignIssue.id ? foreign.id : "local";
         const projection = await app.request(`/api/s96-store-projection/${id}?workspace_id=${workspaceId}`, { headers });
-        expect(projection.status).toBe(invalidBinding ? 401 : id === "iss_nonexistent" ? 404
-          : id === foreignIssue.id && token !== "active-fixture-root" ? 404 : 200);
+        expect(projection.status, `credential ${[owner.token, reader.token, "active-fixture-root", ...taskTokens].indexOf(token)} / ${id}`).toBe(invalidBinding ? 401 : id === "iss_nonexistent" ? 404
+          : id === foreignIssue.id && workspaceBound ? 404 : 200);
         const retired = await app.request(`/api/issues/${id}/active-task`, { headers });
         expect(retired.status).toBe(invalidBinding ? 401 : 410);
         expect(await retired.json()).toEqual(invalidBinding ? { error: "unauthorized" }

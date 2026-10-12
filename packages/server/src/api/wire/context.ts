@@ -27,6 +27,8 @@ export interface MultiremiRequestAuth {
 declare module "hono" {
   interface ContextVariableMap {
     multiremiAuth: MultiremiRequestAuth;
+    /** Set only after credential verification checked this daemon's workspace. */
+    multiremiVerifiedDaemonWorkspaceId: string;
     multiremiMemberMemo: Map<string, MultiremiWorkspaceMember | null>;
   }
 }
@@ -200,7 +202,7 @@ function matchesCredentialWorkspace(c: Context, workspaceId: string): boolean {
 
 export function currentWorkspaceRoleStrict(c: Context, store: MultiremiStore, workspaceId: string): string | null {
   if (!matchesCredentialWorkspace(c, workspaceId)) return null;
-  if (isHumanOperatorRequest(c)) return store.getWorkspace(workspaceId) ? "owner" : null;
+  if (isHumanOperatorRequest(c)) return store.hasWorkspace(workspaceId) ? "owner" : null;
   const member = currentWorkspaceMember(c, store, workspaceId);
   if (member) return member.role;
   if (workspaceId === "local" && authenticatedRequestUserId(c) === null) return "owner";

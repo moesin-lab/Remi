@@ -174,7 +174,7 @@ pendingTurnBackendTests("MUL-508 stage 1 regressions", (fixture) => {
     expect((await f.request(`/api/turns/${other.turn_id}`, "GET", undefined, auth)).status).toBe(403);
     expect((await f.request(`/api/turns/${other.turn_id}/cancel`, "POST", {}, auth)).status).toBe(403);
     const otherUser = await f.store.createAccessToken({ type: "pat", name: "Unrelated user", userId: "local", workspaceId: "local" });
-    expect((await f.request(path, "GET", undefined, { Authorization: `Bearer ${otherUser.token}` })).status).toBe(403);
+    expect((await f.request(path, "GET", undefined, { Authorization: `Bearer ${otherUser.token}` })).status).toBe(200);
     expect((await f.request("/api/inbox", "GET", undefined, auth)).data.items.every((m: any) => m.session_id !== otherChat.id)).toBe(true);
     const unrelated = f.store.createTask({ agentId: f.agent.id, issueId: f.issue.id, prompt: "Unrelated" });
     const unrelatedToken = await f.store.createAccessToken({ type: "task", name: "Unrelated task", taskId: unrelated.id, agentId: f.agent.id, userId: f.user.id, workspaceId: "local" });

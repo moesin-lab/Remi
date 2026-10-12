@@ -101,11 +101,18 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
       const sourceOnly = await member(false);
       const both = await member(true);
       const targetOnly = await member(false, target);
+      // Human login accounts now share all workspaces. Legacy ownerless PATs
+      // remain scoped capabilities and exercise the cross-workspace deny path.
+      const scoped = async (workspaceId: string) => (await store.createAccessToken({
+        type: "pat", workspaceId, userId: "local", name: "Bound workspace capability",
+      })).token;
+      const sourceScoped = await scoped(source), targetScoped = await scoped(target);
       const request = (token: string, path: string, method: string, body?: unknown) => app.request(path, {
         method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
       return { app, sourceOnly: sourceOnly.token, both: both.token, targetOnly: targetOnly.token,
+        sourceScoped, targetScoped,
         sourceMember: sourceOnly.memberId, targetMember: targetOnly.memberId, bothUser: both.userId,
         root: "mul476-test-root", request };
     }
@@ -504,7 +511,8 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
           expect(JSON.parse(original.data).projectId).toBe(f.project.id);
           expect(original.workspace_id).toBe(f.source);
           for (const path of [`/api/issues/${f.issue.id}`, `/api/issues/${f.issue.id}/labels`, `/api/issues/${f.issue.id}/timeline`]) {
-            expect((await f.auth.request(f.auth.sourceOnly, path, "GET")).status).toBe(404);
+            expect(await read(f.auth, f.auth.sourceOnly, path)).toEqual(await read(f.auth, f.auth.targetOnly, path));
+            expect((await f.auth.request(f.auth.sourceScoped, path, "GET")).status).toBe(404);
           }
         }
       });
@@ -524,7 +532,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         }
       });
 
-      it(`${direction}: MUL-480 subscriber investigation: source member stays subscribed but gets no target comment`, async () => {
+      it(`${direction}: MUL-480 historical subscriptions collapse to the target operator without self-notifications`, async () => {
         const f = await moveFixture("member");
         store.addIssueSubscriber(f.issue.id, f.auth.sourceMember);
         const before = store.listInboxItems(f.auth.sourceMember);
@@ -534,13 +542,16 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         const targetBefore = store.listInboxItems(otherTargetMember.id).length;
         const session = store.createIssueSession(f.issue.id, { title: "Target notification probe" });
         store.createIssueComment(f.issue.id, { body: "Target-only new content", authorType: "member", authorId: f.auth.targetMember, issueSessionId: session.id });
-        expect(store.listIssueSubscribers(f.issue.id).some(row => row.userId === f.auth.sourceMember)).toBe(true);
+        const sourceOperator = store.getWorkspaceOperator(f.source)!;
+        const targetOperator = store.getWorkspaceOperator(f.target)!;
+        expect(db.query("SELECT user_id FROM multiremi_issue_subscribers WHERE issue_id = ? AND user_id = ?")
+          .get(f.issue.id, sourceOperator.id)).toEqual({ user_id: sourceOperator.id });
+        expect(store.listIssueSubscribers(f.issue.id).map(row => row.userId)).toEqual([targetOperator.id]);
         expect(store.listInboxItems(f.auth.sourceMember)).toEqual(before);
-        expect(store.listInboxItems(otherTargetMember.id)).toHaveLength(targetBefore + 1);
-        // The subscriber list is not filtered on move; this is an identified
-        // residual source member ID, reported separately without changing it.
+        expect(store.listInboxItems(otherTargetMember.id)).toHaveLength(targetBefore);
+        // Historical rows do not create a second human subscription in the UI.
         const subscribers = await read(f.auth, f.auth.targetOnly, `/api/issues/${f.issue.id}/subscribers`);
-        expect(subscribers.some((row: { user_id: string }) => row.user_id === f.auth.sourceMember)).toBe(true);
+        expect(subscribers.map((row: { user_id: string }) => row.user_id)).toEqual([targetOperator.id]);
       });
 
       it(`${direction}: moved Issue status notifications use the fresh target Main without moving source history or creating another Session`, async () => {
@@ -576,7 +587,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         expect(notifications).toHaveLength(targetBefore + 1);
         const notification = notifications.find(item => item.type === "dependency_satisfied")!;
         expect(store.getMessage(notification.id)).toMatchObject({ session_id: targetMain.id,
-          message_kind: "status", to_member_id: f.auth.targetMember });
+          message_kind: "status", to_member_id: store.getWorkspaceOperator(f.target)!.id });
         expect(store.getIssueSession(oldSession.id)).toMatchObject({ ownerType: "issue", ownerId: f.issue.id,
           workspaceId: f.source, isDefault: false });
         expect(db.query("SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id = ?").get(oldSession.id))
@@ -597,7 +608,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
           const proc = Bun.spawn([process.execPath, "apps/remi/main.ts", "issue", "batch-update",
             "--data", JSON.stringify({ issue_ids: [f.issue.id], updates: { ...responsibilityTransfer(f.target), workspace_id: f.target } }),
             "--server", server.url.toString(), "--token", f.auth.both, "--output", "json"], {
-            env: { PATH: process.env.PATH, HOME: process.env.TMPDIR ?? "/tmp" }, stdout: "pipe", stderr: "pipe",
+            env: { ...process.env }, stdout: "pipe", stderr: "pipe",
           });
           const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
           expect(code, stdout + stderr).toBe(0);
@@ -611,7 +622,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         const auth = await credentials(source, target);
         const { issue, runtime } = issueWorkspace(source);
         const before = store.getIssueWorkspace(issue.id);
-        const denied = await auth.request(auth.sourceOnly, `/api/issues/${issue.id}`, "PATCH", { ...responsibilityTransfer(target, issue.id), workspace_id: target });
+        const denied = await auth.request(auth.sourceScoped, `/api/issues/${issue.id}`, "PATCH", { ...responsibilityTransfer(target, issue.id), workspace_id: target });
         expect(denied.status).toBe(404);
         for (const status of ["preparing", "ready", "in_use", "dirty", "error", "runtime_offline"]) {
           db.run("UPDATE multiremi_issue_workspaces SET status = ? WHERE issue_id = ?", [status, issue.id]);
@@ -667,7 +678,8 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
             runtime_status: null, runtime_provider: null, runtime_mode: null, runtime_device_info: null,
             runtime_daemon_id: null, runtime_machine_name: null, root_path: "", branch_name: "", repos: [] });
           expect(JSON.stringify(bundle)).not.toContain(`/PRIVATE/${source}`);
-          expect((await auth.request(auth.sourceOnly, `/api/issues/${issue.id}/workspace`, "GET")).status).toBe(404);
+          expect(await read(auth, auth.sourceOnly, `/api/issues/${issue.id}/workspace`)).toEqual(bundle);
+          expect((await auth.request(auth.sourceScoped, `/api/issues/${issue.id}/workspace`, "GET")).status).toBe(404);
         });
       }
 
@@ -679,7 +691,8 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         store.registerRuntime({ id: `${runtime.id}_sibling`, name: "Keep daemon alive", provider: "claude",
           workspaceId: source, daemonId: runtime.daemonId! });
         db.run("UPDATE multiremi_issues SET workspace_id = ?, issue_number = 999, issue_key = 'MUL-999' WHERE id = ?", [target, issue.id]);
-        expect((await auth.request(auth.sourceOnly, `/api/issues/${issue.id}`, "GET")).status).toBe(404);
+        expect((await auth.request(auth.sourceOnly, `/api/issues/${issue.id}`, "GET")).status).toBe(200);
+        expect((await auth.request(auth.sourceScoped, `/api/issues/${issue.id}`, "GET")).status).toBe(404);
         for (const token of [auth.sourceOnly, auth.targetOnly]) {
           const abandoned = await auth.request(token, `/api/issues/${issue.id}/workspace/abandon`, "POST", {});
           expect(abandoned.status).toBe(404);
@@ -718,8 +731,10 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
               expect(encoded).not.toContain(secret);
             }
           }
-          expect((await auth.request(auth.sourceOnly, `/api/issues/${issue.id}/workspace`, "GET")).status).toBe(404);
-          expect((await auth.request(auth.sourceOnly, `/api/issues/${issue.id}/share`, "POST", {})).status).toBe(404);
+          expect(await read(auth, auth.sourceOnly, `/api/issues/${issue.id}/workspace`)).toEqual(workspace);
+          expect((await auth.request(auth.sourceOnly, `/api/issues/${issue.id}/share`, "POST", {})).status).toBe(201);
+          expect((await auth.request(auth.sourceScoped, `/api/issues/${issue.id}/workspace`, "GET")).status).toBe(404);
+          expect((await auth.request(auth.sourceScoped, `/api/issues/${issue.id}/share`, "POST", {})).status).toBe(404);
         });
       }
 
@@ -931,10 +946,10 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
             title: `HTTP child ${i}`, workspaceId: source, parentIssueId: parent.id,
           }));
           for (const issue of [parent, children[0]!]) {
-            const denied = await auth.request(auth.sourceOnly, `${prefix}/${issue.id}`, method!, { ...responsibilityTransfer(target, issue.id), workspace_id: target });
+            const denied = await auth.request(auth.sourceScoped, `${prefix}/${issue.id}`, method!, { ...responsibilityTransfer(target, issue.id), workspace_id: target });
             expect(denied.status).toBe(404);
             expect(await denied.json()).not.toHaveProperty("relations");
-            for (const token of [auth.both, auth.root]) {
+            for (const token of [auth.sourceOnly, auth.both, auth.root]) {
               const refused = await auth.request(token, `${prefix}/${issue.id}`, method!, { ...responsibilityTransfer(target, issue.id), workspace_id: target });
               expect(refused.status).toBe(409);
               const body = await refused.json();
@@ -947,17 +962,17 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         });
       }
 
-      it(`${direction}: HTTP detachment must precede a move and leaf moves require target membership`, async () => {
+      it(`${direction}: HTTP detachment precedes a move and human access does not require target membership`, async () => {
         const { source, target } = workspaces(reverse);
         const auth = await credentials(source, target);
         const parent = createResponsibleTestIssue(store, { title: "Detach parent", workspaceId: source });
         const child = createResponsibleTestIssue(store, { title: "Detach child", workspaceId: source, parentIssueId: parent.id });
-        expect((await auth.request(auth.sourceOnly, `/api/issues/${child.id}`, "PATCH", { ...responsibilityTransfer(target, child.id, true), workspace_id: target, parent_issue_id: null })).status).toBe(404);
+        expect((await auth.request(auth.sourceScoped, `/api/issues/${child.id}`, "PATCH", { ...responsibilityTransfer(target, child.id, true), workspace_id: target, parent_issue_id: null })).status).toBe(404);
         expect((await auth.request(auth.both, `/api/issues/${child.id}`, "PATCH", { ...responsibilityTransfer(target, child.id, true), workspace_id: target, parent_issue_id: null })).status).toBe(409);
         expect((await auth.request(auth.sourceOnly, `/api/issues/${child.id}`, "PATCH", { ...responsibilityTransfer(source, child.id, true), parent_issue_id: null })).status).toBe(200);
-        expect((await auth.request(auth.sourceOnly, `/api/issues/${child.id}`, "PATCH", { ...responsibilityTransfer(target, child.id), workspace_id: target })).status).toBe(404);
+        expect((await auth.request(auth.sourceScoped, `/api/issues/${child.id}`, "PATCH", { ...responsibilityTransfer(target, child.id), workspace_id: target })).status).toBe(404);
         expect(store.getIssue(child.id)?.workspaceId).toBe(source);
-        expect((await auth.request(auth.both, `/api/issues/${child.id}`, "PATCH", { ...responsibilityTransfer(target, child.id), workspace_id: target })).status).toBe(200);
+        expect((await auth.request(auth.sourceOnly, `/api/issues/${child.id}`, "PATCH", { ...responsibilityTransfer(target, child.id), workspace_id: target })).status).toBe(200);
         expect(store.getIssue(child.id)).toMatchObject({ workspaceId: target, parentIssueId: null });
       });
 
@@ -969,8 +984,8 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
           createResponsibleTestIssue(store, { title: "Batch child", workspaceId: source, parentIssueId: parent.id });
           const leaf = createResponsibleTestIssue(store, { title: "Batch leaf first", workspaceId: source });
           const body = { issue_ids: [leaf.id, parent.id], updates: { ...responsibilityTransfer(target), workspace_id: target } };
-          expect((await auth.request(auth.sourceOnly, `${prefix}/batch-update`, "POST", body)).status).toBe(404);
-          for (const token of [auth.both, auth.root]) {
+          expect((await auth.request(auth.sourceScoped, `${prefix}/batch-update`, "POST", body)).status).toBe(404);
+          for (const token of [auth.sourceOnly, auth.both, auth.root]) {
             const response = await auth.request(token, `${prefix}/batch-update`, "POST", body);
             expect(response.status).toBe(409);
             expect(await response.json()).toMatchObject({ code: "workspace_move_blocked", issue_ids: [parent.id] });
@@ -989,8 +1004,8 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
           const dependency = store.createIssueDependency(issue.id, { dependsOnIssueId: other.id, type });
           for (const [endpoint, peer] of [[issue, other], [other, issue]]) {
             for (const prefix of ["/api/issues", "/api/multiremi/issues"]) {
-              expect((await auth.request(auth.sourceOnly, `${prefix}/${endpoint!.id}`, "PATCH", { ...responsibilityTransfer(target, endpoint!.id), workspace_id: target })).status).toBe(404);
-              for (const token of [auth.both, auth.root]) {
+              expect((await auth.request(auth.sourceScoped, `${prefix}/${endpoint!.id}`, "PATCH", { ...responsibilityTransfer(target, endpoint!.id), workspace_id: target })).status).toBe(404);
+              for (const token of [auth.sourceOnly, auth.both, auth.root]) {
                 const response = await auth.request(token, `${prefix}/${endpoint!.id}`, "PATCH", { ...responsibilityTransfer(target, endpoint!.id), workspace_id: target });
                 expect(response.status).toBe(409);
                 expect((await response.json()).relations.dependencies).toEqual([{ id: dependency.id, key: peer!.key, type }]);
@@ -1006,8 +1021,8 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         const auth = await credentials(source, target);
         const leaf = createResponsibleTestIssue(store, { title: "Implicit local target", workspaceId: source });
         for (const workspace_id of [null, ""]) {
-          expect((await auth.request(auth.sourceOnly, `/api/issues/${leaf.id}`, "PATCH", { workspace_id })).status).toBe(404);
-          expect((await auth.request(auth.sourceOnly, "/api/issues/batch-update", "POST", {
+          expect((await auth.request(auth.sourceScoped, `/api/issues/${leaf.id}`, "PATCH", { workspace_id })).status).toBe(404);
+          expect((await auth.request(auth.sourceScoped, "/api/issues/batch-update", "POST", {
             issue_ids: [leaf.id], updates: { workspace_id },
           })).status).toBe(404);
           expect(store.getIssue(leaf.id)?.workspaceId).toBe(source);
@@ -1024,7 +1039,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
           const proc = Bun.spawn([process.execPath, "apps/remi/main.ts", "issue", "batch-update",
             "--data", JSON.stringify({ issue_ids: [parent.id], updates: { ...responsibilityTransfer(target), workspace_id: target } }),
             "--server", server.url.toString(), "--token", auth.both, "--output", "json"], {
-            env: { PATH: process.env.PATH, HOME: process.env.TMPDIR ?? "/tmp" }, stdout: "pipe", stderr: "pipe",
+            env: { ...process.env }, stdout: "pipe", stderr: "pipe",
           });
           const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
           expect(code).not.toBe(0);
@@ -1085,7 +1100,8 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         }
         const decisions = await read(auth, auth.targetOnly, issueMessagesPath(store, parent.id) + "?message_kind=decision");
         expect(decisions.messages).toEqual([]);
-        expect((await auth.request(auth.targetOnly, `/api/messages/${oldDecision.id}/question`, 'GET')).status).toBe(404);
+        expect((await auth.request(auth.targetOnly, `/api/messages/${oldDecision.id}/question`, 'GET')).status).toBe(200);
+        expect((await auth.request(auth.targetScoped, `/api/messages/${oldDecision.id}/question`, 'GET')).status).toBe(404);
         expect(store.getIssueDecision(parent.id, oldDecision.id)).toBeNull();
         expect(store.countPendingIssueDecisions(parent.id)).toBe(0);
         expect((await read(auth, auth.targetOnly, `/api/issues/${parent.id}`)).pending_decision_count).toBe(0);

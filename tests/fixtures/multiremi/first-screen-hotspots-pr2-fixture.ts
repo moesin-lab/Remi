@@ -196,7 +196,7 @@ export async function capturePr2Responses() {
     const attachment = { status: response.status,
       headers: Object.fromEntries(["content-type", "content-length", "content-disposition", "x-content-type-options"].map(key => [key, response.headers.get(key)])),
       body: Buffer.from(await response.arrayBuffer()).toString("base64") };
-    const denied = await json(`/api/attachments/${harness.privateAttachmentId}/content`, {
+    const sharedAttachment = await json(`/api/attachments/${harness.privateAttachmentId}/content`, {
       ...viewerHeaders, "If-None-Match": `"${harness.privateAttachmentId}"`,
     });
     const unauthorized = await json(`/api/attachments/${harness.attachmentId}/content`, {} as typeof headers);
@@ -211,7 +211,7 @@ export async function capturePr2Responses() {
       for (const [id, placeholder] of harness.issueSessionIds) wire = wire.replaceAll(id, placeholder);
       return JSON.parse(wire);
     };
-    return normalize({ source: "MUL-493 canonical inbox; unchanged attachment/runtime wire contracts", fixture: { sessions: fixture.counts.sessions,
-      agents: fixture.counts.agents, inboxRows: fixture.counts.inboxRows + 6 }, inbox, attachment, denied, unauthorized, runtimes, owned, hydrated });
+    return normalize({ source: "Shared workspace inbox, attachments and Runtime fleet; historical authors preserved", fixture: { sessions: fixture.counts.sessions,
+      agents: fixture.counts.agents, inboxRows: fixture.counts.inboxRows + 6 }, inbox, attachment, sharedAttachment, unauthorized, runtimes, owned, hydrated });
   } finally { await harness.dispose(); restore(); }
 }

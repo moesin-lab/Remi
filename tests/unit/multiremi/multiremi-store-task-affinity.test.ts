@@ -230,7 +230,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     expect(store.getTask(task.id)?.runtimeId).toBeNull();
   });
 
-  it("re-pins (not re-pools) a stale local_directory task off an ineligible machine", () => {
+  it("recovers a stale local_directory task on its machine after historical owner changes", () => {
     const store = createStore();
     const dirRuntime = store.registerRuntime({ id: "rt_stale_dir", name: "dir", provider: "codex", daemonId: "daemon-stale-dir" });
     store.registerRuntime({ id: "rt_stale_other", name: "other", provider: "codex", daemonId: "daemon-other" });
@@ -245,12 +245,11 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     expect(task.runtimeId).toBe(dirRuntime.id);
     expect(store.claimTask(dirRuntime.id)?.id).toBe(task.id);
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2020-01-01T00:00:00.000Z", task.id]);
-    // Owner change makes dirRuntime ineligible; stale recovery must re-pin to
-    // the directory's daemon (never re-pool onto a machine without the dir).
+    // Human attribution does not change eligibility or the directory's machine.
     store.updateAgent(agent.id, { ownerId: "someone" });
-    expect(store.claimTask(dirRuntime.id)).toBeNull();
+    expect(store.claimTask(dirRuntime.id)?.id).toBe(task.id);
     expect(store.getTask(task.id)?.runtimeId).toBe(dirRuntime.id);
-    expect(store.getTask(task.id)?.status).toBe("queued");
+    expect(store.getTask(task.id)?.status).toBe("dispatched");
   });
 
   it("fully cancels (terminal) an agent's tasks on workspace move, ending autopilot runs", () => {
@@ -384,7 +383,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     expect(store.listSquads().find((sq) => sq.name === "S2")).toBeUndefined();
   });
 
-  it("re-pools a stale dispatched task the runtime may no longer run", () => {
+  it("recovers a stale dispatched task across historical human ownership", () => {
     const store = createStore();
     const runtime = store.registerRuntime({ id: "rt_stale", name: "stale", provider: "codex", ownerId: "alice", visibility: "private" });
     const agent = store.createAgent({ name: "Stale", provider: "codex", ownerId: "alice" });
@@ -392,12 +391,11 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     // The dispatch response was lost (never started) and the recovery window passed.
     runTurnExecutionMutation(db!, "UPDATE multiremi_turn_execution_records SET dispatched_at = ? WHERE id = ?", ["2020-01-01T00:00:00.000Z", task.id]);
-    // Meanwhile the agent changed owner, so this runtime may no longer run it.
+    // Attribution changes do not remove a compatible workspace runtime.
     store.updateAgent(agent.id, { ownerId: "bob" });
-    // The stale re-claim must NOT hand the task back to the now-ineligible runtime.
-    expect(store.claimTask(runtime.id)).toBeNull();
-    expect(store.getTask(task.id)?.status).toBe("queued");
-    expect(store.getTask(task.id)?.runtimeId).toBeNull();
+    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    expect(store.getTask(task.id)?.status).toBe("dispatched");
+    expect(store.getTask(task.id)?.runtimeId).toBe(runtime.id);
   });
 
   it("rejects an autopilot whose project is in another workspace", () => {
@@ -429,7 +427,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     ).toThrow(/different workspace/i);
   });
 
-  it("re-homes an agent's queued tasks when its owner changes", () => {
+  it("preserves a queued task's machine and provider session when only attribution changes", () => {
     const store = createStore();
     const alicePrivate = store.registerRuntime({ id: "rt_owner_alice", name: "alice", provider: "codex", ownerId: "alice", visibility: "private" });
     const bobPrivate = store.registerRuntime({ id: "rt_owner_bob", name: "bob", provider: "codex", ownerId: "bob", visibility: "private" });
@@ -442,10 +440,11 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const followUp = store.createTask({ agentId: agent.id, chatSessionId: session.id, prompt: "again" });
     expect(followUp.runtimeId).toBe(alicePrivate.id);
 
-    // Reassign the agent to bob → the queued task must leave alice's private pin.
+    // The provider session is still on the same machine after an attribution edit.
     store.updateAgent(agent.id, { ownerId: "bob" });
-    expect(store.getTask(followUp.id)?.runtimeId).toBeNull();
-    expect(store.claimTask(bobPrivate.id)?.id).toBe(followUp.id);
+    expect(store.getTask(followUp.id)).toMatchObject({ runtimeId: alicePrivate.id, sessionId: "sess_owner" });
+    expect(store.claimTask(bobPrivate.id)).toBeNull();
+    expect(store.claimTask(alicePrivate.id)?.id).toBe(followUp.id);
   });
 
   it("cancels an agent's queued tasks when its workspace changes", () => {
@@ -486,16 +485,16 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     expect(store.claimTask(claude.id)?.id).toBe(followUp.id);
   });
 
-  it("gives each owner their own default agent so a private runtime can run it", () => {
+  it("preserves explicitly addressed historical defaults while sharing runtime eligibility", () => {
     const store = createStore();
     const bobPrivate = store.registerRuntime({ id: "rt_def_bob", name: "bob", provider: "claude", ownerId: "bob", visibility: "private" });
     const bobDefault = store.ensureDefaultAgent("claude", { workspaceId: "local", ownerId: "bob" });
     const aliceDefault = store.ensureDefaultAgent("claude", { workspaceId: "local", ownerId: "alice" });
-    // Distinct per-owner agents, each owned by that member.
+    // Store callers can still address historical defaults without rewriting them.
     expect(bobDefault.id).not.toBe(aliceDefault.id);
     expect(bobDefault.ownerId).toBe("bob");
-    // Bob's private runtime can run Bob's own default agent's task.
-    const task = store.createTask({ agentId: bobDefault.id, prompt: "onboard" });
+    // A compatible workspace runtime also runs a differently attributed default.
+    const task = store.createTask({ agentId: aliceDefault.id, prompt: "onboard" });
     expect(store.claimTask(bobPrivate.id)?.id).toBe(task.id);
   });
 
@@ -612,7 +611,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     expect(unsafeRetry.runtimeId).toBeNull();
   });
 
-  it("keeps another member's private default agent out of the default endpoint", async () => {
+  it("resolves the same operator default agent for both authenticated accounts", async () => {
     const store = createStore();
     store.createWorkspaceMember({ workspaceId: "local", userId: "alice", name: "Alice", role: "member" });
     store.createWorkspaceMember({ workspaceId: "local", userId: "bob", name: "Bob", role: "member" });
@@ -621,7 +620,7 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const jsonHeaders = (token: string) => ({ "Content-Type": "application/json", Authorization: `Bearer ${token}` });
 
-    // Alice seeds her default agent (per-owner) and stores a secret on it.
+    // The first account seeds the workspace operator's default.
     const seeded = await app.request("/api/multiremi/agents/default", {
       method: "POST",
       headers: jsonHeaders(aliceToken.token),
@@ -629,23 +628,22 @@ describe("Multiremi store — local_directory affinity, retries, and agent re-ho
     });
     expect(seeded.status).toBe(201);
     const aliceAgent = (await seeded.json()).agent;
-    expect(aliceAgent.ownerId).toBe("alice");
+    expect(aliceAgent.ownerId).toBe("local");
     store.updateAgent(aliceAgent.id, { customEnv: { SECRET_TOKEN: "s3cret-value" } });
 
-    // Bob's provider-only call resolves to HIS own default agent — a distinct
-    // id owned by bob — never alice's, so her custom_env can't leak.
+    // Another human resolves that same configured agent.
     const bobSeed = await app.request("/api/multiremi/agents/default", {
       method: "POST",
       headers: jsonHeaders(bobToken.token),
       body: JSON.stringify({ provider: "claude" }),
     });
-    expect(bobSeed.status).toBe(201);
+    expect(bobSeed.status).toBe(200);
     const bobBody = await bobSeed.json();
-    expect(bobBody.agent.id).not.toBe(aliceAgent.id);
-    expect(bobBody.agent.ownerId).toBe("bob");
-    expect(JSON.stringify(bobBody)).not.toContain("s3cret-value");
+    expect(bobBody.agent.id).toBe(aliceAgent.id);
+    expect(bobBody.agent.ownerId).toBe("local");
+    expect(bobBody.agent.customEnv).toEqual({ SECRET_TOKEN: "s3cret-value" });
 
-    // Each keeps resolving to their own default agent on repeat calls.
+    // Repeated calls continue resolving the same default.
     const aliceAgain = await app.request("/api/multiremi/agents/default", {
       method: "POST",
       headers: jsonHeaders(aliceToken.token),

@@ -198,7 +198,11 @@ export function denyDaemonOwnerWorkspaceMembership(
   c: Context,
   store: MultiremiStore,
 ): Response | null {
-  if (isDaemonOwnerWorkspaceMember(store, currentAccessToken(c))) return null;
+  const token = currentAccessToken(c);
+  // HTTP authentication already checked existence in the token lookup. Other
+  // callers must still validate it; a token-shaped auth context is not proof.
+  if (token?.type === "daemon" && c.get("multiremiVerifiedDaemonWorkspaceId") === token.workspaceId) return null;
+  if (isDaemonOwnerWorkspaceMember(store, token)) return null;
   return c.json(
     {
       error: "daemon workspace is no longer available",
@@ -365,8 +369,9 @@ export function compatibilityInboxScope(
 ): { memberId: string; workspaceId: string } | Response {
   const workspaceId = resolveRequestWorkspaceId(c, store, c.req.query("workspaceId") ?? c.req.query("workspace_id"));
   if (workspaceId instanceof Response) return workspaceId;
-  const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+  const denied = denyCredentialWorkspaceAccess(c, workspaceId);
   if (denied) return denied;
+  // The operator read joins the owning workspace, so it also proves existence.
   const operator = store.getWorkspaceOperator(workspaceId);
   if (!operator) return c.json({ error: "inbox not found" }, 404);
   return { memberId: operator.id, workspaceId };
@@ -659,9 +664,14 @@ export function loadCurrentWorkspaceRole(
 }
 
 export function denyCurrentUserWorkspaceAccess(c: Context, store: MultiremiStore, workspaceId: string): Response | null {
+  const denied = denyCredentialWorkspaceAccess(c, workspaceId);
+  if (denied) return denied;
+  return store.hasWorkspace(workspaceId) ? null : c.json({ error: "workspace not found" }, 404);
+}
+
+function denyCredentialWorkspaceAccess(c: Context, workspaceId: string): Response | null {
   const token = currentAccessToken(c);
   if (token?.type === "daemon") return c.json({ error: "forbidden for daemon token" }, 403);
-  if (!store.getWorkspace(workspaceId)) return c.json({ error: "workspace not found" }, 404);
   const userId = authenticatedRequestUserId(c);
   // Tokens bound to one workspace (task tokens, user-less workspace PATs) can't
   // reach others. A human's login PAT is minted under "local" but is a session

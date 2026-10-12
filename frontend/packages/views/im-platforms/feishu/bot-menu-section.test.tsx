@@ -151,7 +151,7 @@ describe("BotMenuSection", () => {
     await userEvent.setup().click(screen.getByRole("button", { name: "Dry run" }));
     expect(await screen.findByText("Connection lost")).toBeInTheDocument();
     expect(mockGetPublish).toHaveBeenCalledWith("workspace-1", "publish-second", "bot-second");
-    expect(screen.getByRole("button", { name: "Dry run" })).toBeEnabled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Dry run" })).toBeEnabled());
   });
 
 });

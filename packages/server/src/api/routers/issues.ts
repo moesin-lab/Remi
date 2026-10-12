@@ -906,7 +906,7 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
     const assigneeType = body.assigneeType ?? body.assignee_type ?? (body.agentId ? "agent" : null);
-    if(assigneeType==='member')return c.json({error:'Choose an Agent or team Leader for execution; configure the final human through responsible_member_id',code:'issue_execution_owner_required'},409);
+    if(assigneeType==='member')return c.json({error:'Choose an Agent or team Leader for execution',code:'issue_execution_owner_required'},409);
     assertRuntimeWorkspaceAccess(c, store, body.runtimeWorkspaceId ?? body.runtime_workspace_id, workspaceId);
     const assigneeId = body.assigneeId ?? body.assignee_id ?? body.agentId ?? null;
     const dispatchDenied = denySideSessionAssigneeDispatch(c, store, workspaceId, assigneeType, assigneeId);

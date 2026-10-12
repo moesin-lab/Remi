@@ -94,7 +94,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       const agent = store.createAgent({ name: `Replay ${directory}`, provider: "claude", runtimeId: runtime.id });
       const squad = owner === "squad" ? store.createSquad({ name: `Replay ${directory}`, leaderId: agent.id }) : null;
       const prerequisiteOwner=store.createAgent({name:`Prerequisite owner ${directory}`,provider:'codex',workspaceId:'local'});
-      const prerequisite = createResponsibleTestIssue(store, { title: "Crash prerequisite", status: "in_progress",assigneeType:'agent',assigneeId:prerequisiteOwner.id });
+      const prerequisite = createResponsibleTestIssue(store, { title: "Crash prerequisite", status: "in_progress",assigneeType:'agent',assigneeId:prerequisiteOwner.id,responsibleMemberId:null });
       const dependent = createResponsibleTestIssue(store, {
         title: "Crash dependent", status: "backlog", blockedBy: [prerequisite.id],
         assigneeType: owner, assigneeId: squad?.id ?? agent.id,

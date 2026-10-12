@@ -51,7 +51,8 @@ describe.skipIf(!adminUrl)("MUL-457 PostgreSQL grant and merge paths", () => {
     store.createIssueComment(parent.id, { body: "PG summary", authorType: "agent", authorId: owner.id });
     expect(()=>store.updateIssue(parent.id,{status:'done',actorType:'agent',actorId:owner.id})).toThrow('specific delivery');
     const prepared=prepareTestIssueDelivery(store,parent.id);
-    store.authorizeIssueDelivery(parent.id,prepared.delivery.id,owner.id,prepared.delivery.responsibilityRevision,prepared.actor);
+    store.authorizeIssueDelivery(parent.id,prepared.delivery.id,owner.id,prepared.delivery.responsibilityRevision,
+      {type:'member',id:store.resolveIssueResponsibility(parent.id).rootHuman!.id});
     database.resetTransactionDepthStats();
     store.respondIssueDelivery(parent.id,prepared.delivery.id,{action:'accept',revision:prepared.delivery.responsibilityRevision},
       {type:'agent',id:owner.id,taskId:prepared.executionTask.id});
@@ -101,7 +102,8 @@ describe.skipIf(!adminUrl)("MUL-457 PostgreSQL grant and merge paths", () => {
       expect(database.query('SELECT status,last_error FROM multiremi_scm_effects WHERE issue_id=?').get(parent.id))
         .toMatchObject({status:'applied',last_error:null});
       const prepared=prepareTestIssueDelivery(store,parent.id);
-      store.authorizeIssueDelivery(parent.id,prepared.delivery.id,owner.id,prepared.delivery.responsibilityRevision,prepared.actor);
+      store.authorizeIssueDelivery(parent.id,prepared.delivery.id,owner.id,prepared.delivery.responsibilityRevision,
+        {type:'member',id:store.resolveIssueResponsibility(parent.id).rootHuman!.id});
       database.resetTransactionDepthStats();
       store.respondIssueDelivery(parent.id,prepared.delivery.id,{action:'accept',revision:prepared.delivery.responsibilityRevision},
         {type:'agent',id:owner.id,taskId:prepared.executionTask.id});

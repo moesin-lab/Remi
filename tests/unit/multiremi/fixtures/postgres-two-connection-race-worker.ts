@@ -9,7 +9,7 @@
  *
  * Role `force` sends `{status: todo, force: true}`; `comment` and `rerun` drive
  * MUL-458's real HTTP entry points; role `auto` accepts the prerequisite's
- * submitted delivery as its designated human.
+ * submitted delivery using its explicitly prepared reviewer Task.
  * Every worker owns its own bridge and connection and reports its maximum
  * transaction depth to the parent.
  */
@@ -17,13 +17,14 @@ import { existsSync } from "node:fs";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { createMultiremiApp } from "@multiremi/api.js";
+import type { IssueDeliveryActor } from "@multiremi/store/issue-deliveries.js";
 
 interface RaceInput {
   databaseUrl: string;
   issueId: string;
   prerequisiteId: string;
   agentId?: string;
-  prerequisiteDelivery?: { id: string; revision: string; memberId: string } | null;
+  prerequisiteDelivery?: { id: string; revision: string; actor: IssueDeliveryActor } | null;
   barrierPath: string;
   role: "force" | "comment" | "rerun" | "owner_request" | "auto";
 }
@@ -81,7 +82,7 @@ self.onmessage = async (message: MessageEvent<RaceInput>) => {
       try {
         store.respondIssueDelivery(prerequisiteId, prerequisiteDelivery.id,
           { action: "accept", revision: prerequisiteDelivery.revision },
-          { type: "member", id: prerequisiteDelivery.memberId });
+          prerequisiteDelivery.actor);
         responseStatus = 200;
       } catch {
         // Same: a refusal is a valid outcome for the arbitration loser.

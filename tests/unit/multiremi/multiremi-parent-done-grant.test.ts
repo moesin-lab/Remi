@@ -195,7 +195,7 @@ describe("MUL-457 parent done grant", () => {
     expect(afterMemberForgery.status).toBe(409);
     expect((await afterMemberForgery.json()).code).toBe("issue_delivery_acceptance_required");
 
-    // 3. Even the owner's genuine comment requires a concrete delivery and proxy grant.
+    // 3. Even the owner's genuine comment still requires formal delivery and acceptance.
     const own = await app.request(issueMessagesPath(store, parent.id), {
       method: "POST", headers: auth(taskToken), body: JSON.stringify(requestMessageBody(store, { body: "Owner summary" }, { type: "role", ref: "issue_owner" })),
     });
@@ -221,7 +221,8 @@ describe("MUL-457 parent done grant", () => {
     expect(memberDone.status).toBe(409);
     expect((await memberDone.json()).code).toBe("issue_delivery_acceptance_required");
     const prepared=prepareTestIssueDelivery(store,parent.id);
-    store.authorizeIssueDelivery(parent.id,prepared.delivery.id,owner.id,prepared.delivery.responsibilityRevision,prepared.actor);
+    store.authorizeIssueDelivery(parent.id,prepared.delivery.id,owner.id,prepared.delivery.responsibilityRevision,
+      {type:'member',id:store.resolveIssueResponsibility(parent.id).rootHuman!.id});
     const oldSource=await store.createTaskAccessToken(prepared.executionTask,'local');
     store.updateIssue(parent.id, { assigneeType: "agent", assigneeId: other.id });
     expect(store.issueParentDoneGrantView(store.getIssue(parent.id)!)).toMatchObject({
@@ -253,7 +254,8 @@ describe("MUL-457 parent done grant", () => {
     expect(await held.json()).toMatchObject({ code: "issue_delivery_acceptance_required" });
     acceptTestIssueDelivery(store,child.id);
     const prepared=prepareTestIssueDelivery(store,parent.id);
-    store.authorizeIssueDelivery(parent.id,prepared.delivery.id,owner.id,prepared.delivery.responsibilityRevision,prepared.actor);
+    store.authorizeIssueDelivery(parent.id,prepared.delivery.id,owner.id,prepared.delivery.responsibilityRevision,
+      {type:'member',id:store.resolveIssueResponsibility(parent.id).rootHuman!.id});
     store.updateIssue(child.id,{status:'in_progress'});
     const ownerSource=await store.createTaskAccessToken(prepared.executionTask,'local');
     const heldDelivery=await app.request(`/api/issues/${parent.id}/deliveries/${prepared.delivery.id}/respond`,{method:'POST',headers:auth(ownerSource.token),
@@ -307,7 +309,8 @@ describe("MUL-457 parent done grant", () => {
     expect(teammate.status).toBe(409);
     expect((await teammate.json()).code).toBe('issue_delivery_acceptance_required');
     const prepared=prepareTestIssueDelivery(store,parent.id);
-    store.authorizeIssueDelivery(parent.id,prepared.delivery.id,owner.id,prepared.delivery.responsibilityRevision,prepared.actor);
+    store.authorizeIssueDelivery(parent.id,prepared.delivery.id,owner.id,prepared.delivery.responsibilityRevision,
+      {type:'member',id:store.resolveIssueResponsibility(parent.id).rootHuman!.id});
     const teammateDelivery=await app.request(`/api/issues/${parent.id}/deliveries/${prepared.delivery.id}/respond`,{method:'POST',headers:auth(teammateToken),
       body:JSON.stringify({action:'accept',revision:prepared.delivery.responsibilityRevision})});
     expect(teammateDelivery.status).toBe(403);

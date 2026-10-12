@@ -66,7 +66,7 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 
 `release-build-check.yml` 在合并请求和 main 上跑的内容不同（MUL-516）：
 
-- 合并请求只跑快检查：架构守卫、CLI 能力、前端类型/测试、CLI 和容器构建、平台专项检查。四个 `backend` 分片 job 的「Backend test suite」显示为跳过（skipped），job 仍正常报告结果。同一个合并请求推送新提交时，未跑完的旧运行会被自动取消。
+- 合并请求只跑快检查：架构守卫、Runtime 能力声明与 API 响应快照、CLI 能力、前端类型/测试、CLI 和容器构建、平台专项检查。`build` 中的契约回归验证 `hello`/`hb` 能力及完整路由响应，覆盖协议字段和 API 响应变更。四个 `backend` 分片 job 的「Backend test suite」显示为跳过（skipped），job 仍正常报告结果。同一个合并请求推送新提交时，未跑完的旧运行会被自动取消。
 - 后端全套 `bun run test` 在合入 main 后的 push 运行里跑。main 上的运行互不取消，每个 main 提交都有自己的完整结果。
 - 打 tag 前，目标 main SHA 必须有一次全绿的 main push 运行或 main 上的手动运行，包含完整四个后端分片；合并请求上的绿灯不能代替。检查停用后重新打开时，main 不会自动补跑，用 `gh workflow run release-build-check.yml --ref main` 手动跑一次。
 - 完整后端套件已经跑完且仅后端用例失败时，可以用 `gh workflow run release-build-check.yml --ref main -f retry_backend_run_id=<完整运行 ID>` 追加失败文件诊断。本 fork 仍执行完整四个后端分片，诊断通过不能清除完整套件的失败。入口支持上游 `build` 中的完整套件及本 fork 的四分片基准，核验每个后端 job 的完整日志、汇总、用例与文件数量、HOME 清理和其他 job 全绿；原 SHA 必须是目标 SHA 的祖先，差异只能是重跑入口、其脚本/测试和本说明，业务源码、依赖与原有测试必须完全相同。每个分片只诊断其原失败文件；上游单 job 基准由第一分片诊断。诊断还运行入口自身的测试，保持每个用例的原有期限，不设置全局宽限。取消或中断的套件、源码变化、部分测试和诊断运行本身不能作为基准。报告必须分别说明原完整运行的失败、诊断复跑的结果与当前完整运行的结果，不能把部分绿灯称为全量通过。

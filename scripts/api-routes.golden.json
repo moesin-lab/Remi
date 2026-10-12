@@ -22760,7 +22760,11 @@
       "status": 200,
       "body": {
         "workspace_id": "local",
-        "bot_menu": {}
+        "bot_id": "default",
+        "bot_menu": {
+          "default": []
+        },
+        "legacy_target_count": 0
       }
     },
     {
@@ -22771,6 +22775,7 @@
       "body": {
         "id": "bmp_ntqjp15rt1ph",
         "workspace_id": "local",
+        "bot_id": "default",
         "dry_run": true,
         "status": "pending",
         "result": null,

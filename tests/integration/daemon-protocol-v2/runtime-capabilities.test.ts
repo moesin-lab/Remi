@@ -4,6 +4,7 @@ import {
   DAEMON_HEARTBEAT_INTERVAL_MS,
 } from "@multiremi/contracts/daemon-protocol.js";
 import {
+  BOT_MENU_PROTOCOL_VERSION,
   FEISHU_CONCIERGE_ATTACHMENT_PROTOCOL_VERSION,
   FEISHU_DECISION_CARD_PROTOCOL_VERSION,
   FEISHU_ISSUE_DECISION_CARD_PROTOCOL_VERSION,
@@ -67,6 +68,7 @@ function assertHostedCapabilities(h: DaemonProtocolHarness, type: "hello" | "hb"
     supports_directory_scan: true,
     supports_skill_directory: true,
     supports_bot_menu: true,
+    bot_menu_protocol: BOT_MENU_PROTOCOL_VERSION,
     agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
     feishu_concierge_protocol: FEISHU_CONCIERGE_ATTACHMENT_PROTOCOL_VERSION,
     feishu_decision_card: FEISHU_DECISION_CARD_PROTOCOL_VERSION,
@@ -77,6 +79,7 @@ function assertHostedCapabilities(h: DaemonProtocolHarness, type: "hello" | "hb"
     supports_directory_scan: true,
     supports_skill_directory: true,
     feishu_bot_menu: true,
+    feishu_bot_menu_protocol: BOT_MENU_PROTOCOL_VERSION,
     agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
     feishu_concierge_config_v1: true,
     feishu_decision_card: 1,
@@ -188,7 +191,7 @@ describe("v2 runtime capability advertisement", () => {
     await h.startDaemon();
     await h.settleHeartbeat();
     const id = runtimeId(h);
-    h.store.heartbeatRuntime(id, { supportsBotMenu: true, supportsFeishuBotConfig: true,
+    h.store.heartbeatRuntime(id, { supportsBotMenu: true, botMenuProtocol: BOT_MENU_PROTOCOL_VERSION, supportsFeishuBotConfig: true,
       supportsDecisionCard: true, supportsIssueDecisionCard: true });
     expect(h.store.getRuntime(id)!.metadata.feishu_issue_decision_card).toBe(1);
     let atHello: Record<string, unknown> | null = null;
@@ -199,11 +202,11 @@ describe("v2 runtime capability advertisement", () => {
     await h.reconnect();
     expect(atHello).toMatchObject({ feishu_concierge_config_v1: false, feishu_issue_decision_card: 0 });
     expect(runtimeCapabilitiesInFrame(latestFrame(h, "hello"), id)).toMatchObject({
-      supports_bot_menu: false, feishu_concierge_protocol: 0,
+      supports_bot_menu: false, bot_menu_protocol: 0, feishu_concierge_protocol: 0,
       feishu_decision_card: 0, feishu_issue_decision_card: 0,
     });
     expect(h.store.getRuntime(id)!.metadata).toMatchObject({
-      feishu_bot_menu: false, feishu_concierge_config_v1: false,
+      feishu_bot_menu: false, feishu_bot_menu_protocol: 0, feishu_concierge_config_v1: false,
       feishu_decision_card: 0, feishu_issue_decision_card: 0,
     });
   }, 15_000);

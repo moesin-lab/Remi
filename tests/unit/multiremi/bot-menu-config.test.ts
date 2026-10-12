@@ -5,7 +5,6 @@ import type {
   MultiremiWorkspaceMember,
 } from "@multiremi/contracts/types.js";
 import {
-  BotMenuConfigError,
   parseBotMenuConfig,
   resolveBotMenuConfig,
 } from "../../../packages/server/src/bot-menu/config.js";
@@ -72,7 +71,7 @@ describe("workspace bot menu config", () => {
     })).toThrow("exceeds two menu levels");
   });
 
-  it("resolves roles to Feishu open_id and lets explicit targets override roles", () => {
+  it("deduplicates historical cleanup identities across roles and explicit targets", () => {
     const members = [
       member("mem-owner", "usr-owner", "owner"),
       member("mem-member", "usr-member", "member"),
@@ -93,22 +92,25 @@ describe("workspace bot menu config", () => {
 
     const resolved = resolveBotMenuConfig(config, "ws-menu", members, (id) => users.get(id) ?? null);
 
-    expect(resolved.users).toEqual([
-      { userId: "ou_member", userIdType: "open_id", items: [item("Explicit")] },
-      { userId: "union-advanced", userIdType: "union_id", items: [item("Advanced")] },
+    expect(resolved.clearUsers).toEqual([
+      { userId: "ou_member", userIdType: "open_id" },
+      { userId: "ou_owner", userIdType: "open_id" },
+      { userId: "union-advanced", userIdType: "union_id" },
     ]);
+    expect(resolved.users).toBeUndefined();
+    expect(resolved.unresolvedLegacyTargetCount).toBe(1);
   });
 
-  it("fails when an explicitly selected member has no linked Feishu identity", () => {
+  it("keeps the shared menu usable when a historical member has no Feishu identity", () => {
     const config: BotMenuConfig = {
       users: [{ target: { type: "member", memberId: "mem-member" }, items: [item("Menu")] }],
     };
 
-    expect(() => resolveBotMenuConfig(
+    expect(resolveBotMenuConfig(
       config,
       "ws-menu",
       [member("mem-member", "usr-member", "member")],
       () => user("usr-member", null),
-    )).toThrow(BotMenuConfigError);
+    )).toEqual({ default: [], unresolvedLegacyTargetCount: 1 });
   });
 });

@@ -1653,8 +1653,12 @@ runMigrations(this.db);
     return this.workspaces.getWorkspaceMemberByRef(ref, workspaceId);
   }
 
-  listWorkspaceMembers(workspaceId?: string | null): MultiremiWorkspaceMember[] {
-    return this.workspaces.listWorkspaceMembers(workspaceId);
+  updateBotMenu(workspaceId: string, botId: string, menu: import("@multiremi/contracts/types.js").BotMenuConfig): MultiremiWorkspace | null {
+    return this.workspaces.updateBotMenu(workspaceId, botId, menu);
+  }
+
+  listWorkspaceMembers(workspaceId?: string | null, options: { includeArchived?: boolean } = {}): MultiremiWorkspaceMember[] {
+    return this.workspaces.listWorkspaceMembers(workspaceId, options);
   }
 
   updateWorkspaceMember(id: string, input: UpdateWorkspaceMemberInput): MultiremiWorkspaceMember {
@@ -3887,6 +3891,7 @@ runMigrations(this.db);
     supportsSkillDirectory?: boolean;
     agentPluginProtocol?: number;
     supportsBotMenu?: boolean;
+    botMenuProtocol?: number;
     supportsFeishuBotConfig?: boolean;
     supportsDecisionCard?: boolean;
     supportsIssueDecisionCard?: boolean;

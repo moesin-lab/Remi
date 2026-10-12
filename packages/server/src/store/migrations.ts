@@ -95,7 +95,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
     if(tables.has('multiremi_issues'))addColumnIfMissing(db,'multiremi_issues','responsible_member_id TEXT');
     if(tables.has('multiremi_autopilots'))addColumnIfMissing(db,'multiremi_autopilots','responsible_member_id TEXT');
     if(tables.has('multiremi_issue_activity'))addColumnIfMissing(db,'multiremi_issue_activity','workspace_id TEXT');
-    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);return;}
+    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);return;}
     // Inspect the existing snapshot before bootstrap migrations can touch it.
     const checks=unifiedModelPreflight(db);
     if(checks.some(c=>!c.ok)){
@@ -104,7 +104,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
     }
     runMigrationsForDialect(db,resolveSqlDialect(db,options.dialect));
     runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});
-    separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);
+    separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);
   });
   // SQLite schema rebuilds toggle foreign_keys outside their transactions.
   // Hold a separate SQLite writer lock across that entire sequence so another
@@ -6722,4 +6722,8 @@ export function migrateFeishuMultipleBots(db: SqlDatabase): void {
       if (db.dialect !== "postgres" && db.query("PRAGMA foreign_key_check").all().length) throw new Error("Feishu bot migration introduced invalid foreign keys");
     })();
   } finally { if (foreignKeys) db.exec("PRAGMA foreign_keys = ON"); }
+}
+
+function ensureBotMenuScope(db: SqlDatabase): void {
+  addColumnIfMissing(db, "multiremi_bot_menu_publish_requests", "bot_id TEXT NOT NULL DEFAULT 'default'");
 }

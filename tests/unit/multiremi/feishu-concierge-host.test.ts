@@ -155,6 +155,20 @@ function host(input: {
 }
 
 describe("control-plane Feishu concierge host", () => {
+  it("publishes only for the bot identity and revision hosted by this connector", async () => {
+    const fake = fakeDaemon();
+    const test = host({ daemon: fake.daemon });
+    await test.conciergeHost.start(assignment({ bot_id: "second" }));
+    const publish = fake.botMenuPublishers.at(-1) as NonNullable<Parameters<MultiremiDaemon["setBotMenuPublisher"]>[0]>;
+    const target = { botId: "second", appId: "cli_a1b2c3d4e5f6g7h8", domain: "feishu", revision: 4 };
+    await expect(publish({ default: [], target }, true)).resolves.toMatchObject({ dryRun: true });
+    for (const changed of [{ botId: "default" }, { appId: "cli_other" }, { domain: "lark" }, { revision: 5 }]) {
+      await expect(publish({ default: [], target: { ...target, ...changed } }, true)).rejects.toThrow("does not match");
+    }
+    await expect(publish({ default: [] }, true)).rejects.toThrow("does not match");
+    await test.conciergeHost.stop();
+  });
+
   it("hosts either co-resident provider without letting a sibling stop or detach its channel", async () => {
     const daemons = [fakeDaemon(), fakeDaemon()];
     const hosts: FeishuConciergeHost[] = [];

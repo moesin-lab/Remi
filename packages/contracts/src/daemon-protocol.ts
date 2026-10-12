@@ -311,6 +311,7 @@ export interface DaemonRuntimeCapabilities {
   supports_directory_scan?: boolean;
   supports_skill_directory?: boolean;
   supports_bot_menu?: boolean;
+  bot_menu_protocol?: number;
   agent_plugin_protocol?: number;
   feishu_concierge_protocol?: number;
   feishu_decision_card?: number;

@@ -60,33 +60,24 @@ export interface BotMenuItem {
   children?: BotMenuItem[];
 }
 
-export type BotMenuTarget =
-  | { type: "member"; memberId: string }
-  | { type: "role"; role: MemberRole }
-  | { type: "external"; userId: string; userIdType: BotMenuUserIdType };
-
-export interface BotMenuAudience {
-  target: BotMenuTarget;
-  label?: string;
-  items: BotMenuItem[];
-}
-
 export interface BotMenuConfig {
   default?: BotMenuItem[];
-  users?: BotMenuAudience[];
 }
 
 export interface BotMenuResponse {
+  bot_id: string;
+  legacy_target_count: number;
   workspace_id: string;
   bot_menu: BotMenuConfig;
 }
 
 export interface BotMenuPublishResponse {
+  bot_id: string;
   id: string;
   workspace_id: string;
   dry_run: boolean;
   status: "pending" | "running" | "completed" | "failed" | "timeout";
-  result: { defaultPublished: boolean; userMenuCount: number; dryRun: boolean } | null;
+  result: { defaultPublished: boolean; userMenuCount: number; dryRun: boolean; clearedUserMenuCount?: number; unresolvedLegacyTargetCount?: number } | null;
   error: string | null;
   created_at: string;
   updated_at: string;

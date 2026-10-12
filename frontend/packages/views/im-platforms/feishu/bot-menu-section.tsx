@@ -22,18 +22,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, ChevronDown, ChevronRight, GripVertical, Plus, Send, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@multiremi/core/api";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
-import { botMenuOptions, memberListOptions, workspaceKeys } from "@multiremi/core/workspace/queries";
+import { botMenuOptions, workspaceKeys } from "@multiremi/core/workspace/queries";
 import type {
-  BotMenuAudience,
   BotMenuBehavior,
   BotMenuConfig,
   BotMenuItem,
   BotMenuPublishResponse,
-  BotMenuTarget,
-  MemberRole,
-  MemberWithUser,
 } from "@multiremi/core/types";
 import { Button } from "@multiremi/ui/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@multiremi/ui/components/ui/card";
@@ -58,10 +53,12 @@ import {
 } from "@multiremi/ui/components/ui/alert-dialog";
 import { cn } from "@multiremi/ui/lib/utils";
 import { useT } from "../../i18n";
+import { useFeishuBotSelection } from "./bot-selection";
+import { useImWorkspaceAccess } from "../workspace-access";
+import { ImLoadError } from "../load-error";
 
 type DraftItem = BotMenuItem & { _id: string; children?: DraftItem[] };
-type DraftAudience = Omit<BotMenuAudience, "items"> & { _id: string; items: DraftItem[] };
-type DraftConfig = { default: DraftItem[]; users: DraftAudience[] };
+type DraftConfig = { default: DraftItem[] };
 
 let localId = 0;
 function nextId(prefix: string): string {
@@ -70,15 +67,17 @@ function nextId(prefix: string): string {
 }
 
 export function BotMenuSection() {
-  const { t } = useT("im-platforms");
   const workspaceId = useWorkspaceId();
+  const { botId } = useFeishuBotSelection();
+  return <BotMenuEditor key={`${workspaceId}:${botId}`} workspaceId={workspaceId} botId={botId} />;
+}
+
+function BotMenuEditor({ workspaceId, botId }: { workspaceId: string; botId: string }) {
+  const { t } = useT("im-platforms");
   const queryClient = useQueryClient();
-  const user = useAuthStore((state) => state.user);
-  const menuQuery = useQuery(botMenuOptions(workspaceId));
-  const membersQuery = useQuery(memberListOptions(workspaceId));
-  const members = membersQuery.data ?? [];
-  const currentRole = members.find((member) => member.user_id === user?.id)?.role;
-  const canManage = currentRole === "owner" || currentRole === "admin";
+  const access = useImWorkspaceAccess(workspaceId);
+  const canManage = access.canManage;
+  const menuQuery = useQuery(botMenuOptions(workspaceId, botId));
   const [draft, setDraft] = useState<DraftConfig>(() => fromConfig({}));
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -93,16 +92,17 @@ export function BotMenuSection() {
 
   useEffect(() => {
     if (!publishRequest || !["pending", "running"].includes(publishRequest.status)) return;
+    let active = true;
     const timer = window.setTimeout(async () => {
       try {
-        setPublishRequest(await api.getBotMenuPublish(workspaceId, publishRequest.id));
+        const response = await api.getBotMenuPublish(workspaceId, publishRequest.id, botId);
+        if (active) setPublishRequest(response);
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : t(($) => $.feishu.botMenu.publish_failed));
-        setPublishing(null);
+        if (active) setPublishRequest({ ...publishRequest, status: "failed", error: error instanceof Error ? error.message : t(($) => $.feishu.botMenu.publish_failed) });
       }
     }, 750);
-    return () => window.clearTimeout(timer);
-  }, [publishRequest, t, workspaceId]);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [publishRequest, t, workspaceId, botId]);
 
   useEffect(() => {
     if (!publishRequest || ["pending", "running"].includes(publishRequest.status)) return;
@@ -128,8 +128,8 @@ export function BotMenuSection() {
     if (!canManage || saving) return false;
     setSaving(true);
     try {
-      const response = await api.updateBotMenu(workspaceId, config);
-      queryClient.setQueryData(workspaceKeys.botMenu(workspaceId), response);
+      const response = await api.updateBotMenu(workspaceId, config, botId);
+      queryClient.setQueryData(workspaceKeys.botMenu(workspaceId, botId), response);
       setDraft(fromConfig(response.bot_menu));
       setDirty(false);
       toast.success(t(($) => $.feishu.botMenu.saved));
@@ -144,19 +144,21 @@ export function BotMenuSection() {
 
   async function publish(dryRun: boolean) {
     if (!canManage || publishing) return;
-    if (dirty && !(await save())) return;
     setPublishing(dryRun ? "dry" : "live");
+    if (dirty && !(await save())) { setPublishing(null); return; }
     try {
-      setPublishRequest(await api.publishBotMenu(workspaceId, dryRun));
+      setPublishRequest(await api.publishBotMenu(workspaceId, dryRun, botId));
     } catch (error) {
       setPublishing(null);
       toast.error(error instanceof Error ? error.message : t(($) => $.feishu.botMenu.publish_failed));
     }
   }
 
-  if (menuQuery.isPending || membersQuery.isPending) {
+  if (menuQuery.isPending || access.isPending) {
     return <div className="h-28 animate-pulse rounded border bg-muted/30" />;
   }
+
+  if (menuQuery.isError || access.isError) return <ImLoadError retry={() => { void menuQuery.refetch(); void access.refetch(); }} />;
 
   return (
     <section>
@@ -175,49 +177,15 @@ export function BotMenuSection() {
           <MenuEditor
             title={t(($) => $.feishu.botMenu.default_title)}
             items={draft.default}
-            disabled={!canManage}
+            disabled={!canManage || saving || Boolean(publishing)}
             onChange={(items) => change({ ...draft, default: items })}
           />
 
-          <div className="space-y-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <h3 className="text-sm font-medium">{t(($) => $.feishu.botMenu.audiences_title)}</h3>
-                <p className="text-xs text-muted-foreground">{t(($) => $.feishu.botMenu.audiences_description)}</p>
-              </div>
-              {canManage && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => change({
-                    ...draft,
-                    users: [...draft.users, newAudience(members)],
-                  })}
-                >
-                  <Plus className="size-4" />
-                  {t(($) => $.feishu.botMenu.add_audience)}
-                </Button>
-              )}
-            </div>
-
-            {draft.users.length === 0 ? (
-              <p className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
-                {t(($) => $.feishu.botMenu.no_audiences)}
-              </p>
-            ) : draft.users.map((audience, index) => (
-              <AudienceEditor
-                key={audience._id}
-                audience={audience}
-                members={members}
-                disabled={!canManage}
-                onChange={(next) => change({
-                  ...draft,
-                  users: draft.users.map((entry, candidate) => candidate === index ? next : entry),
-                })}
-                onDelete={() => change({ ...draft, users: draft.users.filter((_, candidate) => candidate !== index) })}
-              />
-            ))}
-          </div>
+          {(menuQuery.data?.legacy_target_count ?? 0) > 0 && (
+            <p className="rounded-lg bg-muted/50 px-3 py-2 text-sm text-muted-foreground">
+              {t(($) => $.feishu.botMenu.legacy_notice)}
+            </p>
+          )}
 
           {publishRequest && (
             <div className={cn(
@@ -226,6 +194,9 @@ export function BotMenuSection() {
                 publishRequest.status === "failed" || publishRequest.status === "timeout" ? "border-destructive/40 bg-destructive/5" : "bg-muted/30",
             )}>
               {publishStatusText(publishRequest, t)}
+              {Boolean(publishRequest.result?.unresolvedLegacyTargetCount) && <p className="mt-2">
+                {t(($) => $.feishu.botMenu.legacy_unresolved, { count: publishRequest.result!.unresolvedLegacyTargetCount })}
+              </p>}
             </div>
           )}
         </CardContent>
@@ -262,106 +233,6 @@ export function BotMenuSection() {
   );
 }
 
-function AudienceEditor({ audience, members, disabled, onChange, onDelete }: {
-  audience: DraftAudience;
-  members: MemberWithUser[];
-  disabled: boolean;
-  onChange: (audience: DraftAudience) => void;
-  onDelete: () => void;
-}) {
-  const { t } = useT("im-platforms");
-  return (
-    <div className="space-y-4 rounded-lg border p-4">
-      <div className="flex items-start gap-3">
-        <div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2">
-          <div className="space-y-1.5">
-            <Label>{t(($) => $.feishu.botMenu.target_type)}</Label>
-            <Select
-              disabled={disabled}
-              value={audience.target.type}
-              onValueChange={(value) => value && onChange({ ...audience, target: newTarget(value, members) })}
-            >
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="member">{t(($) => $.feishu.botMenu.target_member)}</SelectItem>
-                <SelectItem value="role">{t(($) => $.feishu.botMenu.target_role)}</SelectItem>
-                <SelectItem value="external">{t(($) => $.feishu.botMenu.target_external)}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <TargetEditor
-            target={audience.target}
-            members={members}
-            disabled={disabled}
-            onChange={(target) => onChange({ ...audience, target })}
-          />
-        </div>
-        {!disabled && (
-          <Button variant="ghost" size="icon" title={t(($) => $.feishu.botMenu.delete_audience)} onClick={onDelete}>
-            <Trash2 className="size-4" />
-          </Button>
-        )}
-      </div>
-      <MenuEditor
-        title={audience.label || targetLabel(audience.target, members)}
-        items={audience.items}
-        disabled={disabled}
-        onChange={(items) => onChange({ ...audience, items })}
-      />
-    </div>
-  );
-}
-
-function TargetEditor({ target, members, disabled, onChange }: {
-  target: BotMenuTarget;
-  members: MemberWithUser[];
-  disabled: boolean;
-  onChange: (target: BotMenuTarget) => void;
-}) {
-  const { t } = useT("im-platforms");
-  if (target.type === "member") {
-    return (
-      <div className="space-y-1.5">
-        <Label>{t(($) => $.feishu.botMenu.member)}</Label>
-        <Select disabled={disabled} value={target.memberId} onValueChange={(memberId) => memberId && onChange({ type: "member", memberId })}>
-          <SelectTrigger><SelectValue placeholder={t(($) => $.feishu.botMenu.select_member)} /></SelectTrigger>
-          <SelectContent>
-            {members.map((member) => <SelectItem key={member.id} value={member.id}>{member.name}</SelectItem>)}
-          </SelectContent>
-        </Select>
-      </div>
-    );
-  }
-  if (target.type === "role") {
-    return (
-      <div className="space-y-1.5">
-        <Label>{t(($) => $.feishu.botMenu.role)}</Label>
-        <Select disabled={disabled} value={target.role} onValueChange={(role) => role && onChange({ type: "role", role: role as MemberRole })}>
-          <SelectTrigger><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="owner">{t(($) => $.feishu.botMenu.role_owner)}</SelectItem>
-            <SelectItem value="admin">{t(($) => $.feishu.botMenu.role_admin)}</SelectItem>
-            <SelectItem value="member">{t(($) => $.feishu.botMenu.role_member)}</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-    );
-  }
-  return (
-    <div className="grid gap-2 sm:grid-cols-[120px_1fr]">
-      <Select disabled={disabled} value={target.userIdType} onValueChange={(userIdType) => userIdType && onChange({ ...target, userIdType: userIdType as typeof target.userIdType })}>
-        <SelectTrigger><SelectValue /></SelectTrigger>
-        <SelectContent>
-          <SelectItem value="open_id">{t(($) => $.feishu.botMenu.id_type_open)}</SelectItem>
-          <SelectItem value="union_id">{t(($) => $.feishu.botMenu.id_type_union)}</SelectItem>
-          <SelectItem value="user_id">{t(($) => $.feishu.botMenu.id_type_user)}</SelectItem>
-        </SelectContent>
-      </Select>
-      <Input disabled={disabled} value={target.userId} placeholder={t(($) => $.feishu.botMenu.external_id)} onChange={(event) => onChange({ ...target, userId: event.target.value })} />
-    </div>
-  );
-}
-
 function MenuEditor({ title, items, disabled, onChange, depth = 0 }: {
   title: string;
   items: DraftItem[];
@@ -382,7 +253,7 @@ function MenuEditor({ title, items, disabled, onChange, depth = 0 }: {
   }
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h4 className="text-xs font-semibold uppercase text-muted-foreground">{title}</h4>
         {!disabled && (
           <Button variant="ghost" size="sm" onClick={() => onChange([...items, newItem()])}>
@@ -431,7 +302,7 @@ function SortableMenuItem({ item, disabled, depth, onChange, onDelete }: {
   return (
     <div ref={sortable.setNodeRef} style={style} className={cn("rounded border bg-background", sortable.isDragging && "opacity-60 shadow-sm")}>
       <div className="flex min-h-12 items-center gap-1 p-2">
-        <Button variant="ghost" size="icon" className="size-8" onClick={() => setExpanded((value) => !value)}>
+        <Button variant="ghost" size="icon" className="size-8" aria-expanded={expanded} aria-label={t(($) => $.feishu.botMenu.item_details)} onClick={() => setExpanded((value) => !value)}>
           {expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
         </Button>
         <button
@@ -510,20 +381,6 @@ function newItem(): DraftItem {
   return { _id: nextId("menu"), name: "", behaviors: [{ type: "send_message" }] };
 }
 
-function newAudience(members: MemberWithUser[]): DraftAudience {
-  return {
-    _id: nextId("audience"),
-    target: members[0] ? { type: "member", memberId: members[0].id } : { type: "role", role: "member" },
-    items: [],
-  };
-}
-
-function newTarget(type: string, members: MemberWithUser[]): BotMenuTarget {
-  if (type === "role") return { type: "role", role: "member" };
-  if (type === "external") return { type: "external", userId: "", userIdType: "open_id" };
-  return members[0] ? { type: "member", memberId: members[0].id } : { type: "role", role: "member" };
-}
-
 function fromConfig(config: BotMenuConfig): DraftConfig {
   const inflate = (items: BotMenuItem[] = []): DraftItem[] => items.map(({ children, ...item }) => ({
     ...item,
@@ -532,7 +389,6 @@ function fromConfig(config: BotMenuConfig): DraftConfig {
   }));
   return {
     default: inflate(config.default),
-    users: (config.users ?? []).map((audience) => ({ ...audience, _id: nextId("audience"), items: inflate(audience.items) })),
   };
 }
 
@@ -543,14 +399,7 @@ function toConfig(draft: DraftConfig): BotMenuConfig {
   }));
   return {
     default: strip(draft.default),
-    users: draft.users.map(({ _id: _unused, items, ...audience }) => ({ ...audience, items: strip(items) })),
   };
-}
-
-function targetLabel(target: BotMenuTarget, members: MemberWithUser[]): string {
-  if (target.type === "member") return members.find((member) => member.id === target.memberId)?.name ?? target.memberId;
-  if (target.type === "role") return target.role;
-  return `${target.userIdType}: ${target.userId}`;
 }
 
 function publishStatusText(
@@ -559,8 +408,7 @@ function publishStatusText(
 ): string {
   if (request.status === "pending" || request.status === "running") return t(($) => $.feishu.botMenu.publish_waiting);
   if (request.status !== "completed") return request.error || t(($) => $.feishu.botMenu.publish_failed);
-  const count = request.result?.userMenuCount ?? 0;
   return request.dry_run
-    ? t(($) => $.feishu.botMenu.validation_summary, { count })
-    : t(($) => $.feishu.botMenu.publish_summary, { count });
+    ? t(($) => $.feishu.botMenu.validation_summary)
+    : t(($) => $.feishu.botMenu.publish_summary);
 }

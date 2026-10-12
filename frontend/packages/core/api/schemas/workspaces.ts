@@ -51,38 +51,28 @@ const BotMenuItemSchema: z.ZodType<unknown> = z.lazy(() => z.object({
   children: z.array(BotMenuItemSchema).optional(),
 }).loose());
 
-const BotMenuTargetSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("member"), memberId: z.string() }).loose(),
-  z.object({ type: z.literal("role"), role: z.enum(["owner", "admin", "member"]) }).loose(),
-  z.object({
-    type: z.literal("external"),
-    userId: z.string(),
-    userIdType: z.enum(["open_id", "union_id", "user_id"]),
-  }).loose(),
-]);
-
 export const BotMenuConfigSchema = z.object({
   default: z.array(BotMenuItemSchema).optional(),
-  users: z.array(z.object({
-    target: BotMenuTargetSchema,
-    label: z.string().optional(),
-    items: z.array(BotMenuItemSchema),
-  }).loose()).optional(),
 }).loose();
 
 export const BotMenuResponseSchema = z.object({
   workspace_id: z.string(),
+  bot_id: z.string(),
+  legacy_target_count: z.number().int().nonnegative(),
   bot_menu: BotMenuConfigSchema,
 }).loose();
 
 export const BotMenuPublishResponseSchema = z.object({
   id: z.string(),
+  bot_id: z.string(),
   workspace_id: z.string(),
   dry_run: z.boolean(),
   status: z.enum(["pending", "running", "completed", "failed", "timeout"]),
   result: z.object({
     defaultPublished: z.boolean(),
     userMenuCount: z.number(),
+    clearedUserMenuCount: z.number().optional(),
+    unresolvedLegacyTargetCount: z.number().optional(),
     dryRun: z.boolean(),
   }).loose().nullable(),
   error: z.string().nullable(),
@@ -91,11 +81,14 @@ export const BotMenuPublishResponseSchema = z.object({
 }).loose();
 
 export const EMPTY_BOT_MENU_RESPONSE = {
+  bot_id: "default",
+  legacy_target_count: 0,
   workspace_id: "",
   bot_menu: {},
 };
 
 export const EMPTY_BOT_MENU_PUBLISH_RESPONSE = {
+  bot_id: "default",
   id: "",
   workspace_id: "",
   dry_run: true,

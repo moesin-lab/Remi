@@ -677,7 +677,14 @@ export function controlPlaneConciergeHost(deps: {
         },
       );
       deps.attach(handle);
-      daemon.setBotMenuPublisher(handle.publishBotMenu);
+      daemon.setBotMenuPublisher(async (menu, dryRun) => {
+        const target = menu.target;
+        if (deps.current() !== handle || !target || target.botId !== (config.bot_id ?? "default") || target.appId !== config.app_id
+          || target.domain !== config.domain || target.revision !== config.revision) {
+          throw new Error("bot menu target does not match the running bot; publish again after it reconnects");
+        }
+        return handle.publishBotMenu(menu, dryRun);
+      });
       // The click map is process-local, so a restart empties it while the cards
       // stay on screen. Re-register from the control plane before serving.
       await restoreDecisionCardClicks(daemon, handle).catch((error: unknown) => {

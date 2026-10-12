@@ -261,6 +261,14 @@ backup, and starts the selected code with its bundled runtimes. API/Web are
 temporarily unavailable during backup, rehearsal and child startup. Their
 containers, supervisors, PostgreSQL container and independent agents stay alive.
 
+Supervisor JSON files are synced before atomic replacement. On Windows, short
+sharing violations (`EPERM`, `EACCES`, `EBUSY`) retry the rename at most nine times
+with 450 ms total backoff, keeping the previous file readable. Other errors and
+exhausted retries fail the write; unpublished temporary files are cleaned up on
+a best-effort basis. The [JSON regression tests](../tests/unit/platform-updater/supervisor-json.test.ts)
+cover concurrent readers, transient and persistent failures, and preservation of
+the previous document.
+
 The image does not need to contain each future Bun or Node version. The archive
 provides both executables; compatibility checks require the same container CPU,
 glibc and native-tool contract, supervisor protocol 1, reviewed migration

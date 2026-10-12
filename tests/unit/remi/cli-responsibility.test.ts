@@ -30,6 +30,13 @@ afterEach(() => {
   for (const name of envNames) { if (envBefore[name] === undefined) delete process.env[name]; else process.env[name] = envBefore[name]; }
 });
 describe("responsibility CLI", () => {
+  for (const domain of ["issue", "autopilot"]) it(`clears optional ${domain} contact through the real command registry`, async () => {
+    setup();
+    await registry.execute([domain, "responsible", "clear", "example", "--output", "json"]);
+    const write = requests.find(request => request.method === "PATCH")!;
+    expect(new URL(write.url).pathname).toBe(`/api/${domain === "issue" ? "issues" : "autopilots"}/example`);
+    expect(await write.json()).toEqual({responsible_member_id:null});
+  });
   it("keeps execution assignment and formal acceptance constraints visible in generated help", () => {
     const issueHelp = new CommandRegistry();
     for (const command of collaborationCommandSpecs().filter(command => ["issue.assign", "issue.update", "issue.status"].includes(command.id))) issueHelp.register(command);

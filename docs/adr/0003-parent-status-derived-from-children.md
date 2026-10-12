@@ -53,16 +53,15 @@ dropped (`active_task_exists`), so a parent could lose reports entirely.
 3. **Formal delivery replaces implicit final-summary closure.** Task results
    and summary comments remain evidence. They cannot close an Issue. Its
    execution owner submits a message-backed delivery, and its parent execution
-   owner accepts a child delivery. The root's explicitly designated human
-   accepts a root delivery. The response references that delivery, validates
+   owner accepts a child delivery. The root's execution owner can accept its own root delivery without a human
+   grant; workspace members can optionally review a root delivery. The response references that delivery, validates
    the responsibility revision and commits with the receipt and Issue status.
    The [responsibility contract](../dev/issue-responsibility.md) defines the
-   single resolver, legacy missing-human handling and complete API.
+   single resolver, optional legacy-contact handling and complete API.
 4. **`force` remains member-only and cannot override formal acceptance.**
    The old broad parent grant remains readable for audit but does not authorize
-   closure. A root human can grant/revoke proxy acceptance only for one concrete
-   pending delivery, its current execution owner and current responsibility
-   revision. A reassignment or newer delivery invalidates the grant. The
+   closure. Legacy contact grants remain auditable but do not gate root Agent
+   acceptance. A reassignment or newer delivery invalidates the old receipt. The
    universal store guard runs independently of the parent guard's environment
    switch and rejects PATCH/batch/system closure without the server-owned
    accepted-delivery receipt. Clients cannot supply that receipt option.

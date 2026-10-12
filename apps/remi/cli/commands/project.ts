@@ -31,7 +31,7 @@ const PROJECT_FIELDS: readonly CliOptionSpec[] = [
   { name: "lead", type: "string", valueName: "member-or-agent", description: "Project lead reference" },
   { name: "lead-type", type: "string", valueName: "member|agent", description: "Project lead type" },
   { name: "default-assignee", type: "string", valueName: "ref", description: "Default issue assignee" },
-  { name: "default-assignee-type", type: "string", valueName: "agent|squad", description: "Default issue execution assignee type; root human responsibility is configured on the Issue" },
+  { name: "default-assignee-type", type: "string", valueName: "agent|squad", description: "Default issue execution assignee type" },
   { name: "repo", type: "string", valueName: "repo", repeatable: true, description: "Associate an imported repository" },
   { name: "expected-version", type: "integer", valueName: "n", description: "Expected instructions revision" },
 ];

@@ -3084,6 +3084,32 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "issue.responsible.clear": {
+      "command": "remi issue responsible clear",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.responsible.clear",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "autopilot.responsible.clear": {
+      "command": "remi autopilot responsible clear",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "autopilot.responsible.clear",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "issue.responsibility-unassigned.list": {
       "command": "remi issue responsibility-unassigned list",
       "auth": [

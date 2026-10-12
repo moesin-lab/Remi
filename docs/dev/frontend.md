@@ -54,7 +54,7 @@ Chat 队列读取发给当前 agent、位于实际 cursor_seq 之后的消息；
 
 决定面板按需读取 `/api/issues/:id/questions` 的统一原 Q 投影；[共享问题卡](../../frontend/packages/views/common/question-card.tsx)显示原问题、独立 Remi 总结、来源、当前处理者、路由版本和转交/回答历史。Issue 主线、Chat 通知、Inbox 和运行中的问题 dock 沿 `metadata.question` 或 `root_question_id` 读取同一个 Q，答复使用版本校验的 `/api/messages/:id/question/answer`，最终由服务端写回原会话。原权限提问同样读取 Q，保持单选并提交原 `option_id`；原上下文单独按 Markdown 折叠展示。表单失败保留输入；`wait_status` 区分原调用等待、已结束、已消费与续接消费，不能把答案保存成功写成恢复成功。未知展示枚举保留原值。历史入口在责任侧栏常驻，最后一个待答结束后仍可打开。
 
-[责任与交付侧栏](../../frontend/packages/views/issues/components/issue-responsibility-section.tsx)读取服务端统一责任解析，分别显示本单执行统筹、父单结果责任和顶层指定人类。创建顶层单默认显示当前真实成员并允许选择；子单不复制根责任字段。根责任移交调用 Issue update，并保留服务端审计。正式交付由执行统筹提交，指定人类按具体交付接受、退回或授予绑定交付版本的代理验收授权；页面不再凭 Task completed 提供直接完成按钮，也不使用一般 parent-done grant 替代正式验收。
+[责任与交付侧栏](../../frontend/packages/views/issues/components/issue-responsibility-section.tsx)读取统一执行与验收负责人。普通/快捷建单、机器人、话题和自动化表单不再选择人类责任人。子单由父单执行 Agent 验收，根单执行 Agent 可直接验收自身正式交付；工作区成员也可在根单侧栏主动验收或退回具体交付，无需代理授权。页面不凭 Task completed 提供直接完成按钮，仍核对正式收据、当前版本和未完成子单。
 
 评论与会话日志的 [EntryHtml](../../frontend/packages/views/common/session-log/entry-html.tsx) 会把服务端 `div[data-type="fileCard"]` 增强成统一附件卡片。静态 [entry-html.css](../../frontend/packages/views/common/session-log/entry-html.css) 在首屏给每个槽位预留固定 40px（32px 卡片加上下各 4px 间距），普通和紧凑密度共用；图片与 HTML 文件也保持卡片外观，预览在弹窗中打开。附件记录通过 `attachments` 传入 provider，预览与下载按附件 ID 走现有链路；没有记录时使用 URL 模式，不合法 href 只显示文件名。
 
@@ -96,7 +96,7 @@ WSClient → useRealtimeSync → sync/<领域>.ts
 
 响应解析由各端点负责，目前并非所有历史方法都已调用 schema helper；新增或修改消费逻辑遵循前端规则。[createQueryClient](../../frontend/packages/core/query-client.ts)默认使用 `staleTime: Infinity`，列表是否更新依赖 mutation、WS 和重连处理，排查陈旧数据时应先核对这些路径。
 
-Issue 的成员负责人保存为工作区成员记录 `id`；成员响应中的 `user_id` 对应用户账号。[负责人选择器](../../frontend/packages/views/issues/components/pickers/assignee-picker.tsx)提交成员 `id`，名称、头像和成员资料通过 [member-lookup.ts](../../frontend/packages/core/workspace/member-lookup.ts)同时识别成员 ID 与账号 ID，优先精确匹配成员 ID；当前账号的角色判断仍按 `user_id` 查找。回归入口为 [workspace hooks 测试](../../frontend/packages/core/workspace/hooks.test.tsx)、[负责人选择器测试](../../frontend/packages/views/issues/components/pickers/assignee-picker.test.tsx)、[成员资料测试](../../frontend/packages/views/members/member-identity.test.tsx)和[服务端身份契约测试](../../tests/unit/multiremi/workspace-member-identity.test.ts)。
+Issue 执行负责人只接受 Agent 或团队；旧可选联系人记录使用成员 `id`，成员响应中的 `user_id` 对应用户账号。[负责人选择器](../../frontend/packages/views/issues/components/pickers/assignee-picker.tsx)提交 Agent/团队 `id`，名称、头像和成员资料通过 [member-lookup.ts](../../frontend/packages/core/workspace/member-lookup.ts)同时识别成员 ID 与账号 ID，优先精确匹配成员 ID；当前账号的角色判断仍按 `user_id` 查找。回归入口为 [workspace hooks 测试](../../frontend/packages/core/workspace/hooks.test.tsx)、[负责人选择器测试](../../frontend/packages/views/issues/components/pickers/assignee-picker.test.tsx)、[成员资料测试](../../frontend/packages/views/members/member-identity.test.tsx)和[服务端身份契约测试](../../tests/unit/multiremi/workspace-member-identity.test.ts)。
 
 执行时间线的旧消息与 trace 读取路径共用“过滤 usage/execution → 合并文字分片 → 脱敏”处理；合并同时保留父调用、回答阶段和记录连续性的边界。[共享 trace 语义](../../packages/shared/src/trace-semantics.ts)供页面、Daemon 和飞书使用，工具按调用 ID 配对并去重计数，取消也是终态。上下文标签独立读取 seq 最新的有效 usage（兼容旧 JSON content），与任务累计 input/output 用量分开显示。
 

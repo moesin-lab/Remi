@@ -365,7 +365,6 @@ describe("AgentCreatePanel", () => {
       expect(mockQuickCreateIssue).toHaveBeenCalledWith({
         agent_id: "agent-1",
         prompt: "New agent prompt",
-        responsible_member_id: "member-human",
         project_id: null,
         runtime_workspace_id: null,
       });
@@ -419,7 +418,6 @@ describe("AgentCreatePanel", () => {
     await waitFor(() => {
       expect(mockQuickCreateIssue).toHaveBeenCalledWith({
         squad_id: "squad-1",
-        responsible_member_id: "member-human",
         prompt: "Investigate the regression",
         project_id: null,
         runtime_workspace_id: null,
@@ -527,7 +525,6 @@ describe("AgentCreatePanel", () => {
       expect(mockQuickCreateIssue).toHaveBeenCalledWith({
         agent_id: "agent-2",
         prompt: "Create the issue",
-        responsible_member_id: "member-human",
         project_id: "proj-a",
         runtime_workspace_id: null,
       });

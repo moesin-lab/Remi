@@ -32,7 +32,7 @@ for(const backend of ['sqlite','pg'] as const)describe(`Unresolved parent notice
         expect(store.listIssueActivity(parent.id)).toContainEqual(expect.objectContaining({
           type:'child_done_parent_skipped',data:expect.objectContaining({reason:'responsibility_unresolved',child_issue_id:child.id,child_status:'todo'})}));
         expect(()=>store.submitIssueDelivery(child.id,{summary:'Cannot accept an unknown chain'},
-          {type:'agent',id:agent.id,taskId:assigned.task!.id})).toThrow('Configure the Issue responsibility chain before delivery');
+          {type:'agent',id:agent.id,taskId:assigned.task!.id})).toThrow('Configure the Issue execution and review chain before delivery');
       });
     },30_000);
   it.skipIf(backend==='pg'&&!conversationLogPgAdminUrl)('rolls the notice audit, assignment and queue back together',async()=>{

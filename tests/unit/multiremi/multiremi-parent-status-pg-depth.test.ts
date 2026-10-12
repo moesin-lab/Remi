@@ -546,7 +546,8 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
     store.grantParentDone(parent.id, store.resolveIssueResponsibility(parent.id).rootHuman!.id);
     store.createIssueComment(parent.id, { body: "PG summary", authorType: "agent", authorId: agent });
     const prepared = prepareTestIssueDelivery(store, parent.id);
-    store.authorizeIssueDelivery(parent.id, prepared.delivery.id, agent, prepared.delivery.responsibilityRevision, prepared.actor);
+    store.authorizeIssueDelivery(parent.id, prepared.delivery.id, agent, prepared.delivery.responsibilityRevision,
+      {type:'member',id:store.resolveIssueResponsibility(parent.id).rootHuman!.id});
     const actor = { type: "agent" as const, id: agent, taskId: prepared.executionTask.id };
     const activityBefore = store.listIssueActivity(parent.id);
 
@@ -724,7 +725,7 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
     expect(store.listIssueActivity(parent.id).filter((e) => e.type === "issue_delivery_accepted")).toHaveLength(1);
   });
 
-  it("keeps forged comments and a legacy grant from replacing formal delivery authorization (Postgres)", async () => {
+  it("keeps forged comments and legacy grants from replacing formal delivery and the actual reviewer (Postgres)", async () => {
     const workspaceId = "local";
     const agent = store.createAgent({
       name: `PG forgery owner ${workspaceCounter += 1}`,
@@ -804,10 +805,13 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
       method: "POST", headers: { Authorization: `Bearer ${ownerToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ action: "accept", revision: submitted.responsibilityRevision }),
     });
-    expect((await acceptanceRequest()).status).toBe(403);
+    const forgedAcceptance = await app.request(`/api/issues/${parent.id}/deliveries/${submitted.id}/respond`, {
+      method: "POST", headers: { Authorization: `Bearer ${otherToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "accept", revision: submitted.responsibilityRevision, actor_id: agent, task_id: ownerTask.id }),
+    });
+    expect(forgedAcceptance.status).toBe(403);
     expect(store.listIssueDeliveries(parent.id)[0]?.status).toBe("pending");
-    const human = store.resolveIssueResponsibility(parent.id).rootHuman!;
-    store.authorizeIssueDelivery(parent.id, submitted.id, agent, submitted.responsibilityRevision, { type: "member", id: human.id });
+    // The actual execution Agent accepts without a human proxy grant.
     const accepted = await acceptanceRequest();
     expect(accepted.status).toBe(200);
     expect(store.getIssue(parent.id)?.status).toBe("done");

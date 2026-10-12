@@ -3667,7 +3667,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
         const worker = new Worker(workerUrl, { type: "module", env: workerEnv() });
         const {delivery,actor}=prepareTestIssueDelivery(store,issue.id);
         worker.postMessage({ type: "init", databaseUrl, issueId: issue.id, barrierPath: barrier,
-          delivery:{id:delivery.id,revision:delivery.responsibilityRevision,memberId:actor.id} });
+          delivery:{id:delivery.id,revision:delivery.responsibilityRevision,actor} });
         return worker;
       });
       try {
@@ -4677,7 +4677,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
         const ready = armWorkerPhase(worker, "ready");
         const done = armWorkerPhase(worker, "done");
         worker.postMessage({ databaseUrl, issueId: dependent.id, prerequisiteId: prereq.id, barrierPath: barrier, role,
-          prerequisiteDelivery:{id:delivery.id,revision:delivery.responsibilityRevision,memberId:actor.id} });
+          prerequisiteDelivery:{id:delivery.id,revision:delivery.responsibilityRevision,actor} });
         return { worker, ready, done };
       });
       try {

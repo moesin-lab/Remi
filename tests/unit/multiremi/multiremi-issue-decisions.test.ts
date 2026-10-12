@@ -317,7 +317,7 @@ async function exerciseAnsweredWindow(store: MultiremiStore): Promise<void> {
   expect(merges.some((entry) => entry.id === decisions[1]!.id)).toBe(true);
 }
 
-/** Root human facts supersede the old creator/subscriber/workspace-owner guesses. */
+/** Explicit contacts keep private routing; missing contacts use the workspace review queue. */
 async function exerciseDecisionRecipientFallback(store: MultiremiStore): Promise<void> {
   store.ensureLocalWorkspace();
   const workspaceOwner = store.getWorkspaceMember('mem_local_local')!;
@@ -366,11 +366,14 @@ async function exerciseDecisionRecipientFallback(store: MultiremiStore): Promise
       assigneeType: 'agent', assigneeId: sourceAgent.id, responsibleMemberId: archived.id });
     const unavailable = ask(unavailableIssue.id, 'production_change');
     store.archiveWorkspaceMember(archived.id);
-    expect(store.getQuestion(unavailable.id)).toMatchObject({ status: 'pending', stage: 'unavailable', current_handler: null });
+    expect(store.getQuestion(unavailable.id)).toMatchObject({ status: 'pending', stage: 'human', current_handler: null });
     expect(questionNotifications(unavailable.id, creator.id)).toHaveLength(0);
     expect(questionNotifications(unavailable.id, workspaceOwner.id)).toHaveLength(0);
-    expect(() => store.answerQuestion(unavailable.id, { expected_route_revision: store.getQuestion(unavailable.id)!.route_revision,
-      response: { answer: 'Yes' } }, { type: 'member', id: workspaceOwner.id })).toThrow();
+    const response = { expected_route_revision: store.getQuestion(unavailable.id)!.route_revision, response: { answer: 'Yes' } };
+    expect(() => store.answerQuestion(unavailable.id, response, { type: 'member', id: archived.id })).toThrow();
+    expect(() => store.answerQuestion(unavailable.id, response, { type: 'agent', id: sourceAgent.id })).toThrow();
+    store.answerQuestion(unavailable.id, response, { type: 'member', id: workspaceOwner.id });
+    expect(store.getQuestion(unavailable.id)?.status).toBe('answered');
 
     const parent = store.createIssue({ title: 'Ownerless parent', createdBy: bystander.id,
       assigneeType: 'agent', assigneeId: agentless.id, responsibleMemberId: creator.id });
@@ -408,7 +411,7 @@ describe("MUL-400 S4 decisions on SQLite", () => {
     await exerciseAnsweredWindow(createStore());
   });
 
-  it("uses only the explicit root human and fails closed when that person is unavailable", async () => {
+  it("keeps explicit contacts private and uses the workspace review queue when a contact is unavailable", async () => {
     await exerciseDecisionRecipientFallback(createStore());
   });
 });
@@ -518,7 +521,7 @@ describe.skipIf(!pgAvailable)("MUL-400 S4 decisions on PostgreSQL", () => {
     await exerciseAnsweredWindow(store);
   }, 15_000);
 
-  it("uses only the explicit root human and fails closed when that person is unavailable", async () => {
+  it("keeps explicit contacts private and uses the workspace review queue when a contact is unavailable", async () => {
     await exerciseDecisionRecipientFallback(store);
   });
 });

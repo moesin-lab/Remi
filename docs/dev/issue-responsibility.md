@@ -36,6 +36,8 @@ workspace owner 或外部发送者身份。伪造 body 的 run ID、创建人和
 省略字段的无关配置修改不被旧失效联系人阻塞。真实人类可通过 `remi issue responsible clear`
 或 `remi autopilot responsible clear` 清空字段。清空后不影响执行和验收。
 Task 创建根单可以不传联系人，也可继承真实来源；不能冒用技术令牌的 owner 任意指定联系人。
+普通与快捷建单独立校验 Task 的实际 Session、工作区和产品归属；来源跨工作区或 Task 审计归属与
+实际 Session 冲突时返回 `403 issue_creation_source_invalid`，不创建事项或派活。该校验不依赖联系人是否存在。
 改父单不再按根联系人是否相同审批，仍执行工作区、父链循环及现有会话/任务授权校验。
 消息转 Issue 必须由真实成员确认；飞书外部发送人或 Runtime owner 不冒充审批成员。
 入门引导从已验证 bootstrap 用户创建；显式 QA seed 和测试工厂使用有名称的合成成员。
@@ -132,6 +134,12 @@ SQLite 使用内存库；设置 `MULTIREMI_TEST_POSTGRES_URL` 后每个测试创
 `chat-responsibility-mutation-hooks.test.ts` 通过实际配置和实体变更验证 Chat 转交、旧卡失效、
 外层事务失败后配置/问题/凭据共同回滚及重启保留原会话；
 `issue-responsibility-transfer-hooks.test.ts` 包含深层子单指派和已升级 Q 的真实 HTTP 回归。
+进程恢复与并发夹具使用实际验收 Agent 的 Main Task 身份；
+`multiremi-dependency-auto-start-replay-crash.test.ts` 覆盖无联系人的跨进程提交、崩溃与重放，
+`multiremi-dependency-human-force-pg.test.ts`、`multiremi-postgres-store.test.ts` 和
+`multiremi-parent-status-race.test.ts` 验证真实 PostgreSQL 连接间的自动开工与父子状态竞争。
+旧授权元数据用例显式使用历史联系人维护授权，正式验收仍使用当前执行 Agent；
+`multiremi-parent-status-pg-depth.test.ts` 保留伪造 Agent/Task 被拒绝及验收失败整笔回滚的断言。
 
 # 历史归属复核
 

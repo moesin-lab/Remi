@@ -693,7 +693,7 @@ describe("MUL-400 E1 — parent status derived from children", () => {
     expect(acceptTestIssueDelivery(store,plain.id).status).toBe('done');
   });
 
-  it.each(["/api/issues", "/api/multiremi/issues"])("requires configuration and concrete human acceptance for unassigned parents on %s", async (path) => {
+  it.each(["/api/issues", "/api/multiremi/issues"])("supports manual acceptance after assigning an execution Agent to unassigned parents on %s", async (path) => {
     const store = createStore();
     store.ensureLocalWorkspace();
     const memberCredential = await store.createAccessToken({ name: "Closing member", type: "pat", workspaceId: "local", userId: "local" });

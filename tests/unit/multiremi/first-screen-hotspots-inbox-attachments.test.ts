@@ -189,6 +189,7 @@ describe("MUL-473 inbox summary", () => {
     expect((await getInboxSummary(harness,0)).body).toEqual({unread:300,attention:119});
     const read=await harness.app.request('/api/inbox/read',{method:'POST',headers:{...harness.headers,'Content-Type':'application/json'},body:JSON.stringify({session_id:session})});
     expect(read.status).toBe(200);
+    expect((await read.json()).cursor_seq).toBe(300);
     expect((await getInboxSummary(harness,0)).body).toEqual({unread:0,attention:0});
   },20000);
 

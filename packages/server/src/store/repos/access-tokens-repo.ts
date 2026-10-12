@@ -159,7 +159,13 @@ export class AccessTokensRepo {
 
   /** Recheck a connected daemon's credential without writing last_used_at. */
   isAccessTokenStillValid(previous: MultiremiAccessToken): boolean {
-    const current = this.getAccessToken(previous.id);
+    // Fold workspace revocation into the credential read instead of adding a
+    // second lookup on every heartbeat. Login accounts do not use workspace membership.
+    const row = this.db.query(`SELECT token.* FROM multiremi_access_tokens token
+      WHERE token.id = ? AND (token.type != 'daemon' OR EXISTS (
+        SELECT 1 FROM multiremi_workspaces workspace WHERE workspace.id = token.workspace_id
+      ))`).get(previous.id) as Row | null;
+    const current = row ? toAccessToken(row) : null;
     return Boolean(current
       && current.tokenPrefix === previous.tokenPrefix
       && current.createdAt === previous.createdAt
@@ -279,7 +285,10 @@ export class AccessTokensRepo {
     const token = rawToken.trim();
     if (!token) return null;
     const hash = await hashAccessToken(token);
-    const row = this.db.query("SELECT * FROM multiremi_access_tokens WHERE token_hash = ?").get(hash) as Row | null;
+    const row = this.db.query(`SELECT token.* FROM multiremi_access_tokens token
+      WHERE token.token_hash = ? AND (token.type != 'daemon' OR EXISTS (
+        SELECT 1 FROM multiremi_workspaces workspace WHERE workspace.id = token.workspace_id
+      ))`).get(hash) as Row | null;
     if (!row) return null;
     const accessToken = toAccessToken(row);
     if (allowedTypes?.length && !allowedTypes.includes(accessToken.type)) return null;

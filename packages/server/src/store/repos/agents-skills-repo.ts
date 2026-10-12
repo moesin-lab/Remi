@@ -253,20 +253,19 @@ export class AgentsSkillsRepo {
     this.ctx.db.run("UPDATE multiremi_agents SET execution_group_id = ? WHERE id = ?", [executionGroupId, id]);
     const updated = this.getAgent(id)!;
     if (updated.workspaceId !== current.workspaceId) refreshResponsibilityEntityChange(this.ctx,'agent',id,'execution_owner_workspace_changed',[current.workspaceId]);
-    // Changing a scheduling-relevant field (target, engine, owner, or workspace)
+    // Changing a scheduling-relevant field (target, engine, or workspace)
     // strands the agent's already-queued tasks: a task pinned to a runtime
-    // that no longer matches the agent (provider/owner) can't be claimed, and
+    // that no longer matches the agent's provider can't be claimed, and
     // a workspace change leaves the task's workspace stale versus the claim
     // predicate. Re-home them.
     const providerChanged = input.provider !== undefined && input.provider !== current.provider;
-    const ownerChanged = (updated.ownerId ?? "local") !== (current.ownerId ?? "local");
     const workspaceChanged = updated.workspaceId !== current.workspaceId;
     const runtimeChanged = updated.runtimeId !== current.runtimeId || updated.executionGroupId !== current.executionGroupId;
     const managedGroup = updated.executionGroupId
       ? getExecutionGroup(this.ctx.db, updated.executionGroupId, updated.workspaceId)?.managed : false;
     const modelChanged = Boolean(managedGroup)
       && (updated.model !== current.model || updated.thinkingLevel !== current.thinkingLevel);
-    if (providerChanged || ownerChanged || workspaceChanged || runtimeChanged || modelChanged) {
+    if (providerChanged || workspaceChanged || runtimeChanged || modelChanged) {
       // Dispatched tasks contain a frozen connection but hydrate Agent model
       // settings on recovery. Retire those unstarted snapshots when the user
       // changes execution parameters, just as for an explicit target change.
@@ -311,7 +310,7 @@ export class AgentsSkillsRepo {
     }
     // Include tasks with only a session/work_dir (no runtime pin) — a chat
     // send can queue a task carrying the promoted provider session without a
-    // runtime stamp, and that session is also void after an engine/owner change.
+    // runtime stamp, and that session is also void after an engine change.
     const rows = this.ctx.db
       .query(
         "SELECT * FROM multiremi_turn_execution_records WHERE agent_id = ? AND status = 'queued' AND (runtime_id IS NOT NULL OR session_id IS NOT NULL)",
@@ -322,7 +321,7 @@ export class AgentsSkillsRepo {
       if (daemonId) {
         // local_directory task: keep it on the machine that holds the
         // directory, under the runtime id for the agent's current provider.
-        // Drop the provider session — an engine/owner change invalidates it —
+        // Drop the provider session — an engine change invalidates it —
         // while keeping work_dir (the directory itself is unchanged).
         const rt = this.ctx.runtimes().getRuntimeByDaemonAndProvider(daemonId, agent.provider);
         const newRuntimeId = rt ? rt.id : daemonRuntimeId(daemonId, agent.provider);
@@ -700,14 +699,9 @@ export class AgentsSkillsRepo {
       }
       return existing;
     }
-    // Per-owner default agent: each member gets their own, owned by them. This
-    // is what lets a member's PRIVATE runtime run their default/onboarding task
-    // (the claim ownership predicate requires runtime owner == agent owner) —
-    // a single workspace-shared default owned by whoever created it first would
-    // be rejected by every other member's private machine. It also means the
-    // /agents/default endpoint can never hand one member another member's
-    // default agent (with its custom_env / mcp_config). Walk past any taken id
-    // (legacy/imported rows) so createAgent can't hit a UNIQUE violation.
+    // Human requests use the shared operator owner. Explicit store callers may
+    // still address a historical owner's default without rewriting attribution.
+    // Walk past imported or legacy ids to avoid a UNIQUE collision.
     const base = `agt_default_${safeIdSegment(workspaceId)}_${provider}_${safeIdSegment(ownerId)}`;
     let id = base;
     for (let n = 2; this.getAgent(id); n += 1) id = `${base}_${n}`;
@@ -724,11 +718,11 @@ export class AgentsSkillsRepo {
   }
 
   /**
-   * Find a member's default agent for a provider. Matches legacy ids too
+   * Find a default agent for a provider and the requested attribution owner.
+   * Human API calls pass the shared operator. Matches legacy ids too
    * (`agt_default_<provider>`, `agt_default_<ws>_<provider>`) so pre-pool
    * deployments reuse their default agent instead of growing a twin. Scoped to
-   * `ownerId` (exact match) — default agents are per-owner, so this never
-   * returns another member's default agent (with its custom_env / mcp_config).
+   * `ownerId` retains exact matching for historical store callers.
    */
   getDefaultAgent(workspaceId: string, provider: string, ownerId: string): MultiremiAgent | null {
     const row = this.ctx.db.query(

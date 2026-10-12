@@ -24,9 +24,11 @@ import { readOfferedTurnInput, turnCompletion } from "../../fixtures/turn-report
 // `POST :id/complete`, which reads through the cache, writes, and then re-reads
 // to build its response body.
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { Hono } from "hono";
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { markSqliteDialect, openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { createMultiremiApp } from "@multiremi/api.js";
+import { buildRequestAuth, denyDaemonOwnerWorkspaceMembership } from "@multiremi/api/helpers/auth-guards.js";
 import { taskOfferResponse } from "../../fixtures/task-offer.js";
 import { openRuntimeDownlinks, requestRuntimeRpc } from "../../fixtures/runtime-downlinks.js";
 import type { SqlDatabase, SqlStatement } from "@multiremi/store/db/postgres.js";
@@ -185,6 +187,27 @@ describe("MUL-474 daemon task-level polls", () => {
     expectMaintenanceGateReads(sql, 0);
     expect(sql.length).toBeLessThanOrEqual(MAX_STATEMENTS.status);
     expectNoTaskPayloadReads(sql);
+  });
+
+  it("rejects a deleted daemon workspace on the next HTTP request and in unverified guard contexts", async () => {
+    const scaffolded = await scaffold();
+    const path = `/api/daemon/tasks/${scaffolded.fixture.taskId}/status`;
+    await countRoute(scaffolded, "GET", path);
+    const token = await scaffolded.store.verifyAccessToken(scaffolded.fixture.daemonToken);
+    expect(token?.type).toBe("daemon");
+    databases.at(-1)!.run("DELETE FROM multiremi_workspaces WHERE id = ?", [token!.workspaceId]);
+    expect((await scaffolded.app.request(path, { headers: scaffolded.headers })).status).toBe(401);
+    const openApp = createMultiremiApp({ store: scaffolded.store });
+    expect((await openApp.request(path, { headers: scaffolded.headers })).status).toBe(401);
+
+    const directGuardApp = new Hono();
+    directGuardApp.get("/guard", (c) => {
+      c.set("multiremiAuth", buildRequestAuth(token, null));
+      return denyDaemonOwnerWorkspaceMembership(c, scaffolded.store) ?? c.json({ ok: true });
+    });
+    const guarded = await directGuardApp.request("/guard");
+    expect(guarded.status).toBe(403);
+    expect(await guarded.json()).toMatchObject({ code: "daemon_workspace_unavailable" });
   });
 
   it("bounds trace.append for one event and never reads the task payload", async () => {

@@ -34,7 +34,7 @@ Organizer 巡查报告按来源 Turn 的实际 Session owner 路由。Chat-owned
 
 成员通知的 `createInboxItem` 优先使用 `details.issue_session_id` 指定的触发 Session，要求它属于当前 Issue 及其当前工作区；否则尝试同工作区的默认 Session，再退到 `auto_orphan_inbox_${workspaceId}`。Issue 移动时，Issue-owned Session、会话头及消息反应同事务迁到目标工作区；Chat-owned Session 保留 Chat 工作区并解除 Issue 工作投影。评论和状态通知不能向其他工作区 Session 写入目标工作区成员的通知。
 
-类型及参数的事实来源为 [unified-model.ts](../../packages/contracts/src/unified-model.ts)、[InboxOperations](../../packages/server/src/store/inbox/operations.ts) 和 [Store facade](../../packages/server/src/store/store.ts)。HTTP/CLI 调用方负责鉴权、身份解析和参数校验；Store 同时校验消息源、收件人、对话与成员工作区边界。匿名旧领域评论允许 member/null，新用户入口应传入实际成员身份。
+类型及参数的事实来源为 [unified-model.ts](../../packages/contracts/src/unified-model.ts)、[InboxOperations](../../packages/server/src/store/inbox/operations.ts) 和 [Store facade](../../packages/server/src/store/store.ts)。HTTP/CLI 调用方负责鉴权、身份解析和参数校验；Store 同时校验消息源、收件人、对话与成员工作区边界。匿名旧领域评论允许 member/null，新的人类入口应传入目标工作区的共享 operator；历史作者身份保持原样。
 
 消息列表和完整 turn input 从查询行直接批量投影，不再逐 ID 重新读取。HTTP 按页批量加载附件和反应。inbox 在 SQL 中应用会话和受保护来源权限，分页与计数使用同一规则；可见性缓存只在当前请求内使用，隐藏提问不计入未读和 attention 数。
 

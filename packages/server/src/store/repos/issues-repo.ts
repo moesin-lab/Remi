@@ -1,4 +1,5 @@
 import { InboxOperations } from '../inbox/operations.js';
+import { activeRequestReadCache, cacheKey } from '../request-read-cache.js';
 import { assertIssueDeliveryAccepted, IssueDeliveryError } from '../issue-deliveries.js';
 import { refreshResponsibilityQuestions } from '../issue-responsibility-changes.js';
 import { sendMessageWithinTransaction } from "../inbox/send-message.js";
@@ -889,7 +890,14 @@ export class IssuesRepo {
   }
 
   getIssue(id: string): MultiremiIssue | null {
-    const row = this.ctx.db.query("SELECT * FROM multiremi_issues WHERE id = ?").get(id) as Row | null;
+    const cache = activeRequestReadCache();
+    const row = this.ctx.db.query(cache
+      ? `SELECT i.*, w.id AS existing_workspace_id FROM multiremi_issues i
+         LEFT JOIN multiremi_workspaces w ON w.id = i.workspace_id WHERE i.id = ?`
+      : "SELECT * FROM multiremi_issues WHERE id = ?").get(id) as Row | null;
+    // The HTTP guard needs workspace existence, not its full settings. Keep the
+    // fact in the table-scoped cache so writes and transaction locks invalidate it.
+    if (cache && row) cache.set(cacheKey("multiremi_workspaces", "exists", String(row.workspace_id)), row.existing_workspace_id != null);
     return row ? this.hydrateIssue(toIssue(row)) : null;
   }
 

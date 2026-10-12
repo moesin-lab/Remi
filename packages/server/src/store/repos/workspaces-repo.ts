@@ -122,9 +122,10 @@ export class WorkspacesRepo {
 
   /** Historical members remain resolvable; only this row is the current operator. */
   getWorkspaceOperator(workspaceId: string): MultiremiWorkspaceMember | null {
-    const row = this.ctx.db.query(`SELECT * FROM multiremi_workspace_members
-      WHERE workspace_id = ? AND user_id = 'local'
-      ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, created_at, id LIMIT 1`)
+    const row = this.ctx.db.query(`SELECT member.* FROM multiremi_workspace_members member
+      JOIN multiremi_workspaces workspace ON workspace.id = member.workspace_id
+      WHERE member.workspace_id = ? AND member.user_id = 'local'
+      ORDER BY CASE WHEN member.id = ? THEN 0 ELSE 1 END, member.created_at, member.id LIMIT 1`)
       .get(workspaceId, `mem_${workspaceId}_local`) as Row | null;
     return row ? { ...toWorkspaceMember(row), name: "Operator", email: null, role: "owner", archivedAt: null } : null;
   }
@@ -542,6 +543,18 @@ export class WorkspacesRepo {
     const rows = this.ctx.db.query("SELECT * FROM multiremi_workspaces ORDER BY created_at ASC").all() as Row[];
     if (!rows.length) return [this.ensureLocalWorkspace()];
     return rows.map(toWorkspace);
+  }
+
+  hasWorkspace(id: string): boolean {
+    const cache = activeRequestReadCache();
+    const row = cache?.get<Row | null>(cacheKey("multiremi_workspaces", "row", id));
+    if (row !== undefined) return row !== null;
+    const key = cacheKey("multiremi_workspaces", "exists", id);
+    const cached = cache?.get<boolean>(key);
+    if (cached !== undefined) return cached;
+    const exists = Boolean(this.ctx.db.query("SELECT id FROM multiremi_workspaces WHERE id = ?").get(id));
+    cache?.set(key, exists);
+    return exists;
   }
 
   getWorkspace(id: string): MultiremiWorkspace | null {

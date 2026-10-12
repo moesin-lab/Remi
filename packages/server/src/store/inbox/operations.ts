@@ -95,22 +95,20 @@ export class InboxOperations {
   }
   listMessageInbox(memberId:string,workspaceId:string,input:InboxQuery={}) {
     const member=this.ctx.workspaces().getWorkspaceMember(memberId);if(!member||member.workspaceId!==workspaceId||member.archivedAt)throw new Error('Member belongs to another workspace');
-    const operator=this.ctx.workspaces().getWorkspaceOperator(workspaceId);
-    return this.listReaderMessageInbox('member',operator?.id??memberId,workspaceId,input);
+    return this.listReaderMessageInbox('member',memberId,workspaceId,input);
   }
   listReaderMessageInbox(type:'member'|'agent',readerId:string,workspaceId:string,input:InboxQuery={}) {
-    if(type==='member')readerId=this.ctx.workspaces().getWorkspaceOperator(workspaceId)?.id??readerId;
     const scope=type==='member'?"''":this.ctx.db.dialect==='postgres'?"COALESCE(m.metadata::jsonb ->> 'execution_scope','')":"COALESCE(json_extract(m.metadata,'$.execution_scope'),'')";
     const json=(key:string)=>this.ctx.db.dialect==='postgres'?`m.metadata::jsonb #>> '{${key.replaceAll('.',',')}}'`:`json_extract(m.metadata,'$.${key}')`;
     const from=`FROM multiremi_conversation_log m
       JOIN multiremi_conversation_heads h ON h.session_id=m.session_id
-      ${type==='member'?'LEFT JOIN multiremi_workspace_read_cursors l ON l.session_id=m.session_id AND l.workspace_id=h.workspace_id':`LEFT JOIN multiremi_session_lanes l ON l.session_id=m.session_id AND l.reader_type=? AND l.reader_id=? AND l.execution_scope=${scope}`}
+      ${type==='member'?'LEFT JOIN multiremi_workspace_read_cursors l ON l.session_id=m.session_id AND l.workspace_id=?':`LEFT JOIN multiremi_session_lanes l ON l.session_id=m.session_id AND l.reader_type=? AND l.reader_id=? AND l.execution_scope=${scope}`}
       ${type==='member'?"LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id=m.session_id AND legacy.reader_type='member' AND legacy.reader_id=m.to_member_id AND legacy.execution_scope=''":''}
       LEFT JOIN multiremi_issue_sessions s ON s.id=m.session_id LEFT JOIN multiremi_chat_sessions c ON c.id=COALESCE(s.chat_id,m.session_id)
       LEFT JOIN multiremi_autopilots a ON a.session_id=m.session_id
       WHERE ${type==='member'?'m.to_member_id IS NOT NULL':'m.to_agent_id=?'} AND COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)=? AND m.kind='message'
         AND m.seq>COALESCE(l.cursor_seq,0) ${type==='member'?'AND m.seq>COALESCE(legacy.cursor_seq,0)':''} AND m.visibility='shown' AND m.deleted_at IS NULL`;
-    const params=[...(type==='agent'?[type,readerId,readerId]:[]),workspaceId];
+    const params=[...(type==='agent'?[type,readerId,readerId]:[workspaceId]),workspaceId];
     const attention=`CASE WHEN m.resolved_at IS NULL AND m.wake_applied<>'inbox_only' AND (
       m.message_kind='decision' OR m.message_kind='request' AND m.sender_type='member'
       OR m.message_kind='status' AND ${json('lifecycle_event')} IN ('task_failed','task_cancelled')

@@ -43,7 +43,7 @@ describe("workspace bot menu API", () => {
     expect(store.getWorkspace("local")?.settings).toEqual({ unrelated: { keep: true }, botMenu });
   });
 
-  it("rejects configuration changes from a non-admin member", async () => {
+  it("accepts configuration changes from the shared human operator", async () => {
     const store = createLocalStore();
     const user = store.getOrCreateUser({ externalId: "member-external", email: "member@example.test", name: "Member" });
     store.createWorkspaceMember({ workspaceId: "local", userId: user.id, name: "Member", role: "member" });
@@ -56,7 +56,7 @@ describe("workspace bot menu API", () => {
       body: JSON.stringify({ bot_menu: {} }),
     });
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(200);
   });
 
   it("retires legacy member menus through the configured host without leaking identities", async () => {

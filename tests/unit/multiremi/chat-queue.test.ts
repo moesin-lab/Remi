@@ -324,7 +324,7 @@ pendingTurnBackendTests("Chat queue unified API", fixture => {
     expect(resumed.workDir).toBe("/tmp/completed");
   });
 
-  it("enforces message ownership, unread conflicts and delete/resend FIFO through the public API", async () => {
+  it("shares human message edits while enforcing unread conflicts and delete/resend FIFO through the public API", async () => {
     const { store } = fixture();
     const agent = store.createAgent({ name: "Queue API", provider: "codex", visibility: "workspace" });
     store.ensureLocalWorkspace();
@@ -346,24 +346,18 @@ pendingTurnBackendTests("Chat queue unified API", fixture => {
     expect(second.message).toMatchObject({ body_md: "second", to_agent_id: agent.id });
     const unread = await app.request(`/api/sessions/${chat.id}/messages?unread_by=${agent.id}`, { headers });
     expect((await unread.json()).messages.map((m: any) => m.id)).toEqual([first.message.id, second.message.id]);
-    for (const method of ["PATCH", "DELETE"]) {
-      const denied = await app.request(`/api/messages/${second.message.id}`, {
-        method, headers: { ...jsonHeaders, Authorization: `Bearer ${bob.token}` },
-        ...(method === "PATCH" ? { body: JSON.stringify({ body_md: "not yours" }) } : {}),
-      });
-      expect(denied.status).toBe(403);
-    }
+    const bobHeaders = { ...jsonHeaders, Authorization: `Bearer ${bob.token}` };
     const foreign = store.createChatSession({ agentId: agent.id, creatorId: "alice" });
     const foreignMessage = store.sendChatMessage(foreign.id, { content: "foreign" }).message;
     const rejected = await app.request(`/api/sessions/${chat.id}/messages`, { method: "POST", headers,
       body: JSON.stringify({ body_md: "wrong conversation", reply_to_id: foreignMessage.id }) });
     expect(rejected.status).toBe(400);
     expect(store.getMessage(foreignMessage.id)?.deleted_at).toBeNull();
-    const edit = await app.request(`/api/messages/${second.message.id}`, { method: "PATCH", headers,
+    const edit = await app.request(`/api/messages/${second.message.id}`, { method: "PATCH", headers: bobHeaders,
       body: JSON.stringify({ body_md: "edited" }) });
     expect(edit.status).toBe(200);
     expect((await edit.json()).message).toMatchObject({ id: second.message.id, body_md: "edited", attachments: [] });
-    const removed = await app.request(`/api/messages/${second.message.id}`, { method: "DELETE", headers });
+    const removed = await app.request(`/api/messages/${second.message.id}`, { method: "DELETE", headers: bobHeaders });
     expect(removed.status).toBe(200);
     const resent = await send("edited");
     expect(resent.message.id).not.toBe(second.message.id);
@@ -371,7 +365,7 @@ pendingTurnBackendTests("Chat queue unified API", fixture => {
     const remaining = await app.request(`/api/sessions/${chat.id}/messages?unread_by=${agent.id}`, { headers });
     expect((await remaining.json()).messages.map((m: any) => m.id)).toEqual([first.message.id, resent.message.id]);
     store.recordSessionAgentInlineRead(chat.id, agent.id, [first.message.seq], first.message.seq);
-    const stale = await app.request(`/api/messages/${first.message.id}`, { method: "DELETE", headers });
+    const stale = await app.request(`/api/messages/${first.message.id}`, { method: "DELETE", headers: bobHeaders });
     expect(stale.status).toBe(409);
     expect(store.getMessage(first.message.id)?.deleted_at).toBeNull();
     const invalid = await app.request(`/api/chat/sessions/${chat.id}`, { method: "PATCH", headers, body: JSON.stringify({ pinned: "yes" }) });

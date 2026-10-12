@@ -100,7 +100,7 @@ export function authorizeReportRuntime(store: MultiremiStore, session: DaemonPro
   if (runtime.daemonId && runtime.daemonId !== session.daemonId) reject("authority_revoked");
   const workspaceId = runtime.workspaceId ?? "local";
   if (token && (token.workspaceId !== workspaceId || token.daemonId !== session.daemonId)) reject("authority_revoked");
-  if (!store.getWorkspace(workspaceId)) reject("authority_revoked");
+  if (token && !store.getWorkspace(workspaceId)) reject("authority_revoked");
   if (store.isDaemonRetired(workspaceId, session.daemonId)) reject("authority_revoked");
 }
 

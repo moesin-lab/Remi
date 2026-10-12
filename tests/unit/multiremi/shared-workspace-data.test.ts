@@ -64,6 +64,49 @@ pendingTurnBackendTests("Shared workspace operator data", fixture => {
     expect(() => store.readMessageInbox(store.getWorkspaceOperator(elsewhere.id)!.id, chat.id)).toThrow("another workspace");
   });
 
+  for (const kind of ["Issue", "Chat"] as const) it(`shares filtered ${kind} inbox reads when the historical head has no workspace stamp`, () => {
+    const { store, db } = fixture();
+    const operator = store.getWorkspaceOperator("local")!;
+    const member = store.createWorkspaceMember({ name: "Historical recipient" });
+    const session = kind === "Issue"
+      ? store.getOrCreateDefaultIssueSession(store.createIssue({ title: "Legacy inbox" }).id)
+      : store.createChatSession({ agentId: store.createAgent({ name: "Legacy Chat", provider: "codex" }).id });
+    const message = store.sendMessage({ session_id: session.id, sender: { type: "platform", id: null },
+      to: { type: "member", ref: member.id }, message_kind: "status", wake_requested: "inbox_only", body_md: "Legacy notification" }).message;
+    db.run("UPDATE multiremi_conversation_heads SET workspace_id=NULL WHERE session_id=?", [session.id]);
+    const access = { userId: "local", admin: true };
+    const unread = store.listMessageInbox(operator.id, "local", { access, limit: 1 });
+    expect(unread.unread_count).toBe(1);
+    expect(unread.items.map(item => item.id)).toEqual([message.id]);
+    expect(store.listInboxItems(operator.id, "local").map(item => item.id)).toEqual([message.id]);
+    store.readMessageInbox(operator.id, session.id);
+    expect(store.listMessageInbox(member.id, "local", { access }).unread_count).toBe(0);
+    expect(store.getInboxItem(message.id)).toMatchObject({ workspaceId: "local", memberId: operator.id, read: true });
+    expect(store.getMessage(message.id)?.to_member_id).toBe(member.id);
+  });
+
+  it("keeps foreign Task and Issue sources out of an inbox with an unstamped head", () => {
+    const { store, db } = fixture();
+    const operator = store.getWorkspaceOperator("local")!;
+    const session = store.getOrCreateDefaultIssueSession(store.createIssue({ title: "Legacy sources" }).id);
+    const foreign = store.createWorkspace({ name: "Foreign sources" });
+    const foreignIssue = store.createIssue({ title: "Foreign issue", workspaceId: foreign.id });
+    const foreignAgent = store.createAgent({ name: "Foreign worker", provider: "codex", workspaceId: foreign.id });
+    const foreignTask = store.createTask({ agentId: foreignAgent.id, issueId: foreignIssue.id, prompt: "Foreign task" });
+    for (const source of ["Task", "Issue"] as const) {
+      const message = store.sendMessage({ session_id: session.id, sender: { type: "platform", id: null },
+        to: { type: "member", ref: operator.id }, message_kind: "status", wake_requested: "inbox_only", body_md: `Foreign ${source} notification` }).message;
+      // Preserve malformed historical references to exercise the read boundary.
+      db.run("UPDATE multiremi_conversation_log SET task_id=?,metadata=? WHERE id=?", [
+        source === "Task" ? foreignTask.id : null,
+        JSON.stringify(source === "Task" ? { human_request: {} } : { source_issue_id: foreignIssue.id }), message.id]);
+    }
+    db.run("UPDATE multiremi_conversation_heads SET workspace_id=NULL WHERE session_id=?", [session.id]);
+    expect(store.listMessageInbox(operator.id, "local").unread_count).toBe(2);
+    const inbox = store.listMessageInbox(operator.id, "local", { access: { userId: "local", admin: true }, limit: 1 });
+    expect(inbox).toMatchObject({ items: [], unread_count: 0, attention_count: 0, next_cursor: null });
+  });
+
   it("new Chat messages and replies use the shared operator without rewriting the creator", () => {
     const { store } = fixture();
     const agent = store.createAgent({ name: "Chat assistant", provider: "codex" });

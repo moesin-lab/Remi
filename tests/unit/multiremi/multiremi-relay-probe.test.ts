@@ -149,14 +149,14 @@ describe("relay probe route", () => {
     });
   });
 
-  it("rejects a non-admin member and an unknown engine", async () => {
+  it("permits a human operator and rejects an unknown engine", async () => {
     const { app, memberToken } = await setup();
     const asMember = await app.request("/api/workspaces/local/relay-config/claude/probe", {
       method: "POST",
       headers: { Authorization: `Bearer ${memberToken}`, "content-type": "application/json" },
       body: "{}",
     });
-    expect(asMember.status).toBe(403);
+    expect(asMember.status).toBe(200);
 
     const badEngine = await app.request("/api/workspaces/local/relay-config/gemini/probe", {
       method: "POST",

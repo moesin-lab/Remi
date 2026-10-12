@@ -312,7 +312,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
           throw new IssueTopicConfigError(`project does not belong to this workspace: ${projectId}`);
         }
       }
-      if(issueTopics.responsibleMemberId) {
+      if(body.responsible_member_id !== undefined && issueTopics.responsibleMemberId) {
         const human=store.getWorkspaceMember(issueTopics.responsibleMemberId);
         if(!human||human.archivedAt||human.workspaceId!==workspaceId)throw new IssueTopicConfigError('responsible_member_id must name an active human in this workspace');
       }

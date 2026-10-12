@@ -98,6 +98,30 @@ try {
   assert.equal(store.messaging.ingestMessages({ connectionId: "smoke-one", sourceId: "smoke-source", messages: [message] }).inserted, 1);
   server = startMultiremiServer({ store, authToken: randomUUID(), hostname: "127.0.0.1", port: 0, backgroundJobs: false, scheduler: null, scmPolling: null, messaging: null, controlPlaneSshMesh: null, messagingProviders: new MessageProviderRegistry([new SimulatedFeishu()]) });
   const backend = `http://127.0.0.1:${server.port}`;
+  const request = async (path: string, token: string, body: object) => {
+    const response = await fetch(`${backend}${path}`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const result = await response.json();
+    assert(response.ok, `${path}: ${response.status} ${JSON.stringify(result)}`);
+    return result;
+  };
+  const taskToken = async (agentId: string, issueId?: string) => {
+    const task = store.createTask({ workspaceId: workspace.id, agentId, issueId, prompt: "Isolated formal workflow smoke" });
+    const token = (await store.createTaskAccessToken(task, owner.id)).token;
+    tokens.push(token); return token;
+  };
+  const sourceToken = await taskToken(agent.id);
+  const rootIssue = await request("/api/issues", sourceToken, { title: "No human root smoke", assignee_type: "agent", assignee_id: agent.id });
+  assert.equal(store.getIssue(rootIssue.id)?.responsibleMemberId, null);
+  const rootToken = await taskToken(agent.id, rootIssue.id);
+  const childIssue = await request("/api/issues", rootToken, { title: "No human child smoke", parent_issue_id: rootIssue.id, assignee_type: "agent", assignee_id: specialist.id });
+  const childToken = await taskToken(specialist.id, childIssue.id);
+  const childReport = await request(`/api/issues/${childIssue.id}/deliveries`, childToken, { summary: "Child evidence verified" });
+  await request(`/api/issues/${childIssue.id}/deliveries/${childReport.delivery.id}/respond`, rootToken, { action: "accept", revision: childReport.delivery.responsibilityRevision });
+  const rootReport = await request(`/api/issues/${rootIssue.id}/deliveries`, rootToken, { summary: "Integrated evidence verified" });
+  await request(`/api/issues/${rootIssue.id}/deliveries/${rootReport.delivery.id}/respond`, rootToken, { action: "accept", revision: rootReport.delivery.responsibilityRevision });
+  for (const id of [rootIssue.id, childIssue.id]) assert.equal(store.getIssue(id)?.status, "done");
+  assert.equal(store.resolveIssueResponsibility(childIssue.id).rootHuman, null);
+  check("real HTTP creates root and child without a human, accepts the child by its parent and closes the root by its execution Agent");
   next = spawn("node", [require.resolve("next/dist/bin/next"), "dev", "--webpack", "--hostname", "127.0.0.1", "--port", String(port)], { cwd: join(repo, "frontend/apps/web"), env: { ...process.env, NODE_ENV: "development", NEXT_TELEMETRY_DISABLED: "1", REMOTE_API_URL: backend, NEXT_PUBLIC_API_URL: "", NEXT_PUBLIC_WS_URL: "", FRONTEND_PORT: String(port) }, windowsHide: true, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
   next.on("error", error => { nextLogs += `\n${error.message}`; });
   for (const stream of [next.stdout, next.stderr]) stream?.on("data", chunk => { nextLogs = (nextLogs + String(chunk)).slice(-32_000); });
@@ -123,7 +147,7 @@ try {
   assert.equal(store.revealFeishuBotSecrets(workspace.id)?.appSecret, botSecret);
   assert.equal(store.getFeishuBotConfig(workspace.id)?.enabled, false);
   assert.equal(store.getFeishuBotConfig(workspace.id)?.senderAccessPolicy, "agent");
-  assert.equal(store.getFeishuBotConfig(workspace.id)?.responsibleMemberId, ownerMember.id);
+  assert.equal(store.getFeishuBotConfig(workspace.id)?.responsibleMemberId, null);
   assert(store.listFeishuBotAgentRoutes(workspace.id).some(route => route.agentId === specialist.id));
   check("database retains saved bot, write-only secret, sender policy and agent route");
 } catch (error) {

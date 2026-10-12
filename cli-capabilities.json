@@ -4265,6 +4265,40 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "issue.responsible.clear": {
+      "command": "remi issue responsible clear",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "issue.responsible.clear",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "autopilot.responsible.clear": {
+      "command": "remi autopilot responsible clear",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "autopilot.responsible.clear",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "issue.responsibility-unassigned.list": {
       "command": "remi issue responsibility-unassigned list",
       "aliases": [],

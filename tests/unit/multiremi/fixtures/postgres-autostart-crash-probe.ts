@@ -100,9 +100,12 @@ try {
   } else {
     const delivery=store.listIssueDeliveries(prerequisiteId,{limit:1})[0]!;
     const reviewer=store.resolveIssueResponsibility(prerequisiteId).reviewOwner!;
-    if(reviewer.type!=='member')throw new Error('Crash prerequisite requires its explicit human reviewer');
+    if(reviewer.type!=='agent')throw new Error('Crash prerequisite requires its execution Agent reviewer');
+    const task=store.listTasksForIssue(prerequisiteId).find(candidate=>
+      candidate.agentId===reviewer.id&&candidate.issueSessionId===delivery.sourceSessionId);
+    if(!task)throw new Error('Crash prerequisite requires its persisted Main session Task');
     store.respondIssueDelivery(prerequisiteId,delivery.id,{action:'accept',revision:delivery.responsibilityRevision},
-      {type:'member',id:reviewer.id});
+      {type:'agent',id:reviewer.id,taskId:task.id});
   }
   announce("completed");
 } catch (error) {

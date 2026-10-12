@@ -193,15 +193,14 @@ describe("Chat task request isolation", () => {
         const events: string[] = [];
         const stop = store.onWorkspaceEvent(event => events.push(event.type));
         try {
-          for (const path of ["/api/issues", "/api/multiremi/issues"]) {
+          for (const path of ["/api/issues", "/api/multiremi/issues", "/api/issues/quick-create", "/api/multiremi/issues/quick-create"]) {
             for (const forgedHuman of [false, true]) {
               const response = await app.request(path, {
                 method: "POST", headers: { Authorization: `Bearer ${token.token}`, "Content-Type": "application/json" },
                 body: JSON.stringify({ title: "Forbidden root", ...(forgedHuman ? { responsible_member_id: human.id } : {}) }),
               });
-              expect(response.status, await response.clone().text()).toBe(forgedHuman ? 403 : 409);
-              expect(await response.json()).toMatchObject({ code: forgedHuman
-                ? "human_issue_responsibility_required" : "issue_responsibility_required" });
+              expect(response.status, await response.clone().text()).toBe(403);
+              expect(await response.json()).toMatchObject({ code: "issue_creation_source_invalid" });
               expect(snapshot()).toEqual(before);
               expect(events).toEqual([]);
             }

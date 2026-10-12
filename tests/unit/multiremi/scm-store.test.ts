@@ -924,7 +924,7 @@ describe("SCM connection and canonical event store", () => {
     expect(store.listScmChangeRequestsForIssue(issue.id)).toHaveLength(1);
   });
 
-  it("settles linked merge evidence once and closes only after explicit human delivery acceptance", () => {
+  it("settles linked merge evidence once and closes only after formal Agent delivery acceptance", () => {
     const { store, connection } = seedConnection();
     store.updateWorkspace("local", {
       settings: { scm_auto_link_enabled: true, scm_complete_issue_on_merge_enabled: true },
@@ -977,7 +977,7 @@ describe("SCM connection and canonical event store", () => {
     expect(acceptScmFixtureDelivery(store, issue.id).status).toBe('done');
     const accepted = store.listIssueDeliveries(issue.id).filter(delivery => delivery.status === 'accepted');
     expect(accepted).toHaveLength(1);
-    expect(store.getMessage(accepted[0]!.responseMessageId!)).toMatchObject({ sender_type: 'member', sender_id: store.resolveIssueResponsibility(issue.id).rootHuman!.id });
+    expect(store.getMessage(accepted[0]!.responseMessageId!)).toMatchObject({ sender_type: 'agent', sender_id: store.resolveIssueResponsibility(issue.id).executionOwner!.id });
   });
 
   it("holds a parent with open children when a child change request merges", () => {

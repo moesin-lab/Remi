@@ -404,7 +404,6 @@ describe.skipIf(!pgAvailable)("MUL-458 human dependency force (PostgreSQL)", () 
     const barrierPath = join(barrierDir, "go");
     const workerUrl = new URL("./fixtures/postgres-two-connection-race-worker.ts", import.meta.url);
     const acceptance = roles.includes("auto") ? prepareTestIssueDelivery(store, prerequisiteId) : null;
-    if (acceptance && acceptance.actor.type !== "member") throw new Error("The race prerequisite requires its designated root human");
     const entries = roles.map((role) => {
       const worker = new Worker(workerUrl, { type: "module", env: workerEnv() });
       const ready = workerPhase(worker, "ready");
@@ -414,7 +413,7 @@ describe.skipIf(!pgAvailable)("MUL-458 human dependency force (PostgreSQL)", () 
       worker.postMessage({
         databaseUrl: pgDatabaseUrl(TEST_DB), issueId, prerequisiteId, agentId, barrierPath, role,
         prerequisiteDelivery: acceptance ? {
-          id: acceptance.delivery.id, revision: acceptance.delivery.responsibilityRevision, memberId: acceptance.actor.id,
+          id: acceptance.delivery.id, revision: acceptance.delivery.responsibilityRevision, actor: acceptance.actor,
         } : null,
       });
       return { worker, ready, done };

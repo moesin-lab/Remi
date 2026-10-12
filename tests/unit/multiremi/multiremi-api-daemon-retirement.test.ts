@@ -6,7 +6,7 @@ import { createLocalStore as createStore, db, readyArchiveBinding, resetMultirem
 afterEach(resetMultiremiTestEnv);
 
 describe("Multiremi API — daemon retirement", () => {
-  it("funnels bound credential revocation and member removal through daemon retirement", async () => {
+  it("retires bound credentials while historical member mutations remain unavailable", async () => {
     const store = createStore();
     const member = store.createWorkspaceMember({
       id: "machine-member-record",
@@ -59,10 +59,8 @@ describe("Multiremi API — daemon retirement", () => {
       method: "DELETE",
       headers,
     });
-    expect(removeOwner.status).toBe(409);
-    expect(await removeOwner.json()).toMatchObject({
-      error: expect.stringContaining("retire them before removing the member"),
-    });
+    expect(removeOwner.status).toBe(410);
+    expect(await removeOwner.json()).toMatchObject({ code: "workspace_members_retired" });
 
     const plan = store.getDaemonRetirementPlan("local", "daemon-trust-revocation");
     const retired = await app.request("/api/multiremi/daemons/daemon-trust-revocation/retire", {
@@ -81,7 +79,8 @@ describe("Multiremi API — daemon retirement", () => {
       method: "DELETE",
       headers,
     });
-    expect(removed.status).toBe(204);
+    expect(removed.status).toBe(410);
+    expect(store.getWorkspaceMember(member.id)?.archivedAt).toBeNull();
   });
 
   it("rejects expiring daemon credentials at the storage and admin API boundaries", async () => {
@@ -122,7 +121,7 @@ describe("Multiremi API — daemon retirement", () => {
     expect(await compatibilityRenew.json()).toMatchObject({ code: "daemon_token_expiry_not_allowed" });
   });
 
-  it("lists every daemon for managers and only owner-claimed daemons for members", async () => {
+  it("lists the shared daemon inventory for every human account", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "inventory-admin", userId: "inventory-admin", name: "Inventory Admin", role: "admin" });
     store.createWorkspaceMember({ id: "inventory-member", userId: "inventory-member", name: "Inventory Member", role: "member" });
@@ -204,20 +203,22 @@ describe("Multiremi API — daemon retirement", () => {
       headers: { Authorization: `Bearer ${memberToken.token}` },
     });
     expect(memberInventory.status).toBe(200);
-    expect((await memberInventory.json()).daemons).toEqual([
+    const sharedInventory = await memberInventory.json();
+    expect(sharedInventory.daemons).toEqual(expect.arrayContaining([
       expect.objectContaining({
         daemon_id: "daemon-inventory-member",
         owner_user_id: "inventory-member",
         runtime_count: 0,
         token_count: 1,
       }),
-    ]);
+    ]));
 
     const response = await app.request("/api/multiremi/daemons?workspace_id=local", {
       headers: { Authorization: `Bearer ${adminToken.token}` },
     });
     expect(response.status).toBe(200);
     const body = await response.json();
+    expect(body.daemons).toEqual(sharedInventory.daemons);
     expect(body.workspace_id).toBe("local");
     expect(body.daemons.find((daemon: any) => daemon.daemon_id === "daemon-inventory-token-only")).toMatchObject({
       runtime_count: 0,
@@ -261,12 +262,12 @@ describe("Multiremi API — daemon retirement", () => {
       daemon_id: "daemon-rename",
       display_name: "My workstation",
       display_name_customized: true,
-      updated_by: "rename-owner",
+      updated_by: "local",
     });
     expect(store.getDaemonProfile("local", "daemon-rename")).toMatchObject({
       displayName: "My workstation",
       displayNameCustomized: true,
-      updatedBy: "rename-owner",
+      updatedBy: "local",
     });
 
     const list = await app.request("/api/runtimes?workspace_id=local", { headers });
@@ -324,7 +325,7 @@ describe("Multiremi API — daemon retirement", () => {
     expect(store.getDaemonProfile("local", "daemon-rename-validation")).toBeNull();
   });
 
-  it("rejects daemon rename attempts from another member", async () => {
+  it("lets another human account rename a shared workspace daemon", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "rename-owner-2", userId: "rename-owner-2", name: "Rename owner", role: "member" });
     store.createWorkspaceMember({ id: "rename-other", userId: "rename-other", name: "Rename other", role: "member" });
@@ -352,15 +353,14 @@ describe("Multiremi API — daemon retirement", () => {
           Authorization: `Bearer ${otherToken.token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ display_name: "Hijacked" }),
+        body: JSON.stringify({ display_name: "Shared workstation" }),
       },
     );
-    expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({ code: "daemon_owner_required" });
-    expect(store.getDaemonProfile("local", "daemon-rename-forbidden")).toBeNull();
+    expect(response.status).toBe(200);
+    expect(store.getDaemonProfile("local", "daemon-rename-forbidden")).toMatchObject({ displayName: "Shared workstation", updatedBy: "local" });
   });
 
-  it("lets a member retire their own last-runtime daemon but rejects another member", async () => {
+  it("shares human retirement control while retaining explicit machine owner fencing", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "machine-owner", userId: "machine-owner", name: "Machine owner", role: "member" });
     store.createWorkspaceMember({ id: "other-member", userId: "other-member", name: "Other member", role: "member" });
@@ -407,8 +407,7 @@ describe("Multiremi API — daemon retirement", () => {
     const crossOwner = await app.request(planPath, {
       headers: { Authorization: `Bearer ${otherToken.token}` },
     });
-    expect(crossOwner.status).toBe(403);
-    expect(await crossOwner.json()).toMatchObject({ code: "daemon_owner_required" });
+    expect(crossOwner.status).toBe(200);
     const directPlan = store.getDaemonRetirementPlan("local", "daemon-member-owned-retire");
     expect(store.retireDaemon(
       "local",
@@ -516,8 +515,8 @@ describe("Multiremi API — daemon retirement", () => {
     const memberDenied = await app.request(path, {
       headers: { Authorization: `Bearer ${memberToken.token}` },
     });
-    expect(memberDenied.status).toBe(403);
-    expect(await memberDenied.json()).toMatchObject({ code: "daemon_owner_required" });
+    expect(memberDenied.status).toBe(200);
+    expect((await memberDenied.json()).plan.can_retire).toBeFalse();
 
     const planResponse = await app.request(path, {
       headers: { Authorization: `Bearer ${adminToken.token}` },

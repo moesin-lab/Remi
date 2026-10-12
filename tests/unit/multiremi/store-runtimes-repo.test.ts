@@ -105,7 +105,7 @@ describe("RuntimesRepo", () => {
     expect(repo.reportRuntimeModelListResult("rt_beta", request.id, { status: "failed" }).status).toBe("completed");
   });
 
-  it("hands pending work back on heartbeat and gates the claim predicate on ownership", () => {
+  it("hands pending work back on heartbeat and shares Runtime placement within its workspace", () => {
     const repo = createRepo();
     const runtime = repo.registerRuntime({
       id: "rt_gamma",
@@ -126,7 +126,10 @@ describe("RuntimesRepo", () => {
     const mine = store!.createAgent({ name: "Mine", provider: "claude", workspaceId: "local", ownerId: "usr_owner" });
     const theirs = store!.createAgent({ name: "Theirs", provider: "claude", workspaceId: "local", ownerId: "usr_other" });
     expect(repo.runtimeCanRunAgent(runtime, mine)).toBe(true);
-    expect(repo.runtimeCanRunAgent(runtime, theirs)).toBe(false);
+    expect(repo.runtimeCanRunAgent(runtime, theirs)).toBe(true);
+    const foreign = store!.createWorkspace({ name: "Other runtime workspace" });
+    const foreignAgent = store!.createAgent({ name: "Foreign", provider: "claude", workspaceId: foreign.id, ownerId: "usr_owner" });
+    expect(repo.runtimeCanRunAgent(runtime, foreignAgent)).toBe(false);
 
     expect(repo.getRuntimeByDaemonAndProvider("rt_gamma", "claude")?.id).toBe("rt_gamma");
     expect(repo.deleteRuntime("rt_gamma")).toBe(true);

@@ -4,17 +4,15 @@ import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, UserPlus, X } from "lucide-react";
 import { api } from "@multiremi/core/api";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import {
   agentListOptions,
-  memberListOptions,
   workspaceKeys,
 } from "@multiremi/core/workspace/queries";
 import { AGENT_DESCRIPTION_MAX_LENGTH } from "@multiremi/core/agents";
 import { isImeComposing } from "@multiremi/core/utils";
-import type { Agent, MemberWithUser } from "@multiremi/core/types";
+import type { Agent } from "@multiremi/core/types";
 import {
   Dialog,
   DialogContent,
@@ -45,7 +43,7 @@ import { matchesPinyin } from "../editor/extensions/pinyin-match";
 import { useT } from "../i18n";
 
 type SelectedMember = {
-  type: "agent" | "member";
+  type: "agent";
   id: string;
   name: string;
 };
@@ -59,11 +57,8 @@ export function CreateSquadModal({ onClose }: { onClose: () => void }) {
   const wsPaths = useWorkspacePaths();
   const wsId = useWorkspaceId();
   const queryClient = useQueryClient();
-  const currentUser = useAuthStore((s) => s.user);
-  const currentUserId = currentUser?.id ?? null;
 
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
-  const { data: wsMembers = [] } = useQuery(memberListOptions(wsId));
 
   // Squad membership is logical and must not depend on transient runtime
   // availability. Pool-model agents intentionally have an empty runtime_id;
@@ -205,15 +200,12 @@ export function CreateSquadModal({ onClose }: { onClose: () => void }) {
 
             <LeaderPicker
               agents={selectableAgents}
-              currentUserId={currentUserId}
               value={leaderId}
               onChange={handleLeaderChange}
             />
 
             <AdditionalMembersPicker
               agents={selectableAgents}
-              members={wsMembers}
-              currentUserId={currentUserId}
               leaderId={leaderId}
               value={selectedMembers}
               onChange={setSelectedMembers}
@@ -240,18 +232,16 @@ export function CreateSquadModal({ onClose }: { onClose: () => void }) {
 }
 
 // ---------------------------------------------------------------------------
-// LeaderPicker — single-select agent picker, grouped "My Agents" first then
-// "Workspace Agents". Empty workspaces render a disabled trigger that points
+// LeaderPicker — single-select workspace agent picker. Empty workspaces
+// render a disabled trigger that points
 // the user at agent creation.
 // ---------------------------------------------------------------------------
 function LeaderPicker({
   agents,
-  currentUserId,
   value,
   onChange,
 }: {
   agents: Agent[];
-  currentUserId: string | null;
   value: string;
   onChange: (id: string) => void;
 }) {
@@ -259,22 +249,11 @@ function LeaderPicker({
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
 
-  const myAgents = useMemo(
-    () => (currentUserId ? agents.filter((a) => a.owner_id === currentUserId) : []),
-    [agents, currentUserId],
-  );
-  const otherAgents = useMemo(
-    () =>
-      currentUserId
-        ? agents.filter((a) => a.owner_id !== currentUserId)
-        : agents,
-    [agents, currentUserId],
-  );
+  const otherAgents = agents;
 
   const q = filter.trim().toLowerCase();
   const matches = (a: Agent) =>
     !q || a.name.toLowerCase().includes(q) || matchesPinyin(a.name, q);
-  const filteredMine = myAgents.filter(matches);
   const filteredOthers = otherAgents.filter(matches);
 
   const selected = agents.find((a) => a.id === value) ?? null;
@@ -335,24 +314,6 @@ function LeaderPicker({
               />
             </div>
             <div className="max-h-72 overflow-y-auto p-1">
-              {filteredMine.length > 0 && (
-                <PickerSection label={t(($) => $.create_squad.group_my_agents)}>
-                  {filteredMine.map((a) => (
-                    <PickerItem
-                      key={a.id}
-                      selected={value === a.id}
-                      onClick={() => {
-                        onChange(a.id);
-                        setOpen(false);
-                        setFilter("");
-                      }}
-                    >
-                      <ActorAvatar actorType="agent" actorId={a.id} size={18} showStatusDot />
-                      <span className="truncate">{a.name}</span>
-                    </PickerItem>
-                  ))}
-                </PickerSection>
-              )}
               {filteredOthers.length > 0 && (
                 <PickerSection label={t(($) => $.create_squad.group_workspace_agents)}>
                   {filteredOthers.map((a) => (
@@ -371,7 +332,7 @@ function LeaderPicker({
                   ))}
                 </PickerSection>
               )}
-              {filteredMine.length === 0 && filteredOthers.length === 0 && (
+              {filteredOthers.length === 0 && (
                 <PickerEmpty />
               )}
             </div>
@@ -383,22 +344,18 @@ function LeaderPicker({
 }
 
 // ---------------------------------------------------------------------------
-// AdditionalMembersPicker — multi-select agents + workspace members. The
+// AdditionalMembersPicker — multi-select workspace agents. The
 // trigger shows up to 3 chips inline; the rest collapse into "+N". The popup
 // stays open while the user toggles selections so they can pick multiple
 // without re-opening it.
 // ---------------------------------------------------------------------------
 function AdditionalMembersPicker({
   agents,
-  members,
-  currentUserId,
   leaderId,
   value,
   onChange,
 }: {
   agents: Agent[];
-  members: MemberWithUser[];
-  currentUserId: string | null;
   leaderId: string;
   value: SelectedMember[];
   onChange: (next: SelectedMember[]) => void;
@@ -407,7 +364,7 @@ function AdditionalMembersPicker({
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
 
-  const isSelected = (type: "agent" | "member", id: string) =>
+  const isSelected = (type: "agent", id: string) =>
     value.some((m) => m.type === type && m.id === id);
 
   const toggle = (m: SelectedMember) => {
@@ -422,34 +379,15 @@ function AdditionalMembersPicker({
     onChange(value.filter((x) => !(x.type === m.type && x.id === m.id)));
   };
 
-  const myAgents = useMemo(
-    () =>
-      currentUserId
-        ? agents.filter((a) => a.owner_id === currentUserId && a.id !== leaderId)
-        : [],
-    [agents, currentUserId, leaderId],
-  );
-  const otherAgents = useMemo(
-    () =>
-      agents.filter(
-        (a) =>
-          a.id !== leaderId &&
-          (currentUserId ? a.owner_id !== currentUserId : true),
-      ),
-    [agents, currentUserId, leaderId],
-  );
+  const otherAgents = agents.filter(a => a.id !== leaderId);
 
   const q = filter.trim().toLowerCase();
   const agentMatches = (a: Agent) =>
     !q || a.name.toLowerCase().includes(q) || matchesPinyin(a.name, q);
-  const memberMatches = (m: MemberWithUser) =>
-    !q || m.name.toLowerCase().includes(q) || matchesPinyin(m.name, q);
 
-  const filteredMine = myAgents.filter(agentMatches);
   const filteredOthers = otherAgents.filter(agentMatches);
-  const filteredMembers = members.filter(memberMatches);
   const anyResults =
-    filteredMine.length + filteredOthers.length + filteredMembers.length > 0;
+    filteredOthers.length > 0;
 
   return (
     <div>
@@ -529,22 +467,6 @@ function AdditionalMembersPicker({
             />
           </div>
           <div id="squad-member-listbox" role="listbox" className="max-h-72 overflow-y-auto p-1">
-            {filteredMine.length > 0 && (
-              <PickerSection label={t(($) => $.create_squad.group_my_agents)}>
-                {filteredMine.map((a) => (
-                  <PickerItem
-                    key={a.id}
-                    selected={isSelected("agent", a.id)}
-                    onClick={() =>
-                      toggle({ type: "agent", id: a.id, name: a.name })
-                    }
-                  >
-                    <ActorAvatar actorType="agent" actorId={a.id} size={18} showStatusDot />
-                    <span className="truncate">{a.name}</span>
-                  </PickerItem>
-                ))}
-              </PickerSection>
-            )}
             {filteredOthers.length > 0 && (
               <PickerSection label={t(($) => $.create_squad.group_workspace_agents)}>
                 {filteredOthers.map((a) => (
@@ -557,22 +479,6 @@ function AdditionalMembersPicker({
                   >
                     <ActorAvatar actorType="agent" actorId={a.id} size={18} showStatusDot />
                     <span className="truncate">{a.name}</span>
-                  </PickerItem>
-                ))}
-              </PickerSection>
-            )}
-            {filteredMembers.length > 0 && (
-              <PickerSection label={t(($) => $.create_squad.group_members)}>
-                {filteredMembers.map((m) => (
-                  <PickerItem
-                    key={m.user_id}
-                    selected={isSelected("member", m.user_id)}
-                    onClick={() =>
-                      toggle({ type: "member", id: m.user_id, name: m.name })
-                    }
-                  >
-                    <ActorAvatar actorType="member" actorId={m.user_id} size={18} />
-                    <span className="truncate">{m.name}</span>
                   </PickerItem>
                 ))}
               </PickerSection>

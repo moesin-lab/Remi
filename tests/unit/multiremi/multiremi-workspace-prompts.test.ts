@@ -82,7 +82,7 @@ describe("workspace prompt settings", () => {
     });
   });
 
-  it("rejects stale writes and non-admin members", async () => {
+  it("rejects stale writes while sharing prompt management across human accounts", async () => {
     const store = createLocalStore();
     const app = createMultiremiApp({ store, authToken: "MASTER" });
     await app.request("/api/workspaces/local/prompts", {
@@ -106,7 +106,8 @@ describe("workspace prompt settings", () => {
       headers: { Authorization: `Bearer ${token.token}`, "content-type": "application/json" },
       body: JSON.stringify({ bootstrapPrompt: "Bypass", deltaPrompt: "", expectedRevision: 1 }),
     });
-    expect(forbidden.status).toBe(403);
+    expect(forbidden.status).toBe(200);
+    expect((await forbidden.json()).revision).toBe(2);
   });
 
   it("ships the latest workspace prompts in a task claim", async () => {

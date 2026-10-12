@@ -342,7 +342,8 @@ describe("complete shell observer guard (MUL-472 R1)", () => {
     act(() => { markRouteContentReady(navigation.pathname); });
     await act(async () => { flushIdle(); });
     await waitFor(() => {
-      for (const request of [listAgents, listSquads, getAgentTaskSnapshot, listMyInvitations,
+      expect(listMyInvitations).not.toHaveBeenCalled();
+      for (const request of [listAgents, listSquads, getAgentTaskSnapshot,
         listPins, listInboxPage, getLatestCliVersion, listIssues, listChatSessions, listPendingChatTasks]) {
         expect(request).toHaveBeenCalledTimes(1);
       }

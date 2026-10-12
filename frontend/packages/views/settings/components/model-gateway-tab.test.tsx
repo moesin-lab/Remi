@@ -7,7 +7,7 @@ import enCommon from "../../locales/en/common.json";
 import enSettings from "../../locales/en/settings.json";
 
 const membersRef = vi.hoisted(() => ({
-  current: [{ user_id: "user-1", role: "owner" as "owner" | "admin" | "member" }],
+  current: [{ user_id: "local", role: "owner" as "owner" | "admin" | "member" }],
   pending: false,
 }));
 const relayRef = vi.hoisted(() => ({
@@ -110,7 +110,7 @@ function Wrapper({ children }: { children: ReactNode }) {
 describe("ModelGatewayTab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    membersRef.current = [{ user_id: "user-1", role: "owner" }];
+    membersRef.current = [{ user_id: "local", role: "owner" }];
     membersRef.pending = false;
     relayRef.current = {
       claude: { fragment: '{"env":{"ANTHROPIC_BASE_URL":"https://ai.openremi.fun"}}', hasToken: true, revision: 3 },
@@ -147,7 +147,7 @@ describe("ModelGatewayTab", () => {
   });
 
   it("blocks non owner/admin members", () => {
-    membersRef.current = [{ user_id: "user-1", role: "member" }];
+    membersRef.current = [{ user_id: "local", role: "member" }];
     render(<ModelGatewayTab />, { wrapper: Wrapper });
     expect(screen.getByText(/Only workspace owners and admins/)).toBeInTheDocument();
     expect(screen.queryByText("Auto-discover models")).not.toBeInTheDocument();

@@ -350,15 +350,22 @@ export class ProjectsRepo {
     return this.getProject(id)!;
   }
 
-  listPinnedItems(workspaceId?: string | null, userId?: string | null): MultiremiPinnedItem[] {
+  listPinnedItems(workspaceId?: string | null, _userId?: string | null): MultiremiPinnedItem[] {
     const resolvedWorkspaceId = workspaceId ?? "local";
-    const resolvedUserId = userId ?? "local";
     const rows = this.ctx.db.query(
       `SELECT * FROM multiremi_pinned_items
-       WHERE workspace_id = ? AND user_id = ?
-       ORDER BY position ASC, created_at ASC`,
-    ).all(resolvedWorkspaceId, resolvedUserId) as Row[];
-    return rows.map(toPinnedItem);
+       WHERE workspace_id = ?
+       ORDER BY position ASC, created_at ASC, id ASC`,
+    ).all(resolvedWorkspaceId) as Row[];
+    // Preserve legacy rows and their IDs, but expose a single workspace list.
+    const seen = new Set<string>();
+    return rows.flatMap((row) => {
+      const pin = toPinnedItem(row);
+      const key = JSON.stringify([pin.itemType, pin.itemId]);
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [{ ...pin, userId: "local" }];
+    });
   }
 
   /**
@@ -372,7 +379,7 @@ export class ProjectsRepo {
     const itemId = String(input.itemId ?? input.item_id ?? "").trim();
     if (!itemId) throw new Error("item_id is required");
     const workspaceId = input.workspaceId ?? input.workspace_id ?? "local";
-    const userId = input.userId ?? input.user_id ?? "local";
+    const userId = "local";
     return this.ctx.db.transaction(() => {
       // Global lock order (MUL-405, see store/advisory-locks.ts): the workspace
       // lifecycle row lock precedes the number lock on every path that needs
@@ -381,12 +388,12 @@ export class ProjectsRepo {
       advisoryXactLock(this.ctx.db, numberAllocationLockKey(`pinned-item:${workspaceId}:${userId}`));
       this.validatePinnedItemTarget(workspaceId, itemType, itemId);
       const existing = this.ctx.db.query(
-        "SELECT id FROM multiremi_pinned_items WHERE workspace_id = ? AND user_id = ? AND item_type = ? AND item_id = ?",
-      ).get(workspaceId, userId, itemType, itemId) as Row | null;
+        "SELECT id FROM multiremi_pinned_items WHERE workspace_id = ? AND item_type = ? AND item_id = ?",
+      ).get(workspaceId, itemType, itemId) as Row | null;
       if (existing) throw new Error("Item already pinned");
       const maxRow = this.ctx.db.query(
-        "SELECT COALESCE(MAX(position), 0) AS max_position FROM multiremi_pinned_items WHERE workspace_id = ? AND user_id = ?",
-      ).get(workspaceId, userId) as Row | null;
+        "SELECT COALESCE(MAX(position), 0) AS max_position FROM multiremi_pinned_items WHERE workspace_id = ?",
+      ).get(workspaceId) as Row | null;
       const id = input.id ?? createId("pin");
       const position = Number(maxRow?.max_position ?? 0) + 1;
       this.ctx.db.run(
@@ -403,28 +410,31 @@ export class ProjectsRepo {
     return row ? toPinnedItem(row) : null;
   }
 
-  deletePinnedItem(workspaceId: string | null | undefined, userId: string | null | undefined, itemType: string, itemId: string): void {
+  deletePinnedItem(workspaceId: string | null | undefined, _userId: string | null | undefined, itemType: string, itemId: string): void {
     const normalizedType = normalizePinnedItemType(itemType);
     this.ctx.db.run(
-      "DELETE FROM multiremi_pinned_items WHERE workspace_id = ? AND user_id = ? AND item_type = ? AND item_id = ?",
-      [workspaceId ?? "local", userId ?? "local", normalizedType, itemId],
+      "DELETE FROM multiremi_pinned_items WHERE workspace_id = ? AND item_type = ? AND item_id = ?",
+      [workspaceId ?? "local", normalizedType, itemId],
     );
   }
 
-  reorderPinnedItems(workspaceId: string | null | undefined, userId: string | null | undefined, items: ReorderPinnedItemInput[]): MultiremiPinnedItem[] {
+  reorderPinnedItems(workspaceId: string | null | undefined, _userId: string | null | undefined, items: ReorderPinnedItemInput[]): MultiremiPinnedItem[] {
     const resolvedWorkspaceId = workspaceId ?? "local";
-    const resolvedUserId = userId ?? "local";
     const tx = this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(resolvedWorkspaceId);
+      advisoryXactLock(this.ctx.db, numberAllocationLockKey(`pinned-item:${resolvedWorkspaceId}:local`));
       for (const item of items) {
         if (!item.id) throw new Error("items[].id is required");
         const position = Number(item.position);
         if (!Number.isFinite(position)) throw new Error("items[].position must be a finite number");
+        const pin = this.getPinnedItem(item.id);
+        if (!pin || pin.workspaceId !== resolvedWorkspaceId) continue;
         this.ctx.db.run(
-          "UPDATE multiremi_pinned_items SET position = ? WHERE id = ? AND workspace_id = ? AND user_id = ?",
-          [position, item.id, resolvedWorkspaceId, resolvedUserId],
+          "UPDATE multiremi_pinned_items SET position = ? WHERE workspace_id = ? AND item_type = ? AND item_id = ?",
+          [position, resolvedWorkspaceId, pin.itemType, pin.itemId],
         );
       }
-      return this.listPinnedItems(resolvedWorkspaceId, resolvedUserId);
+      return this.listPinnedItems(resolvedWorkspaceId);
     });
     return tx();
   }

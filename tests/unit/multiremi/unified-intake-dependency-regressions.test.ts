@@ -160,7 +160,7 @@ pendingTurnBackendTests("MUL-508 C1/C2", (fixture) => {
     return { ...f, user, member, owner, target, prerequisite, issue, session, input, post, audits };
   }
 
-  it("#2-C2: non-owner member request starts once with verified audit and post-commit events", async () => {
+  it("#2-C2: authenticated human request starts once as shared operator with verified audit and post-commit events", async () => {
     const f = await waiting();
     const premature: string[] = [];
     const stop = f.store.onWorkspaceEvent(event => { if (f.db.inTransaction) premature.push(event.type); });
@@ -168,14 +168,15 @@ pendingTurnBackendTests("MUL-508 C1/C2", (fixture) => {
       const response = await f.post(f.input);
       expect(response.status).toBe(200);
       const result = await response.json();
-      expect(result).toMatchObject({ wake_applied: "now", wake_reason: "human_sender", message: { sender_type: "member", sender_id: f.member.id } });
+      expect(result).toMatchObject({ wake_applied: "now", wake_reason: "human_sender", message: { sender_type: "member", sender_id: f.store.getWorkspaceOperator("local")!.id } });
       expect(f.store.getIssue(f.issue.id)?.status).toBe("todo");
       const tasks = f.store.listTasksForIssue(f.issue.id);
       expect(tasks).toHaveLength(1);
       expect(tasks[0]!.agentId).toBe(f.target.id);
       expect(tasks[0]!.prompt).toContain("unfinished prerequisites");
       expect(f.audits()).toHaveLength(1);
-      expect(f.audits()[0]).toMatchObject({ actorType: "member", actorId: f.user.id });
+      expect(f.audits()[0]).toMatchObject({ actorType: "member", actorId: "local" });
+      expect(f.store.getWorkspaceMember(f.member.id)?.userId).toBe(f.user.id);
       expect(f.audits()[0]!.data).toMatchObject({ source: "comment", commentId: result.message.id, taskId: tasks[0]!.id,
         agentId: f.target.id, assigneeDispatched: false, unmet: [{ dependsOnIssueId: f.prerequisite.id }] });
       const duplicate = await f.post(f.input);

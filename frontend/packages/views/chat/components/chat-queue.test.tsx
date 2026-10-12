@@ -8,7 +8,7 @@ vi.mock("@multiremi/core/api", async importOriginal => ({
   ...await importOriginal<typeof import("@multiremi/core/api")>(), api: mock,
 }));
 vi.mock("@multiremi/core/auth", () => ({ useAuthStore: (select: (state: unknown) => unknown) => select({ user: { id: "user-1" } }) }));
-vi.mock("@multiremi/core/workspace/queries", () => ({ memberListOptions: () => ({ queryKey: ["members"], queryFn: async () => [{ id: "member-1", user_id: "user-1" }] }) }));
+vi.mock("@multiremi/core/workspace/queries", () => ({ memberListOptions: () => ({ queryKey: ["members"], queryFn: async () => [{ id: "member-1", user_id: "local" }] }) }));
 vi.mock("@multiremi/core/hooks", () => ({ useWorkspaceId: () => "ws-1" }));
 import { ChatQueue } from "./chat-queue";
 import { ApiError } from "@multiremi/core/api";

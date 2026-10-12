@@ -1,5 +1,7 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useState } from "react";
 import {
   AlertCircle,
@@ -17,7 +19,6 @@ import {
   useWorkspacePresenceMap,
 } from "@multiremi/core/agents";
 import { api, ApiError } from "@multiremi/core/api";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import {
@@ -65,7 +66,7 @@ export function AgentDetailPage({ agentId }: AgentDetailPageProps) {
   const paths = useWorkspacePaths();
   const navigation = useNavigation();
   const qc = useQueryClient();
-  const currentUser = useAuthStore((state) => state.user);
+  const currentUser = workspaceOperatorUser;
 
   const {
     data: agents = [],

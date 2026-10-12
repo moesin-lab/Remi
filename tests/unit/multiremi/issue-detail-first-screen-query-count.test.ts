@@ -18,6 +18,7 @@ import { openHotspotDatabase } from "../../fixtures/multiremi/first-screen-hotsp
 import { createMultiremiApp } from "@multiremi/api.js";
 import type { SqlDatabase, SqlStatement } from "@multiremi/store/db/postgres.js";
 import { MultiremiStore } from "@multiremi/store.js";
+import { withRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import {
   installDeterministicIds,
   normalizeIssueDetailResponse,
@@ -155,6 +156,27 @@ describe("MUL-385 issue detail first-screen response shape", () => {
 });
 
 describe("MUL-385 issue detail first-screen query counts", () => {
+  it("reuses Issue workspace existence only until the next workspace write or request", async () => {
+    const { store, probe } = await createCountedStore();
+    const workspace = store.createWorkspace({ name: "Existence cache", slug: "existence-cache" });
+    const issue = store.createIssue({ title: "Cached workspace", workspaceId: workspace.id });
+    withRequestReadCache(() => {
+      expect(store.getIssue(issue.id)?.workspaceId).toBe(workspace.id);
+      probe.reset();
+      expect(store.hasWorkspace(workspace.id)).toBe(true);
+      expect(probe.statements).toBe(0);
+      store.deleteWorkspace(workspace.id);
+      probe.reset();
+      expect(store.hasWorkspace(workspace.id)).toBe(false);
+      expect(probe.statements).toBe(1);
+    });
+    withRequestReadCache(() => {
+      probe.reset();
+      expect(store.hasWorkspace(workspace.id)).toBe(false);
+      expect(probe.statements).toBe(1);
+    });
+  });
+
   it("includes unmet keys with one dependency read only while a child is in backlog", async () => {
     const { store, probe } = await createCountedStore();
     const app = createMultiremiApp({ store, authToken: AUTH_TOKEN });
@@ -257,7 +279,7 @@ describe("MUL-385 issue detail first-screen query counts", () => {
     expect(store.listSessionParticipantsForSessions([]).size).toBe(0);
   });
 
-  it("batches multiple Chats without exposing another creator or an inaccessible private Agent", async () => {
+  it("batches shared historical Chats while retaining workspace and task boundaries", async () => {
     const { store, db, probe } = await createCountedStore();
     store.ensureLocalWorkspace();
     for (const [userId, role] of [["alice", "member"], ["bob", "member"], ["admin", "admin"]] as const) {
@@ -305,21 +327,21 @@ describe("MUL-385 issue detail first-screen query counts", () => {
     await read(aliceHeaders);
     probe.reset();
     const initialSessions = await read(aliceHeaders);
-    expect(initialSessions.map((session) => session.id).sort()).toEqual([main.id, aliceVisible].sort());
+    const sharedIds = [main.id, aliceVisible, bobVisible, alicePrivate, adminVisible].sort();
+    expect(initialSessions.map((session) => session.id).sort()).toEqual(sharedIds);
     expect(initialSessions.find((session) => session.id === main.id)?.participants).toEqual([]);
     const initialCount = probe.statements;
-    expect((await read(await headersFor("bob"))).map((session) => session.id).sort()).toEqual([main.id, bobVisible].sort());
-    // Admin may access a private Agent, but remains restricted to their own Chat.
-    expect((await read(await headersFor("admin"))).map((session) => session.id).sort()).toEqual([main.id, adminVisible].sort());
-    expect((await read(AUTH_HEADERS)).map((session) => session.id)).toEqual([main.id]);
+    expect((await read(await headersFor("bob"))).map((session) => session.id).sort()).toEqual(sharedIds);
+    expect((await read(await headersFor("admin"))).map((session) => session.id).sort()).toEqual(sharedIds);
+    expect((await read(AUTH_HEADERS)).map((session) => session.id).sort()).toEqual(sharedIds);
     const outsiders = await headersFor("outsider");
-    expect((await app.request(path, { headers: outsiders })).status).toBe(404);
+    expect((await read(outsiders)).map((session) => session.id).sort()).toEqual(sharedIds);
     for (let index = 0; index < 12; index += 1) addChat(`chat_first_screen_extra_${index}`, "alice");
     probe.reset();
     const expanded = await read(aliceHeaders);
     expect(expanded).toHaveLength(initialSessions.length + 12);
     expect(expanded.filter((session) => session.id !== main.id).every((session) => session.participants.length > 0)).toBe(true);
-    expect(expanded.some((session) => session.id === alicePrivate)).toBe(false);
+    expect(expanded.some((session) => session.id === alicePrivate)).toBe(true);
     expect(expanded.some((session) => session.id === inconsistentChat)).toBe(false);
     expect(expanded.some((session) => session.id === foreignSession.id)).toBe(false);
     expect(probe.statements).toBe(initialCount);
@@ -329,9 +351,9 @@ describe("MUL-385 issue detail first-screen query counts", () => {
       agentId: publicAgent.id, taskId: task.id, workspaceId: "local" });
     const taskSessions = await read({ Authorization: `Bearer ${taskCredential.token}` });
     expect(taskSessions.map((session) => session.id)).toEqual([aliceVisible]);
-    // Private-Agent ownership changes are evaluated afresh on each request.
+    // Historical Agent ownership changes do not split the shared human view.
     store.updateAgent(privateAgent.id, { ownerId: "alice" });
-    expect((await read(aliceHeaders)).some((session) => session.id === alicePrivate)).toBe(true);
+    expect((await read(aliceHeaders)).map((session) => session.id).sort()).toEqual(expanded.map((session) => session.id).sort());
     // Real PG setup creates several owner graphs before exercising the HTTP guard.
     // Keep the query-count assertions independent from this correctness budget.
   }, 30_000);

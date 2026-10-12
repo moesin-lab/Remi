@@ -6,7 +6,7 @@ import { collaborationCommandSpecs } from "../../../apps/remi/cli/commands/colla
 import { CommandRegistry } from "../../../apps/remi/cli/core/index.js";
 import { CLI_CAPABILITIES_RUNTIME } from "../../../packages/server/src/api/cli-capabilities-generated.js";
 import { RETIRED_CLI_COMMANDS } from "../../../apps/remi/cli/core/retired-commands.js";
-import { RETIRED_CLI_ROUTES } from "../../../packages/server/src/api/retired-cli-routes.js";
+import { RETIRED_CLI_ROUTES, WORKSPACE_OPERATOR_RETIRED_ROUTES } from "../../../packages/server/src/api/retired-cli-routes.js";
 import {
   cliCoverageReport,
   cliRuntimeCapabilities,
@@ -226,8 +226,8 @@ describe("CLI capabilities manifest", () => {
 
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
     expect(cliCoverageReport(manifest)).toEqual({
-      mapped: 658,
-      exempt: 169,
+      mapped: 645,
+      exempt: 182,
       missing: 0,
       total: 827,
     });
@@ -363,7 +363,7 @@ describe("CLI capabilities manifest", () => {
       deprecated_since: "0.3.0",
     });
     expect(Object.values(manifest.routes).filter((route) => "planned_command" in route)).toEqual([]);
-    expect(Object.keys(manifest.aliases)).toHaveLength(37);
+    expect(Object.keys(manifest.aliases)).toHaveLength(45);
     for (const [legacy, alias] of Object.entries(manifest.aliases)) {
       expect(migrationDoc, legacy).toContain(`| \`${legacy}\` | \`${alias.replacement}\` |`);
     }
@@ -386,7 +386,7 @@ describe("CLI capabilities manifest", () => {
       expect(entry.replacement).toBe(replacement);
       expect(manifest.commands[entry.command]).toMatchObject({ capability: null, aliases: [], hidden: true });
     }
-    for (const route of Object.keys(RETIRED_CLI_ROUTES)) {
+    for (const route of Object.keys({ ...RETIRED_CLI_ROUTES, ...WORKSPACE_OPERATOR_RETIRED_ROUTES })) {
       expect(manifest.routes[route]).toMatchObject({ cli_exempt: true, category: "retired_route" });
     }
   });

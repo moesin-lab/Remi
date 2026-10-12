@@ -105,12 +105,6 @@ export function workspaceCommandSpecs(): CommandSpec[] {
       const response = await client.request({ method: "DELETE", path: `/api/workspaces/${encodePath(String(workspace.id))}` });
       renderResource(invocation, response.data);
     }),
-    destructiveSpec("workspace.leave", ["workspace", "leave"], "Leave a workspace", [refPositional("workspace")], async (invocation) => {
-      const client = await clientFor(invocation);
-      const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
-      const response = await client.request({ method: "POST", path: `/api/workspaces/${encodePath(String(workspace.id))}/leave`, body: {} });
-      renderResource(invocation, response.data);
-    }),
     readSpec("workspace.runtime-provision.list", ["workspace", "runtime-provision", "list"], "List Runtime provisions", [refPositional("workspace")], async (invocation) => {
       const { client, workspaceId } = await runtimeProvisionScope(invocation);
       const response = await client.request({ method: "GET", path: `/api/workspaces/${encodePath(workspaceId)}/runtime-provisions` });

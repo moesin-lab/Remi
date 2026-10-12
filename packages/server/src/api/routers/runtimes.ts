@@ -525,7 +525,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
       if (!store.getExecutionGroup(groupId, workspaceId)) return c.json({ error: "invalid execution_group_id" }, 400);
       const runtimes = executionGroupRuntimes(store, workspaceId, groupId, ownerId);
       const visibleIds = new Set(loaded.runtimes.map((runtime) => runtime.id));
-      if (!runtimes.length || runtimes.some((runtime) => !visibleIds.has(runtime.id))) return c.json({ error: "no accessible execution group members" }, 403);
+      if (!runtimes.length || runtimes.some((runtime) => !visibleIds.has(runtime.id) || !canCurrentUserUseRuntime(c, store, runtime))) return c.json({ error: "no accessible execution group members" }, 403);
       return c.json({ providers: executionGroupModelCatalog(store, workspaceId, groupId, ownerId) });
     }
     if (runtimeId) {

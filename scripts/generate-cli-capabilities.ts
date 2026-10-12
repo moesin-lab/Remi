@@ -3,7 +3,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { cliCommandInventory } from "../apps/remi/cli/index.js";
-import { RETIRED_CLI_ROUTES } from "../packages/server/src/api/retired-cli-routes.js";
+import { RETIRED_CLI_ROUTES, WORKSPACE_OPERATOR_RETIRED_ROUTES } from "../packages/server/src/api/retired-cli-routes.js";
 import {
   cliCoverageReport,
   cliRuntimeCapabilities,
@@ -20,7 +20,7 @@ const RUNTIME_MANIFEST_PATH = resolve(ROOT, "packages/server/src/api/cli-capabil
 const MAX_PLANNED_ROUTES = 0;
 
 const DOMAINS = [
-  "context", "workspace", "member", "invite", "token",
+  "context", "workspace", "account", "member", "invite", "token",
   "project", "repo", "knowledge", "memory", "wiki",
   "issue", "comment", "session", "share", "label", "attachment",
   "chat", "task", "message", "turn",
@@ -132,8 +132,8 @@ export function classifyRoute(route: string): CliManifestRoute {
   if (/^GET \/api\/sessions\/:sessionId\/log(?:\/entry|\/locate)?$/.test(route)) return {
     cli_exempt: true, category: "pure_ui", reason: "Read-only SSR and replica display wire (head, turn cards, window and location); CLI reads use message.list/get.",
   };
-  if (RETIRED_CLI_ROUTES[route]) return {
-    cli_exempt: true, category: "retired_route", reason: `已移除：改用 ${RETIRED_CLI_ROUTES[route]}`,
+  if ((RETIRED_CLI_ROUTES[route] ?? WORKSPACE_OPERATOR_RETIRED_ROUTES[route])) return {
+    cli_exempt: true, category: "retired_route", reason: `已移除：改用 ${(RETIRED_CLI_ROUTES[route] ?? WORKSPACE_OPERATOR_RETIRED_ROUTES[route])}`,
   };
   if (route === "GET /api/inbox") return { command: "inbox" };
   if (route === "GET /api/sessions/:sessionId/messages") return { command: "message.list" };
@@ -179,14 +179,14 @@ function mappedResourceCommand(route: string): string | null {
     "GET /api/workspaces": "workspace.list",
     "POST /api/workspaces": "workspace.create",
     "GET /api/invitations": "invite.list",
-    "GET /api/me": "member.get",
-    "PATCH /api/me": "member.update",
-    "PATCH /api/me/onboarding": "member.onboarding.update",
-    "POST /api/me/onboarding/complete": "member.onboarding.complete",
-    "POST /api/me/onboarding/cloud-waitlist": "member.onboarding.cloud-waitlist",
-    "POST /api/me/onboarding/runtime-bootstrap": "member.onboarding.runtime-bootstrap",
-    "POST /api/me/onboarding/no-runtime-bootstrap": "member.onboarding.no-runtime-bootstrap",
-    "GET /api/multiremi/members": "member.list",
+    "GET /api/me": "account.get",
+    "PATCH /api/me": "account.update",
+    "PATCH /api/me/onboarding": "account.onboarding.update",
+    "POST /api/me/onboarding/complete": "account.onboarding.complete",
+    "POST /api/me/onboarding/cloud-waitlist": "account.onboarding.cloud-waitlist",
+    "POST /api/me/onboarding/runtime-bootstrap": "account.onboarding.runtime-bootstrap",
+    "POST /api/me/onboarding/no-runtime-bootstrap": "account.onboarding.no-runtime-bootstrap",
+    "GET /api/multiremi/members": "workspace.operator",
     "POST /api/multiremi/members": "member.create",
     "GET /api/tokens": "token.list",
     "POST /api/tokens": "token.create",
@@ -345,7 +345,7 @@ function mappedResourceCommand(route: string): string | null {
     [/^PATCH \/api\/workspaces\/:id\/runtime-provisions\/:provisionId$/, "workspace.runtime-provision.update"],
     [/^DELETE \/api\/workspaces\/:id\/runtime-provisions\/:provisionId$/, "workspace.runtime-provision.delete"],
     [/^GET \/api\/workspaces\/:id\/runtime-provisions\/:provisionId\/states$/, "workspace.runtime-provision.states"],
-    [/^GET \/api\/workspaces\/:id\/members$/, "member.list"],
+    [/^GET \/api\/workspaces\/:id\/members$/, "workspace.operator"],
     [/^PATCH \/api\/workspaces\/:id\/members\/:memberId$/, "member.update"],
     [/^DELETE \/api\/workspaces\/:id\/members\/:memberId$/, "member.delete"],
     [/^POST \/api\/workspaces\/:id\/members$/, "invite.create"],

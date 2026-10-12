@@ -1928,15 +1928,15 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const ws = freshWorkspace();
     const member = store.listWorkspaceMembers(ws)[0]!;
     const issue = createResponsibleTestIssue(store, { title: "PG notification", workspaceId: ws, createdBy: member.id });
-    const author = store.createWorkspaceMember({name:'PG notification author',workspaceId:ws});
-    store.createIssueComment(issue.id,{authorType:'member',authorId:author.id,body:'Notify the subscribed creator'});
-    const item = store.listInboxItems(member.id).find((entry) => entry.issueId === issue.id)!;
+    const author = store.createAgent({name:'PG notification author',workspaceId:ws,provider:'codex'});
+    store.createIssueComment(issue.id,{authorType:'agent',authorId:author.id,body:`Notify [@Operator](mention://member/${member.id})`});
+    const item = store.listInboxItems(member.id,ws).find((entry) => entry.issueId === issue.id)!;
     const channel = store.createNotificationChannel({
       workspaceId: ws,
       kind: "feishu_group",
       name: "PG team group",
       target: { chatId: "oc_pg_team" },
-      eventTypes: ["comment_created"],
+      eventTypes: ["comment_mention"],
       minSeverity: "info",
       createdBy: member.id,
     });
@@ -2178,7 +2178,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const workspaceA = freshWorkspace();
     const workspaceB = freshWorkspace();
     const reviewer = store.createWorkspaceMember({ name: "Scoped parent reviewer", workspaceId: workspaceA, role: "member" });
-    const author = store.createWorkspaceMember({ name: "Scoped parent author", workspaceId: workspaceA, role: "member" });
+    const author = store.createAgent({ name: "Scoped parent author", workspaceId: workspaceA, provider: "codex" });
     const parent = createResponsibleTestIssue(store, { title: "Parent moved to B", workspaceId: workspaceA });
     const child = createResponsibleTestIssue(store, {
       title: "Child staying in A",
@@ -2188,9 +2188,9 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       status: "todo",
     });
     store.createIssueComment(child.id, {
-      authorType: "member",
+      authorType: "agent",
       authorId: author.id,
-      body: "Notify before moving the parent",
+      body: `Notify [@Operator](mention://member/${reviewer.id}) before moving the parent`,
     });
 
     // MUL-476 refuses moving an Issue that still has a child, so the parent can
@@ -2221,9 +2221,9 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       createdBy: reviewer.id,
     });
     store.createIssueComment(orphan.id, {
-      authorType: "member",
+      authorType: "agent",
       authorId: author.id,
-      body: "Notify before deleting the parent",
+      body: `Notify [@Operator](mention://member/${reviewer.id}) before deleting the parent`,
     });
     expect(store.deleteIssue(deletedParent.id)).toBe(true);
     expect(store.listInboxItems(reviewer.id, workspaceA).find((item) => item.issueId === orphan.id)).toMatchObject({
@@ -2435,9 +2435,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     const dirTask = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "work in dir", workspaceId: ws });
     expect(dirTask.runtimeId).toBe(codex.id);
 
-    // Ownership predicate: another member's private runtime can't claim the
-    // pool task; a public one can. (Same SQL path as SQLite — this guards the
-    // translated Postgres form.)
+    // Historical human ownership does not partition the shared runtime pool.
     const privateRt = store.registerRuntime({
       name: "rt-pool-private",
       provider: "codex",
@@ -2454,8 +2452,8 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
     });
     const ownedIssue = createResponsibleTestIssue(store, { title: "pg owned", workspaceId: ws });
     const ownedTask = store.createTask({ agentId: agent.id, issueId: ownedIssue.id, prompt: "owned", workspaceId: ws });
-    expect(store.claimTask(privateRt.id)).toBeNull();
-    expect(store.claimTask(publicRt.id)?.id).toBe(ownedTask.id);
+    expect(store.claimTask(privateRt.id)?.id).toBe(ownedTask.id);
+    expect(store.claimTask(publicRt.id)).toBeNull();
   });
 
   it("serializes Runtime-affine project, token, and Issue workspace writes with daemon retirement", async () => {

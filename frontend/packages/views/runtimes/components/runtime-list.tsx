@@ -9,7 +9,7 @@ import type {
   AgentTask,
   MemberWithUser,
 } from "@multiremi/core/types";
-import { useAuthStore } from "@multiremi/core/auth";
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import {
   agentListOptions,
@@ -93,7 +93,7 @@ export function RuntimeList({
   const wsId = useWorkspaceId();
   const slug = useWorkspaceSlug();
   const navigation = useNavigation();
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
 
   const { data: agents = EMPTY_AGENTS } = useQuery(agentListOptions(wsId));
   const { data: members = EMPTY_MEMBERS } = useQuery(memberListOptions(wsId));
@@ -118,16 +118,7 @@ export function RuntimeList({
     return map;
   }, [members]);
 
-  // Owner column only earns its space when the page actually has multiple
-  // distinct owners — otherwise it would just be a column of identical
-  // avatars.
-  const showOwner = useMemo(() => {
-    const owners = new Set<string>();
-    for (const r of runtimes) {
-      if (r.owner_id) owners.add(r.owner_id);
-    }
-    return owners.size > 1;
-  }, [runtimes]);
+  const showOwner = false;
 
   const rows = useMemo<RuntimeRow[]>(() => {
     return runtimes.map((runtime) => ({

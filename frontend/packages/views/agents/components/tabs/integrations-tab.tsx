@@ -1,9 +1,10 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useQuery } from "@tanstack/react-query";
 import { Webhook } from "lucide-react";
 import type { Agent } from "@multiremi/core/types";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { larkInstallationsOptions } from "@multiremi/core/lark";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
@@ -27,7 +28,7 @@ export function IntegrationsTab({ agent }: { agent: Agent }) {
   const { t } = useT("agents");
   const { t: ts } = useT("im-platforms");
   const wsId = useWorkspaceId();
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
 
   // Both queries are already issued by LarkAgentBindButton (and keyed per
   // workspace), so re-reading them here is free — TanStack dedupes by key.

@@ -81,8 +81,7 @@ describe("remi CLI dispatcher", () => {
     expect(inventory.filter((entry) => entry.path.length === 1).map((entry) => entry.path.join(" "))).toEqual([
       "context",
       "workspace",
-      "member",
-      "invite",
+      "account",
       "token",
       "project",
       "repo",
@@ -112,6 +111,7 @@ describe("remi CLI dispatcher", () => {
       "message",
       "turn",
       "inbox",
+      "invite",
       "start",
       "stop",
       "restart",

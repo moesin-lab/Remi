@@ -166,7 +166,8 @@
     "deleting": "删除中...",
     "toast_delete_failed": "删除工作区失败",
     "confirm_cancel": "取消",
-    "confirm_action": "确认"
+    "confirm_action": "确认",
+    "shared_operator_description": "所有操作者共用同一工作区身份。聊天、收件箱状态和工作区配置统一共享。"
   },
   "prompts": {
     "title": "智能体提示词",
@@ -557,10 +558,26 @@
     "source_capabilities_hint": "这里只核对清单是否包含更新器架构所需的内容，不代表下载可用或当前安装兼容；升级仍需通过全部可更新性检查。",
     "source_unknown_requirement": "未知要求：{{requirement}}",
     "update_modes": {
-      "images": { "label": "宿主镜像更新", "description": "由宿主更新器拉取镜像并重建 API/Web 容器。", "migration": "准备宿主更新器和兼容的 API/Web 镜像摘要。在其私有配置中设置 MULTIREMI_PLATFORM_UPDATE_MODE=images，沿用现有 Compose 项目和备份配置。启用前先迁移已有的应用更新覆盖文件。" },
-      "host_application": { "label": "宿主应用更新", "description": "由宿主更新器下载应用包，复用已有基础镜像。", "migration": "准备宿主更新器、Docker 访问、完整备份和隔离迁移演练。沿用 docker_compose 或 local_profile 配置，设置 MULTIREMI_PLATFORM_UPDATE_MODE=application。此模式仍依赖宿主更新器。" },
-      "internal_application": { "label": "容器内部应用更新", "description": "由 Compose 内更新器切换 API/Web 及包内 Bun/Node，容器持续运行。", "migration": "接入配套且支持监管程序的 API/Web 镜像，添加 compose.internal-updates.yml，设置 REMI_UPDATER_IMAGE 和 REMI_UPDATER_ENV_FILE，配置与 API 一致的鉴权信息及 HTTPS 更新源。带上覆盖文件启动更新器和隔离演练服务，等待监管程序和初始副本就绪。" },
-      "systemd_release": { "label": "Systemd 发布目录更新", "description": "由宿主更新器切换发布目录并重启所管理的 systemd 服务。", "migration": "准备 Linux 发布目录、受管理的 API/Web systemd 服务和完整备份。配置 MULTIREMI_PLATFORM_DRIVER=systemd_release 及包含源码归档的更新源。从 Docker 转入此模式还需要单独迁移数据和服务部署。" }
+      "images": {
+        "label": "宿主镜像更新",
+        "description": "由宿主更新器拉取镜像并重建 API/Web 容器。",
+        "migration": "准备宿主更新器和兼容的 API/Web 镜像摘要。在其私有配置中设置 MULTIREMI_PLATFORM_UPDATE_MODE=images，沿用现有 Compose 项目和备份配置。启用前先迁移已有的应用更新覆盖文件。"
+      },
+      "host_application": {
+        "label": "宿主应用更新",
+        "description": "由宿主更新器下载应用包，复用已有基础镜像。",
+        "migration": "准备宿主更新器、Docker 访问、完整备份和隔离迁移演练。沿用 docker_compose 或 local_profile 配置，设置 MULTIREMI_PLATFORM_UPDATE_MODE=application。此模式仍依赖宿主更新器。"
+      },
+      "internal_application": {
+        "label": "容器内部应用更新",
+        "description": "由 Compose 内更新器切换 API/Web 及包内 Bun/Node，容器持续运行。",
+        "migration": "接入配套且支持监管程序的 API/Web 镜像，添加 compose.internal-updates.yml，设置 REMI_UPDATER_IMAGE 和 REMI_UPDATER_ENV_FILE，配置与 API 一致的鉴权信息及 HTTPS 更新源。带上覆盖文件启动更新器和隔离演练服务，等待监管程序和初始副本就绪。"
+      },
+      "systemd_release": {
+        "label": "Systemd 发布目录更新",
+        "description": "由宿主更新器切换发布目录并重启所管理的 systemd 服务。",
+        "migration": "准备 Linux 发布目录、受管理的 API/Web systemd 服务和完整备份。配置 MULTIREMI_PLATFORM_DRIVER=systemd_release 及包含源码归档的更新源。从 Docker 转入此模式还需要单独迁移数据和服务部署。"
+      }
     },
     "preflight_ready": "检查通过",
     "preflight_blocked": "检查未通过",

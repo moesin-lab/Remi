@@ -1916,7 +1916,7 @@ describe("Multiremi session archives", () => {
   });
 
   it("protects and validates workspace archive settings", async () => {
-    const { store, app } = await fixture();
+    const { store, app, daemonHeaders } = await fixture();
     store.createWorkspaceMember({
       id: "member_archive",
       workspaceId: "local",
@@ -1932,6 +1932,9 @@ describe("Multiremi session archives", () => {
     });
     expect((await app.request("/api/workspaces/local/session-archive", {
       headers: { Authorization: `Bearer ${member.token}` },
+    })).status).toBe(200);
+    expect((await app.request("/api/workspaces/local/session-archive", {
+      headers: daemonHeaders,
     })).status).toBe(403);
 
     const invalid = await app.request("/api/workspaces/local/session-archive", {
@@ -1953,7 +1956,7 @@ describe("Multiremi session archives", () => {
 
     const updated = await app.request("/api/workspaces/local/session-archive", {
       method: "PUT",
-      headers: { Authorization: "Bearer root-secret", "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${member.token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ workspace_ttl_ms: 7_200_000, gc_interval_ms: 120_000 }),
     });
     expect(updated.status).toBe(200);
@@ -1971,6 +1974,8 @@ describe("Multiremi session archives", () => {
       workspace_ttl_ms: 7_200_000,
       gc_interval_ms: 120_000,
     });
+    const shared = await app.request("/api/workspaces/local/session-archive", { headers: { Authorization: "Bearer root-secret" } });
+    expect((await shared.json()).config).toMatchObject({ workspace_ttl_ms: 7_200_000, gc_interval_ms: 120_000 });
   });
 
   it("retains Runtime provenance without blocking Runtime deletion", async () => {

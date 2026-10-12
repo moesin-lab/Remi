@@ -17,6 +17,7 @@ import {
   BotMenuResponseSchema,
   PlatformPromptTemplatePreviewSchema,
   WorkspaceEnvResponseSchema,
+  WorkspaceOperatorSchema,
   type WorkspaceEnvResponse,
 } from "../schemas/workspaces";
 
@@ -25,11 +26,12 @@ export class WorkspacesEndpoints {
 
   // Workspaces
   async listWorkspaces(): Promise<Workspace[]> {
-    return this.http.fetch("/api/workspaces");
+    const workspaces = await this.http.fetch<Workspace[]>("/api/workspaces");
+    return workspaces.map(parseWorkspaceIdentity);
   }
 
   async getWorkspace(id: string): Promise<Workspace> {
-    return this.http.fetch(`/api/workspaces/${id}`);
+    return parseWorkspaceIdentity(await this.http.fetch<Workspace>(`/api/workspaces/${id}`));
   }
 
   async createWorkspace(data: { name: string; slug: string; description?: string; context?: string }): Promise<Workspace> {
@@ -126,4 +128,12 @@ export class WorkspacesEndpoints {
 
 function botMenuPath(workspaceId: string, botId: string, suffix = ""): string {
   return `/api/workspaces/${encodeURIComponent(workspaceId)}/bot-menu${suffix}?bot_id=${encodeURIComponent(botId)}`;
+}
+
+function parseWorkspaceIdentity(workspace: Workspace): Workspace {
+  // Older servers can omit the identity field; permissions still require the
+  // canonical operator returned by the workspace actor query.
+  if (workspace.operator === undefined) return workspace;
+  return { ...workspace, operator: parseStrictResponse(workspace.operator, WorkspaceOperatorSchema,
+    { endpoint: "GET /api/workspaces operator" }) };
 }

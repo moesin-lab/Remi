@@ -307,7 +307,7 @@ const mockApiObj = vi.hoisted(() => ({
   listAttachments: vi.fn().mockResolvedValue([]),
   addCommentReaction: vi.fn(),
   removeCommentReaction: vi.fn(),
-  listMembers: vi.fn().mockResolvedValue([{ user_id: "user-1", name: "Test User", email: "test@test.com", role: "admin" }]),
+  listMembers: vi.fn().mockResolvedValue([{ user_id: "local", name: "Test User", email: "test@test.com", role: "admin" }]),
   listAgents: vi.fn().mockResolvedValue([]),
   getProject: vi.fn(),
   listProjects: vi.fn().mockResolvedValue({ projects: [] }),
@@ -609,7 +609,7 @@ async function waitForReveal() {
 
 describe("IssueDetail (shared)", () => {
   beforeEach(() => {
-    activityPreferencesStore("user-1", "ws-1").getState().setShowSystemDetails(false);
+    activityPreferencesStore("local", "ws-1").getState().setShowSystemDetails(false);
     vi.clearAllMocks();
     issueLogOverride.current = null;
     timelinePageControl.hasMore = false;
@@ -618,7 +618,7 @@ describe("IssueDetail (shared)", () => {
     // Default: issue loads successfully
     mockApiObj.getIssue.mockResolvedValue(mockIssue);
     mockWorkspaceMembers.query.mockResolvedValue([
-      { user_id: "user-1", name: "Test User", email: "test@test.com", role: "admin" },
+      { user_id: "local", name: "Test User", email: "test@test.com", role: "admin" },
     ]);
     mockApiObj.listIssueSessions.mockResolvedValue([{
       id: "session-main",
@@ -679,7 +679,7 @@ describe("IssueDetail (shared)", () => {
     mockApiObj.getActiveTasksForIssue.mockResolvedValue({ tasks: [] });
     mockApiObj.listTasksByIssue.mockResolvedValue([]);
     mockApiObj.listMembers.mockResolvedValue([
-      { user_id: "user-1", name: "Test User", email: "test@test.com", role: "admin" },
+      { user_id: "local", name: "Test User", email: "test@test.com", role: "admin" },
     ]);
     mockApiObj.listAgents.mockResolvedValue([]);
     // Reset project mock — individual tests override per case. Default fixture
@@ -835,7 +835,7 @@ describe("IssueDetail (shared)", () => {
     expect(document.querySelector("[data-tab-scroll-root][data-perf-state='ready']")).not.toBeInTheDocument();
 
     await act(async () => {
-      resolveMembers([{ user_id: "user-1", name: "Test User", email: "test@test.com", role: "admin" }]);
+      resolveMembers([{ user_id: "local", name: "Test User", email: "test@test.com", role: "admin" }]);
     });
     expect(document.querySelector("[data-tab-scroll-root][data-perf-state='ready']")).not.toBeInTheDocument();
 
@@ -1466,7 +1466,7 @@ describe("IssueDetail (shared)", () => {
     expect(view.container.querySelector('[data-perf-anchor="target-comment"]')).toBeNull();
     expect(view.container.querySelector(".bg-warning\\/10")).toBeNull();
     expect(screen.getByRole("switch", { name: "Show system details" })).toHaveAttribute("aria-checked", "false");
-    expect(activityPreferencesStore("user-1", "ws-1").getState().showSystemDetails).toBe(false);
+    expect(activityPreferencesStore("local", "ws-1").getState().showSystemDetails).toBe(false);
     expect(mockApiObj.getSessionLog).toHaveBeenCalledWith("session-main", { before: 30, with_activity: 1 });
   });
 

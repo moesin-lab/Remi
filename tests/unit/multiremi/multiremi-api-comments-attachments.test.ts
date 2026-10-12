@@ -171,13 +171,13 @@ describe("Multiremi API — comments, reactions, and attachments", () => {
 
     const issue = createResponsibleTestIssue(store, { title: "Original inbox", createdBy: alice.id });
     store.addIssueSubscriber(issue.id, bob.id);
-    store.createIssueComment(issue.id, { authorType: "member", authorId: alice.id, body: "Ping Bob" });
+    store.createIssueComment(issue.id, { authorType: "agent", authorId: agent.id, body: `Ping [@Bob](mention://member/${bob.id})` });
     const camelInbox = await app.request(`/api/inbox?memberId=${encodeURIComponent(bob.id)}`);
-    expect((await camelInbox.json()).items).toEqual([]);
-    expect((await (await app.request("/api/inbox"+`?member_id=local`)).json()).unread_count).toBe(0);
+    expect((await camelInbox.json()).items).toHaveLength(1);
+    expect((await (await app.request("/api/inbox"+`?member_id=local`)).json()).unread_count).toBe(1);
     const inbox = await app.request(`/api/inbox?member_id=${encodeURIComponent(bob.id)}`);
     const inboxBody = await inbox.json();
-    expect(inboxBody.items[0].to_member_id).toBe(bob.id);
+    expect(inboxBody.items[0].to_member_id).toBe(store.getWorkspaceOperator("local")!.id);
     expect((await (await app.request("/api/inbox"+`?member_id=${encodeURIComponent(bob.id)}`)).json()).unread_count).toBe(1);
     expect((await (await app.request(`/api/inbox/read?member_id=${bob.id}`, { method: "POST" , body: JSON.stringify({ all: true }) })).json()).conversations_read).toBe(1);
     expect((await (await app.request(`/api/inbox/read?member_id=${bob.id}`, { method: "POST" , body: JSON.stringify({ all: true }) })).json()).conversations_read).toBe(1);
@@ -533,16 +533,16 @@ describe("Multiremi API — comments, reactions, and attachments", () => {
     expect(chatUpload.status).toBe(200);
     const chatAttId = (await chatUpload.json()).attachment.id;
 
-    // A different workspace member cannot read another user's private chat attachment.
-    expect((await app.request(`/api/attachments/${chatAttId}/content`, auth(peerToken.token))).status).toBe(403);
-    expect((await app.request(`/api/attachments/${chatAttId}/download`, auth(peerToken.token))).status).toBe(403);
-    expect((await app.request(`/api/attachments/${chatAttId}`, { method: "DELETE", ...auth(peerToken.token) })).status).toBe(403);
-    expect(store.getAttachment(chatAttId)).not.toBeNull();
+    // Every human account shares the workspace's historical Chat attachments.
+    expect((await app.request(`/api/attachments/${chatAttId}/content`, auth(peerToken.token))).status).toBe(200);
+    expect((await app.request(`/api/attachments/${chatAttId}/download`, auth(peerToken.token))).status).toBe(200);
 
     // The chat creator can read their own attachment.
     const creatorRead = await app.request(`/api/attachments/${chatAttId}/content`, auth(localToken.token));
     expect(creatorRead.status).toBe(200);
     expect(await creatorRead.text()).toBe("chat secret");
+    expect((await app.request(`/api/attachments/${chatAttId}`, { method: "DELETE", ...auth(peerToken.token) })).status).toBe(200);
+    expect(store.getAttachment(chatAttId)).toBeNull();
   });
 
   it("enforces Go-style attachment delete authz and listing/upload workspace gates", async () => {
@@ -564,12 +564,13 @@ describe("Multiremi API — comments, reactions, and attachments", () => {
       filename: "secret.txt", url: "/api/attachments/seed/content", contentType: "text/plain", sizeBytes: 5,
     });
 
-    // DELETE authz (Go file.go DeleteAttachment: uploader or workspace admin/owner only).
+    // Human deletion uses shared workspace authority, including historical uploads.
     const att1 = seed();
-    expect((await app.request(`/api/attachments/${att1.id}`, { method: "DELETE", ...auth(bobToken.token) })).status).toBe(403);
-    expect(store.getAttachment(att1.id)).not.toBeNull();
-    expect((await app.request(`/api/attachments/${att1.id}`, { method: "DELETE", ...auth(aliceToken.token) })).status).toBe(200);
+    expect((await app.request(`/api/attachments/${att1.id}`, { method: "DELETE", ...auth(bobToken.token) })).status).toBe(200);
     expect(store.getAttachment(att1.id)).toBeNull();
+    const ownAttachment = seed();
+    expect((await app.request(`/api/attachments/${ownAttachment.id}`, { method: "DELETE", ...auth(aliceToken.token) })).status).toBe(200);
+    expect(store.getAttachment(ownAttachment.id)).toBeNull();
     const att2 = seed();
     expect((await app.request(`/api/attachments/${att2.id}`, { method: "DELETE", ...auth(carolToken.token) })).status).toBe(200);
     expect(store.getAttachment(att2.id)).toBeNull();

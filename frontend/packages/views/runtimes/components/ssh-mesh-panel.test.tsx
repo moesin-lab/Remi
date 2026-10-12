@@ -50,7 +50,7 @@ vi.mock("@multiremi/core/workspace/queries", () => ({
     queryKey: ["members", "ws-1"],
     queryFn: () => fixture.memberError
       ? Promise.reject(new Error("members unavailable"))
-      : Promise.resolve([{ user_id: "user-1", role: fixture.role }]),
+      : Promise.resolve([{ user_id: "local", role: fixture.role }]),
   }),
 }));
 vi.mock("@multiremi/core/runtimes", async () => {

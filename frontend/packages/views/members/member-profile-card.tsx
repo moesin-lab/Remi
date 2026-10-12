@@ -1,10 +1,10 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import type { Agent, MemberRole } from "@multiremi/core/types";
+import type { Agent } from "@multiremi/core/types";
 import { useWorkspaceId } from "@multiremi/core";
 import { agentRunCounts30dOptions } from "@multiremi/core/agents";
-import { agentListOptions, memberListOptions } from "@multiremi/core/workspace/queries";
+import { agentListOptions, historicalActorListOptions } from "@multiremi/core/workspace/queries";
 import { resolvePublicFileUrl } from "@multiremi/core/workspace/avatar-url";
 import { findMemberById } from "@multiremi/core/workspace/member-lookup";
 import { useWorkspacePaths } from "@multiremi/core/paths";
@@ -28,7 +28,7 @@ export function MemberProfileCard({ userId }: MemberProfileCardProps) {
   const { t } = useT("members");
   const wsId = useWorkspaceId();
   const { data: members = [], isLoading: membersLoading } = useQuery(
-    memberListOptions(wsId),
+    historicalActorListOptions(wsId),
   );
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
   const { data: runCounts = [] } = useQuery(agentRunCounts30dOptions(wsId));
@@ -87,7 +87,6 @@ export function MemberProfileCard({ userId }: MemberProfileCardProps) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <p className="truncate text-sm font-semibold">{member.name}</p>
-            <RoleBadge role={member.role} />
           </div>
           <p className="mt-0.5 truncate text-xs text-muted-foreground">
             {member.email}
@@ -101,18 +100,6 @@ export function MemberProfileCard({ userId }: MemberProfileCardProps) {
   );
 }
 
-function RoleBadge({ role }: { role: MemberRole }) {
-  const { t } = useT("members");
-  return (
-    <span className="rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-      {role === "owner"
-        ? t(($) => $.role.owner)
-        : role === "admin"
-          ? t(($) => $.role.admin)
-          : t(($) => $.role.member)}
-    </span>
-  );
-}
 
 function OwnedAgentsSection({ agents }: { agents: Agent[] }) {
   const { t } = useT("members");

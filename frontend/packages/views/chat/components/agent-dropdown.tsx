@@ -1,13 +1,12 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 import type { Agent } from "@multiremi/core/types";
 import { ActorAvatar } from "../../common/actor-avatar";
 import {
   PickerEmpty,
   PickerItem,
-  PickerSection,
   PropertyPicker,
 } from "../../issues/components/pickers/property-picker";
 import { matchesPinyin } from "../../editor/extensions/pinyin-match";
@@ -21,34 +20,20 @@ import { useT } from "../../i18n";
 export function AgentDropdown({
   agents,
   activeAgent,
-  userId,
   onSelect,
 }: {
   agents: Agent[];
   activeAgent: Agent | null;
-  userId: string | undefined;
   onSelect: (agent: Agent) => void;
 }) {
   const { t } = useT("chat");
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
-  // Split into the user's own agents and everyone else so the menu groups
-  // them — matches the old AgentSelector layout.
-  const { mine, others } = useMemo(() => {
-    const mine: Agent[] = [];
-    const others: Agent[] = [];
-    for (const a of agents) {
-      if (a.owner_id === userId) mine.push(a);
-      else others.push(a);
-    }
-    return { mine, others };
-  }, [agents, userId]);
 
   const query = filter.trim().toLowerCase();
   const matches = (name: string) =>
     !query || name.toLowerCase().includes(query) || matchesPinyin(name, query);
-  const filteredMine = mine.filter((agent) => matches(agent.name));
-  const filteredOthers = others.filter((agent) => matches(agent.name));
+  const filteredAgents = agents.filter((agent) => matches(agent.name));
 
   const handlePick = (agent: Agent) => {
     onSelect(agent);
@@ -89,35 +74,17 @@ export function AgentDropdown({
         </>
       }
     >
-      {filteredMine.length === 0 && filteredOthers.length === 0 ? (
+      {filteredAgents.length === 0 ? (
         <PickerEmpty />
       ) : (
-        <>
-          {filteredMine.length > 0 && (
-            <PickerSection label={t(($) => $.window.my_agents)}>
-              {filteredMine.map((agent) => (
-                <AgentPickerItem
-                  key={agent.id}
-                  agent={agent}
-                  isCurrent={agent.id === activeAgent.id}
-                  onSelect={handlePick}
-                />
-              ))}
-            </PickerSection>
-          )}
-          {filteredOthers.length > 0 && (
-            <PickerSection label={t(($) => $.window.others)}>
-              {filteredOthers.map((agent) => (
-                <AgentPickerItem
-                  key={agent.id}
-                  agent={agent}
-                  isCurrent={agent.id === activeAgent.id}
-                  onSelect={handlePick}
-                />
-              ))}
-            </PickerSection>
-          )}
-        </>
+        filteredAgents.map((agent) => (
+          <AgentPickerItem
+            key={agent.id}
+            agent={agent}
+            isCurrent={agent.id === activeAgent.id}
+            onSelect={handlePick}
+          />
+        ))
       )}
     </PropertyPicker>
   );

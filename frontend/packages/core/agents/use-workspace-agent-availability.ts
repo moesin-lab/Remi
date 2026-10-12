@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useWorkspaceId } from "../hooks";
-import { useAuthStore } from "../auth";
+import { WORKSPACE_OPERATOR_USER_ID } from "../workspace/operator";
 import { agentListOptions, memberListOptions } from "../workspace/queries";
 import { canAssignAgentToIssue } from "../permissions";
 
@@ -43,7 +43,7 @@ export function useWorkspaceAgentAvailability(
   enabled = true,
 ): WorkspaceAgentAvailability {
   const wsId = useWorkspaceId();
-  const userId = useAuthStore((s) => s.user?.id);
+  const userId = WORKSPACE_OPERATOR_USER_ID;
   const { data: agents, isFetched: agentsFetched } = useQuery({
     ...agentListOptions(wsId),
     enabled,

@@ -4,7 +4,7 @@ import { useCallback, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useWorkspaceId } from "../hooks";
 import { useAfterFirstScreen } from "../platform/use-after-first-screen";
-import { memberListOptions, agentListOptions, squadListOptions } from "./queries";
+import { historicalActorListOptions, agentListOptions, squadListOptions } from "./queries";
 import { resolvePublicFileUrl } from "./avatar-url";
 import { findMemberById } from "./member-lookup";
 
@@ -26,7 +26,7 @@ export function useActorName(
   const gateOpen = useAfterFirstScreen();
   const squadsEnabled = options.squadsEnabled ?? gateOpen;
   const enabled = options.enabled ?? true;
-  const { data: members = NO_MEMBERS } = useQuery({ ...memberListOptions(wsId), enabled });
+  const { data: members = NO_MEMBERS } = useQuery({ ...historicalActorListOptions(wsId), enabled });
   const { data: agents = NO_AGENTS } = useQuery(agentListOptions(wsId, {
     enabled: enabled && (options.agentsEnabled ?? gateOpen),
   }));

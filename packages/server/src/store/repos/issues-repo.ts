@@ -1,4 +1,5 @@
 import { InboxOperations } from '../inbox/operations.js';
+import { activeRequestReadCache, cacheKey } from '../request-read-cache.js';
 import { assertIssueDeliveryAccepted, IssueDeliveryError } from '../issue-deliveries.js';
 import { refreshResponsibilityQuestions } from '../issue-responsibility-changes.js';
 import { sendMessageWithinTransaction } from "../inbox/send-message.js";
@@ -889,7 +890,14 @@ export class IssuesRepo {
   }
 
   getIssue(id: string): MultiremiIssue | null {
-    const row = this.ctx.db.query("SELECT * FROM multiremi_issues WHERE id = ?").get(id) as Row | null;
+    const cache = activeRequestReadCache();
+    const row = this.ctx.db.query(cache
+      ? `SELECT i.*, w.id AS existing_workspace_id FROM multiremi_issues i
+         LEFT JOIN multiremi_workspaces w ON w.id = i.workspace_id WHERE i.id = ?`
+      : "SELECT * FROM multiremi_issues WHERE id = ?").get(id) as Row | null;
+    // The HTTP guard needs workspace existence, not its full settings. Keep the
+    // fact in the table-scoped cache so writes and transaction locks invalidate it.
+    if (cache && row) cache.set(cacheKey("multiremi_workspaces", "exists", String(row.workspace_id)), row.existing_workspace_id != null);
     return row ? this.hydrateIssue(toIssue(row)) : null;
   }
 
@@ -3185,7 +3193,7 @@ export class IssuesRepo {
     const outcome = reported === "blocked" && options.taskTerminalStatus === "failed" ? "failed" : reported;
     if(changed&&!['done','cancelled'].includes(parent.status)){
       const responsibility=this.ctx.resolveIssueResponsibility(parent.id);
-      if(responsibility.unresolved.length&&!responsibility.rootHuman){
+      if(responsibility.unresolved.length&&!responsibility.rootHuman&&!responsibility.rootIssueId){
         this.ctx.appendIssueActivity(parent.id,{actorType:'system',actorId:SYSTEM_AUTHOR_ID,
           type:'child_done_parent_skipped',body:'Parent notice requires a complete responsibility chain; repair the parent execution chain',
           data:{reason:'responsibility_unresolved',childIssueId:issue.id,child_issue_id:issue.id,
@@ -3197,7 +3205,8 @@ export class IssuesRepo {
       }
       const session=this.ctx.issueSessions().getOrCreateDefaultIssueSessionWithinTransaction(issue.id);
       const details = { childIssueId: issue.id, child_issue_id: issue.id, childIssueKey: issue.key,
-        child_issue_key: issue.key, childStatus: issue.status, child_status: issue.status, outcome };
+        child_issue_key: issue.key, childStatus: issue.status, child_status: issue.status, outcome,
+        ...(outcome && !parent.assigneeId ? { noAssignee: true, no_assignee: true } : {}) };
       const body = outcome ? childStatusSystemCommentBody({mentionPrefix:this.parentAssigneeMentionPrefix(parent),
         childKey:issue.key,childId:issue.id,childTitle:issue.title,outcome,childStatus:issue.status,readinessLines})
         : `${issue.key} ${issue.title}: ${previous.status} → ${issue.status}`;
@@ -3211,7 +3220,7 @@ export class IssuesRepo {
             details,title:`${parent.key}: ${issue.key} ${outcome ? childOutcomeLabel(outcome) : issue.status}`}}},deferredEvents);
       if (outcome && !parent.assigneeId) {
         this.notifyParentSubscribersOfChildOutcome(parent, issue, outcome, deferredEvents,
-          this.getIssueComment(delivered.message.id)!);
+          this.getIssueComment(delivered.message.id)!, delivered.message.to_member_id);
       } else if (outcome && !this.parentNotificationAgent(parent) && parent.assigneeType !== 'member') {
         this.recordChildDoneParentSkipped(parent, this.getIssueComment(delivered.message.id)!,
           parent.assigneeType === 'squad' ? 'squad_leader_unavailable' : 'agent_unavailable',
@@ -4000,6 +4009,7 @@ export class IssuesRepo {
     outcome: ChildTerminalOutcome,
     deferredEvents: CommitEventQueue,
     existingComment?: MultiremiIssueComment,
+    notifiedMemberId?: string | null,
   ): MultiremiIssueComment {
     const comment = existingComment ?? this.createSystemIssueCommentWithinTransaction(parent.id, childStatusSystemCommentBody({
       mentionPrefix: "",
@@ -4018,8 +4028,15 @@ export class IssuesRepo {
       child_status: child.status,
     }, deferredEvents);
     this.recordChildDoneParentSkipped(parent, comment, "no_assignee", { outcome }, deferredEvents);
+    const notifiedMember = notifiedMemberId ? this.ctx.workspaces().getWorkspaceMember(notifiedMemberId) : null;
+    const notifiedOperatorId = notifiedMember?.workspaceId === parent.workspaceId
+      ? this.ctx.workspaces().getWorkspaceOperator(parent.workspaceId)?.id ?? notifiedMemberId
+      : null;
     for (const subscriber of this.listIssueSubscribers(parent.id)) {
       if (subscriber.userType !== "member") continue;
+      // The parent-owner message may already reach this same shared operator.
+      // Deduplicate only this delivery, so later child events remain observable.
+      if (subscriber.userId === notifiedOperatorId) continue;
       this.ctx.createInboxItem({
         issueId: parent.id,
         memberId: subscriber.userId,
@@ -5615,11 +5632,19 @@ export class IssuesRepo {
   }
 
   listIssueSubscribers(issueId: string): MultiremiIssueSubscriber[] {
-    if (!this.getIssue(issueId)) throw new Error(`Issue not found: ${issueId}`);
+    const issue = this.getIssue(issueId);
+    if (!issue) throw new Error(`Issue not found: ${issueId}`);
     const rows = this.ctx.db.query(
       "SELECT * FROM multiremi_issue_subscribers WHERE issue_id = ? ORDER BY created_at ASC",
     ).all(issueId) as Row[];
-    return rows.map(toIssueSubscriber);
+    const operator = this.ctx.workspaces().getWorkspaceOperator(issue.workspaceId);
+    let humanIncluded = false;
+    return rows.map(toIssueSubscriber).flatMap(subscriber => {
+      if (subscriber.userType !== "member" || !operator) return [subscriber];
+      if (humanIncluded) return [];
+      humanIncluded = true;
+      return [{ ...subscriber, memberId: operator.id, userId: operator.id }];
+    });
   }
 
   addIssueSubscriber(issueId: string, memberId: string, reason: MultiremiSubscriptionReason = "manual"): MultiremiIssueSubscriber {
@@ -5643,6 +5668,11 @@ export class IssuesRepo {
     const normalizedUserType = normalizeIssueSubscriberUserType(userType);
     if (!this.isWorkspaceSubscriberTarget(issue.workspaceId, normalizedUserType, userId)) {
       throw new Error("target user is not a member of this workspace");
+    }
+    // Existing human rows remain historical inputs; new subscription state uses
+    // the one workspace operator regardless of the former account target.
+    if (normalizedUserType === "member") {
+      userId = this.ctx.workspaces().getWorkspaceOperator(issue.workspaceId)?.id ?? userId;
     }
     const now = nowIso();
     const id = createId("sub");
@@ -5668,6 +5698,10 @@ export class IssuesRepo {
     const normalizedUserType = normalizeIssueSubscriberUserType(userType);
     if (!this.isWorkspaceSubscriberTarget(issue.workspaceId, normalizedUserType, userId)) {
       throw new Error("target user is not a member of this workspace");
+    }
+    if (normalizedUserType === "member") {
+      this.ctx.db.run("DELETE FROM multiremi_issue_subscribers WHERE issue_id = ? AND user_type = 'member'", [issueId]);
+      return;
     }
     this.ctx.db.run(
       "DELETE FROM multiremi_issue_subscribers WHERE issue_id = ? AND user_type = ? AND user_id = ?",
@@ -5825,8 +5859,14 @@ export class IssuesRepo {
     return this.hydrateInboxRows([row])[0] ?? null;
   }
 
+  private inboxOperatorMemberId(memberId?: string | null, workspaceId?: string): string | null {
+    const member = memberId ? this.ctx.workspaces().getWorkspaceMember(memberId) : null;
+    if (memberId && !member || member && workspaceId && member.workspaceId !== workspaceId) return null;
+    return this.ctx.workspaces().getWorkspaceOperator(workspaceId ?? member?.workspaceId ?? "local")?.id ?? null;
+  }
+
   listInboxItems(memberId?: string | null, workspaceId?: string): MultiremiInboxItem[] {
-    const resolvedMemberId = memberId ?? this.ctx.workspaces().listWorkspaceMembers()[0]?.id ?? null;
+    const resolvedMemberId = this.inboxOperatorMemberId(memberId, workspaceId);
     if (!resolvedMemberId) return [];
     const workspaceFilter = workspaceId === undefined ? "" : " AND workspace_id = ?";
     const params = workspaceId === undefined ? [resolvedMemberId] : [resolvedMemberId, workspaceId];
@@ -5841,7 +5881,7 @@ export class IssuesRepo {
     options: { limit?: number; cursor?: string | null } = {},
     workspaceId?: string,
   ): MultiremiInboxPage {
-    const resolvedMemberId = memberId ?? this.ctx.workspaces().listWorkspaceMembers()[0]?.id ?? null;
+    const resolvedMemberId = this.inboxOperatorMemberId(memberId, workspaceId);
     const requestedLimit = Math.floor(options.limit ?? 50);
     const limit = Number.isFinite(requestedLimit)
       ? Math.max(1, Math.min(requestedLimit, 100))
@@ -5888,7 +5928,7 @@ export class IssuesRepo {
     timezoneOffsetMinutes = 0,
     workspaceId?: string,
   ): MultiremiInboxSummary {
-    const resolvedMemberId = memberId ?? this.ctx.workspaces().listWorkspaceMembers()[0]?.id ?? null;
+    const resolvedMemberId = this.inboxOperatorMemberId(memberId, workspaceId);
     if (!resolvedMemberId) return { unread: 0, attention: 0 };
     const workspaceFilter = workspaceId === undefined ? "" : " AND workspace_id = ?";
     const params = workspaceId === undefined ? [resolvedMemberId] : [resolvedMemberId, workspaceId];
@@ -5965,14 +6005,17 @@ export class IssuesRepo {
 
   markInboxItemRead(id:string):MultiremiInboxItem {
     const message=this.ctx.inbox().getMessage(id);if(!message?.to_member_id)throw new Error('Inbox message not found');
-    new InboxOperations(this.ctx).readMessageInbox(message.to_member_id,message.session_id,message.seq);return this.getInboxItem(id)!;
+    const workspace=this.ctx.db.query('SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id=?').get(message.session_id)?.workspace_id;
+    const operator=workspace?this.ctx.workspaces().getWorkspaceOperator(workspace):null;
+    if(!operator)throw new Error('Inbox workspace not found');
+    new InboxOperations(this.ctx).readMessageInbox(operator.id,message.session_id,message.seq);return this.getInboxItem(id)!;
   }
   archiveInboxItem(id:string):MultiremiInboxItem {
     const item=this.markInboxItemRead(id);new InboxOperations(this.ctx).resolveMessage(id,{type:'member',id:item.memberId});return this.getInboxItem(id)!;
   }
 
   countUnreadInboxItems(memberId?: string | null, workspaceId?: string): number {
-    const resolvedMemberId = memberId ?? this.ctx.workspaces().listWorkspaceMembers()[0]?.id ?? null;
+    const resolvedMemberId = this.inboxOperatorMemberId(memberId, workspaceId);
     if (!resolvedMemberId) return 0;
     const workspaceFilter = workspaceId === undefined ? "" : " AND workspace_id = ?";
     const params = workspaceId === undefined ? [resolvedMemberId] : [resolvedMemberId, workspaceId];
@@ -5983,8 +6026,9 @@ export class IssuesRepo {
   }
 
   markAllInboxItemsRead(memberId?:string|null,workspaceId?:string):number {
-    const member=memberId?this.ctx.workspaces().getWorkspaceMember(memberId):this.ctx.workspaces().listWorkspaceMembers(workspaceId)[0];
-    if(!member)return 0;return new InboxOperations(this.ctx).readAllMessageInbox(member.id,workspaceId??member.workspaceId);
+    const operatorId=this.inboxOperatorMemberId(memberId,workspaceId);
+    const member=operatorId?this.ctx.workspaces().getWorkspaceMember(operatorId):null;
+    if(!member)return 0;return new InboxOperations(this.ctx).readAllMessageInbox(member.id,member.workspaceId);
   }
   archiveAllInboxItems(memberId?:string|null,mode:'all'|'read'|'completed'='all',workspaceId?:string):number {
     const items=this.listInboxItems(memberId,workspaceId).filter(item=>mode==='all'||mode==='read'&&item.read||mode==='completed'&&['done','cancelled'].includes(item.issue?.status??''));
@@ -6679,9 +6723,11 @@ export class IssuesRepo {
     details: unknown | null = null,
   ): void {
     const subscribers = this.listIssueSubscribers(issue.id);
-    const excluded = new Set(excludedMemberIds);
-    const actorMemberId=actorType==='member'&&actorId
-      ?this.ctx.workspaces().getWorkspaceMemberByRef(actorId,issue.workspaceId)?.id??actorId:null;
+    const excluded = new Set(excludedMemberIds
+      .map((memberId) => this.humanNotificationRecipient(memberId, issue.workspaceId))
+      .filter((memberId): memberId is string => memberId !== null));
+    const actorMemberId = actorType === "member" && actorId
+      ? this.humanNotificationRecipient(actorId, issue.workspaceId) : null;
     for (const subscriber of subscribers) {
       if (subscriber.userType !== "member") continue;
       if (actorType === "member" && actorMemberId === subscriber.userId) continue;
@@ -6700,11 +6746,24 @@ export class IssuesRepo {
     }
   }
 
+  /** Validate historical references before collapsing them into the shared human lane. */
+  private humanNotificationRecipient(memberId: string, workspaceId: string): string | null {
+    const workspaces = this.ctx.workspaces();
+    const member = workspaces.getWorkspaceMember(memberId)
+      ?? workspaces.findWorkspaceMemberForUser(memberId, workspaceId);
+    if (!member || member.workspaceId !== workspaceId) return null;
+    return workspaces.getWorkspaceOperator(workspaceId)?.id ?? null;
+  }
+
   private triggerMemberMentions(issue: MultiremiIssue, comment: MultiremiIssueComment): string[] {
-    const targets = this.resolveCommentMemberMentionTargets(comment.body, issue.workspaceId);
+    const targets = new Set(this.resolveCommentMemberMentionTargets(comment.body, issue.workspaceId)
+      .map((memberId) => this.humanNotificationRecipient(memberId, issue.workspaceId))
+      .filter((memberId): memberId is string => memberId !== null));
+    const authorMemberId = comment.authorType === "member" && comment.authorId
+      ? this.humanNotificationRecipient(comment.authorId, issue.workspaceId) : null;
     const notified: string[] = [];
     for (const memberId of targets) {
-      if (comment.authorType === "member" && comment.authorId === memberId) continue;
+      if (authorMemberId === memberId) continue;
       this.addIssueSubscriber(issue.id, memberId, "mentioned");
       this.ctx.createInboxItem({
         issueId: issue.id,
@@ -6865,7 +6924,7 @@ export class IssuesRepo {
     const markdownMention = /mention:\/\/member\/([A-Za-z0-9_-]+)/g;
     for (const match of body.matchAll(markdownMention)) {
       const member = this.ctx.workspaces().getWorkspaceMember(match[1]);
-      if (member && !member.archivedAt) addTarget(member.id);
+      if (member && member.workspaceId === workspaceId && !member.archivedAt) addTarget(member.id);
     }
 
     const withoutLinks = body.replace(/\[[^\]]+\]\(mention:\/\/[^)]+\)/g, " ");

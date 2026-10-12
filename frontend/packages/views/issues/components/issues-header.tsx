@@ -166,7 +166,7 @@ function useIssueCounts(allIssues: Issue[]) {
 // Scope config
 // ---------------------------------------------------------------------------
 
-const SCOPE_VALUES: IssuesScope[] = ["all", "members", "agents"];
+const SCOPE_VALUES: IssuesScope[] = ["all", "agents"];
 
 // ---------------------------------------------------------------------------
 // Actor sub-menu content (shared between Assignee and Creator)
@@ -248,35 +248,6 @@ function ActorSubContent({
               )}
             </DropdownMenuCheckboxItem>
           )}
-
-        {filteredMembers.length > 0 && (
-          <DropdownMenuGroup>
-            <DropdownMenuLabel>{t(($) => $.filters.members_group)}</DropdownMenuLabel>
-            {filteredMembers.map((m) => {
-              const checked = isSelected("member", m.user_id);
-              const count = counts.get(`member:${m.user_id}`) ?? 0;
-              return (
-                <DropdownMenuCheckboxItem
-                  key={m.user_id}
-                  checked={checked}
-                  onCheckedChange={() =>
-                    onToggle({ type: "member", id: m.user_id })
-                  }
-                  className={FILTER_ITEM_CLASS}
-                >
-                  <HoverCheck checked={checked} />
-                  <ActorAvatar actorType="member" actorId={m.user_id} size={18} />
-                  <span className="truncate">{m.name}</span>
-                  {count > 0 && (
-                    <span className="ml-auto text-xs text-muted-foreground">
-                      {count}
-                    </span>
-                  )}
-                </DropdownMenuCheckboxItem>
-              );
-            })}
-          </DropdownMenuGroup>
-        )}
 
         {filteredAgents.length > 0 && (
           <DropdownMenuGroup>
@@ -514,7 +485,7 @@ export function IssuesHeader({
   allowGantt?: boolean;
 }) {
   const { t } = useT("issues");
-  const scope = useIssuesScopeStore((s) => s.scope);
+  const scope = useIssuesScopeStore((s) => s.scope === "members" ? "all" : s.scope);
   const setScope = useIssuesScopeStore((s) => s.setScope);
   // Bind the workspace agents-working chip to the active view store so
   // shared IssuesHeader consumers (/issues and project detail) toggle the

@@ -27,12 +27,13 @@ test("chat lists batch access reads and preserve every native/compatibility fiel
   const credential = await store.createAccessToken({ name: "batch golden", type: "pat", userId: f.readerUserId, workspaceId: "local" });
   const app = createMultiremiApp({ store, authToken: "batch-golden" });
   for (const status of ["", "all", "archived"]) {
-    // The pre-optimization path is the reference, including private Agent denial.
-    const expected = store.listChatSessions("local", { creatorId: f.readerUserId, includeArchived: Boolean(status) })
+    // The unbatched reference shares all historical creators and Agent owners,
+    // while retaining workspace consistency and transport-topic exclusion.
+    const expected = store.listChatSessions("local", { includeArchived: Boolean(status) })
       .filter(s => (!status || status !== "archived" || s.status === "archived") && !store.isFeishuTransportChatSession(s.id))
       .filter(s => {
         const a = store.getAgent(s.agentId);
-        return a && a.workspaceId === s.workspaceId && (a.visibility !== "private" || a.ownerId === f.readerUserId);
+        return a && a.workspaceId === s.workspaceId;
       });
     for (const native of [false, true]) {
       probe.reset();

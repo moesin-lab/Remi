@@ -1,10 +1,11 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, LoaderCircle, Save } from "lucide-react";
 import { toast } from "sonner";
-import { useAuthStore } from "@multiremi/core/auth";
 import { issueTopicConfigOptions } from "@multiremi/core/feishu-bot/queries";
 import { useSaveIssueTopicConfig } from "@multiremi/core/feishu-bot/mutations";
 import { useWorkspaceId } from "@multiremi/core/hooks";
@@ -29,7 +30,7 @@ const EMPTY_CONFIG: IssueTopicConfig = {
 export function IssueTopicSection() {
   const { t } = useT("im-platforms");
   const workspaceId = useWorkspaceId();
-  const user = useAuthStore((state) => state.user);
+  const user = workspaceOperatorUser;
   const membersQuery = useQuery(memberListOptions(workspaceId));
   const role = (membersQuery.data ?? []).find((member) => member.user_id === user?.id)?.role;
   const canManage = role === "owner" || role === "admin";

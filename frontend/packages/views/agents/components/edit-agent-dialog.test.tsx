@@ -275,9 +275,6 @@ describe("EditAgentDialog", () => {
     fireEvent.change(screen.getByLabelText("Instructions"), {
       target: { value: "Verify every claim" },
     });
-    fireEvent.click(
-      screen.getByRole("button", { name: /^Personal / }),
-    );
     fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
@@ -288,7 +285,7 @@ describe("EditAgentDialog", () => {
       provider: "claude",
       model: "claude-opus",
       thinking_level: "high",
-      visibility: "private",
+      visibility: "workspace",
       max_concurrent_tasks: 6,
       instructions: "Verify every claim",
     });
@@ -495,7 +492,7 @@ describe("EditAgentDialog", () => {
     expect(
       (screen.getByLabelText("Concurrency") as HTMLInputElement).value,
     ).toBe("3");
-    expect(screen.getByRole("group", { name: "Visibility" })).not.toBeNull();
+    expect(screen.queryByRole("group", { name: "Visibility" })).toBeNull();
     expect(screen.getByRole("group", { name: "Execution target" })).not.toBeNull();
     expect(
       screen.getByRole("group", { name: "Reasoning effort" }),
@@ -518,13 +515,11 @@ describe("EditAgentDialog", () => {
     ).toBe(true);
   });
 
-  it("translates the visibility options instead of hardcoding English", () => {
-    renderDialog(makeAgent(), "zh-Hans");
-
-    expect(screen.getByText("工作区")).not.toBeNull();
-    expect(screen.getByText("工作区内所有成员都可以指派")).not.toBeNull();
-    expect(screen.getByText("个人")).not.toBeNull();
-    expect(screen.getByText("仅你和工作区管理员可以指派")).not.toBeNull();
-    expect(screen.queryByText("All members can assign")).toBeNull();
-  });
+  it("does not offer personal visibility for a historical private agent", async () => {
+  const { onSave } = renderDialog(makeAgent({ visibility: "private" }), "zh-Hans");
+  expect(screen.queryByText("个人")).toBeNull();
+  expect(screen.queryByText("仅你和工作区管理员可以指派")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+  await waitFor(() => expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ visibility: "workspace" })));
+});
 });

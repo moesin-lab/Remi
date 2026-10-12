@@ -373,7 +373,7 @@ describe("MUL-438 browser stream endpoints", () => {
     }
   });
 
-  it("keeps a chat lifecycle event away from a workspace peer and delivers it to the creator", async () => {
+  it("delivers Chat lifecycle events to both human accounts in the same workspace", async () => {
     const store = createStore();
     const workspace = store.ensureLocalWorkspace();
     store.createWorkspaceMember({ workspaceId: workspace.id, userId: "creator", name: "Creator", role: "owner" });
@@ -390,9 +390,7 @@ describe("MUL-438 browser stream endpoints", () => {
       await authenticateBrowserWebSocket(creator, creatorToken.token);
       await authenticateBrowserWebSocket(peer, peerToken.token);
 
-      // A chat lifecycle signal is creator-private. The creator receives it on
-      // the user registry — without subscribing to any scope — and the peer
-      // receives nothing at all.
+      // Human sockets share workspace lifecycle signals without a scope subscription.
       store.updateChatSession(chat.id, { title: "Renamed privately" });
 
       const received = await nextWebSocketMessage(creator);
@@ -400,18 +398,16 @@ describe("MUL-438 browser stream endpoints", () => {
         type: "chat:session_updated",
         payload: { chat_session_id: chat.id, title: "Renamed privately" },
       });
-      await expectNoWebSocketMessage(peer, 250);
+      expect(await nextWebSocketMessage(peer)).toEqual(received);
 
-      // A deleted session no longer resolves through the store, so this is the
-      // case where the event's own actor has to carry the creator. It must still
-      // reach the creator and still not reach the peer.
+      // Deletion still reaches both sockets after the row is gone.
       store.deleteChatSession(chat.id);
       const deleted = await nextWebSocketMessage(creator);
       expect(deleted).toMatchObject({
         type: "chat:session_deleted",
         payload: { chat_session_id: chat.id },
       });
-      await expectNoWebSocketMessage(peer, 250);
+      expect(await nextWebSocketMessage(peer)).toEqual(deleted);
     } finally {
       creator.close();
       peer.close();

@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
 
-pendingTurnBackendTests("MUL-509 Chat member read cursors", fixture => {
+pendingTurnBackendTests("MUL-509 Chat shared human read cursors", fixture => {
   afterEach(() => fixture().store.stopNotificationDeliverySweeper());
 
   function setup() {
@@ -36,7 +36,8 @@ pendingTurnBackendTests("MUL-509 Chat member read cursors", fixture => {
       expect(detail.status).toBe(200);
       expect(await detail.json()).toMatchObject({ has_unread: false, unread_count: 0 });
     }
-    expect(db.query("SELECT cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_type='member' AND reader_id='mem_local_local'").get(chat.id)?.cursor_seq).toBe(1);
+    expect(db.query("SELECT cursor_seq FROM multiremi_workspace_read_cursors WHERE session_id=? AND workspace_id='local'").get(chat.id)?.cursor_seq).toBe(1);
+    expect(db.query("SELECT cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_type='member' AND reader_id='mem_local_local'").get(chat.id)?.cursor_seq).toBe(0);
     send("New reply");
     expect(await list()).toMatchObject({ has_unread: true, unread_count: 1 });
   });
@@ -59,7 +60,7 @@ pendingTurnBackendTests("MUL-509 Chat member read cursors", fixture => {
     expect(store.listMessageInbox("mem_local_local", "local").unread_count).toBe(0);
   });
 
-  it("resolves the creator's member ID and isolates another member and workspace", () => {
+  it("shares historical recipients within a Chat while rejecting a reader from another workspace", () => {
     const { store, agent } = setup();
     const user = store.getOrCreateUser({ externalId: "chat-cursor-peer", name: "Peer" });
     const peer = store.createWorkspaceMember({ userId: user.id, name: "Peer", role: "member" });
@@ -69,15 +70,17 @@ pendingTurnBackendTests("MUL-509 Chat member read cursors", fixture => {
     const send = (member: string) => store.sendMessage({ session_id: chat.id, sender: { type: "agent", id: agent.id },
       to: { type: "member", ref: member }, message_kind: "reply", wake_requested: "inbox_only", body_md: "reply" });
     send(peer.id); send("mem_local_local");
-    expect(store.getChatSession(chat.id)?.unreadCount).toBe(1);
+    expect(store.getChatSession(chat.id)?.unreadCount).toBe(2);
     expect(() => store.readMessageInbox(elsewhere.id, chat.id)).toThrow("another workspace");
     store.readMessageInbox("mem_local_local", chat.id);
-    expect(store.getChatSession(chat.id)?.unreadCount).toBe(1);
+    expect(store.getChatSession(chat.id)?.unreadCount).toBe(0);
+    expect(store.listMessageInbox(peer.id,'local').unread_count).toBe(0);
+    expect(store.listMessages(chat.id).map(message=>message.to_member_id)).toEqual([peer.id,'mem_local_local']);
     store.readMessageInbox(peer.id, chat.id);
     expect(store.getChatSession(chat.id)).toMatchObject({ hasUnread: false, unreadCount: 0 });
   });
 
-  it("excludes hidden, deleted and outgoing messages from the creator's unread badge", () => {
+  it("excludes hidden, deleted and outgoing messages from the shared unread badge", () => {
     const { store, db, agent, chat, send } = setup();
     const hidden = send("hidden"), deleted = send("deleted"), visible = send("visible");
     db.run("UPDATE multiremi_conversation_log SET visibility='hidden' WHERE id=?", [hidden.id]);

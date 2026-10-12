@@ -25,7 +25,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 判断 Topic、Chat、Session、Task 或成果的边界 | [对话与工作会话模型](../conversation-model.md) | 名词、身份、生命周期、关联与飞书映射 |
 | 改 Chat 页面、私聊或消息队列 | [Chat 契约](../chat.md) | Chat 管理、工作位置、队列串行和私聊权限 |
 | 改 Agent 并行调度与执行目录 | [并行执行](../parallel-agent-execution.md) | Agent/Session 执行隔离、共享代码和 daemon 协议升级 |
-| 修改登录、租户隔离或 token 权限 | [认证与权限](auth.md) | 身份来源、资源 guard 和生产启动约束 |
+| 修改登录、租户隔离或 token 权限 | [认证与权限](auth.md) | 登录账号与共享操作者、资源 guard 和生产启动约束 |
 | 修改 ACP 后端或 token-sync | [Codex 接入](../design/acp-codex-via-codex-acp.md)、[Claude Code 接入](../design/acp-claude-via-claude-agent-acp.md)、[Grok 接入](../design/acp-grok-via-native-cli.md)、[认证插件与同步](../design/1passport-bytedance-sso.md) | 实际启动、认证、会话和凭据隔离边界 |
 | 改 turn 失败检测、备用模型恢复或能力排队切换 | [ADR 0010](../adr/0010-turn-failure-from-bridge-typed-session-failure.md) | AIR 失败 metadata、失败分类、单次切换、5 分钟能力等待与提交后事件 |
 | 修改 Antigravity / agy 执行 | [Antigravity Runtime](../antigravity.md) | 原生 CLI 发现、事件流、续接、旧版恢复和能力边界 |
@@ -47,7 +47,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 对接 Hub 的 trace 订阅（A-6、飞书 CoT） | [Live Hub 对接说明](live-hub-a6-integration.md) | 调用方式、gap 由谁补读、背压恢复与 `closed` 终态 |
 | 改详情页首屏定位、贴底或 `data-perf-state` 契约 | [ADR 0008](../adr/0008-issue-detail-anchored-reveal-and-stick-to-bottom.md) | 先隐藏后一次定位、贴底状态机与预算口径 |
 | 改项目 Memory/Wiki | [项目知识契约](../project-wiki-memory-spec.md) | 查询、提案、发布、物化与权限 |
-| 改 IM 平台导航或管理页面 | [IM 平台管理](im-platforms.md) | 平台目录、机器人/采集连接、能力页面、工作区权限和旧地址迁移 |
+| 改 IM 平台导航或管理页面 | [IM 平台管理](im-platforms.md) | 平台目录、机器人/采集连接、能力页面、共享操作者和旧地址迁移 |
 | 改飞书消息接入 | [消息接入](../feishu-message-ingestion.md) | Connection、Source、消息处理与凭据 |
 | 配置部署或排障 | [部署](../../deploy/README.md)、[本机 stable/dev](../deploy/local-profiles.md)、[daemon 环境](../deploy/66-8-remi-environment.md) | 服务组成、配置和启动条件 |
 | 改版本管理或安全更新 | [更新部署契约](../../deploy/README.md#internal-compose-updater)、[Drain 与 Outbox](../design/mul-74-platform-drain-and-daemon-outbox.md) | 容器内部应用/运行时更新、Web/CLI 更新源、跨平台驱动、备份、兼容检查、切换恢复 |

@@ -11,7 +11,7 @@ const membersRef = vi.hoisted(() => ({
   current: [{
     id: "member-1",
     workspace_id: "workspace-1",
-    user_id: "user-1",
+    user_id: "local",
     role: "owner" as "owner" | "admin" | "member",
     created_at: "2026-01-01T00:00:00.000Z",
     name: "Owner",

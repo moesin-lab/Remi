@@ -65,9 +65,12 @@ describe("project workspace slug", () => {
     expect((await queryCreate.json()).workspace_id).toBe(other.id);
   });
 
-  it("rejects inaccessible and unknown slugs without falling back or creating a project", async () => {
+  it("shares existing workspace slugs and rejects unknown ones without creating a project", async () => {
     const { store, app, headers } = await fixture();
-    for (const slug of ["local", "missing-workspace"]) {
+    for (const endpoint of ["/api/projects", "/api/projects/search?q=project"]) {
+      expect((await app.request(endpoint, { headers: { ...headers, "X-Workspace-Slug": "local" } })).status).toBe(200);
+    }
+    for (const slug of ["missing-workspace"]) {
       const scopedHeaders = { ...headers, "X-Workspace-Slug": slug };
       for (const endpoint of ["/api/projects", "/api/projects/search?q=project"]) {
         const response = await app.request(endpoint, { headers: scopedHeaders });

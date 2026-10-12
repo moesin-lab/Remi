@@ -209,7 +209,9 @@ describe("Runtime Codex profiles", () => {
 
   for (const provider of ["codex", "claude"] as const) {
     for (const change of ["provider", "runtime-owner"] as const) {
-      it(`re-pools ${provider} profile retries after ${change} changes make the original Runtime incompatible`, () => {
+      it(change === "provider"
+        ? `re-pools ${provider} profile retries after a provider change makes the original Runtime incompatible`
+        : `preserves ${provider} profile retries after the historical Runtime owner changes`, () => {
         const store = createLocalStore();
         process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY = Buffer.alloc(32, 13).toString("base64");
         const runtime = store.registerRuntime({ name: "Original", provider, ownerId: "local", metadata: { [`${provider}_profiles`]: 1 } });
@@ -220,12 +222,26 @@ describe("Runtime Codex profiles", () => {
         const agent = store.createAgent({ name: "Custom", provider });
         const chat = store.createChatSession({ agentId: agent.id });
         const task = store.sendChatMessage(chat.id, { body: "work" }).task;
-        expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+        const original = store.claimTask(runtime.id)!;
+        expect(original.id).toBe(task.id);
         store.startTask(task.id);
         if (change === "provider") store.updateAgent(agent.id, { provider: nextProvider });
         else store.updateRuntime(runtime.id, { ownerId: "other-owner" });
         store.failTask(task.id, { error: "stale session", failureReason: "agent_error.stale_session" });
         const retry = store.listTasks().find(candidate => candidate.parentTaskId === task.id)!;
+        if (change === "runtime-owner") {
+          expect(retry.runtimeId).toBe(runtime.id);
+          expect(retry.codexProfile).toEqual(original.codexProfile);
+          expect(retry.claudeProfile).toEqual(original.claudeProfile);
+          expect(retry.executionFingerprint).toBe(original.executionFingerprint);
+          expect(store.claimTask(replacement.id)).toBeNull();
+          expect(store.claimTask(runtime.id)).toMatchObject({ id: retry.id, provider,
+            codexProfile: original.codexProfile, claudeProfile: original.claudeProfile });
+          const credentialId = (retry.codexProfile ?? retry.claudeProfile)!.credential_id!;
+          expect(store.getRuntimeCodexProfileKey(runtime.id, credentialId)).toBe("original-runtime-key");
+          expect(store.getRuntimeCodexProfileKey(replacement.id, credentialId)).toBeNull();
+          return;
+        }
         expect(retry.runtimeId).toBeNull();
         expect(retry.codexProfile).toBeNull();
         expect(retry.claudeProfile).toBeNull();
@@ -255,7 +271,9 @@ describe("Runtime Codex profiles", () => {
     const request = (path: string, token: string, body?: unknown) => app.request(path, { method: body ? "PUT" : "GET", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
     const path = `/api/runtimes/${runtime.id}/codex-profile`;
     const body = { profile: apiProfile, api_key: "super-private-provider-key" };
-    expect((await request(path, member.token, body)).status).toBe(403);
+    const memberSaved = await request(path, member.token, body);
+    expect(memberSaved.status).toBe(200);
+    expect(JSON.stringify(await memberSaved.json())).not.toContain(body.api_key);
     expect((await request(path, taskToken.token, body)).status).toBe(403);
     expect((await request(path, daemon.token, body)).status).toBe(403);
     const saved = await request(path, owner.token, body);

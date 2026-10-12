@@ -841,7 +841,7 @@
     "delete_dialog_title_other": "이슈 {{count}}개를 삭제할까요?",
     "delete_dialog_desc_one": "이 작업은 되돌릴 수 없습니다. 선택한 이슈와 관련 데이터가 영구 삭제됩니다.",
     "delete_dialog_desc_other": "이 작업은 되돌릴 수 없습니다. 선택한 이슈와 관련 데이터가 영구 삭제됩니다.",
-    "delete_dialog_warning": "워크스페이스 멤버라면 누구나 이슈를 삭제할 수 있습니다.",
+    "delete_dialog_warning": "삭제하면 모든 작업자가 해당 이슈에 더 이상 접근할 수 없습니다.",
     "cancel": "취소"
   },
   "card": {

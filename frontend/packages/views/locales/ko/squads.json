@@ -21,12 +21,14 @@
   },
   "add_member_dialog": {
     "title": "멤버 추가",
-    "description": "워크스페이스 멤버 또는 에이전트를 이 스쿼드에 추가합니다.",
+    "description": "이 스쿼드에 워크스페이스 에이전트를 추가합니다.",
     "label_member": "멤버",
     "label_role": "역할",
     "label_optional": "(선택 사항)",
     "placeholder_role_inline": "역할 추가...",
-    "cancel": "취소"
+    "cancel": "취소",
+    "placeholder_agent": "에이전트 선택",
+    "search_agents": "에이전트 검색..."
   },
   "description_dialog": {
     "title": "설명 수정",

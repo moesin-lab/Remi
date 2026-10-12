@@ -1,5 +1,7 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useEffect, useState, type ReactNode } from "react";
 import { Loader2, Pencil } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -8,7 +10,6 @@ import {
   AGENT_DESCRIPTION_MAX_LENGTH,
   type AgentPresenceDetail,
 } from "@multiremi/core/agents";
-import { useAuthStore } from "@multiremi/core/auth";
 import { larkInstallationsOptions } from "@multiremi/core/lark";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
 import { useWorkspaceId } from "@multiremi/core/hooks";
@@ -43,7 +44,6 @@ import { ModelPicker } from "./inspector/model-picker";
 import { SkillAttach } from "./inspector/skill-attach";
 import { ThinkingPropRow } from "./inspector/thinking-prop-row";
 import { supportsThinkingLevel } from "./inspector/thinking-levels";
-import { VisibilityPicker } from "./inspector/visibility-picker";
 import { LarkAgentBindButton } from "../../im-platforms/feishu/lark-tab";
 
 interface InspectorProps {
@@ -79,7 +79,6 @@ interface InspectorProps {
  */
 export function AgentDetailInspector({
   agent,
-  owner,
   presence,
   canEdit,
   onUpdate,
@@ -196,13 +195,6 @@ export function AgentDetailInspector({
           canEdit={canEdit}
           onChange={(v) => update({ fallback_thinking_level: v })}
         />}
-        <PropRow label={t(($) => $.inspector.prop_visibility)} interactive={false}>
-          <VisibilityPicker
-            value={agent.visibility}
-            canEdit={canEdit}
-            onChange={(v) => update({ visibility: v })}
-          />
-        </PropRow>
         <PropRow label={t(($) => $.inspector.prop_concurrency)} interactive={false}>
           <ConcurrencyPicker
             value={agent.max_concurrent_tasks}
@@ -214,18 +206,6 @@ export function AgentDetailInspector({
 
       {/* Details — read-only (no hover, no chip styling — these aren't clickable) */}
       <Section label={t(($) => $.inspector.section_details)}>
-        {owner && (
-          <PropRow label={t(($) => $.inspector.prop_owner)} interactive={false}>
-            <span className="flex min-w-0 items-center gap-1.5">
-              <ActorAvatar
-                actorType="member"
-                actorId={owner.user_id}
-                size={14}
-              />
-              <span className="truncate">{owner.name}</span>
-            </span>
-          </PropRow>
-        )}
         <PropRow label={t(($) => $.inspector.prop_created)} interactive={false}>
           <span className="text-muted-foreground">
             {timeAgo(agent.created_at)}
@@ -314,7 +294,7 @@ export function AgentDetailInspector({
  */
 function useHasIntegrations(agentId: string): boolean {
   const wsId = useWorkspaceId();
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
 
   const { data: listing } = useQuery({
     ...larkInstallationsOptions(wsId ?? ""),

@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CommandRegistry, type CommandSpec } from "../../../apps/remi/cli/core/index.js";
-import { inviteCommandSpecs } from "../../../apps/remi/cli/commands/invite.js";
 import { knowledgeCommandSpecs } from "../../../apps/remi/cli/commands/knowledge.js";
 import { memberCommandSpecs } from "../../../apps/remi/cli/commands/member.js";
 import { projectCommandSpecs } from "../../../apps/remi/cli/commands/project.js";
@@ -26,7 +25,6 @@ const savedEnv = {
 const SPECS = [
   ...workspaceCommandSpecs(),
   ...memberCommandSpecs(),
-  ...inviteCommandSpecs(),
   ...tokenCommandSpecs(),
   ...projectCommandSpecs(),
   ...repoCommandSpecs(),
@@ -46,6 +44,30 @@ afterEach(() => {
 });
 
 describe("native CLI resource contracts", () => {
+  it("routes account compatibility aliases to the authenticated account and lists one workspace operator", async () => {
+    useCliEnv();
+    console.log = () => {}; console.error = () => {};
+    const paths: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path === "/api/cli/capabilities") return Response.json({ protocol_version: 1, identity: "human",
+        commands: ["account.get", "account.update", "workspace.operator"].map(id => ({ id, allowed: true })) });
+      paths.push(`${request.method} ${path}`);
+      if (path === "/api/me") return Response.json({ id: "real-account", name: "Login account" });
+      if (path === "/api/workspaces/ws_1/members") return Response.json({ members: [{ id: "operator", user_id: "local" }] });
+      throw new Error(`Unexpected request ${path}`);
+    }) as typeof fetch;
+    const registry = registryFor(SPECS);
+    await registry.execute(["member", "get", "me", "--output", "json"]);
+    await registry.execute(["member", "update", "me", "--name", "Renamed login", "--output", "json"]);
+    await registry.execute(["member", "list", "--output", "json"]);
+    expect(paths).toEqual(["GET /api/me", "PATCH /api/me", "GET /api/workspaces/ws_1/members"]);
+    await expect(registry.execute(["member", "update", "historical-member", "--name", "Changed"]))
+      .rejects.toThrow("Workspace members are no longer editable");
+    expect(paths).toHaveLength(3);
+  });
+
   it("exposes nested bot help and sends the configured sender access policy", async () => {
     const registry = registryFor(SPECS);
     expect(registry.renderHelpForArgv(["workspace", "feishu-bot", "--help"]))
@@ -117,12 +139,12 @@ describe("native CLI resource contracts", () => {
     for (const id of [
       "workspace.create",
       "workspace.delete",
-      "workspace.leave",
       "workspace.ssh-mesh.update",
       "workspace.ssh-mesh.rotate",
       "workspace.relay.reveal",
-      "member.list",
-      "invite.list",
+      "workspace.operator",
+      "account.get",
+      "account.update",
       "token.list",
       "workspace.organizer.update",
       "workspace.feishu-bot.sender.list",

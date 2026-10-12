@@ -27,6 +27,8 @@ export interface MultiremiRequestAuth {
 declare module "hono" {
   interface ContextVariableMap {
     multiremiAuth: MultiremiRequestAuth;
+    /** Set only after credential verification checked this daemon's workspace. */
+    multiremiVerifiedDaemonWorkspaceId: string;
     multiremiMemberMemo: Map<string, MultiremiWorkspaceMember | null>;
   }
 }
@@ -150,7 +152,13 @@ export function requestStrippedParentTaskLineage(c: Context): { parentTaskId?: s
 }
 
 export function currentRequestUserId(c: Context): string {
-  return currentAuth(c).requestUserId;
+  return isHumanOperatorRequest(c) ? "local" : currentAuth(c).requestUserId;
+}
+
+/** Login accounts authenticate entry; workspace actions share one operator. */
+export function isHumanOperatorRequest(c: Context): boolean {
+  const type = currentAccessToken(c)?.type;
+  return type !== "task" && type !== "daemon";
 }
 
 /**
@@ -185,7 +193,16 @@ export function hasRequestField(input: object, ...fields: string[]): boolean {
   return fields.some((field) => Object.prototype.hasOwnProperty.call(input, field));
 }
 
+function matchesCredentialWorkspace(c: Context, workspaceId: string): boolean {
+  const token = currentAccessToken(c);
+  const bound = token?.type === "task" || token?.type === "daemon"
+    || token?.type === "pat" && (!token.userId || token.userId === "local") && token.purpose !== "session";
+  return !bound || token!.workspaceId === workspaceId;
+}
+
 export function currentWorkspaceRoleStrict(c: Context, store: MultiremiStore, workspaceId: string): string | null {
+  if (!matchesCredentialWorkspace(c, workspaceId)) return null;
+  if (isHumanOperatorRequest(c)) return store.hasWorkspace(workspaceId) ? "owner" : null;
   const member = currentWorkspaceMember(c, store, workspaceId);
   if (member) return member.role;
   if (workspaceId === "local" && authenticatedRequestUserId(c) === null) return "owner";
@@ -197,9 +214,13 @@ export function currentWorkspaceMember(
   store: MultiremiStore,
   workspaceId: string,
 ): MultiremiWorkspaceMember | null {
+  if (!matchesCredentialWorkspace(c, workspaceId)) return null;
   let memo=c.get("multiremiMemberMemo");
   if(!memo){memo=new Map();c.set("multiremiMemberMemo",memo);}
-  if(!memo.has(workspaceId)) memo.set(workspaceId,store.findWorkspaceMemberForUser(currentRequestUserId(c),workspaceId));
+  if(!memo.has(workspaceId)) memo.set(workspaceId,isHumanOperatorRequest(c)
+    || currentAccessToken(c)?.type === "task" && currentAccessToken(c)?.workspaceId === workspaceId
+    ? store.getWorkspaceOperator(workspaceId)
+    : store.findWorkspaceMemberForUser(currentRequestUserId(c),workspaceId));
   return memo.get(workspaceId)!;
 }
 

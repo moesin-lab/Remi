@@ -4,17 +4,18 @@
  *
  * Two stream kinds, two rules:
  *
- * - `log:<session_id>` — the session decides. A chat requires its creator's
- *   active membership and access to its agent; Issue and auto conversations
- *   belong to their workspace. This is the same
+ * - `log:<session_id>` — the session decides. Verified browser identities use
+ *   the shared local operator; Chat, Issue and auto conversations belong to
+ *   their workspace. Non-human compatibility identities retain their original
+ *   creator and agent checks. This is the same
  *   boundary the transcript routes draw (`denyCurrentUserWorkspaceAccess` plus
  *   `canUserViewTaskMessages`, `api/helpers/auth-guards.ts`), expressed here as
  *   one query for ordinary subscriptions plus owner facts for rotated Issues,
  *   instead of a hydrated store read, because C4's
  *   binding constraint is that new server-side read paths must not go through the
  *   synchronous Postgres bridge (MUL-383 `cmt_u3fltd47w6r0`).
- * - `trace:<task_id>` — `canUserViewTaskMessages`: a chat task is creator-only
- *   and a private agent's task is owner/admin-only.
+ * - `trace:<task_id>` — `canUserViewTaskMessages`: the shared operator reads
+ *   same-workspace history; missing owners and cross-workspace streams are denied.
  *
  * ## Two readers, one decision
  *
@@ -47,7 +48,7 @@ export type StreamSubscribeAuthorization =
   | { ok: true }
   | { ok: false; code: StreamSubscribeDenialCode };
 
-/** Who is asking. `userId === null` is the master-token / open-mode identity. */
+/** Browser authorization supplies `local`; null remains a compatibility identity. */
 export interface StreamAuthSubject {
   userId: string | null;
   /** The workspace this socket was bound to at upgrade time. */
@@ -121,9 +122,7 @@ export function decideLogSubscription(
 }
 
 /**
- * `trace:` — a chat task is creator-only; a private agent's task is readable by
- * its owner and by the workspace's owner/admin; everything else is a workspace
- * read.
+ * `trace:` uses the same shared-operator and legacy-actor decision as HTTP.
  *
  * This is `canUserViewTaskMessages` (`api/helpers/auth-guards.ts:485`) with its
  * two store lookups folded into the facts. An agent that no longer exists does

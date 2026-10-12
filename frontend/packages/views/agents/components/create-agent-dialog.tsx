@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Globe, Lock } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ModelDropdown } from "./model-dropdown";
 import { InstructionsEditor } from "./instructions-editor";
@@ -13,7 +12,6 @@ import { isFallbackModelUnavailable, isModelExecutionUnknown, isModelUnavailable
 import { workspaceKeys } from "@multiremi/core/workspace/queries";
 import type {
   Agent,
-  AgentVisibility,
   CreateAgentRequest,
 } from "@multiremi/core/types";
 import { isImeComposing } from "@multiremi/core/utils";
@@ -76,9 +74,7 @@ export function CreateAgentDialog({
     template ? `${template.name}${t(($) => $.create_dialog.duplicate_copy_suffix)}` : "",
   );
   const [description, setDescription] = useState(template?.description ?? "");
-  const [visibility, setVisibility] = useState<AgentVisibility>(
-    template?.visibility ?? "workspace",
-  );
+  const visibility = "workspace";
   const [model, setModel] = useState(template?.model ?? "");
   const [thinkingLevel, setThinkingLevel] = useState(
     template?.thinking_level ?? "",
@@ -308,50 +304,6 @@ export function CreateAgentDialog({
                     />
                   </div>
                 </div>
-              </div>
-            </div>
-
-            <div>
-              <Label className="text-xs text-muted-foreground">{t(($) => $.create_dialog.visibility_label)}</Label>
-              <div className="mt-1.5 flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setVisibility("workspace")}
-                  className={`flex flex-1 items-center gap-2 rounded-lg border px-3 py-2.5 text-sm transition-colors ${
-                    visibility === "workspace"
-                      ? "border-primary bg-primary/5"
-                      : "border-border hover:bg-muted"
-                  }`}
-                >
-                  <Globe className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <div className="text-left">
-                    <div className="font-medium">
-                      {t(($) => $.visibility.workspace.label)}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      {t(($) => $.visibility.workspace.description)}
-                    </div>
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setVisibility("private")}
-                  className={`flex flex-1 items-center gap-2 rounded-lg border px-3 py-2.5 text-sm transition-colors ${
-                    visibility === "private"
-                      ? "border-primary bg-primary/5"
-                      : "border-border hover:bg-muted"
-                  }`}
-                >
-                  <Lock className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <div className="text-left">
-                    <div className="font-medium">
-                      {t(($) => $.visibility.private.label)}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      {t(($) => $.visibility.private.description)}
-                    </div>
-                  </div>
-                </button>
               </div>
             </div>
 

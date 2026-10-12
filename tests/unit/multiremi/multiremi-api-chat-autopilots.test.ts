@@ -257,7 +257,7 @@ describe("Multiremi API — chat sessions and autopilot triggers", () => {
     expect((await replay.json()).delivery.replayedFromDeliveryId).toBe(webhookBody.deliveryId);
   });
 
-  it("hides every Autopilot id surface from callers in another workspace", async () => {
+  it("shares Autopilot access with humans while rejecting credentials bound to another workspace", async () => {
     const store = createStore();
     const callerWorkspace = store.createWorkspace({ name: "Caller", slug: "caller" });
     const targetWorkspace = store.createWorkspace({ name: "Target", slug: "target" });
@@ -286,7 +286,14 @@ describe("Multiremi API — chat sessions and autopilot triggers", () => {
     });
     const trigger = store.createAutopilotTrigger(autopilot.id, { kind: "api" });
     const app = createMultiremiApp({ store, authToken: "root-secret" });
-    const auth = { Authorization: `Bearer ${callerToken.token}` };
+    const humanRead = await app.request(`/api/multiremi/autopilots/${autopilot.id}`, {
+      headers: { Authorization: `Bearer ${callerToken.token}` },
+    });
+    expect(humanRead.status).toBe(200);
+    const workspaceToken = await store.createAccessToken({
+      name: "Workspace-bound automation", type: "pat", workspaceId: callerWorkspace.id, userId: "local",
+    });
+    const auth = { Authorization: `Bearer ${workspaceToken.token}` };
     const json = { ...auth, "Content-Type": "application/json" };
     const requests: Array<[string, RequestInit]> = [
       [`/api/multiremi/autopilots/${autopilot.id}`, { headers: auth }],

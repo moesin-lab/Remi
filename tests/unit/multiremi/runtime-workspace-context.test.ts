@@ -67,12 +67,12 @@ for (const path of ["/api/dashboard/usage/daily", "/api/dashboard/usage/by-agent
   });
 }
 
-test("runtime and model selection preserves credential and membership boundaries", async () => {
+test("runtime and model selection shares human access while preserving credential boundaries", async () => {
   const { store, workspace, app, headers } = await setup();
   const scoped = await store.createAccessToken({ workspaceId: "local", name: "Scoped machine PAT", type: "pat" });
   for (const path of ["/api/runtimes", "/api/multiremi/runtimes", "/api/models", "/api/multiremi/models"]) {
-    const forbidden = await app.request(path, { headers: { ...headers, "X-Workspace-Slug": "local" } });
-    expect(forbidden.status).toBe(404);
+    const shared = await app.request(path, { headers: { ...headers, "X-Workspace-Slug": "local" } });
+    expect(shared.status).toBe(200);
     const wrongScope = await app.request(path, { headers: { Authorization: `Bearer ${scoped.token}`, "X-Workspace-ID": workspace.id } });
     expect(wrongScope.status).toBe(404);
     const unknown = await app.request(path, { headers: { ...headers, "X-Workspace-Slug": "missing-team" } });

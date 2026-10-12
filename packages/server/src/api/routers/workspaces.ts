@@ -131,21 +131,22 @@ import { sha256Text } from "@multiremi/project-knowledge/codec.js";
 
 export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+  const workspaceResponse = (workspace: import("@multiremi/contracts/types.js").MultiremiWorkspace) => ({
+    ...workspace, operator: { userId: "local", memberId: store.getWorkspaceOperator(workspace.id)!.id },
+  });
 
   app.get("/api/workspaces", (c) => {
-    const userId = authenticatedRequestUserId(c);
     const token = currentAccessToken(c);
+    const workspaceBound = token?.type === "task"
+      || token?.type === "pat" && token.userId === "local" && token.purpose !== "session";
     const all = store.listWorkspaces().filter((workspace) =>
-      token?.type !== "task" || workspace.id === token.workspaceId
+      !workspaceBound || workspace.id === token!.workspaceId
     );
-    // Master token / open mode (no identity) is admin and sees everything;
-    // a logged-in user sees only the workspaces they are a member of.
-    if (!userId) return c.json(all);
-    return c.json(all.filter((ws) => store.getUserRoleInWorkspace(userId, ws.id) !== null));
+    return c.json(all.map(workspaceResponse));
   });
   app.post("/api/workspaces", async (c) => {
     const body = sanitizeWorkspaceSettingsInput(await readJson<any>(c));
-    const actingUserId = authenticatedRequestUserId(c) ?? "local";
+    const actingUserId = currentRequestUserId(c);
     const result = safeCreateWorkspace(store, body, actingUserId);
     if ("error" in result) return c.json({ error: result.error }, result.status);
     const provider = "claude";
@@ -162,7 +163,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       });
       publishAgentLifecycleEvent(c, store, "agent:created", agent);
     }
-    return c.json(result, 201);
+    return c.json(workspaceResponse(result), 201);
   });
   app.get("/api/workspaces/:id", (c) => {
     const workspaceId = c.req.param("id");
@@ -170,7 +171,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
-    return c.json(workspace);
+    return c.json(workspaceResponse(workspace));
   });
   app.get("/api/workspaces/:id/runtime-provisions", (c) => {
     const workspaceId = c.req.param("id");
@@ -187,7 +188,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     try {
       const provision = store.createWorkspaceRuntimeProvision(workspaceId, {
         ...body,
-        createdBy: authenticatedRequestUserId(c) ?? "local",
+        createdBy: currentRequestUserId(c),
       });
       return c.json({ provision: runtimeProvisionResponse(provision) }, 201);
     } catch (error) {
@@ -213,7 +214,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     try {
       return c.json({ provision: runtimeProvisionResponse(store.updateWorkspaceRuntimeProvision(provision.id, {
         ...body,
-        createdBy: authenticatedRequestUserId(c) ?? "local",
+        createdBy: currentRequestUserId(c),
       })) });
     } catch (error) {
       return runtimeProvisionError(c, error);
@@ -225,7 +226,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const provision = store.getWorkspaceRuntimeProvision(c.req.param("provisionId"));
     if (!provision || provision.workspaceId !== workspaceId) return c.json({ error: "runtime provision not found" }, 404);
-    store.deleteWorkspaceRuntimeProvision(provision.id, authenticatedRequestUserId(c) ?? "local");
+    store.deleteWorkspaceRuntimeProvision(provision.id, currentRequestUserId(c));
     return c.json({ deleted: true, id: provision.id });
   });
   app.get("/api/workspaces/:id/runtime-provisions/:provisionId/states", (c) => {
@@ -494,7 +495,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (hasOwn(body, "repos")) {
       return c.json({ error: "repositories can only be changed through the workspace repository API" }, 400);
     }
-    return c.json(store.updateWorkspace(c.req.param("id"), body));
+    return c.json(workspaceResponse(store.updateWorkspace(c.req.param("id"), body)!));
   });
   app.patch("/api/workspaces/:id", async (c) => {
     const denied = denyCurrentUserWorkspaceAccess(c, store, c.req.param("id"))
@@ -513,7 +514,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (hasOwn(body, "repos")) {
       return c.json({ error: "repositories can only be changed through the workspace repository API" }, 400);
     }
-    return c.json(store.updateWorkspace(c.req.param("id"), body));
+    return c.json(workspaceResponse(store.updateWorkspace(c.req.param("id"), body)!));
   });
   app.get("/api/workspaces/:id/repos", async (c) => {
     const workspaceId = c.req.param("id");
@@ -647,8 +648,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         source_revision: actor.sourceRevision,
         authorType: actor.kind,
         author_type: actor.kind,
-        authorId: actor.agent?.id ?? authenticatedRequestUserId(c),
-        author_id: actor.agent?.id ?? authenticatedRequestUserId(c),
+        authorId: actor.agent?.id ?? currentRequestUserId(c),
+        author_id: actor.agent?.id ?? currentRequestUserId(c),
       };
       if (actor.kind === "agent" && !actor.canPublish) {
         const submission = createRepositoryMutationSubmission({
@@ -694,7 +695,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         workspaceId,
         repositoryId,
         actor,
-        memberId: authenticatedRequestUserId(c),
+        memberId: currentRequestUserId(c),
       });
       if (actor.kind === "agent" && !actor.canPublish) {
         const currentByRef = new Map<string, MultiremiRepositoryWikiDoc>();
@@ -861,8 +862,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         source_revision: actor.sourceRevision ?? body.sourceRevision ?? body.source_revision,
         updatedByType: actor.kind,
         updated_by_type: actor.kind,
-        updatedById: actor.agent?.id ?? authenticatedRequestUserId(c),
-        updated_by_id: actor.agent?.id ?? authenticatedRequestUserId(c),
+        updatedById: actor.agent?.id ?? currentRequestUserId(c),
+        updated_by_id: actor.agent?.id ?? currentRequestUserId(c),
       };
       if (actor.kind === "agent" && !actor.canPublish) {
         const submission = createRepositoryMutationSubmission({
@@ -1379,14 +1380,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     }
     return c.json({ deleted, ...gatewayReasoningLevels(store, workspaceId, engine, updatedBy) });
   });
-  app.post("/api/workspaces/:id/leave", async (c) => {
-    const workspaceId = c.req.param("id");
-    const requester = loadCurrentWorkspaceMember(c, store, workspaceId);
-    if (requester instanceof Response) return requester;
-    const left = safeLeaveWorkspace(store, workspaceId, requester.member.id);
-    if ("error" in left) return c.json({ error: left.error }, left.status);
-    publishWorkspaceEvent(c, store, "member:removed", workspaceId, memberRemovedPayload(requester.member));
-    return c.body(null, 204);
+  app.post("/api/workspaces/:id/leave", (c) => {
+    const denied = denyCurrentUserWorkspaceAccess(c, store, c.req.param("id"));
+    return denied ?? c.json({ error: "Workspace operators are shared; leaving a workspace is no longer supported", code: "workspace_members_retired" }, 410);
   });
 
   app.get("/api/workspaces/:id/lark/installations", (c) => c.json({

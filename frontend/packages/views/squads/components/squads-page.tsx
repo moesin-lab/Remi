@@ -3,10 +3,8 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multiremi/core/paths";
-import { agentListOptions, memberListOptions, squadListOptions } from "@multiremi/core/workspace/queries";
+import { agentListOptions, historicalActorListOptions, squadListOptions } from "@multiremi/core/workspace/queries";
 import { resolvePublicFileUrl } from "@multiremi/core/workspace/avatar-url";
-import { useAuthStore } from "@multiremi/core/auth";
-import { useSquadsViewStore } from "@multiremi/core/squads/stores";
 import { AppLink } from "../../navigation";
 import { PageHeader } from "../../layout/page-header";
 import { Users, Plus, Search, Bot, User } from "lucide-react";
@@ -19,20 +17,17 @@ import type { Agent, Squad } from "@multiremi/core/types";
 import { useT } from "../../i18n";
 import { matchesPinyin } from "../../editor/extensions/pinyin-match";
 
-type Scope = "mine" | "all";
-
 export function SquadsPage() {
   const { t } = useT("squads");
   const workspace = useCurrentWorkspace();
   const wsId = workspace?.id ?? "";
   const p = useWorkspacePaths();
-  const currentUser = useAuthStore((s) => s.user);
   const { data: squads = [], isLoading } = useQuery({
     ...squadListOptions(wsId),
     enabled: !!wsId,
   });
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
-  const { data: members = [] } = useQuery(memberListOptions(wsId));
+  const { data: members = [] } = useQuery(historicalActorListOptions(wsId));
 
   const agentsById = useMemo(() => {
     const m = new Map<string, Agent>();
@@ -46,26 +41,15 @@ export function SquadsPage() {
     return m;
   }, [members]);
 
-  const scope = useSquadsViewStore((s) => s.scope);
-  const setScope = useSquadsViewStore((s) => s.setScope);
   const [search, setSearch] = useState("");
-
-  const scopeCounts = useMemo(() => {
-    let mine = 0;
-    if (currentUser) {
-      for (const s of squads) mine += s.creator_id === currentUser.id ? 1 : 0;
-    }
-    return { all: squads.length, mine };
-  }, [squads, currentUser]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return squads.filter((s) => {
-      if (scope === "mine" && currentUser && s.creator_id !== currentUser.id) return false;
       if (q && !s.name.toLowerCase().includes(q) && !matchesPinyin(s.name, q) && !s.description.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [squads, scope, currentUser, search]);
+  }, [squads, search]);
 
   return (
     <div className="flex flex-1 min-h-0 flex-col">
@@ -103,7 +87,6 @@ export function SquadsPage() {
                   className="h-8 w-full pl-8 text-sm"
                 />
               </div>
-              <ScopeSegment scope={scope} setScope={setScope} counts={scopeCounts} />
               <span className="hidden sm:inline font-mono text-xs tabular-nums text-muted-foreground/70">
                 {filtered.length} / {squads.length}
               </span>
@@ -157,32 +140,6 @@ function SquadCard({ squad, leader, creator, href }: { squad: Squad; leader?: Ag
         </div>
       </div>
     </AppLink>
-  );
-}
-
-function ScopeSegment({ scope, setScope, counts }: { scope: Scope; setScope: (v: Scope) => void; counts: { all: number; mine: number } }) {
-  return (
-    <div className="flex items-center gap-0.5 rounded-md bg-muted p-0.5">
-      <ScopeButton active={scope === "mine"} label="Mine" count={counts.mine} onClick={() => setScope("mine")} />
-      <ScopeButton active={scope === "all"} label="All" count={counts.all} onClick={() => setScope("all")} />
-    </div>
-  );
-}
-
-function ScopeButton({ active, label, count, onClick }: { active: boolean; label: string; count: number; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-        active ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
-      }`}
-    >
-      <span>{label}</span>
-      <span className={`font-mono tabular-nums ${active ? "text-muted-foreground/80" : "text-muted-foreground/50"}`}>
-        {count}
-      </span>
-    </button>
   );
 }
 

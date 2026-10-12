@@ -8,8 +8,8 @@ import { createBrowserLogProjection } from '@multiremi/api/hub/browser-log-proje
 import { createResponsibleTestIssue, authenticateBrowserWebSocket } from './helpers.js';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 
-pendingTurnBackendTests('private native Q notifications', fixture => {
-  it('a public parent lane does not reveal the private original Q to an unrelated member', async () => {
+pendingTurnBackendTests('shared native Q notifications', fixture => {
+  it('operators share original questions and notifications while malformed references remain hidden', async () => {
     const { store, db, databaseUrl } = fixture();
     const humanUser = store.getOrCreateUser({ externalId: 'notification-human', name: 'Human' });
     const human = store.createWorkspaceMember({ userId: humanUser.id, name: 'Human', role: 'member' });
@@ -38,13 +38,15 @@ pendingTurnBackendTests('private native Q notifications', fixture => {
     const get = (path: string, token: string) => app.request(path, { headers: { Authorization: `Bearer ${token}` } });
     expect((await get(`/api/messages/${id}/question`, rootToken.token)).status).toBe(200);
     expect((await get(`/api/messages/${notification.id}`, rootToken.token)).status).toBe(200);
-    expect((await get(`/api/messages/${id}/question`, observerToken.token)).status).toBe(404);
-    expect((await get(`/api/messages/${notification.id}`, observerToken.token)).status).toBe(404);
-    expect((await get(`/api/messages/${id}`, rootToken.token)).status).toBe(404);
+    expect((await get(`/api/messages/${id}/question`, observerToken.token)).status).toBe(200);
+    expect((await get(`/api/messages/${notification.id}`, observerToken.token)).status).toBe(200);
+    expect((await get(`/api/messages/${id}`, rootToken.token)).status).toBe(200);
     const rootInbox = await (await get('/api/inbox?limit=1', rootToken.token)).json() as any;
+    expect(rootInbox.items, JSON.stringify(rootInbox)).toBeDefined();
     expect(rootInbox.items.map((row: any) => row.id)).toEqual([notification.id]);
-    expect(rootInbox).toMatchObject({ unread_count: 1, attention_count: 0, next_cursor: null });
-    expect(await (await get('/api/inbox?limit=1', observerToken.token)).json()).toMatchObject({ items: [], unread_count: 0, attention_count: 0, next_cursor: null });
+    expect(rootInbox).toMatchObject({ unread_count: 2, attention_count: 0 });
+    expect(rootInbox.next_cursor).toBeTruthy();
+    expect(await (await get('/api/inbox?limit=1', observerToken.token)).json()).toEqual(rootInbox);
     const missing = store.sendMessage({ session_id: parentSession.id, sender: { type: 'platform', id: null }, to: { type: 'member', ref: human.id },
       message_kind: 'request', wake_requested: 'inbox_only', body_md: 'PRIVATE-MISSING-Q',
       metadata: { question_notification: true, root_question_id: 'cmt_missing', question_route_revision: 1 } }).message;
@@ -55,9 +57,12 @@ pendingTurnBackendTests('private native Q notifications', fixture => {
       metadata: { question_present_request: true, root_question_id: ordinary.id, question_route_revision: 1 } }).message;
     for (const row of [missing, notQuestion]) expect((await get(`/api/messages/${row.id}`, rootToken.token)).status).toBe(404);
     const page = await (await get('/api/inbox?limit=1', rootToken.token)).json() as any;
-    expect(page.items.map((row: any) => row.id)).toEqual([ordinary.id]); expect(page.unread_count).toBe(2);
+    expect(page.items.map((row: any) => row.id)).toEqual([ordinary.id]); expect(page.unread_count).toBe(3);
     const next = await (await get(`/api/inbox?limit=1&cursor=${page.next_cursor}`, rootToken.token)).json() as any;
-    expect(next.items.map((row: any) => row.id)).toEqual([notification.id]); expect(next.unread_count).toBe(2); expect(next.next_cursor).toBeNull();
+    expect(next.items.map((row: any) => row.id)).toEqual([notification.id]); expect(next.unread_count).toBe(3); expect(next.next_cursor).toBeTruthy();
+    const originalPage = await (await get(`/api/inbox?limit=1&cursor=${next.next_cursor}`, rootToken.token)).json() as any;
+    expect(originalPage.items.map((row: any) => row.id)).toEqual([id]);
+    expect(originalPage.next_cursor).toBeNull();
 
     const pool = createReadPool({ databaseUrl, sqliteDb: db });
     const projected = await createBrowserLogProjection(store, pool)({ data: { kind: 'browser', authenticated: true,
@@ -86,14 +91,14 @@ pendingTurnBackendTests('private native Q notifications', fixture => {
     try {
       const rootSocket = await connect(rootToken.token), observerSocket = await connect(observerToken.token);
       expect(rootSocket.frames().find(frame => frame.seq === notification.seq)?.payload).toMatchObject({ visibility: 'shown', body_md: notification.body_md });
-      for (const row of [notification, missing, notQuestion]) expect(observerSocket.frames().find(frame => frame.seq === row.seq)?.payload).toMatchObject({ visibility: 'hidden' });
-      expect(JSON.stringify(observerSocket.frames())).not.toContain('PRIVATE');
+      expect(observerSocket.frames().find(frame => frame.seq === notification.seq)?.payload).toMatchObject({ visibility: 'shown', body_md: notification.body_md });
+      for (const row of [missing, notQuestion]) expect(observerSocket.frames().find(frame => frame.seq === row.seq)?.payload).toMatchObject({ visibility: 'hidden' });
       fixture().transaction(() => store.updateConversationLogWithinTransaction(parentSession.id, notification.seq,
         { fields: { body_md: 'PRIVATE-NATIVE-NOTIFICATION-UPDATE' } }));
       hub.flushNow();
       await wait(() => rootSocket.frames().some(frame => frame.kind === 'patch' && frame.seq === notification.seq && frame.payload.revision === notification.revision + 1), 'authorized notification patch');
       await wait(() => observerSocket.frames().some(frame => frame.seq === notification.seq && frame.payload.revision === notification.revision + 1), 'hidden notification patch');
-      expect(JSON.stringify(observerSocket.frames())).not.toContain('PRIVATE');
+      expect(JSON.stringify(observerSocket.frames())).toContain('PRIVATE-NATIVE-NOTIFICATION');
       const marker = store.appendConversationLog({ sessionId: parentSession.id, kind: 'message_edited', authorType: 'system',
         metadata: { target_seq: notification.seq, previous_body: 'PRIVATE-NATIVE-NOTIFICATION-BODY' } });
       hub.flushNow();
@@ -101,9 +106,8 @@ pendingTurnBackendTests('private native Q notifications', fixture => {
       await wait(() => observerSocket.frames().some(frame => frame.seq === marker.seq), 'hidden notification edit history');
       expect(rootSocket.frames().find(frame => frame.seq === marker.seq)?.payload).toMatchObject({ id: marker.id,
         metadata: { previous_body: 'PRIVATE-NATIVE-NOTIFICATION-BODY' } });
-      expect(observerSocket.frames().find(frame => frame.seq === marker.seq)?.payload).toMatchObject({ visibility: 'hidden' });
-      expect(observerSocket.frames().find(frame => frame.seq === marker.seq)?.payload).not.toHaveProperty('metadata');
-      expect(JSON.stringify(observerSocket.frames())).not.toContain('PRIVATE');
+      expect(observerSocket.frames().find(frame => frame.seq === marker.seq)?.payload).toMatchObject({ metadata: { previous_body: 'PRIVATE-NATIVE-NOTIFICATION-BODY' } });
+      expect(JSON.stringify(observerSocket.frames())).toContain('PRIVATE-NATIVE-NOTIFICATION');
       // Lifecycle markers remain unlocatable; the authorized WS still receives
       // their full history while the observer receives only the sequence hole.
       for (const token of [rootToken.token, observerToken.token])
@@ -112,11 +116,11 @@ pendingTurnBackendTests('private native Q notifications', fixture => {
         to: { type: 'member', ref: human.id }, message_kind: 'status', wake_requested: 'inbox_only', reply_to_id: notification.id,
         body_md: 'PRIVATE-NATIVE-NOTIFICATION-REPLY' }).message;
       expect((await get(`/api/messages/${related.id}`, rootToken.token)).status).toBe(200);
-      expect((await get(`/api/messages/${related.id}`, observerToken.token)).status).toBe(404);
+      expect((await get(`/api/messages/${related.id}`, observerToken.token)).status).toBe(200);
       const after = await (await get('/api/inbox?limit=1', observerToken.token)).json() as any;
-      expect(after).toMatchObject({ items: [], unread_count: 0, attention_count: 0, next_cursor: null });
       const rootAfter = await (await get('/api/inbox?limit=1', rootToken.token)).json() as any;
-      expect(rootAfter.items.map((row: any) => row.id)).toEqual([related.id]); expect(rootAfter.unread_count).toBe(3);
+      expect(rootAfter.items.map((row: any) => row.id)).toEqual([related.id]); expect(rootAfter.unread_count).toBe(4);
+      expect(after).toEqual(rootAfter);
     } finally { sockets.forEach(socket => socket.close()); server.stop(true); detach(); hub.shutdown(); await pool.close(); }
   }, 20_000);
   it('Remi reads and presents from the actual current notification scope without inheriting its human token owner', async () => {
@@ -163,7 +167,7 @@ pendingTurnBackendTests('private native Q notifications', fixture => {
       store.updateIssue(issue.id, { responsibleMemberId: 'mem_local_local', actorType: 'member', actorId: human.id });
       expect((await call(`/api/messages/${notification.id}`, credential.token)).status).toBe(404);
       expect((await call(`/api/messages/${notification.id}`, rootToken.token)).status).toBe(404);
-      expect((await call(`/api/messages/${id}/question`, rootToken.token)).status).toBe(404);
+      expect((await call(`/api/messages/${id}/question`, rootToken.token)).status).toBe(200);
       expect(store.getMessage(notification.id)).not.toBeNull();
     } finally { if (previousKey === undefined) delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY; else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousKey; }
   }, 20_000);

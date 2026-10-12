@@ -302,7 +302,16 @@ describe("queued task model capability waits", () => {
     expect(store.listAnalyticsEvents({ name: EVENT })).toHaveLength(0);
   });
 
-  for (const restriction of ["owner", "provider", "workspace", "group", "runtime"] as const) {
+  it("uses healthy shared runtimes regardless of historical human owner", () => {
+    const { store, task, now, fail } = fixture();
+    store.registerRuntime({ name: "Shared healthy runtime", workspaceId: "local", provider: "codex",
+      models: models(), ownerId: "another-owner", visibility: "private" });
+    fail();
+    expect(store.refreshQueuedCapabilityWaitReasons(now)).toEqual({ updated: 0, alerted: 0 });
+    expect(store.getTask(task.id)?.waitReason).toBeNull();
+  });
+
+  for (const restriction of ["provider", "workspace", "group", "runtime"] as const) {
     it(`excludes healthy runtimes that fail the ${restriction} routing constraint`, () => {
       const { store, task, now, fail } = fixture(restriction === "group" || restriction === "runtime" ? restriction : "automatic");
       const workspace = restriction === "workspace"
@@ -310,7 +319,6 @@ describe("queued task model capability waits", () => {
       const ineligible = store.registerRuntime({
         name: "Ineligible healthy runtime", workspaceId: workspace,
         provider: restriction === "provider" ? "claude" : "codex", models: models(),
-        ...(restriction === "owner" ? { ownerId: "another-owner", visibility: "private" as const } : {}),
       });
       if (restriction === "group") {
         store.saveExecutionGroup("local", { name: "Another capability", provider: "codex", profile_id: null, runtime_ids: [ineligible.id] }, "another-capability-group");

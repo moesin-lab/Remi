@@ -11,7 +11,7 @@ import enAgents from "../../locales/en/agents.json";
 const TEST_RESOURCES = { en: { common: enCommon, agents: enAgents } };
 
 const membersRef = vi.hoisted(() => ({
-  current: [{ user_id: "user-1", role: "owner" as "owner" | "admin" | "member" }],
+  current: [{ user_id: "local", role: "owner" as "owner" | "admin" | "member" }],
 }));
 const larkRef = vi.hoisted(() => ({
   current: {
@@ -153,7 +153,7 @@ function renderInspector(agent = makeAgent(), canEdit = true) {
 }
 
 beforeEach(() => {
-  membersRef.current = [{ user_id: "user-1", role: "owner" }];
+  membersRef.current = [{ user_id: "local", role: "owner" }];
   larkRef.current = {
     installations: [],
     configured: true,
@@ -224,7 +224,7 @@ describe("AgentDetailInspector integrations section", () => {
   it("hides the header from an agent owner who is a plain workspace member", () => {
     // LarkAgentBindButton returns null for non owner/admin viewers, so the
     // header would otherwise sit above nothing.
-    membersRef.current = [{ user_id: "user-1", role: "member" }];
+    membersRef.current = [{ user_id: "local", role: "member" }];
     renderInspector();
     expect(screen.queryByText("Integrations")).not.toBeInTheDocument();
   });

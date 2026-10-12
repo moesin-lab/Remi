@@ -71,6 +71,11 @@ describe("SettingsPage platform tab visibility", () => {
     expect(screen.getByText("System")).toBeInTheDocument();
   });
 
+  it("does not expose member management in workspace settings", () => {
+    render(<SettingsPage />, { wrapper: Wrapper });
+    expect(screen.queryByRole("tab", { name: "Members" })).not.toBeInTheDocument();
+  });
+
   it("keeps the tab once status resolves with manage permission", () => {
     statusRef.data = { canManage: true };
     statusRef.isSuccess = true;

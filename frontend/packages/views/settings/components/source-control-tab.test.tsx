@@ -18,7 +18,7 @@ const workspaceRef = vi.hoisted(() => ({
 }));
 
 vi.mock("@tanstack/react-query", () => ({
-  useQuery: () => ({ data: [{ user_id: "user-1", role: "owner" }] }),
+  useQuery: () => ({ data: [{ user_id: "local", role: "owner" }] }),
   useQueryClient: () => ({ setQueryData }),
   queryOptions: <T,>(options: T) => options,
 }));

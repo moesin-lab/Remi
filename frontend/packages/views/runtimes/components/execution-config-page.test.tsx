@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multiremi/core/i18n/react";
@@ -27,7 +27,7 @@ function makeRuntime(id: string, name: string, provider = "codex", overrides: Pa
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
-  api.listMembers.mockResolvedValue([{ user_id: "owner", role: "owner" }]);
+  api.listMembers.mockResolvedValue([{ user_id: "local", role: "owner" }]);
   api.listExecutionProfiles.mockResolvedValue({ profiles: [profile, { ...profile, id: "p2", provider: "claude", name: "Claude only" }] });
   api.listExecutionGroups.mockResolvedValue({ groups: [group] });
   api.listRuntimes.mockResolvedValue([makeRuntime("r1", "Devbox Codex"), makeRuntime("r2", "Local Codex"), makeRuntime("r3", "Claude runtime", "claude")]);
@@ -158,14 +158,14 @@ it("configures provider credentials and models inside a new group with a single 
   const user = userEvent.setup();
   show();
   await user.click(await screen.findByRole("button", { name: "Add group" }));
-  await user.type(screen.getByLabelText("Name"), "Review pool");
-  await user.type(screen.getByLabelText("Purpose and organization"), "Review services");
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Review pool" } });
+  fireEvent.change(screen.getByLabelText("Purpose and organization"), { target: { value: "Review services" } });
   await user.selectOptions(screen.getByLabelText("Provider connection"), "new");
-  await user.type(screen.getByLabelText("Connection name"), "Review gateway");
-  await user.type(screen.getByLabelText("API base URL"), "https://example.test/v1");
-  await user.type(screen.getByLabelText("Model ID"), "default-model");
-  await user.type(screen.getByLabelText(/Allowed model IDs/), "fast-model");
-  await user.type(screen.getByLabelText("API key"), "synthetic-key");
+  fireEvent.change(screen.getByLabelText("Connection name"), { target: { value: "Review gateway" } });
+  fireEvent.change(screen.getByLabelText("API base URL"), { target: { value: "https://example.test/v1" } });
+  fireEvent.change(screen.getByLabelText("Model ID"), { target: { value: "default-model" } });
+  fireEvent.change(screen.getByLabelText(/Allowed model IDs/), { target: { value: "fast-model" } });
+  fireEvent.change(screen.getByLabelText("API key"), { target: { value: "synthetic-key" } });
   await user.click(screen.getByRole("checkbox", { name: /Local Codex/ }));
   await user.click(screen.getByRole("button", { name: "Save group" }));
   await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", undefined, {
@@ -225,7 +225,7 @@ it("keeps the editor and error visible on failure without issuing a separate pro
 });
 
 it("organizes groups by purpose and engine while members have a read-only view", async () => {
-  api.listMembers.mockResolvedValue([{ user_id: "owner", role: "member" }]);
+  api.listMembers.mockResolvedValue([{ user_id: "local", role: "member" }]);
   api.listExecutionGroups.mockResolvedValue({ groups: [group, { ...group, id: "g2", name: "Writing", description: "Documentation", provider: "claude", profile_id: "p2" }] });
   const user = userEvent.setup();
   show();

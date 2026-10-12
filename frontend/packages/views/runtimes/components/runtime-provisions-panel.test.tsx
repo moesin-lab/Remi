@@ -24,7 +24,7 @@ vi.mock("@multiremi/core/realtime", () => ({ useWSEvent: vi.fn() }));
 vi.mock("@multiremi/core/workspace/queries", () => ({
   memberListOptions: () => ({
     queryKey: ["members", "ws-1"],
-    queryFn: () => Promise.resolve([{ user_id: "user-1", role: fixture.role }]),
+    queryFn: () => Promise.resolve([{ user_id: "local", role: fixture.role }]),
   }),
 }));
 vi.mock("@multiremi/core/runtimes/queries", () => ({

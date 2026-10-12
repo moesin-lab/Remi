@@ -217,25 +217,25 @@ describe("execution group API", () => {
     expect((await request("/api/agents", { name: "Wrong", execution_group_id: "shared", model: "first" })).status).toBe(400);
   });
 
-  it("uses the managed agent owner for group and model queries, with workspace and access checks", async () => {
+  it("shares historical owners' execution groups and models within the selected workspace", async () => {
     const { store, runtime, app, request } = setup();
     store.updateRuntime(runtime.id, { ownerId: "other" });
     legacyGroup(store, "others", [runtime.id]);
     const agent = store.createAgent({ name: "Other owner", provider: "codex", ownerId: "other" });
     const defaultGroups = await (await app.request("/api/execution-groups")).json();
-    expect(defaultGroups.groups.some((group: { id: string }) => group.id === "others")).toBe(false);
-    expect((await app.request("/api/models?execution_group_id=others")).status).toBe(403);
+    expect(defaultGroups.groups.some((group: { id: string }) => group.id === "others")).toBe(true);
+    expect((await app.request("/api/models?execution_group_id=others")).status).toBe(200);
     const managed = await (await app.request(`/api/execution-groups?agent_id=${agent.id}`)).json();
     expect(managed.groups.some((group: { id: string }) => group.id === "others")).toBe(true);
     expect((await app.request(`/api/models?execution_group_id=others&agent_id=${agent.id}`)).status).toBe(200);
     const pooled = store.createAgent({ name: "Managed pool", provider: "codex", ownerId: "other" });
     store.updateRuntime(runtime.id, { models: [{ id: "owner-only", label: "Owner only", provider: "codex", default: true }] });
     const poolCatalog = await (await app.request(`/api/models?agent_id=${pooled.id}`)).json();
-    expect(poolCatalog.providers[0].models.map((model: { id: string }) => model.id)).toEqual(["owner-only"]);
+    expect(poolCatalog.providers[0].models.map((model: { id: string }) => model.id).sort()).toEqual(["common", "owner-only", "peer-only"]);
     expect((await app.request("/api/execution-groups?agent_id=missing")).status).toBe(404);
     expect((await request(`/api/agents/${agent.id}`, { execution_group_id: "others" }, "PUT")).status).toBe(200);
   });
-  it("rejects another member using agent_id to inspect private group capabilities", async () => {
+  it("lets another account inspect historical private group capabilities without rewriting ownership", async () => {
     const { store, runtime } = setup();
     store.createWorkspaceMember({ id: "group-owner", name: "Owner", role: "member" });
     store.createWorkspaceMember({ id: "group-outsider", name: "Outsider", role: "member" });
@@ -245,9 +245,10 @@ describe("execution group API", () => {
     const { token } = await store.createAccessToken({ name: "Outsider", type: "pat", workspaceId: "local", userId: "group-outsider" });
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const headers = { Authorization: `Bearer ${token}` };
-    // Private agents are hidden by the current main visibility policy.
-    expect((await app.request(`/api/execution-groups?agent_id=${agent.id}`, { headers })).status).toBe(404);
-    expect((await app.request(`/api/models?execution_group_id=private-group&agent_id=${agent.id}`, { headers })).status).toBe(404);
+    expect((await app.request(`/api/execution-groups?agent_id=${agent.id}`, { headers })).status).toBe(200);
+    expect((await app.request(`/api/models?execution_group_id=private-group&agent_id=${agent.id}`, { headers })).status).toBe(200);
+    expect(store.getAgent(agent.id)?.ownerId).toBe("group-owner");
+    expect(store.getRuntime(runtime.id)?.ownerId).toBe("group-owner");
   });
 
   it("revalidates a group model when changing the agent owner changes eligible members", async () => {

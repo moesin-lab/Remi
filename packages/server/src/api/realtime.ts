@@ -71,12 +71,6 @@ export function notifyBrowserTaskEvent(
     actor_id: task.agentId,
     actor_type: "agent",
   });
-  if (task.chatSessionId) {
-    const session = store.getChatSession(task.chatSessionId);
-    if (session?.creatorId) notifyBrowserUserEventByAudience(userRegistry, session.creatorId,
-      { human: frame, restricted: frame }, undefined, task.workspaceId);
-    return;
-  }
   const clients = workspaceRegistry.get(task.workspaceId);
   if (!clients) return;
   for (const client of [...clients]) {
@@ -145,10 +139,7 @@ export function notifyBrowserWorkspaceEvent(
     }),
   };
   if (isChatRealtimeEvent(event.type)) {
-    const creatorId = chatEventCreatorId(options.store, event);
-    if (creatorId) {
-      notifyBrowserUserEventByAudience(userRegistry, creatorId, frames, undefined, event.workspaceId);
-    }
+    notifyBrowserWorkspaceClientsByAudience(workspaceRegistry, event.workspaceId, frames);
     return;
   }
   if (event.type === "invitation:created" || event.type === "invitation:revoked") {
@@ -423,25 +414,26 @@ export async function authorizeBrowserWebSocketToken(
   | { userId: string; accessToken: MultiremiAccessToken | null }
   | { error: string; status: 401 | 403 }
 > {
-  if (authToken && token === authToken) return { userId: "root", accessToken: null };
+  if (authToken && token === authToken) return { userId: "local", accessToken: null };
   const accessToken = await store.verifyAccessToken(token);
   if (accessToken) {
     if (accessToken.type === "daemon") return { error: "forbidden for daemon token", status: 403 };
     if (accessToken.type === "task") return { error: "forbidden for task token", status: 403 };
     const userId = accessToken.userId || "local";
-    // Membership is the sole authority — a token being bound to this workspace
-    // does not by itself make its user a member.
-    if (!hasJwtWorkspaceAccess(store, userId, workspaceId)) {
-      return { error: "not a member of this workspace", status: 403 };
+    // Human login accounts share existing workspaces. Legacy local PATs keep
+    // their explicit workspace binding unless they represent a login session.
+    if (!store.getWorkspace(workspaceId)
+      || userId === "local" && accessToken.purpose !== "session" && accessToken.workspaceId !== workspaceId) {
+      return { error: "workspace not available to this credential", status: 403 };
     }
-    return { userId, accessToken };
+    return { userId: "local", accessToken };
   }
   const jwt = verifyJwtToken(token);
   if (!jwt) return { error: "invalid token", status: 401 };
   if (!hasJwtWorkspaceAccess(store, jwt.userId, workspaceId)) {
     return { error: "not a member of this workspace", status: 403 };
   }
-  return { userId: jwt.userId, accessToken: null };
+  return { userId: "local", accessToken: null };
 }
 
 

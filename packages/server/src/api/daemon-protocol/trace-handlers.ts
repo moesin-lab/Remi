@@ -67,7 +67,7 @@ export class DaemonTraceService {
     const token = session.ownerAccessToken;
     if (!runtime || (runtime.workspaceId ?? "local") !== task.workspaceId) reject("authority_revoked");
     if (token && (token.workspaceId !== task.workspaceId || token.daemonId !== session.daemonId)) reject("authority_revoked");
-    if (token?.userId && token.userId !== "local" && !this.store.getUserRoleInWorkspace(token.userId, task.workspaceId)) reject("authority_revoked");
+    if (token && !this.store.getWorkspace(task.workspaceId)) reject("authority_revoked");
     if (this.store.isDaemonRetired(task.workspaceId, session.daemonId)) reject("authority_revoked");
     if (token && runtime.daemonId !== session.daemonId
       && !this.store.canFeishuBotDaemonAccessTask(task.workspaceId, session.daemonId, task.id)) reject("authority_revoked");

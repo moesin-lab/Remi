@@ -62,14 +62,16 @@ export interface PendingChatTaskCandidate {
 
 // Chat is private to its creator. Resolve the user to the workspace member lane,
 // exactly as inbox/read does; the legacy unread_since is no longer a read cursor.
+// Historical recipients and receipts remain intact. The shared cursor never
+// marks another recipient's unread message read until an operator reads it.
 const CHAT_UNREAD_FROM = `FROM multiremi_conversation_log m
-  JOIN multiremi_workspace_members member ON member.id = m.to_member_id
-    AND member.workspace_id = chat.workspace_id AND member.user_id = chat.creator_id
-    AND member.archived_at IS NULL
-  LEFT JOIN multiremi_session_lanes lane ON lane.session_id = m.session_id
-    AND lane.reader_type = 'member' AND lane.reader_id = member.id AND lane.execution_scope = ''
+  LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id
+    AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = ''
+  LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id
+    AND shared.workspace_id = chat.workspace_id
   WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown'
-    AND m.deleted_at IS NULL AND m.seq > COALESCE(lane.cursor_seq, 0)`;
+    AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL
+    AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)`;
 
 const CHAT_SESSION_SELECT = `SELECT chat.id, chat.workspace_id, chat.creator_id, chat.agent_id,
   chat.runtime_workspace_id, chat.project_id, chat.title, chat.status, chat.session_id,
@@ -163,7 +165,7 @@ export class ChatRepo {
       clauses.push("workspace_id = ?");
       params.push(workspaceId);
     }
-    if (options.creatorId) {
+    if (options.creatorId && options.creatorId !== "local") {
       clauses.push("creator_id = ?");
       params.push(options.creatorId);
     }
@@ -278,7 +280,7 @@ export class ChatRepo {
   markChatSessionRead(id: string): void {
     const session = this.getChatSession(id);
     if (!session) throw new Error(`Chat session not found: ${id}`);
-    const member = this.ctx.workspaces().findWorkspaceMemberForUser(session.creatorId, session.workspaceId);
+    const member = this.ctx.workspaces().ensureWorkspaceOperator(session.workspaceId);
     if (member) this.ctx.inbox().readMessageInbox(member.id, id);
     this.ctx.emitChatEvent(session, "chat:session_read", {});
   }
@@ -420,7 +422,7 @@ export class ChatRepo {
       clauses.push("chat.workspace_id = ?");
       params.push(workspaceId);
     }
-    if (options.creatorId) {
+    if (options.creatorId && options.creatorId !== "local") {
       clauses.push("chat.creator_id = ?");
       params.push(options.creatorId);
     }
@@ -534,13 +536,12 @@ export class ChatRepo {
     const id=input.id??staged??createId('msg');
     const task=input.taskId?this.ctx.tasks().getTask(input.taskId):null;
     const source=input.taskId?this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(input.taskId):null;
-    const creatorMember=this.ctx.workspaces().getWorkspaceMemberByRef(session.creatorId??'local',session.workspaceId);
-    const member=creatorMember??this.ctx.workspaces().listWorkspaceMembers(session.workspaceId).find(m=>m.role==='owner');
+    const member=this.ctx.workspaces().ensureWorkspaceOperator(session.workspaceId);
     const result=sendMessageWithinTransaction(this.ctx,{id,session_id:session.id,
       sender:{type:input.role==='assistant'?'agent':input.role==='user'?'member':'platform',id:input.role==='assistant'?task?.agentId??null:input.role==='user'?member?.id??null:null},
       source_turn_id:input.role==='assistant'?source?.turn_id:null,
       to:input.role==='user'||input.pendingAgentDelivery?{type:'agent',ref:session.agentId}
-        :input.role==='assistant'&&creatorMember?{type:'member',ref:creatorMember.id}:{type:'none'},
+        :input.role==='assistant'?{type:'member',ref:member.id}:{type:'none'},
       message_kind:input.role==='assistant'?'reply':'request',wake_requested:input.role==='user'||input.pendingAgentDelivery?'now':'inbox_only',
       body_md:input.body,metadata:{...input.metadata,...(input.clientId?{client_id:input.clientId}:{}),failure_reason:input.failureReason??null,elapsed_ms:input.elapsedMs??null,
         pending_agent_delivery:input.pendingAgentDelivery??false,agent_delivery_task_id:input.agentDeliveryTaskId??null}},createCommitEventQueue());
@@ -636,8 +637,7 @@ export class ChatRepo {
       const queued = this.getPendingChatTask(session.id) != null;
       const now = nowIso();
       const messageId = createId("msg");
-      const member=this.ctx.workspaces().getWorkspaceMemberByRef(session.creatorId??'local',session.workspaceId)
-        ??this.ctx.workspaces().listWorkspaceMembers(session.workspaceId).find(m=>m.role==='owner');
+      const member=this.ctx.workspaces().ensureWorkspaceOperator(session.workspaceId);
       if(!member)throw new Error('Chat author is not a workspace member');
       const written=sendMessageWithinTransaction(this.ctx,{id:messageId,session_id:session.id,sender:{type:'member',id:member.id},
         to:{type:'agent',ref:session.agentId},message_kind:'request',wake_requested:'now',body_md:body,metadata:{client_id:input.client_id}},deferredEvents,

@@ -153,17 +153,14 @@ describe("useIssueActions", () => {
     expect(toast.error).not.toHaveBeenCalled();
   });
 
-  it("does not offer force confirmation without a member identity when the summary is missing", () => {
-    mockAuthState.user = null;
-    const { result } = renderHook(() => useIssueActions(mockIssue), { wrapper });
-    act(() => result.current.updateField({ status: "done" }));
-    const callbacks = mockUpdateMutate.mock.calls[0]?.[1];
-    act(() => callbacks.onError(new ApiError("summary missing", 409, "Conflict", {
-      code: "final_summary_missing", reason: "final_summary_missing", open_children: 0,
-    })));
-    expect(mockOpenModal).not.toHaveBeenCalled();
-    expect(toast.error).toHaveBeenCalledWith("summary missing");
-  });
+  it("uses the shared operator for force confirmation independently of the login account", () => {
+  mockAuthState.user = null;
+  const { result } = renderHook(() => useIssueActions(mockIssue), { wrapper });
+  act(() => result.current.updateField({ status: "done" }));
+  const callbacks = mockUpdateMutate.mock.calls[0]?.[1];
+  act(() => callbacks.onError(new ApiError("summary missing", 409, "Conflict", { code: "final_summary_missing", reason: "final_summary_missing", open_children: 0 })));
+  expect(mockOpenModal).toHaveBeenCalled();
+});
 
   it("shows a normal error for a malformed summary refusal", () => {
     const { result } = renderHook(() => useIssueActions(mockIssue), { wrapper });

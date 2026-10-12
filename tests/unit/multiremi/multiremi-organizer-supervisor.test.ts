@@ -164,7 +164,7 @@ describe("Organizer supervisor privilege layer", () => {
       previousTaskId: fixture.targetTask.id, unmet: [{ key: prerequisite.key }],
     });
   });
-  it("defaults to report_only and only lets human owner/admin configure supervisor authority", async () => {
+  it("defaults to report_only and lets human operators configure supervisor authority", async () => {
     const fixture = await setup();
 
     const defaults = await fixture.app.request("/api/workspaces/local/organizer", {
@@ -178,14 +178,7 @@ describe("Organizer supervisor privilege layer", () => {
       headers: headers(fixture.memberToken.token),
       body: JSON.stringify({ mode: "act" }),
     });
-    expect(memberMode.status).toBe(403);
-
-    const memberGrant = await fixture.app.request(`/api/agents/${fixture.supervisorAgent.id}/supervisor`, {
-      method: "PUT",
-      headers: headers(fixture.memberToken.token),
-      body: JSON.stringify({ enabled: true }),
-    });
-    expect(memberGrant.status).toBe(403);
+    expect(memberMode.status).toBe(200);
 
     const preGrantToken = await fixture.store.createTaskAccessToken(fixture.supervisorTask, "owner");
     expect(preGrantToken.scopes).toEqual([]);
@@ -196,6 +189,13 @@ describe("Organizer supervisor privilege layer", () => {
     });
     expect(selfGrant.status).toBe(403);
     expect((await selfGrant.json()).code).toBe("task_token_hard_denied");
+
+    const memberGrant = await fixture.app.request(`/api/agents/${fixture.supervisorAgent.id}/supervisor`, {
+      method: "PUT",
+      headers: headers(fixture.memberToken.token),
+      body: JSON.stringify({ enabled: true }),
+    });
+    expect(memberGrant.status).toBe(200);
 
     const supervisorToken = await grantSupervisor(fixture);
     expect(supervisorToken.scopes).toEqual(["organizer:supervisor"]);

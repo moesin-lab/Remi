@@ -171,7 +171,7 @@ describe("repository Wiki structured outcomes", () => {
       alert: null, build: { outcome: null } });
   });
 
-  it("routes a threshold alert to workspace administrators when the automation creator is unavailable", async () => {
+  it("notifies the shared operator once per threshold event when the automation creator is unavailable", async () => {
     const f = fixture();
     db!.run("UPDATE multiremi_autopilots SET created_by_type = 'agent', created_by_id = 'deleted-agent' WHERE id = ?", [f.autopilot.id]);
     for (let index = 0; index < 3; index++) {
@@ -179,9 +179,20 @@ describe("repository Wiki structured outcomes", () => {
       expect((await f.report(headers, "blocked", "Storage unavailable")).status).toBe(200);
       f.store.completeTask(task.id, { output: "done" });
     }
-    const alerts = f.store.listInboxItems(f.owner.id, "local").filter(item => (item.details as any)?.wiki_alert);
-    expect(alerts).toHaveLength(1);
-    expect(alerts[0]).toMatchObject({ severity: "attention", details: { wiki_alert: { count: 3 } } });
+    const alerts = () => f.store.listInboxItems(f.owner.id, "local").filter(item => (item.details as any)?.wiki_alert);
+    const operator = f.store.getWorkspaceOperator("local")!;
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]).toMatchObject({ memberId: operator.id, severity: "attention", details: { wiki_alert: { count: 3 } } });
+    // A separate failed run still gets its own alert; historical administrators
+    // share this inbox instead of receiving duplicate copies of each event.
+    const { task, headers } = await f.begin();
+    expect((await f.report(headers, "blocked", "Still unavailable")).status).toBe(200);
+    f.store.completeTask(task.id, { output: "done" });
+    expect(alerts()).toHaveLength(2);
+    expect(new Set(alerts().map(item => (item.details as any).run_id)).size).toBe(2);
+    expect(alerts().map(item => (item.details as any).wiki_alert.count).sort()).toEqual([3, 4]);
+    expect(f.store.listInboxItems(operator.id).map(item => item.id))
+      .toEqual(f.store.listInboxItems(f.owner.id).map(item => item.id));
   });
 
   it("does not let a premature no-publication report hide a later successful write", async () => {

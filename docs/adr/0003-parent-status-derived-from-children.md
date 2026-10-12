@@ -73,9 +73,15 @@ dropped (`active_task_exists`), so a parent could lose reports entirely.
    suppresses the report: it is appended to that agent's queued round
    (`child_status_parent_coalesced`), and several child endings coalesce into one
    round because the workspace lock serialises the lookup and append. Human
-   owners get the `child_issue_terminal` inbox type, warning for failed/blocked
-   and info otherwise. A parent with no assignee keeps its historic comment and
-   skip record and now also reaches subscribers.
+   handling uses the shared workspace operator and the `child_issue_terminal`
+   inbox type, warning for failed/blocked and info otherwise. A parent with no
+   assignee keeps its historic comment and skip record. When its parent-owner
+   message already reaches the operator, subscriber fanout does not create a
+   second notification for that event. Later child events still notify separately.
+   Missing legacy human contact does not suppress this notice: a complete
+   same-workspace parent chain falls back to the shared operator without creating
+   an execution Agent or a Task. Missing, cyclic or foreign ancestor chains keep
+   their unresolved audit and cannot route a notice into another workspace.
    A child that ends while its parent is already `done`/`cancelled` is a
    different case: the parent's status is a settled human decision and nothing
    may be filed against a closed parent, so the ending is recorded as a single

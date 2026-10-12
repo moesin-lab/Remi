@@ -76,7 +76,7 @@ describe("current-user profile and onboarding identity", () => {
   it("binds both bootstrap paths to the caller while preserving workspace guards", async () => {
     const { app, store, first, second } = await setup();
     const privateWorkspace = store.createWorkspace({ name: "Unrelated test workspace", slug: "unrelated-bootstrap-test" });
-    expect((await request(app, first.token, "POST", "/api/me/onboarding/no-runtime-bootstrap", { workspace_id: privateWorkspace.id })).status).toBe(404);
+    expect((await request(app, first.token, "POST", "/api/me/onboarding/no-runtime-bootstrap", { workspace_id: "missing-workspace" })).status).toBe(404);
     const runtime = store.registerRuntime({ id: "identity-test-runtime", name: "Test runtime", provider: "codex", workspaceId: "local", ownerId: first.user.id });
     // Direct fixture workspace creation completes its default local actor's
     // onboarding; measure isolation after that setup has finished.
@@ -84,7 +84,7 @@ describe("current-user profile and onboarding identity", () => {
     const withRuntime = await request(app, first.token, "POST", "/api/me/onboarding/runtime-bootstrap", { workspace_id: "local", runtime_id: runtime.id });
     expect(withRuntime.status).toBe(200);
     const bootstrap = await withRuntime.json();
-    expect(store.getAgent(bootstrap.agent_id)?.ownerId).toBe(first.user.id);
+    expect(store.getAgent(bootstrap.agent_id)?.ownerId).toBe("local");
     expect(store.getUser(first.user.id)?.onboardedAt).not.toBeNull();
     expect(store.getUser(second.user.id)?.onboardedAt).toBeNull();
     expect(store.getCurrentUser()).toEqual(local);

@@ -155,7 +155,7 @@
     "manage_only_title": "SSH access is restricted",
     "manage_only_hint": "Only workspace owners and admins can view or change SSH access.",
     "permission_load_failed_title": "Couldn't verify SSH access permissions",
-    "permission_load_failed_hint": "Workspace membership couldn't be loaded. Check the connection and retry.",
+    "permission_load_failed_hint": "Workspace information couldn't be loaded. Check the connection and retry.",
     "load_failed_title": "Couldn't load SSH access",
     "load_failed_hint": "Check the server connection and try again.",
     "retry": "Retry",

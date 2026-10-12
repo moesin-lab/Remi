@@ -1,5 +1,7 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, Globe, Lock } from "lucide-react";
 import { toast } from "sonner";
@@ -19,7 +21,6 @@ import {
   type AgentPresenceDetail,
   useWorkspacePresenceMap,
 } from "@multiremi/core/agents";
-import { useAuthStore } from "@multiremi/core/auth";
 import {
   AlertDialog,
   AlertDialogContent,
@@ -81,7 +82,7 @@ export function DeleteRuntimeDialog({
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { byAgent: presenceMap } = useWorkspacePresenceMap(wsId);
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
 
   // The displayed plan starts from the cached agent list and is replaced by
   // server snapshots when the backend returns a structured 409 (either on

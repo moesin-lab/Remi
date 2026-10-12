@@ -8,7 +8,7 @@ import { receiveRuntimeInputs } from "../../fixtures/runtime-downlinks.js";
 afterEach(resetMultiremiTestEnv);
 
 describe("Multiremi API - runtime commands", () => {
-  it("restricts execution to workspace managers and keeps its audit response redacted", async () => {
+  it("shares human execution control and keeps its audit response redacted", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
     store.createWorkspaceMember({ id: "command-admin", userId: "command-admin", name: "Command Admin", role: "admin" });
@@ -46,14 +46,6 @@ describe("Multiremi API - runtime commands", () => {
     const tokenLikeValue = ["ghp", "placeholdervalue1234"].join("_");
     const command = `printf ${tokenLikeValue}`;
 
-    const denied = await app.request(`/api/runtimes/${runtime.id}/commands`, {
-      method: "POST",
-      headers: jsonHeaders(memberToken.token),
-      body: JSON.stringify({ command }),
-    });
-    expect(denied.status).toBe(403);
-    expect(await denied.json()).toEqual({ error: "insufficient permissions" });
-
     const taskDenied = await app.request(`/api/runtimes/${runtime.id}/commands`, {
       method: "POST",
       headers: jsonHeaders(taskToken.token),
@@ -70,7 +62,7 @@ describe("Multiremi API - runtime commands", () => {
 
     const created = await app.request(`/api/runtimes/${runtime.id}/commands`, {
       method: "POST",
-      headers: jsonHeaders(adminToken.token),
+      headers: jsonHeaders(memberToken.token),
       body: JSON.stringify({ command, args: ["token=placeholder-value"], timeout_ms: 2_000 }),
     });
     expect(created.status).toBe(202);
@@ -79,7 +71,7 @@ describe("Multiremi API - runtime commands", () => {
       runtime_id: runtime.id,
       command: "printf [REDACTED]",
       args: ["token=[REDACTED]"],
-      created_by: "command-admin",
+      created_by: "local",
       status: "pending",
     });
     expect(JSON.stringify(createdBody)).not.toContain(tokenLikeValue);
@@ -116,7 +108,7 @@ describe("Multiremi API - runtime commands", () => {
     expect(JSON.stringify(resultBody)).not.toContain(tokenLikeValue);
   });
 
-  it("restricts workspace Runtime provision CRUD to managers and denies task tokens", async () => {
+  it("shares human Runtime provision control and denies task tokens", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
     store.createWorkspaceMember({ id: "provision-admin", userId: "provision-admin", name: "Provision Admin", role: "admin" });
@@ -136,9 +128,6 @@ describe("Multiremi API - runtime commands", () => {
     });
 
     expect((await app.request("/api/workspaces/local/runtime-provisions", {
-      method: "POST", headers: headers(memberToken.token), body,
-    })).status).toBe(403);
-    expect((await app.request("/api/workspaces/local/runtime-provisions", {
       method: "GET", headers: headers(memberToken.token),
     })).status).toBe(200);
     expect((await app.request("/api/workspaces/local/runtime-provisions", {
@@ -149,7 +138,7 @@ describe("Multiremi API - runtime commands", () => {
     })).status).toBe(403);
 
     const created = await app.request("/api/workspaces/local/runtime-provisions", {
-      method: "POST", headers: headers(adminToken.token), body,
+      method: "POST", headers: headers(memberToken.token), body,
     });
     expect(created.status).toBe(201);
     const response = await created.json();
@@ -158,7 +147,7 @@ describe("Multiremi API - runtime commands", () => {
       kind: "command",
       version_check: false,
       command: "printf token=[REDACTED]",
-      created_by: "provision-admin",
+      created_by: "local",
     });
     expect(JSON.stringify(response)).not.toContain("placeholder-value");
     const runtime = store.registerRuntime({
@@ -169,7 +158,7 @@ describe("Multiremi API - runtime commands", () => {
     });
     const statesResponse = await app.request(
       `/api/workspaces/local/runtime-provisions/${response.provision.id}/states`,
-      { headers: headers(memberToken.token) },
+      { headers: headers(adminToken.token) },
     );
     expect(statesResponse.status).toBe(200);
     const statesBody = await statesResponse.json();
@@ -183,7 +172,7 @@ describe("Multiremi API - runtime commands", () => {
     expect(statesBody.states[0]).not.toHaveProperty("runtimeId");
     const audit = db!.query("SELECT action, snapshot, actor_id FROM multiremi_runtime_provision_audit WHERE provision_id = ?")
       .get(response.provision.id) as { action: string; snapshot: string; actor_id: string };
-    expect(audit).toMatchObject({ action: "create", actor_id: "provision-admin" });
+    expect(audit).toMatchObject({ action: "create", actor_id: "local" });
     expect(audit.snapshot).toContain("[REDACTED]");
     expect(audit.snapshot).not.toContain("placeholder-value");
   });

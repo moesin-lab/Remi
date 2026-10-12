@@ -48,6 +48,17 @@ describe("useIssueLog visibility lifecycle", () => {
     vi.restoreAllMocks();
   });
 
+  it("shares the replica identity across login accounts", async () => {
+    const connect = vi.spyOn(IssueLogReplica.prototype, "connect");
+    socket.subscribeStream.mockReturnValue({ unsubscribe: vi.fn() });
+    const hook = renderHook(() => useIssueLog("s", initial));
+    try {
+      await waitFor(() => expect(connect).toHaveBeenCalledWith(expect.objectContaining({
+        userId: "local", workspaceId: "w",
+      })));
+    } finally { hook.unmount(); }
+  });
+
   it("loads the session without an error when crypto.randomUUID is unavailable over http", async () => {
     vi.stubGlobal("crypto", {
       randomUUID: undefined,

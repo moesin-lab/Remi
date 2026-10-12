@@ -17,7 +17,7 @@ import enSettings from "../../../locales/en/im-platforms.json";
 type MemberRole = "owner" | "admin" | "member" | "guest";
 
 const membersRef = vi.hoisted(() => ({
-  current: [{ user_id: "user-1", role: "owner" as MemberRole }],
+  current: [{ user_id: "local", role: "owner" as MemberRole }],
 }));
 const installationsRef = vi.hoisted(() => ({
   current: {
@@ -107,7 +107,7 @@ function renderTab(children: ReactNode) {
 
 function resetFixtures() {
   vi.clearAllMocks();
-  membersRef.current = [{ user_id: "user-1", role: "owner" }];
+  membersRef.current = [{ user_id: "local", role: "owner" }];
   installationsRef.current = {
     installations: [],
     configured: true,
@@ -148,7 +148,7 @@ describe("IntegrationsTab", () => {
   });
 
   it("points members at Settings instead of a dead button when they can't manage", () => {
-    membersRef.current = [{ user_id: "user-1", role: "member" }];
+    membersRef.current = [{ user_id: "local", role: "member" }];
     renderTab(<IntegrationsTab agent={agent} />);
     expect(
       screen.getByText(/Only workspace owners and admins can bind a Lark Bot/i),

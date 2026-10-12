@@ -50,7 +50,7 @@ vi.mock("@tanstack/react-query", async (importOriginal) => {
       }
       if (options.queryKey?.[0] === "members") {
         return {
-          data: [{ user_id: "user-1", name: "Owner", role: mockCurrentRole.value }],
+          data: [{ user_id: "local", name: "Owner", role: mockCurrentRole.value }],
           isLoading: false,
         };
       }

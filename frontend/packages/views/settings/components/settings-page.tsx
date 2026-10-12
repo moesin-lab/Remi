@@ -6,7 +6,6 @@ import {
   SlidersHorizontal,
   Key,
   Settings,
-  Users,
   FlaskConical,
   Bell,
   Waypoints,
@@ -24,7 +23,6 @@ import { AccountTab } from "./account-tab";
 import { PreferencesTab } from "./preferences-tab";
 import { TokensTab } from "./tokens-tab";
 import { WorkspaceTab } from "./workspace-tab";
-import { MembersTab } from "./members-tab";
 import { SourceControlTab } from "./source-control-tab";
 import { ModelGatewayTab } from "./model-gateway-tab";
 import { LabsTab } from "./labs-tab";
@@ -49,7 +47,6 @@ const WORKSPACE_TAB_KEYS = [
   "model_gateway",
   "storage_cleanup",
   "labs",
-  "members",
 ] as const;
 const WORKSPACE_TAB_VALUES = {
   general: "workspace",
@@ -58,7 +55,6 @@ const WORKSPACE_TAB_VALUES = {
   model_gateway: "model-gateway",
   storage_cleanup: "storage-cleanup",
   labs: "labs",
-  members: "members",
 } as const;
 const WORKSPACE_TAB_ICONS = {
   general: Settings,
@@ -67,7 +63,6 @@ const WORKSPACE_TAB_ICONS = {
   model_gateway: Waypoints,
   storage_cleanup: Archive,
   labs: FlaskConical,
-  members: Users,
 } as const;
 
 const DEFAULT_TAB = "profile";
@@ -78,6 +73,7 @@ const TAB_QUERY_KEY = "tab";
 // dead TabsContent entry. IM bookmarks are redirected at the route boundary.
 const LEGACY_WORKSPACE_TAB_REDIRECTS: Record<string, string> = {
   repositories: "workspace",
+  members: "workspace",
 };
 
 export interface ExtraSettingsTab {
@@ -207,7 +203,6 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
           <TabsContent value="model-gateway"><ModelGatewayTab /></TabsContent>
           <TabsContent value="storage-cleanup"><StorageCleanupTab /></TabsContent>
           <TabsContent value="labs"><LabsTab /></TabsContent>
-          <TabsContent value="members"><MembersTab /></TabsContent>
           {showPlatformTab && <TabsContent value="platform"><PlatformTab /></TabsContent>}
           {extraAccountTabs?.map((tab) => (
             <TabsContent key={tab.value} value={tab.value}>{tab.content}</TabsContent>

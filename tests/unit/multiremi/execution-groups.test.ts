@@ -55,7 +55,7 @@ describe("Execution groups", () => {
     expect(store.getExecutionGroup("shared")?.runtimeIds).toEqual([runtime.id]);
   });
 
-  it("supports multiple groups on the same Runtime without weakening owner or workspace checks", () => {
+  it("supports multiple groups and historical owners on the same Runtime while enforcing workspace checks", () => {
     const store = createStore();
     const runtime = store.registerRuntime({ name: "Private", provider: "codex", ownerId: "alice" });
     group(store, "one", [runtime.id]);
@@ -63,7 +63,7 @@ describe("Execution groups", () => {
     for (const id of ["one", "two"]) {
       const agent = store.createAgent({ name: id, provider: "codex", ownerId: "alice", executionGroupId: id });
       expect(store.runtimeCanRunAgent(runtime, agent)).toBe(true);
-      expect(store.runtimeCanRunAgent(runtime, { ...agent, ownerId: "bob" })).toBe(false);
+      expect(store.runtimeCanRunAgent(runtime, { ...agent, ownerId: "bob" })).toBe(true);
       expect(store.runtimeCanRunAgent(runtime, { ...agent, workspaceId: "foreign" })).toBe(false);
     }
     const direct = store.createAgent({ name: "Direct", provider: "codex", ownerId: "alice", runtimeId: runtime.id });

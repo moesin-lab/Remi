@@ -91,7 +91,7 @@ describe("ChatRepo", () => {
   });
 
   for (const outcome of ["completed", "failed"] as const) {
-    it(`routes the ${outcome} reply to the creator's member inbox`, () => {
+    it(`routes the ${outcome} reply to the shared operator inbox while retaining its Chat creator`, () => {
       const repo = createRepo();
       const user = store!.getOrCreateUser({ name: "Chat creator", email: "creator@example.test" });
       const member = store!.createWorkspaceMember({ name: user.name, userId: user.id });
@@ -105,9 +105,11 @@ describe("ChatRepo", () => {
       else store!.failTask(sent.task.id, { error: "Failure", failureReason: "unknown" });
 
       const reply = store!.listMessages(chat.id).find(message => message.sender_type === "agent")!;
-      expect(reply).toMatchObject({ to_type: "member", to_ref: member.id, to_member_id: member.id, wake_applied: "inbox_only" });
+      const operator = store!.getWorkspaceOperator("local")!;
+      expect(reply).toMatchObject({ to_type: "member", to_ref: operator.id, to_member_id: operator.id, wake_applied: "inbox_only" });
       expect(store!.listMessageInbox(member.id, "local").items.some(item => item.session_id === chat.id)).toBe(true);
-      expect(store!.listMessageInbox("mem_local_local", "local").items.some(item => item.session_id === chat.id)).toBe(false);
+      expect(store!.listMessageInbox(operator.id, "local").items.some(item => item.session_id === chat.id)).toBe(true);
+      expect(repo.getChatSession(chat.id)?.creatorId).toBe(user.id);
       expect(repo.getChatSession(chat.id)).toMatchObject({ hasUnread: true, unreadCount: 1 });
       store!.readMessageInbox(member.id, chat.id, store!.getMessage(sent.message.id)!.seq);
       expect(repo.getChatSession(chat.id)?.hasUnread).toBe(true);

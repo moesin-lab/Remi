@@ -1,5 +1,5 @@
 {
-  "dataSchema": "b8060068bbf53245c304fcc6575815fd817078eab1f1aea8ab3ef1bc155b064d",
+  "dataSchema": "9739569633c62bd9d616f01e21385cee2be2e76c28d0120d2bc1440050f0dc18",
   "rollbackSafeFrom": [],
-  "reason": "The unified message, turn and lane model changes the storage contract. Bot menu publication records additionally persist bot_id so commands remain scoped to their intended bot. No earlier schema fingerprint is attested for code-only rollback. Existing legacy deployments require the controlled cutover in docs/deploy/unified-model-cutover.md; publishing this bundle does not authorize a production migration. Same-schema updates still require backup verification and target/previous migration rehearsal."
+  "reason": "The unified message, turn and lane model changes the storage contract. Shared workspace operators add workspace/session read cursors and migrate active human Question routes while preserving historical receipts and completed audit records. No earlier schema fingerprint is attested for code-only rollback. Existing legacy deployments require the controlled cutover in docs/deploy/unified-model-cutover.md; publishing this bundle does not authorize a production migration. Same-schema updates still require backup verification and target/previous migration rehearsal."
 }

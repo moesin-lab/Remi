@@ -3,6 +3,16 @@ import type { CommandSpec } from "./command-registry.js";
 
 /** Single inventory for dispatch, manifests, documentation guards and data rewrites. */
 const retiredCommands: Record<string, string> = {
+  "member create": "remi workspace operator (all operators share one identity)",
+  "member delete": "remi workspace operator (all operators share one identity)",
+  "workspace leave": "remi workspace list (workspaces are shared)",
+  "invite": "remi workspace list (workspace invitations are no longer needed)",
+  "invite list": "remi workspace list",
+  "invite get": "remi workspace list",
+  "invite create": "remi workspace list",
+  "invite accept": "remi workspace list",
+  "invite decline": "remi workspace list",
+  "invite revoke": "remi workspace list",
   "task create": "remi message send --to <agent> --kind request",
   "task continue": "remi message send --to <agent> --kind request",
   "session task create": "remi message send <conversation> --to <agent> --kind request",

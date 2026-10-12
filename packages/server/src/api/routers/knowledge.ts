@@ -40,7 +40,7 @@ import { resolveTaskRepositoryWikiRepositories } from "@multiremi/repository-wik
 import { autopilotRunTriggerSummary } from "../wire/autopilots.js";
 import { createId } from "@multiremi/ids.js";
 import { assertRepositoryWikiPathChangesReadable, REPOSITORY_WIKI_BATCH_LIMIT, RepositoryWikiLogHistoryError, RepositoryWikiLogRepairConflictError, RepositoryWikiLogRepairInputError, RepositoryWikiUnavailableError, RepositoryWikiRestoreConflictError, RepositoryWikiRestoreInputError, type RepositoryWikiRestoreTarget, type RepositoryWikiRestoreResult } from "@multiremi/repository-wiki/service.js";
-import { authenticatedRequestUserId } from "../wire/index.js";
+import { currentRequestUserId } from "../wire/index.js";
 import { RepositoryWikiOutcomeConflictError } from "@multiremi/store/repos/knowledge-repo.js";
 import type { RepositoryWikiOutcomeStatus } from "@multiremi/store/repository-wiki-outcome.js";
 import { resolveProjectWikiRef, tokenizeWikiLinks } from "@multiremi/contracts/wiki-links";
@@ -147,7 +147,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: RouterDeps): void {
       const options = {
         expectedVersion: body.expected_version,
         updatedByType: actor.kind,
-        updatedById: actor.agent?.id ?? authenticatedRequestUserId(c),
+        updatedById: actor.agent?.id ?? currentRequestUserId(c),
       };
       const ref = required(kind === "move" ? body.ref : body.target, kind === "move" ? "ref" : "target");
       if (kind === "merge" && (!Array.isArray(body.sources) || !body.sources.length || body.sources.some(ref => typeof ref !== "string" || !ref.trim()))) {
@@ -199,7 +199,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: RouterDeps): void {
       }
       const dryRun = body.dry_run !== false;
       audit = { operation: "repository_wiki_restore", dry_run: dryRun, targets: body.targets,
-        actor: { kind: actor.kind, user_id: authenticatedRequestUserId(c),
+        actor: { kind: actor.kind, user_id: currentRequestUserId(c),
           task_id: actor.task?.id ?? null, agent_id: actor.agent?.id ?? null } };
       runId = createFormalWriteRun({ store, actor, workspaceId, repositoryId, scope: "repository_wiki" }).id;
       store.completeKnowledgeCompilationRun(runId, "validating", JSON.stringify(audit));
@@ -256,7 +256,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: RouterDeps): void {
         expected_body_sha256: expectedBodySha256,
         actor: {
           kind: actor.kind,
-          user_id: authenticatedRequestUserId(c),
+          user_id: currentRequestUserId(c),
           task_id: actor.task?.id ?? null,
           agent_id: actor.agent?.id ?? null,
         },
@@ -269,7 +269,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: RouterDeps): void {
         expectedBodySha256,
         reason,
         updatedByType: actor.kind,
-        updatedById: actor.agent?.id ?? authenticatedRequestUserId(c),
+        updatedById: actor.agent?.id ?? currentRequestUserId(c),
         sourceRevision: `repository_wiki_log_repair:${runId}`,
       });
       store.linkKnowledgeFormalVersion({

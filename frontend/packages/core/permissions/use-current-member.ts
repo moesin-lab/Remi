@@ -1,14 +1,11 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { useAuthStore } from "../auth";
+import { useWorkspaceOperator } from "../workspace/operator";
 import type { MemberRole, MemberWithUser } from "../types";
-import { memberListOptions } from "../workspace/queries";
 
 /**
- * Resolves the current user's membership in the given workspace. Single source
- * of truth for "what role am I" — replaces ad-hoc `members.find(...)` lookups
- * scattered across the views.
+ * Resolves the shared workspace operator. The authenticated account is only
+ * the platform access credential; it does not select an in-workspace actor.
  *
  * `wsId` is explicit (not via `useWorkspaceId()` Context) so this hook stays
  * usable in components that may render before workspace context is wired,
@@ -20,9 +17,7 @@ export function useCurrentMember(wsId: string): {
   member: MemberWithUser | null;
   isLoading: boolean;
 } {
-  const userId = useAuthStore((s) => s.user?.id ?? null);
-  const { data: members, isLoading } = useQuery(memberListOptions(wsId));
-  const member = members?.find((m) => m.user_id === userId) ?? null;
+  const { userId, operator: member, isLoading } = useWorkspaceOperator(wsId);
   return {
     userId,
     role: member?.role ?? null,

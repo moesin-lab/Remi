@@ -1,5 +1,7 @@
 "use client";
 
+import { WORKSPACE_OPERATOR_USER_ID } from "@multiremi/core/workspace/operator";
+
 import { useMemo, useState } from "react";
 import {
   AlertCircle,
@@ -17,7 +19,6 @@ import type {
 } from "@multiremi/core/types";
 import { useQuery } from "@tanstack/react-query";
 import { getCoreRowModel, useReactTable } from "@tanstack/react-table";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import {
@@ -48,7 +49,7 @@ import { useT } from "../../i18n";
 
 type FilterKey = "all" | "used" | "unused" | "mine";
 
-const SCOPE_KEYS: FilterKey[] = ["all", "used", "unused", "mine"];
+const SCOPE_KEYS: FilterKey[] = ["all", "used", "unused"];
 
 // ---------------------------------------------------------------------------
 // Page header bar — uses shared PageHeader so the mobile sidebar trigger and
@@ -179,7 +180,7 @@ export default function SkillsPage() {
   const wsId = useWorkspaceId();
   const paths = useWorkspacePaths();
   const navigation = useNavigation();
-  const currentUserId = useAuthStore((s) => s.user?.id ?? null);
+  const currentUserId = WORKSPACE_OPERATOR_USER_ID;
 
   const {
     data: skills = [],
@@ -249,7 +250,6 @@ export default function SkillsPage() {
       }
       if (filter === "used" && !byAssignment(s)) return false;
       if (filter === "unused" && byAssignment(s)) return false;
-      if (filter === "mine" && s.created_by !== currentUserId) return false;
       return true;
     });
   }, [skills, assignments, search, filter, currentUserId]);

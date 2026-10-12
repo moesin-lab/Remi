@@ -16,7 +16,7 @@ const workspaceRef = vi.hoisted(() => ({
   },
 }));
 const membersRef = vi.hoisted(() => ({
-  current: [{ user_id: "user-1", role: "owner" as const }],
+  current: [{ user_id: "local", role: "owner" as const }],
 }));
 
 vi.mock("@tanstack/react-query", () => ({
@@ -77,7 +77,7 @@ describe("RepositoriesTab — view/edit toggle", () => {
       slug: "test-workspace",
       repos: [{ url: "https://github.com/multimira-ai/multimira" }],
     };
-    membersRef.current = [{ user_id: "user-1", role: "owner" }];
+    membersRef.current = [{ user_id: "local", role: "owner" }];
   });
 
   it("renders persisted repos in display mode (no input)", () => {

@@ -420,7 +420,7 @@ describe("persisted inherited context diagnostics", () => {
     expect((await response.json()).diagnostics).toEqual(expected);
   });
 
-  it("requires authentication and hides other workspaces from both member and task tokens", async () => {
+  it("authenticates shared human reads while hiding other workspaces from task tokens", async () => {
     const { store, issue, side, task, app } = fixture();
     const privateWorkspace = store.createWorkspace({ name: "Private", slug: "private", issuePrefix: "PRI" });
     const privateIssue = createResponsibleTestIssue(store, { title: "Hidden issue", workspaceId: privateWorkspace.id });
@@ -433,9 +433,9 @@ describe("persisted inherited context diagnostics", () => {
     for (const token of [memberToken.token, taskToken.token]) {
       const asReader = { Authorization: `Bearer ${token}` };
       expect((await app.request(`/api/sessions/${side.id}/inherited-context`, { headers: asReader })).status).toBe(200);
-      const denied = await app.request(`/api/sessions/${privateSide.id}/inherited-context`, { headers: asReader });
-      expect(denied.status).toBe(404);
-      expect(await denied.text()).not.toContain("Hidden");
+      const otherWorkspace = await app.request(`/api/sessions/${privateSide.id}/inherited-context`, { headers: asReader });
+      expect(otherWorkspace.status).toBe(token === memberToken.token ? 200 : 404);
+      if (token === taskToken.token) expect(await otherWorkspace.text()).not.toContain("Hidden");
     }
     expect((await app.request("/api/sessions/ises_missing/inherited-context", { headers })).status).toBe(404);
   });

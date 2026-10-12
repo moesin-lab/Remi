@@ -45,9 +45,10 @@ describe("WorkspacesEndpoints bot menu", () => {
   it("updates and dry-runs a bot menu through encoded workspace paths", async () => {
     const menu = { default: [{ name: "Status", behaviors: [{ type: "send_message" as const }] }] };
     const responses = [
-      { workspace_id: "ws/1", bot_menu: menu },
+      { workspace_id: "ws/1", bot_id: "bot/2", legacy_target_count: 0, bot_menu: menu },
       {
         id: "bmp_1",
+        bot_id: "bot/2",
         workspace_id: "ws/1",
         dry_run: true,
         status: "pending",
@@ -63,21 +64,20 @@ describe("WorkspacesEndpoints bot menu", () => {
     vi.stubGlobal("fetch", fetchMock);
     const endpoints = new WorkspacesEndpoints(new HttpClient("https://api.example.test"));
 
-    await expect(endpoints.updateBotMenu("ws/1", menu)).resolves.toEqual(responses[0]);
-    await expect(endpoints.publishBotMenu("ws/1", true)).resolves.toEqual(responses[1]);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.example.test/api/workspaces/ws%2F1/bot-menu");
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://api.example.test/api/workspaces/ws%2F1/bot-menu/publish");
+    await expect(endpoints.updateBotMenu("ws/1", menu, "bot/2")).resolves.toEqual(responses[0]);
+    await expect(endpoints.publishBotMenu("ws/1", true, "bot/2")).resolves.toEqual(responses[1]);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.example.test/api/workspaces/ws%2F1/bot-menu?bot_id=bot%2F2");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://api.example.test/api/workspaces/ws%2F1/bot-menu/publish?bot_id=bot%2F2");
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ dry_run: true });
   });
 
-  it("fails closed to an unusable response when publish status is malformed", async () => {
+  it("rejects malformed publish responses instead of reporting success", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ id: null, status: "done" })));
     const endpoints = new WorkspacesEndpoints(new HttpClient("https://api.example.test"));
 
-    await expect(endpoints.getBotMenuPublish("ws-1", "request-1")).resolves.toMatchObject({
-      id: "",
-      status: "failed",
-      error: "Invalid server response",
-    });
+    await expect(endpoints.getBotMenuPublish("ws-1", "request-1")).rejects.toThrow();
+    await expect(endpoints.publishBotMenu("ws-1", true)).rejects.toThrow();
+    await expect(endpoints.updateBotMenu("ws-1", { default: [] })).rejects.toThrow();
+    await expect(endpoints.getBotMenu("ws-1")).rejects.toThrow();
   });
 });

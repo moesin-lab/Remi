@@ -9,12 +9,10 @@ import type {
   BotMenuPublishResponse,
 } from "../../types";
 import type { HttpClient } from "../http";
-import { parseWithFallback } from "../schema";
+import { parseWithFallback, parseStrictResponse } from "../schema";
 import {
   EMPTY_PLATFORM_PROMPT_TEMPLATE,
   EMPTY_WORKSPACE_ENV,
-  EMPTY_BOT_MENU_PUBLISH_RESPONSE,
-  EMPTY_BOT_MENU_RESPONSE,
   BotMenuPublishResponseSchema,
   BotMenuResponseSchema,
   PlatformPromptTemplatePreviewSchema,
@@ -62,40 +60,28 @@ export class WorkspacesEndpoints {
     });
   }
 
-  async getBotMenu(workspaceId: string): Promise<BotMenuResponse> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${encodeURIComponent(workspaceId)}/bot-menu`);
-    return parseWithFallback(raw, BotMenuResponseSchema, EMPTY_BOT_MENU_RESPONSE, {
-      endpoint: "GET /api/workspaces/:id/bot-menu",
-    }) as BotMenuResponse;
+  async getBotMenu(workspaceId: string, botId = "default"): Promise<BotMenuResponse> {
+    const raw = await this.http.fetch<unknown>(botMenuPath(workspaceId, botId));
+    return parseStrictResponse(raw, BotMenuResponseSchema, { endpoint: "GET /api/workspaces/:id/bot-menu" });
   }
 
-  async updateBotMenu(workspaceId: string, botMenu: BotMenuConfig): Promise<BotMenuResponse> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${encodeURIComponent(workspaceId)}/bot-menu`, {
-      method: "PUT",
-      body: JSON.stringify({ bot_menu: botMenu }),
+  async updateBotMenu(workspaceId: string, botMenu: BotMenuConfig, botId = "default"): Promise<BotMenuResponse> {
+    const raw = await this.http.fetch<unknown>(botMenuPath(workspaceId, botId), {
+      method: "PUT", body: JSON.stringify({ bot_menu: botMenu }),
     });
-    return parseWithFallback(raw, BotMenuResponseSchema, EMPTY_BOT_MENU_RESPONSE, {
-      endpoint: "PUT /api/workspaces/:id/bot-menu",
-    }) as BotMenuResponse;
+    return parseStrictResponse(raw, BotMenuResponseSchema, { endpoint: "PUT /api/workspaces/:id/bot-menu" });
   }
 
-  async publishBotMenu(workspaceId: string, dryRun: boolean): Promise<BotMenuPublishResponse> {
-    const raw = await this.http.fetch<unknown>(`/api/workspaces/${encodeURIComponent(workspaceId)}/bot-menu/publish`, {
-      method: "POST",
-      body: JSON.stringify({ dry_run: dryRun }),
+  async publishBotMenu(workspaceId: string, dryRun: boolean, botId = "default"): Promise<BotMenuPublishResponse> {
+    const raw = await this.http.fetch<unknown>(botMenuPath(workspaceId, botId, "/publish"), {
+      method: "POST", body: JSON.stringify({ dry_run: dryRun }),
     });
-    return parseWithFallback(raw, BotMenuPublishResponseSchema, EMPTY_BOT_MENU_PUBLISH_RESPONSE, {
-      endpoint: "POST /api/workspaces/:id/bot-menu/publish",
-    }) as BotMenuPublishResponse;
+    return parseStrictResponse(raw, BotMenuPublishResponseSchema, { endpoint: "POST /api/workspaces/:id/bot-menu/publish" });
   }
 
-  async getBotMenuPublish(workspaceId: string, requestId: string): Promise<BotMenuPublishResponse> {
-    const raw = await this.http.fetch<unknown>(
-      `/api/workspaces/${encodeURIComponent(workspaceId)}/bot-menu/publish/${encodeURIComponent(requestId)}`,
-    );
-    return parseWithFallback(raw, BotMenuPublishResponseSchema, EMPTY_BOT_MENU_PUBLISH_RESPONSE, {
-      endpoint: "GET /api/workspaces/:id/bot-menu/publish/:requestId",
-    }) as BotMenuPublishResponse;
+  async getBotMenuPublish(workspaceId: string, requestId: string, botId = "default"): Promise<BotMenuPublishResponse> {
+    const raw = await this.http.fetch<unknown>(botMenuPath(workspaceId, botId, `/publish/${encodeURIComponent(requestId)}`));
+    return parseStrictResponse(raw, BotMenuPublishResponseSchema, { endpoint: "GET /api/workspaces/:id/bot-menu/publish/:requestId" });
   }
 
   async getWorkspacePromptTemplate(workspaceId: string): Promise<PlatformPromptTemplatePreview> {
@@ -136,4 +122,8 @@ export class WorkspacesEndpoints {
       method: "DELETE",
     });
   }
+}
+
+function botMenuPath(workspaceId: string, botId: string, suffix = ""): string {
+  return `/api/workspaces/${encodeURIComponent(workspaceId)}/bot-menu${suffix}?bot_id=${encodeURIComponent(botId)}`;
 }

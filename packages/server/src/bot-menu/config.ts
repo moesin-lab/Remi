@@ -9,7 +9,6 @@ import type {
   MultiremiUser,
   MultiremiWorkspaceMember,
   ResolvedBotMenuConfig,
-  ResolvedBotMenuUserConfig,
 } from "@multiremi/contracts/types.js";
 
 const USER_ID_TYPES = new Set<BotMenuUserIdType>(["open_id", "union_id", "user_id"]);
@@ -36,62 +35,75 @@ export function parseBotMenuConfig(value: unknown): BotMenuConfig {
   return config;
 }
 
-export function readWorkspaceBotMenu(settings: Record<string, unknown>): BotMenuConfig {
-  return settings.botMenu === undefined ? {} : parseBotMenuConfig(settings.botMenu);
+/** The original workspace menu belongs only to the default bot. */
+export function readWorkspaceBotMenu(settings: Record<string, unknown>, botId = "default"): BotMenuConfig {
+  const menus = isRecord(settings.feishuBotMenus) ? settings.feishuBotMenus : {};
+  const value = botId === "default" ? settings.botMenu
+    : Object.hasOwn(menus, botId) ? menus[botId] : undefined;
+  return value === undefined ? {} : parseBotMenuConfig(value);
 }
 
+export function parseUnifiedBotMenuConfig(value: unknown): BotMenuConfig {
+  const config = parseBotMenuConfig(value);
+  if (config.users?.length) {
+    throw new BotMenuConfigError("personalized menus are retired; configure one menu per bot");
+  }
+  return { default: config.default ?? [] };
+}
+
+export function botMenuView(settings: Record<string, unknown>, botId = "default") {
+  const config = readWorkspaceBotMenu(settings, botId);
+  return {
+    bot_menu: { default: config.default ?? [] },
+    legacy_target_count: config.users?.length ?? 0,
+  };
+}
+
+export function writeWorkspaceBotMenu(
+  settings: Record<string, unknown>, botId: string, menu: BotMenuConfig,
+): Record<string, unknown> {
+  // Keep retired targets as a cleanup record. They are never published as menus.
+  const previous = readWorkspaceBotMenu(settings, botId);
+  const next = { ...menu, ...(previous.users?.length ? { users: previous.users } : {}) };
+  if (botId === "default") return { ...settings, botMenu: next };
+  const menus = isRecord(settings.feishuBotMenus) ? settings.feishuBotMenus : {};
+  return { ...settings, feishuBotMenus: { ...menus, [botId]: next } };
+}
+
+/** Resolve historical identities only to remove their old personalized menus.
+ * Missing/deleted members never block the bot's shared menu. */
 export function resolveBotMenuConfig(
   config: BotMenuConfig,
   workspaceId: string,
   members: readonly MultiremiWorkspaceMember[],
   getUser: (userId: string) => MultiremiUser | null,
 ): ResolvedBotMenuConfig {
-  const resolved = new Map<string, ResolvedBotMenuUserConfig>();
-  const audiences = config.users ?? [];
-
-  // Role targets establish the broad policy first. Explicit member/external
-  // targets are always more specific and replace a role-derived entry.
-  for (const audience of audiences) {
-    if (audience.target.type !== "role") continue;
-    const role = audience.target.role;
-    const matching = members.filter((member) =>
-      member.workspaceId === workspaceId
-      && !member.archivedAt
-      && member.role === role
-    );
-    for (const member of matching) {
-      if (!member.userId) continue;
-      const externalId = cleanString(getUser(member.userId)?.externalId);
-      if (!externalId) continue;
-      resolved.set(`open_id:${externalId}`, resolvedUser(externalId, "open_id", audience));
-    }
-  }
-
-  for (const audience of audiences) {
+  const targets = new Map<string, { userId: string; userIdType: BotMenuUserIdType }>();
+  let unresolved = 0;
+  const add = (userId: string, userIdType: BotMenuUserIdType) => {
+    targets.set(`${userIdType}:${userId}`, { userId, userIdType });
+  };
+  for (const audience of config.users ?? []) {
     const target = audience.target;
-    if (target.type === "role") continue;
     if (target.type === "external") {
-      resolved.set(
-        `${target.userIdType}:${target.userId}`,
-        resolvedUser(target.userId, target.userIdType, audience),
-      );
+      add(target.userId, target.userIdType);
       continue;
     }
-    const member = members.find((candidate) =>
-      candidate.id === target.memberId
-      && candidate.workspaceId === workspaceId
-      && !candidate.archivedAt
-    );
-    if (!member) throw new BotMenuConfigError(`menu member is not active in this workspace: ${target.memberId}`);
-    if (!member.userId) throw new BotMenuConfigError(`menu member has no linked user: ${target.memberId}`);
-    const externalId = cleanString(getUser(member.userId)?.externalId);
-    if (!externalId) throw new BotMenuConfigError(`menu member has no Feishu identity: ${target.memberId}`);
-    resolved.set(`open_id:${externalId}`, resolvedUser(externalId, "open_id", audience));
+    // A former role recipient may now have a different role or be archived.
+    // Every known workspace identity should receive the same bot menu now.
+    const matching = members.filter(member => member.workspaceId === workspaceId
+      && (target.type === "role" || member.id === target.memberId));
+    if (!matching.length) unresolved += 1;
+    for (const member of matching) {
+      const externalId = member.userId ? cleanString(getUser(member.userId)?.externalId) : null;
+      if (externalId) add(externalId, "open_id");
+      else unresolved += 1;
+    }
   }
-
   return {
-    ...(config.default ? { default: config.default } : {}),
-    ...(resolved.size ? { users: [...resolved.values()] } : {}),
+    default: config.default ?? [],
+    ...(targets.size ? { clearUsers: [...targets.values()] } : {}),
+    ...(unresolved ? { unresolvedLegacyTargetCount: unresolved } : {}),
   };
 }
 
@@ -196,19 +208,6 @@ function parseStringMap(value: unknown): Record<string, string> | undefined {
     .map(([key, entry]) => [key.trim(), cleanString(entry)] as const)
     .filter((entry): entry is readonly [string, string] => Boolean(entry[0] && entry[1]));
   return entries.length ? Object.fromEntries(entries) : undefined;
-}
-
-function resolvedUser(
-  userId: string,
-  userIdType: BotMenuUserIdType,
-  audience: BotMenuUserConfig,
-): ResolvedBotMenuUserConfig {
-  return {
-    userId,
-    userIdType,
-    ...(audience.label ? { label: audience.label } : {}),
-    items: audience.items,
-  };
 }
 
 function cleanString(value: unknown): string | null {

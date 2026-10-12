@@ -379,6 +379,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       drain_ack_generation?: number;
       active_task_count?: number;
       supports_bot_menu?: boolean;
+      bot_menu_protocol?: number;
       feishu_concierge_protocol?: number;
       feishu_decision_card?: number;
       feishu_issue_decision_card?: number;
@@ -415,6 +416,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       supportsSkillDirectory: body.supports_skill_directory === true,
       agentPluginProtocol: reportsAgentPluginProtocol ? body.agent_plugin_protocol : undefined,
       supportsBotMenu: body.supports_bot_menu,
+      botMenuProtocol: Number.isSafeInteger(body.bot_menu_protocol) ? body.bot_menu_protocol : 0,
       supportsFeishuBotConfig,
       supportsDecisionCard: normalizeDaemonProtocolVersion(body.feishu_decision_card)
         >= FEISHU_DECISION_CARD_PROTOCOL_VERSION,

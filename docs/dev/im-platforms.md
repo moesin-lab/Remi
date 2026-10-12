@@ -34,7 +34,7 @@ Remi 的 Agent/Runtime 绑定、Issue 话题、持久 outbox 和独立的 Messag
 
 同一 Runtime 更换应用时也先等待旧连接器确认停止，再启动新应用；连续编辑期间持续保留最初仍在运行的应用占用。停止后立即部署同样需要完成停止确认。
 
-本阶段工作区菜单、旧 Agent Bot 绑定和自动 Issue 话题设置仍由默认机器人使用，只在默认机器人的页面显示。多个企业及同一企业的多套应用可分别添加机器人；企业分组、平台实例及单 Runtime 多机器人并发尚未实现。
+每个机器人独立配置一套统一菜单，不再按工作区成员、角色或外部账号编辑定向菜单。旧 Agent Bot 绑定和自动 Issue 话题设置仍由默认机器人使用，只在默认机器人的页面显示。多个企业及同一企业的多套应用可分别添加机器人；企业分组、平台实例及单 Runtime 多机器人并发尚未实现。
 
 ## 实现归属与扩展
 
@@ -46,6 +46,14 @@ Remi 的 Agent/Runtime 绑定、Issue 话题、持久 outbox 和独立的 Messag
 - 页面切换只挂载当前能力，切换工作区会重建表单与选择。消息记录不请求连接健康；普通成员不请求连接/消息源配置、机器人状态/候选设备/路由/发送者等管理员接口。管理员配置失败不会降级为空配置表单。
 
 机器人集合使用 `GET/POST /api/workspaces/:id/feishu-bots`；已有 `/feishu-bot` 子资源通过 `?bot_id=<id>` 指定机器人，省略时仍操作原默认机器人。未知 ID 返回 404，不回退到默认配置。[CLI 命令映射](../cli-command-migration.md#im-platform-management)保留真实可执行的 `workspace`、`messaging` 与 `lark` 命令；传输行为见[飞书接入契约](../feishu-message-ingestion.md)。
+
+## 机器人菜单
+
+菜单读写、发布和发布状态 API 为 `/api/workspaces/:id/bot-menu` 及其子路径，全部接受 `?bot_id=<id>`；省略时选择 `default`。响应包含 `bot_id`，发布记录按工作区及机器人校验，未知机器人不会继承默认菜单。前端草稿和 Query key 同时按两种身份隔离，切换机器人丢弃未保存草稿。CLI 的四个 `workspace bot-menu` 命令使用同一个 `--bot` 选项。
+
+默认机器人的既有 `settings.botMenu.default` 保留原位，其他机器人的菜单存于 `settings.feishuBotMenus[bot_id]`。菜单修改在工作区生命周期锁内读取并合并最新设置，避免两个机器人的并发保存互相覆盖。新写入仅支持 `default` 菜单项（空数组表示清空），非空 `users` 返回校验错误。历史 `users` 保留作为清理记录，读取响应只暴露统一菜单及 `legacy_target_count`；发布不会重新下发历史定向内容。服务端尽可能将旧成员、角色及外部账号解析为清理目标，Runtime 发布统一菜单后删除这些账号的个性化菜单。找不到身份不阻止发布，结果的 `unresolvedLegacyTargetCount` 提示需要在飞书侧确认；历史上已经丢失的账号映射无法自动还原。
+
+发布必须由该机器人绑定且在线的 Runtime 执行，要求 `bot_menu_protocol >= 2`。请求固定机器人、应用、域名及配置修订；下发前再次核对绑定，连接器调用前校验正在运行的身份。配置变更后的排队请求失败并允许重新发布。旧 Runtime 可继续运行机器人，发布菜单前需升级 Runtime。保存和试运行均不修改飞书；真实发布才调用菜单接口，清理失败作为发布失败报告。旧发布请求仍可读取，但新连接器拒绝没有身份范围的旧请求。
 
 ## 旧地址
 
@@ -59,7 +67,7 @@ Remi 的 Agent/Runtime 绑定、Issue 话题、持久 outbox 和独立的 Messag
 
 ## 验证入口
 
-`bun run smoke:im` 使用独立 Next、真实 HTTP API 和临时 SQLite，通过 Chromium 验证侧栏、各页面保存、复数机器人新增/切换/删除与权限隔离、凭据保留、URL/刷新、工作区隔离、成员权限、错误重试及移动端。
+`bun run smoke:im` 使用独立 Next、真实 HTTP API 和临时 SQLite，通过 Chromium 验证侧栏、各页面保存、复数机器人新增/切换/删除与权限隔离、独立菜单保存/刷新/试运行与草稿切换、凭据保留、URL/刷新、工作区隔离、成员权限、错误重试及移动端。
 飞书外部传输由测试 Provider 模拟，不读取个人配置、不启动 Agent、不发送真实飞书消息；因此它不证明真实飞书授权或出站投递。
 输出目录包含检查结果 JSON 与桌面/移动截图。端口可通过 `--port=3331` 指定，浏览器可用 `CHROME_EXECUTABLE` 指定，结果目录可用 `IM_SMOKE_ARTIFACTS` 指定。浏览器 worker 使用 Node.js 22.6+，API 使用固定版本 Bun，避免 Windows 的 Bun 浏览器传输兼容性问题。
 `release-build-check.yml` 的 `im-platform-smoke` job 运行同一命令并上传结果，飞书模拟边界与本地相同。

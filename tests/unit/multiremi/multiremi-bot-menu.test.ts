@@ -30,7 +30,6 @@ describe("workspace bot menu API", () => {
     const app = createMultiremiApp({ store, authToken: "MASTER" });
     const botMenu = {
       default: [{ name: "Status", behaviors: [{ type: "send_message" }] }],
-      users: [{ target: { type: "role", role: "admin" }, items: [] }],
     };
 
     const response = await app.request("/api/workspaces/local/bot-menu", {
@@ -60,7 +59,7 @@ describe("workspace bot menu API", () => {
     expect(response.status).toBe(403);
   });
 
-  it("resolves member targets only in the publish request sent to the configured host", async () => {
+  it("retires legacy member menus through the configured host without leaking identities", async () => {
     const store = createLocalStore();
     const linked = store.getOrCreateUser({ externalId: "resolved-open-id", email: "linked@example.test", name: "Linked" });
     const selected = store.createWorkspaceMember({ workspaceId: "local", userId: linked.id, name: "Linked", role: "member" });
@@ -70,7 +69,7 @@ describe("workspace bot menu API", () => {
       provider: "codex",
       workspaceId: "local",
       status: "online",
-      metadata: { feishu_bot_menu: true, feishu_concierge_config_v1: true },
+      metadata: { feishu_bot_menu: true, feishu_bot_menu_protocol: 2, feishu_concierge_config_v1: true },
     });
     configureConcierge(store, "rt_bot_menu");
     store.updateWorkspace("local", {
@@ -98,13 +97,14 @@ describe("workspace bot menu API", () => {
       dry_run: true,
       config: {
         default: [{ name: "Default", behaviors: [{ type: "send_message" }] }],
-        users: [{ userId: "resolved-open-id", userIdType: "open_id", items: [{ name: "Private", behaviors: [{ type: "send_message" }] }] }],
+        clearUsers: [{ userId: "resolved-open-id", userIdType: "open_id" }],
+        target: { botId: "default", appId: "cli_a1b2c3d4e5f6g7h8", domain: "feishu", revision: 1 },
       },
     });
 
     store.reportBotMenuPublishResult("rt_bot_menu", publicRequest.id, {
       status: "completed",
-      result: { dryRun: true, defaultPublished: true, userMenuCount: 1 },
+      result: { dryRun: true, defaultPublished: true, userMenuCount: 0, clearedUserMenuCount: 1 },
     });
     const status = await app.request(`/api/workspaces/local/bot-menu/publish/${publicRequest.id}`, { headers: MASTER });
     expect(status.status).toBe(200);
@@ -158,7 +158,7 @@ describe("workspace bot menu API", () => {
       provider: "codex",
       workspaceId: "local",
       status: "online",
-      metadata: { feishu_bot_menu: true, feishu_concierge_config_v1: true },
+      metadata: { feishu_bot_menu: true, feishu_bot_menu_protocol: 2, feishu_concierge_config_v1: true },
     });
     registerPublisher(store, "rt_other", 1_000);
     configureConcierge(store, "rt_concierge");
@@ -196,7 +196,7 @@ describe("workspace bot menu API", () => {
     const heartbeat = await app.request("/api/daemon/heartbeat", {
       method: "POST",
       headers: MASTER,
-      body: JSON.stringify({ runtime_id: "rt_concierge", supports_bot_menu: true }),
+      body: JSON.stringify({ runtime_id: "rt_concierge", supports_bot_menu: true, bot_menu_protocol: 2 }),
     });
     expect(heartbeat.status).toBe(200);
     expect(await heartbeat.json()).not.toHaveProperty("pending_bot_menu");
@@ -204,7 +204,7 @@ describe("workspace bot menu API", () => {
     expect((await receiveRuntimeInputs(store, "rt_concierge")).pending_bot_menu).toEqual({
       id: request.id,
       dry_run: false,
-      config: { default: [{ name: "Default", behaviors: [{ type: "send_message" }] }] },
+      config: { default: [{ name: "Default", behaviors: [{ type: "send_message" }] }], target: { botId: "default", appId: "cli_a1b2c3d4e5f6g7h8", domain: "feishu", revision: 1 } },
     });
     // The claim is irreversible, which is what made the omission fatal rather
     // than merely late: nothing re-queues this for the next heartbeat.
@@ -280,6 +280,95 @@ describe("workspace bot menu API", () => {
     expect(publish.status).toBe(409);
     expect((await publish.json()).error).toContain("Feishu concierge");
   });
+  it("isolates concurrent saves and publish requests for two bots", async () => {
+    const { store, app } = menuScaffold();
+    registerPublisher(store, "rt_first", 0);
+    registerPublisher(store, "rt_second", 0);
+    configureConcierge(store, "rt_first");
+    configureConcierge(store, "rt_second", "second");
+    const empty = await app.request("/api/workspaces/local/bot-menu?bot_id=second", { headers: MASTER });
+    expect((await empty.json()).bot_menu).toEqual({ default: [] });
+    const responses = await Promise.all(["default", "second"].map(botId => app.request(`/api/workspaces/local/bot-menu?bot_id=${botId}`, {
+      method: "PUT", headers: MASTER, body: JSON.stringify({ bot_menu: { default: [{ name: botId }] } }),
+    })));
+    expect(responses.map(response => response.status)).toEqual([200, 200]);
+    for (const botId of ["default", "second"]) {
+      const response = await app.request(`/api/workspaces/local/bot-menu?bot_id=${botId}`, { headers: MASTER });
+      expect(await response.json()).toMatchObject({ bot_id: botId, bot_menu: { default: [{ name: botId }] } });
+    }
+    const publish = await app.request("/api/workspaces/local/bot-menu/publish?bot_id=second", {
+      method: "POST", headers: MASTER, body: JSON.stringify({ dry_run: true }),
+    });
+    expect(publish.status).toBe(202);
+    const request = await publish.json();
+    expect(request.bot_id).toBe("second");
+    expect(store.getBotMenuPublishRequest("rt_first", request.id)).toBeNull();
+    const delivered = await receiveRuntimeInputs(store, "rt_second");
+    expect(delivered.pending_bot_menu?.config).toEqual({
+      default: [{ name: "second" }], target: { botId: "second", appId: "cli_second", domain: "feishu", revision: 1 },
+    });
+    expect((await app.request(`/api/workspaces/local/bot-menu/publish/${request.id}`, { headers: MASTER })).status).toBe(404);
+    expect((await app.request(`/api/workspaces/local/bot-menu/publish/${request.id}?bot_id=second`, { headers: MASTER })).status).toBe(200);
+  });
+
+  it("rejects unknown bots and new audience overrides without changing stored menus", async () => {
+    const { store, app } = menuScaffold();
+    const original = store.getWorkspace("local")!.settings;
+    for (const [method, suffix, body] of [
+      ["GET", "", undefined], ["PUT", "", { bot_menu: { default: [] } }], ["POST", "/publish", { dry_run: true }],
+    ] as const) {
+      const response = await app.request(`/api/workspaces/local/bot-menu${suffix}?bot_id=missing`, {
+        method, headers: MASTER, ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+      expect(response.status).toBe(404);
+    }
+    const response = await app.request("/api/workspaces/local/bot-menu", {
+      method: "PUT", headers: MASTER,
+      body: JSON.stringify({ bot_menu: { users: [{ target: { type: "role", role: "admin" }, items: [] }] } }),
+    });
+    expect(response.status).toBe(400);
+    expect(store.getWorkspace("local")!.settings).toEqual(original);
+  });
+
+  it("requires a scoped publisher and discards work after its bot configuration changes", async () => {
+    const { store, app } = menuScaffold();
+    registerPublisher(store, "rt_concierge", 0);
+    configureConcierge(store, "rt_concierge");
+    store.heartbeatRuntime("rt_concierge", { supportsBotMenu: true });
+    const publish = () => app.request("/api/workspaces/local/bot-menu/publish", {
+      method: "POST", headers: MASTER, body: JSON.stringify({ dry_run: true }),
+    });
+    expect((await publish()).status).toBe(409);
+    store.heartbeatRuntime("rt_concierge", { supportsBotMenu: true, botMenuProtocol: 2 });
+    const response = await publish();
+    expect(response.status).toBe(202);
+    const request = await response.json();
+    const bot = store.getFeishuBotConfig("local")!;
+    store.upsertFeishuBotConfig("local", { agentId: bot.agentId, runtimeId: bot.runtimeId, appId: "cli_replaced", domain: bot.domain, enabled: bot.enabled, appSecretOp: "keep" });
+    expect((await receiveRuntimeInputs(store, "rt_concierge")).pending_bot_menu).toBeUndefined();
+    expect(store.getBotMenuPublishRequest("rt_concierge", request.id)).toMatchObject({ status: "failed", config: {} });
+  });
+
+  it("preserves historical targets only for cleanup and allows unlinked legacy members", async () => {
+    const { store, app } = menuScaffold();
+    registerPublisher(store, "rt_concierge", 0);
+    configureConcierge(store, "rt_concierge");
+    const legacy = { target: { type: "member", memberId: "deleted-member" }, items: [{ name: "Retired" }] };
+    store.updateWorkspace("local", { settings: { botMenu: { default: [], users: [legacy] }, unrelated: true } });
+    const saved = await app.request("/api/workspaces/local/bot-menu", {
+      method: "PUT", headers: MASTER, body: JSON.stringify({ bot_menu: { default: [{ name: "Shared" }] } }),
+    });
+    expect(await saved.json()).toEqual({ workspace_id: "local", bot_id: "default", bot_menu: { default: [{ name: "Shared" }] }, legacy_target_count: 1 });
+    expect(store.getWorkspace("local")!.settings).toMatchObject({ unrelated: true, botMenu: { users: [legacy] } });
+    const published = await app.request("/api/workspaces/local/bot-menu/publish", {
+      method: "POST", headers: MASTER, body: JSON.stringify({ dry_run: true }),
+    });
+    expect(published.status).toBe(202);
+    const config = (await receiveRuntimeInputs(store, "rt_concierge")).pending_bot_menu?.config;
+    expect(config).toMatchObject({ default: [{ name: "Shared" }], unresolvedLegacyTargetCount: 1 });
+    expect(config).not.toHaveProperty("users");
+  });
+
 });
 
 function menuScaffold(): { store: MultiremiStore; app: ReturnType<typeof createMultiremiApp> } {
@@ -307,18 +396,18 @@ function registerPublisher(store: MultiremiStore, id: string, ageMs: number): vo
     provider: "codex",
     workspaceId: "local",
     status: "online",
-    metadata: { feishu_bot_menu: true, feishu_concierge_config_v1: true },
+    metadata: { feishu_bot_menu: true, feishu_bot_menu_protocol: 2, feishu_concierge_config_v1: true },
   });
   const heartbeatAt = new Date(Date.now() - ageMs).toISOString();
   db?.run("UPDATE multiremi_runtimes SET last_heartbeat_at = ? WHERE id = ?", [heartbeatAt, id]);
 }
 
-function configureConcierge(store: MultiremiStore, runtimeId: string): void {
+function configureConcierge(store: MultiremiStore, runtimeId: string, botId = "default"): void {
   const agent = store.createAgent({ name: "Concierge", provider: "codex", workspaceId: "local" });
-  store.upsertFeishuBotConfig("local", {
+  store.feishuBotFor(botId).upsertConfig("local", {
     agentId: agent.id,
     runtimeId,
-    appId: "cli_a1b2c3d4e5f6g7h8",
+    appId: botId === "default" ? "cli_a1b2c3d4e5f6g7h8" : `cli_${botId}`,
     domain: "feishu",
     enabled: true,
     appSecretOp: "set",

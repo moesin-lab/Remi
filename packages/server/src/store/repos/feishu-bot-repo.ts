@@ -843,6 +843,7 @@ export class FeishuBotRepo {
     if (!directive || !directive.config_available) return null;
     return {
       workspace_id: workspaceId,
+      bot_id: this.botId,
       runtime_id: runtimeId,
       agent_id: String(row.agent_id ?? ""),
       revision: Number(row.revision ?? 0),

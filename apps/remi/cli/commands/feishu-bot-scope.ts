@@ -7,6 +7,6 @@ export const FEISHU_BOT_OPTION: CliOptionSpec = {
 
 export function feishuBotPath(path: string, invocation: CommandInvocation): string {
   const bot = stringOption(invocation, "bot");
-  return bot && /\/feishu-bot(?:\/|$|\?)/.test(path)
+  return bot && /\/(?:feishu-bot|bot-menu)(?:\/|$|\?)/.test(path)
     ? `${path}${path.includes("?") ? "&" : "?"}bot_id=${encodeURIComponent(bot)}` : path;
 }

@@ -91,7 +91,7 @@ describe("slash command suggestion items", () => {
   it("returns all active agent skills when query is empty", () => {
     chatState.selectedAgentId = "agent-1";
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "member" }],
       agents: [
         agent({
           id: "agent-1",
@@ -109,7 +109,7 @@ describe("slash command suggestion items", () => {
   it("filters skills by name case-insensitively", () => {
     chatState.selectedAgentId = "agent-1";
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "member" }],
       agents: [
         agent({
           id: "agent-1",
@@ -127,7 +127,7 @@ describe("slash command suggestion items", () => {
   it("filters skills by description", () => {
     chatState.selectedAgentId = "agent-1";
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "member" }],
       agents: [
         agent({
           id: "agent-1",
@@ -145,7 +145,7 @@ describe("slash command suggestion items", () => {
   it("tolerates skills with missing descriptions from cached API data", () => {
     chatState.selectedAgentId = "agent-1";
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "member" }],
       agents: [
         agent({
           id: "agent-1",
@@ -165,7 +165,7 @@ describe("slash command suggestion items", () => {
   it("returns empty when the active agent has no skills", () => {
     chatState.selectedAgentId = "agent-1";
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "member" }],
       agents: [agent({ id: "agent-1", skills: [] })],
     });
 
@@ -175,7 +175,7 @@ describe("slash command suggestion items", () => {
   it("caps results at 20", () => {
     chatState.selectedAgentId = "agent-1";
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "member" }],
       agents: [
         agent({
           id: "agent-1",
@@ -194,7 +194,7 @@ describe("slash command suggestion items", () => {
   it("falls back to the first available agent when selectedAgentId is stale", () => {
     chatState.selectedAgentId = "missing";
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "member" }],
       agents: [
         agent({
           id: "agent-1",
@@ -208,7 +208,7 @@ describe("slash command suggestion items", () => {
 
   it("returns empty when no agents exist", () => {
     const qc = fakeQc({
-      members: [{ user_id: "u1", name: "Alice", role: "member" }],
+      members: [{ user_id: "local", name: "Alice", role: "member" }],
       agents: [],
     });
 
@@ -219,7 +219,7 @@ describe("slash command suggestion items", () => {
     chatState.selectedAgentId = "private-agent";
     const qc = fakeQc({
       members: [
-        { user_id: "u1", name: "Alice", role: "member" },
+        { user_id: "local", name: "Alice", role: "member" },
         { user_id: "u2", name: "Bob", role: "member" },
       ],
       agents: [

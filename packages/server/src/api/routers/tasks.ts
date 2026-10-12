@@ -19,7 +19,7 @@ import {
   supervisorTaskIdentity,
 } from "../helpers.js";
 import {
-  authenticatedRequestUserId,
+  currentRequestUserId,
   cleanString,
   currentTaskAccessToken,
   parseOptionalInt,
@@ -301,7 +301,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     // of the ledger row it becomes) is derived from the credential, never from
     // the body. A run must not be able to record itself as the member that
     // asked for the work; a member must not be able to name another author.
-    const requestingUserId = authenticatedRequestUserId(c);
+    const requestingUserId = currentRequestUserId(c);
     const assignmentAuthor = taskToken?.agentId
       ? { authorType: "agent", authorId: taskToken.agentId }
       : requestingUserId
@@ -417,7 +417,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
         kind: forceAnswer ? "force_answer" : "steer",
         content,
         authorType: currentTaskAccessToken(c) ? "agent" : "user",
-        authorId: authenticatedRequestUserId(c) ?? null,
+        authorId: currentRequestUserId(c) ?? null,
       });
       return c.json({ message }, 201);
     } catch (err) {
@@ -493,7 +493,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const task = taskFromParam(store, c, "id");
     if (!task || denyCurrentUserWorkspaceAccess(c, store, task.workspaceId)
       || !canCurrentUserAccessChatTask(c, store, task)
-      || !canUserViewTaskMessages(store, authenticatedRequestUserId(c), task)) {
+      || !canUserViewTaskMessages(store, currentRequestUserId(c), task)) {
       return c.json({ error: "task not found" }, 404);
     }
     const window = parseTraceWindow(c);
@@ -506,7 +506,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
     if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
-    if (!task.chatSessionId && !canUserViewTaskMessages(store, authenticatedRequestUserId(c), task)) {
+    if (!task.chatSessionId && !canUserViewTaskMessages(store, currentRequestUserId(c), task)) {
       return c.json({ error: "forbidden" }, 403);
     }
     return c.json({ messages: store.listTaskMessages(task.id) });
@@ -517,7 +517,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
     if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
-    if (!task.chatSessionId && !canUserViewTaskMessages(store, authenticatedRequestUserId(c), task)) {
+    if (!task.chatSessionId && !canUserViewTaskMessages(store, currentRequestUserId(c), task)) {
       return c.json({ error: "forbidden" }, 403);
     }
     return c.json({ requests: store.listTaskHumanRequests(task.id) });
@@ -528,7 +528,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
     if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
-    if (!task.chatSessionId && !canUserViewTaskMessages(store, authenticatedRequestUserId(c), task)) {
+    if (!task.chatSessionId && !canUserViewTaskMessages(store, currentRequestUserId(c), task)) {
       return c.json({ error: "forbidden" }, 403);
     }
     const requestId = c.req.param("requestId");
@@ -537,7 +537,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJson<{ response?: Record<string, unknown> }>(c);
     const responded = store.respondTaskHumanRequest(request.id, {
       response: body?.response ?? {},
-      respondedBy: authenticatedRequestUserId(c) ?? store.getCurrentUser()?.id ?? null,
+      respondedBy: currentRequestUserId(c) ?? store.getCurrentUser()?.id ?? null,
     });
     if (!responded) {
       return c.json({ error: "request already resolved", request: store.getTaskHumanRequest(request.id) }, 409);
@@ -554,7 +554,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
     if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
-    if (!task.chatSessionId && !canUserViewTaskMessages(store, authenticatedRequestUserId(c), task)) {
+    if (!task.chatSessionId && !canUserViewTaskMessages(store, currentRequestUserId(c), task)) {
       return c.json({ error: "forbidden" }, 403);
     }
     const since = parseOptionalTaskMessageSince(c.req.query("since_seq") ?? c.req.query("sinceSeq") ?? c.req.query("since"));
@@ -567,7 +567,7 @@ export function registerTaskRoutes(app: Hono, deps: RouterDeps): void {
     const taskDenied = denyCurrentUserWorkspaceAccess(c, store, task.workspaceId);
     if (taskDenied) return taskDenied;
     if (!canCurrentUserAccessChatTask(c, store, task)) return c.json({ error: "forbidden" }, 403);
-    if (!task.chatSessionId && !canUserViewTaskMessages(store, authenticatedRequestUserId(c), task)) {
+    if (!task.chatSessionId && !canUserViewTaskMessages(store, currentRequestUserId(c), task)) {
       return c.json({ error: "forbidden" }, 403);
     }
     const artifact = store.getTaskPrompt(task.id);

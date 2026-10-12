@@ -80,18 +80,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "workspace.leave": {
-      "command": "remi workspace leave",
-      "auth": [
-        "human"
-      ],
-      "capability": "workspace.leave",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
     "workspace.runtime-provision.list": {
       "command": "remi workspace runtime-provision list",
       "auth": [
@@ -717,12 +705,96 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "member.list": {
-      "command": "remi member list",
+    "workspace.operator": {
+      "command": "remi workspace operator",
       "auth": [
         "human"
       ],
-      "capability": "member.list",
+      "capability": "workspace.operator",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.get": {
+      "command": "remi account get",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.update": {
+      "command": "remi account update",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.onboarding.update": {
+      "command": "remi account onboarding update",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.onboarding.complete": {
+      "command": "remi account onboarding complete",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.complete",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.onboarding.cloud-waitlist": {
+      "command": "remi account onboarding cloud-waitlist",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.cloud-waitlist",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.onboarding.runtime-bootstrap": {
+      "command": "remi account onboarding runtime-bootstrap",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.runtime-bootstrap",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "account.onboarding.no-runtime-bootstrap": {
+      "command": "remi account onboarding no-runtime-bootstrap",
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.no-runtime-bootstrap",
       "output": [
         "table",
         "json",
@@ -735,174 +807,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "human"
       ],
       "capability": "member.get",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.create": {
-      "command": "remi member create",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.create",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.update": {
-      "command": "remi member update",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.update",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.delete": {
-      "command": "remi member delete",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.delete",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.onboarding.update": {
-      "command": "remi member onboarding update",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.update",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.onboarding.complete": {
-      "command": "remi member onboarding complete",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.complete",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.onboarding.cloud-waitlist": {
-      "command": "remi member onboarding cloud-waitlist",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.cloud-waitlist",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.onboarding.runtime-bootstrap": {
-      "command": "remi member onboarding runtime-bootstrap",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.runtime-bootstrap",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "member.onboarding.no-runtime-bootstrap": {
-      "command": "remi member onboarding no-runtime-bootstrap",
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.no-runtime-bootstrap",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "invite.list": {
-      "command": "remi invite list",
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "invite.get": {
-      "command": "remi invite get",
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.get",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "invite.create": {
-      "command": "remi invite create",
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.create",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "invite.accept": {
-      "command": "remi invite accept",
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.accept",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "invite.decline": {
-      "command": "remi invite decline",
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.decline",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "invite.revoke": {
-      "command": "remi invite revoke",
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.revoke",
       "output": [
         "table",
         "json",

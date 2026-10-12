@@ -53,7 +53,7 @@ vi.mock("@tanstack/react-query", () => ({
     }
     switch (queryKey[0]) {
       case "members":
-        return { data: [{ id: "member-human", user_id: "user-1", name: "Human", role: "admin" }] };
+        return { data: [{ id: "member-human", user_id: "local", name: "Human", role: "admin" }] };
       case "agents":
         return {
           data: [

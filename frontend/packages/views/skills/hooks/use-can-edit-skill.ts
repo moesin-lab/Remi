@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import type { MemberRole, SkillSummary } from "@multiremi/core/types";
-import { useAuthStore } from "@multiremi/core/auth";
+import { WORKSPACE_OPERATOR_USER_ID } from "@multiremi/core/workspace/operator";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
 
 /**
@@ -21,7 +21,7 @@ export function useCanEditSkill(
   skill: SkillSummary | null | undefined,
   wsId: string,
 ): boolean {
-  const userId = useAuthStore((s) => s.user?.id ?? null);
+  const userId = WORKSPACE_OPERATOR_USER_ID;
   const { data: members = [] } = useQuery(memberListOptions(wsId));
 
   if (!skill) return false;

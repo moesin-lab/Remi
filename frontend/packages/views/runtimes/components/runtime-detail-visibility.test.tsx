@@ -2,7 +2,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import type { AgentRuntime } from "@multiremi/core/types";
 import { I18nProvider } from "@multiremi/core/i18n/react";
 import enCommon from "../../locales/en/common.json";
@@ -56,7 +56,9 @@ vi.mock("@tanstack/react-query", async () => {
   return {
     ...actual,
     useQuery: vi.fn((options: { queryKey?: readonly unknown[] }) =>
-      options.queryKey?.includes("routing")
+      options.queryKey?.includes("members")
+        ? { data: [{ user_id: "local", role: "owner" }], isLoading: false, isError: false }
+        : options.queryKey?.includes("routing")
         ? {
             data: {
               workspace_id: "ws-1",
@@ -195,27 +197,29 @@ function renderDetail(runtime: AgentRuntime) {
 describe("RuntimeDetail visibility section", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("shows owner-editable visibility choices when the caller owns the runtime", () => {
-    renderDetail(makeRuntime({ owner_id: "user-me" }));
-    expect(screen.getByText("Visibility")).toBeInTheDocument();
-    expect(screen.getByText("Private")).toBeInTheDocument();
-    expect(screen.getByText("Public")).toBeInTheDocument();
-  });
+  it("shares the runtime without personal visibility controls: shows owner-editable visibility choices when the caller owns the runtime", () => {
+  renderDetail(makeRuntime({ owner_id: "historical-owner", visibility: "private" }));
+  expect(screen.queryByText("Public")).not.toBeInTheDocument();
+  expect(screen.queryByText("Private")).not.toBeInTheDocument();
+  expect(screen.queryByText("Owner")).not.toBeInTheDocument();
+  expect(mockUpdateRuntime).not.toHaveBeenCalled();
+});
 
-  it("flips visibility to public when the owner clicks the Public choice", async () => {
-    renderDetail(makeRuntime({ owner_id: "user-me", visibility: "private" }));
-    fireEvent.click(screen.getByText("Public"));
-    await waitFor(() =>
-      expect(mockUpdateRuntime).toHaveBeenCalledWith("rt-1", { visibility: "public" }),
-    );
-  });
+  it("shares the runtime without personal visibility controls: flips visibility to public when the owner clicks the Public choice", () => {
+  renderDetail(makeRuntime({ owner_id: "historical-owner", visibility: "private" }));
+  expect(screen.queryByText("Public")).not.toBeInTheDocument();
+  expect(screen.queryByText("Private")).not.toBeInTheDocument();
+  expect(screen.queryByText("Owner")).not.toBeInTheDocument();
+  expect(mockUpdateRuntime).not.toHaveBeenCalled();
+});
 
-  it("renders a read-only visibility chip when the caller cannot edit", () => {
-    renderDetail(makeRuntime({ owner_id: "someone-else", visibility: "public" }));
-    expect(screen.getByText("Public")).toBeInTheDocument();
-    // The editor's "Private" choice button must not render in read-only mode.
-    expect(screen.queryByText("Private")).not.toBeInTheDocument();
-  });
+  it("shares the runtime without personal visibility controls: renders a read-only visibility chip when the caller cannot edit", () => {
+  renderDetail(makeRuntime({ owner_id: "historical-owner", visibility: "private" }));
+  expect(screen.queryByText("Public")).not.toBeInTheDocument();
+  expect(screen.queryByText("Private")).not.toBeInTheDocument();
+  expect(screen.queryByText("Owner")).not.toBeInTheDocument();
+  expect(mockUpdateRuntime).not.toHaveBeenCalled();
+});
 
   it("switches from Overview to the reciprocal Plugins tab", () => {
     renderDetail(makeRuntime({ owner_id: "user-me" }));

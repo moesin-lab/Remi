@@ -395,9 +395,8 @@ export class AgentsSkillsRepo {
     if (!group.runtimeIds.some(runtimeId => {
       const runtime = this.ctx.runtimes().getRuntime(runtimeId);
       return runtime && (runtime.workspaceId ?? "local") === workspaceId
-        && (runtime.provider === "any" || runtime.provider === provider)
-        && (runtime.visibility === "public" || (runtime.ownerId ?? "local") === ownerId);
-    })) throw new Error("Execution group has no Runtime available to the Agent owner");
+        && (runtime.provider === "any" || runtime.provider === provider);
+    })) throw new Error("Execution group has no compatible Runtime in this workspace");
   }
 
   private assertRuntimeBinding(runtimeId: string, workspaceId: string, provider: string, ownerId: string): void {
@@ -407,9 +406,6 @@ export class AgentsSkillsRepo {
     }
     if (runtime.provider !== "any" && runtime.provider !== provider) {
       throw new Error("Runtime provider does not match Agent provider");
-    }
-    if (runtime.visibility !== "public" && (runtime.ownerId ?? "local") !== ownerId) {
-      throw new Error("Private Runtime must belong to the Agent owner");
     }
   }
 

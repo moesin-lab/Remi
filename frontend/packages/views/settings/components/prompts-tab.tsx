@@ -1,11 +1,12 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, Eye, FileLock2, Loader2, Save } from "lucide-react";
 import { toast } from "sonner";
 import { api, ApiError } from "@multiremi/core/api";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
 import type { WorkspacePromptSettings } from "@multiremi/core/types";
@@ -29,7 +30,7 @@ export function PromptsTab() {
   const { t } = useT("settings");
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
-  const user = useAuthStore((state) => state.user);
+  const user = workspaceOperatorUser;
   const members = useQuery(memberListOptions(workspaceId));
   const prompts = useQuery({
     queryKey: ["workspace-prompt-settings", workspaceId],

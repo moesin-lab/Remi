@@ -282,8 +282,8 @@ describe("CreateProjectModal", () => {
     await waitFor(() => expect(mockCreateProjectMutate).toHaveBeenCalledTimes(1));
     expect(mockCreateProjectMutate.mock.calls[0]![0]).toMatchObject({
       title: "Platform",
-      lead_type: "member",
-      lead_id: "user-1",
+      lead_type: null,
+      lead_id: null,
       default_assignee_type: null,
       default_assignee_id: null,
     });

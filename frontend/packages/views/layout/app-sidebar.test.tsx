@@ -13,7 +13,7 @@ const { detail, deletePin, pathname, pins, observedQueries } = vi.hoisted(() => 
       {
         id: "pin-1",
         workspace_id: "ws-1",
-        user_id: "user-1",
+        user_id: "local",
         item_type: "issue" as const,
         item_id: "issue-1",
         position: 0,
@@ -173,16 +173,9 @@ describe("shell gate wiring (MUL-472 b rework)", () => {
     pathname.current = "/acme/issues";
   });
 
-  it("passes the shell gate's value into the invitation query instead of leaving it always-on", () => {
+  it("does not mount the retired workspace invitation query", () => {
     render(<AppSidebar />);
-    const invitations = observedQueries.filter((query) => query.queryKey[0] === "invitations");
-    expect(invitations.length).toBeGreaterThan(0);
-    // QA caught this one missing the gate entirely: `/api/invitations` left
-    // 865 ms (issues) / 1540 ms (detail) before the first content row.
-    for (const query of invitations) {
-      expect(query.enabled).toBeDefined();
-      expect(query.enabled).not.toBe(true);
-    }
+    expect(observedQueries.filter((query) => query.queryKey[0] === "invitations")).toEqual([]);
   });
 });
 

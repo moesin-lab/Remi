@@ -2248,17 +2248,17 @@
         "access_token": "mul_0000000000004000800000000000000300000000000040008000000000000004",
         "token_type": "bearer",
         "user": {
-          "id": "local",
+          "id": "usr_2ryujm2j4i6h",
           "externalId": null,
           "external_id": null,
-          "name": "Local User",
+          "name": "user@snapshot.invalid",
           "email": "user@snapshot.invalid",
           "avatarUrl": null,
           "avatar_url": null,
           "language": null,
           "timezone": null,
-          "onboardedAt": "<timestamp>",
-          "onboarded_at": "<timestamp>",
+          "onboardedAt": null,
+          "onboarded_at": null,
           "onboardingQuestionnaire": {},
           "onboarding_questionnaire": {},
           "starterContentState": null,
@@ -2283,17 +2283,17 @@
         "access_token": "mul_0000000000004000800000000000000500000000000040008000000000000006",
         "token_type": "bearer",
         "user": {
-          "id": "local",
+          "id": "usr_q5010won31uy",
           "externalId": null,
           "external_id": null,
-          "name": "Local User",
+          "name": "user@snapshot.invalid",
           "email": "user@snapshot.invalid",
           "avatarUrl": null,
           "avatar_url": null,
           "language": null,
           "timezone": null,
-          "onboardedAt": "<timestamp>",
-          "onboarded_at": "<timestamp>",
+          "onboardedAt": null,
+          "onboarded_at": null,
           "onboardingQuestionnaire": {},
           "onboarding_questionnaire": {},
           "starterContentState": null,
@@ -6260,6 +6260,83 @@
         },
         "commands": [
           {
+            "id": "account.get",
+            "command": "remi account get",
+            "capability": "account.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "account.onboarding.cloud-waitlist",
+            "command": "remi account onboarding cloud-waitlist",
+            "capability": "account.onboarding.cloud-waitlist",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "account.onboarding.complete",
+            "command": "remi account onboarding complete",
+            "capability": "account.onboarding.complete",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "account.onboarding.no-runtime-bootstrap",
+            "command": "remi account onboarding no-runtime-bootstrap",
+            "capability": "account.onboarding.no-runtime-bootstrap",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "account.onboarding.runtime-bootstrap",
+            "command": "remi account onboarding runtime-bootstrap",
+            "capability": "account.onboarding.runtime-bootstrap",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "account.onboarding.update",
+            "command": "remi account onboarding update",
+            "capability": "account.onboarding.update",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "account.update",
+            "command": "remi account update",
+            "capability": "account.update",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "agent.archive",
             "command": "remi agent archive",
             "capability": "agent.archive",
@@ -7503,72 +7580,6 @@
             "allowed": true
           },
           {
-            "id": "invite.accept",
-            "command": "remi invite accept",
-            "capability": "invite.accept",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
-            "id": "invite.create",
-            "command": "remi invite create",
-            "capability": "invite.create",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
-            "id": "invite.decline",
-            "command": "remi invite decline",
-            "capability": "invite.decline",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
-            "id": "invite.get",
-            "command": "remi invite get",
-            "capability": "invite.get",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
-            "id": "invite.list",
-            "command": "remi invite list",
-            "capability": "invite.list",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
-            "id": "invite.revoke",
-            "command": "remi invite revoke",
-            "capability": "invite.revoke",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
             "id": "issue.assign",
             "command": "remi issue assign",
             "capability": "issue.assign",
@@ -8493,108 +8504,9 @@
             "allowed": true
           },
           {
-            "id": "member.create",
-            "command": "remi member create",
-            "capability": "member.create",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
-            "id": "member.delete",
-            "command": "remi member delete",
-            "capability": "member.delete",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
             "id": "member.get",
             "command": "remi member get",
             "capability": "member.get",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
-            "id": "member.list",
-            "command": "remi member list",
-            "capability": "member.list",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
-            "id": "member.onboarding.cloud-waitlist",
-            "command": "remi member onboarding cloud-waitlist",
-            "capability": "member.onboarding.cloud-waitlist",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
-            "id": "member.onboarding.complete",
-            "command": "remi member onboarding complete",
-            "capability": "member.onboarding.complete",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
-            "id": "member.onboarding.no-runtime-bootstrap",
-            "command": "remi member onboarding no-runtime-bootstrap",
-            "capability": "member.onboarding.no-runtime-bootstrap",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
-            "id": "member.onboarding.runtime-bootstrap",
-            "command": "remi member onboarding runtime-bootstrap",
-            "capability": "member.onboarding.runtime-bootstrap",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
-            "id": "member.onboarding.update",
-            "command": "remi member onboarding update",
-            "capability": "member.onboarding.update",
-            "outputs": [
-              "table",
-              "json",
-              "jsonl"
-            ],
-            "allowed": true
-          },
-          {
-            "id": "member.update",
-            "command": "remi member update",
-            "capability": "member.update",
             "outputs": [
               "table",
               "json",
@@ -11881,9 +11793,9 @@
             "allowed": true
           },
           {
-            "id": "workspace.leave",
-            "command": "remi workspace leave",
-            "capability": "workspace.leave",
+            "id": "workspace.list",
+            "command": "remi workspace list",
+            "capability": "workspace.list",
             "outputs": [
               "table",
               "json",
@@ -11892,9 +11804,9 @@
             "allowed": true
           },
           {
-            "id": "workspace.list",
-            "command": "remi workspace list",
-            "capability": "workspace.list",
+            "id": "workspace.operator",
+            "command": "remi workspace operator",
+            "capability": "workspace.operator",
             "outputs": [
               "table",
               "json",
@@ -12180,7 +12092,7 @@
           "type": "human",
           "member": {
             "id": "mem_local_local",
-            "name": "Local User",
+            "name": "Operator",
             "role": "owner"
           }
         },
@@ -12845,8 +12757,215 @@
       "path": "/api/inbox?member_id=mem_local_local",
       "status": 200,
       "body": {
-        "items": [],
-        "unread_count": 0,
+        "items": [
+          {
+            "sender_type": "agent",
+            "sender_id": "agt_snapshot",
+            "to_type": "member",
+            "to_ref": "mem_local_local",
+            "to_agent_id": null,
+            "to_member_id": "mem_local_local",
+            "message_kind": "decision",
+            "wake_requested": "inbox_only",
+            "wake_applied": "inbox_only",
+            "wake_reason": "requested_inbox_only",
+            "dedupe_key": null,
+            "options": null,
+            "reply_to_id": null,
+            "session_id": "ises_0w4ud0f59v1p",
+            "seq": 8,
+            "id": "hrq_snapshot_waiting",
+            "kind": "message",
+            "visibility": "shown",
+            "task_id": "tsk_ttgbd5jebyjy",
+            "body_md": "{\"tool\":\"Bash\",\"command\":\"ls\"}",
+            "body_html": "<p>{\"tool\":\"Bash\",\"command\":\"ls\"}</p>",
+            "render_version": "md-a9442f26e49a14bc",
+            "resolved_at": null,
+            "resolved_by_type": null,
+            "resolved_by_id": null,
+            "metadata": {
+              "kind": "permission",
+              "human_request": {
+                "status": "pending",
+                "kind": "permission",
+                "payload": {
+                  "tool": "Bash",
+                  "command": "ls",
+                  "root_question_id": "hrq_snapshot_waiting",
+                  "route_revision": 1,
+                  "question_summary": null,
+                  "question_summary_wait_until": null
+                },
+                "expires_at": null
+              },
+              "question": {
+                "version": 1,
+                "workspace_id": "local",
+                "source_issue_id": "iss_snapshot",
+                "source_attempt_id": "tsk_ttgbd5jebyjy",
+                "responsibility_revision": "337999b60f9c38d8bf13b4ae8910ea4f8dde15ed00761cdc7010c2bf8fc710c1",
+                "human_required": true,
+                "route": [
+                  {
+                    "handler": {
+                      "type": "member",
+                      "id": "mem_local_local"
+                    },
+                    "issue_id": "iss_snapshot",
+                    "stage": "human"
+                  }
+                ],
+                "route_index": 0,
+                "route_revision": 1,
+                "route_reason": null,
+                "status": "pending",
+                "summary": null,
+                "answer": null,
+                "answer_revision": 0,
+                "history": [
+                  {
+                    "type": "created",
+                    "at": "<timestamp>",
+                    "actor": {
+                      "type": "agent",
+                      "id": "agt_snapshot"
+                    },
+                    "route_revision": 1
+                  },
+                  {
+                    "type": "transfer",
+                    "at": "<timestamp>",
+                    "actor": null,
+                    "route_revision": 1,
+                    "handler": {
+                      "type": "member",
+                      "id": "mem_local_local"
+                    },
+                    "source_message_id": "hrq_snapshot_waiting",
+                    "source_session_id": "ises_0w4ud0f59v1p"
+                  }
+                ],
+                "wait": {
+                  "status": "detached",
+                  "reason": "native_wait_unverified"
+                },
+                "summary_wait_until": null
+              },
+              "execution_scope": ""
+            },
+            "revision": 2,
+            "created_at": "<timestamp>",
+            "updated_at": "<timestamp>",
+            "deleted_at": null,
+            "attachments": [],
+            "reactions": []
+          },
+          {
+            "sender_type": "agent",
+            "sender_id": "agt_snapshot",
+            "to_type": "member",
+            "to_ref": "mem_local_local",
+            "to_agent_id": null,
+            "to_member_id": "mem_local_local",
+            "message_kind": "decision",
+            "wake_requested": "inbox_only",
+            "wake_applied": "inbox_only",
+            "wake_reason": "requested_inbox_only",
+            "dedupe_key": null,
+            "options": null,
+            "reply_to_id": null,
+            "session_id": "ises_0w4ud0f59v1p",
+            "seq": 3,
+            "id": "hrq_snapshot",
+            "kind": "message",
+            "visibility": "shown",
+            "task_id": "tsk_snapshot",
+            "body_md": "{\"tool\":\"Bash\",\"command\":\"ls\"}",
+            "body_html": "<p>{\"tool\":\"Bash\",\"command\":\"ls\"}</p>",
+            "render_version": "md-a9442f26e49a14bc",
+            "resolved_at": null,
+            "resolved_by_type": null,
+            "resolved_by_id": null,
+            "metadata": {
+              "kind": "permission",
+              "human_request": {
+                "status": "pending",
+                "kind": "permission",
+                "payload": {
+                  "tool": "Bash",
+                  "command": "ls",
+                  "root_question_id": "hrq_snapshot",
+                  "route_revision": 1,
+                  "question_summary": null,
+                  "question_summary_wait_until": null
+                },
+                "expires_at": null
+              },
+              "question": {
+                "version": 1,
+                "workspace_id": "local",
+                "source_issue_id": "iss_snapshot",
+                "source_attempt_id": "tsk_snapshot",
+                "responsibility_revision": "337999b60f9c38d8bf13b4ae8910ea4f8dde15ed00761cdc7010c2bf8fc710c1",
+                "human_required": true,
+                "route": [
+                  {
+                    "handler": {
+                      "type": "member",
+                      "id": "mem_local_local"
+                    },
+                    "issue_id": "iss_snapshot",
+                    "stage": "human"
+                  }
+                ],
+                "route_index": 0,
+                "route_revision": 1,
+                "route_reason": null,
+                "status": "pending",
+                "summary": null,
+                "answer": null,
+                "answer_revision": 0,
+                "history": [
+                  {
+                    "type": "created",
+                    "at": "<timestamp>",
+                    "actor": {
+                      "type": "agent",
+                      "id": "agt_snapshot"
+                    },
+                    "route_revision": 1
+                  },
+                  {
+                    "type": "transfer",
+                    "at": "<timestamp>",
+                    "actor": null,
+                    "route_revision": 1,
+                    "handler": {
+                      "type": "member",
+                      "id": "mem_local_local"
+                    },
+                    "source_message_id": "hrq_snapshot",
+                    "source_session_id": "ises_0w4ud0f59v1p"
+                  }
+                ],
+                "wait": {
+                  "status": "detached",
+                  "reason": "native_wait_unverified"
+                },
+                "summary_wait_until": null
+              },
+              "execution_scope": ""
+            },
+            "revision": 2,
+            "created_at": "<timestamp>",
+            "updated_at": "<timestamp>",
+            "deleted_at": null,
+            "attachments": [],
+            "reactions": []
+          }
+        ],
+        "unread_count": 2,
         "attention_count": 0,
         "next_cursor": null
       }
@@ -12885,32 +13004,20 @@
       "key": "get-sweep GET /api/invitations",
       "route": "GET /api/invitations",
       "path": "/api/invitations",
-      "status": 200,
-      "body": []
+      "status": 410,
+      "body": {
+        "error": "Workspace operators are shared; invitations are no longer supported",
+        "code": "workspace_invitations_retired"
+      }
     },
     {
       "key": "get-sweep GET /api/invitations/:id",
       "route": "GET /api/invitations/:id",
       "path": "/api/invitations/inv_ibk9if0740q3",
-      "status": 200,
+      "status": 410,
       "body": {
-        "id": "inv_ibk9if0740q3",
-        "workspaceId": "local",
-        "workspace_id": "local",
-        "inviterId": "local",
-        "inviter_id": "local",
-        "inviteeEmail": "invitee@snapshot.invalid",
-        "invitee_email": "invitee@snapshot.invalid",
-        "inviteeUserId": null,
-        "invitee_user_id": null,
-        "role": "member",
-        "status": "pending",
-        "createdAt": "<timestamp>",
-        "created_at": "<timestamp>",
-        "updatedAt": "<timestamp>",
-        "updated_at": "<timestamp>",
-        "expiresAt": "<timestamp>",
-        "expires_at": "<timestamp>"
+        "error": "Workspace operators are shared; invitations are no longer supported",
+        "code": "workspace_invitations_retired"
       }
     },
     {
@@ -13402,7 +13509,7 @@
             "summary": null,
             "current_handler": {
               "type": "member",
-              "id": "mem_snapshot_one"
+              "id": "mem_local_local"
             },
             "stage": "human",
             "route_revision": 1,
@@ -13436,14 +13543,18 @@
                 "route_revision": 1,
                 "handler": {
                   "type": "member",
-                  "id": "mem_snapshot_one"
+                  "id": "mem_local_local"
                 },
                 "source_message_id": "hrq_snapshot_waiting",
                 "source_session_id": "ises_0w4ud0f59v1p"
               }
             ],
             "actions": {
-              "allowed": []
+              "allowed": [
+                "answer",
+                "transfer",
+                "close"
+              ]
             }
           },
           {
@@ -13462,7 +13573,7 @@
             "summary": null,
             "current_handler": {
               "type": "member",
-              "id": "mem_snapshot_one"
+              "id": "mem_local_local"
             },
             "stage": "human",
             "route_revision": 1,
@@ -13496,14 +13607,18 @@
                 "route_revision": 1,
                 "handler": {
                   "type": "member",
-                  "id": "mem_snapshot_one"
+                  "id": "mem_local_local"
                 },
                 "source_message_id": "hrq_snapshot",
                 "source_session_id": "ises_0w4ud0f59v1p"
               }
             ],
             "actions": {
-              "allowed": []
+              "allowed": [
+                "answer",
+                "transfer",
+                "close"
+              ]
             }
           }
         ]
@@ -13802,7 +13917,7 @@
         {
           "issue_id": "iss_snapshot",
           "user_type": "member",
-          "user_id": "mem_snapshot_one",
+          "user_id": "mem_local_local",
           "reason": "commented",
           "created_at": "<timestamp>"
         }
@@ -13894,7 +14009,7 @@
           "id": "cmt_5nc7q2rsknx9",
           "issue_session_id": "ises_0w4ud0f59v1p",
           "actor_type": "member",
-          "actor_id": null,
+          "actor_id": "mem_local_local",
           "created_at": "<timestamp>",
           "content": "Snapshot prompt",
           "task_id": null,
@@ -14902,8 +15017,8 @@
       "status": 200,
       "body": {
         "id": "local",
-        "externalId": null,
-        "external_id": null,
+        "externalId": "ou_e6b7ffc662b392317275b817295c0b44",
+        "external_id": "ou_e6b7ffc662b392317275b817295c0b44",
         "name": "Local User",
         "email": "local@multiremi.local",
         "avatarUrl": null,
@@ -14934,9 +15049,9 @@
           "sender_type": "agent",
           "sender_id": "agt_snapshot",
           "to_type": "member",
-          "to_ref": "mem_snapshot_one",
+          "to_ref": "mem_local_local",
           "to_agent_id": null,
-          "to_member_id": "mem_snapshot_one",
+          "to_member_id": "mem_local_local",
           "message_kind": "decision",
           "wake_requested": "inbox_only",
           "wake_applied": "inbox_only",
@@ -14976,13 +15091,13 @@
               "workspace_id": "local",
               "source_issue_id": "iss_snapshot",
               "source_attempt_id": "tsk_snapshot",
-              "responsibility_revision": "4591fac5611f2608437160a7717ca74083917e33f805b0f1c57ad3d795d160e7",
+              "responsibility_revision": "337999b60f9c38d8bf13b4ae8910ea4f8dde15ed00761cdc7010c2bf8fc710c1",
               "human_required": true,
               "route": [
                 {
                   "handler": {
                     "type": "member",
-                    "id": "mem_snapshot_one"
+                    "id": "mem_local_local"
                   },
                   "issue_id": "iss_snapshot",
                   "stage": "human"
@@ -15012,7 +15127,7 @@
                   "route_revision": 1,
                   "handler": {
                     "type": "member",
-                    "id": "mem_snapshot_one"
+                    "id": "mem_local_local"
                   },
                   "source_message_id": "hrq_snapshot",
                   "source_session_id": "ises_0w4ud0f59v1p"
@@ -15057,7 +15172,7 @@
           "summary": null,
           "current_handler": {
             "type": "member",
-            "id": "mem_snapshot_one"
+            "id": "mem_local_local"
           },
           "stage": "human",
           "route_revision": 1,
@@ -15091,14 +15206,18 @@
               "route_revision": 1,
               "handler": {
                 "type": "member",
-                "id": "mem_snapshot_one"
+                "id": "mem_local_local"
               },
               "source_message_id": "hrq_snapshot",
               "source_session_id": "ises_0w4ud0f59v1p"
             }
           ],
           "actions": {
-            "allowed": []
+            "allowed": [
+              "answer",
+              "transfer",
+              "close"
+            ]
           }
         }
       }
@@ -18475,8 +18594,8 @@
             "issue_session_id": "ises_0w4ud0f59v1p",
             "authorType": "member",
             "author_type": "member",
-            "authorId": null,
-            "author_id": null,
+            "authorId": "mem_local_local",
+            "author_id": "mem_local_local",
             "taskId": null,
             "task_id": null,
             "parentId": null,
@@ -18954,12 +19073,12 @@
             "id": "sub_cdyoy133keds",
             "issueId": "iss_snapshot",
             "issue_id": "iss_snapshot",
-            "memberId": "mem_snapshot_one",
-            "member_id": "mem_snapshot_one",
+            "memberId": "mem_local_local",
+            "member_id": "mem_local_local",
             "userType": "member",
             "user_type": "member",
-            "userId": "mem_snapshot_one",
-            "user_id": "mem_snapshot_one",
+            "userId": "mem_local_local",
+            "user_id": "mem_local_local",
             "reason": "commented",
             "createdAt": "<timestamp>",
             "created_at": "<timestamp>"
@@ -19062,8 +19181,8 @@
           "issue_session_id": "ises_0w4ud0f59v1p",
           "actorType": "member",
           "actor_type": "member",
-          "actorId": null,
-          "actor_id": null,
+          "actorId": "mem_local_local",
+          "actor_id": "mem_local_local",
           "taskId": null,
           "task_id": null,
           "createdAt": "<timestamp>",
@@ -19763,37 +19882,15 @@
             "id": "mem_local_local",
             "workspaceId": "local",
             "userId": "local",
-            "name": "Local User",
-            "email": "local@multiremi.local",
+            "name": "Operator",
+            "email": null,
             "role": "owner",
-            "archivedAt": null,
-            "createdAt": "<timestamp>",
-            "updatedAt": "<timestamp>"
-          },
-          {
-            "id": "mem_snapshot_two",
-            "workspaceId": "local",
-            "userId": "usr_snapshot_two",
-            "name": "Second Member",
-            "email": "second@snapshot.invalid",
-            "role": "member",
-            "archivedAt": null,
-            "createdAt": "<timestamp>",
-            "updatedAt": "<timestamp>"
-          },
-          {
-            "id": "mem_snapshot_one",
-            "workspaceId": "local",
-            "userId": "local",
-            "name": "Snapshot Member",
-            "email": "member@snapshot.invalid",
-            "role": "admin",
             "archivedAt": null,
             "createdAt": "<timestamp>",
             "updatedAt": "<timestamp>"
           }
         ],
-        "total": 3
+        "total": 1
       }
     },
     {
@@ -19863,7 +19960,7 @@
       "status": 200,
       "body": {
         "workspaceId": "local",
-        "memberId": null,
+        "memberId": "mem_local_local",
         "preferences": {},
         "updatedAt": null
       }
@@ -20677,7 +20774,7 @@
       "status": 200,
       "body": {
         "workspaceId": "local",
-        "memberId": null,
+        "memberId": "mem_local_local",
         "preferences": {},
         "updatedAt": null
       }
@@ -22431,7 +22528,7 @@
           "time_provenance": "task_attributed",
           "context_peak_tokens": null,
           "runtime_provenance": "mixed",
-          "total_seconds": 0.035002827644348145,
+          "total_seconds": 0.034962594509124756,
           "known_cost_by_currency": {},
           "reference_cost_by_currency": {},
           "sdk_estimate_cost_by_currency": {},
@@ -22463,7 +22560,7 @@
             "time_provenance": "task_attributed",
             "context_peak_tokens": null,
             "runtime_provenance": "mixed",
-            "total_seconds": 0.035002827644348145,
+            "total_seconds": 0.034962594509124756,
             "known_cost_by_currency": {},
             "reference_cost_by_currency": {},
             "sdk_estimate_cost_by_currency": {},
@@ -22496,7 +22593,7 @@
             "time_provenance": "task_attributed",
             "context_peak_tokens": null,
             "runtime_provenance": "mixed",
-            "total_seconds": 0.035002827644348145,
+            "total_seconds": 0.034962594509124756,
             "known_cost_by_currency": {},
             "reference_cost_by_currency": {},
             "sdk_estimate_cost_by_currency": {},
@@ -22568,7 +22665,7 @@
             "time_provenance": "task_attributed",
             "context_peak_tokens": null,
             "runtime_provenance": "live_task",
-            "total_seconds": 0.035002827644348145,
+            "total_seconds": 0.034962594509124756,
             "known_cost_by_currency": {},
             "reference_cost_by_currency": {},
             "sdk_estimate_cost_by_currency": {},
@@ -22602,7 +22699,7 @@
             "time_provenance": "task_attributed",
             "context_peak_tokens": null,
             "runtime_provenance": "mixed",
-            "total_seconds": 0.035002827644348145,
+            "total_seconds": 0.034962594509124756,
             "known_cost_by_currency": {},
             "reference_cost_by_currency": {},
             "sdk_estimate_cost_by_currency": {},
@@ -22622,7 +22719,7 @@
           {
             "date": "2026-01-01",
             "task_count": 5,
-            "total_seconds": 0.035002827644348145,
+            "total_seconds": 0.034962594509124756,
             "status_counts": {
               "completed": 1,
               "failed": 0,
@@ -22694,7 +22791,11 @@
           "createdAt": "<timestamp>",
           "created_at": "<timestamp>",
           "updatedAt": "<timestamp>",
-          "updated_at": "<timestamp>"
+          "updated_at": "<timestamp>",
+          "operator": {
+            "userId": "local",
+            "memberId": "mem_local_local"
+          }
         },
         {
           "id": "ws_snapshot",
@@ -22709,7 +22810,11 @@
           "createdAt": "<timestamp>",
           "created_at": "<timestamp>",
           "updatedAt": "<timestamp>",
-          "updated_at": "<timestamp>"
+          "updated_at": "<timestamp>",
+          "operator": {
+            "userId": "local",
+            "memberId": "mem_ws_snapshot_local"
+          }
         }
       ]
     },
@@ -22750,7 +22855,11 @@
         "createdAt": "<timestamp>",
         "created_at": "<timestamp>",
         "updatedAt": "<timestamp>",
-        "updated_at": "<timestamp>"
+        "updated_at": "<timestamp>",
+        "operator": {
+          "userId": "local",
+          "memberId": "mem_local_local"
+        }
       }
     },
     {
@@ -22940,34 +23049,11 @@
       "key": "get-sweep GET /api/workspaces/:id/invitations",
       "route": "GET /api/workspaces/:id/invitations",
       "path": "/api/workspaces/local/invitations",
-      "status": 200,
-      "body": [
-        {
-          "id": "inv_ibk9if0740q3",
-          "workspaceId": "local",
-          "workspace_id": "local",
-          "inviterId": "local",
-          "inviter_id": "local",
-          "inviteeEmail": "invitee@snapshot.invalid",
-          "invitee_email": "invitee@snapshot.invalid",
-          "inviteeUserId": null,
-          "invitee_user_id": null,
-          "role": "member",
-          "status": "pending",
-          "createdAt": "<timestamp>",
-          "created_at": "<timestamp>",
-          "updatedAt": "<timestamp>",
-          "updated_at": "<timestamp>",
-          "expiresAt": "<timestamp>",
-          "expires_at": "<timestamp>",
-          "inviterName": "Local User",
-          "inviter_name": "Local User",
-          "inviterEmail": "local@multiremi.local",
-          "inviter_email": "local@multiremi.local",
-          "workspaceName": "Local Workspace",
-          "workspace_name": "Local Workspace"
-        }
-      ]
+      "status": 410,
+      "body": {
+        "error": "Workspace operators are shared; invitations are no longer supported",
+        "code": "workspace_invitations_retired"
+      }
     },
     {
       "key": "get-sweep GET /api/workspaces/:id/issue-archive",
@@ -23034,25 +23120,7 @@
           "user_id": "local",
           "role": "owner",
           "created_at": "<timestamp>",
-          "name": "Local User",
-          "avatar_url": null
-        },
-        {
-          "id": "mem_snapshot_two",
-          "workspace_id": "local",
-          "user_id": "usr_snapshot_two",
-          "role": "member",
-          "created_at": "<timestamp>",
-          "name": "Second Member",
-          "avatar_url": null
-        },
-        {
-          "id": "mem_snapshot_one",
-          "workspace_id": "local",
-          "user_id": "local",
-          "role": "admin",
-          "created_at": "<timestamp>",
-          "name": "Snapshot Member",
+          "name": "Operator",
           "avatar_url": null
         }
       ]
@@ -23849,7 +23917,7 @@
     {
       "key": "inbox#000 POST /api/inbox/:id/read",
       "route": "POST /api/inbox/:id/read",
-      "path": "/api/inbox/inb_snapshot/read",
+      "path": "/api/inbox/hrq_snapshot_waiting/read",
       "status": 410,
       "body": {
         "code": "route_retired",
@@ -23859,7 +23927,7 @@
     {
       "key": "inbox#001 POST /api/inbox/:id/archive",
       "route": "POST /api/inbox/:id/archive",
-      "path": "/api/inbox/inb_snapshot/archive",
+      "path": "/api/inbox/hrq_snapshot_waiting/archive",
       "status": 410,
       "body": {
         "code": "route_retired",
@@ -23869,7 +23937,7 @@
     {
       "key": "inbox#002 POST /api/multiremi/inbox/:id/read",
       "route": "POST /api/multiremi/inbox/:id/read",
-      "path": "/api/multiremi/inbox/inb_snapshot/read",
+      "path": "/api/multiremi/inbox/hrq_snapshot_waiting/read",
       "status": 410,
       "body": {
         "code": "route_retired",
@@ -23879,7 +23947,7 @@
     {
       "key": "inbox#003 POST /api/multiremi/inbox/:id/archive",
       "route": "POST /api/multiremi/inbox/:id/archive",
-      "path": "/api/multiremi/inbox/inb_snapshot/archive",
+      "path": "/api/multiremi/inbox/hrq_snapshot_waiting/archive",
       "status": 410,
       "body": {
         "code": "route_retired",
@@ -24186,15 +24254,15 @@
       "status": 201,
       "body": {
         "subscriber": {
-          "id": "sub_3gdnj5pggzmd",
+          "id": "sub_cdyoy133keds",
           "issueId": "iss_snapshot",
           "issue_id": "iss_snapshot",
-          "memberId": "mem_snapshot_two",
-          "member_id": "mem_snapshot_two",
+          "memberId": "mem_local_local",
+          "member_id": "mem_local_local",
           "userType": "member",
           "user_type": "member",
-          "userId": "mem_snapshot_two",
-          "user_id": "mem_snapshot_two",
+          "userId": "mem_local_local",
+          "user_id": "mem_local_local",
           "reason": "manual",
           "createdAt": "<timestamp>",
           "created_at": "<timestamp>"
@@ -24310,7 +24378,7 @@
       "path": "/api/issues",
       "status": 201,
       "body": {
-        "id": "iss_4it58rkbvy1m",
+        "id": "iss_aw448dcq07dx",
         "workspace_id": "local",
         "number": 6,
         "identifier": "MUL-6",
@@ -24319,11 +24387,11 @@
         "status": "todo",
         "priority": "none",
         "assignee_type": "agent",
-        "assignee_id": "agt_l30ikvaows9d",
+        "assignee_id": "agt_jez2ujdp6d5n",
         "creator_type": "member",
-        "creator_id": "usr_2ryujm2j4i6h",
+        "creator_id": "local",
         "parent_issue_id": null,
-        "responsible_member_id": "mem_piqp1rpc1xal",
+        "responsible_member_id": "mem_local_local",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -24339,7 +24407,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "task_id": "tsk_btodjmtppou8",
+        "task_id": "tsk_rmh8s6lkcse1",
         "dispatch_status": "dispatched",
         "dispatch_skipped_reason": null
       }
@@ -24350,7 +24418,7 @@
       "path": "/api/issues",
       "status": 201,
       "body": {
-        "id": "iss_80nhvnycarf2",
+        "id": "iss_950jhzoom893",
         "workspace_id": "local",
         "number": 7,
         "identifier": "MUL-7",
@@ -24359,10 +24427,10 @@
         "status": "todo",
         "priority": "none",
         "assignee_type": "agent",
-        "assignee_id": "agt_aw448dcq07dx",
+        "assignee_id": "agt_l30ikvaows9d",
         "creator_type": "member",
-        "creator_id": "usr_2ryujm2j4i6h",
-        "parent_issue_id": "iss_4it58rkbvy1m",
+        "creator_id": "local",
+        "parent_issue_id": "iss_aw448dcq07dx",
         "responsible_member_id": null,
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
@@ -24379,7 +24447,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "task_id": "tsk_z9xe80gxork5",
+        "task_id": "tsk_d9havbvj3rg3",
         "dispatch_status": "dispatched",
         "dispatch_skipped_reason": null
       }
@@ -24394,10 +24462,10 @@
         "bot_id": "default",
         "name": "",
         "workspace_id": "local",
-        "agent_id": "agt_l30ikvaows9d",
+        "agent_id": "agt_jez2ujdp6d5n",
         "agent_name": "Root execution coordinator",
         "agent_archived": false,
-        "runtime_id": "rt_zsxpe4iu5err",
+        "runtime_id": "rt_q5010won31uy",
         "runtime_name": "dmn_responsibility_snapshot",
         "runtime_online": true,
         "runtime_supports_config": false,
@@ -24405,7 +24473,7 @@
         "domain": "feishu",
         "enabled": false,
         "sender_access_policy": "agent",
-        "responsible_member_id": "mem_piqp1rpc1xal",
+        "responsible_member_id": "mem_local_local",
         "revision": 1,
         "app_secret_configured": true,
         "app_secret_hint": "synt••••••",
@@ -24422,18 +24490,18 @@
     {
       "key": "issue-responsibility-and-questions#003 GET /api/messages/:id/question",
       "route": "GET /api/messages/:id/question",
-      "path": "/api/messages/cmt_k28d43f4ai9t/question",
+      "path": "/api/messages/cmt_69wcgugg0y7e/question",
       "status": 200,
       "body": {
         "question": {
-          "id": "cmt_k28d43f4ai9t",
+          "id": "cmt_69wcgugg0y7e",
           "kind": "question",
-          "session_id": "ises_1ijxvp6uzepf",
+          "session_id": "ises_80nhvnycarf2",
           "workspace_id": "local",
-          "source_issue_id": "iss_80nhvnycarf2",
-          "source_agent_id": "agt_aw448dcq07dx",
-          "source_turn_id": "tsk_z9xe80gxork5",
-          "source_attempt_id": "tsk_z9xe80gxork5",
+          "source_issue_id": "iss_950jhzoom893",
+          "source_agent_id": "agt_l30ikvaows9d",
+          "source_turn_id": "tsk_d9havbvj3rg3",
+          "source_attempt_id": "tsk_d9havbvj3rg3",
           "original_questions": [
             {
               "question": "Which approach?",
@@ -24465,7 +24533,7 @@
           "summary": null,
           "current_handler": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d"
+            "id": "agt_jez2ujdp6d5n"
           },
           "stage": "parent_owner",
           "route_revision": 1,
@@ -24488,7 +24556,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_aw448dcq07dx"
+                "id": "agt_l30ikvaows9d"
               },
               "route_revision": 1
             },
@@ -24499,10 +24567,10 @@
               "route_revision": 1,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_m9x3b5kfo3hn",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_hoe93hlguj2k",
+              "source_session_id": "ises_4it58rkbvy1m"
             }
           ],
           "actions": {
@@ -24516,18 +24584,18 @@
     {
       "key": "issue-responsibility-and-questions#004 POST /api/messages/:id/question/transfer",
       "route": "POST /api/messages/:id/question/transfer",
-      "path": "/api/messages/cmt_k28d43f4ai9t/question/transfer",
+      "path": "/api/messages/cmt_69wcgugg0y7e/question/transfer",
       "status": 200,
       "body": {
         "question": {
-          "id": "cmt_k28d43f4ai9t",
+          "id": "cmt_69wcgugg0y7e",
           "kind": "question",
-          "session_id": "ises_1ijxvp6uzepf",
+          "session_id": "ises_80nhvnycarf2",
           "workspace_id": "local",
-          "source_issue_id": "iss_80nhvnycarf2",
-          "source_agent_id": "agt_aw448dcq07dx",
-          "source_turn_id": "tsk_z9xe80gxork5",
-          "source_attempt_id": "tsk_z9xe80gxork5",
+          "source_issue_id": "iss_950jhzoom893",
+          "source_agent_id": "agt_l30ikvaows9d",
+          "source_turn_id": "tsk_d9havbvj3rg3",
+          "source_attempt_id": "tsk_d9havbvj3rg3",
           "original_questions": [
             {
               "question": "Which approach?",
@@ -24559,7 +24627,7 @@
           "summary": null,
           "current_handler": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d"
+            "id": "agt_jez2ujdp6d5n"
           },
           "stage": "parent_owner",
           "route_revision": 2,
@@ -24582,7 +24650,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_aw448dcq07dx"
+                "id": "agt_l30ikvaows9d"
               },
               "route_revision": 1
             },
@@ -24593,23 +24661,23 @@
               "route_revision": 1,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_m9x3b5kfo3hn",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_hoe93hlguj2k",
+              "source_session_id": "ises_4it58rkbvy1m"
             },
             {
               "type": "transfer",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 2,
               "reason": "Confirm current facts",
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               }
             },
             {
@@ -24619,10 +24687,10 @@
               "route_revision": 2,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_lq5icb5et0q5",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_up0ev0j2gn46",
+              "source_session_id": "ises_4it58rkbvy1m"
             }
           ],
           "actions": {
@@ -24639,18 +24707,18 @@
     {
       "key": "issue-responsibility-and-questions#005 POST /api/messages/:id/question/escalate",
       "route": "POST /api/messages/:id/question/escalate",
-      "path": "/api/messages/cmt_k28d43f4ai9t/question/escalate",
+      "path": "/api/messages/cmt_69wcgugg0y7e/question/escalate",
       "status": 200,
       "body": {
         "question": {
-          "id": "cmt_k28d43f4ai9t",
+          "id": "cmt_69wcgugg0y7e",
           "kind": "question",
-          "session_id": "ises_1ijxvp6uzepf",
+          "session_id": "ises_80nhvnycarf2",
           "workspace_id": "local",
-          "source_issue_id": "iss_80nhvnycarf2",
-          "source_agent_id": "agt_aw448dcq07dx",
-          "source_turn_id": "tsk_z9xe80gxork5",
-          "source_attempt_id": "tsk_z9xe80gxork5",
+          "source_issue_id": "iss_950jhzoom893",
+          "source_agent_id": "agt_l30ikvaows9d",
+          "source_turn_id": "tsk_d9havbvj3rg3",
+          "source_attempt_id": "tsk_d9havbvj3rg3",
           "original_questions": [
             {
               "question": "Which approach?",
@@ -24682,7 +24750,7 @@
           "summary": null,
           "current_handler": {
             "type": "member",
-            "id": "mem_piqp1rpc1xal"
+            "id": "mem_local_local"
           },
           "stage": "human",
           "route_revision": 3,
@@ -24705,7 +24773,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_aw448dcq07dx"
+                "id": "agt_l30ikvaows9d"
               },
               "route_revision": 1
             },
@@ -24716,23 +24784,23 @@
               "route_revision": 1,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_m9x3b5kfo3hn",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_hoe93hlguj2k",
+              "source_session_id": "ises_4it58rkbvy1m"
             },
             {
               "type": "transfer",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 2,
               "reason": "Confirm current facts",
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               }
             },
             {
@@ -24742,23 +24810,23 @@
               "route_revision": 2,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_lq5icb5et0q5",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_up0ev0j2gn46",
+              "source_session_id": "ises_4it58rkbvy1m"
             },
             {
               "type": "escalate",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 3,
               "reason": "Explicit human needed",
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               }
             },
             {
@@ -24768,10 +24836,10 @@
               "route_revision": 3,
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
-              "source_message_id": "cmt_t6j5yz0lecsm",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_k0xu80pt05dc",
+              "source_session_id": "ises_4it58rkbvy1m"
             }
           ],
           "actions": {
@@ -24785,18 +24853,18 @@
     {
       "key": "issue-responsibility-and-questions#006 POST /api/messages/:id/question/present",
       "route": "POST /api/messages/:id/question/present",
-      "path": "/api/messages/cmt_k28d43f4ai9t/question/present",
+      "path": "/api/messages/cmt_69wcgugg0y7e/question/present",
       "status": 200,
       "body": {
         "question": {
-          "id": "cmt_k28d43f4ai9t",
+          "id": "cmt_69wcgugg0y7e",
           "kind": "question",
-          "session_id": "ises_1ijxvp6uzepf",
+          "session_id": "ises_80nhvnycarf2",
           "workspace_id": "local",
-          "source_issue_id": "iss_80nhvnycarf2",
-          "source_agent_id": "agt_aw448dcq07dx",
-          "source_turn_id": "tsk_z9xe80gxork5",
-          "source_attempt_id": "tsk_z9xe80gxork5",
+          "source_issue_id": "iss_950jhzoom893",
+          "source_agent_id": "agt_l30ikvaows9d",
+          "source_turn_id": "tsk_d9havbvj3rg3",
+          "source_attempt_id": "tsk_d9havbvj3rg3",
           "original_questions": [
             {
               "question": "Which approach?",
@@ -24827,12 +24895,12 @@
           ],
           "summary": {
             "body_md": "Remi's separate summary; original choices remain unchanged",
-            "agent_id": "agt_l30ikvaows9d",
+            "agent_id": "agt_jez2ujdp6d5n",
             "at": "<timestamp>"
           },
           "current_handler": {
             "type": "member",
-            "id": "mem_piqp1rpc1xal"
+            "id": "mem_local_local"
           },
           "stage": "human",
           "route_revision": 3,
@@ -24855,7 +24923,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_aw448dcq07dx"
+                "id": "agt_l30ikvaows9d"
               },
               "route_revision": 1
             },
@@ -24866,23 +24934,23 @@
               "route_revision": 1,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_m9x3b5kfo3hn",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_hoe93hlguj2k",
+              "source_session_id": "ises_4it58rkbvy1m"
             },
             {
               "type": "transfer",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 2,
               "reason": "Confirm current facts",
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               }
             },
             {
@@ -24892,23 +24960,23 @@
               "route_revision": 2,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_lq5icb5et0q5",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_up0ev0j2gn46",
+              "source_session_id": "ises_4it58rkbvy1m"
             },
             {
               "type": "escalate",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 3,
               "reason": "Explicit human needed",
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               }
             },
             {
@@ -24918,17 +24986,17 @@
               "route_revision": 3,
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
-              "source_message_id": "cmt_t6j5yz0lecsm",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_k0xu80pt05dc",
+              "source_session_id": "ises_4it58rkbvy1m"
             },
             {
               "type": "present",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 3
             }
@@ -24944,15 +25012,15 @@
     {
       "key": "issue-responsibility-and-questions#007 POST /api/messages/:id/question/answer",
       "route": "POST /api/messages/:id/question/answer",
-      "path": "/api/messages/cmt_k28d43f4ai9t/question/answer",
+      "path": "/api/messages/cmt_69wcgugg0y7e/question/answer",
       "status": 200,
       "body": {
         "message": {
           "sender_type": "member",
-          "sender_id": "mem_piqp1rpc1xal",
+          "sender_id": "mem_local_local",
           "to_type": "agent",
-          "to_ref": "agt_aw448dcq07dx",
-          "to_agent_id": "agt_aw448dcq07dx",
+          "to_ref": "agt_l30ikvaows9d",
+          "to_agent_id": "agt_l30ikvaows9d",
           "to_member_id": null,
           "message_kind": "reply",
           "wake_requested": "now",
@@ -24960,10 +25028,10 @@
           "wake_reason": "human_sender",
           "dedupe_key": null,
           "options": null,
-          "reply_to_id": "cmt_k28d43f4ai9t",
-          "session_id": "ises_1ijxvp6uzepf",
+          "reply_to_id": "cmt_69wcgugg0y7e",
+          "session_id": "ises_80nhvnycarf2",
           "seq": 5,
-          "id": "cmt_xppme635kkka",
+          "id": "cmt_sa9xaveb7z8h",
           "kind": "message",
           "visibility": "shown",
           "task_id": null,
@@ -24974,7 +25042,7 @@
           "resolved_by_type": null,
           "resolved_by_id": null,
           "metadata": {
-            "root_question_id": "cmt_k28d43f4ai9t",
+            "root_question_id": "cmt_69wcgugg0y7e",
             "human_response": {
               "answers": {
                 "Which approach?": "A, B"
@@ -24984,7 +25052,7 @@
             "question_route_revision": 3,
             "answer_source_turn_id": null,
             "execution_scope": "",
-            "delivery_turn_id": "tsk_z9xe80gxork5"
+            "delivery_turn_id": "tsk_d9havbvj3rg3"
           },
           "revision": 2,
           "created_at": "<timestamp>",
@@ -24995,16 +25063,16 @@
         },
         "wake_applied": "now",
         "wake_reason": "human_sender",
-        "turn_id": "tsk_z9xe80gxork5",
+        "turn_id": "tsk_d9havbvj3rg3",
         "question": {
-          "id": "cmt_k28d43f4ai9t",
+          "id": "cmt_69wcgugg0y7e",
           "kind": "question",
-          "session_id": "ises_1ijxvp6uzepf",
+          "session_id": "ises_80nhvnycarf2",
           "workspace_id": "local",
-          "source_issue_id": "iss_80nhvnycarf2",
-          "source_agent_id": "agt_aw448dcq07dx",
-          "source_turn_id": "tsk_z9xe80gxork5",
-          "source_attempt_id": "tsk_z9xe80gxork5",
+          "source_issue_id": "iss_950jhzoom893",
+          "source_agent_id": "agt_l30ikvaows9d",
+          "source_turn_id": "tsk_d9havbvj3rg3",
+          "source_attempt_id": "tsk_d9havbvj3rg3",
           "original_questions": [
             {
               "question": "Which approach?",
@@ -25035,12 +25103,12 @@
           ],
           "summary": {
             "body_md": "Remi's separate summary; original choices remain unchanged",
-            "agent_id": "agt_l30ikvaows9d",
+            "agent_id": "agt_jez2ujdp6d5n",
             "at": "<timestamp>"
           },
           "current_handler": {
             "type": "member",
-            "id": "mem_piqp1rpc1xal"
+            "id": "mem_local_local"
           },
           "stage": "human",
           "route_revision": 3,
@@ -25051,7 +25119,7 @@
           "recovery": {
             "consumer_turn_id": null,
             "consumer_attempt_id": null,
-            "reply_message_id": "cmt_xppme635kkka",
+            "reply_message_id": "cmt_sa9xaveb7z8h",
             "continuation_message_id": null,
             "consumed_at": null
           },
@@ -25064,10 +25132,10 @@
             "body_md": "{\"answers\":{\"Which approach?\":\"A, B\"}}",
             "actor": {
               "type": "member",
-              "id": "mem_piqp1rpc1xal"
+              "id": "mem_local_local"
             },
             "at": "<timestamp>",
-            "reply_message_id": "cmt_xppme635kkka"
+            "reply_message_id": "cmt_sa9xaveb7z8h"
           },
           "answer_revision": 1,
           "history": [
@@ -25076,7 +25144,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_aw448dcq07dx"
+                "id": "agt_l30ikvaows9d"
               },
               "route_revision": 1
             },
@@ -25087,23 +25155,23 @@
               "route_revision": 1,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_m9x3b5kfo3hn",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_hoe93hlguj2k",
+              "source_session_id": "ises_4it58rkbvy1m"
             },
             {
               "type": "transfer",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 2,
               "reason": "Confirm current facts",
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               }
             },
             {
@@ -25113,23 +25181,23 @@
               "route_revision": 2,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_lq5icb5et0q5",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_up0ev0j2gn46",
+              "source_session_id": "ises_4it58rkbvy1m"
             },
             {
               "type": "escalate",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 3,
               "reason": "Explicit human needed",
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               }
             },
             {
@@ -25139,17 +25207,17 @@
               "route_revision": 3,
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
-              "source_message_id": "cmt_t6j5yz0lecsm",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_k0xu80pt05dc",
+              "source_session_id": "ises_4it58rkbvy1m"
             },
             {
               "type": "present",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 3
             },
@@ -25158,7 +25226,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 3,
               "answer": {
@@ -25170,13 +25238,13 @@
                 "body_md": "{\"answers\":{\"Which approach?\":\"A, B\"}}",
                 "actor": {
                   "type": "member",
-                  "id": "mem_piqp1rpc1xal"
+                  "id": "mem_local_local"
                 },
                 "at": "<timestamp>",
-                "reply_message_id": "cmt_xppme635kkka"
+                "reply_message_id": "cmt_sa9xaveb7z8h"
               },
-              "source_message_id": "cmt_xppme635kkka",
-              "source_session_id": "ises_1ijxvp6uzepf"
+              "source_message_id": "cmt_sa9xaveb7z8h",
+              "source_session_id": "ises_80nhvnycarf2"
             }
           ],
           "actions": {
@@ -25190,12 +25258,12 @@
     {
       "key": "issue-responsibility-and-questions#008 POST /api/messages/:id/question/answer",
       "route": "POST /api/messages/:id/question/answer",
-      "path": "/api/messages/cmt_k28d43f4ai9t/question/answer",
+      "path": "/api/messages/cmt_69wcgugg0y7e/question/answer",
       "status": 200,
       "body": {
         "message": {
           "sender_type": "member",
-          "sender_id": "mem_piqp1rpc1xal",
+          "sender_id": "mem_local_local",
           "to_type": "none",
           "to_ref": null,
           "to_agent_id": null,
@@ -25206,10 +25274,10 @@
           "wake_reason": "no_recipient",
           "dedupe_key": null,
           "options": null,
-          "reply_to_id": "cmt_k28d43f4ai9t",
-          "session_id": "ises_1ijxvp6uzepf",
+          "reply_to_id": "cmt_69wcgugg0y7e",
+          "session_id": "ises_80nhvnycarf2",
           "seq": 6,
-          "id": "cmt_g92j5vno94a4",
+          "id": "cmt_s1cnid714x5k",
           "kind": "message",
           "visibility": "shown",
           "task_id": null,
@@ -25220,7 +25288,7 @@
           "resolved_by_type": null,
           "resolved_by_id": null,
           "metadata": {
-            "root_question_id": "cmt_k28d43f4ai9t",
+            "root_question_id": "cmt_69wcgugg0y7e",
             "human_response": {
               "answers": {
                 "Which approach?": "B"
@@ -25241,14 +25309,14 @@
         "wake_applied": "inbox_only",
         "wake_reason": "no_recipient",
         "question": {
-          "id": "cmt_k28d43f4ai9t",
+          "id": "cmt_69wcgugg0y7e",
           "kind": "question",
-          "session_id": "ises_1ijxvp6uzepf",
+          "session_id": "ises_80nhvnycarf2",
           "workspace_id": "local",
-          "source_issue_id": "iss_80nhvnycarf2",
-          "source_agent_id": "agt_aw448dcq07dx",
-          "source_turn_id": "tsk_z9xe80gxork5",
-          "source_attempt_id": "tsk_z9xe80gxork5",
+          "source_issue_id": "iss_950jhzoom893",
+          "source_agent_id": "agt_l30ikvaows9d",
+          "source_turn_id": "tsk_d9havbvj3rg3",
+          "source_attempt_id": "tsk_d9havbvj3rg3",
           "original_questions": [
             {
               "question": "Which approach?",
@@ -25279,12 +25347,12 @@
           ],
           "summary": {
             "body_md": "Remi's separate summary; original choices remain unchanged",
-            "agent_id": "agt_l30ikvaows9d",
+            "agent_id": "agt_jez2ujdp6d5n",
             "at": "<timestamp>"
           },
           "current_handler": {
             "type": "member",
-            "id": "mem_piqp1rpc1xal"
+            "id": "mem_local_local"
           },
           "stage": "human",
           "route_revision": 3,
@@ -25293,9 +25361,9 @@
           "wait_status": "consumed",
           "wait_reason": null,
           "recovery": {
-            "consumer_turn_id": "tsk_z9xe80gxork5",
-            "consumer_attempt_id": "tsk_z9xe80gxork5",
-            "reply_message_id": "cmt_g92j5vno94a4",
+            "consumer_turn_id": "tsk_d9havbvj3rg3",
+            "consumer_attempt_id": "tsk_d9havbvj3rg3",
+            "reply_message_id": "cmt_s1cnid714x5k",
             "continuation_message_id": null,
             "consumed_at": "<timestamp>"
           },
@@ -25308,10 +25376,10 @@
             "body_md": "{\"answers\":{\"Which approach?\":\"B\"}}",
             "actor": {
               "type": "member",
-              "id": "mem_piqp1rpc1xal"
+              "id": "mem_local_local"
             },
             "at": "<timestamp>",
-            "reply_message_id": "cmt_g92j5vno94a4"
+            "reply_message_id": "cmt_s1cnid714x5k"
           },
           "answer_revision": 2,
           "history": [
@@ -25320,7 +25388,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_aw448dcq07dx"
+                "id": "agt_l30ikvaows9d"
               },
               "route_revision": 1
             },
@@ -25331,23 +25399,23 @@
               "route_revision": 1,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_m9x3b5kfo3hn",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_hoe93hlguj2k",
+              "source_session_id": "ises_4it58rkbvy1m"
             },
             {
               "type": "transfer",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 2,
               "reason": "Confirm current facts",
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               }
             },
             {
@@ -25357,23 +25425,23 @@
               "route_revision": 2,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_lq5icb5et0q5",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_up0ev0j2gn46",
+              "source_session_id": "ises_4it58rkbvy1m"
             },
             {
               "type": "escalate",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 3,
               "reason": "Explicit human needed",
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               }
             },
             {
@@ -25383,17 +25451,17 @@
               "route_revision": 3,
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
-              "source_message_id": "cmt_t6j5yz0lecsm",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_k0xu80pt05dc",
+              "source_session_id": "ises_4it58rkbvy1m"
             },
             {
               "type": "present",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 3
             },
@@ -25402,7 +25470,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 3,
               "answer": {
@@ -25414,13 +25482,13 @@
                 "body_md": "{\"answers\":{\"Which approach?\":\"A, B\"}}",
                 "actor": {
                   "type": "member",
-                  "id": "mem_piqp1rpc1xal"
+                  "id": "mem_local_local"
                 },
                 "at": "<timestamp>",
-                "reply_message_id": "cmt_xppme635kkka"
+                "reply_message_id": "cmt_sa9xaveb7z8h"
               },
-              "source_message_id": "cmt_xppme635kkka",
-              "source_session_id": "ises_1ijxvp6uzepf"
+              "source_message_id": "cmt_sa9xaveb7z8h",
+              "source_session_id": "ises_80nhvnycarf2"
             },
             {
               "type": "consume",
@@ -25433,7 +25501,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 3,
               "answer": {
@@ -25445,14 +25513,14 @@
                 "body_md": "{\"answers\":{\"Which approach?\":\"B\"}}",
                 "actor": {
                   "type": "member",
-                  "id": "mem_piqp1rpc1xal"
+                  "id": "mem_local_local"
                 },
                 "at": "<timestamp>",
-                "reply_message_id": "cmt_g92j5vno94a4"
+                "reply_message_id": "cmt_s1cnid714x5k"
               },
               "reason": "New evidence",
-              "source_message_id": "cmt_g92j5vno94a4",
-              "source_session_id": "ises_1ijxvp6uzepf"
+              "source_message_id": "cmt_s1cnid714x5k",
+              "source_session_id": "ises_80nhvnycarf2"
             }
           ],
           "actions": {
@@ -25466,7 +25534,7 @@
     {
       "key": "issue-responsibility-and-questions#009 POST /api/messages/:id/question/continue",
       "route": "POST /api/messages/:id/question/continue",
-      "path": "/api/messages/cmt_k28d43f4ai9t/question/continue",
+      "path": "/api/messages/cmt_69wcgugg0y7e/question/continue",
       "status": 409,
       "body": {
         "error": "question_continuation_unavailable",
@@ -25476,7 +25544,7 @@
     {
       "key": "issue-responsibility-and-questions#010 POST /api/messages/:id/question/present",
       "route": "POST /api/messages/:id/question/present",
-      "path": "/api/messages/cmt_k28d43f4ai9t/question/present",
+      "path": "/api/messages/cmt_69wcgugg0y7e/question/present",
       "status": 403,
       "body": {
         "error": "question_present_remi_required",
@@ -25486,18 +25554,18 @@
     {
       "key": "issue-responsibility-and-questions#011 POST /api/messages/:id/question/close",
       "route": "POST /api/messages/:id/question/close",
-      "path": "/api/messages/cmt_tau82zae7oj5/question/close",
+      "path": "/api/messages/cmt_gnjorrekqawv/question/close",
       "status": 200,
       "body": {
         "question": {
-          "id": "cmt_tau82zae7oj5",
+          "id": "cmt_gnjorrekqawv",
           "kind": "question",
-          "session_id": "ises_1ijxvp6uzepf",
+          "session_id": "ises_80nhvnycarf2",
           "workspace_id": "local",
-          "source_issue_id": "iss_80nhvnycarf2",
-          "source_agent_id": "agt_aw448dcq07dx",
-          "source_turn_id": "tsk_z9xe80gxork5",
-          "source_attempt_id": "tsk_z9xe80gxork5",
+          "source_issue_id": "iss_950jhzoom893",
+          "source_agent_id": "agt_l30ikvaows9d",
+          "source_turn_id": "tsk_d9havbvj3rg3",
+          "source_attempt_id": "tsk_d9havbvj3rg3",
           "original_questions": [
             {
               "question": "Which approach?",
@@ -25529,7 +25597,7 @@
           "summary": null,
           "current_handler": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d"
+            "id": "agt_jez2ujdp6d5n"
           },
           "stage": "parent_owner",
           "route_revision": 1,
@@ -25552,7 +25620,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_aw448dcq07dx"
+                "id": "agt_l30ikvaows9d"
               },
               "route_revision": 1
             },
@@ -25563,17 +25631,17 @@
               "route_revision": 1,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_0mi13hhh0ie4",
-              "source_session_id": "ises_mr804acwglzg"
+              "source_message_id": "cmt_hiwp20m7vaxg",
+              "source_session_id": "ises_4it58rkbvy1m"
             },
             {
               "type": "close",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 1,
               "reason": "Explicitly no longer needed"
@@ -25588,20 +25656,20 @@
     {
       "key": "issue-responsibility-and-questions#012 GET /api/issues/:id/questions",
       "route": "GET /api/issues/:id/questions",
-      "path": "/api/issues/iss_4it58rkbvy1m/questions?limit=100",
+      "path": "/api/issues/iss_aw448dcq07dx/questions?limit=100",
       "status": 200,
       "body": {
         "nextCursor": null,
         "questions": [
           {
-            "id": "cmt_tau82zae7oj5",
+            "id": "cmt_gnjorrekqawv",
             "kind": "question",
-            "session_id": "ises_1ijxvp6uzepf",
+            "session_id": "ises_80nhvnycarf2",
             "workspace_id": "local",
-            "source_issue_id": "iss_80nhvnycarf2",
-            "source_agent_id": "agt_aw448dcq07dx",
-            "source_turn_id": "tsk_z9xe80gxork5",
-            "source_attempt_id": "tsk_z9xe80gxork5",
+            "source_issue_id": "iss_950jhzoom893",
+            "source_agent_id": "agt_l30ikvaows9d",
+            "source_turn_id": "tsk_d9havbvj3rg3",
+            "source_attempt_id": "tsk_d9havbvj3rg3",
             "original_questions": [
               {
                 "question": "Which approach?",
@@ -25633,7 +25701,7 @@
             "summary": null,
             "current_handler": {
               "type": "agent",
-              "id": "agt_l30ikvaows9d"
+              "id": "agt_jez2ujdp6d5n"
             },
             "stage": "parent_owner",
             "route_revision": 1,
@@ -25656,7 +25724,7 @@
                 "at": "<timestamp>",
                 "actor": {
                   "type": "agent",
-                  "id": "agt_aw448dcq07dx"
+                  "id": "agt_l30ikvaows9d"
                 },
                 "route_revision": 1
               },
@@ -25667,17 +25735,17 @@
                 "route_revision": 1,
                 "handler": {
                   "type": "agent",
-                  "id": "agt_l30ikvaows9d"
+                  "id": "agt_jez2ujdp6d5n"
                 },
-                "source_message_id": "cmt_0mi13hhh0ie4",
-                "source_session_id": "ises_mr804acwglzg"
+                "source_message_id": "cmt_hiwp20m7vaxg",
+                "source_session_id": "ises_4it58rkbvy1m"
               },
               {
                 "type": "close",
                 "at": "<timestamp>",
                 "actor": {
                   "type": "agent",
-                  "id": "agt_l30ikvaows9d"
+                  "id": "agt_jez2ujdp6d5n"
                 },
                 "route_revision": 1,
                 "reason": "Explicitly no longer needed"
@@ -25688,14 +25756,14 @@
             }
           },
           {
-            "id": "cmt_k28d43f4ai9t",
+            "id": "cmt_69wcgugg0y7e",
             "kind": "question",
-            "session_id": "ises_1ijxvp6uzepf",
+            "session_id": "ises_80nhvnycarf2",
             "workspace_id": "local",
-            "source_issue_id": "iss_80nhvnycarf2",
-            "source_agent_id": "agt_aw448dcq07dx",
-            "source_turn_id": "tsk_z9xe80gxork5",
-            "source_attempt_id": "tsk_z9xe80gxork5",
+            "source_issue_id": "iss_950jhzoom893",
+            "source_agent_id": "agt_l30ikvaows9d",
+            "source_turn_id": "tsk_d9havbvj3rg3",
+            "source_attempt_id": "tsk_d9havbvj3rg3",
             "original_questions": [
               {
                 "question": "Which approach?",
@@ -25726,12 +25794,12 @@
             ],
             "summary": {
               "body_md": "Remi's separate summary; original choices remain unchanged",
-              "agent_id": "agt_l30ikvaows9d",
+              "agent_id": "agt_jez2ujdp6d5n",
               "at": "<timestamp>"
             },
             "current_handler": {
               "type": "member",
-              "id": "mem_piqp1rpc1xal"
+              "id": "mem_local_local"
             },
             "stage": "human",
             "route_revision": 3,
@@ -25740,9 +25808,9 @@
             "wait_status": "consumed",
             "wait_reason": null,
             "recovery": {
-              "consumer_turn_id": "tsk_z9xe80gxork5",
-              "consumer_attempt_id": "tsk_z9xe80gxork5",
-              "reply_message_id": "cmt_g92j5vno94a4",
+              "consumer_turn_id": "tsk_d9havbvj3rg3",
+              "consumer_attempt_id": "tsk_d9havbvj3rg3",
+              "reply_message_id": "cmt_s1cnid714x5k",
               "continuation_message_id": null,
               "consumed_at": "<timestamp>"
             },
@@ -25755,10 +25823,10 @@
               "body_md": "{\"answers\":{\"Which approach?\":\"B\"}}",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "at": "<timestamp>",
-              "reply_message_id": "cmt_g92j5vno94a4"
+              "reply_message_id": "cmt_s1cnid714x5k"
             },
             "answer_revision": 2,
             "history": [
@@ -25767,7 +25835,7 @@
                 "at": "<timestamp>",
                 "actor": {
                   "type": "agent",
-                  "id": "agt_aw448dcq07dx"
+                  "id": "agt_l30ikvaows9d"
                 },
                 "route_revision": 1
               },
@@ -25778,23 +25846,23 @@
                 "route_revision": 1,
                 "handler": {
                   "type": "agent",
-                  "id": "agt_l30ikvaows9d"
+                  "id": "agt_jez2ujdp6d5n"
                 },
-                "source_message_id": "cmt_m9x3b5kfo3hn",
-                "source_session_id": "ises_mr804acwglzg"
+                "source_message_id": "cmt_hoe93hlguj2k",
+                "source_session_id": "ises_4it58rkbvy1m"
               },
               {
                 "type": "transfer",
                 "at": "<timestamp>",
                 "actor": {
                   "type": "agent",
-                  "id": "agt_l30ikvaows9d"
+                  "id": "agt_jez2ujdp6d5n"
                 },
                 "route_revision": 2,
                 "reason": "Confirm current facts",
                 "handler": {
                   "type": "agent",
-                  "id": "agt_l30ikvaows9d"
+                  "id": "agt_jez2ujdp6d5n"
                 }
               },
               {
@@ -25804,23 +25872,23 @@
                 "route_revision": 2,
                 "handler": {
                   "type": "agent",
-                  "id": "agt_l30ikvaows9d"
+                  "id": "agt_jez2ujdp6d5n"
                 },
-                "source_message_id": "cmt_lq5icb5et0q5",
-                "source_session_id": "ises_mr804acwglzg"
+                "source_message_id": "cmt_up0ev0j2gn46",
+                "source_session_id": "ises_4it58rkbvy1m"
               },
               {
                 "type": "escalate",
                 "at": "<timestamp>",
                 "actor": {
                   "type": "agent",
-                  "id": "agt_l30ikvaows9d"
+                  "id": "agt_jez2ujdp6d5n"
                 },
                 "route_revision": 3,
                 "reason": "Explicit human needed",
                 "handler": {
                   "type": "member",
-                  "id": "mem_piqp1rpc1xal"
+                  "id": "mem_local_local"
                 }
               },
               {
@@ -25830,17 +25898,17 @@
                 "route_revision": 3,
                 "handler": {
                   "type": "member",
-                  "id": "mem_piqp1rpc1xal"
+                  "id": "mem_local_local"
                 },
-                "source_message_id": "cmt_t6j5yz0lecsm",
-                "source_session_id": "ises_mr804acwglzg"
+                "source_message_id": "cmt_k0xu80pt05dc",
+                "source_session_id": "ises_4it58rkbvy1m"
               },
               {
                 "type": "present",
                 "at": "<timestamp>",
                 "actor": {
                   "type": "agent",
-                  "id": "agt_l30ikvaows9d"
+                  "id": "agt_jez2ujdp6d5n"
                 },
                 "route_revision": 3
               },
@@ -25849,7 +25917,7 @@
                 "at": "<timestamp>",
                 "actor": {
                   "type": "member",
-                  "id": "mem_piqp1rpc1xal"
+                  "id": "mem_local_local"
                 },
                 "route_revision": 3,
                 "answer": {
@@ -25861,13 +25929,13 @@
                   "body_md": "{\"answers\":{\"Which approach?\":\"A, B\"}}",
                   "actor": {
                     "type": "member",
-                    "id": "mem_piqp1rpc1xal"
+                    "id": "mem_local_local"
                   },
                   "at": "<timestamp>",
-                  "reply_message_id": "cmt_xppme635kkka"
+                  "reply_message_id": "cmt_sa9xaveb7z8h"
                 },
-                "source_message_id": "cmt_xppme635kkka",
-                "source_session_id": "ises_1ijxvp6uzepf"
+                "source_message_id": "cmt_sa9xaveb7z8h",
+                "source_session_id": "ises_80nhvnycarf2"
               },
               {
                 "type": "consume",
@@ -25880,7 +25948,7 @@
                 "at": "<timestamp>",
                 "actor": {
                   "type": "member",
-                  "id": "mem_piqp1rpc1xal"
+                  "id": "mem_local_local"
                 },
                 "route_revision": 3,
                 "answer": {
@@ -25892,14 +25960,14 @@
                   "body_md": "{\"answers\":{\"Which approach?\":\"B\"}}",
                   "actor": {
                     "type": "member",
-                    "id": "mem_piqp1rpc1xal"
+                    "id": "mem_local_local"
                   },
                   "at": "<timestamp>",
-                  "reply_message_id": "cmt_g92j5vno94a4"
+                  "reply_message_id": "cmt_s1cnid714x5k"
                 },
                 "reason": "New evidence",
-                "source_message_id": "cmt_g92j5vno94a4",
-                "source_session_id": "ises_1ijxvp6uzepf"
+                "source_message_id": "cmt_s1cnid714x5k",
+                "source_session_id": "ises_80nhvnycarf2"
               }
             ],
             "actions": {
@@ -25914,79 +25982,79 @@
     {
       "key": "issue-responsibility-and-questions#013 GET /api/issues/:id/responsibility",
       "route": "GET /api/issues/:id/responsibility",
-      "path": "/api/issues/iss_80nhvnycarf2/responsibility",
+      "path": "/api/issues/iss_950jhzoom893/responsibility",
       "status": 200,
       "body": {
-        "issueId": "iss_80nhvnycarf2",
+        "issueId": "iss_950jhzoom893",
         "workspaceId": "local",
         "executionOwner": {
           "type": "agent",
-          "id": "agt_aw448dcq07dx",
-          "issueId": "iss_80nhvnycarf2",
+          "id": "agt_l30ikvaows9d",
+          "issueId": "iss_950jhzoom893",
           "name": "Child execution coordinator"
         },
         "reviewOwner": {
           "type": "agent",
-          "id": "agt_l30ikvaows9d",
-          "issueId": "iss_4it58rkbvy1m",
+          "id": "agt_jez2ujdp6d5n",
+          "issueId": "iss_aw448dcq07dx",
           "name": "Root execution coordinator"
         },
         "rootHuman": {
           "type": "member",
-          "id": "mem_piqp1rpc1xal",
-          "issueId": "iss_4it58rkbvy1m",
-          "name": "Explicit snapshot reviewer"
+          "id": "mem_local_local",
+          "issueId": "iss_aw448dcq07dx",
+          "name": "Operator"
         },
-        "rootIssueId": "iss_4it58rkbvy1m",
+        "rootIssueId": "iss_aw448dcq07dx",
         "chain": [
           {
-            "issueId": "iss_80nhvnycarf2",
+            "issueId": "iss_950jhzoom893",
             "executionOwner": {
               "type": "agent",
-              "id": "agt_aw448dcq07dx",
-              "issueId": "iss_80nhvnycarf2",
+              "id": "agt_l30ikvaows9d",
+              "issueId": "iss_950jhzoom893",
               "name": "Child execution coordinator"
             }
           },
           {
-            "issueId": "iss_4it58rkbvy1m",
+            "issueId": "iss_aw448dcq07dx",
             "executionOwner": {
               "type": "agent",
-              "id": "agt_l30ikvaows9d",
-              "issueId": "iss_4it58rkbvy1m",
+              "id": "agt_jez2ujdp6d5n",
+              "issueId": "iss_aw448dcq07dx",
               "name": "Root execution coordinator"
             }
           }
         ],
         "unresolved": [],
-        "revision": "8ffe76909e326ea904558de3daeb84d22affd728f08d8a2cf9ea4a50e0fde0b3"
+        "revision": "262cbc0df2311d7192df9f2780b65756577ed6a9c6dc720e7faa0a6c8690d5b1"
       }
     },
     {
       "key": "issue-responsibility-and-questions#014 POST /api/issues/:id/deliveries",
       "route": "POST /api/issues/:id/deliveries",
-      "path": "/api/issues/iss_80nhvnycarf2/deliveries",
+      "path": "/api/issues/iss_950jhzoom893/deliveries",
       "status": 201,
       "body": {
         "delivery": {
-          "id": "cmt_aqp70rey2330",
-          "issueId": "iss_80nhvnycarf2",
-          "sourceSessionId": "ises_1ijxvp6uzepf",
+          "id": "cmt_kvdbg9t5m93i",
+          "issueId": "iss_950jhzoom893",
+          "sourceSessionId": "ises_80nhvnycarf2",
           "summary": "Child evidence",
           "status": "pending",
           "submittedBy": {
             "type": "agent",
-            "id": "agt_aw448dcq07dx",
-            "issueId": "iss_80nhvnycarf2",
+            "id": "agt_l30ikvaows9d",
+            "issueId": "iss_950jhzoom893",
             "name": "Child execution coordinator"
           },
           "reviewOwner": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
-          "responsibilityRevision": "8ffe76909e326ea904558de3daeb84d22affd728f08d8a2cf9ea4a50e0fde0b3",
+          "responsibilityRevision": "262cbc0df2311d7192df9f2780b65756577ed6a9c6dc720e7faa0a6c8690d5b1",
           "responseMessageId": null,
           "responseBody": null,
           "createdAt": "<timestamp>",
@@ -25998,29 +26066,29 @@
     {
       "key": "issue-responsibility-and-questions#015 POST /api/issues/:id/deliveries/:deliveryId/respond",
       "route": "POST /api/issues/:id/deliveries/:deliveryId/respond",
-      "path": "/api/issues/iss_80nhvnycarf2/deliveries/cmt_aqp70rey2330/respond",
+      "path": "/api/issues/iss_950jhzoom893/deliveries/cmt_kvdbg9t5m93i/respond",
       "status": 200,
       "body": {
         "delivery": {
-          "id": "cmt_aqp70rey2330",
-          "issueId": "iss_80nhvnycarf2",
-          "sourceSessionId": "ises_1ijxvp6uzepf",
+          "id": "cmt_kvdbg9t5m93i",
+          "issueId": "iss_950jhzoom893",
+          "sourceSessionId": "ises_80nhvnycarf2",
           "summary": "Child evidence",
           "status": "accepted",
           "submittedBy": {
             "type": "agent",
-            "id": "agt_aw448dcq07dx",
-            "issueId": "iss_80nhvnycarf2",
+            "id": "agt_l30ikvaows9d",
+            "issueId": "iss_950jhzoom893",
             "name": "Child execution coordinator"
           },
           "reviewOwner": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
-          "responsibilityRevision": "8ffe76909e326ea904558de3daeb84d22affd728f08d8a2cf9ea4a50e0fde0b3",
-          "responseMessageId": "cmt_n698clexwa6s",
+          "responsibilityRevision": "262cbc0df2311d7192df9f2780b65756577ed6a9c6dc720e7faa0a6c8690d5b1",
+          "responseMessageId": "cmt_34xx4xebcbvz",
           "responseBody": "Delivery accepted",
           "createdAt": "<timestamp>",
           "respondedAt": "<timestamp>",
@@ -26028,7 +26096,7 @@
         },
         "issue": {
           "runtimeWorkspaceId": null,
-          "id": "iss_80nhvnycarf2",
+          "id": "iss_950jhzoom893",
           "key": "MUL-7",
           "number": 7,
           "title": "Formal snapshot child",
@@ -26037,12 +26105,12 @@
           "priority": "none",
           "workspaceId": "local",
           "projectId": null,
-          "parentIssueId": "iss_4it58rkbvy1m",
+          "parentIssueId": "iss_aw448dcq07dx",
           "responsibleMemberId": null,
           "issueKind": "execution",
           "sourceIssueId": null,
           "assigneeType": "agent",
-          "assigneeId": "agt_aw448dcq07dx",
+          "assigneeId": "agt_l30ikvaows9d",
           "position": 0,
           "startDate": null,
           "dueDate": null,
@@ -26053,7 +26121,7 @@
           "parentDoneGrantAt": null,
           "parentDoneGrantBy": null,
           "parentDoneGrantAgentId": null,
-          "createdBy": "usr_2ryujm2j4i6h",
+          "createdBy": "local",
           "completedAt": "<timestamp>",
           "archivedAt": null,
           "createdAt": "<timestamp>",
@@ -26064,28 +26132,28 @@
     {
       "key": "issue-responsibility-and-questions#016 POST /api/issues/:id/deliveries",
       "route": "POST /api/issues/:id/deliveries",
-      "path": "/api/issues/iss_4it58rkbvy1m/deliveries",
+      "path": "/api/issues/iss_aw448dcq07dx/deliveries",
       "status": 201,
       "body": {
         "delivery": {
-          "id": "cmt_sipa61zvr6vu",
-          "issueId": "iss_4it58rkbvy1m",
-          "sourceSessionId": "ises_mr804acwglzg",
+          "id": "cmt_vgz895zjja84",
+          "issueId": "iss_aw448dcq07dx",
+          "sourceSessionId": "ises_4it58rkbvy1m",
           "summary": "Integrated evidence",
           "status": "pending",
           "submittedBy": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
           "reviewOwner": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
-          "responsibilityRevision": "513e76e269c968a1e9319bd617ebc6649857f6e3ea9f3758cdc455b103164bee",
+          "responsibilityRevision": "48fc7814b9970046999ab97e2fbdfe08f411fcea414f0f2dd9a5b29d2a31b70e",
           "responseMessageId": null,
           "responseBody": null,
           "createdAt": "<timestamp>",
@@ -26097,37 +26165,37 @@
     {
       "key": "issue-responsibility-and-questions#017 POST /api/issues/:id/deliveries/:deliveryId/authorize",
       "route": "POST /api/issues/:id/deliveries/:deliveryId/authorize",
-      "path": "/api/issues/iss_4it58rkbvy1m/deliveries/cmt_sipa61zvr6vu/authorize",
+      "path": "/api/issues/iss_aw448dcq07dx/deliveries/cmt_vgz895zjja84/authorize",
       "status": 200,
       "body": {
         "delivery": {
-          "id": "cmt_sipa61zvr6vu",
-          "issueId": "iss_4it58rkbvy1m",
-          "sourceSessionId": "ises_mr804acwglzg",
+          "id": "cmt_vgz895zjja84",
+          "issueId": "iss_aw448dcq07dx",
+          "sourceSessionId": "ises_4it58rkbvy1m",
           "summary": "Integrated evidence",
           "status": "pending",
           "submittedBy": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
           "reviewOwner": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
-          "responsibilityRevision": "513e76e269c968a1e9319bd617ebc6649857f6e3ea9f3758cdc455b103164bee",
+          "responsibilityRevision": "48fc7814b9970046999ab97e2fbdfe08f411fcea414f0f2dd9a5b29d2a31b70e",
           "responseMessageId": null,
           "responseBody": null,
           "createdAt": "<timestamp>",
           "respondedAt": null,
           "isLatest": true,
           "authorization": {
-            "agentId": "agt_l30ikvaows9d",
-            "grantedBy": "mem_piqp1rpc1xal",
-            "responsibilityRevision": "513e76e269c968a1e9319bd617ebc6649857f6e3ea9f3758cdc455b103164bee",
+            "agentId": "agt_jez2ujdp6d5n",
+            "grantedBy": "mem_local_local",
+            "responsibilityRevision": "48fc7814b9970046999ab97e2fbdfe08f411fcea414f0f2dd9a5b29d2a31b70e",
             "grantedAt": "<timestamp>"
           }
         }
@@ -26136,28 +26204,28 @@
     {
       "key": "issue-responsibility-and-questions#018 POST /api/issues/:id/deliveries/:deliveryId/authorize",
       "route": "POST /api/issues/:id/deliveries/:deliveryId/authorize",
-      "path": "/api/issues/iss_4it58rkbvy1m/deliveries/cmt_sipa61zvr6vu/authorize",
+      "path": "/api/issues/iss_aw448dcq07dx/deliveries/cmt_vgz895zjja84/authorize",
       "status": 200,
       "body": {
         "delivery": {
-          "id": "cmt_sipa61zvr6vu",
-          "issueId": "iss_4it58rkbvy1m",
-          "sourceSessionId": "ises_mr804acwglzg",
+          "id": "cmt_vgz895zjja84",
+          "issueId": "iss_aw448dcq07dx",
+          "sourceSessionId": "ises_4it58rkbvy1m",
           "summary": "Integrated evidence",
           "status": "pending",
           "submittedBy": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
           "reviewOwner": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
-          "responsibilityRevision": "513e76e269c968a1e9319bd617ebc6649857f6e3ea9f3758cdc455b103164bee",
+          "responsibilityRevision": "48fc7814b9970046999ab97e2fbdfe08f411fcea414f0f2dd9a5b29d2a31b70e",
           "responseMessageId": null,
           "responseBody": null,
           "createdAt": "<timestamp>",
@@ -26170,29 +26238,29 @@
     {
       "key": "issue-responsibility-and-questions#019 POST /api/issues/:id/deliveries/:deliveryId/respond",
       "route": "POST /api/issues/:id/deliveries/:deliveryId/respond",
-      "path": "/api/issues/iss_4it58rkbvy1m/deliveries/cmt_sipa61zvr6vu/respond",
+      "path": "/api/issues/iss_aw448dcq07dx/deliveries/cmt_vgz895zjja84/respond",
       "status": 200,
       "body": {
         "delivery": {
-          "id": "cmt_sipa61zvr6vu",
-          "issueId": "iss_4it58rkbvy1m",
-          "sourceSessionId": "ises_mr804acwglzg",
+          "id": "cmt_vgz895zjja84",
+          "issueId": "iss_aw448dcq07dx",
+          "sourceSessionId": "ises_4it58rkbvy1m",
           "summary": "Integrated evidence",
           "status": "returned",
           "submittedBy": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
           "reviewOwner": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
-          "responsibilityRevision": "513e76e269c968a1e9319bd617ebc6649857f6e3ea9f3758cdc455b103164bee",
-          "responseMessageId": "cmt_4v01qxzamn3t",
+          "responsibilityRevision": "48fc7814b9970046999ab97e2fbdfe08f411fcea414f0f2dd9a5b29d2a31b70e",
+          "responseMessageId": "cmt_31aykfih2v5v",
           "responseBody": "Add verification evidence",
           "createdAt": "<timestamp>",
           "respondedAt": "<timestamp>",
@@ -26201,7 +26269,7 @@
         },
         "issue": {
           "runtimeWorkspaceId": null,
-          "id": "iss_4it58rkbvy1m",
+          "id": "iss_aw448dcq07dx",
           "key": "MUL-6",
           "number": 6,
           "title": "Formal snapshot root",
@@ -26211,11 +26279,11 @@
           "workspaceId": "local",
           "projectId": null,
           "parentIssueId": null,
-          "responsibleMemberId": "mem_piqp1rpc1xal",
+          "responsibleMemberId": "mem_local_local",
           "issueKind": "execution",
           "sourceIssueId": null,
           "assigneeType": "agent",
-          "assigneeId": "agt_l30ikvaows9d",
+          "assigneeId": "agt_jez2ujdp6d5n",
           "position": 0,
           "startDate": null,
           "dueDate": null,
@@ -26226,7 +26294,7 @@
           "parentDoneGrantAt": null,
           "parentDoneGrantBy": null,
           "parentDoneGrantAgentId": null,
-          "createdBy": "usr_2ryujm2j4i6h",
+          "createdBy": "local",
           "completedAt": null,
           "archivedAt": null,
           "createdAt": "<timestamp>",
@@ -26237,28 +26305,28 @@
     {
       "key": "issue-responsibility-and-questions#020 POST /api/issues/:id/deliveries",
       "route": "POST /api/issues/:id/deliveries",
-      "path": "/api/issues/iss_4it58rkbvy1m/deliveries",
+      "path": "/api/issues/iss_aw448dcq07dx/deliveries",
       "status": 201,
       "body": {
         "delivery": {
-          "id": "cmt_he3r94d3ntdc",
-          "issueId": "iss_4it58rkbvy1m",
-          "sourceSessionId": "ises_mr804acwglzg",
+          "id": "cmt_13aljmz4o2tq",
+          "issueId": "iss_aw448dcq07dx",
+          "sourceSessionId": "ises_4it58rkbvy1m",
           "summary": "Integrated corrected evidence",
           "status": "pending",
           "submittedBy": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
           "reviewOwner": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
-          "responsibilityRevision": "513e76e269c968a1e9319bd617ebc6649857f6e3ea9f3758cdc455b103164bee",
+          "responsibilityRevision": "48fc7814b9970046999ab97e2fbdfe08f411fcea414f0f2dd9a5b29d2a31b70e",
           "responseMessageId": null,
           "responseBody": null,
           "createdAt": "<timestamp>",
@@ -26270,29 +26338,29 @@
     {
       "key": "issue-responsibility-and-questions#021 POST /api/issues/:id/deliveries/:deliveryId/respond",
       "route": "POST /api/issues/:id/deliveries/:deliveryId/respond",
-      "path": "/api/issues/iss_4it58rkbvy1m/deliveries/cmt_he3r94d3ntdc/respond",
+      "path": "/api/issues/iss_aw448dcq07dx/deliveries/cmt_13aljmz4o2tq/respond",
       "status": 200,
       "body": {
         "delivery": {
-          "id": "cmt_he3r94d3ntdc",
-          "issueId": "iss_4it58rkbvy1m",
-          "sourceSessionId": "ises_mr804acwglzg",
+          "id": "cmt_13aljmz4o2tq",
+          "issueId": "iss_aw448dcq07dx",
+          "sourceSessionId": "ises_4it58rkbvy1m",
           "summary": "Integrated corrected evidence",
           "status": "accepted",
           "submittedBy": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
           "reviewOwner": {
             "type": "agent",
-            "id": "agt_l30ikvaows9d",
-            "issueId": "iss_4it58rkbvy1m",
+            "id": "agt_jez2ujdp6d5n",
+            "issueId": "iss_aw448dcq07dx",
             "name": "Root execution coordinator"
           },
-          "responsibilityRevision": "513e76e269c968a1e9319bd617ebc6649857f6e3ea9f3758cdc455b103164bee",
-          "responseMessageId": "cmt_n7b7t5xnhq16",
+          "responsibilityRevision": "48fc7814b9970046999ab97e2fbdfe08f411fcea414f0f2dd9a5b29d2a31b70e",
+          "responseMessageId": "cmt_ibk7rfb9clat",
           "responseBody": "Delivery accepted",
           "createdAt": "<timestamp>",
           "respondedAt": "<timestamp>",
@@ -26300,7 +26368,7 @@
         },
         "issue": {
           "runtimeWorkspaceId": null,
-          "id": "iss_4it58rkbvy1m",
+          "id": "iss_aw448dcq07dx",
           "key": "MUL-6",
           "number": 6,
           "title": "Formal snapshot root",
@@ -26310,11 +26378,11 @@
           "workspaceId": "local",
           "projectId": null,
           "parentIssueId": null,
-          "responsibleMemberId": "mem_piqp1rpc1xal",
+          "responsibleMemberId": "mem_local_local",
           "issueKind": "execution",
           "sourceIssueId": null,
           "assigneeType": "agent",
-          "assigneeId": "agt_l30ikvaows9d",
+          "assigneeId": "agt_jez2ujdp6d5n",
           "position": 0,
           "startDate": null,
           "dueDate": null,
@@ -26325,7 +26393,7 @@
           "parentDoneGrantAt": null,
           "parentDoneGrantBy": null,
           "parentDoneGrantAgentId": null,
-          "createdBy": "usr_2ryujm2j4i6h",
+          "createdBy": "local",
           "completedAt": "<timestamp>",
           "archivedAt": null,
           "createdAt": "<timestamp>",
@@ -26336,66 +26404,66 @@
     {
       "key": "issue-responsibility-and-questions#022 GET /api/issues/:id/deliveries",
       "route": "GET /api/issues/:id/deliveries",
-      "path": "/api/issues/iss_4it58rkbvy1m/deliveries?limit=1",
+      "path": "/api/issues/iss_aw448dcq07dx/deliveries?limit=1",
       "status": 200,
       "body": {
         "deliveries": [
           {
-            "id": "cmt_he3r94d3ntdc",
-            "issueId": "iss_4it58rkbvy1m",
-            "sourceSessionId": "ises_mr804acwglzg",
+            "id": "cmt_13aljmz4o2tq",
+            "issueId": "iss_aw448dcq07dx",
+            "sourceSessionId": "ises_4it58rkbvy1m",
             "summary": "Integrated corrected evidence",
             "status": "accepted",
             "submittedBy": {
               "type": "agent",
-              "id": "agt_l30ikvaows9d",
-              "issueId": "iss_4it58rkbvy1m",
+              "id": "agt_jez2ujdp6d5n",
+              "issueId": "iss_aw448dcq07dx",
               "name": "Root execution coordinator"
             },
             "reviewOwner": {
               "type": "agent",
-              "id": "agt_l30ikvaows9d",
-              "issueId": "iss_4it58rkbvy1m",
+              "id": "agt_jez2ujdp6d5n",
+              "issueId": "iss_aw448dcq07dx",
               "name": "Root execution coordinator"
             },
-            "responsibilityRevision": "513e76e269c968a1e9319bd617ebc6649857f6e3ea9f3758cdc455b103164bee",
-            "responseMessageId": "cmt_n7b7t5xnhq16",
+            "responsibilityRevision": "48fc7814b9970046999ab97e2fbdfe08f411fcea414f0f2dd9a5b29d2a31b70e",
+            "responseMessageId": "cmt_ibk7rfb9clat",
             "responseBody": "Delivery accepted",
             "createdAt": "<timestamp>",
             "respondedAt": "<timestamp>",
             "isLatest": true
           }
         ],
-        "nextCursor": "cmt_he3r94d3ntdc"
+        "nextCursor": "cmt_13aljmz4o2tq"
       }
     },
     {
       "key": "issue-responsibility-and-questions#023 GET /api/issues/:id/deliveries",
       "route": "GET /api/issues/:id/deliveries",
-      "path": "/api/issues/iss_4it58rkbvy1m/deliveries?limit=1&before=cmt_he3r94d3ntdc",
+      "path": "/api/issues/iss_aw448dcq07dx/deliveries?limit=1&before=cmt_13aljmz4o2tq",
       "status": 200,
       "body": {
         "deliveries": [
           {
-            "id": "cmt_sipa61zvr6vu",
-            "issueId": "iss_4it58rkbvy1m",
-            "sourceSessionId": "ises_mr804acwglzg",
+            "id": "cmt_vgz895zjja84",
+            "issueId": "iss_aw448dcq07dx",
+            "sourceSessionId": "ises_4it58rkbvy1m",
             "summary": "Integrated evidence",
             "status": "returned",
             "submittedBy": {
               "type": "agent",
-              "id": "agt_l30ikvaows9d",
-              "issueId": "iss_4it58rkbvy1m",
+              "id": "agt_jez2ujdp6d5n",
+              "issueId": "iss_aw448dcq07dx",
               "name": "Root execution coordinator"
             },
             "reviewOwner": {
               "type": "agent",
-              "id": "agt_l30ikvaows9d",
-              "issueId": "iss_4it58rkbvy1m",
+              "id": "agt_jez2ujdp6d5n",
+              "issueId": "iss_aw448dcq07dx",
               "name": "Root execution coordinator"
             },
-            "responsibilityRevision": "513e76e269c968a1e9319bd617ebc6649857f6e3ea9f3758cdc455b103164bee",
-            "responseMessageId": "cmt_4v01qxzamn3t",
+            "responsibilityRevision": "48fc7814b9970046999ab97e2fbdfe08f411fcea414f0f2dd9a5b29d2a31b70e",
+            "responseMessageId": "cmt_31aykfih2v5v",
             "responseBody": "Add verification evidence",
             "createdAt": "<timestamp>",
             "respondedAt": "<timestamp>",
@@ -26412,7 +26480,7 @@
       "path": "/api/issues",
       "status": 201,
       "body": {
-        "id": "iss_kbv7c97t2xzs",
+        "id": "iss_siv8k0zvn6pd",
         "workspace_id": "local",
         "number": 8,
         "identifier": "MUL-8",
@@ -26421,11 +26489,11 @@
         "status": "todo",
         "priority": "none",
         "assignee_type": "agent",
-        "assignee_id": "agt_l30ikvaows9d",
+        "assignee_id": "agt_jez2ujdp6d5n",
         "creator_type": "member",
-        "creator_id": "usr_2ryujm2j4i6h",
+        "creator_id": "local",
         "parent_issue_id": null,
-        "responsible_member_id": "mem_piqp1rpc1xal",
+        "responsible_member_id": "mem_local_local",
         "parent_done_grant_at": null,
         "parent_done_grant_by": null,
         "parent_done_grant_agent_id": null,
@@ -26441,7 +26509,7 @@
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>",
         "metadata": {},
-        "task_id": "tsk_0bkwp3l99276",
+        "task_id": "tsk_1vw2bvc7e21p",
         "dispatch_status": "dispatched",
         "dispatch_skipped_reason": null
       }
@@ -26449,18 +26517,18 @@
     {
       "key": "issue-responsibility-and-questions#025 POST /api/messages/:id/question/escalate",
       "route": "POST /api/messages/:id/question/escalate",
-      "path": "/api/messages/cmt_0a50xy7qh44z/question/escalate",
+      "path": "/api/messages/cmt_l9lxt2vfpkm6/question/escalate",
       "status": 200,
       "body": {
         "question": {
-          "id": "cmt_0a50xy7qh44z",
+          "id": "cmt_l9lxt2vfpkm6",
           "kind": "question",
-          "session_id": "ises_1o7qz9g4px1h",
+          "session_id": "ises_kbv7c97t2xzs",
           "workspace_id": "local",
-          "source_issue_id": "iss_kbv7c97t2xzs",
-          "source_agent_id": "agt_opj4sjdu303v",
-          "source_turn_id": "tsk_gio7sq2cr576",
-          "source_attempt_id": "tsk_gio7sq2cr576",
+          "source_issue_id": "iss_siv8k0zvn6pd",
+          "source_agent_id": "agt_8o3o0x4b2fhs",
+          "source_turn_id": "tsk_opj4sjdu303v",
+          "source_attempt_id": "tsk_opj4sjdu303v",
           "original_questions": [
             {
               "question": "Proceed after restart?",
@@ -26482,7 +26550,7 @@
           "summary": null,
           "current_handler": {
             "type": "member",
-            "id": "mem_piqp1rpc1xal"
+            "id": "mem_local_local"
           },
           "stage": "human",
           "route_revision": 2,
@@ -26505,7 +26573,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_opj4sjdu303v"
+                "id": "agt_8o3o0x4b2fhs"
               },
               "route_revision": 1
             },
@@ -26516,23 +26584,23 @@
               "route_revision": 1,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_x3r6ojjytx5j",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_0a50xy7qh44z",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "escalate",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 2,
               "reason": "Explicit human authorization after restart",
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               }
             },
             {
@@ -26542,10 +26610,10 @@
               "route_revision": 2,
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
-              "source_message_id": "cmt_hsf5ql5i58f8",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_dg2roo32wqgi",
+              "source_session_id": "ises_kbv7c97t2xzs"
             }
           ],
           "actions": {
@@ -26559,12 +26627,12 @@
     {
       "key": "issue-responsibility-and-questions#026 POST /api/messages/:id/question/answer",
       "route": "POST /api/messages/:id/question/answer",
-      "path": "/api/messages/cmt_0a50xy7qh44z/question/answer",
+      "path": "/api/messages/cmt_l9lxt2vfpkm6/question/answer",
       "status": 200,
       "body": {
         "message": {
           "sender_type": "member",
-          "sender_id": "mem_piqp1rpc1xal",
+          "sender_id": "mem_local_local",
           "to_type": "none",
           "to_ref": null,
           "to_agent_id": null,
@@ -26575,10 +26643,10 @@
           "wake_reason": "no_recipient",
           "dedupe_key": null,
           "options": null,
-          "reply_to_id": "cmt_0a50xy7qh44z",
-          "session_id": "ises_1o7qz9g4px1h",
+          "reply_to_id": "cmt_l9lxt2vfpkm6",
+          "session_id": "ises_kbv7c97t2xzs",
           "seq": 10,
-          "id": "cmt_t6muwdh0he7w",
+          "id": "cmt_ksxvv40flo7i",
           "kind": "message",
           "visibility": "shown",
           "task_id": null,
@@ -26589,7 +26657,7 @@
           "resolved_by_type": null,
           "resolved_by_id": null,
           "metadata": {
-            "root_question_id": "cmt_0a50xy7qh44z",
+            "root_question_id": "cmt_l9lxt2vfpkm6",
             "human_response": {
               "answer": "Proceed",
               "answers": {
@@ -26600,7 +26668,7 @@
             "question_route_revision": 2,
             "answer_source_turn_id": null,
             "execution_scope": "",
-            "delivery_turn_id": "tsk_gio7sq2cr576"
+            "delivery_turn_id": "tsk_opj4sjdu303v"
           },
           "revision": 2,
           "created_at": "<timestamp>",
@@ -26611,16 +26679,16 @@
         },
         "wake_applied": "inbox_only",
         "wake_reason": "no_recipient",
-        "turn_id": "tsk_gio7sq2cr576",
+        "turn_id": "tsk_opj4sjdu303v",
         "question": {
-          "id": "cmt_0a50xy7qh44z",
+          "id": "cmt_l9lxt2vfpkm6",
           "kind": "question",
-          "session_id": "ises_1o7qz9g4px1h",
+          "session_id": "ises_kbv7c97t2xzs",
           "workspace_id": "local",
-          "source_issue_id": "iss_kbv7c97t2xzs",
-          "source_agent_id": "agt_opj4sjdu303v",
-          "source_turn_id": "tsk_gio7sq2cr576",
-          "source_attempt_id": "tsk_gio7sq2cr576",
+          "source_issue_id": "iss_siv8k0zvn6pd",
+          "source_agent_id": "agt_8o3o0x4b2fhs",
+          "source_turn_id": "tsk_opj4sjdu303v",
+          "source_attempt_id": "tsk_opj4sjdu303v",
           "original_questions": [
             {
               "question": "Proceed after restart?",
@@ -26642,7 +26710,7 @@
           "summary": null,
           "current_handler": {
             "type": "member",
-            "id": "mem_piqp1rpc1xal"
+            "id": "mem_local_local"
           },
           "stage": "human",
           "route_revision": 2,
@@ -26653,7 +26721,7 @@
           "recovery": {
             "consumer_turn_id": null,
             "consumer_attempt_id": null,
-            "reply_message_id": "cmt_t6muwdh0he7w",
+            "reply_message_id": "cmt_ksxvv40flo7i",
             "continuation_message_id": null,
             "consumed_at": null
           },
@@ -26667,10 +26735,10 @@
             "body_md": "{\"answer\":\"Proceed\",\"answers\":{\"Proceed after restart?\":\"Proceed\"}}",
             "actor": {
               "type": "member",
-              "id": "mem_piqp1rpc1xal"
+              "id": "mem_local_local"
             },
             "at": "<timestamp>",
-            "reply_message_id": "cmt_t6muwdh0he7w"
+            "reply_message_id": "cmt_ksxvv40flo7i"
           },
           "answer_revision": 1,
           "history": [
@@ -26679,7 +26747,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_opj4sjdu303v"
+                "id": "agt_8o3o0x4b2fhs"
               },
               "route_revision": 1
             },
@@ -26690,23 +26758,23 @@
               "route_revision": 1,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_x3r6ojjytx5j",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_0a50xy7qh44z",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "escalate",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 2,
               "reason": "Explicit human authorization after restart",
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               }
             },
             {
@@ -26716,10 +26784,10 @@
               "route_revision": 2,
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
-              "source_message_id": "cmt_hsf5ql5i58f8",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_dg2roo32wqgi",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "detach",
@@ -26733,7 +26801,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 2,
               "answer": {
@@ -26746,20 +26814,20 @@
                 "body_md": "{\"answer\":\"Proceed\",\"answers\":{\"Proceed after restart?\":\"Proceed\"}}",
                 "actor": {
                   "type": "member",
-                  "id": "mem_piqp1rpc1xal"
+                  "id": "mem_local_local"
                 },
                 "at": "<timestamp>",
-                "reply_message_id": "cmt_t6muwdh0he7w"
+                "reply_message_id": "cmt_ksxvv40flo7i"
               },
-              "source_message_id": "cmt_t6muwdh0he7w",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_ksxvv40flo7i",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "detach",
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 2,
               "reason": "question_source_agent_unavailable"
@@ -26777,18 +26845,18 @@
     {
       "key": "issue-responsibility-and-questions#027 POST /api/messages/:id/question/continue",
       "route": "POST /api/messages/:id/question/continue",
-      "path": "/api/messages/cmt_0a50xy7qh44z/question/continue",
+      "path": "/api/messages/cmt_l9lxt2vfpkm6/question/continue",
       "status": 200,
       "body": {
         "question": {
-          "id": "cmt_0a50xy7qh44z",
+          "id": "cmt_l9lxt2vfpkm6",
           "kind": "question",
-          "session_id": "ises_1o7qz9g4px1h",
+          "session_id": "ises_kbv7c97t2xzs",
           "workspace_id": "local",
-          "source_issue_id": "iss_kbv7c97t2xzs",
-          "source_agent_id": "agt_opj4sjdu303v",
-          "source_turn_id": "tsk_gio7sq2cr576",
-          "source_attempt_id": "tsk_gio7sq2cr576",
+          "source_issue_id": "iss_siv8k0zvn6pd",
+          "source_agent_id": "agt_8o3o0x4b2fhs",
+          "source_turn_id": "tsk_opj4sjdu303v",
+          "source_attempt_id": "tsk_opj4sjdu303v",
           "original_questions": [
             {
               "question": "Proceed after restart?",
@@ -26810,7 +26878,7 @@
           "summary": null,
           "current_handler": {
             "type": "member",
-            "id": "mem_piqp1rpc1xal"
+            "id": "mem_local_local"
           },
           "stage": "human",
           "route_revision": 2,
@@ -26819,10 +26887,10 @@
           "wait_status": "continuation_pending",
           "wait_reason": "question_source_agent_unavailable",
           "recovery": {
-            "consumer_turn_id": "tsk_osjux3lc6x0e",
+            "consumer_turn_id": "tsk_daygl2113hw1",
             "consumer_attempt_id": null,
-            "reply_message_id": "cmt_t6muwdh0he7w",
-            "continuation_message_id": "cmt_daygl2113hw1",
+            "reply_message_id": "cmt_ksxvv40flo7i",
+            "continuation_message_id": "cmt_xrgig2o6bdzy",
             "consumed_at": null
           },
           "answer": {
@@ -26835,10 +26903,10 @@
             "body_md": "{\"answer\":\"Proceed\",\"answers\":{\"Proceed after restart?\":\"Proceed\"}}",
             "actor": {
               "type": "member",
-              "id": "mem_piqp1rpc1xal"
+              "id": "mem_local_local"
             },
             "at": "<timestamp>",
-            "reply_message_id": "cmt_t6muwdh0he7w"
+            "reply_message_id": "cmt_ksxvv40flo7i"
           },
           "answer_revision": 1,
           "history": [
@@ -26847,7 +26915,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_opj4sjdu303v"
+                "id": "agt_8o3o0x4b2fhs"
               },
               "route_revision": 1
             },
@@ -26858,23 +26926,23 @@
               "route_revision": 1,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_x3r6ojjytx5j",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_0a50xy7qh44z",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "escalate",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 2,
               "reason": "Explicit human authorization after restart",
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               }
             },
             {
@@ -26884,10 +26952,10 @@
               "route_revision": 2,
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
-              "source_message_id": "cmt_hsf5ql5i58f8",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_dg2roo32wqgi",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "detach",
@@ -26901,7 +26969,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 2,
               "answer": {
@@ -26914,20 +26982,20 @@
                 "body_md": "{\"answer\":\"Proceed\",\"answers\":{\"Proceed after restart?\":\"Proceed\"}}",
                 "actor": {
                   "type": "member",
-                  "id": "mem_piqp1rpc1xal"
+                  "id": "mem_local_local"
                 },
                 "at": "<timestamp>",
-                "reply_message_id": "cmt_t6muwdh0he7w"
+                "reply_message_id": "cmt_ksxvv40flo7i"
               },
-              "source_message_id": "cmt_t6muwdh0he7w",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_ksxvv40flo7i",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "detach",
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 2,
               "reason": "question_source_agent_unavailable"
@@ -26937,11 +27005,11 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 2,
-              "source_message_id": "cmt_daygl2113hw1",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_xrgig2o6bdzy",
+              "source_session_id": "ises_kbv7c97t2xzs"
             }
           ],
           "actions": {
@@ -26955,18 +27023,18 @@
     {
       "key": "issue-responsibility-and-questions#028 POST /api/messages/:id/question/continue",
       "route": "POST /api/messages/:id/question/continue",
-      "path": "/api/messages/cmt_0a50xy7qh44z/question/continue",
+      "path": "/api/messages/cmt_l9lxt2vfpkm6/question/continue",
       "status": 200,
       "body": {
         "question": {
-          "id": "cmt_0a50xy7qh44z",
+          "id": "cmt_l9lxt2vfpkm6",
           "kind": "question",
-          "session_id": "ises_1o7qz9g4px1h",
+          "session_id": "ises_kbv7c97t2xzs",
           "workspace_id": "local",
-          "source_issue_id": "iss_kbv7c97t2xzs",
-          "source_agent_id": "agt_opj4sjdu303v",
-          "source_turn_id": "tsk_gio7sq2cr576",
-          "source_attempt_id": "tsk_gio7sq2cr576",
+          "source_issue_id": "iss_siv8k0zvn6pd",
+          "source_agent_id": "agt_8o3o0x4b2fhs",
+          "source_turn_id": "tsk_opj4sjdu303v",
+          "source_attempt_id": "tsk_opj4sjdu303v",
           "original_questions": [
             {
               "question": "Proceed after restart?",
@@ -26988,7 +27056,7 @@
           "summary": null,
           "current_handler": {
             "type": "member",
-            "id": "mem_piqp1rpc1xal"
+            "id": "mem_local_local"
           },
           "stage": "human",
           "route_revision": 2,
@@ -26997,10 +27065,10 @@
           "wait_status": "continuation_pending",
           "wait_reason": "question_source_agent_unavailable",
           "recovery": {
-            "consumer_turn_id": "tsk_osjux3lc6x0e",
+            "consumer_turn_id": "tsk_daygl2113hw1",
             "consumer_attempt_id": null,
-            "reply_message_id": "cmt_t6muwdh0he7w",
-            "continuation_message_id": "cmt_daygl2113hw1",
+            "reply_message_id": "cmt_ksxvv40flo7i",
+            "continuation_message_id": "cmt_xrgig2o6bdzy",
             "consumed_at": null
           },
           "answer": {
@@ -27013,10 +27081,10 @@
             "body_md": "{\"answer\":\"Proceed\",\"answers\":{\"Proceed after restart?\":\"Proceed\"}}",
             "actor": {
               "type": "member",
-              "id": "mem_piqp1rpc1xal"
+              "id": "mem_local_local"
             },
             "at": "<timestamp>",
-            "reply_message_id": "cmt_t6muwdh0he7w"
+            "reply_message_id": "cmt_ksxvv40flo7i"
           },
           "answer_revision": 1,
           "history": [
@@ -27025,7 +27093,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_opj4sjdu303v"
+                "id": "agt_8o3o0x4b2fhs"
               },
               "route_revision": 1
             },
@@ -27036,23 +27104,23 @@
               "route_revision": 1,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_x3r6ojjytx5j",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_0a50xy7qh44z",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "escalate",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 2,
               "reason": "Explicit human authorization after restart",
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               }
             },
             {
@@ -27062,10 +27130,10 @@
               "route_revision": 2,
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
-              "source_message_id": "cmt_hsf5ql5i58f8",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_dg2roo32wqgi",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "detach",
@@ -27079,7 +27147,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 2,
               "answer": {
@@ -27092,20 +27160,20 @@
                 "body_md": "{\"answer\":\"Proceed\",\"answers\":{\"Proceed after restart?\":\"Proceed\"}}",
                 "actor": {
                   "type": "member",
-                  "id": "mem_piqp1rpc1xal"
+                  "id": "mem_local_local"
                 },
                 "at": "<timestamp>",
-                "reply_message_id": "cmt_t6muwdh0he7w"
+                "reply_message_id": "cmt_ksxvv40flo7i"
               },
-              "source_message_id": "cmt_t6muwdh0he7w",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_ksxvv40flo7i",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "detach",
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 2,
               "reason": "question_source_agent_unavailable"
@@ -27115,11 +27183,11 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 2,
-              "source_message_id": "cmt_daygl2113hw1",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_xrgig2o6bdzy",
+              "source_session_id": "ises_kbv7c97t2xzs"
             }
           ],
           "actions": {
@@ -27133,17 +27201,17 @@
     {
       "key": "issue-responsibility-and-questions#029 GET /api/sessions/:sessionId/messages",
       "route": "GET /api/sessions/:sessionId/messages",
-      "path": "/api/sessions/ises_1o7qz9g4px1h/messages?from=0&to=14",
+      "path": "/api/sessions/ises_kbv7c97t2xzs/messages?from=0&to=14",
       "status": 200,
       "body": {
-        "session_id": "ises_1o7qz9g4px1h",
+        "session_id": "ises_kbv7c97t2xzs",
         "from_seq": 0,
         "to_seq": 14,
         "entries": [
           {
-            "session_id": "ises_1o7qz9g4px1h",
+            "session_id": "ises_kbv7c97t2xzs",
             "seq": 1,
-            "id": "cmt_bngj85ykrkmr",
+            "id": "cmt_0bkwp3l99276",
             "kind": "message",
             "author_type": "system",
             "author_id": null,
@@ -27151,18 +27219,18 @@
             "parent_id": null,
             "metadata": {
               "execution_scope": "",
-              "delivery_turn_id": "tsk_0bkwp3l99276",
+              "delivery_turn_id": "tsk_1vw2bvc7e21p",
               "envelope": {
                 "to": {
                   "role": "agent",
-                  "agentId": "agt_l30ikvaows9d",
-                  "issueSessionId": "ises_1o7qz9g4px1h"
+                  "agentId": "agt_jez2ujdp6d5n",
+                  "issueSessionId": "ises_kbv7c97t2xzs"
                 },
                 "kind": "request",
                 "wake": "now",
                 "source": {},
                 "priority": 4,
-                "recipient_agent_id": "agt_l30ikvaows9d"
+                "recipient_agent_id": "agt_jez2ujdp6d5n"
               }
             },
             "created_at": "<timestamp>",
@@ -27171,13 +27239,13 @@
             "body_omitted_chars": 0
           },
           {
-            "session_id": "ises_1o7qz9g4px1h",
+            "session_id": "ises_kbv7c97t2xzs",
             "seq": 2,
-            "id": "tsk_0bkwp3l99276",
+            "id": "tsk_1vw2bvc7e21p",
             "kind": "turn",
             "author_type": "agent",
-            "author_id": "agt_l30ikvaows9d",
-            "task_id": "tsk_0bkwp3l99276",
+            "author_id": "agt_jez2ujdp6d5n",
+            "task_id": "tsk_1vw2bvc7e21p",
             "parent_id": null,
             "metadata": {
               "status": "running",
@@ -27191,14 +27259,14 @@
               "failure_reason": null,
               "final_entry_id": null,
               "elapsed_ms": null,
-              "assignee_agent_id": "agt_l30ikvaows9d",
+              "assignee_agent_id": "agt_jez2ujdp6d5n",
               "attempt": 1,
               "source_event_id": null,
               "continued_from_task_id": null,
               "delegation_id": null,
               "delegated_by_agent_id": null,
-              "turn_id": "tsk_0bkwp3l99276",
-              "current_attempt_id": "tsk_0bkwp3l99276",
+              "turn_id": "tsk_1vw2bvc7e21p",
+              "current_attempt_id": "tsk_1vw2bvc7e21p",
               "legacy_prompt": "Controlled continuation snapshot"
             },
             "created_at": "<timestamp>",
@@ -27207,28 +27275,28 @@
             "body_omitted_chars": 0
           },
           {
-            "session_id": "ises_1o7qz9g4px1h",
+            "session_id": "ises_kbv7c97t2xzs",
             "seq": 3,
-            "id": "cmt_ld1sdmipwkme",
+            "id": "cmt_gio7sq2cr576",
             "kind": "message",
             "author_type": "member",
-            "author_id": null,
+            "author_id": "mem_local_local",
             "task_id": null,
             "parent_id": null,
             "metadata": {
               "execution_scope": "",
-              "delivery_turn_id": "tsk_gio7sq2cr576",
+              "delivery_turn_id": "tsk_opj4sjdu303v",
               "envelope": {
                 "to": {
                   "role": "agent",
-                  "agentId": "agt_opj4sjdu303v",
-                  "issueSessionId": "ises_1o7qz9g4px1h"
+                  "agentId": "agt_8o3o0x4b2fhs",
+                  "issueSessionId": "ises_kbv7c97t2xzs"
                 },
                 "kind": "request",
                 "wake": "now",
                 "source": {},
                 "priority": 4,
-                "recipient_agent_id": "agt_opj4sjdu303v"
+                "recipient_agent_id": "agt_8o3o0x4b2fhs"
               }
             },
             "created_at": "<timestamp>",
@@ -27237,28 +27305,28 @@
             "body_omitted_chars": 0
           },
           {
-            "session_id": "ises_1o7qz9g4px1h",
+            "session_id": "ises_kbv7c97t2xzs",
             "seq": 5,
-            "id": "cmt_3s3s3ftajksh",
+            "id": "cmt_5jfyrvtzum2o",
             "kind": "message",
             "author_type": "member",
-            "author_id": null,
+            "author_id": "mem_local_local",
             "task_id": null,
             "parent_id": null,
             "metadata": {
               "execution_scope": "",
-              "delivery_turn_id": "tsk_0bkwp3l99276",
+              "delivery_turn_id": "tsk_1vw2bvc7e21p",
               "envelope": {
                 "to": {
                   "role": "agent",
-                  "agentId": "agt_l30ikvaows9d",
-                  "issueSessionId": "ises_1o7qz9g4px1h"
+                  "agentId": "agt_jez2ujdp6d5n",
+                  "issueSessionId": "ises_kbv7c97t2xzs"
                 },
                 "kind": "request",
                 "wake": "now",
                 "source": {},
                 "priority": 4,
-                "recipient_agent_id": "agt_l30ikvaows9d"
+                "recipient_agent_id": "agt_jez2ujdp6d5n"
               }
             },
             "created_at": "<timestamp>",
@@ -27267,16 +27335,16 @@
             "body_omitted_chars": 0
           },
           {
-            "session_id": "ises_1o7qz9g4px1h",
+            "session_id": "ises_kbv7c97t2xzs",
             "seq": 10,
-            "id": "cmt_t6muwdh0he7w",
+            "id": "cmt_ksxvv40flo7i",
             "kind": "message",
             "author_type": "member",
-            "author_id": "mem_piqp1rpc1xal",
+            "author_id": "mem_local_local",
             "task_id": null,
-            "parent_id": "cmt_0a50xy7qh44z",
+            "parent_id": "cmt_l9lxt2vfpkm6",
             "metadata": {
-              "root_question_id": "cmt_0a50xy7qh44z",
+              "root_question_id": "cmt_l9lxt2vfpkm6",
               "human_response": {
                 "answer": "Proceed",
                 "answers": {
@@ -27287,7 +27355,7 @@
               "question_route_revision": 2,
               "answer_source_turn_id": null,
               "execution_scope": "",
-              "delivery_turn_id": "tsk_gio7sq2cr576"
+              "delivery_turn_id": "tsk_opj4sjdu303v"
             },
             "created_at": "<timestamp>",
             "body_md": "{\"answer\":\"Proceed\",\"answers\":{\"Proceed after restart?\":\"Proceed\"}}",
@@ -27295,70 +27363,70 @@
             "body_omitted_chars": 0
           },
           {
-            "session_id": "ises_1o7qz9g4px1h",
+            "session_id": "ises_kbv7c97t2xzs",
             "seq": 11,
-            "id": "cmt_sz3uar2wj538",
+            "id": "cmt_xz3apo1tzj3z",
             "kind": "message",
             "author_type": "system",
             "author_id": null,
             "task_id": null,
             "parent_id": null,
             "metadata": {
-              "root_question_id": "cmt_0a50xy7qh44z",
+              "root_question_id": "cmt_l9lxt2vfpkm6",
               "question_continuation_unavailable": true,
               "execution_scope": "",
               "envelope": {
                 "to": {
-                  "role": "mem_piqp1rpc1xal"
+                  "role": "mem_local_local"
                 },
                 "kind": "lifecycle",
                 "wake": "inbox_only",
-                "dedupeKey": "question-continuation-unavailable:cmt_0a50xy7qh44z:1:question_source_agent_unavailable",
+                "dedupeKey": "question-continuation-unavailable:cmt_l9lxt2vfpkm6:1:question_source_agent_unavailable",
                 "source": {},
                 "priority": 4
               }
             },
             "created_at": "<timestamp>",
-            "body_md": "问题 cmt_0a50xy7qh44z 的答复已保存；尚未安排续接（question_source_agent_unavailable）。恢复原执行条件后可使用 remi message question continue cmt_0a50xy7qh44z --revision 2。",
+            "body_md": "问题 cmt_l9lxt2vfpkm6 的答复已保存；尚未安排续接（question_source_agent_unavailable）。恢复原执行条件后可使用 remi message question continue cmt_l9lxt2vfpkm6 --revision 2。",
             "body_offset": 0,
             "body_omitted_chars": 0
           },
           {
-            "session_id": "ises_1o7qz9g4px1h",
+            "session_id": "ises_kbv7c97t2xzs",
             "seq": 13,
-            "id": "cmt_daygl2113hw1",
+            "id": "cmt_xrgig2o6bdzy",
             "kind": "message",
             "author_type": "system",
             "author_id": null,
             "task_id": null,
             "parent_id": null,
             "metadata": {
-              "root_question_id": "cmt_0a50xy7qh44z",
+              "root_question_id": "cmt_l9lxt2vfpkm6",
               "question_continuation": true,
               "question_route_revision": 2,
               "authorized_by": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
-              "original_source_turn_id": "tsk_gio7sq2cr576",
+              "original_source_turn_id": "tsk_opj4sjdu303v",
               "execution_scope": "",
-              "delivery_turn_id": "tsk_osjux3lc6x0e",
+              "delivery_turn_id": "tsk_daygl2113hw1",
               "envelope": {
                 "to": {
                   "role": "agent",
-                  "agentId": "agt_opj4sjdu303v",
-                  "issueSessionId": "ises_1o7qz9g4px1h"
+                  "agentId": "agt_8o3o0x4b2fhs",
+                  "issueSessionId": "ises_kbv7c97t2xzs"
                 },
                 "kind": "request",
                 "wake": "now",
-                "dedupeKey": "question-continuation:cmt_0a50xy7qh44z",
+                "dedupeKey": "question-continuation:cmt_l9lxt2vfpkm6",
                 "source": {},
                 "priority": 4,
-                "recipient_agent_id": "agt_opj4sjdu303v"
+                "recipient_agent_id": "agt_8o3o0x4b2fhs"
               }
             },
             "created_at": "<timestamp>",
-            "body_md": "原提问 cmt_0a50xy7qh44z 的 provider 调用已结束（question_source_agent_unavailable）。责任处理者已授权在新轮续接原会话任务。原问题：\nProceed after restart?\n已记录答案：\n{\"answer\":\"Proceed\",\"answers\":{\"Proceed after restart?\":\"Proceed\"}}\n请以新的 provider 会话读取原产品会话上下文继续处理；旧 provider 可能保留未完成工具调用，不要恢复旧 AUQ。",
+            "body_md": "原提问 cmt_l9lxt2vfpkm6 的 provider 调用已结束（question_source_agent_unavailable）。责任处理者已授权在新轮续接原会话任务。原问题：\nProceed after restart?\n已记录答案：\n{\"answer\":\"Proceed\",\"answers\":{\"Proceed after restart?\":\"Proceed\"}}\n请以新的 provider 会话读取原产品会话上下文继续处理；旧 provider 可能保留未完成工具调用，不要恢复旧 AUQ。",
             "body_offset": 0,
             "body_omitted_chars": 0
           }
@@ -27377,18 +27445,18 @@
     {
       "key": "issue-responsibility-and-questions#030 GET /api/messages/:id/question",
       "route": "GET /api/messages/:id/question",
-      "path": "/api/messages/cmt_0a50xy7qh44z/question",
+      "path": "/api/messages/cmt_l9lxt2vfpkm6/question",
       "status": 200,
       "body": {
         "question": {
-          "id": "cmt_0a50xy7qh44z",
+          "id": "cmt_l9lxt2vfpkm6",
           "kind": "question",
-          "session_id": "ises_1o7qz9g4px1h",
+          "session_id": "ises_kbv7c97t2xzs",
           "workspace_id": "local",
-          "source_issue_id": "iss_kbv7c97t2xzs",
-          "source_agent_id": "agt_opj4sjdu303v",
-          "source_turn_id": "tsk_gio7sq2cr576",
-          "source_attempt_id": "tsk_gio7sq2cr576",
+          "source_issue_id": "iss_siv8k0zvn6pd",
+          "source_agent_id": "agt_8o3o0x4b2fhs",
+          "source_turn_id": "tsk_opj4sjdu303v",
+          "source_attempt_id": "tsk_opj4sjdu303v",
           "original_questions": [
             {
               "question": "Proceed after restart?",
@@ -27410,7 +27478,7 @@
           "summary": null,
           "current_handler": {
             "type": "member",
-            "id": "mem_piqp1rpc1xal"
+            "id": "mem_local_local"
           },
           "stage": "human",
           "route_revision": 2,
@@ -27419,10 +27487,10 @@
           "wait_status": "continuation_consumed",
           "wait_reason": "question_source_agent_unavailable",
           "recovery": {
-            "consumer_turn_id": "tsk_osjux3lc6x0e",
-            "consumer_attempt_id": "tsk_osjux3lc6x0e",
-            "reply_message_id": "cmt_t6muwdh0he7w",
-            "continuation_message_id": "cmt_daygl2113hw1",
+            "consumer_turn_id": "tsk_daygl2113hw1",
+            "consumer_attempt_id": "tsk_daygl2113hw1",
+            "reply_message_id": "cmt_ksxvv40flo7i",
+            "continuation_message_id": "cmt_xrgig2o6bdzy",
             "consumed_at": "<timestamp>"
           },
           "answer": {
@@ -27435,10 +27503,10 @@
             "body_md": "{\"answer\":\"Proceed\",\"answers\":{\"Proceed after restart?\":\"Proceed\"}}",
             "actor": {
               "type": "member",
-              "id": "mem_piqp1rpc1xal"
+              "id": "mem_local_local"
             },
             "at": "<timestamp>",
-            "reply_message_id": "cmt_t6muwdh0he7w"
+            "reply_message_id": "cmt_ksxvv40flo7i"
           },
           "answer_revision": 1,
           "history": [
@@ -27447,7 +27515,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_opj4sjdu303v"
+                "id": "agt_8o3o0x4b2fhs"
               },
               "route_revision": 1
             },
@@ -27458,23 +27526,23 @@
               "route_revision": 1,
               "handler": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
-              "source_message_id": "cmt_x3r6ojjytx5j",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_0a50xy7qh44z",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "escalate",
               "at": "<timestamp>",
               "actor": {
                 "type": "agent",
-                "id": "agt_l30ikvaows9d"
+                "id": "agt_jez2ujdp6d5n"
               },
               "route_revision": 2,
               "reason": "Explicit human authorization after restart",
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               }
             },
             {
@@ -27484,10 +27552,10 @@
               "route_revision": 2,
               "handler": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
-              "source_message_id": "cmt_hsf5ql5i58f8",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_dg2roo32wqgi",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "detach",
@@ -27501,7 +27569,7 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 2,
               "answer": {
@@ -27514,20 +27582,20 @@
                 "body_md": "{\"answer\":\"Proceed\",\"answers\":{\"Proceed after restart?\":\"Proceed\"}}",
                 "actor": {
                   "type": "member",
-                  "id": "mem_piqp1rpc1xal"
+                  "id": "mem_local_local"
                 },
                 "at": "<timestamp>",
-                "reply_message_id": "cmt_t6muwdh0he7w"
+                "reply_message_id": "cmt_ksxvv40flo7i"
               },
-              "source_message_id": "cmt_t6muwdh0he7w",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_ksxvv40flo7i",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "detach",
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 2,
               "reason": "question_source_agent_unavailable"
@@ -27537,11 +27605,11 @@
               "at": "<timestamp>",
               "actor": {
                 "type": "member",
-                "id": "mem_piqp1rpc1xal"
+                "id": "mem_local_local"
               },
               "route_revision": 2,
-              "source_message_id": "cmt_daygl2113hw1",
-              "source_session_id": "ises_1o7qz9g4px1h"
+              "source_message_id": "cmt_xrgig2o6bdzy",
+              "source_session_id": "ises_kbv7c97t2xzs"
             },
             {
               "type": "consume",
@@ -28542,8 +28610,8 @@
       "status": 200,
       "body": {
         "id": "local",
-        "externalId": null,
-        "external_id": null,
+        "externalId": "ou_e6b7ffc662b392317275b817295c0b44",
+        "external_id": "ou_e6b7ffc662b392317275b817295c0b44",
         "name": "Snapshot User",
         "email": "local@multiremi.local",
         "avatarUrl": null,
@@ -28571,8 +28639,8 @@
       "status": 200,
       "body": {
         "id": "local",
-        "externalId": null,
-        "external_id": null,
+        "externalId": "ou_e6b7ffc662b392317275b817295c0b44",
+        "external_id": "ou_e6b7ffc662b392317275b817295c0b44",
         "name": "Snapshot User",
         "email": "local@multiremi.local",
         "avatarUrl": null,
@@ -28600,8 +28668,8 @@
       "status": 200,
       "body": {
         "id": "local",
-        "externalId": null,
-        "external_id": null,
+        "externalId": "ou_e6b7ffc662b392317275b817295c0b44",
+        "external_id": "ou_e6b7ffc662b392317275b817295c0b44",
         "name": "Snapshot User",
         "email": "local@multiremi.local",
         "avatarUrl": null,
@@ -28629,8 +28697,8 @@
       "status": 200,
       "body": {
         "id": "local",
-        "externalId": null,
-        "external_id": null,
+        "externalId": "ou_e6b7ffc662b392317275b817295c0b44",
+        "external_id": "ou_e6b7ffc662b392317275b817295c0b44",
         "name": "Snapshot User",
         "email": "local@multiremi.local",
         "avatarUrl": null,
@@ -28682,75 +28750,50 @@
       "key": "members-invitations#000 POST /api/multiremi/members",
       "route": "POST /api/multiremi/members",
       "path": "/api/multiremi/members",
-      "status": 201,
+      "status": 410,
       "body": {
-        "member": {
-          "id": "mem_2ryujm2j4i6h",
-          "workspaceId": "local",
-          "userId": null,
-          "name": "Native member",
-          "email": "native@snapshot.invalid",
-          "role": "member",
-          "archivedAt": null,
-          "createdAt": "<timestamp>",
-          "updatedAt": "<timestamp>"
-        }
+        "error": "Workspace operators are shared; member management is no longer supported",
+        "code": "workspace_members_retired"
       }
     },
     {
       "key": "members-invitations#001 PATCH /api/multiremi/members/:id",
       "route": "PATCH /api/multiremi/members/:id",
       "path": "/api/multiremi/members/mem_snapshot_two",
-      "status": 200,
+      "status": 410,
       "body": {
-        "member": {
-          "id": "mem_snapshot_two",
-          "workspaceId": "local",
-          "userId": "usr_snapshot_two",
-          "name": "Second Member",
-          "email": "second@snapshot.invalid",
-          "role": "admin",
-          "archivedAt": null,
-          "createdAt": "<timestamp>",
-          "updatedAt": "<timestamp>"
-        }
+        "error": "Workspace operators are shared; member management is no longer supported",
+        "code": "workspace_members_retired"
       }
     },
     {
       "key": "members-invitations#002 DELETE /api/multiremi/members/:id",
       "route": "DELETE /api/multiremi/members/:id",
       "path": "/api/multiremi/members/mem_snapshot_two",
-      "status": 200,
+      "status": 410,
       "body": {
-        "member": {
-          "id": "mem_snapshot_two",
-          "workspaceId": "local",
-          "userId": "usr_snapshot_two",
-          "name": "Second Member",
-          "email": "second@snapshot.invalid",
-          "role": "admin",
-          "archivedAt": "<timestamp>",
-          "createdAt": "<timestamp>",
-          "updatedAt": "<timestamp>"
-        }
+        "error": "Workspace operators are shared; member management is no longer supported",
+        "code": "workspace_members_retired"
       }
     },
     {
       "key": "members-invitations#003 POST /api/invitations/:id/decline",
       "route": "POST /api/invitations/:id/decline",
       "path": "/api/invitations/inv_ibk9if0740q3/decline",
-      "status": 403,
+      "status": 410,
       "body": {
-        "error": "invitation does not belong to you"
+        "error": "Workspace operators are shared; invitations are no longer supported",
+        "code": "workspace_invitations_retired"
       }
     },
     {
       "key": "members-invitations#004 POST /api/invitations/:id/accept",
       "route": "POST /api/invitations/:id/accept",
       "path": "/api/invitations/inv_ibk9if0740q3/accept",
-      "status": 403,
+      "status": 410,
       "body": {
-        "error": "invitation does not belong to you"
+        "error": "Workspace operators are shared; invitations are no longer supported",
+        "code": "workspace_invitations_retired"
       }
     },
     {
@@ -29205,7 +29248,7 @@
               },
               {
                 "memberId": "mem_local_local",
-                "name": "Local User",
+                "name": "Operator",
                 "source": "historical_creator",
                 "available": true
               }
@@ -29885,7 +29928,7 @@
       "status": 200,
       "body": {
         "workspaceId": "local",
-        "memberId": null,
+        "memberId": "mem_local_local",
         "preferences": {},
         "updatedAt": "<timestamp>"
       }
@@ -29897,7 +29940,7 @@
       "status": 200,
       "body": {
         "workspaceId": "local",
-        "memberId": null,
+        "memberId": "mem_local_local",
         "preferences": {},
         "updatedAt": "<timestamp>"
       }
@@ -30893,8 +30936,215 @@
       "path": "/api/inbox",
       "status": 200,
       "body": {
-        "items": [],
-        "unread_count": 0,
+        "items": [
+          {
+            "sender_type": "agent",
+            "sender_id": "agt_snapshot",
+            "to_type": "member",
+            "to_ref": "mem_local_local",
+            "to_agent_id": null,
+            "to_member_id": "mem_local_local",
+            "message_kind": "decision",
+            "wake_requested": "inbox_only",
+            "wake_applied": "inbox_only",
+            "wake_reason": "requested_inbox_only",
+            "dedupe_key": null,
+            "options": null,
+            "reply_to_id": null,
+            "session_id": "ises_0w4ud0f59v1p",
+            "seq": 8,
+            "id": "hrq_snapshot_waiting",
+            "kind": "message",
+            "visibility": "shown",
+            "task_id": "tsk_ttgbd5jebyjy",
+            "body_md": "{\"tool\":\"Bash\",\"command\":\"ls\"}",
+            "body_html": "<p>{\"tool\":\"Bash\",\"command\":\"ls\"}</p>",
+            "render_version": "md-a9442f26e49a14bc",
+            "resolved_at": null,
+            "resolved_by_type": null,
+            "resolved_by_id": null,
+            "metadata": {
+              "kind": "permission",
+              "human_request": {
+                "status": "pending",
+                "kind": "permission",
+                "payload": {
+                  "tool": "Bash",
+                  "command": "ls",
+                  "root_question_id": "hrq_snapshot_waiting",
+                  "route_revision": 1,
+                  "question_summary": null,
+                  "question_summary_wait_until": null
+                },
+                "expires_at": null
+              },
+              "question": {
+                "version": 1,
+                "workspace_id": "local",
+                "source_issue_id": "iss_snapshot",
+                "source_attempt_id": "tsk_ttgbd5jebyjy",
+                "responsibility_revision": "337999b60f9c38d8bf13b4ae8910ea4f8dde15ed00761cdc7010c2bf8fc710c1",
+                "human_required": true,
+                "route": [
+                  {
+                    "handler": {
+                      "type": "member",
+                      "id": "mem_local_local"
+                    },
+                    "issue_id": "iss_snapshot",
+                    "stage": "human"
+                  }
+                ],
+                "route_index": 0,
+                "route_revision": 1,
+                "route_reason": null,
+                "status": "pending",
+                "summary": null,
+                "answer": null,
+                "answer_revision": 0,
+                "history": [
+                  {
+                    "type": "created",
+                    "at": "<timestamp>",
+                    "actor": {
+                      "type": "agent",
+                      "id": "agt_snapshot"
+                    },
+                    "route_revision": 1
+                  },
+                  {
+                    "type": "transfer",
+                    "at": "<timestamp>",
+                    "actor": null,
+                    "route_revision": 1,
+                    "handler": {
+                      "type": "member",
+                      "id": "mem_local_local"
+                    },
+                    "source_message_id": "hrq_snapshot_waiting",
+                    "source_session_id": "ises_0w4ud0f59v1p"
+                  }
+                ],
+                "wait": {
+                  "status": "detached",
+                  "reason": "native_wait_unverified"
+                },
+                "summary_wait_until": null
+              },
+              "execution_scope": ""
+            },
+            "revision": 2,
+            "created_at": "<timestamp>",
+            "updated_at": "<timestamp>",
+            "deleted_at": null,
+            "attachments": [],
+            "reactions": []
+          },
+          {
+            "sender_type": "agent",
+            "sender_id": "agt_snapshot",
+            "to_type": "member",
+            "to_ref": "mem_local_local",
+            "to_agent_id": null,
+            "to_member_id": "mem_local_local",
+            "message_kind": "decision",
+            "wake_requested": "inbox_only",
+            "wake_applied": "inbox_only",
+            "wake_reason": "requested_inbox_only",
+            "dedupe_key": null,
+            "options": null,
+            "reply_to_id": null,
+            "session_id": "ises_0w4ud0f59v1p",
+            "seq": 3,
+            "id": "hrq_snapshot",
+            "kind": "message",
+            "visibility": "shown",
+            "task_id": "tsk_snapshot",
+            "body_md": "{\"tool\":\"Bash\",\"command\":\"ls\"}",
+            "body_html": "<p>{\"tool\":\"Bash\",\"command\":\"ls\"}</p>",
+            "render_version": "md-a9442f26e49a14bc",
+            "resolved_at": null,
+            "resolved_by_type": null,
+            "resolved_by_id": null,
+            "metadata": {
+              "kind": "permission",
+              "human_request": {
+                "status": "pending",
+                "kind": "permission",
+                "payload": {
+                  "tool": "Bash",
+                  "command": "ls",
+                  "root_question_id": "hrq_snapshot",
+                  "route_revision": 1,
+                  "question_summary": null,
+                  "question_summary_wait_until": null
+                },
+                "expires_at": null
+              },
+              "question": {
+                "version": 1,
+                "workspace_id": "local",
+                "source_issue_id": "iss_snapshot",
+                "source_attempt_id": "tsk_snapshot",
+                "responsibility_revision": "337999b60f9c38d8bf13b4ae8910ea4f8dde15ed00761cdc7010c2bf8fc710c1",
+                "human_required": true,
+                "route": [
+                  {
+                    "handler": {
+                      "type": "member",
+                      "id": "mem_local_local"
+                    },
+                    "issue_id": "iss_snapshot",
+                    "stage": "human"
+                  }
+                ],
+                "route_index": 0,
+                "route_revision": 1,
+                "route_reason": null,
+                "status": "pending",
+                "summary": null,
+                "answer": null,
+                "answer_revision": 0,
+                "history": [
+                  {
+                    "type": "created",
+                    "at": "<timestamp>",
+                    "actor": {
+                      "type": "agent",
+                      "id": "agt_snapshot"
+                    },
+                    "route_revision": 1
+                  },
+                  {
+                    "type": "transfer",
+                    "at": "<timestamp>",
+                    "actor": null,
+                    "route_revision": 1,
+                    "handler": {
+                      "type": "member",
+                      "id": "mem_local_local"
+                    },
+                    "source_message_id": "hrq_snapshot",
+                    "source_session_id": "ises_0w4ud0f59v1p"
+                  }
+                ],
+                "wait": {
+                  "status": "detached",
+                  "reason": "native_wait_unverified"
+                },
+                "summary_wait_until": null
+              },
+              "execution_scope": ""
+            },
+            "revision": 2,
+            "created_at": "<timestamp>",
+            "updated_at": "<timestamp>",
+            "deleted_at": null,
+            "attachments": [],
+            "reactions": []
+          }
+        ],
+        "unread_count": 2,
         "attention_count": 0,
         "next_cursor": null
       }
@@ -30915,7 +31165,7 @@
       "path": "/api/inbox/read",
       "status": 200,
       "body": {
-        "conversations_read": 0
+        "conversations_read": 1
       }
     },
     {
@@ -31081,7 +31331,7 @@
           "messages": [
             {
               "sender_type": "member",
-              "sender_id": null,
+              "sender_id": "mem_local_local",
               "to_type": "agent",
               "to_ref": "agt_snapshot",
               "to_agent_id": "agt_snapshot",
@@ -31326,7 +31576,11 @@
         "createdAt": "<timestamp>",
         "created_at": "<timestamp>",
         "updatedAt": "<timestamp>",
-        "updated_at": "<timestamp>"
+        "updated_at": "<timestamp>",
+        "operator": {
+          "userId": "local",
+          "memberId": "mem_ws_2ryujm2j4i6h_local"
+        }
       }
     },
     {
@@ -31347,7 +31601,11 @@
         "createdAt": "<timestamp>",
         "created_at": "<timestamp>",
         "updatedAt": "<timestamp>",
-        "updated_at": "<timestamp>"
+        "updated_at": "<timestamp>",
+        "operator": {
+          "userId": "local",
+          "memberId": "mem_ws_2ryujm2j4i6h_local"
+        }
       }
     },
     {
@@ -31368,69 +31626,52 @@
         "createdAt": "<timestamp>",
         "created_at": "<timestamp>",
         "updatedAt": "<timestamp>",
-        "updated_at": "<timestamp>"
+        "updated_at": "<timestamp>",
+        "operator": {
+          "userId": "local",
+          "memberId": "mem_ws_2ryujm2j4i6h_local"
+        }
       }
     },
     {
       "key": "workspaces#003 POST /api/workspaces/:id/members",
       "route": "POST /api/workspaces/:id/members",
       "path": "/api/workspaces/ws_2ryujm2j4i6h/members",
-      "status": 201,
+      "status": 410,
       "body": {
-        "id": "inv_q5010won31uy",
-        "workspaceId": "ws_2ryujm2j4i6h",
-        "workspace_id": "ws_2ryujm2j4i6h",
-        "inviterId": "local",
-        "inviter_id": "local",
-        "inviteeEmail": "invitee@snapshot.invalid",
-        "invitee_email": "invitee@snapshot.invalid",
-        "inviteeUserId": null,
-        "invitee_user_id": null,
-        "role": "member",
-        "status": "pending",
-        "createdAt": "<timestamp>",
-        "created_at": "<timestamp>",
-        "updatedAt": "<timestamp>",
-        "updated_at": "<timestamp>",
-        "expiresAt": "<timestamp>",
-        "expires_at": "<timestamp>",
-        "inviterName": "Local User",
-        "inviter_name": "Local User",
-        "inviterEmail": "local@multiremi.local",
-        "inviter_email": "local@multiremi.local",
-        "workspaceName": "Flow workspace renamed",
-        "workspace_name": "Flow workspace renamed"
+        "error": "Workspace operators are shared; member management is no longer supported",
+        "code": "workspace_members_retired"
       }
     },
     {
       "key": "workspaces#004 PATCH /api/workspaces/:id/members/:memberId",
       "route": "PATCH /api/workspaces/:id/members/:memberId",
       "path": "/api/workspaces/local/members/mem_snapshot_two",
-      "status": 200,
+      "status": 410,
       "body": {
-        "id": "mem_snapshot_two",
-        "workspace_id": "local",
-        "user_id": "usr_snapshot_two",
-        "role": "admin",
-        "created_at": "<timestamp>",
-        "name": "Second Member",
-        "avatar_url": null,
-        "email": "second@snapshot.invalid"
+        "error": "Workspace operators are shared; member management is no longer supported",
+        "code": "workspace_members_retired"
       }
     },
     {
       "key": "workspaces#005 DELETE /api/workspaces/:id/members/:memberId",
       "route": "DELETE /api/workspaces/:id/members/:memberId",
       "path": "/api/workspaces/local/members/mem_snapshot_two",
-      "status": 204,
-      "body": ""
+      "status": 410,
+      "body": {
+        "error": "Workspace operators are shared; member management is no longer supported",
+        "code": "workspace_members_retired"
+      }
     },
     {
       "key": "workspaces#006 DELETE /api/workspaces/:id/invitations/:invitationId",
       "route": "DELETE /api/workspaces/:id/invitations/:invitationId",
-      "path": "/api/workspaces/ws_2ryujm2j4i6h/invitations/inv_q5010won31uy",
-      "status": 204,
-      "body": ""
+      "path": "/api/workspaces/ws_2ryujm2j4i6h/invitations/inv_ibk9if0740q3",
+      "status": 410,
+      "body": {
+        "error": "Workspace operators are shared; invitations are no longer supported",
+        "code": "workspace_invitations_retired"
+      }
     },
     {
       "key": "workspaces#007 PUT /api/workspaces/:id/relay-config/:engine",
@@ -31492,9 +31733,10 @@
       "key": "workspaces#012 POST /api/workspaces/:id/leave",
       "route": "POST /api/workspaces/:id/leave",
       "path": "/api/workspaces/ws_2ryujm2j4i6h/leave",
-      "status": 400,
+      "status": 410,
       "body": {
-        "error": "workspace must have at least one owner"
+        "error": "Workspace operators are shared; leaving a workspace is no longer supported",
+        "code": "workspace_members_retired"
       }
     },
     {

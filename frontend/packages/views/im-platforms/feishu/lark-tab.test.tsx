@@ -33,7 +33,7 @@ const mockInvalidate = vi.hoisted(() => vi.fn());
 type MemberRole = "owner" | "admin" | "member" | "guest";
 
 const membersRef = vi.hoisted(() => ({
-  current: [{ user_id: "user-1", role: "owner" as MemberRole }],
+  current: [{ user_id: "local", role: "owner" as MemberRole }],
 }));
 const installationsRef = vi.hoisted(() => ({
   current: {
@@ -175,7 +175,7 @@ function StrictModeWrapper({ children }: { children: ReactNode }) {
 
 function resetFixtures() {
   vi.clearAllMocks();
-  membersRef.current = [{ user_id: "user-1", role: "owner" }];
+  membersRef.current = [{ user_id: "local", role: "owner" }];
   installationsRef.current = {
     installations: [],
     configured: true,
@@ -199,7 +199,7 @@ describe("LarkAgentBindButton (CTA gate)", () => {
   });
 
   it("shows the Feishu bind CTA but hides the Lark CTA for an admin (MUL-3083)", () => {
-    membersRef.current = [{ user_id: "user-1", role: "admin" }];
+    membersRef.current = [{ user_id: "local", role: "admin" }];
     render(<LarkAgentBindButton agentId="agent-1" agentName="Bot" />, {
       wrapper: I18nWrapper,
     });
@@ -208,7 +208,7 @@ describe("LarkAgentBindButton (CTA gate)", () => {
   });
 
   it("hides both bind CTAs for a non-admin agent owner (matches backend admin gate)", () => {
-    membersRef.current = [{ user_id: "user-1", role: "member" }];
+    membersRef.current = [{ user_id: "local", role: "member" }];
     const { container } = render(
       <LarkAgentBindButton agentId="agent-1" agentName="Bot" />,
       { wrapper: I18nWrapper },
@@ -274,7 +274,7 @@ describe("LarkAgentBindButton (CTA gate)", () => {
         agent_id: "agent-1",
         app_id: "cli_existing_app",
         bot_open_id: "ou_existing_bot",
-        installer_user_id: "user-1",
+        installer_user_id: "local",
         status: "active",
         installed_at: "2026-06-03T00:00:00Z",
         created_at: "2026-06-03T00:00:00Z",
@@ -316,7 +316,7 @@ describe("LarkAgentBindButton (CTA gate)", () => {
         agent_id: "agent-1",
         app_id: "cli_lark_app",
         bot_open_id: "ou_lark_bot",
-        installer_user_id: "user-1",
+        installer_user_id: "local",
         status: "active",
         region: "lark",
         installed_at: "2026-06-03T00:00:00Z",
@@ -340,7 +340,7 @@ describe("LarkAgentBindButton (CTA gate)", () => {
         agent_id: "agent-other",
         app_id: "cli_other",
         bot_open_id: "ou_other",
-        installer_user_id: "user-1",
+        installer_user_id: "local",
         status: "active",
         installed_at: "2026-06-03T00:00:00Z",
         created_at: "2026-06-03T00:00:00Z",
@@ -368,7 +368,7 @@ describe("LarkAgentBindButton (CTA gate)", () => {
         agent_id: "agent-1",
         app_id: "cli_existing_app",
         bot_open_id: "ou_existing_bot",
-        installer_user_id: "user-1",
+        installer_user_id: "local",
         status: "active",
         installed_at: "2026-06-03T00:00:00Z",
         created_at: "2026-06-03T00:00:00Z",
@@ -401,7 +401,7 @@ describe("LarkAgentBindButton (CTA gate)", () => {
         agent_id: "agent-1",
         app_id: "cli_revoked",
         bot_open_id: "ou_revoked",
-        installer_user_id: "user-1",
+        installer_user_id: "local",
         status: "revoked",
         installed_at: "2026-06-03T00:00:00Z",
         created_at: "2026-06-03T00:00:00Z",
@@ -432,7 +432,7 @@ describe("LarkAgentBotConnectedBadge (Unbind / Disconnect)", () => {
         agent_id: "agent-1",
         app_id: "cli_existing_app",
         bot_open_id: "ou_existing_bot",
-        installer_user_id: "user-1",
+        installer_user_id: "local",
         status: "active",
         installed_at: "2026-06-03T00:00:00Z",
         created_at: "2026-06-03T00:00:00Z",
@@ -695,7 +695,7 @@ describe("LarkTab connected bots list (agent identity rendering)", () => {
         agent_id: "agent-1",
         app_id: "cli_aa941499d4f95cd9",
         bot_open_id: "ou_abc123",
-        installer_user_id: "user-1",
+        installer_user_id: "local",
         status: "active",
         installed_at: "2026-06-03T00:00:00Z",
         created_at: "2026-06-03T00:00:00Z",
@@ -731,7 +731,7 @@ describe("LarkTab connected bots list (agent identity rendering)", () => {
         agent_id: "agent-deleted",
         app_id: "cli_orphan",
         bot_open_id: "ou_orphan",
-        installer_user_id: "user-1",
+        installer_user_id: "local",
         status: "active",
         installed_at: "2026-06-03T00:00:00Z",
         created_at: "2026-06-03T00:00:00Z",
@@ -776,7 +776,7 @@ describe("LarkTab as a legacy-only panel (MUL-206)", () => {
           agent_id: "agent-1",
           app_id: "cli_legacy",
           bot_open_id: "ou_legacy",
-          installer_user_id: "user-1",
+          installer_user_id: "local",
           status: "active",
           installed_at: "2026-06-03T00:00:00Z",
           created_at: "2026-06-03T00:00:00Z",

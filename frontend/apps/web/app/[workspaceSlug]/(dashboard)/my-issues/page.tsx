@@ -1,7 +1,13 @@
 "use client";
 
-import { MyIssuesPage } from "@multiremi/views/my-issues";
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { useWorkspacePaths } from "@multiremi/core/paths";
 
+/** The shared workspace has one issue collection. Preserve old bookmarks. */
 export default function Page() {
-  return <MyIssuesPage />;
+  const router = useRouter();
+  const paths = useWorkspacePaths();
+  useEffect(() => { router.replace(paths.issues()); }, [router, paths]);
+  return null;
 }

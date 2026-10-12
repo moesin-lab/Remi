@@ -10,7 +10,7 @@ import enIssues from "../../locales/en/issues.json";
 type MemberRole = "owner" | "admin" | "member" | "guest";
 
 const membersRef = vi.hoisted(() => ({
-  current: [{ user_id: "user-1", role: "owner" as MemberRole }],
+  current: [{ user_id: "local", role: "owner" as MemberRole }],
 }));
 const botRef = vi.hoisted(() => ({ current: undefined as unknown }));
 const statusRef = vi.hoisted(() => ({ current: undefined as unknown }));
@@ -208,7 +208,7 @@ const CANDIDATES = {
 
 function resetFixtures() {
   vi.clearAllMocks();
-  membersRef.current = [{ user_id: "user-1", role: "owner" }];
+  membersRef.current = [{ user_id: "local", role: "owner" }];
   botRef.current = CONFIGURED;
   statusRef.current = undefined;
   candidatesRef.current = CANDIDATES;
@@ -226,7 +226,7 @@ function resetFixtures() {
 describe("FeishuBotSection (member view)", () => {
   beforeEach(() => {
     resetFixtures();
-    membersRef.current = [{ user_id: "user-1", role: "member" }];
+    membersRef.current = [{ user_id: "local", role: "member" }];
     botRef.current = {
       role: "member",
       availability: { configured: true, available: true, bot_name: "Remi Bot" },
@@ -263,7 +263,7 @@ describe("FeishuBotSection (member view)", () => {
     // Role comes from the member list; the payload comes from the server. If
     // they disagree the payload wins, so a stale cached role cannot render an
     // admin form over a member response.
-    membersRef.current = [{ user_id: "user-1", role: "owner" }];
+    membersRef.current = [{ user_id: "local", role: "owner" }];
     botRef.current = {
       role: "member",
       availability: { configured: true, available: true, bot_name: "Remi Bot" },

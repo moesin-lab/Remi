@@ -70,7 +70,7 @@ export function executionGroupRuntimes(store: MultiremiStore, workspaceId: strin
   return store.listRuntimes().filter((runtime) => ids.has(runtime.id)
     && (runtime.workspaceId ?? "local") === workspaceId
     && (runtime.provider === "any" || runtime.provider === group.provider)
-    && (runtime.visibility === "public" || (runtime.ownerId ?? "local") === ownerId));
+    );
 }
 
 /** An explicit group model must be supported by every currently eligible member. */
@@ -1114,7 +1114,7 @@ export function resolveAgentRequestProvider(
     const requestedProvider = cleanString(typeof input.provider === "string" ? input.provider : null);
     if (requestedProvider && requestedProvider !== group.provider) return c.json({ error: "provider does not match the selected execution group" }, 400);
     if (!executionGroupRuntimes(store, workspaceId, groupId, agentOwnerId).length) {
-      return c.json({ error: "no execution group member can run this owner's agents" }, 403);
+      return c.json({ error: "no execution group member is available in this workspace" }, 403);
     }
     return group.provider;
   }
@@ -1124,10 +1124,7 @@ export function resolveAgentRequestProvider(
       return c.json({ error: "invalid runtime_id" }, 400);
     }
     if (!canCurrentUserUseRuntime(c, store, runtime)) {
-      return c.json({ error: "this runtime is private; only its owner or a workspace admin can create agents on it" }, 403);
-    }
-    if (runtime.visibility !== "public" && (runtime.ownerId ?? "local") !== agentOwnerId) {
-      return c.json({ error: "a private runtime can only execute agents owned by its owner" }, 403);
+      return c.json({ error: "this credential cannot use the selected runtime" }, 403);
     }
     const requestedProvider = cleanString(typeof input.provider === "string" ? input.provider : null);
     if (runtime.provider !== "any" && requestedProvider && requestedProvider !== runtime.provider) {

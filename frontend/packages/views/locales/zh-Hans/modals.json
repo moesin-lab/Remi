@@ -71,7 +71,7 @@
     "members_selected_count_other": "已选 {{count}} 人",
     "members_more_count": "+{{count}}",
     "members_remove_aria": "移除 {{name}}",
-    "picker_search_placeholder": "搜索 Agent 或成员...",
+    "picker_search_placeholder": "搜索 Agent...",
     "group_my_agents": "我的 Agent",
     "group_workspace_agents": "工作区 Agent",
     "group_members": "成员",

@@ -47,15 +47,14 @@ async function fixture() {
     reset() { bytes = 0; queries.length = 0; usageReads.length = 0; }, bytes: () => bytes };
 }
 
-test("snapshot filters Chat before hydration and preserves complete public rows for both identities", async () => {
+test("snapshot shares human Chat rows and filters task scope before hydration", async () => {
   const f = await fixture();
   const nonChat = f.store.createTask({ agentId: f.seed.primaryAgentId, prompt: "workspace task" });
   for (const id of [nonChat.id, f.seed.taskIds[0]!]) seedFirstScreenTaskUsage(f.store, id);
   const all = f.store.listWorkspaceAgentTaskSnapshot("local");
   for (const userId of [f.seed.readerUserId, f.seed.ownerUserId, null]) {
     const expected = all.filter((task) => !task.chatSessionId ||
-      (f.store.getChatSession(task.chatSessionId) != null &&
-        (userId === null || f.store.getChatSession(task.chatSessionId)!.creatorId === userId))).map(taskPublicResponse);
+      f.store.getChatSession(task.chatSessionId) != null).map(taskPublicResponse);
     f.reset();
     const actual = f.store.listWorkspaceAgentTaskSnapshot("local", { userId }).map(taskPublicResponse);
     expect(actual).toEqual(expected);
@@ -64,7 +63,6 @@ test("snapshot filters Chat before hydration and preserves complete public rows 
     expect(f.usageReads).toEqual([expected.map((task) => task.id)]);
     expect(f.queries.some((sql) => /SELECT task\.\*/.test(sql))).toBe(false);
     expect(f.queries.some((sql) => /codex_profile|claude_profile|delegation_id/.test(sql))).toBe(false);
-    if (userId === f.seed.ownerUserId) expect(f.bytes()).toBeLessThan(10_000);
   }
   const task = all.find((row) => row.chatSessionId)!;
   const own = f.store.listWorkspaceAgentTaskSnapshot("local", { userId: f.seed.ownerUserId,
@@ -79,30 +77,34 @@ test("snapshot filters Chat before hydration and preserves complete public rows 
   expect(f.store.listWorkspaceAgentTaskSnapshot("local", { userId: null }).some((row) => row.id === task.id)).toBe(false);
   f.db.run("UPDATE multiremi_turns SET session_id = 'auto_orphan_local', chat_session_id = NULL WHERE current_attempt_id = ?", [task.id]);
   expect(f.store.listWorkspaceAgentTaskSnapshot("local", { userId: f.seed.ownerUserId }).some((row) => row.id === task.id)).toBe(true);
-  // Invisible payloads, private profiles and obsolete usage JSON cannot increase bridge bytes.
+  // A task credential cannot hydrate another Chat's payloads or private profiles.
+  const taskAccess = { userId: f.seed.ownerUserId,
+    taskToken: { taskId: task.id, agentId: task.agentId, workspaceId: task.workspaceId } };
   f.reset();
-  const baseline = f.store.listWorkspaceAgentTaskSnapshot("local", { userId: f.seed.ownerUserId }).map(taskPublicResponse);
+  const baseline = f.store.listWorkspaceAgentTaskSnapshot("local", taskAccess).map(taskPublicResponse);
   const baselineBytes = f.bytes();
-  for (const task of all.filter(row => row.chatSessionId && f.store.getChatSession(row.chatSessionId)?.creatorId === f.seed.readerUserId)) {
-    const turn = f.store.getTurnForAttempt(task.id)!;
+  for (const other of all.filter(row => row.id !== task.id && row.chatSessionId && f.store.getChatSession(row.chatSessionId)?.creatorId === f.seed.readerUserId)) {
+    const turn = f.store.getTurnForAttempt(other.id)!;
     const reply = f.store.sendMessage({ session_id: turn.session_id, source_turn_id: turn.id,
-      sender: { type: "agent", id: task.agentId }, to: { type: "none" }, message_kind: "reply",
+      sender: { type: "agent", id: other.agentId }, to: { type: "none" }, message_kind: "reply",
       wake_requested: "inbox_only", body_md: "r".repeat(16_384), visibility: "hidden" });
     f.db.run("UPDATE multiremi_turns SET reply_message_id = ? WHERE id = ?", [reply.message.id, turn.id]);
   }
-  f.mutateExecution("UPDATE multiremi_turn_execution_records SET prompt = ?, codex_profile = ? WHERE chat_session_id IN (SELECT id FROM multiremi_chat_sessions WHERE creator_id = ?)",
-    ["p".repeat(16_384), JSON.stringify({ large: "x".repeat(16_384) }), f.seed.readerUserId]);
+  f.mutateExecution("UPDATE multiremi_turn_execution_records SET prompt = ?, codex_profile = ? WHERE id != ? AND chat_session_id IN (SELECT id FROM multiremi_chat_sessions WHERE creator_id = ?)",
+    ["p".repeat(16_384), JSON.stringify({ large: "x".repeat(16_384) }), task.id, f.seed.readerUserId]);
   f.mutateExecution("UPDATE multiremi_turn_execution_records SET usage = ? WHERE 1 = 1", [JSON.stringify([{ provider: "claude", model: "legacy-decoy",
     inputTokens: 999_999, outputTokens: 0, padding: "x".repeat(65_536) }])]);
   f.reset();
-  expect(f.store.listWorkspaceAgentTaskSnapshot("local", { userId: f.seed.ownerUserId }).map(taskPublicResponse)).toEqual(baseline);
+  expect(f.store.listWorkspaceAgentTaskSnapshot("local", taskAccess).map(taskPublicResponse)).toEqual(baseline);
   expect(f.bytes()).toBe(baselineBytes);
   f.reset();
-  expect(f.store.listWorkspaceAgentTaskSnapshot("local", { userId: "no-chat-access" })).toHaveLength(2);
+  const invalidTaskAccess = { userId: f.seed.ownerUserId,
+    taskToken: { taskId: "missing", agentId: task.agentId, workspaceId: task.workspaceId } };
+  expect(f.store.listWorkspaceAgentTaskSnapshot("local", invalidTaskAccess)).toHaveLength(2);
   expect(f.bytes()).toBeLessThan(10_000);
   f.mutateExecution("UPDATE multiremi_turn_execution_records SET status = 'cancelled' WHERE chat_session_id IS NULL");
   f.reset();
-  expect(f.store.listWorkspaceAgentTaskSnapshot("local", { userId: "no-chat-access" })).toEqual([]);
+  expect(f.store.listWorkspaceAgentTaskSnapshot("local", invalidTaskAccess)).toEqual([]);
   expect(f.bytes()).toBeLessThan(100);
 }, 20000);
 
@@ -116,12 +118,16 @@ test("invisible latest outcome does not promote older visible outcome; missing c
   f.mutateExecution("UPDATE multiremi_turn_execution_records SET status = 'failed', failed_at = ?, updated_at = ? WHERE id = ?",
     ["2026-02-01T00:00:00.000Z", "2026-02-01T00:00:00.000Z", hidden.id]);
   const snapshot = f.store.listWorkspaceAgentTaskSnapshot("local", { userId: f.seed.ownerUserId });
-  expect(snapshot.some((task) => task.id === visible.id || task.id === hidden.id)).toBe(false);
+  expect(snapshot.some((task) => task.id === visible.id)).toBe(false);
+  expect(snapshot.some((task) => task.id === hidden.id)).toBe(true);
+  const taskSnapshot = f.store.listWorkspaceAgentTaskSnapshot("local", { userId: f.seed.ownerUserId,
+    taskToken: { taskId: visible.id, agentId: visible.agentId, workspaceId: visible.workspaceId } });
+  expect(taskSnapshot.some((task) => task.id === visible.id || task.id === hidden.id)).toBe(false);
   f.db.run("UPDATE multiremi_turns SET session_id = 'chat_missing', chat_session_id = 'chat_missing' WHERE current_attempt_id = ?", [visible.id]);
   expect(f.store.listWorkspaceAgentTaskSnapshot("local", { userId: null }).some((task) => task.id === visible.id)).toBe(false);
 }, 20000);
 
-test("both snapshot routes return the same creator-scoped public contract", async () => {
+test("both snapshot routes share the same human public contract and preserve task bindings", async () => {
   const f = await fixture();
   seedFirstScreenTaskUsage(f.store, f.seed.taskIds[0]!);
   expect(f.store.getTask(f.seed.taskIds[0]!)?.usage).toEqual(firstScreenTaskUsage);
@@ -130,7 +136,7 @@ test("both snapshot routes return the same creator-scoped public contract", asyn
     const credential = await f.store.createAccessToken({ name: "snapshot fixture", type: "pat", userId, workspaceId: "local" });
     const headers = { Authorization: `Bearer ${credential.token}`, "X-Workspace-ID": "local" };
     const expected = f.store.listWorkspaceAgentTaskSnapshot("local").filter((task) => !task.chatSessionId ||
-      f.store.getChatSession(task.chatSessionId)?.creatorId === userId).map(taskPublicResponse);
+      f.store.getChatSession(task.chatSessionId) != null).map(taskPublicResponse);
     for (const path of ["/api/agent-task-snapshot", "/api/multiremi/agent-task-snapshot"]) {
       const response = await app.request(path, { headers });
       expect(response.status).toBe(200);

@@ -9,7 +9,7 @@ import enIssues from "../../locales/en/issues.json";
 import type { IssueTopicConfigResponse } from "@multiremi/core/types";
 
 const membersRef = vi.hoisted(() => ({
-  current: [{ user_id: "user-1", role: "owner" }],
+  current: [{ user_id: "local", role: "owner" }],
 }));
 const configRef = vi.hoisted(() => ({
   current: {
@@ -91,7 +91,7 @@ function renderSection() {
 
 function resetFixtures() {
   vi.clearAllMocks();
-  membersRef.current = [{ user_id: "user-1", role: "owner" }];
+  membersRef.current = [{ user_id: "local", role: "owner" }];
   configRef.current = {
     workspace_id: "workspace-1",
     config: { enabled: true, chat_id: "oc_team", project_ids: ["prj_1"] },
@@ -147,7 +147,7 @@ describe("IssueTopicSection", () => {
   });
 
   it("shows the stored validation reason to read-only members", () => {
-    membersRef.current = [{ user_id: "user-1", role: "member" }];
+    membersRef.current = [{ user_id: "local", role: "member" }];
     configRef.current.invalid = { code: "issue_topic_config_invalid", message: "issueTopics.enabled must be a boolean" };
     renderSection();
     expect(screen.getByRole("alert")).toHaveTextContent("issueTopics.enabled must be a boolean");
@@ -214,7 +214,7 @@ describe("IssueTopicSection", () => {
   });
 
   it("renders a read-only form for regular members", async () => {
-    membersRef.current = [{ user_id: "user-1", role: "member" }];
+    membersRef.current = [{ user_id: "local", role: "member" }];
     renderSection();
 
     await waitFor(() => expect(screen.getByLabelText("Feishu group chat ID")).toBeDisabled());

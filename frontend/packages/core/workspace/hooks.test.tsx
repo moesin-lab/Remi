@@ -40,7 +40,7 @@ describe("useActorName", () => {
 
   it.each([member.id, member.user_id])("resolves a member's name and avatar for identity %s", (id) => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-    qc.setQueryData(workspaceKeys.members("ws-1"), [member]);
+    qc.setQueryData(workspaceKeys.historicalActors("ws-1"), [member]);
     const { result } = renderHook(() => useActorName(), { wrapper: createWrapper(qc) });
 
     expect(result.current.getMemberName(id)).toBe("测试用户");
@@ -54,7 +54,7 @@ describe("useActorName", () => {
 
   it("prefers the exact member row over another member's user-id alias", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-    qc.setQueryData(workspaceKeys.members("ws-1"), [
+    qc.setQueryData(workspaceKeys.historicalActors("ws-1"), [
       { ...member, id: "mem_other", user_id: member.id, name: "Other member", avatar_url: "/other.png" },
       member,
     ]);

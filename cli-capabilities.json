@@ -5,6 +5,7 @@
   "domains": [
     "context",
     "workspace",
+    "account",
     "member",
     "invite",
     "token",
@@ -155,22 +156,6 @@
         "human"
       ],
       "capability": "workspace.delete",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "workspace.leave": {
-      "command": "remi workspace leave",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "workspace.leave",
       "mutation": "destructive",
       "output": [
         "table",
@@ -1005,8 +990,8 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "member": {
-      "command": "remi member",
+    "account": {
+      "command": "remi account",
       "aliases": [],
       "auth": [],
       "capability": null,
@@ -1015,14 +1000,142 @@
       "hidden": false,
       "migration_status": "native"
     },
-    "member.list": {
-      "command": "remi member list",
-      "aliases": [],
+    "workspace.operator": {
+      "command": "remi workspace operator",
+      "aliases": [
+        "remi member list"
+      ],
       "auth": [
         "human"
       ],
-      "capability": "member.list",
+      "capability": "workspace.operator",
       "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.get": {
+      "command": "remi account get",
+      "aliases": [
+        "remi member get me"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.update": {
+      "command": "remi account update",
+      "aliases": [
+        "remi member update me"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.onboarding.update": {
+      "command": "remi account onboarding update",
+      "aliases": [
+        "remi member onboarding update"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.onboarding.complete": {
+      "command": "remi account onboarding complete",
+      "aliases": [
+        "remi member onboarding complete"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.complete",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.onboarding.cloud-waitlist": {
+      "command": "remi account onboarding cloud-waitlist",
+      "aliases": [
+        "remi member onboarding cloud-waitlist"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.cloud-waitlist",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.onboarding.runtime-bootstrap": {
+      "command": "remi account onboarding runtime-bootstrap",
+      "aliases": [
+        "remi member onboarding runtime-bootstrap"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.runtime-bootstrap",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "account.onboarding.no-runtime-bootstrap": {
+      "command": "remi account onboarding no-runtime-bootstrap",
+      "aliases": [
+        "remi member onboarding no-runtime-bootstrap"
+      ],
+      "auth": [
+        "human"
+      ],
+      "capability": "account.onboarding.no-runtime-bootstrap",
+      "mutation": "write",
       "output": [
         "table",
         "json",
@@ -1044,23 +1157,7 @@
         "json",
         "jsonl"
       ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.create": {
-      "command": "remi member create",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.create",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
+      "hidden": true,
       "migration_status": "native"
     },
     "member.update": {
@@ -1069,216 +1166,10 @@
       "auth": [
         "human"
       ],
-      "capability": "member.update",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.delete": {
-      "command": "remi member delete",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.delete",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.onboarding.update": {
-      "command": "remi member onboarding update",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.update",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.onboarding.complete": {
-      "command": "remi member onboarding complete",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.complete",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.onboarding.cloud-waitlist": {
-      "command": "remi member onboarding cloud-waitlist",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.cloud-waitlist",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.onboarding.runtime-bootstrap": {
-      "command": "remi member onboarding runtime-bootstrap",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.runtime-bootstrap",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "member.onboarding.no-runtime-bootstrap": {
-      "command": "remi member onboarding no-runtime-bootstrap",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "member.onboarding.no-runtime-bootstrap",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite": {
-      "command": "remi invite",
-      "aliases": [],
-      "auth": [],
       "capability": null,
-      "mutation": "read",
+      "mutation": "write",
       "output": [],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite.list": {
-      "command": "remi invite list",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.list",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite.get": {
-      "command": "remi invite get",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.get",
-      "mutation": "read",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite.create": {
-      "command": "remi invite create",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.create",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite.accept": {
-      "command": "remi invite accept",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.accept",
-      "mutation": "write",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite.decline": {
-      "command": "remi invite decline",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.decline",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
-      "migration_status": "native"
-    },
-    "invite.revoke": {
-      "command": "remi invite revoke",
-      "aliases": [],
-      "auth": [
-        "human"
-      ],
-      "capability": "invite.revoke",
-      "mutation": "destructive",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ],
-      "hidden": false,
+      "hidden": true,
       "migration_status": "native"
     },
     "token": {
@@ -9577,6 +9468,106 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "retired.member.create": {
+      "command": "remi member create",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.member.delete": {
+      "command": "remi member delete",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.workspace.leave": {
+      "command": "remi workspace leave",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite": {
+      "command": "remi invite",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite.list": {
+      "command": "remi invite list",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite.get": {
+      "command": "remi invite get",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite.create": {
+      "command": "remi invite create",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite.accept": {
+      "command": "remi invite accept",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite.decline": {
+      "command": "remi invite decline",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
+    "retired.invite.revoke": {
+      "command": "remi invite revoke",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [],
+      "hidden": true,
+      "migration_status": "native"
+    },
     "retired.task.create": {
       "command": "remi task create",
       "aliases": [],
@@ -10470,6 +10461,46 @@
     }
   },
   "retired": {
+    "remi member create": {
+      "command": "retired.member.create",
+      "replacement": "remi workspace operator (all operators share one identity)"
+    },
+    "remi member delete": {
+      "command": "retired.member.delete",
+      "replacement": "remi workspace operator (all operators share one identity)"
+    },
+    "remi workspace leave": {
+      "command": "retired.workspace.leave",
+      "replacement": "remi workspace list (workspaces are shared)"
+    },
+    "remi invite": {
+      "command": "retired.invite",
+      "replacement": "remi workspace list (workspace invitations are no longer needed)"
+    },
+    "remi invite list": {
+      "command": "retired.invite.list",
+      "replacement": "remi workspace list"
+    },
+    "remi invite get": {
+      "command": "retired.invite.get",
+      "replacement": "remi workspace list"
+    },
+    "remi invite create": {
+      "command": "retired.invite.create",
+      "replacement": "remi workspace list"
+    },
+    "remi invite accept": {
+      "command": "retired.invite.accept",
+      "replacement": "remi workspace list"
+    },
+    "remi invite decline": {
+      "command": "retired.invite.decline",
+      "replacement": "remi workspace list"
+    },
+    "remi invite revoke": {
+      "command": "retired.invite.revoke",
+      "replacement": "remi workspace list"
+    },
     "remi task create": {
       "command": "retired.task.create",
       "replacement": "remi message send --to <agent> --kind request"
@@ -10764,6 +10795,54 @@
     }
   },
   "aliases": {
+    "remi member list": {
+      "command": "workspace.operator",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi workspace operator",
+      "hidden": true
+    },
+    "remi member get me": {
+      "command": "account.get",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account get",
+      "hidden": true
+    },
+    "remi member update me": {
+      "command": "account.update",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account update",
+      "hidden": true
+    },
+    "remi member onboarding update": {
+      "command": "account.onboarding.update",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account onboarding update",
+      "hidden": true
+    },
+    "remi member onboarding complete": {
+      "command": "account.onboarding.complete",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account onboarding complete",
+      "hidden": true
+    },
+    "remi member onboarding cloud-waitlist": {
+      "command": "account.onboarding.cloud-waitlist",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account onboarding cloud-waitlist",
+      "hidden": true
+    },
+    "remi member onboarding runtime-bootstrap": {
+      "command": "account.onboarding.runtime-bootstrap",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account onboarding runtime-bootstrap",
+      "hidden": true
+    },
+    "remi member onboarding no-runtime-bootstrap": {
+      "command": "account.onboarding.no-runtime-bootstrap",
+      "deprecated_since": "0.2.90",
+      "replacement": "remi account onboarding no-runtime-bootstrap",
+      "hidden": true
+    },
     "remi project delete": {
       "command": "project.archive",
       "deprecated_since": "0.3.0",
@@ -11122,7 +11201,9 @@
       "command": "label.delete"
     },
     "DELETE /api/multiremi/members/:id": {
-      "command": "member.delete"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace operator"
     },
     "DELETE /api/multiremi/notification-channels/:id": {
       "command": "notification.channel.delete"
@@ -11197,13 +11278,17 @@
       "command": "workspace.feishu-bot.register-cancel"
     },
     "DELETE /api/workspaces/:id/invitations/:invitationId": {
-      "command": "invite.revoke"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "DELETE /api/workspaces/:id/lark/installations/:installationId": {
       "command": "lark.installation.delete"
     },
     "DELETE /api/workspaces/:id/members/:memberId": {
-      "command": "member.delete"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace operator"
     },
     "DELETE /api/workspaces/:id/repos/:repositoryId": {
       "command": "repo.delete"
@@ -11512,10 +11597,14 @@
       "reason": "已移除：改用 remi inbox"
     },
     "GET /api/invitations": {
-      "command": "invite.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "GET /api/invitations/:id": {
-      "command": "invite.get"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "GET /api/issues": {
       "command": "issue.list"
@@ -11650,7 +11739,7 @@
       "command": "label.get"
     },
     "GET /api/me": {
-      "command": "member.get"
+      "command": "account.get"
     },
     "GET /api/messages/:id": {
       "command": "message.get"
@@ -11844,7 +11933,7 @@
       "command": "label.get"
     },
     "GET /api/multiremi/members": {
-      "command": "member.list"
+      "command": "workspace.operator"
     },
     "GET /api/multiremi/members/:id": {
       "command": "member.get"
@@ -12250,7 +12339,9 @@
       "command": "workspace.feishu-bot.list"
     },
     "GET /api/workspaces/:id/invitations": {
-      "command": "invite.list"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "GET /api/workspaces/:id/issue-archive": {
       "command": "workspace.issue-archive.get"
@@ -12265,7 +12356,7 @@
       "command": "lark.installation.list"
     },
     "GET /api/workspaces/:id/members": {
-      "command": "member.list"
+      "command": "workspace.operator"
     },
     "GET /api/workspaces/:id/organizer": {
       "command": "workspace.organizer.get"
@@ -12444,10 +12535,10 @@
       "command": "issue.session.update"
     },
     "PATCH /api/me": {
-      "command": "member.update"
+      "command": "account.update"
     },
     "PATCH /api/me/onboarding": {
-      "command": "member.onboarding.update"
+      "command": "account.onboarding.update"
     },
     "PATCH /api/messages/:id": {
       "command": "message.edit"
@@ -12482,7 +12573,9 @@
       "command": "label.update"
     },
     "PATCH /api/multiremi/members/:id": {
-      "command": "member.update"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace operator"
     },
     "PATCH /api/multiremi/notification-channels/:id": {
       "command": "notification.channel.update"
@@ -12527,7 +12620,9 @@
       "command": "workspace.update"
     },
     "PATCH /api/workspaces/:id/members/:memberId": {
-      "command": "member.update"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace operator"
     },
     "PATCH /api/workspaces/:id/repos/:repositoryId": {
       "command": "repo.update"
@@ -12871,10 +12966,14 @@
       "command": "inbox.read"
     },
     "POST /api/invitations/:id/accept": {
-      "command": "invite.accept"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "POST /api/invitations/:id/decline": {
-      "command": "invite.decline"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "POST /api/issues": {
       "command": "issue.create"
@@ -13008,16 +13107,16 @@
       "command": "lark.binding.redeem"
     },
     "POST /api/me/onboarding/cloud-waitlist": {
-      "command": "member.onboarding.cloud-waitlist"
+      "command": "account.onboarding.cloud-waitlist"
     },
     "POST /api/me/onboarding/complete": {
-      "command": "member.onboarding.complete"
+      "command": "account.onboarding.complete"
     },
     "POST /api/me/onboarding/no-runtime-bootstrap": {
-      "command": "member.onboarding.no-runtime-bootstrap"
+      "command": "account.onboarding.no-runtime-bootstrap"
     },
     "POST /api/me/onboarding/runtime-bootstrap": {
-      "command": "member.onboarding.runtime-bootstrap"
+      "command": "account.onboarding.runtime-bootstrap"
     },
     "POST /api/messages/:id/question/answer": {
       "command": "message.question.answer"
@@ -13208,7 +13307,9 @@
       "command": "label.create"
     },
     "POST /api/multiremi/members": {
-      "command": "member.create"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace operator"
     },
     "POST /api/multiremi/notification-channels": {
       "command": "notification.channel.create"
@@ -13485,10 +13586,14 @@
       "command": "lark.install.begin"
     },
     "POST /api/workspaces/:id/leave": {
-      "command": "workspace.leave"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace list"
     },
     "POST /api/workspaces/:id/members": {
-      "command": "invite.create"
+      "cli_exempt": true,
+      "category": "retired_route",
+      "reason": "已移除：改用 remi workspace operator"
     },
     "POST /api/workspaces/:id/relay-config/:engine/probe": {
       "command": "workspace.relay.probe"

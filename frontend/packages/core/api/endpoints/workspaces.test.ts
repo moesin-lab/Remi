@@ -14,6 +14,30 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("WorkspacesEndpoints shared operator", () => {
+  it.each([undefined, { userId: "local", memberId: "mem_shared" }])("reads workspace identity %j", async (operator) => {
+    const workspace = { id: "ws-1", name: "Shared workspace", operator };
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(jsonResponse([workspace]))
+      .mockResolvedValueOnce(jsonResponse(workspace)));
+    const endpoints = new WorkspacesEndpoints(new HttpClient("https://api.example.test"));
+    await expect(endpoints.listWorkspaces()).resolves.toEqual([workspace]);
+    await expect(endpoints.getWorkspace("ws-1")).resolves.toEqual(workspace);
+  });
+
+  it.each([null, {}, { userId: "account-a", memberId: "mem_a" }, { userId: "local", memberId: 1 }])(
+    "rejects malformed operator identity %j", async (operator) => {
+      const workspace = { id: "ws-1", operator };
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce(jsonResponse([workspace]))
+        .mockResolvedValueOnce(jsonResponse(workspace)));
+      const endpoints = new WorkspacesEndpoints(new HttpClient("https://api.example.test"));
+      await expect(endpoints.listWorkspaces()).rejects.toThrow();
+      await expect(endpoints.getWorkspace("ws-1")).rejects.toThrow();
+    },
+  );
+});
+
 describe("WorkspacesEndpoints prompt template", () => {
   it("loads the platform template from an encoded workspace path", async () => {
     const body = {

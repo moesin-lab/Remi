@@ -1,5 +1,7 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -20,7 +22,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@multiremi/ui/components/ui/select";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useCurrentWorkspace } from "@multiremi/core/paths";
 import { runtimeModelsKeys } from "@multiremi/core/runtimes";
@@ -60,7 +61,7 @@ export function ModelGatewayTab() {
   const wsId = useWorkspaceId();
   const workspace = useCurrentWorkspace();
   const qc = useQueryClient();
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
 
   const { data: members = [], isPending: membersPending } = useQuery(
     memberListOptions(wsId),

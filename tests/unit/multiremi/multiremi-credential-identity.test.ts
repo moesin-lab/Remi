@@ -2,7 +2,7 @@ import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody } from "./unified-test-paths.js";
 /**
  * MUL-448 QA round 1 follow-up (B1-B4): credentialed requests must derive the
- * acting identity and the issue provenance from the credential, while the
+ * acting identity from the shared human operator or task credential, while the
  * anonymous compatibility mode (master token / auth disabled) keeps the
  * historical behaviour of reading `X-Agent-ID` / `X-Task-ID` and the body.
  *
@@ -69,7 +69,7 @@ function assignmentEvents(store: MultiremiStore, sessionId: string, taskId: stri
 }
 
 describe("MUL-448 B1: X-Agent-ID cannot outrank a member credential", () => {
-  it("keeps session task, session, result and mutation actors as the credential's member", async () => {
+  it("uses the shared human operator for session task, result and mutation actors", async () => {
     const { store, app, ownerId, memberId, otherAgentId, agentId, headers } = await fixture();
     const forged = { ...headers, "X-Agent-ID": otherAgentId };
     const issue = createResponsibleTestIssue(store, { title: "MUL-448 B1 issue" });
@@ -85,7 +85,7 @@ describe("MUL-448 B1: X-Agent-ID cannot outrank a member credential", () => {
     const assigned = assignmentEvents(store, session.id, taskId);
     expect(assigned).toHaveLength(1);
     expect(assigned[0]!.authorType).toBe("member");
-    expect(assigned[0]!.authorId).toBe(store.findWorkspaceMemberForUser(ownerId,"local")!.id); // #7: canonical sender_id identifies the credential’s member row.
+    expect(assigned[0]!.authorId).toBe(store.getWorkspaceOperator("local")!.id); // Human credentials share the canonical workspace sender.
     expect(assigned[0]!.authorId).not.toBe(otherAgentId);
 
     // Session creation: createdByType/Id come from the credential.
@@ -95,8 +95,8 @@ describe("MUL-448 B1: X-Agent-ID cannot outrank a member credential", () => {
     expect(sessionResponse.status).toBe(201);
     const sessionBody = (await sessionResponse.json()) as any;
     expect(sessionBody.created_by_type).toBe("member");
-    expect(sessionBody.created_by_id).toBe(ownerId);
-    expect(store.getIssueSession(sessionBody.id)!.createdById).toBe(ownerId);
+    expect(sessionBody.created_by_id).toBe("local");
+    expect(store.getIssueSession(sessionBody.id)!.createdById).toBe("local");
 
     // Published result: publishedByType/Id come from the credential.
     const resultResponse = await app.request(`/api/issues/${issue.id}/sessions/${session.id}/results`, {
@@ -105,7 +105,7 @@ describe("MUL-448 B1: X-Agent-ID cannot outrank a member credential", () => {
     expect(resultResponse.status).toBe(201);
     const resultBody = (await resultResponse.json()) as any;
     expect(resultBody.published_by_type).toBe("member");
-    expect(resultBody.published_by_id).toBe(ownerId);
+    expect(resultBody.published_by_id).toBe("local");
 
     // A dependency edit writes its activity as the member too.
     const dependsOn = createResponsibleTestIssue(store, { title: "MUL-448 B1 depends on" });
@@ -116,7 +116,7 @@ describe("MUL-448 B1: X-Agent-ID cannot outrank a member credential", () => {
     const dependencyActivity = store.listIssueActivity(issue.id).filter((entry) => entry.type === "issue_dependency_added");
     expect(dependencyActivity).toHaveLength(1);
     expect(dependencyActivity[0]!.actorType).toBe("member");
-    expect(dependencyActivity[0]!.actorId).toBe(ownerId);
+    expect(dependencyActivity[0]!.actorId).toBe("local");
 
     // Label attach takes the same caller.
     const label = store.createLabel({ workspaceId: "local", name: "mul448-b1-label", color: "#3366ff" });
@@ -127,7 +127,7 @@ describe("MUL-448 B1: X-Agent-ID cannot outrank a member credential", () => {
     const labelActivity = store.listIssueActivity(issue.id).filter((entry) => entry.type === "label_attached");
     expect(labelActivity.length).toBeGreaterThan(0);
     expect(labelActivity[0]!.actorType).toBe("member");
-    expect(labelActivity[0]!.actorId).toBe(ownerId);
+    expect(labelActivity[0]!.actorId).toBe("local");
 
     // Subscribe/unsubscribe emits the caller identity as the member.
     const events: Array<{ type: string; actorType?: string; actorId?: string }> = [];
@@ -145,7 +145,7 @@ describe("MUL-448 B1: X-Agent-ID cannot outrank a member credential", () => {
     expect(subscriberEvents).toHaveLength(2);
     for (const event of subscriberEvents) {
       expect(event.actorType).toBe("member");
-      expect(event.actorId).toBe(ownerId);
+      expect(event.actorId).toBe("local");
     }
   });
 
@@ -299,16 +299,16 @@ describe("MUL-448 B3: provenance comes from the credential, not the body", () =>
   });
 });
 
-describe("MUL-448 B4: create routes preserve authenticated human responsibility", () => {
-  it("records the credentialed creator on native and compat routes without trusting a forged creator", async () => {
+describe("MUL-448 B4: create routes use shared operator authorship", () => {
+  it("records the shared operator on native and compat routes without trusting a forged creator", async () => {
     const { store, app, headers, ownerId } = await fixture();
     const decoy = store.getOrCreateUser({ email: "mul448-r2-decoy@example.test", name: "MUL-448 R2 Decoy" });
 
     for (const [label, path, forged, expected] of [
-      ["native create", "/api/multiremi/issues", false, ownerId],
-      ["native create forged", "/api/multiremi/issues", true, ownerId],
-      ["compat create", "/api/issues", false, ownerId],
-      ["compat create forged", "/api/issues", true, ownerId],
+      ["native create", "/api/multiremi/issues", false, "local"],
+      ["native create forged", "/api/multiremi/issues", true, "local"],
+      ["compat create", "/api/issues", false, "local"],
+      ["compat create forged", "/api/issues", true, "local"],
     ] as const) {
       const response = await app.request(path, {
         method: "POST", headers,
@@ -322,14 +322,14 @@ describe("MUL-448 B4: create routes preserve authenticated human responsibility"
       const issue = store.getIssue(body.id ?? body.issue?.id)!;
       expect(issue.createdBy, label).toBe(expected);
       expect(issue.createdBy, label).not.toBe(decoy.id);
-      expect(issue.responsibleMemberId,label).toBe(store.findWorkspaceMemberForUser(ownerId,'local')!.id);
-      expect(store.listIssueSubscribers(issue.id).some(item=>item.memberId===store.findWorkspaceMemberForUser(ownerId,'local')!.id),label).toBeTrue();
+      expect(issue.responsibleMemberId, label).toBe(store.getWorkspaceOperator("local")!.id);
+      expect(store.listIssueSubscribers(issue.id).some(item=>item.memberId===store.getWorkspaceOperator("local")!.id),label).toBeTrue();
     }
   });
 });
 
 describe("MUL-448 B4: quick-create, subscription and share preserve credentials", () => {
-  it("records the actual human creator on every quick-create entry point and strips a forged requester", async () => {
+  it("records the shared operator on every quick-create entry point and strips a forged requester", async () => {
     const { store, app, headers, agentId,ownerId } = await fixture();
     const decoy = store.getOrCreateUser({ email: "mul448-r2-decoy2@example.test", name: "MUL-448 R2 Decoy 2" });
 
@@ -349,9 +349,9 @@ describe("MUL-448 B4: quick-create, subscription and share preserve credentials"
       expect(response.status, label).toBe(202);
       const body = (await response.json()) as any;
       const issue = store.getIssue(body.issue.id)!;
-      expect(issue.createdBy, label).toBe(ownerId);
-      expect(issue.responsibleMemberId,label).toBe(store.findWorkspaceMemberForUser(ownerId,'local')!.id);
-      expect(store.listIssueSubscribers(issue.id).some(item=>item.memberId===store.findWorkspaceMemberForUser(ownerId,'local')!.id),label).toBeTrue();
+      expect(issue.createdBy, label).toBe("local");
+      expect(issue.responsibleMemberId, label).toBe(store.getWorkspaceOperator("local")!.id);
+      expect(store.listIssueSubscribers(issue.id).some(item=>item.memberId===store.getWorkspaceOperator("local")!.id),label).toBeTrue();
       const share = await app.request(`/api/issues/${issue.id}/share`, { method: "POST", headers });
       expect(share.status, label).toBe(201);
     }

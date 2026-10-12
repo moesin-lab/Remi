@@ -1,5 +1,8 @@
 [
   "packages/server/src/store/migrations.ts",
+  "packages/server/src/store/inbox/member-records.ts",
+  "packages/server/src/store/inbox/questions.ts",
+  "packages/server/src/store/repos/workspaces-repo.ts",
   "packages/server/src/store/daemon-routing.ts",
   "packages/server/src/store/db/postgres.ts",
   "packages/server/src/store/db/pg-worker.ts",

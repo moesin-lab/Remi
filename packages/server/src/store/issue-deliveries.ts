@@ -135,7 +135,9 @@ function authorizeActor(ctx: StoreContext, actor: IssueDeliveryActor, expected: 
   const actorId = member?.id ?? actor.id;
   if (actor.type === 'member' && (!member || member.archivedAt || member.workspaceId !== workspaceId))
     throw new IssueDeliveryError('issue_delivery_actor_forbidden', 'An active workspace member is required for manual review', 403);
-  if (actor.type !== expected.type || actorId !== expected.id) throw new IssueDeliveryError('issue_delivery_actor_forbidden', 'Only the designated Issue responsibility holder may perform this action', 403);
+  const operator = ctx.workspaces().getWorkspaceOperator(workspaceId);
+  const sharedHuman = actor.type === 'member' && expected.type === 'member' && member?.id === operator?.id;
+  if (!sharedHuman && (actor.type !== expected.type || actorId !== expected.id)) throw new IssueDeliveryError('issue_delivery_actor_forbidden', 'Only the designated Issue responsibility holder may perform this action', 403);
   if (actor.type === 'agent') {
     const task = actor.taskId ? ctx.tasks().getTask(actor.taskId) : null;
     if (!task || task.agentId !== actor.id || task.workspaceId !== workspaceId
@@ -234,7 +236,8 @@ export function respondIssueDelivery(ctx: StoreContext, issueId: string, deliver
     if (!responsibility.reviewOwner || responsibility.unresolved.length) throw new IssueDeliveryError('issue_responsibility_unresolved','Configure the Issue execution and review chain before acceptance');
     const grant = delivery.authorization;
     const authorizedAgent = actor.type === 'agent' && !issue.parentIssueId
-      && grant?.agentId === actor.id && grant.grantedBy === responsibility.rootHuman?.id
+      && grant?.agentId === actor.id && (grant.grantedBy === responsibility.rootHuman?.id
+        || grant.grantedBy === ctx.workspaces().getWorkspaceOperator(issue.workspaceId)?.id)
       && grant.responsibilityRevision === responsibility.revision;
     const manualReviewer = !issue.parentIssueId && actor.type === 'member'
       ? ctx.workspaces().getWorkspaceMember(actor.id) ?? ctx.workspaces().findWorkspaceMemberForUser(actor.id, issue.workspaceId) : null;
@@ -300,12 +303,14 @@ export function authorizeIssueDelivery(ctx: StoreContext, issueId: string, deliv
     if (revision !== responsibility.revision || delivery.responsibilityRevision !== revision) throw new IssueDeliveryError('issue_delivery_revision_stale','Responsibility changed');
     if (agentId !== null && agentId !== responsibility.executionOwner?.id) throw new IssueDeliveryError('issue_delivery_authorization_target_invalid','Authorize only the Issue execution owner for this specific delivery');
     const at = new Date().toISOString();
-    const updated = {...delivery,authorization:agentId === null ? null : {agentId,grantedBy:responsibility.rootHuman.id,responsibilityRevision:revision,grantedAt:at}};
+    const grantingMemberId = (ctx.workspaces().getWorkspaceMember(actor.id)
+      ?? ctx.workspaces().findWorkspaceMemberForUser(actor.id, issue.workspaceId))!.id;
+    const updated = {...delivery,authorization:agentId === null ? null : {agentId,grantedBy:grantingMemberId,responsibilityRevision:revision,grantedAt:at}};
     const original = getMessage(ctx,deliveryId)!;
     ctx.conversationLog().updateConversationLogWithinTransaction(original.session_id,original.seq,{deferEmit:true,fields:{metadata:{...original.metadata,issue_delivery:updated}}});
-    ctx.appendIssueActivity(issueId,{actorType:'member',actorId:responsibility.rootHuman.id,type:'issue_delivery_authorized',
+    ctx.appendIssueActivity(issueId,{actorType:'member',actorId:grantingMemberId,type:'issue_delivery_authorized',
       body:null,data:{deliveryId,authorization:updated.authorization}},events);
-    events.workspace.push({type:'issue:updated',workspaceId:issue.workspaceId,actorType:'member',actorId:responsibility.rootHuman.id,
+    events.workspace.push({type:'issue:updated',workspaceId:issue.workspaceId,actorType:'member',actorId:grantingMemberId,
       payload:{issue,status_changed:false}});
     return updated;
   })();

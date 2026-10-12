@@ -1,11 +1,12 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Archive, Check, HardDrive, Save } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@multiremi/core/api";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import {
   sessionArchiveKeys,
@@ -56,7 +57,7 @@ export function validateSessionArchiveTiming(
 export function StorageCleanupTab() {
   const { t } = useT("settings");
   const wsId = useWorkspaceId();
-  const user = useAuthStore((state) => state.user);
+  const user = workspaceOperatorUser;
   const queryClient = useQueryClient();
   const [ttlHours, setTtlHours] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState("");

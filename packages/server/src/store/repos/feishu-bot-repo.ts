@@ -1813,7 +1813,7 @@ export class FeishuBotRepo {
       const operator = recipientOpenId && config ? this.resolveIssueDecisionOperatorMember(String(row.workspace_id), config.appId, recipientOpenId) : null;
       if (!question || question.stage !== 'human' || question.status !== 'pending'
         || (!question.summary && Date.now() < Date.parse(metadata?.summary_wait_until ?? ''))
-        || operator?.status !== 'resolved' || question.current_handler?.id !== operator.member.id) return null;
+        || operator?.status !== 'resolved' || !this.isQuestionCardRecipient(question.id, config!.appId, question.workspace_id, recipientOpenId)) return null;
       return buildIssueDecisionCard(decision, { header,
         routeRevision: question.route_revision, summary: question.summary?.body_md,
         token: this.rotateQuestionCardToken("multiremi_message_decision_records", decisionId, recipientOpenId),
@@ -1829,7 +1829,7 @@ export class FeishuBotRepo {
       if (!question.summary && Date.now() < deadline) return null;
       const config = this.getConfigForSession(question.workspace_id, question.session_id);
       const operator = recipientOpenId && config ? this.resolveIssueDecisionOperatorMember(question.workspace_id, config.appId, recipientOpenId) : null;
-      if (question.stage !== 'human' || operator?.status !== 'resolved' || question.current_handler?.id !== operator.member.id) return null;
+      if (question.stage !== 'human' || operator?.status !== 'resolved' || !this.isQuestionCardRecipient(question.id, config!.appId, question.workspace_id, recipientOpenId)) return null;
     }
     return buildTaskInteractionCard(request, { header,
       token: this.rotateQuestionCardToken("multiremi_message_question_records", request.id, recipientOpenId),
@@ -3023,9 +3023,19 @@ export class FeishuBotRepo {
       if (decision) this.forBot("default").deferOutboundOperation(decision.workspaceId, id, { kind: 'issue_decision', questionId: id });
     }
   }
+  private isQuestionCardRecipient(id: string, appId: string, workspaceId: string, openId: string | null): boolean {
+    const recipient = this.questionRecipient(id, appId, workspaceId);
+    return recipient.kind === 'resolved' && recipient.openId === openId;
+  }
   private questionRecipient(id: string, appId: string, workspaceId: string): DecisionRecipientResolution {
     const question = new Questions(this.ctx).get(id);
-    const member = question?.current_handler?.type === 'member' ? this.ctx.workspaces().getWorkspaceMember(question.current_handler.id) : null;
+    // Retained contacts identify only an external delivery destination. They no
+    // longer decide who may operate or answer within the workspace.
+    const config = question ? this.getConfigForSession(workspaceId, question.session_id) : null;
+    const contactId = question?.source_issue_id ? this.ctx.resolveIssueResponsibility(question.source_issue_id).rootHuman?.id
+      : config?.responsibleMemberId;
+    const member = contactId ? this.ctx.workspaces().getWorkspaceMember(contactId)
+      : question?.current_handler?.type === 'member' ? this.ctx.workspaces().getWorkspaceMember(question.current_handler.id) : null;
     if (!member || question?.stage !== 'human' || member.archivedAt || member.workspaceId !== workspaceId || !member.userId)
       return { kind: 'degraded', reason: 'unresolved_recipient', degraded: true };
     const rows = this.ctx.db.query(`SELECT DISTINCT s.open_id FROM multiremi_feishu_bot_senders s JOIN multiremi_users u ON u.feishu_union_id=s.union_id

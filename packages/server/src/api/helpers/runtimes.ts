@@ -15,6 +15,7 @@ import {
   hasRequestField,
   currentAccessToken,
   currentRequestUserId,
+  isHumanOperatorRequest,
   daemonRuntimeResponse,
   runtimeCompatibilityResponse,
   runtimeWorkspaceId,
@@ -197,7 +198,7 @@ export function loadRuntimeForCurrentEditor(
 export function loadRuntimeForCurrentOwner(c: Context, store: MultiremiStore, runtimeId: string, feature = "local skills"): { runtime: MultiremiRuntime } | Response {
   const loaded = loadRuntimeForCurrentUser(c, store, runtimeId);
   if (loaded instanceof Response) return loaded;
-  if (runtimeOwnerId(loaded.runtime) !== currentRequestUserId(c)) {
+  if (!isHumanOperatorRequest(c) && runtimeOwnerId(loaded.runtime) !== currentRequestUserId(c)) {
     return c.json({ error: `you can only access ${feature} from your own runtimes` }, 403);
   }
   return loaded;
@@ -506,9 +507,7 @@ export function daemonRegisterOwnerContext(
   if (token.type === "daemon") {
     const ownerId = cleanString(token.userId);
     if (
-      ownerId
-      && ownerId !== "local"
-      && !store.getUserRoleInWorkspace(ownerId, targetWorkspaceId)
+      token.workspaceId !== targetWorkspaceId || !store.getWorkspace(targetWorkspaceId)
     ) {
       return { error: "forbidden for token workspace", status: 403 };
     }
@@ -519,8 +518,7 @@ export function daemonRegisterOwnerContext(
   }
   const ownerId = cleanString(token.userId) ?? "local";
   if (
-    ownerId !== "local"
-    && !store.getUserRoleInWorkspace(ownerId, targetWorkspaceId)
+    !store.getWorkspace(targetWorkspaceId)
   ) {
     return { error: "forbidden for token workspace", status: 403 };
   }

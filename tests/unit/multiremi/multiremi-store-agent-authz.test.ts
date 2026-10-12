@@ -1,13 +1,12 @@
-// Agent creation/mutation/env/mcp_config gating and the redacted agent events,
-// matched against the Go server's contracts.
+// Shared workspace Agent management and redacted realtime event contracts.
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createStore, metricValue, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
-describe("Multiremi store — Go-compatible agent authorization", () => {
-  it("gates agent creation and runtime moves like the Go server", async () => {
+describe("Multiremi store — shared workspace agent authorization", () => {
+  it("shares agent creation and historical private runtimes while validating target and model", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "alice", userId: "alice", name: "Alice", role: "member" });
     store.createWorkspaceMember({ id: "bob", userId: "bob", name: "Bob", role: "member" });
@@ -117,16 +116,6 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
       error: 'thinking_level "max" is not supported by model "gpt-authz" for provider "codex"',
     });
 
-    const bobPrivateRuntime = await app.request("/api/agents", {
-      method: "POST",
-      headers: jsonHeaders(bobToken.token),
-      body: JSON.stringify({ name: "Bob blocked", runtime_id: alicePrivate.id }),
-    });
-    expect(bobPrivateRuntime.status).toBe(403);
-    expect(await bobPrivateRuntime.json()).toEqual({
-      error: "this runtime is private; only its owner or a workspace admin can create agents on it",
-    });
-
     const bobPublicRuntime = await app.request("/api/agents", {
       method: "POST",
       headers: jsonHeaders(bobToken.token),
@@ -149,10 +138,10 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
     expect(bobAgent.description).toBe("Bob public description");
     expect(bobAgent.avatar_url).toBe("https://example.com/bob-agent.png");
     expect(bobAgent.runtime_id).toBe(bobPublic.id);
-    expect(bobAgent.owner_id).toBe("bob");
+    expect(bobAgent.owner_id).toBe("local");
     expect(bobAgent.max_concurrent_tasks).toBe(6);
     const bobAgentCreated = store.listAnalyticsEvents({ name: "agent_created" })[0]!;
-    expect(bobAgentCreated.distinctId).toBe("bob");
+    expect(bobAgentCreated.distinctId).toBe("local");
     expect(bobAgentCreated.workspaceId).toBe("local");
     expect(bobAgentCreated.metricsOnly).toBe(false);
     expect(bobAgentCreated.properties).toMatchObject({
@@ -161,7 +150,7 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
       runtime_mode: "local",
       template: "",
       is_first_agent_in_workspace: true,
-      user_id: "bob",
+      user_id: "local",
       source: "manual",
       is_demo: false,
     });
@@ -175,7 +164,7 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
     expect(invalidDefaultJson.status).toBe(400);
     expect(await invalidDefaultJson.json()).toEqual({ error: "invalid request body" });
 
-    // An explicit target also binds the per-owner default agent.
+    // An explicit target binds the shared default agent.
     const defaultSeed = await app.request("/api/multiremi/agents/default", {
       method: "POST",
       headers: jsonHeaders(bobToken.token),
@@ -184,24 +173,24 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
     expect(defaultSeed.status).toBe(201);
     const defaultSeedBody = await defaultSeed.json();
     expect(defaultSeedBody.agent).toMatchObject({
-      id: "agt_default_local_claude_bob",
+      id: "agt_default_local_claude_local",
       name: "Claude",
       provider: "claude",
       runtimeId: bobPublic.id,
       workspaceId: "local",
-      ownerId: "bob",
+      ownerId: "local",
       visibility: "private",
       description: "Default Claude agent",
     });
     const agentCreatedEventsAfterDefault = store.listAnalyticsEvents({ name: "agent_created" });
     expect(agentCreatedEventsAfterDefault).toHaveLength(2);
     expect(agentCreatedEventsAfterDefault[1]!.properties).toMatchObject({
-      agent_id: "agt_default_local_claude_bob",
+      agent_id: "agt_default_local_claude_local",
       provider: "claude",
       runtime_mode: "local",
       template: "default",
       is_first_agent_in_workspace: false,
-      user_id: "bob",
+      user_id: "local",
       source: "manual",
     });
     expect(metricValue(store, "multiremi_agent_created_total", { runtime_mode: "local", source: "manual" })).toBe(2);
@@ -213,7 +202,7 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
       body: JSON.stringify({ provider: "claude" }),
     });
     expect(providerOnlyDefault.status).toBe(200);
-    expect((await providerOnlyDefault.json()).agent.id).toBe("agt_default_local_claude_bob");
+    expect((await providerOnlyDefault.json()).agent.id).toBe("agt_default_local_claude_local");
 
     const defaultSeedAgain = await app.request("/api/multiremi/agents/default", {
       method: "POST",
@@ -221,8 +210,16 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
       body: JSON.stringify({ runtime_id: bobPublic.id }),
     });
     expect(defaultSeedAgain.status).toBe(200);
-    expect((await defaultSeedAgain.json()).agent.id).toBe("agt_default_local_claude_bob");
+    expect((await defaultSeedAgain.json()).agent.id).toBe("agt_default_local_claude_local");
     expect(store.listAnalyticsEvents({ name: "agent_created" })).toHaveLength(2);
+
+    const bobPrivateRuntime = await app.request("/api/agents", {
+      method: "POST",
+      headers: jsonHeaders(bobToken.token),
+      body: JSON.stringify({ name: "Bob shared runtime", runtime_id: alicePrivate.id }),
+    });
+    expect(bobPrivateRuntime.status).toBe(201);
+    expect(await bobPrivateRuntime.json()).toMatchObject({ owner_id: "local", runtime_id: alicePrivate.id });
 
     const invalidNativeUpdate = await app.request(`/api/multiremi/agents/${bobAgent.id}`, {
       method: "PATCH",
@@ -266,13 +263,14 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
     expect(duplicateName.status).toBe(409);
     expect(await duplicateName.json()).toEqual({ error: "an agent named \"Bob public agent\" already exists in this workspace" });
 
-    // Bob cannot select Alice's private execution target.
-    const forbiddenMove = await app.request(`/api/agents/${bobAgent.id}`, {
+    // Historical private execution targets are shared within the workspace.
+    const sharedMove = await app.request(`/api/agents/${bobAgent.id}`, {
       method: "PUT",
       headers: jsonHeaders(bobToken.token),
       body: JSON.stringify({ runtime_id: alicePrivate.id }),
     });
-    expect(forbiddenMove.status).toBe(403);
+    expect(sharedMove.status).toBe(200);
+    expect(store.getAgent(bobAgent.id)?.runtimeId).toBe(alicePrivate.id);
 
     // Changing targets binds the new machine and resets the model.
     store.updateAgent(bobAgent.id, { model: "claude-opus-4-8" });
@@ -367,11 +365,11 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
       headers: jsonHeaders(adminToken.token),
       body: JSON.stringify({ name: "Admin private agent", runtime_id: alicePrivate.id }),
     });
-    expect(adminPrivateRuntime.status).toBe(403);
-    expect(await adminPrivateRuntime.json()).toEqual({ error: "a private runtime can only execute agents owned by its owner" });
+    expect(adminPrivateRuntime.status).toBe(201);
+    expect(await adminPrivateRuntime.json()).toMatchObject({ owner_id: "local", runtime_id: alicePrivate.id });
   });
 
-  it("redacts agent mcp_config like the Go server", async () => {
+  it("shares agent mcp_config and preserves the workspace redaction policy", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
     store.createWorkspaceMember({ id: "owner", userId: "owner", name: "Owner", role: "member" });
@@ -410,15 +408,15 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
     expect(memberRead.status).toBe(200);
     expect(await memberRead.json()).toMatchObject({
       id: agent.id,
-      mcp_config: null,
-      mcp_config_redacted: true,
+      mcp_config: secretConfig,
+      mcp_config_redacted: false,
     });
 
     const memberList = await app.request("/api/agents", { headers: authHeaders(memberToken.token) });
     const listedAgent = (await memberList.json()).find((item: any) => item.id === agent.id);
     expect(listedAgent).toMatchObject({
-      mcp_config: null,
-      mcp_config_redacted: true,
+      mcp_config: secretConfig,
+      mcp_config_redacted: false,
     });
 
     const task = store.createTask({ agentId: agent.id, prompt: "read agent list" });
@@ -443,7 +441,7 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
     });
   });
 
-  it("gates agent mutations and emits Go-style redacted agent events", async () => {
+  it("shares agent mutations and emits redacted events as the workspace operator", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
     store.createWorkspaceMember({ id: "owner", userId: "owner", name: "Owner", role: "member" });
@@ -486,7 +484,7 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
     expect(events.find((event) => event.type === "agent:created")).toMatchObject({
       workspaceId: "local",
       actorType: "member",
-      actorId: "owner",
+      actorId: "local",
       payload: {
         agent: {
           id: createdBody.id,
@@ -499,10 +497,10 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
     const memberUpdate = await app.request(`/api/agents/${createdBody.id}`, {
       method: "PUT",
       headers: jsonHeaders(memberToken.token),
-      body: JSON.stringify({ name: "Member Should Not Update" }),
+      body: JSON.stringify({ name: "Shared operator update" }),
     });
-    expect(memberUpdate.status).toBe(403);
-    expect(await memberUpdate.json()).toEqual({ error: "only the agent owner can manage this agent" });
+    expect(memberUpdate.status).toBe(200);
+    expect(await memberUpdate.json()).toMatchObject({ name: "Shared operator update" });
 
     const task = store.createTask({ agentId: createdBody.id, prompt: "try to mutate agent" });
     const taskToken = await store.createTaskAccessToken(task, "owner");
@@ -530,7 +528,7 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
       (event.payload.agent as any)?.id === createdBody.id &&
       (event.payload.agent as any)?.name === "Event Agent Updated"
     )).toMatchObject({
-      actorId: "owner",
+      actorId: "local",
       payload: {
         agent: {
           mcp_config: null,
@@ -551,7 +549,7 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
       mcp_config_redacted: false,
     });
     expect(events.find((event) => event.type === "agent:archived")).toMatchObject({
-      actorId: "admin",
+      actorId: "local",
       payload: {
         agent: {
           id: createdBody.id,
@@ -566,8 +564,8 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
       method: "POST",
       headers: jsonHeaders(memberToken.token),
     });
-    expect(memberRestore.status).toBe(403);
-    expect(await memberRestore.json()).toEqual({ error: "only the agent owner can manage this agent" });
+    expect(memberRestore.status).toBe(200);
+    expect(await memberRestore.json()).toMatchObject({ id: createdBody.id, status: "active" });
 
     const ownerRestore = await app.request(`/api/agents/${createdBody.id}/restore`, {
       method: "POST",
@@ -581,7 +579,7 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
       mcp_config_redacted: false,
     });
     expect(events.find((event) => event.type === "agent:restored")).toMatchObject({
-      actorId: "owner",
+      actorId: "local",
       payload: {
         agent: {
           id: createdBody.id,
@@ -593,7 +591,7 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
     });
   });
 
-  it("gates agent env management like the Go server", async () => {
+  it("shares agent env management and preserves task and secret-mask behavior", async () => {
     const store = createStore();
     store.createWorkspaceMember({ id: "owner", userId: "owner", name: "Owner", role: "owner" });
     store.createWorkspaceMember({ id: "admin", userId: "admin", name: "Admin", role: "admin" });
@@ -612,23 +610,23 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
     });
 
     const memberRead = await app.request(`/api/agents/${agent.id}/env`, { headers: headers(memberToken.token) });
-    expect(memberRead.status).toBe(403);
-    expect(await memberRead.json()).toEqual({ error: "insufficient permissions" });
+    expect(memberRead.status).toBe(200);
+    expect(await memberRead.json()).toEqual({ agent_id: agent.id, custom_env: { SECRET_TOKEN: "real-value", KEEP_ME: "yes" } });
 
     const memberWrite = await app.request(`/api/agents/${agent.id}/env`, {
       method: "PUT",
       headers: headers(memberToken.token),
-      body: JSON.stringify({ custom_env: { SECRET_TOKEN: "changed" } }),
+      body: JSON.stringify({ custom_env: { SECRET_TOKEN: "changed", KEEP_ME: "yes" } }),
     });
-    expect(memberWrite.status).toBe(403);
-    expect(await memberWrite.json()).toEqual({ error: "insufficient permissions" });
-    expect(store.getAgent(agent.id)?.customEnv).toEqual({ SECRET_TOKEN: "real-value", KEEP_ME: "yes" });
+    expect(memberWrite.status).toBe(200);
+    expect(await memberWrite.json()).toEqual({ agent_id: agent.id, custom_env: { SECRET_TOKEN: "changed", KEEP_ME: "yes" } });
+    expect(store.getAgent(agent.id)?.customEnv).toEqual({ SECRET_TOKEN: "changed", KEEP_ME: "yes" });
 
     const ownerRead = await app.request(`/api/agents/${agent.id}/env`, { headers: headers(ownerToken.token) });
     expect(ownerRead.status).toBe(200);
     expect(await ownerRead.json()).toEqual({
       agent_id: agent.id,
-      custom_env: { SECRET_TOKEN: "real-value", KEEP_ME: "yes" },
+      custom_env: { SECRET_TOKEN: "changed", KEEP_ME: "yes" },
     });
 
     const envTask = store.createTask({ agentId: agent.id, prompt: "env access" });
@@ -637,7 +635,7 @@ describe("Multiremi store — Go-compatible agent authorization", () => {
     expect(taskTokenRead.status).toBe(200);
     expect(await taskTokenRead.json()).toEqual({
       agent_id: agent.id,
-      custom_env: { SECRET_TOKEN: "real-value", KEEP_ME: "yes" },
+      custom_env: { SECRET_TOKEN: "changed", KEEP_ME: "yes" },
     });
 
     const taskTokenWrite = await app.request(`/api/agents/${agent.id}/env`, {

@@ -667,6 +667,14 @@ export class MultiremiStore {
       now => this.tasks.sweepIdleIssueLanes(now),
     ]);
     this.migrate();
+    for (const workspace of this.workspaces.listWorkspaces()) {
+      const events = createCommitEventQueue();
+      this.db.transaction(() => {
+        this.workspaces.ensureWorkspaceOperator(workspace.id);
+        new Questions(this.ctx).refreshWorkspaceOperatorWithinTransaction(workspace.id, events);
+      })();
+      this.ctx.emitCommitEvents(events);
+    }
   }
 
   onTaskEnqueued(listener: TaskEnqueuedListener): () => void {
@@ -1712,6 +1720,14 @@ runMigrations(this.db);
 
   findWorkspaceMemberForUser(userId: string | null | undefined, workspaceId: string): MultiremiWorkspaceMember | null {
     return this.workspaces.findWorkspaceMemberForUser(userId, workspaceId);
+  }
+
+  getWorkspaceOperator(workspaceId: string): MultiremiWorkspaceMember | null {
+    return this.workspaces.getWorkspaceOperator(workspaceId);
+  }
+
+  ensureWorkspaceOperator(workspaceId: string): MultiremiWorkspaceMember {
+    return this.workspaces.ensureWorkspaceOperator(workspaceId);
   }
 
   canReadQuestionNotification(id: string, access: InboxAccess): boolean {

@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({ getIssueResponsibility: vi.fn(), listIssueDeli
 vi.mock("@multiremi/core/api", () => ({ api: mocks }));
 vi.mock("@multiremi/core/hooks", () => ({ useWorkspaceId: () => "ws" }));
 vi.mock("@multiremi/core/auth", () => ({ useAuthStore: (selector: (state: { user: { id: string } }) => unknown) => selector({ user: { id: "user-human" } }) }));
-vi.mock("@multiremi/core/workspace/queries", () => ({ memberListOptions: () => ({ queryKey: ["members", "ws"], queryFn: async () => [{ id: "member-human", user_id: "user-human", name: "Designated human" }, { id: "other-human", user_id: "user-other", name: "Other human" }] }) }));
+vi.mock("@multiremi/core/workspace/queries", () => ({ memberListOptions: () => ({ queryKey: ["members", "ws"], queryFn: async () => [{ id: "member-human", user_id: "local", name: "Designated human" }, { id: "other-human", user_id: "user-other", name: "Other human" }] }) }));
 vi.mock("@multiremi/core/paths", () => ({ useWorkspaceSlug: () => "ws", useWorkspacePaths: () => ({ issueDetail: (id: string) => `/ws/issues/${id}`, squadDetail: (id: string) => `/ws/squads/${id}`, inboxItem: (id: string) => `/ws/inbox?item=${id}` }) }));
 vi.mock("../../navigation", () => ({ AppLink: (props: { href: string; children: React.ReactNode }) => <a {...props} /> }));
 import { IssueResponsibilitySection } from "./issue-responsibility-section";

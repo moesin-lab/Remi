@@ -44,7 +44,7 @@ Organizer 巡查报告按来源 Turn 的实际 Session owner 路由。Chat-owned
 |---|---|---|
 | 消息发送、读取 | `sendMessage(input)`、`getMessage(id)`、`listMessages(sessionId,{from,to,limit,thread,unread_by})` | seq 范围为 `(from,to]`；发送返回实际 wake；读取过滤 tombstone |
 | 编辑、删除、解决、反应 | `editMessage(id,{body_md})`、`deleteMessage(id)`、`resolveMessage(id,actor,resolved)`、`reactMessage(id,input)` | 已消费或部分已消费内容不能编辑或删除；删除保留 tombstone；反应幂等 |
-| 人的收件箱 | `listMessageInbox(memberId,workspaceId,{limit})`、`readMessageInbox(memberId,sessionId,toSeq)`、`readAllMessageInbox(memberId,workspaceId)` | member lane，计数不受分页影响；未解决且非 inbox_only 的 decision、成员 request、`lifecycle_event=task_failed/task_cancelled` 的 status、`message_outcome=failed/blocked/cancelled` 的 report 或 final 进入 attention；读到哪只前进 |
+| 人的收件箱 | `listMessageInbox(memberId,workspaceId,{limit})`、`readMessageInbox(memberId,sessionId,toSeq)`、`readAllMessageInbox(memberId,workspaceId)` | 工作区共享游标，计数不受分页影响；未解决且非 inbox_only 的 decision、成员 request、`lifecycle_event=task_failed/task_cancelled` 的 status、`message_outcome=failed/blocked/cancelled` 的 report 或 final 进入 attention；读到哪只前进 |
 | 轮与尝试 | `getTurn(id)`、`listTurns(input)`、`getTurnInput(id)`、`listTurnAttempts(id)`、`getTurnTrace(id)` | trace 定位 current_attempt_id；历史输入范围保留 legacy_prompt |
 | 轮控制 | `cancelTurn(id)`、`wrapUpTurn(id)`、`retryTurn(id,cold)`、`retryTurnAsMember(id,cold,authorizeConversation)` | wrap-up 是标记；retry 同轮新 attempt，cold 清 provider 续接缓存；成员恢复公开 Issue 时按上述规则推导状态 |
 | 卡片答复 | `issueMessageCardToken(id,recipient)`、`answerMessageDecision(id,input)` | hash/binding/consumed 在消息行，答复 CAS 与 reply 同事务；decision 在发送时持久化 pending，答复绑定来源轮和 scope，跨 Issue 恢复后同事务推导来源 Issue；宿主负责把答复者映射到成员 |
@@ -55,6 +55,14 @@ Organizer 巡查报告按来源 Turn 的实际 Session owner 路由。Chat-owned
 终态事务持有同一 lane 锁时检查已经下发的 now 请求。请求 seq 高于完成报告的 `input_to_seq` 且不超过 attempt 的 `projection_to_seq` 时，拒绝旧结果并返回 `turn_input_pending`；daemon 等待下行消息，在同一 provider 会话消费后重新提交。未下发的请求仍由终态补铃处理，next_turn、已删除、隐藏、其它 agent 或 scope 的消息不会触发该完成屏障。
 
 [server 启动](../../packages/server/src/api/server.ts) 默认调用 `Store.getDaemonTurnBridge()`，同一实例用于 offer、下行快照、RPC 和完成报告；测试可用 `daemonTurnBridge` 显式覆盖。传输接入已在此分支完成，生产切换和 212 真机验收另行执行。定向集成验证入口为 `tests/unit/daemon/task-downlinks.test.ts` 的 Store bridge 用例，以及 `decision-callback-integration.test.ts` 的双后端真实 callback、未读范围和附件下载/注入用例。
+
+## 人类共享已读状态
+
+`multiremi_workspace_read_cursors` 按工作区与 Session 保存所有操作者共用的读取位置。旧 member lanes 与原消息收件人保留，每条历史消息结合自己原收件人的游标和新的共享游标判定是否已读；不能合并所有旧成员游标的最大值。读较早位置不会把其他收件人的未读吞掉，也不会让原已读消息重新出现。Agent lane 的执行范围与游标约束保持独立。
+
+同工作区的历史人类提及先解析原成员，再合并为一个操作者收件人；多个名字不会重复通知。人类向人类的评论视为自身操作，不新增自我通知；Agent 提及仍可通知共享操作者。外部工作区或未知成员 ID 不会被映射为本地操作者。
+
+旧 inbox 视图和兼容接口投影到统一 operator；原始消息 `to_member_id` 不改写。终态回复、通知及人工问题使用工作区 operator。待答问题启动切换有按工作区的持久标记，同一事务保留转交历史并失效旧人工卡片，重复启动不重复路由或通知。参考[问题契约](questions.md)。
 
 ## 状态与迁移
 

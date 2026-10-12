@@ -495,6 +495,8 @@ export interface WorkspacesSurface {
   listWorkspaces(): MultiremiWorkspace[];
   getWorkspace(id: string): MultiremiWorkspace | null;
   findWorkspaceMemberForUser(userId: string | null | undefined, workspaceId: string): MultiremiWorkspaceMember | null;
+  getWorkspaceOperator(workspaceId: string): MultiremiWorkspaceMember | null;
+  ensureWorkspaceOperator(workspaceId: string): MultiremiWorkspaceMember;
   getWorkspaceMember(id: string): MultiremiWorkspaceMember | null;
   getWorkspaceMemberByRef(ref: string, workspaceId?: string | null): MultiremiWorkspaceMember | null;
   listWorkspaceMembers(workspaceId?: string | null): MultiremiWorkspaceMember[];

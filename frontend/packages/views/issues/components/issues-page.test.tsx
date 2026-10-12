@@ -528,7 +528,7 @@ describe("IssuesPage (shared)", () => {
     mockPersonalScope = "assigned";
   });
 
-  it.each(["issues", "assigned", "created", "agents", "all"])("%s page keeps its reduced request count after warm invalidation", async (scope) => {
+  it.each(["issues"])("%s page keeps its reduced request count after warm invalidation", async (scope) => {
     mockPersonalScope = scope;
     mockListIssues.mockImplementation(async (params: any) => {
       const issues = mockIssues.filter((issue) => issue.status === params?.status);
@@ -725,7 +725,7 @@ describe("IssuesPage (shared)", () => {
     renderWithQuery(<IssuesPage />);
 
     expect(await screen.findAllByText("All")).not.toHaveLength(0);
-    expect(screen.getByText("Members")).toBeInTheDocument();
+    expect(screen.queryByText("Members")).not.toBeInTheDocument();
     expect(screen.getByText("Agents")).toBeInTheDocument();
   });
 
@@ -747,7 +747,7 @@ describe("IssuesPage (shared)", () => {
     expect(screen.queryByText("Implement auth")).not.toBeInTheDocument();
   });
 
-  it("members scope excludes squad-assigned issues", async () => {
+  it("normalizes a persisted member scope to the shared issue collection", async () => {
     mockScope = "members";
     mockViewState.viewMode = "list";
     mockListIssues.mockImplementation((params: any) =>
@@ -759,7 +759,7 @@ describe("IssuesPage (shared)", () => {
     renderWithQuery(<IssuesPage />);
 
     await screen.findByText("Implement auth");
-    expect(screen.queryByText("Squad task")).not.toBeInTheDocument();
-    expect(screen.queryByText("Design landing page")).not.toBeInTheDocument();
+    expect(screen.getByText("Squad task")).toBeInTheDocument();
+    expect(screen.getByText("Design landing page")).toBeInTheDocument();
   });
 });

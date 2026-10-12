@@ -513,10 +513,9 @@ function placementAfterRoutingSql(runtime: MultiremiRuntime): SqlFragment {
              WHERE gm.runtime_id = ? AND gm.provider = a.provider
                AND gm.workspace_id = a.workspace_id AND gm.group_id = a.execution_group_id
            ))
-           AND (? = 'any' OR a.provider = ?)
-           AND (? = 'public' OR COALESCE(CAST(? AS TEXT), 'local') = COALESCE(a.owner_id, 'local'))`,
+           AND (? = 'any' OR a.provider = ?)`,
     params: [...aliases, ...aliases, ...aliases, runtime.id, runtime.id, runtime.id,
-      runtime.provider, runtime.provider, runtime.visibility, runtime.ownerId],
+      runtime.provider, runtime.provider],
   };
 }
 
@@ -1528,9 +1527,6 @@ export class TasksRepo {
     if (access.taskToken) {
       chatIdentity = " AND task.id = ? AND task.agent_id = ? AND task.workspace_id = ?";
       params.push(access.taskToken.taskId, access.taskToken.agentId, access.taskToken.workspaceId);
-    } else if (access.userId !== null) {
-      chatIdentity = " AND COALESCE(chat.creator_id, 'local') = ?";
-      params.push(access.userId);
     }
     const rows = this.ctx.db.query(`SELECT ${SNAPSHOT_PUBLIC_COLUMNS.map(column => `task.${column}`).join(", ")}
       FROM multiremi_turn_execution_records task
@@ -1842,7 +1838,7 @@ export class TasksRepo {
       throw new Error('Cannot attach a runtime workspace to a Session without workspace ownership');
     let type=existing?.sender_type??(input.assignmentAuthorType==='system'?'platform':sourceTask?'agent':input.assignmentAuthorType==='agent'?'agent':'member');
     let senderId=existing?.sender_id??(type==='agent'?sourceTask?.agentId??input.assignmentAuthorId??null:type==='member'?input.assignmentAuthorId??null:null);
-    if(type==='member')senderId=this.ctx.workspaces().getWorkspaceMemberByRef(senderId??'local',input.workspaceId??'local')?.id??senderId;
+    if(type==='member'&&!existing)senderId=this.ctx.workspaces().getWorkspaceOperator(input.workspaceId??'local')?.id??senderId;
     const delegationId=cleanOptionalString(input.delegationId??input.delegation_id);
     const delegatedByAgentId=cleanOptionalString(input.delegatedByAgentId??input.delegated_by_agent_id);
     // An omitted scope lets the message writer allocate or reuse an automatic
@@ -3190,9 +3186,6 @@ export class TasksRepo {
       if (access.taskToken) {
         sessionAccess = " AND task.id = ? AND task.agent_id = ? AND task.workspace_id = ?";
         identityParams.push(access.taskToken.taskId, access.taskToken.agentId, access.taskToken.workspaceId);
-      } else if (access.userId !== null) {
-        sessionAccess = " AND COALESCE(chat.creator_id, 'local') = ?";
-        identityParams.push(access.userId);
       }
       chatAccess = ` AND (((task.chat_session_id IS NULL OR task.chat_session_id = '') AND NOT EXISTS (
         SELECT 1 FROM multiremi_issue_sessions session
@@ -4659,7 +4652,7 @@ ${placementAfter.sql}
       || !runtime || (runtime.workspaceId ?? "local") !== authority.workspaceId
       || (runtime.daemonId && runtime.daemonId !== authority.daemonId)
       || this.ctx.runtimes().isDaemonRetired(authority.workspaceId, authority.daemonId)
-      || (authority.userId && authority.userId !== "local" && !this.ctx.workspaces().getUserRoleInWorkspace(authority.userId, authority.workspaceId))) {
+      || !this.ctx.workspaces().getWorkspace(authority.workspaceId)) {
       throw new TaskDaemonReportError("authority_revoked", false);
     }
     return task;
@@ -4867,7 +4860,7 @@ ${placementAfter.sql}
         kind:'force_answer',content:input.content,createdAt:nowIso(),consumedAt:null};
     }
     const type=input.authorType==='agent'?'agent':input.authorType==='member'||input.authorType==='user'?'member':'platform';
-    const member=type==='member'?this.ctx.workspaces().getWorkspaceMemberByRef(input.authorId??'local',task.workspaceId):null;
+    const member=type==='member'?this.ctx.workspaces().ensureWorkspaceOperator(task.workspaceId):null;
     const source=type==='agent'?this.ctx.db.query("SELECT id FROM multiremi_turns WHERE agent_id=? AND workspace_id=? AND status='running' ORDER BY created_at DESC LIMIT 1").get(input.authorId,task.workspaceId):null;
     const result=sendMessageWithinTransaction(this.ctx,{id:input.id,session_id:turn.session_id,
       sender:{type,id:type==='member'?member?.id??null:input.authorId??null},source_turn_id:source?.id,

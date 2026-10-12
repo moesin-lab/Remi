@@ -70,7 +70,7 @@
     "members_selected_count_other": "{{count}} 件選択中",
     "members_more_count": "+{{count}}",
     "members_remove_aria": "{{name}} を削除",
-    "picker_search_placeholder": "エージェントとメンバーを検索...",
+    "picker_search_placeholder": "エージェントを検索...",
     "group_my_agents": "マイエージェント",
     "group_workspace_agents": "ワークスペースエージェント",
     "group_members": "メンバー",

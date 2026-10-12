@@ -1,7 +1,7 @@
 import type { Hono } from "hono";
 import type { CreateRuntimeWorkspaceInput } from "@multiremi/contracts/types.js";
 import { RuntimeWorkspaceError } from "@multiremi/store/repos/runtime-workspaces-repo.js";
-import { currentAccessToken, currentRequestUserId } from "../wire/index.js";
+import { currentAccessToken, currentRequestUserId, isHumanOperatorRequest } from "../wire/index.js";
 import { readJson } from "../helpers/request.js";
 import { denyCurrentUserWorkspaceAccess } from "../helpers/auth-guards.js";
 import { loadRuntimeForCurrentOwner, loadRuntimeForCurrentUser, requestedRuntimeWorkspaceId } from "../helpers/runtimes.js";
@@ -55,7 +55,7 @@ export function registerRuntimeWorkspaceRoutes(app: Hono, { store }: RouterDeps)
     const denied = denyCurrentUserWorkspaceAccess(c, store, item.workspaceId);
     if (denied) return denied;
     if (!canUseRuntimeWorkspace(c, store, item)
-      || (edit && (currentAccessToken(c)?.type === "task" || currentRequestUserId(c) !== item.ownerId))) {
+      || (edit && !isHumanOperatorRequest(c))) {
       return c.json({ error: "runtime workspace access denied" }, 403);
     }
     return item;

@@ -525,9 +525,11 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     const alice = store.createWorkspaceMember({ name: "Alice Reviewer" });
     const bob = store.createWorkspaceMember({ name: "Bob Approver" });
     const carol = store.createWorkspaceMember({ name: "Carol Owner" });
+    const agent = store.createAgent({ name: "Mention author", provider: "codex" });
     const issue = createResponsibleTestIssue(store, { title: "Notify people", createdBy: alice.id });
+    const operator = store.getWorkspaceOperator("local")!;
 
-    expect(store.listIssueSubscribers(issue.id).map((subscriber) => subscriber.memberId)).toEqual([alice.id]);
+    expect(store.listIssueSubscribers(issue.id).map((subscriber) => subscriber.memberId)).toEqual([operator.id]);
 
     // The old assignment event remains readable; new member execution writes are refused.
     expect(()=>store.assignIssue(issue.id,{assigneeType:'member',assigneeId:bob.id})).toThrow('Agent or team Leader');
@@ -536,22 +538,30 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
       type:'issue_assigned',title:`${issue.key} assigned to you`,body:issue.title,actorType:'system'});
     expect(store.listInboxItems(bob.id).some((item) => item.type === "issue_assigned")).toBe(true);
 
-    store.createIssueComment(issue.id, {
-      authorType: "member",
-      authorId: carol.id,
+    const mentionComment = store.createIssueComment(issue.id, {
+      authorType: "agent",
+      authorId: agent.id,
       body: `Please review [@Bob Approver](mention://member/${bob.id}) and @Alice Reviewer`,
     });
 
-    expect(store.listIssueSubscribers(issue.id).map((subscriber) => subscriber.memberId).sort()).toEqual([
-      alice.id,
-      bob.id,
-      carol.id,
-    ].sort());
+    expect(store.listIssueSubscribers(issue.id).map((subscriber) => subscriber.memberId)).toEqual([operator.id]);
     const mentions = store.listInboxItems(bob.id).filter((item) => item.type === "comment_mention");
     expect(mentions).toHaveLength(1);
+    expect(mentions[0]?.memberId).toBe(operator.id);
+    expect(store.getMessage(mentions[0]!.id)?.to_member_id).toBe(operator.id);
+    expect(store.getIssueComment(mentionComment.id)?.authorId).toBe(agent.id);
     expect(mentions[0]?.severity).toBe(INBOX_ROUTING.comment_mention?.severity);
     expect(store.listInboxItems(bob.id).filter((item) => item.type === "comment_created")).toHaveLength(0);
     expect(store.listInboxItems(alice.id).some((item) => item.type === "comment_mention")).toBe(true);
+    expect(store.listInboxItems(alice.id)).toEqual(store.listInboxItems(bob.id));
+    store.createIssueComment(issue.id, { authorType: "member", authorId: carol.id,
+      body: `Shared self mention [@Alice](mention://member/${alice.id}) and [@Bob](mention://member/${bob.id})` });
+    expect(store.listInboxItems(bob.id).filter(item => item.type === "comment_mention")).toHaveLength(1);
+    const foreignWorkspace = store.createWorkspace({ name: "Foreign mention workspace" });
+    const foreign = store.getWorkspaceOperator(foreignWorkspace.id)!;
+    store.createIssueComment(issue.id, { authorType: "agent", authorId: agent.id,
+      body: `Invalid mentions [@Foreign](mention://member/${foreign.id}) and [@Missing](mention://member/mem_missing)` });
+    expect(store.listInboxItems(bob.id).filter(item => item.type === "comment_mention")).toHaveLength(1);
 
     const item = store.listInboxItems(bob.id)[0]!;
     expect(store.markInboxItemRead(item.id).read).toBe(true);
@@ -581,7 +591,7 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     }
 
     const notifications = store.listInboxItems(subscriber.id).filter((item) => item.type === "comment_created");
-    expect(notifications.map((item) => item.body)).toEqual(["Hidden member progress"]);
+    expect(notifications).toEqual([]);
   });
 
   it("honors notification preferences when creating inbox items", () => {

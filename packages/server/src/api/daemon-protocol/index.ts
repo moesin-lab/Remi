@@ -224,7 +224,7 @@ export class DaemonProtocolLayer {
         return {
           response: Response.json(
             {
-              error: "daemon owner is no longer a workspace member",
+              error: "daemon workspace is no longer available",
               code: "daemon_owner_membership_required",
             },
             { status: 403 },
@@ -382,7 +382,7 @@ export class DaemonProtocolLayer {
           scope: "daemon",
           status: 401,
           code: "daemon_owner_membership_required",
-          message: "daemon owner is no longer a workspace member",
+          message: "daemon workspace is no longer available",
         };
       }
     }
@@ -564,7 +564,7 @@ export class DaemonProtocolLayer {
     if (isOwnerStillMember(this.store, token)) return false;
     session.closeWithCode(
       DAEMON_PROTOCOL_CLOSE_CODES.authority_revoked,
-      "daemon owner is no longer a workspace member",
+      "daemon workspace is no longer available",
     );
     return true;
   }
@@ -572,8 +572,7 @@ export class DaemonProtocolLayer {
 
 
 function isOwnerStillMember(store: MultiremiStore, token: MultiremiAccessToken): boolean {
-  const owner = token.userId?.trim();
-  return !owner || owner === "local" || Boolean(store.getUserRoleInWorkspace(owner, token.workspaceId));
+  return Boolean(store.getWorkspace(token.workspaceId));
 }
 
 function readNonNegativeInteger(value: unknown): number | null {

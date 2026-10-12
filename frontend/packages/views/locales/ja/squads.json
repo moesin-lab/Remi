@@ -21,12 +21,14 @@
   },
   "add_member_dialog": {
     "title": "メンバーを追加",
-    "description": "ワークスペースのメンバーまたはエージェントをこのスクワッドに追加します。",
+    "description": "このスクワッドにワークスペースのエージェントを追加します。",
     "label_member": "メンバー",
     "label_role": "役割",
     "label_optional": "（任意）",
     "placeholder_role_inline": "役割を追加…",
-    "cancel": "キャンセル"
+    "cancel": "キャンセル",
+    "placeholder_agent": "エージェントを選択",
+    "search_agents": "エージェントを検索..."
   },
   "description_dialog": {
     "title": "説明を編集",

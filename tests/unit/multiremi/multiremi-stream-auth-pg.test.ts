@@ -335,6 +335,27 @@ describe.skipIf(!pgAvailable)("MUL-438 stream auth on Postgres (integration)", (
       .toEqual({ ok: false, code: "forbidden" });
   });
 
+  it("lets the canonical operator read historical Chats and private-agent traces only in its bound workspace", async () => {
+    const auth = createPostgresStreamAuthReader(pool);
+    const subject = { userId: "local", workspaceId };
+    for (const sessionId of [refs().chatSessionId!, refs().ownedSessionId!]) {
+      const result = await auth.logFacts(sessionId, subject);
+      if (!result.ok) throw new Error("unexpected unavailable");
+      expect(result.facts).toMatchObject({ kind: "chat", creatorId: "creator", requesterIsMember: true });
+      expect(decideLogSubscription(subject, result.facts)).toEqual({ ok: true });
+      expect(decideLogSubscription({ ...subject, workspaceId: otherWorkspaceId }, result.facts))
+        .toEqual({ ok: false, code: "forbidden" });
+    }
+    for (const taskId of [refs().chatTaskId!, refs().ownedTaskId!, refs().privateTaskId!]) {
+      const result = await auth.traceFacts(taskId, subject);
+      if (!result.ok) throw new Error("unexpected unavailable");
+      expect(decideTraceSubscription(subject, result.facts)).toEqual({ ok: true });
+      expect(decideTraceSubscription({ ...subject, workspaceId: otherWorkspaceId }, result.facts))
+        .toEqual({ ok: false, code: "forbidden" });
+    }
+    expect(store.getChatSession(refs().chatSessionId!)!.creatorId).toBe("creator");
+  });
+
   it("reads chat-creator and agent-privacy facts for a trace subscription", async () => {
     const auth = createPostgresStreamAuthReader(pool);
 

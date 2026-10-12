@@ -16,7 +16,6 @@ import {
   withChatSessionRequestContext,
 } from "../helpers.js";
 import {
-  authenticatedRequestUserId,
   currentTaskAccessToken,
   chatMessageCompatibilityResponse,
   chatSessionCompatibilityResponse,
@@ -48,7 +47,7 @@ import { stripServerOwnedSessionTaskFields } from "../wire/issues.js";
 function sessionMutationActor(c: Context): { actorType: "agent" | "member" | "system"; actorId: string | null } {
   const taskAgentId = currentTaskAccessToken(c)?.agentId ?? null;
   if (taskAgentId) return { actorType: "agent", actorId: taskAgentId };
-  const userId = authenticatedRequestUserId(c);
+  const userId = currentRequestUserId(c);
   return userId
     ? { actorType: "member", actorId: userId }
     : { actorType: "system", actorId: null };
@@ -67,7 +66,7 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
   // thread to Feishu itself — never to the user's Web conversation list.
   const listedSessions = (c: Context, workspaceId: string): MultiremiChatSession[] => {
     const sessions = store.listChatSessions(workspaceId, {
-      creatorId: currentRequestUserId(c),
+      creatorId: currentTaskAccessToken(c) ? currentRequestUserId(c) : undefined,
       includeArchived: c.req.query("status") === "all" || c.req.query("status") === "archived",
       excludeTransportSessions: true,
     });
@@ -115,7 +114,7 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
     if (body.id && store.getIssueSession(body.id)) return c.json({ error: "Session id already exists" }, 409);
     return sessionMutation(c, () => {
       const taskAgentId = currentTaskAccessToken(c)?.agentId ?? null;
-      const userId = authenticatedRequestUserId(c);
+      const userId = currentRequestUserId(c);
       const session = store.createSession(loaded.session.id, {
         ...body,
         chatId: loaded.session.id,

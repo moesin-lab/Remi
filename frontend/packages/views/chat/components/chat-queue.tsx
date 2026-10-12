@@ -1,11 +1,12 @@
 "use client";
 
+import { WORKSPACE_OPERATOR_USER_ID } from "@multiremi/core/workspace/operator";
+
 import { useState } from "react";
 import { Pencil, Trash2 } from "lucide-react";
 import { Button } from "@multiremi/ui/components/ui/button";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useWorkspaceId } from "@multiremi/core/hooks";
-import { useAuthStore } from "@multiremi/core/auth";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
 import { api, ApiError } from "@multiremi/core/api";
 import {
@@ -24,7 +25,7 @@ export function ChatQueue({
   const { t } = useT("chat");
   const { t: tm } = useT("messages");
   const wsId = useWorkspaceId();
-  const userId = useAuthStore(s => s.user?.id);
+  const userId = WORKSPACE_OPERATOR_USER_ID;
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const memberId = userId ? members.find(member => member.user_id === userId)?.id : undefined;
   const query = useInfiniteQuery({

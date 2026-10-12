@@ -1,9 +1,10 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@multiremi/core/api";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multiremi/core/paths";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { agentListOptions, memberListOptions, squadMemberStatusOptions, workspaceKeys } from "@multiremi/core/workspace/queries";
@@ -63,11 +64,9 @@ export function SquadDetailPage() {
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
   const { data: wsMembers = [] } = useQuery(memberListOptions(wsId));
 
-  // Runtimes are only fetched when the Create Agent dialog might open;
-  // gating on isWorkspaceAdmin below means non-admins never trigger the
-  // request. The runtime list mirrors the agents page so the picker
-  // (and the "only my runtimes" filter) behaves identically here.
-  const currentUser = useAuthStore((s) => s.user);
+  // Agent creation uses the canonical workspace operator, independently
+  // of the account currently signed in.
+  const currentUser = workspaceOperatorUser;
   const myRole = useMemo(() => {
     if (!currentUser) return null;
     return wsMembers.find((m) => m.user_id === currentUser.id)?.role ?? null;
@@ -166,7 +165,6 @@ export function SquadDetailPage() {
   }
 
   const availableAgents = agents.filter((a: Agent) => !a.archived_at && !members.some((m) => m.member_type === "agent" && m.member_id === a.id));
-  const availableMembers = wsMembers.filter((m) => !members.some((sm) => sm.member_type === "member" && sm.member_id === m.user_id));
   const isLeader = (m: SquadMember) => m.member_type === "agent" && squad.leader_id === m.member_id;
   const isArchived = (m: SquadMember) =>
     m.member_type === "agent" && !!agents.find((a: Agent) => a.id === m.member_id)?.archived_at;
@@ -230,7 +228,6 @@ export function SquadDetailPage() {
 
       {showAddMember && (
         <AddMemberDialog
-          availableMembers={availableMembers}
           availableAgents={availableAgents}
           onClose={() => setShowAddMember(false)}
           onSubmit={async (input) => { await addMemberMut.mutateAsync(input); }}

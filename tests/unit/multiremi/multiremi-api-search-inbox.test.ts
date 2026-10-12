@@ -4,6 +4,7 @@ import { issueMessagesPath, requestMessageBody } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createLocalStore as createStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { seedHistoricalCommentNotification } from "./shared-operator-test-helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -78,6 +79,7 @@ describe("Multiremi API — pins, search, and inbox", () => {
 
   it("serves issue and project search endpoints", async () => {
     const store = createStore();
+    store.createWorkspace({ id: "remote", name: "Remote search workspace" });
     const app = createMultiremiApp({ store });
     const issue = createResponsibleTestIssue(store, { title: "Searchable API issue", description: "Has api needle context", workspaceId: "local" });
     const execution=store.createAgent({name:'Search fixture execution',provider:'codex'});
@@ -166,6 +168,7 @@ describe("Multiremi API — pins, search, and inbox", () => {
     const alice = store.createWorkspaceMember({ name: "Alice API" });
     const bob = store.createWorkspaceMember({ name: "Bob API" });
     const issue = createResponsibleTestIssue(store, { title: "Inbox API", createdBy: alice.id });
+    const operator = store.getWorkspaceOperator("local")!;
 
     const subscribed = await app.request(`/api/multiremi/issues/${issue.id}/subscribers`, {
       method: "POST",
@@ -173,18 +176,16 @@ describe("Multiremi API — pins, search, and inbox", () => {
       body: JSON.stringify({ memberId: bob.id, reason: "manual" }),
     });
     expect(subscribed.status).toBe(201);
-    expect((await subscribed.json()).subscriber.memberId).toBe(bob.id);
+    expect((await subscribed.json()).subscriber.memberId).toBe(operator.id);
 
     const subscribers = await app.request(`/api/multiremi/issues/${issue.id}/subscribers`);
     expect((await subscribers.json()).subscribers.map((subscriber: any) => subscriber.memberId).sort()).toEqual([
-      alice.id,
-      bob.id,
+      operator.id,
     ].sort());
     const compatibilitySubscribers = await app.request(`/api/issues/${issue.id}/subscribers`);
     const compatibilitySubscribersBody = await compatibilitySubscribers.json();
     expect(compatibilitySubscribersBody.map((subscriber: any) => subscriber.user_id).sort()).toEqual([
-      alice.id,
-      bob.id,
+      operator.id,
     ].sort());
     expect(compatibilitySubscribersBody[0].memberId).toBeUndefined();
     expect(compatibilitySubscribersBody[0]).toMatchObject({
@@ -198,8 +199,8 @@ describe("Multiremi API — pins, search, and inbox", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId: charlie.id, userType: "member" }),
     });
-    expect(camelSubscribe.status).toBe(403);
-    expect(await camelSubscribe.json()).toEqual({ error: "target user is not a member of this workspace" });
+    expect(camelSubscribe.status).toBe(200);
+    expect(await camelSubscribe.json()).toEqual({ subscribed: true });
     const afterCamelSubscribe = await (await app.request(`/api/issues/${issue.id}/subscribers`)).json();
     expect(afterCamelSubscribe.some((subscriber: any) =>
       subscriber.user_id === charlie.id && subscriber.user_type === "member"
@@ -212,12 +213,12 @@ describe("Multiremi API — pins, search, and inbox", () => {
     });
     expect(await goSubscribe.json()).toEqual({ subscribed: true });
     const goSubscribers = await (await app.request(`/api/issues/${issue.id}/subscribers`)).json();
-    expect(goSubscribers.some((subscriber: any) => subscriber.user_id === charlie.id && subscriber.user_type === "member")).toBe(true);
+    expect(goSubscribers.some((subscriber: any) => subscriber.user_id === operator.id && subscriber.user_type === "member")).toBe(true);
     expect(events.some((event) =>
       event.type === "subscriber:added"
       && event.payload.issue_id === issue.id
       && event.payload.user_type === "member"
-      && event.payload.user_id === charlie.id
+      && event.payload.user_id === operator.id
     )).toBe(true);
 
     const runtime = store.registerRuntime({ id: "rt_subscriber_agent", provider: "codex", name: "Subscriber agent runtime" });
@@ -308,6 +309,7 @@ describe("Multiremi API — pins, search, and inbox", () => {
     const author = store.createWorkspaceMember({ name: "Author", userId: "user-author" });
     const issue = createResponsibleTestIssue(store, { title: "Inbox identity", createdBy: reviewer.id });
     store.createIssueComment(issue.id, { authorType: "member", authorId: author.id, body: "ping subscribers" });
+    seedHistoricalCommentNotification(store, issue.id, reviewer.id, "ping subscribers");
 
     // Sanity: the notification row exists under the member id.
     const byMemberId = await app.request(`/api/inbox?member_id=${encodeURIComponent(reviewer.id)}`);
@@ -340,6 +342,7 @@ describe("Multiremi API — pins, search, and inbox", () => {
         authorId: author.id,
         body: `Notification for ${title}`,
       });
+      seedHistoricalCommentNotification(store, issue.id, reviewer.id, `Notification for ${title}`);
     }
 
     const firstResponse = await app.request("/api/inbox"+`?member_id=user-page&limit=2`);
@@ -395,6 +398,7 @@ describe("Multiremi API — pins, search, and inbox", () => {
       authorId: author.id,
       body: "Notify the reviewer before the parent moves",
     });
+    seedHistoricalCommentNotification(store, child.id, reviewer.id, "Notify the reviewer before the parent moves");
     const credential = await store.createAccessToken({
       workspaceId: workspaceA.id,
       userId: "usr_parent_scope_reviewer",
@@ -408,15 +412,15 @@ describe("Multiremi API — pins, search, and inbox", () => {
     };
     const app = createMultiremiApp({ store, authToken: "root-secret" });
 
-    // MUL-476 refuses this move (a PAT without access to B gets 404; with it,
-    // the child would make it 409 workspace_move_blocked), so the parent can
+    // MUL-476 refuses this move because the child makes it 409
+    // workspace_move_blocked, so the parent can
     // only be in B as a legacy row from before that rule, which is not migrated.
     const moved = await app.request(`/api/issues/${parent.id}?workspace_id=${workspaceA.id}`, {
       method: "PATCH",
       headers,
       body: JSON.stringify({ workspace_id: workspaceB.id }),
     });
-    expect(moved.status).toBe(404);
+    expect(moved.status).toBe(409);
     expect(store.getIssue(parent.id)?.workspaceId).toBe(workspaceA.id);
     db!.run("UPDATE multiremi_issues SET workspace_id = ? WHERE id = ?", [workspaceB.id, parent.id]);
     expect(store.getIssue(parent.id)?.workspaceId).toBe(workspaceB.id);
@@ -431,7 +435,7 @@ describe("Multiremi API — pins, search, and inbox", () => {
     expect(notification.issue_parent_id).toBeUndefined();
 
     const directParent = await app.request(`/api/issues/${parent.id}?workspace_id=${workspaceB.id}`, { headers });
-    expect(directParent.status).toBe(404);
+    expect(directParent.status).toBe(200);
     expect(store.getChildIssueProgress(parent.id)).toMatchObject({ total: 0, active: 0 });
     expect(store.listChildIssueProgress(workspaceA.id).some((progress) => progress.parentIssueId === parent.id)).toBe(false);
     expect(store.listChildIssueProgress(workspaceB.id).some((progress) => progress.parentIssueId === parent.id)).toBe(false);
@@ -450,6 +454,7 @@ describe("Multiremi API — pins, search, and inbox", () => {
       authorId: author.id,
       body: "Notify before deletion",
     });
+    seedHistoricalCommentNotification(store, child.id, reviewer.id, "Notify before deletion");
     expect(store.deleteIssue(parent.id)).toBe(true);
 
     const app = createMultiremiApp({ store });

@@ -42,7 +42,8 @@ const member: MemberWithUser = {
 
 function renderPicker(assigneeId: string | null, members = [member], frequency: Array<{ assignee_type: string; assignee_id: string; frequency: number }> = []) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-  qc.setQueryData(workspaceKeys.members("ws-1"), members);
+  qc.setQueryData(workspaceKeys.members("ws-1"), [{ ...member, id: "operator", user_id: "local" }]);
+  qc.setQueryData(workspaceKeys.historicalActors("ws-1"), members);
   qc.setQueryData(workspaceKeys.agents("ws-1"), [{ id: "agent-execution", name: "Execution Agent", visibility: "public", archived_at: null }]);
   qc.setQueryData(workspaceKeys.squads("ws-1"), [{ id: "squad-execution", name: "Execution Squad", leader_id: "agent-execution", archived_at: null }]);
   qc.setQueryData(workspaceKeys.assigneeFrequency("ws-1"), frequency);

@@ -1,16 +1,9 @@
 import type { Context } from "hono";
 import type { MultiremiStore } from "@multiremi/store/store.js";
-import { authenticatedRequestUserId, cleanString, currentAccessToken } from "../wire/context.js";
+import { cleanString, currentAccessToken } from "../wire/context.js";
 
 export function resolveDefaultWorkspaceIdForUser(store: MultiremiStore, userId: string): string {
-  const memberships = store.listWorkspaceMembers().filter((member) => member.userId === userId);
-  memberships.sort((left, right) =>
-    Number(right.role === "owner") - Number(left.role === "owner")
-    || left.createdAt.localeCompare(right.createdAt)
-    || left.workspaceId.localeCompare(right.workspaceId)
-    || left.id.localeCompare(right.id)
-  );
-  return memberships[0]?.workspaceId ?? "local";
+  return store.getWorkspace("local")?.id ?? store.listWorkspaces()[0]?.id ?? "local";
 }
 
 /** Resolve request context only; callers must authorize this same ID before using it. */
@@ -27,9 +20,9 @@ export function resolveRequestWorkspaceId(
     return workspace?.id ?? c.json({ error: "workspace not found" }, 404);
   }
   const token = currentAccessToken(c);
-  if (token && (token.type === "task" && token.workspaceId || store.getUserRoleInWorkspace(token.userId, token.workspaceId) !== null)) {
-    return token.workspaceId;
-  }
-  const userId = token?.userId ?? authenticatedRequestUserId(c);
-  return userId ? resolveDefaultWorkspaceIdForUser(store, userId) : "local";
+  if (token?.type === "task" || token?.type === "daemon") return token.workspaceId;
+  // Human accounts share the same default; explicit workspace selections above
+  // still win. User-less legacy PATs retain their bound workspace.
+  if (token?.type === "pat" && token.userId === "local" && token.purpose !== "session") return token.workspaceId;
+  return resolveDefaultWorkspaceIdForUser(store, "local");
 }

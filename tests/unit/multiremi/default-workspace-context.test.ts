@@ -6,15 +6,15 @@ import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 afterEach(resetMultiremiTestEnv);
 
 describe("default workspace resolution", () => {
-  it("uses a user's only active membership", () => {
+  it("uses the shared default regardless of historical membership", () => {
     const store = createStore();
     const user = store.getOrCreateUser({ email: "single@example.test", name: "Single" });
     const workspace = store.createWorkspace({ name: "Single workspace", slug: "single-workspace" }, user.id);
 
-    expect(resolveDefaultWorkspaceIdForUser(store, user.id)).toBe(workspace.id);
+    expect(resolveDefaultWorkspaceIdForUser(store, user.id)).toBe("local");
   });
 
-  it("prefers owners, then the earliest membership, when a user has multiple workspaces", () => {
+  it("does not let historical roles or membership dates change the shared default", () => {
     const store = createStore();
     const user = store.getOrCreateUser({ email: "multiple@example.test", name: "Multiple" });
     const memberWorkspace = store.createWorkspace({ name: "Member workspace", slug: "member-workspace" });
@@ -35,7 +35,7 @@ describe("default workspace resolution", () => {
       `mem_${earlierOwner.id}_${user.id}`,
     ]);
 
-    expect(resolveDefaultWorkspaceIdForUser(store, user.id)).toBe(earlierOwner.id);
+    expect(resolveDefaultWorkspaceIdForUser(store, user.id)).toBe("local");
   });
 
   it("falls back to local when the user has no active membership", () => {
@@ -71,7 +71,7 @@ describe("default workspace resolution", () => {
     expect(resolveDefaultWorkspaceIdForUser(store, user.id)).toBe("local");
   });
 
-  it("mints login tokens for the resolved member workspace", async () => {
+  it("mints login tokens for the shared default with the real account identity", async () => {
     const store = createStore();
     const user = store.getOrCreateUser({ email: "returning@example.test", name: "Returning" });
     const workspace = store.createWorkspace({ name: "Returning workspace", slug: "returning-workspace" }, user.id);
@@ -83,7 +83,7 @@ describe("default workspace resolution", () => {
 
     expect(await store.verifyAccessToken(login.token)).toMatchObject({
       userId: user.id,
-      workspaceId: workspace.id,
+      workspaceId: "local",
     });
   });
 });

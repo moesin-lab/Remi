@@ -1,6 +1,6 @@
 "use client";
 
-import { Lock, Monitor } from "lucide-react";
+import { Monitor } from "lucide-react";
 import type { ColumnDef } from "@tanstack/react-table";
 import type { Agent, AgentRuntime } from "@multiremi/core/types";
 import {
@@ -173,9 +173,8 @@ export function createAgentColumns({
 
 function AgentNameCell({ row }: { row: AgentRow }) {
   const { t } = useT("agents");
-  const { agent, ownerIdToShow, isOwnedByMe } = row;
+  const { agent } = row;
   const isArchived = !!agent.archived_at;
-  const isPrivate = agent.visibility === "private";
 
   return (
     <div className="flex min-w-0 items-center gap-3">
@@ -195,30 +194,6 @@ function AgentNameCell({ row }: { row: AgentRow }) {
           >
             {agent.name}
           </span>
-          {isPrivate && !isArchived && (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Lock className="h-3 w-3 shrink-0 text-muted-foreground/60" />
-                }
-              />
-              <TooltipContent>
-                {t(($) => $.visibility.private.tooltip)}
-              </TooltipContent>
-            </Tooltip>
-          )}
-          {isOwnedByMe && !ownerIdToShow && (
-            <span className="shrink-0 rounded bg-muted px-1 text-[10px] font-medium text-muted-foreground">
-              {t(($) => $.row.you)}
-            </span>
-          )}
-          {ownerIdToShow && (
-            <ActorAvatar
-              actorType="member"
-              actorId={ownerIdToShow}
-              size={14}
-            />
-          )}
           {isArchived && (
             <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
               {t(($) => $.row.archived)}

@@ -43,7 +43,7 @@ Remi 的 Agent/Runtime 绑定、Issue 话题、持久 outbox 和独立的 Messag
 - [平台页面外壳](../../frontend/packages/views/im-platforms/im-platform-page.tsx)负责面包屑、能力导航和单页挂载；飞书适配在 [feishu](../../frontend/packages/views/im-platforms/feishu)。新增平台需要声明目录并接入其实际能力组件，不能只添加占位卡片。
 - 四种语言文案归属 `locales/*/im-platforms.json`。Agent 详情仍可使用飞书绑定组件，其实现归属 IM 模块。
 - 查询使用工作区和机器人分区的 `feishu-bot`、`feishu`、`lark` 和 `workspace` cache key，复用原 API schema、mutation 失效与服务端权限。不引入第二套配置数据、凭据表或缓存。
-- 页面切换只挂载当前能力，切换工作区会重建表单与选择。消息记录不请求连接健康；普通成员不请求连接/消息源配置、机器人状态/候选设备/路由/发送者等管理员接口。管理员配置失败不会降级为空配置表单。
+- 页面切换只挂载当前能力，切换工作区会重建表单与选择。消息记录不请求连接健康；所有已登录操作者可管理当前工作区的连接、消息源及机器人配置。配置失败不会降级为空配置表单；task/daemon 凭据仍遵循对应接口的权限边界。
 
 机器人集合使用 `GET/POST /api/workspaces/:id/feishu-bots`；已有 `/feishu-bot` 子资源通过 `?bot_id=<id>` 指定机器人，省略时仍操作原默认机器人。未知 ID 返回 404，不回退到默认配置。[CLI 命令映射](../cli-command-migration.md#im-platform-management)保留真实可执行的 `workspace`、`messaging` 与 `lark` 命令；传输行为见[飞书接入契约](../feishu-message-ingestion.md)。
 
@@ -67,7 +67,7 @@ Remi 的 Agent/Runtime 绑定、Issue 话题、持久 outbox 和独立的 Messag
 
 ## 验证入口
 
-`bun run smoke:im` 使用独立 Next、真实 HTTP API 和临时 SQLite，通过 Chromium 验证侧栏、各页面保存、复数机器人新增/切换/删除与权限隔离、独立菜单保存/刷新/试运行与草稿切换、凭据保留、URL/刷新、工作区隔离、成员权限、错误重试及移动端。
+`bun run smoke:im` 使用独立 Next、真实 HTTP API 和临时 SQLite，通过 Chromium 验证侧栏、各页面保存、复数机器人新增/切换/删除与权限隔离、独立菜单保存/刷新/试运行与草稿切换、凭据保留、URL/刷新、工作区数据隔离、不同登录账号共享配置、错误重试及移动端。
 飞书外部传输由测试 Provider 模拟，不读取个人配置、不启动 Agent、不发送真实飞书消息；因此它不证明真实飞书授权或出站投递。
 输出目录包含检查结果 JSON 与桌面/移动截图。端口可通过 `--port=3331` 指定，浏览器可用 `CHROME_EXECUTABLE` 指定，结果目录可用 `IM_SMOKE_ARTIFACTS` 指定。浏览器 worker 使用 Node.js 22.6+，API 使用固定版本 Bun，避免 Windows 的 Bun 浏览器传输兼容性问题。
 `release-build-check.yml` 的 `im-platform-smoke` job 运行同一命令并上传结果，飞书模拟边界与本地相同。

@@ -2341,9 +2341,9 @@ export class RuntimesRepo {
 
   /**
    * May this runtime execute this agent? A claim hands the runtime the agent's
-   * custom_env / mcp_config, so a private runtime is restricted to its owner's
-   * agents. Mirrors the claim SQL's ownership predicate (COALESCE(...,'local')
-   * so single-machine NULL owners still pair). The provider must also match.
+   * custom_env / mcp_config, so placement stays inside the same workspace.
+   * Human ownership is historical metadata;
+   * provider, group membership and explicit Runtime binding still must match.
    */
   runtimeCanRunAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
     return this.runtimeCanRouteAgent(runtime, agent) && this.runtimeSupportsAgentModel(runtime, agent);
@@ -2360,7 +2360,6 @@ export class RuntimesRepo {
     // runtime's workspace to match, so a runtime in a different workspace can
     // never run this agent (COALESCE(...,'local') for NULL-workspace runtimes).
     if ((runtime.workspaceId ?? "local") !== (agent.workspaceId ?? "local")) return false;
-    if (runtime.visibility !== "public" && (runtime.ownerId ?? "local") !== (agent.ownerId ?? "local")) return false;
     return true;
   }
 

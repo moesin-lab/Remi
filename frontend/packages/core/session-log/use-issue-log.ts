@@ -5,7 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import type { StreamSubscription } from "../api/ws-client";
 import type { IssueLogBootstrap } from "../api/schemas/session-log";
 import { useWorkspaceId } from "../hooks";
-import { useAuthStore } from "../auth";
+import { WORKSPACE_OPERATOR_USER_ID } from "../workspace/operator";
 import { useWS } from "../realtime";
 import { useReplicaEnv } from "../platform/replica-env";
 import { IssueLogReplica } from "./issue-log";
@@ -18,7 +18,7 @@ export function useIssueLog(sessionId: string, initial?: IssueLogBootstrap, comm
   );
   const [error, setError] = useState(false);
   const { subscribeStream, onReconnect } = useWS();
-  const userId = useAuthStore(s => s.user?.id);
+  const userId = WORKSPACE_OPERATOR_USER_ID;
   const workspaceId = useWorkspaceId();
   const env = useReplicaEnv();
   const qc = useQueryClient();

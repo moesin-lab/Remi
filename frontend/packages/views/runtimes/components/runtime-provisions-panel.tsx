@@ -1,5 +1,7 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -15,7 +17,6 @@ import {
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useWSEvent } from "@multiremi/core/realtime";
 import {
@@ -90,7 +91,7 @@ export function sortRuntimeProvisionStates(states: RuntimeProvisionState[]): Run
 export function RuntimeProvisionsPanel() {
   const { t } = useT("runtimes");
   const wsId = useWorkspaceId();
-  const user = useAuthStore((state) => state.user);
+  const user = workspaceOperatorUser;
   const queryClient = useQueryClient();
   const membersQuery = useQuery(memberListOptions(wsId));
   const member = membersQuery.data?.find((candidate) => candidate.user_id === user?.id);

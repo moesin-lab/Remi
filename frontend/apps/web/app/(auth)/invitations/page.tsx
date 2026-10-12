@@ -2,27 +2,10 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { useAuthStore } from "@multiremi/core/auth";
-import { paths } from "@multiremi/core/paths";
-import { InvitationsPage } from "@multiremi/views/invitations";
 
-export default function InvitationsRoutePage() {
+/** Workspace invitations no longer apply; login and workspace selection live at the root. */
+export default function Page() {
   const router = useRouter();
-  const user = useAuthStore((s) => s.user);
-  const isLoading = useAuthStore((s) => s.isLoading);
-
-  // Unauthenticated users have nowhere meaningful to land here — kick them
-  // through login and bring them back. The login page will eventually run
-  // its own listMyInvitations() check and route them here again.
-  useEffect(() => {
-    if (!isLoading && !user) {
-      router.replace(
-        `${paths.login()}?next=${encodeURIComponent(paths.invitations())}`,
-      );
-    }
-  }, [isLoading, user, router]);
-
-  if (isLoading || !user) return null;
-
-  return <InvitationsPage />;
+  useEffect(() => { router.replace("/"); }, [router]);
+  return null;
 }

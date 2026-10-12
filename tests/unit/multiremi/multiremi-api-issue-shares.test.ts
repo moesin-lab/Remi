@@ -160,7 +160,7 @@ describe("Multiremi API - issue sharing", () => {
     expect(store.getActiveIssueShare(siblingIssue.id)).toBeNull();
   });
 
-  it("grants a signed, revocable, issue-only read view to a logged-in non-member", async () => {
+  it("keeps signed issue-only share scope and revocation while operators share workspace access", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
     const traceStore = new InMemoryTraceStore();
@@ -279,7 +279,7 @@ describe("Multiremi API - issue sharing", () => {
       sizeBytes: 18,
     });
 
-    expect((await app.request(`/api/issues/${issue.id}`, bearer(viewer.token))).status).toBe(404);
+    expect((await app.request(`/api/issues/${issue.id}`, bearer(viewer.token))).status).toBe(200);
 
     const created = await app.request(`/api/issues/${issue.id}/share`, {
       method: "POST",
@@ -337,8 +337,8 @@ describe("Multiremi API - issue sharing", () => {
       expect(response.status).toBe(200);
       expect(Buffer.byteLength(await response.text())).toBeLessThanOrEqual(1024 * 1024 + 512);
     }
-    // The share deliberately preserves today's private-agent bypass.
-    expect((await app.request(turnApiPath(store, task.id, "/trace"), bearer(viewer.token))).status).toBe(404);
+    // The operator also reads historical private-agent tasks through the workspace API.
+    expect((await app.request(turnApiPath(store, task.id, "/trace"), bearer(viewer.token))).status).toBe(200);
     expect((await app.request(tracePath)).status).toBe(401);
     expect((await app.request(`/api/shares/${encodeURIComponent(share.token)}/tasks/tsk_unknown/trace`, bearer(viewer.token))).status).toBe(404);
     const foreignTask = store.createTask({ agentId: agent.id, issueId: otherIssue.id, workspaceId: "local", prompt: "foreign" });
@@ -384,7 +384,7 @@ describe("Multiremi API - issue sharing", () => {
       method: "DELETE",
       ...bearer(viewer.token),
     });
-    expect(viewerRevoke.status).toBe(404);
+    expect(viewerRevoke.status).toBe(204);
 
     const revoked = await app.request(`/api/issues/${issue.id}/share`, {
       method: "DELETE",

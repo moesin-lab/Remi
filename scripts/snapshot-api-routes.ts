@@ -1337,9 +1337,9 @@ flow("skills-native", async (rec, refs) => {
 // -- issues -----------------------------------------------------------------
 flow("issue-responsibility-and-questions", async (rec, refs, store) => {
   rec.enableAuthentication("snapshot-responsibility-master");
-  const user = store.getOrCreateUser({ email: "responsible@snapshot.invalid", name: "Explicit snapshot reviewer" });
-  const human = store.createWorkspaceMember({ userId: user.id, workspaceId: refs.workspaceId, name: user.name, role: "member" });
-  const pat = await store.createAccessToken({ type: "pat", workspaceId: refs.workspaceId, userId: user.id, name: "Snapshot designated human" });
+  const user = store.getOrCreateUser({ email: "responsible@snapshot.invalid", name: "Snapshot operator account" });
+  const human = store.getWorkspaceOperator(refs.workspaceId)!;
+  const pat = await store.createAccessToken({ type: "pat", workspaceId: refs.workspaceId, userId: user.id, name: "Snapshot operator account" });
   const runtime = store.registerRuntime({ name: "Responsibility snapshot provider", provider: "codex", ownerId: user.id, daemonId: "dmn_responsibility_snapshot", maxConcurrency: 8 });
   const owner = store.createAgent({ name: "Root execution coordinator", provider: "codex", ownerId: user.id, runtimeId: runtime.id, visibility: "workspace", maxConcurrentTasks: 8 });
   const worker = store.createAgent({ name: "Child execution coordinator", provider: "codex", ownerId: user.id, runtimeId: runtime.id, visibility: "workspace", maxConcurrentTasks: 8 });
@@ -1941,7 +1941,8 @@ flow("workspaces", async (rec, refs) => {
   await rec.json("PUT", `/api/workspaces/${id}`, { name: "Flow workspace renamed" });
   await rec.json("PATCH", `/api/workspaces/${id}`, { description: "patched" });
   const invited = await rec.json("POST", `/api/workspaces/${id}/members`, { email: "invitee@snapshot.invalid", role: "member" });
-  const invitationId = invited.body?.id ?? invited.body?.invitation?.id ?? refs.invitationId;
+  if (invited.status !== 410 || invited.body?.code !== "workspace_members_retired") throw new Error("Workspace member mutation must stay retired");
+  const invitationId = refs.invitationId;
   await rec.json("PATCH", `/api/workspaces/${refs.workspaceId}/members/${refs.otherMemberId}`, { role: "admin" });
   await rec.call("DELETE", `/api/workspaces/${refs.workspaceId}/members/${refs.otherMemberId}`);
   await rec.call("DELETE", `/api/workspaces/${id}/invitations/${invitationId}`);
@@ -1961,7 +1962,8 @@ flow("members-invitations", async (rec, refs) => {
     workspaceId: refs.workspaceId,
     role: "member",
   });
-  const id = created.body?.id ?? refs.otherMemberId;
+  if (created.status !== 410 || created.body?.code !== "workspace_members_retired") throw new Error("Legacy member mutation must stay retired");
+  const id = refs.otherMemberId;
   await rec.json("PATCH", `/api/multiremi/members/${id}`, { role: "admin" });
   await rec.call("DELETE", `/api/multiremi/members/${id}`);
   await rec.json("POST", `/api/invitations/${refs.invitationId}/decline`, {});

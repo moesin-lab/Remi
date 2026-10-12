@@ -1,9 +1,10 @@
 "use client";
 
+import { WORKSPACE_OPERATOR_USER_ID } from "@multiremi/core/workspace/operator";
+
 import { useMemo, useState } from "react";
 import { BookOpen, GitBranch, GitFork, Plus, Search, Trash2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { scmConnectionsOptions } from "@multiremi/core/scm";
 import {
@@ -144,7 +145,7 @@ export function RepositoriesPage() {
   const { t } = useT("repositories");
   const workspaceId = useWorkspaceId();
   const paths = useWorkspacePaths();
-  const userId = useAuthStore((state) => state.user?.id);
+  const userId = WORKSPACE_OPERATOR_USER_ID;
   const { data: repositoryResponse, isLoading } = useQuery(
     repositoryListOptions(workspaceId),
   );

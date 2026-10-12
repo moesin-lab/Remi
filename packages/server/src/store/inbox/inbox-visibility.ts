@@ -19,18 +19,15 @@ export function inboxVisibilitySql(db: SqlDatabase, access: InboxAccess,
     ${sourceNotification(alias)} AND ${next}.id=${json(alias, 'root_question_id')})`;
   const chatGuard = (chat: string, turn: string) => {
     if (access.attemptId) { params.push(access.attemptId); return `${turn}.current_attempt_id=?`; }
-    if (access.userId) { params.push(access.userId); return `${chat}.creator_id=?`; }
     return '1=1';
   };
   const conversation = `((s.id IS NOT NULL AND s.chat_id IS NULL OR a.id IS NOT NULL OR m.session_id='auto_orphan_inbox_'||h.workspace_id)
     OR c.id IS NOT NULL AND c.workspace_id=h.workspace_id AND ${access.attemptId
       ? (params.push(access.attemptId), "EXISTS (SELECT 1 FROM multiremi_turns own WHERE own.session_id=m.session_id AND own.current_attempt_id=?)")
-      : access.userId ? (params.push(access.userId), "COALESCE(c.creator_id,'local')=?") : '1=1'})`;
+      : '1=1'})`;
   const sourceChatGuard = chatGuard('sc', 't');
-  const sourceAgentGuard = access.userId && !access.admin
-    ? (params.push(access.userId), "(ag.visibility<>'private' OR ag.owner_id=?)") : '1=1';
-  const conversationAgentGuard = access.userId && !access.admin && !access.attemptId
-    ? (params.push(access.userId), "(c.id IS NULL OR EXISTS (SELECT 1 FROM multiremi_agents ca WHERE ca.id=c.agent_id AND (ca.visibility<>'private' OR ca.owner_id=?)))") : '1=1';
+  const sourceAgentGuard = '1=1';
+  const conversationAgentGuard = '1=1';
   const protectedSource = `(d.kind='turn' OR ${json('d', 'human_request')} IS NOT NULL
     OR ${json('d', 'human_response')} IS NOT NULL AND d.task_id IS NOT NULL)`;
   const sourceIssue = `COALESCE(${json('d', 'decision_record.source_issue_id')},${json('d', 'source_issue_id')})`;

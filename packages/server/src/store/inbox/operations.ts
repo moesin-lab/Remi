@@ -95,19 +95,22 @@ export class InboxOperations {
   }
   listMessageInbox(memberId:string,workspaceId:string,input:InboxQuery={}) {
     const member=this.ctx.workspaces().getWorkspaceMember(memberId);if(!member||member.workspaceId!==workspaceId||member.archivedAt)throw new Error('Member belongs to another workspace');
-    return this.listReaderMessageInbox('member',memberId,workspaceId,input);
+    const operator=this.ctx.workspaces().getWorkspaceOperator(workspaceId);
+    return this.listReaderMessageInbox('member',operator?.id??memberId,workspaceId,input);
   }
   listReaderMessageInbox(type:'member'|'agent',readerId:string,workspaceId:string,input:InboxQuery={}) {
+    if(type==='member')readerId=this.ctx.workspaces().getWorkspaceOperator(workspaceId)?.id??readerId;
     const scope=type==='member'?"''":this.ctx.db.dialect==='postgres'?"COALESCE(m.metadata::jsonb ->> 'execution_scope','')":"COALESCE(json_extract(m.metadata,'$.execution_scope'),'')";
     const json=(key:string)=>this.ctx.db.dialect==='postgres'?`m.metadata::jsonb #>> '{${key.replaceAll('.',',')}}'`:`json_extract(m.metadata,'$.${key}')`;
     const from=`FROM multiremi_conversation_log m
       JOIN multiremi_conversation_heads h ON h.session_id=m.session_id
-      LEFT JOIN multiremi_session_lanes l ON l.session_id=m.session_id AND l.reader_type=? AND l.reader_id=? AND l.execution_scope=${scope}
+      ${type==='member'?'LEFT JOIN multiremi_workspace_read_cursors l ON l.session_id=m.session_id AND l.workspace_id=h.workspace_id':`LEFT JOIN multiremi_session_lanes l ON l.session_id=m.session_id AND l.reader_type=? AND l.reader_id=? AND l.execution_scope=${scope}`}
+      ${type==='member'?"LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id=m.session_id AND legacy.reader_type='member' AND legacy.reader_id=m.to_member_id AND legacy.execution_scope=''":''}
       LEFT JOIN multiremi_issue_sessions s ON s.id=m.session_id LEFT JOIN multiremi_chat_sessions c ON c.id=COALESCE(s.chat_id,m.session_id)
       LEFT JOIN multiremi_autopilots a ON a.session_id=m.session_id
-      WHERE m.${type==='member'?'to_member_id':'to_agent_id'}=? AND COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)=? AND m.kind='message'
-        AND m.seq>COALESCE(l.cursor_seq,0) AND m.visibility='shown' AND m.deleted_at IS NULL`;
-    const params=[type,readerId,readerId,workspaceId];
+      WHERE ${type==='member'?'m.to_member_id IS NOT NULL':'m.to_agent_id=?'} AND COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)=? AND m.kind='message'
+        AND m.seq>COALESCE(l.cursor_seq,0) ${type==='member'?'AND m.seq>COALESCE(legacy.cursor_seq,0)':''} AND m.visibility='shown' AND m.deleted_at IS NULL`;
+    const params=[...(type==='agent'?[type,readerId,readerId]:[]),workspaceId];
     const attention=`CASE WHEN m.resolved_at IS NULL AND m.wake_applied<>'inbox_only' AND (
       m.message_kind='decision' OR m.message_kind='request' AND m.sender_type='member'
       OR m.message_kind='status' AND ${json('lifecycle_event')} IN ('task_failed','task_cancelled')
@@ -157,9 +160,9 @@ export class InboxOperations {
     const scopeSql=this.ctx.db.dialect==='postgres'?"COALESCE(metadata::jsonb ->> 'execution_scope','')":"COALESCE(json_extract(metadata,'$.execution_scope'),'')";
     let upper=toSeq;
     for(;;){
-      const rows=this.ctx.db.query(`SELECT id,seq,session_id,kind,task_id,reply_to_id,metadata FROM multiremi_conversation_log WHERE session_id=?${allMessages?'':` AND ${type==='member'?'to_member_id':'to_agent_id'}=?`}
+      const rows=this.ctx.db.query(`SELECT id,seq,session_id,kind,task_id,reply_to_id,metadata FROM multiremi_conversation_log WHERE session_id=?${allMessages?'':type==='member'?' AND to_member_id IS NOT NULL':' AND to_agent_id=?'}
         AND kind='message' AND visibility='shown' AND deleted_at IS NULL AND seq<=?${scope===undefined?'':` AND ${scopeSql}=?`} ORDER BY seq DESC LIMIT 1000`)
-        .all(sessionId,...(allMessages?[]:[readerId]),upper,...(scope===undefined?[]:[scope]));
+        .all(sessionId,...(allMessages||type==='member'?[]:[readerId]),upper,...(scope===undefined?[]:[scope]));
       const visible=rows.find(row=>visibleMessage({...row,metadata:JSON.parse(row.metadata??'{}')}));
       if(visible)return Number(visible.seq);
       if(rows.length<1000)return 0;
@@ -194,7 +197,7 @@ export class InboxOperations {
     return this.transaction(()=>{
       const member=this.ctx.workspaces().getWorkspaceMember(memberId);if(!member||member.archivedAt)throw new Error('Member not found');
       this.ctx.lockWorkspaceRuntimeLifecycle(member.workspaceId);
-      const cursor=this.readMemberConversation(member,sessionId,toSeq,visibleMessage);
+      const cursor=this.readMemberConversation(this.ctx.workspaces().ensureWorkspaceOperator(member.workspaceId),sessionId,toSeq,visibleMessage);
       this.ctx.emitWorkspaceEvent({type:'inbox:read',workspaceId:member.workspaceId,actorType:'system',actorId:null,payload:{index_only:true}});
       return cursor;
     });
@@ -205,12 +208,12 @@ export class InboxOperations {
     const head=this.ctx.conversationLog().getConversationLogHead(sessionId)?.headSeq??0;
     if(toSeq!==undefined&&(!Number.isSafeInteger(toSeq)||toSeq<0||toSeq>head))throw new Error('Inbox read cursor must be within the log');
     const seq=visibleMessage?this.visibleReadSeq('member',member.id,sessionId,toSeq??head,visibleMessage,undefined,!!chat):toSeq??head,at=nowIso();
-    if(visibleMessage&&!seq)return Number(this.ctx.db.query("SELECT cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_type='member' AND reader_id=?").get(sessionId,member.id)?.cursor_seq??0);
-    this.ctx.db.run(`INSERT INTO multiremi_session_lanes(session_id,reader_type,reader_id,execution_scope,cursor_seq,created_at,updated_at)
-      VALUES(?,'member',?,'',?,?,?) ON CONFLICT(session_id,reader_type,reader_id,execution_scope)
-      DO UPDATE SET cursor_seq=CASE WHEN multiremi_session_lanes.cursor_seq<excluded.cursor_seq THEN excluded.cursor_seq ELSE multiremi_session_lanes.cursor_seq END,updated_at=excluded.updated_at`,[sessionId,member.id,seq,at,at]);
-    const cursor=Number(this.ctx.db.query("SELECT cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_type='member' AND reader_id=?").get(sessionId,member.id).cursor_seq);
-    if(chat&&(chat.creatorId??'local')===(member.userId??member.id))this.ctx.db.run(`UPDATE multiremi_chat_sessions SET unread_since=NULL WHERE id=? AND NOT EXISTS (
+    if(visibleMessage&&!seq)return Number(this.ctx.db.query("SELECT cursor_seq FROM multiremi_workspace_read_cursors WHERE session_id=? AND workspace_id=?").get(sessionId,member.workspaceId)?.cursor_seq??0);
+    this.ctx.db.run(`INSERT INTO multiremi_workspace_read_cursors(session_id,workspace_id,cursor_seq,created_at,updated_at)
+      VALUES(?,?,?,?,?) ON CONFLICT(workspace_id,session_id)
+      DO UPDATE SET cursor_seq=CASE WHEN multiremi_workspace_read_cursors.cursor_seq<excluded.cursor_seq THEN excluded.cursor_seq ELSE multiremi_workspace_read_cursors.cursor_seq END,updated_at=excluded.updated_at`,[sessionId,member.workspaceId,seq,at,at]);
+    const cursor=Number(this.ctx.db.query("SELECT cursor_seq FROM multiremi_workspace_read_cursors WHERE session_id=? AND workspace_id=?").get(sessionId,member.workspaceId).cursor_seq);
+    if(chat)this.ctx.db.run(`UPDATE multiremi_chat_sessions SET unread_since=NULL WHERE id=? AND NOT EXISTS (
       SELECT 1 FROM multiremi_conversation_log WHERE session_id=? AND kind='message' AND sender_type<>'member'
         AND visibility='shown' AND deleted_at IS NULL AND seq>?)`,[sessionId,sessionId,cursor]);
     return cursor;
@@ -218,11 +221,13 @@ export class InboxOperations {
   readAllMessageInbox(memberId:string,workspaceId:string,visible?:(sessionId:string)=>boolean,visibleMessage?:MessageVisibility):number {
     return this.transaction(()=>{
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
-      const member=this.ctx.workspaces().getWorkspaceMember(memberId);
-      if(!member||member.workspaceId!==workspaceId||member.archivedAt)throw new Error('Member belongs to another workspace');
+      const requested=this.ctx.workspaces().getWorkspaceMember(memberId);
+      if(!requested||requested.workspaceId!==workspaceId||requested.archivedAt)throw new Error('Member belongs to another workspace');
+      const member=this.ctx.workspaces().ensureWorkspaceOperator(workspaceId);
+      memberId=member.id;
       const sessions=this.ctx.db.query(`SELECT DISTINCT m.session_id FROM multiremi_conversation_log m
         JOIN multiremi_conversation_heads h ON h.session_id=m.session_id LEFT JOIN multiremi_issue_sessions s ON s.id=m.session_id LEFT JOIN multiremi_chat_sessions c ON c.id=COALESCE(s.chat_id,m.session_id)
-        LEFT JOIN multiremi_autopilots a ON a.session_id=m.session_id WHERE m.to_member_id=? AND COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)=?`).all(memberId,workspaceId).filter(row=>!visible||visible(row.session_id));
+        LEFT JOIN multiremi_autopilots a ON a.session_id=m.session_id WHERE m.to_member_id IS NOT NULL AND COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)=?`).all(workspaceId).filter(row=>!visible||visible(row.session_id));
       let conversationsRead=0;
       for(const row of sessions){
         const head=this.ctx.conversationLog().getConversationLogHead(row.session_id)?.headSeq??0;
@@ -242,20 +247,17 @@ export class InboxOperations {
     for(const key of ['issue_id','session_id','agent_id','status'] as const)if(input[key]){conditions.push(`multiremi_turns.${key}=?`);params.push(input[key]);}
     if(input.cursor){conditions.push('(multiremi_turns.created_at<? OR multiremi_turns.created_at=? AND multiremi_turns.id<?)');params.push(input.cursor.created_at,input.cursor.created_at,input.cursor.id);}
     if (input.visibility) {
-      const { userId, admin, attemptId, coordinatingSessionId } = input.visibility;
+      const { attemptId, coordinatingSessionId } = input.visibility;
       // Actual Session ownership wins over damaged execution pointers. A deleted
-      // Chat's persisted pointer remains private and cannot grant another creator access.
+      // Chat's persisted pointer cannot grant access to an orphaned conversation.
       const ownerChat = `COALESCE((SELECT s.chat_id FROM multiremi_issue_sessions s WHERE s.id=multiremi_turns.session_id),
         multiremi_turns.chat_session_id,(SELECT c.id FROM multiremi_chat_sessions c WHERE c.id=multiremi_turns.session_id))`;
-      const actor = attemptId ? "multiremi_turns.current_attempt_id=?" : userId ? "COALESCE(c.creator_id,'local')=?" : "1=1";
-      const agent = userId && !admin && !attemptId
-        ? " AND EXISTS (SELECT 1 FROM multiremi_agents a WHERE a.id=c.agent_id AND a.workspace_id=c.workspace_id AND (a.visibility<>'private' OR a.owner_id=?))" : "";
+      const actor = attemptId ? "multiremi_turns.current_attempt_id=?" : "1=1";
       const coordinated = coordinatingSessionId ? "multiremi_turns.session_id=? OR " : "";
       conditions.push(`(${coordinated}${ownerChat} IS NULL OR EXISTS (SELECT 1 FROM multiremi_chat_sessions c
-        WHERE c.id=${ownerChat} AND c.workspace_id=multiremi_turns.workspace_id AND ${actor}${agent}))`);
+        WHERE c.id=${ownerChat} AND c.workspace_id=multiremi_turns.workspace_id AND ${actor}))`);
       if (coordinatingSessionId) params.push(coordinatingSessionId);
-      if (attemptId || userId) params.push(attemptId ?? userId);
-      if (agent) params.push(userId);
+      if (attemptId) params.push(attemptId);
     }
     // Lists never transfer historical input bodies through the synchronous PG
     // bridge. Turn get --input remains the explicit full-input read.
@@ -393,7 +395,10 @@ export class InboxOperations {
       if (message.metadata.question || message.metadata.human_request || isHistoricalIssueQuestionRecord(message.metadata.decision_record)) return new Questions(this.ctx).answer(id, { expected_route_revision: input.expected_route_revision!, response: input.response ?? { answer: input.body_md }, body_md: input.body_md, revise: input.revise, reason: input.reason, expected_answer_revision: input.expected_answer_revision }, input.sender, input.source_turn_id, input.credential);
       // Retain the carrier of old status-only choices without inventing a Q.
       const key=message.metadata.decision_record?'decision_record':'message_choice';
-      if(input.sender.type==='member'?message.to_member_id!==input.sender.id:input.sender.type!=='agent'||message.to_agent_id!==input.sender.id)throw new IssueDecisionError(403,'Decision requires its recipient');
+      const recipient=input.sender.type==='member'&&message.to_member_id?this.ctx.workspaces().getWorkspaceMember(message.to_member_id):null;
+      const actor=input.sender.type==='member'&&input.sender.id?this.ctx.workspaces().getWorkspaceMember(input.sender.id):null;
+      const workspaceId=this.ctx.db.query('SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id=?').get(message.session_id)?.workspace_id;
+      if(input.sender.type==='member'?(!actor||actor.archivedAt||actor.workspaceId!==workspaceId||!recipient||recipient.workspaceId!==workspaceId):input.sender.type!=='agent'||message.to_agent_id!==input.sender.id)throw new IssueDecisionError(403,'Decision requires its recipient');
       if(!patchDecisionRecord(this.ctx,id,key,{status:'answered',answer:input.body_md,responded_at:nowIso()},'pending',input.credential))throw new IssueDecisionError(409,'Decision is settled');
       return sendMessageWithinTransaction(this.ctx,{session_id:message.session_id,sender:input.sender,to:message.sender_type==='agent'&&message.sender_id?{type:'agent',ref:message.sender_id}:{type:'none'},
         body_md:input.body_md,message_kind:'reply',wake_requested:'now',reply_to_id:id,source_turn_id:input.source_turn_id,

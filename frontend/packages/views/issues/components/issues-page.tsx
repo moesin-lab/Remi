@@ -41,7 +41,7 @@ export function IssuesPage() {
   const wsId = useWorkspaceId();
   const { pathname } = useNavigation();
 
-  const scope = useIssuesScopeStore((s) => s.scope);
+  const scope = useIssuesScopeStore((s) => s.scope === "members" ? "all" : s.scope);
   const viewMode = useIssueViewStore((s) => s.viewMode);
   const grouping = useIssueViewStore((s) => s.grouping);
   const statusFilters = useIssueViewStore((s) => s.statusFilters);
@@ -106,7 +106,6 @@ export function IssuesPage() {
       label_ids: labelFilters,
       top_level_only: !showSubIssues,
     };
-    if (scope === "members") filter.assignee_types = ["member"];
     if (scope === "agents") filter.assignee_types = ["agent", "squad"];
     return filter;
   }, [assigneeFilters, creatorFilters, includeNoAssignee, includeNoProject, labelFilters, priorityFilters, projectFilters, scope, statusFilters, showSubIssues]);
@@ -163,8 +162,6 @@ export function IssuesPage() {
 
   // Scope pre-filter: narrow by assignee type
   const scopedIssues = useMemo(() => {
-    if (scope === "members")
-      return allIssues.filter((i) => i.assignee_type === "member");
     if (scope === "agents")
       return allIssues.filter((i) => i.assignee_type === "agent" || i.assignee_type === "squad");
     return allIssues;

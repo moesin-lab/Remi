@@ -40,7 +40,7 @@ vi.mock("@tanstack/react-query", () => ({
         refetch: vi.fn(),
       };
     }
-    return { data: [{ user_id: "user-1", role: roleRef.current }] };
+    return { data: [{ user_id: "local", role: roleRef.current }] };
   },
   useQueryClient: () => ({ setQueryData: vi.fn() }),
 }));

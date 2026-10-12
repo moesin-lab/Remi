@@ -12,7 +12,6 @@ import {
   Plus,
   SearchIcon,
   Inbox,
-  CircleUser,
   ListTodo,
   FolderKanban,
   Library,
@@ -29,7 +28,6 @@ import { Command as CommandPrimitive } from "cmdk";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type {
-  MemberWithUser,
   SearchIssueResult,
   SearchProjectResult,
 } from "@multiremi/core/types";
@@ -45,11 +43,9 @@ import { useWorkspacePaths } from "@multiremi/core/paths";
 import type { WorkspacePaths } from "@multiremi/core/paths";
 import { useModalStore } from "@multiremi/core/modals";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
-import { resolvePublicFileUrl } from "@multiremi/core/workspace/avatar-url";
 import { StatusIcon } from "../issues/components";
 import { ProjectIcon } from "../projects/components/project-icon";
 import { STATUS_CONFIG } from "@multiremi/core/issues/config";
-import { ActorAvatar as ActorAvatarBase } from "@multiremi/ui/components/common/actor-avatar";
 import {
   Dialog,
   DialogContent,
@@ -61,7 +57,6 @@ import { useTheme } from "@multiremi/ui/components/common/theme-provider";
 import { copyText } from "@multiremi/ui/lib/clipboard";
 import { useNavigation } from "../navigation";
 import { useT } from "../i18n";
-import { matchesPinyin } from "../editor/extensions/pinyin-match";
 import { HighlightText } from "./highlight-text";
 import { useSearchStore } from "./search-store";
 
@@ -89,24 +84,7 @@ interface NavPage {
 
 type ThemeValue = "light" | "dark" | "system";
 
-function memberInitials(name: string) {
-  return name
-    .split(" ")
-    .map((word) => word[0])
-    .join("")
-    .toUpperCase()
-    .slice(0, 2);
-}
 
-function matchesMember(member: MemberWithUser, query: string) {
-  const email = member.email?.toLowerCase() ?? "";
-  return (
-    member.name.toLowerCase().includes(query) ||
-    email.includes(query) ||
-    (query.length >= 3 && member.role.startsWith(query)) ||
-    matchesPinyin(member.name, query)
-  );
-}
 
 interface CommandItem {
   key: string;
@@ -133,7 +111,6 @@ export function SearchCommand() {
   const { t } = useT("search");
   const navPages: NavPage[] = [
     { key: "inbox", label: t(($) => $.pages.inbox), icon: Inbox, keywords: ["inbox", "notifications", "收件箱"] },
-    { key: "myIssues", label: t(($) => $.pages.my_issues), icon: CircleUser, keywords: ["my", "issues", "assigned", "我的"] },
     { key: "issues", label: t(($) => $.pages.issues), icon: ListTodo, keywords: ["issues", "tasks", "bugs"] },
     { key: "projects", label: t(($) => $.pages.projects), icon: FolderKanban, keywords: ["projects", "kanban", "项目"] },
     { key: "knowledge", label: t(($) => $.pages.knowledge), icon: Library, keywords: ["knowledge", "wiki", "memory", "知识库"] },
@@ -150,7 +127,7 @@ export function SearchCommand() {
   const recentItems = useRecentIssuesStore(selectRecentIssues(wsId));
   const p: WorkspacePaths = useWorkspacePaths();
   const { theme, setTheme } = useTheme();
-  const { data: members = [] } = useQuery(memberListOptions(wsId));
+  useQuery(memberListOptions(wsId));
 
   // Resolve each recent issue via its cached detail entry. Recent items are
   // typically already in the detail cache because the user has opened them;
@@ -314,24 +291,9 @@ export function SearchCommand() {
     );
   }, [commands, query]);
 
-  const filteredMembers = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return [];
-    const wantsAllMembers =
-      q.length >= 3 &&
-      ("members".startsWith(q) ||
-        "people".startsWith(q) ||
-        "users".startsWith(q) ||
-        "team".startsWith(q));
-    return members
-      .filter((member) => wantsAllMembers || matchesMember(member, q))
-      .slice(0, 10);
-  }, [members, query]);
-
   const hasResults =
     results.issues.length > 0 ||
-    results.projects.length > 0 ||
-    filteredMembers.length > 0;
+    results.projects.length > 0;
 
   // Global Cmd+K / Ctrl+K shortcut
   useEffect(() => {
@@ -520,13 +482,6 @@ export function SearchCommand() {
     [push, setOpen, p],
   );
 
-  const handleMemberSelect = useCallback(
-    (userId: string) => {
-      push(p.memberDetail(userId));
-      setOpen(false);
-    },
-    [push, setOpen, p],
-  );
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -607,38 +562,6 @@ export function SearchCommand() {
               </CommandPrimitive.Group>
             )}
 
-            {filteredMembers.length > 0 && (
-              <CommandPrimitive.Group className="p-2">
-                <div className="px-3 py-1.5 text-xs font-medium text-muted-foreground">
-                  {t(($) => $.groups.members)}
-                </div>
-                {filteredMembers.map((member) => (
-                  <CommandPrimitive.Item
-                    key={member.user_id}
-                    value={`member:${member.user_id}`}
-                    onSelect={() => handleMemberSelect(member.user_id)}
-                    className="flex cursor-default select-none items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 data-selected:bg-accent"
-                  >
-                    <ActorAvatarBase
-                      name={member.name}
-                      initials={memberInitials(member.name)}
-                      avatarUrl={resolvePublicFileUrl(member.avatar_url)}
-                      size={22}
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate">
-                        <HighlightText text={member.name} query={query} />
-                      </div>
-                      {member.email && (
-                        <div className="truncate text-xs text-muted-foreground">
-                          <HighlightText text={member.email} query={query} />
-                        </div>
-                      )}
-                    </div>
-                  </CommandPrimitive.Item>
-                ))}
-              </CommandPrimitive.Group>
-            )}
 
             {isLoading && (
               <div className="flex items-center justify-center py-10">

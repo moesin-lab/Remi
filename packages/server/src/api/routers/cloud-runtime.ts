@@ -6,7 +6,7 @@ import {
   readJson,
 } from "../helpers.js";
 import {
-  authenticatedRequestUserId,
+  currentRequestUserId,
   parseOptionalInt,
 } from "../wire/index.js";
 import type {
@@ -27,7 +27,7 @@ export function registerCloudRuntimeRoutes(app: Hono, deps: RouterDeps): void {
   })));
   app.post("/api/cloud-runtime/nodes", async (c) => {
     const body = await readJson<CreateCloudRuntimeNodeInput>(c);
-    return c.json(store.createCloudRuntimeNode(body, authenticatedRequestUserId(c) ?? "local"), 201);
+    return c.json(store.createCloudRuntimeNode(body, currentRequestUserId(c) ?? "local"), 201);
   });
   app.delete("/api/cloud-runtime/nodes", async (c) => {
     const body = await readJson<{ id?: string; node_id?: string; nodeId?: string }>(c);

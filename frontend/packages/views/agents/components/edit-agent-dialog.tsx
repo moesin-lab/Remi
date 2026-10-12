@@ -1,11 +1,9 @@
 "use client";
 
 import { useId, useMemo, useState } from "react";
-import { Globe, Lock } from "lucide-react";
 import type {
   Agent,
   AgentRole,
-  AgentVisibility,
   UpdateAgentRequest,
 } from "@multiremi/core/types";
 import { AGENT_DESCRIPTION_MAX_LENGTH } from "@multiremi/core/agents";
@@ -62,7 +60,6 @@ export function EditAgentDialog({
   const fieldId = useId();
   const nameId = `${fieldId}-name`;
   const descriptionId = `${fieldId}-description`;
-  const visibilityLabelId = `${fieldId}-visibility-label`;
   const concurrencyId = `${fieldId}-concurrency`;
   const roleId = `${fieldId}-role`;
   const [name, setName] = useState(agent.name);
@@ -79,9 +76,7 @@ export function EditAgentDialog({
   );
   const [fallbackModel, setFallbackModel] = useState(agent.fallback_model ?? agent.fallbackModel ?? "");
   const [fallbackThinkingLevel, setFallbackThinkingLevel] = useState(agent.fallback_thinking_level ?? agent.fallbackThinkingLevel ?? "");
-  const [visibility, setVisibility] = useState<AgentVisibility>(
-    agent.visibility,
-  );
+  const visibility = "workspace";
   const [maxConcurrency, setMaxConcurrency] = useState(
     String(agent.max_concurrent_tasks),
   );
@@ -246,31 +241,6 @@ export function EditAgentDialog({
               </div>
             </div>
 
-            <div>
-              <Label
-                id={visibilityLabelId}
-                className="text-xs text-muted-foreground"
-              >
-                {t(($) => $.create_dialog.visibility_label)}
-              </Label>
-              <div
-                role="group"
-                aria-labelledby={visibilityLabelId}
-                className="mt-1.5 flex gap-2"
-              >
-                <VisibilityOption
-                  value="workspace"
-                  selected={visibility === "workspace"}
-                  onSelect={setVisibility}
-                />
-                <VisibilityOption
-                  value="private"
-                  selected={visibility === "private"}
-                  onSelect={setVisibility}
-                />
-              </div>
-            </div>
-
             {canManageRole && (
               <div>
                 <Label htmlFor={roleId} className="text-xs text-muted-foreground">
@@ -393,37 +363,5 @@ export function EditAgentDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function VisibilityOption({
-  value,
-  selected,
-  onSelect,
-}: {
-  value: AgentVisibility;
-  selected: boolean;
-  onSelect: (value: AgentVisibility) => void;
-}) {
-  const { t } = useT("agents");
-  const Icon = value === "workspace" ? Globe : Lock;
-  return (
-    <button
-      type="button"
-      onClick={() => onSelect(value)}
-      className={`flex flex-1 items-center gap-2 rounded-lg border px-3 py-2.5 text-sm transition-colors ${
-        selected
-          ? "border-primary bg-primary/5"
-          : "border-border hover:bg-muted"
-      }`}
-    >
-      <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
-      <div className="text-left">
-        <div className="font-medium">{t(($) => $.visibility[value].label)}</div>
-        <div className="text-xs text-muted-foreground">
-          {t(($) => $.visibility[value].description)}
-        </div>
-      </div>
-    </button>
   );
 }

@@ -132,7 +132,9 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
 
       expect(store.getTask(task.id)?.status).toBe("cancelled");
       expect(store.getTurn(turn.id)?.status).toBe("cancelled");
-      expect(store.listTurns({ workspace_id: "local", visibility: { userId: "external", admin: true } }).map(item => item.id)).not.toContain(turn.id);
+      const humanVisibleTurns = store.listTurns({ workspace_id: "local", visibility: { userId: "external", admin: true } }).map(item => item.id);
+      if (lifecycle === "archived") expect(humanVisibleTurns).toContain(turn.id);
+      else expect(humanVisibleTurns).not.toContain(turn.id);
       expect(JSON.stringify(store.listConversationLogEntries(main.id))).not.toContain("PRIVATE_PENDING_WITHOUT_AUDIT_CHAT");
       expect(JSON.stringify(store.listIssueComments(issue.id))).not.toContain("PRIVATE_PENDING_WITHOUT_AUDIT_CHAT");
     });

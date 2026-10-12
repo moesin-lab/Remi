@@ -39,17 +39,6 @@ async function resolveLoggedInDestination(
   hasOnboarded: boolean,
   workspaces: Workspace[],
 ): Promise<string> {
-  if (!hasOnboarded) {
-    try {
-      const invites = await api.listMyInvitations();
-      if (invites.length > 0) {
-        qc.setQueryData(workspaceKeys.myInvitations(), invites);
-        return paths.invitations();
-      }
-    } catch {
-      // fall through
-    }
-  }
   return resolvePostAuthDestination(workspaces, hasOnboarded);
 }
 

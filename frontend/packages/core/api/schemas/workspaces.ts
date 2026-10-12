@@ -3,6 +3,17 @@
 // so an older/newer server never white-screens the settings page.
 import { z } from "zod";
 
+export const WorkspaceOperatorSchema = z.object({
+  userId: z.literal("local"),
+  memberId: z.string().min(1),
+});
+
+export const WorkspaceMemberSchema = z.object({
+  id: z.string().min(1), workspace_id: z.string().min(1), user_id: z.string().min(1),
+  role: z.enum(["owner", "admin", "member"]), name: z.string(),
+  email: z.string().optional(), avatar_url: z.string().nullable(), created_at: z.string(),
+}).loose();
+
 export const WorkspaceEnvResponseSchema = z.object({
   workspace_id: z.string().default(""),
   env: z.record(z.string(), z.string()).default({}),

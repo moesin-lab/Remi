@@ -10,14 +10,14 @@ import {
   setAuthCookie,
 } from "../helpers.js";
 import {
-  currentRequestUserId,
+  authenticatedRequestUserId,
 } from "../wire/index.js";
 import type { RouterDeps } from "./deps.js";
 
 export function registerMeRoutes(app: Hono, deps: RouterDeps): void {
   const { store, authToken } = deps;
   const requireKnownUser: MiddlewareHandler = async (c, next) => {
-    const userId = currentRequestUserId(c);
+    const userId = (authenticatedRequestUserId(c) ?? "local");
     if (userId !== "local" && !store.getUser(userId)) return c.json({ error: "unauthorized" }, 401);
     await next();
   };
@@ -25,7 +25,7 @@ export function registerMeRoutes(app: Hono, deps: RouterDeps): void {
   app.use("/api/me/*", requireKnownUser);
 
   app.get("/api/me", (c) => {
-    const userId = currentRequestUserId(c);
+    const userId = (authenticatedRequestUserId(c) ?? "local");
     const user = userId === "local" ? store.getCurrentUser() : store.getUser(userId);
     if (!user) return c.json({ error: "unauthorized" }, 401);
     // Sessions that predate cookie auth carry only the localStorage token.
@@ -41,18 +41,18 @@ export function registerMeRoutes(app: Hono, deps: RouterDeps): void {
   });
   app.patch("/api/me", async (c) => {
     const body = await readJson<any>(c);
-    const result = safeUpdateCurrentUser(store, body, currentRequestUserId(c));
+    const result = safeUpdateCurrentUser(store, body, (authenticatedRequestUserId(c) ?? "local"));
     if ("error" in result) return c.json({ error: result.error }, result.status);
     return c.json(result);
   });
   app.patch("/api/me/onboarding", async (c) => {
     const body = await readJson<{ questionnaire?: Record<string, unknown>; onboarding_questionnaire?: Record<string, unknown> }>(c);
-    return c.json(store.patchCurrentUserOnboarding(body.questionnaire ?? body.onboarding_questionnaire ?? {}, currentRequestUserId(c)));
+    return c.json(store.patchCurrentUserOnboarding(body.questionnaire ?? body.onboarding_questionnaire ?? {}, (authenticatedRequestUserId(c) ?? "local")));
   });
-  app.post("/api/me/onboarding/complete", (c) => c.json(store.markCurrentUserOnboarded(currentRequestUserId(c))));
+  app.post("/api/me/onboarding/complete", (c) => c.json(store.markCurrentUserOnboarded((authenticatedRequestUserId(c) ?? "local"))));
   app.post("/api/me/onboarding/cloud-waitlist", async (c) => {
     const body = await readJson<{ email?: string; reason?: string }>(c);
-    const result = safeJoinCloudWaitlist(body, store, currentRequestUserId(c));
+    const result = safeJoinCloudWaitlist(body, store, (authenticatedRequestUserId(c) ?? "local"));
     if ("error" in result) return c.json({ error: result.error }, result.status);
     return c.json(result);
   });
@@ -62,7 +62,7 @@ export function registerMeRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const result = safeRuntimeOnboardingBootstrap(store, { ...body, workspaceId, workspace_id: workspaceId }, currentRequestUserId(c));
+    const result = safeRuntimeOnboardingBootstrap(store, { ...body, workspaceId, workspace_id: workspaceId }, (authenticatedRequestUserId(c) ?? "local"));
     if ("error" in result) return c.json({ error: result.error }, result.status);
     return c.json(result);
   });
@@ -72,7 +72,7 @@ export function registerMeRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    const result = safeNoRuntimeOnboardingBootstrap(store, { ...body, workspaceId, workspace_id: workspaceId }, currentRequestUserId(c));
+    const result = safeNoRuntimeOnboardingBootstrap(store, { ...body, workspaceId, workspace_id: workspaceId }, (authenticatedRequestUserId(c) ?? "local"));
     if ("error" in result) return c.json({ error: result.error }, result.status);
     return c.json(result);
   });

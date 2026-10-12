@@ -7,6 +7,7 @@ import type {
 import { localAttachmentFileResponse } from "../helpers.js";
 import {
   authenticatedRequestUserId,
+  currentRequestUserId,
   currentWorkspaceMember,
   currentWorkspaceRoleStrict,
   issueCompatibilityResponse,
@@ -47,7 +48,7 @@ export function registerIssueShareRoutes(app: Hono, deps: RouterDeps): void {
     const share = store.ensureIssueShare(
       issue.id,
       issue.workspaceId,
-      authenticatedRequestUserId(c) ?? "local",
+      currentRequestUserId(c),
       SHARE_DURATION_DAYS,
     );
     return c.json({ share: managedShareResponse(share, shareSecret) }, 201);

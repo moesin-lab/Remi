@@ -92,7 +92,7 @@ SSR 和本地副本继续使用只读展示协议：`GET /api/sessions/:sessionI
 
 input 为 `{from_seq,to_seq,messages,legacy_prompt}`，读取完整绑定范围，不因超过 1000 条而截断。attempts 按 attempt_no 升序。status 为 pending/running/awaiting_human/completed/failed/cancelled。列表 limit 默认100、上限500；cursor 为 opaque 字符串。
 
-成员 retry 仅恢复指定的 failed/cancelled Turn，沿实际 owner 的工作区、Chat 创建者和 Agent 可见性授权；管理员不绕过这些检查，daemon 凭据返回 403。请求只接受 `cold` 布尔值和不超过 2000 字符的 `reason` 字符串，旧 selector 或 Agent、Session、prompt 覆盖字段返回 400。Store 在工作区锁内重读 owner 并重验权限；公开 Issue 上任意活动轮或私有会话中本 Session 的活动轮阻止恢复，归档会话与不可用 Agent 同样拒绝。依赖闸门生效且 backlog Issue 有未满足前置项时拒绝，不授予 force。成功原子保留同一 Turn、Agent、Session、prompt 和创建限制，只新增一次 attempt 并将同轮排回 pending，返回 `{turn}`；公开 Issue 单次推导可从 blocked 回到 todo，但 done/cancelled 不重开，Chat-owned 工作投影不推导。
+人类 retry 仅恢复指定的 failed/cancelled Turn，沿实际 owner 核验工作区。工作区内的历史 Chat 和 Agent 对统一操作者共享，不再以创建者区分人类权限；daemon 凭据返回 403，task 凭据保持原会话及 Agent 边界。请求只接受 `cold` 布尔值和不超过 2000 字符的 `reason` 字符串，旧 selector 或 Agent、Session、prompt 覆盖字段返回 400。Store 在工作区锁内重读 owner 并重验权限；公开 Issue 上任意活动轮或私有会话中本 Session 的活动轮阻止恢复，归档会话与不可用 Agent 同样拒绝。依赖闸门生效且 backlog Issue 有未满足前置项时拒绝，不授予 force。成功原子保留同一 Turn、Agent、Session、prompt 和创建限制，只新增一次 attempt 并将同轮排回 pending，返回 `{turn}`；公开 Issue 单次推导可从 blocked 回到 todo，但 done/cancelled 不重开，Chat-owned 工作投影不推导。
 
 Task retry 接受带 organizer:supervisor scope 的当前 supervisor task 凭证，也接受同工作区组长或父单负责人对组员轮的控制；旁支会话不能发起监督者重试，其他跨 agent 操作返回 403。此分支沿用 organizer 的 report_only/act 设置、巡查报告和审计，提交后发布事件；返回同一 turn、新 attempt，以及 organizer_action/comment_id，replacement 不推导 Issue。cold=false 保留 provider 缓存，cold=true 清缓存。cancel/wrap-up 同样允许这些相关控制者。retry 不新增轮；不可重试状态返回409。trace attempt 必须属于指定轮，原 TraceReadResult 的可用性、分页及断档字段保留；runtime/all 角色提供此入口，ui 角色继续返回 421。
 

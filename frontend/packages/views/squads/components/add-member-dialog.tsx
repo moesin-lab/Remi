@@ -11,36 +11,33 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { ActorAvatar } from "../../common/actor-avatar";
 import { PickerItem, PickerSection, PickerEmpty } from "../../issues/components/pickers/property-picker";
 import { ChevronDown, UserPlus } from "lucide-react";
-import type { Agent, MemberWithUser } from "@multiremi/core/types";
+import type { Agent } from "@multiremi/core/types";
 import { useT } from "../../i18n";
 import { matchesPinyin } from "../../editor/extensions/pinyin-match";
 
 // Two-step add-member dialog (mirrors CreateAgentDialog's compact layout):
-// 1) pick a target — Members + Agents in one searchable popover, each row
+// 1) pick a workspace agent in one searchable popover, each row
 //    with an avatar so visual recognition matches the issue assignee picker;
 // 2) optionally describe the role they'll play in this squad. Description
 //    lives here (not on the picker) because role is per-squad context that
 //    only makes sense at the moment of joining.
 export function AddMemberDialog({
-  availableMembers,
   availableAgents,
   onClose,
   onSubmit,
 }: {
-  availableMembers: MemberWithUser[];
   availableAgents: Agent[];
   onClose: () => void;
-  onSubmit: (input: { type: "agent" | "member"; id: string; role?: string }) => Promise<void>;
+  onSubmit: (input: { type: "agent"; id: string; role?: string }) => Promise<void>;
 }) {
   const { t } = useT("squads");
-  const [target, setTarget] = useState<{ type: "agent" | "member"; id: string; name: string } | null>(null);
+  const [target, setTarget] = useState<{ type: "agent"; id: string; name: string } | null>(null);
   const [role, setRole] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerFilter, setPickerFilter] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   const query = pickerFilter.trim().toLowerCase();
-  const filteredMembers = availableMembers.filter((m) => m.name.toLowerCase().includes(query) || matchesPinyin(m.name, query));
   const filteredAgents = availableAgents.filter((a) => a.name.toLowerCase().includes(query) || matchesPinyin(a.name, query));
 
   const canSubmit = !!target && !submitting;
@@ -76,7 +73,7 @@ export function AddMemberDialog({
                 )}
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-medium">
-                    {target?.name ?? "Select a member or agent"}
+                    {target?.name ?? t(($) => $.add_member_dialog.placeholder_agent)}
                   </div>
                   {target && (
                     <div className="truncate text-xs text-muted-foreground capitalize">{target.type}</div>
@@ -91,29 +88,11 @@ export function AddMemberDialog({
                     type="text"
                     value={pickerFilter}
                     onChange={(e) => setPickerFilter(e.target.value)}
-                    placeholder="Search members or agents..."
+                    placeholder={t(($) => $.add_member_dialog.search_agents)}
                     className="w-full bg-transparent text-sm placeholder:text-muted-foreground outline-none"
                   />
                 </div>
                 <div className="p-1 max-h-72 overflow-y-auto">
-                  {filteredMembers.length > 0 && (
-                    <PickerSection label="Members">
-                      {filteredMembers.map((m) => (
-                        <PickerItem
-                          key={m.user_id}
-                          selected={target?.type === "member" && target.id === m.user_id}
-                          onClick={() => {
-                            setTarget({ type: "member", id: m.user_id, name: m.name });
-                            setPickerOpen(false);
-                            setPickerFilter("");
-                          }}
-                        >
-                          <ActorAvatar actorType="member" actorId={m.user_id} size={18} />
-                          <span>{m.name}</span>
-                        </PickerItem>
-                      ))}
-                    </PickerSection>
-                  )}
                   {filteredAgents.length > 0 && (
                     <PickerSection label="Agents">
                       {filteredAgents.map((a) => (
@@ -132,7 +111,7 @@ export function AddMemberDialog({
                       ))}
                     </PickerSection>
                   )}
-                  {filteredMembers.length === 0 && filteredAgents.length === 0 && <PickerEmpty />}
+                  {filteredAgents.length === 0 && <PickerEmpty />}
                 </div>
               </PopoverContent>
             </Popover>

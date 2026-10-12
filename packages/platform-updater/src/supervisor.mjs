@@ -5,6 +5,7 @@ import { cp, mkdir, readFile, rename, rm, open, readdir } from 'node:fs/promises
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { DATA_SCHEMA_INPUTS, API_BASE_INPUTS } from './container-runtime.mjs';
 
 export async function readJson(path) {
@@ -15,10 +16,24 @@ export async function writeJson(path, value) {
   await mkdir(dirname(path), { recursive: true });
   const temp = path + '.' + randomUUID() + '.tmp';
   const file = await open(temp, 'wx', 0o600);
-  try { await file.writeFile(JSON.stringify(value) + '\n'); await file.sync(); }
-  finally { await file.close(); }
-  await rename(temp, path);
-  await syncDirectory(dirname(path));
+  try {
+    try { await file.writeFile(JSON.stringify(value) + '\n'); await file.sync(); }
+    finally { await file.close(); }
+    for (let attempt = 0; ; attempt++) {
+      try { await rename(temp, path); break; }
+      catch (error) {
+        // Windows readers/scanners can briefly deny replacement. Keep the old
+        // document intact and retry only the rename, never unlink the target.
+        if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(error?.code) || attempt >= 9) throw error;
+        await sleep(10 * (attempt + 1));
+      }
+    }
+    await syncDirectory(dirname(path));
+  } catch (error) {
+    // Preserve the original failure if cleanup is also denied.
+    await rm(temp, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 export async function syncDirectory(path) {
   // The supervisor runs on Linux. Windows unit tests cannot fsync directories.

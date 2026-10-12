@@ -352,54 +352,13 @@ describe("SearchCommand", () => {
     expect(useSearchStore.getState().open).toBe(false);
   });
 
-  it("lists workspace members and navigates to the member page on selection", async () => {
-    const user = userEvent.setup();
-    mockMembers.current = [
-      {
-        id: "member-1",
-        workspace_id: "ws-test",
-        user_id: "user-1",
-        role: "member",
-        created_at: "2026-01-01T00:00:00Z",
-        name: "Alice Zhang",
-        email: "alice@example.com",
-        avatar_url: null,
-      },
-      {
-        id: "member-2",
-        workspace_id: "ws-test",
-        user_id: "user-2",
-        role: "admin",
-        created_at: "2026-01-01T00:00:00Z",
-        name: "Bob Liu",
-        email: "bob@example.com",
-        avatar_url: null,
-      },
-    ];
-    renderSearch();
-
-    const input = screen.getByPlaceholderText("Type a command or search...");
-    await user.type(input, "alice");
-
-    await waitFor(() => {
-      expect(screen.getByText("Members")).toBeInTheDocument();
-      expect(
-        screen.getByText((_, el) => el?.textContent === "Alice Zhang" && el?.tagName === "DIV"),
-      ).toBeInTheDocument();
-    });
-    expect(
-      screen.getByText((_, el) => el?.textContent === "alice@example.com" && el?.tagName === "DIV"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("Bob Liu")).not.toBeInTheDocument();
-
-    const aliceItem = await screen.findByText(
-      (_, el) => el?.textContent === "Alice Zhang" && el?.tagName === "DIV",
-    );
-    await user.click(aliceItem);
-
-    expect(mockPush).toHaveBeenCalledWith("/ws-test/members/user-1");
-    expect(useSearchStore.getState().open).toBe(false);
-  });
+  it("does not expose workspace people as search results", async () => {
+  const user = userEvent.setup();
+  renderSearch();
+  await user.type(screen.getByPlaceholderText("Type a command or search..."), "members");
+  await waitFor(() => expect(screen.queryByText("Members")).not.toBeInTheDocument());
+  expect(mockPush).not.toHaveBeenCalled();
+});
 
   it("does not resolve recents until the panel is open (MUL-472 b)", () => {
     mockRecentItems.current = [

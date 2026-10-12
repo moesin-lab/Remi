@@ -298,7 +298,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
         workspaceId,
         // Own the daemon token by the user provisioning it, so runtimes it later
         // registers are attributed to that person (FR6/FR8).
-        userId: currentRequestUserId(c),
+        userId: authenticatedRequestUserId(c) ?? "local",
         daemonId,
         name: body.tokenName ?? body.token_name ?? "Multiremi daemon",
         type: "daemon",

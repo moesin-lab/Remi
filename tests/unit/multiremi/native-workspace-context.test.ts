@@ -40,36 +40,35 @@ function writes(context: Awaited<ReturnType<typeof fixture>>) {
     { path: "/api/multiremi/squads", body: { name: "Created squad", leaderId: agent.id }, entity: "squad", status: 201 },
     { path: "/api/multiremi/pins", body: { itemType: "project", itemId: project.id }, entity: "pin", status: 201 },
     { path: "/api/multiremi/tokens", body: { name: "Created token" }, entity: "token", status: 201 },
-    { path: "/api/multiremi/members", body: { name: "Created member" }, entity: "member", status: 201 },
     { path: "/api/multiremi/attachments", body: { filename: "note.txt", url: "https://example.test/note.txt" }, entity: "attachment", status: 201 },
   ];
 }
 
 describe("native workspace request context", () => {
   for (const native of [false, true]) {
-    it(`requires administration of the destination when moving a member (${native ? "native" : "compatibility"})`, async () => {
+    it(`retires member moves regardless of destination (${native ? "native" : "compatibility"})`, async () => {
       const { store, user, workspace, other, foreign, app, headers } = await fixture();
       const movedUser = store.getOrCreateUser({ email: "moved-membership@example.test", name: "Moved membership" });
       const member = store.createWorkspaceMember({ workspaceId: workspace.id, userId: movedUser.id, name: movedUser.name, role: "member" });
       const path = native ? `/api/multiremi/members/${member.id}` : `/api/workspaces/${workspace.id}/members/${member.id}`;
       const move = () => app.request(path, { method: "PATCH", headers, body: JSON.stringify({ workspaceId: foreign.id, role: "member" }) });
-      expect((await move()).status).toBe(404);
+      expect((await move()).status).toBe(410);
       expect(store.getWorkspaceMember(member.id)?.workspaceId).toBe(workspace.id);
       store.createWorkspaceMember({ workspaceId: foreign.id, userId: user.id, name: user.name, role: "member" });
-      expect((await move()).status).toBe(403);
+      expect((await move()).status).toBe(410);
       expect(store.getWorkspaceMember(member.id)?.workspaceId).toBe(workspace.id);
       const allowed = await app.request(path, { method: "PATCH", headers, body: JSON.stringify({ workspaceId: other.id, role: "member" }) });
-      expect(allowed.status).toBe(200);
-      expect(store.getWorkspaceMember(member.id)?.workspaceId).toBe(other.id);
+      expect(allowed.status).toBe(410);
+      expect(store.getWorkspaceMember(member.id)?.workspaceId).toBe(workspace.id);
     });
   }
 
   for (const endpoint of reads) {
-    it(`${endpoint} honors selected headers, explicit IDs, and rejects stale or foreign context`, async () => {
+    it(`${endpoint} honors selected headers, explicit IDs, and rejects stale context`, async () => {
       const { app, headers, workspace, foreign } = await fixture();
       expect((await app.request(endpoint, { headers })).status).toBe(200);
       expect((await app.request(endpoint, { headers: { ...headers, "X-Workspace-Slug": "missing" } })).status).toBe(404);
-      expect((await app.request(endpoint, { headers: { ...headers, "X-Workspace-Slug": foreign.slug } })).status).toBe(404);
+      expect((await app.request(endpoint, { headers: { ...headers, "X-Workspace-Slug": foreign.slug } })).status).toBe(200);
       expect((await app.request(endpoint, { headers: { ...headers, "X-Workspace-ID": workspace.id, "X-Workspace-Slug": "missing" } })).status).toBe(200);
       const explicit = `${endpoint}${endpoint.includes("?") ? "&" : "?"}workspaceId=${workspace.id}`;
       expect((await app.request(explicit, { headers: { ...headers, "X-Workspace-ID": foreign.id, "X-Workspace-Slug": "missing" } })).status).toBe(200);
@@ -82,7 +81,7 @@ describe("native workspace request context", () => {
       const { app, store, headers, workspace, user } = context;
       if (selector === "id") Object.assign(headers, { "X-Workspace-ID": workspace.id, "X-Workspace-Slug": "missing" });
       if (selector === "token") {
-        const { token } = await store.createAccessToken({ workspaceId: workspace.id, userId: user.id, name: "Scoped session", type: "pat", purpose: "session" });
+        const { token } = await store.createAccessToken({ workspaceId: workspace.id, name: "Legacy workspace credential", type: "pat" });
         Object.assign(headers, { Authorization: `Bearer ${token}`, "X-Workspace-Slug": "" });
       }
       for (const input of writes(context)) {
@@ -145,16 +144,20 @@ describe("native workspace request context", () => {
     expect(store.listLabels(other.id)).toHaveLength(0);
   });
 
-  it("authorizes label reads and mutations against the label workspace", async () => {
+  it("resolves label operations from their resource workspace for the shared operator", async () => {
     const { app, store, headers, workspace, foreign } = await fixture();
-    const label = store.createLabel({ workspaceId: foreign.id, name: "Foreign label", color: "#112233" });
     for (const prefix of ["/api/labels", "/api/multiremi/labels"]) {
-      for (const method of ["GET", "PUT", "DELETE", ...(prefix.includes("multiremi") ? ["PATCH"] : [])]) {
-        const response = await app.request(`${prefix}/${label.id}`, { method, headers, ...(method === "PUT" || method === "PATCH" ? { body: JSON.stringify({ name: "Stolen label" }) } : {}) });
-        expect(response.status, `${method} ${prefix}`).toBe(404);
+      const label = store.createLabel({ workspaceId: foreign.id, name: "Other workspace label", color: "#112233" });
+      expect((await app.request(`${prefix}/${label.id}`, { headers })).status).toBe(200);
+      for (const method of ["PUT", ...(prefix.includes("multiremi") ? ["PATCH"] : [])]) {
+        const response = await app.request(`${prefix}/${label.id}`, { method, headers, body: JSON.stringify({ name: "Shared edit" }) });
+        expect(response.status).toBe(200);
+        expect(store.getLabel(label.id)?.workspaceId).toBe(foreign.id);
       }
+      const deleted = await app.request(`${prefix}/${label.id}`, { method: "DELETE", headers });
+      expect(deleted.status).toBe(prefix.includes("multiremi") ? 200 : 204);
+      expect(store.getLabel(label.id)).toBeNull();
     }
-    expect(store.getLabel(label.id)?.name).toBe("Foreign label");
     const own = store.createLabel({ workspaceId: workspace.id, name: "Own label", color: "#112233" });
     expect((await app.request(`/api/multiremi/labels/${own.id}`, { headers: { ...headers, "X-Workspace-Slug": "missing" } })).status).toBe(200);
   });

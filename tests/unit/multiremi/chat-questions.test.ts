@@ -28,57 +28,40 @@ function setup(f: PendingTurnTestFixture, transport = false, native = true, crea
   return { ...f, ctx, runtime, agent, chat, task, turn, questionId, refresh };
 }
 
-pendingTurnBackendTests('Chat question explicit responsibility', fixture => {
-  it('an unresolved creator identity cannot become a same-name member through fuzzy lookup', () => {
+pendingTurnBackendTests('Chat question shared workspace responsibility', fixture => {
+  it('an unresolved historical creator routes to the shared operator without a fuzzy member lookup', () => {
     const f = fixture();
     const user = f.store.getOrCreateUser({ externalId: 'chat_q_name_impostor', name: 'Ambiguous Chat creator' });
-    f.store.createWorkspaceMember({ workspaceId: 'local', userId: user.id, name: 'Ambiguous Chat creator', role: 'member' });
+    const other = f.store.createWorkspaceMember({ workspaceId: 'local', userId: user.id, name: 'Ambiguous Chat creator', role: 'member' });
     const h = setup(f, false, true, 'Ambiguous Chat creator');
-    expect(h.store.getQuestion(h.questionId)).toMatchObject({ current_handler: null, route_reason: 'explicit_human_responsibility_required' });
+    expect(h.store.getQuestion(h.questionId)).toMatchObject({ current_handler: { type: 'member', id: 'mem_local_local' }, route_reason: null });
+    expect(h.store.getQuestion(h.questionId)?.current_handler?.id).not.toBe(other.id);
     const before = h.store.getMessage(h.questionId)!.revision;
     h.store.getQuestion(h.questionId);
     expect(h.store.getMessage(h.questionId)!.revision).toBe(before);
   });
-  it('ordinary Chat uses its explicit creator and source Agent/member changes migrate the same Q', () => {
+  it('source Agent changes refresh the same Q while historical member changes do not change the shared handler', () => {
     const h = setup(fixture());
     expect(h.store.getQuestion(h.questionId)).toMatchObject({ current_handler: { type: 'member', id: 'mem_local_local' }, wait_status: 'waiting', route_revision: 1 });
     h.db.transaction(() => { h.store.archiveAgent(h.agent.id); h.refresh({ agentId: h.agent.id }); })();
     expect(h.store.getQuestion(h.questionId)).toMatchObject({ current_handler: { id: 'mem_local_local' }, route_revision: 2 });
-    const ownerUser = h.store.getOrCreateUser({ externalId: 'chat_q_other_owner', name: 'Other workspace owner' });
-    h.store.createWorkspaceMember({ workspaceId: 'local', userId: ownerUser.id, name: 'Other workspace owner', role: 'owner' });
-    h.db.transaction(() => { h.store.archiveWorkspaceMember('mem_local_local'); h.refresh({ memberId: 'mem_local_local' }); })();
-    expect(h.store.getQuestion(h.questionId)).toMatchObject({ current_handler: null, stage: 'unavailable', route_reason: 'explicit_human_responsibility_required', route_revision: 3 });
-    expect(h.store.getQuestion(h.questionId)?.history.filter(e => e.reason === 'chat_responsibility_transferred')).toHaveLength(2);
+    const user = h.store.getOrCreateUser({ externalId: 'chat_q_old_contact', name: 'Old contact' });
+    const member = h.store.createWorkspaceMember({ workspaceId: 'local', userId: user.id, name: user.name, role: 'member' });
+    h.db.transaction(() => { h.store.archiveWorkspaceMember(member.id); h.refresh({ memberId: member.id }); })();
+    expect(h.store.getQuestion(h.questionId)).toMatchObject({ current_handler: { id: 'mem_local_local' }, route_revision: 2 });
   });
-  it('transport creator is never human authority, config changes rotate old cards atomically, and no-op config facts do not transfer', () => {
+  it('Feishu Chat needs no configured human and external card credentials still bind the recipient and route', () => {
     const h = setup(fixture(), true);
-    expect(h.store.getQuestion(h.questionId)).toMatchObject({ current_handler: null, route_reason: 'explicit_human_responsibility_required' });
-    expect(() => h.store.answerQuestion(h.questionId, { expected_route_revision: 1, response: { answer: 'A' } }, { type: 'member', id: 'mem_local_local' })).toThrow('question_handler_required');
-    const user = h.store.getOrCreateUser({ externalId: 'chat_q_designated', name: 'Designated Chat human' });
-    const human = h.store.createWorkspaceMember({ workspaceId: 'local', userId: user.id, name: 'Designated Chat human', role: 'member' });
-    const prior = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
-    process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 11).toString('base64');
-    const set = (memberId: string | null) => {
-      h.ctx.lockWorkspaceRuntimeLifecycle('local');
-      return h.store.upsertFeishuBotConfig('local', { agentId: h.agent.id, runtimeId: h.runtime.id, appId: 'cli_chat_q',
-        appSecretOp: 'set', appSecret: 'synthetic-chat-question', domain: 'feishu', enabled: false, responsibleMemberId: memberId });
-    };
-    try {
-      h.db.transaction(() => { set(human.id); h.refresh({ transportOnly: true }); })();
-      expect(h.store.getQuestion(h.questionId)).toMatchObject({ current_handler: { id: human.id }, route_revision: 2 });
-      const token = h.store.issueMessageCardToken(h.questionId, 'ou_chat_designated'); expect(token).toBeTruthy();
-      const cardHash = h.store.getMessage(h.questionId)!.card_token_hash;
-      expect(() => h.db.transaction(() => { set('mem_local_local'); h.refresh({ transportOnly: true }); throw new Error('Rollback config and Q'); })()).toThrow('Rollback config and Q');
-      expect(h.store.getFeishuBotConfig('local')?.responsibleMemberId).toBe(human.id);
-      expect(h.store.getQuestion(h.questionId)?.route_revision).toBe(2); expect(h.store.getMessage(h.questionId)!.card_token_hash).toBe(cardHash);
-      h.db.transaction(() => { set(human.id); h.refresh({ transportOnly: true }); })();
-      expect(h.store.getQuestion(h.questionId)?.route_revision).toBe(2);
-      h.db.transaction(() => { set('mem_local_local'); h.refresh({ transportOnly: true }); })();
-      expect(h.store.getQuestion(h.questionId)).toMatchObject({ current_handler: { id: 'mem_local_local' }, route_revision: 3 });
-      expect(h.store.getMessage(h.questionId)!.card_token_hash).toBeNull();
-      expect(() => h.store.answerQuestion(h.questionId, { expected_route_revision: 2, response: { answer: 'A' } }, { type: 'member', id: human.id })).toThrow('question_route_changed');
-      expect(() => h.store.answerQuestion(h.questionId, { expected_route_revision: 3, response: { answer: 'A' } }, { type: 'member', id: human.id })).toThrow('question_handler_required');
-    } finally { if (prior === undefined) delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY; else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = prior; }
+    expect(h.store.getQuestion(h.questionId)).toMatchObject({ current_handler: { id: 'mem_local_local' }, route_reason: null });
+    const token = h.store.issueMessageCardToken(h.questionId, 'ou_designated');
+    const credential = { token, operatorOpenId: 'ou_other', routeRevision: 1 };
+    expect(() => h.store.answerQuestion(h.questionId, { expected_route_revision: 1, response: { answer: 'A' } },
+      { type: 'member', id: 'mem_local_local' }, undefined, credential)).toThrow();
+    expect(h.store.getQuestion(h.questionId)?.status).toBe('pending');
+    expect(h.store.getMessage(h.questionId)?.card_token_consumed_at).toBeNull();
+    const answer = h.store.answerQuestion(h.questionId, { expected_route_revision: 1, response: { answer: 'A' } },
+      { type: 'member', id: 'mem_local_local' });
+    expect(answer.question.status).toBe('answered');
   });
   it('compatibility creation without a native wait nonce cannot treat running DB status as a live callback', () => {
     const h = setup(fixture(), false, false);

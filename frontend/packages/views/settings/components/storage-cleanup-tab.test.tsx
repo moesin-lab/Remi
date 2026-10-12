@@ -7,7 +7,7 @@ import enCommon from "../../locales/en/common.json";
 import enSettings from "../../locales/en/settings.json";
 
 const membersRef = vi.hoisted(() => ({
-  current: [{ user_id: "user-1", role: "owner" as "owner" | "admin" | "member" }],
+  current: [{ user_id: "local", role: "owner" as "owner" | "admin" | "member" }],
   pending: false,
   error: false,
 }));
@@ -101,7 +101,7 @@ function Wrapper({ children }: { children: ReactNode }) {
 describe("StorageCleanupTab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    membersRef.current = [{ user_id: "user-1", role: "owner" }];
+    membersRef.current = [{ user_id: "local", role: "owner" }];
     membersRef.pending = false;
     membersRef.error = false;
     statusRef.pending = false;
@@ -169,7 +169,7 @@ describe("StorageCleanupTab", () => {
   });
 
   it("does not expose settings to a regular workspace member", () => {
-    membersRef.current = [{ user_id: "user-1", role: "member" }];
+    membersRef.current = [{ user_id: "local", role: "member" }];
     render(<StorageCleanupTab />, { wrapper: Wrapper });
 
     expect(screen.getByText(/Only workspace owners and admins/)).toBeInTheDocument();

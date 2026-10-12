@@ -368,7 +368,7 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
     if (loaded instanceof Response) return loaded;
     const actor = messageActor(c, store, loaded.conversation.workspaceId);
     if (actor instanceof Response) return actor;
-    if (actor.type !== loaded.message.sender_type || actor.id !== loaded.message.sender_id) return c.json({ error: "only the sender may edit or delete" }, 403);
+    if (actor.type !== loaded.message.sender_type || actor.type !== "member" && actor.id !== loaded.message.sender_id) return c.json({ error: "only the sender may edit or delete" }, 403);
     return action(c, async () => {
       if (method === "DELETE") return { message: publicMessage(store.deleteMessage(loaded.message.id)) };
       const input = await body(c);

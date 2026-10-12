@@ -10,7 +10,11 @@ import { pathToFileURL } from 'node:url';
 
 const ROOT = process.env.REMI_APPLICATION_ROOT || '/opt/remi-application';
 export const DATA_SCHEMA_INPUTS = [
-  'packages/server/src/store/migrations.ts', 'packages/server/src/store/daemon-routing.ts',
+  'packages/server/src/store/migrations.ts',
+  'packages/server/src/store/inbox/member-records.ts',
+  'packages/server/src/store/inbox/questions.ts',
+  'packages/server/src/store/repos/workspaces-repo.ts',
+  'packages/server/src/store/daemon-routing.ts',
   'packages/server/src/store/db/postgres.ts', 'packages/server/src/store/db/pg-worker.ts',
   'packages/server/src/session-archive/retry-policy.ts', 'packages/contracts/src/attachments.ts',
   'packages/shared/src/db/index.ts',
@@ -276,7 +280,7 @@ async function main() {
     const url = new URL(process.env.MULTIREMI_DATABASE_URL || '');
     if (url.hostname !== '127.0.0.1' || url.pathname !== '/remi_update_rehearsal' || url.username !== 'remi_rehearsal') throw new Error('Migrations may only run against the isolated rehearsal database');
     const child = spawn('bun', ['--eval',
-      "const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {runMigrations}=await import('./packages/server/src/store/migrations.ts');const db=openMultiremiDatabase();try{await runMigrations(db)}finally{await db.close()}"],
+      "const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {MultiremiStore}=await import('./packages/server/src/store/store.ts');const db=openMultiremiDatabase();try{new MultiremiStore(db)}finally{await db.close()}"],
     { cwd: releasePath(id) + '/api', stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, HOME: '/tmp', MULTIREMI_HOME: '/tmp/remi' } });
     child.stderr.resume();
     // A hung candidate migration must not strand API/Web offline indefinitely.

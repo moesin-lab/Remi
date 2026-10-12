@@ -21,12 +21,14 @@
   },
   "add_member_dialog": {
     "title": "Add Member",
-    "description": "Add a workspace member or agent to this squad.",
+    "description": "Add a workspace agent to this squad.",
     "label_member": "Member",
     "label_role": "Role",
     "label_optional": "(optional)",
     "placeholder_role_inline": "Add role…",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "placeholder_agent": "Select an agent",
+    "search_agents": "Search agents..."
   },
   "description_dialog": {
     "title": "Edit description",

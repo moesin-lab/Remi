@@ -1,5 +1,7 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useCallback, useId, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -19,7 +21,6 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { ApiContractError, ApiError } from "@multiremi/core/api";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useWSEvent } from "@multiremi/core/realtime";
 import {
@@ -77,7 +78,7 @@ export function SshMeshPanel({
     defaultSourceId: string | null;
     nodeId: string;
   } | null>(null);
-  const user = useAuthStore((state) => state.user);
+  const user = workspaceOperatorUser;
   const queryClient = useQueryClient();
   const lastHeartbeatRefreshRef = useRef(0);
   const membersQuery = useQuery(memberListOptions(wsId));

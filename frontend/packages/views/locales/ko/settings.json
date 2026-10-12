@@ -166,7 +166,8 @@
     "deleting": "삭제하는 중...",
     "toast_delete_failed": "워크스페이스를 삭제하지 못했습니다",
     "confirm_cancel": "취소",
-    "confirm_action": "확인"
+    "confirm_action": "확인",
+    "shared_operator_description": "모든 작업자는 하나의 워크스페이스 ID를 공유합니다. 채팅, 받은 편지함 상태와 설정도 공유됩니다."
   },
   "prompts": {
     "title": "에이전트 프롬프트",
@@ -476,10 +477,26 @@
     "source_capabilities_hint": "업데이터 아키텍처에 필요한 매니페스트 내용을 확인합니다. 다운로드 가능 여부나 현재 설치와의 호환성을 보장하지 않으며 모든 업데이트 사전 검사를 통과해야 합니다.",
     "source_unknown_requirement": "알 수 없는 요구 사항: {{requirement}}",
     "update_modes": {
-      "images": { "label": "호스트 이미지 업데이트", "description": "호스트 업데이터가 이미지를 가져와 API/Web 컨테이너를 다시 만듭니다.", "migration": "호스트 업데이터와 호환되는 API/Web 이미지 다이제스트를 준비하세요. 비공개 설정에 MULTIREMI_PLATFORM_UPDATE_MODE=images를 지정하고 기존 Compose 프로젝트와 백업 설정을 사용하세요. 활성화 전에 기존 앱 오버레이를 이전하세요." },
-      "host_application": { "label": "호스트 앱 업데이트", "description": "호스트 업데이터가 기존 기본 이미지를 사용하여 앱 패키지를 설치합니다.", "migration": "호스트 업데이터, Docker 접근, 완전한 백업 및 격리된 이전 검증을 준비하세요. 기존 docker_compose 또는 local_profile 설정에 MULTIREMI_PLATFORM_UPDATE_MODE=application을 지정하세요. 호스트 업데이터가 계속 필요합니다." },
-      "internal_application": { "label": "컨테이너 내부 앱 업데이트", "description": "Compose 내부 업데이터가 API/Web 및 번들 Bun/Node를 전환하며 컨테이너는 계속 실행됩니다.", "migration": "감독 프로그램을 지원하는 API/Web 이미지를 맞추세요. compose.internal-updates.yml을 추가하고 REMI_UPDATER_IMAGE, REMI_UPDATER_ENV_FILE, API와 일치하는 인증 정보 및 HTTPS 소스를 설정하세요. 오버레이와 함께 업데이터 및 격리 검증 서비스를 시작하고 감독 프로그램과 초기 복사본이 준비될 때까지 기다리세요." },
-      "systemd_release": { "label": "Systemd 릴리스 업데이트", "description": "호스트 업데이터가 릴리스 디렉터리를 전환하고 관리하는 systemd 서비스를 다시 시작합니다.", "migration": "Linux 릴리스 디렉터리, 관리되는 API/Web systemd 서비스 및 완전한 백업을 준비하세요. MULTIREMI_PLATFORM_DRIVER=systemd_release와 소스 아카이브 업데이트 주소를 설정하세요. Docker에서 이동할 때는 데이터와 서비스 배포도 별도로 이전해야 합니다." }
+      "images": {
+        "label": "호스트 이미지 업데이트",
+        "description": "호스트 업데이터가 이미지를 가져와 API/Web 컨테이너를 다시 만듭니다.",
+        "migration": "호스트 업데이터와 호환되는 API/Web 이미지 다이제스트를 준비하세요. 비공개 설정에 MULTIREMI_PLATFORM_UPDATE_MODE=images를 지정하고 기존 Compose 프로젝트와 백업 설정을 사용하세요. 활성화 전에 기존 앱 오버레이를 이전하세요."
+      },
+      "host_application": {
+        "label": "호스트 앱 업데이트",
+        "description": "호스트 업데이터가 기존 기본 이미지를 사용하여 앱 패키지를 설치합니다.",
+        "migration": "호스트 업데이터, Docker 접근, 완전한 백업 및 격리된 이전 검증을 준비하세요. 기존 docker_compose 또는 local_profile 설정에 MULTIREMI_PLATFORM_UPDATE_MODE=application을 지정하세요. 호스트 업데이터가 계속 필요합니다."
+      },
+      "internal_application": {
+        "label": "컨테이너 내부 앱 업데이트",
+        "description": "Compose 내부 업데이터가 API/Web 및 번들 Bun/Node를 전환하며 컨테이너는 계속 실행됩니다.",
+        "migration": "감독 프로그램을 지원하는 API/Web 이미지를 맞추세요. compose.internal-updates.yml을 추가하고 REMI_UPDATER_IMAGE, REMI_UPDATER_ENV_FILE, API와 일치하는 인증 정보 및 HTTPS 소스를 설정하세요. 오버레이와 함께 업데이터 및 격리 검증 서비스를 시작하고 감독 프로그램과 초기 복사본이 준비될 때까지 기다리세요."
+      },
+      "systemd_release": {
+        "label": "Systemd 릴리스 업데이트",
+        "description": "호스트 업데이터가 릴리스 디렉터리를 전환하고 관리하는 systemd 서비스를 다시 시작합니다.",
+        "migration": "Linux 릴리스 디렉터리, 관리되는 API/Web systemd 서비스 및 완전한 백업을 준비하세요. MULTIREMI_PLATFORM_DRIVER=systemd_release와 소스 아카이브 업데이트 주소를 설정하세요. Docker에서 이동할 때는 데이터와 서비스 배포도 별도로 이전해야 합니다."
+      }
     },
     "preflight_ready": "검사 통과",
     "preflight_blocked": "검사 미통과",

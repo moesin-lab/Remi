@@ -84,6 +84,24 @@ export const RETIRED_CLI_ROUTES: Readonly<Record<string, string>> = {
   "POST /api/multiremi/inbox/:id/read": "remi inbox read <conversation>"
 };
 
+// These paths retain their domain guards before returning 410 in their router.
+// Keep them in the capability inventory without registering an unguarded handler.
+export const WORKSPACE_OPERATOR_RETIRED_ROUTES: Readonly<Record<string, string>> = {
+  "POST /api/workspaces/:id/members": "remi workspace operator",
+  "PATCH /api/workspaces/:id/members/:memberId": "remi workspace operator",
+  "DELETE /api/workspaces/:id/members/:memberId": "remi workspace operator",
+  "POST /api/multiremi/members": "remi workspace operator",
+  "PATCH /api/multiremi/members/:id": "remi workspace operator",
+  "DELETE /api/multiremi/members/:id": "remi workspace operator",
+  "GET /api/invitations": "remi workspace list",
+  "GET /api/invitations/:id": "remi workspace list",
+  "POST /api/invitations/:id/accept": "remi workspace list",
+  "POST /api/invitations/:id/decline": "remi workspace list",
+  "GET /api/workspaces/:id/invitations": "remi workspace list",
+  "DELETE /api/workspaces/:id/invitations/:invitationId": "remi workspace list",
+  "POST /api/workspaces/:id/leave": "remi workspace list",
+};
+
 export function registerRetiredCliRoutes(app: Hono): void {
   for (const [route, replacement] of Object.entries(RETIRED_CLI_ROUTES)) {
     const separator = route.indexOf(" ");

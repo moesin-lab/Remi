@@ -13,7 +13,7 @@ import { Sheet, SheetContent } from "@multiremi/ui/components/ui/sheet";
 import { useIsMobile } from "@multiremi/ui/hooks/use-mobile";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useScmSettings } from "@multiremi/core/scm";
-import { useSSRUser } from "@multiremi/core/platform/ssr-workspace";
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
 import { useIssueLog } from "@multiremi/core/session-log/use-issue-log";
 import { issueKeys } from "@multiremi/core/issues/queries";
 import type { IssueLogBootstrap } from "@multiremi/core/api/schemas/session-log";
@@ -89,7 +89,7 @@ export function IssueDetail({
   const { registerRightRail } = useFloatingPanelLayout();
   const router = useNavigation();
   const { pathname } = router;
-  const { user } = useSSRUser();
+  const user = workspaceOperatorUser;
   const paths = useWorkspacePaths();
 
   const wsId = useWorkspaceId();

@@ -95,43 +95,17 @@ describe("Multiremi multi-user auth", () => {
     expect(store.getUserRoleInWorkspace(b.id, "local")).toBeNull();
   });
 
-  it("AC2: a non-member cannot see the workspace or its runtimes", async () => {
+  it("authenticated operators can access existing workspaces and runtimes without membership", async () => {
     const store = seedDeployment();
-    store.registerRuntime({
-      id: "rt_pub", name: "Public", provider: "codex",
-      workspaceId: "local", ownerId: "local", visibility: "public",
-    });
+    store.registerRuntime({ id: "rt_pub", name: "Public", provider: "codex", workspaceId: "local", ownerId: "local", visibility: "public" });
     const app = createMultiremiApp({ store, authToken: "root-secret" });
-
-    const b = await login(store, { externalId: "ou_b", email: "b@feishu.local", name: "B" });
-    expect((await store.verifyAccessToken(b.token))?.workspaceId).toBe("local");
-
-    const ws = await app.request("/api/workspaces", bearer(b.token));
-    expect(ws.status).toBe(200);
-    expect(await ws.json()).toEqual([]);
-
-    expect((await app.request("/api/workspaces/local", bearer(b.token))).status).toBe(404);
-    expect((await app.request("/api/multiremi/runtimes", bearer(b.token))).status).toBe(404);
-    expect((await app.request("/api/multiremi/runtimes/rt_pub", bearer(b.token))).status).toBe(404);
-
-    const project = store.createProject({ title: "Private project", workspaceId: "local" });
-    store.updateWorkspace("local", { repos: [{ url: "https://example.test/private.git" }] });
-    const resource = store.createProjectResource(project.id, {
-      resourceType: "github_repo",
-      resourceRef: { url: "https://example.test/private.git" },
-    });
-    expect((await app.request(`/api/projects/${project.id}`, { method: "DELETE", ...bearer(b.token) })).status).toBe(404);
-    expect((await app.request(`/api/projects/${project.id}/restore`, { method: "POST", ...bearer(b.token) })).status).toBe(404);
-    expect((await app.request(`/api/projects/${project.id}/resources`, {
-      method: "POST",
-      headers: jsonAuth(b.token),
-      body: JSON.stringify({ resource_type: "github_repo", resource_ref: { url: "https://example.test/other.git" } }),
-    })).status).toBe(404);
-    expect((await app.request(`/api/projects/${project.id}/resources/${resource.id}`, {
-      method: "PUT",
-      headers: jsonAuth(b.token),
-      body: JSON.stringify({ label: "renamed" }),
-    })).status).toBe(404);
+    const b = await login(store, { externalId: "ou_b", email: "b@example.test", name: "B" });
+    expect((await (await app.request("/api/workspaces", bearer(b.token))).json()).map((ws: any) => ws.id)).toContain("local");
+    for (const path of ["/api/workspaces/local", "/api/multiremi/runtimes", "/api/multiremi/runtimes/rt_pub"]) {
+      expect((await app.request(path, bearer(b.token))).status).toBe(200);
+      expect((await app.request(path)).status).toBe(401);
+    }
+    expect(store.findWorkspaceMemberForUser(b.userId, "local")).toBeNull();
   });
 
   it("AC3: the owner sees the workspace and all runtimes", async () => {
@@ -152,78 +126,22 @@ describe("Multiremi multi-user auth", () => {
     expect(ids).toEqual(["rt_priv", "rt_pub"]);
   });
 
-  it("AC4: an invited member sees the workspace; public runtime usable, private blocked", async () => {
+  it("retired invitations are unnecessary for using historical private runtimes", async () => {
     const store = seedDeployment();
-    store.registerRuntime({ id: "rt_pub", name: "Public", provider: "codex", workspaceId: "local", ownerId: "local", visibility: "public" });
     store.registerRuntime({ id: "rt_priv", name: "Private", provider: "codex", workspaceId: "local", ownerId: "local", visibility: "private" });
     const app = createMultiremiApp({ store, authToken: "root-secret" });
-
-    const owner = await login(store, { externalId: OWNER_OPEN_ID, email: "hehuajie@feishu.local", name: "贺华杰" });
-    const b = await login(store, { externalId: "ou_b", email: "b@corp.com", name: "B" });
-
-    // Before invite: B is a non-member and sees nothing.
-    expect((await (await app.request("/api/workspaces", bearer(b.token))).json())).toEqual([]);
-
-    // Owner invites B by email.
-    const invite = await app.request("/api/workspaces/local/members", {
-      method: "POST",
-      headers: jsonAuth(owner.token),
-      body: JSON.stringify({ email: "b@corp.com", role: "member" }),
-    });
-    expect(invite.status).toBe(201);
-    const invitation = await invite.json();
-
-    // Invite details are visible to the invitee and workspace members, but not
-    // to unrelated authenticated users who happen to know the invitation ID.
-    expect((await app.request(`/api/invitations/${invitation.id}`, bearer(b.token))).status).toBe(200);
-    const outsider = await login(store, { externalId: "ou_outsider", email: "outsider@corp.com", name: "Outsider" });
-    expect((await app.request(`/api/invitations/${invitation.id}`, bearer(outsider.token))).status).toBe(404);
-
-    // B accepts the invitation as themselves.
-    const accept = await app.request(`/api/invitations/${invitation.id}/accept`, { method: "POST", ...bearer(b.token) });
-    expect(accept.status).toBe(200);
-    expect(await accept.json()).toMatchObject({
-      workspace_id: "local",
-      user_id: b.userId,
-      name: "B",
-      email: "b@corp.com",
-    });
-
-    // B now sees the workspace.
-    const ws = await app.request("/api/workspaces", bearer(b.token));
-    expect((await ws.json()).map((w: { id: string }) => w.id)).toContain("local");
-    expect(store.getUserRoleInWorkspace(b.userId, "local")).toBe("member");
-
-    // B can use the public runtime.
-    const usePublic = await app.request("/api/multiremi/agents/default", {
-      method: "POST",
-      headers: jsonAuth(b.token),
-      body: JSON.stringify({ runtimeId: "rt_pub", workspaceId: "local", provider: "codex" }),
-    });
-    expect([200, 201]).toContain(usePublic.status);
-
-    // B is blocked from the private runtime.
-    const usePrivate = await app.request("/api/multiremi/agents/default", {
-      method: "POST",
-      headers: jsonAuth(b.token),
-      body: JSON.stringify({ runtimeId: "rt_priv", workspaceId: "local", provider: "codex" }),
-    });
-    expect(usePrivate.status).toBe(403);
-    expect((await usePrivate.json()).error).toContain("private");
+    const b = await login(store, { externalId: "ou_b", email: "b@example.test", name: "B" });
+    const invite = await app.request("/api/workspaces/local/members", { method: "POST", headers: jsonAuth(b.token), body: JSON.stringify({ email: "b@example.test" }) });
+    expect(invite.status).toBe(410);
+    const usePrivate = await app.request("/api/multiremi/agents/default", { method: "POST", headers: jsonAuth(b.token), body: JSON.stringify({ runtimeId: "rt_priv", workspaceId: "local", provider: "codex" }) });
+    expect([200, 201]).toContain(usePrivate.status);
   });
 
-  it("transcript messages of a private agent's task are owner/admin-only, not workspace-wide", async () => {
+  it("transcript messages of historical private agents are shared by workspace operators", async () => {
     const store = seedDeployment();
     const app = createMultiremiApp({ store, authToken: "root-secret" });
     const owner = await login(store, { externalId: OWNER_OPEN_ID, email: "hehuajie@feishu.local", name: "贺华杰" });
     const b = await login(store, { externalId: "ou_b2", email: "b2@corp.com", name: "B" });
-
-    // B joins the workspace as a plain member.
-    const invite = await app.request("/api/workspaces/local/members", {
-      method: "POST", headers: jsonAuth(owner.token), body: JSON.stringify({ email: "b2@corp.com", role: "member" }),
-    });
-    const invitation = await invite.json();
-    await app.request(`/api/invitations/${invitation.id}/accept`, { method: "POST", ...bearer(b.token) });
 
     // Owner's PRIVATE agent runs a task that records transcript messages.
     const agent = store.createAgent({ name: "Secret", provider: "claude", workspaceId: "local", ownerId: "local", visibility: "private" });
@@ -238,106 +156,29 @@ describe("Multiremi multi-user auth", () => {
 
     // B (member, not owner/admin) is denied; owner sees the messages.
     const bResp = await traceApp.request(turnApiPath(store, task.id, "/trace"), bearer(b.token));
-    expect(bResp.status).toBe(404);
+    expect(bResp.status).toBe(200);
     const ownerResp = await traceApp.request(turnApiPath(store, task.id, "/trace"), bearer(owner.token));
     expect(ownerResp.status).toBe(200);
     expect((await ownerResp.json()).events).toHaveLength(1);
   });
 
-  it("FR4: a new user creates a workspace, becomes its owner, and can open it with their login token", async () => {
+  it("new workspaces and headerless actions use the shared operator", async () => {
     const store = seedDeployment();
     const app = createMultiremiApp({ store, authToken: "root-secret" });
-
-    const b = await login(store, { externalId: "ou_b", email: "b@feishu.local", name: "B" });
-
-    const created = await app.request("/api/workspaces", {
-      method: "POST",
-      headers: jsonAuth(b.token),
-      body: JSON.stringify({ name: "B Team" }),
-    });
+    const b = await login(store, { externalId: "ou_b", email: "b@example.test", name: "B" });
+    const created = await app.request("/api/workspaces", { method: "POST", headers: jsonAuth(b.token), body: JSON.stringify({ name: "Shared team" }) });
     expect(created.status).toBe(201);
     const workspace = await created.json();
-
-    // The creator — not the legacy "local" owner — owns the new workspace.
-    expect(store.getUserRoleInWorkspace(b.userId, workspace.id)).toBe("owner");
-    expect(store.getUserRoleInWorkspace("local", workspace.id)).toBeNull();
-    const workspaceAgents = store.listAgents().filter((agent) => agent.workspaceId === workspace.id);
-    expect(workspaceAgents.length).toBeGreaterThanOrEqual(1);
-    expect(workspaceAgents[0]).toMatchObject({ ownerId: b.userId, provider: "claude" });
-
-    // The workspace shows up in their list and opens with the login token
-    // (which was minted under the "local" workspace before this one existed).
-    const list = await app.request("/api/workspaces", bearer(b.token));
-    expect((await list.json()).map((w: { id: string }) => w.id)).toEqual([workspace.id]);
-    expect((await app.request(`/api/workspaces/${workspace.id}`, bearer(b.token))).status).toBe(200);
-
-    // The stale login token still says "local", but headerless requests recover
-    // from the caller's real membership and stay in B's workspace.
-    const agents = await app.request("/api/agents", bearer(b.token));
-    expect(agents.status).toBe(200);
-    expect((await agents.json()).map((agent: { id: string }) => agent.id)).toEqual(
-      workspaceAgents.map((agent) => agent.id),
-    );
-
-    const createdAgent = await app.request("/api/agents", {
-      method: "POST",
-      headers: jsonAuth(b.token),
-      body: JSON.stringify({ name: "B headerless agent", provider: "claude" }),
-    });
+    expect(store.getWorkspaceOperator(workspace.id)?.userId).toBe("local");
+    expect(store.getUserRoleInWorkspace(b.userId, workspace.id)).toBeNull();
+    expect(workspace.operator.memberId).toBe(store.getWorkspaceOperator(workspace.id)?.id);
+    expect(store.listAgents().find(agent => agent.workspaceId === workspace.id)?.ownerId).toBe("local");
+    const createdAgent = await app.request("/api/agents", { method: "POST", headers: jsonAuth(b.token), body: JSON.stringify({ name: "Headerless", provider: "claude" }) });
     expect(createdAgent.status).toBe(201);
-    const createdAgentBody = await createdAgent.json();
-    expect(store.getAgent(createdAgentBody.id)).toMatchObject({
-      workspaceId: workspace.id,
-      ownerId: b.userId,
-    });
-    expect(store.listAgents().filter((agent) => agent.workspaceId === "local")).toEqual([]);
-
-    const createdIssue = await app.request("/api/multiremi/issues", {
-      method: "POST", headers: jsonAuth(b.token),
-      body: JSON.stringify({ title: "B responsible Issue" }),
-    });
+    expect(store.getAgent((await createdAgent.json()).id)).toMatchObject({ workspaceId: "local", ownerId: "local" });
+    const createdIssue = await app.request("/api/multiremi/issues", { method: "POST", headers: { ...jsonAuth(b.token), "X-Workspace-ID": workspace.id }, body: JSON.stringify({ title: "Shared issue" }) });
     expect(createdIssue.status).toBe(201);
-    const { issue } = await createdIssue.json();
-    const member = store.findWorkspaceMemberForUser(b.userId, workspace.id)!;
-    expect(issue).toMatchObject({ workspaceId: workspace.id, createdBy: b.userId,
-      responsibleMemberId: member.id });
-    const assigned = await app.request(`/api/multiremi/issues/${issue.id}/assign`, {
-      method: "POST",
-      headers: jsonAuth(b.token),
-      body: JSON.stringify({ assigneeType: "agent", assigneeId: createdAgentBody.id }),
-    });
-    expect(assigned.status).toBe(200);
-    expect((await assigned.json()).issue).toMatchObject({
-      workspaceId: workspace.id, responsibleMemberId: member.id,
-      assigneeType: "agent", assigneeId: createdAgentBody.id,
-    });
-    const tasksBeforeRejectedAssignment = store.listTasksForIssue(issue.id).map(task => ({ id: task.id, status: task.status }));
-    const memberExecution = await app.request(`/api/multiremi/issues/${issue.id}/assign`, {
-      method: "POST", headers: jsonAuth(b.token),
-      body: JSON.stringify({ assigneeType: "member", assigneeId: b.userId }),
-    });
-    expect(memberExecution.status).toBe(409);
-    expect(await memberExecution.json()).toMatchObject({ code: "issue_execution_owner_required" });
-    expect(store.getIssue(issue.id)).toMatchObject({ assigneeType: "agent",
-      assigneeId: createdAgentBody.id, responsibleMemberId: member.id });
-    const compatMemberExecution = await app.request(`/api/issues/${issue.id}`, {
-      method: "PATCH", headers: jsonAuth(b.token),
-      body: JSON.stringify({ assignee_type: "member", assignee_id: member.id }),
-    });
-    expect(compatMemberExecution.status).toBe(409);
-    expect(await compatMemberExecution.json()).toMatchObject({ code: "issue_execution_owner_required" });
-    expect(store.listTasksForIssue(issue.id).map(task => ({ id: task.id, status: task.status })))
-      .toEqual(tasksBeforeRejectedAssignment);
-    const missingMember = await app.request(`/api/multiremi/issues/${issue.id}/assign`, {
-      method: "POST",
-      headers: jsonAuth(b.token),
-      body: JSON.stringify({ assigneeType: "member", assigneeId: "usr_missing" }),
-    });
-    expect(missingMember.status).toBe(404);
-    expect(await missingMember.json()).toEqual({ error: "Member not found: usr_missing" });
-
-    // Membership stays the authority: the legacy local workspace is still hidden.
-    expect((await app.request("/api/workspaces/local", bearer(b.token))).status).toBe(404);
+    expect((await createdIssue.json()).issue).toMatchObject({ workspaceId: workspace.id, createdBy: "local" });
   });
 
   it("add computer: a new user mints a real setup token for their own workspace", async () => {
@@ -384,7 +225,7 @@ describe("Multiremi multi-user auth", () => {
       body: JSON.stringify({ name: "no context" }),
     });
     expect(noContext.status).toBe(201);
-    expect((await store.verifyAccessToken((await noContext.json()).token))?.workspaceId).toBe(workspace.id);
+    expect((await store.verifyAccessToken((await noContext.json()).token))?.workspaceId).toBe("local");
   });
 
   it("keeps the headerless single-user local path unchanged", async () => {
@@ -440,10 +281,8 @@ describe("Multiremi multi-user auth", () => {
           ...forgedIdentity,
         }),
       });
-      expect(forged.status).toBe(400);
-      expect(await forged.json()).toEqual({
-        error: "member identity is server-managed; use an invitation to bind a user",
-      });
+      expect(forged.status).toBe(410);
+      expect(await forged.json()).toMatchObject({ code: "workspace_members_retired" });
     }
 
     // Existing databases may already contain an unlinked legacy row with a
@@ -462,7 +301,8 @@ describe("Multiremi multi-user auth", () => {
       headers: jsonAuth(victim.token),
       body: JSON.stringify({ name: "Misrouted victim agent", provider: "claude" }),
     });
-    expect(create.status).toBe(404);
+    expect(create.status).toBe(201);
+    expect(store.getAgent((await create.json()).id)?.workspaceId).toBe("local");
     expect(store.listAgents().filter((agent) => agent.workspaceId === attackerWorkspace.id)).toEqual(before);
   });
 
@@ -511,12 +351,13 @@ describe("Multiremi multi-user auth", () => {
     expect(store.getAccessToken(memberPersonal.id)?.revokedAt).toBeNull();
 
     const legacyList = await app.request("/api/multiremi/tokens", bearer(member.token));
-    expect(legacyList.status).toBe(403);
+    expect(legacyList.status).toBe(200);
+    expect((await legacyList.json()).tokens.every((token: any) => token.userId === member.userId)).toBe(true);
     const legacyRevoke = await app.request(`/api/multiremi/tokens/${ownerPersonal.id}`, {
       method: "DELETE",
       ...bearer(member.token),
     });
-    expect(legacyRevoke.status).toBe(403);
+    expect(legacyRevoke.status).toBe(404);
     expect(store.getAccessToken(ownerPersonal.id)?.revokedAt).toBeNull();
   });
 

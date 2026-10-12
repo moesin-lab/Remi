@@ -1,5 +1,7 @@
 "use client";
 
+import { WORKSPACE_OPERATOR_USER_ID } from "@multiremi/core/workspace/operator";
+
 import {
   forwardRef,
   useCallback,
@@ -14,7 +16,6 @@ import type { QueryClient } from "@tanstack/react-query";
 import { getCurrentWsId } from "@multiremi/core/platform";
 import { flattenIssueBuckets, issueKeys } from "@multiremi/core/issues/queries";
 import { workspaceKeys } from "@multiremi/core/workspace/queries";
-import { useAuthStore } from "@multiremi/core/auth";
 import { canAssignAgentToIssue } from "@multiremi/core/permissions";
 import { api } from "@multiremi/core/api";
 import { isImeComposing } from "@multiremi/core/utils";
@@ -526,29 +527,12 @@ export function createMentionSuggestion(
     const cachedResponse = listQueries[0]?.[1];
     const cachedIssues: Issue[] = cachedResponse ? flattenIssueBuckets(cachedResponse) : [];
 
-    // Read current user identity imperatively — this factory runs outside
-    // React render so we can't useAuthStore() as a hook here. The Proxy in
-    // packages/core/auth/index.ts forwards `.getState()` to the registered
-    // store. Used to gate personal agents in the @mention list so members
-    // don't see (or auto-complete) agents they couldn't assign anyway.
-    const userId = useAuthStore.getState().user?.id ?? null;
+    // Workspace actions use the shared operator, independent of login accounts.
+    const userId = WORKSPACE_OPERATOR_USER_ID;
     const myRole =
       members.find((m) => m.user_id === userId)?.role ?? null;
 
     const q = query.toLowerCase();
-
-    const allItem: MentionItem[] =
-      "all members".includes(q) || "all".includes(q)
-        ? [{ id: "all", label: "All members", type: "all" as const }]
-        : [];
-
-    const memberItems: MentionItem[] = members
-      .filter((m) => m.name.toLowerCase().includes(q) || matchesPinyin(m.name, q))
-      .map((m) => ({
-        id: m.user_id,
-        label: m.name,
-        type: "member" as const,
-      }));
 
     const agentItems: MentionItem[] = agents
       .filter(
@@ -568,7 +552,7 @@ export function createMentionSuggestion(
     // for everyone the user hasn't mentioned yet on this device.
     const recency = getRecencyMap(wsId);
     const userItems = sortUserItemsByRecency(
-      [...memberItems, ...agentItems, ...squadItems],
+      [...agentItems, ...squadItems],
       recency,
     );
 
@@ -582,7 +566,7 @@ export function createMentionSuggestion(
       )
       .map(issueToMention);
 
-    return [...allItem, ...userItems, ...issueItems];
+    return [...userItems, ...issueItems];
   }
 
   return {

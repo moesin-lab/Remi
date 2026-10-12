@@ -5,13 +5,16 @@ import type {
   UpdateMemberRequest,
 } from "../../types";
 import type { HttpClient } from "../http";
+import { parseStrictResponse } from "../schema";
+import { WorkspaceMemberSchema } from "../schemas/workspaces";
 
 export class MembersEndpoints {
   constructor(readonly http: HttpClient) {}
 
   // Members
-  async listMembers(workspaceId: string): Promise<MemberWithUser[]> {
-    return this.http.fetch(`/api/workspaces/${workspaceId}/members`);
+  async listMembers(workspaceId: string, includeHistory = false): Promise<MemberWithUser[]> {
+    const raw = await this.http.fetch<unknown>(`/api/workspaces/${workspaceId}/members${includeHistory ? "?include_history=true" : ""}`);
+    return parseStrictResponse(raw, WorkspaceMemberSchema.array(), { endpoint: "GET /api/workspaces/:id/members" });
   }
 
   async createMember(workspaceId: string, data: CreateMemberRequest): Promise<Invitation> {

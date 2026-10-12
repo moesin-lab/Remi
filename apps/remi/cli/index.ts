@@ -10,7 +10,6 @@ import { CommandRegistry, type CommandInventoryEntry, type CommandSource } from 
 import { agentExtensionCommandSpecs } from "./commands/agent-extensions.js";
 import { contextCommandSpec } from "./commands/context.js";
 import { collaborationCommandSpecs } from "./commands/collaboration.js";
-import { inviteCommandSpecs } from "./commands/invite.js";
 import { knowledgeCommandSpecs } from "./commands/knowledge.js";
 import { memberCommandSpecs } from "./commands/member.js";
 import { operationsCommandSpecs } from "./commands/operations.js";
@@ -28,7 +27,6 @@ commandRegistry.register(runtimePrepareCommandSpec());
 for (const spec of replaceRetiredSpecs([
   ...workspaceCommandSpecs(),
   ...memberCommandSpecs(),
-  ...inviteCommandSpecs(),
   ...tokenCommandSpecs(),
   ...projectCommandSpecs(),
   ...repoCommandSpecs(),

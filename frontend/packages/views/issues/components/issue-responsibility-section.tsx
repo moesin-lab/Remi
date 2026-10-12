@@ -1,9 +1,10 @@
 "use client";
+
+import { WORKSPACE_OPERATOR_USER_ID } from "@multiremi/core/workspace/operator";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@multiremi/core/api";
 import type { IssueDeliveryView } from "@multiremi/core/api/schemas";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import { issueResponsibilityOptions, issueDeliveriesOptions, issueKeys } from "@multiremi/core/issues/queries";
@@ -20,7 +21,7 @@ export function IssueResponsibilitySection({ issue, enabled = true, getActorName
   const { t } = useT("issues");
   const wsId = useWorkspaceId();
   const paths = useWorkspacePaths();
-  const userId = useAuthStore(s => s.user?.id);
+  const userId = WORKSPACE_OPERATOR_USER_ID;
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const memberId = members.find(member => member.user_id === userId)?.id;
   const responsibility = useQuery({ ...issueResponsibilityOptions(wsId, issue.id), enabled });

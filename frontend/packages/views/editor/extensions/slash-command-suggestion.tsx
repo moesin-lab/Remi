@@ -1,5 +1,7 @@
 "use client";
 
+import { WORKSPACE_OPERATOR_USER_ID } from "@multiremi/core/workspace/operator";
+
 import {
   forwardRef,
   useCallback,
@@ -11,7 +13,6 @@ import {
 import type { QueryClient } from "@tanstack/react-query";
 import type { SuggestionOptions } from "@tiptap/suggestion";
 import { PluginKey } from "@tiptap/pm/state";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useChatStore } from "@multiremi/core/chat";
 import { getCurrentWsId } from "@multiremi/core/platform";
 import { canAssignAgentToIssue } from "@multiremi/core/permissions";
@@ -133,7 +134,7 @@ function buildItems(qc: QueryClient, query: string): SlashCommandItem[] {
   // Tiptap calls suggestion items outside React render, so direct store reads
   // are intentional here.
   const { selectedAgentId } = useChatStore.getState();
-  const userId = useAuthStore.getState().user?.id ?? null;
+  const userId = WORKSPACE_OPERATOR_USER_ID;
   const memberRole = members.find((m) => m.user_id === userId)?.role ?? null;
 
   const availableAgents = agents.filter(

@@ -1,5 +1,7 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WorkLocationPicker } from "../../runtimes/components/runtime-workspace-picker";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -21,7 +23,6 @@ import {
   TooltipContent,
 } from "@multiremi/ui/components/ui/tooltip";
 import { useWorkspaceId } from "@multiremi/core/hooks";
-import { useAuthStore } from "@multiremi/core/auth";
 import {
   agentListOptions,
   memberListOptions,
@@ -128,7 +129,7 @@ export function ChatWindow({
     [storeSetActiveSession, onSessionChange, isPage],
   );
   const setSelectedAgentId = useChatStore((s) => s.setSelectedAgentId);
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
   const { data: agents = [] } = useQuery(agentListOptions(wsId, { enabled: chatVisible }));
   const { data: members = [] } = useQuery({ ...memberListOptions(wsId), enabled: chatVisible });
   const { data: projects = [] } = useQuery({ ...projectListOptions(wsId), enabled: chatVisible });
@@ -777,7 +778,6 @@ export function ChatWindow({
           <AgentDropdown
             agents={availableAgents}
             activeAgent={activeAgent}
-            userId={user?.id}
             onSelect={handleSelectAgent}
           />
         }

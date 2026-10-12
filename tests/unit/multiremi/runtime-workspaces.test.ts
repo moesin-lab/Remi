@@ -168,8 +168,8 @@ describe("Runtime-owned workspaces", () => {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ issue_ids: [child.id], updates: { runtime_workspace_id: id } }),
       });
-      expect((await request(privateWorkspace.id)).status).toBe(403);
-      expect(store.getIssue(child.id)?.runtimeWorkspaceId).toBeNull();
+      expect((await request(privateWorkspace.id)).status).toBe(200);
+      expect(store.getIssue(child.id)?.runtimeWorkspaceId).toBe(privateWorkspace.id);
       const bound = await request(workspace.id);
       expect(bound.status).toBe(200);
       expect((await bound.json()).updated).toBe(1);

@@ -71,7 +71,7 @@
     "members_selected_count_other": "{{count}}개 선택됨",
     "members_more_count": "+{{count}}",
     "members_remove_aria": "{{name}} 제거",
-    "picker_search_placeholder": "에이전트와 멤버 검색...",
+    "picker_search_placeholder": "에이전트 검색...",
     "group_my_agents": "내 에이전트",
     "group_workspace_agents": "워크스페이스 에이전트",
     "group_members": "멤버",

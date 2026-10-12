@@ -71,7 +71,7 @@
     "members_selected_count_other": "{{count}} selected",
     "members_more_count": "+{{count}}",
     "members_remove_aria": "Remove {{name}}",
-    "picker_search_placeholder": "Search agents and members...",
+    "picker_search_placeholder": "Search agents...",
     "group_my_agents": "My Agents",
     "group_workspace_agents": "Workspace Agents",
     "group_members": "Members",

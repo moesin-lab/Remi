@@ -541,22 +541,14 @@ export class IssueSessionsRepo {
     const params: unknown[] = [issueId];
     if (!includeArchived) clauses.push("s.status = 'active'");
     if (options.chatAccess) {
-      // Batch equivalent of loadChatSessionForCurrentUser after the request has
-      // authorized the Issue workspace. Missing/cross-workspace Chats or Agents
-      // fail closed; a workspace admin still cannot read another creator's Chat.
+      // Human operators share Chat access. Actual owner workspace and Agent
+      // existence still protect missing, moved, or deleted conversation data.
       clauses.push(`(s.chat_id IS NULL OR EXISTS (
         SELECT 1 FROM multiremi_chat_sessions chat
         JOIN multiremi_agents agent ON agent.id = chat.agent_id AND agent.workspace_id = chat.workspace_id
         WHERE chat.id = s.chat_id AND chat.workspace_id = s.workspace_id
           AND chat.workspace_id = (SELECT workspace_id FROM multiremi_issues WHERE id = s.issue_id)
-          AND COALESCE(chat.creator_id, 'local') = ?
-          AND (LOWER(TRIM(COALESCE(agent.visibility, 'private'))) = 'workspace' OR agent.owner_id = ?
-            OR COALESCE((SELECT member.role FROM multiremi_workspace_members member
-              WHERE member.workspace_id = s.workspace_id AND member.user_id = ? AND member.archived_at IS NULL
-              ORDER BY member.name ASC LIMIT 1), ?) IN ('owner', 'admin'))
       ))`);
-      params.push(options.chatAccess.userId, options.chatAccess.userId,
-        options.chatAccess.userId, options.chatAccess.roleWithoutMembership);
     }
     const rows = this.ctx.db.query(
       `${SESSION_SELECT} WHERE ${clauses.join(" AND ")} ORDER BY s.is_default DESC, s.updated_at DESC`,
@@ -603,10 +595,8 @@ export class IssueSessionsRepo {
     } else {
       const member = this.ctx.workspaces().getWorkspaceMember(participantId) ?? this.ctx.workspaces().findWorkspaceMemberForUser(participantId, session.workspaceId);
       if (!member || member.workspaceId !== session.workspaceId) throw new Error(`Member not found: ${participantId}`);
-      // New API actors use stable user ids, while local/legacy member fixtures
-      // may not have a user link yet. Preserve their member id rather than
-      // inserting NULL into the participant key.
-      normalizedParticipantId = member.userId ?? member.id;
+      // New participation is shared. Historical participant rows remain audit data.
+      normalizedParticipantId = this.ctx.workspaces().ensureWorkspaceOperator(session.workspaceId).userId!;
     }
     const now = nowIso();
     const id = createId("spart");
@@ -627,7 +617,20 @@ export class IssueSessionsRepo {
   }
 
   removeSessionParticipant(sessionId: string, participantType: string, participantId: string): void {
-    if (!this.getIssueSession(sessionId)) throw new Error(`Session not found: ${sessionId}`);
+    const session = this.getIssueSession(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    if (participantType === "member") {
+      const member = this.ctx.workspaces().getWorkspaceMember(participantId)
+        ?? this.ctx.workspaces().findWorkspaceMemberForUser(participantId, session.workspaceId);
+      if (member && member.workspaceId !== session.workspaceId) throw new Error("Participant belongs to another workspace");
+      const historical = this.ctx.db.query(`SELECT id FROM multiremi_session_participants
+        WHERE session_id=? AND participant_type='member' AND participant_id=?`).get(sessionId, participantId);
+      if (!member && !historical) return;
+      // Human participation is one shared state; leave rows intact for audit.
+      this.ctx.db.run(`UPDATE multiremi_session_participants SET status='left',updated_at=?
+        WHERE session_id=? AND participant_type='member'`, [nowIso(), sessionId]);
+      return;
+    }
     this.ctx.db.run(
       `UPDATE multiremi_session_participants
        SET status = 'left', updated_at = ?
@@ -645,7 +648,7 @@ export class IssueSessionsRepo {
       : this.ctx.db.query(
         "SELECT * FROM multiremi_session_participants WHERE session_id = ? AND status = 'active' ORDER BY joined_at ASC",
       ).all(sessionId) as Row[];
-    return rows.map(toSessionParticipant);
+    return sharedSessionParticipants(rows.map(toSessionParticipant), includeLeft);
   }
 
   /**
@@ -680,6 +683,9 @@ export class IssueSessionsRepo {
         const list = grouped.get(participant.sessionId);
         if (list) list.push(participant);
       }
+    }
+    if (!includeLeft) for (const [sessionId, participants] of grouped) {
+      grouped.set(sessionId, sharedSessionParticipants(participants, false));
     }
     return grouped;
   }
@@ -1216,6 +1222,17 @@ function toIssueSession(row: Row): MultiremiIssueSession {
     updatedAt,
     updated_at: updatedAt,
   };
+}
+
+function sharedSessionParticipants(participants: MultiremiSessionParticipant[], includeHistory: boolean): MultiremiSessionParticipant[] {
+  if (includeHistory) return participants;
+  let humanIncluded = false;
+  return participants.flatMap(participant => {
+    if (participant.participantType !== "member") return [participant];
+    if (humanIncluded) return [];
+    humanIncluded = true;
+    return [{ ...participant, participantId: "local" }];
+  });
 }
 
 function toSessionParticipant(row: Row): MultiremiSessionParticipant {

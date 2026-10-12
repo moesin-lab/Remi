@@ -17,7 +17,9 @@ export default async function IssueDetailPage({ params, searchParams }: {
   if (initial) {
     queries.setQueryData(issueKeys.detail(initial.issue.workspace_id, id), initial.issue);
     queries.setQueryData(issueKeys.sessions(id), initial.sessions);
-    queries.setQueryData(workspaceKeys.members(initial.issue.workspace_id), initial.members);
+    queries.setQueryData(workspaceKeys.historicalActors(initial.issue.workspace_id), initial.members);
+    queries.setQueryData(workspaceKeys.members(initial.issue.workspace_id),
+      initial.members.filter((member) => member.user_id === "local"));
     queries.setQueryData(issueKeys.children(initial.issue.workspace_id, id), initial.children);
     queries.setQueryData(issueKeys.tasks(id), initial.tasks);
     if (initial.parentIssue) queries.setQueryData(issueKeys.detail(initial.issue.workspace_id, initial.parentIssue.id), initial.parentIssue);

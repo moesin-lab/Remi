@@ -474,70 +474,14 @@ describe("ProjectDetail instructions", () => {
   });
 });
 
-describe("ProjectDetail lead picker", () => {
-  beforeEach(() => {
-    state.project = makeProject();
-    state.projectLoading = false;
-    state.issues = [];
-    state.issuesLoading = false;
-    state.issuesError = false;
-    state.issuesErrorValue = null;
-    state.members = [{ user_id: "user-2", name: "张三" }];
+describe("ProjectDetail shared operator", () => {
+  it("does not offer human project owner assignment or mutate historical contacts", () => {
+    state.project = makeProject({ lead_type: "member", lead_id: "user-2" });
     updateProject.mockClear();
-  });
-
-  it("uses the shared picker shell — search box, grouped sections, checked current lead", () => {
-    state.project = makeProject({ lead_type: "member", lead_id: "user-2" });
-
     renderDetail();
-    fireEvent.click(screen.getByText("member:user-2"));
-
-    // The shared shell's search input carries the picker's own aria-label —
-    // the hand-rolled <input> it replaced had none.
-    expect(
-      screen.getByRole("textbox", { name: "Filter options" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Members")).toBeInTheDocument();
-    expect(screen.queryByText("Agents")).not.toBeInTheDocument();
-  });
-
-  it("assigns a member as lead and closes", () => {
-    renderDetail();
-    fireEvent.click(screen.getByText("No owner"));
-
-    fireEvent.click(screen.getByText("张三"));
-
-    expect(updateProject).toHaveBeenCalledWith({
-      id: "proj-1",
-      lead_type: "member",
-      lead_id: "user-2",
-    });
-  });
-
-  it("filters by pinyin and falls back to the shared empty state", () => {
-    renderDetail();
-    fireEvent.click(screen.getByText("No owner"));
-
-    const search = screen.getByRole("textbox", { name: "Filter options" });
-    fireEvent.change(search, { target: { value: "zhang" } });
-    expect(screen.getByText("张三")).toBeInTheDocument();
-
-    fireEvent.change(search, { target: { value: "nobody-here" } });
-    expect(screen.getByText("No results")).toBeInTheDocument();
-  });
-
-  it("clears the lead", () => {
-    state.project = makeProject({ lead_type: "member", lead_id: "user-2" });
-
-    renderDetail();
-    fireEvent.click(screen.getByText("member:user-2"));
-    fireEvent.click(screen.getByText("No owner"));
-
-    expect(updateProject).toHaveBeenCalledWith({
-      id: "proj-1",
-      lead_type: null,
-      lead_id: null,
-    });
+    expect(screen.queryByText("No owner")).not.toBeInTheDocument();
+    expect(screen.queryByText("Members")).not.toBeInTheDocument();
+    expect(updateProject).not.toHaveBeenCalled();
   });
 });
 

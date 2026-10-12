@@ -101,36 +101,38 @@ async function expectNodeManagement(
 
 for (const credential of ["pat", "jwt"] as const) {
   describe(`cloud runtime node authorization (${credential})`, () => {
-    it("persists the real creator and filters each user's list before pagination", async () => {
+    it("persists the shared operator and paginates the same nodes for every login", async () => {
       const { store, app, owner, other, ownerHeaders, otherHeaders } = await createFixture(credential);
       const ownedNode = await createNode(app, ownerHeaders);
       const otherNode = await createNode(app, otherHeaders);
-      store.createCloudRuntimeNode({ instance_type: "legacy" });
-      expect(ownedNode).toMatchObject({ ownerId: owner.id, owner_id: owner.id });
-      expect(otherNode).toMatchObject({ ownerId: other.id, owner_id: other.id });
+      const historical = store.createCloudRuntimeNode({ instance_type: "legacy" }, owner.id);
+      expect(store.getCloudRuntimeNode(historical.id)?.ownerId).toBe(owner.id);
+      expect(ownedNode).toMatchObject({ ownerId: "local", owner_id: "local" });
+      expect(otherNode).toMatchObject({ ownerId: "local", owner_id: "local" });
       expect(db!.query("SELECT owner_id FROM multiremi_cloud_runtime_nodes WHERE id = ?").get(ownedNode.id))
-        .toEqual({ owner_id: owner.id });
+        .toEqual({ owner_id: "local" });
       expect(owner.id).not.toBe("local");
+      const allNodes = store.listCloudRuntimeNodes();
       const ownedList = await app.request(`${root}?limit=1&offset=0`, { headers: ownerHeaders });
       expect(ownedList.status).toBe(200);
-      expect(await ownedList.json()).toEqual([ownedNode]);
+      expect(await ownedList.json()).toEqual(allNodes.slice(0, 1));
       const otherList = await app.request(root, { headers: otherHeaders });
       expect(otherList.status).toBe(200);
-      expect(await otherList.json()).toEqual([otherNode]);
+      expect(await otherList.json()).toEqual(allNodes);
       const nextPage = await app.request(`${root}?limit=1&offset=1`, { headers: ownerHeaders });
       expect(nextPage.status).toBe(200);
-      expect(await nextPage.json()).toEqual([]);
+      expect(await nextPage.json()).toEqual(allNodes.slice(1, 2));
     });
 
     for (const operation of operations) {
-      it(`denies cross-owner ${operation.name} without deleting, changing or executing the node`, async () => {
+      it(`rejects unknown ${operation.name} targets before mutation and allows another login's node`, async () => {
         const { store, app, ownerHeaders, otherHeaders } = await createFixture(credential);
         const node = await createNode(app, ownerHeaders);
         const deleteNode = spyOn(store, "deleteCloudRuntimeNode");
         const setStatus = spyOn(store, "setCloudRuntimeNodeStatus");
         const execNode = spyOn(store, "execCloudRuntimeNode");
         for (const idKey of ["id", "node_id", "nodeId"]) {
-          for (const nodeId of [node.id, "crn_missing", ""]) {
+          for (const nodeId of ["crn_missing", ""]) {
             const response = await app.request(`${root}${operation.path}`, {
               method: operation.method,
               headers: otherHeaders,
@@ -144,6 +146,11 @@ for (const credential of ["pat", "jwt"] as const) {
         expect(deleteNode).not.toHaveBeenCalled();
         expect(setStatus).not.toHaveBeenCalled();
         expect(execNode).not.toHaveBeenCalled();
+        const allowed = await app.request(`${root}${operation.path}`, {
+          method: operation.method, headers: otherHeaders,
+          body: JSON.stringify({ id: node.id, status: "maintenance", command: "echo allowed" }),
+        });
+        expect(allowed.status).toBe(operation.method === "DELETE" ? 204 : 200);
       });
     }
 
@@ -163,12 +170,12 @@ for (const credential of ["pat", "jwt"] as const) {
         expect(listed.status).toBe(200);
         expect(await listed.json()).toEqual(expect.arrayContaining([node, legacy]));
         const adminNode = await createNode(app, otherHeaders);
-        expect(adminNode.owner_id).toBe(other.id);
+        expect(adminNode.owner_id).toBe("local");
         await expectNodeManagement(app, store, otherHeaders, node);
       });
     }
 
-    it("does not treat a migrated local user's login as master mode after demotion", async () => {
+    it("keeps shared operator access despite obsolete membership role changes", async () => {
       const { store, app, other, ownerHeaders } = await createFixture(credential);
       store.createWorkspaceMember({ workspaceId: "local", userId: other.id, name: other.name, role: "owner" });
       store.updateWorkspaceMember("mem_local_local", { role: "member" });
@@ -176,17 +183,8 @@ for (const credential of ["pat", "jwt"] as const) {
       const node = await createNode(app, ownerHeaders);
       const listed = await app.request(root, { headers });
       expect(listed.status).toBe(200);
-      expect(await listed.json()).toEqual([]);
-      for (const operation of operations) {
-        const denied = await app.request(`${root}${operation.path}`, {
-          method: operation.method,
-          headers,
-          body: JSON.stringify({ id: node.id, status: "maintenance", command: "echo forbidden" }),
-        });
-        expect(denied.status, operation.name).toBe(404);
-        expect(await denied.json()).toEqual({ error: "cloud runtime node not found" });
-        expect(store.getCloudRuntimeNode(node.id)).toEqual(node);
-      }
+      expect(await listed.json()).toEqual([node]);
+      await expectNodeManagement(app, store, headers, node);
     });
   });
 }
@@ -226,7 +224,7 @@ describe("cloud runtime administrative compatibility", () => {
     });
   }
 
-  it("scopes the same legacy PAT to local-owned nodes after its deployment owner is demoted", async () => {
+  it("keeps legacy human credentials on the shared node list after an obsolete role change", async () => {
     const { store, app, other, ownerHeaders } = await createFixture();
     store.createWorkspaceMember({ workspaceId: "local", userId: other.id, name: other.name, role: "owner" });
     const foreignNode = await createNode(app, ownerHeaders);
@@ -241,25 +239,26 @@ describe("cloud runtime administrative compatibility", () => {
     store.updateWorkspaceMember("mem_local_local", { role: "member" });
     const afterDemotion = await app.request(root, { headers });
     expect(afterDemotion.status).toBe(200);
-    // Historical owner_id="local" rows still belong to this user; demotion
-    // removes administrative access, not ownership. Reassignment needs migration.
-    expect(await afterDemotion.json()).toEqual([localNode]);
-    const deleteNode = spyOn(store, "deleteCloudRuntimeNode");
-    const setStatus = spyOn(store, "setCloudRuntimeNodeStatus");
-    const execNode = spyOn(store, "execCloudRuntimeNode");
-    for (const operation of operations) {
-      const denied = await app.request(`${root}${operation.path}`, {
-        method: operation.method,
-        headers,
-        body: JSON.stringify({ id: foreignNode.id, status: "maintenance", command: "echo forbidden" }),
-      });
-      expect(denied.status, operation.name).toBe(404);
-      expect(await denied.json()).toEqual({ error: "cloud runtime node not found" });
-      expect(store.getCloudRuntimeNode(foreignNode.id)).toEqual(foreignNode);
-    }
-    expect(deleteNode).not.toHaveBeenCalled();
-    expect(setStatus).not.toHaveBeenCalled();
-    expect(execNode).not.toHaveBeenCalled();
+    expect(await afterDemotion.json()).toEqual(expect.arrayContaining([foreignNode, localNode]));
+    await expectNodeManagement(app, store, headers, foreignNode);
     await expectNodeManagement(app, store, headers, localNode);
+  });
+
+  it.each(["task", "daemon"] as const)("keeps %s credentials outside cloud node administration", async type => {
+    const { store, app, ownerHeaders } = await createFixture();
+    const node = await createNode(app, ownerHeaders);
+    const agent = store.createAgent({ name: "Cloud auth boundary", provider: "codex" });
+    const task = store.createTask({ agentId: agent.id, prompt: "Scoped task" });
+    const credential = await store.createAccessToken({ name: "Cloud machine scope", type, workspaceId: "local", userId: "local",
+      ...(type === "task" ? { taskId: task.id, agentId: agent.id } : { daemonId: "cloud-auth-daemon" }) });
+    const headers = { Authorization: `Bearer ${credential.token}`, "Content-Type": "application/json" };
+    expect((await app.request(root, { headers })).status).toBe(403);
+    expect((await app.request(root, { method: "POST", headers, body: JSON.stringify({ instance_type: "forbidden" }) })).status).toBe(403);
+    for (const operation of operations) {
+      const response = await app.request(`${root}${operation.path}`, { method: operation.method, headers,
+        body: JSON.stringify({ id: node.id, status: "maintenance", command: "echo forbidden" }) });
+      expect(response.status, operation.name).toBe(403);
+      expect(store.getCloudRuntimeNode(node.id)).toEqual(node);
+    }
   });
 });

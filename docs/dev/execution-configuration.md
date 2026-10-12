@@ -10,6 +10,8 @@ summary: 工作区集中配置连接、选择 Runtime 成员，并通过版本�
 
 [API](../../packages/server/src/api/routers/execution-config.ts)使用 `/api/execution-profiles` 与 `/api/execution-groups`，集合支持 GET/POST，单项支持 GET/PUT/DELETE。连接配置的 provider 只支持 `claude`、`codex`；组还支持 `antigravity`，但其 `profile_id` 必须为 null。组内成员必须同工作区并匹配 provider，`any` Runtime 可承载具体 provider。更新不能更改已有 Profile 或组的 provider。
 
+已登录操作者共享工作区内的全部 Runtime、Profile 和能力组；历史 `owner_id` 不再限制选择、管理或同工作区调度。机器注册与领取任务仍校验 daemon 凭据、工作区和执行能力。
+
 ## 配置流程
 
 可以直接创建含 Provider 连接的组，Web 和 CLI 使用相同的原子保存接口：

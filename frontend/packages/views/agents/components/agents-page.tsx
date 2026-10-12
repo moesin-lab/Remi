@@ -1,5 +1,7 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
@@ -27,7 +29,6 @@ import {
 } from "@multiremi/core/agents";
 import { useAgentsViewStore } from "@multiremi/core/agents/stores";
 import { api } from "@multiremi/core/api";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { canAssignAgentToIssue } from "@multiremi/core/permissions";
 import { useWorkspacePaths } from "@multiremi/core/paths";
@@ -91,7 +92,7 @@ export function AgentsPage() {
   const paths = useWorkspacePaths();
   const navigation = useNavigation();
   const qc = useQueryClient();
-  const currentUser = useAuthStore((s) => s.user);
+  const currentUser = workspaceOperatorUser;
 
   const {
     data: agents = [],
@@ -121,7 +122,7 @@ export function AgentsPage() {
   const [view, setView] = useState<View>("active");
   // Scope (Mine/All) is persisted per workspace so it survives list →
   // detail → back navigation. Default is "mine" on first visit.
-  const scope = useAgentsViewStore((s) => s.scope);
+  const scope: Scope = "all";
   const setScope = useAgentsViewStore((s) => s.setScope);
   const [availabilityFilter, setAvailabilityFilter] =
     useState<AvailabilityFilter>("all");
@@ -187,27 +188,8 @@ export function AgentsPage() {
   // Layer 1c — ownership scope. Counts shown on the segment are
   // computed against the visibleInView set so the numbers always reflect
   // "what would I see if I clicked this".
-  const scopeCounts = useMemo(() => {
-    let mine = 0;
-    if (currentUser) {
-      for (const a of visibleInView) {
-        if (a.owner_id === currentUser.id) mine += 1;
-      }
-    }
-    return { all: visibleInView.length, mine };
-  }, [visibleInView, currentUser]);
+  const inScope = visibleInView;
 
-  const inScope = useMemo(() => {
-    // Archived view ignores Mine / All — its toolbar has no scope
-    // segment, so silently filtering by `scope` would hide other
-    // people's archived agents without any UI to explain why.
-    if (view === "archived") return visibleInView;
-    if (scope === "all" || !currentUser) return visibleInView;
-    return visibleInView.filter((a) => a.owner_id === currentUser.id);
-  }, [visibleInView, scope, currentUser, view]);
-
-  // An agent's engine: authoritative from `provider`;
-  // legacy rows without it fall back to the bound runtime's provider.
   const agentEngine = useCallback(
     (a: Agent): string =>
       a.provider || runtimesById.get(a.runtime_id)?.provider || "",
@@ -504,7 +486,6 @@ export function AgentsPage() {
                 <ActiveToolbarRow
                   scope={scope}
                   setScope={setScope}
-                  scopeCounts={scopeCounts}
                   sort={sort}
                   setSort={setSort}
                   search={search}
@@ -653,9 +634,6 @@ function ListError({
 // ---------------------------------------------------------------------------
 
 function ActiveToolbarRow({
-  scope,
-  setScope,
-  scopeCounts,
   sort,
   setSort,
   search,
@@ -670,7 +648,6 @@ function ActiveToolbarRow({
 }: {
   scope: Scope;
   setScope: (v: Scope) => void;
-  scopeCounts: { all: number; mine: number };
   sort: SortKey;
   setSort: (v: SortKey) => void;
   search: string;
@@ -695,7 +672,6 @@ function ActiveToolbarRow({
           className="h-8 w-64 pl-8 text-sm"
         />
       </div>
-      <ScopeSegment scope={scope} setScope={setScope} counts={scopeCounts} />
       <div className="ml-auto flex items-center gap-3">
         <EngineFilterDropdown
           value={engineFilter}
@@ -721,66 +697,7 @@ function ActiveToolbarRow({
   );
 }
 
-function ScopeSegment({
-  scope,
-  setScope,
-  counts,
-}: {
-  scope: Scope;
-  setScope: (v: Scope) => void;
-  counts: { all: number; mine: number };
-}) {
-  const { t } = useT("agents");
-  return (
-    <div className="flex items-center gap-0.5 rounded-md bg-muted p-0.5">
-      <ScopeButton
-        active={scope === "mine"}
-        label={t(($) => $.scope.mine)}
-        count={counts.mine}
-        onClick={() => setScope("mine")}
-      />
-      <ScopeButton
-        active={scope === "all"}
-        label={t(($) => $.scope.all)}
-        count={counts.all}
-        onClick={() => setScope("all")}
-      />
-    </div>
-  );
-}
 
-function ScopeButton({
-  active,
-  label,
-  count,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  count: number;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-        active
-          ? "bg-background text-foreground shadow-sm"
-          : "text-muted-foreground hover:text-foreground"
-      }`}
-    >
-      <span>{label}</span>
-      <span
-        className={`font-mono tabular-nums ${
-          active ? "text-muted-foreground/80" : "text-muted-foreground/50"
-        }`}
-      >
-        {count}
-      </span>
-    </button>
-  );
-}
 
 function SortDropdown({
   sort,

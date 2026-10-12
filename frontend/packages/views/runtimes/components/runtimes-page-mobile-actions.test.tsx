@@ -37,7 +37,7 @@ vi.mock("@tanstack/react-query", async () => {
         };
       }
       if (key === "workspaces:ws-1:members") {
-        return { data: [{ user_id: "user-1", role: "owner" }] };
+        return { data: [{ user_id: "local", role: "owner" }] };
       }
       return { data: [] };
     },

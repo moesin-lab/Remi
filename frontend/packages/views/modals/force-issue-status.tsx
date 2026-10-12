@@ -1,15 +1,16 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useState } from "react";
 import { useUpdateIssue } from "@multiremi/core/issues/mutations";
-import { useAuthStore } from "@multiremi/core/auth";
 import type { IssueStatus } from "@multiremi/core/types";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@multiremi/ui/components/ui/alert-dialog";
 import { useT } from "../i18n";
 
 export function ForceIssueStatusModal({ onClose, data }: { onClose: () => void; data: Record<string, unknown> | null }) {
   const { t } = useT("issues");
-  const member = useAuthStore((state) => state.user);
+  const member = workspaceOperatorUser;
   const updateIssue = useUpdateIssue();
   const [error, setError] = useState("");
   const issueId = typeof data?.issueId === "string" ? data.issueId : "";

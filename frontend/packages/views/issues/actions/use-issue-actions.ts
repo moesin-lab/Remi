@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ApiError, IssueStatusHeldErrorSchema } from "@multiremi/core/api";
 import type { Issue, UpdateIssueRequest } from "@multiremi/core/types";
-import { useAuthStore } from "@multiremi/core/auth";
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import { useModalStore } from "@multiremi/core/modals";
@@ -40,7 +40,7 @@ export function useIssueActions(issue: Issue | null): UseIssueActionsResult {
   const paths = useWorkspacePaths();
   const navigation = useNavigation();
   const { pathname } = navigation;
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
   const userId = user?.id;
 
   // MUL-472 b: the pin state is decoration on a toolbar that renders anyway, so

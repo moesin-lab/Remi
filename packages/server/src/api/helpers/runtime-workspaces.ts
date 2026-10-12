@@ -2,11 +2,12 @@ import type { Context } from "hono";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import type { MultiremiRuntimeWorkspace } from "@multiremi/contracts/types.js";
 import { RuntimeWorkspaceError } from "@multiremi/store/repos/runtime-workspaces-repo.js";
-import { currentRequestUserId, currentTaskAccessToken } from "../wire/index.js";
+import { currentRequestUserId, currentTaskAccessToken, isHumanOperatorRequest } from "../wire/index.js";
 
 export function canUseRuntimeWorkspace(c: Context, store: MultiremiStore, item: MultiremiRuntimeWorkspace): boolean {
   const token = currentTaskAccessToken(c);
   if (token) return store.getTask(token.taskId ?? "")?.runtimeWorkspaceId === item.id;
+  if (isHumanOperatorRequest(c)) return store.getWorkspace(item.workspaceId) !== null;
   return item.ownerId === currentRequestUserId(c) || store.listRuntimes().some(r =>
     r.workspaceId === item.workspaceId && r.daemonId === item.daemonId && r.visibility === "public");
 }

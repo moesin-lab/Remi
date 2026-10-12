@@ -1,5 +1,7 @@
 "use client";
 
+import { WORKSPACE_OPERATOR_USER_ID } from "@multiremi/core/workspace/operator";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeftRight, Check, ChevronRight, Maximize2, Minimize2, X as XIcon } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -37,7 +39,6 @@ import {
   PickerSection,
   PickerEmpty,
 } from "../issues/components/pickers/property-picker";
-import { useAuthStore } from "@multiremi/core/auth";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
 import {
   ContentEditor,
@@ -86,7 +87,7 @@ export function AgentCreatePanel({
   const { t } = useT("modals");
   const workspaceName = useCurrentWorkspace()?.name;
   const wsId = useWorkspaceId();
-  const userId = useAuthStore((s) => s.user?.id);
+  const userId = WORKSPACE_OPERATOR_USER_ID;
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { data: agents = [], isSuccess: agentsLoaded } = useQuery(agentListOptions(wsId));
   const { data: squads = [] } = useQuery(squadListOptions(wsId));

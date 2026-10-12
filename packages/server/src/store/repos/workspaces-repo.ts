@@ -120,6 +120,37 @@ export class WorkspaceSshMeshCleanupRequiredError extends Error {
 export class WorkspacesRepo {
   constructor(private ctx: StoreContext) {}
 
+  /** Historical members remain resolvable; only this row is the current operator. */
+  getWorkspaceOperator(workspaceId: string): MultiremiWorkspaceMember | null {
+    const row = this.ctx.db.query(`SELECT * FROM multiremi_workspace_members
+      WHERE workspace_id = ? AND user_id = 'local'
+      ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, created_at, id LIMIT 1`)
+      .get(workspaceId, `mem_${workspaceId}_local`) as Row | null;
+    return row ? { ...toWorkspaceMember(row), name: "Operator", email: null, role: "owner", archivedAt: null } : null;
+  }
+
+  ensureWorkspaceOperator(workspaceId: string): MultiremiWorkspaceMember {
+    if (!this.getWorkspace(workspaceId)) throw new Error("workspace not found");
+    const ready = this.getWorkspaceOperator(workspaceId);
+    const stored = ready ? this.getWorkspaceMember(ready.id) : null;
+    if (ready && stored?.role === "owner" && !stored.archivedAt) return ready;
+    this.getCurrentUser();
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const existing = this.getWorkspaceOperator(workspaceId);
+      if (existing) {
+        this.ctx.db.run("UPDATE multiremi_workspace_members SET role = 'owner', archived_at = NULL WHERE id = ?", [existing.id]);
+        return this.getWorkspaceOperator(workspaceId)!;
+      }
+      const id = `mem_${workspaceId}_local`;
+      // Do not overwrite an unrelated historical row if its id is occupied.
+      let stableId = id;
+      for (let suffix = 1; this.getWorkspaceMember(stableId); suffix++) stableId = `operator_${workspaceId}_local_${suffix}`;
+      this.createWorkspaceMember({ id: stableId, workspaceId, userId: "local", name: "Operator", role: "owner" });
+      return this.getWorkspaceOperator(workspaceId)!;
+    })();
+  }
+
   createWorkspaceMember(input: CreateWorkspaceMemberInput): MultiremiWorkspaceMember {
     if (!input.name?.trim()) throw new Error("Member name is required");
     const id = input.id ?? createId("mem");
@@ -554,15 +585,15 @@ export class WorkspacesRepo {
     );
     // The authenticated creator (not the legacy "local" user) becomes the owner,
     // otherwise a new user could create a workspace they cannot access.
-    const user = this.resolveActingUser(actingUserId);
+    const user = this.getCurrentUser();
     const memberId = `mem_${id}_${user.id}`;
     if (!this.getWorkspaceMember(memberId)) {
       this.createWorkspaceMember({
         id: memberId,
         workspaceId: id,
         userId: user.id,
-        name: user.name,
-        email: user.email,
+        name: "Operator",
+        email: null,
         role: "owner",
       });
     }
@@ -1247,9 +1278,13 @@ export class WorkspacesRepo {
 
   getNotificationPreferences(input: { workspaceId?: string | null; memberId?: string | null } = {}): MultiremiNotificationPreferenceResponse {
     const workspaceId = input.workspaceId ?? "local";
-    const memberId = input.memberId ?? null;
+    const memberId = this.getWorkspaceOperator(workspaceId)?.id ?? null;
+    // Existing per-person settings remain stored. Prefer the shared setting,
+    // then the old workspace default, then the most recently saved setting.
     const row = this.ctx.db.query(
-      "SELECT * FROM multiremi_notification_preferences WHERE workspace_id = ? AND member_id = ?",
+      `SELECT * FROM multiremi_notification_preferences WHERE workspace_id = ?
+       ORDER BY CASE WHEN member_id = ? THEN 0 WHEN member_id = '' THEN 1 ELSE 2 END,
+         updated_at DESC, member_id ASC LIMIT 1`,
     ).get(workspaceId, memberId ?? "") as Row | null;
     return {
       workspaceId,
@@ -1265,7 +1300,7 @@ export class WorkspacesRepo {
     preferences: MultiremiNotificationPreferences;
   }): MultiremiNotificationPreferenceResponse {
     const workspaceId = input.workspaceId ?? "local";
-    const memberId = input.memberId ?? null;
+    const memberId = this.ensureWorkspaceOperator(workspaceId).id;
     const preferences = normalizeNotificationPreferences(input.preferences);
     const now = nowIso();
     this.ctx.db.run(

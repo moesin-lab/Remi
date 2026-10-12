@@ -123,6 +123,8 @@ export function RuntimesPage({
   cloudRuntimeEnabled = false,
 }: RuntimesPageProps = {}) {
   const isLoading = useAuthStore((s) => s.isLoading);
+  // Account identity is only a fallback for recognizing this physical machine.
+  // Workspace access and management use the shared operator independently.
   const currentUserId = useAuthStore((s) => s.user?.id);
   const wsId = useWorkspaceId();
   const qc = useQueryClient();

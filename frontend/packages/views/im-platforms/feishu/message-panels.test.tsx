@@ -65,7 +65,7 @@ vi.mock("@tanstack/react-query", () => {
     switch (options.__kind) {
       case "members":
         return {
-          data: server.role ? [{ user_id: "user-1", role: server.role }] : [],
+          data: server.role ? [{ user_id: "local", role: server.role }] : [],
           isPending: false,
           isError: false,
           isFetching: false,

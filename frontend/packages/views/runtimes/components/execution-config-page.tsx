@@ -1,9 +1,10 @@
 "use client";
 
+import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
+
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@multiremi/core/api";
-import { useAuthStore } from "@multiremi/core/auth";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
@@ -34,7 +35,7 @@ export function ExecutionConfigPage() {
   const { t } = useT("runtimes");
   const wsId = useWorkspaceId();
   const paths = useWorkspacePaths();
-  const user = useAuthStore((s) => s.user);
+  const user = workspaceOperatorUser;
   const members = useQuery(memberListOptions(wsId));
   const canManage =
     members.data?.some(

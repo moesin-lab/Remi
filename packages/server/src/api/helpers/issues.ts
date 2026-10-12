@@ -168,7 +168,7 @@ export function humanRequestActor(c: Context): { memberId: string } | null {
   if (currentTaskAccessToken(c)) return null;
   if(currentAccessToken(c)?.type==='daemon')return null;
   if (cleanString(c.req.header("X-Agent-ID"))) return null;
-  return { memberId: authenticatedRequestUserId(c) ?? currentRequestUserId(c) };
+  return { memberId: currentRequestUserId(c) };
 }
 
 export function denyRestrictedTaskIssueCreation(c: Context, store: MultiremiStore): Response | null {
@@ -203,7 +203,7 @@ export function issueSubscriberCaller(c: Context): { actorType: "member" | "agen
   const taskToken = currentTaskAccessToken(c);
   if (taskToken?.agentId) return { actorType: "agent", actorId: taskToken.agentId };
   const userId = authenticatedRequestUserId(c);
-  if (userId) return { actorType: "member", actorId: userId };
+  if (userId) return { actorType: "member", actorId: currentRequestUserId(c) };
   const agentId = cleanString(c.req.header("X-Agent-ID"));
   if (agentId) return { actorType: "agent", actorId: agentId };
   return { actorType: "member", actorId: currentRequestUserId(c) };
@@ -241,7 +241,7 @@ export function issueCommentCreateInput(
   // token branch above sets it, and it takes it from the token.
   const publicInput = stripCommentTaskLink(input);
   const userId = authenticatedRequestUserId(c);
-  if (userId) return { ...publicInput, authorType: "member", authorId: userId };
+  if (userId) return { ...publicInput, authorType: "member", authorId: currentRequestUserId(c) };
   // MUL-448 B1: everything below runs only for the anonymous compatibility mode
   // (master token / auth disabled), which keeps its historical behaviour; a
   // request with a credential never reaches the header or the body identity.
@@ -265,6 +265,7 @@ export function stripCommentTaskLink<T extends { taskId?: string | null; task_id
 export function issueSubscriberTarget(
   c: Context,
   body: { member_id?: string; user_id?: string; user_type?: string },
+  operatorMemberId: string,
 ): { userType: "member" | "agent"; userId: string } | { error: string; status: 403 } {
   const caller = issueSubscriberCaller(c);
   const requestedUserType = cleanString(body.user_type);
@@ -275,7 +276,7 @@ export function issueSubscriberTarget(
   if (userType !== "member" && userType !== "agent") {
     return { error: "target user is not a member of this workspace", status: 403 };
   }
-  return { userType, userId };
+  return { userType, userId: userType === "member" ? operatorMemberId : userId };
 }
 
 export function withIssueCreateRequestContext(
@@ -287,7 +288,7 @@ export function withIssueCreateRequestContext(
     cleanString(c.req.query("workspace_id")) ??
     currentAccessToken(c)?.workspaceId ??
     "local";
-  const userId = currentTaskAccessToken(c) || currentAccessToken(c)?.type==='daemon' ? null : authenticatedRequestUserId(c) ?? currentRequestUserId(c);
+  const userId = currentTaskAccessToken(c) || currentAccessToken(c)?.type==='daemon' ? null : currentRequestUserId(c);
   const out: CreateIssueWithTaskInput = {
     title: input.title,
     workspace_id: workspaceId,
@@ -530,7 +531,7 @@ export function issueMutationActor(
   const taskToken = currentTaskAccessToken(c);
   if (taskToken?.agentId) return { actorType: "agent", actorId: taskToken.agentId };
   const userId = authenticatedRequestUserId(c);
-  if (userId) return { actorType: "member", actorId: userId };
+  if (userId) return { actorType: "member", actorId: currentRequestUserId(c) };
   // Explicit actors are only trusted for the master token or auth-disabled mode.
   const agentId = cleanString(c.req.header("X-Agent-ID"));
   return {

@@ -108,7 +108,7 @@ describe.skipIf(!pgAvailable)("MUL-448 credential identity on PostgreSQL", () =>
       leaderId: leader.id,
       squadId: squad.id,
       app: createMultiremiApp({ store, authToken: "mul448-r2-pg-root" }),
-      headers: { Authorization: "Bearer " + tokenResult.token, "Content-Type": "application/json" },
+      headers: { Authorization: "Bearer " + tokenResult.token, "Content-Type": "application/json", "X-Workspace-ID": workspace.id },
     };
   }
 
@@ -134,14 +134,14 @@ describe.skipIf(!pgAvailable)("MUL-448 credential identity on PostgreSQL", () =>
     const assigned = assignmentEvents(session.id, taskId);
     expect(assigned).toHaveLength(1);
     expect(assigned[0]!.authorType).toBe("member");
-    expect(store.getWorkspaceMember(assigned[0]!.authorId!)?.userId).toBe(fixture.ownerId);
+    expect(store.getWorkspaceMember(assigned[0]!.authorId!)?.userId).toBe("local");
 
     const sessionsPath = "/api/issues/" + issue.id + "/sessions";
     const sessionResponse = await fixture.app.request(sessionsPath, {
       method: "POST", headers: forged, body: JSON.stringify({ title: "PG forged session" }),
     });
     expect(sessionResponse.status).toBe(201);
-    expect(((await sessionResponse.json()) as any).created_by_id).toBe(fixture.ownerId);
+    expect(((await sessionResponse.json()) as any).created_by_id).toBe("local");
 
     const resultsPath = sessionsPath + "/" + session.id + "/results";
     const resultResponse = await fixture.app.request(resultsPath, {
@@ -150,7 +150,7 @@ describe.skipIf(!pgAvailable)("MUL-448 credential identity on PostgreSQL", () =>
     expect(resultResponse.status).toBe(201);
     const resultBody = (await resultResponse.json()) as any;
     expect(resultBody.published_by_type).toBe("member");
-    expect(resultBody.published_by_id).toBe(fixture.ownerId);
+    expect(resultBody.published_by_id).toBe("local");
 
     const dependsOn = createResponsibleTestIssue(store, { title: "MUL448 R2 PG B1 dependency", workspaceId: fixture.workspaceId });
     const dependenciesPath = "/api/multiremi/issues/" + issue.id + "/dependencies";
@@ -161,7 +161,7 @@ describe.skipIf(!pgAvailable)("MUL-448 credential identity on PostgreSQL", () =>
     const activity = store.listIssueActivity(issue.id).filter((entry) => entry.type === "issue_dependency_added");
     expect(activity).toHaveLength(1);
     expect(activity[0]!.actorType).toBe("member");
-    expect(activity[0]!.actorId).toBe(fixture.ownerId);
+    expect(activity[0]!.actorId).toBe("local");
 
     const source = store.createSessionTask(session.id, { agentId: fixture.agentId, prompt: "Source run" });
     const taskToken = await store.createTaskAccessToken(store.getTask(source.id)!, fixture.ownerId);
@@ -240,7 +240,7 @@ describe.skipIf(!pgAvailable)("MUL-448 credential identity on PostgreSQL", () =>
     expect(recorded[0]!.actorId).toBe(fixture.leaderId);
   });
 
-  it("B3/B4: forged lineage and creator are dropped while the authenticated human is recorded", async () => {
+  it("B3/B4: forged lineage and creator are dropped while the shared operator is recorded", async () => {
     const fixture = await freshFixture();
     const intake = createResponsibleTestIssue(store, {
       title: "MUL448 R2 PG intake", issueKind: "intake", workspaceId: fixture.workspaceId,
@@ -258,12 +258,12 @@ describe.skipIf(!pgAvailable)("MUL-448 credential identity on PostgreSQL", () =>
       const body = (await decoy.json()) as any;
       const decoyIssue = store.getIssue(body.id ?? body.issue?.id)!;
       expect(decoyIssue.sourceIssueId, spelling).toBeNull();
-      expect(decoyIssue.createdBy, spelling).toBe(fixture.ownerId);
+      expect(decoyIssue.createdBy, spelling).toBe("local");
       expect(decoyIssue.createdBy, spelling).not.toBe("someone-else");
-      expect(decoyIssue.responsibleMemberId, spelling).toBe(fixture.memberId);
+      expect(decoyIssue.responsibleMemberId, spelling).toBe(store.getWorkspaceOperator(fixture.workspaceId)!.id);
       const subscribers = store.listIssueSubscribers(decoyIssue.id);
       expect(subscribers, spelling).toHaveLength(1);
-      expect(subscribers[0]!.memberId, spelling).toBe(fixture.memberId);
+      expect(subscribers[0]!.memberId, spelling).toBe(store.getWorkspaceOperator(fixture.workspaceId)!.id);
     }
 
     const nativeIntake = await fixture.app.request("/api/multiremi/issues", {

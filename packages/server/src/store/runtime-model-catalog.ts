@@ -206,10 +206,9 @@ function capabilityRank(model: MultiremiRuntimeModel): number {
   return provenance;
 }
 
-export function fleetModelsResponse(runtimes: MultiremiRuntime[], callerOwnerId: string): FleetProviderModelsResponse[] {
-  const usable = runtimes.filter(
-    (r) => r.visibility === "public" || (r.ownerId ?? "local") === (callerOwnerId ?? "local"),
-  );
+export function fleetModelsResponse(runtimes: MultiremiRuntime[], _callerOwnerId: string): FleetProviderModelsResponse[] {
+  // The caller supplies an already workspace-scoped Runtime list.
+  const usable = runtimes;
   const buckets = new Map<string, {
     online: number;
     models: Map<string, MultiremiRuntimeModel>;

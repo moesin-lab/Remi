@@ -101,20 +101,16 @@ afterEach(() => {
 });
 
 describe("agent name cell visibility tooltip", () => {
-  it("uses the translated visibility copy for private agents", () => {
+  it("omits personal visibility from historical private agents in Chinese", () => {
     renderCell(makeRow(), "zh-Hans");
 
-    expect(screen.getByRole("tooltip")).toHaveTextContent(
-      "个人 · 仅你和工作区管理员可以使用该智能体",
-    );
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 
-  it("renders the English copy from the locale bundle", () => {
+  it("omits personal visibility from historical private agents in English", () => {
     renderCell(makeRow());
 
-    expect(screen.getByRole("tooltip")).toHaveTextContent(
-      "Personal · only you and workspace admins can use this agent",
-    );
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 
   it("shows no visibility tooltip for workspace agents", () => {

@@ -79,6 +79,8 @@ Issue-owned Session Task 不需要 Chat；普通 Chat 输入仍使用 Chat Task�
 工作区可保存多个 [Feishu bot 配置](../packages/server/src/store/repos/feishu-bot-repo.ts)，以 `workspace_id + bot_id` 标识，各自指定 Agent 和独立 Runtime；Runtime v1 协议仍为单 connector，绑定和停止确认防止重复分配。旧配置迁移为 `default`，路由、发送者、入站去重及审计按机器人隔离；
 bot 控制指令携带版本和期望状态。[concierge supervisor](../packages/server/src/worker/feishu-concierge.ts)经鉴权接口拉取 assignment 后串行协调 connector 的启动、停止与重试，应用凭据不随心跳下发。持久化出站投递使用 `feishu.outbound`，发出后收到 ACK 才领取原有租约；断连前未确认的投递由 DB 快照重推，不改变投递数据模型。自动 Issue 话题及负责人轮次完成推送见[飞书接入契约](feishu-message-ingestion.md)。
 
+平台登录账号与工作区业务身份分离。登录后的人类共享全部工作区，并使用统一 operator；历史作者、创建者和外部身份映射保留，成员邀请与角色管理退出日常操作。Chat、云友、Runtime、收件箱、收藏和通知不再按人类 owner 分区，机器凭据仍保留工作区与执行范围限制。入口和迁移规则见[认证与共享身份](dev/auth.md)。
+
 ## 存储与事务
 
 Issue 责任由 [统一 resolver](../packages/server/src/store/issue-responsibility.ts)根据明确指派和父链解析，
@@ -109,7 +111,7 @@ PostgreSQL 的 `PgBridge.request` 用 `Atomics.wait` 等待 [pg-worker](../packa
 [启动迁移](../packages/server/src/store/unified-model-migration.ts)预检后一次切换；运行路径不再读写三张退役对话表。
 执行消费者使用 [只读投影](../packages/server/src/store/turn-execution-records.ts)，写入口更新规范表；轮卡由 [轮和当前尝试](../packages/server/src/store/turn-attempts.ts)投影，统计及最终回复不再镜像到日志 turn 行。
 自动重试、监督者 redispatch 与孤儿恢复只替换尝试，不写 Issue 状态。成员经 canonical Turn retry 恢复 failed/cancelled 轮时保留同一 Turn、Agent、Session 和输入；公开 Issue 按 pending 规则单次推导状态，Chat-owned 工作投影不推导，done/cancelled Issue 不重开。授权与事务边界见[统一收件箱 Store](dev/inbox-store.md)。自动化账本引用轮，在 `auto_*` 对话保留 timer 输入与运行消息。
-[sendMessageWithinTransaction](../packages/server/src/store/inbox/send-message.ts)是唯一消息写入口，领域 producer 与执行投影均经它落库；[lane 状态机](../packages/server/src/store/inbox/lane-machine.ts)负责 pending 合并、运行中插话、补铃和兜底扫描。人的收件箱使用 member lane；提问与决定及其一次性令牌保存在消息。Issue 只由轮和未答 decision 推导，子单变化发送父单 status。Daemon 适配器与用户接口所需 Store facade 已提供，传输/CLI/页面由消费者集成；接口和事务边界见[统一收件箱 Store](dev/inbox-store.md)。
+[sendMessageWithinTransaction](../packages/server/src/store/inbox/send-message.ts)是唯一消息写入口，领域 producer 与执行投影均经它落库；[lane 状态机](../packages/server/src/store/inbox/lane-machine.ts)负责 pending 合并、运行中插话、补铃和兜底扫描。人的收件箱使用工作区共享已读游标，旧 member lane 仅保留历史已读依据；提问与决定及其一次性令牌保存在消息。Issue 只由轮和未答 decision 推导，子单变化发送父单 status。Daemon 适配器与用户接口所需 Store facade 已提供，传输/CLI/页面由消费者集成；接口和事务边界见[统一收件箱 Store](dev/inbox-store.md)。
 完整边界见 [ADR 0016](adr/0016-unified-message-inbox-and-turn.md)及[切换手册](deploy/unified-model-cutover.md)。
 
 该适配文件记录的动机是兼容已有同步 Store 调用；不能据此推断它仍适合当前并发负载。

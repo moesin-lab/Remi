@@ -2,10 +2,9 @@
 
 import { ChevronRight, UserRound } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import type { MemberRole } from "@multiremi/core/types";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useCurrentWorkspace } from "@multiremi/core/paths";
-import { memberListOptions } from "@multiremi/core/workspace/queries";
+import { historicalActorListOptions } from "@multiremi/core/workspace/queries";
 import { resolvePublicFileUrl } from "@multiremi/core/workspace/avatar-url";
 import { findMemberById } from "@multiremi/core/workspace/member-lookup";
 import { ActorAvatar as ActorAvatarBase } from "@multiremi/ui/components/common/actor-avatar";
@@ -20,7 +19,7 @@ export function MemberDetailPage({ userId }: { userId: string }) {
   const { t } = useT("members");
   const wsId = useWorkspaceId();
   const workspace = useCurrentWorkspace();
-  const { data: members = [], isLoading } = useQuery(memberListOptions(wsId));
+  const { data: members = [], isLoading } = useQuery(historicalActorListOptions(wsId));
   const member = findMemberById(members, userId) ?? null;
 
   if (isLoading && !member) {
@@ -63,7 +62,6 @@ export function MemberDetailPage({ userId }: { userId: string }) {
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
             <h1 className="truncate text-base font-semibold">{member.name}</h1>
-            <RoleBadge role={member.role} />
           </div>
           <p className="mt-0.5 truncate text-sm text-muted-foreground">
             {member.email}
@@ -102,18 +100,6 @@ function MemberBreadcrumb({
   );
 }
 
-function RoleBadge({ role }: { role: MemberRole }) {
-  const { t } = useT("members");
-  return (
-    <span className="rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-      {role === "owner"
-        ? t(($) => $.role.owner)
-        : role === "admin"
-          ? t(($) => $.role.admin)
-          : t(($) => $.role.member)}
-    </span>
-  );
-}
 
 function MemberDetailSkeleton() {
   return (

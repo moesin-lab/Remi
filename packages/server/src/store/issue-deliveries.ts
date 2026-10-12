@@ -122,7 +122,7 @@ export function listIssueDeliveries(ctx: StoreContext, issueId: string, input: L
 
 export function assertIssueDeliveryAccepted(ctx: StoreContext, issueId: string, deliveryId?: string): void {
   const responsibility = ctx.resolveIssueResponsibility(issueId);
-  if (!responsibility.reviewOwner || !responsibility.rootHuman || responsibility.unresolved.length) throw new IssueDeliveryError('issue_responsibility_unresolved', 'Configure the Issue responsibility chain before closure');
+  if (!responsibility.reviewOwner || responsibility.unresolved.length) throw new IssueDeliveryError('issue_responsibility_unresolved', 'Configure the Issue execution and review chain before closure');
   const latest = getLatestIssueDelivery(ctx, issueId);
   if (!latest || latest.id !== deliveryId || latest.status !== 'accepted' || latest.responsibilityRevision !== responsibility.revision) {
     throw new IssueDeliveryError('issue_delivery_acceptance_required', 'The current delivery must be accepted by its designated reviewer before closure');
@@ -133,6 +133,8 @@ function authorizeActor(ctx: StoreContext, actor: IssueDeliveryActor, expected: 
   const member = actor.type === 'member' ? ctx.workspaces().getWorkspaceMember(actor.id)
     ?? ctx.workspaces().findWorkspaceMemberForUser(actor.id, workspaceId) : null;
   const actorId = member?.id ?? actor.id;
+  if (actor.type === 'member' && (!member || member.archivedAt || member.workspaceId !== workspaceId))
+    throw new IssueDeliveryError('issue_delivery_actor_forbidden', 'An active workspace member is required for manual review', 403);
   if (actor.type !== expected.type || actorId !== expected.id) throw new IssueDeliveryError('issue_delivery_actor_forbidden', 'Only the designated Issue responsibility holder may perform this action', 403);
   if (actor.type === 'agent') {
     const task = actor.taskId ? ctx.tasks().getTask(actor.taskId) : null;
@@ -161,7 +163,7 @@ export function submitIssueDelivery(ctx: StoreContext, issueId: string, input: S
     lockResponsibilityChain(ctx,issueId);
     issue = ctx.issues().getIssue(issueId)!;
     const responsibility = ctx.resolveIssueResponsibility(issueId);
-    if (!responsibility.executionOwner || !responsibility.reviewOwner || !responsibility.rootHuman || responsibility.unresolved.length) throw new IssueDeliveryError('issue_responsibility_unresolved', 'Configure the Issue responsibility chain before delivery');
+    if (!responsibility.executionOwner || !responsibility.reviewOwner || responsibility.unresolved.length) throw new IssueDeliveryError('issue_responsibility_unresolved', 'Configure the Issue execution and review chain before delivery');
     authorizeActor(ctx, actor, responsibility.executionOwner, issue.workspaceId);
     const summary = typeof input.summary === 'string' ? input.summary.trim() : '';
     if (!summary) throw new IssueDeliveryError('issue_delivery_summary_required', 'A delivery summary is required');
@@ -229,12 +231,15 @@ export function respondIssueDelivery(ctx: StoreContext, issueId: string, deliver
     if (!delivery) throw new IssueDeliveryError('issue_delivery_not_found','Delivery not found',404);
     delivery.isLatest = getLatestIssueDelivery(ctx,issueId)?.id === delivery.id;
     if (delivery.invalidatedAt) throw new IssueDeliveryError('issue_delivery_revision_stale','Responsibility changed; submit a new delivery to the current reviewer');
-    if (!responsibility.reviewOwner || !responsibility.rootHuman || responsibility.unresolved.length) throw new IssueDeliveryError('issue_responsibility_unresolved','Configure the Issue responsibility chain before acceptance');
+    if (!responsibility.reviewOwner || responsibility.unresolved.length) throw new IssueDeliveryError('issue_responsibility_unresolved','Configure the Issue execution and review chain before acceptance');
     const grant = delivery.authorization;
-    const authorizedAgent = actor.type === 'agent' && responsibility.reviewOwner.type === 'member'
-      && grant?.agentId === actor.id && grant.grantedBy === responsibility.reviewOwner.id
+    const authorizedAgent = actor.type === 'agent' && !issue.parentIssueId
+      && grant?.agentId === actor.id && grant.grantedBy === responsibility.rootHuman?.id
       && grant.responsibilityRevision === responsibility.revision;
-    authorizeActor(ctx,actor,authorizedAgent ? {type:'agent',id:actor.id,issueId:issue.id,name:actor.id} : responsibility.reviewOwner,issue.workspaceId);
+    const manualReviewer = !issue.parentIssueId && actor.type === 'member'
+      ? ctx.workspaces().getWorkspaceMember(actor.id) ?? ctx.workspaces().findWorkspaceMemberForUser(actor.id, issue.workspaceId) : null;
+    const reviewer = manualReviewer ? {type:'member' as const,id:manualReviewer.id,issueId:issue.id,name:manualReviewer.name} : responsibility.reviewOwner;
+    authorizeActor(ctx,actor,reviewer,issue.workspaceId);
     if (input.revision !== responsibility.revision || delivery.responsibilityRevision !== responsibility.revision) throw new IssueDeliveryError('issue_delivery_revision_stale','Responsibility changed; submit a new delivery to the current reviewer');
     if (!['accept','return'].includes(input.action)) throw new IssueDeliveryError('issue_delivery_action_invalid','Choose accept or return');
     if (delivery.status !== 'pending') {
@@ -247,7 +252,7 @@ export function respondIssueDelivery(ctx: StoreContext, issueId: string, deliver
     if (input.action === 'accept' && ctx.issues().countOpenChildIssues(issueId)) throw new IssueDeliveryError('issue_delivery_children_open','Finish or cancel child issues before acceptance');
     if (input.body !== undefined && typeof input.body !== 'string') throw new IssueDeliveryError('issue_delivery_response_invalid','Delivery response body must be text');
     if (input.action === 'return' && !input.body?.trim()) throw new IssueDeliveryError('issue_delivery_return_reason_required','Explain what needs to change');
-    const responseActorId = authorizedAgent ? actor.id : responsibility.reviewOwner.id;
+    const responseActorId = reviewer.id;
     const response = sendMessageWithinTransaction(ctx,{session_id:delivery.sourceSessionId,sender:{type:actor.type,id:responseActorId},
       to:{type:'agent',ref:delivery.submittedBy.id},message_kind:'reply',wake_requested:'inbox_only',reply_to_id:delivery.id,
       body_md:input.body?.trim() || 'Delivery accepted',dedupe_key:`issue_delivery_response:${delivery.id}`,
@@ -290,17 +295,17 @@ export function authorizeIssueDelivery(ctx: StoreContext, issueId: string, deliv
     const delivery = getLatestIssueDelivery(ctx,issueId);
     if (!delivery || delivery.id !== deliveryId || delivery.status !== 'pending') throw new IssueDeliveryError('issue_delivery_not_pending','Authorize the latest pending delivery');
     if (delivery.invalidatedAt) throw new IssueDeliveryError('issue_delivery_revision_stale','Responsibility changed; submit a new delivery to the current reviewer');
-    if (!responsibility.reviewOwner || responsibility.reviewOwner.type !== 'member' || !responsibility.rootHuman || responsibility.unresolved.length) throw new IssueDeliveryError('issue_delivery_authorization_requires_human','Only the root designated human with a complete responsibility chain may grant proxy acceptance',403);
-    authorizeActor(ctx,actor,responsibility.reviewOwner,issue.workspaceId);
+    if (issue.parentIssueId || !responsibility.rootHuman || responsibility.unresolved.length) throw new IssueDeliveryError('issue_delivery_authorization_requires_human','Legacy proxy metadata can only be managed by the optional root contact',403);
+    authorizeActor(ctx,actor,responsibility.rootHuman,issue.workspaceId);
     if (revision !== responsibility.revision || delivery.responsibilityRevision !== revision) throw new IssueDeliveryError('issue_delivery_revision_stale','Responsibility changed');
     if (agentId !== null && agentId !== responsibility.executionOwner?.id) throw new IssueDeliveryError('issue_delivery_authorization_target_invalid','Authorize only the Issue execution owner for this specific delivery');
     const at = new Date().toISOString();
-    const updated = {...delivery,authorization:agentId === null ? null : {agentId,grantedBy:responsibility.reviewOwner.id,responsibilityRevision:revision,grantedAt:at}};
+    const updated = {...delivery,authorization:agentId === null ? null : {agentId,grantedBy:responsibility.rootHuman.id,responsibilityRevision:revision,grantedAt:at}};
     const original = getMessage(ctx,deliveryId)!;
     ctx.conversationLog().updateConversationLogWithinTransaction(original.session_id,original.seq,{deferEmit:true,fields:{metadata:{...original.metadata,issue_delivery:updated}}});
-    ctx.appendIssueActivity(issueId,{actorType:'member',actorId:responsibility.reviewOwner.id,type:'issue_delivery_authorized',
+    ctx.appendIssueActivity(issueId,{actorType:'member',actorId:responsibility.rootHuman.id,type:'issue_delivery_authorized',
       body:null,data:{deliveryId,authorization:updated.authorization}},events);
-    events.workspace.push({type:'issue:updated',workspaceId:issue.workspaceId,actorType:'member',actorId:responsibility.reviewOwner.id,
+    events.workspace.push({type:'issue:updated',workspaceId:issue.workspaceId,actorType:'member',actorId:responsibility.rootHuman.id,
       payload:{issue,status_changed:false}});
     return updated;
   })();

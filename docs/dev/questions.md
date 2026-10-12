@@ -10,13 +10,13 @@ summary: 原会话中的唯一问题、责任路由、答复版本与provider等
 
 新责任问题只由 provider 的原生 AskUserQuestion 进入；CLI 不提供另建业务 Q 的入口。`remi issue responsibility <issue>`读取责任归属，`remi message question`操作既有原 Q。普通 `message send --kind decision` 是会话消息选择，不进入责任链；Leader 咨询 Senior 仍用普通协作消息。
 
-[`QuestionView`](../../packages/contracts/src/question.ts)是 Web 与 CLI 的共享投影。`GET /api/issues/:id/questions` 返回待答和历史；`GET /api/messages/:id/question`读取一个原问题。答复、升级、责任移交、Remi 总结、例外续接及显式关闭使用 `/api/messages/:id/question/{answer,escalate,transfer,present,continue,close}`。所有写操作提交 `expected_route_revision`；已答问题只有指定人类可以显式 `revise`，且必须给原因和 `expected_answer_revision`。正常答复重放不当作改答。原 provider 上下文在 `original_context`，责任不可解析原因在 `route_reason`；均与 Remi 总结分开。关闭保存原因和完整历史，并取消尚存的原 provider 等待。
+[`QuestionView`](../../packages/contracts/src/question.ts)是 Web 与 CLI 的共享投影。`GET /api/issues/:id/questions` 返回待答和历史；`GET /api/messages/:id/question`读取一个原问题。答复、升级、责任移交、Remi 总结、例外续接及显式关闭使用 `/api/messages/:id/question/{answer,escalate,transfer,present,continue,close}`。所有写操作提交 `expected_route_revision`；已答问题由有权处理人工阶段的成员显式 `revise`，且必须给原因和 `expected_answer_revision`。正常答复重放不当作改答。原 provider 上下文在 `original_context`，责任不可解析原因在 `route_reason`；均与 Remi 总结分开。关闭保存原因和完整历史，并取消尚存的原 provider 等待。
 
-责任从唯一 Issue resolver 读取。Worker 先问本单执行统筹人，再逐级问父单执行统筹人，最后问顶层明确人类。重复负责人和提问者自己被跳过。缺少 Leader 不能替换成普通成员；父链循环、父单缺失或跨工作区链保持不可处理状态。无 Issue 的普通 Chat 只从明确创建人映射人类；飞书 transport Chat 只使用配置的 `responsibleMemberId`，技术会话创建人不授予人类答复权，不取工作区 owner。明确来源和可用性事实形成责任 hash；配置或实体变更在其事务调用 Chat 刷新 hook，定位相关会话的待答或待恢复 Q、记录移交并使旧卡失效，GET 不写迁移。密钥或域名更新不改变责任 hash。权限请求直接交人类，Remi 只总结同一个 Q。
+责任从唯一 Issue resolver 读取。Worker 先问本单执行统筹人，再逐级问父单执行统筹人，最后进入人工处理阶段。配置了可用历史联系人时仍定向通知；未配置时进入事项工作区的待处理队列，路由 human 节点的 handler 为 null，不创建虚拟成员。重复负责人和提问者自己被跳过。缺少 Leader 不能替换成普通成员；父链循环、父单缺失或跨工作区链保持不可处理状态。无 Issue 的普通 Chat 只从明确创建人映射人类；飞书 transport Chat 只使用配置的 `responsibleMemberId`，技术会话创建人不授予人类答复权，不取工作区 owner。明确来源和可用性事实形成责任 hash；配置或实体变更在其事务调用 Chat 刷新 hook，定位相关会话的待答或待恢复 Q、记录移交并使旧卡失效，GET 不写迁移。密钥或域名更新不改变责任 hash。权限请求直接交人类，Remi 只总结同一个 Q。
 
 工作 Session 的问题来源按实际所有者解析：Issue-owned Session 使用其所属 Issue；Chat-owned Session 使用其所属 Chat，`turn.issue_id` 的工作投影不继承 Issue 责任，也不自动创建公开 Issue 通知。审计字段为空不改变真实所有者。普通 Chat 采用明确创建人，飞书 Chat 采用持久 binding 指定 bot 的人类责任人；多个 bot 的移交、卡片和呈现通知各自隔离。普通 Topic Chat 的 Issue 来源须通过现有持久 binding 与实际执行分类校验。
 
-列表使用 `limit`（默认100，最多200）、`before`（前页最后 Q 的 id）及 `nextCursor`。SQL只读取目标 Issue 子树的 Issue-owned 会话及这些会话里的同Q通知，责任刷新也只定位受影响子树。已答但等待仍分离的 Q 同样移交新的明确人类，保留原答案及恢复原因，只发送待恢复状态通知，不重新向Agent提问；新责任人可在原执行条件恢复后授权唯一续接。原来源 Issue 或会话被移到其他工作区时冻结 Q 不授予新工作区处理权；内部审计投影显示不可处理原因，HTTP原Q入口返回404，Issue问题列表隐藏该Q正文和答案历史。没有明确可用顶层人类时整条 Q 授权保持关闭。
+列表使用 `limit`（默认100，最多200）、`before`（前页最后 Q 的 id）及 `nextCursor`。SQL只读取目标 Issue 子树的 Issue-owned 会话及这些会话里的同Q通知，责任刷新也只定位受影响子树。已答但等待仍分离的 Q 同样移交新的明确人类，保留原答案及恢复原因，只发送待恢复状态通知，不重新向Agent提问；新责任人可在原执行条件恢复后授权唯一续接。原来源 Issue 或会话被移到其他工作区时冻结 Q 不授予新工作区处理权；内部审计投影显示不可处理原因，HTTP原Q入口返回404，Issue问题列表隐藏该Q正文和答案历史。缺少可用顶层联系人不关闭 Agent 问题链。事项的 human 阶段没有固定联系人时，当前工作区有效成员可答复、修订、关闭及恢复同一个 Q；仍保留真实批准者与版本审计。权限请求依旧要求真实人工批准，Agent 不能代答。
 
 答复身份必须是当前处理者；Agent 还必须提交属于自己和同一工作区的当前执行轮。明确人类来源只按成员ID或普通Chat创建者userId解析，不按姓名或ID前缀猜测；permission、merge和production_change授权直接跳过Agent处理者。Question专属HTTP入口允许当前处理者、原提问者、明确人类责任人和人类阶段的Remi定点读取原Q及提问者提供的必要背景；不授予私有Agent消息、Chat或trace的通用读取权。非处理Agent和跨工作区身份不能借运行宿主的权限读取Q。责任变更在同一事务重新路由、记录移交历史、增加路由版本并使旧卡凭据失效，不改变原消息冻结收件人。答案和原会话 reply、问题结算以及可靠通知和卡片更新意图同事务保存，实时推送在提交后执行。
 
@@ -68,7 +68,7 @@ Inbox 的 `?item=<Q>&question=<Q>` 专属定位，只读取 Question API，不�
 
 历史来源回传和不可执行提醒按其 `question_source_notification` 与 `root_question_id` 继承原 Q 的私有来源及两端工作区可见性；HTTP、WebSocket 和 Inbox 计数/分页使用相同关联，原 Q 不可见或引用缺失时不返回提醒正文。跨会话关联不会创建 `reply_to` 或扩大通用来源读取权。
 
-处理和呈现通知也只授予该条消息及其关联答复、编辑记录的定点读取权：引用必须指向当前版本、来源仍在冻结工作区的真实 Q，并有明确可用人类责任人。人类责任人可读自己的通知；Agent 或 Remi 必须是该通知收件人，且使用当前实际执行轮的同一会话与 scope。旁观成员不能借公有父会话或编辑历史读取私有原题。HTTP 与 WebSocket 共用只读事实判据，Inbox 在计数和分页前按相同条件过滤；旧通知保留数据库历史，但过期版本或缺失、非 Q 引用不返回正文。异步 WebSocket 查询只使用原有 read pool 允许的读取，不放宽自定义函数或写操作门禁。
+处理和呈现通知也只授予该条消息及其关联答复、编辑记录的定点读取权：引用必须指向当前版本、来源仍在冻结工作区的真实 Q，并有明确可用联系人，或该 Q 属于同工作区的事项人工队列。联系人可读定向通知；无固定联系人时仅该事项工作区的有效成员可读队列通知；Agent 或 Remi 必须是该通知收件人，且使用当前实际执行轮的同一会话与 scope。旁观成员不能借公有父会话或编辑历史读取私有原题。HTTP 与 WebSocket 共用只读事实判据，Inbox 在计数和分页前按相同条件过滤；旧通知保留数据库历史，但过期版本或缺失、非 Q 引用不返回正文。异步 WebSocket 查询只使用原有 read pool 允许的读取，不放宽自定义函数或写操作门禁。
 
 初建 Q 的题目、路由和通知在同事务保存，由原消息提交后发布最终完整 entry；初次保存不另外发布相同 revision 的 patch。后续答复和移交仍发布真正的新 revision patch，保留 WebSocket 客户端已收到的完整行作为更新基准。
 

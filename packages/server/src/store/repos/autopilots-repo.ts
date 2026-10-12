@@ -291,7 +291,7 @@ export class AutopilotsRepo {
     }
     const nextProjectId = input.projectId === undefined ? current.projectId : input.projectId;
     const responsibleMemberId=hasAnyField(input,'responsibleMemberId','responsible_member_id')?cleanOptionalString(input.responsibleMemberId??input.responsible_member_id):current.responsibleMemberId??null;
-    this.validateRootResponsibleMember(responsibleMemberId,current.workspaceId);
+    if(hasAnyField(input,'responsibleMemberId','responsible_member_id'))this.validateRootResponsibleMember(responsibleMemberId,current.workspaceId);
     const existingTriggers = this.listAutopilotTriggers(id);
     if (nextExecutionMode === "create_issue" && existingTriggers.some((trigger) => trigger.scheduleTargets)) {
       throw new Error("schedule_targets requires run_only or trigger_issue execution");
@@ -1569,12 +1569,13 @@ export class AutopilotsRepo {
       let issueSessionId: string | null = null;
       let chatSessionId: string | null = null;
       if (autopilot.executionMode === "create_issue") {
+        const contact = autopilot.responsibleMemberId ? this.ctx.workspaces().getWorkspaceMember(autopilot.responsibleMemberId) : null;
         issue = this.ctx.issues().createIssueWithinTransaction({
           title: prompt,
           description: autopilot.description,
           workspaceId: autopilot.workspaceId,
           projectId: autopilot.projectId,
-          responsibleMemberId: autopilot.responsibleMemberId??null,
+          responsibleMemberId: contact && !contact.archivedAt && contact.workspaceId === autopilot.workspaceId ? contact.id : null,
           // Historical createdBy is attribution, never an implicit root responsibility.
           createdBy: null,
           assigneeType:autopilot.assigneeType,

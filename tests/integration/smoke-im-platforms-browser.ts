@@ -65,12 +65,11 @@ try {
   assert.equal(await page.getByLabel("App Secret", { exact: true }).inputValue(), "");
   await page.getByLabel("App ID", { exact: true }).fill("cli_im_updated");
   const botSection = page.locator("section").filter({ has: page.getByRole("heading", { name: "Feishu concierge bot", exact: true }) });
-  const designatedHuman = botSection.getByRole("combobox", { name: "Designated human", exact: true });
-  await designatedHuman.selectOption(memberIds.owner);
+  assert.equal(await botSection.getByRole("combobox", { name: "Designated human", exact: true }).count(), 0);
   const savedBot = await saveResponse("PUT", `${apiBase}/feishu-bot`, () => botSection.getByRole("button", { name: "Save", exact: true }).click());
-  assert.equal(savedBot.responsible_member_id, memberIds.owner);
+  assert.equal(savedBot.responsible_member_id, null);
   await page.reload();
-  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_im_updated" && await designatedHuman.inputValue() === memberIds.owner, 20_000, "saved bot after reload");
+  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_im_updated", 20_000, "saved bot after reload");
   check("bot configuration saves through HTTP, survives refresh, retains write-only secret and stopped state");
   const menu = page.locator("section").filter({ has: page.getByRole("heading", { name: "Feishu bot menu", exact: true }) });
   await menu.getByRole("button", { name: "Add item", exact: true }).first().click();
@@ -83,7 +82,6 @@ try {
   await page.getByRole("button", { name: "Add bot", exact: true }).click();
   await page.waitForURL(/bot=new/);
   await page.getByLabel("Bot name", { exact: true }).fill("Second concierge");
-  await designatedHuman.selectOption(memberIds.member);
   await botSection.getByText("Default Agent", { exact: true }).locator("..").getByRole("combobox").click();
   await page.getByRole("option", { name: "Group Specialist", exact: true }).click();
   await botSection.getByText("Host machine", { exact: true }).locator("..").getByRole("combobox").click();
@@ -92,15 +90,15 @@ try {
   await page.getByLabel("App Secret", { exact: true }).fill("second-synthetic-secret");
   const createdBot = await saveResponse("POST", `${apiBase}/feishu-bots`, () => botSection.getByRole("button", { name: "Save", exact: true }).click());
   assert(createdBot.bot_id && createdBot.bot_id !== "default");
-  assert.equal(createdBot.responsible_member_id, memberIds.member);
+  assert.equal(createdBot.responsible_member_id, null);
   await page.waitForURL(new RegExp(`bot=${createdBot.bot_id}`));
   await page.reload();
-  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_second_bot" && await designatedHuman.inputValue() === memberIds.member, 20_000, "second bot after reload");
+  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_second_bot", 20_000, "second bot after reload");
   assert.equal(await page.getByLabel("App Secret", { exact: true }).inputValue(), "");
   await selectBot("cli_im_updated");
-  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_im_updated" && await designatedHuman.inputValue() === memberIds.owner, 20_000, "original bot unchanged");
+  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_im_updated", 20_000, "original bot unchanged");
   await selectBot("Second concierge");
-  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_second_bot" && await designatedHuman.inputValue() === memberIds.member, 20_000, "second bot selection");
+  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_second_bot", 20_000, "second bot selection");
   await page.screenshot({ path: join(artifacts, "im-multiple-bots-desktop.png") });
   check("second bot is created through the form, survives refresh and switches without overwriting original credentials");
   await page.emulateMedia({ colorScheme: "dark" });
@@ -132,7 +130,7 @@ try {
   const scopedSave = await saveResponse("PUT", `${apiBase}/feishu-bot`, () => page!.getByRole("switch").click());
   assert.equal(scopedSave.bot_id, createdBot.bot_id);
   assert.equal(scopedSave.sender_access_policy, "allowlist");
-  assert.equal(scopedSave.responsible_member_id, memberIds.member);
+  assert.equal(scopedSave.responsible_member_id, null);
   await selectBot("cli_im_updated");
   await page.getByRole("heading", { name: "Bot capability access", exact: true }).waitFor();
   check("bot selection persists between capability pages and isolates sender access policy");
@@ -160,7 +158,7 @@ try {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await botSection.getByRole("button", { name: "Delete", exact: true }).click();
   await saveResponse("DELETE", `${apiBase}/feishu-bot`, () => page!.getByRole("alertdialog").getByRole("button", { name: "Delete", exact: true }).click());
-  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_im_updated" && await designatedHuman.inputValue() === memberIds.owner, 20_000, "original bot after second deletion");
+  await poll(async () => await page!.getByLabel("App ID", { exact: true }).inputValue() === "cli_im_updated", 20_000, "original bot after second deletion");
   check("deleting the second bot preserves the original bot; multi-bot UI fits mobile");
 
   await navigate("access", "Access control");

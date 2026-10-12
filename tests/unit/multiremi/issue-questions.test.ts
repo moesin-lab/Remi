@@ -8,13 +8,13 @@ import { handleTaskInteractionEvent, registerQuestionCardClient } from '@connect
 import { createMultiremiApp } from '@multiremi/api.js';
 import { MultiremiDaemonClient } from '@multiremi/worker/client.js';
 
-function setup(f: PendingTurnTestFixture, sameOwner = false, busyOwner = false, kind = 'question') {
+function setup(f: PendingTurnTestFixture, sameOwner = false, busyOwner = false, kind = 'question', withoutHuman = false) {
   const { store, db } = f;
   const runtime = store.registerRuntime({ name: 'questions host', provider: 'codex', daemonId: 'questions-daemon', maxConcurrency: 8 });
   const leader = store.createAgent({ name: 'Issue leader', provider: 'codex', maxConcurrentTasks: busyOwner ? 1 : 8 });
   const parentLeader = sameOwner ? leader : store.createAgent({ name: 'Parent leader', provider: 'codex', maxConcurrentTasks: 8 });
   const worker = store.createAgent({ name: 'Worker', provider: 'codex', maxConcurrentTasks: 8 });
-  const parent = store.createIssue({ title: 'Root', assigneeType: 'agent', assigneeId: parentLeader.id, responsibleMemberId: 'mem_local_local' });
+  const parent = store.createIssue({ title: 'Root', assigneeType: 'agent', assigneeId: parentLeader.id, responsibleMemberId: withoutHuman ? null : 'mem_local_local' });
   const issue = store.createIssue({ title: 'Child', parentIssueId: parent.id, assigneeType: 'agent', assigneeId: leader.id });
   const leaderRuntime = busyOwner ? store.registerRuntime({ name: 'Busy Leader host', provider: 'codex', daemonId: 'busy-leader-daemon', maxConcurrency: 8 }) : null;
   if (leaderRuntime) {
@@ -30,7 +30,7 @@ function setup(f: PendingTurnTestFixture, sameOwner = false, busyOwner = false, 
   const scope = { runtimeId: runtime.id, daemonId: 'questions-daemon', workspaceId: 'local' };
   const result = bridge.rpc('turn.decision', { turn_id: turn.id, attempt_id: task.id, dedupe_key: `question:${task.id}`,
     wait_id: `wait_nonce_${task.id}`, body_md: 'Which approach?', options: [{ label: 'A', value: 'A' }, { label: 'B', value: 'B' }],
-    metadata: { kind, questions: [{ fieldKey: 'approach', question: { question: 'Which approach?', options: [{ label: 'A' }, { label: 'B' }] } }] }, timeout_ms: 50 }, scope);
+    metadata: { kind, ...(kind === 'permission' ? {options:[{optionId:'A',name:'Allow once',kind:'allow_once'}]} : {}), questions: [{ fieldKey: 'approach', question: { question: 'Which approach?', options: [{ label: 'A' }, { label: 'B' }] } }] }, timeout_ms: 50 }, scope);
   expect(result.ok).toBeTrue();
   const q = store.getQuestion(String(result.message_id))!;
   const agentTurn = (id: string) => {
@@ -43,6 +43,29 @@ function setup(f: PendingTurnTestFixture, sameOwner = false, busyOwner = false, 
 }
 
 pendingTurnBackendTests('one question through the responsibility chain', fixture => {
+  it('accepts workspace permission review without a designated human and preserves native consumption and workspace isolation', async () => {
+    const h = setup(fixture(), false, false, 'permission', true);
+    const user = h.store.getOrCreateUser({email:'optional-reviewer@example.test',name:'Workspace reviewer'});
+    const member = h.store.createWorkspaceMember({userId:user.id,name:user.name,role:'member'});
+    const token = await h.store.createAccessToken({userId:user.id,name:'Review',type:'pat'});
+    const agentToken = await h.store.createTaskAccessToken(h.store.getTask(h.task.id)!, 'local');
+    const outsider = h.store.getOrCreateUser({email:'outside-reviewer@example.test',name:'Outside reviewer'});
+    const outsideToken = await h.store.createAccessToken({userId:outsider.id,name:'Outside',type:'pat'});
+    const app = createMultiremiApp({store:h.store,authToken:'question-no-human'});
+    const answer = (credential:string) => app.request(`/api/messages/${h.q.id}/question/answer`, {
+      method:'POST',headers:{Authorization:`Bearer ${credential}`,'Content-Type':'application/json'},
+      body:JSON.stringify({expected_route_revision:1,response:{option_id:'A'}})});
+    expect(h.q).toMatchObject({current_handler:null,stage:'human',route_reason:null});
+    expect(h.store.getQuestion(h.q.id,{type:'member',id:member.id})?.actions.allowed).toContain('answer');
+    expect((await answer(outsideToken.token)).status).toBe(404);
+    expect((await answer(agentToken.token)).status).toBe(403);
+    expect((await answer(token.token)).status).toBe(200);
+    const answered = h.store.getQuestion(h.q.id)!;
+    expect(answered.answer?.actor).toEqual({type:'member',id:member.id});
+    expect(h.bridge.rpc('turn.decision.consume',{turn_id:h.turn.id,attempt_id:h.task.id,message_id:h.q.id,
+      reply_message_id:answered.answer!.reply_message_id,wait_id:`wait_nonce_${h.task.id}`},h.scope)).toEqual({ok:true});
+    expect(h.store.getQuestion(h.q.id)?.wait_status).toBe('consumed');
+  });
   it('ordinary choices are excluded before the Question page limit without rewriting historical rows', () => {
     const h = setup(fixture());
     const original = h.store.getMessage(h.q.id)!;
@@ -73,7 +96,7 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     const assignedSquad = store.createSquad({ name: 'Explicit assignment', leaderId: second.id, memberIds: [worker.id] });
     expect(firstSquad.id).not.toBe(assignedSquad.id);
     const issue = store.createIssue({ title: 'Second Squad owns this work', assigneeType: 'squad', assigneeId: assignedSquad.id,
-      responsibleMemberId: 'mem_local_local' });
+      responsibleMemberId: null });
     const session = store.createIssueSession(issue.id, { title: 'Original private Worker lane', holdsWorkspace: false });
     const task = store.createTask({ agentId: worker.id, issueId: issue.id, issueSessionId: session.id, prompt: 'Ask the actual Issue owner', priority: 200 });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
@@ -105,6 +128,11 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     expect((await act(wrongToken.token)).status).toBe(403);
     expect((await act(wrongToken.token, 'answer')).status).toBe(403);
     expect(store.getQuestion(id)?.status).toBe('pending');
+    // A missing contact cannot hide the current Agent's notification, and
+    // another task cannot borrow its token owner's workspace visibility.
+    const notificationPath = `/api/messages/${notifications[0]!.id}`;
+    expect((await api.request(notificationPath, {headers:{Authorization:`Bearer ${token.token}`}})).status).toBe(200);
+    expect((await api.request(notificationPath, {headers:{Authorization:`Bearer ${wrongToken.token}`}})).status).toBe(403);
     expect((await act(token.token)).status).toBe(200);
     expect((await act(token.token, 'answer')).status).toBe(200);
     expect(store.getQuestion(id)?.answer?.actor).toEqual({ type: 'agent', id: second.id });
@@ -489,13 +517,12 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     h.db.transaction(() => refreshIssueQuestionsAfterResponsibilityChangeWithinTransaction(ctx, h.issue.id, events))();
     expect(h.store.getMessage(unrelatedQ.id)?.metadata.question).toBeUndefined();
   });
-  it('fails closed for invalid ancestry, missing root human and moved source workspace', () => {
+  it('keeps Agent question routing without a human while denying moved source workspaces', () => {
     const h = setup(fixture());
     h.db.run('UPDATE multiremi_issues SET responsible_member_id=NULL WHERE id=?', [h.parent.id]);
     const ctx = new StoreContext(h.db, () => h.store), events = createCommitEventQueue();
     h.db.transaction(() => refreshIssueQuestionsAfterResponsibilityChangeWithinTransaction(ctx, h.parent.id, events))();
-    expect(h.store.getQuestion(h.q.id)).toMatchObject({ current_handler: null, stage: 'unavailable' });
-    expect(h.store.getQuestion(h.q.id)?.route_reason).toContain('human_missing');
+    expect(h.store.getQuestion(h.q.id)).toMatchObject({ current_handler: {type:'agent',id:h.leader.id}, stage: 'issue_owner', route_reason: null });
     const other = h.store.createWorkspace({ name: 'Other', slug: 'question-other' });
     const agent = h.store.createAgent({ name: 'Foreign actor', provider: 'codex', workspaceId: other.id });
     expect(() => h.store.answerQuestion(h.q.id, { expected_route_revision: 2, response: { answer: 'A' } }, { type: 'agent', id: agent.id })).toThrow('question_actor_workspace_mismatch');

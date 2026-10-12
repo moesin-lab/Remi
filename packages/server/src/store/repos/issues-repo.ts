@@ -524,11 +524,8 @@ const COMMENT_REACTIONS: ReactionSpec<MultiremiCommentReaction> = {
 export class IssuesRepo {
   constructor(private ctx: StoreContext) {}
 
-  private validateResponsibleMember(id: string | null, workspaceId: string, required: boolean): void {
-    if (!id) {
-      if (required) throw new IssueDeliveryError('issue_responsibility_required','Top-level Issue requires an explicit responsible_member_id or authenticated human creator');
-      return;
-    }
+  private validateResponsibleMember(id: string | null, workspaceId: string): void {
+    if (!id) return;
     const member = this.ctx.workspaces().getWorkspaceMember(id);
     if (!member || member.workspaceId !== workspaceId || member.archivedAt) throw new IssueDeliveryError('issue_responsibility_invalid','Responsible human must be an active member of this workspace');
   }
@@ -778,7 +775,7 @@ export class IssuesRepo {
     const creatorMember = createdBy ? this.ctx.workspaces().getWorkspaceMember(createdBy)
       ?? this.ctx.workspaces().findWorkspaceMemberForUser(createdBy, workspaceId) : null;
     const responsibleMemberId = parentIssueId ? null : responsibleRef ?? creatorMember?.id ?? null;
-    this.validateResponsibleMember(responsibleMemberId, workspaceId, !parentIssueId);
+    this.validateResponsibleMember(responsibleMemberId, workspaceId);
     const completedAt = isTerminalIssueStatus(status) ? now : null;
     this.ctx.db.run(
       `INSERT INTO multiremi_issues (
@@ -2438,13 +2435,17 @@ export class IssuesRepo {
     const nextParentIssueId = parentId ?? resolveOptionalStringField(input, "parentIssueId", "parent_issue_id", current.parentIssueId);
     const nextStatus = requestedStatus ?? current.status;
     const hasResponsibleField = hasAnyField(input, 'responsibleMemberId', 'responsible_member_id');
-    const nextResponsibleMemberId = nextParentIssueId ? null : resolveOptionalStringField(input,
+    let nextResponsibleMemberId = nextParentIssueId ? null : resolveOptionalStringField(input,
       'responsibleMemberId', 'responsible_member_id', current.responsibleMemberId ?? null);
+    if (moving && !hasResponsibleField && nextResponsibleMemberId) {
+      const contact = this.ctx.workspaces().getWorkspaceMember(nextResponsibleMemberId);
+      if (!contact || contact.archivedAt || contact.workspaceId !== nextWorkspaceId) nextResponsibleMemberId = null;
+    }
     if (nextParentIssueId && hasResponsibleField && resolveOptionalStringField(input, 'responsibleMemberId', 'responsible_member_id', null)) {
       throw new Error('Child issue human responsibility is inherited from its root');
     }
     if (hasResponsibleField || moving || (current.parentIssueId && !nextParentIssueId)) {
-      this.validateResponsibleMember(nextResponsibleMemberId, nextWorkspaceId, !nextParentIssueId);
+      this.validateResponsibleMember(nextResponsibleMemberId, nextWorkspaceId);
       if (hasResponsibleField && input.actorType !== 'member') throw new Error('Only a member can transfer human responsibility');
     }
     // A new membership (even a closed child) changes A4; reopening changes the
@@ -3186,7 +3187,7 @@ export class IssuesRepo {
       const responsibility=this.ctx.resolveIssueResponsibility(parent.id);
       if(responsibility.unresolved.length&&!responsibility.rootHuman){
         this.ctx.appendIssueActivity(parent.id,{actorType:'system',actorId:SYSTEM_AUTHOR_ID,
-          type:'child_done_parent_skipped',body:'Parent notice requires a complete responsibility chain; repair the parent chain and configure its root human',
+          type:'child_done_parent_skipped',body:'Parent notice requires a complete responsibility chain; repair the parent execution chain',
           data:{reason:'responsibility_unresolved',childIssueId:issue.id,child_issue_id:issue.id,
             childStatus:issue.status,child_status:issue.status,outcome,responsibility_unresolved:responsibility.unresolved}},deferredEvents);
         // Ordinary status observation can still derive the same-workspace parent.

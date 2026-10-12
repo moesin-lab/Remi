@@ -8,10 +8,12 @@ business question uses the versioned `message question` actions below.
 
 Issue responsibility is resolved with `remi issue responsibility <issue>`: the
 execution coordinator belongs to the Issue, the direct parent coordinator reviews
-child results, and the root explicitly designates a human. Create/update accepts
-`--responsible-member <workspace-member-id>`; `remi issue responsible set <root>
---member <member-id>` explicitly transfers it and preserves ownership audit.
-Children inherit the root human and never persist an independent copy. New execution
+child results, and the root coordinator reviews its own formal delivery. A human
+contact is optional. Create/update retains `--responsible-member <workspace-member-id>`
+for compatibility; `remi issue responsible set <root> --member <member-id>` sets
+that legacy contact and `remi issue responsible clear <root>` removes it.
+`remi autopilot responsible clear <autopilot>` clears an automation contact without
+blocking automatic issue creation. Children do not persist a separate contact. New execution
 assignees use `agent` or `squad`; historical member assignments remain visible as
 needing configuration and are not valid execution coordinators.
 
@@ -19,10 +21,11 @@ needing configuration and are not valid execution coordinators.
 submit requires the execution coordinator's identity and `--summary` or JSON input.
 Delivery list takes `--limit 1..100` and `--cursor <nextCursor>` for older pages.
 `remi issue delivery accept|return <issue> <delivery> --revision <responsibilityRevision>`
-reviews that exact delivery (`return` requires `--reason`). The designated human can
+reviews that exact delivery (`return` requires `--reason`). Root execution Agents need no
+human grant. Workspace members can optionally review a root delivery. A legacy contact can
 use `remi issue delivery authorize <issue> <delivery> --revision <revision> --agent
 <execution-owner>` or `--revoke`; this authorization applies only to that delivery
-and ownership version. Task completion and ordinary parent-done grants do not
+and ownership version as audit metadata, not a prerequisite for root Agent review. Task completion and ordinary parent-done grants do not
 replace formal acceptance.
 
 `remi issue question list <issue>` and `remi message question get <Q>` expose the

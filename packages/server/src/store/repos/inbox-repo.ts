@@ -89,7 +89,7 @@ export class InboxRepo {
     const issue = this.ctx.issues().getIssue(issueId);
     if (!issue || issue.workspaceId !== initial.workspaceId) throw new Error("Envelope Issue moved or was removed");
     const responsibility = !agentId ? this.ctx.resolveIssueResponsibility(issue.id) : null;
-    if (responsibility?.unresolved.length) throw new Error('Envelope Issue responsibility is unresolved; repair its owner and root human');
+    if (responsibility?.unresolved.length) throw new Error('Envelope Issue responsibility is unresolved; repair its execution owner');
     const ownerId = agentId ?? responsibility?.executionOwner?.id;
     const agent = ownerId ? this.ctx.agents().getAgent(ownerId) : null;
     if (!agent || agent.archivedAt || agent.workspaceId !== issue.workspaceId) {

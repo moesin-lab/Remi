@@ -131,8 +131,6 @@ it("uses the browser API client against authenticated HTTP for creation, Q routi
     expect(childAccepted.status).toBe("accepted");
     const rootDelivery = await client.submitIssueDelivery(root.id, { summary: "Integrated child evidence" });
     client.setToken(otherPat.token);
-    await expect(client.respondIssueDelivery(root.id, rootDelivery.id, { action: "accept", revision: rootDelivery.responsibilityRevision })).rejects.toThrow();
-    client.setToken(pat.token);
     const accepted = await client.respondIssueDelivery(root.id, rootDelivery.id, { action: "accept", revision: rootDelivery.responsibilityRevision });
     expect(accepted.status).toBe("accepted"); expect((await client.getIssue(root.id)).status).toBe("done");
     expect((await client.listIssueDeliveries(root.id))[0]?.id).toBe(rootDelivery.id);

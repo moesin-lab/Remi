@@ -265,20 +265,11 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
   const denyTechnicalResponsibilityWrite=(c:Context,input:{responsibleMemberId?:string|null;responsible_member_id?:string|null;parentIssueId?:string|null;parent_issue_id?:string|null},issue?:MultiremiIssue):Response|null=>{
     const token=currentAccessToken(c);
     if(token?.type!=='task'&&token?.type!=='daemon')return null;
-    const parentField=hasRequestField(input,'parentIssueId','parent_issue_id');
-    const nextParent=input.parentIssueId??input.parent_issue_id??null;
-    if(parentField && nextParent && (!issue||nextParent!==issue.parentIssueId)) {
-      const parent=store.resolveIssueResponsibility(nextParent);
-      const previous=issue?store.resolveIssueResponsibility(issue.id):null;
-      const source=previous?previous.unresolved.length?null:previous.rootHuman?.id:token.type==='task'?taskIssueResponsibleMember(c,store):null;
-      if(parent.unresolved.length||!source||parent.rootHuman?.id!==source)return c.json({error:'A human must confirm moving work to a different root responsibility',code:'human_issue_responsibility_required'},403);
-    }
     const explicit=hasRequestField(input,'responsibleMemberId','responsible_member_id');
     const target=input.responsibleMemberId??input.responsible_member_id??null;
     if(explicit) {
-      const inherited=issue?.parentIssueId??input.parentIssueId??input.parent_issue_id;
       const source=issue?issue.responsibleMemberId??null:token.type==='task'?taskIssueResponsibleMember(c,store):null;
-      if((inherited&&target===null)||(token.type==='task'&&target!==null&&target===source))return null;
+      if(target===null||(token.type==='task'&&target===source))return null;
       return c.json({error:'A human credential must choose or change root responsibility; Task roots inherit their verified source',code:'human_issue_responsibility_required'},403);
     }
     return null;

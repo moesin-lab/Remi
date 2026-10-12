@@ -165,7 +165,7 @@ describe("Central execution configuration", () => {
       ),
     ).not.toContain("first-secret");
   });
-  it("authorizes human administrators and only releases central credentials to the assigned daemon", async () => {
+  it("authorizes the shared human operator and only releases central credentials to the assigned daemon", async () => {
     const { store, runtime } = setup();
     store.registerRuntime({
       id: runtime.id,
@@ -232,7 +232,7 @@ describe("Central execution configuration", () => {
     expect(
       (await request("/api/execution-profiles", member.token, "POST", input))
         .status,
-    ).toBe(403);
+    ).toBe(201);
     const created = await request(
       "/api/execution-profiles",
       owner.token,

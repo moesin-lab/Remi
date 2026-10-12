@@ -35,7 +35,7 @@ export function createMemberInboxReadProjection(db:SqlDatabase):void {
     LEFT JOIN multiremi_workspace_members operator ON operator.id=(
       SELECT candidate.id FROM multiremi_workspace_members candidate
       WHERE candidate.workspace_id=h.workspace_id AND candidate.user_id='local'
-      ORDER BY CASE WHEN candidate.id='mem_' || h.workspace_id || '_local' THEN 0 ELSE 1 END,
+      ORDER BY CASE WHEN candidate.id='mem_' || candidate.workspace_id || '_local' THEN 0 ELSE 1 END,
         candidate.created_at,candidate.id LIMIT 1)
     LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id=m.session_id AND shared.workspace_id=h.workspace_id
     WHERE m.kind='message' AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL`);

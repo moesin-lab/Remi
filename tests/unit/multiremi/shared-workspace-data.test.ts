@@ -5,6 +5,11 @@ import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
 pendingTurnBackendTests("Shared workspace operator data", fixture => {
   it("projects each inbox row once when historical local memberships are duplicated", () => {
     const { store, db } = fixture();
+    // SQLite reparses every view during table renames. Keep the operator rank
+    // expression valid there as well as in ordinary SELECTs and PostgreSQL.
+    db.exec("CREATE TABLE shared_operator_projection_probe (id TEXT)");
+    db.exec("ALTER TABLE shared_operator_projection_probe RENAME TO shared_operator_projection_probe_renamed");
+    db.exec("DROP TABLE shared_operator_projection_probe_renamed");
     const operator = store.getWorkspaceOperator("local")!;
     const duplicate = store.createWorkspaceMember({ id: "old_local_duplicate", workspaceId: "local", name: "Older local member", userId: "local" });
     db.run("UPDATE multiremi_workspace_members SET created_at='2000-01-01T00:00:00.000Z' WHERE id=?", [duplicate.id]);

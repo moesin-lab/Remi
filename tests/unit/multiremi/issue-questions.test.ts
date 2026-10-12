@@ -128,6 +128,11 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     expect((await act(wrongToken.token)).status).toBe(403);
     expect((await act(wrongToken.token, 'answer')).status).toBe(403);
     expect(store.getQuestion(id)?.status).toBe('pending');
+    // A missing contact cannot hide the current Agent's notification, and
+    // another task cannot borrow its token owner's workspace visibility.
+    const notificationPath = `/api/messages/${notifications[0]!.id}`;
+    expect((await api.request(notificationPath, {headers:{Authorization:`Bearer ${token.token}`}})).status).toBe(200);
+    expect((await api.request(notificationPath, {headers:{Authorization:`Bearer ${wrongToken.token}`}})).status).toBe(403);
     expect((await act(token.token)).status).toBe(200);
     expect((await act(token.token, 'answer')).status).toBe(200);
     expect(store.getQuestion(id)?.answer?.actor).toEqual({ type: 'agent', id: second.id });

@@ -26,6 +26,10 @@ function daemonForBindings() {
   daemon.options = { runtimeId: "rt_a", provider: "codex" };
   daemon.runtimeProviderKeys = new Map();
   daemon.runtimeBindingAcks = [];
+  daemon.runtimeBindingDiscoveries = new Map();
+  daemon.runtimeBindingProbeTasks = new Set();
+  daemon.runtimeBindingApplication = 0;
+  daemon.stopped = true;
   daemon.runtimeCodexProfile = null;
   daemon.runtimeClaudeProfile = null;
   daemon.client = { reportRuntimeBindingAcks: async () => {}, getRuntimeCodexProfileKey: async (_runtimeId: string, id: string) => { keys.push(id); return `secret-${id}`; } };
@@ -73,6 +77,159 @@ describe("central execution binding application", () => {
     expect(payload.execution_profile_protocol).toBe(1);
     expect(payload.runtime_binding_acks).toEqual(acks);
     expect(result.runtime_bindings).toEqual(desired);
+  });
+});
+
+describe("central binding catalog refresh", () => {
+  const activeDaemons: any[] = [];
+  afterEach(async () => {
+    for (const daemon of activeDaemons.splice(0)) {
+      daemon.stopped = true;
+      for (const entry of daemon.runtimeBindingDiscoveries.values()) { entry.abort.abort(); clearTimeout(entry.timer); }
+      await Promise.allSettled([...daemon.runtimeBindingDiscoveries.values()].map((entry: any) => entry.probe));
+    }
+  });
+
+  function active() {
+    const { daemon } = daemonForBindings();
+    daemon.stopped = false;
+    daemon.runtimeRegistrationGeneration = 1;
+    Object.assign(daemon.options, { runtimeModelRefreshIntervalMs: 60_000, runtimeModelRetryBaseMs: 60_000 });
+    activeDaemons.push(daemon);
+    return daemon;
+  }
+
+  it("discovers bindings asynchronously without replacing native state or another group", async () => {
+    const daemon = active();
+    const native = [{ id: "native", label: "Native", provider: "codex", default: true }];
+    daemon.runtimeModels = native;
+    let release: (() => void) | undefined;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    globalThis.fetch = (async input => {
+      if (String(input).includes("held.example")) await held;
+      return String(input).includes("failed.example") ? new Response("private-provider-response", { status: 401 })
+        : Response.json({ data: [{ id: "custom-a" }, { id: "custom-b" }] });
+    }) as typeof fetch;
+    const fast = binding();
+    fast.profile = { ...fast.profile!, model: "" };
+    const slow = binding("slow");
+    slow.profile = { ...slow.profile!, base_url: "https://held.example/v1", model: "" };
+    const failed = binding("failed");
+    failed.profile = { ...failed.profile!, base_url: "https://failed.example/v1", model: "" };
+    try {
+      await daemon.applyRuntimeExecutionBindings([fast, slow, failed]);
+      expect(daemon.runtimeBindingAcks.every((ack: any) => ack.status === "ready")).toBe(true);
+      expect(daemon.runtimeBindingDiscoveries.get("slow").probe).toBeDefined();
+      await daemon.runtimeBindingDiscoveries.get(fast.groupId).probe;
+      await daemon.runtimeBindingDiscoveries.get(failed.groupId).probe;
+      expect(daemon.runtimeBindingDiscoveries.get(fast.groupId).ack.model_catalog.models.map((model: any) => model.id)).toEqual(["custom-a", "custom-b"]);
+      expect(daemon.runtimeBindingDiscoveries.get(failed.groupId).ack.model_catalog).toEqual({ status: "error", models: [] });
+      expect(JSON.stringify(daemon.runtimeBindingAcks)).not.toContain("private-provider-response");
+      expect(daemon.runtimeModels).toBe(native);
+      release!();
+      await daemon.runtimeBindingDiscoveries.get(slow.groupId).probe;
+      expect(daemon.runtimeBindingDiscoveries.get(slow.groupId).ack.model_catalog.status).toBe("ready");
+    } finally { release!(); }
+  });
+
+  it("discards late probes after profile replacement and after a new registration generation", async () => {
+    const daemon = active();
+    let release: (() => void) | undefined;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    globalThis.fetch = (async input => {
+      if (String(input).includes("held.example")) { await held; return Response.json({ data: [{ id: "stale" }] }); }
+      return Response.json({ data: [{ id: "current" }] });
+    }) as typeof fetch;
+    const reports: any[] = [];
+    daemon.client.reportRuntimeBindingAcks = async (_rt: string, acks: any[]) => { reports.push(...acks); };
+    const old = binding();
+    old.profile = { ...old.profile!, base_url: "https://held.example/v1", model: "" };
+    try {
+      await daemon.applyRuntimeExecutionBindings([old]);
+      const oldEntry = daemon.runtimeBindingDiscoveries.get(old.groupId);
+      const next = binding(old.groupId, old.profileId!, 2);
+      next.profile = { ...next.profile!, model: "" };
+      await daemon.applyRuntimeExecutionBindings([next]);
+      await daemon.runtimeBindingDiscoveries.get(next.groupId).probe;
+      release!();
+      await oldEntry.probe;
+      expect(reports.filter(ack => ack.model_catalog).every(ack => ack.profileRevision === 2)).toBe(true);
+      expect(JSON.stringify(reports)).not.toContain('"id":"stale"');
+      let releaseRegistration: (() => void) | undefined;
+      const registrationHeld = new Promise<void>(resolve => { releaseRegistration = resolve; });
+      globalThis.fetch = (async (_input: unknown) => { await registrationHeld; return Response.json({ data: [{ id: "old-registration" }] }); }) as typeof fetch;
+      const rebind = { ...next, generation: "new-binding" };
+      await daemon.applyRuntimeExecutionBindings([rebind]);
+      const entry = daemon.runtimeBindingDiscoveries.get(rebind.groupId);
+      daemon.runtimeRegistrationGeneration++;
+      releaseRegistration!();
+      await entry.probe;
+      expect(JSON.stringify(reports)).not.toContain("old-registration");
+    } finally { release!(); }
+  });
+
+  it("retains the current catalog on repeated configuration and refreshes it on the discovery cadence", async () => {
+    const daemon = active();
+    daemon.options.runtimeModelRefreshIntervalMs = 50;
+    let calls = 0;
+    globalThis.fetch = (async (_input: unknown) => Response.json({ data: [{ id: `model-${++calls}` }] })) as typeof fetch;
+    const connection = binding();
+    connection.profile = { ...connection.profile!, model: "" };
+    await daemon.applyRuntimeExecutionBindings([connection]);
+    await daemon.runtimeBindingDiscoveries.get(connection.groupId).probe;
+    await daemon.applyRuntimeExecutionBindings([connection]);
+    expect(calls).toBe(1);
+    expect(daemon.runtimeBindingAcks[0].model_catalog.models[0].id).toBe("model-1");
+    const deadline = Date.now() + 1_000;
+    while (calls < 2 && Date.now() < deadline) await Bun.sleep(10);
+    expect(calls).toBeGreaterThanOrEqual(2);
+    await daemon.runtimeBindingDiscoveries.get(connection.groupId).probe;
+    expect(daemon.runtimeBindingAcks[0].model_catalog.models[0].id).toBe("model-2");
+  });
+
+  it("rebuilds a cancelled binding on authority recovery even when the configuration is identical", async () => {
+    const daemon = active();
+    let calls = 0;
+    globalThis.fetch = (async (_input: unknown) => Response.json({ data: [{ id: `model-${++calls}` }] })) as typeof fetch;
+    const connection = binding();
+    connection.profile = { ...connection.profile!, model: "" };
+    await daemon.applyRuntimeExecutionBindings([connection]);
+    const original = daemon.runtimeBindingDiscoveries.get(connection.groupId);
+    await original.probe;
+    daemon.cancelRuntimeModelRefresh();
+    expect(original.abort.signal.aborted).toBe(true);
+    expect(daemon.runtimeBindingDiscoveries.size).toBe(0);
+    await daemon.applyRuntimeExecutionBindings([connection]);
+    const recovered = daemon.runtimeBindingDiscoveries.get(connection.groupId);
+    expect(recovered).not.toBe(original);
+    await recovered.probe;
+    expect(recovered.ack.model_catalog.models[0].id).toBe("model-2");
+  });
+
+  it("does not let a delayed credential lookup republish an older concurrent configuration", async () => {
+    const daemon = active();
+    let release: (() => void) | undefined;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    daemon.client.getRuntimeCodexProfileKey = async (_rt: string, id: string) => {
+      if (id.endsWith("_1")) await held;
+      return "private-test-key";
+    };
+    globalThis.fetch = (async (_input: unknown) => Response.json({ data: [{ id: "current" }] })) as typeof fetch;
+    const old = binding();
+    old.profile = { ...old.profile!, model: "" };
+    const next = binding(old.groupId, old.profileId!, 2);
+    next.profile = { ...next.profile!, model: "" };
+    const applyingOld = daemon.applyRuntimeExecutionBindings([old]);
+    try {
+      await daemon.applyRuntimeExecutionBindings([next]);
+      const current = daemon.runtimeBindingDiscoveries.get(next.groupId);
+      await current.probe;
+      release!();
+      await applyingOld;
+      expect(daemon.runtimeBindingDiscoveries.get(next.groupId)).toBe(current);
+      expect(daemon.runtimeBindingAcks[0].profileRevision).toBe(2);
+      expect(daemon.runtimeBindingAcks[0].model_catalog.status).toBe("ready");
+    } finally { release!(); await applyingOld; }
   });
 });
 

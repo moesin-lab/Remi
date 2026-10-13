@@ -3357,6 +3357,7 @@ function runMigrationsForDialect(db: SqlDatabase, dialect: SqlDatabaseDialect): 
     profile_revision INTEGER,status TEXT NOT NULL,error TEXT,updated_at TEXT NOT NULL,
     PRIMARY KEY(workspace_id,group_id,runtime_id));`);
   addColumnIfMissing(db, "multiremi_execution_binding_states", "generation TEXT");
+  addColumnIfMissing(db, "multiremi_execution_binding_states", "model_catalog TEXT");
   runMigrationOnce(db, "central_execution_profiles_v1", () => {
     db.exec(`ALTER TABLE multiremi_execution_group_members RENAME TO multiremi_execution_group_members_legacy;
       CREATE TABLE multiremi_execution_group_members (

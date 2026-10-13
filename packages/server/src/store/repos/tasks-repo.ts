@@ -3635,6 +3635,8 @@ export class TasksRepo {
     }
     runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records
        SET provider = ?, plugin_snapshot = ?, execution_fingerprint = ?, codex_profile = ?, claude_profile = ?,
+           execution_model = COALESCE(NULLIF(execution_model, ''), ?),
+           execution_thinking_level = COALESCE(NULLIF(execution_thinking_level, ''), ?),
            session_id = CASE WHEN ? = 1 THEN ? WHEN ? = 1 THEN session_id ELSE NULL END,
            work_dir = CASE WHEN ? = 1 THEN ? WHEN ? = 1 THEN work_dir ELSE NULL END,
            issue_session_generation = CASE WHEN ? = 1 THEN ? ELSE issue_session_generation END,
@@ -3646,6 +3648,8 @@ export class TasksRepo {
         executionFingerprint,
         provider === "codex" && runtimeProfile ? toJson(runtimeProfile) : null,
         provider === "claude" && runtimeProfile ? toJson(runtimeProfile) : null,
+        runtimeProfile?.model ?? null,
+        runtimeProfile && !currentAgent.model ? taskExecutionTarget(currentAgent, task).thinkingLevel : null,
         issueSessionId ? 1 : 0,
         issueProviderSessionId,
         keepProviderSession ? 1 : 0,
@@ -3685,6 +3689,10 @@ export class TasksRepo {
       executionFingerprint: current.executionFingerprint,
       codexProfile: current.codexProfile,
       claudeProfile: current.claudeProfile,
+      executionModel: current.executionModel,
+      execution_model: current.execution_model,
+      executionThinkingLevel: current.executionThinkingLevel,
+      execution_thinking_level: current.execution_thinking_level,
       sessionId: current.sessionId,
       workDir: current.workDir,
       issueSessionGeneration: current.issueSessionGeneration,
@@ -4104,6 +4112,7 @@ ${routing.sql}
     // profile, while changing models invalidates the provider session fingerprint.
     // A fallback-switched task freezes ITS model, not the Agent's selection.
     const model = task ? taskExecutionTarget(agent, task).model : cleanOptionalString(agent.model);
+    if (profile && !profile.model && !model) return null;
     return runtimeConnectionSnapshot(profile, model);
   }
 
@@ -4122,9 +4131,7 @@ ${routing.sql}
     if (task.executionFingerprint && group?.managed) {
       // Central tasks already own immutable connection/model evidence. Keep
       // checking membership and authorization without consulting a newer catalog.
-      return this.ctx.runtimes().runtimeCanRunAgent(runtime, {
-        ...effectiveAgent, model: null, thinkingLevel: null,
-      });
+      return this.ctx.runtimes().runtimeCanRouteAgent(runtime, effectiveAgent);
     }
     const profile = task.executionFingerprint ? task.codexProfile ?? task.claudeProfile : null;
     if (!profile) return this.ctx.runtimes().runtimeCanRunAgent(runtime, effectiveAgent);

@@ -1,4 +1,6 @@
-/** A Runtime-owned model connection. Plaintext credentials are never part of this configuration. */
+import type { MultiremiRuntimeModel } from "./types.js";
+
+/** A model connection. Central profiles may leave model empty until discovery. */
 export interface RuntimeConnectionProfile {
   name: string;
   base_url: string;
@@ -36,18 +38,22 @@ export function runtimeConnectionModels<T extends { id: string; label: string }>
   provider: string,
   models: readonly T[],
 ) {
-  const ids = profile.models ?? [profile.model, ...models.map(model => model.id).filter(id => id !== profile.model)];
+  const ids = profile.models
+    ? profile.model ? profile.models : profile.models.filter(id => models.some(model => model.id === id))
+    : [...new Set([profile.model, ...models.map(model => model.id)].filter(Boolean))];
+  const defaultId = profile.model || models.find(model => ids.includes(model.id) && "default" in model && model.default)?.id || ids[0];
   return ids.map(id => {
     const reported = models.find(model => model.id === id);
-    return { ...reported, id, label: reported?.label ?? id, provider, default: id === profile.model };
+    return { ...reported, id, label: reported?.label ?? id, provider, default: id === defaultId };
   });
 }
 
 /** Shared by the control plane and daemon; never accept executable TOML or inline secrets. */
-export function parseRuntimeConnectionProfile(value: unknown, envPrefix: "REMI_CODEX_" | "REMI_CLAUDE_"): RuntimeConnectionProfile | null {
+export function parseRuntimeConnectionProfile(value: unknown, envPrefix: "REMI_CODEX_" | "REMI_CLAUDE_", allowUnselectedModel = false): RuntimeConnectionProfile | null {
   if (value === null) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("profile must be an object or null");
-  const row = value as Record<string, unknown>;
+  const row = { ...(value as Record<string, unknown>) };
+  if (allowUnselectedModel && row.model === undefined) row.model = "";
   if (Object.keys(row).some(key => !["name", "base_url", "model", "models", "env_key", "auth_mode", "credential_id"].includes(key))) {
     throw new Error("Unsupported profile field; send api_key separately or reference a Runtime variable with env_key");
   }
@@ -65,11 +71,11 @@ export function parseRuntimeConnectionProfile(value: unknown, envPrefix: "REMI_C
   const credential_id = row.credential_id;
   if (credential_id !== undefined && (typeof credential_id !== "string" || !/^rck_[a-zA-Z0-9_-]{1,100}$/.test(credential_id))) throw new Error("Invalid credential reference");
   if (!/^[a-zA-Z0-9_-]+$/.test(name)) throw new Error("Profile name must use letters, numbers, underscores or hyphens");
-  if (!model) throw new Error("Profile model is required");
+  if (!model && !allowUnselectedModel) throw new Error("Profile model is required");
   const models = row.models;
   if (models !== undefined && (!Array.isArray(models) || models.length === 0 || models.length > 200 ||
     models.some(id => typeof id !== "string" || !id.trim() || id !== id.trim() || id.length > 200 || /[\x00-\x1f\x7f]/.test(id)) ||
-    new Set(models).size !== models.length || !models.includes(model))) {
+    new Set(models).size !== models.length || (model && !models.includes(model)))) {
     throw new Error("models must contain unique model IDs including the default model");
   }
   // A dedicated prefix prevents remote configuration from redirecting unrelated daemon secrets.
@@ -102,4 +108,11 @@ export interface RuntimeExecutionBindingAck {
   profileRevision: number | null;
   status: "ready" | "error";
   error?: string;
+  /** Independently discovered for this binding identity, never the Runtime's native connection. */
+  model_catalog?: RuntimeBindingModelCatalog;
+}
+
+export interface RuntimeBindingModelCatalog {
+  status: "ready" | "error";
+  models: MultiremiRuntimeModel[];
 }

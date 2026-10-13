@@ -1,4 +1,7 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { verifyReports, validatePlan, discoverTests, verifyConfig, type Plan, type Report } from "./ci-backend.js";
 import { runTests } from "./run-tests.js";
 
 const WORKFLOW = ".github/workflows/release-build-check.yml";
@@ -10,7 +13,7 @@ export function failedBackendFiles(raw: string, requireFailures = true): string[
   const passes = [...log.matchAll(/^\s*(\d+) pass\s*$/gm)];
   const skips = [...log.matchAll(/^\s*(\d+) skip\s*$/gm)];
   const failures = [...log.matchAll(/^\s*(\d+) fail\s*$/gm)];
-  const totals = [...log.matchAll(/Ran (\d+) tests across (\d+) files?\./g)];
+  const totals = [...log.matchAll(/Ran (\d+) tests? across (\d+) files?\./g)];
   const [pass] = passes, [skip] = skips, [fail] = failures, [total] = totals;
   if (passes.length !== 1 || skips.length > 1 || failures.length !== 1 || totals.length !== 1
     || !pass || !fail || !total || Number(pass[1]) < 1 || (requireFailures && Number(fail[1]) < 1)
@@ -22,7 +25,7 @@ export function failedBackendFiles(raw: string, requireFailures = true): string[
   // The final skipped/failed summaries repeat names without their source file.
   for (const line of log.split(/\r?\n/)) {
     if (/^(?:\d+ tests? (?:failed|skipped):|\d+ pass)$/.test(line.trim())) break;
-    const heading = /^(?:##\[group\])?(tests\/[A-Za-z0-9_./-]+\.test\.[cm]?[jt]sx?):$/.exec(line.trim());
+    const heading = /^(?:##\[group\]|::group::)?(tests\/[A-Za-z0-9_./-]+\.test\.[cm]?[jt]sx?):$/.exec(line.trim());
     if (heading) { file = heading[1]!; testFiles.add(file); }
     if (line.startsWith("(pass) ")) passCount++;
     if (line.startsWith("(skip) ")) skipCount++;
@@ -87,9 +90,65 @@ async function output(command: string, args: string[]): Promise<string> {
   return stdout;
 }
 
-export async function verifiedBackendRetry(runId: string, shard = 1): Promise<number> {
+interface BaselineJob { name: string; conclusion: string; steps?: { name: string; conclusion: string }[] }
+export function verifyShardedJobs(plan: Plan, reports: Report[], jobs: BaselineJob[]): string[] {
+  verifyReports(plan, reports, "completed-test-failure");
+  const required = ["im-platform-smoke", "execution-configuration", "platform-updater (ubuntu-latest)", "platform-updater (windows-latest)", "platform-updater (macos-latest)", "guards", "frontend-types", "frontend-tests", "cli-build", "api-build", "web-build", "session-archive-platform (ubuntu-latest)", "session-archive-platform (macos-latest)", "frontend-zero-jump", "frontend-replica", "backend-plan", "backend-evidence", "backend-retry", "candidate-package", "build", ...plan.shards.map(s => `backend (${s.index})`)];
+  if (new Set(jobs.map(job => job.name)).size !== jobs.length || required.some(name => !jobs.some(job => job.name === name))) throw new Error("Missing or duplicate baseline jobs");
+  const get = (name: string) => jobs.find(job => job.name === name)!;
+  for (const job of jobs) {
+    let expected = "success";
+    if (["backend-evidence", "backend-retry", "candidate-package"].includes(job.name)) expected = "skipped";
+    if (job.name === "build") expected = "failure";
+    const shard = /^backend \((\d+)\)$/.exec(job.name);
+    if (shard) {
+      const report = reports.find(r => r.shard === Number(shard[1]));
+      if (!report) throw new Error("Unexpected baseline shard job");
+      expected = report.shardExitCode === 0 ? "success" : "failure";
+      const step = job.steps?.find(step => step.name === "Backend test shard");
+      if (step?.conclusion !== expected || job.steps?.some(step => step.name !== "Backend test shard" && step.conclusion !== "success"
+        && !(step.conclusion === "skipped" && ["Post Run oven-sh/setup-bun@v2", "Post Run actions/checkout@v4"].includes(step.name)))) throw new Error("Backend job failed outside completed tests");
+    }
+    if (job.conclusion !== expected) throw new Error(`Unsafe baseline job: ${job.name} (${job.conclusion})`);
+  }
+  const failedSteps = get("build").steps?.filter(step => step.conclusion === "failure");
+  if (failedSteps?.length !== 1 || failedSteps[0].name !== "Require every applicable check") throw new Error("Unexpected baseline summary failure");
+  const files = reports.flatMap(report => report.files.filter(file => file.failures > 0).map(file => file.path)).sort();
+  if (!files.length) throw new Error("Baseline does not contain test failures");
+  return files;
+}
+async function paginated(endpoint: string, field: string): Promise<any[]> {
+  const pages = JSON.parse(await output("gh", ["api", "--paginate", "--slurp", endpoint]));
+  return pages.flatMap((page: any) => page[field]);
+}
+async function shardedFailedFiles(api: string, runId: string, repo: string, sha: string, jobs: BaselineJob[]): Promise<{ files: string[]; evidence: unknown }> {
+  const artifacts = await paginated(`${api}/artifacts?per_page=100`, "artifacts");
+  const directory = mkdtempSync(join(tmpdir(), "remi-retry-baseline-"));
+  try {
+    const download = async (name: string) => {
+      const matches = artifacts.filter(artifact => artifact.name === name);
+      if (matches.length !== 1 || matches[0].expired) throw new Error(`Missing or expired trusted artifact: ${name}`);
+      await output("gh", ["run", "download", runId, "--repo", repo, "--name", name, "--dir", directory]);
+    };
+    await download("backend-plan");
+    if (!lstatSync(join(directory, "plan.json")).isFile()) throw new Error("Invalid plan artifact");
+    const plan: Plan = JSON.parse(readFileSync(join(directory, "plan.json"), "utf8"));
+    validatePlan(plan); verifyConfig(plan);
+    if (plan.sha !== sha || JSON.stringify(discoverTests(process.cwd(), plan.scope)) !== JSON.stringify(plan.files)) throw new Error("Baseline plan differs from unchanged test inventory");
+    for (const shard of plan.shards) await download(`backend-shard-${shard.index}`);
+    const reports: Report[] = plan.shards.map(shard => {
+      const path = join(directory, `shard-${shard.index}.json`);
+      if (!lstatSync(path).isFile()) throw new Error("Invalid shard artifact");
+      return JSON.parse(readFileSync(path, "utf8"));
+    });
+    if (readdirSync(directory).length !== plan.shards.length + 1) throw new Error("Unexpected baseline artifact files");
+    const files = verifyShardedJobs(plan, reports, jobs);
+    return { files, evidence: { mode: "completed-sharded-test-failure", plan, reports, artifacts: artifacts.filter(a => a.name === "backend-plan" || /^backend-shard-\d+$/.test(a.name)).map(a => ({ id: a.id, name: a.name, digest: a.digest })) } };
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+}
+
+export async function verifiedBackendRetry(runId: string): Promise<number> {
   if (!/^\d+$/.test(runId)) throw new Error("A completed full CI run ID is required");
-  if (!Number.isInteger(shard) || shard < 1 || shard > 4) throw new Error("Retry shard must be an integer from 1 through 4");
   const repo = process.env.GITHUB_REPOSITORY;
   if (!repo || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error("GITHUB_REPOSITORY is required");
   if (process.env.GITHUB_EVENT_NAME !== "workflow_dispatch" || process.env.GITHUB_REF !== "refs/heads/main") {
@@ -99,37 +158,45 @@ export async function verifiedBackendRetry(runId: string, shard = 1): Promise<nu
   const run = JSON.parse(await output("gh", ["api", api]));
   if (run.status !== "completed" || run.conclusion !== "failure" || run.head_branch !== "main"
     || !["push", "workflow_dispatch"].includes(run.event) || run.path !== WORKFLOW
-    || !/^[a-f0-9]{40}$/.test(run.head_sha)) throw new Error("Baseline must be a failed, completed release check on main");
+    || !/^[a-f0-9]{40}$/.test(run.head_sha) || run.repository?.full_name !== repo || run.head_repository?.full_name !== repo) throw new Error("Baseline must be a failed, completed release check on main");
   const workflow = await output("git", ["show", `${run.head_sha}:${WORKFLOW}`]);
+  const sharded = workflow.includes("scripts/ci-backend.ts run --plan") && workflow.includes("scripts/ci-backend.ts verify --plan");
+  // A retry cannot be used as another retry's full-suite baseline.
   await output("git", ["merge-base", "--is-ancestor", run.head_sha, "HEAD"]);
   const changed = (await output("git", ["diff", "--name-only", run.head_sha, "HEAD"])).trim().split("\n").filter(Boolean);
   verifyRetryChanges(changed);
-  const { jobs, total_count } = JSON.parse(await output("gh", ["api", `${api}/jobs?per_page=100`]));
-  if (jobs.length !== total_count) throw new Error("Baseline job inventory was truncated");
-  const backend = backendBaselineJobs(workflow, jobs);
-  const inventories = await Promise.all(backend.map(async ({ job, shard: baselineShard }) => {
-    const raw = await output("gh", ["run", "view", runId, "--repo", repo, "--job", String(job.id), "--log"]);
-    // Whole logs are required for successful shards too; architecture summaries
-    // in a single-job baseline are outside this backend step.
-    const log = raw.split(/\r?\n/).flatMap(line => {
-      const parts = line.split("\t");
-      return parts[1] === "Backend test suite" ? [parts.slice(2).join("\t").replace(/^\S+Z /, "")] : [];
-    }).join("\n");
-    const files = failedBackendFiles(log, job.conclusion === "failure");
-    if (job.conclusion === "success" && files.length) throw new Error("Successful baseline shard contains failed tests");
-    return { baselineShard, baselineJobId: job.id, failedFiles: files };
-  }));
-  const allFiles = inventories.flatMap(inventory => inventory.failedFiles);
-  if (new Set(allFiles).size !== allFiles.length) throw new Error("Failed files overlap baseline shards");
-  const files = inventories.find(inventory => inventory.baselineShard === shard)?.failedFiles ?? [];
+  const jobs = await paginated(`${api}/jobs?filter=latest&per_page=100`, "jobs");
+  let files: string[], evidence: unknown;
+  if (sharded) {
+    const verified = await shardedFailedFiles(api, runId, repo, run.head_sha, jobs);
+    files = verified.files; evidence = verified.evidence;
+  } else {
+    const backend = backendBaselineJobs(workflow, jobs);
+    const inventories = await Promise.all(backend.map(async ({ job, shard }) => {
+      const raw = await output("gh", ["run", "view", runId, "--repo", repo, "--job", String(job.id), "--log"]);
+      // Keep the complete backend step, including successful native shards.
+      const log = raw.split(/\r?\n/).flatMap(line => {
+        const parts = line.split("\t");
+        return parts[1] === "Backend test suite" ? [parts.slice(2).join("\t").replace(/^\S+Z /, "")] : [];
+      }).join("\n");
+      const failedFiles = failedBackendFiles(log, job.conclusion === "failure");
+      if (job.conclusion === "success" && failedFiles.length) throw new Error("Successful baseline shard contains failed tests");
+      return { shard, baselineJobId: job.id, failedFiles };
+    }));
+    files = inventories.flatMap(inventory => inventory.failedFiles);
+    if (new Set(files).size !== files.length) throw new Error("Failed files overlap baseline shards");
+    evidence = { mode: "completed-legacy-test-failure", inventories };
+  }
   if (files.some(file => !existsSync(file))) throw new Error("A baseline failed test file is missing");
-  console.log(JSON.stringify({ baselineRunId: runId, baselineSha: run.head_sha,
-    sourceAndExistingTestsUnchanged: true, baselineBackendInventories: inventories,
-    retryShard: shard, failedFiles: files, retryInfrastructureTest: RETRY_TEST,
-    replacesCurrentFullSuite: false }));
+  const receipt = { schemaVersion: 1, mode: "verified-retry", repository: repo, baselineRunId: runId, baselineSha: run.head_sha, targetSha: process.env.GITHUB_SHA, replacesCurrentFullSuite: false,
+    sourceAndExistingTestsUnchanged: true, evidence, failedFiles: files, retryInfrastructureTest: RETRY_TEST };
+  mkdirSync("ci-backend", { recursive: true });
+  writeFileSync("ci-backend/retry-evidence.json", JSON.stringify(receipt, null, 2) + "\n");
+  console.log(JSON.stringify({ mode: receipt.mode, baselineRunId: runId, baselineSha: run.head_sha, failedFiles: files, evidencePath: "ci-backend/retry-evidence.json" }));
+  // Keep each test's existing timeout; diagnostics never replace the full run.
   return runTests([...files, RETRY_TEST]);
 }
 
 if (import.meta.main) {
-  process.exitCode = await verifiedBackendRetry(process.argv[2] ?? "", Number(process.argv[3] ?? "1"));
+  process.exitCode = await verifiedBackendRetry(process.argv[2] ?? "");
 }

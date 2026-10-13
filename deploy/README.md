@@ -29,6 +29,12 @@ no supervised updater (the historical local-profile default), no independent
 updater token, or no release feed therefore correctly shows an offline updater,
 null releases and an empty service list even while API/Web containers run.
 
+## Container dependency cache
+
+Build the API/Web Dockerfiles with BuildKit (the CI buildx jobs already use it). The [manifest collector](../scripts/docker-workspace-manifests.ts) reads the root workspace declarations and copies every current workspace package manifest plus `bun.lock` and `bunfig.toml` into a separate stage. Both images install from those inputs with pinned Bun and the public frozen lockfile before copying application source; source-only edits can reuse the install layer. Unsupported workspace patterns, symlink workspaces, workspace binaries, local file/link dependencies and package patches fail instead of silently leaving an install input out. Such changes require extending the collector's input contract. The root CLI `bin` entry is retained; container build behavior has not been exercised in this maintenance session.
+
+Release-version build arguments follow dependency installation; API installation still runs with its existing production `NODE_ENV`. No build or timing measurement has been run for this rearrangement, so cache reuse and time savings remain to be verified with actual image builds.
+
 ## Usage accounting startup cutover
 
 API startup automatically migrates the required legacy task usage scalars after

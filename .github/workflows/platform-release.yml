@@ -70,6 +70,17 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.sha }}
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Validate prepared runtime snapshot
+        env:
+          TAG: ${{ inputs.tag }}
+        run: bun run release:check --tag "$TAG"
+
+      # Candidate OCI archives are amd64-only; formal images retain both
+      # supported architectures and the application base revision.
       - name: Set up multi-platform image storage
         uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5
         with:
@@ -228,14 +239,16 @@ jobs:
             local version_image="${REGISTRY}/${OWNER}/${name}:$TAG"
             local source_image="${REGISTRY}/${OWNER}/${name}:sha-$SHA"
             local version_digest source_digest
-            version_digest="$(docker buildx imagetools inspect "$version_image" --format '{{json .Manifest}}' | jq -er '.digest')"
-            source_digest="$(docker buildx imagetools inspect "$source_image" --format '{{json .Manifest}}' | jq -er '.digest')"
-            test "$version_digest" = "$source_digest"
+            version_digest="$(docker buildx imagetools inspect "$version_image" --format '{{json .Manifest}}' | jq -er '.digest')" || return 1
+            source_digest="$(docker buildx imagetools inspect "$source_image" --format '{{json .Manifest}}' | jq -er '.digest')" || return 1
+            [[ "$version_digest" =~ ^sha256:[a-f0-9]{64}$ && "$source_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || return 1
+            test "$version_digest" = "$source_digest" || return 1
             printf '%s\n' "$version_digest"
           }
-          echo "api_digest=$(verify_image remi-api)" >> "$GITHUB_OUTPUT"
-          echo "web_digest=$(verify_image remi-web)" >> "$GITHUB_OUTPUT"
-          echo "updater_digest=$(verify_image remi-updater)" >> "$GITHUB_OUTPUT"
+          api_digest="$(verify_image remi-api)"
+          web_digest="$(verify_image remi-web)"
+          updater_digest="$(verify_image remi-updater)"
+          printf 'api_digest=%s\nweb_digest=%s\nupdater_digest=%s\n' "$api_digest" "$web_digest" "$updater_digest" >> "$GITHUB_OUTPUT"
 
       - name: Build deployment manifest
         env:

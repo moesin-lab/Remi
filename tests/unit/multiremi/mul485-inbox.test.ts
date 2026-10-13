@@ -70,23 +70,6 @@ async function verifyLegacyDeliveryUnknown(store: MultiremiStore): Promise<void>
   }
 }
 
-async function verifyLegacyReportStaysWhole(store: MultiremiStore): Promise<void> {
-  const agent = store.createAgent({ name: "Legacy report reader", provider: "codex", visibility: "workspace" });
-  const issue = createResponsibleTestIssue(store, { title: "Long legacy report", workspaceId: "local" });
-  const session = store.getOrCreateDefaultIssueSession(issue.id);
-  const body = "R".repeat(4_001);
-  const report = store.appendSessionEvent(session.id, { kind: "delegation_report", authorType: "system", body });
-  const task = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Read report" });
-  const projection = store.buildTaskSessionProjection(task.id)!;
-  const lines = projection.jsonl.split("\n").map((line) => JSON.parse(line));
-  const rendered = lines.find((line) => line.type === "session_event" && line.seq === report.seq);
-  expect(rendered.body_folded).toBe(true);
-  expect(rendered.expand).toBe(`remi message get ${report.id}`);
-  const app=createMultiremiApp({store});
-  expect((await (await app.request(`/api/messages/${report.id}`)).json()).message.body_md).toBe(body);
-  expect(lines[1].entries.find((entry: { seq: number }) => entry.seq === report.seq).folded).toBe(true);
-}
-
 async function verifyEveryFoldedEntryExpands(store: MultiremiStore): Promise<void> {
   const agent = store.createAgent({ name: "Expansion invariant reader", provider: "codex", visibility: "workspace" });
   const issue = createResponsibleTestIssue(store, { title: "Expansion invariant", workspaceId: "local" });
@@ -127,6 +110,10 @@ async function verifyEveryFoldedEntryExpands(store: MultiremiStore): Promise<voi
   const toc = lines[1].entries as Array<{ seq: number; folded: boolean }>;
   const rendered = lines.filter((line) => line.type === "session_event");
   const app = createMultiremiApp({ store });
+  // The legacy appendSessionEvent fixture also retains the message expansion endpoint.
+  const reportResponse = await app.request(`/api/messages/${report.id}`);
+  expect(reportResponse.status).toBe(200);
+  expect((await reportResponse.json()).message.body_md).toBe(reportBody);
   let foldedCount = 0;
   for (const [seq, entry] of expected) {
     const line = rendered.find((candidate) => candidate.seq === seq);
@@ -430,10 +417,6 @@ describe("MUL-485 SQLite", () => {
     await verifyPlanRoundTrip(createStore());
   });
 
-  it("orders the inbox by priority then seq and leaves old daemon JSONL readable", () => {
-    verifyPriorityAndCompatibility();
-  });
-
   it("folds a Chat, shares human expansion, and denies unrelated task expansion", async () => {
     await verifyChatProjectionAndAccess(createStore());
   });
@@ -486,13 +469,13 @@ describe("MUL-485 SQLite", () => {
     await verifyLegacyDeliveryUnknown(createStore());
   });
 
-  it("keeps a 4,001-character legacy delegation report whole", async () => {
-    await verifyLegacyReportStaysWhole(createStore());
-  });
-
   it("expands every folded log kind by seq and id without folding unavailable bodies", async () => {
     await verifyEveryFoldedEntryExpands(createStore());
   });
+});
+
+it("orders the inbox by priority then seq and leaves old daemon JSONL readable", () => {
+  verifyPriorityAndCompatibility();
 });
 
 function verifyPriorityAndCompatibility(): void {
@@ -586,10 +569,6 @@ describe.skipIf(!pgAdminUrl)("MUL-485 PostgreSQL", () => {
     await verifyPlanRoundTrip(store);
   });
 
-  it("orders the same envelope and legacy entries on the PostgreSQL run", () => {
-    verifyPriorityAndCompatibility();
-  });
-
   it("folds a Chat, shares human expansion, and denies unrelated task expansion on real PostgreSQL", async () => {
     await verifyChatProjectionAndAccess(store);
   });
@@ -640,10 +619,6 @@ describe.skipIf(!pgAdminUrl)("MUL-485 PostgreSQL", () => {
 
   it("reports unknown delivery for a legacy entry without a recipient on real PostgreSQL", async () => {
     await verifyLegacyDeliveryUnknown(store);
-  });
-
-  it("keeps a 4,001-character legacy delegation report whole on real PostgreSQL", async () => {
-    await verifyLegacyReportStaysWhole(store);
   });
 
   it("expands every folded log kind by seq and id on real PostgreSQL", async () => {

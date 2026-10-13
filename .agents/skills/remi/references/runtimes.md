@@ -24,7 +24,7 @@ remi runtime profile create --help
 remi runtime group create --help
 ```
 
-Codex 需要 Responses 兼容接口；Claude Code 需要 Anthropic Messages 兼容接口。根据用户提供的信息核对协议、基础地址和模型 ID，缺失且影响配置时再询问。Codex 请求文件示例：
+Codex 需要 Responses 兼容接口；Claude Code 需要 Anthropic Messages 兼容接口。核对协议、基础地址和鉴权；中央连接无需用户手填模型 ID，由能力组成员自动发现，再为云友选择目录中的模型。Codex 请求文件示例：
 
 ```json
 {
@@ -33,8 +33,6 @@ Codex 需要 Responses 兼容接口；Claude Code 需要 Anthropic Messages 兼�
   "profile": {
     "name": "custom-codex",
     "base_url": "https://gateway.example/v1",
-    "model": "provider-model-id",
-    "models": ["provider-model-id", "provider-model-id-fast"],
     "auth_mode": "api_key",
     "env_key": ""
   },
@@ -42,7 +40,7 @@ Codex 需要 Responses 兼容接口；Claude Code 需要 Anthropic Messages 兼�
 }
 ```
 
-Claude 使用 `provider: "claude"`，在 `profile` 中加 `auth_header: "bearer"` 或 `"x-api-key"`。内层连接 `name` 只用字母、数字、下划线、连字符，外层 `name` 是展示名；`base_url` 是 HTTP(S) 基础地址，无用户信息、query 或 fragment。Claude 基础地址不包含完整 `/v1/messages` 路径。`models` 是可选白名单，必须包含默认 `model`；省略时使用 provider 发现目录。
+Claude 使用 `provider: "claude"`，在 `profile` 中加 `auth_header: "bearer"` 或 `"x-api-key"`。内层连接 `name` 只用字母、数字、下划线、连字符，外层 `name` 是展示名；`base_url` 是 HTTP(S) 基础地址，无用户信息、query 或 fragment。Claude 基础地址不包含完整 `/v1/messages` 路径。中央连接的 `model` 可以省略或为空；可选手动默认值及 `models` 白名单仍有效，指定默认值时白名单必须包含它。旧单 Runtime 连接仍要求默认模型。
 
 ```sh
 remi runtime profile create --file <private-profile.json> --json
@@ -71,7 +69,7 @@ remi runtime model catalog --execution-group <group-id> --json
 
 成员必须属于当前工作区并兼容组的 provider；一个 Runtime 可以加入多个组。`profile_id: null` 使用工作区 Relay / 原生连接，不继承旧的单 Runtime 自定义连接。组修改使用 `runtime group update <group-id> --file <group.json>`；云友通过 `agent update <agent-id> --execution-group <group-id>` 选择组，执行前核对用户要求的云友和目标。
 
-读回配置和成员后，等待各机器确认当前 Profile revision。待应用或失败的机器不能领取该受管组任务；在线不等于已应用，已应用也不等于模型调用成功。任务首次领取冻结连接快照，运行中任务不随配置变更切换。用户要求验证执行时再创建最小测试任务或 Chat，并检查终态。
+读回配置和成员后，等待各机器确认当前 Profile revision，再用组目录查询核对自动发现的模型和推理选项。目录取各成员共同可用能力；空默认连接尚未发现时不能执行。待应用或失败的机器不能领取该受管组任务；在线不等于已应用，目录存在也不等于模型调用成功。任务首次领取冻结实际模型与连接快照，运行中任务不随配置变更切换。用户要求验证执行时再创建最小测试任务或 Chat，并检查终态。
 
 若密钥已配置在每台承载机器的 daemon 进程环境，使用 `auth_mode: "env"`，省略 `api_key`。Codex 的 `env_key` 必须为 `REMI_CODEX_*`，Claude 必须为 `REMI_CLAUDE_*`。运行管理 CLI 的终端变量不会自动进入远端或后台 daemon；修改环境时核对实际服务管理方式和重启影响。
 

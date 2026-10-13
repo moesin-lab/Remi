@@ -23,7 +23,7 @@ for (const point of [0, 1, 2]) {
 }
 
 it("shares historical Chat attachments but still authenticates before comparing an ETag", async () => {
-  const harness = await createPr2Harness();
+  const harness = await createPr2Harness({ attachmentOnly: true });
   try {
     const path = `/api/attachments/${harness.privateAttachmentId}/content`;
     const allowed = await harness.app.request(path, { headers: harness.headers });

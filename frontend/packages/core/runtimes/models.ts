@@ -102,12 +102,13 @@ export function useFleetProviderModels(
   };
 }
 
-/** Relay catalogs constrain selection; older APIs and custom connections keep their behavior. */
+/** Authoritative catalogs constrain selection; older Claude APIs keep manual selection. */
 export function isModelCatalogRestricted(
   provider: string,
   models: RuntimeModel[],
   catalogStatus?: FleetProviderModels["model_catalog_status"],
 ): boolean {
+  if (provider === "claude") return catalogStatus !== undefined;
   return provider === "codex" && (catalogStatus === "ready" || catalogStatus === "unknown"
     || models.some((entry) => entry.execution_status !== undefined));
 }
@@ -118,7 +119,7 @@ export function isModelExecutionUnknown(
   models: RuntimeModel[],
   catalogStatus?: FleetProviderModels["model_catalog_status"],
 ): boolean {
-  if (provider !== "codex") return false;
+  if (provider !== "codex" && !isModelCatalogRestricted(provider, models, catalogStatus)) return false;
   const status = models.find((entry) => entry.id === model.trim())?.execution_status;
   return status === "unknown" || (status === undefined && catalogStatus === "unknown");
 }
@@ -130,7 +131,8 @@ export function isModelUnavailable(
   models: RuntimeModel[],
   catalogStatus?: FleetProviderModels["model_catalog_status"],
 ): boolean {
-  if (provider !== "codex" || !model.trim()) return false;
+  if (!model.trim()) return false;
+  if (provider !== "codex" && !isModelCatalogRestricted(provider, models, catalogStatus)) return false;
   const entry = models.find((entry) => entry.id === model.trim());
   if (entry?.execution_status !== undefined) return entry.execution_status !== "available";
   if (catalogStatus === "unknown") return true;

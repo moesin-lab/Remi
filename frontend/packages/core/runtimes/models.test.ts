@@ -5,7 +5,7 @@ import { QueryClient } from "@tanstack/react-query";
 import type { RuntimeModel } from "../types";
 const listFleetModels = vi.hoisted(() => vi.fn());
 vi.mock("../api", () => ({ api: { listFleetModels } }));
-import { executionTargetModelsOptions, fleetModelsOptions, isFallbackModelUnavailable, isModelExecutionUnknown, isModelUnavailable, runtimeModelsKeys } from "./models";
+import { executionTargetModelsOptions, fleetModelsOptions, isFallbackModelUnavailable, isModelCatalogRestricted, isModelExecutionUnknown, isModelUnavailable, runtimeModelsKeys } from "./models";
 
 describe("execution target model catalog", () => {
   it("requires fallback selection to be executable in the target's authoritative catalog", () => {
@@ -27,25 +27,54 @@ describe("execution target model catalog", () => {
     expect(isModelUnavailable("codex", "", models, "ready")).toBe(false);
     expect(isModelUnavailable("codex", "inventory-only", models, "error")).toBe(false);
     expect(isModelUnavailable("codex", "inventory-only", models)).toBe(false);
-    expect(isModelUnavailable("claude", "inventory-only", models, "ready")).toBe(false);
+    expect(isModelUnavailable("claude", "inventory-only", models, "ready")).toBe(true);
   });
 
-  it("distinguishes failed inventory from executable bundled models without restricting Claude", () => {
+  it.each(["codex", "claude"])("distinguishes failed inventory from executable %s models", (provider) => {
     const models: RuntimeModel[] = [
       { id: "gateway-only", label: "Gateway", execution_status: "unavailable" },
       { id: "bundled", label: "Bundled", execution_status: "available" },
       { id: "pending", label: "Pending", execution_status: "unknown" },
     ];
-    expect(isModelUnavailable("codex", "gateway-only", models, "error")).toBe(true);
-    expect(isModelUnavailable("codex", "bundled", models, "error")).toBe(false);
-    expect(isModelUnavailable("codex", "custom", models, "error")).toBe(true);
-    expect(isModelUnavailable("codex", "pending", models, "ready")).toBe(true);
-    expect(isModelUnavailable("codex", "bundled", models, "unknown")).toBe(false);
-    expect(isModelExecutionUnknown("codex", "bundled", models, "unknown")).toBe(false);
-    expect(isModelUnavailable("codex", "custom-new", models, "unknown")).toBe(true);
-    expect(isModelExecutionUnknown("codex", "custom-new", models, "unknown")).toBe(true);
-    expect(isModelUnavailable("codex", "", models, "unknown")).toBe(false);
-    expect(isModelUnavailable("claude", "gateway-only", models, "error")).toBe(false);
+    expect(isModelUnavailable(provider, "gateway-only", models, "error")).toBe(true);
+    expect(isModelUnavailable(provider, "bundled", models, "error")).toBe(false);
+    expect(isModelUnavailable(provider, "custom", models, "error")).toBe(true);
+    expect(isModelUnavailable(provider, "pending", models, "ready")).toBe(true);
+    expect(isModelUnavailable(provider, "pending", models, "error")).toBe(true);
+    expect(isModelUnavailable(provider, "bundled", models, "unknown")).toBe(false);
+    expect(isModelExecutionUnknown(provider, "bundled", models, "unknown")).toBe(false);
+    expect(isModelUnavailable(provider, "custom-new", models, "unknown")).toBe(true);
+    expect(isModelExecutionUnknown(provider, "custom-new", models, "unknown")).toBe(true);
+    expect(isModelUnavailable(provider, "", models, "unknown")).toBe(false);
+  });
+
+  it.each(["ready", "unknown", "error"] as const)("matches Claude choices against the group's %s catalog received from the API", async (model_catalog_status) => {
+    const fetch = vi.fn().mockResolvedValue({ providers: [{ provider: "claude", model_catalog_status, models: [] }] });
+    const endpoints = new RuntimesEndpoints({ fetch } as unknown as HttpClient);
+    const { providers } = await endpoints.listFleetModels({ workspace_id: "ws", execution_group_id: "claude-team" });
+    const catalog = providers[0]!;
+    expect(fetch).toHaveBeenCalledWith("/api/models?workspace_id=ws&execution_group_id=claude-team");
+    expect(isModelCatalogRestricted(catalog.provider, catalog.models, catalog.model_catalog_status)).toBe(true);
+    expect(isModelUnavailable(catalog.provider, "manual-unlisted", catalog.models, catalog.model_catalog_status)).toBe(true);
+    expect(isModelExecutionUnknown(catalog.provider, "manual-unlisted", catalog.models, catalog.model_catalog_status)).toBe(model_catalog_status === "unknown");
+    expect(isModelUnavailable(catalog.provider, "", catalog.models, catalog.model_catalog_status)).toBe(false);
+  });
+
+  it("allows discovered Claude models in a ready catalog while preserving older manual selection without catalog status", () => {
+    const models: RuntimeModel[] = [
+      { id: "discovered", label: "Discovered" },
+      { id: "unconfirmed", label: "Unconfirmed", execution_status: "unknown" },
+    ];
+    expect(isModelCatalogRestricted("claude", models, "ready")).toBe(true);
+    expect(isModelUnavailable("claude", "discovered", models, "ready")).toBe(false);
+    expect(isModelUnavailable("claude", "discovered", models, "unknown")).toBe(true);
+    expect(isModelUnavailable("claude", "unconfirmed", models, "ready")).toBe(true);
+    expect(isModelExecutionUnknown("claude", "unconfirmed", models, "ready")).toBe(true);
+
+    expect(isModelCatalogRestricted("claude", models)).toBe(false);
+    expect(isModelUnavailable("claude", "manual-unlisted", models)).toBe(false);
+    expect(isModelUnavailable("claude", "unconfirmed", models)).toBe(false);
+    expect(isModelExecutionUnknown("claude", "unconfirmed", models)).toBe(false);
   });
 
   it.each([fleetModelsOptions("ws"), executionTargetModelsOptions("ws", "rt")])(

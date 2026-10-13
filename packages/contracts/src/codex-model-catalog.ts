@@ -4,6 +4,8 @@ export interface CodexNativeModel extends Record<string, unknown> {
   display_name: string;
   visibility: string;
   supported_in_api: boolean;
+  supported_reasoning_levels: Array<{ effort: string; description: string }>;
+  default_reasoning_level?: string | null;
 }
 
 /**

@@ -3,12 +3,13 @@ import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-record
 import { createLogger } from "@shared/logger.js";
 import { DAEMON_MIN_CLI_VERSION, DAEMON_PROTOCOL_VERSION, meetsDaemonMinCliVersion } from "@multiremi/contracts/daemon-protocol.js";
 import type { RuntimeProtocolStatus } from "@multiremi/contracts/runtime-protocol";
-import { catalogAllowsModel, modelThinkingState, providerDeclaresReasoningLevels, runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
+import { catalogAllowsModel, intersectExecutionGroupCatalogs, runtimeModelCompatibilityResponse, modelThinkingState, providerDeclaresReasoningLevels, runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
 import { syncRuntimeExecutionGroups, runtimeExecutionGroupId, getExecutionGroup, getGroupExecutionProfile } from "@multiremi/store/execution-groups.js";
 import { numberAllocationLockKey } from "@multiremi/store/advisory-locks.js";
 import { advisoryXactLock } from "@multiremi/store/db/postgres.js";
 import { WorkspacesRepo } from "@multiremi/store/repos/workspaces-repo.js";
+import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
 // Runtimes domain (runtime registration/lifecycle, models, and the five daemon async-request
 // families: model list, directory scan, update, local-skill list, local-skill import), extracted
 // verbatim from MultiremiStore (the facade delegates every public method here).
@@ -2377,16 +2378,37 @@ export class RuntimesRepo {
 
   getAgentExecutionProfile(runtimeId: string | null, agent: MultiremiAgent): RuntimeCodexProfile | null {
     const group = agent.executionGroupId ? getExecutionGroup(this.ctx.db, agent.executionGroupId, agent.workspaceId) : null;
-    if (group?.managed) return getGroupExecutionProfile(this.ctx.db, group.id, agent.workspaceId)?.profile ?? null;
+    if (group?.managed) {
+      const profile = getGroupExecutionProfile(this.ctx.db, group.id, agent.workspaceId)?.profile ?? null;
+      if (!profile || profile.model || !runtimeId) return profile;
+      const models = this.discoveredExecutionGroupCatalog(group, profile)?.models ?? [];
+      const selected = models.find(model => model.default) ?? models[0];
+      return selected ? { ...profile, model: selected.id } : profile;
+    }
     return runtimeId ? this.getRuntimeExecutionProfile(runtimeId, agent.provider) : null;
   }
 
+  private discoveredExecutionGroupCatalog(group: { id: string; provider: string; runtimeIds: string[] }, profile: RuntimeCodexProfile) {
+    const states = new ExecutionBindingStatesRepo(this.ctx);
+    const catalogs = [...group.runtimeIds].sort().map(id => states.getRuntimeBindingModelCatalog(group.id, id));
+    if (!catalogs.length || catalogs.some(catalog => catalog?.status !== "ready")) return null;
+    const providers = catalogs.map(catalog => ({ provider: group.provider, online_runtime_count: 0,
+      model_catalog_status: "ready" as const,
+      models: runtimeConnectionModels(profile, group.provider, catalog!.models).map(runtimeModelCompatibilityResponse),
+    }));
+    return intersectExecutionGroupCatalogs(group.provider, providers, 0, true)[0]!;
+  }
+
   runtimeSupportsAgentModel(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
-    if (!agent.model && !agent.thinkingLevel) return true;
     const workspaces = new WorkspacesRepo(this.ctx);
     const group = agent.executionGroupId ? getExecutionGroup(this.ctx.db, agent.executionGroupId, agent.workspaceId) : null;
     const profileOverride = group?.managed ? this.getAgentExecutionProfile(runtime.id, agent) : undefined;
-    const catalog = runtimeTargetModelCatalog({
+    if (profileOverride && !profileOverride.model) return false;
+    if (!agent.model && !agent.thinkingLevel) return true;
+    const configured = group?.managed ? getGroupExecutionProfile(this.ctx.db, group.id, agent.workspaceId)?.profile : null;
+    const catalog = group && configured && !configured.model
+      ? this.discoveredExecutionGroupCatalog(group, configured)
+      : runtimeTargetModelCatalog({
       getRelayModelDiscovery: (id) => workspaces.getRelayModelDiscovery(id),
       getRelayConfigForDaemon: (id) => workspaces.getRelayConfigForDaemon(id),
       getGatewayModels: (id, provider) => workspaces.getGatewayModels(id, provider),
@@ -2395,15 +2417,17 @@ export class RuntimesRepo {
       listWorkspaceClaudeProfileModels: (id) => this.listWorkspaceClaudeProfileModels(id),
       getRuntimeExecutionProfile: (id, provider) => this.getRuntimeExecutionProfile(id, provider),
       runtimeProfileModelEvidenceMatches: (id, provider, profile) => this.runtimeProfileModelEvidenceMatches(id, provider, profile),
-    }, agent.workspaceId, runtime, profileOverride).find(entry => entry.provider === agent.provider);
+      getRuntimeBindingModelCatalog: (groupId, runtimeId) => new ExecutionBindingStatesRepo(this.ctx).getRuntimeBindingModelCatalog(groupId, runtimeId),
+    }, agent.workspaceId, runtime, profileOverride, group?.managed ? group.id : undefined).find(entry => entry.provider === agent.provider);
     const models = catalog?.models ?? [];
-    if (!catalogAllowsModel(catalog, agent.model ?? "")) return false;
+    const selectedModel = agent.model || (configured && !configured.model ? profileOverride?.model : "") || "";
+    if (!catalogAllowsModel(catalog ?? undefined, selectedModel)) return false;
     if (agent.model && !models.some(model => model.id === agent.model)
       && ((!agent.runtimeId && (agent.provider === "codex" || runtime.metadata[`${agent.provider}_profiles`] === 1))
         || catalog?.model_catalog_status === "ready" || agent.thinkingLevel
         || (agent.executionGroupId && !agent.runtimeId))) return false;
     if (!agent.thinkingLevel) return true;
-    const capability = modelThinkingState(models, agent.model ?? "", catalog?.default_thinking);
+    const capability = modelThinkingState(models, selectedModel, catalog?.default_thinking);
     if (capability.state === "supported") {
       return capability.levels.some(level => level.value === agent.thinkingLevel);
     }

@@ -1,5 +1,6 @@
 import { expect, it } from "bun:test";
 import { discoverRuntimeProfileModels } from "@multiremi/worker/runtime-profile-models.js";
+import { readFile, stat } from "node:fs/promises";
 
 it("discovers a custom Codex catalog from the Runtime-local base path and keeps its default", async () => {
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
@@ -59,5 +60,35 @@ it("rejects invalid, failed and redirected catalogs without disclosing response 
     await expect(probe()).rejects.toThrow("requires a data array");
     response = () => new Response(null, { status: 302, headers: { Location: "http://127.0.0.1:1" } });
     await expect(probe()).rejects.toThrow();
+  } finally { server.stop(true); }
+});
+
+it("uses exact native slugs and their own reasoning metadata only after native decoder validation", async () => {
+  const native = (slug: string, effort: string) => ({
+    slug, display_name: slug, shell_type: "unified_exec", visibility: "list", supported_in_api: true, priority: 0,
+    support_verbosity: false, truncation_policy: { mode: "tokens", limit: 10_000 }, experimental_supported_tools: [],
+    supported_reasoning_levels: [{ effort, description: effort }], default_reasoning_level: effort, base_instructions: "Fixture",
+  });
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({
+    data: [{ id: "inventory-only" }], models: [native("aiden-sol", "high"), native("aiden-flash", "low"),
+      { ...native("hidden", "ultra"), visibility: "hide" }],
+  }) });
+  const profile = { name: "native", base_url: `http://127.0.0.1:${server.port}/v1`, model: "", env_key: "REMI_CODEX_KEY" };
+  let validations = 0;
+  try {
+    const models = await discoverRuntimeProfileModels("codex", profile, "private-test-key", new AbortController().signal,
+      async path => {
+        validations++;
+        expect(JSON.parse(await readFile(path, "utf8")).models).toHaveLength(3);
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+      });
+    expect(validations).toBe(1);
+    expect(models.map(model => model.id)).toEqual(["aiden-sol", "aiden-flash"]);
+    expect(models[0]!.thinking?.supportedLevels.map(level => level.value)).toEqual(["high"]);
+    expect(models[1]!.thinking?.supportedLevels.map(level => level.value)).toEqual(["low"]);
+    expect(models[0]!.default).toBe(true);
+    expect(models[0]!.catalog?.status).toBe("ready");
+    await expect(discoverRuntimeProfileModels("codex", profile, "private-test-key", new AbortController().signal,
+      async () => { throw new Error("private-decoder-output"); })).rejects.toThrow("native metadata validation failed");
   } finally { server.stop(true); }
 });

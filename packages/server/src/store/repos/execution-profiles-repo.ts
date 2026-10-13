@@ -1,7 +1,6 @@
 import { createId, nowIso } from "@multiremi/ids.js";
 import type { StoreContext } from "@multiremi/store/context.js";
-import { parseRuntimeClaudeProfile } from "@multiremi/contracts/claude-profile.js";
-import { parseRuntimeCodexProfile } from "@multiremi/contracts/codex-profile.js";
+import { parseExecutionConnectionProfile } from "@multiremi/contracts/execution-profile.js";
 import type {
   ExecutionProfile,
   ExecutionProfileInput,
@@ -67,11 +66,7 @@ export class ExecutionProfilesRepo {
       throw new Error("Profile name is required (maximum 128 characters)");
     if (input.provider !== "claude" && input.provider !== "codex")
       throw new Error("Profile provider must be claude or codex");
-    const profile = (
-      input.provider === "claude"
-        ? parseRuntimeClaudeProfile
-        : parseRuntimeCodexProfile
-    )(input.profile);
+    const profile = parseExecutionConnectionProfile(input.provider, input.profile);
     if (!profile) throw new Error("A connection profile is required");
     const apiKey = input.api_key;
     if (

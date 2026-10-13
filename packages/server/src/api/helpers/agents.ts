@@ -1,6 +1,6 @@
 import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
 import { createLogger } from "@shared/logger.js";
-import { workspaceRuntimeModelCatalog, catalogAllowsModel, commonThinkingCapabilities, modelThinkingState, providerDeclaresReasoningLevels, runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
+import { workspaceRuntimeModelCatalog, intersectExecutionGroupCatalogs, catalogAllowsModel, modelThinkingState, providerDeclaresReasoningLevels, runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { GATEWAY_REASONING_LEVELS, manualThinkingResponse } from "@multiremi/store/runtime-model-catalog.js";
 import type { FleetModelThinkingResponse, FleetModelThinkingSource } from "@multiremi/store/runtime-model-catalog.js";
 import type { RelayEngine } from "@multiremi/store/store.js";
@@ -83,55 +83,12 @@ export function executionGroupModelCatalog(store: MultiremiStore, workspaceId: s
     provider: group.provider,
     models: runtimeConnectionModels(profile, group.provider, []),
     online_runtime_count: runtimes.filter((runtime) => runtime.status === "online").length,
+    ...(!profile.model ? { model_catalog_status: "unknown" as const } : {}),
   }];
-  const providers = runtimes.map((runtime) => runtimeTargetModelCatalog(store, workspaceId, runtime, profile)
+  const providers = runtimes.map((runtime) => runtimeTargetModelCatalog(store, workspaceId, runtime, profile, group.managed ? groupId : undefined)
     .find((entry) => entry.provider === group.provider));
-  const catalogs = providers.map((entry) => entry?.models ?? []);
-  const models = (catalogs[0] ?? []).flatMap((model): FleetModelResponse[] => {
-    const matches = catalogs.map((catalog) => catalog.find((candidate) => candidate.id === model.id));
-    if (matches.some((candidate) => !candidate)) return [];
-    const supported = modelThinkingLevels([model], model.id).filter((level) => matches.every((candidate) =>
-      candidate && modelThinkingLevels([candidate], candidate.id).some((entry) => entry.value === level.value)));
-    const failed = matches.find((candidate) => candidate?.thinking?.status === "error")?.thinking;
-    const unknown = matches.some((candidate) => !candidate?.thinking || candidate.thinking.status === "unknown");
-    const status = failed ? "error" : unknown ? "unknown" : supported.length ? "supported" : "unsupported";
-    const explicitStatus = matches.some((candidate) => candidate?.thinking?.status !== undefined);
-    const defaultLevel = model.thinking?.default_level;
-    const thinkingDefault = defaultLevel && supported.some((level) => level.value === defaultLevel)
-      && matches.every((candidate) => candidate?.thinking?.default_level === defaultLevel) ? defaultLevel : undefined;
-    // These levels are the intersection across the group's members, so naming a
-    // single member's source for the consensus would misattribute it: report one
-    // only when every member that offers the model states the same source.
-    const sources = matches.map((candidate) => candidate?.thinking_source);
-    const thinkingSource = sources.length > 0
-      && sources.every((source) => source !== undefined && source === sources[0]) ? sources[0] : undefined;
-    return [{
-      id: model.id, label: model.label, provider: group.provider,
-      ...(matches.some(candidate => candidate?.execution_status !== undefined) ? {
-        execution_status: matches.some(candidate => candidate?.execution_status === "unknown") ? "unknown" as const
-          : matches.some(candidate => candidate?.execution_status === "unavailable") ? "unavailable" as const : "available" as const,
-      } : {}),
-      ...(matches.every((candidate) => candidate?.default) ? { default: true } : {}),
-      ...(supported.length || explicitStatus || matches.every((candidate) => candidate?.thinking) ? { thinking: {
-        supported_levels: supported,
-        ...(explicitStatus ? { status } : {}),
-        ...(failed?.error ? { error: failed.error } : {}),
-        ...(thinkingDefault ? { default_level: thinkingDefault } : {}),
-      } } : {}),
-      ...(thinkingSource ? { thinking_source: thinkingSource } : {}),
-    }];
-  });
-  return [{ provider: group.provider, models, online_runtime_count: runtimes.filter((runtime) => runtime.status === "online").length,
-    ...(providers.some((entry) => entry?.model_catalog_status === "unknown")
-      ? { model_catalog_status: "unknown" as const }
-      : providers.some((entry) => entry?.model_catalog_status === "error")
-      ? { model_catalog_status: "error" as const }
-      : providers.some((entry) => entry?.model_catalog_status === "ready")
-      ? { model_catalog_status: "ready" as const } : {}),
-    ...(providers.some((entry) => entry?.default_thinking) ? { default_thinking: commonThinkingCapabilities(providers.map((entry) =>
-      entry?.default_thinking ?? { supported_levels: modelThinkingLevels(entry?.models ?? [], "") })),
-    } : {}),
-  }];
+  return intersectExecutionGroupCatalogs(group.provider, providers, runtimes.filter(runtime => runtime.status === "online").length,
+    Boolean(profile && !profile.model));
 }
 
 export function executionGroupRequestOwner(c: Context, store: MultiremiStore, workspaceId: string): string | Response {

@@ -1,5 +1,6 @@
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
 import { runtimeConnectionModels, type RuntimeExecutionBinding, type RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection";
+import { parseExecutionConnectionProfile } from "@multiremi/contracts/execution-profile.js";
 import { createHash, randomUUID } from "node:crypto";
 import { parseRuntimeCodexProfile, type RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import { parseRuntimeClaudeProfile, type RuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
@@ -687,6 +688,16 @@ export class MultiremiRuntimeReregisterGate {
   }
 }
 
+interface RuntimeBindingDiscovery {
+  key: string;
+  binding: RuntimeExecutionBinding;
+  ack: RuntimeExecutionBindingAck;
+  abort: AbortController;
+  probe?: Promise<void>;
+  timer?: ReturnType<typeof setTimeout>;
+  nextRefreshAt: number;
+}
+
 export class MultiremiDaemon {
   private client: MultiremiDaemonClient;
   private options: Required<Omit<MultiremiDaemonOptions, "token" | "runtimeId" | "daemonId" | "workspaceId" | "providerFactory" | "updateRunner" | "localSkillRoots" | "launchedBy" | "onRestartRequested" | "taskTimeoutMs" | "daemonPort" | "workspacesRoot" | "repoCacheRoot" | "gcEnabled" | "gcIntervalMs" | "gcTtlMs" | "gcOrphanTtlMs" | "gcRequireArchive" | "gitWorktreeInspector" | "sessionArchiveMaxSourceBytes" | "sessionArchiveUploadBaseUrl" | "sessionArchiveProxyMaxBytes" | "sessionArchiveDirectProbeTtlMs" | "sessionArchiveDirectProbeTimeoutMs" | "sessionArchiveUploadTimeoutMs" | "sessionArchiveFailureReportTimeoutMs" | "pluginCacheRoot" | "agentPluginProviderPreflight" | "sshMeshManager" | "terminalAuthorityCleanupRetryDelaysMs" | "issueWorkspaceLifecycleLocker" | "workspaceRootFence" | "runWorkspaceGcPass" | "runSnapshotGcPass" | "supervisorReady" | "onReadyChange" | "cliUpdateCoordinator" | "outboxPath" | "outboxBackoffMs" | "outboxMaxBytes" | "claimIdleMaxMs" | "pluginDesiredRefreshMs" | "protocolClient" | "protocolClientOptions" | "authorityProbeDelaysMs">> & {
@@ -725,10 +736,31 @@ export class MultiremiDaemon {
   private runtimeProfileSnapshotReceived = false;
   private runtimeProviderKeys = new Map<string, Promise<string>>();
   private runtimeBindingAcks: RuntimeExecutionBindingAck[] = [];
+  private runtimeBindingDiscoveries = new Map<string, RuntimeBindingDiscovery>();
+  private runtimeBindingProbeTasks = new Set<Promise<void>>();
+  private runtimeBindingApplication = 0;
 
   private async applyRuntimeExecutionBindings(bindings: RuntimeExecutionBinding[]): Promise<void> {
+    const application = ++this.runtimeBindingApplication;
+    const registration = this.runtimeRegistrationGeneration;
+    const runtimeId = this.options.runtimeId;
+    const currentApplication = () => application === this.runtimeBindingApplication
+      && registration === this.runtimeRegistrationGeneration && runtimeId === this.options.runtimeId;
     const acknowledgements: RuntimeExecutionBindingAck[] = [];
+    const desired = new Map(bindings.map(binding => [binding.groupId, JSON.stringify(binding)]));
+    for (const [groupId, entry] of this.runtimeBindingDiscoveries) {
+      if (desired.get(groupId) !== entry.key) {
+        entry.abort.abort();
+        clearTimeout(entry.timer);
+        this.runtimeBindingDiscoveries.delete(groupId);
+      }
+    }
     for (const binding of bindings) {
+      const cached = this.runtimeBindingDiscoveries.get(binding.groupId);
+      if (cached) {
+        acknowledgements.push(cached.ack);
+        continue;
+      }
       const identity = { generation: binding.generation, groupId: binding.groupId, profileId: binding.profileId, profileRevision: binding.profileRevision };
       try {
         if (typeof binding.generation !== "string" || !binding.generation) throw new Error("Binding generation is required");
@@ -745,24 +777,92 @@ export class MultiremiDaemon {
           if (binding.provider !== "codex" && binding.provider !== "claude") {
             throw new Error("Runtime provider does not support connection profiles");
           }
-          const profile = binding.provider === "codex"
-            ? parseRuntimeCodexProfile(binding.profile)!
-            : parseRuntimeClaudeProfile(binding.profile)!;
+          const profile = parseExecutionConnectionProfile(binding.provider, binding.profile)!;
           const key = await this.runtimeProfileKey(profile, binding.provider);
+          if (!currentApplication()) return;
           // Build the same isolated configuration used by task snapshots. Never
           // replace the Runtime's global provider config with a group's profile.
-          if (binding.provider === "codex") resolveRuntimeCodexProfile(profile, process.env, key);
-          else resolveRuntimeClaudeProfile(profile, process.env, key);
+          const token = (profile.auth_mode === "api_key" ? key : process.env[profile.env_key])?.trim();
+          if (!token) throw new Error("Capability group credentials are unavailable");
+          if (profile.model) {
+            if (binding.provider === "codex") resolveRuntimeCodexProfile(profile, process.env, key);
+            else resolveRuntimeClaudeProfile(profile, process.env, key);
+          }
         }
-        acknowledgements.push({ ...identity, status: "ready" });
+        const ack: RuntimeExecutionBindingAck = { ...identity, status: "ready" };
+        acknowledgements.push(ack);
+        this.runtimeBindingDiscoveries.set(binding.groupId, { key: JSON.stringify(binding), binding, ack,
+          abort: new AbortController(), nextRefreshAt: 0 });
       } catch {
+        if (!currentApplication()) return;
         // Do not return raw transport/configuration errors: they can contain
         // provider credentials or response bodies.
         acknowledgements.push({ ...identity, status: "error", error: "Profile could not be applied; check provider compatibility and configured credentials" });
       }
     }
+    if (!currentApplication()) return;
     this.runtimeBindingAcks = acknowledgements;
     if (this.options.runtimeId && acknowledgements.length > 0) await this.client.reportRuntimeBindingAcks(this.options.runtimeId, acknowledgements);
+    if (!currentApplication()) return;
+    for (const entry of this.runtimeBindingDiscoveries.values()) this.refreshRuntimeBindingModels(entry);
+  }
+
+  private refreshRuntimeBindingModels(entry: RuntimeBindingDiscovery): void {
+    const { binding } = entry;
+    if (this.stopped || !binding.profile || entry.probe || Date.now() < entry.nextRefreshAt) return;
+    if (binding.provider !== "codex" && binding.provider !== "claude") return;
+    const provider = binding.provider;
+    const runtimeId = this.options.runtimeId;
+    const registration = this.runtimeRegistrationGeneration;
+    if (!runtimeId) return;
+    const current = () => !this.stopped && !entry.abort.signal.aborted && this.options.runtimeId === runtimeId
+      && this.runtimeRegistrationGeneration === registration && this.runtimeBindingDiscoveries.get(binding.groupId) === entry;
+    entry.probe = (async () => {
+      const startedAt = Date.now();
+      let model_catalog: NonNullable<RuntimeExecutionBindingAck["model_catalog"]>;
+      try {
+        const profile = parseExecutionConnectionProfile(provider, binding.profile)!;
+        const key = await this.runtimeProfileKey(profile, provider);
+        const token = (profile.auth_mode === "api_key" ? key : process.env[profile.env_key])?.trim();
+        if (!token) throw new Error("Capability group credentials are unavailable");
+        const models = await discoverRuntimeProfileModels(provider, profile, token, entry.abort.signal);
+        model_catalog = { status: "ready", models };
+      } catch (error) {
+        model_catalog = { status: "error", models: [] };
+        if (current()) {
+          const message = error instanceof Error ? error.message : "";
+          const status = /^Runtime (?:codex|claude) model discovery HTTP (\d{3})$/.exec(message)?.[1];
+          const reason = status ? `http_${status}` : message === "Runtime codex model discovery native metadata validation failed"
+            ? "native_metadata_invalid" : "discovery_failed";
+          log.warn("Capability group model discovery failed", {
+            event: "runtime_binding_model_discovery_failed", runtime_id: runtimeId, group_id: binding.groupId,
+            provider, profile_id: binding.profileId, profile_revision: binding.profileRevision,
+            durationMs: Date.now() - startedAt, reason,
+          });
+        }
+      }
+      if (!current()) return;
+      entry.nextRefreshAt = Date.now() + (model_catalog.status === "ready"
+        ? this.options.runtimeModelRefreshIntervalMs : this.options.runtimeModelRetryBaseMs);
+      entry.ack = { ...entry.ack, model_catalog };
+      this.runtimeBindingAcks = [...this.runtimeBindingDiscoveries.values()].map(value => value.ack);
+      await this.client.reportRuntimeBindingAcks(runtimeId, [entry.ack]);
+    })().catch(() => {
+      // The durable report transport retains delivery; configuration replay also carries this cached result.
+      if (current()) log.warn("Capability group model report failed", {
+        event: "runtime_binding_model_report_failed", group_id: binding.groupId, provider,
+      });
+    }).finally(() => {
+      this.runtimeBindingProbeTasks.delete(entry.probe!);
+      entry.probe = undefined;
+      if (current()) {
+        clearTimeout(entry.timer);
+        entry.timer = setTimeout(() => { entry.timer = undefined; this.refreshRuntimeBindingModels(entry); },
+          Math.max(0, entry.nextRefreshAt - Date.now()));
+        entry.timer.unref?.();
+      }
+    });
+    this.runtimeBindingProbeTasks.add(entry.probe);
   }
 
 
@@ -1547,6 +1647,7 @@ export class MultiremiDaemon {
       this.cancelRuntimeModelRefresh();
       const modelRefresh = this.runtimeModelRefreshTask;
       if (modelRefresh) await Promise.allSettled([modelRefresh]);
+      await Promise.allSettled([...this.runtimeBindingProbeTasks]);
       await Promise.allSettled([...this.runtimeModelListRequests.values()]);
       // Running tasks depend on the repo-checkout server, so let any in-flight
       // tasks drain before waiting for the GC lease they may currently hold.
@@ -2257,6 +2358,13 @@ export class MultiremiDaemon {
   private cancelRuntimeModelRefresh(): void {
     this.runtimeModelRefreshAbort?.abort();
     this.cancelRuntimeModelProbe();
+    for (const entry of this.runtimeBindingDiscoveries.values()) {
+      entry.abort.abort();
+      clearTimeout(entry.timer);
+    }
+    this.runtimeBindingDiscoveries.clear();
+    this.runtimeBindingAcks = [];
+    this.runtimeBindingApplication++;
     this.wakeRuntimeModelRetry();
   }
 

@@ -27,6 +27,10 @@ it("syncs multiple centrally configured profiles through real WebSocket daemon c
   const db = openSqliteDatabase(":memory:");
   const store = new MultiremiStore(db);
   store.ensureLocalWorkspace();
+  const modelServer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    if (new URL(request.url).pathname !== "/v1/models") return new Response(null, { status: 404 });
+    return Response.json({ data: ["model-a", "model-b", "model-a-v2"].map(id => ({ id })) });
+  } });
   const daemonToken = await store.createAccessToken({ name: "Isolated daemon", type: "daemon", workspaceId: "local", daemonId: "central-profile-test", userId: "local" });
   const humanToken = await store.createAccessToken({ name: "Isolated administrator", type: "pat", workspaceId: "local", userId: "local" });
 
@@ -68,7 +72,7 @@ it("syncs multiple centrally configured profiles through real WebSocket daemon c
     expect(response.ok).toBe(true);
     return result;
   };
-  const connection = (model: string) => ({ name: model, base_url: "https://never-contacted.example/v1", model, env_key: "", auth_mode: "api_key" });
+  const connection = (model: string) => ({ name: model, base_url: `http://127.0.0.1:${modelServer.port}/v1`, model, env_key: "", auth_mode: "api_key" });
   try {
     await waitUntil(() => store.listRuntimes().length === 1 && (daemon as any).runtimeProfileSnapshotReceived === true, "daemon registration and first WebSocket configuration");
     const runtimeId = store.listRuntimes()[0]!.id;
@@ -83,6 +87,23 @@ it("syncs multiple centrally configured profiles through real WebSocket daemon c
     expect((await human(`/api/execution-groups/${groupA.id}`)).group.members[0].status).toBe("ready");
     expect((await human(`/api/execution-groups/${groupB.id}`)).group.members[0].status).toBe("ready");
     expect(store.getRuntimeCodexProfile(runtimeId)).toBeNull();
+    await waitUntil(() => store.getRuntimeBindingModelCatalog(groupA.id, runtimeId)?.status === "ready"
+      && store.getRuntimeBindingModelCatalog(groupB.id, runtimeId)?.status === "ready", "independent group catalogs reported through WebSocket");
+    expect((await human(`/api/models?workspace_id=local&execution_group_id=${groupA.id}`)).providers[0].models.map((model: { id: string }) => model.id))
+      .toEqual(["model-a", "model-b", "model-a-v2"]);
+    const discovered = (await human("/api/execution-profiles", { name: "Automatic connection", provider: "codex",
+      profile: { name: "automatic", base_url: `http://127.0.0.1:${modelServer.port}/v1`, env_key: "", auth_mode: "api_key" },
+      api_key: "isolated-automatic-key" })).profile;
+    expect(discovered.profile.model).toBe("");
+    const automatic = (await human("/api/execution-groups", { name: "Discovered models", provider: "codex",
+      profile_id: discovered.id, runtime_ids: [runtimeId] })).group;
+    await waitUntil(() => store.getRuntimeBindingModelCatalog(automatic.id, runtimeId)?.status === "ready", "model-free central connection discovering its selectable models");
+    const automaticCatalog = (await human(`/api/models?workspace_id=local&execution_group_id=${automatic.id}`)).providers[0];
+    expect(automaticCatalog.model_catalog_status).toBe("ready");
+    expect(automaticCatalog.models.find((model: { default?: boolean }) => model.default)?.id).toBe("model-a");
+    const discoveredAgent = await human("/api/agents", { name: "Discovered selection", provider: "codex",
+      execution_group_id: automatic.id, model: "model-b" });
+    expect(discoveredAgent.model).toBe("model-b");
 
     const oldAcks = receivedAcks.findLast((acks) => acks.some((ack) => ack.groupId === groupA.id && ack.status === "ready"))!;
     holdHeartbeat = true;
@@ -120,6 +141,7 @@ it("syncs multiple centrally configured profiles through real WebSocket daemon c
     daemon.stop();
     await run;
     server.stop(true);
+    modelServer.stop(true);
     db.close();
     rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     if (previousKey === undefined) delete process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY;

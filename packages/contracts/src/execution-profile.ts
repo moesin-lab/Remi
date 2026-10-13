@@ -1,4 +1,13 @@
-import type { RuntimeConnectionProfile } from "./runtime-connection.js";
+import { parseRuntimeConnectionProfile, type RuntimeConnectionProfile } from "./runtime-connection.js";
+
+/** Central connections can discover their default; task/legacy Runtime profiles remain strict. */
+export function parseExecutionConnectionProfile(provider: "claude" | "codex", value: unknown): (RuntimeConnectionProfile & { auth_header?: "bearer" | "x-api-key" }) | null {
+  if (provider === "codex" || value === null) return parseRuntimeConnectionProfile(value, "REMI_CODEX_", true);
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("profile must be an object or null");
+  const { auth_header = "bearer", ...connection } = value as Record<string, unknown>;
+  if (auth_header !== "bearer" && auth_header !== "x-api-key") throw new Error("Invalid profile auth_header");
+  return { ...parseRuntimeConnectionProfile(connection, "REMI_CLAUDE_", true)!, auth_header };
+}
 
 /** Workspace-owned, immutable revision of a connection. Contains no plaintext secrets. */
 export interface ExecutionProfile {

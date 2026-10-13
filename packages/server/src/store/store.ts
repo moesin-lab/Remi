@@ -1060,6 +1060,9 @@ runMigrations(this.db);
   getRuntimeExecutionBindings(runtimeId: string) {
     return this.executionBindingStates.getRuntimeExecutionBindings(runtimeId);
   }
+  getRuntimeBindingModelCatalog(groupId: string, runtimeId: string) {
+    return this.executionBindingStates.getRuntimeBindingModelCatalog(groupId, runtimeId);
+  }
   recordRuntimeExecutionBindingAcks(runtimeId: string, input: unknown) {
     return this.executionBindingStates.recordRuntimeExecutionBindingAcks(
       runtimeId,

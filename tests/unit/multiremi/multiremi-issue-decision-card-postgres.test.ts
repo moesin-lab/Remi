@@ -109,11 +109,13 @@ async function beforeBarrierTimeout<T>(operation: Promise<T>, label: string): Pr
 describe.skipIf(!available)("MUL-412 decision cards on Postgres", () => {
   let db: PostgresSyncDatabase;
   let store: MultiremiStore;
-  let previousLarkAppId: string | undefined;
-  let previousLarkAppSecret: string | undefined;
+  const previousEnv = new Map<string, string | undefined>();
   let scanBefore: ReturnType<typeof scanCounts>;
 
   beforeAll(async () => {
+    for (const key of ["MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY", "MULTIREMI_PUBLIC_URL", "MULTIREMI_LARK_APP_ID", "MULTIREMI_LARK_APP_SECRET"]) {
+      previousEnv.set(key, process.env[key]);
+    }
     scanBefore = scanCounts();
     const admin = new Bun.SQL(PG_ADMIN_URL, { max: 1 });
     await admin.unsafe(`DROP DATABASE IF EXISTS ${TEST_DB} WITH (FORCE)`);
@@ -121,8 +123,6 @@ describe.skipIf(!available)("MUL-412 decision cards on Postgres", () => {
     await admin.unsafe(`CREATE DATABASE ${TEST_DB}`);
     await admin.unsafe(`CREATE DATABASE ${UPGRADE_DB}`);
     await admin.end();
-    previousLarkAppId = process.env.MULTIREMI_LARK_APP_ID;
-    previousLarkAppSecret = process.env.MULTIREMI_LARK_APP_SECRET;
     process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 11).toString("base64");
     process.env.MULTIREMI_PUBLIC_URL = "https://remi.example.com";
     process.env.MULTIREMI_LARK_APP_ID = "cli_pg412";
@@ -142,10 +142,10 @@ describe.skipIf(!available)("MUL-412 decision cards on Postgres", () => {
         await admin.unsafe(`DROP DATABASE IF EXISTS ${UPGRADE_DB} WITH (FORCE)`);
       } finally { await admin.end(); }
     } finally {
-      if (previousLarkAppId === undefined) delete process.env.MULTIREMI_LARK_APP_ID;
-      else process.env.MULTIREMI_LARK_APP_ID = previousLarkAppId;
-      if (previousLarkAppSecret === undefined) delete process.env.MULTIREMI_LARK_APP_SECRET;
-      else process.env.MULTIREMI_LARK_APP_SECRET = previousLarkAppSecret;
+      for (const [key, value] of previousEnv) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
     // MUL-482: this file owns its beforeAll → afterAll delta. Other files'
     // intentional DB savepoint tests remain in the raw report (cmt_kexlr6zs2ras).

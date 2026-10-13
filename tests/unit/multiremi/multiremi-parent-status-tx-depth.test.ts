@@ -19,12 +19,25 @@ import type { SqlDatabase as UnifiedFixtureDatabase } from '@multiremi/store/db/
  * runs the same full-frame count, plus the SQL control assertions, on real
  * PostgreSQL.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { StoreContext } from "@multiremi/store/context.js";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 import { inboxFlowFixture, triggerInboxFlow } from "./fixtures/inbox-flow-fixture.js";
 
-afterEach(resetMultiremiTestEnv);
+let previousScmEncryptionKey: string | undefined;
+
+beforeEach(() => {
+  previousScmEncryptionKey = process.env.MULTIREMI_SCM_ENCRYPTION_KEY;
+});
+
+afterEach(() => {
+  try {
+    resetMultiremiTestEnv();
+  } finally {
+    if (previousScmEncryptionKey === undefined) delete process.env.MULTIREMI_SCM_ENCRYPTION_KEY;
+    else process.env.MULTIREMI_SCM_ENCRYPTION_KEY = previousScmEncryptionKey;
+  }
+});
 
 type Store = ReturnType<typeof createStore>;
 

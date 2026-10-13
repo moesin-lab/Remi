@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multiremi/core/i18n/react";
@@ -7,7 +7,7 @@ import type { AgentRuntime } from "@multiremi/core/types";
 import en from "../../locales/en/runtimes.json";
 import { ExecutionConfigPage, RuntimeExecutionBindings } from "./execution-config-page";
 
-const api = vi.hoisted(() => ({ listExecutionProfiles: vi.fn(), listExecutionGroups: vi.fn(), listRuntimes: vi.fn(), listMembers: vi.fn(), saveExecutionGroup: vi.fn(), saveExecutionProfile: vi.fn(), deleteExecutionGroup: vi.fn(), deleteExecutionProfile: vi.fn() }));
+const api = vi.hoisted(() => ({ listExecutionProfiles: vi.fn(), listExecutionGroups: vi.fn(), listRuntimes: vi.fn(), listFleetModels: vi.fn(), listMembers: vi.fn(), saveExecutionGroup: vi.fn(), saveExecutionProfile: vi.fn(), deleteExecutionGroup: vi.fn(), deleteExecutionProfile: vi.fn() }));
 vi.mock("@multiremi/core/api", () => ({ api }));
 vi.mock("@multiremi/core/hooks", () => ({ useWorkspaceId: () => "ws" }));
 vi.mock("@multiremi/core/paths", () => ({ useWorkspacePaths: () => ({ runtimes: () => "/ws/runtimes", executionGroups: () => "/ws/execution-groups", agents: () => "/ws/agents" }) }));
@@ -30,13 +30,14 @@ beforeEach(() => {
   api.listMembers.mockResolvedValue([{ user_id: "local", role: "owner" }]);
   api.listExecutionProfiles.mockResolvedValue({ profiles: [profile, { ...profile, id: "p2", provider: "claude", name: "Claude only" }] });
   api.listExecutionGroups.mockResolvedValue({ groups: [group] });
+  api.listFleetModels.mockReset().mockResolvedValue({ providers: [{ provider: "codex", model_catalog_status: "ready", models: [{ id: "discovered-model", label: "Discovered model", execution_status: "available" }] }] });
   api.listRuntimes.mockResolvedValue([makeRuntime("r1", "Devbox Codex"), makeRuntime("r2", "Local Codex"), makeRuntime("r3", "Claude runtime", "claude")]);
   api.saveExecutionGroup.mockResolvedValue({ group });
   api.saveExecutionProfile.mockResolvedValue({ profile });
 });
 function show(component = <ExecutionConfigPage />) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return render(<I18nProvider locale="en" resources={{ en: { runtimes: en } }}><QueryClientProvider client={client}>{component}</QueryClientProvider></I18nProvider>);
+  return { ...render(<I18nProvider locale="en" resources={{ en: { runtimes: en } }}><QueryClientProvider client={client}>{component}</QueryClientProvider></I18nProvider>), client };
 }
 
 it("creates another group with the same Runtime and restricts profiles and runtimes by provider", async () => {
@@ -154,7 +155,7 @@ it("shows every binding and an unconfirmed state without inventing successful ap
   expect(screen.getByRole("link")).toHaveAttribute("href", "/ws/execution-groups");
 });
 
-it("configures provider credentials and models inside a new group with a single save", async () => {
+it("saves a new group's connection without requiring model IDs, leaving discovery automatic", async () => {
   const user = userEvent.setup();
   show();
   await user.click(await screen.findByRole("button", { name: "Add group" }));
@@ -163,17 +164,114 @@ it("configures provider credentials and models inside a new group with a single 
   await user.selectOptions(screen.getByLabelText("Provider connection"), "new");
   fireEvent.change(screen.getByLabelText("Connection name"), { target: { value: "Review gateway" } });
   fireEvent.change(screen.getByLabelText("API base URL"), { target: { value: "https://example.test/v1" } });
-  fireEvent.change(screen.getByLabelText("Model ID"), { target: { value: "default-model" } });
-  fireEvent.change(screen.getByLabelText(/Allowed model IDs/), { target: { value: "fast-model" } });
+  expect(screen.getByLabelText("Model ID")).not.toBeRequired();
+  expect(screen.getByLabelText("Model ID")).toHaveValue("");
+  expect(screen.getByText("Advanced model settings (optional)").closest("details")).not.toHaveAttribute("open");
   fireEvent.change(screen.getByLabelText("API key"), { target: { value: "synthetic-key" } });
   await user.click(screen.getByRole("checkbox", { name: /Local Codex/ }));
   await user.click(screen.getByRole("button", { name: "Save group" }));
   await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", undefined, {
     name: "Review pool", description: "Review services", provider: "codex", profile_id: null, runtime_ids: ["r2"],
-    connection: { name: "Review gateway", profile: { name: "custom", base_url: "https://example.test/v1", model: "default-model", models: ["default-model", "fast-model"], auth_mode: "api_key", env_key: "" }, api_key: "synthetic-key" },
+    connection: { name: "Review gateway", profile: { name: "custom", base_url: "https://example.test/v1", model: "", auth_mode: "api_key", env_key: "" }, api_key: "synthetic-key" },
   }));
   expect(api.saveExecutionProfile).not.toHaveBeenCalled();
   expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+});
+
+it("allows an optional allowlist without inventing an empty default model entry", async () => {
+  const automatic = { ...profile, profile: { ...profile.profile, model: "" } };
+  api.listExecutionProfiles.mockResolvedValue({ profiles: [automatic] });
+  const user = userEvent.setup();
+  show();
+  await user.click(within(await screen.findByRole("article", { name: "Aiden" })).getByRole("button", { name: "Edit" }));
+  await user.click(screen.getByText("Advanced model settings (optional)"));
+  await user.type(screen.getByLabelText(/Allowed model IDs/), "discovered-model\ndiscovered-model");
+  await user.click(screen.getByRole("button", { name: "Save connection" }));
+  await waitFor(() => expect(api.saveExecutionProfile).toHaveBeenCalledWith("ws", "p1", {
+    name: "Aiden", provider: "codex", profile: { ...automatic.profile, models: ["discovered-model"] },
+  }));
+});
+
+it("keeps advanced settings open while clearing an existing default and allowlist", async () => {
+  api.listExecutionProfiles.mockResolvedValue({ profiles: [{ ...profile, profile: { ...profile.profile, models: ["test-model"] } }] });
+  const user = userEvent.setup();
+  show();
+  await user.click(within(await screen.findByRole("article", { name: "Aiden" })).getByRole("button", { name: "Edit" }));
+  const advanced = screen.getByText("Advanced model settings (optional)").closest("details");
+  expect(advanced).toHaveAttribute("open");
+  await user.clear(screen.getByLabelText("Model ID"));
+  await user.clear(screen.getByLabelText(/Allowed model IDs/));
+  expect(advanced).toHaveAttribute("open");
+  expect(screen.getByLabelText(/Allowed model IDs/)).toHaveFocus();
+});
+
+it("leaves groups without assigned runtimes waiting and does not request a model catalog", async () => {
+  api.listExecutionGroups.mockResolvedValue({ groups: [{ ...group, runtime_ids: [] }] });
+  show();
+  const row = within(await screen.findByRole("article", { name: group.name }));
+  expect(row.getByText(/No machines assigned/)).toBeInTheDocument();
+  expect(row.queryByRole("region", { name: "Model catalog" })).not.toBeInTheDocument();
+  expect(row.queryByRole("alert")).not.toBeInTheDocument();
+  expect(api.listFleetModels).not.toHaveBeenCalled();
+});
+
+it("displays each group's discovered models rather than the connection's configured default", async () => {
+  const second = { ...group, id: "g2", name: "Review pool" };
+  api.listExecutionGroups.mockResolvedValue({ groups: [group, second] });
+  api.listFleetModels.mockImplementation(({ execution_group_id }) => Promise.resolve({
+    providers: [{ provider: "codex", model_catalog_status: "ready", models: [
+      { id: execution_group_id === "g1" ? "build-model" : "review-model", label: execution_group_id === "g1" ? "Build model" : "Review model", execution_status: "available" },
+      { id: "unavailable-model", label: "Unavailable model", execution_status: "unavailable" },
+      { id: "unknown-model", label: "Unknown model", execution_status: "unknown" },
+    ] }],
+  }));
+  show();
+  const firstRow = within(await screen.findByRole("article", { name: group.name }));
+  const secondRow = within(screen.getByRole("article", { name: second.name }));
+  expect(await firstRow.findByText("Build model · build-model")).toBeInTheDocument();
+  expect(await secondRow.findByText("Review model · review-model")).toBeInTheDocument();
+  expect(firstRow.getByText("Available models: 1")).toBeInTheDocument();
+  expect(secondRow.getByText("Available models: 1")).toBeInTheDocument();
+  expect(firstRow.queryByText(/review-model/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Unavailable model|Unknown model/)).not.toBeInTheDocument();
+  expect(api.listFleetModels).toHaveBeenCalledWith(expect.objectContaining({ workspace_id: "ws", execution_group_id: "g1" }));
+  expect(api.listFleetModels).toHaveBeenCalledWith(expect.objectContaining({ workspace_id: "ws", execution_group_id: "g2" }));
+  expect(api.listFleetModels.mock.calls.every(([input]) => !!input.execution_group_id)).toBe(true);
+});
+
+it("keeps discovery pending until the group's catalog is ready and then displays its models", async () => {
+  api.listFleetModels.mockResolvedValue({ providers: [{ provider: "codex", model_catalog_status: "unknown", models: [] }] });
+  const { client } = show();
+  const row = within(await screen.findByRole("article", { name: group.name }));
+  expect(await row.findByRole("status")).toHaveTextContent("Discovering models…");
+  expect(row.queryByText(/Available models:/)).not.toBeInTheDocument();
+  api.listFleetModels.mockResolvedValue({ providers: [{ provider: "codex", model_catalog_status: "ready", models: [{ id: "live-model", label: "Live model", execution_status: "available" }] }] });
+  await act(() => client.invalidateQueries({ queryKey: ["runtimes", "models", "fleet", "ws"] }));
+  expect(await row.findByText("Live model · live-model")).toBeInTheDocument();
+  expect(row.queryByRole("status")).not.toBeInTheDocument();
+});
+
+it.each(["request", "catalog"])("shows a model discovery failure from %s without showing configured IDs as discovered", async (failure) => {
+  if (failure === "request") api.listFleetModels.mockRejectedValue(new Error("Cannot reach gateway"));
+  else api.listFleetModels.mockResolvedValue({ providers: [{ provider: "codex", model_catalog_status: "error", models: [{ id: "configured-only", label: "Configured only", execution_status: "unavailable" }] }] });
+  show();
+  const row = within(await screen.findByRole("article", { name: group.name }));
+  expect(await row.findByRole("alert")).toHaveTextContent("Could not discover models. Check the connection and assigned runtimes.");
+  expect(row.queryByText(/Available models:/)).not.toBeInTheDocument();
+  expect(row.queryByText(/Configured only/)).not.toBeInTheDocument();
+});
+
+it("labels a saved connection with no default as automatic discovery and handles an empty group catalog", async () => {
+  api.listExecutionProfiles.mockResolvedValue({ profiles: [{ ...profile, profile: { ...profile.profile, model: "" } }] });
+  api.listFleetModels.mockResolvedValue({ providers: [{ provider: "codex", model_catalog_status: "ready", models: [] }] });
+  const user = userEvent.setup();
+  show();
+  const row = within(await screen.findByRole("article", { name: group.name }));
+  expect(await row.findByText("No available models in this group.")).toBeInTheDocument();
+  expect(within(screen.getByRole("article", { name: "Aiden" })).getByText(/Automatic discovery/)).toBeInTheDocument();
+  await user.click(row.getByRole("button", { name: "Edit" }));
+  expect(within(screen.getByRole("form", { name: "Capability groups" })).getByText("Automatic discovery")).toBeInTheDocument();
+  expect(screen.queryByText("Default model:")).not.toBeInTheDocument();
 });
 
 it("explains shared updates and keeps the key hidden while editing a group's connection", async () => {

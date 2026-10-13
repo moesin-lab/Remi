@@ -211,9 +211,11 @@ export function GroupForm({
           ) : profile ? (
             <>
               <p className="break-all text-sm text-muted-foreground">
-                {t(($) => $.configuration.default_model, {
-                  model: profile.profile.model,
-                })}
+                {profile.profile.model
+                  ? t(($) => $.configuration.default_model, {
+                      model: profile.profile.model,
+                    })
+                  : t(($) => $.configuration.automatic_models)}
               </p>
               <p className="break-all text-xs text-muted-foreground">
                 {profile.profile.models?.join(" · ") ??

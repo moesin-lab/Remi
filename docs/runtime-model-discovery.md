@@ -1,5 +1,25 @@
 # Runtime Model Capabilities
 
+## Central Capability Groups
+
+Central connection profiles can omit `model`; the owning Runtime discovers the
+connection's `/models` inventory asynchronously after applying the binding.
+Claude uses `/v1/models` with its selected authentication header and pagination.
+The result travels in `runtime.binding_state` as a separate `model_catalog`,
+fenced by group, Runtime, binding generation and Profile revision. Configuration
+ready and catalog ready remain distinct. A changed connection cannot reuse a
+previous revision's directory or the Runtime's native connection capabilities.
+
+Group model selection and task placement use the same intersection of member
+catalogs. Automatic selection resolves a real model from that shared set and
+freezes it with the connection at claim time; an undiscovered automatic
+connection waits. Explicit defaults and allowlists retain their manual semantics.
+When a Codex endpoint includes complete native `models` metadata, discovery uses
+the actual Codex decoder offline before publishing exact-model reasoning levels.
+An ordinary `data` inventory does not imply reasoning support. A directory
+update invalidates group model queries and wakes task matching; it does not
+prove a successful model generation.
+
 ## Context Window Declarations
 
 Claude gateway models have a separate administrator-controlled 1M context switch

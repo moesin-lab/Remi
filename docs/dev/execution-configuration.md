@@ -32,8 +32,6 @@ remi runtime group create --file group.json --json
     "profile": {
       "name": "team",
       "base_url": "https://gateway.example/v1",
-      "model": "coding-model",
-      "models": ["coding-model", "fast-model"],
       "auth_mode": "env",
       "env_key": "REMI_CODEX_TEAM"
     }
@@ -43,7 +41,7 @@ remi runtime group create --file group.json --json
 
 `description` 最多 2000 字符；旧客户端省略时保留原说明，空字符串清除。`connection` 省略时只更新组本身；提供时继承组的执行引擎。`profile_id: null` 创建一个中央连接；非空则更新该工作区内的现有连接。连接、凭据版本和组成员在同一事务保存，任一步校验失败全部回滚。组内编辑共用连接会更新所有引用它的组，界面显示受影响的组数；要使用不同地址或模型，选择「配置新的 Provider」。无需更改其他组时，普通用途说明或成员编辑不会产生新的连接版本。
 
-组可先创建，再分配兼容的 Runtime。尚无机器或配置未确认时不能执行；机器就绪后，在云友设置中选择能力组。云友模型为「自动」时使用连接默认模型；指定模型须在该组可用目录中，显式配置 `models` 时受白名单限制。切换组时重新读取该组模型与思考能力，不能沿用另一组的目录。默认模型和模型选择随任务首次领取冻结，不改变运行中的任务。
+组可先创建，再分配兼容的 Runtime。尚无机器或配置未确认时不能执行；机器就绪后，每个成员使用组的连接获取模型目录，组目录取成员共同可用的模型与推理选项。在云友设置中选择能力组，再从该组目录选择模型。连接无需手填模型 ID；云友模型为「自动」且连接未指定默认模型时，从组的共同目录确定默认模型，目录尚未发现或没有共同模型时等待。显式配置 `models` 时仍受白名单限制。切换组时重新读取该组目录，不能沿用另一组的能力。实际模型与连接在任务首次领取时冻结，不改变运行中的任务。
 
 Web 的 Runtime 成员选择器与已保存的成员列表同时显示 Runtime 名称、机器名称、在线状态和完整 Runtime ID，以区分同名引擎或同一机器上的重复注册。机器名称沿用 Runtime 页的顺序：daemon 展示名、设备信息中的主机名、旧名称中的主机名；仍无名称时，云 Runtime 显示引擎云端名称，本地 Runtime 回退到 daemon ID 或占位名称。成员仍按 Runtime ID 保存；离线成员可保留，在线状态与配置下发确认状态分别展示，不能互相代替。无法读取成员详情时保留其 ID，编辑时仍可移除。
 
@@ -65,8 +63,6 @@ remi runtime profile create --file profile.json --json
   "profile": {
     "name": "team-codex",
     "base_url": "https://gateway.example/v1",
-    "model": "custom-model",
-    "models": ["custom-model", "custom-model-fast"],
     "auth_mode": "api_key",
     "env_key": ""
   },
@@ -74,7 +70,7 @@ remi runtime profile create --file profile.json --json
 }
 ```
 
-外层 `name` 是展示名，内层 `profile.name` 是连接标识，只接受字母、数字、下划线、连字符。Codex 接口须兼容 Responses；Claude 须兼容 Anthropic Messages，并可设置 `auth_header: "bearer"` 或 `"x-api-key"`。`model` 是默认模型；可选 `models` 是最多 200 个唯一模型 ID 的白名单，必须包含默认模型。省略 `models` 时沿用 provider 自动发现的目录；显式配置后只允许列表内模型。地址、模型与思考能力规则见 [Codex](../design/acp-codex-via-codex-acp.md#runtime-自定义连接)和 [Claude](../design/acp-claude-via-claude-agent-acp.md)。不要把真实密钥提交到 Git。
+外层 `name` 是展示名，内层 `profile.name` 是连接标识，只接受字母、数字、下划线、连字符。Codex 接口须兼容 Responses；Claude 须兼容 Anthropic Messages，并可设置 `auth_header: "bearer"` 或 `"x-api-key"`。中央连接的 `model` 可以省略或留空，由能力组自动发现；手动默认模型和最多 200 个唯一 ID 的 `models` 白名单仍可在高级设置中配置，指定默认模型时白名单必须包含它。自动模式下白名单只过滤实际发现的模型，不补出目录里不存在的 ID；省略白名单时使用完整发现目录。旧单 Runtime 连接仍要求非空默认模型。地址和能力规则见 [Codex](../design/acp-codex-via-codex-acp.md#runtime-自定义连接)和 [Claude](../design/acp-claude-via-claude-agent-acp.md)。不要把真实密钥提交到 Git。
 
 选择机器上登记的 Runtime，使用返回的 Profile ID 创建组：
 
@@ -104,6 +100,8 @@ remi runtime group list --json
 generation 只跟踪实际 Runtime 绑定。能力组改名不会清除已有 ready；只增删成员时，仅新增或移除的成员生成新 generation，未变成员继续可调度。切换 Profile 或把旧组转换为受管组会轮换所有成员的 generation，直到各 Runtime 确认新配置。这样管理元数据和横向扩容不会制造无关的执行中断，同时旧确认仍不能复活已改变的绑定。
 
 ready 表示配置与凭据解析成功，不表示已调用远端模型。Runtime 在线、模型出现在目录与配置 ready 是不同证据，真实连通性仍需执行任务验证。
+
+成员在自己的机器上异步请求该连接的模型目录，因此支持本机网关和 Runtime 环境变量鉴权。目录通过同一绑定确认事件上报，但状态独立于配置 ready；按组、Runtime、绑定 generation 与 Profile revision 保存，旧版本或已移除成员的结果不能覆盖当前目录。目录变动会刷新模型选择并重新匹配待执行任务，不覆盖 Runtime 的原生目录或其他组的连接。Codex 完整元数据先经当前执行引擎的离线解码校验，再保留准确 ID 对应的推理选项；仅有普通模型列表时不推断推理能力。
 
 首次 claim 冻结完整连接配置和凭据版本，加入执行指纹。运行中任务继续使用自己的快照，daemon 按任务构造隔离配置；同一 Runtime 上不同组的任务不会互相覆盖全局 provider 设置。已冻结任务重领继续使用旧连接；显式修改云友模型或 thinking 参数时，已冻结但尚未启动的任务取消，运行中任务继续原执行。重试与会话隔离约束见各 provider 接入文档。
 

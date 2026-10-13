@@ -24,11 +24,11 @@ RPC、typed 失败对象及其 cause、原生失败压缩工具的文本共用 A
 
 不在范围内，QA 记为观察项而非缺陷：裸值终止符之后没有标签的文本；不足 8 字符的已配置凭据（只靠格式和键名规则）；空敏感字段后用 tab 或换行隔开的状态码会被替换；`401\"` 这类转义形态在脱敏前就分不出类。
 
-统一配置入口的 Claude Profile 支持一个 Anthropic Messages 兼容接口、一个默认模型和可选 `models` 白名单，再由能力组绑定到多个 Runtime。填写连接名称、API 基础地址、模型 ID，以及 API Key 或本机 `REMI_CLAUDE_*` 环境变量名；请求鉴权可选 Bearer Token 或 `x-api-key`。地址填写服务基础路径，Claude Code 在其后请求 `/v1/messages`，例如网关是 `https://gateway.example/anthropic`，不要填写完整 messages 路径。允许 Runtime 可访问的 HTTP(S) 本机或局域网地址，服务端不主动请求该地址。
+统一配置入口的 Claude Profile 支持一个 Anthropic Messages 兼容接口，再由能力组绑定到多个 Runtime。填写连接名称、API 基础地址，以及 API Key 或本机 `REMI_CLAUDE_*` 环境变量名；模型 ID 可省略，组成员自动发现目录。手动默认模型和可选 `models` 白名单保留在高级设置中。请求鉴权可选 Bearer Token 或 `x-api-key`。地址填写服务基础路径，Claude Code 在其后请求 `/v1/messages`，例如网关是 `https://gateway.example/anthropic`，不要填写完整 messages 路径。允许 Runtime 可访问的 HTTP(S) 本机或局域网地址，服务端不主动请求该地址。
 
 请求头对应 Claude Code 的 `ANTHROPIC_AUTH_TOKEN`（Bearer）或 `ANTHROPIC_API_KEY`（x-api-key），每次仅注入选中的一种。具体协议见 [Claude Code 官方网关接入说明](https://code.claude.com/docs/en/llm-gateway-connect)。这不是 OpenAI Chat Completions/Responses 协议转换器。
 
-中央配置要求 daemon 支持 Profile 下发并确认组的当前版本。组内任务优先使用其 Profile，组未指定 Profile 时使用工作区 Relay / 本机登录。配置流程、权限与旧数据迁移见[执行配置](../dev/execution-configuration.md)。留空时使用连接默认模型；旧 Runtime 连接的发现目录支持选择其他模型。中央 Profile 尚无独立目录探测缓存：未配置 `models` 白名单时，组目录默认只确定配置模型，仅在同一 Runtime 的旧连接与中央配置可证明等价时复用目录和 thinking 证据。显式 `models` 白名单提供无需探测即可选择的模型集合；等价目录证据只为其中相同 ID 补充 thinking 能力。不同连接的探测状态和能力不混用，多机器组取成员有效能力交集。
+中央配置要求 daemon 支持 Profile 下发并确认组的当前版本。组内任务优先使用其 Profile，组未指定 Profile 时使用工作区 Relay / 本机登录。配置流程、权限与旧数据迁移见[执行配置](../dev/execution-configuration.md)。每个成员使用该连接探测 `/v1/models`，结果按绑定 generation 与 Profile revision 保存，不覆盖其他组或 Runtime 原生目录。模型选择和任务匹配使用成员共同目录；云友模型留空且连接无手动默认值时，从共同目录确定实际模型并在 claim 时冻结，无可用目录则等待发现。显式默认模型与白名单保留手动配置语义，推理能力只采用该连接准确模型 ID 的证据。
 
 旧 Runtime 连接的[模型发现](../../packages/server/src/worker/runtime-profile-models.ts)由 daemon 使用所选鉴权头请求 `/v1/models`，基础地址已以 `/v1` 结尾时不重复追加；按 [Claude Models API](https://platform.claude.com/docs/en/api/models/list) 的 `has_more` / `last_id` 翻页。完整目录保留配置默认模型，探测失败保留上次目录；首次失败仍可使用配置模型。thinking 能力仅按准确模型 ID 合并 ACP 实测结果，目录可读取也不代表模型推理成功。供应商目录不可用但 ACP 探测成功时，保留已有目录（首次使用配置默认模型）并更新已知模型的能力，日志明确记录目录探测失败；不会把 ACP 的官方模型列表当作 custom 供应商目录。平台和 daemon 需同时更新：模型上报携带 `model_profile`，过期或旧 daemon 的无标识上报不能覆盖 custom 目录。
 

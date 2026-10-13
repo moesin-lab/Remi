@@ -9,9 +9,9 @@ vi.mock("../api", () => ({ api: { listFleetModels } }));
 afterEach(() => vi.useRealTimers());
 
 describe("pending model catalog recovery", () => {
-  it("bounds pending recovery requests and still accepts a later capability invalidation", async () => {
+  it.each(["codex", "claude"])("bounds pending %s recovery requests and still accepts a later capability invalidation", async (provider) => {
     vi.useFakeTimers();
-    listFleetModels.mockReset().mockResolvedValue({ providers: [{ provider: "codex", model_catalog_status: "unknown", models: [] }] });
+    listFleetModels.mockReset().mockResolvedValue({ providers: [{ provider, model_catalog_status: "unknown", models: [] }] });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const observer = new QueryObserver(client, executionTargetModelsOptions("ws", "rt"));
     const unsubscribe = observer.subscribe(() => undefined);
@@ -24,14 +24,14 @@ describe("pending model catalog recovery", () => {
       await vi.advanceTimersByTimeAsync(60_000);
       expect(listFleetModels).toHaveBeenCalledTimes(pendingCalls);
 
-      listFleetModels.mockResolvedValue({ providers: [{ provider: "codex", model_catalog_status: "ready", models: [{ id: "ready-model", label: "Ready model", execution_status: "available" }] }] });
+      listFleetModels.mockResolvedValue({ providers: [{ provider, model_catalog_status: "ready", models: [{ id: "ready-model", label: "Ready model", execution_status: "available" }] }] });
       await client.invalidateQueries({ queryKey: runtimeModelsKeys.fleet("ws") });
       expect(observer.getCurrentResult().data?.providers[0]?.models[0]?.id).toBe("ready-model");
       await vi.advanceTimersByTimeAsync(60_000);
       expect(listFleetModels).toHaveBeenCalledTimes(pendingCalls + 1);
 
       // A later gateway refresh gets its own bounded recovery window.
-      listFleetModels.mockResolvedValueOnce({ providers: [{ provider: "codex", model_catalog_status: "unknown", models: [] }] });
+      listFleetModels.mockResolvedValueOnce({ providers: [{ provider, model_catalog_status: "unknown", models: [] }] });
       await client.invalidateQueries({ queryKey: runtimeModelsKeys.fleet("ws") });
       expect(observer.getCurrentResult().data?.providers[0]?.model_catalog_status).toBe("unknown");
       await vi.advanceTimersByTimeAsync(2_000);

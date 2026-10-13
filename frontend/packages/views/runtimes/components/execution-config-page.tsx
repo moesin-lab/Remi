@@ -13,6 +13,7 @@ import {
   executionGroupListOptions,
   runtimeListOptions,
   useExecutionConfigMutation,
+  useExecutionTargetModels,
   type ExecutionProfile,
   type ExecutionGroupList,
 } from "@multiremi/core/runtimes";
@@ -250,6 +251,9 @@ export function ExecutionConfigPage() {
                   })}
                 </p>
               )}
+              {group.runtime_ids.length > 0 && (
+                <GroupModelCatalog wsId={wsId} group={group} />
+              )}
               {group.runtime_ids.length === 0 && (
                 <p className="text-xs text-muted-foreground">
                   {t(($) => $.configuration.no_members)}
@@ -310,7 +314,9 @@ export function ExecutionConfigPage() {
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-medium">{profile.name}</p>
                   <p className="truncate text-xs text-muted-foreground">
-                    {profile.provider} · {profile.profile.model} · v
+                    {profile.provider} ·{" "}
+                    {profile.profile.model ||
+                      t(($) => $.configuration.automatic_models)} · v
                     {profile.revision}
                   </p>
                 </div>
@@ -366,6 +372,51 @@ export function ExecutionConfigPage() {
         )}
       </div>
     </div>
+  );
+}
+
+function GroupModelCatalog({ wsId, group }: { wsId: string; group: Group }) {
+  const { t } = useT("runtimes");
+  const { models, modelCatalogStatus, isLoading, isError } =
+    useExecutionTargetModels(wsId, group.provider, null, group.id);
+  const availableModels = models.filter(
+    (model) =>
+      model.execution_status === undefined ||
+      model.execution_status === "available",
+  );
+
+  return (
+    <section
+      aria-label={t(($) => $.configuration.model_catalog)}
+      className="space-y-1 text-xs text-muted-foreground"
+    >
+      {isError || modelCatalogStatus === "error" ? (
+        <p role="alert" className="text-destructive">
+          {t(($) => $.configuration.catalog_error)}
+        </p>
+      ) : isLoading || modelCatalogStatus === "unknown" ? (
+        <p role="status">{t(($) => $.configuration.catalog_loading)}</p>
+      ) : availableModels.length === 0 ? (
+        <p>{t(($) => $.configuration.catalog_empty)}</p>
+      ) : (
+        <>
+          <p>
+            {t(($) => $.configuration.catalog_count, {
+              count: availableModels.length,
+            })}
+          </p>
+          <ul className="max-h-32 space-y-1 overflow-y-auto">
+            {availableModels.map((model) => (
+              <li className="truncate" key={model.id} title={model.id}>
+                {model.label && model.label !== model.id
+                  ? `${model.label} · ${model.id}`
+                  : model.id}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
   );
 }
 

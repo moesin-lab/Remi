@@ -15,7 +15,7 @@ export const runtimeModelsKeys = {
 };
 
 const isCatalogPending = (data?: FleetModelsResponse) =>
-  data?.providers.some((entry) => entry.provider === "codex" && entry.model_catalog_status === "unknown") ?? false;
+  data?.providers.some((entry) => entry.model_catalog_status === "unknown") ?? false;
 
 // A pre-refresh snapshot cannot be cached as an authoritative catalog. Bound
 // recovery requests while discovery is pending; daemon WS events also invalidate

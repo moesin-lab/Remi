@@ -47,6 +47,8 @@ export function connectionInput(
     ),
   ];
   const { models: _previousModels, ...profile } = draft.profile;
+  const defaultModel = profile.model.trim();
+
   return {
     name: draft.name,
     profile: {
@@ -54,8 +56,8 @@ export function connectionInput(
       ...(models.length
         ? {
             models: [
-              profile.model.trim(),
-              ...models.filter((id) => id !== profile.model.trim()),
+              ...(defaultModel ? [defaultModel] : []),
+              ...models.filter((id) => id !== defaultModel),
             ],
           }
         : {}),
@@ -78,6 +80,7 @@ export function ConnectionFields({
 }) {
   const { t } = useT("runtimes");
   const profile = value.profile;
+  const [initiallyExpanded] = useState(() => !!profile.model || !!value.models);
   const change = (patch: Partial<typeof profile>) =>
     onChange({ ...value, profile: { ...profile, ...patch } });
   return (
@@ -91,7 +94,7 @@ export function ConnectionFields({
           onChange={(e) => onChange({ ...value, name: e.target.value })}
         />
       </label>
-      {(["name", "base_url", "model"] as const).map((key) => (
+      {(["name", "base_url"] as const).map((key) => (
         <label className="block text-sm" key={key}>
           {t(($) => $.codex_profile[key])}
           <Input
@@ -101,17 +104,6 @@ export function ConnectionFields({
           />
         </label>
       ))}
-      <label className="block text-sm">
-        {t(($) => $.codex_profile.models)}
-        <textarea
-          value={value.models}
-          onChange={(e) => onChange({ ...value, models: e.target.value })}
-          className="mt-1 min-h-24 w-full rounded-md border bg-background p-2 text-sm"
-        />
-        <span className="mt-1 block text-xs text-muted-foreground">
-          {t(($) => $.codex_profile.models_hint)}
-        </span>
-      </label>
       <label className="block text-sm">
         {t(($) => $.codex_profile.auth)}
         <NativeSelect
@@ -179,6 +171,33 @@ export function ConnectionFields({
           </NativeSelect>
         </label>
       )}
+      <p className="text-xs text-muted-foreground">
+        {t(($) => $.configuration.catalog_after_save)}
+      </p>
+      <details open={initiallyExpanded} className="space-y-3">
+        <summary className="cursor-pointer text-sm">
+          {t(($) => $.configuration.advanced_models)}
+        </summary>
+        <label className="block text-sm">
+          {t(($) => $.codex_profile.model)}
+          <Input
+            value={profile.model}
+            placeholder={t(($) => $.configuration.automatic_models)}
+            onChange={(e) => change({ model: e.target.value })}
+          />
+        </label>
+        <label className="block text-sm">
+          {t(($) => $.codex_profile.models)}
+          <textarea
+            value={value.models}
+            onChange={(e) => onChange({ ...value, models: e.target.value })}
+            className="mt-1 min-h-24 w-full rounded-md border bg-background p-2 text-sm"
+          />
+          <span className="mt-1 block text-xs text-muted-foreground">
+            {t(($) => $.codex_profile.models_hint)}
+          </span>
+        </label>
+      </details>
       <p className="text-xs text-muted-foreground">
         {t(($) => $.codex_profile.sessions_hint)}
       </p>

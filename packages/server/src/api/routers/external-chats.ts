@@ -80,6 +80,13 @@ function text(value: unknown): string {
   return value;
 }
 
+function answerKey(value: string): void {
+  if (!value || value.length > 256 || /[\x00-\x1f\x7f-\x9f]/.test(value)
+    || ["__proto__", "constructor", "prototype"].includes(value)) {
+    throw new ExternalChatInputError("Invalid question id");
+  }
+}
+
 function responseInput(value: Record<string, unknown>): Pick<Extract<ExternalChatOperation, { operation: "respond" }>, "decision" | "answers"> {
   if ((value.decision === undefined) === (value.answers === undefined)) throw new ExternalChatInputError("Send either decision or answers");
   if (value.decision !== undefined) {
@@ -90,8 +97,8 @@ function responseInput(value: Record<string, unknown>): Pick<Extract<ExternalCha
   if (!answers || typeof answers !== "object" || Array.isArray(answers) || Object.keys(answers).length > 20) throw new ExternalChatInputError("Invalid answers");
   const result: Record<string, string[]> = {};
   for (const [key, values] of Object.entries(answers)) {
-    opaqueId(key, "question id");
-    if (["__proto__", "constructor", "prototype"].includes(key) || !Array.isArray(values) || values.length > 20
+    answerKey(key);
+    if (!Array.isArray(values) || values.length > 20
       || values.some(value => typeof value !== "string" || value.length > EXTERNAL_CHAT_MAX_TEXT_CHARS || value.includes("\0"))) {
       throw new ExternalChatInputError("Invalid answers");
     }

@@ -862,6 +862,14 @@ These topology edits do not directly write business data. Starting either API
 role still runs the required [usage cutover](#usage-accounting-startup-cutover),
 which can write migration checkpoints and the canonical usage ledger.
 
+External Codex Chat routes under `/api/runtimes/:id/external-chats` also belong
+to the Runtime process: their reverse RPC needs its live daemon connection.
+The UI role returns 421 for this family. The split Nginx location template sends
+these browser and CLI requests to `multica_api_runtime`; apply that location
+when updating an existing split installation. The default single-process stack
+continues serving both surfaces. Authentication remains in the API, including
+the prohibition on task and daemon credentials for native Chat access.
+
 ### Paths and the Compose prefix
 
 Every `docker compose` command in this section names the env file and the

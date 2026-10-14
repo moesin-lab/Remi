@@ -1035,6 +1035,10 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
       return "sce_snapshot";
     case "sourceId":
       return pattern.includes("/messaging/") ? "msrc_snapshot" : "fsrc_snapshot";
+    case "threadId":
+      return "00000000-0000-4000-8000-000000000001";
+    case "requestId":
+      return "00000000-0000-4000-8000-000000000002";
     case "messageId":
       return "fmsg_snapshot";
     case "externalMessageId":
@@ -1719,6 +1723,25 @@ flow("autopilots-native", async (rec, refs) => {
 flow("webhooks", async (rec, refs) => {
   await rec.json("POST", `/api/webhooks/autopilots/${refs.webhookToken}`, { action: "opened" });
   await rec.json("POST", "/api/webhooks/stripe", { type: "checkout.session.completed" });
+});
+
+// Native access is intentionally absent from this in-memory snapshot. These
+// valid requests freeze the explicit unavailable response without touching a CLI.
+flow("external-chats", async (rec, refs, store) => {
+  const runtime = store.registerRuntime({ id: "rt_external_snapshot", name: "External snapshot",
+    provider: "codex", daemonId: "dmn_external_snapshot", workspaceId: refs.workspaceId,
+    metadata: { external_chats: 1 } });
+  const base = `/api/runtimes/${runtime.id}/external-chats`;
+  const threads = `${base}/codex_snapshot/threads`;
+  const thread = `${threads}/00000000-0000-4000-8000-000000000001`;
+  const requestId = "00000000-0000-4000-8000-000000000002";
+  await rec.call("GET", base);
+  await rec.call("GET", threads);
+  await rec.call("GET", thread);
+  await rec.json("POST", `${thread}/messages`, { text: "Snapshot native continuation", request_id: requestId });
+  await rec.call("GET", `${thread}/receipts/${requestId}`);
+  await rec.json("POST", `${thread}/interrupt`, { turn_id: "turn_snapshot" });
+  await rec.json("POST", `${thread}/requests/17`, { decision: "decline" });
 });
 
 // -- runtimes ---------------------------------------------------------------

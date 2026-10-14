@@ -108,8 +108,9 @@ function expectedRefusal(role: ApiRole, pathname: string): boolean {
   if (role === "all") return false;
   const traceRead = /^\/api\/(?:tasks|turns)\/[^/]+\/trace$/.test(pathname)
     || /^\/api\/shares\/[^/]+\/tasks\/[^/]+\/trace$/.test(pathname);
-  if (role === "ui") return pathname.startsWith("/api/daemon/") || traceRead || pathname === "/api/trace/ws";
-  if (traceRead) return false;
+  const externalChat = /^\/api\/runtimes\/[^/]+\/external-chats(?:\/|$)/.test(pathname);
+  if (role === "ui") return pathname.startsWith("/api/daemon/") || traceRead || externalChat || pathname === "/api/trace/ws";
+  if (traceRead || externalChat) return false;
   if (RUNTIME_ALLOWED_EXACT.includes(pathname as (typeof RUNTIME_ALLOWED_EXACT)[number])) return false;
   return !RUNTIME_ALLOWED_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
@@ -358,6 +359,9 @@ describe("MUL-461 api role — env resolution", () => {
       { path: "/api/tasks/task_1/trace", ui: true, runtime: false },
       { path: "/api/turns/turn_1/trace", ui: true, runtime: false },
       { path: "/api/shares/share_1/tasks/task_1/trace", ui: true, runtime: false },
+      { path: "/api/runtimes/rt_1/external-chats", ui: true, runtime: false },
+      { path: "/api/runtimes/rt_1/external-chats/source/threads/thread/messages", ui: true, runtime: false },
+      { path: "/api/runtimes/rt_1/external-chats-other", ui: false, runtime: true },
     ];
     for (const entry of cases) {
       expect(isMisdirectedPath("ui", entry.path), `ui ${entry.path}`).toBe(entry.ui);
@@ -412,9 +416,9 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(statuses.has(route)).toBe(true);
       expect(statuses.get(route), `${route} belongs to the browser/CLI process`).not.toBe(421);
     }
-    expect(misdirected, routeCountHint("ui")).toHaveLength(63);
+    expect(misdirected, routeCountHint("ui")).toHaveLength(70);
     // daemon/ws and trace/ws are tested as real upgrades below.
-    expect(misdirected.length + 2, routeCountHint("ui")).toBe(65);
+    expect(misdirected.length + 2, routeCountHint("ui")).toBe(72);
   });
 
   it("refuses paths outside runtime's daemon, health, peer and trace routes", async () => {
@@ -427,7 +431,7 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
     }
     // Bot management, responsibility, delivery and Question user operations belong
     // to UI; runtime owns daemon/health/peer/trace routes.
-    // Of 827 registered routes, it refuses 753 HTTP routes and two browser
+    // Of 834 registered routes, it refuses 753 HTTP routes and two browser
     // upgrades. The independent literal oracle checks every route above.
     const mintRoute = "GET /api/daemon/runtimes/:runtimeId/feishu-bot/decision-cards";
     expect(statuses.has(mintRoute)).toBe(true);

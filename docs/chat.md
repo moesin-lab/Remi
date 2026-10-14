@@ -1,15 +1,58 @@
 ---
 title: Chat 私聊与消息队列
 status: active
-summary: 独立 Chat 页面与浮窗共用私聊、执行队列和 Chat 管理。
+summary: Remi 私聊与外部 Codex 会话的来源、项目分组、续聊和权限边界。
 ---
 
 # Chat
 
-Chat 是用户与一个云友的持续私聊。可以直接提问、讨论或要求执行工作，无需先创建 Issue。
+Remi Chat 是用户与一个云友的持续私聊。可以直接提问、讨论或要求执行工作，无需先创建 Issue。
 它不是 Session，但它拥有自己的工作 Sessions；完整对象关系见 [Topic、Chat 与 Session](conversation-model.md)。
 独立页面位于 `/<workspaceSlug>/chat`，与其他页面的浮窗共享 Chat 选择和草稿；独立页不再挂载浮窗。
 页面可以通过 `?session=<id>` 打开已有聊天，或通过 `?agent=<id>` 开始新聊天。
+
+## 外部 Codex Chat
+
+Chat 页的「外部」入口读取已注册 macOS / Linux Codex Runtime 上的原生会话。按 Runtime、来源和来源 Project
+选择历史会话后，可在 Remi 继续同一原生 thread。外部会话不创建 Remi Chat、Agent 或工作 Session，
+不进入平台任务调度和日志表；历史与执行状态仍以原生 Codex 为准。
+
+来源由 daemon 扫描当前系统用户拥有的 `~/.codex`、`~/.codex-*` 和自身 `CODEX_HOME`，
+按真实 Home 路径去重，来源 ID 绑定目录身份；同路径目录被替换后，旧来源 ID 失效。
+API 只接受已发现的来源 ID，不接受 Home、socket、任意原生方法或配置覆盖。
+不读取其他系统用户的目录，凭据和完整配置文件不上传。来源 Home 及项目路径用于只读展示。
+工作区人类操作者沿用 Runtime 的共享权限；任务和 daemon 凭据不能读取或控制外部会话。
+
+原生 Project 的名称和 roots 由 Codex 的项目目录提供，保持只读。没有原生 Project 归属的历史会话
+按精确工作目录分组，标记为「按目录发现」，不会据重叠 roots 猜测归属、按远端地址合并不同工作副本，
+或写回原生 Project。每个来源目录扫描有数量上限；达到上限或某个来源不可读时展示警告，不能将部分结果称为完整目录。
+
+读取使用原生 metadata 和有界历史分页，不恢复线程。原生服务已运行时，经其本地控制 socket 接入；
+没有可用原生服务时使用同一来源 Home 的独立 Codex app-server。仍在运行但连接失败的服务不会被另一进程替换。
+继续聊只调用原生 `thread/resume` 和 `turn/start`，不新建、复制或 fork thread，不注入云友提示词、模型、
+连接 Profile、AGENTS 或 Skill。模型、provider、思考强度和工作目录来自原生 metadata；
+权限与其他运行设置由原生 Codex 按其恢复规则解析，不能用当前 Project 配置冒充历史轮设置。
+续接失败、来源离线、writer lease 冲突或版本不支持时明确报错，不冷启动一个替代会话。
+
+Remi 拒绝已知 active 线程的新输入，同一线程在本产品内串行处理发送；本连接发送的上一轮即使已收到 ACK，
+仍需确认原生终态后才能发送下一条，暂缺历史和 unknown 回执都不能作为结束依据。原生接口没有跨客户端的
+「仅在 idle 时发送」原子条件：状态读取后若 Codex App 同时开轮，输入仍可能成为原生插话。
+继续聊时应等原客户端完成当前轮，避免两边同时操作。只能停止明确的原生 turn，不能把取消等同于撤销已执行的工具操作。
+本连接收到的命令、文件、权限审批和用户提问可在 Remi 答复；原客户端已持有的等待仍需回原客户端处理。
+
+依赖客户端专属工具或认证回调、以及超出可完整展示和回答预算的原生请求，会被明确拒绝。
+Remi 不自动执行这些工具、不刷新原生认证、不批准裁剪后的命令或权限；该连接随后保留可见的不支持状态，
+不能宣称拒绝回调后已自动恢复执行。
+
+发送使用客户端生成的 `request_id` 和 daemon 持久回执。断线或超时可能发生在原生接受输入之后，
+因此结果为 `unknown` 时不自动重发，先按原生消息的 client ID 对账。同一个请求 ID 不能绑定不同正文或线程。
+原生读取有独立条数和字节预算，裁剪的输出明确标识；分页不等于一次返回完整历史。
+
+接口见 [外部 Chat 路由](../packages/server/src/api/routers/external-chats.ts)，
+类型见 [共享契约](../packages/contracts/src/external-chats.ts)，
+本机接入见 [Codex driver](../packages/daemon/src/external-chats/index.ts)。
+CLI 使用 `remi chat external sources/list/get/send/receipt/interrupt/respond`，参数由 Registry help 生成。
+普通 Remi Chat 的工作位置、消息队列与管理操作继续遵循以下契约。
 
 ## Chat 与上下文
 
@@ -158,3 +201,7 @@ remi turn list --chat <chat>
 `tests/integration/daemon-protocol-v2/chat-unread-consumption.test.ts` 使用隔离的真实 daemon、API、SQLite、
 ACP 子进程与 CLI 范围读取，回归连续 warm 输入和 next_turn 编辑/删除的消息 ID、正文哈希、读取次数与持久回执。
 该测试使用测试 provider，不调用真实模型，也不代替 PPE 或浏览器验收。
+
+外部会话可运行 `bun run tests/integration/external-codex-chat.ts`：使用已安装的固定版本原生 Codex CLI、
+临时 Home 和本地 Responses fixture，经真实 daemon 协议及 API 验证原线程续聊、模型和目录保留、重复请求去重，
+以及不创建 Remi Project / Chat、不改写来源配置。它不读取用户会话、不调用外部模型，不能代替线上 UI 验收。

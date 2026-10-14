@@ -1,6 +1,17 @@
 import type { ExternalChatOperation, ExternalChatRpcResult } from "@multiremi/contracts/external-chats.js";
 import { EXTERNAL_CHAT_RPC_MAX_BYTES } from "@multiremi/contracts/external-chats.js";
 import type { DaemonProtocolClient } from "./daemon-protocol-client.js";
+import { locateBridgePackage } from "@acp/provision.js";
+import { runtimePackage } from "@acp/runtime-bundle.js";
+
+/** The ACP executable does not forward `cli`; launch its installed Codex package directly. */
+export function installedExternalCodexCommand(): { codexBinary: string; codexArgs: string[] } {
+  const bridge = locateBridgePackage("codex");
+  const node = Bun.which("node");
+  if (!bridge || !node) throw new Error("Installed Codex runtime or Node executable is unavailable");
+
+  return { codexBinary: node, codexArgs: [runtimePackage("codex", bridge).executable] };
+}
 
 export interface NativeExternalChatDriver {
   request(operation: ExternalChatOperation): Promise<ExternalChatRpcResult>;

@@ -5,21 +5,29 @@ import { useChatStore } from "@multiremi/core/chat";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import { useNavigation } from "../../navigation";
 import { ChatWindow } from "./chat-window";
+import { ExternalChatPage } from "./external-chat-page";
 import type { IssueLogBootstrap } from "@multiremi/core/api/schemas/session-log";
 
 export function ChatPage({ initialLog, initialSessionId }: { initialLog?: IssueLogBootstrap; initialSessionId?: string } = {}) {
   const navigation = useNavigation();
   const paths = useWorkspacePaths();
+  const external = navigation.searchParams.get("kind") === "external";
   const querySession = navigation.searchParams.get("session") ?? initialSessionId;
   const queryAgent = navigation.searchParams.get("agent");
   const mounted = useRef(false);
+  const returningFromExternal = useRef(false);
   useEffect(() => {
+    if (external) {
+      returningFromExternal.current = true;
+      return;
+    }
     const state = useChatStore.getState();
     if (querySession) state.setActiveSession(querySession);
-    else if (queryAgent || mounted.current) state.setActiveSession(null);
+    else if (queryAgent || (mounted.current && !returningFromExternal.current)) state.setActiveSession(null);
     if (queryAgent) state.setSelectedAgentId(queryAgent);
     mounted.current = true;
-  }, [querySession, queryAgent]);
+    returningFromExternal.current = false;
+  }, [querySession, queryAgent, external]);
   const onSessionChange = useCallback(
     (sessionId: string | null, agentId?: string) => {
       navigation.replace(
@@ -28,6 +36,7 @@ export function ChatPage({ initialLog, initialSessionId }: { initialLog?: IssueL
     },
     [navigation, paths],
   );
+  if (external) return <ExternalChatPage />;
   return <ChatWindow presentation="page" onSessionChange={onSessionChange}
     initialLog={initialLog} initialSessionId={querySession ?? undefined} />;
 }

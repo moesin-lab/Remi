@@ -549,6 +549,12 @@ export function ChatWindow({
     <>
       {/* Header — ⊕ new + session dropdown | window tools */}
       <div className="flex items-center justify-between border-b px-4 py-2.5 gap-2">
+        <nav className="flex shrink-0 items-center gap-1 text-xs">
+          <span aria-current="page">{t(($) => $.external.switch_remi)}</span>
+          <Button type="button" variant="ghost" size="sm" onClick={() => navigation.push(workspacePaths.externalChat())}>
+            {t(($) => $.external.switch_external)}
+          </Button>
+        </nav>
         {isPage && (
           <Button
             variant="ghost"

@@ -78,6 +78,13 @@ describe("paths.workspace(slug)", () => {
       `/acme/projects/p1/wiki/${encodeURIComponent("部署手册")}`,
     );
   });
+
+  it("keeps native source/thread deep links distinct from Remi sessions", () => {
+    const url = new URL(ws.externalChat("rt/1", "source&1", "thread?2"), "https://remi.test");
+    expect(url.pathname).toBe("/acme/chat");
+    expect(Object.fromEntries(url.searchParams)).toEqual({ kind: "external", external_runtime: "rt/1", external_source: "source&1", external_thread: "thread?2" });
+    expect(url.searchParams.has("session")).toBe(false);
+  });
 });
 
 describe("paths (global)", () => {

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmod, copyFile, link, lstat, mkdir, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
-import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { parse as parseToml, stringify as stringifyToml, type TomlTable } from "smol-toml";
 import { sanitizeProviderConfigValue } from "../provider-config-sanitize.js";
 import type { PreparedAgentPluginRuntime } from "./types.js";
 import { AgentPluginError } from "./types.js";
@@ -203,6 +203,56 @@ async function readCodexExecutionConfig(baseHome: string): Promise<string> {
     if (CODEX_EXECUTION_CONFIG_KEYS.has(key)) allowed[key] = sanitizeProviderConfigValue(value);
   }
   return stringifyToml(allowed);
+}
+
+/** Inherit only native Skill enablement and its catalog budget, never routing or credentials. */
+export function mergeCodexSkillSettings(currentToml: string, userToml: string): string {
+  const current = parseToml(currentToml);
+  let source: unknown;
+  try {
+    source = parseToml(userToml).skills;
+  } catch {
+    // A user config can contain unrelated credentials; never repeat its raw
+    // parser excerpt in task errors.
+    throw new Error("Codex Skill settings source is not valid TOML");
+  }
+  if (source === undefined) return currentToml;
+  if (!source || typeof source !== "object" || Array.isArray(source) || source instanceof Date) {
+    throw new Error("Codex skills must be a table");
+  }
+  const table = source as Record<string, unknown>;
+
+  const skills: TomlTable = {};
+  const config = table.config;
+  if (config !== undefined) {
+    if (!Array.isArray(config)) throw new Error("Codex skills.config must be an array");
+    skills.config = config.map(entry => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)
+        || typeof entry.path !== "string" || !isAbsolute(entry.path)
+        || typeof entry.enabled !== "boolean") {
+        throw new Error("Codex skills.config entries require an absolute path and boolean enabled");
+      }
+      return { path: entry.path, enabled: entry.enabled };
+    });
+  }
+  const budget = table.max_context_tokens;
+  if (budget !== undefined) {
+    if (typeof budget !== "number" || !Number.isSafeInteger(budget) || budget < 1) {
+      throw new Error("Codex skills.max_context_tokens must be a positive integer");
+    }
+    skills.max_context_tokens = budget;
+  }
+
+  if (!Object.keys(skills).length) return currentToml;
+  const existing = current.skills;
+  if (existing !== undefined && (!existing || typeof existing !== "object" || Array.isArray(existing) || existing instanceof Date)) {
+    throw new Error("Codex current skills must be a table");
+  }
+  current.skills = {
+    ...(existing as TomlTable | undefined),
+    ...skills,
+  };
+  return stringifyToml(current);
 }
 
 /**

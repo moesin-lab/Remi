@@ -123,9 +123,11 @@ macOS 的 socket 路径上限是 104 字节（`sun_path`），而真实私有目
 
 daemon 检查 cwd、额外上下文和环境文件的真实路径位于根目录内。目录缺失、越界或不可读写时任务失败，不创建替代目录。
 
-原生会话历史继续按 Session 隔离。daemon 在隔离的 provider home 中生成本地指令，包含用户级指令、根目录到 cwd 的指令和 Skill 索引。Codex 每层按 `AGENTS.override.md`、`AGENTS.md`、`AGENT.md` 选一份；Claude 每层按 `CLAUDE.md`、`AGENTS.md`、`AGENT.md` 选一份。目录越具体，优先级越高。
+原生会话历史继续按 Session 隔离。daemon 在隔离的 provider home 中生成本地指令。Codex 保留显式基础 Home 的用户指令；基础 Home 没有指令文件时，从实际用户的 `~/.codex` 读取。每层按 `AGENTS.override.md`、`AGENTS.md`、`AGENT.md` 选择；Git 根目录到 cwd 的指令由原生 Codex 加载，不再重复写入隔离 Home。注册根目录与 Git 根之间的指令，以及显式额外上下文文件，仍由 daemon 校验并注入。无 Git 目录的 cwd 指令也由原生 Codex读取。Claude 等 provider 保持原有指令和 Skill 索引装配；Claude 每层按 `CLAUDE.md`、`AGENTS.md`、`AGENT.md` 选一份。目录越具体，优先级越高。
 
-Skill 索引包含名称、触发描述和绝对 `SKILL.md` 路径，支持文件从原目录读取。数据库 Agent Skill 写入 daemon 状态目录，不覆盖本地同名 Skill。单份上下文文件上限 256 KiB；生成的本地指令和 Skill 索引合计上限 24 KiB，超限明确失败。
+Codex 的 Skill 发现与目录预算使用固定原生版本：用户 `~/.agents/skills` 和仓库 Skill 由原生加载；注册根目录到 cwd 的各级 `.agents/skills` 与数据库 Agent Skill 通过现有 ACP additional directories 注册。`~/.codex/skills`、基础 Home 的 Skill 与显式额外 Skill 目录在隔离 Home 中建立受管链接，保留原文件、完整触发描述和绝对路径，不解析或截断 Skill 元信息。每次准备只核对和清理本工作区的旧链接，不覆盖其他原生 Skill；显式上下文及目录内的 Skill 路径仍必须位于注册根目录内。数据库 Agent Skill 留在 daemon 状态目录，不覆盖本地同名 Skill。
+
+只有用户 `~/.codex/config.toml` 中通过类型校验的 `skills.config` 启用状态与 `skills.max_context_tokens` 预算会合入隔离配置，不复制模型、认证、Plugin 或 trust 设置。无效 Skill 的读取与元信息问题由原生 Skill 发现反馈，不让一份 Skill 的 YAML 问题阻断整个工作区。单份 daemon 注入的上下文文件上限 256 KiB；生成的本地指令保持 24 KiB 上限，Codex 不再把全量 Skill 索引计入其中。Codex 仍使用其原生指令链预算（固定版本默认 32 KiB）与 Skill 目录预算；其他 provider 的生成指令和 Skill 索引合计仍为 24 KiB，超限明确失败。
 
 `env_file` 使用 dotenv 格式，不执行 shell。注入顺序：机器环境 → 团队环境 → Agent 环境 → 本地环境文件 → provider 路由/认证 → Task 坐标。本地文件不能覆盖 `MULTIREMI_*`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`OPENAI_*`、`ANTHROPIC_*`。其他 provider 配置继续沿用现有筛选、插件和 relay 机制，不共享完整 native home。
 

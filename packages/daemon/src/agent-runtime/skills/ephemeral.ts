@@ -180,7 +180,7 @@ function renderSkillMarkdown(skill: NonNullable<AgentTask["agent"]>["skills"][nu
     "---",
     "",
   ].filter((line) => line !== "").join("\n");
-  return `${frontmatter}${content}`;
+  return `${frontmatter}\n${content}`;
 }
 
 function yamlQuote(value: string): string {

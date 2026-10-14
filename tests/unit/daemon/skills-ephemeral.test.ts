@@ -61,6 +61,7 @@ test("codex tasks materialize skills into .agents/skills — the only root codex
 
   const skillFile = join(workDir, ".agents", "skills", "deploy-runbook", "SKILL.md");
   expect(readFileSync(skillFile, "utf-8")).toContain("step one");
+  expect(readFileSync(skillFile, "utf-8")).toMatch(/^---\n[\s\S]*?\n---\nstep one\n$/);
   expect(readFileSync(join(workDir, ".agents", "skills", "deploy-runbook", "scripts", "check.sh"), "utf-8")).toBe("echo ok\n");
   expect(existsSync(join(workDir, ".claude", "skills"))).toBe(false);
 });

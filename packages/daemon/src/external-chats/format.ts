@@ -52,22 +52,34 @@ function contentText(content: NativeObject): string {
 
 /** Bound both text and item count; omitted content is represented by an explicit marker. */
 export function turns(values: NativeObject[]): ExternalChatTurn[] {
+  const pages = values.map(turn => ({ turn, entries: array(turn.items).map(item => ({
+    item, text: itemText(item), rendered: undefined as ExternalChatItem | undefined,
+  })) }));
+  const entries = pages.flatMap(page => page.entries);
   let remaining = 100_000;
   let count = 0;
-  return values.map(turn => {
-    const items: ExternalChatItem[] = [];
-    for (const item of array(turn.items)) {
-      if (++count > 400 || remaining <= 0) {
-        items.push({ id: `truncated_${string(turn.id)}`, type: "truncated", role: "tool", text: "本页内容超过显示上限，已截断。", truncated: true });
-        break;
-      }
-      const text = itemText(item);
+  // Reserve space for each turn's omission marker. Recent dialogue must not
+  // disappear merely because an older tool produced a large output.
+  const itemBudget = Math.max(0, 400 - pages.length);
+  for (const dialogue of [true, false]) {
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const entry = entries[index]!;
+      const { item, text } = entry;
+      if ((item.type === "userMessage" || item.type === "agentMessage") !== dialogue) continue;
+      if (count >= itemBudget || remaining <= 0) continue;
+
       const limit = Math.min(EXTERNAL_CHAT_MAX_TEXT_CHARS, remaining);
       remaining -= Math.min(text.length, limit);
+      count++;
       const type = string(item.type).slice(0, 80);
-      items.push({ id: string(item.id).slice(0, 160), type, role: type === "userMessage" ? "user" : ["agentMessage", "reasoning", "plan"].includes(type) ? "assistant" : "tool",
-        text: text.slice(0, limit), ...(text.length > limit || type === "truncated" ? { truncated: true } : {}) });
+      entry.rendered = { id: string(item.id).slice(0, 160), type, role: type === "userMessage" ? "user" : ["agentMessage", "reasoning", "plan"].includes(type) ? "assistant" : "tool",
+        text: text.slice(0, limit), ...(text.length > limit || type === "truncated" ? { truncated: true } : {}) };
     }
+  }
+
+  return pages.map(({ turn, entries }) => {
+    const items = entries.flatMap(entry => entry.rendered ? [entry.rendered] : []);
+    if (entries.some(entry => !entry.rendered)) items.push({ id: `truncated_${string(turn.id)}`, type: "truncated", role: "tool", text: "本页内容超过显示上限，已截断。", truncated: true });
     const error = string(object(turn.error).message);
     return { id: string(turn.id), status: string(turn.status), items, ...(error ? { error: error.slice(0, 1_000) } : {}) };
   });

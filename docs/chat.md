@@ -46,7 +46,8 @@ Remi 不自动执行这些工具、不刷新原生认证、不批准裁剪后的
 
 发送使用客户端生成的 `request_id` 和 daemon 持久回执。断线或超时可能发生在原生接受输入之后，
 因此结果为 `unknown` 时不自动重发，先按原生消息的 client ID 对账。同一个请求 ID 不能绑定不同正文或线程。
-原生读取有独立条数和字节预算，裁剪的输出明确标识；分页不等于一次返回完整历史。
+原生读取有独立条数和字节预算，优先保留最近的用户消息与助手回复，再展示工具输出；
+裁剪的输出明确标识，分页不等于一次返回完整历史。
 
 接口见 [外部 Chat 路由](../packages/server/src/api/routers/external-chats.ts)，
 类型见 [共享契约](../packages/contracts/src/external-chats.ts)，

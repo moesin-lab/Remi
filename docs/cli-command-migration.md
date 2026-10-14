@@ -909,3 +909,29 @@ serve the new message and cursor contract. Old item IDs are rejected locally.
 | `remi issue comment resolve` | `remi message resolve <message>` |
 | `remi issue comment unresolve` | `remi message resolve <message> --no-resolved` |
 | `remi inbox read <inb_item>` | `remi inbox read <conversation> [--to <seq>]` |
+
+## External native Codex Chats
+
+These commands read or continue the original Codex thread on the selected Runtime.
+They require human credentials and use the selected workspace's Runtime access.
+Source and Project IDs come from the native catalog; they are opaque IDs, not
+filesystem paths or product Chat IDs.
+
+| Operation | Canonical command |
+| --- | --- |
+| Sources and Projects | `remi chat external sources --runtime <id>` |
+| One Chat page | `remi chat external list --runtime <id> --source <id> [--project <id>] [--cursor <cursor>] [--limit 1..50]` |
+| One history page and pending requests | `remi chat external get <thread> --runtime <id> --source <id> [--cursor <cursor>] [--limit 1..50]` |
+| Send to the original thread | `remi chat external send <thread> --runtime <id> --source <id> --text <text> [--request-id <uuid>]` |
+| Reconcile a send | `remi chat external receipt <thread> --runtime <id> --source <id> --request-id <uuid>` |
+| Interrupt an exact native turn | `remi chat external interrupt <thread> --runtime <id> --source <id> --turn <turn>` |
+| Answer a pending native request | `remi chat external respond <thread> --runtime <id> --source <id> --request-id <id> --decision accept\|decline\|cancel` or `--answers-json '{"question-id":["answer"]}'` |
+
+`send` generates a new UUID when `--request-id` is omitted. Its receipt retains
+that UUID, the original thread, native turn and `accepted` or `unknown` outcome.
+Lost or invalid acknowledgements preserve an unknown receipt in the CLI error
+details and a reconciliation hint. Query `receipt` with the same UUID before
+making a new send. Native sends, interrupts and request responses are never
+automatically retried; a receipt UUID is not an HTTP retry authorization.
+`respond` accepts only one of `--decision` and `--answers-json`; its request ID is
+the opaque pending request ID delivered to this Remi connection, not a send UUID.

@@ -163,6 +163,7 @@ const TASK_PARITY_DENIED_COMMAND_IDS = new Set([
 ]);
 
 const TASK_PARITY_DENIED_COMMAND_PREFIXES = [
+  "chat.external.",
   "account.",
   "billing.",
   "context.auth.",

@@ -131,7 +131,7 @@ export async function connectNative(home: string, options: NativeOptions): Promi
       capabilities: { experimentalApi: true },
     });
     if (realpathSync(string(initialized.codexHome)) !== home) throw new NativeError("source_home_mismatch");
-    channel.version = string(initialized.userAgent).match(/(?:codex_cli_rs|codex-cli|codex)\/(\d+\.\d+\.\d+[^\s;)]*)/)?.[1] ?? "";
+    channel.version = string(initialized.userAgent).match(/(?:codex_cli_rs|codex-cli|codex|Codex Desktop)\/(\d+\.\d+\.\d+[^\s;)]*)/)?.[1] ?? "";
     channel.notify("initialized");
     return channel;
   } catch (error) {
@@ -156,7 +156,8 @@ class Channel implements NativeConnection {
   constructor(readonly connection: "live" | "isolated", private timeoutMs: number) {}
 
   async openWebSocket(socket: string): Promise<void> {
-    const ws = new WebSocket(`ws+unix://${socket}:/`, { handshakeTimeout: this.timeoutMs, maxPayload: MAX_NATIVE_BYTES });
+    // Keep Bun's Unix handshake compatible with Codex Desktop 0.154 by disabling compression.
+    const ws = new WebSocket(`ws+unix://${socket}:/`, { handshakeTimeout: this.timeoutMs, maxPayload: MAX_NATIVE_BYTES, perMessageDeflate: false });
     this.socket = ws;
     ws.on("message", data => this.receive(data.toString()));
     ws.on("error", () => this.fail(new NativeError("native_connection_failed")));

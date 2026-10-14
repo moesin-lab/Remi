@@ -362,7 +362,10 @@ describe.skipIf(typeof process.getuid !== "function")("external Codex chats", ()
     const server = createServer();
     const wss = new WebSocketServer({ server });
     const calls: NativeObject[] = [];
+    const compressionOffers: unknown[] = [];
+    server.on("upgrade", request => compressionOffers.push(request.headers["sec-websocket-extensions"]));
     let initializedHome = f.home;
+    let userAgent = "Codex Desktop/0.154.0 (Linux Unknown; x86_64)";
     wss.on("connection", ws => ws.on("message", data => {
       const message = JSON.parse(data.toString()) as NativeObject;
       calls.push(message);
@@ -373,13 +376,15 @@ describe.skipIf(typeof process.getuid !== "function")("external Codex chats", ()
         ws.send(JSON.stringify({ id: "questions_native", method: "item/tool/requestUserInput", params: { threadId: "thread_a", turnId: "turn_a", questions: Array.from({ length: 21 }, (_, i) => ({ id: `q_${i}`, header: "Choice", question: "Continue?" })) } }));
         ws.send(JSON.stringify({ id: "approval_native", method: "item/commandExecution/requestApproval", params: { threadId: "thread_a", turnId: "turn_a" } }));
       }
-      if (message.id && message.method) ws.send(JSON.stringify({ id: message.id, result: message.method === "initialize" ? { codexHome: initializedHome, userAgent: "codex_cli_rs/0.162.1" } : { data: [] } }));
+      if (message.id && message.method) ws.send(JSON.stringify({ id: message.id, result: message.method === "initialize" ? { codexHome: initializedHome, userAgent } : { data: [] } }));
     }));
     await new Promise<void>(resolve => server.listen(socket, resolve));
     cleanups.push(() => { for (const client of wss.clients) client.terminate(); wss.close(); server.closeAllConnections(); server.close(); });
     const connection = await connectNative(f.home, { uid: process.getuid!(), codexBinary: "/NEVER_EXECUTE_MISSING_BINARY" });
     cleanups.push(() => connection.close());
     expect(connection.connection).toBe("live");
+    expect(connection.version).toBe("0.154.0");
+    expect(compressionOffers).toEqual([undefined]);
     await connection.rpc("thread/list", { useStateDbOnly: true });
     expect(calls[0]!.params).toMatchObject({ clientInfo: { name: "codex-backend" }, capabilities: { experimentalApi: true } });
     await connection.rpc("thread/read", { threadId: "thread_a" });
@@ -395,6 +400,10 @@ describe.skipIf(typeof process.getuid !== "function")("external Codex chats", ()
     for (const ws of wss.clients) ws.send(JSON.stringify({ method: "serverRequest/resolved", params: { requestId: "approval_native" } }));
     await connection.rpc("thread/list", { useStateDbOnly: true });
     expect(connection.pending("thread_a")).toEqual([]);
+    userAgent = "Unknown Client/0.154.0";
+    const unknown = await connectNative(f.home, { uid: process.getuid!(), codexBinary: "/NEVER_EXECUTE_MISSING_BINARY" });
+    cleanups.push(() => unknown.close());
+    expect(unknown.version).toBe("");
     initializedHome = f.user;
     await expect(connectNative(f.home, { uid: process.getuid!(), codexBinary: "/NEVER_EXECUTE_MISSING_BINARY" })).rejects.toMatchObject({ code: "source_home_mismatch" });
   });
@@ -407,6 +416,7 @@ describe.skipIf(typeof process.getuid !== "function")("external Codex chats", ()
     const connection = await connectNative(f.home, { uid: process.getuid!(), codexBinary: process.execPath, codexArgs: [script] });
     cleanups.push(() => connection.close());
     expect(connection.connection).toBe("isolated");
+    expect(connection.version).toBe("0.162.1");
     expect(JSON.parse(readFileSync(capture, "utf8").trim())).toEqual({ args: ["app-server", "--listen", "stdio://"], home: realpathSync(f.home) });
   });
 

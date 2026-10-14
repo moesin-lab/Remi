@@ -12,6 +12,7 @@ import { PageHeader } from "../../layout/page-header";
 import { RuntimeMemberIdentity } from "../../runtimes/components/runtime-member-identity";
 import { useT } from "../../i18n";
 import { ExternalChatWindow } from "./external-chat-window";
+import { ExternalChatProjectPicker } from "./external-chat-project-picker";
 
 export function ExternalChatPage() {
   const { t } = useT("chat");
@@ -74,14 +75,7 @@ export function ExternalChatPage() {
           ))}
           {sourceId && catalog.data && !source && <p role="alert">{t(($) => $.external.source_missing)}</p>}
           {source && <>
-            <Button variant="outline" aria-pressed={!projectId} onClick={() => setProject({ source: sourceKey, id: "" })}>{t(($) => $.external.all_projects)}</Button>
-            {projects.map(row => (
-              <button type="button" className="block w-full rounded border p-2 text-left" key={row.id} aria-pressed={projectId === row.id} onClick={() => setProject({ source: sourceKey, id: row.id })}>
-                <span className="block break-words font-medium">{row.name}</span>
-                <span className="block text-xs text-muted-foreground">{row.kind === "native" ? t(($) => $.external.native_project) : row.kind === "directory" ? t(($) => $.external.directory_project) : row.kind}</span>
-                {row.roots.map(path => <span className="block break-all text-xs text-muted-foreground" key={path}>{path}</span>)}
-              </button>
-            ))}
+            <ExternalChatProjectPicker key={sourceKey} projects={projects} projectId={projectId} onChange={id => setProject({ source: sourceKey, id })} />
             {threads.isPending && <p role="status">{t(($) => $.page.loading)}</p>}
             {threads.isError && <p role="alert">{threads.error.message} <Button variant="outline" onClick={() => void threads.refetch()}>{t(($) => $.page.retry)}</Button></p>}
             {threads.data && chats.length === 0 && <p>{t(($) => $.external.empty)}</p>}

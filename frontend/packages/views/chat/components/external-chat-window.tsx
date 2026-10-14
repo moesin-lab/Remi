@@ -3,7 +3,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@multiremi/core/api";
-import { externalChatHistoryOptions, externalChatKeys, externalChatWriteIsUnknown, EXTERNAL_CHAT_MAX_TEXT_CHARS, type ExternalChatReceipt, type ExternalChatTurn } from "@multiremi/core/chat";
+import { externalChatHistoryOptions, externalChatKeys, externalChatWriteIsUnknown, externalChatReceiptStorageKey, readExternalChatReceipt, writeExternalChatReceipt, EXTERNAL_CHAT_MAX_TEXT_CHARS, type ExternalChatReceipt, type ExternalChatTurn } from "@multiremi/core/chat";
+import { defaultSessionStorage } from "@multiremi/core/platform";
 import { createSafeId } from "@multiremi/core/utils";
 import { Button } from "@multiremi/ui/components/ui/button";
 import { Markdown } from "@multiremi/ui/markdown";
@@ -11,7 +12,7 @@ import { useT } from "../../i18n";
 import { ExternalChatRequestCard } from "./external-chat-request";
 
 const terminal = (status: string) => ["completed", "failed", "interrupted", "cancelled"].includes(status);
-interface NativeSendState { receipt: ExternalChatReceipt; text: string }
+interface NativeSendState { receipt: ExternalChatReceipt; text?: string }
 
 export function ExternalChatWindow({ ws, runtime, source, thread, online, draft, onDraftChange }: {
   ws: string; runtime: string; source: string; thread: string; online: boolean;
@@ -26,11 +27,21 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, draft,
   const followTail = useRef(true);
   const [sendError, setSendError] = useState(false);
   const lastReceiptKey = externalChatKeys.lastReceipt(ws, runtime, source, thread);
-  // Retain an unresolved native write across source changes. It is never replayed.
+  const storageKey = externalChatReceiptStorageKey(ws, runtime, source, thread);
+  const [stored] = useState(() => readExternalChatReceipt(defaultSessionStorage, storageKey, thread));
+  const [storageAvailable, setStorageAvailable] = useState(stored.available);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+  // Restore only the acknowledgement, never the text or the native POST.
   const { data: sendState } = useQuery({
-    queryKey: lastReceiptKey, queryFn: (): NativeSendState | null => null, enabled: false, initialData: null, staleTime: Infinity,
+    queryKey: lastReceiptKey, queryFn: (): NativeSendState | null => null, enabled: false,
+    initialData: (): NativeSendState | null => stored.receipt ? { receipt: stored.receipt } : null, staleTime: Infinity,
   });
-  const lastReceipt = sendState?.receipt;
+  const recordSend = (state: NativeSendState | null) => {
+    client.setQueryData(lastReceiptKey, state);
+    setStorageAvailable(writeExternalChatReceipt(defaultSessionStorage, storageKey, state?.receipt ?? null));
+  };
+  const lastReceipt = mounted ? sendState?.receipt : undefined;
   const history = useInfiniteQuery({
     ...externalChatHistoryOptions(ws, runtime, source, thread, online),
     refetchInterval: query => {
@@ -77,9 +88,10 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, draft,
   useEffect(() => {
     if (!sendState || !uncertain || receipt.data?.outcome !== "accepted") return;
     client.setQueryData<NativeSendState>(lastReceiptKey, { receipt: receipt.data, text: sendState.text });
-    if (draftRef.current === sendState?.text) onDraftChange("");
+    setStorageAvailable(writeExternalChatReceipt(defaultSessionStorage, storageKey, receipt.data));
+    if (sendState.text !== undefined && draftRef.current === sendState.text) onDraftChange("");
     void client.invalidateQueries({ queryKey: historyKey });
-  }, [receipt.data, uncertain, client, lastReceiptKey, sendState, onDraftChange, historyKey]);
+  }, [receipt.data, uncertain, client, lastReceiptKey, sendState, onDraftChange, historyKey, storageKey]);
 
   const interrupt = useMutation({ mutationFn: (turn: string) => api.interruptExternalChatTurn(runtime, source, thread, turn), retry: false, onSuccess: refresh });
   const respond = useMutation({
@@ -87,7 +99,7 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, draft,
       api.respondExternalChatRequest(runtime, source, thread, id, input),
     retry: false, onSuccess: refresh,
   });
-  const canSend = online && !!current && !history.isError && ["idle", "notLoaded"].includes(current.chat.status) && !active && !uncertain && !send.isPending;
+  const canSend = mounted && online && !!current && !history.isError && ["idle", "notLoaded"].includes(current.chat.status) && !active && !uncertain && !send.isPending;
 
   useLayoutEffect(() => {
     const root = scrollRoot.current;
@@ -99,17 +111,17 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, draft,
     sending.current = true;
     setSendError(false);
     const input = { text: draft, request_id: createSafeId() };
-    client.setQueryData<NativeSendState>(lastReceiptKey, {
+    recordSend({
       receipt: { request_id: input.request_id, thread_id: thread, turn_id: null, outcome: "unknown" }, text: input.text,
     });
     try {
       const result = await send.mutateAsync(input);
-      client.setQueryData<NativeSendState>(lastReceiptKey, { receipt: result, text: input.text });
+      recordSend({ receipt: result, text: input.text });
       if (result.outcome === "accepted" && draftRef.current === input.text) onDraftChange("");
       refresh();
     } catch (error) {
       if (!externalChatWriteIsUnknown(error)) {
-        client.setQueryData(lastReceiptKey, null);
+        recordSend(null);
         setSendError(true);
       }
     } finally {
@@ -166,6 +178,7 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, draft,
         <Button variant="outline" disabled={!online || receipt.isFetching} onClick={() => void receipt.refetch()}>{t(($) => $.external.check_receipt)}</Button>
       </div>}
       {sendError && <p role="alert" className="px-3 text-sm text-destructive">{t(($) => $.external.send_failed)}</p>}
+      {mounted && !storageAvailable && <p role="alert" className="px-3 text-sm text-warning">{t(($) => $.external.receipt_storage_unavailable)}</p>}
       <form className="space-y-2 border-t p-3" onSubmit={event => { event.preventDefault(); void submit(); }}>
         <textarea aria-label={t(($) => $.external.message)} maxLength={EXTERNAL_CHAT_MAX_TEXT_CHARS} value={draft} disabled={!online || !current}
           onChange={event => onDraftChange(event.target.value)} className="min-h-20 w-full resize-y rounded-md border bg-background p-2 text-sm" />

@@ -41,3 +41,4 @@ export const useChatStore: ChatStoreInstance = new Proxy(
   },
 );
 export * from "./external-chats";
+export * from "./external-chat-receipts";

@@ -8,20 +8,34 @@ export function ExternalChatProjectPicker({ projects, projectId, onChange }: {
   projects: ExternalChatProject[]; projectId: string; onChange: (id: string) => void;
 }) {
   const { t } = useT("chat");
-  const selected = projects.find(project => project.id === projectId);
-  const options: { id: string; name: string; roots: string[] }[] = [{ id: "", name: t(($) => $.external.all_projects), roots: [] }, ...projects];
+  const projectsById = new Map(projects.map(project => [project.id, project]));
+  const selected = projectsById.get(projectId);
+  const options = ["", ...projectsById.keys()];
 
   return <div className="space-y-2">
-    <Combobox items={options} value={options.find(option => option.id === projectId) ?? options[0]}
-      onValueChange={option => { if (option) onChange(option.id); }}
-      itemToStringLabel={option => option.name}
-      itemToStringValue={option => option.id}
-      filter={(option, query) => `${option.name} ${option.roots.join(" ")}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())}
-      isItemEqualToValue={(option, value) => option.id === value.id}>
+    <Combobox items={options} value={selected ? projectId : ""}
+      onValueChange={id => { if (id !== null) onChange(id); }}
+      itemToStringLabel={id => projectsById.get(id)?.name ?? t(($) => $.external.all_projects)}
+      filter={(id, query) => {
+        const option = projectsById.get(id);
+        const text = option ? `${option.name} ${option.roots.join(" ")}` : t(($) => $.external.all_projects);
+        return text.toLocaleLowerCase().includes(query.toLocaleLowerCase());
+      }}>
       <ComboboxInput className="w-full" aria-label={t(($) => $.external.search_projects)} placeholder={t(($) => $.external.search_projects)} />
       <ComboboxContent>
         <ComboboxEmpty>{t(($) => $.external.no_projects)}</ComboboxEmpty>
-        <ComboboxList>{(option: { id: string; name: string }) => <ComboboxItem key={option.id} value={option}>{option.name}</ComboboxItem>}</ComboboxList>
+        <ComboboxList>{(id: string) => {
+          const option = projectsById.get(id);
+          return <ComboboxItem key={id} value={id} className="items-start py-2">
+            <span className="min-w-0">
+              <span className="block break-words">{option?.name ?? t(($) => $.external.all_projects)}</span>
+              {option && <>
+                <span className="block text-xs text-muted-foreground">{option.kind === "native" ? t(($) => $.external.native_project) : option.kind === "directory" ? t(($) => $.external.directory_project) : option.kind}</span>
+                <span className="block break-all text-xs text-muted-foreground">{option.roots.join(" · ")}</span>
+              </>}
+            </span>
+          </ComboboxItem>;
+        }}</ComboboxList>
       </ComboboxContent>
     </Combobox>
     {selected && <div className="rounded border p-2">

@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import {
   EXTERNAL_CHAT_MAX_PAGE_SIZE,
   EXTERNAL_CHAT_MAX_TEXT_CHARS,
+  type ExternalChatCatalog,
   type ExternalChatHistory,
+  type ExternalChatList,
   type ExternalChatReceipt,
 } from "@multiremi/contracts/external-chats.js";
 import { CliError, CliRenderer, type CliOptionSpec, type CommandInvocation, type CommandSpec } from "../core/index.js";
@@ -25,16 +27,16 @@ export function externalChatCommandSpecs(): CommandSpec[] {
     },
     spec("sources", "List native Codex sources and their Projects", "read", [RUNTIME], async invocation => {
       const path = catalogPath(invocation);
-      const response = await (await clientFor(invocation)).request({ method: "GET", path });
-      renderResource(invocation, response.data, ["sources"]);
+      const response = await (await clientFor(invocation)).request<ExternalChatCatalog>({ method: "GET", path });
+      renderSources(invocation, response.data);
     }, false),
     spec("list", "List one page of native Chats", "read", [RUNTIME, SOURCE, ...PAGE,
       { name: "project", type: "string", valueName: "id", description: "Native or directory Project ID from the source catalog" },
     ], async invocation => {
       const path = threadsPath(invocation);
       const query = { ...pageQuery(invocation), project_id: stringOption(invocation, "project") };
-      const response = await (await clientFor(invocation)).request({ method: "GET", path, query });
-      renderResource(invocation, response.data, ["chats"]);
+      const response = await (await clientFor(invocation)).request<ExternalChatList>({ method: "GET", path, query });
+      renderChats(invocation, response.data);
     }, false),
     spec("get", "Read one page of original native Chat history and pending requests", "read", [RUNTIME, SOURCE, ...PAGE], async invocation => {
       const path = threadPath(invocation), query = pageQuery(invocation);
@@ -175,9 +177,34 @@ function renderReceipt(invocation: CommandInvocation, receipt: ExternalChatRecei
   ] });
 }
 
+function renderSources(invocation: CommandInvocation, catalog: ExternalChatCatalog): void {
+  new CliRenderer().render(catalog, { mode: outputMode(invocation), rows: () => catalog.sources, columns: [
+    { header: "ID", value: row => row.id },
+    { header: "NAME", value: row => row.name },
+    { header: "HOME", value: row => row.home },
+    { header: "CONNECTION", value: row => row.connection },
+  ] });
+}
+
+function renderChats(invocation: CommandInvocation, list: ExternalChatList): void {
+  const renderer = new CliRenderer(), mode = outputMode(invocation);
+  renderer.render(list, { mode, rows: () => list.chats, columns: [
+    { header: "ID", value: row => row.id },
+    { header: "TITLE", value: row => row.title },
+    { header: "PROJECT", value: row => row.project_id },
+    { header: "CWD", value: row => row.cwd },
+    { header: "STATE", value: row => row.status },
+    { header: "MODEL", value: row => row.model },
+  ] });
+  if (mode === "table" && list.next_cursor) renderer.diagnostic(`next_cursor: ${list.next_cursor}`);
+}
+
 function renderHistory(invocation: CommandInvocation, history: ExternalChatHistory): void {
-  new CliRenderer().render(history, { mode: outputMode(invocation), rows: () => [
-    ...history.turns.flatMap(turn => turn.items.map(item => ({ turn: turn.id, role: item.role, text: item.text }))),
-    ...history.requests.map(request => ({ turn: request.turn_id, role: request.kind, text: `${request.id}: ${request.text}` })),
-  ], columns: [{ header: "TURN", value: row => row.turn }, { header: "ROLE", value: row => row.role }, { header: "TEXT", value: row => row.text }] });
+  const renderer = new CliRenderer(), mode = outputMode(invocation);
+  renderer.render(history, { mode, rows: () => [
+    ...history.turns.flatMap(turn => turn.items.map(item => ({ turn: turn.id, role: item.role, text: item.text, truncated: item.truncated === true }))),
+    ...history.requests.map(request => ({ turn: request.turn_id, role: request.kind, text: `${request.id}: ${request.text}`, truncated: false })),
+  ], columns: [{ header: "TURN", value: row => row.turn }, { header: "ROLE", value: row => row.role },
+    { header: "TEXT", value: row => row.text }, { header: "TRUNCATED", value: row => row.truncated ? "yes" : "-" }] });
+  if (mode === "table" && history.next_cursor) renderer.diagnostic(`next_cursor: ${history.next_cursor}`);
 }

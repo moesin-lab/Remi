@@ -204,6 +204,43 @@ describe.skipIf(typeof process.getuid !== "function")("external Codex chats", ()
     expect(f.native.calls.filter(call => call.method === "turn/start")).toHaveLength(1);
   });
 
+  it("blocks new requests after ACK until the owned turn is published and terminal even while native status is idle", async () => {
+    const f = fixture();
+    let started = 0;
+    f.native.override = method => method === "turn/start" ? { turn: { id: ++started === 1 ? "turn_pending" : "turn_next", status: "inProgress" } } : undefined;
+    const first = { operation: "send" as const, source_id: f.source, thread_id: "thread_a", text: "first", request_id: "request_a" };
+    const next = { ...first, text: "next", request_id: "request_b" };
+    expect((await f.driver.request(first) as { ok: true; data: ExternalChatReceipt }).data.outcome).toBe("accepted");
+    expect(f.native.thread.status).toEqual({ type: "idle" });
+    expect(await f.driver.request(next)).toMatchObject({ ok: false, code: "native_busy" });
+    expect((await f.driver.request(first) as { ok: true; data: ExternalChatReceipt }).data.outcome).toBe("accepted");
+    expect(started).toBe(1);
+    f.native.history.push({ id: "turn_pending", status: "inProgress", items: [] });
+    expect(await f.driver.request(next)).toMatchObject({ ok: false, code: "native_busy" });
+    f.native.history.at(-1)!.status = "completed";
+    expect((await f.driver.request({ operation: "read", source_id: f.source, thread_id: "thread_a" })).ok).toBe(true);
+    expect((await f.driver.request(next)).ok).toBe(true);
+    expect(started).toBe(2);
+  });
+
+  it("blocks new requests after an unknown write until native clientId history proves the turn terminal", async () => {
+    const f = fixture();
+    f.native.override = method => { if (method === "turn/start") throw new NativeError("native_request_timeout"); return undefined; };
+    const first = { operation: "send" as const, source_id: f.source, thread_id: "thread_a", text: "first", request_id: "request_a" };
+    const next = { ...first, text: "next", request_id: "request_b" };
+    expect((await f.driver.request(first) as { ok: true; data: ExternalChatReceipt }).data.outcome).toBe("unknown");
+    expect(await f.driver.request(next)).toMatchObject({ ok: false, code: "native_busy" });
+    expect((await f.driver.request(first) as { ok: true; data: ExternalChatReceipt }).data.outcome).toBe("unknown");
+    expect(f.native.calls.filter(call => call.method === "turn/start")).toHaveLength(1);
+    f.native.history.push({ id: "turn_pending", status: "inProgress", items: [{ id: "message", type: "userMessage", clientId: "request_a", content: [{ type: "text", text: "first" }] }] });
+    expect((await f.driver.request(first) as { ok: true; data: ExternalChatReceipt }).data.outcome).toBe("accepted");
+    expect(await f.driver.request(next)).toMatchObject({ ok: false, code: "native_busy" });
+    f.native.history.at(-1)!.status = "failed";
+    f.native.override = undefined;
+    expect((await f.driver.request(next)).ok).toBe(true);
+    expect(f.native.calls.filter(call => call.method === "turn/start")).toHaveLength(2);
+  });
+
   it("fails closed on a linked receipt before any native input can be written", async () => {
     const f = fixture();
     const receipts = join(f.root, "state", "receipts");

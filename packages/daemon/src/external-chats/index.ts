@@ -24,7 +24,9 @@ class ChatError extends Error {
 }
 
 interface SourceIndex { projects: ExternalChatProject[]; threads: NativeObject[]; truncated: boolean; refreshed: number }
+interface OwnedInput { requestId: string; turnId: string | null }
 const SOURCES = ["cli", "vscode", "appServer", "exec"];
+const TERMINAL_TURNS = new Set(["completed", "interrupted", "failed"]);
 
 export class CodexExternalChats {
   private readonly home: string;
@@ -34,6 +36,7 @@ export class CodexExternalChats {
   private readonly connections = new Map<string, Promise<NativeConnection>>();
   private readonly indexes = new Map<string, Promise<SourceIndex>>();
   private readonly locks = new Map<string, Promise<unknown>>();
+  private readonly ownedInputs = new Map<string, OwnedInput>();
   private closed = false;
   private closePromise?: Promise<void>;
 
@@ -224,6 +227,7 @@ export class CodexExternalChats {
       }
       page = { data: selected, nextCursor: null };
     }
+    this.observeOwnedInput(source.id, operation.thread_id, array(page.data));
     const requests = connection.pending(operation.thread_id).map(nativeRequest);
     if (connection.unsupported?.(operation.thread_id) || requests.some(request => request === null)) throw new ChatError("native_request_unsupported", "原生会话发出了 Remi 尚不支持的客户端请求；请求已拒绝，未执行工具或刷新认证。");
     return { chat: summary(thread, source.id), turns: turns(array(page.data).reverse()), next_cursor: string(page.nextCursor) || null, requests: requests.filter(request => request !== null) };
@@ -238,6 +242,7 @@ export class CodexExternalChats {
       try { return await this.reconcile(previous, connection); }
       catch { return this.publicReceipt(previous); }
     }
+    await this.requireOwnedInputFinished(source.id, operation.thread_id, connection);
     const thread = await this.thread(connection, operation.thread_id);
     this.requireIdle(connection, thread);
     if (!connection.attached.has(operation.thread_id)) {
@@ -250,16 +255,43 @@ export class CodexExternalChats {
     this.requireIdle(connection, await this.thread(connection, operation.thread_id));
     const receipt: SavedReceipt = { source_id: source.id, request_id: operation.request_id, thread_id: operation.thread_id, turn_id: null, outcome: "unknown", payload_hash: binding };
     if (!this.receipts.create(receipt)) return this.send(source, connection, operation);
+    const key = `${source.id}:${operation.thread_id}`;
+    this.ownedInputs.set(key, { requestId: operation.request_id, turnId: null });
     try {
       const result = await connection.rpc("turn/start", { threadId: operation.thread_id, input: [{ type: "text", text: operation.text }], clientUserMessageId: operation.request_id });
       const turnId = string(object(result.turn).id);
-      if (turnId) { receipt.outcome = "accepted"; receipt.turn_id = turnId; this.receipts.update(receipt); }
+      if (turnId) {
+        const owned = this.ownedInputs.get(key);
+        if (owned?.requestId === operation.request_id) owned.turnId = turnId;
+        receipt.outcome = "accepted"; receipt.turn_id = turnId; this.receipts.update(receipt);
+      }
     } catch {
       receipt.outcome = "unknown";
       receipt.turn_id = null;
       // The persisted unknown receipt forbids retrying a potentially accepted native input.
     }
     return this.publicReceipt(receipt);
+  }
+
+  private async requireOwnedInputFinished(source: string, thread: string, connection: NativeConnection): Promise<void> {
+    const key = `${source}:${thread}`;
+    const owned = this.ownedInputs.get(key);
+    if (!owned) return;
+    // ACK can precede native status/history publication. Absence is not proof that the input finished.
+    const page = await connection.rpc("thread/turns/list", { threadId: thread, limit: 20, itemsView: owned.turnId ? "summary" : "full", sortDirection: "desc" });
+    this.observeOwnedInput(source, thread, array(page.data));
+    if (this.ownedInputs.has(key)) throw new ChatError("native_busy", "上一条消息尚未确认结束，请等待该轮次完成后再发送。");
+  }
+
+  private observeOwnedInput(source: string, thread: string, values: NativeObject[]): void {
+    const key = `${source}:${thread}`;
+    const owned = this.ownedInputs.get(key);
+    if (!owned) return;
+    const turn = values.find(turn => owned.turnId ? turn.id === owned.turnId
+      : array(turn.items).some(item => item.type === "userMessage" && item.clientId === owned.requestId));
+    if (!turn || !string(turn.id)) return;
+    owned.turnId = string(turn.id);
+    if (TERMINAL_TURNS.has(string(turn.status))) this.ownedInputs.delete(key);
   }
 
   private requireIdle(connection: NativeConnection, thread: NativeObject): void {
@@ -274,6 +306,7 @@ export class CodexExternalChats {
     const seen = new Set<string>();
     for (let pageNumber = 0; pageNumber < 25; pageNumber++) {
       const page = await connection.rpc("thread/turns/list", { threadId: receipt.thread_id, limit: 20, itemsView: "full", sortDirection: "desc", ...(cursor ? { cursor } : {}) });
+      this.observeOwnedInput(receipt.source_id, receipt.thread_id, array(page.data));
       for (const turn of array(page.data)) {
         if (array(turn.items).some(item => item.type === "userMessage" && item.clientId === receipt.request_id)) {
           receipt.outcome = "accepted"; receipt.turn_id = string(turn.id); this.receipts.update(receipt); return this.publicReceipt(receipt);

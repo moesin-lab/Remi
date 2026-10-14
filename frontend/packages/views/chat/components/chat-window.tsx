@@ -74,6 +74,7 @@ import type {
   Attachment,
 } from "@multiremi/core/types";
 import { useT } from "../../i18n";
+import { ChatModeTabs } from "./chat-mode-tabs";
 import { useNavigation } from "../../navigation";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import { getCurrentWsId } from "@multiremi/core/platform";
@@ -549,12 +550,12 @@ export function ChatWindow({
     <>
       {/* Header — ⊕ new + session dropdown | window tools */}
       <div className="flex items-center justify-between border-b px-4 py-2.5 gap-2">
-        <nav className="flex shrink-0 items-center gap-1 text-xs">
+        {!isPage && <nav className="flex shrink-0 items-center gap-1 text-xs">
           <span aria-current="page">{t(($) => $.external.switch_remi)}</span>
           <Button type="button" variant="ghost" size="sm" onClick={() => navigation.push(workspacePaths.externalChat())}>
             {t(($) => $.external.switch_external)}
           </Button>
-        </nav>
+        </nav>}
         {isPage && (
           <Button
             variant="ghost"
@@ -802,7 +803,8 @@ export function ChatWindow({
       <div className="flex h-full min-h-0 flex-col">
         <PageHeader>
           <h1 className="text-sm font-semibold">{t(($) => $.page.title)}</h1>
-          <span className="ml-3 truncate text-xs text-muted-foreground">
+          <ChatModeTabs />
+          <span className="ml-auto hidden truncate text-xs text-muted-foreground sm:block">
             {t(($) => $.page.private)}
           </span>
         </PageHeader>

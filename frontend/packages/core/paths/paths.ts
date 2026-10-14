@@ -50,11 +50,12 @@ function workspaceScoped(slug: string) {
     squadDetail: (id: string) => `${ws}/squads/${encode(id)}`,
     inbox: () => `${ws}/inbox`,
     chat: (sessionId?: string, agentId?: string) => `${ws}/chat${sessionId ? `?session=${encode(sessionId)}` : agentId ? `?agent=${encode(agentId)}` : ""}`,
-    externalChat: (runtimeId?: string, sourceId?: string, threadId?: string) => {
+    externalChat: (runtimeId?: string, sourceId?: string, threadId?: string, projectId?: string) => {
       const query = new URLSearchParams({ kind: "external" });
       if (runtimeId) query.set("external_runtime", runtimeId);
       if (sourceId) query.set("external_source", sourceId);
       if (threadId) query.set("external_thread", threadId);
+      if (projectId) query.set("external_project", projectId);
       return `${ws}/chat?${query}`;
     },
     myIssues: () => `${ws}/my-issues`,

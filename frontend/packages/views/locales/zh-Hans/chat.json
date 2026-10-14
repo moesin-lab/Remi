@@ -247,6 +247,16 @@
     "message": "发送到此原生会话",
     "sending": "正在发送…",
     "send": "继续此会话",
-    "status": "状态"
+    "status": "状态",
+    "runtime": "Runtime",
+    "select_runtime": "选择机器",
+    "source": "Codex 来源",
+    "select_source": "选择 Codex 来源",
+    "config_readonly": "来源与项目配置只读",
+    "details": "会话信息",
+    "latest": "回到最新消息",
+    "engine": "Codex",
+    "unavailable_project": "项目不可用",
+    "history": "会话消息"
   }
 }

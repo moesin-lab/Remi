@@ -247,6 +247,16 @@
     "message": "このネイティブチャットに送信",
     "sending": "送信中…",
     "send": "このチャットを続ける",
-    "status": "状態"
+    "status": "状態",
+    "runtime": "Runtime",
+    "select_runtime": "マシンを選択",
+    "source": "Codex ソース",
+    "select_source": "Codex ソースを選択",
+    "config_readonly": "ソースとプロジェクト設定は読み取り専用",
+    "details": "チャット情報",
+    "latest": "最新メッセージへ",
+    "engine": "Codex",
+    "unavailable_project": "プロジェクトを利用できません",
+    "history": "チャットメッセージ"
   }
 }

@@ -11,14 +11,16 @@ export function ExternalChatProjectPicker({ projects, projectId, onChange }: {
   const projectsById = new Map(projects.map(project => [project.id, project]));
   const selected = projectsById.get(projectId);
   const options = ["", ...projectsById.keys()];
+  if (projectId && !selected) options.push(projectId);
+  const label = (id: string) => projectsById.get(id)?.name ?? (id ? t(($) => $.external.unavailable_project) : t(($) => $.external.all_projects));
 
-  return <div className="space-y-2">
-    <Combobox items={options} value={selected ? projectId : ""}
+  return <div className="min-w-0" title={selected ? `${selected.name}\n${selected.roots.join("\n")}` : undefined}>
+    <Combobox items={options} value={projectId}
       onValueChange={id => { if (id !== null) onChange(id); }}
-      itemToStringLabel={id => projectsById.get(id)?.name ?? t(($) => $.external.all_projects)}
+      itemToStringLabel={label}
       filter={(id, query) => {
         const option = projectsById.get(id);
-        const text = option ? `${option.name} ${option.roots.join(" ")}` : t(($) => $.external.all_projects);
+        const text = option ? `${option.name} ${option.roots.join(" ")}` : label(id);
         return text.toLocaleLowerCase().includes(query.toLocaleLowerCase());
       }}>
       <ComboboxInput className="w-full" aria-label={t(($) => $.external.search_projects)} placeholder={t(($) => $.external.search_projects)} />
@@ -28,7 +30,7 @@ export function ExternalChatProjectPicker({ projects, projectId, onChange }: {
           const option = projectsById.get(id);
           return <ComboboxItem key={id} value={id} className="items-start py-2">
             <span className="min-w-0">
-              <span className="block break-words">{option?.name ?? t(($) => $.external.all_projects)}</span>
+              <span className="block break-words">{label(id)}</span>
               {option && <>
                 <span className="block text-xs text-muted-foreground">{option.kind === "native" ? t(($) => $.external.native_project) : option.kind === "directory" ? t(($) => $.external.directory_project) : option.kind}</span>
                 <span className="block break-all text-xs text-muted-foreground">{option.roots.join(" · ")}</span>
@@ -38,10 +40,5 @@ export function ExternalChatProjectPicker({ projects, projectId, onChange }: {
         }}</ComboboxList>
       </ComboboxContent>
     </Combobox>
-    {selected && <div className="rounded border p-2">
-      <p className="break-words font-medium">{selected.name}</p>
-      <p className="text-xs text-muted-foreground">{selected.kind === "native" ? t(($) => $.external.native_project) : selected.kind === "directory" ? t(($) => $.external.directory_project) : selected.kind}</p>
-      {selected.roots.map(path => <p className="break-all text-xs text-muted-foreground" key={path}>{path}</p>)}
-    </div>}
   </div>;
 }

@@ -3239,6 +3239,90 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "chat.external.sources": {
+      "command": "remi chat external sources",
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.external.sources",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "chat.external.list": {
+      "command": "remi chat external list",
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.external.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "chat.external.get": {
+      "command": "remi chat external get",
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.external.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "chat.external.send": {
+      "command": "remi chat external send",
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.external.send",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "chat.external.receipt": {
+      "command": "remi chat external receipt",
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.external.receipt",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "chat.external.interrupt": {
+      "command": "remi chat external interrupt",
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.external.interrupt",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "chat.external.respond": {
+      "command": "remi chat external respond",
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.external.respond",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "agent.list": {
       "command": "remi agent list",
       "auth": [

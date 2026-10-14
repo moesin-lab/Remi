@@ -43,6 +43,11 @@ export function isTraceReadPath(pathname: string): boolean {
     || /^\/api\/shares\/[^/]+\/tasks\/[^/]+\/trace$/.test(pathname);
 }
 
+/** Native Chat RPC must reach the process holding the Runtime's daemon socket. */
+export function isExternalChatPath(pathname: string): boolean {
+  return /^\/api\/runtimes\/[^/]+\/external-chats(?:\/|$)/.test(pathname);
+}
+
 /**
  * Resolve the role. Unset, empty and unrecognized values all mean `all`, which is
  * the only value allowed to be a default here: a typo must degrade to main's
@@ -82,6 +87,7 @@ export function isRuntimeAllowedPath(pathname: string): boolean {
   // upgrade would answer 421 in the process that owns the stream.
   if (pathname === "/api/trace/ws") return true;
   if (isTraceReadPath(pathname)) return true;
+  if (isExternalChatPath(pathname)) return true;
   if (pathname === "/health" || pathname.startsWith("/health/")) return true;
   if (pathname === "/healthz" || pathname === "/readyz") return true;
   // `/api/multiremi/health` sits in the "mounted for every role" row of §3.2 and
@@ -101,7 +107,8 @@ export function isMisdirectedPath(role: ApiRole, pathname: string): boolean {
   if (role === "all") return false;
   // Trace reads and the trace socket belong to runtime, including upgrades
   // that bypass Hono routing. The UI process refuses each with 421.
-  if (role === "ui") return isDaemonPath(pathname) || isTraceReadPath(pathname) || pathname === "/api/trace/ws";
+  if (role === "ui") return isDaemonPath(pathname) || isTraceReadPath(pathname)
+    || isExternalChatPath(pathname) || pathname === "/api/trace/ws";
   return !isRuntimeAllowedPath(pathname);
 }
 

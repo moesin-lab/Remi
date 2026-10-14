@@ -66,6 +66,11 @@ HTTP 心跳 ack 只保留升级请求和 drain，不添加 v1 业务兼容层。
 
 Runtime 可持有独立的[持久化工作区](dev/runtime-workspaces.md)：绑定 daemon 的已有目录。任务和聊天通过统一的「工作位置」选择项目或本机目录，二者互斥；Agent 可在不同任务中选择不同位置。目录绑定只能在所属机器执行；未指定位置时沿用自动任务目录。
 
+**外部 Codex 会话**：[专用路由](../packages/server/src/api/routers/external-chats.ts)经所属 Runtime 的
+`external_chat.request` 反向 RPC，调用 [daemon 原生 driver](../packages/daemon/src/external-chats/index.ts)。
+项目目录与 thread 由来源 Home 扫描、只读展示；历史分页、原线程续聊和原生审批独立于 Remi Agent/Task 链路，
+不创建平台 Chat 或复制来源配置。共享权限、回执不确定性及跨原客户端并发限制见 [Chat 契约](chat.md#外部-codex-chat)。
+
 Chat 与 Issue 独立，Chat 创建时保存项目或本机目录选择；Runtime 本机目录不附加项目仓库；项目聊天优先采用项目所选的 `local_directory`，否则在托管 Chat 目录自动准备项目显式声明的仓库，后续复用已有 worktree。未选工作位置时使用自动 Chat 目录。在 Chat 中创建 Issue 不绑定会话，也不继承新 Issue 的上下文；普通私聊不接收 Issue 播报。飞书群 Issue 话题的归属由 [FeishuBotRepo](../packages/server/src/store/repos/feishu-bot-repo.ts)维护，投递和任务领取检查绑定、Issue、工作区、Chat 与 Agent 一致性；归属不明的旧关联按[迁移手册](migrations/chat-issue-decoupling.md)审计恢复。[claim wire](../packages/server/src/api/wire/tasks.ts)保留有预算的会话 projection，仅向已确认的 Issue 话题附加按 `relay:<chat_session_id>` 游标读取的 Issue 日志（最多 100 条，并给出续读位置）；转述任务完成才推进游标。详见 [Chat 契约](chat.md)。
 
 产品 Session 恰好由一个 Chat 或 Issue 拥有，二者创建时都在同一事务内建立自己的 `Main`。

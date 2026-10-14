@@ -16,6 +16,8 @@ import { multiremiStateDir } from "@shared/home-paths.js";
 import { basename, dirname, join, resolve } from "node:path";
 import { acquireDaemonOutbox, releaseDaemonOutbox, daemonReportTransport, daemonOutboxHasPriority } from "./report-transport.js";
 import { acquireDaemonTrace, releaseDaemonTrace, daemonTraceStore, type DaemonTraceTransport } from "./trace-transport.js";
+import { installedExternalCodexCommand, registerDaemonExternalChats } from "./external-chats.js";
+import { CodexExternalChats } from "@daemon/external-chats/index.js";
 import type { DaemonTraceListener } from "./trace-subscriptions.js";
 import type { TraceStore } from "@multiremi/worker/trace-store.js";
 import { createLogger } from "@shared/logger.js";
@@ -959,6 +961,7 @@ export class MultiremiDaemon {
   private appliedDrainGeneration = 0;
   private outbox: MultiremiTaskReportOutbox | null = null;
   private traceTransport: DaemonTraceTransport | null = null;
+  private externalChats: { close(): Promise<void> } | null = null;
   private subjectArchiveQueue: SubjectSessionArchiveQueue | null = null;
   private subjectArchiveRuntimeId: string | null = null;
   private outboxAbort: AbortController | null = null;
@@ -1252,6 +1255,16 @@ export class MultiremiDaemon {
       ...options.protocolClientOptions,
     });
     this.taskDownlinks = new DaemonTaskDownlinks(this.protocolClient, () => this.options.runtimeId ?? undefined);
+    if (this.options.provider === "codex" && typeof process.getuid === "function") {
+      this.externalChats = registerDaemonExternalChats(this.protocolClient,
+        () => this.stopped ? undefined : this.options.runtimeId ?? undefined,
+        () => new CodexExternalChats({
+          home: homedir(),
+          baseHome: process.env.CODEX_HOME,
+          ...installedExternalCodexCommand(),
+          stateDir: join(dirname(this.outboxPath), "external-chats", outboxIdentity),
+        }));
+    }
     this.drainRuntimeDownlinks = registerDaemonRuntimeDownlinks(this.protocolClient, () => this.options.runtimeId,
       (rt, input) => this.handleHeartbeatAck(rt, input), (rt, revision) => this.reconcileRuntimeAgentPlugins(rt, revision));
     this.drainSessionArchiveRequests = registerDaemonSessionArchiveRequests(this.protocolClient, () => this.options.runtimeId,
@@ -1480,6 +1493,7 @@ export class MultiremiDaemon {
       supports_batch_import: true,
       supports_directory_scan: true,
       supports_skill_directory: true,
+      external_chats: this.options.provider === "codex" && typeof process.getuid === "function" ? 1 : 0,
       supports_bot_menu: this.botMenuPublisher !== null,
       bot_menu_protocol: this.botMenuPublisher ? BOT_MENU_PROTOCOL_VERSION : 0,
       agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
@@ -1661,6 +1675,8 @@ export class MultiremiDaemon {
       for (const run of this.feishuOutboundRuns.values()) run.abort.abort();
       await Promise.allSettled([...this.feishuOutboundRuns.values()].map(run => run.done));
       await this.drainGcInFlight();
+      await this.externalChats?.close();
+      this.externalChats = null;
       await this.protocolClient?.drain();
       if (this.traceTransport) {
         this.traceTransport = null;
@@ -1837,6 +1853,7 @@ export class MultiremiDaemon {
         launched_by: this.options.launchedBy ?? "manual",
         agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
         runtime_workspaces: 1,
+        external_chats: this.options.provider === "codex" && typeof process.getuid === "function" ? 1 : 0,
         execution_profiles: 1,
         codex_profiles: 1,
         claude_profiles: 1,

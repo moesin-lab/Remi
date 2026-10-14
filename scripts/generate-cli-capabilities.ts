@@ -174,6 +174,13 @@ function mappedResourceCommand(route: string): string | null {
   const operation = mappedOperationsCommand(route);
   if (operation) return operation;
   const exact: Record<string, string> = {
+    "GET /api/runtimes/:id/external-chats": "chat.external.sources",
+    "GET /api/runtimes/:id/external-chats/:sourceId/threads": "chat.external.list",
+    "GET /api/runtimes/:id/external-chats/:sourceId/threads/:threadId": "chat.external.get",
+    "POST /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/messages": "chat.external.send",
+    "GET /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/receipts/:requestId": "chat.external.receipt",
+    "POST /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/interrupt": "chat.external.interrupt",
+    "POST /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/requests/:requestId": "chat.external.respond",
     "GET /api/cli/context": "context.get",
     "GET /api/cli/capabilities": "context.get",
     "GET /api/workspaces": "workspace.list",

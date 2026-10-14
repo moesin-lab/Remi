@@ -47,6 +47,8 @@ import { registerTokenRoutes } from "./routers/tokens.js";
 import { registerNotificationPreferenceRoutes } from "./routers/notification-preferences.js";
 import { registerNotificationChannelRoutes } from "./routers/notification-channels.js";
 import { registerRuntimeRoutes } from "./routers/runtimes.js";
+import { registerExternalChatRoutes } from "./routers/external-chats.js";
+import { SocketExternalChatClient } from "./external-chats/socket-client.js";
 import { registerRuntimeWorkspaceRoutes } from "./routers/runtime-workspaces.js";
 import { RuntimeWorkspaceError } from "@multiremi/store/repos/runtime-workspaces-repo.js";
 import { registerDaemonRetirementRoutes } from "./routers/daemon-retirement.js";
@@ -340,6 +342,7 @@ export interface MultiremiApiOptions {
   repositoryWiki?: RepositoryWikiServiceContract;
   sessionArchives?: SessionArchiveService;
   daemonTraceReader?: import("./trace/daemon-trace-reader.js").DaemonTraceReader;
+  externalChatClient?: import("@multiremi/contracts/external-chats.js").ExternalChatClient | null;
   getOrganizerTurnStats?: (taskId: string) => import("./helpers/organizer.js").OrganizerTurnStats | null;
   /** Absolute API origin advertised to daemons for direct archive uploads. */
   daemonDirectBaseUrl?: string | null;
@@ -542,6 +545,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
     repositoryWiki,
     sessionArchives,
     traceReader,
+    externalChatClient: options.externalChatClient ?? null,
     getOrganizerTurnStats: options.getOrganizerTurnStats ?? ((taskId) => organizerTurnStats(store, taskId)),
     messagingProviders,
     daemonDirectBaseUrl,
@@ -977,6 +981,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
 
   registerExecutionConfigRoutes(app, deps);
   registerRuntimeRoutes(app, deps);
+  registerExternalChatRoutes(app, deps);
   registerRuntimeWorkspaceRoutes(app, deps);
   registerDaemonRetirementRoutes(app, deps);
   registerPlatformRoutes(app, deps);
@@ -1178,6 +1183,9 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     // startup completes. Delegate to the same runtime-owned trace service.
     daemonTraceReader: options.daemonTraceReader ?? (effectiveApiRole === "ui" ? undefined
       : { read: request => daemonTrace.reader.read(request) }),
+    externalChatClient: options.externalChatClient === undefined
+      ? (effectiveApiRole === "ui" ? null : { request: (runtimeId, operation) => externalChatClient.request(runtimeId, operation) })
+      : options.externalChatClient,
   });
   // MUL-367: the per-minute summary belongs to a long-lived server only. Tests
   // build apps with `createMultiremiApp` and must not inherit a timer.
@@ -1211,6 +1219,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   const daemonTrace = registerDaemonTraceHandlers(daemonProtocol, store,
     effectiveApiRole !== "ui" && options.liveHub === undefined && options.hub === undefined
       ? createHubTraceSink(liveHub as HubImpl) : undefined);
+  const externalChatClient = new SocketExternalChatClient(daemonProtocol);
   registerDaemonReportHandlers(daemonProtocol, store, (taskId, head, runtimeId) => daemonTrace.close(taskId, head, runtimeId), daemonTurnBridge);
   registerDaemonMaintenanceHandlers(daemonProtocol, store, sessionArchives);
   registerSessionArchiveRequestHandlers(daemonProtocol, store);

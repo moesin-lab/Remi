@@ -1,4 +1,5 @@
 import type { CapabilityBlock, PersistentContext, EphemeralContext } from "../types.js";
+import { codexRuntimeWorkspaceDirectories } from "../workspace/runtime-context.js";
 
 export const workspaceBlock: CapabilityBlock = {
   name: "workspace",
@@ -12,6 +13,9 @@ export const workspaceBlock: CapabilityBlock = {
   },
 
   ephemeral(ctx: EphemeralContext) {
+    if (ctx.task.runtimeWorkspace && ctx.task.agent?.provider === "codex") {
+      return { cwd: ctx.workDir, addDirs: codexRuntimeWorkspaceDirectories(ctx.task, ctx.workDir, ctx.providerHome) };
+    }
     return { cwd: ctx.workDir, ...(ctx.task.runtimeWorkspace ? { addDirs: [ctx.task.runtimeWorkspace.rootPath] } : {}) };
   },
 };

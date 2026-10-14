@@ -156,11 +156,25 @@ describe("external Chat HTTP contract and authorization", () => {
       [`${f.path}/messages`, { text: "x".repeat(32_001), request_id: requestId }],
       [`${f.path}/interrupt`, { turn_id: "not-a-uuid" }],
       [`${f.path}/requests/17`, { decision: "accept", answers: {} }],
-      [`${f.path}/requests/17`, { answers: { "../private": ["x"] } }],
       [`${f.path}/requests/17`, { decision: "approve-anything" }],
     ];
     for (const [target, input] of invalid) expect((await f.request(target, input)).status).toBe(400);
     expect(f.calls).toHaveLength(0);
+  });
+
+  it("preserves textual native question IDs while rejecting oversized, control and prototype keys", async () => {
+    const f = fixture();
+    const answers = { "choose directory": ["Continue"], "选择目录": ["继续"], ["界".repeat(256)]: ["Bounded"] };
+    expect((await f.request(`${f.path}/requests/17`, { answers })).status).toBe(200);
+    expect(f.calls[0]!.operation).toMatchObject({ operation: "respond", request_id: "17", answers });
+
+    for (const key of ["", "界".repeat(257), "__proto__", "constructor", "prototype", "question\nname", "question\0name", "\x7f", "\x85"]) {
+      // Object.fromEntries makes __proto__ an own JSON key, so the test covers
+      // the actual wire payload rather than object-literal prototype syntax.
+      const invalid = { answers: Object.fromEntries([[key, ["Reply"]]]) };
+      expect((await f.request(`${f.path}/requests/17`, invalid)).status).toBe(400);
+    }
+    expect(f.calls).toHaveLength(1);
   });
 
   it("bounds actual body bytes even with multibyte JSON and accepts native user-input replies", async () => {

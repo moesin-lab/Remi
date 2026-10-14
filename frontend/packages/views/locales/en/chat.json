@@ -251,6 +251,16 @@
     "message": "Message this native chat",
     "sending": "Sending…",
     "send": "Continue this chat",
-    "status": "Status"
+    "status": "Status",
+    "runtime": "Runtime",
+    "select_runtime": "Choose a machine",
+    "source": "Codex source",
+    "select_source": "Choose a Codex source",
+    "config_readonly": "Source and project settings are read-only",
+    "details": "Chat details",
+    "latest": "Jump to latest",
+    "engine": "Codex",
+    "unavailable_project": "Project unavailable",
+    "history": "Chat messages"
   }
 }

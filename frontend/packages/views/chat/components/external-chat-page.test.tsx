@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -17,7 +17,7 @@ const backend = vi.hoisted(() => ({
   sendExternalChatMessage: vi.fn(), getExternalChatReceipt: vi.fn(), interruptExternalChatTurn: vi.fn(), respondExternalChatRequest: vi.fn(),
   createChatSession: vi.fn(), listChatSessions: vi.fn(), sendChatMessage: vi.fn(), markChatSessionRead: vi.fn(), getSessionLog: vi.fn(), listAgents: vi.fn(), listProjects: vi.fn(),
 }));
-const navigation = vi.hoisted(() => ({ searchParams: new URLSearchParams(), replace: vi.fn(), select: vi.fn(), agent: vi.fn() }));
+const navigation = vi.hoisted(() => ({ searchParams: new URLSearchParams(), replace: vi.fn(), push: vi.fn(), select: vi.fn(), agent: vi.fn(), revision: 0, listeners: new Set<() => void>() }));
 vi.mock("@multiremi/core/api", async original => ({ ...await original<typeof import("@multiremi/core/api")>(), api: backend }));
 vi.mock("@multiremi/core/hooks", () => ({ useWorkspaceId: () => "ws" }));
 vi.mock("@multiremi/core/paths", async original => {
@@ -29,7 +29,10 @@ vi.mock("@multiremi/core/chat", async original => ({
   useChatStore: Object.assign(vi.fn(), { getState: () => ({ setActiveSession: navigation.select, setSelectedAgentId: navigation.agent }) }),
 }));
 vi.mock("../../navigation", () => ({
-  useNavigation: () => navigation,
+  useNavigation: () => {
+    useSyncExternalStore(listener => { navigation.listeners.add(listener); return () => { navigation.listeners.delete(listener); }; }, () => navigation.revision);
+    return navigation;
+  },
   AppLink: ({ children, href }: { children: ReactNode; href: string }) => <a href={href}>{children}</a>,
 }));
 vi.mock("../../layout/page-header", () => ({ PageHeader: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
@@ -62,7 +65,13 @@ beforeEach(() => {
   vi.resetAllMocks();
   window.sessionStorage.clear();
   navigation.searchParams = new URLSearchParams({ kind: "external", external_runtime: "rt", external_source: "source", external_thread: "thread" });
-  navigation.replace.mockImplementation(url => { navigation.searchParams = new URLSearchParams(String(url).split("?")[1]); });
+  const navigate = (url: string) => {
+    navigation.searchParams = new URLSearchParams(String(url).split("?")[1]);
+    navigation.revision++;
+    navigation.listeners.forEach(listener => listener());
+  };
+  navigation.replace.mockImplementation(navigate);
+  navigation.push.mockImplementation(navigate);
   backend.listRuntimes.mockResolvedValue([runtime]);
   backend.listExternalChatCatalog.mockResolvedValue({ sources: [source], warnings: [] });
   backend.listExternalChats.mockResolvedValue({ chats: [chat], projects: [project], next_cursor: null });
@@ -78,13 +87,16 @@ it("deep-links to native history while keeping source Project and config read-on
   expect(await screen.findByText("Original native history")).toBeInTheDocument();
   expect(screen.queryByTestId("remi-window")).not.toBeInTheDocument();
   expect(screen.getByText("original-model")).toBeInTheDocument();
-  expect(screen.getByText("original-provider")).toBeInTheDocument();
   const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Chat details" }));
+  expect(await screen.findByText("original-provider")).toBeInTheDocument();
+  await user.keyboard("{Escape}");
   await user.click(screen.getByRole("combobox", { name: "Search source projects" }));
-  await user.click(await screen.findByRole("option", { name: /^Original native project/ }));
-  expect(screen.getByText("Original native project")).toBeInTheDocument();
-  expect(screen.getByText("/work/second-root")).toBeInTheDocument();
-  expect(screen.getByText("Native project · Read-only")).toBeInTheDocument();
+  const native = await screen.findByRole("option", { name: /^Original native project/ });
+  expect(within(native).getByText("/work/project · /work/second-root")).toBeInTheDocument();
+  expect(within(native).getByText("Native project · Read-only")).toBeInTheDocument();
+  await user.click(native);
+  expect(screen.getByRole("combobox", { name: "Search source projects" })).toHaveValue("Original native project");
   expect(screen.getByRole("link", { name: "Remi" })).toHaveAttribute("href", "/demo/chat");
   expect(navigation.select).not.toHaveBeenCalled();
   expect(navigation.agent).not.toHaveBeenCalled();
@@ -108,6 +120,84 @@ it("keeps the existing Remi selection when switching to an external chat and ret
   expect(navigation.select).not.toHaveBeenCalled();
 });
 
+it("clears the old thread on Project change, preserves its draft and restores the filter from the URL", async () => {
+  const user = userEvent.setup();
+  const view = show(<ExternalChatPage />);
+  await screen.findByText("Original native history");
+  await user.type(screen.getByRole("textbox", { name: "Message this native chat" }), "Draft for this thread");
+  await user.click(screen.getByRole("combobox", { name: "Search source projects" }));
+  await user.click(await screen.findByRole("option", { name: /^Original native project/ }));
+  expect(navigation.searchParams.get("external_project")).toBe(project.id);
+  expect(navigation.searchParams.has("external_thread")).toBe(false);
+  expect(screen.queryByRole("textbox", { name: "Message this native chat" })).not.toBeInTheDocument();
+  expect(backend.sendExternalChatMessage).not.toHaveBeenCalled();
+  await user.click(await screen.findByRole("button", { name: /Original thread/ }));
+  expect(await screen.findByRole("textbox", { name: "Message this native chat" })).toHaveValue("Draft for this thread");
+  view.unmount();
+  show(<ExternalChatPage />);
+  expect(await screen.findByRole("combobox", { name: "Search source projects" })).toHaveValue("Original native project");
+  expect(navigation.searchParams.get("external_project")).toBe(project.id);
+});
+
+it("selects a sole native source without opening or sending to a thread", async () => {
+  navigation.searchParams = new URLSearchParams({ kind: "external", external_runtime: "rt" });
+  show(<ExternalChatPage />);
+  await waitFor(() => expect(navigation.replace).toHaveBeenCalledWith("/demo/chat?kind=external&external_runtime=rt&external_source=source"));
+  expect(await screen.findByRole("button", { name: /Original thread/ })).toBeInTheDocument();
+  expect(backend.getExternalChatHistory).not.toHaveBeenCalled();
+  expect(backend.sendExternalChatMessage).not.toHaveBeenCalled();
+});
+
+it("shows a missing Project as unavailable and lets the user clear its URL filter", async () => {
+  navigation.searchParams.set("external_project", "native:removed");
+  const user = userEvent.setup();
+  show(<ExternalChatPage />);
+  const picker = await screen.findByRole("combobox", { name: "Search source projects" });
+  expect(picker).toHaveValue("Project unavailable");
+  await user.click(picker);
+  await user.click(await screen.findByRole("option", { name: "All projects" }));
+  expect(navigation.searchParams.has("external_project")).toBe(false);
+  expect(picker).toHaveValue("All projects");
+  expect(backend.sendExternalChatMessage).not.toHaveBeenCalled();
+});
+
+it("keeps the user's jump to latest when an older-history request resolves later", async () => {
+  let finishOlder!: (value: ExternalChatHistory) => void;
+  backend.getExternalChatHistory.mockResolvedValueOnce(history({ next_cursor: "older" }))
+    .mockImplementationOnce(() => new Promise(resolve => { finishOlder = resolve; }));
+  const user = userEvent.setup();
+  show(<WindowHarness />);
+  await screen.findByText("Original native history");
+  const log = screen.getByRole("region", { name: "Chat messages" });
+  let height = 1000;
+  Object.defineProperty(log, "scrollHeight", { configurable: true, get: () => height });
+  Object.defineProperty(log, "clientHeight", { configurable: true, value: 500 });
+  log.scrollTop = 200;
+  fireEvent.scroll(log);
+  await user.click(screen.getByRole("button", { name: "Load earlier turns" }));
+  await user.click(screen.getByRole("button", { name: "Jump to latest" }));
+  height = 2000;
+  await act(async () => finishOlder(history({ turns: [{ id: "earlier-turn", status: "completed", items: [{ id: "earlier", type: "userMessage", role: "user", text: "Earlier native question" }] }] })));
+  await screen.findByText("Earlier native question");
+  expect(log.scrollTop).toBe(height);
+  expect(screen.queryByRole("button", { name: "Jump to latest" })).not.toBeInTheDocument();
+});
+
+it("uses Mod+Enter to continue while bare Enter and IME composition never send", async () => {
+  backend.sendExternalChatMessage.mockImplementation((_runtime, _source, thread, input) => Promise.resolve({ request_id: input.request_id, thread_id: thread, turn_id: "native-turn", outcome: "accepted" }));
+  show(<WindowHarness initialDraft={"Line one\nLine two"} />);
+  await screen.findByText("Original native history");
+  const input = screen.getByRole("textbox", { name: "Message this native chat" });
+  fireEvent.keyDown(input, { key: "Enter" });
+  fireEvent.keyDown(input, { key: "Enter", ctrlKey: true, isComposing: true });
+  expect(backend.sendExternalChatMessage).not.toHaveBeenCalled();
+  fireEvent.keyDown(input, { key: "Enter", metaKey: true });
+  await waitFor(() => expect(backend.sendExternalChatMessage).toHaveBeenCalledTimes(1));
+  expect(backend.sendExternalChatMessage.mock.calls[0]?.[3].text).toBe("Line one\nLine two");
+  fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+  expect(backend.sendExternalChatMessage).toHaveBeenCalledTimes(1);
+});
+
 it("pages and sorts native chats, filters by source project, and retains native selection in the URL", async () => {
   backend.listExternalChats.mockResolvedValueOnce({ chats: [{ ...chat, id: "older", title: "Older thread", updated_at: 1 }], projects: [project], next_cursor: "next-page" })
     .mockResolvedValue({ chats: [{ ...chat, id: "newer", title: "Newer thread", updated_at: 4 }], projects: [{ ...project, id: "directory:root", kind: "directory", name: "Discovered project" }], next_cursor: null });
@@ -119,13 +209,13 @@ it("pages and sorts native chats, filters by source project, and retains native 
   expect(backend.listExternalChats).toHaveBeenCalledWith("rt", "source", expect.objectContaining({ cursor: "next-page", limit: 50 }));
   await user.click(screen.getByRole("combobox", { name: "Search source projects" }));
   await user.click(await screen.findByRole("option", { name: /^Discovered project/ }));
-  expect(screen.getByText("Discovered by directory · Read-only")).toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Search source projects" })).toHaveValue("Discovered project");
   await user.click(screen.getByRole("combobox", { name: "Search source projects" }));
   await user.clear(screen.getByRole("combobox", { name: "Search source projects" }));
   await user.click(await screen.findByRole("option", { name: /^Original native project/ }));
   await waitFor(() => expect(backend.listExternalChats).toHaveBeenCalledWith("rt", "source", expect.objectContaining({ project_id: project.id })));
   await user.click(screen.getByRole("button", { name: /Newer thread/ }));
-  expect(navigation.replace).toHaveBeenCalledWith("/demo/chat?kind=external&external_runtime=rt&external_source=source&external_thread=newer");
+  expect(navigation.push).toHaveBeenCalledWith("/demo/chat?kind=external&external_runtime=rt&external_source=source&external_thread=newer&external_project=native%3Aproject");
   view.update(<ExternalChatPage />);
   await waitFor(() => expect(backend.getExternalChatHistory).toHaveBeenCalledWith("rt", "source", "newer", expect.any(Object)));
 });
@@ -141,7 +231,7 @@ it("keeps chats directly after a searchable Project selector even with hundreds 
   const firstChat = await screen.findByRole("button", { name: /Original thread/ });
   const picker = screen.getByRole("combobox", { name: "Search source projects" });
   expect(picker).toHaveValue("All projects");
-  expect(firstChat.previousElementSibling).toContainElement(picker);
+  expect(firstChat).toBeInTheDocument();
   expect(screen.queryByText("Worktree 499")).not.toBeInTheDocument();
   expect(screen.queryByText("/worktrees/root-499")).not.toBeInTheDocument();
   expect(screen.queryAllByRole("option")).toHaveLength(0);
@@ -149,10 +239,11 @@ it("keeps chats directly after a searchable Project selector even with hundreds 
   await user.clear(picker);
   await user.type(picker, "Worktree 499");
   expect(picker).toHaveValue("Worktree 499");
-  await user.click(await screen.findByRole("option", { name: /^Worktree 499/ }));
-  expect(screen.getByText("Discovered by directory · Read-only")).toBeInTheDocument();
-  expect(screen.getByText("/worktrees/root-499")).toBeInTheDocument();
-  expect(screen.getByText("/worktrees/extra-499")).toBeInTheDocument();
+  const option = await screen.findByRole("option", { name: /^Worktree 499/ });
+  expect(within(option).getByText("Discovered by directory · Read-only")).toBeInTheDocument();
+  expect(within(option).getByText("/worktrees/root-499 · /worktrees/extra-499")).toBeInTheDocument();
+  await user.click(option);
+  expect(picker).toHaveValue("Worktree 499");
   expect(screen.queryByText("/worktrees/root-0")).not.toBeInTheDocument();
   await waitFor(() => expect(backend.listExternalChats).toHaveBeenCalledWith("rt", "source", expect.objectContaining({ project_id: "directory:499" })));
   expect(backend.listProjects).not.toHaveBeenCalled();

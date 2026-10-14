@@ -69,9 +69,12 @@ vi.mock("@multiremi/core/session-log/use-issue-log", () => ({ useIssueLog: (sess
   snapshot: { entries: [], head: null, ready: true }, error: false,
   });
 } }));
-vi.mock("@multiremi/core/paths", () => ({ useWorkspacePaths: () => ({ chat: () => "/chat" }) }));
+vi.mock("@multiremi/core/paths", () => ({ useWorkspacePaths: () => ({ chat: () => "/chat", externalChat: () => "/chat?kind=external" }) }));
 vi.mock("@multiremi/views/issues/components", () => ({ canAssignAgent: () => true }));
-vi.mock("../../navigation", () => ({ useNavigation: () => ({ push: vi.fn() }) }));
+vi.mock("../../navigation", () => ({
+  useNavigation: () => ({ push: vi.fn() }),
+  AppLink: ({ children, href }: { children: ReactNode; href: string }) => <a href={href}>{children}</a>,
+}));
 vi.mock("../../layout/page-header", () => ({ PageHeader: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
 vi.mock("./use-chat-resize", () => ({ useChatResize: () => ({ boundsReady: true }) }));
 vi.mock("./use-chat-context-items", () => ({ useChatContextItems: () => [] }));

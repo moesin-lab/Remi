@@ -250,6 +250,16 @@
     "message": "이 기본 채팅에 메시지 보내기",
     "sending": "전송 중…",
     "send": "이 채팅 계속하기",
-    "status": "상태"
+    "status": "상태",
+    "runtime": "Runtime",
+    "select_runtime": "머신 선택",
+    "source": "Codex 소스",
+    "select_source": "Codex 소스 선택",
+    "config_readonly": "소스와 프로젝트 설정은 읽기 전용",
+    "details": "채팅 정보",
+    "latest": "최신 메시지로 이동",
+    "engine": "Codex",
+    "unavailable_project": "프로젝트를 사용할 수 없음",
+    "history": "채팅 메시지"
   }
 }

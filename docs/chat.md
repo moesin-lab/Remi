@@ -17,6 +17,11 @@ Chat 页的「外部」入口读取已注册 macOS / Linux Codex Runtime 上的�
 选择历史会话后，可在 Remi 继续同一原生 thread。外部会话不创建 Remi Chat、Agent 或工作 Session，
 不进入平台任务调度和日志表；历史与执行状态仍以原生 Codex 为准。
 
+外部页沿用 Chat 的双栏布局：Runtime、来源和 Project 选择固定在会话列表上方，列表与历史各自滚动；
+手机端在列表与正文之间切换。Project 筛选记录在 URL，切换 Project 会退出当前会话，避免误向上一项目发送；
+按会话分区的草稿仍保留。只有一个来源时直接选中该来源。会话信息按需展开；输入区使用 Enter 换行、
+Cmd/Ctrl+Enter 发送，输入法组合阶段不发送。加载旧历史保留阅读位置，回到最新后恢复自动贴底。
+
 来源由 daemon 扫描当前系统用户拥有的 `~/.codex`、`~/.codex-*` 和自身 `CODEX_HOME`，
 按真实 Home 路径去重，来源 ID 绑定目录身份；同路径目录被替换后，旧来源 ID 失效。
 API 只接受已发现的来源 ID，不接受 Home、socket、任意原生方法或配置覆盖。

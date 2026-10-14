@@ -10,6 +10,7 @@ import { CommandRegistry, type CommandInventoryEntry, type CommandSource } from 
 import { agentExtensionCommandSpecs } from "./commands/agent-extensions.js";
 import { contextCommandSpec } from "./commands/context.js";
 import { collaborationCommandSpecs } from "./commands/collaboration.js";
+import { externalChatCommandSpecs } from "./commands/external-chats.js";
 import { knowledgeCommandSpecs } from "./commands/knowledge.js";
 import { memberCommandSpecs } from "./commands/member.js";
 import { operationsCommandSpecs } from "./commands/operations.js";
@@ -32,6 +33,7 @@ for (const spec of replaceRetiredSpecs([
   ...repoCommandSpecs(),
   ...knowledgeCommandSpecs(),
   ...collaborationCommandSpecs(),
+  ...externalChatCommandSpecs(),
   ...agentExtensionCommandSpecs(),
   ...operationsCommandSpecs(),
 ])) commandRegistry.register(spec);

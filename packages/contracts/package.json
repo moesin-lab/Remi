@@ -28,7 +28,8 @@
     "./unified-model": "./src/unified-model.ts",
     "./issue-activity": "./src/issue-activity.ts",
     "./question": "./src/question.ts",
-    "./trace-file": "./src/trace-file.ts"
+    "./trace-file": "./src/trace-file.ts",
+    "./external-chats": "./src/external-chats.ts"
   },
   "dependencies": {}
 }

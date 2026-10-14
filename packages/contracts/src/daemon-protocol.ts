@@ -172,6 +172,7 @@ export const DAEMON_DOWNLINK_EVENT_FRAMES = [
 /** server -> daemon RPC requests, paired with a `res` by `id`. */
 export const DAEMON_DOWNLINK_RPC_FRAMES = [
   "trace.read",
+  "external_chat.request",
 ] as const;
 
 /** server -> daemon trace fan-out for subscribed tasks. Ordered per subscription. */
@@ -307,6 +308,7 @@ export type DaemonProtocolReply = DaemonProtocolOkReply | DaemonProtocolErrorRep
 
 /** Per-runtime capability fields use the same names and versions as the HTTP heartbeat. */
 export interface DaemonRuntimeCapabilities {
+  external_chats?: number;
   supports_batch_import?: boolean;
   supports_directory_scan?: boolean;
   supports_skill_directory?: boolean;

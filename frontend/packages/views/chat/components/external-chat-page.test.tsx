@@ -7,6 +7,8 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { I18nProvider } from "@multiremi/core/i18n/react";
 import { ApiError } from "@multiremi/core/api";
 import type { ExternalChatHistory, ExternalChatProject, ExternalChatSource, ExternalChatSummary } from "@multiremi/core/chat";
+import { externalChatReceiptStorageKey } from "@multiremi/core/chat";
+import { defaultSessionStorage } from "@multiremi/core/platform";
 import enChat from "../../locales/en/chat.json";
 import enRuntimes from "../../locales/en/runtimes.json";
 
@@ -51,13 +53,14 @@ function show(component: ReactNode = <ChatPage />) {
   const view = render(wrap(component));
   return { ...view, client, update: (next: ReactNode) => view.rerender(wrap(next)) };
 }
-function WindowHarness() {
-  const [draft, setDraft] = useState("");
+function WindowHarness({ initialDraft = "" }: { initialDraft?: string }) {
+  const [draft, setDraft] = useState(initialDraft);
   return <ExternalChatWindow ws="ws" runtime="rt" source="source" thread="thread" online draft={draft} onDraftChange={setDraft} />;
 }
 
 beforeEach(() => {
   vi.resetAllMocks();
+  window.sessionStorage.clear();
   navigation.searchParams = new URLSearchParams({ kind: "external", external_runtime: "rt", external_source: "source", external_thread: "thread" });
   navigation.replace.mockImplementation(url => { navigation.searchParams = new URLSearchParams(String(url).split("?")[1]); });
   backend.listRuntimes.mockResolvedValue([runtime]);
@@ -67,7 +70,7 @@ beforeEach(() => {
   backend.interruptExternalChatTurn.mockResolvedValue({ accepted: true });
   backend.respondExternalChatRequest.mockResolvedValue({ accepted: true });
 });
-afterEach(() => { cleanup(); clients.splice(0).forEach(client => client.clear()); });
+afterEach(() => { cleanup(); clients.splice(0).forEach(client => client.clear()); vi.restoreAllMocks(); window.sessionStorage.clear(); });
 
 it("deep-links to native history while keeping source Project and config read-only and never invoking Remi Chat APIs", async () => {
   navigation.searchParams.set("session", "remi-must-not-open");
@@ -76,6 +79,9 @@ it("deep-links to native history while keeping source Project and config read-on
   expect(screen.queryByTestId("remi-window")).not.toBeInTheDocument();
   expect(screen.getByText("original-model")).toBeInTheDocument();
   expect(screen.getByText("original-provider")).toBeInTheDocument();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("combobox", { name: "Search source projects" }));
+  await user.click(await screen.findByRole("option", { name: "Original native project" }));
   expect(screen.getByText("Original native project")).toBeInTheDocument();
   expect(screen.getByText("/work/second-root")).toBeInTheDocument();
   expect(screen.getByText("Native project · Read-only")).toBeInTheDocument();
@@ -111,13 +117,45 @@ it("pages and sorts native chats, filters by source project, and retains native 
   const newer = await screen.findByRole("button", { name: /Newer thread/ });
   expect(newer.compareDocumentPosition(screen.getByRole("button", { name: /Older thread/ })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(backend.listExternalChats).toHaveBeenCalledWith("rt", "source", expect.objectContaining({ cursor: "next-page", limit: 50 }));
+  await user.click(screen.getByRole("combobox", { name: "Search source projects" }));
+  await user.click(await screen.findByRole("option", { name: "Discovered project" }));
   expect(screen.getByText("Discovered by directory · Read-only")).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: /Original native project/ }));
+  await user.click(screen.getByRole("combobox", { name: "Search source projects" }));
+  await user.clear(screen.getByRole("combobox", { name: "Search source projects" }));
+  await user.click(await screen.findByRole("option", { name: "Original native project" }));
   await waitFor(() => expect(backend.listExternalChats).toHaveBeenCalledWith("rt", "source", expect.objectContaining({ project_id: project.id })));
   await user.click(screen.getByRole("button", { name: /Newer thread/ }));
   expect(navigation.replace).toHaveBeenCalledWith("/demo/chat?kind=external&external_runtime=rt&external_source=source&external_thread=newer");
   view.update(<ExternalChatPage />);
   await waitFor(() => expect(backend.getExternalChatHistory).toHaveBeenCalledWith("rt", "source", "newer", expect.any(Object)));
+});
+
+it("keeps chats directly after a searchable Project selector even with hundreds of source projects", async () => {
+  const projects: ExternalChatProject[] = Array.from({ length: 500 }, (_, index) => ({
+    id: `directory:${index}`, kind: "directory", name: `Worktree ${index}`, roots: [`/worktrees/root-${index}`, `/worktrees/extra-${index}`], readonly: true,
+  }));
+  backend.listExternalChatCatalog.mockResolvedValue({ sources: [{ ...source, projects }], warnings: [] });
+  backend.listExternalChats.mockResolvedValue({ chats: [chat], projects, next_cursor: null });
+  const user = userEvent.setup();
+  show(<ExternalChatPage />);
+  const firstChat = await screen.findByRole("button", { name: /Original thread/ });
+  const picker = screen.getByRole("combobox", { name: "Search source projects" });
+  expect(picker).toHaveValue("All projects");
+  expect(firstChat.previousElementSibling).toContainElement(picker);
+  expect(screen.queryByText("Worktree 499")).not.toBeInTheDocument();
+  expect(screen.queryByText("/worktrees/root-499")).not.toBeInTheDocument();
+  expect(screen.queryAllByRole("option")).toHaveLength(0);
+
+  await user.clear(picker);
+  await user.type(picker, "Worktree 499");
+  expect(picker).toHaveValue("Worktree 499");
+  await user.click(await screen.findByRole("option", { name: "Worktree 499" }));
+  expect(screen.getByText("Discovered by directory · Read-only")).toBeInTheDocument();
+  expect(screen.getByText("/worktrees/root-499")).toBeInTheDocument();
+  expect(screen.getByText("/worktrees/extra-499")).toBeInTheDocument();
+  expect(screen.queryByText("/worktrees/root-0")).not.toBeInTheDocument();
+  await waitFor(() => expect(backend.listExternalChats).toHaveBeenCalledWith("rt", "source", expect.objectContaining({ project_id: "directory:499" })));
+  expect(backend.listProjects).not.toHaveBeenCalled();
 });
 
 it("distinguishes native source errors, empty results, offline runtimes and older unsupported runtimes", async () => {
@@ -175,6 +213,56 @@ it("keeps unknown send outcomes blocked, reads the receipt, and never replays th
   expect(backend.sendExternalChatMessage).toHaveBeenCalledTimes(1);
 });
 
+it("restores the unknown request after reload with a fresh QueryClient and only GETs its receipt", async () => {
+  const key = externalChatReceiptStorageKey("ws", "rt", "source", "thread");
+  backend.sendExternalChatMessage.mockImplementation((_runtime, _source, thread, input) => {
+    expect(JSON.parse(window.sessionStorage.getItem(key)!)).toEqual({ request_id: input.request_id, thread_id: thread, turn_id: null, outcome: "unknown" });
+    return Promise.reject(new TypeError("Native response lost"));
+  });
+  backend.getExternalChatReceipt.mockImplementation((_runtime, _source, thread, request_id) => Promise.resolve({ request_id, thread_id: thread, turn_id: null, outcome: "unknown" }));
+  const user = userEvent.setup();
+  const first = show(<WindowHarness initialDraft="Original private message" />);
+  await screen.findByText("Original native history");
+  await user.click(screen.getByRole("button", { name: "Continue this chat" }));
+  await screen.findByText(/Send outcome is unknown/);
+  const requestId = backend.sendExternalChatMessage.mock.calls[0]![3].request_id;
+  expect(window.sessionStorage.getItem(key)).not.toContain("Original private message");
+  first.unmount();
+  first.client.clear();
+  backend.getExternalChatReceipt.mockClear();
+
+  const reloaded = show(<WindowHarness initialDraft="A new draft after reload" />);
+  expect(reloaded.client).not.toBe(first.client);
+  await screen.findByText("Original native history");
+  expect(screen.getByRole("button", { name: "Continue this chat" })).toBeDisabled();
+  await waitFor(() => expect(backend.getExternalChatReceipt).toHaveBeenCalledWith("rt", "source", "thread", requestId));
+  expect(backend.sendExternalChatMessage).toHaveBeenCalledTimes(1);
+  backend.getExternalChatReceipt.mockResolvedValue({ request_id: requestId, thread_id: "thread", turn_id: "confirmed-turn", outcome: "accepted" });
+  backend.getExternalChatHistory.mockResolvedValue(history({ turns: [{ id: "confirmed-turn", status: "completed", items: [] }] }));
+  await user.click(screen.getByRole("button", { name: "Check receipt" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Continue this chat" })).toBeEnabled());
+  expect(screen.getByRole("textbox", { name: "Message this native chat" })).toHaveValue("A new draft after reload");
+  expect(JSON.parse(window.sessionStorage.getItem(key)!)).toEqual({ request_id: requestId, thread_id: "thread", turn_id: "confirmed-turn", outcome: "accepted" });
+  expect(backend.sendExternalChatMessage).toHaveBeenCalledTimes(1);
+  expect(backend.sendChatMessage).not.toHaveBeenCalled();
+});
+
+it("retains the unknown send gate in memory and explains the reload limitation when storage is denied", async () => {
+  vi.spyOn(defaultSessionStorage, "setItem").mockImplementation(() => { throw new Error("Storage denied"); });
+  backend.sendExternalChatMessage.mockRejectedValue(new TypeError("Native response lost"));
+  backend.getExternalChatReceipt.mockImplementation((_runtime, _source, thread, request_id) => Promise.resolve({ request_id, thread_id: thread, turn_id: null, outcome: "unknown" }));
+  const user = userEvent.setup();
+  show(<WindowHarness initialDraft="Track in memory" />);
+  await screen.findByText("Original native history");
+  await user.click(screen.getByRole("button", { name: "Continue this chat" }));
+  expect(await screen.findByText(/Send receipts cannot be saved in this tab/)).toBeInTheDocument();
+  await screen.findByText(/Send outcome is unknown/);
+  expect(screen.getByRole("button", { name: "Continue this chat" })).toBeDisabled();
+  expect(screen.getByRole("textbox", { name: "Message this native chat" })).toHaveValue("Track in memory");
+  expect(backend.sendExternalChatMessage).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(backend.getExternalChatReceipt).toHaveBeenCalled());
+});
+
 it("disables new native turns while busy, and interrupts only the known native turn", async () => {
   backend.getExternalChatHistory.mockResolvedValue(history({ chat: { ...chat, status: "active" }, turns: [{ id: "running-native", status: "inProgress", items: [] }] }));
   const user = userEvent.setup();
@@ -202,6 +290,7 @@ it("keeps explicitly rejected text and newer edits when an uncertain receipt lat
   expect(input).toHaveValue("Original message");
   expect(backend.sendExternalChatMessage).toHaveBeenCalledTimes(1);
   expect(backend.getExternalChatReceipt).not.toHaveBeenCalled();
+  expect(window.sessionStorage.getItem(externalChatReceiptStorageKey("ws", "rt", "source", "thread"))).toBeNull();
   await user.click(screen.getByRole("button", { name: "Continue this chat" }));
   await screen.findByText(/Send outcome is unknown/);
   await user.type(input, " plus next message");

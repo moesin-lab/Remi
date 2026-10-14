@@ -6,16 +6,17 @@ import { cliCommandHelp, cliCommandInventory } from "../../../apps/remi/cli/inde
 const specs = externalChatCommandSpecs();
 const registry = new CommandRegistry();
 for (const spec of specs) registry.register(spec);
-const realFetch = globalThis.fetch, realLog = console.log;
-let requests: Request[] = [], output: string[] = [];
+const realFetch = globalThis.fetch, realLog = console.log, realError = console.error;
+let requests: Request[] = [], output: string[] = [], diagnostics: string[] = [];
 const fixtureId = "3ed318d8-bf6f-40df-8d9c-6a620ecaf3b7";
 const location = ["--runtime", "rt_codex", "--source", "codex:aiden"];
 const connection = ["--server", "http://external.test", "--workspace", "ws_test", "--token", "fixture", "--json"];
 const base = "/api/runtimes/rt_codex/external-chats/codex%3Aaiden/threads/thread_1";
 
 function setup(handler: (request: Request) => Response | Promise<Response> = () => Response.json({ accepted: true })) {
-  requests = []; output = [];
+  requests = []; output = []; diagnostics = [];
   console.log = (...values) => { output.push(values.join(" ")); };
+  console.error = (...values) => { diagnostics.push(values.join(" ")); };
   globalThis.fetch = (async (input, init) => {
     const request = new Request(input, init); requests.push(request);
     if (new URL(request.url).pathname === "/api/cli/capabilities") {
@@ -29,7 +30,7 @@ function execute(action: string, args: string[] = [], flags = location) {
   return registry.execute(["chat", "external", action, ...args, ...flags, ...connection]);
 }
 
-afterEach(() => { globalThis.fetch = realFetch; console.log = realLog; });
+afterEach(() => { globalThis.fetch = realFetch; console.log = realLog; console.error = realError; });
 
 describe("external native Chat CLI", () => {
   it("registers seven human-only capabilities and generated help in the real dispatcher", () => {
@@ -64,6 +65,41 @@ describe("external native Chat CLI", () => {
     expect(request.headers.get("Authorization")).toBe("Bearer fixture");
     expect(request.headers.get("X-Workspace-ID")).toBe("ws_test");
     expect(JSON.parse(output.join("\n"))).toEqual(sample.response);
+    expect(diagnostics).toEqual([]);
+  });
+
+  it("shows source homes and live connection state in table output", async () => {
+    setup(() => Response.json({ sources: [{ id: "codex:aiden", name: "Aiden Codex", home: "/home/operator/.codex-aiden", connection: "live", projects: [] }], warnings: [] }));
+    await registry.execute(["chat", "external", "sources", "--runtime", "rt_codex", ...connection.filter(value => value !== "--json")]);
+    const table = output.join("\n");
+    expect(table).toContain("HOME"); expect(table).toContain("CONNECTION");
+    expect(table).toContain("codex:aiden"); expect(table).toContain("Aiden Codex");
+    expect(table).toContain("/home/operator/.codex-aiden"); expect(table).toContain("live");
+    expect(diagnostics).toEqual([]);
+  });
+
+  it("shows the original Chat title, Project, cwd, state and model with a page cursor", async () => {
+    setup(() => Response.json({ chats: [{ id: "thread_1", title: "继续开发 CLI", project_id: "cwd:p1", cwd: "/home/operator/dev/aiden-cli", status: "active", model: "aiden-gpt-6.1-sol" }], projects: [], next_cursor: "chat:next" }));
+    await registry.execute(["chat", "external", "list", ...location, ...connection.filter(value => value !== "--json")]);
+    const table = output.join("\n");
+    for (const column of ["TITLE", "PROJECT", "CWD", "STATE", "MODEL"]) expect(table).toContain(column);
+    for (const value of ["继续开发 CLI", "cwd:p1", "/home/operator/dev/aiden-cli", "active", "aiden-gpt-6.1-sol"]) expect(table).toContain(value);
+    expect(diagnostics).toEqual(["next_cursor: chat:next"]);
+    expect(requests.filter(request => new URL(request.url).pathname.endsWith("/threads"))).toHaveLength(1);
+  });
+
+  it("marks clipped history items and exposes the next page only in table mode", async () => {
+    const history = { chat: { id: "thread_1" }, turns: [{ id: "turn_1", status: "completed", items: [{ id: "item_1", type: "agentMessage", role: "assistant", text: "截断正文", truncated: true }] }], requests: [], next_cursor: "history:next" };
+    setup(() => Response.json(history));
+    await registry.execute(["chat", "external", "get", "thread_1", ...location, ...connection.filter(value => value !== "--json")]);
+    expect(output.join("\n")).toContain("TRUNCATED");
+    expect(output.join("\n")).toContain("截断正文");
+    expect(output.join("\n")).toContain("yes");
+    expect(diagnostics).toEqual(["next_cursor: history:next"]);
+    setup(() => Response.json(history));
+    await execute("get", ["thread_1"]);
+    expect(JSON.parse(output.join("\n"))).toEqual(history);
+    expect(diagnostics).toEqual([]);
   });
 
   it("sends literal text with an explicit UUID once and no HTTP idempotency retry header", async () => {

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { useState } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -81,7 +81,7 @@ it("deep-links to native history while keeping source Project and config read-on
   expect(screen.getByText("original-provider")).toBeInTheDocument();
   const user = userEvent.setup();
   await user.click(screen.getByRole("combobox", { name: "Search source projects" }));
-  await user.click(await screen.findByRole("option", { name: "Original native project" }));
+  await user.click(await screen.findByRole("option", { name: /^Original native project/ }));
   expect(screen.getByText("Original native project")).toBeInTheDocument();
   expect(screen.getByText("/work/second-root")).toBeInTheDocument();
   expect(screen.getByText("Native project · Read-only")).toBeInTheDocument();
@@ -118,11 +118,11 @@ it("pages and sorts native chats, filters by source project, and retains native 
   expect(newer.compareDocumentPosition(screen.getByRole("button", { name: /Older thread/ })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(backend.listExternalChats).toHaveBeenCalledWith("rt", "source", expect.objectContaining({ cursor: "next-page", limit: 50 }));
   await user.click(screen.getByRole("combobox", { name: "Search source projects" }));
-  await user.click(await screen.findByRole("option", { name: "Discovered project" }));
+  await user.click(await screen.findByRole("option", { name: /^Discovered project/ }));
   expect(screen.getByText("Discovered by directory · Read-only")).toBeInTheDocument();
   await user.click(screen.getByRole("combobox", { name: "Search source projects" }));
   await user.clear(screen.getByRole("combobox", { name: "Search source projects" }));
-  await user.click(await screen.findByRole("option", { name: "Original native project" }));
+  await user.click(await screen.findByRole("option", { name: /^Original native project/ }));
   await waitFor(() => expect(backend.listExternalChats).toHaveBeenCalledWith("rt", "source", expect.objectContaining({ project_id: project.id })));
   await user.click(screen.getByRole("button", { name: /Newer thread/ }));
   expect(navigation.replace).toHaveBeenCalledWith("/demo/chat?kind=external&external_runtime=rt&external_source=source&external_thread=newer");
@@ -149,12 +149,57 @@ it("keeps chats directly after a searchable Project selector even with hundreds 
   await user.clear(picker);
   await user.type(picker, "Worktree 499");
   expect(picker).toHaveValue("Worktree 499");
-  await user.click(await screen.findByRole("option", { name: "Worktree 499" }));
+  await user.click(await screen.findByRole("option", { name: /^Worktree 499/ }));
   expect(screen.getByText("Discovered by directory · Read-only")).toBeInTheDocument();
   expect(screen.getByText("/worktrees/root-499")).toBeInTheDocument();
   expect(screen.getByText("/worktrees/extra-499")).toBeInTheDocument();
   expect(screen.queryByText("/worktrees/root-0")).not.toBeInTheDocument();
   await waitFor(() => expect(backend.listExternalChats).toHaveBeenCalledWith("rt", "source", expect.objectContaining({ project_id: "directory:499" })));
+  expect(backend.listProjects).not.toHaveBeenCalled();
+});
+
+it("preserves a Project search and its option nodes when native chats finish loading and the parent rerenders", async () => {
+  const projects: ExternalChatProject[] = [
+    { id: "directory:main", kind: "directory", name: "markone", roots: ["/dev/aiden/markone"], readonly: true },
+    { id: "native:worktree", kind: "native", name: "markone", roots: ["/dev/worktrees/markone-fix"], readonly: true },
+    { id: "directory:cli", kind: "directory", name: "aiden-cli", roots: ["/dev/aiden/aiden-cli"], readonly: true },
+  ];
+  let resolveThreads!: (result: { chats: ExternalChatSummary[]; projects: ExternalChatProject[]; next_cursor: null }) => void;
+  backend.listExternalChatCatalog.mockResolvedValue({ sources: [{ ...source, projects }], warnings: [] });
+  backend.listExternalChats.mockImplementationOnce(() => new Promise(resolve => { resolveThreads = resolve; }));
+  const user = userEvent.setup();
+  const view = show(<ExternalChatPage />);
+  const picker = await screen.findByRole("combobox", { name: "Search source projects" });
+  await user.clear(picker);
+  await user.type(picker, "markone");
+  const options = await screen.findAllByRole("option", { name: /^markone/ });
+  expect(options).toHaveLength(2);
+  expect(within(options[0]!).getByText("Discovered by directory · Read-only")).toBeInTheDocument();
+  expect(within(options[0]!).getByText("/dev/aiden/markone")).toBeInTheDocument();
+  expect(within(options[1]!).getByText("Native project · Read-only")).toBeInTheDocument();
+  expect(within(options[1]!).getByText("/dev/worktrees/markone-fix")).toBeInTheDocument();
+
+  await act(async () => resolveThreads({ chats: [chat], projects: projects.map(row => ({ ...row, roots: [...row.roots] })), next_cursor: null }));
+  await waitFor(() => expect(view.client.getQueryState(["external-chat", "ws", "rt", "source", "threads", ""])?.status).toBe("success"));
+  view.update(<ExternalChatPage />);
+  expect(picker).toHaveValue("markone");
+  expect(screen.getAllByRole("option", { name: /^markone/ })).toHaveLength(2);
+  expect(options.every(option => option.isConnected)).toBe(true);
+  await user.click(options[1]!);
+  await waitFor(() => expect(backend.listExternalChats).toHaveBeenCalledWith("rt", "source", expect.objectContaining({ project_id: "native:worktree" })));
+
+  await user.clear(picker);
+  await user.type(picker, "markone");
+  const selectedOptions = await screen.findAllByRole("option", { name: /^markone/ });
+  await act(async () => {
+    view.client.setQueryData(["external-chat", "ws", "rt", "catalog"], {
+      sources: [{ ...source, projects: projects.map(row => ({ ...row, roots: [...row.roots, "/updated-root"] })) }], warnings: [],
+    });
+  });
+  view.update(<ExternalChatPage />);
+  expect(picker).toHaveValue("markone");
+  expect(screen.getAllByRole("option", { name: /^markone/ })).toHaveLength(2);
+  expect(selectedOptions.every(option => option.isConnected)).toBe(true);
   expect(backend.listProjects).not.toHaveBeenCalled();
 });
 

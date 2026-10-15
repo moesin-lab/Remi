@@ -119,6 +119,17 @@ it("keeps request Markdown stable while the user types an answer", async () => {
   expect(rendering.markdownCalls).toBe(before);
 });
 
+it("keeps the newest copy of a repeated item ID within a single native turn", async () => {
+  const value = history();
+  value.turns[0]!.items.push({ ...value.turns[0]!.items[1]!, text: "Corrected native answer" });
+  backend.getExternalChatHistory.mockResolvedValue(value);
+  show();
+  await screen.findByText("Corrected native answer");
+  expect(screen.queryByText("Native answer 0")).not.toBeInTheDocument();
+  expect(screen.getAllByText("Corrected native answer")).toHaveLength(1);
+  expect(rendering.markdownCalls).toBe(40);
+});
+
 it("updates translated truncation labels inside memoized turns when the locale changes", async () => {
   const value = history();
   value.turns[0]!.items[1]!.truncated = true;

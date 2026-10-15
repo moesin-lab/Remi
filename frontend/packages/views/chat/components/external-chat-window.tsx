@@ -84,7 +84,8 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, models
       for (const turn of page.turns) {
         const previous = merged.get(turn.id);
         if (!previous) {
-          merged.set(turn.id, turn);
+          const items = new Map(turn.items.map(item => [item.id, item]));
+          merged.set(turn.id, items.size === turn.items.length ? turn : { ...turn, items: [...items.values()] });
           continue;
         }
 

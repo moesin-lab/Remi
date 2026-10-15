@@ -64,4 +64,72 @@ describe("external chat query isolation and acknowledgement", () => {
       client.clear();
     }
   });
+
+  it("reuses settled older pages during polling, but refreshes changed cursors and expired history", async () => {
+    vi.useFakeTimers();
+    let headCursor = "older";
+    read.mockReset().mockImplementation((_runtime, _source, _thread, params) => Promise.resolve({
+      chat: { status: "idle" }, turns: [{ id: params.cursor ?? "newest", status: "completed", items: [] }],
+      requests: [], next_cursor: params.cursor ? null : headCursor,
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const observer = new InfiniteQueryObserver(client, externalChatHistoryOptions("ws", "rt", "source", "thread", true));
+    const unsubscribe = observer.subscribe(() => undefined);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      await observer.fetchNextPage();
+      read.mockClear();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(read.mock.calls.map(call => call[3].cursor ?? "HEAD")).toEqual(["HEAD"]);
+      expect(observer.getCurrentResult().data?.pages[1]?.turns[0]?.id).toBe("older");
+
+      headCursor = "shifted";
+      read.mockClear();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(read.mock.calls.map(call => call[3].cursor ?? "HEAD")).toEqual(["HEAD", "shifted"]);
+      expect(observer.getCurrentResult().data?.pageParams).toEqual([undefined, "shifted"]);
+
+      read.mockClear();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(read.mock.calls.filter(call => call[3].cursor === "shifted")).toHaveLength(1);
+
+      read.mockClear();
+      await client.invalidateQueries({ queryKey: externalChatKeys.history("ws", "rt", "source", "thread") });
+      expect(read.mock.calls.map(call => call[3].cursor ?? "HEAD")).toEqual(["HEAD", "shifted"]);
+    } finally {
+      unsubscribe();
+      client.clear();
+    }
+  });
+
+  it("keeps polling an unsettled older turn and isolates cached pages by native identity", async () => {
+    vi.useFakeTimers();
+    read.mockReset().mockImplementation((_runtime, _source, _thread, params) => Promise.resolve({
+      chat: { status: "active" }, turns: [{ id: params.cursor ?? "newest", status: "inProgress", items: [] }],
+      requests: [], next_cursor: params.cursor ? null : "older",
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const observer = new InfiniteQueryObserver(client, externalChatHistoryOptions("ws", "rt", "source", "thread", true));
+    const unsubscribe = observer.subscribe(() => undefined);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      await observer.fetchNextPage();
+      read.mockClear();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(read.mock.calls.map(call => call[3].cursor ?? "HEAD")).toEqual(["HEAD", "older"]);
+
+      const other = new InfiniteQueryObserver(client, externalChatHistoryOptions("ws", "rt", "other-source", "thread", true));
+      const stopOther = other.subscribe(() => undefined);
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        read.mockClear();
+        await other.fetchNextPage();
+        expect(read).toHaveBeenCalledWith("rt", "other-source", "thread", expect.objectContaining({ cursor: "older" }));
+      } finally { stopOther(); }
+    } finally {
+      unsubscribe();
+      client.clear();
+    }
+  });
 });

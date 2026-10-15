@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
+  EXTERNAL_CHAT_MAX_MODEL_CHARS,
   EXTERNAL_CHAT_MAX_PAGE_SIZE,
   EXTERNAL_CHAT_MAX_TEXT_CHARS,
   type ExternalChatCatalog,
   type ExternalChatHistory,
   type ExternalChatList,
+  type ExternalChatModels,
   type ExternalChatReceipt,
 } from "@multiremi/contracts/external-chats.js";
 import { CliError, CliRenderer, type CliOptionSpec, type CommandInvocation, type CommandSpec } from "../core/index.js";
@@ -30,6 +32,11 @@ export function externalChatCommandSpecs(): CommandSpec[] {
       const response = await (await clientFor(invocation)).request<ExternalChatCatalog>({ method: "GET", path });
       renderSources(invocation, response.data);
     }, false),
+    spec("models", "List one page of native models available from this source", "read", [RUNTIME, SOURCE, ...PAGE], async invocation => {
+      const path = `${catalogPath(invocation)}/${encodePath(requiredOption(invocation, "source"))}/models`, query = pageQuery(invocation);
+      const response = await (await clientFor(invocation)).request<ExternalChatModels>({ method: "GET", path, query });
+      renderModels(invocation, response.data);
+    }, false),
     spec("list", "List one page of native Chats", "read", [RUNTIME, SOURCE, ...PAGE,
       { name: "project", type: "string", valueName: "id", description: "Native or directory Project ID from the source catalog" },
     ], async invocation => {
@@ -45,6 +52,7 @@ export function externalChatCommandSpecs(): CommandSpec[] {
     }),
     spec("send", "Send once to the same native thread; reconcile unknown acknowledgements with receipt", "write", [RUNTIME, SOURCE,
       { name: "text", type: "string", required: true, valueName: "text", description: "Message text" },
+      { name: "model", type: "string", valueName: "id", description: "Native model ID for this turn (omit to preserve the native model)" },
       { ...REQUEST_ID, required: false, valueName: "uuid", description: "Send UUID (default: a new UUID); never automatically resent" },
     ], send),
     spec("receipt", "Reconcile a native send by its original request UUID", "read", [RUNTIME, SOURCE, { ...REQUEST_ID, valueName: "uuid" }], async invocation => {
@@ -116,12 +124,17 @@ async function send(invocation: CommandInvocation): Promise<void> {
   if (typeof text !== "string" || !text.trim() || text.length > EXTERNAL_CHAT_MAX_TEXT_CHARS) {
     throw new CliError("usage", `--text must contain 1..${EXTERNAL_CHAT_MAX_TEXT_CHARS} characters`);
   }
+  const model = invocation.options.model;
+  if (model !== undefined && (typeof model !== "string" || !model.trim() || model.length > EXTERNAL_CHAT_MAX_MODEL_CHARS || /[\x00-\x1f\x7f-\x9f]/.test(model))) {
+    throw new CliError("usage", `--model must contain 1..${EXTERNAL_CHAT_MAX_MODEL_CHARS} characters without controls`);
+  }
   const requestId = requestUuid(invocation, true);
   const client = await clientFor(invocation);
   const unknown: ExternalChatReceipt = { request_id: requestId, thread_id: threadId, turn_id: null, outcome: "unknown" };
   const hint = `Reconcile with remi chat external receipt ${threadId} --runtime ${requiredOption(invocation, "runtime")} --source ${requiredOption(invocation, "source")} --request-id ${requestId}. Do not resend.`;
   try {
-    const response = await client.request<ExternalChatReceipt>({ method: "POST", path, body: { text, request_id: requestId }, retries: false });
+    const response = await client.request<ExternalChatReceipt>({ method: "POST", path,
+      body: { text, request_id: requestId, ...(model === undefined ? {} : { model }) }, retries: false });
     const receipt = response.data;
     if (!receipt || receipt.request_id !== requestId || receipt.thread_id !== threadId
       || !["accepted", "unknown"].includes(receipt.outcome)
@@ -130,6 +143,10 @@ async function send(invocation: CommandInvocation): Promise<void> {
     }
     renderReceipt(invocation, receipt);
   } catch (error) {
+    if (error instanceof CliError && isRecord(error.details) && error.details.code === "external_chat_models_unsupported"
+      && error.details.outcome !== "unknown") {
+      throw new CliError(error.code, error.message, { status: error.status, retryable: false, details: error.details, cause: error });
+    }
     if (error instanceof CliError && (error.code === "network" || error.code === "timeout" || (error.status !== undefined && error.status >= 500)
       || (isRecord(error.details) && error.details.outcome === "unknown"))) {
       throw new CliError(error.code, `Native send acknowledgement is unknown (request_id ${requestId})`, {
@@ -195,6 +212,16 @@ function renderChats(invocation: CommandInvocation, list: ExternalChatList): voi
     { header: "CWD", value: row => row.cwd },
     { header: "STATE", value: row => row.status },
     { header: "MODEL", value: row => row.model },
+  ] });
+  if (mode === "table" && list.next_cursor) renderer.diagnostic(`next_cursor: ${list.next_cursor}`);
+}
+
+function renderModels(invocation: CommandInvocation, list: ExternalChatModels): void {
+  const renderer = new CliRenderer(), mode = outputMode(invocation);
+  renderer.render(list, { mode, rows: () => list.models, columns: [
+    { header: "ID", value: row => row.id },
+    { header: "NAME", value: row => row.name },
+    { header: "DESCRIPTION", value: row => row.description },
   ] });
   if (mode === "table" && list.next_cursor) renderer.diagnostic(`next_cursor: ${list.next_cursor}`);
 }

@@ -21,6 +21,8 @@ const catalog = { sources: [{ id: "codex_local", name: "Codex", home: "/home/fix
 function dataFor(operation: ExternalChatOperation): ExternalChatRpcResult {
   switch (operation.operation) {
     case "catalog": return { ok: true, data: catalog };
+    case "models": return { ok: true, data: { source_id: operation.source_id,
+      models: [{ id: "provider/model", name: "Native model", description: "Source catalog model" }], next_cursor: null } };
     case "list": return { ok: true, data: { chats: [chat], projects: [project], next_cursor: null } };
     case "read": return { ok: true, data: { chat, turns: [], next_cursor: null, requests: [] } };
     case "send":
@@ -32,7 +34,7 @@ function dataFor(operation: ExternalChatOperation): ExternalChatRpcResult {
 function fixture() {
   const store = createLocalSnapshotStore();
   const runtime = store.registerRuntime({ id: "rt_external", name: "External Codex", provider: "codex", workspaceId: "local",
-    ownerId: "alice", visibility: "private", daemonId: "daemon_external", metadata: { external_chats: 1, codex_profiles: 1 } });
+    ownerId: "alice", visibility: "private", daemonId: "daemon_external", metadata: { external_chats: 1, external_chat_models: 1, codex_profiles: 1 } });
   const calls: Array<{ runtimeId: string; operation: ExternalChatOperation }> = [];
   const client: ExternalChatClient = { request: async (runtimeId, operation) => { calls.push({ runtimeId, operation }); return dataFor(operation); } };
   const app = createMultiremiApp({ store, authToken: "external-test-master", externalChatClient: client });
@@ -48,13 +50,15 @@ function fixture() {
 }
 
 describe("external Chat HTTP contract and authorization", () => {
-  it("implements all seven routes as native projections without creating Remi resources", async () => {
+  it("implements all eight routes as native projections without creating Remi resources", async () => {
     const f = fixture();
     const resourceTables = ["multiremi_projects", "multiremi_chat_sessions"];
     const before = resourceTables.map(table => db!.query(`SELECT COUNT(*) AS count FROM ${table}`).get());
     const tasksBefore = f.store.listTasks();
     const cases: Array<[string, unknown, ExternalChatOperation, number]> = [
       [f.base, undefined, { operation: "catalog" }, 200],
+      [`${f.base}/codex_local/models?cursor=next%3A%2B%2F%3D&limit=1`, undefined,
+        { operation: "models", source_id: "codex_local", cursor: "next:+/=", limit: 1 }, 200],
       [`${f.threads}?project_id=dir_project&cursor=opaque:next&limit=5`, undefined,
         { operation: "list", source_id: "codex_local", project_id: "dir_project", cursor: "opaque:next", limit: 5 }, 200],
       [`${f.path}?cursor=turn:cursor&limit=2`, undefined,
@@ -83,7 +87,8 @@ describe("external Chat HTTP contract and authorization", () => {
     const bob = f.store.getOrCreateUser({ email: "bob@example.test", name: "Bob" });
     const token = await f.store.createAccessToken({ name: "Bob session", type: "pat", purpose: "session", userId: bob.id, workspaceId: "local" });
     expect((await f.request(f.base, undefined, token.token)).status).toBe(200);
-    expect(f.calls).toHaveLength(1);
+    expect((await f.request(`${f.base}/codex_local/models`, undefined, token.token)).status).toBe(200);
+    expect(f.calls).toHaveLength(2);
   });
 
   it("denies task and daemon credentials on every external route before any native RPC", async () => {
@@ -93,7 +98,8 @@ describe("external Chat HTTP contract and authorization", () => {
     const taskToken = await f.store.createAccessToken({ name: "Fixture task", type: "task", purpose: "task", taskId: task.id, agentId: agent.id, workspaceId: "local" });
     const daemonToken = await f.store.createAccessToken({ name: "Fixture daemon", type: "daemon", userId: "alice", daemonId: "daemon_external", workspaceId: "local" });
     for (const token of [taskToken, daemonToken]) {
-      for (const [target, input] of [[f.base], [f.threads], [f.path], [`${f.path}/messages`, { text: "x", request_id: requestId }],
+      for (const [target, input] of [[f.base], [`${f.base}/codex_local/models`], [f.threads], [f.path],
+        [`${f.path}/messages`, { text: "x", request_id: requestId }], [`${f.path}/messages`, { text: "x", request_id: requestId, model: "provider/model" }],
         [`${f.path}/receipts/${requestId}`], [`${f.path}/interrupt`, { turn_id: turnId }], [`${f.path}/requests/17`, { decision: "accept" }]] as const) {
         expect((await f.request(target, input, token.token)).status).toBe(403);
       }
@@ -107,6 +113,7 @@ describe("external Chat HTTP contract and authorization", () => {
     const workspace = f.store.createWorkspace({ name: "Team", slug: "external-team" }, user.id);
     const token = await f.store.createAccessToken({ name: "Human session", type: "pat", purpose: "session", userId: user.id, workspaceId: "local" });
     expect((await f.request(f.base, undefined, token.token, { "X-Workspace-ID": workspace.id })).status).toBe(404);
+    expect((await f.request(`${f.base}/codex_local/models`, undefined, token.token, { "X-Workspace-ID": workspace.id })).status).toBe(404);
     expect((await f.request(f.base, undefined, token.token, { "X-Workspace-Slug": "missing" })).status).toBe(404);
     expect(f.calls).toHaveLength(0);
     const teamRuntime = f.store.registerRuntime({ id: "rt_team", name: "Team Codex", provider: "codex", workspaceId: workspace.id,
@@ -141,10 +148,55 @@ describe("external Chat HTTP contract and authorization", () => {
     expect(f.calls).toHaveLength(0);
   });
 
+  it("requires the model capability for listing or explicit selection while preserving ordinary sends on older daemons", async () => {
+    const f = fixture();
+    for (const version of [undefined, 0, 2, "1", true]) {
+      f.store.updateRuntime(f.runtime.id, { metadata: { external_chats: 1, ...(version === undefined ? {} : { external_chat_models: version }) } });
+      const before = f.calls.length;
+      for (const [target, input] of [[`${f.base}/codex_local/models`, undefined],
+        [`${f.path}/messages`, { text: "Continue", request_id: requestId, model: "provider/model" }]] as const) {
+        const response = await f.request(target, input);
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({ code: "external_chat_models_unsupported" });
+      }
+      expect(f.calls).toHaveLength(before);
+      expect((await f.request(`${f.path}/messages`, { text: "Continue", request_id: requestId })).status).toBe(202);
+      expect(f.calls.at(-1)!.operation).not.toHaveProperty("model");
+    }
+    f.store.updateRuntime(f.runtime.id, { metadata: { external_chat_models: 1 } });
+    expect((await f.request(`${f.base}/codex_local/models`)).status).toBe(503);
+  });
+
+  it("passes the exact bounded model ID without treating it as a path or injecting connection options", async () => {
+    const f = fixture();
+    for (const model of ["provider/model", "provider/" + "界".repeat(247)]) {
+      expect((await f.request(`${f.path}/messages`, { text: "Continue", request_id: requestId, model })).status).toBe(202);
+      expect(f.calls.at(-1)!.operation).toEqual({ operation: "send", source_id: "codex_local", thread_id: threadId,
+        request_id: requestId, text: "Continue", model });
+    }
+    const before = f.calls.length;
+    for (const model of ["", " ", "x".repeat(257), "provider/\nmodel", "provider/\0model", "provider/\x85model", null, 1, [], {}]) {
+      expect((await f.request(`${f.path}/messages`, { text: "Continue", request_id: requestId, model })).status).toBe(400);
+    }
+    expect(f.calls).toHaveLength(before);
+  });
+
+  it("accepts a complete 4096-character native model cursor without truncation", async () => {
+    const f = fixture();
+    const cursor = "x".repeat(4096);
+    expect((await f.request(`${f.base}/codex_local/models?cursor=${cursor}`)).status).toBe(200);
+    expect(f.calls.at(-1)!.operation).toEqual({ operation: "models", source_id: "codex_local", cursor });
+    expect((await f.request(`${f.base}/codex_local/models?cursor=${cursor}x`)).status).toBe(400);
+    expect(f.calls).toHaveLength(1);
+  });
+
   it("rejects paths, configuration overrides, malformed IDs, unknown and repeated queries", async () => {
     const f = fixture();
     const invalid: Array<[string, unknown?]> = [
       [`${f.base}?home=/tmp/native`], [`${f.threads}?socket=/tmp/native.sock`], [`${f.threads}?project_id=../private`],
+      [`${f.base}/codex_local/models?home=/tmp/private`], [`${f.base}/codex_local/models?limit=0`],
+      [`${f.base}/codex_local/models?limit=51`], [`${f.base}/codex_local/models?limit=1&limit=2`],
+      [`${f.base}/codex_local/models?cursor=%00`], [`${f.base}/%2Ftmp%2Fhome/models`],
       [`${f.threads}?limit=51`], [`${f.threads}?limit=1&limit=2`], [`${f.path}?cursor=%00`],
       [`${f.base}/%2Ftmp%2Fhome/threads`], [`${f.base}/..%5Cprivate/threads`],
       [`${f.threads}/not-a-uuid`], [`${f.path}/receipts/17`],
@@ -211,7 +263,7 @@ it("records external capability through real hello and heartbeat without modifyi
   const f = fixture();
   f.store.setRuntimeCodexProfile(f.runtime.id, { name: "fixture_profile", base_url: "https://fixture.example/v1", model: "fixture",
     env_key: "REMI_CODEX_EXTERNAL_TEST_KEY", auth_mode: "env" });
-  f.store.updateRuntime(f.runtime.id, { metadata: { kept: "fixture", external_chats: 0, codex_profiles: 1 } });
+  f.store.updateRuntime(f.runtime.id, { metadata: { kept: "fixture", external_chats: 0, external_chat_models: 0, codex_profiles: 1 } });
   const before = f.store.getRuntime(f.runtime.id)!;
   const profileBefore = f.store.getRuntimeCodexProfile(f.runtime.id);
   const tables = ["multiremi_execution_group_members", "multiremi_execution_profiles", "multiremi_runtime_codex_profiles"];
@@ -223,13 +275,16 @@ it("records external capability through real hello and heartbeat without modifyi
   try {
     await session.handleMessage(JSON.stringify({ v: 2, t: "hello", p: { protocol: 2, cli_version: DAEMON_MIN_CLI_VERSION,
       daemon_id: "daemon_external", runtimes: [{ runtime_id: f.runtime.id, provider: "codex", max_concurrency: 1,
-        active_task_ids: [], capabilities: { external_chats: 1, codex_profiles: 1 } }] } }));
+        active_task_ids: [], capabilities: { external_chats: 1, external_chat_models: 1, codex_profiles: 1 } }] } }));
     expect(frames.some(frame => frame.t === "welcome")).toBe(true);
-    expect(f.store.getRuntime(f.runtime.id)?.metadata).toMatchObject({ kept: "fixture", external_chats: 1 });
+    expect(f.store.getRuntime(f.runtime.id)?.metadata).toMatchObject({ kept: "fixture", external_chats: 1, external_chat_models: 1 });
 
     await session.handleMessage(JSON.stringify({ v: 2, t: "hb", p: { runtimes: [{ runtime_id: f.runtime.id, capabilities: { codex_profiles: 1 } }] } }));
     const after = f.store.getRuntime(f.runtime.id)!;
-    expect(after.metadata).toMatchObject({ kept: "fixture", external_chats: 0 });
+    expect(after.metadata).toMatchObject({ kept: "fixture", external_chats: 0, external_chat_models: 0 });
+    await session.handleMessage(JSON.stringify({ v: 2, t: "hb", p: { runtimes: [{ runtime_id: f.runtime.id,
+      capabilities: { external_chats: 1, external_chat_models: 1, codex_profiles: 1 } }] } }));
+    expect(f.store.getRuntime(f.runtime.id)?.metadata).toMatchObject({ kept: "fixture", external_chats: 1, external_chat_models: 1 });
     for (const key of ["executionGroupId", "workspaceId", "ownerId", "visibility", "models"] as const) {
       expect(after[key]).toEqual(before[key]);
     }
@@ -249,12 +304,12 @@ it("proxies HTTP through an actual daemon session and associates the native rece
   try {
     await session.handleMessage(JSON.stringify({ v: 2, t: "hello", p: { protocol: 2, cli_version: DAEMON_MIN_CLI_VERSION,
       daemon_id: "daemon_external", runtimes: [{ runtime_id: f.runtime.id, provider: "codex", max_concurrency: 1,
-        active_task_ids: [], capabilities: { external_chats: 1 } }] } }));
+        active_task_ids: [], capabilities: { external_chats: 1, external_chat_models: 1 } }] } }));
     const response = app.request(`${f.path}/messages`, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: "Continue native session", request_id: requestId }) });
+      body: JSON.stringify({ text: "Continue native session", request_id: requestId, model: "provider/model" }) });
     await Bun.sleep(0);
     const outbound = frames.find(frame => frame.t === "external_chat.request");
-    expect(outbound).toMatchObject({ rt: f.runtime.id, p: { operation: "send", thread_id: threadId, request_id: requestId } });
+    expect(outbound).toMatchObject({ rt: f.runtime.id, p: { operation: "send", thread_id: threadId, request_id: requestId, model: "provider/model" } });
     await session.handleMessage(JSON.stringify({ v: 2, t: "res", re: outbound!.id, rt: f.runtime.id,
       p: dataFor(outbound!.p as ExternalChatOperation) }));
     const result = await response;

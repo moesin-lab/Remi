@@ -1,4 +1,5 @@
-import type { ExternalChatOperation, ExternalChatRpcResult, ExternalChatResult } from "@multiremi/contracts/external-chats.js";
+import { EXTERNAL_CHAT_MAX_MODEL_CHARS, EXTERNAL_CHAT_MAX_PAGE_SIZE,
+  type ExternalChatOperation, type ExternalChatRpcResult, type ExternalChatResult } from "@multiremi/contracts/external-chats.js";
 
 export function isExternalChatWrite(operation: ExternalChatOperation): boolean {
   return operation.operation === "send" || operation.operation === "interrupt" || operation.operation === "respond";
@@ -73,6 +74,22 @@ export function externalChatResult(value: unknown, operation: ExternalChatOperat
           return { source_id: string(warning.source_id), code: string(warning.code), message: string(warning.message) };
         }) };
         break;
+      case "models": {
+        if (row.source_id !== operation.source_id) throw new Error("Foreign external model source");
+        const models = array(row.models, value => {
+          const model = object(value);
+          const id = string(model.id);
+          if (!id.trim() || id.length > EXTERNAL_CHAT_MAX_MODEL_CHARS || /[\x00-\x1f\x7f-\x9f]/.test(id)) throw new Error("Invalid external model id");
+          return { id, name: string(model.name), description: string(model.description) };
+        });
+        const cursor = nullableString(row.next_cursor);
+        if (models.length > (operation.limit ?? EXTERNAL_CHAT_MAX_PAGE_SIZE)
+          || (cursor !== null && (!cursor || cursor.length > 4096 || /[\x00-\x1f\x7f-\x9f]/.test(cursor)))) {
+          throw new Error("Invalid external model page");
+        }
+        data = { source_id: operation.source_id, models, next_cursor: cursor };
+        break;
+      }
       case "list":
         data = { chats: array(row.chats, value => summary(value, operation)), projects: array(row.projects, project),
           next_cursor: nullableString(row.next_cursor) };

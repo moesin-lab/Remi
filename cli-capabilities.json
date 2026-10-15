@@ -12294,6 +12294,9 @@
     "GET /api/runtimes/:id/external-chats": {
       "command": "chat.external.sources"
     },
+    "GET /api/runtimes/:id/external-chats/:sourceId/models": {
+      "command": "chat.external.models"
+    },
     "GET /api/runtimes/:id/external-chats/:sourceId/threads": {
       "command": "chat.external.list"
     },

@@ -147,7 +147,7 @@ try {
   const modelCursors = new Set<string>();
   do {
     const params = new URLSearchParams({ limit: "2", ...(modelCursor ? { cursor: modelCursor } : {}) });
-    const page = await request<ExternalChatModels>(`${base}/${source.id}/models?${params}`);
+    const page: ExternalChatModels = await request<ExternalChatModels>(`${base}/${source.id}/models?${params}`);
     assert.equal(page.source_id, source.id);
     assert(page.models.length <= 2);
     modelsFromApi.push(...page.models);

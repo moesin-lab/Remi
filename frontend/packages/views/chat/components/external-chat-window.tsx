@@ -3,7 +3,7 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@multiremi/core/api";
-import { externalChatHistoryOptions, externalChatKeys, externalChatWriteIsUnknown, externalChatReceiptStorageKey, readExternalChatReceipt, writeExternalChatReceipt, EXTERNAL_CHAT_MAX_TEXT_CHARS, type ExternalChatReceipt, type ExternalChatTurn, type ExternalChatModel } from "@multiremi/core/chat";
+import { externalChatHistoryOptions, externalChatKeys, externalChatWriteIsUnknown, externalChatReceiptStorageKey, readExternalChatReceipt, writeExternalChatReceipt, EXTERNAL_CHAT_MAX_TEXT_CHARS, type ExternalChatReceipt, type ExternalChatTurn, type ExternalChatModel, type ExternalChatSource } from "@multiremi/core/chat";
 import { defaultSessionStorage } from "@multiremi/core/platform";
 import { createSafeId } from "@multiremi/core/utils";
 import { Button } from "@multiremi/ui/components/ui/button";
@@ -84,9 +84,11 @@ const ExternalChatTurnView = memo(function ExternalChatTurnView({ turn }: { turn
   </section>;
 });
 
-export function ExternalChatWindow({ ws, runtime, source, thread, online, modelsSupported = false, draft, onDraftChange, onShowList }: {
+export function ExternalChatWindow({ ws, runtime, source, thread, online, modelsSupported = false, runtimeName, sourceDetails, draft, onDraftChange, onShowList }: {
   ws: string; runtime: string; source: string; thread: string; online: boolean;
   modelsSupported?: boolean;
+  runtimeName?: string;
+  sourceDetails?: ExternalChatSource;
   draft: string; onDraftChange: (value: string) => void;
   onShowList?: () => void;
 }) {
@@ -128,6 +130,7 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, models
     },
   });
   const current = history.data?.pages[0];
+  const project = sourceDetails?.projects.find(row => row.id === current?.chat.project_id);
   const turns = useMemo(() => {
     const merged = new Map<string, ExternalChatTurn>();
 
@@ -239,24 +242,31 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, models
         {onShowList && <Button type="button" variant="ghost" size="icon-sm" className="md:hidden" aria-label={t(($) => $.page.history)} onClick={onShowList}><List /></Button>}
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium" title={current?.chat.title}>{current?.chat.title || t(($) => $.external.title)}</p>
-          {current && <p className="truncate text-xs text-muted-foreground" title={current.chat.cwd}>{current.chat.cwd}</p>}
         </div>
         {current && <>
           <ExternalChatModelPicker ws={ws} runtime={runtime} source={source} online={online} supported={modelsSupported} disabled={!canSend}
             currentModel={current.chat.model} value={selectedModel} onChange={setSelectedModel} />
           <Popover>
             <PopoverTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t(($) => $.external.details)} />}><Info className="size-4" /></PopoverTrigger>
-            <PopoverContent align="end" className="w-80 max-w-[calc(100vw-2rem)] space-y-2">
+            <PopoverContent align="end" className="max-h-[min(32rem,calc(100dvh-6rem))] w-80 max-w-[calc(100vw-2rem)] space-y-2 overflow-y-auto">
               <p className="text-xs text-muted-foreground">{t(($) => $.external.readonly)}</p>
               <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-xs">
           {([
+            [t(($) => $.external.runtime), runtimeName],
+            [t(($) => $.external.runtime_id), runtime],
+            [t(($) => $.external.source), sourceDetails?.name],
+            [t(($) => $.external.source_home), sourceDetails?.home],
+            [t(($) => $.external.source_id), source],
+            [t(($) => $.external.thread_id), thread],
+            [t(($) => $.external.project), project?.name],
+            [t(($) => $.external.project_roots), project?.roots.join("\n")],
             [t(($) => $.external.model), current.chat.model],
             [t(($) => $.external.provider), current.chat.model_provider],
             [t(($) => $.external.effort), current.chat.reasoning_effort],
             [t(($) => $.external.cwd), current.chat.cwd],
             [t(($) => $.external.project_id), current.chat.native_project_id],
             [t(($) => $.external.status), current.chat.status],
-          ] as const).map(([label, value]) => value && <div className="contents" key={label}><dt>{label}</dt><dd className="break-all">{value}</dd></div>)}
+          ] as const).map(([label, value]) => value && <div className="contents" key={label}><dt>{label}</dt><dd className="whitespace-pre-line break-all">{value}</dd></div>)}
               </dl>
             </PopoverContent>
           </Popover>

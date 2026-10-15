@@ -644,3 +644,80 @@ it("submits attached approval and selected/free-text native question answers thr
   await user.click(screen.getByRole("button", { name: "Submit answer" }));
   await waitFor(() => expect(backend.respondExternalChatRequest).toHaveBeenCalledWith("rt", "source", "thread", "question", { answers: { q1: ["Option A"], q2: ["Original answer"] } }));
 });
+
+it("keeps paths and native IDs in chat details while the list and header show only the conversation title", async () => {
+  const user = userEvent.setup();
+  show(<ExternalChatPage />);
+  await screen.findByText("Original native history");
+  const row = screen.getByRole("button", { name: /Original thread/ });
+  expect(row).not.toHaveTextContent(chat.cwd);
+  expect(row).toHaveAttribute("title", chat.title);
+  expect(screen.queryByText(chat.cwd)).not.toBeInTheDocument();
+  expect(screen.queryByText(source.home)).not.toBeInTheDocument();
+  expect(screen.queryByText("native-id")).not.toBeInTheDocument();
+  expect(screen.queryByText(enChat.external.config_readonly)).not.toBeInTheDocument();
+  expect(screen.queryByRole("combobox", { name: "Codex source" })).not.toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Runtime" })).toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Search source projects" })).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Chat details" }));
+  expect(await screen.findByText(source.home)).toBeVisible();
+  expect(screen.getByText(chat.cwd)).toBeVisible();
+  expect(screen.getByText("native-id")).toBeVisible();
+  expect(screen.getByText("thread", { selector: "dd" })).toBeVisible();
+  expect(screen.getByText("rt", { selector: "dd" })).toBeVisible();
+  expect(screen.getByText("source", { selector: "dd" })).toBeVisible();
+  expect(screen.getByText(source.name, { selector: "dd" })).toBeVisible();
+  expect(screen.getByText(project.name, { selector: "dd" })).toBeVisible();
+  expect(screen.getByText("/work/project /work/second-root", { selector: "dd" })).toBeVisible();
+  expect(screen.getByText(enChat.external.readonly)).toBeVisible();
+});
+
+it("retains source choice when multiple sources exist and shows the newly selected source metadata on demand", async () => {
+  const alternate = { ...source, id: "alternate", name: "Second Codex", home: "/alternate/.codex" };
+  backend.listExternalChatCatalog.mockResolvedValue({ sources: [source, alternate], warnings: [] });
+  backend.listExternalChats.mockImplementation((_runtime, currentSource) => Promise.resolve({ chats: [{ ...chat, source_id: currentSource }], projects: [project], next_cursor: null }));
+  backend.getExternalChatHistory.mockImplementation((_runtime, currentSource) => Promise.resolve(history({ chat: { ...chat, source_id: currentSource } })));
+  const user = userEvent.setup();
+  show(<ExternalChatPage />);
+  await screen.findByText("Original native history");
+  await user.click(screen.getByRole("combobox", { name: "Codex source" }));
+  const option = await screen.findByRole("option", { name: alternate.name });
+  expect(option).not.toHaveTextContent(alternate.home);
+  await user.click(option);
+  expect(navigation.searchParams.get("external_source")).toBe(alternate.id);
+  expect(navigation.searchParams.has("external_thread")).toBe(false);
+  await user.click(await screen.findByRole("button", { name: /Original thread/ }));
+  await screen.findByText("Original native history");
+  expect(screen.queryByText(alternate.home)).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Chat details" }));
+  expect(await screen.findByText(alternate.home)).toBeVisible();
+  expect(screen.getByText(alternate.name, { selector: "dd" })).toBeVisible();
+  expect(screen.queryByText(source.home)).not.toBeInTheDocument();
+});
+
+it("keeps the approval working directory and command visible without opening general chat details", async () => {
+  backend.getExternalChatHistory.mockResolvedValue(history({ requests: [{
+    id: "approval", thread_id: "thread", turn_id: "old-turn", kind: "command_approval",
+    text: "Run `git status` in:\n\n`/approval/workspace`",
+  }] }));
+  show(<ExternalChatPage />);
+  expect(await screen.findByText("/approval/workspace")).toBeVisible();
+  expect(screen.getByText("git status")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
+  expect(screen.queryByText(chat.cwd)).not.toBeInTheDocument();
+  expect(screen.queryByText(source.home)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Chat details" })).toBeInTheDocument();
+});
+
+it("lets the user explicitly recover an unavailable source even when only one replacement source exists", async () => {
+  navigation.searchParams.set("external_source", "removed-source");
+  const user = userEvent.setup();
+  show(<ExternalChatPage />);
+  await user.click(await screen.findByRole("combobox", { name: "Codex source" }));
+  await user.click(await screen.findByRole("option", { name: source.name }));
+  expect(navigation.searchParams.get("external_source")).toBe(source.id);
+  expect(navigation.searchParams.has("external_thread")).toBe(false);
+  expect(screen.queryByRole("combobox", { name: "Codex source" })).not.toBeInTheDocument();
+  expect(backend.sendExternalChatMessage).not.toHaveBeenCalled();
+});

@@ -32,7 +32,6 @@ export interface NativeConnection {
   readonly version: string;
   readonly attached: Set<string>;
   readonly closed?: boolean;
-  unsupported?(threadId: string): boolean;
   rpc(method: string, params?: NativeObject): Promise<NativeObject>;
   pending(threadId: string): NativeRequest[];
   respond(id: string, result: NativeObject): void;
@@ -145,7 +144,6 @@ class Channel implements NativeConnection {
   readonly attached = new Set<string>();
   private readonly generation = randomUUID().replaceAll("-", "");
   private readonly requests = new Map<string, NativeRequest>();
-  private readonly unsupportedThreads = new Set<string>();
   private readonly inflight = new Map<number, { resolve(value: NativeObject): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
   private sequence = 0;
   closed = false;
@@ -209,7 +207,6 @@ class Channel implements NativeConnection {
 
   notify(method: string): void { this.write({ method }); }
   pending(threadId: string): NativeRequest[] { return [...this.requests.values()].filter(r => r.params.threadId === threadId); }
-  unsupported(threadId: string): boolean { return this.unsupportedThreads.has(threadId) || this.unsupportedThreads.has(""); }
 
   respond(id: string, result: NativeObject): void {
     const request = this.requests.get(id);
@@ -247,8 +244,12 @@ class Channel implements NativeConnection {
       const method = string(message.method);
       const params = object(message.params);
       if (!supportedNativeRequest(method, params)) {
-        this.unsupportedThreads.add(string(params.threadId));
-        // Client tools, authentication refresh and other unimplemented methods must never wait or auto-grant.
+        // Live app-servers broadcast callbacks to multiple clients; the first
+        // reply (including an error) consumes the request for all of them.
+        // Leave client-specific tools/auth and oversized approvals to their
+        // native client. A rejected callback must not poison history or later turns.
+        if (this.connection === "live") return;
+        // This private stdio process has no other client that could answer it.
         try { this.write({ id: message.id, error: { code: -32601, message: "Remi does not support this native client request" } }); }
         catch { this.fail(new NativeError("native_connection_failed")); }
         return;
@@ -261,7 +262,6 @@ class Channel implements NativeConnection {
     } else if (message.method === "thread/closed") {
       const id = string(object(message.params).threadId);
       this.attached.delete(id);
-      this.unsupportedThreads.delete(id);
       for (const [key, request] of this.requests) if (request.params.threadId === id) this.requests.delete(key);
     }
   }

@@ -265,6 +265,14 @@
     "latest": "回到最新消息",
     "engine": "Codex",
     "unavailable_project": "项目不可用",
-    "history": "会话消息"
+    "history": "会话消息",
+    "activity": "执行过程 · {{count}} 项",
+    "activity_reasoning": "思考",
+    "activity_command": "执行命令",
+    "activity_tool": "工具调用",
+    "activity_files": "文件修改",
+    "activity_plan": "计划",
+    "local_image": "原生图片",
+    "local_image_hint": "图片位于原生机器，请在原客户端查看。"
   }
 }

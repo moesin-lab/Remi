@@ -621,7 +621,8 @@ it("renders native tools, older history, approvals and user input without fabric
   })).mockResolvedValue(history({ turns: [{ id: "earliest", status: "completed", items: [{ id: "early", type: "userMessage", role: "user", text: "Earlier question" }] }] }));
   const user = userEvent.setup();
   show(<WindowHarness />);
-  const tool = await screen.findByText("commandExecution");
+  const tool = await screen.findByText(enChat.external.activity_command);
+  await user.click(tool.closest("details")!.parentElement!.closest("details")!.querySelector("summary")!);
   await user.click(tool);
   expect(screen.getByText(/npm test/)).toBeVisible();
   await user.click(screen.getByRole("button", { name: "Load earlier turns" }));

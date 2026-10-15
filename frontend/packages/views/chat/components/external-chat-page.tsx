@@ -69,10 +69,9 @@ export function ExternalChatPage() {
     <div className="flex min-h-0 flex-1 overflow-hidden">
       <aside aria-label={t(($) => $.external.sources)} className={cn("min-h-0 w-full shrink-0 flex-col border-r bg-sidebar md:flex md:w-80", showList ? "flex" : "hidden")}>
         <div className="shrink-0 space-y-2 border-b p-3">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-medium">{t(($) => $.external.title)}</span>
-            {threadId && <Button variant="ghost" size="icon-sm" className="md:hidden" aria-label={t(($) => $.page.back)} onClick={() => setShowList(false)}><ArrowLeft /></Button>}
-          </div>
+          {threadId && <div className="flex justify-end md:hidden">
+            <Button variant="ghost" size="icon-sm" aria-label={t(($) => $.page.back)} onClick={() => setShowList(false)}><ArrowLeft /></Button>
+          </div>}
           <Select value={runtimeId || null} onValueChange={id => { if (id && id !== runtimeId) choose(id); }}>
             <SelectTrigger className="w-full" aria-label={t(($) => $.external.runtime)}>
               <Monitor className="size-3.5 text-muted-foreground" />
@@ -83,14 +82,13 @@ export function ExternalChatPage() {
               <span className={cn("ml-auto size-1.5 shrink-0 rounded-full", row.status === "online" ? "bg-success" : "bg-muted-foreground")} />
             </SelectItem>)}</SelectContent>
           </Select>
-          {catalog.data && catalog.data.sources.length > 0 && <Select value={sourceId || null} onValueChange={id => { if (id && id !== sourceId) choose(runtimeId, id); }}>
+          {catalog.data && (catalog.data.sources.length > 1 || (catalog.data.sources.length === 1 && !!sourceId && !source)) && <Select value={sourceId || null} onValueChange={id => { if (id && id !== sourceId) choose(runtimeId, id); }}>
             <SelectTrigger className="w-full" aria-label={t(($) => $.external.source)} title={source?.home}><SelectValue>{source?.name ?? t(($) => $.external.select_source)}</SelectValue></SelectTrigger>
             <SelectContent>{catalog.data.sources.map(row => <SelectItem key={row.id} value={row.id}>
-              <span className="min-w-0"><span className="block truncate">{row.name}</span><span className="block break-all whitespace-normal text-xs text-muted-foreground">{row.home}</span></span>
+              <span className="min-w-0 truncate" title={row.home}>{row.name}</span>
             </SelectItem>)}</SelectContent>
           </Select>}
           {source && <ExternalChatProjectPicker key={sourceKey} projects={projects} projectId={projectId} onChange={id => { if (id !== projectId) choose(runtimeId, sourceId, undefined, id); }} />}
-          <p className="text-[11px] text-muted-foreground">{t(($) => $.external.config_readonly)}</p>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2" aria-label={t(($) => $.page.history)}>
           {runtimes.isPending && <p role="status" className="p-2 text-sm text-muted-foreground">{t(($) => $.page.loading)}</p>}
@@ -107,12 +105,12 @@ export function ExternalChatPage() {
             {threads.isPending && <p role="status" className="p-2 text-sm text-muted-foreground">{t(($) => $.page.loading)}</p>}
             {threads.isError && <div role="alert" className="p-2 text-sm text-destructive">{threads.error.message} <Button variant="outline" size="sm" onClick={() => void threads.refetch()}>{t(($) => $.page.retry)}</Button></div>}
             {threads.data && chats.length === 0 && <p className="p-2 text-sm text-muted-foreground">{t(($) => $.external.empty)}</p>}
-            {chats.map(chat => <button type="button" key={chat.id} aria-current={chat.id === threadId ? "true" : undefined} title={`${chat.title}\n${chat.cwd}`}
+            {chats.map(chat => <button type="button" key={chat.id} aria-current={chat.id === threadId ? "true" : undefined} title={chat.title || t(($) => $.window.untitled)}
               className={cn("relative flex min-h-11 w-full min-w-0 items-center gap-2 overflow-hidden rounded-md px-2 py-2 text-left transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring", chat.id === threadId && "bg-accent/70")}
               onClick={() => choose(runtimeId, sourceId, chat.id, projectId)}>
               {chat.id === threadId && <span className="absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-brand" />}
               <MessageSquare className="size-4 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 flex-1"><span className="block truncate text-sm">{chat.title || t(($) => $.window.untitled)}</span><span className="block truncate text-xs text-muted-foreground">{chat.cwd}</span></span>
+              <span className="min-w-0 flex-1 truncate text-sm">{chat.title || t(($) => $.window.untitled)}</span>
               <time className="shrink-0 text-[11px] text-muted-foreground" dateTime={new Date(chat.updated_at * 1_000).toISOString()}>{formatTimeAgo(new Date(chat.updated_at * 1_000).toISOString())}</time>
             </button>)}
             {threads.hasNextPage && <Button variant="ghost" size="sm" className="mt-2 w-full" disabled={threads.isFetchingNextPage} onClick={() => void threads.fetchNextPage()}>{t(($) => $.external.load_more)}</Button>}
@@ -121,6 +119,7 @@ export function ExternalChatPage() {
       </aside>
       <section className={cn("min-h-0 min-w-0 flex-1 flex-col md:flex", showList ? "hidden" : "flex")}>
         {runtimeId && sourceId && threadId ? <ExternalChatWindow key={draftKey} ws={ws} runtime={runtimeId} source={sourceId} thread={threadId} online={available && !!source}
+          runtimeName={runtime ? runtimeLabel(runtime) : undefined} sourceDetails={source}
           modelsSupported={runtime?.metadata.external_chat_models === 1}
           onShowList={() => setShowList(true)} draft={drafts[draftKey] ?? ""} onDraftChange={value => setDrafts(previous => ({ ...previous, [draftKey]: value }))} />
           : <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"><MessageSquare className="size-8 text-muted-foreground/50" /><p className="text-sm text-muted-foreground">{t(($) => $.external.select)}</p></div>}

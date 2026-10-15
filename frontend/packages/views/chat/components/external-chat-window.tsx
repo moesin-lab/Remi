@@ -136,7 +136,7 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, models
     if (!canSend || !draft.trim() || sending.current) return;
     sending.current = true;
     setSendError(false);
-    const input = { text: draft, request_id: createSafeId(), ...(modelsSupported && selectedModel ? { model: selectedModel.id } : {}) };
+    const input = { text: draft, request_id: createSafeId(), ...(selectedModel ? { model: selectedModel.id } : {}) };
     recordSend({
       receipt: { request_id: input.request_id, thread_id: thread, turn_id: null, outcome: "unknown" }, text: input.text,
     });

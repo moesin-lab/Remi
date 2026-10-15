@@ -265,6 +265,14 @@
     "latest": "最新メッセージへ",
     "engine": "Codex",
     "unavailable_project": "プロジェクトを利用できません",
-    "history": "チャットメッセージ"
+    "history": "チャットメッセージ",
+    "activity": "実行過程 · {{count}} 件",
+    "activity_reasoning": "思考",
+    "activity_command": "コマンド実行",
+    "activity_tool": "ツール呼び出し",
+    "activity_files": "ファイル変更",
+    "activity_plan": "計画",
+    "local_image": "ネイティブ画像",
+    "local_image_hint": "この画像は元のマシンにあります。ネイティブクライアントで確認してください。"
   }
 }

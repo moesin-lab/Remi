@@ -268,6 +268,14 @@
     "latest": "최신 메시지로 이동",
     "engine": "Codex",
     "unavailable_project": "프로젝트를 사용할 수 없음",
-    "history": "채팅 메시지"
+    "history": "채팅 메시지",
+    "activity": "실행 과정 · {{count}}개",
+    "activity_reasoning": "추론",
+    "activity_command": "명령 실행",
+    "activity_tool": "도구 호출",
+    "activity_files": "파일 변경",
+    "activity_plan": "계획",
+    "local_image": "원본 이미지",
+    "local_image_hint": "이 이미지는 원본 기기에 있습니다. 원본 클라이언트에서 확인하세요."
   }
 }

@@ -7,29 +7,80 @@ import { externalChatHistoryOptions, externalChatKeys, externalChatWriteIsUnknow
 import { defaultSessionStorage } from "@multiremi/core/platform";
 import { createSafeId } from "@multiremi/core/utils";
 import { Button } from "@multiremi/ui/components/ui/button";
-import { MemoizedMarkdown } from "@multiremi/ui/markdown";
 import { Popover, PopoverContent, PopoverTrigger } from "@multiremi/ui/components/ui/popover";
-import { ArrowDown, ArrowUp, Info, List, Loader2, Square } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronRight, Info, List, Loader2, Square } from "lucide-react";
 import { useT } from "../../i18n";
 import { ExternalChatRequestCard } from "./external-chat-request";
 import { ExternalChatModelPicker } from "./external-chat-model-picker";
+import { ExternalChatMarkdown } from "./external-chat-markdown";
 
 const terminal = (status: string) => ["completed", "failed", "interrupted", "cancelled"].includes(status);
 interface NativeSendState { receipt: ExternalChatReceipt; text?: string }
 
 const ExternalChatTurnView = memo(function ExternalChatTurnView({ turn }: { turn: ExternalChatTurn }) {
   const { t } = useT("chat");
+  const blocks = useMemo(() => {
+    const result: { id: string; activity: boolean; items: ExternalChatTurn["items"] }[] = [];
+
+    for (const item of turn.items) {
+      const activity = item.role !== "user" && item.type !== "agentMessage";
+      const visible = !!item.text.trim() || !!item.truncated;
+      if (!activity && !visible) continue;
+
+      const previous = result.at(-1);
+      if (activity && previous?.activity) {
+        if (visible) previous.items.push(item);
+      } else {
+        // Keep the boundary stable when an initially empty native item fills in.
+        result.push({ id: item.id, activity, items: visible ? [item] : [] });
+      }
+    }
+
+    return result.filter(block => block.items.length > 0);
+  }, [turn.items]);
+
+  if (!blocks.length && !turn.error?.trim()) return null;
+
+  const activityLabel = (type: string) => {
+    switch (type) {
+      case "reasoning": return t(($) => $.external.activity_reasoning);
+      case "commandExecution": return t(($) => $.external.activity_command);
+      case "mcpToolCall":
+      case "dynamicToolCall": return t(($) => $.external.activity_tool);
+      case "fileChange": return t(($) => $.external.activity_files);
+      case "plan": return t(($) => $.external.activity_plan);
+      case "truncated": return t(($) => $.external.truncated);
+      default: return type;
+    }
+  };
 
   return <section className="space-y-3">
-    {turn.items.map(item => item.role === "user" || item.type === "agentMessage" ? (
+    {blocks.map(block => block.activity ? (
+      <details className="group/activity rounded-lg border border-border/60 bg-muted/20" key={block.id}>
+        <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-xs text-muted-foreground [&::-webkit-details-marker]:hidden">
+          <ChevronRight className="size-3.5 shrink-0 transition-transform group-open/activity:rotate-90" />
+          {t(($) => $.external.activity, { count: block.items.length })}
+        </summary>
+        <div className="space-y-1 border-t border-border/60 px-3 py-2">
+          {block.items.map(item => <details className="group/item rounded-md" key={item.id}>
+            <summary className="flex cursor-pointer list-none items-center gap-1.5 py-1.5 text-xs [&::-webkit-details-marker]:hidden">
+              <ChevronRight className="size-3 shrink-0 text-muted-foreground transition-transform group-open/item:rotate-90" />
+              {activityLabel(item.type)}
+            </summary>
+            {item.text.trim() && <pre className="my-1 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md bg-background p-2 text-xs">{item.text}</pre>}
+            {item.truncated && <p className="text-xs text-muted-foreground">{t(($) => $.external.truncated)}</p>}
+          </details>)}
+        </div>
+      </details>
+    ) : block.items.map(item => (
       <div className={item.role === "user" ? "flex justify-end" : "text-sm leading-relaxed"} key={item.id}>
         <div className={item.role === "user" ? "max-w-[80%] break-words rounded-2xl bg-muted px-3.5 py-2 text-sm" : "min-w-0 w-full"}>
-          <div className="prose prose-sm dark:prose-invert max-w-none break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"><MemoizedMarkdown>{item.text}</MemoizedMarkdown></div>
+          <div className="prose prose-sm dark:prose-invert max-w-none break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"><ExternalChatMarkdown>{item.text}</ExternalChatMarkdown></div>
           {item.truncated && <p className="text-xs text-muted-foreground">{t(($) => $.external.truncated)}</p>}
         </div>
       </div>
-    ) : <details className="rounded-md border p-2" key={item.id}><summary className="cursor-pointer text-xs">{item.type}</summary><pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words text-xs">{item.text}</pre>{item.truncated && <p className="text-xs">{t(($) => $.external.truncated)}</p>}</details>)}
-    {turn.error && <p role="alert" className="text-sm text-destructive">{turn.error}</p>}
+    )))}
+    {turn.error?.trim() && <p role="alert" className="text-sm text-destructive">{turn.error}</p>}
   </section>;
 });
 

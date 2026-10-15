@@ -269,6 +269,14 @@
     "latest": "Jump to latest",
     "engine": "Codex",
     "unavailable_project": "Project unavailable",
-    "history": "Chat messages"
+    "history": "Chat messages",
+    "activity": "Execution · {{count}} steps",
+    "activity_reasoning": "Reasoning",
+    "activity_command": "Command",
+    "activity_tool": "Tool call",
+    "activity_files": "File changes",
+    "activity_plan": "Plan",
+    "local_image": "Native image",
+    "local_image_hint": "This image is on the source machine. Open it in the native client."
   }
 }

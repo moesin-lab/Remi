@@ -47,6 +47,30 @@ describe("external native chat HTTP boundary", () => {
     await expect(endpoint({ ...receipt, request_id: "05a1f17c-c79f-4c3b-bb87-e875a0865e79" }).api.getExternalChatReceipt("rt", chat.source_id, chat.id, requestId)).rejects.toBeInstanceOf(ApiContractError);
   });
 
+  it("reads the source's real model page and cursor without inventing availability from historical metadata", async () => {
+    const page = { source_id: chat.source_id, models: [{ id: "gemini-native-id", name: "Native catalog name", description: "Source catalog description" }], next_cursor: "next&page" };
+    const { api, fetch } = endpoint(page);
+    expect(await api.listExternalChatModels("runtime/1", chat.source_id, { cursor: "older&cursor", limit: 50 })).toEqual(page);
+    expect(fetch.mock.calls[0]?.[0]).toBe("https://api.example.test/api/runtimes/runtime%2F1/external-chats/source%261/models?cursor=older%26cursor&limit=50");
+    expect(fetch.mock.calls[0]?.[1].method).toBeUndefined();
+  });
+
+  it.each([
+    { source_id: "other-source", models: [], next_cursor: null },
+    { source_id: chat.source_id, models: [{ id: "", name: "Invalid", description: "Empty native ID" }], next_cursor: null },
+    { source_id: chat.source_id, models: [{ id: "id", name: "Missing description" }], next_cursor: null },
+    { source_id: chat.source_id, models: [], next_cursor: 123 },
+  ])("rejects a cross-source or malformed model directory", async bad => {
+    await expect(endpoint(bad).api.listExternalChatModels("rt", chat.source_id)).rejects.toBeInstanceOf(ApiContractError);
+  });
+
+  it("forwards only an explicitly selected native model alongside the unchanged text and request UUID", async () => {
+    const { api, fetch } = endpoint(receipt, 202);
+    await api.sendExternalChatMessage("rt", chat.source_id, chat.id, { text: "Original text", request_id: requestId, model: "aiden-native-model" });
+    expect(JSON.parse(fetch.mock.calls[0]?.[1].body)).toEqual({ text: "Original text", request_id: requestId, model: "aiden-native-model" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("queries an uncertain receipt and sends explicit native interrupts and request responses", async () => {
     const read = endpoint({ ...receipt, outcome: "unknown", turn_id: null });
     expect(await read.api.getExternalChatReceipt("rt", chat.source_id, chat.id, requestId)).toMatchObject({ outcome: "unknown" });

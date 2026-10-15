@@ -1,7 +1,7 @@
-import type { ExternalChatCatalog, ExternalChatList, ExternalChatHistory, ExternalChatReceipt } from "@multiremi/contracts";
+import type { ExternalChatCatalog, ExternalChatList, ExternalChatHistory, ExternalChatModels, ExternalChatReceipt } from "@multiremi/contracts";
 import type { HttpClient } from "../http";
 import { ApiContractError, parseStrictResponse } from "../schema";
-import { ExternalChatCatalogSchema, ExternalChatListSchema, ExternalChatHistorySchema, ExternalChatReceiptSchema, ExternalChatAcceptedSchema } from "../schemas/external-chats";
+import { ExternalChatCatalogSchema, ExternalChatListSchema, ExternalChatModelsSchema, ExternalChatHistorySchema, ExternalChatReceiptSchema, ExternalChatAcceptedSchema } from "../schemas/external-chats";
 
 const root = (runtime: string, source?: string) => `/api/runtimes/${encodeURIComponent(runtime)}/external-chats${source ? `/${encodeURIComponent(source)}` : ""}`;
 const threadRoot = (runtime: string, source: string, thread: string) => `${root(runtime, source)}/threads/${encodeURIComponent(thread)}`;
@@ -28,6 +28,13 @@ export class ExternalChatsEndpoints {
     return result;
   }
 
+  async listExternalChatModels(runtime: string, source: string, params: { cursor?: string; limit?: number } = {}): Promise<ExternalChatModels> {
+    const endpoint = `${root(runtime, source)}/models${pageQuery(params)}`;
+    const result = parseStrictResponse<ExternalChatModels>(await this.http.fetch<unknown>(endpoint), ExternalChatModelsSchema, { endpoint });
+    if (result.source_id !== source) throw new ApiContractError(endpoint, "Model catalog did not match the requested source");
+    return result;
+  }
+
   async getExternalChatHistory(runtime: string, source: string, thread: string, params: { cursor?: string; limit?: number } = {}): Promise<ExternalChatHistory> {
     const endpoint = `${threadRoot(runtime, source, thread)}${pageQuery(params)}`;
     const result = parseStrictResponse<ExternalChatHistory>(await this.http.fetch<unknown>(endpoint), ExternalChatHistorySchema, { endpoint });
@@ -37,7 +44,7 @@ export class ExternalChatsEndpoints {
     return result;
   }
 
-  async sendExternalChatMessage(runtime: string, source: string, thread: string, input: { text: string; request_id: string }): Promise<ExternalChatReceipt> {
+  async sendExternalChatMessage(runtime: string, source: string, thread: string, input: { text: string; request_id: string; model?: string }): Promise<ExternalChatReceipt> {
     const endpoint = `${threadRoot(runtime, source, thread)}/messages`;
     const result = parseStrictResponse<ExternalChatReceipt>(await this.http.fetch<unknown>(endpoint, { method: "POST", body: JSON.stringify(input) }), ExternalChatReceiptSchema, { endpoint });
     if (result.thread_id !== thread || result.request_id !== input.request_id) throw new ApiContractError(endpoint, "Native send receipt did not match the request");

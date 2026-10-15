@@ -3,12 +3,13 @@ import { api, ApiError } from "../api";
 import { ExternalChatErrorSchema } from "../api/schemas/external-chats";
 import { EXTERNAL_CHAT_MAX_PAGE_SIZE } from "@multiremi/contracts/external-chats";
 
-export type { ExternalChatProject, ExternalChatSource, ExternalChatSummary, ExternalChatHistory, ExternalChatRequest, ExternalChatQuestion, ExternalChatTurn, ExternalChatReceipt } from "@multiremi/contracts";
+export type { ExternalChatProject, ExternalChatSource, ExternalChatSummary, ExternalChatHistory, ExternalChatRequest, ExternalChatQuestion, ExternalChatTurn, ExternalChatReceipt, ExternalChatModel, ExternalChatModels } from "@multiremi/contracts";
 export { EXTERNAL_CHAT_MAX_TEXT_CHARS } from "@multiremi/contracts/external-chats";
 
 export const externalChatKeys = {
   catalog: (ws: string, runtime: string) => ["external-chat", ws, runtime, "catalog"] as const,
   threads: (ws: string, runtime: string, source: string, project: string) => ["external-chat", ws, runtime, source, "threads", project] as const,
+  models: (ws: string, runtime: string, source: string) => ["external-chat", ws, runtime, source, "models"] as const,
   history: (ws: string, runtime: string, source: string, thread: string) => ["external-chat", ws, runtime, source, "history", thread] as const,
   receipt: (ws: string, runtime: string, source: string, thread: string, request: string) => ["external-chat", ws, runtime, source, "receipt", thread, request] as const,
   lastReceipt: (ws: string, runtime: string, source: string, thread: string) => ["external-chat", ws, runtime, source, "last-receipt", thread] as const,
@@ -25,6 +26,16 @@ export function externalChatListOptions(ws: string, runtime: string, source: str
     queryFn: ({ pageParam }) => api.listExternalChats(runtime, source, { project_id: project || undefined, cursor: pageParam, limit: EXTERNAL_CHAT_MAX_PAGE_SIZE }),
     getNextPageParam: page => page.next_cursor ?? undefined,
     enabled: !!ws && !!runtime && !!source && online, retry: false,
+  });
+}
+
+export function externalChatModelsOptions(ws: string, runtime: string, source: string, enabled: boolean) {
+  return infiniteQueryOptions({
+    queryKey: externalChatKeys.models(ws, runtime, source),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => api.listExternalChatModels(runtime, source, { cursor: pageParam, limit: EXTERNAL_CHAT_MAX_PAGE_SIZE }),
+    getNextPageParam: page => page.next_cursor ?? undefined,
+    enabled: !!ws && !!runtime && !!source && enabled, retry: false, staleTime: 10_000,
   });
 }
 

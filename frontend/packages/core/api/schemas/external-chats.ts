@@ -22,6 +22,11 @@ export const ExternalChatCatalogSchema = z.object({
 export const ExternalChatListSchema = z.object({
   chats: z.array(SummarySchema), projects: z.array(ExternalChatProjectSchema), next_cursor: z.string().nullable(),
 });
+export const ExternalChatModelsSchema = z.object({
+  source_id: z.string(),
+  models: z.array(z.object({ id: z.string().min(1), name: z.string(), description: z.string() })),
+  next_cursor: z.string().nullable(),
+});
 export const ExternalChatHistorySchema = z.object({
   chat: SummarySchema, next_cursor: z.string().nullable(),
   turns: z.array(z.object({

@@ -13,7 +13,7 @@ import enChat from "../../locales/en/chat.json";
 import enRuntimes from "../../locales/en/runtimes.json";
 
 const backend = vi.hoisted(() => ({
-  listRuntimes: vi.fn(), listExternalChatCatalog: vi.fn(), listExternalChats: vi.fn(), getExternalChatHistory: vi.fn(),
+  listRuntimes: vi.fn(), listExternalChatCatalog: vi.fn(), listExternalChats: vi.fn(), getExternalChatHistory: vi.fn(), listExternalChatModels: vi.fn(),
   sendExternalChatMessage: vi.fn(), getExternalChatReceipt: vi.fn(), interruptExternalChatTurn: vi.fn(), respondExternalChatRequest: vi.fn(),
   createChatSession: vi.fn(), listChatSessions: vi.fn(), sendChatMessage: vi.fn(), markChatSessionRead: vi.fn(), getSessionLog: vi.fn(), listAgents: vi.fn(), listProjects: vi.fn(),
 }));
@@ -56,9 +56,9 @@ function show(component: ReactNode = <ChatPage />) {
   const view = render(wrap(component));
   return { ...view, client, update: (next: ReactNode) => view.rerender(wrap(next)) };
 }
-function WindowHarness({ initialDraft = "" }: { initialDraft?: string }) {
+function WindowHarness({ initialDraft = "", modelsSupported = false }: { initialDraft?: string; modelsSupported?: boolean }) {
   const [draft, setDraft] = useState(initialDraft);
-  return <ExternalChatWindow ws="ws" runtime="rt" source="source" thread="thread" online draft={draft} onDraftChange={setDraft} />;
+  return <ExternalChatWindow ws="ws" runtime="rt" source="source" thread="thread" online modelsSupported={modelsSupported} draft={draft} onDraftChange={setDraft} />;
 }
 
 beforeEach(() => {
@@ -76,6 +76,7 @@ beforeEach(() => {
   backend.listExternalChatCatalog.mockResolvedValue({ sources: [source], warnings: [] });
   backend.listExternalChats.mockResolvedValue({ chats: [chat], projects: [project], next_cursor: null });
   backend.getExternalChatHistory.mockResolvedValue(history());
+  backend.listExternalChatModels.mockResolvedValue({ source_id: "source", models: [{ id: "source-native-id", name: "Source catalog model", description: "Source catalog description" }], next_cursor: null });
   backend.interruptExternalChatTurn.mockResolvedValue({ accepted: true });
   backend.respondExternalChatRequest.mockResolvedValue({ accepted: true });
 });
@@ -327,6 +328,141 @@ it("continues the same native thread with unchanged text and a UUID, without add
   expect(input.request_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   expect(screen.getByRole("textbox", { name: "Message this native chat" })).toHaveValue("");
   expect(screen.getByRole("button", { name: "Continue this chat" })).toBeDisabled();
+});
+
+it("automatically loads every native model page and sends an explicit selection only on the next message", async () => {
+  const firstModel = { id: "source-gemini-id", name: "Source Gemini", description: "First-page description" };
+  const chosen = { id: "source-aiden-id", name: "Source Aiden", description: "Second-page description" };
+  let resolveSecond!: (page: { source_id: string; models: typeof chosen[]; next_cursor: string }) => void;
+  backend.listExternalChatModels.mockResolvedValueOnce({ source_id: "source", models: [firstModel], next_cursor: "second&page" })
+    .mockImplementationOnce(() => new Promise(resolve => { resolveSecond = resolve; }))
+    .mockResolvedValue({ source_id: "source", models: [firstModel, { id: "source-third-id", name: "Source third model", description: "Last page" }], next_cursor: null });
+  let resolveSend!: (receipt: { request_id: string; thread_id: string; turn_id: string; outcome: "accepted" }) => void;
+  backend.sendExternalChatMessage.mockImplementation(() => new Promise(resolve => { resolveSend = resolve; }));
+  const user = userEvent.setup();
+  show(<WindowHarness modelsSupported initialDraft="Keep my exact question" />);
+  await screen.findByText("Original native history");
+  await user.click(screen.getByRole("button", { name: "Model for next message" }));
+  await screen.findByText("Current model: original-model");
+  expect(screen.queryByRole("button", { name: "original-model" })).not.toBeInTheDocument();
+  await waitFor(() => expect(backend.listExternalChatModels).toHaveBeenCalledWith("rt", "source", { cursor: "second&page", limit: 50 }));
+  expect(screen.getByText("Loading source models…")).toBeInTheDocument();
+  await act(async () => resolveSecond({ source_id: "source", models: [chosen], next_cursor: "last&page" }));
+  await screen.findByRole("button", { name: /Source third model/ });
+  expect(backend.listExternalChatModels).toHaveBeenCalledWith("rt", "source", { cursor: undefined, limit: 50 });
+  expect(backend.listExternalChatModels).toHaveBeenCalledWith("rt", "source", { cursor: "last&page", limit: 50 });
+  expect(screen.getAllByRole("button", { name: /Source Gemini/ })).toHaveLength(1);
+  await user.click(screen.getByRole("button", { name: /Source Aiden/ }));
+  expect(screen.getByRole("button", { name: "Model for next message" })).toHaveTextContent("Source Aiden");
+  expect(backend.sendExternalChatMessage).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Chat details" }));
+  expect(await screen.findByText("original-model")).toBeInTheDocument();
+  expect(screen.getByText("original-provider")).toBeInTheDocument();
+  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("button", { name: "Continue this chat" }));
+  await waitFor(() => expect(backend.sendExternalChatMessage).toHaveBeenCalledWith("rt", "source", "thread", { text: "Keep my exact question", request_id: expect.any(String), model: chosen.id }));
+  expect(screen.getByRole("button", { name: "Model for next message" })).toBeDisabled();
+  const sent = backend.sendExternalChatMessage.mock.calls[0]![3];
+  await act(async () => resolveSend({ request_id: sent.request_id, thread_id: "thread", turn_id: "native-model-turn", outcome: "accepted" }));
+  expect(screen.getByRole("button", { name: "Model for next message" })).toBeDisabled();
+  expect(backend.sendChatMessage).not.toHaveBeenCalled();
+});
+
+it("can clear an explicit model choice and continue with the source's native model without an override", async () => {
+  backend.sendExternalChatMessage.mockImplementation((_runtime, _source, thread, input) => Promise.resolve({ request_id: input.request_id, thread_id: thread, turn_id: "native-turn", outcome: "accepted" }));
+  const user = userEvent.setup();
+  show(<WindowHarness modelsSupported initialDraft="Use native defaults" />);
+  await screen.findByText("Original native history");
+  await user.click(screen.getByRole("button", { name: "Model for next message" }));
+  await user.click(await screen.findByRole("button", { name: /Source catalog model/ }));
+  await user.click(screen.getByRole("button", { name: "Model for next message" }));
+  await user.click(screen.getByRole("button", { name: "Keep native model" }));
+  await user.click(screen.getByRole("button", { name: "Continue this chat" }));
+  await waitFor(() => expect(backend.sendExternalChatMessage).toHaveBeenCalledWith("rt", "source", "thread", { text: "Use native defaults", request_id: expect.any(String) }));
+});
+
+it("keeps legacy Runtime continuation available while explaining that model selection requires an upgrade", async () => {
+  backend.sendExternalChatMessage.mockImplementation((_runtime, _source, thread, input) => Promise.resolve({ request_id: input.request_id, thread_id: thread, turn_id: "native-turn", outcome: "accepted" }));
+  const user = userEvent.setup();
+  show(<WindowHarness initialDraft="Legacy continuation" />);
+  await screen.findByText("Original native history");
+  await user.click(screen.getByRole("button", { name: "Model for next message" }));
+  expect(await screen.findByText(/Update this Runtime to choose a model/)).toBeInTheDocument();
+  expect(backend.listExternalChatModels).not.toHaveBeenCalled();
+  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("button", { name: "Continue this chat" }));
+  await waitFor(() => expect(backend.sendExternalChatMessage).toHaveBeenCalledWith("rt", "source", "thread", { text: "Legacy continuation", request_id: expect.any(String) }));
+});
+
+it("shows catalog failure and retry, distinguishes an empty catalog, and still permits native-default continuation", async () => {
+  backend.listExternalChatModels.mockResolvedValueOnce({ source_id: "source", models: [{ id: "first-id", name: "First-page model", description: "Partial directory" }], next_cursor: "failed-page" })
+    .mockRejectedValueOnce(new Error("Source model read failed"))
+    .mockResolvedValue({ source_id: "source", models: [], next_cursor: null });
+  backend.sendExternalChatMessage.mockImplementation((_runtime, _source, thread, input) => Promise.resolve({ request_id: input.request_id, thread_id: thread, turn_id: "native-turn", outcome: "accepted" }));
+  const user = userEvent.setup();
+  const view = show(<WindowHarness modelsSupported initialDraft="Continue anyway" />);
+  await screen.findByText("Original native history");
+  await user.click(screen.getByRole("button", { name: "Model for next message" }));
+  expect(await screen.findByText("Could not load source models.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /First-page model/ })).toBeInTheDocument();
+  expect(backend.listExternalChatModels).toHaveBeenCalledTimes(2);
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(screen.queryByText("Could not load source models.")).not.toBeInTheDocument());
+  expect(backend.listExternalChatModels).toHaveBeenCalledWith("rt", "source", { cursor: "failed-page", limit: 50 });
+  await act(async () => view.client.resetQueries({ queryKey: ["external-chat", "ws", "rt", "source", "models"] }));
+  expect(await screen.findByText("This source has no models in its catalog.")).toBeInTheDocument();
+  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("button", { name: "Continue this chat" }));
+  await waitFor(() => expect(backend.sendExternalChatMessage.mock.calls[0]?.[3]).toEqual({ text: "Continue anyway", request_id: expect.any(String) }));
+});
+
+it.each(["active", "unknown"])("locks model selection while the native chat is %s", async status => {
+  if (status === "active") backend.getExternalChatHistory.mockResolvedValue(history({ chat: { ...chat, status: "active" } }));
+  else {
+    backend.sendExternalChatMessage.mockRejectedValue(new TypeError("Acknowledgement lost"));
+    backend.getExternalChatReceipt.mockImplementation((_runtime, _source, thread, request_id) => Promise.resolve({ request_id, thread_id: thread, turn_id: null, outcome: "unknown" }));
+  }
+  const user = userEvent.setup();
+  show(<WindowHarness modelsSupported initialDraft="Keep one native turn" />);
+  await screen.findByText("Original native history");
+  if (status === "unknown") {
+    await user.click(screen.getByRole("button", { name: "Continue this chat" }));
+    await screen.findByText(/Send outcome is unknown/);
+  }
+  expect(screen.getByRole("button", { name: "Model for next message" })).toBeDisabled();
+  expect(backend.listExternalChatModels).not.toHaveBeenCalled();
+});
+
+it("isolates model selection across threads, sources and Runtimes while using each Runtime's capability", async () => {
+  const otherSource = { ...source, id: "other-source" };
+  backend.listRuntimes.mockResolvedValue([runtime, { ...runtime, id: "rt-models", metadata: { external_chats: 1, external_chat_models: 1 } }]);
+  backend.listExternalChatCatalog.mockResolvedValue({ sources: [source, otherSource], warnings: [] });
+  backend.getExternalChatHistory.mockImplementation((_runtime, sourceId, threadId) => Promise.resolve(history({ chat: { ...chat, id: threadId, source_id: sourceId } })));
+  backend.listExternalChatModels.mockImplementation((runtimeId, sourceId) => Promise.resolve({ source_id: sourceId, models: [{ id: `${runtimeId}-${sourceId}-model`, name: "Scoped model", description: "Scoped source catalog" }], next_cursor: null }));
+  const user = userEvent.setup();
+  show(<ExternalChatPage />);
+  await screen.findByText("Original native history");
+  await user.click(screen.getByRole("button", { name: "Model for next message" }));
+  await screen.findByText(/Update this Runtime to choose a model/);
+  await user.keyboard("{Escape}");
+  await act(async () => navigation.push("/demo/chat?kind=external&external_runtime=rt-models&external_source=source&external_thread=thread"));
+  await screen.findByText("Original native history");
+  await user.click(screen.getByRole("button", { name: "Model for next message" }));
+  await user.click(await screen.findByRole("button", { name: /Scoped model/ }));
+  expect(screen.getByRole("button", { name: "Model for next message" })).toHaveTextContent("Scoped model");
+  await act(async () => navigation.push("/demo/chat?kind=external&external_runtime=rt-models&external_source=source&external_thread=other-thread"));
+  await screen.findByText("Original native history");
+  expect(screen.getByRole("button", { name: "Model for next message" })).toHaveTextContent("original-model");
+  await user.click(screen.getByRole("button", { name: "Model for next message" }));
+  await user.click(await screen.findByRole("button", { name: /Scoped model/ }));
+  await act(async () => navigation.push("/demo/chat?kind=external&external_runtime=rt-models&external_source=other-source&external_thread=other-thread"));
+  await screen.findByText("Original native history");
+  expect(screen.getByRole("button", { name: "Model for next message" })).toHaveTextContent("original-model");
+  await user.click(screen.getByRole("button", { name: "Model for next message" }));
+  await screen.findByRole("button", { name: /Scoped model/ });
+  expect(backend.listExternalChatModels).toHaveBeenCalledWith("rt-models", "other-source", expect.any(Object));
+  expect(backend.listExternalChatModels).not.toHaveBeenCalledWith("rt", expect.anything(), expect.anything());
+  expect(backend.sendExternalChatMessage).not.toHaveBeenCalled();
 });
 
 it("keeps unknown send outcomes blocked, reads the receipt, and never replays the POST", async () => {

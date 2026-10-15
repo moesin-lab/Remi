@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InfiniteQueryObserver, QueryClient } from "@tanstack/react-query";
 import { ApiError } from "../api";
-import { externalChatKeys, externalChatHistoryOptions, externalChatListOptions, externalChatWriteIsUnknown } from "./external-chats";
+import { externalChatKeys, externalChatHistoryOptions, externalChatListOptions, externalChatModelsOptions, externalChatWriteIsUnknown } from "./external-chats";
 
 const read = vi.hoisted(() => vi.fn());
 vi.mock("../api", async original => ({ ...await original<typeof import("../api")>(), api: { getExternalChatHistory: read } }));
@@ -25,6 +25,17 @@ describe("external chat query isolation and acknowledgement", () => {
     expect(externalChatWriteIsUnknown(new ApiError("invalid acknowledgement", 502, "Bad Gateway", { error: "invalid" }))).toBe(true);
     expect(externalChatWriteIsUnknown(new ApiError("lost", 504, "Timeout", { error: "lost", code: "TIMEOUT", outcome: "unknown" }))).toBe(true);
     expect(externalChatWriteIsUnknown(new ApiError("busy", 409, "Conflict", { error: "busy", code: "BUSY" }))).toBe(false);
+  });
+
+  it("shares model catalogs only within one source and disables unsupported or offline source queries", () => {
+    const key = externalChatModelsOptions("ws", "rt", "source", true).queryKey;
+    expect(key).toEqual(externalChatKeys.models("ws", "rt", "source"));
+    expect(key).not.toEqual(externalChatKeys.models("other", "rt", "source"));
+    expect(key).not.toEqual(externalChatKeys.models("ws", "other", "source"));
+    expect(key).not.toEqual(externalChatKeys.models("ws", "rt", "other"));
+    expect(externalChatModelsOptions("ws", "rt", "source", false).enabled).toBe(false);
+    expect(externalChatModelsOptions("", "rt", "source", true).enabled).toBe(false);
+    expect(externalChatModelsOptions("ws", "rt", "", true).enabled).toBe(false);
   });
 
   it("polls native history every 5 seconds idle, 2 seconds active, and stops when the page consumer leaves", async () => {

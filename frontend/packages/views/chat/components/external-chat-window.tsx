@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@multiremi/core/api";
-import { externalChatHistoryOptions, externalChatKeys, externalChatWriteIsUnknown, externalChatReceiptStorageKey, readExternalChatReceipt, writeExternalChatReceipt, EXTERNAL_CHAT_MAX_TEXT_CHARS, type ExternalChatReceipt, type ExternalChatTurn } from "@multiremi/core/chat";
+import { externalChatHistoryOptions, externalChatKeys, externalChatWriteIsUnknown, externalChatReceiptStorageKey, readExternalChatReceipt, writeExternalChatReceipt, EXTERNAL_CHAT_MAX_TEXT_CHARS, type ExternalChatReceipt, type ExternalChatTurn, type ExternalChatModel } from "@multiremi/core/chat";
 import { defaultSessionStorage } from "@multiremi/core/platform";
 import { createSafeId } from "@multiremi/core/utils";
 import { Button } from "@multiremi/ui/components/ui/button";
@@ -12,12 +12,14 @@ import { Popover, PopoverContent, PopoverTrigger } from "@multiremi/ui/component
 import { ArrowDown, ArrowUp, Info, List, Loader2, Square } from "lucide-react";
 import { useT } from "../../i18n";
 import { ExternalChatRequestCard } from "./external-chat-request";
+import { ExternalChatModelPicker } from "./external-chat-model-picker";
 
 const terminal = (status: string) => ["completed", "failed", "interrupted", "cancelled"].includes(status);
 interface NativeSendState { receipt: ExternalChatReceipt; text?: string }
 
-export function ExternalChatWindow({ ws, runtime, source, thread, online, draft, onDraftChange, onShowList }: {
+export function ExternalChatWindow({ ws, runtime, source, thread, online, modelsSupported = false, draft, onDraftChange, onShowList }: {
   ws: string; runtime: string; source: string; thread: string; online: boolean;
+  modelsSupported?: boolean;
   draft: string; onDraftChange: (value: string) => void;
   onShowList?: () => void;
 }) {
@@ -31,6 +33,7 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, draft,
   const prependAnchor = useRef<{ height: number; top: number } | null>(null);
   const [showJump, setShowJump] = useState(false);
   const [sendError, setSendError] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<ExternalChatModel | null>(null);
   const lastReceiptKey = externalChatKeys.lastReceipt(ws, runtime, source, thread);
   const storageKey = externalChatReceiptStorageKey(ws, runtime, source, thread);
   const [stored] = useState(() => readExternalChatReceipt(defaultSessionStorage, storageKey, thread));
@@ -80,7 +83,7 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, draft,
 
   const send = useMutation({
     retry: false,
-    mutationFn: (input: { text: string; request_id: string }) => api.sendExternalChatMessage(runtime, source, thread, input),
+    mutationFn: (input: { text: string; request_id: string; model?: string }) => api.sendExternalChatMessage(runtime, source, thread, input),
   });
   const uncertain = lastReceipt?.outcome === "unknown";
   const receipt = useQuery({
@@ -133,7 +136,7 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, draft,
     if (!canSend || !draft.trim() || sending.current) return;
     sending.current = true;
     setSendError(false);
-    const input = { text: draft, request_id: createSafeId() };
+    const input = { text: draft, request_id: createSafeId(), ...(modelsSupported && selectedModel ? { model: selectedModel.id } : {}) };
     recordSend({
       receipt: { request_id: input.request_id, thread_id: thread, turn_id: null, outcome: "unknown" }, text: input.text,
     });
@@ -161,7 +164,8 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, draft,
           {current && <p className="truncate text-xs text-muted-foreground" title={current.chat.cwd}>{current.chat.cwd}</p>}
         </div>
         {current && <>
-          <span className="hidden max-w-40 truncate rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground sm:block" title={current.chat.model ?? undefined}>{current.chat.model}</span>
+          <ExternalChatModelPicker ws={ws} runtime={runtime} source={source} online={online} supported={modelsSupported} disabled={!canSend}
+            currentModel={current.chat.model} value={selectedModel} onChange={setSelectedModel} />
           <Popover>
             <PopoverTrigger render={<Button variant="ghost" size="icon-sm" aria-label={t(($) => $.external.details)} />}><Info className="size-4" /></PopoverTrigger>
             <PopoverContent align="end" className="w-80 max-w-[calc(100vw-2rem)] space-y-2">

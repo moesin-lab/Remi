@@ -121,6 +121,7 @@ export function ExternalChatPage() {
       </aside>
       <section className={cn("min-h-0 min-w-0 flex-1 flex-col md:flex", showList ? "hidden" : "flex")}>
         {runtimeId && sourceId && threadId ? <ExternalChatWindow key={draftKey} ws={ws} runtime={runtimeId} source={sourceId} thread={threadId} online={available && !!source}
+          modelsSupported={runtime?.metadata.external_chat_models === 1}
           onShowList={() => setShowList(true)} draft={drafts[draftKey] ?? ""} onDraftChange={value => setDrafts(previous => ({ ...previous, [draftKey]: value }))} />
           : <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"><MessageSquare className="size-8 text-muted-foreground/50" /><p className="text-sm text-muted-foreground">{t(($) => $.external.select)}</p></div>}
       </section>

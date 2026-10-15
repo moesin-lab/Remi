@@ -156,6 +156,36 @@ describe("external Chat reverse RPC", () => {
     f.close();
   });
 
+  it("projects source-scoped model pages while preserving native IDs, descriptions and cursors", async () => {
+    const f = fixture();
+    const models = [{ id: "provider/model", name: "Native model", description: "Catalog entry" }];
+    for (const next_cursor of ["next:+/=", "x".repeat(4096), null]) {
+      const job = f.client.request("rt", { operation: "models", source_id: "local", cursor: "cursor", limit: 1 });
+      expect(f.sent.at(-1)!.frame.p).toEqual({ operation: "models", source_id: "local", cursor: "cursor", limit: 1 });
+      f.reply(f.sent.at(-1)!.id, { ok: true, data: { source_id: "local", models: models.map(model => ({ ...model, config: {} })), next_cursor, auth: "fixture" } });
+      expect(await job).toEqual({ ok: true, data: { source_id: "local", models, next_cursor } });
+    }
+    f.close();
+  });
+
+  it("rejects foreign model catalogs, malformed entries and unusable pagination", async () => {
+    const f = fixture();
+    const model = { id: "provider/model", name: "Model", description: "Native model" };
+    const page = { source_id: "local", models: [model], next_cursor: null };
+    for (const data of [
+      { ...page, source_id: "foreign" }, { ...page, models: {} }, { ...page, models: [{ ...model, description: null }] },
+      { ...page, models: [{ ...model, name: ["Model"] }] }, { ...page, models: [{ ...model, id: "" }] },
+      { ...page, models: [{ ...model, id: "x".repeat(257) }] }, { ...page, models: [{ ...model, id: "provider/\nmodel" }] },
+      { ...page, next_cursor: 2 }, { ...page, next_cursor: "" }, { ...page, next_cursor: "x".repeat(4097) },
+      { ...page, next_cursor: "next\0cursor" }, { ...page, models: [model, model] },
+    ]) {
+      const job = f.client.request("rt", { operation: "models", source_id: "local", limit: 1 });
+      f.reply(f.sent.at(-1)!.id, { ok: true, data });
+      expect(await job).toMatchObject({ ok: false, code: "invalid_external_chat_response" });
+    }
+    f.close();
+  });
+
   it("rejects history from a different source or thread despite a matching RPC envelope", async () => {
     const f = fixture();
     for (const changed of [{ ...chat, source_id: "foreign" }, { ...chat, id: requestId }]) {

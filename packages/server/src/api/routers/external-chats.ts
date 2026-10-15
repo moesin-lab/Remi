@@ -1,5 +1,5 @@
 import type { Context, Hono } from "hono";
-import { EXTERNAL_CHAT_MAX_PAGE_SIZE, EXTERNAL_CHAT_MAX_TEXT_CHARS, EXTERNAL_CHAT_RPC_MAX_BYTES,
+import { EXTERNAL_CHAT_MAX_MODEL_CHARS, EXTERNAL_CHAT_MAX_PAGE_SIZE, EXTERNAL_CHAT_MAX_TEXT_CHARS, EXTERNAL_CHAT_RPC_MAX_BYTES,
   type ExternalChatOperation, type ExternalChatRpcResult } from "@multiremi/contracts/external-chats.js";
 import { currentAccessToken, isHumanOperatorRequest } from "../wire/context.js";
 import { denyCurrentUserWorkspaceAccess } from "../helpers/auth-guards.js";
@@ -26,11 +26,11 @@ function uuid(value: unknown, name: string): string {
   return value;
 }
 
-function query(c: Context, allowed: readonly string[]): Record<string, string> {
+function query(c: Context, allowed: readonly string[], maxValueChars = 2048): Record<string, string> {
   const values: Record<string, string> = {};
   for (const [key, value] of new URL(c.req.url).searchParams) {
     if (!allowed.includes(key) || Object.hasOwn(values, key)) throw new ExternalChatInputError("Unsupported or repeated query parameter");
-    if (!value || value.length > 2048 || /[\x00-\x1f\x7f]/.test(value)) throw new ExternalChatInputError(`Invalid ${key}`);
+    if (!value || value.length > maxValueChars || /[\x00-\x1f\x7f]/.test(value)) throw new ExternalChatInputError(`Invalid ${key}`);
     values[key] = value;
   }
   return values;
@@ -85,6 +85,13 @@ function answerKey(value: string): void {
     || ["__proto__", "constructor", "prototype"].includes(value)) {
     throw new ExternalChatInputError("Invalid question id");
   }
+}
+
+function model(value: unknown): string {
+  if (typeof value !== "string" || !value.trim() || value.length > EXTERNAL_CHAT_MAX_MODEL_CHARS || /[\x00-\x1f\x7f-\x9f]/.test(value)) {
+    throw new ExternalChatInputError(`model must contain between 1 and ${EXTERNAL_CHAT_MAX_MODEL_CHARS} characters without controls`);
+  }
+  return value;
 }
 
 function responseInput(value: Record<string, unknown>): Pick<Extract<ExternalChatOperation, { operation: "respond" }>, "decision" | "answers"> {
@@ -144,6 +151,10 @@ export function registerExternalChatRoutes(app: Hono, deps: RouterDeps): void {
       if (loaded.runtime.provider !== "codex" || loaded.runtime.metadata.external_chats !== 1) {
         return c.json({ error: "Upgrade the owning Codex Runtime to enable External Chats", code: "external_chats_unsupported" }, 503);
       }
+      if ((operation.operation === "models" || (operation.operation === "send" && operation.model !== undefined))
+        && loaded.runtime.metadata.external_chat_models !== 1) {
+        return c.json({ error: "Upgrade the owning Codex Runtime to list or select external Chat models", code: "external_chat_models_unsupported" }, 503);
+      }
       if (!deps.externalChatClient) return c.json({ error: "External Chat transport is unavailable", code: "external_chats_unavailable" }, 503);
       try { return resultResponse(c, await deps.externalChatClient.request(loaded.runtime.id, operation), operation); }
       catch { return resultResponse(c, externalChatFailure("daemon_unreachable", "The owning Runtime did not acknowledge the request", isExternalChatWrite(operation)), operation); }
@@ -156,6 +167,8 @@ export function registerExternalChatRoutes(app: Hono, deps: RouterDeps): void {
   const thread = (c: Context) => uuid(c.req.param("threadId"), "thread id");
 
   app.get(base, c => run(c, () => { query(c, []); return { operation: "catalog" }; }));
+  app.get(`${base}/:sourceId/models`, c => run(c, () => ({ operation: "models", source_id: source(c),
+    ...pageParams(query(c, ["cursor", "limit"], 4096)) })));
   app.get(threads, c => run(c, () => {
     const values = query(c, ["project_id", "cursor", "limit"]);
     return { operation: "list", source_id: source(c), ...pageParams(values),
@@ -165,8 +178,9 @@ export function registerExternalChatRoutes(app: Hono, deps: RouterDeps): void {
     ...pageParams(query(c, ["cursor", "limit"])) })));
   app.post(`${threads}/:threadId/messages`, c => run(c, async () => {
     query(c, []);
-    const input = await body(c, ["text", "request_id"]);
-    return { operation: "send", source_id: source(c), thread_id: thread(c), text: text(input.text), request_id: uuid(input.request_id, "request id") };
+    const input = await body(c, ["text", "request_id", "model"]);
+    return { operation: "send", source_id: source(c), thread_id: thread(c), text: text(input.text), request_id: uuid(input.request_id, "request id"),
+      ...(input.model === undefined ? {} : { model: model(input.model) }) };
   }));
   app.get(`${threads}/:threadId/receipts/:requestId`, c => run(c, () => {
     query(c, []);

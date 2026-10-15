@@ -4513,6 +4513,22 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "chat.external.models": {
+      "command": "remi chat external models",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.external.models",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "chat.external.list": {
       "command": "remi chat external list",
       "aliases": [],

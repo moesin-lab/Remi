@@ -920,9 +920,10 @@ filesystem paths or product Chat IDs.
 | Operation | Canonical command |
 | --- | --- |
 | Sources and Projects | `remi chat external sources --runtime <id>` |
+| One native model page | `remi chat external models --runtime <id> --source <id> [--cursor <cursor>] [--limit 1..50]` |
 | One Chat page | `remi chat external list --runtime <id> --source <id> [--project <id>] [--cursor <cursor>] [--limit 1..50]` |
 | One history page and pending requests | `remi chat external get <thread> --runtime <id> --source <id> [--cursor <cursor>] [--limit 1..50]` |
-| Send to the original thread | `remi chat external send <thread> --runtime <id> --source <id> --text <text> [--request-id <uuid>]` |
+| Send to the original thread | `remi chat external send <thread> --runtime <id> --source <id> --text <text> [--request-id <uuid>] [--model <id>]` |
 | Reconcile a send | `remi chat external receipt <thread> --runtime <id> --source <id> --request-id <uuid>` |
 | Interrupt an exact native turn | `remi chat external interrupt <thread> --runtime <id> --source <id> --turn <turn>` |
 | Answer a pending native request | `remi chat external respond <thread> --runtime <id> --source <id> --request-id <id> --decision accept\|decline\|cancel` or `--answers-json '{"question-id":["answer"]}'` |
@@ -935,3 +936,12 @@ making a new send. Native sends, interrupts and request responses are never
 automatically retried; a receipt UUID is not an HTTP retry authorization.
 `respond` accepts only one of `--decision` and `--answers-json`; its request ID is
 the opaque pending request ID delivered to this Remi connection, not a send UUID.
+
+`models` reads one page from the selected source's native model catalog. Listing a
+model does not prove that the source account has inference access to it. `send
+--model` passes that exact model ID, including names with `/`, to the original
+thread's next native turn. Omit it to preserve the native model. Both model
+listing and explicit selection require Runtime capability `external_chat_models: 1`;
+older daemons return an upgrade error instead of silently ignoring the model.
+An explicit model does not enable retries or replace the source's connection
+configuration, provider, workspace or credentials.

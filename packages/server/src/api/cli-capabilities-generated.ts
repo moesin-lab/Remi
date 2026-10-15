@@ -3251,6 +3251,18 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "chat.external.models": {
+      "command": "remi chat external models",
+      "auth": [
+        "human"
+      ],
+      "capability": "chat.external.models",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "chat.external.list": {
       "command": "remi chat external list",
       "auth": [

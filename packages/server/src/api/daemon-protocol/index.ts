@@ -158,7 +158,7 @@ export class DaemonProtocolLayer {
           this.store.recordDaemonProtocol(runtimeId, hello.daemonId, DAEMON_PROTOCOL_VERSION, hello.cliVersion);
           const runtime = hello.runtimes.find(entry => entry.runtimeId === runtimeId);
           this.store.heartbeatRuntime(runtimeId, { claimPending: false, ...runtimeCapabilityOptions(runtime?.capabilities) });
-          this.recordExternalChatCapability(runtimeId, runtime?.capabilities);
+          this.recordExternalChatCapabilities(runtimeId, runtime?.capabilities);
         }
         for (const hooks of this.sessionHooks) hooks.hello?.(session, hello);
       },
@@ -474,11 +474,12 @@ export class DaemonProtocolLayer {
     };
   }
 
-  private recordExternalChatCapability(runtimeId: string, capabilities: DaemonRuntimeCapabilities | undefined): void {
+  private recordExternalChatCapabilities(runtimeId: string, capabilities: DaemonRuntimeCapabilities | undefined): void {
     const version = capabilities?.external_chats === 1 ? 1 : 0;
+    const modelsVersion = capabilities?.external_chat_models === 1 ? 1 : 0;
     const runtime = this.store.getRuntimeLite(runtimeId);
-    if (!runtime || runtime.metadata.external_chats === version) return;
-    this.store.updateRuntime(runtimeId, { metadata: { ...runtime.metadata, external_chats: version } });
+    if (!runtime || (runtime.metadata.external_chats === version && runtime.metadata.external_chat_models === modelsVersion)) return;
+    this.store.updateRuntime(runtimeId, { metadata: { ...runtime.metadata, external_chats: version, external_chat_models: modelsVersion } });
   }
 
   /**
@@ -514,7 +515,7 @@ export class DaemonProtocolLayer {
       const reported = reportedRuntimes.find(entry => entry.runtime_id === runtimeId);
       const ack = this.store.heartbeatRuntime(runtimeId, { claimPending: false,
         ...runtimeCapabilityOptions(readPayload(reported?.capabilities) as DaemonRuntimeCapabilities) });
-      if (ack.status !== "runtime_gone") this.recordExternalChatCapability(runtimeId, readPayload(reported?.capabilities) as DaemonRuntimeCapabilities);
+      if (ack.status !== "runtime_gone") this.recordExternalChatCapabilities(runtimeId, readPayload(reported?.capabilities) as DaemonRuntimeCapabilities);
       if (ack.status === "runtime_gone") {
         // The row vanished between the handshake and now. Same report as a
         // handshake-time exclusion: tell the daemon, do not close the socket, and

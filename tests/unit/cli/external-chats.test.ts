@@ -33,10 +33,10 @@ function execute(action: string, args: string[] = [], flags = location) {
 afterEach(() => { globalThis.fetch = realFetch; console.log = realLog; console.error = realError; });
 
 describe("external native Chat CLI", () => {
-  it("registers seven human-only capabilities and generated help in the real dispatcher", () => {
+  it("registers eight human-only capabilities and generated help in the real dispatcher", () => {
     const inventory = cliCommandInventory().filter(spec => spec.capability?.startsWith("chat.external."));
     expect(inventory.map(spec => spec.id).sort()).toEqual(specs.filter(spec => spec.capability).map(spec => spec.id).sort());
-    expect(inventory).toHaveLength(7);
+    expect(inventory).toHaveLength(8);
     for (const entry of inventory) {
       expect(entry.auth).toEqual(["human"]);
       expect(entry.capability).toBe(entry.id);
@@ -46,10 +46,16 @@ describe("external native Chat CLI", () => {
     }
     expect(cliCommandHelp(["chat", "external"])).toContain("sources");
     expect(cliCommandHelp(["chat", "external", "send"])).toContain("--request-id");
+    expect(cliCommandHelp(["chat", "external", "send"])).toContain("--model");
+    expect(cliCommandHelp(["chat", "external", "models"])).toContain("--cursor");
+    expect(cliCommandHelp(["chat", "external", "models"])).toContain("--limit");
   });
 
   const reads: Array<{ action: string; args: string[]; flags: string[]; path: string; query: Record<string, string>; response: unknown }> = [
     { action: "sources", args: [], flags: ["--runtime", "rt_codex"], path: "/api/runtimes/rt_codex/external-chats", query: {}, response: { sources: [], warnings: [] } },
+    { action: "models", args: ["--cursor", "models:+/=", "--limit", "3"], flags: location,
+      path: "/api/runtimes/rt_codex/external-chats/codex%3Aaiden/models", query: { cursor: "models:+/=", limit: "3" },
+      response: { source_id: "codex:aiden", models: [{ id: "provider/model", name: "Model", description: "Native catalog model" }], next_cursor: "next" } },
     { action: "list", args: ["--project", "native:p1", "--cursor", "cursor:+/=", "--limit", "5"], flags: location, path: base.slice(0, -"/thread_1".length), query: { project_id: "native:p1", cursor: "cursor:+/=", limit: "5" }, response: { chats: [], projects: [], next_cursor: "next" } },
     { action: "get", args: ["thread_1", "--cursor", "turn:2", "--limit", "3"], flags: location, path: base, query: { cursor: "turn:2", limit: "3" }, response: { chat: { id: "thread_1" }, turns: [], requests: [], next_cursor: "next" } },
     { action: "receipt", args: ["thread_1", "--request-id", fixtureId], flags: location, path: `${base}/receipts/${fixtureId}`, query: {}, response: { request_id: fixtureId, thread_id: "thread_1", turn_id: null, outcome: "unknown" } },
@@ -88,6 +94,15 @@ describe("external native Chat CLI", () => {
     expect(requests.filter(request => new URL(request.url).pathname.endsWith("/threads"))).toHaveLength(1);
   });
 
+  it("shows complete native model IDs, names and descriptions with the next page cursor", async () => {
+    const model = { id: "provider/model", name: "Native model", description: "Available from this source" };
+    setup(() => Response.json({ source_id: "codex:aiden", models: [model], next_cursor: "models:next" }));
+    await registry.execute(["chat", "external", "models", ...location, ...connection.filter(value => value !== "--json")]);
+    for (const value of ["ID", "NAME", "DESCRIPTION", model.id, model.name, model.description]) expect(output.join("\n")).toContain(value);
+    expect(diagnostics).toEqual(["next_cursor: models:next"]);
+    expect(requests.filter(request => new URL(request.url).pathname.endsWith("/models"))).toHaveLength(1);
+  });
+
   it("marks clipped history items and exposes the next page only in table mode", async () => {
     const history = { chat: { id: "thread_1" }, turns: [{ id: "turn_1", status: "completed", items: [{ id: "item_1", type: "agentMessage", role: "assistant", text: "截断正文", truncated: true }] }], requests: [], next_cursor: "history:next" };
     setup(() => Response.json(history));
@@ -113,6 +128,30 @@ describe("external native Chat CLI", () => {
     await execute("send", ["thread_1", "--text", text, "--request-id", fixtureId]);
     expect(requests.filter(request => request.method === "POST")).toHaveLength(1);
     expect(JSON.parse(output.join("\n"))).toMatchObject({ request_id: fixtureId, outcome: "accepted" });
+  });
+
+  it("sends an explicit native model with slashes or Unicode unchanged and without retry authorization", async () => {
+    const models = ["provider/model", "provider/" + "界".repeat(247)];
+    setup(async request => {
+      const body = await request.json() as { text: string; request_id: string; model: string };
+      expect(body).toEqual({ text: "Continue native thread", request_id: fixtureId, model: models.shift()! });
+      expect(request.headers.has("Idempotency-Key")).toBe(false);
+      return Response.json({ request_id: fixtureId, thread_id: "thread_1", turn_id: "turn_1", outcome: "accepted" }, { status: 202 });
+    });
+    for (const model of [...models]) await execute("send", ["thread_1", "--text", "Continue native thread", "--request-id", fixtureId, "--model", model]);
+    expect(models).toHaveLength(0);
+    expect(requests.filter(request => request.method === "POST")).toHaveLength(2);
+  });
+
+  it("preserves an actionable upgrade error when an old daemon refuses model selection", async () => {
+    setup(() => Response.json({ error: "Upgrade the owning Codex Runtime", code: "external_chat_models_unsupported" }, { status: 503 }));
+    const error = await execute("send", ["thread_1", "--text", "continue", "--request-id", fixtureId, "--model", "provider/model"]).catch(error => error);
+    expect(error).toBeInstanceOf(CliError);
+    expect(error.message).toBe("Upgrade the owning Codex Runtime");
+    expect(error.retryable).toBe(false);
+    expect(error.details).toMatchObject({ code: "external_chat_models_unsupported" });
+    expect(error.details).not.toHaveProperty("receipt");
+    expect(requests.filter(request => request.method === "POST")).toHaveLength(1);
   });
 
   it("generates a fresh UUID per send and returns it in the receipt", async () => {
@@ -143,7 +182,7 @@ describe("external native Chat CLI", () => {
       if (failure === "timeout") return new Promise((_resolve, reject) => request.signal.addEventListener("abort", () => reject(new Error("timed out")), { once: true }));
       return Response.json({ error: "native acknowledgement lost", code: "external_unknown", outcome: "unknown" }, { status: 503 });
     });
-    const error = await execute("send", ["thread_1", "--text", "continue", "--request-id", fixtureId, "--timeout", "5"]).catch(error => error);
+    const error = await execute("send", ["thread_1", "--text", "continue", "--request-id", fixtureId, "--model", "provider/model", "--timeout", "5"]).catch(error => error);
     expect(error).toBeInstanceOf(CliError);
     expect(error.retryable).toBe(false);
     expect(error.details).toEqual({ receipt: { request_id: fixtureId, thread_id: "thread_1", turn_id: null, outcome: "unknown" } });
@@ -188,6 +227,7 @@ describe("external native Chat CLI", () => {
       ["send", "thread_1", "--text", " "], ["send", "thread_1", "--text", "x".repeat(32_001)],
       ["send", "thread_1", "--text", "continue", "--request-id", "bad"],
       ["send", "thread_1", "--text", "continue", "--request-id", ""],
+      ...["", " ", "x".repeat(257), "provider/\nmodel", "provider/\0model", "provider/\x85model"].map(model => ["send", "thread_1", "--text", "continue", "--model", model]),
       ["receipt", "thread_1", "--request-id", "bad"], ["interrupt", "thread_1"],
       ["respond", "thread_1", "--request-id", "request_1"],
       ["respond", "thread_1", "--request-id", "request_1", "--decision", "unknown"],
@@ -195,7 +235,7 @@ describe("external native Chat CLI", () => {
       ["respond", "thread_1", "--request-id", "request_1", "--answers-json", "[]"],
       ["respond", "thread_1", "--request-id", "request_1", "--answers-json", "{"],
       ["respond", "thread_1", "--request-id", "request_1", "--decision", "accept", "--answers-json", "{}"],
-      ["list", "--limit", "51"], ["get", "thread_1", "--limit", "0"],
+      ["list", "--limit", "51"], ["get", "thread_1", "--limit", "0"], ["models", "--limit", "51"], ["models", "--limit", "0"],
     ];
     for (const [action, ...args] of cases) await expect(execute(action!, args)).rejects.toThrow();
     expect(requests).toHaveLength(0);

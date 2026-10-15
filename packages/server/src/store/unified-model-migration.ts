@@ -5,6 +5,7 @@ import { existsSync, readFileSync, mkdirSync, renameSync, writeFileSync } from "
 import { join } from "node:path";
 import { prepareMigrationReportDirectory, resolveMigrationReportDirectory } from "./migration-report-directory.js";
 import type { SqlDatabase } from "./db/postgres.js";
+import { withModernSqliteAlterTable } from "./db/sqlite.js";
 import { autopilotSessionId } from "@multiremi/contracts/unified-model.js";
 import { createTurnExecutionReadProjection } from "./turn-execution-records.js";
 import { UNIFIED_MODEL_MIGRATION, UNIFIED_TURNS_SCHEMA, UNIFIED_LANES_SCHEMA,
@@ -61,7 +62,6 @@ export function unifiedModelPreflight(db: SqlDatabase): UnifiedMigrationCheck[] 
     ["unconsumed_steer", "multiremi_task_steer_messages", `consumed_at IS NULL AND NOT EXISTS
       (SELECT 1 FROM multiremi_tasks t WHERE t.id=multiremi_task_steer_messages.task_id
         AND t.status IN ('completed','failed','cancelled'))`],
-    ["running_trace_backfill_groups", "multiremi_trace_backfill_progress", "status = 'running'"],
     ["undrained_tasks", "multiremi_tasks", "status IN ('running', 'dispatched')"],
   ].map(([name, table, where]) => {
     const n = count(db, table!, where!);
@@ -657,7 +657,7 @@ export function runUnifiedModelMigration(db: SqlDatabase, options: { reportDir?:
   const sqliteForeignKeys = db.dialect === "sqlite" ? Number(db.query("PRAGMA foreign_keys").get()?.foreign_keys ?? 0) : 0;
   if (sqliteForeignKeys) db.exec("PRAGMA foreign_keys=OFF");
   try {
-    db.transaction(() => {
+    withModernSqliteAlterTable(db, db.dialect, db.transaction(() => {
       migrateHeaders(db);
       migrateTurns(db,tasks);
       migrateAutopilots(db);
@@ -671,7 +671,7 @@ export function runUnifiedModelMigration(db: SqlDatabase, options: { reportDir?:
       if (after.mismatches.length) throw new Error(`Unified migration reconciliation failed: ${after.mismatches.join("; ")}`);
       if (db.dialect === "sqlite" && db.query("PRAGMA foreign_key_check").all().length) throw new Error("Unified migration foreign key check failed");
       db.run("INSERT INTO multiremi_schema_migrations(id,applied_at) VALUES (?,?)",[UNIFIED_MODEL_MIGRATION,new Date().toISOString()]);
-    })();
+    }));
   } finally { if (sqliteForeignKeys) db.exec("PRAGMA foreign_keys=ON"); }
   writeUnifiedModelReport(reportDir,"after",after);
   return after;

@@ -14,7 +14,7 @@ import type { MultiremiFeishuBotOutboundDelivery } from "@multiremi/contracts/ty
 import { sendDecisionLane, sendIssueDecisionLane } from "../../../apps/remi/cli/multiremi.js";
 import type { FeishuChannelHandle } from "../../../apps/remi/cli/agent.js";
 import { FeishuTaskPresentation } from "@connectors/feishu/task-presentation.js";
-import { nativeHarness, taskEvent, completed } from "../connectors/feishu-native-harness.js";
+import { item, nativeHarness, started, terminal } from "../connectors/feishu-native-harness.js";
 
 import { unifiedModelBackendTests } from "./unified-model-test-backends.js";
 import { assertQuestionCardToken } from "@multiremi/store/question-card-token.js";
@@ -88,8 +88,9 @@ for (const backend of ["SQLite", "Postgres"] as const) {
       store.updateWorkspace(workspaceId, { settings: { ...workspace.settings,
         issueTopics: { enabled: true, chatId: `oc_mul487_${n}`, notifyMode: mode, ...(mode === "person" ? { notifyOpenId: recipient } : {}) },
       } });
+      // The recipient created the root: a human-stage card goes to the root creator.
       const issue = createResponsibleTestIssue(store, { title: "Question parent", workspaceId, assigneeType: "agent", assigneeId: agent.id,
-        responsibleMemberId: member.id });
+        createdBy: user.id });
       store.prepareFeishuIssueTopicWithinTransaction(issue);
       const root = store.claimFeishuBotOutbound(workspaceId, runtimeId)!;
       store.reportFeishuBotOutbound(workspaceId, runtimeId, root.id, { claimToken: root.claimToken, status: "sent", externalMessageId: `om_root_${n}` });
@@ -291,7 +292,7 @@ for (const backend of ["SQLite", "Postgres"] as const) {
       });
     }
 
-    it("fr: native stream issuance and retarget rotate tokens and bind the new person", async () => {
+    it("fr: native stream issuance and retarget rotate tokens and bind the new member", async () => {
       const f = await setup("fr");
       const path = `/api/daemon/messages/${f.request.id}/card`;
       const mint = (recipient: string) => f.api.request(path, { method: "POST",
@@ -303,11 +304,14 @@ for (const backend of ["SQLite", "Postgres"] as const) {
       expect(nativeToken === f.token).toBe(false);
       const changedRecipient = "ou_new_addressee";
       const changedUser = store.getOrCreateUser({ externalId: changedRecipient, name: "New addressee" });
-      const changedMember = store.createWorkspaceMember({ workspaceId: f.workspaceId, userId: changedUser.id, name: "New addressee", role: "member" });
-      seedQuestionHumanMapping(db, f.workspaceId, 'cli_mul487', changedUser.id, changedRecipient);
+      // An open_id that maps to no active member of this workspace never gets a card.
       expect((await mint(changedRecipient)).status).toBe(409);
       expect(f.row().token_recipient).toBe(f.recipient);
-      store.updateIssue(f.issue.id, { responsibleMemberId: changedMember.id, actorType: 'member', actorId: f.member.id });
+      store.createWorkspaceMember({ workspaceId: f.workspaceId, userId: changedUser.id, name: "New addressee", role: "member" });
+      seedQuestionHumanMapping(db, f.workspaceId, 'cli_mul487', changedUser.id, changedRecipient);
+      // The Issue human stage names nobody: any active member may be shown the card, and the
+      // token binds it to that member alone.
+      expect(store.getQuestion(f.request.id)).toMatchObject({ stage: 'human', current_handler: null });
       const retargeted = await mint(changedRecipient);
       expect(retargeted.status).toBe(200);
       const newToken = questionCardAction((await retargeted.json()).card)!.t as string;
@@ -377,12 +381,10 @@ for (const backend of ["SQLite", "Postgres"] as const) {
       const presentation = new FeishuTaskPresentation(h.client as any, "oc_mul487", {
         taskId: f.task.id, getHumanRequest: async () => store.getTaskHumanRequest(f.request.id),
         prepareHumanRequestCard: async (id, recipient) => store.prepareTaskStreamQuestionCard(id, recipient)!,
-        respondHumanRequest: async (_id, response, credential) => store.respondTaskHumanRequest(f.request.id,
-          { response, cardCredential: credential, respondedBy: f.member.id, expectedRouteRevision: store.getQuestion(f.request.id)!.route_revision })!,
       }, { appId: "cli_mul487", idempotencyKey: "native-token-retry", interactionOpenId: f.recipient, save: h.save });
       async function* stream() {
-        yield taskEvent(1, "question_request", { input: { request_id: f.request.id } });
-        yield completed;
+        yield started(1, item("question", `q:${f.request.id}`, { message_id: f.request.id }));
+        yield terminal;
       }
       await presentation.consume(stream());
       expect(tokens).toHaveLength(2);

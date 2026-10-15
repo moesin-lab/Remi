@@ -1,7 +1,8 @@
 import { InboxOperations } from '../inbox/operations.js';
 import { activeRequestReadCache, cacheKey } from '../request-read-cache.js';
-import { assertIssueDeliveryAccepted, IssueDeliveryError } from '../issue-deliveries.js';
+import { IssueResponsibilityError } from '../issue-responsibility.js';
 import { refreshResponsibilityQuestions } from '../issue-responsibility-changes.js';
+import { Questions } from '../inbox/questions.js';
 import { sendMessageWithinTransaction } from "../inbox/send-message.js";
 import { patchDecisionRecord } from "../inbox/decision-records.js";
 import { deriveIssueStatusWithinTransaction } from "../inbox/issue-status.js";
@@ -97,7 +98,6 @@ import type {
   MultiremiIssuePrerequisite,
   MultiremiIssueWaitingOn,
   MultiremiIssueKind,
-  MultiremiIssueParentDoneGrant,
   MultiremiIssuePriority,
   MultiremiIssueReaction,
   MultiremiIssueSearchResult,
@@ -188,28 +188,17 @@ function childTerminalOutcome(status: string): ChildTerminalOutcome | null {
 export { IssueDependencyError } from "@multiremi/store/repos/issue-dependencies.js";
 
 /**
- * MUL-400 S1c (A4): why an agent was refused `done` on a parent it does not (or
- * no longer does) hold an effective grant for. The wire response repeats it so
- * a run can tell "ask a member to authorize me" apart from "the grant lapsed".
+ * 409 for a held parent transition (guard A: unfinished children); the route
+ * maps it to the API error code. Who may close an Issue at all is the separate
+ * done rule ({@link IssueResponsibilityError}).
  */
-export type ParentDoneGrantRefusalReason =
-  | "grant_missing"
-  | "not_owner_agent"
-  | "assignee_changed"
-  | "owner_not_agent"
-  | "force_requires_member"
-  | "final_summary_missing"
-  | "children_open";
-
-/** 409/403 for a held parent transition; the route maps it to the API error code. */
 export class ParentStatusGuardError extends Error {
   constructor(
-    readonly code: "issue_status_held" | "final_summary_missing" | "parent_done_requires_member",
+    readonly code: "issue_status_held",
     message: string,
     readonly details: {
       openChildren?: number;
-      lastChildClosedAt?: string | null;
-      reason?: ParentDoneGrantRefusalReason;
+      reason?: "children_open";
     } = {},
   ) {
     super(message);
@@ -273,18 +262,9 @@ function retryOnceOnStaleLockSet<T>(attempt: () => T): T {
   }
 }
 
-export class ParentDoneGrantOwnerError extends Error {
-  readonly code = "parent_done_grant_owner_not_agent";
-}
-
 /** Statuses a parent with unfinished children must not enter. */
 function statusNeedsChildGuard(status: string): boolean {
   return status === "in_review" || status === "done";
-}
-
-/** A4: closing a parent with children is a member decision. */
-function statusIsMemberOnlyParentTerminal(status: string): boolean {
-  return status === "done";
 }
 
 /**
@@ -334,19 +314,6 @@ const CHILD_PROGRESS_SELECT = `SELECT child.parent_issue_id, COUNT(*) AS total,
          ON parent.id = child.parent_issue_id
         AND parent.workspace_id = child.workspace_id`;
 
-/** `result` is stored JSON; "has a result" means non-empty output text. */
-function storedTaskResultHasOutput(value: unknown): boolean {
-  const raw = nullableString(value);
-  if (raw == null) return false;
-  const parsed = parseJson<unknown>(raw, null);
-  if (typeof parsed === "string") return parsed.trim().length > 0;
-  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-    const output = (parsed as Record<string, unknown>).output;
-    return typeof output === "string" && output.trim().length > 0;
-  }
-  return false;
-}
-
 export interface IssueMutationActivityContext {
   actorType?: string;
   actorId?: string | null;
@@ -394,18 +361,6 @@ export interface AnswerIssueDecisionOptions {
   idempotent?: boolean;
   cardCredential?: QuestionCardCredential;
 }
-
-export type IssueDeletionBlockCode =
-  | "issue_not_found"
-  | "issue_has_active_tasks"
-  | "issue_workspace_not_cleaned"
-  | "issue_workspace_archive_invalid"
-  | "issue_deletion_conflict";
-
-export type BeginIssueDeletionResult =
-  | { ok: true }
-  | { ok: false; code: IssueDeletionBlockCode; error: string };
-type IssueDeletionBlockedResult = Extract<BeginIssueDeletionResult, { ok: false }>;
 
 // ── reactions ─────────────────────────────────────────────────────────────────
 // Issue reactions and comment reactions are the same table shape hung off two different parents,
@@ -525,12 +480,6 @@ const COMMENT_REACTIONS: ReactionSpec<MultiremiCommentReaction> = {
 export class IssuesRepo {
   constructor(private ctx: StoreContext) {}
 
-  private validateResponsibleMember(id: string | null, workspaceId: string): void {
-    if (!id) return;
-    const member = this.ctx.workspaces().getWorkspaceMember(id);
-    if (!member || member.workspaceId !== workspaceId || member.archivedAt) throw new IssueDeliveryError('issue_responsibility_invalid','Responsible human must be an active member of this workspace');
-  }
-
   /**
    * MUL-400 E3 gate 3. The whole creation — the issue row, its number, its
    * dependencies and the cycle/ancestor checks — is one transaction, so a
@@ -609,20 +558,31 @@ export class IssuesRepo {
     ).get(decisionId, issueId, workspaceId) != null;
   }
 
+  /**
+   * This Issue's own Qs waiting at the human stage (any active member answers).
+   * Qs still climbing the execution-owner chain, Qs of other Issues in the
+   * family and frozen `source_workspace_changed` Qs do not count. Unresolved
+   * decision rows raised by this Issue's Turns or stored in its sessions are the
+   * candidates, so the common nothing-pending case stays one statement; each
+   * candidate's routed stage is then read from its original Q.
+   */
   countPendingIssueDecisions(issueId: string): number {
-    const row = this.ctx.db.query(
-      `SELECT
-        (SELECT COUNT(*) FROM multiremi_message_decision_records d
-          JOIN multiremi_issues target ON target.id = d.issue_id AND target.workspace_id = d.workspace_id
-          JOIN multiremi_issues source ON source.id = d.source_issue_id AND source.workspace_id = d.workspace_id
-          WHERE d.issue_id = ? AND d.status = 'escalated') +
-        (SELECT COUNT(*) FROM multiremi_message_question_records h
-          JOIN multiremi_turn_execution_records t ON t.id = h.task_id
-          JOIN multiremi_issues i ON i.id = t.issue_id
-          WHERE h.status = 'pending' AND (i.id = ? OR i.parent_issue_id = ?)
-            AND i.workspace_id = (SELECT workspace_id FROM multiremi_issues WHERE id = ?)) AS total`,
-    ).get(issueId, issueId, issueId, issueId) as { total: number } | null;
-    return Number(row?.total ?? 0);
+    const rows = this.ctx.db.query(
+      `SELECT m.id FROM multiremi_turns t JOIN multiremi_conversation_log m ON m.task_id = t.id
+       WHERE t.issue_id = ? AND m.kind = 'message' AND m.message_kind = 'decision'
+         AND m.deleted_at IS NULL AND m.resolved_at IS NULL
+       UNION
+       SELECT m.id FROM multiremi_issue_sessions s JOIN multiremi_conversation_log m ON m.session_id = s.id
+       WHERE s.issue_id = ? AND m.kind = 'message' AND m.message_kind = 'decision'
+         AND m.deleted_at IS NULL AND m.resolved_at IS NULL`,
+    ).all(issueId, issueId) as Row[];
+    if (!rows.length) return 0;
+    const questions = new Questions(this.ctx);
+    return rows.filter((row) => {
+      const question = questions.get(String(row.id));
+      return question?.status === "pending" && question.stage === "human" && question.source_issue_id === issueId
+        && question.route_reason !== "source_workspace_changed";
+    }).length;
   }
 
   listIssueDecisions(issueId: string): MultiremiIssueDecisionList {
@@ -770,20 +730,16 @@ export class IssuesRepo {
     const contextRefs = normalizeJsonArray(input.contextRefs ?? input.context_refs ?? []);
     const createdBy = input.createdBy ?? input.created_by ?? null;
     const status = normalizeIssueStatus(input.status);
-    if (status === 'done') throw new IssueDeliveryError('issue_delivery_acceptance_required','Create an issue before submitting and accepting its delivery');
-    const responsibleRef = resolveOptionalStringField(input, 'responsibleMemberId', 'responsible_member_id', null);
-    if (parentIssueId && responsibleRef) throw new Error('Child issue human responsibility is inherited from its root');
-    const creatorMember = createdBy ? this.ctx.workspaces().getWorkspaceMember(createdBy)
-      ?? this.ctx.workspaces().findWorkspaceMemberForUser(createdBy, workspaceId) : null;
-    const responsibleMemberId = parentIssueId ? null : responsibleRef ?? creatorMember?.id ?? null;
-    this.validateResponsibleMember(responsibleMemberId, workspaceId);
+    // Closing is a status decision under the done rule, so it never rides on a
+    // creation. `responsibleMemberId` is deprecated: accepted, never read.
+    if (status === "done") throw new IssueResponsibilityError("issue_create_done_unsupported", "Create the Issue first, then set it to done");
     const completedAt = isTerminalIssueStatus(status) ? now : null;
     this.ctx.db.run(
       `INSERT INTO multiremi_issues (
         runtime_workspace_id, id, issue_number, issue_key, title, description, status, priority, workspace_id, project_id,
-        parent_issue_id, responsible_member_id, issue_kind, source_issue_id, assignee_type, assignee_id, position, start_date, due_date,
+        parent_issue_id, issue_kind, source_issue_id, assignee_type, assignee_id, position, start_date, due_date,
         acceptance_criteria, context_refs, created_by, completed_at, archived_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         runtimeWorkspaceId,
         id,
@@ -796,7 +752,6 @@ export class IssuesRepo {
         workspaceId,
         projectId,
         parentIssueId,
-        responsibleMemberId,
         issueKind,
         sourceIssueId,
         assigneeType,
@@ -829,8 +784,7 @@ export class IssuesRepo {
       actorId: createdBy,
       type: "issue_created",
       body: input.title,
-      data: { projectId, parentIssueId, issueKind, sourceIssueId, priority, startDate, dueDate,
-        ...(input.responsibilitySourceAudit?{responsibilitySource:input.responsibilitySourceAudit}:{}) },
+      data: { projectId, parentIssueId, issueKind, sourceIssueId, priority, startDate, dueDate },
     }, deferredEvents);
     // MUL-400 E1 re-derivation: a child created under an in_review parent puts
     // that parent back to in_progress. `createIssue` is the third entry point
@@ -1211,7 +1165,8 @@ export class IssuesRepo {
           if (err instanceof ParentStatusGuardError) {
             throw new BatchParentStatusGuardError(err, [issueId]);
           }
-          if (err instanceof IssueDeliveryError) throw err;
+          // A done-rule refusal fails the whole closure batch, never `updated: 0`.
+          if (err instanceof IssueResponsibilityError) throw err;
           // Dependency refusals retain the existing per-row skipped result.
           if (err instanceof IssueDependencyError) {
             skipped.push({ issueId, error: err.message, code: err.code });
@@ -1229,20 +1184,12 @@ export class IssuesRepo {
   }
 
   /**
-   * Evaluate guard A (A1 and A4 included) for every row before any of them is
+   * Evaluate the done rule and guard A for every row before any of them is
    * written. Rows that do not exist are left to the write loop's historic
-   * "skip invalid rows" behaviour; only a would-be guard refusal stops the
-   * batch, and it does so with the refused issue ids.
+   * "skip invalid rows" behaviour; only a would-be refusal stops the batch, and
+   * a guard refusal names the refused issue ids.
    */
   private preflightBatchUpdateIssues(issueIds: string[], updates: UpdateIssueInput): void {
-    // A batch has no server-owned acceptance receipt. Check every row before
-    // any mutation, including force and childless Issues; settled no-ops remain valid.
-    const assertDeliveryClosure = () => { if (hasAnyField(updates,'status') && normalizeIssueStatus(updates.status)==='done') {
-      for (const issueId of issueIds) {
-        const current=this.getIssue(issueId);
-        if(current && current.status!=='done') throw new IssueDeliveryError('issue_delivery_acceptance_required','Close the Issue by accepting its specific delivery');
-      }
-    } };
     if (hasAnyField(updates, "workspaceId", "workspace_id")) {
       const rejected: string[] = [];
       let firstError: IssueWorkspaceMoveError | null = null;
@@ -1259,8 +1206,16 @@ export class IssuesRepo {
       }
       if (firstError) throw new IssueWorkspaceMoveError(firstError.relations, rejected);
     }
-    if (!parentStatusGuardEnabled()) { assertDeliveryClosure(); return; }
     if (!hasAnyField(updates, "status")) return;
+    // The done rule is independent of the guard switch and of `force`, and runs
+    // before guard A exactly as the per-row write does. Settled no-ops stay valid.
+    if (normalizeIssueStatus(updates.status) === "done") {
+      for (const issueId of issueIds) {
+        const current = this.getIssue(issueId);
+        if (current && current.status !== "done") this.assertIssueDoneAllowed(current, updates);
+      }
+    }
+    if (!parentStatusGuardEnabled()) return;
     const rejected: string[] = [];
     let firstError: ParentStatusGuardError | null = null;
     for (const issueId of issueIds) {
@@ -1272,14 +1227,11 @@ export class IssuesRepo {
         this.assertParentStatusAllowed(issueId, current, nextStatus, updates);
       } catch (err) {
         if (!(err instanceof ParentStatusGuardError)) throw err;
-        // Final summaries are now part of the concrete delivery receipt.
-        if (err.code==='final_summary_missing') assertDeliveryClosure();
         rejected.push(issueId);
         firstError ??= err;
       }
     }
     if (firstError) throw new BatchParentStatusGuardError(firstError, rejected);
-    assertDeliveryClosure();
   }
 
   private assertIssueWorkspaceMoveAllowed(current: MultiremiIssue, input: UpdateIssueInput): void {
@@ -1344,21 +1296,20 @@ export class IssuesRepo {
     const deferredEvents = createCommitEventQueue();
     const deleted = this.ctx.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(issue.workspaceId);
-      this.ctx.lockIssueArchiveLifecycle(id);
+      this.ctx.lockIssueLifecycle(id);
       const current = this.getIssue(id);
       if (!current || current.workspaceId !== issue.workspaceId) return false;
-      if (this.issueDeletionBlockWithinLifecycleLock(id)) return false;
-      this.ctx.db.run(
-        "UPDATE multiremi_issues SET lifecycle_state = 'deleting' WHERE id = ?",
-        [id],
-      );
+      if (this.hasActiveIssueTasks(id)) return false;
       return this.deleteIssueRowsWithinLifecycleLock(current, deferredEvents);
     })();
     this.ctx.emitCommitEvents(deferredEvents);
     return deleted;
   }
 
-  /** Delete every fenced Issue in one control-plane transaction. */
+  /**
+   * Delete the Issues in one control-plane transaction. An Issue with an active
+   * task blocks the whole batch, so a late task start never leaves it half applied.
+   */
   deleteIssuesAtomically(ids: string[]): { deleted: number } {
     const uniqueIds = [...new Set(ids)].sort();
     if (uniqueIds.length === 0) return { deleted: 0 };
@@ -1370,17 +1321,15 @@ export class IssuesRepo {
       for (const workspaceId of [...new Set(initial.map((issue) => issue.workspaceId))].sort()) {
         this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       }
-      for (const id of uniqueIds) this.ctx.lockIssueArchiveLifecycle(id);
+      for (const id of uniqueIds) this.ctx.lockIssueLifecycle(id);
 
       const current: MultiremiIssue[] = [];
       for (const id of uniqueIds) {
         const issue = this.getIssue(id);
         if (!issue) continue;
-        const block = this.issueDeletionBlockWithinLifecycleLock(id);
-        if (block) throw Object.assign(new Error(block.error), { code: block.code, issueId: id });
-        if (this.issueLifecycleState(id) !== "deleting") {
-          throw Object.assign(new Error("Issue deletion was not fenced"), {
-            code: "issue_deletion_conflict",
+        if (this.hasActiveIssueTasks(id)) {
+          throw Object.assign(new Error("active Issue tasks must finish before hard deletion"), {
+            code: "issue_has_active_tasks",
             issueId: id,
           });
         }
@@ -1407,9 +1356,8 @@ export class IssuesRepo {
     runAutopilotRunMutation(this.ctx.db, "UPDATE multiremi_autopilot_run_records SET issue_id = NULL WHERE issue_id = ?", [id]);
     // PostgreSQL intentionally does not rely on FK cascades and SQLite tests
     // may run with them disabled. Remove the machine-local checkout record
-    // and archive control-plane rows explicitly so deleting an Issue cannot
-    // leave a retirement blocker or orphaned archive metadata.
-    this.ctx.db.run("DELETE FROM multiremi_session_archives WHERE issue_id = ?", [id]);
+    // explicitly so deleting an Issue cannot leave a retirement blocker. The
+    // daemon forgets the workspace on its own when the server stops knowing the Issue.
     this.ctx.db.run("DELETE FROM multiremi_issue_workspaces WHERE issue_id = ?", [id]);
     this.ctx.issueSessions().deleteOwnedSessionsWithinTransaction("issue", id);
     // Chat-owned Sessions retain their owner and only lose this projection.
@@ -1423,134 +1371,8 @@ export class IssuesRepo {
     return removed.changes > 0;
   }
 
-  /**
-   * Persist the hard-delete fence before archive paths are snapshotted.
-   * Re-entering an already deleting Issue is intentional: a process may stop
-   * after writing the durable purge receipt and the next request must be able
-   * to resume the same deletion.
-   */
-  beginIssueDeletion(id: string): BeginIssueDeletionResult {
-    const issue = this.getIssue(id);
-    if (!issue) {
-      return { ok: false, code: "issue_not_found", error: "issue not found" };
-    }
-    return this.ctx.db.transaction(() => {
-      this.ctx.lockWorkspaceRuntimeLifecycle(issue.workspaceId);
-      this.ctx.lockIssueArchiveLifecycle(id);
-      const current = this.getIssue(id);
-      if (!current || current.workspaceId !== issue.workspaceId) {
-        return { ok: false, code: "issue_not_found", error: "issue not found" } as const;
-      }
-      const block = this.issueDeletionBlockWithinLifecycleLock(id);
-      if (block) return block;
-      const state = this.issueLifecycleState(id);
-      if (state !== "active" && state !== "deleting") {
-        return {
-          ok: false,
-          code: "issue_deletion_conflict",
-          error: "issue deletion lifecycle is not writable",
-        } as const;
-      }
-      this.ctx.db.run(
-        "UPDATE multiremi_issues SET lifecycle_state = 'deleting' WHERE id = ?",
-        [id],
-      );
-      return { ok: true } as const;
-    })();
-  }
-
-  abortIssueDeletion(id: string): void {
-    const issue = this.getIssue(id);
-    if (!issue) return;
-    this.ctx.db.transaction(() => {
-      this.ctx.lockWorkspaceRuntimeLifecycle(issue.workspaceId);
-      this.ctx.lockIssueArchiveLifecycle(id);
-      this.ctx.db.run(
-        "UPDATE multiremi_issues SET lifecycle_state = 'active' WHERE id = ? AND lifecycle_state = 'deleting'",
-        [id],
-      );
-    })();
-  }
-
-  deletionLifecycleState(id: string): string | null {
-    return this.getIssue(id) ? this.issueLifecycleState(id) : null;
-  }
-
-  private issueDeletionBlockWithinLifecycleLock(id: string): IssueDeletionBlockedResult | null {
-    if (this.ctx.tasks().listTasksForIssue(id).some((task) => isActiveTaskStatus(task.status))) {
-      return {
-        ok: false,
-        code: "issue_has_active_tasks",
-        error: "active Issue tasks must finish before hard deletion",
-      };
-    }
-    const workspace = this.ctx.db.query(
-      `SELECT status, cleaned_archive_id, cleaned_archive_source_revision,
-              cleaned_archive_sha256
-       FROM multiremi_issue_workspaces WHERE issue_id = ? AND workspace_id = ?`,
-    ).get(id, this.getIssue(id)!.workspaceId) as { status?: unknown } | null;
-    if (workspace) {
-      if (String(workspace.status) !== "cleaned") {
-        return {
-          ok: false,
-          code: "issue_workspace_not_cleaned",
-          error: "issue workspace must be archived and cleaned before hard deletion",
-        };
-      }
-      const archiveId = String((workspace as Row).cleaned_archive_id ?? "");
-      const sourceRevision = String((workspace as Row).cleaned_archive_source_revision ?? "");
-      const sha256 = String((workspace as Row).cleaned_archive_sha256 ?? "");
-      const exactReady = archiveId && sourceRevision && sha256
-        ? this.ctx.db.query(
-          `SELECT 1 AS present FROM multiremi_session_archives
-           WHERE id = ? AND issue_id = ? AND source_revision = ? AND sha256 = ?
-             AND status = 'ready'`,
-        ).get(archiveId, id, sourceRevision, sha256)
-        : null;
-      return exactReady
-        ? null
-        : {
-          ok: false,
-          code: "issue_workspace_archive_invalid",
-          error: "cleaned Issue workspace is not bound to an exact ready session archive",
-        };
-    }
-    // Missing workspace state is safe only for an Issue that was never
-    // materialized. Any task/session/archive proves a Runtime touched it, so
-    // absence of the cleanup acknowledgement must fail closed.
-    // cmt_v70r9qrr49uc: global evidence keeps the deletion gate unchanged by a move.
-    const hasTask = Boolean(this.ctx.db.query(
-      "SELECT 1 AS present FROM multiremi_turn_execution_records WHERE issue_id = ? LIMIT 1",
-    ).get(id));
-    const hasArchive = Boolean(this.ctx.db.query(
-      "SELECT 1 AS present FROM multiremi_session_archives WHERE issue_id = ? LIMIT 1",
-    ).get(id));
-    const hasMaterializedSession = Boolean(this.ctx.db.query(
-      `SELECT 1 AS present
-       FROM multiremi_issue_sessions s
-       WHERE s.issue_id = ? AND (
-         s.is_default = 0
-         OR EXISTS (SELECT 1 FROM multiremi_conversation_log e WHERE e.session_id = s.id AND e.kind <> 'head' AND e.seq > 0)
-         OR EXISTS (SELECT 1 FROM multiremi_session_participants p WHERE p.session_id = s.id)
-         OR EXISTS (SELECT 1 FROM multiremi_agent_lane_records l WHERE l.session_id = s.id)
-       )
-       LIMIT 1`,
-    ).get(id));
-    const hasRuntimeEvidence = hasTask || hasArchive || hasMaterializedSession;
-    return hasRuntimeEvidence
-      ? {
-        ok: false,
-        code: "issue_workspace_not_cleaned",
-        error: "issue workspace cleanup state is missing for a materialized Issue",
-      }
-      : null;
-  }
-
-  private issueLifecycleState(id: string): string {
-    const row = this.ctx.db.query(
-      "SELECT lifecycle_state FROM multiremi_issues WHERE id = ?",
-    ).get(id) as { lifecycle_state?: unknown } | null;
-    return String(row?.lifecycle_state ?? "active");
+  private hasActiveIssueTasks(id: string): boolean {
+    return this.ctx.tasks().listTasksForIssue(id).some((task) => isActiveTaskStatus(task.status));
   }
 
   batchDeleteIssues(input: BatchDeleteIssuesInput): { deleted: number } {
@@ -1674,12 +1496,11 @@ export class IssuesRepo {
    * same stale child set.
    *
    * Only a status edit that actually CHANGES the Issue is guarded. The callers
-   * that touch other fields — the auto-retitle service, the merge-completion
-   * effect and every title/description/priority edit in the UI — are not status
-   * decisions and must keep working on parents that already have children.
-   *
-   * MUL-400 S1c (A4): a task identity may close a parent when a member has
-   * authorized THIS issue's owner agent — see {@link parentDoneGrantStatus}.
+   * that touch other fields — the auto-retitle service and every
+   * title/description/priority edit in the UI — are not status decisions and
+   * must keep working on parents that already have children. Who may close an
+   * Issue is the separate done rule ({@link assertIssueDoneAllowed}); `force`
+   * stays member-only at the routes.
    */
   private assertParentStatusAllowed(
     id: string,
@@ -1688,29 +1509,7 @@ export class IssuesRepo {
     input: UpdateIssueInput,
   ): void {
     if (!statusNeedsChildGuard(nextStatus)) return;
-    const force = input.force === true;
-    const hasChildren = this.hasChildIssues(id);
-    if (!hasChildren) return;
-    // A4: a task identity may never close a parent issue at all, force or not —
-    // unless a member has authorized exactly this agent on this parent (S1c).
-    if (statusIsMemberOnlyParentTerminal(nextStatus) && input.actorType === "agent") {
-      const grant = this.parentDoneGrantStatus(current);
-      if (!grant.effective || grant.agentId !== input.actorId) {
-        throw new ParentStatusGuardError(
-          "parent_done_requires_member",
-          `Task ${input.parentTaskId ?? "unknown"} cannot set ${current.key} to ${nextStatus}; only a member, or the owner agent a member has authorized on this issue, can close an issue that has children`,
-          { reason: grant.effective ? "not_owner_agent" : grant.reason ?? "grant_missing" },
-        );
-      }
-      if (force) {
-        throw new ParentStatusGuardError(
-          "parent_done_requires_member",
-          `Only a member can force ${current.key} to ${nextStatus}; the owner agent must finish the children and publish a summary`,
-          { reason: "force_requires_member" },
-        );
-      }
-    }
-    if (force) return;
+    if (input.force === true) return;
     const openChildren = this.countOpenChildIssues(id);
     if (openChildren > 0) {
       throw new ParentStatusGuardError(
@@ -1719,151 +1518,41 @@ export class IssuesRepo {
         { openChildren, reason: "children_open" },
       );
     }
-    if (nextStatus === "done") {
-      // A1. The authorized owner agent (S1c D2) may satisfy it either with a
-      // finished result-bearing round or with a summary comment it posted after
-      // the last child closed; every other caller keeps the original rule.
-      const grant = input.actorType === "agent" ? this.parentDoneGrantStatus(current) : null;
-      const acceptCommentBy = grant?.effective && grant.agentId === input.actorId ? input.actorId : null;
-      const summary = this.finalSummaryAfterLastChild(id, { acceptCommentBy });
-      if (!summary.satisfied) {
-        throw new ParentStatusGuardError(
-          "final_summary_missing",
-          acceptCommentBy
-            ? `Post a summary comment on ${current.key} after the last child finished, then set it to done`
-            : `${current.key} cannot be closed before its owner publishes a result after the last child finished`,
-          { lastChildClosedAt: summary.lastChildClosedAt, reason: "final_summary_missing" },
-        );
-      }
-    }
   }
 
   /**
-   * MUL-400 S1c (A4): does this Issue have any children at all? `countOpenChildIssues`
-   * answers a different question (unfinished children), and the grant rules key
-   * off "has children", not "has open children".
+   * The done rule, shared by PATCH, the compatibility PATCH/PUT and batch
+   * writes. A member (and any server-owned writer) may close any Issue. An
+   * Agent closes only a direct child of an Issue it executes: never an Issue it
+   * executes itself, and never a root. Independent of the parent-status guard
+   * switch; guard A still applies afterwards.
    */
+  private assertIssueDoneAllowed(current: MultiremiIssue, input: UpdateIssueInput): void {
+    if (input.actorType !== "agent") return;
+    const actorId = input.actorId ?? null;
+    const responsibility = this.ctx.resolveIssueResponsibility(current.id);
+    const parent = responsibility.chain[1];
+    if (!parent) {
+      throw new IssueResponsibilityError("issue_done_requires_member",
+        `Only a workspace member can set ${current.key} to done; it has no parent Issue in this workspace`, 403);
+    }
+    if (responsibility.executionOwner?.id === actorId) {
+      throw new IssueResponsibilityError("issue_done_requires_parent_owner",
+        `The execution owner of ${current.key} cannot set it to done; its parent Issue's execution owner or a member closes it`, 403);
+    }
+    if (!actorId || parent.executionOwner?.id !== actorId) {
+      throw new IssueResponsibilityError("issue_done_requires_parent_owner",
+        `Only the execution owner of the parent Issue, or a member, can set ${current.key} to done`, 403);
+    }
+  }
+
+  /** Does this Issue have any same-workspace children at all, finished or not? */
   hasChildIssues(issueId: string): boolean {
     return this.ctx.db.query(
       `SELECT 1 AS present FROM multiremi_issues child
        JOIN multiremi_issues parent ON parent.id = child.parent_issue_id AND parent.workspace_id = child.workspace_id
        WHERE child.parent_issue_id = ? LIMIT 1`,
     ).get(issueId) != null;
-  }
-
-  /**
-   * MUL-400 S1c (A4): the ONE place that decides whether the stored grant still
-   * authorizes the CURRENT owner agent. Read by guard A (inside its row lock),
-   * the SCM merge effect and the detail routes, so all three agree.
-   *
-   * The effective agent is re-resolved from the Issue's assignee on every read
-   * (`resolveRunnableAgentForAssignee`: agent -> itself, squad -> its leader).
-   * A grant records the agent that was the owner when the member granted it, so
-   * re-assigning the parent makes the grant ineffective (`assignee_changed`,
-   * D1) instead of silently following the new owner.
-   */
-  parentDoneGrantStatus(issue: MultiremiIssue): {
-    granted: boolean;
-    grantedAt: string | null;
-    grantedBy: string | null;
-    agentId: string | null;
-    ownerAgentId: string | null;
-    effective: boolean;
-    reason: ParentDoneGrantRefusalReason | null;
-  } {
-    const grantedAt = issue.parentDoneGrantAt ?? null;
-    const grantedBy = issue.parentDoneGrantBy ?? null;
-    const agentId = issue.parentDoneGrantAgentId ?? null;
-    const granted = grantedAt != null && agentId != null;
-    if (!granted) {
-      return { granted: false, grantedAt, grantedBy, agentId, ownerAgentId: null, effective: false, reason: "grant_missing" };
-    }
-    const ownerAgentId = issue.assigneeType && issue.assigneeId
-      ? this.ctx.resolveRunnableAgentForAssignee(issue.assigneeType, issue.assigneeId)?.id ?? null
-      : null;
-    const effective = granted && ownerAgentId != null && ownerAgentId === agentId;
-    const reason: ParentDoneGrantRefusalReason | null = effective
-      ? null
-      : !granted
-        ? "grant_missing"
-        : ownerAgentId == null
-          ? "owner_not_agent"
-          : "assignee_changed";
-    return { granted, grantedAt, grantedBy, agentId, ownerAgentId, effective, reason };
-  }
-
-  /**
-   * The wire shape for `issue.parent_done_grant` (S7 / MUL-414 renders the
-   * toggle from it). `null` means "no grant was ever recorded"; a recorded but
-   * ineffective grant still returns its data with `effective: false` so the UI
-   * can say "re-authorize" instead of pretending nothing happened.
-   */
-  issueParentDoneGrantView(issue: MultiremiIssue): MultiremiIssueParentDoneGrant | null {
-    const status = this.parentDoneGrantStatus(issue);
-    if (!status.granted || status.grantedAt == null || status.grantedBy == null || status.agentId == null) return null;
-    return {
-      granted_at: status.grantedAt,
-      granted_by: status.grantedBy,
-      agent_id: status.agentId,
-      effective: status.effective,
-      ineffective_reason: status.effective ? null : status.reason === "assignee_changed" ? "assignee_changed" : "owner_not_agent",
-    };
-  }
-
-  /**
-   * A1: the parent owner owes a result-bearing round that finished after the last
-   * child closed. Skipped for member-owned and unassigned parents — a human
-   * closing the issue is the summary. The signal is the owner's task set on the
-   * parent: a `completed` task with a non-empty result and `completed_at` at or
-   * after the last child's terminal timestamp.
-   *
-   * An authorized owner agent may also satisfy A1 with its own non-empty
-   * comment after the final child closes. SCM checks the same signal before
-   * bypassing guard A; members closing agent/squad parents need a completed task.
-   */
-  finalSummaryAfterLastChild(parentIssueId: string, options: { acceptCommentBy?: string | null } = {}): { satisfied: boolean; lastChildClosedAt: string | null } {
-    const parent = this.getIssue(parentIssueId);
-    if (!parent) return { satisfied: false, lastChildClosedAt: null };
-    if (parent.assigneeType === "member" || (!parent.assigneeType && !parent.assigneeId)) {
-      return { satisfied: true, lastChildClosedAt: null };
-    }
-    const lastChild = this.ctx.db.query(
-      `SELECT MAX(COALESCE(child.completed_at, child.updated_at)) AS closed_at
-       FROM multiremi_issues child
-       JOIN multiremi_issues parent ON parent.id = child.parent_issue_id AND parent.workspace_id = child.workspace_id
-       WHERE child.parent_issue_id = ? AND child.status IN ('done', 'cancelled')`,
-    ).get(parentIssueId) as { closed_at?: unknown } | null;
-    const lastChildClosedAt = nullableString(lastChild?.closed_at);
-    const openChildren = this.countOpenChildIssues(parentIssueId);
-    if (openChildren > 0) return { satisfied: false, lastChildClosedAt };
-    const parentAgentId = parent.assigneeType && parent.assigneeId
-      ? this.ctx.resolveRunnableAgentForAssignee(parent.assigneeType, parent.assigneeId)?.id ?? null
-      : null;
-    if (!parentAgentId) return { satisfied: false, lastChildClosedAt };
-    if (options.acceptCommentBy === parentAgentId) {
-      const comments = this.ctx.db.query(
-        `SELECT log.body_md AS body FROM multiremi_conversation_log log
-         JOIN multiremi_issue_sessions session ON session.id = log.session_id
-         WHERE session.issue_id = ? AND log.sender_type = 'agent' AND log.sender_id = ? AND log.kind = 'message'
-           AND SUBSTR(log.id, 1, 4) = 'cmt_' AND log.deleted_at IS NULL
-           ${lastChildClosedAt ? "AND log.created_at >= ?" : ""}`,
-      ).all(...(lastChildClosedAt ? [parentIssueId, parentAgentId, lastChildClosedAt] : [parentIssueId, parentAgentId])) as Row[];
-      if (comments.some((row) => String(row.body ?? "").trim().length > 0)) {
-        return { satisfied: true, lastChildClosedAt };
-      }
-    }
-    // `result` is a JSON blob written by completeTask; "has a result" means the
-    // stored payload carries non-empty output text, so evaluate it in JS rather
-    // than pattern-matching the serialized column in SQL.
-    const rows = this.ctx.db.query(
-      `SELECT result FROM multiremi_turn_execution_records
-       WHERE issue_id = ? AND agent_id = ? AND status = 'completed'
-         AND result IS NOT NULL AND completed_at IS NOT NULL
-         ${lastChildClosedAt ? "AND completed_at >= ?" : ""}
-       ORDER BY completed_at DESC`,
-    ).all(...(lastChildClosedAt ? [parentIssueId, parentAgentId, lastChildClosedAt] : [parentIssueId, parentAgentId])) as Row[];
-    const satisfied = rows.some((row) => storedTaskResultHasOutput(row.result));
-    return { satisfied, lastChildClosedAt };
   }
 
   /**
@@ -1925,55 +1614,6 @@ export class IssuesRepo {
       unmet: prerequisites.filter((row) => !isPrerequisiteSatisfied(row.status)),
       prerequisites,
     };
-  }
-
-  grantParentDone(issueId: string, memberId: string): MultiremiIssue {
-    const deferredEvents = createCommitEventQueue();
-    const issue = this.ctx.db.transaction(() => {
-      if (!lockIssueRowWithinTransaction(this.ctx.db, issueId)) throw new Error(`Issue not found: ${issueId}`);
-      const current = this.getIssue(issueId)!;
-      const ownerAgentId = current.assigneeType && current.assigneeId
-        ? this.ctx.resolveRunnableAgentForAssignee(current.assigneeType, current.assigneeId)?.id ?? null
-        : null;
-      if (!ownerAgentId) throw new ParentDoneGrantOwnerError("Assign an agent or squad owner before granting parent closure");
-      if (current.parentDoneGrantAt && current.parentDoneGrantAgentId === ownerAgentId) return current;
-      const now = nowIso();
-      this.ctx.db.run(
-        "UPDATE multiremi_issues SET parent_done_grant_at = ?, parent_done_grant_by = ?, parent_done_grant_agent_id = ?, updated_at = ? WHERE id = ?",
-        [now, memberId, ownerAgentId, now, issueId],
-      );
-      this.ctx.appendIssueActivity(issueId, {
-        actorType: "member", actorId: memberId, type: "parent_done_grant_created",
-        data: {
-          agentId: ownerAgentId, agent_id: ownerAgentId, memberId, member_id: memberId,
-          previousAgentId: current.parentDoneGrantAgentId, previous_agent_id: current.parentDoneGrantAgentId,
-          grantedAt: now, granted_at: now,
-        },
-      }, deferredEvents);
-      return this.getIssue(issueId)!;
-    })();
-    this.ctx.emitCommitEvents(deferredEvents);
-    return issue;
-  }
-
-  revokeParentDone(issueId: string, memberId: string): MultiremiIssue {
-    const deferredEvents = createCommitEventQueue();
-    const issue = this.ctx.db.transaction(() => {
-      if (!lockIssueRowWithinTransaction(this.ctx.db, issueId)) throw new Error(`Issue not found: ${issueId}`);
-      const current = this.getIssue(issueId)!;
-      if (!current.parentDoneGrantAt) return current;
-      this.ctx.db.run(
-        "UPDATE multiremi_issues SET parent_done_grant_at = NULL, parent_done_grant_by = NULL, parent_done_grant_agent_id = NULL, updated_at = ? WHERE id = ?",
-        [nowIso(), issueId],
-      );
-      this.ctx.appendIssueActivity(issueId, {
-        actorType: "member", actorId: memberId, type: "parent_done_grant_revoked",
-        data: { agentId: current.parentDoneGrantAgentId, agent_id: current.parentDoneGrantAgentId, memberId, member_id: memberId },
-      }, deferredEvents);
-      return this.getIssue(issueId)!;
-    })();
-    this.ctx.emitCommitEvents(deferredEvents);
-    return issue;
   }
 
   listIssueDependencies(issueId: string): MultiremiIssueDependencyView[] {
@@ -2330,7 +1970,7 @@ export class IssuesRepo {
   } {
     // MUL-400 S1c (QA round 1): the row write and its audit activities are one
     // transaction, and every outbound event waits for COMMIT. The write lives in
-    // {@link updateIssueWithinTransaction} so the SCM merge effect can join the
+    // {@link updateIssueWithinTransaction} so a server-owned writer can join the
     // same transaction and roll the status back together with its bookkeeping.
     // A stale lock set rolls back and retries once with fresh queues.
     const ownsTransaction = !this.ctx.db.inTransaction;
@@ -2355,9 +1995,9 @@ export class IssuesRepo {
   /**
    * MUL-400 S1c (QA round 1): the caller owns the transaction.
    *
-   * The row update, `issue_updated`, `issue_status_forced` and
-   * `parent_done_grant_used` commit together, so an exception after any of them
-   * leaves nothing behind. `collector`/`deferredEvents` are mandatory: only the
+   * The row update, `issue_updated` and `issue_status_forced` commit together,
+   * so an exception after any of them leaves nothing behind.
+   * `collector`/`deferredEvents` are mandatory: only the
    * caller's COMMIT makes the write durable (a nested `transaction()` is a
    * SAVEPOINT since B1, MUL-426), so this method never opens a transaction and
    * never emits a workspace event directly. The caller must run
@@ -2442,22 +2082,10 @@ export class IssuesRepo {
     let nextProjectId = resolveOptionalStringField(input, "projectId", "project_id", current.projectId);
     const nextParentIssueId = parentId ?? resolveOptionalStringField(input, "parentIssueId", "parent_issue_id", current.parentIssueId);
     const nextStatus = requestedStatus ?? current.status;
-    const hasResponsibleField = hasAnyField(input, 'responsibleMemberId', 'responsible_member_id');
-    let nextResponsibleMemberId = nextParentIssueId ? null : resolveOptionalStringField(input,
-      'responsibleMemberId', 'responsible_member_id', current.responsibleMemberId ?? null);
-    if (moving && !hasResponsibleField && nextResponsibleMemberId) {
-      const contact = this.ctx.workspaces().getWorkspaceMember(nextResponsibleMemberId);
-      if (!contact || contact.archivedAt || contact.workspaceId !== nextWorkspaceId) nextResponsibleMemberId = null;
-    }
-    if (nextParentIssueId && hasResponsibleField && resolveOptionalStringField(input, 'responsibleMemberId', 'responsible_member_id', null)) {
-      throw new Error('Child issue human responsibility is inherited from its root');
-    }
-    if (hasResponsibleField || moving || (current.parentIssueId && !nextParentIssueId)) {
-      this.validateResponsibleMember(nextResponsibleMemberId, nextWorkspaceId);
-      if (hasResponsibleField && input.actorType !== 'member') throw new Error('Only a member can transfer human responsibility');
-    }
-    // A new membership (even a closed child) changes A4; reopening changes the
-    // unfinished-child count as well. Both need the parent row locked above.
+    // `responsibleMemberId` is deprecated and ignored: the column keeps its value.
+    // A new membership (even a closed child) changes the parent's child set and
+    // who may close the child; reopening changes the unfinished-child count as
+    // well. Both need the parent row locked above.
     if (nextParentIssueId && (nextParentIssueId !== current.parentIssueId
       || (isTerminalIssueStatus(current.status) && !isTerminalIssueStatus(nextStatus)))) {
       if (!lockedRows.has(nextParentIssueId)) throw new IssueLockSetStaleError();
@@ -2529,8 +2157,8 @@ export class IssuesRepo {
     }
 
     const updatedAt = nowIso();
-    // MUL-400 E3 gate 2: dependency and parent-grant guards are both decided
-    // while the same Issue row lock is held.
+    // MUL-400 E3 gate 2: the dependency gate, the done rule and guard A are all
+    // decided while the same Issue row lock is held.
     this.assertDependenciesMetForStatus(id, current, nextStatus, input, deferredEvents);
     forceStartAttempt = input.force === true
       && current.status === "backlog"
@@ -2541,16 +2169,14 @@ export class IssuesRepo {
     // Field-only edits are never status decisions, so the guard stays out of
     // their way even for a task identity.
     const statusChanged = nextStatus !== current.status;
-    if (statusChanged && nextStatus === 'done' && !options.holdParentStatus) {
-      if (!options.acceptedDeliveryId) throw new IssueDeliveryError('issue_delivery_acceptance_required','Close the Issue by accepting its specific delivery');
-      if (hasAssigneeField || hasResponsibleField || hasParentField || moving) throw new Error('Transfer responsibility before accepting a delivery');
-      assertIssueDeliveryAccepted(this.ctx, id, options.acceptedDeliveryId);
-    }
-    // MUL-400 E1 `holdParentStatus`: a system writer (the SCM merge effect) must
-    // not decide a guarded parent transition, and must not fail either — it
-    // records why the request was held and leaves the status to the human. The
-    // hold replaces the guard rather than tripping it, and the write below is
-    // skipped entirely, so nothing about the Issue moves.
+    // The done rule reads the CURRENT execution owners, before this write moves
+    // the parent or the assignee. A held system write decides nothing.
+    if (statusChanged && nextStatus === "done" && !options.holdParentStatus) this.assertIssueDoneAllowed(current, input);
+    // MUL-400 E1 `holdParentStatus`: a guarded system writer must not decide a
+    // parent transition, and must not fail either — it records why the request
+    // was held and leaves the status to the human. The hold replaces the guard
+    // rather than tripping it, and the write below is skipped entirely, so
+    // nothing about the Issue moves.
     const holdParentStatus = options.holdParentStatus === true;
     if (holdParentStatus) {
       this.recordHeldParentStatus(id, requestedStatusForHold(input, nextStatus), options.holdParentStatusData ?? null, deferredEvents);
@@ -2608,7 +2234,6 @@ export class IssuesRepo {
       project_id = ?,
       runtime_workspace_id = ?,
       parent_issue_id = ?,
-      responsible_member_id = ?,
       assignee_type = ?,
       assignee_id = ?,
       position = ?,
@@ -2631,7 +2256,6 @@ export class IssuesRepo {
       nextProjectId,
       nextRuntimeWorkspaceId,
       nextParentIssueId,
-      nextResponsibleMemberId,
       nextAssigneeType,
       nextAssigneeId,
       input.position === undefined || input.position === null ? current.position : normalizeIssuePosition(input.position),
@@ -2670,11 +2294,11 @@ export class IssuesRepo {
         data: { previousSessionId: previousMain?.id ?? null, previousSessionIds, retiredTargetSessionIds, sessionId: nextMain.id, previousWorkspaceId: current.workspaceId, workspaceId: nextWorkspaceId },
       }, deferredEvents);
     }
-    if (nextResponsibleMemberId !== (current.responsibleMemberId ?? null) || nextParentIssueId !== current.parentIssueId || nextAssigneeId !== current.assigneeId || nextAssigneeType !== current.assigneeType) {
+    if (nextParentIssueId !== current.parentIssueId || nextAssigneeId !== current.assigneeId || nextAssigneeType !== current.assigneeType) {
       this.ctx.appendIssueActivity(id, {actorType:input.actorType ?? 'system',actorId:input.actorId ?? null,
         type:'issue_responsibility_transferred',body:null,data:{previous:{parentIssueId:current.parentIssueId,
-          assigneeType:current.assigneeType,assigneeId:current.assigneeId,responsibleMemberId:current.responsibleMemberId ?? null},
-          current:{parentIssueId:nextParentIssueId,assigneeType:nextAssigneeType,assigneeId:nextAssigneeId,responsibleMemberId:nextResponsibleMemberId}}},deferredEvents);
+          assigneeType:current.assigneeType,assigneeId:current.assigneeId},
+          current:{parentIssueId:nextParentIssueId,assigneeType:nextAssigneeType,assigneeId:nextAssigneeId}}},deferredEvents);
       refreshResponsibilityQuestions(this.ctx,id,deferredEvents,input.actorType,input.actorId);
     }
     if (moving) {
@@ -2719,7 +2343,8 @@ export class IssuesRepo {
       this.ctx.db.run(
         `UPDATE multiremi_issue_workspaces
          SET workspace_id = ?, issue_key = ?, runtime_id = NULL, root_path = '', branch_name = '',
-             repos = '[]', last_task_id = NULL, updated_at = ?
+             repos = '[]', last_task_id = NULL, snapshot_json = NULL, snapshot_at = NULL, unsaved_work = 0,
+             updated_at = ?
          WHERE issue_id = ? AND status = 'cleaned'`,
         [nextWorkspaceId, formatIssueKey(movedNumber!), updatedAt, id],
       );
@@ -2790,12 +2415,14 @@ export class IssuesRepo {
       ["start_date", current.startDate, next.startDate], ["due_date", current.dueDate, next.dueDate],
       ["project_id", current.projectId, next.projectId], ["parent_issue_id", current.parentIssueId, next.parentIssueId],
     ] as const) if (before !== after) previous[field] = before;
+    // The deprecated responsible fields are ignored, so the audit does not keep them either.
+    const { responsibleMemberId: _ignored, responsible_member_id: _ignoredSnake, ...audited } = input;
     this.ctx.appendIssueActivity(id, {
       actorType: "system",
       actorId: null,
       type: "issue_updated",
       body: null,
-      data: { ...input, previous },
+      data: { ...audited, previous },
     }, deferredEvents);
     if (dispatchOutcome?.skipped) {
       this.recordForcedStartSkipped(next, dispatchOutcome.skipped, input, deferredEvents);
@@ -2821,21 +2448,6 @@ export class IssuesRepo {
           ...sourceTaskActivityData(resolveCamelOrSnakeString(input, "parentTaskId", "parent_task_id")),
         },
       }, deferredEvents);
-    }
-    if (current.status !== "done" && next.status === "done" && input.actorType === "agent") {
-      const grant = this.parentDoneGrantStatus(next);
-      if (grant.effective && grant.agentId === input.actorId && this.hasChildIssues(id)) {
-        this.ctx.appendIssueActivity(id, {
-          actorType: "agent", actorId: input.actorId, type: "parent_done_grant_used",
-          data: {
-            source: options.parentDoneGrantSource ?? "api",
-            agentId: grant.agentId,
-            grantedBy: grant.grantedBy,
-            grantedAt: grant.grantedAt,
-            ...(options.parentDoneGrantData ?? {}),
-          },
-        }, deferredEvents);
-      }
     }
     if (current.projectId) this.ctx.db.run("UPDATE multiremi_projects SET updated_at = ? WHERE id = ?", [updatedAt, current.projectId]);
     if (next.projectId) this.ctx.db.run("UPDATE multiremi_projects SET updated_at = ? WHERE id = ?", [updatedAt, next.projectId]);
@@ -2875,7 +2487,7 @@ export class IssuesRepo {
     const updated = result.issue;
     const previous = result.previous;
     // The write is durable: publish its audit rows (the `issue_updated` line,
-    // the member force record, the grant-use row, a hold) before the hook runs.
+    // the member force record, a hold) before the hook runs.
     // The hook gets its OWN queue, so a hook failure cannot retroactively
     // publish events for rows its rolled-back transaction just erased.
     this.ctx.emitCommitEvents(deferredEvents);
@@ -3192,17 +2804,6 @@ export class IssuesRepo {
     const reported = changed ? childTerminalOutcome(issue.status) : null;
     const outcome = reported === "blocked" && options.taskTerminalStatus === "failed" ? "failed" : reported;
     if(changed&&!['done','cancelled'].includes(parent.status)){
-      const responsibility=this.ctx.resolveIssueResponsibility(parent.id);
-      if(responsibility.unresolved.length&&!responsibility.rootHuman&&!responsibility.rootIssueId){
-        this.ctx.appendIssueActivity(parent.id,{actorType:'system',actorId:SYSTEM_AUTHOR_ID,
-          type:'child_done_parent_skipped',body:'Parent notice requires a complete responsibility chain; repair the parent execution chain',
-          data:{reason:'responsibility_unresolved',childIssueId:issue.id,child_issue_id:issue.id,
-            childStatus:issue.status,child_status:issue.status,outcome,responsibility_unresolved:responsibility.unresolved}},deferredEvents);
-        // Ordinary status observation can still derive the same-workspace parent.
-        // No message, recipient or Turn is created from an unknown responsibility.
-        if(parentStatusGuardEnabled())this.rederiveParentStatus(parent,issue,collector,deferredEvents);
-        return;
-      }
       const session=this.ctx.issueSessions().getOrCreateDefaultIssueSessionWithinTransaction(issue.id);
       const details = { childIssueId: issue.id, child_issue_id: issue.id, childIssueKey: issue.key,
         child_issue_key: issue.key, childStatus: issue.status, child_status: issue.status, outcome,
@@ -3210,7 +2811,13 @@ export class IssuesRepo {
       const body = outcome ? childStatusSystemCommentBody({mentionPrefix:this.parentAssigneeMentionPrefix(parent),
         childKey:issue.key,childId:issue.id,childTitle:issue.title,outcome,childStatus:issue.status,readinessLines})
         : `${issue.key} ${issue.title}: ${previous.status} → ${issue.status}`;
-      const delivered = sendMessageWithinTransaction(this.ctx,{session_id:session.id,sender:{type:'platform',id:null},to:{type:'role',ref:'parent_owner'},
+      // Roles reach only execution owners. A historical member assignee executes
+      // nothing, so MUL-400 E2 addresses that human directly in the parent's Main.
+      const legacyHuman = parent.assigneeType === 'member' && parent.assigneeId ? this.ctx.workspaces().getWorkspaceMember(parent.assigneeId) : null;
+      const humanParent = legacyHuman && !legacyHuman.archivedAt && legacyHuman.workspaceId === parent.workspaceId ? legacyHuman : null;
+      const delivered = sendMessageWithinTransaction(this.ctx,{
+        session_id:humanParent?this.ctx.issueSessions().getOrCreateDefaultIssueSessionWithinTransaction(parent.id).id:session.id,
+        sender:{type:'platform',id:null},to:humanParent?{type:'member',ref:humanParent.id}:{type:'role',ref:'parent_owner'},
         message_kind:'status',wake_requested:'now',
         dedupe_key:`child_status:${issue.id}:${issue.status}:${eventId}`,
         body_md:body,
@@ -3408,7 +3015,7 @@ export class IssuesRepo {
    * MUL-400 E1: a guarded system writer asked to move a parent but will not
    * decide the transition itself. Record why and leave the status untouched.
    * `holdParentStatus` callers mark their own effect processed afterwards, so a
-   * held merge is a settled outcome rather than something to retry.
+   * held request is a settled outcome rather than something to retry.
    */
   private recordHeldParentStatus(
     issueId: string,
@@ -3795,15 +3402,16 @@ export class IssuesRepo {
   }
 
   /**
-   * MUL-400 E1 guard B. The task-terminal path derives `in_review` (a finished
-   * round) or `done` (an intake issue with generated children) for the Issue the
-   * task ran on; when that Issue is itself a parent with unfinished children it
-   * must stay `in_progress` instead. Returns the status to write, and records
+   * MUL-400 E1 guard B. The task-terminal path derives `in_review` for a
+   * finished round (intake included; a round never derives `done`) on the Issue
+   * the task ran on; when that Issue is itself a parent with unfinished children
+   * it must stay `in_progress` instead. Returns the status to write, and records
    * `parent_status_held` when it overrode the request.
    *
-   * Deliberately not applied to `createTaskHumanRequest`: while an owner is
-   * waiting for an answer the Issue legitimately parks at `in_review`, and the
-   * resume path puts it back.
+   * Deliberately skipped (`exempt`) while one of this Issue's questions waits at
+   * the human stage: the Issue legitimately parks at `in_review` for the answer,
+   * and the resume path puts it back. A question still waiting on a Leader keeps
+   * the Issue `in_progress` and never reaches this guard.
    */
   holdParentStatusForOpenChildren(
     issueId: string,
@@ -4647,8 +4255,6 @@ export class IssuesRepo {
       runtimeWorkspaceId: input.runtimeWorkspaceId ?? input.runtime_workspace_id ?? null,
       title: quickCreateTitle(prompt),
       parentIssueId: input.parentIssueId ?? input.parent_issue_id ?? null,
-      responsibleMemberId: input.responsibleMemberId ?? input.responsible_member_id ?? null,
-      responsibilitySourceAudit:input.responsibilitySourceAudit,
       description: prompt,
       workspaceId,
       projectId,
@@ -6450,7 +6056,7 @@ export class IssuesRepo {
       if (!agent) throw new Error(`Agent not found: ${assigneeId}`);
       if (agent.archivedAt) throw new Error(`Agent is archived: ${assigneeId}`);
     } else if (assigneeType === "member") {
-      throw new IssueDeliveryError('issue_execution_owner_required','Choose an Agent or team Leader for execution; configure the final human through responsible_member_id');
+      throw new IssueResponsibilityError("issue_execution_owner_required", "Choose an Agent or team Leader as the execution owner");
     } else if (assigneeType === "squad") {
       const squad = this.ctx.squads().getSquad(assigneeId);
       if (!squad) throw new Error(`Squad not found: ${assigneeId}`);
@@ -7619,7 +7225,6 @@ function toIssue(row: Row): MultiremiIssue {
     workspaceId: String(row.workspace_id ?? "local"),
     projectId: nullableString(row.project_id),
     parentIssueId: nullableString(row.parent_issue_id),
-    responsibleMemberId: nullableString(row.responsible_member_id),
     issueKind: normalizeIssueKind(nullableString(row.issue_kind)),
     sourceIssueId: nullableString(row.source_issue_id),
     assigneeType: nullableString(row.assignee_type) as MultiremiIssue["assigneeType"],
@@ -7631,9 +7236,6 @@ function toIssue(row: Row): MultiremiIssue {
     contextRefs: parseJson(row.context_refs, []),
     metadata: parseIssueMetadata(row.metadata),
     labels: [],
-    parentDoneGrantAt: nullableString(row.parent_done_grant_at),
-    parentDoneGrantBy: nullableString(row.parent_done_grant_by),
-    parentDoneGrantAgentId: nullableString(row.parent_done_grant_agent_id),
     createdBy: nullableString(row.created_by),
     completedAt: nullableString(row.completed_at),
     archivedAt: nullableString(row.archived_at),

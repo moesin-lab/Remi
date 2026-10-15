@@ -1,18 +1,16 @@
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { MultiremiStore } from "@multiremi/store.js";
-import type { IssueDeliveryActor } from "@multiremi/store/issue-deliveries.js";
 
 /**
  * One process, one Postgres connection (MUL-409 fix round 3).
  *
  * The concurrency blocker is only reproducible with genuinely separate
  * connections, so this worker exists to be spawned twice: both instances wait
- * on a file barrier and then accept their own prerequisite delivery at the same
+ * on a file barrier and then close their own prerequisite as a member at the same
  * moment, which is exactly the race the atomic start claim has to arbitrate.
  */
 type WorkerMessage =
-  | { type: "init"; databaseUrl: string; issueId: string; barrierPath: string;
-      delivery: {id:string;revision:string;actor:IssueDeliveryActor} }
+  | { type: "init"; databaseUrl: string; issueId: string; barrierPath: string; memberId: string }
   | { type: "close" };
 
 let db: PostgresSyncDatabase | null = null;
@@ -32,8 +30,7 @@ self.onmessage = async (message: MessageEvent<WorkerMessage>) => {
       // worker's own prerequisite. Staying inside this handler keeps the race
       // tight: both connections are already open when the barrier drops.
       while (!(await Bun.file(barrierPath).exists())) await Bun.sleep(1);
-      const delivery=message.data.delivery;
-      store.respondIssueDelivery(issueId,delivery.id,{action:'accept',revision:delivery.revision},delivery.actor);
+      store.updateIssue(issueId, { status: "done", actorType: "member", actorId: message.data.memberId });
       self.postMessage({ phase: "done" });
       return;
     }

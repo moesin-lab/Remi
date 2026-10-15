@@ -1,4 +1,4 @@
-import { isRelatedTurnController } from '../../store/turn-controls.js';
+import { ChatTurnRetryError, isRelatedTurnController } from '../../store/turn-controls.js';
 import type { Context, Hono } from "hono";
 import { unlink } from "node:fs/promises";
 import { MESSAGE_KINDS, TURN_STATUSES, type SendMessageInput, type UnifiedMessage } from "@multiremi/contracts/unified-model.js";
@@ -12,6 +12,7 @@ import { parseTraceWindow } from "../trace/request.js";
 import type { RouterDeps } from "./deps.js";
 import { IssueDecisionError } from "@multiremi/store/repos/issues-repo.js";
 import { QuestionError } from '../../store/inbox/questions.js';
+import { QueuedMessageError } from '../../store/inbox/queued-messages.js';
 import type { QuestionActor } from '@multiremi/contracts';
 import { supervisorTaskIdentity } from "../helpers/organizer.js";
 import { denySideSessionAgentDispatch, issueCommentCreateInput, issueMutationActor } from "../helpers/issues.js";
@@ -66,7 +67,9 @@ async function action(c: Context, run: () => unknown | Promise<unknown>): Promis
     if (error instanceof InputError) return c.json({ error: error.message }, 400);
     if (error instanceof IssueDecisionError) return c.json({ error: error.message }, error.status);
     if (error instanceof QuestionError) return c.json({ error: error.message, code: error.code }, error.status);
+    if (error instanceof QueuedMessageError) return c.json({ error: error.message, code: error.code }, error.status);
     if (error instanceof OrganizerActionError) return c.json({ error: error.message, code: error.code }, error.status);
+    if (error instanceof ChatTurnRetryError) return c.json({ error: error.message, code: error.code }, error.status);
     if (error instanceof IssueDependencyError) return issueDependencyErrorResponse(c, error)!;
     if (error instanceof Error && /consumed|settled|running turn|retry|terminal|cancelled|pending attempt/i.test(error.message)) return c.json({ error: error.message }, 409);
     if (error instanceof Error && /not found|another workspace|recipient|required|within the log|Reply target|Source turn|Decision requires|attachment/i.test(error.message)) return c.json({ error: error.message }, 400);
@@ -124,9 +127,7 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
     const conversation = loadConversation(c, store, c.req.param("sessionId"), { scope: "owner", allowCoordination: true });
     if (conversation instanceof Response) return conversation;
     if ("workSession" in conversation && conversation.workSession?.status === "archived") return c.json({ error: "Session is archived" }, 409);
-    if (conversation.chatId && store.getChatSession(conversation.chatId)?.status === "archived") {
-      return c.json({error:"Chat session is archived"},409);
-    }
+    const archivedChat = conversation.chatId ? store.getChatSession(conversation.chatId)?.status === "archived" : false;
     return action(c, async () => {
       let sender: SendMessageInput['sender'];
       let input: Record<string, any>, files: File[] = [];
@@ -149,6 +150,8 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
         if (actor instanceof Response) return actor;
         sender = actor;
       }
+      // A member writing into an archived Chat reopens it; other senders may not.
+      if (archivedChat && sender.type !== "member") return c.json({ error: "Chat session is archived" }, 409);
       const kind = input.message_kind ?? (input.reply_to_id ? "reply" : "request"), wake = input.wake_requested ?? "now";
       if (!MESSAGE_KINDS.includes(kind) || !["now", "next_turn", "inbox_only"].includes(wake)) throw new InputError("invalid kind or wake");
       if (input.body_md != null && typeof input.body_md !== "string") throw new InputError("body_md must be a string");
@@ -292,16 +295,97 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
     const loaded = loadMessage(c);
     return loaded instanceof Response ? loaded : c.json({ message: publicMessage(loaded.message) });
   });
+  // ADR 0020: the Chat follow-up queue. Rows stay outside the log until they
+  // are released as ordinary member now requests. Chat access and a
+  // member credential are required; task tokens are refused.
+  const queueScope = (c: Context) => {
+    const conversation = loadConversation(c, store, c.req.param("sessionId")!);
+    if (conversation instanceof Response) return conversation;
+    if (!conversation.chatId || conversation.id !== conversation.chatId) return c.json({ error: "The follow-up queue is only available in the main Chat conversation", code: "not_a_chat" }, 400);
+    const actor = messageActor(c, store, conversation.workspaceId);
+    if (actor instanceof Response) return actor;
+    if (actor.type !== "member" || !actor.id) return c.json({ error: "A workspace member is required", code: "queue_actor_required" }, 403);
+    return { sessionId: conversation.id, workspaceId: conversation.workspaceId, memberId: actor.id };
+  };
+  const queueAttachmentIds = (c: Context, workspaceId: string, raw: unknown): string[] | undefined => {
+    if (raw === undefined) return undefined;
+    if (!Array.isArray(raw) || raw.some(id => typeof id !== "string")) throw new InputError("invalid attachment_ids");
+    for (const id of raw as string[]) {
+      const attachment = store.getAttachment(id);
+      if (!attachment || attachment.workspaceId !== workspaceId || denyAttachmentAccess(c, store, attachment)) throw new InputError("attachment not found");
+    }
+    return raw as string[];
+  };
+  const publicRelease = <T extends { message: UnifiedMessage; turn_id?: string }>(release: T) => ({ ...release, message: publicMessage(release.message) });
+  app.get("/api/sessions/:sessionId/queue", c => {
+    const scope = queueScope(c);
+    if (scope instanceof Response) return scope;
+    return action(c, () => store.listQueuedMessages(scope.sessionId));
+  });
+  app.post("/api/sessions/:sessionId/queue", async c => {
+    const scope = queueScope(c);
+    if (scope instanceof Response) return scope;
+    return action(c, async () => {
+      const input = await body(c);
+      if (typeof input.client_id !== "string" || !input.client_id.trim() || input.client_id.length > 200) throw new InputError("client_id is required");
+      if (typeof input.body_md !== "string") throw new InputError("body_md must be a string");
+      const attachmentIds = queueAttachmentIds(c, scope.workspaceId, input.attachment_ids);
+      const agent = store.getAgent(store.getChatSession(scope.sessionId)!.agentId);
+      if (!agent || !canCurrentUserAccessAgent(c, store, agent)) throw new IssueDecisionError(403, "you do not have access to this agent");
+      const result = store.enqueueQueuedMessage({ session_id: scope.sessionId, sender_member_id: scope.memberId,
+        body_md: input.body_md, attachment_ids: attachmentIds, client_id: input.client_id });
+      return { item: result.item, released: result.released ? publicRelease(result.released) : null };
+    });
+  });
+  app.post("/api/sessions/:sessionId/queue/resume", async c => {
+    const scope = queueScope(c);
+    if (scope instanceof Response) return scope;
+    return action(c, async () => {
+      await body(c);
+      const result = store.resumeQueuedMessages(scope.sessionId, scope.memberId);
+      return { ...result, released: result.released.map(publicRelease) };
+    });
+  });
+  app.patch("/api/sessions/:sessionId/queue/:qid", async c => {
+    const scope = queueScope(c);
+    if (scope instanceof Response) return scope;
+    return action(c, async () => {
+      const input = await body(c);
+      if (typeof input.body_md !== "string") throw new InputError("body_md must be a string");
+      const revision = input.expected_revision;
+      if (revision !== undefined && (!Number.isSafeInteger(revision) || revision < 1)) throw new InputError("invalid expected_revision");
+      return { item: store.updateQueuedMessage(scope.sessionId, c.req.param("qid")!, scope.memberId,
+        { body_md: input.body_md, attachment_ids: queueAttachmentIds(c, scope.workspaceId, input.attachment_ids), expected_revision: revision }) };
+    });
+  });
+  app.delete("/api/sessions/:sessionId/queue/:qid", c => {
+    const scope = queueScope(c);
+    if (scope instanceof Response) return scope;
+    return action(c, () => ({ item: store.deleteQueuedMessage(scope.sessionId, c.req.param("qid")!, scope.memberId) }));
+  });
+  app.post("/api/sessions/:sessionId/queue/:qid/steer", async c => {
+    const scope = queueScope(c);
+    if (scope instanceof Response) return scope;
+    return action(c, async () => {
+      await body(c);
+      const result = store.steerQueuedMessage(scope.sessionId, c.req.param("qid")!, scope.memberId);
+      // The failed row and the send_failed pause are committed; the caller sees why.
+      if (!result.message) return c.json({ error: result.error, code: "queued_message_send_failed", item: result.item }, 409);
+      return { ...publicRelease(result), item: result.item };
+    });
+  });
   const questionActor = (c: Context, workspaceId: string) => {
     const actor = messageActor(c, store, workspaceId);
     return actor instanceof Response ? actor : actor.type === 'member' || actor.type === 'agent' ? actor as QuestionActor : undefined;
   };
   // A routed Q grants access to this original question only. It never grants
-  // access to the source Agent's private message history, Chat or trace.
+  // access to the source Agent's private message history, Chat or trace. The
+  // Issue human stage names nobody (no current handler): any active member reads it.
   const routedQuestionAccess = (c: Context, q: NonNullable<ReturnType<typeof store.getQuestion>>, actor: QuestionActor | undefined) => !!actor
     && (actor.type === 'agent' ? store.canAccessQuestionFromTurn(q.id, actor.id, callerTurn(c))
       : q.current_handler?.type === actor.type && q.current_handler.id === actor.id
-      || q.actions.allowed.some(action => ['present', 'close', 'revise'].includes(action)));
+      || q.stage === 'human' && !q.current_handler
+      || q.actions.allowed.some(action => ['answer', 'present', 'close', 'revise', 'continue'].includes(action)));
   const loadQuestion = (c: Context) => {
     const message = store.getMessage(c.req.param('id')!);
     if (!message || message.visibility !== 'shown') return c.json({ error: 'question not found' }, 404);
@@ -340,7 +424,8 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
     const loaded = loadQuestion(c); if (loaded instanceof Response) return loaded;
     return c.json({ question: loaded.question });
   });
-  for (const operation of ['answer', 'escalate', 'transfer', 'present', 'continue', 'close'] as const) app.post(`/api/messages/:id/question/${operation}`, async c => {
+  // Responsibility changes re-route a Q automatically; the retired transfer route answers 410.
+  for (const operation of ['answer', 'escalate', 'present', 'continue', 'close'] as const) app.post(`/api/messages/:id/question/${operation}`, async c => {
     const loaded = loadQuestion(c); if (loaded instanceof Response) return loaded;
     const actor = loaded.actor;
     if (!actor) return c.json({ error: 'question actor required' }, 403);
@@ -356,7 +441,6 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
         return { ...result, message: publicMessage(result.message) };
       }
       const question = operation === 'escalate' ? store.escalateQuestion(loaded.message.id, mutation, actor, callerTurn(c))
-        : operation === 'transfer' ? store.transferQuestion(loaded.message.id, mutation, actor, callerTurn(c))
         : operation === 'present' ? store.presentQuestion(loaded.message.id, { ...mutation, summary: input.summary }, actor, callerTurn(c))
         : operation === 'close' ? store.closeQuestion(loaded.message.id, mutation, actor, callerTurn(c))
         : store.continueQuestion(loaded.message.id, mutation, actor);
@@ -568,8 +652,24 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
           targetTaskId: turn.current_attempt_id, action: "redispatch", reason: input.reason ?? "Retry requested through turn API", cold });
         return { turn: store.getTurn(turn.id), organizer_action: result.audit, comment_id: result.comment.id };
       }
-      return { turn: operation === "cancel" ? store.cancelTurn(turn.id) : store.wrapUpTurn(turn.id) };
+      if (operation === "wrap-up") return { turn: store.wrapUpTurn(turn.id) };
+      // A member's stop pauses the Chat follow-up queue as `interrupted` (ADR 0020). Agent and
+      // supervisor cancels pause it too, as `turn_ended`, through the turn-end hook.
+      const actor = messageActor(c, store, turn.workspace_id);
+      return { turn: store.cancelTurn(turn.id, { byMember: !(actor instanceof Response) && actor.type === "member" }) };
     });
+  });
+  // `remi automation quiet`: the run found nothing worth reporting. A completed
+  // quiet run archives its Chat; a failed run stays visible whatever was said.
+  app.post("/api/turns/:id/automation/quiet", c => {
+    const turn = loadTurn(c);
+    if (turn instanceof Response) return turn;
+    const token = currentTaskAccessToken(c);
+    if (token && store.getTurnForAttempt(token.taskId ?? "")?.id !== turn.id) {
+      return c.json({ error: "only an attempt of this turn may mark its run quiet" }, 403);
+    }
+    if (!store.markAutopilotRunQuiet(turn.id)) return c.json({ error: "turn is not an automation run" }, 404);
+    return c.json({ ok: true });
   });
   app.get("/api/turns/:id/trace", async c => {
     const turn = loadTurn(c);
@@ -590,6 +690,6 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
       && selected.issueSessionId === source.issueSessionId && selected.chatSessionId === source.chatSessionId
       && store.getTurnForAttempt(selected.id)?.id === turn.id);
     if (!ownHistory && !canAccessConversationTask(c, store, selected)) return c.json({ error: "turn not found" }, 404);
-    return c.json({ turn_id: turn.id, attempt_id: attemptId, ...await deps.traceReader.readTrace(attemptId, window.afterSeq, window.limit) });
+    return c.json({ turn_id: turn.id, attempt_id: attemptId, ...await deps.traceReader.read(attemptId, window) });
   });
 }

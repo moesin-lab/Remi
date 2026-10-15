@@ -1,6 +1,7 @@
 import type { MultiremiRuntime, MultiremiRuntimeModel, MultiremiRuntimeModelThinking } from "@multiremi/contracts/types.js";
 import { runtimeConnectionModels, type RuntimeConnectionProfile, type RuntimeBindingModelCatalog } from "@multiremi/contracts/runtime-connection";
 import { commonThinkingLevels, modelThinkingLevels } from "@multiremi/contracts/model-thinking.js";
+import { extractAntigravityDefaultModel, RELAY_ENGINES } from "@multiremi/relay/fragment.js";
 import type { GatewayModelReasoningDecl, MultiremiStore, RelayEngine } from "./store.js";
 
 /** Minimal data source shared by API catalogs and dispatch capability checks. */
@@ -22,6 +23,9 @@ export type RuntimeModelCatalogSource = Pick<MultiremiStore,
 export const GATEWAY_REASONING_LEVELS: Record<RelayEngine, readonly string[]> = {
   claude: ["low", "medium", "high", "xhigh", "max"],
   codex: ["minimal", "low", "medium", "high", "xhigh", "max"],
+  // The Antigravity server's gateway path offers no `thought_level` selector, so
+  // there is no level an administrator could declare that the engine would honour.
+  antigravity: [],
 };
 
 /** Display labels for the declared enum, matching the CLIs' own spelling. */
@@ -442,7 +446,7 @@ export function overlayGatewayModels(
   const config = store.getRelayConfigForDaemon(workspaceId);
   const byEngine = new Map<string, FleetProviderModelsResponse>();
   for (const provider of providers) byEngine.set(provider.provider, provider);
-  for (const engine of ["claude", "codex"] as const) {
+  for (const engine of RELAY_ENGINES) {
     const engineConfig = config[engine];
     // No live gateway credential → don't surface any (possibly stale) snapshot.
     if (!engineConfig || !engineConfig.authToken) continue;
@@ -513,6 +517,10 @@ export function overlayGatewayModels(
       continue;
     }
     if (!snapshot || snapshot.sourceRevision !== engineConfig.revision || snapshot.models.length === 0) continue;
+    // An Antigravity Agent without a model runs the engine's configured
+    // default_model, never whatever the server happens to list first, so that is
+    // the only model this catalog may mark as the default.
+    const configuredDefault = engine === "antigravity" ? extractAntigravityDefaultModel(engineConfig.fragment) : null;
     const existingModels = existing?.models ?? [];
     const runtimeModels = new Map(existingModels.map((model) => [model.id, model]));
     const familyModels = new Map<ClaudeModelFamily, FleetModelResponse[]>();
@@ -542,12 +550,14 @@ export function overlayGatewayModels(
         manual: manualDecl ? manualThinkingResponse(manualDecl) : undefined,
         family: familyMatched ? familyThinkingConsensus(matchingFamilyModels) : undefined,
       });
-      const isDefault = runtimeModel
-        ? runtimeModel.default === true
-        : family !== undefined
-          && familyMatched
-          && gatewayFamilyCounts.get(family) === 1
-          && matchingFamilyModels.filter((candidate) => candidate.default).length === 1;
+      const isDefault = engine === "antigravity"
+        ? model.id === configuredDefault
+        : runtimeModel
+          ? runtimeModel.default === true
+          : family !== undefined
+            && familyMatched
+            && gatewayFamilyCounts.get(family) === 1
+            && matchingFamilyModels.filter((candidate) => candidate.default).length === 1;
       return {
         id: model.id,
         label: model.label,
@@ -557,7 +567,7 @@ export function overlayGatewayModels(
         ...(thinking && source ? { thinking_source: source } : {}),
       };
     });
-    if (options.preserveCustomProfileModels !== false) {
+    if (engine === "claude" && options.preserveCustomProfileModels !== false) {
       const customIds = new Set(store.listWorkspaceClaudeProfileModels(workspaceId));
       for (const model of existingModels) {
         if (customIds.has(model.id) && !models.some(candidate => candidate.id === model.id)) models.push(model);

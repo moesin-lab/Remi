@@ -1,6 +1,7 @@
 # ADR 0011: Question cards use recipient-bound tokens and a responsibility revision
 
-- Status: accepted
+- Status: accepted; amended by [ADR 0017](0017-issue-execution-and-escalation.md)
+  (card recipient at an Issue Q's human stage)
 
 ## Decision
 
@@ -12,6 +13,15 @@ Every card delivery mints a random token. Only its hash, designated recipient
 `open_id` and consumed timestamp are stored on `multiremi_conversation_log`.
 The plaintext travels once in the action value with `message_id` and
 `route_revision`. It must never appear in activities or logs.
+
+A card has one recipient. At an Issue Q's human stage nobody is designated, so
+the card goes to the root Issue's creator when that creator is an active member
+who maps uniquely to the bot app's `open_id`. A Chat Q without an Issue sends it
+to its explicitly configured external recipient. This affects delivery only, not
+the shared workspace operator used by web callers. Group owners and workspace owners never substitute for
+that recipient. Ambiguous or missing identity mapping produces a text reminder
+with its original Q and workbench link; any active member can still answer the
+same Q on the web.
 
 The server validates the configured bot transport and resolves the external
 `open_id` to one active historical identity in the Q's frozen workspace. It

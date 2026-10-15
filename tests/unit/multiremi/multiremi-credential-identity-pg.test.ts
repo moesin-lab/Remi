@@ -260,7 +260,7 @@ describe.skipIf(!pgAvailable)("MUL-448 credential identity on PostgreSQL", () =>
       expect(decoyIssue.sourceIssueId, spelling).toBeNull();
       expect(decoyIssue.createdBy, spelling).toBe("local");
       expect(decoyIssue.createdBy, spelling).not.toBe("someone-else");
-      expect(decoyIssue.responsibleMemberId, spelling).toBe(store.getWorkspaceOperator(fixture.workspaceId)!.id);
+      expect(decoyIssue, spelling).not.toHaveProperty('responsibleMemberId');
       const subscribers = store.listIssueSubscribers(decoyIssue.id);
       expect(subscribers, spelling).toHaveLength(1);
       expect(subscribers[0]!.memberId, spelling).toBe(store.getWorkspaceOperator(fixture.workspaceId)!.id);

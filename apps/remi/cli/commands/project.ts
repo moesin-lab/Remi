@@ -238,7 +238,7 @@ async function projectBody(
   });
   const type = body.default_assignee_type ?? body.defaultAssigneeType;
   if (type != null && type !== "agent" && type !== "squad") {
-    throw new CliError("usage", "Project default execution assignee must be an Agent or Squad; configure the final human on the root Issue");
+    throw new CliError("usage", "Project default execution assignee must be an Agent or Squad");
   }
   return body;
 }

@@ -8,7 +8,8 @@ const ROOT = join(import.meta.dir, "../..");
 // Existing production home reads. New defaults need an isolation review, even
 // inside a file that already reads home; lowering a count needs no exemption.
 const HOME_CALL_LIMITS: Readonly<Record<string, number>> = {
-  "packages/acp/src/antigravity.ts": 2,
+  // ${REMI_HOME:-~/.remi}/acp/antigravity, like the npm bundles' prefix.
+  "packages/acp/src/antigravity-install.ts": 1,
   "packages/acp/src/client.ts": 2,
   // Grok adds two read-only executable probes; provider tests inject a fixture executable.
   "packages/acp/src/provider.ts": 9,
@@ -29,7 +30,6 @@ const HOME_CALL_LIMITS: Readonly<Record<string, number>> = {
   "packages/remi/src/core.ts": 1,
   "packages/server/src/api/helpers/uploads.ts": 1,
   "packages/server/src/config.ts": 1,
-  "packages/server/src/session-archive/service.ts": 1,
   "packages/server/src/ssh-mesh/control-plane.ts": 2,
   "packages/server/src/worker/daemon.ts": 6,
   // Grok adds a read-only skill-root lookup; listing/import only read files and accept explicit roots.

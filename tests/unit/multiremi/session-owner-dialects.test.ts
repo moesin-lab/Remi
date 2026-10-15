@@ -164,7 +164,7 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     const sourceHistory = [main.id, side.id].map(id =>
       db.query("SELECT * FROM multiremi_conversation_log WHERE session_id = ? ORDER BY seq").all(id));
 
-    store.updateIssue(issue.id, { workspaceId: target.id, responsibleMemberId: human.id, actorType: "member", actorId: "mem_local_local" });
+    store.updateIssue(issue.id, { workspaceId: target.id, actorType: "member", actorId: "mem_local_local" });
 
     const targetMain = store.getOrCreateDefaultIssueSession(issue.id);
     expect(targetMain.id).not.toBe(main.id);
@@ -191,16 +191,17 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     const task = store.createSessionTask(targetMain.id, { agentId: agent.id, createdByType: "system", prompt: "New target work" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
+    store.addIssueSubscriber(issue.id, human.id);
     const question = store.createTaskHumanRequest({ taskId: task.id, kind: "question", payload: { title: "TARGET_QUESTION_AFTER_MOVE" } });
-    expect(store.getMessage(question.id)?.to_member_id).toBe(human.id);
+    expect(store.getMessage(question.id)?.to_member_id).toBeNull();
     expect(store.getMessage(question.id)?.wake_applied).toBe("inbox_only");
-    expect(store.resolveIssueResponsibility(issue.id).rootHuman).toMatchObject({ type: "member", id: human.id, issueId: issue.id });
+    expect(store.resolveIssueResponsibility(issue.id)).toMatchObject({ executionOwner: null, rootIssueId: issue.id });
     expect(store.listIssueQuestions(issue.id).find(item => item.id === question.id)).toMatchObject({
       id: question.id, session_id: targetMain.id, workspace_id: target.id, stage: "human",
-      current_handler: { type: "member", id: human.id },
+      current_handler: null,
     });
     const inbox = store.listMessageInbox(human.id, target.id, { access: { userId: "local", admin: true } });
-    expect(inbox.items.map(message => message.id)).toContain(question.id);
+    expect(inbox.items.some(message => message.metadata.root_question_id === question.id)).toBe(true);
     expect(inbox.unread_count).toBeGreaterThan(0);
     expect(inbox.attention_count).toBe(0);
     const report = store.sendMessage({ session_id: targetMain.id, sender: { type: "platform", id: null },

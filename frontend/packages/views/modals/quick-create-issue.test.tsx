@@ -597,4 +597,18 @@ describe("AgentCreatePanel", () => {
     renderPanel({ onClose: vi.fn(), isExpanded: false, setIsExpanded: vi.fn() });
     expect(screen.queryByTestId("agent-sub-issue-chip")).toBeNull();
   });
+
+  // Root issues no longer designate a human; a draft seeded by an older
+  // caller with `responsible_member_id` must not resurrect the field.
+  it("creates a root issue without a designated-human picker or field", async () => {
+    const user = userEvent.setup();
+    renderPanel({ onClose: vi.fn(), isExpanded: false, setIsExpanded: vi.fn(), data: { responsible_member_id: "member-legacy" } });
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.queryByText(/Designated human|Choose a human/)).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /^Let agent create \(/i }));
+
+    await waitFor(() => expect(mockQuickCreateIssue).toHaveBeenCalledTimes(1));
+    expect(mockQuickCreateIssue.mock.calls[0]?.[0]).not.toHaveProperty("responsible_member_id");
+  });
 });

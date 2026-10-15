@@ -1,5 +1,4 @@
-import { createResponsibleTestAutopilot } from './helpers.js';
-import { createResponsibleTestIssue } from './helpers.js';
+import { acceptTestIssueDelivery, createResponsibleTestIssue } from './helpers.js';
 import { turnApiPath, mutateExecutionFixture } from "./unified-test-paths.js";
 import { taskOfferResponse, reconcileRuntimeReady } from "../../fixtures/task-offer.js";
 import { requestRuntimeRpc } from "../../fixtures/runtime-downlinks.js";
@@ -11,10 +10,11 @@ import { createMultiremiApp } from "@multiremi/api.js";
 import type { MultiremiStore } from "@multiremi/store.js";
 import { InMemoryDaemonTraceReader } from "@multiremi/api/trace/daemon-trace-reader.js";
 import { InMemoryTraceStore } from "@multiremi/worker/trace-store.js";
+import { commandItem, messageEvent } from "./trace-budget-fixtures.js";
 import { daemonRuntimeId } from "@multiremi/store.js";
 import { daemonTaskWireResponse, daemonTaskMessageWireResponse } from "@multiremi/api/wire/index.js";
 import { DAEMON_MIN_CLI_VERSION, DAEMON_PROTOCOL_MIN } from "@multiremi/contracts/daemon-protocol.js";
-import { createLocalStore as createStore, db, readyArchiveBinding, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore as createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -184,11 +184,7 @@ describe("Multiremi API — daemon endpoints", () => {
 
     store.startTask(task.id);
     store.completeTask(task.id, { output: "done" });
-    store.markIssueWorkspaceCleaned({
-      issueId: issue.id,
-      runtimeId: runtime.id,
-      ...readyArchiveBinding(store, issue.id, runtime.id),
-    });
+    store.reportSubjectReclaimed(runtime.id, { subject: { kind: "issue", id: issue.id }, snapshot: null, unsavedWork: false });
     const nextRuntime = store.registerRuntime({ id: "rt_workspace_next", name: "codex (next)", provider: "codex" });
     const nextTask = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "continue" });
     expect(store.claimTask(nextRuntime.id)?.id).toBe(nextTask.id);
@@ -1311,9 +1307,11 @@ describe("Multiremi API — daemon endpoints", () => {
     expect(since.status).toBe(426);
     expect(await since.json()).toEqual({ code: "daemon_protocol_upgrade_required", min_version: DAEMON_PROTOCOL_MIN });
     // #10: the UI reads daemon trace events; legacy SQL rows remain a separate compatibility fixture.
-    trace.append(task.id,[{type:"text",content:"starting"},{type:"tool_result",tool:"edit",content:"updated"}]);
+    trace.append(task.id,[messageEvent("msg:start","starting"),{type:"item.completed",item:commandItem("cmd_edit","edit")}]);
     const uiMessages = await (await app.request(turnApiPath(store, task.id, "/trace"))).json();
-    expect(uiMessages.events.map((message: any) => message.seq)).toEqual([1, 2]);
+    expect(uiMessages.items.map((item: any) => [item.id, item.seq])).toEqual([["msg:start", 1], ["cmd_edit", 2]]);
+    const rawMessages = await (await app.request(turnApiPath(store, task.id, "/trace?view=events"))).json();
+    expect(rawMessages.events.map((message: any) => message.seq)).toEqual([1, 2]);
     const sinceBody = store.listTaskMessages(task.id).filter(message => message.seq > 1).map(message => daemonTaskMessageWireResponse(message, store.getTask(task.id)!));
     expect(sinceBody.map((message: any) => [message.seq, message.output])).toEqual([[2, "updated"]]);
     expect(sinceBody[0].task_id).toBe(task.id);
@@ -1378,17 +1376,6 @@ describe("Multiremi API — daemon endpoints", () => {
     });
     const issue = createResponsibleTestIssue(store, { title: "GC issue", workspaceId: "local" });
     const chat = store.createChatSession({ agentId: agent.id, workspaceId: "local", title: "GC chat" });
-    const autopilot = createResponsibleTestAutopilot(store, {
-      title: "GC autopilot",
-      workspaceId: "local",
-      assigneeId: agent.id,
-      issueTitleTemplate: "GC run",
-    });
-    const run = store.runAutopilot(autopilot.id);
-    expect(store.claimTask(runtime.id)?.id).toBe(run.taskId!);
-    store.startTask(run.taskId!);
-    store.completeTask(run.taskId!, { output: "done" });
-    const completedRun = store.getAutopilotRun(run.id)!;
     const task = store.createTask({ agentId: agent.id, workspaceId: "local", prompt: "quick create gc" });
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
@@ -1397,13 +1384,6 @@ describe("Multiremi API — daemon endpoints", () => {
     const remoteIssue = createResponsibleTestIssue(store, { title: "Remote GC issue", workspaceId: "remote" });
     const remoteAgent = store.createAgent({ name: "Remote GC Codex", provider: "codex", workspaceId: "remote" });
     const remoteChat = store.createChatSession({ agentId: remoteAgent.id, workspaceId: "remote", title: "Remote GC chat" });
-    const remoteAutopilot = createResponsibleTestAutopilot(store, {
-      title: "Remote GC autopilot",
-      workspaceId: "remote",
-      assigneeId: remoteAgent.id,
-      issueTitleTemplate: "Remote GC run",
-    });
-    const remoteRun = store.runAutopilot(remoteAutopilot.id);
     const remoteTask = store.createTask({ agentId: remoteAgent.id, workspaceId: "remote", prompt: "remote quick create gc" });
     const daemonToken = await store.createAccessToken({
       workspaceId: "local",
@@ -1421,11 +1401,7 @@ describe("Multiremi API — daemon endpoints", () => {
       issueId: completedIssueWithQueuedTask.id,
       prompt: "Maintain Wiki before GC",
     });
-    const gcDelivery = store.submitIssueDelivery(completedIssueWithQueuedTask.id, { summary: 'GC fixture verified' },
-      { type: 'agent', id: agent.id, taskId: queuedIssueTask.id });
-    store.respondIssueDelivery(completedIssueWithQueuedTask.id, gcDelivery.id,
-      { action: 'accept', revision: gcDelivery.responsibilityRevision },
-      { type: 'member', id: completedIssueWithQueuedTask.responsibleMemberId! });
+    acceptTestIssueDelivery(store, completedIssueWithQueuedTask.id);
     const gcOptions = { headers: daemonHeaders, authToken: "root-secret", runtimeId: runtime.id };
     const heldGc = await reportFrame(store, "gc.check_issue", { issue_id: completedIssueWithQueuedTask.id }, gcOptions);
     expect(heldGc.status).toBe("active");
@@ -1436,17 +1412,17 @@ describe("Multiremi API — daemon endpoints", () => {
     const issueGc = await reportFrame(store, "gc.check_issue", { issue_id: issue.id }, gcOptions);
     expect(issueGc).toEqual({ ok: true, status: "todo", updated_at: issue.updatedAt });
     const chatGc = await reportFrame(store, "gc.check_chat_session", { session_id: chat.id }, gcOptions);
-    expect(chatGc).toEqual({ ok: true, status: "active", updated_at: chat.updatedAt });
-    const runGc = await reportFrame(store, "gc.check_autopilot_run", { run_id: completedRun.id }, gcOptions);
-    expect(runGc).toEqual({ ok: true, status: "completed", completed_at: completedRun.completedAt });
+    expect(chatGc).toEqual({ ok: true, status: "active", updated_at: chat.updatedAt, pinned: false, origin: null, last_activity_at: null });
     const taskGc = await reportFrame(store, "gc.check_task", { task_id: completedTask.id }, gcOptions);
     expect(taskGc).toEqual({ ok: true, status: "completed", completed_at: completedTask.completedAt });
 
     for (const [type, payload] of [
       ["gc.check_issue", { issue_id: remoteIssue.id }],
       ["gc.check_chat_session", { session_id: remoteChat.id }],
-      ["gc.check_autopilot_run", { run_id: remoteRun.id }],
       ["gc.check_task", { task_id: remoteTask.id }],
+      ["gc.subject_reclaimed", { subject: { kind: "issue", id: remoteIssue.id }, snapshot: null, unsaved_work: false, freed_bytes: 0 }],
+      ["gc.subject_reclaimed", { subject: { kind: "chat", id: remoteChat.id }, snapshot: null, unsaved_work: false, freed_bytes: 0 }],
+      ["gc.subject_reclaimed", { subject: { kind: "task", id: remoteTask.id }, snapshot: null, unsaved_work: false, freed_bytes: 0 }],
     ] as const) {
       const crossWorkspace = await reportFrame(store, type, payload, gcOptions);
       expect(crossWorkspace).toMatchObject({ ok: false, code: "task_not_found", retryable: false });

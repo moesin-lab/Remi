@@ -16,7 +16,7 @@ pendingTurnBackendTests("MUL-508 stage 1 regressions", (fixture) => {
     const user = store.getOrCreateUser({ externalId: "stage1-member", name: "Member" });
     store.createWorkspaceMember({ userId: user.id, name: user.name, role: "member" });
     const agent = store.createAgent({ name: "Private", provider: "codex", visibility: "private", ownerId: "local" });
-    const issue = createResponsibleTestIssue(store, { title: "Stage 1", assigneeType: "agent", assigneeId: agent.id, responsibleMemberId: "mem_local_local" });
+    const issue = createResponsibleTestIssue(store, { title: "Stage 1", assigneeType: "agent", assigneeId: agent.id });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
     const token = await store.createAccessToken({ type: "pat", name: "Member", userId: user.id, workspaceId: "local" });
     const app = createMultiremiApp({ store, authToken: "stage1-master" });
@@ -145,20 +145,19 @@ pendingTurnBackendTests("MUL-508 stage 1 regressions", (fixture) => {
   });
 
   for (const kind of ["permission", "question"] as const) it(`B2: humans share private ${kind} access and answer as the operator through the original Q surface`, async () => {
-    const f = await scaffold(), member = f.store.findWorkspaceMemberForUser(f.user.id, "local")!;
-    f.store.updateIssue(f.issue.id, { responsibleMemberId: member.id, actorType: "member", actorId: "mem_local_local" });
+    const f = await scaffold();
     const q = runningRequest(f.store, f.db, f.agent.id, f.issue.id, kind, kind === "permission" ? permission : question);
     expect((await f.request(`/api/messages/${q.request.id}`)).status).toBe(200);
     expect((await f.request(`/api/turns/${q.turn.id}`)).status).toBe(200);
     expect((await f.request(`/api/turns/${q.turn.id}/trace`)).status).toBe(200);
     const view = await f.request(`/api/messages/${q.request.id}/question`);
-    expect(view.status).toBe(200); expect(view.data.question.current_handler).toEqual({ type: "member", id: f.store.getWorkspaceOperator("local")!.id });
+    expect(view.status).toBe(200); expect(view.data.question).toMatchObject({ stage: "human", current_handler: null });
     const response = kind === "permission" ? { option_id: "allow_once" } : { answers: { "Continue?": "Yes" } };
     expect((await f.request(`/api/messages/${q.request.id}/question/answer`, "POST",
       { expected_route_revision: q.revision, response })).status).toBe(200);
     expect(f.store.getQuestion(q.request.id)?.answer?.actor).toEqual({ type: "member", id: f.store.getWorkspaceOperator("local")!.id });
     expect(f.store.getQuestion(q.request.id)?.wait_status).toBe("waiting");
-    expect(f.store.getIssue(f.issue.id)?.responsibleMemberId).toBe(member.id);
+    expect(f.store.getIssue(f.issue.id)).not.toHaveProperty("responsibleMemberId");
     const consumed = f.store.getDaemonTurnBridge().rpc("turn.decision.consume", { turn_id: q.turn.id, attempt_id: q.task.id,
       message_id: q.request.id, wait_id: q.waitId, reply_message_id: f.store.getQuestion(q.request.id)!.answer!.reply_message_id },
       { runtimeId: q.runtime.id, daemonId: q.runtime.daemonId!, workspaceId: "local" });

@@ -8,8 +8,6 @@ export type {
   MultiremiIssueDecisionKind,
   MultiremiIssueDecisionList,
   MultiremiIssueDecisionStatus,
-  MultiremiIssueParentDoneGrant,
-  MultiremiIssueParentDoneGrantIneffectiveReason,
 } from "@multiremi/contracts";
 export type {
   Issue,
@@ -159,7 +157,7 @@ export type { IssueSubscriber } from "./subscriber";
 export type * from "./events";
 export type * from "./api";
 export type { Attachment } from "./attachment";
-export type { ChatSession, ChatMessage, ChatMessagesPage, ChatPendingTask, PendingChatTaskItem, PendingChatTasksResponse, SendChatMessageResponse, CreateChatSessionInput, UpdateChatSessionInput } from "./chat";
+export type { ChatSession, ChatOrigin, ChatOriginFilter, ChatMessage, ChatMessagesPage, ChatPendingTask, PendingChatTaskItem, PendingChatTasksResponse, SendChatMessageResponse, CreateChatSessionInput, UpdateChatSessionInput } from "./chat";
 export type { StorageAdapter } from "./storage";
 export type {
   Project,

@@ -322,7 +322,7 @@ describe("MUL-448 B4: create routes use shared operator authorship", () => {
       const issue = store.getIssue(body.id ?? body.issue?.id)!;
       expect(issue.createdBy, label).toBe(expected);
       expect(issue.createdBy, label).not.toBe(decoy.id);
-      expect(issue.responsibleMemberId, label).toBe(store.getWorkspaceOperator("local")!.id);
+      expect(issue, label).not.toHaveProperty('responsibleMemberId');
       expect(store.listIssueSubscribers(issue.id).some(item=>item.memberId===store.getWorkspaceOperator("local")!.id),label).toBeTrue();
     }
   });
@@ -350,7 +350,7 @@ describe("MUL-448 B4: quick-create, subscription and share preserve credentials"
       const body = (await response.json()) as any;
       const issue = store.getIssue(body.issue.id)!;
       expect(issue.createdBy, label).toBe("local");
-      expect(issue.responsibleMemberId, label).toBe(store.getWorkspaceOperator("local")!.id);
+      expect(issue, label).not.toHaveProperty('responsibleMemberId');
       expect(store.listIssueSubscribers(issue.id).some(item=>item.memberId===store.getWorkspaceOperator("local")!.id),label).toBeTrue();
       const share = await app.request(`/api/issues/${issue.id}/share`, { method: "POST", headers });
       expect(share.status, label).toBe(201);

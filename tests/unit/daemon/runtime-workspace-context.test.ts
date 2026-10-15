@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTask } from "@daemon/contracts/types.js";
 import { LocalPathLocker, resolveTaskWorkDir } from "@daemon/agent-runtime/workspace/ephemeral.js";
-import { resolveTaskProviderHome, prepareIssueSessionProviderHome } from "@daemon/agent-runtime/workspace/session-home.js";
+import { resolveTaskProviderHome, prepareIssueSessionProviderHome, seedIssueSessionAntigravityHome } from "@daemon/agent-runtime/workspace/session-home.js";
 import { prepareRuntimeWorkspaceContext } from "@daemon/agent-runtime/workspace/runtime-context.js";
 import { codexRuntimeWorkspaceDirectories } from "@daemon/agent-runtime/workspace/runtime-context.js";
 import { mergeCodexSkillSettings } from "@daemon/agent-runtime/agent-plugins/codex-home.js";
@@ -82,7 +82,7 @@ describe("Runtime workspace local execution", () => {
 
   it("loads parent and user context locally without embedding file contents in the server prompt", async () => {
     const { base, root, cwd, baseHome, task, options } = fixture();
-    const home = resolveTaskProviderHome(task, options.workspacesRoot, options.workspacesRoot)!;
+    const home = resolveTaskProviderHome(task, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(home, { baseCodexHome: baseHome, linkCodexAuth: false });
     const env = prepareRuntimeWorkspaceContext(task, home, cwd, { baseHome, userHome: join(base, "user-home") });
     const instructions = readFileSync(join(home.home, "AGENTS.md"), "utf8");
@@ -109,7 +109,7 @@ describe("Runtime workspace local execution", () => {
       mkdirSync(directory, { recursive: true });
       writeFileSync(join(directory, "SKILL.md"), `---\nname: skill-${index}\ndescription: Use when: ${"complete trigger description ".repeat(20)}\n---\nOriginal body\n`);
     }
-    const home = resolveTaskProviderHome(task, options.workspacesRoot, options.workspacesRoot)!;
+    const home = resolveTaskProviderHome(task, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(home, { baseCodexHome: baseHome, linkCodexAuth: false });
     prepareRuntimeWorkspaceContext(task, home, cwd, { baseHome, userHome: join(base, "user-home") });
 
@@ -127,7 +127,7 @@ describe("Runtime workspace local execution", () => {
     const authHome = join(base, "aiden-auth");
     mkdirSync(authHome);
     writeFileSync(join(baseHome, "config.toml"), '[skills]\nmax_context_tokens = 4000\n[[skills.config]]\npath = "/skills/disabled/SKILL.md"\nenabled = false\n[model_providers.ignored]\nbase_url = "DO_NOT_COPY"\n');
-    const home = resolveTaskProviderHome(task, options.workspacesRoot, options.workspacesRoot)!;
+    const home = resolveTaskProviderHome(task, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(home, { baseCodexHome: authHome, linkCodexAuth: false });
     prepareRuntimeWorkspaceContext(task, home, cwd, { baseHome: authHome, userHome: join(base, "user-home") });
 
@@ -145,7 +145,7 @@ describe("Runtime workspace local execution", () => {
     const { base, cwd, baseHome, task, options } = fixture();
     mkdirSync(join(cwd, ".git"));
     writeFileSync(join(cwd, "AGENT.md"), "LEGACY_GIT_GUIDANCE");
-    const home = resolveTaskProviderHome(task, options.workspacesRoot, options.workspacesRoot)!;
+    const home = resolveTaskProviderHome(task, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(home, { baseCodexHome: baseHome, linkCodexAuth: false });
     prepareRuntimeWorkspaceContext(task, home, cwd, { baseHome, userHome: join(base, "user-home") });
     expect(readFileSync(join(home.home, "AGENTS.md"), "utf8")).toContain("LEGACY_GIT_GUIDANCE");
@@ -156,7 +156,7 @@ describe("Runtime workspace local execution", () => {
     const nested = join(cwd, "nested");
     mkdirSync(nested);
     mkdirSync(join(cwd, ".agents", "skills"), { recursive: true });
-    const home = resolveTaskProviderHome(task, options.workspacesRoot, options.workspacesRoot)!;
+    const home = resolveTaskProviderHome(task, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(home, { baseCodexHome: baseHome, linkCodexAuth: false });
     task.agent!.skills = [{ name: "db-skill", description: "Use when verifying DB Skill discovery.", content: "Database body" }] as NonNullable<AgentTask["agent"]>["skills"];
     writeAgentSkillContext(home.home, task);
@@ -175,7 +175,7 @@ describe("Runtime workspace local execution", () => {
     writeFileSync(join(explicit, "SKILL.md"), "---\nname: explicit\ndescription: Use when: preserving exact metadata.\n---\nSupporting body\n");
     writeFileSync(join(root, "extra.md"), "EXPLICIT_EXTRA_INSTRUCTIONS");
     task.runtimeWorkspace!.contextPaths = ["extra-skills", "extra.md"];
-    const home = resolveTaskProviderHome(task, options.workspacesRoot, options.workspacesRoot)!;
+    const home = resolveTaskProviderHome(task, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(home, { baseCodexHome: baseHome, linkCodexAuth: false });
     const other = join(home.home, "skills", "unrelated-native-skill");
     mkdirSync(other, { recursive: true });
@@ -193,7 +193,7 @@ describe("Runtime workspace local execution", () => {
 
   it("rejects escaping context and Skill aliases, oversized instructions, and linked targets", async () => {
     const { base, root, cwd, baseHome, task, options } = fixture();
-    const home = resolveTaskProviderHome(task, options.workspacesRoot, options.workspacesRoot)!;
+    const home = resolveTaskProviderHome(task, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(home, { baseCodexHome: baseHome, linkCodexAuth: false });
     const outside = join(base, "outside");
     mkdirSync(outside);
@@ -219,7 +219,7 @@ describe("Runtime workspace local execution", () => {
   it("does not let an uninstalled dangling Skill link block native discovery", async () => {
     const { base, root, cwd, baseHome, task, options } = fixture();
     symlinkSync(join(base, "removed-skill"), join(root, ".agents", "skills", "removed"), "dir");
-    const home = resolveTaskProviderHome(task, options.workspacesRoot, options.workspacesRoot)!;
+    const home = resolveTaskProviderHome(task, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(home, { baseCodexHome: baseHome, linkCodexAuth: false });
     expect(() => prepareRuntimeWorkspaceContext(task, home, cwd, { baseHome, userHome: join(base, "user-home") })).not.toThrow();
   });
@@ -229,7 +229,7 @@ describe("Runtime workspace local execution", () => {
     const authHome = join(base, "auth-home");
     mkdirSync(join(authHome, "skills"), { recursive: true });
     mkdirSync(join(baseHome, "skills"));
-    const home = resolveTaskProviderHome(task, options.workspacesRoot, options.workspacesRoot)!;
+    const home = resolveTaskProviderHome(task, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(home, { baseCodexHome: authHome, linkCodexAuth: false });
     const nativeRoot = join(home.home, "skills", "remi-runtime-workspace");
     mkdirSync(join(nativeRoot, "provider"), { recursive: true });
@@ -242,7 +242,7 @@ describe("Runtime workspace local execution", () => {
     const authHome = join(base, "auth-home");
     mkdirSync(join(authHome, "skills"), { recursive: true });
     mkdirSync(join(baseHome, "skills"));
-    const home = resolveTaskProviderHome(task, options.workspacesRoot, options.workspacesRoot)!;
+    const home = resolveTaskProviderHome(task, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(home, { baseCodexHome: authHome, linkCodexAuth: false });
     const original = fs.renameSync;
     let publications = 0;
@@ -261,7 +261,7 @@ describe("Runtime workspace local execution", () => {
 
   it("rejects a dangling generated AGENTS symlink before creating its external target", async () => {
     const { base, cwd, baseHome, task, options } = fixture();
-    const home = resolveTaskProviderHome(task, options.workspacesRoot, options.workspacesRoot)!;
+    const home = resolveTaskProviderHome(task, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(home, { baseCodexHome: baseHome, linkCodexAuth: false });
     const outside = join(base, "not-created.md");
     symlinkSync(outside, join(home.home, "AGENTS.md"));
@@ -278,6 +278,42 @@ describe("Runtime workspace local execution", () => {
     expect(merged.skills).toEqual({ max_context_tokens: 2000, config: [{ path: "/skill/SKILL.md", enabled: false }] });
     expect(() => mergeCodexSkillSettings(current, '[skills]\nmax_context_tokens = 0')).toThrow("integer");
     expect(() => mergeCodexSkillSettings(current, '[[skills.config]]\npath = "/skill"\nenabled = "false"')).toThrow("boolean");
+  });
+
+  it("keeps Antigravity's home, gateway routing and Google credentials out of the env file, but not other providers' Google tools", async () => {
+    const { base, cwd, task, options } = fixture();
+    writeFileSync(join(cwd, ".env.local"), "GOOGLE_APPLICATION_CREDENTIALS=/creds.json\n");
+    const codexHome = resolveTaskProviderHome(task, options.workspacesRoot)!;
+    await prepareIssueSessionProviderHome(codexHome, { baseCodexHome: join(base, "user-home", ".codex"), linkCodexAuth: false });
+    expect(prepareRuntimeWorkspaceContext(task, codexHome, cwd, { userHome: join(base, "user-home") }))
+      .toEqual({ GOOGLE_APPLICATION_CREDENTIALS: "/creds.json" });
+    const agyTask = { ...task, agent: { ...task.agent!, provider: "antigravity" } } as AgentTask;
+    const agyHome = resolveTaskProviderHome(agyTask, options.workspacesRoot)!;
+    await prepareIssueSessionProviderHome(agyHome);
+    for (const line of ["GOOGLE_APPLICATION_CREDENTIALS=/creds.json", "GEMINI_HOME=/elsewhere", "GEMINI_API_KEY=k", "AGY_LLM_GATEWAY_URL=https://x", "ANTIGRAVITY_HARNESS_PATH=/h"]) {
+      writeFileSync(join(cwd, ".env.local"), `${line}\n`);
+      expect(() => prepareRuntimeWorkspaceContext(agyTask, agyHome, cwd, { userHome: join(base, "user-home") }))
+        .toThrow(`cannot override ${line.split("=")[0]}`);
+    }
+  });
+
+  it("seeds the Antigravity home on every start and refuses a linked settings file", async () => {
+    const { base, cwd, task, options } = fixture();
+    const agyTask = { ...task, agent: { ...task.agent!, provider: "antigravity" } } as AgentTask;
+    const home = resolveTaskProviderHome(agyTask, options.workspacesRoot)!;
+    await prepareIssueSessionProviderHome(home);
+    await seedIssueSessionAntigravityHome(home, { cwd, workspaceDir: base });
+    const settings = join(home.home, "antigravity-acp", "settings.json");
+    expect(JSON.parse(readFileSync(settings, "utf8"))).toEqual({ auth: { type: "gateway" } });
+    expect(JSON.parse(readFileSync(join(home.home, "antigravity-acp", "trusted_workspaces.json"), "utf8")))
+      .toEqual({ trusted: [], untrusted: [realpathSync(cwd), realpathSync(base)] });
+    // A model can rewrite its own home; the next start must not write through a planted link.
+    rmSync(settings);
+    const outside = join(base, "outside.json");
+    writeFileSync(outside, "{}");
+    symlinkSync(outside, settings);
+    await expect(seedIssueSessionAntigravityHome(home, { cwd })).rejects.toThrow("regular file");
+    expect(readFileSync(outside, "utf8")).toBe("{}");
   });
 
   it("fails closed on wrong hosts, missing directories and escaping cwd", async () => {

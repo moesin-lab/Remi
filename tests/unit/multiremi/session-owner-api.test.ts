@@ -425,7 +425,7 @@ describe("Session owner API boundaries", () => {
     expect((await post()).status).toBe(200);
     expect((await post(false)).status).toBe(403);
     expect((await f.app.request(metadataPath, { headers })).status).toBe(200);
-    const otherIssue = f.store.createIssue({ title: "Unbound", workspaceId: "local", responsibleMemberId: f.issue.responsibleMemberId });
+    const otherIssue = f.store.createIssue({ title: "Unbound", workspaceId: "local" });
     const otherSession = f.store.getOrCreateDefaultIssueSession(otherIssue.id);
     expect((await f.app.request(`/api/sessions/${otherSession.id}/messages`, {
       method: "POST", headers, body: JSON.stringify({ body_md: "Cross-Issue intrusion", message_kind: "request", to: { type: "agent", ref: f.agent.id } }),

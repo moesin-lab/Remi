@@ -215,7 +215,7 @@ export class IssueSessionsRepo {
       if (!initialSession) throw new Error(`Session not found: ${sessionId}`);
       this.ctx.lockWorkspaceRuntimeLifecycle(initialChat.workspaceId);
       if (!initialSession.chatId && initialSession.issueId) {
-        this.ctx.lockIssueArchiveLifecycle(initialSession.issueId);
+        this.ctx.lockIssueLifecycle(initialSession.issueId);
       }
       const chat = this.ctx.chat().getChatSession(chatId);
       if (!chat) throw new Error(`Chat not found: ${chatId}`);
@@ -294,7 +294,7 @@ export class IssueSessionsRepo {
     const initialIssue = this.ctx.issues().getIssue(issueId);
     if (!initialIssue) throw new Error(`Issue not found: ${issueId}`);
     this.ctx.lockWorkspaceRuntimeLifecycle(initialIssue.workspaceId);
-    this.ctx.lockIssueArchiveLifecycle(issueId);
+    this.ctx.lockIssueLifecycle(issueId);
     const issue = this.ctx.issues().getIssue(issueId);
     if (!issue) throw new Error(`Issue not found: ${issueId}`);
     if (issue.workspaceId !== initialIssue.workspaceId) throw new Error("Issue moved to another workspace");
@@ -314,7 +314,7 @@ export class IssueSessionsRepo {
     const initialIssue = this.ctx.issues().getIssue(issueId);
     if (!initialIssue) throw new Error(`Issue not found: ${issueId}`);
     this.ctx.lockWorkspaceRuntimeLifecycle(initialIssue.workspaceId);
-    this.ctx.lockIssueArchiveLifecycle(issueId);
+    this.ctx.lockIssueLifecycle(issueId);
     const issue = this.ctx.issues().getIssue(issueId);
     if (!issue) throw new Error(`Issue not found: ${issueId}`);
     if (issue.workspaceId !== initialIssue.workspaceId) throw new Error("Issue moved to another workspace");

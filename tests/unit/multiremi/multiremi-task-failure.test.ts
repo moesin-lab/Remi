@@ -34,6 +34,19 @@ describe("Multiremi task failure classification", () => {
     expect(classifyTaskFailure("the agent gave up for reasons unknown")).toBe(TaskFailureReason.AgentUnknown);
   });
 
+  it("classifies a turn the stall watchdog stopped as an agent timeout", () => {
+    expect(classifyDaemonTaskFailure("antigravity", "The antigravity turn timed out after 120 s without progress: No agent update",
+      { category: "timeout", errorKind: "turn_stalled" })).toBe(TaskFailureReason.AgentTimeout);
+  });
+
+  it("classifies an unconfigured Antigravity gateway or model as missing configuration", () => {
+    for (const error of [
+      "[antigravity_gateway_unconfigured] Antigravity runs only through the workspace Model gateway: configure Settings > Model gateway > Antigravity with an API key",
+      "[antigravity_model_required] antigravity needs a model: set the Agent's model or the Model gateway default_model",
+      "[antigravity_home_required] antigravity needs an absolute session home",
+    ]) expect(classifyTaskFailure(error)).toBe(TaskFailureReason.AgentMissingConfig);
+  });
+
   it("classifies repository sync failures ahead of network and timeout rules", () => {
     expect(classifyTaskFailure("repository sync timed out after 120000ms: git@code.byted.org:ies/sdma-deepwiki.git"))
       .toBe(TaskFailureReason.RepoSyncFailed);
@@ -153,13 +166,11 @@ describe("Multiremi task failure classification", () => {
   it("classifies poisoned output, invalid requests, and Codex resume-unsafe timeouts", () => {
     expect(classifyPoisonedOutput("I reached the iteration limit and could not continue.")).toBe(TaskFailureReason.IterationLimit);
     expect(classifyPoisonedOutput("Put your final update inside the content string. Keep it concise.")).toBe(TaskFailureReason.AgentFallbackMessage);
-    expect(classifyPoisonedOutput("Compacting...")).toBe(TaskFailureReason.AgentFallbackMessage);
-    expect(classifyPoisonedOutput("\n\nCompacting completed.")).toBe(TaskFailureReason.AgentFallbackMessage);
-    expect(classifyPoisonedOutput("Compacting...\n\nCompacting failed: context window unavailable"))
-      .toBe(TaskFailureReason.AgentFallbackMessage);
-    // codex-acp's `thread/compacted` banner — same failure mode, different bridge.
-    expect(classifyPoisonedOutput("*Context compacted to fit the model's context window.*\n\n"))
-      .toBe(TaskFailureReason.AgentFallbackMessage);
+    // Compaction banners no longer reach the reply: Remi advertises
+    // `session.compaction`, so both pinned bridges send `compaction_update`
+    // (PR 2 decision R11) and a banner-looking reply is ordinary text.
+    expect(classifyPoisonedOutput("Compacting...")).toBeNull();
+    expect(classifyPoisonedOutput("*Context compacted to fit the model's context window.*\n\n")).toBeNull();
     expect(classifyPoisonedOutput("The final answer mentions Compacting... as diagnostic context.")).toBeNull();
     expect(classifyPoisonedOutput("Note: *Context compacted to fit the model's context window.* happened mid-run, but the fix landed."))
       .toBeNull();

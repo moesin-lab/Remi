@@ -25,7 +25,7 @@ const DOMAINS = [
   "issue", "comment", "session", "share", "label", "attachment",
   "chat", "task", "message", "turn",
   "agent", "squad", "skill", "plugin",
-  "runtime", "daemon", "autopilot", "scm", "messaging", "feishu",
+  "runtime", "daemon", "autopilot", "automation", "scm", "messaging", "feishu",
   "inbox", "notification", "pin", "dashboard", "platform", "billing", "lark",
 ];
 
@@ -132,6 +132,11 @@ export function classifyRoute(route: string): CliManifestRoute {
   if (/^GET \/api\/sessions\/:sessionId\/log(?:\/entry|\/locate)?$/.test(route)) return {
     cli_exempt: true, category: "pure_ui", reason: "Read-only SSR and replica display wire (head, turn cards, window and location); CLI reads use message.list/get.",
   };
+  // ADR 0020: no queue CLI. Agents never act on a member's queue; CLI senders choose
+  // the wake directly with `remi message send --wake`.
+  if (/^(?:GET|POST|PATCH|DELETE) \/api\/sessions\/:sessionId\/queue(?:\/resume|\/:qid(?:\/steer)?)?$/.test(route)) return {
+    cli_exempt: true, category: "pure_ui", reason: "Chat composer follow-up queue (member-only Web state, ADR 0020); CLI and agents send directly with message.send --wake.",
+  };
   if ((RETIRED_CLI_ROUTES[route] ?? WORKSPACE_OPERATOR_RETIRED_ROUTES[route])) return {
     cli_exempt: true, category: "retired_route", reason: `已移除：改用 ${(RETIRED_CLI_ROUTES[route] ?? WORKSPACE_OPERATOR_RETIRED_ROUTES[route])}`,
   };
@@ -139,20 +144,13 @@ export function classifyRoute(route: string): CliManifestRoute {
   if (route === "GET /api/sessions/:sessionId/messages") return { command: "message.list" };
   const unified: Record<string, string> = {
     "GET /api/issues/:id/responsibility": "issue.responsibility",
-    "GET /api/issues/:id/deliveries": "issue.delivery.list",
-    "POST /api/issues/:id/deliveries": "issue.delivery.submit",
-    "POST /api/issues/:id/deliveries/:deliveryId/respond": "issue.delivery.accept",
-    "POST /api/issues/:id/deliveries/:deliveryId/authorize": "issue.delivery.authorize",
     "GET /api/issues/:id/questions": "issue.question.list",
     "GET /api/messages/:id/question": "message.question.get",
     "POST /api/messages/:id/question/answer": "message.question.answer",
     "POST /api/messages/:id/question/escalate": "message.question.escalate",
-    "POST /api/messages/:id/question/transfer": "message.question.transfer",
     "POST /api/messages/:id/question/present": "message.question.present",
     "POST /api/messages/:id/question/continue": "message.question.continue",
     "POST /api/messages/:id/question/close": "message.question.close",
-    "GET /api/workspaces/:workspaceId/issue-responsibility-migration": "issue.responsibility-unassigned.list",
-    "POST /api/workspaces/:workspaceId/issue-responsibility-migration/map": "issue.responsibility-unassigned.map",
     "POST /api/sessions/:sessionId/messages": "message.send",
     "GET /api/messages/:id": "message.get", "PATCH /api/messages/:id": "message.edit",
     "DELETE /api/messages/:id": "message.delete", "POST /api/messages/:id/resolve": "message.resolve",
@@ -160,6 +158,7 @@ export function classifyRoute(route: string): CliManifestRoute {
     "GET /api/turns": "turn.list", "GET /api/turns/:id": "turn.get",
     "POST /api/turns/:id/cancel": "turn.cancel", "POST /api/turns/:id/wrap-up": "turn.wrap-up",
     "POST /api/turns/:id/retry": "turn.retry", "GET /api/turns/:id/trace": "turn.trace.read",
+    "POST /api/turns/:id/automation/quiet": "automation.quiet",
   };
   if (unified[route]) return { command: unified[route]! };
   const mapped = mappedResourceCommand(route);
@@ -345,6 +344,9 @@ function mappedResourceCommand(route: string): string | null {
     [/^PUT \/api\/workspaces\/:id\/prompts$/, "workspace.prompt.update"],
     [/^GET \/api\/workspaces\/:id\/issue-archive$/, "workspace.issue-archive.get"],
     [/^PUT \/api\/workspaces\/:id\/issue-archive$/, "workspace.issue-archive.update"],
+    [/^GET \/api\/workspaces\/:id\/storage$/, "workspace.storage.get"],
+    [/^PUT \/api\/workspaces\/:id\/storage$/, "workspace.storage.set"],
+    [/^GET \/api\/workspaces\/:id\/storage\/daemons$/, "runtime.storage"],
     [/^GET \/api\/workspaces\/:id\/issue-topics$/, "workspace.issue-topics.get"],
     [/^PUT \/api\/workspaces\/:id\/issue-topics$/, "workspace.issue-topics.set"],
     [/^GET \/api\/workspaces\/:id\/runtime-provisions$/, "workspace.runtime-provision.list"],
@@ -431,8 +433,6 @@ function mappedResourceCommand(route: string): string | null {
     [/^POST \/api\/issues\/:id\/decisions\/:decisionId\/withdraw$/, "issue.decision.withdraw"],
     [/^POST \/api\/(?:multiremi\/)?issues\/:id\/dependencies$/, "issue.dependency.add"],
     [/^DELETE \/api\/(?:multiremi\/)?issues\/:id\/dependencies\/:dependencyId$/, "issue.dependency.remove"],
-    [/^POST \/api\/(?:multiremi\/)?issues\/:id\/parent-done-grant$/, "issue.done-grant.add"],
-    [/^DELETE \/api\/(?:multiremi\/)?issues\/:id\/parent-done-grant$/, "issue.done-grant.remove"],
     [/^GET \/api\/(?:multiremi\/)?issues\/:id\/reactions$/, "issue.reaction.list"],
     [/^POST \/api\/(?:multiremi\/)?issues\/:id\/reactions$/, "issue.reaction.add"],
     [/^DELETE \/api\/(?:multiremi\/)?issues\/:id\/reactions$/, "issue.reaction.remove"],
@@ -472,11 +472,6 @@ function mappedResourceCommand(route: string): string | null {
     [/^POST \/api\/issues\/:id\/sessions\/:sessionId\/tasks$/, "issue.session.task.create"],
     [/^GET \/api\/issues\/:id\/session-results$/, "issue.session.result.list"],
     [/^POST \/api\/issues\/:id\/sessions\/:sessionId\/results$/, "issue.session.result.publish"],
-    [/^GET \/api\/issues\/:issueId\/session-archives$/, "session.archive.list"],
-    [/^POST \/api\/issues\/:issueId\/session-archives\/:archiveId\/verify$/, "session.archive.verify"],
-    [/^POST \/api\/issues\/:issueId\/session-archives\/:archiveId\/retry$/, "session.archive.retry"],
-    [/^GET \/api\/workspaces\/:id\/session-archive$/, "session.config.get"],
-    [/^PUT \/api\/workspaces\/:id\/session-archive$/, "session.config.update"],
     [/^GET \/api\/issues\/:id\/share$/, "share.get"],
     [/^POST \/api\/issues\/:id\/share$/, "share.create"],
     [/^POST \/api\/issues\/:id\/share\/extend$/, "share.extend"],
@@ -703,6 +698,8 @@ function mappedOperationsCommand(route: string): string | null {
     [/^GET \/api\/(?:multiremi\/)?runtimes\/:id\/local-skills\/:requestId$/, "runtime.skill.status"],
     [/^POST \/api\/(?:multiremi\/)?runtimes\/:id\/local-skills\/import$/, "runtime.skill.import"],
     [/^GET \/api\/(?:multiremi\/)?runtimes\/:id\/local-skills\/import\/:requestId$/, "runtime.skill.import-status"],
+    [/^POST \/api\/runtimes\/:id\/gc-runs$/, "runtime.gc"],
+    [/^GET \/api\/runtimes\/:id\/gc-runs\/:requestId$/, "runtime.gc-status"],
     [/^POST \/api\/(?:multiremi\/)?runtimes\/:id\/directory-scans$/, "runtime.directory.scan"],
     [/^GET \/api\/(?:multiremi\/)?runtimes\/:id\/directory-scans\/:requestId$/, "runtime.directory.status"],
     [/^GET \/api\/(?:multiremi\/)?runtimes\/:id\/usage$/, "runtime.usage"],
@@ -890,7 +887,6 @@ function plannedCommand(route: string): { domain: string; command: string } {
   else if (rawDomain === "workspaces" && segments.includes("feishu")) rawDomain = "feishu";
   else if (rawDomain === "issues" && segments.includes("change-requests")) rawDomain = "scm";
   else if (rawDomain === "workspaces" && segments.includes("lark")) rawDomain = "lark";
-  else if (rawDomain === "workspaces" && segments.includes("session-archive")) rawDomain = "session";
   if (rawDomain === "auth") rawDomain = "context";
   if (rawDomain === "me") rawDomain = "member";
   if (rawDomain === "remi" || rawDomain === "install.sh") rawDomain = "platform";

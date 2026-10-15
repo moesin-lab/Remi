@@ -39,6 +39,9 @@ import type {
   CloseSessionParams,
   McpServerConfig,
   PromptContent,
+  AgentSteering,
+  SteerParams,
+  SteerResponse,
 } from "@shared/contracts/acp-protocol.js";
 
 export interface AcpClientOptions {
@@ -126,6 +129,16 @@ export class AcpClient {
   /** The agent's `initialize` response (protocol version + advertised capabilities). */
   get initializeResult(): InitializeResult | null {
     return this._initializeResult;
+  }
+
+  /**
+   * Native steering, advertised as top-level `InitializeResponse._meta.steering
+   * .supported: true` by both pinned bridges (claude-agent-acp 0.90
+   * dist/acp-agent.js:1427-1429; codex-acp 2.2.2 dist/index.js:42474-42477).
+   */
+  get steeringSupported(): boolean {
+    const steering = this._initializeResult?._meta?.steering;
+    return !!steering && typeof steering === "object" && (steering as { supported?: unknown }).supported === true;
   }
 
   get typedSessionFailures(): boolean {
@@ -532,6 +545,15 @@ export class AcpClient {
             : { "subagent-transcript": true, jetbrains: { air: { version: 1, capabilities: ["sessionFailure"] } } }),
         },
         fs: { readTextFile: true, writeTextFile: true },
+        // ACP session lifecycle reports (PR 2 decision R11). Both pinned bridges
+        // need an object: with `compaction` they send `compaction_update` /
+        // `compaction_summary_chunk` instead of a "Compact conversation" tool call
+        // or banner text (claude-agent-acp 0.89 dist/context-compaction.js:3-6,
+        // acp-agent.js:2536-2541; codex-acp 2.2.2 dist/index.js:42231-42233,
+        // 44875); with `notices` they send `notice` updates instead of message
+        // text that would pollute the final reply (dist/session-notices.js:6-35;
+        // dist/index.js:30671-30682, 31504-31517, 31702-31711).
+        session: { compaction: {}, notices: {} },
         // Form-elicitation support: the agent keeps AskUserQuestion enabled and
         // sends it to us as `elicitation/create` instead of disabling the tool.
         // NOTE: `form` must be an object — the agent's zod schema silently
@@ -578,6 +600,20 @@ export class AcpClient {
 
     const params: PromptParams = { sessionId, prompt };
     return this._request<PromptResult>("session/prompt", params);
+  }
+
+  /**
+   * Inject `text` into the session's running turn (ADR 0020). With the idle
+   * opt-in, an idle Claude session answers `promptRequired` and leaves the text
+   * to us; codex-acp has no opt-in and drops `_meta` (dist/index.js:43989-43998).
+   */
+  async steer(sessionId: string, text: string, steering: AgentSteering): Promise<SteerResponse> {
+    const params: SteerParams = {
+      sessionId,
+      prompt: [{ type: "text", text }],
+      ...(steering.idleOptIn ? { _meta: { steering: { idleBehavior: "promptRequired" as const } } } : {}),
+    };
+    return this._request<SteerResponse>(steering.method, params);
   }
 
   async setMode(sessionId: string, modeId: string): Promise<void> {

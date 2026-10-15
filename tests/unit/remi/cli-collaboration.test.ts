@@ -488,10 +488,8 @@ describe("native collaboration CLI contracts", () => {
     try {
       const store = new MultiremiStore(database);
       store.ensureLocalWorkspace();
-      const parent = store.createIssue({ title: "CLI parent", responsibleMemberId: "mem_local_local" });
-      // This read/reply compatibility case intentionally models a historical
-      // member assignment. Current executable assignment rejects this shape.
-      database.run("UPDATE multiremi_issues SET assignee_type='member',assignee_id=? WHERE id=?", ["mem_local_local", parent.id]);
+      const owner = store.createAgent({ name: "CLI parent owner", provider: "codex" });
+      const parent = store.createIssue({ title: "CLI parent", assigneeType: "agent", assigneeId: owner.id });
       const child = store.createIssue({ title: "CLI child", parentIssueId: parent.id });
       const childSession = store.getOrCreateDefaultIssueSession(child.id);
       const parentSession = store.getOrCreateDefaultIssueSession(parent.id);
@@ -510,11 +508,16 @@ describe("native collaboration CLI contracts", () => {
         const output = await capture(() => registryFor([spec]).execute([...spec.path, ...args, "--output", "json"]));
         return JSON.parse(output.stdout);
       };
-      const first = await run("send", [childSession.id, "--to", "parent_owner", "--kind", "decision", "--content", "Ship it", "--option", "yes", "--option", "no"]);
+      // The parent_owner role resolves only to the parent's execution owner, in the parent's Main session.
+      const toOwner = await run("send", [childSession.id, "--to", "parent_owner", "--kind", "decision", "--content", "Ship it?", "--option", "yes", "--option", "no"]);
+      expect(toOwner.message).toMatchObject({ message_kind: "decision", session_id: parentSession.id, to_agent_id: owner.id, to_member_id: null });
+      // A member answers a decision addressed to them.
+      const first = await run("send", [parentSession.id, "--to", "mem_local_local", "--kind", "decision", "--content", "Ship it", "--option", "yes", "--option", "no"]);
       expect(first.message.message_kind).toBe("decision");
+      expect(first.message.to_member_id).toBe("mem_local_local");
       expect(first.message.metadata.message_choice.status).toBe("pending");
       const listed = await run("list", [parentSession.id, "--kind", "decision"]);
-      expect(listed.messages.map((message: { id: string }) => message.id)).toContain(first.message.id);
+      expect(listed.messages.map((message: { id: string }) => message.id)).toEqual(expect.arrayContaining([toOwner.message.id, first.message.id]));
       expect(store.getQuestion(first.message.id)).toBeNull();
       const answered = await run("send", [parentSession.id, "--reply-to", first.message.id, "--content", "Approved", "--option", "yes"]);
       expect(answered.message.reply_to_id).toBe(first.message.id);
@@ -629,6 +632,24 @@ describe("native collaboration CLI contracts", () => {
       await rm(dir, { recursive: true, force: true });
     }
     expect(requests).toBe(0);
+  });
+
+  it("lists user chats by default and forwards the requested chat origin", async () => {
+    useCliEnv();
+    const spec = specById("chat.list");
+    const queries: Array<Record<string, string>> = [];
+    globalThis.fetch = capabilityFetch(spec.id, (request) => {
+      const url = new URL(request.url);
+      expect(url.pathname).toBe("/api/chat/sessions");
+      queries.push(Object.fromEntries(url.searchParams));
+      return Response.json({ sessions: [{ id: "chat_auto", title: "Daily report · 09:00", origin: { autopilot_id: "apt_1", run_id: "run_1" } }] });
+    });
+    expect(registryFor([spec]).renderHelp(spec.path)).toContain("--origin <user|automation|all>");
+
+    await capture(() => registryFor([spec]).execute([...spec.path, "--json"]));
+    await capture(() => registryFor([spec]).execute([...spec.path, "--origin", "automation", "--json"]));
+    expect(queries[0]).not.toHaveProperty("origin");
+    expect(queries[1]).toMatchObject({ workspace_id: "ws_1", origin: "automation" });
   });
 
   it("advertises the Project flag only for creation and rejects empty Project values", async () => {

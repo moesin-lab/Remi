@@ -41,7 +41,7 @@ import type {
   UpdateIssueSessionInput,
 } from "@multiremi/contracts/types.js";
 import type { RouterDeps } from "./deps.js";
-import { ChatConflictError, ChatValidationError } from "@multiremi/store/repos/chat-repo.js";
+import { CHAT_ORIGIN_FILTERS, ChatConflictError, ChatValidationError, type ChatOriginFilter } from "@multiremi/store/repos/chat-repo.js";
 import { stripServerOwnedSessionTaskFields } from "../wire/issues.js";
 
 function sessionMutationActor(c: Context): { actorType: "agent" | "member" | "system"; actorId: string | null } {
@@ -64,8 +64,9 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
   // Feishu conversations share transport storage with Chat, but belong to
   // Feishu — an Issue topic to the Issue discussion surface, a private Feishu
   // thread to Feishu itself — never to the user's Web conversation list.
-  const listedSessions = (c: Context, workspaceId: string): MultiremiChatSession[] => {
+  const listedSessions = (c: Context, workspaceId: string, origin: ChatOriginFilter): MultiremiChatSession[] => {
     const sessions = store.listChatSessions(workspaceId, {
+      origin,
       creatorId: currentTaskAccessToken(c) ? currentRequestUserId(c) : undefined,
       includeArchived: c.req.query("status") === "all" || c.req.query("status") === "archived",
       excludeTransportSessions: true,
@@ -80,17 +81,26 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
     });
   };
 
+  // Automation-opened Chats stay out of the default list; `origin=all` or `automation` shows them.
+  const requestedOrigin = (c: Context): ChatOriginFilter | Response => {
+    const origin = c.req.query("origin") ?? "user";
+    return (CHAT_ORIGIN_FILTERS as readonly string[]).includes(origin)
+      ? origin as ChatOriginFilter : c.json({ error: "origin must be user, automation or all" }, 400);
+  };
+
   app.get("/api/multiremi/chats", (c) => {
     const workspaceId = requestedChatWorkspaceId(c, store);
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
+    const origin = requestedOrigin(c);
+    if (origin instanceof Response) return origin;
     const taskToken = currentTaskAccessToken(c);
     const task = taskToken?.taskId ? store.getTask(taskToken.taskId) : null;
     if (taskToken && !task?.chatSessionId) return c.json({ sessions: [], total: 0 });
     const contentDenied = denyTaskChatContentAccess(c, store, task?.chatSessionId ?? "");
     if (contentDenied) return contentDenied;
-    const sessions = listedSessions(c, workspaceId).filter((session) => !task || session.id === task.chatSessionId);
+    const sessions = listedSessions(c, workspaceId, origin).filter((session) => !task || session.id === task.chatSessionId);
     return c.json({ sessions, total: sessions.length });
   });
   app.post("/api/multiremi/chats", async (c) => {
@@ -213,12 +223,14 @@ export function registerChatRoutes(app: Hono, deps: RouterDeps): void {
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
+    const origin = requestedOrigin(c);
+    if (origin instanceof Response) return origin;
     const taskToken = currentTaskAccessToken(c);
     const task = taskToken?.taskId ? store.getTask(taskToken.taskId) : null;
     if (taskToken && !task?.chatSessionId) return c.json([]);
     const contentDenied = denyTaskChatContentAccess(c, store, task?.chatSessionId ?? "");
     if (contentDenied) return contentDenied;
-    return c.json(listedSessions(c, workspaceId).filter((session) => !task || session.id === task.chatSessionId)
+    return c.json(listedSessions(c, workspaceId, origin).filter((session) => !task || session.id === task.chatSessionId)
       .map(chatSessionCompatibilityResponse));
   });
   app.post("/api/chat/sessions", async (c) => {

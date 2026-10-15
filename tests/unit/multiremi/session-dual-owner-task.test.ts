@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { daemonTaskClaimResponse, taskRealtimePayload } from "@multiremi/api/wire/tasks.js";
 import { buildTaskPrompt } from "@daemon/agent-runtime/prompts/ephemeral.js";
 import { resolveWorkDir } from "@daemon/agent-runtime/workspace/persistent.js";
-import { resolveIssueSessionProviderHome } from "@daemon/agent-runtime/workspace/session-home.js";
+import { resolveTaskProviderHome } from "@daemon/agent-runtime/workspace/session-home.js";
 import { createLocalStore, createResponsibleTestIssue, db, resetMultiremiTestEnv } from "./helpers.js";
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 import { bindFeishuTopicFixture } from "./feishu-topic-fixture.js";
@@ -38,9 +38,9 @@ describe("Session Task dual ownership", () => {
         expect(wire.issue_session).toMatchObject({ ownerType: owner, ownerId: chat?.id ?? issue!.id });
         expect(taskRealtimePayload(task)).toMatchObject({ issue_session_id: session.id });
         const daemonTask = { ...claimed, issueSession: session, agent } as any;
-        expect(resolveIssueSessionProviderHome(daemonTask, "/tmp/work", "/tmp/session-workspaces")?.sessionId).toBe(session.id);
+        expect(resolveTaskProviderHome(daemonTask, "/tmp/session-workspaces")?.sessionId).toBe(session.id);
         expect(resolveWorkDir(daemonTask, "/tmp/session-workspaces").workDir)
-          .toBe(owner === "issue" ? `/tmp/session-workspaces/issues/${issue!.key}` : `/tmp/session-workspaces/chats/${chat!.id}`);
+          .toBe(owner === "issue" ? `/tmp/session-workspaces/work/${issue!.id}` : `/tmp/session-workspaces/work/${chat!.id}`);
         store.startTask(task.id);
         if (status === "completed") store.completeTask(task.id, { output: "Durable result", sessionId: "provider_result", workDir: "/tmp/work" });
         else if (status === "failed") store.failTask(task.id, { error: "boom" });
@@ -176,7 +176,7 @@ describe("Session Task dual ownership", () => {
       const sharedTasks = [ordinary, taskA, taskB];
       for (const task of sharedTasks) {
         expect(resolveWorkDir(store.getTaskWithAgent(task.id)! as any, "/tmp/chat-lease-workspaces").workDir)
-          .toBe(`/tmp/chat-lease-workspaces/chats/${chat.id}`);
+          .toBe(`/tmp/chat-lease-workspaces/work/${chat.id}`);
       }
       const first = firstSurface === "session-a" ? taskA : firstSurface === "session-b" ? taskB : ordinary;
       expect(store.claimTask(runtime.id)?.id).toBe(first.id);

@@ -68,7 +68,6 @@ export type AutopilotEventConfig =
   | AutopilotScmEventConfig;
 
 export interface Autopilot {
-  responsible_member_id?: string | null;
   id: string;
   workspace_id: string;
   title: string;
@@ -154,6 +153,8 @@ export interface AutopilotRun {
   status: AutopilotRunStatus;
   issue_id: string | null;
   issue_session_id: string | null;
+  /** Chat opened for a `run_only` run. */
+  chat_session_id: string | null;
   task_id: string | null;
   triggered_at: string;
   completed_at: string | null;
@@ -166,7 +167,6 @@ export interface AutopilotRun {
 }
 
 export interface CreateAutopilotRequest {
-  responsible_member_id?: string | null;
   title: string;
   description?: string;
   project_id?: string | null;
@@ -181,7 +181,6 @@ export interface CreateAutopilotRequest {
 }
 
 export interface UpdateAutopilotRequest {
-  responsible_member_id?: string | null;
   title?: string;
   description?: string | null;
   project_id?: string | null;

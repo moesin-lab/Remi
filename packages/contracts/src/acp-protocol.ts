@@ -69,6 +69,12 @@ export interface InitializeParams {
 export interface ClientCapabilities {
   fs?: { readTextFile?: boolean; writeTextFile?: boolean };
   terminal?: boolean;
+  /**
+   * `ClientSessionCapabilities` (@agentclientprotocol/sdk 1.8.0
+   * dist/schema/zod.gen.js:2345-2350): each present entry opts into an ACP
+   * session report. Both are records; the bridges require an object.
+   */
+  session?: { compaction?: Record<string, unknown>; notices?: Record<string, unknown>; _meta?: Record<string, unknown> };
   elicitation?: { form?: Record<string, unknown>; url?: Record<string, unknown> };
   _meta?: Record<string, unknown>;
 }
@@ -145,6 +151,8 @@ export interface NewSessionMeta {
   systemPrompt?: string | { append?: string; [key: string]: unknown };
   /** Grok Build extension: approve tool use without an interactive permission round-trip. */
   yoloMode?: boolean;
+  /** Antigravity ACP server options (`_meta.antigravity`, read on new, load and resume). */
+  antigravity?: { systemPrompt?: { append: string } };
 }
 
 export interface SdkMessageFilter {
@@ -296,7 +304,40 @@ export type SessionUpdate =
   | UsageUpdate
   | ConfigOptionUpdate
   | SessionInfoUpdate
-  | AvailableCommandsUpdate;
+  | AvailableCommandsUpdate
+  | CompactionUpdate
+  | CompactionSummaryChunkUpdate
+  | NoticeUpdate;
+
+/**
+ * ACP context compaction lifecycle (sdk 1.8.0 schema; sent once the client
+ * advertises `session.compaction`). `summary` comes with the terminal update
+ * unless it streamed as `compaction_summary_chunk`s.
+ */
+export interface CompactionUpdate {
+  sessionUpdate: "compaction_update";
+  compactionId: string;
+  status: "in_progress" | "completed" | "failed" | "cancelled";
+  summary?: ContentBlock[];
+  error?: string;
+  _meta?: Record<string, unknown>;
+}
+
+export interface CompactionSummaryChunkUpdate {
+  sessionUpdate: "compaction_summary_chunk";
+  compactionId: string;
+  content: ContentBlock;
+  _meta?: Record<string, unknown>;
+}
+
+/** A session notice (sent once the client advertises `session.notices`). */
+export interface NoticeUpdate {
+  sessionUpdate: "notice";
+  severity: "info" | "warning" | "error";
+  title: string;
+  description?: string;
+  _meta?: Record<string, unknown>;
+}
 
 export interface ContentChunkUpdate {
   sessionUpdate: "agent_message_chunk" | "user_message_chunk";
@@ -645,8 +686,46 @@ export interface AgentAdapter {
   /** Build agent-specific _meta for session/new. */
   buildSessionMeta(options: AgentSessionOptions): NewSessionMeta | undefined;
 
+  /**
+   * Native steering (ADR 0020): the bridge's request method, and whether it
+   * accepts the `promptRequired` idle opt-in (`_meta.steering.idleBehavior`).
+   * Absent when the agent cannot steer. The switch point for ACP `session/inject`.
+   */
+  readonly steering?: AgentSteering;
+
   /** Default executable name for this agent type. */
   defaultExecutable(): string;
+}
+
+export interface AgentSteering {
+  /** JSON-RPC request method, e.g. `_session/steering`. */
+  method: string;
+  /**
+   * Send `_meta.steering.idleBehavior: "promptRequired"`, so an idle session
+   * answers `promptRequired` instead of starting a detached turn.
+   */
+  idleOptIn: boolean;
+  /**
+   * Hold the steer until no top-level tool call of the prompt is running. A
+   * bridge that moves a running call to the background to deliver a steer
+   * (claude-agent-acp 0.90) would otherwise end the prompt before the call's
+   * result and the reply to it arrive.
+   */
+  waitForToolCalls: boolean;
+}
+
+/** Params of the `_session/steering` request (both pinned bridges). */
+export interface SteerParams {
+  sessionId: string;
+  prompt: PromptContent[];
+  _meta?: { steering?: { idleBehavior?: "promptRequired" } } & Record<string, unknown>;
+}
+
+/** Result of the `_session/steering` request; unknown outcomes are treated as `failed`. */
+export interface SteerResponse {
+  outcome?: string;
+  reason?: string;
+  _meta?: Record<string, unknown>;
 }
 
 export interface AskUserQuestionData {

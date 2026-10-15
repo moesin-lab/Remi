@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { attachmentIdsFromText } from "@multiremi/contracts/attachments.js";
 import { CHAT_ARTIFACT_DELIVERY_CONTRACT } from "@multiremi/contracts/artifact-delivery.js";
 import type { AgentTask } from "@daemon/contracts/types.js";
 import { hasReadOnlyCodeSnapshot, isSideConversation, SIDE_CONVERSATION_INSTRUCTIONS } from "./side-conversation.js";
 
-/** A repo the daemon pre-checked-out into the task workDir before the run. */
+/** A repo the daemon pre-checked-out into the subject workspace before the run; `path` is absolute. */
 export interface TaskRepoCheckout {
   repoUrl: string;
   path: string;
@@ -30,7 +31,11 @@ export interface BuildTaskPromptOptions {
   repoWarnings?: TaskRepoWarning[];
   platform?: NodeJS.Platform;
   sessionHistoryPaths?: string[];
-  issueWorkspacePath?: string;
+  /**
+   * The subject's shared workspace, the value of `$MULTIREMI_WORKSPACE_ROOT`: repositories and the
+   * Wiki working copy live here, which can differ from the directory the agent starts in.
+   */
+  workspacePath?: string;
   /** Actual workspace preparation result; false means Wiki is available through CLI only. */
   wikiMaterialized?: boolean;
   /** Actual workspace preparation mode; true only for eligible daemon-owned Project Chat workspaces. */
@@ -136,7 +141,7 @@ export function buildTaskPromptArtifact(task: AgentTask, opts: BuildTaskPromptOp
   if (!privateChat || task.project) appendRepositoryWarnings(sections, opts.repoWarnings ?? [], privateChat);
   appendKnowledgeAvailabilityWarnings(sections, task);
 
-  appendProjectPromptSections(sections, task, mode, task.runtimeWorkspaceId ? false : opts.wikiMaterialized);
+  appendProjectPromptSections(sections, task, mode, task.runtimeWorkspaceId ? false : opts.wikiMaterialized, opts.workspacePath);
   if (mode === "bootstrap" && task.issue) appendProjectDiscoverySection(sections);
 
   if (hasReadOnlyCodeSnapshot(task)) {
@@ -174,16 +179,17 @@ export function buildTaskPromptArtifact(task: AgentTask, opts: BuildTaskPromptOp
   if (task.issue && taskHoldsWorkspace(task)) {
     sections.push("", "## Shared Workspace Coordination",
       "Other Agents may run concurrently in the same repository checkouts. Your execution directory contains private task configuration, not a separate code checkout. Use the reported repository paths, coordinate overlapping edits, preserve others' changes, and never switch the shared branch. Do not assume another Agent has finished just because one task completed.");
-    if (opts.issueWorkspacePath) sections.push(`Shared code root: \`${opts.issueWorkspacePath}\`. Run repository checkout commands from this root, not your private execution directory. Read each repository's AGENTS.md and directory instructions before editing it.`);
+    if (opts.workspacePath) sections.push(`Shared code root: \`${opts.workspacePath}\` (\`$MULTIREMI_WORKSPACE_ROOT\`). Run repository checkout commands from this root, not your private execution directory. Read each repository's AGENTS.md and directory instructions before editing it.`);
   }
   appendSquadContextSection(sections, task);
   if (task.issue) {
-    sections.push("", "## Issue Responsibility and Formal Delivery",
-      `Read \`remi issue responsibility ${task.issue.id} --output json\` for the execution coordinator, reviewer and unavailable execution reasons. Responsibility comes from this Issue, never the first team of the message sender. A missing or archived Leader is a blocker; do not substitute another member.`,
-      "Delegated work reports return to the actual delegator's original Session/scope, including cross-team delegation. They do not transfer Issue ownership. The parent execution coordinator continuously owns child progress, blockers and result review; the root execution coordinator owns the final result.",
-      `When you are this Issue's execution coordinator, submit the durable summary/evidence with \`remi issue delivery submit ${task.issue.id} --summary \"<summary and evidence links>\"\`. Task completion, an SCM merge and an empty queue are not Issue acceptance. Review an exact delivery with \`remi issue delivery accept|return <issue> <delivery> --revision <responsibilityRevision> [--reason <feedback>]\` only as its authorized reviewer. For a root Issue, its execution coordinator is also its reviewer: submit then accept the exact delivery using its returned responsibilityRevision. No designated human or proxy grant is required. A child is reviewed by its direct parent coordinator. Workspace members may optionally review a root delivery.`,
-      "Create a responsibility question only through native AskUserQuestion, which creates one original Q. `remi message send --kind decision` is an ordinary conversation choice and does not create a responsibility Q. Read responsibility with `remi issue responsibility <issue>`. Read the original Q using `remi message question get <Q> --output json`; answer using `remi message question answer <Q> --revision <route_revision> --data '<JSON with response>'`. If you cannot decide, use `remi message question escalate <Q> --revision <route_revision> --reason <reason>`. Do not create a second AUQ in the parent or Remi Session, and do not answer a human authorization on their behalf. Consult a Senior through ordinary directed collaboration messages.",
-      "Remi presents context and recommendations through `remi message question present <Q> --revision <route_revision> --summary <summary>` while preserving original questions/options and the current route; an Issue without a designated contact uses its workspace human-review queue. Answer saved is not proof the original call resumed: report wait_status and actual consumption. An explicit human revision uses --revise --answer-revision <answer_revision> --reason <reason>, preserving history without replaying the old call.");
+    sections.push("", "## Issue Execution and Escalation",
+      `Read \`remi issue responsibility ${task.issue.id} --output json\` for the execution owner chain and unavailable reasons. An Issue's execution owner is its assigned Agent or the assigned team's available Leader, never the first team of the message sender. A missing or archived Leader is a blocker; do not substitute another member.`,
+      "Delegated work reports return to the actual delegator's original Session/scope, including cross-team delegation. They do not transfer Issue ownership.",
+      "As this Issue's execution owner, your final reply of the round is its summary; when the round ends the Issue moves to `in_review` automatically. Never set an Issue you execute to `done`.",
+      "As a parent Issue's execution owner, check each child's result. If it is right, run `remi issue status <child> done`. If it needs changes, find the child's Issue Session with `remi issue session list <child> --output json` and send `remi message send <child-session-id> --to issue-owner --kind request --content \"<what to change>\"`.",
+      "Ask questions only through native AskUserQuestion, which creates one original Q; `remi message send --kind decision` is an ordinary conversation choice and creates no Q. Every Q, permission requests included, climbs the execution owner chain: this Issue, then each parent up to the root, and above the root the workspace members. For a Q routed to you, read it with `remi message question get <Q> --output json`. Answer with `remi message question answer <Q> --revision <route_revision> --data '{\"response\":{\"selected_options\":[\"<options[].value>\"]}}'` (for a permission request, the chosen option's value is its option_id) or `--data '{\"response\":{\"answers\":{\"<question>\":\"<answer>\"}}}'`. If you cannot decide, use `remi message question escalate <Q> --revision <route_revision> --reason <reason>`. Do not create a second AUQ in the parent or Remi Session. Consult a Senior through ordinary directed collaboration messages.",
+      "Remi presents context and recommendations through `remi message question present <Q> --revision <route_revision> --summary <summary>` while preserving the original questions and options. Answer saved is not proof the original call resumed: report wait_status and actual consumption. An explicit answer revision uses --revise --answer-revision <answer_revision> --reason <reason>, preserving history without replaying the old call.");
   }
 
   if (mode === "bootstrap" && task.agent?.instructions) {
@@ -274,7 +280,13 @@ function appendWorkspacePromptSection(sections: string[], task: AgentTask, mode:
   sections.push(prompt);
 }
 
-function appendProjectPromptSections(sections: string[], task: AgentTask, mode: TaskPromptMode, wikiMaterialized?: boolean): void {
+function appendProjectPromptSections(
+  sections: string[],
+  task: AgentTask,
+  mode: TaskPromptMode,
+  wikiMaterialized?: boolean,
+  workspacePath?: string,
+): void {
   if (!task.project) return;
   if (mode === "delta") {
     const deltaInstructions = task.project.deltaInstructions?.trim()
@@ -305,7 +317,7 @@ function appendProjectPromptSections(sections: string[], task: AgentTask, mode: 
     sections.push("## Project Instructions");
     sections.push(projectInstructions);
   }
-  appendProjectKnowledgeSections(sections, task.project.id, wikiMaterialized);
+  appendProjectKnowledgeSections(sections, task.project.id, wikiMaterialized, workspacePath);
 }
 
 function appendProjectDiscoverySection(sections: string[]): void {
@@ -466,6 +478,12 @@ function appendClaimContextSections(sections: string[], task: AgentTask, mode: T
       sections.push("Trigger payload:");
       sections.push(formatJsonBlock(autopilotPayload));
     }
+  }
+
+  if (task.autopilotRunId && task.chatSessionId) {
+    sections.push("");
+    sections.push("## Automation Run");
+    sections.push("A schedule or event started this run; nobody is waiting on the screen. If it has nothing worth reporting, run `remi automation quiet` before finishing and the conversation is archived instead of notifying anyone. A run that fails always stays visible.");
   }
 
   const quickCreatePrompt = stringField(task, "quickCreatePrompt", "quick_create_prompt");
@@ -862,7 +880,9 @@ function appendBoundIssueFollowupSection(sections: string[], issueId: string): v
   sections.push("After a verified handoff, finish this Chat turn. Do not wait or poll until the work finishes; once no other Issue task is active, the reporting path brings the terminal round (completed, failed, or cancelled) back to this topic. Do not issue an unsolicited follow-up task while summarizing a report.");
 }
 
-function appendProjectKnowledgeSections(sections: string[], projectId: string, wikiMaterialized?: boolean): void {
+function appendProjectKnowledgeSections(sections: string[], projectId: string, wikiMaterialized?: boolean, workspacePath?: string): void {
+  // The agent may start outside the workspace, so the Wiki is addressed through the workspace root, never `./wiki`.
+  const wiki = "$MULTIREMI_WORKSPACE_ROOT/wiki";
   sections.push("");
   sections.push("## Project Knowledge");
   sections.push("Project Memory is not embedded in this prompt. Use the `remi memory` CLI only: first run `remi memory search \"<query>\"`, then `remi memory get <slug-or-id>` for relevant hits before relying on them.");
@@ -871,13 +891,13 @@ function appendProjectKnowledgeSections(sections: string[], projectId: string, w
   if (wikiMaterialized === false) {
     sections.push("Project Wiki has not been materialized in this working directory. Use `remi wiki search` and `remi wiki get` to read the current project's Wiki through the CLI. Use `remi wiki --help` to discover supported write commands.");
   } else {
-    sections.push("Project Wiki is materialized in `./wiki`. Repository code facts are materialized in `./wiki/repositories/<repository>/`. Edit files only below `./wiki`; `.multiremi/wiki-base` is a read-only merge baseline and must not be edited.");
+    sections.push(`Project Wiki is materialized in \`${wiki}\`${workspacePath ? ` (absolute path \`${join(workspacePath, "wiki")}\`)` : ""}. Repository code facts are materialized in \`${wiki}/repositories/<repository>/\`. Edit files only below \`${wiki}\`; \`$MULTIREMI_WORKSPACE_ROOT/.multiremi/wiki-base\` is a read-only merge baseline and must not be edited.`);
   }
   sections.push("Repository Wiki is shared by every Project that references the same repository. Keep code-level facts there; keep cross-repository decisions and synthesis in the Project Wiki.");
   sections.push("For every non-empty Wiki, maintain a non-empty root `index.md` as its curated reading map and append every publication to a non-empty root `log.md` without rewriting earlier entries. Beyond those two root files, let project and repository semantics choose the directory names; do not impose a fixed vocabulary, per-directory overview pages, or nesting that mirrors the source tree.");
   sections.push("Directory names are free, but size is not: keep at most 20 body pages directly inside any one directory, at most 5 non-index body pages at the root, and at most 4 levels of nesting. When a directory exceeds 20, split it into subdirectories by subsystem or functional domain — grouping inside `index.md` does not count. A single directory holding 100 pages reads exactly like a flat Wiki in the sidebar, which is what this rule exists to prevent.");
   sections.push("Search before creating a page. When facts overlap across pages, merge them into the authoritative page with all source references preserved instead of adding another near-duplicate page.");
-  if (wikiMaterialized !== false) sections.push("Before finishing, run `remi wiki status` and `remi wiki push`. Push performs a three-way merge; resolve any reported conflicts in `./wiki`, then retry the push.");
+  if (wikiMaterialized !== false) sections.push(`Before finishing, run \`remi wiki status\` and \`remi wiki push\`. Push performs a three-way merge; resolve any reported conflicts in \`${wiki}\`, then retry the push.`);
   sections.push(`When durable Memory changes, search before writing and update an existing entry instead of creating a duplicate. Use \`remi memory create|update\` (project ${projectId}), cite \`issue:\`/\`task:\`/\`url:\` provenance, and skip one-off details.`);
 }
 
@@ -887,7 +907,7 @@ function appendSquadContextSection(sections: string[], task: AgentTask): void {
   if (!squad || !task.agent || squad.leaderAgentId !== task.agent.id) return;
   sections.push("");
   sections.push("## Squad Coordination");
-  sections.push(`You are the lead agent for squad ${squad.name}. You coordinate execution and integration; the resolved parent reviewer owns child acceptance; a root execution coordinator can accept its own formal delivery without a human grant.`);
+  sections.push(`You are the lead agent for squad ${squad.name} and this Issue's execution owner: coordinate execution and integration. Your final reply of the round is the summary; the parent execution owner, or a workspace member for a root Issue, sets it to done.`);
   const teammates = squad.members.filter((member) => member.agentId !== task.agent!.id);
   if (teammates.length) {
     sections.push("Available agent teammates:");

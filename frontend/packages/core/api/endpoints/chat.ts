@@ -8,6 +8,7 @@ import type {
   Session,
   SessionTask,
   CreateChatSessionInput,
+  ChatOriginFilter,
   ChatPendingTask,
   ChatSession,
   PendingChatTasksResponse,
@@ -93,8 +94,11 @@ export class ChatEndpoints {
   }
 
   // Chat Sessions
-  async listChatSessions(params?: { status?: string }): Promise<ChatSession[]> {
-    const query = params?.status ? `?status=${params.status}` : "";
+  async listChatSessions(params?: { status?: string; origin?: ChatOriginFilter }): Promise<ChatSession[]> {
+    const search = new URLSearchParams();
+    if (params?.status) search.set("status", params.status);
+    if (params?.origin) search.set("origin", params.origin);
+    const query = search.toString() ? `?${search}` : "";
     const raw = await this.http.fetch<unknown>(`/api/chat/sessions${query}`);
     return parseStrictResponse<ChatSession[]>(raw, ChatSessionListSchema, { endpoint: "GET /api/chat/sessions" });
   }
@@ -137,10 +141,15 @@ export class ChatEndpoints {
     return session;
   }
 
+  /**
+   * Sends now: a running turn takes the message as a steer (ADR 0020). The
+   * wake is explicit so a different server default cannot turn a steer into
+   * a deferred message; queueing goes through the follow-up queue instead.
+   */
   async sendChatMessage(sessionId: string, content: string, attachmentIds?: string[], clientId?: string): Promise<SendChatMessageResponse> {
     const session = await this.getChatSession(sessionId);
     const result = await new MessagesEndpoints(this.http).sendMessage(sessionId, {
-      body_md: content, message_kind: "request", to: { type: "agent", ref: session.agent_id },
+      body_md: content, message_kind: "request", to: { type: "agent", ref: session.agent_id }, wake_requested: "now",
       attachment_ids: attachmentIds?.length ? attachmentIds : undefined, dedupe_key: clientId,
     });
     // The message is committed. A supplemental read must not turn it into a failed send.
@@ -169,7 +178,7 @@ export class ChatEndpoints {
   }
   async listPendingChatTasks(): Promise<PendingChatTasksResponse> {
     return { tasks: (await this.activeTurns()).filter(turn => turn.session_id.startsWith("chat_"))
-      .map(turn => ({ task_id: turn.current_attempt_id ?? turn.id, status: turn.status === "pending" ? "queued" : turn.status, chat_session_id: turn.session_id })) };
+      .map(turn => ({ task_id: turn.current_attempt_id ?? turn.id, turn_id: turn.id, status: turn.status === "pending" ? "queued" : turn.status, chat_session_id: turn.session_id })) };
   }
 
   async markChatSessionRead(sessionId: string): Promise<void> {

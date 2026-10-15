@@ -10,7 +10,6 @@ import { createId, nowIso } from "@multiremi/ids.js";
 import { IssueDependencyError } from "@multiremi/store/repos/issue-dependencies.js";
 import {
   cleanOptionalString,
-  hasAnyField,
   isRecord,
   normalizeOptionalTimezone,
   normalizePositiveInt,
@@ -32,6 +31,7 @@ import type {
   MultiremiAutopilotRun,
   MultiremiAutopilotScmEventConfig,
   MultiremiAutopilotSystemEventConfig,
+  MultiremiChatSession,
   MultiremiScmCanonicalEventType,
   MultiremiAutopilotTrigger,
   MultiremiScheduleTargets,
@@ -69,6 +69,8 @@ export type RunAutopilotStoreInput = RunAutopilotInput & {
 export interface MultiremiAutopilotRunRecord extends MultiremiAutopilotRun {
   repositoryId: string | null;
   dedupeKey: string | null;
+  /** The agent reported nothing worth surfacing (`remi automation quiet`). */
+  quiet: boolean;
   /** Set (not persisted) when runAutopilot returned an existing run instead of creating one. */
   deduplicated?: boolean;
 }
@@ -132,11 +134,6 @@ export interface MultiremiAutopilotFailureThresholdCandidate {
 }
 
 export class AutopilotsRepo {
-  private validateRootResponsibleMember(id:string|null,workspaceId:string):void {
-    if(!id)return;
-    const member=this.ctx.workspaces().getWorkspaceMember(id);
-    if(!member||member.archivedAt||member.workspaceId!==workspaceId)throw new Error('Autopilot responsible_member_id must name an active human in its workspace');
-  }
   constructor(private ctx: StoreContext) {}
 
   createAutopilot(input: CreateAutopilotInput): MultiremiAutopilot {
@@ -168,8 +165,7 @@ export class AutopilotsRepo {
     }
     const createdByType = normalizeAutopilotCreatorType(input.createdByType ?? input.created_by_type);
     const createdById = cleanOptionalString(input.createdById ?? input.created_by_id) ?? "local";
-    const responsibleMemberId=cleanOptionalString(input.responsibleMemberId??input.responsible_member_id);
-    this.validateRootResponsibleMember(responsibleMemberId,workspaceId);
+    // `responsibleMemberId` is deprecated: accepted, never validated or persisted.
     const issueCreationRestricted = Boolean(input.issueCreationRestricted ?? input.issue_creation_restricted);
     const issueCreationRestrictedByTaskId = issueCreationRestricted
       ? cleanOptionalString(input.issueCreationRestrictedByTaskId)
@@ -216,17 +212,49 @@ export class AutopilotsRepo {
     this.ctx.db.run('UPDATE multiremi_autopilots SET session_id=? WHERE id=?',[sessionId,id]);
     this.ctx.conversationLog().ensureSessionHeadWithinTransaction(sessionId,{bodyMd:input.title,title:input.title});
     const autopilot = this.getAutopilot(id)!;
-    this.ctx.db.run('UPDATE multiremi_autopilots SET responsible_member_id=? WHERE id=?',[responsibleMemberId,id]);
     this.ctx.analytics().recordAutopilotCreatedAnalytics(autopilot);
-    return this.getAutopilot(id)!;
+    return autopilot;
   }
 
-  private appendAutomationRequestWithinTransaction(autopilotId:string,agentId:string,prompt:string,issueSessionId:string|null,turnId:string):number {
+  /**
+   * The request goes into the conversation that runs it (an Issue session or the run's Chat);
+   * the `auto_<id>` log keeps a trigger entry that points at that conversation.
+   */
+  private appendAutomationRequestWithinTransaction(autopilotId:string,agentId:string,prompt:string,sessionId:string,turnId:string):number {
     const autoSession=autopilotSessionId(autopilotId),events=createCommitEventQueue();
-    const request=sendMessageWithinTransaction(this.ctx,{session_id:issueSessionId??autoSession,sender:{type:'timer',id:autopilotId},to:{type:'agent',ref:agentId},
-      message_kind:'request',wake_requested:'next_turn',body_md:prompt,execution_scope:issueSessionId?'':`auto:${this.ctx.db.query('SELECT id FROM multiremi_autopilot_runs WHERE turn_id=?').get(turnId)?.id??turnId}`},events);
-    if(issueSessionId)sendMessageWithinTransaction(this.ctx,{session_id:autoSession,sender:{type:'timer',id:autopilotId},to:{type:'none'},message_kind:'request',wake_requested:'inbox_only',body_md:prompt,metadata:{turn_id:turnId,session_id:issueSessionId}},events);
+    const request=sendMessageWithinTransaction(this.ctx,{session_id:sessionId,sender:{type:'timer',id:autopilotId},to:{type:'agent',ref:agentId},
+      message_kind:'request',wake_requested:'next_turn',body_md:prompt},events);
+    sendMessageWithinTransaction(this.ctx,{session_id:autoSession,sender:{type:'timer',id:autopilotId},to:{type:'none'},message_kind:'request',wake_requested:'inbox_only',body_md:prompt,metadata:{turn_id:turnId,session_id:sessionId}},events);
     afterCommit(this.ctx.db,()=>this.ctx.emitCommitEvents(events));return request.message.seq;
+  }
+  /**
+   * The Chat a `run_only` run executes in. `reuse_latest` continues the Chat of the
+   * automation's latest run while it still exists and belongs to the same agent;
+   * otherwise each run opens a new Chat owned by the automation's responsible member.
+   */
+  private openRunChatWithinTransaction(autopilot:MultiremiAutopilot,agent:{id:string},runId:string,reuseLatest:boolean):MultiremiChatSession {
+    if(reuseLatest){
+      const latest=this.ctx.db.query('SELECT chat_session_id FROM multiremi_autopilot_runs WHERE autopilot_id=? AND id<>? ORDER BY created_at DESC,id DESC LIMIT 1').get(autopilot.id,runId);
+      const chat=latest?.chat_session_id?this.ctx.chat().getChatSession(String(latest.chat_session_id)):null;
+      if(chat&&chat.agentId===agent.id&&chat.workspaceId===autopilot.workspaceId){
+        this.ctx.db.run('UPDATE multiremi_autopilot_runs SET chat_session_id=? WHERE id=?',[chat.id,runId]);
+        return chat;
+      }
+    }
+    const chat=this.ctx.chat().createChatSessionWithinTransaction({workspaceId:autopilot.workspaceId,agentId:agent.id,
+      creatorId:this.runChatCreator(autopilot),title:`${autopilot.title} · ${formatLocalMinute(new Date())}`});
+    this.ctx.db.run('UPDATE multiremi_chat_sessions SET origin_autopilot_id=?,origin_run_id=? WHERE id=?',[autopilot.id,runId,chat.id]);
+    this.ctx.db.run('UPDATE multiremi_autopilot_runs SET chat_session_id=? WHERE id=?',[chat.id,runId]);
+    return this.ctx.chat().getChatSession(chat.id)!;
+  }
+  /** The member who created the automation, else the workspace owner (as a user id). */
+  private runChatCreator(autopilot:MultiremiAutopilot):string {
+    const workspaces=this.ctx.workspaces();
+    const creator=autopilot.createdByType==='member'?this.ctx.resolveWorkspaceMemberForNotification(autopilot.workspaceId,autopilot.createdById):null;
+    const member=(creator&&!creator.archivedAt?creator:null)
+      ??workspaces.listWorkspaceMembers(autopilot.workspaceId).find(candidate=>candidate.role==='owner'&&!candidate.archivedAt);
+    if(!member)throw new Error(`Automation ${autopilot.id} has no member to own its Chat`);
+    return member.userId??member.id;
   }
   private bindAutomationInputWithinTransaction(attemptId:string,requestSeq:number):void {
     this.ctx.db.run('UPDATE multiremi_turns SET wake_seq=? WHERE current_attempt_id=?',[requestSeq,attemptId]);
@@ -290,8 +318,6 @@ export class AutopilotsRepo {
       if (project.workspaceId !== current.workspaceId) throw new Error("Autopilot project is in a different workspace");
     }
     const nextProjectId = input.projectId === undefined ? current.projectId : input.projectId;
-    const responsibleMemberId=hasAnyField(input,'responsibleMemberId','responsible_member_id')?cleanOptionalString(input.responsibleMemberId??input.responsible_member_id):current.responsibleMemberId??null;
-    if(hasAnyField(input,'responsibleMemberId','responsible_member_id'))this.validateRootResponsibleMember(responsibleMemberId,current.workspaceId);
     const existingTriggers = this.listAutopilotTriggers(id);
     if (nextExecutionMode === "create_issue" && existingTriggers.some((trigger) => trigger.scheduleTargets)) {
       throw new Error("schedule_targets requires run_only or trigger_issue execution");
@@ -323,7 +349,6 @@ export class AutopilotsRepo {
     }
     const now = nowIso();
     this.ctx.db.transaction(() => {
-      this.ctx.db.run('UPDATE multiremi_autopilots SET responsible_member_id=? WHERE id=?',[responsibleMemberId,id]);
       this.ctx.db.run(
         `UPDATE multiremi_autopilots SET
         title = ?,
@@ -542,13 +567,14 @@ export class AutopilotsRepo {
               runAutopilotRunMutation(this.ctx.db, "UPDATE multiremi_autopilot_run_records SET status = 'skipped', completed_at = ?, failure_reason = 'Source task unavailable' WHERE id = ?", [nowIso(), run.id]);
               continue;
             }
+            const chat=this.openRunChatWithinTransaction(autopilot,agent,run.id,false);
             const attemptId=createId('tsk');
             this.ctx.db.run('UPDATE multiremi_autopilot_runs SET turn_id=? WHERE id=?',[attemptId,run.id]);
             const requestBody=`${String(row.schedule_prompt)}\n\n## Scheduled Target\n${JSON.stringify(target)}\nThis task is bound to this single target. Do not process other projects or repositories.`;
-            const requestSeq = this.appendAutomationRequestWithinTransaction(autopilot.id,agent.id,requestBody,null,attemptId);
+            const requestSeq = this.appendAutomationRequestWithinTransaction(autopilot.id,agent.id,requestBody,chat.id,attemptId);
             const created = this.ctx.tasks().createTaskWithinTransaction({
-              id:attemptId,agentId: agent.id, workspaceId: autopilot.workspaceId,conversationSessionId:autopilotSessionId(autopilot.id),
-              triggerCommentId:this.ctx.db.query('SELECT id FROM multiremi_conversation_log WHERE session_id=? AND seq=?').get(autopilotSessionId(autopilot.id),requestSeq)?.id,
+              id:attemptId,agentId: agent.id, workspaceId: autopilot.workspaceId,conversationSessionId:chat.id,chatSessionId:chat.id,
+              triggerCommentId:this.ctx.db.query('SELECT id FROM multiremi_conversation_log WHERE session_id=? AND seq=?').get(chat.id,requestSeq)?.id,
               prompt:requestBody,
               parentTaskId: parent?.id ?? null,
               issueCreationRestricted: Boolean(autopilot.issueCreationRestricted || trigger.issueCreationRestricted || parent?.issueCreationRestricted || agent.issueCreationRequiresProposal),
@@ -1567,16 +1593,13 @@ export class AutopilotsRepo {
 
       let issue: MultiremiIssue | null = null;
       let issueSessionId: string | null = null;
-      let chatSessionId: string | null = null;
       if (autopilot.executionMode === "create_issue") {
-        const contact = autopilot.responsibleMemberId ? this.ctx.workspaces().getWorkspaceMember(autopilot.responsibleMemberId) : null;
         issue = this.ctx.issues().createIssueWithinTransaction({
           title: prompt,
           description: autopilot.description,
           workspaceId: autopilot.workspaceId,
           projectId: autopilot.projectId,
-          responsibleMemberId: contact && !contact.archivedAt && contact.workspaceId === autopilot.workspaceId ? contact.id : null,
-          // Historical createdBy is attribution, never an implicit root responsibility.
+          // Automation-created Issues infer no human: no creator, no designated person.
           createdBy: null,
           assigneeType:autopilot.assigneeType,
           assigneeId:autopilot.assigneeId,
@@ -1618,9 +1641,12 @@ export class AutopilotsRepo {
       }
 
       if(issue&&!issueSessionId)issueSessionId=this.ctx.issueSessions().getOrCreateDefaultIssueSessionWithinTransaction(issue.id,null).id;
+      // Without an Issue the run opens (or, with reuse_latest, continues) a Chat of its own.
+      const chat=issueSessionId?null:this.openRunChatWithinTransaction(autopilot,agent,runId,autopilot.sessionPolicy==='reuse_latest');
+      const requestSessionId=(issueSessionId??chat?.id)!;
       const attemptId=createId('tsk');
       this.ctx.db.run('UPDATE multiremi_autopilot_runs SET turn_id=? WHERE id=?',[attemptId,runId]);
-      const requestSeq = this.appendAutomationRequestWithinTransaction(autopilot.id,agent.id,prompt,issueSessionId,attemptId);
+      const requestSeq = this.appendAutomationRequestWithinTransaction(autopilot.id,agent.id,prompt,requestSessionId,attemptId);
       let task: MultiremiTask;
       try {
         // MUL-400 E3 gate 3: a `trigger_issue` autopilot on a waiting issue must
@@ -1628,11 +1654,11 @@ export class AutopilotsRepo {
         // failing, mirroring the "no runnable agent" skip above, so the operator
         // sees why nothing ran.
         task = this.ctx.tasks().createTaskWithinTransaction({
-          id:attemptId,agentId: agent.id,conversationSessionId:issueSessionId??autopilotSessionId(autopilot.id),
-          triggerCommentId:this.ctx.db.query('SELECT id FROM multiremi_conversation_log WHERE session_id=? AND seq=?').get(issueSessionId??autopilotSessionId(autopilot.id),requestSeq)?.id,
+          id:attemptId,agentId: agent.id,conversationSessionId:requestSessionId,
+          triggerCommentId:this.ctx.db.query('SELECT id FROM multiremi_conversation_log WHERE session_id=? AND seq=?').get(requestSessionId,requestSeq)?.id,
           issueId: issue?.id ?? null,
           issueSessionId,
-          chatSessionId,
+          chatSessionId: chat?.id ?? null,
           workspaceId: autopilot.workspaceId,
           prompt,
           assignmentAuthorType: "system",
@@ -1661,7 +1687,7 @@ export class AutopilotsRepo {
           issue?.id ?? null,
           task.id,
           issueSessionId,
-          toJson({ taskId: task.id, issueId: issue?.id ?? null, issueSessionId }),
+          toJson({ taskId: task.id, issueId: issue?.id ?? null, issueSessionId, chatSessionId: chat?.id ?? null }),
           runId,
         ],
       );
@@ -1753,6 +1779,38 @@ export class AutopilotsRepo {
   getAutopilotRun(id: string): MultiremiAutopilotRunRecord | null {
     const row = this.ctx.db.query("SELECT * FROM multiremi_autopilot_run_records WHERE id = ?").get(id) as Row | null;
     return row ? toAutopilotRun(row) : null;
+  }
+
+  /**
+   * The agent of a run says it found nothing worth reporting. Returns null when
+   * the turn is not an automation run. A completed quiet run archives its Chat.
+   */
+  markAutopilotRunQuiet(turnId: string): MultiremiAutopilotRunRecord | null {
+    return this.ctx.db.transaction(() => {
+      const row = this.ctx.db.query(
+        `SELECT run.id, autopilot.workspace_id FROM multiremi_autopilot_runs run
+         JOIN multiremi_autopilots autopilot ON autopilot.id = run.autopilot_id WHERE run.turn_id = ?`,
+      ).get(turnId) as Row | null;
+      if (!row) return null;
+      this.ctx.lockWorkspaceRuntimeLifecycle(String(row.workspace_id));
+      this.ctx.db.run("UPDATE multiremi_autopilot_runs SET quiet = 1 WHERE id = ?", [row.id]);
+      this.settleQuietRunWithinTransaction(String(row.id));
+      return this.getAutopilotRun(String(row.id));
+    })();
+  }
+
+  /**
+   * A finished quiet run leaves nothing to read: archive the Chat it ran in, already read.
+   * Failed runs are never quiet, and a Chat someone pinned or kept talking in stays active.
+   */
+  settleQuietRunWithinTransaction(runId: string): void {
+    const run = this.getAutopilotRun(runId);
+    if (!run?.quiet || run.status !== "completed" || !run.chatSessionId) return;
+    const chat = this.ctx.chat().getChatSession(run.chatSessionId);
+    if (!chat || chat.status === "archived" || chat.pinned || chat.origin?.autopilot_id !== run.autopilotId) return;
+    if (this.ctx.chat().getPendingChatTask(chat.id)) return;
+    this.ctx.chat().markChatSessionRead(chat.id);
+    this.ctx.chat().updateChatSession(chat.id, { status: "archived" });
   }
 
   listWebhookDeliveries(autopilotId: string, options: { includeRawBody?: boolean; limit?: number } = {}): MultiremiWebhookDelivery[] {
@@ -2426,8 +2484,6 @@ function toAutopilot(row: Row): MultiremiAutopilot {
     workspace_id: workspaceId,
     title: String(row.title),
     description: nullableString(row.description),
-    responsibleMemberId:nullableString(row.responsible_member_id),
-    responsible_member_id:nullableString(row.responsible_member_id),
     projectId,
     project_id: projectId,
     assigneeType,
@@ -2519,8 +2575,10 @@ function toAutopilotRun(row: Row): MultiremiAutopilotRunRecord {
     triggerId: nullableString(row.trigger_id),
     eventId: nullableString(row.event_id),
     issueSessionId: nullableString(row.issue_session_id),
+    chatSessionId: nullableString(row.chat_session_id),
     repositoryId: nullableString(row.repository_id),
     dedupeKey: nullableString(row.dedupe_key),
+    quiet: Number(row.quiet ?? 0) === 1,
     triggeredAt: String(row.triggered_at),
     completedAt: nullableString(row.completed_at),
     failureReason: nullableString(row.failure_reason),
@@ -2598,4 +2656,10 @@ function toWebhookDelivery(row: Row): MultiremiWebhookDelivery {
     lastAttemptAt: String(row.last_attempt_at),
     createdAt: String(row.created_at),
   };
+}
+
+/** `YYYY-MM-DD HH:mm` in the server's local time, for Chat titles. */
+function formatLocalMinute(date: Date): string {
+  const two = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())} ${two(date.getHours())}:${two(date.getMinutes())}`;
 }

@@ -13,8 +13,9 @@
  *     --baseline --out tests/fixtures/multiremi/first-screen-hotspots-golden.json
  *
  * The Turn list includes current Attempt metadata and Chat ownership. Issue
- * assignee responses retain their existing contract. `--source <label>`
- * overrides the header label for an independent comparison.
+ * responses omit the retired parent_done_grant_* and responsible_member_id
+ * fields. Capture from a revision with these canonical shapes; `--source
+ * <label>` overrides the header for an independent comparison.
  *
  * The golden records only the routes PR1 touches. `GET /api/inbox/summary` and
  * `GET /api/attachments/:id/content` are captured by their own PR2 files.
@@ -35,7 +36,7 @@ const DEFAULT_OUT = join(import.meta.dir, "first-screen-hotspots-golden.json");
 const AUTH_TOKEN = "mul473-hotspot-token";
 
 const FIRST_SCREEN_GOLDEN_SOURCE =
-  "MUL-493 canonical Turn list with current Attempt metadata; unchanged Issue assignee filters";
+  "Canonical Turn metadata and Chat ownership; ADR 0017 Issue execution and escalation fields";
 
 export interface FirstScreenHotspotGolden {
   name: string;

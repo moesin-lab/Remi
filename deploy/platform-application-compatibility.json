@@ -1,5 +1,5 @@
 {
-  "dataSchema": "9739569633c62bd9d616f01e21385cee2be2e76c28d0120d2bc1440050f0dc18",
+  "dataSchema": "871341793e85542fc30324c6c747a584afff7a86b5cbe0e349b6bbdda7529a2d",
   "rollbackSafeFrom": [],
-  "reason": "The unified message, turn and lane model changes the storage contract. Shared workspace operators add workspace/session read cursors and migrate active human Question routes while preserving historical receipts and completed audit records. No earlier schema fingerprint is attested for code-only rollback. Existing legacy deployments require the controlled cutover in docs/deploy/unified-model-cutover.md; publishing this bundle does not authorize a production migration. Same-schema updates still require backup verification and target/previous migration rehearsal."
+  "reason": "The upstream integration replaces issue responsibility and delivery with execution-owner escalation, moves records and recyclable workspaces to daemon-owned storage, and adds turn/item traces and Chat follow-up queues. Fork shared-operator, dual-owner Session and model-catalog migrations are retained. No earlier schema fingerprint is attested for code-only rollback. Existing deployments require the ADR 0018 and ADR 0019 controlled cutover steps; publishing this bundle does not authorize a production migration. Same-schema updates still require backup verification and target/previous migration rehearsal."
 }

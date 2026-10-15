@@ -36,8 +36,9 @@
  * from the event sequence and window, so the classification lives here as data.
  */
 
-import type { TraceEvent } from "./trace.js";
-import type { MultiremiDaemonHeartbeatAck, MultiremiDaemonSshMeshStatus } from "./types.js";
+import type { GcRunMode, StorageReport, StorageSubjectRef, SubjectSnapshot } from "./storage.js";
+import type { TraceContextUsage, TraceEvent, TraceEventPage, TraceTurnPage } from "./trace.js";
+import type { MultiremiChatSessionStatus, MultiremiDaemonHeartbeatAck, MultiremiDaemonSshMeshStatus } from "./types.js";
 import type { UnifiedMessage, DecisionOption } from "./unified-model.js";
 
 export const DAEMON_PROTOCOL_VERSION = 2;
@@ -53,10 +54,12 @@ export const DAEMON_PROTOCOL_MIN = 2;
 /**
  * Lowest CLI version the server accepts on the v2 socket.
  *
- * First unified-model release: v0.2.90. Released v0.2.88 and earlier daemons
- * use the old payload protocol and must upgrade. Before publishing, the release
- * owner must verify the v0.2.90 tag, package.json, prepared dependency snapshot
- * and target main SHA. The version gate does not mean the fleet has upgraded.
+ * First turn + items trace release: v0.2.90 (PR 2, ADR 0019). Released v0.2.89
+ * and earlier daemons write fragment traces and answer `trace.read` without a
+ * view, so they must upgrade; a v0.2.90 daemon refuses a server that still
+ * advertises an older gate. Before publishing, the release owner must verify the
+ * v0.2.90 tag, package.json, prepared dependency snapshot and target main SHA.
+ * The version gate does not mean the fleet has upgraded.
  */
 export const DAEMON_MIN_CLI_VERSION = "0.2.90";
 
@@ -98,7 +101,7 @@ export const DAEMON_UPLINK_EVENT_FRAMES = [
   "runtime.bot_menu_result",
   "feishu.outbound_result",
   "plugin.state",
-  "runtime.archive_sessions_result",
+  "runtime.gc_run_result",
   "runtime.binding_state",
 ] as const;
 
@@ -119,6 +122,7 @@ export const DAEMON_UPLINK_TRACE_FRAMES = [
 export const DAEMON_UPLINK_BEST_EFFORT_FRAMES = [
   "runtime.ready",
   "concierge.status",
+  "gc.storage_report",
 ] as const;
 
 /** Non-trace-stream daemon -> server RPC requests, paired with a `res` by `id`. */
@@ -136,9 +140,8 @@ export const DAEMON_UPLINK_RPC_FRAMES = [
   "trace.fetch",
   "gc.check_issue",
   "gc.check_chat_session",
-  "gc.check_autopilot_run",
   "gc.check_task",
-  "gc.workspace_cleaned",
+  "gc.subject_reclaimed",
 ] as const;
 
 /**
@@ -166,7 +169,7 @@ export const DAEMON_DOWNLINK_EVENT_FRAMES = [
   "platform.drain",
   "plugin.desired_revision",
   "workspace.settings",
-  "runtime.archive_sessions",
+  "runtime.gc_run",
 ] as const;
 
 /** server -> daemon RPC requests, paired with a `res` by `id`. */
@@ -399,9 +402,9 @@ export interface DaemonTaskCompletionTrace {
   head: number;
   event_count: number;
   closed: true;
-  /** Count of `tool_use` events. */
+  /** Tool items (`TRACE_TOOL_ITEM_TYPES`) at any depth: the single tool-count rule. */
   tool_call_count: number;
-  /** Bucketed by `(type, tool)`; `tool` is non-null only for tool frames (A11). */
+  /** Bucketed by `(item type, tool)`; `tool` is non-null only for items that name a tool. */
   type_histogram: DaemonTraceHistogramBucket[];
 }
 
@@ -426,8 +429,20 @@ export interface DaemonTaskCompletionFields {
   trace: DaemonTaskCompletionTrace;
   /** Markdown of the turn's final answer, or null when the turn produced none. */
   final_reply_md: string | null;
-  /** From the last `execution` event's meta, or null when unknown. */
+  /** The trace turn's `provider` and last reported `model`, or null when unknown. */
   model: DaemonTaskCompletionModel | null;
+  /**
+   * Turn + items traces (PR 2). The daemon sends these three on `task.fail` as
+   * well; a receiver reads a malformed value as null and never blocks the
+   * terminal report on it.
+   *
+   * Last context-window occupancy the bridge reported for the turn.
+   */
+  context_usage: TraceContextUsage | null;
+  /** `final_started_at - started_at` of the trace turn ("Worked for"), or null without a final reply. */
+  worked_ms: number | null;
+  /** Top-level items the Chat fold renders: every item but the final reply, user messages, permissions and questions. */
+  process_item_count: number | null;
 }
 
 /** Turn input travels as messages; attempt ids remain trace/outbox keys. */
@@ -477,38 +492,61 @@ export interface DaemonTurnDecisionPayload {
 }
 
 /**
- * `runtime.archive_sessions`, server -> daemon.
- *
- * Replaces the plan to reuse the heartbeat's `pending_command`: that field is a
- * general shell channel (`{ command, args, timeout_ms }` executed directly), so
- * archiving through it would mean remote shell execution for a structured request.
- * The entity id (and so the dedupe key) is `request_id`, and the backing table is
- * MUL-402's `multiremi_session_archive_requests`.
+ * `gc.check_chat_session` reply on success. The daemon decides whether a Chat
+ * has ended and how long to keep its workspace from these fields.
  */
-export interface DaemonArchiveSessionsPayload {
-  request_id: string;
-  subjects: DaemonArchiveSubject[];
-}
-
-export interface DaemonArchiveSubject {
-  kind: "issue" | "chat" | "task";
-  id: string;
+export interface DaemonGcCheckChatSessionReply {
+  ok: true;
+  status: MultiremiChatSessionStatus;
+  updated_at: string;
+  pinned: boolean;
+  /** Set for Chats opened by an automation run; those use the shorter retention. */
+  origin: { autopilot_id: string; run_id: string } | null;
+  last_activity_at: string | null;
 }
 
 /**
- * `runtime.archive_sessions_result`, daemon -> server, partitioned under `rt:<id>`.
- *
- * The upload itself still travels over HTTP; this frame only reports the outcome.
+ * `gc.subject_reclaimed`, daemon -> server RPC: the daemon deleted a subject's
+ * workspace. The server records the snapshot and resets the subject's native
+ * sessions on this daemon so the next execution starts a fresh generation.
+ * The reply is `{ ok: true }`.
  */
-export interface DaemonArchiveSessionsResultPayload {
-  request_id: string;
-  status: DaemonArchiveSessionsResultStatus;
-  archive_ids: string[];
-  /** Present when `status` is `failed`. */
-  error?: string;
+export interface DaemonGcSubjectReclaimedPayload {
+  runtime_id: string;
+  subject: StorageSubjectRef;
+  snapshot: SubjectSnapshot | null;
+  unsaved_work: boolean;
+  /** Free space the workspaces filesystem gained while this subject was reclaimed. */
+  freed_bytes: number;
 }
 
-export type DaemonArchiveSessionsResultStatus = "completed" | "failed";
+/**
+ * `gc.storage_report`, daemon -> server, best effort: the report of a periodic round (also one that only
+ * plans, under `MULTIREMI_GC_DRY_RUN`). An operator's dry run answers through `runtime.gc_run_result`
+ * instead. The report's lists are bounded to fit one frame.
+ */
+export interface DaemonGcStorageReportPayload {
+  runtime_id: string;
+  report: StorageReport;
+}
+
+/**
+ * `runtime.gc_run`, server -> daemon, pending-request mechanics of
+ * `runtime.directory_scan`: the daemon runs one reclaim round in `mode`.
+ */
+export interface DaemonGcRunPayload {
+  id: string;
+  mode: GcRunMode;
+}
+
+/** `runtime.gc_run_result`, daemon -> server, partitioned under `rt:<id>`. */
+export interface DaemonGcRunResultPayload {
+  request_id: string;
+  runtime_id: string;
+  status: "completed" | "failed";
+  report: StorageReport | null;
+  error: string | null;
+}
 
 /**
  * `trace.append`, daemon -> server.
@@ -590,23 +628,46 @@ export interface DaemonTracePushPayload {
   closed: boolean;
 }
 
-/** `trace.read` request, server -> daemon. */
-export interface DaemonTraceReadPayload {
+/**
+ * `trace.read` request, server -> daemon (PR 2): the server picks a view.
+ * `turn` pages the fold (running) or the persisted snapshot (closed) from
+ * `item_cursor`; `events` pages raw stored lines after `after_seq`, which is also
+ * the only view that shows a v1 file's lines. A payload without a known `view`
+ * is a protocol violation: the daemon release gate (`DAEMON_MIN_CLI_VERSION`)
+ * keeps servers that did not send one away from daemons that require it.
+ */
+export type DaemonTraceReadPayload = DaemonTraceReadTurnPayload | DaemonTraceReadEventsPayload;
+
+export interface DaemonTraceReadTurnPayload {
   task_id: string;
+  view: "turn";
+  /** Index of the first item to return; 0 for the first page. */
+  item_cursor: number;
+  /** At most this many items. */
+  limit: number;
+  /** Serialized-size budget for the page; at least one item is always returned. */
+  max_bytes: number;
+}
+
+export interface DaemonTraceReadEventsPayload {
+  task_id: string;
+  view: "events";
+  /** Exclusive cursor: the first line returned has `seq > after_seq`. */
   after_seq: number;
   limit: number;
   max_bytes: number;
 }
 
-/** `trace.read` / `trace.fetch` reply payload, on success. */
-export interface DaemonTraceReadReplyPayload {
-  ok: true;
-  events: TraceEvent[];
-  next_after_seq: number;
-  head: number;
-  eof: boolean;
-  closed: boolean;
-}
+/**
+ * `trace.read` success reply, shaped by the request's `view`. A v1 file answers
+ * `format: "legacy"`: no turn and no items for `turn`, its raw lines for `events`.
+ */
+export type DaemonTraceReadReplyPayload = DaemonTraceReadTurnReplyPayload | DaemonTraceReadEventsReplyPayload;
+export type DaemonTraceReadTurnReplyPayload = { ok: true } & TraceTurnPage;
+export type DaemonTraceReadEventsReplyPayload = { ok: true } & TraceEventPage;
+
+/** `trace.fetch` reply on success: the server reads the daemon's `events` view. */
+export type DaemonTraceFetchReplyPayload = DaemonTraceReadEventsReplyPayload;
 
 /** `trace.fetch` request, daemon -> server: fill a gap from the server's copy. */
 export interface DaemonTraceFetchPayload {

@@ -30,7 +30,7 @@ async function fixture(topic = false) {
     process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY=Buffer.alloc(32,19).toString('base64');
     try {
       store.upsertFeishuBotConfig('local',{agentId:agent.id,runtimeId:runtime.id,domain:'feishu',appId:'synthetic-isolation',appSecretOp:'set',appSecret:'synthetic-test-only',
-        enabled:false,responsibleMemberId:store.resolveIssueResponsibility(issue.id).rootHuman!.id});
+        enabled:false,responsibleMemberId:store.createWorkspaceMember({name:'Chat question handler',workspaceId:'local'}).id});
     } finally {
       if(previousKey===undefined)delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
       else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY=previousKey;
@@ -103,9 +103,7 @@ describe("Chat task request isolation", () => {
   });
 
   it("does not inherit the old intake Issue, project, or project assignee when the running Chat creates an Issue", async () => {
-    const { store, app, headers, task, issue, chat } = await fixture();
-    const human = store.findWorkspaceMemberForUser(chat.creatorId!, chat.workspaceId)!;
-    expect(human.id).not.toBe(issue.responsibleMemberId);
+    const { store, app, headers, task } = await fixture();
     for (const input of [{}, { project_id: null }]) {
       const response = await app.request("/api/issues", {
         method: "POST", headers,
@@ -113,9 +111,9 @@ describe("Chat task request isolation", () => {
       });
       expect(response.status).toBe(201);
       const body = await response.json();
-      expect(body).toMatchObject({ project_id: null, source_issue_id: null, assignee_type: null, assignee_id: null,
-        responsible_member_id: human.id });
-      expect(store.getIssue(body.id)?.responsibleMemberId).toBe(human.id);
+      expect(body).toMatchObject({ project_id: null, source_issue_id: null, assignee_type: null, assignee_id: null });
+      expect(body).not.toHaveProperty("responsible_member_id");
+      expect(store.getIssue(body.id)).not.toHaveProperty("responsibleMemberId");
       expect(store.getIssue(body.id)?.contextRefs).toEqual([]);
       expect(store.listTasksForIssue(body.id)).toHaveLength(0);
     }
@@ -123,7 +121,7 @@ describe("Chat task request isolation", () => {
   });
 
   for (const owner of ["issue", "chat"] as const) {
-    it(`inherits only the actual ${owner} Session human when Task audit columns are NULL`, async () => {
+    it(`uses the actual ${owner} Session source when Task audit columns are NULL, without assigning a human`, async () => {
       const { store, app, agent, executor, project, issue, chat, defaultSession } = await fixture();
       const sourceSession = owner === "issue" ? defaultSession
         : store.createIssueSession(issue.id, { chatId: chat.id, title: "Private responsibility source" });
@@ -136,8 +134,6 @@ describe("Chat task request isolation", () => {
       expect(persisted).toMatchObject({ issueId: null, chatSessionId: null, issueSessionId: sourceSession.id });
       const token = await store.createTaskAccessToken(persisted, "local");
       expect(await store.verifyAccessToken(token.token, ["task"])).not.toBeNull();
-      const human = owner === "issue" ? issue.responsibleMemberId!
-        : store.findWorkspaceMemberForUser(chat.creatorId!, chat.workspaceId)!.id;
 
       for (const path of ["/api/issues", "/api/multiremi/issues"]) {
         const response = await app.request(path, {
@@ -147,10 +143,10 @@ describe("Chat task request isolation", () => {
         expect(response.status, await response.clone().text()).toBe(201);
         const body = await response.json();
         const created = store.getIssue(body.id ?? body.issue?.id)!;
-        expect(created.responsibleMemberId).toBe(human);
+        expect(created).not.toHaveProperty("responsibleMemberId");
+        expect(body.issue ?? body).not.toHaveProperty(path === "/api/issues" ? "responsible_member_id" : "responsibleMemberId");
         expect(created.parentIssueId).toBeNull();
         if (owner === "chat") {
-          expect(created.responsibleMemberId).not.toBe(issue.responsibleMemberId);
           expect(created).toMatchObject({ projectId: null, sourceIssueId: null, assigneeType: null, assigneeId: null, contextRefs: [] });
           expect(store.listTasksForIssue(created.id)).toHaveLength(0);
         } else if (path === "/api/issues") {
@@ -261,9 +257,9 @@ describe("Chat task request isolation", () => {
     const created = await response.json();
     expect(created).toMatchObject({
       project_id: project.id, source_issue_id: issue.id, assignee_type: "agent", assignee_id: executor.id,
-      responsible_member_id: issue.responsibleMemberId,
     });
-    expect(store.getIssue(created.id)?.responsibleMemberId).toBe(issue.responsibleMemberId);
+    expect(created).not.toHaveProperty("responsible_member_id");
+    expect(store.getIssue(created.id)).not.toHaveProperty("responsibleMemberId");
 
     const comment = await app.request(issueMessagesPath(store, issue.id), {
       method: "POST", headers, body: JSON.stringify(requestMessageBody(store, { agent_id: executor.id, content: "Topic request stays on its session" })),

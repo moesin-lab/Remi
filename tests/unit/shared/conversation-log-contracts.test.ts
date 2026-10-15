@@ -11,14 +11,12 @@ import {
 } from "@multiremi/contracts/conversation-log";
 import type { MultiremiIssueComment } from "@multiremi/contracts/types";
 import {
-  SESSION_ARCHIVE_REQUEST_STATUSES,
-  SESSION_ARCHIVE_SUBJECT_KINDS,
   TRACE_END_STATUSES,
   TRACE_FILE_FORMAT,
   TRACE_REF_LOCATIONS,
 } from "@multiremi/contracts/trace-file";
-import type { TraceEndStatus, TraceFileHeader, TraceFileTrailer } from "@multiremi/contracts/trace-file";
-import { TRACE_EVENT_STATUSES } from "@multiremi/contracts/trace.js";
+import type { TraceEndStatus, TraceFileHeaderV2, TraceFileTrailer } from "@multiremi/contracts/trace-file";
+import { TRACE_ITEM_STATUSES } from "@multiremi/contracts/trace.js";
 import type { TraceEndStatus as StoreTraceEndStatus } from "@multiremi/worker/trace-store.js";
 
 /**
@@ -201,14 +199,8 @@ describe("trace file and archive request contract", () => {
   });
 
   it("pins the trace file format and pointer states", () => {
-    expect(TRACE_FILE_FORMAT).toBe("multiremi.trace.v1");
-    expect([...TRACE_REF_LOCATIONS]).toEqual([
-      "daemon",
-      "archive",
-      "none",
-      "lost",
-      "backfilling",
-    ]);
+    expect(TRACE_FILE_FORMAT).toBe("multiremi.trace.v2");
+    expect([...TRACE_REF_LOCATIONS]).toEqual(["daemon", "none", "lost"]);
   });
 
   it("pins the trailer status vocabulary and never borrows the event one", () => {
@@ -217,17 +209,17 @@ describe("trace file and archive request contract", () => {
     // lists must stay different, or the trailer would accept a lifecycle value.
     expect(TRACE_END_STATUSES).not.toContain("pending" as never);
     expect(TRACE_END_STATUSES).not.toContain("in_progress" as never);
-    // Tool cancellation is also an event outcome, but nonterminal event states
-    // must never enter the trailer vocabulary.
+    // Item outcomes (declined, stopped) and nonterminal item states must never
+    // enter the trailer vocabulary.
     expect(
-      TRACE_EVENT_STATUSES.some(
+      TRACE_ITEM_STATUSES.some(
         (status) => !(TRACE_END_STATUSES as readonly string[]).includes(status),
       ),
     ).toBe(true);
   });
 
   it("types the trailer end block and keeps framing lines free of seq", () => {
-    const header: TraceFileHeader = {
+    const header: TraceFileHeaderV2 = {
       format: TRACE_FILE_FORMAT,
       task_id: "task_1",
       session_id: "ises_1",
@@ -250,16 +242,5 @@ describe("trace file and archive request contract", () => {
     expect("seq" in trailer).toBe(false);
     expect("seq" in trailer.end).toBe(false);
     expect(trailer.end.status).toBe("completed");
-  });
-
-  it("pins the archive request state machine and its subjects", () => {
-    expect([...SESSION_ARCHIVE_REQUEST_STATUSES]).toEqual([
-      "pending",
-      "sent",
-      "acked",
-      "completed",
-      "failed",
-    ]);
-    expect([...SESSION_ARCHIVE_SUBJECT_KINDS]).toEqual(["issue", "chat", "task"]);
   });
 });

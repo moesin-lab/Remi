@@ -16,6 +16,11 @@ export const workspaceBlock: CapabilityBlock = {
     if (ctx.task.runtimeWorkspace && ctx.task.agent?.provider === "codex") {
       return { cwd: ctx.workDir, addDirs: codexRuntimeWorkspaceDirectories(ctx.task, ctx.workDir, ctx.providerHome) };
     }
-    return { cwd: ctx.workDir, ...(ctx.task.runtimeWorkspace ? { addDirs: [ctx.task.runtimeWorkspace.rootPath] } : {}) };
+    const addDirs = [
+      ...(ctx.task.runtimeWorkspace ? [ctx.task.runtimeWorkspace.rootPath] : []),
+      // Antigravity reaches only the directories it is given; the other providers are not confined to their cwd.
+      ...(ctx.task.agent?.provider === "antigravity" && ctx.workspaceDir !== ctx.workDir ? [ctx.workspaceDir] : []),
+    ];
+    return { cwd: ctx.workDir, ...(addDirs.length ? { addDirs } : {}) };
   },
 };

@@ -2,7 +2,7 @@ import type { MessageHeader, SendMessageInput, SendMessageResult, UnifiedMessage
 import { isHistoricalIssueQuestionRecord } from '@multiremi/contracts';
 import type { CreateTaskInput } from '@multiremi/contracts/types.js';
 import type { CommitEventQueue, StoreContext } from '../context.js';
-import { createId } from '@multiremi/ids.js';
+import { createId, nowIso } from '@multiremi/ids.js';
 import { clampEnvelopeBody } from '../envelope-body.js';
 import { countDelegationPairHops, pairRoundTripLimit, DelegationRoundTripLimitError, type TaskSessionContinuation } from '../repos/tasks-repo.js';
 import { resolveWake } from './wake-policy.js';
@@ -83,16 +83,14 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
   let recipientType:'agent'|'member'|'none'='none',recipientId:string|null=null;
   let targetIssue=issue;
   let roleScope:string|undefined;
+  // A role reaches only the Issue's execution owner. Without one the message stays
+  // readable without a recipient; it never falls back to a guessed person.
   const owner=(ownerIssue:typeof issue)=>{
     if(!ownerIssue)return;
     const responsibility=ctx.resolveIssueResponsibility(ownerIssue.id);
-    if(!responsibility.unresolved.length && responsibility.executionOwner){recipientType='agent';recipientId=responsibility.executionOwner.id;return;}
+    if(responsibility.executionOwner){recipientType='agent';recipientId=responsibility.executionOwner.id;return;}
+    recipientType='none';recipientId=null;
     input={...input,metadata:{...input.metadata,responsibility_unresolved:responsibility.unresolved}};
-    // A complete same-workspace parent chain can notify the shared operator
-    // without a legacy contact. This never supplies an execution/review Agent.
-    const human = responsibility.rootHuman ?? (responsibility.rootIssueId ? ctx.workspaces().getWorkspaceOperator(workspaceId) : null);
-    if(human){recipientType='member';recipientId=human.id;return;}
-    throw new Error('Issue owner responsibility is unresolved; configure its execution owner');
   };
   if(input.to.type==='agent'||input.to.type==='member'){recipientType=input.to.type;recipientId=input.to.ref;}
   else if(input.to.type==='role'){
@@ -101,11 +99,6 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
       targetIssue=issue?.parentIssueId?ctx.issues().getIssue(issue.parentIssueId):null;
       if(!targetIssue||targetIssue.workspaceId!==workspaceId)throw new Error('Parent issue not found');
       owner(targetIssue);
-      if (!recipientId) {
-        const responsibility=ctx.resolveIssueResponsibility(targetIssue.id);
-        if (responsibility.rootHuman) {recipientType='member';recipientId=responsibility.rootHuman.id;}
-        input={...input,metadata:{...input.metadata,responsibility_unresolved:responsibility.unresolved}};
-      }
       sessionId=ctx.issueSessions().getOrCreateDefaultIssueSessionWithinTransaction(targetIssue.id).id;
     } else if(input.to.ref==='delegator'){
       const dispatch=source?.trigger_message_id?getMessage(ctx,source.trigger_message_id):null;
@@ -143,6 +136,13 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
   if(duplicate){const message=getMessage(ctx,duplicate.id)!;const delivery=message.metadata.delivery_turn_id;
     const turn=ctx.db.query('SELECT id FROM multiremi_turns WHERE id=? OR trigger_message_id=?').get(typeof delivery==='string'?delivery:null,message.id);
     return {message,wake_applied:message.wake_applied,wake_reason:message.wake_reason,...(turn?{turn_id:turn.id}:{})};}
+  // A person or timer writing into an archived Chat reopens it in the same transaction as the message.
+  if(originalChat?.status==='archived'&&sessionId===input.session_id&&(input.sender.type==='member'||input.sender.type==='timer')){
+    ctx.db.run("UPDATE multiremi_chat_sessions SET status='active',updated_at=? WHERE id=? AND status='archived'",[nowIso(),sessionId]);
+    const reopened=ctx.chat().getChatSession(sessionId)!;
+    ctx.emitChatEvent(reopened,'chat:session_updated',{title:reopened.title,status:reopened.status,pinned:reopened.pinned,
+      project_id:reopened.projectId,updated_at:reopened.updatedAt});
+  }
   const decisionTurn=input.message_kind==='reply'&&reply?.message_kind==='decision'&&reply.task_id
     ?ctx.db.query("SELECT * FROM multiremi_turns WHERE id=? AND status IN ('running','awaiting_human')").get(reply.task_id):null;
   const unmet=dependencyGateEnabled()&&targetIssue?.status==='backlog'?ctx.issues().listUnmetPrerequisites(targetIssue.id):[];
@@ -164,8 +164,8 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
   const hops=source&&recipientId?countMessageDelegationPairHops(ctx,source.id,recipientId,limit):0;
   const isLeader=recipientId&&input.sender.id?!!ctx.db.query(`SELECT 1 FROM multiremi_squads s JOIN multiremi_squad_members m ON m.squad_id=s.id
     WHERE s.leader_id=? AND m.member_id=? AND m.member_type='agent' AND s.workspace_id=? AND s.archived_at IS NULL`).get(recipientId,input.sender.id,workspaceId):false;
-  const responsibility=issue?ctx.resolveIssueResponsibility(issue.id):null;
-  const parentAgent=responsibility && !responsibility.unresolved.length && responsibility.reviewOwner?.type==='agent' ? responsibility.reviewOwner : null;
+  // The direct parent's execution owner, whatever the rest of the chain resolves to.
+  const parentAgent=issue?ctx.resolveIssueResponsibility(issue.id).chain[1]?.executionOwner??null:null;
   const policy=resolveWake(input.sender,input.to,input.wake_requested,input.message_kind,{
     recipientType,recipientId,recipientAvailable:recipientType==='agent'?!!targetAgent&&!targetAgent.archivedAt:recipientType==='member'?!!member&&!member.archivedAt:false,
     // Structural platform reports retain main's dependency exemption. Agent

@@ -22,6 +22,7 @@ import { TokensEndpoints } from "./endpoints/tokens";
 import { AttachmentsEndpoints } from "./endpoints/attachments";
 import { ChatEndpoints } from "./endpoints/chat";
 import { ExternalChatsEndpoints } from "./endpoints/external-chats";
+import { ChatQueueEndpoints } from "./endpoints/chat-queue";
 import { ProjectsEndpoints } from "./endpoints/projects";
 import { ProjectDocsEndpoints } from "./endpoints/project-docs";
 import { LabelsEndpoints } from "./endpoints/labels";
@@ -32,7 +33,7 @@ import { LarkEndpoints } from "./endpoints/lark";
 import { RepositoriesEndpoints } from "./endpoints/repositories";
 import { PluginsEndpoints } from "./endpoints/plugins";
 import { IssueSharesEndpoints } from "./endpoints/issue-shares";
-import { SessionArchivesEndpoints } from "./endpoints/session-archives";
+import { StorageEndpoints } from "./endpoints/storage";
 import { ScmEndpoints } from "./endpoints/scm";
 import { PlatformEndpoints } from "./endpoints/platform";
 import { FeishuEndpoints } from "./endpoints/feishu";
@@ -84,6 +85,7 @@ export const ENDPOINT_FACTORIES: ReadonlyArray<(http: HttpClient) => object> = [
   (http: HttpClient) => new AttachmentsEndpoints(http),
   (http: HttpClient) => new ChatEndpoints(http),
   (http: HttpClient) => new ExternalChatsEndpoints(http),
+  (http: HttpClient) => new ChatQueueEndpoints(http),
   (http: HttpClient) => new ProjectsEndpoints(http),
   (http: HttpClient) => new ProjectDocsEndpoints(http),
   (http: HttpClient) => new LabelsEndpoints(http),
@@ -94,7 +96,7 @@ export const ENDPOINT_FACTORIES: ReadonlyArray<(http: HttpClient) => object> = [
   (http: HttpClient) => new RepositoriesEndpoints(http),
   (http: HttpClient) => new PluginsEndpoints(http),
   (http: HttpClient) => new IssueSharesEndpoints(http),
-  (http: HttpClient) => new SessionArchivesEndpoints(http),
+  (http: HttpClient) => new StorageEndpoints(http),
   (http: HttpClient) => new ScmEndpoints(http),
   (http: HttpClient) => new PlatformEndpoints(http),
   (http: HttpClient) => new FeishuEndpoints(http),
@@ -137,6 +139,7 @@ export interface ApiClient extends
     AttachmentsEndpoints,
     ChatEndpoints,
     ExternalChatsEndpoints,
+    ChatQueueEndpoints,
     ProjectsEndpoints,
     ProjectDocsEndpoints,
     LabelsEndpoints,
@@ -147,7 +150,7 @@ export interface ApiClient extends
     RepositoriesEndpoints,
     PluginsEndpoints,
     IssueSharesEndpoints,
-    SessionArchivesEndpoints,
+    StorageEndpoints,
     ScmEndpoints,
     PlatformEndpoints,
     FeishuEndpoints,

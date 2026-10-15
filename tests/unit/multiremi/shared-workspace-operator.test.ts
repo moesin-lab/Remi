@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { authorizeBrowserWebSocketToken } from "@multiremi/api/realtime.js";
-import { createLocalStore, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -57,24 +57,32 @@ describe("shared workspace operator", () => {
     expect(store.getWorkspaceMember(old.id)?.archivedAt).toBeNull();
   });
 
-  it("lets the shared operator review a delivery with a historical human contact", async () => {
+  it("lets the shared operator close an Issue while retaining ignored historical human data", async () => {
     const { store, first, ws, request } = await fixture();
     const contact = store.createWorkspaceMember({ workspaceId: ws.id, userId: first.id, name: "Historical contact", role: "member" });
-    const agent = store.createAgent({ workspaceId: ws.id, name: "Delivery Agent", provider: "codex" });
+    const agent = store.createAgent({ workspaceId: ws.id, name: "Execution Agent", provider: "codex" });
     const issue = store.createIssue({ workspaceId: ws.id, title: "Review", responsibleMemberId: contact.id, assigneeType: "agent", assigneeId: agent.id });
-    const task = store.createTask({ workspaceId: ws.id, issueId: issue.id, agentId: agent.id, prompt: "Deliver" });
-    const delivery = store.submitIssueDelivery(issue.id, { summary: "Done" }, { type: "agent", id: agent.id, taskId: task.id });
-    const authorized = await request(`/api/issues/${issue.id}/deliveries/${delivery.id}/authorize`, 1, {
-      method: "POST", body: JSON.stringify({ agentId: agent.id, revision: delivery.responsibilityRevision }),
-    });
-    expect(authorized.status).toBe(200);
-    expect((await authorized.json()).delivery.authorization.grantedBy).toBe(store.getWorkspaceOperator(ws.id)!.id);
-    const response = await request(`/api/issues/${issue.id}/deliveries/${delivery.id}/respond`, 1, {
-      method: "POST", body: JSON.stringify({ action: "accept", revision: delivery.responsibilityRevision }),
+    expect(issue).not.toHaveProperty("responsibleMemberId");
+    expect(db!.query("SELECT responsible_member_id FROM multiremi_issues WHERE id=?").get(issue.id))
+      .toEqual({ responsible_member_id: null });
+    // Preserve legacy stored data without using it as authorization.
+    db!.run("UPDATE multiremi_issues SET responsible_member_id=? WHERE id=?", [contact.id, issue.id]);
+    for (const action of ["authorize", "respond"]) {
+      const retired = await request(`/api/issues/${issue.id}/deliveries/old-delivery/${action}`, 1, {
+        method: "POST", body: JSON.stringify({ action: "accept", agentId: agent.id, revision: "old" }),
+      });
+      expect(retired.status).toBe(410);
+      expect((await retired.json()).code).toBe("route_retired");
+    }
+    const response = await request(`/api/issues/${issue.id}`, 1, {
+      method: "PATCH", body: JSON.stringify({ status: "done" }),
     });
     expect(response.status).toBe(200);
     expect(store.getIssue(issue.id)?.status).toBe("done");
-    expect(store.getIssue(issue.id)?.responsibleMemberId).toBe(contact.id);
+    expect(store.listIssueActivity(issue.id).find(activity => activity.type === "issue_updated")?.data)
+      .toMatchObject({ actorType: "member", actorId: "local", status: "done" });
+    expect(db!.query("SELECT responsible_member_id FROM multiremi_issues WHERE id=?").get(issue.id))
+      .toEqual({ responsible_member_id: contact.id });
   });
 
   it("shares human subscriptions across accounts and preserves Agent subscriptions", async () => {

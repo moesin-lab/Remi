@@ -295,6 +295,11 @@ export const EMPTY_FLEET_MODELS: FleetModelsResponse = { providers: [] };
 // Model gateway (relay config) schemas
 // ---------------------------------------------------------------------------
 
+/** Every engine the workspace model gateway holds a config for. */
+export type RelayEngine = "claude" | "codex" | "antigravity";
+/** Engines whose gateway models accept administrator-declared reasoning levels. */
+export type RelayReasoningEngine = Exclude<RelayEngine, "antigravity">;
+
 const RelayEngineConfigSchema = z.object({
   fragment: z.string().default(""),
   hasToken: z.boolean().default(false),
@@ -304,6 +309,8 @@ const RelayEngineConfigSchema = z.object({
 export const RelayConfigResponseSchema = z.object({
   claude: RelayEngineConfigSchema.default(null),
   codex: RelayEngineConfigSchema.default(null),
+  // Older servers omit the engine; it then reads as unconfigured.
+  antigravity: RelayEngineConfigSchema.default(null),
   modelDiscovery: z.boolean().default(false),
 }).loose();
 
@@ -311,7 +318,7 @@ export type RelayConfigResponse = z.infer<typeof RelayConfigResponseSchema>;
 
 export type RelayEngineConfig = z.infer<typeof RelayEngineConfigSchema>;
 
-export const EMPTY_RELAY_CONFIG: RelayConfigResponse = { claude: null, codex: null, modelDiscovery: false };
+export const EMPTY_RELAY_CONFIG: RelayConfigResponse = { claude: null, codex: null, antigravity: null, modelDiscovery: false };
 
 // Explicit gateway probe (`POST /api/workspaces/:id/relay-config/:engine/probe`).
 // The server answers with the snapshot it just refreshed: `status` is `error`
@@ -671,6 +678,7 @@ export const DaemonRetirementPlanSchema = z
           })
           .loose(),
       ),
+    traces_to_lose: z.number().int().nonnegative().default(0),
     impact: DaemonRetirementImpactSchema,
   })
   .loose();
@@ -694,6 +702,7 @@ export const EMPTY_DAEMON_RETIREMENT_PLAN_RESPONSE: DaemonRetirementPlanResponse
     queued_tasks: [],
     local_directory_resources: [],
     issue_workspaces: [],
+    traces_to_lose: 0,
     impact: {
       runtimes_removed: 0,
       agents_detached: 0,

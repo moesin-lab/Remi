@@ -28,18 +28,17 @@
   "retry": "重试本轮",
   "retry_cold": "新会话重试",
   "retry_failed": "本轮重试失败",
-  "queue": "未读消息",
   "decision_reply": "回复",
   "resolved": "已解决",
   "wake_reasons": {
     "human_sender": "由人请求唤醒",
     "platform_to_owner": "平台消息发给负责人",
-    "agent_dispatch": "云友调度",
+    "agent_dispatch": "智能体调度",
     "member_to_delegator": "回复委派人",
     "to_leader": "消息发给组长",
     "to_parent_owner": "消息发给父单负责人",
-    "agent_pair_not_privileged": "这对云友需等下一轮",
-    "pair_round_trip_limit": "云友往返次数达到上限",
+    "agent_pair_not_privileged": "这对智能体需等下一轮",
+    "pair_round_trip_limit": "智能体往返次数达到上限",
     "self": "发给自己不唤醒",
     "recipient_unavailable": "收件人暂不可用",
     "no_recipient": "没有要唤醒的收件人",
@@ -65,8 +64,5 @@
   "current_attempt": "当前尝试",
   "attempt_logs": "查看尝试日志",
   "no_attempts": "暂无尝试",
-  "load_more": "加载更多",
-  "retry_load": "重新加载",
-  "consumed_draft": "消息已被读到或删除。草稿保留在这里，可以复制后重新发送。",
-  "consumed_message": "消息已被 agent 读取，无法再编辑或删除。"
+  "retry_load": "重新加载"
 }

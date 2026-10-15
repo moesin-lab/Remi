@@ -1,6 +1,7 @@
 import { queryOptions } from "@tanstack/react-query";
 import { api } from "../api";
-import type { ChatPendingTask, PendingChatTasksResponse } from "../types";
+import type { ChatOriginFilter, ChatPendingTask, PendingChatTasksResponse } from "../types";
+import type { ChatQueue } from "../api/schemas/chat-queue";
 
 // NOTE on workspace scoping:
 // `wsId` is used only as part of queryKey for cache isolation per workspace.
@@ -11,15 +12,24 @@ import type { ChatPendingTask, PendingChatTasksResponse } from "../types";
 
 export const chatKeys = {
   all: (wsId: string) => ["chat", wsId] as const,
-  /** Full sessions list (active + archived); the dropdown splits locally. */
+  /** The user's own sessions, active + archived; the dropdown splits locally. Prefix of every list below. */
   sessions: (wsId: string) => [...chatKeys.all(wsId), "sessions"] as const,
-  sessionList: (wsId: string, status: "all" | "active" | "archived" = "all") =>
-    status === "all" ? chatKeys.sessions(wsId) : [...chatKeys.sessions(wsId), status] as const,
+  /** Position 3 is the status filter and position 4 the origin filter; absent means "all" and "user". */
+  sessionList: (
+    wsId: string,
+    status: "all" | "active" | "archived" = "all",
+    origin: ChatOriginFilter = "user",
+  ) =>
+    origin !== "user"
+      ? [...chatKeys.sessions(wsId), status, origin] as const
+      : status === "all" ? chatKeys.sessions(wsId) : [...chatKeys.sessions(wsId), status] as const,
   session: (wsId: string, id: string) => [...chatKeys.all(wsId), "session", id] as const,
   pendingTask: (sessionId: string) => ["chat", "pending-task", sessionId] as const,
   /** Aggregate of in-flight chat tasks for the current user — FAB reads this. */
   pendingTasks: (wsId: string) => [...chatKeys.all(wsId), "pending-tasks"] as const,
   humanRequests: (taskId: string) => ["task-human-requests", taskId] as const,
+  /** Follow-up queue of one Chat (ADR 0020): live rows and the lane pause. */
+  queue: (wsId: string, sessionId: string) => [...chatKeys.all(wsId), "queue", sessionId] as const,
 };
 
 /**
@@ -55,10 +65,11 @@ export function chatSessionsOptions(
   status: "all" | "active" | "archived" = "all",
   /** MUL-472 b: the minimised chat window keeps cached sessions but stops fetching. */
   options: { enabled?: boolean } = {},
+  origin: ChatOriginFilter = "user",
 ) {
   return queryOptions({
-    queryKey: chatKeys.sessionList(wsId, status),
-    queryFn: () => api.listChatSessions({ status }),
+    queryKey: chatKeys.sessionList(wsId, status, origin),
+    queryFn: () => api.listChatSessions({ status, origin }),
     enabled: options.enabled ?? true,
     staleTime: Infinity,
   });
@@ -110,6 +121,39 @@ export function pendingChatTasksOptions(
     queryFn: () => api.listPendingChatTasks(),
     enabled: options.enabled ?? true,
     refetchInterval: pendingChatTasksRefetchInterval,
+    refetchIntervalInBackground: false,
+    staleTime: Infinity,
+  });
+}
+
+/**
+ * Follow-up queue fallback poll. `chat:queue_updated` and pending-task
+ * changes invalidate the key; the poll only reconciles a missed event while
+ * the queue holds rows or is paused, and never while the tab is hidden.
+ */
+export const CHAT_QUEUE_REFETCH_INTERVAL_MS = 10_000;
+export function chatQueueRefetchInterval(query: {
+  state: { data?: ChatQueue };
+}): number | false {
+  const data = query.state.data;
+  return data && (data.items.length > 0 || data.paused) ? CHAT_QUEUE_REFETCH_INTERVAL_MS : false;
+}
+
+/**
+ * The Chat follow-up queue. Mount it only inside a visible chat (MUL-472):
+ * `enabled` follows the window, and the cached rows stay readable while it
+ * is closed.
+ */
+export function chatQueueOptions(
+  wsId: string,
+  sessionId: string,
+  options: { enabled?: boolean } = {},
+) {
+  return queryOptions({
+    queryKey: chatKeys.queue(wsId, sessionId),
+    queryFn: () => api.getChatQueue(sessionId),
+    enabled: !!sessionId && (options.enabled ?? true),
+    refetchInterval: chatQueueRefetchInterval,
     refetchIntervalInBackground: false,
     staleTime: Infinity,
   });

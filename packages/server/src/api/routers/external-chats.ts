@@ -120,6 +120,7 @@ function resultResponse(c: Context, result: ExternalChatRpcResult, operation: Ex
     : result.code === "invalid_external_chat_response" ? 502
     : result.code === "request_too_large" ? 413
     : /(?:not_found|unknown_source)/.test(result.code) ? 404
+    : result.code === "model_not_available" ? 409
     : /(?:busy|conflict|locked)/.test(result.code) ? 409
     : /(?:invalid_request|invalid_input)/.test(result.code) ? 400 : 503;
   return c.json({ error: result.message, code: result.code, ...(result.outcome ? { outcome: result.outcome } : {}) }, status);

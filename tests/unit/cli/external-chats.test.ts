@@ -154,6 +154,33 @@ describe("external native Chat CLI", () => {
     expect(requests.filter(request => request.method === "POST")).toHaveLength(1);
   });
 
+  for (const [code, status] of [["model_not_available", 409], ["model_catalog_too_large", 503],
+    ["native_model_catalog_invalid", 503], ["native_cursor_invalid", 503]] as const) {
+    it(`preserves a definite ${code} model preflight rejection without fabricating a receipt`, async () => {
+      const body = { error: "Native model preflight refused this send", code };
+      setup(() => Response.json(body, { status }));
+      const error = await execute("send", ["thread_1", "--text", "continue", "--request-id", fixtureId, "--model", "provider/model"]).catch(error => error);
+      expect(error).toBeInstanceOf(CliError);
+      expect(error.message).toBe(body.error);
+      expect(error.status).toBe(status);
+      expect(error.retryable).toBe(false);
+      expect(error.details).toEqual(body);
+      expect(error.details).not.toHaveProperty("receipt");
+      expect(requests.filter(request => request.method === "POST")).toHaveLength(1);
+    });
+  }
+
+  for (const body of [{ error: "Native result is uncertain", code: "native_model_catalog_invalid", outcome: "unknown" },
+    { error: "Unclassified server failure", code: "native_state_unavailable" }]) {
+    it(`keeps ${body.code} unknown when the server does not prove a model preflight rejection`, async () => {
+      setup(() => Response.json(body, { status: 503 }));
+      const error = await execute("send", ["thread_1", "--text", "continue", "--request-id", fixtureId, "--model", "provider/model"]).catch(error => error);
+      expect(error.retryable).toBe(false);
+      expect(error.details.receipt).toEqual({ request_id: fixtureId, thread_id: "thread_1", turn_id: null, outcome: "unknown" });
+      expect(requests.filter(request => request.method === "POST")).toHaveLength(1);
+    });
+  }
+
   it("generates a fresh UUID per send and returns it in the receipt", async () => {
     const ids: string[] = [];
     setup(async request => {

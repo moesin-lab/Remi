@@ -1,4 +1,4 @@
-# Issue、Session 与交付
+# Issue、Session 与成果
 
 ## 查找、创建和派单
 
@@ -15,7 +15,7 @@ remi turn list --issue <issue-id> --json
 
 示例创建未分配的项目 Issue；需要自动分配时按用户意图使用项目默认值或显式 assignee。**省略 assignee 会继承项目默认执行者**，`--no-project-defaults` 才表示不继承。创建响应里的派发结果与实际 Task 状态分别检查。
 
-派给人、云友或团队时明确 `member|agent|squad`，不要仅凭同名对象猜类型。`issue assign` 使用 `--to/--to-type`，`issue create/update` 使用 `--assignee/--assignee-type`。创建、分配、状态变化、发送 request 都可能启动工作；不能将它们当读取探针。
+执行指派仅接受 Agent 或团队，明确 `agent|squad`，不要仅凭同名对象猜类型。`issue assign` 使用 `--to/--to-type`，`issue create/update` 使用 `--assignee/--assignee-type`。创建、分配、状态变化、发送 request 都可能启动工作；不能将它们当读取探针。
 
 工作位置二选一：项目用 `--project`，Runtime 持久目录用 `--runtime-workspace`，详见 [Runtime](runtimes.md)。已执行的目录绑定不可任意移动。`issue status <issue> <status>` 改业务状态，`turn cancel <turn> --yes` 取消执行，二者不能互相代替。
 
@@ -36,7 +36,7 @@ remi message send <issue-id> --content-file <comment.md> --json
 
 评论、回复、发布成果都是协作写入，沿用用户已有发送授权。`message resolve` 解决一条评论，不代表 Issue 完成。批量修改先列出精确目标 ID 并读当前值；`issue batch-update` / `batch-delete` 的 JSON 不能从单条更新参数推断。`issue delete` 与 `issue restore` 的当前归档/恢复行为以目标版本帮助和返回为准，不能用批量删除整理无关任务。
 
-## Session、成果和归档
+## Session 与成果
 
 ```sh
 remi issue session list <issue-id> --json
@@ -44,10 +44,9 @@ remi issue session get <issue-id> <session-id> --json
 remi turn list --session <session-id> --json
 remi issue session result list <issue-id> --json
 remi issue session result publish <issue-id> <session-id> --type report --title "<result-title>" --content-file <result.md> --json
-remi session archive status <issue-id> --json
 ```
 
-Issue 创建时已有自己的 Main；从 Issue 派发无需另建 Chat。Issue 路径的 get、update、participant 命令同时需要 Issue ID 和 Session ID；成果 publish 也接受 `--session <session-id>`。成果类型为 `mr|report|deploy|decision|doc|other`，发布可复用结论并附实际证据，不把未完成的运行写成成果。消息与派发统一使用 `remi message send <session-id> --to <agent-id> --kind request`，轮状态使用 `remi turn`；旧 Session task/message/event 命令仅提示替代命令，不执行。`session config get/update <workspace>` 配置 provider 归档，不是单个产品 Session 配置。
+Issue 创建时已有自己的 Main；从 Issue 派发无需另建 Chat。Issue 路径的 get、update、participant 命令同时需要 Issue ID 和 Session ID；成果 publish 也接受 `--session <session-id>`。成果类型为 `mr|report|deploy|decision|doc|other`，发布可复用结论并附实际证据，不把未完成的运行写成成果。消息与派发统一使用 `remi message send <session-id> --to <agent-id> --kind request`，轮状态使用 `remi turn`；旧 Session task/message/event 命令仅提示替代命令，不执行。存储策略改用 `remi workspace storage get/set <workspace>`，Runtime 占用和保留信息用 `remi runtime storage <runtime>`；旧 Session archive/config 路径已退役。
 
 Issue 列表可能包含有权访问的 Chat-owned 工作投影；先读返回的 `owner_type/owner_id`。Chat-owned 的管理使用 `remi session ... <chat-id> <session-id>`；不能把 Issue ID 传给这组 Chat 命令。两种所有者的消息都按 Session ID 使用 `message`。没有 Chat ID 的 Issue-owned Session 可以直接执行，不需要 adopt。
 
@@ -59,7 +58,7 @@ Task 凭据绑定当前 attempt；读取 Session 内容限于当前 Session。�
 
 定向 request 可向同工作区其他 Issue-owned Session 派发委派工作，须满足实际 owner、工作区、Agent、来源轮血统、交接次数及旁聊限制。发送成功不额外授予 Session 内容或执行读取、控制权限；Chat-owned 目标须是当前 Session 或已验证 Topic 协调目标。消息即使已保存也可能降为 next_turn 或 inbox_only，应核对 `wake_applied/wake_reason`。Issue 触发的 Autopilot 使用 Issue-owned Session，`reuse_latest` 不复用 Chat-owned 工作投影。
 
-`session archive verify/retry` 会执行校验或重试归档，不是单纯读取；先看 status 和 list，针对已有失败记录处理。`remi turn trace read <turn> --attempt <attempt>` 查询指定尝试的执行证据。
+`remi turn trace read <turn> --attempt <attempt>` 查询指定尝试的执行证据：默认返回折叠后的轮与条目（`turn`、`items`），用 `--cursor <next_item_cursor>` 翻页；`--raw` 返回原始事件行，用 `--after <next_after_seq>` 翻页，也是查看旧格式（v1）记录的唯一方式。执行记录留在 daemon 本机，服务端不再归档：daemon 离线时读取返回不可达，daemon 下线或 Runtime 删除后记录标为丢失。
 
 ## 附件与分享
 

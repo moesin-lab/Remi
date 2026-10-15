@@ -16,7 +16,7 @@ export const DATA_SCHEMA_INPUTS = [
   'packages/server/src/store/repos/workspaces-repo.ts',
   'packages/server/src/store/daemon-routing.ts',
   'packages/server/src/store/db/postgres.ts', 'packages/server/src/store/db/pg-worker.ts',
-  'packages/server/src/session-archive/retry-policy.ts', 'packages/contracts/src/attachments.ts',
+  'packages/contracts/src/attachments.ts',
   'packages/shared/src/db/index.ts',
 ];
 // These image-owned programs cannot change during a code-only update. Changes

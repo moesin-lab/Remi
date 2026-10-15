@@ -15,6 +15,7 @@ import { buildSessionProjection } from "@multiremi/store/session-projection.js";
 import { conversationLogChatMessage } from "@multiremi/store/conversation-log-projection.js";
 import { resolveProjectionTokenBudget } from "@multiremi/store/session-projection-budget.js";
 import { createLogger } from "@shared/logger.js";
+import { resolveStorageSettings } from "@multiremi/contracts/storage.js";
 import type {
   CreateChatSessionInput,
   MultiremiChatMessage,
@@ -28,6 +29,13 @@ import type {
 } from "@multiremi/contracts/types.js";
 
 type Row = Record<string, unknown>;
+
+/** Chats archived per sweep; a backlog drains over successive sweeps. */
+const IDLE_CHAT_ARCHIVE_BATCH = 50;
+
+/** Which Chats a list shows: the user's own, those opened by automation runs, or both. */
+export type ChatOriginFilter = "user" | "automation" | "all";
+export const CHAT_ORIGIN_FILTERS: readonly ChatOriginFilter[] = ["user", "automation", "all"];
 
 export class ChatConflictError extends Error {}
 export class ChatValidationError extends Error {}
@@ -76,7 +84,7 @@ const CHAT_UNREAD_FROM = `FROM multiremi_conversation_log m
 const CHAT_SESSION_SELECT = `SELECT chat.id, chat.workspace_id, chat.creator_id, chat.agent_id,
   chat.runtime_workspace_id, chat.project_id, chat.title, chat.status, chat.session_id,
   chat.work_dir, chat.session_runtime_id, chat.session_provider, chat.session_execution_fingerprint,
-  chat.latest_task_id, chat.pinned, chat.created_at, chat.updated_at,
+  chat.latest_task_id, chat.pinned, chat.origin_autopilot_id, chat.origin_run_id, chat.created_at, chat.updated_at,
   (SELECT COUNT(*) ${CHAT_UNREAD_FROM}) AS unread_count,
   (SELECT MIN(m.created_at) ${CHAT_UNREAD_FROM}) AS reader_unread_since,
   (SELECT SUBSTR(m.body, 1, 240) FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id
@@ -158,13 +166,20 @@ export class ChatRepo {
     return project.id;
   }
 
-  listChatSessions(workspaceId?: string | null, options: { creatorId?: string | null; includeArchived?: boolean; excludeTransportSessions?: boolean } = {}): MultiremiChatSession[] {
+  listChatSessions(workspaceId?: string | null, options: {
+    creatorId?: string | null;
+    includeArchived?: boolean;
+    excludeTransportSessions?: boolean;
+    origin?: ChatOriginFilter;
+  } = {}): MultiremiChatSession[] {
     const clauses: string[] = [];
     const params: unknown[] = [];
     if (workspaceId) {
       clauses.push("workspace_id = ?");
       params.push(workspaceId);
     }
+    if (options.origin === "user") clauses.push("origin_autopilot_id IS NULL");
+    else if (options.origin === "automation") clauses.push("origin_autopilot_id IS NOT NULL");
     if (options.creatorId && options.creatorId !== "local") {
       clauses.push("creator_id = ?");
       params.push(options.creatorId);
@@ -179,6 +194,45 @@ export class ChatRepo {
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = this.ctx.db.query(`${CHAT_SESSION_SELECT} ${where} ORDER BY pinned DESC, updated_at DESC`).all(...params) as Row[];
     return rows.map(toChatSession);
+  }
+
+  /**
+   * Archives each workspace's Chats that nobody has touched for `chat_idle_days`
+   * (workspace storage setting; 0 turns it off). Pinned Chats, Chats with work in
+   * flight and Feishu Issue topics, whose lifecycle follows their Issue, stay.
+   * A new message from the owner reopens an archived Chat.
+   */
+  archiveIdleChats(now: number = Date.now(), limit = IDLE_CHAT_ARCHIVE_BATCH): string[] {
+    const archived: string[] = [];
+    for (const workspace of this.ctx.workspaces().listWorkspaces()) {
+      const idleDays = resolveStorageSettings(workspace.settings.storage).chat_idle_days;
+      if (idleDays <= 0) continue;
+      const cutoff = new Date(now - idleDays * 24 * 60 * 60 * 1000).toISOString();
+      const pending = PENDING_CHAT_TASK_STATUSES.map(() => "?").join(", ");
+      const rows = this.ctx.db.query(
+        `SELECT chat.id FROM multiremi_chat_sessions chat
+         WHERE chat.workspace_id = ? AND chat.status = 'active' AND chat.pinned = 0
+           AND chat.updated_at < ?
+           AND COALESCE((SELECT MAX(m.created_at) FROM multiremi_chat_message_records m
+                         WHERE m.chat_session_id = chat.id), chat.created_at) < ?
+           AND NOT EXISTS (SELECT 1 FROM multiremi_turn_execution_records task
+                           WHERE task.chat_session_id = chat.id AND task.status IN (${pending}))
+           AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_chat_bindings binding
+                           WHERE binding.chat_session_id = chat.id AND binding.issue_id IS NOT NULL)
+         ORDER BY chat.updated_at ASC LIMIT ?`,
+      ).all(workspace.id, cutoff, cutoff, ...PENDING_CHAT_TASK_STATUSES, limit - archived.length) as Row[];
+      for (const row of rows) {
+        const id = String(row.id);
+        try {
+          this.updateChatSession(id, { status: "archived" });
+          archived.push(id);
+        } catch (error) {
+          log.warn(`idle chat archive failed for ${id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (archived.length >= limit) break;
+    }
+    return archived;
   }
 
   getChatSession(id: string): MultiremiChatSession | null {
@@ -260,6 +314,9 @@ export class ChatRepo {
       // Keep the original private scope on retained task audits. Clearing it
       // would make their transcripts inherit the workspace Agent visibility.
       this.ctx.db.run("DELETE FROM multiremi_attachments WHERE chat_session_id = ?", [id]);
+      // Queued follow-ups are private drafts of this Chat (ADR 0020).
+      this.ctx.db.run("DELETE FROM multiremi_queued_messages WHERE session_id = ?", [id]);
+      this.ctx.db.run("UPDATE multiremi_autopilot_runs SET chat_session_id = NULL WHERE chat_session_id = ?", [id]);
       this.ctx.db.run("UPDATE multiremi_conversation_log SET deleted_at=? WHERE session_id=?", [nowIso(),id]);
       this.ctx.notificationChannels().deleteAgentChatNotificationChannel(id);
       this.ctx.issueSessions().deleteOwnedSessionsWithinTransaction("chat", id);
@@ -325,76 +382,6 @@ export class ChatRepo {
        WHERE m.chat_session_id = ? AND m.task_id = ? AND m.role = 'user'`,
     ).all(task.chatSessionId, task.id) as Row[];
     return { task_id: task.id, content: task.prompt, attachment_ids: attachments.map((row) => String(row.id)), created_at: task.createdAt };
-  }
-
-  private requireQueuedTask(chatSessionId: string, taskId: string): MultiremiTask {
-    const task = this.pendingTasks(chatSessionId).slice(1).find((entry) => entry.id === taskId && entry.status === "queued" && !entry.wakeSource);
-    if (!task) throw new ChatConflictError("Task is no longer queued in this chat");
-    return task;
-  }
-
-  updateQueuedChatTask(chatSessionId: string, taskId: string, content: string): QueuedChatTask {
-    const result = this.ctx.db.transaction(() => {
-      this.lockActiveSession(chatSessionId);
-      const task = this.requireQueuedTask(chatSessionId, taskId);
-      if (task.offeredAt) throw new ChatConflictError("Task was already dispatched and can no longer be edited");
-      const body = content.trim();
-      if (!body) throw new Error("content is required");
-      const changed = runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records SET prompt = ?, offered_at = NULL, accepted_at = NULL, updated_at = ? WHERE id = ? AND status = 'queued'`,
-        [body, nowIso(), taskId],
-      );
-      if (!changed.changes) throw new ChatConflictError("Task is no longer queued");
-      const messages = this.ctx.db.run("UPDATE multiremi_conversation_log SET body_md = ?,revision=revision+1 WHERE session_id = ? AND task_id = ? AND sender_type = 'member'", [body, chatSessionId, taskId]);
-      if (messages.changes !== 1) throw new ChatConflictError("Queued input can no longer be edited");
-      return this.queuedTaskResponse(this.ctx.tasks().getTask(taskId)!);
-    })();
-    this.ctx.emitChatEvent(this.getChatSession(chatSessionId)!, "chat:queue_updated", {});
-    return result;
-  }
-
-  removeQueuedChatTasks(chatSessionId: string, taskId?: string): void {
-    const childStatusChangesQ: import("./tasks-repo.js").ChildStatusChangeCollector = [];
-    const deferredEventsQ = createCommitEventQueue();
-    const cancelled = this.ctx.db.transaction(() => {
-      this.lockActiveSession(chatSessionId);
-      const tasks = taskId ? [this.requireQueuedTask(chatSessionId, taskId)]
-        : this.pendingTasks(chatSessionId).slice(1).filter((task) => task.status === "queued" && !task.wakeSource);
-      return tasks.map((task) => {
-        const result = this.ctx.tasks().cancelTaskWithinTransaction(task.id, childStatusChangesQ, deferredEventsQ);
-        this.ctx.db.run(`UPDATE multiremi_attachments SET chat_message_id = NULL WHERE chat_message_id IN
-          (SELECT id FROM multiremi_chat_message_records WHERE chat_session_id = ? AND task_id = ? AND role = 'user')`, [chatSessionId, task.id]);
-        this.ctx.db.run("UPDATE multiremi_conversation_log SET deleted_at=? WHERE session_id = ? AND task_id = ? AND sender_type = 'member'", [nowIso(),chatSessionId, task.id]);
-        return result;
-      });
-    })();
-    for (const result of cancelled) this.ctx.tasks().notifyCancelledTask(result);
-    this.ctx.tasks().runCollectedChildStatusChanges(childStatusChangesQ);
-    this.ctx.emitCommitEvents(deferredEventsQ);
-    this.ctx.emitChatEvent(this.getChatSession(chatSessionId)!, "chat:queue_updated", {});
-  }
-
-  prioritizeQueuedChatTask(chatSessionId: string, taskId: string): { task_id: string; active_task_id: string | null } {
-    const childStatusChangesP: import("./tasks-repo.js").ChildStatusChangeCollector = [];
-    const deferredEventsP = createCommitEventQueue();
-    const result = this.ctx.db.transaction(() => {
-      this.lockActiveSession(chatSessionId);
-      this.requireQueuedTask(chatSessionId, taskId);
-      const pending = this.pendingTasks(chatSessionId);
-      // A retry is still the current logical turn even while waiting to claim.
-      // Interrupt it instead of moving its already-executed input into the queue.
-      const active = pending.find((task) => task.status !== "queued")
-        ?? (pending[0]?.attempt > 1 ? pending[0] : undefined);
-      const priority = Math.max(0, ...pending.map((task) => task.priority)) + 1;
-      runTurnExecutionMutation(this.ctx.db, "UPDATE multiremi_turn_execution_records SET priority = ?, updated_at = ? WHERE id = ? AND status = 'queued'", [priority, nowIso(), taskId]);
-      const cancelled = active ? this.ctx.tasks().cancelTaskWithinTransaction(active.id, childStatusChangesP, deferredEventsP) : null;
-      return { cancelled, activeTaskId: active?.id ?? null };
-    })();
-    if (result.cancelled) this.ctx.tasks().notifyCancelledTask(result.cancelled);
-    this.ctx.tasks().runCollectedChildStatusChanges(childStatusChangesP);
-    this.ctx.emitCommitEvents(deferredEventsP);
-    this.ctx.notifyTaskEnqueued(this.ctx.tasks().getTask(taskId)!);
-    this.ctx.emitChatEvent(this.getChatSession(chatSessionId)!, "chat:queue_updated", {});
-    return { task_id: taskId, active_task_id: result.activeTaskId };
   }
 
   /**
@@ -631,7 +618,8 @@ export class ChatRepo {
     const childStatusChanges: import("./tasks-repo.js").ChildStatusChangeCollector = [];
     const deferredEvents = createCommitEventQueue();
     const result = this.ctx.db.transaction(() => {
-      const session = this.lockActiveSession(chatSessionId);
+      // An archived Chat reopens when its owner writes again (sendMessageWithinTransaction).
+      const session = this.lockSession(chatSessionId);
       const body = (input.body ?? input.content)?.trim();
       if (!body) throw new Error("Chat message body is required");
       const queued = this.getPendingChatTask(session.id) != null;
@@ -663,12 +651,12 @@ export class ChatRepo {
     return result;
   }
 
-  private lockActiveSession(chatSessionId: string): MultiremiChatSession {
+  private lockSession(chatSessionId: string): MultiremiChatSession {
     const initial = this.getChatSession(chatSessionId);
     if (!initial) throw new Error(`Chat session not found: ${chatSessionId}`);
     this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
     const session = this.getChatSession(chatSessionId);
-    if (!session || session.status === "archived") throw new ChatConflictError("Chat session is archived");
+    if (!session) throw new Error(`Chat session not found: ${chatSessionId}`);
     return session;
   }
 
@@ -841,6 +829,8 @@ function toChatSession(row: Row): MultiremiChatSession {
     unreadSince: nullableString(row.reader_unread_since),
     hasUnread: Number(row.unread_count ?? 0) > 0,
     pinned: Number(row.pinned ?? 0) === 1,
+    origin: row.origin_autopilot_id == null ? null
+      : { autopilot_id: String(row.origin_autopilot_id), run_id: String(row.origin_run_id ?? "") },
     unreadCount: Number(row.unread_count ?? 0),
     lastMessage: row.last_message_created_at == null ? null : {
       content: String(row.last_message_content ?? ""),

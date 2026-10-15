@@ -1,4 +1,5 @@
 import { FEISHU_BOT_OPTION, feishuBotPath } from "./feishu-bot-scope.js";
+import { STORAGE_SETTINGS_DEFAULTS, STORAGE_SETTINGS_KEYS, type WorkspaceStorageResponse } from "@multiremi/contracts/storage.js";
 import {
   CliError,
   CliRenderer,
@@ -59,8 +60,8 @@ const RUNTIME_PROVISION_FIELDS: readonly CliOptionSpec[] = [
  */
 const FEISHU_BOT_FIELDS: readonly CliOptionSpec[] = [
   { name: "name", type: "string", valueName: "name", description: "Bot display name" },
-  { name: "responsible-member", type: "string", description: "Optional legacy contact for root issues from inbound conversations", conflictsWith: ["clear-responsible"] },
-  { name: "clear-responsible", type: "boolean", description: "Clear the human configuration; inbound conversations remain but automatic root creation stops", conflictsWith: ["responsible-member"] },
+  { name: "responsible-member", type: "string", description: "Member who answers questions from Feishu Chats without an Issue", conflictsWith: ["clear-responsible"] },
+  { name: "clear-responsible", type: "boolean", description: "Clear it; such Chat questions then have no handler", conflictsWith: ["responsible-member"] },
   { name: "sender-access-policy", type: "string", valueName: "agent|allowlist", description: "Use Agent permissions (default) or require a sender allowlist" },
   { name: "agent", type: "string", valueName: "agent-id", description: "Agent that answers concierge messages" },
   { name: "runtime", type: "string", valueName: "runtime-id", description: "Runtime that hosts the connector" },
@@ -69,6 +70,16 @@ const FEISHU_BOT_FIELDS: readonly CliOptionSpec[] = [
   { name: "domain", type: "string", valueName: "feishu|lark|bytedance", description: "Open platform domain" },
   { name: "enabled", type: "boolean", description: "Run after saving; requires an online Runtime with concierge support" },
   { name: "disabled", type: "boolean", description: "Save without running; permits an offline Runtime or one without concierge support" },
+];
+
+const STORAGE_FIELDS: readonly CliOptionSpec[] = [
+  { name: "ttl-ms", type: "integer", valueName: "ms", description: "Retention after an Issue or Chat ends before its workspace is reclaimed" },
+  { name: "automation-ttl-ms", type: "integer", valueName: "ms", description: "Same as --ttl-ms for Chats opened by automation runs" },
+  { name: "max-retained", type: "integer", valueName: "n", description: "Ended subjects allowed to keep a workspace; 0 means no cap" },
+  { name: "orphan-ttl-ms", type: "integer", valueName: "ms", description: "How long a daemon keeps data of a subject the server no longer knows" },
+  { name: "snapshot-max-bytes", type: "integer", valueName: "bytes", description: "Largest unsaved work a reclaim snapshot may capture" },
+  { name: "chat-idle-days", type: "integer", valueName: "days", description: "Days without activity before an active Chat is archived; 0 means never" },
+  { name: "reset", type: "string", valueName: "option", repeatable: true, description: "Reset an option to its default, for example --reset ttl-ms" },
 ];
 
 export function workspaceCommandSpecs(): CommandSpec[] {
@@ -158,8 +169,8 @@ export function workspaceCommandSpecs(): CommandSpec[] {
       "PUT",
       [
         { name: "chat-id", type: "string", valueName: "chat-id", description: "Feishu group chat ID" },
-        { name: "responsible-member", type: "string", description: "Optional legacy contact for roots created from this topic", conflictsWith: ["inherit-bot-responsible"] },
-        { name: "inherit-bot-responsible", type: "boolean", description: "Clear topic override and inherit the explicit bot human", conflictsWith: ["responsible-member"] },
+        { name: "responsible-member", type: "string", description: "Deprecated no-op: topic Issues no longer designate a human; the value is ignored" },
+        { name: "inherit-bot-responsible", type: "boolean", description: "Deprecated no-op: topic Issues no longer designate a human" },
         { name: "notify", type: "string", valueName: "group_owner|person|none", description: "Proactive report mention target (default: group_owner)" },
         { name: "notify-open-id", type: "string", valueName: "open-id", description: "Bot-scoped recipient open ID for --notify person" },
         { name: "project", type: "string", valueName: "project-id", repeatable: true, description: "Limit topics to a project" },
@@ -329,6 +340,19 @@ export function workspaceCommandSpecs(): CommandSpec[] {
       { name: "ttl-ms", type: "integer", valueName: "ms", description: "Archive retention duration" },
       { name: "sweep-interval-ms", type: "integer", valueName: "ms", description: "Archive sweep interval" },
     ], issueArchiveBody),
+    readSpec("workspace.storage.get", ["workspace", "storage", "get"], "Read the daemon storage retention policy", [refPositional("workspace")], async (invocation) => {
+      const client = await clientFor(invocation);
+      const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
+      const response = await client.request({ method: "GET", path: `/api/workspaces/${encodePath(String(workspace.id))}/storage` });
+      renderStorageSettings(invocation, response.data);
+    }),
+    writeSpec("workspace.storage.set", ["workspace", "storage", "set"], "Update the daemon storage retention policy", [refPositional("workspace")], STORAGE_FIELDS, async (invocation) => {
+      const client = await clientFor(invocation);
+      const workspace = await resolveWorkspace(client, positional(invocation, 0, "workspace"));
+      const body = await storageBody(invocation);
+      const response = await client.request({ method: "PUT", path: `/api/workspaces/${encodePath(String(workspace.id))}/storage`, body });
+      renderStorageSettings(invocation, response.data);
+    }),
   ];
   return specs.map(spec => (spec.path[1] === "bot-menu" || spec.path[1] === "feishu-bot" && !["list", "create", "register", "register-status", "register-cancel"].includes(spec.path[2] ?? ""))
     ? { ...spec, options: [...(spec.options ?? []), FEISHU_BOT_OPTION] } : spec);
@@ -659,6 +683,47 @@ async function issueArchiveBody(invocation: CommandInvocation): Promise<Record<s
   return body;
 }
 
+/** Every option name is its setting key with dashes; `--reset` sends null so the server falls back to the default. */
+async function storageBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
+  const explicit: Record<string, number | null> = {};
+  for (const key of STORAGE_SETTINGS_KEYS) {
+    const value = integerOption(invocation, key.replaceAll("_", "-"));
+    if (value !== null) explicit[key] = value;
+  }
+  for (const name of stringOptions(invocation, "reset")) {
+    const key = name.replaceAll("-", "_");
+    if (!(STORAGE_SETTINGS_KEYS as readonly string[]).includes(key)) {
+      throw new CliError("usage", `--reset expects one of ${STORAGE_SETTINGS_KEYS.map((entry) => entry.replaceAll("_", "-")).join(", ")}`);
+    }
+    if (key in explicit) throw new CliError("usage", `--${key.replaceAll("_", "-")} conflicts with --reset ${name}`);
+    explicit[key] = null;
+  }
+  const body = await requestBody(invocation, explicit);
+  if (!Object.keys(body).length) throw new CliError("usage", "workspace storage set requires an option, --reset or input JSON");
+  return body;
+}
+
+function renderStorageSettings(invocation: CommandInvocation, value: unknown): void {
+  new CliRenderer().render<{ key: string; value: number; source: string; default: number }>(value, {
+    mode: outputMode(invocation),
+    rows: (input) => {
+      const { settings, overrides } = input as WorkspaceStorageResponse;
+      return STORAGE_SETTINGS_KEYS.map((key) => ({
+        key,
+        value: settings[key],
+        source: key in overrides ? "workspace" : "default",
+        default: STORAGE_SETTINGS_DEFAULTS[key],
+      }));
+    },
+    columns: [
+      { header: "SETTING", value: (row) => row.key },
+      { header: "VALUE", value: (row) => row.value },
+      { header: "SOURCE", value: (row) => row.source },
+      { header: "DEFAULT", value: (row) => row.default },
+    ],
+  });
+}
+
 async function organizerBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
   const body = await requestBody(invocation, { mode: stringOption(invocation, "mode") ?? undefined });
   if (body.mode !== "report_only" && body.mode !== "act") {
@@ -674,7 +739,6 @@ async function issueTopicsBody(invocation: CommandInvocation): Promise<Record<st
       ? false
       : booleanOption(invocation, "enabled") ?? undefined,
     chat_id: stringOption(invocation, "chat-id") ?? undefined,
-    responsible_member_id: booleanOption(invocation, "inherit-bot-responsible") === true ? null : stringOption(invocation, "responsible-member") ?? undefined,
     project_ids: projects.length ? projects : undefined,
     notify_mode: stringOption(invocation, "notify") ?? undefined,
     notify_open_id: stringOption(invocation, "notify-open-id") ?? undefined,

@@ -1823,7 +1823,7 @@ export class TasksRepo {
     input={...input,id:requestId,workspaceId:agent.workspaceId};
     const sessionId=input.conversationSessionId??input.issueSessionId??input.issue_session_id??input.chatSessionId
       ??(issueId?this.ctx.issueSessions().getOrCreateDefaultIssueSessionWithinTransaction(issueId).id:null)
-      ??this.ctx.db.query('SELECT a.session_id FROM multiremi_autopilots a JOIN multiremi_autopilot_runs r ON r.autopilot_id=a.id WHERE r.turn_id=?').get(input.id)?.session_id??`auto_orphan_${requestId}`;
+      ??`auto_orphan_${requestId}`;
     if(!sessionId)throw new Error('A request must name an Issue, Chat or automation conversation');
     const issueSession=this.ctx.issueSessions().getIssueSession(sessionId);
     const explicitSessionId=cleanOptionalString(input.issueSessionId??input.issue_session_id);
@@ -4733,13 +4733,13 @@ ${placementAfter.sql}
       );
       if (transition.changes > 0) {
         transitionedTask = this.getTask(input.taskId);
-        // Guard B is deliberately exempt here: while an owner waits for an
-        // answer the Issue legitimately parks at `in_review`, and the resume
-        // path (`resumeTaskFromAwaitingHumanWithinTransaction`) puts it back.
+        // The Issue derives `in_review` once the question is at the human stage
+        // and stays `in_progress` while it waits on a Leader; question route
+        // changes re-derive it, and the resume path
+        // (`resumeTaskFromAwaitingHumanWithinTransaction`) puts it back.
         if (transitionedTask) {
           this.deriveTaskIssueWithinTransaction(transitionedTask, "in_review", {
             rederive: true,
-            exemptFromParentStatusGuard: true,
             collectChildStatusChanges: childStatusChanges,
             deferredEvents,
           });
@@ -6668,6 +6668,8 @@ ${placementAfter.sql}
         }
         for (const recipientId of recipients) {
           if (runStatus === "completed") {
+            // A quiet run has nothing to report: its Chat is archived read instead of notifying.
+            if (run.quiet) continue;
             const outcome = wikiOutcome ? {
               kind: wikiOutcome.status === "noop" ? "no_change" as const : "changes" as const,
               headline: `Wiki ${wikiOutcome.status}`, text: wikiOutcome.reason, links: [], counts: null,
@@ -6694,6 +6696,7 @@ ${placementAfter.sql}
                 duration_seconds: durationSeconds,
                 issue_id: run.issueId,
                 issue_session_id: run.issueSessionId,
+                chat_session_id: run.chatSessionId,
                 trigger_object: triggerObject,
                 outcome,
                 ...(wikiOutcome ? { knowledge_outcome: wikiOutcome } : {}),
@@ -6724,6 +6727,7 @@ ${placementAfter.sql}
                 duration_seconds: durationSeconds,
                 issue_id: run.issueId,
                 issue_session_id: run.issueSessionId,
+                chat_session_id: run.chatSessionId,
                 trigger_object: triggerObject,
                 outcome,
                 ...(wikiOutcome ? { knowledge_outcome: wikiOutcome } : {}),
@@ -6734,6 +6738,7 @@ ${placementAfter.sql}
           }
         }
       }
+      this.ctx.autopilots().settleQuietRunWithinTransaction(runRow.id);
     }
     return { retry, delegationReturns, roundPushTasks };
   }

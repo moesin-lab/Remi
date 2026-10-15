@@ -19,6 +19,13 @@
       "browser_suffix": "（浏览器）",
       "hint": "用于仪表盘、图表和「今天」标签。这是个人偏好，在你的所有工作区中通用。",
       "sync_failed": "保存时区偏好失败。"
+    },
+    "chat": {
+      "title": "聊天",
+      "follow_up": "运行中发送消息时",
+      "steer": "引导（送进这一轮）",
+      "queue": "排队（这一轮结束后发送）",
+      "hint": "按 {{shortcut}} 临时换用另一种方式"
     }
   },
   "page": {
@@ -36,10 +43,10 @@
       "repositories": "代码仓库",
       "source_control": "代码托管",
       "model_gateway": "模型网关",
-      "storage_cleanup": "存储与清理",
       "labs": "实验室",
       "members": "成员",
-      "platform": "版本与服务"
+      "platform": "版本与服务",
+      "storage": "存储"
     }
   },
   "account": {
@@ -313,8 +320,8 @@
     "section_collaboration_description": "以下行为同时适用于 GitHub Pull Request 和 Codebase Merge Request。",
     "feature_change_sidebar_label": "代码变更侧栏",
     "feature_change_sidebar_description": "在 Issue 详情中展示关联的 Pull Request 和 Merge Request。",
-    "feature_complete_on_merge_label": "合并后完成 Issue",
-    "feature_complete_on_merge_description": "关联的 Pull Request 或 Merge Request 合并后，将 Issue 转为已完成。",
+    "feature_complete_on_merge_label": "合并后记录到 Issue",
+    "feature_complete_on_merge_description": "关联的 Pull Request 或 Merge Request 合并后，在 Issue 上记录这次合并；Issue 状态不变。",
     "section_commits": "提交署名",
     "section_commits_description": "智能体提交使用统一且与平台无关的 Git 身份。",
     "feature_co_author_label": "Co-authored-by trailer",
@@ -402,47 +409,6 @@
         "label": "成员",
         "description": "创建并处理 issue"
       }
-    }
-  },
-  "storageCleanup": {
-    "description": "在清理已完成 Issue 的工作目录前，归档 Claude/Codex 的原生会话记录。",
-    "storage_title": "归档存储",
-    "backend": "存储后端",
-    "local_disk": "本地磁盘",
-    "root_hint": "归档位置",
-    "archive_gate": "工作目录清理前必须完成并校验归档",
-    "required": "强制",
-    "unknown": "未上报",
-    "max_archive_size": "单个归档上限",
-    "min_free_space": "最低磁盘剩余空间",
-    "usage_title": "使用情况",
-    "total": "全部",
-    "ready": "已就绪",
-    "pending": "等待中",
-    "failed": "失败",
-    "exhausted": "已停止自动重试",
-    "space_used": "占用空间",
-    "last_failure": "最近一次归档失败",
-    "cleanup_title": "工作目录清理",
-    "cleanup_description": "已完成 Issue 的工作目录会保留指定时间。Provider Session 归档校验成功前，清理任务不会删除工作目录。",
-    "workspace_ttl": "工作目录保留时间",
-    "gc_interval": "清理扫描周期",
-    "hours": "小时",
-    "minutes": "分钟",
-    "save": "保存",
-    "saving": "保存中…",
-    "saved": "已保存存储与清理设置",
-    "save_failed": "保存存储与清理设置失败",
-    "load_failed": "无法加载存储与清理设置",
-    "retry_load": "重试",
-    "insufficient": "仅工作区所有者和管理员可管理存储与清理。",
-    "validation": {
-      "ttl_required": "请输入整数小时。",
-      "ttl_min": "工作目录至少保留 1 小时。",
-      "ttl_max": "工作目录最多保留 365 天。",
-      "interval_required": "请输入整数分钟。",
-      "interval_min": "清理扫描周期至少为 1 分钟。",
-      "interval_gt_ttl": "清理扫描周期不能超过工作目录保留时间。"
     }
   },
   "platform": {
@@ -670,7 +636,7 @@
     "context_save_failed": "上下文窗口保存失败。",
     "description": "用于全部智能体任务的工作区网关策略。daemon 会在隔离的 Provider Home 中重建无密配置，Token 只注入子进程环境。",
     "discovery_title": "自动发现模型",
-    "discovery_desc": "查询网关的 /v1/models 与 /models，让创建 agent 的模型下拉框显示网关真实模型。两个引擎统一。",
+    "discovery_desc": "查询网关的 /v1/models、/models 与 /v1beta/models，让创建 agent 的模型下拉框显示网关真实模型。所有引擎统一。",
     "auto_title_title": "Issue 自动命名",
     "auto_title_description": "定期通过工作区网关优化不清晰的 Issue 标题。",
     "auto_title_enabled_label": "自动命名",
@@ -696,6 +662,7 @@
     "token_label": "鉴权 Token",
     "claude_hint": "配置片段以无密方式写入隔离 Provider Home 的 settings.json；ANTHROPIC_AUTH_TOKEN 仅在子进程启动时注入。",
     "codex_hint": "配置片段以无密方式写入隔离 Provider Home 的 config.toml；OPENAI_API_KEY 仅在子进程启动时注入。",
+    "antigravity_hint": "配置片段仅含 base_url（网关根地址，不带 /v1beta）和 default_model（Agent 未选模型时使用）。密钥下发到 daemon 的本地网关 shim，仅用于 Antigravity 的模型请求；Antigravity 进程本身拿不到密钥。",
     "save": "保存",
     "saving": "保存中…",
     "reveal": "显示",
@@ -754,5 +721,58 @@
     "reasoning_blocked_execution_catalog_unknown": "Codex 执行目录未知或加载中，暂时无法判定，声明暂不生效。",
     "reasoning_blocked_not_in_catalog": "当前引擎目录中没有这个模型（例如没有可用的该引擎 Runtime），声明暂不生效。",
     "reasoning_blocked_unknown_reason": "该声明当前未生效。"
+  },
+  "storage": {
+    "description": "已结束的 Issue 和对话在保留期过后会释放代码目录和运行环境。未保存的工作会先保存为快照，Issue 或对话重新打开时恢复；执行记录始终保留在机器上。",
+    "machines_title": "机器",
+    "no_machines": "还没有机器连接到此工作区。",
+    "policy_title": "保留策略",
+    "policy_description": "适用于此工作区的所有机器。每台机器可用环境变量在本地覆盖。",
+    "fields": {
+      "ttl_ms": {
+        "label": "保留时长",
+        "hint": "已结束的 Issue 或对话保留工作区多久后被回收。"
+      },
+      "automation_ttl_ms": {
+        "label": "自动化对话保留时长",
+        "hint": "自动化运行所开对话的保留时长。"
+      },
+      "max_retained": {
+        "label": "保留工作区数量上限",
+        "hint": "每台机器保留的已结束工作区数量，超出时先回收最久未使用的。0 表示不限制。"
+      },
+      "orphan_ttl_ms": {
+        "label": "孤立数据保留时长",
+        "hint": "机器保留服务端已删除的 Issue 或对话数据的时长。"
+      },
+      "snapshot_max_bytes": {
+        "label": "快照大小上限",
+        "hint": "快照可保存的未保存工作的最大体积；超出则保留工作区而不回收。"
+      },
+      "chat_idle_days": {
+        "label": "对话自动归档",
+        "hint": "活跃对话无活动多少天后自动归档。0 表示不自动归档。"
+      }
+    },
+    "units": {
+      "hours": "小时",
+      "mb": "MB",
+      "days": "天",
+      "count": "个"
+    },
+    "default_value": "默认：{{value}} {{unit}}",
+    "validation": {
+      "required": "请输入数字。",
+      "integer": "请输入整数。",
+      "range": "须在 {{min}} 到 {{max}} {{unit}}之间。"
+    },
+    "reset_default": "恢复默认",
+    "save": "保存",
+    "saving": "保存中…",
+    "saved": "存储设置已保存",
+    "save_failed": "保存存储设置失败",
+    "load_failed": "无法加载存储信息",
+    "retry_load": "重试",
+    "read_only": "仅工作区所有者和管理员可修改存储设置。"
   }
 }

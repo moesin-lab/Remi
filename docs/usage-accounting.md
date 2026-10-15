@@ -36,19 +36,21 @@ summary: 从可靠采集到规范化事实、SQL 报表、价格版本和可恢�
 
 Claude 采集保留请求状态直到最终用量和终止事件得到确认，内容块对应的早期 assistant 不等于最终结算。相同请求后续的输出计数更新原单位，取消和失败保留已经观察到的部分用量。具体时序见 [Claude 接入](design/acp-claude-via-claude-agent-acp.md)。
 
-Codex 从 `rawResponse/completed` 采集实际逐请求消费，以真实 thread/session 与 response ID 使用 `identityKind=request`，包含上下文压缩请求。旧累计通知和 PromptResult 的最后请求不能与这些请求重复相加。实时采集和原生日志恢复共用计数校验，缓存分量从 input 中拆出，reasoning 不再加到 output；详见 [Codex 接入](design/acp-codex-via-codex-acp.md)。
+Codex 逐请求消费有两个来源。新会话从 app-server 的 `rawResponse/completed` 实时采集：app-server 只向 `thread/start` 声明了 `experimentalRawEvents` 的线程及其原生子线程发送该事件，由 usage 补丁声明。恢复和 fork 的线程无法声明（包括 daemon 重启后的续聊），provider 在 prompt 结算时读取根线程及子线程在本次 prompt 中追加到原生 rollout 的 `token_usage_record`。两个来源都以真实 thread 与 response ID 使用 `identityKind=request`，同一请求合并为一个单位，包含上下文压缩请求。旧累计通知和 PromptResult 的最后请求不能与这些请求重复相加。两个来源与原生日志恢复共用计数校验：缓存分量从 input 中拆出，reasoning 不再加到 output。详见 [Codex 接入](design/acp-codex-via-codex-acp.md)。
+
+Antigravity 的消费只取自 daemon 本地网关垫片观察到的每次模型响应 `usageMetadata`（[gemini-request-usage.ts](../packages/acp/src/gemini-request-usage.ts)），以 ACP server 签发的 session ID 与 `responseId` 建立 `identityKind=request`；没有 `responseId` 的响应只记 partial、不建身份，中断且无计数的流记 unknown，被拒绝且无计数的请求不计。我们网关的 `promptTokenCount` 含缓存，因此 input 为 prompt + toolUsePrompt − cached，缓存读取单列，thinking 计入 output 且不重复相加。server 自报的 `usage_update.used` 等于 total + cached，会把缓存算两遍，provider 直接丢弃，绝不计费；中断的流只按已收到的计数记 partial，绝不补算。垫片只在提示词进行中放行模型调用：提示词之外（后台命令在轮次结束后调用网关等）一律快速 503，不转发、不计费；提示词结束时仍在进行的调用计入该提示词，2 秒后仍未结束的被截断并记 partial；run 结束时先吊销令牌再关闭用量账本。上下文占用取会话模型最近一次请求的 total，其它模型的调用（浏览器子代理等）只计费不计上下文。连接归属为 `workspace:<ws>:relay:antigravity`。垫片见 [gateway-shim.ts](../packages/daemon/src/agent-runtime/antigravity/gateway-shim.ts)，端到端验证见 [Antigravity daemon 测试](../tests/integration/antigravity-daemon.test.ts) 与 [Antigravity Runtime](antigravity.md)。
 
 历史累计证据仍可以具有 `identityKind=cumulative_meter`：真实 session、`providerObservationId` 和 `meterEvidence` 保留 epoch、before/after 及可用 last。相同 meter namespace/epoch 内相邻 `(before,after]` 区间可累计，重叠观察跨 run 只保留审计而不另加消费。不同形式的 compaction 时间戳与 item/turn 身份可能指向同一次重置，重叠时保守判为竞争。没有可靠 session、baseline 或 epoch 的证据不建立强身份。历史请求恢复必须证明与原累计观测的覆盖关系后才能替换，不能将两者相加。计量器 owner 用标量区间检索，证据 JSON 供审计，不用于正常报表逐行解析。
 
 用量报告按字节与单位数分块，避免长任务超过 daemon 的 1 MiB frame 上限。单个 turn 金额关联的请求列表也可分块：`coverageExpectedCount` 和 `coverageSha256` 固定完整排序列表的数量与 SHA-256（UTF-8 `JSON.stringify(sortedIds)`），各块保留同 unit/revision、金额和不可变事实，仅发送列表子集。同 revision 的列表块幂等追加，更新 revision 清空旧关联；较旧 revision 不回退。数量及哈希验证完成前金额只保留诊断，不能提前计入已知费用或与配置估价相加。所有块持久化后才发送 run 完整标记。采集器在金额观测与 turn settle 时关联覆盖，避免每个请求写入不断增长的完整列表。
 
-单位 `purpose` 默认 `agent`，辅助进度摘要使用 `progress_summary`，与主执行共享已认证的 run 和 ledger。辅助请求保留它真实返回的 provider/model；独立连接未知时不套用主云友连接费率。模型表按 purpose 分组并展示摘要用途，CSV 保留该字段。已有消费与辅助请求尚未结束时不能提前将 run 标为完整。
+单位 `purpose` 默认 `agent`，辅助进度摘要使用 `progress_summary`，与主执行共享已认证的 run 和 ledger。辅助请求保留它真实返回的 provider/model；独立连接未知时不套用主 Agent 连接费率。模型表按 purpose 分组并展示摘要用途，CSV 保留该字段。已有消费与辅助请求尚未结束时不能提前将 run 标为完整。
 
 `provider` 表示调用来源/执行引擎或协议族（如 codex、claude、openai），不代表底层模型厂商；同模型经不同协议和连接调用可有不同计价键。辅助摘要独立连接使用 `runtime:<runtimeId>:progress-summary:<claude|openai>`，只有明确共用 workspace relay 时才复用它原有 engine 的连接标识。
 
 `multiremi_usage_run_scopes` 固化每个 run 的 workspace、Agent、Runtime 和执行项目，单位保存同样的标量归属及 runtime/project provenance。现场项目解析顺序为 Issue、项目型 schedule target、Chat；独立 Runtime 工作区不附加项目。报表按单位保存的 Runtime、项目和 Agent 分组、过滤，旧 run 重放不能改归属。任务生命周期 scope 跟随新 active run，已结束任务和旧 run 重放不能移动它。尚无 scope 的排队任务可以使用当前任务绑定描述生命周期；已有未知 scope 不从当前 Issue 猜测项目。
 
-历史恢复保留已有证据：不可变 autopilot schedule target 和 Chat 项目绑定可以恢复项目；未标记 cross-switch 的 attempt=1 task 优先采用已保存 trace owner，其次采用已有 started_at 的 task.runtime_id，标为 `trace_owner` 或 `task_record`，不是当前 Agent 配置。重试或跨 Runtime 痕迹无法区分请求归属时保留 unknown。维护计划可以传入更强的 archive manifest/原始报告 scope 证据。缺证据才保存 null；Runtime 表展示 recorded owner、trace/archive owner、未知或混合出处，不把 recorded owner 误称每个请求均已独立证明的执行者。
+历史恢复保留已有证据：不可变 autopilot schedule target 和 Chat 项目绑定可以恢复项目；未标记 cross-switch 的 attempt=1 task 优先采用已保存 trace owner，其次采用已有 started_at 的 task.runtime_id，标为 `trace_owner` 或 `task_record`，不是当前 Agent 配置。重试或跨 Runtime 痕迹无法区分请求归属时保留 unknown。维护计划可以传入更强的原始报告 scope 证据。缺证据才保存 null；Runtime 表展示 recorded owner、trace owner、未知或混合出处，不把 recorded owner 误称每个请求均已独立证明的执行者。
 
 ## 报表与两条时间轴
 
@@ -107,7 +109,7 @@ remi dashboard usage reconcile --workspace <id> --days all --tz Asia/Shanghai --
 
 Compose 更新前会校验 API 的 `healthcheck.start_period >= 迁移预算 + 60 s`、宿主更新器等待 `>= start_period`，即默认 `300 s + 60 s <= 360 s <= 360 s`。调大预算时要同步调大后两者；宿主 compose 文件先更新，再安装新版更新器。大数据集推荐先用新版 API 镜像运行 `scripts/migrate-usage-accounting.ts --execute` 准备标量迁移。配置、上线顺序和 Docker 复现入口统一见[部署切换说明](../deploy/README.md#usage-accounting-startup-cutover)。
 
-启动先创建 schema，释放全局 migration 锁后自动执行必需的标量迁移；UI/runtime 两个 API 进程都在迁移完成后才开启后台任务、HTTP listener 和 `/readyz`。每批默认 500 task、最多 5000，每个 task 独立提交，持久化游标和源版本检查点支持中断恢复；失败或默认五分钟启动预算耗尽会使启动失败，不会把未完成迁移当作就绪。空库同样自动完成切换，已就绪启动仍在数据库内检查 pending task ID，复检旧 writer 或镜像回滚后的来源变化，不向进程读取全部旧 JSON。v2-only 任务的旧字段为 null 或默认 `[]` 时，不因缺少旧来源检查点或生命周期变化生成空 legacy run。启动不扫描 archive、trace 或原始 telemetry，常规报表仍只读规范化账本。配置与部署边界见[部署切换说明](../deploy/README.md#usage-accounting-startup-cutover)。
+启动先创建 schema，释放全局 migration 锁后自动执行必需的标量迁移；UI/runtime 两个 API 进程都在迁移完成后才开启后台任务、HTTP listener 和 `/readyz`。每批默认 500 task、最多 5000，每个 task 独立提交，持久化游标和源版本检查点支持中断恢复；失败或默认五分钟启动预算耗尽会使启动失败，不会把未完成迁移当作就绪。空库同样自动完成切换，已就绪启动仍在数据库内检查 pending task ID，复检旧 writer 或镜像回滚后的来源变化，不向进程读取全部旧 JSON。v2-only 任务的旧字段为 null 或默认 `[]` 时，不因缺少旧来源检查点或生命周期变化生成空 legacy run。启动不扫描 trace 或原始 telemetry，常规报表仍只读规范化账本。配置与部署边界见[部署切换说明](../deploy/README.md#usage-accounting-startup-cutover)。
 
 `multiremi_usage_legacy_audit` 保留第一次审计的原始值；`multiremi_usage_legacy_versions` 保存所有实际观察到的源版本。维护脚本可提前进行标量预回填，但不会写启动切换标记；新代码每次启动都检查旧来源变化。迁移只替换自身创建的 provisional legacy aggregate。任意 run 下已有计量的 native 消费或提供商金额（包括普通已认证 v2 run 和 historical 恢复）时，变化的旧累计无法证明与这些事实独立：弃用上报入口返回不可重试 `invalid_report`，保留原 canonical 和 outbox payload；相同已处理旧快照重放不改事实或 revision。迁移观察到此类来源变化时，提交新源审计、撤销就绪标记并失败，既不推进 processed source，也不相加或自动覆盖消费，需受审查证据修复。没有已处理基线的非空旧来源与 native 消费并存时同样需要审查；拒绝审计与任意既有 legacy run 的组合也不是接受证明。没有检查点的原预迁移或旧入口来源，只有规范化后与已接受的非空 legacy units 的单位身份和全部事实字段一致，才能建立等价检查点；比较不含 revision 和随任务生命周期变化的发生时间。空 modern/historical run 或仅 context 的历史观测没有已计消费，不阻止明确旧 split 被规范化。新 run 的 start ACK 或部分请求证据不证明其覆盖旧聚合，不能据此删除旧消费；只有经审核的身份与覆盖证据才能退休旧聚合。
 
@@ -120,26 +122,57 @@ Compose 更新前会校验 API 的 `healthcheck.start_period >= 迁移预算 + 6
 ```bash
 bun run scripts/migrate-usage-accounting.ts --batch-size=500
 bun run scripts/migrate-usage-accounting.ts --batch-size=500 --execute
-bun run scripts/reconcile-task-usage.ts --archive-root=<archives> --out=<review-plan.json>
+bun run scripts/reconcile-task-usage.ts --out=<review-plan.json>
 bun run scripts/reconcile-task-usage.ts --apply-plan=<review-plan.json> --execute --confirm=USAGE_EVIDENCE_V2
 bun run scripts/reconcile-task-usage.ts --verify-plan=<review-plan.json>
 ```
 
-不带 execute 的 legacy migration 只读计数；native/raw 恢复先生成只读计划，再按审核过的计划执行。恢复读取 v2 ZIP 索引和 v1 tar.gz 的有限大小原生成员，按全部竞争任务的时间边界归属，`--task-id` 仅筛选输出。非终态任务不会被修复；已有规范化执行记录的终态任务可以进入 `modernRepairs`，不再一概排除。计划摘要分别列出修复任务、前后已知消费及无法修复的原因。
+不带 execute 的 legacy migration 只读计数；raw 恢复先生成只读计划，再按审核过的计划执行。恢复只读取 `multiremi_task_messages` 保留的历史 usage 观测（服务端 Session Archive 已下线，不再读取任何归档，见 [ADR 0018](adr/0018-local-records-and-recyclable-workspaces.md)），按全部竞争任务的时间边界归属，`--task-id` 仅筛选输出。非终态任务不会被修复；已有规范化执行记录的终态任务不进入历史恢复计划。计划摘要列出前后已知消费及无法恢复的原因。计划生成器默认不产出 `modernRepairs`；只有传入 `--native-evidence` 时，才按下文的 Codex 原生用量补录生成。apply 与 verify 接受带有该字段的已审核计划。
 
 现代记录修复由 [modern-usage-repair.ts](../scripts/modern-usage-repair.ts)执行，通过 `multiremi_turn_execution_records` 读取轮及尝试，原 task ID 对应尝试 ID。每个待修复尝试必须处于终态、只有一个已完整上报的执行 run，且尝试、原始请求与原生日志的 provider session 身份一致。Claude 仅使用有明确结束原因的最终请求记录更新同一请求；全部相关请求身份匹配、更新增量恰好解释唯一结算差额时，才将对应 `acp_prompt_unattributed_remainder` 退休。原有进度摘要、上下文和其他调用保留；涉及费用覆盖时同时更新原关联，不把修正后的数字再加一份。
 
-原始 usage 事件属于尝试的 daemon trace，不属于对话消息。恢复计划读取 v2 archive 的 trace 成员，校验索引、尝试、对话、Agent、provider 和文件封口事实；同一尝试的 seq 在旧行与回填 trace 中只读取一次。`multiremi_task_messages` 的入口仅保留作历史只读取证，与历史 trace 回填一致；统一模型不向它写入新执行事件。原生日志仍优先于重叠的原始消费，缺少请求身份和覆盖证据时保留 unknown。
+计费不在 trace 中：自 PR 2（[ADR 0019](adr/0019-turn-and-item-traces.md) 决策 6）起，桥接的计费帧（`size == 0` 的 `usage_update`）由 trace 翻译器丢弃，计量单位只经 `_meta.remiUsageUnits` 进入 [task usage ledger](../packages/server/src/worker/task-usage-ledger.ts) 与可靠 usage 报告；trace 只在 `turn.updated` 里记录上下文占用（`context_usage`），它也随完成报告写到轮卡，但不是消费。v1 trace 文件里的旧 `usage` 片段属于历史 daemon trace，不属于对话消息。恢复计划不再读取服务端归档，也不再回填历史 trace；同一尝试的 seq 只读取一次。`multiremi_task_messages` 的入口仅保留作历史只读取证；统一模型不向它写入新执行事件。缺少请求身份和覆盖证据时保留 unknown。
 
 Codex 原生日志的 `token_usage_record` 按 thread/session 与 response ID 去重，`compacted.latest_token_usage_record` 是同一请求的副本。普通生成和压缩请求均进入恢复小计。只有同一 turn 的独立请求分量之和等于最终 `turn_token_usage`、存在匹配的 `task_started` 和 `task_complete`，并满足任务和 run 的归属边界，才能替代该 turn 明确始末范围内的旧 unknown 观测。其他轮次或界外的迟到观测继续保留未知，单一 run 不等于只有一个 turn。
 
-跨 archive 合并同一请求时采用完整的更强快照，不将相互矛盾的分量拼成不存在的数字。合并完所有成员后统一处理旧 `token_count` 与新请求的覆盖：完整 turn 内择一计量，不完整或无明确 turn 归属的重叠观察保留为非计量 unknown，不能与请求重复相加，也不能被当成纯上下文而隐藏消费缺口。明确属于更早、只有旧格式的轮次继续保留原计量证据。
+跨来源合并同一请求时采用完整的更强快照，不将相互矛盾的分量拼成不存在的数字。合并完所有来源后统一处理旧 `token_count` 与新请求的覆盖：完整 turn 内择一计量，不完整或无明确 turn 归属的重叠观察保留为非计量 unknown，不能与请求重复相加，也不能被当成纯上下文而隐藏消费缺口。明确属于更早、只有旧格式的轮次继续保留原计量证据。
 
 现代修复使用原 run 和规范化写入器，维护审计表 `multiremi_usage_modern_repair_audit` 的外键关联尝试，保存原状态及修复后哈希。计划冻结尝试的 `turn_id`，状态哈希包含轮归属和尝试序号；执行前在事务内按审核时的轮归属锁定轮和尝试，再复检尝试边界、所有 run、单位、receipts、归属和费用覆盖。尝试换轮或序号变化会拒绝应用；同轮正常重试、`current_attempt_id` 变化不会使旧终态尝试的计划失效。旧版缺少轮归属的现代修复计划必须重新生成并审核。被替代的差额或旧观测必须已有持久 receipt，退休后设置 `superseded`，迟到上报不恢复旧计量。重复应用同一计划不重复记账，verify 核对修复后状态。此过程不会作为服务启动或普通查询的隐式操作。
 
 CLI 的 apply/verify 入口与修复库的 apply 入口先只读校验统一轮、尝试、执行投影及必要字段，再进行用量 schema 或审计表 DDL。缺少执行投影或未完成统一模型迁移时，返回列明缺项与迁移步骤的拒绝，不创建维护表或改账；先在隔离恢复库用当前服务完成启动迁移，再重新生成并审核计划。新库和已完成真实旧库迁移的统一模型均可使用这条恢复流程。
 
-只有旧聚合而缺少整个执行覆盖证明的 legacy 任务，仍不能用部分原生日志替换其已知消费：请求证据单独保留供审核，不与旧聚合相加。只有旧消费未知时才补入请求 subtotal，coverage 仍为 partial；不能据此宣称全部历史已恢复。旧累计证据的 replay 和无重置证据下降不改变差分基线，total-only 的上下文估计不成为消费。恢复按 task 保存原事实、旧 usage 校验哈希和修订水位；后续计划须保留已有请求身份、已知计数及费用关联，空或较窄扫描不能撤销事实。不可恢复项保留明确原因。旧 `backfill-codex-task-usage.ts` 不再执行 sum-used 写入。计划、日志和 archive 可能包含敏感证据，应放在维护输出目录，避免在公共日志输出正文或凭据。
+只有旧聚合而缺少整个执行覆盖证明的 legacy 任务，仍不能用部分原生日志替换其已知消费：请求证据单独保留供审核，不与旧聚合相加。只有旧消费未知时才补入请求 subtotal，coverage 仍为 partial；不能据此宣称全部历史已恢复。旧累计证据的 replay 和无重置证据下降不改变差分基线，total-only 的上下文估计不成为消费。恢复按 task 保存原事实、旧 usage 校验哈希和修订水位；后续计划须保留已有请求身份、已知计数及费用关联，空或较窄扫描不能撤销事实。不可恢复项保留明确原因。旧 `backfill-codex-task-usage.ts` 不再执行 sum-used 写入。计划和日志可能包含敏感证据，应放在维护输出目录，避免在公共日志输出正文或凭据。
+
+### Codex 原生用量补录
+
+v0.2.89 的 daemon 使用 `codex-usage-v6`，它的逐请求钩子从未触发（见 [Codex 接入](design/acp-codex-via-codex-acp.md)）。这期间每个 Codex prompt 只记了一个无 token 的 `context_snapshot` 单位，报表把这些尝试计入 `unknown_task_count`。每次请求的事实仍保存在 Codex 原生 rollout 的 `token_usage_record` 中，补录分两步读取，都不写生产库：
+
+```bash
+# 1. 每台 daemon 主机，只读，只写 --out
+bun run scripts/export-codex-native-usage.ts --workspaces-root=<daemon 工作区根目录> --since=2026-10-08T00:00:00Z --out=<host>.json
+# 2. 维护环境，连接隔离恢复库；所有主机的导出放进同一份计划
+bun run scripts/reconcile-task-usage.ts --native-evidence=<a.json>,<b.json> --out=<review-plan.json>
+```
+
+**导出范围。** [导出脚本](../scripts/export-codex-native-usage.ts)读取工作区根目录下各 provider home 的 `sessions/` 与 `archived_sessions/`，覆盖三种目录：
+- v0.2.89 布局的 `.runtime/`；
+- ADR 0018 布局的 `env/`；
+- 升级清扫产生的 `legacy-<日期>/`。
+
+它不进入 `work/` 等工作树，也不跟随符号链接。输出只有计数、thread/response ID、时间与模型，不含会话内容。`--scan=<目录>` 读取任意目录中的 rollout，适用于单独的 `CODEX_HOME` 或解压后的旧 Session archive。
+
+**证据还在哪里。** v0.2.89 的 GC 只在服务端有就绪 Session archive 后，才删除超过保留期的 `.runtime/<主体>`。因此已回收主体的 rollout 只留在 API 主机 `REMI_SESSION_ARCHIVE_ROOT` 下的归档 ZIP 中：用 `unzip` 解压后以 `--scan` 导出。部署 ADR 0018 后 compose 不再挂载该目录，但不会删除它，补录完成前保留。daemon 升级到 ADR 0018 布局后首次启动，会把 `.runtime/` 移入 `legacy-<日期>/`，`MULTIREMI_LEGACY_KEEP_DAYS`（默认 7 天）后删除，所以应在升级前或这个期限内导出。
+
+**生成计划。** [补录计划](../scripts/native-usage-backfill.ts)通过 apply 使用的同一读取器，在 REPEATABLE READ、READ ONLY 快照中生成，保证审核时的状态哈希可以复现。
+- 请求先按 rollout 的 `session_id`（根线程，即尝试记录的 `session_id`）找候选尝试，再分给唯一一个执行窗口 `[started_at, 结束时间)` 包含它的尝试。
+- 原生子 agent 的请求以自己的 thread 作为请求身份，和实时采集一致。
+- 落在任何窗口之外或重叠窗口中的请求、已在任意 run 或身份冲突审计中出现的请求，以及两份导出计数不一致的请求，都不补录，只计入摘要。
+
+**补录对象与结果。** 补录对象是终态 Codex 尝试中，唯一完整 live run 没有任何 agent 消费（只有上下文）的那些。
+- 补录保留原上下文和其他单位；新请求单位沿用该 run 唯一的连接，并用 `descendantSessionIds` 记录审核过的子线程。
+- 计划摘要的 `nativeBackfill.outcomes` 按尝试列出 `repaired`、`no_native_request_evidence`（rollout 已不存在，保持未知）、`live_request_usage_present`、`no_single_complete_live_run`、`nonterminal_task` 与 `repair_not_proven`。
+- 补录后的尝试不再属于补录对象，之后的计划不会再给它加请求，所以所有主机与归档的导出要一次合并审核。
+- apply、verify 与重复执行的规则同上方现代记录修复。
 
 ## 验证和性能边界
 

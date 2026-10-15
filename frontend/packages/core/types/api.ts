@@ -4,10 +4,10 @@ import type { TimelineEntry } from "./activity";
 import type { IssueSession, SessionEvent, SessionResult } from "./issue-session";
 import type { MemberRole } from "./workspace";
 import type { Project } from "./project";
+import type { TraceTurnPage } from "@multiremi/contracts/trace";
 
 // Issue API
 export interface CreateIssueRequest {
-  responsible_member_id?: string | null;
   runtime_workspace_id?: string | null;
   title: string;
   description?: string;
@@ -26,7 +26,6 @@ export interface CreateIssueRequest {
 }
 
 export interface UpdateIssueRequest {
-  responsible_member_id?: string | null;
   force?: boolean;
   runtime_workspace_id?: string | null;
   title?: string;
@@ -303,18 +302,14 @@ export interface SharedIssueBundle {
   actors: SharedIssueActor[];
 }
 
-export interface SharedTaskTracePage {
-  events: Array<Record<string, unknown> & { seq: number; type: string; ts: string }>;
-  next_after_seq: number;
-  head: number;
-  eof: boolean;
-  closed: boolean;
-  source: "daemon" | "archive" | null;
-  state: "ok" | "unreachable" | "not_found" | "backfilling" | "lost";
+/** A shared task's trace read: one `view=turn` page plus the read status. */
+export type SharedTaskTracePage = TraceTurnPage & {
+  state: "ok" | "unreachable" | "not_found" | "lost";
+  source?: "daemon" | null;
   runtime_name?: string | null;
   reason?: string;
   retryable?: boolean;
-}
+};
 
 // Pagination
 export interface PaginationParams {

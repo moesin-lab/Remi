@@ -26,7 +26,7 @@ pendingTurnBackendTests("MUL-508 browser log source visibility", fixture => {
     const sourceHuman = store.createWorkspaceMember({ userId: sourceOwner.id, name: sourceOwner.name, role: "member" });
     const agent = store.createAgent({ name: "Source", provider: "codex", visibility: shared ? "workspace" : "private", ownerId: sourceOwner.id });
     const runtime = store.registerRuntime({ name: 'Browser native host', provider: 'codex', daemonId: 'browser-native', maxConcurrency: 16, ownerId: sourceOwner.id });
-    const issue = createResponsibleTestIssue(store, { title: "Browser visibility", assigneeType: "agent", assigneeId: agent.id, responsibleMemberId: sourceHuman.id });
+    const issue = createResponsibleTestIssue(store, { title: "Browser visibility", assigneeType: "agent", assigneeId: agent.id });
     const session = store.getOrCreateDefaultIssueSession(issue.id);
     const member = await store.createAccessToken({ type: "pat", name: "Member", userId: user.id, workspaceId: "local" });
     const owner = await store.createAccessToken({ type: "pat", name: "Source owner", userId: sourceOwner.id, workspaceId: "local" });
@@ -234,8 +234,9 @@ pendingTurnBackendTests("MUL-508 browser log source visibility", fixture => {
   it('human accounts share native Q content and answers regardless of the historical contact', async () => {
     const f = await scaffold();
     try {
-      f.store.updateIssue(f.issue.id, { responsibleMemberId: f.recipient.id, actorType: 'member', actorId: f.sourceHuman.id });
       const q = f.question('permission'); f.start();
+      // The asker executes this root Issue, so nobody above it is an Agent: the Q waits at the shared human stage.
+      expect(f.store.getQuestion(q.request.id)).toMatchObject({ stage: 'human', current_handler: null });
       expect((await f.request(`/api/messages/${q.request.id}/question`, f.member.token)).status).toBe(200);
       await readReply(f, q.request.id, f.member.token, true);
       expect((await f.request(`/api/turns/${q.turn.id}/trace`, f.member.token)).status).toBe(200);

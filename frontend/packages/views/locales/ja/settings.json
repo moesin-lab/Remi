@@ -19,6 +19,13 @@
       "browser_suffix": " (ブラウザ)",
       "hint": "ダッシュボード、チャート、表示される「今日」ラベルに使用されます。すべてのワークスペースに適用される個人設定です。",
       "sync_failed": "タイムゾーン設定を保存できませんでした。"
+    },
+    "chat": {
+      "title": "チャット",
+      "follow_up": "実行中にメッセージを送信するとき",
+      "steer": "方向転換（この実行に送る）",
+      "queue": "キューに追加（この実行の終了後に送る）",
+      "hint": "{{shortcut}} で今回だけもう一方の方法を使います"
     }
   },
   "page": {
@@ -36,10 +43,10 @@
       "repositories": "リポジトリ",
       "source_control": "ソース管理",
       "model_gateway": "モデルゲートウェイ",
-      "storage_cleanup": "ストレージとクリーンアップ",
       "labs": "ラボ",
       "members": "メンバー",
-      "platform": "バージョンとサービス"
+      "platform": "バージョンとサービス",
+      "storage": "ストレージ"
     }
   },
   "account": {
@@ -313,8 +320,8 @@
     "section_collaboration_description": "GitHub Pull Request と Codebase Merge Request に共通して適用されます。",
     "feature_change_sidebar_label": "コード変更サイドバー",
     "feature_change_sidebar_description": "リンクされた Pull Request と Merge Request を Issue 詳細に表示します。",
-    "feature_complete_on_merge_label": "マージ後に Issue を完了",
-    "feature_complete_on_merge_description": "リンクされたコード変更がマージされたら Issue を完了にします。",
+    "feature_complete_on_merge_label": "マージを Issue に記録",
+    "feature_complete_on_merge_description": "リンクされたコード変更がマージされたら、そのマージを Issue に記録します。ステータスは変わりません。",
     "section_commits": "コミットの帰属",
     "section_commits_description": "エージェントの Git コミットにプラットフォーム共通の ID を使用します。",
     "feature_co_author_label": "Co-authored-by トレーラー",
@@ -402,47 +409,6 @@
         "label": "メンバー",
         "description": "イシューの作成と作業"
       }
-    }
-  },
-  "storageCleanup": {
-    "description": "完了した Issue のワークスペースを削除する前に、プロバイダー固有のセッション履歴をアーカイブします。",
-    "storage_title": "アーカイブストレージ",
-    "backend": "バックエンド",
-    "local_disk": "ローカルディスク",
-    "root_hint": "アーカイブ先",
-    "archive_gate": "検証済みアーカイブがワークスペース削除の必須条件",
-    "required": "必須",
-    "unknown": "未報告",
-    "max_archive_size": "最大アーカイブサイズ",
-    "min_free_space": "最小空きディスク容量",
-    "usage_title": "使用状況",
-    "total": "合計",
-    "ready": "準備完了",
-    "pending": "保留中",
-    "failed": "失敗",
-    "exhausted": "自動再試行を停止済み",
-    "space_used": "使用容量",
-    "last_failure": "最新のアーカイブ失敗",
-    "cleanup_title": "ワークスペースのクリーンアップ",
-    "cleanup_description": "完了した Issue のワークスペースを指定時間保持します。Provider セッションアーカイブの検証前には削除されません。",
-    "workspace_ttl": "ワークスペース保持期間",
-    "gc_interval": "クリーンアップ間隔",
-    "hours": "時間",
-    "minutes": "分",
-    "save": "保存",
-    "saving": "保存中…",
-    "saved": "ストレージとクリーンアップの設定を保存しました",
-    "save_failed": "ストレージとクリーンアップの設定を保存できませんでした",
-    "load_failed": "ストレージとクリーンアップの設定を読み込めませんでした",
-    "retry_load": "再試行",
-    "insufficient": "ワークスペースのオーナーと管理者のみが管理できます。",
-    "validation": {
-      "ttl_required": "保持時間を整数で入力してください。",
-      "ttl_min": "ワークスペースの保持期間は 1 時間以上必要です。",
-      "ttl_max": "ワークスペースの保持期間は 365 日を超えられません。",
-      "interval_required": "スキャン間隔を整数で入力してください。",
-      "interval_min": "スキャン間隔は 1 分以上必要です。",
-      "interval_gt_ttl": "スキャン間隔はワークスペースの保持期間を超えられません。"
     }
   },
   "platform": {
@@ -669,7 +635,7 @@
     "context_save_failed": "コンテキストウィンドウを保存できませんでした。",
     "description": "すべてのエージェントタスクに適用するワークスペースゲートウェイポリシーです。daemon は隔離された Provider Home に非機密設定を再構築し、Token は子プロセス環境にのみ注入します。",
     "discovery_title": "モデルを自動検出",
-    "discovery_desc": "ゲートウェイの /v1/models と /models を照会し、エージェント作成のドロップダウンに実際のモデルを表示します。両エンジンに適用。",
+    "discovery_desc": "ゲートウェイの /v1/models、/models、/v1beta/models を照会し、エージェント作成のドロップダウンに実際のモデルを表示します。すべてのエンジンに適用。",
     "auto_title_title": "イシューの自動命名",
     "auto_title_description": "ワークスペースのゲートウェイを使用し、不明確なイシュータイトルを定期的に改善します。",
     "auto_title_enabled_label": "自動命名",
@@ -695,6 +661,7 @@
     "token_label": "認証トークン",
     "claude_hint": "フラグメントは認証情報なしで隔離された Provider Home の settings.json に保存され、ANTHROPIC_AUTH_TOKEN は子プロセス起動時だけ注入されます。",
     "codex_hint": "フラグメントは認証情報なしで隔離された Provider Home の config.toml に保存され、OPENAI_API_KEY は子プロセス起動時だけ注入されます。",
+    "antigravity_hint": "フラグメントのキーは base_url（/v1beta を含まないゲートウェイのルート）と default_model（Agent がモデルを選ばない場合に使用）のみです。キーは daemon のローカルゲートウェイ shim に渡され、Antigravity のモデルリクエストにだけ使われます。Antigravity プロセス自体はキーを受け取りません。",
     "save": "保存",
     "saving": "保存中…",
     "reveal": "表示",
@@ -753,5 +720,58 @@
     "reasoning_blocked_execution_catalog_unknown": "Codex 実行カタログが不明または読み込み中のため、宣言はまだ反映されません。",
     "reasoning_blocked_not_in_catalog": "このエンジンのカタログにモデルがないため（例: 利用可能な Runtime がない）、宣言はまだ反映されません。",
     "reasoning_blocked_unknown_reason": "この宣言は現在反映されていません。"
+  },
+  "storage": {
+    "description": "終了した Issue とチャットは、保持期間を過ぎるとコードディレクトリと実行環境を解放します。未保存の作業は先にスナップショットとして保存され、Issue やチャットを再開すると復元されます。実行記録は常にマシン上に残ります。",
+    "machines_title": "マシン",
+    "no_machines": "このワークスペースに接続したマシンはまだありません。",
+    "policy_title": "保持ポリシー",
+    "policy_description": "このワークスペースのすべてのマシンに適用されます。各マシンの環境変数でローカルに上書きできます。",
+    "fields": {
+      "ttl_ms": {
+        "label": "保持期間",
+        "hint": "終了した Issue またはチャットがワークスペースを保持してから回収されるまでの期間。"
+      },
+      "automation_ttl_ms": {
+        "label": "自動化チャットの保持期間",
+        "hint": "自動化の実行で開かれたチャットに適用される保持期間。"
+      },
+      "max_retained": {
+        "label": "保持ワークスペース数の上限",
+        "hint": "マシンごとに保持する終了済みワークスペースの数。超えた分は最も長く使われていないものから回収します。0 は無制限です。"
+      },
+      "orphan_ttl_ms": {
+        "label": "孤立データの保持期間",
+        "hint": "サーバー上で削除された Issue やチャットのデータをマシンが保持する期間。"
+      },
+      "snapshot_max_bytes": {
+        "label": "スナップショットの上限サイズ",
+        "hint": "スナップショットに保存できる未保存作業の最大サイズ。超えるとワークスペースは回収されず保持されます。"
+      },
+      "chat_idle_days": {
+        "label": "チャットの自動アーカイブ",
+        "hint": "アクティブなチャットが操作されないまま自動アーカイブされるまでの日数。0 は自動アーカイブしません。"
+      }
+    },
+    "units": {
+      "hours": "時間",
+      "mb": "MB",
+      "days": "日",
+      "count": "件"
+    },
+    "default_value": "既定: {{value}} {{unit}}",
+    "validation": {
+      "required": "数値を入力してください。",
+      "integer": "整数を入力してください。",
+      "range": "{{min}} から {{max}} {{unit}}の範囲で入力してください。"
+    },
+    "reset_default": "既定値に戻す",
+    "save": "保存",
+    "saving": "保存中…",
+    "saved": "ストレージ設定を保存しました",
+    "save_failed": "ストレージ設定を保存できませんでした",
+    "load_failed": "ストレージ情報を読み込めませんでした",
+    "retry_load": "再試行",
+    "read_only": "ストレージ設定を変更できるのはワークスペースのオーナーと管理者のみです。"
   }
 }

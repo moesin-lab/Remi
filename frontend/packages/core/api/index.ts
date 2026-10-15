@@ -18,6 +18,7 @@ export { DuplicateIssueErrorBodySchema, IssueStatusHeldErrorSchema } from "./sch
 export type { DuplicateIssueErrorBody } from "./schemas";
 export type {
   RelayConfigResponse,
+  RelayEngine,
   RelayEngineConfig,
   RelayEngineProbe,
   RelayReasoningLevelEffective,
@@ -27,22 +28,15 @@ export type {
   RelayReasoningLevelModel,
   RelayReasoningLevelsResponse,
   RelayReasoningLevelSaveResult,
+  RelayReasoningEngine,
 } from "./schemas";
-export type {
-  IssueSessionArchivesResponse,
-  SessionArchive,
-  SessionArchiveRetryResponse,
-  SessionArchiveVerifyResponse,
-  WorkspaceSessionArchiveStatus,
-} from "./schemas/session-archives";
 export type {
   TaskSteerListResponse,
   TaskSteerMessage,
   TaskSteerResponse,
   TaskTraceRead,
 } from "./schemas/tasks";
-export { TraceEventSchema } from "./schemas/tasks";
-export { mergeTraceWindow, TRACE_VIEW_WINDOW_SIZE, TRACE_LIVE_WINDOW_SIZE, TRACE_HISTORY_WINDOW_BYTES, TRACE_LIVE_WINDOW_BYTES } from "./trace-window";
+export { TraceEventSchema, TraceTurnPageSchema, parseTraceEvent, parseTraceFrames } from "./schemas/tasks";
 export { WSClient } from "./ws-client";
 
 import type { ApiClient as ApiClientType } from "./client";

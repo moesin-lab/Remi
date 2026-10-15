@@ -1,6 +1,4 @@
-import { createResponsibleTestIssue, createHistoricalTestIssue, acceptTestIssueDelivery, useUploadDir } from './helpers.js';
-import { SessionArchiveService } from '@multiremi/session-archive/service.js';
-import { buildArchiveFixture, traceFileBody } from './session-archive-fixtures.js';
+import { createResponsibleTestIssue, createHistoricalTestIssue, acceptTestIssueDelivery } from './helpers.js';
 import { mutateExecutionFixture } from "./unified-test-paths.js";
 // Issues as first-class records plus the compatibility list/grouped/batch,
 // quick-create, hierarchy/planning, dependency, assignment, metadata and label routes.
@@ -119,6 +117,10 @@ describe("Multiremi API — issue endpoints", () => {
     const first = await createFromChat("Created from Chat");
     expect(first.status).toBe(201);
     const firstBody = await first.json();
+    // An Agent creates a root Issue with its task credential: no designated human is needed or recorded.
+    expect(firstBody.parent_issue_id).toBeNull();
+    expect(firstBody).not.toHaveProperty("responsible_member_id");
+    expect(db!.query("SELECT responsible_member_id FROM multiremi_issues WHERE id=?").get(firstBody.id)).toEqual({ responsible_member_id: null });
     expect(firstBody.chat_issue_binding).toBeUndefined();
     expect(firstBody.chat_issue_binding_hint).toBeUndefined();
     expect(store.getChatSession(chat.id)).not.toHaveProperty("issueId");
@@ -137,6 +139,9 @@ describe("Multiremi API — issue endpoints", () => {
 
     const issueSession = store.getOrCreateDefaultIssueSession(firstBody.id);
     store.updateIssue(firstBody.id,{assigneeType:'agent',assigneeId:agent.id});
+    // Legacy data may still carry the deprecated column on the source Issue.
+    const legacyHuman = store.listWorkspaceMembers("local")[0]!;
+    db!.run("UPDATE multiremi_issues SET responsible_member_id=? WHERE id=?", [legacyHuman.id, firstBody.id]);
     const issueTask = store.createSessionTask(issueSession.id, {
       agentId: agent.id,
       prompt: "Create a child Issue",
@@ -151,7 +156,11 @@ describe("Multiremi API — issue endpoints", () => {
       body: JSON.stringify({ title: "Created from Issue lane" }),
     });
     expect(issueLaneCreate.status).toBe(201);
-    expect((await issueLaneCreate.json()).chat_issue_binding).toBeUndefined();
+    const laneBody = await issueLaneCreate.json();
+    expect(laneBody.chat_issue_binding).toBeUndefined();
+    // An Issue task's new root inherits no human from the Issue it came from.
+    expect(laneBody.parent_issue_id).toBeNull();
+    expect(db!.query("SELECT responsible_member_id FROM multiremi_issues WHERE id=?").get(laneBody.id)).toEqual({ responsible_member_id: null });
     expect(store.getChatSession(chat.id)).not.toHaveProperty("issueId");
   });
 
@@ -317,28 +326,59 @@ describe("Multiremi API — issue endpoints", () => {
     expect(store.getIssue(remote.id)?.id).toBe(remote.id);
   });
 
-  it("preflights batch lifecycle fences before deleting any Issue", async () => {
+  it("blocks a batch delete on an active task without deleting any Issue", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
+    const agent = store.createAgent({ name: "Batch blocker", provider: "codex" });
     const deletable = createResponsibleTestIssue(store, { title: "Batch deletable", workspaceId: "local" });
     const materialized = createResponsibleTestIssue(store, { title: "Batch materialized", workspaceId: "local" });
     store.createIssueSession(materialized.id, { title: "Materialized session" });
+    const busy = createResponsibleTestIssue(store, { title: "Batch busy", workspaceId: "local" });
+    const task = store.createTask({ agentId: agent.id, issueId: busy.id, prompt: "still running" });
+    const runtime = store.registerRuntime({ name: "Batch workspace host", provider: "codex", daemonId: "batch-delete" });
+    store.reportIssueWorkspace({ issueId: deletable.id, runtimeId: runtime.id, rootPath: "/synthetic/deletable", branchName: `agent/${deletable.key}`, status: "ready" });
     const app = createMultiremiApp({ store, authToken: "root-secret" });
-
-    const response = await app.request("/api/issues/batch-delete", {
+    const batch = () => app.request("/api/issues/batch-delete", {
       method: "POST",
-      headers: {
-        Authorization: "Bearer root-secret",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ issue_ids: [deletable.id, materialized.id] }),
+      headers: { Authorization: "Bearer root-secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ issue_ids: [deletable.id, materialized.id, busy.id] }),
     });
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ code: "issue_workspace_not_cleaned" });
-    expect(store.getIssue(deletable.id)?.id).toBe(deletable.id);
-    expect(store.getIssue(materialized.id)?.id).toBe(materialized.id);
-    expect(store.beginIssueDeletion(deletable.id)).toEqual({ ok: true });
-    store.abortIssueDeletion(deletable.id);
+
+    const blocked = await batch();
+    expect(blocked.status).toBe(409);
+    expect(await blocked.json()).toMatchObject({ code: "issue_has_active_tasks" });
+    for (const issue of [deletable, materialized, busy]) expect(store.getIssue(issue.id)?.id).toBe(issue.id);
+    expect(store.getIssueWorkspace(deletable.id)).not.toBeNull();
+
+    store.cancelTask(task.id);
+    const deleted = await batch();
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toEqual({ deleted: 3 });
+    for (const issue of [deletable, materialized, busy]) expect(store.getIssue(issue.id)).toBeNull();
+    expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_issue_workspaces WHERE issue_id = ?").get(deletable.id)).toEqual({ count: 0 });
+  });
+
+  it("hard-deletes an Issue whose workspace was never cleaned, 409 only for active tasks", async () => {
+    const store = createStore();
+    store.ensureLocalWorkspace();
+    const agent = store.createAgent({ name: "Delete blocker", provider: "codex" });
+    const runtime = store.registerRuntime({ name: "Delete workspace host", provider: "codex", daemonId: "single-delete" });
+    const app = createMultiremiApp({ store, authToken: "root-secret" });
+    const headers = { Authorization: "Bearer root-secret" };
+    const busy = createResponsibleTestIssue(store, { title: "Delete busy", workspaceId: "local" });
+    const task = store.createTask({ agentId: agent.id, issueId: busy.id, prompt: "still running" });
+    const conflict = await app.request(`/api/issues/${busy.id}`, { method: "DELETE", headers });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ code: "issue_has_active_tasks" });
+    store.cancelTask(task.id);
+
+    const idle = createResponsibleTestIssue(store, { title: "Delete idle", workspaceId: "local" });
+    store.reportIssueWorkspace({ issueId: idle.id, runtimeId: runtime.id, rootPath: "/synthetic/idle", branchName: `agent/${idle.key}`, status: "in_use" });
+    expect((await app.request(`/api/issues/${idle.id}`, { method: "DELETE", headers })).status).toBe(204);
+    expect((await app.request(`/api/multiremi/issues/${busy.id}`, { method: "DELETE", headers })).status).toBe(200);
+    expect(store.getIssue(idle.id)).toBeNull();
+    expect(store.getIssue(busy.id)).toBeNull();
+    expect((await app.request(`/api/issues/${idle.id}`, { method: "DELETE", headers })).status).toBe(404);
   });
 
   it("serves issues as first-class records with linked tasks", async () => {
@@ -379,8 +419,7 @@ describe("Multiremi API — issue endpoints", () => {
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
     const member = store.createWorkspaceMember({ name: "Issue owner" });
     const project = store.createProject({ title: "Batch project" });
-    const sessionArchives = new SessionArchiveService(store, { root: useUploadDir(), minFreeBytes: 0 });
-    const app = createMultiremiApp({ store, sessionArchives });
+    const app = createMultiremiApp({ store });
     const events: Array<{ type: string; workspaceId: string; payload: Record<string, unknown>; actorId?: string | null; actorType?: string }> = [];
     store.onWorkspaceEvent((event) => events.push(event));
 
@@ -573,14 +612,7 @@ describe("Multiremi API — issue endpoints", () => {
     expect(await camelBatchUpdates.json()).toEqual({ updated: 0 });
     expect(store.getIssue(first.id)?.assigneeId).toBe(agent.id);
 
-    const refused = await app.request("/api/issues/batch-update", {
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({issue_ids:[first.id,second.id],updates:{status:'done',priority:'urgent'}}),
-    });
-    expect(refused.status).toBe(409);
-    expect(store.getIssue(first.id)?.priority).toBe('low');expect(store.getIssue(second.id)?.priority).toBe('medium');
-    store.updateIssue(second.id,{assigneeType:'agent',assigneeId:agent.id});
-    acceptTestIssueDelivery(store,first.id);acceptTestIssueDelivery(store,second.id);
+    // A member may close any Issue, so a member batch closes both rows.
     const updated = await app.request("/api/issues/batch-update", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -604,18 +636,6 @@ describe("Multiremi API — issue endpoints", () => {
 
     for (const id of [first.id, second.id]) for (const task of store.listTasksForIssue(id)) {
       if (['queued', 'running', 'awaiting_human', 'dispatched'].includes(task.status)) store.cancelTask(task.id);
-    }
-    const daemonId = 'batch-cleanup';
-    const cleanupRuntime = store.registerRuntime({ name: 'Batch deletion cleanup fixture', provider: 'codex', daemonId });
-    for (const id of [first.id, second.id]) {
-      store.reportIssueWorkspace({ issueId: id, runtimeId: cleanupRuntime.id, rootPath: `/synthetic/${id}`, branchName: `agent/${store.getIssue(id)!.key}`, status: 'ready' });
-      const archiveTaskId = `tsk_archive_${id}`;
-      const fixture = await buildArchiveFixture({ subject: { kind: 'issue', id }, traces: { [archiveTaskId]: traceFileBody({ events: 1, taskId: archiveTaskId }) } });
-      const archive = sessionArchives.initialize({ workspaceId: 'local', subjectKind: 'issue', subjectId: id, issueId: id, runtimeId: cleanupRuntime.id, daemonId, sourceRevision: fixture.sourceRevision, sha256: fixture.sha256, sizeBytes: fixture.sizeBytes }).archive;
-      const claimed = await sessionArchives.claimUploadAttempt(cleanupRuntime.id, id, archive.id);
-      await sessionArchives.upload(cleanupRuntime.id, id, archive.id, claimed.uploadAttempt!, new Response(fixture.bytes.buffer.slice(fixture.bytes.byteOffset, fixture.bytes.byteOffset + fixture.bytes.byteLength) as ArrayBuffer).body);
-      const ready = await sessionArchives.complete(cleanupRuntime.id, id, archive.id, claimed.uploadAttempt!);
-      store.markIssueWorkspaceCleaned({ issueId: id, runtimeId: cleanupRuntime.id, archiveId: ready.id, sourceRevision: ready.sourceRevision, sha256: ready.sha256 });
     }
     const deleted = await app.request("/api/issues/batch-delete", {
       method: "POST",
@@ -1084,7 +1104,8 @@ describe("Multiremi API — issue endpoints", () => {
     expect(created.status).toBe(201);
     const createdBody = await created.json();
     expect(createdBody.issue.assigneeType).toBeNull();
-    expect(createdBody.issue.responsibleMemberId).toBe(member.id);
+    // The deprecated field is accepted and ignored.
+    expect(createdBody.issue).not.toHaveProperty("responsibleMemberId");
     expect(createdBody.task).toBeNull();
 
     const assigned = await app.request(`/api/multiremi/issues/${createdBody.issue.id}/assign`, {
@@ -1122,7 +1143,8 @@ describe("Multiremi API — issue endpoints", () => {
       body:JSON.stringify({assignee_type:'agent',assignee_id:'Grace executor'})});
     expect(valid.status).toBe(200);
     expect(await valid.json()).toMatchObject({assignee_type:'agent',assignee_id:next.id});
-    expect(store.getIssue(createdBody.issue.id)?.responsibleMemberId).toBe(member.id);
+    // Issues no longer designate a human; the deprecated field is neither stored nor projected.
+    expect(store.getIssue(createdBody.issue.id)).not.toHaveProperty('responsibleMemberId');
   });
 
   it("serves issue metadata endpoints", async () => {

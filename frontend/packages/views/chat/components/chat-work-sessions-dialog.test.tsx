@@ -1,5 +1,5 @@
 import type { ComponentProps } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@multiremi/core/i18n/react";
@@ -392,14 +392,15 @@ describe("ChatWorkSessionsDialog", () => {
     backend.actOnQuestion.mockResolvedValue(answered);
 
     mount();
-    const viewQuestion = await screen.findByRole("button", { name: "View question" });
-    expect(backend.getQuestion).not.toHaveBeenCalled();
-    fireEvent.click(viewQuestion);
-    fireEvent.click(await screen.findByRole("button", { name: "Allow once" }));
-    fireEvent.click(screen.getByRole("button", { name: /History and details/ }));
-    expect(screen.getByRole("link", { name: "Source · session-1" })).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Source · chat-1" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Answer" }));
+    const answerQuestion = await screen.findByRole("button", { name: "Answer" });
+    expect(backend.getQuestion).toHaveBeenCalledWith("decision-1");
+    fireEvent.click(answerQuestion);
+    const drawer = within(await screen.findByRole("dialog", { name: "Questions" }));
+    fireEvent.click(drawer.getByRole("button", { name: "Allow once" }));
+    fireEvent.click(drawer.getByRole("button", { name: /History and details/ }));
+    expect(drawer.getByRole("link", { name: "Source · session-1" })).toBeInTheDocument();
+    expect(drawer.queryByRole("link", { name: "Source · chat-1" })).not.toBeInTheDocument();
+    fireEvent.click(drawer.getByRole("button", { name: "Answer" }));
 
     await waitFor(() => expect(backend.actOnQuestion).toHaveBeenCalledWith("decision-1", "answer", expect.objectContaining({
       expected_route_revision: 7, response: { option_id: "allow" },

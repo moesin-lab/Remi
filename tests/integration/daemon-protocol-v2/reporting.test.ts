@@ -4,6 +4,7 @@ import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 import { MultiremiDaemonClient } from "@multiremi/client.js";
 import { MultiremiTaskReportOutbox } from "@multiremi/worker/outbox.js";
 import { DaemonProtocolHarness, waitFor } from "./harness.js";
+import { agentTexts } from "../../helpers/turn-trace.js";
 
 const fixtures: DaemonProtocolHarness[] = [];
 afterEach(async () => { for (const h of fixtures.splice(0)) await h.dispose(); });
@@ -180,13 +181,13 @@ describe("v2 report reconciliation with real sockets and DB", () => {
     const h = await fixture(); await h.startDaemon();
     const box = outbox(h);
     const purge = spyOn(box, "purgeTask");
-    const client = (h.daemon as any).client as MultiremiDaemonClient;
     try {
-      await expect(client.reportIssueWorkspaceCleaned("deleted-issue", runtime(h), {
-        archiveId: "archive", sourceRevision: "revision", sha256: "a".repeat(64),
-      })).rejects.toMatchObject({ name: "MultiremiDaemonHttpError", status: 404, code: "issue_not_found" });
+      await expect(h.client.rpc("gc.subject_reclaimed", {
+        runtime_id: runtime(h), subject: { kind: "issue", id: "deleted-issue" },
+        snapshot: null, unsaved_work: false, freed_bytes: 0,
+      })).rejects.toMatchObject({ code: "task_not_found", operationError: { status: 404, code: "issue_not_found" } });
       expect(purge).not.toHaveBeenCalled();
-      expect(h.ledger.some(entry => entry.type === "gc.workspace_cleaned" && entry.seq === null)).toBe(true);
+      expect(h.ledger.some(entry => entry.type === "gc.subject_reclaimed" && entry.seq === null)).toBe(true);
       expect(h.client.connectionState()).toBe("connected");
     } finally { purge.mockRestore(); }
   });
@@ -281,7 +282,7 @@ describe("v2 report reconciliation with real sockets and DB", () => {
       expect(turns).toBe(2);
       expect(prompts[1]).toContain("use the new answer");
       expect(h.store.getTask(t.id)).toMatchObject({ status: "completed", result: "new answer" });
-      expect(h.daemon.traceStore().read(t.id).events).toContainEqual(expect.objectContaining({ type: "text", content: "old answer" }));
+      expect(agentTexts(h.daemon.traceStore().read(t.id).events)).toContain("old answer");
       expect(terminalEffects).toBe(1);
       expect(h.ledger.filter(entry => entry.type === "turn.complete" && entry.partition === t.id)).toHaveLength(2);
       expect(outbox(h).stats().blocked).toBe(0);

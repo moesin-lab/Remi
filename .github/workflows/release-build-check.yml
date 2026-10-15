@@ -210,7 +210,7 @@ jobs:
         if: runner.os == 'Linux'
         run: bun run tests/integration/platform-application-smoke.ts --internal
 
-  session-archive-platform:
+  runtime-platform:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -237,9 +237,6 @@ jobs:
         with:
           path: ~/.bun/install/cache
           key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
-
-      - name: Verify native Issue session archive traversal
-        run: bun run test tests/unit/daemon/session-archive.test.ts
 
       - name: Verify pinned ACP bridges and bundled agent runtimes
         env:
@@ -653,7 +650,7 @@ jobs:
   # dependency can become a green full-run release gate.
   build:
     if: always()
-    needs: [im-platform-smoke, execution-configuration, platform-updater, guards, frontend-types, frontend-tests, cli-build, api-build, web-build, session-archive-platform, frontend-zero-jump, frontend-replica, backend-plan, backend, backend-evidence, backend-retry]
+    needs: [im-platform-smoke, execution-configuration, platform-updater, guards, frontend-types, frontend-tests, cli-build, api-build, web-build, runtime-platform, frontend-zero-jump, frontend-replica, backend-plan, backend, backend-evidence, backend-retry]
     runs-on: ubuntu-latest
     steps:
       - name: Require every applicable check

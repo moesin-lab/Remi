@@ -19,12 +19,7 @@ import { cleanOptionalString, nullableString, parseJson, toJson } from "@multire
 import { createLogger } from "@shared/logger.js";
 import { INBOX_ROUTING, inboxRouteFor } from "@multiremi/store/inbox-routing.js";
 import { markRequestReadCacheLockTaken } from "@multiremi/store/request-read-cache.js";
-import type { MultiremiTaskTrace } from "@multiremi/contracts/session-archive.js";
-import type {
-  TaskTraceArchivePointer,
-  TaskTracePointerSource,
-  TaskTracePointerWriteResult,
-} from "@multiremi/store/repos/task-traces-repo.js";
+import type { MultiremiTaskTrace } from "@multiremi/contracts/trace-file.js";
 import type { TaskMessageFanoutSubject } from "@multiremi/contracts/task-message-fanout.js";
 export type { TaskMessageFanoutSubject } from "@multiremi/contracts/task-message-fanout.js";
 import type {
@@ -61,6 +56,7 @@ import type {
   MultiremiIssueComment,
   MultiremiIssue,
   MultiremiIssueDependencyView,
+  MultiremiIssueSubscriber,
   MultiremiKnowledgeSubmission,
   MultiremiIssueSession,
   MultiremiIssueWaitingOn,
@@ -309,6 +305,8 @@ export interface IssuesSurface {
   ): MultiremiIssueComment;
   getIssue(id: string): MultiremiIssue | null;
   hasIssue(id: string): boolean;
+  /** Throws for an unknown Issue; Q notifications read member subscribers of the source Issue. */
+  listIssueSubscribers(issueId: string): MultiremiIssueSubscriber[];
   getIssueByRef(ref: string, workspaceId?: string | null): MultiremiIssue | null;
   getIssueComment(id: string): MultiremiIssueComment | null;
   getAttachment(id: string): MultiremiAttachment | null;
@@ -323,9 +321,9 @@ export interface IssuesSurface {
   updateIssue(id: string, input: UpdateIssueInput, options?: UpdateIssueOptions): MultiremiIssue;
   /**
    * MUL-400 S1c (QA round 1): the same write as {@link updateIssue} but owned by
-   * the caller's transaction. The status row, its audit activities and (for the
-   * SCM merge effect) the effect's own bookkeeping commit together; every
-   * outbound event goes on `deferredEvents` and only flushes after COMMIT.
+   * the caller's transaction. The status row, its audit activities and the
+   * caller's own bookkeeping commit together; every outbound event goes on
+   * `deferredEvents` and only flushes after COMMIT.
    */
   updateIssueWithinTransaction(
     id: string,
@@ -354,31 +352,20 @@ export interface IssuesSurface {
     deferredEvents: CommitEventQueue,
   ): void;
   hasChildIssues(issueId: string): boolean;
-  parentDoneGrantStatus(issue: MultiremiIssue): {
-    granted: boolean;
-    grantedAt: string | null;
-    grantedBy: string | null;
-    agentId: string | null;
-    ownerAgentId: string | null;
-    effective: boolean;
-    reason: import("./repos/issues-repo.js").ParentDoneGrantRefusalReason | null;
-  };
-  finalSummaryAfterLastChild(parentIssueId: string, options?: { acceptCommentBy?: string | null }): {
-    satisfied: boolean;
-    lastChildClosedAt: string | null;
-  };
   /** MUL-400 E1: children that still count as unfinished (not done/cancelled). */
   countOpenChildIssues(parentIssueId: string): number;
   /**
    * MUL-400 E1 guard B: hold a parent at in_progress while children are open.
-   * `exempt` is for transitions the guard deliberately leaves alone (the
-   * human-request `in_review` transient).
+   * `exempt` lets a caller apply the requested status unguarded; derivation
+   * uses it while a question of this Issue waits at the human stage.
    */
   holdParentStatusForOpenChildren(
     issueId: string,
     requested: string,
     options: { exempt?: boolean; deferredEvents: CommitEventQueue },
   ): string;
+  /** This Issue's own pending questions at the human stage (any member may answer). */
+  countPendingIssueDecisions(issueId: string): number;
   /** MUL-400 E3: direct prerequisites of an issue that are not `done` yet. */
   listUnmetPrerequisites(issueId: string): import("./repos/issue-dependencies.js").IssueDependencyUnmetRef[];
   replayDependencyAutoStart(event: MultiremiSystemEvent): void;
@@ -567,7 +554,8 @@ export interface AutopilotsSurface {
   getAutopilot(id: string): MultiremiAutopilot | null;
   listAutopilots(workspaceId?: string | null): MultiremiAutopilot[];
   listAutopilotTriggers(autopilotId: string): MultiremiAutopilotTrigger[];
-  getAutopilotRun(id: string): MultiremiAutopilotRun | null;
+  getAutopilotRun(id: string): import("@multiremi/store/repos/autopilots-repo.js").MultiremiAutopilotRunRecord | null;
+  settleQuietRunWithinTransaction(runId: string): void;
   runAutopilot(autopilotId: string, input?: import("@multiremi/contracts/types.js").RunAutopilotInput): MultiremiAutopilotRun;
   enqueueIssueStatusChangedEvent(input: {
     issue: MultiremiIssue;
@@ -681,6 +669,7 @@ export interface ChatSurface {
   createChatSessionWithinTransaction(input: CreateChatSessionInput): MultiremiChatSession;
   getChatSession(id: string): MultiremiChatSession | null;
   updateChatSession(id: string, input: UpdateChatSessionInput): MultiremiChatSession;
+  markChatSessionRead(id: string): void;
   getChatMessage(id: string): MultiremiChatMessage | null;
   getPendingChatTask(chatSessionId: string): MultiremiTask | null;
   /**
@@ -1017,12 +1006,10 @@ export interface TaskTracesSurface {
   markTaskTraceDaemon(taskId: string, runtimeId: string): void;
   markTaskTraceNone(taskId: string): void;
   markTaskTraceLost(taskId: string): void;
-  /** Must be called inside the caller's transaction. */
-  writeTaskTraceArchivePointers(
-    pointers: readonly TaskTraceArchivePointer[],
-    source: TaskTracePointerSource,
-  ): TaskTracePointerWriteResult;
-  clearTaskTraceArchivePointers(archiveId: string): number;
+  /** Marks every `daemon` pointer held by the Runtimes `lost`; returns how many changed. */
+  markTaskTracesLostForRuntimes(runtimeIds: readonly string[]): number;
+  /** A merged legacy Runtime hands its trace pointers to its successor. */
+  moveTaskTracesToRuntime(fromRuntimeId: string, toRuntimeId: string): void;
 }
 
 export interface StoreContextHost extends TaskTracesSurface, AgentsSurface, AgentPluginsSurface, IssuesSurface, WorkspacesSurface, NotificationChannelsSurface, SquadsSurface, ProjectsSurface, TasksSurface, RuntimesSurface, ChatSurface, IssueSessionsSurface, ConversationLogSurface, AutopilotsSurface, AccessTokensSurface, FeishuBotSurface, KnowledgeSurface, InboxSurface {}
@@ -1101,8 +1088,8 @@ export class StoreContext {
     );
   }
 
-  /** Caller holds the workspace lifecycle lock and is inside a transaction. */
-  lockIssueArchiveLifecycle(issueId: string): void {
+  /** Serialize writers of one Issue's workspace. Caller holds the workspace lifecycle lock and is inside a transaction. */
+  lockIssueLifecycle(issueId: string): void {
     this.db.run(
       "UPDATE multiremi_issues SET lifecycle_state = lifecycle_state WHERE id = ?",
       [issueId],
@@ -1164,10 +1151,7 @@ export class StoreContext {
     return this.resolveHost();
   }
 
-  /**
-   * Task trace pointers. Resolved through `resolveHost` like the other carved
-   * repos, since the archive repo needs them inside its own transaction.
-   */
+  /** Task trace pointers, resolved through `resolveHost` like the other carved repos. */
   taskTraces(): TaskTracesSurface {
     return this.resolveHost();
   }

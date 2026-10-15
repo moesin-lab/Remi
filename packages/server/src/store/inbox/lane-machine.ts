@@ -10,6 +10,7 @@ import { afterCommit } from '../db/postgres.js';
 import { appendPendingTurnAuditWithinTransaction } from '../pending-turns.js';
 import { notifyTurnChanged } from '../turn-execution-records.js';
 import { RE_RING_SWEEP_PAGE_SQL, reRingSweepEnabled } from '../re-ring-sweep.js';
+import { settleQueueAfterTurnEndWithinTransaction } from './queued-messages.js';
 
 export function lockLane(ctx: StoreContext, sessionId: string, agentId: string, scope = ''): void {
   const at = nowIso();
@@ -81,6 +82,9 @@ export function reRingAfterTurnEnd(ctx: StoreContext, turnId: string, events: Co
   if (!agent || agent.archivedAt || chat?.status==='archived' || turn.issue_session_id && !session) return;
   if (session && ctx.issueSessions().getIssueSessionWithOwnerScope(session.id)?.ownerWorkspaceId !== session.workspaceId) return;
   lockLane(ctx,turn.session_id,turn.agent_id,turn.execution_scope);
+  // ADR 0020: a completed Chat turn releases the follow-up queue as ordinary now
+  // requests; the scan below then merges them into the same pending turn.
+  const queueTurn=chat?settleQueueAfterTurnEndWithinTransaction(ctx,turn,events):undefined;
   const lane=ctx.db.query(`SELECT cursor_seq FROM multiremi_session_lanes
     WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?`).get(turn.session_id,turn.agent_id,turn.execution_scope)!;
   const scopeSql=ctx.db.dialect==='postgres'?"COALESCE(metadata::jsonb->>'execution_scope','')":"COALESCE(json_extract(metadata,'$.execution_scope'),'')";
@@ -99,7 +103,7 @@ export function reRingAfterTurnEnd(ctx: StoreContext, turnId: string, events: Co
     execution_scope:turn.execution_scope},events,{delegationId:turn.delegation_id,delegatedByAgentId:turn.delegated_by_agent_id,delegatedFromIssueSessionId:turn.delegated_from_issue_session_id,priority:turn.priority},
     {kind:'turn_end_re_ring',sourceTaskId:turn.current_attempt_id});
   if(successor)appendPendingTurnAuditWithinTransaction(ctx.db,{id:successor,issueId:turn.issue_id,workspaceId:turn.workspace_id},'re_ring',{
-    origin,action:'created',seq:message.seq,task_id:ctx.db.query('SELECT current_attempt_id FROM multiremi_turns WHERE id=?').get(successor)!.current_attempt_id});
+    origin,action:successor===queueTurn?'coalesced':'created',seq:message.seq,task_id:ctx.db.query('SELECT current_attempt_id FROM multiremi_turns WHERE id=?').get(successor)!.current_attempt_id});
   if(successor)ctx.db.run(`UPDATE multiremi_turns SET delegation_return_turn_id=? WHERE delegation_return_turn_id=?
     AND id IN (SELECT task_id FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND to_agent_id=? AND wake_applied='now' AND ${scopeSql}=?)`,
     [successor,turn.id,turn.session_id,cursor,turn.agent_id,turn.execution_scope]);

@@ -1,5 +1,3 @@
-import { isCompactionOutput } from "@shared/contracts/compaction.js";
-
 const providerHttpStatusRe = /(?:^|[\s:()[\]{},."'])([45][0-9]{2})(?=$|[\s:()[\]{},."'])/g;
 
 const codexSemanticInactivityMarker = "codex semantic inactivity timeout";
@@ -58,7 +56,8 @@ export function classifyTaskFailure(rawError: string): TaskFailureReasonValue {
     lower.includes("missing environment variable") ||
     (lower.includes("missing") && lower.includes("api_key")) ||
     (lower.includes("api key") && lower.includes("required")) ||
-    containsAny(lower, "no llm provider configured", "no provider configured")
+    containsAny(lower, "no llm provider configured", "no provider configured",
+      "antigravity_gateway_unconfigured", "antigravity_model_required", "antigravity_home_required")
   ) {
     return TaskFailureReason.AgentMissingConfig;
   }
@@ -164,7 +163,6 @@ export function classifyTaskFailure(rawError: string): TaskFailureReasonValue {
 export function classifyPoisonedOutput(output: string): TaskFailureReasonValue | null {
   const trimmed = String(output ?? "").trim();
   if (!trimmed || trimmed.length > poisonedOutputMaxLen) return null;
-  if (isCompactionOutput(trimmed)) return TaskFailureReason.AgentFallbackMessage;
   const lower = trimmed.toLowerCase();
   if (lower.includes("i reached the iteration limit")) return TaskFailureReason.IterationLimit;
   if (lower.includes("put your final update inside the content string")) return TaskFailureReason.AgentFallbackMessage;
@@ -204,6 +202,10 @@ function classifyFailureHint(hint?: TaskFailureHint): TaskFailureReasonValue | n
     case "overloaded": return TaskFailureReason.AgentProviderCapacityOrRateLimit;
     case "server_error": return TaskFailureReason.AgentProviderServerError;
     case "invalid_request": return TaskFailureReason.ApiInvalidRequest;
+    // The provider's stall watchdog stopped a turn that made no progress.
+    case "turn_stalled": return TaskFailureReason.AgentTimeout;
+    // The Antigravity gateway shim got no answer from the gateway at all.
+    case "gateway_unreachable": return TaskFailureReason.AgentProviderNetwork;
   }
   if (hint?.codexErrorInfo != null) {
     const info = hint.codexErrorInfo;

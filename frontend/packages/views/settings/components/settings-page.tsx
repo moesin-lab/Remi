@@ -9,7 +9,7 @@ import {
   FlaskConical,
   Bell,
   Waypoints,
-  Archive,
+  HardDrive,
   GitBranch,
   ServerCog,
   FileText,
@@ -27,7 +27,7 @@ import { SourceControlTab } from "./source-control-tab";
 import { ModelGatewayTab } from "./model-gateway-tab";
 import { LabsTab } from "./labs-tab";
 import { NotificationsTab } from "./notifications-tab";
-import { StorageCleanupTab } from "./storage-cleanup-tab";
+import { StorageTab } from "./storage-tab";
 import { PlatformTab } from "./platform-tab";
 import { PromptsTab } from "./prompts-tab";
 import { useT } from "../../i18n";
@@ -45,7 +45,7 @@ const WORKSPACE_TAB_KEYS = [
   "prompts",
   "source_control",
   "model_gateway",
-  "storage_cleanup",
+  "storage",
   "labs",
 ] as const;
 const WORKSPACE_TAB_VALUES = {
@@ -53,7 +53,7 @@ const WORKSPACE_TAB_VALUES = {
   prompts: "prompts",
   source_control: "source-control",
   model_gateway: "model-gateway",
-  storage_cleanup: "storage-cleanup",
+  storage: "storage",
   labs: "labs",
 } as const;
 const WORKSPACE_TAB_ICONS = {
@@ -61,7 +61,7 @@ const WORKSPACE_TAB_ICONS = {
   prompts: FileText,
   source_control: GitBranch,
   model_gateway: Waypoints,
-  storage_cleanup: Archive,
+  storage: HardDrive,
   labs: FlaskConical,
 } as const;
 
@@ -201,7 +201,7 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
           <TabsContent value="prompts"><PromptsTab /></TabsContent>
           <TabsContent value="source-control"><SourceControlTab /></TabsContent>
           <TabsContent value="model-gateway"><ModelGatewayTab /></TabsContent>
-          <TabsContent value="storage-cleanup"><StorageCleanupTab /></TabsContent>
+          <TabsContent value="storage"><StorageTab /></TabsContent>
           <TabsContent value="labs"><LabsTab /></TabsContent>
           {showPlatformTab && <TabsContent value="platform"><PlatformTab /></TabsContent>}
           {extraAccountTabs?.map((tab) => (

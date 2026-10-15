@@ -158,9 +158,6 @@ function installDeterminism(): () => void {
   setEnv("MULTIREMI_STATE_DIR", join(SNAPSHOT_TMP, "state"));
   setEnv("MULTIREMI_MIGRATION_REPORT_DIR", join(SNAPSHOT_TMP, "reports", "migrations"));
   setEnv("MULTIREMI_UPLOAD_DIR", UPLOAD_DIR);
-  // Purge callbacks write a durable outbox: keep it inside this disposable
-  // fixture instead of touching the operator's real session archive directory.
-  setEnv("MULTIREMI_SESSION_ARCHIVE_ROOT", join(SNAPSHOT_TMP, "session-archives"));
   setEnv("MULTIREMI_RELEASE_DIR", RELEASE_DIR);
   setEnv("MULTIREMI_SCRIPTS_DIR", SCRIPTS_DIR);
   setEnv("MULTIREMI_RELEASE_REPO", "Grassgod/Remi");
@@ -502,6 +499,7 @@ export interface SeedRefs {
   decisionId: string;
   runtimeModelRequestId: string;
   dirScanRequestId: string;
+  gcRunRequestId: string;
   localSkillListRequestId: string;
   localSkillImportRequestId: string;
   runtimeUpdateRequestId: string;
@@ -647,7 +645,6 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
     assigneeType: "agent",
     assigneeId: agent.id,
     createdBy: member.id,
-    responsibleMemberId: member.id,
   });
   const childIssue = store.createIssue({
     id: "iss_snapshot_child",
@@ -666,7 +663,6 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
     workspaceId,
     createdBy: member.id,
     status: "backlog",
-    responsibleMemberId: member.id,
   });
   store.attachLabelToIssue(issue.id, label.id);
   store.setIssueMetadataKey(issue.id, "snapshot_key", "snapshot_value");
@@ -802,7 +798,6 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
 
   const autopilot = store.createAutopilot({
     id: "apl_snapshot",
-    responsibleMemberId: member.id,
     title: "Snapshot autopilot",
     description: "Autopilot used by the snapshot",
     workspaceId,
@@ -827,6 +822,7 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
 
   const modelRequest = store.createRuntimeModelListRequest(runtime.id);
   const dirScan = store.createRuntimeDirectoryScanRequest(runtime.id, { root: "/snapshot", maxDepth: 2, mode: "scan" });
+  const gcRun = store.createRuntimeGcRunRequest(runtime.id, { mode: "dry_run", requestedBy: member.userId ?? member.id });
   const localSkillList = store.createRuntimeLocalSkillListRequest(runtime.id);
   const localSkillImport = store.createRuntimeLocalSkillImportRequest(runtime.id, { skillKey: "snapshot-skill", name: "Snapshot skill" });
   const runtimeUpdate = store.createRuntimeUpdateRequest(runtime.id, { targetVersion: "9.9.9", scope: "agent" as any });
@@ -947,6 +943,7 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
     decisionId,
     runtimeModelRequestId: (modelRequest as any).id ?? (modelRequest as any).requestId,
     dirScanRequestId: (dirScan as any).id ?? (dirScan as any).requestId,
+    gcRunRequestId: gcRun.id,
     localSkillListRequestId: (localSkillList as any).id ?? (localSkillList as any).requestId,
     localSkillImportRequestId: (localSkillImport as any).id ?? (localSkillImport as any).requestId,
     runtimeUpdateRequestId: (runtimeUpdate as any).id ?? (runtimeUpdate as any).requestId,
@@ -1071,8 +1068,6 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
       return "agent";
     case "participantId":
       return refs.agentId;
-    case "archiveId":
-      return "sar_snapshot";
     case "requestId":
       if (pattern.includes("/human-requests/")) return refs.humanRequestId;
       if (pattern.includes("/bot-menu/")) return refs.botMenuRequestId;
@@ -1080,6 +1075,7 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
       if (pattern.includes("/local-skills/import/")) return refs.localSkillImportRequestId;
       if (pattern.includes("/local-skills/")) return refs.localSkillListRequestId;
       if (pattern.includes("/directory-scans/")) return refs.dirScanRequestId;
+      if (pattern.includes("/gc-runs/")) return refs.gcRunRequestId;
       if (pattern.includes("/models/")) return refs.runtimeModelRequestId;
       break;
     case "sessionId":
@@ -1089,6 +1085,8 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
       if (pattern.includes("/lark/install/")) return "lark_snapshot_session";
       if (pattern.includes("/cloud-billing/")) return "cs_snapshot";
       if (pattern.includes("/messaging/")) return "mauth_snapshot";
+      // The follow-up queue exists only in a Chat (ADR 0020).
+      if (pattern.startsWith("/api/sessions/:sessionId/queue")) return refs.chatSessionId;
       if (pattern.includes("/issues/") || pattern.includes("/sessions/")) {
         return pattern.includes("/chat/sessions/") || pattern.includes("/chat-sessions/")
           ? refs.chatSessionId
@@ -1271,6 +1269,20 @@ flow("unified-messages-inbox-turns", async (rec, refs) => {
   await rec.call("GET", `/api/turns/${refs.turnId}/trace`);
 });
 
+// ADR 0020: the Chat follow-up queue, on the seeded Chat whose turn is still pending.
+flow("chat-follow-up-queue", async (rec, refs) => {
+  const base = `/api/sessions/${refs.chatSessionId}/queue`;
+  const first = await rec.json("POST", base, { body_md: "Queued snapshot", client_id: "snapshot-queue-1" });
+  const second = await rec.json("POST", base, { body_md: "Second queued snapshot", client_id: "snapshot-queue-2" });
+  const firstId = first.body?.item?.id ?? "qmsg_snapshot";
+  const secondId = second.body?.item?.id ?? "qmsg_snapshot";
+  await rec.call("GET", base);
+  await rec.json("PATCH", `${base}/${firstId}`, { body_md: "Edited queued snapshot", expected_revision: 1 });
+  await rec.json("POST", `${base}/${secondId}/steer`, {});
+  await rec.call("DELETE", `${base}/${firstId}`);
+  await rec.json("POST", `${base}/resume`, {});
+});
+
 // -- agents -----------------------------------------------------------------
 flow("agents-compat", async (rec, refs) => {
   const created = await rec.json("POST", "/api/agents", {
@@ -1342,11 +1354,10 @@ flow("skills-native", async (rec, refs) => {
 flow("issue-responsibility-and-questions", async (rec, refs, store) => {
   rec.enableAuthentication("snapshot-responsibility-master");
   const user = store.getOrCreateUser({ email: "responsible@snapshot.invalid", name: "Snapshot operator account" });
-  const human = store.getWorkspaceOperator(refs.workspaceId)!;
   const pat = await store.createAccessToken({ type: "pat", workspaceId: refs.workspaceId, userId: user.id, name: "Snapshot operator account" });
   const runtime = store.registerRuntime({ name: "Responsibility snapshot provider", provider: "codex", ownerId: user.id, daemonId: "dmn_responsibility_snapshot", maxConcurrency: 8 });
-  const owner = store.createAgent({ name: "Root execution coordinator", provider: "codex", ownerId: user.id, runtimeId: runtime.id, visibility: "workspace", maxConcurrentTasks: 8 });
-  const worker = store.createAgent({ name: "Child execution coordinator", provider: "codex", ownerId: user.id, runtimeId: runtime.id, visibility: "workspace", maxConcurrentTasks: 8 });
+  const owner = store.createAgent({ name: "Root execution owner", provider: "codex", ownerId: user.id, runtimeId: runtime.id, visibility: "workspace", maxConcurrentTasks: 8 });
+  const worker = store.createAgent({ name: "Child execution owner", provider: "codex", ownerId: user.id, runtimeId: runtime.id, visibility: "workspace", maxConcurrentTasks: 8 });
   const checked = async (method: string, path: string, body: unknown, token: string, status = 200) => {
     const result = await rec.json(method, path, body, token);
     if (result.status !== status) throw new Error(`Responsibility flow ${method} ${path}: expected ${status}, got ${result.status} ${JSON.stringify(result.body)}`);
@@ -1357,10 +1368,11 @@ flow("issue-responsibility-and-questions", async (rec, refs, store) => {
     if (result.status !== 200) throw new Error(`Responsibility read ${path}: expected 200, got ${result.status} ${JSON.stringify(result.body)}`);
     return result.body;
   };
-  const root = await checked("POST", "/api/issues", { title: "Formal snapshot root", workspace_id: refs.workspaceId, responsible_member_id: human.id, assignee_type: "agent", assignee_id: owner.id }, pat.token, 201);
-  const child = await checked("POST", "/api/issues", { title: "Formal snapshot child", workspace_id: refs.workspaceId, parent_issue_id: root.id, assignee_type: "agent", assignee_id: worker.id }, pat.token, 201);
-  const sourceTask = store.createTask({ agentId: worker.id, issueId: child.id, prompt: "Question and evidence" });
-  const ownerTask = store.createTask({ agentId: owner.id, issueId: root.id, prompt: "Review child evidence" });
+  // Neither Issue names a human; each only has an Agent execution owner.
+  const root = await checked("POST", "/api/issues", { title: "Snapshot root", workspace_id: refs.workspaceId, assignee_type: "agent", assignee_id: owner.id }, pat.token, 201);
+  const child = await checked("POST", "/api/issues", { title: "Snapshot child", workspace_id: refs.workspaceId, parent_issue_id: root.id, assignee_type: "agent", assignee_id: worker.id }, pat.token, 201);
+  const sourceTask = store.createTask({ agentId: worker.id, issueId: child.id, prompt: "Question and summary" });
+  const ownerTask = store.createTask({ agentId: owner.id, issueId: root.id, prompt: "Check the child result" });
   for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id); if (!claimed) break; store.startTask(claimed.id); }
   const sourceToken = await store.createTaskAccessToken(store.getTask(sourceTask.id)!, user.id);
   const ownerToken = await store.createTaskAccessToken(store.getTask(ownerTask.id)!, user.id);
@@ -1372,13 +1384,17 @@ flow("issue-responsibility-and-questions", async (rec, refs, store) => {
   };
   // Configure Remi before escalation so the actual human-stage notification
   // exists; an unrelated running owner turn does not grant presentation access.
-  await checked("PUT", `/api/workspaces/${refs.workspaceId}/feishu-bot`, { agent_id: owner.id, runtime_id: runtime.id, app_id: "cli_responsibility_snapshot", app_secret: "synthetic-secret", app_secret_op: "set", domain: "feishu", enabled: false, responsible_member_id: human.id }, "snapshot-responsibility-master");
+  // The bot needs no Chat question handler for an Issue Q.
+  await checked("PUT", `/api/workspaces/${refs.workspaceId}/feishu-bot`, { agent_id: owner.id, runtime_id: runtime.id, app_id: "cli_responsibility_snapshot", app_secret: "synthetic-secret", app_secret_op: "set", domain: "feishu", enabled: false }, "snapshot-responsibility-master");
   const question = createQ("snapshot-question-answer");
+  // The worker executes the child, so its own Q skips it and climbs to the parent's execution owner.
+  if (question.stage !== "parent_owner" || question.current_handler?.id !== owner.id) throw new Error("Snapshot Q must start at the parent execution owner");
   await read(`/api/messages/${question.id}/question`);
-  await checked("POST", `/api/messages/${question.id}/question/transfer`, { expected_route_revision: question.route_revision, reason: "Confirm current facts" }, ownerToken.token);
-  const routed = store.getQuestion(question.id)!;
-  const humanQuestion = (await checked("POST", `/api/messages/${question.id}/question/escalate`, { expected_route_revision: routed.route_revision, reason: "Explicit human needed" }, ownerToken.token)).question;
-  const presentation = store.listMessages(store.getOrCreateDefaultIssueSession(root.id).id).find(message =>
+  // A member only reads an Agent-stage Q; answering belongs to that execution owner.
+  await checked("POST", `/api/messages/${question.id}/question/answer`, { expected_route_revision: question.route_revision, response: { answers: { "Which approach?": "A" } } }, pat.token, 403);
+  const humanQuestion = (await checked("POST", `/api/messages/${question.id}/question/escalate`, { expected_route_revision: question.route_revision, reason: "Needs a workspace member" }, ownerToken.token)).question;
+  if (humanQuestion.stage !== "human" || humanQuestion.current_handler !== null) throw new Error("Snapshot escalation above the root must reach the human stage without a named handler");
+  const presentation = [child.id, root.id].flatMap(id => store.listMessages(store.getOrCreateDefaultIssueSession(id).id)).find(message =>
     message.metadata.question_present_request === true && message.metadata.root_question_id === question.id
     && message.metadata.question_route_revision === humanQuestion.route_revision);
   if (!presentation || typeof presentation.metadata.delivery_turn_id !== "string") throw new Error("Snapshot Remi presentation notification has no bound turn");
@@ -1387,6 +1403,7 @@ flow("issue-responsibility-and-questions", async (rec, refs, store) => {
   if (presentationTurn.session_id !== presentation.session_id || presentationTurn.execution_scope !== String(presentation.metadata.execution_scope ?? "")) throw new Error("Snapshot Remi notification lane changed");
   const presentationToken = await store.createTaskAccessToken(store.getTask(presentationTurn.current_attempt_id!)!, user.id);
   await checked("POST", `/api/messages/${question.id}/question/present`, { expected_route_revision: humanQuestion.route_revision, summary: "Remi's separate summary; original choices remain unchanged" }, presentationToken.token);
+  // Any active workspace member handles the human stage; nobody was designated.
   const answer = (await checked("POST", `/api/messages/${question.id}/question/answer`, { expected_route_revision: humanQuestion.route_revision, response: { answers: { "Which approach?": "A, B" } } }, pat.token)).question;
   const consumed = store.getDaemonTurnBridge().rpc("turn.decision.consume", { turn_id: turn.id, attempt_id: sourceTask.id, message_id: question.id, reply_message_id: answer.answer.reply_message_id, wait_id: "wait:snapshot-question-answer" }, { runtimeId: runtime.id, daemonId: "dmn_responsibility_snapshot", workspaceId: refs.workspaceId });
   if (!consumed.ok || store.getQuestion(question.id)?.wait_status !== "consumed") throw new Error("Snapshot Q answer was not consumed by the original provider wait");
@@ -1399,33 +1416,29 @@ flow("issue-responsibility-and-questions", async (rec, refs, store) => {
   await checked("POST", `/api/messages/${closed.id}/question/close`, { expected_route_revision: closed.route_revision, reason: "Explicitly no longer needed" }, ownerToken.token);
   await read(`/api/issues/${root.id}/questions?limit=100`);
   await read(`/api/issues/${child.id}/responsibility`);
-  const childDelivery = (await checked("POST", `/api/issues/${child.id}/deliveries`, { summary: "Child evidence" }, sourceToken.token, 201)).delivery;
-  await checked("POST", `/api/issues/${child.id}/deliveries/${childDelivery.id}/respond`, { action: "accept", revision: childDelivery.responsibilityRevision }, ownerToken.token);
-  const delivery = (await checked("POST", `/api/issues/${root.id}/deliveries`, { summary: "Integrated evidence" }, ownerToken.token, 201)).delivery;
-  await checked("POST", `/api/issues/${root.id}/deliveries/${delivery.id}/authorize`, { agentId: owner.id, revision: delivery.responsibilityRevision }, pat.token);
-  await checked("POST", `/api/issues/${root.id}/deliveries/${delivery.id}/authorize`, { agentId: null, revision: delivery.responsibilityRevision }, pat.token);
-  await checked("POST", `/api/issues/${root.id}/deliveries/${delivery.id}/respond`, { action: "return", body: "Add verification evidence", revision: delivery.responsibilityRevision }, pat.token);
-  const finalDelivery = (await checked("POST", `/api/issues/${root.id}/deliveries`, { summary: "Integrated corrected evidence" }, ownerToken.token, 201)).delivery;
-  await checked("POST", `/api/issues/${root.id}/deliveries/${finalDelivery.id}/respond`, { action: "accept", revision: finalDelivery.responsibilityRevision }, pat.token);
-  await read(`/api/issues/${root.id}/deliveries?limit=1`);
-  await read(`/api/issues/${root.id}/deliveries?limit=1&before=${finalDelivery.id}`);
+  // The done rule: an Agent closes only a direct child of an Issue it executes,
+  // never its own Issue or a root; a member closes any Issue.
+  await checked("PATCH", `/api/issues/${child.id}`, { status: "done" }, sourceToken.token, 403);
+  await checked("PATCH", `/api/issues/${root.id}`, { status: "done" }, ownerToken.token, 403);
+  await checked("PATCH", `/api/issues/${child.id}`, { status: "done" }, ownerToken.token);
+  await checked("PATCH", `/api/issues/${root.id}`, { status: "done" }, pat.token);
 
   // A detached native wait keeps its valid answer when execution is temporarily
   // unavailable. The explicit HTTP continuation creates one new consumer;
   // only its actual input acknowledgement can mark the question consumed.
-  const continuationIssue = await checked("POST", "/api/issues", { title: "Controlled continuation snapshot", workspace_id: refs.workspaceId, responsible_member_id: human.id, assignee_type: "agent", assignee_id: owner.id }, pat.token, 201);
+  const continuationIssue = await checked("POST", "/api/issues", { title: "Controlled continuation snapshot", workspace_id: refs.workspaceId, assignee_type: "agent", assignee_id: owner.id }, pat.token, 201);
   const continuationAgent = store.createAgent({ name: "Continuation source", provider: "codex", ownerId: user.id, runtimeId: runtime.id, visibility: "workspace" });
   const continuationTask = store.createTask({ agentId: continuationAgent.id, issueId: continuationIssue.id, prompt: "Continue only after explicit authorization" });
-  const reviewerTask = store.createTask({ agentId: owner.id, issueId: continuationIssue.id, prompt: "Review continuation question" });
+  const continuationOwnerTask = store.createTask({ agentId: owner.id, issueId: continuationIssue.id, prompt: "Handle the continuation question" });
   for (let count = 0; count < 8; count++) { const claimed = store.claimTask(runtime.id); if (!claimed) break; store.startTask(claimed.id); }
-  const reviewerToken = await store.createTaskAccessToken(store.getTask(reviewerTask.id)!, user.id);
+  const continuationOwnerToken = await store.createTaskAccessToken(store.getTask(continuationOwnerTask.id)!, user.id);
   const continuationTurn = store.getTurnForAttempt(continuationTask.id)!;
   const bridge = store.getDaemonTurnBridge();
   const scope = { runtimeId: runtime.id, daemonId: "dmn_responsibility_snapshot", workspaceId: refs.workspaceId };
   const native = bridge.rpc("turn.decision", { turn_id: continuationTurn.id, attempt_id: continuationTask.id, dedupe_key: "snapshot-controlled-continuation", wait_id: "snapshot-continuation-wait", body_md: "Proceed after restart?", options: [{ label: "Proceed", value: "Proceed" }], metadata: { kind: "question", questions: [{ question: "Proceed after restart?", options: [{ label: "Proceed" }] }] } }, scope);
   if (!native.ok) throw new Error(`Snapshot continuation Q failed: ${native.code}`);
   const continuationQuestion = store.getQuestion(String(native.message_id))!;
-  const escalated = (await checked("POST", `/api/messages/${continuationQuestion.id}/question/escalate`, { expected_route_revision: continuationQuestion.route_revision, reason: "Explicit human authorization after restart" }, reviewerToken.token)).question;
+  const escalated = (await checked("POST", `/api/messages/${continuationQuestion.id}/question/escalate`, { expected_route_revision: continuationQuestion.route_revision, reason: "Needs a workspace member after restart" }, continuationOwnerToken.token)).question;
   const expired = bridge.rpc("turn.decision.expire", { turn_id: continuationTurn.id, attempt_id: continuationTask.id, message_id: continuationQuestion.id, status: "timeout" }, scope);
   if (!expired.ok) throw new Error(`Snapshot wait detach failed: ${expired.code}`);
   store.archiveAgent(continuationAgent.id);
@@ -1452,28 +1465,34 @@ flow("issue-responsibility-and-questions", async (rec, refs, store) => {
   await read(`/api/messages/${continuationQuestion.id}/question`);
 });
 
-flow("responsibility-migration-and-configuration", async (rec, refs, store) => {
-  const master = "snapshot-migration-master";
+flow("responsibility-retired-routes", async (rec, refs) => {
+  const master = "snapshot-retired-responsibility-master";
   rec.enableAuthentication(master);
   const checked = async (method: string, path: string, body: unknown, status = 200) => {
     const result = await rec.json(method, path, body, master);
-    if (result.status !== status) throw new Error(`Migration flow ${method} ${path}: expected ${status}, got ${result.status} ${JSON.stringify(result.body)}`);
+    if (result.status !== status) throw new Error(`Retired responsibility flow ${method} ${path}: expected ${status}, got ${result.status} ${JSON.stringify(result.body)}`);
     return result.body;
   };
-  const legacy = store.createIssue({ title: "Explicit historical mapping sample", workspaceId: refs.workspaceId, responsibleMemberId: refs.memberId });
-  // An exact historical row, distinct from all new API creation constraints.
-  const historicalDb = (store as unknown as { db: { run: (sql: string, params: unknown[]) => void } }).db;
-  historicalDb.run("UPDATE multiremi_issues SET responsible_member_id=NULL,assignee_type='member',assignee_id=?,created_by=? WHERE id=?", [refs.memberId, refs.userId, legacy.id]);
-  const path = `/api/workspaces/${refs.workspaceId}/issue-responsibility-migration`;
-  const list = await checked("GET", `${path}?limit=100&offset=0`, undefined);
-  const item = list.items.find((item: { issueId: string }) => item.issueId === legacy.id);
-  if (!item || item.responsibleMemberId !== null || item.assigneeId !== refs.memberId) throw new Error("Migration must retain original facts without backfilling them");
-  await checked("POST", `${path}/map`, { reason: "Explicitly verified human", mappings: [{ issueId: legacy.id, memberId: refs.memberId, revision: "stale" }] }, 409);
-  await checked("POST", `${path}/map`, { reason: "Explicitly verified human", mappings: [{ issueId: legacy.id, memberId: refs.memberId, revision: item.revision }] });
-  await checked("GET", `${path}?limit=100&offset=0`, undefined);
-  await checked("PATCH", `/api/autopilots/${refs.autopilotId}`, { responsible_member_id: refs.memberId });
-  await checked("PUT", `/api/workspaces/${refs.workspaceId}/issue-topics`, { enabled: true, chat_id: "oc_migration_snapshot", project_ids: null, responsible_member_id: refs.memberId });
-  await checked("PUT", `/api/workspaces/${refs.workspaceId}/issue-topics`, { enabled: true, chat_id: "oc_migration_snapshot", project_ids: null, responsible_member_id: null });
+  // Old clients may still send the deprecated human field: it is accepted and
+  // ignored, never validated, so even an unknown member ID succeeds.
+  const ignored = "mem_ignored_snapshot";
+  const issue = await checked("POST", "/api/issues", { title: "Old client root", workspace_id: refs.workspaceId, responsible_member_id: ignored }, 201);
+  await checked("PATCH", `/api/issues/${issue.id}`, { responsible_member_id: ignored });
+  await checked("PATCH", `/api/autopilots/${refs.autopilotId}`, { responsible_member_id: ignored });
+  await checked("PUT", `/api/workspaces/${refs.workspaceId}/issue-topics`, { enabled: true, chat_id: "oc_retired_snapshot", project_ids: null, responsible_member_id: ignored });
+  // Historical mapping, formal delivery, explicit transfer and the parent-done
+  // grant are retired: each answers 410 with its replacement.
+  const retired: Array<[string, string]> = [
+    ["GET", `/api/workspaces/${refs.workspaceId}/issue-responsibility-migration?limit=100&offset=0`],
+    ["POST", `/api/workspaces/${refs.workspaceId}/issue-responsibility-migration/map`],
+    ["GET", `/api/issues/${issue.id}/deliveries`],
+    ["POST", `/api/issues/${issue.id}/deliveries`],
+    ["POST", `/api/issues/${issue.id}/deliveries/dlv_retired_snapshot/respond`],
+    ["POST", `/api/issues/${issue.id}/deliveries/dlv_retired_snapshot/authorize`],
+    ["POST", "/api/messages/msg_retired_snapshot/question/transfer"],
+    ...["POST", "DELETE"].flatMap((method): Array<[string, string]> => [[method, `/api/issues/${issue.id}/parent-done-grant`], [method, `/api/multiremi/issues/${issue.id}/parent-done-grant`]]),
+  ];
+  for (const [method, path] of retired) await checked(method, path, method === "GET" ? undefined : {}, 410);
 });
 
 flow("issues-compat", async (rec, refs) => {
@@ -1483,7 +1502,6 @@ flow("issues-compat", async (rec, refs) => {
     workspace_id: refs.workspaceId,
     project_id: refs.projectId,
     priority: "medium",
-    responsible_member_id: refs.memberId,
   });
   const id = created.body?.id ?? refs.issueId;
   await rec.json("PUT", `/api/issues/${id}`, { title: "Compat issue renamed", status: "in_progress" });
@@ -1493,7 +1511,6 @@ flow("issues-compat", async (rec, refs) => {
     prompt: "do the thing",
     workspace_id: refs.workspaceId,
     agent_id: refs.agentId,
-    responsible_member_id: refs.memberId,
   });
   await rec.json("POST", "/api/issues/batch-update", { issue_ids: [id], status: "done" });
   await rec.json("POST", `/api/issues/${id}/squad-evaluated`, { outcome: "no_action", reason: "nothing to do" });
@@ -1506,7 +1523,6 @@ flow("issues-native", async (rec, refs) => {
     title: "Native issue",
     workspaceId: refs.workspaceId,
     projectId: refs.projectId,
-    responsibleMemberId: refs.memberId,
   });
   const id = created.body?.id ?? refs.issueId;
   await rec.json("PATCH", `/api/multiremi/issues/${id}`, { status: "in_progress" });
@@ -1516,7 +1532,6 @@ flow("issues-native", async (rec, refs) => {
     prompt: "do the thing",
     workspaceId: refs.workspaceId,
     agentId: refs.agentId,
-    responsibleMemberId: refs.memberId,
   });
   await rec.json("POST", "/api/multiremi/issues/batch-update", { issueIds: [id], status: "done" });
   await rec.json("POST", "/api/multiremi/issues/batch-delete", { issueIds: [id] });
@@ -1682,7 +1697,6 @@ flow("squads", async (rec, refs) => {
 flow("autopilots-compat", async (rec, refs) => {
   const created = await rec.json("POST", "/api/autopilots", {
     title: "Compat autopilot",
-    responsible_member_id: refs.memberId,
     assignee_type: "agent",
     assignee_id: refs.agentId,
     workspace_id: refs.workspaceId,
@@ -1705,7 +1719,6 @@ flow("autopilots-compat", async (rec, refs) => {
 flow("autopilots-native", async (rec, refs) => {
   const created = await rec.json("POST", "/api/multiremi/autopilots", {
     title: "Native autopilot",
-    responsibleMemberId: refs.memberId,
     assigneeType: "agent",
     assigneeId: refs.agentId,
     workspaceId: refs.workspaceId,
@@ -1772,6 +1785,8 @@ flow("runtimes", async (rec, refs) => {
     timeout_ms: 1_000,
   });
   await rec.call("GET", `/api/runtimes/${id}/commands/${command.body?.id ?? refs.runtimeCommandRequestId}`);
+  const gcRun = await rec.json("POST", `/api/runtimes/${id}/gc-runs`, { mode: "run" });
+  await rec.call("GET", `/api/runtimes/${id}/gc-runs/${gcRun.body?.request?.id ?? refs.gcRunRequestId}`);
   await rec.json("POST", `/api/runtimes/${id}/archive-agents-and-delete`, {});
   await rec.call("DELETE", `/api/runtimes/${refs.runtimeId}`);
 });
@@ -1788,6 +1803,12 @@ flow("daemon-retirement", async (rec, refs) => {
 });
 
 // -- daemon -----------------------------------------------------------------
+const SNAPSHOT_STORAGE_REPORT = {
+  version: 1, generated_at: "2026-01-01T00:00:00.000Z", mode: "dry_run", root: "/snapshot", bytes: null, bytes_measured_at: null,
+  subjects: { total: 0, active: 0, ended: 0, reclaimed: 0 }, retained: {}, reclaimed_this_round: 0,
+  forgotten_this_round: 0, freed_bytes: 0, plan: [], errors: [],
+};
+
 flow("daemon", async (rec, refs, store) => {
   await rec.json("POST", "/api/daemon/register", {
     workspace_id: refs.workspaceId,
@@ -1809,6 +1830,10 @@ flow("daemon", async (rec, refs, store) => {
   await rec.report("runtime.directory_scan_result", { runtime_id: refs.runtimeId, request_id: refs.dirScanRequestId, status: "completed",
     entries: [{ path: "/snapshot/project", name: "project", is_git_repo: true }],
   });
+  await rec.report("runtime.gc_run_result", { runtime_id: refs.runtimeId, request_id: refs.gcRunRequestId, status: "completed",
+    report: SNAPSHOT_STORAGE_REPORT,
+  });
+  await reportFrame(store, "gc.storage_report", { runtime_id: refs.runtimeId, report: SNAPSHOT_STORAGE_REPORT });
   await rec.json("POST", `/api/daemon/runtimes/${refs.runtimeId}/local-skills/claim`, {});
   await rec.report("runtime.local_skills_result", { runtime_id: refs.runtimeId, request_id: refs.localSkillListRequestId, status: "completed",
     skills: [{ key: "snapshot-skill", name: "Snapshot skill" }],
@@ -1972,6 +1997,9 @@ flow("workspaces", async (rec, refs) => {
   await rec.json("PUT", `/api/workspaces/${id}/relay-config/claude`, { baseUrl: "https://relay.invalid", token: "relay-token" });
   await rec.json("POST", `/api/workspaces/${id}/relay-config/claude/reveal`, {});
   await rec.json("PUT", `/api/workspaces/${id}/relay-config/discovery`, { enabled: true });
+  await rec.call("GET", `/api/workspaces/${id}/storage`);
+  await rec.json("PUT", `/api/workspaces/${id}/storage`, { ttl_ms: 7_200_000, max_retained: null });
+  await rec.call("GET", `/api/workspaces/${id}/storage/daemons`);
   await rec.json("POST", `/api/workspaces/${id}/lark/install/begin`, {});
   await rec.call("DELETE", `/api/workspaces/${id}/lark/installations/inst_snapshot`);
   await rec.json("POST", `/api/workspaces/${id}/leave`, {});

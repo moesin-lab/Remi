@@ -26,6 +26,7 @@ import {
 import {
   INPUT_OPTIONS,
   PAGE_OPTIONS,
+  TRACE_READ_OPTIONS,
   YES_OPTION,
   clientFor,
   commandOptions,
@@ -37,11 +38,13 @@ import {
   positional,
   queryOptions,
   renderResource,
+  renderTraceRead,
   requestBody,
   requireConfirmation,
   requiredWorkspace,
   stringOption,
   stringOptions,
+  traceReadQuery,
 } from "./resource-common.js";
 
 const HUMAN_TASK: readonly CliIdentity[] = ["human", "task"];
@@ -64,7 +67,7 @@ const ISSUE_LIST_OPTIONS: readonly CliOptionSpec[] = [
 ];
 
 const ISSUE_FIELDS: readonly CliOptionSpec[] = [
-  { name: "responsible-member", type: "string", valueName: "member-id", description: "Optional legacy contact for a root Issue" },
+  { name: "responsible-member", type: "string", valueName: "member-id", description: "Deprecated no-op: Issues no longer designate a human; the value is ignored" },
   { name: "runtime-workspace", type: "string", valueName: "id", description: "Persistent Runtime workspace (immutable after execution)" },
   { name: "title", type: "string", valueName: "title", description: "Issue title" },
   { name: "description", type: "string", valueName: "text", description: "Issue description" },
@@ -156,7 +159,7 @@ function issueCompatibilitySpecs(): CommandSpec[] {
     ], ["issue", "bind-topic"]),
     legacySpec("issue.update", ["issue", "update"], "Update an issue", "write", HUMAN_TASK, [refPositional("issue")], [
       ...ISSUE_FIELDS,
-      { name: "force", type: "boolean", description: "Override eligible parent/dependency guards as a member; done still requires formal delivery acceptance" },
+      { name: "force", type: "boolean", description: "Override the unfinished-child and dependency guards as a member" },
     ], ["issue", "update"]),
     legacySpec("issue.assign", ["issue", "assign"], "Assign or unassign an issue", "write", HUMAN_TASK, [refPositional("issue")], [
       { name: "to", type: "string", valueName: "ref", description: "Assignee reference" },
@@ -164,7 +167,7 @@ function issueCompatibilitySpecs(): CommandSpec[] {
       { name: "unassign", type: "boolean", description: "Clear the assignee and cancel active tasks on this issue" },
     ], ["issue", "assign"]),
     legacySpec("issue.status", ["issue", "status"], "Change issue status", "write", HUMAN_TASK, [refPositional("issue"), refPositional("status")], [
-      { name: "force", type: "boolean", description: "Override eligible parent/dependency guards as a member; done still requires formal delivery acceptance" },
+      { name: "force", type: "boolean", description: "Override the unfinished-child and dependency guards as a member" },
     ], ["issue", "status"]),
     legacySpec("issue.delete", ["issue", "delete"], "Delete an issue", "destructive", HUMAN_TASK, [refPositional("issue")], [], ["issue", "delete"]),
     nativeSpec("issue.restore", ["issue", "restore"], "Restore an archived issue", "write", HUMAN, [refPositional("issue")], [], async (invocation) => {
@@ -442,16 +445,6 @@ function sessionCommandSpecs(): CommandSpec[] {
         },
       });
     }),
-    legacySpec("session.archive.list", ["session", "archive", "list"], "List provider session archives for an issue", "read", HUMAN, [refPositional("issue")], [], ["issue", "archive", "list"], [compatAlias(["issue", "archive", "list"], "remi session archive list")]),
-    legacySpec("session.archive.status", ["session", "archive", "status"], "Show provider session archive status", "read", HUMAN, [refPositional("issue")], [], ["issue", "archive", "status"], [compatAlias(["issue", "archive", "status"], "remi session archive status")]),
-    legacySpec("session.archive.verify", ["session", "archive", "verify"], "Verify a provider session archive", "write", HUMAN, [refPositional("issue"), optionalPositional("archive")], [], ["issue", "archive", "verify"], [compatAlias(["issue", "archive", "verify"], "remi session archive verify")]),
-    legacySpec("session.archive.retry", ["session", "archive", "retry"], "Retry a provider session archive", "write", HUMAN, [refPositional("issue"), optionalPositional("archive")], [], ["issue", "archive", "retry"], [compatAlias(["issue", "archive", "retry"], "remi session archive retry")]),
-    nativeSpec("session.config.get", ["session", "config", "get"], "Get workspace provider session archive settings", "read", HUMAN, [refPositional("workspace")], [], async (invocation) => {
-      await getAndRender(invocation, `/api/workspaces/${encodePath(positional(invocation, 0, "workspace"))}/session-archive`);
-    }),
-    nativeSpec("session.config.update", ["session", "config", "update"], "Update workspace provider session archive settings", "write", HUMAN, [refPositional("workspace")], INPUT_OPTIONS, async (invocation) => {
-      await mutateAndRender(invocation, "PUT", `/api/workspaces/${encodePath(positional(invocation, 0, "workspace"))}/session-archive`, await requestBody(invocation));
-    }),
   ];
   return [...specs, ...issueSessionCommandSpecs(specs)];
 }
@@ -603,12 +596,6 @@ function issueExtendedSpecs(): CommandSpec[] {
       requireConfirmation(invocation);
       await mutateAndRender(invocation, "DELETE", `${issueSubpath(invocation, "dependencies")}/${encodePath(positional(invocation, 1, "dependency"))}`);
     }),
-    nativeSpec("issue.done-grant.add", ["issue", "done-grant", "add"], "Authorize the owner agent to close a parent issue", "write", HUMAN, [refPositional("issue")], [], async (invocation) => {
-      await mutateAndRender(invocation, "POST", issueSubpath(invocation, "parent-done-grant"));
-    }),
-    nativeSpec("issue.done-grant.remove", ["issue", "done-grant", "remove"], "Revoke the owner agent's parent closure grant", "write", HUMAN, [refPositional("issue")], [], async (invocation) => {
-      await mutateAndRender(invocation, "DELETE", issueSubpath(invocation, "parent-done-grant"));
-    }),
     nativeSpec("issue.reaction.list", ["issue", "reaction", "list"], "List issue reactions", "read", HUMAN_TASK, [refPositional("issue")], [], async (invocation) => {
       await getAndRender(invocation, issueSubpath(invocation, "reactions"), ["reactions"]);
     }),
@@ -640,7 +627,7 @@ function issueExtendedSpecs(): CommandSpec[] {
       await mutateAndRender(invocation, "POST", "/api/issues/batch-delete", await requestBody(invocation));
     }),
     nativeSpec("issue.quick-create", ["issue", "quick-create"], "Quick-create an issue", "write", HUMAN, [], [...INPUT_OPTIONS,
-      { name: "responsible-member", type: "string", valueName: "member-id", description: "Optional legacy root contact; children inherit" },
+      { name: "responsible-member", type: "string", valueName: "member-id", description: "Deprecated no-op: Issues no longer designate a human; the value is ignored" },
       { name: "agent", type: "string", valueName: "id", description: "Creator agent", conflictsWith: ["squad"] },
       { name: "squad", type: "string", valueName: "id", description: "Creator squad", conflictsWith: ["agent"] },
       { name: "prompt", type: "string", valueName: "text", description: "Work to plan" },
@@ -650,7 +637,6 @@ function issueExtendedSpecs(): CommandSpec[] {
       await mutateAndRender(invocation, "POST", "/api/issues/quick-create", await requestBody(invocation, {
         workspace_id: requiredWorkspace(invocation), agent_id: stringOption(invocation, "agent") ?? undefined,
         squad_id: stringOption(invocation, "squad") ?? undefined, prompt: stringOption(invocation, "prompt") ?? undefined,
-        responsible_member_id: stringOption(invocation, "responsible-member") ?? undefined,
         project_id: stringOption(invocation, "project") ?? undefined, runtime_workspace_id: stringOption(invocation, "runtime-workspace") ?? undefined,
       }));
     }),
@@ -768,17 +754,16 @@ function shareCommandSpecs(): CommandSpec[] {
       await getAndRender(invocation, `/api/shares/${encodePath(token)}`);
     }),
     nativeSpec("share.trace.read", ["share", "trace", "read"], "Read a task trace through a signed issue share", "read", ["human", "share"], [refPositional("task"), optionalPositional("token")], [
-      { name: "after", type: "integer", valueName: "seq", description: "Exclusive trace sequence cursor" },
-      { name: "limit", type: "integer", valueName: "count", description: "Maximum events" },
+      ...TRACE_READ_OPTIONS,
     ], async (invocation) => {
       const token = positionalOrOption(invocation, 1, "token", "share");
       if (!stringOption(invocation, "share") || token !== stringOption(invocation, "share")) {
         throw new CliError("usage", "share trace read requires a matching --share <signed-token>");
       }
-      await getAndRender(invocation, `/api/shares/${encodePath(token)}/tasks/${encodePath(positional(invocation, 0, "task"))}/trace`, undefined, {
-        after_seq: integerOption(invocation, "after"),
-        limit: integerOption(invocation, "limit"),
-      });
+      const query = traceReadQuery(invocation);
+      const client = await clientFor(invocation);
+      const response = await client.request({ method: "GET", path: `/api/shares/${encodePath(token)}/tasks/${encodePath(positional(invocation, 0, "task"))}/trace`, query });
+      renderTraceRead(invocation, response.data);
     }),
   ];
 }
@@ -819,8 +804,9 @@ function chatCommandSpecs(): CommandSpec[] {
     groupSpec("chat", "Manage product chat Sessions"),
     nativeSpec("chat.list", ["chat", "list"], "List chats", "read", HUMAN, [], [
       { name: "status", type: "string", valueName: "active|all", description: "Archive filter" },
+      { name: "origin", type: "string", valueName: "user|automation|all", description: "Chat origin (default: user conversations only)" },
     ], async (invocation) => {
-      await getAndRender(invocation, "/api/chat/sessions", ["sessions"], { workspace_id: requiredWorkspace(invocation), status: stringOption(invocation, "status") });
+      await getAndRender(invocation, "/api/chat/sessions", ["sessions"], { workspace_id: requiredWorkspace(invocation), status: stringOption(invocation, "status"), origin: stringOption(invocation, "origin") });
     }),
     nativeSpec("chat.get", ["chat", "get"], "Get a chat", "read", HUMAN, [refPositional("chat")], [], async (invocation) => {
       const chat = await resolveChat(invocation, positional(invocation, 0, "chat"));
@@ -1036,14 +1022,13 @@ function taskCommandSpecs(): CommandSpec[] {
       await getAndRender(invocation, `/api/tasks/${encodePath(positional(invocation, 0, "task"))}/steer`, ["messages"]);
     }),
     nativeSpec("task.trace.read", ["task", "trace", "read"], "Read a task trace window", "read", HUMAN_TASK, [refPositional("task")], [
-      { name: "after", type: "integer", valueName: "seq", description: "Exclusive trace sequence cursor" },
+      ...TRACE_READ_OPTIONS,
       { name: "since", type: "integer", valueName: "seq", description: "Deprecated alias for --after" },
-      { name: "limit", type: "integer", valueName: "count", description: "Maximum events" },
     ], async (invocation) => {
-      await getAndRender(invocation, `/api/tasks/${encodePath(positional(invocation, 0, "task"))}/trace`, undefined, {
-        after_seq: integerOption(invocation, "after") ?? integerOption(invocation, "since"),
-        limit: integerOption(invocation, "limit"),
-      });
+      const query = traceReadQuery(invocation, integerOption(invocation, "since"));
+      const client = await clientFor(invocation);
+      const response = await client.request({ method: "GET", path: `/api/tasks/${encodePath(positional(invocation, 0, "task"))}/trace`, query });
+      renderTraceRead(invocation, response.data);
     }, [
       { path: ["task", "message", "list"], deprecatedSince: DEPRECATED_SINCE, replacement: "remi task trace read" },
       { path: ["task", "messages"], deprecatedSince: DEPRECATED_SINCE, replacement: "remi task trace read" },

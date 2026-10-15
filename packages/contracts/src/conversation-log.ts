@@ -16,6 +16,7 @@
  */
 import type { MultiremiTaskStatus, TaskUsageEntry } from "./types.js";
 import type { TraceRef } from "./trace-file.js";
+import type { TraceContextUsage } from "./trace.js";
 import type { EnvelopeMetadata } from "./inbox.js";
 
 /** A row is either a display unit or a hidden lifecycle marker. */
@@ -159,11 +160,23 @@ export interface ConversationLogTurnMetadata extends ConversationLogEntryMetadat
   type_histogram?: ConversationLogTypeHistogramBucket[] | null;
   usage?: TaskUsageEntry[] | null;
   model?: ConversationLogModel | null;
-  /** Pointer to the trace while it is on a daemon or inside a session archive. */
+  /** Pointer to the trace on the daemon that ran the turn. */
   trace_ref?: TraceRef | null;
   status?: MultiremiTaskStatus | null;
   elapsed_ms?: number | null;
   failure_reason?: string | null;
+  /**
+   * Turn + items traces (PR 2), projected from the attempt's completion fields.
+   * Absent or null on turns that predate them, so a reader shows no fold and no
+   * context ring for those.
+   *
+   * Context-window occupancy at the end of the turn (the ring when idle).
+   */
+  context_usage?: TraceContextUsage | null;
+  /** "Worked for": `final_started_at - started_at` of the trace turn. */
+  worked_ms?: number | null;
+  /** Top-level process items; the finished-turn fold renders only when > 0. */
+  process_item_count?: number | null;
 }
 
 /**

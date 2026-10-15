@@ -115,6 +115,20 @@ describe("IssueTopicSection", () => {
     expect(mockSave.mock.calls.at(-1)?.[0]).not.toHaveProperty("responsible_member_id");
   });
 
+  it("asks for no topic human and never sends one, even when an older server still returns it", async () => {
+    configRef.current = {
+      workspace_id: "workspace-1",
+      config: { enabled: true, chat_id: "oc_team", project_ids: ["prj_1"], ...{ responsible_member_id: "old-human" } },
+    };
+    const user = userEvent.setup(); renderSection();
+    expect(screen.queryByRole("combobox", { name: /human/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Designated human|Inherit the bot/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("switch", { name: "Only selected projects" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(mockSave).toHaveBeenCalledTimes(1);
+    expect(mockSave.mock.calls[0]?.[0]).not.toHaveProperty("responsible_member_id");
+  });
+
   it("shows an invalid stored person warning and lets an admin repair the recipient", async () => {
     configRef.current = {
       workspace_id: "workspace-1",

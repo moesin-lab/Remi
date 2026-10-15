@@ -2,18 +2,12 @@ import { acceptTestIssueDelivery, createHistoricalTestIssue, createResponsibleTe
 import { issueMessagesPath, mutateExecutionFixture } from "./unified-test-paths.js";
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { SessionArchiveService } from "@multiremi/session-archive/service.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { IssueWorkspaceMoveError } from "@multiremi/store/repos/issues-repo.js";
-import { readyArchiveBinding } from "./helpers.js";
 import { reportFrame } from "../../fixtures/report-session.js";
-import { buildArchiveFixture } from "./session-archive-fixtures.js";
 
 const pgUrl = process.env.MULTIREMI_TEST_POSTGRES_URL;
 
@@ -22,8 +16,6 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
     let db: Database | PostgresSyncDatabase;
     let store: MultiremiStore;
     let admin: Bun.SQL | undefined;
-    let sessionArchives: SessionArchiveService;
-    let archiveRoot: string;
     const databaseName = `mul476_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
     let serial = 0;
     const humans = new Map<string, string>();
@@ -40,19 +32,14 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
       }
       store = new MultiremiStore(db);
       store.ensureLocalWorkspace();
-      archiveRoot = mkdtempSync(join(tmpdir(), "mul476-iw-archives-"));
-      sessionArchives = new SessionArchiveService(store, { root: archiveRoot, maxBytes: 1024 * 1024, minFreeBytes: 0 });
     });
 
     afterAll(async () => {
-      sessionArchives?.stopIssueArchivePurgeRecovery();
-      await sessionArchives?.whenIssueArchivePurgeRecoveryIdle();
       db?.close();
       if (admin) {
         await admin.unsafe(`DROP DATABASE IF EXISTS ${databaseName} WITH (FORCE)`);
         await admin.end();
       }
-      if (archiveRoot) rmSync(archiveRoot, { recursive: true, force: true });
     });
 
     function workspaces(reverse: boolean) {
@@ -87,7 +74,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
     }
 
     async function credentials(source: string, target: string) {
-      const app = createMultiremiApp({ store, sessionArchives, authToken: "mul476-test-root", shareSecret: "mul476-test-share" });
+      const app = createMultiremiApp({ store, authToken: "mul476-test-root", shareSecret: "mul476-test-share" });
       async function member(both: boolean, home = source) {
         const user = store.getOrCreateUser({ email: `${home}-${both}@example.test`, name: both ? "Both workspaces" : "One workspace" });
         let memberId = "";
@@ -178,19 +165,6 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
       expect(db.query(`SELECT iw.issue_id FROM multiremi_issue_workspaces iw
         JOIN multiremi_issues i ON i.id = iw.issue_id
         WHERE iw.issue_id = ? AND iw.workspace_id <> i.workspace_id`).all(issueId)).toEqual([]);
-    }
-
-    async function physicalArchive(issueId: string, runtimeId: string) {
-      const runtime = store.getRuntime(runtimeId)!;
-      const fixture = await buildArchiveFixture({ subject: { kind: "issue", id: issueId }, traces: {} });
-      const bytes = fixture.bytes;
-      const initialized = sessionArchives.initialize({ workspaceId: runtime.workspaceId!, subjectKind: "issue", subjectId: issueId, issueId, runtimeId,
-        daemonId: runtime.daemonId!, sourceRevision: fixture.sourceRevision,
-        sha256: fixture.sha256, sizeBytes: bytes.byteLength }).archive;
-      const claimed = await sessionArchives.claimUploadAttempt(runtimeId, issueId, initialized.id);
-      await sessionArchives.upload(runtimeId, issueId, initialized.id, claimed.uploadAttempt!, new Response(fixture.bytes).body);
-      const ready = await sessionArchives.complete(runtimeId, issueId, initialized.id, claimed.uploadAttempt!);
-      return { archiveId: ready.id, sourceRevision: ready.sourceRevision, sha256: ready.sha256 };
     }
 
     async function completedTask(issueId: string, workspaceId: string) {
@@ -644,16 +618,19 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         expect(store.getIssueWorkspace(issue.id)).toEqual(before);
       });
 
-      for (const cleanup of ["archive", "abandon"] as const) {
+      for (const cleanup of ["reclaim", "abandon"] as const) {
         it(`${direction}: IW2 ${cleanup} tombstone follows a move without machine fields`, async () => {
           const { source, target } = workspaces(reverse);
           const auth = await credentials(source, target);
           const { issue, runtime } = issueWorkspace(source);
           const task = await completedTask(issue.id, source);
           db.run("UPDATE multiremi_issue_workspaces SET last_task_id = ? WHERE issue_id = ?", [task.id, issue.id]);
-          if (cleanup === "archive") {
-            store.markIssueWorkspaceCleaned({ issueId: issue.id, runtimeId: runtime.id,
-              ...readyArchiveBinding(store, issue.id, runtime.id) });
+          if (cleanup === "reclaim") {
+            store.reportSubjectReclaimed(runtime.id, { subject: { kind: "issue", id: issue.id }, snapshot: { created_at: "2026-10-13T00:00:00.000Z", wiki_files: 1, git: [{
+                repo_url: `https://private.example/${source}/repo.git`, ref: `refs/remi/snapshots/${issue.id}/1`,
+                commit: "a".repeat(40), head: "b".repeat(40), branch: `agent/${issue.key}`, dir: "repo" }] }, unsavedWork: true });
+            expect(store.getIssueWorkspace(issue.id)).toMatchObject({ status: "cleaned", unsavedWork: true,
+              snapshot: { git: [{ ref: `refs/remi/snapshots/${issue.id}/1` }] } });
           } else {
             db.run("UPDATE multiremi_issue_workspaces SET runtime_id = NULL WHERE issue_id = ?", [issue.id]);
             expect((await auth.request(auth.sourceOnly, `/api/issues/${issue.id}/workspace/abandon`, "POST", {})).status).toBe(200);
@@ -666,12 +643,11 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
           expect(tombstone).not.toBeNull();
           expect(tombstone).toMatchObject({ workspaceId: target, issueKey: moved.key, runtimeId: null,
             lastTaskId: null, rootPath: "", branchName: "", repos: [], status: "cleaned" });
-          for (const field of ["status", "cleanedAt", "cleanedArchiveId", "cleanedArchiveSourceRevision", "cleanedArchiveSha256", "createdAt"] as const) {
+          for (const field of ["status", "cleanedAt", "createdAt"] as const) {
             expect(tombstone[field]).toBe(before[field]);
           }
-          if (before.cleanedArchiveId) {
-            expect(store.getSessionArchive(before.cleanedArchiveId)?.workspaceId).toBe(source);
-          }
+          // The snapshot names source-workspace repositories and lives on the source daemon.
+          expect(tombstone).toMatchObject({ snapshot: null, snapshotAt: null, unsavedWork: false });
           assertWorkspaceInvariant(issue.id);
           const bundle = await read(auth, auth.targetOnly, `/api/issues/${issue.id}/workspace`);
           expect(bundle.workspace).toMatchObject({ status: "cleaned", runtime_id: null, runtime_name: null,
@@ -744,14 +720,11 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         const { issue, runtime } = issueWorkspace(source);
         const daemon = (await store.createAccessToken({ type: "daemon", purpose: "daemon", workspaceId: source,
           daemonId: runtime.daemonId!, name: "Source daemon" })).token;
-        const daemonOptions = { headers: { Authorization: `Bearer ${daemon}` }, authToken: "mul476-test-root", runtimeId: runtime.id, archives: sessionArchives };
-        const reachable = await reportFrame(store, "gc.workspace_cleaned", { issue_id: issue.id, runtime_id: runtime.id }, daemonOptions);
+        const daemonOptions = { headers: { Authorization: `Bearer ${daemon}` }, authToken: "mul476-test-root", runtimeId: runtime.id };
+        const reclaimed = { subject: { kind: "issue", id: issue.id }, runtime_id: runtime.id, snapshot: null, unsaved_work: false };
+        const reachable = await reportFrame(store, "gc.subject_reclaimed", { ...reclaimed, unsaved_work: "yes" }, daemonOptions);
         expect(reachable).toMatchObject({ ok: false, code: "invalid_report", operation_error: { status: 400 } });
         db.run("UPDATE multiremi_issues SET workspace_id = ?, issue_number = 999, issue_key = 'MUL-999' WHERE id = ?", [target, issue.id]);
-        expect(() => store.initSessionArchive({ workspaceId: target, subjectKind: "issue", subjectId: issue.id, issueId: issue.id, runtimeId: runtime.id,
-          daemonId: runtime.daemonId!, sourceRevision: "foreign-runtime", sha256: "f".repeat(64), sizeBytes: 0 },
-          `sar_foreign_${issue.id}`, "foreign.tar.gz")).toThrow("Issue is deleting or its workspace has already been cleaned");
-        expect(store.listSessionArchives(issue.id)).toEqual([]);
         const targetRuntime = store.registerRuntime({ id: `rt_target_${target}`, name: "Target Runtime", provider: "codex",
           workspaceId: target, daemonId: `dmn_target_${target}` });
         const input = { issueId: issue.id, runtimeId: targetRuntime.id, status: "ready" as const,
@@ -759,8 +732,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         expect(store.reportIssueWorkspace(input)).toMatchObject({ workspaceId: target, issueKey: "MUL-999", runtimeId: targetRuntime.id });
         assertWorkspaceInvariant(issue.id);
         expect(() => store.reportIssueWorkspace({ ...input, runtimeId: runtime.id })).toThrow("runtime belongs to another workspace");
-        const cleaned = await reportFrame(store, "gc.workspace_cleaned", { issue_id: issue.id, runtime_id: runtime.id,
-          archive_id: "sar_source", source_revision: "source-revision", sha256: "f".repeat(64) }, daemonOptions);
+        const cleaned = await reportFrame(store, "gc.subject_reclaimed", reclaimed, daemonOptions);
         expect(cleaned).toMatchObject({ ok: false, code: "task_not_found", operation_error: { status: 404, code: "issue_not_found" } });
         expect(store.getIssueWorkspace(issue.id)).toMatchObject({ workspaceId: target, issueKey: "MUL-999", runtimeId: targetRuntime.id, status: "ready" });
       });
@@ -789,8 +761,8 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         expect(store.claimTask(targetRuntime.id)?.id).toBe(next.id);
       });
 
-      for (const evidence of ["archive", "abandon", "missing"] as const) {
-        it(`${direction}: IW7 ${evidence} deletion gate gives the same result before and after moving`, async () => {
+      for (const evidence of ["reclaim", "abandon", "missing", "in_use"] as const) {
+        it(`${direction}: IW7 ${evidence} workspace never gates hard deletion, before or after moving`, async () => {
           const { source, target } = workspaces(reverse);
           const auth = await credentials(source, target);
           store.updateWorkspaceMember(auth.sourceMember, { role: "admin" });
@@ -798,13 +770,12 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
           async function prepared() {
             const { issue, runtime } = issueWorkspace(source);
             await completedTask(issue.id, source);
-            if (evidence === "archive") {
-              store.markIssueWorkspaceCleaned({ issueId: issue.id, runtimeId: runtime.id,
-                ...await physicalArchive(issue.id, runtime.id) });
+            if (evidence === "reclaim") {
+              store.reportSubjectReclaimed(runtime.id, { subject: { kind: "issue", id: issue.id }, snapshot: null, unsavedWork: false });
             } else if (evidence === "abandon") {
               db.run("UPDATE multiremi_issue_workspaces SET runtime_id = NULL WHERE issue_id = ?", [issue.id]);
               expect((await auth.request(auth.sourceOnly, `/api/issues/${issue.id}/workspace/abandon`, "POST", {})).status).toBe(200);
-            } else {
+            } else if (evidence === "missing") {
               db.run("DELETE FROM multiremi_issue_workspaces WHERE issue_id = ?", [issue.id]);
             }
             return issue;
@@ -812,41 +783,18 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
           // Use equivalent Issues: a successful source deletion consumes its fixture.
           const original = await prepared();
           const before = await auth.request(auth.sourceOnly, `/api/issues/${original.id}`, "DELETE");
-          const beforeBody = before.status === 204 ? {} : await before.json();
+          expect(before.status).toBe(204);
           const issue = await prepared();
-          const moved = await auth.request(auth.both, `/api/issues/${issue.id}`, "PATCH", { ...responsibilityTransfer(target, issue.id), workspace_id: target });
-          expect(moved.status, await moved.clone().text()).toBe(200);
-          const after = await auth.request(auth.targetOnly, `/api/issues/${issue.id}`, "DELETE");
-          const afterBody = after.status === 204 ? {} : await after.json();
-          expect(after.status).toBe(before.status);
-          expect(afterBody.code).toBe(beforeBody.code);
-          if (evidence === "archive") {
-            expect(after.status, JSON.stringify(afterBody)).toBe(204);
-            expect(store.getIssue(issue.id)).toBeNull();
-            expect(db.query("SELECT issue_id FROM multiremi_issue_workspaces WHERE issue_id = ?").get(issue.id)).toBeNull();
-            expect(db.query("SELECT id FROM multiremi_session_archives WHERE issue_id = ?").all(issue.id)).toEqual([]);
-          } else {
-            expect(after.status).toBe(409);
-            expect(afterBody.code).toBe(evidence === "abandon" ? "issue_workspace_archive_invalid" : "issue_workspace_not_cleaned");
-            expect(store.getIssue(issue.id)?.workspaceId).toBe(target);
+          if (evidence !== "in_use") {
+            const moved = await auth.request(auth.both, `/api/issues/${issue.id}`, "PATCH", { ...responsibilityTransfer(target, issue.id), workspace_id: target });
+            expect(moved.status, await moved.clone().text()).toBe(200);
           }
+          const after = await auth.request(evidence === "in_use" ? auth.sourceOnly : auth.targetOnly, `/api/issues/${issue.id}`, "DELETE");
+          expect(after.status, await after.clone().text()).toBe(204);
+          expect(store.getIssue(issue.id)).toBeNull();
+          expect(db.query("SELECT issue_id FROM multiremi_issue_workspaces WHERE issue_id = ?").get(issue.id)).toBeNull();
         });
       }
-
-      it(`${direction}: IW7 legacy cleanup in a foreign workspace cannot authorize hard deletion`, async () => {
-        const { source, target } = workspaces(reverse);
-        const auth = await credentials(source, target);
-        store.updateWorkspaceMember(auth.targetMember, { role: "admin" });
-        const { issue, runtime } = issueWorkspace(source);
-        store.markIssueWorkspaceCleaned({ issueId: issue.id, runtimeId: runtime.id,
-          ...await physicalArchive(issue.id, runtime.id) });
-        db.run("UPDATE multiremi_issues SET workspace_id = ? WHERE id = ?", [target, issue.id]);
-        const response = await auth.request(auth.targetOnly, `/api/issues/${issue.id}`, "DELETE");
-        expect(response.status).toBe(409);
-        expect(await response.json()).toMatchObject({ code: "issue_workspace_not_cleaned" });
-        expect(store.getIssue(issue.id)?.workspaceId).toBe(target);
-        expect(store.listSessionArchives(issue.id)).toHaveLength(1);
-      });
 
       it(`${direction}: IW8 abandoning an orphan workspace unblocks its move`, async () => {
         const { source, target } = workspaces(reverse);
@@ -1110,7 +1058,7 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         expect(store.listChildIssueProgress(target)).toEqual([]);
       });
 
-      it(`${direction}: R2 foreign-child closure fails closed and cancellation emits no parent comments, rounds, inbox or workspace events`, async () => {
+      it(`${direction}: R2 closing or cancelling a foreign child emits no parent comments, rounds, inbox or workspace events`, async () => {
         const { target, auth, parent, child } = await legacyTree(reverse);
         const owner = store.createAgent({ name: "Parent owner", provider: "codex", workspaceId: target, ownerId: auth.targetMember });
         db.run("UPDATE multiremi_issues SET assignee_type = 'agent', assignee_id = ? WHERE id = ?", [owner.id, parent.id]);
@@ -1121,9 +1069,10 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         const events: string[] = [];
         const stop = store.onWorkspaceEvent((event) => { if (event.workspaceId === target) events.push(event.type); });
         try {
-          const denied = await auth.request(auth.sourceOnly, `/api/issues/${child.id}`, 'PATCH', { status: 'done' });
-          expect(denied.status).toBe(409);
-          expect(store.getIssue(child.id)?.status).toBe('todo');
+          // A member closes any Issue; the legacy foreign parent is never touched.
+          const closed = await auth.request(auth.sourceOnly, `/api/issues/${child.id}`, 'PATCH', { status: 'done' });
+          expect(closed.status, await closed.clone().text()).toBe(200);
+          expect(store.getIssue(child.id)?.status).toBe('done');
           const response = await auth.request(auth.sourceOnly, `/api/issues/${child.id}`, "PATCH", { status: "cancelled" });
           expect(response.status, await response.clone().text()).toBe(200);
           expect(store.getIssue(child.id)?.status).toBe("cancelled");
@@ -1136,14 +1085,16 @@ for (const backend of ["SQLite", "PostgreSQL"] as const) {
         } finally { stop(); }
       });
 
-      it(`${direction}: R3 a native task question with a legacy foreign parent remains unavailable on its own source issue`, async () => {
+      it(`${direction}: R3 a native task question with a legacy foreign parent stops at the break and stays on its own source workspace`, async () => {
         const { source, target, auth, parent, child, agent, task } = await legacyTree(reverse);
         const events: string[] = [];
         const stop = store.onWorkspaceEvent((event) => { if (event.workspaceId === target) events.push(event.type); });
         try {
           const decision = taskQuestion(task, 'PRIVATE source decision and body');
-          expect(decision).toMatchObject({ workspace_id: source, source_issue_id: child.id, status: 'pending', stage: 'unavailable', current_handler: null });
-          expect(decision.route_reason).not.toBeNull();
+          // The asker owns the child and the parent chain breaks at another workspace: the Q waits at
+          // the human stage of its own workspace, with the break as its reason, and never crosses over.
+          expect(decision).toMatchObject({ workspace_id: source, source_issue_id: child.id, status: 'pending', stage: 'human', current_handler: null,
+            route_reason: `${parent.id}:workspace_mismatch` });
           expect((await read(auth, auth.targetOnly, issueMessagesPath(store, parent.id) + "?message_kind=decision")).messages).toEqual([]);
           expect(store.listTasksForIssue(parent.id)).toEqual([]);
           expect(store.listInboxItems(auth.targetMember, target)).toEqual([]);

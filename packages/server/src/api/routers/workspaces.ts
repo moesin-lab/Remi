@@ -100,6 +100,7 @@ import {
 } from "@multiremi/relay/discovery.js";
 import {
   extractBaseUrl,
+  isRelayEngine,
   validateRelayFragment,
 } from "@multiremi/relay/fragment.js";
 import type { RouterDeps } from "./deps.js";
@@ -291,19 +292,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       project_ids?: unknown;
       notify_mode?: unknown;
       notify_open_id?: unknown;
+      /** @deprecated Accepted for old clients; ignored, never validated or stored. */
       responsible_member_id?: unknown;
     }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const fields = Object.keys(body);
     if (fields.some((key) => !["enabled", "chat_id", "project_ids", "notify_mode", "notify_open_id",'responsible_member_id'].includes(key))) {
-      return c.json({ error: "only enabled, chat_id, project_ids, notify_mode, notify_open_id, and responsible_member_id are allowed" }, 400);
+      return c.json({ error: "only enabled, chat_id, project_ids, notify_mode, and notify_open_id are allowed" }, 400);
     }
     try {
       const previous = readWorkspaceIssueTopicsLenient(workspace.settings);
       const issueTopics = parseIssueTopicConfig({
         enabled: body.enabled,
         chatId: body.chat_id,
-        responsibleMemberId:body.responsible_member_id===undefined?previous.responsibleMemberId:body.responsible_member_id,
         projectIds: body.project_ids,
         notifyMode: body.notify_mode === undefined ? previous.notifyMode : body.notify_mode,
         notifyOpenId: body.notify_open_id === undefined
@@ -314,10 +315,6 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
         if (!project || project.workspaceId !== workspaceId) {
           throw new IssueTopicConfigError(`project does not belong to this workspace: ${projectId}`);
         }
-      }
-      if(body.responsible_member_id !== undefined && issueTopics.responsibleMemberId) {
-        const human=store.getWorkspaceMember(issueTopics.responsibleMemberId);
-        if(!human||human.archivedAt||human.workspaceId!==workspaceId)throw new IssueTopicConfigError('responsible_member_id must name an active human in this workspace');
       }
       const updated = store.updateWorkspace(workspaceId, {
         settings: { ...workspace.settings, issueTopics },
@@ -1256,7 +1253,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.put("/api/workspaces/:id/relay-config/:engine", async (c) => {
     const workspaceId = c.req.param("id");
     const engine = c.req.param("engine");
-    if (engine !== "claude" && engine !== "codex") return c.json({ error: "invalid engine" }, 400);
+    if (!isRelayEngine(engine)) return c.json({ error: "invalid engine" }, 400);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     const body = await readJsonStrict<{ fragment?: string; token_op?: string; auth_token?: string }>(c);
@@ -1295,7 +1292,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/workspaces/:id/relay-config/:engine/reveal", (c) => {
     const workspaceId = c.req.param("id");
     const engine = c.req.param("engine");
-    if (engine !== "claude" && engine !== "codex") return c.json({ error: "invalid engine" }, 400);
+    if (!isRelayEngine(engine)) return c.json({ error: "invalid engine" }, 400);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     c.header("Cache-Control", "no-store");
@@ -1307,7 +1304,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/workspaces/:id/relay-config/:engine/probe", async (c) => {
     const workspaceId = c.req.param("id");
     const engine = c.req.param("engine");
-    if (engine !== "claude" && engine !== "codex") return c.json({ error: "invalid engine" }, 400);
+    if (!isRelayEngine(engine)) return c.json({ error: "invalid engine" }, 400);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     c.header("Cache-Control", "no-store");
@@ -1322,7 +1319,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/workspaces/:id/relay-config/:engine/reasoning-levels", (c) => {
     const workspaceId = c.req.param("id");
     const engine = c.req.param("engine");
-    if (engine !== "claude" && engine !== "codex") return c.json({ error: "invalid engine" }, 400);
+    if (engine !== "claude" && engine !== "codex") return c.json({ error: reasoningEngineError(engine) }, 400);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     c.header("Cache-Control", "no-store");
@@ -1331,7 +1328,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
   app.put("/api/workspaces/:id/relay-config/:engine/reasoning-levels", async (c) => {
     const workspaceId = c.req.param("id");
     const engine = c.req.param("engine");
-    if (engine !== "claude" && engine !== "codex") return c.json({ error: "invalid engine" }, 400);
+    if (engine !== "claude" && engine !== "codex") return c.json({ error: reasoningEngineError(engine) }, 400);
     const denied = requireWorkspaceAdmin(c, store, workspaceId);
     if (denied) return denied;
     c.header("Cache-Control", "no-store");
@@ -1408,6 +1405,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     session_id: c.req.param("sessionId"),
   }));
   app.delete("/api/workspaces/:id/lark/installations/:installationId", (c) => c.body(null, 204));
+}
+
+/**
+ * Reasoning-level declarations exist for Claude and Codex only. Antigravity's
+ * gateway path offers no `thought_level` selector at all, so a declared level
+ * would route and then be rejected by the engine; say so instead of "invalid".
+ */
+function reasoningEngineError(engine: string): string {
+  return engine === "antigravity" ? "reasoning levels are not supported for antigravity" : "invalid engine";
 }
 
 function hasOwn(value: unknown, key: string): boolean {
@@ -1656,7 +1662,6 @@ function issueTopicConfigResponse(workspaceId: string, config: IssueTopicConfig)
     config: {
       enabled: config.enabled,
       chat_id: config.chatId,
-      responsible_member_id:config.responsibleMemberId??null,
       project_ids: config.projectIds ?? null,
       notify_mode: config.notifyMode ?? "group_owner",
       notify_open_id: config.notifyOpenId ?? null,

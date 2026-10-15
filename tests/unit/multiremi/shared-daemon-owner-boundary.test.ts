@@ -3,7 +3,7 @@ import { createMultiremiApp } from "@multiremi/api.js";
 import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
 
 pendingTurnBackendTests("Shared human daemon management", fixture => {
-  it("does not elevate a task's daemon inventory, metadata or retirement archive authority", async () => {
+  it("does not elevate a task's daemon inventory, metadata or retirement-plan authority", async () => {
     const { store } = fixture();
     for (const [userId, role] of [["machine-peer", "member"], ["machine-owner", "member"], ["machine-admin", "admin"]] as const) {
       store.createWorkspaceMember({ userId, name: userId, role });
@@ -19,7 +19,7 @@ pendingTurnBackendTests("Shared human daemon management", fixture => {
     const admin = await store.createTaskAccessToken(task, "machine-admin");
     const human = await store.createAccessToken({ type: "pat", name: "Shared human", userId: "machine-peer", workspaceId: "local" });
     const app = createMultiremiApp({ store, authToken: "daemon-owner-test-master" });
-    const archives = spyOn(store, "requestDaemonRetirementArchives");
+    const plans = spyOn(store, "getDaemonRetirementPlan");
     try {
       for (const [credential, allowed] of [[peer, false], [owner, true], [admin, true], [human, true]] as const) {
         const headers = { Authorization: `Bearer ${credential.token}`, "Content-Type": "application/json" };
@@ -28,10 +28,10 @@ pendingTurnBackendTests("Shared human daemon management", fixture => {
         const ids = (await inventory.json()).daemons.map((row: { daemon_id: string }) => row.daemon_id);
         expect(ids.includes("dmn_owner")).toBe(allowed);
         if (credential === peer) expect(ids).toContain("dmn_peer");
-        const before = archives.mock.calls.length;
+        const before = plans.mock.calls.length;
         const plan = await app.request("/api/multiremi/daemons/dmn_owner/retirement-plan?workspace_id=local", { headers });
         expect(plan.status).toBe(allowed ? 200 : 403);
-        expect(archives.mock.calls.length - before).toBe(allowed ? 1 : 0);
+        expect(plans.mock.calls.length - before).toBe(allowed ? 1 : 0);
         const metadata = await app.request("/api/daemons/dmn_owner?workspace_id=local", {
           method: "PATCH", headers, body: JSON.stringify({ display_name: "Shared workstation", dedicated: true }),
         });
@@ -44,7 +44,7 @@ pendingTurnBackendTests("Shared human daemon management", fixture => {
         }
       }
     } finally {
-      archives.mockRestore();
+      plans.mockRestore();
     }
     expect(store.getRuntime("rt_dmn_owner")?.ownerId).toBe("machine-owner");
   });

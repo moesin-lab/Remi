@@ -7,6 +7,7 @@
 import type { RuntimeCodexProfile } from "./codex-profile.js";
 import type { RuntimeClaudeProfile } from "./claude-profile.js";
 import type { RuntimeProtocolStatus } from "./runtime-protocol.js";
+import type { GcRunMode, SubjectSnapshot } from "./storage.js";
 
 export type MultiremiAgentProvider = "claude" | "codex" | string;
 
@@ -919,6 +920,10 @@ export interface MultiremiDaemonRuntimeInput {
     root?: string;
     max_depth?: number;
     mode?: string;
+  };
+  pending_gc_run?: {
+    id: string;
+    mode: GcRunMode;
   };
   pending_local_skill_import?: {
     id: string;
@@ -1980,8 +1985,6 @@ export interface MultiremiIssue {
   projectId: string | null;
   parentIssueId: string | null;
   issueKind: MultiremiIssueKind;
-  /** Persisted only on roots. Null explicitly identifies unresolved legacy ownership. */
-  responsibleMemberId?: string | null;
   sourceIssueId: string | null;
   assigneeType: MultiremiAssigneeType | null;
   assigneeId: string | null;
@@ -1994,40 +1997,11 @@ export interface MultiremiIssue {
   labels: MultiremiLabel[];
   /** Included on daemon task claims so prompts can make issue attachments directly discoverable. */
   attachments?: MultiremiAttachment[];
-  /**
-   * MUL-400 S1c (A4): the raw `parent_done_grant` columns. All three are null
-   * when no member has authorized the owner agent, which is the default for
-   * every existing row. The derived shape the detail routes expose is
-   * {@link MultiremiIssueParentDoneGrant}.
-   */
-  parentDoneGrantAt: string | null;
-  parentDoneGrantBy: string | null;
-  parentDoneGrantAgentId: string | null;
   createdBy: string | null;
   completedAt: string | null;
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
-}
-
-/**
- * MUL-400 S1c (A4): why a stored grant does or does not authorize the CURRENT
- * owner agent to close the parent. `grant_missing` is "nobody granted";
- * `assignee_changed` is "the grant still names a different agent" (D1: a grant
- * never follows a re-assignment); `owner_not_agent` is "the owner resolves to no
- * runnable agent at all", which is also what a member-owned parent reports.
- */
-export type MultiremiIssueParentDoneGrantIneffectiveReason =
-  | "grant_missing"
-  | "assignee_changed"
-  | "owner_not_agent";
-
-export interface MultiremiIssueParentDoneGrant {
-  granted_at: string;
-  granted_by: string;
-  agent_id: string;
-  effective: boolean;
-  ineffective_reason: MultiremiIssueParentDoneGrantIneffectiveReason | null;
 }
 
 export interface MultiremiIssueWithTasks extends MultiremiIssue {
@@ -2091,95 +2065,13 @@ export interface MultiremiIssueWorkspace {
   repos: MultiremiIssueWorkspaceRepo[];
   lastTaskId: string | null;
   cleanedAt: string | null;
-  cleanedArchiveId: string | null;
-  cleanedArchiveSourceRevision: string | null;
-  cleanedArchiveSha256: string | null;
+  /** What the daemon saved when it reclaimed the workspace; null when nothing needed saving. */
+  snapshot: SubjectSnapshot | null;
+  snapshotAt: string | null;
+  /** True when the reclaimed workspace held unsaved work that the snapshot preserves. */
+  unsavedWork: boolean;
   createdAt: string;
   updatedAt: string;
-}
-
-export interface MultiremiIssueWorkspaceArchiveBinding {
-  archiveId: string;
-  sourceRevision: string;
-  sha256: string;
-}
-
-export type MultiremiSessionArchiveStatus =
-  | "pending"
-  | "uploading"
-  | "ready"
-  | "failed"
-  | "superseded";
-
-/** What an archive covers: one Issue, one Chat Session, or one one-shot Task. */
-export type MultiremiSessionArchiveSubjectKind = "issue" | "chat" | "task";
-
-export const MULTIREMI_SESSION_ARCHIVE_MIN_TTL_MS = 60 * 60 * 1000;
-export const MULTIREMI_SESSION_ARCHIVE_MAX_TTL_MS = 365 * 24 * 60 * 60 * 1000;
-export const MULTIREMI_SESSION_ARCHIVE_MIN_GC_INTERVAL_MS = 60 * 1000;
-export const MULTIREMI_SESSION_ARCHIVE_PREPARATION_FAILURE_REVISION = "preparation-failed";
-
-/**
- * Control-plane metadata for one Session Archive.
- *
- * `subjectKind` is `issue`, `chat` or `task`; `issueId` is only set for Issue
- * subjects. Archive bytes live in SessionArchiveStore, never in SQL.
- */
-export interface MultiremiSessionArchive {
-  id: string;
-  workspaceId: string;
-  subjectKind: MultiremiSessionArchiveSubjectKind;
-  subjectId: string;
-  /** Container format; v1 rows stay readable, new uploads are always v2. */
-  format: string;
-  issueId: string | null;
-  runtimeId: string;
-  daemonId: string;
-  sourceRevision: string;
-  sha256: string;
-  sizeBytes: number;
-  uploadedSizeBytes: number;
-  fileCount: number | null;
-  status: MultiremiSessionArchiveStatus;
-  relativePath: string;
-  metadata: Record<string, unknown>;
-  attemptCount: number;
-  /** Attempt number at the last manual retry; budget and display use the difference. */
-  retryBudgetBaseAttempt: number;
-  lastError: string | null;
-  nextRetryAt: string | null;
-  retryExhaustedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-  completedAt: string | null;
-}
-
-export interface InitSessionArchiveInput {
-  workspaceId: string;
-  subjectKind: MultiremiSessionArchiveSubjectKind;
-  subjectId: string;
-  /** Only Issue subjects carry an Issue id. */
-  issueId?: string | null;
-  runtimeId: string;
-  daemonId: string;
-  /** Container format; v2 uploads carry the v2 format string. */
-  format?: string;
-  sourceRevision: string;
-  sha256: string;
-  sizeBytes: number;
-  fileCount?: number | null;
-  metadata?: Record<string, unknown>;
-}
-
-export interface ReportSessionArchiveFailureInput {
-  workspaceId: string;
-  subjectKind: MultiremiSessionArchiveSubjectKind;
-  subjectId: string;
-  issueId?: string | null;
-  runtimeId: string;
-  daemonId: string;
-  stage: "prepare";
-  error: string;
 }
 
 export interface ReportIssueWorkspaceInput {
@@ -2193,9 +2085,11 @@ export interface ReportIssueWorkspaceInput {
   cleanedAt?: string | null;
 }
 
-export interface MarkIssueWorkspaceCleanedInput extends MultiremiIssueWorkspaceArchiveBinding {
+export interface MarkIssueWorkspaceCleanedInput {
   issueId: string;
   runtimeId: string;
+  snapshot: SubjectSnapshot | null;
+  unsavedWork: boolean;
 }
 
 export interface MultiremiIssueAssigneeGroup {
@@ -2404,11 +2298,9 @@ export interface MultiremiTimelinePage {
 }
 
 export interface CreateIssueInput {
-  /** Server-internal creation audit only; HTTP callers cannot supply trusted provenance. */
-  responsibilitySourceAudit?: {
-    kind: 'autopilot_run'; taskId: string; runId: string; autopilotId: string; responsibleMemberId: string;
-  } | null;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
   responsibleMemberId?: string | null;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
   responsible_member_id?: string | null;
   /**
    * MUL-400 E3: prerequisite issues this one waits on, as keys or ids. Created
@@ -2459,7 +2351,9 @@ export interface CreateIssueWithTaskInput extends CreateIssueInput {
 }
 
 export interface UpdateIssueInput {
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
   responsibleMemberId?: string | null;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
   responsible_member_id?: string | null;
   runtimeWorkspaceId?: string | null;
   runtime_workspace_id?: string | null;
@@ -2506,17 +2400,14 @@ export interface UpdateIssueInput {
 /**
  * Server-internal options for {@link UpdateIssueInput} writes. These deliberately
  * live OUTSIDE the input object: the wire layer builds `UpdateIssueInput` straight
- * from the request body, so anything on that shape is client-reachable. The SCM
- * merge effect is the only caller and passes this positionally on the server.
+ * from the request body, so anything on that shape is client-reachable. Only
+ * server writers pass this positionally.
  */
 export interface UpdateIssueOptions {
-  /** Server-owned, set only by the atomic designated-reviewer delivery acceptance. */
-  acceptedDeliveryId?: string;
   /**
-   * Skip guard A (A1 and A4 included). Only the merge effect uses it: closing an
-   * Issue after a merge that already required a human authorization carries the
-   * same decision the guard exists to protect. A parent with unfinished children
-   * is still held — the effect handles that itself, with `parent_status_held`.
+   * Skip guard A's unfinished-child check for a server-owned writer. It never
+   * bypasses the done rule: a member may close any Issue, while an Agent closes
+   * only a direct child of an Issue it executes.
    */
   allowParentStatusGuardBypass?: boolean;
   /** Record `parent_status_held` instead of applying the requested status. */
@@ -2532,16 +2423,6 @@ export interface UpdateIssueOptions {
    * reads it.
    */
   parentStatusForce?: boolean;
-  /**
-   * MUL-400 S1c (QA round 1): where the `parent_done_grant_used` audit row came
-   * from. The SCM merge effect closes the parent through the same in-transaction
-   * writer as the API, so the row must still distinguish the two. Server-only —
-   * `UpdateIssueOptions` is passed positionally by the store and is never built
-   * from the request body.
-   */
-  parentDoneGrantSource?: "api" | "scm_merge";
-  /** Extra audit fields for the merge-sourced grant use (PR number and URL). */
-  parentDoneGrantData?: Record<string, unknown> | null;
 }
 
 /**
@@ -2629,11 +2510,11 @@ export interface AssignIssueResult {
 }
 
 export interface QuickCreateIssueInput {
-  /** Server-internal creation audit, derived from the verified requesting Task. */
-  responsibilitySourceAudit?: CreateIssueInput['responsibilitySourceAudit'];
   parentIssueId?: string | null;
   parent_issue_id?: string | null;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
   responsibleMemberId?: string | null;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
   responsible_member_id?: string | null;
   runtimeWorkspaceId?: string | null;
   runtime_workspace_id?: string | null;
@@ -4152,8 +4033,6 @@ export interface MultiremiAutopilot {
   workspace_id?: string;
   title: string;
   description: string | null;
-  responsibleMemberId?: string | null;
-  responsible_member_id?: string | null;
   projectId: string | null;
   project_id?: string | null;
   assigneeType: MultiremiAutopilotAssigneeType;
@@ -4232,6 +4111,8 @@ export interface MultiremiAutopilotRun {
   triggerId: string | null;
   eventId: string | null;
   issueSessionId: string | null;
+  /** Chat opened for a `run_only` run. */
+  chatSessionId: string | null;
   triggeredAt: string;
   completedAt: string | null;
   failureReason: string | null;
@@ -4243,7 +4124,9 @@ export interface MultiremiAutopilotRun {
 export interface CreateAutopilotInput {
   id?: string;
   title: string;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
   responsibleMemberId?: string | null;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
   responsible_member_id?: string | null;
   description?: string | null;
   projectId?: string | null;
@@ -4322,7 +4205,9 @@ export interface UpdateAutopilotTriggerInput {
 
 export interface UpdateAutopilotInput {
   title?: string;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
   responsibleMemberId?: string | null;
+  /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
   responsible_member_id?: string | null;
   description?: string | null;
   projectId?: string | null;
@@ -4575,7 +4460,6 @@ export type IssueTopicNotifyMode = "group_owner" | "person" | "none";
 export interface IssueTopicConfig {
   enabled: boolean;
   chatId: string;
-  responsibleMemberId?: string | null;
   /** Omitted means every project, including projectless Issues. */
   projectIds?: string[];
   notifyMode?: IssueTopicNotifyMode;
@@ -4650,6 +4534,9 @@ export type FeishuBotRuntimeState = "stopped" | "starting" | "online" | "failed"
 export type FeishuBotOutboundBodyOrigin = "issue" | "agent";
 
 /** Delivery state only. Task messages and human responses remain authoritative. */
+/** Native CoT renderers, oldest first: `semantic_v1` read fragment events, `items_v1` reads turn + items. */
+export type FeishuCotPresentation = "semantic_v1" | "items_v1";
+
 export interface FeishuPresentationCheckpoint {
   /** Invocation IDs whose native START is deferred until display arguments arrive. */
   deferredToolIds?: string[];
@@ -4659,8 +4546,12 @@ export interface FeishuPresentationCheckpoint {
   interactionOpenId?: string;
   cot?: {
     status: "creating" | "active" | "finished" | "disabled";
-    /** Keep event IDs/layout from different renderers out of the same CoT. */
-    presentation?: "semantic_v1";
+    /**
+     * Keep event IDs/layout from different renderers out of the same CoT.
+     * `items_v1` is the turn + items renderer; an active CoT with any other tag
+     * (or none) belongs to an earlier renderer and is closed once on resume.
+     */
+    presentation?: FeishuCotPresentation;
     cotId?: string;
     messageId?: string;
     /** Set before a write, cleared after its acknowledgement is checkpointed. */
@@ -4782,6 +4673,7 @@ export interface MultiremiFeishuBotConfig {
   domain: FeishuBotDomain;
   enabled: boolean;
   senderAccessPolicy: "agent" | "allowlist";
+  /** Member who answers questions from Feishu transport Chats without an Issue; never an Issue creation requirement. */
   responsibleMemberId?: string | null;
   /** Bumped on every mutation; daemons refetch when their applied revision lags. */
   revision: number;
@@ -4805,6 +4697,7 @@ export interface MultiremiFeishuBotConfig {
 export interface FeishuBotConfigView {
   bot_id?: string;
   name?: string;
+  /** Member who answers questions from Feishu transport Chats without an Issue. */
   responsible_member_id?: string | null;
   configured: boolean;
   workspace_id: string;
@@ -4875,6 +4768,7 @@ export interface UpsertFeishuBotConfigInput {
   domain: FeishuBotDomain;
   enabled: boolean;
   senderAccessPolicy?: "agent" | "allowlist";
+  /** Member who answers questions from Feishu transport Chats without an Issue. */
   responsibleMemberId?: string | null;
   appSecretOp: FeishuBotSecretOp;
   appSecret?: string;
@@ -4968,7 +4862,6 @@ export interface SubmitFeishuBotMessageInput {
 
 /** The canonical Chat/Task lineage selected for an inbound Feishu event. */
 export interface SubmitFeishuBotMessageResult {
-  responsibilityUnavailableReason?: string;
   chatSessionId: string;
   taskId: string;
   agentId: string;
@@ -5337,6 +5230,8 @@ export interface MultiremiChatSession {
   unreadSince: string | null;
   hasUnread: boolean;
   pinned: boolean;
+  /** Set for Chats opened by an automation run. */
+  origin: { autopilot_id: string; run_id: string } | null;
   unreadCount: number;
   lastMessage: { content: string; role: MultiremiChatMessageRole; createdAt: string } | null;
   createdAt: string;

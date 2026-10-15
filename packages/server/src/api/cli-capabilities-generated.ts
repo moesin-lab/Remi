@@ -705,6 +705,31 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "workspace.storage.get": {
+      "command": "remi workspace storage get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.storage.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.storage.set": {
+      "command": "remi workspace storage set",
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.storage.set",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "workspace.operator": {
       "command": "remi workspace operator",
       "auth": [
@@ -2067,84 +2092,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "session.archive.list": {
-      "command": "remi session archive list",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.archive.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "session.archive.status": {
-      "command": "remi session archive status",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.archive.status",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "session.archive.verify": {
-      "command": "remi session archive verify",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.archive.verify",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "session.archive.retry": {
-      "command": "remi session archive retry",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.archive.retry",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "session.config.get": {
-      "command": "remi session config get",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.config.get",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "session.config.update": {
-      "command": "remi session config update",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "session.config.update",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
     "issue.session.list": {
       "command": "remi issue session list",
       "auth": [
@@ -2399,32 +2346,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "issue.dependency.remove",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "issue.done-grant.add": {
-      "command": "remi issue done-grant add",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.done-grant.add",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "issue.done-grant.remove": {
-      "command": "remi issue done-grant remove",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.done-grant.remove",
       "output": [
         "table",
         "json",
@@ -2988,68 +2909,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "issue.responsible.clear": {
-      "command": "remi issue responsible clear",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.responsible.clear",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "autopilot.responsible.clear": {
-      "command": "remi autopilot responsible clear",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "autopilot.responsible.clear",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "issue.responsibility-unassigned.list": {
-      "command": "remi issue responsibility-unassigned list",
-      "auth": [
-        "human"
-      ],
-      "capability": "issue.responsibility-unassigned.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "issue.responsibility-unassigned.map": {
-      "command": "remi issue responsibility-unassigned map",
-      "auth": [
-        "human"
-      ],
-      "capability": "issue.responsibility-unassigned.map",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "autopilot.responsible.set": {
-      "command": "remi autopilot responsible set",
-      "auth": [
-        "human"
-      ],
-      "capability": "autopilot.responsible.set",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
     "issue.responsibility": {
       "command": "remi issue responsibility",
       "auth": [
@@ -3063,18 +2922,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
-    "issue.responsible.set": {
-      "command": "remi issue responsible set",
-      "auth": [
-        "human"
-      ],
-      "capability": "issue.responsible.set",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
     "issue.question.list": {
       "command": "remi issue question list",
       "auth": [
@@ -3082,69 +2929,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "issue.question.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "issue.delivery.list": {
-      "command": "remi issue delivery list",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.delivery.list",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "issue.delivery.authorize": {
-      "command": "remi issue delivery authorize",
-      "auth": [
-        "human"
-      ],
-      "capability": "issue.delivery.authorize",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "issue.delivery.submit": {
-      "command": "remi issue delivery submit",
-      "auth": [
-        "task"
-      ],
-      "capability": "issue.delivery.submit",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "issue.delivery.accept": {
-      "command": "remi issue delivery accept",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.delivery.accept",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "issue.delivery.return": {
-      "command": "remi issue delivery return",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "issue.delivery.return",
       "output": [
         "table",
         "json",
@@ -3183,19 +2967,6 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "message.question.escalate",
-      "output": [
-        "table",
-        "json",
-        "jsonl"
-      ]
-    },
-    "message.question.transfer": {
-      "command": "remi message question transfer",
-      "auth": [
-        "human",
-        "task"
-      ],
-      "capability": "message.question.transfer",
       "output": [
         "table",
         "json",
@@ -4486,6 +4257,44 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "runtime.storage": {
+      "command": "remi runtime storage",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.storage",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.gc": {
+      "command": "remi runtime gc",
+      "auth": [
+        "human"
+      ],
+      "capability": "runtime.gc",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.gc-status": {
+      "command": "remi runtime gc-status",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.gc-status",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "runtime.skill.scan": {
       "command": "remi runtime skill scan",
       "auth": [
@@ -5072,6 +4881,19 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "autopilot.scheduler",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "automation.quiet": {
+      "command": "remi automation quiet",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "automation.quiet",
       "output": [
         "table",
         "json",

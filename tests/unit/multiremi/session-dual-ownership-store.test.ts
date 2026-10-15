@@ -4,7 +4,7 @@ import { MultiremiStore } from "@multiremi/store.js";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { historicalWriters } from "./unified-model-test-backends.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
-import { createResponsibleTestIssue, createStore, db, readyArchiveBinding, resetMultiremiTestEnv } from "./helpers.js";
+import { createResponsibleTestIssue, createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -102,10 +102,8 @@ describe("Session dual ownership store", () => {
       const runtime = store.registerRuntime({ id: "rt_delete", name: "Cleanup", provider: "claude" });
       store.reportIssueWorkspace({ issueId: issue.id, runtimeId: runtime.id, rootPath: "/tmp/owned",
         branchName: `agent/${issue.key}`, status: "ready" });
-      store.markIssueWorkspaceCleaned({ issueId: issue.id, runtimeId: runtime.id,
-        ...readyArchiveBinding(store, issue.id, runtime.id) });
-
-      expect(store.beginIssueDeletion(issue.id)).toEqual({ ok: true });
+      // Local files belong to the daemon; deleting control-plane history no
+      // longer requires an archive receipt or a separate deletion phase.
       const deleted = store.deleteIssue(issue.id);
       expect(store.getIssue(issue.id)).toBeNull();
       expect(deleted).toBe(true);
@@ -150,7 +148,6 @@ describe("Session dual ownership store", () => {
   it("rotates the Issue Main while preserving source history and detaching Chat projections atomically", () => {
     const store = createStore();
     const target = store.createWorkspace({ name: "Target" });
-    const human = store.createWorkspaceMember({ workspaceId: target.id, name: "Target human", role: "member" });
     const agent = store.createAgent({ name: "Worker", provider: "claude" });
     const issue = createResponsibleTestIssue(store, { title: "Move with history" });
     const main = store.getOrCreateDefaultIssueSession(issue.id);
@@ -161,8 +158,8 @@ describe("Session dual ownership store", () => {
     const projected = store.createIssueSession(issue.id, { chatId: chat.id });
     const projectedResult = store.publishSessionResult(projected.id, { body: "Projected result" });
     const task = store.createSessionTask(main.id, { agentId: agent.id, prompt: "Active work" });
-    const move = { workspaceId: target.id, responsibleMemberId: human.id,
-      actorType: "member" as const, actorId: issue.responsibleMemberId };
+    const move = { workspaceId: target.id,
+      actorType: "member" as const, actorId: store.getWorkspaceOperator("local")!.id };
     expect(() => store.updateIssue(issue.id, move)).toThrow("workspace");
     expect(store.getIssueSession(main.id)?.workspaceId).toBe("local");
     expect(store.getIssueSession(projected.id)?.issueId).toBe(issue.id);
@@ -189,7 +186,7 @@ describe("Session dual ownership store", () => {
     expect(store.getTask(task.id)?.workspaceId).toBe("local");
     const empty = createResponsibleTestIssue(store, { title: "Empty Main can move" });
     const previousEmptyMain = store.getOrCreateDefaultIssueSession(empty.id);
-    store.updateIssue(empty.id, { ...move, actorId: empty.responsibleMemberId });
+    store.updateIssue(empty.id, move);
     expect(store.getOrCreateDefaultIssueSession(empty.id).id).not.toBe(previousEmptyMain.id);
     expect(store.getOrCreateDefaultIssueSession(empty.id).workspaceId).toBe(target.id);
   });

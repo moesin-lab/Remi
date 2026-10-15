@@ -1,28 +1,16 @@
 import { issueMessagesPath, requestMessageBody } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { signIssueShareId } from "@multiremi/api/helpers/issue-share-tokens.js";
-import { SessionArchiveService } from "@multiremi/session-archive/service.js";
 import { createLocalStore as createStore, createResponsibleTestIssue, resetMultiremiTestEnv } from "./helpers.js";
 
-let archiveRoot: string | undefined;
-afterEach(() => {
-  resetMultiremiTestEnv();
-  if (archiveRoot) rmSync(archiveRoot, { recursive: true, force: true });
-  archiveRoot = undefined;
-});
+afterEach(resetMultiremiTestEnv);
 
 describe("collaboration CLI authorization boundaries", () => {
   it("lets an owner task token manage sibling issues in its workspace", async () => {
     const store = createStore();
     store.ensureLocalWorkspace();
-    archiveRoot = mkdtempSync(join(tmpdir(), "remi-cli-collaboration-archives-"));
-    const app = createMultiremiApp({ store, authToken: "root-secret",
-      sessionArchives: new SessionArchiveService(store, { root: archiveRoot }),
-    });
+    const app = createMultiremiApp({ store, authToken: "root-secret" });
     const agent = store.createAgent({ name: "Scoped CLI agent", provider: "claude" });
     const current = createResponsibleTestIssue(store, { title: "Current issue", workspaceId: "local", assigneeType: "agent", assigneeId: agent.id });
     const sibling = createResponsibleTestIssue(store, { title: "Sibling issue", workspaceId: "local", assigneeType: "agent", assigneeId: agent.id });

@@ -1,4 +1,5 @@
 import { InboxOperations } from "../inbox/operations.js";
+import { QueuedMessages } from "../inbox/queued-messages.js";
 import { getMessage, sendMessageWithinTransaction } from "../inbox/send-message.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { envelopePriority, type Envelope, type EnvelopeMetadata } from "@multiremi/contracts/inbox.js";
@@ -27,7 +28,9 @@ export interface EnvelopeDelivery extends EnsurePendingTurnResult {
 
 export class InboxRepo {
   readonly operations:InboxOperations;
-  constructor(private ctx: StoreContext) { this.operations=new InboxOperations(ctx); }
+  /** ADR 0020 Chat follow-up queue. */
+  readonly queue:QueuedMessages;
+  constructor(private ctx: StoreContext) { this.operations=new InboxOperations(ctx); this.queue=new QueuedMessages(ctx); }
 
   sendEnvelopeWithinTransaction(
     env: Envelope,
@@ -35,34 +38,21 @@ export class InboxRepo {
     deferredEvents: CommitEventQueue,
   ): EnvelopeDelivery[] {
     if(!this.ctx.db.inTransaction)throw new Error('Envelope producer requires a transaction');
-    const address=env.to;
-    const members=(address.role==='issue_owner'||address.role==='parent_owner')?(()=>{
-      const issueId=address.role==='issue_owner'?address.issueId:this.ctx.issues().getIssue(address.childIssueId)?.parentIssueId;
-      const issue=issueId?this.ctx.issues().getIssue(issueId):null;
-      const child=address.role==='parent_owner'?this.ctx.issues().getIssue(address.childIssueId):null;
-      if(child && issue && child.workspaceId!==issue.workspaceId)throw new Error('Envelope parent Issue belongs to another workspace');
-      const responsibility=issue?this.ctx.resolveIssueResponsibility(issue.id):null;
-      if(!issue||responsibility?.executionOwner||!responsibility?.rootHuman)return [];
-      const session=this.ctx.issueSessions().getOrCreateDefaultIssueSessionWithinTransaction(issue.id);
-      return [{workspaceId:issue.workspaceId,agentId:'',issueId:issue.id,issueSessionId:session.id,chatSessionId:null,executionScope:'',
-        memberId:responsibility.rootHuman.id,unresolved:responsibility.unresolved}];
-    })():[];
-    const recipients=members.length?members:this.resolveRecipients(env);
+    // Owner roles reach only an execution owner Agent; no member stands in for a missing one.
+    const recipients=this.resolveRecipients(env);
     const source=env.source.taskId?this.ctx.tasks().getTask(env.source.taskId):null;
     const deliveries:EnvelopeDelivery[]=[];
     for(const recipient of recipients){
       const sessionId=recipient.issueSessionId??recipient.chatSessionId!;
       const before=env.dedupeKey?this.ctx.db.query('SELECT id FROM multiremi_conversation_log WHERE session_id=? AND dedupe_key=?').get(sessionId,env.dedupeKey):null;
-      const member=members.find(item=>item.issueId===recipient.issueId)?.memberId;
       const reply=env.replyTo?this.getMessage(env.replyTo):null;
       const activeBefore=this.ctx.db.query("SELECT id FROM multiremi_turns WHERE session_id=? AND agent_id=? AND execution_scope=? AND status IN ('pending','running','awaiting_human')").get(sessionId,recipient.agentId,recipient.executionScope);
       const sourceTurn=source?this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(source.id):null;
       const result=sendMessageWithinTransaction(this.ctx,{session_id:sessionId,sender:{type:'platform',id:null},source_turn_id:sourceTurn?.turn_id??null,
-        to:member?{type:'member',ref:member}:{type:'agent',ref:recipient.agentId},message_kind:env.kind==='lifecycle'?'status':env.kind==='decision_needed'?'decision':env.kind,
+        to:{type:'agent',ref:recipient.agentId},message_kind:env.kind==='lifecycle'?'status':env.kind==='decision_needed'?'decision':env.kind,
         wake_requested:env.wake,body_md:env.body,dedupe_key:env.dedupeKey,
         reply_to_id:reply?.session_id===sessionId?reply.id:null,execution_scope:recipient.executionScope,
-        metadata:{message_source:env.source,message_outcome:env.outcome,priority:envelopePriority(env),address_context:env.to,
-          ...(member?{responsibility_unresolved:members[0]!.unresolved}:{})},
+        metadata:{message_source:env.source,message_outcome:env.outcome,priority:envelopePriority(env),address_context:env.to},
       },deferredEvents,{issueId:recipient.issueId,...(env.to.role==='delegator'&&source?{
         delegationId:source.delegationId,delegatedByAgentId:recipient.agentId,delegatedFromIssueSessionId:source.delegatedFromIssueSessionId,
         priority:source.priority,parentTaskId:null,wakeSource:'delegation_return',
@@ -88,9 +78,8 @@ export class InboxRepo {
     this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
     const issue = this.ctx.issues().getIssue(issueId);
     if (!issue || issue.workspaceId !== initial.workspaceId) throw new Error("Envelope Issue moved or was removed");
-    const responsibility = !agentId ? this.ctx.resolveIssueResponsibility(issue.id) : null;
-    if (responsibility?.unresolved.length) throw new Error('Envelope Issue responsibility is unresolved; repair its execution owner');
-    const ownerId = agentId ?? responsibility?.executionOwner?.id;
+    // Only this Issue's execution owner matters; an unresolved ancestor does not block its delivery.
+    const ownerId = agentId ?? this.ctx.resolveIssueResponsibility(issue.id).executionOwner?.id;
     const agent = ownerId ? this.ctx.agents().getAgent(ownerId) : null;
     if (!agent || agent.archivedAt || agent.workspaceId !== issue.workspaceId) {
       throw new Error("Envelope Issue has no runnable owner in its workspace");

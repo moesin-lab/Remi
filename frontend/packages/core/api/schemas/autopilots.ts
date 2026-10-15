@@ -52,7 +52,6 @@ export const AutopilotEventConfigSchema = z.union([
 ]);
 
 export const AutopilotSchema = z.object({
-  responsible_member_id: z.string().nullable().optional().default(null),
   id: z.string(),
   workspace_id: z.string(),
   title: z.string(),
@@ -130,6 +129,7 @@ export const AutopilotRunSchema = z.object({
   status: z.string(),
   issue_id: z.string().nullable(),
   issue_session_id: z.string().nullable().default(null),
+  chat_session_id: z.string().nullable().default(null),
   task_id: z.string().nullable(),
   triggered_at: z.string(),
   completed_at: z.string().nullable(),
@@ -205,6 +205,7 @@ export const EMPTY_AUTOPILOT_RUN: AutopilotRun = {
   status: "failed",
   issue_id: null,
   issue_session_id: null,
+  chat_session_id: null,
   task_id: null,
   triggered_at: "",
   completed_at: null,

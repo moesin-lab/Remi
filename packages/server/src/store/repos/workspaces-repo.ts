@@ -34,7 +34,7 @@ import type {
 
 type Row = Record<string, unknown>;
 
-export type RelayEngine = "claude" | "codex";
+export type RelayEngine = "claude" | "codex" | "antigravity";
 export interface RelayEngineConfig {
   fragment: string;
   authToken: string;
@@ -48,11 +48,13 @@ export interface RelayEngineBrowser {
 export interface RelayConfigForDaemon {
   claude: RelayEngineConfig | null;
   codex: RelayEngineConfig | null;
+  antigravity: RelayEngineConfig | null;
   modelDiscovery: boolean;
 }
 export interface RelayConfigForBrowser {
   claude: RelayEngineBrowser | null;
   codex: RelayEngineBrowser | null;
+  antigravity: RelayEngineBrowser | null;
   modelDiscovery: boolean;
 }
 export interface GatewayModelsSnapshot {
@@ -899,6 +901,7 @@ export class WorkspacesRepo {
     return {
       claude: this.relayRow(workspaceId, "claude"),
       codex: this.relayRow(workspaceId, "codex"),
+      antigravity: this.relayRow(workspaceId, "antigravity"),
       modelDiscovery: this.getRelayModelDiscovery(workspaceId),
     };
   }
@@ -910,6 +913,7 @@ export class WorkspacesRepo {
     return {
       claude: mask(this.relayRow(workspaceId, "claude")),
       codex: mask(this.relayRow(workspaceId, "codex")),
+      antigravity: mask(this.relayRow(workspaceId, "antigravity")),
       modelDiscovery: this.getRelayModelDiscovery(workspaceId),
     };
   }

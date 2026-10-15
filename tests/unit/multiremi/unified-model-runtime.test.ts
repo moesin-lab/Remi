@@ -59,20 +59,23 @@ pendingTurnBackendTests('MUL-505 canonical runtime',fixture=>{
     expect(db.query("SELECT metadata,body_md FROM multiremi_conversation_log WHERE kind='turn'").get()).toEqual({metadata:'{}',body_md:''});
     expect(reconcileUnifiedModel(db).mismatches).toEqual([]);
   });
-  it('run-only automation writes a timer request in its own conversation and links the ledger to its turn',()=>{
+  it('run-only automation writes a timer request in the run Chat and links the ledger to its turn',()=>{
     const {store,db}=fixture();
     const agent=store.createAgent({name:'Worker',provider:'codex'});
     const auto=createResponsibleTestAutopilot(store, {title:'Automation',assigneeType:'agent',assigneeId:agent.id,executionMode:'run_only',description:'do work'});
     const run=store.runAutopilot(auto.id);expect(run.taskId).toBeTruthy();
     const session=db.query('SELECT session_id FROM multiremi_autopilots WHERE id=?').get(auto.id).session_id;
     expect(session).toBe(`auto_${auto.id}`);
-    const turn=db.query('SELECT turn_id FROM multiremi_autopilot_runs WHERE id=?').get(run.id).turn_id;
-    expect(db.query('SELECT session_id FROM multiremi_turns WHERE id=?').get(turn).session_id).toBe(session);
-    expect(db.query("SELECT sender_type,to_agent_id FROM multiremi_conversation_log WHERE session_id=? AND message_kind='request'").get(session)).toEqual({sender_type:'timer',to_agent_id:agent.id});
+    const stored=db.query('SELECT turn_id,chat_session_id FROM multiremi_autopilot_runs WHERE id=?').get(run.id);
+    expect(stored.chat_session_id).toBe(run.chatSessionId);
+    expect(db.query('SELECT session_id FROM multiremi_turns WHERE id=?').get(stored.turn_id).session_id).toBe(run.chatSessionId);
+    expect(db.query("SELECT sender_type,to_agent_id FROM multiremi_conversation_log WHERE session_id=? AND message_kind='request'").get(run.chatSessionId)).toEqual({sender_type:'timer',to_agent_id:agent.id});
+    // The automation log only records the trigger and points at the Chat.
+    expect(db.query("SELECT to_type FROM multiremi_conversation_log WHERE session_id=? AND message_kind='request'").get(session)).toEqual({to_type:'none'});
     for(const column of ['task_id','status','result'])expect(db.query('PRAGMA table_info(multiremi_autopilot_runs)').all().map((r:any)=>r.name)).not.toContain(column);
     expect(store.getAutopilotRun(run.id)?.status).toBe('running');
   });
-  it('queues consecutive run_only invocations in independent lanes and completes each once', () => {
+  it('runs consecutive run_only invocations in their own Chats and completes each once', () => {
     const { store, db } = fixture();
     const agent = store.createAgent({ name: 'Concurrent auto', provider: 'codex' });
     const runtime = store.registerRuntime({ name: 'auto host', provider: 'codex' });
@@ -81,10 +84,12 @@ pendingTurnBackendTests('MUL-505 canonical runtime',fixture=>{
     const second = store.runAutopilot(auto.id);
     expect(second.id).not.toBe(first.id);
     expect(second.taskId).not.toBe(first.taskId);
-    const turns = db.query('SELECT session_id,execution_scope,status FROM multiremi_turns WHERE session_id=?').all(`auto_${auto.id}`);
-    expect(turns).toHaveLength(2);
-    expect(new Set(turns.map(t => t.execution_scope)).size).toBe(2);
-    expect(turns.every(t => t.status === 'pending')).toBeTrue();
+    expect(second.chatSessionId).not.toBe(first.chatSessionId);
+    expect(Number(db.query('SELECT COUNT(*) AS n FROM multiremi_turns WHERE session_id=?').get(`auto_${auto.id}`).n)).toBe(0);
+    for (const run of [first, second]) {
+      const turns = db.query('SELECT execution_scope,status FROM multiremi_turns WHERE session_id=?').all(run.chatSessionId);
+      expect(turns).toEqual([{ execution_scope: '', status: 'pending' }]);
+    }
     for (let i = 0; i < 2; i++) {
       const task = store.claimTask(runtime.id)!;
       expect([first.taskId, second.taskId]).toContain(task.id);
@@ -94,7 +99,7 @@ pendingTurnBackendTests('MUL-505 canonical runtime',fixture=>{
     expect(store.getAutopilotRun(first.id)?.status).toBe('completed');
     expect(store.getAutopilotRun(second.id)?.status).toBe('completed');
     expect(store.claimTask(runtime.id)).toBeNull();
-    expect(Number(db.query('SELECT COUNT(*) AS n FROM multiremi_turns WHERE session_id=?').get(`auto_${auto.id}`).n)).toBe(2);
+    for (const run of [first, second]) expect(Number(db.query('SELECT COUNT(*) AS n FROM multiremi_turns WHERE session_id=?').get(run.chatSessionId).n)).toBe(1);
   });
   it('completes create_issue automation without re-ringing its own timer input', () => {
     const { store, db } = fixture();
@@ -111,8 +116,8 @@ pendingTurnBackendTests('MUL-505 canonical runtime',fixture=>{
     store.startTask(run.taskId!);
     store.completeTask(run.taskId!, { output: 'fixed' });
     expect(store.getAutopilotRun(run.id)?.status).toBe('completed');
-    expect(store.getIssue(run.issueId!)).toMatchObject({assigneeType:'agent',assigneeId:agent.id,status:'in_review',responsibleMemberId:auto.responsibleMemberId});
-    expect(store.listIssueDeliveries(run.issueId!)).toEqual([]);
+    // The round's last reply is its summary: the Issue waits in review, closed by nobody.
+    expect(store.getIssue(run.issueId!)).toMatchObject({assigneeType:'agent',assigneeId:agent.id,status:'in_review'});
     expect(db.query('SELECT id,status,wake_source FROM multiremi_turns WHERE issue_id=?').all(run.issueId)).toEqual([
       { id: run.taskId, status: 'completed', wake_source: 'platform_to_owner' },
     ]);
@@ -137,7 +142,7 @@ pendingTurnBackendTests('MUL-505 canonical runtime',fixture=>{
     store.completeTask(run.taskId!,{output:'auto answer'});
     expect(store.getAutopilotRun(run.id)?.status).toBe('completed');
     expect(store.findTurnEntry(run.taskId!)?.metadata.final_entry_id).toBeTruthy();
-    expect(db.query("SELECT body_md FROM multiremi_conversation_log WHERE session_id=? AND message_kind='reply'").get(`auto_${auto.id}`).body_md).toBe('auto answer');
+    expect(db.query("SELECT body_md FROM multiremi_conversation_log WHERE session_id=? AND message_kind='reply'").get(run.chatSessionId).body_md).toBe('auto answer');
   });
   it('keeps old attempt statistics independent and emits projected creation and update frames',()=>{
     const {store,db}=fixture();const agent=store.createAgent({name:'Worker',provider:'codex'});
@@ -149,7 +154,7 @@ pendingTurnBackendTests('MUL-505 canonical runtime',fixture=>{
     expect(store.claimTask(runtime.id)?.id).toBe(first.id);store.startTask(first.id);
     store.recoverOrphans(runtime.id);
     const current=db.query('SELECT current_attempt_id FROM multiremi_turns WHERE id=?').get(first.id).current_attempt_id;
-    const fields={trace:{event_count:7,head:7,closed:true as const,tool_call_count:2,type_histogram:[{type:'tool_use',tool:'Read',count:2}]},model:{provider:'codex',model:'new-model'},final_reply_md:null};
+    const fields={trace:{event_count:7,head:7,closed:true as const,tool_call_count:2,type_histogram:[{type:'tool_use',tool:'Read',count:2}]},model:{provider:'codex',model:'new-model'},final_reply_md:null,context_usage:null,worked_ms:null,process_item_count:null};
     db.transaction(()=>store.recordTurnCardCompletionFieldsWithinTransaction(current,fields))();
     db.transaction(()=>store.recordTurnCardCompletionFieldsWithinTransaction(first.id,{...fields,trace:{...fields.trace,event_count:3},model:{provider:'claude',model:'old-model'}}))();
     expect(store.findTurnEntry(first.id)?.metadata.event_count).toBe(7);

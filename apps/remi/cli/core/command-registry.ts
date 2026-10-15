@@ -92,11 +92,6 @@ interface RegisteredPath {
 
 const TASK_PARITY_DENIED_COMMAND_IDS = new Set([
   "workspace.operator",
-  "issue.responsibility-unassigned.list",
-  "issue.responsibility-unassigned.map",
-  "issue.responsible.set",
-  "autopilot.responsible.set",
-  "issue.delivery.authorize",
   "message.question.continue",
   "agent.role.set",
   "agent.supervisor.set",
@@ -140,6 +135,7 @@ const TASK_PARITY_DENIED_COMMAND_IDS = new Set([
   "runtime.archive-agents-and-delete",
   "runtime.create",
   "runtime.delete",
+  "runtime.gc",
   "runtime.release.start",
   "runtime.command.run",
   "runtime.workspace.create",
@@ -160,6 +156,7 @@ const TASK_PARITY_DENIED_COMMAND_IDS = new Set([
   "workspace.relay.reveal",
   "workspace.ssh-mesh.rotate",
   "workspace.ssh-mesh.update",
+  "workspace.storage.set",
 ]);
 
 const TASK_PARITY_DENIED_COMMAND_PREFIXES = [

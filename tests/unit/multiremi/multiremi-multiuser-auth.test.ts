@@ -1,5 +1,6 @@
 import { createResponsibleTestIssue } from './helpers.js';
 import { InMemoryTraceStore } from "@multiremi/worker/trace-store.js";
+import { commandItem } from "./trace-budget-fixtures.js";
 import { InMemoryDaemonTraceReader } from "@multiremi/api/trace/daemon-trace-reader.js";
 import { turnApiPath } from "./unified-test-paths.js";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -151,15 +152,15 @@ describe("Multiremi multi-user auth", () => {
     expect(store.claimTask(runtime.id)?.id).toBe(task.id);
     store.startTask(task.id);
     const traces = new InMemoryTraceStore();
-    traces.append(task.id,[{type:"tool_use",tool:"Bash",input:{command:"cat ~/.aws/credentials"}}]);
+    traces.append(task.id,[{type:"item.completed",item:commandItem("cmd_secret","cat ~/.aws/credentials")}]);
     const traceApp=createMultiremiApp({store,authToken:"root-secret",daemonTraceReader:new InMemoryDaemonTraceReader(()=>traces)});
 
-    // B (member, not owner/admin) is denied; owner sees the messages.
+    // Both human login identities see the workspace transcript.
     const bResp = await traceApp.request(turnApiPath(store, task.id, "/trace"), bearer(b.token));
     expect(bResp.status).toBe(200);
     const ownerResp = await traceApp.request(turnApiPath(store, task.id, "/trace"), bearer(owner.token));
     expect(ownerResp.status).toBe(200);
-    expect((await ownerResp.json()).events).toHaveLength(1);
+    expect((await ownerResp.json()).items).toHaveLength(1);
   });
 
   it("new workspaces and headerless actions use the shared operator", async () => {
@@ -178,7 +179,35 @@ describe("Multiremi multi-user auth", () => {
     expect(store.getAgent((await createdAgent.json()).id)).toMatchObject({ workspaceId: "local", ownerId: "local" });
     const createdIssue = await app.request("/api/multiremi/issues", { method: "POST", headers: { ...jsonAuth(b.token), "X-Workspace-ID": workspace.id }, body: JSON.stringify({ title: "Shared issue" }) });
     expect(createdIssue.status).toBe(201);
-    expect((await createdIssue.json()).issue).toMatchObject({ workspaceId: workspace.id, createdBy: "local" });
+    const createdIssueBody = await createdIssue.json();
+    expect(createdIssueBody.issue).toMatchObject({ workspaceId: workspace.id, createdBy: "local" });
+    expect(createdIssueBody.issue).not.toHaveProperty("responsibleMemberId");
+
+    const issueId = createdIssueBody.issue.id;
+    const agent = store.createAgent({ name: "Workspace executor", provider: "codex", workspaceId: workspace.id });
+    const headers = { ...jsonAuth(b.token), "X-Workspace-ID": workspace.id };
+    const assigned = await app.request(`/api/multiremi/issues/${issueId}/assign`, {
+      method: "POST", headers, body: JSON.stringify({ assigneeType: "agent", assigneeId: agent.id }),
+    });
+    expect(assigned.status).toBe(200);
+    const tasksBeforeRejectedAssignment = store.listTasksForIssue(issueId).map(task => ({ id: task.id, status: task.status }));
+    const operator = store.getWorkspaceOperator(workspace.id)!;
+    for (const [path, body, method] of [
+      [`/api/multiremi/issues/${issueId}/assign`, { assigneeType: "member", assigneeId: operator.id }, "POST"],
+      [`/api/issues/${issueId}`, { assignee_type: "member", assignee_id: operator.id }, "PATCH"],
+    ] as const) {
+      const rejected = await app.request(path, { method, headers, body: JSON.stringify(body) });
+      expect(rejected.status).toBe(409);
+      expect(await rejected.json()).toMatchObject({ code: "issue_execution_owner_required" });
+      expect(store.getIssue(issueId)).toMatchObject({ assigneeType: "agent", assigneeId: agent.id });
+      expect(store.listTasksForIssue(issueId).map(task => ({ id: task.id, status: task.status })))
+        .toEqual(tasksBeforeRejectedAssignment);
+    }
+    const missingMember = await app.request(`/api/multiremi/issues/${issueId}/assign`, {
+      method: "POST", headers, body: JSON.stringify({ assigneeType: "member", assigneeId: "usr_missing" }),
+    });
+    expect(missingMember.status).toBe(404);
+    expect(await missingMember.json()).toEqual({ error: "Member not found: usr_missing" });
   });
 
   it("add computer: a new user mints a real setup token for their own workspace", async () => {

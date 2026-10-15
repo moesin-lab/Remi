@@ -10,7 +10,7 @@ remi workspace prompt get <workspace-id> --json
 remi workspace prompt update --help
 ```
 
-工作区命令里的位置参数是被操作的工作区；全局 `--workspace` 是请求上下文，保持二者一致。设置的影响范围大于单个云友，更新时保留没有要求改变的字段。
+工作区命令里的位置参数是被操作的工作区；全局 `--workspace` 是请求上下文，保持二者一致。设置的影响范围大于单个 Agent，更新时保留没有要求改变的字段。
 
 公共提示词有 bootstrap 和 delta 两部分。先 get 得到当前内容及版本，修改对应部分；`workspace prompt update` 支持 `--bootstrap-prompt`、`--delta-prompt`、`--expected-revision` 和 JSON 文件。发生版本冲突时重读并合并，不去掉版本条件覆盖别人刚写的内容。Agent 的个性化 instructions 不应全塞进工作区公共提示词。
 
@@ -23,6 +23,8 @@ remi workspace prompt update --help
 | Runtime 预配置 | `remi workspace runtime-provision create --help` | 对应 provision 的 `get` 和 `states` |
 | 飞书工作区 bot | `remi workspace feishu-bot set --help` | 配置读回、测试及 deploy/status 是不同阶段 |
 | 消息来源白名单 | `remi feishu source update --help` | `source get/status`；空白名单不代表接收所有来源 |
+
+存储保留策略用 `remi workspace storage get <workspace-id> --json` 读取有效值和工作区覆盖项，`remi workspace storage set <workspace-id> --ttl-ms <ms>` 修改（可用 `--automation-ttl-ms`、`--max-retained`、`--orphan-ttl-ms`、`--snapshot-max-bytes`、`--chat-idle-days`，`--reset <选项>` 恢复默认）。只改被要求的项并读回核验；缩短保留期会让下一轮回收更早清理已结束的工作区。
 
 环境变量 update 是映射替换，保留其他键后再写。`workspace relay reveal` 会取出敏感内容，不把它当作例行只读探测。只配置一个 Runtime 的模型时，使用它的 profile；不要顺手改整个工作区网关。
 
@@ -51,4 +53,4 @@ remi project update --help
 
 `repo list/get` 查询平台记录，`repo checkout` 会访问 Git 并修改本地检出。只有任务确实需要仓库文件时才检出；不要用 checkout 验证导入记录。默认分支以仓库配置为准，不硬编码 `main`；指定 `--ref` 时失败不能偷偷换分支。
 
-用户要求处理某台机器的已有目录时，转到 [Runtime 工作目录](runtimes.md)，无需先创建项目或导入仓库。选择项目也不意味着每个云友永久绑定同一个工作位置。
+用户要求处理某台机器的已有目录时，转到 [Runtime 工作目录](runtimes.md)，无需先创建项目或导入仓库。选择项目也不意味着每个 Agent 永久绑定同一个工作位置。

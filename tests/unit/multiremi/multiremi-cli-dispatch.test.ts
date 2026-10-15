@@ -99,6 +99,7 @@ describe("remi CLI dispatcher", () => {
       "runtime",
       "daemon",
       "autopilot",
+      "automation",
       "scm",
       "messaging",
       "feishu",
@@ -239,9 +240,12 @@ describe("remi CLI dispatcher", () => {
 });
 
 describe("remi CLI provider detection", () => {
-  it("detects the native agy executable as Antigravity", () => {
+  it("detects Antigravity only through the pinned install, never the retired agy CLI", () => {
     expect(detectMultiremiProviders({
-      pathEnv: "/mock/bin", canExecute: path => path === join("/mock/bin", "agy"),
+      pathEnv: "/mock/bin", canExecute: path => path === join("/mock/bin", "agy"), antigravityInstalled: () => false,
+    })).toEqual([]);
+    expect(detectMultiremiProviders({
+      pathEnv: "/mock/bin", canExecute: () => false, antigravityInstalled: () => true,
     })).toEqual(["antigravity"]);
   });
   it("detects supported daemon providers from PATH", () => {
@@ -252,11 +256,13 @@ describe("remi CLI provider detection", () => {
       canExecute: (path) => path === join("/mock/bin", "claude")
         || path === join("/other/bin", "codex")
         || path === join("/mock/bin", "grok"),
+      antigravityInstalled: () => false,
     })).toEqual(["claude", "codex", "grok"]);
 
     expect(detectMultiremiProviders({
       pathEnv,
       canExecute: (path) => path === "/mock/bin/gemini",
+      antigravityInstalled: () => false,
     })).toEqual([]);
   });
 });

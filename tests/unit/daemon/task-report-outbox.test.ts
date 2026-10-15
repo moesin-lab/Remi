@@ -244,7 +244,7 @@ describe("MultiremiTaskReportOutbox", () => {
     expect(outbox.stats().pending).toBe(20);
   });
 
-  it("batches and coalesces consecutive persisted message records on replay", async () => {
+  it("batches consecutive persisted legacy message records into one delivery on replay", async () => {
     const path = tempPath();
     const first = track(new MultiremiTaskReportOutbox({
       path,
@@ -266,11 +266,13 @@ describe("MultiremiTaskReportOutbox", () => {
 
     expect(delivered).toHaveLength(1);
     expect(delivered[0]).toMatchObject({ kind: "messages", seq: 1 });
-    expect(delivered[0]?.payload.messages).toEqual([{
-      seq: 1,
+    // Only v1 queues hold these rows and the daemon drops them (PR 2): they are
+    // batched for one delivery, no longer coalesced into one fragment.
+    expect(delivered[0]?.payload.messages).toEqual(Array.from({ length: 100 }, (_, index) => ({
+      seq: index + 1,
       type: "thinking",
-      content: "x".repeat(100),
-    }]);
+      content: "x",
+    })));
     expect(second.stats().pending).toBe(0);
   });
 
@@ -473,7 +475,7 @@ describe("MultiremiTaskReportOutbox", () => {
   it("never evicts other reliable kinds or a final progress row under capacity pressure", async () => {
     const kinds: MultiremiOutboxKind[] = ["start", "prompt", "usage", "messages", "complete", "fail",
       "runtime.update_result", "runtime.command_result", "runtime.model_list_result", "runtime.local_skills_result",
-      "runtime.directory_scan_result", "runtime.local_skill_import_result", "runtime.bot_menu_result",
+      "runtime.directory_scan_result", "runtime.gc_run_result", "runtime.local_skill_import_result", "runtime.bot_menu_result",
       "feishu.outbound_result", "plugin.state"];
     let online = false;
     const delivered: MultiremiOutboxRecord[] = [];

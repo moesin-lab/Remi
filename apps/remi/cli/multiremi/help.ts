@@ -49,10 +49,6 @@ Commands:
   issue session result list <id> List explicitly published cross-Session results
   issue session result publish <id> Publish a reusable result from one Session
                          [--type mr|report|deploy|decision|doc|other] [--ref <type>:<value>]
-  issue archive status <id> Show archive readiness for an issue
-  issue archive list <id> List provider-native session archives
-  issue archive verify <id> [archive-id] Verify an archive (defaults to latest ready)
-  issue archive retry <id> [archive-id] Retry a failed archive
   issue subscriber list <id>
   issue subscriber add <id> [--user-id <member-id>]
   issue subscriber remove <id> [--user-id <member-id>]
@@ -111,8 +107,9 @@ Options:
   --ref <branch-or-sha>  Branch or commit for repo checkout (memory/wiki commands
                          use --ref <type>:<value> as a citation; see below)
   --provider <name>      Limit daemon to one provider: claude, codex, grok, or antigravity (default: auto-detect)
+  --accept-antigravity-terms  Accept Google's Antigravity terms for its first download (setup/daemon start)
   --workspace <id>       Workspace id (default: local)
-  --responsible-member <id>  Explicit human responsibility on issue create/update
+  --responsible-member <id>  Deprecated no-op on issue create/update: Issues no longer designate a human
   --runtime-id <id>      Reuse a fixed runtime id
   --daemon-id <id>       Stable daemon id for local directory resources
   --device-name <name>   Device display name (defaults to hostname-user)

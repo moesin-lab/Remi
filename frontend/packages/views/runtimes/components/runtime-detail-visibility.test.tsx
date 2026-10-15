@@ -21,6 +21,9 @@ const TEST_RESOURCES = {
 
 const mockUpdateRuntime = vi.hoisted(() => vi.fn());
 const mockUpdateDedicated = vi.hoisted(() => vi.fn());
+const membersRef = vi.hoisted(() => ({
+  current: [{ user_id: "local", role: "owner" }] as Array<{ user_id: string; role: string }>,
+}));
 
 vi.mock("@multiremi/core/hooks", () => ({
   useWorkspaceId: () => "ws-1",
@@ -57,7 +60,7 @@ vi.mock("@tanstack/react-query", async () => {
     ...actual,
     useQuery: vi.fn((options: { queryKey?: readonly unknown[] }) =>
       options.queryKey?.includes("members")
-        ? { data: [{ user_id: "local", role: "owner" }], isLoading: false, isError: false }
+        ? { data: membersRef.current, isLoading: false, isError: false }
         : options.queryKey?.includes("routing")
         ? {
             data: {
@@ -144,6 +147,11 @@ vi.mock("./update-section", () => ({
   ),
 }));
 vi.mock("./usage-section", () => ({ UsageSection: () => null }));
+vi.mock("./daemon-storage-card", () => ({
+  RuntimeStorageCard: ({ daemonId, canManage }: { daemonId: string; canManage: boolean }) => (
+    <div data-testid="runtime-storage-card">{`${daemonId}:${canManage ? "manage" : "view"}`}</div>
+  ),
+}));
 vi.mock("./runtime-plugins-tab", () => ({
   RuntimePluginsTab: () => <div>runtime-plugins-tab</div>,
 }));
@@ -195,7 +203,27 @@ function renderDetail(runtime: AgentRuntime) {
 }
 
 describe("RuntimeDetail visibility section", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    membersRef.current = [{ user_id: "local", role: "owner" }];
+  });
+
+  it("shows the machine's storage card only for a runtime that belongs to a daemon", () => {
+    const { unmount } = renderDetail(makeRuntime({ daemon_id: "daemon-1" }));
+    expect(screen.getByTestId("runtime-storage-card")).toHaveTextContent("daemon-1:manage");
+    unmount();
+    renderDetail(makeRuntime({ daemon_id: null }));
+    expect(screen.queryByTestId("runtime-storage-card")).toBeNull();
+  });
+
+  it("keeps storage read-only for the shared operator without borrowing the login account role", () => {
+    membersRef.current = [
+      { user_id: "local", role: "member" },
+      { user_id: "user-me", role: "owner" },
+    ];
+    renderDetail(makeRuntime({ daemon_id: "daemon-1" }));
+    expect(screen.getByTestId("runtime-storage-card")).toHaveTextContent("daemon-1:view");
+  });
 
   it("shares the runtime without personal visibility controls: shows owner-editable visibility choices when the caller owns the runtime", () => {
   renderDetail(makeRuntime({ owner_id: "historical-owner", visibility: "private" }));

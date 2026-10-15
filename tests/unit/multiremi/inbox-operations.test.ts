@@ -32,7 +32,6 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
     const first=f.store.sendChatMessage(chat.id,{body:'first'}),second=f.store.sendChatMessage(chat.id,{body:'second'});
     expect(second.task.id).toBe(first.task.id);expect(f.store.listTurns({workspace_id:'local',session_id:chat.id})).toHaveLength(1);expect(f.store.listMessages(chat.id).map(m=>m.body_md)).toEqual(['first','second']);});
   it('questions and permission answers work after physically dropping the three old tables',()=>{const f=setup();for(const table of ['multiremi_task_human_requests','multiremi_issue_decisions','multiremi_task_steer_messages'])f.db.exec(`DROP TABLE ${table}`);
-    f.store.updateIssue(f.issue.id,{responsibleMemberId:'mem_local_local',actorType:'member',actorId:'mem_local_local'});
     const runtime=f.store.registerRuntime({name:'Permission host',provider:'codex',daemonId:'permission-host'});
     f.store.updateAgent(f.a.id,{runtimeId:runtime.id});
     const sent=f.send('work',f.a.id),turn=f.store.getTurn(sent.turn_id!)!,attemptId=turn.current_attempt_id!;
@@ -44,7 +43,8 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
       {runtimeId:runtime.id,daemonId:runtime.daemonId!,workspaceId:'local'});
     expect(result.ok).toBe(true);
     const request=f.store.getQuestion(String(result.message_id))!;
-    expect(request.current_handler).toEqual({type:'member',id:'mem_local_local'});
+    // The asker executes this root, so the request waits at the human stage for any active member.
+    expect(request).toMatchObject({stage:'human',current_handler:null});
     expect(f.store.getMessage(request.id)?.message_kind).toBe('decision');
     expect(()=>f.store.respondTaskHumanRequest(request.id,{response:{option_id:'forged'},respondedBy:'mem_local_local',expectedRouteRevision:request.route_revision})).toThrow('invalid human response');
     expect(f.store.respondTaskHumanRequest(request.id,{response:{option_id:'allow'},respondedBy:'mem_local_local',expectedRouteRevision:request.route_revision})?.status).toBe('responded');
@@ -52,11 +52,14 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
   it('Autopilot inputs use one canonical message and independent run lanes',()=>{const f=setup();
     const auto=createResponsibleTestAutopilot(f.store, {title:'Runs',assigneeId:f.a.id,executionMode:'run_only'});
     const one=f.store.runAutopilot(auto.id,{prompt:'one'}),two=f.store.runAutopilot(auto.id,{prompt:'two'});
-    const turns=f.store.listTurns({workspace_id:'local',session_id:`auto_${auto.id}`});
-    expect(turns).toHaveLength(2);expect(new Set(turns.map(t=>t.execution_scope)).size).toBe(2);
+    // Each run_only run executes in a Chat of its own; the automation log keeps only the triggers.
+    expect(one.chatSessionId).toBeTruthy();expect(two.chatSessionId).not.toBe(one.chatSessionId);
     expect(f.store.listMessages(`auto_${auto.id}`).filter(m=>m.message_kind==='request').map(m=>m.body_md)).toEqual(['one','two']);
+    expect(f.store.listTurns({workspace_id:'local',session_id:`auto_${auto.id}`})).toHaveLength(0);
     for(const run of [one,two]){const task=f.store.getTask(run.taskId!)!;
-      expect(turns.find(t=>t.current_attempt_id===task.id)?.trigger_message_id).toBeTruthy();}
+      const turn=f.store.listTurns({workspace_id:'local',session_id:run.chatSessionId!}).find(t=>t.current_attempt_id===task.id);
+      expect(turn?.trigger_message_id).toBeTruthy();
+      expect(f.store.listMessages(run.chatSessionId!).filter(m=>m.message_kind==='request').map(m=>m.body_md)).toEqual([run===one?'one':'two']);}
     const issueAuto=createResponsibleTestAutopilot(f.store, {title:'Issue run',assigneeId:f.b.id,executionMode:'create_issue'}),run=f.store.runAutopilot(issueAuto.id,{prompt:'Issue request'});
     expect(f.store.listMessages(f.store.getOrCreateDefaultIssueSession(run.issueId!).id)).toHaveLength(1);
     expect(f.store.listMessages(`auto_${issueAuto.id}`)[0]?.message_kind).toBe('request');

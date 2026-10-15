@@ -381,6 +381,34 @@ it("can clear an explicit model choice and continue with the source's native mod
   await waitFor(() => expect(backend.sendExternalChatMessage).toHaveBeenCalledWith("rt", "source", "thread", { text: "Use native defaults", request_id: expect.any(String) }));
 });
 
+it("retains an explicit model after capability loss until the user clears it, without silently using a different native model", async () => {
+  backend.sendExternalChatMessage.mockImplementation((_runtime, _source, thread, input) => input.model
+    ? Promise.reject(new ApiError("Model selection unsupported", 409, "Conflict", { error: "Model selection unsupported", code: "MODEL_SELECTION_UNSUPPORTED" }))
+    : Promise.resolve({ request_id: input.request_id, thread_id: thread, turn_id: "native-turn", outcome: "accepted" }));
+  const user = userEvent.setup();
+  const view = show(<WindowHarness modelsSupported initialDraft="Use my selected model" />);
+  await screen.findByText("Original native history");
+  await user.click(screen.getByRole("button", { name: "Model for next message" }));
+  await user.click(await screen.findByRole("button", { name: /Source catalog model/ }));
+  view.update(<WindowHarness modelsSupported={false} initialDraft="Use my selected model" />);
+  expect(screen.getByRole("button", { name: "Model for next message" })).toHaveTextContent("Source catalog model");
+  await user.click(screen.getByRole("button", { name: "Continue this chat" }));
+  await waitFor(() => expect(backend.sendExternalChatMessage).toHaveBeenCalledWith("rt", "source", "thread", {
+    text: "Use my selected model", request_id: expect.any(String), model: "source-native-id",
+  }));
+  await screen.findByText("Message was rejected. Your draft is retained.");
+  expect(screen.getByRole("textbox", { name: "Message this native chat" })).toHaveValue("Use my selected model");
+  await user.click(screen.getByRole("button", { name: "Model for next message" }));
+  await screen.findByText(/Update this Runtime to choose a model/);
+  expect(screen.queryByRole("button", { name: /Source catalog model/ })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Keep native model" }));
+  expect(screen.getByRole("button", { name: "Model for next message" })).toHaveTextContent("original-model");
+  await user.click(screen.getByRole("button", { name: "Continue this chat" }));
+  await waitFor(() => expect(backend.sendExternalChatMessage).toHaveBeenLastCalledWith("rt", "source", "thread", {
+    text: "Use my selected model", request_id: expect.any(String),
+  }));
+});
+
 it("keeps legacy Runtime continuation available while explaining that model selection requires an upgrade", async () => {
   backend.sendExternalChatMessage.mockImplementation((_runtime, _source, thread, input) => Promise.resolve({ request_id: input.request_id, thread_id: thread, turn_id: "native-turn", outcome: "accepted" }));
   const user = userEvent.setup();

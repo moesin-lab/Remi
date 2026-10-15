@@ -23,7 +23,7 @@ export function ExternalChatModelPicker({ ws, runtime, source, online, supported
   }, [open, online, supported, hasNextPage, isFetching, isError, fetchNextPage]);
 
   const choose = (model: ExternalChatModel | null) => {
-    if (disabled || !supported) return;
+    if (disabled || (!supported && model !== null)) return;
 
     onChange(model);
     setOpen(false);
@@ -38,8 +38,8 @@ export function ExternalChatModelPicker({ ws, runtime, source, online, supported
     <PopoverContent align="end" className="w-80 max-w-[calc(100vw-2rem)] space-y-3">
       {currentModel && <p className="break-all text-xs text-muted-foreground">{t(($) => $.external.model_current, { model: currentModel })}</p>}
       <p className="text-xs text-muted-foreground">{t(($) => $.external.model_next_message)}</p>
+      {(supported || value !== null) && <Button type="button" variant="outline" size="sm" className="w-full" disabled={disabled} aria-pressed={!value} onClick={() => choose(null)}>{t(($) => $.external.model_inherit)}</Button>}
       {!supported ? <p role="status" className="text-sm">{t(($) => $.external.model_upgrade)}</p> : <>
-        <Button type="button" variant="outline" size="sm" className="w-full" disabled={disabled} aria-pressed={!value} onClick={() => choose(null)}>{t(($) => $.external.model_inherit)}</Button>
         <div className="max-h-64 space-y-1 overflow-y-auto">
           {models.map(model => <button type="button" key={model.id} disabled={disabled} aria-pressed={value?.id === model.id}
             className="block w-full rounded-md px-2 py-2 text-left text-sm hover:bg-accent disabled:pointer-events-none disabled:opacity-50" onClick={() => choose(model)}>

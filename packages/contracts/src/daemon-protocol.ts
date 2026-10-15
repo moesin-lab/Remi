@@ -309,6 +309,7 @@ export type DaemonProtocolReply = DaemonProtocolOkReply | DaemonProtocolErrorRep
 /** Per-runtime capability fields use the same names and versions as the HTTP heartbeat. */
 export interface DaemonRuntimeCapabilities {
   external_chats?: number;
+  external_chat_models?: number;
   supports_batch_import?: boolean;
   supports_directory_scan?: boolean;
   supports_skill_directory?: boolean;

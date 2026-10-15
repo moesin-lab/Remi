@@ -83,6 +83,19 @@ export interface ExternalChatHistory {
   requests: ExternalChatRequest[];
 }
 
+/** Picker entries from this source's native catalog; listing does not prove inference entitlement. */
+export interface ExternalChatModel {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface ExternalChatModels {
+  source_id: string;
+  models: ExternalChatModel[];
+  next_cursor: string | null;
+}
+
 /** A lost acknowledgement never authorizes retrying the native write. */
 export interface ExternalChatReceipt {
   request_id: string;
@@ -93,24 +106,26 @@ export interface ExternalChatReceipt {
 
 export type ExternalChatOperation =
   | { operation: "catalog" }
+  | { operation: "models"; source_id: string; cursor?: string; limit?: number }
   | { operation: "list"; source_id: string; project_id?: string; cursor?: string; limit?: number }
   | { operation: "read"; source_id: string; thread_id: string; cursor?: string; limit?: number }
-  | { operation: "send"; source_id: string; thread_id: string; text: string; request_id: string }
+  | { operation: "send"; source_id: string; thread_id: string; text: string; request_id: string; model?: string }
   | { operation: "receipt"; source_id: string; thread_id: string; request_id: string }
   | { operation: "interrupt"; source_id: string; thread_id: string; turn_id: string }
   | { operation: "respond"; source_id: string; thread_id: string; request_id: string;
       decision?: "accept" | "decline" | "cancel"; answers?: Record<string, string[]> };
 
-export type ExternalChatResult = ExternalChatCatalog | ExternalChatList | ExternalChatHistory | ExternalChatReceipt | { accepted: true };
+export type ExternalChatResult = ExternalChatCatalog | ExternalChatList | ExternalChatHistory | ExternalChatModels | ExternalChatReceipt | { accepted: true };
 export type ExternalChatRpcResult =
   | { ok: true; data: ExternalChatResult }
   | { ok: false; code: string; message: string; outcome?: "unknown" };
 
-/** No provider method, filesystem path, credentials or config override crosses this boundary. */
+/** No provider method, filesystem path, credentials or arbitrary config crosses this boundary. */
 export interface ExternalChatClient {
   request(runtimeId: string, operation: ExternalChatOperation): Promise<ExternalChatRpcResult>;
 }
 
 export const EXTERNAL_CHAT_MAX_TEXT_CHARS = 32_000;
+export const EXTERNAL_CHAT_MAX_MODEL_CHARS = 256;
 export const EXTERNAL_CHAT_MAX_PAGE_SIZE = 50;
 export const EXTERNAL_CHAT_RPC_MAX_BYTES = 900_000;

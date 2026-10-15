@@ -3,7 +3,7 @@
 import { useState } from "react";
 import type { ExternalChatRequest } from "@multiremi/core/chat";
 import { Button } from "@multiremi/ui/components/ui/button";
-import { Markdown } from "@multiremi/ui/markdown";
+import { MemoizedMarkdown } from "@multiremi/ui/markdown";
 import { useT } from "../../i18n";
 
 export function ExternalChatRequestCard({ request, disabled, onRespond }: {
@@ -19,7 +19,7 @@ export function ExternalChatRequestCard({ request, disabled, onRespond }: {
   return (
     <section className="space-y-2 rounded-md border bg-card p-3">
       <p className="text-xs font-medium">{approval ? t(($) => $.human_requests.permission_title) : request.kind === "user_input" ? t(($) => $.human_requests.question_title) : request.kind}</p>
-      <Markdown mode="minimal">{request.text}</Markdown>
+      <MemoizedMarkdown mode="minimal">{request.text}</MemoizedMarkdown>
       {approval ? (
         <div className="flex flex-wrap gap-2">
           {(["accept", "decline", "cancel"] as const).map(decision => (

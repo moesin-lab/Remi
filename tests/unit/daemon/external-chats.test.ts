@@ -403,10 +403,11 @@ describe.skipIf(typeof process.getuid !== "function")("external Codex chats", ()
     expect(f.native.replies).toEqual([{ permissions, scope: "turn" }]);
   });
 
-  it("keeps unsupported native requests visible without automatically granting them", async () => {
+  it("keeps history readable when a native client must handle a request", async () => {
     const f = fixture();
     f.native.requests.push({ id: "unsupported", nativeId: 8, method: "item/tool/call", params: { threadId: "thread_a", turnId: "turn_a" } });
-    expect(await f.driver.request({ operation: "read", source_id: f.source, thread_id: "thread_a" })).toMatchObject({ ok: false, code: "native_request_unsupported" });
+    expect(await f.driver.request({ operation: "read", source_id: f.source, thread_id: "thread_a" })).toMatchObject({ ok: true, data: { turns: [{ id: "turn_old" }], requests: [] } });
+    expect(await f.driver.request({ operation: "respond", source_id: f.source, thread_id: "thread_a", request_id: "unsupported", decision: "accept" })).toMatchObject({ ok: false, code: "native_request_unsupported" });
     expect(f.native.replies).toEqual([]);
   });
 
@@ -440,7 +441,9 @@ describe.skipIf(typeof process.getuid !== "function")("external Codex chats", ()
         ws.send(JSON.stringify({ id: "questions_native", method: "item/tool/requestUserInput", params: { threadId: "thread_a", turnId: "turn_a", questions: Array.from({ length: 21 }, (_, i) => ({ id: `q_${i}`, header: "Choice", question: "Continue?" })) } }));
         ws.send(JSON.stringify({ id: "approval_native", method: "item/commandExecution/requestApproval", params: { threadId: "thread_a", turnId: "turn_a" } }));
       }
-      if (message.id && message.method) ws.send(JSON.stringify({ id: message.id, result: message.method === "initialize" ? { codexHome: initializedHome, userAgent } : { data: [] } }));
+      if (message.id && message.method) ws.send(JSON.stringify({ id: message.id, result: message.method === "initialize" ? { codexHome: initializedHome, userAgent }
+        : message.method === "thread/read" ? { thread: f.native.thread }
+        : message.method === "thread/turns/list" ? { data: f.native.history } : { data: [] } }));
     }));
     await new Promise<void>(resolve => server.listen(socket, resolve));
     cleanups.push(() => { for (const client of wss.clients) client.terminate(); wss.close(); server.closeAllConnections(); server.close(); });
@@ -453,14 +456,16 @@ describe.skipIf(typeof process.getuid !== "function")("external Codex chats", ()
     expect(calls[0]!.params).toMatchObject({ clientInfo: { name: "codex-backend" }, capabilities: { experimentalApi: true } });
     await connection.rpc("thread/read", { threadId: "thread_a" });
     await Bun.sleep(10);
-    expect(calls.filter(call => call.error).map(call => ({ id: call.id, error: call.error }))).toEqual([
-      { id: "tool_native", error: { code: -32601, message: "Remi does not support this native client request" } },
-      { id: "auth_native", error: { code: -32601, message: "Remi does not support this native client request" } },
-      { id: "huge_native", error: { code: -32601, message: "Remi does not support this native client request" } },
-      { id: "questions_native", error: { code: -32601, message: "Remi does not support this native client request" } },
-    ]);
+    // A shared app-server broadcasts requests. An error from this observer would
+    // win the response race and prevent the original client from completing it.
+    expect(calls.filter(call => call.error || call.result)).toEqual([]);
     expect(connection.pending("thread_a").map(request => request.nativeId)).toEqual(["approval_native"]);
-    expect(connection.unsupported!("thread_a")).toBe(true);
+    const driver = new CodexExternalChats({ ...f.options, connectionFactory: async () => connection });
+    cleanups.push(() => driver.close());
+    expect(await driver.request({ operation: "read", source_id: f.source, thread_id: "thread_a" })).toMatchObject({
+      ok: true, data: { turns: [{ id: "turn_old" }], requests: [{ kind: "command_approval" }] },
+    });
+    expect(calls.filter(call => call.error || call.result)).toEqual([]);
     for (const ws of wss.clients) ws.send(JSON.stringify({ method: "serverRequest/resolved", params: { requestId: "approval_native" } }));
     await connection.rpc("thread/list", { useStateDbOnly: true });
     expect(connection.pending("thread_a")).toEqual([]);
@@ -486,6 +491,41 @@ describe.skipIf(typeof process.getuid !== "function")("external Codex chats", ()
     expect(connection.connection).toBe("isolated");
     expect(connection.version).toBe("0.162.1");
     expect(JSON.parse(readFileSync(capture, "utf8").trim())).toEqual({ args: ["app-server", "--listen", "stdio://"], home: realpathSync(f.home) });
+  });
+
+  it("rejects unsupported callbacks only on an isolated process without blocking subsequent reads", async () => {
+    const f = fixture();
+    const script = join(f.root, "fake-private-codex.cjs");
+    writeFileSync(script, `
+      if (process.argv.includes('--version')) { console.log('codex-cli 0.162.1'); process.exit(0); }
+      const replies = [];
+      const send = value => console.log(JSON.stringify(value));
+      require('node:readline').createInterface({input: process.stdin}).on('line', line => {
+        const message = JSON.parse(line);
+        if (!message.method) { replies.push(message); return; }
+        if (message.method === 'initialized') return;
+        if (message.method === 'thread/read') {
+          send({id: 'private_tool', method: 'item/tool/call', params: {threadId: 'thread_a', turnId: 'turn_a'}});
+          send({id: 'private_auth', method: 'account/chatgptAuthTokens/refresh', params: {}});
+        }
+        send({id: message.id, result: message.method === 'initialize'
+          ? {codexHome: process.env.CODEX_HOME, userAgent: 'codex_cli_rs/0.162.1'}
+          : message.method === 'thread/read' ? {thread: ${JSON.stringify(f.native.thread)}}
+          : message.method === 'test/replies' ? {replies}
+          : {data: ${JSON.stringify(f.native.history)}}});
+      });
+    `);
+    const connection = await connectNative(f.home, { uid: process.getuid!(), codexBinary: process.execPath, codexArgs: [script] });
+    cleanups.push(() => connection.close());
+    const driver = new CodexExternalChats({ ...f.options, connectionFactory: async () => connection });
+    cleanups.push(() => driver.close());
+    expect(await driver.request({ operation: "read", source_id: f.source, thread_id: "thread_a" })).toMatchObject({
+      ok: true, data: { turns: [{ id: "turn_old" }], requests: [] },
+    });
+    expect((await connection.rpc("test/replies")).replies).toEqual([
+      { id: "private_tool", error: { code: -32601, message: "Remi does not support this native client request" } },
+      { id: "private_auth", error: { code: -32601, message: "Remi does not support this native client request" } },
+    ]);
   });
 
   it("closes a malformed fake stdio process even when it ignores EOF and SIGTERM", async () => {

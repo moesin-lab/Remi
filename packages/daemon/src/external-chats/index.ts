@@ -271,7 +271,6 @@ export class CodexExternalChats {
     }
     this.observeOwnedInput(source.id, operation.thread_id, array(page.data));
     const requests = connection.pending(operation.thread_id).map(nativeRequest);
-    if (connection.unsupported?.(operation.thread_id) || requests.some(request => request === null)) throw new ChatError("native_request_unsupported", "原生会话发出了 Remi 尚不支持的客户端请求；请求已拒绝，未执行工具或刷新认证。");
     return { chat: summary(thread, source.id), turns: turns(array(page.data).reverse()), next_cursor: string(page.nextCursor) || null, requests: requests.filter(request => request !== null) };
   }
 
@@ -286,7 +285,7 @@ export class CodexExternalChats {
     }
     await this.requireOwnedInputFinished(source.id, operation.thread_id, connection);
     const thread = await this.thread(connection, operation.thread_id);
-    this.requireIdle(connection, thread);
+    this.requireIdle(thread);
     const selectedModel = operation.model === undefined ? undefined : await this.findModel(connection, operation.model);
     const currentEffort = string(thread.reasoningEffort);
     const supportedEfforts = array(selectedModel?.supportedReasoningEfforts).map(effort => string(effort.reasoningEffort));
@@ -298,7 +297,7 @@ export class CodexExternalChats {
       connection.attached.add(operation.thread_id);
     }
     // This catches observed busy state. Codex's API does not provide an atomic idle precondition across clients.
-    this.requireIdle(connection, await this.thread(connection, operation.thread_id));
+    this.requireIdle(await this.thread(connection, operation.thread_id));
     const receipt: SavedReceipt = { source_id: source.id, request_id: operation.request_id, thread_id: operation.thread_id, turn_id: null, outcome: "unknown", payload_hash: binding, ...(operation.model === undefined ? {} : { model: operation.model }) };
     if (!this.receipts.create(receipt)) return this.send(source, connection, operation);
     const key = `${source.id}:${operation.thread_id}`;
@@ -341,8 +340,7 @@ export class CodexExternalChats {
     if (TERMINAL_TURNS.has(string(turn.status))) this.ownedInputs.delete(key);
   }
 
-  private requireIdle(connection: NativeConnection, thread: NativeObject): void {
-    if (connection.unsupported?.(string(thread.id))) throw new ChatError("native_request_unsupported", "此原生会话使用 Remi 尚不支持的客户端请求。");
+  private requireIdle(thread: NativeObject): void {
     const state = object(thread.status).type;
     if (state === "active") throw new ChatError("native_busy", "此会话正在原客户端运行，请结束后再发送。");
     if (state !== "idle" && state !== "notLoaded") throw new ChatError("thread_not_writable", "无法确认原生会话处于可发送状态。");

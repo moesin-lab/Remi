@@ -246,6 +246,8 @@ it("does not request native image paths from the web origin and still renders ab
   expect(screen.getAllByRole("img")).toHaveLength(1);
   expect(screen.getByRole("img", { name: "Remote screenshot" })).toHaveAttribute("src", "https://example.com/image.png");
   expect(screen.getAllByText(enChat.external.local_image_hint)).toHaveLength(4);
-  expect(screen.getByText("/tmp/native-image.png")).toBeInTheDocument();
-  expect(screen.getByText("./screenshots/image.png")).toBeInTheDocument();
+  expect(screen.queryByText("/tmp/native-image.png")).not.toBeInTheDocument();
+  expect(screen.queryByText("./screenshots/image.png")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Local screenshot" }));
+  expect(await screen.findByText("/tmp/native-image.png")).toBeVisible();
 });

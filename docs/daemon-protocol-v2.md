@@ -211,13 +211,14 @@ S2 同事务创建 decision 消息并将轮置为 `awaiting_human`，通过 `rep
 **server → daemon**：`trace.read`、`external_chat.request`。
 
 `external_chat.request` 仅由广告 `external_chats: 1` 的 Codex lane 接收，带明确 `rt`。
+`models` 与包含 `model` 的 `send` 还要求 `external_chat_models: 1`，防止旧 daemon 静默忽略模型选择。
 载荷使用 [外部 Chat 契约](../packages/contracts/src/external-chats.ts) 的固定操作联合，
 不转发任意原生方法、Home、socket 或配置；正文页遵守普通帧预算。
 应答为 `{ok:true,data}` 或 `{ok:false,code,message,outcome?}`，通过所属连接和 `re` 关联，
 离线、并发额度及请求期限由服务端反向 RPC 客户端控制。
 原生发送、审批和停止是写操作，不进可靠 outbox，不在超时或断线后自动重放；
 `outcome: unknown` 保留原生写入已发生的可能性。发送回执在 daemon 自有状态目录持久化，
-相同 `request_id` 只查询或对账，不重复发送。具体来源和恢复规则见 [Chat](chat.md#外部-codex-chat)。
+相同 `request_id` 绑定线程、正文和可选模型，只查询或对账，不重复发送。具体来源和恢复规则见 [Chat](chat.md#外部-codex-chat)。
 
 RPC 应答的 `t` 固定为 `res`，`p` 为 `{ "ok": true, ... }` 或
 `{ "ok": false, "code": <错误码>, "message": "人话", "retryable": <bool> }`。

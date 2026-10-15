@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExternalChatCatalog, ExternalChatOperation, ExternalChatProject, ExternalChatReceipt, ExternalChatResult, ExternalChatRpcResult } from "@multiremi/contracts/external-chats";
-import { EXTERNAL_CHAT_MAX_PAGE_SIZE, EXTERNAL_CHAT_MAX_TEXT_CHARS, EXTERNAL_CHAT_RPC_MAX_BYTES } from "@multiremi/contracts/external-chats";
+import type { ExternalChatCatalog, ExternalChatModels, ExternalChatOperation, ExternalChatProject, ExternalChatReceipt, ExternalChatResult, ExternalChatRpcResult } from "@multiremi/contracts/external-chats";
+import { EXTERNAL_CHAT_MAX_MODEL_CHARS, EXTERNAL_CHAT_MAX_PAGE_SIZE, EXTERNAL_CHAT_MAX_TEXT_CHARS, EXTERNAL_CHAT_RPC_MAX_BYTES } from "@multiremi/contracts/external-chats";
 import { connectNative, NativeError, array, object, string, type NativeConnection, type NativeConnectionFactory, type NativeObject } from "./native.js";
 import { assertSourceOwned, discoverSources, hash, type LocalSource } from "./sources.js";
 import { directoryProject, nativeProject, nativeRequest, summary, turns } from "./format.js";
@@ -68,8 +68,8 @@ export class CodexExternalChats {
 
   private validate(operation: ExternalChatOperation): void {
     if (!operation || typeof operation !== "object") throw new ChatError("invalid_operation", "无效的外部会话操作。");
-    if (!["catalog", "list", "read", "send", "receipt", "interrupt", "respond"].includes(operation.operation)) throw new ChatError("invalid_operation", "不支持此外部会话操作。");
-    const required = operation.operation === "catalog" ? [] : operation.operation === "list" ? ["source_id"]
+    if (!["catalog", "models", "list", "read", "send", "receipt", "interrupt", "respond"].includes(operation.operation)) throw new ChatError("invalid_operation", "不支持此外部会话操作。");
+    const required = operation.operation === "catalog" ? [] : ["list", "models"].includes(operation.operation) ? ["source_id"]
       : ["source_id", "thread_id", ...(["send", "receipt", "respond"].includes(operation.operation) ? ["request_id"] : []), ...(operation.operation === "interrupt" ? ["turn_id"] : [])];
     if (required.some(field => !(field in operation))) throw new ChatError("invalid_reference", "缺少原生会话标识。");
     for (const field of ["source_id", "thread_id", "request_id", "turn_id"] as const) {
@@ -77,6 +77,7 @@ export class CodexExternalChats {
       if (field in operation && (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,160}$/.test(value))) throw new ChatError("invalid_reference", "无效的原生会话标识。");
     }
     if (operation.operation === "send" && (typeof operation.text !== "string" || !operation.text.trim() || operation.text.length > EXTERNAL_CHAT_MAX_TEXT_CHARS)) throw new ChatError("invalid_text", "消息为空或超过长度上限。");
+    if (operation.operation === "send" && operation.model !== undefined && !this.validModel(operation.model)) throw new ChatError("invalid_model", "模型标识无效。");
     if ("cursor" in operation && operation.cursor !== undefined && (typeof operation.cursor !== "string" || operation.cursor.length > 4_096)) throw new ChatError("invalid_cursor", "分页游标无效。");
     if ("limit" in operation && operation.limit !== undefined && (!Number.isInteger(operation.limit) || operation.limit < 1 || operation.limit > EXTERNAL_CHAT_MAX_PAGE_SIZE)) throw new ChatError("invalid_limit", "分页数量无效。");
   }
@@ -180,6 +181,10 @@ export class CodexExternalChats {
       catch { return this.publicReceipt(receipt); }
     }
     const connection = await this.connection(source);
+    if (operation.operation === "models") {
+      const page = await this.modelPage(connection, operation.cursor, operation.limit);
+      return { source_id: source.id, models: page.models.map(model => ({ id: string(model.model), name: string(model.displayName) || string(model.model), description: string(model.description) })), next_cursor: page.nextCursor } satisfies ExternalChatModels;
+    }
     if (operation.operation === "list") {
       const index = await this.index(source, connection);
       const project = operation.project_id && index.projects.find(project => project.id === operation.project_id);
@@ -211,6 +216,43 @@ export class CodexExternalChats {
     return thread;
   }
 
+  private validModel(value: unknown): value is string {
+    return typeof value === "string" && value.length > 0 && value.length <= EXTERNAL_CHAT_MAX_MODEL_CHARS
+      && value.trim() === value && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
+  }
+
+  private async modelPage(connection: NativeConnection, cursor?: string, limit = EXTERNAL_CHAT_MAX_PAGE_SIZE): Promise<{ models: NativeObject[]; nextCursor: string | null }> {
+    const page = await connection.rpc("model/list", { limit, includeHidden: false, ...(cursor ? { cursor } : {}) });
+    if (!Array.isArray(page.data) || page.data.length > limit || page.nextCursor !== null && page.nextCursor !== undefined && (typeof page.nextCursor !== "string" || page.nextCursor.length > 4_096)) {
+      throw new NativeError("native_model_catalog_invalid");
+    }
+    const models = array(page.data).filter(model => model.hidden !== true);
+    if (models.some(model => !this.validModel(model.model) || typeof model.displayName !== "string" || model.displayName.length > 240
+      || typeof model.description !== "string" || model.description.length > 4_000)) throw new NativeError("native_model_catalog_invalid");
+    return { models, nextCursor: string(page.nextCursor) || null };
+  }
+
+  private async findModel(connection: NativeConnection, id: string): Promise<NativeObject> {
+    let cursor: string | undefined;
+    const seen = new Set<string>();
+    // Bound native work even if a broken catalog keeps producing fresh cursors.
+    for (let pageNumber = 0; pageNumber < 10; pageNumber++) {
+      const page = await this.modelPage(connection, cursor);
+      const model = page.models.find(model => model.model === id);
+      if (model) {
+        const defaultEffort = model.defaultReasoningEffort;
+        if (typeof defaultEffort !== "string" || !defaultEffort || defaultEffort.length > 80
+          || !Array.isArray(model.supportedReasoningEfforts) || !array(model.supportedReasoningEfforts).some(effort => effort.reasoningEffort === defaultEffort)) throw new NativeError("native_model_catalog_invalid");
+        return model;
+      }
+      if (!page.nextCursor) throw new ChatError("model_not_available", "所选模型不在此原生来源的可见模型目录中，请刷新模型选项。");
+      if (seen.has(page.nextCursor)) throw new NativeError("native_cursor_invalid");
+      seen.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
+    throw new ChatError("model_catalog_too_large", "模型目录超过校验上限，未发送消息。");
+  }
+
   private async read(source: LocalSource, connection: NativeConnection, operation: Extract<ExternalChatOperation, { operation: "read" }>): Promise<ExternalChatResult> {
     const thread = await this.thread(connection, operation.thread_id);
     let page: NativeObject;
@@ -237,7 +279,7 @@ export class CodexExternalChats {
     const binding = hash(operation.text);
     const previous = this.receipts.read(source.id, operation.request_id);
     if (previous) {
-      if (previous.thread_id !== operation.thread_id || previous.payload_hash !== binding) throw new ChatError("receipt_binding_mismatch", "此请求 ID 已绑定另一会话或消息。");
+      if (previous.thread_id !== operation.thread_id || previous.payload_hash !== binding || previous.model !== operation.model) throw new ChatError("receipt_binding_mismatch", "此请求 ID 已绑定另一会话、消息或模型。");
       if (previous.outcome === "accepted") return this.publicReceipt(previous);
       try { return await this.reconcile(previous, connection); }
       catch { return this.publicReceipt(previous); }
@@ -245,6 +287,10 @@ export class CodexExternalChats {
     await this.requireOwnedInputFinished(source.id, operation.thread_id, connection);
     const thread = await this.thread(connection, operation.thread_id);
     this.requireIdle(connection, thread);
+    const selectedModel = operation.model === undefined ? undefined : await this.findModel(connection, operation.model);
+    const currentEffort = string(thread.reasoningEffort);
+    const supportedEfforts = array(selectedModel?.supportedReasoningEfforts).map(effort => string(effort.reasoningEffort));
+    const effort = selectedModel && !supportedEfforts.includes(currentEffort) ? string(selectedModel.defaultReasoningEffort) : undefined;
     if (!connection.attached.has(operation.thread_id)) {
       const resumed = await connection.rpc("thread/resume", { threadId: operation.thread_id, excludeTurns: true });
       const resumedThread = object(resumed.thread);
@@ -253,12 +299,13 @@ export class CodexExternalChats {
     }
     // This catches observed busy state. Codex's API does not provide an atomic idle precondition across clients.
     this.requireIdle(connection, await this.thread(connection, operation.thread_id));
-    const receipt: SavedReceipt = { source_id: source.id, request_id: operation.request_id, thread_id: operation.thread_id, turn_id: null, outcome: "unknown", payload_hash: binding };
+    const receipt: SavedReceipt = { source_id: source.id, request_id: operation.request_id, thread_id: operation.thread_id, turn_id: null, outcome: "unknown", payload_hash: binding, ...(operation.model === undefined ? {} : { model: operation.model }) };
     if (!this.receipts.create(receipt)) return this.send(source, connection, operation);
     const key = `${source.id}:${operation.thread_id}`;
     this.ownedInputs.set(key, { requestId: operation.request_id, turnId: null });
     try {
-      const result = await connection.rpc("turn/start", { threadId: operation.thread_id, input: [{ type: "text", text: operation.text }], clientUserMessageId: operation.request_id });
+      const result = await connection.rpc("turn/start", { threadId: operation.thread_id, input: [{ type: "text", text: operation.text }], clientUserMessageId: operation.request_id,
+        ...(operation.model === undefined ? {} : { model: operation.model }), ...(effort ? { effort } : {}) });
       const turnId = string(object(result.turn).id);
       if (turnId) {
         const owned = this.ownedInputs.get(key);

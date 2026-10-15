@@ -143,7 +143,8 @@ async function send(invocation: CommandInvocation): Promise<void> {
     }
     renderReceipt(invocation, receipt);
   } catch (error) {
-    if (error instanceof CliError && isRecord(error.details) && error.details.code === "external_chat_models_unsupported"
+    if (error instanceof CliError && isRecord(error.details) && typeof error.details.code === "string"
+      && ["external_chat_models_unsupported", "model_catalog_too_large", "native_model_catalog_invalid", "native_cursor_invalid"].includes(error.details.code)
       && error.details.outcome !== "unknown") {
       throw new CliError(error.code, error.message, { status: error.status, retryable: false, details: error.details, cause: error });
     }

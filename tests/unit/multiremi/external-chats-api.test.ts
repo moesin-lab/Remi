@@ -240,6 +240,18 @@ describe("external Chat HTTP contract and authorization", () => {
     expect(f.calls[0]!.operation).toMatchObject({ operation: "respond", request_id: "17", answers: { choice: ["Continue"] } });
   });
 
+  it("reports a removed model as a conflict without claiming an unknown send outcome", async () => {
+    const f = fixture();
+    f.client.request = async (runtimeId, operation) => {
+      f.calls.push({ runtimeId, operation });
+      return { ok: false, code: "model_not_available", message: "Refresh the native model catalog" };
+    };
+    const response = await f.request(`${f.path}/messages`, { text: "Continue", request_id: requestId, model: "provider/removed" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: "model_not_available", error: "Refresh the native model catalog" });
+    expect(f.calls).toHaveLength(1);
+  });
+
   it("returns unknown write outcomes without resending and maps typed native failures", async () => {
     const f = fixture();
     f.client.request = async (runtimeId, operation) => {

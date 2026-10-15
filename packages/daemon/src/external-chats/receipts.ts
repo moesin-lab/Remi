@@ -2,9 +2,10 @@ import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openS
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import type { ExternalChatReceipt } from "@multiremi/contracts/external-chats";
+import { EXTERNAL_CHAT_MAX_MODEL_CHARS } from "@multiremi/contracts/external-chats";
 import { hash } from "./sources.js";
 
-export interface SavedReceipt extends ExternalChatReceipt { source_id: string; payload_hash: string }
+export interface SavedReceipt extends ExternalChatReceipt { source_id: string; payload_hash: string; model?: string }
 
 export class Receipts {
   constructor(private root: string, private uid: number | undefined) { this.root = resolve(root); }
@@ -22,6 +23,7 @@ export class Receipts {
       const receipt = JSON.parse(readFileSync(fd, "utf8")) as SavedReceipt;
       if (receipt.source_id !== source || receipt.request_id !== request || typeof receipt.thread_id !== "string"
         || typeof receipt.payload_hash !== "string" || !["unknown", "accepted"].includes(receipt.outcome)
+        || receipt.model !== undefined && (typeof receipt.model !== "string" || !receipt.model || receipt.model.length > EXTERNAL_CHAT_MAX_MODEL_CHARS)
         || receipt.turn_id !== null && typeof receipt.turn_id !== "string") throw new Error("Invalid receipt binding");
       return receipt;
     } finally { closeSync(fd); }
@@ -43,7 +45,7 @@ export class Receipts {
   update(receipt: SavedReceipt): void {
     this.prepare();
     const previous = this.read(receipt.source_id, receipt.request_id);
-    if (!previous || previous.thread_id !== receipt.thread_id || previous.payload_hash !== receipt.payload_hash) throw new Error("Invalid receipt binding");
+    if (!previous || previous.thread_id !== receipt.thread_id || previous.payload_hash !== receipt.payload_hash || previous.model !== receipt.model) throw new Error("Invalid receipt binding");
     const temporary = join(this.root, `${randomUUID()}.tmp`);
     const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     try { writeFileSync(fd, JSON.stringify(receipt) + "\n"); fsyncSync(fd); }

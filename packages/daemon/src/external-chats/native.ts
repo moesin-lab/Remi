@@ -131,7 +131,7 @@ export async function connectNative(home: string, options: NativeOptions): Promi
       capabilities: { experimentalApi: true },
     });
     if (realpathSync(string(initialized.codexHome)) !== home) throw new NativeError("source_home_mismatch");
-    channel.version = string(initialized.userAgent).match(/(?:codex_cli_rs|codex-cli|codex|Codex Desktop)\/(\d+\.\d+\.\d+[^\s;)]*)/)?.[1] ?? "";
+    channel.version = string(initialized.userAgent).match(/(?:codex_cli_rs|codex-cli|codex-tui|codex|Codex Desktop)\/(\d+\.\d+\.\d+[^\s;)]*)/)?.[1] ?? "";
     channel.notify("initialized");
     return channel;
   } catch (error) {

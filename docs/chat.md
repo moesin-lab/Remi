@@ -34,10 +34,18 @@ API 只接受已发现的来源 ID，不接受 Home、socket、任意原生方�
 
 读取使用原生 metadata 和有界历史分页，不恢复线程。原生服务已运行时，经其本地控制 socket 接入；
 没有可用原生服务时使用同一来源 Home 的独立 Codex app-server。仍在运行但连接失败的服务不会被另一进程替换。
-继续聊只调用原生 `thread/resume` 和 `turn/start`，不新建、复制或 fork thread，不注入云友提示词、模型、
-连接 Profile、AGENTS 或 Skill。模型、provider、思考强度和工作目录来自原生 metadata；
+继续聊只调用原生 `thread/resume` 和 `turn/start`，不新建、复制或 fork thread，不注入云友提示词、
+连接 Profile、AGENTS 或 Skill。未选择模型时保留原生模型和思考强度；provider 和工作目录来自原生 metadata；
 权限与其他运行设置由原生 Codex 按其恢复规则解析，不能用当前 Project 配置冒充历史轮设置。
 续接失败、来源离线、writer lease 冲突或版本不支持时明确报错，不冷启动一个替代会话。
+
+模型选项通过所选来源的原生 `model/list` 分页读取，与能力组或其他来源的目录分开。
+选择模型只影响下一次发送：daemon 先确认模型仍在该来源的可见目录，再向同一 thread 的 `turn/start`
+传入 `model`。已知的原思考强度被新模型支持时保留，否则使用该模型目录中的默认强度。
+该覆盖由原生 Codex 保留到后续轮次，不改写 Home 配置；切换失败不自动尝试其他模型。
+原生模型目录可能来自缓存，列出选项不等于已验证推理权限。历史模型不在目录时仍可沿用原生设置续聊。
+模型读取与带模型发送要求 Runtime 广告 `external_chat_models: 1`；旧 daemon 只能使用原生设置续聊。
+运行中、发送中或发送结果尚未确认时锁定选择，切换会话或来源不会沿用上一会话的待发送模型选择。
 
 Remi 拒绝已知 active 线程的新输入，同一线程在本产品内串行处理发送；本连接发送的上一轮即使已收到 ACK，
 仍需确认原生终态后才能发送下一条，暂缺历史和 unknown 回执都不能作为结束依据。原生接口没有跨客户端的
@@ -50,14 +58,14 @@ Remi 不自动执行这些工具、不刷新原生认证、不批准裁剪后的
 不能宣称拒绝回调后已自动恢复执行。
 
 发送使用客户端生成的 `request_id` 和 daemon 持久回执。断线或超时可能发生在原生接受输入之后，
-因此结果为 `unknown` 时不自动重发，先按原生消息的 client ID 对账。同一个请求 ID 不能绑定不同正文或线程。
+因此结果为 `unknown` 时不自动重发，先按原生消息的 client ID 对账。同一个请求 ID 不能绑定不同正文、线程或模型。
 原生读取有独立条数和字节预算，优先保留最近的用户消息与助手回复，再展示工具输出；
 裁剪的输出明确标识，分页不等于一次返回完整历史。
 
 接口见 [外部 Chat 路由](../packages/server/src/api/routers/external-chats.ts)，
 类型见 [共享契约](../packages/contracts/src/external-chats.ts)，
 本机接入见 [Codex driver](../packages/daemon/src/external-chats/index.ts)。
-CLI 使用 `remi chat external sources/list/get/send/receipt/interrupt/respond`，参数由 Registry help 生成。
+CLI 使用 `remi chat external sources/models/list/get/send/receipt/interrupt/respond`，`send --model` 可显式选择模型，参数由 Registry help 生成。
 普通 Remi Chat 的工作位置、消息队列与管理操作继续遵循以下契约。
 
 ## Chat 与上下文

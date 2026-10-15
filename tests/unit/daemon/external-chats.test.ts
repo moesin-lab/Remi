@@ -7,7 +7,7 @@ import { WebSocketServer } from "ws";
 import { CodexExternalChats } from "@daemon/external-chats/index.js";
 import { connectNative, NativeError, supportedNativeRequest, type NativeConnection, type NativeObject, type NativeRequest } from "@daemon/external-chats/native.js";
 import { discoverSources, hash } from "@daemon/external-chats/sources.js";
-import type { ExternalChatCatalog, ExternalChatHistory, ExternalChatList, ExternalChatReceipt } from "@multiremi/contracts/external-chats";
+import type { ExternalChatCatalog, ExternalChatHistory, ExternalChatList, ExternalChatModels, ExternalChatReceipt } from "@multiremi/contracts/external-chats";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -20,6 +20,7 @@ class FakeNative implements NativeConnection {
   calls: { method: string; params: NativeObject }[] = [];
   requests: NativeRequest[] = [];
   replies: NativeObject[] = [];
+  models: NativeObject[] = [{ model: "source-model", displayName: "Source model", description: "From this home", hidden: false, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "medium" }, { reasoningEffort: "high" }] }];
   thread: NativeObject = { id: "thread_a", cwd: "/work/app", source: "vscode", model: "source-model", modelProvider: "source-provider", reasoningEffort: "high", historyMode: "paginated", status: { type: "notLoaded" } };
   history: NativeObject[] = [{ id: "turn_old", status: "completed", items: [{ id: "message_old", type: "agentMessage", text: "old" }] }];
   loseAcknowledgement = false;
@@ -33,6 +34,7 @@ class FakeNative implements NativeConnection {
     if (overridden) return overridden;
     if (method === "project/list") return { data: [{ id: "project_a", name: "Native", roots: [{ path: "/work" }] }, { id: "project_b", name: "Overlap", roots: [{ path: "/work/app" }] }], nextCursor: null };
     if (method === "thread/list") return { data: [this.thread], nextCursor: null };
+    if (method === "model/list") return { data: this.models, nextCursor: null };
     if (method === "thread/read") {
       if (params.threadId !== this.thread.id) throw new NativeError(-32600, "thread not found");
       return { thread: { ...this.thread, ...(params.includeTurns ? { turns: this.history } : {}) } };
@@ -201,6 +203,68 @@ describe.skipIf(typeof process.getuid !== "function")("external Codex chats", ()
     cleanups.push(() => again.close());
     const result = await again.request(operation) as { ok: true; data: ExternalChatReceipt };
     expect(result.data.outcome).toBe("accepted");
+    expect(f.native.calls.filter(call => call.method === "turn/start")).toHaveLength(1);
+  });
+
+  it("lists the selected source's paged visible models without resuming a thread", async () => {
+    const f = fixture();
+    f.native.override = (method, params) => method === "model/list" ? { data: [
+      { ...f.native.models[0], model: "gateway/model-next", displayName: "Next" },
+      { ...f.native.models[0], model: "hidden", hidden: true },
+    ], nextCursor: "page_two" } : undefined;
+    const result = await f.driver.request({ operation: "models", source_id: f.source, cursor: "page_one", limit: 2 }) as { ok: true; data: ExternalChatModels };
+    expect(result).toEqual({ ok: true, data: { source_id: f.source, models: [{ id: "gateway/model-next", name: "Next", description: "From this home" }], next_cursor: "page_two" } });
+    expect(f.native.calls).toEqual([{ method: "model/list", params: { limit: 2, includeHidden: false, cursor: "page_one" } }]);
+    expect((await f.driver.request({ operation: "models", source_id: "codex_foreign" })).ok).toBe(false);
+    expect(f.native.calls).toHaveLength(1);
+  });
+
+  it("validates a selected model across native pages and uses its default only for incompatible effort", async () => {
+    const f = fixture();
+    f.native.override = (method, params) => {
+      if (method !== "model/list") return undefined;
+      return params.cursor ? { data: [{ ...f.native.models[0], model: "gateway/model-next", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] }], nextCursor: null }
+        : { data: f.native.models, nextCursor: "next" };
+    };
+    const operation = { operation: "send" as const, source_id: f.source, thread_id: "thread_a", text: "switch", request_id: "request_switch", model: "gateway/model-next" };
+    expect((await f.driver.request(operation)).ok).toBe(true);
+    expect(f.native.calls.filter(call => call.method === "model/list").map(call => call.params.cursor)).toEqual([undefined, "next"]);
+    expect(f.native.calls.find(call => call.method === "turn/start")!.params).toEqual({ threadId: "thread_a", input: [{ type: "text", text: "switch" }], clientUserMessageId: "request_switch", model: "gateway/model-next", effort: "medium" });
+    expect(f.native.calls.find(call => call.method === "thread/resume")!.params).toEqual({ threadId: "thread_a", excludeTurns: true });
+    expect(readFileSync(join(f.home, "config.toml"), "utf8")).toBe('model = "SOURCE_ONLY"\n');
+    const again = new CodexExternalChats(f.options);
+    cleanups.push(() => again.close());
+    expect((await again.request(operation)).ok).toBe(true);
+    expect(await again.request({ ...operation, model: "source-model" })).toMatchObject({ ok: false, code: "receipt_binding_mismatch" });
+    expect(await again.request({ ...operation, model: undefined })).toMatchObject({ ok: false, code: "receipt_binding_mismatch" });
+    expect(f.native.calls.filter(call => call.method === "turn/start")).toHaveLength(1);
+  });
+
+  it("preserves a known compatible native effort when explicitly selecting a model", async () => {
+    const f = fixture();
+    expect((await f.driver.request({ operation: "send", source_id: f.source, thread_id: "thread_a", text: "hello", request_id: "request_model", model: "source-model" })).ok).toBe(true);
+    expect(f.native.calls.find(call => call.method === "turn/start")!.params.model).toBe("source-model");
+    expect(f.native.calls.find(call => call.method === "turn/start")!.params).not.toHaveProperty("effort");
+  });
+
+  it("rejects unavailable models, malformed catalogs and cursor loops before resume or native input", async () => {
+    const f = fixture();
+    const operation = { operation: "send" as const, source_id: f.source, thread_id: "thread_a", text: "hello", request_id: "request_model", model: "foreign-model" };
+    expect(await f.driver.request(operation)).toMatchObject({ ok: false, code: "model_not_available" });
+    f.native.override = method => method === "model/list" ? { data: [{ ...f.native.models[0], model: "malformed\nmodel" }], nextCursor: null } : undefined;
+    expect(await f.driver.request(operation)).toMatchObject({ ok: false, code: "native_model_catalog_invalid" });
+    f.native.override = method => method === "model/list" ? { data: [], nextCursor: "loop" } : undefined;
+    expect(await f.driver.request(operation)).toMatchObject({ ok: false, code: "native_cursor_invalid" });
+    expect(f.native.calls.some(call => ["thread/resume", "turn/start"].includes(call.method))).toBe(false);
+  });
+
+  it("binds an unknown acknowledgement to the original model without a second write", async () => {
+    const f = fixture();
+    f.native.loseAcknowledgement = true;
+    const operation = { operation: "send" as const, source_id: f.source, thread_id: "thread_a", text: "hello", request_id: "request_model", model: "source-model" };
+    expect(await f.driver.request(operation)).toMatchObject({ ok: true, data: { outcome: "unknown" } });
+    expect(await f.driver.request({ ...operation, model: "another-model" })).toMatchObject({ ok: false, code: "receipt_binding_mismatch" });
+    expect(await f.driver.request(operation)).toMatchObject({ ok: true, data: { outcome: "accepted" } });
     expect(f.native.calls.filter(call => call.method === "turn/start")).toHaveLength(1);
   });
 
@@ -400,6 +464,10 @@ describe.skipIf(typeof process.getuid !== "function")("external Codex chats", ()
     for (const ws of wss.clients) ws.send(JSON.stringify({ method: "serverRequest/resolved", params: { requestId: "approval_native" } }));
     await connection.rpc("thread/list", { useStateDbOnly: true });
     expect(connection.pending("thread_a")).toEqual([]);
+    userAgent = "codex-tui/0.162.1 (Mac OS 15; arm64)";
+    const tui = await connectNative(f.home, { uid: process.getuid!(), codexBinary: "/NEVER_EXECUTE_MISSING_BINARY" });
+    cleanups.push(() => tui.close());
+    expect(tui.version).toBe("0.162.1");
     userAgent = "Unknown Client/0.154.0";
     const unknown = await connectNative(f.home, { uid: process.getuid!(), codexBinary: "/NEVER_EXECUTE_MISSING_BINARY" });
     cleanups.push(() => unknown.close());

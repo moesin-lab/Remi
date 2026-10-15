@@ -1,14 +1,14 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 834,
+    "routeCount": 835,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 592,
+      "compat": 593,
       "root": 16
     },
-    "getRoutes": 359,
-    "getRoutesWithBody": 355,
+    "getRoutes": 360,
+    "getRoutesWithBody": 356,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
@@ -393,6 +393,7 @@
     "GET /api/runtimes/:id/commands/:requestId",
     "GET /api/runtimes/:id/directory-scans/:requestId",
     "GET /api/runtimes/:id/external-chats",
+    "GET /api/runtimes/:id/external-chats/:sourceId/models",
     "GET /api/runtimes/:id/external-chats/:sourceId/threads",
     "GET /api/runtimes/:id/external-chats/:sourceId/threads/:threadId",
     "GET /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/receipts/:requestId",
@@ -1207,6 +1208,7 @@
     "GET /api/runtimes/:id/commands/:requestId",
     "GET /api/runtimes/:id/directory-scans/:requestId",
     "GET /api/runtimes/:id/external-chats",
+    "GET /api/runtimes/:id/external-chats/:sourceId/models",
     "GET /api/runtimes/:id/external-chats/:sourceId/threads",
     "GET /api/runtimes/:id/external-chats/:sourceId/threads/:threadId",
     "GET /api/runtimes/:id/external-chats/:sourceId/threads/:threadId/receipts/:requestId",
@@ -7041,6 +7043,17 @@
             "id": "chat.external.list",
             "command": "remi chat external list",
             "capability": "chat.external.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "chat.external.models",
+            "command": "remi chat external models",
+            "capability": "chat.external.models",
             "outputs": [
               "table",
               "json",
@@ -21467,6 +21480,16 @@
       "key": "get-sweep GET /api/runtimes/:id/external-chats",
       "route": "GET /api/runtimes/:id/external-chats",
       "path": "/api/runtimes/rt_snapshot/external-chats",
+      "status": 503,
+      "body": {
+        "error": "Upgrade the owning Codex Runtime to enable External Chats",
+        "code": "external_chats_unsupported"
+      }
+    },
+    {
+      "key": "get-sweep GET /api/runtimes/:id/external-chats/:sourceId/models",
+      "route": "GET /api/runtimes/:id/external-chats/:sourceId/models",
+      "path": "/api/runtimes/rt_snapshot/external-chats/fsrc_snapshot/models",
       "status": 503,
       "body": {
         "error": "Upgrade the owning Codex Runtime to enable External Chats",

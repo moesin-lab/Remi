@@ -170,7 +170,15 @@ describe("CLI capabilities manifest", () => {
         expect(options.has(name), `${entry.id} --${name}`).toBe(true);
       }
       if (entry.mutation === "read") {
-        for (const name of ["limit", "cursor", "query"]) {
+        const externalParameters: Record<string, string[]> = {
+          "chat.external.sources": [],
+          "chat.external.models": ["limit", "cursor"],
+          "chat.external.list": ["limit", "cursor"],
+          "chat.external.get": ["limit", "cursor"],
+          "chat.external.receipt": [],
+        };
+        // Native catalogs and receipts accept only their real protocol parameters.
+        for (const name of externalParameters[entry.id] ?? ["limit", "cursor", "query"]) {
           expect(options.has(name), `${entry.id} --${name}`).toBe(true);
         }
       }
@@ -226,10 +234,10 @@ describe("CLI capabilities manifest", () => {
 
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
     expect(cliCoverageReport(manifest)).toEqual({
-      mapped: 645,
+      mapped: 653,
       exempt: 182,
       missing: 0,
-      total: 827,
+      total: 835,
     });
     for (const [route, command] of Object.entries({
       "GET /api/workspaces/:id/feishu-bots": "workspace.feishu-bot.list",

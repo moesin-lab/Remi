@@ -416,9 +416,10 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(statuses.has(route)).toBe(true);
       expect(statuses.get(route), `${route} belongs to the browser/CLI process`).not.toBe(421);
     }
-    expect(misdirected, routeCountHint("ui")).toHaveLength(70);
+    expect(misdirected).toContain("GET /api/runtimes/:id/external-chats/:sourceId/models");
+    expect(misdirected, routeCountHint("ui")).toHaveLength(71);
     // daemon/ws and trace/ws are tested as real upgrades below.
-    expect(misdirected.length + 2, routeCountHint("ui")).toBe(72);
+    expect(misdirected.length + 2, routeCountHint("ui")).toBe(73);
   });
 
   it("refuses paths outside runtime's daemon, health, peer and trace routes", async () => {

@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@multiremi/core/api";
 import { externalChatHistoryOptions, externalChatKeys, externalChatWriteIsUnknown, externalChatReceiptStorageKey, readExternalChatReceipt, writeExternalChatReceipt, EXTERNAL_CHAT_MAX_TEXT_CHARS, type ExternalChatReceipt, type ExternalChatTurn, type ExternalChatModel } from "@multiremi/core/chat";
 import { defaultSessionStorage } from "@multiremi/core/platform";
 import { createSafeId } from "@multiremi/core/utils";
 import { Button } from "@multiremi/ui/components/ui/button";
-import { Markdown } from "@multiremi/ui/markdown";
+import { MemoizedMarkdown } from "@multiremi/ui/markdown";
 import { Popover, PopoverContent, PopoverTrigger } from "@multiremi/ui/components/ui/popover";
 import { ArrowDown, ArrowUp, Info, List, Loader2, Square } from "lucide-react";
 import { useT } from "../../i18n";
@@ -16,6 +16,22 @@ import { ExternalChatModelPicker } from "./external-chat-model-picker";
 
 const terminal = (status: string) => ["completed", "failed", "interrupted", "cancelled"].includes(status);
 interface NativeSendState { receipt: ExternalChatReceipt; text?: string }
+
+const ExternalChatTurnView = memo(function ExternalChatTurnView({ turn }: { turn: ExternalChatTurn }) {
+  const { t } = useT("chat");
+
+  return <section className="space-y-3">
+    {turn.items.map(item => item.role === "user" || item.type === "agentMessage" ? (
+      <div className={item.role === "user" ? "flex justify-end" : "text-sm leading-relaxed"} key={item.id}>
+        <div className={item.role === "user" ? "max-w-[80%] break-words rounded-2xl bg-muted px-3.5 py-2 text-sm" : "min-w-0 w-full"}>
+          <div className="prose prose-sm dark:prose-invert max-w-none break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"><MemoizedMarkdown>{item.text}</MemoizedMarkdown></div>
+          {item.truncated && <p className="text-xs text-muted-foreground">{t(($) => $.external.truncated)}</p>}
+        </div>
+      </div>
+    ) : <details className="rounded-md border p-2" key={item.id}><summary className="cursor-pointer text-xs">{item.type}</summary><pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words text-xs">{item.text}</pre>{item.truncated && <p className="text-xs">{t(($) => $.external.truncated)}</p>}</details>)}
+    {turn.error && <p role="alert" className="text-sm text-destructive">{turn.error}</p>}
+  </section>;
+});
 
 export function ExternalChatWindow({ ws, runtime, source, thread, online, modelsSupported = false, draft, onDraftChange, onShowList }: {
   ws: string; runtime: string; source: string; thread: string; online: boolean;
@@ -61,15 +77,25 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, models
     },
   });
   const current = history.data?.pages[0];
-  const turns = new Map<string, ExternalChatTurn>();
-  for (const page of [...(history.data?.pages ?? [])].reverse()) {
-    for (const turn of page.turns) {
-      const previous = turns.get(turn.id);
-      const items = [...new Map([...(previous?.items ?? []), ...turn.items].map(item => [item.id, item])).values()];
-      turns.set(turn.id, { ...turn, items });
+  const turns = useMemo(() => {
+    const merged = new Map<string, ExternalChatTurn>();
+
+    for (const page of [...(history.data?.pages ?? [])].reverse()) {
+      for (const turn of page.turns) {
+        const previous = merged.get(turn.id);
+        if (!previous) {
+          merged.set(turn.id, turn);
+          continue;
+        }
+
+        const items = [...new Map([...previous.items, ...turn.items].map(item => [item.id, item])).values()];
+        merged.set(turn.id, { ...turn, items });
+      }
     }
-  }
-  const allTurns = [...turns.values()];
+
+    return merged;
+  }, [history.data]);
+  const allTurns = useMemo(() => [...turns.values()], [turns]);
   const receiptTurn = lastReceipt?.turn_id ? turns.get(lastReceipt.turn_id) : undefined;
   const receiptRunning = lastReceipt?.outcome === "accepted" && !!lastReceipt.turn_id && (!receiptTurn || !terminal(receiptTurn.status));
   const activeTurn = allTurns.find(turn => ["inProgress", "running", "active"].includes(turn.status));
@@ -197,17 +223,7 @@ export function ExternalChatWindow({ ws, runtime, source, thread, online, models
         <div className="mx-auto w-full max-w-4xl space-y-4 px-5 py-4">
         {history.hasNextPage && <div className="flex h-10 items-center justify-center"><Button variant="ghost" size="sm" disabled={history.isFetchingNextPage || !online} onClick={loadOlder}>{t(($) => $.external.older)}</Button></div>}
         {current && allTurns.length === 0 && <p className="text-sm text-muted-foreground">{t(($) => $.external.no_messages)}</p>}
-        {allTurns.map(turn => <section className="space-y-3" key={turn.id}>
-          {turn.items.map(item => item.role === "user" || item.type === "agentMessage" ? (
-            <div className={item.role === "user" ? "flex justify-end" : "text-sm leading-relaxed"} key={item.id}>
-              <div className={item.role === "user" ? "max-w-[80%] break-words rounded-2xl bg-muted px-3.5 py-2 text-sm" : "min-w-0 w-full"}>
-              <div className="prose prose-sm dark:prose-invert max-w-none break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"><Markdown>{item.text}</Markdown></div>
-              {item.truncated && <p className="text-xs text-muted-foreground">{t(($) => $.external.truncated)}</p>}
-              </div>
-            </div>
-          ) : <details className="rounded-md border p-2" key={item.id}><summary className="cursor-pointer text-xs">{item.type}</summary><pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words text-xs">{item.text}</pre>{item.truncated && <p className="text-xs">{t(($) => $.external.truncated)}</p>}</details>)}
-          {turn.error && <p role="alert" className="text-sm text-destructive">{turn.error}</p>}
-        </section>)}
+        {allTurns.map(turn => <ExternalChatTurnView key={turn.id} turn={turn} />)}
         {current?.requests.map(request => <ExternalChatRequestCard request={request} key={request.id} disabled={!online || respond.isPending}
           onRespond={input => respond.mutate({ id: request.id, ...input })} />)}
         </div>

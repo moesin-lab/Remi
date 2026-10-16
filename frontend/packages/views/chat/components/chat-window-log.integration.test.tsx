@@ -41,7 +41,10 @@ vi.mock("@multiremi/core/paths", async importOriginal => {
   return { ...actual, useWorkspacePaths: () => actual.paths.workspace("test") };
 });
 vi.mock("@multiremi/views/issues/components", () => ({ canAssignAgent: () => true }));
-vi.mock("../../navigation", () => ({ useNavigation: () => ({ push: vi.fn() }) }));
+vi.mock("../../navigation", () => ({
+  useNavigation: () => ({ push: vi.fn() }),
+  AppLink: ({ href, children }: { href: string; children: ReactNode }) => <a href={href}>{children}</a>,
+}));
 vi.mock("../../layout/page-header", () => ({ PageHeader: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
 vi.mock("./use-chat-resize", () => ({ useChatResize: () => ({ boundsReady: true }) }));
 vi.mock("./use-chat-context-items", () => ({ useChatContextItems: () => [] }));

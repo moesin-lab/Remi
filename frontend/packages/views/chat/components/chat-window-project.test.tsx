@@ -9,6 +9,7 @@ import type { ChatSession } from "@multiremi/core/types";
 import enChat from "../../locales/en/chat.json";
 import enIssues from "../../locales/en/issues.json";
 import enRuntimes from "../../locales/en/runtimes.json";
+import { traceTurn, turnPage, turnTraceCache } from "../../test/trace-fixtures";
 
 const backend = vi.hoisted(() => ({
   sessions: [] as ChatSession[],
@@ -497,6 +498,23 @@ describe("minimised chat window preloads nothing (MUL-472 b)", () => {
 });
 
 describe("ChatWindow page shell", () => {
+  it("keeps the external-chat switch available when the subagent panel opens", async () => {
+    backend.sessions = [session];
+    const { store, client } = mount(true);
+    const externalLink = await screen.findByRole("link", { name: "External" });
+    const header = document.querySelector("[data-chat-page-header]");
+    client.setQueryData(["task-trace", "att_1"], turnTraceCache(turnPage(traceTurn({ status: "completed" }), [])));
+
+    act(() => store.getState().openSubagentPanel({
+      sessionId: session.id, attemptId: "att_1", turnId: "turn_1", live: false, path: [],
+    }));
+
+    expect(document.querySelector("[data-subagent-panel]")).toHaveAttribute("data-subagent-panel", "overview");
+    expect(document.querySelector("[data-chat-page-header]")).toBe(header);
+    expect(screen.getByRole("link", { name: "External" })).toBe(externalLink);
+    expect(externalLink).toHaveAttribute("href", "/chat?kind=external");
+  });
+
   it("names the agent, title and bound location without the page banner or session controls", async () => {
     backend.sessions = [{ ...session, title: "Release prep" }];
     mount(true);

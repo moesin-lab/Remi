@@ -64,6 +64,9 @@ export const TurnSchema = z.object({
   input_from_seq: z.number().nullable(), input_to_seq: z.number().nullable(),
   created_at: z.string(), started_at: z.string().nullable(), ended_at: z.string().nullable(),
   ended_reason: z.string().nullable(),
+  // Running subagents of the current attempt (PR 5); display-only, so a
+  // malformed value degrades to unknown instead of failing the turn list.
+  running_subagents: z.number().int().nonnegative().nullable().optional().catch(null),
 }).loose().refine(turn => !turn.current_attempt || turn.current_attempt.id === turn.current_attempt_id,
   { message: "Current attempt does not match the turn identity" });
 export const AttemptSchema = z.object({

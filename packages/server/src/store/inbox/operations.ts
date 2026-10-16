@@ -264,10 +264,12 @@ export class InboxOperations {
       "progress_summary", "progress_step", "progress_total"] as const;
     params.push(Math.min(input.limit ?? 100, 1000));
     return this.ctx.db.query(`SELECT ${fields.split(",").map(field => `multiremi_turns.${field}`).join(",")},NULL AS legacy_prompt,
-      ${attemptFields.map(field => `current_attempt.${field} AS attempt_${field}`).join(",")}
+      ${attemptFields.map(field => `current_attempt.${field} AS attempt_${field}`).join(",")},
+      CASE WHEN current_attempt.status IN ('accepted','running') THEN current_attempt.running_subagents END AS running_subagents
       FROM multiremi_turns LEFT JOIN multiremi_turn_attempts current_attempt ON current_attempt.id=multiremi_turns.current_attempt_id
       WHERE ${conditions.join(" AND ")} ORDER BY multiremi_turns.created_at DESC,multiremi_turns.id DESC LIMIT ?`).all(...params).map(row => {
-      const turn = { ...row, holds_workspace: !!row.holds_workspace } as MultiremiTurn;
+      const turn = { ...row, holds_workspace: !!row.holds_workspace,
+        running_subagents: row.running_subagents == null ? null : Number(row.running_subagents) } as MultiremiTurn;
       turn.current_attempt = row.attempt_id == null ? null : {
         id: row.attempt_id, status: row.attempt_status, runtime_id: row.attempt_runtime_id, provider: row.attempt_provider,
         error: row.attempt_error, failure_reason: row.attempt_failure_reason, progress_summary: row.attempt_progress_summary,
@@ -286,7 +288,10 @@ export class InboxOperations {
       claude_profile:row.claude_profile?JSON.parse(row.claude_profile):null,type_histogram:row.type_histogram?JSON.parse(row.type_histogram):null,
       model:row.model?JSON.parse(row.model):null,trace_ref:row.trace_ref?JSON.parse(row.trace_ref):null,
       context_usage:row.context_usage?JSON.parse(row.context_usage):null,worked_ms:row.worked_ms==null?null:Number(row.worked_ms),
-      process_item_count:row.process_item_count==null?null:Number(row.process_item_count)} as MultiremiTurnAttempt));
+      process_item_count:row.process_item_count==null?null:Number(row.process_item_count),
+      // PR 5: as on /api/turns rows, only an active attempt reports a running count.
+      running_subagents:row.running_subagents==null||!['accepted','running'].includes(row.status)?null:Number(row.running_subagents),
+      late_subagents:row.late_subagents?JSON.parse(row.late_subagents):null} as MultiremiTurnAttempt));
   }
   getTurnTrace(id:string){const turn=this.getTurn(id);if(!turn?.current_attempt_id)throw new Error('Turn not found');
     return {turn_id:id,attempt_id:turn.current_attempt_id,trace:this.ctx.taskTraces().getTaskTrace(turn.current_attempt_id)};}

@@ -45,6 +45,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:50>",
           "status": "offered",
@@ -91,6 +92,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:49>",
           "status": "offered",
@@ -137,6 +139,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:48>",
           "status": "offered",
@@ -183,6 +186,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:47>",
           "status": "offered",
@@ -229,6 +233,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:46>",
           "status": "offered",
@@ -275,6 +280,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:45>",
           "status": "offered",
@@ -321,6 +327,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:44>",
           "status": "offered",
@@ -367,6 +374,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:43>",
           "status": "offered",
@@ -413,6 +421,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:42>",
           "status": "offered",
@@ -459,6 +468,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:41>",
           "status": "offered",
@@ -505,6 +515,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:40>",
           "status": "offered",
@@ -551,6 +562,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:39>",
           "status": "offered",
@@ -597,6 +609,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:38>",
           "status": "offered",
@@ -643,6 +656,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:37>",
           "status": "offered",
@@ -689,6 +703,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:36>",
           "status": "offered",
@@ -735,6 +750,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:35>",
           "status": "offered",
@@ -781,6 +797,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:34>",
           "status": "offered",
@@ -827,6 +844,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:33>",
           "status": "offered",
@@ -873,6 +891,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:32>",
           "status": "offered",
@@ -919,6 +938,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:31>",
           "status": "offered",
@@ -965,6 +985,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:30>",
           "status": "offered",
@@ -1011,6 +1032,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:29>",
           "status": "offered",
@@ -1057,6 +1079,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:28>",
           "status": "offered",
@@ -1103,6 +1126,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:27>",
           "status": "offered",
@@ -1149,6 +1173,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:26>",
           "status": "offered",
@@ -1195,6 +1220,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:25>",
           "status": "offered",
@@ -1241,6 +1267,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:24>",
           "status": "offered",
@@ -1287,6 +1314,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:23>",
           "status": "offered",
@@ -1333,6 +1361,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:22>",
           "status": "offered",
@@ -1379,6 +1408,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:21>",
           "status": "offered",
@@ -1425,6 +1455,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:20>",
           "status": "offered",
@@ -1471,6 +1502,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:19>",
           "status": "offered",
@@ -1517,6 +1549,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:18>",
           "status": "offered",
@@ -1563,6 +1596,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:17>",
           "status": "offered",
@@ -1609,6 +1643,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:16>",
           "status": "offered",
@@ -1655,6 +1690,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:15>",
           "status": "offered",
@@ -1701,6 +1737,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:14>",
           "status": "offered",
@@ -1747,6 +1784,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:13>",
           "status": "offered",
@@ -1793,6 +1831,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:12>",
           "status": "offered",
@@ -1839,6 +1878,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:11>",
           "status": "offered",
@@ -1885,6 +1925,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:10>",
           "status": "offered",
@@ -1931,6 +1972,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:9>",
           "status": "offered",
@@ -1977,6 +2019,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:8>",
           "status": "offered",
@@ -2023,6 +2066,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:7>",
           "status": "offered",
@@ -2069,6 +2113,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:6>",
           "status": "offered",
@@ -2115,6 +2160,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:5>",
           "status": "offered",
@@ -2161,6 +2207,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:4>",
           "status": "offered",
@@ -2207,6 +2254,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:3>",
           "status": "offered",
@@ -2253,6 +2301,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:2>",
           "status": "offered",
@@ -2299,6 +2348,7 @@
         "ended_at": null,
         "ended_reason": null,
         "legacy_prompt": null,
+        "running_subagents": null,
         "current_attempt": {
           "id": "<task:0>",
           "status": "offered",

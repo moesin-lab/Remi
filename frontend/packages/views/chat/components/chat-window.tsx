@@ -93,6 +93,7 @@ import { getCurrentWsId } from "@multiremi/core/platform";
 import { createSafeId } from "@multiremi/core/utils";
 import { useFloatingPanelLayout } from "../../layout/floating-panel-layout";
 import { ChatQueue, type ChatQueueController } from "./chat-queue";
+import { SubagentPanelLayout } from "./subagent-panel";
 
 const uiLogger = createLogger("chat.ui");
 const apiLogger = createLogger("chat.api");
@@ -988,7 +989,9 @@ export function ChatWindow({
           <main
             className={`${showList ? "hidden" : "flex"} min-h-0 min-w-0 flex-1 flex-col md:flex`}
           >
-            {conversation}
+            <SubagentPanelLayout sessionId={displayedSessionId ?? null} presentation="page">
+              {conversation}
+            </SubagentPanelLayout>
           </main>
         </div>
       </div>
@@ -1028,7 +1031,10 @@ export function ChatWindow({
       }}
     >
       <ChatResizeHandles onDragStart={startDrag} />
-      {conversation}
+      {/* In the floating window the subagent panel covers the conversation. */}
+      <SubagentPanelLayout sessionId={displayedSessionId ?? null} presentation="window" visible={isOpen}>
+        {conversation}
+      </SubagentPanelLayout>
     </motion.div>
     </>
   );

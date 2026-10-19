@@ -10,6 +10,7 @@ import enChat from "../../locales/en/chat.json";
 import enIssues from "../../locales/en/issues.json";
 import enRuntimes from "../../locales/en/runtimes.json";
 import { traceTurn, turnPage, turnTraceCache } from "../../test/trace-fixtures";
+import { CHAT_COLUMN_CLASS } from "../lib/chat-column";
 
 const backend = vi.hoisted(() => ({
   sessions: [] as ChatSession[],
@@ -76,7 +77,7 @@ vi.mock("@multiremi/core/platform", async (importOriginal) => ({
 vi.mock("@multiremi/core/agents", () => ({ useWorkspaceAgentAvailability: () => "available", useAgentPresenceDetail: () => "loading" }));
 vi.mock("@multiremi/core/hooks/use-file-upload", () => ({ useFileUpload: () => ({ uploadWithToast: vi.fn() }) }));
 vi.mock("@multiremi/core/realtime", () => ({ useChatScopeSubscription: () => {}, useTraceStreamSubscription: () => {} }));
-vi.mock("@multiremi/core/session-log/use-issue-log", () => ({ useIssueLog: (sessionId: string, _initial: unknown, _comment: unknown, _cached: unknown, enabled: boolean) => {
+vi.mock("@multiremi/core/session-log/use-issue-log", () => ({ useChatLog: (sessionId: string, _initial: unknown, enabled: boolean) => {
   // The 444 replica replaces listChatMessagesPage; observe its load gate here.
   if (enabled && sessionId) listChatMessagesPageCalls();
   return ({
@@ -98,7 +99,7 @@ vi.mock("../../layout/page-header", () => ({ PageHeader: ({ children }: { childr
 vi.mock("./use-chat-resize", () => ({ useChatResize: () => ({ boundsReady: true }) }));
 vi.mock("./use-chat-context-items", () => ({ useChatContextItems: () => [] }));
 vi.mock("./chat-message-list", () => ({ ChatMessageList: () => null, ChatMessageSkeleton: () => null }));
-vi.mock("./human-request-dock", () => ({ HumanRequestDock: () => null }));
+vi.mock("./human-request-dock", () => ({ HumanRequestDock: ({ className }: { className?: string }) => <div data-testid="human-request-dock" className={className} /> }));
 vi.mock("./offline-banner", () => ({ OfflineBanner: () => null }));
 vi.mock("./no-agent-banner", () => ({ NoAgentBanner: () => null }));
 const queueFlush = vi.hoisted(() => vi.fn(async () => {}));
@@ -112,13 +113,15 @@ vi.mock("./session-dropdown", () => ({ SessionDropdown: () => <div data-testid="
 vi.mock("../../common/actor-avatar", () => ({
   ActorAvatar: ({ actorId }: { actorId: string }) => <span data-testid={`avatar-${actorId}`} />,
 }));
-vi.mock("./chat-input", () => ({ ChatInput: ({ onSend, onSaveQueueEdit, onStop, disabled }: {
+vi.mock("./chat-input", () => ({ ChatInput: ({ onSend, onSaveQueueEdit, onStop, disabled, leftAdornment }: {
   onSend: (value: string, ids?: string[], local?: unknown[], mode?: string) => Promise<void>;
   onSaveQueueEdit: (sessionId: string, edit: unknown, content: string, ids: string[]) => Promise<void>;
   onStop: () => void;
   disabled: boolean;
+  leftAdornment?: ReactNode;
 }) => (
   <>
+    <div data-testid="composer-footer">{leftAdornment}</div>
     <button disabled={disabled} onClick={() => void onSend("Hello").catch(() => {})}>Send test message</button>
     <button onClick={() => void onSend("Steer this", undefined, [], "steer").catch(() => {})}>Steer test message</button>
     <button onClick={() => void onSend("Queue this", ["att-1"], [{ id: "att-1", filename: "a.png", content_type: "image/png", size_bytes: 4 }], "queue")
@@ -147,14 +150,14 @@ const getChatSessionCalls = vi.hoisted(() => vi.fn());
  * minimised. `mount()` uses `presentation="page"` (always visible) for the
  * other suites, so this one drives the floating presentation.
  */
-function mountFloatingOpen(open: boolean) {
+function mountFloatingOpen(open: boolean, activeSessionId: string | null = session.id) {
   const values = new Map<string, string>();
   const store = createChatStore({ storage: {
     getItem: key => values.get(key) ?? null,
     setItem: (key, value) => { values.set(key, value); },
     removeItem: key => { values.delete(key); },
   } });
-  store.getState().setActiveSession(session.id);
+  store.getState().setActiveSession(activeSessionId);
   store.getState().setOpen(open);
   registerChatStore(store);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -289,7 +292,7 @@ describe("ChatWindow plain HTTP sends", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send test message" }));
 
     await waitFor(() => expect(backend.create).toHaveBeenCalledWith({ agent_id: "agent-a", title: "Hello" }));
-    await waitFor(() => expect(backend.send).toHaveBeenCalledWith("chat-a", "Hello", undefined, expect.any(String)));
+    await waitFor(() => expect(backend.send).toHaveBeenCalledWith("chat-a", "Hello", undefined, expect.any(String), { signal: expect.any(AbortSignal) }));
     await waitFor(() => expect(backend.refresh).toHaveBeenCalledOnce());
   });
 
@@ -301,7 +304,7 @@ describe("ChatWindow plain HTTP sends", () => {
     expect(globalThis.crypto.randomUUID).toBeUndefined();
     fireEvent.click(screen.getByRole("button", { name: "Send test message" }));
 
-    await waitFor(() => expect(backend.send).toHaveBeenCalledWith("chat-a", "Hello", undefined, expect.any(String)));
+    await waitFor(() => expect(backend.send).toHaveBeenCalledWith("chat-a", "Hello", undefined, expect.any(String), { signal: expect.any(AbortSignal) }));
     expect(backend.create).not.toHaveBeenCalled();
   });
 
@@ -346,7 +349,7 @@ describe("ChatWindow plain HTTP sends", () => {
 describe("ChatWindow project settings", () => {
   it("replaces a project draft with a fixed local working directory", async () => {
     const { store } = mount();
-    fireEvent.click(screen.getByRole("button", { name: "Work location: Automatic" }));
+    fireEvent.click(screen.getByRole("button", { name: "Work location: No project" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Remi" }));
     expect(store.getState().draftProjectId).toBe("project-a");
     fireEvent.click(screen.getByRole("button", { name: "Work location: Remi" }));
@@ -361,7 +364,7 @@ describe("ChatWindow project settings", () => {
 
   it("replaces a local directory draft with a project without sending both bindings", async () => {
     mount();
-    fireEvent.click(screen.getByRole("button", { name: "Work location: Automatic" }));
+    fireEvent.click(screen.getByRole("button", { name: "Work location: No project" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: /Local workbench/ }));
     fireEvent.click(screen.getByRole("button", { name: "Work location: Local workbench" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Remi" }));
@@ -370,15 +373,17 @@ describe("ChatWindow project settings", () => {
   });
 
   it("creates a conversation with the selected draft project", async () => {
-    mount();
-    fireEvent.click(screen.getByRole("button", { name: "Work location: Automatic" }));
+    const { store } = mount();
+    fireEvent.click(screen.getByRole("button", { name: "Work location: No project" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Remi" }));
     expect(screen.getByRole("button", { name: "Work location: Remi" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Send test message" }));
     await waitFor(() => expect(backend.create).toHaveBeenCalledWith({ agent_id: "agent-a", title: "Hello", project_id: "project-a" }));
-    await waitFor(() => expect(backend.send).toHaveBeenCalledWith("chat-a", "Hello", undefined, expect.any(String)));
+    await waitFor(() => expect(backend.send).toHaveBeenCalledWith("chat-a", "Hello", undefined, expect.any(String), { signal: expect.any(AbortSignal) }));
     expect(await screen.findByRole("group", { name: "Project: Remi" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Project:/ })).not.toBeInTheDocument();
+    // The created chat consumed the draft: the next new chat starts unbound.
+    expect(store.getState().draftProjectId).toBeNull();
   });
 
   it("keeps a new unbound chat's create request unchanged", async () => {
@@ -390,14 +395,14 @@ describe("ChatWindow project settings", () => {
 
   it("can clear a project draft before creating a pure chat", async () => {
     mount();
-    fireEvent.click(screen.getByRole("button", { name: "Work location: Automatic" }));
+    fireEvent.click(screen.getByRole("button", { name: "Work location: No project" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Remi" }));
     fireEvent.click(screen.getByRole("button", { name: "Work location: Remi" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Automatic" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /No project/ }));
     fireEvent.click(screen.getByRole("button", { name: "Send test message" }));
     await waitFor(() => expect(backend.create).toHaveBeenCalledWith({ agent_id: "agent-a", title: "Hello" }));
-    // An unbound chat keeps no location strip: the picker is gone once the
-    // chat exists, so the row would only restate that nothing is bound.
+    // A started chat with nothing bound shows no location: the footer would
+    // only restate that nothing is bound.
     await waitFor(() => expect(screen.queryByRole("button", { name: /^Work location:/ })).not.toBeInTheDocument());
     expect(screen.queryByRole("group", { name: /^Project:/ })).not.toBeInTheDocument();
     expect(backend.update).not.toHaveBeenCalled();
@@ -414,7 +419,7 @@ describe("ChatWindow project settings", () => {
     expect(backend.update).not.toHaveBeenCalled();
     expect(backend.create).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Send test message" }));
-    await waitFor(() => expect(backend.send).toHaveBeenCalledWith("chat-a", "Hello", undefined, expect.any(String)));
+    await waitFor(() => expect(backend.send).toHaveBeenCalledWith("chat-a", "Hello", undefined, expect.any(String), { signal: expect.any(AbortSignal) }));
   });
 
   it("keeps no location strip for an existing chat with nothing bound", async () => {
@@ -462,7 +467,52 @@ describe("ChatWindow project settings", () => {
     act(() => store.getState().setDraftProjectId("project-b"));
     fireEvent.click(screen.getByRole("button", { name: "New chat" }));
     expect(store.getState().draftProjectId).toBeNull();
-    expect(screen.getByRole("button", { name: "Work location: Automatic" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Work location: No project" })).toBeEnabled();
+  });
+});
+
+describe("ChatWindow work location in the composer footer", () => {
+  it("offers a new chat's location beside the agent, with no row of its own", async () => {
+    mount();
+    const footer = screen.getByTestId("composer-footer");
+    const picker = within(footer).getByRole("button", { name: "Work location: No project" });
+    expect(picker).toBeEnabled();
+    // The only picker on the page is the footer's.
+    expect(screen.getAllByRole("button", { name: /^Work location:/ })).toEqual([picker]);
+    fireEvent.click(picker);
+    expect(await screen.findByText(/By default there is no project/)).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /No project/ })).toHaveTextContent("Works in this chat's own folder; pulls no code");
+  });
+
+  it("shows a started chat's bound location read-only in the floating window", async () => {
+    backend.sessions = [session];
+    mountFloatingOpen(true);
+    const chip = await within(screen.getByTestId("composer-footer")).findByRole("group", { name: "Work location: Remi" });
+    expect(chip).toHaveAttribute("title", expect.stringContaining("The work location is fixed after the session starts."));
+    expect(screen.queryByRole("button", { name: /^Work location:/ })).not.toBeInTheDocument();
+  });
+
+  it("shows nothing for a started chat with no location", async () => {
+    backend.sessions = [{ ...session, project_id: null }];
+    mountFloatingOpen(true);
+    await waitFor(() => expect(listChatSessionsCalls).toHaveBeenCalled());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    const footer = screen.getByTestId("composer-footer");
+    expect(within(footer).queryByRole("group", { name: /^Work location:/ })).not.toBeInTheDocument();
+    expect(within(footer).queryByRole("button", { name: /^Work location:/ })).not.toBeInTheDocument();
+  });
+
+  it("starts the next new chat at No project after a bound chat is created and deleted", async () => {
+    const { store } = mountFloatingOpen(true, null);
+    fireEvent.click(within(screen.getByTestId("composer-footer")).getByRole("button", { name: "Work location: No project" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Local workbench/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Send test message" }));
+    await waitFor(() => expect(backend.create).toHaveBeenCalledWith({ agent_id: "agent-a", title: "Hello", runtime_workspace_id: "rws-a" }));
+    expect(await within(screen.getByTestId("composer-footer")).findByRole("group", { name: "Work location: Local workbench" })).toBeInTheDocument();
+    expect(store.getState().draftRuntimeWorkspaceId).toBeNull();
+    // useDeleteChatSession and chat:session_deleted clear the active chat.
+    act(() => store.getState().setActiveSession(null));
+    expect(await within(screen.getByTestId("composer-footer")).findByRole("button", { name: "Work location: No project" })).toBeEnabled();
   });
 });
 
@@ -526,10 +576,12 @@ describe("ChatWindow page shell", () => {
     expect(header.querySelector('[data-testid="avatar-agent-a"]')).not.toBeNull();
     await waitFor(() => expect(header).toHaveTextContent("Remi"));
     expect(screen.queryByText("Private conversations with your agents")).toBeNull();
-    // New chat and history moved to the sidebar.
+    // New chat and history moved to the sidebar; the header only hides and shows it.
     expect(screen.queryByTestId("session-dropdown")).toBeNull();
     expect(within(header).getByRole("button", { name: "Work Sessions" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "External" })).toHaveAttribute("href", "/chat?kind=external");
+    expect([...header.querySelectorAll("button[aria-label]")].map((button) => button.getAttribute("aria-label")))
+      .toEqual(["Hide sidebar", "Chat history"]);
   });
 
   it("shows a placeholder, not 'unavailable', while the Project list loads", async () => {
@@ -598,7 +650,7 @@ describe("ChatWindow follow-up delivery", () => {
     const { client } = mount(true);
     await agentsLoaded(client);
     fireEvent.click(await screen.findByRole("button", { name: "Steer test message" }));
-    await waitFor(() => expect(backend.send).toHaveBeenCalledWith("chat-a", "Steer this", undefined, expect.any(String)));
+    await waitFor(() => expect(backend.send).toHaveBeenCalledWith("chat-a", "Steer this", undefined, expect.any(String), { signal: expect.any(AbortSignal) }));
     expect(backend.enqueue).not.toHaveBeenCalled();
   });
 
@@ -610,7 +662,7 @@ describe("ChatWindow follow-up delivery", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Queue test message" }));
     await waitFor(() => expect(sent).toHaveBeenCalledWith("resolved"));
     expect(backend.enqueue).toHaveBeenCalledWith("chat-a", { body_md: "Queue this", attachment_ids: ["att-1"], client_id: expect.any(String) });
-    // Deletes still behind their undo go out first: an idle lane releases every queued row.
+    // Deletes still behind their undo go out first: an idle lane releases its oldest queued row.
     expect(queueFlush.mock.invocationCallOrder[0]).toBeLessThan(backend.enqueue.mock.invocationCallOrder[0]!);
     expect(backend.send).not.toHaveBeenCalled();
     expect(backend.refresh).not.toHaveBeenCalled();
@@ -689,5 +741,20 @@ describe("ChatWindow follow-up delivery", () => {
     fireEvent.click(screen.getByRole("button", { name: "Stop test run" }));
     await waitFor(() => expect(backend.cancel).toHaveBeenCalledWith("turn-a"));
     await waitFor(() => expect(client.getQueryState(chatKeys.queue("workspace-a", "chat-a"))?.isInvalidated).toBe(true));
+  });
+});
+
+describe("ChatWindow Chat column", () => {
+  it("puts the question lines, the archived-chat row and the action error in the shared Chat column", async () => {
+    backend.sessions = [{ ...session, status: "archived" }];
+    backend.update.mockRejectedValueOnce(new Error("offline"));
+    mount(true);
+    const column = CHAT_COLUMN_CLASS.split(" ");
+    // The question lines drop the dock's own band and sit edge to edge with the composer.
+    expect(screen.getByTestId("human-request-dock")).toHaveClass(...column, "border-t-0", "bg-transparent", "py-0");
+    const restore = await screen.findByRole("button", { name: "Restore chat" });
+    expect(restore.parentElement).toHaveClass(...column);
+    fireEvent.click(restore);
+    expect(await screen.findByText("Action failed. Please try again.")).toHaveClass(...column);
   });
 });

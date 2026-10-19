@@ -5,6 +5,7 @@ import { chatKeys } from "../../chat/queries";
 import { chatWorkSessionKeys } from "../../chat/work-sessions";
 import { issueKeys } from "../../issues/queries";
 import { removeChatSessionFromCache, updateChatSessionInCache } from "../../chat/session-cache";
+import { applyBackgroundTasksEvent } from "../../chat/background-tasks";
 import { useChatStore } from "../../chat";
 import type {
   TaskQueuedPayload,
@@ -26,6 +27,18 @@ import type { SyncContext, SyncModule } from "./types";
 
 const chatWsLogger = createLogger("chat.ws");
 
+/**
+ * A running turn's event for a chat whose cached pending task names no task.
+ * The handlers below only patch a cached task with the same id, and the poll
+ * stops once a read finds none, so a read that missed the running turn (see
+ * `readPendingChatTask`) would hide it until the next event that refetches.
+ * Read it again now.
+ */
+function refetchUnheldPendingTask(qc: QueryClient, sessionId: string): void {
+  if (qc.getQueryData<ChatPendingTask>(chatKeys.pendingTask(sessionId))?.task_id) return;
+  void qc.invalidateQueries({ queryKey: chatKeys.pendingTask(sessionId) });
+}
+
 function settleChatPendingTask(qc: QueryClient, sessionId: string, taskId: string): void {
   qc.setQueryData<ChatPendingTask>(chatKeys.pendingTask(sessionId), old => {
     if (!old) return old;
@@ -37,11 +50,13 @@ function settleChatPendingTask(qc: QueryClient, sessionId: string, taskId: strin
 
 /**
  * Whether the cached `["task-trace", id]` value (`TurnTraceCache` in views) is
- * a read trace the stream already sealed: nothing newer can arrive for it.
+ * a trace that read ok and that the stream already sealed: nothing newer can
+ * arrive for it. A read that was not ok (a live view's read can land before
+ * the daemon claims the attempt) is read again.
  */
 function holdsClosedTrace(data: unknown): boolean {
-  const cache = data as { state?: { closed?: unknown }; read?: unknown } | null | undefined;
-  return !!cache && cache.state?.closed === true && !!cache.read;
+  const cache = data as { state?: { closed?: unknown }; read?: { state?: unknown } | null } | null | undefined;
+  return !!cache && cache.state?.closed === true && cache.read?.state === "ok";
 }
 
 export function applyChatDoneToCache(
@@ -187,6 +202,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
         const payload = p as TaskDispatchPayload;
         if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
+        refetchUnheldPendingTask(qc, payload.chat_session_id);
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
           (old) => {
@@ -214,6 +230,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
           return;
         }
         if (!payload.chat_session_id) return;
+        refetchUnheldPendingTask(qc, payload.chat_session_id);
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
           (old) => {
@@ -232,6 +249,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
         if (invalidateWorkSessionTask(payload)) return;
         if (typeof payload.chat_session_id !== "string" || typeof payload.task_id !== "string"
           || (typeof payload.progress_summary !== "string" && payload.progress_summary !== null)) return;
+        refetchUnheldPendingTask(qc, payload.chat_session_id);
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
           old => old?.task_id === payload.task_id
@@ -246,14 +264,28 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
         if (!p || typeof p !== "object") return;
         const payload = p as TaskSubagentsPayload;
         if (typeof payload.task_id !== "string" || !("running_subagents" in payload)) return;
-        const raw = payload.running_subagents;
-        const count = typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+        const countOf = (raw: unknown) => typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+        const count = countOf(payload.running_subagents);
+        // PR 6: the same report may carry the attempt's background tasks.
+        const tasks = "running_background_tasks" in payload ? countOf(payload.running_background_tasks) : undefined;
         const wsId = getCurrentWsId();
         if (!wsId) return;
+        const changed = (task: PendingChatTasksResponse["tasks"][number]) => task.task_id === payload.task_id
+          && (task.running_subagents !== count || (tasks !== undefined && task.running_background_tasks !== tasks));
         qc.setQueryData<PendingChatTasksResponse>(chatKeys.pendingTasks(wsId), (old) => {
-          if (!old?.tasks.some((task) => task.task_id === payload.task_id && task.running_subagents !== count)) return old;
-          return { ...old, tasks: old.tasks.map((task) => task.task_id === payload.task_id ? { ...task, running_subagents: count } : task) };
+          if (!old?.tasks.some(changed)) return old;
+          return { ...old, tasks: old.tasks.map((task) => task.task_id === payload.task_id
+            ? { ...task, running_subagents: count, ...(tasks !== undefined ? { running_background_tasks: tasks } : {}) } : task) };
         });
+      },
+
+      // A Chat's background tasks changed (PR 6 §7): merge the registry rows
+      // into a list a reader has loaded and move the sidebar's count. Nothing
+      // is read for a chat no one shows (MUL-472).
+      "chat:background_tasks": (p) => {
+        const wsId = getCurrentWsId();
+        if (!wsId) return;
+        if (!applyBackgroundTasksEvent(qc, wsId, p)) chatWsLogger.warn("chat:background_tasks: unreadable payload");
       },
 
       // task:waiting_local_directory fires when the daemon dequeues a task but
@@ -270,7 +302,9 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
           chatKeys.pendingTask(payload.chat_session_id),
           (old) => {
             if (!old || old.task_id !== payload.task_id) return old;
-            return { ...old, status: "waiting_local_directory" };
+            // The reason may name a parked lane of another Chat holding the folder (PR 6 §2.8).
+            return { ...old, status: "waiting_local_directory",
+              ...(typeof payload.wait_reason === "string" ? { wait_reason: payload.wait_reason } : {}) };
           },
         );
       },
@@ -285,6 +319,7 @@ export function createChatHandlers({ qc }: SyncContext): SyncModule {
         invalidateIssueDecisionSurfaces();
         if (invalidateWorkSessionTask(payload)) return;
         if (!payload.chat_session_id) return;
+        refetchUnheldPendingTask(qc, payload.chat_session_id);
         qc.setQueryData<ChatPendingTask>(
           chatKeys.pendingTask(payload.chat_session_id),
           (old) => {

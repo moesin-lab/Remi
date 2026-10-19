@@ -540,11 +540,14 @@ export function canUserViewTaskMessages(
   }
   const session = task.chatSessionId ? memoizedChatSession(store, memo, task.chatSessionId) : null;
   if (task.chatSessionId && !session) return false;
-  const agent = task.agentId ? memoizedAgent(store, memo, task.agentId) : null;
+  // A Chat task's decision reads only the creator (canUserViewTaskMessageFacts
+  // returns before the Agent facts), so its Agent is not loaded.
+  const agent = task.agentId && !task.chatSessionId ? memoizedAgent(store, memo, task.agentId) : null;
   return canUserViewTaskMessageFacts(userId, {
     chatSessionId: task.chatSessionId, chatCreatorId: session?.creatorId ?? null,
     agentVisibility: agent?.visibility ?? null, agentOwnerId: agent?.ownerId ?? null,
-    requesterIsWorkspaceAdmin: !!agent && canUserAccessAgentByUserId(store, userId, agent),
+    // Local/open identities return before these admin facts, so do not reread their workspace per source.
+    requesterIsWorkspaceAdmin: !!agent && userId != null && userId !== "local" && canUserAccessAgentByUserId(store, userId, agent),
   });
 }
 

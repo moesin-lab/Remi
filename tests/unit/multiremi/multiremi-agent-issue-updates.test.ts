@@ -5,7 +5,8 @@ import { beforeEach, expect, it, spyOn } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
 import { useTaskSessionInput } from "@multiremi/api/daemon-protocol/offer-budget.js";
-import { buildTaskPrompt } from "@multiremi/prompt.js";
+import { buildTaskPromptArtifact } from "@multiremi/prompt.js";
+import { normalizeDaemonClaimTask } from "@multiremi/worker/client.js";
 import { createCommitEventQueue } from "@multiremi/store/context.js";
 import { runMigrations } from "@multiremi/store/migrations.js";
 import { bindFeishuTopicFixture } from "./feishu-topic-fixture.js";
@@ -60,11 +61,13 @@ pendingTurnBackendTests("MUL-486 relay Issue log", (fixture) => {
     }
     expect(log.content_jsonl).toBe("");
     expect(JSON.stringify(wire)).not.toContain(foreignBody);
-    const prompt = buildTaskPrompt({ ...task, prompt: wire.prompt,
-      sessionProjection: wire.session_projection, boundIssue: wire.bound_issue,
-      boundIssueLog: wire.bound_issue_log } as any);
-    expect(prompt).not.toContain(foreignBody);
-    expect(prompt).not.toContain("## Bound Issue Log");
+    const { prompt, instructions } = buildTaskPromptArtifact(normalizeDaemonClaimTask(wire)!);
+    for (const text of [prompt, instructions]) {
+      expect(text).not.toContain(foreignBody);
+      expect(text).not.toContain("## Bound Issue Log");
+      expect(text).not.toContain(`remi message list ${f.session.id}`);
+    }
+    expect(prompt).not.toContain('"type":"unread_range"');
     expect(f.db.query("SELECT bound_issue_log_delivered_seq FROM multiremi_turn_execution_records WHERE id = ?")
       .get(taskId)).toEqual({ bound_issue_log_delivered_seq: null });
     return log;
@@ -327,7 +330,7 @@ pendingTurnBackendTests("MUL-486 relay Issue log", (fixture) => {
     assertForeignCursorUnchanged(f);
   });
 
-  it("folds an owned public Issue body while preserving authenticated full-message and range reads", async () => {
+  it("keeps an owned public Issue body out of the offer while preserving authenticated full-message and range reads", async () => {
     const f = setup();
     const body = "Issue detail: " + "x".repeat(4_001);
     const entry = f.store.appendConversationLog({
@@ -336,12 +339,17 @@ pendingTurnBackendTests("MUL-486 relay Issue log", (fixture) => {
     const task = f.store.createSessionTask(f.session.id, { agentId: f.agent.id, prompt: "Read this Issue detail" });
     expect(task.chatSessionId).toBeNull();
     expect(f.store.claimTask(f.runtime.id)?.id).toBe(task.id);
-    const wire = daemonTaskClaimResponse(f.store, f.store.getTaskWithAgent(task.id)!);
+    const claimed = f.store.getTaskWithAgent(task.id)!;
+    const wire = daemonTaskClaimResponse(f.store, claimed);
+    useTaskSessionInput(f.store, claimed, wire);
     const projection = wire.session_projection as { jsonl: string; to_seq: number };
-    const projected = projection.jsonl.split("\n").map(line => JSON.parse(line))
-      .find(line => line.type === "session_event" && line.seq === entry.seq);
-    expect(projected).toMatchObject({ body_folded: true, expand: `remi message get ${entry.id}` });
-    expect(projected.body).toBeUndefined();
+    const unread = JSON.parse(projection.jsonl.split("\n")[0]!);
+    expect(unread).toMatchObject({ type: "unread_range", session_id: f.session.id, from_seq: 0, to_seq: projection.to_seq });
+    expect(entry.seq).toBeLessThanOrEqual(unread.to_seq);
+    expect(projection.jsonl).not.toContain(body);
+    const { prompt, instructions } = buildTaskPromptArtifact(normalizeDaemonClaimTask(wire)!);
+    expect(prompt).toContain(`remi message list ${f.session.id} --from 0 --to ${projection.to_seq}`);
+    for (const text of [prompt, instructions]) expect(text).not.toContain(body);
     expect(f.store.getConversationLogEntry(f.session.id, entry.seq)?.body_md).toBe(body);
     const { app, headers } = await authenticatedTask(f, task.id);
     const expanded = await app.request(`/api/messages/${entry.id}`, { headers });
@@ -366,6 +374,17 @@ pendingTurnBackendTests("MUL-486 relay Issue log", (fixture) => {
     expect(task.chatSessionId).toBeNull();
     expect(f.store.claimTask(f.runtime.id)?.id).toBe(task.id);
     const toSeq = f.store.getConversationLogHead(f.session.id)!.headSeq;
+    const claimed = f.store.getTaskWithAgent(task.id)!;
+    const wire = daemonTaskClaimResponse(f.store, claimed);
+    useTaskSessionInput(f.store, claimed, wire);
+    const projection = wire.session_projection as { jsonl: string; to_seq: number };
+    const unread = JSON.parse(projection.jsonl.split("\n")[0]!);
+    expect(unread).toMatchObject({ type: "unread_range", session_id: f.session.id, from_seq: 0, to_seq: toSeq });
+    expect(unread.unread_count).toBeGreaterThanOrEqual(110);
+    expect(projection.jsonl).not.toContain("Log item");
+    const { prompt } = buildTaskPromptArtifact(normalizeDaemonClaimTask(wire)!);
+    expect(prompt).toContain(`remi message list ${f.session.id} --from 0 --to ${toSeq}`);
+    expect(prompt).not.toContain('"type":"unread_range"');
     // The range reader omits this Agent's own turn card, while retaining every message body.
     const expected = f.store.listConversationLogShown(f.session.id, { toSeq })
       .filter(entry => entry.kind !== "turn");

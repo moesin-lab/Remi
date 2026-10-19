@@ -1,5 +1,5 @@
 {
-  "dataSchema": "b7c960db81fe1ced70da9bee1c02ec31fbdb2b11ddb3b6479b81b0ad539041ad",
+  "dataSchema": "0d4c0487db0d688d5df4fc76db4ba029d431f8f3e902322200132f91c211ae9a",
   "rollbackSafeFrom": [],
-  "reason": "The upstream integration replaces issue responsibility and delivery with execution-owner escalation, moves records and recyclable workspaces to daemon-owned storage, and adds turn/item traces, Chat follow-up queues and subagent activity fields. Fork shared-operator, dual-owner Session and model-catalog migrations are retained. No earlier schema fingerprint is attested for code-only rollback. Existing deployments require the ADR 0018 and ADR 0019 controlled cutover steps; publishing this bundle does not authorize a production migration. Same-schema updates still require backup verification and target/previous migration rehearsal."
+  "reason": "The upstream integration replaces issue responsibility and delivery with execution-owner escalation, moves records and recyclable workspaces to daemon-owned storage, and adds turn/item traces, Chat follow-up queues, subagent activity fields, background-task registry and per-attempt prompt instructions. Fork shared-operator, dual-owner Session and model-catalog migrations are retained. No earlier schema fingerprint is attested for code-only rollback. Existing deployments require the ADR 0018 and ADR 0019 controlled cutover steps; publishing this bundle does not authorize a production migration. Same-schema updates still require backup verification and target/previous migration rehearsal."
 }

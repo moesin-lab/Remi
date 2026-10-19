@@ -298,3 +298,183 @@ describe("Issue log presentation over C7", () => {
     expect(delivered).toEqual([[10], [11]]);
   });
 });
+
+describe("C7 keeps the windows this page read", () => {
+  const ticks = async () => { for (let n = 0; n < 32; n++) await Promise.resolve(); };
+  const seqs = (replica: IssueLogReplica) => replica.getSnapshot("s").entries.map(entry => entry.seq);
+  const ack = (logVersion: number, head = 2) => ({ stream: "log" as const, id: "s", first_seq: 1, head_seq: head, log_version: logVersion, gap: null });
+
+  it("stores a window opened before the Web Lock is granted, so the stream ack keeps its rows", async () => {
+    // A Chat's SSR bootstrap carries no separate head row to wait on.
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: null,
+      window: { ...windowOf([row(1), row(2)]), head_seq: 2, has_more_before: false } });
+    let grant!: () => void;
+    const locks = { request: (_name: string, _options: unknown, run: () => Promise<void>) =>
+      new Promise<void>(() => { grant = () => void run(); }) };
+    const subscribe = vi.fn();
+    const connecting = replica.connect({ userId: "u", workspaceId: "w", subscribe, unsubscribe: vi.fn(), env: {
+      hasOpfs: true, locks: locks as never, broadcastChannel: class { onmessage = null; postMessage() {} close() {} } as never,
+    } });
+    await ticks();
+    grant();
+    const cleanup = await connecting;
+    try {
+      expect(subscribe).toHaveBeenCalledWith("s", 3);
+      replica.ack("s", ack(4));
+      await ticks();
+      expect(seqs(replica)).toEqual([1, 2]);
+      expect(mocks.read).not.toHaveBeenCalled();
+    } finally { cleanup(); }
+  });
+
+  it("keeps the rows when a resumed stream acks a new log_version", async () => {
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"),
+      window: { ...windowOf([row(1), row(2)]), head_seq: 2, has_more_before: false } });
+    const cleanup = await replica.connect({ userId: "u", workspaceId: "w", subscribe: vi.fn(), unsubscribe: vi.fn(), env: { hasOpfs: false } });
+    try {
+      replica.ack("s", ack(4));
+      // Writes since the last ack bumped the version (ADR 0007's freshness token).
+      replica.ack("s", ack(9));
+      await ticks();
+      expect(seqs(replica)).toEqual([0, 1, 2]);
+    } finally { cleanup(); }
+  });
+
+  it("stores an older page read after the log moved on", async () => {
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: row(0, "head"),
+      window: { ...windowOf([row(3), row(4)]), head_seq: 4 } });
+    const cleanup = await replica.connect({ userId: "u", workspaceId: "w", subscribe: vi.fn(), unsubscribe: vi.fn(), env: { hasOpfs: false } });
+    try {
+      mocks.read.mockResolvedValue({ ...windowOf([row(1), row(2)]), head_seq: 6, log_version: 7, has_more_before: false });
+      await replica.earlier();
+      replica.ack("s", ack(7, 4));
+      await ticks();
+      expect(seqs(replica)).toEqual([0, 1, 2, 3, 4]);
+    } finally { cleanup(); }
+  });
+
+  it("reads another tab's session through the read route, never from this session's windows", async () => {
+    const replica = new IssueLogReplica("s", { sessionId: "s", head: null,
+      window: { ...windowOf([row(1), row(2)]), head_seq: 2 } });
+    const other = SessionLogEntrySchema.parse({ ...row(1), session_id: "other", id: "o1" });
+    mocks.read.mockResolvedValue({ ...windowOf([other]), head_seq: 1 });
+    await expect(replica["readRange"]("other", { from: 1, to: 1 })).resolves.toEqual([other]);
+    expect(mocks.read).toHaveBeenCalledExactlyOnceWith("other", { anchor: 0, after: 100 });
+  });
+});
+
+describe("Chat's log: no head row, retained across connections", () => {
+  const memory = { hasOpfs: false };
+  const ticks = async () => { for (let n = 0; n < 32; n++) await Promise.resolve(); };
+  const seqs = (replica: IssueLogReplica) => replica.getSnapshot("s").entries.map(entry => entry.seq);
+  const live = (seq: number) => ({ seq, kind: "entry" as const, payload: { session_id: "s", seq, id: `r${seq}`, kind: "message", revision: 1 } });
+  /** The read route over one log; every call is recorded by `mocks.read`. */
+  function serve(rows: ReturnType<typeof row>[]) {
+    mocks.read.mockReset();
+    mocks.read.mockImplementation(async (_id: string, params: { anchor?: number; before?: number; after?: number }) => {
+      const head = rows.at(-1)?.seq ?? 0;
+      const anchor = params.anchor ?? head;
+      const before = params.before ? rows.filter(entry => entry.seq <= anchor).slice(-params.before) : [];
+      const after = params.after ? rows.filter(entry => entry.seq > anchor).slice(0, params.after) : [];
+      return { entries: [...before, ...after], head_seq: head, log_version: 1, has_more_before: false, has_more_after: false };
+    });
+    return { write: (entry: ReturnType<typeof row>) => { rows.push(entry); } };
+  }
+  const seeded = (entries = [row(1), row(2)]) => new IssueLogReplica("s", { sessionId: "s", head: null,
+    window: { ...windowOf(entries), head_seq: entries.at(-1)!.seq, has_more_before: false } }, true, false, false);
+
+  it("never reads, holds or shows the seq-0 head; an Issue log still reads it", async () => {
+    serve([row(0, "head"), row(1), row(2)]);
+    const chat = new IssueLogReplica("s", undefined, true, false, false);
+    await chat.loadTail();
+    expect(mocks.read.mock.calls.map(([, params]) => params)).toEqual([{ before: 30 }]);
+    expect(chat.headRow).toBeNull();
+    expect(seqs(chat)).toEqual([1, 2]);
+    await chat.refreshHead();
+    await chat.refreshTailPreservingWindow();
+    expect(chat.headRow).toBeNull();
+    expect(seqs(chat)).toEqual([1, 2]);
+    const cleanup = await chat.connect({ userId: "u", workspaceId: "w", subscribe: vi.fn(), unsubscribe: vi.fn(), env: memory });
+    try {
+      // A head row C7 holds (another log of the session, an older page) stays out.
+      await (chat as unknown as { browser: { loadWindow(id: string, range: { from: number; to: number }): Promise<void> } })
+        .browser.loadWindow("s", { from: 0, to: 0 });
+      await ticks();
+      expect(chat.headRow).toBeNull();
+      expect(seqs(chat)).toEqual([1, 2]);
+    } finally { cleanup(); }
+    expect(mocks.read.mock.calls.some(([, params]) => params.anchor === 0 && params.before === 1)).toBe(false);
+
+    const issue = new IssueLogReplica("s");
+    await issue.loadTail();
+    expect(mocks.read).toHaveBeenCalledWith("s", { anchor: 0, before: 1 });
+    expect(seqs(issue)).toEqual([0, 1, 2]);
+  });
+
+  it("connects again after a release: retained rows stay on screen, the tail refreshes, then the stream resumes", async () => {
+    const log = serve([row(1), row(2)]);
+    const chat = seeded();
+    const first = vi.fn();
+    const cleanup = await chat.connect({ userId: "u", workspaceId: "w", subscribe: first, unsubscribe: vi.fn(), env: memory });
+    expect(first).toHaveBeenCalledWith("s", 3);
+    log.write(row(3));
+    await chat.hydratedFrames("s", [live(3)]);
+    await ticks();
+    expect(seqs(chat)).toEqual([1, 2, 3]);
+    // Released into the pool: the connection goes, the rows stay.
+    const late = chat.hydratedFrames("s", [live(4)]);
+    cleanup(); chat.disconnect(); chat.trimRetained();
+    await late;
+    expect(chat.getSnapshot("s").ready).toBe(true);
+    expect(seqs(chat)).toEqual([1, 2, 3]);
+    log.write(row(4)); log.write(row(5));
+    mocks.read.mockClear();
+
+    const refreshed = chat.resume();
+    const second = vi.fn();
+    const connecting = chat.connect({ userId: "u", workspaceId: "w", subscribe: second, unsubscribe: vi.fn(), env: memory });
+    expect(chat.getSnapshot("s").ready).toBe(true);
+    expect(seqs(chat)).toEqual([1, 2, 3]);
+    await refreshed;
+    const reconnected = await connecting;
+    try {
+      expect(mocks.read.mock.calls.map(([, params]) => params)).toEqual([{ before: 30 }]);
+      // Subscribed after the refresh, from its head.
+      expect(second).toHaveBeenCalledExactlyOnceWith("s", 6);
+      await ticks();
+      expect(seqs(chat)).toEqual([1, 2, 3, 4, 5]);
+    } finally { reconnected(); }
+  });
+
+  it("keeps the retained rows and still connects when the background refresh fails", async () => {
+    serve([row(1), row(2)]);
+    const chat = seeded();
+    chat.disconnect(); chat.trimRetained();
+    mocks.read.mockRejectedValue(new ApiError("unavailable", 503, "Unavailable"));
+    const refreshed = chat.resume();
+    const subscribe = vi.fn();
+    const connecting = chat.connect({ userId: "u", workspaceId: "w", subscribe, unsubscribe: vi.fn(), env: memory });
+    await expect(refreshed).rejects.toBeInstanceOf(ApiError);
+    const cleanup = await connecting;
+    try {
+      // The stream resumes from the retained head.
+      expect(subscribe).toHaveBeenCalledWith("s", 3);
+      expect(chat.getSnapshot("s").ready).toBe(true);
+      expect(seqs(chat)).toEqual([1, 2]);
+    } finally { cleanup(); }
+  });
+
+  it("keeps only the current window's read when trimmed, and drops every row when disposed", async () => {
+    serve([row(1), row(2), row(3)]);
+    const chat = seeded([row(2), row(3)]);
+    await chat.earlier();
+    const known = () => (chat as unknown as { knownWindows: Array<{ range: { from: number; to: number } }> }).knownWindows.map(w => w.range);
+    expect(known()).toEqual([{ from: 2, to: 3 }, { from: 1, to: 3 }]);
+    chat.trimRetained();
+    expect(known()).toEqual([{ from: 1, to: 3 }]);
+    chat.dispose();
+    expect(chat.window).toBeNull();
+    expect(known()).toEqual([]);
+    expect(chat.getSnapshot("s")).toMatchObject({ ready: false, entries: [] });
+  });
+});

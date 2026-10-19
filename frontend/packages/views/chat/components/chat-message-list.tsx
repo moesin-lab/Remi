@@ -42,15 +42,26 @@ import { finishedFoldHeader, isAwaitingHuman } from "../lib/turn-steps";
 import { isNonterminalTurn } from "../lib/turn-card";
 import { FinishedTurnSteps, LiveTurnSteps } from "./turn-steps-fold";
 import { SubagentCompletionRows } from "./subagent-completion-row";
-import { SubagentRunningStrip } from "./subagent-running-strip";
+import { ChatRunningStrip } from "./subagent-running-strip";
+import { DoorbellRow } from "./doorbell-row";
+import { doorbellTaskIds, rowDoorbell } from "../lib/background-tasks";
 import { isTraceLateSubagent, type TraceLateSubagent } from "@multiremi/contracts/trace";
 import { useT } from "../../i18n";
 import { clientIdOf, mergeOptimisticChatRows, type OptimisticChatRow } from "../lib/optimistic-log";
+import { CHAT_COLUMN_CLASS } from "../lib/chat-column";
 
 /** Bumped when Chat's row layout changes, so cached row heights from the old layout are misses. */
 const CHAT_LAYOUT_VERSION = ":chat-layout-v2";
-/** Codex reading column: 768px including 16px side padding. */
-const CHAT_CONTENT_CLASS = "max-w-[768px] px-4 py-6";
+/** The shared Chat column; the composer and the rows above it use the same one. */
+const CHAT_CONTENT_CLASS = `${CHAT_COLUMN_CLASS} py-6`;
+/**
+ * An always-visible scrollbar narrows only the list, which would center its
+ * column half a scrollbar left of the composer's. From 800px of list width
+ * (the column is capped there) the list reserves the same gutter on its left
+ * too, so both keep one center line; narrower, the column fills the width and
+ * the scrollbar keeps to the right edge. Overlay scrollbars reserve nothing.
+ */
+const CHAT_LIST_CLASS = "@container/chat-log @min-[800px]/chat-log:[&>[data-session-log-scroll]]:[scrollbar-gutter:stable_both-edges]";
 /**
  * Message actions stay out of the way until the row is hovered or holds
  * keyboard focus; devices without hover always show them. Opacity, not
@@ -152,6 +163,8 @@ interface ChatMessageListProps {
   onLoadOlderMessages?: () => void;
   onRetrySend?: (clientId: string) => void;
   initialPositioned?: boolean;
+  /** Another chat of this reader, for a local folder its background tasks hold (`TaskStatusPill`). */
+  resolveChat?: (sessionId: string) => { title: string; open: () => void } | null;
 }
 
 export function ChatMessageList({
@@ -166,6 +179,7 @@ export function ChatMessageList({
   onLoadOlderMessages,
   onRetrySend,
   initialPositioned = false,
+  resolveChat,
 }: ChatMessageListProps) {
   const { t } = useT("chat");
   const namesReady = useAfterFirstScreen();
@@ -237,13 +251,17 @@ export function ChatMessageList({
     }).map(entry => {
       // Q rows became one fixed-height summary line; never reserve the old button height.
       const row = entry as SessionLogEntry & { metadata?: Record<string, unknown> };
-      const question = row.kind === "message" && linkedQuestionId(row.id, row.metadata) ? ":question-line-v1" : "";
+      const question = row.kind === "message" && linkedQuestionId(row.id, row.metadata) ? ":question-line-v1"
+        // A doorbell is one centered line, not a bubble (PR 6).
+        : rowDoorbell(row) ? ":doorbell-v1" : "";
       // The Chat column, bubble and turn rows changed size; old cached heights are misses.
       const steps = openSteps.has(entry.id) ? STEPS_OPEN_VERSION : "";
       return { ...entry, render_version: `${entry.render_version ?? ""}${question}${CHAT_LAYOUT_VERSION}${steps}` };
     }), optimisticRows);
   }, [optimisticRows, openSteps]);
   const cardsByReply = useMemo(() => turnCardsByReply(snapshot.entries), [snapshot.entries]);
+  // Tasks the loaded conversation already explains with a doorbell line (PR 6).
+  const doorbells = useMemo(() => doorbellTaskIds(snapshot.entries as ReadonlyArray<SessionLogEntry & { sender_type?: string | null; metadata?: unknown }>), [snapshot.entries]);
   const entryKey = useCallback((entry: SessionLogEntry) => clientIdOf(entry) ?? entry.id, []);
   const pendingTaskId = pendingTask?.task_id ?? null;
   const pendingAlreadyPersisted = !!pendingTaskId && replica.getSnapshot(sessionId).entries.some((entry) => {
@@ -264,16 +282,18 @@ export function ChatMessageList({
     && (!foldShown || waitingOnHuman);
 
   return <SessionLogList sessionId={sessionId} replica={replica} perfScroll="session-log"
-    contentClassName={CHAT_CONTENT_CLASS} scrollButton="arrow"
+    className={CHAT_LIST_CLASS} contentClassName={CHAT_CONTENT_CLASS} scrollButton="arrow"
     onScrollRoot={element => { scrollRoot.current = element; }}
     initialPositioned={initialPositioned} showPendingSkeleton={false}
     localDataReady={optimisticRows.length > 0}
     transformEntries={transformEntries}
     entryKey={entryKey}
     header={<>
-      {/* Sticky while a subagent of the running turn is in progress (PR 5 §6.5). */}
-      {showLiveTimeline && liveTraceId && <SubagentRunningStrip items={liveTrace.items}
-        source={{ sessionId, attemptId: liveTraceId, turnId: pendingTask?.turn_id, live: true }} />}
+      {/* Sticky while a subagent of the running turn (PR 5 §6.5) or a background
+        * task of the chat (PR 6 §8.1, with or without a turn) runs. */}
+      <ChatRunningStrip sessionId={sessionId} doorbells={doorbells}
+        items={showLiveTimeline && liveTraceId ? liveTrace.items : undefined}
+        source={showLiveTimeline && liveTraceId ? { sessionId, attemptId: liveTraceId, turnId: pendingTask?.turn_id, live: true } : null} />
       <div className="flex h-10 items-center justify-center text-xs text-muted-foreground max-md:h-12">
         {hasOlderMessages ? <button type="button" data-chat-earlier disabled={!visible || isFetchingOlderMessages}
           onClick={loadOlder} className="h-full hover:text-foreground">
@@ -297,6 +317,11 @@ export function ChatMessageList({
           elapsed_ms: typeof row.metadata?.elapsed_ms === "number" ? row.metadata.elapsed_ms : null,
           attachments: AttachmentSchema.array().safeParse(row.metadata?.attachments).data as ChatMessage["attachments"],
       };
+      // The doorbell a parked task's end rang (PR 6 §8.1): a line before the
+      // reply it started, never a bubble.
+      const doorbell = rowDoorbell(row);
+      if (doorbell) return <DoorbellRow doorbell={doorbell} sessionId={sessionId}
+        attempt={showLiveTimeline && liveTraceId ? { attemptId: liveTraceId, turnId: pendingTask?.turn_id, live: true } : undefined} />;
       const clientId = clientIdOf(entry);
       const local = optimisticRows.find((item) => item.clientId === clientId);
       const isPush = row.kind === "turn" && isNonterminalTurn(row.metadata);
@@ -350,7 +375,7 @@ export function ChatMessageList({
       {showLiveTimeline && <LiveTurnSteps key={liveTraceId ?? "pending"} trace={liveTrace} sessionId={sessionId} />}
       {showLiveTimeline && liveTrace.error && <div role="alert" className="text-xs text-destructive">{traceT(($) => $.transcript.trace_failed)}</div>}
       {showStatusPill && pendingTask && <TaskStatusPill pendingTask={pendingTask}
-        items={liveTrace.items} availability={availability} />}
+        items={liveTrace.items} availability={availability} resolveChat={resolveChat} />}
     </div>} />;
 }
 
@@ -364,6 +389,13 @@ function SendStatus({ status, onRetry }: { status: OptimisticChatRow["status"]; 
       <span className="text-destructive">{t(($) => $.message_list.send_failed)}</span>
       <button type="button" onClick={onRetry} aria-label={t(($) => $.message_list.retry_send)}
         className="relative inline-flex h-5 items-center justify-center px-1 text-destructive underline after:absolute after:-inset-y-3 after:inset-x-0">
+        {t(($) => $.message_list.retry)}
+      </button></>}
+    {/* No answer: it may have landed, so this is not a failure; the log is re-read meanwhile. */}
+    {status === "unconfirmed" && <><AlertCircle className="mr-1 size-3" aria-hidden="true" />
+      <span>{t(($) => $.message_list.unconfirmed)}</span>
+      <button type="button" onClick={onRetry} aria-label={t(($) => $.message_list.retry_send)}
+        className="relative inline-flex h-5 items-center justify-center px-1 underline after:absolute after:-inset-y-3 after:inset-x-0">
         {t(($) => $.message_list.retry)}
       </button></>}
   </div>;

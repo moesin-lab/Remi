@@ -126,6 +126,19 @@ import {
 import type { GcRunMode, GcRunRequest, StorageReport } from "@multiremi/contracts/storage.js";
 import { RuntimeWorkspacesRepo } from "@multiremi/store/repos/runtime-workspaces-repo.js";
 import { TaskTracesRepo } from "@multiremi/store/repos/task-traces-repo.js";
+import {
+  BackgroundTasksRepo,
+  type BackgroundTaskDownlinks,
+  type BackgroundTaskStopResult,
+  type BackgroundTaskStopTarget,
+  type SessionBackgroundTasks,
+} from "@multiremi/store/repos/background-tasks-repo.js";
+import type {
+  DaemonLaneBackgroundTasksPayload,
+  DaemonLaneBackgroundWakePayload,
+  DaemonLaneBackgroundWakeReply,
+  DaemonParkedLane,
+} from "@multiremi/contracts/daemon-protocol.js";
 import type { MultiremiTaskTrace } from "@multiremi/contracts/trace-file.js";
 import type { TraceLateSubagent } from "@multiremi/contracts/trace.js";
 import type { DaemonTaskCompletionFields } from "@multiremi/contracts/daemon-protocol.js";
@@ -556,6 +569,7 @@ export class MultiremiStore {
   private sshMesh: SshMeshRepo;
   private autopilots: AutopilotsRepo;
   private tasks: TasksRepo;
+  private backgroundTasks: BackgroundTasksRepo;
 
   constructor(db?: SqlDatabase, options: {
     /** Pointer reads can be routed to a read-only pool in the split topology. */
@@ -629,10 +643,12 @@ export class MultiremiStore {
     this.sshMesh = new SshMeshRepo(this.ctx);
     this.autopilots = new AutopilotsRepo(this.ctx);
     this.tasks = new TasksRepo(this.ctx);
+    this.backgroundTasks = new BackgroundTasksRepo(this.ctx);
     this.taskCapabilityMonitor = new TaskCapabilityMonitor([
       now => this.tasks.refreshQueuedCapabilityWaitReasons(now),
       now => this.tasks.sweepIdleIssueLanes(now),
       now => this.archiveIdleChats(now),
+      now => this.backgroundTasks.sweep(now),
     ]);
     this.migrate();
     for (const workspace of this.workspaces.listWorkspaces()) {
@@ -1104,6 +1120,10 @@ runMigrations(this.db);
 
   setAgentSkills(agentId: string, input: SetAgentSkillsInput | string[]): MultiremiSkill[] {
     return this.agents.setAgentSkills(agentId, input);
+  }
+
+  addAgentSkills(agentId: string, skillIds: readonly string[]): MultiremiSkill[] {
+    return this.agents.addAgentSkills(agentId, skillIds);
   }
 
   /** Internal cross-domain primitive; callers must already own a DB transaction. */
@@ -2340,6 +2360,10 @@ runMigrations(this.db);
 
   completeFeishuRoundPushTaskWithinTransaction(task: MultiremiTask, body: string): void {
     this.feishuBot.upsertRoundPushDeliveryWithinTransaction(task, body);
+  }
+
+  prepareFeishuBackgroundDoorbellDeliveryWithinTransaction(originAttemptId: string, originTurnId: string | null, taskId: string): void {
+    this.feishuBot.forTask(taskId).prepareBackgroundDoorbellDeliveryWithinTransaction(originAttemptId, originTurnId, taskId);
   }
 
   materializeFeishuTaskDeliveries(taskId: string): void {
@@ -4698,16 +4722,16 @@ runMigrations(this.db);
     return this.sessions.getSessionAgentMaxCursorSeq(sessionId, agentId);
   }
 
-  buildTaskSessionProjection(taskId: string): MultiremiSessionProjection | null {
+  buildTaskSessionProjection(taskId: string, options: { boundsOnly?: boolean } = {}): MultiremiSessionProjection | null {
     const task = this.tasks.getTask(taskId);
     if (task?.chatSessionId) {
       const executionKind = this.tasks.getTaskChatExecutionKind(task);
       if (task.issueSessionId && executionKind !== "ordinary") {
-        return this.sessions.buildTaskSessionProjection(taskId);
+        return this.sessions.buildTaskSessionProjection(taskId, options);
       }
-      return this.chat.buildTaskSessionProjection(taskId);
+      return this.chat.buildTaskSessionProjection(taskId, options);
     }
-    if (task?.issueSessionId) return this.sessions.buildTaskSessionProjection(taskId);
+    if (task?.issueSessionId) return this.sessions.buildTaskSessionProjection(taskId, options);
     return null;
   }
 
@@ -5578,6 +5602,8 @@ runMigrations(this.db);
   closeQuestion(...args: Parameters<Questions['close']>) { return new Questions(this.ctx).close(...args); }
   reconcileQuestionWaits(...args: Parameters<Questions['reconcileRuntimeWaits']>) { return new Questions(this.ctx).reconcileRuntimeWaits(...args); }
   getMessage(...args: Parameters<InboxRepo["getMessage"]>) { return this.inbox.getMessage(...args); }
+  /** `getMessage` for many ids in bounded batches; ids without a message are absent. */
+  getMessages(...args: Parameters<InboxRepo["getMessages"]>) { return this.inbox.getMessages(...args); }
   getDaemonTurnBridge() {return new DaemonTurnBridge(this.ctx);}
   sendMessage(input:import("@multiremi/contracts/unified-model.js").SendMessageInput, uploads: CreateAttachmentInput[] = [],
     authorizeRecipient?:(agent:MultiremiAgent)=>void, authorizeConversation?:(sessionId:string,targetAgent:MultiremiAgent|null)=>void) {
@@ -5699,6 +5725,11 @@ runMigrations(this.db);
   getTaskIdentity(id: string, projection: "fanout"): import("@multiremi/store/context.js").TaskMessageFanoutSubject | null;
   getTaskIdentity(id: string, projection?: "fanout") {
     return projection ? this.tasks.getTaskIdentity(id, projection) : this.tasks.getTaskIdentity(id);
+  }
+
+  /** Conversation-visibility subjects for many source ids; see TasksRepo.getConversationSourceSubjects. */
+  getConversationSourceSubjects(sourceIds: readonly string[]) {
+    return this.tasks.getConversationSourceSubjects(sourceIds);
   }
 
   taskOfferRetryDeadlines(runtimeId: string) { return this.tasks.taskOfferRetryDeadlines(runtimeId); }
@@ -6097,6 +6128,54 @@ runMigrations(this.db);
 
   getRunningSubagents(taskId: string): number | null {
     return this.tasks.getRunningSubagents(taskId);
+  }
+
+  /** PR 6: the whole `task.activity` frame (subagents and background tasks); see `TasksRepo.recordTaskActivity`. */
+  recordTaskActivity(taskId: string, activity: { runningSubagents: number; runningBackgroundTasks?: number }): boolean {
+    return this.tasks.recordTaskActivity(taskId, activity);
+  }
+
+  getRunningBackgroundTasks(taskId: string): number | null {
+    return this.tasks.getRunningBackgroundTasks(taskId);
+  }
+
+  // ── Background tasks (PR 6): see BackgroundTasksRepo ──────────────────────
+
+  upsertLaneBackgroundSnapshot(runtimeId: string, workspaceId: string, payload: DaemonLaneBackgroundTasksPayload): number {
+    return this.backgroundTasks.upsertLaneSnapshot(runtimeId, workspaceId, payload);
+  }
+
+  reconcileParkedLanes(runtimeId: string, parkedLanes: readonly DaemonParkedLane[], activeTaskIds: readonly string[]): number {
+    return this.backgroundTasks.reconcileParkedLanes(runtimeId, parkedLanes, activeTaskIds);
+  }
+
+  /** The sweep: rows of a deleted runtime end `lost`, runtimes silent for 10 minutes turn running rows `unknown`, retention. */
+  sweepBackgroundTasks(now?: number): { unknown: number; lost: number; deleted: number } {
+    return this.backgroundTasks.sweep(now);
+  }
+
+  requestBackgroundTaskStop(sessionId: string, target: BackgroundTaskStopTarget, memberId: string | null): BackgroundTaskStopResult {
+    return this.backgroundTasks.requestStop(sessionId, target, memberId);
+  }
+
+  laneBackgroundWake(runtimeId: string, workspaceId: string, payload: DaemonLaneBackgroundWakePayload): DaemonLaneBackgroundWakeReply {
+    return this.backgroundTasks.laneBackgroundWake(runtimeId, workspaceId, payload);
+  }
+
+  listSessionBackgroundTasks(sessionId: string): SessionBackgroundTasks {
+    return this.backgroundTasks.listSessionBackgroundTasks(sessionId);
+  }
+
+  countRunningBackgroundTasksBySession(sessionIds: readonly string[]): Map<string, number> {
+    return this.backgroundTasks.countRunningBySession(sessionIds);
+  }
+
+  runtimesWithAliveBackgroundTasks(sessionId: string): string[] {
+    return this.backgroundTasks.runtimesWithAliveTasks(sessionId);
+  }
+
+  backgroundTaskDownlinks(runtimeId: string): BackgroundTaskDownlinks {
+    return this.backgroundTasks.downlinkEntities(runtimeId);
   }
 
   pinTaskSession(taskId: string, sessionId?: string | null, workDir?: string | null): MultiremiTask {

@@ -72,6 +72,22 @@ describe("chat attachment drafts", () => {
     expect(storage.getItem("multimira:chat:draftAttachments:workspace-a")).toBeNull();
   });
 
+  it("keeps no key for an emptied draft, in memory as in storage, and leaves its attachments", () => {
+    const storage = memoryStorage();
+    const store = createChatStore({ storage });
+    store.getState().setInputDraft("chat-1", "text");
+    store.getState().setInputDraft("chat-2", "other");
+    store.getState().setInputDraftAttachment("chat-1", "url-a", "attachment-a");
+    store.getState().setInputDraft("chat-1", "");
+    expect(store.getState().inputDrafts).toEqual({ "chat-2": "other" });
+    expect(createChatStore({ storage }).getState().inputDrafts).toEqual({ "chat-2": "other" });
+    expect(store.getState().inputDraftAttachments).toEqual({ "chat-1": { "url-a": "attachment-a" } });
+    // Emptying a draft that does not exist changes nothing.
+    const before = store.getState().inputDrafts;
+    store.getState().setInputDraft("chat-3", "");
+    expect(store.getState().inputDrafts).toBe(before);
+  });
+
   it("removes uploaded references without deleting text when explicitly requested", () => {
     const storage = memoryStorage();
     const store = createChatStore({ storage });
@@ -108,25 +124,87 @@ describe("new chat project selection", () => {
     store.getState().setDraftProjectId(null);
     expect(createChatStore({ storage }).getState().draftProjectId).toBeNull();
   });
+
+  it("keeps one location kind: a Project and a local directory replace each other", () => {
+    const storage = memoryStorage();
+    const store = createChatStore({ storage });
+    store.getState().setDraftLocation({ projectId: "project-a", runtimeWorkspaceId: null });
+    store.getState().setDraftLocation({ projectId: null, runtimeWorkspaceId: "rws-a" });
+    expect(store.getState()).toMatchObject({ draftProjectId: null, draftRuntimeWorkspaceId: "rws-a" });
+    // Only the Project survives a reload; a directory draft is per surface.
+    expect(createChatStore({ storage }).getState()).toMatchObject({ draftProjectId: null, draftRuntimeWorkspaceId: null });
+    store.getState().setDraftLocation({ projectId: "project-a", runtimeWorkspaceId: null });
+    expect(store.getState()).toMatchObject({ draftProjectId: "project-a", draftRuntimeWorkspaceId: null });
+  });
+
+  it("consumes the draft location when the new chat is created or another chat opens", () => {
+    for (const location of [{ projectId: "project-a", runtimeWorkspaceId: null }, { projectId: null, runtimeWorkspaceId: "rws-a" }]) {
+      const storage = memoryStorage();
+      const store = createChatStore({ storage });
+      store.getState().setDraftLocation(location);
+      store.getState().setActiveSession("chat-created");
+      expect(store.getState()).toMatchObject({ draftProjectId: null, draftRuntimeWorkspaceId: null });
+      expect(createChatStore({ storage }).getState().draftProjectId).toBeNull();
+    }
+  });
+
+  it("starts the next new chat unbound after the active chat is deleted", () => {
+    const storage = memoryStorage();
+    const store = createChatStore({ storage });
+    store.getState().setActiveSession("chat-bound");
+    // Whatever a draft left behind while the bound chat was open.
+    store.getState().setDraftProjectId("project-a");
+    // useDeleteChatSession and chat:session_deleted clear the active chat.
+    store.getState().setActiveSession(null);
+    expect(store.getState()).toMatchObject({ activeSessionId: null, draftProjectId: null, draftRuntimeWorkspaceId: null });
+    expect(createChatStore({ storage }).getState().draftProjectId).toBeNull();
+  });
+
+  it("keeps the location while the surface stays on the same unsaved draft", () => {
+    const storage = memoryStorage();
+    const store = createChatStore({ storage });
+    store.getState().setDraftLocation({ projectId: "project-a", runtimeWorkspaceId: null });
+    // An agent switch on the draft re-enters the draft.
+    store.getState().setActiveSession(null);
+    expect(store.getState().draftProjectId).toBe("project-a");
+    // A sidebar group's "+" leaves the open chat first, then binds the new one.
+    store.getState().setActiveSession("chat-open");
+    store.getState().setActiveSession(null);
+    store.getState().setDraftLocation({ projectId: null, runtimeWorkspaceId: "rws-a" });
+    expect(store.getState()).toMatchObject({ draftProjectId: null, draftRuntimeWorkspaceId: "rws-a" });
+  });
 });
 
 describe("follow-up preference", () => {
-  it("defaults to steer and persists the choice globally across workspaces", () => {
+  it("defaults to queue and persists the choice globally across workspaces", () => {
     const storage = memoryStorage();
     const store = createChatStore({ storage });
-    expect(store.getState().followUpMode).toBe("steer");
-    store.getState().setFollowUpMode("queue");
-    expect(storage.getItem("multimira:chat:followUpMode")).toBe("queue");
+    expect(store.getState().followUpMode).toBe("queue");
+    store.getState().setFollowUpMode("steer");
+    expect(storage.getItem("multimira:chat:followUpMode")).toBe("steer");
     workspace.slug = "workspace-b";
     workspace.rehydrate.forEach(callback => callback());
-    expect(store.getState().followUpMode).toBe("queue");
-    expect(createChatStore({ storage }).getState().followUpMode).toBe("queue");
+    expect(store.getState().followUpMode).toBe("steer");
+    expect(createChatStore({ storage }).getState().followUpMode).toBe("steer");
+  });
+
+  it("does not store the default, so a browser that never chose follows it", () => {
+    const storage = memoryStorage();
+    createChatStore({ storage });
+    workspace.rehydrate.forEach(callback => callback());
+    expect(storage.getItem("multimira:chat:followUpMode")).toBeNull();
+  });
+
+  it("keeps a stored steer choice made before queue became the default", () => {
+    const storage = memoryStorage();
+    storage.setItem("multimira:chat:followUpMode", "steer");
+    expect(createChatStore({ storage }).getState().followUpMode).toBe("steer");
   });
 
   it("ignores an unknown stored value", () => {
     const storage = memoryStorage();
     storage.setItem("multimira:chat:followUpMode", "interrupt");
-    expect(createChatStore({ storage }).getState().followUpMode).toBe("steer");
+    expect(createChatStore({ storage }).getState().followUpMode).toBe("queue");
   });
 });
 
@@ -308,5 +386,27 @@ describe("subagent panel (PR 5 §6.8)", () => {
     workspace.rehydrate.forEach(callback => callback());
     expect(store.getState().subagentPanel).toBeNull();
     expect(store.getState().subagentReveal).toBeNull();
+  });
+});
+
+describe("background tasks in the right panel (PR 6 §8.1)", () => {
+  it("opens the 后台任务 view without an attempt, switches views at their overviews and dismisses notices, persisting nothing", () => {
+    const storage = memoryStorage();
+    const store = createChatStore({ storage });
+    store.getState().openSubagentPanel({ sessionId: "chat-1", view: "tasks", attemptId: null, live: false, path: [], task: { task_id: "t1" } });
+    expect(store.getState().subagentPanel).toMatchObject({ view: "tasks", attemptId: null, task: { task_id: "t1" } });
+    store.getState().setPanelTask(null);
+    expect(store.getState().subagentPanel).toMatchObject({ view: "tasks", task: null });
+    store.getState().openSubagentPanel({ sessionId: "chat-1", attemptId: "att-1", live: true, path: ["sa:1"] });
+    store.getState().setPanelView("tasks");
+    // The attempt stays, so the switch can go back to its subagents.
+    expect(store.getState().subagentPanel).toMatchObject({ view: "tasks", attemptId: "att-1", path: [], task: null });
+    store.getState().setPanelTask({ task_id: "t2", provider_session_id: "ps" });
+    store.getState().setPanelView("subagents");
+    expect(store.getState().subagentPanel).toMatchObject({ view: "subagents", attemptId: "att-1", path: [], task: null });
+    store.getState().dismissBackgroundNotice("row-1");
+    store.getState().dismissBackgroundNotice("row-1");
+    expect(store.getState().dismissedBackgroundNotices).toEqual(["row-1"]);
+    expect(createChatStore({ storage }).getState().dismissedBackgroundNotices).toEqual([]);
   });
 });

@@ -129,6 +129,10 @@ function main(): void {
 }
 
 export function classifyRoute(route: string): CliManifestRoute {
+  if (route === "GET /api/chat/sessions/:sessionId/background-tasks"
+    || route === "POST /api/chat/sessions/:sessionId/background-tasks/stop") return {
+    cli_exempt: true, category: "pure_ui", reason: "Chat background-task panel state and stop actions are exposed in the Web UI (ADR 0022).",
+  };
   if (/^GET \/api\/sessions\/:sessionId\/log(?:\/entry|\/locate)?$/.test(route)) return {
     cli_exempt: true, category: "pure_ui", reason: "Read-only SSR and replica display wire (head, turn cards, window and location); CLI reads use message.list/get.",
   };

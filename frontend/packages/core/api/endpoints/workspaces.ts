@@ -18,6 +18,7 @@ import {
   PlatformPromptTemplatePreviewSchema,
   WorkspaceEnvResponseSchema,
   WorkspaceOperatorSchema,
+  WorkspacePromptSettingsSchema,
   type WorkspaceEnvResponse,
 } from "../schemas/workspaces";
 
@@ -49,16 +50,22 @@ export class WorkspacesEndpoints {
   }
 
   async getWorkspacePromptSettings(workspaceId: string): Promise<WorkspacePromptSettings> {
-    return this.http.fetch(`/api/workspaces/${workspaceId}/prompts`);
+    const raw = await this.http.fetch<unknown>(`/api/workspaces/${encodeURIComponent(workspaceId)}/prompts`);
+    return parseStrictResponse(raw, WorkspacePromptSettingsSchema, {
+      endpoint: "GET /api/workspaces/:id/prompts",
+    });
   }
 
   async updateWorkspacePromptSettings(
     workspaceId: string,
     data: UpdateWorkspacePromptSettingsRequest,
   ): Promise<WorkspacePromptSettings> {
-    return this.http.fetch(`/api/workspaces/${workspaceId}/prompts`, {
+    const raw = await this.http.fetch<unknown>(`/api/workspaces/${encodeURIComponent(workspaceId)}/prompts`, {
       method: "PUT",
       body: JSON.stringify(data),
+    });
+    return parseStrictResponse(raw, WorkspacePromptSettingsSchema, {
+      endpoint: "PUT /api/workspaces/:id/prompts",
     });
   }
 

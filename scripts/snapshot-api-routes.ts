@@ -68,7 +68,7 @@ export const SNAPSHOT_STATUS_ONLY_ROUTES = new Set([
 const NORMALIZER_RULES = [
   "ISO-8601 timestamps (anywhere in a string) -> \"<timestamp>\"",
   "local timestamp ids (local[-contact|-lark]-<epoch>) -> \"<timestamp>\" suffix",
-  "epoch-millisecond numbers (1.5e12..4e12) and *_ms/duration/elapsed/uptime/latency numeric keys -> 0",
+  "epoch-millisecond numbers (1.5e12..4e12) and *_ms/duration/elapsed/uptime/latency/total_seconds numeric keys -> 0",
   "absolute machine paths (repo root, $HOME, $TMPDIR, upload dir) -> \"<repo>\"/\"<home>\"/\"<tmp>\"/\"<uploads>\"",
   "root_hint path separators -> / (portable redacted storage paths)",
   "hostname in URL/UNC authorities -> \"<hostname>\"; username in Unix/Windows home paths -> \"<user>\"",
@@ -368,7 +368,7 @@ export function normalize(value: unknown, key = ""): unknown {
     return scrubString(key === "root_hint" ? value.replaceAll("\\", "/") : value);
   }
   if (typeof value === "number") {
-    if (TIME_KEY_RE.test(key) || MS_KEY_RE.test(key)) return 0;
+    if (TIME_KEY_RE.test(key) || MS_KEY_RE.test(key) || key === "total_seconds") return 0;
     if (Number.isFinite(value) && value >= 1_500_000_000_000 && value <= 4_000_000_000_000) return 0;
     return value;
   }
@@ -1941,6 +1941,8 @@ flow("chat", async (rec, refs) => {
   await rec.json("POST", `/api/chat/sessions/${compatId}/messages`, { body: "compat message" });
   await rec.json("POST", `/api/chat/sessions/${compatId}/read`, {});
   await rec.json("PATCH", `/api/chat/sessions/${compatId}`, { title: "Compat chat renamed" });
+  // PR 6: nothing runs in the background here, so the stop is refused.
+  await rec.json("POST", `/api/chat/sessions/${compatId}/background-tasks/stop`, { all: true });
   await rec.call("DELETE", `/api/chat/sessions/${compatId}`);
 
   const native = await rec.json("POST", "/api/multiremi/chats", { agentId: refs.agentId, title: "Native chat" });

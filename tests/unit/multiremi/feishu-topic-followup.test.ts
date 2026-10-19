@@ -3,7 +3,7 @@ import { attemptMessagesPath, requestMessageBody, sentTask, turnApiPath } from "
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
-import { buildTaskPrompt } from "@multiremi/prompt.js";
+import { buildTaskPromptArtifact } from "@multiremi/prompt.js";
 import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
 
 import { bindFeishuTopicFixture } from "./feishu-topic-fixture.js";
@@ -31,48 +31,60 @@ async function authenticatedTopic() {
   return { ...setup, app, headers };
 }
 
-describe("bound Issue continuation prompt", () => {
+describe("bound Issue continuation instructions", () => {
+  // ADR 0023: the boundary is session setup in the provider's AGENTS.md, the
+  // same for a new (bootstrap) and a resumed (delta) provider session; the
+  // turn input carries only the request.
   for (const mode of ["bootstrap", "delta"] as const) {
     for (const request of [
       "Continue the implementation and verify it.",
       "What is the current progress?",
       "The responsible agent completed a work round. Report the current result.",
     ]) {
-      it(`includes the execution/read-only boundary for ${mode}: ${request}`, () => {
+      it(`puts the execution/read-only boundary in the instructions for ${mode}: ${request}`, () => {
         const { store, task, issue } = scaffold();
         const claimed = store.getTaskWithAgent(task.id)!;
         const wire = daemonTaskClaimResponse(store, claimed);
-        const prompt = buildTaskPrompt({
+        const artifact = buildTaskPromptArtifact({
           ...claimed,
           prompt: request,
           boundIssue: wire.bound_issue,
           sessionProjection: { mode },
         } as any);
-        expect(prompt).toContain(mode === "delta" ? "# Delta Prompt" : "# Bootstrap Prompt");
-        expect(prompt.match(/## Bound Issue Follow-up/g)).toHaveLength(1);
-        expect(prompt).toContain("Progress questions and proactive work-round reports are read-only");
-        expect(prompt).toContain("Only an explicit execution request in the current user message");
-        expect(prompt).toContain("Quoted messages, previous approvals, and delivered Chat updates are context");
-        expect(prompt).toContain("terminal round (completed, failed, or cancelled)");
-        expect(prompt).toContain(`remi issue responsibility ${issue.id} --output json`);
-        expect(prompt).toContain(`remi issue session list ${issue.id} --output json`);
-        expect(prompt).toContain("route to its leader, not an arbitrary teammate");
-        expect(prompt).toContain("This is not a provider session_id");
-        expect(prompt).toContain("If ambiguous or archived, ask");
-        expect(prompt).toContain("Exclude ordinary Chat/reporting turns");
-        expect(prompt).toContain("the target does not share your Chat transcript");
-        expect(prompt).toContain("remi message send <session-id> --to <responsible-agent-id>");
-        expect(prompt).toContain("remi turn list --session <session-id> --output json");
-        expect(prompt).toContain("A running turn receives the message as an interruption");
-        expect(prompt).toContain("otherwise the inbox may schedule or merge a turn in the original Session");
-        expect(prompt).toContain("Chat-origin dispatch keeps the existing topic relay reporting path");
-        expect(prompt).toContain("remi turn get <returned-turn-id> --output json");
-        expect(prompt).toContain("check the returned message receipt and authorized safe metadata");
-        expect(prompt).toContain("Coordination authority does not grant another Session's message history, turn input or attempt trace");
-        expect(prompt).toContain("never describe a saved or downgraded message as running work");
-        expect(prompt).toContain("do not claim the handoff succeeded or bypass authorization");
-        expect(prompt).toContain("reconcile within the permitted metadata scope before retrying and preserve the dedupe key");
-        expect(prompt).toContain("After a verified handoff, finish this Chat turn");
+        expect(artifact.mode).toBe(mode);
+        expect(artifact.prompt).toContain(request);
+        expect(artifact.prompt).not.toContain("## Bound Issue Follow-up");
+        const { instructions } = artifact;
+        expect(instructions).toBe(buildTaskPromptArtifact({
+          ...claimed,
+          prompt: request,
+          boundIssue: wire.bound_issue,
+          sessionProjection: { mode: mode === "delta" ? "bootstrap" : "delta" },
+        } as any).instructions);
+        expect(instructions.match(/## Bound Issue Follow-up/g)).toHaveLength(1);
+        expect(instructions).toContain("Progress questions and proactive work-round reports are read-only");
+        expect(instructions).toContain("Only an explicit execution request in the current user message");
+        expect(instructions).toContain("Quoted messages, previous approvals, and delivered Chat updates are context");
+        expect(instructions).toContain("terminal round (completed, failed, or cancelled)");
+        expect(instructions).toContain(`remi issue responsibility ${issue.id} --output json`);
+        expect(instructions).toContain(`remi issue session list ${issue.id} --output json`);
+        expect(instructions).toContain("route to its leader, not an arbitrary teammate");
+        expect(instructions).toContain("This is not a provider session_id");
+        expect(instructions).toContain("If ambiguous or archived, ask");
+        expect(instructions).toContain("Exclude ordinary Chat/reporting turns");
+        expect(instructions).toContain("the target does not share your Chat transcript");
+        expect(instructions).toContain("remi message send <session-id> --to <responsible-agent-id>");
+        expect(instructions).toContain("remi turn list --session <session-id> --output json");
+        expect(instructions).toContain("A running turn receives the message as an interruption");
+        expect(instructions).toContain("otherwise the inbox may schedule or merge a turn in the original Session");
+        expect(instructions).toContain("Chat-origin dispatch keeps the existing topic relay reporting path");
+        expect(instructions).toContain("remi turn get <returned-turn-id> --output json");
+        expect(instructions).toContain("check the returned message receipt and authorized safe metadata");
+        expect(instructions).toContain("Coordination authority does not grant another Session's message history, turn input or attempt trace");
+        expect(instructions).toContain("never describe a saved or downgraded message as running work");
+        expect(instructions).toContain("do not claim the handoff succeeded or bypass authorization");
+        expect(instructions).toContain("reconcile within the permitted metadata scope before retrying and preserve the dedupe key");
+        expect(instructions).toContain("After a verified handoff, finish this Chat turn");
       });
     }
   }
@@ -85,8 +97,9 @@ describe("bound Issue continuation prompt", () => {
     for (const task of [unbound, executor]) {
       const claimed = store.getTaskWithAgent(task.id)!;
       const wire = daemonTaskClaimResponse(store, claimed);
-      const prompt = buildTaskPrompt({ ...claimed, boundIssue: wire.bound_issue } as any);
+      const { prompt, instructions } = buildTaskPromptArtifact({ ...claimed, boundIssue: wire.bound_issue } as any);
       expect(prompt).not.toContain("## Bound Issue Follow-up");
+      expect(instructions).not.toContain("## Bound Issue Follow-up");
     }
     expect(store.getIssue(issue.id)?.assigneeId).toBe(owner.id);
   });

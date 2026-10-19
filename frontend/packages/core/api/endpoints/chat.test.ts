@@ -166,27 +166,44 @@ describe("ChatEndpoints contracts", () => {
     await expect(endpointsWithResponse({ ...session, pinned: undefined }).updateChatSession("chat-1", { pinned: false })).rejects.toBeInstanceOf(ApiContractError);
   });
 
-  it("keeps an accepted message successful when the supplemental turn read fails", async () => {
+  it("settles once the message is accepted, without reading its turn", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(response(session))
-      .mockResolvedValueOnce(response({ message: messageFixture({ dedupe_key: "send-1" }), wake_applied: "next_turn", wake_reason: "agent_pair_not_privileged", turn_id: "turn_1" }))
-      .mockRejectedValueOnce(new Error("offline"));
+      .mockResolvedValueOnce(response({ message: messageFixture({ dedupe_key: "send-1" }), wake_applied: "next_turn", wake_reason: "agent_pair_not_privileged", turn_id: "turn_1" }));
     vi.stubGlobal("fetch", fetchMock);
     const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
-    await expect(api.sendChatMessage("chat_1", "Follow up", undefined, "send-1")).resolves.toMatchObject({ message_id: "msg_1", turn_id: "turn_1", created_at: "2026-10-04T00:00:00Z" });
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    await expect(api.sendChatMessage("chat_1", "Follow up", undefined, "send-1"))
+      .resolves.toEqual({ message_id: "msg_1", turn_id: "turn_1", created_at: "2026-10-04T00:00:00Z" });
+    // A turn read that hangs or fails can no longer hold or fail the send.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("/api/turns/"), expect.anything());
     expect(JSON.parse(fetchMock.mock.calls[1]![1]!.body).dedupe_key).toBe("send-1");
   });
-  it("sends a canonical message, preserving dedupe and the active attempt identity", async () => {
+  it("sends a canonical message, preserving dedupe, with the caller's abort signal on every request", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(response(session))
-      .mockResolvedValueOnce(response({ message: messageFixture(), wake_applied: "next_turn", wake_reason: "agent_pair_not_privileged", turn_id: "turn_1" }))
-      .mockResolvedValueOnce(response({ turn: turnFixture() }));
+      .mockResolvedValueOnce(response({ message: messageFixture(), wake_applied: "next_turn", wake_reason: "agent_pair_not_privileged", turn_id: "turn_1" }));
     vi.stubGlobal("fetch", fetchMock);
     const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
-    await expect(api.sendChatMessage("chat_1", "Follow up", undefined, "send-1")).resolves.toMatchObject({ message_id: "msg_1", task_id: "attempt_2", turn_id: "turn_1" });
+    const { signal } = new AbortController();
+    await expect(api.sendChatMessage("chat_1", "Follow up", undefined, "send-1", { signal })).resolves.toMatchObject({ message_id: "msg_1", turn_id: "turn_1" });
     expect(fetchMock).toHaveBeenCalledWith("https://api.example.test/api/sessions/chat_1/messages", expect.objectContaining({
-      method: "POST", body: JSON.stringify({ body_md: "Follow up", message_kind: "request", to: { type: "agent", ref: "agent-1" }, wake_requested: "now", dedupe_key: "send-1" }),
+      method: "POST", signal, body: JSON.stringify({ body_md: "Follow up", message_kind: "request", to: { type: "agent", ref: "agent-1" }, wake_requested: "now", dedupe_key: "send-1" }),
     }));
+    expect(fetchMock.mock.calls.map(([, init]) => init?.signal)).toEqual([signal, signal]);
+  });
+  it("reads a sent message's turn as the pending task: its attempt while in flight, none once it ended", async () => {
+    for (const [fields, expected] of [
+      [{ status: "pending" }, { task_id: "attempt_2", turn_id: "turn_1", status: "queued", created_at: "2026-10-04T00:00:00Z", supports_queue: true }],
+      [{ status: "running", current_attempt_id: null }, { task_id: "turn_1", turn_id: "turn_1", status: "running", supports_queue: true }],
+      [{ status: "completed" }, { supports_queue: true }],
+    ] as const) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({ turn: turnFixture(fields) })));
+      const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
+      const task = await api.getChatTurnPendingTask("turn_1");
+      expect(task).toMatchObject(expected);
+      if (!("task_id" in expected)) expect(task).toEqual(expected);
+      expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/turns/turn_1", expect.anything());
+    }
   });
   it("reads the active turn through status-filtered pages, without a legacy queue", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => {
@@ -197,6 +214,24 @@ describe("ChatEndpoints contracts", () => {
     await expect(api.getPendingChatTask("chat_1")).resolves.toMatchObject({ task_id: "attempt_2", turn_id: "turn_1", status: "running" });
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining("pending-task"), expect.anything());
+  });
+  it("reads a running turn whose attempt waits for its local folder as waiting, with the reason (PR 6 §2.8)", async () => {
+    const reason = "local_directory /Users/me/repo (held by background tasks of chat chat_2)";
+    for (const [field, expected] of [
+      [reason, { status: "waiting_local_directory", wait_reason: reason }],
+      ["", { status: "waiting_local_directory", wait_reason: null }],
+      [null, { status: "running" }],
+      [7, { status: "running" }],
+    ] as const) {
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+        const params = new URL(url).searchParams;
+        return response({ turns: params.get("status") === "running" ? [turnFixture({ local_directory_wait_reason: field })] : [], next_cursor: null });
+      }));
+      const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
+      const pending = await api.getPendingChatTask("chat_1");
+      expect(pending, String(field)).toMatchObject({ task_id: "attempt_2", ...expected });
+      if (expected.status === "running") expect(pending.wait_reason, String(field)).toBeUndefined();
+    }
   });
   it("lists in-flight chat turns with both the attempt and the turn the cancel command addresses", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url: string) => {
@@ -224,6 +259,55 @@ describe("ChatEndpoints contracts", () => {
       ["chat_1", 2], ["chat_3", undefined], ["chat_4", undefined], ["chat_5", undefined],
     ]);
     expect("running_subagents" in tasks[3]!).toBe(false);
+  });
+  it("reads the session list's background-task count, degrading a malformed one (PR 6)", async () => {
+    const list = await endpointsWithResponse([{ ...session, running_background_tasks: 2 }, { ...session, id: "chat-2", running_background_tasks: "x" }, { ...session, id: "chat-3" }])
+      .listChatSessions();
+    expect(list.map((item) => item.running_background_tasks)).toEqual([2, undefined, undefined]);
+  });
+  it("carries the attempt's background-task count into the pending list when the turn reports it (PR 6)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => response({ turns: new URL(url).searchParams.get("status") === "running"
+      ? [turnFixture({ running_background_tasks: 1 }), turnFixture({ id: "turn_2", current_attempt_id: "attempt_2", session_id: "chat_2", running_background_tasks: -3 })]
+      : [], next_cursor: null })));
+    const { tasks } = await new ChatEndpoints(new HttpClient("https://api.example.test")).listPendingChatTasks();
+    expect(tasks.map((task) => task.running_background_tasks)).toEqual([1, undefined]);
+  });
+  it("reads a chat's background tasks from the session registry, dropping a malformed row and degrading unknown values (PR 6)", async () => {
+    const row = { id: "row-1", session_id: "chat-1", task_id: "t1", task_type: "shell", name: "npm run dev", command: "npm run dev",
+      origin_attempt_id: "attempt_1", status: "running", can_stop: true, started_at: "2026-10-16T00:00:00Z", lane_state: "parked",
+      parked_until: "2026-10-16T02:00:00Z", stop_reason: "a_new_reason", origin_turn_seq: 4 };
+    const snapshot = await endpointsWithResponse({ session_id: "chat-1", rows: [row, { ...row, id: "row-2", status: "teleported", lane_state: "orbit" }, { id: "row-3" }] })
+      .listChatBackgroundTasks("chat-1");
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/chat/sessions/chat-1/background-tasks", expect.anything());
+    expect(snapshot.rows.map((r) => [r.id, r.status, r.lane_state, r.stop_reason])).toEqual([
+      ["row-1", "running", "parked", null], ["row-2", "unknown", "closed", null],
+    ]);
+    expect(snapshot.rows[0]).toMatchObject({ origin_turn_seq: 4, stop_outcome: null, output_tail: null, usage: null });
+    // `running` is the server's, else the running rows.
+    expect(snapshot.running).toBe(1);
+    await expect(endpointsWithResponse({ session_id: "chat-9", rows: [] }).listChatBackgroundTasks("chat-1")).rejects.toBeInstanceOf(ApiContractError);
+    await expect(endpointsWithResponse({ tasks: [] }).listChatBackgroundTasks("chat-1")).rejects.toBeInstanceOf(ApiContractError);
+  });
+  it("asks to stop one background task or all of them (PR 6 §6.1)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 202 })));
+    const api = new ChatEndpoints(new HttpClient("https://api.example.test"));
+    await expect(api.stopChatBackgroundTasks("chat-1", { task_id: "t1" })).resolves.toEqual([]);
+    expect(fetch).toHaveBeenCalledWith("https://api.example.test/api/chat/sessions/chat-1/background-tasks/stop", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ task_id: "t1" }),
+    }));
+    await api.stopChatBackgroundTasks("chat-1", { all: true });
+    expect(fetch).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ body: JSON.stringify({ all: true }) }));
+    // The rows the server marked come back, well-formed ones of this chat only.
+    const marked = { id: "row-1", session_id: "chat-1", task_id: "t1", started_at: "2026-10-16T00:00:00Z", status: "running",
+      stop_requested_at: "2026-10-16T00:01:00Z", stop_requested_by: "member-1", stop_outcome: "pending" };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ requested_at: "2026-10-16T00:01:00Z",
+      rows: [marked, { ...marked, id: "row-x", session_id: "chat-2" }, { id: "bad" }] }), { status: 202 })));
+    await expect(new ChatEndpoints(new HttpClient("https://api.example.test")).stopChatBackgroundTasks("chat-1", { task_id: "t1" }))
+      .resolves.toMatchObject([{ id: "row-1", stop_requested_by: "member-1", stop_outcome: "pending" }]);
+    // A refusal keeps its code for the caller.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "offline", code: "runtime_offline" }), { status: 409 })));
+    await expect(new ChatEndpoints(new HttpClient("https://api.example.test")).stopChatBackgroundTasks("chat-1", { all: true }))
+      .rejects.toMatchObject({ status: 409, body: { code: "runtime_offline" } });
   });
   it("marks the conversation read through the cursor command and rejects an invalid acknowledgement", async () => {
     await expect(endpointsWithResponse({ session_id: "chat_1", cursor_seq: 5 }).markChatSessionRead("chat_1")).resolves.toBeUndefined();

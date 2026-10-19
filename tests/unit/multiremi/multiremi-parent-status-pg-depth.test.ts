@@ -38,6 +38,7 @@ import { inboxFlowFixture, triggerInboxFlow } from "./fixtures/inbox-flow-fixtur
 const PG_ADMIN_URL = process.env.MULTIREMI_TEST_POSTGRES_URL
   ?? "postgres://multimira:multimira@localhost:5432/postgres";
 const TEST_DB = `multiremi_mul406_pg_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
+const previousScmEncryptionKey = process.env.MULTIREMI_SCM_ENCRYPTION_KEY;
 
 function pgDatabaseUrl(database: string): string {
   const url = new URL(PG_ADMIN_URL);
@@ -219,7 +220,14 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
   });
 
   beforeEach(() => counter.reset());
-  afterEach(() => counter.assertTransactionControl());
+  afterEach(() => {
+    try {
+      counter.assertTransactionControl();
+    } finally {
+      if (previousScmEncryptionKey === undefined) delete process.env.MULTIREMI_SCM_ENCRYPTION_KEY;
+      else process.env.MULTIREMI_SCM_ENCRYPTION_KEY = previousScmEncryptionKey;
+    }
+  });
 
   it("keeps the prepared Lane projection and column shape stable across a second Store startup", async () => {
     const database = `${TEST_DB}_lane_shape`;

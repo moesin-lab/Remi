@@ -38,8 +38,13 @@ const QUEUE_OUTBOX_KEY = "multimira:chat:queueOutbox";
  * `queue` (排队) holds the message until the turn completes (ADR 0020).
  */
 export type ChatFollowUpMode = "steer" | "queue";
-export const DEFAULT_FOLLOW_UP_MODE: ChatFollowUpMode = "steer";
+/** Like Codex, follow-ups queue unless the user chose otherwise. */
+export const DEFAULT_FOLLOW_UP_MODE: ChatFollowUpMode = "queue";
 
+/**
+ * Only `setFollowUpMode` writes the key, so a browser that never chose keeps
+ * following the default; a stored choice always wins.
+ */
 function readFollowUpMode(storage: StorageAdapter): ChatFollowUpMode {
   const stored = storage.getItem(FOLLOW_UP_MODE_KEY);
   return stored === "queue" || stored === "steer" ? stored : DEFAULT_FOLLOW_UP_MODE;
@@ -160,21 +165,41 @@ function readQueueOutbox(storage: StorageAdapter, key: string): Record<string, C
   return outbox;
 }
 
+/** The right panel's two views (PR 6 §8.1): an attempt's subagents, or the chat's background tasks. */
+export type ChatPanelView = "subagents" | "tasks";
+
 /**
- * What the subagent panel shows (PR 5): one attempt of one chat, its overview
- * (`path` empty) or a subagent's detail. `path` holds the subagent item ids
- * from a top-level subagent down to the open one; back drops the last id.
+ * A background task the panel's 后台任务 view shows in detail (PR 6 §8.2),
+ * by its registry identity: the bridge's `task_id` within the lane's provider
+ * session. A doorbell names its task this way before the rows are loaded.
+ */
+export interface BackgroundTaskRef {
+  task_id: string;
+  provider_session_id?: string | null;
+}
+
+/**
+ * What the right panel shows. The 子代理 view (PR 5) is one attempt of one
+ * chat, its overview (`path` empty) or a subagent's detail: `path` holds the
+ * subagent item ids from a top-level subagent down to the open one; back
+ * drops the last id. The 后台任务 view (PR 6) is the chat's, so it needs no
+ * attempt: its overview, or one task's detail (`task`). An attempt kept with
+ * it lets the 「子代理 | 后台任务」 switch go back to that attempt's subagents.
  */
 export interface SubagentPanelTarget {
   /** The chat the panel belongs to; another chat never shows it. */
   sessionId: string | null;
-  /** The attempt whose trace holds the subagents. */
-  attemptId: string;
+  /** Which view; absent means 子代理. */
+  view?: ChatPanelView;
+  /** The attempt whose trace holds the subagents; required for the 子代理 view. */
+  attemptId?: string | null;
   /** The turn of that attempt, when known; reads go through the turn route. */
   turnId?: string;
   /** Follow the trace socket (the running turn). */
   live: boolean;
   path: string[];
+  /** The open background task in the 后台任务 view; absent or null for its overview. */
+  task?: BackgroundTaskRef | null;
 }
 
 /** A request to show a top-level subagent's row in the live steps fold. */
@@ -198,8 +223,15 @@ export interface ChatState {
   isOpen: boolean;
   activeSessionId: string | null;
   selectedAgentId: string | null;
-  /** Project selected for a new conversation; existing bindings live in Query. */
+  /**
+   * Where the unsaved new conversation will run: a Project or a local
+   * directory, never both. Existing bindings live in Query. Opening a real
+   * chat consumes the draft and leaving one starts the next draft unbound, so
+   * a new chat never inherits an earlier chat's location.
+   */
   draftProjectId: string | null;
+  /** Not persisted: a reload starts the new chat without a directory. */
+  draftRuntimeWorkspaceId: string | null;
   /** Drafts per session: sessionId (or DRAFT_NEW_SESSION) → markdown text. */
   inputDrafts: Record<string, string>;
   inputDraftAttachments: Record<string, Record<string, string>>;
@@ -219,11 +251,15 @@ export interface ChatState {
   subagentPanel: SubagentPanelTarget | null;
   /** The last reveal request for a subagent row. Not persisted. */
   subagentReveal: SubagentRevealRequest | null;
+  /** Background-task end notices the reader closed (registry row ids, PR 6 §8.1). Not persisted. */
+  dismissedBackgroundNotices: readonly string[];
   setOpen: (open: boolean) => void;
   toggle: () => void;
   setActiveSession: (id: string | null) => void;
   setSelectedAgentId: (id: string) => void;
   setDraftProjectId: (id: string | null) => void;
+  /** Selecting a Project or a local directory replaces the other. */
+  setDraftLocation: (location: { projectId: string | null; runtimeWorkspaceId: string | null }) => void;
   /** sessionId accepts a real session UUID or DRAFT_NEW_SESSION. */
   setInputDraft: (sessionId: string, draft: string) => void;
   clearInputDraft: (sessionId: string) => void;
@@ -273,6 +309,12 @@ export interface ChatState {
   closeSubagentPanel: () => void;
   /** Asks the live steps fold to open and scroll to a top-level subagent's row. */
   revealSubagent: (attemptId: string, itemId: string) => void;
+  /** Switches the open panel between 子代理 and 后台任务, at that view's overview. */
+  setPanelView: (view: ChatPanelView) => void;
+  /** Opens a background task's detail in the 后台任务 view, or its overview with null. */
+  setPanelTask: (task: BackgroundTaskRef | null) => void;
+  /** Closes a background-task end notice. */
+  dismissBackgroundNotice: (rowId: string) => void;
 }
 
 export interface ChatStoreOptions {
@@ -300,6 +342,7 @@ export function createChatStore(options: ChatStoreOptions) {
     activeSessionId: storage.getItem(wsKey(SESSION_STORAGE_KEY)),
     selectedAgentId: storage.getItem(wsKey(AGENT_STORAGE_KEY)),
     draftProjectId: storage.getItem(wsKey(DRAFT_PROJECT_KEY)),
+    draftRuntimeWorkspaceId: null,
     inputDrafts: readDrafts(storage, wsKey(DRAFTS_KEY)),
     inputDraftAttachments: readDraftAttachments(storage, wsKey(DRAFT_ATTACHMENTS_KEY)),
     localAttachmentDetails: {},
@@ -311,6 +354,7 @@ export function createChatStore(options: ChatStoreOptions) {
     queueOutbox: readQueueOutbox(storage, wsKey(QUEUE_OUTBOX_KEY)),
     subagentPanel: null,
     subagentReveal: null,
+    dismissedBackgroundNotices: [],
     setOpen: (open) => {
       logger.debug("setOpen", { from: get().isOpen, to: open });
       storage.setItem(OPEN_KEY, String(open));
@@ -323,15 +367,22 @@ export function createChatStore(options: ChatStoreOptions) {
       set({ isOpen: next });
     },
     setActiveSession: (id) => {
-      logger.info("setActiveSession", { from: get().activeSessionId, to: id });
+      const previous = get().activeSessionId;
+      logger.info("setActiveSession", { from: previous, to: id });
       if (id) {
         storage.setItem(wsKey(SESSION_STORAGE_KEY), id);
       } else {
         storage.removeItem(wsKey(SESSION_STORAGE_KEY));
       }
       // The subagent panel and a reveal request belong to one chat.
-      const subagents = id !== get().activeSessionId ? { subagentPanel: null, subagentReveal: null } : {};
-      set({ activeSessionId: id, ...subagents });
+      const subagents = id !== previous ? { subagentPanel: null, subagentReveal: null } : {};
+      // A draft location belongs to one unsaved chat. Opening a real chat
+      // (just created, selected or navigated to) consumes it; leaving one
+      // (deleted, or a new chat started) begins the next draft unbound. Only
+      // draft to draft keeps it, so a caller binding the new chat sets it after.
+      const draft = id || previous ? { draftProjectId: null, draftRuntimeWorkspaceId: null } : {};
+      if (id || previous) storage.removeItem(wsKey(DRAFT_PROJECT_KEY));
+      set({ activeSessionId: id, ...subagents, ...draft });
     },
     setSelectedAgentId: (id) => {
       logger.info("setSelectedAgentId", { from: get().selectedAgentId, to: id });
@@ -343,10 +394,23 @@ export function createChatStore(options: ChatStoreOptions) {
       else storage.removeItem(wsKey(DRAFT_PROJECT_KEY));
       set({ draftProjectId: id });
     },
+    setDraftLocation: ({ projectId, runtimeWorkspaceId }) => {
+      const location = runtimeWorkspaceId
+        ? { draftProjectId: null, draftRuntimeWorkspaceId: runtimeWorkspaceId }
+        : { draftProjectId: projectId, draftRuntimeWorkspaceId: null };
+      if (location.draftProjectId) storage.setItem(wsKey(DRAFT_PROJECT_KEY), location.draftProjectId);
+      else storage.removeItem(wsKey(DRAFT_PROJECT_KEY));
+      set(location);
+    },
     setInputDraft: (sessionId, draft) => {
       // Debug level — onUpdate fires on every keystroke.
       logger.debug("setInputDraft", { sessionId, length: draft.length });
-      const next = { ...get().inputDrafts, [sessionId]: draft };
+      // An empty draft is no draft: its key goes, as in storage. Attachment
+      // bindings are left to their own setters.
+      if (!draft && !(sessionId in get().inputDrafts)) return;
+      const next = { ...get().inputDrafts };
+      if (draft) next[sessionId] = draft;
+      else delete next[sessionId];
       writeDrafts(storage, wsKey(DRAFTS_KEY), next);
       set({ inputDrafts: next });
     },
@@ -492,7 +556,7 @@ export function createChatStore(options: ChatStoreOptions) {
       writeDraftAttachments(storage, wsKey(DRAFT_ATTACHMENTS_KEY), inputDraftAttachments);
       set({ inputDrafts, inputDraftAttachments });
     },
-    openSubagentPanel: (target) => set({ subagentPanel: { ...target, path: [...target.path] } }),
+    openSubagentPanel: (target) => set({ subagentPanel: { ...target, path: [...target.path], ...(target.task ? { task: { ...target.task } } : {}) } }),
     setSubagentPath: (path) => {
       const panel = get().subagentPanel;
       if (panel) set({ subagentPanel: { ...panel, path: [...path] } });
@@ -501,6 +565,18 @@ export function createChatStore(options: ChatStoreOptions) {
       if (get().subagentPanel || get().subagentReveal) set({ subagentPanel: null, subagentReveal: null });
     },
     revealSubagent: (attemptId, itemId) => set({ subagentReveal: { attemptId, itemId, nonce: ++revealNonce } }),
+    setPanelView: (view) => {
+      const panel = get().subagentPanel;
+      if (panel && (panel.view ?? "subagents") !== view) set({ subagentPanel: { ...panel, view, path: [], task: null } });
+    },
+    setPanelTask: (task) => {
+      const panel = get().subagentPanel;
+      if (panel) set({ subagentPanel: { ...panel, view: "tasks", path: [], task: task ? { ...task } : null } });
+    },
+    dismissBackgroundNotice: (rowId) => {
+      const dismissed = get().dismissedBackgroundNotices;
+      if (!dismissed.includes(rowId)) set({ dismissedBackgroundNotices: [...dismissed, rowId] });
+    },
     clearQueueState: (sessionId) => {
       const state = get();
       if (!(sessionId in state.queueEdit) && !(sessionId in state.queueOutbox)) return;
@@ -529,6 +605,7 @@ export function createChatStore(options: ChatStoreOptions) {
       activeSessionId: nextSession,
       selectedAgentId: nextAgent,
       draftProjectId: storage.getItem(wsKey(DRAFT_PROJECT_KEY)),
+      draftRuntimeWorkspaceId: null,
       inputDrafts: nextDrafts,
       inputDraftAttachments: readDraftAttachments(storage, wsKey(DRAFT_ATTACHMENTS_KEY)),
       localAttachmentDetails: {},

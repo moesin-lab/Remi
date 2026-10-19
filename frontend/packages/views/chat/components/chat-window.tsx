@@ -44,8 +44,10 @@ import {
   chatSessionsOptions,
   pendingChatTaskOptions,
   chatKeys,
+  CHAT_PENDING_REFETCH_INTERVAL_MS,
 } from "@multiremi/core/chat/queries";
-import { useIssueLog } from "@multiremi/core/session-log/use-issue-log";
+import { useChatLog } from "@multiremi/core/session-log/use-issue-log";
+import { hasPooledChatLog } from "@multiremi/core/session-log/chat-log-pool";
 import type { IssueLogBootstrap } from "@multiremi/core/api/schemas/session-log";
 import {
   useCreateChatSession,
@@ -57,6 +59,7 @@ import {
 import {
   reconcileSettledPendingChatTask,
   useChatStore,
+  withChatSendTimeout,
   type ChatQueueEdit,
   type PendingChatTaskRef,
 } from "@multiremi/core/chat";
@@ -67,13 +70,14 @@ import { ChatContextUsage } from "./chat-context-usage";
 import type { SessionLogEntry } from "@multiremi/core/replica";
 import { useTurnTrace } from "../../common/task-transcript/use-task-trace";
 import { clientIdOf, type OptimisticChatRow } from "../lib/optimistic-log";
+import { CHAT_COLUMN_CLASS } from "../lib/chat-column";
 import { ChatInput, type ChatSendMode } from "./chat-input";
 import { AgentDropdown } from "./agent-dropdown";
-import { ProjectDisplay } from "./project-dropdown";
 import { SessionDropdown } from "./session-dropdown";
 import { ChatSidebar } from "./chat-sidebar";
 import { ChatWorkSessionsDialog } from "./chat-work-sessions-dialog";
 import { ChatModeTabs } from "./chat-mode-tabs";
+import { ChatPageLayout, ChatSidebarToggle } from "./chat-page-layout";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { EmptyState } from "./chat-empty-state";
 import { ChatResizeHandles } from "./chat-resize-handles";
@@ -94,9 +98,12 @@ import { createSafeId } from "@multiremi/core/utils";
 import { useFloatingPanelLayout } from "../../layout/floating-panel-layout";
 import { ChatQueue, type ChatQueueController } from "./chat-queue";
 import { SubagentPanelLayout } from "./subagent-panel";
+import { useChatBackgroundTasks } from "./use-background-tasks";
 
 const uiLogger = createLogger("chat.ui");
 const apiLogger = createLogger("chat.api");
+/** Question lines sit in the Chat column above the composer, edge to edge with it: no band of their own. */
+const CHAT_DOCK_CLASS = `${CHAT_COLUMN_CLASS} mb-2 border-t-0 bg-transparent py-0`;
 export function ChatWindow({
   presentation = "window",
   onSessionChange,
@@ -115,26 +122,38 @@ export function ChatWindow({
   const { t } = useT("chat");
   const { t: tr } = useT("runtimes");
   const wsId = useWorkspaceId();
-  const [runtimeWorkspaceId, setRuntimeWorkspaceId] = useState<string | null>(null);
-  useEffect(() => { setRuntimeWorkspaceId(null); }, [wsId]);
   const isOpen = useChatStore((s) => s.isOpen);
   const chatVisible = isPage || isOpen;
   const storedActiveSessionId = useChatStore((s) => s.activeSessionId);
   const [pageSessionId, setPageSessionId] = useState(initialSessionId ?? storedActiveSessionId);
   useEffect(() => { if (isPage) setPageSessionId(initialSessionId ?? storedActiveSessionId); }, [isPage, initialSessionId]);
+  // After that the page follows every change of the stored chat made outside
+  // this window: a bare /chat (the nav's 「Chat」) starting a new one, a chat
+  // deleted elsewhere, the store's first read. The page and the composer's
+  // draft never name two chats. The URL follows when it names another one, so
+  // a reload does not reopen a deleted chat; a change the URL made (a link, a
+  // bare /chat) already agrees with it, so nothing navigates twice.
+  const followedSessionId = useRef(storedActiveSessionId);
   useEffect(() => {
-    if (isPage && !initialSessionId && !pageSessionId && storedActiveSessionId)
-      setPageSessionId(storedActiveSessionId);
-  }, [isPage, initialSessionId, pageSessionId, storedActiveSessionId]);
+    if (followedSessionId.current === storedActiveSessionId) return;
+    followedSessionId.current = storedActiveSessionId;
+    if (!isPage) return;
+    setPageSessionId(storedActiveSessionId);
+    if ((initialSessionId ?? null) !== storedActiveSessionId) onSessionChange?.(storedActiveSessionId);
+  }, [isPage, storedActiveSessionId, initialSessionId, onSessionChange]);
   const activeSessionId = isPage ? pageSessionId : storedActiveSessionId;
   const displayedSessionId = activeSessionId;
   const selectedAgentId = useChatStore((s) => s.selectedAgentId);
+  // Where a new chat will run; the store resets it whenever a chat is opened or left.
   const draftProjectId = useChatStore((s) => s.draftProjectId);
-  const setDraftProjectId = useChatStore((s) => s.setDraftProjectId);
+  const runtimeWorkspaceId = useChatStore((s) => s.draftRuntimeWorkspaceId);
+  const setDraftLocation = useChatStore((s) => s.setDraftLocation);
   const setOpen = useChatStore((s) => s.setOpen);
   const storeSetActiveSession = useChatStore((s) => s.setActiveSession);
   const setActiveSession = useCallback(
     (id: string | null, agentId?: string) => {
+      // This window moves the page and the URL itself; the follower skips it.
+      followedSessionId.current = id;
       storeSetActiveSession(id);
       if (isPage) setPageSessionId(id);
       onSessionChange?.(id, agentId);
@@ -147,7 +166,6 @@ export function ChatWindow({
   const { data: agents = [] } = useQuery(agentListOptions(wsId, { enabled: chatVisible }));
   const { data: members = [] } = useQuery({ ...memberListOptions(wsId), enabled: chatVisible });
   const { data: projectsData, isError: projectsFailed } = useQuery({ ...projectListOptions(wsId), enabled: chatVisible });
-  const projects = projectsData ?? [];
   // Loading is not "missing": a bound Project reads "…" until the list answers.
   const loadedProjects = projectsData ?? (projectsFailed ? [] : undefined);
   // Single sessions cache — eliminates the separate active/all queries
@@ -158,24 +176,49 @@ export function ChatWindow({
     isError: sessionsError,
     refetch: refetchSessions,
   } = useQuery(chatSessionsOptions(wsId, "all", { enabled: chatVisible }));
-  const { replica, snapshot: logSnapshot, error: messagesError } = useIssueLog(
-    displayedSessionId ?? "", initialLog?.sessionId === displayedSessionId ? initialLog : undefined,
-    undefined, true, chatVisible,
+  // `initialLog` is the route's log bootstrap for its `?session=` chat, read
+  // when the route renders (load, reload, a real navigation). A switch or a
+  // send replaces that URL (the first send moves to the chat it created);
+  // depending on how ChatPage replaces it, the route either renders again with
+  // a new bootstrap or only the URL changes and the first one is dropped.
+  // Either way only the bootstrap present when a chat is first shown seeds its
+  // log: a later one is a new object holding an older read, and rebuilding the
+  // replica from it in the middle of a send would lose the rows just sent and
+  // their reply. A chat the log pool still holds is not seeded at all: its
+  // retained rows are painted instead.
+  const logSeedFor = (sessionId: string | null) => ({ sessionId,
+    log: initialLog?.sessionId === sessionId && !hasPooledChatLog(user?.id, wsId, sessionId) ? initialLog : undefined });
+  const [storedLogSeed, setLogSeed] = useState(() => logSeedFor(displayedSessionId));
+  let logSeed = storedLogSeed;
+  if (logSeed.sessionId !== displayedSessionId) {
+    logSeed = logSeedFor(displayedSessionId);
+    setLogSeed(logSeed);
+  }
+  const { replica, snapshot: logSnapshot, error: messagesError } = useChatLog(
+    displayedSessionId ?? "", logSeed.log, chatVisible,
   );
   const replicaRef = useRef(replica);
   replicaRef.current = replica;
+  // A chat whose last read after a send failed; the fallback below reads it again.
+  const [staleLogSessionId, setStaleLogSessionId] = useState<string | null>(null);
+  const readLogTail = useCallback((target: typeof replica) => target.refreshTailPreservingWindow().then(
+    () => setStaleLogSessionId((id) => id === target.sessionId ? null : id),
+    (error: unknown) => {
+      apiLogger.warn("refreshSession.error", { sessionId: target.sessionId, error: toSafeErrorDetails(error) });
+      setStaleLogSessionId(target.sessionId);
+    },
+  ), []);
   const [pendingRefreshSessionId, setPendingRefreshSessionId] = useState<string | null>(null);
   const refreshSession = useCallback((sessionId: string) => {
     if (!chatVisible) { setPendingRefreshSessionId(sessionId); return; }
-    if (replicaRef.current.sessionId === sessionId)
-      void replicaRef.current.refreshTailPreservingWindow().catch(() => {});
+    if (replicaRef.current.sessionId === sessionId) void readLogTail(replicaRef.current);
     else setPendingRefreshSessionId(sessionId);
-  }, [chatVisible]);
+  }, [chatVisible, readLogTail]);
   useEffect(() => {
     if (!chatVisible || !pendingRefreshSessionId || replica.sessionId !== pendingRefreshSessionId) return;
     setPendingRefreshSessionId(null);
-    void replica.refreshTailPreservingWindow().catch(() => {});
-  }, [replica, pendingRefreshSessionId, chatVisible]);
+    void readLogTail(replica);
+  }, [replica, pendingRefreshSessionId, chatVisible, readLogTail]);
   const [optimisticRows, setOptimisticRows] = useState<OptimisticChatRow[]>([]);
   const [isFetchingOlderMessages, setIsFetchingOlderMessages] = useState(false);
   const optimisticCounter = useRef(0);
@@ -188,7 +231,7 @@ export function ChatWindow({
     setOptimisticRows((rows) => {
       let changed = false;
       const next = rows.map((row) => {
-        if (row.sessionId !== displayedSessionId || !confirmed.has(row.clientId) || row.status === "sent" || row.status === "hidden") return row;
+        if (row.sessionId !== displayedSessionId || row.confirmedAt !== undefined || !confirmed.has(row.clientId)) return row;
         changed = true;
         return { ...row, status: "sent" as const, confirmedAt: now };
       });
@@ -204,6 +247,19 @@ export function ChatWindow({
         ? { ...row, status: "hidden" } : row)), delay);
     return () => clearTimeout(timer);
   }, [optimisticRows]);
+  // Fallback when the log does not say: while a send is in flight or got no
+  // answer, or the read after a send failed, the tail is read again on the
+  // pending-task cadence until the server's row is there.
+  const awaitingLog = displayedOptimistic.some((row) => row.status === "sending" || row.status === "unconfirmed")
+    || (!!displayedSessionId && staleLogSessionId === displayedSessionId);
+  useEffect(() => {
+    if (!chatVisible || !awaitingLog) return;
+    const timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void readLogTail(replicaRef.current);
+    }, CHAT_PENDING_REFETCH_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [chatVisible, awaitingLog, readLogTail]);
 
   // Server-authoritative pending task. Survives refresh / reopen / session
   // switch because it's keyed on sessionId in the Query cache; WS events
@@ -242,18 +298,34 @@ export function ChatWindow({
   const listedSession = activeSessionId
     ? sessions.find((s) => s.id === activeSessionId)
     : undefined;
-  const { data: fetchedSession } = useQuery({
+  const { data: fetchedSession, isLoading: fetchedSessionLoading } = useQuery({
     ...chatSessionOptions(wsId, activeSessionId ?? ""),
     enabled: chatVisible && !!activeSessionId && !sessionsLoading && !listedSession,
   });
   const currentSession = listedSession ?? fetchedSession ?? null;
+  // Until the open chat's record arrives, the agent below is the composer's
+  // fallback (the stored pick or the first agent), not necessarily the chat's.
+  const sessionAgentPending = !!activeSessionId && !currentSession && (sessionsLoading || fetchedSessionLoading);
   const isSessionArchived = currentSession?.status === "archived";
 
-  // New chats keep the picker: it is the only chance to choose where the
-  // chat runs. An existing chat with neither binding has no location to
-  // report, so the strip would spend a row on the absence of a choice. The
-  // page names an existing chat's location in its header instead.
-  const showLocationStrip =
+  // Background tasks (PR 6): the session list says how many run, with or
+  // without a turn; only then does the visible chat read the registry rows
+  // the strip, the panel and the launch rows share (MUL-472). An older
+  // server sends no count, and nothing is read.
+  const sessionBackgroundTasks = currentSession?.id === displayedSessionId ? currentSession?.running_background_tasks ?? null : null;
+  const backgroundTasks = useChatBackgroundTasks(displayedSessionId, {
+    enabled: chatVisible && (sessionBackgroundTasks ?? 0) > 0,
+    // A count that drops to 0 under a list still showing a running task reads it once more.
+    visible: chatVisible,
+    expectRunning: sessionBackgroundTasks,
+  });
+  const backgroundTasksRunning = Math.max(sessionBackgroundTasks ?? 0, backgroundTasks.running);
+
+  // The work location lives in the composer footer beside the agent, not in a
+  // row of its own. A new chat chooses it until the first message; a started
+  // chat shows a bound location as a read-only chip and nothing when unbound.
+  // The page header already names a started chat's location.
+  const showLocation =
     !activeSessionId ||
     (!isPage && Boolean(currentSession?.project_id || currentSession?.runtime_workspace_id));
 
@@ -291,14 +363,17 @@ export function ChatWindow({
       sessionId: activeSessionId,
       taskId: pendingTaskId,
     };
-    reconcileSettledPendingChatTask(
-      qc,
-      wsId,
-      previousPendingTaskRef.current,
-      current,
-    );
+    const previous = previousPendingTaskRef.current;
+    const settled = reconcileSettledPendingChatTask(qc, wsId, previous, current);
     previousPendingTaskRef.current = current;
-  }, [activeSessionId, pendingTaskId, qc, wsId]);
+    // While a turn runs the list shows it from its live trace; once the chat's
+    // pending task moves on, only the log's rows show that turn. They arrive
+    // as stream frames, which can be lost or hidden, so read the tail once.
+    // An optimistic send seed giving way to its real task settles nothing.
+    if (settled && chatVisible && !previous.taskId?.startsWith("optimistic-") && replicaRef.current.sessionId === current.sessionId) {
+      void readLogTail(replicaRef.current);
+    }
+  }, [activeSessionId, pendingTaskId, qc, wsId, readLogTail, chatVisible]);
 
   const createSession = useCreateChatSession();
   const markRead = useMarkChatSessionRead();
@@ -337,7 +412,9 @@ export function ChatWindow({
   // returns "loading" while queries are still resolving — pass `undefined`
   // downstream so banners and pill copy stay silent during loading rather
   // than flash speculative offline text.
-  const presenceDetail = useAgentPresenceDetail(wsId, activeAgent?.id);
+  // A fallback agent's presence would speak for the wrong agent (an offline
+  // banner naming another agent while the chat loads), so it waits too.
+  const presenceDetail = useAgentPresenceDetail(wsId, sessionAgentPending ? undefined : activeAgent?.id);
   const availability =
     presenceDetail === "loading" ? undefined : presenceDetail.availability;
 
@@ -445,27 +522,43 @@ export function ChatWindow({
 
   const deliverRow = useCallback(async (row: OptimisticChatRow) => {
     const sessionId = row.sessionId;
+    const seedId = `optimistic-${row.clientId}`;
     const priorPending = qc.getQueryData<ChatPendingTask>(chatKeys.pendingTask(sessionId));
     if (!priorPending?.task_id) qc.setQueryData<ChatPendingTask>(chatKeys.pendingTask(sessionId), {
-      task_id: `optimistic-${row.clientId}`, status: "queued", created_at: row.createdAt,
+      task_id: seedId, status: "queued", created_at: row.createdAt,
     });
+    const holdsSeed = () => qc.getQueryData<ChatPendingTask>(chatKeys.pendingTask(sessionId))?.task_id === seedId;
+    let turnId: string | undefined;
     try {
-      const result = await api.sendChatMessage(sessionId, row.content, row.attachmentIds, row.clientId);
-      if (!result.queued) qc.setQueryData<ChatPendingTask>(chatKeys.pendingTask(sessionId), {
-        task_id: result.task_id, turn_id: result.turn_id, status: "queued", created_at: result.created_at,
-        supports_queue: result.supports_queue,
-      });
+      const result = await withChatSendTimeout((signal) =>
+        api.sendChatMessage(sessionId, row.content, row.attachmentIds, row.clientId, { signal }));
+      turnId = result.turn_id;
+      // The server accepted it: the bubble says so now. The log's row, when it
+      // comes, only takes the bubble's place.
+      setOptimisticRows((rows) => rows.map((item) => item.clientId === row.clientId && item.status === "sending"
+        ? { ...item, status: "sent" } : item));
+      // The turn it started only refines the seed; reading it never holds the
+      // send. A steer leaves the running turn's entry alone, and the
+      // pending-task read below may answer first.
+      if (turnId && holdsSeed()) void api.getChatTurnPendingTask(turnId).then((task) => {
+        if (holdsSeed()) qc.setQueryData<ChatPendingTask>(chatKeys.pendingTask(sessionId), task.task_id ? task : priorPending ?? {});
+      }, (error: unknown) => apiLogger.warn("getChatTurnPendingTask.error", { turnId, error: toSafeErrorDetails(error) }));
       refreshSession(sessionId);
     } catch (error) {
       apiLogger.error("sendChatMessage.error", { sessionId, error: toSafeErrorDetails(error) });
-      setOptimisticRows((rows) => rows.map((item) => item.clientId === row.clientId
-        ? { ...item, status: "failed" } : item));
+      // Without an answer from the API (a timeout, the network, a gateway) the
+      // message may have landed: it is unconfirmed until the log says, and a
+      // retry reuses its dedupe_key. Only a refusal is a failure.
+      const unconfirmed = isQueueDeliveryUnconfirmed(error);
+      setOptimisticRows((rows) => rows.map((item) => item.clientId === row.clientId && item.status === "sending"
+        ? { ...item, status: unconfirmed ? "unconfirmed" : "failed" } : item));
       refreshSession(sessionId);
-      throw error;
+      // An unconfirmed message stays in its bubble, not the composer: sending
+      // it again as a new message could post it twice.
+      if (!unconfirmed) throw error;
     } finally {
-      if (qc.getQueryData<ChatPendingTask>(chatKeys.pendingTask(sessionId))?.task_id === `optimistic-${row.clientId}`) {
-        qc.setQueryData(chatKeys.pendingTask(sessionId), priorPending ?? {});
-      }
+      // The seed stays for an accepted turn until a read replaces it.
+      if (!turnId && holdsSeed()) qc.setQueryData(chatKeys.pendingTask(sessionId), priorPending ?? {});
       void qc.invalidateQueries({ queryKey: chatKeys.pendingTask(sessionId) });
       void qc.invalidateQueries({ queryKey: chatKeys.pendingTasks(wsId) });
       void qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) });
@@ -479,8 +572,8 @@ export function ChatWindow({
     if (!sessionId || getCurrentWsId() !== wsId) throw new Error("Chat workspace changed");
     if (mode === "queue") {
       // Queued (排队): the row waits outside the log until this turn completes.
-      // An enqueue on an idle lane releases every queued row, so deletes still
-      // behind their undo are sent first.
+      // An enqueue on an idle lane releases the oldest queued row, which may be
+      // one still behind its undo, so those deletes are sent first.
       await queueController.current?.flushDeletes();
       try {
         const result = await enqueueMessage({
@@ -539,13 +632,15 @@ export function ChatWindow({
 
   const retrySend = useCallback((clientId: string) => {
     const row = optimisticRows.find((item) => item.clientId === clientId);
-    if (!row) return;
-    void replica.refreshTailPreservingWindow().then(() => {
+    if (!row || (row.status !== "failed" && row.status !== "unconfirmed")) return;
+    setOptimisticRows((rows) => rows.map((item) => item.clientId === clientId ? { ...item, status: "sending" } : item));
+    // The log is read first: an unanswered send may have landed. The resend
+    // keeps the dedupe_key, so the server answers a landed one with it again.
+    void readLogTail(replica).then(() => {
       if (replica.getSnapshot(row.sessionId).entries.some((entry) => clientIdOf(entry) === clientId)) return;
-      setOptimisticRows((rows) => rows.map((item) => item.clientId === clientId ? { ...item, status: "sending" } : item));
       void deliverRow(row).catch(() => {});
-    }).catch(() => {});
-  }, [optimisticRows, replica, deliverRow]);
+    });
+  }, [optimisticRows, replica, readLogTail, deliverRow]);
 
   const [stopping, setStopping] = useState(false);
   const handleStop = useCallback(async () => {
@@ -588,8 +683,8 @@ export function ChatWindow({
         previousSessionId: activeSessionId,
       });
       setSelectedAgentId(agent.id);
-      if (activeSessionId) setDraftProjectId(null);
-      // Reset session when switching agent
+      // Reset session when switching agent; leaving a chat also resets the
+      // draft location, while a draft keeps it.
       setActiveSession(null, agent.id);
     },
     [
@@ -597,7 +692,6 @@ export function ChatWindow({
       selectedAgentId,
       activeSessionId,
       setSelectedAgentId,
-      setDraftProjectId,
       setActiveSession,
     ],
   );
@@ -609,10 +703,13 @@ export function ChatWindow({
       previousSessionId: activeSessionId,
       previousPendingTask: pendingTaskId,
     });
-    setRuntimeWorkspaceId(location?.runtime_workspace_id ?? null);
-    setDraftProjectId(location?.project_id ?? null);
+    // Leaving the open chat resets the draft location, so bind the new one after.
     setActiveSession(null);
-  }, [activeSessionId, pendingTaskId, setActiveSession, setDraftProjectId]);
+    setDraftLocation({
+      projectId: location?.project_id ?? null,
+      runtimeWorkspaceId: location?.runtime_workspace_id ?? null,
+    });
+  }, [activeSessionId, pendingTaskId, setActiveSession, setDraftLocation]);
 
   const handleSelectSession = useCallback(
     (session: ChatSession) => {
@@ -630,6 +727,21 @@ export function ChatWindow({
     },
     [activeAgent, setSelectedAgentId, setActiveSession],
   );
+
+  // PR 6 §2.8: a turn waiting for a local folder that another chat's parked
+  // background tasks hold links to that chat's 后台任务 view (「全部停止」 there).
+  const openSubagentPanel = useChatStore((s) => s.openSubagentPanel);
+  const resolveChat = useCallback((sessionId: string) => {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (!session) return null;
+    return {
+      title: session.title?.trim() || t(($) => $.session_history.untitled),
+      open: () => {
+        handleSelectSession(session);
+        openSubagentPanel({ sessionId: session.id, view: "tasks", attemptId: null, live: false, path: [], task: null });
+      },
+    };
+  }, [sessions, t, handleSelectSession, openSubagentPanel]);
 
   const handleMinimize = useCallback(() => {
     uiLogger.info("minimize (close)", {
@@ -676,6 +788,7 @@ export function ChatWindow({
         // Page header: who and what this chat is. New chat and history live
         // in the sidebar, so the header carries no session controls.
         <div data-chat-page-header="" className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+          <ChatSidebarToggle />
           <Button
             variant="ghost"
             size="icon-sm"
@@ -686,7 +799,7 @@ export function ChatWindow({
             <List />
           </Button>
           {activeAgent && (
-            <ActorAvatar actorType="agent" actorId={activeAgent.id} size={20} enableHoverCard showStatusDot />
+            <ActorAvatar actorType="agent" actorId={activeAgent.id} size={20} enableHoverCard showStatusDot={!sessionAgentPending} />
           )}
           <h1 className="min-w-0 truncate text-sm font-medium">
             {/* "New chat" names the unsaved draft; an existing chat without a title is "Untitled". */}
@@ -815,26 +928,6 @@ export function ChatWindow({
         </div>
       )}
 
-      {showLocationStrip && (
-        <div className="flex min-w-0 items-center border-b px-4 py-1.5">
-          {activeSessionId && !currentSession?.runtime_workspace_id ? (
-            <ProjectDisplay projects={projects} projectId={currentSession?.project_id ?? null} />
-          ) : (
-            <WorkLocationPicker
-              projectsEnabled={chatVisible}
-              wsId={wsId}
-              value={activeSessionId ? currentSession?.runtime_workspace_id ?? null : runtimeWorkspaceId}
-              projectId={activeSessionId ? currentSession?.project_id ?? null : draftProjectId}
-              onChange={location => {
-                setDraftProjectId(location.project_id);
-                setRuntimeWorkspaceId(location.runtime_workspace_id);
-              }}
-              disabled={Boolean(activeSessionId) || createSession.isPending}
-            />
-          )}
-        </div>
-      )}
-
       {/* The log window is hidden until its first answer; no skeleton replaces rows. */}
       {messagesError && !logSnapshot.ready ? (
         <div
@@ -861,7 +954,7 @@ export function ChatWindow({
           optimisticRows={displayedOptimistic}
           pendingTask={pendingTask}
           availability={availability}
-          initialPositioned={initialLog?.sessionId === displayedSessionId}
+          initialPositioned={!!logSeed.log}
           hasOlderMessages={!!replica.window?.has_more_before}
           isFetchingOlderMessages={isFetchingOlderMessages}
           onLoadOlderMessages={() => {
@@ -869,6 +962,7 @@ export function ChatWindow({
             void replica.earlier().finally(() => setIsFetchingOlderMessages(false));
           }}
           onRetrySend={retrySend}
+          resolveChat={resolveChat}
         />
       ) : (
         <EmptyState
@@ -890,7 +984,9 @@ export function ChatWindow({
        *  We key off `noAgent` (the resolved-empty state) rather than
        *  `!activeAgent`, so the loading window between mount and the
        *  first agent-list response stays banner-free. */}
-      <HumanRequestDock taskId={pendingTaskId} sessionId={displayedSessionId ?? undefined} turnId={pendingTask?.turn_id} enabled={chatVisible} />
+      {/* The Chat's own open questions stay answerable here whether or not a
+       *  turn is in flight; the running turn's answered ones stay as its record. */}
+      <HumanRequestDock taskId={pendingTaskId} sessionId={displayedSessionId ?? undefined} turnId={pendingTask?.turn_id} open enabled={chatVisible} className={CHAT_DOCK_CLASS} />
 
       {noAgent ? (
         <NoAgentBanner />
@@ -914,12 +1010,12 @@ export function ChatWindow({
         />
       )}
       {actionError && (
-        <p role="alert" className="mx-5 mb-2 text-xs text-destructive">
+        <p role="alert" className={`${CHAT_COLUMN_CLASS} mb-2 text-xs text-destructive`}>
           {t(($) => $.sessions.failed)}
         </p>
       )}
       {isSessionArchived && activeSessionId && (
-        <div className="flex items-center justify-between gap-2 px-5 py-2 text-sm text-muted-foreground">
+        <div className={`${CHAT_COLUMN_CLASS} flex items-center justify-between gap-2 py-2 text-sm text-muted-foreground`}>
           <span>{t(($) => $.input.placeholder_archived)}</span>
           <Button
             size="sm"
@@ -937,21 +1033,42 @@ export function ChatWindow({
         </div>
       )}
       <ChatInput
+        sessionId={activeSessionId}
         onSend={handleSend}
         onSaveQueueEdit={handleSaveQueueEdit}
         onUploadFile={handleUploadFile}
         onStop={handleStop}
+        // The turn's own stop leaves background tasks running (PR 6 §6.3); its label says so.
+        stopLabel={backgroundTasksRunning > 0 ? t(($) => $.bg_tasks.stop_turn_hint) : undefined}
+        onSteerFirstQueued={() => queueController.current?.steerFirst()}
         isRunning={!!pendingTaskId}
         disabled={isSessionArchived}
         noAgent={noAgent}
         agentName={activeAgent?.name}
         rightAdornment={<ChatContextUsage live={liveRingUsage} last={ringContext.last} />}
         leftAdornment={
-          <AgentDropdown
-            agents={availableAgents}
-            activeAgent={activeAgent}
-            onSelect={handleSelectAgent}
-          />
+          <>
+            <AgentDropdown
+              agents={availableAgents}
+              activeAgent={activeAgent}
+              onSelect={handleSelectAgent}
+            />
+            {showLocation && (
+              <WorkLocationPicker
+                surface="chat"
+                projectsEnabled={chatVisible}
+                wsId={wsId}
+                value={activeSessionId ? currentSession?.runtime_workspace_id ?? null : runtimeWorkspaceId}
+                projectId={activeSessionId ? currentSession?.project_id ?? null : draftProjectId}
+                onChange={(location) => setDraftLocation({
+                  projectId: location.project_id,
+                  runtimeWorkspaceId: location.runtime_workspace_id,
+                })}
+                readOnly={Boolean(activeSessionId)}
+                disabled={createSession.isPending}
+              />
+            )}
+          </>
         }
         contextItems={contextItems}
       />
@@ -969,10 +1086,9 @@ export function ChatWindow({
         <div className="flex h-12 shrink-0 items-center border-b px-4">
           <ChatModeTabs />
         </div>
-        <div className="flex min-h-0 flex-1">
-          <aside
-            className={`${showList ? "flex" : "hidden"} w-full min-h-0 shrink-0 flex-col border-r bg-sidebar md:flex md:w-[300px]`}
-          >
+        <ChatPageLayout
+          showList={showList}
+          list={
             <ChatSidebar
               sessions={sessions}
               projects={loadedProjects}
@@ -985,15 +1101,13 @@ export function ChatWindow({
               onSessionDeleted={() => setActiveSession(null)}
               onClose={() => setShowList(false)}
             />
-          </aside>
-          <main
-            className={`${showList ? "hidden" : "flex"} min-h-0 min-w-0 flex-1 flex-col md:flex`}
-          >
-            <SubagentPanelLayout sessionId={displayedSessionId ?? null} presentation="page">
-              {conversation}
-            </SubagentPanelLayout>
-          </main>
-        </div>
+          }
+        >
+          {/* The subagent panel pushes the conversation aside (PR 5 §6.6). */}
+          <SubagentPanelLayout sessionId={displayedSessionId ?? null} presentation="page">
+            {conversation}
+          </SubagentPanelLayout>
+        </ChatPageLayout>
       </div>
     );
 

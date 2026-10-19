@@ -265,11 +265,15 @@ export class InboxOperations {
     params.push(Math.min(input.limit ?? 100, 1000));
     return this.ctx.db.query(`SELECT ${fields.split(",").map(field => `multiremi_turns.${field}`).join(",")},NULL AS legacy_prompt,
       ${attemptFields.map(field => `current_attempt.${field} AS attempt_${field}`).join(",")},
-      CASE WHEN current_attempt.status IN ('accepted','running') THEN current_attempt.running_subagents END AS running_subagents
+      CASE WHEN current_attempt.status IN ('accepted','running') THEN current_attempt.running_subagents END AS running_subagents,
+      CASE WHEN current_attempt.status IN ('accepted','running') THEN current_attempt.running_background_tasks END AS running_background_tasks,
+      CASE WHEN current_attempt.status='waiting_local_directory' THEN COALESCE(current_attempt.wait_reason,'') END AS local_directory_wait_reason
       FROM multiremi_turns LEFT JOIN multiremi_turn_attempts current_attempt ON current_attempt.id=multiremi_turns.current_attempt_id
       WHERE ${conditions.join(" AND ")} ORDER BY multiremi_turns.created_at DESC,multiremi_turns.id DESC LIMIT ?`).all(...params).map(row => {
       const turn = { ...row, holds_workspace: !!row.holds_workspace,
-        running_subagents: row.running_subagents == null ? null : Number(row.running_subagents) } as MultiremiTurn;
+        running_subagents: row.running_subagents == null ? null : Number(row.running_subagents),
+        running_background_tasks: row.running_background_tasks == null ? null : Number(row.running_background_tasks),
+        local_directory_wait_reason: row.local_directory_wait_reason == null ? null : String(row.local_directory_wait_reason) } as MultiremiTurn;
       turn.current_attempt = row.attempt_id == null ? null : {
         id: row.attempt_id, status: row.attempt_status, runtime_id: row.attempt_runtime_id, provider: row.attempt_provider,
         error: row.attempt_error, failure_reason: row.attempt_failure_reason, progress_summary: row.attempt_progress_summary,
@@ -291,15 +295,25 @@ export class InboxOperations {
       process_item_count:row.process_item_count==null?null:Number(row.process_item_count),
       // PR 5: as on /api/turns rows, only an active attempt reports a running count.
       running_subagents:row.running_subagents==null||!['accepted','running'].includes(row.status)?null:Number(row.running_subagents),
+      running_background_tasks:row.running_background_tasks==null||!['accepted','running'].includes(row.status)?null:Number(row.running_background_tasks),
       late_subagents:row.late_subagents?JSON.parse(row.late_subagents):null} as MultiremiTurnAttempt));
   }
   getTurnTrace(id:string){const turn=this.getTurn(id);if(!turn?.current_attempt_id)throw new Error('Turn not found');
     return {turn_id:id,attempt_id:turn.current_attempt_id,trace:this.ctx.taskTraces().getTaskTrace(turn.current_attempt_id)};}
-  getTurnInput(id:string){const turn=this.getTurn(id);if(!turn)throw new Error('Turn not found');
+  /**
+   * The turn's input range and messages, and (ADR 0023) what one attempt actually sent the agent: its
+   * first prompt (`sent_prompt`) and Remi's part of the AGENTS.md in effect (`instructions`), as its
+   * daemon recorded them. `attemptId` picks an attempt of this turn; the current one by default.
+   */
+  getTurnInput(id:string,attemptId?:string|null){const turn=this.getTurn(id);if(!turn)throw new Error('Turn not found');
     const from=turn.input_from_seq??0,to=turn.input_to_seq??turn.wake_seq,messages:UnifiedMessage[]=[];
     let after=from;
     for(;;){const page=this.listMessages(turn.session_id,{from:after,to,limit:1000});messages.push(...page);if(page.length<1000)break;after=page.at(-1)!.seq;}
-    return {from_seq:from,to_seq:to,messages,legacy_prompt:turn.legacy_prompt};}
+    const attempt=attemptId??turn.current_attempt_id;
+    const owned=attempt?this.ctx.db.query('SELECT id FROM multiremi_turn_attempts WHERE id=? AND turn_id=?').get(attempt,turn.id):null;
+    const sent=owned?this.ctx.db.query('SELECT prompt,instructions FROM multiremi_task_prompts WHERE task_id=?').get(attempt) as {prompt:string;instructions:string|null}|null:null;
+    return {from_seq:from,to_seq:to,messages,legacy_prompt:turn.legacy_prompt,
+      sent_attempt_id:sent?attempt!:null,sent_prompt:sent?.prompt??null,instructions:sent?.instructions||null};}
   /** `byMember`: a member's stop pauses the Chat follow-up queue (ADR 0020). */
   cancelTurn(id:string,opts:{byMember?:boolean}={}):MultiremiTurn {
     return this.transaction(events=>{const turn=this.getTurn(id);if(!turn?.current_attempt_id)throw new Error('Turn not found');

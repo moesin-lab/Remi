@@ -18,8 +18,8 @@ export function ImPlatformSidebarGroup() {
         const href = paths.imPlatform(platform.id);
         const active = pathname === href || pathname.startsWith(`${href}/`);
         return <SidebarMenuItem key={platform.id}>
-          <SidebarMenuButton isActive={active} render={<AppLink href={href} aria-current={active ? "page" : undefined} />} className="text-muted-foreground hover:not-data-active:bg-sidebar-accent/70 data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground">
-            <MessagesSquare /><span>{t($ => $.platforms[platform.id].name)}</span>
+          <SidebarMenuButton tooltip={t($ => $.platforms[platform.id].name)} isActive={active} render={<AppLink href={href} aria-current={active ? "page" : undefined} />} className="text-muted-foreground hover:not-data-active:bg-sidebar-accent/70 data-active:bg-sidebar-accent data-active:text-sidebar-accent-foreground">
+            <MessagesSquare /><span className="group-data-[collapsible=icon]:hidden">{t($ => $.platforms[platform.id].name)}</span>
           </SidebarMenuButton>
         </SidebarMenuItem>;
       })}

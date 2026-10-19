@@ -19,8 +19,12 @@ import type { ApiClient } from "@multiremi/core/api/client";
 import type { SessionLogRow } from "@multiremi/core/api/schemas/session-log";
 import { createAuthStore, registerAuthStore } from "@multiremi/core/auth";
 import { createChatStore, registerChatStore, useChatStore, useRecentContextStore } from "@multiremi/core/chat";
+import { setCurrentWorkspace } from "@multiremi/core/platform";
+import { clearChatLogPool } from "@multiremi/core/session-log/chat-log-pool";
 import { chatKeys } from "@multiremi/core/chat/queries";
+import { humanRequestsOptions } from "@multiremi/core/chat/human-requests";
 import { workspaceKeys } from "@multiremi/core/workspace/queries";
+import { WORKSPACE_OPERATOR_USER_ID } from "@multiremi/core/workspace/operator";
 import { agentTaskSnapshotKeys } from "@multiremi/core/agents/queries";
 import { pinKeys } from "@multiremi/core/pins/queries";
 import { inboxKeys } from "@multiremi/core/inbox/queries";
@@ -65,6 +69,7 @@ const subscribeStream = vi.hoisted(() => vi.fn(() => ({ unsubscribe: vi.fn() }))
 const wsTransport = vi.hoisted(() => ({ subscribeStream, onReconnect: () => () => {} }));
 const getPendingChatTask = vi.hoisted(() => vi.fn(async () => ({ task_id: "tsk_guard_live", status: "running" })));
 const getChatQueue = vi.hoisted(() => vi.fn(async () => ({ items: [], paused: null })).mockName("getChatQueue"));
+const listChatBackgroundTasks = vi.hoisted(() => vi.fn(async (sessionId: string) => ({ session_id: sessionId, running: 0, rows: [] })).mockName("listChatBackgroundTasks"));
 const listWorkspaces = vi.hoisted(() => vi.fn(async () => [{ id: "ws-1", name: "Acme", slug: "acme" }]));
 
 const navigation = vi.hoisted(() => ({ pathname: "/acme/issues" }));
@@ -151,6 +156,7 @@ beforeEach(() => {
     listPins, listInboxPage, getLatestCliVersion, listIssues, listChatSessions,
     listPendingChatTasks, listWorkspaces, getTaskTrace, listMessages, listDecisionMessages,
     listChatMessagesPage, getSessionLog, subscribeStream, getPendingChatTask, getIssue, getProject, getChatQueue,
+    listChatBackgroundTasks,
   ]) spy.mockClear();
   getSessionLog.mockImplementation(async (sessionId: string, params: { anchor?: number }) => {
     const entries = sessionId === "cs_guard_cached" && params.anchor !== 0
@@ -180,6 +186,7 @@ beforeEach(() => {
     getSessionLog,
     getPendingChatTask,
     getChatQueue,
+    listChatBackgroundTasks,
     listWorkspaces,
     listMembers: async () => [],
     listProjects: async () => ({ projects: [] }),
@@ -196,6 +203,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  clearChatLogPool();
   resetAfterFirstScreenForTest();
   Reflect.deleteProperty(window, "requestIdleCallback");
   Reflect.deleteProperty(window, "cancelIdleCallback");
@@ -260,6 +268,8 @@ function Shell() {
 
 function isDeferredShellKey(key: readonly unknown[]): boolean {
   if (["chat", "pins", "invitations", "task-messages", "task-human-requests"].includes(String(key[0]))) return true;
+  // The Chat's question lines (HumanRequestDock) sit under the Q key space.
+  if (key[0] === "question") return key[2] === "requests";
   if (key[0] === "workspaces") return ["agents", "squads", "agent-task-snapshot", "members"].includes(String(key[2]));
   if (key[0] === "inbox") return key[2] === "summary";
   if (key[0] === "runtimes") return key[1] === "latestVersion";
@@ -277,11 +287,10 @@ describe("complete shell observer guard (MUL-472 R1)", () => {
       expect(getSessionLog).not.toHaveBeenCalled();
       expect(subscribeStream).not.toHaveBeenCalled();
       act(() => { useChatStore.getState().setOpen(true); });
-      await waitFor(() => expect(getSessionLog).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(getSessionLog).toHaveBeenCalledTimes(1));
       await waitFor(() => expect(subscribeStream).toHaveBeenCalledTimes(1));
-      expect(getSessionLog.mock.calls.map(([, params]) => params)).toEqual([
-        { before: 30 }, { anchor: 0, before: 1 },
-      ]);
+      // Chat never shows the seq-0 head row, so it never reads it.
+      expect(getSessionLog.mock.calls.map(([, params]) => params)).toEqual([{ before: 30 }]);
       expect(listChatMessagesPage).not.toHaveBeenCalled();
     } finally { view.unmount(); client.clear(); }
   });
@@ -372,8 +381,9 @@ describe("complete shell observer guard (MUL-472 R1)", () => {
     useRecentContextStore.getState().recordVisit("ws-1", { type: "project", id: "prj_guard_pin" });
     const cached: Array<[readonly unknown[], unknown]> = [
       [workspaceKeys.agents("ws-1"), []], [workspaceKeys.squads("ws-1"), []],
-      [workspaceKeys.members("ws-1"), []], [projectKeys.list("ws-1"), { projects: [] }],
-      [agentTaskSnapshotKeys.list("ws-1"), []], [pinKeys.list("ws-1", "user-1"), pins],
+      [workspaceKeys.members("ws-1"), []], [workspaceKeys.historicalActors("ws-1"), []],
+      [projectKeys.list("ws-1"), { projects: [] }],
+      [agentTaskSnapshotKeys.list("ws-1"), []], [pinKeys.list("ws-1", WORKSPACE_OPERATOR_USER_ID), pins],
       [workspaceKeys.myInvitations(), []], [runtimeKeys.latestVersion(), "1.0.0"],
       [inboxKeys.summary("ws-1"), { items: [], unread_count: 0, attention_count: 0, next_cursor: null }],
       [workbenchKeys.pendingCount("ws-1"), { issues: [], total: 0 }],
@@ -384,7 +394,7 @@ describe("complete shell observer guard (MUL-472 R1)", () => {
       [chatKeys.pendingTasks("ws-1"), { tasks: [] }],
       [chatKeys.pendingTask(sessionId), { task_id: taskId, status: "running" }],
       [chatKeys.queue("ws-1", sessionId), { items: [], paused: null }],
-      [["task-trace", taskId], CACHED_TRACE], [[...chatKeys.humanRequests(taskId), sessionId], []],
+      [["task-trace", taskId], CACHED_TRACE], [humanRequestsOptions("ws-1", sessionId, { open: true }).queryKey, []],
     ];
     for (const [key, data] of cached) client.setQueryData(key, data);
     // The reopened chat still finds its session, so the queue mounts again.
@@ -402,7 +412,7 @@ describe("complete shell observer guard (MUL-472 R1)", () => {
       await waitFor(() => expect(listWorkspaces).toHaveBeenCalled());
       // A persisted reply suppresses the live observer and keeps historical
       // trace lazy even with the real virtualized row mounted.
-      await waitFor(() => expect(getSessionLog).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(getSessionLog).toHaveBeenCalledTimes(1));
       await waitFor(() => expect(view.getByText("Cached reply")).toBeTruthy());
       // The follow-up queue is observed only inside the visible chat.
       await waitFor(() => expect(client.getQueryCache().find({ queryKey: chatKeys.queue("ws-1", sessionId) })?.isActive()).toBe(true));
@@ -449,13 +459,60 @@ describe("complete shell observer guard (MUL-472 R1)", () => {
         }
       });
       expect(getTaskTrace).not.toHaveBeenCalled();
-      // The 444 replica keeps its window across minimisation; reopening only
-      // reconnects the stream and never falls back to the removed page API.
-      expect(getSessionLog).not.toHaveBeenCalled();
+      // The Chat log pool keeps the window across minimisation: reopening
+      // repaints it, refreshes the tail once in the background and reconnects
+      // the stream, never falling back to the removed page API.
+      expect(view.getByText("Cached reply")).toBeTruthy();
+      expect(getSessionLog.mock.calls.map(([, params]) => params)).toEqual([{ before: 30 }]);
       expect(listChatMessagesPage).not.toHaveBeenCalled();
     } finally {
       listChatSessions.mockImplementation(async () => []);
       view.unmount(); unsubscribe(); client.clear();
+    }
+  });
+
+  it("reads a chat's background tasks only while it is visible and its session counts a running one (PR 6, never a trace)", async () => {
+    setCurrentWorkspace("acme", "ws-1");
+    const client = newClient();
+    const busy = "cs_bg_busy";
+    const idle = "cs_bg_idle";
+    client.setQueryData(chatKeys.sessions("ws-1"), [
+      { id: busy, agent_id: "agt_bg", status: "active", title: "Dev server", running_background_tasks: 2,
+        created_at: "2026-10-16T00:00:00Z", updated_at: "2026-10-16T00:00:02Z" },
+      { id: idle, agent_id: "agt_bg", status: "active", title: "Quiet", running_background_tasks: 0,
+        created_at: "2026-10-16T00:00:00Z", updated_at: "2026-10-16T00:00:01Z" },
+    ]);
+    // No turn runs in either chat: only the parked tasks are live.
+    getPendingChatTask.mockImplementation(async () => ({ supports_queue: true }) as never);
+    // The registry agrees with the session list's count, so one read is enough.
+    listChatBackgroundTasks.mockImplementation(async (sessionId: string) => ({ session_id: sessionId, running: 2, rows: [] }));
+    client.setQueryData(chatKeys.pendingTask(busy), { supports_queue: true });
+    client.setQueryData(chatKeys.pendingTask(idle), { supports_queue: true });
+    act(() => { useChatStore.getState().setActiveSession(idle); });
+    const view = render(<Shell />, { wrapper: wrapper(client) });
+    try {
+      await act(async () => {});
+      // Hidden: nothing, whatever the count says.
+      act(() => { useChatStore.getState().setActiveSession(busy); });
+      await act(async () => {});
+      expect(listChatBackgroundTasks).not.toHaveBeenCalled();
+      // Visible with no running task: still nothing.
+      act(() => { useChatStore.getState().setActiveSession(idle); useChatStore.getState().setOpen(true); });
+      await act(async () => {});
+      expect(listChatBackgroundTasks).not.toHaveBeenCalled();
+      // Visible with running tasks: one read of the registry, and no trace for it.
+      act(() => { useChatStore.getState().setActiveSession(busy); });
+      await waitFor(() => expect(listChatBackgroundTasks).toHaveBeenCalledTimes(1));
+      expect(listChatBackgroundTasks).toHaveBeenCalledWith(busy);
+      expect(getTaskTrace).not.toHaveBeenCalled();
+      act(() => { useChatStore.getState().setOpen(false); });
+      await act(async () => { await client.invalidateQueries({ queryKey: chatKeys.backgroundTasks("ws-1", busy) }); });
+      expect(listChatBackgroundTasks).toHaveBeenCalledTimes(1);
+    } finally {
+      view.unmount(); client.clear();
+      setCurrentWorkspace(null, null);
+      getPendingChatTask.mockImplementation(async () => ({ task_id: "tsk_guard_live", status: "running" }));
+      listChatBackgroundTasks.mockImplementation(async (sessionId: string) => ({ session_id: sessionId, running: 0, rows: [] }));
     }
   });
 

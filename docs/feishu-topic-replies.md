@@ -473,6 +473,8 @@ After handoff, Remi finishes its Chat turn. The existing responsible-agent round
 completion path reports back to the same topic; no new polling or notification
 channel is added. These are prompt instructions using existing CLI/API behavior,
 not an automatic intent parser or a transactional exactly-once handoff service.
-They apply to bootstrap and delta prompts after upgrading the bot-hosting daemon;
-the unified storage and Session-owner migrations follow their own startup gates;
-these prompt changes do not authorize production cutover.
+They live in the session's `AGENTS.md` (ADR 0023), which the bot-hosting daemon
+rewrites before every turn, so they apply from the next turn after upgrading it;
+these prompt changes need no database or historical Session migration. The unified
+storage and Session-owner migrations still follow their own startup gates; these
+prompt changes do not authorize production cutover.

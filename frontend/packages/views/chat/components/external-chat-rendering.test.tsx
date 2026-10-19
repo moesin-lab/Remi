@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { I18nProvider } from "@multiremi/core/i18n/react";
+import { markdownTrees } from "@multiremi/ui/markdown/Markdown";
 import type { ExternalChatHistory } from "@multiremi/core/chat";
 import { externalChatKeys } from "@multiremi/core/chat";
 import enChat from "../../locales/en/chat.json";
@@ -14,15 +15,6 @@ import { ExternalChatWindow } from "./external-chat-window";
 const backend = vi.hoisted(() => ({ getExternalChatHistory: vi.fn() }));
 const rendering = vi.hoisted(() => ({ markdownCalls: 0 }));
 vi.mock("@multiremi/core/api", async original => ({ ...await original<typeof import("@multiremi/core/api")>(), api: backend }));
-vi.mock("react-markdown", async original => {
-  const actual = await original<typeof import("react-markdown")>();
-  const { createElement } = await import("react");
-
-  return { ...actual, default: (props: import("react-markdown").Options) => {
-    rendering.markdownCalls++;
-    return createElement(actual.default, props);
-  } };
-});
 
 function history(): ExternalChatHistory {
   return {
@@ -57,12 +49,21 @@ function show(extra?: ReactNode) {
 beforeEach(() => {
   vi.resetAllMocks();
   rendering.markdownCalls = 0;
+  markdownTrees.cache.clear();
+  const get = markdownTrees.get.bind(markdownTrees);
+  vi.spyOn(markdownTrees, "get").mockImplementation(content => {
+    const entry = get(content);
+    if (entry.parsed) rendering.markdownCalls++;
+    return entry;
+  });
   window.sessionStorage.clear();
   backend.getExternalChatHistory.mockResolvedValue(history());
 });
 afterEach(() => {
   cleanup();
   clients.splice(0).forEach(client => client.clear());
+  vi.restoreAllMocks();
+  markdownTrees.cache.clear();
   window.sessionStorage.clear();
 });
 

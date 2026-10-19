@@ -1,4 +1,6 @@
 /** Grok Build adapter for its native ACP-over-stdio agent mode. */
+import { lstatSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 import type {
   AgentAdapter,
   AgentPromptResultMetadata,
@@ -14,6 +16,39 @@ import { canonicalToolName, titleToToolName } from "../tool-name.js";
 
 const USD_TICKS_PER_DOLLAR = 10_000_000_000;
 
+/** Grok receives session instructions through initialize metadata rather than reading Remi's private home. */
+function homeInstructions(home: unknown): string | null {
+  if (typeof home !== "string" || !home) return null;
+  const file = join(home, "AGENTS.md");
+  try {
+    const stat = statSync(file);
+    if (!stat.isFile() || stat.size > 256 * 1024) return null;
+    return readFileSync(file, "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** User-owned cwd: only the Agent skills sync recorded in Remi's private home are catalogued. */
+function homeAgentSkills(home: unknown): string | null {
+  if (typeof home !== "string" || !home) return null;
+  const root = join(home, "skills");
+  try {
+    if (!lstatSync(root).isDirectory() || lstatSync(root).isSymbolicLink()) return null;
+    const manifest = JSON.parse(readFileSync(join(root, ".remi-skills.json"), "utf8")) as { skills?: unknown };
+    if (!Array.isArray(manifest.skills)) return null;
+    const files = [...new Set(manifest.skills)].filter((name): name is string => {
+      if (typeof name !== "string" || !/^[a-z0-9_][a-z0-9._-]*$/.test(name)) return false;
+      const directory = lstatSync(join(root, name), { throwIfNoEntry: false });
+      const file = lstatSync(join(root, name, "SKILL.md"), { throwIfNoEntry: false });
+      return Boolean(directory?.isDirectory() && !directory.isSymbolicLink() && file?.isFile() && !file.isSymbolicLink());
+    }).map(name => `- Skill ${JSON.stringify(name)}: read ${JSON.stringify(join(root, name, "SKILL.md"))}; resolve supporting files beside it.`);
+    return files.length ? ["## Agent Skills", "When a listed skill is relevant, read its original SKILL.md and follow its instructions before working.", ...files].join("\n") : null;
+  } catch {
+    return null;
+  }
+}
+
 export class GrokAdapter implements AgentAdapter {
   readonly agentType = "grok";
   readonly promptUsageSettleScope = "turn" as const;
@@ -26,8 +61,9 @@ export class GrokAdapter implements AgentAdapter {
   }
 
   buildInitializeMeta(options: AgentSessionOptions): Record<string, unknown> {
+    const rules = [options.systemPrompt?.trim(), homeInstructions(options.home), homeAgentSkills(options.home)].filter(Boolean).join("\n\n");
     return {
-      ...(options.systemPrompt?.trim() ? { rules: options.systemPrompt.trim() } : {}),
+      ...(rules ? { rules } : {}),
       startupHints: {
         nonInteractive: true,
         skipGitStatus: true,

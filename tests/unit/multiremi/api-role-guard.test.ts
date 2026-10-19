@@ -430,10 +430,11 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(status === 421, `${pattern} -> ${status}`).toBe(expectedRefusal("runtime", path));
       if (status === 421) refused += 1;
     }
-    // Bot management, responsibility, delivery and Question user operations belong
-    // to UI; runtime owns daemon/health/peer/trace routes.
-    // Of 819 registered routes, it refuses 760 HTTP routes and two browser
-    // upgrades. The independent literal oracle checks every route above.
+    // The merged inventory has 821 routes. Responsibility, delivery, Question,
+    // Chat follow-up queue (ADR 0020) and background-task (PR 6) user operations
+    // belong to UI; runtime owns daemon/health/peer/trace routes. It refuses 762
+    // HTTP routes and two browser upgrades.
+    // The independent literal oracle checks every route above.
     const mintRoute = "GET /api/daemon/runtimes/:runtimeId/feishu-bot/decision-cards";
     expect(statuses.has(mintRoute)).toBe(true);
     expect(statuses.get(mintRoute)).not.toBe(421);
@@ -443,8 +444,8 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(statuses.has(route), `${route} is registered`).toBe(true);
       expect(statuses.get(route), `${route} belongs to ui`).toBe(421);
     }
-    expect(refused, routeCountHint("runtime")).toBe(760);
-    expect(refused + 2, routeCountHint("runtime")).toBe(762);
+    expect(refused, routeCountHint("runtime")).toBe(762);
+    expect(refused + 2, routeCountHint("runtime")).toBe(764);
   });
 
   it("answers 421 with the misdirected body, the role header, and a real route still reachable", async () => {

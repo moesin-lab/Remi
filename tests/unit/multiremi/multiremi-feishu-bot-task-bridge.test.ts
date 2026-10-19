@@ -8,7 +8,7 @@ import { MultiremiStore } from "@multiremi/store.js";
 import { seedLegacyChatIssueClassificationFixture } from "./chat-issue-migration-fixture.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
 import { useTaskSessionInput } from "@multiremi/api/daemon-protocol/offer-budget.js";
-import { buildTaskPrompt } from "@multiremi/prompt.js";
+import { buildTaskPromptArtifact } from "@multiremi/prompt.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 import type { MultiremiDaemon } from "@multiremi/daemon.js";
 import type { IncomingMessage, TaskStreamMeta } from "@connectors/base.js";
@@ -63,6 +63,47 @@ function scaffold(provider: "claude" | "codex" = "codex") {
 }
 
 describe("Feishu bot standard Task bridge", () => {
+  it("replays a secondary bot's background doorbell on its original connector", () => {
+    const { store, config: defaultConfig } = scaffold();
+    store.reportFeishuBotRuntimeStatus("local", "rt_bot", { appliedRevision: defaultConfig.revision, state: "online" });
+    store.registerRuntime({ id: "rt_secondary", name: "Secondary connector", provider: "codex", workspaceId: "local" });
+    const agent = store.createAgent({ name: "Secondary Remi", provider: "codex", runtimeId: "rt_secondary", workspaceId: "local" });
+    store.heartbeatRuntime("rt_secondary", { supportsFeishuBotConfig: true });
+    const bot = store.feishuBotFor("secondary");
+    const config = bot.upsertConfig("local", { agentId: agent.id, runtimeId: "rt_secondary", appId: "cli_secondary",
+      appSecretOp: "set", appSecret: APP_SECRET, domain: "feishu", enabled: true });
+    store.reportFeishuBotRuntimeStatus("local", "rt_secondary", { appliedRevision: config.revision, state: "online" });
+    const inbound = bot.submitMessage("local", "rt_secondary", {
+      revision: config.revision, externalSessionKey: "oc_secondary:thread:omt_secondary",
+      externalMessageId: "om_secondary", chatId: "oc_secondary", threadId: "omt_secondary",
+      senderUnionId: "on_owner", deliveryMode: "native_cot_v1", text: "Start the background work",
+    });
+    expect(store.claimTask("rt_secondary")?.id).toBe(inbound.taskId);
+    store.startTask(inbound.taskId);
+    store.completeTask(inbound.taskId, { output: "Background task started", sessionId: "provider_secondary" });
+    for (const delivery of store.claimFeishuBotOutbounds("local", "rt_secondary")) {
+      store.reportFeishuBotOutbound("local", "rt_secondary", delivery.id, {
+        claimToken: delivery.claimToken, status: "sent", externalMessageId: `om_sent_${delivery.id}`,
+      });
+    }
+
+    const successor = store.sendChatMessage(inbound.chatSessionId, { body: "Background task completed" }).task;
+    const previousJobs = process.env.MULTIREMI_BACKGROUND_JOBS;
+    process.env.MULTIREMI_BACKGROUND_JOBS = "0";
+    try {
+      store.prepareFeishuBackgroundDoorbellDeliveryWithinTransaction(inbound.taskId,
+        store.getTurnForAttempt(inbound.taskId)!.id, successor.id);
+      const operation = db!.query("SELECT operation FROM multiremi_feishu_bot_outbound_operations WHERE kind='background_doorbell'").get() as { operation: string };
+      expect(JSON.parse(String(operation.operation))).toMatchObject({ botId: "secondary", taskId: successor.id });
+      expect(store.claimFeishuBotOutbounds("local", "rt_bot").some(row => row.taskId === successor.id)).toBe(false);
+      const delivery = store.claimFeishuBotOutbounds("local", "rt_secondary").find(row => row.taskId === successor.id)!;
+      expect(delivery).toMatchObject({ chatId: "oc_secondary", threadId: "omt_secondary", replyToMessageId: "om_secondary" });
+    } finally {
+      if (previousJobs === undefined) delete process.env.MULTIREMI_BACKGROUND_JOBS;
+      else process.env.MULTIREMI_BACKGROUND_JOBS = previousJobs;
+    }
+  });
+
   it("hands an in-flight card to the new connector after the old Runtime lease expires", () => {
     const { store, agent, config } = scaffold();
     store.registerRuntime({ id: "rt_next", name: "New host", provider: "codex", workspaceId: "local",
@@ -250,15 +291,15 @@ describe("Feishu bot standard Task bridge", () => {
       expect(wire.runtime_id).toBe(""); // Existing wire representation for an unassigned runtime.
       expect(wire.work_dir).toBeUndefined();
       expect(wire.prior_work_dir).toBeUndefined();
-      // The private task cannot consume the retained topic's directory affinity.
+      // Storage cutover invalidates the old native session and directory generation.
       expect(store.getChatSession(chatId)).toMatchObject({
         sessionId: null, sessionProvider: null, sessionExecutionFingerprint: null,
-        workDir: "/work/issue-A", sessionRuntimeId: "rt_legacy",
+        workDir: null, sessionRuntimeId: null,
       });
       const topic = sentTask(store, store.sendMessage({ session_id: chatId,
         sender: { type: "platform", id: null }, to: { type: "agent", ref: "agt_chat_migration" },
         message_kind: "request", wake_requested: "now", execution_scope: "retained-group-fixture", body_md: "Group continuation" }));
-      expect(topic).toMatchObject({ runtimeId: "rt_legacy", workDir: "/work/issue-A" });
+      expect(topic).toMatchObject({ runtimeId: null, workDir: null });
       store.cancelTask(topic.id);
       // Claim refresh must not restore the shared topic's affinity either.
       const claimed = store.claimTask("rt_bot")!;
@@ -698,7 +739,7 @@ describe("Feishu bot standard Task bridge", () => {
       message.role === "system" && message.body.includes(issue.key))).toBe(true);
   });
 
-  it("switches the bound Chat from bootstrap to delta after the provider session is promoted", () => {
+  it("keeps the bound Chat's setup in the instructions and sends only new input after the provider session is promoted", () => {
     const { store, agent, config } = scaffold();
     store.updateAgent(agent.id, { instructions: "Follow the workspace rules.\n".repeat(400) });
     const skill = store.createSkill({
@@ -721,12 +762,14 @@ describe("Feishu bot standard Task bridge", () => {
     const firstWire = daemonTaskClaimResponse(store, firstTask);
     useTaskSessionInput(store, firstTask, firstWire);
     expect((firstWire.session_projection as { mode?: string } | undefined)?.mode).toBe("bootstrap");
-    const firstPrompt = buildTaskPrompt({
+    const first = buildTaskPromptArtifact({
       ...firstTask,
       prompt: firstWire.prompt,
       sessionProjection: firstWire.session_projection,
-      chatMessage: firstWire.chat_message,
     } as any);
+    expect(first.mode).toBe("bootstrap");
+    expect(first.prompt).toContain("first Feishu request");
+    expect(first.instructions).toContain("Follow the workspace rules.");
 
     store.startTask(firstTask.id);
     store.recordSessionAgentRangeRead(firstSubmission.chatSessionId, agent.id,
@@ -757,28 +800,41 @@ describe("Feishu bot standard Task bridge", () => {
     const secondWire = daemonTaskClaimResponse(store, secondTask);
     useTaskSessionInput(store, secondTask, secondWire);
     expect((secondWire.session_projection as { mode?: string } | undefined)?.mode).toBe("delta");
-    const secondPrompt = buildTaskPrompt({
+    const secondInput = {
       ...secondTask,
       prompt: secondWire.prompt,
       sessionProjection: secondWire.session_projection,
-      chatMessage: secondWire.chat_message,
       boundIssue: secondWire.bound_issue,
       boundIssueLog: secondWire.bound_issue_log,
-    } as any);
+    };
+    const second = buildTaskPromptArtifact(secondInput as any);
+    expect(second.mode).toBe("delta");
 
-    expect(secondPrompt).toContain(`## Issue\nKey: ${issue.key}`);
-    expect(secondPrompt).not.toContain("## Bound Issue Log");
+    // Session setup lives in the provider's AGENTS.md, the same for a new or resumed provider session.
+    expect(second.instructions).toContain(`## Issue\nKey: ${issue.key}`);
+    expect(second.instructions).toContain("## Bound Issue\n");
+    expect(second.instructions).toContain("Follow the workspace rules.");
+    expect(second.instructions).toBe(buildTaskPromptArtifact({
+      ...secondInput,
+      sessionProjection: { ...(secondWire.session_projection as object), mode: "bootstrap" },
+    } as any).instructions);
+
+    expect(second.instructions).not.toContain("## Bound Issue Log");
     const issueSession = store.getOrCreateDefaultIssueSession(issue.id);
     expect(secondWire.bound_issue_log).toMatchObject({ session_id: issueSession.id, content_jsonl: "", has_more: false });
-    expect(secondPrompt).not.toContain(`remi message list ${issueSession.id} --from 0 --to 1`);
-    expect(secondPrompt).not.toContain("The Feishu reviewer approved the bound Issue.");
+    expect(second.instructions).not.toContain(`remi message list ${issueSession.id} --from 0 --to 1`);
+    expect(second.instructions).not.toContain("The Feishu reviewer approved the bound Issue.");
     expect(JSON.stringify(secondWire)).not.toContain("The Feishu reviewer approved the bound Issue.");
     expect(store.listMessages(issueSession.id).map(message => message.body_md))
       .toEqual(["The Feishu reviewer approved the bound Issue."]);
-    expect(secondPrompt.match(/second Feishu request/g)).toHaveLength(1);
-    expect(secondPrompt).not.toContain("## Agent Instructions");
-    expect(secondPrompt).not.toContain("## Skills");
-    expect(Buffer.byteLength(secondPrompt)).toBeLessThan(Buffer.byteLength(firstPrompt) / 2);
+    expect(second.prompt.match(/second Feishu request/g)).toHaveLength(1);
+    expect(second.prompt).not.toContain("first Feishu request");
+    expect(second.prompt).not.toContain("Follow the workspace rules.");
+    expect(second.prompt).not.toContain("## ");
+    // Skills load natively from the provider's skill directory; neither part inlines them.
+    for (const text of [first.prompt, first.instructions, second.prompt, second.instructions]) {
+      expect(text).not.toContain("Inspect the repository carefully.");
+    }
   });
 
   it("deduplicates events and steers an active Task in the bound Chat Session", () => {

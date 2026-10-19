@@ -8,7 +8,7 @@ import { fitTaskOfferToBudget } from '@multiremi/api/daemon-protocol/offer-budge
 import { ProjectKnowledgeService } from '@multiremi/project-knowledge/service.js';
 import { RepositoryWikiService } from '@multiremi/repository-wiki/service.js';
 import { normalizeDaemonClaimTask } from '@multiremi/worker/client.js';
-import { buildTaskPrompt } from '@daemon/agent-runtime/prompts/ephemeral.js';
+import { buildTaskPromptArtifact } from '@daemon/agent-runtime/prompts/ephemeral.js';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
 import { bindFeishuTopicFixture } from './feishu-topic-fixture.js';
 
@@ -220,9 +220,14 @@ pendingTurnBackendTests('MUL-493 QA blockers B1-B4', fixture => {
       expect(JSON.parse(own.jsonl.split('\n')[0])).toMatchObject({ type: 'unread_range', session_id: target.chat.id,
         from_seq: ownFrom, to_seq: ownTo });
       expect(own.jsonl).toContain(`remi message list ${target.chat.id} --from ${ownFrom} --to ${ownTo}`);
-      const prompt = buildTaskPrompt(normalizeDaemonClaimTask(offered)!);
-      expect(prompt).toContain(own.jsonl.split('\n')[0]);
-      expect(prompt).not.toContain(`remi message list ${target.session.id}`);
+      const { prompt, instructions } = buildTaskPromptArtifact(normalizeDaemonClaimTask(offered)!);
+      // ADR 0023 keeps the range record on the wire; the provider receives only new input and an unread sentence.
+      expect(prompt).toContain(`remi message list ${target.chat.id} --from ${ownFrom} --to ${ownTo}`);
+      expect(prompt).not.toContain('"type":"unread_range"');
+      for (const text of [prompt, instructions]) {
+        expect(text).not.toContain(`remi message list ${target.session.id}`);
+        expect(text).not.toContain('FOREIGN_BOUND_ISSUE_BODY');
+      }
       return offered!;
     }
     try {

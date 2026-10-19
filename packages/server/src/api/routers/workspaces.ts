@@ -89,6 +89,7 @@ import {
 import {
   mergeWorkspacePromptSettings,
   readWorkspacePromptSettings,
+  workspacePromptsResponse,
   WorkspacePromptRevisionConflictError,
 } from "../../prompts/workspace-settings.js";
 import { buildPlatformPromptTemplatePreview } from "../../prompts/platform-template.js";
@@ -432,7 +433,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const workspace = store.getWorkspace(workspaceId);
     if (!workspace) return c.json({ error: "workspace not found" }, 404);
-    return c.json(readWorkspacePromptSettings(workspace));
+    return c.json(workspacePromptsResponse(readWorkspacePromptSettings(workspace)));
   });
   app.get("/api/workspaces/:id/prompt-template", (c) => {
     const workspaceId = c.req.param("id");
@@ -461,7 +462,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       if (merged.settings !== workspace.settings) {
         store.updateWorkspace(workspaceId, { settings: merged.settings });
       }
-      return c.json(merged.prompts);
+      return c.json(workspacePromptsResponse(merged.prompts));
     } catch (error) {
       if (error instanceof WorkspacePromptRevisionConflictError) {
         return c.json({

@@ -1,18 +1,18 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
-import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTask } from "@daemon/contracts/types.js";
-import { LocalPathLocker, resolveTaskWorkDir } from "@daemon/agent-runtime/workspace/ephemeral.js";
+import { LocalPathLocker, lockedFolderOf, resolveTaskWorkDir } from "@daemon/agent-runtime/workspace/ephemeral.js";
 import { resolveTaskProviderHome, prepareIssueSessionProviderHome, seedIssueSessionAntigravityHome } from "@daemon/agent-runtime/workspace/session-home.js";
-import { prepareRuntimeWorkspaceContext } from "@daemon/agent-runtime/workspace/runtime-context.js";
-import { codexRuntimeWorkspaceDirectories } from "@daemon/agent-runtime/workspace/runtime-context.js";
+import { PROVIDER_INSTRUCTIONS_MARKER, prepareRuntimeWorkspaceContext, writeProviderInstructions, codexRuntimeWorkspaceDirectories } from "@daemon/agent-runtime/workspace/runtime-context.js";
 import { mergeCodexSkillSettings } from "@daemon/agent-runtime/agent-plugins/codex-home.js";
-import { writeAgentSkillContext } from "@daemon/agent-runtime/skills/ephemeral.js";
+import { providerHomeSkillRoot, syncAgentSkills } from "@daemon/agent-runtime/skills/ephemeral.js";
 import { workspaceBlock } from "@daemon/agent-runtime/capabilities/workspace.js";
 import type { EphemeralContext } from "@daemon/agent-runtime/types.js";
 import { parse as parseToml } from "smol-toml";
+import { AcpProvider } from "@acp/provider.js";
 import { buildTaskPrompt } from "@daemon/agent-runtime/prompts/ephemeral.js";
 
 const temporary: string[] = [];
@@ -70,6 +70,9 @@ describe("Runtime workspace local execution", () => {
     expect(resolved.workDir).toBe(cwd);
     expect(resolved.ensureDir).toBe(false);
     expect(resolved.localDirectory).toBe(true);
+    // PR 6: the lock a parked lane's process keeps, as the lane's next attempt computes it.
+    expect(resolved.lockPath).toBe(realpathSync(cwd));
+    expect(lockedFolderOf(task, options.daemonIds)).toBe(resolved.lockPath!);
     resolved.release?.();
     const reused = await resolveTaskWorkDir({ ...task, id: "second" }, options);
     try {
@@ -86,7 +89,9 @@ describe("Runtime workspace local execution", () => {
     await prepareIssueSessionProviderHome(home, { baseCodexHome: baseHome, linkCodexAuth: false });
     const env = prepareRuntimeWorkspaceContext(task, home, cwd, { baseHome, userHome: join(base, "user-home") });
     const instructions = readFileSync(join(home.home, "AGENTS.md"), "utf8");
+    // Explicit Codex development workspaces preserve user guidance with isolated provider history.
     expect(instructions).toContain("Use the local compiler.");
+    expect(instructions.startsWith(PROVIDER_INSTRUCTIONS_MARKER)).toBe(true);
     expect(instructions).toContain("PARENT_PRIVATE_INSTRUCTION");
     expect(instructions).not.toContain("Use when inspecting local research.");
     expect(codexRuntimeWorkspaceDirectories(task, cwd, home)).toContain(realpathSync(root));
@@ -159,11 +164,11 @@ describe("Runtime workspace local execution", () => {
     const home = resolveTaskProviderHome(task, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(home, { baseCodexHome: baseHome, linkCodexAuth: false });
     task.agent!.skills = [{ name: "db-skill", description: "Use when verifying DB Skill discovery.", content: "Database body" }] as NonNullable<AgentTask["agent"]>["skills"];
-    writeAgentSkillContext(home.home, task);
+    syncAgentSkills(providerHomeSkillRoot(home.home, "codex"), task);
     prepareRuntimeWorkspaceContext(task, home, nested, { baseHome, userHome: join(base, "user-home") });
     const directories = codexRuntimeWorkspaceDirectories(task, nested, home);
     expect(directories).toEqual([realpathSync(root), realpathSync(cwd), home.home]);
-    const skillMarkdown = readFileSync(join(home.home, ".agents", "skills", "db-skill", "SKILL.md"), "utf8");
+    const skillMarkdown = readFileSync(join(home.home, "skills", "db-skill", "SKILL.md"), "utf8");
     expect(skillMarkdown).toContain("\n---\nDatabase body");
     expect(workspaceBlock.ephemeral!({ task, workDir: nested, providerHome: home } as EphemeralContext)).toEqual({ cwd: nested, addDirs: directories });
   });
@@ -280,19 +285,65 @@ describe("Runtime workspace local execution", () => {
     expect(() => mergeCodexSkillSettings(current, '[[skills.config]]\npath = "/skill"\nenabled = "false"')).toThrow("boolean");
   });
 
+  it("delivers Grok's provider instructions, local catalog and only managed Agent Skills through initialize rules", async () => {
+    const { base, root, cwd, task, options } = fixture();
+    const grokTask = { ...task, agent: { ...task.agent!, provider: "grok" } } as AgentTask;
+    const home = resolveTaskProviderHome(grokTask, options.workspacesRoot)!;
+    await prepareIssueSessionProviderHome(home);
+    mkdirSync(join(root, ".grok", "skills", "local"), { recursive: true });
+    writeFileSync(join(root, ".grok", "skills", "local", "SKILL.md"), "---\nname: local\ndescription: Use when inspecting Grok context.\n---\nPrivate body");
+    prepareRuntimeWorkspaceContext(grokTask, home, cwd);
+    const local = readFileSync(join(home.home, "AGENTS.md"), "utf8");
+    expect(local).toContain("Use when inspecting Grok context.");
+    expect(local).not.toContain("Private body");
+    writeProviderInstructions(home, { remi: "# Grok Agent\nFollow Remi rules.", local });
+    const skills = providerHomeSkillRoot(home.home, "grok");
+    syncAgentSkills(skills, { ...grokTask, agent: { ...grokTask.agent!, skills: [
+      { name: "DB review", description: "Use when checking the delivery.", content: "PRIVATE_DB_SKILL_BODY" },
+    ] } } as AgentTask);
+    mkdirSync(join(skills, "unmanaged"));
+    writeFileSync(join(skills, "unmanaged", "SKILL.md"), "UNMANAGED_SKILL");
+    const logPath = join(base, "grok-initialize.jsonl");
+    const configPath = join(base, "grok-script.json");
+    writeFileSync(configPath, JSON.stringify({ prompts: [[{ resolve: "end_turn" }]] }));
+    const executable = join(base, "grok-fixture");
+    writeFileSync(executable, '#!/bin/sh\nexec "$REMI_TEST_BUN" "$REMI_TEST_AGENT"\n');
+    chmodSync(executable, 0o755);
+    const provider = new AcpProvider({
+      agentType: "grok", executable,
+      cwd, providerHome: home.home, getMcpServers: () => [],
+      env: { FAKE_SUBAGENT_CONFIG_FILE: configPath, FAKE_SUBAGENT_LOG: logPath,
+        REMI_TEST_BUN: process.execPath, REMI_TEST_AGENT: join(import.meta.dir, "../../fixtures/acp/fake-subagent-agent.ts") },
+    });
+    try {
+      for await (const event of provider.sendStream("Inspect", { chatId: "grok-context", systemPrompt: "Existing policy." })) void event;
+      const entries = readFileSync(logPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      const rules = entries.find(entry => entry.method === "initialize").params._meta.rules;
+      expect(rules).toContain("Existing policy.");
+      expect(rules).toContain("# Grok Agent\nFollow Remi rules.");
+      expect(rules).toContain("Use when inspecting Grok context.");
+      expect(rules.match(/# Grok Agent/g)).toHaveLength(1);
+      expect(rules).toContain(JSON.stringify(join(skills, "db-review", "SKILL.md")));
+      expect(rules.match(/Skill "db-review"/g)).toHaveLength(1);
+      expect(rules).not.toMatch(/unmanaged|PRIVATE_DB_SKILL_BODY|UNMANAGED_SKILL/);
+    } finally {
+      await provider.close();
+    }
+  });
+
   it("keeps Antigravity's home, gateway routing and Google credentials out of the env file, but not other providers' Google tools", async () => {
     const { base, cwd, task, options } = fixture();
     writeFileSync(join(cwd, ".env.local"), "GOOGLE_APPLICATION_CREDENTIALS=/creds.json\n");
     const codexHome = resolveTaskProviderHome(task, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(codexHome, { baseCodexHome: join(base, "user-home", ".codex"), linkCodexAuth: false });
-    expect(prepareRuntimeWorkspaceContext(task, codexHome, cwd, { userHome: join(base, "user-home") }))
+    expect(prepareRuntimeWorkspaceContext(task, codexHome, cwd))
       .toEqual({ GOOGLE_APPLICATION_CREDENTIALS: "/creds.json" });
     const agyTask = { ...task, agent: { ...task.agent!, provider: "antigravity" } } as AgentTask;
     const agyHome = resolveTaskProviderHome(agyTask, options.workspacesRoot)!;
     await prepareIssueSessionProviderHome(agyHome);
     for (const line of ["GOOGLE_APPLICATION_CREDENTIALS=/creds.json", "GEMINI_HOME=/elsewhere", "GEMINI_API_KEY=k", "AGY_LLM_GATEWAY_URL=https://x", "ANTIGRAVITY_HARNESS_PATH=/h"]) {
       writeFileSync(join(cwd, ".env.local"), `${line}\n`);
-      expect(() => prepareRuntimeWorkspaceContext(agyTask, agyHome, cwd, { userHome: join(base, "user-home") }))
+      expect(() => prepareRuntimeWorkspaceContext(agyTask, agyHome, cwd))
         .toThrow(`cannot override ${line.split("=")[0]}`);
     }
   });
@@ -340,5 +391,92 @@ describe("Runtime workspace local execution", () => {
     } finally { first.release?.(); }
     const third = await resolveTaskWorkDir({ ...task, id: "third" }, options);
     third.release?.();
+  });
+
+  it("writes one AGENTS.md in the provider home, a CLAUDE.md that imports it, atomically and only on change", async () => {
+    const { task, options } = fixture();
+    const claudeTask = { ...task, agent: { ...task.agent!, provider: "claude" } } as AgentTask;
+    const home = resolveTaskProviderHome(claudeTask, options.workspacesRoot)!;
+    await prepareIssueSessionProviderHome(home, { linkClaudeCredentials: false });
+    const written = writeProviderInstructions(home, { remi: "# Remi\nNotes.", local: "# Runtime workspace local context\nLocal." })!;
+    expect(written).toBe(`${PROVIDER_INSTRUCTIONS_MARKER}\n\n# Remi\nNotes.\n\n# Runtime workspace local context\nLocal.\n`);
+    expect(readFileSync(join(home.home, "AGENTS.md"), "utf8")).toBe(written);
+    expect(readFileSync(join(home.home, "CLAUDE.md"), "utf8")).toBe("@AGENTS.md\n");
+    const before = statSync(join(home.home, "AGENTS.md")).ino;
+    writeProviderInstructions(home, { remi: "# Remi\nNotes.", local: "# Runtime workspace local context\nLocal." });
+    expect(statSync(join(home.home, "AGENTS.md")).ino).toBe(before);
+    writeProviderInstructions(home, { remi: "# Remi\nChanged." });
+    expect(readFileSync(join(home.home, "AGENTS.md"), "utf8")).toContain("Changed.");
+    expect(readdirSync(home.home).filter(name => name.endsWith(".tmp"))).toEqual([]);
+    // Nothing to write: Remi's own files go, anyone else's stay.
+    writeProviderInstructions(home, {});
+    expect(existsSync(join(home.home, "AGENTS.md"))).toBe(false);
+    expect(existsSync(join(home.home, "CLAUDE.md"))).toBe(false);
+    writeFileSync(join(home.home, "AGENTS.md"), "my own notes");
+    writeProviderInstructions(home, {});
+    expect(readFileSync(join(home.home, "AGENTS.md"), "utf8")).toBe("my own notes");
+    // A planted link is never written through.
+    rmSync(join(home.home, "AGENTS.md"));
+    const outside = join(options.workspacesRoot, "..", "outside.md");
+    writeFileSync(outside, "outside");
+    symlinkSync(outside, join(home.home, "AGENTS.md"));
+    expect(() => writeProviderInstructions(home, { remi: "# Remi" })).toThrow("unlinked regular file");
+    expect(readFileSync(outside, "utf8")).toBe("outside");
+  });
+
+  it("installs the Agent's skills where the provider finds them and removes the ones it no longer has", () => {
+    const { base, task } = fixture();
+    const root = providerHomeSkillRoot(join(base, "home"), "claude");
+    expect(root).toBe(join(base, "home", "skills"));
+    expect(providerHomeSkillRoot(join(base, "home"), "antigravity")).toBe(join(base, "home", ".agents", "skills"));
+    const skill = (name: string, files: Array<{ path: string; content: string }> = []) => ({ name, description: `${name} skill`, content: `# ${name}`, files });
+    syncAgentSkills(root, { ...task, agent: { ...task.agent!, skills: [skill("Review", [{ path: "ref.md", content: "r" }]), skill("Deploy")] } } as AgentTask);
+    mkdirSync(join(root, ".system", "builtin"), { recursive: true });
+    mkdirSync(join(root, "own-skill"), { recursive: true });
+    // The frontmatter ends on its own line; Codex skips a SKILL.md whose closing `---` runs into the body.
+    expect(readFileSync(join(root, "review", "SKILL.md"), "utf8")).toBe('---\nname: "Review"\ndescription: "Review skill"\n---\n# Review');
+    expect(readFileSync(join(root, "review", "ref.md"), "utf8")).toBe("r");
+    syncAgentSkills(root, { ...task, agent: { ...task.agent!, skills: [skill("Review")] } } as AgentTask);
+    expect(existsSync(join(root, "deploy"))).toBe(false);
+    expect(existsSync(join(root, "review", "ref.md"))).toBe(false);
+    expect(existsSync(join(root, ".system", "builtin"))).toBe(true);
+    expect(existsSync(join(root, "own-skill"))).toBe(true);
+    syncAgentSkills(root, { ...task, agent: { ...task.agent!, skills: [] } } as AgentTask);
+    expect(existsSync(join(root, "review"))).toBe(false);
+    expect(existsSync(join(root, "own-skill"))).toBe(true);
+  });
+
+  it("never writes into or deletes a skill directory Remi did not create", () => {
+    const { base, task } = fixture();
+    const root = join(base, "exec", ".claude", "skills");
+    // Someone else's skill already has the Agent skill's name.
+    mkdirSync(join(root, "review"), { recursive: true });
+    writeFileSync(join(root, "review", "SKILL.md"), "mine");
+    const skill = (name: string) => ({ name, description: `${name} skill`, content: `# ${name}`, files: [] });
+    syncAgentSkills(root, { ...task, agent: { ...task.agent!, skills: [skill("Review"), skill("Deploy")] } } as AgentTask);
+    expect(readFileSync(join(root, "review", "SKILL.md"), "utf8")).toBe("mine");
+    expect(existsSync(join(root, "deploy", "SKILL.md"))).toBe(true);
+    expect(JSON.parse(readFileSync(join(root, ".remi-skills.json"), "utf8"))).toEqual({ skills: ["deploy"] });
+    // Removing the Agent's skills removes only what Remi recorded.
+    syncAgentSkills(root, { ...task, agent: { ...task.agent!, skills: [] } } as AgentTask);
+    expect(readFileSync(join(root, "review", "SKILL.md"), "utf8")).toBe("mine");
+    expect(existsSync(join(root, "deploy"))).toBe(false);
+  });
+
+  it("isolates ordinary Codex sessions from personal skills while explicit development workspaces keep them", async () => {
+    const { base, task, options } = fixture();
+    const personal = join(base, "personal-home");
+    mkdirSync(join(personal, ".agents", "skills", "my-private"), { recursive: true });
+    writeFileSync(join(personal, ".agents", "skills", "my-private", "SKILL.md"), "---\nname: my-private\n---\nbody");
+    const ordinaryTask = { ...task, runtimeWorkspaceId: null, runtimeWorkspace: null } as AgentTask;
+    const home = resolveTaskProviderHome(ordinaryTask, options.workspacesRoot)!;
+    await prepareIssueSessionProviderHome(home, { baseCodexHome: join(base, "user-home", ".codex"), linkCodexAuth: false, personalSkillsHome: personal });
+    const config = readFileSync(join(home.home, "config.toml"), "utf8");
+    expect(config).toContain("[[skills.config]]");
+    expect(config).toContain(JSON.stringify(join(realpathSync(personal), ".agents", "skills", "my-private", "SKILL.md")));
+    expect(config).toContain("enabled = false");
+    const none = resolveTaskProviderHome({ ...task, agent: { ...task.agent!, id: "agt_other" } } as AgentTask, options.workspacesRoot)!;
+    await prepareIssueSessionProviderHome(none, { baseCodexHome: join(base, "user-home", ".codex"), linkCodexAuth: false, personalSkillsHome: personal });
+    expect(readFileSync(join(none.home, "config.toml"), "utf8")).not.toContain("skills.config");
   });
 });

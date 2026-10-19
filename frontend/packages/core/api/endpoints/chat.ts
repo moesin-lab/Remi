@@ -1,12 +1,15 @@
 import { MessagesEndpoints } from "./messages";
 import { InboxEndpoints } from "./inbox";
 import { turnToTask } from "../turn-task";
-import { TurnDetailSchema } from "../schemas/messages";
+import { TurnDetailSchema, type TurnSchema } from "../schemas/messages";
 import type {
   CreateSessionRequest,
   CreateSessionTaskRequest,
   Session,
   SessionTask,
+  ChatBackgroundStopTarget,
+  ChatBackgroundTask,
+  ChatBackgroundTasksSnapshot,
   CreateChatSessionInput,
   ChatOriginFilter,
   ChatPendingTask,
@@ -20,11 +23,23 @@ import type { HttpClient } from "../http";
 import { ApiContractError, parseStrictResponse } from "../schema";
 import {
   ChatSessionSchema, ChatSessionListSchema, ChatSessionUpdateResponseSchema, ChatNoContentSchema,
+  ChatBackgroundTasksSnapshotSchema, parseChatBackgroundTasks,
 } from "../schemas/chat";
 import { IssueSessionSchema } from "../schemas/comments";
 
 const WorkSessionResponseSchema = z.object({ session: IssueSessionSchema });
 const WorkSessionsResponseSchema = z.object({ sessions: z.array(IssueSessionSchema) });
+
+/** Turn statuses a chat shows as in flight. */
+const ACTIVE_TURN_STATUSES: readonly string[] = ["pending", "running", "awaiting_human"];
+
+function pendingTaskOf(turn: z.infer<typeof TurnSchema>): ChatPendingTask {
+  // A running turn whose attempt waits for its local folder says so, and why (PR 6 §2.8).
+  const folderWait = turn.status === "running" && typeof turn.local_directory_wait_reason === "string"
+    ? { status: "waiting_local_directory", wait_reason: turn.local_directory_wait_reason || null } : null;
+  return { task_id: turn.current_attempt_id ?? turn.id, turn_id: turn.id,
+    status: turn.status === "pending" ? "queued" : turn.status, created_at: turn.created_at, supports_queue: true, ...folderWait };
+}
 
 export class ChatEndpoints {
   constructor(readonly http: HttpClient) {}
@@ -103,8 +118,8 @@ export class ChatEndpoints {
     return parseStrictResponse<ChatSession[]>(raw, ChatSessionListSchema, { endpoint: "GET /api/chat/sessions" });
   }
 
-  async getChatSession(id: string): Promise<ChatSession> {
-    const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${id}`);
+  async getChatSession(id: string, options: { signal?: AbortSignal } = {}): Promise<ChatSession> {
+    const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${id}`, options.signal ? { signal: options.signal } : undefined);
     return parseStrictResponse<ChatSession>(raw, ChatSessionSchema, { endpoint: "GET /api/chat/sessions/:id" });
   }
 
@@ -145,24 +160,29 @@ export class ChatEndpoints {
    * Sends now: a running turn takes the message as a steer (ADR 0020). The
    * wake is explicit so a different server default cannot turn a steer into
    * a deferred message; queueing goes through the follow-up queue instead.
+   * It settles when the server has accepted the message; the turn it started
+   * or joined is read separately (`getChatTurnPendingTask`), so a slow turn
+   * read never holds the send. `signal` aborts both requests.
    */
-  async sendChatMessage(sessionId: string, content: string, attachmentIds?: string[], clientId?: string): Promise<SendChatMessageResponse> {
-    const session = await this.getChatSession(sessionId);
+  async sendChatMessage(sessionId: string, content: string, attachmentIds?: string[], clientId?: string,
+    options: { signal?: AbortSignal } = {}): Promise<SendChatMessageResponse> {
+    const session = await this.getChatSession(sessionId, options);
     const result = await new MessagesEndpoints(this.http).sendMessage(sessionId, {
       body_md: content, message_kind: "request", to: { type: "agent", ref: session.agent_id }, wake_requested: "now",
       attachment_ids: attachmentIds?.length ? attachmentIds : undefined, dedupe_key: clientId,
-    });
-    // The message is committed. A supplemental read must not turn it into a failed send.
-    // Pending-turn polling reconciles the optimistic identity if this read is unavailable.
-    const detail = result.turn_id ? await new MessagesEndpoints(this.http).getTurn(result.turn_id).catch(() => null) : null;
-    return { message_id: result.message.id, task_id: detail?.turn.current_attempt_id ?? result.turn_id ?? "",
-      turn_id: result.turn_id, created_at: detail?.turn.created_at ?? result.message.created_at,
-      supports_queue: true, queued: detail?.turn.status === "running" || detail?.turn.status === "awaiting_human" };
+    }, options);
+    return { message_id: result.message.id, turn_id: result.turn_id, created_at: result.message.created_at };
+  }
+
+  /** One turn as its chat's pending task; an ended turn reads as none. */
+  async getChatTurnPendingTask(turnId: string): Promise<ChatPendingTask> {
+    const { turn } = await new MessagesEndpoints(this.http).getTurn(turnId);
+    return ACTIVE_TURN_STATUSES.includes(turn.status) ? pendingTaskOf(turn) : { supports_queue: true };
   }
 
   private async activeTurns(sessionId?: string) {
     const messages = new MessagesEndpoints(this.http);
-    const pages = await Promise.all(["pending", "running", "awaiting_human"].map(async status => {
+    const pages = await Promise.all(ACTIVE_TURN_STATUSES.map(async status => {
       const turns = [];
       let cursor: string | undefined;
       do { const page = await messages.listTurns({ session_id: sessionId, status, cursor, limit: 100 }); turns.push(...page.turns); cursor = page.next_cursor ?? undefined; } while (cursor);
@@ -172,14 +192,40 @@ export class ChatEndpoints {
   }
   async getPendingChatTask(sessionId: string): Promise<ChatPendingTask> {
     const turn = (await this.activeTurns(sessionId))[0];
-    return turn ? { task_id: turn.current_attempt_id ?? turn.id, turn_id: turn.id,
-      status: turn.status === "pending" ? "queued" : turn.status, created_at: turn.created_at, supports_queue: true }
-      : { supports_queue: true };
+    return turn ? pendingTaskOf(turn) : { supports_queue: true };
   }
   async listPendingChatTasks(): Promise<PendingChatTasksResponse> {
     return { tasks: (await this.activeTurns()).filter(turn => turn.session_id.startsWith("chat_"))
       .map(turn => ({ task_id: turn.current_attempt_id ?? turn.id, turn_id: turn.id, status: turn.status === "pending" ? "queued" : turn.status, chat_session_id: turn.session_id,
-        ...(typeof turn.running_subagents === "number" ? { running_subagents: turn.running_subagents } : {}) })) };
+        ...(typeof turn.running_subagents === "number" ? { running_subagents: turn.running_subagents } : {}),
+        ...(typeof turn.running_background_tasks === "number" ? { running_background_tasks: turn.running_background_tasks } : {}) })) };
+  }
+
+  /**
+   * A chat's background tasks (PR 6): the running rows plus the last ended
+   * ones, from the session registry. Never a trace (MUL-472).
+   */
+  async listChatBackgroundTasks(sessionId: string): Promise<ChatBackgroundTasksSnapshot> {
+    const path = `/api/chat/sessions/${encodeURIComponent(sessionId)}/background-tasks`;
+    const snapshot = parseStrictResponse<ChatBackgroundTasksSnapshot>(await this.http.fetch<unknown>(path),
+      ChatBackgroundTasksSnapshotSchema, { endpoint: "GET /api/chat/sessions/:id/background-tasks" });
+    if (snapshot.session_id !== sessionId) throw new ApiContractError("GET /api/chat/sessions/:id/background-tasks", "Server returned another session");
+    return snapshot;
+  }
+
+  /**
+   * Asks the chat's computer to stop one background task or all of them
+   * (PR 6 §6.1). Accepted with 202 `{requested_at, rows}`: the rows it marked
+   * as stopping (well-formed ones; none when the answer has no body). They
+   * end when the daemon answers. A 409 says why not: `task_not_running` or
+   * `runtime_offline`.
+   */
+  async stopChatBackgroundTasks(sessionId: string, target: ChatBackgroundStopTarget): Promise<ChatBackgroundTask[]> {
+    const path = `/api/chat/sessions/${encodeURIComponent(sessionId)}/background-tasks/stop`;
+    const res = await this.http.fetchRaw(path, { method: "POST", body: JSON.stringify(target), extraHeaders: { "Content-Type": "application/json" } });
+    // Any 2xx accepts the stop; the marked rows are a bonus, not a contract.
+    const body = await res.json().catch(() => null) as { rows?: unknown } | null;
+    return parseChatBackgroundTasks(body?.rows).filter((row) => row.session_id === sessionId);
   }
 
   async markChatSessionRead(sessionId: string): Promise<void> {

@@ -77,23 +77,20 @@ function ask(h: ReturnType<typeof multibotFixture>, suffix = "original") {
   return h.store.getQuestion(String(result.message_id))!;
 }
 
-function present(h: ReturnType<typeof multibotFixture>, questionId: string) {
+function expectDirectChatQuestion(h: ReturnType<typeof multibotFixture>, questionId: string) {
   const second = h.bots[1]!;
-  const record = h.store.getMessage(questionId)!.metadata.question as { presentation_session_id: string };
-  const notification = h.store.listMessages(record.presentation_session_id).find(message => message.metadata.question_present_request === true)!;
-  expect(notification).toMatchObject({ to_agent_id: second.agent.id, metadata: { root_question_id: questionId, question_route_revision: 1 } });
-  expect(notification.session_id).not.toBe(h.session.id);
-  const presenterTurn = h.store.getTurn(String(notification.metadata.delivery_turn_id))!;
-  const presenter = h.store.claimTask(second.runtime.id)!;
-  expect(presenter.id).toBe(presenterTurn.current_attempt_id!);
-  expect(presenter.agentId).toBe(second.agent.id);
-  h.store.startTask(presenter.id);
-  h.store.presentQuestion(questionId, { expected_route_revision: 1, summary: "Read the original second-bot options" },
-    { type: "agent", id: second.agent.id }, presenterTurn.id);
+  const record = h.store.getMessage(questionId)!.metadata.question as { presentation_session_id?: string; summary_wait_until?: string | null };
+  expect(record.presentation_session_id).toBeUndefined();
+  expect(record.summary_wait_until).toBeNull();
+  expect(h.store.getQuestion(questionId)).toMatchObject({ session_id: h.session.id, summary: null });
+  expect(h.db.query("SELECT id FROM multiremi_chat_sessions WHERE agent_id=?").all(second.agent.id)).toEqual([]);
+  expect(h.db.query("SELECT id FROM multiremi_turns WHERE agent_id=?").all(second.agent.id)).toEqual([]);
+  expect(h.db.query(`SELECT id FROM multiremi_conversation_log WHERE kind='message' AND metadata LIKE ?
+    AND metadata LIKE '%question_present_request%'`).all(`%${questionId}%`)).toEqual([]);
 }
 
 pendingTurnBackendTests("multibot Question Session ownership", fixture => {
-  it("uses the shared operator with the second bot's presenter, app-scoped recipient and card token", () => {
+  it("uses the shared operator with the second bot's direct card, app-scoped recipient and card token", () => {
     const h = multibotFixture(fixture());
     const first = h.bots[0]!, second = h.bots[1]!;
     const question = ask(h);
@@ -104,7 +101,7 @@ pendingTurnBackendTests("multibot Question Session ownership", fixture => {
     expect(h.store.getQuestion(question.id, { type: "agent", id: first.agent.id })!.actions.allowed).not.toContain("present");
     expect(h.store.getQuestion(question.id, { type: "agent", id: second.agent.id })!.actions.allowed).toContain("present");
 
-    present(h, question.id);
+    expectDirectChatQuestion(h, question.id);
 
     // The persisted transport carrier deliberately has the other app's recipient.
     // Materialization must resolve this Q's handler instead of copying that value.
@@ -131,7 +128,7 @@ pendingTurnBackendTests("multibot Question Session ownership", fixture => {
       { type: "member", id: h.humans[0]!.id }, undefined, { token: "wrong-token", operatorOpenId: first.openId, routeRevision: 1 })).toThrow("token_invalid");
     expect(h.store.getMessage(question.id)!.card_token_hash).toBe(protectedMessage.card_token_hash);
     expect(h.store.getQuestion(question.id)).toMatchObject({ status: "pending", session_id: h.session.id, wait_status: "waiting",
-      summary: { agent_id: second.agent.id, body_md: "Read the original second-bot options" } });
+      summary: null });
   });
 
   it("editing or deleting default leaves the second bot's Question, token and running directive unchanged", () => {
@@ -169,7 +166,7 @@ pendingTurnBackendTests("multibot Question Session ownership", fixture => {
       const question = ask(h);
       expect(question).toMatchObject({ session_id: h.session.id, source_issue_id: null,
         current_handler: { type: "member", id: "mem_local_local" }, wait_status: "waiting" });
-      present(h, question.id);
+      expectDirectChatQuestion(h, question.id);
       expect(first.bot.statusSnapshot("local").status).toBe("online");
       const request = h.store.getTaskHumanRequest(question.id)!;
       expect(h.store.prepareFeishuBotHumanRequestPush(request)).toBeNull();
@@ -204,7 +201,7 @@ pendingTurnBackendTests("multibot Question Session ownership", fixture => {
     expect(response.ok, JSON.stringify(response)).toBe(true);
     const question = store.getQuestion(String(response.message_id))!;
     expect(question).toMatchObject({ session_id: session.id, source_issue_id: issue.id, stage: "human",
-      current_handler: { type: "member", id: "mem_local_local" }, wait_status: "waiting" });
+      current_handler: null, wait_status: "waiting" });
     expect(store.getMessage(question.id)!.session_id).toBe(session.id);
     expect(store.listIssueQuestions(issue.id).map(item => item.id)).toContain(question.id);
   });

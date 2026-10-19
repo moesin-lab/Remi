@@ -90,6 +90,7 @@ import {
 import { normalizeWorkspaceRepositories, workspaceDefaultBranchResolver } from "@multiremi/api/helpers/repositories.js";
 import { autopilotRunTriggerSummary } from "@multiremi/api/wire/autopilots.js";
 import { createLogger } from "@shared/logger.js";
+import { backgroundFolderHolderForDisplay } from "@shared/background-tasks.js";
 import type {
   CreateIssueCommentInput,
   CreateOrganizerActionInput,
@@ -177,6 +178,7 @@ export interface TaskStatusSnapshot {
 }
 
 const TASK_AUTOPILOT_LOOKUP_BATCH_SIZE = 500;
+const CONVERSATION_SOURCE_BATCH_SIZE = 400;
 
 const AUTO_RETRY_FAILURE_REASONS = new Set([
   "runtime_offline",
@@ -199,6 +201,8 @@ const RESUME_UNSAFE_FAILURE_REASONS = new Set([
 const CLAIM_RESPONSE_RECOVERY_MS = 90 * 1000;
 const TRIGGER_SUMMARY_MAX_LENGTH = 200;
 const TASK_PROMPT_MAX_BYTES = 2 * 1024 * 1024;
+/** The Remi Chat block the daemon writes is capped at 32 KiB; anything larger is not one. */
+const TASK_PROMPT_INSTRUCTIONS_MAX_BYTES = 64 * 1024;
 const ISSUE_WORKSPACE_MIN_CLI_VERSION = [0, 2, 26] as const;
 
 // MUL-336: how long a transient-throttle retry waits before it may be claimed
@@ -2690,6 +2694,47 @@ export class TasksRepo {
   }
 
   /**
+   * Batched form of the conversation-visibility source lookup
+   * `getTask((getTurn(id) ?? getTurnForAttempt(id))?.current_attempt_id)`.
+   *
+   * A source id names a turn, or — only when no turn has that id — an attempt
+   * whose turn is used. The subject is that turn's *current* attempt, read from
+   * the same `multiremi_turn_execution_records` view as `getTask` and converted
+   * like {@link getTaskIdentity}'s fan-out projection, which carries every field
+   * a visibility decision reads (id, workspace, agent, Chat session). Every
+   * requested id is in the result; it maps to null exactly when the per-id
+   * lookup returns no task. One statement per 400 ids; its rows are id columns only.
+   */
+  getConversationSourceSubjects(sourceIds: readonly string[]): Map<string, TaskMessageFanoutSubject | null> {
+    const result = new Map<string, TaskMessageFanoutSubject | null>();
+    const ids = [...new Set(sourceIds.filter(Boolean))];
+    const subject = "t.current_attempt_id AS source_attempt_id, r.id, r.workspace_id, r.agent_id, r.chat_session_id, r.issue_id, r.issue_session_id";
+    const current = "LEFT JOIN multiremi_turn_execution_records r ON r.id = t.current_attempt_id";
+    for (let offset = 0; offset < ids.length; offset += CONVERSATION_SOURCE_BATCH_SIZE) {
+      const batch = ids.slice(offset, offset + CONVERSATION_SOURCE_BATCH_SIZE);
+      const placeholders = batch.map(() => "?").join(", ");
+      // Both halves of `getTurn(id) ?? getTurnForAttempt(id)` in one statement:
+      // the turn named by the id, and the turn of the attempt named by the id.
+      const rows = this.ctx.db.query(`SELECT 0 AS by_attempt, t.id AS source_id, ${subject}
+          FROM multiremi_turns t ${current} WHERE t.id IN (${placeholders})
+        UNION ALL
+        SELECT 1 AS by_attempt, s.id AS source_id, ${subject}
+          FROM multiremi_turn_attempts s JOIN multiremi_turns t ON t.id = s.turn_id ${current} WHERE s.id IN (${placeholders})`)
+        .all(...batch, ...batch) as Row[];
+      const byTurn = new Map<string, Row>(), byAttempt = new Map<string, Row>();
+      for (const row of rows) (Number(row.by_attempt) ? byAttempt : byTurn).set(String(row.source_id), row);
+      for (const id of batch) {
+        // A turn with this id wins, exactly like the `??` above.
+        const row = byTurn.get(id) ?? byAttempt.get(id);
+        // Same guards as the per-id path: no turn, no current attempt, or no
+        // execution record for it means no task.
+        result.set(id, row?.source_attempt_id && row.id != null ? toTaskMessageFanoutSubject(row) : null);
+      }
+    }
+    return result;
+  }
+
+  /**
    * MUL-474: the `status` route's response fields, without the prompt.
    *
    * The Feishu host renders `getFeishuBotTaskSnapshot` from this, so the shape is
@@ -4683,18 +4728,26 @@ ${placementAfter.sql}
     return task;
   }
 
+  /**
+   * The attempt waits for its local folder. A waiting one only takes a new
+   * reason (what holds the folder changed, PR 6 §2.8); the same reason again
+   * writes and announces nothing.
+   */
   markTaskWaitingLocalDirectory(taskId: string, reason?: string | null): MultiremiTask {
     const cleanReason = cleanOptionalString(reason);
+    const existing = this.getTask(taskId);
+    if (existing?.status === "waiting_local_directory" && (existing.waitReason ?? null) === cleanReason) return existing;
     const now = nowIso();
     const result = runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records
        SET status = 'waiting_local_directory',
            wait_reason = ?,
            progress_summary = ?,
            updated_at = ?
-       WHERE id = ? AND status = 'dispatched'`,
+       WHERE id = ? AND status IN ('dispatched', 'waiting_local_directory')`,
       [
         cleanReason,
-        cleanReason ? `Waiting for local directory: ${cleanReason}` : "Waiting for local directory",
+        // The summary is read by people (Issue rows, activity): it never names another member's chat (PR 6 §2.8).
+        cleanReason ? `Waiting for local directory: ${backgroundFolderHolderForDisplay(cleanReason)}` : "Waiting for local directory",
         now,
         taskId,
       ],
@@ -4984,15 +5037,42 @@ ${placementAfter.sql}
    * with or without a project. Returns whether the value changed.
    */
   recordRunningSubagents(taskId: string, count: number): boolean {
-    const result = this.ctx.db.run(
-      `UPDATE multiremi_turn_attempts SET running_subagents = ?, updated_at = ?
-       WHERE id = ? AND status IN ('accepted', 'running') AND COALESCE(running_subagents, 0) <> ?`,
-      [count, nowIso(), taskId, count],
-    );
+    return this.recordTaskActivity(taskId, { runningSubagents: count });
+  }
+
+  /**
+   * The whole `task.activity` frame: PR 5's running-subagent count and, from
+   * PR 6 daemons, `running_background_tasks` (the attempt's running or paused
+   * background tasks). Same rules for both: only an active attempt takes them,
+   * a never-reported value reads as 0, and only a change writes and tells the
+   * Chat's creator `task:subagents`. An omitted background count (an older
+   * daemon) leaves the stored one alone. Returns whether a value changed.
+   */
+  recordTaskActivity(taskId: string, activity: { runningSubagents: number; runningBackgroundTasks?: number }): boolean {
+    const background = activity.runningBackgroundTasks;
+    const result = background === undefined
+      ? this.ctx.db.run(
+        `UPDATE multiremi_turn_attempts SET running_subagents = ?, updated_at = ?
+         WHERE id = ? AND status IN ('accepted', 'running') AND COALESCE(running_subagents, 0) <> ?`,
+        [activity.runningSubagents, nowIso(), taskId, activity.runningSubagents],
+      )
+      : this.ctx.db.run(
+        `UPDATE multiremi_turn_attempts SET running_subagents = ?, running_background_tasks = ?, updated_at = ?
+         WHERE id = ? AND status IN ('accepted', 'running')
+           AND (COALESCE(running_subagents, 0) <> ? OR COALESCE(running_background_tasks, 0) <> ?)`,
+        [activity.runningSubagents, background, nowIso(), taskId, activity.runningSubagents, background],
+      );
     if (!result.changes) return false;
     const task = this.getTask(taskId);
     if (task?.chatSessionId) this.ctx.notifyTaskEvent("task:subagents", task);
     return true;
+  }
+
+  /** PR 6: the count `recordTaskActivity` last stored for the attempt's background tasks; null when never reported. */
+  getRunningBackgroundTasks(taskId: string): number | null {
+    const row = this.ctx.db.query("SELECT running_background_tasks FROM multiremi_turn_attempts WHERE id = ?").get(taskId) as
+      { running_background_tasks: unknown } | null;
+    return row?.running_background_tasks == null ? null : Number(row.running_background_tasks);
   }
 
   /** The count `recordRunningSubagents` last stored for the attempt; null when never reported. */
@@ -5124,10 +5204,13 @@ ${placementAfter.sql}
     }
     const sha256 = createHash("sha256").update(input.prompt).digest("hex");
     if (input.sha256 !== sha256) throw new Error("assembled prompt sha256 mismatch");
+    // Display-only: an oversized block is dropped rather than refusing the prompt record (a refused report blocks the outbox).
+    const instructions = typeof input.instructions === "string" && input.instructions
+      && Buffer.byteLength(input.instructions, "utf8") <= TASK_PROMPT_INSTRUCTIONS_MAX_BYTES ? input.instructions : null;
     this.ctx.db.run(
-      `INSERT OR IGNORE INTO multiremi_task_prompts (task_id, mode, prompt, sha256, assembled_at)
-       VALUES (?, ?, ?, ?, ?)`,
-      [taskId, input.mode, input.prompt, sha256, nowIso()],
+      `INSERT OR IGNORE INTO multiremi_task_prompts (task_id, mode, prompt, sha256, assembled_at, instructions)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [taskId, input.mode, input.prompt, sha256, nowIso(), instructions],
     );
     const recorded = this.getTaskPrompt(taskId);
     if (!recorded) throw new Error("assembled prompt was not recorded");
@@ -5146,6 +5229,7 @@ ${placementAfter.sql}
       prompt: String(row.prompt),
       sha256: String(row.sha256),
       assembledAt: String(row.assembled_at),
+      instructions: typeof row.instructions === "string" && row.instructions ? row.instructions : null,
     };
   }
 
@@ -6439,7 +6523,7 @@ ${placementAfter.sql}
       const head = this.ctx.conversationLog().getConversationLogHead(issueSession.id)?.headSeq ?? 0;
       const outcome = status === "completed" ? "done" : status;
       const reason = envelopeSummary(status === "failed" ? (body ?? task.failureReason ?? "unknown") : body);
-      const envelopeBody = `${issue.key} 有新日志：会话 ${issueSession.id}，seq ({{cursor}}, ${head}]；本次轮次 ${reportTurn.id} 状态 ${status}`
+      const envelopeBody = `${issue.key} 有新日志：会话 ${issueSession.id}，最新 seq ${head}；本次轮次 ${reportTurn.id} 状态 ${status}`
         + (reason ? `，原因 ${reason}` : "");
       const deliveries: EnvelopeDelivery[] = this.ctx.inbox().sendEnvelopeWithinTransaction({
         to: { role: "relay", issueId: issue.id }, kind: "report", outcome,

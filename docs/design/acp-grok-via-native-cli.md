@@ -19,7 +19,11 @@ speaks ACP over stdio.
   headless `defaultAuthMethodId`, otherwise use `xai.api_key` when
   `XAI_API_KEY` is present or `cached_token` from `grok login`. Interactive
   `grok.com` browser authentication is not valid for a daemon.
-- Instructions: send the assembled Remi system prompt as `initialize._meta.rules`.
+- Instructions: merge the existing system prompt with the `AGENTS.md` written in
+  Remi's private provider home and send them as `initialize._meta.rules`. Each turn
+  sends only its new input; Grok does not discover that private instruction file
+  itself. Runtime workspace context is appended to that file on the daemon and
+  omitted from server prompt reports.
 - Permissions: map Remi bypass mode to `session/new._meta.yoloMode=true`;
   Grok's prompt modes are not used as permission modes.
 - Restore: use `session/load`, not `session/resume`.
@@ -29,7 +33,13 @@ speaks ACP over stdio.
   model-specific effort values from the live session catalog.
 - Metering: normalize prompt result `_meta.usage`, `_meta.modelId`, and
   `costUsdTicks` into Remi's provider-neutral response.
-- Skills and MCP: materialize task skills under `.grok/skills`; pass configured
+- Skills and MCP: materialize Agent skills under `.grok/skills` in daemon-owned
+  execution directories. For a Runtime workspace or Project `local_directory`,
+  write them to `skills` in Remi's private provider home and append a name/path
+  catalog to `initialize._meta.rules`. Only valid directories recorded in
+  `.remi-skills.json` are catalogued; unowned entries and symbolic links are
+  excluded, and Skill bodies are not inlined. Existing Runtime workspace
+  `.grok/skills` directories retain their local-context catalog. Pass configured
   MCP servers through the standard ACP session payload.
 
 ## Deliberate limits
@@ -38,8 +48,10 @@ speaks ACP over stdio.
   bridge for it.
 - Grok does not use Remi's Claude/Codex Agent Plugin bundle formats.
 - Grok authentication and native history remain in its normal CLI home; Remi
-  creates only daemon-owned task context/private-temp state and does not replace
-  `GROK_HOME`. Canonical task/session events remain stored by Multiremi.
+  creates daemon-owned task context, private temporary directories, and a private
+  provider home for `AGENTS.md` and managed Agent skills. It does not replace
+  `GROK_HOME` or write those files into user-owned working directories. Canonical
+  task/session events remain stored by Multiremi.
 - A real CLI smoke requires Grok Build installed and authenticated on the
   runtime machine. The deterministic fake-agent contract test remains the CI
   gate when those credentials are unavailable.

@@ -612,6 +612,8 @@ data-service networks; it never creates, replaces, or deletes data containers.
    their owner. SSH Mesh rejects a root-owned service home. Bind the host
    account's `.ssh` directory with `REMI_SSH_HOME_DIR` and set its login name in
    `REMI_SSH_USER`.
+   The API entrypoint preserves the configured `$HOME` after dropping privileges,
+   so CLI credentials remain on the persistent mount instead of the account's image home.
    Startup migration reports default to `$HOME/reports/migrations`, or
    `/srv/multiremi/reports/migrations` in both production Compose topologies
    (`api` and `api-runtime`). This is inside the persistent `REMI_HOME_DIR`

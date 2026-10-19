@@ -31,4 +31,6 @@ if ! getent passwd "$runtime_uid" >/dev/null 2>&1; then
     multiremi-runtime
 fi
 
-exec gosu "$runtime_uid:$runtime_gid" "$@"
+# gosu replaces HOME with the account's passwd home; keep service state on the
+# configured persistent mount even when the image already contains this UID.
+exec gosu "$runtime_uid:$runtime_gid" env HOME="${HOME:-/srv/multiremi}" "$@"

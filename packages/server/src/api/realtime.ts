@@ -126,11 +126,11 @@ export function notifyBrowserWorkspaceEvent(
    * caller may omit it.
    */
   options: { store?: MultiremiStore | null } = {},
-): void {
-  if (event.type.startsWith("chat:") && !isChatRealtimeEvent(event.type)) return;
+): number {
+  if (event.type.startsWith("chat:") && !isChatRealtimeEvent(event.type)) return 0;
   // Internal daemon wake-ups carry no browser state or private Chat audience.
   if (["daemon:dispatch_conditions_changed", "daemon:pending_changed", "daemon:maintenance_changed",
-    "daemon:feishu_changed", "daemon:ssh_mesh_changed", "daemon:task_input"].includes(event.type)) return;
+    "daemon:feishu_changed", "daemon:ssh_mesh_changed", "daemon:task_input"].includes(event.type)) return 0;
   const envelope = {
     type: event.type,
     payload: event.payload,
@@ -145,19 +145,18 @@ export function notifyBrowserWorkspaceEvent(
     }),
   };
   if (isChatRealtimeEvent(event.type)) {
-    notifyBrowserWorkspaceClientsByAudience(workspaceRegistry, event.workspaceId, frames);
-    return;
+    return notifyBrowserWorkspaceClientsByAudience(workspaceRegistry, event.workspaceId, frames);
   }
   if (event.type === "invitation:created" || event.type === "invitation:revoked") {
     const inviteeUserId = invitationEventInviteeUserId(event.payload);
-    if (inviteeUserId) notifyBrowserUserEventByAudience(userRegistry, inviteeUserId, frames);
-    return;
+    return inviteeUserId ? notifyBrowserUserEventByAudience(userRegistry, inviteeUserId, frames) : 0;
   }
-  notifyBrowserWorkspaceClientsByAudience(workspaceRegistry, event.workspaceId, frames);
+  let sent = notifyBrowserWorkspaceClientsByAudience(workspaceRegistry, event.workspaceId, frames);
   if (event.type === "member:added") {
     const userId = memberAddedEventUserId(event.payload);
-    if (userId) notifyBrowserUserEventByAudience(userRegistry, userId, frames, event.workspaceId);
+    if (userId) sent += notifyBrowserUserEventByAudience(userRegistry, userId, frames, event.workspaceId);
   }
+  return sent;
 }
 
 type BrowserWorkspaceEventFrames = {
@@ -210,16 +209,19 @@ function browserWorkspaceEventFrame(
   return tokenType == null || tokenType === "pat" ? frames.human : frames.restricted;
 }
 
+/** Returns how many sockets were handed the frame. */
 function notifyBrowserWorkspaceClientsByAudience(
   registry: BrowserWebSocketRegistry,
   workspaceId: string,
   frames: BrowserWorkspaceEventFrames,
-): void {
+): number {
   const clients = registry.get(workspaceId);
-  if (!clients?.size) return;
+  if (!clients?.size) return 0;
+  let sent = 0;
   for (const client of [...clients]) {
     try {
       client.sendText(browserWorkspaceEventFrame(client, frames));
+      sent += 1;
     } catch {
       unregisterBrowserWebSocketClient(registry, client);
       try {
@@ -229,8 +231,10 @@ function notifyBrowserWorkspaceClientsByAudience(
       }
     }
   }
+  return sent;
 }
 
+/** Returns how many sockets were handed the frame. */
 function notifyBrowserUserEventByAudience(
   registry: BrowserUserWebSocketRegistry,
   userId: string,
@@ -245,14 +249,16 @@ function notifyBrowserUserEventByAudience(
    * session's title.
    */
   onlyWorkspaceId?: string,
-): void {
+): number {
   const clients = registry.get(userId);
-  if (!clients?.size) return;
+  if (!clients?.size) return 0;
+  let sent = 0;
   for (const client of [...clients]) {
     if (client.data.kind === "browser" && excludeWorkspaceId && client.data.workspaceId === excludeWorkspaceId) continue;
     if (client.data.kind === "browser" && onlyWorkspaceId && client.data.workspaceId !== onlyWorkspaceId) continue;
     try {
       client.sendText(browserWorkspaceEventFrame(client, frames));
+      sent += 1;
     } catch {
       unregisterBrowserUserWebSocketClient(registry, client);
       try {
@@ -262,6 +268,7 @@ function notifyBrowserUserEventByAudience(
       }
     }
   }
+  return sent;
 }
 
 export function isChatRealtimeEvent(type: string): boolean {

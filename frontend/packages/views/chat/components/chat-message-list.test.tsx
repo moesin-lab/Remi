@@ -53,6 +53,7 @@ vi.mock("./task-status-pill", () => ({
 }));
 
 import { ChatMessageList } from "./chat-message-list";
+import { LIVE_TURN_HANDOFF_MS } from "./use-live-turn-handoff";
 
 // Subagent rows open the panel through the chat store (PR 5).
 const storeValues = new Map<string, string>();
@@ -118,26 +119,6 @@ describe("cached message observer visibility", () => {
       expect(getQuestion).not.toHaveBeenCalled();
     } finally { view.unmount(); client.clear(); }
   });
-  it("keeps a pinned Chat at the bottom when an availability banner changes layout, but leaves released scrolling alone", () => {
-    const client = new QueryClient();
-    const replica = new MemorySessionReplica({ "cs-1": { entries: [] } });
-    const content = (availability: "offline" | "unstable" | undefined) => <QueryClientProvider client={client}>
-      <ChatMessageList sessionId="cs-1" replica={replica} optimisticRows={[]}
-        pendingTask={null} availability={availability} />
-    </QueryClientProvider>;
-    const view = render(content(undefined));
-    const root = view.container.querySelector<HTMLElement>('[data-perf-scroll="session-log"]')!;
-    Object.defineProperty(root, "scrollHeight", { configurable: true, value: 500 });
-    root.dataset.stickState = "pinned";
-    view.rerender(content("offline"));
-    expect(root.scrollTop).toBe(500);
-    root.dataset.stickState = "released";
-    root.scrollTop = 42;
-    view.rerender(content("unstable"));
-    expect(root.scrollTop).toBe(42);
-    view.unmount(); client.clear();
-  });
-
   it("does not load older log rows while the window is hidden", () => {
     const client = new QueryClient();
     const replica = new MemorySessionReplica({ "cs-1": { entries: [] } });
@@ -154,6 +135,16 @@ describe("cached message observer visibility", () => {
     fireEvent.click(view.container.querySelector<HTMLButtonElement>("[data-chat-earlier]")!);
     expect(load).toHaveBeenCalledTimes(1);
     view.unmount(); client.clear();
+  });
+
+  it("says nothing at the start of the chat but keeps the row that spaces the top", () => {
+    const view = renderList([], null, false, null);
+    try {
+      const row = view.container.querySelector<HTMLElement>("[data-chat-earlier-row]")!;
+      expect(row).toHaveClass("h-10");
+      expect(row).toBeEmptyDOMElement();
+      expect(view.container.querySelector("[data-chat-earlier]")).toBeNull();
+    } finally { view.unmount(); }
   });
 
   it.each(["live", "assistant"])("loads only a visible live task, keeps terminal reply trace lazy (%s)", async (kind) => {
@@ -472,7 +463,12 @@ describe("ChatMessageList with mid-run agent attachments", () => {
     fireEvent.click(view.container.querySelector<HTMLButtonElement>('[data-slot="collapsible-trigger"]')!);
     expect(screen.getByText("Provider rejected the prompt")).toBeInTheDocument();
     expect(getTaskTrace).not.toHaveBeenCalled();
-    expect(view.container.querySelector("[data-chat-trace]")).toBeInTheDocument();
+    // One log button, after the failed-after caption in the footer row where a
+    // reply has it; a failure keeps it visible, as the end notice does.
+    const logs = view.container.querySelectorAll<HTMLButtonElement>("[data-chat-trace]");
+    expect(logs).toHaveLength(1);
+    expect(logs[0]!.parentElement).toHaveAttribute("data-chat-message-footer");
+    expect(logs[0]!.className).not.toContain("opacity-0");
     view.unmount();
   });
   it("keeps the running task's live steps visible after an attachment push lands", () => {
@@ -600,6 +596,26 @@ describe("Chat rows without the envelope header or attempts list", () => {
       expect(hints).toHaveLength(1);
       expect(hints[0]).toHaveAttribute("data-wake-hint", "next_turn");
       expect(hints[0]!.closest('[data-perf-key="queued"]')).not.toBeNull();
+    } finally { view.unmount(); client.clear(); }
+  });
+
+  // Markdown is a plain span here: the row hands it the chip link, which the
+  // real renderer shows as a chip (ui markdown fixtures, "mentions and slash links").
+  it("hands a message's leading command to Markdown as a chip link and leaves other text alone (ADR 0025)", () => {
+    setApiInstance({ getTurn: vi.fn() } as never);
+    const { view, client } = render2([
+      { seq: 1, id: "command", kind: "message", sender_type: "member", sender_id: "user", message_kind: "request",
+        to_type: "agent", to_ref: "agent-1", body_md: "/compact keep the plan" },
+      { seq: 2, id: "legacy", kind: "message", sender_type: "member", sender_id: "user", message_kind: "request",
+        to_type: "agent", to_ref: "agent-1", body_md: "[/deploy](slash://skill/s1) now" },
+      { seq: 3, id: "path", kind: "message", sender_type: "member", sender_id: "user", message_kind: "request",
+        to_type: "agent", to_ref: "agent-1", body_md: "/tmp/x is missing" },
+    ]);
+    try {
+      const row = (id: string) => view.container.querySelector(`[data-perf-key="${id}"] .prose`);
+      expect(row("command")).toHaveTextContent("[/compact](slash://command/compact) keep the plan");
+      expect(row("legacy")).toHaveTextContent("[/deploy](slash://skill/s1) now");
+      expect(row("path")).toHaveTextContent(/^\/tmp\/x is missing$/);
     } finally { view.unmount(); client.clear(); }
   });
 
@@ -743,8 +759,6 @@ describe("finished turn steps fold (MUL-472)", () => {
       expect(fold).not.toBeNull();
       const header = fold.querySelector<HTMLButtonElement>("[data-chat-steps-header]")!;
       expect(header).toHaveAttribute("aria-expanded", "false");
-      // The fold carries the execution log, so the reply footer has none of its own.
-      expect(reply.querySelector("[data-chat-trace]")).toBeNull();
       // An old card without a count gets no fold and keeps the quiet log button.
       const old = view.container.querySelector<HTMLElement>('[data-perf-key="turn_8"]')!;
       expect(old.querySelector("[data-chat-steps]")).toBeNull();
@@ -754,24 +768,85 @@ describe("finished turn steps fold (MUL-472)", () => {
       fireEvent.click(header);
       await waitFor(() => expect(getTaskTrace).toHaveBeenCalledWith("attempt_7", { itemCursor: 0, turnId: "turn_7" }));
       expect(getTaskTrace).toHaveBeenCalledTimes(1);
-      await waitFor(() => expect(reply.querySelector('[data-chat-steps="finished"] [data-chat-trace]')).not.toBeNull());
+      await waitFor(() => expect(fold.querySelector('[role="status"]')).toBeNull());
+      // Open and loaded, the fold still carries no log button of its own.
+      expect(fold.querySelector("[data-chat-trace]")).toBeNull();
+      expect(reply.querySelectorAll("[data-chat-trace]")).toHaveLength(1);
     } finally { view.unmount(); client.clear(); }
   });
 
-  it("puts a failed turn's steps above its failure notice and keeps the notice's own log button", () => {
-    const getTaskTrace = vi.fn();
+  it("puts the execution log in the reply's footer row, after copy, with or without a steps fold", async () => {
+    const getTaskTrace = vi.fn().mockResolvedValue(turnPage(traceTurn({ id: "attempt_13", status: "completed" }), []));
+    const getTask = vi.fn(async (id: string, turnId?: string) => ({ id, turn_id: turnId, agent_id: "", runtime_id: "", issue_id: "",
+      status: "completed", priority: 0, created_at: "2026-10-05T00:00:00Z", started_at: null, dispatched_at: null, completed_at: null, result: null, error: null }));
+    setApiInstance({ getTaskTrace, getTask, getTurn: vi.fn(), getTaskPrompt: vi.fn().mockRejectedValue({ status: 404 }) } as never);
+    const { view, client } = renderRows([
+      { seq: 1, id: "turn_13", kind: "turn", task_id: "attempt_13", body_md: "",
+        metadata: { turn_id: "turn_13", status: "completed", final_entry_id: "msg_13", process_item_count: 2, worked_ms: 20_000, elapsed_ms: 21_000 } },
+      { seq: 2, id: "msg_13", kind: "message", sender_type: "agent", message_kind: "reply", task_id: "turn_13", body_md: "With steps", metadata: { elapsed_ms: 21_000 } },
+      { seq: 3, id: "turn_14", kind: "turn", task_id: "attempt_14", body_md: "",
+        metadata: { turn_id: "turn_14", status: "completed", final_entry_id: "msg_14", elapsed_ms: 12_000 } },
+      { seq: 4, id: "msg_14", kind: "message", sender_type: "agent", message_kind: "reply", task_id: "turn_14", body_md: "Without steps", metadata: { elapsed_ms: 12_000 } },
+    ]);
+    try {
+      const withSteps = view.container.querySelector<HTMLElement>('[data-perf-key="msg_13"]')!;
+      const without = view.container.querySelector<HTMLElement>('[data-perf-key="msg_14"]')!;
+      expect(withSteps.querySelector('[data-chat-steps="finished"]')).not.toBeNull();
+      expect(without.querySelector("[data-chat-steps]")).toBeNull();
+      for (const reply of [withSteps, without]) {
+        const logs = reply.querySelectorAll<HTMLButtonElement>("[data-chat-trace]");
+        expect(logs).toHaveLength(1);
+        const footer = logs[0]!.parentElement!;
+        expect(footer).toHaveAttribute("data-chat-message-footer");
+        // The footer row is the reply's last line, and the log is its last action.
+        expect(footer.closest("[data-chat-steps]")).toBeNull();
+        expect(footer.querySelector("[data-chat-copy]")!.compareDocumentPosition(logs[0]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(footer.lastElementChild).toBe(logs[0]);
+        // Revealed with copy on hover or focus.
+        expect(logs[0]!.className).toContain("opacity-0");
+      }
+      expect(getTask).not.toHaveBeenCalled();
+      // Each opens the execution dialog of its own attempt and turn.
+      fireEvent.click(withSteps.querySelector<HTMLButtonElement>("[data-chat-trace]")!);
+      await waitFor(() => expect(getTask).toHaveBeenCalledWith("attempt_13", "turn_13"));
+      expect(await screen.findByRole("dialog")).toBeInTheDocument();
+      await waitFor(() => expect(getTaskTrace).toHaveBeenCalledWith("attempt_13", { itemCursor: 0, turnId: "turn_13" }));
+      fireEvent.click(without.querySelector<HTMLButtonElement>("[data-chat-trace]")!);
+      await waitFor(() => expect(getTask).toHaveBeenCalledWith("attempt_14", "turn_14"));
+    } finally { view.unmount(); client.clear(); }
+  });
+
+  it("puts a failed turn's steps above its failure notice and keeps the notice's own log button", async () => {
+    const getTaskTrace = vi.fn().mockResolvedValue(turnPage(traceTurn({ id: "attempt_9", status: "failed" }), [command("cmd_1", [read("a.ts")])]));
     setApiInstance({ getTaskTrace, getTurn: vi.fn() } as never);
     const { view, client } = renderRows([
       { seq: 1, id: "turn_9", kind: "turn", task_id: "attempt_9", body_md: "",
         metadata: { turn_id: "turn_9", status: "failed", failure_reason: "agent_error", process_item_count: 2, elapsed_ms: 5000 } },
+      // The same with its reply row loaded: the reply row shows the notice.
+      { seq: 2, id: "turn_15", kind: "turn", task_id: "attempt_15", body_md: "",
+        metadata: { turn_id: "turn_15", status: "failed", failure_reason: "agent_error", final_entry_id: "msg_15", process_item_count: 2, elapsed_ms: 5000 } },
+      { seq: 3, id: "msg_15", kind: "message", sender_type: "agent", message_kind: "reply", task_id: "turn_15",
+        body_md: "Provider rejected the prompt", metadata: { failure_reason: "agent_error", elapsed_ms: 5000 } },
     ]);
     try {
+      for (const key of ["turn_9", "msg_15"]) {
+        const row = view.container.querySelector<HTMLElement>(`[data-perf-key="${key}"]`)!;
+        const fold = row.querySelector('[data-chat-steps="finished"]')!;
+        const notice = row.querySelector('[data-turn-notice="failed"]')!;
+        expect(fold.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        // Exactly one log button: the notice's, never a second in the fold or a footer.
+        const logs = row.querySelectorAll("[data-chat-trace]");
+        expect(logs).toHaveLength(1);
+        expect(notice.contains(logs[0]!)).toBe(true);
+        expect(row.querySelector("[data-chat-message-footer]")).toBeNull();
+      }
+      expect(getTaskTrace).not.toHaveBeenCalled();
       const row = view.container.querySelector<HTMLElement>('[data-perf-key="turn_9"]')!;
       const fold = row.querySelector('[data-chat-steps="finished"]')!;
-      const notice = row.querySelector('[data-turn-notice="failed"]')!;
-      expect(fold.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-      expect(notice.querySelector("[data-chat-trace]")).not.toBeNull();
-      expect(getTaskTrace).not.toHaveBeenCalled();
+      fireEvent.click(fold.querySelector<HTMLButtonElement>("[data-chat-steps-header]")!);
+      await waitFor(() => expect(getTaskTrace).toHaveBeenCalledWith("attempt_9", { itemCursor: 0, turnId: "turn_9" }));
+      await waitFor(() => expect(fold.querySelector('[role="status"]')).toBeNull());
+      expect(row.querySelectorAll("[data-chat-trace]")).toHaveLength(1);
     } finally { view.unmount(); client.clear(); }
   });
 
@@ -885,7 +960,9 @@ describe("live turn steps", () => {
       // The strip shares one sticky block with the background-task notices (PR 6).
       expect(strip.closest<HTMLElement>("[data-chat-running-strip]")!.className).toContain("sticky");
       expect(strip.querySelector('[data-strip-chip="sa:1"]')).not.toBeNull();
-      // Its row in the live fold opens the panel on the live attempt.
+      // Before the reply the live steps have no header to name the subagent: the strip does.
+      expect(view.container.querySelector("[data-chat-live-turn] [data-chat-steps-header]")).toBeNull();
+      // Its row in the live steps opens the panel on the live attempt.
       fireEvent.click(view.container.querySelector<HTMLButtonElement>('[data-chat-live-turn] [data-subagent-row="sa:1"]')!);
       expect(useChatStore.getState().subagentPanel).toMatchObject({ sessionId: "cs-1", attemptId: TASK_ID, live: true, path: ["sa:1"] });
     } finally { view.unmount(); client.clear(); }
@@ -902,6 +979,217 @@ describe("Chat column", () => {
       // the centered column stays on the composer's center line.
       expect(scroll.parentElement).toHaveClass("@container/chat-log",
         "@min-[800px]/chat-log:[&>[data-session-log-scroll]]:[scrollbar-gutter:stable_both-edges]");
+      // On a wide pane the column's `cqi` resolves against that container, the
+      // nearest one: it must span the pane like the composer's, with no width,
+      // margin or padding of its own and no container in between.
+      expect(scroll.parentElement!.className).not.toMatch(/(^|\s)(p[xlr]?|m[xlr]?|w|max-w)-/);
+      expect(scroll.className).not.toContain("@container");
     } finally { view.unmount(); }
+  });
+});
+
+describe("live turn handoff", () => {
+  const row = (fields: Record<string, unknown>) => SessionLogEntrySchema.parse({
+    session_id: "cs-1", revision: 1, body_html: null, render_version: null, metadata: {}, ...fields,
+  }) as SessionLogEntry;
+  const ask = (seq: number, body: string) => row({ seq, id: `ask-${seq}`, kind: "message", sender_type: "member", message_kind: "request", body_md: body });
+  /** A turn's card as the log holds it once the turn ended; a running card is hidden and not in the window. */
+  const card = (seq: number, n: number, status: string, reply: string | null = `reply-${n}`) => row({
+    seq, id: `turn-${n}`, revision: 3, kind: "turn", task_id: `att-${n}`, body_md: "",
+    metadata: { turn_id: `turn-${n}`, status, final_entry_id: reply, failure_reason: status === "failed" ? "agent_error" : null },
+  });
+  /** The reply row carries its turn's id. */
+  const reply = (seq: number, n: number) => row({ seq, id: `reply-${n}`, kind: "message", sender_type: "agent", message_kind: "reply",
+    task_id: `turn-${n}`, body_md: `PERSISTED_${n}` });
+  const pending = (n: number) => ({ task_id: `att-${n}`, turn_id: `turn-${n}`, status: "running", supports_queue: true }) as ChatPendingTask;
+  const settled = { supports_queue: true } as ChatPendingTask;
+
+  function setup(entries: SessionLogEntry[], turns = [1]) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    // Each live trace: one command (so the fold has a step) and the final reply.
+    for (const n of turns) client.setQueryData(["task-trace", `att-${n}`], turnTraceCache(turnPage(
+      traceTurn({ id: `att-${n}`, turn_id: `turn-${n}`, final_item_id: `final:${n}`, final_started_at: at(5) }),
+      [command(`cmd:${n}`, [read("a.ts")]), traceMessage(`final:${n}`, `LIVE_${n}`, "final", { started_at: at(5) })], { closed: false })));
+    const replica = new MemorySessionReplica({ "cs-1": { entries }, "cs-2": { entries: [ask(1, "Other chat")] } });
+    const content = (task: ChatPendingTask | null, sessionId = "cs-1") => <QueryClientProvider client={client}>
+      <ChatMessageList sessionId={sessionId} replica={replica} optimisticRows={[]} pendingTask={task} availability={undefined} />
+    </QueryClientProvider>;
+    const view = render(content(pending(turns[0]!)));
+    const held = () => [...view.container.querySelectorAll<HTMLElement>('[data-chat-live-turn="held"]')].map((element) => element.textContent);
+    const live = () => [...view.container.querySelectorAll<HTMLElement>('[data-chat-live-turn=""]')].map((element) => element.textContent);
+    return { client, replica, view, content, held, live };
+  }
+
+  it("keeps a finished turn's live reply after chat-done until its card and reply land, then swaps them in one render", () => {
+    const { client, replica, view, content, held, live } = setup([ask(1, "Question")]);
+    try {
+      expect(live()).toEqual([expect.stringContaining("LIVE_1")]);
+      // chat:done settles the pending task before the turn's rows reach the log.
+      view.rerender(content(settled));
+      expect(held()).toEqual([expect.stringContaining("LIVE_1")]);
+      expect(live()).toEqual([]);
+      // The card alone shows nothing: the reply row it names is not loaded yet.
+      act(() => replica.setWindow("cs-1", [ask(1, "Question"), card(2, 1, "completed")]));
+      expect(held()).toEqual([expect.stringContaining("LIVE_1")]);
+      expect(view.container).not.toHaveTextContent("PERSISTED_1");
+      act(() => replica.setWindow("cs-1", [ask(1, "Question"), card(2, 1, "completed"), reply(3, 1)]));
+      expect(view.container).toHaveTextContent("PERSISTED_1");
+      expect(view.container).not.toHaveTextContent("LIVE_1");
+      expect(view.container.querySelector("[data-chat-live-turn]")).toBeNull();
+      // Rows that go again later do not bring the live view back.
+      act(() => replica.setWindow("cs-1", [ask(1, "Question")]));
+      expect(view.container.querySelector("[data-chat-live-turn]")).toBeNull();
+    } finally { view.unmount(); client.clear(); }
+  });
+
+  it("keeps the running turn's live view while its finished card waits for the reply row", () => {
+    const { client, replica, view, live } = setup([ask(1, "Question")]);
+    try {
+      act(() => replica.setWindow("cs-1", [ask(1, "Question"), card(2, 1, "completed")]));
+      expect(live()).toEqual([expect.stringContaining("LIVE_1")]);
+      act(() => replica.setWindow("cs-1", [ask(1, "Question"), card(2, 1, "completed"), reply(3, 1)]));
+      expect(view.container.querySelector("[data-chat-live-turn]")).toBeNull();
+      expect(view.container).toHaveTextContent("PERSISTED_1");
+    } finally { view.unmount(); client.clear(); }
+  });
+
+  /** The reply row as the server writes it when the attempt ends: failure and elapsed time stamped on it. */
+  const endedReply = (seq: number, n: number, body: string, failure: string | null, revision = 1) => row({
+    seq, id: `reply-${n}`, revision, kind: "message", sender_type: "agent", message_kind: "reply", task_id: `turn-${n}`, body_md: body,
+    metadata: { failure_reason: failure, elapsed_ms: failure ? 8_000 : 20_000 },
+  });
+  /** What each change to the list leaves on screen: the live answer and the persisted one, never both. */
+  function watchAnswers(container: HTMLElement, persisted: string) {
+    const seen = new Set<string>();
+    const observer = new MutationObserver(() => {
+      seen.add(`${!!container.querySelector("[data-chat-live-final]")}/${container.textContent!.includes(persisted)}`);
+    });
+    observer.observe(container, { subtree: true, childList: true, characterData: true, attributes: true });
+    return { seen, stop: () => observer.disconnect() };
+  }
+
+  it("ends the running turn's live view in the render its completed reply row lands, before the card", () => {
+    const { client, replica, view, content, held, live } = setup([ask(1, "Question")]);
+    try {
+      expect(live()).toEqual([expect.stringContaining("LIVE_1")]);
+      const answers = watchAnswers(view.container, "PERSISTED_1");
+      // The pending task still says running: chat:done and the finished card are late.
+      act(() => replica.setWindow("cs-1", [ask(1, "Question"), endedReply(3, 1, "PERSISTED_1", null)]));
+      expect(view.container.querySelector("[data-chat-live-turn]")).toBeNull();
+      expect(view.container.querySelector("[data-chat-live-final]")).toBeNull();
+      expect(view.container).not.toHaveTextContent("LIVE_1");
+      expect(view.container).toHaveTextContent("PERSISTED_1");
+      // The card lands, then the pending task settles: one answer throughout, and nothing held.
+      act(() => replica.setWindow("cs-1", [ask(1, "Question"), card(2, 1, "completed"), endedReply(3, 1, "PERSISTED_1", null)]));
+      view.rerender(content(settled));
+      expect(held()).toEqual([]);
+      expect(view.container.querySelector("[data-chat-live-turn]")).toBeNull();
+      expect(view.container.textContent!.split("PERSISTED_1")).toHaveLength(2);
+      answers.stop();
+      expect([...answers.seen]).not.toContain("true/true");
+      expect([...answers.seen]).not.toContain("false/false");
+    } finally { view.unmount(); client.clear(); }
+  });
+
+  it("keeps a running retry live beside the failed attempt's reply row, until the retry's reply rewrites it", () => {
+    // A retry runs on the same turn, and the failed attempt's reply row stays in the log meanwhile.
+    const failed = endedReply(3, 1, "FAILED_1", "agent_error");
+    const { client, replica, view, live } = setup([ask(1, "Question"), failed]);
+    try {
+      expect(live()).toEqual([expect.stringContaining("LIVE_1")]);
+      expect(view.container.querySelector('[data-perf-key="reply-1"]')).not.toBeNull();
+      // The retry's completion rewrites the same row in place.
+      const answers = watchAnswers(view.container, "PERSISTED_1");
+      act(() => replica.setWindow("cs-1", [ask(1, "Question"), endedReply(3, 1, "PERSISTED_1", null, 2)]));
+      expect(view.container.querySelector("[data-chat-live-turn]")).toBeNull();
+      expect(view.container).toHaveTextContent("PERSISTED_1");
+      expect(view.container).not.toHaveTextContent("LIVE_1");
+      answers.stop();
+      expect([...answers.seen]).not.toContain("true/true");
+    } finally { view.unmount(); client.clear(); }
+  });
+
+  it.each(["failed", "cancelled"])("hands a turn that ended %s over to its notice", (status) => {
+    const { client, replica, view, content, held } = setup([ask(1, "Question")]);
+    try {
+      // A member's stop settles the pending task through task:cancelled the same way.
+      view.rerender(content(settled));
+      expect(held()).toHaveLength(1);
+      act(() => replica.setWindow("cs-1", [ask(1, "Question"), card(2, 1, status, null)]));
+      expect(view.container.querySelector(`[data-turn-notice="${status}"]`)).not.toBeNull();
+      expect(view.container.querySelector("[data-chat-live-turn]")).toBeNull();
+    } finally { view.unmount(); client.clear(); }
+  });
+
+  it("takes a reply row whose card is outside the window as the turn's outcome", () => {
+    const { client, replica, view, content, held } = setup([ask(1, "Question")]);
+    try {
+      view.rerender(content(settled));
+      expect(held()).toHaveLength(1);
+      act(() => replica.setWindow("cs-1", [ask(1, "Question"), reply(3, 1)]));
+      expect(view.container).toHaveTextContent("PERSISTED_1");
+      expect(view.container.querySelector("[data-chat-live-turn]")).toBeNull();
+    } finally { view.unmount(); client.clear(); }
+  });
+
+  it("lets the held view go after the handoff timeout when the reply row never reaches the window", () => {
+    vi.useFakeTimers();
+    const { client, replica, view, content, held } = setup([ask(1, "Question")]);
+    try {
+      view.rerender(content(settled));
+      act(() => replica.setWindow("cs-1", [ask(1, "Question"), card(2, 1, "completed")]));
+      act(() => { vi.advanceTimersByTime(LIVE_TURN_HANDOFF_MS - 1); });
+      expect(held()).toHaveLength(1);
+      act(() => { vi.advanceTimersByTime(1); });
+      expect(view.container.querySelector("[data-chat-live-turn]")).toBeNull();
+    } finally { view.unmount(); client.clear(); vi.useRealTimers(); }
+  });
+
+  it("shows the next queued turn live under the held one, never mixed, and releases only the held one", () => {
+    const { client, replica, view, content, held, live } = setup([ask(1, "Question")], [1, 2]);
+    try {
+      // The lane released the queued follow-up: the next turn is pending before turn 1's rows land.
+      view.rerender(content(pending(2)));
+      expect(held()).toEqual([expect.stringContaining("LIVE_1")]);
+      expect(live()).toEqual([expect.stringContaining("LIVE_2")]);
+      expect(held()[0]).not.toContain("LIVE_2");
+      expect(view.container.textContent!.indexOf("LIVE_1")).toBeLessThan(view.container.textContent!.indexOf("LIVE_2"));
+      act(() => replica.setWindow("cs-1", [ask(1, "Question"), card(2, 1, "completed"), reply(3, 1), ask(4, "Follow-up")]));
+      expect(held()).toEqual([]);
+      expect(live()).toEqual([expect.stringContaining("LIVE_2")]);
+      expect(view.container).toHaveTextContent("PERSISTED_1");
+    } finally { view.unmount(); client.clear(); }
+  });
+
+  it("keeps the fold as the reader left it when a turn moves from live to held, and one view when it is pending again", () => {
+    const { client, view, content, held, live } = setup([ask(1, "Question")]);
+    try {
+      const header = () => view.container.querySelector<HTMLButtonElement>("[data-chat-live-turn] [data-chat-steps-header]")!;
+      // The final reply started, so the fold closed; the reader opens it.
+      expect(header().hasAttribute("data-panel-open")).toBe(false);
+      fireEvent.click(header());
+      expect(header().hasAttribute("data-panel-open")).toBe(true);
+      view.rerender(content(settled));
+      expect(held()).toHaveLength(1);
+      expect(header().hasAttribute("data-panel-open")).toBe(true);
+      // A read that still finds the turn running makes it the live one again.
+      view.rerender(content(pending(1)));
+      expect(held()).toEqual([]);
+      expect(live()).toHaveLength(1);
+      expect(header().hasAttribute("data-panel-open")).toBe(true);
+    } finally { view.unmount(); client.clear(); }
+  });
+
+  it("drops the held view when another chat is shown", () => {
+    const { client, view, content, held } = setup([ask(1, "Question")]);
+    try {
+      view.rerender(content(settled));
+      expect(held()).toHaveLength(1);
+      view.rerender(content(null, "cs-2"));
+      expect(view.container).toHaveTextContent("Other chat");
+      expect(view.container.querySelector("[data-chat-live-turn]")).toBeNull();
+      view.rerender(content(settled));
+      expect(view.container.querySelector("[data-chat-live-turn]")).toBeNull();
+    } finally { view.unmount(); client.clear(); }
   });
 });

@@ -934,6 +934,165 @@ describe("ChatInput queued-message edit", () => {
   });
 });
 
+describe("ChatInput slash commands (ADR 0025)", () => {
+  const type = (value: string) =>
+    fireEvent.change(screen.getByTestId("editor"), { target: { value } });
+  const settle = () => act(async () => {});
+  const menu = (provider: string | null) => ({ status: "ready" as const, catalogue: "session" as const, provider, items: [] });
+
+  it("gives the editor the agent's menu and says when it opens", () => {
+    const onSlashCommandsOpen = vi.fn();
+    const slashCommands = menu("claude");
+    renderInput({ slashCommands, onSlashCommandsOpen });
+    expect(editorProps.last?.slashCommands).toBe(slashCommands);
+    (editorProps.last?.onSlashMenuOpen as () => void)();
+    expect(onSlashCommandsOpen).toHaveBeenCalledOnce();
+  });
+
+  it("has no menu where none is given", () => {
+    renderInput({});
+    expect(editorProps.last?.slashCommands).toBeUndefined();
+  });
+
+  it("queues a command while the agent runs, whatever the preference or shortcut", async () => {
+    useChatStore.getState().followUpMode = "steer";
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderInput({ onSend, isRunning: true });
+    type("/compact keep the plan");
+    // The button says what will happen, and offers no steer.
+    const button = screen.getByRole("button", { name: "Queue" });
+    expect(button).toHaveAttribute("data-composer-action", "queue");
+    expect(button).toHaveAttribute("title", "Queue · Ctrl+Enter\nA command runs after this turn ends");
+    pressSubmitShortcut(false);
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("/compact keep the plan", undefined, [], "queue"));
+    await settle();
+    type("/review");
+    pressSubmitShortcut(true);
+    await waitFor(() => expect(onSend).toHaveBeenLastCalledWith("/review", undefined, [], "queue"));
+    await settle();
+    // Ordinary text still follows the preference.
+    type("Use the staging database");
+    pressSubmitShortcut(false);
+    await waitFor(() => expect(onSend).toHaveBeenLastCalledWith("Use the staging database", undefined, [], "steer"));
+  });
+
+  it("sends a command normally while idle", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderInput({ onSend });
+    type("/compact");
+    pressSubmitShortcut(false);
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("/compact", undefined, [], "send"));
+  });
+
+  it("warns, without stopping the send, about a command Remi does not run for the agent's provider", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderInput({ onSend, slashCommands: menu("claude") });
+    type("/model opus");
+    expect(screen.getByRole("status")).toHaveTextContent("Remi doesn't run /model in Chat. The agent gets it as plain text.");
+    pressSubmitShortcut(false);
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("/model opus", undefined, [], "send"));
+    await waitFor(() => expect(document.querySelector("[data-chat-blocked-command]")).toBeNull());
+  });
+
+  it("does not warn about a command the provider does run, or before the provider is known", () => {
+    const first = renderInput({ slashCommands: menu("codex") });
+    type("/model");
+    expect(document.querySelector("[data-chat-blocked-command]")).toBeNull();
+    first.unmount();
+    renderInput({ slashCommands: menu(null) });
+    type("/clear");
+    expect(document.querySelector("[data-chat-blocked-command]")).toBeNull();
+  });
+});
+
+describe("ChatInput model chip", () => {
+  const opus = { modelId: "claude-opus-4-1-20250805", label: "Opus 4.1", effort: null, fallback: false };
+  const chip = () => document.querySelector<HTMLElement>("[data-chat-model]");
+
+  it("names the model read-only after the pickers in the footer's start slot", () => {
+    renderInput({ leftAdornment: <button type="button">Agent</button>, model: opus });
+    const start = document.querySelector<HTMLElement>("[data-chat-composer-footer-start]")!;
+    const shown = screen.getByRole("group", { name: "Model: Opus 4.1" });
+    expect(shown).toBe(chip());
+    expect(start).toContainElement(shown);
+    expect(screen.getByRole("button", { name: "Agent" }).compareDocumentPosition(shown) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(shown).toHaveTextContent(/^Opus 4\.1$/);
+    // Not a control: no button inside, no menu chevron, no hover background.
+    expect(shown.querySelector("button")).toBeNull();
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).not.toContain("Opus 4.1");
+    expect(shown.className).not.toMatch(/hover:/);
+    expect(shown).toHaveClass("cursor-default");
+    // The full id and where it is changed.
+    expect(shown.title).toBe("claude-opus-4-1-20250805\nSet in the agent's settings");
+  });
+
+  it("adds the effort level after the name", () => {
+    renderInput({ model: { ...opus, effort: "High" } });
+    expect(screen.getByRole("group", { name: "Model: Opus 4.1 · High" })).toHaveTextContent("Opus 4.1· High");
+    expect(chip()!.title).toBe("claude-opus-4-1-20250805\nReasoning effort: High\nSet in the agent's settings");
+  });
+
+  it("shows the raw id when the catalog has no name for it", () => {
+    renderInput({ model: { ...opus, label: null } });
+    expect(screen.getByRole("group", { name: "Model: claude-opus-4-1-20250805" })).toBeInTheDocument();
+  });
+
+  it("calls an unset model the default model", () => {
+    renderInput({ model: { modelId: null, label: null, effort: null, fallback: false } });
+    expect(screen.getByRole("group", { name: "Model: Default model" })).toHaveTextContent("Default model");
+    expect(chip()!.title).toBe("No model set: the runtime's default model runs\nSet in the agent's settings");
+  });
+
+  it("explains a running turn that switched to the fallback model", () => {
+    renderInput({ model: { modelId: "claude-sonnet-4-5", label: "Sonnet 4.5", effort: null, fallback: true } });
+    expect(screen.getByRole("group", { name: "Model: Sonnet 4.5" })).toBeInTheDocument();
+    expect(chip()!.title).toBe("claude-sonnet-4-5\nThis turn switched to the fallback model\nSet in the agent's settings");
+    expect(chip()!.querySelector("svg")).toHaveClass("text-warning");
+  });
+
+  it("takes only the room the pickers leave: the name truncates, then the effort and the chip hide", () => {
+    renderInput({ leftAdornment: <button type="button">Agent</button>, model: { ...opus, effort: "High" } });
+    const shown = chip()!;
+    // Its slot grows from zero into the free space (never squeezing a picker)
+    // and is the container its own narrow-width rules read.
+    const slot = shown.parentElement!;
+    expect(slot).toHaveAttribute("data-chat-model-slot");
+    expect(slot.className).toMatch(/(^|\s)@container\/model(\s|$)/);
+    expect(slot).toHaveClass("flex-1", "min-w-0", "max-w-64");
+    expect(slot.className).not.toMatch(/(^|\s)shrink-0(\s|$)/);
+    expect(shown).toHaveClass("min-w-0", "max-w-full", "@max-[4.5rem]/model:hidden");
+    expect(shown.querySelector("[data-chat-model-name]")).toHaveClass("min-w-0", "truncate");
+    expect(shown.lastElementChild).toHaveClass("shrink-0", "whitespace-nowrap", "@max-[8rem]/model:hidden");
+    // It sits in the start slot, which yields to the actions; the send button keeps its own box.
+    const start = document.querySelector<HTMLElement>("[data-chat-composer-footer-start]")!;
+    expect(start.lastElementChild).toBe(slot);
+    const actions = start.nextElementSibling as HTMLElement;
+    expect(actions).not.toContainElement(shown);
+    expect(actions).toContainElement(screen.getByRole("button", { name: "Send" }));
+  });
+
+  it("renders nothing while there is no agent or it is still loading", () => {
+    const { rerender } = renderInput({ leftAdornment: <button type="button">Agent</button> });
+    expect(chip()).toBeNull();
+    rerender(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatInput sessionId={null} onSend={vi.fn()} model={null} />
+      </I18nProvider>,
+    );
+    expect(chip()).toBeNull();
+    // Arriving later adds only the chip: no placeholder was reserved for it.
+    const start = document.querySelector<HTMLElement>("[data-chat-composer-footer-start]")!;
+    expect(start.children).toHaveLength(0);
+    rerender(
+      <I18nProvider locale="en" resources={TEST_RESOURCES}>
+        <ChatInput sessionId={null} onSend={vi.fn()} model={opus} />
+      </I18nProvider>,
+    );
+    expect(start.children).toHaveLength(1);
+    expect(start.firstElementChild).toContainElement(chip());
+  });
+});
+
 describe("ChatInput Chat column", () => {
   it("puts the composer's border on the shared Chat column's edges, like the message text", () => {
     renderInput({});

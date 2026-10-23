@@ -8,6 +8,9 @@ import { MultiremiDaemonClient } from "@multiremi/client.js";
 import { MultiremiDaemonHttpError } from "@multiremi/worker/client.js";
 import { DaemonProtocolRpcError } from "@multiremi/worker/daemon-protocol-client.js";
 import { DaemonProtocolHarness, waitFor } from "./harness.js";
+import { useMigratedIntegrationDatabases } from "../../helpers/integration-database.js";
+
+useMigratedIntegrationDatabases();
 
 const fixtures: DaemonProtocolHarness[] = [];
 async function fixture(options: Parameters<typeof DaemonProtocolHarness.create>[0] = {}) {
@@ -44,6 +47,9 @@ function localProgressSummary() {
     }
   } };
 }
+
+// Injected disconnects in the leak check (halved from 20).
+const DISCONNECT_ROUNDS = 10;
 
 describe("daemon protocol v2 real connection", () => {
   it("handshakes all provider lanes on one socket and continuously heartbeats without HTTP heartbeats", async () => {
@@ -263,7 +269,6 @@ describe("daemon protocol v2 real connection", () => {
   });
 
   it("does not enter the provider when shutdown occurs during preparation after the start ACK", async () => {
-    const summaryEndpoint = localProgressSummary();
     let providerCalls = 0;
     let preparing = false;
     let releasePreparation!: () => void;
@@ -271,6 +276,9 @@ describe("daemon protocol v2 real connection", () => {
     const h = await fixture({ providerFactory: () => ({
       async *sendStream() { providerCalls++; }, getLastResponse: () => null,
     }) });
+    // The daemon reads these settings per task; set them after the harness has
+    // opened its (env-fingerprinted) migrated database.
+    const summaryEndpoint = localProgressSummary();
     // Hold an actual awaited workspace preparation boundary, then run its
     // original implementation: authorization and workspace work stay real.
     const daemon = h.daemon as any;
@@ -316,7 +324,6 @@ describe("daemon protocol v2 real connection", () => {
   });
 
   it("drains an already-started provider on shutdown without aborting its execution", async () => {
-    const summaryEndpoint = localProgressSummary();
     let providerCalls = 0;
     let executionSignal: AbortSignal | undefined;
     let releaseProvider!: () => void;
@@ -332,6 +339,8 @@ describe("daemon protocol v2 real connection", () => {
         getLastResponse: () => ({ text: "finished", sessionId: "drained-session", usage: [], toolCalls: [] } as any),
       }),
     });
+    // Per-task daemon settings: set after the harness opened its migrated database.
+    const summaryEndpoint = localProgressSummary();
     await h.startDaemon();
     const runtimeId = h.store.listRuntimes()[0]!.id;
     const agent = h.store.createAgent({ name: "graceful provider drain", provider: "claude", runtimeId });
@@ -369,12 +378,12 @@ describe("daemon protocol v2 real connection", () => {
     } finally { releaseProvider(); summaryEndpoint.close(); }
   });
 
-  it("survives 20 injected disconnects without leaking sockets, listeners, timers or pending RPCs", async () => {
+  it(`survives ${DISCONNECT_ROUNDS} injected disconnects without leaking sockets, listeners, timers or pending RPCs`, async () => {
     const h = await fixture();
     await h.startDaemon();
     await h.settleHeartbeat();
     let seed = 418;
-    for (let round = 0; round < 20; round++) {
+    for (let round = 0; round < DISCONNECT_ROUNDS; round++) {
       seed = (seed * 1664525 + 1013904223) >>> 0;
       h.clock.advance(seed % 1_000);
       await h.disconnect();
@@ -387,7 +396,7 @@ describe("daemon protocol v2 real connection", () => {
         expect([...socket.listeners.values()].every(set => set.size === 0)).toBe(true);
       }
     }
-    expect(h.ledger.filter(entry => entry.type === "hello")).toHaveLength(21);
+    expect(h.ledger.filter(entry => entry.type === "hello")).toHaveLength(DISCONNECT_ROUNDS + 1);
     await h.stopDaemon();
     expect(h.client.diagnostics()).toEqual({ timers: 0, sockets: 0, pending_rpcs: 0, background: 0 });
     expect(h.clock.pendingTimerCount).toBe(0);

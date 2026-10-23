@@ -22,6 +22,7 @@ import { CodexExternalChats } from "@daemon/external-chats/index.js";
 import type { DaemonTraceListener } from "./trace-subscriptions.js";
 import type { TraceStore } from "@multiremi/worker/trace-store.js";
 import type { TraceSteerResult } from "@multiremi/contracts/trace.js";
+import { COMPACT_COMMAND_REPLY, isCompactCommand, type ObservedSlashCommand, type SlashCommandCatalogue } from "@multiremi/contracts/slash-commands.js";
 import { createLogger } from "@shared/logger.js";
 import {
   AcpProvider,
@@ -40,7 +41,7 @@ import {
 import type { ElicitationCreateParams, ElicitationResult, PermissionOutcome, RequestPermissionParams } from "@shared/contracts/acp-protocol.js";
 import { answersToElicitationContent, elicitationToQuestions, type ElicitationQuestion } from "@shared/contracts/acp-elicitation.js";
 import type { AgentResponse, Provider, ProviderEvent } from "@shared/contracts/provider-types.js";
-import type { AgentTask } from "@daemon/contracts/types.js";
+import type { AgentTask, AgentTaskSkill } from "@daemon/contracts/types.js";
 import type { UnifiedMessage } from "@multiremi/contracts/unified-model.js";
 import {
   DEFAULT_DAEMON_REQUEST_TIMEOUT_MS,
@@ -97,6 +98,7 @@ import {
   type DaemonLaneBackgroundWakeReply,
   type DaemonLaneRef,
   type DaemonRuntimeCapabilities,
+  type DaemonTaskCompletionFields,
   type DaemonTurnInput,
 } from "@multiremi/contracts/daemon-protocol.js";
 import { FeishuConciergeSupervisor, type FeishuConciergeHost } from "./feishu-concierge.js";
@@ -159,6 +161,7 @@ import {
   syncAgentSkills,
   agentSkillRoot,
   providerHomeSkillRoot,
+  reportedSlashCommands,
 } from "@daemon/agent-runtime/skills/ephemeral.js";
 import {
   runSnapshotGcOnce,
@@ -317,6 +320,8 @@ function traceAttachments(value: unknown): Array<{ id: string; name: string | nu
     return [{ id: row.id, name: typeof row.filename === "string" ? row.filename : typeof row.name === "string" ? row.name : null }];
   });
 }
+/** ADR 0025: catalogues kept for attempts that have not sent their terminal report yet. */
+const ATTEMPT_SLASH_COMMANDS_LIMIT = 256;
 /** A failed layout sweep is retried with this backoff; the daemon does not register meanwhile. */
 const LEGACY_SWEEP_RETRY_MIN_MS = 1_000;
 const LEGACY_SWEEP_RETRY_MAX_MS = 30_000;
@@ -793,6 +798,8 @@ export type MultiremiTaskProvider = Pick<Provider, "sendStream" | "getLastRespon
   processGroupId?: Provider["processGroupId"];
   /** Whether a live process is pooled under `chatId` (PR 6 §2.4). */
   sessionAlive?: (chatId: string) => boolean;
+  /** ADR 0025: the latest command list the agent advertised under `chatId`, or null; absent on providers without one. */
+  availableCommands?: (chatId: string) => ObservedSlashCommand[] | null;
   /** `session/cancel` for a cycle nobody reads (PR 6 §2.5). */
   cancelIdle?: (chatId: string) => Promise<void>;
   /** The native agent of a child session, as the provider registered it (PR 5 §1.3). */
@@ -974,6 +981,12 @@ export class MultiremiDaemon {
   private antigravityShim: AntigravityGatewayShim | null = null;
   /** Running attempts' `task.activity` reporters, resent on reconnect (PR 5 §3.8). */
   private activityReporters = new Set<TaskActivityReporter>();
+  /**
+   * ADR 0025: each attempt's latest command catalogue, sent with its terminal
+   * report and dropped when the trace closes. Bounded: an attempt that never
+   * reports leaves at most a few entries behind.
+   */
+  private readonly attemptSlashCommands = new Map<string, SlashCommandCatalogue>();
   /** Chat lanes whose process lives across attempts while background tasks run (PR 6 §2.3). */
   private readonly parkedLanes: ParkedLanes;
   /** The parked lanes' close when the daemon stops (PR 6 §2.7); null while running. */
@@ -1646,9 +1659,12 @@ export class MultiremiDaemon {
         completion: (taskId, status) => {
           const trace = this.ensureTrace();
           if (this.options.runtimeId) trace.track(taskId, this.options.runtimeId);
-          return trace.completion(taskId, status);
+          return this.withSlashCommands(taskId, trace.completion(taskId, status));
         },
-        close: (taskId, status, error) => this.ensureTrace().close(taskId, status, error),
+        close: (taskId, status, error) => {
+          this.attemptSlashCommands.delete(taskId);
+          this.ensureTrace().close(taskId, status, error);
+        },
       }));
   }
 
@@ -3472,10 +3488,29 @@ export class MultiremiDaemon {
     if (terminal && this.options.runtimeId) this.ensureTrace().track(taskId, this.options.runtimeId);
     // The completion fields describe the close that follows the enqueue.
     this.ensureOutbox().enqueue(taskId, kind, { ...payload, runtime_id: payload.runtime_id ?? this.options.runtimeId,
-      ...(terminal ? this.ensureTrace().completion(taskId, status) : {}) });
+      ...(terminal ? this.withSlashCommands(taskId, this.ensureTrace().completion(taskId, status)) : {}) });
     if (terminal) {
+      this.attemptSlashCommands.delete(taskId);
       this.ensureTrace().close(taskId, status, typeof payload.error === "string"
         ? { message: payload.error, reason: typeof payload.failureReason === "string" ? payload.failureReason : null } : null);
+    }
+  }
+
+  /** ADR 0025: a terminal report's fields, with the attempt's command catalogue when the agent advertised one. */
+  private withSlashCommands(taskId: string, fields: DaemonTaskCompletionFields): DaemonTaskCompletionFields {
+    const commands = this.attemptSlashCommands.get(taskId);
+    return commands ? { ...fields, available_commands: commands } : fields;
+  }
+
+  /** ADR 0025: keep the attempt's catalogue from what the agent advertised; nothing when it advertised none. */
+  private noteSlashCommands(taskId: string, provider: string | undefined, observed: ObservedSlashCommand[] | null,
+    skills: readonly AgentTaskSkill[], installedSkillDirs: readonly string[]): void {
+    if (!observed) return;
+    this.attemptSlashCommands.delete(taskId);
+    this.attemptSlashCommands.set(taskId, { provider: provider ?? "", reported_at: new Date().toISOString(),
+      commands: reportedSlashCommands(provider, observed, skills, installedSkillDirs) });
+    while (this.attemptSlashCommands.size > ATTEMPT_SLASH_COMMANDS_LIMIT) {
+      this.attemptSlashCommands.delete(this.attemptSlashCommands.keys().next().value!);
     }
   }
 
@@ -4855,6 +4890,8 @@ export class MultiremiDaemon {
         signal,
       );
     }
+    /** ADR 0025: the skill directories Remi installed for this attempt, to name its skills in the command catalogue. */
+    let installedSkillDirs: string[] = [];
     try {
       const contextDir = task.runtimeWorkspaceId ? providerHome?.root : workDir;
       if (!contextDir) throw new Error("Runtime workspace requires an isolated provider home");
@@ -4863,8 +4900,8 @@ export class MultiremiDaemon {
       // directory, or the provider home when the working directory is the user's own (a runtime workspace or a
       // Project's local_directory).
       const userFolder = Boolean(task.runtimeWorkspaceId) || (resolvedWorkDir.localDirectory && workDir === workspaceDir);
-      if (!userFolder) syncAgentSkills(agentSkillRoot(workDir, agent.provider), task);
-      else if (providerHome) syncAgentSkills(providerHomeSkillRoot(providerHome.home, agent.provider), task);
+      if (!userFolder) installedSkillDirs = syncAgentSkills(agentSkillRoot(workDir, agent.provider), task);
+      else if (providerHome) installedSkillDirs = syncAgentSkills(providerHomeSkillRoot(providerHome.home, agent.provider), task);
       else if (agent.skills?.length) log.warn(`Task ${task.id}: no provider home for skills; the user's folder is left as it is`);
       writeProjectResourceContext(contextDir, task);
     } catch (err) {
@@ -5132,7 +5169,7 @@ export class MultiremiDaemon {
       let prompt = promptArtifact.prompt;
       // ADR 0023: a steer is the new messages, labelled as the turn input labels them.
       const steerPrompt = (messages: Parameters<typeof buildSteerInjectionPrompt>[0]) =>
-        buildSteerInjectionPrompt(messages, { agentId: agent.id, alwaysLabel: !privateChat });
+        buildSteerInjectionPrompt(messages, { agentId: agent.id, alwaysLabel: !privateChat, provider: agent.provider });
 
       // Every steer batch flows through here exactly once: injected into the
       // running prompt (`native`), sent as the next prompt (`reprompt`), or —
@@ -5335,6 +5372,8 @@ export class MultiremiDaemon {
 
       // ADR 0023: the turn's images go with its first prompt as image blocks; their lines stay in the text.
       const firstPromptImages = turnImages(task.chatMessageAttachments);
+      // ADR 0025: a `/compact` turn that only compacts has no reply text; it is still a success.
+      const compactCommandInput = !skipFirstPrompt && isCompactCommand(prompt);
       while (true) {
         turnIndex++;
         config.media = turnIndex === 1 && firstPromptImages.length ? firstPromptImages : undefined;
@@ -5395,6 +5434,9 @@ export class MultiremiDaemon {
         }
         let last = provider.getLastResponse?.() as AgentResponse | null | undefined;
         if (last?.model) this.recordTrace(task.id, () => trace.model(last!.model!));
+        // ADR 0025: the command list the agent advertised so far (at setup, or again during the prompt).
+        this.noteSlashCommands(task.id, agent.provider, provider.availableCommands?.(config.chatId) ?? null,
+          agent.skills ?? [], installedSkillDirs);
         finalSessionId = last?.sessionId ?? finalSessionId;
         if (laneRecord) this.parkedLanes.setProviderSession(laneRecord, finalSessionId);
         checkpointUsage(ledger.observe(responseToUsageUnits(agent.provider, last, config.model, `turn:${turnIndex}`)));
@@ -5416,6 +5458,8 @@ export class MultiremiDaemon {
         // steer, a wrap-up or the cancel came first; the bridge already holds a
         // prompt while such a subagent still runs.
         let autonomousRounds = 0;
+        // Rounds in which the bridge actually did something (an empty wait is not one).
+        let activeAutonomousRounds = 0;
         // A wrap-up in effect (a force_answer was injected) bounds the wait by its grace deadline.
         const wrapUpOver = () => forceAnswerDeadline != null && Date.now() >= forceAnswerDeadline;
         while (this.options.autonomousRounds && provider.listenAutonomous && !turnError && !turnAbort.signal.aborted
@@ -5452,6 +5496,7 @@ export class MultiremiDaemon {
           if (last?.model) this.recordTrace(task.id, () => trace.model(last!.model!));
           finalSessionId = last?.sessionId ?? finalSessionId;
           checkpointUsage(ledger.observe(responseToUsageUnits(agent.provider, last, config.model, `turn:${turnIndex}:auto:${autonomousRounds}`)));
+          if (roundActivity) activeAutonomousRounds++;
           if (listenFailed) break;
           if (!roundActivity) {
             // R1: the owed notification was consumed inside the prompt after all (unless a steer, a cancel or a wrap-up stopped the wait).
@@ -5505,7 +5550,13 @@ export class MultiremiDaemon {
         // can still be injected as another turn instead of failing the run.
         // The final reply is decided once per completion attempt (spec §2.4).
         const settled = this.recordTrace(task.id, () => trace.settle()) ?? { itemId: null, text: null };
-        if (trace.sawCompaction && !settled.text?.trim() && !(last?.text ?? "").trim()) {
+        const noReplyText = !settled.text?.trim() && !(last?.text ?? "").trim();
+        // ADR 0025: both bridges answer `/compact` with compaction updates only. Only a turn whose
+        // input was that command, that compacted, and that nothing else joined (no steer, no
+        // re-prompt, no autonomous round) may end without reply text; any other run still fails.
+        const compactCommandTurn = compactCommandInput && trace.sawCompaction && turnIndex === 1
+          && recordedSteerIds.size === 0 && activeAutonomousRounds === 0;
+        if (trace.sawCompaction && noReplyText && !compactCommandTurn) {
           await this.client.pinTaskSession(task.id, finalSessionId, workDir);
           return {
             output: "Agent returned empty output after compaction.",
@@ -5516,7 +5567,7 @@ export class MultiremiDaemon {
             failureReason: TaskFailureReason.AgentEmptyOrUnparseableOutput,
           };
         }
-        const candidate = finalReplyBody(settled, trace.items, last?.text);
+        const candidate = compactCommandTurn && noReplyText ? COMPACT_COMMAND_REPLY : finalReplyBody(settled, trace.items, last?.text);
         if (classifyPoisonedOutput(candidate)) {
           await this.client.pinTaskSession(task.id, finalSessionId, workDir);
           return { output: candidate, sessionId: finalSessionId, workDir, usageSnapshot: ledger.finish(), completed: false };

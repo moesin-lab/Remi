@@ -420,7 +420,7 @@
     "workdir_path_copy_failed": "复制本地 workdir 路径失败",
     "workdir_path_unavailable": "暂无本地 workdir — 这个 issue 还没被本地 agent 运行过",
     "dialog_cancel": "取消",
-    "new_session_description": "Session 保存此 Issue 中独立的对话和云友执行记录。",
+    "new_session_description": "Session 保存此 Issue 中独立的对话和智能体执行记录。",
     "no_agents_in_workspace": "当前空间还没有 Agent，先创建一个再添加参与者。",
     "all_agents_in_session": "空间里的 Agent 都已经在这个 Session 中了。",
     "session_participants_description": "参与者可以看到这个 Session，并接收在其中派发的任务。",
@@ -435,7 +435,7 @@
     "session_owner_issue": "Issue",
     "no_linked_sessions_title": "暂无 Session",
     "no_linked_sessions_hint": "创建 Session，即可在此 Issue 中评论或开始工作。",
-    "chat_new_session_description": "Session 保存此 Chat 中独立的对话和云友执行记录。",
+    "chat_new_session_description": "Session 保存此 Chat 中独立的对话和智能体执行记录。",
     "chat_session_type_working_description": "使用此 Chat 的工作位置进行代码修改、测试和审查。"
   },
   "log_event": {

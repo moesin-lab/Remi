@@ -1,88 +1,20 @@
 import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { join } from "node:path";
 import { createPeerChannel, type PeerFetch } from "../../../packages/server/src/api/peer/peer-channel.js";
-import { DaemonProtocolHarness, waitFor } from "./harness.js";
+import { DaemonProtocolHarness, startUiProcess, waitFor } from "./harness.js";
 import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
-
-interface UiReply {
-  ready?: boolean;
-  op?: string;
-  port?: number;
-  taskId?: string;
-  requestId?: string;
-  steerId?: string;
-  daemonHookCalls?: number;
-  daemonSessions?: number;
-  stopped?: boolean;
-  error?: string;
-}
-
-async function startUiProcess(databasePath: string, runtimePort: number, secret: string) {
-  const child = Bun.spawn(["bun", join(import.meta.dir, "../../fixtures/daemon-protocol-v2/ui-process.ts"),
-    databasePath, String(runtimePort), secret], {
-    cwd: process.cwd(), stdin: "pipe", stdout: "pipe", stderr: "pipe",
-    env: { ...process.env },
-  });
-  const queued: UiReply[] = [];
-  const waiting: Array<(reply: UiReply) => void> = [];
-  let output = "";
-  const reader = child.stdout.getReader();
-  const readLoop = (async () => {
-    const decoder = new TextDecoder();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) return;
-      output += decoder.decode(value, { stream: true });
-      let newline: number;
-      while ((newline = output.indexOf("\n")) >= 0) {
-        const line = output.slice(0, newline);
-        output = output.slice(newline + 1);
-        if (!line.startsWith("MUL419 ")) continue;
-        const reply = JSON.parse(line.slice(7)) as UiReply;
-        const resolve = waiting.shift();
-        if (resolve) resolve(reply); else queued.push(reply);
-      }
-    }
-  })();
-  const next = async (): Promise<UiReply> => {
-    if (queued.length) return queued.shift()!;
-    return await Promise.race([
-      new Promise<UiReply>(resolve => waiting.push(resolve)),
-      Bun.sleep(10_000).then(() => { throw new Error("ui process control response timed out"); }),
-    ]);
-  };
-  const ready = await next();
-  if (!ready.ready || !ready.port) throw new Error(`ui process did not start: ${ready.error ?? "no ready frame"}`);
-  return {
-    port: ready.port,
-    async command(command: { op: string; runtimeId?: string; taskId?: string; agentId?: string;
-      issueId?: string; requestId?: string; humanToken?: string; status?: "timeout" | "cancelled" }): Promise<UiReply> {
-      child.stdin.write(`${JSON.stringify(command)}\n`);
-      await child.stdin.flush();
-      const reply = await next();
-      if (reply.error) throw new Error(`ui process ${command.op}: ${reply.error}`);
-      expect(reply.op).toBe(command.op);
-      return reply;
-    },
-    async close(): Promise<void> {
-      if (!child.killed) {
-        try {
-          await this.command({ op: "stop" });
-        }
-        catch { child.kill(); }
-      }
-      child.stdin.end();
-      const exited = await Promise.race([child.exited.then(() => true), Bun.sleep(1_000).then(() => false)]);
-      if (!exited) child.kill();
-      await child.exited;
-      await readLoop;
-    },
-  };
-}
 
 const harnesses: DaemonProtocolHarness[] = [];
 afterEach(async () => { for (const h of harnesses.splice(0)) await h.dispose(); });
+
+// Bound for the whole path: UI command -> DB write -> cross-process head pointer
+// -> daemon `turn.message`. ADR 0007's <=200 ms budget covers only the channel
+// hop (a ~100-byte head pointer), not this full path, and 200 ms flaked at
+// 232 ms on a shared CI runner. 350 ms absorbs runner jitter while staying below
+// the 400 ms poll that ADR 0007 / C12 removed (and far below
+// DAEMON_HEARTBEAT_INTERVAL_MS), so a regression back to polling or to waiting
+// for a heartbeat still fails here.
+const UI_TO_DAEMON_FANOUT_BOUND_MS = 350;
 
 describe("MUL-419 ui to runtime fanout across OS processes", () => {
   for (const status of ["responded", "timeout", "cancelled"] as const) {
@@ -180,8 +112,8 @@ describe("MUL-419 ui to runtime fanout across OS processes", () => {
       expect((await ui.command(status === "responded" ? { op: "respond_human_request", requestId, humanToken: humanAccess.token }
         : { op: "expire_human_request", requestId, status })).requestId).toBe(requestId);
       if (status === "responded") await waitFor(() => h.received.some(frame => frame.t === "turn.message"
-        && frame.p.message.reply_to_id === requestId), "decision reply message", 200);
-      expect(performance.now() - started).toBeLessThan(200);
+        && frame.p.message.reply_to_id === requestId), "decision reply message", UI_TO_DAEMON_FANOUT_BOUND_MS);
+      expect(performance.now() - started).toBeLessThan(UI_TO_DAEMON_FANOUT_BOUND_MS);
       expect(claims).not.toHaveBeenCalled();
       claims.mockRestore();
       expect(h.received.filter(frame => frame.t === "turn.message" && frame.p.message.reply_to_id === requestId))

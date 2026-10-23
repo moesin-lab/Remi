@@ -19,7 +19,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 运行测试、验证回归 | [测试](../../TESTING.md) | 测试发现范围与真实服务前提 |
 | 新增 API 或 CLI 能力 | [CLI 命令契约](../cli-command-migration.md) | canonical 命令、注册与能力检查 |
 | 改用量采集、统计报表或模型价格 | [统一用量与价格](../usage-accounting.md)、[公开参考价格导入](../usage-reference-prices.md) | actual/context/unknown、run 幂等、执行归属、双时轴和受控历史迁移 |
-| 通过 CLI 使用、管理或排查 Remi | [Remi Skill](../../.agents/skills/remi/SKILL.md) | 任务协作、项目知识、云友与模型、集成、权限和运行维护 |
+| 通过 CLI 使用、管理或排查 Remi | [Remi Skill](../../.agents/skills/remi/SKILL.md) | 任务协作、项目知识、Agent 与模型、集成、权限和运行维护 |
 | 改能力组、连接 Profile 或配置下发 | [执行配置](execution-configuration.md) | 集中配置、成员关系、版本确认与旧数据兼容 |
 | 改 Runtime 工作区、执行目录或本地上下文 | [Runtime 持久化工作区](runtime-workspaces.md) | daemon 归属、绑定、目录和上下文保留、调度约束 |
 | 判断 Topic、Chat、Session、Task 或成果的边界 | [对话与工作会话模型](../conversation-model.md) | 名词、身份、生命周期、关联与飞书映射 |
@@ -30,6 +30,8 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 改原生子代理、子会话路由、Claude 迟到回答（自主轮）或子代理呈现 | [ADR 0021](../adr/0021-subagent-sessions-and-autonomous-rounds.md)、[Chat 契约](../chat.md#子代理)、[前端](frontend.md) | 子会话登记与帧隔离、权限路由、`owesAutonomousRound` 与 60 s 等待、桥补丁 `claude-subagents-v1`、`late_subagents` / `running_subagents`、两个开关 |
 | 改 agent 每轮收到的内容、会话设定（`AGENTS.md`）、Skill 加载或工作区/Project 提示词 | [ADR 0023](../adr/0023-turn-input-and-provider-agents-md.md)、[daemon 协议](../daemon-protocol-v2.md)、[Runtime 工作区](runtime-workspaces.md) | 两部分的划分、指令文件位置与刷新、标签与未读说明、Skill 原生目录与同步、提示词合并迁移、实际发出内容的记录 |
 | 改后台任务、驻留进程、门铃或后台任务呈现 | [ADR 0022](../adr/0022-background-tasks-keep-alive-on-demand.md)、[Chat 契约](../chat.md#后台任务)、[daemon 协议](../daemon-protocol-v2.md)、[前端](frontend.md) | 驻留条件与资源交接、接手与释放（一个会话一个进程）、门铃与 attach、任务上下文文件、上限与崩溃清扫、共享本地文件夹锁、`lane.background` 能力位与下行、三个开关 |
+| 改 Chat 斜杠命令（拦截、`/compact` 轮、技能命令名、命令目录的带回与接口、「/」菜单） | [ADR 0025](../adr/0025-chat-slash-commands.md)、[Chat 契约](../chat.md#斜杠命令)、[daemon 协议](../daemon-protocol-v2.md) | 桥怎么认开头的命令、按 provider 的拦截与隐藏名单和说明行、`/compact` 轮的完成条件、`SKILL.md` 的 `name`、`available_commands` 终态字段、会话线目录与 `GET /api/chat/slash-commands`、菜单的分组匹配与插入（[slash-menu.ts](../../frontend/packages/core/chat/slash-menu.ts)、[slash-command-suggestion.tsx](../../frontend/packages/views/editor/extensions/slash-command-suggestion.tsx)） |
+| 实现侧边聊天（设计已接受，尚未实现） | [ADR 0024](../adr/0024-chat-side-chat-fork.md)、[Chat 契约](../chat.md#侧边聊天尚未实现) | 独立 Chat 会话加父链接、两个桥的原生分叉与原生历史复制（Codex 引用链）、`AGENTS.md` 边界说明、客人目录（不排锁、不驻留）、摘录退路与冷启动、多个标签与每个主对话 10 个上限、跟着主对话归档/恢复/删除、`chat.side` 能力位与 `task.side_fork` |
 | 改 turn 失败检测、备用模型恢复或能力排队切换 | [ADR 0010](../adr/0010-turn-failure-from-bridge-typed-session-failure.md) | AIR 失败 metadata、失败分类、单次切换、5 分钟能力等待与提交后事件 |
 | 修改 Antigravity 执行 | [Antigravity Runtime](../antigravity.md) | 按机器安装与条款同意、接入配置（环境、网关垫片、用量）、能力边界 |
 | 修改 Agent 模板或 Skill | [Agent 配置规范](../agent-config-spec.md) | 提示词结构、字段和元信息检查 |

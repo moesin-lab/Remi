@@ -92,7 +92,7 @@ Issue-owned Session Task 不需要 Chat；普通 Chat 输入仍使用 Chat Task�
 工作区可保存多个 [Feishu bot 配置](../packages/server/src/store/repos/feishu-bot-repo.ts)，以 `workspace_id + bot_id` 标识，各自指定 Agent 和独立 Runtime；Runtime v1 协议仍为单 connector，绑定和停止确认防止重复分配。旧配置迁移为 `default`，路由、发送者、入站去重及审计按机器人隔离；
 bot 控制指令携带版本和期望状态。[concierge supervisor](../packages/server/src/worker/feishu-concierge.ts)经鉴权接口拉取 assignment 后串行协调 connector 的启动、停止与重试，应用凭据不随心跳下发。持久化出站投递使用 `feishu.outbound`，发出后收到 ACK 才领取原有租约；断连前未确认的投递由 DB 快照重推，不改变投递数据模型。自动 Issue 话题及负责人轮次完成推送见[飞书接入契约](feishu-message-ingestion.md)。
 
-平台登录账号与工作区业务身份分离。登录后的人类共享全部工作区，并使用统一 operator；历史作者、创建者和外部身份映射保留，成员邀请与角色管理退出日常操作。Chat、云友、Runtime、收件箱、收藏和通知不再按人类 owner 分区，机器凭据仍保留工作区与执行范围限制。入口和迁移规则见[认证与共享身份](dev/auth.md)。
+平台登录账号与工作区业务身份分离。登录后的人类共享全部工作区，并使用统一 operator；历史作者、创建者和外部身份映射保留，成员邀请与角色管理退出日常操作。Chat、Agent、Runtime、收件箱、收藏和通知不再按人类 owner 分区，机器凭据仍保留工作区与执行范围限制。入口和迁移规则见[认证与共享身份](dev/auth.md)。
 
 ## 存储与事务
 
@@ -157,10 +157,10 @@ Chat 跟进队列放行前存在 `multiremi_queued_messages`，放行时经同�
 
 [执行组存储](../packages/server/src/store/execution-groups.ts)与[中央 Profile 存储](../packages/server/src/store/repos/execution-profiles-repo.ts)分别管理执行成员和连接配置。Profile 属于工作区，保存 Claude/Codex 连接及不可变版本；能力组是独立配置对象，包含名称、用途说明、provider、Profile 和 Runtime 成员，同一个 Runtime 可以加入多个组。组内 Provider/模型与成员可在同一事务保存；失败时连接、凭据版本及成员均回滚。自动发现只登记机器的引擎与健康状态，不再创建能力组。配置入口、权限与升级兼容见[执行配置](dev/execution-configuration.md)。
 
-云友通过 `execution_group_id` 选择能力组，也可保留「自动调度」。组内任务领取通过 `runtimeCanRunAgent` 复验成员关系、模型、类型、工作区与归属，并与项目设备和本机目录约束取交集。受管能力组还要求 daemon 对当前 Profile 版本回报 ready；在线数量不代表配置已就绪。无可用成员时排队，不转到组外机器。中央 Profile 的模型用于该组目录，未配置中央 Profile 的路径沿用有效连接目录；目录声明不代表服务连通。
+Agent 通过 `execution_group_id` 选择能力组，也可保留「自动调度」。组内任务领取通过 `runtimeCanRunAgent` 复验成员关系、模型、类型、工作区与归属，并与项目设备和本机目录约束取交集。受管能力组还要求 daemon 对当前 Profile 版本回报 ready；在线数量不代表配置已就绪。无可用成员时排队，不转到组外机器。中央 Profile 的模型用于该组目录，未配置中央 Profile 的路径沿用有效连接目录；目录声明不代表服务连通。
 
 [调度](../packages/server/src/store/repos/tasks-repo.ts)首次 claim 时冻结完整连接与凭据版本，并纳入执行指纹。daemon 按任务快照构造隔离的 provider 配置，不以组配置覆盖机器全局配置。配置变更不改写运行中任务。
 
-迁移按每个 Runtime/provider 独立导入旧连接与凭据，并保留原数据供旧任务快照使用；可确定单一连接的旧组转换为受管组，连接不一致的旧组保留原行为。新组由用户显式创建，不按名称合并 Profile。组被云友引用时不可删除，Profile 被组引用时不可删除；历史 Profile 版本与加密凭据保留供任务快照使用。
+迁移按每个 Runtime/provider 独立导入旧连接与凭据，并保留原数据供旧任务快照使用；可确定单一连接的旧组转换为受管组，连接不一致的旧组保留原行为。新组由用户显式创建，不按名称合并 Profile。组被 Agent 引用时不可删除，Profile 被组引用时不可删除；历史 Profile 版本与加密凭据保留供任务快照使用。
 
-切换云友执行组默认清空模型和思考覆盖，未冻结的排队任务清除旧会话信息，已冻结但未启动的任务取消，运行中任务继续原执行。Runtime 离组或删除后保留组，已有云友不会静默转组。旧 `runtime_id` 绑定保留机器约束与手填模型兼容行为，显式选择组后解除旧机器绑定并启用组模型校验；原先未绑定的云友保留原调度行为。
+切换 Agent 执行组默认清空模型和思考覆盖，未冻结的排队任务清除旧会话信息，已冻结但未启动的任务取消，运行中任务继续原执行。Runtime 离组或删除后保留组，已有 Agent 不会静默转组。旧 `runtime_id` 绑定保留机器约束与手填模型兼容行为，显式选择组后解除旧机器绑定并启用组模型校验；原先未绑定的 Agent 保留原调度行为。

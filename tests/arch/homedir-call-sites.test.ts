@@ -27,13 +27,18 @@ const HOME_CALL_LIMITS: Readonly<Record<string, number>> = {
   "packages/daemon/src/agent-runtime/workspace/runtime-context.ts": 1,
   // ADR 0023: the Codex session config disables the user's personal `~/.agents/skills` by path.
   "packages/daemon/src/agent-runtime/workspace/session-home.ts": 7,
+  // Native source discovery reads only; tests inject home and validate source ownership.
+  "packages/daemon/src/external-chats/sources.ts": 1,
+  // Receipt writes accept stateDir/home overrides and stay under the isolated test HOME.
+  "packages/daemon/src/external-chats/index.ts": 1,
   "packages/daemon/src/ssh-mesh.ts": 5,
   "packages/remi/src/conversation/parser.ts": 1,
   "packages/remi/src/core.ts": 1,
   "packages/server/src/api/helpers/uploads.ts": 1,
   "packages/server/src/config.ts": 1,
   "packages/server/src/ssh-mesh/control-plane.ts": 2,
-  "packages/server/src/worker/daemon.ts": 6,
+  // Includes the external-Chat adapter's home passed to its source discovery and receipts.
+  "packages/server/src/worker/daemon.ts": 7,
   // Grok adds a read-only skill-root lookup; listing/import only read files and accept explicit roots.
   "packages/server/src/worker/local-skills.ts": 9,
   "packages/server/src/worker/progress-summarizer.ts": 3,

@@ -141,6 +141,10 @@ export function classifyRoute(route: string): CliManifestRoute {
   if (/^(?:GET|POST|PATCH|DELETE) \/api\/sessions\/:sessionId\/queue(?:\/resume|\/:qid(?:\/steer)?)?$/.test(route)) return {
     cli_exempt: true, category: "pure_ui", reason: "Chat composer follow-up queue (member-only Web state, ADR 0020); CLI and agents send directly with message.send --wake.",
   };
+  // ADR 0025: the Chat composer's "/" menu; an agent sees its own commands, and the CLI sends text with message.send.
+  if (route === "GET /api/chat/slash-commands") return {
+    cli_exempt: true, category: "pure_ui", reason: "Chat composer slash-command menu (the agent's advertised commands and skills, ADR 0025); a CLI sender types the command into message.send.",
+  };
   if ((RETIRED_CLI_ROUTES[route] ?? WORKSPACE_OPERATOR_RETIRED_ROUTES[route])) return {
     cli_exempt: true, category: "retired_route", reason: `已移除：改用 ${(RETIRED_CLI_ROUTES[route] ?? WORKSPACE_OPERATOR_RETIRED_ROUTES[route])}`,
   };

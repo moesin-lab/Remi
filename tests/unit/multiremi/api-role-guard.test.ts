@@ -430,10 +430,10 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(status === 421, `${pattern} -> ${status}`).toBe(expectedRefusal("runtime", path));
       if (status === 421) refused += 1;
     }
-    // The merged inventory has 821 routes. Responsibility, delivery, Question,
-    // Chat follow-up queue (ADR 0020) and background-task (PR 6) user operations
-    // belong to UI; runtime owns daemon/health/peer/trace routes. It refuses 762
-    // HTTP routes and two browser upgrades.
+    // The merged inventory has 822 routes. Responsibility, delivery, Question,
+    // Chat follow-up queue (ADR 0020), background-task (PR 6) and slash-command
+    // (ADR 0025) user operations belong to UI; runtime owns daemon/health/peer/trace
+    // routes. It refuses 763 HTTP routes and two browser upgrades.
     // The independent literal oracle checks every route above.
     const mintRoute = "GET /api/daemon/runtimes/:runtimeId/feishu-bot/decision-cards";
     expect(statuses.has(mintRoute)).toBe(true);
@@ -444,8 +444,10 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(statuses.has(route), `${route} is registered`).toBe(true);
       expect(statuses.get(route), `${route} belongs to ui`).toBe(421);
     }
-    expect(refused, routeCountHint("runtime")).toBe(762);
-    expect(refused + 2, routeCountHint("runtime")).toBe(764);
+    expect(refused, routeCountHint("runtime")).toBe(763);
+    expect(refused + 2, routeCountHint("runtime")).toBe(765);
+    // ADR 0025: the Chat menu's catalogue is a UI read.
+    expect(statuses.get("GET /api/chat/slash-commands")).toBe(421);
   });
 
   it("answers 421 with the misdirected body, the role header, and a real route still reachable", async () => {

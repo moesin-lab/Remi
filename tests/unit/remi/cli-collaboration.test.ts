@@ -18,6 +18,7 @@ import { runMultiremi } from "../../../apps/remi/cli/multiremi.js";
 import { dispatch } from "../../../apps/remi/cli/index.js";
 import { unifiedCommandSpecs } from "../../../apps/remi/cli/commands/unified.js";
 import { RETIRED_CLI_COMMANDS } from "../../../apps/remi/cli/core/retired-commands.js";
+import { backendsInScope } from "../../helpers/postgres-scope.js";
 
 const root = resolve(import.meta.dir, "../../..");
 const realFetch = globalThis.fetch;
@@ -165,7 +166,7 @@ describe("native collaboration CLI contracts", () => {
     expect(JSON.parse(result.stdout)).toMatchObject([{ seq: 1, body_md: "first entry" }, { seq: 50, body_md: "last" }]);
   });
 
-  for (const backend of ["sqlite", "pg"] as const) {
+  for (const backend of backendsInScope(import.meta.path, ["sqlite", "pg"] as const)) {
     it.skipIf(backend === "pg" && !conversationLogPgAdminUrl)(
       `${backend}: session log get reports Issue claim, Chat reply and symbolic recipient delivery`, async () => {
         await withConversationLogStore(backend, async (store, db) => {
@@ -979,7 +980,6 @@ describe("native collaboration CLI contracts", () => {
     const canonicalPromptPaths = [
       "message list",
       "message send",
-      "session result publish",
       "issue session list",
       "turn list",
       "turn get",
@@ -1002,6 +1002,8 @@ describe("native collaboration CLI contracts", () => {
     registry.register(legacyParent("issue"));
     registry.register(legacyParent("attachment"));
     for (const spec of specs) registry.register(spec);
+    expect(registry.inventory().find(entry => entry.id === "session.result.publish")?.path)
+      .toEqual(["session", "result", "publish"]);
     const cases = [
       ["issue", "comment", "list", "iss_1", "--thread", "cmt_1", "--output", "json"],
       ["issue", "comment", "add", "iss_1", "--parent", "cmt_1", "--content-stdin"],

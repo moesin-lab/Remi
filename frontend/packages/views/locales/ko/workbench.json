@@ -33,7 +33,7 @@
     "awaiting_human": "답변 대기 중",
     "failed": "최근 실행 실패",
     "cancelled": "최근 실행 중지됨",
-    "completed": "최근 실행 완료 — 검토 대기 중",
+    "completed": "최근 실행 완료",
     "active_count": "진행 중인 실행 {{count}}개",
     "view": "실행 보기",
     "retry": "실행 재시도",

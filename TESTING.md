@@ -32,13 +32,29 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 
 [公开参考价格 PG/CLI 回归](tests/unit/scripts/usage-reference-prices.test.ts)沿用 CI 的 `MULTIREMI_TEST_POSTGRES_URL`；可用 `MULTIREMI_TEST_REFERENCE_DATABASE_URL` 单独覆盖。所选测试连接必须具有创建测试库的权限，两条用例各创建随机命名的独立数据库，所有并发 writer 与 CLI 只连接该库，完成后仅删除本次成功创建的数据库。不要指向生产；连接或清理失败会使测试失败，不会跳过或强制删除公共表。
 
-[路由矩阵夹具](tests/helpers/routing-matrix-database.ts)仅用于同步 placement cells：每个 dialect 初始化一次独立数据库与 Store，各 cell 开始前提交恢复原生临时表保存的基线，保留真实 transaction/afterCommit 行为。它拒绝 schema 变化、request cache、订阅、后台工作、sequence/trigger 和不支持的外键种子依赖。迁移、冷启动、竞态或生命周期测试必须继续使用新夹具；不能把矩阵复用推广为全套共享数据库。显式 PG URL 仅接受本机测试服务，创建随机专属数据库并清理；reset 失败不能算成功。SQLite/PG 场景保留同一组风险维度与断言。
+[路由矩阵夹具](tests/helpers/routing-matrix-database.ts)仅用于同步 placement cells：每个 dialect 初始化一次独立数据库与 Store，各 cell 开始前提交恢复原生临时表保存的基线，保留真实 transaction/afterCommit 行为。它拒绝 schema 变化、request cache、订阅、后台工作、sequence/trigger 和不支持的外键种子依赖。迁移、冷启动、竞态或生命周期测试必须继续使用新夹具；不能把矩阵复用推广为全套共享数据库。显式 PG URL 仅接受本机测试服务，创建随机专属数据库并清理；reset 失败不能算成功。SQLite 跑全部 304 格；PG 复跑同一 claim/probe SQL 以覆盖方言差异，只跑带绝对断言的格加确定性的两两全覆盖（当前 99 格），每格风险维度与断言不变。
 
-[SQLite snapshot 工厂](tests/helpers/sqlite-store-snapshot.ts)只供显式接入的普通业务测试：目前18个文件使用 `createSnapshotStore` / `createLocalSnapshotStore`，每例仍有独立SQLite连接和新Store，正常迁移入口走已有 unified schema 的检查路径；`createStore` / `createLocalStore` 默认仍fresh。snapshot共享迁移种子的时间戳和元数据，环境、时钟、ID生成、空schema、迁移或startup副作用敏感用例不用它。兼容检查失败或迁移报告缺失会回退fresh，不能跳过生产迁移入口。`snapshotStatsForFile` 在消费文件的beforeAll采起点、afterAll输出 `scope: "file-window"` 增量，仅包含该窗口的冷bootstrap、clone、fresh fallback、Store初始化和初始化时间，不是全仓累计值。
+[SQLite snapshot 工厂](tests/helpers/sqlite-store-snapshot.ts)供普通业务测试使用：[helpers](tests/unit/multiremi/helpers.ts) 的 `createStore` / `createLocalStore` 默认即走 snapshot（与 `createSnapshotStore` / `createLocalSnapshotStore` 相同），每例仍有独立SQLite连接和新Store，正常迁移入口走已有 unified schema 的检查路径。snapshot共享迁移种子的时间戳和元数据，需要观察首次冷迁移的环境、时钟、ID生成、空schema、迁移或startup副作用用例改用 `createFreshStore`，或自行 `openSqliteDatabase` 后构造Store。每个工厂按环境指纹各保留一份镜像（最多4份，同一分片进程里环境不同的文件各自建一次而不是整文件回退）；时钟/随机数非原生或迁移报告缺失会回退fresh，不能跳过生产迁移入口。`snapshotStatsForFile` 在消费文件的beforeAll采起点、afterAll输出 `scope: "file-window"` 增量，仅包含该窗口的冷bootstrap、clone、fresh fallback、Store初始化和初始化时间，不是全仓累计值。
 
-[Pending-turn 夹具](tests/unit/multiremi/pending-turn-test-backends.ts)默认仍为每例fresh；七个已审阅的同步普通业务套件显式选择 `{ isolation: 'committed-baseline' }`，每suite独立数据库和Store、每例开始前提交恢复基线。业务 `fixture.transaction` 必须通过Store的数据库wrapper，保留SQLite afterCommit、缓存失效和锁顺序守卫；raw数据库事务仅用于基线恢复或原用例已有的raw SQL边界。共用[恢复实现](tests/helpers/reusable-store-database.ts)重置analytics和已settled只读缓存，未结束的锁/lease、未提交version、replay、afterCommit、订阅或后台工作会失败，schema、request cache及env/clock/UUID注入同样拒绝。PG仅连接显式本机测试服务、删除本次成功创建的随机owned DB，初始化失败清理已开资源；消费suite的afterAll必须await `dispose()`：先排空已排队microtask并停止调度，等待活跃dispatch及原sender实际settled后清理连接/owned DB（dispatch超时不代表原send已结束），随后仍报告后台工作违约。原sender调用在测试夹具中追踪，registry/send运行期替换拒绝；同步 `close()` 仅供已idle的调用；永不settled且不可取消的外部工作不在支持范围，不能强制销毁其连接。SQLite wrapper的afterCommit闭包依靠同步transaction/savepoint的finally弹栈与排空保证，不通过raw DB字段反射声称已检测全部状态。迁移、reopen、多连接、多进程和生产startup恢复继续fresh，外部Context监听器由用例自己的finally清理。
+[PG template 工厂](tests/helpers/postgres-store-template.ts)是 SQLite snapshot 的 PG 对应物，同样只供显式接入：每个消费 suite 拥有一个随机命名的 TEMPLATE 数据库，在 suite 的 beforeAll（自有超时）里按当时环境冷迁移一次，首例环境不同且尚未克隆时重建一次；之后每例经 `CREATE DATABASE ... TEMPLATE` 得到独立数据库、连接和新 Store，迁移入口仍走已迁移检查路径。时钟/随机数非原生、环境指纹与模板不一致或迁移报告缺失时，该例回退为空库 fresh。仅接受本机测试服务、只删除本工厂创建的库，suite 的 afterAll 必须 await `dispose()`。[migrated-store-backends](tests/helpers/migrated-store-backends.ts) 把两个工厂包成每例 `open()`，供每例新开本地工作区 Store 的双 dialect 套件使用。[会话日志](tests/unit/multiremi/fixtures/conversation-log-store.ts)、[首屏热点](tests/fixtures/multiremi/first-screen-hotspots-database.ts)和[集成](tests/helpers/integration-database.ts)数据库夹具另有按文件在顶层调用的 `useMigratedConversationLogStores` / `useMigratedHotspotDatabases` / `useMigratedIntegrationDatabases`：调用文件的数据库同样从已迁移镜像克隆，调用方的新 Store 仍先跑迁移入口再重置探针，规模、golden 与语句/字节预算不变；历史 schema 和未调用的文件仍为空库。冻结时钟或按例改环境的文件（如 daemon-heartbeat-fanout-cost）不调用。
+
+[Pending-turn 夹具](tests/unit/multiremi/pending-turn-test-backends.ts)默认仍为每例fresh；已审阅的普通业务套件可选 `{ isolation: 'snapshot' }`（SQLite image / PG template，每例仍是独立数据库、连接和 Store，reopen、多连接、多进程、订阅和后台工作保持真实；冷迁移专项和每例改环境的套件保持 fresh，各 suite 在 afterAll 输出 clone/fallback 统计）。七个已审阅的同步普通业务套件显式选择 `{ isolation: 'committed-baseline' }`，每suite独立数据库和Store、每例开始前提交恢复基线。业务 `fixture.transaction` 必须通过Store的数据库wrapper，保留SQLite afterCommit、缓存失效和锁顺序守卫；raw数据库事务仅用于基线恢复或原用例已有的raw SQL边界。共用[恢复实现](tests/helpers/reusable-store-database.ts)重置analytics和已settled只读缓存，未结束的锁/lease、未提交version、replay、afterCommit、订阅或后台工作会失败，schema、request cache及env/clock/UUID注入同样拒绝。PG仅连接显式本机测试服务、删除本次成功创建的随机owned DB，初始化失败清理已开资源；消费suite的afterAll必须await `dispose()`：先排空已排队microtask并停止调度，等待活跃dispatch及原sender实际settled后清理连接/owned DB（dispatch超时不代表原send已结束），随后仍报告后台工作违约。原sender调用在测试夹具中追踪，registry/send运行期替换拒绝；同步 `close()` 仅供已idle的调用；永不settled且不可取消的外部工作不在支持范围，不能强制销毁其连接。SQLite wrapper的afterCommit闭包依靠同步transaction/savepoint的finally弹栈与排空保证，不通过raw DB字段反射声称已检测全部状态。迁移、reopen、多连接、多进程和生产startup恢复继续fresh，外部Context监听器由用例自己的finally清理。
 
 [PR2大夹具](tests/fixtures/multiremi/first-screen-hotspots-pr2-fixture.ts)的 `attachmentOnly: true` 仅用于附件上传、权限和ETag功能场景，保留所需身份、Issue和Chat；未传该选项的golden、query-count和benchmark仍使用原默认规模。不得用小夹具替代规模回归或更新golden来掩盖变化。
+
+### PostgreSQL 覆盖范围
+
+双 dialect 套件默认在 SQLite 和 PostgreSQL 上都跑。[postgres-scope](tests/helpers/postgres-scope.ts) 是唯一的例外清单：列入的套件只跳过 PostgreSQL 一侧，SQLite 仍跑全部用例，每项附一行理由。只有 PostgreSQL 用例与 SQLite 是同一个业务场景、断言不区分 dialect 时才可列入；有下列任一情况就必须保留 PostgreSQL：
+
+- 断言或分支依赖 dialect、SQL 方言差异、catalog/EXPLAIN/PRAGMA、trigger 或 sequence；
+- 锁、事务深度、savepoint、回滚，或在事务中注入故障；
+- 并发、竞态、多连接、Worker 或子进程；
+- 迁移、历史 schema 或回填；
+- 控制时钟，或依赖过期、lease、提醒、心跳、空闲天数等时间戳比较；
+- 同步 PG bridge、read pool、回复大小上限、语句/查询计数或 golden；
+- 文件里有专门的 PostgreSQL 用例块，或曾因 PostgreSQL 缺陷修复过（`git log` 中提到 postgres/PG 的修复提交）。
+
+接入方式：`pendingTurnBackendTests` 传 `file: import.meta.path`，自写循环用 `backendsInScope(import.meta.path, [...])`；不在清单里的文件两种写法都保留两个 dialect。[架构守卫](tests/arch/postgres-scope.test.ts)要求清单中的文件存在、理由只占一行、经上述入口接入，且只有清单内的文件使用这些入口；它还按文件名和内容信号（锁/回滚、数据库故障注入、并发/进程、迁移、catalog/trigger、时钟与时间戳、read pool/回复上限/语句计数/reopen）拒绝条目。命中信号时把套件留在双 dialect，不要放宽信号。守卫不读 git 历史，新增条目时需人工核对上面最后一条。
 
 ## 真实服务与手动验证
 
@@ -52,9 +68,9 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 | `bun run probe:feishu` | [飞书流式卡片](tests/integration/feishu-streaming-probe.ts) | 专用测试会话与飞书凭据 |
 | `bun run replay:coverage` | [ACP fixture 重放检查](tests/integration/replay-coverage.ts) | 仓库内 fixture |
 | `bun run smoke:im` | [IM 平台浏览器验证](tests/integration/smoke-im-platforms.ts)：侧栏和能力页面、机器人/路由/消息源保存、权限、旧链接、工作区隔离与移动端；独立 Next ↔ HTTP API ↔ 临时 SQLite | 前端依赖与 Chromium（可设 `CHROME_EXECUTABLE`）；模拟飞书外部传输，不发送真实消息 |
-| `bun run smoke:chat` | 独立 Chat 页面、队列、会话管理和附件；隔离 Next ↔ Bun API ↔ 临时 SQLite，模拟 Agent 输出 | 前端依赖与 Chromium；不调用真实 provider |
+| `bun run smoke:chat` | [独立 Chat 页面](tests/integration/smoke-chat-workspace.ts)（模型标签、「/」菜单）、跟进队列（排队、编辑、每轮放行一条、引导、删除）、停止、未确认送达的重试、会话管理和附件；隔离 Next ↔ Bun API ↔ 临时 SQLite，状态、上传等路径都在临时目录，由脚本自己领取并完成任务 | 前端依赖与 Chromium（`CHROME_EXECUTABLE` 可指定）；`--port=` 改前端端口，默认 3318；不调用真实 provider |
 | `bun run tests/integration/smoke-interaction-recovery.ts` | 创建/接单回执、失败保留输入、重复提交、工作台重试与状态更新、390px 布局；临时数据库、独立 workspace、独立浏览器 | Node、前端依赖和 Playwright Chromium（`node node_modules/playwright-core/cli.js install chromium`）；默认端口 3348，可用 `--port=` 修改；模拟 worker，不调用真实 provider；输出截图和 `result.json` |
-| `bun run tests/integration/smoke-execution-configuration.ts` | [能力组浏览器 E2E](tests/integration/smoke-execution-configuration.ts)：独立入口、组内 Provider/模型原子保存、用途搜索、成员、绑定状态、版本失效、云友与模型联动及移动端；隔离 Next ↔ HTTP API ↔ 临时 SQLite | 前端依赖、Node 和 Chromium；使用测试凭据、模拟绑定确认，不调用真实模型；可用 `EXECUTION_CONFIG_ARTIFACTS` 指定诊断输出目录 |
+| `bun run tests/integration/smoke-execution-configuration.ts` | [能力组浏览器 E2E](tests/integration/smoke-execution-configuration.ts)：独立入口、组内 Provider/模型原子保存、用途搜索、成员、绑定状态、版本失效、Agent 与模型联动及移动端；隔离 Next ↔ HTTP API ↔ 临时 SQLite | 前端依赖、Node 和 Chromium；使用测试凭据、模拟绑定确认，不调用真实模型；可用 `EXECUTION_CONFIG_ARTIFACTS` 指定诊断输出目录 |
 
 `frontend/e2e/` 仍有继承的 Playwright 用例和上游登录/数据库假设；[配置](frontend/playwright.config.ts)只指定浏览器与 baseURL，不启动服务。它不能替代根 `e2e:frontend` 对 Remi Bun API 的验证。针对这些用例开发时，先核对 [env.ts](frontend/e2e/env.ts) 和实际 helper。
 
@@ -69,12 +85,14 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 | 工作流 | 实际检查范围 |
 |---|---|
 | [dev-context.yml](.github/workflows/dev-context.yml) | PR / main push；Linux、Windows 上的 Node 检查器测试及默认文档阅读链校验 |
-| [release-build-check.yml](.github/workflows/release-build-check.yml) | 按路径触发；独立的架构/CLI 守卫、CI 编排小回归、前端类型、前端测试、CLI/API/Web 构建、平台专项和浏览器专项；main push 与手动运行另有四个后端分片及完整覆盖校验 |
-| [release.yml](.github/workflows/release.yml) / [platform-release.yml](.github/workflows/platform-release.yml) | 校验准备快照、tag 版本及同一 main SHA 的成功完整 CI（包括四个后端分片与覆盖校验）；CLI 复用符合来源与内容校验的正式 candidate，正式平台镜像保持多架构原构建路径，缺少可用 candidate 时保留原构建路径 |
+| [release-build-check.yml](.github/workflows/release-build-check.yml) | 按路径触发；独立的架构/CLI 守卫、CI 编排小回归、前端类型、前端测试、CLI/API/Web 构建、平台专项和浏览器专项；main push 与手动运行另有八个后端分片及完整覆盖校验 |
+| [release.yml](.github/workflows/release.yml) / [platform-release.yml](.github/workflows/platform-release.yml) | 校验准备快照、tag 版本及同一 main SHA 的成功完整 CI（包括八个后端分片与覆盖校验）；CLI 复用符合来源与内容校验的正式 candidate，正式平台镜像保持多架构原构建路径，缺少可用 candidate 时保留原构建路径 |
 
-`build` 保留为分支保护的必需检查，是所有适用 job 的汇总，不再承载串行测试与构建。平台专项 job `session-archive-platform` 已更名为 `runtime-platform`（ubuntu-latest 与 macos-latest 两个矩阵项，仍验证固定的 ACP 桥与内置 agent runtime，归档回归随 ADR 0018 删除）；`build` 的 `needs` 已改用新名。若分支保护的必需检查直接列出了 `session-archive-platform (ubuntu-latest)` / `session-archive-platform (macos-latest)`，需由仓库管理员改为 `runtime-platform (ubuntu-latest)` / `runtime-platform (macos-latest)`，否则旧名永远等不到状态而阻塞合并。它逐项要求预期的 success / skipped；失败、取消、缺少分片报告或非预期 skipped 均不能给出绿灯。PR 跳过后端分片；main push 与所有手动运行要求完整后端覆盖，指定 retry 也不跳过完整分片。PR 新提交取消该 PR 的旧运行，main 运行互不取消。两个浏览器专项保留各自的路径检测，路径不相关时跳过专项步骤，job 仍需正常成功。
+`build` 保留为分支保护的必需检查，是所有适用 job 的汇总，不再承载串行测试与构建。平台专项 job `session-archive-platform` 已更名为 `runtime-platform`（ubuntu-latest 与 macos-latest 两个矩阵项，仍验证固定的 ACP 桥与内置 agent runtime，归档回归随 ADR 0018 删除）；`build` 的 `needs` 已改用新名。若分支保护的必需检查直接列出了 `session-archive-platform (ubuntu-latest)` / `session-archive-platform (macos-latest)`，需由仓库管理员改为 `runtime-platform (ubuntu-latest)` / `runtime-platform (macos-latest)`，否则旧名永远等不到状态而阻塞合并。它逐项要求预期的 success / skipped；失败、取消、缺少分片报告或非预期 skipped 均不能给出绿灯。PR 跳过后端分片；main push 与所有手动运行要求完整后端覆盖，指定 retry 也不跳过完整分片。PR 新提交取消该 PR 的旧运行，main 运行互不取消。浏览器副本专项 `frontend-replica` 保留路径检测，路径不相关时跳过专项步骤，job 仍需正常成功。前端零跳动浏览器检查已移除；[ADR 0008](docs/adr/0008-issue-detail-anchored-reveal-and-stick-to-bottom.md) 的零跳动设计规则保留，详见[性能调查](docs/dev/performance.md)的「CI 零跳动检查（已删除）」。API/Web 镜像构建在 PR 上只读取 main 的 gha 层缓存、不导出；main push 与手动运行照常导出。
 
-[ci-backend.ts](scripts/ci-backend.ts) 从 bunfig 的 test root 自动发现 Bun 支持的 `.test` / `_test` / `.spec` / `_spec` 文件和八种 JS/TS 扩展，排除隐藏目录与 node_modules，隐藏文件名仍按后缀发现；不维护测试文件清单。它按 [历史权重](scripts/ci-backend-weights.json) 做 LPT 分配，新文件使用至少 60 秒或历史 p90 的保守权重。初始权重来自文件中标识的真实 Actions run/job/SHA，按日志文件标题边界计时，包含部分 runner 开销，不能视为当前版本的实测耗时。
+[ci-backend.ts](scripts/ci-backend.ts) 从 bunfig 的 test root 自动发现 Bun 支持的 `.test` / `_test` / `.spec` / `_spec` 文件和八种 JS/TS 扩展，排除隐藏目录与 node_modules，隐藏文件名仍按后缀发现；不维护测试文件清单。它按 [历史权重](scripts/ci-backend-weights.json) 做 LPT 分配，新文件使用至少 60 秒或历史 p90 的保守权重。现行权重由下文 `weights` 命令从文件中标识的完整运行（run ID 与 SHA）的覆盖报告导入，是该次运行各文件的实测时间；覆盖报告里没有的旧条目（已删除的文件）原样保留，规划只取当前发现的文件，不影响分配。权重只用于调度估算，不能视为当前版本的实测耗时。
+
+分片数只在 `backend-plan` job 的 `BACKEND_SHARDS` 设定（现为 8），传给 `plan --shards`；`plan` 不设默认值。`backend` 矩阵取自计划里的分片序号（`backend-plan` 的 `shards` 输出），`verify` 要求每个计划分片恰有一份完整报告，`build` 汇总整个矩阵的结果，因此矩阵、计划与覆盖校验不会不一致；verified retry 从基准运行的计划读取分片，不依赖当前分片数。选择 8 的估算：权重总和约 7,450 秒，8 片时 LPT 每片约 930 秒；用另一次完整运行的实测文件时间复核，最慢片约 950 秒，再加每片约 50 秒的固定开销（runner 准备、PostgreSQL service、checkout、Bun 下载缓存与安装），后端关键路径约 16–17 分钟。6 片约 22 分钟，10 片约 14 分钟但多出两片固定开销并占用更多并发 job。每多一片约多 1 runner 分钟。实测（同一 SHA 的手动完整运行 39454365698、39457662184）：各片测试步骤 620–1073 秒，后端 job 最长 18.2 / 18.9 分钟，整条运行 18.7 / 19.4 分钟（此前 4 片的完整运行为 32.6–38.6 分钟）；后端 job 合计约 130 分钟，此前约 119–128 分钟。
 
 每片使用独立 runner、PostgreSQL service 和一次包装测试进程，保留 hermetic preload、假 HOME 检查及 lock-order sentinel。启动前实际验证显式 `MULTIREMI_TEST_POSTGRES_URL` 的连接，失败报错。计划与报告绑定 SHA、bunfig 指纹、scope/preload 和完整文件归属；覆盖校验要求每个文件恰好出现一次且所有分片成功。架构快守卫故意在 `guards` 先跑，并在全量分片再次覆盖，以保留快速反馈与可审计发现范围。`guards` 另以 `CI=true`、`GITHUB_ACTIONS=true` 显式执行 CI 编排自身的五个小回归文件（ci-backend、run-tests、run-tests-signals、retry-failed-backend-tests、release-candidate），让真实 GitHub 分组日志、包装退出/清理、覆盖及补跑来源问题在 PR 阶段暴露；这五个文件不执行数据库或业务套件；`guards` 另保留 Runtime 能力/API 响应和共享工作区身份/历史数据的业务契约回归。
 
@@ -83,14 +101,14 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 以下入口只做文件规划或报告校验，不启动测试；`run` 才执行后端分片：
 
 ```bash
-bun run scripts/ci-backend.ts plan --sha <40位提交SHA> --shards 4 --out ci-backend/plan.json
+bun run scripts/ci-backend.ts plan --sha <40位提交SHA> --shards 8 --out ci-backend/plan.json
 bun run scripts/ci-backend.ts verify --plan ci-backend/plan.json --reports ci-backend --out ci-backend/coverage.json
 bun run scripts/ci-backend.ts weights --coverage ci-backend/coverage.json --previous scripts/ci-backend-weights.json --run-id <完整运行ID> --out ci-backend/weights.json
 ```
 
 `verify` 使用 CI 的 `GITHUB_SHA` 核对报告身份。`weights` 只导入通过完整覆盖校验的报告；检查新权重来源后更新仓库权重文件，CI 规划不依赖联网获取历史记录。并行关键路径与总 runner 成本应分别比较；独立安装与启动的成本也需计入，未跑新 CI 时不能宣称提速或节省已验证。
 
-完整后端套件已经跑完且仅少量用例失败时，可用 `gh workflow run release-build-check.yml --ref main -f retry_backend_run_id=<完整运行ID>` 追加失败文件诊断。本 fork 仍执行完整四个后端分片及覆盖校验，诊断通过不能清除完整套件的失败。[基准验证器](scripts/retry-failed-backend-tests.ts)核验原运行来自同仓库 main；原 SHA 必须是目标 SHA 的祖先，差异只能是它允许的重跑入口、脚本/测试和本说明，不能改变业务源码、依赖或原有测试。旧单进程及 Bun 原生四片基准核验全部后端日志、完整汇总、失败文件数量与 HOME 清理；新分片基准下载该运行的计划与全部分片 artifact，核对完整实际文件归属、Bun 最终汇总、精确失败文件、子进程退出与 HOME 清理，且其他 job 必须成功（覆盖校验仅因后端失败跳过）。HOME 写入、observer 错误、缺报告、取消、中断、部分套件及诊断自身均不能作基准。诊断 artifact 记录 `verified-retry` 和 `fullSuite:false`，当前汇总仍要求完整后端 evidence，使用 `full-with-retry` 区分这类运行；不生成正式 candidate。诊断集中执行原失败文件与入口自身测试，保持每个用例原有期限，不设置全局宽限。报告分别说明原完整运行的失败、诊断复跑结果与当前完整运行结果，不能把部分绿灯称为全量通过。
+完整后端套件已经跑完且仅少量用例失败时，可用 `gh workflow run release-build-check.yml --ref main -f retry_backend_run_id=<完整运行ID>` 追加失败文件诊断。本 fork 仍执行完整八个后端分片及覆盖校验，诊断通过不能清除完整套件的失败。[基准验证器](scripts/retry-failed-backend-tests.ts)核验原运行来自同仓库 main；原 SHA 必须是目标 SHA 的祖先，差异只能是它允许的重跑入口、脚本/测试和本说明，不能改变业务源码、依赖或原有测试。旧单进程及 Bun 原生四片基准核验全部后端日志、完整汇总、失败文件数量与 HOME 清理；新分片基准下载该运行的计划与全部分片 artifact，核对完整实际文件归属、Bun 最终汇总、精确失败文件、子进程退出与 HOME 清理，且其他 job 必须成功（覆盖校验仅因后端失败跳过）。HOME 写入、observer 错误、缺报告、取消、中断、部分套件及诊断自身均不能作基准。诊断 artifact 记录 `verified-retry` 和 `fullSuite:false`，当前汇总仍要求完整后端 evidence，使用 `full-with-retry` 区分这类运行；不生成正式 candidate。诊断集中执行原失败文件与入口自身测试，保持每个用例原有期限，不设置全局宽限。报告分别说明原完整运行的失败、诊断复跑结果与当前完整运行结果，不能把部分绿灯称为全量通过。
 
 依赖准备变更提交到 main 后，若 `release:check` 对 push 的 base SHA 检查成功且版本增加，该次 main push 完整检查直接生成正式 candidate；正常流程无需再为同一 SHA 手动执行一轮完整检查。普通非版本变更 main、PR、带诊断的运行 和未请求候选的手动运行不生成候选。需要补生成或重建时仍可显式执行 `gh workflow run release-build-check.yml --ref main -f release_candidate=true`，该手动请求会重新执行完整检查；非 main 或同时指定 retry 的候选请求失败。候选不发版、不打 tag、不推送镜像。构建使用 package.json 的正式版本，并校验准备快照；只有实际完整后端覆盖与其余检查成功后，`candidate-package` 才上传 `release-candidate-<SHA>`（保留 30 天）。产物分为保留 30 天的 `candidate-cli`（四平台 CLI 归档与安装脚本）、`candidate-api` / `candidate-web`（linux/amd64 OCI 归档）和最终 `release-candidate-<SHA>` manifest；聚合时完整校验三部分，最终 artifact 不重复上传 OCI。
 
@@ -143,9 +161,9 @@ Chromium（可设置 `CHROME_EXECUTABLE`）；默认端口 3349，可用 `--port
 
 直接 `bun test <path>` 保留 `NODE_ENV`、`PATH`、`HOME`、`SHELL`、`USER`、`GIT_*` 和 `SQLITE_LIB_PATH` 等宿主能力，只提供上述进程内隔离。preload 不修改 HOME，不 mock OS；Bun 1.3.14 的 `homedir()` 和 `userInfo().homedir` 在启动时固定。workspaces、state 的 HOME 兜底在 `NODE_ENV=test` 时抛 `real_home_default_in_test`，要求开关或显式参数。
 
-`bun run test <path> [bun test 参数]` 通过 [run-tests.ts](scripts/run-tests.ts) 在启动测试进程前换成假 HOME（Windows 同设 USERPROFILE），清除 XDG_*，把 Git 全局配置指向不存在的临时 .gitconfig，并将 Bun 转译/安装缓存放在仓库 `node_modules/.cache/bun/` 下。跑完递归检查假 HOME；任何文件、空目录或符号链接都逐行报告并返回 1，无白名单。HOME 为空时保留测试退出码，再清理假 HOME。CI 的架构和后端全套均使用此包装；这层覆盖无路径开关及未来新增的 HOME 写入。遇到 Git 配置差异，定位实际影响并修测试夹具，不修改用户全局配置。
+`bun run test <path> [bun test 参数]` 通过 [run-tests.ts](scripts/run-tests.ts) 在启动测试进程前换成假 HOME（Windows 同设 USERPROFILE），清除 XDG_*，把 Git 全局配置指向不存在的临时 .gitconfig，并将 Bun 转译/安装缓存放在仓库 `node_modules/.cache/bun/` 下。假 HOME 启动前预置一组真实开发机会有、代码不得触碰的 sentinel（带 SSH Mesh include 块的 `.ssh/config`、`authorized_keys`、已有 mesh 工作区与 include、daemon outbox 与 workspaces 状态，见 `homeSentinels`）。跑完对整个假 HOME 做快照比对（目录、文件 SHA-256、符号链接目标，不跟随链接）；任何新增、改写或删除都逐行报告并返回 1，无白名单。HOME 与预置内容一致时保留测试退出码，再清理假 HOME。CI 的架构和后端全套均使用此包装；这层覆盖无路径开关及未来新增的 HOME 写入。遇到 Git 配置差异，定位实际影响并修测试夹具，不修改用户全局配置。
 
-Daemon 测试和独立 harness 必须注入 [disabledSshMeshRuntime()](tests/helpers/ssh-mesh-isolation.ts)，或使用带临时 `home` 的 SSH Mesh paths；仅更换 mesh root 不会隔离 `.ssh/config` 和 `.ssh/authorized_keys`。`NODE_ENV=test` 时，[SSH Mesh 路径解析](packages/daemon/src/ssh-mesh.ts)拒绝模块加载时的 `HOME` / `userInfo().homedir` / `homedir()`（含符号链接别名），抛出 `ssh_mesh_real_home_in_test`；进程内改写 HOME 不能代替显式注入。启动 daemon 的测试子进程也必须使用临时 HOME。[回归测试](tests/integration/daemon-real-home-isolation.test.ts)用假 HOME 运行 steer、approval-e2e、drain-outbox，比较整个 HOME 的目录列表、文件 SHA-256 和符号链接，保留原有 Mesh/OpenSSH sentinel，并以故意写入验证快照能检出变化。三个完整子套件并行运行，共享一个 90 秒总预算；总耗时为三者的最大值。steer 的 PostgreSQL 初始化和 Store 迁移在独立的 `beforeEach` 中限时 15 秒；自然轮结束插话和延迟重放这两个多轮用例限时 15 秒，其余四个行为用例保持 5 秒。
+Daemon 测试和独立 harness 必须注入 [disabledSshMeshRuntime()](tests/helpers/ssh-mesh-isolation.ts)，或使用带临时 `home` 的 SSH Mesh paths；仅更换 mesh root 不会隔离 `.ssh/config` 和 `.ssh/authorized_keys`。`NODE_ENV=test` 时，[SSH Mesh 路径解析](packages/daemon/src/ssh-mesh.ts)拒绝模块加载时的 `HOME` / `userInfo().homedir` / `homedir()`（含符号链接别名），抛出 `ssh_mesh_real_home_in_test`；进程内改写 HOME 不能代替显式注入。启动 daemon 的测试子进程也必须使用临时 HOME。上述包装的 sentinel HOME 覆盖每个后端测试文件（原先只由单独的回归测试对 steer、approval-e2e、drain-outbox 三个文件复跑检查），[包装回归](tests/unit/scripts/run-tests.test.ts)以故意新增、改写和删除验证快照能检出变化。
 
 [环境护栏测试](tests/arch/hermetic-test-env.test.ts)检查 preload 挂载、实际执行标记和变量泄漏；测试只导入 policy，不能通过直接导入 preload 自行清理后证明隔离成功。[HOME 调用 ratchet](tests/arch/homedir-call-sites.test.ts)限制生产源码每文件的 HOME 读取数量，新增调用需要隔离审查。通过 `bun run` 执行的独立手动 harness 不加载该测试 preload，也不走 test 包装，仍使用真实环境。
 

@@ -48,7 +48,7 @@ Remi 的平台入口保留独立登录账号和分类型访问凭据；登录后
 
 ## 共享状态与数据保留
 
-历史 Chat、云友和 Runtime 的 creator/owner 字段保留审计用途。人类读取、编辑与实时订阅不再按这些字段分区；执行调度也不再因历史人类 owner 不同拒绝同工作区的 Runtime。机器注册的 daemon ID、凭据绑定、Agent 执行范围和跨工作区资源关系仍需核验。
+历史 Chat、Agent 和 Runtime 的 creator/owner 字段保留审计用途。人类读取、编辑与实时订阅不再按这些字段分区；执行调度也不再因历史人类 owner 不同拒绝同工作区的 Runtime。机器注册的 daemon ID、凭据绑定、Agent 执行范围和跨工作区资源关系仍需核验。
 
 Runtime 列表的旧 `owner=me` 人类筛选参数兼容为整个工作区的共享 Runtime 列表；机器凭据仍受原有 daemon 和工作区绑定限制。
 

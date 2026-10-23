@@ -163,4 +163,4 @@ pendingTurnBackendTests("D1 T6 comment edit recovery", fixture => {
       expect(store.listTasksForIssue(issue.id).filter(task=>task.status==='queued')).toEqual([]);
     });
   }
-});
+}, { isolation: "snapshot" });

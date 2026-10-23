@@ -20,7 +20,17 @@
     "queue": "Queue",
     "editing_queued": "Editing queued message",
     "save": "Save",
-    "cancel_edit": "Cancel"
+    "cancel_edit": "Cancel",
+    "blocked_command": "Remi doesn't run {{command}} in Chat. The agent gets it as plain text.",
+    "command_queues": "A command runs after this turn ends"
+  },
+  "model": {
+    "label": "Model",
+    "default": "Default model",
+    "default_detail": "No model set: the runtime's default model runs",
+    "effort": "Reasoning effort: {{value}}",
+    "fallback": "This turn switched to the fallback model",
+    "settings_hint": "Set in the agent's settings"
   },
   "message_list": {
     "show_details": "Show details",
@@ -35,7 +45,6 @@
     "turn_retry_new_session": "Retry in new session",
     "loading_older": "Loading older messages…",
     "expand_older": "Show 30 earlier messages",
-    "earliest": "Start of chat",
     "sending": "Sending…",
     "sent": "Sent",
     "send_failed": "Failed to send ·",
@@ -377,14 +386,17 @@
     "pending_result": "The result appears here when it finishes.",
     "stopped_output": "Output before it stopped",
     "working": "Working",
-    "read_only": "Subagents are read-only. To change course, say so in the main chat.",
     "loading": "Loading…",
     "not_found": "Subagent not found",
     "model": "Model {{model}}",
     "from_subagent": "From subagent {{name}}",
     "from_subagent_unnamed": "From a subagent",
     "unnamed": "Subagent",
-    "view": "Subagents · {{count}}"
+    "panel_toggle": "View subagents and background tasks",
+    "panel_toggle_running_one": "View subagents and background tasks ({{count}} running)",
+    "panel_toggle_running_other": "View subagents and background tasks ({{count}} running)",
+    "chat_empty": "No subagents in this chat",
+    "turn_untitled": "Untitled turn"
   },
   "bg_tasks": {
     "view": "Background tasks · {{count}}",

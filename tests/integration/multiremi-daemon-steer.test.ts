@@ -9,7 +9,7 @@ import { disabledSshMeshRuntime } from "../helpers/ssh-mesh-isolation.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as acpProvision from "@acp/provision.js";
 import { MultiremiDaemonClient } from "@multiremi/client.js";
-import { openIntegrationDatabase, type IntegrationDatabase } from "../helpers/integration-database.js";
+import { openIntegrationDatabase, type IntegrationDatabase, useMigratedIntegrationDatabases } from "../helpers/integration-database.js";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +38,8 @@ afterAll(() => {
   cliVersionMock.mockRestore();
   bridgeVersionMock.mockRestore();
 });
+
+useMigratedIntegrationDatabases();
 
 let database: IntegrationDatabase | null = null;
 let activeStore: MultiremiStore | null = null;

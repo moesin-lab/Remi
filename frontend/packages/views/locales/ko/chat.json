@@ -20,7 +20,17 @@
     "queue": "대기열에 추가",
     "editing_queued": "대기 메시지 편집 중",
     "save": "저장",
-    "cancel_edit": "취소"
+    "cancel_edit": "취소",
+    "blocked_command": "Remi는 Chat에서 {{command}}를 실행하지 않습니다. 에이전트는 일반 텍스트로 받습니다.",
+    "command_queues": "명령은 이번 턴이 끝난 뒤 실행됩니다"
+  },
+  "model": {
+    "label": "모델",
+    "default": "기본 모델",
+    "default_detail": "모델 미지정: 런타임의 기본 모델로 실행합니다",
+    "effort": "추론 강도: {{value}}",
+    "fallback": "이번 턴은 예비 모델로 전환되었습니다",
+    "settings_hint": "에이전트 설정에서 변경할 수 있습니다"
   },
   "message_list": {
     "show_details": "세부 정보 보기",
@@ -35,7 +45,6 @@
     "turn_retry_new_session": "새 세션에서 재시도",
     "loading_older": "이전 메시지를 불러오는 중…",
     "expand_older": "이전 메시지 30개 보기",
-    "earliest": "첫 메시지입니다",
     "sending": "보내는 중…",
     "sent": "전송됨",
     "send_failed": "전송 실패 ·",
@@ -367,14 +376,16 @@
     "pending_result": "완료되면 여기에 결과가 표시됩니다.",
     "stopped_output": "중지 전 출력",
     "working": "처리 중",
-    "read_only": "하위 에이전트는 읽기 전용입니다. 방향을 바꾸려면 메인 채팅에서 말해 주세요.",
     "loading": "불러오는 중…",
     "not_found": "하위 에이전트를 찾을 수 없습니다",
     "model": "모델 {{model}}",
     "from_subagent": "하위 에이전트 {{name}}에서",
     "from_subagent_unnamed": "하위 에이전트에서",
     "unnamed": "하위 에이전트",
-    "view": "하위 에이전트 · {{count}}"
+    "panel_toggle": "하위 에이전트 및 백그라운드 작업 보기",
+    "panel_toggle_running_other": "하위 에이전트 및 백그라운드 작업 보기({{count}}개 실행 중)",
+    "chat_empty": "이 채팅에는 하위 에이전트가 없습니다",
+    "turn_untitled": "이름 없는 턴"
   },
   "bg_tasks": {
     "view": "백그라운드 작업 · {{count}}",

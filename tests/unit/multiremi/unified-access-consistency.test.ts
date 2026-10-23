@@ -465,4 +465,4 @@ pendingTurnBackendTests("MUL-508 access consistency", (fixture, backend) => {
       }
     } finally { socket.close(); server.stop(true); hub.shutdown(); await s.pool.close(); }
   });
-});
+}, { isolation: "snapshot" });

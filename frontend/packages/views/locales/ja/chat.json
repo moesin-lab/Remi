@@ -19,7 +19,17 @@
     "queue": "キューに追加",
     "editing_queued": "待機中のメッセージを編集中",
     "save": "保存",
-    "cancel_edit": "キャンセル"
+    "cancel_edit": "キャンセル",
+    "blocked_command": "Remi は Chat で {{command}} を実行しません。エージェントにはただのテキストとして届きます。",
+    "command_queues": "コマンドはこのターンの終了後に実行されます"
+  },
+  "model": {
+    "label": "モデル",
+    "default": "デフォルトモデル",
+    "default_detail": "モデル未指定：ランタイムのデフォルトモデルで実行します",
+    "effort": "推論強度：{{value}}",
+    "fallback": "このターンは予備モデルに切り替わりました",
+    "settings_hint": "エージェントの設定で変更できます"
   },
   "message_list": {
     "show_details": "詳細を表示",
@@ -34,7 +44,6 @@
     "turn_retry_new_session": "新しいセッションで再試行",
     "loading_older": "古いメッセージを読み込み中…",
     "expand_older": "以前のメッセージを30件表示",
-    "earliest": "チャットの開始",
     "sending": "送信中…",
     "sent": "送信済み",
     "send_failed": "送信失敗 ·",
@@ -364,14 +373,16 @@
     "pending_result": "完了するとここに結果が表示されます。",
     "stopped_output": "停止前の出力",
     "working": "処理中",
-    "read_only": "サブエージェントは読み取り専用です。方針を変えるには、メインのチャットで伝えてください。",
     "loading": "読み込み中…",
     "not_found": "サブエージェントが見つかりません",
     "model": "モデル {{model}}",
     "from_subagent": "サブエージェント {{name}} から",
     "from_subagent_unnamed": "サブエージェントから",
     "unnamed": "サブエージェント",
-    "view": "サブエージェント · {{count}}"
+    "panel_toggle": "サブエージェントとバックグラウンドタスクを表示",
+    "panel_toggle_running_other": "サブエージェントとバックグラウンドタスクを表示（{{count}} 件実行中）",
+    "chat_empty": "このチャットにはサブエージェントがありません",
+    "turn_untitled": "名前のないターン"
   },
   "bg_tasks": {
     "view": "バックグラウンドタスク · {{count}}",

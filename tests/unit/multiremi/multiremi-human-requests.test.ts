@@ -310,4 +310,4 @@ pendingTurnBackendTests("Human Request unified API", fixture => {
     expect(store.getTaskHumanRequest(request.id)?.respondedBy).toBe(store.getWorkspaceOperator("local")!.id);
     expect(store.getWorkspaceMember(aliceMember.id)?.userId).toBe("alice");
   });
-});
+}, { isolation: "snapshot" });

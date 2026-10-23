@@ -18,11 +18,33 @@ function sources(dir: string): string[] {
   });
 }
 
+const LEGACY_NAME = "appendTaskMessages";
+
+// Unicode/hex escapes and line continuations, which can spell the name in an identifier or string.
+const ESCAPES = /\\u\{([0-9a-fA-F]+)\}|\\u([0-9a-fA-F]{4})|\\x([0-9a-fA-F]{2})|\\\r?\n/g;
+
+/**
+ * Whether a file can hold a reference at all: its text contains the name once
+ * escapes are decoded. Only those files are parsed and walked; walking the
+ * syntax tree of all ~1,700 production files took 3-10 s against the 5 s budget.
+ */
+function mayReference(source: string): boolean {
+  if (source.includes(LEGACY_NAME)) return true;
+  if (!/\\[ux\r\n]/.test(source)) return false;
+  return source.replace(ESCAPES, (match, braced?: string, unicode?: string, hex?: string) => {
+    const digits = braced ?? unicode ?? hex;
+    if (digits === undefined) return "";
+    const code = parseInt(digits, 16);
+    return code <= 0x10ffff ? String.fromCodePoint(code) : match;
+  }).includes(LEGACY_NAME);
+}
+
 function legacyReferences(source: string): number[] {
+  if (!mayReference(source)) return [];
   const tree = ts.createSourceFile("producer.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const lines: number[] = [];
   const visit = (node: ts.Node): void => {
-    if ((ts.isIdentifier(node) || ts.isStringLiteral(node)) && node.text === "appendTaskMessages") {
+    if ((ts.isIdentifier(node) || ts.isStringLiteral(node)) && node.text === LEGACY_NAME) {
       lines.push(tree.getLineAndCharacterOfPosition(node.getStart(tree)).line + 1);
     }
     ts.forEachChild(node, visit);
@@ -32,8 +54,8 @@ function legacyReferences(source: string): number[] {
 }
 
 describe("legacy task-message writer boundary", () => {
-  // This parses every production source file; its deadline is a correctness
-  // harness budget, separate from request or query performance guards.
+  // Reads every production source and parses only files that may name the writer.
+  // Its deadline is a correctness harness budget, separate from request or query performance guards.
   it("forbids production references outside the two Store implementation files", () => {
     const files = ["apps", "packages", "frontend/apps", "frontend/packages"].flatMap((dir) => sources(join(ROOT, dir)));
     expect(files.length).toBeGreaterThan(500);
@@ -50,7 +72,13 @@ describe("legacy task-message writer boundary", () => {
       'store["appendTaskMessages"]("task", []);',
       "const { appendTaskMessages: write } = store; write();",
       "const write = store.appendTaskMessages; write();",
+      'store.append\\u0054askMessages("task", []);',
+      'store["append\\x54askMessages"]("task", []);',
+      'store["\\u{61}ppendTaskMessages"]("task", []);',
+      'store["append\\\nTaskMessages"]("task", []);',
     ]) expect(legacyReferences(source)).toHaveLength(1);
     expect(legacyReferences("// store.appendTaskMessages()")).toEqual([]);
+    expect(mayReference("store.appendTaskMessage(task);")).toBe(false);
+    expect(mayReference('const s = "\\u0041\\x42\\u{1F600}\\u{FFFFFFF}";')).toBe(false);
   });
 });

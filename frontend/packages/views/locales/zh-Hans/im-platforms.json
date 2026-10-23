@@ -33,7 +33,7 @@
     },
     "bot": {
       "title": "机器人",
-      "description": "管理工作区内的多个机器人、应答云友、承载 Runtime 和应用凭据。"
+      "description": "管理工作区内的多个机器人、应答智能体、承载 Runtime 和应用凭据。"
     },
     "access": {
       "title": "访问控制",
@@ -247,7 +247,7 @@
     },
     "concierge": {
       "title": "飞书个人机器人",
-      "description": "为当前机器人选择应答的云友、承载它的 Runtime 和飞书应用凭据。每个机器人独立保存、启停和设置会话路由。",
+      "description": "为当前机器人选择应答的智能体、承载它的 Runtime 和飞书应用凭据。每个机器人独立保存、启停和设置会话路由。",
       "member_available": "{{name}} 在线。在飞书里私聊它即可访问当前 workspace。",
       "member_unnamed_bot": "机器人",
       "member_unavailable": "机器人已配置，但当前不可用。",

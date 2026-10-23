@@ -41,7 +41,7 @@ remi runtime group create --file group.json --json
 
 `description` 最多 2000 字符；旧客户端省略时保留原说明，空字符串清除。`connection` 省略时只更新组本身；提供时继承组的执行引擎。`profile_id: null` 创建一个中央连接；非空则更新该工作区内的现有连接。连接、凭据版本和组成员在同一事务保存，任一步校验失败全部回滚。组内编辑共用连接会更新所有引用它的组，界面显示受影响的组数；要使用不同地址或模型，选择「配置新的 Provider」。无需更改其他组时，普通用途说明或成员编辑不会产生新的连接版本。
 
-组可先创建，再分配兼容的 Runtime。尚无机器或配置未确认时不能执行；机器就绪后，每个成员使用组的连接获取模型目录，组目录取成员共同可用的模型与推理选项。在云友设置中选择能力组，再从该组目录选择模型。连接无需手填模型 ID；云友模型为「自动」且连接未指定默认模型时，从组的共同目录确定默认模型，目录尚未发现或没有共同模型时等待。显式配置 `models` 时仍受白名单限制。切换组时重新读取该组目录，不能沿用另一组的能力。实际模型与连接在任务首次领取时冻结，不改变运行中的任务。
+组可先创建，再分配兼容的 Runtime。尚无机器或配置未确认时不能执行；机器就绪后，每个成员使用组的连接获取模型目录，组目录取成员共同可用的模型与推理选项。在 Agent 设置中选择能力组，再从该组目录选择模型。连接无需手填模型 ID；Agent 模型为「自动」且连接未指定默认模型时，从组的共同目录确定默认模型，目录尚未发现或没有共同模型时等待。显式配置 `models` 时仍受白名单限制。切换组时重新读取该组目录，不能沿用另一组的能力。实际模型与连接在任务首次领取时冻结，不改变运行中的任务。
 
 Web 的 Runtime 成员选择器与已保存的成员列表同时显示 Runtime 名称、机器名称、在线状态和完整 Runtime ID，以区分同名引擎或同一机器上的重复注册。机器名称沿用 Runtime 页的顺序：daemon 展示名、设备信息中的主机名、旧名称中的主机名；仍无名称时，云 Runtime 显示引擎云端名称，本地 Runtime 回退到 daemon ID 或占位名称。成员仍按 Runtime ID 保存；离线成员可保留，在线状态与配置下发确认状态分别展示，不能互相代替。无法读取成员详情时保留其 ID，编辑时仍可移除。
 
@@ -89,9 +89,9 @@ remi runtime group list --json
 }
 ```
 
-`profile_id: null` 使用工作区 Relay / 原生连接，不继承该 Runtime 的旧自定义 Profile。能力组可以暂时无成员，但不会有可执行机器。云友使用 `--execution-group <group-id>` 选择组；模型目录使用 `remi runtime model catalog --execution-group <group-id>` 查询。
+`profile_id: null` 使用工作区 Relay / 原生连接，不继承该 Runtime 的旧自定义 Profile。能力组可以暂时无成员，但不会有可执行机器。Agent 使用 `--execution-group <group-id>` 选择组；模型目录使用 `remi runtime model catalog --execution-group <group-id>` 查询。
 
-更新使用 `runtime profile update <id> --file ...` 或 `runtime group update <id> --file ...`，提交完整配置。Profile 每次保存产生不可变 revision；省略 `api_key` 保留已存密钥。删除使用对应 `delete <id>` 命令。仍被组引用的 Profile、仍被云友引用的组不可删除。
+更新使用 `runtime profile update <id> --file ...` 或 `runtime group update <id> --file ...`，提交完整配置。Profile 每次保存产生不可变 revision；省略 `api_key` 保留已存密钥。删除使用对应 `delete <id>` 命令。仍被组引用的 Profile、仍被 Agent 引用的组不可删除。
 
 ## 下发、快照与凭据
 
@@ -103,7 +103,7 @@ ready 表示配置与凭据解析成功，不表示已调用远端模型。Runti
 
 成员在自己的机器上异步请求该连接的模型目录，因此支持本机网关和 Runtime 环境变量鉴权。目录通过同一绑定确认事件上报，但状态独立于配置 ready；按组、Runtime、绑定 generation 与 Profile revision 保存，旧版本或已移除成员的结果不能覆盖当前目录。目录变动会刷新模型选择并重新匹配待执行任务，不覆盖 Runtime 的原生目录或其他组的连接。Codex 完整元数据先经当前执行引擎的离线解码校验，再保留准确 ID 对应的推理选项；仅有普通模型列表时不推断推理能力。
 
-首次 claim 冻结完整连接配置和凭据版本，加入执行指纹。运行中任务继续使用自己的快照，daemon 按任务构造隔离配置；同一 Runtime 上不同组的任务不会互相覆盖全局 provider 设置。已冻结任务重领继续使用旧连接；显式修改云友模型或 thinking 参数时，已冻结但尚未启动的任务取消，运行中任务继续原执行。重试与会话隔离约束见各 provider 接入文档。
+首次 claim 冻结完整连接配置和凭据版本，加入执行指纹。运行中任务继续使用自己的快照，daemon 按任务构造隔离配置；同一 Runtime 上不同组的任务不会互相覆盖全局 provider 设置。已冻结任务重领继续使用旧连接；显式修改 Agent 模型或 thinking 参数时，已冻结但尚未启动的任务取消，运行中任务继续原执行。重试与会话隔离约束见各 provider 接入文档。
 
 旧 Runtime 自定义 Profile 的冻结凭据仍绑定原机器。Chat 冷启动重试若保留该快照且工作目录归属未变化，必须保留原 Runtime 绑定；历史 owner 改变不清除绑定。provider 不兼容或工作目录归属变化继续走原有重新分配流程，不能把旧机器密钥交给无法解析它的 Runtime。
 
@@ -113,7 +113,7 @@ Profile 与组的写入要求人类工作区管理员身份；组修改还检查
 
 ## 升级与旧数据
 
-[迁移](../../packages/server/src/store/execution-profile-migration.ts)保留旧成员与云友绑定，放开一个 Runtime 只能属于一个同 provider 组的限制。每份旧 Runtime/provider 连接独立导入为中央 Profile，不按名称或配置内容合并；API Key 解密后以中央 Profile 作用域重新加密，旧连接和凭据继续保留给既有任务快照。迁移要求原凭据和解密密钥完整可用，缺失时失败，不丢弃连接或回退明文。
+[迁移](../../packages/server/src/store/execution-profile-migration.ts)保留旧成员与 Agent 绑定，放开一个 Runtime 只能属于一个同 provider 组的限制。每份旧 Runtime/provider 连接独立导入为中央 Profile，不按名称或配置内容合并；API Key 解密后以中央 Profile 作用域重新加密，旧连接和凭据继续保留给既有任务快照。迁移要求原凭据和解密密钥完整可用，缺失时失败，不丢弃连接或回退明文。
 
 单成员旧组绑定该成员导入的 Profile 并转为受管组；成员都没有自定义连接的旧组转为 `profile_id: null` 的受管组。多成员组含不同连接时保留旧组的非受管调度语义，不擅自用一个 Profile 覆盖其他成员的连接。每个导入连接如果尚无受管组，迁移会为其建立绑定原 Runtime 的独立能力组，供集中编辑与使用；旧异构组不被静默替换。受管组必须等待新版 daemon 的当前配置确认才能接新任务，因此升级平台前应先升级各机器 CLI，平台升级后重启 daemon 并确认绑定 ready。
 
@@ -125,4 +125,4 @@ Profile 与组的写入要求人类工作区管理员身份；组修改还检查
 
 配置与下发可从上述 CLI 的读取结果、Runtime 绑定状态及 daemon WebSocket 快照检查；`tests/integration/central-profile-daemon-sync.test.ts` 覆盖真实连接的配置更新、凭据轮换与过期确认拒绝。文档检查使用 `npm run docs:test` 与 `npm run docs:check`；这些检查不代表真实模型调用成功。
 
-`tests/unit/multiremi/execution-group-configuration.test.ts` 覆盖组内原子保存、模型约束、回滚、共享连接更新和说明兼容。`tests/integration/execution-group-daemon.test.ts` 通过真实 API、WebSocket 和 daemon 验证 Claude/Codex 的默认与指定模型、凭据和隔离 Home，外部模型使用测试实现。`tests/integration/smoke-execution-configuration.ts` 驱动真实浏览器、Next 和临时数据库，覆盖独立入口、组内连接、搜索、版本确认、云友分组与模型切换及移动端；Windows 通过 Node 浏览器宿主避免 Bun 的 Chromium 管道问题。CI 的 `execution-configuration` job 在 PR 和完整检查中运行这些回归，并上传截图与失败诊断。
+`tests/unit/multiremi/execution-group-configuration.test.ts` 覆盖组内原子保存、模型约束、回滚、共享连接更新和说明兼容。`tests/integration/execution-group-daemon.test.ts` 通过真实 API、WebSocket 和 daemon 验证 Claude/Codex 的默认与指定模型、凭据和隔离 Home，外部模型使用测试实现。`tests/integration/smoke-execution-configuration.ts` 驱动真实浏览器、Next 和临时数据库，覆盖独立入口、组内连接、搜索、版本确认、Agent 分组与模型切换及移动端；Windows 通过 Node 浏览器宿主避免 Bun 的 Chromium 管道问题。CI 的 `execution-configuration` job 在 PR 和完整检查中运行这些回归，并上传截图与失败诊断。

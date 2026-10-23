@@ -725,7 +725,7 @@
   },
   "configuration": {
     "title": "能力配置",
-    "description": "为能力组配置连接并分配机器 Runtime。能力组会自动发现可用模型，再为云友选择能力组和模型。",
+    "description": "为能力组配置连接并分配机器 Runtime。能力组会自动发现可用模型，再为智能体选择能力组和模型。",
     "profiles": "连接 Profile",
     "groups": "能力组",
     "add_profile": "新建 Profile",
@@ -764,7 +764,7 @@
     "catalog_count": "可用模型：{{count}} 个",
     "discovered_models": "模型由此能力组的连接自动发现。",
     "native_models": "使用工作区网关或机器原生登录，可用模型取决于已分配的 Runtime。",
-    "model_selection_hint": "云友设置会从此能力组的模型目录中匹配模型。高级设置可指定默认模型或限制可选范围。",
+    "model_selection_hint": "智能体设置会从此能力组的模型目录中匹配模型。高级设置可指定默认模型或限制可选范围。",
     "no_compatible_runtimes": "暂无兼容的 Runtime。可以先创建能力组，再分配机器。",
     "members_hint": "一个 Runtime 可以加入多个能力组，各组使用自己选择的连接。",
     "save_group": "保存能力组",
@@ -773,7 +773,7 @@
     "all_providers": "全部引擎",
     "no_matches": "没有匹配的能力组。",
     "no_members": "尚未分配机器。分配兼容的 Runtime 并确认配置就绪后才能执行任务。",
-    "assign_agents": "在云友设置中分配能力组",
+    "assign_agents": "在智能体设置中分配能力组",
     "edit_connection": "编辑 Provider 与模型"
   },
   "storage": {

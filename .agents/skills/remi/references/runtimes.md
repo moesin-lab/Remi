@@ -13,7 +13,7 @@ Runtime 是某台 daemon 提供的执行能力，Agent 是工作区里配置的�
 
 ## 集中配置连接与能力组
 
-先在工作区配置可复用 Profile，再把 Profile 和机器上的 Runtime 绑定到能力组，最后让云友选择组。写入需人类工作区管理员权限；组成员还受 Runtime 编辑权限约束。task/daemon 凭据不能管理配置。自动扫描只发现引擎，不创建能力组。
+先在工作区配置可复用 Profile，再把 Profile 和机器上的 Runtime 绑定到能力组，最后让 Agent 选择组。写入需人类工作区管理员权限；组成员还受 Runtime 编辑权限约束。task/daemon 凭据不能管理配置。自动扫描只发现引擎，不创建能力组。
 
 先核对已有对象与当前命令参数：
 
@@ -24,7 +24,7 @@ remi runtime profile create --help
 remi runtime group create --help
 ```
 
-Codex 需要 Responses 兼容接口；Claude Code 需要 Anthropic Messages 兼容接口。核对协议、基础地址和鉴权；中央连接无需用户手填模型 ID，由能力组成员自动发现，再为云友选择目录中的模型。Codex 请求文件示例：
+Codex 需要 Responses 兼容接口；Claude Code 需要 Anthropic Messages 兼容接口。核对协议、基础地址和鉴权；中央连接无需用户手填模型 ID，由能力组成员自动发现，再为 Agent 选择目录中的模型。Codex 请求文件示例：
 
 ```json
 {
@@ -67,13 +67,13 @@ remi runtime group list --json
 remi runtime model catalog --execution-group <group-id> --json
 ```
 
-成员必须属于当前工作区并兼容组的 provider；一个 Runtime 可以加入多个组。`profile_id: null` 使用工作区 Relay / 原生连接，不继承旧的单 Runtime 自定义连接。组修改使用 `runtime group update <group-id> --file <group.json>`；云友通过 `agent update <agent-id> --execution-group <group-id>` 选择组，执行前核对用户要求的云友和目标。
+成员必须属于当前工作区并兼容组的 provider；一个 Runtime 可以加入多个组。`profile_id: null` 使用工作区 Relay / 原生连接，不继承旧的单 Runtime 自定义连接。组修改使用 `runtime group update <group-id> --file <group.json>`；Agent 通过 `agent update <agent-id> --execution-group <group-id>` 选择组，执行前核对用户要求的 Agent 和目标。
 
 读回配置和成员后，等待各机器确认当前 Profile revision，再用组目录查询核对自动发现的模型和推理选项。目录取各成员共同可用能力；空默认连接尚未发现时不能执行。待应用或失败的机器不能领取该受管组任务；在线不等于已应用，目录存在也不等于模型调用成功。任务首次领取冻结实际模型与连接快照，运行中任务不随配置变更切换。用户要求验证执行时再创建最小测试任务或 Chat，并检查终态。
 
 若密钥已配置在每台承载机器的 daemon 进程环境，使用 `auth_mode: "env"`，省略 `api_key`。Codex 的 `env_key` 必须为 `REMI_CODEX_*`，Claude 必须为 `REMI_CLAUDE_*`。运行管理 CLI 的终端变量不会自动进入远端或后台 daemon；修改环境时核对实际服务管理方式和重启影响。
 
-删除使用 `runtime profile delete <profile-id>` 或 `runtime group delete <group-id>`：仍被组引用的 Profile、仍被云友引用的组会拒绝删除。旧版单 Runtime 的 `runtime codex-profile get|set`、`runtime claude-profile get|set` 保留兼容，但不编辑中央组配置。迁移和下发契约见[执行配置](../../../../docs/dev/execution-configuration.md)。
+删除使用 `runtime profile delete <profile-id>` 或 `runtime group delete <group-id>`：仍被组引用的 Profile、仍被 Agent 引用的组会拒绝删除。旧版单 Runtime 的 `runtime codex-profile get|set`、`runtime claude-profile get|set` 保留兼容，但不编辑中央组配置。迁移和下发契约见[执行配置](../../../../docs/dev/execution-configuration.md)。
 
 ## 本地工作目录
 

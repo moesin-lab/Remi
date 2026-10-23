@@ -33,7 +33,7 @@
     "awaiting_human": "返信待ち",
     "failed": "直近の実行が失敗しました",
     "cancelled": "直近の実行は停止されました",
-    "completed": "直近の実行が完了 — レビュー待ち",
+    "completed": "直近の実行が完了しました",
     "active_count": "{{count}} 件の実行が進行中",
     "view": "実行を表示",
     "retry": "実行を再試行",

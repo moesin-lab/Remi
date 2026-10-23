@@ -77,7 +77,9 @@ describe("candidate release inputs and provenance", () => {
     wrong.labels = identity.builds.api.labels; wrong.args.MULTIREMI_VERSION = "v9.9.9";
     expect(() => ociDigest(join(f.directory, "api.oci.tar"), wrong)).toThrow("runtime version");
     writeFileSync(join(f.root, "evil"), "unsafe");
-    execFileSync("tar", ["-cf", join(f.root, "unsafe.tar"), "--transform=s|evil|../evil|", "-C", f.root, "evil"]);
+    const nested = join(f.root, "nested");
+    mkdirSync(nested);
+    execFileSync("tar", ["-cf", join(f.root, "unsafe.tar"), "-P", "-C", nested, "../evil"]);
     expect(() => ociDigest(join(f.root, "unsafe.tar"))).toThrow("Unsafe OCI");
   });
 

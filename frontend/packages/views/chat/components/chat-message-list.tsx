@@ -34,13 +34,14 @@ import type { AgentAvailability } from "@multiremi/core/agents";
 import type { ChatMessage, ChatPendingTask, TaskFailureReason } from "@multiremi/core/types";
 import { failureReasonLabel } from "../../agents/components/tabs/task-failure";
 import { TaskStatusPill } from "./task-status-pill";
-import { useTurnTrace } from "../../common/task-transcript/use-task-trace";
+import { useCachedTurnTraces, useTurnTrace } from "../../common/task-transcript/use-task-trace";
 import { TaskTraceDialog } from "../../common/task-transcript/task-trace-dialog";
 import { formatElapsedMs } from "../../common/format";
 import { extractCopyText } from "../lib/copy-text";
 import { finishedFoldHeader, isAwaitingHuman } from "../lib/turn-steps";
-import { isNonterminalTurn } from "../lib/turn-card";
+import { isNonterminalTurn, turnOutcomeShown, type TurnLogRow } from "../lib/turn-card";
 import { FinishedTurnSteps, LiveTurnSteps } from "./turn-steps-fold";
+import { useLiveTurnHandoff } from "./use-live-turn-handoff";
 import { SubagentCompletionRows } from "./subagent-completion-row";
 import { ChatRunningStrip } from "./subagent-running-strip";
 import { DoorbellRow } from "./doorbell-row";
@@ -49,9 +50,10 @@ import { isTraceLateSubagent, type TraceLateSubagent } from "@multiremi/contract
 import { useT } from "../../i18n";
 import { clientIdOf, mergeOptimisticChatRows, type OptimisticChatRow } from "../lib/optimistic-log";
 import { CHAT_COLUMN_CLASS } from "../lib/chat-column";
+import { leadingCommandChipMarkdown } from "../lib/leading-command";
 
 /** Bumped when Chat's row layout changes, so cached row heights from the old layout are misses. */
-const CHAT_LAYOUT_VERSION = ":chat-layout-v2";
+const CHAT_LAYOUT_VERSION = ":chat-layout-v3";
 /** The shared Chat column; the composer and the rows above it use the same one. */
 const CHAT_CONTENT_CLASS = `${CHAT_COLUMN_CLASS} py-6`;
 /**
@@ -120,8 +122,11 @@ function turnStepsRef(metadata: Record<string, unknown> | undefined, attemptId: 
   };
 }
 
-/** Row heights are cached per render version; an open fold is a different layout. */
-const STEPS_OPEN_VERSION = ":steps-open";
+/**
+ * Row heights are cached per render version; an open fold is a different
+ * layout. v2: the execution-log button left the fold for the reply's footer.
+ */
+const STEPS_OPEN_VERSION = ":steps-open-v2";
 
 const endedBadly = (status: string | null | undefined): status is "failed" | "cancelled" =>
   status === "failed" || status === "cancelled";
@@ -187,13 +192,6 @@ export function ChatMessageList({
   const { t: traceT } = useT("agents");
   const scrollRoot = useRef<HTMLElement | null>(null);
   const prependAnchor = useRef<{ id: string; top: number } | null>(null);
-  const previousAvailability = useRef(availability);
-  useLayoutEffect(() => {
-    if (previousAvailability.current === availability) return;
-    previousAvailability.current = availability;
-    const root = scrollRoot.current;
-    if (root?.dataset.stickState === "pinned") root.scrollTop = root.scrollHeight;
-  }, [availability]);
   const snapshot = useSyncExternalStore(
     useCallback(listener => replica.subscribe(sessionId, listener), [replica, sessionId]),
     useCallback(() => replica.getSnapshot(sessionId), [replica, sessionId]),
@@ -254,7 +252,8 @@ export function ChatMessageList({
       const question = row.kind === "message" && linkedQuestionId(row.id, row.metadata) ? ":question-line-v1"
         // A doorbell is one centered line, not a bubble (PR 6).
         : rowDoorbell(row) ? ":doorbell-v1" : "";
-      // The Chat column, bubble and turn rows changed size; old cached heights are misses.
+      // The Chat column, bubble and turn rows changed size, and the execution-log
+      // button moved into each reply's footer row; old cached heights are misses.
       const steps = openSteps.has(entry.id) ? STEPS_OPEN_VERSION : "";
       return { ...entry, render_version: `${entry.render_version ?? ""}${question}${CHAT_LAYOUT_VERSION}${steps}` };
     }), optimisticRows);
@@ -264,15 +263,25 @@ export function ChatMessageList({
   const doorbells = useMemo(() => doorbellTaskIds(snapshot.entries as ReadonlyArray<SessionLogEntry & { sender_type?: string | null; metadata?: unknown }>), [snapshot.entries]);
   const entryKey = useCallback((entry: SessionLogEntry) => clientIdOf(entry) ?? entry.id, []);
   const pendingTaskId = pendingTask?.task_id ?? null;
-  const pendingAlreadyPersisted = !!pendingTaskId && replica.getSnapshot(sessionId).entries.some((entry) => {
-    const row = entry as SessionLogEntry & { task_id?: string; metadata?: Record<string, unknown> };
-    return row.kind === "turn" && row.task_id === pendingTaskId
-      && !isNonterminalTurn(row.metadata);
-  });
+  const pendingTurnId = pendingTask?.turn_id ?? null;
+  const logRows = snapshot.entries as readonly TurnLogRow[];
+  // The running turn gives way once the log shows its outcome: a finished card
+  // with its reply row, a failure notice, or its completed reply row alone (the
+  // card can land seconds later; ChatWindow then reads the pending task again).
+  const pendingAlreadyPersisted = !!pendingTaskId && turnOutcomeShown(logRows, { taskId: pendingTaskId, turnId: pendingTurnId });
   const showLiveTimeline = !!pendingTaskId && !pendingAlreadyPersisted;
   // An optimistic pending id has no trace yet; the real id replaces it on dispatch.
   const liveTraceId = pendingTaskId?.startsWith("optimistic-") ? null : pendingTaskId;
   const liveTrace = useTurnTrace(liveTraceId, { enabled: visible && showLiveTimeline, live: true, turnId: pendingTask?.turn_id });
+  // The pending task moves on before the turn's rows land: its live view stays,
+  // frozen on its cached trace, until they do (or the handoff times out).
+  const heldTurns = useLiveTurnHandoff(sessionId, showLiveTimeline && liveTraceId ? { taskId: liveTraceId, turnId: pendingTurnId } : null, logRows);
+  const heldTraces = useCachedTurnTraces(heldTurns.map((turn) => turn.taskId));
+  // One keyed list, so a turn moving from live to held keeps its fold as it is.
+  const liveViews = [
+    ...heldTurns.map((turn, index) => ({ key: turn.taskId, trace: heldTraces[index]!, frozen: true })),
+    ...(showLiveTimeline ? [{ key: liveTraceId ?? "pending", trace: liveTrace, frozen: false }] : []),
+  ];
   // The pill says only what the steps fold cannot: the wait before the trace
   // has a turn (queued, dispatched, offline, the directory lock, preparation),
   // a read that failed or a legacy trace (no fold), and a wait on a person.
@@ -294,11 +303,12 @@ export function ChatMessageList({
       <ChatRunningStrip sessionId={sessionId} doorbells={doorbells}
         items={showLiveTimeline && liveTraceId ? liveTrace.items : undefined}
         source={showLiveTimeline && liveTraceId ? { sessionId, attemptId: liveTraceId, turnId: pendingTask?.turn_id, live: true } : null} />
-      <div className="flex h-10 items-center justify-center text-xs text-muted-foreground max-md:h-12">
-        {hasOlderMessages ? <button type="button" data-chat-earlier disabled={!visible || isFetchingOlderMessages}
+      {/* Empty at the start of the chat, but kept: the row sets the top spacing. */}
+      <div data-chat-earlier-row className="flex h-10 items-center justify-center text-xs text-muted-foreground max-md:h-12">
+        {hasOlderMessages && <button type="button" data-chat-earlier disabled={!visible || isFetchingOlderMessages}
           onClick={loadOlder} className="h-full hover:text-foreground">
           {isFetchingOlderMessages ? t(($) => $.message_list.loading_older) : t(($) => $.message_list.expand_older)}
-        </button> : t(($) => $.message_list.earliest)}
+        </button>}
       </div>
     </>}
     renderEntry={({ entry }) => {
@@ -339,10 +349,11 @@ export function ChatMessageList({
       const stepsRef = card ? card.steps : row.kind === "turn" && !isPush ? turnStepsRef(row.metadata, row.task_id) : null;
       // A failed or cancelled turn's notice carries its own execution log.
       const endNotice = !!(card && endedBadly(card.status)) || !!(turnId && endedBadly(turnStatus));
+      // The execution log is never in the fold: the reply's footer row or the
+      // end notice carries it, in one place whether or not there are steps.
       const stepsFold = stepsRef ? <FinishedTurnSteps attemptId={stepsRef.attemptId} turnId={stepsRef.turnId} sessionId={sessionId}
         header={finishedFoldHeader(stepsRef)} visible={visible} open={openSteps.has(row.id)}
-        onOpenChange={(open) => setStepsOpen(row.id, open)}
-        footer={endNotice ? undefined : <ChatTraceButton taskId={stepsRef.attemptId} turnId={stepsRef.turnId} visible={visible} />} /> : null;
+        onOpenChange={(open) => setStepsOpen(row.id, open)} /> : null;
       // Subagents that finished after the reply started: rows under the reply,
       // read from the card (MUL-472: no trace until the reader opens one).
       const lateRef = card ? (card.attemptId && card.lateSubagents ? { attemptId: card.attemptId, turnId: card.turnId, late: card.lateSubagents } : null)
@@ -372,7 +383,7 @@ export function ChatMessageList({
       </div>;
     }}
     footer={<div className="space-y-4 pb-4">
-      {showLiveTimeline && <LiveTurnSteps key={liveTraceId ?? "pending"} trace={liveTrace} sessionId={sessionId} />}
+      {liveViews.map((view) => <LiveTurnSteps key={view.key} trace={view.trace} sessionId={sessionId} frozen={view.frozen} />)}
       {showLiveTimeline && liveTrace.error && <div role="alert" className="text-xs text-destructive">{traceT(($) => $.transcript.trace_failed)}</div>}
       {showStatusPill && pendingTask && <TaskStatusPill pendingTask={pendingTask}
         items={liveTrace.items} availability={availability} resolveChat={resolveChat} />}
@@ -414,6 +425,7 @@ function MessageBubble({ message, isPending, isPush, visible, trace = null, step
 }) {
   if (message.role === "user") {
     const markdown = message.content;
+    const rendered = leadingCommandChipMarkdown(markdown);
     return (
       <div className="flex justify-end">
         <div className="max-w-[70%] break-words rounded-[22px] bg-muted px-4 py-2.5 text-sm">
@@ -422,7 +434,7 @@ function MessageBubble({ message, isPending, isPush, visible, trace = null, step
            * Neutralise prose's leading/trailing margin so single-line
            * bubbles stay as compact as the plain-text version used to. */}
           <div className="prose prose-sm dark:prose-invert max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-            <Markdown attachments={message.attachments}>{markdown}</Markdown>
+            <Markdown attachments={message.attachments}>{rendered}</Markdown>
           </div>
           <AttachmentList
             attachments={message.attachments}
@@ -459,16 +471,16 @@ function AssistantMessage({
 
   // Legacy failure bubble: an assistant row written by the server's FailTask
   // fallback before turns carried their own status. Canonical failed turns
-  // render TurnEndNotice instead.
+  // render TurnEndNotice instead. Like that notice, a failure keeps its
+  // execution log visible; it sits in the footer row, where a reply has it.
   if (message.failure_reason) {
     return (
-      <div className="w-full space-y-1.5"><FailureBubble
+      <FailureBubble
         reason={message.failure_reason}
         rawError={message.content}
         elapsedMs={message.elapsed_ms}
+        trace={traceRef ? <ChatTraceButton taskId={traceRef.taskId} turnId={traceRef.turnId} visible={visible} /> : null}
       />
-        {traceRef && <ChatTraceButton taskId={traceRef.taskId} turnId={traceRef.turnId} visible={visible} />}
-      </div>
     );
   }
 
@@ -487,8 +499,8 @@ function AssistantMessage({
       <MessageFooter
         message={message}
         isPending={isPending}
-        // The steps fold carries the execution log for the turns that have one.
-        trace={traceRef && !steps
+        // Every reply keeps its execution log here, with or without a steps fold.
+        trace={traceRef
           ? <ChatTraceButton taskId={traceRef.taskId} turnId={traceRef.turnId} visible={visible} quiet /> : null}
       />
     </div>
@@ -618,9 +630,10 @@ function NotWokenHint({ wakeApplied, wakeReason }: { wakeApplied?: string | null
 }
 
 // Inline footer row beneath the assistant reply: "Replied in 38s · [Copy] [Log]".
-// The elapsed caption always shows; the actions appear on hover or keyboard
-// focus (see REVEAL_ON_ROW). Copy is suppressed during streaming because the
-// final text is still being appended.
+// The one place a reply's execution log sits, with or without a steps fold
+// above the reply. The elapsed caption always shows; the actions appear on
+// hover or keyboard focus (see REVEAL_ON_ROW). Copy is suppressed during
+// streaming because the final text is still being appended.
 function MessageFooter({
   message,
   isPending,
@@ -633,7 +646,7 @@ function MessageFooter({
   const showCopy = !isPending;
   if (message.elapsed_ms == null && !showCopy && !trace) return null;
   return (
-    <div className="flex min-h-6 items-center gap-1.5">
+    <div data-chat-message-footer className="flex min-h-6 items-center gap-1.5">
       {message.elapsed_ms != null && (
         <ElapsedCaption variant="replied" elapsedMs={message.elapsed_ms} />
       )}
@@ -712,10 +725,13 @@ function FailureBubble({
   reason,
   rawError,
   elapsedMs,
+  trace,
 }: {
   reason: string;
   rawError: string;
   elapsedMs?: number | null;
+  /** The execution-log button, after the elapsed caption as in a reply's footer. */
+  trace?: React.ReactNode;
 }) {
   const { t } = useT("chat");
   const [open, setOpen] = useState(false);
@@ -756,8 +772,11 @@ function FailureBubble({
           )}
         </div>
       </div>
-      {elapsedMs != null && (
-        <ElapsedCaption variant="failed" elapsedMs={elapsedMs} />
+      {(elapsedMs != null || trace) && (
+        <div data-chat-message-footer className="flex min-h-6 items-center gap-1.5">
+          {elapsedMs != null && <ElapsedCaption variant="failed" elapsedMs={elapsedMs} />}
+          {trace}
+        </div>
       )}
     </div>
   );

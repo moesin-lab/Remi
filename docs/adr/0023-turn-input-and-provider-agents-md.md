@@ -58,6 +58,7 @@
      - Antigravity 保持原来的 `.agents/skills`。
      - Grok 在 daemon 自有执行目录使用原生 `.grok/skills`；工作目录是用户自己的文件夹时同步到 Remi 私有 provider home 的 `skills`。adapter 仅为 `.remi-skills.json` 记录的合法受管目录生成名称与 `SKILL.md` 路径索引，追加到 `initialize._meta.rules`，不内联正文，不索引未受管目录或符号链接。Runtime 工作区原有 `.grok/skills` 的索引仍在本地上下文里。
    - 每个 Skill 整体重写；Agent 不再拥有的 Skill 按清单 `.remi-skills.json` 删除。只写入、只删除 Remi 创建并记入清单的目录：目录里原有的同名 Skill（provider 自带、agent 或用户自己的）原样保留，Remi 的同名 Skill 不装。
+   - [ADR 0025](0025-chat-slash-commands.md) 决策 7 修订：Remi 生成的 `SKILL.md` 的 `name` 写目录名而不是平台上的显示名，`/目录名`（Codex 是 `$目录名`）就能调用；名字含非 ASCII 字符的 Skill 目录名带上名字的短哈希，原名写在 `description` 开头。
    - Codex 0.163 总会加载用户的 `$HOME/.agents/skills`，没有关闭整个目录的开关。因此普通非绑定会话的 `config.toml` 每次启动都按路径为其中每个 Skill 写 `[[skills.config]] enabled = false`，`HOME` 不变。显式绑定 Runtime 工作区的 Codex 不执行此禁用，沿用用户的启用状态和预算；额外 Skill 通过原生目录或受管链接发现。
 
 6. **工作区与 Project 的提示词各合成一份。**

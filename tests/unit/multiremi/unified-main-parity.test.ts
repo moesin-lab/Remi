@@ -278,4 +278,4 @@ pendingTurnBackendTests('MUL-508 main parity', fixture => {
     expect(store.listIssueActivity(parent.id).find(row=>row.type==='child_done_parent_skipped')?.data).toMatchObject({reason:'agent_unavailable',outcome:'blocked'});
   });
 
-});
+}, { isolation: "snapshot" });

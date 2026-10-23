@@ -293,4 +293,4 @@ for (const mode of ["sql", "openviking"] as const) test(`Wiki offers read metada
     expect((await response.json() as any).doc.body).toBe(body);
   }
 });
-});
+}, { isolation: "snapshot", file: import.meta.path });

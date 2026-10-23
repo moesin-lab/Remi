@@ -67,7 +67,7 @@ describe("release workflows", () => {
     expect(ci.jobs["runtime-platform"].strategy.matrix.os).toEqual(["ubuntu-latest", "macos-latest"]);
     expect(JSON.stringify(ci)).toContain("runtime prepare --provider claude --provider codex");
     expect(ci.on).toHaveProperty("workflow_dispatch");
-    expect(ci.jobs.backend.strategy.matrix.shard).toEqual([0, 1, 2, 3]);
+    expect(ci.jobs.backend.strategy.matrix.shard).toBe("${{ fromJSON(needs.backend-plan.outputs.shards) }}");
     const backend = ci.jobs.backend.steps.find((step: any) => step.name === "Backend test shard");
     expect(ci.jobs["backend-plan"].if).toBe("github.event_name != 'pull_request'");
     expect(backend.run).toContain("scripts/ci-backend.ts run --plan");
@@ -103,7 +103,16 @@ describe("release workflows", () => {
   });
   test("parallel backend remains an exact-coverage gate with independent services", () => {
     const ci = readWorkflow("release-build-check.yml");
-    expect(ci.jobs.backend.strategy.matrix.shard).toEqual([0, 1, 2, 3]);
+    // One shard count: the plan step owns it and the matrix is the plan's own indices.
+    const planJob = ci.jobs["backend-plan"];
+    expect(Number.isInteger(planJob.env.BACKEND_SHARDS) && planJob.env.BACKEND_SHARDS > 1).toBe(true);
+    const planStep = planJob.steps.find((step: any) => step.id === "plan");
+    expect(planStep.run).toContain('scripts/ci-backend.ts plan --sha "$GITHUB_SHA" --shards "$BACKEND_SHARDS" --out ci-backend/plan.json');
+    expect(planStep.run).toContain("jq -c '[.shards[].index]' ci-backend/plan.json");
+    expect(JSON.stringify(ci).match(/--shards/g)).toHaveLength(1);
+    expect(planJob.outputs.shards).toBe("${{ steps.plan.outputs.shards }}");
+    expect(ci.jobs.backend.needs).toBe("backend-plan");
+    expect(ci.jobs.backend.strategy.matrix).toEqual({ shard: "${{ fromJSON(needs.backend-plan.outputs.shards) }}" });
     expect(ci.jobs.backend.strategy["fail-fast"]).toBe(false);
     expect(ci.jobs.backend.services.postgres.image).toBe("pgvector/pgvector:pg17");
     const shard = ci.jobs.backend.steps.find((step: any) => step.name === "Backend test shard");
@@ -112,6 +121,8 @@ describe("release workflows", () => {
     expect(ci.jobs.build.if).toBe("always()");
     expect(ci.jobs.build.needs).toContain("backend-evidence");
     expect(ci.jobs.build.needs).toContain("backend-retry");
+    // `build` is the aggregate gate: every other job except the candidate packager feeds it.
+    expect([...ci.jobs.build.needs].sort()).toEqual(Object.keys(ci.jobs).filter(name => !["build", "candidate-package"].includes(name)).sort());
     const summary = ci.jobs.build.steps[0].run;
     expect(summary).toContain("result == expected");
     expect(summary).toContain("full-with-retry");
@@ -171,6 +182,9 @@ describe("release workflows", () => {
       expect(image.with.outputs).toContain("oci-mediatypes=true");
       expect(image.with.outputs).toContain("needs.guards.outputs.candidate == 'true'");
       expect(image.with.labels).toContain("org.opencontainers.image.revision=${{ github.sha }}");
+      // Pull requests read the shared layer cache but never export to it.
+      expect(image.with["cache-from"]).toBe(`type=gha,scope=platform-${kind}`);
+      expect(image.with["cache-to"]).toBe(`\${{ github.event_name != 'pull_request' && 'type=gha,scope=platform-${kind},mode=max' || '' }}`);
     }
     const platform = readWorkflow("platform-release.yml");
     expect(JSON.stringify(platform)).not.toContain("Publish verified candidate images without rebuilding");

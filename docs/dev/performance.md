@@ -311,7 +311,7 @@ MUL-367 的脚本量的是「H1 出现、骨架归零」，因此它看不见内
 | `data-perf-state` | `data-tab-scroll-root` | `pending` \| `ready` \| `ready-forced` | `useAnchoredReveal`（[frontend/packages/views/common/use-anchored-reveal.ts](../../frontend/packages/views/common/use-anchored-reveal.ts)），S1 与 `useStickToBottom` 不写 |
 | `data-perf-fresh` | 同上 | `0` \| `1` | 同上；消费方传 `fresh`（`undefined` 时不写并移除该属性） |
 
-`data-perf-state` 是**只读**契约：S1 应用侧不写它（没有 hook 就写死 `ready` 是假数据，会让 S7 的断言空过）。记录器在浏览器内用 `MutationObserver` 抓它的变化时间戳，不从 Node 侧轮询；属性不存在时 `appReadyMs` 为 `null`，且**永远不作为终点**。写入方无权改名、改宿主或改取值。
+`data-perf-state` 是**只读**契约：S1 应用侧不写它（没有 hook 就写死 `ready` 是假数据，会让依赖它的就绪断言空过）。记录器在浏览器内用 `MutationObserver` 抓它的变化时间戳，不从 Node 侧轮询；属性不存在时 `appReadyMs` 为 `null`，且**永远不作为终点**。写入方无权改名、改宿主或改取值。
 
 `data-perf-fresh` 是**新鲜度**位，只有 `useAnchoredReveal` 写它，消费方传 `fresh`；`undefined` 时不写并移除该属性（今天 main 上还没有任何消费方传它）。记录器按「属性在不在」分两套口径：
 
@@ -398,9 +398,9 @@ MUL-367 的脚本量的是「H1 出现、骨架归零」，因此它看不见内
 
 探测按原 opaque next_cursor 分页；测量只使用已准备第一页的 message ID。报告记录 inboxApiPage、inboxInjected、inboxApiIndex 与 inboxDomRowIndex。点击不发已读请求，所以 inboxPageRequestsBeforeStub 在没有桩写时为 null，不能解释为 0 次加载。
 
-CI 的 `detail-deeplink` 通过 `/inbox?item=<messageId>` 打开消息详情，读取 `/api/messages/:id`，以 `[data-inbox-message]` 为锚点。该页面使用工作区事件连接，不订阅 Issue 的 `log:` 流；收尾必须收到真实的 `auth_ack`，其他 Issue 详情场景仍必须收到 `stream.ack`。报告的 `hubAckType` 记录本轮要求的确认帧，`hubAckSeen` 记录是否收到；两类场景均继续要求 API 无在途请求、API/WS 连续静默 500 ms，并保留零跳动、目标锚点、无骨架及 `ready/fresh=1` 检查。
+原 S7 CI 检查（2026-10-21 已删除，见下文「CI 零跳动检查（已删除）」）的 `detail-deeplink` 通过 `/inbox?item=<messageId>` 打开消息详情，读取 `/api/messages/:id`，以 `[data-inbox-message]` 为锚点。该页面使用工作区事件连接，不订阅 Issue 的 `log:` 流；收尾必须收到真实的 `auth_ack`，其他 Issue 详情场景仍必须收到 `stream.ack`。报告的 `hubAckType` 记录本轮要求的确认帧，`hubAckSeen` 记录是否收到；两类场景均继续要求 API 无在途请求、API/WS 连续静默 500 ms，并保留零跳动、目标锚点、无骨架及 `ready/fresh=1` 检查。
 
-`detail-f398` 的溢出夹具使用 20 个独立 agent 的排队轮，避免同一 agent/session 的请求按单一待处理轮规则合并。检查仍要求全部 20 行在固定槽内呈现且最后一行可滚动到达。
+`detail-f398` 的溢出夹具使用 20 个独立 agent 的排队轮，避免同一 agent/session 的请求按单一待处理轮规则合并。该检查当时要求全部 20 行在固定槽内呈现且最后一行可滚动到达。
 
 ### 场景矩阵与参数
 
@@ -447,56 +447,20 @@ schema 2 的 **cold** 行两边都以文档 origin 起算，照常配对；两�
 
 本地端到端（不需要生产凭证）用 [tests/manual/mul384-perf-harness.ts](../../tests/manual/mul384-perf-harness.ts)：起内存 SQLite 的 API + 本地 web，铸造本地 PAT 注入 `MULTIREMI_QA_WEB_TOKEN`，跑完全部场景并 grep 产物确认 0 个 token 泄漏。**不要把生产凭证用于本地。** 它跑的是 `next dev`：首个访问的路由要现场编译（实测 `/[slug]/inbox` 首次 17.6 s），会撞 20 s 的单轮超时，所以 harness 传 `--warmup`，先对每个场景各访问一次再开始测量。**`--warmup` 只是本地 dev 服务器的让步**：209 跑的是构建产物，没有现场编译，生产基线的数字不含这一步。
 
-## CI 零跳动检查（MUL-394 / MUL-383 S7）
+## CI 零跳动检查（已删除）
 
-[tests/integration/zero-jump-check.ts](../../tests/integration/zero-jump-check.ts) 把上面这套口径搬进 CI：内存 SQLite 起 API（`startMultiremiServer`，fixture 见 [tests/integration/zero-jump-fixture.ts](../../tests/integration/zero-jump-fixture.ts)：短 issue 3 条评论、长 issue 250 条含 20 个代码块与 5 张图片并分 3 个 session、一个带消息的 running task、一条指向长 issue 第 40 条评论的 inbox 深链），`next build` + `next start` 起 web，Playwright + Chromium 驱动同一个浏览器侧记录器，每行跑 3 次。**只断言结构量**（`jumps = 0`、anchor 完整可见、骨架为 0、就绪状态合格），不断言毫秒数。
+2026-10-21 按用户决定，CI 的 `frontend-zero-jump` job 与它运行的 `tests/integration/zero-jump-check.ts`（MUL-394 / MUL-383 S7）整体删除，没有迁到其他 job。它在内存 SQLite 上起 API，以生产模式构建并启动 Next，再用 Chromium 冷启动或从 Issue 列表、收件箱深链进入 Issue 详情（短/长评论、运行中任务、图片、侧栏宽度等场景），每行跑 3 次，只断言结构量（跳动为 0、锚点完整可见、无骨架、`data-perf-state=ready`），不断言毫秒数。删除时它每次约 9 分钟，是 PR CI 中耗时最长的一项；自 2026-10-09 起最近 200 次运行没有失败过，且不覆盖 Chat。
 
-两条容易踩的实现事实：
+随它删除的只有它独用的部分：图片用例 `zero-jump-image-cases.ts`、揭示前波次分组 `zero-jump-waves.ts`、详情页几何断言 `issue-detail-layout-assertions.ts`、已知失败清单 `zero-jump-known-failures.json` 与判定模块 `frontend/scripts/perf/lib/zero-jump-verdict.ts`、这两部分的单测和 `tests/manual/zero-jump-wave-mutation.ts`，以及清单棘轮用的冻结基线 `reports/performance/MUL-394-zero-jump-strict-main-2026-09-26.json`。需要时可从版本历史取回。
 
-MUL-395 的图片回归由 [zero-jump-image-cases.ts](../../tests/integration/zero-jump-image-cases.ts) 扩展 fixture：真实 640×240 PNG 的晚到、404、canonical 元素锚点，以及有尺寸/快速加载对照。晚到请求以第一次正常揭示为条件屏障释放，图片和行高前后必须一致；位置仍由原收集器和零跳动判定检查。五类用例默认进入 CI，`--only detail-image-late` 等可以定向运行，关闭 SSR cookie 可复核 CSR。不改原 fixture 延迟或 allowlist。
+仍然保留的：
 
-`detail-f398::cold` 默认进入同一 CI：带 `#` 标题的长描述、20 段正文、4 条评论、20 条 queued dispatch、60 次标题/优先级更新，覆盖延后挂载的多任务 footer。任务槽保持 64px，更多任务在槽内滚动，避免揭示后的挂载触发外层贴底补偿。回归沿用完整锚点与零跳动判定，并验证空槽和 20 行挂载后的高度相同、所有行保留且末行可滚到。活动偏好关闭是默认；`--only detail-f398-system-details` 验证打开偏好，`--no-ssr-cookie` 验证 CSR。
+- [ADR 0008](../adr/0008-issue-detail-anchored-reveal-and-stick-to-bottom.md) 的设计规则（先隐藏、一次定位、此后贴底；首个含真实内容的帧就是最终位置，之后到达的内容不能移动视口）继续有效，只是不再由 CI 强制。改详情页、日志列表、揭示门禁或图片占位时，用本页的 S1 测速和下面的会话日志检查手动复核。
+- 共用夹具 [zero-jump-fixture.ts](../../tests/integration/zero-jump-fixture.ts)：`chat-log-check.ts`、`issue-log-check.ts`、`task-trace-dialog-check.ts`、`durable-trace-browser-check.ts` 与若干 `tests/manual/mul395-*` 脚本仍在使用，单测也保留。
+- 浏览器侧记录器、选择器和 `data-perf-*` 契约：S1 [page-speed.ts](../../frontend/scripts/perf/page-speed.ts)、会话日志检查与 `perf-jump-recorder` 单测仍使用它们；`useAnchoredReveal` 写入的 `data-perf-state` / `data-perf-fresh` 不变。
+- `reports/performance/` 下 MUL-390、MUL-395、MUL-444 等历史报告原样保留，例如 MUL-390 合入后 9 行 × 3 轮全部 0 违例的 strict 实测 [MUL-390-zero-jump-strict-2026-09-27.json](../../reports/performance/MUL-390-zero-jump-strict-2026-09-27.json)。报告里出现的 `zero-jump-check.ts` 命令只是当时的记录，现在已不能直接运行。
 
-- **`REMOTE_API_URL` 是构建期烘焙的。** Next 把 `/api/*` 的 rewrite 目标写进 `.next/routes-manifest.json`，`next start` 时再设 env 不会改变它。所以检查必须**先固定 API 端口、再 build、最后 start**（写完第一版后才实测到：`next start` 带着新 `REMOTE_API_URL` 仍代理到 build 时的端口，所有 API 都是 500）。
-- **消息深链的 URL 为 `/{slug}/inbox?item=<message_id>`**，使用 `target-message` anchor。独立详情深链使用 `/issues/:id?comment=…`，由 SSR/CSR locate 窗口提供目标锚点；`detail-locate` 和 `detail-image-element` 单独验证该路径。
-
-### 已知失败清单与判定规则
-
-曾经必然失败的行写在 [tests/integration/zero-jump-known-failures.json](../../tests/integration/zero-jump-known-failures.json)：**行 = `<场景 key>::<cold|warm>`**（沿用 `report.ts` 里 `--compare` 的配对键），每行显式列出它还被允许出现的违例类型（`jumps` / `anchor` / `skeleton` / `perf-state`）。判定是纯函数（[lib/zero-jump-verdict.ts](../../frontend/scripts/perf/lib/zero-jump-verdict.ts)），四条规则：
-
-1. 行不在清单，出现任何违例 → 失败。
-2. 行在清单，出现该行没列出的类型 → 失败（「已经过的部分」由此立刻受保护）。
-3. 行在清单，某个列出的类型 3 次都没出现 → 失败，提示从该行删掉这个类型、类型删空就删整行。只出现 2/3 次不触发。
-4. `--strict` 忽略清单，所有行都按规则 1 判。
-
-**清单对冻结基线的方向是单向的：只能收紧，不能放宽。** `allowlistWithinBaseline()`（[lib/zero-jump-verdict.ts](../../frontend/scripts/perf/lib/zero-jump-verdict.ts)）逐行检查：清单里的 `key::mode` 必须出现在 strict 基线报告里，且该行的 `violations` 必须是基线中该行类型的**子集**；少行、少类型都允许。反向（新增一行、给已有行加一个基线里没有的类型）会失败。
-
-- 收紧（修好一个类型就删掉它、类型删空就删整行）**不需要**改基线报告，单测保持绿——这正是规则 3 要推动的动作，由「清理者」在修复合入的 PR 里顺手做掉。
-- 要**新增**行或类型，必须在同批提交里附上新的 strict 报告（`reports/performance/MUL-394-zero-jump-strict-main-<日期>.json`），并更新 `tests/unit/scripts/zero-jump-verdict.test.ts` 里引用的基线路径。否则棘轮会拦住它。
-
-「与当轮运行是否一致」由检查本体在每次 CI 运行时判定（规则 a–c，`judgeZeroJumpRun`）；单测只防清单超出基线，不重复前者。规则 3 只在默认模式生效——它就是「MUL-443 / MUL-393 修好之后顺手清掉自己那几行」的机制。
-
-**清单现在是空的**（MUL-390，2026-09-27）。`useAnchoredReveal` 接入详情页后，9 行在 strict 下全部 0 违例，于是按规则 3 删掉整份清单，删空的记录留在 `tests/integration/zero-jump-known-failures.json` 的 `empty` 字段里。此后任何一行出现任何违例都会按规则 1 直接让 job 变红；新增行必须同批附新的 strict 基线报告。`rows` 为空是清单的终态，`tests/unit/scripts/zero-jump-verdict.test.ts` 里对应两处「行数必须为正」的断言因此删除（MUL-390 执行方案 2/3 的 R1）。
-
-「localStorage 里有非默认侧栏布局」那一轮刻意用**独立的 `detail-long-sidebar::cold`**，不与 `detail-long` 共键：它触发的是另一条机制（[sidebar.tsx](../../frontend/packages/ui/components/ui/sidebar.tsx) 在 `useEffect` 里恢复宽度，首帧之后才改正文宽度），共键会让清单表达不了「长 issue 已修、侧栏轮还没修」。
-
-**这一轮只跑 cold，不跑 warm。** 侧栏宽度是在整页加载时从 `localStorage` 恢复的；warm 轮先进的是列表页，那时侧栏已经按非默认宽度恢复好了，进入详情页不再发生宽度变化，因此 warm 轮等价于 `detail-long::warm`，测不到这个机制。QA 另起探针按同一记录器口径实测 3 次 warm（`sidebar_width=360`，真实点击进入长 issue）：`jumps = 0/0/0`、骨架 0、宽度三轮都保持 360（MUL-394 `cmt_48kfa37phg9x`）。结论一致，故不把 warm 加进矩阵。
-
-### 运行方式
-
-```text
-bun run tests/integration/zero-jump-check.ts                      # 默认：清单模式，CI 门禁用
-bun run tests/integration/zero-jump-check.ts --strict             # 忽略清单：证明「未修复代码上会失败」
-bun run tests/integration/zero-jump-check.ts --only detail-long --rounds 1   # 单场景排查
-```
-
-`--skip-build` 复用已有 `.next`；`--api-port` / `--web-port` 固定端口（注意上面的构建期烘焙）；`--out` 指定报告路径。报告是记录器 JSON，含每轮 `jumps` / `anchorRectAtReady` / `skeleton` 数与清单判定结论。
-
-**当前 strict 实测**（MUL-390 分支：`43d75571` + MUL-450 合入 main 后的 `3b2406e4`，3 次/行）存于 [reports/performance/MUL-390-zero-jump-strict-2026-09-27.json](../../reports/performance/MUL-390-zero-jump-strict-2026-09-27.json)：9 个 `key::mode` 行、27 轮全部 `jumps=0`、anchor 完整可见、骨架 0、`data-perf-state=ready`，没有任何 `ready-forced`。该 JSON 同时是 MUL-443 / MUL-444 / MUL-393 前后对比的「后」基线；本单合入 main 后它即 main 的 strict 基线。（报告里的 `commit` 是记录它时分支的 head。）
-
-同一分支的默认（清单）模式在本地与 CI 各跑一次，都是 9 行 × 3 轮 0 违例：本地 [reports/performance/MUL-390-zero-jump-default-local-2026-09-27.json](../../reports/performance/MUL-390-zero-jump-default-local-2026-09-27.json)，CI 的 `frontend-zero-jump` job 产物 [reports/performance/MUL-390-zero-jump-default-ci-2026-09-27.json](../../reports/performance/MUL-390-zero-jump-default-ci-2026-09-27.json)。
-
-### 会话日志列表自己的零跳动检查（MUL-443）
+## 会话日志列表的零跳动检查（MUL-443，手动运行）
 
 [tests/integration/zero-jump-session-log-check.ts](../../tests/integration/zero-jump-session-log-check.ts) 测的是新的平铺会话日志列表（`frontend/packages/views/common/session-log/`），不是详情页。它对应用例里点名的三种扰动各跑 3 轮：
 
@@ -515,8 +479,6 @@ bun run tests/integration/zero-jump-session-log-check.ts
 ```
 
 报告写在 `reports/performance/MUL-443-session-log-zero-jump.json`。三条踩过的坑写在检查文件头注释里：合成 `WheelEvent` 只触发监听、不产生滚动；Chrome 自身的 scroll anchoring 会冒充应用的同帧补偿（夹具显式 `overflow-anchor:none`）；在两次 `page.evaluate` 之间做的扰动落在下一帧采样之前，记录器永远看不到变化（扰动改为在 rAF 回调里做）。还有一个探测能力边界：`jump-recorder` 把任何 >1px 的 `scrollTop` 变化都记为跳动，因此它无法区分「补偿式贴底」与「真跳动」；贴底补偿由 MUL-450 的 hook 单测覆盖，本检查不去断言它。
-
-**前基线**（`4248ef07`）仍存于 [reports/performance/MUL-394-zero-jump-strict-main-2026-09-26.json](../../reports/performance/MUL-394-zero-jump-strict-main-2026-09-26.json)：9 行全部失败，其中 8 行只有 `perf-state`，`detail-deeplink::cold` 另有 `jumps`（每次 1 跳、内容位移 8359.8 px、滚动 2450 px）。
 
 ## 优化不能破坏的约束
 
@@ -625,7 +587,7 @@ HTTP 或 app.request p50/p95（ms） / 错误率 / SQL数 / 响应 bytes：
 
 S1 的 `--ssr-cookie` 默认开启，仅在目标 origin 的浏览器内存 context 设置 HttpOnly `multimira_auth`；`--no-ssr-cookie` 用于 CSR 对照。开关不代表播种成功，逐轮以实际日志 DOM 的 seed 标记报告 SSR/CSR。`renderMs` 只量目标 Session 的窗口 `responseEnd` 到首次正常 fresh 揭示，warm 沿用 click 原点；SSR seed 没有浏览器窗口 responseEnd，缺观测或 forced 揭示记 null 并说明原因。各来源单列分位数；compare 不对不同 Cookie/实际来源或混合来源做差。
 
-S7 整轮等待延后 API 与真实 Hub `stream.ack` 处理安静后才统计回读、附件和跳动。CI 的揭示前波次由 [zero-jump-waves.ts](../../tests/integration/zero-jump-waves.ts) 按在飞区间分组：请求直接或经其他请求重叠时为同一波，上一波全部结束后发出的请求才开下一波，结束与开始同一时刻视为不重叠；链路用每波最后结束的请求连接。S1 测速的 `computeWaves` 与 8ms 容差保持原样，历史数字仍可对比，S7 的新波次不能与旧口径直接做差。SSR 普通详情 warm 的揭示前波次 ≤2 为阻塞项；日志提前与去重后的 CSR warm 以 ≤2 为目标，未达到时逐波保留链路与原因，10/9 生产 S1 决定最终达标。cold、运行中 warm 和收件箱未读通知深链 warm 的波次只记录，保留逐请求及逐波链路；这些场景的回读=0、同附件 content≤1、跳动=0 和非强制揭示仍严格检查。`detail-locate` 验证独立详情 `?comment`，`detail-child` 验证带父 Issue 的详情，均可分别跑 SSR/CSR。150ms 渲染目标仅记录，剩余同步布局/面板注册热点不在本批改动范围内。
+以下 S7 口径记录的是 2026-10-21 删除前的 CI 检查。S7 整轮等待延后 API 与真实 Hub `stream.ack` 处理安静后才统计回读、附件和跳动。CI 的揭示前波次由当时的 `zero-jump-waves.ts` 按在飞区间分组：请求直接或经其他请求重叠时为同一波，上一波全部结束后发出的请求才开下一波，结束与开始同一时刻视为不重叠；链路用每波最后结束的请求连接。S1 测速的 `computeWaves` 与 8ms 容差保持原样，历史数字仍可对比，S7 的新波次不能与旧口径直接做差。SSR 普通详情 warm 的揭示前波次 ≤2 为阻塞项；日志提前与去重后的 CSR warm 以 ≤2 为目标，未达到时逐波保留链路与原因，10/9 生产 S1 决定最终达标。cold、运行中 warm 和收件箱未读通知深链 warm 的波次只记录，保留逐请求及逐波链路；这些场景的回读=0、同附件 content≤1、跳动=0 和非强制揭示仍严格检查。`detail-locate` 验证独立详情 `?comment`，`detail-child` 验证带父 Issue 的详情，均可分别跑 SSR/CSR。150ms 渲染目标仅记录，剩余同步布局/面板注册热点不在本批改动范围内。
 
 
 ## Chat 切换
@@ -663,9 +625,62 @@ Markdown 解析缓存（[markdown-tree.ts](../../frontend/packages/ui/markdown/m
 
 这组日志池数字高于上表，是机器负载不同所致，只在同一组内比较。再次访问的主线程工作从约 60ms 降到约 34ms，其中 Markdown 解析从约 23ms 降到 1ms 以下；剩余主要是输入框编辑器切换、揭示时的布局读取、代码块的 `useTranslation` 和 React 工作。
 
+## Chat 回复交接
+
+**本地模型，不是生产数据。** [chat-reply-handoff-probe.ts](../../tests/manual/chat-reply-handoff-probe.ts) 对着带 `CHAT_SWITCH_AGENT_MS` 的 [chat-switch-harness.ts](../../tests/manual/chat-switch-harness.ts)（假 Agent 隔这么久用 Markdown 回复结束每一轮）发消息，逐帧记录这一轮的回复是否在屏幕上：实时视图里的回复（`[data-chat-live-final]`）和发出的消息之后的持久化回复行。假 Agent 不写 trace，探针自己应答页面的实时 trace 读取（一条命令加最终回复，与持久化回复含同一段标记文字），trace socket 仍是真的。每轮报告两者之间都不在屏幕上的帧（`blank`）、同时在的帧（`dup`）和回复行出现后又消失的帧（`drop`）；`CHAT_PROBE_STOP_AT_MS` 改为停止这一轮、看取消提示，`CHAT_PROBE_QUEUE_AT_MS` 加一条排队消息、看两轮。`CHAT_PROBE_HOST_MAP` 把一个非 localhost 主机名解析到本机，页面是非安全上下文（`isSecureContext` 为 false），日志副本与纯 HTTP 的生产部署一样走每个标签页的内存实现。
+
+```bash
+CHAT_SWITCH_API_PORT=16491 CHAT_SWITCH_AGENT_MS=4000 CHAT_SWITCH_SQL_MS=1 bun run tests/manual/chat-switch-harness.ts
+# frontend/apps/web 中以 REMOTE_API_URL=http://127.0.0.1:16491 构建，再 next start -p 3391
+CHAT_PROBE_TOKEN=<token> CHAT_PROBE_HOST_MAP=chathandoff.test CHAT_PROBE_WEB=http://chathandoff.test:3391 \
+  CHAT_PROBE_LATENCY=50 CHAT_PROBE_RUNS=3 bun run tests/manual/chat-reply-handoff-probe.ts
+```
+
+2026-10-20，Apple M3 Pro、macOS 26.2、Bun 1.3.14、Next.js 生产构建、headless Chromium、1440×900，`SQL_MS=1`，共享机器（测时 1 分钟负载 10–23）。改动前为交接之前的 main（aa99f71fa），改动后为本次交接在 21e18ce08 之上的构建；除最后一行外都是非安全来源。`blank` 单位 ms（帧数），每格是各次运行的范围：
+
+| 场景 | 运行 | 改动前 blank | 改动后 blank |
+| --- | --- | --- | --- |
+| 新会话，Agent 4s，延迟 50ms | 3 / 3 | 284–324（32–37 帧） | 0 |
+| 已有会话，Agent 4s，延迟 50ms | 3 / 3 | 343–379（40–45 帧） | 0 |
+| 新会话，Agent 4s，延迟 150ms | 3 / 3 | 471–484（54–56 帧） | 0 |
+| 新会话，Agent 1s，延迟 50ms | 3 / 3 | 238–354（27–40 帧） | 0 |
+| 已有会话，Agent 1s，延迟 50ms | 3 / 3 | 240–529（28–63 帧） | 0 |
+| 排队一条后续，第一轮 / 第二轮 | 2 / 2 | 441–643 / 251–267 | 0 / 0 |
+| 运行 2 秒时停止，取消提示 | 2 / 2 | 214–234（25–28 帧） | 0 |
+| localhost（安全来源），Agent 1s | 2 / 2 | 225–330（26–36 帧） | 0 |
+
+所有运行改动前后 `dup` 与 `drop` 都是 0。改动前实时视图在结算事件（`chat:done` 或 `task:cancelled`）后的下一帧消失，回复行在 230–660ms 后才到；改动后实时视图保留到回复行出现的那一帧。排队场景里第一轮的行到达时，第二轮的实时视图仍在 DOM 中，但有一帧被新行挤到视口下方，贴底滚动下一帧追上；改动前同一时刻也有一帧看不到第二轮的实时视图，与交接无关。
+
+## Chat 侧面板开合
+
+**本地模型，不是生产数据。** [chat-switch-harness.ts](../../tests/manual/chat-switch-harness.ts) 加 `CHAT_SWITCH_SUBAGENTS=1` 时，第一个 Chat 最后三轮的轮卡带 daemon 上报的完成事实（`type_histogram` 里的子代理与后台任务、`late_subagents`），会话的后台任务登记有一个运行中、一个已结束的任务。[chat-side-panel-measure.ts](../../tests/manual/chat-side-panel-measure.ts) 在 headless Chromium 1440×900 中点会话头的「查看子代理与后台任务」开合面板，逐帧记录并排时面板外框的宽度、浮窗里覆盖层的偏移、会话离底距离、聊天栏宽度、贴底状态和「回到底部」按钮，另记 long task 与 long animation frame；harness 不写 trace，脚本自己应答面板的 trace 读取（一轮跑过三个子代理）。离底距离在该帧的 `requestAnimationFrame` 排入的任务里读，即那一帧渲染之后。
+
+```bash
+CHAT_SWITCH_API_PORT=16521 CHAT_SWITCH_CHATS=3 CHAT_SWITCH_TURNS=20 CHAT_SWITCH_SQL_MS=1 CHAT_SWITCH_SUBAGENTS=1 \
+  bun run tests/manual/chat-switch-harness.ts
+# frontend/apps/web 中以 REMOTE_API_URL=http://127.0.0.1:16521 构建，再 next start -p 3421
+CHAT_PANEL_TOKEN=<token> CHAT_PANEL_CHAT=<第一个 chat> CHAT_PANEL_ROUNDS=5 bun run tests/manual/chat-side-panel-measure.ts
+```
+
+2026-10-20，Apple M3 Pro、macOS 26.2、Bun 1.3.14、Next.js 生产构建，共享机器（1 分钟负载 5.9–6.9）。headless Chromium 以约 120Hz 出帧。会话页宽：应用导航与 300px 会话列表之外约 880px，面板 400px 时会话面板约 480px。每格是各轮的范围，帧间隔单位 ms：
+
+| 场景 | CPU | 轮 | 稳定用时 | 帧间隔 p50 / p95 | > 25ms 的帧 | long task / LoAF | 离底（过程中最大 / 结束） | 「回到底部」出现 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 并排打开 | 1× | 5 | 366ms | 8.3 / 8.4–9.3 | 0 | 0 / 0 | 22–34px / 0 | 0 帧 |
+| 并排关闭 | 1× | 5 | 516–517ms | 8.3 / 8.6–9.2 | 0 | 0 / 0 | 0 / 0 | 0 帧 |
+| 并排打开 | 4× | 3 | 367–377ms | 16.5–24.5 / 25.0–33.8 | 1–3 | 0 / 0 | 0–46px / 0 | 0 帧 |
+| 并排关闭 | 4× | 3 | 516–517ms | 8.4 / 24.8–25.0 | 1–2 | 0 / 0 | 46–68px / 0 | 0 帧 |
+| 减少动态效果，开 / 关 | 1× | 5 | 7–17ms | 8.3 / 8.5–9.4 | 0 | 0 / 0 | 0 / 0 | 0 帧 |
+| 浮窗覆盖，开 / 关 | 1× | 5 | 196–217ms | 8.3–8.4 / 8.8–9.4 | 0 | 0 / 0 | 0 / 0 | 0 帧 |
+| 浮窗覆盖，开 / 关 | 4× | 3 | 201–217ms | 8.2–8.4 / 9.0–24.9 | 0 | 0 / 1 次 55ms | 0 / 0 | 0 帧 |
+
+稳定用时是从点击到面板宽度（覆盖层位置）不再变化；弹簧在约 370ms 时已到宽度的 99.8%，关闭在 0.5s 时到 0 并卸载。并排开合时会话列随会话面板逐帧变宽或变窄（打开 768→476px 经过 34–35 个宽度，关闭 17–18 个），这是逐帧重排而不是一次跳变：1× 时帧间隔与覆盖层相同，4× 降速时打开的帧间隔升到 16–34ms，覆盖层不重排、保持 ~9ms，没有 long task。会话始终贴底，贴底状态没有离开 `pinned`，「回到底部」按钮一帧也没出现；过程中读到的离底距离是帧后读数，结束时为 0。
+
+没有 `usePinnedThroughWidthChange` 的构建（3 轮，离底在 `requestAnimationFrame` 里读）：并排关闭有 2/3 轮贴底状态变为 `released`，其中 1 轮结束时离底 23px；减少动态效果时第一次关闭就解除贴底并停在离底 336px，之后各轮都是 `released`、离底 225–336px。只用 ResizeObserver 的第一版保护（3 轮，帧后读）：减少动态效果的关闭仍每轮有一帧 `released`，2 轮里「回到底部」按钮各闪 1 帧；加上会话面板上捕获阶段的 scroll 监听后为上表。原因是会话面板变宽时浏览器收紧 `scrollTop`，或列表在两帧之间挂载、重量行，紧接着的 scroll 事件读到超过 24px 的离底距离，列表把它当成读者滚离。拖动面板边缘改宽度时不启用这层保护，没有测量。
+
 ## CI 测试成本
 
-后端文件耗时与分片归属由 [ci-backend.ts](../../scripts/ci-backend.ts)报告，发现范围、初始权重来源、报告 artifact 和更新命令见 [CI 覆盖](../../TESTING.md#ci-覆盖)。历史标题间隔用于调度估算，包含 runner 开销；每文件时间总和不等于整条工作流墙钟时间或计费时间。比较同一范围与环境时，分别记录分片关键路径、所有 job 的总 runner 时间、安装/服务启动与构建开销。
+后端文件耗时与分片归属由 [ci-backend.ts](../../scripts/ci-backend.ts)报告，发现范围、权重来源、分片数、报告 artifact 和更新命令见 [CI 覆盖](../../TESTING.md#ci-覆盖)。历史文件时间只用于调度估算，不含每片 runner 准备与安装开销；每文件时间总和不等于整条工作流墙钟时间或计费时间。比较同一范围与环境时，分别记录分片关键路径、所有 job 的总 runner 时间、安装/服务启动与构建开销。
 
 [路由矩阵夹具](../../tests/helpers/routing-matrix-database.ts)输出创建、初始化、迁移、重置、连接计数及 setup/reset 实采时间；只代表该夹具使用范围。矩阵恢复已改变初始化方式；定向数据库验证保留两后端各304组合且通过，实采每后端一次Store初始化、304次重置。尚无同条件完整CI前后对照，不能据构造次数宣称总体耗时改善已验证，也不能把测试setup时间当作产品延迟。长期去重要求与隔离限制见 [测试说明](../../TESTING.md)。
 

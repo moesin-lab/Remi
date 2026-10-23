@@ -370,4 +370,4 @@ pendingTurnBackendTests("Chat queue unified API", fixture => {
     expect(invalid.status).toBe(400);
   });
 
-});
+}, { isolation: "snapshot" });

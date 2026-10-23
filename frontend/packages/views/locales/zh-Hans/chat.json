@@ -19,7 +19,17 @@
     "queue": "排队",
     "editing_queued": "正在编辑排队消息",
     "save": "保存",
-    "cancel_edit": "取消"
+    "cancel_edit": "取消",
+    "blocked_command": "Remi 不在 Chat 里执行 {{command}}，Agent 只会把它当作普通文字收到。",
+    "command_queues": "命令会在本轮结束后执行"
+  },
+  "model": {
+    "label": "模型",
+    "default": "默认模型",
+    "default_detail": "未指定模型，由运行时的默认模型执行",
+    "effort": "推理强度：{{value}}",
+    "fallback": "这一轮已切换到备用模型",
+    "settings_hint": "在智能体设置中修改"
   },
   "message_list": {
     "show_details": "查看详情",
@@ -34,7 +44,6 @@
     "turn_retry_new_session": "在新会话中重试",
     "loading_older": "正在载入更早消息…",
     "expand_older": "展开更早 30 条",
-    "earliest": "已到最早消息",
     "sending": "发送中…",
     "sent": "已发送",
     "send_failed": "发送失败 ·",
@@ -364,14 +373,16 @@
     "pending_result": "完成后在这里显示结果。",
     "stopped_output": "停止前的输出",
     "working": "处理中",
-    "read_only": "子代理只读。如需调整，请在主对话中说明。",
     "loading": "正在加载…",
     "not_found": "找不到这个子代理",
     "model": "模型 {{model}}",
     "from_subagent": "来自子代理 {{name}}",
     "from_subagent_unnamed": "来自子代理",
     "unnamed": "子代理",
-    "view": "子代理 · {{count}}"
+    "panel_toggle": "查看子代理与后台任务",
+    "panel_toggle_running_other": "查看子代理与后台任务（{{count}} 个运行中）",
+    "chat_empty": "这个会话没有子代理",
+    "turn_untitled": "未命名的一轮"
   },
   "bg_tasks": {
     "view": "后台任务 · {{count}}",
@@ -564,7 +575,7 @@
     "archived": "已归档",
     "archived_hint": "已归档的 Session 仅供查看，请先恢复所属 Chat 或 Session 再派发任务。",
     "prompt": "任务说明",
-    "agent": "执行云友",
+    "agent": "执行智能体",
     "run": "派发任务",
     "trace": "执行详情",
     "unknown_status": "未知状态"

@@ -8,6 +8,13 @@ repository wiki list change ([ADR 0002](0002-repository-wiki-list-without-bodies
 The two hooks it describes are implemented by MUL-450
 (`views/common/use-anchored-reveal.ts`, `views/common/use-stick-to-bottom.ts`).
 
+**2026-10-21:** the CI zero-jump gate (the `frontend-zero-jump` job running
+`tests/integration/zero-jump-check.ts`, S7) was removed by user decision. The
+design rule and the decisions below stand unchanged, but CI no longer enforces
+them; mentions of S7 or CI enforcement below describe the gate as it was. The
+`data-perf-*` contract and S1 (`frontend/scripts/perf/page-speed.ts`) remain for
+manual measurement.
+
 ## Context
 
 The issue detail page renders the title, description, sub-issues, published
@@ -74,6 +81,21 @@ so the mechanism cannot be owned by the issue timeline component.
    offset. Any real user scroll intent — wheel up, touch move, arrow/page
    keys, dragging the scrollbar — releases the pin. Returning to within the pin
    threshold, `pin()`, or the existing "back to latest" control re-engages it.
+
+   The same observer also watches the scroll root, because the viewport can
+   change size while the content does not. Chat stacks its question lines,
+   follow-up queue, presence banners and archived row between the list and
+   the composer in one column; they answer on their own queries, usually after
+   the reveal, and a floating window can be resized. Each one moves the end of
+   the content out of view without resizing the content, so a content-only
+   observer never fired: a pinned list was left short of its end until some
+   unrelated resize, and the next scroll event read the gap as the reader
+   leaving and released the pin. A pinned bottom-mode list now holds its
+   distance across viewport changes in the same frame. A released or returning
+   list is left where it is, and element mode does not move, since a viewport
+   change leaves the target's offset in the content unchanged. Before the
+   reveal the reveal hook still owns the position: it re-aims every frame, and
+   a viewport change resets its stable-frame count through the target position.
 
    The "back to latest" control drives the hook's own return trip rather than the
    virtualizer's `scrollToIndex(LAST)`. The virtualizer can only place the last

@@ -14,6 +14,7 @@ import {
   SessionLogEntrySchema, type IssueLogBootstrap, type LogWindowParams, type SessionLogRow, type SessionLogWindow,
 } from "@multiremi/core/api/schemas/session-log";
 import type { ChatSession } from "@multiremi/core/types";
+import { at, message as traceMessage, traceTurn } from "../../test/trace-fixtures";
 import enChat from "../../locales/en/chat.json";
 import enIssues from "../../locales/en/issues.json";
 import enMessages from "../../locales/en/messages.json";
@@ -21,8 +22,9 @@ import enMessages from "../../locales/en/messages.json";
 const backend = vi.hoisted(() => ({
   read: vi.fn(), listMessages: vi.fn(), getChatQueue: vi.fn(),
   createChatSession: vi.fn(), getChatSession: vi.fn(), sendChatMessage: vi.fn(),
+  getPendingChatTask: vi.fn(async () => ({})), getChatTurnPendingTask: vi.fn(),
 }));
-const composer = vi.hoisted(() => ({ props: null as null | { agentName?: string; onSend: (content: string) => Promise<void> } }));
+const composer = vi.hoisted(() => ({ props: null as null | { agentName?: string; isRunning?: boolean; onSend: (content: string) => Promise<void> } }));
 const socket = vi.hoisted(() => ({ subscribeStream: vi.fn(), onReconnect: vi.fn(() => () => {}) }));
 vi.mock("@multiremi/core/api", async importOriginal => ({
   ...await importOriginal<typeof import("@multiremi/core/api")>(),
@@ -32,7 +34,7 @@ vi.mock("@multiremi/core/api", async importOriginal => ({
     listMembers: async () => [{ id: "member-a", user_id: "local", role: "owner" }],
     listProjects: async () => ({ projects: [] }),
     listChatSessions: async () => [session],
-    getPendingChatTask: async () => ({}),
+    getPendingChatTask: backend.getPendingChatTask, getChatTurnPendingTask: backend.getChatTurnPendingTask,
     createChatSession: backend.createChatSession, getChatSession: backend.getChatSession,
     sendChatMessage: backend.sendChatMessage,
   },
@@ -70,8 +72,12 @@ vi.mock("./chat-input", () => ({
   ChatInput: (props: NonNullable<typeof composer.props>) => { composer.props = props; return null; },
 }));
 vi.mock("../../runtimes/components/runtime-workspace-picker", () => ({ WorkLocationPicker: () => null }));
+// A live turn reads its trace here: set one per attempt to show its steps and reply.
+const traces = vi.hoisted(() => new Map<string, { turn: unknown; items: unknown[] }>());
 vi.mock("../../common/task-transcript/use-task-trace", () => ({
-  useTurnTrace: () => ({ turn: null, items: [], closed: false, loaded: false, error: false, retry: () => {}, read: null, head: 0 }),
+  useTurnTrace: (id: string | null) => ({ turn: null, items: [], closed: false, loaded: false, error: false, retry: () => {}, read: null, head: 0,
+    ...(id ? traces.get(id) : undefined) }),
+  useCachedTurnTraces: (ids: readonly string[]) => ids.map((id) => traces.get(id) ?? { turn: null, items: [] }),
 }));
 vi.mock("../../common/markdown", () => ({ Markdown: ({ children }: { children: string }) => <span>{children}</span> }));
 vi.mock("../../issues/components/comment-card", () => ({ AttachmentList: () => null }));
@@ -90,7 +96,7 @@ const message = (seq: number, body: string) => SessionLogEntrySchema.parse({
   message_kind: "request", body_md: body, body_html: null, render_version: null,
   metadata: { attachments: [], reactions: [] },
 });
-afterEach(() => { vi.clearAllMocks(); clearChatLogPool(); });
+afterEach(() => { vi.clearAllMocks(); clearChatLogPool(); traces.clear(); });
 
 it("N2 removes a deleted unread body through ChatWindow's real log chain before refresh or reconnect", async () => {
   const kept = message(1, "QA509_EDIT_AFTER");
@@ -182,6 +188,71 @@ it("reads the log tail once when the shown chat's pending turn settles, so its r
   } finally { view.unmount(); client.clear(); }
 });
 
+it("keeps a finished turn's live reply on screen until the settle read brings its rows, then swaps them in", async () => {
+  const sent = message(1, "QA_HANDOFF_QUESTION");
+  const card = SessionLogEntrySchema.parse({
+    session_id: session.id, seq: 2, id: "turn-1", revision: 3, kind: "turn", task_id: "attempt-1", author_type: "agent",
+    body_md: "QA_HANDOFF_REPLY", body_html: null, render_version: null,
+    metadata: { attachments: [], turn_id: "turn-1", status: "completed", final_entry_id: "reply-3" },
+  });
+  const reply = SessionLogEntrySchema.parse({
+    session_id: session.id, seq: 3, id: "reply-3", revision: 1, kind: "message", sender_type: "agent", sender_id: "agent-a",
+    author_type: "agent", to_type: "member", message_kind: "reply", task_id: "turn-1", body_md: "QA_HANDOFF_REPLY",
+    body_html: null, render_version: null, metadata: { attachments: [], reactions: [] },
+  });
+  traces.set("attempt-1", {
+    turn: traceTurn({ id: "attempt-1", turn_id: "turn-1", final_item_id: "final", final_started_at: at(5) }),
+    items: [traceMessage("final", "QA_LIVE_REPLY", "final", { started_at: at(5) })],
+  });
+  const initial: IssueLogBootstrap = { sessionId: session.id, head: null, window: {
+    entries: [sent], head_seq: 2, log_version: 1, has_more_before: false, has_more_after: false,
+  } };
+  // The turn's frames never come: only the read on settle brings its rows, late.
+  socket.subscribeStream.mockImplementation(() => ({ unsubscribe: vi.fn() }));
+  backend.listMessages.mockImplementation(async () => ({ messages: [], next_cursor: null }));
+  let answer!: () => void;
+  const answered = new Promise<void>((resolve) => { answer = resolve; });
+  backend.read.mockImplementation(async () => {
+    await answered;
+    return { ...initial.window, entries: [sent, card, reply], head_seq: 3, log_version: 4 };
+  });
+  backend.getChatQueue.mockResolvedValue({ items: [], paused: null });
+  registerChatStore(createChatStore({ storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} } }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  const pendingKey = ["chat", "pending-task", session.id];
+  client.setQueryData(pendingKey, { task_id: "attempt-1", turn_id: "turn-1", status: "running", supports_queue: true });
+  const view = render(<QueryClientProvider client={client}>
+    <I18nProvider locale="en" resources={{ en: { chat: enChat, issues: enIssues, messages: enMessages } }}>
+      <ReplicaEnvProvider env={memoryEnv}>
+        <ChatWindow presentation="page" initialSessionId={session.id} initialLog={initial} />
+      </ReplicaEnvProvider>
+    </I18nProvider>
+  </QueryClientProvider>);
+  try {
+    const main = view.container.querySelector<HTMLElement>('[data-perf-scroll="session-log"]')!;
+    await waitFor(() => expect(main).toHaveTextContent("QA_LIVE_REPLY"));
+    // What each change to the list leaves on screen: the live reply, the row, or neither.
+    const seen = new Set<string>();
+    const observer = new MutationObserver(() => {
+      seen.add(`${main.textContent!.includes("QA_LIVE_REPLY")}/${main.textContent!.includes("QA_HANDOFF_REPLY")}`);
+    });
+    observer.observe(main, { subtree: true, childList: true, characterData: true, attributes: true });
+    // chat:done settles the pending task; the tail read it starts has not answered.
+    await act(async () => { client.setQueryData(pendingKey, { supports_queue: true }); });
+    await waitFor(() => expect(backend.read).toHaveBeenCalled());
+    expect(main).toHaveTextContent("QA_LIVE_REPLY");
+    expect(main.querySelector('[data-chat-live-turn="held"]')).not.toBeNull();
+    expect(main).not.toHaveTextContent("QA_HANDOFF_REPLY");
+    await act(async () => { answer(); });
+    await waitFor(() => expect(main).toHaveTextContent("QA_HANDOFF_REPLY"));
+    expect(main).not.toHaveTextContent("QA_LIVE_REPLY");
+    expect(main.querySelector("[data-chat-live-turn]")).toBeNull();
+    observer.disconnect();
+    expect([...seen]).not.toContain("false/false");
+    expect([...seen]).not.toContain("true/true");
+  } finally { view.unmount(); client.clear(); }
+});
+
 /** One chat's read route. As on the server, every log write bumps `log_version`. */
 function chatLog() {
   const rows: SessionLogRow[] = [];
@@ -204,19 +275,22 @@ function chatLog() {
 }
 
 it("shows a new chat's first message as sent and its reply without a reload", async () => {
-  const chatId = "chat-new";
-  const created: ChatSession = { ...session, id: chatId, title: "Hello from a new chat" };
+  // The client names the new chat; the server keeps that id.
+  let chatId = "";
+  let created: ChatSession | undefined;
   const row = (seq: number, fields: Record<string, unknown>) => SessionLogEntrySchema.parse({
     session_id: chatId, seq, id: `row-${seq}`, revision: 1, body_html: null, render_version: null,
     metadata: { attachments: [], reactions: [] }, ...fields,
   });
   const log = chatLog();
   let routeLog: IssueLogBootstrap | undefined;
-  backend.createChatSession.mockImplementation(async () => {
+  backend.createChatSession.mockImplementation(async (input: { id: string }) => {
+    chatId = input.id;
+    created = { ...session, id: chatId, title: "Hello from a new chat" };
     log.write(row(0, { kind: "head", body_md: created.title }));
     return created;
   });
-  backend.getChatSession.mockResolvedValue(created);
+  backend.getChatSession.mockImplementation(async () => created);
   backend.sendChatMessage.mockImplementation(async (_id: string, body: string, _attachments: unknown, clientId: string) => {
     // The page navigates to `?session=` before the send lands, so the route's
     // bootstrap read still holds an empty chat.
@@ -435,4 +509,82 @@ it("paints a chat shown again from the log pool before its tail read answers, th
     expect(reads.slice(before)).toEqual([[session.id, { before: 30 }]]);
     expect(reads.some(([, params]) => params.anchor === 0 && params.before === 1)).toBe(false);
   } finally { view.unmount(); client.clear(); }
+});
+
+it("reads the pending task once when the running turn's reply lands before chat:done, and shows one answer throughout", async () => {
+  const log = chatLog();
+  const chatRow = (seq: number, fields: Record<string, unknown>) => SessionLogEntrySchema.parse({
+    session_id: session.id, seq, id: `row-${seq}`, revision: 1, body_html: null, render_version: null,
+    visibility: "shown", metadata: { attachments: [], reactions: [] }, ...fields,
+  });
+  log.write(chatRow(1, { kind: "message", sender_type: "member", sender_id: "member-a", to_type: "agent", to_agent_id: "agent-a",
+    message_kind: "request", body_md: "QA_REPLY_QUESTION" }));
+  // The running turn's card is hidden until the turn ends.
+  log.write(chatRow(2, { kind: "turn", visibility: "hidden", task_id: "attempt-1", body_md: "" }));
+  traces.set("attempt-1", {
+    turn: traceTurn({ id: "attempt-1", turn_id: "turn-1", final_item_id: "final", final_started_at: at(5) }),
+    items: [traceMessage("final", "QA_LIVE_ANSWER", "final", { started_at: at(5) })],
+  });
+  backend.read.mockImplementation(async (_id: string, params: LogWindowParams) => log.read(params));
+  backend.listMessages.mockResolvedValue({ messages: [], next_cursor: null });
+  backend.getChatQueue.mockResolvedValue({ items: [], paused: null });
+  // On the server the turn has ended: no active turn, and the turn read finds it over.
+  backend.getChatTurnPendingTask.mockResolvedValue({ supports_queue: true });
+  const streams: StreamSubscriptionHandlers[] = [];
+  socket.subscribeStream.mockImplementation((_stream, _id: string, handlers: StreamSubscriptionHandlers) => {
+    streams.push(handlers);
+    return { unsubscribe: vi.fn() };
+  });
+  const publish = (frames: HubFrame[]) => { for (const handlers of streams) handlers.onFrames?.(frames); };
+  const entry = (seq: number, kind: string, revision = 1): HubFrame =>
+    ({ seq, kind: "entry", payload: { session_id: session.id, seq, id: `row-${seq}`, kind, revision } });
+  registerChatStore(createChatStore({ storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} } }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  const pendingKey = ["chat", "pending-task", session.id];
+  client.setQueryData(pendingKey, { task_id: "attempt-1", turn_id: "turn-1", status: "running", supports_queue: true });
+  const view = render(<QueryClientProvider client={client}>
+    <I18nProvider locale="en" resources={{ en: { chat: enChat, issues: enIssues, messages: enMessages } }}>
+      <ReplicaEnvProvider env={memoryEnv}>
+        <ChatWindow presentation="page" initialSessionId={session.id} />
+      </ReplicaEnvProvider>
+    </I18nProvider>
+  </QueryClientProvider>);
+  const main = () => view.container.querySelector<HTMLElement>('[data-perf-scroll="session-log"]')!;
+  try {
+    await waitFor(() => expect(main()).toHaveTextContent("QA_LIVE_ANSWER"));
+    await waitFor(() => expect(streams).toHaveLength(1));
+    expect(composer.props?.isRunning).toBe(true);
+    const reads = backend.getPendingChatTask.mock.calls.length;
+    const seen = new Set<string>();
+    const observer = new MutationObserver(() => {
+      seen.add(`${main().textContent!.includes("QA_LIVE_ANSWER")}/${main().textContent!.includes("QA_PERSISTED_ANSWER")}`);
+    });
+    observer.observe(main(), { subtree: true, childList: true, characterData: true, attributes: true });
+
+    // The reply row arrives; chat:done and the finished card do not (yet).
+    log.write(chatRow(3, { kind: "message", sender_type: "agent", sender_id: "agent-a", to_type: "member", message_kind: "reply",
+      task_id: "turn-1", body_md: "QA_PERSISTED_ANSWER",
+      metadata: { attachments: [], reactions: [], failure_reason: null, elapsed_ms: 20_000 } }));
+    await act(async () => {
+      streams[0]!.onAck?.({ stream: "log", id: session.id, first_seq: 0, head_seq: 2, log_version: null, gap: null });
+      publish([entry(3, "message")]);
+    });
+    await waitFor(() => expect(main()).toHaveTextContent("QA_PERSISTED_ANSWER"));
+    expect(main()).not.toHaveTextContent("QA_LIVE_ANSWER");
+    expect(main().querySelector("[data-chat-live-turn]")).toBeNull();
+    // One read of the pending task, which finds the turn over: the composer stops showing it running.
+    await waitFor(() => expect(composer.props?.isRunning).toBe(false));
+    expect(backend.getPendingChatTask).toHaveBeenCalledTimes(reads + 1);
+
+    // The finished card lands later, at its old position: its fold joins the reply, and nothing reads again.
+    log.replace(chatRow(2, { kind: "turn", task_id: "attempt-1", revision: 3, body_md: "",
+      metadata: { attachments: [], turn_id: "turn-1", status: "completed", final_entry_id: "row-3", process_item_count: 2, worked_ms: 9000 } }));
+    await act(async () => { publish([entry(2, "turn", 3)]); });
+    await waitFor(() => expect(main().querySelector('[data-perf-key="row-3"] [data-chat-steps="finished"]')).not.toBeNull());
+    expect(backend.getPendingChatTask).toHaveBeenCalledTimes(reads + 1);
+    expect(main().textContent!.split("QA_PERSISTED_ANSWER")).toHaveLength(2);
+    observer.disconnect();
+    expect([...seen]).not.toContain("true/true");
+    expect([...seen]).not.toContain("false/false");
+  } finally { view.unmount(); client.clear(); backend.getChatTurnPendingTask.mockReset(); }
 });

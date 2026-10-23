@@ -2176,4 +2176,4 @@ describe("MUL-412 issue decision cards", () => {
 function app(store: MultiremiStore) {
   return createMultiremiApp({ store, authToken: "MASTER" });
 }
-});
+}, { isolation: "snapshot" });

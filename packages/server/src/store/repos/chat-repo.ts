@@ -116,6 +116,18 @@ export class ChatRepo {
     return this.ctx.db.transaction(() => this.createChatSessionWithinTransaction(input))();
   }
 
+  /**
+   * Whether a chat has ever had this id, in any workspace; a client-made id
+   * must name none, or a new chat would take over what an old one left. The
+   * reservation survives deletion without retaining the chat's private log.
+   * Legacy log rows also reserve their ids until they are cleaned up.
+   */
+  isChatSessionIdUsed(id: string): boolean {
+    if (this.getChatSession(id)) return true;
+    if (this.ctx.db.query("SELECT id FROM multiremi_chat_session_ids WHERE id = ?").get(id)) return true;
+    return !!this.ctx.db.query("SELECT session_id FROM multiremi_conversation_log WHERE session_id = ? LIMIT 1").get(id);
+  }
+
   /** Caller owns the transaction, including any accompanying Chat binding. */
   createChatSessionWithinTransaction(input: CreateChatSessionInput): MultiremiChatSession {
     if (Object.hasOwn(input, "issueId") || Object.hasOwn(input, "issue_id")) {
@@ -135,7 +147,7 @@ export class ChatRepo {
       Object.hasOwn(input, "projectId") ? input.projectId : input.project_id);
     if (projectId && runtimeWorkspaceId) throw new RuntimeWorkspaceError("Choose either a project or a runtime workspace");
     const id = input.id ?? createId("chat");
-    if (this.getChatSession(id) || this.ctx.db.query("SELECT id FROM multiremi_turn_execution_records WHERE chat_session_id = ? LIMIT 1").get(id)) {
+    if (this.isChatSessionIdUsed(id) || this.ctx.db.query("SELECT id FROM multiremi_turn_execution_records WHERE chat_session_id = ? LIMIT 1").get(id)) {
       throw new ChatConflictError("Chat session id has already been used");
     }
     const now = nowIso();
@@ -147,6 +159,7 @@ export class ChatRepo {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, NULL, ?, ?)`,
       [projectId, runtimeWorkspaceId, id, workspaceId, input.creatorId ?? input.creator_id ?? "local", agentId, title, now, now],
     );
+    this.ctx.db.run("INSERT INTO multiremi_chat_session_ids (id) VALUES (?)", [id]);
     // The chat head is the session title at seq 0.
     this.ctx.conversationLog().syncChatHeadWithinTransaction(id, title, now);
     const session = this.getChatSession(id)!;

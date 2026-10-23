@@ -62,6 +62,7 @@
     "./chat/work-sessions": "./chat/work-sessions.ts",
     "./chat/queue": "./chat/queue.ts",
     "./chat/background-tasks": "./chat/background-tasks.ts",
+    "./chat/slash-menu": "./chat/slash-menu.ts",
     "./runtimes": "./runtimes/index.ts",
     "./runtimes/queries": "./runtimes/queries.ts",
     "./runtimes/workspaces": "./runtimes/workspaces.ts",

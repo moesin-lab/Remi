@@ -424,3 +424,40 @@ describe("transcript header from the turn", () => {
     expect(screen.queryByText(/Execution finished/)).not.toBeInTheDocument();
   });
 });
+
+describe("transcript copy feedback", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // A "Copied" reset still pending when the dialog unmounts used to fire after
+  // the test file's environment was torn down, where React's setState throws
+  // "window is not defined" and fails the whole run.
+  it("leaves no Copied reset to fire after the dialog closes within the feedback window", async () => {
+    getTurnInput.mockResolvedValue(turnInput("Fix the review note."));
+    const { unmount } = renderTranscript([message("msg:final", "All done.", "final")], {
+      task: { relative_work_dir: "repo/main" }, initialView: "prompt",
+    });
+    const copyPrompt = await screen.findByRole("button", { name: "Copy prompt" });
+
+    vi.useFakeTimers();
+    fireEvent.click(copyPrompt);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Execution" }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy all" }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    fireEvent.click(screen.getByTitle("repo/main"));
+    await act(async () => {});
+    expect(copyText).toHaveBeenCalledTimes(4);
+    expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
+
+    unmount();
+    // What teardown does to a timer that is still pending.
+    vi.stubGlobal("window", undefined);
+    try {
+      expect(() => vi.advanceTimersByTime(2000)).not.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

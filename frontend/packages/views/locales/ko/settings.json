@@ -46,7 +46,8 @@
       "labs": "실험실",
       "members": "멤버",
       "platform": "버전 및 서비스",
-      "storage": "저장소"
+      "storage": "저장소",
+      "services": "서비스 연결"
     }
   },
   "account": {

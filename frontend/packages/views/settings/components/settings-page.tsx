@@ -27,6 +27,7 @@ import { SourceControlTab } from "./source-control-tab";
 import { ModelGatewayTab } from "./model-gateway-tab";
 import { LabsTab } from "./labs-tab";
 import { NotificationsTab } from "./notifications-tab";
+import { ServicesTab } from "./services-tab";
 import { StorageTab } from "./storage-tab";
 import { PlatformTab } from "./platform-tab";
 import { PromptsTab } from "./prompts-tab";
@@ -45,6 +46,7 @@ const WORKSPACE_TAB_KEYS = [
   "prompts",
   "source_control",
   "model_gateway",
+  "services",
   "storage",
   "labs",
 ] as const;
@@ -53,6 +55,7 @@ const WORKSPACE_TAB_VALUES = {
   prompts: "prompts",
   source_control: "source-control",
   model_gateway: "model-gateway",
+  services: "services",
   storage: "storage",
   labs: "labs",
 } as const;
@@ -61,6 +64,7 @@ const WORKSPACE_TAB_ICONS = {
   prompts: FileText,
   source_control: GitBranch,
   model_gateway: Waypoints,
+  services: ServerCog,
   storage: HardDrive,
   labs: FlaskConical,
 } as const;
@@ -201,6 +205,7 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
           <TabsContent value="prompts"><PromptsTab /></TabsContent>
           <TabsContent value="source-control"><SourceControlTab /></TabsContent>
           <TabsContent value="model-gateway"><ModelGatewayTab /></TabsContent>
+          <TabsContent value="services"><ServicesTab /></TabsContent>
           <TabsContent value="storage"><StorageTab /></TabsContent>
           <TabsContent value="labs"><LabsTab /></TabsContent>
           {showPlatformTab && <TabsContent value="platform"><PlatformTab /></TabsContent>}

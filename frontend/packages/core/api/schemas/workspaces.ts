@@ -120,3 +120,5 @@ export const EMPTY_BOT_MENU_PUBLISH_RESPONSE = {
   created_at: "",
   updated_at: "",
 };
+
+export const MagpieServiceSchema = z.object({ url: z.string().url().refine(value => /^https?:\/\//.test(value)).nullable() });

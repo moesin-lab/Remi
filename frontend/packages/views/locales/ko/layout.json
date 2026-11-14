@@ -16,7 +16,8 @@
     "skills": "스킬",
     "settings": "설정",
     "chat": "채팅",
-    "execution_groups": "실행 기능 그룹"
+    "execution_groups": "실행 기능 그룹",
+    "magpie": "Magpie"
   },
   "help": {
     "trigger": "도움말",

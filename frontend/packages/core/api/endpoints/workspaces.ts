@@ -11,6 +11,7 @@ import type {
 import type { HttpClient } from "../http";
 import { parseWithFallback, parseStrictResponse } from "../schema";
 import {
+  MagpieServiceSchema,
   EMPTY_PLATFORM_PROMPT_TEMPLATE,
   EMPTY_WORKSPACE_ENV,
   BotMenuPublishResponseSchema,
@@ -24,6 +25,18 @@ import {
 
 export class WorkspacesEndpoints {
   constructor(readonly http: HttpClient) {}
+
+  async getMagpieService(workspaceId: string): Promise<{ url: string | null }> {
+    const raw = await this.http.fetch<unknown>(`/api/workspaces/${encodeURIComponent(workspaceId)}/services/magpie`);
+    return parseStrictResponse(raw, MagpieServiceSchema, { endpoint: "GET /api/workspaces/:id/services/magpie" });
+  }
+
+  async updateMagpieService(workspaceId: string, url: string | null): Promise<{ url: string | null }> {
+    const raw = await this.http.fetch<unknown>(`/api/workspaces/${encodeURIComponent(workspaceId)}/services/magpie`, {
+      method: "PUT", body: JSON.stringify({ url }),
+    });
+    return parseStrictResponse(raw, MagpieServiceSchema, { endpoint: "PUT /api/workspaces/:id/services/magpie" });
+  }
 
   // Workspaces
   async listWorkspaces(): Promise<Workspace[]> {

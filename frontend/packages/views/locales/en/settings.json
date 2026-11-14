@@ -46,7 +46,8 @@
       "labs": "Labs",
       "members": "Members",
       "platform": "Version & Services",
-      "storage": "Storage"
+      "storage": "Storage",
+      "services": "Service connections"
     }
   },
   "account": {

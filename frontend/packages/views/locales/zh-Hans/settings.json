@@ -46,7 +46,8 @@
       "labs": "实验室",
       "members": "成员",
       "platform": "版本与服务",
-      "storage": "存储"
+      "storage": "存储",
+      "services": "服务接入"
     }
   },
   "account": {

@@ -860,5 +860,17 @@
     },
     "load_failed": "ストレージレポートを読み込めませんでした",
     "retry": "再試行"
+  },
+  "magpie": {
+    "loading": "読み込み中…",
+    "open": "別のタブで開く",
+    "reload": "再読み込み",
+    "configure": "サービス設定",
+    "empty": "Magpie が設定されていません。",
+    "address": "Magpie サービスの URL",
+    "address_hint": "ログインキーを含まないサービス URL。空欄で接続を解除します。",
+    "save": "保存",
+    "services": "サービス接続",
+    "saved": "保存しました"
   }
 }

@@ -133,16 +133,59 @@ it("limits endpoint choices by protocol, including Antigravity", async () => {
   expect(screen.getByRole("button", { name: "Save group" })).toBeDisabled();
 });
 
+it("cross-filters capability groups by endpoint linkage and local sign-in", async () => {
+  api.listExecutionGroups.mockResolvedValue({
+    groups: [
+      group,
+      { ...group, id: "g-native", name: "Native Claude", provider: "claude", profile_id: null, endpoint_id: null, connection_mode: "native" },
+    ],
+  });
+  const user = userEvent.setup(); show();
+  expect(await screen.findByRole("article", { name: "Codex team" })).toBeInTheDocument();
+  expect(screen.getByRole("article", { name: "Native Claude" })).toBeInTheDocument();
+
+  const endpointCard = within(screen.getByRole("article", { name: "Aiden" }));
+  await user.click(endpointCard.getByRole("button", { name: /Used by 1 group/ }));
+  expect(screen.getByRole("article", { name: "Codex team" })).toBeInTheDocument();
+  expect(screen.queryByRole("article", { name: "Native Claude" })).not.toBeInTheDocument();
+
+  await user.click(screen.getAllByRole("button", { name: "Clear filters" })[0]!);
+  expect(screen.getByRole("article", { name: "Native Claude" })).toBeInTheDocument();
+
+  const groupsRegion = within(screen.getByRole("region", { name: "Capability groups" }));
+  await user.click(groupsRegion.getAllByRole("button", { name: "Local sign-in" })[0]!);
+  expect(screen.queryByRole("article", { name: "Codex team" })).not.toBeInTheDocument();
+  expect(screen.getByRole("article", { name: "Native Claude" })).toBeInTheDocument();
+});
+
+it("collapses large discovered model catalogs and expands on demand", async () => {
+  api.listFleetModels.mockResolvedValue({
+    providers: [{
+      provider: "codex",
+      model_catalog_status: "ready",
+      models: ["m1", "m2", "m3", "m4", "m5", "m6"].map((id) => ({ id, label: id, execution_status: "available" })),
+    }],
+  });
+  const user = userEvent.setup(); show();
+  const card = within(await screen.findByRole("article", { name: "Codex team" }));
+  expect(await card.findByText("m1")).toBeInTheDocument();
+  expect(card.queryByText("m6")).not.toBeInTheDocument();
+  await user.click(card.getByRole("button", { name: "Show all (6)" }));
+  expect(card.getByText("m6")).toBeInTheDocument();
+  await user.click(card.getByRole("button", { name: "Show less" }));
+  expect(card.queryByText("m6")).not.toBeInTheDocument();
+});
+
 it("opens and focuses manual model entry from the model list", async () => {
   const user = userEvent.setup(); show();
   const endpoint = await screen.findByRole("article", { name: "Aiden" });
-  await user.click(within(endpoint).getByRole("button", { name: "Edit", exact: true }));
-  await user.click(screen.getByRole("button", { name: "Add model", exact: true }));
+  await user.click(within(endpoint).getByRole("button", { name: "Edit" }));
+  await user.click(screen.getByRole("button", { name: "Add model" }));
   const input = screen.getByLabelText("Manual models", { exact: true });
   expect(input).toHaveFocus();
   expect(input.closest("details")).toHaveAttribute("open");
   await user.type(input, "my-deployment");
-  await user.click(screen.getByRole("button", { name: "Save endpoint", exact: true }));
+  await user.click(screen.getByRole("button", { name: "Save endpoint" }));
   await waitFor(() => expect(api.saveExecutionEndpoint).toHaveBeenCalledWith("ws", "p1", expect.objectContaining({
     connection: expect.objectContaining({ options: { manual_models: [{ id: "my-deployment", source: "manual" }] } }),
   })));

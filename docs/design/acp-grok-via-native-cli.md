@@ -29,8 +29,13 @@ speaks ACP over stdio.
 - Restore: use `session/load`, not `session/resume`.
 - Model selection: prefer standard `configOptions` and
   `session/set_config_option`; fall back to Grok's `session/set_model` extension
-  with optional `_meta.reasoningEffort` for older dialects. Discover
-  model-specific effort values from the live session catalog.
+  with optional `_meta.reasoningEffort` for older dialects.
+- Model discovery: initialize and authenticate without creating a session. Read
+  `initialize._meta.modelState`, falling back to `x.ai/models/list` when no
+  non-empty catalog is advertised there. Preserve each model's reasoning levels
+  and explicitly marked default. Missing or invalid catalogs fail discovery;
+  they never fall back to `session/new` or a model prompt. This keeps periodic
+  Runtime probes out of the user's native Grok conversation history.
 - Metering: normalize prompt result `_meta.usage`, `_meta.modelId`, and
   `costUsdTicks` into Remi's provider-neutral response.
 - Skills and MCP: materialize Agent skills under `.grok/skills` in daemon-owned

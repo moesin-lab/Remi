@@ -660,6 +660,10 @@ export class AcpClient {
     await this._request("authenticate", params);
   }
 
+  async listGrokModels(): Promise<unknown> {
+    return this._request("x.ai/models/list", {});
+  }
+
   async newSession(params?: Partial<NewSessionParams>): Promise<NewSessionResult> {
     const meta = params?._meta;
     const fullParams: NewSessionParams = {

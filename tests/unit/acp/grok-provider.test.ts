@@ -17,7 +17,12 @@ interface LoggedEntry {
   params?: Record<string, any>;
 }
 
-function fakeGrok(options: { configOptions?: boolean; costUsdTicks?: number } = {}): { executable: string; entries(): LoggedEntry[] } {
+function fakeGrok(options: {
+  configOptions?: boolean;
+  costUsdTicks?: number;
+  modelDiscovery?: "initialize" | "extension" | "error" | "empty";
+  modelState?: unknown;
+} = {}): { executable: string; entries(): LoggedEntry[] } {
   const dir = mkdtempSync(join(tmpdir(), "remi-grok-acp-"));
   const logPath = join(dir, "requests.jsonl");
   const executable = join(dir, "grok");
@@ -26,10 +31,36 @@ const fs = require("node:fs");
 const readline = require("node:readline");
 const LOG = ${JSON.stringify(logPath)};
 const USE_CONFIG_OPTIONS = ${options.configOptions !== false};
+const MODEL_DISCOVERY = ${JSON.stringify(options.modelDiscovery ?? "initialize")};
 const log = (entry) => fs.appendFileSync(LOG, JSON.stringify(entry) + "\\n");
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 let currentModel = "grok-4.5";
 let currentEffort = "high";
+const modelState = ${JSON.stringify(options.modelState ?? null)} ?? {
+  currentModelId: "grok-4.5",
+  availableModels: [
+    {
+      modelId: "grok-4.5", name: "Grok 4.5",
+      _meta: {
+        supportsReasoningEffort: true,
+        reasoningEfforts: [
+          { value: "low", label: "Low", default: false },
+          { value: "high", label: "High", default: true },
+        ],
+      },
+    },
+    {
+      modelId: "grok-4.6", name: "Grok 4.6",
+      _meta: {
+        supportsReasoningEffort: true,
+        reasoningEfforts: [
+          { value: "high", label: "High", default: true },
+          { value: "xhigh", label: "Extra high", default: false },
+        ],
+      },
+    },
+  ],
+};
 const configOptions = () => [
   {
     id: "model", name: "Model", category: "model", type: "select",
@@ -58,13 +89,20 @@ rl.on("line", (line) => {
     case "initialize":
       return ok({
         protocolVersion: 1,
-        _meta: { defaultAuthMethodId: process.env.XAI_API_KEY ? "xai.api_key" : "cached_token" },
+        _meta: {
+          defaultAuthMethodId: process.env.XAI_API_KEY ? "xai.api_key" : "cached_token",
+          ...(MODEL_DISCOVERY === "initialize" ? { modelState } : {}),
+        },
         authMethods: process.env.XAI_API_KEY
           ? [{ id: "cached_token", name: "Cached login" }, { id: "xai.api_key", name: "API key" }]
           : [{ id: "cached_token", name: "Cached login" }],
         agentCapabilities: { loadSession: true },
       });
     case "authenticate": return ok({});
+    case "x.ai/models/list":
+      return ok(MODEL_DISCOVERY === "error"
+        ? { error: { message: "listing unavailable" } }
+        : { result: MODEL_DISCOVERY === "empty" ? { availableModels: [] } : modelState });
     case "session/new":
       return ok({
         sessionId: "grok-session-1",
@@ -343,7 +381,7 @@ describe("Grok ACP provider", () => {
     expect(requests(entries, "session/resume")).toHaveLength(0);
   });
 
-  it("discovers Grok models and their model-specific reasoning levels", async () => {
+  it("discovers Grok models and reasoning defaults without creating a session or sending a prompt", async () => {
     const agent = fakeGrok();
     const provider = new AcpProvider({
       agentType: "grok",
@@ -356,6 +394,8 @@ describe("Grok ACP provider", () => {
     const models = await provider.discoverModelCapabilities();
     await provider.close();
 
+    expect(requests(agent.entries(), "session/new")).toHaveLength(0);
+    expect(requests(agent.entries(), "session/prompt")).toHaveLength(0);
     expect(models).toEqual([
       {
         id: "grok-4.5",
@@ -373,11 +413,93 @@ describe("Grok ACP provider", () => {
         default: false,
         effort: {
           status: "supported",
+          defaultLevel: "high",
           supportedLevels: [{ value: "high", label: "High" }, { value: "xhigh", label: "Extra high" }],
         },
       },
     ]);
+    expect(requests(agent.entries(), "authenticate")[0]?.params?.methodId).toBe("xai.api_key");
+    expect(requests(agent.entries(), "session/set_config_option")).toHaveLength(0);
+    expect(requests(agent.entries(), "x.ai/models/list")).toHaveLength(0);
   });
+
+  it("uses the session-free model extension when initialize has no model catalog", async () => {
+    const agent = fakeGrok({ modelDiscovery: "extension" });
+    const provider = new AcpProvider({
+      agentType: "grok", executable: agent.executable,
+      cwd: mkdtempSync(join(tmpdir(), "remi-grok-cwd-")), env: { XAI_API_KEY: "" },
+    });
+    try {
+      const models = await provider.discoverModelCapabilities();
+      expect(models.map(model => model.id)).toEqual(["grok-4.5", "grok-4.6"]);
+      expect(models[1]?.effort?.defaultLevel).toBe("high");
+    } finally {
+      await provider.close();
+    }
+    expect(requests(agent.entries(), "authenticate")[0]?.params?.methodId).toBe("cached_token");
+    expect(requests(agent.entries(), "x.ai/models/list")).toHaveLength(1);
+    expect(requests(agent.entries(), "session/new")).toHaveLength(0);
+    expect(requests(agent.entries(), "session/prompt")).toHaveLength(0);
+  });
+
+  for (const modelDiscovery of ["error", "empty"] as const) {
+    it(`rejects an ${modelDiscovery} catalog without falling back to a persistent session`, async () => {
+      const agent = fakeGrok({ modelDiscovery });
+      const provider = new AcpProvider({
+        agentType: "grok", executable: agent.executable,
+        cwd: mkdtempSync(join(tmpdir(), "remi-grok-cwd-")), env: { XAI_API_KEY: "" },
+      });
+      try {
+        await expect(provider.discoverModelCapabilities()).rejects.toThrow("Grok model catalog");
+      } finally {
+        await provider.close();
+      }
+      expect(requests(agent.entries(), "session/new")).toHaveLength(0);
+      expect(requests(agent.entries(), "session/prompt")).toHaveLength(0);
+    });
+  }
+
+  it("keeps unsupported and unknown reasoning distinct without guessing defaults from current effort", async () => {
+    const agent = fakeGrok({
+      modelState: {
+        currentModelId: "plain",
+        availableModels: [
+          { modelId: "plain", _meta: { supportsReasoningEffort: false } },
+          { modelId: "unknown" },
+          { modelId: "empty", _meta: { reasoningEfforts: [] } },
+          { modelId: "reasoning", _meta: { reasoningEffort: "high", reasoningEfforts: [{ value: "high" }] } },
+        ],
+      },
+    });
+    const provider = new AcpProvider({ agentType: "grok", executable: agent.executable });
+    try {
+      const models = await provider.discoverModelCapabilities();
+      expect(models.map(model => model.effort?.status)).toEqual(["unsupported", "unknown", "unsupported", "supported"]);
+      expect(models[3]?.effort?.defaultLevel).toBeUndefined();
+      expect(models[3]?.effort?.supportedLevels).toEqual([{ value: "high", label: "high" }]);
+      expect(models[0]).toMatchObject({ id: "plain", label: "plain", default: true });
+    } finally {
+      await provider.close();
+    }
+    expect(requests(agent.entries(), "session/new")).toHaveLength(0);
+  });
+
+  for (const model of [
+    { modelId: "" },
+    { modelId: "invalid-efforts", _meta: { reasoningEfforts: "high" } },
+    { modelId: "invalid-level", _meta: { reasoningEfforts: [{ value: "" }] } },
+  ]) {
+    it(`rejects malformed model metadata for ${model.modelId || "an empty id"}`, async () => {
+      const agent = fakeGrok({ modelState: { availableModels: [model] } });
+      const provider = new AcpProvider({ agentType: "grok", executable: agent.executable });
+      try {
+        await expect(provider.discoverModelCapabilities()).rejects.toThrow("Grok model catalog");
+      } finally {
+        await provider.close();
+      }
+      expect(requests(agent.entries(), "session/new")).toHaveLength(0);
+    });
+  }
 
   it("falls back to Grok's set_model extension when config options are absent", async () => {
     const agent = fakeGrok({ configOptions: false });

@@ -30,6 +30,7 @@ import { observeAvailableCommands, type ObservedSlashCommand } from "@shared/con
 import { beginCodexRolloutUsage, codexHomeFor, collectCodexRolloutUsage, type CodexRolloutCursor } from "./codex-rollout-usage.js";
 import type { TaskUsageUnit } from "@shared/contracts/usage-accounting.js";
 import { AcpClient } from "./client.js";
+import { discoverGrokModelCapabilities } from "./grok-model-discovery.js";
 import { AcpRpcError, AcpSessionFailureError, airMetadata, readSessionFailure, redactProviderError, redactProviderErrorText, record, type AcpSessionFailure } from "./session-failure.js";
 import { resolveAcpProcessLaunch } from "./launch.js";
 import { createAdapter, type AgentAdapter } from "./adapters/index.js";
@@ -824,6 +825,31 @@ export class AcpProvider implements Provider {
    * changed, so a single session must walk the model selector in order.
    */
   async discoverModelCapabilities(): Promise<AcpModelCapability[]> {
+    if (this._adapter.agentType === "grok") {
+      const launch = this._resolveLaunch();
+      const env = {
+        ...(this._options.apiKey ? { XAI_API_KEY: this._options.apiKey } : {}),
+        ...this._options.env,
+      };
+      const client = new AcpClient({
+        inheritProcessGroup: this._options.inheritProcessGroup,
+        executable: launch.executable,
+        args: this._adapter.buildLaunchArgs?.(launch.args ?? []) ?? launch.args,
+        agentType: this._adapter.agentType,
+        cwd: this._options.cwd ?? homedir(),
+        privateTmpDirectory: this._options.privateTmpDirectory,
+        privateTmpPlatform: this._options.privateTmpPlatform,
+        env,
+      });
+      this._startingClients.add(client);
+      try {
+        await client.start();
+        return await discoverGrokModelCapabilities(client, this._adapter, { ...process.env, ...env });
+      } finally {
+        await client.stop();
+        this._startingClients.delete(client);
+      }
+    }
     const chatId = `__capability_probe__:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     const entry = await this._ensureSession(chatId, {
       chatId,

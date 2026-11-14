@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multiremi/core/i18n/react";
@@ -7,15 +7,15 @@ import type { AgentRuntime } from "@multiremi/core/types";
 import en from "../../locales/en/runtimes.json";
 import { ExecutionConfigPage, RuntimeExecutionBindings } from "./execution-config-page";
 
-const api = vi.hoisted(() => ({ listExecutionProfiles: vi.fn(), listExecutionGroups: vi.fn(), listRuntimes: vi.fn(), listFleetModels: vi.fn(), listMembers: vi.fn(), saveExecutionGroup: vi.fn(), saveExecutionProfile: vi.fn(), deleteExecutionGroup: vi.fn(), deleteExecutionProfile: vi.fn() }));
+const api = vi.hoisted(() => ({ listExecutionEndpoints: vi.fn(), getExecutionEndpointCatalog: vi.fn(), inspectExecutionEndpoint: vi.fn(), listExecutionGroups: vi.fn(), listRuntimes: vi.fn(), listFleetModels: vi.fn(), listMembers: vi.fn(), saveExecutionGroup: vi.fn(), saveExecutionEndpoint: vi.fn(), deleteExecutionGroup: vi.fn(), deleteExecutionEndpoint: vi.fn() }));
 vi.mock("@multiremi/core/api", () => ({ api }));
 vi.mock("@multiremi/core/hooks", () => ({ useWorkspaceId: () => "ws" }));
 vi.mock("@multiremi/core/paths", () => ({ useWorkspacePaths: () => ({ runtimes: () => "/ws/runtimes", executionGroups: () => "/ws/execution-groups", agents: () => "/ws/agents" }) }));
 vi.mock("@multiremi/core/auth", () => ({ useAuthStore: (selector: (s: unknown) => unknown) => selector({ user: { id: "owner" } }) }));
 vi.mock("../../navigation", () => ({ AppLink: ({ children, href }: { children: React.ReactNode; href: string }) => <a href={href}>{children}</a> }));
 vi.mock("../../layout/breadcrumb-header", () => ({ BreadcrumbHeader: ({ leaf }: { leaf: React.ReactNode }) => <h1>{leaf}</h1> }));
-const profile = { id: "p1", workspace_id: "ws", name: "Aiden", provider: "codex", revision: 1, profile: { name: "custom", base_url: "https://example.test", model: "test-model", env_key: "", auth_mode: "api_key", credential_id: "cred" }, created_at: "now", updated_at: "now" };
-const group = { id: "g1", workspace_id: "ws", name: "Codex team", description: "Build and review", provider: "codex", profile_id: "p1", runtime_ids: ["r1"], online_runtime_count: 1, members: [{ runtime_id: "r1", status: "ready" }] };
+const profile = { id: "p1", workspace_id: "ws", name: "Aiden", revision: 1, connection: { base_url: "https://example.test", protocols: ["openai-responses"], env_key: "", auth_mode: "api_key", auth_header: "bearer", credential_id: "cred" }, created_at: "now", updated_at: "now" };
+const group = { id: "g1", workspace_id: "ws", name: "Codex team", description: "Build and review", provider: "codex", profile_id: "p1", endpoint_id: "p1", connection_mode: "endpoint", model_policy: {}, runtime_ids: ["r1"], online_runtime_count: 1, members: [{ runtime_id: "r1", status: "ready" }] };
 function makeRuntime(id: string, name: string, provider = "codex", overrides: Partial<AgentRuntime> = {}): AgentRuntime {
   return {
     id, name, provider, workspace_id: "ws", daemon_id: null, runtime_mode: "local",
@@ -27,331 +27,123 @@ function makeRuntime(id: string, name: string, provider = "codex", overrides: Pa
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
+  api.getExecutionEndpointCatalog.mockResolvedValue({ catalogs: [] });
   api.listMembers.mockResolvedValue([{ user_id: "local", role: "owner" }]);
-  api.listExecutionProfiles.mockResolvedValue({ profiles: [profile, { ...profile, id: "p2", provider: "claude", name: "Claude only" }] });
+  api.listExecutionEndpoints.mockResolvedValue({ endpoints: [profile, { ...profile, id: "p2", connection: { ...profile.connection, protocols: ["anthropic-messages"] }, name: "Claude only" }] });
   api.listExecutionGroups.mockResolvedValue({ groups: [group] });
   api.listFleetModels.mockReset().mockResolvedValue({ providers: [{ provider: "codex", model_catalog_status: "ready", models: [{ id: "discovered-model", label: "Discovered model", execution_status: "available" }] }] });
   api.listRuntimes.mockResolvedValue([makeRuntime("r1", "Devbox Codex"), makeRuntime("r2", "Local Codex"), makeRuntime("r3", "Claude runtime", "claude")]);
   api.saveExecutionGroup.mockResolvedValue({ group });
-  api.saveExecutionProfile.mockResolvedValue({ profile });
+  api.saveExecutionEndpoint.mockResolvedValue({ profile });
 });
 function show(component = <ExecutionConfigPage />) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return { ...render(<I18nProvider locale="en" resources={{ en: { runtimes: en } }}><QueryClientProvider client={client}>{component}</QueryClientProvider></I18nProvider>), client };
 }
 
-it("creates another group with the same Runtime and restricts profiles and runtimes by provider", async () => {
-  const user = userEvent.setup();
-  show();
+it("shares an endpoint across engines while selecting compatible runtimes", async () => {
+  api.listExecutionEndpoints.mockResolvedValue({ endpoints: [{ ...profile, connection: { ...profile.connection, protocols: ["openai-responses", "anthropic-messages"] } }] });
+  const user = userEvent.setup(); show();
   await user.click(await screen.findByRole("button", { name: "Add group" }));
-  await user.type(screen.getByLabelText("Name"), "Second group");
-  expect(screen.queryByRole("option", { name: "Claude only" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("checkbox", { name: /Claude runtime/ })).not.toBeInTheDocument();
-  await user.selectOptions(screen.getByLabelText("Provider connection"), "p1");
-  await user.click(screen.getByRole("checkbox", { name: /Devbox Codex/ }));
-  await user.click(screen.getByRole("checkbox", { name: /Local Codex/ }));
+  await user.type(screen.getByLabelText("Name"), "Claude team");
+  await user.selectOptions(screen.getByLabelText("Execution engine"), "claude");
+  await user.selectOptions(screen.getByLabelText("Connection endpoint"), "p1");
+  expect(screen.queryByRole("checkbox", { name: /Devbox Codex/ })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("checkbox", { name: /Claude runtime/ }));
   await user.click(screen.getByRole("button", { name: "Save group" }));
-  await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", undefined, { name: "Second group", description: "", provider: "codex", profile_id: "p1", runtime_ids: ["r1", "r2"] }));
+  await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", undefined, {
+    name: "Claude team", description: "", provider: "claude", endpoint_id: "p1", runtime_ids: ["r3"], model_policy: {},
+  }));
 });
-
-it("distinguishes three same-name Codex runtimes and preserves the chosen ID through save and edit", async () => {
-  const runtimes = [
-    makeRuntime("rt_shared-prefix-first", "Codex", "codex", { daemon_display_name: "Office machine", device_info: "old-host · Windows" }),
-    makeRuntime("rt_shared-prefix-second", "Codex", "codex", { device_info: "Office machine · Windows" }),
-    makeRuntime("rt_shared-prefix-third", "Codex", "codex", { device_info: "Linux server · Linux", status: "offline" }),
-  ] as const;
-  api.listRuntimes.mockResolvedValue(runtimes);
-  api.listExecutionGroups.mockResolvedValue({ groups: [] });
-  const user = userEvent.setup();
-  show();
-  await user.click(await screen.findByRole("button", { name: "Add group" }));
-  const form = screen.getByRole("form", { name: "Capability groups" });
-  for (const runtime of runtimes) {
-    expect(within(form).getByText(runtime.id)).toBeVisible();
-    expect(within(form).getByRole("checkbox", { name: new RegExp(runtime.id) })).not.toBeChecked();
-  }
-  expect(within(form).getAllByText("Office machine")).toHaveLength(2);
-  expect(within(form).queryByText(/old-host/)).not.toBeInTheDocument();
-  const offline = within(form).getByRole("checkbox", { name: /rt_shared-prefix-third/ });
-  expect(offline).not.toBeDisabled();
-  expect(within(offline.closest("label")!).getByText("Offline")).toBeVisible();
-  await user.type(within(form).getByLabelText("Name"), "Chosen machine");
-  await user.click(within(form).getByRole("checkbox", { name: /rt_shared-prefix-second/ }));
-  const saved = { ...group, name: "Chosen machine", profile_id: null, runtime_ids: [runtimes[1].id] };
-  api.saveExecutionGroup.mockResolvedValue({ group: saved });
-  api.listExecutionGroups.mockResolvedValue({ groups: [saved] });
-  await user.click(within(form).getByRole("button", { name: "Save group" }));
-  await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", undefined, expect.objectContaining({ runtime_ids: [runtimes[1].id] })));
-  await waitFor(() => expect(screen.queryByRole("form")).not.toBeInTheDocument());
-  const row = within(screen.getByRole("article", { name: "Chosen machine" }));
-  expect(row.getByText("Office machine")).toBeVisible();
-  expect(row.getByText(runtimes[1].id)).toBeVisible();
-  expect(row.queryByText(runtimes[0].id)).not.toBeInTheDocument();
-  await user.click(row.getByRole("button", { name: "Edit" }));
-  expect(screen.getByRole("checkbox", { name: /rt_shared-prefix-second/ })).toBeChecked();
-  expect(screen.getByRole("checkbox", { name: /rt_shared-prefix-first/ })).not.toBeChecked();
-  expect(screen.getByRole("checkbox", { name: /rt_shared-prefix-third/ })).not.toBeChecked();
+it("creates an endpoint without engine or model fields", async () => {
+  const user = userEvent.setup(); show();
+  await user.click(await screen.findByRole("button", { name: "Add endpoint" }));
+  await user.type(screen.getByLabelText("Name"), "Shared gateway");
+  await user.type(screen.getByLabelText("API base URL"), "https://gateway.test");
+  await user.type(screen.getByLabelText("API key"), "test-key");
+  await user.click(screen.getByRole("checkbox", { name: "anthropic-messages" }));
+  expect(screen.queryByLabelText("Model ID")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Execution engine")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Save endpoint" }));
+  await waitFor(() => expect(api.saveExecutionEndpoint).toHaveBeenCalledWith("ws", undefined, {
+    name: "Shared gateway", connection: { base_url: "https://gateway.test", protocols: ["openai-responses", "anthropic-messages"],
+      auth_mode: "api_key", env_key: "", auth_header: "bearer" }, api_key: "test-key",
+  }));
 });
-
-it("keeps unidentified and unavailable members visible by ID and allows removing the unavailable one", async () => {
-  const unavailable = "rt_member-no-longer-visible";
-  api.listExecutionGroups.mockResolvedValue({ groups: [{ ...group, runtime_ids: ["r1", unavailable] }] });
-  const user = userEvent.setup();
-  show();
-  const row = within(await screen.findByRole("article", { name: group.name }));
-  expect(row.getByText("Registered machine")).toBeVisible();
-  expect(row.getByText("r1")).toBeVisible();
-  expect(row.getByText(unavailable)).toBeVisible();
-  await user.click(row.getByRole("button", { name: "Edit" }));
-  expect(screen.getByRole("checkbox", { name: /Devbox Codex.*r1/ })).toBeChecked();
-  await user.click(screen.getByRole("checkbox", { name: unavailable }));
-  await user.click(screen.getByRole("button", { name: "Save group" }));
-  await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", group.id, expect.objectContaining({ runtime_ids: ["r1"] })));
-});
-
-it("retains an existing credential when editing a profile without a new key", async () => {
-  const user = userEvent.setup();
-  show();
-  await screen.findByText("Claude only");
-  await user.click(within(screen.getByRole("article", { name: "Aiden" })).getByRole("button", { name: "Edit" }));
+it("keeps credentials when editing an endpoint without a replacement", async () => {
+  const user = userEvent.setup(); show();
+  await user.click(within(await screen.findByRole("article", { name: "Aiden" })).getByRole("button", { name: "Edit" }));
   expect(screen.getByLabelText("API key")).toHaveValue("");
-  await user.click(screen.getByRole("button", { name: "Save connection" }));
-  await waitFor(() => expect(api.saveExecutionProfile).toHaveBeenCalledWith("ws", "p1", { name: "Aiden", provider: "codex", profile: profile.profile }));
+  await user.click(screen.getByRole("button", { name: "Save endpoint" }));
+  await waitFor(() => expect(api.saveExecutionEndpoint).toHaveBeenCalledWith("ws", "p1", { name: "Aiden", connection: profile.connection }));
 });
-
-it("saves an optional model allowlist while always including the default", async () => {
-  const user = userEvent.setup();
-  show();
-  await screen.findByText("Claude only");
-  await user.click(within(screen.getByRole("article", { name: "Aiden" })).getByRole("button", { name: "Edit" }));
-  await user.type(screen.getByLabelText(/Allowed model IDs/), "alternate\ntest-model\nalternate");
-  await user.click(screen.getByRole("button", { name: "Save connection" }));
-  await waitFor(() => expect(api.saveExecutionProfile).toHaveBeenCalledWith("ws", "p1", {
-    name: "Aiden", provider: "codex", profile: { ...profile.profile, models: ["test-model", "alternate"] },
-  }));
+it("stores model policy on the group without mutating its shared endpoint", async () => {
+  const user = userEvent.setup(); show();
+  await user.click(within(await screen.findByRole("article", { name: "Codex team" })).getByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Model ID"), { target: { value: "fast" } });
+  fireEvent.change(screen.getByLabelText(/Allowed models/), { target: { value: "fast\nlarge" } });
+  await user.click(screen.getByRole("button", { name: "Save group" }));
+  await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", "g1", expect.objectContaining({
+    endpoint_id: "p1", model_policy: { model: "fast", models: ["fast", "large"] },
+  })));
+  expect(api.saveExecutionEndpoint).not.toHaveBeenCalled();
 });
-
-it("preserves an explicit default-only allowlist when editing other profile fields", async () => {
-  const restricted = { ...profile, profile: { ...profile.profile, models: [profile.profile.model] } };
-  api.listExecutionProfiles.mockResolvedValue({ profiles: [restricted] });
-  const user = userEvent.setup();
-  show();
-  await waitFor(() => expect(screen.getAllByRole("button", { name: "Edit" })).toHaveLength(2));
-  await user.click(within(screen.getByRole("article", { name: "Aiden" })).getByRole("button", { name: "Edit" }));
-  expect(await screen.findByLabelText(/Allowed model IDs/)).toHaveValue("test-model");
-  await user.click(screen.getByRole("button", { name: "Save connection" }));
-  await waitFor(() => expect(api.saveExecutionProfile).toHaveBeenCalledWith("ws", "p1", {
-    name: "Aiden", provider: "codex", profile: restricted.profile,
-  }));
+it("uses explicit local sign-in and explains that workspace gateways are not inherited", async () => {
+  const user = userEvent.setup(); show();
+  await user.click(await screen.findByRole("button", { name: "Add group" }));
+  await user.type(screen.getByLabelText("Name"), "Local");
+  expect(screen.getByLabelText("Connection endpoint")).toHaveValue("native");
+  expect(screen.getByText(en.configuration.native_models)).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Save group" }));
+  await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", undefined, expect.objectContaining({ endpoint_id: null })));
 });
-
-it("shows every binding and an unconfirmed state without inventing successful application", async () => {
+it("preserves missing runtime IDs and disables deletion of referenced endpoints", async () => {
+  api.listExecutionGroups.mockResolvedValue({ groups: [{ ...group, runtime_ids: ["missing-runtime"] }] });
+  const user = userEvent.setup(); show();
+  const row = within(await screen.findByRole("article", { name: "Aiden" }));
+  expect(row.getByRole("button", { name: "Delete" })).toBeDisabled();
+  await user.click(within(screen.getByRole("article", { name: "Codex team" })).getByRole("button", { name: "Edit" }));
+  expect(screen.getByRole("checkbox", { name: /missing-runtime/ })).toBeChecked();
+});
+it("does not expose writes when configuration or membership loading fails", async () => {
+  api.listExecutionEndpoints.mockRejectedValue(new Error("offline")); show();
+  expect(await screen.findByRole("alert")).toHaveTextContent(en.configuration.load_error);
+  expect(screen.getByRole("button", { name: "Add group" })).toBeDisabled();
+});
+it("filters groups and preserves binding statuses", async () => {
   api.listExecutionGroups.mockResolvedValue({ groups: [group, { ...group, id: "g2", name: "Second group", members: [] }] });
   show(<RuntimeExecutionBindings runtimeId="r1" />);
   expect(await screen.findByText("Codex team")).toBeInTheDocument();
   expect(screen.getByText("Second group")).toBeInTheDocument();
   expect(screen.getByText("Applied")).toBeInTheDocument();
   expect(screen.getByText("Unconfirmed")).toBeInTheDocument();
-  expect(screen.getByRole("link")).toHaveAttribute("href", "/ws/execution-groups");
 });
-
-it("saves a new group's connection without requiring model IDs, leaving discovery automatic", async () => {
-  const user = userEvent.setup();
+it("shows discovered models and errors without requiring manually configured model names", async () => {
   show();
+  const row = within(await screen.findByRole("article", { name: "Codex team" }));
+  expect(await row.findByText(/Discovered model/)).toBeInTheDocument();
+});
+it("limits endpoint choices by protocol, including Antigravity", async () => {
+  const user = userEvent.setup(); show();
   await user.click(await screen.findByRole("button", { name: "Add group" }));
-  fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Review pool" } });
-  fireEvent.change(screen.getByLabelText("Purpose and organization"), { target: { value: "Review services" } });
-  await user.selectOptions(screen.getByLabelText("Provider connection"), "new");
-  fireEvent.change(screen.getByLabelText("Connection name"), { target: { value: "Review gateway" } });
-  fireEvent.change(screen.getByLabelText("API base URL"), { target: { value: "https://example.test/v1" } });
-  expect(screen.getByLabelText("Model ID")).not.toBeRequired();
-  expect(screen.getByLabelText("Model ID")).toHaveValue("");
-  expect(screen.getByText("Advanced model settings (optional)").closest("details")).not.toHaveAttribute("open");
-  fireEvent.change(screen.getByLabelText("API key"), { target: { value: "synthetic-key" } });
-  await user.click(screen.getByRole("checkbox", { name: /Local Codex/ }));
-  await user.click(screen.getByRole("button", { name: "Save group" }));
-  await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", undefined, {
-    name: "Review pool", description: "Review services", provider: "codex", profile_id: null, runtime_ids: ["r2"],
-    connection: { name: "Review gateway", profile: { name: "custom", base_url: "https://example.test/v1", model: "", auth_mode: "api_key", env_key: "" }, api_key: "synthetic-key" },
-  }));
-  expect(api.saveExecutionProfile).not.toHaveBeenCalled();
-  expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "Claude only" })).not.toBeInTheDocument();
+  await user.selectOptions(screen.getByLabelText("Execution engine"), "antigravity");
+  expect(screen.queryByRole("option", { name: "Aiden" })).not.toBeInTheDocument();
+  expect(screen.getByText(en.configuration.endpoint_required)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Save group" })).toBeDisabled();
 });
 
-it("allows an optional allowlist without inventing an empty default model entry", async () => {
-  const automatic = { ...profile, profile: { ...profile.profile, model: "" } };
-  api.listExecutionProfiles.mockResolvedValue({ profiles: [automatic] });
-  const user = userEvent.setup();
-  show();
-  await user.click(within(await screen.findByRole("article", { name: "Aiden" })).getByRole("button", { name: "Edit" }));
-  await user.click(screen.getByText("Advanced model settings (optional)"));
-  await user.type(screen.getByLabelText(/Allowed model IDs/), "discovered-model\ndiscovered-model");
-  await user.click(screen.getByRole("button", { name: "Save connection" }));
-  await waitFor(() => expect(api.saveExecutionProfile).toHaveBeenCalledWith("ws", "p1", {
-    name: "Aiden", provider: "codex", profile: { ...automatic.profile, models: ["discovered-model"] },
-  }));
-});
-
-it("keeps advanced settings open while clearing an existing default and allowlist", async () => {
-  api.listExecutionProfiles.mockResolvedValue({ profiles: [{ ...profile, profile: { ...profile.profile, models: ["test-model"] } }] });
-  const user = userEvent.setup();
-  show();
-  await user.click(within(await screen.findByRole("article", { name: "Aiden" })).getByRole("button", { name: "Edit" }));
-  const advanced = screen.getByText("Advanced model settings (optional)").closest("details");
-  expect(advanced).toHaveAttribute("open");
-  await user.clear(screen.getByLabelText("Model ID"));
-  await user.clear(screen.getByLabelText(/Allowed model IDs/));
-  expect(advanced).toHaveAttribute("open");
-  expect(screen.getByLabelText(/Allowed model IDs/)).toHaveFocus();
-});
-
-it("leaves groups without assigned runtimes waiting and does not request a model catalog", async () => {
-  api.listExecutionGroups.mockResolvedValue({ groups: [{ ...group, runtime_ids: [] }] });
-  show();
-  const row = within(await screen.findByRole("article", { name: group.name }));
-  expect(row.getByText(/No machines assigned/)).toBeInTheDocument();
-  expect(row.queryByRole("region", { name: "Model catalog" })).not.toBeInTheDocument();
-  expect(row.queryByRole("alert")).not.toBeInTheDocument();
-  expect(api.listFleetModels).not.toHaveBeenCalled();
-});
-
-it("displays each group's discovered models rather than the connection's configured default", async () => {
-  const second = { ...group, id: "g2", name: "Review pool" };
-  api.listExecutionGroups.mockResolvedValue({ groups: [group, second] });
-  api.listFleetModels.mockImplementation(({ execution_group_id }) => Promise.resolve({
-    providers: [{ provider: "codex", model_catalog_status: "ready", models: [
-      { id: execution_group_id === "g1" ? "build-model" : "review-model", label: execution_group_id === "g1" ? "Build model" : "Review model", execution_status: "available" },
-      { id: "unavailable-model", label: "Unavailable model", execution_status: "unavailable" },
-      { id: "unknown-model", label: "Unknown model", execution_status: "unknown" },
-    ] }],
-  }));
-  show();
-  const firstRow = within(await screen.findByRole("article", { name: group.name }));
-  const secondRow = within(screen.getByRole("article", { name: second.name }));
-  expect(await firstRow.findByText("Build model · build-model")).toBeInTheDocument();
-  expect(await secondRow.findByText("Review model · review-model")).toBeInTheDocument();
-  expect(firstRow.getByText("Available models: 1")).toBeInTheDocument();
-  expect(secondRow.getByText("Available models: 1")).toBeInTheDocument();
-  expect(firstRow.queryByText(/review-model/)).not.toBeInTheDocument();
-  expect(screen.queryByText(/Unavailable model|Unknown model/)).not.toBeInTheDocument();
-  expect(api.listFleetModels).toHaveBeenCalledWith(expect.objectContaining({ workspace_id: "ws", execution_group_id: "g1" }));
-  expect(api.listFleetModels).toHaveBeenCalledWith(expect.objectContaining({ workspace_id: "ws", execution_group_id: "g2" }));
-  expect(api.listFleetModels.mock.calls.every(([input]) => !!input.execution_group_id)).toBe(true);
-});
-
-it("keeps discovery pending until the group's catalog is ready and then displays its models", async () => {
-  api.listFleetModels.mockResolvedValue({ providers: [{ provider: "codex", model_catalog_status: "unknown", models: [] }] });
-  const { client } = show();
-  const row = within(await screen.findByRole("article", { name: group.name }));
-  expect(await row.findByRole("status")).toHaveTextContent("Discovering models…");
-  expect(row.queryByText(/Available models:/)).not.toBeInTheDocument();
-  api.listFleetModels.mockResolvedValue({ providers: [{ provider: "codex", model_catalog_status: "ready", models: [{ id: "live-model", label: "Live model", execution_status: "available" }] }] });
-  await act(() => client.invalidateQueries({ queryKey: ["runtimes", "models", "fleet", "ws"] }));
-  expect(await row.findByText("Live model · live-model")).toBeInTheDocument();
-  expect(row.queryByRole("status")).not.toBeInTheDocument();
-});
-
-it.each(["request", "catalog"])("shows a model discovery failure from %s without showing configured IDs as discovered", async (failure) => {
-  if (failure === "request") api.listFleetModels.mockRejectedValue(new Error("Cannot reach gateway"));
-  else api.listFleetModels.mockResolvedValue({ providers: [{ provider: "codex", model_catalog_status: "error", models: [{ id: "configured-only", label: "Configured only", execution_status: "unavailable" }] }] });
-  show();
-  const row = within(await screen.findByRole("article", { name: group.name }));
-  expect(await row.findByRole("alert")).toHaveTextContent("Could not discover models. Check the connection and assigned runtimes.");
-  expect(row.queryByText(/Available models:/)).not.toBeInTheDocument();
-  expect(row.queryByText(/Configured only/)).not.toBeInTheDocument();
-});
-
-it("labels a saved connection with no default as automatic discovery and handles an empty group catalog", async () => {
-  api.listExecutionProfiles.mockResolvedValue({ profiles: [{ ...profile, profile: { ...profile.profile, model: "" } }] });
-  api.listFleetModels.mockResolvedValue({ providers: [{ provider: "codex", model_catalog_status: "ready", models: [] }] });
-  const user = userEvent.setup();
-  show();
-  const row = within(await screen.findByRole("article", { name: group.name }));
-  expect(await row.findByText("No available models in this group.")).toBeInTheDocument();
-  expect(within(screen.getByRole("article", { name: "Aiden" })).getByText(/Automatic discovery/)).toBeInTheDocument();
-  await user.click(row.getByRole("button", { name: "Edit" }));
-  expect(within(screen.getByRole("form", { name: "Capability groups" })).getByText("Automatic discovery")).toBeInTheDocument();
-  expect(screen.queryByText("Default model:")).not.toBeInTheDocument();
-});
-
-it("explains shared updates and keeps the key hidden while editing a group's connection", async () => {
-  api.listExecutionGroups.mockResolvedValue({ groups: [group, { ...group, id: "g2", name: "Review pool" }] });
-  const user = userEvent.setup();
-  show();
-  await user.click(within(await screen.findByRole("article", { name: "Codex team" })).getByRole("button", { name: "Edit" }));
-  await user.click(screen.getByRole("button", { name: "Edit provider and models" }));
-  expect(screen.getByText(/shared by 2 groups/)).toBeInTheDocument();
-  expect(screen.getByLabelText("API key")).toHaveValue("");
-  await user.clear(screen.getByLabelText("Model ID"));
-  await user.type(screen.getByLabelText("Model ID"), "new-default");
-  await user.click(screen.getByRole("button", { name: "Save group" }));
-  await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", "g1", expect.objectContaining({
-    profile_id: "p1", connection: { name: "Aiden", profile: { ...profile.profile, model: "new-default" } },
+it("opens and focuses manual model entry from the model list", async () => {
+  const user = userEvent.setup(); show();
+  const endpoint = await screen.findByRole("article", { name: "Aiden" });
+  await user.click(within(endpoint).getByRole("button", { name: "Edit", exact: true }));
+  await user.click(screen.getByRole("button", { name: "Add model", exact: true }));
+  const input = screen.getByLabelText("Manual models", { exact: true });
+  expect(input).toHaveFocus();
+  expect(input.closest("details")).toHaveAttribute("open");
+  await user.type(input, "my-deployment");
+  await user.click(screen.getByRole("button", { name: "Save endpoint", exact: true }));
+  await waitFor(() => expect(api.saveExecutionEndpoint).toHaveBeenCalledWith("ws", "p1", expect.objectContaining({
+    connection: expect.objectContaining({ options: { manual_models: [{ id: "my-deployment", source: "manual" }] } }),
   })));
-});
-
-it("clears connection, secret, model and membership drafts when changing engines", async () => {
-  const user = userEvent.setup();
-  show();
-  await user.click(await screen.findByRole("button", { name: "Add group" }));
-  await user.type(screen.getByLabelText("Name"), "Claude team");
-  await user.selectOptions(screen.getByLabelText("Provider connection"), "new");
-  await user.type(screen.getByLabelText("API key"), "codex-only-key");
-  await user.type(screen.getByLabelText("Model ID"), "codex-only-model");
-  await user.click(screen.getByRole("checkbox", { name: /Local Codex/ }));
-  await user.selectOptions(screen.getByLabelText("Execution engine"), "claude");
-  expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
-  expect(screen.queryByRole("checkbox", { name: /Local Codex/ })).not.toBeInTheDocument();
-  await user.selectOptions(screen.getByLabelText("Provider connection"), "new");
-  expect(screen.getByLabelText("API key")).toHaveValue("");
-  expect(screen.getByLabelText("Model ID")).toHaveValue("");
-  await user.selectOptions(screen.getByLabelText("Provider connection"), "native");
-  await user.click(screen.getByRole("button", { name: "Save group" }));
-  await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", undefined, { name: "Claude team", description: "", provider: "claude", profile_id: null, runtime_ids: [] }));
-});
-
-it("keeps the editor and error visible on failure without issuing a separate profile write", async () => {
-  api.saveExecutionGroup.mockRejectedValueOnce(new Error("Runtime is no longer available"));
-  const user = userEvent.setup();
-  show();
-  await user.click(await screen.findByRole("button", { name: "Add group" }));
-  await user.type(screen.getByLabelText("Name"), "Keep my draft");
-  await user.click(screen.getByRole("button", { name: "Save group" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("Runtime is no longer available");
-  expect(screen.getByLabelText("Name")).toHaveValue("Keep my draft");
-  expect(api.saveExecutionProfile).not.toHaveBeenCalled();
-});
-
-it("organizes groups by purpose and engine while members have a read-only view", async () => {
-  api.listMembers.mockResolvedValue([{ user_id: "local", role: "member" }]);
-  api.listExecutionGroups.mockResolvedValue({ groups: [group, { ...group, id: "g2", name: "Writing", description: "Documentation", provider: "claude", profile_id: "p2" }] });
-  const user = userEvent.setup();
-  show();
-  await screen.findByRole("article", { name: "Codex team" });
-  expect(screen.queryByRole("button", { name: "Add group" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
-  await user.type(screen.getByRole("textbox", { name: "Search groups" }), "review");
-  expect(screen.getByRole("article", { name: "Codex team" })).toBeInTheDocument();
-  expect(screen.queryByRole("article", { name: "Writing" })).not.toBeInTheDocument();
-  await user.clear(screen.getByRole("textbox", { name: "Search groups" }));
-  await user.selectOptions(screen.getByRole("combobox", { name: "Filter by engine" }), "claude");
-  expect(screen.queryByRole("article", { name: "Codex team" })).not.toBeInTheDocument();
-  expect(screen.getByRole("article", { name: "Writing" })).toBeInTheDocument();
-});
-
-it("keeps the selected engine visible after deleting its last group", async () => {
-  const otherGroup = { ...group, id: "g2", name: "Writing", provider: "claude", profile_id: "p2" };
-  api.listExecutionGroups.mockResolvedValue({ groups: [group, otherGroup] });
-  api.deleteExecutionGroup.mockResolvedValue(undefined);
-  const user = userEvent.setup();
-  show();
-  await screen.findByRole("article", { name: "Codex team" });
-  const filter = screen.getByRole("combobox", { name: "Filter by engine" });
-  await user.selectOptions(filter, "codex");
-  api.listExecutionGroups.mockResolvedValue({ groups: [otherGroup] });
-  await user.click(within(screen.getByRole("article", { name: "Codex team" })).getByRole("button", { name: "Delete" }));
-  expect(await screen.findByText("No matching groups.")).toBeInTheDocument();
-  expect(filter).toHaveValue("codex");
-  await user.selectOptions(filter, "all");
-  expect(screen.getByRole("article", { name: "Writing" })).toBeInTheDocument();
 });

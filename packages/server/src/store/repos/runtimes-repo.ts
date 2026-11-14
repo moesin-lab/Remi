@@ -1,4 +1,5 @@
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
+import { executionEndpointGroupCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { createLogger } from "@shared/logger.js";
 import { DAEMON_MIN_CLI_VERSION, DAEMON_PROTOCOL_VERSION, meetsDaemonMinCliVersion } from "@multiremi/contracts/daemon-protocol.js";
@@ -2480,9 +2481,11 @@ export class RuntimesRepo {
     const group = agent.executionGroupId ? getExecutionGroup(this.ctx.db, agent.executionGroupId, agent.workspaceId) : null;
     const profileOverride = group?.managed ? this.getAgentExecutionProfile(runtime.id, agent) : undefined;
     if (profileOverride && !profileOverride.model) return false;
-    if (!agent.model && !agent.thinkingLevel) return true;
+    if (!agent.model && !agent.thinkingLevel && (!group || group.connectionMode === "legacy")) return true;
     const configured = group?.managed ? getGroupExecutionProfile(this.ctx.db, group.id, agent.workspaceId)?.profile : null;
-    const catalog = group && configured && !configured.model
+    const catalog = group && group.connectionMode !== "legacy"
+      ? executionEndpointGroupCatalog(group, id => new ExecutionBindingStatesRepo(this.ctx).getRuntimeBindingModelCatalog(group.id, id))
+      : group && configured && !configured.model
       ? this.discoveredExecutionGroupCatalog(group, configured)
       : runtimeTargetModelCatalog({
       getRelayModelDiscovery: (id) => workspaces.getRelayModelDiscovery(id),
@@ -2496,7 +2499,8 @@ export class RuntimesRepo {
       getRuntimeBindingModelCatalog: (groupId, runtimeId) => new ExecutionBindingStatesRepo(this.ctx).getRuntimeBindingModelCatalog(groupId, runtimeId),
     }, agent.workspaceId, runtime, profileOverride, group?.managed ? group.id : undefined).find(entry => entry.provider === agent.provider);
     const models = catalog?.models ?? [];
-    const selectedModel = agent.model || (configured && !configured.model ? profileOverride?.model : "") || "";
+    if (group && group.connectionMode !== "legacy" && (catalog?.model_catalog_status !== "ready" || !models.length)) return false;
+    const selectedModel = agent.model || group?.modelPolicy.model || (configured && !configured.model ? profileOverride?.model : "") || "";
     if (!catalogAllowsModel(catalog ?? undefined, selectedModel)) return false;
     if (agent.model && !models.some(model => model.id === agent.model)
       && ((!agent.runtimeId && (agent.provider === "codex" || runtime.metadata[`${agent.provider}_profiles`] === 1))

@@ -1,128 +1,146 @@
 ---
-title: 能力组与连接 Profile
+title: 执行能力组与网关端点
 status: active
-summary: 工作区集中配置连接、选择 Runtime 成员，并通过版本确认控制任务领取。
+summary: 端点保存地址、协议和认证；执行能力组选择引擎、机器、连接和模型策略。
 ---
 
-# 能力组与连接 Profile
+# 执行能力组与网关端点
 
-侧栏「执行能力组」是独立配置入口（`/{workspaceSlug}/execution-groups`），支持新建、编辑、删除、用途说明、搜索与按引擎筛选。旧 Runtime 配置地址仍可访问同一页面。能力组选择执行引擎、一个连接 Profile（或不使用自定义连接）与 Runtime 成员；组内可以直接设置 Provider 地址、鉴权、默认模型与可用模型，无需先逐台配置机器。一个 Profile 可供多个组复用，一个 Runtime 可承载多个组。自动发现只登记引擎与机器状态，不创建能力组。
+侧栏「执行能力组」（`/{workspaceSlug}/execution-groups`）统一管理执行组和网关端点。端点不属于某个模型或执行引擎：它保存地址、支持的 API 协议、协议路径和认证。执行组选择执行引擎、Runtime 成员、一个端点或本机登录，以及可选的默认模型和模型白名单。Agent 选择执行组，再选择该组实际可用的模型。
 
-[API](../../packages/server/src/api/routers/execution-config.ts)使用 `/api/execution-profiles` 与 `/api/execution-groups`，集合支持 GET/POST，单项支持 GET/PUT/DELETE。连接配置的 provider 只支持 `claude`、`codex`；组还支持 `antigravity`，但其 `profile_id` 必须为 null。组内成员必须同工作区并匹配 provider，`any` Runtime 可承载具体 provider。更新不能更改已有 Profile 或组的 provider。
+同一端点可以同时支持 `openai-responses`、`anthropic-messages`、`google-generative`，分别供 Codex、Claude、Antigravity 执行组使用。`openai-chat-completions` 供直接调用 Chat Completions 的系统功能使用，与 Codex 的 Responses 协议分开声明。声明支持协议不代表 Remi 转换协议；网关必须真实实现相应接口。当前 Antigravity 适配器仅支持端点连接，本机订阅尚未实现。Grok 保留原生连接。
 
-已登录操作者共享工作区内的全部 Runtime、Profile 和能力组；历史 `owner_id` 不再限制选择、管理或同工作区调度。机器注册与领取任务仍校验 daemon 凭据、工作区和执行能力。
+## 端点与执行组
 
-## 配置流程
+[端点契约](../../packages/contracts/src/execution-endpoint.ts)与[API](../../packages/server/src/api/routers/execution-config.ts)定义：
 
-可以直接创建含 Provider 连接的组，Web 和 CLI 使用相同的原子保存接口：
+- `/api/execution-endpoints` 和 `/:id`：列表、读取、创建、更新、删除端点。
+- `/api/execution-groups` 和 `/:id`：执行组管理；`endpoint_id: null` 明确选择本机登录，不继承工作区 Relay。
+- 端点可保存模型清单和手动补充条目；执行默认值与白名单 `model_policy.model` / `model_policy.models` 仍属于组。同一端点的两个组可以选择不同模型。
+- 更新端点产生不可变 revision，所有引用组等待成员确认新版本。共享端点的编辑影响所有引用组；仍被组或系统 AI 引用时不能删除，也不能移除消费者需要的协议。
+- `protocol_paths` 为相对 `base_url` 的路径。Codex 未显式设置路径且基地址没有版本后缀时，默认加 `/v1`；Claude 使用基地址并请求 `/v1/messages`；Antigravity 使用基地址并请求 `/v1beta/...`。迁移保留原连接的完整基地址，不重复添加版本路径。
 
 ```bash
-remi runtime group create --file group.json --json
+remi runtime endpoint list --json
+remi runtime endpoint create --file endpoint.json --json
+remi runtime endpoint update <endpoint-id> --file endpoint.json --json
+remi runtime endpoint delete <endpoint-id> --json
 ```
+
+`endpoint.json` 示例（真实密钥不要提交到 Git）：
 
 ```json
 {
-  "name": "团队开发",
-  "description": "开发与代码审查",
-  "provider": "codex",
-  "profile_id": null,
-  "runtime_ids": [],
+  "name": "团队网关",
   "connection": {
-    "name": "团队网关",
-    "profile": {
-      "name": "team",
-      "base_url": "https://gateway.example/v1",
-      "auth_mode": "env",
-      "env_key": "REMI_CODEX_TEAM"
-    }
-  }
-}
-```
-
-`description` 最多 2000 字符；旧客户端省略时保留原说明，空字符串清除。`connection` 省略时只更新组本身；提供时继承组的执行引擎。`profile_id: null` 创建一个中央连接；非空则更新该工作区内的现有连接。连接、凭据版本和组成员在同一事务保存，任一步校验失败全部回滚。组内编辑共用连接会更新所有引用它的组，界面显示受影响的组数；要使用不同地址或模型，选择「配置新的 Provider」。无需更改其他组时，普通用途说明或成员编辑不会产生新的连接版本。
-
-组可先创建，再分配兼容的 Runtime。尚无机器或配置未确认时不能执行；机器就绪后，每个成员使用组的连接获取模型目录，组目录取成员共同可用的模型与推理选项。在 Agent 设置中选择能力组，再从该组目录选择模型。连接无需手填模型 ID；Agent 模型为「自动」且连接未指定默认模型时，从组的共同目录确定默认模型，目录尚未发现或没有共同模型时等待。显式配置 `models` 时仍受白名单限制。切换组时重新读取该组目录，不能沿用另一组的能力。实际模型与连接在任务首次领取时冻结，不改变运行中的任务。
-
-Web 的 Runtime 成员选择器与已保存的成员列表同时显示 Runtime 名称、机器名称、在线状态和完整 Runtime ID，以区分同名引擎或同一机器上的重复注册。机器名称沿用 Runtime 页的顺序：daemon 展示名、设备信息中的主机名、旧名称中的主机名；仍无名称时，云 Runtime 显示引擎云端名称，本地 Runtime 回退到 daemon ID 或占位名称。成员仍按 Runtime ID 保存；离线成员可保留，在线状态与配置下发确认状态分别展示，不能互相代替。无法读取成员详情时保留其 ID，编辑时仍可移除。
-
-也可以先建立可复用连接，再由多个组引用：
-
-先检查当前工作区，再创建连接：
-
-```bash
-remi runtime profile list --json
-remi runtime profile create --file profile.json --json
-```
-
-`profile.json` 示例：
-
-```json
-{
-  "name": "团队 Codex",
-  "provider": "codex",
-  "profile": {
-    "name": "team-codex",
-    "base_url": "https://gateway.example/v1",
+    "base_url": "https://gateway.example",
+    "protocols": ["openai-responses", "anthropic-messages"],
+    "protocol_paths": {"openai-responses": "/v1", "anthropic-messages": ""},
     "auth_mode": "api_key",
-    "env_key": ""
+    "env_key": "",
+    "auth_header": "bearer"
   },
   "api_key": "REPLACE_WITH_API_KEY"
 }
 ```
 
-外层 `name` 是展示名，内层 `profile.name` 是连接标识，只接受字母、数字、下划线、连字符。Codex 接口须兼容 Responses；Claude 须兼容 Anthropic Messages，并可设置 `auth_header: "bearer"` 或 `"x-api-key"`。中央连接的 `model` 可以省略或留空，由能力组自动发现；手动默认模型和最多 200 个唯一 ID 的 `models` 白名单仍可在高级设置中配置，指定默认模型时白名单必须包含它。自动模式下白名单只过滤实际发现的模型，不补出目录里不存在的 ID；省略白名单时使用完整发现目录。旧单 Runtime 连接仍要求非空默认模型。地址和能力规则见 [Codex](../design/acp-codex-via-codex-acp.md#runtime-自定义连接)和 [Claude](../design/acp-claude-via-claude-agent-acp.md)。不要把真实密钥提交到 Git。
-
-选择机器上登记的 Runtime，使用返回的 Profile ID 创建组：
+认证头 `auth_header` 用于 Anthropic 接口，可选 `bearer` / `x-api-key`。Google 接口使用 Google API key 头并兼容网关 Bearer。`auth_mode: env` 使用 daemon 进程内的 `REMI_ENDPOINT_*` 变量；服务端不接收环境变量的值。迁移的引擎专属变量继续兼容，但不会自动复制到其他机器。
 
 ```bash
-remi runtime list --json
 remi runtime group create --file group.json --json
-remi runtime group list --json
+remi runtime group get <group-id> --json
+remi runtime model catalog --execution-group <group-id> --json
+remi agent update <agent-id> --execution-group <group-id>
 ```
 
 ```json
 {
-  "name": "团队开发",
+  "name": "开发 Codex",
+  "description": "开发和代码审查",
   "provider": "codex",
-  "profile_id": "ep_REPLACE_WITH_PROFILE_ID",
-  "runtime_ids": ["REPLACE_WITH_RUNTIME_ID"]
+  "endpoint_id": "ep_REPLACE_WITH_ENDPOINT_ID",
+  "runtime_ids": ["REPLACE_WITH_RUNTIME_ID"],
+  "model_policy": {}
 }
 ```
 
-`profile_id: null` 使用工作区 Relay / 原生连接，不继承该 Runtime 的旧自定义 Profile。能力组可以暂时无成员，但不会有可执行机器。Agent 使用 `--execution-group <group-id>` 选择组；模型目录使用 `remi runtime model catalog --execution-group <group-id>` 查询。
+`model_policy: {}` 自动发现模型；可用 `{"model":"default-model","models":["default-model","fast-model"]}` 限制选择。实际目录由各成员通过选定连接探测后求共同可用集合，不用工作区全局目录补足缺失模型。空目录或探测错误不会伪装成可用。端点编辑不触发模型推理；目录探测不等于真实模型调用成功。
 
-更新使用 `runtime profile update <id> --file ...` 或 `runtime group update <id> --file ...`，提交完整配置。Profile 每次保存产生不可变 revision；省略 `api_key` 保留已存密钥。删除使用对应 `delete <id>` 命令。仍被组引用的 Profile、仍被 Agent 引用的组不可删除。
+## 第三方端点接入
 
-## 下发、快照与凭据
+交互参照 Magpie 提供商编辑器、模型目录与测试流程（参考提交 `7a69f455cb391a6b0674c8f4a70f9b76f12e85ea`，仓库 `yetone/magpie` 的 `internal/gui/assets/app.js`、`internal/provider/models.go`、`internal/provider/test.go`），在 Remi 的端点／执行组边界内实现。
 
-[v2 Runtime 快照](../../packages/server/src/api/daemon-protocol/runtime-input-snapshot.ts)通过 `runtime.profile.runtime_bindings` 下发组 ID、绑定 generation、Profile ID、revision 与非秘密配置。[daemon](../../packages/server/src/worker/daemon.ts)检查 provider、解析配置并取得对应凭据或本机环境变量，随后通过持久化上行事件 `runtime.binding_state` 回报 ready 或 error。[服务端状态存储](../../packages/server/src/store/repos/execution-binding-states-repo.ts)只接受与当前绑定 generation 和 Profile 版本一致的确认，重新注册或修改绑定后拒绝旧确认；[任务调度](../../packages/server/src/store/repos/tasks-repo.ts)要求受管组配置 ready 才能首次领取任务。更新 Profile 后旧 revision 的确认不再满足领取条件。旧 daemon 不能为受管组确认配置。
+| 接入行为 | Remi 契约 |
+|---|---|
+| 粘贴 cURL / 环境变量 | 仅解析文本中的 URL、API Key、请求模型；不运行命令，不展开变量。请求模型作为手动目录条目，仍由组选择默认模型 |
+| 每协议独立地址 | `protocol_urls` 优先于公共地址和 `protocol_paths`；输入完整请求地址时去除请求后缀，保留自定义路径 |
+| 单独获取模型 | `options.models_url` 可指定独立模型列表地址；使用当前端点凭据，从 Remi 服务器连接 |
+| 禁用列表与手动补充 | `options.fetch_models: false` 不请求列表；`manual_models` 保存 ID、名称、上下文、输出上限。手动条目覆盖同 ID 展示元数据，但不证明引擎能力 |
+| 非秘密附加头 | `options.headers` 应用于模型发现及 Codex、Claude、Antigravity 和系统标题请求；认证、Cookie 与传输控制头不允许放在这里 |
+| 超时 | `options.timeout_ms` 仅控制检查和模型发现，不是任务执行超时 |
+| 模型浏览 | 列表旁的「添加模型」按钮展开并定位手动输入；搜索 ID/名称，显示协议、来源、上下文和输出上限；可将发现的条目保留为手动条目 |
+| 分开检查 | 获取列表、探测 API 路径、测试一个模型。路径返回 400/422 只表示有响应；模型测试才发送一次小型推理请求，可能计费 |
+| 失败与旧目录 | 刷新失败保留上次成功列表并标识旧版本；修改草稿后显示旧目录提示。失败、空列表、无效 JSON 不标为成功 |
+| 未保存草稿 | 可以检查草稿；不会因此保存配置。已保存端点可在服务器复用密钥，浏览器不取回明文 |
 
-generation 只跟踪实际 Runtime 绑定。能力组改名不会清除已有 ready；只增删成员时，仅新增或移除的成员生成新 generation，未变成员继续可调度。切换 Profile 或把旧组转换为受管组会轮换所有成员的 generation，直到各 Runtime 确认新配置。这样管理元数据和横向扩容不会制造无关的执行中断，同时旧确认仍不能复活已改变的绑定。
+`POST /api/execution-endpoints/inspect` 接收 `operation: models | detect | test`；`test` 必须指定一个 `protocol` 和 `model`。`GET /api/execution-endpoints/:id/catalog` 读取目录缓存及最近检查结果。只有未修改的已保存配置才更新缓存；旧 revision 的迟到结果被忽略。缓存不参与 Runtime ready 判定，实际可执行目录仍由执行组成员确认。使用 Runtime 环境变量认证的端点不能在服务器检查，手动目录读取除外。
 
-ready 表示配置与凭据解析成功，不表示已调用远端模型。Runtime 在线、模型出现在目录与配置 ready 是不同证据，真实连通性仍需执行任务验证。
+```bash
+remi runtime endpoint inspect --file inspection.json --json
+remi runtime endpoint catalog <endpoint-id> --json
+```
 
-成员在自己的机器上异步请求该连接的模型目录，因此支持本机网关和 Runtime 环境变量鉴权。目录通过同一绑定确认事件上报，但状态独立于配置 ready；按组、Runtime、绑定 generation 与 Profile revision 保存，旧版本或已移除成员的结果不能覆盖当前目录。目录变动会刷新模型选择并重新匹配待执行任务，不覆盖 Runtime 的原生目录或其他组的连接。Codex 完整元数据先经当前执行引擎的离线解码校验；普通模型列表读取每个模型明确声明的 `supported_reasoning_levels`，没有声明时不推断推理能力。
+`inspection.json` 可使用 `{"endpoint_id":"ep_ID","operation":"models"}`，也可附带草稿 `connection` 和新 `api_key`。测试模型时再添加 `protocol`、`model` 并将 operation 改为 `test`。
 
-首次 claim 冻结完整连接配置和凭据版本，加入执行指纹。运行中任务继续使用自己的快照，daemon 按任务构造隔离配置；同一 Runtime 上不同组的任务不会互相覆盖全局 provider 设置。已冻结任务重领继续使用旧连接；显式修改 Agent 模型或 thinking 参数时，已冻结但尚未启动的任务取消，运行中任务继续原执行。重试与会话隔离约束见各 provider 接入文档。
+本次未实现 Magpie 的密钥池、额度路由、代理／自定义 CA、任意请求体覆盖或无认证模式。当前 Remi 原生执行适配器仍要求 API Key 或 Runtime 环境变量；页面不提供尚未接通执行层的开关。协议检查不会自动改写协议，也不自动试用不同账号或模型。
 
-旧 Runtime 自定义 Profile 的冻结凭据仍绑定原机器。Chat 冷启动重试若保留该快照且工作目录归属未变化，必须保留原 Runtime 绑定；历史 owner 改变不清除绑定。provider 不兼容或工作目录归属变化继续走原有重新分配流程，不能把旧机器密钥交给无法解析它的 Runtime。
+带 `endpoint_options` 的组和冻结任务要求 Runtime 声明 `execution_endpoint_options: 1`，旧 Runtime 提示升级且不能领取任务，避免静默忽略手动目录或附加头。
 
-Profile 与组的写入要求人类工作区管理员身份；组修改还检查受影响 Runtime 的编辑权限。task/daemon token 不能管理中央配置。API 不回显明文密钥；中央凭据使用现有 AES-256-GCM 机制，作用域绑定工作区、Profile ID 与不可变 credential ID。密钥配置及轮换变量见 [Codex 凭据说明](../design/acp-codex-via-codex-acp.md#runtime-自定义连接)。删除 Profile 只隐藏当前配置，保留历史版本和加密凭据，支持既有任务快照。
+## 本机登录与隔离
 
-环境变量模式不在平台存密钥：Codex 使用 `REMI_CODEX_*`，Claude 使用 `REMI_CLAUDE_*`。变量必须存在于每台承载机器的 daemon 进程环境；仅在运行管理 CLI 的终端设置无效。
+本机登录指 daemon 运行账号下可用的原生认证，不一定与浏览器用户或交互终端相同。端点与本机登录都是显式选择；连接失败不会切换到另一种账号或计费来源。每个会话保留隔离的配置目录和原生记录，不让同机不同组互相覆盖配置。
 
-## 升级与旧数据
+原生连接的模型也按组独立探测，不继承工作区网关目录。当前 Antigravity 不能创建本机登录组；迁移出来但未配置端点的 Antigravity 组保留可见状态并阻止执行，管理员需为其选择 Google 协议端点。
 
-[迁移](../../packages/server/src/store/execution-profile-migration.ts)保留旧成员与 Agent 绑定，放开一个 Runtime 只能属于一个同 provider 组的限制。每份旧 Runtime/provider 连接独立导入为中央 Profile，不按名称或配置内容合并；API Key 解密后以中央 Profile 作用域重新加密，旧连接和凭据继续保留给既有任务快照。迁移要求原凭据和解密密钥完整可用，缺失时失败，不丢弃连接或回退明文。
+## 下发、任务快照与密钥
 
-单成员旧组绑定该成员导入的 Profile 并转为受管组；成员都没有自定义连接的旧组转为 `profile_id: null` 的受管组。多成员组含不同连接时保留旧组的非受管调度语义，不擅自用一个 Profile 覆盖其他成员的连接。每个导入连接如果尚无受管组，迁移会为其建立绑定原 Runtime 的独立能力组，供集中编辑与使用；旧异构组不被静默替换。受管组必须等待新版 daemon 的当前配置确认才能接新任务，因此升级平台前应先升级各机器 CLI，平台升级后重启 daemon 并确认绑定 ready。
+[绑定状态](../../packages/server/src/store/repos/execution-binding-states-repo.ts)下发组 ID、绑定 generation、端点 revision 和适配后的非秘密连接。daemon 声明 `execution_endpoints: 1` 后才能执行新连接语义；旧 daemon 的页面状态提示升级，不让旧进程把本机登录解释为继承网关。
 
-迁移保留旧模型能力的来源证据。仅同 Runtime 的实际旧连接与中央连接等价、凭据来源可验证时复用 thinking 能力；更换服务地址或密钥后旧证据失效，多机器组继续取成员能力交集。
+配置 ready、目录 ready、Runtime 在线是不同证据。连接变更使旧确认失效；只改组名不使成员失效。模型策略变更轮换 generation。daemon 在任务首次领取时收到 `execution_connection`，其中冻结模式、引擎、端点 ID/revision、连接和凭据引用；运行中任务与基础设施重试不随端点编辑改账号。冷重试重新选择当前配置。
 
-编辑旧组会将其转为受管组；选择 null Profile 会采用工作区 Relay / 原生连接，因此迁移自定义连接时应选择正确的导入 Profile。Runtime 详情不再逐台编辑自定义连接；旧 `runtime codex-profile get|set`、`runtime claude-profile get|set` API/CLI 保留用于旧数据兼容，它们不会同步导入后的中央 Profile。
+端点复用已有版本和凭据存储。密钥以 AES-256-GCM 加密，作用域绑定 workspace、端点 ID 和 credential ID；API 不回显明文。只向属于工作区、已绑定端点或正在执行对应冻结快照的 Runtime 交付凭据。删除端点保留历史版本与凭据供冻结任务恢复。新增 `execution_connection` 列和读取投影的迁移同时覆盖 SQLite/PostgreSQL。
+
+## 系统 AI 与兼容入口
+
+设置中的原「模型网关」改为「系统 AI」，保留旧 `?tab=model-gateway` 地址。自动标题、进度摘要引用已有端点，不再独立编辑地址和密钥；这些系统默认连接不覆盖执行能力组。由服务器直接调用的功能只接受存储 API 凭据的端点，本机环境变量凭据不交给服务器。
+
+```bash
+remi workspace system-model-endpoints get <workspace> --json
+remi workspace system-model-endpoints set <workspace> --file defaults.json --json
+```
+
+```json
+{"defaults":{"openai-chat-completions":"ep_REPLACE_WITH_ENDPOINT_ID","anthropic-messages":null}}
+```
+
+旧 `runtime profile`、`workspace relay` API/CLI 暂留兼容；已迁移的 Profile 编辑转换为端点变更，旧模型字段写入对应组策略。旧 Relay 写入转换为端点与系统默认引用，不生成第二套明文密钥。新文档和页面只使用端点入口。旧 Runtime 单机 Profile 保留冻结历史任务兼容用途。
+
+## 升级与迁移
+
+[迁移](../../packages/server/src/store/execution-endpoint-migration.ts)在事务内执行一次：
+
+1. 原中央 Profile 保留 ID，新增端点 revision，旧版本和 credential ID 不改；默认模型和白名单移动到引用组。
+2. 完整的旧工作区 Relay 导入独立端点，原 Relay 行变为端点引用，清除其明文 token。相同 URL 不自动合并，避免混淆账号和协议路径。
+3. 原来继承 Relay 的受管组绑定导入端点；无网关的组明确设为本机登录。无组 Agent 的原有引擎与机器约束转换为显式组。
+4. 不完整的旧网关，以及使用旧全局手工推理声明、1M 上下文声明或额外原生配置选项的继承组，保留 legacy 执行状态；地址与密钥仍可导入端点，但不会静默丢弃这些额外语义。页面显示旧配置，需显式选择端点或本机登录后转换。冻结中的旧任务保留原快照语义，新端点组使用新组语义。
+5. 清理旧绑定确认，等待支持 `execution_endpoints: 1` 的 daemon 重新确认。应先准备新版 daemon，再升级平台；旧进程不具备新连接能力时不能领取这些组的新任务。
 
 ## 验证入口
 
-配置与下发可从上述 CLI 的读取结果、Runtime 绑定状态及 daemon WebSocket 快照检查；`tests/integration/central-profile-daemon-sync.test.ts` 覆盖真实连接的配置更新、凭据轮换与过期确认拒绝。文档检查使用 `npm run docs:test` 与 `npm run docs:check`；这些检查不代表真实模型调用成功。
+- `tests/unit/multiremi/execution-endpoints.test.ts`：SQLite/PostgreSQL 下跨引擎复用、凭据隔离、轮换、原生连接、迁移和系统引用。
+- `tests/integration/execution-endpoint-daemon.test.ts`：真实 API/WS/daemon 下发与隔离配置；模型实现为测试替身。
+- `tests/unit/daemon/execution-endpoint-routing.test.ts`：原生连接不继承网关、协议路径、Google 模型分页。
+- `frontend/packages/views/runtimes/components/execution-config-page.test.tsx`、`settings/components/model-gateway-tab.test.tsx`：页面选择与写入边界。
+- `bun run scripts/check-cli-capabilities.ts`、`npm run docs:test`、`npm run docs:check`：CLI 覆盖和文档检查。
 
-`tests/unit/multiremi/execution-group-configuration.test.ts` 覆盖组内原子保存、模型约束、回滚、共享连接更新和说明兼容。`tests/integration/execution-group-daemon.test.ts` 通过真实 API、WebSocket 和 daemon 验证 Claude/Codex 的默认与指定模型、凭据和隔离 Home，外部模型使用测试实现。`tests/integration/smoke-execution-configuration.ts` 驱动真实浏览器、Next 和临时数据库，覆盖独立入口、组内连接、搜索、版本确认、Agent 分组与模型切换及移动端；Windows 通过 Node 浏览器宿主避免 Bun 的 Chromium 管道问题。CI 的 `execution-configuration` job 在 PR 和完整检查中运行这些回归，并上传截图与失败诊断。
+这些是验证入口，不代表真实登录、订阅或模型调用已经验证。

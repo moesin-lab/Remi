@@ -451,6 +451,40 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "workspace.system-model-endpoints.get": {
+      "command": "remi workspace system-model-endpoints get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-model-endpoints.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-model-endpoints.set": {
+      "command": "remi workspace system-model-endpoints set",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-model-endpoints.set",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "workspace.relay.discovery": {
       "command": "remi workspace relay discovery",
       "aliases": [],
@@ -5453,6 +5487,91 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "runtime.endpoint.list": {
+      "command": "remi runtime endpoint list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.endpoint.get": {
+      "command": "remi runtime endpoint get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.endpoint.create": {
+      "command": "remi runtime endpoint create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.endpoint.update": {
+      "command": "remi runtime endpoint update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.endpoint.delete": {
+      "command": "remi runtime endpoint delete",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.delete",
+      "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "runtime.group.get": {
       "command": "remi runtime group get",
       "aliases": [],
@@ -5513,6 +5632,40 @@
       ],
       "capability": "runtime.group.delete",
       "mutation": "destructive",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.endpoint.inspect": {
+      "command": "remi runtime endpoint inspect",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.inspect",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "runtime.endpoint.catalog": {
+      "command": "remi runtime endpoint catalog",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.catalog",
+      "mutation": "read",
       "output": [
         "table",
         "json",
@@ -11262,6 +11415,9 @@
       "category": "retired_route",
       "reason": "已移除：改用 remi message resolve <message> --no-resolved"
     },
+    "DELETE /api/execution-endpoints/:id": {
+      "command": "runtime.endpoint.delete"
+    },
     "DELETE /api/execution-groups/:id": {
       "command": "runtime.group.delete"
     },
@@ -11645,6 +11801,11 @@
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
     },
+    "GET /api/daemon/runtimes/:id/endpoint-key": {
+      "cli_exempt": true,
+      "category": "daemon_internal_protocol",
+      "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
     "GET /api/daemon/runtimes/:runtimeId/agent-plugins/desired": {
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
@@ -11704,6 +11865,15 @@
     },
     "GET /api/dashboard/usage/daily": {
       "command": "dashboard.usage.daily"
+    },
+    "GET /api/execution-endpoints": {
+      "command": "runtime.endpoint.list"
+    },
+    "GET /api/execution-endpoints/:id": {
+      "command": "runtime.endpoint.get"
+    },
+    "GET /api/execution-endpoints/:id/catalog": {
+      "command": "runtime.endpoint.catalog"
     },
     "GET /api/execution-groups": {
       "command": "runtime.group.list"
@@ -12650,6 +12820,9 @@
     "GET /api/workspaces/:workspaceId/scm/events/:eventId": {
       "command": "scm.event.get"
     },
+    "GET /api/workspaces/:workspaceId/system-model-endpoints": {
+      "command": "workspace.system-model-endpoints.get"
+    },
     "GET /auth/lark/url": {
       "command": "context.auth.lark"
     },
@@ -13036,6 +13209,12 @@
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/execution-endpoints": {
+      "command": "runtime.endpoint.create"
+    },
+    "POST /api/execution-endpoints/inspect": {
+      "command": "runtime.endpoint.inspect"
     },
     "POST /api/execution-groups": {
       "command": "runtime.group.create"
@@ -13912,6 +14091,9 @@
       "category": "retired_route",
       "reason": "已移除：改用 remi message edit <message>"
     },
+    "PUT /api/execution-endpoints/:id": {
+      "command": "runtime.endpoint.update"
+    },
     "PUT /api/execution-groups/:id": {
       "command": "runtime.group.update"
     },
@@ -14051,6 +14233,9 @@
     },
     "PUT /api/workspaces/:workspaceId/scm/connections/:connectionId/repositories/:repositoryId": {
       "command": "scm.repository.bind"
+    },
+    "PUT /api/workspaces/:workspaceId/system-model-endpoints": {
+      "command": "workspace.system-model-endpoints.set"
     }
   }
 }

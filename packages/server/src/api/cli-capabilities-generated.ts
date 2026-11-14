@@ -297,6 +297,32 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "workspace.system-model-endpoints.get": {
+      "command": "remi workspace system-model-endpoints get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-model-endpoints.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.system-model-endpoints.set": {
+      "command": "remi workspace system-model-endpoints set",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-model-endpoints.set",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "workspace.relay.discovery": {
       "command": "remi workspace relay discovery",
       "auth": [
@@ -3923,6 +3949,71 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "runtime.endpoint.list": {
+      "command": "remi runtime endpoint list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.endpoint.get": {
+      "command": "remi runtime endpoint get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.endpoint.create": {
+      "command": "remi runtime endpoint create",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.endpoint.update": {
+      "command": "remi runtime endpoint update",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.endpoint.delete": {
+      "command": "remi runtime endpoint delete",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.delete",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "runtime.group.get": {
       "command": "remi runtime group get",
       "auth": [
@@ -3969,6 +4060,32 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "runtime.group.delete",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.endpoint.inspect": {
+      "command": "remi runtime endpoint inspect",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.inspect",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "runtime.endpoint.catalog": {
+      "command": "remi runtime endpoint catalog",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "runtime.endpoint.catalog",
       "output": [
         "table",
         "json",

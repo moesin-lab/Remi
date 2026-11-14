@@ -10,19 +10,39 @@ import { tmpdir } from "node:os";
 
 /** Runs on the owning Runtime: custom connections intentionally support loopback/LAN. */
 export async function discoverRuntimeProfileModels(
-  provider: "codex" | "claude",
+  provider: "codex" | "claude" | "antigravity",
+  profile: RuntimeCodexProfile | RuntimeClaudeProfile,
+  token: string,
+  signal: AbortSignal,
+  validate: typeof validateCodexModelCatalog = validateCodexModelCatalog,
+): Promise<MultiremiRuntimeModel[]> {
+  const manual = (profile.endpoint_options?.manual_models ?? []).map(model => ({
+    id: model.id, label: model.name ?? model.id, provider, default: model.id === profile.model,
+  }));
+  if (profile.endpoint_options?.fetch_models === false) return manual;
+  let discovered: MultiremiRuntimeModel[];
+  try { discovered = await discoverListedRuntimeModels(provider, profile, token, signal, validate); }
+  catch (error) { if (signal.aborted || !manual.length) throw error; return manual; }
+  const models = new Map(discovered.map(model => [model.id, model]));
+  for (const model of manual) models.set(model.id, { ...models.get(model.id), ...model });
+  return [...models.values()];
+}
+
+async function discoverListedRuntimeModels(
+  provider: "codex" | "claude" | "antigravity",
   profile: RuntimeCodexProfile | RuntimeClaudeProfile,
   token: string,
   signal: AbortSignal,
   validate: typeof validateCodexModelCatalog = validateCodexModelCatalog,
 ): Promise<MultiremiRuntimeModel[]> {
   const base = profile.base_url.replace(/\/+$/, "");
-  const url = new URL(base + (provider === "claude" && !base.endsWith("/v1") ? "/v1/models" : "/models"));
-  const headers: Record<string, string> = { Accept: "application/json" };
+  const url = new URL(profile.endpoint_options?.models_url ?? base + (provider === "antigravity" ? "/v1beta/models" : provider === "claude" && !base.endsWith("/v1") ? "/v1/models" : "/models"));
+  const headers: Record<string, string> = { Accept: "application/json", ...profile.endpoint_options?.headers };
   if (provider === "claude" && (profile as RuntimeClaudeProfile).auth_header === "x-api-key") headers["x-api-key"] = token;
   else headers.Authorization = `Bearer ${token}`;
+  if (provider === "antigravity") headers["x-goog-api-key"] = token;
   if (provider === "claude") headers["anthropic-version"] = "2023-06-01";
-  const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
+  const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(profile.endpoint_options?.timeout_ms ?? 10_000)]);
   const models = new Map<string, MultiremiRuntimeModel>();
   const cursors = new Set<string>();
   for (;;) {
@@ -33,9 +53,27 @@ export async function discoverRuntimeProfileModels(
       throw new Error(`Runtime ${provider} model discovery HTTP ${response.status}`);
     }
     const text = await readCapped(response, 1_000_000);
-    let body: { data?: unknown; models?: unknown; has_more?: boolean; last_id?: unknown };
+    let body: { data?: unknown; models?: unknown; has_more?: boolean; last_id?: unknown; nextPageToken?: unknown };
     try { body = JSON.parse(text); }
     catch { throw new Error(`Runtime ${provider} model discovery returned invalid JSON`); }
+    if (provider === "antigravity") {
+      if (!body || !Array.isArray(body.models)) throw new Error("Runtime antigravity model discovery requires a models array");
+      for (const item of body.models) {
+        if (!item || typeof item.name !== "string" || !item.name.startsWith("models/")) continue;
+        if (Array.isArray(item.supportedGenerationMethods) && !item.supportedGenerationMethods.includes("generateContent")) continue;
+        const id = item.name.slice(7);
+        if (!id || models.has(id)) continue;
+        const clean = id.toLowerCase().replace(/-preview$/, "");
+        if (clean.startsWith("imagen") || clean.startsWith("dall-e") || clean.endsWith("-image") || clean.endsWith("_image") || clean.includes("image-gen")) continue;
+        models.set(id, { id, label: typeof item.displayName === "string" ? item.displayName : id, provider, default: id === profile.model,
+          thinking: { status: "unsupported", supportedLevels: [] } });
+      }
+      if (!body.nextPageToken) break;
+      if (typeof body.nextPageToken !== "string" || cursors.has(body.nextPageToken) || cursors.size >= 100)
+        throw new Error("Invalid antigravity model discovery pagination");
+      cursors.add(body.nextPageToken); url.searchParams.set("pageToken", body.nextPageToken);
+      continue;
+    }
     if (!body || !Array.isArray(body.data)) throw new Error(`Runtime ${provider} model discovery requires a data array`);
     if (provider === "codex" && body.models !== undefined) {
       if (!validCodexNativeCatalog(body)) throw new Error("Runtime codex model discovery returned invalid native metadata");

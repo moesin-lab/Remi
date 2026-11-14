@@ -13,7 +13,8 @@ export function resolveRuntimeCodexProfile(input: RuntimeCodexProfile, env: Node
       model: profile.model,
       model_provider: "remi_custom",
       model_providers: {
-        remi_custom: { name: profile.name, base_url: profile.base_url, wire_api: "responses", env_key: "OPENAI_API_KEY", requires_openai_auth: false },
+        remi_custom: { name: profile.name, base_url: profile.base_url, wire_api: "responses", env_key: "OPENAI_API_KEY", requires_openai_auth: false,
+          ...(profile.endpoint_options?.headers ? { http_headers: profile.endpoint_options.headers } : {}) },
       },
     }),
     auth_token: token,

@@ -1,6 +1,7 @@
 import { createId } from "@multiremi/ids.js";
 import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
 import { ExecutionProfilesRepo } from "@multiremi/store/repos/execution-profiles-repo.js";
+import { ExecutionEndpointsRepo } from "@multiremi/store/repos/execution-endpoints-repo.js";
 import { getExecutionGroup, listExecutionGroups, saveExecutionGroup, deleteExecutionGroup } from "@multiremi/store/execution-groups.js";
 import { isRelatedTurnController } from './turn-controls.js';
 import { DaemonTurnBridge } from './inbox/daemon-turn-bridge.js';
@@ -850,6 +851,11 @@ runMigrations(this.db);
     const group = this.getExecutionGroup(id, workspaceId);
     if (!group) return [];
     return group.runtimeIds.map((runtimeId) => {
+      if (group.endpointId && this.getExecutionEndpoint(group.endpointId, workspaceId)?.connection.options
+        && this.getRuntimeLite(runtimeId)?.metadata.execution_endpoint_options !== 1)
+        return { runtime_id: runtimeId, status: "error", error: "Upgrade this Runtime to support endpoint model inventory and custom headers" };
+      if (group.connectionMode !== "legacy" && this.getRuntimeLite(runtimeId)?.metadata.execution_endpoints !== 1)
+        return { runtime_id: runtimeId, status: "error", error: "Upgrade this Runtime to support explicit endpoint and local-sign-in selection" };
       const row = this.db
         .query(
           "SELECT profile_id,profile_revision,status,error,generation FROM multiremi_execution_binding_states WHERE workspace_id=? AND group_id=? AND runtime_id=?",
@@ -924,6 +930,72 @@ runMigrations(this.db);
   listExecutionProfiles(workspaceId: string) {
     return this.executionProfiles.list(workspaceId);
   }
+  listExecutionEndpoints(workspaceId: string) {
+    return new ExecutionEndpointsRepo(this.ctx).list(workspaceId);
+  }
+  getExecutionEndpoint(id: string, workspaceId: string) {
+    return new ExecutionEndpointsRepo(this.ctx).get(id, workspaceId);
+  }
+  saveExecutionEndpoint(workspaceId: string, input: import("@multiremi/contracts/execution-endpoint.js").ExecutionEndpointInput, id?: string) {
+    const result = new ExecutionEndpointsRepo(this.ctx).save(workspaceId, input, id);
+    this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId, actorType: "system", actorId: null, payload: {} });
+    return result;
+  }
+  deleteExecutionEndpoint(id: string, workspaceId: string) {
+    return this.executionProfiles.delete(id, workspaceId);
+  }
+  getExecutionEndpointCatalog(id: string, workspaceId: string) {
+    return (this.db.query("SELECT snapshot FROM multiremi_execution_endpoint_catalogs WHERE workspace_id=? AND endpoint_id=? ORDER BY protocol")
+      .all(workspaceId, id) as { snapshot: string }[]).map(row => JSON.parse(row.snapshot));
+  }
+  recordExecutionEndpointInspection(id: string, workspaceId: string, revision: number, inspection: import("@multiremi/relay/endpoint-inspection.js").EndpointInspection) {
+    this.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      if (this.getExecutionEndpoint(id, workspaceId)?.revision !== revision) return;
+      for (const result of inspection.results) {
+        if (result.operation !== "models") continue;
+        const old = this.db.query("SELECT snapshot FROM multiremi_execution_endpoint_catalogs WHERE workspace_id=? AND endpoint_id=? AND protocol=?")
+          .get(workspaceId, id, result.protocol) as { snapshot: string } | null;
+        const previous = old ? JSON.parse(old.snapshot) : null;
+        const ok = result.state === "ok" || result.state === "manual";
+        const snapshot = { protocol: result.protocol, revision, last_checked_at: inspection.checked_at,
+          last_success_at: ok ? inspection.checked_at : previous?.last_success_at ?? null,
+          models_revision: ok ? revision : previous?.models_revision ?? null,
+          models: ok ? result.models : previous?.models ?? [],
+          error_code: ok ? null : result.error_code ?? "discovery_failed", message: ok ? null : result.message ?? null,
+          state: result.state, http_status: result.http_status, duration_ms: result.duration_ms };
+        this.db.run(`INSERT INTO multiremi_execution_endpoint_catalogs(workspace_id,endpoint_id,protocol,snapshot) VALUES(?,?,?,?)
+          ON CONFLICT(workspace_id,endpoint_id,protocol) DO UPDATE SET snapshot=excluded.snapshot`,
+          [workspaceId, id, result.protocol, JSON.stringify(snapshot)]);
+      }
+    })();
+  }
+  getSystemModelEndpoints(workspaceId: string): Record<string, string | null> {
+    return Object.fromEntries((["claude", "codex", "antigravity"] as const).map(engine => [
+      engine === "claude" ? "anthropic-messages" : engine === "codex" ? "openai-chat-completions" : "google-generative",
+      (this.db.query("SELECT endpoint_id FROM multiremi_relay_config WHERE workspace_id=? AND engine=?")
+        .get(workspaceId, engine) as { endpoint_id: string | null } | null)?.endpoint_id ?? null,
+    ]));
+  }
+  setSystemModelEndpoints(workspaceId: string, input: unknown) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("defaults must be an object");
+    const protocols = { "anthropic-messages": "claude", "openai-chat-completions": "codex", "google-generative": "antigravity" } as const;
+    return this.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      for (const [protocol, id] of Object.entries(input)) {
+        if (!(protocol in protocols)) throw new Error("Unknown API protocol");
+        const endpoint = typeof id === "string" ? this.getExecutionEndpoint(id, workspaceId) : null;
+        if (id !== null && (!endpoint || !endpoint.connection.protocols.some(value => value === protocol))) throw new Error("Endpoint is missing or incompatible");
+        if (endpoint && endpoint.connection.auth_mode !== "api_key") throw new Error("Server AI features require a stored API credential");
+        this.db.run(`INSERT INTO multiremi_relay_config(workspace_id,engine,fragment,auth_token,revision,updated_at,endpoint_id)
+          VALUES(?,?,'','',1,?,?) ON CONFLICT(workspace_id,engine) DO UPDATE SET endpoint_id=excluded.endpoint_id,
+          fragment='',auth_token='',revision=multiremi_relay_config.revision+1,updated_at=excluded.updated_at`,
+          [workspaceId, protocols[protocol as keyof typeof protocols], new Date().toISOString(), id]);
+      }
+      this.ctx.emitWorkspaceEvent({ type: "daemon:pending_changed", workspaceId, actorType: "system", actorId: null, payload: {} });
+      return this.getSystemModelEndpoints(workspaceId);
+    })();
+  }
   getExecutionProfile(id: string, workspaceId: string, revision?: number) {
     return this.executionProfiles.get(id, workspaceId, revision);
   }
@@ -964,6 +1036,7 @@ runMigrations(this.db);
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       let profileId = input.profile_id;
       if (input.connection !== undefined) {
+        if (input.endpoint_id !== undefined) throw new Error("Save endpoint settings through the endpoint API");
         if (!input.connection || typeof input.connection !== "object" || Array.isArray(input.connection))
           throw new Error("connection must be a provider connection object");
         if (input.provider !== "claude" && input.provider !== "codex")

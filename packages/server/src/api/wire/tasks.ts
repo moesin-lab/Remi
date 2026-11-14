@@ -20,6 +20,7 @@ type InternalTaskField =
   | "execution_scope"
   | "codexProfile"
   | "claudeProfile"
+  | "executionConnection"
   | "delegationId"
   | "delegation_id"
   | "delegatedByAgentId"
@@ -56,6 +57,7 @@ export function taskPublicResponse<T extends MultiremiTask>(task: T): Omit<T, In
     execution_scope: _executionScope,
     codexProfile: _codexProfile,
     claudeProfile: _claudeProfile,
+    executionConnection: _executionConnection,
     delegationId: _delegationId,
     delegation_id: _delegationIdSnake,
     delegatedByAgentId: _delegatedByAgentId,
@@ -349,6 +351,7 @@ export function daemonTaskWireResponse(
   if (task.executionFingerprint || task.pluginSnapshot.length) response.plugin_snapshot = task.pluginSnapshot;
   response.codex_profile = task.codexProfile ?? null;
   response.claude_profile = task.claudeProfile ?? null;
+  if (task.executionConnection) response.execution_connection = task.executionConnection;
   if (task.executionFingerprint) response.execution_fingerprint = task.executionFingerprint;
   if (triggerMetadata?.triggerThreadId) response.trigger_thread_id = triggerMetadata.triggerThreadId;
   if (triggerMetadata?.triggerCommentContent) response.trigger_comment_content = triggerMetadata.triggerCommentContent;

@@ -38,12 +38,12 @@ export function createReplacementAttemptWithinTransaction(db: SqlDatabase, turnI
     [input.previousStatus,input.reason,now,now,previous.id]);
   db.run("UPDATE multiremi_access_tokens SET revoked_at=? WHERE type='task' AND task_id=? AND revoked_at IS NULL",
     [now,previous.id]);
-  const carry=["runtime_id","provider","session_id","work_dir","plugin_snapshot","codex_profile","claude_profile",
+  const carry=["runtime_id","provider","session_id","work_dir","plugin_snapshot","codex_profile","claude_profile","execution_connection",
     "execution_fingerprint","execution_model","execution_thinking_level","fallback_switched","switch_reason",
     "projection_degrade_level"];
   const value: Record<string,unknown>=Object.fromEntries(carry.map(k=>[k,previous[k]]));
   if (input.cold) Object.assign(value,{runtime_id:null,session_id:null,work_dir:null,execution_fingerprint:null,
-    plugin_snapshot:"[]",codex_profile:null,claude_profile:null});
+    plugin_snapshot:"[]",codex_profile:null,claude_profile:null,execution_connection:null});
   const lane=db.query("SELECT cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?").get(turn.session_id,turn.agent_id,turn.execution_scope);
   const cold=input.cold||!previous.session_id;
   const from=cold?0:Number(previous.input_ack_seq??turn.input_to_seq??lane?.cursor_seq??0);

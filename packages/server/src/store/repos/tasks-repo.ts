@@ -26,6 +26,7 @@ import type { ConversationLogEntry } from "@multiremi/contracts/conversation-log
 import { reRingSweepEnabled, RE_RING_SWEEP_CANDIDATES_SQL, RE_RING_SWEEP_PAGE_SQL, RE_RING_SWEEP_LANE_LIMIT,
   RE_RING_SWEEP_ENTRY_LIMIT, RE_RING_SWEEP_MIN_AGE_MS, type ReRingSweepResult } from "@multiremi/store/re-ring-sweep.js";
 import { runtimeConnectionSnapshot } from "@multiremi/contracts/runtime-connection.js";
+import { executionEndpointGroupCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { canonicalJson } from "@multiremi/agent-plugins/import.js";
 import { sanitizeTraceEventFields } from "@shared/trace-sanitize.js";
@@ -2348,6 +2349,8 @@ export class TasksRepo {
         WHERE id = ?`, [retryParent, chatSession.id, id]);
     }
     if (inheritedPluginSnapshot) this.replaceTaskPluginSnapshotIndex(id, inheritedPluginSnapshot, now);
+    if (inheritedExecutionFingerprint && input.executionConnection) runTurnExecutionMutation(this.ctx.db,
+      "UPDATE multiremi_turn_execution_records SET execution_connection=? WHERE id=?", [toJson(input.executionConnection), id]);
     if (issueSession && !(parentTaskId && attempt > 1)) {
       this.ctx.issueSessions().addSessionParticipant(issueSession.id, {
         participantType: "agent",
@@ -3619,9 +3622,18 @@ export class TasksRepo {
 
     const pluginSnapshot = this.ctx.agentPlugins().resolveAgentPluginSnapshot(currentAgent.id);
     const runtimeProfile = this.runtimeProfileForAgent(runtime.id, currentAgent, task);
+    const connectionGroup = currentAgent.executionGroupId ? getExecutionGroup(this.ctx.db, currentAgent.executionGroupId, currentAgent.workspaceId) : null;
+    const connectionCatalog = connectionGroup && connectionGroup.connectionMode !== "legacy"
+      ? executionEndpointGroupCatalog(connectionGroup, id => this.ctx.executionBindingStates().getRuntimeBindingModelCatalog(connectionGroup.id, id)) : null;
+    const connectionModel = taskExecutionTarget(currentAgent, task).model || connectionGroup?.modelPolicy.model
+      || connectionCatalog?.models.find(model => model.default)?.id || connectionCatalog?.models[0]?.id || null;
+    const executionConnection = connectionGroup && connectionGroup.connectionMode !== "legacy"
+      ? { mode: connectionGroup.connectionMode, provider: currentAgent.provider,
+        endpoint_id: connectionGroup.endpointId, endpoint_revision: connectionGroup.profileRevision, profile: runtimeProfile }
+      : null;
     const chat = task.chatSessionId && !task.issueId ? this.ctx.chat().getChatSession(task.chatSessionId) : null;
     const executionFingerprint = this.chatExecutionFingerprint(withRuntimeProfileFingerprint(
-      createHash("sha256").update(canonicalJson(pluginSnapshot)).digest("hex"), runtimeProfile,
+      createHash("sha256").update(canonicalJson(executionConnection ? [pluginSnapshot, executionConnection] : pluginSnapshot)).digest("hex"), runtimeProfile,
     ), chat);
     if (!this.runtimeHasReadyPluginSnapshot(runtime, pluginSnapshot)) {
       throw new AgentPluginReadinessChangedError("Agent Plugin readiness changed during task claim");
@@ -3694,7 +3706,7 @@ export class TasksRepo {
         executionFingerprint,
         provider === "codex" && runtimeProfile ? toJson(runtimeProfile) : null,
         provider === "claude" && runtimeProfile ? toJson(runtimeProfile) : null,
-        runtimeProfile?.model ?? null,
+        runtimeProfile?.model || connectionModel,
         runtimeProfile && !currentAgent.model ? taskExecutionTarget(currentAgent, task).thinkingLevel : null,
         issueSessionId ? 1 : 0,
         issueProviderSessionId,
@@ -3709,6 +3721,8 @@ export class TasksRepo {
       ],
     );
     this.replaceTaskPluginSnapshotIndex(task.id, pluginSnapshot);
+    runTurnExecutionMutation(this.ctx.db, "UPDATE multiremi_turn_execution_records SET execution_connection=? WHERE id=?",
+      [executionConnection ? toJson(executionConnection) : null, task.id]);
     return this.rehydrateSnapshot(task);
   }
 
@@ -3735,6 +3749,7 @@ export class TasksRepo {
       executionFingerprint: current.executionFingerprint,
       codexProfile: current.codexProfile,
       claudeProfile: current.claudeProfile,
+      executionConnection: current.executionConnection,
       executionModel: current.executionModel,
       execution_model: current.execution_model,
       executionThinkingLevel: current.executionThinkingLevel,
@@ -3786,6 +3801,7 @@ export class TasksRepo {
       const profile = this.ctx.runtimes().getAgentExecutionProfile(runtime.id, agent);
       return !profile || runtime.metadata[`${agent.provider}_profiles`] === 1;
     }
+    if (group.connectionMode !== "legacy" && runtime.metadata.execution_endpoints !== 1) return false;
 
     return this.ctx.executionBindingStates().isRuntimeExecutionBindingReady(
       group.id, runtime.id, group.profileId, group.profileRevision,
@@ -3797,6 +3813,8 @@ export class TasksRepo {
     if (!agent || (!task.executionFingerprint && !this.runtimeHasReadyExecutionGroup(runtime, agent))) return false;
     if (task.codexProfile && runtime.metadata.codex_profiles !== 1) return false;
     if (task.claudeProfile && runtime.metadata.claude_profiles !== 1) return false;
+    if (task.executionConnection && runtime.metadata.execution_endpoints !== 1) return false;
+    if (task.executionConnection?.profile?.endpoint_options && runtime.metadata.execution_endpoint_options !== 1) return false;
     if (!task.executionFingerprint) {
       return this.ctx.agentPlugins().runtimeHasReadyAgentPlugins(runtime.id, task.agentId);
     }
@@ -5898,6 +5916,7 @@ ${placementAfter.sql}
       pluginSnapshot: inheritExecutionSnapshot ? parent.pluginSnapshot : undefined,
       codexProfile: inheritExecutionSnapshot ? parent.codexProfile : null,
       claudeProfile: inheritExecutionSnapshot ? parent.claudeProfile : null,
+      executionConnection: inheritExecutionSnapshot ? parent.executionConnection : null,
       executionFingerprint: inheritExecutionSnapshot ? parent.executionFingerprint : null,
       // MUL-336 recovery chain state. The override and the switch budget are
       // carried forward by every later retry of this chain, so a fallback that
@@ -5987,12 +6006,12 @@ ${placementAfter.sql}
       reason:redispatch?'redispatch':parent.failureReason??'retry',cold:Boolean(input.resetProviderSession),allowCancelledTurn:redispatch,
     });
     const mapping:Record<string,string>={runtimeId:'runtime_id',provider:'provider',sessionId:'session_id',workDir:'work_dir',
-      codexProfile:'codex_profile',claudeProfile:'claude_profile',executionFingerprint:'execution_fingerprint',
+      codexProfile:'codex_profile',claudeProfile:'claude_profile',executionConnection:'execution_connection',executionFingerprint:'execution_fingerprint',
       executionModel:'execution_model',executionThinkingLevel:'execution_thinking_level',fallbackSwitched:'fallback_switched',
       switchReason:'switch_reason',nextRetryAt:'next_retry_at',projectionDegradeLevel:'projection_degrade_level',pluginSnapshot:'plugin_snapshot'};
     const fields:Record<string,unknown>={};
     for(const[key,column]of Object.entries(mapping))if((input as any)[key]!==undefined){let value=(input as any)[key];
-      if(['pluginSnapshot','codexProfile','claudeProfile'].includes(key)&&value!=null)value=toJson(value);
+      if(['pluginSnapshot','codexProfile','claudeProfile','executionConnection'].includes(key)&&value!=null)value=toJson(value);
       if(key==='fallbackSwitched')value=value?1:0;fields[column]=value;}
     const keys=Object.keys(fields);
     if(keys.length)this.ctx.db.run(`UPDATE multiremi_turn_attempts SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`,[...keys.map(k=>fields[k]),created.attempt_id]);
@@ -7412,6 +7431,7 @@ function toTask(row: Row, usage: TaskUsageEntry[]): MultiremiTask {
     pluginSnapshot: parseJson<MultiremiTaskPluginSnapshotEntry[]>(row.plugin_snapshot, []),
     codexProfile: parseJson(row.codex_profile, null),
     claudeProfile: parseJson(row.claude_profile, null),
+    executionConnection: parseJson(row.execution_connection, null),
     plugin_snapshot: parseJson<MultiremiTaskPluginSnapshotEntry[]>(row.plugin_snapshot, []),
     executionFingerprint: nullableString(row.execution_fingerprint),
     execution_fingerprint: nullableString(row.execution_fingerprint),

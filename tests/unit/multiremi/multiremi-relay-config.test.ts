@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 import { afterEach, describe, expect, it } from "bun:test";
 import { extractAntigravityDefaultModel, extractBaseUrl, validateRelayFragment } from "@multiremi/relay/fragment.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -58,7 +60,7 @@ describe("relay config store", () => {
     expect(JSON.stringify(browser)).not.toContain("agy-gateway-secret");
 
     const daemon = store.getRelayConfigForDaemon("local");
-    expect(daemon.antigravity).toEqual({ fragment: ANTIGRAVITY_FRAGMENT, authToken: "agy-gateway-secret", revision: 1 });
+    expect(daemon.antigravity).toMatchObject({ fragment: ANTIGRAVITY_FRAGMENT, authToken: "agy-gateway-secret", revision: 1 });
     expect(daemon.claude?.authToken).toBe("sk-ant-secret");
     expect(store.revealRelayToken("local", "antigravity")).toBe("agy-gateway-secret");
 

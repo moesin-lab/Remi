@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 import { createResponsibleTestIssue } from './helpers.js';
 import { reportFrame } from "../../fixtures/report-session.js";
 // Bearer auth, daemon-token route scoping, and the cookie fallback for safe methods.

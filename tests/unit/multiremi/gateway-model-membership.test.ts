@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, taskRequestPath, sentTask, mutateExecutionFixture } from "./unified-test-paths.js";
 import { taskOfferResponse } from "../../fixtures/task-offer.js";

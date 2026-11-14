@@ -2,28 +2,33 @@
 
 ## Central Capability Groups
 
-Central connection profiles can omit `model`; the owning Runtime discovers the
-connection's `/models` inventory asynchronously after applying the binding.
-Claude uses `/v1/models` with its selected authentication header and pagination.
-The result travels in `runtime.binding_state` as a separate `model_catalog`,
-fenced by group, Runtime, binding generation and Profile revision. Configuration
-ready and catalog ready remain distinct. A changed connection cannot reuse a
-previous revision's directory or the Runtime's native connection capabilities.
+Execution groups choose a shared gateway endpoint or explicit local sign-in. Endpoints
+store addresses, supported API protocols and credentials; default models and allowlists
+belong to groups. See [execution configuration](dev/execution-configuration.md).
 
-Group model selection and task placement use the same intersection of member
-catalogs. Automatic selection resolves a real model from that shared set and
-freezes it with the connection at claim time; an undiscovered automatic
-connection waits. Explicit defaults and allowlists retain their manual semantics.
-When a Codex endpoint includes complete native `models` metadata, discovery uses
-the actual Codex decoder offline before publishing exact-model reasoning levels.
-An ordinary `data` inventory does not imply reasoning support. A directory
-update invalidates group model queries and wakes task matching; it does not
-prove a successful model generation.
+Each Runtime probes the selected connection after applying its binding. Codex uses
+OpenAI Responses-compatible model inventory; Claude uses `/v1/models` with its selected
+authentication header; Antigravity uses Google `/v1beta/models`. Per-protocol base paths
+are resolved before discovery. A local-sign-in probe has a separate group home and
+explicitly clears workspace gateway routing.
+
+The report travels in `runtime.binding_state.model_catalog`, fenced by group,
+Runtime, generation and endpoint revision. Configuration readiness, catalog readiness
+and online status are separate. A group's catalog is the intersection of its members'
+current reports, filtered by that group's model policy. New endpoint-backed groups do
+not fabricate a model from a manually entered default or inherit global gateway models.
+The selected model and connection are frozen on first claim. Unknown/failed catalogs
+block new tasks until a usable catalog is reported.
+
+When a Codex endpoint includes complete native `models` metadata, discovery validates
+it with the actual Codex decoder. An ordinary `data` array does not imply reasoning
+support. The display-only legacy workspace overlay described below remains for older
+clients and unconverted connections; it does not override explicit endpoint groups.
 
 ## Context Window Declarations
 
 Claude gateway models have a separate administrator-controlled 1M context switch
-in Settings > Model gateway, defaulting off. The declaration is stored independently
+in The legacy Relay API, defaulting off. The declaration is stored independently
 of discovery snapshots and reasoning levels, so a probe cannot erase it. The
 reasoning-level listing includes each model's `context_window` and retains
 context-only rows when an inventory entry disappears. The write command is
@@ -90,7 +95,7 @@ therefore only ever fills a gap. When a higher-priority source already declares
 levels the declaration is stored but not applied, and the read model
 (`remi workspace relay reasoning-levels get`) reports the stored declaration and
 the effective levels with their source — `gateway`, `runtime`, `manual`,
-`family`, or none — so the settings page can show a declaration that is being
+`family`, or none — so the legacy reasoning API can show a declaration that is being
 outranked instead of appearing to ignore it. A declaration names one model id and
 never applies to any other. An empty level set removes it rather than storing an
 empty list, because an empty list would read as an authoritative *unsupported*
@@ -110,7 +115,7 @@ entry carrying `thinking_source: manual` with the declared levels, so it appears
 in the Agent model dropdown with those levels selectable and is routable on any
 Claude runtime. An empty snapshot, a snapshot whose last attempt failed, a
 disabled discovery toggle or a model that has since left the inventory therefore
-never blocks declaring levels and never hides the declaration: the settings page
+never blocks declaring levels and never hides the declaration: the legacy reasoning API
 distinguishes "not discovered" from "not declared" and accepts a manually entered
 model id instead of only offering 立即探测. Executability is a separate question
 from reasoning levels, and the Codex boundary (#220) is unchanged: a declaration
@@ -210,45 +215,20 @@ compatibility, and cross-workspace bindings remain invalid.
 
 ## Antigravity Gateway Engine
 
-Settings > Model gateway also holds an `antigravity` engine beside Claude and
-Codex (`PUT /api/workspaces/:id/relay-config/antigravity`, or
-`remi workspace relay update antigravity`). Its fragment is JSON with only two
-keys, `{"base_url": "https://…", "default_model": "gemini-…"}`
-([validator](../packages/server/src/relay/fragment.ts)). `base_url` passes the
-same public-https check as the other gateways, must not carry a query or
-fragment, and must be the gateway root: a trailing `/v1beta` or `/v1` is
-rejected because the Antigravity server appends `/v1beta/...` itself.
-`default_model` is optional, at most 200 characters, without whitespace. The
-token field holds the gateway API key, and a key still requires a `base_url`.
-The browser projection masks the key exactly like the other engines; reveal and
-probe accept the engine.
+Antigravity groups select an endpoint that declares `google-generative`. The endpoint
+address is the API root and omits `/v1beta` and `/v1`; the adapter appends `/v1beta/...`.
+The group chooses its default model; endpoints have no model field. Current Remi
+Antigravity does not support a native-login group.
 
-Discovery ([discovery.ts](../packages/server/src/relay/discovery.ts)) lists
-`<base_url>/v1beta/models?pageSize=1000` with `Authorization: Bearer <key>` and
-follows `nextPageToken` for at most five pages, as the server does. It applies
-the server's own filter: the `models/` prefix is stripped, an entry whose
-`supportedGenerationMethods` omits `generateContent` is dropped (an entry listing
-no methods is kept, as the server keeps it), and image-generation ids (`imagen*`,
-`dall-e*`, `*-image`, `*_image`, `*image-gen*`, ignoring `-preview`) are
-excluded. `inputTokenLimit` is not stored. Every model carries
-`thinking.status: unsupported`, because the server's gateway path offers no
-`thought_level` selector; the engine's declarable level set is empty and an
-explicit Agent effort is rejected. A failed first page fails the run and keeps
-the last known snapshot; a failed later page keeps the models already listed and
-records the error, so 立即探测 reports `error` with those models.
+Binding discovery calls `/v1beta/models` on the Runtime, follows page tokens, removes
+non-chat and image-only models and reports no effort selector. A failed page makes the
+binding catalog fail, rather than promoting a partial list to executable capability.
+Before execution, the daemon opens the existing loopback shim with the task's frozen
+endpoint and credential. The ACP server still verifies actual model selection and can
+reject a model even if a gateway inventory listed it. See [Antigravity Runtime](antigravity.md).
 
-The catalog overlay treats the engine like Claude without the family inference:
-with discovery on and a key stored, the current-revision snapshot replaces the
-Runtime union in the Antigravity dropdown. The only model marked `default` is
-the fragment's `default_model`; with none configured, nothing is marked.
+Old Relay API/CLI shapes remain compatible. Migration imports their address and key
+into an endpoint and moves `default_model` into group policy. The Relay row retains an
+endpoint reference for old consumers; new groups neither read nor inherit that row.
 
-The daemon wire carries the engine as `relay.antigravity` (fragment, key and
-revision) wherever the relay travels — register, the workspace repository
-refresh and the `workspace.relay` downlink in the heartbeat acknowledgement —
-and, as for the other engines, only to owner/admin daemons. An Antigravity daemon
-keeps the key in its loopback gateway shim
-([gateway-shim.ts](../packages/daemon/src/agent-runtime/antigravity/gateway-shim.ts)):
-tasks and the runtime model probe reach the gateway only through a per-process
-shim token, and a task without the engine's base URL and key fails with
-`antigravity_gateway_unconfigured` before its start ACK. An Agent without a model
-runs the engine's `default_model` ([Antigravity Runtime](antigravity.md)).
+执行端点可通过 `options.models_url` 指定目录地址，通过 `fetch_models: false` 禁止自动发现并使用 `manual_models`。Runtime 合并手动条目与发现结果；发现失败且配置手动条目时使用手动目录。服务器编辑器的检查缓存只供查看，不替代执行组成员的目录确认。Codex 禁用列表时也跳过原生扩展目录请求，不能由手工条目推断原生推理能力。详见[执行配置](dev/execution-configuration.md#第三方端点接入)。

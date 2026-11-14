@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { runtimeInputSnapshot } from "@multiremi/api/daemon-protocol/runtime-input-snapshot.js";

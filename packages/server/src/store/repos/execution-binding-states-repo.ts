@@ -1,6 +1,7 @@
 import { runtimeConnectionSnapshot, type RuntimeExecutionBinding, type RuntimeExecutionBindingAck, type RuntimeBindingModelCatalog } from "@multiremi/contracts/runtime-connection.js";
 import type { StoreContext } from "@multiremi/store/context.js";
 import { createId, nowIso } from "@multiremi/ids.js";
+import { getGroupExecutionProfile } from "../execution-groups.js";
 
 export class ExecutionBindingStatesRepo {
   constructor(private readonly ctx: StoreContext) {}
@@ -11,7 +12,7 @@ export class ExecutionBindingStatesRepo {
       if (!runtime) return [];
       const workspaceId = runtime.workspace_id ?? "local";
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
-      const rows = this.ctx.db.query(`SELECT g.id, g.provider, g.profile_id, p.revision, v.profile
+      const rows = this.ctx.db.query(`SELECT g.id, g.provider, g.profile_id, g.connection_mode, p.revision, v.profile
         FROM multiremi_execution_group_members m
         JOIN multiremi_runtimes r ON r.id = m.runtime_id AND COALESCE(r.workspace_id, 'local') = m.workspace_id
         JOIN multiremi_execution_groups g ON g.workspace_id = m.workspace_id AND g.id = m.group_id
@@ -19,6 +20,7 @@ export class ExecutionBindingStatesRepo {
         LEFT JOIN multiremi_execution_profile_versions v ON v.workspace_id = p.workspace_id AND v.id = p.id AND v.revision = p.revision
         WHERE m.runtime_id = ? AND g.managed = 1 ORDER BY g.id`).all(runtimeId) as Array<{
           id: string; provider: string; profile_id: string | null; revision: number | null; profile: string | null;
+          connection_mode: "legacy" | "native" | "endpoint";
         }>;
       return rows.map(row => {
         // Membership changes and Runtime registration delete this generation.
@@ -34,9 +36,10 @@ export class ExecutionBindingStatesRepo {
           provider: row.provider,
           profileId: row.profile_id,
           profileRevision: row.revision,
+          connectionMode: row.connection_mode,
           // The allowlist is a control-plane catalog contract. Older daemons
           // understand the selected/default model but reject unknown fields.
-          profile: row.profile ? runtimeConnectionSnapshot(JSON.parse(row.profile)) : null,
+          profile: row.profile ? runtimeConnectionSnapshot(getGroupExecutionProfile(this.ctx.db, row.id, workspaceId)?.profile ?? null) : null,
         };
       });
     })();
@@ -86,15 +89,22 @@ export class ExecutionBindingStatesRepo {
 
   getRuntimeBindingModelCatalog(groupId: string, runtimeId: string): RuntimeBindingModelCatalog | null {
     const desired = this.getRuntimeExecutionBindings(runtimeId).find(binding => binding.groupId === groupId);
-    if (!desired?.profile || !this.isRuntimeExecutionBindingReady(groupId, runtimeId, desired.profileId, desired.profileRevision)) return null;
+    if (!desired || (!desired.profile && desired.connectionMode !== "native")
+      || !this.isRuntimeExecutionBindingReady(groupId, runtimeId, desired.profileId, desired.profileRevision)) return null;
     const row = this.ctx.db.query(`SELECT model_catalog FROM multiremi_execution_binding_states
-      WHERE group_id=? AND runtime_id=? AND generation=? AND profile_id=? AND profile_revision=?`)
-      .get(groupId, runtimeId, desired.generation, desired.profileId, desired.profileRevision) as { model_catalog: string | null } | null;
+      WHERE group_id=? AND runtime_id=? AND generation=?
+      AND (profile_id=? OR (profile_id IS NULL AND CAST(? AS TEXT) IS NULL))
+      AND (profile_revision=? OR (profile_revision IS NULL AND CAST(? AS INTEGER) IS NULL))`)
+      .get(groupId, runtimeId, desired.generation, desired.profileId, desired.profileId, desired.profileRevision, desired.profileRevision) as { model_catalog: string | null } | null;
     return row?.model_catalog ? JSON.parse(row.model_catalog) : null;
   }
 
   isRuntimeExecutionBindingReady(groupId: string, runtimeId: string, profileId: string | null, profileRevision: number | null): boolean {
     const desired = this.getRuntimeExecutionBindings(runtimeId).find(binding => binding.groupId === groupId);
+    if (desired?.profile?.endpoint_options) {
+      const runtime = this.ctx.runtimes().getRuntimeLite(runtimeId);
+      if (runtime?.metadata.execution_endpoint_options !== 1) return false;
+    }
     if (!desired || desired.profileId !== profileId || desired.profileRevision !== profileRevision) return false;
     if (profileId !== null && (!desired.profile || profileRevision === null)) return false;
     const row = this.ctx.db.query(`SELECT s.profile_id, s.profile_revision, s.status, s.generation

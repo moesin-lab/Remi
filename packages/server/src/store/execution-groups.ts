@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 import type { MultiremiExecutionGroup } from "@multiremi/contracts/types.js";
+import { endpointRuntimeProfile, legacyEndpointConnection, parseExecutionModelPolicy } from "@multiremi/contracts/execution-endpoint.js";
 
 type RuntimeRow = {
   id: string;
@@ -151,6 +152,8 @@ export function getExecutionGroup(
     description: string;
     profile_id: string | null;
     managed: number;
+    connection_mode: "legacy" | "native" | "endpoint";
+    model_policy: string;
   } | null;
   if (!row) return null;
   const members = db
@@ -172,6 +175,9 @@ export function getExecutionGroup(
     description: row.description ?? "",
     profileId: row.profile_id ?? null,
     profileRevision: profile?.revision ?? null,
+    endpointId: row.connection_mode === "endpoint" ? row.profile_id : null,
+    connectionMode: row.connection_mode ?? "legacy",
+    modelPolicy: JSON.parse(row.model_policy ?? "{}"),
     managed: row.managed === 1,
     id: row.id,
     workspaceId: row.workspace_id,
@@ -211,21 +217,23 @@ export function getGroupExecutionProfile(
   db: SqlDatabase,
   groupId: string,
   workspaceId: string,
-): import("@multiremi/contracts/execution-profile.js").ExecutionProfile | null {
+): import("@multiremi/contracts/execution-profile.js").ResolvedExecutionProfile | null {
   const row = db
     .query(
-      `SELECT v.* FROM multiremi_execution_groups g
+      `SELECT v.*,g.provider AS group_provider,g.model_policy,g.connection_mode FROM multiremi_execution_groups g
     JOIN multiremi_execution_profiles p ON p.id=g.profile_id AND p.workspace_id=g.workspace_id AND p.deleted_at IS NULL
     JOIN multiremi_execution_profile_versions v ON v.id=p.id AND v.workspace_id=p.workspace_id AND v.revision=p.revision
     WHERE g.id=? AND g.workspace_id=?`,
     )
     .get(groupId, workspaceId) as Record<string, unknown> | null;
-  return row
-    ? ({
-        ...row,
-        profile: JSON.parse(row.profile as string),
-      } as unknown as import("@multiremi/contracts/execution-profile.js").ExecutionProfile)
-    : null;
+  if (!row) return null;
+  const profile = JSON.parse(row.profile as string);
+  return { ...row, provider: row.group_provider,
+    profile: row.provider === "endpoint" || row.connection_mode === "endpoint"
+      ? endpointRuntimeProfile(String(row.id), row.provider === "endpoint" ? profile : legacyEndpointConnection(String(row.provider), profile),
+        String(row.group_provider), JSON.parse(String(row.model_policy ?? "{}")))
+      : profile,
+  } as unknown as import("@multiremi/contracts/execution-profile.js").ResolvedExecutionProfile;
 }
 
 export function saveExecutionGroup(
@@ -234,6 +242,13 @@ export function saveExecutionGroup(
   id: string,
   input: import("@multiremi/contracts/execution-profile.js").ExecutionGroupInput,
 ): MultiremiExecutionGroup {
+  const canonical = Object.hasOwn(input, "endpoint_id");
+  const profileId = canonical ? input.endpoint_id ?? null : input.profile_id ?? null;
+  if (canonical && input.profile_id !== undefined && input.profile_id !== profileId)
+    throw new Error("endpoint_id conflicts with legacy profile_id");
+  const mode = canonical ? profileId ? "endpoint" : "native" : undefined;
+  if (mode === "native" && input.provider === "antigravity") throw new Error("The current Antigravity adapter requires a Google Generative API endpoint");
+  const policy = input.model_policy === undefined ? undefined : parseExecutionModelPolicy(input.model_policy);
   if (
     typeof input.name !== "string" ||
     !input.name.trim() ||
@@ -250,24 +265,29 @@ export function saveExecutionGroup(
     new Set(input.runtime_ids).size !== input.runtime_ids.length
   )
     throw new Error("runtime_ids must contain unique Runtime IDs");
-  if (input.profile_id !== null && typeof input.profile_id !== "string")
+  if (profileId !== null && typeof profileId !== "string")
     throw new Error("profile_id must be a Profile ID or null");
   return db.transaction(() => {
     const old = getExecutionGroup(db, id, workspaceId);
     if (old && old.provider !== input.provider)
       throw new Error("Group provider cannot be changed");
-    if (input.profile_id) {
+    if (profileId) {
       db.run(
         "UPDATE multiremi_execution_profiles SET revision=revision WHERE id=? AND workspace_id=?",
-        [input.profile_id, workspaceId],
+        [profileId, workspaceId],
       );
       const p = db
         .query(
-          "SELECT provider FROM multiremi_execution_profiles WHERE workspace_id=? AND id=? AND deleted_at IS NULL",
+          `SELECT p.provider,v.profile FROM multiremi_execution_profiles p
+           JOIN multiremi_execution_profile_versions v ON v.workspace_id=p.workspace_id AND v.id=p.id AND v.revision=p.revision
+           WHERE p.workspace_id=? AND p.id=? AND p.deleted_at IS NULL`,
         )
-        .get(workspaceId, input.profile_id) as { provider: string } | null;
-      if (!p || p.provider !== input.provider)
+        .get(workspaceId, profileId) as { provider: string; profile: string } | null;
+      if (!p || (p.provider !== "endpoint" && p.provider !== input.provider))
         throw new Error("Profile is missing or has a different provider");
+      if (canonical || p.provider === "endpoint") endpointRuntimeProfile(profileId,
+        p.provider === "endpoint" ? JSON.parse(p.profile) : legacyEndpointConnection(p.provider, JSON.parse(p.profile)),
+        input.provider, policy ?? {});
     }
     for (const runtimeId of input.runtime_ids) {
       const r = db
@@ -288,7 +308,8 @@ export function saveExecutionGroup(
     const oldRuntimeIds = new Set(old?.runtimeIds ?? []);
     const nextRuntimeIds = new Set(input.runtime_ids);
     const bindingChangedForEveryMember = Boolean(
-      old && (!old.managed || old.profileId !== input.profile_id),
+      old && (!old.managed || old.profileId !== profileId || (mode !== undefined && mode !== old.connectionMode)
+        || (policy !== undefined && JSON.stringify(policy) !== JSON.stringify(old.modelPolicy))),
     );
     const invalidatedRuntimeIds = bindingChangedForEveryMember
       ? new Set([...oldRuntimeIds, ...nextRuntimeIds])
@@ -299,16 +320,18 @@ export function saveExecutionGroup(
           ),
         );
     db.run(
-      `INSERT INTO multiremi_execution_groups(id,workspace_id,provider,machine_id,created_at,name,profile_id,managed,description) VALUES(?,?,?,NULL,?,?,?,1,?)
-      ON CONFLICT(workspace_id,id) DO UPDATE SET name=excluded.name,description=excluded.description,profile_id=excluded.profile_id,managed=1,machine_id=NULL`,
+      `INSERT INTO multiremi_execution_groups(id,workspace_id,provider,machine_id,created_at,name,profile_id,managed,description,connection_mode,model_policy) VALUES(?,?,?,NULL,?,?,?,1,?,?,?)
+      ON CONFLICT(workspace_id,id) DO UPDATE SET name=excluded.name,description=excluded.description,profile_id=excluded.profile_id,managed=1,machine_id=NULL,connection_mode=excluded.connection_mode,model_policy=excluded.model_policy`,
       [
         id,
         workspaceId,
         input.provider,
         new Date().toISOString(),
         input.name.trim(),
-        input.profile_id,
+        profileId,
         input.description?.trim() ?? old?.description ?? "",
+        mode ?? old?.connectionMode ?? "legacy",
+        JSON.stringify(policy ?? old?.modelPolicy ?? {}),
       ],
     );
     // Generations identify the effective binding, not the group's display

@@ -328,21 +328,23 @@ thinking level are preserved. Custom Runtime connections keep their own catalogs
 
 ## Canonical command tree
 
-Reusable workspace connections use `remi runtime profile list|get|create|update|delete`.
-Create/update accepts `name`, `provider` (`codex` or `claude`), a structured `profile`,
-and an optional write-only `api_key`. The structured profile accepts an optional
-`models` allowlist containing its default `model`; omitting it keeps provider model
-discovery authoritative. Updates replace configuration and allocate a
-new revision; omitting `api_key` preserves an existing key. Use
-`remi runtime group list|get|create|update|delete` to bind profiles to explicit
-Runtime members. Writes require workspace administration, and group changes also
-require permission to edit the affected Runtimes. Task and daemon credentials
-cannot manage these resources. Examples and migration limits are in
-[execution configuration](dev/execution-configuration.md).
+Shared gateway endpoints use `remi runtime endpoint list|get|create|update|delete`.
+Create/update accepts `name`, a `connection` containing `base_url`, `protocols`,
+optional `protocol_paths`, authentication settings, and a separate write-only
+`api_key`. Endpoints own neither an execution engine nor a model selection.
+`remi runtime group create|update` accepts `endpoint_id` (null means native local
+sign-in) and an optional `model_policy`; it keeps the engine and Runtime membership.
+One multi-protocol endpoint can serve several engines. System AI selects existing
+endpoints with `remi workspace system-model-endpoints get|set`.
+The old `runtime profile` and `workspace relay` commands remain executable
+compatibility interfaces for at least one release cycle. They retain their old
+input shape; migrated writes update the shared endpoint rather than a second key.
+New integrations use the endpoint commands. Human workspace administration is
+required for writes. See [execution configuration](dev/execution-configuration.md).
 
 The older `runtime codex-profile get|set` and `runtime claude-profile get|set`
 commands remain available for retained per-Runtime connections. New configuration
-uses central profiles; the legacy commands do not edit a group's central profile.
+uses shared endpoints; the legacy commands do not edit a group's endpoint.
 
 For either custom connection, `remi runtime model refresh <runtime>` asks its
 daemon to discover the provider catalog. Poll `runtime model status <runtime>
@@ -1011,3 +1013,5 @@ a replacement.
 | `remi issue done-grant add` | `remi issue status <child> done` by the parent's execution owner; members close any Issue |
 | `remi issue done-grant remove` | `remi issue status <child> done` by the parent's execution owner; members close any Issue |
 | `remi message question transfer` | Automatic re-routing; `remi message question get <question>` shows the current handler |
+
+端点检查使用 `remi runtime endpoint inspect --file inspection.json --json`（operation 为 `models`、`detect` 或显式单模型 `test`）；缓存读取使用 `remi runtime endpoint catalog <endpoint-id> --json`。模型列表不代表实际调用验证，`test` 可能计费。

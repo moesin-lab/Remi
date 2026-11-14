@@ -1,4 +1,5 @@
 import type { MultiremiRuntimeModel } from "./types.js";
+import { parseEndpointOptions, type EndpointOptions } from "./endpoint-options.js";
 
 /** A model connection. Central profiles may leave model empty until discovery. */
 export interface RuntimeConnectionProfile {
@@ -11,6 +12,7 @@ export interface RuntimeConnectionProfile {
   auth_mode?: "api_key" | "env";
   /** Opaque immutable credential version; never contains the key. */
   credential_id?: string;
+  endpoint_options?: EndpointOptions;
 }
 
 /** Freeze one selected model without sending the control-plane allowlist to daemons. */
@@ -49,12 +51,12 @@ export function runtimeConnectionModels<T extends { id: string; label: string }>
 }
 
 /** Shared by the control plane and daemon; never accept executable TOML or inline secrets. */
-export function parseRuntimeConnectionProfile(value: unknown, envPrefix: "REMI_CODEX_" | "REMI_CLAUDE_", allowUnselectedModel = false): RuntimeConnectionProfile | null {
+export function parseRuntimeConnectionProfile(value: unknown, envPrefix: "REMI_CODEX_" | "REMI_CLAUDE_" | "REMI_ANTIGRAVITY_", allowUnselectedModel = false): RuntimeConnectionProfile | null {
   if (value === null) return null;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("profile must be an object or null");
   const row = { ...(value as Record<string, unknown>) };
   if (allowUnselectedModel && row.model === undefined) row.model = "";
-  if (Object.keys(row).some(key => !["name", "base_url", "model", "models", "env_key", "auth_mode", "credential_id"].includes(key))) {
+  if (Object.keys(row).some(key => !["name", "base_url", "model", "models", "env_key", "auth_mode", "credential_id", "endpoint_options"].includes(key))) {
     throw new Error("Unsupported profile field; send api_key separately or reference a Runtime variable with env_key");
   }
   const field = (key: string, max: number) => {
@@ -79,7 +81,7 @@ export function parseRuntimeConnectionProfile(value: unknown, envPrefix: "REMI_C
     throw new Error("models must contain unique model IDs including the default model");
   }
   // A dedicated prefix prevents remote configuration from redirecting unrelated daemon secrets.
-  if (auth_mode === "env" && !new RegExp(`^${envPrefix}[A-Z0-9_]+$`).test(env_key)) throw new Error(`env_key must name a ${envPrefix}* Runtime environment variable`);
+  if (auth_mode === "env" && !new RegExp(`^(?:${envPrefix}|REMI_ENDPOINT_)[A-Z0-9_]+$`).test(env_key)) throw new Error(`env_key must name a ${envPrefix}* or REMI_ENDPOINT_* Runtime environment variable`);
   let url: URL;
   try { url = new URL(field("base_url", 2048)); } catch { throw new Error("Invalid profile base_url"); }
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
@@ -87,6 +89,7 @@ export function parseRuntimeConnectionProfile(value: unknown, envPrefix: "REMI_C
   }
   // Only the Runtime connects to this URL; loopback and LAN endpoints are intentional.
   return { name, base_url: url.toString().replace(/\/$/, ""), model, env_key: auth_mode === "env" ? env_key : "", auth_mode,
+    ...(row.endpoint_options !== undefined ? { endpoint_options: parseEndpointOptions(row.endpoint_options) } : {}),
     ...(models !== undefined ? { models: models as string[] } : {}),
     ...(auth_mode === "api_key" && credential_id ? { credential_id } : {}) };
 }
@@ -98,6 +101,7 @@ export interface RuntimeExecutionBinding {
   provider: string;
   profileId: string | null;
   profileRevision: number | null;
+  connectionMode?: "legacy" | "native" | "endpoint";
   profile: (RuntimeConnectionProfile & { auth_header?: "bearer" | "x-api-key" }) | null;
 }
 

@@ -31,6 +31,17 @@ import type { RouterDeps } from "./deps.js";
 
 export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
   const { store, authToken } = deps;
+  app.get("/api/daemon/runtimes/:id/endpoint-key", (c) => {
+    if (currentAccessToken(c)?.type !== "daemon") return c.json({ error: "daemon token required" }, 403);
+    const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
+    if (loaded instanceof Response) return loaded;
+    try {
+      const key = store.executionProfilesRepo().getKeyForRuntime(loaded.runtime.id, c.req.query("credential_id") ?? "");
+      if (key === null) return c.json({ error: "Endpoint credential not found" }, 404);
+      c.header("Cache-Control", "no-store");
+      return c.json({ api_key: key });
+    } catch { return c.json({ error: "Endpoint credential is unavailable; check server encryption configuration" }, 503); }
+  });
 
   app.get("/api/runtimes/:id/codex-profile", (c) => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
@@ -502,6 +513,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
         id: group.id, workspace_id: loaded.workspaceId, provider: group.provider,
         description: group.description,
         profile_id: group.profileId, profile_revision: group.profileRevision, managed: group.managed,
+        endpoint_id: group.endpointId, connection_mode: group.connectionMode, model_policy: group.modelPolicy,
         name: group.managed ? group.name : group.machineId ? `${machine?.daemonDisplayName ?? machine?.name ?? group.machineId} / ${group.provider}` : group.id,
         runtime_ids: ["admin","owner"].includes(currentWorkspaceRoleStrict(c,store,loaded.workspaceId) ?? "") ? group.runtimeIds : runtimes.map((runtime) => runtime.id),
         online_runtime_count: runtimes.filter((runtime) => runtime.status === "online").length,

@@ -9,12 +9,12 @@ import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import { memberListOptions } from "@multiremi/core/workspace/queries";
 import {
-  executionProfileListOptions,
+  executionEndpointListOptions,
   executionGroupListOptions,
   runtimeListOptions,
   useExecutionConfigMutation,
   useExecutionTargetModels,
-  type ExecutionProfile,
+  type ExecutionEndpoint,
   type ExecutionGroupList,
 } from "@multiremi/core/runtimes";
 import { Button } from "@multiremi/ui/components/ui/button";
@@ -26,7 +26,7 @@ import {
 import { BreadcrumbHeader } from "../../layout/breadcrumb-header";
 import { AppLink } from "../../navigation";
 import { useT } from "../../i18n";
-import { ProfileForm } from "./execution-profile-form";
+import { EndpointForm } from "./execution-endpoint-form";
 import { GroupForm } from "./execution-group-form";
 import { RuntimeMemberIdentity } from "./runtime-member-identity";
 
@@ -43,7 +43,7 @@ export function ExecutionConfigPage() {
       (m) =>
         m.user_id === user?.id && (m.role === "owner" || m.role === "admin"),
     ) ?? false;
-  const profiles = useQuery(executionProfileListOptions(wsId));
+  const profiles = useQuery(executionEndpointListOptions(wsId));
   const groups = useQuery({
     ...executionGroupListOptions(wsId),
     refetchInterval: 10_000,
@@ -53,7 +53,7 @@ export function ExecutionConfigPage() {
   const [search, setSearch] = useState("");
   const [providerFilter, setProviderFilter] = useState("all");
   const [editProfile, setEditProfile] = useState<
-    ExecutionProfile | "new" | null
+    ExecutionEndpoint | "new" | null
   >(null);
   const [editGroup, setEditGroup] = useState<Group | "new" | null>(null);
   const visibleGroups = (groups.data?.groups ?? [])
@@ -154,8 +154,7 @@ export function ExecutionConfigPage() {
             <GroupForm
               key={editGroup === "new" ? "new" : editGroup.id}
               initial={editGroup === "new" ? undefined : editGroup}
-              profiles={profiles.data?.profiles ?? []}
-              groups={groups.data?.groups ?? []}
+              endpoints={profiles.data?.endpoints ?? []}
               runtimes={runtimes.data ?? []}
               pending={
                 mutation.isPending ||
@@ -199,12 +198,12 @@ export function ExecutionConfigPage() {
                   <p className="truncate font-medium">{group.name}</p>
                   <p className="text-xs text-muted-foreground">
                     {group.provider} ·{" "}
-                    {profiles.data?.profiles.find(
+                    {profiles.data?.endpoints.find(
                       (p) => p.id === group.profile_id,
                     )?.name ??
                       (group.profile_id ||
                         t(($) =>
-                          group.managed === false
+                          group.managed === false || group.connection_mode === "legacy"
                             ? $.configuration.legacy
                             : $.configuration.native,
                         ))}
@@ -240,17 +239,7 @@ export function ExecutionConfigPage() {
                   {group.description}
                 </p>
               )}
-              {profiles.data?.profiles.find(
-                (profile) => profile.id === group.profile_id,
-              )?.profile.model && (
-                <p className="break-all text-xs text-muted-foreground">
-                  {t(($) => $.configuration.default_model, {
-                    model: profiles.data.profiles.find(
-                      (profile) => profile.id === group.profile_id,
-                    )!.profile.model,
-                  })}
-                </p>
-              )}
+              {group.model_policy?.model && <p className="text-xs text-muted-foreground">{t($ => $.configuration.default_model, { model: group.model_policy.model })}</p>}
               {group.runtime_ids.length > 0 && (
                 <GroupModelCatalog wsId={wsId} group={group} />
               )}
@@ -282,30 +271,30 @@ export function ExecutionConfigPage() {
         </section>
         {canManage && (
           <section
-            aria-label={t(($) => $.configuration.profiles)}
+            aria-label={t(($) => $.configuration.endpoints)}
             className="space-y-3"
           >
             <div className="flex items-center justify-between">
               <h2 className="font-semibold">
-                {t(($) => $.configuration.profiles)}
+                {t(($) => $.configuration.endpoints)}
               </h2>
               <Button
-                disabled={mutation.isPending}
+                disabled={mutation.isPending || profiles.isPending || profiles.isError}
                 onClick={() => {
                   setEditProfile("new");
                   setEditGroup(null);
                   mutation.reset();
                 }}
               >
-                {t(($) => $.configuration.add_profile)}
+                {t(($) => $.configuration.add_endpoint)}
               </Button>
             </div>
-            {profiles.data?.profiles.length === 0 && (
+            {profiles.data?.endpoints.length === 0 && (
               <p className="text-sm text-muted-foreground">
-                {t(($) => $.configuration.no_profiles)}
+                {t(($) => $.configuration.no_endpoints)}
               </p>
             )}
-            {profiles.data?.profiles.map((profile) => (
+            {profiles.data?.endpoints.map((profile) => (
               <article
                 key={profile.id}
                 aria-label={profile.name}
@@ -314,11 +303,14 @@ export function ExecutionConfigPage() {
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-medium">{profile.name}</p>
                   <p className="truncate text-xs text-muted-foreground">
-                    {profile.provider} ·{" "}
-                    {profile.profile.model ||
-                      t(($) => $.configuration.automatic_models)} · v
+                    {profile.connection.base_url} · {profile.connection.protocols.join(" / ")} · v
                     {profile.revision}
                   </p>
+                  {(groups.data?.groups.filter(group => group.profile_id === profile.id).length ?? 0) > 1 && (
+                    <p className="text-xs text-muted-foreground">{t($ => $.configuration.shared_connection, {
+                      count: groups.data!.groups.filter(group => group.profile_id === profile.id).length,
+                    })}</p>
+                  )}
                 </div>
                 <Button
                   variant="outline"
@@ -338,7 +330,7 @@ export function ExecutionConfigPage() {
                     groups.data?.groups.some((g) => g.profile_id === profile.id)
                   }
                   onClick={() =>
-                    run(() => api.deleteExecutionProfile(wsId, profile.id))
+                    run(() => api.deleteExecutionEndpoint(wsId, profile.id))
                   }
                 >
                   {t(($) => $.configuration.delete)}
@@ -346,7 +338,7 @@ export function ExecutionConfigPage() {
               </article>
             ))}
             {editProfile && (
-              <ProfileForm
+              <EndpointForm
                 key={
                   editProfile === "new"
                     ? "new"
@@ -358,7 +350,7 @@ export function ExecutionConfigPage() {
                 onSave={(input) =>
                   run(
                     () =>
-                      api.saveExecutionProfile(
+                      api.saveExecutionEndpoint(
                         wsId,
                         editProfile === "new" ? undefined : editProfile.id,
                         input,

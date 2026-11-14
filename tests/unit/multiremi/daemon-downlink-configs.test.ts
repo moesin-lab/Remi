@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 import { afterEach, describe, expect, it } from "bun:test";
 import { startMultiremiServer } from "../../fixtures/daemon-protocol.js";
 import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";

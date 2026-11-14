@@ -54,6 +54,8 @@ export type DaemonRegisterRequestBody = {
     parallel_agent_execution?: number;
     codex_profiles?: number;
     claude_profiles?: number;
+    execution_endpoints?: number;
+    execution_endpoint_options?: number;
     agent_plugins?: number;
   };
   runtimes?: Array<{
@@ -376,6 +378,8 @@ export function registerDaemonRuntimes(
           runtime_workspaces: body.capabilities?.runtime_workspaces === 1 ? 1 : 0,
           codex_profiles: body.capabilities?.codex_profiles === 1 ? 1 : 0,
           claude_profiles: body.capabilities?.claude_profiles === 1 ? 1 : 0,
+          execution_endpoints: body.capabilities?.execution_endpoints === 1 ? 1 : 0,
+          execution_endpoint_options: body.capabilities?.execution_endpoint_options === 1 ? 1 : 0,
           ...(body.capabilities?.parallel_agent_execution === 1 ? { parallel_agent_execution: 1 } : {}),
           ...(typeof runtime.acpVersion === "string" && runtime.acpVersion ? { acp_version: runtime.acpVersion } : {}),
           ...(typeof runtime.agentVersion === "string" && runtime.agentVersion ? { agent_version: runtime.agentVersion } : {}),

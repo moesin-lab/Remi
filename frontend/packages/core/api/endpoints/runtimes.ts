@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { ExecutionProfileListSchema, ExecutionProfileResponseSchema, type ExecutionProfile, type ExecutionProfileInput, type ExecutionGroupInput } from "../schemas/execution-profiles";
+import { ExecutionEndpointListSchema, ExecutionEndpointResponseSchema, type ExecutionEndpoint, type ExecutionEndpointInput } from "../schemas/execution-endpoints";
+import { EndpointInspectionSchema, EndpointCatalogsSchema, type EndpointInspectionResponse, type EndpointCatalogs } from "../schemas/execution-endpoints";
 import type {
   AgentRuntime,
   CreateRuntimeDirectoryScanRequest,
@@ -109,6 +111,41 @@ export class RuntimesEndpoints {
   async listExecutionProfiles(wsId: string) {
     const raw = await this.http.fetch<unknown>(`/api/execution-profiles?workspace_id=${encodeURIComponent(wsId)}`);
     return parseStrictResponse<{ profiles: ExecutionProfile[] }>(raw, ExecutionProfileListSchema, { endpoint: "GET /api/execution-profiles" });
+  }
+  async listExecutionEndpoints(wsId: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-endpoints?workspace_id=${encodeURIComponent(wsId)}`);
+    return parseStrictResponse<{ endpoints: ExecutionEndpoint[] }>(raw, ExecutionEndpointListSchema, { endpoint: "GET /api/execution-endpoints" });
+  }
+  async inspectExecutionEndpoint(wsId: string, input: { endpoint_id?: string; connection: ExecutionEndpointInput["connection"]; api_key?: string;
+    operation: "models" | "detect" | "test"; protocol?: string; model?: string }, signal?: AbortSignal) {
+    const raw = await this.http.fetch<unknown>("/api/execution-endpoints/inspect",
+      { method: "POST", body: JSON.stringify({ ...input, workspace_id: wsId }), signal });
+    return parseStrictResponse<EndpointInspectionResponse>(raw, EndpointInspectionSchema, { endpoint: "POST /api/execution-endpoints/inspect" });
+  }
+  async getExecutionEndpointCatalog(wsId: string, id: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-endpoints/${encodeURIComponent(id)}/catalog?workspace_id=${encodeURIComponent(wsId)}`);
+    return parseStrictResponse<EndpointCatalogs>(raw, EndpointCatalogsSchema, { endpoint: "GET /api/execution-endpoints/:id/catalog" });
+  }
+  async getSystemModelEndpoints(wsId: string) {
+    const raw = await this.http.fetch<unknown>(`/api/workspaces/${encodeURIComponent(wsId)}/system-model-endpoints`);
+    return parseStrictResponse<{ defaults: Record<string, string | null> }>(raw, z.object({ defaults: z.record(z.string(), z.string().nullable()) }),
+      { endpoint: "GET /api/workspaces/:id/system-model-endpoints" });
+  }
+  async saveSystemModelEndpoints(wsId: string, defaults: Record<string, string | null>) {
+    const raw = await this.http.fetch<unknown>(`/api/workspaces/${encodeURIComponent(wsId)}/system-model-endpoints`,
+      { method: "PUT", body: JSON.stringify({ defaults }) });
+    return parseStrictResponse<{ defaults: Record<string, string | null> }>(raw, z.object({ defaults: z.record(z.string(), z.string().nullable()) }),
+      { endpoint: "PUT /api/workspaces/:id/system-model-endpoints" });
+  }
+  async saveExecutionEndpoint(wsId: string, id: string | undefined, input: ExecutionEndpointInput) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-endpoints${id ? `/${encodeURIComponent(id)}` : ""}`, {
+      method: id ? "PUT" : "POST", body: JSON.stringify({ ...input, workspace_id: wsId }),
+    });
+    return parseStrictResponse<{ endpoint: ExecutionEndpoint }>(raw, ExecutionEndpointResponseSchema, { endpoint: "SAVE /api/execution-endpoints" });
+  }
+  async deleteExecutionEndpoint(wsId: string, id: string) {
+    const raw = await this.http.fetch<unknown>(`/api/execution-endpoints/${encodeURIComponent(id)}?workspace_id=${encodeURIComponent(wsId)}`, { method: "DELETE" });
+    parseStrictResponse(raw, z.object({ ok: z.literal(true) }), { endpoint: "DELETE /api/execution-endpoints/:id" });
   }
 
   async saveExecutionProfile(wsId: string, id: string | undefined, input: ExecutionProfileInput) {

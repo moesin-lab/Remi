@@ -293,8 +293,9 @@ function runtimeLaunchHeader(provider: string): string {
 /** Snake-case wire shape of relay config for the daemon register response. */
 export function relayForDaemonWire(store: MultiremiStore, workspaceId: string): Record<string, unknown> {
   const config = store.getRelayConfigForDaemon(workspaceId);
-  const engine = (e: { fragment: string; authToken: string; revision: number } | null) =>
-    e ? { fragment: e.fragment, auth_token: e.authToken, revision: e.revision } : null;
+  const engine = (e: { fragment: string; authToken: string; revision: number; authHeader?: string; endpointId?: string; headers?: Record<string, string> } | null) =>
+    e ? { fragment: e.fragment, auth_token: e.authToken, revision: e.revision,
+      ...(e.endpointId ? { endpoint_id: e.endpointId, auth_header: e.authHeader, headers: e.headers } : {}) } : null;
   const claude = engine(config.claude);
   return {
     claude: claude ? { ...claude, one_million_models: store.listGatewayModelContext(workspaceId, "claude").map(row => row.modelId) } : null,

@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 // The fleet catalog the UI reads: which engines/models an any-provider runtime
 // surfaces, how models bucket by runtime engine, and cross-connection claim atomicity.
 import { afterEach, describe, expect, it } from "bun:test";

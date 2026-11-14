@@ -49,3 +49,21 @@ it("requires an explicit successful delete response", async () => {
   fetch.mockResolvedValue(response({ ok: true }));
   await expect(endpoint.deleteExecutionProfile("ws", "p")).resolves.toBeUndefined();
 });
+
+it("validates endpoint contracts and sends endpoint references independently from engine and model choices", async () => {
+  const endpoint = { id: "ep_one", workspace_id: "ws", name: "Shared", revision: 1, created_at: "now", updated_at: "now",
+    connection: { base_url: "https://gateway.test", protocols: ["openai-responses", "anthropic-messages"], auth_mode: "api_key", env_key: "", auth_header: "bearer" } };
+  const fetch = vi.fn().mockResolvedValue(response({ endpoints: [endpoint] }));
+  vi.stubGlobal("fetch", fetch);
+  const client = new RuntimesEndpoints(new HttpClient("https://api.test"));
+  expect((await client.listExecutionEndpoints("ws")).endpoints[0]?.id).toBe(endpoint.id);
+  fetch.mockResolvedValue(response({ endpoints: [{ ...endpoint, connection: { ...endpoint.connection, api_key: "must-not-return" } }] }));
+  await expect(client.listExecutionEndpoints("ws")).rejects.toBeInstanceOf(ApiContractError);
+  fetch.mockResolvedValue(response({ endpoint }));
+  const input = { name: endpoint.name, connection: { ...endpoint.connection,
+    protocols: ["openai-responses" as const, "anthropic-messages" as const], auth_mode: "api_key" as const, auth_header: "bearer" as const }, api_key: "test-key" };
+  await client.saveExecutionEndpoint("ws", undefined, input);
+  expect(JSON.parse(fetch.mock.calls.at(-1)![1].body)).toEqual({ ...input, workspace_id: "ws" });
+  fetch.mockResolvedValue(response({ ok: false }));
+  await expect(client.deleteExecutionEndpoint("ws", endpoint.id)).rejects.toBeInstanceOf(ApiContractError);
+});

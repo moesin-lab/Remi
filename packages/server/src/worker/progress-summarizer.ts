@@ -24,6 +24,8 @@ const log = createLogger("multiremi-progress");
 export type ProgressSummaryTransport = "auto" | "api" | "cli" | "openai";
 
 export interface OpenAiProgressSummaryConfig {
+  headers?: Record<string, string>;
+  exactBaseUrl?: boolean;
   baseUrl: string;
   model: string;
   apiKey: string;
@@ -177,6 +179,7 @@ export async function resolveTaskProgressSummaryConfig(
 }
 
 export interface SummarizerCredentials {
+  headers?: Record<string, string>;
   baseUrl: string;
   /** Anthropic `x-api-key` style credential. */
   apiKey?: string;
@@ -420,6 +423,7 @@ async function callSummaryModel(
   onUsage?: SummaryUsageCallback,
 ): Promise<ProgressSummaryResult> {
   const headers: Record<string, string> = {
+    ...credentials.headers,
     "content-type": "application/json",
     "anthropic-version": "2023-06-01",
   };
@@ -458,11 +462,12 @@ async function callOpenAiSummaryModel(
   fetchImpl: FetchLike,
   onUsage?: SummaryUsageCallback,
 ): Promise<ProgressSummaryResult> {
-  const apiRoot = config.baseUrl.endsWith("/v1") ? config.baseUrl : `${config.baseUrl}/v1`;
+  const apiRoot = config.exactBaseUrl || config.baseUrl.endsWith("/v1") ? config.baseUrl : `${config.baseUrl}/v1`;
   const recordUsage = beginSummaryUsage("openai", config.model, onUsage);
   const response = await fetchImpl(`${apiRoot}/chat/completions`, {
     method: "POST",
     headers: {
+      ...config.headers,
       "content-type": "application/json",
       authorization: `Bearer ${config.apiKey}`,
     },

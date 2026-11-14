@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 /**
  * MUL-338 round C — reading the model catalog must not probe the gateway.
  *

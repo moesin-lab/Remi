@@ -4,6 +4,27 @@ import { commonThinkingLevels, modelThinkingLevels } from "@multiremi/contracts/
 import { extractAntigravityDefaultModel, RELAY_ENGINES } from "@multiremi/relay/fragment.js";
 import type { GatewayModelReasoningDecl, MultiremiStore, RelayEngine } from "./store.js";
 
+/** Canonical groups use only their own authenticated binding catalogs, never workspace fallback catalogs. */
+export function executionEndpointGroupCatalog(
+  group: Pick<import("@multiremi/contracts/types.js").MultiremiExecutionGroup, "id" | "provider" | "runtimeIds" | "modelPolicy">,
+  snapshot: (runtimeId: string) => RuntimeBindingModelCatalog | null,
+  online = 0,
+): FleetProviderModelsResponse {
+  const providers = [...group.runtimeIds].sort().map(runtimeId => {
+    const catalog = snapshot(runtimeId);
+    const allowed = catalog?.models.filter(model => !group.modelPolicy.models || group.modelPolicy.models.includes(model.id)) ?? [];
+    const selected = group.modelPolicy.model || allowed.find(model => model.default)?.id || allowed[0]?.id;
+    return { provider: group.provider, online_runtime_count: 0,
+      model_catalog_status: catalog?.status ?? "unknown" as const,
+      models: allowed.map(model => runtimeModelCompatibilityResponse({ ...model, default: model.id === selected })) };
+  });
+  const result = intersectExecutionGroupCatalogs(group.provider, providers, online, true)[0]!;
+  if (group.modelPolicy.model && !result.models.some(model => model.id === group.modelPolicy.model)) {
+    result.models = result.models.map(model => ({ ...model, default: false }));
+  }
+  return result;
+}
+
 /** Minimal data source shared by API catalogs and dispatch capability checks. */
 export type RuntimeModelCatalogSource = Pick<MultiremiStore,
   "getRelayModelDiscovery" | "getRelayConfigForDaemon" | "getGatewayModels" |

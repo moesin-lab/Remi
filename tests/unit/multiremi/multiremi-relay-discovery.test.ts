@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 import { loadCodexModelCatalog } from "@daemon/agent-runtime/relay-sync.js";
 import { codexNativeModel } from "../../fixtures/codex-native-catalog.js";
 import { afterEach, describe, expect, it } from "bun:test";

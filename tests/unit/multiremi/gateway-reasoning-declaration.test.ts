@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 /**
  * MUL-338 item 4 — an administrator's explicit reasoning-level declaration.
  *

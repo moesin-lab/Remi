@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 import { createResponsibleTestIssue, createResponsibleTestAutopilot } from "../unit/multiremi/helpers.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { disabledSshMeshRuntime } from "../helpers/ssh-mesh-isolation.js";

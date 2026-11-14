@@ -3,6 +3,10 @@
 // (the facade delegates every public method here).
 import { writeWorkspaceBotMenu } from "@multiremi/bot-menu/config.js";
 import { createId, nowIso } from "@multiremi/ids.js";
+import { ExecutionEndpointsRepo } from "./execution-endpoints-repo.js";
+import { endpointProtocolBaseUrl, providerEndpointProtocol } from "@multiremi/contracts/execution-endpoint.js";
+import { extractBaseUrl } from "@multiremi/relay/fragment.js";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { refreshResponsibilityEntityChange } from '../issue-responsibility-changes.js';
 import {
   cleanOptionalString,
@@ -39,6 +43,9 @@ export interface RelayEngineConfig {
   fragment: string;
   authToken: string;
   revision: number;
+  authHeader?: "bearer" | "x-api-key";
+  endpointId?: string;
+  headers?: Record<string, string>;
 }
 export interface RelayEngineBrowser {
   fragment: string;
@@ -881,17 +888,44 @@ export class WorkspacesRepo {
     const cached = cache?.get<RelayEngineConfig | null>(key);
     if (cached !== undefined) return cached;
     const row = this.ctx.db
-      .query("SELECT fragment, auth_token, revision FROM multiremi_relay_config WHERE workspace_id = ? AND engine = ?")
+      .query("SELECT fragment, auth_token, revision, endpoint_id FROM multiremi_relay_config WHERE workspace_id = ? AND engine = ?")
       .get(workspaceId, engine) as Row | null;
     if (!row) {
       cache?.set(key, null);
       return null;
     }
-    const value = {
+    const value: RelayEngineConfig = {
       fragment: String(row.fragment ?? ""),
       authToken: String(row.auth_token ?? ""),
       revision: Number(row.revision ?? 0),
     };
+    if (row.endpoint_id) {
+      const endpoint = new ExecutionEndpointsRepo(this.ctx).get(String(row.endpoint_id), workspaceId);
+      const protocol = engine === "codex" ? "openai-chat-completions" : providerEndpointProtocol(engine)!;
+      if (!endpoint || !endpoint.connection.protocols.includes(protocol)) return null;
+      const connection = endpoint.connection;
+      value.authToken = connection.credential_id
+        ? this.ctx.executionProfiles().getKey(endpoint.id, workspaceId, endpoint.revision, connection.credential_id) ?? "" : "";
+      const resolvedUrl = endpointProtocolBaseUrl(connection, protocol);
+      value.authHeader = connection.auth_header;
+      value.endpointId = endpoint.id;
+      value.headers = connection.options?.headers;
+      if (extractBaseUrl(engine, value.fragment) !== resolvedUrl) {
+        if (engine === "codex") {
+          const fragment = value.fragment.trim() ? parseToml(value.fragment) : {};
+          const provider = typeof fragment.model_provider === "string" ? fragment.model_provider : "endpoint";
+          const providers = (fragment.model_providers ?? {}) as Record<string, Record<string, string>>;
+          value.fragment = stringifyToml({ ...fragment, model_provider: provider, model_providers: {
+            ...providers, [provider]: { ...providers[provider], base_url: resolvedUrl, wire_api: "responses" },
+          } });
+        } else {
+          const fragment = parseJson<Record<string, unknown>>(value.fragment, {});
+          value.fragment = engine === "claude"
+            ? JSON.stringify({ ...fragment, env: { ...(fragment.env as Record<string, string> ?? {}), ANTHROPIC_BASE_URL: resolvedUrl } })
+            : JSON.stringify({ ...fragment, base_url: resolvedUrl });
+        }
+      }
+    }
     cache?.set(key, value);
     return value;
   }
@@ -934,20 +968,37 @@ export class WorkspacesRepo {
     // (never two writers computing the same "existing + 1" in JS). The token for
     // "keep" is read inside the same transaction to avoid a lost update.
     this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       const existing = this.relayRow(workspaceId, engine);
       let token = existing?.authToken ?? "";
       if (input.tokenOp === "set") token = String(input.authToken ?? "");
       else if (input.tokenOp === "clear") token = "";
+      let endpointId: string | null = null;
+      const baseUrl = extractBaseUrl(engine, input.fragment);
+      if (baseUrl && token) {
+        const previous = this.ctx.db.query("SELECT endpoint_id FROM multiremi_relay_config WHERE workspace_id=? AND engine=?")
+          .get(workspaceId, engine) as { endpoint_id: string | null } | null;
+        const endpoints = new ExecutionEndpointsRepo(this.ctx);
+        const endpoint = previous?.endpoint_id ? endpoints.get(previous.endpoint_id, workspaceId) : null;
+        endpointId = endpoints.save(workspaceId, {
+          name: endpoint?.name ?? `System endpoint / ${engine}`,
+          connection: { base_url: baseUrl, protocols: endpoint?.connection.protocols ?? (engine === "codex" ? ["openai-responses", "openai-chat-completions"] : [providerEndpointProtocol(engine)!]),
+            protocol_paths: { ...endpoint?.connection.protocol_paths, [providerEndpointProtocol(engine)!]: "" },
+            auth_mode: "api_key", env_key: "", auth_header: endpoint?.connection.auth_header ?? "bearer" },
+          ...(input.tokenOp === "set" || !endpoint ? { api_key: token } : {}),
+        }, endpoint?.id).id;
+      }
       this.ctx.db.run(
-        `INSERT INTO multiremi_relay_config (workspace_id, engine, fragment, auth_token, revision, updated_at, updated_by)
-         VALUES (?, ?, ?, ?, 1, ?, ?)
+        `INSERT INTO multiremi_relay_config (workspace_id, engine, fragment, auth_token, revision, updated_at, updated_by, endpoint_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(workspace_id, engine) DO UPDATE SET
            fragment = excluded.fragment,
            auth_token = excluded.auth_token,
-           revision = multiremi_relay_config.revision + 1,
+           revision = excluded.revision,
            updated_at = excluded.updated_at,
-           updated_by = excluded.updated_by`,
-        [workspaceId, engine, input.fragment, token, now, input.actor ?? null],
+           updated_by = excluded.updated_by,
+           endpoint_id = excluded.endpoint_id`,
+        [workspaceId, engine, input.fragment, endpointId ? "" : token, (existing?.revision ?? 0) + 1, now, input.actor ?? null, endpointId],
       );
       const row = this.ctx.db
         .query("SELECT revision FROM multiremi_relay_config WHERE workspace_id = ? AND engine = ?")

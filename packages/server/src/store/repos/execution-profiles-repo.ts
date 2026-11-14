@@ -9,6 +9,9 @@ import {
   encryptRuntimeProviderKey,
   decryptRuntimeProviderKey,
 } from "@multiremi/runtime-provider-credentials.js";
+import { getGroupExecutionProfile } from "../execution-groups.js";
+import { endpointRuntimeProfile } from "@multiremi/contracts/execution-endpoint.js";
+import { ExecutionEndpointsRepo } from "./execution-endpoints-repo.js";
 
 type Row = Omit<ExecutionProfile, "profile"> & { profile: string };
 export class ExecutionProfilesRepo {
@@ -28,7 +31,17 @@ export class ExecutionProfilesRepo {
       .get(
         ...[id, workspaceId, ...(revision === undefined ? [] : [revision])],
       ) as Row | null;
-    return row ? { ...row, profile: JSON.parse(row.profile) } : null;
+    if (!row) return null;
+    if (row.provider === ("endpoint" as string)) {
+      const legacy = this.ctx.db.query(`SELECT provider,profile FROM multiremi_execution_profile_versions
+        WHERE workspace_id=? AND id=? AND provider IN ('claude','codex') ORDER BY revision DESC LIMIT 1`)
+        .get(workspaceId, id) as { provider: "claude" | "codex"; profile: string } | null;
+      if (!legacy) return null;
+      const policy = JSON.parse(legacy.profile);
+      return { ...row, provider: legacy.provider,
+        profile: endpointRuntimeProfile(id, JSON.parse(row.profile), legacy.provider, { model: policy.model, models: policy.models }) };
+    }
+    return { ...row, profile: JSON.parse(row.profile) };
   }
 
   list(workspaceId: string): ExecutionProfile[] {
@@ -38,19 +51,14 @@ export class ExecutionProfilesRepo {
           "SELECT id FROM multiremi_execution_profiles WHERE workspace_id = ? AND deleted_at IS NULL ORDER BY name, id",
         )
         .all(workspaceId) as { id: string }[]
-    ).map((row) => this.get(row.id, workspaceId)!);
+    ).map((row) => this.get(row.id, workspaceId)).filter((row): row is ExecutionProfile => row !== null);
   }
 
   getGroupExecutionProfile(
     groupId: string,
     workspaceId: string,
-  ): ExecutionProfile | null {
-    const row = this.ctx.db
-      .query(
-        "SELECT profile_id FROM multiremi_execution_groups WHERE id = ? AND workspace_id = ?",
-      )
-      .get(groupId, workspaceId) as { profile_id: string | null } | null;
-    return row?.profile_id ? this.get(row.profile_id, workspaceId) : null;
+  ): import("@multiremi/contracts/execution-profile.js").ResolvedExecutionProfile | null {
+    return getGroupExecutionProfile(this.ctx.db, groupId, workspaceId);
   }
 
   save(
@@ -90,6 +98,19 @@ export class ExecutionProfilesRepo {
       const previous = this.get(id, workspaceId);
       if (previous && previous.provider !== input.provider)
         throw new Error("Profile provider cannot be changed");
+      const stored = this.ctx.db.query("SELECT provider FROM multiremi_execution_profiles WHERE workspace_id=? AND id=?")
+        .get(workspaceId, id) as { provider: string } | null;
+      if (stored?.provider === "endpoint") {
+        const endpoints = new ExecutionEndpointsRepo(this.ctx);
+        const current = endpoints.get(id, workspaceId)!;
+        const saved = endpoints.save(workspaceId, { name: input.name, api_key: apiKey,
+          connection: { ...current.connection, base_url: profile.base_url, auth_mode: profile.auth_mode,
+            env_key: profile.env_key, auth_header: profile.auth_header ?? current.connection.auth_header } }, id);
+        const policy = JSON.stringify({ ...(profile.model ? { model: profile.model } : {}), ...(profile.models ? { models: profile.models } : {}) });
+        this.ctx.db.run("UPDATE multiremi_execution_groups SET model_policy=? WHERE workspace_id=? AND profile_id=? AND provider=?",
+          [policy, workspaceId, id, input.provider]);
+        return { ...saved, provider: input.provider, profile: { ...profile, credential_id: saved.connection.credential_id } };
+      }
       if (profile.auth_mode === "api_key") {
         const credentialId =
           apiKey === undefined
@@ -158,6 +179,8 @@ export class ExecutionProfilesRepo {
           .get(workspaceId, id)
       )
         throw new Error("Profile is still used by an execution group");
+      if (this.ctx.db.query("SELECT engine FROM multiremi_relay_config WHERE workspace_id=? AND endpoint_id=? LIMIT 1").get(workspaceId, id))
+        throw new Error("Endpoint is still used by system AI features");
       this.ctx.db.run(
         "UPDATE multiremi_execution_profiles SET deleted_at=? WHERE id=? AND workspace_id=?",
         [nowIso(), id, workspaceId],
@@ -177,7 +200,7 @@ export class ExecutionProfilesRepo {
       )
       .get(workspaceId, credentialId) as { profile_id: string } | null;
     if (!credential) return null;
-    const current = this.get(credential.profile_id, workspaceId);
+    const current = this.credentialProfile(credential.profile_id, workspaceId);
     const bound =
       current?.profile.credential_id === credentialId &&
       this.ctx.db
@@ -196,14 +219,16 @@ export class ExecutionProfilesRepo {
       );
     const tasks = this.ctx.db
       .query(
-        "SELECT codex_profile,claude_profile FROM multiremi_turn_execution_records WHERE runtime_id=? AND status IN ('dispatched','running','awaiting_human','waiting_local_directory')",
+        "SELECT codex_profile,claude_profile,execution_connection FROM multiremi_turn_execution_records WHERE runtime_id=? AND status IN ('dispatched','running','awaiting_human','waiting_local_directory')",
       )
       .all(runtimeId) as {
       codex_profile: string | null;
       claude_profile: string | null;
+      execution_connection: string | null;
     }[];
     if (
       !tasks.some((task) =>
+        (task.execution_connection && JSON.parse(task.execution_connection).profile?.credential_id === credentialId) ||
         [task.codex_profile, task.claude_profile].some(
           (value) => value && JSON.parse(value).credential_id === credentialId,
         ),
@@ -237,7 +262,7 @@ export class ExecutionProfilesRepo {
     revision: number,
     credentialId: string,
   ): string | null {
-    const profile = this.get(id, workspaceId, revision);
+    const profile = this.credentialProfile(id, workspaceId, revision);
     if (!profile || profile.profile.credential_id !== credentialId) return null;
     const row = this.ctx.db
       .query(
@@ -251,5 +276,13 @@ export class ExecutionProfilesRepo {
           credentialId,
         })
       : null;
+  }
+
+  private credentialProfile(id: string, workspaceId: string, revision?: number) {
+    const row = this.ctx.db.query(`SELECT v.id,v.revision,v.profile FROM multiremi_execution_profiles p
+      JOIN multiremi_execution_profile_versions v ON v.workspace_id=p.workspace_id AND v.id=p.id
+      WHERE p.id=? AND p.workspace_id=? AND ${revision === undefined ? "p.deleted_at IS NULL AND v.revision=p.revision" : "v.revision=?"}`)
+      .get(id, workspaceId, ...(revision === undefined ? [] : [revision])) as { id: string; revision: number; profile: string } | null;
+    return row ? { ...row, profile: JSON.parse(row.profile) as { credential_id?: string } } : null;
   }
 }

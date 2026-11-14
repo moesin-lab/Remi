@@ -1539,7 +1539,10 @@ export class RuntimesRepo {
     return this.withPendingRequest(runtimeId, (runtime) => {
       this.assertRuntimeOnline(runtime);
       const scope = input.scope === "acp" || input.scope === "agent" ? input.scope : "cli";
-      // ACP/agent updates always pull @latest, so no target version is required.
+      if (scope === "agent" && (runtime.provider === "claude" || runtime.provider === "codex" || runtime.provider === "antigravity")) {
+        throw new Error("Agent and ACP versions are managed by the Remi release; upgrade the machine's Remi CLI instead");
+      }
+      // Non-CLI requests retain the legacy sentinel; ACP reinstalls release pins.
       const targetVersion = String(input.targetVersion ?? input.target_version ?? "").trim() || (scope !== "cli" ? "latest" : "");
       if (!targetVersion) throw new Error("target_version is required");
       const active = this.ctx.db.query(

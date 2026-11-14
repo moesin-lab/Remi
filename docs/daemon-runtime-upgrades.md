@@ -116,6 +116,10 @@ daemon 由 systemd 托管时，重启交给 `systemctl --user restart --no-block
 
 全局 claude、codex 命令与用户登录配置不被覆盖。显式配置的自定义执行文件仍由用户管理；发行版校验针对 Remi 托管依赖。启动和 ACP 重装入口使用相同的版本与安装逻辑。仅 bridge 版本正确不代表 SDK 与实际执行文件正确。
 
+网页 Runtime 详情展示实际 Agent/ACP 版本，Claude、Codex 和 Antigravity 的升级入口统一指向机器页面的 CLI 更新；不再调用 PATH 中的 `claude update` / `codex update`，因为它们可能更新另一套全局安装。ACP 操作标为“重装 ACP”，完成提示明确它修复的是当前 Remi 配套版本。服务端拒绝这三个 provider 的 `scope=agent` 请求，避免旧页面或 CLI 将更新错对象报告为成功。Grok 仍支持独立 Agent 更新。
+
+CLI 使用 `remi runtime release start <runtime> --file <request.json>`：`{"scope":"cli","target_version":"<已发布版本>"}` 升级该机器 Remi CLI 及配套依赖；`{"scope":"acp"}` 重装当前配套 ACP；`{"scope":"agent"}` 仅用于 Grok。ACP 请求中的历史 `latest` 哨兵为协议兼容保留，不代表查询 npm 最新版本。
+
 原有 daemon 启动健康检查继续执行；安装校验不等同于登录授权、真实模型调用或重启后服务注册成功的端到端验收。旧发布包不含 runtime-bundle.json，安装脚本仍兼容旧版本安装；旧 daemon 需要升级到包含本改动的版本才会使用新依赖。
 
 ## 0.2.68 macOS arm64 临时恢复

@@ -650,6 +650,9 @@ export function safeCreateRuntimeUpdateRequest(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message === "target_version is required") return { apiError: message, statusCode: 400 };
+    if (message === "Agent and ACP versions are managed by the Remi release; upgrade the machine's Remi CLI instead") {
+      return { apiError: message, statusCode: 409 };
+    }
     if (message.startsWith("Runtime not found")) return { apiError: "runtime not found", statusCode: 404 };
     if (message === "runtime is offline") return { apiError: message, statusCode: 503 };
     if (message === "an update is already in progress for this runtime") return { apiError: message, statusCode: 409 };

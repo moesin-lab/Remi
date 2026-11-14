@@ -1062,12 +1062,12 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     expect(store.getRuntimeUpdateRequest("rt_update_flow", staleRunning.id)?.status).toBe("timeout");
   });
 
-  it("supports ACP-scope update requests (no target version, defaults to latest)", async () => {
+  it("supports ACP reinstallation with the legacy latest sentinel", async () => {
     const store = createSnapshotStore();
     const runtime = store.registerRuntime({ id: "rt_acp_update", name: "ACP update runtime", provider: "codex" });
     const app = createMultiremiApp({ store });
 
-    // ACP-bridge updates always pull @latest, so no target_version is required.
+    // No target is required for reinstallation of the daemon's release pins.
     const created = await app.request(`/api/runtimes/${runtime.id}/update`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1087,7 +1087,7 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
 
   it("supports agent-scope update requests (runs the agent CLI updater)", async () => {
     const store = createSnapshotStore();
-    const runtime = store.registerRuntime({ id: "rt_agent_update", name: "Agent update runtime", provider: "claude" });
+    const runtime = store.registerRuntime({ id: "rt_agent_update", name: "Agent update runtime", provider: "grok" });
     const app = createMultiremiApp({ store });
 
     const created = await app.request(`/api/runtimes/${runtime.id}/update`, {
@@ -1103,6 +1103,26 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     const ack = store.heartbeatRuntime(runtime.id, { supportsBatchImport: true });
     expect(ack.pending_update).toMatchObject({ id: createdBody.id, scope: "agent" });
     expect(store.getRuntimeUpdateRequest(runtime.id, createdBody.id)?.scope).toBe("agent");
+  });
+
+  it("rejects standalone Agent updates for release-managed runtimes before dispatch to old daemons", async () => {
+    const store = createSnapshotStore();
+    const app = createMultiremiApp({ store });
+    for (const provider of ["claude", "codex", "antigravity"] as const) {
+      const runtime = store.registerRuntime({ name: provider, provider });
+      for (const prefix of ["/api/runtimes", "/api/multiremi/runtimes"]) {
+        const response = await app.request(`${prefix}/${runtime.id}/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scope: "agent", target_version: "latest" }),
+        });
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({
+          error: "Agent and ACP versions are managed by the Remi release; upgrade the machine's Remi CLI instead",
+        });
+      }
+      expect(store.heartbeatRuntime(runtime.id, { supportsBatchImport: true }).pending_update).toBeUndefined();
+    }
   });
 
   it("serves runtime local skill list and import request flows", async () => {

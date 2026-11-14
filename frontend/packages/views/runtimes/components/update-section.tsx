@@ -181,6 +181,7 @@ function UpdateRow({
   onAction,
   flow,
   retryLabel,
+  completedLabel,
 }: {
   label: string;
   version: string | null;
@@ -190,6 +191,7 @@ function UpdateRow({
   onAction: () => void;
   flow: UpdateFlow;
   retryLabel: string;
+  completedLabel?: string;
 }) {
   const { t } = useT("runtimes");
   const config = flow.status ? statusConfig[flow.status] : null;
@@ -216,7 +218,9 @@ function UpdateRow({
             className={`inline-flex items-center gap-1 text-xs ${config.color}`}
           >
             <Icon className={`h-3 w-3 ${flow.active ? "animate-spin" : ""}`} />
-            {t(($) => $.update.status[flow.status as RuntimeUpdateStatus])}
+            {flow.status === "completed" && completedLabel
+              ? completedLabel
+              : t(($) => $.update.status[flow.status as RuntimeUpdateStatus])}
           </span>
         )}
       </div>
@@ -248,6 +252,7 @@ function UpdateRow({
 
 interface UpdateSectionProps {
   runtimeId: string;
+  provider: string;
   agentVersion: string | null;
   acpVersion: string | null;
   isOnline: boolean;
@@ -255,6 +260,7 @@ interface UpdateSectionProps {
 
 export function UpdateSection({
   runtimeId,
+  provider,
   agentVersion,
   acpVersion,
   isOnline,
@@ -269,14 +275,16 @@ export function UpdateSection({
   }, [qc]);
 
   const agentFlow = useUpdateFlow(runtimeId, "Agent updated", refresh);
-  const acpFlow = useUpdateFlow(runtimeId, "ACP bridge updated", refresh);
+  const acpFlow = useUpdateFlow(runtimeId, t(($) => $.update.acp_reinstalled), refresh);
+  const managedAgent = ["claude", "codex", "antigravity"].includes(provider);
+  const supportsAcpReinstall = managedAgent;
 
   return (
     <div className="space-y-2.5">
       <UpdateRow
         label={t(($) => $.update.agent_label)}
         version={agentVersion}
-        showAction={isOnline && !agentFlow.active}
+        showAction={isOnline && provider === "grok" && !agentFlow.active}
         actionLabel={t(($) => $.update.agent_action)}
         onAction={() =>
           agentFlow.run(() =>
@@ -290,14 +298,20 @@ export function UpdateSection({
       <UpdateRow
         label={t(($) => $.update.acp_label)}
         version={acpVersion}
-        showAction={isOnline && !acpFlow.active}
+        showAction={isOnline && supportsAcpReinstall && !acpFlow.active}
         actionLabel={t(($) => $.update.acp_action)}
         onAction={() =>
           acpFlow.run(() => api.initiateUpdate(runtimeId, "latest", "acp"))
         }
         flow={acpFlow}
         retryLabel={t(($) => $.update.retry)}
+        completedLabel={t(($) => $.update.acp_reinstalled)}
       />
+      {managedAgent && (
+        <p className="text-xs text-muted-foreground">
+          {t(($) => $.update.managed_runtime_hint)}
+        </p>
+      )}
     </div>
   );
 }

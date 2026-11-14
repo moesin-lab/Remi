@@ -2359,7 +2359,7 @@ export class MultiremiDaemon {
     }
   }
 
-  /** Force-reinstall this runtime's ACP bridge to the latest version. */
+  /** Reinstall the ACP bundle pinned by this daemon release. */
   private async reinstallAcpBridge(): Promise<string> {
     const provider = this.options.provider;
     if (provider === "antigravity") {
@@ -2370,12 +2370,16 @@ export class MultiremiDaemon {
     if (provider !== "claude" && provider !== "codex") {
       throw new Error(`ACP bridge update not supported for provider: ${provider}`);
     }
-    return reinstallBridge(provider as ProvisionProvider, (m) => log.info(`[acp] ${m}`));
+    const version = reinstallBridge(provider as ProvisionProvider, (m) => log.info(`[acp] ${m}`));
+    return `${provider} ACP ${version} reinstalled from this Remi release. Upgrade the machine's Remi CLI to upgrade its bundled Agent and ACP.`;
   }
 
   /** Update the underlying agent CLI via its own `update` subcommand. */
   private async updateAgentCli(): Promise<string> {
     const provider = this.options.provider;
+    if (provider === "claude" || provider === "codex") {
+      throw new Error("Agent and ACP versions are managed by the Remi release; upgrade the machine's Remi CLI instead");
+    }
     if (provider === "antigravity") {
       throw new Error("The Antigravity ACP server is pinned by the Remi release; upgrade Remi to change it");
     }

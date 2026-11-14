@@ -179,6 +179,21 @@ describe("co-resident CLI update coordination", () => {
     }
   });
 
+  it("fails legacy Agent requests instead of updating a different Claude or Codex installation", async () => {
+    const daemons = createDaemons();
+    for (const daemon of daemons) {
+      const daemonState = state(daemon);
+      const reports = captureReports(daemonState);
+      await daemonState.handleRuntimeUpdate("rt_managed", "upd_agent", "latest", "agent");
+      expect(reports).toEqual([
+        { status: "running" },
+        { status: "failed", error: "Agent and ACP versions are managed by the Remi release; upgrade the machine's Remi CLI instead" },
+      ]);
+      expect(daemonState.claimsPaused).toBe(false);
+      expect(daemon.restartRequested()).toBe(false);
+    }
+  });
+
   it("preserves the single-provider update gate when no coordinator is injected", async () => {
     const [daemon] = createDaemons(1);
     const daemonState = state(daemon);

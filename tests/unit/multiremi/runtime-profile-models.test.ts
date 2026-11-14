@@ -2,6 +2,28 @@ import { expect, it } from "bun:test";
 import { discoverRuntimeProfileModels } from "@multiremi/worker/runtime-profile-models.js";
 import { readFile, stat } from "node:fs/promises";
 
+it("preserves per-model reasoning levels from an OpenAI-style gateway for both engines", async () => {
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ data: [
+    { id: "magpie/model", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }], default_reasoning_level: "high" },
+    { id: "no-metadata" },
+    { id: "invalid", supported_reasoning_levels: [{ effort: 123 }] },
+    { id: "empty", supported_reasoning_levels: [] },
+  ] }) });
+  try {
+    for (const provider of ["codex", "claude"] as const) {
+      const models = await discoverRuntimeProfileModels(provider, {
+        name: "magpie", base_url: `http://127.0.0.1:${server.port}/v1`, model: "magpie/model",
+        env_key: provider === "codex" ? "REMI_CODEX_KEY" : "REMI_CLAUDE_KEY",
+      }, "test-key", new AbortController().signal);
+      expect(models[0]?.thinking?.supportedLevels.map(level => level.value)).toEqual(["low", "high"]);
+      expect(models[0]?.thinking?.defaultLevel).toBe("high");
+      expect(models[1]?.thinking).toBeUndefined();
+      expect(models[2]?.thinking?.status).toBe("error");
+      expect(models[3]?.thinking?.status).toBe("unsupported");
+    }
+  } finally { server.stop(true); }
+});
+
 it("discovers a custom Codex catalog from the Runtime-local base path and keeps its default", async () => {
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
     expect(new URL(request.url).pathname).toBe("/v2/models");

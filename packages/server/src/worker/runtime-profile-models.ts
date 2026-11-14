@@ -72,8 +72,9 @@ export async function discoverRuntimeProfileModels(
       if (!row || typeof row.id !== "string" || !row.id.trim()) continue;
       const id = row.id.trim();
       if (models.has(id)) continue;
+      const thinking = gatewayThinking(row);
       models.set(id, { id, label: typeof row.display_name === "string" && row.display_name.trim() ? row.display_name.trim() : id,
-        provider, default: id === profile.model || row.default === true });
+        provider, default: id === profile.model || row.default === true, ...(thinking ? { thinking } : {}) });
     }
     if (provider !== "claude" || !body.has_more) break;
     const cursor = typeof body.last_id === "string" ? body.last_id : "";
@@ -86,4 +87,26 @@ export async function discoverRuntimeProfileModels(
   if (profile.model && !models.has(profile.model)) models.set(profile.model, { id: profile.model, label: profile.model, provider, default: true });
   if (!profile.model && ![...models.values()].some(model => model.default)) models.values().next().value!.default = true;
   return [...models.values()];
+}
+
+function gatewayThinking(row: Record<string, unknown>): MultiremiRuntimeModel["thinking"] {
+  const levels = row.supported_reasoning_levels;
+  if (levels === undefined) return undefined;
+  const invalid = (): NonNullable<MultiremiRuntimeModel["thinking"]> => ({
+    status: "error", supportedLevels: [], error: "gateway returned invalid reasoning metadata",
+  });
+  if (!Array.isArray(levels)) return invalid();
+  const supportedLevels: Array<{ value: string; label: string; description?: string }> = [];
+  for (const level of levels) {
+    if (!level || typeof level !== "object" || typeof level.effort !== "string" || !level.effort.trim()
+      || (level.description !== undefined && typeof level.description !== "string")) return invalid();
+    if (!supportedLevels.some(item => item.value === level.effort)) {
+      supportedLevels.push({ value: level.effort, label: level.effort,
+        ...(level.description ? { description: level.description } : {}) });
+    }
+  }
+  const defaultLevel = row.default_reasoning_level;
+  if (defaultLevel != null && (typeof defaultLevel !== "string" || !supportedLevels.some(level => level.value === defaultLevel))) return invalid();
+  return { status: supportedLevels.length ? "supported" : "unsupported", supportedLevels,
+    ...(typeof defaultLevel === "string" ? { defaultLevel } : {}) };
 }

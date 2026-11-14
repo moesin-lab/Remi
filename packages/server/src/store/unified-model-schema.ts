@@ -72,7 +72,7 @@ CREATE TABLE multiremi_turn_attempts (
   id TEXT PRIMARY KEY, turn_id TEXT NOT NULL, attempt_no INTEGER NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('offered','accepted','running','waiting_local_directory','completed','failed','cancelled','lost')),
   runtime_id TEXT, provider TEXT, session_id TEXT, work_dir TEXT,
-  plugin_snapshot TEXT NOT NULL DEFAULT '[]', codex_profile TEXT, claude_profile TEXT,
+  plugin_snapshot TEXT NOT NULL DEFAULT '[]', codex_profile TEXT, claude_profile TEXT, execution_connection TEXT,
   execution_fingerprint TEXT, execution_model TEXT, execution_thinking_level TEXT,
   fallback_switched INTEGER NOT NULL DEFAULT 0, switch_reason TEXT,
   input_ack_seq INTEGER, input_read_seq INTEGER, input_read_offset INTEGER, input_trigger_ack INTEGER,

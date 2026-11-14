@@ -1,4 +1,5 @@
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
+import { parseExecutionConnectionSnapshot } from "@multiremi/contracts/execution-endpoint.js";
 import type { RuntimeExecutionBinding, RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection";
 import { DaemonProtocolRpcError } from "./daemon-protocol-client.js";
 import type { DaemonGcSubjectReclaimedPayload, DaemonLaneBackgroundTasksPayload, DaemonTaskActivityPayload } from "@multiremi/contracts/daemon-protocol.js";
@@ -96,6 +97,9 @@ export interface MultiremiRelayEngineWire {
   fragment: string;
   auth_token: string;
   revision: number;
+  endpoint_id?: string;
+  headers?: Record<string, string>;
+  auth_header?: string;
   one_million_models?: string[];
 }
 export interface MultiremiRelayWire {
@@ -299,6 +303,8 @@ export class MultiremiDaemonClient {
       launched_by: input.launchedBy ?? "",
       capabilities: {
         execution_profiles: 1,
+        execution_endpoints: 1,
+        execution_endpoint_options: 1,
         codex_profiles: 1,
         claude_profiles: 1,
         runtime_workspaces: 1,
@@ -319,6 +325,11 @@ export class MultiremiDaemonClient {
   async getRuntimeClaudeProfileKey(runtimeId: string, credentialId: string): Promise<string> {
     const response = await this.get<{ api_key: string }>(`/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/claude-profile-key?credential_id=${encodeURIComponent(credentialId)}`);
     if (typeof response.api_key !== "string" || !response.api_key) throw new Error("Runtime provider key is unavailable");
+    return response.api_key;
+  }
+  async getRuntimeEndpointKey(runtimeId: string, credentialId: string): Promise<string> {
+    const response = await this.get<{ api_key: string }>(`/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/endpoint-key?credential_id=${encodeURIComponent(credentialId)}`);
+    if (typeof response.api_key !== "string" || !response.api_key) throw new Error("Endpoint credential is unavailable");
     return response.api_key;
   }
 
@@ -1398,6 +1409,7 @@ export function normalizeDaemonClaimTask(raw: any | null): (MultiremiTaskWithAge
     failureReason: stringOrNull(raw.failure_reason ?? raw.failureReason),
     codexProfile: parseRuntimeCodexProfile(raw.codex_profile ?? raw.codexProfile ?? null),
     claudeProfile: parseRuntimeClaudeProfile(raw.claude_profile ?? raw.claudeProfile ?? null),
+    executionConnection: parseExecutionConnectionSnapshot(raw.execution_connection),
     pluginSnapshot: Array.isArray(raw.plugin_snapshot)
       ? raw.plugin_snapshot
       : Array.isArray(raw.pluginSnapshot)

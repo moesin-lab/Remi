@@ -1035,7 +1035,7 @@ export class MultiremiDaemon {
           throw new Error("Invalid capability group profile reference");
         }
         if (binding.profile) {
-          if (binding.provider !== "codex" && binding.provider !== "claude") {
+          if (binding.provider !== "codex" && binding.provider !== "claude" && binding.provider !== "antigravity") {
             throw new Error("Runtime provider does not support connection profiles");
           }
           const profile = parseExecutionConnectionProfile(binding.provider, binding.profile)!;
@@ -1047,8 +1047,10 @@ export class MultiremiDaemon {
           if (!token) throw new Error("Capability group credentials are unavailable");
           if (profile.model) {
             if (binding.provider === "codex") resolveRuntimeCodexProfile(profile, process.env, key);
-            else resolveRuntimeClaudeProfile(profile, process.env, key);
+            else if (binding.provider === "claude") resolveRuntimeClaudeProfile(profile, process.env, key);
           }
+        } else if (binding.connectionMode === "native" && binding.provider === "antigravity") {
+          throw new Error("Antigravity requires an endpoint");
         }
         const ack: RuntimeExecutionBindingAck = { ...identity, status: "ready" };
         acknowledgements.push(ack);
@@ -1070,8 +1072,8 @@ export class MultiremiDaemon {
 
   private refreshRuntimeBindingModels(entry: RuntimeBindingDiscovery): void {
     const { binding } = entry;
-    if (this.stopped || !binding.profile || entry.probe || Date.now() < entry.nextRefreshAt) return;
-    if (binding.provider !== "codex" && binding.provider !== "claude") return;
+    if (this.stopped || (!binding.profile && binding.connectionMode !== "native") || entry.probe || Date.now() < entry.nextRefreshAt) return;
+    if (binding.provider !== "codex" && binding.provider !== "claude" && binding.provider !== "antigravity" && binding.provider !== "grok") return;
     const provider = binding.provider;
     const runtimeId = this.options.runtimeId;
     const registration = this.runtimeRegistrationGeneration;
@@ -1082,11 +1084,20 @@ export class MultiremiDaemon {
       const startedAt = Date.now();
       let model_catalog: NonNullable<RuntimeExecutionBindingAck["model_catalog"]>;
       try {
-        const profile = parseExecutionConnectionProfile(provider, binding.profile)!;
-        const key = await this.runtimeProfileKey(profile, provider);
-        const token = (profile.auth_mode === "api_key" ? key : process.env[profile.env_key])?.trim();
-        if (!token) throw new Error("Capability group credentials are unavailable");
-        const models = await discoverRuntimeProfileModels(provider, profile, token, entry.abort.signal);
+        let models: MultiremiRuntimeModel[];
+        if (binding.connectionMode === "native") {
+          const prepared = await this.runtimeModelProbeProviderOptions(binding.groupId);
+          try { models = await this.discoverAcpRuntimeModelsWith(prepared, entry.abort.signal); }
+          finally { prepared.release?.(); }
+        } else {
+          if (provider === "grok") throw new Error("Grok does not support endpoint connections");
+          const profile = parseExecutionConnectionProfile(provider, binding.profile)!;
+          const key = await this.runtimeProfileKey(profile, provider);
+          const token = (profile.auth_mode === "api_key" ? key : process.env[profile.env_key])?.trim();
+          if (!token) throw new Error("Capability group credentials are unavailable");
+          models = await discoverRuntimeProfileModels(provider,
+            binding.connectionMode === "endpoint" ? { ...profile, model: "" } : profile, token, entry.abort.signal);
+        }
         model_catalog = { status: "ready", models };
       } catch (error) {
         model_catalog = { status: "error", models: [] };
@@ -1147,14 +1158,14 @@ export class MultiremiDaemon {
     this.wakeRuntimeModelRetry();
   }
 
-  private async runtimeProfileKey(profile: RuntimeCodexProfile | RuntimeClaudeProfile, provider: "codex" | "claude"): Promise<string | undefined> {
+  private async runtimeProfileKey(profile: RuntimeCodexProfile | RuntimeClaudeProfile, provider: "codex" | "claude" | "antigravity"): Promise<string | undefined> {
     if (profile.auth_mode !== "api_key") return undefined;
     if (!profile.credential_id || !this.options.runtimeId) throw new Error(`${provider} profile API key is unavailable`);
     const id = `${this.options.runtimeId}:${profile.credential_id}`;
     let pending = this.runtimeProviderKeys.get(id);
     if (!pending) {
       if (this.runtimeProviderKeys.size >= 64) this.runtimeProviderKeys.clear();
-      pending = provider === "codex"
+      pending = provider === "antigravity" ? this.client.getRuntimeEndpointKey(this.options.runtimeId, profile.credential_id) : provider === "codex"
         ? this.client.getRuntimeCodexProfileKey(this.options.runtimeId, profile.credential_id)
         : this.client.getRuntimeClaudeProfileKey(this.options.runtimeId, profile.credential_id);
       this.runtimeProviderKeys.set(id, pending);
@@ -1177,6 +1188,26 @@ export class MultiremiDaemon {
       ...(codexProfile ? { codex: resolveRuntimeCodexProfile(codexProfile, process.env, await this.runtimeProfileKey(codexProfile, "codex")) } : {}),
       ...(claudeProfile ? { claude: resolveRuntimeClaudeProfile(claudeProfile, process.env, await this.runtimeProfileKey(claudeProfile, "claude")) } : {}),
     };
+  }
+  private async taskConnectionRelay(task: MultiremiTaskWithAgent): Promise<MultiremiRelayWire | undefined> {
+    const connection = task.executionConnection;
+    if (!connection) return this.effectiveWorkspaceRelay(task.workspaceId, task.codexProfile ?? null, task.claudeProfile ?? null);
+    if (connection.provider !== task.agent?.provider) throw new Error("Task connection does not match its execution engine");
+    // Explicit empty routing removes inherited workspace/environment gateways.
+    const relay: MultiremiRelayWire = { claude: null, codex: null, antigravity: null, model_discovery: false };
+    if (connection.mode === "native") return relay;
+    const profile = connection.profile;
+    if (!profile || connection.provider === "grok") throw new Error("Endpoint snapshot is unavailable");
+    const key = await this.runtimeProfileKey(profile, connection.provider);
+    if (connection.provider === "codex") relay.codex = resolveRuntimeCodexProfile(profile, process.env, key);
+    else if (connection.provider === "claude") relay.claude = resolveRuntimeClaudeProfile(profile, process.env, key);
+    else {
+      const token = (profile.auth_mode === "api_key" ? key : process.env[profile.env_key])?.trim();
+      if (!token) throw new Error("Endpoint credentials are unavailable");
+      relay.antigravity = { fragment: JSON.stringify({ base_url: profile.base_url, default_model: profile.model }),
+        auth_token: token, revision: connection.endpoint_revision! };
+    }
+    return relay;
   }
   private async prepareCodexModelCatalog(
     profile: RuntimeCodexProfile,
@@ -2166,6 +2197,8 @@ export class MultiremiDaemon {
         external_chats: this.options.provider === "codex" && typeof process.getuid === "function" ? 1 : 0,
         external_chat_models: this.options.provider === "codex" && typeof process.getuid === "function" ? 1 : 0,
         execution_profiles: 1,
+        execution_endpoints: 1,
+        execution_endpoint_options: 1,
         codex_profiles: 1,
         claude_profiles: 1,
         ssh_mesh_protocol: MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
@@ -2840,7 +2873,7 @@ export class MultiremiDaemon {
     return runtimeModelsWithCatalogError(probed, prepared.catalogState.error);
   }
 
-  private async runtimeModelProbeProviderOptions(): Promise<{
+  private async runtimeModelProbeProviderOptions(nativeGroupId?: string): Promise<{
     options: AcpProviderOptions;
     catalogState?: CodexModelCatalogState;
     relay?: MultiremiRelayEngineWire | null;
@@ -2855,10 +2888,10 @@ export class MultiremiDaemon {
       return { options: { agentType: provider, cwd: homedir() } };
     }
     const workspaceId = this.options.workspaceId ?? "local";
-    const workspaceRelay = await this.effectiveWorkspaceRelay(workspaceId);
+    const workspaceRelay = nativeGroupId ? { claude: null, codex: null, antigravity: null } : await this.effectiveWorkspaceRelay(workspaceId);
     const relayAuthoritative = workspaceRelay !== undefined;
     const relay = provider === "claude" ? workspaceRelay?.claude : workspaceRelay?.codex;
-    const owner = `${this.options.daemonId ?? this.options.runtimeName}:${provider}`;
+    const owner = `${this.options.daemonId ?? this.options.runtimeName}:${provider}:${nativeGroupId ?? ""}`;
     const root = join(
       probeRoot(this.options.workspacesRoot),
       `${provider}-${createHash("sha256").update(owner).digest("hex").slice(0, 16)}`,
@@ -2880,7 +2913,7 @@ export class MultiremiDaemon {
           }
         : {}),
     });
-    if (provider === "claude" && this.runtimeClaudeProfile) Object.assign(providerEnv, runtimeClaudeProfileEnv(this.runtimeClaudeProfile, relay!.auth_token));
+    if (!nativeGroupId && provider === "claude" && this.runtimeClaudeProfile) Object.assign(providerEnv, runtimeClaudeProfileEnv(this.runtimeClaudeProfile, relay!.auth_token));
     const usesCodexRelayKey = provider === "codex" && Boolean(providerEnv.OPENAI_API_KEY);
     const prepared = await prepareIssueSessionProviderHome(providerHome, {
       linkCodexAuth: provider === "codex" && !usesCodexRelayKey,
@@ -3828,7 +3861,7 @@ export class MultiremiDaemon {
       const codexProfile = task.agent?.provider === "codex" ? task.codexProfile ?? null : null;
       const claudeProfile = task.agent?.provider === "claude" ? task.claudeProfile ?? null : null;
       if (claudeProfile) await assertRuntimeClaudeProjectCredentials(resolvedWorkDir.workDir);
-      const workspaceRelay = await this.effectiveWorkspaceRelay(task.workspaceId, codexProfile, claudeProfile);
+      const workspaceRelay = await this.taskConnectionRelay(task);
       const relayAuthoritative = workspaceRelay !== undefined;
       const relay = task.agent?.provider === "claude"
         ? workspaceRelay?.claude
@@ -3847,7 +3880,8 @@ export class MultiremiDaemon {
         }
         // The real key stays in the daemon: the server gets a per-process loopback token.
         antigravity = {
-          run: this.antigravityGatewayShim().forRun({ upstreamBase: gateway.upstreamBase, apiKey: gateway.apiKey, runId: usageRunId }),
+          run: this.antigravityGatewayShim().forRun({ upstreamBase: gateway.upstreamBase, apiKey: gateway.apiKey, runId: usageRunId,
+            headers: task.executionConnection?.profile?.endpoint_options?.headers }),
           apiKey: gateway.apiKey, defaultModel: gateway.defaultModel,
         };
       }
@@ -3950,7 +3984,9 @@ export class MultiremiDaemon {
         });
       }
       this.enqueueTaskReport(task.id, "progress", { summary: pickTaskStartupLine(task.agent?.name), step: 1, total: 3 });
-      const usageConnection = task.codexProfile || task.claudeProfile
+      const usageConnection = task.executionConnection?.mode === "endpoint"
+        ? `workspace:${task.workspaceId}:endpoint:${task.executionConnection.endpoint_id}`
+        : task.codexProfile || task.claudeProfile
         ? `runtime:${this.options.runtimeId}:profile:${task.agent?.provider}`
         : relay?.auth_token ? `workspace:${task.workspaceId}:relay:${task.agent?.provider}` : null;
       usageLedger = new TaskUsageLedger(usageConnection, usageRunId);
@@ -3960,9 +3996,7 @@ export class MultiremiDaemon {
         task, abort.signal, resolvedWorkDir, pluginRuntime, providerHome, providerEnv,
         progressSummarizer, taskPrivateTmp.aliasPath ?? taskPrivateTmp.path,
         relay?.one_million_models ?? [],
-        task.codexProfile || task.claudeProfile
-          ? `runtime:${this.options.runtimeId}:profile:${task.agent?.provider}`
-          : relay?.auth_token ? `workspace:${task.workspaceId}:relay:${task.agent?.provider}` : null,
+        usageConnection,
         (usage) => {
           observedUsage = { ...usage, units: [] };
           for (const unit of usage.units) {
@@ -4732,7 +4766,24 @@ export class MultiremiDaemon {
     usageLedger?: TaskUsageLedger,
     checkpointUsage?: (snapshot: TaskUsageSnapshot | null) => void,
   ): Promise<TaskProgressSummarizer | null> {
-    if (task.codexProfile || task.claudeProfile) {
+    const system = this.workspaceRelays.get(task.workspaceId);
+    const systemOpenAi = system?.codex?.endpoint_id ? system.codex : null;
+    const systemClaude = system?.claude?.endpoint_id ? system.claude : null;
+    const systemConfigured = Boolean(systemOpenAi || systemClaude);
+    let summaryEnv: NodeJS.ProcessEnv = process.env;
+    if (systemConfigured) {
+      const baseUrl = systemOpenAi ? extractBaseUrl("codex", systemOpenAi.fragment) : null;
+      const claudeUrl = systemClaude ? extractBaseUrl("claude", systemClaude.fragment) : null;
+      summaryEnv = { ...process.env, OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "", ANTHROPIC_BASE_URL: "",
+        MULTIREMI_PROGRESS_SUMMARY_OPENAI_BASE_URL: baseUrl ?? "",
+        MULTIREMI_PROGRESS_SUMMARY_OPENAI_API_KEY: systemOpenAi?.auth_token ?? "" };
+      providerEnv = claudeUrl && systemClaude ? {
+        ANTHROPIC_BASE_URL: claudeUrl,
+        ...(systemClaude.auth_header === "x-api-key" ? { ANTHROPIC_API_KEY: systemClaude.auth_token, ANTHROPIC_AUTH_TOKEN: "" }
+          : { ANTHROPIC_AUTH_TOKEN: systemClaude.auth_token, ANTHROPIC_API_KEY: "" }),
+      } : undefined;
+      relayFragment = undefined;
+    } else if (task.codexProfile || task.claudeProfile || task.executionConnection?.mode === "endpoint") {
       // A custom provider key is scoped to its connection. The optional
       // summarizer uses Chat Completions and may have a different base URL.
       if (!process.env.MULTIREMI_PROGRESS_SUMMARY_OPENAI_API_KEY?.trim()
@@ -4746,8 +4797,8 @@ export class MultiremiDaemon {
       );
       const config = await resolveTaskProgressSummaryConfig(
         providerEnv,
-        process.env,
-        undefined,
+        summaryEnv,
+        systemConfigured ? async () => null : undefined,
         workspacePolicy,
         (task.agent?.provider === "codex" || task.agent?.provider === "claude")
           && relayFragment !== undefined
@@ -4755,7 +4806,9 @@ export class MultiremiDaemon {
           : undefined,
       );
       if (!config.enabled) return null;
-      const credentials = resolveSummarizerCredentials(providerEnv);
+      const credentials = resolveSummarizerCredentials(providerEnv, summaryEnv);
+      if (systemOpenAi && config.openAi) { config.openAi.headers = systemOpenAi.headers; config.openAi.exactBaseUrl = true; }
+      if (systemClaude && credentials) credentials.headers = systemClaude.headers;
       const hasOpenAiTransport = (config.transport === "auto" || config.transport === "openai")
         && config.openAi !== null;
       if (!credentials && !hasOpenAiTransport) {
@@ -4767,6 +4820,10 @@ export class MultiremiDaemon {
       const relayBaseUrl = relayEngine && relayFragment !== undefined ? extractBaseUrl(relayEngine, relayFragment) : null;
       const processCredentials = resolveSummarizerCredentials(undefined);
       const summaryConnection = (provider: string): string | null => {
+        if (systemConfigured) {
+          const selected = provider === "openai" ? systemOpenAi : systemClaude;
+          return selected?.endpoint_id ? `workspace:${task.workspaceId}:endpoint:${selected.endpoint_id}` : null;
+        }
         if (provider === "openai" && process.env.MULTIREMI_PROGRESS_SUMMARY_OPENAI_API_KEY?.trim() && config.openAi?.baseUrl) {
           return `runtime:${this.options.runtimeId}:progress-summary:openai`;
         }

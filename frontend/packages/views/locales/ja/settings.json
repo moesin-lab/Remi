@@ -42,7 +42,7 @@
       "prompts": "プロンプト",
       "repositories": "リポジトリ",
       "source_control": "ソース管理",
-      "model_gateway": "モデルゲートウェイ",
+      "model_gateway": "システム AI",
       "labs": "ラボ",
       "members": "メンバー",
       "platform": "バージョンとサービス",
@@ -723,7 +723,11 @@
     "reasoning_blocked_not_in_execution_catalog": "このモデルは Codex 実行カタログにないため、宣言は反映されず、モデルも選択できません。",
     "reasoning_blocked_execution_catalog_unknown": "Codex 実行カタログが不明または読み込み中のため、宣言はまだ反映されません。",
     "reasoning_blocked_not_in_catalog": "このエンジンのカタログにモデルがないため（例: 利用可能な Runtime がない）、宣言はまだ反映されません。",
-    "reasoning_blocked_unknown_reason": "この宣言は現在反映されていません。"
+    "reasoning_blocked_unknown_reason": "この宣言は現在反映されていません。",
+    "system_title": "システム AI",
+    "system_description": "自動タイトルや進捗要約には既存のエンドポイントを選択します。Agent の接続は実行グループで設定します。",
+    "manage_endpoints": "実行グループでエンドポイントを管理",
+    "no_endpoint": "未設定"
   },
   "storage": {
     "description": "終了した Issue とチャットは、保持期間を過ぎるとコードディレクトリと実行環境を解放します。未保存の作業は先にスナップショットとして保存され、Issue やチャットを再開すると復元されます。実行記録は常にマシン上に残ります。",

@@ -42,7 +42,7 @@
       "prompts": "提示词",
       "repositories": "代码仓库",
       "source_control": "代码托管",
-      "model_gateway": "模型网关",
+      "model_gateway": "系统 AI",
       "labs": "实验室",
       "members": "成员",
       "platform": "版本与服务",
@@ -724,7 +724,11 @@
     "reasoning_blocked_not_in_execution_catalog": "该模型不在 Codex 执行目录中，声明不会让它可选，也无法生效。",
     "reasoning_blocked_execution_catalog_unknown": "Codex 执行目录未知或加载中，暂时无法判定，声明暂不生效。",
     "reasoning_blocked_not_in_catalog": "当前引擎目录中没有这个模型（例如没有可用的该引擎 Runtime），声明暂不生效。",
-    "reasoning_blocked_unknown_reason": "该声明当前未生效。"
+    "reasoning_blocked_unknown_reason": "该声明当前未生效。",
+    "system_title": "系统 AI",
+    "system_description": "选择已有端点供自动标题、进度摘要等系统功能使用。Agent 的连接只由执行能力组决定。",
+    "manage_endpoints": "前往执行能力组管理端点",
+    "no_endpoint": "未配置"
   },
   "storage": {
     "description": "已结束的 Issue 和对话在保留期过后会释放代码目录和运行环境。未保存的工作会先保存为快照，Issue 或对话重新打开时恢复；执行记录始终保留在机器上。",

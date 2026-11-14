@@ -35,6 +35,9 @@ interface GatewayCandidate {
   engine: RelayEngine;
   baseUrl: string;
   authToken: string;
+  authHeader?: "bearer" | "x-api-key";
+  headers?: Record<string, string>;
+  endpointId?: string;
 }
 
 export async function generateIssueTitle(
@@ -107,20 +110,21 @@ function resolveGateway(
     const relay = config[engine];
     if (!relay?.authToken) continue;
     const baseUrl = extractBaseUrl(engine, relay.fragment);
-    if (baseUrl) return { engine, baseUrl, authToken: relay.authToken };
+    if (baseUrl) return { engine, baseUrl, authToken: relay.authToken, authHeader: relay.authHeader, headers: relay.headers, endpointId: relay.endpointId };
   }
   return null;
 }
 
 function gatewayEndpoint(gateway: GatewayCandidate): string {
   const base = gateway.baseUrl.replace(/\/+$/, "");
-  if (gateway.engine === "claude") return `${base}/v1/messages`;
-  return base.endsWith("/v1") ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
+  if (gateway.engine === "claude") return `${base}${base.endsWith("/v1") ? "" : "/v1"}/messages`;
+  return gateway.endpointId || base.endsWith("/v1") ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
 }
 
 function gatewayHeaders(gateway: GatewayCandidate): Record<string, string> {
   return {
-    Authorization: `Bearer ${gateway.authToken}`,
+    ...gateway.headers,
+    ...(gateway.engine === "claude" && gateway.authHeader === "x-api-key" ? { "x-api-key": gateway.authToken } : { Authorization: `Bearer ${gateway.authToken}` }),
     "Content-Type": "application/json",
     ...(gateway.engine === "claude" ? { "anthropic-version": "2023-06-01" } : {}),
   };

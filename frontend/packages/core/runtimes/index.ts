@@ -20,3 +20,4 @@ export * from "./execution-config";
 // only import that broke `@multiremi/web build`.
 export { modelThinkingLevels } from "@multiremi/contracts/model-thinking";
 export { formatRuntimeProtocol } from "@multiremi/contracts/runtime-protocol";
+export { importEndpointSnippet } from "./endpoint-import";

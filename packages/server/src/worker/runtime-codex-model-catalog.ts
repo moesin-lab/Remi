@@ -15,12 +15,13 @@ export async function prepareRuntimeCodexModelCatalog(
   signal: AbortSignal,
   validate: typeof validateCodexModelCatalog = validateCodexModelCatalog,
 ): Promise<void> {
+  if (profile.endpoint_options?.fetch_models === false) return;
   let response: Response | undefined;
   let text: string;
   try {
-    response = await fetch(profile.base_url.replace(/\/+$/, "") + "/models", {
-      headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
-      signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+    response = await fetch(profile.endpoint_options?.models_url ?? profile.base_url.replace(/\/+$/, "") + "/models", {
+      headers: { ...profile.endpoint_options?.headers, Accept: "application/json", Authorization: `Bearer ${token}` },
+      signal: AbortSignal.any([signal, AbortSignal.timeout(profile.endpoint_options?.timeout_ms ?? 10_000)]),
       redirect: "error",
     });
     if (!response.ok) {

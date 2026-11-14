@@ -184,6 +184,8 @@ export function workspaceCommandSpecs(): CommandSpec[] {
     scopedWrite("workspace.ssh-mesh.rotate", ["workspace", "ssh-mesh", "rotate"], "Rotate SSH mesh key material", "/ssh-mesh/rotate", "POST"),
     scopedWrite("workspace.ssh-mesh.test", ["workspace", "ssh-mesh", "test"], "Test SSH mesh connectivity", "/ssh-mesh/test", "POST"),
     scopedRead("workspace.relay.get", ["workspace", "relay", "get"], "Read relay configuration", "/relay-config"),
+    scopedRead("workspace.system-model-endpoints.get", ["workspace", "system-model-endpoints", "get"], "Read endpoint references used by system AI features", "/system-model-endpoints"),
+    scopedWrite("workspace.system-model-endpoints.set", ["workspace", "system-model-endpoints", "set"], "Select existing endpoints for system AI protocols from JSON; does not change execution groups", "/system-model-endpoints", "PUT"),
     scopedWrite("workspace.relay.discovery", ["workspace", "relay", "discovery"], "Update relay discovery settings", "/relay-config/discovery", "PUT"),
     scopedWrite("workspace.relay.update", ["workspace", "relay", "update"], "Update a relay engine", "/relay-config/:engine", "PUT", [refPositional("engine")]),
     scopedWrite("workspace.relay.reveal", ["workspace", "relay", "reveal"], "Reveal a relay engine credential", "/relay-config/:engine/reveal", "POST", [refPositional("engine")]),

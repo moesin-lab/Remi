@@ -12,6 +12,16 @@ const JSON_HEADERS = { "Content-Type": "application/json" };
 const ROOT_JSON_HEADERS = { ...JSON_HEADERS, Authorization: "Bearer root-secret" };
 
 describe("knowledge compilation control plane", () => {
+  it("does not run Claude/Codex plugin validation for other execution engines", async () => {
+    const store = createSnapshotStore();
+    for (const provider of ["antigravity", "grok"]) {
+      const agent = store.createAgent({ name: provider, provider, role: "supervisor" });
+      expect(agentHasKnowledgePublishCapability(store, agent)).toBe(false);
+      const task = store.createTask({ agentId: agent.id, prompt: "Hello" });
+      const token = await store.createTaskAccessToken(task, "local");
+      expect(token.token).toBeTruthy();
+    }
+  });
   it("migrates the SQLite schema additively and deduplicates only pending raw submissions", () => {
     const store = createSnapshotStore();
     const tables = (db!.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name);

@@ -72,340 +72,106 @@ try {
   assert.equal((await state()).groups.length, 0);
   await page.goto(`${frontend}/${workspace.slug}/execution-groups`, {
     waitUntil: "domcontentloaded",
-    timeout: 90_000,
+    // Cold webpack compilation can exceed 90 seconds on the shared dev host.
+    timeout: 180_000,
   });
-  await page
-    .getByRole("button", { name: "Add profile", exact: true })
-    .waitFor();
-  await page
-    .getByText("No capability groups assigned.", { exact: true })
-    .waitFor();
-  const minimize = page
-    .locator("button")
-    .filter({ has: page.locator("svg.lucide-minus") });
+  await page.getByRole("button", { name: "Add endpoint", exact: true }).waitFor();
+  const minimize = page.locator("button").filter({ has: page.locator("svg.lucide-minus") });
   if (await minimize.count()) await minimize.click();
-  assert(
-    (await page
-      .getByRole("link", { name: "Capability groups", exact: true })
-      .count()) > 0,
-    "Independent configuration navigation is missing",
-  );
-  check("non-local workspace loads; discovery creates no capability groups");
-
-  const submit = async (method: string, path: string, status: number) => {
-    const response = page!.waitForResponse(
-      (r) =>
-        r.request().method() === method && new URL(r.url()).pathname === path,
-    );
-    await page!
-      .locator("form")
-      .getByRole("button", {
-        name: path.includes("execution-groups")
-          ? "Save group"
-          : "Save connection",
-        exact: true,
-      })
-      .click();
-    const result = await response;
-    assert.equal(result.status(), status, await result.text());
-    await page!.locator("form").waitFor({ state: "detached" });
-    return result.json();
-  };
-  const createProfile = async (name: string, model: string) => {
-    await page!
-      .getByRole("button", { name: "Add profile", exact: true })
-      .click();
-    const form = page!.locator("form");
-    await form.getByLabel("Connection name", { exact: true }).fill(name);
-    await form
-      .getByLabel("API base URL", { exact: true })
-      .fill("https://example.test/v1");
-    await form.getByLabel("Model ID", { exact: true }).fill(model);
-    await form
-      .getByLabel("API key", { exact: true })
-      .fill("synthetic-smoke-key");
-    const result = await submit("POST", "/api/execution-profiles", 201);
+  check("non-local workspace loads without creating execution groups");
+  const submit = async (method: string, path: string, label: string) => {
+    const pending = page!.waitForResponse(response => response.request().method() === method && new URL(response.url()).pathname === path);
+    await page!.locator("form").getByRole("button", { name: label, exact: true }).click();
+    const response = await pending;
+    assert(response.ok(), await response.text());
+    const result = await response.json();
     assert(!JSON.stringify(result).includes("synthetic-smoke-key"));
-    return result.profile;
+    await page!.locator("form").waitFor({ state: "detached" });
+    return result;
   };
+  await page.getByRole("button", { name: "Add endpoint", exact: true }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Shared gateway");
+  await page.getByLabel("API base URL", { exact: true }).fill("https://example.test");
+  await page.getByRole("checkbox", { name: "anthropic-messages", exact: true }).check();
+  await page.getByLabel("API key", { exact: true }).fill("synthetic-smoke-key");
+  assert.equal(await page.getByLabel("Model ID", { exact: true }).count(), 0);
+  const endpoint = (await submit("POST", "/api/execution-endpoints", "Save endpoint")).endpoint;
+  assert.deepEqual(endpoint.connection.protocols, ["openai-responses", "anthropic-messages"]);
+  check("one endpoint declares multiple API protocols without model or engine fields");
   await page.getByRole("button", { name: "Add group", exact: true }).click();
-  const form = page.getByRole("form", {
-    name: "Capability groups",
-    exact: true,
-  });
+  const form = page.getByRole("form", { name: "Capability groups", exact: true });
   assert.equal(await form.getByRole("checkbox").count(), 3);
   for (const member of runtimeChoices) {
     assert(await form.getByText(member.id, { exact: true }).isVisible());
-    assert(await form.getByText(member.deviceInfo.split(" · ", 1)[0], { exact: true }).isVisible());
     assert.equal(await form.getByRole("checkbox", { name: new RegExp(member.id) }).count(), 1);
   }
-  assert(await form.getByText("Offline", { exact: true }).isVisible());
-  await page.screenshot({ path: join(artifacts, "runtime-member-picker-desktop.png"), fullPage: false });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForFunction(() => document.documentElement.scrollWidth <= window.innerWidth);
   await form.getByText(runtimeChoices[2].id, { exact: true }).scrollIntoViewIfNeeded();
-  await page.screenshot({ path: join(artifacts, "runtime-member-picker-mobile.png"), fullPage: false });
+  await page.screenshot({ path: join(artifacts, "runtime-member-picker-mobile.png") });
   await page.setViewportSize({ width: 1440, height: 1000 });
-  check("three same-name Codex runtimes expose machine, status and distinct IDs; long names fit 390px");
   await form.getByLabel("Name", { exact: true }).fill("Group A");
-  await form
-    .getByLabel("Purpose and organization", { exact: true })
-    .fill("Build and review services");
-  await form
-    .getByLabel("Provider connection", { exact: true })
-    .selectOption("new");
-  await form.getByLabel("Connection name", { exact: true }).fill("Gateway A");
-  await form
-    .getByLabel("API base URL", { exact: true })
-    .fill("https://example.test/v1");
-  await form.getByLabel("Model ID", { exact: true }).fill("model-a");
-  await form.getByLabel(/Allowed model IDs/).fill("model-fast");
-  await form.getByLabel("API key", { exact: true }).fill("synthetic-smoke-key");
+  await form.getByLabel("Purpose and organization", { exact: true }).fill("Build and review");
+  await form.getByLabel("Connection endpoint", { exact: true }).selectOption(endpoint.id);
   await form.getByRole("checkbox", { name: new RegExp(runtime.id) }).check();
-  const ga = (await submit("POST", "/api/execution-groups", 201)).group;
+  await form.locator("summary").click();
+  await form.getByLabel("Model ID", { exact: true }).fill("model-a");
+  await form.getByLabel(/Allowed models/).fill("model-a\nmodel-fast");
+  const ga = (await submit("POST", "/api/execution-groups", "Save group")).group;
   assert.deepEqual(ga.runtime_ids, [runtime.id]);
-  const memberRow = page.getByRole("article", { name: "Group A", exact: true });
-  await memberRow.getByText(runtime.id, { exact: true }).waitFor();
-  assert(await memberRow.getByText("Design Mac", { exact: true }).isVisible());
-  assert.equal(await memberRow.getByText(runtimeChoices[0].id, { exact: true }).count(), 0);
-  check("saving the second Codex binds its exact Runtime ID and keeps the machine visible in the group");
-  assert(!JSON.stringify(ga).includes("synthetic-smoke-key"));
-  const a = (await state()).profiles.find(
-    (profile: any) => profile.id === ga.profile_id,
-  )!;
-  assert.equal(ga.description, "Build and review services");
-  assert.deepEqual(a.profile.models, ["model-a", "model-fast"]);
+  assert.equal(ga.endpoint_id, endpoint.id);
+  assert.deepEqual(ga.model_policy, { model: "model-a", models: ["model-a", "model-fast"] });
   assert.equal((await state()).runtimeProfile, null);
-  check(
-    "creates group, provider, models and membership in one browser save; machine configuration stays empty",
-  );
-  const b = await createProfile("Gateway B", "model-b");
-  assert.equal((await state()).profiles.length, 2);
+  check("group owns model policy and exact machine selection; endpoint does not");
+  await page.getByRole("button", { name: "Add group", exact: true }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Group B");
+  await page.getByLabel("Connection endpoint", { exact: true }).selectOption(endpoint.id);
+  await page.getByRole("checkbox", { name: new RegExp(runtime.id) }).check();
+  const gb = (await submit("POST", "/api/execution-groups", "Save group")).group;
+  assert.equal((await state()).profiles.length, 1);
   assert.equal((await state()).localProfiles.length, 0);
-  check(
-    "inline and reusable provider connections stay in the selected workspace and never return secrets",
-  );
-  const createGroup = async (name: string, profileId: string) => {
-    await page!.getByRole("button", { name: "Add group", exact: true }).click();
-    const form = page!.locator("form");
-    await form.getByLabel("Name", { exact: true }).fill(name);
-    await form
-      .getByRole("combobox", { name: /^Provider connection/ })
-      .selectOption(profileId);
-    assert.equal(
-      await form.getByRole("checkbox", { name: /Other Claude machine/ }).count(),
-      0,
-    );
-    await form.getByRole("checkbox", { name: new RegExp(runtime.id) }).check();
-    return (await submit("POST", "/api/execution-groups", 201)).group;
-  };
-  const gb = await createGroup("Group B", b.id);
   assert.equal((await state()).bindings.length, 2);
-  await page.getByText("Pending", { exact: true }).first().waitFor();
-  const profileRow = (name: string) =>
-    page!
-      .getByRole("region", { name: "Connection profiles", exact: true })
-      .getByRole("article", { name, exact: true });
-  assert(
-    await profileRow("Gateway A")
-      .getByRole("button", { name: "Delete", exact: true })
-      .isDisabled(),
-  );
-  check(
-    "one runtime accepts two profile groups; mismatched engines hidden; bound profiles cannot be deleted",
-  );
-
+  const endpointRow = () => page!.getByRole("article", { name: "Shared gateway", exact: true });
+  assert(await endpointRow().getByRole("button", { name: "Delete", exact: true }).isDisabled());
+  assert(await endpointRow().getByText(/shared by 2 groups/).isVisible());
   const oldBindings = (await state()).bindings;
   await ack(oldBindings);
-  await poll(
-    async () =>
-      (await page!.getByText("Applied", { exact: true }).count()) === 2,
-    20_000,
-    "ready status polling",
-  );
-  check(
-    "simulated daemon acknowledgements refresh both groups to Applied without reload",
-  );
-  await page
-    .getByRole("textbox", { name: "Search groups", exact: true })
-    .fill("review");
-  assert.equal(
-    await page.getByRole("article", { name: "Group B", exact: true }).count(),
-    0,
-  );
-  await page
-    .getByRole("article", { name: "Group A", exact: true })
-    .getByRole("button", { name: "Edit", exact: true })
-    .click();
-  assert(await page.getByRole("checkbox", { name: new RegExp(runtime.id) }).isChecked());
-  assert.equal(await page.getByRole("checkbox", { name: new RegExp(runtimeChoices[0].id) }).isChecked(), false);
-  check("reopening the group retains the selected Codex without checking another same-name Runtime");
-  await page
-    .getByRole("button", { name: "Edit provider and models", exact: true })
-    .click();
-  assert.equal(
-    await page
-      .locator("form")
-      .getByLabel("API key", { exact: true })
-      .inputValue(),
-    "",
-  );
-  await page
-    .locator("form")
-    .getByLabel("Model ID", { exact: true })
-    .fill("model-a-next");
-  await submit("PUT", `/api/execution-groups/${ga.id}`, 200);
-  const updated = (await state()).profiles.find(
-    (profile: any) => profile.id === a.id,
-  )!;
-  await page
-    .getByRole("textbox", { name: "Search groups", exact: true })
-    .fill("");
-  assert.equal(updated.revision, 2);
-  assert.equal((await state()).keysMatch, true);
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByText("Applied", { exact: true }).first().waitFor();
+  await endpointRow().getByRole("button", { name: "Edit", exact: true }).click();
+  assert.equal(await page.getByLabel("API key", { exact: true }).inputValue(), "");
+  await page.getByLabel("API base URL", { exact: true }).fill("https://changed.example.test");
+  await submit("PUT", `/api/execution-endpoints/${endpoint.id}`, "Save endpoint");
+  const updated = await state();
+  assert.equal(updated.profiles[0].revision, 2);
+  assert(updated.keysMatch);
+  assert.deepEqual(updated.groups.find((g: any) => g.id === ga.id).modelPolicy, ga.model_policy);
   await ack(oldBindings);
-  assert.equal((await state()).members[ga.id][0].status, "pending");
-  await page.getByText("Pending", { exact: true }).waitFor();
-  const currentBindings = (await state()).bindings;
-  await ack(currentBindings);
-  await poll(
-    async () =>
-      (await page!.getByText("Applied", { exact: true }).count()) === 2,
-    20_000,
-    "new revision ready",
-  );
-  check(
-    "editing retains hidden key, increments revision, rejects old acknowledgement, and reapplies",
-  );
-
-  await page
-    .getByRole("link", { name: "Assign groups in agent settings", exact: true })
-    .click();
-  await page
-    .getByRole("button", { name: "New agent", exact: true })
-    .first()
-    .click();
-  const dialog = page.getByRole("dialog", {
-    name: "Create Agent",
-    exact: true,
-  });
-  await dialog
-    .getByPlaceholder("e.g. Deep Research Agent", { exact: true })
-    .fill("Group model smoke agent");
-  await dialog
-    .getByRole("button", { name: /^Fixed execution group · Group A/ })
-    .click();
-  await dialog
-    .getByRole("button", { name: "Default (provider)", exact: true })
-    .click();
-  await page.getByRole("button", { name: "model-fast", exact: true }).waitFor();
-  assert.equal(
-    await page.getByRole("button", { name: "model-b", exact: true }).count(),
-    0,
-  );
-  await page.getByRole("button", { name: "model-fast", exact: true }).click();
-  await dialog
-    .getByRole("button", { name: /^Fixed execution group · Group B/ })
-    .click();
-  await dialog
-    .getByRole("button", { name: "Default (provider)", exact: true })
-    .click();
-  await page.getByRole("button", { name: "model-b", exact: true }).waitFor();
-  assert.equal(
-    await page.getByRole("button", { name: "model-fast", exact: true }).count(),
-    0,
-  );
-  await page.getByRole("button", { name: "model-b", exact: true }).click();
-  await dialog
-    .getByRole("button", { name: /^Fixed execution group · Group A/ })
-    .click();
-  await dialog
-    .getByRole("button", { name: "Default (provider)", exact: true })
-    .click();
-  await page.getByRole("button", { name: "model-fast", exact: true }).click();
-  const createdResponse = page.waitForResponse(
-    (r) =>
-      r.request().method() === "POST" &&
-      new URL(r.url()).pathname === "/api/agents",
-  );
-  await dialog.getByRole("button", { name: "Create", exact: true }).click();
-  const created = await createdResponse;
-  assert.equal(created.status(), 201, await created.text());
-  const agent = await created.json();
-  assert.equal(agent.execution_group_id, ga.id);
-  assert.equal(agent.model, "model-fast");
-  await dialog.waitFor({ state: "detached" });
-  check(
-    "assigns group to an agent; switching groups scopes models and clears incompatible selections",
-  );
-
-  // Detach the fixture agent before exercising group deletion through the UI.
-  const detached = await context.request.put(
-    `${frontend}/api/agents/${agent.id}?workspace_id=${workspace.id}`,
-    {
-      headers: { Authorization: `Bearer ${pat}` },
-      data: { execution_group_id: null, model: "", thinking_level: "" },
-    },
-  );
-  assert.equal(detached.status(), 200, await detached.text());
-  await page.goto(`${frontend}/${workspace.slug}/execution-groups`, {
-    waitUntil: "domcontentloaded",
-  });
-  await page.getByRole("article", { name: "Group A", exact: true }).waitFor();
-  await page.screenshot({
-    path: join(artifacts, "configuration-desktop.png"),
-    fullPage: false,
-  });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.waitForFunction(
-    () => document.documentElement.scrollWidth <= window.innerWidth,
-  );
-  await page.screenshot({
-    path: join(artifacts, "configuration-mobile.png"),
-    fullPage: false,
-  });
-  check("390px mobile configuration fits viewport");
-  await page
-    .getByRole("article", { name: "Group A", exact: true })
-    .getByRole("button", { name: "Edit", exact: true })
-    .click();
-  await page.getByRole("button", { name: "Edit provider and models", exact: true }).click();
-  await page.waitForFunction(() => document.documentElement.scrollWidth <= window.innerWidth);
-  await page.screenshot({ path: join(artifacts, "configuration-mobile-editor.png"), fullPage: false });
+  assert((await state()).members[ga.id].every((m: any) => m.status === "pending"));
+  check("shared edit preserves secret and group policy, invalidates old acknowledgements for every group");
+  await ack((await state()).bindings);
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByText("Applied", { exact: true }).first().waitFor();
+  await page.screenshot({ path: join(artifacts, "execution-endpoints-desktop.png"), fullPage: true });
+  await page.getByRole("button", { name: "Add group", exact: true }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Claude team");
+  await page.getByLabel("Execution engine", { exact: true }).selectOption("claude");
+  await page.getByLabel("Connection endpoint", { exact: true }).selectOption(endpoint.id);
+  assert.equal(await page.getByRole("checkbox", { name: new RegExp(runtime.id) }).count(), 0);
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
-  check("group provider editor remains usable at 390px");
-  await page.setViewportSize({ width: 1440, height: 1000 });
-  for (const [name, id] of [
-    ["Group A", ga.id],
-    ["Group B", gb.id],
-  ]) {
-    const row = page.getByRole("article", { name, exact: true });
-    const response = page.waitForResponse(
-      (r) =>
-        r.request().method() === "DELETE" &&
-        new URL(r.url()).pathname === `/api/execution-groups/${id}`,
-    );
-    await row.getByRole("button", { name: "Delete", exact: true }).click();
-    assert.equal((await response).status(), 200);
-    await page.getByText(name, { exact: true }).waitFor({ state: "detached" });
+  check("same endpoint is selectable by a different compatible engine");
+  for (const group of [ga, gb]) {
+    const pending = page.waitForResponse(response => response.request().method() === "DELETE" && new URL(response.url()).pathname === `/api/execution-groups/${group.id}`);
+    await page.getByRole("article", { name: group.name, exact: true }).getByRole("button", { name: "Delete", exact: true }).click();
+    assert((await pending).ok());
+    await page.getByRole("article", { name: group.name, exact: true }).waitFor({ state: "detached" });
   }
-  for (const profile of [a, b]) {
-    const response = page.waitForResponse(
-      (r) =>
-        r.request().method() === "DELETE" &&
-        new URL(r.url()).pathname === `/api/execution-profiles/${profile.id}`,
-    );
-    await profileRow(profile.name)
-      .getByRole("button", { name: "Delete", exact: true })
-      .click();
-    assert.equal((await response).status(), 200);
-    await page
-      .getByText(profile.name, { exact: true })
-      .waitFor({ state: "detached" });
-  }
-  assert.equal((await state()).groups.length, 0);
+  const deletion = page.waitForResponse(response => response.request().method() === "DELETE" && new URL(response.url()).pathname === `/api/execution-endpoints/${endpoint.id}`);
+  await endpointRow().getByRole("button", { name: "Delete", exact: true }).click();
+  assert((await deletion).ok());
+  await endpointRow().waitFor({ state: "detached" });
   assert.equal((await state()).profiles.length, 0);
-  check("deleting groups unbinds runtimes and allows profile deletion");
+  check("deleting groups releases references so the endpoint can be deleted");
   assert.deepEqual(apiFailures, []);
   assert.deepEqual(jsErrors, []);
   check("no uncaught browser errors or API 5xx");

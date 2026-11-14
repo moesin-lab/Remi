@@ -95,6 +95,7 @@ export function operationsCommandSpecs(): CommandSpec[] {
 function executionConfigurationSpecs(): CommandSpec[] {
   return ([
     { resource: "profile", endpoint: "execution-profiles", collection: "profiles" },
+    { resource: "endpoint", endpoint: "execution-endpoints", collection: "endpoints" },
     { resource: "group", endpoint: "execution-groups", collection: "groups" },
   ] as const).flatMap(({ resource, endpoint, collection }) => {
     const root = `/api/${endpoint}`;
@@ -102,7 +103,7 @@ function executionConfigurationSpecs(): CommandSpec[] {
     const scope = (i: CommandInvocation) => queryOptions(i, { workspace_id: requiredWorkspace(i) });
 
     return [
-      ...(resource === "profile" ? [op({ id: "runtime.profile.list", path: ["runtime", "profile", "list"], description: "List reusable workspace connection profiles", method: "GET", apiPath: root, auth: HUMAN, query: scope, collections: [collection] })] : []),
+      ...(resource !== "group" ? [op({ id: `runtime.${resource}.list`, path: ["runtime", resource, "list"], description: resource === "endpoint" ? "List shared gateway endpoints and their API protocols" : "List legacy workspace connection profiles", method: "GET", apiPath: root, auth: HUMAN, query: scope, collections: [collection] })] : []),
       op({ id: `runtime.${resource}.get`, path: ["runtime", resource, "get"], description: `Get a workspace execution ${resource}`, method: "GET", apiPath: item, auth: HUMAN, positionals: [ref(resource)], query: scope }),
       op({ id: `runtime.${resource}.create`, path: ["runtime", resource, "create"], description: resource === "group" ? "Create a capability group, optionally configuring its provider and models with connection in the same JSON" : "Create a workspace execution profile from JSON", method: "POST", apiPath: root, mutation: "write", auth: HUMAN, options: INPUT_OPTIONS, query: scope, body: withWorkspace }),
       op({ id: `runtime.${resource}.update`, path: ["runtime", resource, "update"], description: resource === "group" ? "Save group description, membership and optional provider connection atomically from JSON" : "Replace a workspace execution profile configuration from JSON", method: "PUT", apiPath: item, mutation: "write", auth: HUMAN, positionals: [ref(resource)], options: INPUT_OPTIONS, query: scope, body: withWorkspace }),
@@ -120,6 +121,8 @@ function runtimeSpecs(): CommandSpec[] {
     group("runtime", "Manage execution runtimes and cloud nodes"),
     op({ id: "runtime.group.list", path: ["runtime", "group", "list"], description: "List execution groups", method: "GET", apiPath: "/api/execution-groups", auth: HUMAN, query: (i) => queryOptions(i, { workspace_id: requiredWorkspace(i) }), collections: ["groups"] }),
     ...executionConfigurationSpecs(),
+    op({ id: "runtime.endpoint.inspect", path: ["runtime", "endpoint", "inspect"], description: "Inspect a saved or draft endpoint from JSON: operation models, detect, or explicit single-model test (may incur cost)", method: "POST", apiPath: "/api/execution-endpoints/inspect", mutation: "write", auth: HUMAN, options: INPUT_OPTIONS, body: withWorkspace }),
+    op({ id: "runtime.endpoint.catalog", path: ["runtime", "endpoint", "catalog"], description: "Read the last endpoint model inventory and refresh status", method: "GET", apiPath: i => `/api/execution-endpoints/${encodePath(positional(i, 0, "endpoint"))}/catalog`, auth: HUMAN, positionals: [ref("endpoint")], query: i => queryOptions(i, { workspace_id: requiredWorkspace(i) }), collections: ["catalogs"] }),
     op({ id: "runtime.codex-profile.get", path: ["runtime", "codex-profile", "get"], description: "Get a Runtime's custom Codex connection", method: "GET", apiPath: runtime("/codex-profile"), auth: HUMAN_DAEMON, positionals: [ref("runtime")] }),
     op({ id: "runtime.codex-profile.set", path: ["runtime", "codex-profile", "set"], description: "Set a Codex connection with --file; profile: null restores the workspace gateway", method: "PUT", apiPath: runtime("/codex-profile"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
     op({ id: "runtime.claude-profile.get", path: ["runtime", "claude-profile", "get"], description: "Get a Runtime's custom Claude Code connection", method: "GET", apiPath: runtime("/claude-profile"), auth: HUMAN_DAEMON, positionals: [ref("runtime")] }),
@@ -160,7 +163,7 @@ function runtimeSpecs(): CommandSpec[] {
     op({ id: "runtime.model.set", path: ["runtime", "model", "set"], description: "Replace runtime model configuration", method: "PUT", apiPath: runtime("/models"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
     op({ id: "runtime.model.refresh", path: ["runtime", "model", "refresh"], description: "Request a runtime model refresh", method: "POST", apiPath: runtime("/models"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
     op({ id: "runtime.model.status", path: ["runtime", "model", "status"], description: "Get a model refresh request", method: "GET", apiPath: async (i, c) => `${await runtime("/models")(i, c)}/${encodePath(positional(i, 1, "request"))}`, auth: HUMAN_DAEMON, positionals: [ref("runtime"), ref("request")] }),
-    op({ id: "runtime.release.start", path: ["runtime", "release", "start"], description: "Start a runtime update", method: "POST", apiPath: runtime("/update"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
+    op({ id: "runtime.release.start", path: ["runtime", "release", "start"], description: "Upgrade the machine CLI (scope=cli), reinstall release-pinned ACP (scope=acp), or update Grok (scope=agent); Claude/Codex/Antigravity versions follow CLI releases", method: "POST", apiPath: runtime("/update"), mutation: "write", auth: HUMAN, positionals: [ref("runtime")], options: INPUT_OPTIONS }),
     op({ id: "runtime.release.status", path: ["runtime", "release", "status"], description: "Get a runtime update request", method: "GET", apiPath: async (i, c) => `${await runtime("/update")(i, c)}/${encodePath(positional(i, 1, "update"))}`, auth: HUMAN_DAEMON, positionals: [ref("runtime"), ref("update")] }),
     runtimeCommandRunSpec(),
     runtimeStorageSpec(),

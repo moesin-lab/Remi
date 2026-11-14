@@ -799,7 +799,8 @@ export interface MultiremiRuntimeDirectoryScanRequest {
 
 /**
  * What a runtime update request targets: the remi CLI binary (`cli`), the ACP
- * bridges (`acp`), or the underlying agent CLI — claude/codex (`agent`).
+ * release-pinned ACP bundles (`acp`, reinstall), or the standalone Grok CLI
+ * (`agent`). Claude/Codex/Antigravity are upgraded with the Remi CLI release.
  */
 export type MultiremiRuntimeUpdateScope = "cli" | "acp" | "agent";
 
@@ -1484,6 +1485,7 @@ export interface MultiremiTask {
   /** Runtime connection frozen at claim time, without credentials. */
   codexProfile?: RuntimeCodexProfile | null;
   claudeProfile?: RuntimeClaudeProfile | null;
+  executionConnection?: import("./execution-endpoint.js").ExecutionConnectionSnapshot | null;
   plugin_snapshot?: MultiremiTaskPluginSnapshotEntry[];
   /** Stable hash of the exact Plugin versions, binding config and Runtime
    * Codex connection/credential version used by this execution. Provider sessions only resume when it
@@ -1819,6 +1821,7 @@ export interface TaskDependencyForceInput {
 }
 
 export interface CreateTaskInput {
+  executionConnection?: import("./execution-endpoint.js").ExecutionConnectionSnapshot | null;
   /** Internal canonical conversation for automation/message producers. */
   conversationSessionId?: string;
   runtimeWorkspaceId?: string | null;
@@ -6048,6 +6051,9 @@ export interface MultiremiExecutionGroup {
   description: string;
   profileId: string | null;
   profileRevision: number | null;
+  endpointId: string | null;
+  connectionMode: "legacy" | "native" | "endpoint";
+  modelPolicy: import("./execution-endpoint.js").ExecutionModelPolicy;
   managed: boolean;
   workspaceId: string;
   provider: string;

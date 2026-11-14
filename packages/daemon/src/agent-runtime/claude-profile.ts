@@ -46,7 +46,7 @@ export function runtimeClaudeProfileRouting(profile: RuntimeClaudeProfile): Reco
     CLAUDE_CODE_USE_VERTEX: "0",
     CLAUDE_CODE_USE_FOUNDRY: "0",
     CLAUDE_MODEL_CONFIG: "",
-    ANTHROPIC_CUSTOM_HEADERS: "",
+    ANTHROPIC_CUSTOM_HEADERS: Object.entries(profile.endpoint_options?.headers ?? {}).map(([name, value]) => `${name}: ${value}`).join("\n"),
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
   };
 }

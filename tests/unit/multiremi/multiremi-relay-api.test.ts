@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 import { describe, expect, it } from "bun:test";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -92,18 +94,21 @@ describe("relay config API — Antigravity engine", () => {
     expect((await reveal.json()).token).toBe("AGY-SECRET");
   });
 
-  it("delivers the engine on the daemon wire to an administrator only", async () => {
+  it("delivers the endpoint-backed engine to registered shared-workspace daemons", async () => {
     const { store, app, ownerToken, memberToken } = await setup();
     store.upsertRelayConfig("local", "antigravity", { fragment: AGY_FRAGMENT, tokenOp: "set", authToken: "AGY-SECRET" });
 
     const asOwner = await (await register(app, ownerToken)).json();
-    expect(asOwner.relay.antigravity).toEqual({ fragment: AGY_FRAGMENT, auth_token: "AGY-SECRET", revision: 1 });
+    expect(asOwner.relay.antigravity).toMatchObject({ fragment: AGY_FRAGMENT, auth_token: "AGY-SECRET", revision: 1, auth_header: "bearer" });
+    expect(asOwner.relay.antigravity.endpoint_id).toMatch(/^ep_/);
     // The 1M context list is a Claude-only declaration and stays off the other engines.
     expect(asOwner.relay.antigravity.one_million_models).toBeUndefined();
 
     const asMember = await (await register(app, memberToken, "d2")).json();
-    expect(JSON.stringify(asMember.relay)).not.toContain("AGY-SECRET");
-    expect(asMember.relay?.antigravity ?? null).toBeNull();
+    expect(asMember.relay?.antigravity).toEqual(asOwner.relay.antigravity);
+    const anonymous = await register(app, "invalid-credential", "untrusted");
+    expect(anonymous.status).toBe(401);
+    expect(await anonymous.text()).not.toContain("AGY-SECRET");
   });
 
   it("answers null for an unconfigured engine on the daemon wire", async () => {

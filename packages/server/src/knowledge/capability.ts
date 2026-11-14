@@ -29,6 +29,7 @@ export function agentKnowledgePublishPluginNames(
   agent: MultiremiAgent,
 ): string[] {
   if (!agentRoleAtLeast(agent.role, "maintainer")) return [];
+  if (agent.provider !== "claude" && agent.provider !== "codex") return [];
   const allowedNames = new Set<string>(KNOWLEDGE_PUBLISH_PLUGIN_NAMES);
   const pluginsById = new Map(
     reader.listAgentPlugins(agent.workspaceId, {

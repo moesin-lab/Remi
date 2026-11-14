@@ -1,13 +1,13 @@
 # Antigravity Runtime
 
-Remi runs Antigravity as the `antigravity` provider on Google's official ACP server (`antigravity-acp`, pinned at 1.4.0). The server authenticates only through its gateway mode, against a loopback gateway shim inside the daemon that holds the workspace Model gateway key. The retired `agy -p` integration and personal-account `agy` logins no longer work.
+Remi runs Antigravity as the `antigravity` provider on Google's official ACP server (`antigravity-acp`, pinned at 1.4.0). The server authenticates only through its gateway mode, against a loopback gateway shim inside the daemon that holds the execution group endpoint key. The retired `agy -p` integration and personal-account `agy` logins no longer work.
 
 > **Opt-in, and not ready to enable by default.** The server is Google's proprietary software, downloaded per machine from Google after the operator accepts [Google's Antigravity terms](https://antigravity.google/terms). Whether this use (a third-party ACP client on an API-key gateway) is covered by those terms has not been reviewed: **get a legal review before enabling Antigravity by default** for any workspace or installer (PR 4 risk R2). Windows is not supported.
 
 ## Upgrade notes
 
 1. `agy -p` and personal-account `agy` logins no longer work; an Agent `executable` that points at `agy` is rejected ("points at the retired agy CLI; clear it").
-2. Configure *Settings > Model gateway > Antigravity* with the gateway base URL, the API key and, ideally, a `default_model` ([engine contract](runtime-model-discovery.md#antigravity-gateway-engine)).
+2. Configure a *Gateway endpoint* supporting `google-generative` in *Execution groups* with the gateway base URL, the API key and, ideally, a `default_model` ([engine contract](runtime-model-discovery.md#antigravity-gateway-engine)).
 3. On each machine run `remi runtime prepare --provider antigravity --accept-antigravity-terms`. It downloads about 110 MB on macOS (392 MB on disk) or about 330 MB on Linux (about 1.1 GB on disk).
 4. Reselect the model of every Antigravity Agent (or rely on the engine's `default_model`) and clear its thinking level: stale ids fail with `acp_model_unsupported`, and an explicit effort fails with `acp_effort_unsupported`.
 5. Restart the daemon.
@@ -23,7 +23,7 @@ Remi runs Antigravity as the `antigravity` provider on Google's official ACP ser
 ## Architecture
 
 ```
-ACP server (Google, pinned)  ──HTTP──▶  daemon gateway shim (127.0.0.1)  ──HTTPS──▶  workspace Model gateway
+ACP server (Google, pinned)  ──HTTP──▶  daemon gateway shim (127.0.0.1)  ──HTTPS──▶  selected endpoint
         ▲ ACP over stdio                    │ usageMetadata of every model response
         └──────── AcpProvider ◀─────────────┘ → usage ledger, turn context
 ```
@@ -41,16 +41,16 @@ The daemon-start health check spawns nothing: the manifest must match the pin, b
 
 ## Gateway engine and model
 
-Antigravity runs only through the workspace's *Model gateway > Antigravity* engine (fragment `{"base_url", "default_model"}`, key in the token field; [contract](runtime-model-discovery.md#antigravity-gateway-engine)). Before the start ACK, and therefore before any model call, a task fails with:
+Antigravity execution groups select a shared endpoint with the `google-generative` protocol. The task freezes its address, credential revision and selected model; the daemon adapts that snapshot to its loopback shim. Older frozen tasks retain the legacy workspace Relay. See [execution configuration](dev/execution-configuration.md). Before the start ACK, and therefore before any model call, a task fails with:
 
 - `antigravity_gateway_unconfigured` when the engine, its base URL or its key is missing;
 - `antigravity_model_required` when neither the Agent nor the engine names a model (without a selection the server silently runs the gateway's first model).
 
-Both classify as `agent_error.missing_config`. An Agent without a model runs the engine's `default_model`. Model selection is strict: `session/set_config_option` must switch to the requested id or the turn fails with `acp_model_unsupported`. The gateway path offers no effort selector, so an explicit effort fails with `acp_effort_unsupported`; variant ids such as `gemini-3-pro-high` are separate models.
+Both classify as `agent_error.missing_config`. New tasks use the Agent model, group default, or a discovered default; old frozen tasks can retain the Relay `default_model`. Model selection is strict: `session/set_config_option` must switch to the requested id or the turn fails with `acp_model_unsupported`. The gateway path offers no effort selector, so an explicit effort fails with `acp_effort_unsupported`; variant ids such as `gemini-3-pro-high` are separate models.
 
 A refused or failing gateway is reported as such, never as an unsupported model. Server 1.4.0 never fails `session/new` when its model listing is refused or unreachable: it falls back to built-in model ids. The shim therefore reports how every listing ended. A breaker that opened while the session was set up (a 401/403) fails the turn with "The model gateway rejected the credentials" (`agent_error.provider_auth_or_access`). A model selection that fails after a refused or failed listing reports the listing's failure instead: "The model gateway is unreachable" as `agent_error.provider_server_error` for 5xx, `agent_error.provider_network` when nothing answered, or the quota failure for 429.
 
-The runtime's executable model list comes from the server's own `configOptions` (it caps unknown models and filters image models), probed through a per-daemon probe home and a probe token of the shim; listing consumes nothing and is not metered. A probe whose listing was refused or failed fails (and keeps the last known catalog) instead of reporting the server's fallback ids. The workspace dropdown comes from the gateway discovery.
+The runtime's executable model list comes from the server's own `configOptions` (it caps unknown models and filters image models), probed through a per-daemon probe home and a probe token of the shim; listing consumes nothing and is not metered. A probe whose listing was refused or failed fails (and keeps the last known catalog) instead of reporting the server's fallback ids. The execution-group dropdown comes from its endpoint binding discovery.
 
 ## Gateway shim
 
@@ -85,7 +85,7 @@ The server also creates directories on its own: `$GEMINI_HOME/antigravity-cli/sk
 
 ## Usage and context
 
-The server's own `usage_update.used` equals total + cached (it counts the cache twice) and is never billed; the provider keeps only its window size. Billing comes from the shim: one request-identity unit per model response ([gemini-request-usage.ts](../packages/acp/src/gemini-request-usage.ts)), keyed by the server-minted ACP session id and the `responseId`, under connection `workspace:<ws>:relay:antigravity` with provider `antigravity`. Our gateway's `promptTokenCount` includes cached tokens, so input = prompt + tool-use prompt − cached, cache reads are separate, and thinking counts as output once. A response without `responseId` is `partial` without identity; a stream cut short keeps only the counters it carried and is `partial`, or `unknown` when it carried none; a rejected request without counters bills nothing. Context is the last session-model request's total; calls to other models (browser subagents) bill but do not count as context (R9). Details: [usage accounting](usage-accounting.md).
+The server's own `usage_update.used` equals total + cached (it counts the cache twice) and is never billed; the provider keeps only its window size. Billing comes from the shim: one request-identity unit per model response ([gemini-request-usage.ts](../packages/acp/src/gemini-request-usage.ts)), keyed by the server-minted ACP session id and the `responseId`, under connection `workspace:<ws>:endpoint:<endpoint-id>` for endpoint-backed tasks (old snapshots retain `workspace:<ws>:relay:antigravity`) with provider `antigravity`. Our gateway's `promptTokenCount` includes cached tokens, so input = prompt + tool-use prompt − cached, cache reads are separate, and thinking counts as output once. A response without `responseId` is `partial` without identity; a stream cut short keeps only the counters it carried and is `partial`, or `unknown` when it carried none; a rejected request without counters bills nothing. Context is the last session-model request's total; calls to other models (browser subagents) bill but do not count as context (R9). Details: [usage accounting](usage-accounting.md).
 
 ## Validation
 
@@ -107,7 +107,7 @@ Last live run (2026-10-15, macOS arm64, server 1.4.0, `gemini-2.5-flash` on our 
 - **Health check: "is not installed" or "does not match"**: rerun `runtime prepare`; a pin bump needs one download per machine.
 - **"machine policy overrides gateway routing"**: an `admin_settings.json` policy file exists; it can pin the URL or forbid gateway auth, so Remi refuses to run. Remove the policy or run on another machine.
 - **`antigravity_gateway_unconfigured` / `antigravity_model_required`**: configure the Antigravity engine's base URL and key, and a `default_model` or the Agent's model.
-- **"The model gateway rejected the credentials"**: the gateway answered 401/403 to the real key; fix the key in *Model gateway*. A key that only works as `x-goog-api-key` must also accept `Authorization: Bearer`.
+- **"The model gateway rejected the credentials"**: the gateway answered 401/403 to the real key; fix the selected endpoint credential. A key that only works as `x-goog-api-key` must also accept `Authorization: Bearer`.
 - **"The model gateway is unreachable" / "rate limiting or out of quota"**: the shim's breaker opened after repeated network, 5xx or 429 failures. Check the gateway and the daemon's proxy settings; the next turn starts a fresh server process with a new token.
 - **Proxy and SOCKS.** The shim's upstream calls use the daemon's `HTTPS_PROXY` / `NO_PROXY`. The server only talks to the loopback shim and Google's local harness; its environment merges `127.0.0.1,localhost,::1` into `NO_PROXY` / `no_proxy`. Proxy variables in the daemon's environment (including a SOCKS `ALL_PROXY`) were verified not to affect those loopback calls. On macOS, CPython reads environment proxies whenever any `*_proxy` variable is set and only otherwise the system settings, so this non-empty `no_proxy` should also keep a *system* SOCKS proxy (which failed with a missing `python-socks` error in the first probe) out of the server; that case is not yet verified (R7). If the error appears, set `HTTPS_PROXY` / `HTTP_PROXY` explicitly in the daemon's environment.
 - **Commands run in the wrong directory**: they should run in the session cwd; if a model still picks `$GEMINI_HOME/antigravity-cli/skills`, report the model id (R5).

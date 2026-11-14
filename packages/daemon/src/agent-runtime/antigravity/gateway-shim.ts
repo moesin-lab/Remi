@@ -65,6 +65,7 @@ export interface GatewayShimRunOptions {
   upstreamBase: string;
   /** The gateway key. Never leaves this process except as the upstream Bearer. */
   apiKey: string;
+  headers?: Record<string, string>;
   /** For logs only. */
   runId: string;
 }
@@ -172,6 +173,7 @@ class ShimRunState implements GatewayShimRun {
     readonly upstreamBase: string,
     /** Cleared at close: a finished run keeps no copy of the gateway key. */
     public apiKey: string,
+    readonly headers: Record<string, string> = {},
   ) {}
 
   open(label: string): GatewayShimChannel {
@@ -305,7 +307,7 @@ export class AntigravityGatewayShim {
     if (/\/v1(?:beta)?$/.test(base)) throw new Error("[antigravity_gateway_unconfigured] the Antigravity gateway base_url must not end in /v1beta");
     const apiKey = options.apiKey.trim();
     if (!apiKey || /[\r\n]/.test(apiKey)) throw new Error("[antigravity_gateway_unconfigured] the Antigravity gateway key is missing");
-    const run = new ShimRunState(this, options.runId, base, apiKey);
+    const run = new ShimRunState(this, options.runId, base, apiKey, options.headers);
     this.runs.add(run);
     return run;
   }
@@ -393,6 +395,7 @@ export class AntigravityGatewayShim {
       headers.set(name, value);
     }
     headers.set("authorization", `Bearer ${channel.run.apiKey}`);
+    for (const [name, value] of Object.entries(channel.run.headers)) headers.set(name, value);
 
     const metered = route.kind === "generateContent" || route.kind === "streamGenerateContent";
     if (metered && channel.activePrompts === 0) {

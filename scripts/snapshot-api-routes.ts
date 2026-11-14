@@ -468,6 +468,7 @@ export interface SeedRefs {
   skillFileId: string;
   runtimeId: string;
   executionProfileId: string;
+  executionEndpointId: string;
   executionGroupId: string;
   projectId: string;
   repositoryId: string;
@@ -825,7 +826,7 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
   const gcRun = store.createRuntimeGcRunRequest(runtime.id, { mode: "dry_run", requestedBy: member.userId ?? member.id });
   const localSkillList = store.createRuntimeLocalSkillListRequest(runtime.id);
   const localSkillImport = store.createRuntimeLocalSkillImportRequest(runtime.id, { skillKey: "snapshot-skill", name: "Snapshot skill" });
-  const runtimeUpdate = store.createRuntimeUpdateRequest(runtime.id, { targetVersion: "9.9.9", scope: "agent" as any });
+  const runtimeUpdate = store.createRuntimeUpdateRequest(runtime.id, { targetVersion: "9.9.9", scope: "acp" });
   const runtimeCommandRequestId = "rcm_snapshot";
   const botMenuRequest = store.createBotMenuPublishRequest(runtime.id, {
     workspaceId,
@@ -887,9 +888,14 @@ async function seedStore(store: MultiremiStore, db: Database): Promise<SeedRefs>
   const executionGroup = store.saveExecutionGroup(workspaceId, {
     name: "Snapshot group", provider: "claude", profile_id: executionProfile.id, runtime_ids: [runtime.id],
   }, "eg_snapshot");
+  const executionEndpoint = store.saveExecutionEndpoint(workspaceId, {
+    name: "Snapshot endpoint", connection: { base_url: "https://models.snapshot.invalid",
+      protocols: ["openai-responses", "anthropic-messages"], auth_mode: "env", env_key: "REMI_ENDPOINT_SNAPSHOT_KEY", auth_header: "bearer" },
+  }, "ep_endpoint_snapshot");
 
   return {
     executionProfileId: executionProfile.id,
+    executionEndpointId: executionEndpoint.id,
     executionGroupId: executionGroup.id,
     workspaceId,
     otherWorkspaceId: other.id,
@@ -979,6 +985,7 @@ const ID_BY_COLLECTION: Record<string, keyof SeedRefs> = {
   submissions: "knowledgeSubmissionId",
   runtimes: "runtimeId",
   "execution-profiles": "executionProfileId",
+  "execution-endpoints": "executionEndpointId",
   "execution-groups": "executionGroupId",
   skills: "skillId",
   squads: "squadId",
@@ -1116,6 +1123,9 @@ function getQuery(pattern: string, refs: SeedRefs): string {
   switch (pattern) {
     case "/api/execution-profiles":
     case "/api/execution-profiles/:id":
+    case "/api/execution-endpoints":
+    case "/api/execution-endpoints/:id":
+    case "/api/execution-endpoints/:id/catalog":
     case "/api/execution-groups":
     case "/api/execution-groups/:id":
       return `?workspace_id=${encodeURIComponent(refs.workspaceId)}`;

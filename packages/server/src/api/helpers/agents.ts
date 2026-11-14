@@ -1,4 +1,5 @@
 import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
+import { executionEndpointGroupCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { createLogger } from "@shared/logger.js";
 import { workspaceRuntimeModelCatalog, intersectExecutionGroupCatalogs, catalogAllowsModel, modelThinkingState, providerDeclaresReasoningLevels, runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { GATEWAY_REASONING_LEVELS, manualThinkingResponse } from "@multiremi/store/runtime-model-catalog.js";
@@ -78,6 +79,8 @@ export function executionGroupModelCatalog(store: MultiremiStore, workspaceId: s
   const group = store.getExecutionGroup(groupId, workspaceId);
   if (!group) return [];
   const runtimes = executionGroupRuntimes(store, workspaceId, groupId, ownerId).sort((a, b) => a.id.localeCompare(b.id));
+  if (group.connectionMode !== "legacy") return [executionEndpointGroupCatalog(group,
+    runtimeId => store.getRuntimeBindingModelCatalog(groupId, runtimeId), runtimes.filter(runtime => runtime.status === "online").length)];
   const profile = group.managed ? store.getGroupExecutionProfile(groupId, workspaceId)?.profile ?? null : undefined;
   if (profile && !runtimes.length) return [{
     provider: group.provider,

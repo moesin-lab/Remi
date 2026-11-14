@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 import { disabledSshMeshRuntime } from "../helpers/ssh-mesh-isolation.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { Database } from "bun:sqlite";

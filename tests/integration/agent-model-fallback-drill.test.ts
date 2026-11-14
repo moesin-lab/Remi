@@ -1,3 +1,5 @@
+import { useEndpointEncryptionKey } from "../helpers/endpoint-encryption.js";
+useEndpointEncryptionKey();
 import { createResponsibleTestIssue } from "../unit/multiremi/helpers.js";
 /**
  * MUL-336 / MUL-478 drill — a REAL primary -> fallback switch on the execution

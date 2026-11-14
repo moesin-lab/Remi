@@ -58,9 +58,9 @@ try {
   const workspace = store.createWorkspace({ name: "Configuration smoke", slug: "configuration-smoke" }, user.id);
   assert.notEqual(workspace.id, "local");
   const runtimeChoices = [
-    store.registerRuntime({ id: "rt_member-shared-prefix-one", name: "Codex", deviceInfo: "Windows desktop · Windows", provider: "codex", workspaceId: workspace.id, ownerId: user.id, status: "online", maxConcurrency: 1 }),
-    store.registerRuntime({ id: "rt_member-shared-prefix-two", name: "Codex", deviceInfo: "Design Mac · macOS (arm64)", provider: "codex", workspaceId: workspace.id, ownerId: user.id, status: "online", maxConcurrency: 1 }),
-    store.registerRuntime({ id: "rt_member-shared-prefix-three", name: "Codex", deviceInfo: `${"remote-linux-worker-".repeat(8)} · Linux`, provider: "codex", workspaceId: workspace.id, ownerId: user.id, status: "offline", maxConcurrency: 1 }),
+    store.registerRuntime({ id: "rt_member-shared-prefix-one", name: "Codex", deviceInfo: "Windows desktop · Windows", provider: "codex", workspaceId: workspace.id, ownerId: user.id, status: "online", metadata: { execution_endpoints: 1 }, maxConcurrency: 1 }),
+    store.registerRuntime({ id: "rt_member-shared-prefix-two", name: "Codex", deviceInfo: "Design Mac · macOS (arm64)", provider: "codex", workspaceId: workspace.id, ownerId: user.id, status: "online", metadata: { execution_endpoints: 1 }, maxConcurrency: 1 }),
+    store.registerRuntime({ id: "rt_member-shared-prefix-three", name: "Codex", deviceInfo: `${"remote-linux-worker-".repeat(8)} · Linux`, provider: "codex", workspaceId: workspace.id, ownerId: user.id, status: "offline", metadata: { execution_endpoints: 1 }, maxConcurrency: 1 }),
   ] as const;
   // Select the second of three identical engine names to catch accidental
   // selection of the first matching label. No real provider is started.
@@ -87,9 +87,9 @@ try {
       store.recordRuntimeExecutionBindingAcks(runtime.id, bindings.map(binding => ({ ...binding, status: "ready" })));
       return Response.json({ ok: true });
     }
-    const profiles = store.listExecutionProfiles(workspace.id);
+    const profiles = store.listExecutionEndpoints(workspace.id);
     const groups = store.listExecutionGroups(workspace.id);
-    return Response.json({ profiles, groups, localProfiles: store.listExecutionProfiles("local"), bindings: store.getRuntimeExecutionBindings(runtime.id), runtimeProfile: store.getRuntimeCodexProfile(runtime.id), members: Object.fromEntries(groups.map(group => [group.id, store.getExecutionGroupMembers(group.id, workspace.id)])), keysMatch: profiles.every(profile => !profile.profile.credential_id || store.getRuntimeCodexProfileKey(runtime.id, profile.profile.credential_id) === "synthetic-smoke-key") });
+    return Response.json({ profiles, groups, localProfiles: store.listExecutionEndpoints("local"), bindings: store.getRuntimeExecutionBindings(runtime.id), runtimeProfile: store.getRuntimeCodexProfile(runtime.id), members: Object.fromEntries(groups.map(group => [group.id, store.getExecutionGroupMembers(group.id, workspace.id)])), keysMatch: profiles.every(profile => !profile.connection.credential_id || store.getRuntimeCodexProfileKey(runtime.id, profile.connection.credential_id) === "synthetic-smoke-key") });
   } });
   browserHost = spawn("node", ["--experimental-strip-types", join(repo, "tests/integration/execution-configuration-browser.ts")], {
     cwd: repo, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],

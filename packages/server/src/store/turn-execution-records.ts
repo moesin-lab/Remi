@@ -20,7 +20,7 @@ const ATTEMPT_FIELDS = ["id","runtime_id","projection_from_seq","projection_to_s
   "work_dir","progress_summary","progress_step","progress_total","wait_reason","usage","created_at","updated_at","started_at",
   "inherited_projection_truncated","inherited_projection_omitted_events","inherited_projection_estimated_tokens",
   "inherited_projection_to_seq","inherited_projection_from_seq","inherited_projection_token_budget","inherited_projection_recorded_at",
-  "provider","plugin_snapshot","codex_profile","claude_profile","execution_fingerprint","offered_at","accepted_at",
+  "provider","plugin_snapshot","codex_profile","claude_profile","execution_connection","execution_fingerprint","offered_at","accepted_at",
   "execution_model","execution_thinking_level","fallback_switched","switch_reason","next_retry_at"];
 const EXTRA_FIELDS: Record<string,string> = {
   turn_id:"t.id", prompt:"COALESCE(t.legacy_prompt,'')",
@@ -33,7 +33,7 @@ const EXTRA_FIELDS: Record<string,string> = {
     WHEN a.status='offered' THEN 'queued' WHEN a.status='accepted' THEN 'dispatched' WHEN a.status='lost' THEN 'failed' ELSE a.status END`,
 };
 
-const EXECUTION_READ_PROJECTION_MIGRATION = "20261009_stable_execution_read_projection";
+const EXECUTION_READ_PROJECTION_MIGRATION = "20261114_execution_endpoint_read_projection";
 
 export function createTurnExecutionReadProjection(db: SqlDatabase): void {
   if (db.query("SELECT id FROM multiremi_schema_migrations WHERE id=?").get(EXECUTION_READ_PROJECTION_MIGRATION)) return;

@@ -15,9 +15,11 @@ export function RuntimeMemberIdentity({
   const { t } = useT("runtimes");
   if (!runtime) {
     return (
-      <code className="min-w-0 break-all text-xs text-muted-foreground">
-        {runtimeId}
-      </code>
+      <span className="min-w-0 flex-1">
+        <code className="inline-block max-w-full break-all rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+          {runtimeId}
+        </code>
+      </span>
     );
   }
 
@@ -28,15 +30,17 @@ export function RuntimeMemberIdentity({
   return (
     <span className="min-w-0 flex-1 space-y-1">
       <span className="flex flex-wrap items-center gap-2">
-        <span className="min-w-0 break-all">{runtime.name}</span>{" "}
+        <span className="min-w-0 break-all text-sm font-medium text-foreground">
+          {runtime.name}
+        </span>{" "}
         <HealthBadge health={runtime.status} />
       </span>{" "}
-      <span className="block break-all text-xs text-muted-foreground">
-        {machine}
-      </span>{" "}
-      <code className="block break-all text-xs text-muted-foreground">
-        {runtimeId}
-      </code>
+      <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+        <span className="min-w-0 break-all">{machine}</span>{" "}
+        <code className="break-all rounded bg-muted/70 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+          {runtimeId}
+        </code>
+      </span>
     </span>
   );
 }

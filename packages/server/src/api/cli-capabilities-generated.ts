@@ -4643,6 +4643,32 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "workspace.magpie.get": {
+      "command": "remi workspace magpie get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.magpie.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "workspace.magpie.set": {
+      "command": "remi workspace magpie set",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.magpie.set",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "daemon.retire": {
       "command": "remi daemon retire",
       "auth": [

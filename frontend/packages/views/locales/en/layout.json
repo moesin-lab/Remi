@@ -16,7 +16,8 @@
     "skills": "Skills",
     "settings": "Settings",
     "chat": "Chat",
-    "execution_groups": "Capability groups"
+    "execution_groups": "Capability groups",
+    "magpie": "Magpie"
   },
   "help": {
     "trigger": "Help",

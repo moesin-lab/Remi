@@ -860,5 +860,17 @@
     },
     "load_failed": "无法加载存储报告",
     "retry": "重试"
+  },
+  "magpie": {
+    "loading": "加载中…",
+    "open": "单独打开",
+    "reload": "重新加载",
+    "configure": "前往服务设置",
+    "empty": "尚未配置 Magpie 服务。",
+    "address": "Magpie 服务地址",
+    "address_hint": "填写服务地址，不含登录密钥；留空可解除接入。",
+    "save": "保存",
+    "services": "服务接入",
+    "saved": "已保存"
   }
 }

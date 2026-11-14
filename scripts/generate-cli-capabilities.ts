@@ -357,6 +357,8 @@ function mappedResourceCommand(route: string): string | null {
     [/^GET \/api\/workspaces\/:id\/storage\/daemons$/, "runtime.storage"],
     [/^GET \/api\/workspaces\/:id\/issue-topics$/, "workspace.issue-topics.get"],
     [/^PUT \/api\/workspaces\/:id\/issue-topics$/, "workspace.issue-topics.set"],
+    [/^GET \/api\/workspaces\/:id\/services\/magpie$/, "workspace.magpie.get"],
+    [/^PUT \/api\/workspaces\/:id\/services\/magpie$/, "workspace.magpie.set"],
     [/^GET \/api\/workspaces\/:id\/runtime-provisions$/, "workspace.runtime-provision.list"],
     [/^POST \/api\/workspaces\/:id\/runtime-provisions$/, "workspace.runtime-provision.create"],
     [/^GET \/api\/workspaces\/:id\/runtime-provisions\/:provisionId$/, "workspace.runtime-provision.get"],

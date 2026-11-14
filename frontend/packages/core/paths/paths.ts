@@ -61,6 +61,7 @@ function workspaceScoped(slug: string) {
     myIssues: () => `${ws}/my-issues`,
     workbench: () => `${ws}/workbench`,
     runtimes: () => `${ws}/runtimes`,
+    magpie: () => `${ws}/magpie`,
     executionGroups: () => `${ws}/execution-groups`,
     runtimeMachine: (id: string) => `${ws}/runtimes?machine=${encode(id)}`,
     runtimeDetail: (id: string) => `${ws}/runtimes/${encode(id)}`,

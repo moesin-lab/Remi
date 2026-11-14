@@ -46,7 +46,8 @@
       "labs": "ラボ",
       "members": "メンバー",
       "platform": "バージョンとサービス",
-      "storage": "ストレージ"
+      "storage": "ストレージ",
+      "services": "サービス接続"
     }
   },
   "account": {

@@ -137,6 +137,38 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
     ...workspace, operator: { userId: "local", memberId: store.getWorkspaceOperator(workspace.id)!.id },
   });
 
+  app.get("/api/workspaces/:id/services/magpie", (c) => {
+    const workspaceId = c.req.param("id");
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+    if (denied) return denied;
+    const workspace = store.getWorkspace(workspaceId);
+    if (!workspace) return c.json({ error: "workspace not found" }, 404);
+    return c.json({ url: workspace.settings.magpie_url ?? null });
+  });
+  app.put("/api/workspaces/:id/services/magpie", async (c) => {
+    const workspaceId = c.req.param("id");
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId)
+      ?? requireHumanWorkspaceAdmin(c, store, workspaceId);
+    if (denied) return denied;
+    const body = await readJsonStrict<{ url?: unknown }>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    let url: string | null = null;
+    if (body.url !== null) {
+      if (typeof body.url !== "string" || body.url.length > 2048) return c.json({ error: "url must be HTTP(S) or null" }, 400);
+      try {
+        const parsed = new URL(body.url);
+        if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+          return c.json({ error: "Use HTTP(S) without credentials, query or fragment" }, 400);
+        }
+        url = parsed.href;
+      } catch { return c.json({ error: "Invalid service URL" }, 400); }
+    }
+    const workspace = store.getWorkspace(workspaceId);
+    if (!workspace) return c.json({ error: "workspace not found" }, 404);
+    store.updateWorkspace(workspaceId, { settings: { ...workspace.settings, magpie_url: url } });
+    return c.json({ url });
+  });
+
   app.get("/api/workspaces", (c) => {
     const token = currentAccessToken(c);
     const workspaceBound = token?.type === "task"

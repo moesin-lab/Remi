@@ -20,6 +20,7 @@ import {
   ListTodo,
   Bot,
   Monitor,
+  Waypoints,
   Layers,
   Puzzle,
   ChevronDown,
@@ -126,6 +127,7 @@ type NavKey =
   | "agents"
   | "squads"
   | "usage"
+  | "magpie"
   | "runtimes"
   | "executionGroups"
   | "plugins"
@@ -146,6 +148,7 @@ type NavLabelKey =
   | "agents"
   | "squads"
   | "usage"
+  | "magpie"
   | "runtimes"
   | "execution_groups"
   | "plugins"
@@ -172,6 +175,7 @@ const workspaceNav: { key: NavKey; labelKey: NavLabelKey; icon: typeof Inbox }[]
 const configureNav: { key: NavKey; labelKey: NavLabelKey; icon: typeof Inbox }[] = [
   { key: "executionGroups", labelKey: "execution_groups", icon: Layers },
   { key: "runtimes", labelKey: "runtimes", icon: Monitor },
+  { key: "magpie", labelKey: "magpie", icon: Waypoints },
   { key: "plugins", labelKey: "plugins", icon: Puzzle },
   { key: "skills", labelKey: "skills", icon: BookOpenText },
   { key: "settings", labelKey: "settings", icon: Settings },

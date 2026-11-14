@@ -89,7 +89,7 @@ vi.mock("../auth", () => ({ useLogout: () => vi.fn() }));
 vi.mock("../issues/components/status-icon", () => ({ StatusIcon: () => <span /> }));
 vi.mock("../navigation", () => ({
   AppLink: ({ children, href }: { children: React.ReactNode; href: string }) => <a href={href}>{children}</a>,
-  useNavigation: () => ({ pathname: pathname.current, push: vi.fn() }),
+  useNavigation: () => ({ pathname: pathname.current.split("?")[0], searchParams: new URLSearchParams(pathname.current.split("?")[1]), push: vi.fn() }),
 }));
 vi.mock("../projects/components/project-icon", () => ({ ProjectIcon: () => <span /> }));
 vi.mock("../workspace/workspace-avatar", () => ({ WorkspaceAvatar: () => <span /> }));
@@ -116,6 +116,7 @@ vi.mock("@multiremi/core/paths", () => ({
     squads: () => "/acme/squads",
     usage: () => "/acme/usage",
     runtimes: () => "/acme/runtimes",
+    magpie: () => "/acme/magpie",
     executionGroups: () => "/acme/execution-groups",
     plugins: () => "/acme/plugins",
     skills: () => "/acme/skills",
@@ -252,4 +253,11 @@ it("exposes the independent chat workspace in personal navigation", () => {
   const { container } = render(<AppSidebar />);
   const chat = container.querySelector('button[data-href="/acme/chat"]');
   expect(chat).toHaveAttribute("data-active", "true");
+});
+
+it("opens the standalone Magpie page from the sidebar and highlights only its shortcut", () => {
+  pathname.current = "/acme/magpie";
+  const { container } = render(<AppSidebar />);
+  expect(container.querySelector('button[data-href="/acme/magpie"]')).toHaveAttribute("data-active", "true");
+  expect(container.querySelector('button[data-href="/acme/runtimes"]')).toHaveAttribute("data-active", "false");
 });

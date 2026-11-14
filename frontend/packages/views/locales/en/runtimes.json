@@ -886,5 +886,17 @@
     },
     "load_failed": "Couldn't load storage reports",
     "retry": "Retry"
+  },
+  "magpie": {
+    "loading": "Loading…",
+    "open": "Open separately",
+    "reload": "Reload",
+    "configure": "Service settings",
+    "empty": "Magpie is not configured.",
+    "address": "Magpie service address",
+    "address_hint": "Service URL without a login key. Leave blank to disconnect.",
+    "save": "Save",
+    "services": "Service connections",
+    "saved": "Saved"
   }
 }

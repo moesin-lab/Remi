@@ -167,3 +167,10 @@ export function assigneeFrequencyOptions(wsId: string) {
     queryFn: () => api.getAssigneeFrequency(),
   });
 }
+
+export function magpieServiceOptions(wsId: string) {
+  return queryOptions({
+    queryKey: [...workspaceKeys.all(wsId), "services", "magpie"],
+    queryFn: () => api.getMagpieService(wsId),
+  });
+}

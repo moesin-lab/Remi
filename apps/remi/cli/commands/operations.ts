@@ -454,6 +454,18 @@ function daemonSpecs(): CommandSpec[] {
       },
     }),
     op({ id: "daemon.retirement-plan", path: ["daemon", "retirement-plan"], description: "Review a daemon retirement plan", method: "GET", apiPath: (i) => `/api/multiremi/daemons/${encodePath(positional(i, 0, "daemon"))}/retirement-plan`, auth: HUMAN, positionals: [ref("daemon")], query: (i) => ({ workspace_id: requiredWorkspace(i) }) }),
+    op({ id: "workspace.magpie.get", path: ["workspace", "magpie", "get"], description: "Get the Magpie service address", method: "GET", apiPath: i => `/api/workspaces/${encodePath(requiredWorkspace(i))}/services/magpie`, auth: HUMAN }),
+    op({ id: "workspace.magpie.set", path: ["workspace", "magpie", "set"], description: "Set the Magpie service address", method: "PUT", apiPath: i => `/api/workspaces/${encodePath(requiredWorkspace(i))}/services/magpie`, auth: HUMAN, mutation: "write",
+      options: [
+        { name: "url", type: "string", description: "Magpie web service URL", conflictsWith: ["clear"] },
+        { name: "clear", type: "boolean", description: "Remove the service address", conflictsWith: ["url"] },
+      ],
+      body: i => {
+        if (i.options.clear === true) return { url: null };
+        if (typeof i.options.url !== "string" || !i.options.url) throw new CliError("usage", "Use --url or --clear");
+        return { url: i.options.url };
+      },
+    }),
     daemonRetireSpec(),
     ...["start", "stop", "restart", "status", "logs", "service"].map(localDaemonSpec),
   ];

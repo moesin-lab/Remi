@@ -240,3 +240,11 @@ Worker 请求带 session 生命周期令牌和清库代次，窗口查询带唯�
 Issue 的结果列表、代码工作区、用量、标签、归档和代码变更查询延后到当前详情揭示。结果发布行仍使用已有固定单行与 metadata 标题，缓存数据继续可读；查询晚到只更新该行文字。收件箱在同一路径切换选中 Issue 时，详情访问门单独重置，不能复用入口页已经开启的首屏门。DOM 布局、揭示预算及滚动锚定路径不变。
 
 CSR 详情在 sessions 解出 activeId 后即启动 useIssueLog 的 tail/head 读取，不等待成员或 children 的既有渲染门；活动区复用同一个副本，不重新读取窗口。task-runs 与窗口独立并行，并与侧栏共用原查询键和策略。描述 reactions 用详情缓存里的完整 reactions 播种原 reactions 查询，保留 WS/重连失效与 mutation 行为，避免首屏再次读取同一 Issue。
+
+## Magpie 服务页面
+
+侧边栏「Magpie」打开独立的工作区页面 `/magpie`，不依赖 Runtime 或 daemon。地址保存在工作区 `settings.magpie_url`，管理员在「设置 → 服务接入」配置。页面以完整可用高度嵌入 Magpie，仅保留紧凑的刷新、单独打开和设置工具栏。
+
+服务 URL 只接受 HTTP(S)，不包含凭据、查询参数或片段。Magpie 使用自己的登录会话；Remi 不保存其登录密钥，也不代理其 API 或同步其资源。
+
+CLI：`remi workspace magpie get --workspace <id>`；配置使用 `remi workspace magpie set --workspace <id> --url <url>`，解除使用 `--clear`。

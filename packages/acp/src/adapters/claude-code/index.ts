@@ -11,6 +11,9 @@ import type {
   AskUserQuestionData,
   AgentSessionOptions,
 } from "@shared/contracts/acp-protocol.js";
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { titleToToolName } from "../tool-name.js";
 
 /** Our mode ids → the closest mode the bridge still advertises when ours is absent. */
@@ -205,7 +208,16 @@ export class ClaudeAdapter implements AgentAdapter {
     if (options.claudeEnv) claudeOpts.env = options.claudeEnv;
     // Inline SDK settings override project/local routing while retaining their
     // unrelated hooks, permissions and Plugin settings. Never include secrets.
-    if (options.claudeSettings) claudeOpts.settings = options.claudeSettings;
+    if (options.claudeSettings) {
+      claudeOpts.settings = options.claudeSettings;
+      // At HOME itself, project/local sources alias the user's personal .claude
+      // directory even with CLAUDE_CONFIG_DIR set. Runtime connections must use
+      // only the isolated user tier there. Ordinary projects keep all sources.
+      if (typeof options.cwd === "string") {
+        const canonical = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
+        if (canonical(options.cwd) === canonical(homedir())) claudeOpts.settingSources = ["user"];
+      }
+    }
     if (options.allowedTools?.length) claudeOpts.allowedTools = options.allowedTools;
     const pluginPaths = (options as AgentSessionOptions & { pluginPaths?: string[] }).pluginPaths;
     if (pluginPaths?.length) {

@@ -6784,6 +6784,10 @@ ${placementAfter.sql}
           ? repositoryWikiObservability(this.ctx, task.workspaceId)[scopedRepository]?.alert ?? null : null;
         if (runStatus === "completed") this.ctx.analytics().recordAutopilotRunCompletedAnalytics(autopilot, run);
         else this.ctx.analytics().recordAutopilotRunFailedAnalytics(autopilot, run, failureReason);
+        this.ctx.autopilots().deliverRunReportWithinTransaction(autopilot, run, [
+          `${autopilot.title} · ${runStatus} (${run.id})`,
+          runStatus === "failed" ? failureReason : task.result?.trim() || "Run completed.",
+        ].join("\n\n"));
         const durationSeconds = autopilotRunDurationSeconds(run.triggeredAt, run.completedAt);
         const trigger = run.source;
         const repositories = normalizeWorkspaceRepositories(

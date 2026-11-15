@@ -33,6 +33,23 @@ pendingTurnBackendTests("automation run Chats", fixture => {
     return { store, agent, runtime, autopilot };
   };
 
+  it("lets a timer attempt read its bound run Chat while refusing sibling run Chats", async () => {
+    const { store, autopilot } = setup();
+    const first = store.runAutopilot(autopilot.id, { prompt: "First private timer input" });
+    const second = store.runAutopilot(autopilot.id, { prompt: "Second private timer input" });
+    const token = await store.createTaskAccessToken(store.getTask(first.taskId!)!, "local");
+    const app = createMultiremiApp({ store, authToken: "timer-read-fixture" });
+    const headers = { Authorization: `Bearer ${token.token}` };
+    const own = await app.request(`/api/sessions/${first.chatSessionId}/messages?from=0&to=100`, { headers });
+    expect(own.status).toBe(200);
+    expect(await own.text()).toContain("First private timer input");
+    for (const suffix of ["messages", "messages?from=0&to=100", "log"]) {
+      const sibling = await app.request(`/api/sessions/${second.chatSessionId}/${suffix}`, { headers });
+      expect(sibling.status).toBe(403);
+      expect(await sibling.text()).not.toContain("Second private timer input");
+    }
+  });
+
   /** Claim, start and finish the run's current attempt. */
   function finish(store: MultiremiStore, runtimeId: string, taskId: string, outcome: "completed" | "failed" = "completed") {
     expect(store.claimTask(runtimeId)?.id).toBe(taskId);

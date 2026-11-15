@@ -770,6 +770,10 @@ export function denyTaskChatContentAccess(c: Context, store: MultiremiStore, cha
     const trigger = turn?.trigger_message_id ? store.getMessage(turn.trigger_message_id) : null;
     if (turn?.session_id === sourceChat.id && trigger?.session_id === sourceChat.id
       && trigger.sender_type === "member" && trigger.metadata.delivery_turn_id === turn.id) return null;
+    // Timer-created run Chats have no member-authored trigger. Only the
+    // server-owned run-to-attempt binding authorizes reading that same Chat.
+    const run = current.autopilotRunId ? store.getAutopilotRun(current.autopilotRunId) : null;
+    if (chat.id === sourceChat.id && run?.taskId === current.id && run.chatSessionId === sourceChat.id) return null;
     if (userTaskIds.has(current.id)) return null;
     visited.add(current.id);
     const parent = current.parentTaskId ? store.getTask(current.parentTaskId) : null;

@@ -32,6 +32,8 @@ describe("daemon GC and lifecycle orchestration", () => {
       finish = resolve;
     });
     Object.assign(daemon, {
+      runtimeBindingDiscoveries: new Map(),
+      runtimeBindingProbeTasks: new Set(),
       gcInFlight: null,
       executeGcOnce: async () => {
         calls++;
@@ -53,6 +55,8 @@ describe("daemon GC and lifecycle orchestration", () => {
     const daemon = Object.create(MultiremiDaemon.prototype) as MultiremiDaemon & Record<string, unknown>;
     let calls = 0;
     Object.assign(daemon, {
+      runtimeBindingDiscoveries: new Map(),
+      runtimeBindingProbeTasks: new Set(),
       gcTimer: null,
       options: { gcEnabled: true, once: false, gcIntervalMs: 20 },
       runGcOnce: async () => {
@@ -78,6 +82,8 @@ describe("daemon GC and lifecycle orchestration", () => {
       loopEntered = resolve;
     });
     Object.assign(daemon, {
+      runtimeBindingDiscoveries: new Map(),
+      runtimeBindingProbeTasks: new Set(),
       stopped: false,
       ready: false,
       claimsPaused: false,
@@ -170,6 +176,8 @@ describe("daemon GC and lifecycle orchestration", () => {
     });
     const events: string[] = [];
     Object.assign(daemon, {
+      runtimeBindingDiscoveries: new Map(),
+      runtimeBindingProbeTasks: new Set(),
       pollAbort: new AbortController(),
       activeTaskCount: 0,
       activeTaskIds: new Set<string>(),
@@ -239,6 +247,8 @@ describe("daemon GC and lifecycle orchestration", () => {
     let finishProvider!: () => void;
     const providerFinished = new Promise<void>((resolve) => { finishProvider = resolve; });
     Object.assign(daemon, {
+      runtimeBindingDiscoveries: new Map(),
+      runtimeBindingProbeTasks: new Set(),
       pollAbort: new AbortController(),
       activeTaskCount: 0,
       activeTaskIds: new Set<string>(),
@@ -348,6 +358,8 @@ describe("daemon GC and lifecycle orchestration", () => {
     let providerReady!: () => void;
     const providerReachedBarrier = new Promise<void>((resolve) => { providerReady = resolve; });
     Object.assign(daemon, {
+      runtimeBindingDiscoveries: new Map(),
+      runtimeBindingProbeTasks: new Set(),
       stopped: false,
       ready: false,
       claimsPaused: false,
@@ -420,6 +432,8 @@ describe("daemon GC and lifecycle orchestration", () => {
     const daemon = Object.create(MultiremiDaemon.prototype) as MultiremiDaemon & Record<string, unknown>;
     const calls: string[] = [];
     Object.assign(daemon, {
+      runtimeBindingDiscoveries: new Map(),
+      runtimeBindingProbeTasks: new Set(),
       workspaceRootFence: null,
       gcRunRequests: new Map(),
       reclaim: { run: async (mode: string) => { calls.push(`reclaim:${mode}`); return storageReport(mode as "periodic"); } },
@@ -603,6 +617,8 @@ describe("daemon GC and lifecycle orchestration", () => {
     const pollAbort = new AbortController();
     const readyStates: boolean[] = [];
     Object.assign(daemon, {
+      runtimeBindingDiscoveries: new Map(),
+      runtimeBindingProbeTasks: new Set(),
       workspaceRootFence: () => {
         throw new Error("workspace root identity changed");
       },

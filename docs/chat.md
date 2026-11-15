@@ -29,7 +29,7 @@ remi autopilot update <autopilot> --data '{"delivery_chat_session_id":null}'
 服务端在完成事务中写入报告，包含 Autopilot 标题、运行 ID、成功结果或失败原因，不唤醒目标
 Agent。执行 Chat 仍独立创建；`reuse_latest` 只复用本 Autopilot 的执行 Chat，不读取目标主对话，
 普通 Task、Work Session 和 timer Task 都不因此获得跨 Chat 读写权限。成功的 quiet 运行不投递，
-失败仍报告。超长正文按统一消息正文上限裁剪。
+失败仍报告。目标 Chat 和飞书使用同一份摘要，超长正文按统一的 4,096 字节上限裁剪（保留完整 UTF-8 字符与截断提示）；全文保留在来源 Task。
 
 目标及撤销以运行完成时的配置为准，修改也影响尚未结束的运行。目标已归档、删除或授权操作者
 已停用时，报告不写入目标，在 Autopilot 日志留下跳过记录。已入队的飞书消息由出站队列继续处理。

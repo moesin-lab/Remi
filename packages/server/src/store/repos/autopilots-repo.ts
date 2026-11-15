@@ -1,5 +1,6 @@
 import { afterCommit } from '../db/postgres.js';
 import { sendMessageWithinTransaction } from '../inbox/send-message.js';
+import { clampEnvelopeBody } from '@multiremi/store/envelope-body.js';
 import { autopilotSessionId } from "@multiremi/contracts/unified-model.js";
 import { runAutopilotRunMutation } from "@multiremi/store/autopilot-run-records.js";
 // Autopilots domain (autopilots, schedule/webhook triggers, runs and webhook deliveries),
@@ -239,18 +240,21 @@ export class AutopilotsRepo {
     const valid = target?.workspaceId === autopilot.workspaceId && target.status === "active"
       && member?.workspaceId === autopilot.workspaceId && !member.archivedAt;
     const events = createCommitEventQueue();
-    const report = sendMessageWithinTransaction(this.ctx, {
+    // Timer replies bypass the platform status/report clamp in the inbox writer.
+    // Bound the delivery copy once; the source Task retains the full output/error.
+    const reportBody = clampEnvelopeBody(valid ? body : `Run ${run.id}: report delivery skipped because the authorized Chat or operator is unavailable.`);
+    sendMessageWithinTransaction(this.ctx, {
       id: `msg_autopilot_delivery_${run.id}`,
       session_id: valid ? targetId : autopilotSessionId(autopilot.id),
       sender: { type: "timer", id: autopilot.id },
       to: valid ? { type: "member", ref: member!.id } : { type: "none" },
       message_kind: "reply", wake_requested: "inbox_only",
-      body_md: valid ? body : `Run ${run.id}: report delivery skipped because the authorized Chat or operator is unavailable.`,
+      body_md: reportBody,
       metadata: { autopilot_id: autopilot.id, run_id: run.id, task_id: run.taskId,
         delivery_chat_session_id: targetId, delivery_authorized_by: autopilot.deliveryAuthorizedBy,
         delivery_status: valid ? "queued" : "skipped" },
     }, events);
-    if (valid) this.ctx.feishuBot().enqueueAutopilotReportWithinTransaction(targetId, run.id, report.message.body_md ?? body);
+    if (valid) this.ctx.feishuBot().enqueueAutopilotReportWithinTransaction(targetId, run.id, reportBody);
     afterCommit(this.ctx.db, () => this.ctx.emitCommitEvents(events));
   }
 

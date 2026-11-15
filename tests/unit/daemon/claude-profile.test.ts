@@ -1,7 +1,7 @@
 import { expect, it } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { parseRuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
 import { assertRuntimeClaudeProjectCredentials, resolveRuntimeClaudeProfile, runtimeClaudeProfileEnv, runtimeClaudeProfileRouting } from "@daemon/agent-runtime/claude-profile.js";
 import { prepareIssueSessionProviderHome, type IssueSessionProviderHome } from "@daemon/agent-runtime/workspace/session-home.js";
@@ -18,17 +18,71 @@ it("rejects project credential overrides without disclosing their values or chan
     const path = join(root, "project", ".claude", "settings.local.json");
     const safe = { env: { ANTHROPIC_BASE_URL: "http://old.invalid", ANTHROPIC_MODEL: "old" }, hooks: {} };
     await writeFile(path, JSON.stringify(safe));
-    await assertRuntimeClaudeProjectCredentials(cwd);
+    await assertRuntimeClaudeProjectCredentials(cwd, { workspaceRoot: join(root, "project") });
     for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "apiKeyHelper"]) {
       const text = JSON.stringify(key === "apiKeyHelper" ? { ...safe, apiKeyHelper: "private-value" } : { ...safe, env: { [key]: "private-value" } });
       await writeFile(path, text);
-      const error = await assertRuntimeClaudeProjectCredentials(cwd).catch(error => error as Error);
+      const error = await assertRuntimeClaudeProjectCredentials(cwd, { workspaceRoot: join(root, "project") }).catch(error => error as Error);
       expect(error).toBeInstanceOf(Error);
       if (!(error instanceof Error)) throw new Error("Expected project credential conflict");
       expect(error.message).toContain(key);
       expect(error.message).not.toContain("private-value");
       expect(await readFile(path, "utf8")).toBe(text);
     }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("ignores user and shared ancestor credentials while checking both project settings files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "remi-claude-home-boundary-"));
+  try {
+    const userHome = join(root, "home");
+    const workspaceRoot = join(userHome, ".remi", "workspaces", "issue");
+    const cwd = join(workspaceRoot, "nested", "child");
+    await mkdir(cwd, { recursive: true });
+    for (const directory of [root, userHome, join(userHome, ".remi")]) {
+      await mkdir(join(directory, ".claude"));
+      await writeFile(join(directory, ".claude", "settings.json"), JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: "personal-secret" } }));
+    }
+    const options = { workspaceRoot, userHome };
+    await assertRuntimeClaudeProjectCredentials(cwd, options);
+    await assertRuntimeClaudeProjectCredentials(cwd, { userHome }); // Non-Git: cwd only.
+    await assertRuntimeClaudeProjectCredentials(userHome, { workspaceRoot: userHome, userHome });
+    for (const directory of [workspaceRoot, join(workspaceRoot, "nested"), cwd]) {
+      await mkdir(join(directory, ".claude"));
+      for (const name of ["settings.json", "settings.local.json"]) {
+        const path = join(directory, ".claude", name);
+        await writeFile(path, JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: "project-secret" } }));
+        const error = await assertRuntimeClaudeProjectCredentials(cwd, options).catch(error => error);
+        expect(error).toBeInstanceOf(Error);
+        expect(error.message).toContain(path);
+        expect(error.message).not.toContain("project-secret");
+        await rm(path);
+      }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("finds Git and linked worktree roots for local subdirectories and canonicalizes explicit boundaries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "remi-claude-git-boundary-"));
+  try {
+    const project = join(root, "project");
+    const cwd = join(project, "child");
+    await mkdir(cwd, { recursive: true });
+    await mkdir(join(project, ".claude"));
+    await writeFile(join(project, ".claude", "settings.json"), '{"apiKeyHelper":"private-value"}');
+    for (const linked of [false, true]) {
+      if (linked) await writeFile(join(project, ".git"), "gitdir: /unused/worktree/metadata");
+      else await mkdir(join(project, ".git"));
+      await expect(assertRuntimeClaudeProjectCredentials(cwd)).rejects.toThrow("apiKeyHelper");
+      await expect(assertRuntimeClaudeProjectCredentials(cwd, { workspaceRoot: cwd })).rejects.toThrow("apiKeyHelper");
+      await rm(join(project, ".git"), { recursive: true });
+    }
+    const alias = join(root, "alias");
+    await symlink(project, alias, process.platform === "win32" ? "junction" : "dir");
+    await expect(assertRuntimeClaudeProjectCredentials(join(alias, "child"), { workspaceRoot: project })).rejects.toThrow("apiKeyHelper");
+    await expect(assertRuntimeClaudeProjectCredentials(cwd, { workspaceRoot: join(root, "unrelated") })).rejects.toThrow("outside its workspace boundary");
+    await writeFile(join(project, ".claude", "settings.json"), "invalid-json-secret");
+    await expect(assertRuntimeClaudeProjectCredentials(cwd, { workspaceRoot: project })).rejects.toThrow("fix its JSON");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -64,5 +118,19 @@ it("keeps keys out of the isolated settings and sends the selected auth header o
     }
     expect(await readFile(join(root, "settings.json"), "utf8")).toBe(original);
     expect(await Bun.file(join(home.home, ".credentials.json")).exists()).toBe(false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("loads only isolated user settings for Runtime connections whose actual cwd is HOME", async () => {
+  const root = await mkdtemp(join(tmpdir(), "remi-claude-home-cwd-"));
+  try {
+    const adapter = new ClaudeAdapter();
+    const claudeSettings = { model: profile.model, env: runtimeClaudeProfileRouting(profile) };
+    expect(adapter.buildSessionMeta({ cwd: homedir(), claudeSettings })?.claudeCode?.options?.settingSources).toEqual(["user"]);
+    const alias = join(root, "alias");
+    await symlink(homedir(), alias, process.platform === "win32" ? "junction" : "dir");
+    expect(adapter.buildSessionMeta({ cwd: alias, claudeSettings })?.claudeCode?.options?.settingSources).toEqual(["user"]);
+    expect(adapter.buildSessionMeta({ cwd: root, claudeSettings })?.claudeCode?.options?.settingSources).toBeUndefined();
+    expect(adapter.buildSessionMeta({ cwd: homedir(), model: profile.model })?.claudeCode?.options?.settingSources).toBeUndefined();
   } finally { await rm(root, { recursive: true, force: true }); }
 });

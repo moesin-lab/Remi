@@ -3868,7 +3868,10 @@ export class MultiremiDaemon {
       }
       const codexProfile = task.agent?.provider === "codex" ? task.codexProfile ?? null : null;
       const claudeProfile = task.agent?.provider === "claude" ? task.claudeProfile ?? null : null;
-      if (claudeProfile) await assertRuntimeClaudeProjectCredentials(resolvedWorkDir.workDir);
+      if (claudeProfile) await assertRuntimeClaudeProjectCredentials(resolvedWorkDir.workDir, {
+        workspaceRoot: resolvedWorkDir.runtimeWorkspaceRoot
+          ?? (resolvedWorkDir.localDirectory ? undefined : resolvedWorkDir.workDir),
+      });
       const workspaceRelay = await this.taskConnectionRelay(task);
       const relayAuthoritative = workspaceRelay !== undefined;
       const relay = task.agent?.provider === "claude"
@@ -4954,6 +4957,15 @@ export class MultiremiDaemon {
     const wikiMaterialized = preparedWorkspace.wikiMaterialized ?? false;
     await this.restoreReclaimedWorkspace(task, resolvedWorkDir);
     this.assertWorkspaceRootOwner();
+    // Issue lanes run in a private execution directory, not workspaceDir. Check
+    // the actual provider cwd too, after preparation and before entering ACP.
+    if (agent.provider === "claude" && task.claudeProfile) {
+      await assertRuntimeClaudeProjectCredentials(workDir, {
+        workspaceRoot: workDir === workspaceDir
+          ? resolvedWorkDir.runtimeWorkspaceRoot ?? (resolvedWorkDir.localDirectory ? undefined : workspaceDir)
+          : workDir,
+      });
+    }
     if (task.chatMessageAttachments?.length) {
       task.chatMessageAttachments = await materializeChatAttachments(
         workDir,

@@ -200,7 +200,7 @@ describe("Zadig PPE deployment", () => {
   test("pins API builds and both deployed containers to the target commit version (MUL-502)", () => {
     expect(versionResolutionStart).toBeGreaterThan(workflow.indexOf('if [[ "${PPE_ACTION}" == "deploy" ]]; then'));
     expect(versionResolutionStart).toBeLessThan(workflow.indexOf("\nselect_slot\n"));
-    expect(versionResolution).toContain('https://raw.githubusercontent.com/Grassgod/Remi/${GIT_COMMIT}/package.json');
+    expect(versionResolution).toContain('https://raw.githubusercontent.com/moesin-lab/Remi/${GIT_COMMIT}/package.json');
     expect(versionResolution).toContain("curl -fsSL --retry 3");
     expect(versionResolution).toContain("sed -n");
     expect(versionResolution).toContain('^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]+)?$');

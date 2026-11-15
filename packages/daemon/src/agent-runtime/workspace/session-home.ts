@@ -418,7 +418,7 @@ export async function seedIssueSessionAntigravityHome(
 /** Copy only the local agy login; settings, hooks and conversations stay isolated. */
 export async function seedIssueSessionNativeAntigravityHome(
   resolvedHome: IssueSessionProviderHome,
-  baseHome = process.env.GEMINI_HOME || join(homedir(), ".gemini"),
+  baseHome: string,
 ): Promise<void> {
   if (resolvedHome.provider !== "antigravity") throw new Error("Native Antigravity requires an Antigravity home");
   const directory = join(resolvedHome.home, "antigravity-cli");

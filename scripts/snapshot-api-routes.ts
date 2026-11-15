@@ -160,7 +160,7 @@ function installDeterminism(): () => void {
   setEnv("MULTIREMI_UPLOAD_DIR", UPLOAD_DIR);
   setEnv("MULTIREMI_RELEASE_DIR", RELEASE_DIR);
   setEnv("MULTIREMI_SCRIPTS_DIR", SCRIPTS_DIR);
-  setEnv("MULTIREMI_RELEASE_REPO", "Grassgod/Remi");
+  setEnv("MULTIREMI_RELEASE_REPO", "moesin-lab/Remi");
   setEnv("MULTIREMI_PUBLIC_URL", "https://snapshot.invalid");
   setEnv("MULTIREMI_ALLOW_EMAIL_CODE_LOGIN", "1");
   setEnv("MULTIREMI_LOCAL_AUTH_CODE", "424242");

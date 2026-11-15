@@ -22,6 +22,16 @@ function legacyGroup(store: MultiremiStore, id: string, runtimeIds: string[]) {
 }
 
 describe("Execution groups", () => {
+  it("rejects native Antigravity readiness on old runtimes even with a ready acknowledgement", () => {
+    const store = createStore();
+    const runtime = store.registerRuntime({ name: "Old", provider: "antigravity", metadata: { execution_endpoints: 1 } });
+    const group = store.saveExecutionGroup("local", { name: "Native", provider: "antigravity", endpoint_id: null, runtime_ids: [runtime.id] });
+    const desired = store.getRuntimeExecutionBindings(runtime.id)[0]!;
+    store.recordRuntimeExecutionBindingAcks(runtime.id, [{ ...desired, status: "ready" }]);
+    expect(store.isRuntimeExecutionBindingReady(group.id, runtime.id, null, null)).toBe(false);
+    expect(store.getExecutionGroupMembers(group.id, "local")[0]).toMatchObject({ status: "error", error: expect.stringContaining("Upgrade") });
+  });
+
   it("does not turn machine discovery into capability configuration", () => {
     const store = createStore();
     for (const provider of ["codex", "claude", "grok", "antigravity", "any"]) {

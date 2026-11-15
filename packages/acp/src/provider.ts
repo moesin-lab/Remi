@@ -636,11 +636,12 @@ export function resolveAcpExecutableForAgent(agentType: string, executable: stri
     try { return access.launch().executable; } catch { return fallback; }
   }
 
+  const userHome = homedir();
   if (agentType === "claude") {
     const envExecutable = process.env.REMI_CLAUDE_AGENT_ACP_EXECUTABLE?.trim();
     if (envExecutable) return envExecutable;
 
-    const remiHome = process.env.REMI_HOME ?? join(homedir(), ".remi");
+    const remiHome = process.env.REMI_HOME ?? join(userHome, ".remi");
     const candidates = [
       // Prefer the wrapper shipped next to the running remi binary — it always
       // matches this build. Otherwise a stale copy earlier on PATH (e.g. an old
@@ -649,7 +650,7 @@ export function resolveAcpExecutableForAgent(agentType: string, executable: stri
       // bun binary, so this candidate simply doesn't exist and we fall through.)
       join(dirname(process.execPath), REMI_CLAUDE_AGENT_ACP_WRAPPER),
       join(remiHome, "bin", REMI_CLAUDE_AGENT_ACP_WRAPPER),
-      join(homedir(), ".remi", "bin", REMI_CLAUDE_AGENT_ACP_WRAPPER),
+      join(userHome, ".remi", "bin", REMI_CLAUDE_AGENT_ACP_WRAPPER),
       join(import.meta.dir, "..", "bin", REMI_CLAUDE_AGENT_ACP_WRAPPER),
       join(import.meta.dir, "..", "..", "..", "bin", REMI_CLAUDE_AGENT_ACP_WRAPPER),
     ];
@@ -665,11 +666,11 @@ export function resolveAcpExecutableForAgent(agentType: string, executable: stri
     const envExecutable = process.env.REMI_CODEX_AGENT_ACP_EXECUTABLE?.trim();
     if (envExecutable) return envExecutable;
 
-    const remiHome = process.env.REMI_HOME ?? join(homedir(), ".remi");
+    const remiHome = process.env.REMI_HOME ?? join(userHome, ".remi");
     const candidates = [
       join(remiHome, "bin", "codex-acp"),
-      join(homedir(), ".remi", "bin", "codex-acp"),
-      join(homedir(), ".npm-global", "bin", "codex-acp"),
+      join(userHome, ".remi", "bin", "codex-acp"),
+      join(userHome, ".npm-global", "bin", "codex-acp"),
     ];
     for (const candidate of candidates) {
       if (existsSync(candidate)) return candidate;
@@ -683,8 +684,8 @@ export function resolveAcpExecutableForAgent(agentType: string, executable: stri
     const envExecutable = process.env.REMI_GROK_EXECUTABLE?.trim();
     if (envExecutable) return envExecutable;
 
-    const grokHome = process.env.GROK_HOME?.trim() || join(homedir(), ".grok");
-    const candidates = [join(grokHome, "bin", "grok"), join(homedir(), ".grok", "bin", "grok")];
+    const grokHome = process.env.GROK_HOME?.trim() || join(userHome, ".grok");
+    const candidates = [join(grokHome, "bin", "grok"), join(userHome, ".grok", "bin", "grok")];
     for (const candidate of candidates) {
       if (existsSync(candidate)) return candidate;
     }
@@ -721,8 +722,9 @@ export function resolveAcpHealthCheckCommand(
   agentType: string,
   executable: string | null | undefined,
   fallback: string,
+  antigravityNative = false,
 ): AcpHealthCheckCommand {
-  if (agentType === "antigravity" && !executable?.trim() && Bun.which("agy", { PATH: process.env.PATH })) return { command: "agy" };
+  if (agentType === "antigravity" && antigravityNative) return { command: executable?.trim() || "agy" };
   const command = resolveAcpExecutableForAgent(agentType, executable, fallback);
   const access = accessConfigFor(agentType);
   if (access && !executable?.trim()) {
@@ -2253,6 +2255,7 @@ export class AcpProvider implements Provider {
         this._adapter.agentType,
         this._options.executable,
         this._adapter.defaultExecutable(),
+        this._options.antigravityNative,
       );
     } catch (error) {
       // A retired executable override.

@@ -256,7 +256,7 @@ describe("central execution binding readiness", () => {
     const first = await heartbeat("rt_a", []);
     expect(first.status).toBe(200);
     expect((await first.json() as any).runtime_bindings).toBeUndefined();
-    expect(runtimeInputSnapshot(store, "rt_a").find(frame => frame.type === "runtime.profile")!.payload.runtime_bindings).toEqual([{ generation: expect.any(String), groupId: "group-a", provider: "codex", profileId: null, profileRevision: null, profile: null }]);
+    expect(runtimeInputSnapshot(store, "rt_a").find(frame => frame.type === "runtime.profile")!.payload.runtime_bindings).toEqual([{ generation: expect.any(String), groupId: "group-a", provider: "codex", connectionMode: "legacy", profileId: null, profileRevision: null, profile: null }]);
     const ack = { ...repo.getRuntimeExecutionBindings("rt_a")[0]!, status: "ready" };
     expect((await heartbeat("rt_b", [ack])).status).toBe(403);
     expect(repo.isRuntimeExecutionBindingReady("group-a", "rt_a", null, null)).toBe(false);

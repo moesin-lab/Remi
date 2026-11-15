@@ -11,6 +11,35 @@ Remi Chat 是用户与一个 Agent 的持续私聊。可以直接提问、讨论
 独立页面位于 `/<workspaceSlug>/chat`，与其他页面的浮窗共享 Chat 选择和草稿；独立页不再挂载浮窗。
 页面可以通过 `?session=<id>` 打开已有聊天，或通过 `?agent=<id>` 开始新聊天。在页内切换或新建聊天只改写地址栏，不重新加载页面，也不新增浏览器历史记录；刷新或分享该地址打开同一个聊天。
 
+## Autopilot 巡检报告
+
+`run_only` Autopilot 可由人类操作者显式配置 `delivery_chat_session_id`，将每次结束时的结果
+同步到已有 Chat。CLI 通过注册的创建/更新命令提交 JSON：
+
+```bash
+remi autopilot update <autopilot> --data '{"delivery_chat_session_id":"chat_target"}'
+remi autopilot update <autopilot> --data '{"delivery_chat_session_id":null}'
+```
+
+原生 `/api/multiremi/autopilots` API 同时接受 `deliveryChatSessionId`；兼容 API 返回
+`delivery_chat_session_id`。绑定要求同工作区的活跃 Chat、当前操作者的 Chat/Agent 访问权限，
+并记录授权的工作区操作者。Task 和 daemon 凭据不能创建、修改或清除此绑定，客户端不能指定授权人。
+未配置时行为保持不变；目前仅支持 `run_only`，不支持把 Issue 执行结果自动送往 Chat。
+
+服务端在完成事务中写入报告，包含 Autopilot 标题、运行 ID、成功结果或失败原因，不唤醒目标
+Agent。执行 Chat 仍独立创建；`reuse_latest` 只复用本 Autopilot 的执行 Chat，不读取目标主对话，
+普通 Task、Work Session 和 timer Task 都不因此获得跨 Chat 读写权限。成功的 quiet 运行不投递，
+失败仍报告。超长正文按统一消息正文上限裁剪。
+
+目标及撤销以运行完成时的配置为准，修改也影响尚未结束的运行。目标已归档、删除或授权操作者
+已停用时，报告不写入目标，在 Autopilot 日志留下跳过记录。已入队的飞书消息由出站队列继续处理。
+目标绑定飞书时，使用该 Chat 对应 bot 的持久化出站队列，保留群/线程目的地并按运行 ID 去重；
+关闭后台任务的 API 进程先保存投递意图，由 bot 的正常出站领取流程恢复。更换或删除原绑定不将
+待恢复意图转投新绑定。Chat 中的 queued 记录表示服务端已登记报告，不表示飞书已收到；实际
+发送与失败状态以飞书 outbox 为准。实现见 [Autopilot store](../packages/server/src/store/repos/autopilots-repo.ts)、
+[飞书 outbox](../packages/server/src/store/repos/feishu-bot-repo.ts)，回归见
+[授权投递测试](../tests/unit/multiremi/autopilot-chat-delivery.test.ts)。
+
 ## 外部 Codex Chat
 
 Chat 页的「外部」入口读取已注册 macOS / Linux Codex Runtime 上的原生会话。按 Runtime、来源和来源 Project

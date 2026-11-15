@@ -2233,6 +2233,10 @@ runMigrations(this.db);
     return this.feishuBot.getConfig(workspaceId);
   }
 
+  enqueueAutopilotReportWithinTransaction(...args: Parameters<FeishuBotRepo["enqueueAutopilotReportWithinTransaction"]>): void {
+    this.feishuBot.enqueueAutopilotReportWithinTransaction(...args);
+  }
+
   getFeishuBotConfigForSession(workspaceId: string, sessionId: string): MultiremiFeishuBotConfig | null {
     return this.feishuBot.getConfigForSession(workspaceId, sessionId);
   }
@@ -5438,6 +5442,10 @@ runMigrations(this.db);
 
   advanceScheduledTargetRuns(): void {
     this.autopilots.advanceScheduledTargetRuns();
+  }
+
+  deliverRunReportWithinTransaction(...args: Parameters<AutopilotsRepo["deliverRunReportWithinTransaction"]>): void {
+    this.autopilots.deliverRunReportWithinTransaction(...args);
   }
 
   getAutopilotRun(id: string): MultiremiAutopilotRunRecord | null {

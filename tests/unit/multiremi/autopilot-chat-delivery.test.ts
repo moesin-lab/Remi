@@ -64,7 +64,8 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const s = await setup();
       s.store.createAutopilotTrigger(s.autopilot.id, { kind: "schedule", cronExpression: "*/30 * * * *" });
       const scheduler = new MultiremiScheduler({ store: s.store });
-      const run = scheduler.trigger(s.autopilot.id)!;
+      const scheduled = scheduler.trigger(s.autopilot.id)!;
+      const run = s.store.getAutopilotRun(scheduled.id)!;
       expect(run.source).toBe("schedule");
       expect(run.chatSessionId).not.toBe(s.target.id);
       expect(s.store.claimTask(s.runtime.id)!.id).toBe(run.taskId!);
@@ -78,7 +79,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       expect(report.sender_type).toBe("timer");
       expect(report.metadata).toMatchObject({ run_id: run.id, delivery_authorized_by: s.autopilot.deliveryAuthorizedBy });
       expect(report.wake_applied).toBe("inbox_only");
-      const next = scheduler.trigger(s.autopilot.id)!;
+      const next = s.store.getAutopilotRun(scheduler.trigger(s.autopilot.id)!.id)!;
       expect(next.chatSessionId).toBe(run.chatSessionId);
       scheduler.stop();
     });

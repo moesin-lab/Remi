@@ -126,7 +126,7 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
   app.post("/api/sessions/:sessionId/messages", async (c) => {
     const conversation = loadConversation(c, store, c.req.param("sessionId"), { scope: "owner", allowCoordination: true });
     if (conversation instanceof Response) return conversation;
-    if ("workSession" in conversation && conversation.workSession?.status === "archived") return c.json({ error: "Session is archived" }, 409);
+    if ("workSession" in conversation && conversation.chatId !== conversation.id && conversation.workSession?.status === "archived") return c.json({ error: "Session is archived" }, 409);
     const archivedChat = conversation.chatId ? store.getChatSession(conversation.chatId)?.status === "archived" : false;
     return action(c, async () => {
       let sender: SendMessageInput['sender'];
@@ -266,8 +266,9 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
             if (content instanceof Response) throw new IssueDecisionError(content.status === 404 ? 404 : 403, "conversation not available");
           }
           if (target instanceof Response) throw new IssueDecisionError(target.status === 404 ? 404 : 403, "conversation not available");
-          if ("workSession" in target && target.workSession?.status === "archived"
-            || target.chatId && store.getChatSession(target.chatId)?.status === "archived") {
+          const reopensChat = sender.type === "member" && target.id === conversation.id && target.chatId === target.id;
+          if (!reopensChat && ("workSession" in target && target.workSession?.status === "archived"
+            || target.chatId && store.getChatSession(target.chatId)?.status === "archived")) {
             throw new IssueDecisionError(409, "Session is archived");
           }
           if (coordinating && (!("workSession" in target) || !target.workSession

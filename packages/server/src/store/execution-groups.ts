@@ -247,7 +247,6 @@ export function saveExecutionGroup(
   if (canonical && input.profile_id !== undefined && input.profile_id !== profileId)
     throw new Error("endpoint_id conflicts with legacy profile_id");
   const mode = canonical ? profileId ? "endpoint" : "native" : undefined;
-  if (mode === "native" && input.provider === "antigravity") throw new Error("The current Antigravity adapter requires a Google Generative API endpoint");
   const policy = input.model_policy === undefined ? undefined : parseExecutionModelPolicy(input.model_policy);
   if (
     typeof input.name !== "string" ||

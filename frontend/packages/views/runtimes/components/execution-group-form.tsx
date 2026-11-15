@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import {
-  AlertTriangle,
   ChevronRight,
   Globe,
   History,
@@ -86,7 +85,6 @@ export function GroupForm({
   );
   const endpoint = compatibleEndpoints.find((e) => e.id === input.endpoint_id);
   const invalid = !!input.endpoint_id && !endpoint;
-  const requiresEndpoint = !input.endpoint_id && input.provider === "antigravity";
   const selectedCompatibleCount = compatibleRuntimes.filter((r) =>
     input.runtime_ids.includes(r.id),
   ).length;
@@ -256,15 +254,7 @@ export function GroupForm({
               </NativeSelect>
             </label>
 
-            {requiresEndpoint ? (
-              <div
-                role="status"
-                className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning"
-              >
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                <span>{t(($) => $.configuration.endpoint_required)}</span>
-              </div>
-            ) : legacyConnection ? (
+            {legacyConnection ? (
               <div className="flex items-start gap-2 rounded-lg border bg-background px-3 py-2 text-xs text-muted-foreground">
                 <History className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 <span>{t(($) => $.configuration.legacy)}</span>
@@ -442,7 +432,7 @@ export function GroupForm({
           type="submit"
           size="sm"
           disabled={
-            pending || legacyConnection || invalid || requiresEndpoint
+            pending || legacyConnection || invalid
           }
         >
           {t(($) => $.configuration.save_group)}

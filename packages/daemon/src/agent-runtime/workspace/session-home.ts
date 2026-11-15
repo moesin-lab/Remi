@@ -415,6 +415,25 @@ export async function seedIssueSessionAntigravityHome(
   }
 }
 
+/** Copy only the local agy login; settings, hooks and conversations stay isolated. */
+export async function seedIssueSessionNativeAntigravityHome(
+  resolvedHome: IssueSessionProviderHome,
+  baseHome = process.env.GEMINI_HOME || join(homedir(), ".gemini"),
+): Promise<void> {
+  if (resolvedHome.provider !== "antigravity") throw new Error("Native Antigravity requires an Antigravity home");
+  const directory = join(resolvedHome.home, "antigravity-cli");
+  await ensureOwnedDirectory(resolvedHome.storageRoot, directory, "Antigravity login");
+  let credential: string;
+  try {
+    credential = await readFile(join(baseHome, "antigravity-cli", "antigravity-oauth-token"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    throw new Error("[antigravity_login_required] Sign in with agy on the Runtime machine using the daemon account");
+  }
+  if (!credential.trim()) throw new Error("[antigravity_login_required] The local agy login is empty; sign in again");
+  await writePrivateFileIfChanged(join(directory, "antigravity-oauth-token"), credential);
+}
+
 /**
  * Create `target` below `storageRoot` one level at a time, refusing a link at any
  * level so a daemon-owned path can never be redirected out of the root.

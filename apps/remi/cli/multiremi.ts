@@ -247,12 +247,11 @@ async function serve(options: CliOptions): Promise<void> {
 }
 
 /**
- * An explicitly selected Antigravity installs the pinned server (opt-in; never
- * auto-detected into a download). Without accepted terms this fails with the
- * command to run.
+ * An installed agy can serve local groups without a gateway download. Otherwise
+ * explicit Antigravity selection prepares the pinned gateway server with consent.
  */
 async function ensureExplicitAntigravity(options: CliOptions, provider: string | null | undefined): Promise<void> {
-  if (provider !== "antigravity") return;
+  if (provider !== "antigravity" || Bun.which("agy", { PATH: process.env.PATH })) return;
   const { ensureAntigravityServer } = await import("@acp/antigravity-install.js");
   await ensureAntigravityServer({
     acceptTerms: Boolean(options["accept-antigravity-terms"]),

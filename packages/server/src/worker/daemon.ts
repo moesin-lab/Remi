@@ -183,6 +183,7 @@ import {
   resolveTaskProviderHome,
   prepareTaskPrivateTempDirectory,
   seedIssueSessionAntigravityHome,
+  seedIssueSessionNativeAntigravityHome,
   type TaskPrivateTempDirectory,
   type IssueSessionProviderHome,
 } from "@daemon/agent-runtime/workspace/session-home.js";
@@ -1050,7 +1051,7 @@ export class MultiremiDaemon {
             else if (binding.provider === "claude") resolveRuntimeClaudeProfile(profile, process.env, key);
           }
         } else if (binding.connectionMode === "native" && binding.provider === "antigravity") {
-          throw new Error("Antigravity requires an endpoint");
+          if (!Bun.which("agy", { PATH: process.env.PATH })) throw new Error("Local Antigravity requires agy on PATH");
         }
         const ack: RuntimeExecutionBindingAck = { ...identity, status: "ready" };
         acknowledgements.push(ack);
@@ -1086,7 +1087,7 @@ export class MultiremiDaemon {
       try {
         let models: MultiremiRuntimeModel[];
         if (binding.connectionMode === "native") {
-          const prepared = await this.runtimeModelProbeProviderOptions(binding.groupId);
+          const prepared = await this.runtimeModelProbeProviderOptions(binding.groupId, provider);
           try { models = await this.discoverAcpRuntimeModelsWith(prepared, entry.abort.signal); }
           finally { prepared.release?.(); }
         } else {
@@ -2198,6 +2199,7 @@ export class MultiremiDaemon {
         external_chat_models: this.options.provider === "codex" && typeof process.getuid === "function" ? 1 : 0,
         execution_profiles: 1,
         execution_endpoints: 1,
+        antigravity_native: 1,
         execution_endpoint_options: 1,
         codex_profiles: 1,
         claude_profiles: 1,
@@ -2838,7 +2840,7 @@ export class MultiremiDaemon {
           signal, timeoutMs: RUNTIME_MODEL_PROBE_TIMEOUT_MS,
         });
         signal.throwIfAborted();
-        return runtimeModelsFromAcpCapabilities(this.options.provider, capabilities);
+        return runtimeModelsFromAcpCapabilities(prepared.options.agentType ?? this.options.provider, capabilities);
       }
       const provider = this.providerFactory(prepared.options);
       try {
@@ -2851,7 +2853,7 @@ export class MultiremiDaemon {
         );
         signal.throwIfAborted();
         if (!capabilities.length) throw new Error(`ACP did not advertise any models for provider: ${this.options.provider}`);
-        return runtimeModelsFromAcpCapabilities(this.options.provider, capabilities);
+        return runtimeModelsFromAcpCapabilities(prepared.options.agentType ?? this.options.provider, capabilities);
       } finally {
         await provider.close?.();
       }
@@ -2873,7 +2875,7 @@ export class MultiremiDaemon {
     return runtimeModelsWithCatalogError(probed, prepared.catalogState.error);
   }
 
-  private async runtimeModelProbeProviderOptions(nativeGroupId?: string): Promise<{
+  private async runtimeModelProbeProviderOptions(nativeGroupId?: string, bindingProvider?: string): Promise<{
     options: AcpProviderOptions;
     catalogState?: CodexModelCatalogState;
     relay?: MultiremiRelayEngineWire | null;
@@ -2882,8 +2884,8 @@ export class MultiremiDaemon {
     /** Throws when the probe's models cannot be trusted (the Antigravity gateway refused its listing). */
     check?: () => void;
   }> {
-    const provider = this.options.provider;
-    if (provider === "antigravity") return this.antigravityModelProbeOptions();
+    const provider = bindingProvider ?? this.options.provider;
+    if (provider === "antigravity") return this.antigravityModelProbeOptions(nativeGroupId);
     if (provider !== "claude" && provider !== "codex") {
       return { options: { agentType: provider, cwd: homedir() } };
     }
@@ -2948,16 +2950,22 @@ export class MultiremiDaemon {
    * hold the in-process shim, so it gets only the token URL; listing models
    * consumes nothing, so the channel's observations are not metered.
    */
-  private async antigravityModelProbeOptions(): Promise<{ options: AcpProviderOptions; release: () => void; check: () => void }> {
+  private async antigravityModelProbeOptions(nativeGroupId?: string): Promise<{ options: AcpProviderOptions; release?: () => void; check?: () => void }> {
     const workspaceId = this.options.workspaceId ?? "local";
-    const gateway = antigravityGatewayFor((await this.effectiveWorkspaceRelay(workspaceId))?.antigravity);
-    const owner = `${this.options.daemonId ?? this.options.runtimeName}:antigravity`;
+    const relay = nativeGroupId ? null : (await this.effectiveWorkspaceRelay(workspaceId))?.antigravity;
+    const native = !!nativeGroupId || (!relay && !!Bun.which("agy", { PATH: process.env.PATH }));
+    const owner = `${this.options.daemonId ?? this.options.runtimeName}:antigravity:${nativeGroupId ?? (native ? "native" : "gateway")}`;
     const root = join(probeRoot(this.options.workspacesRoot), `antigravity-${createHash("sha256").update(owner).digest("hex").slice(0, 16)}`);
     const providerHome: IssueSessionProviderHome = {
       storageRoot: resolve(this.options.workspacesRoot), root, home: join(root, "home"),
       sessionId: "runtime-model-probe", agentId: owner, generation: 1, provider: "antigravity",
     };
     await prepareIssueSessionProviderHome(providerHome);
+    if (native) {
+      await seedIssueSessionNativeAntigravityHome(providerHome);
+      return { options: { agentType: "antigravity", cwd: root, providerHome: providerHome.home, antigravityNative: true } };
+    }
+    const gateway = antigravityGatewayFor(relay);
     await seedIssueSessionAntigravityHome(providerHome, { cwd: root });
     const run = this.antigravityGatewayShim().forRun({ upstreamBase: gateway.upstreamBase, apiKey: gateway.apiKey, runId: "runtime-model-probe" });
     try {
@@ -3872,7 +3880,11 @@ export class MultiremiDaemon {
             : null;
       if (relay?.auth_token) failureCredentials.push(relay.auth_token);
       if (task.authToken) failureCredentials.push(task.authToken);
-      if (task.agent?.provider === "antigravity") {
+      if (task.agent?.provider === "antigravity" && task.executionConnection?.mode === "native") {
+        if (!providerHome) throw new Error("[antigravity_home_required] Local Antigravity needs a session home");
+        if (!Bun.which("agy", { PATH: process.env.PATH })) throw new Error("[antigravity_login_required] Install agy and sign in on the Runtime machine");
+        await seedIssueSessionNativeAntigravityHome(providerHome);
+      } else if (task.agent?.provider === "antigravity") {
         // Before the start ACK, so a missing gateway costs no model call (PR 4 §3).
         const gateway = antigravityGatewayFor(relay);
         if (!task.agent.model && !gateway.defaultModel) {
@@ -5019,7 +5031,8 @@ export class MultiremiDaemon {
     const failureCredentials = [...Object.entries(config.env ?? {})
       .filter(([name]) => /(?:^|_)(?:SECRET|TOKEN|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL)(?:_|$)/i.test(name))
       .map(([, value]) => value), ...(antigravity ? [antigravity.apiKey] : [])];
-    if (agent.provider === "antigravity") {
+    const antigravityNative = agent.provider === "antigravity" && task.executionConnection?.mode === "native";
+    if (agent.provider === "antigravity" && !antigravityNative) {
       if (!antigravity || !providerHome) {
         throw new Error("[antigravity_gateway_unconfigured] Antigravity runs only through the workspace Model gateway and a session home");
       }
@@ -5090,6 +5103,7 @@ export class MultiremiDaemon {
         pluginFingerprint: config.pluginFingerprint,
         codexHome: config.codexHome,
         ...(antigravity ? { gatewayShim: antigravity.run, providerHome: providerHome!.home } : {}),
+        ...(antigravityNative ? { antigravityNative: true, providerHome: providerHome!.home } : {}),
         // Honoured only by adapters that declare them (PR 5 §1.1, §2.3).
         nativeSubagentSessions: this.options.nativeSubagents,
         captureAutonomousRounds: this.options.autonomousRounds,

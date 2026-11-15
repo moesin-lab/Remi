@@ -851,6 +851,9 @@ runMigrations(this.db);
     const group = this.getExecutionGroup(id, workspaceId);
     if (!group) return [];
     return group.runtimeIds.map((runtimeId) => {
+      if (group.provider === "antigravity" && group.connectionMode === "native"
+        && this.getRuntimeLite(runtimeId)?.metadata.antigravity_native !== 1)
+        return { runtime_id: runtimeId, status: "error", error: "Upgrade this Runtime to support Antigravity local sign-in" };
       if (group.endpointId && this.getExecutionEndpoint(group.endpointId, workspaceId)?.connection.options
         && this.getRuntimeLite(runtimeId)?.metadata.execution_endpoint_options !== 1)
         return { runtime_id: runtimeId, status: "error", error: "Upgrade this Runtime to support endpoint model inventory and custom headers" };

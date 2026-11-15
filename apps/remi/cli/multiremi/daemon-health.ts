@@ -149,7 +149,9 @@ export async function resolveHealthyDaemonProviders(explicitProvider: SupportedD
   const candidates = explicitProvider ? [explicitProvider] : detectMultiremiProviders();
   const healthy: SupportedDaemonProvider[] = [];
   for (const provider of candidates) {
-    const checker = createRuntimeProvider({ agentType: provider });
+    const checker = createRuntimeProvider({ agentType: provider,
+      antigravityNative: provider === "antigravity" && !!Bun.which("agy", { PATH: process.env.PATH }),
+    });
     try {
       if (await checker.healthCheck()) {
         healthy.push(provider);

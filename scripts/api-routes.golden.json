@@ -4096,7 +4096,8 @@
               "codex_profiles": 0,
               "claude_profiles": 0,
               "execution_endpoints": 0,
-              "execution_endpoint_options": 0
+              "execution_endpoint_options": 0,
+              "antigravity_native": 0
             },
             "owner_id": null,
             "visibility": "private",
@@ -18090,9 +18091,9 @@
         "token": null,
         "tokenId": null,
         "daemonId": null,
-        "installScriptUrl": "https://github.com/Grassgod/Remi/releases/latest/download/install-remi.sh",
+        "installScriptUrl": "https://github.com/moesin-lab/Remi/releases/latest/download/install-remi.sh",
         "releaseArtifactPattern": "multiremi-${version}-${os}-${arch}.tar.gz",
-        "installCommand": "curl -fsSL https://github.com/Grassgod/Remi/releases/latest/download/install-remi.sh | bash",
+        "installCommand": "curl -fsSL https://github.com/moesin-lab/Remi/releases/latest/download/install-remi.sh | bash",
         "setupCommand": "multiremi setup --server https://snapshot.invalid --workspace local --token <YOUR_TOKEN>",
         "daemonCommand": "multiremi daemon",
         "daemonStartCommand": "multiremi daemon start",
@@ -18100,7 +18101,7 @@
           {
             "key": "install",
             "label": "Install Multiremi CLI",
-            "command": "curl -fsSL https://github.com/Grassgod/Remi/releases/latest/download/install-remi.sh | bash"
+            "command": "curl -fsSL https://github.com/moesin-lab/Remi/releases/latest/download/install-remi.sh | bash"
           },
           {
             "key": "setup",
@@ -29836,9 +29837,9 @@
         "token": "mdt_0000000000004000800000000000000400000000000040008000000000000005",
         "tokenId": "dtk_aw448dcq07dx",
         "daemonId": "dmn_00000000000040008000000000000003",
-        "installScriptUrl": "https://github.com/Grassgod/Remi/releases/latest/download/install-remi.sh",
+        "installScriptUrl": "https://github.com/moesin-lab/Remi/releases/latest/download/install-remi.sh",
         "releaseArtifactPattern": "multiremi-${version}-${os}-${arch}.tar.gz",
-        "installCommand": "curl -fsSL https://github.com/Grassgod/Remi/releases/latest/download/install-remi.sh | bash",
+        "installCommand": "curl -fsSL https://github.com/moesin-lab/Remi/releases/latest/download/install-remi.sh | bash",
         "setupCommand": "multiremi setup --server https://snapshot.invalid --workspace local --token mdt_0000000000004000800000000000000400000000000040008000000000000005 --provider claude --daemon-id dmn_00000000000040008000000000000003",
         "daemonCommand": "multiremi daemon",
         "daemonStartCommand": "multiremi daemon start",
@@ -29846,7 +29847,7 @@
           {
             "key": "install",
             "label": "Install Multiremi CLI",
-            "command": "curl -fsSL https://github.com/Grassgod/Remi/releases/latest/download/install-remi.sh | bash"
+            "command": "curl -fsSL https://github.com/moesin-lab/Remi/releases/latest/download/install-remi.sh | bash"
           },
           {
             "key": "setup",

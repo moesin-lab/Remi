@@ -11,8 +11,12 @@ const HOME_CALL_LIMITS: Readonly<Record<string, number>> = {
   // ${REMI_HOME:-~/.remi}/acp/antigravity, like the npm bundles' prefix.
   "packages/acp/src/antigravity-install.ts": 1,
   "packages/acp/src/client.ts": 2,
+  // MUL-2: read-only canonical HOME comparison excludes personal project settings.
+  "packages/acp/src/adapters/claude-code/index.ts": 1,
+  // MUL-2: read-only boundary discovery; userHome is injectable and never a write target.
+  "packages/daemon/src/agent-runtime/claude-profile.ts": 1,
   // Grok adds two read-only executable probes; provider tests inject a fixture executable.
-  "packages/acp/src/provider.ts": 9,
+  "packages/acp/src/provider.ts": 4,
   "packages/acp/src/provision.ts": 2,
   "packages/acp/src/runtime-bundle.ts": 1,
   "packages/auth/src/oauth-cli.ts": 1,
@@ -38,7 +42,7 @@ const HOME_CALL_LIMITS: Readonly<Record<string, number>> = {
   "packages/server/src/config.ts": 1,
   "packages/server/src/ssh-mesh/control-plane.ts": 2,
   // Includes the external-Chat adapter's home passed to its source discovery and receipts.
-  "packages/server/src/worker/daemon.ts": 7,
+  "packages/server/src/worker/daemon.ts": 2,
   // Grok adds a read-only skill-root lookup; listing/import only read files and accept explicit roots.
   "packages/server/src/worker/local-skills.ts": 9,
   "packages/server/src/worker/progress-summarizer.ts": 3,

@@ -25,7 +25,7 @@ import { basename, dirname, join } from "node:path";
 import { VERSION } from "@shared/version.js";
 import * as ui from "./ui.js";
 
-const DEFAULT_RELEASE_REPOSITORY = "Grassgod/Remi";
+const DEFAULT_RELEASE_REPOSITORY = "moesin-lab/Remi";
 const RELEASE_ARCHIVE_ENTRIES = new Set(["remi", "remi-claude-agent-acp", "runtime-bundle.json"]);
 
 export interface GithubReleaseAsset {

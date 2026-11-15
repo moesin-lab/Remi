@@ -46,7 +46,7 @@ vi.mock("@multiremi/core/paths", () => {
     useCurrentWorkspace: () => ({ id: "ws-1", name: "Acme", slug: "acme" }),
     useWorkspacePaths: () => ({
       inbox: route("inbox"), chat: route("chat"), myIssues: route("my-issues"), workbench: route("workbench"),
-      issues: route("issues"), projects: route("projects"), repositories: route("repos"), knowledge: route("knowledge"),
+      issues: route("issues"), projects: route("projects"), repositories: route("repos"), knowledge: route("knowledge"), magpie: route("magpie"),
       autopilots: route("autopilots"), agents: route("agents"), squads: route("squads"), usage: route("usage"),
       runtimes: route("runtimes"), plugins: route("plugins"), skills: route("skills"), settings: route("settings"),
       executionGroups: route("execution-groups"), imPlatform: (id: string) => `/acme/im-platforms/${id}`,

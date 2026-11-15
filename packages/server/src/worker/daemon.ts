@@ -948,6 +948,7 @@ interface RuntimeBindingDiscovery {
 }
 
 export class MultiremiDaemon {
+  private readonly userHome = homedir();
   private client: MultiremiDaemonClient;
   private options: Required<Omit<MultiremiDaemonOptions, "token" | "runtimeId" | "daemonId" | "workspaceId" | "providerFactory" | "updateRunner" | "localSkillRoots" | "launchedBy" | "onRestartRequested" | "taskTimeoutMs" | "daemonPort" | "workspacesRoot" | "repoCacheRoot" | "gcEnabled" | "gcIntervalMs" | "gcDryRun" | "legacyKeepDays" | "pluginCacheRoot" | "agentPluginProviderPreflight" | "sshMeshManager" | "terminalAuthorityCleanupRetryDelaysMs" | "issueWorkspaceLifecycleLocker" | "workspaceRootFence" | "runSnapshotGcPass" | "supervisorReady" | "onReadyChange" | "cliUpdateCoordinator" | "outboxPath" | "outboxBackoffMs" | "outboxMaxBytes" | "claimIdleMaxMs" | "pluginDesiredRefreshMs" | "protocolClient" | "protocolClientOptions" | "authorityProbeDelaysMs" | "antigravityGatewayShim" | "parkedLaneOptions">> & {
     token: string | null;
@@ -1402,7 +1403,7 @@ export class MultiremiDaemon {
       snapshotTtlMs: options.snapshotTtlMs ?? numberEnv(process.env.MULTIREMI_SNAPSHOT_TTL_MS, 72 * 60 * 60 * 1000),
       pluginCacheRoot: options.pluginCacheRoot
         ?? process.env.MULTIREMI_PLUGIN_CACHE_ROOT
-        ?? join(homedir(), ".remi", "plugin-cache", "sha256"),
+        ?? join(this.userHome, ".remi", "plugin-cache", "sha256"),
       claimIdleMaxMs: Math.max(
         DEFAULT_CLAIM_IDLE_BASE_MS,
         options.claimIdleMaxMs
@@ -1555,7 +1556,7 @@ export class MultiremiDaemon {
       this.externalChats = registerDaemonExternalChats(this.protocolClient,
         () => this.stopped ? undefined : this.options.runtimeId ?? undefined,
         () => new CodexExternalChats({
-          home: homedir(),
+          home: this.userHome,
           baseHome: process.env.CODEX_HOME,
           ...installedExternalCodexCommand(),
           stateDir: join(dirname(this.outboxPath), "external-chats", outboxIdentity),
@@ -2887,7 +2888,7 @@ export class MultiremiDaemon {
     const provider = bindingProvider ?? this.options.provider;
     if (provider === "antigravity") return this.antigravityModelProbeOptions(nativeGroupId);
     if (provider !== "claude" && provider !== "codex") {
-      return { options: { agentType: provider, cwd: homedir() } };
+      return { options: { agentType: provider, cwd: this.userHome } };
     }
     const workspaceId = this.options.workspaceId ?? "local";
     const workspaceRelay = nativeGroupId ? { claude: null, codex: null, antigravity: null } : await this.effectiveWorkspaceRelay(workspaceId);
@@ -2962,7 +2963,7 @@ export class MultiremiDaemon {
     };
     await prepareIssueSessionProviderHome(providerHome);
     if (native) {
-      await seedIssueSessionNativeAntigravityHome(providerHome);
+      await seedIssueSessionNativeAntigravityHome(providerHome, process.env.GEMINI_HOME || join(this.userHome, ".gemini"));
       return { options: { agentType: "antigravity", cwd: root, providerHome: providerHome.home, antigravityNative: true } };
     }
     const gateway = antigravityGatewayFor(relay);
@@ -3190,7 +3191,7 @@ export class MultiremiDaemon {
         {
           readinessRoot: join(this.options.pluginCacheRoot, ".codex-readiness"),
           scopeIdentity: workspaceId,
-          baseHome: process.env.CODEX_HOME || join(homedir(), ".codex"),
+          baseHome: process.env.CODEX_HOME || join(this.userHome, ".codex"),
           relayAuthoritative: workspaceRelay !== undefined,
           relay: workspaceRelay?.codex ?? null,
           signal,
@@ -3886,7 +3887,7 @@ export class MultiremiDaemon {
       if (task.agent?.provider === "antigravity" && task.executionConnection?.mode === "native") {
         if (!providerHome) throw new Error("[antigravity_home_required] Local Antigravity needs a session home");
         if (!Bun.which("agy", { PATH: process.env.PATH })) throw new Error("[antigravity_login_required] Install agy and sign in on the Runtime machine");
-        await seedIssueSessionNativeAntigravityHome(providerHome);
+        await seedIssueSessionNativeAntigravityHome(providerHome, process.env.GEMINI_HOME || join(this.userHome, ".gemini"));
       } else if (task.agent?.provider === "antigravity") {
         // Before the start ACK, so a missing gateway costs no model call (PR 4 §3).
         const gateway = antigravityGatewayFor(relay);
@@ -3920,7 +3921,7 @@ export class MultiremiDaemon {
           && !providerInstallEnv.OPENAI_API_KEY
         ) {
           await assertIssueSessionNativeCodexOAuth(
-            process.env.CODEX_HOME || join(homedir(), ".codex"),
+            process.env.CODEX_HOME || join(this.userHome, ".codex"),
           );
         }
       }
@@ -4132,7 +4133,7 @@ export class MultiremiDaemon {
       codexHome: task.agent?.provider === "codex" ? providerHome?.home : undefined,
     });
     if (task.agent?.provider === "codex" && prepared.codexHome) {
-      const baseHome = process.env.CODEX_HOME || join(homedir(), ".codex");
+      const baseHome = process.env.CODEX_HOME || join(this.userHome, ".codex");
       await installCodexPluginHome(prepared, {
         signal,
         seedHome: (targetHome) => seedCodexHomeFromBase({
@@ -6235,7 +6236,7 @@ function formatDuration(ms: number): string {
 async function runDefaultMultiremiUpdate(targetVersion: string): Promise<string> {
   const version = targetVersion.trim();
   if (!version) throw new Error("target_version is required");
-  const repo = process.env.MULTIREMI_RELEASE_REPO || process.env.MULTIREMI_REPO || "Grassgod/Remi";
+  const repo = process.env.MULTIREMI_RELEASE_REPO || process.env.MULTIREMI_REPO || "moesin-lab/Remi";
   const installerUrl = process.env.MULTIREMI_INSTALLER_URL || `https://github.com/${repo}/releases/latest/download/install-remi.sh`;
   const env = cleanProcessEnv({
     ...process.env,

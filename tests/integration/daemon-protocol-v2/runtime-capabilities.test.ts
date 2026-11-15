@@ -70,6 +70,8 @@ function assertHostedCapabilities(h: DaemonProtocolHarness, type: "hello" | "hb"
     supports_batch_import: true,
     supports_directory_scan: true,
     supports_skill_directory: true,
+    external_chats: 0,
+    external_chat_models: 0,
     supports_bot_menu: true,
     bot_menu_protocol: BOT_MENU_PROTOCOL_VERSION,
     agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,

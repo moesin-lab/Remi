@@ -3814,6 +3814,8 @@ export class TasksRepo {
     if (task.codexProfile && runtime.metadata.codex_profiles !== 1) return false;
     if (task.claudeProfile && runtime.metadata.claude_profiles !== 1) return false;
     if (task.executionConnection && runtime.metadata.execution_endpoints !== 1) return false;
+    if (task.executionConnection?.provider === "antigravity" && task.executionConnection.mode === "native"
+      && runtime.metadata.antigravity_native !== 1) return false;
     if (task.executionConnection?.profile?.endpoint_options && runtime.metadata.execution_endpoint_options !== 1) return false;
     if (!task.executionFingerprint) {
       return this.ctx.agentPlugins().runtimeHasReadyAgentPlugins(runtime.id, task.agentId);

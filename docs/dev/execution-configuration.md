@@ -8,7 +8,7 @@ summary: 端点保存地址、协议和认证；执行能力组选择引擎、�
 
 侧栏「执行能力组」（`/{workspaceSlug}/execution-groups`）统一管理执行组和网关端点。端点不属于某个模型或执行引擎：它保存地址、支持的 API 协议、协议路径和认证。执行组选择执行引擎、Runtime 成员、一个端点或本机登录，以及可选的默认模型和模型白名单。Agent 选择执行组，再选择该组实际可用的模型。
 
-同一端点可以同时支持 `openai-responses`、`anthropic-messages`、`google-generative`，分别供 Codex、Claude、Antigravity 执行组使用。`openai-chat-completions` 供直接调用 Chat Completions 的系统功能使用，与 Codex 的 Responses 协议分开声明。声明支持协议不代表 Remi 转换协议；网关必须真实实现相应接口。当前 Antigravity 适配器仅支持端点连接，本机订阅尚未实现。Grok 保留原生连接。
+同一端点可以同时支持 `openai-responses`、`anthropic-messages`、`google-generative`，分别供 Codex、Claude、Antigravity 执行组使用。`openai-chat-completions` 供直接调用 Chat Completions 的系统功能使用，与 Codex 的 Responses 协议分开声明。声明支持协议不代表 Remi 转换协议；网关必须真实实现相应接口。Antigravity 支持 Google 协议端点或本机 `agy acp` 登录，两条认证链路互不回退。Grok 保留原生连接。
 
 ## 端点与执行组
 
@@ -100,7 +100,7 @@ remi runtime endpoint catalog <endpoint-id> --json
 
 本机登录指 daemon 运行账号下可用的原生认证，不一定与浏览器用户或交互终端相同。端点与本机登录都是显式选择；连接失败不会切换到另一种账号或计费来源。每个会话保留隔离的配置目录和原生记录，不让同机不同组互相覆盖配置。
 
-原生连接的模型也按组独立探测，不继承工作区网关目录。当前 Antigravity 不能创建本机登录组；迁移出来但未配置端点的 Antigravity 组保留可见状态并阻止执行，管理员需为其选择 Google 协议端点。
+原生连接的模型也按组独立探测，不继承工作区网关目录。Antigravity 本机登录组使用 daemon 账号现有的 `agy` 登录凭据，复制到隔离会话目录后启动 `agy acp`；不复制个人配置和历史。成员需声明 `antigravity_native: 1`，旧 Runtime 必须升级。未登录时明确报错，不继承网关；模型和思考级别由本机 ACP 探测。详见 [Antigravity Runtime](../antigravity.md#local-sign-in)。
 
 ## 下发、任务快照与密钥
 

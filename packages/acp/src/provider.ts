@@ -36,6 +36,7 @@ import { resolveAcpProcessLaunch } from "./launch.js";
 import { createAdapter, type AgentAdapter } from "./adapters/index.js";
 import { resolveClaudeContextSelection, hasOneMillionContext } from "./adapters/claude-code/model-context.js";
 import { autonomousOrigin, isWorkspaceTrustPrompt, nativeAgentId, permissionAsQuestion, serviceMessage, serviceMessageFailure, type PermissionQuestion } from "./adapters/trace-vendor.js";
+import { ANTIGRAVITY_NATIVE_ACCESS, nativeAntigravityLaunch } from "./access/antigravity-native.js";
 import { accessConfigFor, type AcpAccessConfig } from "./access/index.js";
 import type { GatewayShimChannel, GatewayShimEvent, GatewayShimHost, GatewayShimListingFailure } from "./access/gateway-shim-types.js";
 import { GEMINI_USAGE_SOURCE, geminiObservationUsage } from "./gemini-request-usage.js";
@@ -111,6 +112,8 @@ export interface AcpProviderOptions {
   gatewayShim?: GatewayShimHost;
   /** A shim base URL without usage observations, for subprocess model probes that cannot hold a host. */
   gatewayUrl?: string;
+  /** Explicit local agy ACP connection; never inferred from a missing gateway. */
+  antigravityNative?: boolean;
   /**
    * Stall watchdog bound for access configs that declare one (Antigravity:
    * 120 s). Tests shorten it; production leaves it unset.
@@ -719,6 +722,7 @@ export function resolveAcpHealthCheckCommand(
   executable: string | null | undefined,
   fallback: string,
 ): AcpHealthCheckCommand {
+  if (agentType === "antigravity" && !executable?.trim() && Bun.which("agy", { PATH: process.env.PATH })) return { command: "agy" };
   const command = resolveAcpExecutableForAgent(agentType, executable, fallback);
   const access = accessConfigFor(agentType);
   if (access && !executable?.trim()) {
@@ -775,7 +779,8 @@ export class AcpProvider implements Provider {
   constructor(options: AcpProviderOptions = {}) {
     this._options = options;
     this._adapter = createAdapter(options.agentType ?? "claude");
-    this._access = accessConfigFor(this._adapter.agentType);
+    this._access = options.antigravityNative && this._adapter.agentType === "antigravity"
+      ? ANTIGRAVITY_NATIVE_ACCESS : accessConfigFor(this._adapter.agentType);
     this.name = `acp:${this._adapter.agentType}`;
   }
 
@@ -2451,7 +2456,7 @@ export class AcpProvider implements Provider {
       pluginPaths,
     });
 
-    const launch = this._resolveLaunch();
+    const launch = this._resolveLaunch(permissionMode ?? undefined);
     let gateway: GatewayState | undefined;
     if (this._access) {
       const home = this._options.providerHome?.trim();
@@ -2462,14 +2467,14 @@ export class AcpProvider implements Provider {
         gateway = openGateway(this._options.gatewayShim, `${this._adapter.agentType}:${chatId}`);
       }
       const shimUrl = gateway?.channel?.baseUrl ?? this._options.gatewayUrl;
-      if (!shimUrl) {
+      if (!shimUrl && this._access.usage === "gateway-shim") {
         throw new Error(`[${this._adapter.agentType}_gateway_unconfigured] ${this._adapter.agentType} runs only through the `
           + "workspace Model gateway; configure it under Model gateway");
       }
       try {
         // Last, so the access config owns home, routing and the blanked credentials.
         Object.assign(env, this._access.buildEnv({
-          home: home!, shimUrl, model, daemonEnv: { ...process.env, ...this._options.env },
+          home: home!, shimUrl: shimUrl ?? "", model, daemonEnv: { ...process.env, ...this._options.env },
           launch: launch.pinned ? { executable: launch.executable, args: launch.args ?? [] } : null,
         }));
       } catch (error) {
@@ -2589,7 +2594,10 @@ export class AcpProvider implements Provider {
    * The executable and args to spawn. An Agent `executable` override wins (and
    * keeps its own args); otherwise an access config supplies its pinned launch.
    */
-  private _resolveLaunch(): { executable: string; args: string[] | undefined; pinned: boolean } {
+  private _resolveLaunch(permissionMode?: string): { executable: string; args: string[] | undefined; pinned: boolean } {
+    if (this._options.antigravityNative && this._adapter.agentType === "antigravity") {
+      return { ...nativeAntigravityLaunch(this._options.providerHome, permissionMode, this._options.executable), pinned: false };
+    }
     const explicit = this._options.executable?.trim();
     const executable = resolveAcpExecutableForAgent(this._adapter.agentType, this._options.executable, this._adapter.defaultExecutable());
     if (!this._access || explicit) return { executable, args: this._options.args, pinned: false };

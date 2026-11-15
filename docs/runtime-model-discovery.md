@@ -217,8 +217,9 @@ compatibility, and cross-workspace bindings remain invalid.
 
 Antigravity groups select an endpoint that declares `google-generative`. The endpoint
 address is the API root and omits `/v1beta` and `/v1`; the adapter appends `/v1beta/...`.
-The group chooses its default model; endpoints have no model field. Current Remi
-Antigravity does not support a native-login group.
+The group chooses its default model; endpoints have no model field. Native-login groups
+instead probe the installed `agy acp` using an isolated copy of the local login,
+and discover both models and thinking levels through ACP config options.
 
 Binding discovery calls `/v1beta/models` on the Runtime, follows page tokens, removes
 non-chat and image-only models and reports no effort selector. A failed page makes the

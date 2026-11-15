@@ -113,12 +113,12 @@ export function seedAntigravityHome(input: { home: string; cwd: string; workspac
 
 /** Remi mode names → the server's `default` / `auto_edit` / `yolo` (server 1.4.0's modes). */
 const PERMISSION_MODES: Record<string, string[]> = {
-  bypassPermissions: ["yolo"],
-  dontAsk: ["yolo"],
-  auto: ["yolo"],
-  acceptEdits: ["auto_edit"],
+  bypassPermissions: ["yolo", "auto"],
+  dontAsk: ["yolo", "auto"],
+  auto: ["yolo", "auto"],
+  acceptEdits: ["auto_edit", "accept-edits"],
   default: ["default"],
-  plan: ["default"],
+  plan: ["plan", "default"],
 };
 
 export function mapAntigravityPermissionMode(mode: string): string[] {

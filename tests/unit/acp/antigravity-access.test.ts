@@ -121,11 +121,11 @@ describe("modes, launch and capabilities", () => {
   const modes = { currentModeId: "default", availableModes: [{ id: "default", name: "Default" }, { id: "auto_edit", name: "Auto Edit" }, { id: "yolo", name: "YOLO" }] };
 
   it("maps Remi's mode names onto default / auto_edit / yolo and defaults to bypass", () => {
-    expect(mapAntigravityPermissionMode("bypassPermissions")).toEqual(["yolo"]);
-    expect(mapAntigravityPermissionMode("dontAsk")).toEqual(["yolo"]);
-    expect(mapAntigravityPermissionMode("auto")).toEqual(["yolo"]);
-    expect(mapAntigravityPermissionMode("acceptEdits")).toEqual(["auto_edit"]);
-    expect(mapAntigravityPermissionMode("plan")).toEqual(["default"]);
+    expect(mapAntigravityPermissionMode("bypassPermissions")).toEqual(["yolo", "auto"]);
+    expect(mapAntigravityPermissionMode("dontAsk")).toEqual(["yolo", "auto"]);
+    expect(mapAntigravityPermissionMode("auto")).toEqual(["yolo", "auto"]);
+    expect(mapAntigravityPermissionMode("acceptEdits")).toEqual(["auto_edit", "accept-edits"]);
+    expect(mapAntigravityPermissionMode("plan")).toEqual(["plan", "default"]);
     expect(mapAntigravityPermissionMode("unknown")).toEqual([]);
     const adapter = new AntigravityAdapter();
     expect(resolveAcpPermissionMode("antigravity", null)).toBe("bypassPermissions");

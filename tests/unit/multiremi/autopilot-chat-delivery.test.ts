@@ -157,7 +157,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       expect(s.store.listChatMessages(s.target.id)).toHaveLength(0);
     });
 
-    for (const jobs of ["1", "0"]) it(`queues a report for the Feishu-bound target, including jobs=${jobs} deferral`, async () => {
+    for (const jobs of ["1", "0"]) for (const outcome of ["short", "long", "failed"] as const) it(`queues a ${outcome} report for the Feishu-bound target, including jobs=${jobs} deferral`, async () => {
       const s = await setup();
       const bot = configureKindBot(s.store);
       const inbound = bot.inbound(`mul11_${jobs}`);
@@ -170,8 +170,24 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const run = s.store.runAutopilot(s.autopilot.id, { source: "schedule" });
       // The automation and the target bot deliberately have different agents.
       s.store.claimTask(s.runtime.id); s.store.startTask(run.taskId!);
-      s.store.completeTask(run.taskId!, { output: "定期巡检：所有项目进展已更新。" });
-      expect(s.store.listChatMessages(targetId).at(-1)!.body).toContain("所有项目进展已更新");
+      const output = outcome === "short" ? "定期巡检：所有项目进展已更新。" : "巡😀".repeat(20_000);
+      if (outcome === "failed") s.store.failTask(run.taskId!, { error: output });
+      else s.store.completeTask(run.taskId!, { output });
+      const reportBody = s.store.listChatMessages(targetId).at(-1)!.body;
+      expect(Buffer.byteLength(reportBody)).toBeLessThanOrEqual(4_096);
+      expect(reportBody).not.toContain("\ufffd");
+      expect(reportBody).toContain(run.id);
+      if (outcome === "short") {
+        expect(reportBody).toContain(output);
+        expect(reportBody).not.toContain("已截断");
+      } else {
+        expect(reportBody).toContain("巡😀");
+        expect(reportBody).toContain("已截断");
+        // Only the delivery copy is bounded; the execution keeps its full evidence.
+        const task = s.store.getTask(run.taskId!)!;
+        if (outcome === "failed") expect(task.error).toBe(output);
+        else expect(task.result).toContain(output);
+      }
       // Claiming drains durable intents even in runtime API processes with jobs disabled.
       let delivery = null;
       for (let index = 0; index < 12; index++) {
@@ -182,7 +198,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       }
       expect(delivery).not.toBeNull();
       expect(delivery!.chatId).toBe(`oc_kind_mul11_${jobs}`);
-      expect(delivery!.body).toContain("所有项目进展已更新");
+      expect(delivery!.body).toBe(reportBody);
       expect(delivery!.taskId).toBeUndefined();
     });
   });

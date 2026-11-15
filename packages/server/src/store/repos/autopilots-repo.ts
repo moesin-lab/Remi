@@ -392,6 +392,7 @@ export class AutopilotsRepo {
     if (targetInput !== undefined || nextExecutionMode !== current.executionMode) this.assertDeliveryTarget(current.workspaceId, nextExecutionMode, deliveryTarget, deliveryAuthorizedBy);
     const now = nowIso();
     this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(current.workspaceId);
       this.ctx.db.run(
         `UPDATE multiremi_autopilots SET
         title = ?,
@@ -410,8 +411,8 @@ export class AutopilotsRepo {
         issue_creation_restricted = ?,
         issue_creation_restriction_reason = ?,
         issue_creation_restricted_by_task_id = ?,
-        delivery_chat_session_id = ?,
-        delivery_authorized_by = ?,
+        delivery_chat_session_id = CASE WHEN ? = 1 THEN ? ELSE delivery_chat_session_id END,
+        delivery_authorized_by = CASE WHEN ? = 1 THEN ? ELSE delivery_authorized_by END,
         updated_at = ?
        WHERE id = ?`,
       [
@@ -431,7 +432,9 @@ export class AutopilotsRepo {
         nextIssueCreationRestricted ? 1 : 0,
         nextIssueCreationRestrictionReason,
         nextIssueCreationRestrictedByTaskId,
+        targetInput !== undefined ? 1 : 0,
         deliveryTarget ?? null,
+        targetInput !== undefined ? 1 : 0,
         deliveryTarget ? deliveryAuthorizedBy : null,
         now,
         id,

@@ -632,6 +632,7 @@ export class ScmRepo {
         this.reconcileDefaultBindingsLocked(connection.id, repositories);
       }
     }
+    new MergePolicyRepo(this.ctx).appendStrictCoverage(workspaceId);
     return this.listRepositoryBindings({ workspaceId });
   }
 
@@ -1491,7 +1492,7 @@ export class ScmRepo {
   }
 
   private demoteAndTransferDefaultBindingsLocked(previousId: string, nextId: string, now: string): void {
-    this.lockConnection(previousId);
+    const previous = this.lockConnection(previousId);
     const bindings = this.listRepositoryBindings({ connectionId: previousId })
       .filter((binding) => binding.assignmentOrigin === "default");
     for (const binding of bindings) {
@@ -1509,6 +1510,7 @@ export class ScmRepo {
        WHERE id = ?`,
       [now, previousId],
     );
+    new MergePolicyRepo(this.ctx).appendStrictCoverage(previous.workspaceId);
   }
 
   private deleteRepositorySyncStateLocked(connectionId: string, repositoryId: string): void {

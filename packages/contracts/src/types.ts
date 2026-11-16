@@ -4034,6 +4034,11 @@ export interface MultiremiSystemEvent {
 }
 
 export interface MultiremiAutopilot {
+  /** Server-delivered run report; configuring it requires a human operator. Null clears it. */
+  deliveryChatSessionId?: string | null;
+  delivery_chat_session_id?: string | null;
+  /** Server-owned authorizing workspace operator; never trusted from API input. */
+  deliveryAuthorizedBy?: string | null;
   id: string;
   workspaceId: string;
   workspace_id?: string;
@@ -4128,6 +4133,11 @@ export interface MultiremiAutopilotRun {
 }
 
 export interface CreateAutopilotInput {
+  /** Server-delivered run report; configuring it requires a human operator. Null clears it. */
+  deliveryChatSessionId?: string | null;
+  delivery_chat_session_id?: string | null;
+  /** Server-owned authorizing workspace operator; never trusted from API input. */
+  deliveryAuthorizedBy?: string | null;
   id?: string;
   title: string;
   /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
@@ -4210,6 +4220,11 @@ export interface UpdateAutopilotTriggerInput {
 }
 
 export interface UpdateAutopilotInput {
+  /** Server-delivered run report; configuring it requires a human operator. Null clears it. */
+  deliveryChatSessionId?: string | null;
+  delivery_chat_session_id?: string | null;
+  /** Server-owned authorizing workspace operator; never trusted from API input. */
+  deliveryAuthorizedBy?: string | null;
   title?: string;
   /** @deprecated Accepted for old clients and fixtures; ignored, never validated or persisted. */
   responsibleMemberId?: string | null;

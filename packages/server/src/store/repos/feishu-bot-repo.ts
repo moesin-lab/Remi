@@ -112,6 +112,7 @@ export type IssueDecisionOperatorMemberResolution =
   | { status: "unmapped" }
   | { status: "ambiguous" };
 type DeferredOutboundOperation =
+  | { kind: "autopilot_report"; chatSessionId: string; runId: string; body: string; bindingId: string }
   | { kind: "topic"; issue: MultiremiIssue }
   | { kind: "issue_decision"; questionId: string }
   | { kind: "human_request" | "decision_patch"; request: MultiremiTaskHumanRequest }
@@ -883,6 +884,31 @@ export class FeishuBotRepo {
           scope.revision, scope.externalSessionKey.trim(), scope.externalMessageId.trim()]);
       return attachment;
     })();
+  }
+
+  /** A server-authorized automation report uses the target Chat's bot, never the run Chat's bot. */
+  enqueueAutopilotReportWithinTransaction(chatSessionId: string, runId: string, body: string, expectedBindingId?: string): void {
+    if (!this.ctx.db.inTransaction) throw new Error("Autopilot report outbox requires a transaction");
+    const chat = this.ctx.chat().getChatSession(chatSessionId);
+    if (!chat || chat.status !== "active") return;
+    const binding = this.ctx.db.query(`SELECT * FROM multiremi_feishu_bot_chat_bindings
+      WHERE workspace_id = ? AND chat_session_id = ?`).get(chat.workspaceId, chat.id) as Row | null;
+    if (!binding || expectedBindingId && binding.id !== expectedBindingId) return;
+    const owner = this.forBot(String(binding.bot_id));
+    if (owner !== this) return owner.enqueueAutopilotReportWithinTransaction(chatSessionId, runId, body, String(binding.id));
+    if (!this.canWriteOutbound()) {
+      this.deferOutboundOperation(chat.workspaceId, runId, { kind: "autopilot_report", chatSessionId, runId, body, bindingId: String(binding.id) });
+      return;
+    }
+    const now = nowIso();
+    // A standalone text delivery has no task carrier or CoT/result reconciliation.
+    // Its stable ID makes replay idempotent; the normal outbox owns retries/leases.
+    this.ctx.db.run(`INSERT INTO multiremi_feishu_bot_outbound_deliveries
+      (id, workspace_id, binding_id, task_id, chat_id, thread_id, reply_to_message_id,
+       body, status, available_at, created_at, updated_at)
+      VALUES (?, ?, ?, NULL, ?, ?, ?, ?, 'pending', ?, ?, ?) ON CONFLICT DO NOTHING`,
+      [`fbo_autopilot_${runId}`, chat.workspaceId, binding.id, binding.chat_id, binding.thread_id,
+        binding.reply_to_message_id, body, now, now, now]);
   }
 
   /** Atomic Chat message + outbox registration. File bytes are already persisted. */
@@ -3105,6 +3131,8 @@ export class FeishuBotRepo {
         owner.replayingOutboundOperation = true;
         try {
           switch (op.kind) {
+            case 'autopilot_report': owner.ctx.db.transaction(() =>
+              owner.enqueueAutopilotReportWithinTransaction(op.chatSessionId, op.runId, op.body, op.bindingId))(); break;
             case 'topic':
               if (owner.ctx.issues().getIssue(op.issue.id)) owner.prepareIssueTopicWithinTransaction(op.issue);
               break;

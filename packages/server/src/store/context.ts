@@ -550,6 +550,7 @@ export interface ProjectsSurface {
 }
 
 export interface AutopilotsSurface {
+  deliverRunReportWithinTransaction: import("./repos/autopilots-repo.js").AutopilotsRepo["deliverRunReportWithinTransaction"];
   getSystemEvent(id: string): MultiremiSystemEvent | null;
   getAutopilot(id: string): MultiremiAutopilot | null;
   listAutopilots(workspaceId?: string | null): MultiremiAutopilot[];
@@ -895,6 +896,7 @@ export interface RuntimesSurface {
  * than leave a workspace pointing at something that no longer exists.
  */
 export interface FeishuBotSurface {
+  enqueueAutopilotReportWithinTransaction: import('./repos/feishu-bot-repo.js').FeishuBotRepo['enqueueAutopilotReportWithinTransaction'];
   isFeishuTransportChatSession(chatSessionId: string): boolean;
   enqueueQuestionPresentationWithinTransaction: import('./repos/feishu-bot-repo.js').FeishuBotRepo['enqueueQuestionPresentationWithinTransaction'];
   getFeishuBotConfig: import('./repos/feishu-bot-repo.js').FeishuBotRepo['getConfig'];

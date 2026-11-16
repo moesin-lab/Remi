@@ -146,10 +146,15 @@ function fixture(t) {
   function run(profile, action, { args = [], commit = OLD_REF, fail = '', environment = {}, profileBase = profilesRoot, localBuild = true } = {}) {
     writeFileSync(log, '');
     if (localBuild && profile === 'stable' && ['deploy', 'host-stage'].includes(action)) args = [...args, '--build-local', 'true'];
+    const inheritedEnvironment = { ...process.env };
+    // Delete all spellings before applying test inputs. Empty uppercase entries
+    // would shadow lowercase inputs when Windows deduplicates spawn's env keys.
+    for (const key of Object.keys(inheritedEnvironment)) {
+      if (/^(https?_proxy|no_proxy|remi_build_network)$/iu.test(key)) delete inheritedEnvironment[key];
+    }
     const result = spawnSync(process.execPath, ['--import', pathToFileURL(mock).href, script, profile, action, ...args], {
       env: {
-        ...process.env,
-        ...Object.fromEntries(['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy', 'REMI_BUILD_NETWORK'].map((key) => [key, ''])),
+        ...inheritedEnvironment,
         ...environment,
         NODE_OPTIONS: '',
         REMI_PROFILES_ROOT: profileBase,
@@ -1021,7 +1026,7 @@ test('local builds inherit proxy names only and keep proxy values out of saved f
   const build = result.calls.find(isAction('build'));
   for (const service of ['api', 'web']) {
     assert.deepEqual(build.buildOverride.services[service].build, {
-      args: Object.fromEntries(Object.keys(environment).map((key) => [key, null])),
+      args: Object.fromEntries(Object.keys(environment).map((key) => [process.platform === 'win32' ? key.toUpperCase() : key, null])),
       ...(process.platform === 'linux' ? { network: 'host' } : {}),
     });
   }
@@ -1045,7 +1050,9 @@ test('direct builds keep the original command and network overrides apply to dev
     const result = f.run('dev', 'watch', { environment: { REMI_BUILD_NETWORK: network, https_proxy: 'http://proxy.example:8080' } });
     succeeds(result);
     for (const call of result.calls.filter((call) => call.args.includes('--build') || call.args.includes('watch'))) {
-      assert.deepEqual(call.buildOverride.services.api.build, { args: { https_proxy: null }, network });
+      const proxyKey = process.platform === 'win32' ? 'HTTPS_PROXY' : 'https_proxy';
+      assert.deepEqual(call.buildOverride.services.api.build, { args: { [proxyKey]: null }, network });
+      assert.ok(call.environmentKeys.some((key) => key.toLowerCase() === 'https_proxy'), 'the lowercase proxy input reaches Docker');
     }
   }
 });

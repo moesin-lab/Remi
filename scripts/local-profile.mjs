@@ -137,7 +137,11 @@ function compose(root, ...args) {
   // Null Compose build args inherit the environment without putting credentials
   // in argv, profile files, or the override. Keep Docker's predefined proxy args
   // undeclared in Dockerfiles so BuildKit excludes them from history/cache keys.
-  const proxyKeys = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'];
+  // Windows environment lookups ignore case: emit each predefined arg once.
+  // POSIX hosts can intentionally supply both spellings.
+  const proxyKeys = process.platform === 'win32'
+    ? ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY']
+    : ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'];
   const keys = proxyKeys.filter((key) => process.env[key]);
   let network = process.env.REMI_BUILD_NETWORK || undefined;
   if (network && !['host', 'default', 'none'].includes(network)) {

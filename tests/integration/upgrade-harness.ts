@@ -161,7 +161,7 @@ try {
       await clearGate(); const task = await control('/task', 'POST');
       await wait('ACP tool running', async () => (await providerLines()).includes('control_waiting'));
       assert.equal((await control(`/task/${task.id}`)).status, 'running');
-      // Workspace leases exist on demand, after the first task acquires its workspace.
+      // Observe the actual lease and environment while the provider tool is active.
       await inspectBoundary();
       return task;
     };

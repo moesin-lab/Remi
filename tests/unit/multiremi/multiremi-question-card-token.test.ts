@@ -80,7 +80,7 @@ for (const backend of ["SQLite", "Postgres"] as const) {
       const daemonId = `daemon_mul487_${n}`;
       store.registerRuntime({ id: runtimeId, name: "Question host", provider: "codex", workspaceId, daemonId });
       store.heartbeatRuntime(runtimeId, { supportsFeishuBotConfig: true, supportsDecisionCard: true, supportsIssueDecisionCard: true });
-      const config = store.upsertFeishuBotConfig(workspaceId, {
+      const config = store.upsertFeishuBotConfig(workspaceId, { senderAccessPolicy: "agent",
         agentId: agent.id, runtimeId, appId: "cli_mul487", appSecretOp: "set", appSecret: fixtureSecret, domain: "feishu", enabled: true,
         responsibleMemberId: member.id,
       });
@@ -292,7 +292,7 @@ for (const backend of ["SQLite", "Postgres"] as const) {
       });
     }
 
-    it("fr: native stream issuance and retarget rotate tokens and bind the new member", async () => {
+    it("fr: native stream issuance rotates tokens and rejects retargeting away from the root creator", async () => {
       const f = await setup("fr");
       const path = `/api/daemon/messages/${f.request.id}/card`;
       const mint = (recipient: string) => f.api.request(path, { method: "POST",
@@ -309,19 +309,21 @@ for (const backend of ["SQLite", "Postgres"] as const) {
       expect(f.row().token_recipient).toBe(f.recipient);
       store.createWorkspaceMember({ workspaceId: f.workspaceId, userId: changedUser.id, name: "New addressee", role: "member" });
       seedQuestionHumanMapping(db, f.workspaceId, 'cli_mul487', changedUser.id, changedRecipient);
-      // The Issue human stage names nobody: any active member may be shown the card, and the
-      // token binds it to that member alone.
+      // Any active member may answer on the web, but external cards are delivered
+      // only to the root creator, even when another member has a valid mapping.
       expect(store.getQuestion(f.request.id)).toMatchObject({ stage: 'human', current_handler: null });
-      const retargeted = await mint(changedRecipient);
-      expect(retargeted.status).toBe(200);
-      const newToken = questionCardAction((await retargeted.json()).card)!.t as string;
+      expect((await mint(changedRecipient)).status).toBe(409);
+      expect(f.row().token_recipient).toBe(f.recipient);
+      const reissued = await mint(f.recipient);
+      expect(reissued.status).toBe(200);
+      const newToken = questionCardAction((await reissued.json()).card)!.t as string;
       for (const token of [f.token, nativeToken]) {
         const rejected = await f.respond(token);
         expect(rejected.status).toBe(403);
         expect(await rejected.json()).toMatchObject({ code: "token_invalid" });
       }
-      expect(f.row().token_recipient).toBe(changedRecipient);
-      expect((await f.respond(newToken, changedRecipient)).status).toBe(200);
+      expect(f.row().token_recipient).toBe(f.recipient);
+      expect((await f.respond(newToken)).status).toBe(200);
     });
 
     it("fr: only the selected bot host can mint and answer cards for a bound Chat on another provider", async () => {
@@ -360,6 +362,11 @@ for (const backend of ["SQLite", "Postgres"] as const) {
         method: "POST", headers, body: cardInput,
       })).status).toBe(403);
       expect((await f.api.request(`${path}/answer`, { method: "POST", headers, body: answer })).status).toBe(200);
+      expect(store.getTaskHumanRequest(request.id)?.respondedBy).toBe(f.member.id);
+      expect(store.getQuestion(request.id)?.answer?.actor).toEqual({ type: "member", id: f.member.id });
+      const replay = await f.api.request(`${path}/answer`, { method: "POST", headers, body: answer });
+      expect(replay.status).toBe(403);
+      expect(await replay.json()).toMatchObject({ code: "token_consumed" });
     });
 
     it("fr: native send retries mint a new credential and delivery key without persisting plaintext in checkpoints", async () => {

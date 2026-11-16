@@ -360,7 +360,7 @@ export class ContainerApplicationDriver implements PlatformDeploymentDriver {
       await this.mustDocker(['exec', '-i', name, 'pg_restore', '-U', 'remi_rehearsal', '-d', 'remi_update_rehearsal', '--no-owner', '--no-privileges', '--exit-on-error'], { stdinFile: join(backup, 'database.dump') });
       const before = await this.databaseShape(name);
       for (const id of [target.id, previous.id]) {
-        await this.control(installation, ['migrate', id], { network: `container:${name}`, env: ['MULTIREMI_DATABASE_URL=postgresql://remi_rehearsal@127.0.0.1:5432/remi_update_rehearsal'] });
+        await this.control(installation, ['migrate', id], { input: [join(backup, 'volume-api-home.archive'), '/remi-input/api-home.archive'], network: `container:${name}`, env: ['MULTIREMI_DATABASE_URL=postgresql://remi_rehearsal@127.0.0.1:5432/remi_update_rehearsal'] });
         const after = new Set(await this.databaseShape(name));
         if (before.some(column => !after.has(column))) throw new Error('Migration rehearsal removed or changed an existing column; automatic application update refused');
       }
@@ -533,7 +533,18 @@ export class ContainerApplicationDriver implements PlatformDeploymentDriver {
     return this.runner.run('docker', ['compose', ...(this.config.projectName ? ['-p', this.config.projectName] : []), '--env-file', this.config.envFile, ...files.flatMap(path => ['-f', path]), ...args], { cwd: dirname(this.config.composeFile) });
   }
   private async mustCompose(args: string[]) { const result = await this.compose(args); if (result.exitCode !== 0) throw new Error(`Docker Compose ${args[0]} failed`); return result.stdout; }
-  private async mustDocker(args: string[], options?: CommandOptions) { const result = await this.runner.run('docker', args, options); if (result.exitCode !== 0) throw new Error(`Docker application ${args[0]} ${args.includes('migrate') ? 'migration rehearsal' : 'command'} failed`); return result.stdout; }
+  private async mustDocker(args: string[], options?: CommandOptions) {
+    const result = await this.runner.run('docker', args, options);
+    if (result.exitCode !== 0) {
+      // Keep arbitrary candidate stderr private while surfacing the known
+      // backup-report failure as an actionable operation error.
+      if (args.includes('migrate') && result.stderr.includes('Migration rehearsal:')) {
+        throw new Error('Docker application migration rehearsal failed: current api-home backup is missing or has invalid persistent migration reports (reports/migrations)');
+      }
+      throw new Error(`Docker application ${args[0]} ${args.includes('migrate') ? 'migration rehearsal' : 'command'} failed`);
+    }
+    return result.stdout;
+  }
 }
 function safeId(value: string): string { if (!/^[A-Za-z0-9_-]{1,100}$/.test(value)) throw new Error('Invalid application ID'); return value; }
 function message(error: unknown) { return error instanceof Error ? error.message : String(error); }

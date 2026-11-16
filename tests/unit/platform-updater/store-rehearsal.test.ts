@@ -2,6 +2,7 @@ import { afterEach, expect, it } from 'bun:test';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
@@ -11,8 +12,8 @@ async function fixture(fails = false) {
   const source = join(root, 'releases', 'candidate', 'api', 'packages/server/src/store');
   await mkdir(join(source, 'db'), { recursive: true });
   await writeFile(join(source, 'db/postgres.ts'), 'export function openMultiremiDatabase(){return {close(){}}}');
-  await writeFile(join(source, 'store.ts'), `import {writeFileSync} from 'node:fs';
-export class MultiremiStore { constructor(){writeFileSync('startup-ran','operator and question migrations');if(!process.env.MULTIREMI_MIGRATION_REPORT_DIR?.endsWith('/scratch/reports/migrations'))throw new Error('Missing report override');${fails ? "throw new Error('invalid historical route');" : ''}} }`);
+  await writeFile(join(source, 'store.ts'), `import {writeFileSync} from 'node:fs';import {resolve} from 'node:path';
+export class MultiremiStore { constructor(){writeFileSync('startup-ran','operator and question migrations');if(resolve(process.env.MULTIREMI_MIGRATION_REPORT_DIR || '')!==${JSON.stringify(join(root, 'scratch/reports/migrations'))})throw new Error('Missing report override');${fails ? "throw new Error('invalid historical route');" : ''}} }`);
   const reports = join(root, 'home/reports/migrations');
   await mkdir(reports, { recursive: true });
   await writeFile(join(reports, 'test-before.json'), '{"phase":"before"}');
@@ -21,7 +22,7 @@ export class MultiremiStore { constructor(){writeFileSync('startup-ran','operato
   if (await tar.exited !== 0) throw new Error('Fixture tar failed');
   const run = async (url = 'postgres://remi_rehearsal:fixture@127.0.0.1/remi_update_rehearsal') => {
     const runtime = resolve('packages/platform-updater/src/container-runtime.mjs');
-    const script = `import {rehearseStoreMigration} from ${JSON.stringify(runtime)}; await rehearseStoreMigration(${JSON.stringify(resolve(source, '../../../..'))}, ${JSON.stringify(archive)}, ${JSON.stringify(join(root, 'scratch'))});`;
+    const script = `import {rehearseStoreMigration} from ${JSON.stringify(pathToFileURL(runtime).href)}; await rehearseStoreMigration(${JSON.stringify(resolve(source, '../../../..'))}, ${JSON.stringify(archive)}, ${JSON.stringify(join(root, 'scratch'))});`;
     const args = url.endsWith('/production') ? [runtime, 'migrate', 'candidate'] : ['--eval', script];
     const child = Bun.spawn([process.execPath, ...args], {
       env: { ...process.env, REMI_APPLICATION_ROOT: root, MULTIREMI_DATABASE_URL: url }, stdout: 'pipe', stderr: 'pipe',
@@ -56,8 +57,8 @@ it('rejects a production database before importing the candidate', async () => {
 it('direct store startup still refuses an applied migration without persistent reports', async () => {
   const root = await mkdtemp(join(tmpdir(), 'remi-store-report-guard-')); roots.push(root);
   const script = `
-    import { MultiremiStore } from ${JSON.stringify(resolve('packages/server/src/store/store.ts'))};
-    import { openSqliteDatabase } from ${JSON.stringify(resolve('packages/server/src/store/db/sqlite.ts'))};
+    import { MultiremiStore } from ${JSON.stringify(pathToFileURL(resolve('packages/server/src/store/store.ts')).href)};
+    import { openSqliteDatabase } from ${JSON.stringify(pathToFileURL(resolve('packages/server/src/store/db/sqlite.ts')).href)};
     import { rmSync, mkdirSync } from 'node:fs';
     const db = openSqliteDatabase(':memory:');
     try {

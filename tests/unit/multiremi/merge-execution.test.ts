@@ -353,6 +353,44 @@ describe('C1 credential boundary (mock GitHub, real SQLite/HTTP/worker)', () => 
     expect((await f.app.request(`/api/workspaces/local/scm/connections/scm_other/repositories/${y.id}`, { method: 'PUT', headers: f.taskHeaders, body: JSON.stringify({ transfer: true }) })).status).toBe(200);
     const allowed = await otherCredentials(f); expect(allowed.status).toBe(200); expect((await allowed.json()).password).toBe('separate-task-secret');
   });
+  it('records default connection transfers before immediate Task deletion without intervening reads', async () => {
+    const f = await protectionFixture({ strict: true });
+    expect((await f.credentials()).status).toBe(409);
+    await removeAssociations(f);
+    expect((await f.app.request('/api/workspaces/local/repos/repo_merge', { method: 'DELETE', headers: f.taskHeaders })).status).toBe(200);
+    const r = await imported(f, 'https://github.com/acme/widgets.git');
+    expect(f.store.listScmRepositoryBindings({ connectionId: 'scm_merge' }).find(b => b.repositoryId === r.id)?.assignmentOrigin).toBe('default');
+    f.store.createScmConnection({ id: 'scm_other', workspaceId: 'local', name: 'C2', provider: 'github', mode: 'poll', accessToken: 'other-secret', repositoryScope: 'selected' });
+    const revision = f.store.mergePolicies.get(f.project.id).revision;
+    const switched = await f.app.request('/api/workspaces/local/scm/connections/scm_other', { method: 'PATCH', headers, body: JSON.stringify({ repositoryScope: 'all' }) });
+    expect(switched.status, await switched.clone().text()).toBe(200);
+    expect(f.store.listScmRepositoryBindings({ connectionId: 'scm_other' }).find(b => b.repositoryId === r.id)?.assignmentOrigin).toBe('default');
+    // No gate or credentials read between the transfer and deleting its only repository.
+    expect((await f.app.request(`/api/workspaces/local/repos/${r.id}`, { method: 'DELETE', headers: f.taskHeaders })).status).toBe(200);
+    const y = await imported(f, 'https://github.com/acme/other.git');
+    expect(f.store.listScmRepositoryBindings({ connectionId: 'scm_other' }).find(b => b.repositoryId === y.id)?.assignmentOrigin).toBe('default');
+    const denied = await otherCredentials(f);
+    expect(denied.status).toBe(409);
+    expect((await denied.json()).reasons[0].evidence.remote_key).toBe('github.com/acme/widgets');
+    expect(f.store.mergePolicies.get(f.project.id).revision).toBe(revision);
+    expect(f.state.puts).toHaveLength(0);
+  });
+  it('does not allow Task PATCH to change a repository URL or its binding', async () => {
+    const f = await protectionFixture({ strict: true }); await removeAssociations(f);
+    const y = await imported(f, 'https://github.com/acme/other.git');
+    f.store.createScmConnection({ id: 'scm_other', workspaceId: 'local', name: 'C2', provider: 'github', mode: 'poll', accessToken: 'other-secret', repositoryScope: 'selected' });
+    expect((await bind(f, y.id, 'scm_other')).status).toBe(200);
+    for (const url of ['https://github.com/acme/widgets.git', 'https://github.com/acme/other.git']) {
+      const response = await f.app.request(`/api/workspaces/local/repos/${y.id}`, { method: 'PATCH', headers: f.taskHeaders, body: JSON.stringify({ url }) });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: 'repository update is empty' });
+    }
+    // Unknown url is also ignored alongside a valid editable field; it cannot mutate the remote.
+    expect((await f.app.request(`/api/workspaces/local/repos/${y.id}`, { method: 'PATCH', headers: f.taskHeaders, body: JSON.stringify({ url: 'https://github.com/acme/widgets.git', description: 'Y' }) })).status).toBe(200);
+    expect(f.store.listScmRepositoryBindings({ connectionId: 'scm_other' }).find(b => b.repositoryId === y.id)?.repositoryUrl).toBe('https://github.com/acme/other.git');
+    expect((await otherCredentials(f)).status).toBe(200);
+    expect(f.state.puts).toHaveLength(0);
+  });
   it('binding upsert records coverage in the transaction before immediate Task unbind', async () => {
     const f = await protectionFixture({ strict: true }); await removeAssociations(f);
     f.store.createScmConnection({ id: 'scm_new', workspaceId: 'local', name: 'New', provider: 'github', mode: 'poll', accessToken: 'new-task-secret', repositoryIds: [] });

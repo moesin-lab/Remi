@@ -234,8 +234,9 @@ try {
       if (exitCode && cmd === 'docker' && argv.at(-2) === 'migrate') {
         const id = argv.at(-1)!; assert(/^(?:app|seed)-[a-f0-9]{40,64}$/.test(id));
         // Reproduce only inside the still-live disposable PostgreSQL namespace. Return the original failure unchanged.
-        const probe = "process.env.HOME='/tmp';process.env.MULTIREMI_HOME='/tmp/remi';const url=new URL(process.env.MULTIREMI_DATABASE_URL);if(url.hostname!=='127.0.0.1'||url.username!=='remi_rehearsal'||url.pathname!=='/remi_update_rehearsal')throw new Error('Unsafe diagnostic database');const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {MultiremiStore}=await import('./packages/server/src/store/store.ts');const db=openMultiremiDatabase();try{new MultiremiStore(db)}finally{await db.close()}";
-        await diagnostic('migration_failure_probe', ['run', '--name', `${project}-diagnostic`, '--label', `io.remi.upgrade-harness=${project}`, ...argv.slice(1, -3), '--cwd', `/opt/remi-application/releases/${id}/api`, '--eval', probe]);
+        // Match the migration child's startup HOME: Bun caches os.homedir(), so assigning HOME inside eval is too late.
+        const probe = "const url=new URL(process.env.MULTIREMI_DATABASE_URL);if(url.hostname!=='127.0.0.1'||url.username!=='remi_rehearsal'||url.pathname!=='/remi_update_rehearsal')throw new Error('Unsafe diagnostic database');const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {MultiremiStore}=await import('./packages/server/src/store/store.ts');const db=openMultiremiDatabase();try{new MultiremiStore(db)}finally{await db.close()}";
+        await diagnostic('migration_failure_probe', ['run', '--name', `${project}-diagnostic`, '--label', `io.remi.upgrade-harness=${project}`, '--env', 'HOME=/tmp', '--env', 'MULTIREMI_HOME=/tmp/remi', ...argv.slice(1, -3), '--cwd', `/opt/remi-application/releases/${id}/api`, '--eval', probe]);
       }
       if (exitCode && cmd === 'docker' && argv.includes('verify-running')) {
         const index = argv.indexOf('exec');

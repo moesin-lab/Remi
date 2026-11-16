@@ -1,6 +1,8 @@
 # 自用实例部署（stable profile）
 
-适用条件：Linux 主机，用 `scripts/local-profile.mjs` 以本地构建（`--build-local true`）方式部署的本机 stable 实例，未接入应用更新模式（profile 里没有 `compose.application.json`）。下文 `<profile-root>` 指 `~/.remi/profiles/stable`，`<target>` 指 daemon 编译目标（例如 `bun-linux-x64`），按实际主机替换。以下适用于用 `scripts/local-profile.mjs` 部署的本机 stable 实例：API / Web 在 Compose 项目 `remi-stable` 中运行，daemon 是 systemd user unit `multiremi-daemon.service`，以 drop-in 覆盖 `ExecStart` 指向某个 release 目录里的二进制。部署前确认用户已授权「拉最新代码重新部署」。
+适用条件：Linux 主机；用 `scripts/local-profile.mjs` 以本地构建（`--build-local true`）方式部署的本机 stable 实例，未接入应用更新模式（profile 里没有 `compose.application.json`）。API / Web 在 Compose 项目 `remi-stable` 中运行；daemon 是 systemd user unit `multiremi-daemon.service`，用 drop-in 覆盖 `ExecStart`，指向某个 release 目录里的二进制。其他部署方式不要照搬本页。
+
+下文 `<profile-root>` 指 stable profile 目录（默认 `~/.remi/profiles/stable`），`<target>` 指 daemon 编译目标（例如 `bun-linux-x64`），按实际主机替换。部署前确认用户已授权「拉最新代码重新部署」。
 
 ## 1. 平台（API / Web）
 
@@ -23,7 +25,7 @@
 5. 脚本先构建镜像、再停旧服务、备份（`Backup: …` 行给出目录）、启动新服务。检查：
 
    ```bash
-   jq '{ref,version}' ~/.remi/profiles/stable/active.json
+   jq '{ref,version}' <profile-root>/active.json
    curl -s http://<host>:16120/readyz     # {"ok":true}
    curl -s -o /dev/null -w '%{http_code}' http://<host>:13000/login   # 200
    ```
@@ -39,7 +41,7 @@
    out/remi --version
    ```
 
-2. 安装到 `~/.remi/profiles/stable/releases/<full-sha>/daemon-bin/remi`，新增一个编号更大的 drop-in（例如 `95-main-<short-sha>.conf`），内容为清空并重设 `ExecStart=<那个路径> daemon start --foreground`，然后 `systemctl --user daemon-reload`。
+2. 安装到 `<profile-root>/releases/<full-sha>/daemon-bin/remi`，新增一个编号更大的 drop-in（例如 `95-main-<short-sha>.conf`），内容为清空并重设 `ExecStart=<那个路径> daemon start --foreground`，然后 `systemctl --user daemon-reload`。
 3. 重启前看 `remi daemon status` 的 `Active tasks`。等空闲最多约 20 分钟；任务持续进来时直接 `systemctl --user restart multiremi-daemon.service`（systemd 约 90 秒后强杀）。
 4. 重启后确认每条 lane 的 `Version` 都是新版本；用 `remi turn list --status running` 记下重启前在跑的轮次，重启后它们会以 `agent_error.unknown` 失败且**不会自动重试**，逐个 `remi turn retry <turn> --yes`（已经有新轮次在跑的会话会报 already has an active run，可以忽略）。
 

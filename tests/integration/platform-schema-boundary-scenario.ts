@@ -23,7 +23,7 @@ export async function runSchemaBoundaryScenario(): Promise<void> {
   const volume = `${name}-program`;
   const label = `io.remi.schema-boundary=${name}`;
   const commands: Array<{ command: string; args: string[]; cwd?: string }> = [];
-  const evidence: Record<string, unknown> = { base: BASE, productBaseline: '84e31e785b9faa3a085587732a9b9d26751de658', commands, cleanup: {}, manual: 'docs/deploy/manual-schema-boundary-upgrade.md' };
+  const evidence: Record<string, unknown> = { base: BASE, productBaseline: 'f59025e755b13d0217eac8cf35ddf51997ef6c1b', commands, cleanup: {}, manual: 'docs/deploy/manual-schema-boundary-upgrade.md' };
   let pgCreated = false, volumeCreated = false, worktreeCreated = false;
   const command = (executable: string, args: string[], input?: Buffer | string) => {
     commands.push({ command: executable, args });

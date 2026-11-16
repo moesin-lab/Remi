@@ -16,7 +16,7 @@ pendingTurnBackendTests('MUL-506 actual reader and provider checkpoints', fixtur
     const attempt = f.store.claimTask('rt_read')!;
     f.store.startTask(attempt.id);
     f.store.getDaemonTurnBridge().offerInput(f.store.getTaskWithAgent(attempt.id)!);
-    const lane = () => f.db.query("SELECT cursor_seq,cursor_offset,provider_cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=''").get(session.id, agent.id)!;
+    const lane = () => fixture().db.query("SELECT cursor_seq,cursor_offset,provider_cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=''").get(session.id, agent.id)!;
     return { ...f, issue, agent, session, sent, attempt, lane };
   }
 
@@ -39,13 +39,17 @@ pendingTurnBackendTests('MUL-506 actual reader and provider checkpoints', fixtur
     f.db.run('DELETE FROM multiremi_schema_migrations WHERE id IN (?,?,?)', ['20261005_fold_agent_read_state', '20261005_separate_lane_provider_progress', '20261114_execution_endpoint_read_projection']);
     f.db.exec('ALTER TABLE multiremi_session_lanes DROP COLUMN cursor_offset');
     f.db.exec('ALTER TABLE multiremi_turns DROP COLUMN trigger_message_id');
-    new MultiremiStore(f.db);
+    // A historical-schema restart gets a fresh PostgreSQL connection too: cached
+    // SELECT * plans from the modern view cannot survive this synthetic column reorder.
+    if (f.databaseUrl) f.reopen();
+    else new MultiremiStore(f.db);
+    const migrated = fixture();
     expect(f.lane()).toMatchObject({ cursor_seq: 0, cursor_offset: 32_000, provider_cursor_seq: head });
-    f.store.completeTask(f.attempt.id, { output: 'finished', sessionId: 'reader-provider', workDir: '/reader' });
-    new MultiremiStore(f.db);
+    migrated.store.completeTask(f.attempt.id, { output: 'finished', sessionId: 'reader-provider', workDir: '/reader' });
+    new MultiremiStore(migrated.db);
     expect(f.lane()).toMatchObject({ cursor_seq: 0, cursor_offset: 32_000, provider_cursor_seq: head });
-    const newcomer = f.store.createAgent({ name: 'New reader', provider: 'codex' });
-    expect(f.store.getSessionAgentReadProgress(f.session.id, newcomer.id)).toEqual({ seq: 0, offset: 0 });
+    const newcomer = migrated.store.createAgent({ name: 'New reader', provider: 'codex' });
+    expect(migrated.store.getSessionAgentReadProgress(f.session.id, newcomer.id)).toEqual({ seq: 0, offset: 0 });
   });
 
   for (const partial of [false, true]) it(`warm completion preserves ${partial ? 'partial' : 'unread'} actual progress independently of the provider`, () => {

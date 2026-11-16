@@ -83,6 +83,12 @@ export class SkillImportError extends Error {
   }
 }
 
+class UpstreamHttpError extends Error {
+  constructor(readonly status: number, url: string) {
+    super(`HTTP ${status} for ${url}`);
+  }
+}
+
 class ImportCapError extends Error {
   constructor(message: string) {
     super(message);
@@ -164,7 +170,7 @@ async function fetchFromGitHub(rawUrl: string): Promise<ImportedSkill> {
   try {
     skillMd = await fetchRawText(buildRawGitHubUrl(rawPrefix, skillMdPath));
   } catch (error) {
-    if (isCapError(error) || error instanceof SkillImportError) throw error;
+    if (!(error instanceof UpstreamHttpError) || error.status !== 404) throw error;
     if (!spec.skillDir) {
       throw new Error(`SKILL.md not found at the root of ${spec.owner}/${spec.repo}@${spec.ref}. For multi-skill repositories, point to github.com/${spec.owner}/${spec.repo}/tree/${spec.ref}/<skill-dir>`);
     }
@@ -214,7 +220,8 @@ async function fetchFromSkillsSh(rawUrl: string): Promise<ImportedSkill> {
       skillMd = await fetchRawText(buildRawGitHubUrl(rawPrefix, `${dir}/SKILL.md`));
       skillDir = dir;
       break;
-    } catch {
+    } catch (error) {
+      if (!(error instanceof UpstreamHttpError) || error.status !== 404) throw error;
       // Try the next conventional location.
     }
   }
@@ -226,7 +233,8 @@ async function fetchFromSkillsSh(rawUrl: string): Promise<ImportedSkill> {
         skillMd = rootSkillMd;
         skillDir = "";
       }
-    } catch {
+    } catch (error) {
+      if (!(error instanceof UpstreamHttpError) || error.status !== 404) throw error;
       // Fall through to the repository tree scan.
     }
   }
@@ -391,7 +399,7 @@ async function resolveGitHubSkillDirByName(owner: string, repo: string, defaultB
   const treeUrl = `https://api.github.com/repos/${encodePathSegment(owner)}/${encodePathSegment(repo)}/git/trees/${escapeRefPath(defaultBranch)}?recursive=1`;
   const response = await fetchGitHubApi(treeUrl);
   if (response.status !== 200) {
-    throw new Error(`failed to inspect repository ${owner}/${repo} for skill ${skillName}: HTTP ${response.status}`);
+    throw upstreamHttpError(response, treeUrl);
   }
   const tree = await response.json() as GitHubTreeResponse;
   const skillPaths = extractSkillMdPaths(tree.tree ?? []);
@@ -419,12 +427,14 @@ async function findSkillDirFromConventionalPrefixes(owner: string, repo: string,
 }
 
 async function listGitHubSkillMdPaths(owner: string, repo: string, repoPath: string, ref: string): Promise<string[]> {
-  const response = await fetchGitHubApi(buildGitHubContentsUrl(owner, repo, repoPath, ref));
+  const url = buildGitHubContentsUrl(owner, repo, repoPath, ref);
+  const response = await fetchGitHubApi(url);
   if (response.status === 404) return [];
-  if (response.status !== 200) return [];
-  const decoded = await response.json().catch(() => []);
+  if (response.status !== 200) throw upstreamHttpError(response, url);
+  const decoded = await response.json();
+  if (!Array.isArray(decoded)) throw new Error(`expected a directory listing for ${url}`);
   const paths: string[] = [];
-  if (Array.isArray(decoded)) await collectGitHubSkillMdPaths(decoded as GitHubContentEntry[], paths, buildGitHubContentsUrl(owner, repo, repoPath, ref));
+  await collectGitHubSkillMdPaths(decoded as GitHubContentEntry[], paths, url);
   return paths;
 }
 
@@ -437,11 +447,8 @@ async function collectGitHubSkillMdPaths(entries: GitHubContentEntry[], out: str
     }
     if (entry.type !== "dir") continue;
     const subUrl = entry.url || deriveGitHubSubdirectoryUrl(parentUrl, entry.name ?? "");
-    if (!subUrl) continue;
-    const response = await fetchGitHubApi(subUrl);
-    if (response.status !== 200) continue;
-    const decoded = await response.json().catch(() => []);
-    if (Array.isArray(decoded)) await collectGitHubSkillMdPaths(decoded as GitHubContentEntry[], out, subUrl);
+    if (!subUrl) throw new Error(`GitHub import: missing URL for directory ${entry.path ?? entry.name}`);
+    await collectGitHubSkillMdPaths(await readGitHubDirectory(subUrl), out, subUrl);
   }
 }
 
@@ -452,7 +459,8 @@ async function findMatchingSkillDirByFrontmatter(rawPrefix: string, skillName: s
       if (parseSkillFrontmatter(skillMd).name === skillName) {
         return { skillDir: skillDirFromSkillFilePath(skillPath), skillMd };
       }
-    } catch {
+    } catch (error) {
+      if (!(error instanceof UpstreamHttpError) || error.status !== 404) throw error;
       // Keep scanning other candidate SKILL.md files.
     }
   }
@@ -461,38 +469,32 @@ async function findMatchingSkillDirByFrontmatter(rawPrefix: string, skillName: s
 
 async function resolveGitHubRefAndPath(spec: GitHubSpec): Promise<void> {
   const tried: string[] = [];
-  let blocked = false;
   for (let length = spec.refSegments.length; length >= 1; length -= 1) {
     const candidate = spec.refSegments.slice(0, length).join("/");
     tried.push(candidate);
     const result = await githubRefExists(spec.owner, spec.repo, candidate);
-    if (result === "blocked") {
-      blocked = true;
-      continue;
-    }
     if (result) {
       spec.ref = candidate;
       spec.skillDir = length === spec.refSegments.length ? "" : spec.refSegments.slice(length).join("/");
       return;
     }
   }
-  if (blocked) return;
   throw new Error(`could not resolve ref in github.com/${spec.owner}/${spec.repo} URL; tried: ${tried.join(", ")}`);
 }
 
-async function githubRefExists(owner: string, repo: string, ref: string): Promise<boolean | "blocked"> {
+async function githubRefExists(owner: string, repo: string, ref: string): Promise<boolean> {
   const url = `https://api.github.com/repos/${encodePathSegment(owner)}/${encodePathSegment(repo)}/commits/${escapeRefPath(ref)}`;
   const response = await fetchGitHubApi(url, { accept: "application/vnd.github.v3.sha" });
   if (response.status === 200) return true;
   if (response.status === 404 || response.status === 422) return false;
-  if (response.status === 401 || response.status === 403 || response.status === 429) return "blocked";
-  throw new Error(`github API returned status ${response.status} for ref ${ref}`);
+  throw upstreamHttpError(response, url);
 }
 
 async function fetchGitHubDefaultBranch(owner: string, repo: string): Promise<string> {
-  const response = await fetchGitHubApi(`https://api.github.com/repos/${encodePathSegment(owner)}/${encodePathSegment(repo)}`);
-  if (response.status !== 200) return "main";
-  const info = await response.json().catch(() => ({})) as GitHubRepoInfo;
+  const url = `https://api.github.com/repos/${encodePathSegment(owner)}/${encodePathSegment(repo)}`;
+  const response = await fetchGitHubApi(url);
+  if (response.status !== 200) throw upstreamHttpError(response, url);
+  const info = await response.json() as GitHubRepoInfo;
   return info.default_branch || "main";
 }
 
@@ -639,7 +641,7 @@ function upstreamHttpError(response: Response, url: string): Error {
       429,
     );
   }
-  return new Error(`HTTP ${response.status} for ${url}`);
+  return new UpstreamHttpError(response.status, url);
 }
 
 async function fetchRawText(url: string): Promise<string> {

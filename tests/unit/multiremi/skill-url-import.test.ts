@@ -25,6 +25,7 @@ function mockBundle(override: (url: string) => Response | undefined = () => unde
     if (url === `${raw}/notes.md`) return new Response("Notes");
     if (url === `${raw}/references/SKILL.md`) return new Response("Nested Skill");
     if (url === `${raw}/references/guide.md`) return new Response("Guide");
+    if (url.startsWith("https://raw.githubusercontent.com/example/skills/main/") && url.endsWith("/SKILL.md")) return new Response("Not found", { status: 404 });
     throw new Error(`Unexpected fetch: ${url}`);
   });
 }
@@ -113,6 +114,48 @@ describe("URL skill bundle import", () => {
         expect((await post(app, routes[1], url)).status).toBe(failure.status);
         expect(store.getSkill(good.id)).toEqual(before);
       });
+    }
+  }
+
+  const discoveryStages = [
+    { name: "GitHub default branch", source: "https://github.com/example/skills", target: "https://api.github.com/repos/example/skills" },
+    { name: "skills.sh default branch", source: "https://skills.sh/example/skills/demo", target: "https://api.github.com/repos/example/skills" },
+    { name: "GitHub ref", source: sourceUrl, target: "https://api.github.com/repos/example/skills/commits/main/demo" },
+    { name: "conventional candidate", source: "https://skills.sh/example/skills/demo", target: "https://raw.githubusercontent.com/example/skills/main/skills/demo/SKILL.md" },
+    { name: "root candidate", source: "https://skills.sh/example/skills/demo", target: "https://raw.githubusercontent.com/example/skills/main/SKILL.md" },
+    { name: "tree", source: "https://skills.sh/example/skills/demo", target: "https://api.github.com/repos/example/skills/git/trees/main?recursive=1" },
+    { name: "tree candidate", source: "https://skills.sh/example/skills/demo", target: "https://raw.githubusercontent.com/example/skills/main/other/SKILL.md" },
+    { name: "truncated tree prefix", source: "https://skills.sh/example/skills/demo", target: "https://api.github.com/repos/example/skills/contents/skills?ref=main", truncated: true },
+    { name: "truncated tree subdirectory", source: "https://skills.sh/example/skills/demo", target: "https://api.github.com/repos/example/skills/contents/skills/nested?ref=main", truncated: true },
+  ];
+  for (const stage of discoveryStages) {
+    for (const status of [403, 429, 500]) {
+      for (const route of routes) {
+        it(`preserves discovery failure ${status} at ${stage.name}: ${route}`, async () => {
+          const store = createStore();
+          const app = createMultiremiApp({ store });
+          mockBundle((url) => {
+            if (["root candidate", "tree", "tree candidate", "truncated tree prefix", "truncated tree subdirectory"].includes(stage.name)
+              && url === `${raw}/SKILL.md`) return new Response("Not found", { status: 404 });
+            if (stage.name === "tree candidate" && url.endsWith("/git/trees/main?recursive=1")) return jsonResponse({ tree: [{ type: "blob", path: "other/SKILL.md" }] });
+            if (url === stage.target) return new Response("Failed", {
+              status,
+              headers: status === 403 ? { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1800000000" } : {},
+            });
+            if (stage.truncated && url.endsWith("/git/trees/main?recursive=1")) return jsonResponse({ tree: [], truncated: true });
+            if (stage.truncated && url.endsWith("/contents/skills?ref=main")) return jsonResponse([
+              { name: "nested", type: "dir", path: "skills/nested", url: stage.target },
+            ]);
+          });
+          const response = await post(app, route, stage.source);
+          expect(response.status).toBe(status === 500 ? 502 : 429);
+          const error = (await response.json()).error;
+          expect(error).toContain(stage.target);
+          expect(error).toContain(status === 500 ? "HTTP 500" : "GITHUB_TOKEN");
+          if (status === 403) expect(error).toContain("2027-01-15T08:00:00.000Z");
+          expect(store.listSkills()).toEqual([]);
+        });
+      }
     }
   }
 

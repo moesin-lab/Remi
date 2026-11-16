@@ -487,21 +487,42 @@ dependencies must update that list too. Unknown fingerprints block updates.
 Application releases with different fingerprints additionally require a reviewed
 `application.rollbackSafeFrom` declaration in both the feed and archive and a
 successful target/previous migration rehearsal. Existing columns must remain
-compatible. Release packaging checks
-[`platform-application-compatibility.json`](platform-application-compatibility.json)
-against the actual migration fingerprint; maintain that policy when migrations
-change. The [release architecture guard](../tests/arch/release-workflows.test.ts)
-also checks this policy against the tracked source before publication. Never
-copy a new fingerprint onto old code. The explicit image and
-systemd executors retain their stricter equal-fingerprint requirement.
+compatible. Packaging computes `dataSchema` from tagged source, verifies both
+architecture images and extracted archives against it, and writes it into the
+feed and each archive. Source PRs do not commit fingerprints or rollback policy.
+Never copy a new fingerprint onto old code. Explicit image and systemd executors
+retain their stricter equal-fingerprint requirement.
 
-The current `rollbackSafeFrom` policy attests only the preceding fingerprint
-listed in the policy file: MUL-40 changes continuation consumer logic in a
-hashed source file without changing schema, migrations or record formats.
-Both versions retain the #44 sender allowlist data migration and default; this
-does not attest rollback across that migration to an earlier fingerprint.
-Code-only rollback restores the known continuation/input failure behavior.
-This does not attest code-only rollback from the legacy storage model.
+#### Release rollback review
+
+Before platform publication, the release manager identifies the **previous
+published platform release** (not the previous main commit), downloads its
+`platform-release.json`, and asks a human reviewer to confirm that previous code
+can read data after the target migrations. Record the reviewer and rationale in
+a `platform-rollback-review.json` attachment on the **target GitHub Release**:
+
+```json
+{
+  "targetRef": "<target 40-character commit SHA>",
+  "previousVersion": "0.2.95",
+  "previousDataSchema": "<dataSchema from the previous published manifest>",
+  "reviewedBy": "<human reviewer>",
+  "reason": "<reviewed migration/storage compatibility evidence and rollback limitations>"
+}
+```
+
+Upload the reviewed attachment before `platform-release.yml` packages the release;
+if automatic publication already ran, rerun that workflow for the same tag after
+review. The workflow downloads the named stable Release manifest and packaging
+checks its version/schema against the attestation and binds it to the target SHA.
+The attachment and embedded `rollbackReview` preserve the review evidence.
+Without an attachment, packaging emits `application.rollbackSafeFrom: []`;
+a changed fingerprint still blocks updates. Invalid declarations fail publication.
+The release manager must verify this is the previous published platform version;
+no compatibility is inferred from Git history. Declaration changes require renewed
+human review. Packaging and publication do not authorize deployment; backup and
+migration rehearsal remain mandatory.
+
 Legacy deployments must follow the [controlled cutover](../docs/deploy/unified-model-cutover.md)
 before adopting this schema; publication alone does not authorize that migration.
 

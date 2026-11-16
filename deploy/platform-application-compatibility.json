@@ -1,7 +1,0 @@
-{
-  "dataSchema": "5d6e7a6bbf969f7995698de836f056bdd4ca41830b9c1bf36a96039e51082cf8",
-  "rollbackSafeFrom": [
-    "54139a9278d267bc8bc5a460c9196899a51ce8a4670654877e44080c6ea3fab1"
-  ],
-  "reason": "MUL-48: relative to main 84e31e785b9faa3a085587732a9b9d26751de658 (fingerprint 54139a9278d267bc8bc5a460c9196899a51ce8a4670654877e44080c6ea3fab1), the only changed data-schema input is packages/server/src/store/inbox/questions.ts. It validates the existing source attempt against its actual Turn, Session, workspace, Agent and execution scope before accepting a native Question. Historical business Questions retain their existing exact-source checks and may live in a parent Session or a different execution scope. No tables, columns, indexes, migrations, backfills, serialized record formats or lifecycle status values change. Previous code can read the same persisted records; code-only rollback to that immediate main fingerprint is compatible but restores the known Chat-owned automation Question source-integrity defect. Only that immediate main fingerprint is attested by rollbackSafeFrom. This retains the existing feishu_sender_allowlist_enforced_v1 migration and shared-operator storage contracts on both sides; it does not attest rollback across that migration or to earlier fingerprints. Backup verification and target/previous migration rehearsal remain required before an application update. This declaration does not authorize production migration or deployment."
-}

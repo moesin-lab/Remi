@@ -25,7 +25,10 @@ Web 设置的「版本与服务」和 CommandRegistry 的 `platform` 命令共�
 宿主应用模式仍默认下载 API/Web 应用包，首次复用原镜像接入，之后重启相同容器；
 该模式复用镜像内的 Bun/Node，运行时不兼容仍阻止更新。运行中的 api-runtime 必须显式
 纳入其核心服务；daemon、数据库和 SSH 控制面不属于可重启范围。
-未知数据指纹拒绝更新；指纹变化还必须有[审核过的回退兼容声明](../../deploy/platform-application-compatibility.json)。
+未知数据指纹拒绝更新；指纹由打包时从源码计算。指纹变化还必须有[发版阶段审核过的回退兼容声明](../../deploy/README.md#release-rollback-review)：
+发版负责人以先前已发布版本的 manifest 为依据，请人工审阅者确认兼容性，
+将声明作为目标 Release 附件交给打包流程；无声明时生成空列表，updater 继续拒绝不同指纹更新。
+迁移源清单统一来自 `packages/platform-updater/src/data-schema-inputs.json`。
 显式 `MULTIREMI_PLATFORM_UPDATE_MODE=images` 才使用原镜像驱动和 local-profile 快照协议；
 其相同迁移指纹限制继续保留。切换更新模式前需完成旧模式中的操作恢复。
 

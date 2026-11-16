@@ -61,7 +61,8 @@ export async function runSchemaBoundaryScenario(): Promise<void> {
       if (attempt >= 60) throw new Error('PostgreSQL readiness timed out');
       await Bun.sleep(500);
     }
-    const migrate = (source: string, database: string, apiHome: string) => docker(['run', '--rm', '--pull=never', '--label', label, '--network', `container:${name}`, '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m',
+    // Migration reports are private files: keep their owner equal to the host test runner.
+    const migrate = (source: string, database: string, apiHome: string) => docker(['run', '--rm', '--pull=never', '--user', `${process.getuid!()}:${process.getgid!()}`, '--label', label, '--network', `container:${name}`, '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m',
       '--mount', `type=bind,src=${source},dst=/source,readonly`, '--mount', `type=bind,src=${apiHome},dst=/data/home`, '--workdir', '/source',
       '--env', 'HOME=/data/home', '--env', 'REMI_HOME=/data/home', '--env', 'MULTIREMI_HOME=/data/home', '--env', 'MULTIREMI_MIGRATION_REPORT_DIR=/data/home/reports/migrations',
       '--env', `MULTIREMI_DATABASE_URL=postgresql://remi_rehearsal@127.0.0.1:5432/${database}`, 'oven/bun:1.3.14', 'bun', '--eval', migration]);

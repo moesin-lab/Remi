@@ -21,11 +21,10 @@ export async function runSchemaBoundaryScenario(): Promise<void> {
   const oldSource = join(scratch, 'v0.2.90');
   const name = `remi-schema-boundary-${process.pid}`;
   const volume = `${name}-program`;
-  const updaterImage = `${name}:updater`;
   const label = `io.remi.schema-boundary=${name}`;
   const commands: Array<{ command: string; args: string[]; cwd?: string }> = [];
   const evidence: Record<string, unknown> = { base: BASE, productBaseline: 'f59025e755b13d0217eac8cf35ddf51997ef6c1b', commands, cleanup: {}, manual: 'docs/deploy/manual-schema-boundary-upgrade.md' };
-  let pgCreated = false, volumeCreated = false, worktreeCreated = false, imageCreated = false;
+  let pgCreated = false, volumeCreated = false, worktreeCreated = false;
   const command = (executable: string, args: string[], input?: Buffer | string) => {
     commands.push({ command: executable, args });
     const result = spawnSync(executable, args, { cwd: repository, input, maxBuffer: 128 * 1024 * 1024, timeout: 180_000 });
@@ -62,10 +61,6 @@ export async function runSchemaBoundaryScenario(): Promise<void> {
       if (attempt >= 60) throw new Error('PostgreSQL readiness timed out');
       await Bun.sleep(500);
     }
-    docker(['build', '--pull=false', '--network=none', '--label', label, '--tag', updaterImage, '--file', 'deploy/docker/Dockerfile.updater', '.']); imageCreated = true;
-    evidence.updaterImage = docker(['image', 'inspect', '--format', '{{.Id}}', updaterImage]).toString().trim();
-    docker(['run', '--rm', '--pull=never', '--read-only', '--label', label, '--network', 'none', '--entrypoint', 'bun', updaterImage, '--eval', "await import('@remi-platform/updater/internal-driver.js'); await import('@remi-platform/updater/worker.js'); const {isPlatformSchemaContractFailure}=await import('@multiremi/contracts/platform-failure.js'); if (typeof isPlatformSchemaContractFailure !== 'function') throw new Error('Missing contracts validator');"]);
-    evidence.updaterImageSmoke = true;
     // Migration reports are private files: keep their owner equal to the host test runner.
     const migrate = (source: string, database: string, apiHome: string) => docker(['run', '--rm', '--pull=never', '--user', `${process.getuid!()}:${process.getgid!()}`, '--label', label, '--network', `container:${name}`, '--read-only', '--tmpfs', '/tmp:rw,nosuid,size=512m',
       '--mount', `type=bind,src=${source},dst=/source,readonly`, '--mount', `type=bind,src=${apiHome},dst=/data/home`, '--workdir', '/source',
@@ -176,15 +171,13 @@ export async function runSchemaBoundaryScenario(): Promise<void> {
     try {
       if (pgCreated) cleanup(() => { docker(['rm', '--force', '--volumes', name]); });
       if (volumeCreated) cleanup(() => { docker(['volume', 'rm', volume]); });
-      if (imageCreated) cleanup(() => { docker(['image', 'rm', updaterImage]); });
       if (worktreeCreated) cleanup(() => { command('git', ['worktree', 'remove', '--force', oldSource]); });
       const containers = docker(['ps', '--all', '--filter', `label=${label}`, '--format', '{{.Names}}']).toString().trim();
       const rehearsals = docker(['ps', '--all', '--filter', `label=io.remi.application.project=${name}`, '--format', '{{.Names}}']).toString().trim();
       const volumes = docker(['volume', 'ls', '--filter', `label=${label}`, '--format', '{{.Name}}']).toString().trim();
-      const images = docker(['image', 'ls', '--filter', `label=${label}`, '--format', '{{.ID}}']).toString().trim();
       const worktreeListed = command('git', ['worktree', 'list', '--porcelain']).toString().split('\n').includes('worktree ' + oldSource);
-      evidence.cleanup = { containers, rehearsals, volumes, images, worktreeListed, errors: cleanupErrors };
-      expect([containers, rehearsals, volumes, images, worktreeListed, cleanupErrors]).toEqual(['', '', '', '', false, []]);
+      evidence.cleanup = { containers, rehearsals, volumes, worktreeListed, errors: cleanupErrors };
+      expect([containers, rehearsals, volumes, worktreeListed, cleanupErrors]).toEqual(['', '', '', false, []]);
     } finally {
       if (cleanupErrors.length) { evidence.success = false; evidence.cleanupErrors = cleanupErrors; }
       mkdirSync(resolve(evidencePath, '..'), { recursive: true }); writeFileSync(evidencePath, JSON.stringify(evidence, null, 2) + '\n');

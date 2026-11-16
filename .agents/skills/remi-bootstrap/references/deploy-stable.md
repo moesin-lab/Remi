@@ -5,6 +5,7 @@
 ## 1. 平台（API / Web）
 
 1. `git fetch origin`，取 `origin/main` 的**完整 40 位 SHA**（脚本只接受完整提交；手敲容易出错，用 `git rev-parse` 取）。
+   **从目标提交的检出目录运行部署脚本**（例如 `git worktree add --detach <dir> <full-sha>`），不要在别的分支的工作区里跑：脚本本身也会随版本变化，旧脚本可能缺少新提交需要的能力。
 2. 主机能直接访问外网时：
 
    ```bash

@@ -195,8 +195,16 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
       status: "in_progress",
     });
 
+    const sourceComments = () => store.listIssueComments(parent.id).filter(comment => {
+      const message = store.getMessage(comment.id);
+      return comment.authorType === "system" && message?.metadata.child_issue_id === child.id
+        && message.metadata.outcome === "done";
+    });
+    const notifications = () => store.listInboxItems(store.getWorkspaceOperator("local")!.id)
+      .filter(item => item.type === "child_issue_terminal" && (item.details as Record<string, unknown>)?.childIssueId === child.id);
     replayHistoricalTestChildDone(store,child.id);
-    let comments = store.listIssueComments(parent.id).filter((comment) => comment.authorType === "system");
+    let comments = sourceComments();
+    expect(notifications()).toHaveLength(1);
     expect(comments).toHaveLength(1);
     expect(comments[0]?.type).toBe("system");
     expect(store.getMessage(comments[0]!.id)?.sender_type).toBe("platform");
@@ -209,12 +217,14 @@ describe("Multiremi store — issues, comments, labels, and inbox", () => {
     expect(comments[0]?.body).not.toContain("mention://squad/");
 
     replayHistoricalTestChildDone(store,child.id);
-    comments = store.listIssueComments(parent.id).filter((comment) => comment.authorType === "system");
+    comments = sourceComments();
+    expect(notifications()).toHaveLength(1);
     expect(comments).toHaveLength(1);
 
     store.updateIssue(child.id, { status: "in_progress" });
     replayHistoricalTestChildDone(store,child.id,'legacy-second-close');
-    comments = store.listIssueComments(parent.id).filter((comment) => comment.authorType === "system" && comment.body.includes("is done"));
+    comments = sourceComments().filter(comment => comment.body.includes("is done"));
+    expect(notifications()).toHaveLength(2);
     expect(comments).toHaveLength(2);
 
     const doneParent = createHistoricalTestIssue(store, { title: "Already done parent", status: "done" });

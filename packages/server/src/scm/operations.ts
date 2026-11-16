@@ -128,7 +128,7 @@ export class GitHubScmOperations {
   }
 
   /** Gate-only evidence: bind Actions jobs to the newest workflow run/attempt.
-   * A's observational checks endpoint and response contract are unchanged. */
+   * Workflow observations remain separate from the required job identities. */
   async gateChecks(headSha: string): Promise<ScmCheckObservation[]> {
     const summary = await this.checks(headSha);
     const actions = summary.checks.filter(c => c.kind === "check_run" && c.appSlug === "github-actions" && c.workflowPath);

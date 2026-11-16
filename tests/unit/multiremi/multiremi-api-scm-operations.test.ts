@@ -62,6 +62,7 @@ describe("SCM active HTTP operations (mock provider)", () => {
     const { app } = setup();
     let reads = 0;
     globalThis.fetch = stubFetch(async (url) => {
+      if (String(url).includes("actions/runs")) return json({ workflow_runs: [] });
       if (String(url).includes("check-runs")) return json({ check_runs: [] });
       if (String(url).includes("statuses")) return json([]);
       reads++;
@@ -82,6 +83,7 @@ describe("SCM active HTTP operations (mock provider)", () => {
     const { app } = setup();
     let reads = 0;
     globalThis.fetch = stubFetch(async (url) => {
+      if (String(url).includes("actions/runs")) return json({ workflow_runs: [] });
       if (String(url).includes("check-runs")) return json({ check_runs: [{ id: 1, name: "build", status: "completed", conclusion: "success", head_sha: head }] });
       if (String(url).includes("statuses")) return json([]);
       return json(++reads === 1 ? pull : { ...pull, base: { ...pull.base, ...base } });

@@ -56,13 +56,13 @@ export async function extractArchive(archive, destination, compressed = true, su
   const source = createReadStream(archive);
   const stream = compressed ? source.pipe(createGunzip()) : source;
   const iterator = stream[Symbol.asyncIterator]();
-  let buffer = Buffer.alloc(0), total = 0;
+  let buffer = Buffer.alloc(0), total = 0, extracted = 0;
   async function take(size) {
     while (buffer.length < size) {
       const item = await iterator.next();
       if (item.done) throw new Error('Truncated application archive');
       total += item.value.length;
-      if (total > 8 * 1024 ** 3) throw new Error('Application archive exceeds 8 GiB');
+      if (!subtree && total > 8 * 1024 ** 3) throw new Error('Application archive exceeds 8 GiB');
       buffer = Buffer.concat([buffer, item.value]);
     }
     const result = buffer.subarray(0, size);
@@ -96,7 +96,7 @@ export async function extractArchive(archive, destination, compressed = true, su
       const checksum = header.reduce((sum, byte, i) => sum + (i >= 148 && i < 156 ? 32 : byte), 0);
       if (checksum !== expected) throw new Error('Invalid tar header checksum');
       const size = parseInt(field(header.subarray(124, 136)).trim() || '0', 8);
-      if (!Number.isSafeInteger(size) || size < 0 || size > 2 * 1024 ** 3) throw new Error('Invalid tar entry size');
+      if (!Number.isSafeInteger(size) || size < 0 || (!subtree && size > 2 * 1024 ** 3)) throw new Error('Invalid tar entry size');
       const type = String.fromCharCode(header[156] || 48);
       if (['x', 'g', 'L', 'K'].includes(type)) {
         if (size > 1024 * 1024) throw new Error('Tar metadata is too large');
@@ -127,8 +127,6 @@ export async function extractArchive(archive, destination, compressed = true, su
       const name = safe(extension.path || (prefix ? prefix + '/' : '') + field(header.subarray(0, 100)));
       const link = extension.linkpath || field(header.subarray(157, 257));
       extension = {};
-      if (names.has(name) || names.size >= 250000) throw new Error('Duplicate or excessive archive entries');
-      names.add(name);
       if (subtree && name !== subtree && !name.startsWith(subtree + '/')) {
         // Consume unrelated HOME entries without materializing credentials,
         // caches or links. Only this backup's migration reports enter tmpfs.
@@ -138,6 +136,14 @@ export async function extractArchive(archive, destination, compressed = true, su
         }
         if (size % 512) await take(512 - size % 512);
         continue;
+      }
+      // HOME backups have no application bundle quotas. Bound only the report
+      // subtree here, keeping skipped HOME contents and names out of memory.
+      if (names.has(name) || names.size >= 250000) throw new Error('Duplicate or excessive archive entries');
+      names.add(name);
+      if (subtree) {
+        extracted += size;
+        if (size > 2 * 1024 ** 3 || extracted > 8 * 1024 ** 3) throw new Error('Migration reports exceed extraction limits');
       }
       if (subtree && !['0', '5'].includes(type)) throw new Error('Migration report archive entries must be regular files or directories');
       const path = destination + '/' + name;

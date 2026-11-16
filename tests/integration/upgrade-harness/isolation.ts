@@ -13,7 +13,7 @@ export function isolatedEnv(root: string): Record<string, string> {
   // Allowlist, rather than cloning the task's tokens, provider credentials or systemd context.
   return { BUN_BE_BUN: '1', PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin', HOME: join(root, 'home'),
     TMPDIR: join(root, 'tmp'), NODE_ENV: 'test', REMI_HOME: join(root, 'home/.remi'),
-    MULTIREMI_STATE_DIR: join(root, 'state'), MULTIREMI_TEST_RUN_ROOT: join(root, 'locks'),
+    MULTIREMI_STATE_DIR: join(root, 'state'), MULTIREMI_SESSION_ARCHIVE_ROOT: join(root, 'state/session-archives'), MULTIREMI_TEST_RUN_ROOT: join(root, 'locks'),
     MULTIREMI_WORKSPACES_ROOT: join(root, 'workspaces'), MULTIREMI_DAEMON_PORT: '19131',
     MULTIREMI_BACKGROUND_JOBS: 'false', MULTIREMI_SSH_MESH_ENABLED: 'false' };
 }

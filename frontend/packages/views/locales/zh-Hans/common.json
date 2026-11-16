@@ -29,5 +29,13 @@
     "title": "加载失败",
     "description": "请求没有成功，检查网络后重试。",
     "retry": "重试"
+  },
+  "update": {
+    "draining": "正在准备更新，您可以继续操作。",
+    "switching": "正在切换版本，消息将在服务恢复后发送。",
+    "updated": "新版本已就绪。",
+    "waiting": "正在等待消息确认和编辑完成。",
+    "refresh": "刷新",
+    "progress": "{{tasks}} 个运行任务 · {{acked}}/{{total}} 个运行时已就绪"
   }
 }

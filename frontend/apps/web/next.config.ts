@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { NextConfig } from "next";
 import { config } from "dotenv";
 import { resolve } from "path";
@@ -32,7 +33,12 @@ const allowedDevOrigins = process.env.CORS_ALLOWED_ORIGINS
 const buildCpus = Number.parseInt(process.env.NEXT_BUILD_CPUS ?? "", 10);
 const cpus = Number.isInteger(buildCpus) && buildCpus > 0 ? buildCpus : undefined;
 
+// Generated once at build time; inlined into server route and browser bundles.
+const webBuildId = process.env.REMI_WEB_BUILD_ID || randomUUID();
 const nextConfig: NextConfig = {
+  outputFileTracingRoot: resolve(__dirname, "../../.."),
+  generateBuildId: async () => webBuildId,
+  env: { NEXT_PUBLIC_REMI_WEB_BUILD_ID: webBuildId },
   ...(process.env.STANDALONE === "true" ? { output: "standalone" as const } : {}),
   transpilePackages: ["@multiremi/core", "@multiremi/ui", "@multiremi/views", "@multiremi/contracts", "@multiremi/shared"],
   experimental: {

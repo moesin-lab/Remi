@@ -1,3 +1,4 @@
+import { mergerOperations } from "./credential-boundary.js";
 import { QuestionError } from "@multiremi/store/inbox/questions.js";
 import type { MultiremiStore } from '@multiremi/store/store.js';
 import type { ScmActor } from '@multiremi/contracts/merge-policy.js';
@@ -41,8 +42,9 @@ export class MergeExecutionService {
     const binding = this.store.listScmRepositoryBindings({ workspaceId: cr.workspaceId, enabled: true }).find(b => b.connectionId === cr.connectionId && b.repositoryId === cr.repositoryId);
     const connection = this.store.getScmConnection(cr.connectionId), credential = this.store.getScmConnectionCredential(cr.connectionId);
     if (!binding || !connection?.enabled || !credential) throw new ScmOperationError('scm_binding_unavailable', 'SCM connection unavailable');
-    // B2 uses the existing connection credential. C switches this to server-merger.
-    return { cr, binding, op: new GitHubScmOperations({ binding, connection, credential }) };
+    // PR/check evidence stays on task-writer; only rules and merge use server-merger.
+    const credentialVersion = this.store.getScmCredentialVersion(connection.id);
+    return { cr, binding, op: new GitHubScmOperations({ binding, connection, credential }), mergeOp: mergerOperations(this.store, binding), credentialVersion };
   }
   async request(projectId: string, crId: string, actor: ScmActor, body: unknown): Promise<ScmMergeOperation> {
     const input = validateMergeRequest(body), serialized = JSON.stringify({ expected_head_sha: input.expected_head_sha, method: input.method, idempotency_key: input.idempotency_key });
@@ -106,7 +108,7 @@ export class MergeExecutionService {
     }
     let sent = false;
     try {
-      const { cr, binding, op } = this.live(current.change_request_id);
+      const { cr, binding, op, mergeOp, credentialVersion } = this.live(current.change_request_id);
       const policy = this.store.mergePolicies.get(current.project_id);
       const live = await readLiveMergeGate(this.store, current.project_id, cr, op, policy, identity => !!current.approved_binding && sameBinding(current.approved_binding, { ...identity, method: current.method, policy_revision: policy.revision }));
       const bindingNow = { ...live.identity, method: current.method, policy_revision: policy.revision };
@@ -119,6 +121,7 @@ export class MergeExecutionService {
       if (!policy.allowed_merge_methods.includes(current.method)) return blocked('merge_method_not_allowed', 'Merge method is no longer allowed');
       if (!this.store.mergePolicies.belongsToProject(current.project_id, cr.id)) return blocked('cr_project_changed', 'CR is no longer linked to project');
       // Reuse exactly the B1 evaluator. An approval removes only its own reason.
+      save({ credential_boundary: live.gate.credential_boundary });
       const reasons = [...live.gate.reasons];
       if (live.observation.payload.mergeable !== true) reasons.push({ code: live.observation.payload.mergeable == null ? 'mergeability_unknown' : 'pull_request_not_mergeable', message: 'Provider has not confirmed mergeability' });
       const nonHuman = reasons.filter(r => r.code !== 'human_approval_required');
@@ -133,8 +136,9 @@ export class MergeExecutionService {
       // If another worker recovered this lease while evidence was loading, it wins.
       if (this.store.mergePolicies.get(current.project_id).revision !== current.policy_revision) return blocked('policy_changed', 'Policy changed before execution');
       save({ lease_until: new Date(Date.now() + 120_000).toISOString() });
+      if (credentialVersion !== this.store.getScmCredentialVersion(cr.connectionId)) return blocked('protection_credentials_changed', 'Credentials changed before execution; request fresh proof');
       sent = true;
-      const result = await op.merge(cr.number!, { headSha: current.expected_head_sha, method: current.method });
+      const result = await mergeOp.merge(cr.number!, { headSha: current.expected_head_sha, method: current.method });
       if (!result.merged || !result.sha) return save({ state: 'unknown', lease_until: null, reasons: [{ code: 'merge_outcome_unknown', message: 'Provider returned no definitive merge result; recover by reading PR' }] });
       // Use the same canonical change.merged ID/path as webhook/poll, never a second activity writer.
       const observed = await op.get(cr.number!);

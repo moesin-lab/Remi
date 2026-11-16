@@ -17,6 +17,7 @@ async function fixture(options: { human?: boolean; chat?: boolean; delegated?: b
   store.updateWorkspace('local', { settings: { scm_complete_issue_on_merge_enabled: true }, repos: [{ id: 'repo_merge', name: 'widgets', url: 'https://github.com/acme/widgets.git', defaultBranch: 'main' }] });
   store.createScmConnection({ id: 'scm_merge', workspaceId: 'local', name: 'GitHub', provider: 'github', mode: 'hybrid', accessToken: 'provider-secret', webhookSecret: 'hook-secret', repositoryIds: ['repo_merge'] });
   const project = store.createProject({ title: 'Merge execution' });
+  store.createProjectResource(project.id, { resourceType: 'github_repo', resourceRef: { url: 'https://github.com/acme/widgets.git' } });
   const issue = createResponsibleTestIssue(store, { title: 'Merge', projectId: project.id, workspaceId: 'local', createdBy: 'local' });
   const agent = store.createAgent({ name: 'Author', provider: 'codex', workspaceId: 'local', ...(options.delegated ? { maxConcurrentTasks: 4 } : {}) });
   const runtime = store.registerRuntime({ name: 'Merge runtime', provider: 'codex', daemonId: 'merge-runtime', ...(options.delegated ? { maxConcurrency: 4 } : {}) });
@@ -60,7 +61,8 @@ async function fixture(options: { human?: boolean; chat?: boolean; delegated?: b
     return Response.json([]);
   }, { preconnect: originalFetch.preconnect });
   const active = '/api/workspaces/local/scm/repositories/repo_merge/change-requests';
-  expect((await app.request(active, { method: 'POST', headers: taskHeaders, body: JSON.stringify({ head: 'feature', base: 'main', title: 'PR' }) })).status).toBe(201);
+  const created = await app.request(active, { method: 'POST', headers: taskHeaders, body: JSON.stringify({ head: 'feature', base: 'main', title: 'PR' }) });
+  expect(created.status, await created.text()).toBe(201);
   const cr = store.mergePolicies.findChangeRequest('scm_merge', 'repo_merge', '9001')!;
   store.linkScmChangeRequestToIssue(issue.id, cr.id);
   const { revision: _, ...fields } = defaultMergePolicy();
@@ -262,5 +264,214 @@ describe('B2 policy-gated merge execution (real SQLite/HTTP, mock GitHub)', () =
     const f = await fixture({ human: true }), op = await operation(await f.request());
     const db = (f.store as unknown as { db: SqlDatabase }).db;
     expect(() => db.query('INSERT INTO multiremi_scm_merge_operations SELECT ?,project_id,change_request_id,?,request_body,state,version,lease_until,operation FROM multiremi_scm_merge_operations WHERE id=?').run('mop_collision','other',op.id)).toThrow();
+  });
+});
+
+
+/** C1 mock provider; SQLite, HTTP authentication, policy, Question and worker are real. */
+async function protectionFixture(options: Parameters<typeof fixture>[0] = { strict: true }) {
+  const f = await fixture(options);
+  const legacyFetch = globalThis.fetch;
+  const proof = { sameIdentity: false, admin: false, enforceAdmins: true, force: false, deletion: false, updateRestriction: true,
+    bypassReadFail: false, mergerBypass: false, taskBypass: false, pagination: false, unsupported: false, classic404: false, reads: 0 };
+  const calls: Array<{ path: string; auth: string }> = [];
+  const classic = () => ({ required_status_checks: { strict: false, contexts: ['ci'], checks: [{ context: 'ci', app_id: null }] },
+    enforce_admins: { enabled: proof.enforceAdmins }, restrictions: proof.updateRestriction ? { users: [{ id: 2, login: 'merger' }], teams: [], apps: [] } : null,
+    allow_force_pushes: { enabled: proof.force }, allow_deletions: { enabled: proof.deletion } });
+  const rules = () => proof.unsupported ? [{ type: 'future_security_rule', ruleset_id: 10 }] :
+    proof.bypassReadFail || proof.mergerBypass || proof.taskBypass ? [
+      { type: 'required_status_checks', ruleset_id: 10, parameters: { strict_required_status_checks_policy: false, required_status_checks: [{ context: 'ci', integration_id: null }] } },
+      { type: 'update', ruleset_id: 20, parameters: { update_allows_fetch_and_merge: false } },
+    ] : [];
+  globalThis.fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = new URL(String(input)), path = url.pathname, auth = new Headers(init?.headers).get('Authorization') ?? '';
+    calls.push({ path, auth });
+    const isMerger = auth === 'Bearer merger-secret';
+    if (path === '/user') { proof.reads++; return Response.json({ id: isMerger || proof.sameIdentity ? 2 : 1, login: isMerger ? 'merger' : 'task-writer' }); }
+    if (path.endsWith('/permission')) return Response.json({ permission: proof.admin ? 'admin' : 'write', role_name: proof.admin ? 'admin' : 'write', user: { id: proof.sameIdentity ? 2 : 1 } });
+    if (path.includes('/rules/branches/')) return Response.json(rules(), proof.pagination ? { headers: { link: '<https://api.github.com/next>; rel="next"' } } : undefined);
+    if (path.includes('/rulesets/')) {
+      if (proof.bypassReadFail) return Response.json({}, { status: 403 });
+      const update = path.endsWith('/20');
+      return Response.json({ id: update ? 20 : 10, target: 'branch', enforcement: 'active', bypass_actors: isMerger ? [] : undefined,
+        current_user_can_bypass: update ? isMerger || proof.taskBypass ? 'always' : 'never' : isMerger && proof.mergerBypass ? 'always' : 'never' });
+    }
+    if (path.includes('/protection/restrictions/')) return Response.json(path.endsWith('/users') ? [{ id: 2, login: 'merger' }] : []);
+    if (path.endsWith('/protection')) return proof.classic404 ? Response.json({}, { status: 404 }) : Response.json(classic());
+    if (path.includes('/branches/')) return Response.json({ name: decodeURIComponent(path.split('/').pop()!), protected: true });
+    return legacyFetch(input, init);
+  }, { preconnect: originalFetch.preconnect });
+  const connectionRoot = '/api/workspaces/local/scm/connections/scm_merge';
+  const configure = (body = { mergeCredential: 'merger-secret', mergeCredentialKind: 'token' }, h = headers) => f.app.request(connectionRoot, { method: 'PATCH', headers: h, body: JSON.stringify(body) });
+  const credentials = (h = f.taskHeaders) => f.app.request('/api/daemon/scm/git-credentials', { method: 'POST', headers: h, body: JSON.stringify({ workspaceId: 'local', repositoryUrl: 'https://github.com/acme/widgets.git' }) });
+  const gate = () => f.app.request(`${f.root}/merge-gate`, { headers: f.taskHeaders });
+  return { ...f, proof, calls, configure, credentials, gate, connectionRoot };
+}
+describe('C1 credential boundary (mock GitHub, real SQLite/HTTP/worker)', () => {
+  const policyPut = (f: Awaited<ReturnType<typeof protectionFixture>>, extra = {}) => f.app.request(f.policyRoot, { method: 'PUT', headers,
+    body: JSON.stringify({ ...f.policy, expected_revision: f.store.mergePolicies.get(f.project.id).revision, ...extra }) });
+  const removeAssociations = async (f: Awaited<ReturnType<typeof protectionFixture>>) => {
+    for (const resource of f.store.listProjectResources(f.project.id)) expect((await f.app.request(`/api/projects/${f.project.id}/resources/${resource.id}`, { method: 'DELETE', headers: f.taskHeaders })).status).toBe(204);
+    expect((await f.app.request(`/api/issues/${f.issue.id}/change-requests/${f.cr.id}`, { method: 'DELETE', headers: f.taskHeaders })).status).toBe(204);
+  };
+  const addOtherRepository = (f: Awaited<ReturnType<typeof protectionFixture>>) => {
+    f.store.updateWorkspace('local', { repos: [...f.store.getWorkspace('local')!.repos, { id: 'repo_other', name: 'other', url: 'https://github.com/acme/other.git', defaultBranch: 'main' }] });
+    f.store.updateScmConnection('scm_merge', { repositoryScope: 'selected', repositoryIds: ['repo_merge','repo_other'] });
+  };
+  const otherCredentials = (f: Awaited<ReturnType<typeof protectionFixture>>) => f.app.request('/api/daemon/scm/git-credentials', { method: 'POST', headers: f.taskHeaders,
+    body: JSON.stringify({ workspaceId: 'local', repositoryUrl: 'https://github.com/acme/other.git' }) });
+  it('retains coverage after Task removals until member disables strict', async () => {
+    const f = await protectionFixture({ strict: true }); await removeAssociations(f);
+    expect((await f.credentials()).status).toBe(409);
+    expect((await policyPut(f, { credential_enforcement_mode: 'platform_only' })).status).toBe(200);
+    expect((await f.credentials()).status).toBe(200);
+  });
+  it('member strict PUT recomputes coverage, rejects an empty set without erasing old coverage', async () => {
+    const f = await protectionFixture({ strict: true }); await removeAssociations(f);
+    const empty = await policyPut(f); expect(empty.status).toBe(400); expect((await empty.json()).code).toBe('merge_policy_strict_coverage_empty');
+    expect((await f.credentials()).status).toBe(409);
+    addOtherRepository(f);
+    f.store.createProjectResource(f.project.id, { resourceType: 'github_repo', resourceRef: { url: 'https://github.com/acme/other.git' } });
+    expect((await policyPut(f)).status).toBe(200);
+    expect((await f.credentials(headers)).status).toBe(200);
+    expect((await otherCredentials(f)).status).toBe(409);
+  });
+  it('persists project_ref repositories and Task additions in the same write transaction', async () => {
+    const f = await protectionFixture({ strict: true }); addOtherRepository(f);
+    const referenced = f.store.createProject({ title: 'Referenced repositories' });
+    f.store.createProjectResource(referenced.id, { resourceType: 'github_repo', resourceRef: { url: 'https://github.com/acme/other.git' } });
+    expect((await f.app.request(`/api/projects/${f.project.id}/resources`, { method: 'POST', headers: f.taskHeaders,
+      body: JSON.stringify({ resourceType: 'project_ref', resourceRef: { projectId: referenced.id } }) })).status).toBe(201);
+    const persisted = (f.store as unknown as { db: SqlDatabase }).db.query('SELECT repository_id FROM multiremi_scm_strict_coverage WHERE project_id=?').all(f.project.id);
+    expect(persisted.map(r => r.repository_id)).toContain('repo_other');
+    const coverage = f.store.mergePolicies.strictForRepository('local','repo_other'); expect(coverage.map(c => c.project_id)).toEqual([f.project.id]);
+    await removeAssociations(f); f.store.deleteProjectResource(referenced.id, f.store.listProjectResources(referenced.id)[0]!.id);
+    expect((await otherCredentials(f)).status).toBe(409);
+  });
+  it('appends coverage on Task resource update and CR link creation', async () => {
+    const f = await protectionFixture({ strict: true }); addOtherRepository(f);
+    const resource = f.store.listProjectResources(f.project.id)[0]!;
+    expect((await f.app.request(`/api/projects/${f.project.id}/resources/${resource.id}`, { method: 'PUT', headers: f.taskHeaders,
+      body: JSON.stringify({ resourceRef: { url: 'https://github.com/acme/other.git' } }) })).status).toBe(200);
+    f.store.deleteProjectResource(f.project.id, resource.id);
+    expect((await otherCredentials(f)).status).toBe(409);
+    // Member recomputation drops the removed repository, while retaining the linked original CR.
+    expect((await policyPut(f)).status).toBe(200); expect((await otherCredentials(f)).status).toBe(200);
+    const second = f.store.createProject({ title: 'Second strict project' });
+    f.store.createProjectResource(second.id, { resourceType: 'github_repo', resourceRef: { url: 'https://github.com/acme/other.git' } });
+    f.store.mergePolicies.put(second.id, { ...f.policy, expected_revision: 0 }, 'operator');
+    const issue = createResponsibleTestIssue(f.store, { title: 'Link coverage', projectId: second.id, workspaceId: 'local', createdBy: 'local' });
+    f.store.linkScmChangeRequestToIssue(issue.id, f.cr.id); f.store.unlinkScmChangeRequestFromIssue(issue.id, f.cr.id);
+    expect(f.store.mergePolicies.strictForRepository('local','repo_merge').map(c => c.project_id)).toContain(second.id);
+  });
+  it('persists dynamically discovered coverage when an Issue moves into a strict project', async () => {
+    const f = await protectionFixture({ strict: true }); addOtherRepository(f);
+    const second = f.store.createProject({ title: 'Dynamically linked strict project' });
+    f.store.createProjectResource(second.id, { resourceType: 'github_repo', resourceRef: { url: 'https://github.com/acme/other.git' } });
+    f.store.mergePolicies.put(second.id, { ...f.policy, expected_revision: 0 }, 'operator');
+    f.store.updateIssue(f.issue.id, { projectId: second.id });
+    expect(f.store.mergePolicies.strictForRepository('local','repo_merge').map(c => c.project_id)).toContain(second.id);
+    f.store.updateIssue(f.issue.id, { projectId: f.project.id });
+    expect(f.store.mergePolicies.strictForRepository('local','repo_merge').map(c => c.project_id)).toContain(second.id);
+  });
+  it('does not let Task resource removal and CR unlink downgrade strict credential coverage', async () => {
+    const f = await protectionFixture({ strict: true });
+    expect((await f.credentials()).status).toBe(409);
+    const resource = f.store.listProjectResources(f.project.id)[0]!;
+    await f.app.request(`/api/projects/${f.project.id}/resources/${resource.id}`, { method: 'DELETE', headers: f.taskHeaders });
+    await f.app.request(`/api/issues/${f.issue.id}/change-requests/${f.cr.id}`, { method: 'DELETE', headers: f.taskHeaders });
+    expect((await f.credentials()).status).toBe(409);
+  });
+  it('disabled strict policy leaves credential handout unchanged', async () => {
+    const f = await protectionFixture({ strict: true, disabled: true });
+    const response = await f.credentials(); expect(response.status).toBe(200); expect((await response.json()).password).toBe('provider-secret');
+    expect(f.proof.reads).toBe(0);
+  });
+  it('Codebase strict credentials fail closed with capability unavailable', async () => {
+    const f = await protectionFixture({ strict: false });
+    f.store.updateWorkspace('local', { repos: [...f.store.getWorkspace('local')!.repos,
+      { id: 'repo_codebase', name: 'internal', url: 'git@code.byted.org:example/internal.git', source: 'codebase', defaultBranch: 'main' }] });
+    f.store.createScmConnection({ id: 'scm_codebase', workspaceId: 'local', name: 'Codebase', provider: 'codebase', mode: 'poll', accessToken: 'jwt:task-only', repositoryIds: ['repo_codebase'] });
+    f.store.createProjectResource(f.project.id, { resourceType: 'github_repo', resourceRef: { url: 'git@code.byted.org:example/internal.git' } });
+    expect((await policyPut(f, { credential_enforcement_mode: 'strict' })).status).toBe(200);
+    const response = await f.app.request('/api/daemon/scm/git-credentials', { method: 'POST', headers,
+      body: JSON.stringify({ workspaceId: 'local', repositoryUrl: 'git@code.byted.org:example/internal.git' }) });
+    expect(response.status).toBe(409);
+    const result = await response.json(); expect(result.reasons[0].code).toBe('scm_capability_unavailable');
+    expect(JSON.stringify(result)).not.toContain('jwt:task-only'); expect(f.state.puts).toHaveLength(0);
+  });
+  it('keeps merger secret encrypted and private; task/daemon cannot configure it', async () => {
+    const f = await protectionFixture({ strict: false });
+    expect((await f.configure(undefined, f.taskHeaders)).status).toBe(403);
+    const token = await f.store.createAccessToken({ type: 'daemon', name: 'daemon', workspaceId: 'local', daemonId: 'merge-test' });
+    expect((await f.configure(undefined, { ...headers, Authorization: `Bearer ${token.token}` })).status).toBe(403);
+    const result = await f.configure(); expect(result.status).toBe(200);
+    const json = await result.json(); expect(json.connection).toMatchObject({ mergeCredentialSet: true, mergeCredentialKind: 'token' });
+    expect(JSON.stringify(json)).not.toContain('merger-secret');
+    expect(f.store.getScmConnectionCredential('scm_merge')).toEqual({ accessToken: 'provider-secret', webhookSecret: 'hook-secret' });
+    const { db } = await import('./helpers.js');
+    const encrypted = db!.query('SELECT merge_credential_encrypted FROM multiremi_scm_connections').get() as { merge_credential_encrypted: string };
+    expect(encrypted.merge_credential_encrypted).not.toContain('merger-secret');
+    expect((await f.credentials()).status).toBe(200); expect((await (await f.credentials()).json()).password).toBe('provider-secret');
+    expect((await (await f.credentials({ ...headers, Authorization: `Bearer ${token.token}` })).json()).password).toBe('provider-secret');
+    expect(f.proof.reads).toBe(0);
+    const op = await operation(await f.request()); expect(op.state).toBe('merged');
+    expect(f.calls.filter(c => c.path.endsWith('/merge')).map(c => c.auth)).toEqual(['Bearer merger-secret']);
+    expect(f.calls.filter(c => c.path.includes('/statuses')).every(c => c.auth === 'Bearer provider-secret')).toBe(true);
+    expect(f.calls.filter(c => c.path.includes('/rules/branches/')).every(c => c.auth === 'Bearer merger-secret')).toBe(true);
+    for (const body of [{ mergeCredential: 'other', clearMergeCredential: true }, { mergeCredentialKind: 'app' }, { mergeCredential: null }]) {
+      expect((await f.app.request(f.connectionRoot, { method: 'PATCH', headers, body: JSON.stringify(body) })).status).toBe(400);
+    }
+    const cleared = await f.app.request(f.connectionRoot, { method: 'PATCH', headers, body: JSON.stringify({ clearMergeCredential: true }) });
+    expect(cleared.status).toBe(200); expect((await cleared.json()).connection).toMatchObject({ mergeCredentialSet: false, mergeCredentialKind: null, mergeCredentialHint: null });
+  });
+  for (const [condition, code] of [
+    ['classic404','protection_classic_unreadable'], ['missing','merge_credential_missing'], ['sameIdentity','credential_identity_not_separated'], ['enforceAdmins','protection_required_checks_bypassable'],
+    ['mergerBypass','protection_required_checks_bypassable'], ['bypassReadFail','protection_bypass_unreadable'], ['updateRestriction','protection_task_can_update_target'],
+    ['taskBypass','protection_task_can_update_target'], ['force','protection_force_push_allowed'], ['deletion','protection_deletion_allowed'],
+    ['admin','task_identity_admin'], ['pagination','protection_pagination_incomplete'], ['unsupported','repository_rules_unsupported'],
+  ] as const) it(`strict ${condition}: gate denied, credentials withheld, merge PUT=0`, async () => {
+    const f = await protectionFixture({ strict: true, human: true });
+    if (condition !== 'missing') expect((await f.configure()).status).toBe(200);
+    if (condition === 'enforceAdmins' || condition === 'updateRestriction') f.proof[condition] = false;
+    else if (condition !== 'missing') f.proof[condition] = true;
+    const gate = await (await f.gate()).json(); expect(gate.allowed).toBe(false); expect(gate.reasons.map((r: {code: string}) => r.code)).toContain(code);
+    const credential = await f.credentials(); expect(credential.status).toBe(409); expect((await credential.json()).reasons.map((r: {code: string}) => r.code)).toContain(code);
+    if (condition === 'missing') {
+      const broker = await f.store.createAccessToken({ type: 'daemon', name: 'strict-broker', workspaceId: 'local', daemonId: 'merge-test' });
+      expect((await f.credentials({ ...headers, Authorization: `Bearer ${broker.token}` })).status).toBe(409);
+    }
+    const denied = await f.request(); expect(denied.status).toBe(409); expect((await operation(denied)).approval_message_id).toBeNull(); expect(f.state.puts).toEqual([]);
+    expect(f.calls.filter(c => c.path.endsWith('/merge'))).toEqual([]);
+  });
+  it('proves every target, releases only task-writer and re-proves before one sha-bound merger PUT', async () => {
+    const f = await protectionFixture({ strict: true }); expect((await f.configure()).status).toBe(200);
+    const gate = await (await f.gate()).json(); expect(gate.allowed).toBe(true); expect(gate.protection_proof.proven).toBe(true);
+    const broker = await f.store.createAccessToken({ type: 'daemon', name: 'strict-broker', workspaceId: 'local', daemonId: 'merge-test' });
+    const brokerResponse = await f.credentials({ ...headers, Authorization: `Bearer ${broker.token}` });
+    expect(brokerResponse.status).toBe(200); expect((await brokerResponse.json()).password).toBe('provider-secret');
+    expect(gate.credential_boundary).toBe('平台入口受控、直推已由仓库保护封闭（实时证明）');
+    expect(gate.protection_proof.evidence.branches.map((b: {target: string}) => b.target)).toEqual(['main','release']);
+    const cred = await f.credentials(); expect(cred.status).toBe(200); expect((await cred.json()).password).toBe('provider-secret');
+    const reads = f.proof.reads;
+    const op = await operation(await f.request()); expect(op.state).toBe('merged'); expect(op.credential_boundary).toBe(gate.credential_boundary);
+    expect(f.proof.reads).toBeGreaterThan(reads); expect(f.state.puts).toEqual([{ sha: head, merge_method: 'squash' }]);
+    expect(f.calls.filter(c => c.path.endsWith('/merge')).map(c => c.auth)).toEqual(['Bearer merger-secret']);
+  });
+  it('approval does not cache proof; changed protection blocks worker with zero PUT', async () => {
+    const f = await protectionFixture({ strict: true, human: true }); await f.configure();
+    const response = await f.request(); expect(response.status).toBe(202); const op = await operation(response);
+    expect((await f.answer(op.approval_message_id)).status).toBe(200);
+    f.proof.force = true; await f.service.runOnce();
+    expect(f.store.mergeOperations.get(op.id)?.state).toBe('blocked'); expect(f.state.puts).toEqual([]);
+  });
+  it('uses no cached proof after either credential or policy changes', async () => {
+    const f = await protectionFixture({ strict: true }); await f.configure(); await f.gate(); let reads = f.proof.reads;
+    f.store.updateScmConnection('scm_merge', { accessToken: 'new-task-secret' });
+    await f.gate(); expect(f.proof.reads).toBeGreaterThan(reads); reads = f.proof.reads;
+    await f.configure({ mergeCredential: 'new-merger-secret', mergeCredentialKind: 'token' });
+    await f.gate(); expect(f.proof.reads).toBeGreaterThan(reads); reads = f.proof.reads;
+    expect((await f.app.request(f.policyRoot, { method: 'PUT', headers, body: JSON.stringify({ ...f.policy, expected_revision: 1 }) })).status).toBe(200);
+    await f.gate(); expect(f.proof.reads).toBeGreaterThan(reads);
   });
 });

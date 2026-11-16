@@ -218,7 +218,7 @@ describe("B1 merge policy and structured reviews (SQLite + mock GitHub)", () => 
   it("blocks rule read failures and explains credential and human boundaries", async () => {
     const f = await fixture(); await f.save({ ...f.update, require_human_approval: true, credential_enforcement_mode: "strict" }); greenProvider(); await f.submit(1); greenProvider({ rulesFail: true });
     const result = await gate(f); expect(result.allowed).toBe(false);
-    expect(result.reasons.map((r: { code: string }) => r.code)).toEqual(expect.arrayContaining(["repository_rules_unavailable", "human_approval_required", "credential_enforcement_unavailable"]));
+    expect(result.reasons.map((r: { code: string }) => r.code)).toEqual(expect.arrayContaining(["repository_rules_unavailable", "human_approval_required", "merge_credential_missing"]));
     expect(result.credential_boundary).toBe("平台入口受控、直推未封闭");
   });
   it("member review records server identity, and an update by a former reviewer invalidates that review", async () => {

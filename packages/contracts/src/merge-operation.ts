@@ -11,5 +11,5 @@ export interface ScmMergeOperation extends MergeOperationBinding {
   state: MergeOperationState; version: number; lease_until: string | null;
   approval_message_id: string | null; approved_binding: MergeOperationBinding | null;
   reasons: MergeGateReason[]; merge_commit_sha: string | null;
-  credential_boundary: '平台入口受控、直推未封闭'; created_at: string; updated_at: string;
+  credential_boundary: "平台入口受控、直推未封闭" | "平台入口受控、直推已由仓库保护封闭（实时证明）"; created_at: string; updated_at: string;
 }

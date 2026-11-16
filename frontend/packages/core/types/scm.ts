@@ -84,6 +84,9 @@ export interface ScmConnection {
   isDefault: boolean;
   accessTokenSet: boolean;
   accessTokenHint: string | null;
+  mergeCredentialSet?: boolean;
+  mergeCredentialHint?: string | null;
+  mergeCredentialKind?: "token" | null;
   webhookSecretSet: boolean;
   webhookSecretHint: string | null;
   verificationStatus: ScmVerificationStatus;

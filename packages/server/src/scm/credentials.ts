@@ -12,7 +12,7 @@ export class ScmCredentialEncryptionError extends Error {
 
 export function encryptScmCredential(
   plaintext: string,
-  context: { workspaceId: string; connectionId: string; field: "access_token" | "webhook_secret" },
+  context: { workspaceId: string; connectionId: string; field: "access_token" | "webhook_secret" | "merge_credential" },
 ): string {
   const { id: keyId, key } = resolveEncryptionKeys()[0]!;
   const iv = randomBytes(12);
@@ -25,7 +25,7 @@ export function encryptScmCredential(
 
 export function decryptScmCredential(
   ciphertext: string,
-  context: { workspaceId: string; connectionId: string; field: "access_token" | "webhook_secret" },
+  context: { workspaceId: string; connectionId: string; field: "access_token" | "webhook_secret" | "merge_credential" },
 ): string {
   try {
     const parts = ciphertext.split(".");

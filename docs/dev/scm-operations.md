@@ -37,7 +37,7 @@ MUL-35 裁定要求项目策略默认关闭，required checks 使用仓库有效
 
 合并操作需持久化与幂等恢复，超时先标 unknown、查询实际状态后再决定。完成后沿现有 `scm_merge_completed` activity 规则，不自动将 Issue 标 done（ADR 0017）。
 
-C 阶段分离 task-writer/server-merger 凭据；任务及 daemon git-credentials 路径永不返回合并凭据。严格模式下未配置独立任务身份或无法由服务端合并身份实时证明仓库保护有效（含 bypass 列表）时拒绝发写凭据和执行合并。未启用严格凭据模式时必须显示“平台入口受控、直推未封闭”。仓库保护设置、身份创建、现有 PAT 轮换与隔离测试仓库需另获外部授权；本单不自行修改设置。
+C1 已分离 token 类型的 task-writer/server-merger 凭据；任务及 daemon git-credentials 路径永不返回合并凭据。严格模式下未配置独立任务身份或无法由服务端合并身份实时证明仓库保护有效（含 bypass 列表）时拒绝发写凭据和执行合并。未启用严格凭据模式时必须显示“平台入口受控、直推未封闭”。仓库保护设置、身份创建、现有 PAT 轮换与隔离测试仓库需另获外部授权；本单不自行修改设置。
 
 ## Remi 项目 CI 的已知限制
 
@@ -61,7 +61,7 @@ PR 的 build 运行采用 pr-fast，不运行 backend 全量测试；PR 绿灯�
 | `GET /api/projects/:id/change-requests/:changeRequestId/reviews` | `remi scm change-request review list <project> <change-request>` |
 | `GET /api/projects/:id/change-requests/:changeRequestId/merge-gate` | `remi scm change-request gate <project> <change-request>` |
 
-这里 change-request 是平台内部 ID，必须关联该项目内的 Issue；不是 GitHub 编号。列表保留全部历史，不把旧结论标成当前授权。策略写入仅接受通过鉴权的成员（共享 operator），拒绝 Task/daemon。PUT 是整体替换，包含 `version: 1`、`expected_revision`、`enabled`、`target_branches`（精确分支名，不支持模式）、`required_checks`、`require_independent_review`、`independent_reviewers`、`require_human_approval`、`allowed_merge_methods`、`credential_enforcement_mode`（`platform_only|strict`）。未知字段和非法组合返回 400；revision 冲突返回 409 `scm_policy_conflict`。默认 revision=0 / enabled=false；启用必须有目标分支，要求独立审阅时必须明确配置工作区内有效 Agent 白名单。凭据模式在 B1 只持久化和校验；strict 返回 `credential_enforcement_unavailable`，不会声称 C 已实施。
+这里 change-request 是平台内部 ID，必须关联该项目内的 Issue；不是 GitHub 编号。列表保留全部历史，不把旧结论标成当前授权。策略写入仅接受通过鉴权的成员（共享 operator），拒绝 Task/daemon。PUT 是整体替换，包含 `version: 1`、`expected_revision`、`enabled`、`target_branches`（精确分支名，不支持模式）、`required_checks`、`require_independent_review`、`independent_reviewers`、`require_human_approval`、`allowed_merge_methods`、`credential_enforcement_mode`（`platform_only|strict`）。未知字段和非法组合返回 400；revision 冲突返回 409 `scm_policy_conflict`。默认 revision=0 / enabled=false；启用必须有目标分支，要求独立审阅时必须明确配置工作区内有效 Agent 白名单。strict 现在使用下文 C1 的实时保护证明，缺少合并凭据或证明失败时阻塞。
 
 检查身份示例：`{"kind":"check_run","app_id":15368,"workflow_path":".github/workflows/release-build-check.yml","job":"build"}`，或 `{"kind":"commit_status","context":"security"}`。每次预检读取目标分支的 branch protection 和有效 branch rules（包含继承 rulesets），与项目附加项取并集。仓库 API 只给 context/app 时，必须用项目显式绑定补 workflow 路径；缺失返回 `repository_check_identity_missing`，不能猜测同名 job 的 workflow。仓库 `app_id=null` 表示任意来源，必须在项目中显式绑定同名的 app/workflow/job 或 commit_status context；没有绑定返回 `repository_check_identity_missing`，多个绑定必须全部满足，不能按名称信任任意 app。项目不能移除仓库要求。并集去重后为空返回 `required_checks_empty`，即使已有有效审阅也阻塞；项目附加项本身允许为空。
 
@@ -73,7 +73,7 @@ PR 的 build 运行采用 pr-fast，不运行 backend 全量测试；PR 绿灯�
 
 提交时实时读取 PR，head/base 不符返回 409 `scm_pull_request_changed`。策略 PUT 与审阅追加在各自事务内取得同一个 project 行锁，使 PostgreSQL 中两者串行化；策略 PUT 保留 revision CAS。审阅追加不可变历史，绑定当时 head/base、目标分支、base 仓库及策略 revision。同 reviewer 的同绑定只取最高 sequence；任一有效 block 返回 `review_blocked`，另一 reviewer 的 pass 无法覆盖；要求审阅时至少一条有效 pass，否则 `independent_review_missing`。push/force-push、base、retarget、仓库或策略 revision 变化后旧结论不计入；判断实时比对，不依赖 webhook。读证据期间 PR 或策略变化同样阻塞。
 
-响应始终有 `preflight_only=true`、`execution_authorized=false` 和“平台入口受控、直推未封闭”。`allowed=true` 只表示此次读取的 B1 证据满足要求，不能作为执行授权或缓存授权。人工策略返回 `human_approval_required`；B2 创建 operation 绑定的 Inbox 审批，并在 worker 内重新检查全部条件。B2 的执行目标仍须独立绑定和重验，本预检不代替它。
+响应始终有 `preflight_only=true`、`execution_authorized=false`；凭据边界按 C1 实时证明输出。`allowed=true` 只表示此次读取的 B1 证据满足要求，不能作为执行授权或缓存授权。人工策略返回 `human_approval_required`；B2 创建 operation 绑定的 Inbox 审批，并在 worker 内重新检查全部条件。B2 的执行目标仍须独立绑定和重验，本预检不代替它。
 
 内置 code-reviewer 模板由 `api/agent-templates.ts` 实际加载，本次加入 CLI 结构化提交指引；这只影响以后从模板创建的 Agent，不自动改写现有 DB Agent 的 instructions。`.remi/pipeline/skills/` 的读取链已删除，仍是死目录，本次没有将其当成生效配置；现有审阅 Agent 应由配置维护者按当前模板补提交指引。
 
@@ -91,7 +91,7 @@ POST 只接受 `{expected_head_sha, method, idempotency_key}`；HTTP 要求 key�
 
 operation 持久保存 head/base SHA、规范化 target/base repository、policy revision、method、actor、原因及凭据边界。状态包含 requested、blocked、awaiting_human、approved、executing、merged、failed、unknown、rejected。数据库 partial unique index 保证每个 CR 仅一个活动 operation；unknown 也持有该唯一位置，避免结果不明时创建第二次合并。不同 key 若绑定完全一致，复用活动 operation/Q，同时持久记录该 key 的别名以支持终态后的重放；绑定不同返回 409 `merge_operation_in_progress`。终态 blocked/failed/rejected/merged 允许新 key 新建 operation，但仍须全部重验。
 
-worker 以 version CAS 领取 120 秒租约，网络请求全部在数据库事务之外。每次执行实时重读 PR、完整规则与最新检查、策略和审阅；PR 必须 open、非 Draft，GitHub `mergeable=null` 以 `mergeability_unknown` 阻塞，不轮询等待。除人工批准外任一条件不满足时 operation=blocked、HTTP 409 `merge_gate_blocked` + reasons，不创建 Q，provider merge 调用为零。strict 在 C 前继续因 `credential_enforcement_unavailable` 阻塞。platform_only 可以执行，但 operation 和响应始终标注“平台入口受控、直推未封闭”。B2 使用连接现有凭据，`MergeExecutionService.live` 是 C 切换到 server-merger 身份的入口；当前不宣称直推已封闭。
+worker 以 version CAS 领取 120 秒租约，网络请求全部在数据库事务之外。每次执行实时重读 PR、完整规则与最新检查、策略和审阅；PR 必须 open、非 Draft，GitHub `mergeable=null` 以 `mergeability_unknown` 阻塞，不轮询等待。除人工批准外任一条件不满足时 operation=blocked、HTTP 409 `merge_gate_blocked` + reasons，不创建 Q，provider merge 调用为零。strict 必须通过 C1 实时保护证明；platform_only 可以执行，仍标注“平台入口受控、直推未封闭”。配置合并槽时使用 server-merger 执行，未配置时仅 platform_only 可回退原任务槽。
 
 只差人工批准时返回 202、`operation_id`、`approval_message_id`，operation=awaiting_human。Agent 请求路由到原 turn 所在工作会话，source_issue_id 取该会话所有者 Issue，并保留该已验证 turn 的 execution_scope；原 scope 可读取和 present，同一 Agent 的其他 scope 不因此获得访问权。成员请求路由到关联项目 Issue 的 Main，execution_scope 为空。无法定位则 409 `merge_approval_unroutable`，不跳过审批。Q 为 `origin=platform_merge_approval`，创建即 human / wait_status=none，无 provider nonce/wait，不经执行负责人链，不使用退役 decision writer。正文展示仓库、PR、head/base、target、method、policy revision、gate 摘要；选项固定 approve/reject。
 
@@ -102,3 +102,64 @@ worker 以 version CAS 领取 120 秒租约，网络请求全部在数据库事�
 合并成功后主动读取 PR 经同一 canonical `change.merged` 入站路径，webhook/poll 重放共用逻辑 ID；不另写合并活动，只沿既有开关记录一次 `scm_merge_completed`，不自动 done（ADR 0017）。
 
 B2 本地回归入口为 [merge-execution.test.ts](../../tests/unit/multiremi/merge-execution.test.ts)，覆盖真实 HTTP/SQLite/Question/签名 ingestion，provider 响应为 mock。部分重跑的真实 GitHub API 形状、真实合并、凭据隔离与仓库保护均需另行授权验证；SQLite 测试不代替 PostgreSQL 实跑。迁移为 [共同 additive SQL](../../packages/server/src/store/merge-operation-schema.ts)，兼容输入清单与指纹同批更新，不新增 rollbackSafeFrom 声明。
+
+
+## C1：token 双槽位与实时保护证明
+
+现有 `access_token` 是 task-writer：git-credentials、PR 创建/更新和检查证据仍使用它。
+连接新增加密的 `merge_credential_encrypted`、hint 与 `merge_credential_kind`，C1 只支持 `token`。
+成员使用现有 `PATCH /api/workspaces/:workspaceId/scm/connections/:connectionId` 更新
+`mergeCredential`（可显式 `mergeCredentialKind: "token"`）或 `clearMergeCredential: true`；
+两者互斥，Task/daemon 写入返回 403。连接响应仅给 `mergeCredentialSet`、hint 和 kind，永不返回明文。
+CLI 续用 `remi scm connection update <connection> --file -`，从 stdin 读 JSON；合并凭据禁止用 `--data` 或文件路径传入。
+
+`getScmConnectionCredential` 不含合并槽。只有服务端 worker/保护证明模块可经独立入口读取它，架构测试固定调用白名单。
+配置合并槽后，仓库规则读取与 merge API 使用合并身份；PR/检查仍用 task-writer。
+platform_only 没配合并槽时保留 B2 的任务凭据回退；strict 没配时返回 `merge_credential_missing`，不调用 merge。
+GitHub App 的签发与安装身份留给 C2，真实身份、仓库设置和 PAT 轮换待外部授权，本实现不更改这些设置。
+
+[`credential-boundary.ts`](../../packages/server/src/scm/credential-boundary.ts)读取 GitHub 证据，
+[`protection-proof.ts`](../../packages/server/src/scm/protection-proof.ts)纯函数求证。
+服务端分别用两个 token 调 `GET /user`，按 provider user ID 判断分离，不按 token 文本。
+任务仓库权限由 collaborator permission 接口取得；custom role 无法证明其管理权限时阻塞。
+对策略的**每个精确 target branch**读取完整有效规则、classic protection 和分页 restrictions；
+ruleset 按有效规则携带的 ID 经 repository 端点读取（含继承规则），用合并身份读全量 bypass_actors，
+用两种身份分别读取 `current_user_can_bypass`。缺失字段、权限失败、未知规则/actor/参数、分页超限均不放行。
+
+| 证明项 | 放行条件 | 主要阻塞码 |
+|---|---|---|
+| 合并槽和独立身份 | 有 token，两次 `/user` ID 不同 | `merge_credential_missing` / `credential_identity_not_separated` |
+| 非管理员任务身份 | 低于 admin 且为可识别标准仓库角色 | `task_identity_admin` / `protection_permissions_unsupported` |
+| provider 强制检查 | 非空 required checks；classic `enforce_admins=true`，或 required-check ruleset 两身份均 `never` bypass | `protection_required_checks_bypassable` |
+| 禁止任务更新目标 | classic 完整 restrictions 仅显式 users，排除任务、允许 merger；或 update ruleset 任务 `never`、merger 可 bypass，且 `update_allows_fetch_and_merge=false` | `protection_task_can_update_target` / `protection_restrictions_unsupported` |
+| 禁止 force push / 删除 | classic 禁止且 enforce_admins，或相应 ruleset 两身份均不可 bypass | `protection_force_push_allowed` / `protection_deletion_allowed` |
+| 完整可读证据 | 每个目标和所有页可读，规则/bypass 语义已知 | `protection_read_failed` / `protection_bypass_unreadable` / `protection_pagination_incomplete` / `protection_evidence_incomplete` / `protection_rules_unsupported` |
+| 证据一致性 | 凭据和策略读取期间不变 | `protection_credentials_changed` / `scm_credential_protection_changed` |
+
+required-PR 本身不能证明任务无法调用原生 PR merge，不能代替 restrictions/update。
+C1 classic restrictions 的 teams/apps 需要额外成员/安装证明，暂以 `protection_restrictions_unsupported` 阻塞。
+现有 B1 对 classic `/protection` 404 仍阻塞，纯 ruleset 仓库也不据此推断“无 classic”；
+C1 仅支持存在 classic 保护的目标分支，可叠加 ruleset；classic 404 返回 `protection_classic_unreadable`，gate 拒绝、git-credentials 返回 409。纯 ruleset 配置尚不支持；纯 evaluator 的拆分 ruleset 测试不代表 HTTP 入口已支持。
+
+启用前需要 Admin 配置的 classic 示例：每个 target 有明确 required checks、`enforce_admins=true`，
+restrictions 只允许独立 merger 用户，不包含 task 用户/teams/apps，关闭 force push 和删除；
+task 为标准 write（非 admin）角色。restrictions 仅适用于组织仓库，真实目标是否满足须外部验收确认。叠加 ruleset 时，merger 只能绕过 update，不能绕过 required checks / non_fast_forward / deletion。
+不支持的原生审批、严格 up-to-date、merge queue 等 B1 原因码继续生效，不改 workflow。
+
+strict 成功返回 `protection_proof`（checked_at、身份和逐目标证据）及
+“平台入口受控、直推已由仓库保护封闭（实时证明）”；失败保留“平台入口受控、直推未封闭”并列出原因。
+GET gate 仍是预检，不变成执行授权。worker 在执行时重新证明，人工批准不缓存证明；
+凭据变更期间立即停止该次执行。所有证据均来自服务端，不接受任务提交或手填证明。
+
+strict 覆盖持久化于 `multiremi_scm_strict_coverage`，按 workspace/repository/project 唯一。派生集合为 github_repo、递归 project_ref 与活跃 CR link；复用任务仓库解析，但不采用空资源时的 workspace 回退。成员 PUT enabled+strict 时整体重算，集合为空返回 400 `merge_policy_strict_coverage_empty`；关闭或 platform_only 时清空该项目覆盖。
+资源创建/更新及 CR link 写入同一事务追加覆盖（包含 project_ref 的依赖项目）；每次凭据、gate 和 worker 判定再以持久 ∪ 动态补齐。Task 删除资源、解除 CR 或移动 Issue 不会收缩；只有成员 PUT 可收缩。Task 增加资源可能扩大覆盖，使其他项目取凭据也收到 409；成员删除资源并重新 PUT 可解除。
+
+仓库只要被任一 enabled+strict 项目持久覆盖，该仓库的所有 git-credentials 调用方
+（包括 daemon broker）都必须先通过全部策略的证明；失败 HTTP 409 且不含 password。
+证明不缓存，每次重新读取，因此更换任一凭据、覆盖集合或策略 revision 立即重新证明。证明结束再核对覆盖集合、策略 revision 及凭据版本，变化时不下发写凭据。
+返回的始终是 task-writer；原 PAT 生命周期与 helper 的 expiresAt 独立，旧凭据撤销仍需外部授权。
+strict 尚未证明时私有仓库也无法克隆；只读源码获取通道不在 C1，需后续单独跟进。
+
+C1 回归使用 mock GitHub 与本地真实 SQLite/HTTP/Task token/Question/worker。
+真实 GitHub token、保护规则、拒绝直推/force-push/原生 merge 与合并身份验证均**待外部授权**，不把 mock 作为真实验收。
+PostgreSQL 仅在配置隔离实例时实跑；否则交接明确标为静态核对。

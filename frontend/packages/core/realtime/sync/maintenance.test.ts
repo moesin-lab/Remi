@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import { QueryClient } from "@tanstack/react-query";
 import { createPrefixRefresh } from "./prefix-refresh";
 import type { SyncContext } from "./types";

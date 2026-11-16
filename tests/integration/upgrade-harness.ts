@@ -198,6 +198,23 @@ try {
     await log('Daemon upgrade and rollback: lost -> new completed attempt');
 
     // Real host application updater, including its drain gate, backup and rollback.
+    const diagnostic = async (name: string, argv: string[]) => {
+      if (interrupted) return;
+      const child = Bun.spawn(['docker', ...argv], { env, stdout: 'pipe', stderr: 'pipe' });
+      running.add(child);
+      const timer = setTimeout(() => child.kill('SIGKILL'), 30_000);
+      try {
+        const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+        evidence[name] = { stdout, stderr, exitCode };
+        await log(`${name}: ${JSON.stringify(evidence[name])}`);
+      } finally {
+        clearTimeout(timer); running.delete(child);
+        if (argv[0] === 'run') {
+          const cleanup = Bun.spawn(['docker', 'rm', '-f', `${project}-diagnostic`], { env, stdout: 'ignore', stderr: 'ignore' });
+          await cleanup.exited;
+        }
+      }
+    };
     const commandRunner = { async run(cmd: string, argv: string[], options: import('../../packages/platform-updater/src/types.js').CommandOptions = {}) {
       const child = Bun.spawn([cmd, ...argv], { cwd: options.cwd, env: { ...env, ...options.env },
         stdin: options.stdinFile ? Bun.file(options.stdinFile) : 'ignore',
@@ -214,6 +231,17 @@ try {
         }
       }
       if (exitCode) await log(`Updater ${cmd} ${argv.join(' ')} failed: ${stderr.slice(-4000)}`);
+      if (exitCode && cmd === 'docker' && argv.at(-2) === 'migrate') {
+        const id = argv.at(-1)!; assert(/^(?:app|seed)-[a-f0-9]{40,64}$/.test(id));
+        // Reproduce only inside the still-live disposable PostgreSQL namespace. Return the original failure unchanged.
+        const probe = "process.env.HOME='/tmp';process.env.MULTIREMI_HOME='/tmp/remi';const url=new URL(process.env.MULTIREMI_DATABASE_URL);if(url.hostname!=='127.0.0.1'||url.username!=='remi_rehearsal'||url.pathname!=='/remi_update_rehearsal')throw new Error('Unsafe diagnostic database');const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {MultiremiStore}=await import('./packages/server/src/store/store.ts');const db=openMultiremiDatabase();try{new MultiremiStore(db)}finally{await db.close()}";
+        await diagnostic('migration_failure_probe', ['run', '--name', `${project}-diagnostic`, '--label', `io.remi.upgrade-harness=${project}`, ...argv.slice(1, -3), '--cwd', `/opt/remi-application/releases/${id}/api`, '--eval', probe]);
+      }
+      if (exitCode && cmd === 'docker' && argv.includes('verify-running')) {
+        const index = argv.indexOf('exec');
+        const probe = "const fs=require('node:fs');console.log(JSON.stringify(fs.readdirSync('/proc').filter(p=>/^\\d+$/.test(p)).map(p=>{try{return {pid:p,cwd:fs.readlinkSync('/proc/'+p+'/cwd'),argv:fs.readFileSync('/proc/'+p+'/cmdline','utf8').split('\\0')}}catch(e){return {pid:p,error:e.code}}})))";
+        await diagnostic('recovery_process_probe', [...argv.slice(0, index), 'exec', '-T', argv[index + 2]!, argv[index + 3]!, '-e', probe]);
+      }
       return { stdout, stderr, exitCode };
     } };
     const apiId = await compose(['ps', '-q', 'api']), webId = await compose(['ps', '-q', 'web']);

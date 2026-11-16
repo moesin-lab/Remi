@@ -13,21 +13,23 @@ export function samePull(a: PullIdentity, b: PullIdentity): boolean {
 }
 export function independentActor(actor: ScmActor, policy: ProjectMergePolicy, actors: Array<{ action: string; actor: ScmActor }>): boolean {
   if (!actors.some(a => a.action === "create")) return false;
-  if (actor.kind === "member") return true; // Explicit authenticated member submission, never task identity fallback.
+  if (actor.kind === "member") return true; // Member attestation: shared operator, no creator/updater exclusion. Agents alone require independence.
   return policy.independent_reviewers.includes(actor.id) && !actors.some(a => a.actor.kind === "agent" && a.actor.id === actor.id);
 }
 export function evaluateMergeGate(input: {
   policy: ProjectMergePolicy; pull: PullIdentity; required: RequiredMergeCheck[];
   checks: ScmCheckObservation[]; reviews: ScmStructuredReview[]; actors: Array<{ action: string; actor: ScmActor }>;
-  reasons?: MergeGateReason[];
+  reasons?: MergeGateReason[]; ref_write_rules?: MergeGateResult["ref_write_rules"];
 }): MergeGateResult {
   const { policy, pull } = input;
+  const review_evidence: MergeGateResult["review_evidence"] = [];
   const reasons: MergeGateReason[] = [...(input.reasons ?? [])];
   const add = (code: string, message: string, evidence?: unknown) => reasons.push({ code, message, ...(evidence === undefined ? {} : { evidence }) });
   if (!policy.enabled) add("policy_disabled", "Project merge policy is disabled");
   else {
     if (!policy.target_branches.includes(pull.target_branch)) add("target_branch_not_allowed", "Target branch is outside project merge policy", pull.target_branch);
     const unique = new Map(input.required.map(c => [checkIdentity(c), c]));
+    if (!unique.size) add("required_checks_empty", "Repository and project required-check union is empty");
     for (const required of unique.values()) {
       const matches = input.checks.filter(c => c.headSha === pull.head_sha && (required.kind === "commit_status"
         ? c.kind === "commit_status" && c.name === required.context
@@ -47,12 +49,13 @@ export function evaluateMergeGate(input: {
         const key = `${review.reviewer.kind}:${review.reviewer.id}`;
         if ((latest.get(key)?.sequence ?? -1) < review.sequence) latest.set(key, review);
       }
-      if ([...latest.values()].some(r => r.verdict === "block")) add("review_blocked", "A current independent reviewer blocks this revision", [...latest.values()].filter(r => r.verdict === "block").map(r => r.id));
-      if (policy.require_independent_review && ![...latest.values()].some(r => r.verdict === "pass")) add("independent_review_missing", "At least one current independent pass review is required");
+      review_evidence.push(...[...latest.values()].map(r => ({ review_id: r.id, attestation: r.reviewer.kind === "member" ? "member_attested" as const : "agent_independent" as const })));
+      if ([...latest.values()].some(r => r.verdict === "block")) add("review_blocked", "A current eligible reviewer blocks this revision", [...latest.values()].filter(r => r.verdict === "block").map(r => r.id));
+      if (policy.require_independent_review && ![...latest.values()].some(r => r.verdict === "pass")) add("independent_review_missing", "At least one current Agent-independent or member-attested pass review is required");
     }
     if (policy.require_human_approval) add("human_approval_required", "An operation-bound member approval is required; preflight cannot grant approval");
     if (policy.credential_enforcement_mode === "strict") add("credential_enforcement_unavailable", "Strict credential enforcement is pending C; direct push has not been closed");
   }
   return { allowed: reasons.length === 0, reasons, preflight_only: true, execution_authorized: false,
-    credential_boundary: "平台入口受控、直推未封闭", policy };
+    credential_boundary: "平台入口受控、直推未封闭", policy, review_evidence, ref_write_rules: input.ref_write_rules ?? [] };
 }

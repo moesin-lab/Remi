@@ -18,15 +18,20 @@ export class MergePolicyRepo {
     }
     const { expected_revision, ...fields } = input;
     const policy: ProjectMergePolicy = { ...fields, revision: expected_revision + 1 };
-    // Atomic compare-and-swap also serializes concurrent first writes across processes.
-    const changed = expected_revision === 0
-      ? this.ctx.db.query(`INSERT INTO multiremi_project_merge_policies(project_id, revision, policy, updated_by, updated_at)
-          VALUES(?,?,?,?,?) ON CONFLICT(project_id) DO NOTHING`).run(projectId, policy.revision, JSON.stringify(policy), memberId, nowIso())
-      : this.ctx.db.query(`UPDATE multiremi_project_merge_policies SET revision=?, policy=?, updated_by=?, updated_at=? WHERE project_id=? AND revision=?`)
-          .run(policy.revision, JSON.stringify(policy), memberId, nowIso(), projectId, expected_revision);
-    if (!changed.changes) throw new ScmOperationError("scm_policy_conflict", "Merge policy revision changed");
-    return policy;
+    return this.ctx.db.transaction(() => {
+      // Same project lock as append: serialize policy updates and review submission on PG.
+      this.ctx.db.query("UPDATE multiremi_projects SET id=id WHERE id=?").run(projectId);
+      // Atomic compare-and-swap also serializes concurrent first writes across processes.
+      const changed = expected_revision === 0
+        ? this.ctx.db.query(`INSERT INTO multiremi_project_merge_policies(project_id, revision, policy, updated_by, updated_at)
+            VALUES(?,?,?,?,?) ON CONFLICT(project_id) DO NOTHING`).run(projectId, policy.revision, JSON.stringify(policy), memberId, nowIso())
+        : this.ctx.db.query(`UPDATE multiremi_project_merge_policies SET revision=?, policy=?, updated_by=?, updated_at=? WHERE project_id=? AND revision=?`)
+            .run(policy.revision, JSON.stringify(policy), memberId, nowIso(), projectId, expected_revision);
+      if (!changed.changes) throw new ScmOperationError("scm_policy_conflict", "Merge policy revision changed");
+      return policy;
+    })();
   }
+
   findChangeRequest(connectionId: string, repositoryId: string, externalId: string): { id: string } | null {
     return this.ctx.db.query("SELECT id FROM multiremi_scm_change_requests WHERE connection_id=? AND repository_id=? AND external_id=?").get(connectionId, repositoryId, externalId) ?? null;
   }

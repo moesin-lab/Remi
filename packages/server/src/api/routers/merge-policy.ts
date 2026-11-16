@@ -87,8 +87,10 @@ export function registerMergePolicyRoutes(app: Hono, deps: RouterDeps): void {
       if (!identity || before.externalId !== loaded.cr.externalId) throw new ScmOperationError("scm_evidence_mismatch", "Provider omitted or mismatched PR identity");
       const reasons = [];
       let required = policy.required_checks;
+      let ref_write_rules: Awaited<ReturnType<typeof op.requiredChecks>>["ref_write_rules"] = [];
       try {
         const rules = await op.requiredChecks(identity.target_branch);
+        ref_write_rules = rules.ref_write_rules;
         required = [...required, ...resolveRepositoryChecks(rules, required)];
       } catch (error) {
         reasons.push({ code: error instanceof ScmOperationError ? ["scm_evidence_incomplete", "scm_invalid_response"].includes(error.code) ? "repository_rules_incomplete" : error.code : "repository_rules_unavailable", message: "Could not completely verify effective repository rules", evidence: error instanceof ScmOperationError ? error.message : undefined });
@@ -102,9 +104,9 @@ export function registerMergePolicyRoutes(app: Hono, deps: RouterDeps): void {
       if (policy.revision !== store.mergePolicies.get(loaded.project.id).revision) reasons.push({ code: "policy_changed", message: "Policy changed while evaluating gate" });
       if (after.payload.state !== "open" || after.payload.draft === true) reasons.push({ code: "pull_request_not_mergeable", message: "PR must be open and ready for review" });
       return c.json(evaluateMergeGate({ policy, pull: identity, required, checks,
-        reviews: store.mergePolicies.list(loaded.project.id, loaded.cr.id), actors: store.mergePolicies.actors(loaded.cr.id), reasons }));
+        reviews: store.mergePolicies.list(loaded.project.id, loaded.cr.id), actors: store.mergePolicies.actors(loaded.cr.id), reasons, ref_write_rules }));
     } catch (error) {
-      return c.json({ allowed: false, reasons: [{ code: "scm_evidence_unavailable", message: error instanceof ScmOperationError ? error.message : "Cannot verify live PR" }], preflight_only: true, execution_authorized: false, credential_boundary: "平台入口受控、直推未封闭", policy });
+      return c.json({ allowed: false, reasons: [{ code: "scm_evidence_unavailable", message: error instanceof ScmOperationError ? error.message : "Cannot verify live PR" }], preflight_only: true, execution_authorized: false, credential_boundary: "平台入口受控、直推未封闭", policy, review_evidence: [], ref_write_rules: [] });
     }
   });
 }

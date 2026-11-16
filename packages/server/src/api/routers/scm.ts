@@ -5,6 +5,8 @@ import type {
   MultiremiScmChangeRequestWithRepository,
   UpdateScmConnectionInput,
 } from "@multiremi/contracts/types.js";
+import { GitHubScmOperations, ScmOperationError } from "@multiremi/scm/operations.js";
+import { ScmHttpError } from "@multiremi/scm/http.js";
 import { ScmCredentialEncryptionError } from "@multiremi/scm/credentials.js";
 import {
   denyCurrentUserWorkspaceAccess,
@@ -19,6 +21,24 @@ import type { RouterDeps } from "./deps.js";
 
 export function registerScmRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+  const activeRoot = "/api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests";
+
+  app.get(`${activeRoot}/:number/checks`, async (c) => {
+    const loaded = loadOperations(c, deps);
+    if (loaded instanceof Response) return loaded;
+    try {
+      const number = Number(c.req.param("number"));
+      const before = await loaded.operations.get(number);
+      const summary = await loaded.operations.checks(String(before.payload.head_sha));
+      const after = await loaded.operations.get(number);
+      if (before.payload.head_sha !== after.payload.head_sha || before.payload.base_sha !== after.payload.base_sha
+        || before.payload.target_branch !== after.payload.target_branch
+        || before.payload.base_repository_full_name !== after.payload.base_repository_full_name) {
+        return c.json({ error: "Pull request changed while reading checks", code: "scm_head_changed" }, 409);
+      }
+      return c.json({ summary });
+    } catch (error) { return scmErrorResponse(c, error); }
+  });
 
   app.get("/api/issues/:id/change-requests", (c) => {
     const issue = store.getIssue(c.req.param("id"));
@@ -247,6 +267,27 @@ export function registerScmRoutes(app: Hono, deps: RouterDeps): void {
   });
 }
 
+function loadOperations(c: Context, deps: RouterDeps): {
+  operations: GitHubScmOperations;
+} | Response {
+  const workspaceId = c.req.param("workspaceId") ?? "";
+  const denied = denyCurrentUserWorkspaceAccess(c, deps.store, workspaceId);
+  if (denied) return denied;
+  const binding = deps.store.listScmRepositoryBindings({ workspaceId, enabled: true })
+    .find(item => item.repositoryId === c.req.param("repositoryId"));
+  if (!binding) return c.json({ error: "SCM repository binding not found" }, 404);
+  const connection = deps.store.getScmConnection(binding.connectionId);
+  if (!connection || !connection.enabled) return c.json({ error: "SCM connection unavailable" }, 409);
+  try {
+    if (connection.provider !== "github") throw new ScmOperationError("scm_capability_unavailable", "Active SCM operations are not verified for this provider");
+    const credential = deps.store.getScmConnectionCredential(connection.id);
+    if (!credential) return c.json({ error: "SCM credentials unavailable" }, 503);
+    return {
+      operations: new GitHubScmOperations({ connection, binding, credential, signal: c.req.raw.signal }),
+    };
+  } catch (error) { return scmErrorResponse(c, error); }
+}
+
 function loadConnection(c: Context, deps: RouterDeps, requireAdmin = false): {
   connection: NonNullable<ReturnType<RouterDeps["store"]["getScmConnectionWithRepositories"]>>;
 } | Response {
@@ -271,6 +312,17 @@ function eventPageLimit(value: string | undefined): number {
 
 function scmErrorResponse(c: Context, error: unknown): Response {
   const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof ScmOperationError) {
+    const status = error.code === "scm_capability_unavailable" ? 501
+      : /conflict|ambiguous/u.test(error.code) ? 409 : 400;
+    return c.json({ error: message, code: error.code }, status);
+  }
+  if (error instanceof ScmHttpError) {
+    return c.json({ error: "SCM provider request failed", code: "scm_provider_error", providerStatus: error.status }, 502);
+  }
+  if (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) {
+    return c.json({ error: "SCM request interrupted; retry the read", code: "scm_operation_unknown" }, 504);
+  }
   if (error instanceof ScmCredentialEncryptionError) {
     return c.json({ error: message, code: error.code }, 503);
   }

@@ -29,6 +29,18 @@ afterEach(() => {
 });
 
 describe("operations CLI contracts", () => {
+  it("reads live checks with the canonical repository and provider PR number", async () => {
+    useCliEnv();
+    const spec = specById("scm.change-request.checks");
+    globalThis.fetch = capabilityFetch(spec.id, request => {
+      expect(request.method).toBe("GET");
+      expect(new URL(request.url).pathname).toBe("/api/workspaces/ws_1/scm/repositories/repo_widgets/change-requests/42/checks");
+      return Response.json({ summary: { conclusion: "missing", checks: [] } });
+    });
+    const output = await capture(() => registryFor([spec]).execute(["scm", "change-request", "checks", "repo_widgets", "42", "--json"]));
+    expect(JSON.parse(output.stdout).summary.conclusion).toBe("missing");
+  });
+
   it("requests one canonical day/model detail page using the declared CLI parameters", async () => {
     useCliEnv();
     const spec = specById("dashboard.usage.report");

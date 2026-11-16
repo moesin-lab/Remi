@@ -19,6 +19,9 @@ export function canRefresh(): boolean {
     !document.querySelector('[contenteditable="true"]:focus, input:focus, textarea:focus');
 }
 export function checkBuild(): Promise<boolean> {
+  // Next dev already owns updates through HMR. Polling a cold route there
+  // starts a webpack compilation and can stall unrelated page reloads.
+  if (process.env.NODE_ENV === "development") return Promise.resolve(false);
   if (!inFlight) {
     inFlight = fetch(BUILD_PATH, { cache: "no-store", signal: AbortSignal.timeout(1500) }).then(async response => {
       if (!response.ok) return false;

@@ -29,6 +29,38 @@ afterEach(() => {
 });
 
 describe("operations CLI contracts", () => {
+  it("reads the merger slot from real stdin and rejects argv/file secrets before any HTTP request", async () => {
+    const bodies: unknown[] = [];
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async request => {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/cli/capabilities") return Response.json({ identity: "human", commands: [{ id: "scm.connection.update", allowed: true }] });
+      if (request.method === "GET") return Response.json({ connections: [{ id: "scm_fixture", name: "Fixture" }] });
+      expect(path).toBe("/api/workspaces/ws_1/scm/connections/scm_fixture");
+      expect(request.method).toBe("PATCH");
+      bodies.push(await request.json());
+      return Response.json({ connection: { id: "scm_fixture", mergeCredentialSet: true } });
+    } });
+    const secret = "fixture-merger-stdin-secret";
+    const directory = mkdtempSync(join(tmpdir(), "scm-credential-cli-")); tempDirectories.push(directory);
+    const file = join(directory, "input.json"); writeFileSync(file, JSON.stringify({ mergeCredential: secret }));
+    try {
+      for (const [args, success] of [
+        [["--file", "-"], true],
+        [["--data", JSON.stringify({ mergeCredential: secret })], false],
+        [["--file", file], false],
+      ] as const) {
+        const child = Bun.spawn([process.execPath, "apps/remi/main.ts", "scm", "connection", "update", "scm_fixture", ...args, "--json"], {
+          env: { ...process.env, MULTIREMI_SERVER_URL: `http://127.0.0.1:${server.port}`, MULTIREMI_WORKSPACE_ID: "ws_1", MULTIREMI_TOKEN: "fixture-member", MULTIREMI_CONFIG: join(directory, "config.json") },
+          stdin: Buffer.from(JSON.stringify({ mergeCredential: secret, mergeCredentialKind: "token" })), stdout: "pipe", stderr: "pipe",
+        });
+        const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+        expect(code === 0, stderr).toBe(success);
+        expect(stdout + stderr).not.toContain(secret);
+      }
+      expect(bodies).toEqual([{ mergeCredential: secret, mergeCredentialKind: "token" }]);
+    } finally { server.stop(true); }
+  });
+
   it("executes active SCM commands through the Registry with real API paths and JSON bodies", async () => {
     useCliEnv();
     for (const [action, method, suffix, body] of [

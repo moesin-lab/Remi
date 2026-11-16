@@ -1,3 +1,5 @@
+import { MergePolicyRepo } from "./merge-policy-repo.js";
+import { createHash } from "node:crypto";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { createCommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
@@ -214,6 +216,12 @@ export class ScmRepo {
       throw new Error("SCM repositoryIds must be an array");
     }
     const repositoryIds = uniqueStrings(repositoryIdsInput ?? []);
+    if (input.mergeCredentialKind !== undefined && input.mergeCredentialKind !== "token") throw new Error("Unsupported merge credential kind");
+    if (input.clearMergeCredential !== undefined && typeof input.clearMergeCredential !== "boolean") throw new Error("clearMergeCredential must be a boolean");
+    const replaceMergeCredential = input.mergeCredential !== undefined;
+    if (replaceMergeCredential && input.clearMergeCredential) throw new Error("mergeCredential and clearMergeCredential cannot be used together");
+    if (input.mergeCredentialKind && !replaceMergeCredential) throw new Error("mergeCredentialKind requires mergeCredential");
+    const mergeCredential = replaceMergeCredential ? requiredSecret(input.mergeCredential, "merge credential") : null;
     const replaceAccessToken = input.accessToken !== undefined || input.access_token !== undefined;
     const clearAccessToken = Boolean(input.clearAccessToken ?? input.clear_access_token);
     const webhookSecretInput = input.webhookSecret ?? input.webhook_secret;
@@ -298,6 +306,9 @@ export class ScmRepo {
           repository_scope = ?, is_default = ?,
           access_token_encrypted = CASE WHEN ? = 1 THEN ? WHEN ? = 1 THEN NULL ELSE access_token_encrypted END,
           access_token_hint = CASE WHEN ? = 1 THEN ? WHEN ? = 1 THEN NULL ELSE access_token_hint END,
+          merge_credential_encrypted = CASE WHEN ? = 1 THEN ? WHEN ? = 1 THEN NULL ELSE merge_credential_encrypted END,
+          merge_credential_hint = CASE WHEN ? = 1 THEN ? WHEN ? = 1 THEN NULL ELSE merge_credential_hint END,
+          merge_credential_kind = CASE WHEN ? = 1 THEN 'token' WHEN ? = 1 THEN NULL ELSE merge_credential_kind END,
           webhook_secret_encrypted = CASE WHEN ? = 1 THEN ? WHEN ? = 1 THEN NULL ELSE webhook_secret_encrypted END,
           webhook_secret_hint = CASE WHEN ? = 1 THEN ? WHEN ? = 1 THEN NULL ELSE webhook_secret_hint END,
           verification_status = CASE WHEN ? = 1 THEN 'unverified' ELSE verification_status END,
@@ -328,6 +339,11 @@ export class ScmRepo {
           replaceAccessToken ? 1 : 0,
           secretHint(accessToken),
           clearAccessToken ? 1 : 0,
+          replaceMergeCredential ? 1 : 0,
+          mergeCredential ? encryptScmCredential(mergeCredential, { workspaceId: lockedCurrent.workspaceId, connectionId: id, field: "merge_credential" }) : null,
+          input.clearMergeCredential ? 1 : 0,
+          replaceMergeCredential ? 1 : 0, secretHint(mergeCredential), input.clearMergeCredential ? 1 : 0,
+          replaceMergeCredential ? 1 : 0, input.clearMergeCredential ? 1 : 0,
           replaceWebhookSecret ? 1 : 0,
           webhookSecret ? encryptScmCredential(webhookSecret, { workspaceId: lockedCurrent.workspaceId, connectionId: id, field: "webhook_secret" }) : null,
           clearWebhookSecret ? 1 : 0,
@@ -392,6 +408,19 @@ export class ScmRepo {
       this.ctx.db.run("DELETE FROM multiremi_scm_repository_bindings WHERE connection_id = ?", [id]);
       return this.ctx.db.run("DELETE FROM multiremi_scm_connections WHERE id = ?", [id]).changes > 0;
     })();
+  }
+
+  credentialVersion(id: string): string {
+    const row = this.ctx.db.query("SELECT access_token_encrypted,merge_credential_encrypted,merge_credential_kind,api_base_url,base_url,enabled FROM multiremi_scm_connections WHERE id=?").get(id);
+    return createHash("sha256").update(JSON.stringify(row ?? null)).digest("hex");
+  }
+
+  /** Server-only capability: callers are restricted by the architecture test. */
+  getMergeCredential(id: string): string | null {
+    const row = this.ctx.db.query("SELECT workspace_id,merge_credential_encrypted,merge_credential_kind FROM multiremi_scm_connections WHERE id=?").get(id) as Row | null;
+    if (!row?.merge_credential_encrypted) return null;
+    if (row.merge_credential_kind !== "token") throw new Error("Unsupported merge credential kind");
+    return decryptScmCredential(String(row.merge_credential_encrypted), { workspaceId: String(row.workspace_id), connectionId: id, field: "merge_credential" });
   }
 
   getConnectionCredential(id: string): MultiremiScmConnectionCredential | null {
@@ -884,6 +913,11 @@ export class ScmRepo {
     const contentHash = requiredString(input.contentHash, "snapshot content hash");
     const revision = requiredString(input.revision ?? cleanOptionalString(input.version) ?? contentHash, "snapshot revision");
     let projected: { changeRequestId: string; issueIds: string[] } | null = null;
+    if (input.entityType === "change_request") {
+      const owner = this.getConnection(input.connectionId);
+      if (!owner) throw new Error("SCM connection unavailable");
+      this.ctx.lockWorkspaceRepositoryTopology(owner.workspaceId);
+    }
     const { connection, binding } = this.lockConnectionAndBinding(input.connectionId, input.repositoryId);
     const values = [
       input.connectionId,
@@ -998,6 +1032,7 @@ export class ScmRepo {
       const changeRequest = this.getChangeRequest(changeRequestId);
       if (!changeRequest) throw new Error(`SCM change request not found: ${changeRequestId}`);
       if (changeRequest.workspaceId !== issue.workspaceId) throw new Error("SCM change request belongs to another workspace");
+      this.ctx.lockWorkspaceRepositoryTopology(issue.workspaceId);
       const now = nowIso();
       this.ctx.db.run(
         `INSERT INTO multiremi_scm_issue_links (
@@ -1009,6 +1044,7 @@ export class ScmRepo {
           unlinked_at = NULL, updated_at = excluded.updated_at`,
         [createId("sil"), issue.workspaceId, changeRequestId, issueId, now, now, now],
       );
+      new MergePolicyRepo(this.ctx).appendStrictCoverage(issue.workspaceId);
       const linkRow = this.ctx.db.query(
         "SELECT * FROM multiremi_scm_issue_links WHERE change_request_id = ? AND issue_id = ?",
       ).get(changeRequestId, issueId) as Row;
@@ -1646,6 +1682,7 @@ export class ScmRepo {
         );
       }
     }
+    new MergePolicyRepo(this.ctx).appendStrictCoverage(connection.workspaceId);
     return { changeRequestId: changeRequest.id, issueIds: this.activeIssueIds(changeRequest.id) };
   }
 
@@ -1861,6 +1898,9 @@ function toScmConnection(row: Row): MultiremiScmConnection {
     isDefault: Boolean(Number(row.is_default ?? 0)),
     accessTokenSet: Boolean(nullableString(row.access_token_encrypted)),
     accessTokenHint: nullableString(row.access_token_hint),
+    mergeCredentialSet: Boolean(nullableString(row.merge_credential_encrypted)),
+    mergeCredentialHint: nullableString(row.merge_credential_hint),
+    mergeCredentialKind: row.merge_credential_kind === "token" ? "token" : null,
     webhookSecretSet: Boolean(nullableString(row.webhook_secret_encrypted)),
     webhookSecretHint: nullableString(row.webhook_secret_hint),
     verificationStatus: normalizeVerificationStatus(row.verification_status ?? "unverified"),

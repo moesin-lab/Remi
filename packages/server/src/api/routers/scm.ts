@@ -1,3 +1,4 @@
+import { isHumanOperatorRequest } from "../wire/index.js";
 import { registerMergeExecutionRoutes } from "./merge-execution.js";
 import { registerMergePolicyRoutes, scmRequestActor } from "./merge-policy.js";
 import type { Context, Hono } from "hono";
@@ -167,6 +168,7 @@ export function registerScmRoutes(app: Hono, deps: RouterDeps): void {
     const body = await readJsonStrictAllowEmpty<UpdateScmConnectionInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
+      if (["mergeCredential", "clearMergeCredential", "mergeCredentialKind"].some(key => key in body) && !isHumanOperatorRequest(c)) return c.json({ code: "merge_credential_member_required", error: "Only members may write merge credentials" }, 403);
       const connection = store.updateScmConnection(loaded.connection.id, body);
       publishWorkspaceEvent(c, store, "scm:connection_updated", loaded.connection.workspaceId, { connection });
       return c.json({ connection });

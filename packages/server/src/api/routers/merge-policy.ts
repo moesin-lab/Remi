@@ -84,7 +84,7 @@ export function registerMergePolicyRoutes(app: Hono, deps: RouterDeps): void {
       const op = operations(loaded.cr, c.req.raw.signal);
       return c.json((await readLiveMergeGate(store, loaded.project.id, loaded.cr, op, policy)).gate);
     } catch (error) {
-      return c.json({ allowed: false, reasons: [{ code: "scm_evidence_unavailable", message: error instanceof ScmOperationError ? error.message : "Cannot verify live PR" }], preflight_only: true, execution_authorized: false, credential_boundary: "平台入口受控、直推未封闭", policy, review_evidence: [], ref_write_rules: [] });
+      return c.json({ allowed: false, reasons: [{ code: error instanceof ScmOperationError && error.code === "scm_capability_unavailable" ? error.code : "scm_evidence_unavailable", message: error instanceof ScmOperationError ? error.message : "Cannot verify live PR" }], preflight_only: true, execution_authorized: false, credential_boundary: "平台入口受控、直推未封闭", policy, review_evidence: [], ref_write_rules: [] });
     }
   });
 }

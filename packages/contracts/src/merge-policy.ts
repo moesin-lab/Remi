@@ -45,7 +45,8 @@ export interface MergeGateResult {
   reasons: MergeGateReason[];
   preflight_only: true;
   execution_authorized: false;
-  credential_boundary: "平台入口受控、直推未封闭";
+  credential_boundary: "平台入口受控、直推未封闭" | "平台入口受控、直推已由仓库保护封闭（实时证明）";
+  protection_proof?: { proven: boolean; checked_at: string; reasons: MergeGateReason[]; evidence: unknown };
   policy: ProjectMergePolicy;
   ref_write_rules: RepositoryRefWriteRule[];
   /** Current eligible reviews; member attestations do not claim Agent independence. */

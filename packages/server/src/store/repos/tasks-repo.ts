@@ -3041,30 +3041,7 @@ export class TasksRepo {
   private resolveTaskRepos(workspaceId: string, projectResources: MultiremiProjectResource[]): MultiremiRepoData[] {
     const workspaceRepos = this.ctx.workspaces().getWorkspace(workspaceId)?.repos ?? [];
     const defaultBranchFor = workspaceDefaultBranchResolver(workspaceRepos);
-    const ownProjectId = projectResources[0]?.projectId ?? null;
-    const refs: Record<string, unknown>[] = [];
-    const visited = new Set<string>();
-    if (ownProjectId) visited.add(ownProjectId);
-    // Own github_repo refs plus those of referenced projects, walked
-    // recursively. The visited set is the real cycle defense (write-time
-    // validation has a TOCTOU gap); dangling targets are silently skipped and
-    // referenced projects' local_directory resources are never pulled.
-    const collect = (resources: MultiremiProjectResource[], depth: number): void => {
-      for (const resource of resources) {
-        if (resource.resourceType === "github_repo") {
-          refs.push(resource.resourceRef);
-        } else if (resource.resourceType === "project_ref") {
-          if (depth >= PROJECT_REF_MAX_DEPTH) continue;
-          const targetId = String(resource.resourceRef.projectId ?? resource.resourceRef.project_id ?? "").trim();
-          if (!targetId || visited.has(targetId)) continue;
-          visited.add(targetId);
-          if (!this.ctx.projects().getProject(targetId)) continue;
-          collect(this.ctx.projects().listProjectResources(targetId), depth + 1);
-        }
-      }
-    };
-    collect(projectResources, 0);
-    const projectRepos = normalizeRepos(refs, defaultBranchFor);
+    const projectRepos = resolveProjectRepositories(this.ctx, workspaceId, projectResources);
     if (projectRepos.length) return projectRepos;
     return normalizeRepos(workspaceRepos, defaultBranchFor);
   }
@@ -7697,4 +7674,32 @@ function computeChatElapsedMs(task: MultiremiTask): number | null {
   const createdAt = Date.parse(task.createdAt);
   if (!Number.isFinite(completedAt) || !Number.isFinite(createdAt)) return null;
   return Math.max(0, completedAt - createdAt);
+}
+
+/** Shared project/project_ref resolution without the task-only workspace fallback. */
+export function resolveProjectRepositories(ctx: StoreContext, workspaceId: string, projectResources: MultiremiProjectResource[]): MultiremiRepoData[] {
+  const ownProjectId = projectResources[0]?.projectId ?? null;
+  const refs: Record<string, unknown>[] = [];
+  const visited = new Set<string>();
+  if (ownProjectId) visited.add(ownProjectId);
+  // Own github_repo refs plus those of referenced projects, walked
+  // recursively. The visited set is the real cycle defense (write-time
+  // validation has a TOCTOU gap); dangling targets are silently skipped and
+  // referenced projects' local_directory resources are never pulled.
+  const collect = (resources: MultiremiProjectResource[], depth: number): void => {
+    for (const resource of resources) {
+      if (resource.resourceType === "github_repo") {
+        refs.push(resource.resourceRef);
+      } else if (resource.resourceType === "project_ref") {
+        if (depth >= PROJECT_REF_MAX_DEPTH) continue;
+        const targetId = String(resource.resourceRef.projectId ?? resource.resourceRef.project_id ?? "").trim();
+        if (!targetId || visited.has(targetId)) continue;
+        visited.add(targetId);
+        if (!ctx.projects().getProject(targetId)) continue;
+        collect(ctx.projects().listProjectResources(targetId), depth + 1);
+      }
+    }
+  };
+  collect(projectResources, 0);
+  return normalizeRepos(refs, workspaceDefaultBranchResolver(ctx.workspaces().getWorkspace(workspaceId)?.repos ?? []));
 }

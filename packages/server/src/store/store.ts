@@ -2640,6 +2640,11 @@ runMigrations(this.db);
     return this.scm.deleteConnection(id);
   }
 
+  getScmCredentialVersion(id: string): string { return this.scm.credentialVersion(id); }
+
+  /** Server-only secret; do not expose through generic connection credentials. */
+  getScmMergeCredential(id: string): string | null { return this.scm.getMergeCredential(id); }
+
   getScmConnectionCredential(id: string): MultiremiScmConnectionCredential | null {
     return this.scm.getConnectionCredential(id);
   }

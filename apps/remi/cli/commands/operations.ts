@@ -602,6 +602,17 @@ function autopilotRunGuard(): CommandSpec {
   };
 }
 
+/** Validate/redact input before capability negotiation or reference resolution reads it. */
+function withScmCredentialInput(spec: CommandSpec): CommandSpec {
+  return { ...spec, run: async invocation => {
+    let body: Record<string, unknown>;
+    try { body = await requestBody(invocation); }
+    catch { throw new CliError("usage", "Invalid SCM connection JSON; use --file - for credentials"); }
+    if ("mergeCredential" in body && stringOption(invocation, "file") !== "-") throw new CliError("usage", "Read mergeCredential via --file - (stdin), never argv");
+    await spec.run(invocation);
+  } };
+}
+
 function scmSpecs(): CommandSpec[] {
   const pullRequests = (i: CommandInvocation) => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/repositories/${encodePath(positional(i, 0, "repository"))}/change-requests`;
   const pullRequest = (i: CommandInvocation) => `${pullRequests(i)}/${encodePath(positional(i, 1, "number"))}`;
@@ -615,7 +626,7 @@ function scmSpecs(): CommandSpec[] {
     op({ id: "scm.connection.list", path: ["scm", "connection", "list"], description: "List SCM connections", method: "GET", apiPath: (i) => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/connections`, auth: HUMAN, collections: ["connections"] }),
     op({ id: "scm.connection.get", path: ["scm", "connection", "get"], description: "Get an SCM connection", method: "GET", apiPath: connection, auth: HUMAN, positionals: [ref("connection")] }),
     op({ id: "scm.connection.create", path: ["scm", "connection", "create"], description: "Create an SCM connection", method: "POST", apiPath: (i) => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/connections`, mutation: "write", auth: HUMAN, options: INPUT_OPTIONS }),
-    op({ id: "scm.connection.update", path: ["scm", "connection", "update"], description: "Update an SCM connection", method: "PATCH", apiPath: connection, mutation: "write", auth: HUMAN, positionals: [ref("connection")], options: INPUT_OPTIONS }),
+    withScmCredentialInput(op({ id: "scm.connection.update", path: ["scm", "connection", "update"], description: "Update SCM connection; mergeCredential/clearMergeCredential via --file - (stdin), server-only token slot", method: "PATCH", apiPath: connection, mutation: "write", auth: HUMAN, positionals: [ref("connection")], options: INPUT_OPTIONS })),
     op({ id: "scm.connection.delete", path: ["scm", "connection", "delete"], description: "Delete an SCM connection after reporting repository impact", method: "DELETE", apiPath: connection, mutation: "destructive", auth: HUMAN, positionals: [ref("connection")], before: scmImpact }),
     op({ id: "scm.connection.verify", path: ["scm", "connection", "verify"], description: "Verify an SCM connection", method: "POST", apiPath: async (i, c) => `${await connection(i, c)}/verify`, mutation: "write", auth: HUMAN, positionals: [ref("connection")] }),
     op({ id: "scm.repository.bind", path: ["scm", "repository", "bind"], description: "Bind a repository to an SCM connection", method: "PUT", apiPath: async (i, c) => `${await connection(i, c)}/repositories/${encodePath(positional(i, 1, "repository"))}`, mutation: "write", auth: HUMAN, positionals: [ref("connection"), ref("repository")], options: INPUT_OPTIONS }),

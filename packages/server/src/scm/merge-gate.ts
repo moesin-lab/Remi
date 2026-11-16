@@ -21,6 +21,7 @@ export function evaluateMergeGate(input: {
   checks: ScmCheckObservation[]; reviews: ScmStructuredReview[]; actors: Array<{ action: string; actor: ScmActor }>;
   /** Internal execution evidence; HTTP preflight never supplies this. */
   operationApprovalValid?: boolean;
+  protectionProof?: MergeGateResult["protection_proof"];
   reasons?: MergeGateReason[]; ref_write_rules?: MergeGateResult["ref_write_rules"];
 }): MergeGateResult {
   const { policy, pull } = input;
@@ -56,8 +57,13 @@ export function evaluateMergeGate(input: {
       if (policy.require_independent_review && ![...latest.values()].some(r => r.verdict === "pass")) add("independent_review_missing", "At least one current Agent-independent or member-attested pass review is required");
     }
     if (policy.require_human_approval && !input.operationApprovalValid) add("human_approval_required", "An operation-bound member approval is required; preflight cannot grant approval");
-    if (policy.credential_enforcement_mode === "strict") add("credential_enforcement_unavailable", "Strict credential enforcement is pending C; direct push has not been closed");
+    if (policy.credential_enforcement_mode === "strict") {
+      if (!input.protectionProof) add("credential_enforcement_unavailable", "Live credential protection proof is required");
+      else reasons.push(...input.protectionProof.reasons);
+      if (input.protectionProof && !input.protectionProof.proven && !input.protectionProof.reasons.length) add("credential_enforcement_unavailable", "Protection is unproven");
+    }
   }
   return { allowed: reasons.length === 0, reasons, preflight_only: true, execution_authorized: false,
-    credential_boundary: "平台入口受控、直推未封闭", policy, review_evidence, ref_write_rules: input.ref_write_rules ?? [] };
+    credential_boundary: policy.enabled && policy.credential_enforcement_mode === "strict" && input.protectionProof?.proven ? "平台入口受控、直推已由仓库保护封闭（实时证明）" : "平台入口受控、直推未封闭",
+    ...(input.protectionProof ? { protection_proof: input.protectionProof } : {}), policy, review_evidence, ref_write_rules: input.ref_write_rules ?? [] };
 }

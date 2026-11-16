@@ -1,3 +1,4 @@
+import { readProtectionProof } from "@multiremi/scm/credential-boundary.js";
 import type { Hono } from "hono";
 import { ensureDaemonProtocolUpgrade } from "../helpers/daemon-protocol-upgrade.js";
 import { CHAT_ATTACHMENT_MAX_BYTES, sanitizeChatAttachmentFilename } from "@multiremi/contracts/attachments.js";
@@ -201,10 +202,18 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
         code: "scm_repository_origin_mismatch",
       }, 409);
     }
+    const credentialVersion = store.getScmCredentialVersion(binding.connectionId);
     const credential = store.getScmConnectionCredential(binding.connectionId);
     if (!credential?.accessToken) {
       return c.json({ error: "repository credential is not configured", code: "scm_credential_missing" }, 409);
     }
+    const strictPolicies = store.mergePolicies.strictForRepository(workspaceId, binding.repositoryId);
+    for (const { policy } of strictPolicies) {
+      const proof = await readProtectionProof(store, binding, policy);
+      if (!proof.proven) return c.json({ error: "Repository protection is unproven; write credential withheld", code: "scm_credential_protection_unproven", reasons: proof.reasons, proof }, 409);
+    }
+    if (credentialVersion !== store.getScmCredentialVersion(binding.connectionId)
+      || JSON.stringify(strictPolicies) !== JSON.stringify(store.mergePolicies.strictForRepository(workspaceId, binding.repositoryId))) return c.json({ code: "scm_credential_protection_changed", error: "Credentials or strict policy changed during proof" }, 409);
     const password = scmGitCredentialPassword(connection.provider, credential.accessToken);
     if (!password || /[\r\n]/u.test(password)) {
       return c.json({ error: "repository credential is invalid", code: "scm_credential_invalid" }, 500);

@@ -1,3 +1,4 @@
+import { MergePolicyRepo } from "./merge-policy-repo.js";
 // Projects domain (projects, pinned items, project resources and project docs/wiki), extracted
 // verbatim from MultiremiStore (the facade delegates every public method here).
 import { joinProjectInstructions, MAX_PROJECT_INSTRUCTIONS_LENGTH, PROJECT_INSTRUCTIONS_TOO_LONG } from "@multiremi/contracts/remi-rules.js";
@@ -133,7 +134,7 @@ export class ProjectsRepo {
       String(resource.resourceType ?? resource.resource_type ?? "").trim() === "local_directory"
     );
     const hasGitRepository = resources.some((resource) =>
-      String(resource.resourceType ?? resource.resource_type ?? "").trim() === "github_repo"
+      ["github_repo", "project_ref"].includes(String(resource.resourceType ?? resource.resource_type ?? "").trim())
     );
     const tx = this.ctx.db.transaction(() => {
       if (hasLocalDirectory) this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
@@ -609,7 +610,7 @@ export class ProjectsRepo {
     if (!project) throw new Error(`Project not found: ${projectId}`);
     const resourceType = String(input.resourceType ?? input.resource_type ?? "").trim();
     if (resourceType !== "local_directory" && resourceType !== "github_repo") {
-      return this.createProjectResourceForProject(project, input);
+      return this.ctx.db.transaction(() => this.createProjectResourceForProject(project, input))();
     }
     const tx = this.ctx.db.transaction(() => {
       if (resourceType === "local_directory") {
@@ -635,6 +636,7 @@ export class ProjectsRepo {
     const resourceType = String(input.resourceType ?? input.resource_type ?? "").trim();
     const rawRef = input.resourceRef ?? input.resource_ref ?? {};
     const resourceRef = normalizeProjectResourceRef(resourceType, rawRef);
+    if (["github_repo", "project_ref"].includes(resourceType)) this.ctx.lockWorkspaceRepositoryTopology(project.workspaceId);
     this.assertLocalDirectoryDaemonNotRetired(project.workspaceId, resourceType, resourceRef);
     this.assertNoLocalDirectoryDaemonConflict(projectId, resourceType, resourceRef, null, "create");
     this.assertImportedGitRepository(project.workspaceId, resourceType, resourceRef);
@@ -659,6 +661,7 @@ export class ProjectsRepo {
       ],
     );
     this.ctx.db.run("UPDATE multiremi_projects SET updated_at = ? WHERE id = ?", [now, projectId]);
+    if (["github_repo", "project_ref"].includes(resourceType)) new MergePolicyRepo(this.ctx).appendStrictCoverage(project.workspaceId);
     return this.getProjectResource(id)!;
   }
 
@@ -673,7 +676,7 @@ export class ProjectsRepo {
     const existing = this.getProjectResource(resourceId);
     if (!existing || existing.projectId !== projectId) throw new Error(`Project resource not found: ${resourceId}`);
     if (existing.resourceType !== "local_directory" && existing.resourceType !== "github_repo") {
-      return this.updateProjectResourceWithinLifecycleLock(project, existing, input);
+      return this.ctx.db.transaction(() => this.updateProjectResourceWithinLifecycleLock(project, existing, input))();
     }
     const tx = this.ctx.db.transaction(() => {
       if (existing.resourceType === "local_directory") {
@@ -705,6 +708,7 @@ export class ProjectsRepo {
     const hasRef = hasAnyField(input, "resourceRef", "resource_ref");
     const rawRef = hasRef ? input.resourceRef ?? input.resource_ref ?? {} : existing.resourceRef;
     const resourceRef = normalizeProjectResourceRef(existing.resourceType, rawRef);
+    if (["github_repo", "project_ref"].includes(existing.resourceType)) this.ctx.lockWorkspaceRepositoryTopology(project.workspaceId);
     this.assertLocalDirectoryDaemonNotRetired(project.workspaceId, existing.resourceType, resourceRef);
     this.assertNoLocalDirectoryDaemonConflict(projectId, existing.resourceType, resourceRef, resourceId, "update");
     this.assertImportedGitRepository(project.workspaceId, existing.resourceType, resourceRef);
@@ -722,6 +726,7 @@ export class ProjectsRepo {
     );
     if (result.changes === 0) throw new Error(`Project resource not found: ${resourceId}`);
     this.ctx.db.run("UPDATE multiremi_projects SET updated_at = ? WHERE id = ?", [now, projectId]);
+    if (["github_repo", "project_ref"].includes(existing.resourceType)) new MergePolicyRepo(this.ctx).appendStrictCoverage(project.workspaceId);
     return this.getProjectResource(resourceId)!;
   }
 

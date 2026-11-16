@@ -23,6 +23,8 @@ export function classifyTaskFailure(rawError: string): TaskFailureReasonValue {
   const lower = trimmed.toLowerCase()
     .replace(/\brequest[\s_-]*id\s*[:=]\s*["']?[a-z0-9_-]+["']?/g, "")
     .replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/g, "");
+  if (/daemon rpc failed: (?:input_gap|question_consumer_mismatch|invalid_report)\b/.test(lower)
+    || lower.includes("unconfirmed turn input gap")) return TaskFailureReason.PlatformInputRejected;
   const statuses = [...lower.matchAll(providerHttpStatusRe)].map((match) => Number(match[1]));
 
   // Repository preparation happens before the agent starts; these markers only

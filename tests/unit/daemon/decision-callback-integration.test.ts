@@ -117,6 +117,54 @@ async function setup({ store }: PendingTurnTestFixture, delegated = false, under
 }
 
 pendingTurnBackendTests("decision callbacks over Store and native WS", fixture => {
+  for (const readFirst of [false, true]) it(`MUL-40 realigns a running turn after another Agent receives context (read first: ${readFirst})`, async () => {
+    const h = await setup(fixture());
+    try {
+      const initial = h.inbox.turnInput(h.attempt.id);
+      await h.inbox.rpc('turn.input', { ...initial, message_ids: h.offer.input_messages.map(m => m.id) });
+      const other = h.store.createAgent({ name: 'Other input consumer', provider: 'claude' });
+      const ordinary = h.store.sendMessage({ session_id: h.session.id, sender: { type: 'member', id: 'mem_local_local' },
+        to: { type: 'agent', ref: other.id }, message_kind: 'request', wake_requested: 'now', body_md: 'Context for another Agent' });
+      const interrupt = h.send('Continue this running provider');
+      await until(() => h.inbox.pendingTaskSteerMessages(h.attempt.id).some(m => m.id === interrupt.message.id));
+      if (readFirst) await h.readRange(h.offer.input_to_seq, interrupt.message.seq);
+      await h.inbox.consumeTaskSteerMessages(h.attempt.id, [interrupt.message.id]);
+      if (!readFirst) {
+        expect(h.store.getTurn(h.offer.turn_id)?.input_to_seq).toBe(h.offer.input_to_seq);
+        const hints = h.inbox.pendingTaskSteerMessages(h.attempt.id);
+        expect(hints.some(m => m.id.startsWith('input_resync:'))).toBe(true);
+        expect((await h.readRange(h.offer.input_to_seq, interrupt.message.seq)).some(m => m.id === ordinary.message.id)).toBe(true);
+        await h.inbox.consumeTaskSteerMessages(h.attempt.id, hints.map(m => m.id));
+      }
+      expect(h.store.getTurn(h.offer.turn_id)).toMatchObject({ status: 'running', input_to_seq: interrupt.message.seq });
+      expect(h.inbox.pendingTaskSteerMessages(h.attempt.id)).toEqual([]);
+    } finally { await h.close(); }
+  });
+  it('MUL-40 keeps a running provider alive when a delegated child returns', async () => {
+    const h = await setup(fixture());
+    try {
+      await h.inbox.rpc('turn.input', { ...h.inbox.turnInput(h.attempt.id), message_ids: h.offer.input_messages.map(m => m.id) });
+      const childRuntime = h.store.registerRuntime({ name: 'Child host', provider: 'claude', daemonId: 'mul40-child-daemon' });
+      const child = h.store.createAgent({ name: 'Delegated child', provider: 'claude', runtimeId: childRuntime.id });
+      const childSession = h.store.createIssueSession(h.issue.id, { title: 'Child work', inheritMode: 'none' });
+      h.store.sendMessage({ session_id: childSession.id, sender: { type: 'agent', id: h.agent.id }, source_turn_id: h.offer.turn_id,
+        to: { type: 'agent', ref: child.id }, message_kind: 'request', wake_requested: 'now', body_md: 'Return your finding' });
+      const childTask = h.store.claimTask(childRuntime.id)!;
+      h.store.startTask(childTask.id);
+      h.send('Ordinary context before the return', 'next_turn');
+      h.store.completeTask(childTask.id, { output: 'Delegated finding' });
+      await until(() => h.inbox.pendingTaskSteerMessages(h.attempt.id).length > 0);
+      const pending = h.inbox.pendingTaskSteerMessages(h.attempt.id);
+      expect(pending.some(m => m.content.includes('Delegated finding'))).toBe(true);
+      await h.inbox.consumeTaskSteerMessages(h.attempt.id, pending.map(m => m.id));
+      const hints = h.inbox.pendingTaskSteerMessages(h.attempt.id);
+      expect(hints.some(m => m.id.startsWith('input_resync:'))).toBe(true);
+      const head = h.store.getConversationLogHead(h.session.id)!.headSeq;
+      await h.readRange(h.offer.input_to_seq, head);
+      await h.inbox.consumeTaskSteerMessages(h.attempt.id, hints.map(m => m.id));
+      expect(h.store.getTurn(h.offer.turn_id)).toMatchObject({ status: 'running', input_to_seq: head });
+    } finally { await h.close(); }
+  });
   it('same process socket reconnect preserves native wait and never schedules a second consumer', async () => {
     const h = await setup(fixture());
     try {
@@ -313,14 +361,15 @@ pendingTurnBackendTests("decision callbacks over Store and native WS", fixture =
           await expect(h.inbox.consumeTaskSteerMessages(h.attempt.id, [])).rejects.toThrow("unconfirmed turn input gap");
           expect(h.store.getTurn(h.offer.turn_id)?.input_to_seq).toBe(h.offer.input_to_seq);
           // A full range read sees the omitted ordinary body and advances its checkpoint.
-          await expect(h.inbox.consumeTaskSteerMessages(h.attempt.id, hints.map(m => m.id))).rejects.toMatchObject({ code: "input_gap" });
+          await h.inbox.consumeTaskSteerMessages(h.attempt.id, hints.map(m => m.id));
+          expect(h.inbox.pendingTaskSteerMessages(h.attempt.id).some(m => m.id.startsWith("input_resync:"))).toBe(true);
           const range = await h.readRange(h.offer.input_to_seq, answer.message.seq);
           if (ordinary) expect(range.find(m => m.id === ordinary.message.id)?.body_md).toBe(ordinary.message.body_md);
           const readAnswer = range.find(m => m.id === answer.message.id)!;
           expect(JSON.parse(readAnswer.body_md)).toEqual(kind === "long_text" || !multi
             ? { ...response, answers: { "Where?": kind === "long_text" ? body : "Paris" } }
             : { ...response, answers: { "Where?": "Paris", "When?": "Now" } });
-          await h.inbox.consumeTaskSteerMessages(h.attempt.id, hints.map(m => m.id));
+          await h.inbox.consumeTaskSteerMessages(h.attempt.id, h.inbox.pendingTaskSteerMessages(h.attempt.id).map(m => m.id));
         } else {
           expect(h.inbox.pendingTaskSteerMessages(h.attempt.id)).toEqual([]);
           await h.inbox.consumeTaskSteerMessages(h.attempt.id, []);
@@ -367,8 +416,15 @@ pendingTurnBackendTests("decision callbacks over Store and native WS", fixture =
           }
           text = "Ordinary context handled";
         } else {
-          expect(scenario).toBe("late_interrupt");
           expect(turns).toBe(3);
+          if (scenario === "unread") {
+            expect(prompt).toContain("remi message list");
+            await h.readRange(h.offer.input_to_seq, answerSeq);
+            text = "Recovered missing input in the same provider session";
+            yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text }] };
+            return;
+          }
+          expect(scenario).toBe("late_interrupt");
           expect(prompt).toContain("Second directive during provider execution");
           expect(h.store.getSessionAgentReadProgress(h.session.id, h.agent.id).seq).toBe(answerSeq);
           expect(h.store.getTurn(h.offer.turn_id)?.input_to_seq).toBeLessThan(lateSeq);
@@ -398,20 +454,13 @@ pendingTurnBackendTests("decision callbacks over Store and native WS", fixture =
     try {
       const run = state.runAgent({ ...h.attempt, holdsWorkspace: false }, new AbortController().signal,
         { workDir, ensureDir: false });
-      if (scenario === "unread") {
-        await expect(run).rejects.toMatchObject({ code: "input_gap" });
-        expect(turns).toBe(2);
-        expect(h.store.getSessionAgentReadProgress(h.session.id, h.agent.id).seq).toBe(h.offer.input_to_seq);
-        expect(h.store.getTurn(h.offer.turn_id)).toMatchObject({ status: "running", input_to_seq: h.offer.input_to_seq, reply_message_id: null });
-        return;
-      }
       const result = await run;
       expect(result.completed).toBe(true);
-      expect(turns).toBe(scenario === "late_interrupt" ? 3 : 2);
+      expect(turns).toBe(scenario === "read" ? 2 : 3);
       expect(h.store.getTurn(h.offer.turn_id)?.input_to_seq).toBe(lateSeq || answerSeq);
       expect(h.store.getTurn(h.offer.turn_id)?.status).toBe("completed");
       expect(h.store.getMessage(h.store.getTurn(h.offer.turn_id)!.reply_message_id!)?.body_md)
-        .toBe(scenario === "late_interrupt" ? "Both directives handled" : "Ordinary context handled");
+        .toBe(scenario === "late_interrupt" ? "Both directives handled" : scenario === "unread" ? "Recovered missing input in the same provider session" : "Ordinary context handled");
     } finally { await drain(); await h.close(); rmSync(workDir, { recursive: true, force: true }); }
   }, 120_000);
 

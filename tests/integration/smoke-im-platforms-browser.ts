@@ -260,7 +260,7 @@ try {
   await page.screenshot({ path: join(artifacts, "im-ingestion-mobile.png") });
   await navigate("messages", "Message history");
   await poll(() => page!.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 10_000, "message mobile overflow");
-  await poll(() => page!.locator('nav [aria-current="page"]').evaluate(link => {
+  await poll(() => page!.getByRole("navigation", { name: "Manage platform capabilities", exact: true }).locator('[aria-current="page"]').evaluate(link => {
     const rect = link.getBoundingClientRect();
     // Browser layout uses subpixels; allow at most one rounding pixel.
     return rect.left >= -1 && rect.right <= innerWidth + 1;

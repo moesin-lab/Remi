@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { isQueueDeliveryUnconfirmed } from "../chat/queue";
 import { HttpClient, ApiError } from "./http";
 import { withChatSendTimeout, ChatSendTimeoutError } from "../chat/send";
 import { MAINTENANCE_RETRY_LIMIT_MS, retryAfterMs, useContinuityStore } from "../platform-lifecycle/continuity";
@@ -38,6 +39,19 @@ describe("maintenance continuity", () => {
     await vi.advanceTimersByTimeAsync(2_000); await answer;
     await expect(client.fetch("/safe", { method: "POST", retrySafe: true })).rejects.toMatchObject({ status: 500 });
     expect(fetch).toHaveBeenCalledTimes(3);
+  });
+  it.each(["dedupe_key", "client_id"])("keeps exhausted proxy delivery unconfirmed with its original %s", async key => {
+    vi.useFakeTimers();
+    const fetch = vi.fn().mockImplementation(() => Promise.resolve(new Response("Internal Server Error", { status: 500 })));
+    vi.stubGlobal("fetch", fetch);
+    const body = JSON.stringify({ [key]: "original-id", body_md: "keep me" });
+    const outcome = new HttpClient("").fetch("/send", { method: "POST", body, retrySafe: true }).catch(error => error);
+    await vi.advanceTimersByTimeAsync(MAINTENANCE_RETRY_LIMIT_MS);
+    const error = await outcome;
+    expect(error).toBeInstanceOf(TypeError);
+    expect(isQueueDeliveryUnconfirmed(error)).toBe(true);
+    expect(fetch.mock.calls.every(([, init]) => init.body === body)).toBe(true);
+    expect(useContinuityStore.getState().pendingWrites).toBe(0);
   });
   it("does not replay ordinary writes; abort cancels backoff", async () => {
     vi.useFakeTimers(); const fetch = vi.fn().mockImplementation(maintenance); vi.stubGlobal("fetch", fetch);

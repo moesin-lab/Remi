@@ -227,6 +227,7 @@ export class HttpClient {
           ?? Math.min(1000 * 2 ** attempt, 15_000) * (0.8 + Math.random() * 0.4));
         if (budget.waited + delay >= MAINTENANCE_RETRY_LIMIT_MS) {
           if (failure) throw failure;
+          if (proxyUnavailable) throw new TypeError("Web proxy unavailable; delivery is unconfirmed");
           res = response!;
           break;
         }

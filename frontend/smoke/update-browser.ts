@@ -52,7 +52,7 @@ try {
   const link = page.getByRole("link", { name: /Issues|任务|课题|이슈/, exact: true }).first();
   await link.click();
   await documentRequest;
-  await page.waitForLoadState("networkidle");
+  await page.waitForURL(`**/${fixture.slug}/issues**`, { waitUntil: "networkidle" });
   assert.deepEqual(await page.evaluate(() => fetch("/health/build", { cache: "no-store" }).then(r => r.json())), { build_id: "mul34-build-b" });
   assert.equal(errors.length, 0, errors.join("\n"));
   assert.equal(await page.getByText(/Application error|ChunkLoadError|Loading chunk .*failed/).count(), 0);

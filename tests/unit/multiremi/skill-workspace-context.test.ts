@@ -113,14 +113,19 @@ describe("skill workspace request context", () => {
         throw new Error(`unexpected import fetch: ${url}`);
       });
       const contexts: Record<string, string>[] = [{ "X-Workspace-Slug": workspace.slug }, { "X-Workspace-ID": workspace.id }];
+      let firstId: string | undefined;
       for (const context of contexts) {
         const name = "X-Workspace-Slug" in context ? "Imported slug" : "Imported ID";
         const response = await app.request(`${route}/import`, {
           method: "POST", headers: { ...headers, ...context },
           body: JSON.stringify({ url: "https://github.com/example/skills/tree/main/review-helper", name }),
         });
-        expect(response.status).toBe(201);
+        expect(response.status).toBe(firstId ? 200 : 201);
         const result = await response.json();
+        const skill = result.skill ?? result;
+        if (firstId) expect(skill.id).toBe(firstId);
+        firstId = skill.id;
+        expect(skill.name).toBe(name);
         expect((result.skill ?? result).workspaceId ?? result.workspace_id).toBe(workspace.id);
         expect((result.skill ?? result).content).toContain("# Review");
       }

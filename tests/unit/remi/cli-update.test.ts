@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   compareVersions,
   performUpdate,
@@ -92,6 +92,34 @@ describe("Remi CLI updater", () => {
       .toContain(`<string>${oldSnapshot}/remi</string>`);
     expect(existsSync(join(oldSnapshot, "remi"))).toBe(true);
     expect(execFileSync(fixture.launcherPath, ["--version"], { encoding: "utf8" }).trim()).toBe("0.2.81");
+  });
+
+  test("rewrites an installer launcher on the next local update and retains its snapshot", async () => {
+    const fixture = releaseFixture(roots);
+    const oldRelease = join(fixture.root, "old-release");
+    const mocks = join(fixture.root, "mocks");
+    mkdirSync(oldRelease); mkdirSync(mocks);
+    writeExecutable(join(oldRelease, "remi"), "#!/bin/sh\necho 0.2.80\n");
+    const archive = join(fixture.root, "old.tar.gz");
+    execFileSync("tar", ["czf", archive, "-C", oldRelease, "remi"]);
+    const oldId = createHash("sha256").update(readFileSync(archive)).digest("hex").slice(0, 8);
+    writeExecutable(join(mocks, "curl"), '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\nif [ "$1" = -o ]; then cp "$FIXTURE_ARCHIVE" "$2"; exit; fi\nshift\ndone\nexit 93\n');
+    const installed = spawnSync("bash", [resolve("scripts/install-remi.sh")], { encoding: "utf8", env: {
+      ...process.env, PATH: `${mocks}:${process.env.PATH}`, MULTIREMI_VERSION: "0.2.80",
+      MULTIREMI_BIN_DIR: join(fixture.root, "bin"), MULTIREMI_INSTALL_ROOT: fixture.installRoot,
+      FIXTURE_ARCHIVE: archive,
+    } });
+    expect(installed.status).toBe(0);
+    const previous = readFileSync(fixture.launcherPath, "utf8").replace("# Remi stable", "export LOCAL_SETUP=preserved\n# Remi stable");
+    writeExecutable(fixture.launcherPath, previous);
+    const result = await performUpdate({ currentVersion: "0.2.80", platform: { os: "darwin", arch: "arm64" },
+      fetchImpl: fixture.fetchImpl, env: { PATH: "", FIXTURE_EVENTS: fixture.events },
+      homeDir: fixture.homeDir, installRoot: fixture.installRoot, launcherPath: fixture.launcherPath, launchdPath: fixture.launchdPath });
+    expect(result.status).toBe("installed");
+    expect(readFileSync(fixture.launcherPath, "utf8")).toContain("export LOCAL_SETUP=preserved");
+    expect(readFileSync(fixture.launcherPath, "utf8")).not.toContain(`/versions/${oldId}/remi`);
+    expect(execFileSync(fixture.launcherPath, ["--version"], { encoding: "utf8" }).trim()).toBe("0.2.81");
+    expect(existsSync(join(fixture.installRoot, "versions", oldId, "remi"))).toBe(true);
   });
 
   test("does not replace the executable when the release checksum fails", async () => {

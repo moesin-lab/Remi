@@ -1,0 +1,5 @@
+{
+  "autoUpdateStable": false,
+  "autoUpdate": { "enabled": false },
+  "releaseFeedUrl": "https://github.com/moesin-lab/Remi/releases/download/vX.Y.Z/platform-release.json"
+}

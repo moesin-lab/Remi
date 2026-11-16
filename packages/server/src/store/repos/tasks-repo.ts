@@ -7330,7 +7330,7 @@ function delegationTerminalReportSection(report: DelegationTerminalReport, comme
     `Status: ${report.terminalStatus}`,
     ...(report.crossIssue && report.sourceIssueKey ? [`来源：${report.sourceIssueKey}`] : []),
     report.resultCommentId
-      ? `结论评论：${report.resultCommentId}（remi comment list ${report.source.issueId} --thread ${report.resultCommentId}）`
+      ? `结论评论：${report.resultCommentId}（remi message get ${report.resultCommentId} --output json）`
       : `结论评论：无；结果见 remi turn get ${report.sourceTurnId}`,
     `摘要：${envelopeSummary(report.terminalStatus === "cancelled" ? null
       : report.terminalStatus === "completed" ? commentBody ?? report.terminalBody : report.terminalBody)}`,

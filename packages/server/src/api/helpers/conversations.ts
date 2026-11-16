@@ -253,6 +253,19 @@ export function loadConversation(c: Context, store: MultiremiStore, id: string, 
     : { id, workspaceId: chat.session.workspaceId, issueId: null, chatId: id, chatSession: chat.session };
 }
 
+/** Read-only exception; never use this to authorize Session logs or message mutations. */
+export function canReadDelegationResult(c: Context, store: MultiremiStore, messageId: string): boolean {
+  const token = currentTaskAccessToken(c);
+  const message = store.getMessage(messageId);
+  const task = token?.taskId ? store.getTask(token.taskId) : null;
+  if (!token || !task || !message || token.agentId !== task.agentId || token.workspaceId !== task.workspaceId) return false;
+  const caller = task.issueSessionId ? store.getIssueSessionWithOwnerScope(task.issueSessionId) : null;
+  const target = store.getIssueSessionWithOwnerScope(message.session_id);
+  if (!caller || !target || caller.ownerWorkspaceId !== token.workspaceId || target.ownerWorkspaceId !== token.workspaceId
+    || caller.session.workspaceId !== token.workspaceId || target.session.workspaceId !== token.workspaceId) return false;
+  return store.canReadDelegationResult(task.id, message.id);
+}
+
 export function messageActor(c: Context, store: MultiremiStore, workspaceId: string): SendMessageInput["sender"] | Response {
   const token = currentTaskAccessToken(c);
   if (token) {

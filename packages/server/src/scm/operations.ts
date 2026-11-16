@@ -138,4 +138,3 @@ function appendQuery(path: string, values: Record<string, string | number>): str
   for (const [key, value] of Object.entries(values)) url.searchParams.set(key, String(value));
   return `${url.pathname}${url.search}`;
 }
-

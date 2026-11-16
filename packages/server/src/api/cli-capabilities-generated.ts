@@ -5186,6 +5186,19 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "scm.change-request.checks": {
+      "command": "remi scm change-request checks",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.checks",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "scm.change-request.list": {
       "command": "remi scm change-request list",
       "auth": [

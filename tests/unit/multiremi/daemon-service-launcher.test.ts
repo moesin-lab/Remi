@@ -95,6 +95,14 @@ describe("daemon service stable launcher", () => {
     expectCommand(binary, binary);
   });
 
+  test("accepts a historical single quoted exec target on an otherwise safe path", () => {
+    const plainBinary = join(root, "install", "versions", "release-a", "remi");
+    process.env.MULTIREMI_INSTALL_ROOT = join(root, "install");
+    writeLauncher();
+    writeFileSync(launcher, `#!/bin/sh\nexec '${plainBinary}' "$@"\n`);
+    expectCommand(plainBinary, launcher);
+  });
+
   test("accepts a double quoted exec target", () => {
     const plainBinary = join(root, "install", "versions", "release-a", "remi");
     process.env.MULTIREMI_INSTALL_ROOT = join(root, "install");

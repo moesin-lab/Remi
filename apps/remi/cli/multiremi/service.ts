@@ -414,7 +414,7 @@ function stableDaemonLauncher(execPath: string): string | null {
 
   const binDir = process.env.MULTIREMI_BIN_DIR?.trim();
   const directories = [binDir, ...(process.env.PATH?.split(delimiter) ?? [])];
-  const targets = [shellQuote(execPath), `"${execPath.replace(/["\\$`]/g, "\\$&")}"`];
+  const targets = [shellQuote(execPath), `'${execPath.replace(/'/g, "'\\''")}'`, `"${execPath.replace(/["\\$`]/g, "\\$&")}"`];
   for (const directory of directories) {
     if (!directory) continue;
     const candidate = resolve(directory, "remi");

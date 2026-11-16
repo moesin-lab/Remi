@@ -493,6 +493,8 @@ systemd executors retain their stricter equal-fingerprint requirement.
 The current `rollbackSafeFrom` policy attests only the preceding fingerprint
 listed in the policy file: MUL-40 changes continuation consumer logic in a
 hashed source file without changing schema, migrations or record formats.
+Both versions retain the #44 sender allowlist data migration and default; this
+does not attest rollback across that migration to an earlier fingerprint.
 Code-only rollback restores the known continuation/input failure behavior.
 This does not attest code-only rollback from the legacy storage model.
 Legacy deployments must follow the [controlled cutover](../docs/deploy/unified-model-cutover.md)

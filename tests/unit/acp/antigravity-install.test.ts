@@ -208,6 +208,7 @@ describe("fast health", () => {
     const check = resolveAcpHealthCheckCommand("antigravity", null, "agy_acp_server.par");
     expect(check.args).toBeUndefined();
     expect(check.failure).toBeTruthy();
+    expect(resolveAcpHealthCheckCommand("antigravity", null, "agy_acp_server.par", true)).toEqual({ command: "agy" });
     // An explicit override is health-checked like any other ACP executable, unless it is the retired CLI.
     expect(resolveAcpHealthCheckCommand("antigravity", "/opt/fake/agy-acp", "agy_acp_server.par")).toEqual({ command: "/opt/fake/agy-acp" });
     expect(() => resolveAcpHealthCheckCommand("antigravity", "/usr/local/bin/agy", "agy_acp_server.par"))

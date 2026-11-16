@@ -316,7 +316,7 @@ Chat 列表与收件箱使用共享已读游标，并按原收件人的旧 membe
 
 Chat 是 daemon 存储模型里的一类主体（见[存储与保留](dev/storage-retention.md)）：被归档即视为结束，工作区按保留期回收，置顶的 Chat 不回收。
 活跃 Chat 超过工作区设置 `chat_idle_days`（默认 14 天，0 为不自动归档）没有新消息会被自动归档；归档的 Chat 收到新消息（成员、飞书或自动化续接）自动恢复活跃。
-`run_only` 自动化每次运行新开一个 Chat，带 `origin: { autopilot_id, run_id }`；agent 判断没有值得报告的内容时执行 `remi automation quiet`，运行完成后该 Chat 自动归档，否则保持活跃并带未读。
+`run_only` 自动化每次运行新开一个 Chat，带 `origin: { autopilot_id, run_id }`；定时触发的任务凭证只可通过服务端保存的 run→attempt→Chat 绑定读取本次 Chat，不因同一创建者而获得其他自动化 Chat 的内容权限；agent 判断没有值得报告的内容时执行 `remi automation quiet`，运行完成后该 Chat 自动归档，否则保持活跃并带未读。
 Chat 列表默认只显示用户的对话，`origin=automation|all` 或 `remi chat list --origin automation|all` 查看自动化开的 Chat；独立页侧栏通过底部「自动化」入口查看。
 
 ## CLI 与验证入口

@@ -78,7 +78,7 @@ test("discussion Tasks fail closed when the product Session id is absent", () =>
     holdsWorkspace: false,
     agent: { id: "agt_1" },
     issue: { id: "iss_1", key: "MUL-136" },
-  }), ROOT)).toThrow("discussion task requires a product Session id");
+  }), ROOT)).toThrow("discussion task requires an issue session id");
 });
 
 test("chat Tasks use one stable directory per Chat Session", () => {
@@ -100,7 +100,7 @@ test("Issue-bound Chat Tasks stay in their Chat workspace", () => {
   });
 });
 
-test("Chat-owned Session Tasks linked to an Issue keep the Issue workspace", () => {
+test("Chat-owned Session Tasks linked to an Issue keep their Chat workspace", () => {
   expect(resolveWorkDir(task({
     id: "t11",
     chatSessionId: "chat_1",
@@ -108,7 +108,7 @@ test("Chat-owned Session Tasks linked to an Issue keep the Issue workspace", () 
     issueId: "iss_1",
     issue: { id: "iss_1", key: "MUL-226" },
   }), ROOT)).toEqual({
-    workDir: join(ROOT, "issues", "MUL-226"),
+    workDir: join(ROOT, "work", "chat_1"),
     ensureDir: true,
   });
 });

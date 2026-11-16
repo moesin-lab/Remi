@@ -176,8 +176,8 @@ async function startHarness(options: {
         const input = await fetch(`${baseUrl}/api/sessions/${current.session_id}/messages?from=0&to=${store.getConversationLogHead(current.session_id)!.headSeq}`, {
           headers: { Authorization: `Bearer ${credential.token}` },
         });
-        expect(input.status).toBe(200);
-        await input.text();
+        const inputBody = await input.text();
+        expect(input.status, inputBody).toBe(200);
         yield { sessionUpdate: "agent_thought_chunk", content: [{ type: "text", text: "About to run a tool" }] } as any;
         // Block exactly like a real ACP agent: the stream does not advance
         // until the permission promise resolves.

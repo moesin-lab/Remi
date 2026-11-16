@@ -305,6 +305,7 @@ export class MultiremiDaemonClient {
         execution_profiles: 1,
         execution_endpoints: 1,
         execution_endpoint_options: 1,
+        antigravity_native: 1,
         codex_profiles: 1,
         claude_profiles: 1,
         runtime_workspaces: 1,

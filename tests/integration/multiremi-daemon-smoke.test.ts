@@ -1159,8 +1159,8 @@ describe("Bun Multiremi daemon smoke", () => {
     expect(store.getTask(taskId)).toMatchObject({ status: "completed", result: "Compacted; 12k tokens left." });
   });
 
-  it("still fails a Chat turn that only compacts when its input was not the `/compact` command", async () => {
-    for (const body of ["Please continue", "[Alice] /compact", "/compactor", "/context"]) {
+  for (const body of ["Please continue", "[Alice] /compact", "/compactor", "/context"]) {
+    it(`still fails a Chat turn that only compacts for input ${JSON.stringify(body)}`, async () => {
       const { store, taskId } = await runChatCommandCase({
         id: `compact-not-command-${body.replace(/[^a-z]/gi, "")}`,
         body,
@@ -1171,8 +1171,8 @@ describe("Bun Multiremi daemon smoke", () => {
         error: "Agent returned empty output after compaction.",
         failureReason: "agent_error.empty_or_unparseable_output",
       });
-    }
-  });
+    });
+  }
 
   it("sends a blocked command to the provider behind the note line, never at the start", async () => {
     const { store, taskId, prompts } = await runChatCommandCase({

@@ -378,7 +378,7 @@ if [[ "${PPE_ACTION}" == "deploy" ]]; then
     *) printf 'invalid PPE_MODE: %s\n' "${PPE_MODE}" >&2; exit 64 ;;
   esac
 
-  package_json_url="https://raw.githubusercontent.com/Grassgod/Remi/${GIT_COMMIT}/package.json"
+  package_json_url="https://raw.githubusercontent.com/moesin-lab/Remi/${GIT_COMMIT}/package.json"
   if ! target_package_json="$(curl -fsSL --retry 3 --connect-timeout 10 --max-time 30 "${package_json_url}")"; then
     printf 'Failed to fetch package.json for commit %s\n' "${GIT_COMMIT}" >&2
     exit 1
@@ -437,7 +437,7 @@ fi
 registry="${PPE_REGISTRY_HOST}/multiremi-ppe"
 api_image="${registry}/api:${GIT_COMMIT}"
 web_image="${registry}/web:${GIT_COMMIT}"
-git_context="git://github.com/Grassgod/Remi.git#${GIT_COMMIT}"
+git_context="git://github.com/moesin-lab/Remi.git#${GIT_COMMIT}"
 
 delete_managed_resources
 

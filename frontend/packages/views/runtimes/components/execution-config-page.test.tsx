@@ -129,8 +129,9 @@ it("limits endpoint choices by protocol, including Antigravity", async () => {
   expect(screen.queryByRole("option", { name: "Claude only" })).not.toBeInTheDocument();
   await user.selectOptions(screen.getByLabelText("Execution engine"), "antigravity");
   expect(screen.queryByRole("option", { name: "Aiden" })).not.toBeInTheDocument();
-  expect(screen.getByText(en.configuration.endpoint_required)).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Save group" })).toBeDisabled();
+  await user.type(screen.getByLabelText("Name"), "Local Antigravity");
+  await user.click(screen.getByRole("button", { name: "Save group" }));
+  await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", undefined, expect.objectContaining({ provider: "antigravity", endpoint_id: null })));
 });
 
 it("cross-filters capability groups by endpoint linkage and local sign-in", async () => {

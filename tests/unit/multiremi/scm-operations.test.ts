@@ -10,7 +10,7 @@ const head = "a".repeat(40);
 const base = "b".repeat(40);
 export const pull = {
   id: 9001, number: 42, title: "MUL-35 gate", body: "", state: "open", draft: true,
-  head: { ref: "feature", sha: head }, base: { ref: "main", sha: base },
+  head: { ref: "feature", sha: head, repo: { full_name: "acme/widgets" } }, base: { ref: "main", sha: base },
   html_url: "https://github.com/acme/widgets/pull/42", updated_at: "2026-11-16T00:00:00Z",
 };
 function adapter() {
@@ -33,6 +33,13 @@ describe("GitHub active SCM adapter (mock provider)", () => {
     expect(await adapter().create({ head: "feature", base: "main", title: "title" })).toMatchObject({ reused: true, observation: { payload: { head_sha: head } } });
     expect(methods).toEqual(["GET"]);
     await expect(adapter().create({ head: "feature", base: "release", title: "title" })).rejects.toMatchObject({ code: "scm_change_request_conflict" });
+  });
+
+  it("does not reuse a same-owner fork PR and rejects missing source identity", async () => {
+    globalThis.fetch = stubFetch(async (_url, init) => init?.method === "POST" ? json(pull) : json([{ ...pull, head: { ...pull.head, repo: { full_name: "acme/widgets-fork" } } }]));
+    expect((await adapter().create({ head: "feature", base: "main", title: "title" })).reused).toBe(false);
+    globalThis.fetch = stubFetch(async () => json([{ ...pull, head: { ref: "feature", sha: head } }]));
+    await expect(adapter().create({ head: "feature", base: "main", title: "title" })).rejects.toMatchObject({ code: "scm_invalid_response" });
   });
 
   it("creates a draft and reconciles a concurrent create conflict", async () => {

@@ -242,9 +242,13 @@ describe("SCM provider adapters", () => {
       },
       observedAt: "2026-08-21T08:00:00.000Z",
     });
-    expect(parsed.candidates).toHaveLength(1);
-    expect(parsed.candidates[0]).toMatchObject({ subjectId: "check_run:7001", type: "pipeline.completed", payload: { kind: "check_run", head_sha: "abc" } });
-    expect(parsed.ignoredReason).toBeNull();
+    expect(parsed.candidates).toHaveLength(0);
+    expect(parsed.internalObservations).toHaveLength(1);
+    expect(parsed.internalObservations![0]!.observation).toMatchObject({
+      stream: "checks", entityType: "check_run", externalId: "check_run:7001",
+      payload: { kind: "check_run", head_sha: "abc", name: "build", provider_event_id: "delivery-check" },
+    });
+    expect(parsed.ignoredReason).toContain("internal checks evidence");
   });
 
   it("filters ordinary GitHub issue comments in webhook and polling ingestion", async () => {

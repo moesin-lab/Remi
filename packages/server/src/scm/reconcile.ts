@@ -35,11 +35,15 @@ export function reconcileObservation(input: ReconcileObservationInput): Reconcil
   const {
     store,
     binding,
-    observation,
+    observation: receivedObservation,
     baseline,
     source = "poll",
     fidelity = source === "webhook" ? "exact" : "inferred",
   } = input;
+  // Route even legacy/misclassified check observations away from pipeline snapshots.
+  const observation: ScmEntityObservation = isCheckRun(receivedObservation)
+    ? { ...receivedObservation, stream: "checks", entityType: "check_run" }
+    : receivedObservation;
   const contentHash = stableJsonHash(observation.payload);
   let changed = false;
   const written = store.advanceEntitySnapshotWithEvents(
@@ -101,6 +105,9 @@ export function deriveCanonicalCandidates(
   observation: ScmEntityObservation,
   previous: MultiremiScmEntitySnapshot | null,
 ): ScmCanonicalCandidate[] {
+  // Check runs are job evidence, never workflow pipeline events (including legacy observations).
+  if (isCheckRun(observation)) return [];
+
   const current = observation.payload;
   const prior = previous?.payload ?? null;
   if (observation.stream === "default_branch") {
@@ -267,4 +274,9 @@ function nullableString(value: unknown): string | null {
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value.trim() : value == null ? "" : String(value);
+}
+
+function isCheckRun(observation: ScmEntityObservation): boolean {
+  return observation.entityType === "check_run" || observation.payload.kind === "check_run"
+    || observation.externalId.startsWith("check_run:");
 }

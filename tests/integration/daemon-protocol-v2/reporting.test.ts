@@ -264,7 +264,34 @@ describe("v2 report reconciliation with real sockets and DB", () => {
     expect(outbox(h).stats()).toMatchObject({pending:0,blocked:0});
   });
 
-  for(const mode of ['read','limit','provider_gone','legacy'] as const)it(`MUL-63 live folded input recovery: ${mode}`,async()=>{
+  it("MUL-63 replays a paused live completion after daemon recreation and publishes once", async () => {
+    const h = await fixture(); await h.startDaemon();
+    const agent = h.store.createAgent({ name: "Paused unread", provider: "claude" });
+    const t = h.store.createTask({ agentId: agent.id, prompt: "x".repeat(20000) });
+    expect(h.store.claimTask(runtime(h))?.id).toBe(t.id); h.store.startTask(t.id);
+    const input = h.store.getDaemonTurnBridge().offerInput(h.store.getTaskWithAgent(t.id)!);
+    await expect(outbox(h).enqueueAndWait(t.id, "turn.complete", {
+      runtime_id: runtime(h), turn_id: input.turn_id, input_to_seq: input.input_to_seq,
+      reply: { body_md: "saved during reminder", message_kind: "final" },
+    })).rejects.toMatchObject({ code: "input_unread" });
+    expect(outbox(h).stats()).toMatchObject({ pendingTerminal: 1, blocked: 0 });
+    expect(h.store.getTurn(input.turn_id)?.reply_message_id).toBeNull();
+    await h.recreateDaemon();
+    await outbox(h).waitForTaskDrain(t.id);
+    expect(h.store.getTask(t.id)).toMatchObject({ status: "completed", result: "saved during reminder" });
+    const replyId = h.store.getTurn(input.turn_id)!.reply_message_id!;
+    expect(h.store.getMessage(replyId)?.body_md).toBe("saved during reminder");
+    const frames = h.ledger.filter(entry => entry.type === "turn.complete" && entry.partition === t.id);
+    expect(frames).toHaveLength(2);
+    expect(frames[1]!.frame.p.input_unread_fallback).toBe(true);
+    await h.recreateDaemon();
+    await outbox(h).flushAll();
+    expect(h.store.getTurn(input.turn_id)?.reply_message_id).toBe(replyId);
+    expect(h.ledger.filter(entry => entry.type === "turn.complete" && entry.partition === t.id)).toHaveLength(2);
+    expect(outbox(h).stats()).toMatchObject({ pending: 0, blocked: 0 });
+  });
+
+  for(const mode of ['read','limit','provider_gone','legacy_error_text','legacy'] as const)it(`MUL-63 live folded input recovery: ${mode}`,async()=>{
     let rounds=0;
     const prompts:string[]=[];
     let taskId='';
@@ -277,10 +304,15 @@ describe("v2 report reconciliation with real sockets and DB", () => {
         }
       },
       providerFactory:()=>({
+      typedSessionFailures: mode === 'legacy_error_text' ? false : undefined,
       async *sendStream(prompt) {
         prompts.push(String(prompt));rounds++;
         if(rounds>=(mode==='limit'?3:mode==='legacy'?1:2))(h.daemon as any).claimsPaused=true;
         if(mode==='provider_gone' && rounds===2)throw new Error('provider session exited');
+        if(mode==='legacy_error_text' && rounds===2) {
+          yield {sessionUpdate:'agent_message_chunk',content:[{type:'text',text:'stream disconnected'}]} as any;
+          return;
+        }
         const task=h.store.getTaskWithAgent(taskId)!;
         const offer=h.store.getDaemonTurnBridge().offerInput(task);
         readTo=offer.input_to_seq;
@@ -301,7 +333,7 @@ describe("v2 report reconciliation with real sockets and DB", () => {
       expect(prompts[1]).toContain('--from 0');
       expect(prompts[1]).toContain(`--to ${readTo}`);
     }
-    expect(h.store.getTask(taskId)).toMatchObject({status:'completed',result:mode==='provider_gone'?'answer 1':`answer ${rounds}`});
+    expect(h.store.getTask(taskId)).toMatchObject({status:'completed',result:(mode==='provider_gone'||mode==='legacy_error_text')?'answer 1':`answer ${rounds}`});
     const turn=h.db.query('SELECT input_to_seq FROM multiremi_turns WHERE current_attempt_id=?').get(taskId)!;
     expect(turn.input_to_seq??0).toBe(mode==='read'?readTo:0);
     expect(outbox(h).stats().blocked).toBe(0);

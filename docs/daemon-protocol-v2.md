@@ -980,7 +980,8 @@ available_commands?: SlashCommandCatalogue | null;  // agent 最近一次发布�
   Chat 菜单经 `GET /api/chat/slash-commands` 读取。
 - 折叠输入未读只在协商 `input_unread` 能力后返回 `input_unread`（`retryable:false`），
   附 `read_to_seq`、`required_to_seq`、`read_command` 和包含连续读取命令的 `message`。
-  outbox 将该拒绝交回执行器并移除这次完成记录，保持 trace 开放；执行器在同一 provider 会话
+  outbox 将该拒绝交回执行器，将原完成记录持久暂停，保持 trace 开放；后继终态入队时
+  原子替换暂停记录，重启后将无人接管的暂停记录转为 fallback 重放。执行器在同一 provider 会话
   提醒最多两次，要求从指定 `--from` 连续读取后重新给出最终回复。
   达到上限、provider 补读续接失败，或 outbox 重放时执行器已不在，daemon 用
   `input_unread_fallback:true` 重交原回复；未协商能力的旧 daemon 直接兜底。

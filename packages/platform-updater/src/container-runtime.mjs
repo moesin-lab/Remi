@@ -249,8 +249,14 @@ async function main() {
       if (!/^\d+$/.test(pid)) continue;
       try {
         if (await readlink('/proc/' + pid + '/cwd') !== expected) continue;
-        const argv = await readFile('/proc/' + pid + '/cmdline', 'utf8');
-        if (argv.includes(role === 'web' ? 'server.js' : 'apps/server/main.ts')) return;
+        if (role === 'web') {
+          // Next rewrites cmdline via process.title. The executable identity
+          // survives that change; cwd still pins it to the selected release.
+          if (posix.basename(await readlink('/proc/' + pid + '/exe')) === 'node') return;
+        } else {
+          const argv = await readFile('/proc/' + pid + '/cmdline', 'utf8');
+          if (argv.includes('apps/server/main.ts')) return;
+        }
       } catch {} // A process may exit during inspection.
     }
     throw new Error('Service is not running the selected application release');

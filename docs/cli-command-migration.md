@@ -534,7 +534,13 @@ of 128 supporting files, 1 MiB per file and 8 MiB combined supporting content.
 A failed directory listing, invalid listing or failed file download fails the
 whole GitHub/skills.sh import before saving anything. Upstream rate limits return
 HTTP 429 with a reset time when available and a hint to configure `GITHUB_TOKEN`
-on the API server; other upstream failures return HTTP 502. CLI failures display
+on the API server. Each upstream request has a 10-second deadline covering both
+connection and body reading; the whole import has a 25-second deadline, below
+the CLI default of 30 seconds. Timeouts return HTTP 504 with the upstream host,
+operation (ref resolution, listing or download path), read/connect phase and
+deadline. Client cancellation aborts the active upstream request and stops
+subsequent requests. Failed or timed-out imports leave existing Skills intact.
+Other upstream failures return HTTP 502. CLI failures display
 the server error and exit unsuccessfully.
 
 Reimporting the same source type and URL in the selected workspace updates the

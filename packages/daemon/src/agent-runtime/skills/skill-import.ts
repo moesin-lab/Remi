@@ -1,3 +1,5 @@
+import { fetchSkillImportResponse, SkillImportError, withSkillImportDeadline, type SkillImportOptions } from "./skill-import-network.js";
+export { SkillImportError } from "./skill-import-network.js";
 import type {
   CreateSkillInput,
   ImportSkillInput,
@@ -76,13 +78,6 @@ type ClawHubVersionResponse = {
   };
 };
 
-export class SkillImportError extends Error {
-  constructor(message: string, public readonly status = 400) {
-    super(message);
-    this.name = "SkillImportError";
-  }
-}
-
 class UpstreamHttpError extends Error {
   constructor(readonly status: number, url: string) {
     super(`HTTP ${status} for ${url}`);
@@ -96,7 +91,11 @@ class ImportCapError extends Error {
   }
 }
 
-export async function buildImportedSkillInput(input: ImportSkillInput): Promise<ImportResult> {
+export async function buildImportedSkillInput(input: ImportSkillInput, options: SkillImportOptions = {}): Promise<ImportResult> {
+  return withSkillImportDeadline(options, () => buildImportedSkillInputWithinDeadline(input));
+}
+
+async function buildImportedSkillInputWithinDeadline(input: ImportSkillInput): Promise<ImportResult> {
   const sourceUrl = input.url ?? input.sourceUrl ?? input.source_url ?? "";
   const detected = detectImportSource(sourceUrl);
   let imported: ImportedSkill;
@@ -303,6 +302,7 @@ async function fetchFromClawHub(rawUrl: string): Promise<ImportedSkill> {
     try {
       content = await fetchRawText(url.toString());
     } catch (error) {
+      if (error instanceof SkillImportError) throw error;
       if (isCapError(error) || filePath === "SKILL.md") throw new Error(`clawhub import: ${filePath}: ${errorMessage(error)}`);
       continue;
     }
@@ -622,7 +622,7 @@ function skillNameHints(skillName: string): string[] {
 }
 
 async function fetchJson<T>(url: string, options: { allowNotFound?: boolean } = {}): Promise<T> {
-  const response = await fetch(url);
+  const response = await fetchSkillImportResponse(url, {}, MAX_IMPORT_TOTAL_SIZE);
   if (response.status === 404 && options.allowNotFound) return {} as T;
   if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
   return await response.json() as T;
@@ -645,39 +645,9 @@ function upstreamHttpError(response: Response, url: string): Error {
 }
 
 async function fetchRawText(url: string): Promise<string> {
-  const response = await fetch(url);
+  const response = await fetchSkillImportResponse(url, {}, MAX_IMPORT_FILE_SIZE);
   if (response.status !== 200) throw upstreamHttpError(response, url);
-  if (Number(response.headers.get("content-length") ?? 0) > MAX_IMPORT_FILE_SIZE) {
-    throw new ImportCapError(`file exceeds ${MAX_IMPORT_FILE_SIZE} byte limit`);
-  }
-  const bytes = await readLimitedBytes(response, MAX_IMPORT_FILE_SIZE);
-  return new TextDecoder().decode(bytes);
-}
-
-async function readLimitedBytes(response: Response, limit: number): Promise<Uint8Array> {
-  const reader = response.body?.getReader();
-  if (!reader) {
-    const buffer = new Uint8Array(await response.arrayBuffer());
-    if (buffer.byteLength > limit) throw new ImportCapError(`file exceeds ${limit} byte limit`);
-    return buffer;
-  }
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    total += value.byteLength;
-    if (total > limit) throw new ImportCapError(`file exceeds ${limit} byte limit`);
-    chunks.push(value);
-  }
-  const output = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return output;
+  return await response.text();
 }
 
 async function fetchGitHubApi(url: string, options: { accept?: string } = {}): Promise<Response> {
@@ -686,7 +656,7 @@ async function fetchGitHubApi(url: string, options: { accept?: string } = {}): P
   headers.set("X-GitHub-Api-Version", "2022-11-28");
   const token = process.env.GITHUB_TOKEN?.trim();
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  return await fetch(url, { headers });
+  return await fetchSkillImportResponse(url, { headers }, MAX_IMPORT_TOTAL_SIZE);
 }
 
 function buildRawGitHubUrl(rawPrefix: string, repoPath: string): string {

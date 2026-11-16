@@ -47,11 +47,36 @@ describe("GitHub active SCM adapter (mock provider)", () => {
     expect(requested.some(path => path.includes("page=2"))).toBe(true);
   });
 
-  it("treats empty, unknown, skipped, pending and failed evidence conservatively", async () => {
-    for (const [state, expected] of [[null, "missing"], ["pending", "pending"], ["skipped", "pending"], ["unknown", "pending"], ["error", "failure"]] as const) {
+  it("treats empty, unknown, pending and failed evidence conservatively", async () => {
+    for (const [state, expected] of [[null, "missing"], ["pending", "pending"], ["unknown", "pending"], ["error", "failure"]] as const) {
       globalThis.fetch = stubFetch(async (url) => String(url).includes("actions/runs") ? json({ workflow_runs: [] }) : String(url).includes("check-runs") ? json({ check_runs: [] }) : json(state ? [{ id: 1, context: "test", state }] : []));
       expect((await adapter().checks(head)).conclusion).toBe(expected);
     }
+  });
+
+  it.each([
+    [[], "missing"],
+    [["success"], "success"],
+    [["success", "skipped", "neutral"], "success"],
+    [["skipped", "neutral"], "success"],
+    [["skipped"], "success"],
+    [["neutral"], "success"],
+    ...["queued", "in_progress"].map(status => [["success", status], "pending"]),
+    ...[null, "unknown"].map(conclusion => [["success", conclusion], "pending"]),
+    ...["failure", "cancelled", "timed_out", "error", "action_required", "stale", "startup_failure"]
+      .map(conclusion => [["success", "skipped", "queued", conclusion], "failure"]),
+  ] as Array<[Array<string | null>, "missing" | "pending" | "failure" | "success"]>)("summarizes check runs %j as %s without rewriting conclusions", async (conclusions, expected) => {
+    const runs = conclusions.map((conclusion, id) => ({
+      id, name: `job-${id}`, head_sha: head,
+      status: conclusion === "queued" || conclusion === "in_progress" ? conclusion : "completed",
+      conclusion: conclusion === "queued" || conclusion === "in_progress" ? null : conclusion,
+    }));
+    globalThis.fetch = stubFetch(async url => String(url).includes("actions/runs")
+      ? json({ workflow_runs: [] }) : String(url).includes("check-runs") ? json({ check_runs: runs }) : json([]));
+    const summary = await adapter().checks(head);
+    expect(summary.conclusion).toBe(expected);
+    expect(summary.checks.map(check => ({ status: check.status, conclusion: check.conclusion })))
+      .toEqual(runs.map(run => ({ status: run.status, conclusion: run.conclusion })));
   });
 
   it("fails closed on SHA mismatch, provider error, and truncated evidence", async () => {

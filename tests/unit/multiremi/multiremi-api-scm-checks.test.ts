@@ -29,6 +29,24 @@ afterEach(() => {
 });
 
 describe("SCM read-only checks HTTP (mock provider)", () => {
+  it("returns success for completed success/skipped/neutral while preserving item conclusions", async () => {
+    const { app } = setup();
+    const conclusions = ["success", "skipped", "neutral"];
+    globalThis.fetch = stubFetch(async url => {
+      if (String(url).includes("check-runs")) return json({ check_runs: conclusions.map((conclusion, id) => ({
+        id, head_sha: head, name: `job-${id}`, status: "completed", conclusion,
+      })) });
+      if (String(url).includes("actions/runs")) return json({ workflow_runs: [] });
+      if (String(url).includes("statuses")) return json([]);
+      return json(pull);
+    });
+    const response = await app.request(root + "/42/checks", { headers });
+    expect(response.status).toBe(200);
+    const { summary } = await response.json();
+    expect(summary).toMatchObject({ headSha: head, conclusion: "success" });
+    expect(summary.checks.map((check: { conclusion: string }) => check.conclusion)).toEqual(conclusions);
+  });
+
   it.each(["repo_widgets", "git@github.com:acme/widgets", "acme/widgets", "ACME/Widgets", "https://github.com/acme/widgets.git", "git@github.com:acme/widgets.git", "ssh://git@github.com/acme/widgets.git", "ssh://git@github.com:22/acme/widgets.git", "https://github.com:443/acme/widgets.git", "http://github.com:80/acme/widgets.git"])("resolves the enabled workspace binding for %s", async reference => {
     const { app } = setup();
     globalThis.fetch = stubFetch(async url => String(url).includes("actions/runs") ? json({ workflow_runs: [] }) : String(url).includes("check-runs") ? json({ check_runs: [] }) : String(url).includes("statuses") ? json([]) : json(pull));

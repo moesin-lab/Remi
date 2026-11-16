@@ -31,7 +31,7 @@ kind 为 workflow_run，保留 status、conclusion 和 runAttempt。同一 run I
 附 retryAfterSeconds 和 rateLimitResetAt（Unix 秒；不可用为 null）；普通权限 403 保持 scm_provider_error。
 仅返回这些解析后的数值，不返回原始响应头或正文。
 
-没有检查时 conclusion 为 missing；存在失败时为 failure；运行中、未知、neutral/skipped 为 pending；全部 success 才为 success；queued/in_progress 的 workflow 即使尚无 job checks，也参与汇总并阻止 success/missing。
+没有检查时 conclusion 为 missing；存在失败时为 failure；运行中或未知结论为 pending；全部检查 completed 且结论均为 success、skipped 或 neutral 时为 success（全部 skipped/neutral 也为 success），逐项保留原始结论；queued/in_progress 的 workflow 即使尚无 job checks，也参与汇总并阻止 success/missing。
 这是已观察检查的汇总，不表示 required checks 已满足，也不授权合并。
 此查询只向 provider 发 GET，不写 SCM 快照或触发 Issue 事件；不包含 PR 创建、更新、合并、webhook 或策略迁移。
 

@@ -13,6 +13,8 @@ remi scm change-request checks <owner/仓库> <PR 编号> --output json   # 需�
 - 仓库参数可以用 `owner/仓库`，也可以用平台内部 ID（`repo_…`）。
 - 要用与 daemon 同版本的 `remi`。任务 PATH 上的旧版本 CLI 可能没有这条命令（MUL-26）。
 
+已完成检查的 `skipped` 表示策略跳过，不等于未通过；`neutral` 也按 GitHub 语义视为非阻塞。全部检查已完成且结论均为 `success`、`skipped` 或 `neutral` 时，汇总为 `success`，即使全部跳过或中立也一样；表格和 JSON 仍保留逐项原始结论。跳过不代表相应测试已执行。
+
 结论规则与合并规则相同：queued、in_progress、缺失都不算通过；runner 容量导致的取消要引用 "The job was not acquired by Runner" 注解作证据；已建单的 flaky 要写单号和日志行。检查通过不等于可以合并。
 
 下文是协调者用 `gh` 核对或代查的方法，在 Agent 查不了（命令不可用、被限流、需要读失败日志）时使用。

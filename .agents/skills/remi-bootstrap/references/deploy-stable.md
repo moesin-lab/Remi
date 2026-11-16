@@ -43,7 +43,7 @@
 
 2. 安装到 `<profile-root>/releases/<full-sha>/daemon-bin/remi`，新增一个编号更大的 drop-in（例如 `95-main-<short-sha>.conf`），内容为清空并重设 `ExecStart=<那个路径> daemon start --foreground`，然后 `systemctl --user daemon-reload`。
 3. 重启前看 `remi daemon status` 的 `Active tasks`。等空闲最多约 20 分钟；任务持续进来时直接 `systemctl --user restart multiremi-daemon.service`（systemd 约 90 秒后强杀）。
-4. 重启后确认每条 lane 的 `Version` 都是新版本；用 `remi turn list --status running` 记下重启前在跑的轮次，重启后它们会以 `agent_error.unknown` 失败且**不会自动重试**，逐个 `remi turn retry <turn> --yes`（已经有新轮次在跑的会话会报 already has an active run，可以忽略）。
+4. 重启后确认每条 lane 的 `Version` 都是新版本。重启前先用 `remi turn list --status running` 记下在跑的轮次；重启后逐个看 `remi turn get <turn>`：大多数会自动换成新尝试继续运行（`current_attempt_id` 变了）；以 `runtime_recovery` 等原因结束的，用 `remi turn retry <turn> --yes` 重试。报 already has an active run 的，说明服务端已经续上，可以忽略。
 
 ## 3. 验证
 

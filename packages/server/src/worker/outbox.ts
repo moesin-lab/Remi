@@ -98,6 +98,7 @@ const DISCARDED_TASK_TTL_MS = 24 * 60 * 60 * 1_000;
  */
 export class MultiremiTaskReportOutbox {
   private readonly db: Database;
+  private readonly synchronousMode: number;
   private readonly deliver: MultiremiTaskReportOutboxOptions["deliver"];
   private readonly backoff: number[];
   private readonly maxBytes: number;
@@ -116,6 +117,7 @@ export class MultiremiTaskReportOutbox {
     if (options.path !== ":memory:") mkdirSync(dirname(options.path), { recursive: true, mode: 0o700 });
     this.db = openSqliteDatabase(options.path, { create: true });
     this.db.exec("PRAGMA journal_mode = WAL;");
+    this.synchronousMode = Number((this.db.query("PRAGMA synchronous").all()[0] as { synchronous: number }).synchronous);
     if (options.path !== ":memory:") {
       // Payloads mirror task reports (transcripts, prompts) — owner-only, like
       // the rest of the daemon state dir.
@@ -497,7 +499,8 @@ export class MultiremiTaskReportOutbox {
     if (!this.db.query("SELECT id FROM outbox_events WHERE id = ? AND status = 'pending'").get(record.id)) return;
     try {
       const reply = await this.deliver(record);
-      this.deleteRecords(recordIds);
+      const usage = record.payload.usageSnapshot as { version?: unknown } | undefined;
+      this.deleteRecords(recordIds, record.kind === "usage" && usage?.version === 2);
       for (const id of recordIds) {
         this.recordWaiters.get(id)?.resolve(reply ?? { ok: true });
         this.recordWaiters.delete(id);
@@ -615,9 +618,10 @@ export class MultiremiTaskReportOutbox {
   }
 
   private nextDelivery(taskId: string): OutboxDelivery | null {
-    const firstRow = this.db.query(
+    // Exhaust the bounded head read before delivery can pause with pending rows.
+    const firstRow = (this.db.query(
       "SELECT * FROM outbox_events WHERE task_id = ? AND status = 'pending' ORDER BY id ASC LIMIT 1",
-    ).get(taskId) as Record<string, unknown> | null;
+    ).all(taskId) as Array<Record<string, unknown>>)[0];
     if (!firstRow) return null;
     const first = toRecord(firstRow);
     if (String(firstRow.status) === "blocked") {
@@ -659,13 +663,23 @@ export class MultiremiTaskReportOutbox {
     };
   }
 
-  private deleteRecords(recordIds: number[]): void {
-    if (recordIds.length === 1) {
-      this.db.run("DELETE FROM outbox_events WHERE id = ?", [recordIds[0]!]);
-      return;
+  private deleteRecords(recordIds: number[], replayableUsage = false): void {
+    // Only an acknowledged v2 usage deletion may be lost on power failure:
+    // its replay is absorbed by the server's per-unit revision/receipt checks.
+    // Enqueue and every other write retain the connection's original setting.
+    const normal = replayableUsage && this.synchronousMode > 1;
+    try {
+      if (normal) this.db.exec("PRAGMA synchronous = NORMAL");
+      if (recordIds.length === 1) {
+        this.db.run("DELETE FROM outbox_events WHERE id = ?", [recordIds[0]!]);
+        return;
+      }
+      const placeholders = recordIds.map(() => "?").join(", ");
+      this.db.run(`DELETE FROM outbox_events WHERE id IN (${placeholders})`, recordIds);
+    } finally {
+      // No await may separate the mode switch, deletion and restoration.
+      if (normal) this.db.exec(`PRAGMA synchronous = ${this.synchronousMode}`);
     }
-    const placeholders = recordIds.map(() => "?").join(", ");
-    this.db.run(`DELETE FROM outbox_events WHERE id IN (${placeholders})`, recordIds);
   }
 
   /** Capacity pressure may compact only pending overwrite rows already covered by a newer row. */

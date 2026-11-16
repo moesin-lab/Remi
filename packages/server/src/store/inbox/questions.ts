@@ -177,6 +177,15 @@ export class Questions {
     return result;
   }
   private integrity(message: UnifiedMessage, record: QuestionRecord): boolean {
+    if (record.source_attempt_id) {
+      const source = this.ctx.db.query(`SELECT t.id, t.session_id, t.workspace_id, t.agent_id, t.execution_scope
+        FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id WHERE a.id=?`)
+        .get(record.source_attempt_id);
+      if (!source || source.id !== message.task_id
+        || source.session_id !== message.session_id || source.workspace_id !== record.workspace_id
+        || message.sender_type !== 'agent' || source.agent_id !== message.sender_id
+        || String(source.execution_scope ?? '') !== String(message.metadata.execution_scope ?? '')) return false;
+    }
     const scoped = this.ctx.issueSessions().getIssueSessionWithOwnerScope(message.session_id);
     if (scoped) {
       if (scoped.ownerWorkspaceId !== record.workspace_id || scoped.session.workspaceId !== record.workspace_id) return false;

@@ -103,13 +103,13 @@ describe("workspace storage policy", () => {
     expect((await request("admin", "PUT", path, [1])).status).toBe(400);
   });
 
-  it("lets members read but only owners and admins write, and hides the workspace from outsiders", async () => {
+  it("lets authenticated operators share storage settings and still rejects missing workspaces", async () => {
     const { workspace, request } = await fixture();
     const path = `/api/workspaces/${workspace.id}/storage`;
     expect((await request("member", "GET", path)).status).toBe(200);
-    expect((await request("member", "PUT", path, { ttl_ms: 7_200_000 })).status).toBe(403);
-    expect((await request("outsider", "GET", path)).status).toBeGreaterThanOrEqual(403);
-    expect((await request("outsider", "PUT", path, { ttl_ms: 7_200_000 })).status).toBeGreaterThanOrEqual(403);
+    expect((await request("member", "PUT", path, { ttl_ms: 7_200_000 })).status).toBe(200);
+    expect((await request("outsider", "GET", path)).status).toBe(200);
+    expect((await request("outsider", "PUT", path, { ttl_ms: 7_200_000 })).status).toBe(200);
     expect((await request("root", "GET", "/api/workspaces/missing/storage")).status).toBeGreaterThanOrEqual(403);
   });
 
@@ -165,7 +165,7 @@ describe("daemon storage reports", () => {
     expect(a.reported_at).toEqual(expect.any(String));
     expect(daemons.find((daemon: { daemon_id: string }) => daemon.daemon_id === "dmn_b"))
       .toMatchObject({ runtime_ids: ["rt_b"], online: false, report: null, reported_at: null });
-    expect((await request("outsider", "GET", `/api/workspaces/${workspace.id}/storage/daemons`)).status).toBeGreaterThanOrEqual(403);
+    expect((await request("outsider", "GET", `/api/workspaces/${workspace.id}/storage/daemons`)).status).toBe(200);
   });
 
   it("keeps a daemon's report per workspace and drops only its own workspace's report on retirement", async () => {
@@ -310,17 +310,17 @@ describe("reclaim rounds on demand", () => {
     expect(store.getRuntimeGcRunRequest(runtime.id, running.id)).toMatchObject({ status: "completed", error: null, report });
   });
 
-  it("validates the mode, requires an owner or admin and an online runtime", async () => {
+  it("validates the mode and online runtime while allowing shared human operators", async () => {
     const { store, runtime, request } = await online();
     const path = `/api/runtimes/${runtime.id}/gc-runs`;
     expect((await request("admin", "POST", path, { mode: "everything" })).status).toBe(400);
     expect((await request("admin", "POST", path, {})).status).toBe(400);
-    expect((await request("member", "POST", path, { mode: "dry_run" })).status).toBe(403);
-    expect((await request("outsider", "POST", path, { mode: "dry_run" })).status).toBeGreaterThanOrEqual(403);
+    expect((await request("member", "POST", path, { mode: "dry_run" })).status).toBe(201);
+    expect((await request("outsider", "POST", path, { mode: "dry_run" })).status).toBe(201);
     expect((await request("admin", "POST", "/api/runtimes/rt_missing/gc-runs", { mode: "dry_run" })).status).toBe(404);
     expect((await request("admin", "GET", `${path}/rgc_missing`)).status).toBe(404);
-    expect((await request("outsider", "GET", `${path}/rgc_missing`)).status).toBeGreaterThanOrEqual(403);
-    expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_runtime_gc_run_requests").get()).toEqual({ count: 0 });
+    expect((await request("outsider", "GET", `${path}/rgc_missing`)).status).toBe(404);
+    expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_runtime_gc_run_requests").get()).toEqual({ count: 2 });
 
     store.setRuntimeOffline(runtime.id);
     const offline = await request("admin", "POST", path, { mode: "dry_run" });

@@ -1,23 +1,7 @@
 import type { SessionLogEntry } from "@multiremi/core/replica";
-import type { Attachment } from "@multiremi/core/types";
 
-export interface OptimisticChatRow {
-  clientId: string;
-  sessionId: string;
-  content: string;
-  attachmentIds?: string[];
-  attachments?: Attachment[];
-  createdAt: string;
-  localSeq: number;
-  /**
-   * `sent` once the server accepted the message (its answer, or its row in the
-   * log); `unconfirmed` when the send got no answer and the log has not shown
-   * it yet; `failed` when the server refused it.
-   */
-  status: "sending" | "sent" | "unconfirmed" | "failed" | "hidden";
-  /** When the log first held the server's row; only that row renders after it. */
-  confirmedAt?: number;
-}
+import type { OptimisticChatRow } from "@multiremi/core/chat";
+export type { OptimisticChatRow } from "@multiremi/core/chat";
 
 export function clientIdOf(entry: SessionLogEntry): string | null {
   const metadata = (entry as SessionLogEntry & { metadata?: Record<string, unknown> }).metadata;

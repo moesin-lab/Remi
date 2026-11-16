@@ -58,6 +58,7 @@ export type WSEventType =
   | "member:added"
   | "member:updated"
   | "member:removed"
+  | "daemon:maintenance_changed"
   | "daemon:heartbeat"
   | "daemon:register"
   | "daemon:retired"
@@ -545,6 +546,7 @@ export interface WSEventPayloadMap {
   "invitation:revoked": InvitationRevokedPayload;
   // No formal payload interfaces yet — server emits domain objects clients
   // currently consume as opaque triggers (refetch on receipt).
+  "daemon:maintenance_changed": unknown;
   "daemon:heartbeat": unknown;
   "daemon:register": unknown;
   "daemon:retired": unknown;

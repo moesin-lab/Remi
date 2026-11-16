@@ -11,6 +11,7 @@ import {
   setLoggedInCookie,
   clearLoggedInCookie,
 } from "@/features/auth/auth-cookie";
+import { UpdateContinuity } from "./update-continuity";
 import { PageviewTracker } from "./pageview-tracker";
 import { ReplicaEnvProvider } from "@multiremi/core/platform/replica-env";
 import { WebRuntimeContext } from "./web-runtime";
@@ -81,6 +82,7 @@ export function WebProviders({
             a client component mounted this high in the tree. */}
         <Suspense fallback={null}>
           <PageviewTracker />
+          <UpdateContinuity />
         </Suspense>
         <ReplicaEnvProvider env={replicaEnv}>
           <HydrationTimeProvider now={renderedAt}>

@@ -475,7 +475,7 @@ describe("MUL-474 daemon task authority matrix", () => {
       daemonId: executorDaemonId,
     });
     // The hosting Runtime owns the bot for the duration of this case.
-    store.upsertFeishuBotConfig("local", {
+    store.upsertFeishuBotConfig("local", { senderAccessPolicy: "agent",
       agentId: fixture.agentId,
       runtimeId: fixture.foreignRuntimeId,
       appId: DAEMON_TASK_POLL_APP_ID,
@@ -509,7 +509,7 @@ describe("MUL-474 daemon task authority matrix", () => {
     expect((await reportFrame(store, "turn.complete", turnCompletion(store, submitted.taskId!, "Mine"), { headers: { ...executing, "content-type": "application/json" }, authToken: "" })).ok).toBe(true);
     // Once the connector is reassigned away, the exception no longer holds.
     store.heartbeatRuntime("rt_mul474_executor", { supportsFeishuBotConfig: true });
-    store.upsertFeishuBotConfig("local", {
+    store.upsertFeishuBotConfig("local", { senderAccessPolicy: "agent",
       agentId: fixture.agentId,
       runtimeId: "rt_mul474_executor",
       appId: DAEMON_TASK_POLL_APP_ID,

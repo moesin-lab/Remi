@@ -1,5 +1,7 @@
 "use client";
 
+import { useOptimisticChatOutbox, setOptimisticChatRows as setOptimisticRows } from "@multiremi/core/chat";
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WorkLocationPicker, type WorkLocation } from "../../runtimes/components/runtime-workspace-picker";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -230,7 +232,7 @@ export function ChatWindow({
     setPendingRefreshSessionId(null);
     void readLogTail(replica);
   }, [replica, pendingRefreshSessionId, chatVisible, readLogTail]);
-  const [optimisticRows, setOptimisticRows] = useState<OptimisticChatRow[]>([]);
+  const optimisticRows = useOptimisticChatOutbox(state => state.rows);
   const [isFetchingOlderMessages, setIsFetchingOlderMessages] = useState(false);
   const optimisticCounter = useRef(0);
   const displayedOptimistic = useMemo(() => optimisticRows.filter((row) => row.sessionId === displayedSessionId),

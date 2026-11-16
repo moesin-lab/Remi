@@ -21,4 +21,4 @@
 | 中断的会话恢复后要确认真的好了 | 修复部署后旧会话可能仍有残留状态 | 看修复后该会话的第一个新轮次是否 completed，确认后再关闭缺陷单 |
 | 设了代理变量，部署时镜像构建仍然下载失败 | docker 经 `sudo` 调用，环境变量被丢掉 | 包装脚本加 `--preserve-env=` 列出代理变量 |
 | 部署脚本的新参数或新行为没有生效 | 在别的分支的工作区里运行了旧版本的 `scripts/local-profile.mjs` | 在目标提交的独立 worktree 里运行脚本 |
-| Agent 说读不到 CI | 任务里 PATH 上的 `remi` 是旧版本，或用了表格输出、`owner/name` 仓库参数 | 用与 daemon 同版本的 CLI、`--output json`、`repo_…` 仓库 ID |
+| Agent 说读不到 CI | 任务里 PATH 上的 `remi` 是旧版本，没有 `scm change-request checks` | 用与 daemon 同版本的 CLI |

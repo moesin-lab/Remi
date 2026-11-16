@@ -5,13 +5,13 @@
 平台提供只读命令，任务凭据下可用：
 
 ```bash
-remi scm change-request checks <仓库 ID> <PR 编号> --output json
+remi scm change-request checks <owner/仓库> <PR 编号>                 # 表格：Head SHA、汇总结论、逐项状态和链接
+remi scm change-request checks <owner/仓库> <PR 编号> --output json   # 需要逐项判断时
 ```
 
-- 仓库参数目前只接受平台内部 ID（`repo_…`，`remi repo list` 可查），`owner/name` 会报找不到绑定（MUL-58）。
-- 只看 JSON 输出：默认表格输出目前只有一行空值（MUL-58）。
-- 先核对 `summary.headSha` 等于要验收的最终 SHA，再看各项 `status` / `conclusion`。
-- 要用与 daemon 同版本的 `remi`。任务 PATH 上的旧版本 CLI 可能没有这条命令，只会打印 `remi scm` 的帮助（MUL-26）。
+- 先核对输出里的 Head SHA（JSON 为 `summary.headSha`）等于要验收的最终 SHA，再看各项状态与结论。
+- 仓库参数可以用 `owner/仓库`，也可以用平台内部 ID（`repo_…`）。
+- 要用与 daemon 同版本的 `remi`。任务 PATH 上的旧版本 CLI 可能没有这条命令（MUL-26）。
 
 结论规则与合并规则相同：queued、in_progress、缺失都不算通过；runner 容量导致的取消要引用 "The job was not acquired by Runner" 注解作证据；已建单的 flaky 要写单号和日志行。检查通过不等于可以合并。
 

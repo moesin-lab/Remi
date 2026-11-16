@@ -7285,6 +7285,74 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "scm.change-request.create": {
+      "command": "remi scm change-request create",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.create",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "scm.change-request.get": {
+      "command": "remi scm change-request get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "scm.change-request.update": {
+      "command": "remi scm change-request update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "scm.change-request.checks": {
+      "command": "remi scm change-request checks",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.checks",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "scm.change-request.list": {
       "command": "remi scm change-request list",
       "aliases": [],
@@ -12820,6 +12888,12 @@
     "GET /api/workspaces/:workspaceId/scm/events/:eventId": {
       "command": "scm.event.get"
     },
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number": {
+      "command": "scm.change-request.get"
+    },
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks": {
+      "command": "scm.change-request.checks"
+    },
     "GET /api/workspaces/:workspaceId/system-model-endpoints": {
       "command": "workspace.system-model-endpoints.get"
     },
@@ -12988,6 +13062,9 @@
     },
     "PATCH /api/workspaces/:workspaceId/scm/connections/:connectionId": {
       "command": "scm.connection.update"
+    },
+    "PATCH /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number": {
+      "command": "scm.change-request.update"
     },
     "POST /api/agents": {
       "command": "agent.create"
@@ -14042,6 +14119,9 @@
     },
     "POST /api/workspaces/:workspaceId/scm/connections/:connectionId/verify": {
       "command": "scm.connection.verify"
+    },
+    "POST /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests": {
+      "command": "scm.change-request.create"
     },
     "POST /auth/google": {
       "command": "context.auth.google"

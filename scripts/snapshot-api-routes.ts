@@ -1023,6 +1023,8 @@ const BY_NAME: Record<string, keyof SeedRefs> = {
 function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
   if (name === "id" && pattern.startsWith("/api/runtime-workspaces/")) return "rws_snapshot";
   switch (name) {
+    case "number":
+      return "42";
     case "digest":
       return "0".repeat(64);
     case "versionId":
@@ -1257,6 +1259,14 @@ const MUTATION_FLOWS: Array<{ name: string; run: Flow }> = [];
 function flow(name: string, run: Flow): void {
   MUTATION_FLOWS.push({ name, run });
 }
+
+flow("scm-active-binding-guard", async (rec, refs) => {
+  // The generic snapshot fixture has no SCM binding; dedicated SCM API tests
+  // cover successful provider calls. Snapshot the fail-closed mutation guard.
+  const root = `/api/workspaces/${refs.workspaceId}/scm/repositories/${refs.repositoryId}/change-requests`;
+  await rec.json("POST", root, { head: "feature", base: "main", title: "Snapshot" });
+  await rec.json("PATCH", `${root}/42`, { title: "Snapshot update" });
+});
 
 flow("unified-messages-inbox-turns", async (rec, refs) => {
   const base = `/api/sessions/${refs.issueSessionId}/messages`;

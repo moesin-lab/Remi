@@ -232,13 +232,20 @@ describe("SCM webhook ingestion", () => {
     expect(store.events.size).toBe(1);
     expect(store.recordInputs.map((input) => input.evidence.source)).toEqual(["poll", "webhook"]);
 
-    const ignoredCheck = ingestGitHub(store, "check_run", {
+    const check = ingestGitHub(store, "check_run", {
       repository: { id: 101, name: "widgets", owner: { login: "acme" } },
       check_run: { id: 7001, status: "completed", conclusion: "success", head_sha: "abc" },
     }, "delivery-check", "2026-08-21T08:05:03.000Z");
-    expect(ignoredCheck.events).toEqual([]);
-    expect(ignoredCheck.ignoredReason).toContain("workflow_run only");
-    expect(store.events.size).toBe(1);
+    expect(check.events).toHaveLength(1);
+    expect(check.events[0]?.event.subjectId).toBe("check_run:7001");
+    expect(check.ignoredReason).toBeNull();
+    expect(store.events.size).toBe(2);
+    const duplicateCheck = ingestGitHub(store, "check_run", {
+      repository: { id: 101, name: "widgets", owner: { login: "acme" } },
+      check_run: { id: 7001, status: "completed", conclusion: "success", head_sha: "abc" },
+    }, "delivery-check", "2026-08-21T08:05:03.000Z");
+    expect(duplicateCheck.events[0]?.created).toBe(false);
+    expect(store.events.size).toBe(2);
   });
 });
 

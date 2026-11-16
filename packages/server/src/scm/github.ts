@@ -164,12 +164,30 @@ export class GitHubScmProviderAdapter implements ScmProviderAdapter {
         ),
       });
     } else if (providerEvent === "check_run") {
-      return {
-        providerEvent,
-        deliveryId,
-        candidates: [],
-        ignoredReason: "GitHub check_run is ignored; canonical pipeline events support Actions workflow_run only",
+      const run = record(body.check_run);
+      const normalized = {
+        id: nullableString(run.id), kind: "check_run", name: stringValue(run.name),
+        status: stringValue(run.status).toLowerCase(), conclusion: nullableString(run.conclusion),
+        head_sha: nullableString(run.head_sha), url: nullableString(run.html_url),
+        app_id: numberValue(record(run.app).id), app_slug: nullableString(record(run.app).slug),
+        check_suite_id: nullableString(record(run.check_suite).id),
+        created_at: nullableString(run.started_at),
+        updated_at: nullableString(run.completed_at) ?? nullableString(run.started_at),
       };
+      if (!normalized.id || !normalized.head_sha) {
+        return { providerEvent, deliveryId, candidates: [], ignoredReason: "GitHub check_run requires id and head_sha" };
+      }
+      const completed = normalized.status === "completed";
+      const subjectId = `check_run:${normalized.id}`;
+      const version = pipelineVersion(normalized);
+      const occurredAt = normalized.updated_at ?? request.observedAt;
+      candidates.push({
+        ...base, type: completed ? "pipeline.completed" : "pipeline.started",
+        subjectType: "pipeline", subjectId,
+        logicalVersion: `${version}:${completed ? normalized.conclusion || "completed" : normalized.status || "started"}`,
+        occurredAt, payload: normalized,
+        snapshotObservation: webhookObservation("pipelines", "pipeline", subjectId, version, occurredAt, request.observedAt, normalized),
+      });
     } else if (providerEvent === "push") {
       const ref = stringValue(body.ref).replace(/^refs\/heads\//u, "");
       const after = stringValue(body.after);
@@ -420,7 +438,7 @@ export class GitHubScmProviderAdapter implements ScmProviderAdapter {
   }
 }
 
-function githubPullObservation(pull: Record<string, unknown>, now: Date): ScmEntityObservation {
+export function githubPullObservation(pull: Record<string, unknown>, now: Date): ScmEntityObservation {
   const payload = normalizeGitHubPull(pull);
   return {
     stream: "change_requests",

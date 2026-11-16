@@ -29,6 +29,31 @@ afterEach(() => {
 });
 
 describe("operations CLI contracts", () => {
+  it("executes active SCM commands through the Registry with real API paths and JSON bodies", async () => {
+    useCliEnv();
+    for (const [action, method, suffix, body] of [
+      ["create", "POST", "", { head: "feature", base: "main", title: "MUL-35" }],
+      ["get", "GET", "/42", null],
+      ["update", "PATCH", "/42", { title: "updated" }],
+      ["checks", "GET", "/42/checks", null],
+    ] as const) {
+      const spec = specById(`scm.change-request.${action}`);
+      globalThis.fetch = capabilityFetch(spec.id, async request => {
+        expect(request.method).toBe(method);
+        expect(new URL(request.url).pathname).toBe(`/api/workspaces/ws_1/scm/repositories/repo_widgets/change-requests${suffix}`);
+        if (body) expect(await request.json()).toEqual(body);
+        return Response.json({ ok: true });
+      });
+      const args = ["scm", "change-request", action, "repo_widgets", ...(action === "create" ? [] : ["42"]), "--json"];
+      if (body) {
+        const directory = mkdtempSync(join(tmpdir(), "scm-cli-")); tempDirectories.push(directory);
+        const path = join(directory, "body.json"); writeFileSync(path, JSON.stringify(body));
+        args.push("--file", path);
+      }
+      expect(JSON.parse((await capture(() => registryFor([spec]).execute(args))).stdout)).toEqual({ ok: true });
+    }
+  });
+
   it("requests one canonical day/model detail page using the declared CLI parameters", async () => {
     useCliEnv();
     const spec = specById("dashboard.usage.report");

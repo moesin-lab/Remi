@@ -1,22 +1,22 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 834,
+    "routeCount": 838,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 592,
+      "compat": 596,
       "root": 16
     },
-    "getRoutes": 363,
-    "getRoutesWithBody": 359,
+    "getRoutes": 365,
+    "getRoutesWithBody": 361,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /api/trace/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 471,
-    "mutationRoutesCovered": 299,
+    "mutationRoutes": 473,
+    "mutationRoutesCovered": 301,
     "flows": [
       "agents-compat",
       "agents-native",
@@ -51,6 +51,7 @@
       "projects",
       "responsibility-retired-routes",
       "runtimes",
+      "scm-active-binding-guard",
       "settings-misc",
       "skills-compat",
       "skills-native",
@@ -504,6 +505,8 @@
     "GET /api/workspaces/:workspaceId/scm/connections/:connectionId",
     "GET /api/workspaces/:workspaceId/scm/events",
     "GET /api/workspaces/:workspaceId/scm/events/:eventId",
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks",
     "GET /api/workspaces/:workspaceId/system-model-endpoints",
     "GET /auth/lark/url",
     "GET /favicon.ico",
@@ -555,6 +558,7 @@
     "PATCH /api/workspaces/:workspaceId/messaging/connections/:connectionId",
     "PATCH /api/workspaces/:workspaceId/messaging/sources/:sourceId",
     "PATCH /api/workspaces/:workspaceId/scm/connections/:connectionId",
+    "PATCH /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
     "POST /api/agents",
     "POST /api/agents/:id/archive",
     "POST /api/agents/:id/cancel-tasks",
@@ -845,6 +849,7 @@
     "POST /api/workspaces/:workspaceId/messaging/sources",
     "POST /api/workspaces/:workspaceId/scm/connections",
     "POST /api/workspaces/:workspaceId/scm/connections/:connectionId/verify",
+    "POST /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests",
     "POST /auth/google",
     "POST /auth/lark/callback",
     "POST /auth/logout",
@@ -1319,6 +1324,8 @@
     "GET /api/workspaces/:workspaceId/scm/connections/:connectionId",
     "GET /api/workspaces/:workspaceId/scm/events",
     "GET /api/workspaces/:workspaceId/scm/events/:eventId",
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks",
     "GET /api/workspaces/:workspaceId/system-model-endpoints",
     "GET /auth/lark/url",
     "GET /favicon.ico",
@@ -1355,6 +1362,7 @@
     "PATCH /api/squads/:id/members/role",
     "PATCH /api/workspaces/:id",
     "PATCH /api/workspaces/:id/members/:memberId",
+    "PATCH /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
     "POST /api/agents",
     "POST /api/agents/:id/archive",
     "POST /api/agents/:id/cancel-tasks",
@@ -1535,6 +1543,7 @@
     "POST /api/workspaces/:id/members",
     "POST /api/workspaces/:id/relay-config/:engine/reveal",
     "POST /api/workspaces/:workspaceId/issue-responsibility-migration/map",
+    "POST /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests",
     "POST /auth/google",
     "POST /auth/lark/callback",
     "POST /auth/logout",
@@ -10827,6 +10836,39 @@
             "allowed": true
           },
           {
+            "id": "scm.change-request.checks",
+            "command": "remi scm change-request checks",
+            "capability": "scm.change-request.checks",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.change-request.create",
+            "command": "remi scm change-request create",
+            "capability": "scm.change-request.create",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.change-request.get",
+            "command": "remi scm change-request get",
+            "capability": "scm.change-request.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "scm.change-request.link",
             "command": "remi scm change-request link",
             "capability": "scm.change-request.link",
@@ -10852,6 +10894,17 @@
             "id": "scm.change-request.unlink",
             "command": "remi scm change-request unlink",
             "capability": "scm.change-request.unlink",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.change-request.update",
+            "command": "remi scm change-request update",
+            "capability": "scm.change-request.update",
             "outputs": [
               "table",
               "json",
@@ -22004,7 +22057,7 @@
                 "pollFidelity": "inferred",
                 "webhookFidelity": "exact",
                 "limitations": [
-                  "Canonical pipeline events cover GitHub Actions workflow runs only; GitHub Checks check_run events are ignored."
+                  "Polling covers Actions workflow runs; check_run events are ingested by webhook and checks are read live per head SHA."
                 ]
               }
             },
@@ -24272,6 +24325,24 @@
       "status": 404,
       "body": {
         "error": "SCM event not found"
+      }
+    },
+    {
+      "key": "get-sweep GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
+      "route": "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
+      "path": "/api/workspaces/local/scm/repositories/repo_snapshot/change-requests/42",
+      "status": 404,
+      "body": {
+        "error": "SCM repository binding not found"
+      }
+    },
+    {
+      "key": "get-sweep GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks",
+      "route": "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks",
+      "path": "/api/workspaces/local/scm/repositories/repo_snapshot/change-requests/42/checks",
+      "status": 404,
+      "body": {
+        "error": "SCM repository binding not found"
       }
     },
     {
@@ -29771,6 +29842,24 @@
             "updatedAt": "<timestamp>"
           }
         ]
+      }
+    },
+    {
+      "key": "scm-active-binding-guard#000 POST /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests",
+      "route": "POST /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests",
+      "path": "/api/workspaces/local/scm/repositories/repo_snapshot/change-requests",
+      "status": 404,
+      "body": {
+        "error": "SCM repository binding not found"
+      }
+    },
+    {
+      "key": "scm-active-binding-guard#001 PATCH /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
+      "route": "PATCH /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
+      "path": "/api/workspaces/local/scm/repositories/repo_snapshot/change-requests/42",
+      "status": 404,
+      "body": {
+        "error": "SCM repository binding not found"
       }
     },
     {

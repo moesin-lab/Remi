@@ -1,5 +1,15 @@
 # CLI command migration
 
+## Output and pipe completion
+
+The CLI entry point routes console output through the standard streams and waits
+for stdout and stderr writes to complete before returning, including fatal command
+errors. JSON, JSONL and text output must remain complete when a pipe consumer is
+slow. A consumer closing the pipe early (for example `head`) exits quietly; command
+errors retain their nonzero status. Commands should return or throw rather than
+force process exit after rendering output. The source and compiled entry points
+are covered by [the stdio regression tests](../tests/unit/remi/cli-stdio.test.ts).
+
 ## Shared workspace operator and login account
 
 | Old command | Canonical command |

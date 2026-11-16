@@ -129,7 +129,33 @@ function composeArgs(root, ...args) {
   return [...flags, ...args];
 }
 
-function compose(root, ...args) { return execute('docker', composeArgs(root, ...args)); }
+function compose(root, ...args) {
+  const command = composeArgs(root, ...args);
+  const builds = args[0] === 'build' || args[0] === 'watch' || (args[0] === 'up' && args.includes('--build'));
+  if (!builds) return execute('docker', command);
+
+  // Null Compose build args inherit the environment without putting credentials
+  // in argv, profile files, or the override. Keep Docker's predefined proxy args
+  // undeclared in Dockerfiles so BuildKit excludes them from history/cache keys.
+  const proxyKeys = ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy'];
+  const keys = proxyKeys.filter((key) => process.env[key]);
+  let network = process.env.REMI_BUILD_NETWORK || undefined;
+  if (network && !['host', 'default', 'none'].includes(network)) {
+    throw new Error('REMI_BUILD_NETWORK must be host, default, or none');
+  }
+  const loopback = keys.filter((key) => key.toLowerCase() !== 'no_proxy').some((key) => {
+    try {
+      const host = new URL(process.env[key]).hostname.toLowerCase();
+      return host === 'localhost' || host === '[::1]' || (isIPv4(host) && host.startsWith('127.'));
+    } catch { throw new Error(`Invalid proxy URL in ${key}`); }
+  });
+  if (!network && loopback && process.platform === 'linux') network = 'host';
+  if (!keys.length && !network) return execute('docker', command);
+  const build = { ...(keys.length ? { args: Object.fromEntries(keys.map((key) => [key, null])) } : {}), ...(network ? { network } : {}) };
+  const override = JSON.stringify({ services: { api: { build }, web: { build } } });
+  command.splice(command.length - args.length, 0, '-f', '-');
+  return execute('docker', command, { input: override, stdio: ['pipe', 'inherit', 'inherit'] });
+}
 
 function writeComposeEnvironment(root, deployment) {
   const config = settings[deployment.profile];

@@ -61,10 +61,11 @@ export function unifiedCommandSpecs(): CommandSpec[] {
         const entries: Array<Record<string, any>> = [];
         let cursor: string | null = null;
         do {
-          const page: { entries: Array<Record<string, any>>; next_cursor: string | null } = (await client.request<typeof page>({
+          const page: { entries: Array<Record<string, any>>; next_cursor: string | null; read_warning?: string } = (await client.request<typeof page>({
             method: "GET", path: `/api/sessions/${encodePath(conversation)}/messages`,
             query: { from, to, ...(cursor ? { cursor } : {}) },
           })).data;
+          if(page.read_warning)new CliRenderer().diagnostic(page.read_warning);
           for (const entry of page.entries) {
             const previous = entries.at(-1);
             if (entry.body_offset > 0 && previous && previous.seq === entry.seq) {

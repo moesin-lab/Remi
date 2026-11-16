@@ -174,6 +174,7 @@ export const DAEMON_DOWNLINK_EVENT_FRAMES = [
   "task.offer",
   "task.cancelled",
   "turn.message",
+  "input_unread",
   "turn.wrap_up",
   "runtime.update",
   "runtime.command",
@@ -524,6 +525,8 @@ export interface DaemonTurnWrapUpPayload {
 }
 
 export interface DaemonTurnCompletePayload {
+  /** Provider unavailable or two reminders exhausted: preserve the reply and unread interval. */
+  input_unread_fallback?: boolean;
   turn_id: string;
   attempt_id: string;
   input_to_seq: number;
@@ -902,6 +905,7 @@ export const DAEMON_PROTOCOL_ERROR_CODES = [
   "invalid_report",
   "report_shape_retired",
   "turn_input_pending",
+  "input_unread",
   "start_replayed",
   "steer_pending",
   // offer rejections and dispatch
@@ -1037,6 +1041,7 @@ export const DAEMON_PROTOCOL_CAPS = [
   "offer",
   /** daemon accepts unified turn inputs and reports replies as messages. */
   "turn.message",
+  "input_unread",
   /** daemon answers `trace.read` for its hot tasks. */
   "trace.read",
   /** daemon accepts `trace.subscribe` / `trace.fetch` and emits `trace.push`. */

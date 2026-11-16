@@ -152,7 +152,7 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
     for (const key of this.inputReplyTo.keys()) if (key.startsWith(`${taskId}:`)) this.inputReplyTo.delete(key);
   }
 
-  async consumeTaskSteerMessages(taskId: string, ids: string[]): Promise<void> {
+  async consumeTaskSteerMessages(taskId: string, ids: string[], completing = false): Promise<void> {
     // A callback consumes only its answer. Its projection may also be the only
     // carrier of the range-read instruction for ordinary unread messages.
     for (const pending of this.steers.get(taskId)?.values() ?? []) {
@@ -185,6 +185,10 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
           await this.rpc("turn.input", { ...input, input_to_seq: to, message_ids: messageIds });
         } catch (retryError) {
           if (!(retryError instanceof DaemonProtocolRpcError) || retryError.code !== "input_gap") throw retryError;
+          // Completion owns the bounded reminder/fallback flow. Keep these
+          // receipts pending so turn.complete can distinguish unread bodies
+          // from an invalid report, rather than starting another resync loop.
+          if (completing) return;
           // The provider must read the missing bodies before retrying. Keep the original
           // receipts and steer it in this attempt instead of aborting its running session.
           const retries = (this.inputResyncs.get(taskId) ?? 0) + 1;

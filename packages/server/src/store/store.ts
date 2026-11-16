@@ -5651,6 +5651,7 @@ runMigrations(this.db);
   }
 
   reactMessage(...args:Parameters<import("./inbox/operations.js").InboxOperations["reactMessage"]>) {return this.inbox.operations.reactMessage(...args);}
+  canReadDelegationResult(...args: Parameters<InboxRepo["operations"]["canReadDelegationResult"]>) { return this.inbox.operations.canReadDelegationResult(...args); }
   listMessages(...args: Parameters<InboxRepo["operations"]["listMessages"]>) { return this.inbox.operations.listMessages(...args); }
   editMessage(...args: Parameters<InboxRepo["operations"]["editMessage"]>) { return this.inbox.operations.editMessage(...args); }
   deleteMessage(...args: Parameters<InboxRepo["operations"]["deleteMessage"]>) { return this.inbox.operations.deleteMessage(...args); }

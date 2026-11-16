@@ -367,6 +367,44 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
       if (previous === undefined) delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY; else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previous;
     }
   }, 120_000);
+  for (const failedBeforeConsume of [false, true]) it(`MUL-40 recovers historical continuation (failed before consume: ${failedBeforeConsume})`, () => {
+    const h = setup(fixture(), false, true);
+    h.bridge.rpc('turn.decision.expire', { turn_id: h.turn.id, attempt_id: h.task.id, message_id: h.q.id, status: 'timeout' }, h.scope);
+    h.store.answerQuestion(h.q.id, { expected_route_revision: 1, response: { answer: 'A' } },
+      { type: 'agent', id: h.leader.id }, h.agentTurn(h.leader.id));
+    const bound = h.store.getQuestion(h.q.id)!.recovery.consumer_turn_id!;
+    const attempt = h.store.claimTask(h.runtime.id)!;
+    expect(h.store.getTurnForAttempt(attempt.id)!.id).toBe(bound);
+    h.store.startTask(attempt.id);
+    const acknowledge = (attemptId: string) => {
+      const input = h.bridge.offerInput(h.store.getTaskWithAgent(attemptId)!);
+      expect(input.input_from_seq).toBe(0);
+      h.store.recordSessionAgentRangeRead(h.q.session_id, h.worker.id, { seq: 1, offset: 0 }, { seq: input.input_to_seq + 1, offset: 0 }, attemptId);
+      expect(h.bridge.rpc('turn.input', { turn_id: input.turn_id, attempt_id: attemptId,
+        input_to_seq: input.input_to_seq, message_ids: input.input_messages.map(m => m.id) }, h.scope)).toMatchObject({ ok: true });
+      expect(h.bridge.complete({ payload: { turn_id: input.turn_id, attempt_id: attemptId, input_to_seq: input.input_to_seq,
+        reply: { body_md: 'Recovered', message_kind: 'final' } }, completionFields: null }, h.scope)).toMatchObject({ ok: true });
+      return input.turn_id;
+    };
+    h.store.sendMessage({ session_id: h.q.session_id, sender: { type: 'member', id: 'mem_local_local' },
+      to: { type: 'agent', ref: h.worker.id }, execution_scope: 'observer', message_kind: 'request', wake_requested: 'now', body_md: 'Read context in another scope' });
+    const observer = h.store.claimTask(h.runtime.id)!;
+    h.store.startTask(observer.id);
+    acknowledge(observer.id);
+    expect(h.store.getQuestion(h.q.id)).toMatchObject({ wait_status: 'continuation_pending', recovery: { consumer_turn_id: bound } });
+    if (failedBeforeConsume) h.store.failTask(attempt.id, { error: 'daemon RPC failed: input_gap', failureReason: 'platform_input_rejected' });
+    else acknowledge(attempt.id);
+    // Reopen the real isolated database in the shape of the two poisoned sessions.
+    const reopened = new MultiremiStore(h.db);
+    const next = reopened.sendMessage({ session_id: h.q.session_id, sender: { type: 'member', id: 'mem_local_local' },
+      to: { type: 'agent', ref: h.worker.id }, message_kind: 'request', wake_requested: 'now', body_md: 'Continue after recovery' });
+    const successor = reopened.claimTask(h.runtime.id)!;
+    reopened.startTask(successor.id);
+    const nextTurn = acknowledge(successor.id);
+    expect(nextTurn).toBe(next.turn_id!);
+    expect(h.store.getQuestion(h.q.id)).toMatchObject({ wait_status: 'continuation_consumed',
+      recovery: { consumer_turn_id: failedBeforeConsume ? nextTurn : bound } });
+  });
   it('persists a valid answer when the source Agent is archived and permits one controlled retry after restoring it', () => {
     const h = setup(fixture());
     h.bridge.rpc('turn.decision.expire', { turn_id: h.turn.id, attempt_id: h.task.id, message_id: h.q.id, status: 'timeout' }, h.scope);

@@ -36,6 +36,17 @@ Issue Q 的人工阶段不指定成员，`current_handler` 为 null：通过入�
 
 业务问题与 provider 调用分开：超时保留待答 Q，将等待标为 `detached`。授权答复可安排原产品会话、原 execution scope 与原委派血缘的新续接轮，持久冻结旧轮的委派回程并先取消旧轮避免并发。旧provider可能保留未完成工具调用，所以新轮通过既有reset/bootstrap机制冷启动provider，读取原产品会话和同Q答案。短暂WS断线仍使用原nonce及原provider。续接状态先是 `continuation_pending`，由真实输入消费确认后才成为 `continuation_consumed`；完成后仍只回原派活人。原Agent不可用或调度失败时保存合法答案和具体分离原因，并发出待恢复提醒；恢复执行条件后可显式continue，同Q不重复创建消费者。显式取消不自动开新轮。原回调仍活着时，答案回填原调用，daemon 的 `turn.decision.consume` 确认消费后才标 `consumed`。`none` 表示历史 decision 没有原 AUQ；不会补造等待对象。
 
+历史 continuation 消息在其他轮的输入区间内仅作上下文，不重新消费原 Q。
+若绑定消费者在确认前已终止，同会话、同 Agent 和同 execution scope 的接手轮确认该消息时，
+服务端原子改绑并记为 `continuation_consumed`；活跃消费者和已消费事实不会被抢占。
+
+恢复历史受影响会话无需删除消息或修改数据库。修复按正常版本发布后，可由成员执行
+`remi turn retry <failed-turn> --cold --yes` 重试该会话中一个失败轮；它冷读历史输入，
+已消费 Q 保留原消费者，未消费 Q 由合法接手轮结算。也可向原 Agent 的原 scope 发新消息
+启动冷轮。重试前应核对失败轮已执行的业务操作，恢复完成须以轮成功及 Q 的实际消费状态为准。
+隔离数据库的 `MUL-40 recovers historical continuation` 回归覆盖两种历史形态；
+这些检查不代表已经对线上会话执行恢复。
+
 原生等待有进程内 nonce，随 `hello.runtimes[].active_question_waits` 和 `runtime.ready` 的清单声明。短暂断线保留同一 nonce；新进程没有旧回调清单，服务端在恢复普通孤儿任务前分离该等待并取消旧 attempt 权限。若答案已保存，自动安排唯一新消费者。数据库中的 `running` 或 `awaiting_human` 只用于检查 attempt 仍有效，不能证明退出进程的回调存在；兼容入口没有 nonce 时直接为 `detached/native_wait_unverified`，正常答复走受控续接，不回填不存在的回调。保存答复与实际消费是两个不同状态。
 
 没有 Chat 或 Issue 所有者的执行会话只按真实原生登记校验等待来源：持久 Q、原 Turn/attempt、提问 Agent、工作区、execution scope 和非空 head 必须相符，还须证明原始请求分配的 orphan 会话身份，或 Autopilot 与 run 的实际 Turn 绑定。已声明但失效的 Session 所有者不能进入这个分支；历史 decision 的来源引用也不能代替原生登记。超时、完成或替换 attempt 后保留原 Q 的等待历史，不恢复旧回调，不因此补造人类责任或授予普通消息读取权。回归入口为 [`issue-free-native-question-ownership.test.ts`](../../tests/unit/multiremi/issue-free-native-question-ownership.test.ts)。

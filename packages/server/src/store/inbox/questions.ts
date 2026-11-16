@@ -277,10 +277,14 @@ export class Questions {
     if (this.route(record.source_issue_id, message.sender_id, message.session_id, record.workspace_id).revision !== record.responsibility_revision)
       throw new QuestionError(409, 'question_responsibility_changed', 'Responsibility changed; reload the question');
   }
-  private current(message: UnifiedMessage, record: QuestionRecord, actor: QuestionActor, revision: number) {
+  private current(message: UnifiedMessage, record: QuestionRecord, actor: QuestionActor, revision: number, credential?: QuestionCardCredential) {
     if (!Number.isSafeInteger(revision) || revision < 1) throw new QuestionError(400, 'question_route_revision_required');
     if (revision !== record.route_revision) throw new QuestionError(409, 'question_route_changed');
-    if (!this.handles(record, record.route[record.route_index], actor)) throw new QuestionError(403, 'question_handler_required');
+    // Web Chat answers use the shared operator. A verified external card answer
+    // uses its configured recipient's member identity so history keeps the respondent.
+    const cardRecipient = credential && !record.source_issue_id && actor.type === 'member'
+      && record.route[record.route_index]?.stage === 'human' && this.humanCardMember(message.id)?.id === actor.id;
+    if (!this.handles(record, record.route[record.route_index], actor) && !cardRecipient) throw new QuestionError(403, 'question_handler_required');
     this.fresh(message, record);
   }
   /** A named step matches exactly. The Issue human step names nobody: any active member of the frozen source workspace acts. */
@@ -663,7 +667,7 @@ export class Questions {
         if (input.expected_route_revision !== record.route_revision) throw new QuestionError(409, 'question_route_changed');
         // Issue human-stage authority does not depend on the owner chain; only a Chat member is named by it.
         if (!record.source_issue_id) this.fresh(message, record);
-      } else { this.current(message, record, actor, input.expected_route_revision); if (record.status !== 'pending') throw new QuestionError(409, 'question_already_settled'); }
+      } else { this.current(message, record, actor, input.expected_route_revision, credential); if (record.status !== 'pending') throw new QuestionError(409, 'question_already_settled'); }
       const request = this.ctx.tasks().getTaskHumanRequest(id);
       const response = request ? normalizeHumanResponse(request, input.response) : input.response;
       const text = input.body_md?.trim() || JSON.stringify(response);

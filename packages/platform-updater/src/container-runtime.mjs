@@ -54,17 +54,17 @@ async function manifest(id) {
 // Extract files first, links last. No archive entry can write through a link.
 // This accepts GNU/PAX archives and workspace links, but rejects absolute paths,
 // devices, traversal, escaping links, duplicate paths and unbounded expansion.
-export async function extractArchive(archive, destination, compressed = true) {
+export async function extractArchive(archive, destination, compressed = true, subtree = null) {
   const source = createReadStream(archive);
   const stream = compressed ? source.pipe(createGunzip()) : source;
   const iterator = stream[Symbol.asyncIterator]();
-  let buffer = Buffer.alloc(0), total = 0;
+  let buffer = Buffer.alloc(0), total = 0, extracted = 0;
   async function take(size) {
     while (buffer.length < size) {
       const item = await iterator.next();
       if (item.done) throw new Error('Truncated application archive');
       total += item.value.length;
-      if (total > 8 * 1024 ** 3) throw new Error('Application archive exceeds 8 GiB');
+      if (!subtree && total > 8 * 1024 ** 3) throw new Error('Application archive exceeds 8 GiB');
       buffer = Buffer.concat([buffer, item.value]);
     }
     const result = buffer.subarray(0, size);
@@ -98,7 +98,7 @@ export async function extractArchive(archive, destination, compressed = true) {
       const checksum = header.reduce((sum, byte, i) => sum + (i >= 148 && i < 156 ? 32 : byte), 0);
       if (checksum !== expected) throw new Error('Invalid tar header checksum');
       const size = parseInt(field(header.subarray(124, 136)).trim() || '0', 8);
-      if (!Number.isSafeInteger(size) || size < 0 || size > 2 * 1024 ** 3) throw new Error('Invalid tar entry size');
+      if (!Number.isSafeInteger(size) || size < 0 || (!subtree && size > 2 * 1024 ** 3)) throw new Error('Invalid tar entry size');
       const type = String.fromCharCode(header[156] || 48);
       if (['x', 'g', 'L', 'K'].includes(type)) {
         if (size > 1024 * 1024) throw new Error('Tar metadata is too large');
@@ -129,8 +129,25 @@ export async function extractArchive(archive, destination, compressed = true) {
       const name = safe(extension.path || (prefix ? prefix + '/' : '') + field(header.subarray(0, 100)));
       const link = extension.linkpath || field(header.subarray(157, 257));
       extension = {};
+      if (subtree && name !== subtree && !name.startsWith(subtree + '/')) {
+        // Consume unrelated HOME entries without materializing credentials,
+        // caches or links. Only this backup's migration reports enter tmpfs.
+        for (let left = size; left > 0;) {
+          const length = Math.min(left, 64 * 1024);
+          await take(length); left -= length;
+        }
+        if (size % 512) await take(512 - size % 512);
+        continue;
+      }
+      // HOME backups have no application bundle quotas. Bound only the report
+      // subtree here, keeping skipped HOME contents and names out of memory.
       if (names.has(name) || names.size >= 250000) throw new Error('Duplicate or excessive archive entries');
       names.add(name);
+      if (subtree) {
+        extracted += size;
+        if (size > 2 * 1024 ** 3 || extracted > 8 * 1024 ** 3) throw new Error('Migration reports exceed extraction limits');
+      }
+      if (subtree && !['0', '5'].includes(type)) throw new Error('Migration report archive entries must be regular files or directories');
       const path = destination + '/' + name;
       await mkdir(dirname(path), { recursive: true });
       if (type === '5') {
@@ -183,6 +200,37 @@ export async function extractArchive(archive, destination, compressed = true) {
   } finally { source.destroy(); stream.destroy(); await Promise.all(flushes); }
 }
 
+// Only the current backup archive is available here; never mount live HOME.
+export async function restoreMigrationReports(archive, destination) {
+  try {
+    if (!(await lstat(archive)).isFile()) throw new Error('Not an archive file');
+    await extractArchive(archive, destination, false, 'reports/migrations');
+    const directory = destination + '/reports/migrations';
+    if (!(await lstat(directory)).isDirectory()) throw new Error('Not a directory');
+    return directory;
+  } catch {
+    throw new Error('Migration rehearsal: current api-home backup is missing or has invalid reports/migrations; restore the persistent migration reports before retrying');
+  }
+}
+
+export async function rehearseStoreMigration(apiRoot, archive, scratch) {
+  const reportDirectory = await restoreMigrationReports(archive, scratch);
+  const child = spawn('bun', ['--eval',
+    "const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {MultiremiStore}=await import('./packages/server/src/store/store.ts');const db=openMultiremiDatabase();try{new MultiremiStore(db)}finally{await db.close()}"],
+  { cwd: apiRoot, stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, HOME: '/tmp', MULTIREMI_HOME: '/tmp/remi', MULTIREMI_MIGRATION_REPORT_DIR: reportDirectory } });
+  let missingBeforeReport = false, stderrTail = '';
+  child.stderr.on('data', chunk => {
+    stderrTail = (stderrTail + chunk.toString()).slice(-4096);
+    if (stderrTail.includes('Unified migration before report missing')) missingBeforeReport = true;
+  });
+  // A hung candidate migration must not strand API/Web offline indefinitely.
+  // Only this disposable rehearsal process is killed; no provider runs here.
+  const timeout = setTimeout(() => child.kill('SIGKILL'), 5 * 60_000);
+  try {
+    await new Promise((ok, fail) => { child.on('error', fail); child.on('exit', code => code === 0 ? ok() : fail(new Error(missingBeforeReport ? 'Migration rehearsal: Unified migration before report missing from current api-home backup; restore the persistent migration reports before retrying' : 'Migration rehearsal failed or timed out'))); });
+  } finally { clearTimeout(timeout); }
+}
+
 async function launch(role) {
   if (!['api', 'web'].includes(role)) throw new Error('Unknown application role');
   const selected = await json(ROOT + '/current.json');
@@ -209,8 +257,14 @@ async function main() {
       if (!/^\d+$/.test(pid)) continue;
       try {
         if (await readlink('/proc/' + pid + '/cwd') !== expected) continue;
-        const argv = await readFile('/proc/' + pid + '/cmdline', 'utf8');
-        if (argv.includes(role === 'web' ? 'server.js' : 'apps/server/main.ts')) return;
+        if (role === 'web') {
+          // Next rewrites cmdline via process.title. The executable identity
+          // survives that change; cwd still pins it to the selected release.
+          if (posix.basename(await readlink('/proc/' + pid + '/exe')) === 'node') return;
+        } else {
+          const argv = await readFile('/proc/' + pid + '/cmdline', 'utf8');
+          if (argv.includes('apps/server/main.ts')) return;
+        }
       } catch {} // A process may exit during inspection.
     }
     throw new Error('Service is not running the selected application release');
@@ -281,16 +335,7 @@ async function main() {
   } else if (command === 'migrate') {
     const url = new URL(process.env.MULTIREMI_DATABASE_URL || '');
     if (url.hostname !== '127.0.0.1' || url.pathname !== '/remi_update_rehearsal' || url.username !== 'remi_rehearsal') throw new Error('Migrations may only run against the isolated rehearsal database');
-    const child = spawn('bun', ['--eval',
-      "const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {MultiremiStore}=await import('./packages/server/src/store/store.ts');const db=openMultiremiDatabase();try{new MultiremiStore(db)}finally{await db.close()}"],
-    { cwd: releasePath(id) + '/api', stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, HOME: '/tmp', MULTIREMI_HOME: '/tmp/remi' } });
-    child.stderr.resume();
-    // A hung candidate migration must not strand API/Web offline indefinitely.
-    // Only this disposable rehearsal process is killed; no provider runs here.
-    const timeout = setTimeout(() => child.kill('SIGKILL'), 5 * 60_000);
-    try {
-      await new Promise((ok, fail) => { child.on('error', fail); child.on('exit', code => code === 0 ? ok() : fail(new Error('Migration rehearsal failed or timed out'))); });
-    } finally { clearTimeout(timeout); }
+    await rehearseStoreMigration(releasePath(id) + '/api', '/remi-input/api-home.archive', '/tmp/remi-rehearsal');
   } else throw new Error('Unknown application control command');
 }
 

@@ -112,6 +112,10 @@ node scripts/local-profile.mjs stable backup
 
 ## 容器内部自更新
 
+已有手工布局的实例先按[自用实例迁移手册](self-hosted-update-adoption.md)准备并审批维护窗口。
+该手册列出 internal 与宿主 application 的取舍、固定手动 feed、完整持久卷与备份边界、
+daemon 稳定 launcher 的接入和退回步骤。配置示例不是已执行迁移或验收通过的证据。
+
 接入 [内部 Compose 更新器](../../deploy/README.md#internal-compose-updater) 后，
 Web「设置 → 系统 → 版本与服务」仍然创建同一个持久化操作。Compose 中的 updater
 领取请求，向 API/Web 的监管进程发送共享卷指令。应用和 Bun/Node 都从版本卷启动，

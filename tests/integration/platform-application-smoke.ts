@@ -32,7 +32,11 @@ const apiBaseImage = internal ? 'oven/bun:1.3.13' : bunBase;
 const webBaseImage = internal ? 'node:22.13.1-bookworm-slim' : nodeBase;
 const runner = new BunCommandRunner();
 const calls: string[][] = [];
+let omitBackupReports = false;
 const traced: CommandRunner = { async run(command, args, options) {
+  if (omitBackupReports && args.includes('/backup') && args.includes('-cf')) {
+    args = [...args.slice(0, -1), '--exclude=./reports/migrations', args.at(-1)!];
+  }
   calls.push(args);
   const result = await runner.run(command, args, options);
   const readinessProbe = args[0] === 'exec' && args[1]?.startsWith('remi-rehearsal-') && args.includes('psql') && args.at(-1) === 'SELECT 1';
@@ -72,12 +76,17 @@ try {
   for (const path of DATA_SCHEMA_INPUTS) await save(join(apiRoot, path), '// isolated fixture\n');
   await save(join(apiRoot, 'package.json'), '{"type":"module"}');
   await save(join(apiRoot, 'packages/server/src/store/db/postgres.ts'), 'export function openMultiremiDatabase(){return new Bun.SQL(process.env.MULTIREMI_DATABASE_URL!)}');
+  const migrationRoot = join(apiRoot, 'packages/server/src/store');
+  const storeBuild = await Bun.build({ entrypoints: [join(import.meta.dir, 'platform-application-store-fixture.ts')], target: 'bun', outdir: migrationRoot, naming: 'real-migration.js' });
+  if (!storeBuild.success) throw new Error(storeBuild.logs.map(String).join('\n'));
+  await cp(resolve(import.meta.dir, '../../packages/server/src/store/db/pg-worker.ts'), join(migrationRoot, 'pg-worker.ts'));
   const oldMigration = 'export async function runMigrations(db){await db.unsafe("CREATE TABLE IF NOT EXISTS sentinel(id integer PRIMARY KEY, value text NOT NULL)")}';
   const newMigration = 'export async function runMigrations(db){await db.unsafe("CREATE TABLE IF NOT EXISTS sentinel(id integer PRIMARY KEY, value text NOT NULL)");await db.unsafe("ALTER TABLE sentinel ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT \'\'")}';
   await save(join(apiRoot, 'packages/server/src/store/migrations.ts'), oldMigration);
   // The updater rehearses the full store startup, including data migrations.
   // This fixture uses async SQL, so finish its schema before exposing the ctor.
-  await save(join(apiRoot, 'packages/server/src/store/store.ts'), `import {openMultiremiDatabase} from './db/postgres.ts';
+  await save(join(apiRoot, 'packages/server/src/store/store.ts'), `import './real-migration.js';
+import {openMultiremiDatabase} from './db/postgres.ts';
 import {runMigrations} from './migrations.ts';const db=openMultiremiDatabase();
 try{await runMigrations(db)}finally{await db.close()};export class MultiremiStore {}`);
   const apiSource = `import {app} from './platform-application-api-fixture.js';
@@ -319,6 +328,15 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
   check((await updateFromWeb(second)).status === 'succeeded', 'Internally triggered application update failed');
   check(await docker(['inspect', '--format', '{{.Id}}|{{.Image}}', `${project}-api-1`]) === stableApi, 'Subsequent update replaced API container/image');
   check(await docker(['inspect', '--format', '{{.Id}}|{{.Image}}', `${project}-web-1`]) === stableWeb, 'Subsequent update replaced Web container/image');
+  if (!internal) {
+    console.log('phase: missing reports in current backup refuse rehearsal');
+    omitBackupReports = true;
+    try {
+      const refused = await updateFromWeb(await bundle('1.0.4', '9'.repeat(40)));
+      check(refused.status === 'failed' && String(refused.error).includes('reports/migrations'), 'Missing backup reports did not fail diagnostically');
+      check((await readMigrationReports()).every((report, index) => report === originalReports[index]), 'Failed rehearsal changed production reports');
+    } finally { omitBackupReports = false; }
+  }
   console.log('phase: broken application rolls code back and preserves later writes');
   const broken = await bundle('1.0.3', '4'.repeat(40), true);
   check((await updateFromWeb(broken)).status === 'failed', 'Broken release unexpectedly succeeded');

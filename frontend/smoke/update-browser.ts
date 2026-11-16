@@ -10,6 +10,7 @@ const context = await browser.newContext();
 await context.addInitScript(({ token }) => {
   localStorage.setItem("multimira_token", token);
   localStorage.setItem("multimira-locale", "en");
+  localStorage.setItem("multimira:chat:followUpMode", "steer");
 }, { token: fixture.token });
 await context.addCookies([{ name: "multimira_logged_in", value: "1", url: fixture.web }, { name: "multimira-locale", value: "en", url: fixture.web }, { name: "multimira_auth", value: fixture.token, url: fixture.web, httpOnly: true }, { name: "last_workspace_slug", value: fixture.slug, url: fixture.web }]);
 const page = await context.newPage();
@@ -29,12 +30,17 @@ try {
   for (const mode of ["gate", "restart"]) {
     await command(`prepare-${mode}`);
     await editor.fill(`continuity-${mode}`);
-    const response = page.waitForResponse(r => r.request().method() === "POST" && r.url().endsWith(`/sessions/${fixture.sessionId}/messages`) && r.ok());
-    await page.getByRole("button", { name: /^(Send|发送|送信|보내기)$/ }).click();
+    const response = page.waitForResponse(r => r.request().method() === "POST" && r.url().endsWith(`/sessions/${fixture.sessionId}/messages`) && r.ok()).then(value => ({ value, error: null }), error => ({ value: null, error }));
+    await page.getByRole("button", { name: /^(Send|Steer|发送|送信|보내기)$/ }).click();
     await page.getByText(/Sending|发送中|送信中|전송 중/).first().waitFor();
+    if (mode === "gate") {
+      const bounds = await page.locator('[data-update-state="switching"]').boundingBox();
+      assert(bounds && bounds.y >= 0 && bounds.height > 0, "Maintenance banner must be fully visible");
+    }
     await page.screenshot({ path: join(fixture.artifacts, `pending-${mode}.png`) });
     console.log(`PENDING_${mode}`);
-    await response;
+    const accepted = await response;
+    if (accepted.error) throw accepted.error;
     await page.getByText(`continuity-${mode}`, { exact: true }).first().waitFor();
     assert.equal(await page.getByText(/Delivery unconfirmed|Failed to send|发送失败|未确认送达/).count(), 0);
     console.log(`SENT_${mode}`);

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { assertPort, fingerprint, isolatedEnv, SESSION_ENV, compareSnapshots, processIdentity } from '../../integration/upgrade-harness/isolation.js';
+import { assertPort, fingerprint, isolatedEnv, SESSION_ENV, compareSnapshots, processIdentity, mayHostDaemon } from '../../integration/upgrade-harness/isolation.js';
 
 describe('upgrade harness safety', () => {
   it('rejects production ports, invalid ports and ambient credentials', () => {
@@ -25,6 +25,10 @@ describe('upgrade harness safety', () => {
       expect(compareSnapshots(base, base)).toMatchObject({ unchanged: true, fully_observed: true });
       expect(compareSnapshots({ ...base, observation_errors: ['denied'] }, { ...base, observation_errors: ['denied'] }).fully_observed).toBe(false);
     } finally { rmSync(root, { recursive: true }); }
+  });
+  it('keeps unreadable daemon runtimes ambiguous while excluding unrelated CI helpers', () => {
+    for (const comm of ['bun', 'node', 'remi', 'multiremi-daemon', '']) expect(mayHostDaemon(comm)).toBe(true);
+    for (const comm of ['sleep', 'chrome', 'systemd', 'Runner.Worker']) expect(mayHostDaemon(comm)).toBe(false);
   });
   it.skipIf(process.platform !== 'linux')('records kernel process starttime to detect PID reuse', () => {
     expect(processIdentity(process.pid)).toMatchObject({ pid: process.pid, ppid: process.ppid });

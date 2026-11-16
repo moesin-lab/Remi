@@ -1,9 +1,9 @@
-import { runSchemaBoundaryScenario } from './platform-schema-boundary-scenario.js';
 /**
  * Opt-in, disposable Docker verification; never connects to an existing DB.
  * MULTIREMI_TEST_DOCKER_RECOVERY=1 bun test tests/integration/platform-recovery-postgres.test.ts
  * Images must already exist locally; no ports or host database paths are used.
  */
+import { runSchemaBoundaryScenario } from './platform-schema-boundary-scenario.js';
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";

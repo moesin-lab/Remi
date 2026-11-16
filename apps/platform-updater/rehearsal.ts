@@ -1,6 +1,6 @@
-import { assertSchemaContract, SchemaContractRefusedError } from '../../packages/platform-updater/src/schema-contract.js';
 // Runs in a dedicated network_mode:none container with read-only application
 // and backup volumes. No production DB URL or API credentials enter this image.
+import { assertSchemaContract, SchemaContractRefusedError } from '../../packages/platform-updater/src/schema-contract.js';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';

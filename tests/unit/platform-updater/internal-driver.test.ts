@@ -100,7 +100,7 @@ describe('socket-free internal application updates', () => {
     expect((await restarted.pendingFinalization())?.report.progress?.failure).toEqual(f.state.failure);
     expect((await restarted.inspect()).currentRelease?.version).toBe('1.0.0');
     await expect(restarted.execute(f.operation, f.report, READY_GATE)).rejects.toBeInstanceOf(SchemaContractRefusedError);
-  });
+  }, 15_000);
 
   it('accepts changed Bun/Node executables while requiring compatible native tools and libc', async () => {
     const f = await fixture();

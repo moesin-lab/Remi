@@ -8,7 +8,7 @@ function stubFetch(handler: (...args: Parameters<typeof fetch>) => ReturnType<ty
 }
 const originalKey = process.env.MULTIREMI_SCM_ENCRYPTION_KEY;
 const head = "a".repeat(40);
-const pull = { id: 9001, number: 42, title: "PR", state: "open", head: { ref: "feature", sha: head }, base: { ref: "main", sha: "b".repeat(40) }, updated_at: "2026-11-16T00:00:00Z" };
+const pull = { id: 9001, number: 42, title: "PR", state: "open", head: { ref: "feature", sha: head, repo: { full_name: "acme/widgets" } }, base: { ref: "main", sha: "b".repeat(40) }, updated_at: "2026-11-16T00:00:00Z" };
 const root = "/api/workspaces/local/scm/repositories/repo_widgets/change-requests";
 function setup() {
   process.env.MULTIREMI_SCM_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");

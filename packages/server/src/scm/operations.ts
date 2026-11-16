@@ -134,7 +134,14 @@ export class GitHubScmOperations {
 
   private async findOpen(head: string): Promise<Record<string, unknown> | null> {
     const rows = await this.pages(appendQuery("/pulls", { state: "open", head: `${this.context.binding.owner}:${head}` }));
-    const matches = rows.filter(row => record(row.head).ref === head);
+    const repository = `${this.context.binding.owner}/${this.context.binding.name}`.toLowerCase();
+    const matches = rows.filter(row => {
+      const source = record(row.head);
+      if (source.ref !== head) return false;
+      const fullName = text(record(source.repo).full_name);
+      if (!fullName) throw new ScmOperationError("scm_invalid_response", "Provider omitted the PR source repository identity");
+      return fullName.toLowerCase() === repository;
+    });
     if (matches.length > 1) throw new ScmOperationError("scm_ambiguous_change_request", "Multiple open PRs exist for this source branch");
     return matches[0] ?? null;
   }

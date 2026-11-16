@@ -159,16 +159,20 @@ export async function runSchemaBoundaryScenario(): Promise<void> {
     evidence.success = true;
   } catch (error) { evidence.error = error instanceof Error ? error.stack : String(error); throw error; }
   finally {
+    const cleanupErrors: string[] = [];
+    const cleanup = (action: () => void) => { try { action(); } catch (error) { cleanupErrors.push(String(error)); } };
     try {
-      if (pgCreated) docker(['rm', '--force', '--volumes', name]);
-      if (volumeCreated) docker(['volume', 'rm', volume]);
+      if (pgCreated) cleanup(() => { docker(['rm', '--force', '--volumes', name]); });
+      if (volumeCreated) cleanup(() => { docker(['volume', 'rm', volume]); });
+      if (worktreeCreated) cleanup(() => { command('git', ['worktree', 'remove', '--force', oldSource]); });
       const containers = docker(['ps', '--all', '--filter', `label=${label}`, '--format', '{{.Names}}']).toString().trim();
       const rehearsals = docker(['ps', '--all', '--filter', `label=io.remi.application.project=${name}`, '--format', '{{.Names}}']).toString().trim();
       const volumes = docker(['volume', 'ls', '--filter', `label=${label}`, '--format', '{{.Name}}']).toString().trim();
-      if (worktreeCreated) command('git', ['worktree', 'remove', '--force', oldSource]);
       const worktreeListed = command('git', ['worktree', 'list', '--porcelain']).toString().split('\n').includes('worktree ' + oldSource);
-      evidence.cleanup = { containers, rehearsals, volumes, worktreeListed }; expect([containers, rehearsals, volumes, worktreeListed]).toEqual(['', '', '', false]);
+      evidence.cleanup = { containers, rehearsals, volumes, worktreeListed, errors: cleanupErrors };
+      expect([containers, rehearsals, volumes, worktreeListed, cleanupErrors]).toEqual(['', '', '', false, []]);
     } finally {
+      if (cleanupErrors.length) { evidence.success = false; evidence.cleanupErrors = cleanupErrors; }
       mkdirSync(resolve(evidencePath, '..'), { recursive: true }); writeFileSync(evidencePath, JSON.stringify(evidence, null, 2) + '\n');
       console.log('SCHEMA_BOUNDARY_EVIDENCE ' + JSON.stringify(evidence));
       rmSync(scratch, { recursive: true, force: true });

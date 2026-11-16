@@ -878,9 +878,10 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       expect(store.listFeishuBotSenderProfileSources(workspaceId, beforeRefresh)).toEqual([{
         id: senders[0]!.id, appId: config.appId, openId: "ou_pg_sender", messageId: "om_pg_2",
       }]);
+      const beforeProfileRefresh = store.listFeishuBotSenders(workspaceId)[0]!;
       store.updateFeishuBotSenderProfile(workspaceId, config.appId, senders[0]!.id,
         { name: "陈测试", nameEn: "Test Chen" }, beforeRefresh);
-      expect(store.listFeishuBotSenders(workspaceId)[0]).toMatchObject({ ...senders[0],
+      expect(store.listFeishuBotSenders(workspaceId)[0]).toMatchObject({ ...beforeProfileRefresh,
         allowed: true, display_name: "陈测试", name_en: "Test Chen" });
       expect(store.listFeishuBotSenderProfileSources(workspaceId, beforeRefresh)).toEqual([]);
       store.setFeishuBotSenderAllowed(workspaceId, senders[0]!.id, false, "local");

@@ -169,7 +169,11 @@ build_launcher() {
   local lines=() prefixes=() suffixes=()
   local generated_pattern='^([[:space:]]*exec[[:space:]]+)(.*)([[:space:]]+"\$@")$'
   quoted="$(printf '%s' "$binary" | sed "s/'/'\\\\''/g")"
-  quoted="'$quoted'"
+  if [[ "$binary" =~ ^[A-Za-z0-9_/:=.,@%+-]+$ ]]; then
+    quoted="$binary"
+  else
+    quoted="'$quoted'"
+  fi
   local exec_pattern
   IFS= read -r exec_pattern <<'PATTERN'
 ^([[:space:]]*exec[[:space:]]+)("([^"]+)"|'([^']+)'|([^[:space:]]+))(.*)$

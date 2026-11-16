@@ -326,6 +326,9 @@ export function assertCancelledLegacyWakesCannotRun(db: SqlDatabase, store = new
     db.run("UPDATE multiremi_tasks SET priority = 9999 WHERE status = 'cancelled'");
   }
   const runtime = store.registerRuntime({ name: "Migration callback check", provider: "codex", workspaceId: "local" });
+  // The historical Agent's migrated capability group has no fixture Runtime.
+  // Configure this callback probe for the new worker before creating its turn.
+  store.updateAgent("agt_chat_migration", { executionGroupId: null });
   const next = store.createTask({ agentId: "agt_chat_migration", workspaceId: "local", chatSessionId: chatId,
     prompt: "A new private question", runtimeId: runtime.id });
   expect(JSON.stringify(store.buildTaskSessionProjection(next.id))).not.toContain("PRIVATE_ISSUE_WAKE_SENTINEL");

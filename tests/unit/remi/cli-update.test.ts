@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   compareVersions,
   performUpdate,
@@ -97,6 +97,68 @@ describe("Remi CLI updater", () => {
     expect(execFileSync(fixture.launcherPath, ["--version"], { encoding: "utf8" }).trim()).toBe("0.2.81");
   });
 
+  test.each(["remi-cli-update-", "remi-cli-user's store-"])("rewrites an installer launcher with shell setup and fixed args (%s)", async (prefix) => {
+    const fixture = releaseFixture(roots, undefined, prefix);
+    const oldRelease = join(fixture.root, "old-release");
+    const mocks = join(fixture.root, "mocks");
+    mkdirSync(oldRelease); mkdirSync(mocks);
+    writeExecutable(join(oldRelease, "remi"), "#!/bin/sh\necho 0.2.80\n");
+    const archive = join(fixture.root, "old.tar.gz");
+    execFileSync("tar", ["czf", archive, "-C", oldRelease, "remi"]);
+    const oldId = createHash("sha256").update(readFileSync(archive)).digest("hex").slice(0, 8);
+    writeExecutable(join(mocks, "curl"), '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\nif [ "$1" = -o ]; then cp "$FIXTURE_ARCHIVE" "$2"; exit; fi\nshift\ndone\nexit 93\n');
+    const installed = spawnSync("bash", [resolve("scripts/install-remi.sh")], { encoding: "utf8", env: {
+      ...process.env, PATH: `${mocks}:${process.env.PATH}`, MULTIREMI_VERSION: "0.2.80",
+      MULTIREMI_BIN_DIR: join(fixture.root, "bin"), MULTIREMI_INSTALL_ROOT: fixture.installRoot,
+      FIXTURE_ARCHIVE: archive,
+    } });
+    expect(installed.status).toBe(0);
+    const installedLauncher = readFileSync(fixture.launcherPath, "utf8");
+    const oldBinaryPath = join(fixture.installRoot, "versions", oldId, "remi");
+    const quoted = /^[A-Za-z0-9_/:=.,@%+-]+$/.test(oldBinaryPath) ? oldBinaryPath : "'" + oldBinaryPath.replaceAll("'", "'\\''") + "'";
+    expect(installedLauncher).toBe(`#!/bin/sh\n# Remi stable launcher; versioned binaries make upgrades recoverable.\nexec ${quoted} "$@"\n`);
+    const previous = installedLauncher.replace("# Remi stable", "export LOCAL_SETUP=preserved\n# Remi stable").replace('"$@"', '"fixed argument" "$@"');
+    writeExecutable(fixture.launcherPath, previous);
+    const result = await performUpdate({ currentVersion: "0.2.80", platform: { os: "darwin", arch: "arm64" },
+      fetchImpl: fixture.fetchImpl, env: { PATH: "", FIXTURE_EVENTS: fixture.events },
+      homeDir: fixture.homeDir, installRoot: fixture.installRoot, launcherPath: fixture.launcherPath, launchdPath: fixture.launchdPath });
+    expect(result.status).toBe("installed");
+    expect(readFileSync(fixture.launcherPath, "utf8")).toContain("export LOCAL_SETUP=preserved");
+    expect(readFileSync(fixture.launcherPath, "utf8")).toContain('"fixed argument" "$@"');
+    expect(readFileSync(fixture.launcherPath, "utf8")).not.toContain(`/versions/${oldId}/remi`);
+    expect(execFileSync(fixture.launcherPath, ["--version"], { encoding: "utf8" }).trim()).toBe("0.2.81");
+    expect(existsSync(join(fixture.installRoot, "versions", oldId, "remi"))).toBe(true);
+    // Complete the reverse direction: the runtime installer must retain settings
+    // and fixed arguments emitted by the local updater, including escaped paths.
+    const beforeReinstall = readFileSync(fixture.launcherPath, "utf8");
+    const reinstalled = spawnSync("bash", [resolve("scripts/install-remi.sh")], { encoding: "utf8", env: {
+      ...process.env, PATH: `${mocks}:${process.env.PATH}`, MULTIREMI_VERSION: "0.2.81",
+      MULTIREMI_BIN_DIR: join(fixture.root, "bin"), MULTIREMI_INSTALL_ROOT: fixture.installRoot,
+      FIXTURE_ARCHIVE: join(fixture.root, "remi-0.2.81-darwin-arm64.tar.gz"), FIXTURE_EVENTS: fixture.events,
+    } });
+    expect(reinstalled.status).toBe(0);
+    expect(readFileSync(fixture.launcherPath, "utf8")).toBe(beforeReinstall);
+    expect(execFileSync(fixture.launcherPath, ["--version"], { encoding: "utf8" }).trim()).toBe("0.2.81");
+  });
+
+  test.each(["remi-cli-update-", "remi-cli-user's store-"])("installer and local updater emit identical generic launchers (%s)", async (prefix) => {
+    const fixture = releaseFixture(roots, undefined, prefix);
+    const mocks = join(fixture.root, "mocks"); mkdirSync(mocks);
+    writeExecutable(join(mocks, "curl"), '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\nif [ "$1" = -o ]; then cp "$FIXTURE_ARCHIVE" "$2"; exit; fi\nshift\ndone\nexit 93\n');
+    const installed = spawnSync("bash", [resolve("scripts/install-remi.sh")], { encoding: "utf8", env: {
+      ...process.env, PATH: `${mocks}:${process.env.PATH}`, MULTIREMI_VERSION: "0.2.81",
+      MULTIREMI_BIN_DIR: join(fixture.root, "bin"), MULTIREMI_INSTALL_ROOT: fixture.installRoot,
+      FIXTURE_ARCHIVE: join(fixture.root, "remi-0.2.81-darwin-arm64.tar.gz"), FIXTURE_EVENTS: fixture.events,
+    } });
+    expect(installed.status).toBe(0);
+    const installerLauncher = readFileSync(fixture.launcherPath);
+    rmSync(fixture.launcherPath);
+    await performUpdate({ currentVersion: "0.2.80", platform: { os: "darwin", arch: "arm64" },
+      fetchImpl: fixture.fetchImpl, env: { PATH: "", FIXTURE_EVENTS: fixture.events },
+      homeDir: fixture.homeDir, installRoot: fixture.installRoot, launcherPath: fixture.launcherPath, launchdPath: fixture.launchdPath });
+    expect(readFileSync(fixture.launcherPath)).toEqual(installerLauncher);
+  });
+
   test("service specs use the actual generic launcher written by the updater", async () => {
     const fixture = releaseFixture(roots);
     const result = await performUpdate({
@@ -110,7 +172,7 @@ describe("Remi CLI updater", () => {
       launchdPath: fixture.launchdPath,
     });
     if (result.status !== "installed") throw new Error("expected installed result");
-    expect(readFileSync(fixture.launcherPath, "utf8")).toContain(`exec '${result.snapshotDir}/remi'`);
+    expect(readFileSync(fixture.launcherPath, "utf8")).toContain(`exec ${result.snapshotDir}/remi "$@"`);
     expectUpdaterServiceLauncher(fixture, join(result.snapshotDir, "remi"));
   });
 
@@ -135,7 +197,7 @@ describe("Remi CLI updater", () => {
   });
 });
 
-function releaseFixture(roots: string[], digestOverride?: string): {
+function releaseFixture(roots: string[], digestOverride?: string, prefix = "remi-cli-update-"): {
   root: string;
   homeDir: string;
   installRoot: string;
@@ -145,7 +207,7 @@ function releaseFixture(roots: string[], digestOverride?: string): {
   requests: string[];
   fetchImpl: typeof fetch;
 } {
-  const root = mkdtempSync(join(tmpdir(), "remi-cli-update-"));
+  const root = mkdtempSync(join(tmpdir(), prefix));
   roots.push(root);
   const releaseDir = join(root, "release");
   const homeDir = join(root, "home");
@@ -157,6 +219,7 @@ function releaseFixture(roots: string[], digestOverride?: string): {
   for (const directory of [releaseDir, homeDir, binDir]) mkdirSync(directory, { recursive: true });
   writeExecutable(join(releaseDir, "remi"), [
     "#!/bin/sh",
+    "if [ \"$1\" = \"fixed argument\" ]; then shift; fi",
     "if [ \"$1\" = \"--version\" ]; then echo 0.2.81; exit 0; fi",
     "if [ \"$1 $2\" = \"runtime prepare\" ]; then printf prepared > \"$FIXTURE_EVENTS\"; exit 0; fi",
     "exit 91",

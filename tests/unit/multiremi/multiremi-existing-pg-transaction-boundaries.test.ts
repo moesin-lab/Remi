@@ -106,7 +106,7 @@ describe.skipIf(!pgAvailable)("MUL-465 atomic PostgreSQL boundaries", () => {
     store.heartbeatRuntime(fixture.runtime.id, { supportsFeishuBotConfig: true });
     const config = store.upsertFeishuBotConfig(fixture.workspaceId, {
       agentId: fixture.agent.id, runtimeId: fixture.runtime.id, appId: "cli_mul465",
-      domain: "feishu", enabled: true, appSecretOp: "set",
+      domain: "feishu", enabled: true, senderAccessPolicy: "agent", appSecretOp: "set",
       appSecret: "fixture-secret-not-a-real-credential",
     });
     const input = {
@@ -241,7 +241,7 @@ describe.skipIf(!pgAvailable)("MUL-465 atomic PostgreSQL boundaries", () => {
     store.heartbeatRuntime(fixture.runtime.id, { supportsFeishuBotConfig: true });
     const config = store.upsertFeishuBotConfig(fixture.workspaceId, {
       agentId: fixture.agent.id, runtimeId: fixture.runtime.id, appId: "cli_mul465_round",
-      domain: "feishu", enabled: true, appSecretOp: "set",
+      domain: "feishu", enabled: true, senderAccessPolicy: "agent", appSecretOp: "set",
       appSecret: "fixture-secret-not-a-real-credential",
     });
     store.reportFeishuBotRuntimeStatus(fixture.workspaceId, fixture.runtime.id, {

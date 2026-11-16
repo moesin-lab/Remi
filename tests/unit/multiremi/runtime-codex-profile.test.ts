@@ -61,6 +61,7 @@ describe("Runtime Codex profile-only retry rules", () => {
         store.startTask(task.id);
         if (change === "provider") store.updateAgent(agent.id, { provider: nextProvider });
         else store.updateRuntime(runtime.id, { ownerId: "other-owner" });
+        store.updateRuntimeModels(replacement.id, [{ id: "custom-model", label: "Custom", provider: nextProvider, default: true }]);
         store.failTask(task.id, { error: "stale session", failureReason: "agent_error.stale_session" });
         const retry = store.listTasks().find(candidate => candidate.parentTaskId === task.id)!;
         if (change === "runtime-owner") {

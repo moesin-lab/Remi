@@ -360,7 +360,7 @@ async function exerciseHumanStageReminders(store: MultiremiStore): Promise<void>
   };
   const reminders = (id: string, memberId: string) => decisionInbox(store, memberId).filter(message =>
     message.metadata.question_notification === true && message.metadata.root_question_id === id
-      && message.to_member_id === memberId);
+      && message.to_member_id === store.getWorkspaceOperator("local")!.id);
   const approve = (id: string, memberId: string) => store.answerQuestion(id, { expected_route_revision: store.getQuestion(id)!.route_revision,
     response: { answers: { 'Approve?': 'Yes' } } }, { type: 'member', id: memberId });
   const eventTypes: string[] = [];
@@ -374,9 +374,9 @@ async function exerciseHumanStageReminders(store: MultiremiStore): Promise<void>
     expect(humanQ).toMatchObject({ stage: 'human', current_handler: null });
     expect(reminders(humanQ.id, creator.id)).toHaveLength(1);
     expect(reminders(humanQ.id, subscriber.id)).toHaveLength(1);
-    expect(reminders(humanQ.id, workspaceOwner.id)).toHaveLength(0);
+    expect(reminders(humanQ.id, workspaceOwner.id)).toHaveLength(1);
     expect(eventTypes).toContain('inbox:new');
-    // Reminders never limit who acts: a member nobody reminded answers.
+    // Shared reminders never limit which active human operator can answer.
     expect(approve(humanQ.id, workspaceOwner.id).question.answer?.actor).toEqual({ type: 'member', id: workspaceOwner.id });
 
     // An Agent-created root has no member creator to remind; members still act, archived ones do not.
@@ -417,7 +417,7 @@ async function exerciseHumanStageReminders(store: MultiremiStore): Promise<void>
     expect(escalated).toMatchObject({ stage: 'human', current_handler: null, route_revision: 2 });
     expect(reminders(pending.id, subscriber.id)).toHaveLength(1);
     expect(reminders(pending.id, workspaceOwner.id)).toHaveLength(1);
-    expect(reminders(pending.id, creator.id)).toHaveLength(0);
+    expect(reminders(pending.id, creator.id)).toHaveLength(1);
     expect(approve(pending.id, creator.id).question.answer?.actor).toEqual({ type: 'member', id: creator.id });
   } finally { off(); }
 }

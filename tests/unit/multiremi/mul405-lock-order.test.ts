@@ -202,7 +202,7 @@ function recordFeishuOrder(): LockName[] {
 
   // First message registers the sender and the Chat binding. The sender starts
   // on the allowlist default (denied), so no Issue is auto-created yet.
-  store.submitFeishuBotMessage("local", "rt_lock_order", {
+  expect(() => store.submitFeishuBotMessage("local", "rt_lock_order", {
     revision: config.revision,
     externalSessionKey: "oc_lock_order:thread:omt_lock",
     externalMessageId: "om_lock_order",
@@ -211,7 +211,7 @@ function recordFeishuOrder(): LockName[] {
     threadId: "omt_lock",
     senderOpenId: "ou_lock_order",
     text: "Register the conversation",
-  });
+  })).toThrow("sender is not on this bot's allowlist");
   store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
   // Now the topic binding has no Issue and the sender is allowed, so this call
   // is the one that takes both locks: the workspace row lock on entry, and the

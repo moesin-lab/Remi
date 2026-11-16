@@ -223,7 +223,7 @@ describe("Chat workspace assignment lineage", () => {
       const metadata = { codex_profiles: 1, claude_profiles: 1, agent_plugin_protocol: 1 };
       const previous = store.registerRuntime({ name: "Previous", provider, daemonId: "previous", metadata });
       const destination = store.registerRuntime({ name: "Native", provider, daemonId: "destination", metadata,
-        models: [{ id: "selected-model", label: "Selected model", provider, default: false }] });
+        models: [{ id: "unrelated-model", label: "Unrelated model", provider, default: false }] });
       const profile = { name: "previous", base_url: "http://127.0.0.1:8001/v1", model: "selected-model",
         env_key: provider === "codex" ? "REMI_CODEX_MODEL_TEST" : "REMI_CLAUDE_MODEL_TEST" };
       if (provider === "codex") store.setRuntimeCodexProfile(previous.id, profile);
@@ -242,9 +242,9 @@ describe("Chat workspace assignment lineage", () => {
       store.archiveProject(project.id);
       expect(store.claimTask(destination.id)).toBeNull();
       expect(store.getTask(retry.id)?.status).toBe("queued");
-      store.updateRuntimeModels(destination.id, [{ id: "later-selection", label: "Later selection", provider, default: false }]);
+      store.updateRuntimeModels(destination.id, [{ id: "selected-model", label: "Selected model", provider, default: false }]);
       const claimed = store.claimTask(destination.id)!;
-      expect(claimed).toMatchObject({ id: retry.id, agent: { model: "later-selection" }, codexProfile: null, claudeProfile: null });
+      expect(claimed).toMatchObject({ id: retry.id, executionModel: "selected-model", codexProfile: null, claudeProfile: null });
     });
 
     for (const priorProfile of [true, false]) {

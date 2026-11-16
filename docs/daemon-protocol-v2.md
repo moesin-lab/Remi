@@ -73,6 +73,14 @@ offer 输入与会话投影的范围记录都为 complete 时什么也不加；�
 或被接受的完整 inline 输入确认才能推进，跳过分页不会越过未读缺口。`provider_cursor_seq` 单独保存
 provider 续接位置，`turn.input_to_seq` 保存业务消费上界；轮结束不清零或推进实际读高水位。
 冷 bootstrap 或 replacement 从 0 开始，只有接受后才清零实际读进度并记账完整输入；准备或拒绝不清零。
+`turn.input` 被 `input_gap` 拒绝时，daemon 使用同一 RPC 的 `resync: true` 请求当前
+attempt 的输入投影（仍携带 turn/attempt、`input_to_seq` 和空 `message_ids`）；服务端返回
+`{ok:true,input:DaemonTurnInput}`，不推进确认或读取游标。daemon 移除早于服务端确认位置的旧 ID
+后重试；缺少正文回执时在同一 provider 中投递范围读取提示，阅读后再确认。
+每次成功确认重置恢复计数，连续三次补读仍不能确认则结束为 `platform_input_rejected`，
+不触发模型备用切换。历史 continuation 只有绑定消费者确认时才结算；同会话、同 Agent、
+同 scope 的接手轮可在旧消费者终止后接管尚未消费的 continuation。
+
 Runtime 删除或 daemon 退役只重置 provider 续接缓存。Task token 绑定当前 attempt，旧 attempt token
 在 replacement 时撤销；不能用另一个 attempt 的凭据确认本轮输入。
 

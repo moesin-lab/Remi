@@ -84,7 +84,7 @@ describe('rehearsal migration report restore', () => {
     ]);
     const directory = await f.restore();
     expect(await readFile(join(directory, 'cutover-before.json'), 'utf8')).toBe('{"phase":"before"}');
-    expect(await readdir(directory)).toEqual(['cutover-after.json', 'cutover-before.json']);
+    expect((await readdir(directory)).sort()).toEqual(['cutover-after.json', 'cutover-before.json']);
     expect(await readdir(f.target)).toEqual(['reports']);
   });
   it('fails diagnostically when the backup has no migration reports', async () => {

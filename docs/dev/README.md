@@ -18,6 +18,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 判断能力是否存在 | [能力定位](../MULTIREMI_PARITY_MATRIX.md) | 当前实现和验证入口；不从旧完成标记推断 |
 | 运行测试、验证回归 | [测试](../../TESTING.md) | 测试发现范围与真实服务前提 |
 | 改 SCM PR、检查或合并闸门 | [SCM 主动操作](scm-operations.md) | A 操作、B1 策略/审阅/预检、B2 合并与审批；C1 token 双槽位与 strict 实时保护证明 |
+| 查询 PR 的 CI 状态 | [SCM 实时检查查询](scm-checks.md) | 任务凭据、分页与 head 稳定性；观测不授权合并 |
 | 新增 API 或 CLI 能力 | [CLI 命令契约](../cli-command-migration.md) | canonical 命令、注册与能力检查 |
 | 改用量采集、统计报表或模型价格 | [统一用量与价格](../usage-accounting.md)、[公开参考价格导入](../usage-reference-prices.md) | actual/context/unknown、run 幂等、执行归属、双时轴和受控历史迁移 |
 | 通过 CLI 使用、管理或排查 Remi | [Remi Skill](../../.agents/skills/remi/SKILL.md) | 任务协作、项目知识、Agent 与模型、集成、权限和运行维护 |

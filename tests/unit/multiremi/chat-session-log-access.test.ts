@@ -208,7 +208,7 @@ it("a personal Feishu bot task reads its bound Chat with the real external creat
   process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 17).toString("base64");
   try {
     f.store.heartbeatRuntime(f.runtime.id, { supportsFeishuBotConfig: true });
-    const config = f.store.upsertFeishuBotConfig("local", { agentId: f.agent.id, runtimeId: f.runtime.id,
+    const config = f.store.upsertFeishuBotConfig("local", { senderAccessPolicy: "agent", agentId: f.agent.id, runtimeId: f.runtime.id,
       enabled: true, appId: "cli_log_reader", appSecretOp: "set", appSecret: "test-secret", domain: "feishu" });
     f.store.reportFeishuBotRuntimeStatus("local", f.runtime.id, { state: "online", appliedRevision: config.revision });
     const submit = (senderOpenId: string, externalMessageId: string, text: string) => f.store.submitFeishuBotMessage("local", f.runtime.id, {

@@ -466,6 +466,7 @@ function normalizeGitHubPull(pull: Record<string, unknown>): Record<string, unkn
     url: nullableString(pull.html_url),
     source_branch: stringValue(head.ref),
     target_branch: stringValue(base.ref),
+    base_repository_full_name: stringAt(record(base.repo), "full_name").toLowerCase() || null,
     head_sha: stringAt(head, "sha"),
     base_sha: stringAt(base, "sha"),
     base_repository_full_name: stringAt(record(base.repo), "full_name").toLowerCase() || null,

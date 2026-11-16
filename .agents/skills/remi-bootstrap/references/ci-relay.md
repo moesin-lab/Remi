@@ -1,6 +1,21 @@
-# CI 转达
+# CI 检查结果
 
-Agent 的任务环境里 `gh` 可能是同名的另一个工具，GitHub API 也会限流，所以它们通常看不到 PR 的检查结果，曾经在 CI 红的情况下把单子验收为 done。由协调者代查并转达。
+## 先让负责的 Agent 自己查
+
+平台提供只读命令，任务凭据下可用：
+
+```bash
+remi scm change-request checks <仓库 ID> <PR 编号> --output json
+```
+
+- 仓库参数目前只接受平台内部 ID（`repo_…`，`remi repo list` 可查），`owner/name` 会报找不到绑定（MUL-58）。
+- 只看 JSON 输出：默认表格输出目前只有一行空值（MUL-58）。
+- 先核对 `summary.headSha` 等于要验收的最终 SHA，再看各项 `status` / `conclusion`。
+- 要用与 daemon 同版本的 `remi`。任务 PATH 上的旧版本 CLI 可能没有这条命令，只会打印 `remi scm` 的帮助（MUL-26）。
+
+结论规则与合并规则相同：queued、in_progress、缺失都不算通过；runner 容量导致的取消要引用 "The job was not acquired by Runner" 注解作证据；已建单的 flaky 要写单号和日志行。检查通过不等于可以合并。
+
+下文是协调者用 `gh` 核对或代查的方法，在 Agent 查不了（命令不可用、被限流、需要读失败日志）时使用。
 
 ## 查
 

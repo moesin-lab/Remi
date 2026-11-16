@@ -16,7 +16,7 @@ description: 用 Remi 自己的 Agent 持续改进并重新部署 Remi（自举�
 1. **建单**：每个缺陷一张单，写现象、证据、影响、验收；属于路线图的挂在路线图父单下。协调 Agent（如天工）负责建单和派发，你负责把它看不到的证据（CI、线上状态）转给它。
 2. **实现**：派给开发 Agent（如码匠），在独立 worktree 和 `agent/<KEY>` 分支上开 PR。
 3. **审阅**：由独立审阅 Agent（如审尺）对**最终 SHA** 给出 approve / request changes。改动后 SHA 变了，结论作废，要重审。
-4. **CI 转达**：Agent 在任务环境里读不到 GitHub 检查。由你用 `gh` 查结果、读失败注解，按会话发给负责的 Agent。见 [CI 转达](references/ci-relay.md)。
+4. **CI 核对**：负责的 Agent 用 `remi scm change-request checks` 自己核对最终 SHA 的检查；查不了或需要读失败日志时，由你用 `gh` 查，再按会话转给它。见 [CI 检查结果](references/ci-relay.md)。
 5. **合并**：满足合并规则就 squash 合并，见下文。
 6. **部署与验证**：把 `main` 部署到自用实例的平台和 daemon，验证版本、健康和真实轮次，再把发现的问题回到第 1 步。见 [自用实例部署](references/deploy-stable.md)。
 

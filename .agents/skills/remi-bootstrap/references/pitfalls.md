@@ -17,3 +17,5 @@
 | 附件上传报 `EACCES … /srv/multiremi/uploads/local` | 线上 API 的上传目录权限 | Agent 改为把证据写进消息或 PR 描述；建单修复 |
 | `remi … --json \| jq` 报 Unfinished JSON | 大输出在管道里被截断 | 先重定向到文件再读 |
 | 脚本里的 `remi` 连到了别的服务器 | 交互 shell 的 `remi` 是带 `MULTIREMI_CONFIG` 的函数 | 脚本里显式 export 该变量 |
+| Agent 的提交改了 `.github/workflows/`，推送被拒 | Agent 的令牌没有 `workflow` 权限（有意保留） | 维护者核对 workflow 改动（权限、令牌用途、触发条件）后用自己的凭据推送原提交，在 PR 描述里注明；不要给 Agent 扩权 |
+| 中断的会话恢复后要确认真的好了 | 修复部署后旧会话可能仍有残留状态 | 看修复后该会话的第一个新轮次是否 completed，确认后再关闭缺陷单 |

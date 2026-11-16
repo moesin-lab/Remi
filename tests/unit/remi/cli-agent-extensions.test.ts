@@ -62,6 +62,7 @@ describe("agent extension CLI contracts", () => {
 
   for (const [status, message] of [
     [429, "GitHub rate limit exceeded. Resets at 2027-01-15T08:00:00.000Z. Configure GITHUB_TOKEN on the API server."],
+    [504, "Skill import upstream request timed out (10000 ms) at api.github.com (resolve ref; connect)"],
     [502, "GitHub import: failed to download demo/references/guide.md: HTTP 404"],
   ] as const) {
     it(`surfaces skill import failure details (${status})`, async () => {

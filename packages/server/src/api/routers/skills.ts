@@ -23,6 +23,7 @@ import {
 } from "../wire/index.js";
 import {
   buildImportedSkillInput,
+  SkillImportError,
 } from "@daemon/agent-runtime/skills/skill-import.js";
 import type {
   CreateSkillInput,
@@ -87,7 +88,8 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const request = withSkillImportRequestContext(c, store, body);
     if (request instanceof Response) return request;
-    const imported = await buildImportedSkillInput(request);
+    const imported = await buildImportedSkillInput(request, { signal: c.req.raw.signal });
+    if (c.req.raw.signal.aborted) throw new SkillImportError("Skill import cancelled before saving", 408);
     const input = withSkillCreateRequestContext(c, store, imported.skillInput);
     if (input instanceof Response) return input;
     try {
@@ -184,7 +186,8 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const request = withSkillImportRequestContext(c, store, body);
     if (request instanceof Response) return request;
-    const imported = await buildImportedSkillInput(request);
+    const imported = await buildImportedSkillInput(request, { signal: c.req.raw.signal });
+    if (c.req.raw.signal.aborted) throw new SkillImportError("Skill import cancelled before saving", 408);
     const input = withSkillCreateRequestContext(c, store, imported.skillInput);
     if (input instanceof Response) return input;
     try {

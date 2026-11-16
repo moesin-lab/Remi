@@ -363,12 +363,11 @@ export class FeishuBotRepo {
       FROM multiremi_feishu_bot_senders s
       WHERE s.workspace_id = ? AND s.bot_id = ? AND s.app_id = ?
         AND s.open_id IS NOT NULL
-        AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_deliveries d WHERE d.sender_id = s.id)
         AND (s.profile_checked_at IS NULL OR s.profile_checked_at < ?)
       ORDER BY s.profile_checked_at ASC, s.last_seen_at DESC, s.id ASC LIMIT 10`
     ).all(workspaceId, this.botId, config.appId, before) as Row[];
-    return rows.flatMap(row => row.message_id ? [{ id: String(row.id), appId: String(row.app_id),
-      openId: String(row.open_id), messageId: String(row.message_id) }] : []);
+    return rows.map(row => ({ id: String(row.id), appId: String(row.app_id),
+      openId: String(row.open_id), messageId: nullableString(row.message_id) }));
   }
 
   updateSenderProfile(workspaceId: string, appId: string, senderId: string,
@@ -625,7 +624,7 @@ export class FeishuBotRepo {
       const human=this.ctx.workspaces().getWorkspaceMember(responsibleMemberId);
       if(!human||human.archivedAt||human.workspaceId!==workspaceId)throw new FeishuBotConfigError('responsible_member_id must name an active human in this workspace',400,'invalid_config');
     }
-    const senderAccessPolicy = input.senderAccessPolicy ?? existing?.sender_access_policy ?? "agent";
+    const senderAccessPolicy = input.senderAccessPolicy ?? existing?.sender_access_policy ?? "allowlist";
     if (senderAccessPolicy !== "agent" && senderAccessPolicy !== "allowlist") {
       throw new FeishuBotConfigError("sender_access_policy must be agent or allowlist", 400, "invalid_sender_access_policy");
     }
@@ -1013,7 +1012,7 @@ export class FeishuBotRepo {
     const submitChanges: import("./tasks-repo.js").ChildStatusChangeCollector = [];
     const submitEvents = createCommitEventQueue();
 
-    const result = this.ctx.db.transaction((): SubmitFeishuBotMessageResult => {
+    const result = this.ctx.db.transaction((): SubmitFeishuBotMessageResult | null => {
       // Global lock order (MUL-405): W then N, before any domain row lock.
       // Whether this message auto-creates an Issue is only known after the
       // sender is resolved, and resolving it writes the sender row (D). The
@@ -1023,6 +1022,8 @@ export class FeishuBotRepo {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       advisoryXactLock(this.ctx.db, numberAllocationLockKey(`issue:${workspaceId}`));
       const sender = this.resolveSender(workspaceId, config.appId, input, config.senderAccessPolicy);
+      // Commit the sender record so an admin can approve it, but start no Chat or Task.
+      if (!sender.allowed) return null;
       let binding = this.ctx.db.query(
         `SELECT * FROM multiremi_feishu_bot_chat_bindings
           WHERE workspace_id = ? AND bot_id = ? AND app_id = ? AND agent_id = ? AND external_session_key = ?`,
@@ -1253,6 +1254,10 @@ export class FeishuBotRepo {
         senderAllowed: sender.allowed,
       };
     })();
+    if (!result) {
+      // Not 403: the daemon client treats 401/403/410 as revoked runtime authority.
+      throw new FeishuBotConfigError("sender is not on this bot's allowlist", 409, "sender_not_allowed");
+    }
     if (enqueuedTask) this.ctx.notifyTaskEnqueued(enqueuedTask);
     this.ctx.tasks().runCollectedChildStatusChanges(submitChanges);
     this.ctx.emitCommitEvents(submitEvents);
@@ -3892,8 +3897,8 @@ export class FeishuBotRepo {
       "The Agent's own permissions and approval requirements still apply. The API checks the bot's current access policy; do not infer a pending approval from earlier conversation history.",
     ].join("\n") : [
       "Source: Feishu personal bot",
-      "The space owner manages account access in IM platforms > Feishu > Access control > Feishu account allowlist.",
-      "Approval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
+      "Only allowlisted Feishu accounts can use this bot. The space owner manages access in IM platforms > Feishu > Access control > Feishu account allowlist.",
+      "Issue creation re-checks every source account of this Chat; retry after the owner updates the allowlist.",
     ].join("\n");
     return { id: account?.id ?? null, allowed: accessPolicy === "agent" || (account?.allowed ?? false), displayName, actorId, profileDescription };
   }
@@ -4624,7 +4629,7 @@ function mapConfig(row: Row): MultiremiFeishuBotConfig {
     appId: String(row.app_id ?? ""),
     domain: normalizeDomain(row.domain),
     enabled: Boolean(Number(row.enabled ?? 0)),
-    senderAccessPolicy: row.sender_access_policy === "allowlist" ? "allowlist" : "agent",
+    senderAccessPolicy: row.sender_access_policy === "agent" ? "agent" : "allowlist",
     responsibleMemberId:nullableString(row.responsible_member_id),
     revision: Number(row.revision ?? 0),
     hasAppSecret: Boolean(nullableString(row.app_secret_encrypted)),

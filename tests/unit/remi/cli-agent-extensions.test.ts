@@ -60,6 +60,22 @@ describe("agent extension CLI contracts", () => {
     expect(seeded?.rawArgs).toEqual(["--provider", "codex"]);
   });
 
+  for (const [status, message] of [
+    [429, "GitHub rate limit exceeded. Resets at 2027-01-15T08:00:00.000Z. Configure GITHUB_TOKEN on the API server."],
+    [502, "GitHub import: failed to download demo/references/guide.md: HTTP 404"],
+  ] as const) {
+    it(`surfaces skill import failure details (${status})`, async () => {
+      useCliEnv();
+      const spec = specById("skill.import");
+      globalThis.fetch = capabilityFetch(spec.id, (request) => {
+        expect(new URL(request.url).pathname).toBe("/api/skills/import");
+        return Response.json({ error: message }, { status });
+      });
+      await expect(registryFor([spec]).execute(["skill", "import", "--url", "https://github.com/example/skills"]))
+        .rejects.toThrow(message);
+    });
+  }
+
   it("renders agent lists as table, JSON, and JSONL", async () => {
     useCliEnv();
     const spec = specById("agent.list");

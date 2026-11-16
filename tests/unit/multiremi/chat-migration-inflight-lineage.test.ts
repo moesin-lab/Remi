@@ -24,6 +24,8 @@ describe("drained Chat migration cannot restore private Issue lineage", () => {
         db!.run("UPDATE multiremi_tasks SET status='cancelled'");
         bootstrapPreUnifiedSchema(db!);
         const store = new MultiremiStore(db!);
+        // Explicitly use the legacy native test Runtime; endpoint readiness has separate coverage.
+        store.updateAgent("agt_chat_migration", { executionGroupId: null });
         expect(store.getTask("tsk_chat_migration_running")?.status).toBe("cancelled");
         expect(store.getChatSession("chat_web_migration")?.sessionId).toBeNull();
         expect(() => store.completeTask("tsk_chat_migration_running", { output: "stale", sessionId: "old_issue_provider" })).toThrow();
@@ -66,6 +68,8 @@ describe("drained Chat migration cannot restore private Issue lineage", () => {
     db!.run("UPDATE multiremi_tasks SET status = 'cancelled'");
     bootstrapPreUnifiedSchema(db!);
     const store = new MultiremiStore(db!);
+    // Explicitly use the legacy native test Runtime; endpoint readiness has separate coverage.
+    store.updateAgent("agt_chat_migration", { executionGroupId: null });
     expect(store.getFeishuIssueIdForChatSession("chat_group_migration")).toBe("iss_chat_migration");
     expect(store.getTask("old_A_wake")?.status).toBe("cancelled");
     expect(() => store.completeTask("tsk_topic_migration_queued", { output: "stale B work", sessionId: "old_A_provider" })).toThrow();

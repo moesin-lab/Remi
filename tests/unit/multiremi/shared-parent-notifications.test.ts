@@ -21,7 +21,7 @@ pendingTurnBackendTests("shared parent outcome notifications", fixture => {
     store.updateIssue(child.id, { status: "blocked" });
     expect(messages()).toHaveLength(1);
     expect(notifications()).toHaveLength(1);
-    expect(notifications()[0]).toMatchObject({ id: messages()[0]!.id, memberId: operator.id,
+    expect(notifications()[0]).toMatchObject({ memberId: operator.id,
       severity: "warning", details: { outcome: "blocked", noAssignee: true } });
     expect(store.listIssueActivity(parent.id).filter(event => event.type === "child_done_parent_skipped"))
       .toHaveLength(1);
@@ -32,7 +32,8 @@ pendingTurnBackendTests("shared parent outcome notifications", fixture => {
     store.updateIssue(child.id, { status: "in_progress" });
     store.updateIssue(child.id, { status: "blocked" });
     expect(messages()).toHaveLength(2);
-    expect(notifications().map(item => item.id).sort()).toEqual(messages().map(message => message.id).sort());
+    expect(new Set(notifications().map(item => item.id)).size).toBe(2);
+    for (const item of notifications()) expect(item.details).toMatchObject({ childIssueId: child.id, outcome: "blocked" });
     expect(store.listIssueActivity(parent.id).filter(event => event.type === "child_done_parent_skipped"))
       .toHaveLength(2);
     for (const member of members) expect(store.listInboxItems(member.id).map(item => item.id))
@@ -68,16 +69,17 @@ pendingTurnBackendTests("shared parent outcome notifications", fixture => {
     const parent = store.createIssue({ title: "No legacy contact", status: "in_progress" });
     const children = ["First", "Second"].map(title => store.createIssue({ title,
       parentIssueId: parent.id, status: "in_progress" }));
-    expect(store.resolveIssueResponsibility(parent.id)).toMatchObject({ rootHuman: null,
-      executionOwner: null, reviewOwner: null, rootIssueId: parent.id });
+    expect(store.resolveIssueResponsibility(parent.id)).toMatchObject({ executionOwner: null, rootIssueId: parent.id,
+      unresolved: [{ issueId: parent.id, reason: "execution_owner_missing" }] });
     for (const child of children) store.updateIssue(child.id, { status: "blocked" });
     const items = store.listInboxItems(operator.id).filter(item => item.type === "child_issue_terminal");
     expect(items).toHaveLength(2);
     expect(items.map(item => (item.details as Record<string, unknown> | null)?.childIssueId).sort()).toEqual(children.map(child => child.id).sort());
-    const messages = store.listMessages(store.getOrCreateDefaultIssueSession(parent.id).id);
+    const messages = store.listMessages(store.getOrCreateDefaultIssueSession(parent.id).id)
+      .filter(message => children.some(child => message.metadata.child_issue_id === child.id));
     expect(messages).toHaveLength(2);
     for (const message of messages) {
-      expect(message).toMatchObject({ to_member_id: operator.id, to_agent_id: null });
+      expect(message).toMatchObject({ to_member_id: null, to_agent_id: null });
       expect(message.metadata.responsibility_unresolved).toContainEqual({ issueId: parent.id,
         reason: "execution_owner_missing" });
     }

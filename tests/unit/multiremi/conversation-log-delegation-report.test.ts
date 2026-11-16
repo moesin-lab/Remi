@@ -161,6 +161,98 @@ for (const backend of backendsInScope(import.meta.path, ["sqlite", "postgres"] a
       expect((await get(`/api/messages/${result.id}`, otherHeaders)).status).toBe(403);
       expect((await get(`/api/sessions/${child.issueSessionId}/messages?thread=${result.id}`, otherHeaders)).status).toBe(403);
     }), backend === "postgres" ? 20_000 : 10_000);
+    for (const scenario of [
+      "different execution scope", "stale caller attempt", "running child turn",
+      "missing delegator", "missing delegation id", "missing platform report",
+      "report names another message", "nested reply", "caller owner workspace mismatch",
+      "target owner workspace mismatch",
+    ] as const) {
+      it(`MUL-61 rejects ${scenario} through both result read endpoints`, async () => withStore(backend, async store => {
+        const f = fixture(store);
+        const child = await dispatch(store, f.leaderTask, f.child, f.worker.id);
+        expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
+        store.startTask(f.leaderTask.id);
+        expect(store.claimTask(f.workerRuntime.id)?.id).toBe(child.id);
+        store.startTask(child.id);
+        const result = store.createIssueComment(f.child.id, {
+          authorType: "agent", authorId: f.worker.id, taskId: child.id,
+          issueSessionId: child.issueSessionId, body: "Full delegated result",
+        });
+        store.completeTask(child.id, { output: result.body });
+        const report = reportEnvelope(store, f.leaderSession.id, child.id);
+        const callerTurn = store.getTurnForAttempt(f.leaderTask.id)!;
+        const childTurn = store.getTurnForAttempt(child.id)!;
+        const token = await store.createTaskAccessToken(f.leaderTask, "local");
+        const app = createMultiremiApp({ store, authToken: "test-root" });
+        const get = (path: string) => app.request(path, { headers: { Authorization: `Bearer ${token.token}` } });
+        const paths = (id: string) => [`/api/messages/${id}`,
+          `/api/sessions/${child.issueSessionId}/messages?thread=${id}`];
+        // Each isolated fixture must first demonstrate a valid grant at both endpoints.
+        for (const path of paths(result.id)) expect((await get(path)).status, path).toBe(200);
+        const db = rawDb(store);
+        let deniedId = result.id;
+        // Persist malformed/stale evidence directly: production writers intentionally
+        // prevent these states. No production guard or Store method is replaced.
+        switch (scenario) {
+          case "different execution scope": {
+            const metadata = { ...store.getMessage(report.id)!.metadata, execution_scope: "another-scope" };
+            db.run("UPDATE multiremi_conversation_log SET metadata=? WHERE id=?", [JSON.stringify(metadata), report.id]);
+            expect(store.getTurn(callerTurn.id)).toMatchObject({ session_id: f.leaderSession.id, agent_id: f.leader.id,
+              execution_scope: callerTurn.execution_scope });
+            break;
+          }
+          case "stale caller attempt":
+            db.run("UPDATE multiremi_turns SET current_attempt_id=NULL WHERE id=?", [callerTurn.id]);
+            break;
+          case "running child turn":
+            db.run("UPDATE multiremi_turns SET status='running' WHERE id=?", [childTurn.id]);
+            break;
+          case "missing delegator":
+            db.run("UPDATE multiremi_turns SET delegated_by_agent_id=NULL WHERE id=?", [childTurn.id]);
+            break;
+          case "missing delegation id":
+            db.run("UPDATE multiremi_turns SET delegation_id=NULL WHERE id=?", [childTurn.id]);
+            break;
+          case "missing platform report":
+            db.run("DELETE FROM multiremi_conversation_log WHERE id=?", [report.id]);
+            break;
+          case "report names another message": {
+            const other = store.sendMessage({ session_id: child.issueSessionId!, sender: { type: "agent", id: f.worker.id },
+              to: { type: "none" }, message_kind: "status", wake_requested: "inbox_only", body_md: "Other child message" }).message;
+            const metadata = { ...store.getMessage(report.id)!.metadata,
+              message_source: { ...(report.metadata.message_source as object), commentId: other.id } };
+            db.run("UPDATE multiremi_conversation_log SET metadata=? WHERE id=?", [JSON.stringify(metadata), report.id]);
+            break;
+          }
+          case "nested reply": {
+            const reply = (parentId: string) => store.sendMessage({ session_id: child.issueSessionId!,
+              sender: { type: "agent", id: f.worker.id }, to: { type: "none" }, message_kind: "reply",
+              wake_requested: "inbox_only", reply_to_id: parentId, body_md: "Reply evidence" }).message;
+            const direct = reply(result.id);
+            for (const path of paths(direct.id)) expect((await get(path)).status, path).toBe(200);
+            deniedId = reply(direct.id).id;
+            break;
+          }
+          case "caller owner workspace mismatch":
+          case "target owner workspace mismatch": {
+            const issue = scenario === "caller owner workspace mismatch" ? f.parent : f.child;
+            const otherWorkspace = store.createWorkspace({ name: "Other owner", slug: "other-owner" });
+            db.run("UPDATE multiremi_issues SET workspace_id=? WHERE id=?", [otherWorkspace.id, issue.id]);
+            const sessionId = scenario === "caller owner workspace mismatch" ? f.leaderSession.id : child.issueSessionId!;
+            expect(store.getIssueSessionWithOwnerScope(sessionId)!.session.workspaceId).toBe("local");
+            expect(store.getIssueSessionWithOwnerScope(sessionId)!.ownerWorkspaceId).not.toBe("local");
+            break;
+          }
+        }
+        // Stale attempts are rejected by authentication before reaching the route;
+        // also pin the Store guard independently without replacing authentication.
+        expect(store.canReadDelegationResult(f.leaderTask.id, deniedId)).toBe(
+          scenario === "caller owner workspace mismatch" || scenario === "target owner workspace mismatch");
+        const status = scenario === "stale caller attempt" ? 401
+          : scenario === "target owner workspace mismatch" ? 404 : 403;
+        for (const path of paths(deniedId)) expect((await get(path)).status, path).toBe(status);
+      }), backend === "postgres" ? 20_000 : 10_000);
+    }
     for (const [terminal, withComment] of [["completed", true], ["failed", false], ["cancelled", false]] as const) {
       it(`mirrors one ${terminal} report ${withComment ? "with" : "without"} a result comment at the event's seq`,
         async () => withStore(backend, async (store) => {

@@ -99,7 +99,7 @@ try {
       const version = JSON.parse(await readFile(join(source, 'package.json'), 'utf8')).version as string;
       const image = `${project}-${label}:test`, webImage = `${project}-${label}-web:test`;
       images.push(image, webImage);
-      await save(join(source, 'tests/integration/upgrade-harness/Dockerfile'), `FROM oven/bun:1.3.14\nWORKDIR /app\nCOPY . .\nRUN bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts\nRUN mkdir -p /isolated/home /isolated/tmp /isolated/state /isolated/locks /isolated/workspaces\nENV NODE_ENV=test\nCMD ["bun","tests/integration/upgrade-harness/api-entry.ts"]\n`);
+      await save(join(source, 'tests/integration/upgrade-harness/Dockerfile'), `FROM oven/bun:1.3.14\nWORKDIR /app\nCOPY . .\nRUN bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts\nRUN mkdir -p /isolated/home /isolated/tmp /isolated/state /isolated/locks /isolated/workspaces\nCMD ["bun","tests/integration/upgrade-harness/api-entry.ts"]\n`);
       // The test image has a single stable base recipe across refs; production Dockerfiles are not used as compatibility evidence.
       await cp(join(source, 'tests/integration/upgrade-harness/Dockerfile'), join(source, 'deploy/docker/Dockerfile.api'));
       await save(join(source, 'deploy/docker/api-entrypoint.sh'), '#!/bin/sh\nexec "$@"\n');
@@ -203,7 +203,17 @@ try {
         stdin: options.stdinFile ? Bun.file(options.stdinFile) : 'ignore',
         stdout: options.stdoutFile ? Bun.file(options.stdoutFile) : 'pipe', stderr: 'pipe' });
       const [stdout, stderr, exitCode] = await Promise.all([typeof child.stdout === 'number' ? Promise.resolve('') : new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-      if (exitCode) await log(`Updater ${cmd} ${argv[0]} failed: ${stderr.slice(-4000)}`);
+      // Preserve the real rehearsal's before/after schema observations even if recovery fails.
+      if (cmd === 'docker' && argv.at(-1)?.startsWith('SELECT table_schema||')) {
+        evidence.migration_shapes ??= [];
+        evidence.migration_shapes.push(stdout.trim().split('\n').filter(Boolean));
+        if (evidence.migration_shapes.length > 1) {
+          const after = new Set(evidence.migration_shapes.at(-1));
+          evidence.migration_columns_removed = evidence.migration_shapes[0].filter((column: string) => !after.has(column));
+          await log(`Migration rehearsal removed columns: ${JSON.stringify(evidence.migration_columns_removed)}`);
+        }
+      }
+      if (exitCode) await log(`Updater ${cmd} ${argv.join(' ')} failed: ${stderr.slice(-4000)}`);
       return { stdout, stderr, exitCode };
     } };
     const apiId = await compose(['ps', '-q', 'api']), webId = await compose(['ps', '-q', 'web']);
@@ -265,14 +275,16 @@ try {
         return state.activeOperation?.status === 'draining' && Number(state.activeOperation.progress?.drain?.active_tasks) > 0;
       });
     } finally { await releaseGate(); await updating; }
-    assert.equal((await request('status')).lastOperation?.status, 'succeeded');
+    evidence.platform_upgrade_status = await request('status');
+    assert.equal(evidence.platform_upgrade_status.lastOperation?.status, 'succeeded', JSON.stringify(evidence.platform_upgrade_status));
     assert.deepEqual(await control('/version'), { version: manifest.version, sha: candidateSha });
     const platformAttempts = await assertCompleted(task);
     assert.equal(platformAttempts.length, 1, 'Platform drain unexpectedly interrupted ACP');
     assert.equal(await compose(['ps', '-q', 'daemon']), daemonBefore);
     evidence.scenarios.push({ kind: 'platform-upgrade', operation_id: operation.id, version: manifest.version, source_sha: candidateSha, attempts: platformAttempts, drain_observed: true });
     await queue({ kind: 'rollback', targetVersion: previous.version, targetRef: previous.ref }); await worker.tick();
-    assert.equal((await request('status')).lastOperation?.status, 'rolled_back');
+    evidence.platform_rollback_status = await request('status');
+    assert.equal(evidence.platform_rollback_status.lastOperation?.status, 'rolled_back', JSON.stringify(evidence.platform_rollback_status));
     assert.deepEqual(await control('/version'), { version: previous.version, sha: releaseSha });
     const rollbackTask = await heldTask(); await releaseGate(); const rollbackAttempts = await assertCompleted(rollbackTask);
     evidence.scenarios.push({ kind: 'platform-rollback', version: previous.version, source_sha: releaseSha, attempts: rollbackAttempts });

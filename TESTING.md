@@ -177,6 +177,7 @@ Linux 上从仓库根目录运行（Bun 1.3.14、Git、Docker Engine + Compose v
 
 ```bash
 bun run tests/integration/upgrade-harness.ts --release-ref=v0.2.90 --output=/tmp/remi-upgrade-evidence
+bun run tests/integration/upgrade-harness/daemon-upgrade.ts --release-ref=v0.2.90 --output=/tmp/remi-daemon-evidence
 bun run tests/integration/upgrade-harness.ts --self-check-only --output=/tmp/remi-isolation-evidence
 ```
 
@@ -184,10 +185,12 @@ bun run tests/integration/upgrade-harness.ts --self-check-only --output=/tmp/rem
 
 每次运行创建临时 HOME、REMI_HOME、MULTIREMI_STATE_DIR、MULTIREMI_TEST_RUN_ROOT、随机 Compose project 和命名卷。API/Web 的宿主端口仅绑定 loopback、动态分配并拒绝 6131–6134；daemon 在专属容器网络内显式使用 19131，不暴露宿主端口。子进程环境使用允许列表，清除模型凭据、SSH agent 和 systemd/会话环境；不挂载真实 HOME、SSH 或线上状态。真实 updater 只接收该 project 的 Compose 路径，迁移演练另起无外网临时 PostgreSQL。
 
-`isolation.json` 包含线上 daemon PID + kernel starttime、6131–6134 socket inode 与所属进程、状态目录身份、静态配置 SHA-256、supervisor owner 租约指纹的前后比较。不会比较线上活动目录内容。`production_instance=absent` 与检测到线上实例的结果分别记录。权限不足时 `fully_observed=false` 并非零退出，不把“看不到”写成“未变化”。Docker 缺失/无权限也必须失败退出，并保留前后快照；`--self-check-only` 只观测不启动容器。JSON 中的 `ok` 表示本次选定模式通过，不能把 self-check 当成全流程通过。
+`isolation.json` 包含线上 daemon PID + kernel starttime、6131–6134 socket inode 与所属进程、状态目录身份、静态配置 SHA-256、supervisor owner 租约指纹的前后比较。不会比较线上活动目录内容。`production_instance=absent` 与检测到线上实例的结果分别记录。没有受保护监听端口时不扫描进程 fd；cmdline 不可读时用内核 comm 排除无关 helper，Bun/Node/Remi 等可能承载 daemon 的进程仍要求可观测。受保护监听者未识别或相关进程权限不足时 `fully_observed=false` 并非零退出，不把“看不到”写成“未变化”。Docker 缺失/无权限也必须失败退出，并保留前后快照；`--self-check-only` 只观测不启动容器。JSON 中的 `ok` 表示本次选定模式通过，不能把 self-check 当成全流程通过。
 
 假 ACP 的 `hold: "control"` 在工具运行中输出 `control_waiting`，直到 `FAKE_STEER_CONTROL` 文件存在才完成，不用固定 sleep 猜测切换时机。既有脚本计划继续支持权限请求、后台帧和 `session/load`/`session/resume`。
 
 两条演练固化不同的当前行为：daemon 容器内进程被强制替换时，直接检查数据库 attempt 为 `lost(runtime_recovery)`，随后出现新的 `completed` attempt；升级和回滚均断言结果与源码版本。平台使用真实 `PlatformUpdateWorker` / `ContainerApplicationDriver`，观测在途 ACP 的 drain，完成任务后切到候选应用并执行代码回滚，daemon 容器保持原身份。平台正常 drain 不应制造 lost。daemon 的基线断言集中在 `assertLostThenCompleted`，供 MUL-28/31 显式调整；当前不覆盖 systemd 重启、CLI 自更新安装器或生产发布制品。测试应用跨 ref 使用相同的测试镜像基础配方，迁移与代码回滚兼容性仍由真实 updater 的隔离迁移演练校验，不能代替正式发布的兼容性审阅。
 
-`.github/workflows/upgrade-harness.yml` 的 Linux job 跑全流程，始终上传 `isolation.json`、`run.log` 与容器日志。脚本退出时清理自己的容器/卷/镜像并检查 project label 下没有残留容器。在线上 daemon 承载的任务中跑全流程仍要求任务沙箱同时允许 Docker 和读取所保护进程的 `/proc`；CI 上没有线上实例的成功不能替代这一条验收证据。
+不依赖 Docker 的 `daemon-upgrade.ts` 从显式 release ref 和 candidate HEAD 导出源码、安装锁定依赖，在独立进程中分别运行 daemon；同一个临时 SQLite API 保留任务状态，工具 gate 期间切换版本并回滚，记录实际 heartbeat cli_version 和 lost → completed。该路径也由全流程入口首先执行，因此纳入同一个 CI job。
+
+`.github/workflows/upgrade-harness.yml` 的 Linux job 跑全流程，始终上传 `isolation.json`、`run.log` 与容器日志。脚本退出时清理自己的容器/卷/镜像并检查 project label 下没有残留容器。任务沙箱不开放 Docker：平台全流程只在 Linux CI 跑，本机跑 Docker-free daemon 演练与隔离自检。沙箱无法读取所保护进程的 `/proc` 时，保留 `fully_observed=false`，只作为部分证据；CI 上没有线上实例的成功不能替代同机完整观测。

@@ -43,6 +43,11 @@ function owners(root: string) {
     return [{ ...fingerprint(path), pid: owner.pid, process_start_id: owner.process_start_id, released: owner.released }];
   });
 }
+// A denied cmdline is ambiguous for executables capable of hosting the daemon.
+// Kernel comm is independent of cmdline access (e.g. nondumpable CI helpers).
+export function mayHostDaemon(comm: string): boolean {
+  return !comm.trim() || /remi|bun|node/i.test(comm);
+}
 export function snapshotProduction() {
   if (process.platform !== 'linux') throw new Error('Isolation observation requires Linux /proc');
   const home = homedir(), accountHome = userInfo().homedir;
@@ -63,9 +68,18 @@ export function snapshotProduction() {
     try {
       const pid = Number(entry);
       if (statSync(`/proc/${pid}`).uid !== process.getuid!()) continue;
-      const cmd = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+      let cmd: string[];
+      try { cmd = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0'); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EACCES') throw error;
+        const comm = readFileSync(`/proc/${pid}/comm`, 'utf8');
+        if (mayHostDaemon(comm)) observationErrors.push(`Cannot inspect daemon-capable pid ${pid} (${comm.trim()})`);
+        cmd = [];
+      }
       if (cmd.some(part => /(?:^|\/)remi(?:$|\.ts$)|multiremi/.test(part)) && cmd.includes('daemon')) daemons.push(processIdentity(pid));
-      for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+      // Unrelated same-user CI helpers may deny fd reads. Only inspect fds when
+      // there are protected listeners whose ownership must be established.
+      for (const fd of sockets.length ? readdirSync(`/proc/${pid}/fd`) : []) {
         let target: string;
         try { target = readlinkSync(`/proc/${pid}/fd/${fd}`); } catch (error) { if (missing(error)) continue; if ((error as NodeJS.ErrnoException).code === 'EACCES') { observationErrors.push(`Cannot inspect fd of pid ${pid}`); break; } throw error; }
         const socket = sockets.find(s => target === `socket:[${s.inode}]`);

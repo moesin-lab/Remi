@@ -1,5 +1,6 @@
 /** MUL-27: disposable Linux full stack. No model credentials, host mounts or services. */
 import assert from 'node:assert/strict';
+import { runDaemonUpgrade } from './upgrade-harness/daemon-upgrade.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -74,7 +75,8 @@ try {
   before = snapshotProduction();
   evidence.before = before;
   if (!selfCheckOnly) {
-    // Check Docker before builds, but always execute the observation finally block.
+    evidence.docker_free_daemon = await runDaemonUpgrade(releaseRef!, output);
+    // Always execute the observation finally block, including Docker failures.
     const dockerVersion = await docker(['version', '--format', '{{.Server.Version}}']);
     assert(/^\d+\.\d+/.test(dockerVersion), 'Docker server unavailable (no server version; check socket permissions)');
     await docker(['compose', 'version']);

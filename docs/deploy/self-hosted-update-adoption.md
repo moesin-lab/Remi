@@ -148,8 +148,9 @@ SHA256 在 installer 中用于内容寻址，不能当作已与远端可信摘�
 
 交互 PATH 把 `$HOME/.local/bin` 放到旧 CLI 之前，`hash -r` 后用 `command -v remi` 和
 `remi --version` 验证。daemon 必须保留同一 BIN_DIR/INSTALL_ROOT，避免 runtime 更新装到别处。
-**后续不要执行 `remi daemon service install`**：当前 installer 使用 process.execPath，会将 unit
-重新指向版本二进制，此缺口另单修复。本次维护之后的普通更新不得再手工编辑 unit/Compose。
+**MUL-38 / PR #39 合入并发布之前，不要执行 `remi daemon service install`**：当前 service installer
+使用 process.execPath，会将 unit 重新指向版本二进制。发布之后按 MUL-38 的稳定 launcher 识别语义执行，
+仍须核对实际 ExecStart。本次维护之后的普通更新不得再手工编辑 unit/Compose。
 
 runtime CLI 更新实际下载 `releases/latest/download/install-remi.sh`。必须等本 PR 修复进入
 已发布 release 后才通过该入口验收，否则旧脚本仍会覆盖 launcher。不要擅自指定未发布脚本

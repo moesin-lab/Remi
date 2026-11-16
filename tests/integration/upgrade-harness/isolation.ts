@@ -47,7 +47,7 @@ export function snapshotProduction() {
   if (process.platform !== 'linux') throw new Error('Isolation observation requires Linux /proc');
   const home = homedir(), accountHome = userInfo().homedir;
   const statePaths = [...new Set([process.env.MULTIREMI_STATE_DIR, join(home, '.multiremi'), join(accountHome, '.multiremi'), process.env.REMI_HOME, join(home, '.remi')].filter((s): s is string => Boolean(s)))].map(resolvePath => resolve(resolvePath));
-  const protectedFiles = [...new Set([join(home, '.remi/config.toml'), join(home, '.remi/config.json'), join(home, '.config/systemd/user/multiremi-daemon.service'), ...statePaths.flatMap(path => [join(path, 'config.json'), join(path, 'daemon.json')])])];
+  const protectedFiles = [...new Set([...(process.env.MULTIREMI_CONFIG ? [resolve(process.env.MULTIREMI_CONFIG)] : []), join(home, '.remi/config.toml'), join(home, '.remi/config.json'), join(home, '.remi/profiles/stable/multiremi.toml'), join(home, '.config/systemd/user/multiremi-daemon.service'), ...statePaths.flatMap(path => [join(path, 'config.json'), join(path, 'daemon.json')])])];
   const leaseRoots = [...new Set([home, accountHome])].map(path => join(path, '.multiremi/workspace-supervisors'));
   const sockets: Array<{ port: number; inode: string }> = [];
   for (const path of ['/proc/net/tcp', '/proc/net/tcp6']) {

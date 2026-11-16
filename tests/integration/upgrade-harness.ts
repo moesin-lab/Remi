@@ -33,7 +33,10 @@ const adminToken = randomUUID(), updaterToken = randomUUID();
 const evidence: Record<string, any> = { project, root, self_check_only: selfCheckOnly, scenarios: [] };
 let before: ReturnType<typeof snapshotProduction> | undefined;
 let failure: unknown;
-let dockerAvailable = false, composeStarted = false;
+let dockerAvailable = false, composeStarted = false, cleaning = false, interrupted = false;
+const running = new Set<ReturnType<typeof Bun.spawn>>();
+const onSignal = () => { interrupted = true; for (const child of running) child.kill('SIGTERM'); };
+process.once('SIGINT', onSignal); process.once('SIGTERM', onSignal);
 const images: string[] = [];
 const originalFetch = globalThis.fetch;
 const log = async (line: string) => {
@@ -42,8 +45,11 @@ const log = async (line: string) => {
   console.error(redacted);
 };
 async function command(cmd: string[], options: { cwd?: string; clean?: boolean } = {}) {
+  if (interrupted && !cleaning) throw new Error('Harness interrupted; cleaning isolated resources');
   const child = Bun.spawn(cmd, { cwd: options.cwd ?? repository, env: options.clean === false ? process.env : env, stdout: 'pipe', stderr: 'pipe' });
+  running.add(child);
   const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  running.delete(child);
   if (code !== 0) { await log(`${cmd[0]} ${cmd[1]} failed (${code}): ${stderr.slice(-8000)} ${stdout.slice(-2000)}`); throw new Error(`${cmd[0]} ${cmd[1]} exited ${code}`); }
   return stdout.trim();
 }
@@ -54,6 +60,7 @@ async function wait<T>(description: string, probe: () => Promise<T | false | nul
   const end = Date.now() + timeout;
   let last: unknown;
   while (Date.now() < end) {
+    if (interrupted) throw new Error('Harness interrupted');
     try { const result = await probe(); if (result) return result as T; } catch (error) { last = error; }
     await Bun.sleep(100);
   }
@@ -110,7 +117,7 @@ try {
     evidence.ports = { api: apiPort, control: controlPort, web: webPort, daemon: 19131 };
     const containerEnv = { ...isolatedEnv('/isolated'), PATH: '/usr/local/bin:/usr/bin:/bin',
       MULTIREMI_UPGRADE_HARNESS: '1', MULTIREMI_DATABASE_URL: 'postgresql://fixture@postgres:5432/fixture',
-      FIXTURE_ADMIN_TOKEN: adminToken, FIXTURE_UPDATER_TOKEN: updaterToken, HARNESS_SOURCE_SHA: releaseSha };
+      FIXTURE_ADMIN_TOKEN: adminToken, FIXTURE_UPDATER_TOKEN: updaterToken, HARNESS_SOURCE_SHA: releaseSha, MULTIREMI_VERSION: builds.release!.version };
     const model: any = { services: {
       postgres: { image: 'pgvector/pgvector:pg17', environment: { POSTGRES_HOST_AUTH_METHOD: 'trust', POSTGRES_USER: 'fixture', POSTGRES_DB: 'fixture' }, volumes: ['db:/var/lib/postgresql/data'], healthcheck: { test: ['CMD-SHELL', 'pg_isready -U fixture -d fixture'], interval: '1s', retries: 60 } },
       api: { image: builds.release!.image, init: true, environment: containerEnv, ports: [`127.0.0.1:${apiPort}:6120`, `127.0.0.1:${controlPort}:6121`], volumes: ['api-home:/isolated'], depends_on: { postgres: { condition: 'service_healthy' } } },
@@ -174,12 +181,14 @@ try {
       await compose(['kill', '-s', 'SIGKILL', 'daemon']);
       model.services.daemon.image = builds[label]!.image;
       model.services.daemon.environment.HARNESS_SOURCE_SHA = builds[label]!.sha;
+      model.services.daemon.environment.MULTIREMI_VERSION = builds[label]!.version;
       await save(composeFile, JSON.stringify(model));
       await compose(['up', '-d', '--no-deps', '--force-recreate', 'daemon']);
       await releaseGate();
       const attempts = await assertCompleted(task); assertLostThenCompleted(attempts);
       const actual = await compose(['exec', '-T', 'daemon', 'bun', '-p', 'require("./package.json").version']);
       assert.equal(actual, builds[label]!.version);
+      await wait('running daemon version', async () => (await control('/runtimes')).some((r: any) => r.metadata?.cli_version === actual || r.metadata?.version === actual));
       evidence.scenarios.push({ kind: `daemon-${label === 'candidate' ? 'upgrade' : 'rollback'}`, source_sha: builds[label]!.sha, version: actual, attempts });
       await inspectBoundary();
     }
@@ -268,6 +277,8 @@ try {
   }
 } catch (error) { failure = error; await log(error instanceof Error ? error.stack ?? error.message : String(error)); }
 finally {
+  cleaning = true;
+  if (interrupted) failure ??= new Error('Harness interrupted');
   globalThis.fetch = originalFetch;
   if (composeStarted) {
     try { await writeFile(join(output, 'compose.log'), await compose(['logs', '--no-color']).then(text => [adminToken, updaterToken, evidence.daemon_token].filter(Boolean).reduce((s, token) => s.replaceAll(token, '<redacted>'), text))); } catch {}

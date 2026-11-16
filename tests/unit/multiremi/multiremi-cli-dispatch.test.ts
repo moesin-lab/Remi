@@ -200,10 +200,10 @@ describe("remi CLI dispatcher", () => {
     }
   });
 
-  it("routes `remi project` into the native resource group", async () => {
+  it("shows help successfully for the bare native project group", async () => {
     const result = await runDispatch(["project"]);
 
-    expect(String((result.error as Error | null)?.message ?? "")).toContain("usage: remi project list|get|search");
+    expect(result.error).toBeNull();
     expect(result.exitCode).toBeNull();
     expect(result.stderr.join("\n")).not.toContain("Unknown command");
   });

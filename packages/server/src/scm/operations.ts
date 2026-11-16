@@ -139,7 +139,7 @@ function pullNumber(value: number): number {
 function summarize(checks: ScmCheckObservation[]): ScmCheckSummary["conclusion"] {
   if (!checks.length) return "missing";
   if (checks.some(check => ["failure", "error", "cancelled", "timed_out", "action_required", "stale", "startup_failure"].includes(check.conclusion ?? ""))) return "failure";
-  if (checks.some(check => check.status !== "completed" || check.conclusion !== "success")) return "pending";
+  if (checks.some(check => check.status !== "completed" || !["success", "skipped", "neutral"].includes(check.conclusion ?? ""))) return "pending";
   return "success";
 }
 

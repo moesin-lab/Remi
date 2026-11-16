@@ -7285,6 +7285,23 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "scm.change-request.checks": {
+      "command": "remi scm change-request checks",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.checks",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "scm.change-request.list": {
       "command": "remi scm change-request list",
       "aliases": [],
@@ -12819,6 +12836,9 @@
     },
     "GET /api/workspaces/:workspaceId/scm/events/:eventId": {
       "command": "scm.event.get"
+    },
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks": {
+      "command": "scm.change-request.checks"
     },
     "GET /api/workspaces/:workspaceId/system-model-endpoints": {
       "command": "workspace.system-model-endpoints.get"

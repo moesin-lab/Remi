@@ -1,14 +1,14 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 834,
+    "routeCount": 835,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 592,
+      "compat": 593,
       "root": 16
     },
-    "getRoutes": 363,
-    "getRoutesWithBody": 359,
+    "getRoutes": 364,
+    "getRoutesWithBody": 360,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
@@ -504,6 +504,7 @@
     "GET /api/workspaces/:workspaceId/scm/connections/:connectionId",
     "GET /api/workspaces/:workspaceId/scm/events",
     "GET /api/workspaces/:workspaceId/scm/events/:eventId",
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks",
     "GET /api/workspaces/:workspaceId/system-model-endpoints",
     "GET /auth/lark/url",
     "GET /favicon.ico",
@@ -1319,6 +1320,7 @@
     "GET /api/workspaces/:workspaceId/scm/connections/:connectionId",
     "GET /api/workspaces/:workspaceId/scm/events",
     "GET /api/workspaces/:workspaceId/scm/events/:eventId",
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks",
     "GET /api/workspaces/:workspaceId/system-model-endpoints",
     "GET /auth/lark/url",
     "GET /favicon.ico",
@@ -10819,6 +10821,17 @@
             "id": "scm.capabilities",
             "command": "remi scm capabilities",
             "capability": "scm.capabilities",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.change-request.checks",
+            "command": "remi scm change-request checks",
+            "capability": "scm.change-request.checks",
             "outputs": [
               "table",
               "json",
@@ -24272,6 +24285,15 @@
       "status": 404,
       "body": {
         "error": "SCM event not found"
+      }
+    },
+    {
+      "key": "get-sweep GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks",
+      "route": "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks",
+      "path": "/api/workspaces/local/scm/repositories/repo_snapshot/change-requests/42/checks",
+      "status": 404,
+      "body": {
+        "error": "SCM repository binding not found"
       }
     },
     {

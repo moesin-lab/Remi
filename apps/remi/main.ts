@@ -10,9 +10,16 @@
 import "@shared/db/sqlite-custom.js";
 
 import { dispatch } from "./cli/index.js";
+import { configureCliStdio, flushCliStdio } from "./cli/core/stdio.js";
 
-dispatch(process.argv.slice(2)).catch((e: Error) => {
-  if (e.message.startsWith("已移除：")) console.error(e.message);
-  else console.error("Fatal:", e.message);
-  process.exit(1);
-});
+configureCliStdio();
+try {
+  await dispatch(process.argv.slice(2));
+} catch (e) {
+  process.exitCode = 1;
+  const error = e instanceof Error ? e : new Error(String(e));
+  if (error.message.startsWith("已移除：")) console.error(error.message);
+  else console.error("Fatal:", error.message);
+} finally {
+  await flushCliStdio();
+}

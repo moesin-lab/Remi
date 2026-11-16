@@ -219,7 +219,8 @@ export async function dispatch(args: string[]): Promise<void> {
   if (!commandRegistry.resolve(args)) {
     console.error(`Unknown command: ${cmd}`);
     showHelp();
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   await commandRegistry.execute([cmd, ...cmdArgs], {

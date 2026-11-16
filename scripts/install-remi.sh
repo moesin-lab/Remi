@@ -167,7 +167,6 @@ install_binary() {
 build_launcher() {
   local current="$1" binary="$2" quoted line command index=-1 i=0
   local lines=() prefixes=() suffixes=()
-  local generated_pattern='^([[:space:]]*exec[[:space:]]+)(.*)([[:space:]]+"\$@")$'
   quoted="$(printf '%s' "$binary" | sed "s/'/'\\\\''/g")"
   if [[ "$binary" =~ ^[A-Za-z0-9_/:=.,@%+-]+$ ]]; then
     quoted="$binary"
@@ -176,23 +175,15 @@ build_launcher() {
   fi
   local exec_pattern
   IFS= read -r exec_pattern <<'PATTERN'
-^([[:space:]]*exec[[:space:]]+)("([^"]+)"|'([^']+)'|([^[:space:]]+))(.*)$
+^([[:space:]]*exec[[:space:]]+)("([^"]+)"|'(([^']|'\\'')+)'|([^[:space:]]+))(.*)$
 PATTERN
   if [ -f "$current" ] && [ "$(head -c 2 "$current")" = '#!' ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       lines[i]="$line"
       if [[ "$line" =~ $exec_pattern ]]; then
-        command="${BASH_REMATCH[3]:-${BASH_REMATCH[4]:-${BASH_REMATCH[5]}}}"
+        command="${BASH_REMATCH[3]:-${BASH_REMATCH[4]:-${BASH_REMATCH[6]}}}"
         if [ "${command##*/}" = remi ]; then
-          index=$i; prefixes[i]="${BASH_REMATCH[1]}"; suffixes[i]="${BASH_REMATCH[6]}"
-        fi
-      fi
-      # Our quoted paths can contain shell-escaped apostrophes. Recognize the
-      # generated launcher as well as update.ts's simple quoted exec grammar.
-      if [[ "$line" =~ $generated_pattern ]]; then
-        command="${BASH_REMATCH[2]}"
-        if [[ "$command" == \'*'/remi'\' ]]; then
-          index=$i; prefixes[i]="${BASH_REMATCH[1]}"; suffixes[i]="${BASH_REMATCH[3]}"
+          index=$i; prefixes[i]="${BASH_REMATCH[1]}"; suffixes[i]="${BASH_REMATCH[7]}"
         fi
       fi
       i=$((i + 1))

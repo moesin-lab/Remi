@@ -125,6 +125,17 @@ describe("Remi CLI updater", () => {
     expect(readFileSync(fixture.launcherPath, "utf8")).not.toContain(`/versions/${oldId}/remi`);
     expect(execFileSync(fixture.launcherPath, ["--version"], { encoding: "utf8" }).trim()).toBe("0.2.81");
     expect(existsSync(join(fixture.installRoot, "versions", oldId, "remi"))).toBe(true);
+    // Complete the reverse direction: the runtime installer must retain settings
+    // and fixed arguments emitted by the local updater, including escaped paths.
+    const beforeReinstall = readFileSync(fixture.launcherPath, "utf8");
+    const reinstalled = spawnSync("bash", [resolve("scripts/install-remi.sh")], { encoding: "utf8", env: {
+      ...process.env, PATH: `${mocks}:${process.env.PATH}`, MULTIREMI_VERSION: "0.2.81",
+      MULTIREMI_BIN_DIR: join(fixture.root, "bin"), MULTIREMI_INSTALL_ROOT: fixture.installRoot,
+      FIXTURE_ARCHIVE: join(fixture.root, "remi-0.2.81-darwin-arm64.tar.gz"), FIXTURE_EVENTS: fixture.events,
+    } });
+    expect(reinstalled.status).toBe(0);
+    expect(readFileSync(fixture.launcherPath, "utf8")).toBe(beforeReinstall);
+    expect(execFileSync(fixture.launcherPath, ["--version"], { encoding: "utf8" }).trim()).toBe("0.2.81");
   });
 
   test.each(["remi-cli-update-", "remi-cli-user's store-"])("installer and local updater emit identical generic launchers (%s)", async (prefix) => {

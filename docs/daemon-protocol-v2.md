@@ -478,6 +478,9 @@ A-2 用它进入 `upgrade_wait`（§7.3）而不是单纯停止重连。另外�
 **上行可靠帧：`seq` 就是 outbox 行 id。**`outbox_events.id` 是 AUTOINCREMENT，跨进程重启持久且
 单调，天然满足「每 daemon 会话、跨重启」的作用域。重放缓冲就是 outbox 本身：行未删即未确认。
 泵按 id 顺序单泵发送，滑动窗口取 64 帧或 1 MiB 先到者；服务端逐帧回 `res{re: seq}`，`ok` 即删行。
+已确认 v2 usage 的删行提交临时用 WAL `synchronous=NORMAL`，同步完成后立即恢复连接
+原级别；入队和其他报告的删行不变。断电后可能重放已确认 usage，服务端按 unit
+revision/receipt 幂等吸收；后续 FULL 提交仍同步此前 WAL 帧，维持至少一次投递。
 `ok:false` 且 `retryable:false` → 该分区（task 或 runtime）进入 blocked，与今天
 `isPermanentDeliveryError` 的语义一致。
 例外是 `task_not_found`：daemon 清掉整个分区并记 warn，任务已被删除，重放没有意义；

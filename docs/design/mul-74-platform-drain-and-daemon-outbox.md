@@ -85,6 +85,12 @@ local-profile 默认使用上述应用驱动和保留数据的回退。旧镜像
 数据的保证。更新流程先等待任务和本地执行归零，再切换服务。
 Windows 上保留重试定时器的事件循环引用，避免 Bun 1.3.14 的无引用定时器
 卡住终态回传；`close()` 仍会唤醒并清理重试，不阻塞正常关闭。
+入队保留 SQLite 连接原有的同步级别。仅对服务端已确认的 v2 usage，删除本地行时
+临时使用 WAL `synchronous=NORMAL`，同一段同步调用的 `finally` 恢复原级别；
+其他种类和旧 usage 的删除不切换。NORMAL 省去每次删除提交的同步，后续 FULL
+提交仍同步包含此前帧的 WAL。断电可能使这些已确认的删除丢失，恢复后重复回放
+由[usage 写入](../../packages/server/src/store/usage-accounting.ts)的 unit revision/receipt
+校验吸收，符合至少一次投递；没有降低尚未确认事实的入队持久性。
 
 ## 验证入口
 

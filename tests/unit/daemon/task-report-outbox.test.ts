@@ -41,24 +41,6 @@ function track(outbox: MultiremiTaskReportOutbox): MultiremiTaskReportOutbox {
   return outbox;
 }
 
-// Observe real SQLite calls on this test's private handle; no writes are mocked.
-// The target scenario performs each INSERT/ack DELETE in autocommit mode.
-function observeOutboxWrites(outbox: MultiremiTaskReportOutbox) {
-  const db = (outbox as unknown as { db: Database }).db;
-  const synchronous = (db.query("PRAGMA synchronous").get() as { synchronous: number }).synchronous;
-  const writes = { synchronous, insertCalls: 0, insertMs: 0, ackDeleteCalls: 0, ackDeleteMs: 0 };
-  const run = db.run.bind(db);
-  db.run = ((...args: Parameters<Database["run"]>) => {
-    const started = performance.now();
-    const result = run(...args);
-    const elapsedMs = performance.now() - started;
-    if (args[0].startsWith("INSERT INTO outbox_events")) { writes.insertCalls++; writes.insertMs += elapsedMs; }
-    if (args[0].startsWith("DELETE FROM outbox_events")) { writes.ackDeleteCalls++; writes.ackDeleteMs += elapsedMs; }
-    return result;
-  }) as Database["run"];
-  return writes;
-}
-
 function httpError(status: number, path = "/api/daemon/tasks/x"): MultiremiDaemonHttpError {
   return new MultiremiDaemonHttpError(status, "POST", path, "{}", null);
 }
@@ -132,7 +114,6 @@ describe("MultiremiTaskReportOutbox", () => {
   it("replays over 3000 request facts after an outage with bounded final chunks and delivers terminal last", async () => {
     const started = performance.now();
     let storeMs = 0;
-    const storeBuckets = Array.from({ length: 7 }, () => ({ calls: 0, elapsedMs: 0 }));
     const store = createLocalStore();
     const runtime = store.registerRuntime({ name: "long-usage", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "long-usage", provider: "claude", runtimeId: runtime.id, workspaceId: "local" });
@@ -140,7 +121,6 @@ describe("MultiremiTaskReportOutbox", () => {
     store.claimTask(runtime.id); store.startTask(task.id);
     const path = tempPath();
     const first = track(new MultiremiTaskReportOutbox({ path, canSend: () => false, deliver: async () => {} }));
-    const persistWrites = observeOutboxWrites(first);
     const units = Array.from({ length: 3500 }, (_, i) => ({ ...actualUnit({ unitId: `request-${i}`, provider: "claude", model: i % 2 ? "opus" : "haiku",
       scope: "request", source: "provider_request", inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0,
       totalTokens: 2, evidenceRef: "upstream_request" }), occurredAt: "2026-10-01T01:00:00.000Z" }));
@@ -151,7 +131,6 @@ describe("MultiremiTaskReportOutbox", () => {
     expect(first.stats().blocked).toBe(0);
     await first.close();
     const persisted = performance.now();
-    console.log("[outbox-replay-persisted]", JSON.stringify({ setupMs: initialized - started, persistMs: persisted - initialized, persistWrites }));
     const kinds: string[] = [];
     const reopened = track(new MultiremiTaskReportOutbox({ path, deliver: async record => {
       expect(outboxRecordBytes(record)).toBeLessThanOrEqual(DAEMON_FRAME_MAX_BYTES);
@@ -159,26 +138,59 @@ describe("MultiremiTaskReportOutbox", () => {
       if (record.kind === "usage") {
         const before = performance.now();
         store.reportTaskUsageSnapshot(task.id, record.payload.usageSnapshot as any);
-        const elapsedMs = performance.now() - before;
-        storeMs += elapsedMs;
-        const snapshot = record.payload.usageSnapshot as { revision: number };
-        if (snapshot.revision <= 3500) {
-          const bucket = storeBuckets[Math.floor((snapshot.revision - 1) / 500)]!;
-          bucket.calls++;
-          bucket.elapsedMs += elapsedMs;
-        }
+        storeMs += performance.now() - before;
       }
       else if (record.kind === "complete") store.completeTask(task.id, { output: "done" });
     } }));
-    const replayWrites = observeOutboxWrites(reopened);
     expect(await reopened.waitForTaskDrain(task.id)).toBe("delivered");
     expect(kinds.at(-1)).toBe("complete");
     expect(store.getTask(task.id)?.status).toBe("completed");
     const report = store.getUsageReport({ workspaceId: "local", days: null });
     expect(report.summary.actual_total_tokens).toBe(7000);
     expect(report.by_model.map(row => row.actual_total_tokens).sort()).toEqual([3500, 3500]);
-    console.log("[outbox-replay-timing]", JSON.stringify({ platform: process.platform, setupMs: initialized - started, persistMs: persisted - initialized, replayMs: performance.now() - persisted, storeMs, storeBuckets, persistWrites, replayWrites }));
+    console.log("[outbox-replay-timing]", JSON.stringify({ platform: process.platform, setupMs: initialized - started, persistMs: persisted - initialized, replayMs: performance.now() - persisted, storeMs }));
   }, 180_000);
+  it("restores enqueue durability after a failed v2 usage acknowledgement delete and keeps other deletes durable", async () => {
+    let online = false;
+    let usageDeliveries = 0;
+    const kinds: string[] = [];
+    const outbox = track(new MultiremiTaskReportOutbox({ path: tempPath(), canSend: () => online,
+      backoffScheduleMs: [1], deliver: async record => {
+        expect(mode()).toBe(originalMode);
+        const version = (record.payload.usageSnapshot as { version?: number } | undefined)?.version;
+        kinds.push(version === 2 ? "v2 usage" : record.kind);
+        if (version === 2 && ++usageDeliveries === 2) db.exec("DROP TRIGGER deny_usage_ack");
+      } }));
+    const db = (outbox as unknown as { db: Database }).db;
+    const mode = () => Number((db.query("PRAGMA synchronous").all()[0] as { synchronous: number }).synchronous);
+    const originalMode = mode();
+    expect(originalMode).toBeGreaterThan(1);
+    const insertModes: number[] = [];
+    const deleteModes: number[] = [];
+    const retryModes: number[] = [];
+    const run = db.run.bind(db);
+    db.run = ((...args: Parameters<Database["run"]>) => {
+      if (args[0].startsWith("INSERT INTO outbox_events")) insertModes.push(mode());
+      if (args[0].startsWith("DELETE FROM outbox_events")) deleteModes.push(mode());
+      if (args[0].startsWith("UPDATE outbox_events SET attempts")) retryModes.push(mode());
+      return run(...args);
+    }) as Database["run"];
+    db.exec(`CREATE TRIGGER deny_usage_ack BEFORE DELETE ON outbox_events
+      WHEN json_extract(OLD.payload, '$.usageSnapshot.version')=2
+      BEGIN SELECT RAISE(ABORT, 'injected acknowledgement delete failure'); END`);
+    outbox.enqueue("task", "usage", { usageSnapshot: { version: 2, runId: "run", revision: 1, complete: true, units: [] } });
+    outbox.enqueue("task", "usage", { usage: [] });
+    outbox.enqueue("task", "complete", { output: "done" });
+    online = true;
+    outbox.pumpAll();
+    expect(await outbox.waitForTaskDrain("task")).toBe("delivered");
+    expect(kinds).toEqual(["v2 usage", "v2 usage", "usage", "complete"]);
+    expect(insertModes).toEqual([originalMode, originalMode, originalMode]);
+    expect(deleteModes).toEqual([1, 1, originalMode, originalMode]);
+    expect(retryModes).toEqual([originalMode]);
+    expect(mode()).toBe(originalMode);
+    expect(outbox.stats().pending).toBe(0);
+  });
   it("keeps v2 usage through cancellation and restart without discarding deltas behind a complete marker", async () => {
     const path = tempPath();
     const first = track(new MultiremiTaskReportOutbox({ path, backoffScheduleMs: [60_000],

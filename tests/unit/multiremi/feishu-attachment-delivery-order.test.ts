@@ -23,7 +23,7 @@ function fixture() {
     store.registerRuntime({ id, name: id, provider: "codex", workspaceId: "local", daemonId: id });
     store.heartbeatRuntime(id, { supportsFeishuBotConfig: true });
   }
-  const config = store.upsertFeishuBotConfig("local", { agentId: agent.id, runtimeId: "rt_files", enabled: true,
+  const config = store.upsertFeishuBotConfig("local", { senderAccessPolicy: "agent", agentId: agent.id, runtimeId: "rt_files", enabled: true,
     appId: "cli_order", appSecretOp: "set", appSecret: "test-order-secret", domain: "feishu" });
   store.reportFeishuBotRuntimeStatus("local", "rt_files", { state: "online", appliedRevision: config.revision });
   const submitted = store.submitFeishuBotMessage("local", "rt_files", { revision: config.revision,

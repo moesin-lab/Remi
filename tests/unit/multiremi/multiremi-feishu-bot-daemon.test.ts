@@ -111,6 +111,7 @@ async function scaffold(responsibleMemberId?: string): Promise<Scaffold> {
       domain: "feishu",
       enabled: true,
       app_secret: APP_SECRET,
+      sender_access_policy: "agent",
       ...(responsibleMemberId ? { responsible_member_id: responsibleMemberId } : {}),
     }),
   });
@@ -509,7 +510,7 @@ describe("Feishu bot control-plane delivery", () => {
     expect(await snapshot.json()).toMatchObject({ status: "completed", result: "Completed on Claude" });
     // Reassigning the connector revokes the old transport's access immediately.
     test.store.heartbeatRuntime("rt_claude", { supportsFeishuBotConfig: true });
-    test.store.upsertFeishuBotConfig("local", { agentId: test.agentId, runtimeId: "rt_claude",
+    test.store.upsertFeishuBotConfig("local", { senderAccessPolicy: "agent", agentId: test.agentId, runtimeId: "rt_claude",
       appId: "cli_a1b2c3d4e5f6g7h8", appSecretOp: "keep", enabled: true, domain: "feishu" });
     expect((await test.app.request(`${taskPath}/status`, { headers: daemonHeaders(test.tokens.rt_a!) })).status).toBe(403);
   });

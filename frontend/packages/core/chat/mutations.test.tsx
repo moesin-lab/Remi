@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-quer
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatSession } from "../types";
 import { chatKeys, chatSessionsOptions } from "./queries";
-import { ApiError } from "../api/http";
+import { ApiError, HttpClient } from "../api/http";
 import type { ChatQueue, QueuedChatMessage } from "../api/schemas/chat-queue";
 import {
   useCreateChatSession, useDeleteChatSession, useDeleteQueuedChatMessage, useEnqueueChatMessage, useMarkChatSessionRead,
@@ -244,6 +244,25 @@ describe("chat follow-up queue mutations", () => {
     expect(mock.removeQueueOutboxItem).not.toHaveBeenCalled();
     expect(mock.putQueueOutboxItem).toHaveBeenLastCalledWith("chat-1", expect.objectContaining({ client_id: "client-1", state: "unconfirmed" }));
     expect(mock.enqueueChatMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains and reuses the queue identity when the precise proxy failure exhausts its wait budget", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response("Internal Server Error", { status: 500, headers: { "Retry-After": "600" } }));
+    vi.stubGlobal("fetch", fetch);
+    mock.enqueueChatMessage.mockImplementationOnce((_session, input) => new HttpClient("").fetch("/queue", {
+      method: "POST", body: JSON.stringify(input), retrySafe: true,
+    }));
+    try {
+      const { result } = renderHook(() => useEnqueueChatMessage(), { wrapper });
+      await act(async () => { await expect(result.current.mutateAsync(enqueueVars)).rejects.toBeInstanceOf(TypeError); });
+      expect(mock.removeQueueOutboxItem).not.toHaveBeenCalled();
+      expect(mock.putQueueOutboxItem).toHaveBeenLastCalledWith("chat-1", expect.objectContaining({
+        client_id: enqueueVars.client_id, body_md: enqueueVars.body_md, state: "unconfirmed",
+      }));
+      mock.enqueueChatMessage.mockResolvedValueOnce({ item: queued(), released: null });
+      await act(async () => { await result.current.mutateAsync(enqueueVars); });
+      expect(mock.enqueueChatMessage.mock.calls[0]![1].client_id).toBe(mock.enqueueChatMessage.mock.calls[1]![1].client_id);
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("does not write an unconfirmed row into the workspace the user switched to", async () => {

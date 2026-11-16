@@ -61,8 +61,8 @@ export interface ChatQueueEdit {
 
 /**
  * An enqueue the server has not answered yet. `unconfirmed` means it failed
- * without an HTTP status: the row may or may not exist, so it is never retried
- * automatically. Retrying with the same `client_id` is idempotent.
+ * after the bounded transport retries: the row may or may not exist. Manual
+ * retry keeps the same `client_id` and is idempotent.
  */
 export interface ChatQueueOutboxItem {
   client_id: string;

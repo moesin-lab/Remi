@@ -56,7 +56,7 @@ export class ChatQueueEndpoints {
       client_id: input.client_id,
     };
     const result = parseStrictResponse<EnqueueQueuedMessageResponse>(
-      await this.http.fetch<unknown>(path, { method: "POST", body: JSON.stringify(body) }),
+      await this.http.fetch<unknown>(path, { method: "POST", body: JSON.stringify(body), retrySafe: !!input.client_id }),
       EnqueueQueuedMessageResponseSchema, { endpoint: "POST /api/sessions/:id/queue" },
     );
     if (result.item.client_id !== input.client_id) throw new ApiContractError(path, "Server returned a different queued message");

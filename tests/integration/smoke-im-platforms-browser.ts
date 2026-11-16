@@ -162,10 +162,10 @@ try {
   await page.waitForURL(new RegExp(`/access\\?bot=${createdBot.bot_id}`));
   const scopedSave = await saveResponse("PUT", `${apiBase}/feishu-bot`, () => page!.getByRole("switch").click());
   assert.equal(scopedSave.bot_id, createdBot.bot_id);
-  assert.equal(scopedSave.sender_access_policy, "allowlist");
+  assert.equal(scopedSave.sender_access_policy, "agent");
   assert.equal(scopedSave.responsible_member_id, null);
   await selectBot("cli_im_updated");
-  await page.getByRole("heading", { name: "Bot capability access", exact: true }).waitFor();
+  await page.getByRole("heading", { name: "Feishu account allowlist", exact: true }).waitFor();
   check("bot selection persists between capability pages and isolates sender access policy");
 
   await page.goto(`${frontend}${base}/bot?bot=${createdBot.bot_id}`);
@@ -200,8 +200,9 @@ try {
 
   await navigate("access", "Access control");
   await saveResponse("PUT", `${apiBase}/feishu-bot`, () => page!.getByRole("switch").click());
-  await page.getByRole("heading", { name: "Feishu account allowlist" }).waitFor();
+  await page.getByRole("heading", { name: "Bot capability access" }).waitFor();
   await saveResponse("PUT", `${apiBase}/feishu-bot`, () => page!.getByRole("switch").click());
+  await page.getByRole("heading", { name: "Feishu account allowlist" }).waitFor();
   check("access policy switches between agent capabilities and sender allowlist");
 
   await navigate("conversations", "Chats & notifications");

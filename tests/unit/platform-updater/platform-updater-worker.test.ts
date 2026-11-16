@@ -1,3 +1,4 @@
+import { assertSchemaContract } from '@remi-platform/updater/schema-contract.js';
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { MultiremiPlatformOperation, MultiremiPlatformPreflight, ReportPlatformOperationInput } from "@multiremi/contracts";
 import type { PlatformUpdaterClient } from "@remi-platform/updater/client.js";
@@ -41,6 +42,15 @@ function fixture() {
 }
 
 describe("platform updater worker", () => {
+  it('reports schema_contract_refused and releases maintenance after verified recovery', async () => {
+    const f = fixture(); f.state.claim = f.operation;
+    f.driver.execute = async () => { assertSchemaContract(['public.old.id:text:text:NO'], [], { stage: 'target', currentVersion: '0.2.90', targetVersion: 'candidate' }); return null; };
+    await f.worker.tick();
+    expect(f.reports.at(-1)).toMatchObject({ status: 'failed', progress: { failure: { reason: 'schema_contract_refused' } } });
+    expect(f.state.released).toBe(1);
+    expect((await f.driver.inspect()).currentRelease?.version).toBe('1.0.0');
+  });
+
   it('reports source artifacts and blocks a new internal updater against an image-only source', async () => {
     const test = fixture();
     Object.assign(test.driver, { updateMode: 'internal_application' });

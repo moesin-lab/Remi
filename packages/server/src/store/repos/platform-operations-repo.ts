@@ -1,3 +1,4 @@
+import { isPlatformSchemaContractFailure } from '@multiremi/contracts/platform-failure';
 import { createId, nowIso } from "@multiremi/ids.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 import { parseJson, toJson } from "@multiremi/store/helpers.js";
@@ -571,6 +572,8 @@ function validateReceipt(receipt: PlatformOperationReceipt): void {
     || (report.error !== undefined && !nullableString(report.error))
     || typeof operation.cancelRequested !== "boolean"
     || !isRecord(operation.progress) || (report.progress !== undefined && !isRecord(report.progress))
+    || (isRecord(operation.progress) && "failure" in operation.progress && !isPlatformSchemaContractFailure(operation.progress.failure))
+    || (isRecord(report.progress) && "failure" in report.progress && !isPlatformSchemaContractFailure(report.progress.failure))
     || !operation.targetManifest || typeof operation.targetManifest !== "object" || Array.isArray(operation.targetManifest)
     || (operation.requestId != null && !/^[A-Za-z0-9._:-]{1,128}$/.test(operation.requestId))) {
     throw new PlatformOperationReceiptValidationError("invalid terminal operation receipt");

@@ -1,3 +1,5 @@
+import { assertSchemaContract, SchemaContractRefusedError } from '@remi-platform/updater/schema-contract.js';
+import type { PlatformSchemaContractFailure } from '@multiremi/contracts';
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -43,7 +45,7 @@ async function fixture() {
   }
   await writeJson(join(config.control, 'rehearsal/status.json'), { protocol: 1, isolated: true, heartbeatAt: Date.now() });
   const calls: string[] = [], events: string[] = [];
-  const state = { backupFails: false, rehearsalFails: false, healthFails: false };
+  const state = { backupFails: false, rehearsalFails: false, healthFails: false, failure: undefined as PlatformSchemaContractFailure | undefined };
   const driver = new InternalApplicationDriver(config, { async run(command, args, options) {
     calls.push(command);
     expect(options?.env?.PGPASSWORD).toBe('fixture-password');
@@ -74,7 +76,7 @@ async function fixture() {
         if (desired || probe) await writeJson(join(config.control, role, 'status.json'), { ...statuses[role], heartbeatAt: Date.now() });
       }
       const job = await readJson<any>(join(config.control, 'rehearsal/job.json'));
-      if (job) await writeJson(join(config.control, 'rehearsal/result.json'), { id: job.id, ok: !state.rehearsalFails, error: state.rehearsalFails ? 'Migration removed a column' : undefined });
+      if (job) await writeJson(join(config.control, 'rehearsal/result.json'), { id: job.id, ok: !state.rehearsalFails, error: state.rehearsalFails ? 'Migration removed a column' : undefined, failure: state.failure });
       await Bun.sleep(5);
     }
   })();
@@ -88,6 +90,18 @@ async function fixture() {
 }
 
 describe('socket-free internal application updates', () => {
+  it('preserves structured rehearsal refusal in the internal recovery journal', async () => {
+    const f = await fixture(); f.state.rehearsalFails = true;
+    try { assertSchemaContract(['public.old.id:text:text:NO'], [], { stage: 'previous', currentVersion: '1.0.0', targetVersion: '1.0.0' }); }
+    catch (error) { f.state.failure = (error as SchemaContractRefusedError).failure; }
+    await expect(f.driver.execute(f.operation, f.report, READY_GATE)).rejects.toBeInstanceOf(SchemaContractRefusedError);
+    expect((await f.driver.pendingFinalization())?.report.progress?.failure).toEqual(f.state.failure);
+    const restarted = new InternalApplicationDriver(f.config);
+    expect((await restarted.pendingFinalization())?.report.progress?.failure).toEqual(f.state.failure);
+    expect((await restarted.inspect()).currentRelease?.version).toBe('1.0.0');
+    await expect(restarted.execute(f.operation, f.report, READY_GATE)).rejects.toBeInstanceOf(SchemaContractRefusedError);
+  });
+
   it('accepts changed Bun/Node executables while requiring compatible native tools and libc', async () => {
     const f = await fixture();
     const next = structuredClone(f.manifest);

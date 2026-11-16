@@ -1,3 +1,4 @@
+import { assertSchemaContract, SchemaContractRefusedError } from '../../packages/platform-updater/src/schema-contract.js';
 // Runs in a dedicated network_mode:none container with read-only application
 // and backup volumes. No production DB URL or API credentials enter this image.
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
@@ -24,7 +25,7 @@ async function command(executable: string, args: string[], env: Record<string, s
   } finally { clearTimeout(timeout); }
 }
 const query = "SELECT table_schema||'.'||table_name||'.'||column_name||':'||data_type||':'||udt_name||':'||is_nullable FROM information_schema.columns WHERE table_schema='public' ORDER BY 1";
-async function rehearse(job: { backup: string; previous: string; target: string }) {
+async function rehearse(job: { backup: string; previous: string; target: string; currentVersion: string; targetVersion: string }) {
   if (!/^backups\/pop_[A-Za-z0-9_-]+$/.test(job.backup)) throw new Error('Invalid rehearsal backup path');
   const backup = resolve(state, job.backup);
   if (!backup.startsWith(resolve(state, 'backups') + sep)) throw new Error('Backup escaped state root');
@@ -40,14 +41,14 @@ async function rehearse(job: { backup: string; previous: string; target: string 
     await command('createdb', [env.PGDATABASE], env);
     await command('pg_restore', ['--dbname', env.PGDATABASE, '--no-owner', '--no-privileges', '--exit-on-error', join(backup, 'database.dump')], env);
     const before = (await command('psql', ['-X', '-At', '-v', 'ON_ERROR_STOP=1', '-c', query], env)).split('\n');
-    for (const id of [job.target, job.previous]) {
+    for (const [stage, id] of [['target', job.target], ['previous', job.previous]] as const) {
       const release = releaseDirectory(root, id);
       if (!await readJson(join(release, 'complete.json'))) throw new Error('Rehearsal release is incomplete');
       await command(join(release, 'runtime/bun'), ['--eval',
         "const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {runMigrations}=await import('./packages/server/src/store/migrations.ts');const db=openMultiremiDatabase();try{await runMigrations(db)}finally{await db.close()}"],
       { ...env, MULTIREMI_DATABASE_URL: 'postgresql://remi_rehearsal@127.0.0.1:55432/remi_update_rehearsal', MULTIREMI_HOME: join(scratch, 'home') }, join(release, 'api'));
-      const after = new Set((await command('psql', ['-X', '-At', '-v', 'ON_ERROR_STOP=1', '-c', query], env)).split('\n'));
-      if (before.some(column => !after.has(column))) throw new Error('Migration removed or changed an existing column');
+      const after = (await command('psql', ['-X', '-At', '-v', 'ON_ERROR_STOP=1', '-c', query], env)).split('\n');
+      assertSchemaContract(before, after, { stage, currentVersion: job.currentVersion, targetVersion: job.targetVersion });
     }
   } finally {
     if (started) await command('pg_ctl', ['-D', pg, '-m', 'immediate', '-w', 'stop'], env);
@@ -56,11 +57,11 @@ async function rehearse(job: { backup: string; previous: string; target: string 
   }
 }
 for (;;) {
-  const job = await readJson<{ id: string; backup: string; previous: string; target: string }>(join(control, 'job.json'));
+  const job = await readJson<{ id: string; backup: string; previous: string; target: string; currentVersion: string; targetVersion: string }>(join(control, 'job.json'));
   const previous = await readJson<{ id: string }>(join(control, 'result.json'));
   if (job && job.id !== previous?.id) {
     try { await rehearse(job); await writeJson(join(control, 'result.json'), { id: job.id, ok: true }); }
-    catch (error) { await writeJson(join(control, 'result.json'), { id: job.id, ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    catch (error) { await writeJson(join(control, 'result.json'), { id: job.id, ok: false, error: error instanceof Error ? error.message : String(error), ...(error instanceof SchemaContractRefusedError ? { failure: error.failure } : {}) }); }
   }
   await Bun.sleep(200);
 }

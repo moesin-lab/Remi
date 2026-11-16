@@ -1,3 +1,4 @@
+import { assertSchemaContract, SchemaContractRefusedError } from '@remi-platform/updater/schema-contract.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -28,6 +29,18 @@ function fixture() {
 }
 
 describe("durable API/Web host outcomes", () => {
+  it("replays the bounded schema failure after process restart without changing its payload", async () => {
+    const f = fixture(); await f.outbox.remember(f.operation);
+    let failure;
+    try { assertSchemaContract(['public.old.id:text:text:NO'], [], { stage: 'target', currentVersion: '0.2.90', targetVersion: 'candidate' }); }
+    catch (error) { failure = (error as SchemaContractRefusedError).failure; }
+    const report = { status: 'failed' as const, error: 'schema refused', progress: { failure } };
+    await f.outbox.complete(f.operation.id, report);
+    const received: PlatformOperationReceipt[] = [];
+    await new LocalProfileOperationOutbox(f.root).reconcile({ async reconcile(receipts) { received.push(...receipts); } });
+    expect(received[0]!.report).toEqual(report);
+  });
+
   it("recovers a completed switch after the process dies before its API report", async () => {
     const f = fixture(); await f.outbox.remember(f.operation);
     f.journal({ status: "succeeded", phase: "succeeded", resultRelease: f.release });

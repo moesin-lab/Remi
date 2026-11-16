@@ -15,7 +15,7 @@ function fixture(t) {
   writeFileSync(join(mocks, 'curl'), '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\n if [ "$1" = "-o" ]; then cp "$FIXTURE_ARCHIVE" "$2"; exit 0; fi\n shift\ndone\nexit 93\n', { mode: 0o755 });
   function archive(version, prepareExit = 0) {
     const release = join(root, version); mkdirSync(release);
-    writeFileSync(join(release, 'remi'), `#!/bin/sh\nif [ "$1" = --version ]; then echo ${version}; exit; fi\nif [ "$1 $2" = 'runtime prepare' ]; then exit ${prepareExit}; fi\nprintf '%s\\n' "$@"\n`, { mode: 0o755 });
+    writeFileSync(join(release, 'remi'), `#!/bin/sh\nif [ "$1" = "fixed argument" ]; then shift; fi\nif [ "$1" = --version ]; then echo ${version}; exit; fi\nif [ "$1 $2" = 'runtime prepare' ]; then exit ${prepareExit}; fi\nprintf '%s\\n' "$@"\n`, { mode: 0o755 });
     writeFileSync(join(release, 'remi-claude-agent-acp'), '#!/bin/sh\necho wrapper\n', { mode: 0o755 });
     writeFileSync(join(release, 'runtime-bundle.json'), '{}\n');
     const path = join(root, `${version}.tar.gz`);
@@ -50,9 +50,10 @@ test('second install preserves shell setup and arguments; repeat install keeps o
   const f = fixture(t), a = f.archive('1.0.0'), b = f.archive('1.0.1');
   assert.equal(f.install('1.0.0', a).status, 0);
   const original = readFileSync(f.launcher, 'utf8');
-  writeFileSync(f.launcher, original.replace('# Remi stable launcher;', 'export FIXTURE_LOCAL_SETTING=kept\n# Remi stable launcher;'));
+  writeFileSync(f.launcher, original.replace('# Remi stable launcher;', 'export FIXTURE_LOCAL_SETTING=kept\n# Remi stable launcher;').replace('"$@"', '"fixed argument" "$@"'));
   const r = f.install('1.0.1', b); assert.equal(r.status, 0, r.stderr);
   assert.match(readFileSync(f.launcher, 'utf8'), /export FIXTURE_LOCAL_SETTING=kept/);
+  assert.ok(readFileSync(f.launcher, 'utf8').includes('"fixed argument" "$@"'));
   assert.equal(execFileSync(f.launcher, ['argument with spaces', '$literal'], { encoding: 'utf8' }), 'argument with spaces\n$literal\n');
   assert.equal(execFileSync(f.launcher, ['--version'], { encoding: 'utf8' }).trim(), '1.0.1');
   assert.ok(existsSync(join(f.store, 'versions', a.id, 'remi')));

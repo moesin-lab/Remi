@@ -3,9 +3,9 @@ import { CODEBASE_SCM_CAPABILITIES, GITHUB_SCM_CAPABILITIES } from "@multiremi/s
 import { CodebaseScmProviderAdapter } from "@multiremi/scm/codebase.js";
 import { GitHubScmProviderAdapter } from "@multiremi/scm/github.js";
 import { ScmHttpError } from "@multiremi/scm/http.js";
-import { deriveCanonicalCandidates } from "@multiremi/scm/reconcile.js";
+import { deriveCanonicalCandidates, reconcileObservation } from "@multiremi/scm/reconcile.js";
 import { ScmStreamUnavailableError, type ScmPollContext } from "@multiremi/scm/types.js";
-import { scmBinding, scmConnection } from "./scm-test-helpers.js";
+import { MemoryScmIngestionStore, scmBinding, scmConnection } from "./scm-test-helpers.js";
 
 const originalFetch = globalThis.fetch;
 
@@ -514,6 +514,25 @@ describe("SCM provider adapters", () => {
     ]);
     expect(result.cursor).toBeNull();
     expect(result.done).toBe(true);
+  });
+
+  it("preserves Codebase check-run polling as pipeline events and snapshots", async () => {
+    globalThis.fetch = (async (input) => {
+      expect(new URL(String(input)).searchParams.get("Action")).toBe("ListCheckRuns");
+      return new Response(JSON.stringify({ Result: {
+        CheckRuns: [{ Id: "check_run:7001", Status: "completed", Conclusion: "failure", UpdatedAt: "2026-08-21T07:59:00.000Z" }],
+        TotalCount: 1,
+      } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch;
+    const pollContext = codebaseContext("pipelines");
+    const page = await new CodebaseScmProviderAdapter().poll(pollContext);
+    expect(page.observations).toHaveLength(1);
+    expect(page.observations[0]).toMatchObject({ stream: "pipelines", entityType: "pipeline", payload: { kind: "check_run", conclusion: "failure" } });
+    const store = new MemoryScmIngestionStore();
+    const result = reconcileObservation({ store, binding: pollContext.binding, observation: page.observations[0]!, baseline: false });
+    expect(result.events.map((entry) => entry.event.type)).toEqual(["pipeline.completed"]);
+    expect(result.snapshot).toMatchObject({ entityType: "pipeline", externalId: "check_run:7001", payload: { conclusion: "failure" } });
+    expect(store.snapshots.size).toBe(1);
   });
 
   it("resumes Codebase related-MR and pipeline pages without timestamp cutoffs", async () => {

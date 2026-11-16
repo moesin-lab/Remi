@@ -1,5 +1,5 @@
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
-import { currentAccessToken } from '../wire/index.js';
+import { currentAccessToken, isHumanOperatorRequest, currentWorkspaceMember } from '../wire/index.js';
 import type { Context, Hono } from "hono";
 import {
   boundedQueryInt,
@@ -48,7 +48,25 @@ import type {
   UpdateAutopilotTriggerInput,
 } from "@multiremi/contracts/types.js";
 import type { RouterDeps } from "./deps.js";
+import { loadChatSessionForCurrentUser } from "../helpers/auth-guards.js";
 import { listWorkspaceRepositories } from "../helpers/repositories.js";
+
+/** Task and daemon credentials cannot grant (or revoke) a cross-Chat delivery capability. */
+function autopilotDeliveryInput(c: Context, store: RouterDeps["store"], input: CreateAutopilotInput | UpdateAutopilotInput, workspaceId: string): UpdateAutopilotInput | Response {
+  if (!hasRequestField(input, "deliveryChatSessionId", "delivery_chat_session_id")) return { deliveryAuthorizedBy: undefined };
+  if (!isHumanOperatorRequest(c)) return c.json({ error: "Autopilot delivery requires a human operator" }, 403);
+  if (input.deliveryChatSessionId !== undefined && input.delivery_chat_session_id !== undefined
+    && input.deliveryChatSessionId !== input.delivery_chat_session_id) return c.json({ error: "Conflicting Autopilot delivery targets" }, 400);
+  const target = input.deliveryChatSessionId !== undefined ? input.deliveryChatSessionId : input.delivery_chat_session_id;
+  if (target === null) return { deliveryChatSessionId: null, deliveryAuthorizedBy: null };
+  if (typeof target !== "string" || !target.trim()) return c.json({ error: "delivery_chat_session_id must be a non-empty string or null" }, 400);
+  const loaded = loadChatSessionForCurrentUser(c, store, target.trim());
+  if (loaded instanceof Response) return loaded;
+  if (loaded.session.workspaceId !== workspaceId || loaded.session.status !== "active") return c.json({ error: "Autopilot delivery requires an active Chat in this workspace" }, 400);
+  const operator = currentWorkspaceMember(c, store, workspaceId);
+  if (!operator || operator.archivedAt) return c.json({ error: "Autopilot delivery requires an active workspace operator" }, 403);
+  return { deliveryChatSessionId: loaded.session.id, deliveryAuthorizedBy: operator.id };
+}
 
 function loadAutopilotForCurrentUser(
   c: Context,
@@ -188,7 +206,9 @@ export function registerAutopilotRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyCurrentUserWorkspaceAccess(c, store, input.workspaceId ?? "local");
     if (denied) return denied;
     try {
-      const autopilot = store.createAutopilot({ ...input, ...policy });
+      const delivery = autopilotDeliveryInput(c, store, body, workspaceId);
+      if (delivery instanceof Response) return delivery;
+      const autopilot = store.createAutopilot({ ...input, ...policy, ...delivery });
       scheduler?.sync();
       const response = autopilotCompatibilityResponse(autopilot, taskAutopilotResponseOptions(c));
       publishWorkspaceEvent(c, store, "autopilot:created", autopilot.workspaceId, { autopilot: response });
@@ -215,7 +235,9 @@ export function registerAutopilotRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyCurrentUserWorkspaceAccess(c, store, input.workspaceId ?? "local");
     if (denied) return denied;
     try {
-      const autopilot = store.createAutopilot({ ...input, ...policy });
+      const delivery = autopilotDeliveryInput(c, store, body, workspaceId);
+      if (delivery instanceof Response) return delivery;
+      const autopilot = store.createAutopilot({ ...input, ...policy, ...delivery });
       scheduler?.sync();
       return c.json({ autopilot: autopilotResponse(autopilot, taskAutopilotResponseOptions(c)) }, 201);
     } catch (error) {
@@ -248,7 +270,9 @@ export function registerAutopilotRoutes(app: Hono, deps: RouterDeps): void {
     );
     if (issueDenied) return issueDenied;
     try {
-      const autopilot = store.updateAutopilot(c.req.param("id"), { ...body, ...policy });
+      const delivery = autopilotDeliveryInput(c, store, body, loaded.autopilot.workspaceId);
+      if (delivery instanceof Response) return delivery;
+      const autopilot = store.updateAutopilot(c.req.param("id"), { ...body, ...policy, ...delivery });
       scheduler?.sync();
       return c.json({ autopilot: autopilotResponse(autopilot, taskAutopilotResponseOptions(c)) });
     } catch (error) {
@@ -400,7 +424,9 @@ export function registerAutopilotRoutes(app: Hono, deps: RouterDeps): void {
     );
     if (issueDenied) return issueDenied;
     try {
-      const autopilot = store.updateAutopilot(c.req.param("id"), { ...input, ...policy });
+      const delivery = autopilotDeliveryInput(c, store, body, loaded.autopilot.workspaceId);
+      if (delivery instanceof Response) return delivery;
+      const autopilot = store.updateAutopilot(c.req.param("id"), { ...input, ...policy, ...delivery });
       scheduler?.sync();
       const response = autopilotCompatibilityResponse(autopilot, taskAutopilotResponseOptions(c));
       publishWorkspaceEvent(c, store, "autopilot:updated", autopilot.workspaceId, { autopilot: response });

@@ -1,5 +1,6 @@
 import { afterCommit } from '../db/postgres.js';
 import { sendMessageWithinTransaction } from '../inbox/send-message.js';
+import { clampEnvelopeBody } from '@multiremi/store/envelope-body.js';
 import { autopilotSessionId } from "@multiremi/contracts/unified-model.js";
 import { runAutopilotRunMutation } from "@multiremi/store/autopilot-run-records.js";
 // Autopilots domain (autopilots, schedule/webhook triggers, runs and webhook deliveries),
@@ -173,6 +174,8 @@ export class AutopilotsRepo {
     const issueCreationRestrictionReason = issueCreationRestricted
       ? input.issueCreationRestrictionReason ?? (issueCreationRestrictedByTaskId ? "restricted_task" : "human_policy")
       : null;
+    const deliveryChatSessionId = input.deliveryChatSessionId !== undefined ? input.deliveryChatSessionId : input.delivery_chat_session_id;
+    this.assertDeliveryTarget(workspaceId, executionMode, deliveryChatSessionId, input.deliveryAuthorizedBy);
     const id = input.id ?? createId("aut");
     const now = nowIso();
     this.ctx.db.run(
@@ -181,8 +184,8 @@ export class AutopilotsRepo {
         assignee_id, status, execution_mode, session_policy, workspace_policy, issue_title_template,
         trigger_kind, trigger_label, cron_expression, issue_creation_restricted,
         issue_creation_restriction_reason, issue_creation_restricted_by_task_id, created_by_type,
-        created_by_id, last_run_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+        created_by_id, last_run_at, created_at, updated_at, delivery_chat_session_id, delivery_authorized_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
       [
         id,
         input.title.trim(),
@@ -206,6 +209,8 @@ export class AutopilotsRepo {
         createdById,
         now,
         now,
+        deliveryChatSessionId ?? null,
+        deliveryChatSessionId ? input.deliveryAuthorizedBy : null,
       ],
     );
     const sessionId=autopilotSessionId(id);
@@ -214,6 +219,43 @@ export class AutopilotsRepo {
     const autopilot = this.getAutopilot(id)!;
     this.ctx.analytics().recordAutopilotCreatedAnalytics(autopilot);
     return autopilot;
+  }
+
+  private assertDeliveryTarget(workspaceId: string, mode: string, chatId: string | null | undefined, memberId: string | null | undefined): void {
+    if (chatId == null) return;
+    const chat = typeof chatId === "string" ? this.ctx.chat().getChatSession(chatId) : null;
+    const member = memberId ? this.ctx.workspaces().getWorkspaceMember(memberId) : null;
+    if (mode !== "run_only" || !chat || chat.workspaceId !== workspaceId || chat.status !== "active"
+      || !member || member.workspaceId !== workspaceId || member.archivedAt) {
+      throw new Error("Autopilot delivery requires run_only, an active Chat and an authorizing operator in this workspace");
+    }
+  }
+
+  /** Server-owned reporting path; never grants the running Task access to the target. */
+  deliverRunReportWithinTransaction(autopilot: MultiremiAutopilot, run: MultiremiAutopilotRunRecord, body: string): void {
+    const targetId = autopilot.deliveryChatSessionId;
+    if (!targetId || (run.quiet && run.status === "completed")) return;
+    const target = this.ctx.chat().getChatSession(targetId);
+    const member = autopilot.deliveryAuthorizedBy ? this.ctx.workspaces().getWorkspaceMember(autopilot.deliveryAuthorizedBy) : null;
+    const valid = target?.workspaceId === autopilot.workspaceId && target.status === "active"
+      && member?.workspaceId === autopilot.workspaceId && !member.archivedAt;
+    const events = createCommitEventQueue();
+    // Timer replies bypass the platform status/report clamp in the inbox writer.
+    // Bound the delivery copy once; the source Task retains the full output/error.
+    const reportBody = clampEnvelopeBody(valid ? body : `Run ${run.id}: report delivery skipped because the authorized Chat or operator is unavailable.`);
+    sendMessageWithinTransaction(this.ctx, {
+      id: `msg_autopilot_delivery_${run.id}`,
+      session_id: valid ? targetId : autopilotSessionId(autopilot.id),
+      sender: { type: "timer", id: autopilot.id },
+      to: valid ? { type: "member", ref: member!.id } : { type: "none" },
+      message_kind: "reply", wake_requested: "inbox_only",
+      body_md: reportBody,
+      metadata: { autopilot_id: autopilot.id, run_id: run.id, task_id: run.taskId,
+        delivery_chat_session_id: targetId, delivery_authorized_by: autopilot.deliveryAuthorizedBy,
+        delivery_status: valid ? "queued" : "skipped" },
+    }, events);
+    if (valid) this.ctx.feishuBot().enqueueAutopilotReportWithinTransaction(targetId, run.id, reportBody);
+    afterCommit(this.ctx.db, () => this.ctx.emitCommitEvents(events));
   }
 
   /**
@@ -347,8 +389,14 @@ export class AutopilotsRepo {
         this.assertFeishuEventConfigScope(trigger.eventConfig, { ...current, projectId: nextProjectId });
       }
     }
+    const targetInput = input.deliveryChatSessionId !== undefined ? input.deliveryChatSessionId : input.delivery_chat_session_id;
+    const deliveryTarget = targetInput === undefined ? current.deliveryChatSessionId : targetInput;
+    const deliveryAuthorizedBy = targetInput === undefined ? current.deliveryAuthorizedBy : input.deliveryAuthorizedBy;
+    // Unrelated updates remain possible after a target is archived/deleted.
+    if (targetInput !== undefined || nextExecutionMode !== current.executionMode) this.assertDeliveryTarget(current.workspaceId, nextExecutionMode, deliveryTarget, deliveryAuthorizedBy);
     const now = nowIso();
     this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(current.workspaceId);
       this.ctx.db.run(
         `UPDATE multiremi_autopilots SET
         title = ?,
@@ -367,6 +415,8 @@ export class AutopilotsRepo {
         issue_creation_restricted = ?,
         issue_creation_restriction_reason = ?,
         issue_creation_restricted_by_task_id = ?,
+        delivery_chat_session_id = CASE WHEN ? = 1 THEN ? ELSE delivery_chat_session_id END,
+        delivery_authorized_by = CASE WHEN ? = 1 THEN ? ELSE delivery_authorized_by END,
         updated_at = ?
        WHERE id = ?`,
       [
@@ -386,6 +436,10 @@ export class AutopilotsRepo {
         nextIssueCreationRestricted ? 1 : 0,
         nextIssueCreationRestrictionReason,
         nextIssueCreationRestrictedByTaskId,
+        targetInput !== undefined ? 1 : 0,
+        deliveryTarget ?? null,
+        targetInput !== undefined ? 1 : 0,
+        deliveryTarget ? deliveryAuthorizedBy : null,
         now,
         id,
         ],
@@ -2482,6 +2536,9 @@ function toAutopilot(row: Row): MultiremiAutopilot {
     id: String(row.id),
     workspaceId,
     workspace_id: workspaceId,
+    deliveryChatSessionId: nullableString(row.delivery_chat_session_id),
+    delivery_chat_session_id: nullableString(row.delivery_chat_session_id),
+    deliveryAuthorizedBy: nullableString(row.delivery_authorized_by),
     title: String(row.title),
     description: nullableString(row.description),
     projectId,

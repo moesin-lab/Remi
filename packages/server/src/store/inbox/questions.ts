@@ -990,6 +990,23 @@ export class Questions {
       this.reroute(loaded.message, loaded.record, events, actor ?? null, reason);
     }
   }
+  /** Historical continuation messages are context, not authority to consume a Q. */
+  consumeContinuationInputWithinTransaction(id: string, turnId: string, attemptId: string, messageId: string, events: CommitEventQueue) {
+    const { message, record } = this.lock(id);
+    if (record.wait.status !== 'continuation_pending' || record.wait.continuation_message_id !== messageId) return;
+    if (record.wait.consumer_turn_id !== turnId) {
+      const previous = this.ctx.db.query('SELECT status FROM multiremi_turns WHERE id=?').get(record.wait.consumer_turn_id ?? '');
+      const next = this.ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(turnId);
+      const source = this.ctx.db.query('SELECT execution_scope FROM multiremi_turns WHERE id=?').get(message.task_id ?? '');
+      if (!previous || !['completed', 'failed', 'cancelled'].includes(previous.status)
+        || !next || next.session_id !== message.session_id || next.agent_id !== message.sender_id
+        || next.workspace_id !== record.workspace_id || next.execution_scope !== (source?.execution_scope ?? '')) return;
+      record.wait.consumer_turn_id = turnId;
+      this.event(record, 'continue', null, { source_message_id: messageId, source_session_id: message.session_id });
+      this.save(message, record, events);
+    }
+    this.consumeWithinTransaction(id, turnId, attemptId, messageId, events);
+  }
   consumeWithinTransaction(id: string, turnId: string, attemptId: string, replyId: string, events: CommitEventQueue, waitId?: string) {
     const { message, record } = this.lock(id);
     if (record.wait.wait_id && record.wait.status !== 'continuation_pending' && record.wait.status !== 'continuation_consumed' && record.wait.wait_id !== waitId) throw new QuestionError(409, 'question_wait_binding_changed');

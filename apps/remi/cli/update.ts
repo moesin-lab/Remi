@@ -353,8 +353,8 @@ function buildLauncher(current: Buffer | null, binaryPath: string): string {
   const text = current.toString("utf8");
   const lines = text.split("\n");
   for (let index = lines.length - 1; index >= 0; index--) {
-    const match = lines[index]!.match(/^(\s*exec\s+)(?:"([^"]+)"|'([^']+)'|(\S+))(.*)$/);
-    const command = match?.[2] ?? match?.[3] ?? match?.[4];
+    const match = lines[index]!.match(/^(\s*exec\s+)(?:"([^"]+)"|'((?:[^']|'\\'')+)'|(\S+))(.*)$/);
+    const command = match?.[2] ?? match?.[3]?.replaceAll("'\\''", "'") ?? match?.[4];
     if (!match || !command || basename(command) !== "remi") continue;
     lines[index] = `${match[1]}${shellQuote(binaryPath)}${match[5]}`;
     return lines.join("\n");
@@ -386,7 +386,8 @@ function atomicWriteFile(path: string, content: string | Buffer, mode: number): 
 }
 
 function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+  if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function escapeXml(value: string): string {

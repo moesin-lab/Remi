@@ -24,7 +24,8 @@ function setup() {
   });
   const app = createMultiremiApp({ store, authToken: "MASTER" });
   const body = (index: number) => ({ name: `Bot ${index}`, agent_id: agents[index]!.id,
-    runtime_id: `rt_${index ? "two" : "one"}`, app_id: `cli_${index}`, app_secret: `test-secret-${index}`, enabled: true });
+    runtime_id: `rt_${index ? "two" : "one"}`, app_id: `cli_${index}`, app_secret: `test-secret-${index}`, enabled: true,
+    sender_access_policy: "agent" });
   const request = (path: string, method = "GET", payload?: unknown) => app.request(`/api/workspaces/local/${path}`, {
     method, headers, ...(payload ? { body: JSON.stringify(payload) } : {}),
   });
@@ -66,17 +67,21 @@ describe("multiple Feishu bots", () => {
     const second = await (await request("feishu-bots", "POST", body(1))).json();
     const input = { revision: 1, externalMessageId: "om_same", externalSessionKey: "p2p:oc_same", chatId: "oc_same",
       chatType: "p2p" as const, text: "hello", senderOpenId: "ou_same", senderName: "Same display name" };
-    const firstTask = store.submitFeishuBotMessage("local", "rt_one", input);
+    // Only the allowlist bot rejects the sender; its peer keeps Agent access.
+    expect(() => store.submitFeishuBotMessage("local", "rt_one", input)).toThrow("allowlist");
     const secondTask = store.submitFeishuBotMessage("local", "rt_two", input);
+    const sender = store.listFeishuBotSenders("local")[0]!;
+    expect(store.feishuBotFor(second.bot_id).setSenderAllowed("local", sender.id, true)).toBeNull();
+    store.setFeishuBotSenderAllowed("local", sender.id, true, "local");
+    const firstTask = store.submitFeishuBotMessage("local", "rt_one", input);
     expect(firstTask.agentId).toBe(agents[0]!.id);
     expect(secondTask.agentId).toBe(agents[1]!.id);
     expect(firstTask.taskId).not.toBe(secondTask.taskId);
     expect(firstTask.chatSessionId).not.toBe(secondTask.chatSessionId);
     expect(store.submitFeishuBotMessage("local", "rt_two", input).taskId).toBe(secondTask.taskId);
+    store.setFeishuBotSenderAllowed("local", sender.id, false, "local");
     expect(store.isFeishuBotTaskIssueCreationRestricted(firstTask.taskId)).toBe(true);
     expect(store.isFeishuBotTaskIssueCreationRestricted(secondTask.taskId)).toBe(false);
-    const sender = store.listFeishuBotSenders("local")[0]!;
-    expect(store.feishuBotFor(second.bot_id).setSenderAllowed("local", sender.id, true)).toBeNull();
     expect(store.canFeishuBotDaemonAccessTask("local", "daemon_one", secondTask.taskId)).toBe(false);
   });
 

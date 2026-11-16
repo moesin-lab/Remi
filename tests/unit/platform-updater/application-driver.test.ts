@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { ContainerApplicationDriver, LocalProfileCommandRunner } from '@remi-platform/updater/application-driver.js';
 import { assertApplicationCompatible, parseApplicationManifest, type ApplicationManifest } from '@remi-platform/updater/application-manifest.js';
 import { DATA_SCHEMA, READY_GATE, safetyCommand, testBackup } from './helpers.js';
@@ -134,6 +134,20 @@ describe('container application updates', () => {
     expect((await f.driver.pendingFinalization())?.report.status).toBe('succeeded');
     await f.driver.finalize(f.operation.id);
     expect(await f.driver.pendingFinalization()).toBeNull();
+  });
+
+  it('mounts only the current backup HOME archive read-only for each migration pass', async () => {
+    const f = await fixture();
+    await f.driver.execute(f.operation, f.report, f.gate);
+    const migrations = f.calls.filter(call => call.args.includes('migrate'));
+    expect(migrations).toHaveLength(2);
+    for (const { args } of migrations) {
+      const mounts = args.filter((_, index) => args[index - 1] === '--mount');
+      expect(mounts).toContain(`type=volume,src=remi-test_application-releases,dst=/opt/remi-application,readonly`);
+      expect(mounts.some(mount => mount.startsWith(`type=bind,src=${join(f.root, 'backups', 'pop_app-')}`) && mount.endsWith(`${sep}volume-api-home.archive,dst=/remi-input/api-home.archive,readonly`))).toBe(true);
+      expect(mounts.some(mount => mount.includes('src=remi-test_api-home'))).toBe(false);
+      expect(args).toContain('/tmp:rw,nosuid,size=512m');
+    }
   });
 
   it('subsequent updates restart the same containers without compose up or image changes', async () => {

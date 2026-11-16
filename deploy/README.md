@@ -399,7 +399,12 @@ application updates and needs explicit base-image maintenance.
 The updater waits for drain, durably commits the operation, stops API/Web writers,
 backs up data, and rehearses target and previous migrations in a **separate
 PostgreSQL container with no production network or credentials**. It switches
-the program only after rehearsal passes. The scratch database must answer
+the program only after rehearsal passes. Each migration container reads only the
+current backup's `volume-api-home.archive`, extracts `reports/migrations` into
+its disposable `/tmp`, and sets `MULTIREMI_MIGRATION_REPORT_DIR` there. It never
+mounts the live api-home volume. Missing/invalid backup reports fail rehearsal;
+the production store's persistent-report startup guard remains enforced.
+The scratch database must answer
 `SELECT 1` over loopback TCP before restore starts; the image's temporary
 initialization socket server does not establish readiness. API/Web are unavailable during this
 backup/rehearsal interval; daemon/provider processes remain independent. Each
@@ -490,9 +495,13 @@ also checks this policy against the tracked source before publication. Never
 copy a new fingerprint onto old code. The explicit image and
 systemd executors retain their stricter equal-fingerprint requirement.
 
-The unified message/turn/lane release has an empty `rollbackSafeFrom` policy.
-It can publish application bundles for fresh installations and same-schema
-updates, but does not attest code-only rollback from the legacy storage model.
+The current `rollbackSafeFrom` policy attests only the preceding fingerprint
+listed in the policy file: MUL-40 changes continuation consumer logic in a
+hashed source file without changing schema, migrations or record formats.
+Both versions retain the #44 sender allowlist data migration and default; this
+does not attest rollback across that migration to an earlier fingerprint.
+Code-only rollback restores the known continuation/input failure behavior.
+This does not attest code-only rollback from the legacy storage model.
 Legacy deployments must follow the [controlled cutover](../docs/deploy/unified-model-cutover.md)
 before adopting this schema; publication alone does not authorize that migration.
 

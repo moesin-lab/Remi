@@ -119,8 +119,8 @@ export class ChatEndpoints {
     return parseStrictResponse<ChatSession[]>(raw, ChatSessionListSchema, { endpoint: "GET /api/chat/sessions" });
   }
 
-  async getChatSession(id: string, options: { signal?: AbortSignal } = {}): Promise<ChatSession> {
-    const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${id}`, options.signal ? { signal: options.signal } : undefined);
+  async getChatSession(id: string, options: { signal?: AbortSignal; retrySafe?: boolean } = {}): Promise<ChatSession> {
+    const raw = await this.http.fetch<unknown>(`/api/chat/sessions/${id}`, options);
     return parseStrictResponse<ChatSession>(raw, ChatSessionSchema, { endpoint: "GET /api/chat/sessions/:id" });
   }
 
@@ -171,11 +171,12 @@ export class ChatEndpoints {
    */
   async sendChatMessage(sessionId: string, content: string, attachmentIds?: string[], clientId?: string,
     options: { signal?: AbortSignal } = {}): Promise<SendChatMessageResponse> {
-    const session = await this.getChatSession(sessionId, options);
+    const retryOptions = { ...options, retrySafe: !!clientId };
+    const session = await this.getChatSession(sessionId, retryOptions);
     const result = await new MessagesEndpoints(this.http).sendMessage(sessionId, {
       body_md: content, message_kind: "request", to: { type: "agent", ref: session.agent_id }, wake_requested: "now",
       attachment_ids: attachmentIds?.length ? attachmentIds : undefined, dedupe_key: clientId,
-    }, options);
+    }, retryOptions);
     return { message_id: result.message.id, turn_id: result.turn_id, created_at: result.message.created_at };
   }
 

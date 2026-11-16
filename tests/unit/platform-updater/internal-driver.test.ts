@@ -91,7 +91,7 @@ async function fixture() {
 
 describe('socket-free internal application updates', () => {
   it('preserves structured rehearsal refusal in the internal recovery journal', async () => {
-    const f = await fixture(); f.state.rehearsalFails = true;
+    const f = await fixture(); f.preflight(); f.state.rehearsalFails = true;
     try { assertSchemaContract(['public.old.id:text:text:NO'], [], { stage: 'previous', currentVersion: '1.0.0', targetVersion: '1.0.0' }); }
     catch (error) { f.state.failure = (error as SchemaContractRefusedError).failure; }
     await expect(f.driver.execute(f.operation, f.report, READY_GATE)).rejects.toBeInstanceOf(SchemaContractRefusedError);

@@ -16,10 +16,10 @@ export class MessagesEndpoints {
     const path = `/api/sessions/${encodeURIComponent(sessionId)}/messages${params.size ? `?${params}` : ""}`;
     return parseStrictResponse<z.infer<typeof MessagesPageSchema>>(await this.http.fetch<unknown>(path), MessagesPageSchema, { endpoint: path });
   }
-  async sendMessage(sessionId: string, body: SendMessageBody, options: { signal?: AbortSignal } = {}) {
+  async sendMessage(sessionId: string, body: SendMessageBody, options: { signal?: AbortSignal; retrySafe?: boolean } = {}) {
     const path = `/api/sessions/${encodeURIComponent(sessionId)}/messages`;
     return parseStrictResponse<z.infer<typeof SendMessageResponseSchema>>(await this.http.fetch<unknown>(path, {
-      method: "POST", body: JSON.stringify(body), ...(options.signal ? { signal: options.signal } : {}),
+      method: "POST", body: JSON.stringify(body), retrySafe: !!body.dedupe_key && options.retrySafe, ...(options.signal ? { signal: options.signal } : {}),
     }), SendMessageResponseSchema, { endpoint: path });
   }
   async getMessage(id: string) {

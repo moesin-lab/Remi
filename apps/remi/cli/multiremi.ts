@@ -29,6 +29,7 @@ import type {
 import type { IncomingMessage, TaskStreamingHandler, TaskStreamEvent } from "@connectors/base.js";
 import { MultiremiCliUpdateCoordinator } from "@multiremi/worker/cli-update-coordinator.js";
 import { DaemonProtocolClient } from "@multiremi/worker/daemon-protocol-client.js";
+import { MultiremiDaemonHttpError } from "@multiremi/worker/client.js";
 import { locksForRole, startHubRoleGuard } from "@multiremi/api/hub/hub-role-guard.js";
 import { evaluateStartupEnv, resolveStartupApiRole } from "@multiremi/config/startup-env.js";
 import { prepareUsageAccountingStartup } from "@multiremi/store/usage-migration.js";
@@ -1303,23 +1304,32 @@ export function createFeishuTaskHandler(
         externalMessageId, fileName: media.fileName ?? "attachment.bin", contentType: media.contentType, buffer: media.buffer });
       attachmentIds.push(attachment.id);
     }
-    const submitted = await daemon.submitFeishuBotMessage({
-      revision,
-      externalSessionKey: sessionKey,
-      externalMessageId,
-      chatType,
-      replyToMessageId: chatType === "group" || threadId ? externalMessageId : null,
-      senderOpenId: String(message.metadata?.senderOpenId ?? "").trim() || null,
-      senderUserId: String(message.metadata?.senderUserId ?? "").trim() || null,
-      senderUnionId: String(message.metadata?.senderUnionId ?? "").trim() || null,
-      senderTenantKey: String(message.metadata?.senderTenantKey ?? "").trim() || null,
-      senderName: String(message.metadata?.senderName ?? "").trim() || null,
-      chatId: message.chatId,
-      threadId,
-      text: message.text,
-      attachmentIds,
-      deliveryMode: "native_cot_v1",
-    });
+    let submitted: Awaited<ReturnType<typeof daemon.submitFeishuBotMessage>>;
+    try {
+      submitted = await daemon.submitFeishuBotMessage({
+        revision,
+        externalSessionKey: sessionKey,
+        externalMessageId,
+        chatType,
+        replyToMessageId: chatType === "group" || threadId ? externalMessageId : null,
+        senderOpenId: String(message.metadata?.senderOpenId ?? "").trim() || null,
+        senderUserId: String(message.metadata?.senderUserId ?? "").trim() || null,
+        senderUnionId: String(message.metadata?.senderUnionId ?? "").trim() || null,
+        senderTenantKey: String(message.metadata?.senderTenantKey ?? "").trim() || null,
+        senderName: String(message.metadata?.senderName ?? "").trim() || null,
+        chatId: message.chatId,
+        threadId,
+        text: message.text,
+        attachmentIds,
+        deliveryMode: "native_cot_v1",
+      });
+    } catch (error) {
+      if (error instanceof MultiremiDaemonHttpError && error.code === "sender_not_allowed") {
+        await replyCard(FEISHU_SENDER_NOT_ALLOWED_MESSAGE, "feishu-sender-not-allowed", displayName);
+        return;
+      }
+      throw error;
+    }
     // A live Task already has the card created by its first event. The steer is
     // persisted and injected by the normal Task worker; do not replay it into a
     // second card.
@@ -1334,6 +1344,9 @@ export function createFeishuTaskHandler(
     });
   };
 }
+
+const FEISHU_SENDER_NOT_ALLOWED_MESSAGE =
+  "你还没有使用此机器人的权限。请联系空间管理员在「IM 平台 → 飞书 → 访问控制」中将你加入白名单。";
 
 /**
  * Raw inbound body for command matching. The connector strips the bot mention

@@ -40,7 +40,7 @@ it("uses Agent capabilities without presenting pending sender approvals", async 
   expect(screen.getByText(/Anyone who can message this bot/)).toBeInTheDocument();
   expect(screen.queryByText("Pending authorization")).not.toBeInTheDocument();
   expect(mockApi.listFeishuBotSenders).not.toHaveBeenCalled();
-  const toggle = screen.getByRole("switch", { name: "Require a sender allowlist to create Issues" });
+  const toggle = screen.getByRole("switch", { name: "Only allowlisted accounts can use this bot" });
   expect(toggle).not.toBeChecked();
   await userEvent.click(toggle);
   await waitFor(() => expect(mockApi.saveFeishuBot).toHaveBeenCalledWith("workspace-1", {

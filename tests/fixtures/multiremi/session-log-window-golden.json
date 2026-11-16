@@ -1,6 +1,6 @@
 {
  "name": "Session log window responses",
- "source": "unspecified commit",
+ "source": "MUL-48: per-row capture on 84e31e785 with shared-operator contract fixtures",
  "probes": [
   {
    "name": "chat-window",

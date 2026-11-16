@@ -5,8 +5,9 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, extname, join } from "node:path";
+import { basename, delimiter, extname, join, relative, resolve, sep } from "node:path";
 import { type CliOptions, stringOpt, numberOpt } from "./options.js";
 
 export const DEFAULT_DAEMON_PORT = 6131;
@@ -402,7 +403,39 @@ export function currentProcessLauncher(argv: string[], execPath: string): { comm
   if ((executable === "bun" || executable.startsWith("bun-")) && script) {
     return { command: execPath, argsPrefix: [script] };
   }
-  return { command: execPath, argsPrefix: [] };
+  return { command: stableDaemonLauncher(execPath) ?? execPath, argsPrefix: [] };
+}
+
+/** Only prefer a stable launcher when it execs this installed version. Never run it to probe. */
+function stableDaemonLauncher(execPath: string): string | null {
+  const installRoot = process.env.MULTIREMI_INSTALL_ROOT?.trim() || join(homedir(), ".local", "lib", "remi");
+  const versionPath = relative(join(installRoot, "versions"), execPath).split(sep);
+  if (versionPath.length !== 2 || versionPath[0] === ".." || versionPath[1] !== "remi") return null;
+
+  const binDir = process.env.MULTIREMI_BIN_DIR?.trim();
+  const directories = [binDir, ...(process.env.PATH?.split(delimiter) ?? [])];
+  const targets = [shellQuote(execPath), `"${execPath.replace(/["\\$`]/g, "\\$&")}"`];
+  for (const directory of directories) {
+    if (!directory) continue;
+    const candidate = resolve(directory, "remi");
+    if (candidate === resolve(execPath)) continue;
+    try {
+      accessSync(candidate, constants.X_OK);
+      const stat = statSync(candidate);
+      if (!stat.isFile() || stat.size > 64 * 1024) continue;
+      const content = readFileSync(candidate, "utf8");
+      if (!content.startsWith("#!/bin/sh\n")) continue;
+      const matches = content.split("\n").some((line) => {
+        const command = line.match(/^\s*exec\s+(.+)$/)?.[1];
+        return command && targets.some((target) => command === target
+          || command.startsWith(`${target} `) || command.startsWith(`${target}\t`));
+      });
+      if (matches) return candidate;
+    } catch {
+      // Missing, unreadable or non-executable PATH entries leave the binary unchanged.
+    }
+  }
+  return null;
 }
 
 export function programSubcommandPrefix(programName: string): string[] {

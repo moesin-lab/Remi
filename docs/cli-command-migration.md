@@ -539,18 +539,20 @@ Inbox/Issue object and audited outcome, and generic `resolve` cannot forge those
 outcomes. An empty source allowlist means zero ingestion; `source update
 --clear-allowlist` restores that state.
 
-Feishu bots default to Agent capabilities: anyone who can message the bot may
-use its enabled capabilities without sender approval. `remi workspace feishu-bot
-set <workspace> ... --sender-access-policy agent|allowlist` selects this policy;
-omitting the option preserves the saved choice. Existing bot configurations
-upgrade to `agent`. Agent and inherited task proposal policies still apply.
+Feishu bots default to the sender allowlist: only approved accounts can use the
+bot, and other accounts receive a no-access reply without starting a Chat.
+`remi workspace feishu-bot set <workspace> ... --sender-access-policy
+agent|allowlist` selects this policy; `agent` lets anyone who can message the bot
+use its enabled capabilities. Omitting the option preserves the saved choice.
+Existing bot configurations upgrade to `allowlist` once, with nobody
+pre-approved. Agent and inherited task proposal policies still apply.
 
-The optional Feishu bot sender allowlist uses `remi workspace feishu-bot sender
+The Feishu bot sender allowlist uses `remi workspace feishu-bot sender
 list <workspace>`, `allow <workspace> <sender>`, and `revoke <workspace> <sender>`.
 The sender ID comes from `list`; accounts are discovered from incoming bot
-requests and deduplicated within the current bot app. These human-only commands
-manage permission to create Issues through bot Chats without linking senders to
-Remi users or workspace members. This account allowlist is separate from the
+requests, including rejected ones, and deduplicated within the current bot app.
+These human-only commands manage who can use the bot and create Issues through
+bot Chats without linking senders to Remi users or workspace members. This account allowlist is separate from the
 Messaging Source conversation allowlist. See the [sender policy](feishu-message-ingestion.md#机器人发送者白名单)
 for active Chat checks and legacy restricted sessions.
 

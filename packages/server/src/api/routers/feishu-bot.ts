@@ -734,7 +734,7 @@ export function configView(store: MultiremiStore, workspaceId: string, botId = "
       app_id: "",
       domain: "feishu",
       enabled: false,
-      sender_access_policy: "agent",
+      sender_access_policy: "allowlist",
       revision: 0,
       app_secret_configured: false,
       app_secret_hint: null,

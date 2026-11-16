@@ -1,5 +1,7 @@
 "use client";
 
+import { checkBuild, canRefresh } from "./build-continuity";
+import { useQueryClient } from "@tanstack/react-query";
 import { Suspense } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import {
@@ -13,12 +15,22 @@ function NavigationProviderInner({
   children: React.ReactNode;
 }) {
   const router = useRouter();
+  const qc = useQueryClient();
+  const navigate = async (path: string, options: Parameters<typeof router.push>[1], replace: boolean) => {
+    if (await checkBuild() && canRefresh() && qc.isMutating() === 0) {
+      if (replace) window.location.replace(path);
+      else window.location.assign(path);
+      return;
+    }
+    if (replace) router.replace(path, options);
+    else router.push(path, options);
+  };
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
   const adapter: NavigationAdapter = {
-    push: router.push,
-    replace: router.replace,
+    push: (path) => { void navigate(path, undefined, false); },
+    replace: (path, options) => { void navigate(path, options, true); },
     // The App Router patches history.replaceState: a call whose state lacks
     // its own `__NA` marker keeps its route tree in the entry and updates
     // usePathname/useSearchParams without fetching the route. Passing the

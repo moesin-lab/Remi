@@ -1,3 +1,5 @@
+import { registerSendPause } from "../platform-lifecycle/continuity";
+
 /**
  * How long a chat send waits for the server to accept the message (the session
  * read and the POST). Past it the send is unconfirmed rather than failed: the
@@ -20,11 +22,19 @@ export class ChatSendTimeoutError extends Error {
 export function withChatSendTimeout<T>(send: (signal: AbortSignal) => Promise<T>, timeoutMs = CHAT_SEND_TIMEOUT_MS): Promise<T> {
   const controller = new AbortController();
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
+    let remaining = timeoutMs;
+    let started = Date.now();
+    const expire = () => {
       const error = new ChatSendTimeoutError();
       controller.abort(error);
       reject(error);
-    }, timeoutMs);
-    send(controller.signal).then(resolve, reject).finally(() => clearTimeout(timer));
+    };
+    let timer = setTimeout(expire, remaining);
+    const unregister = registerSendPause(controller.signal, () => {
+      clearTimeout(timer);
+      remaining -= Date.now() - started;
+      return () => { started = Date.now(); timer = setTimeout(expire, Math.max(0, remaining)); };
+    });
+    send(controller.signal).then(resolve, reject).finally(() => { clearTimeout(timer); unregister(); });
   });
 }

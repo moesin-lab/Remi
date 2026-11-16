@@ -399,7 +399,12 @@ application updates and needs explicit base-image maintenance.
 The updater waits for drain, durably commits the operation, stops API/Web writers,
 backs up data, and rehearses target and previous migrations in a **separate
 PostgreSQL container with no production network or credentials**. It switches
-the program only after rehearsal passes. The scratch database must answer
+the program only after rehearsal passes. Each migration container reads only the
+current backup's `volume-api-home.archive`, extracts `reports/migrations` into
+its disposable `/tmp`, and sets `MULTIREMI_MIGRATION_REPORT_DIR` there. It never
+mounts the live api-home volume. Missing/invalid backup reports fail rehearsal;
+the production store's persistent-report startup guard remains enforced.
+The scratch database must answer
 `SELECT 1` over loopback TCP before restore starts; the image's temporary
 initialization socket server does not establish readiness. API/Web are unavailable during this
 backup/rehearsal interval; daemon/provider processes remain independent. Each

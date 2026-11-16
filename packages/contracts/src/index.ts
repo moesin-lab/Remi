@@ -19,3 +19,4 @@ export * from "./external-chats.js";
 export type { TaskMessageFanoutSubject } from "./task-message-fanout.js";
 export type * from './question.js';
 export { isHistoricalIssueQuestionRecord } from './question.js';
+export * from "./platform-failure.js";

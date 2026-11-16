@@ -1,3 +1,4 @@
+import { assertSchemaContract, SchemaContractRefusedError } from '@remi-platform/updater/schema-contract.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
@@ -12,6 +13,24 @@ function fixture() {
 }
 
 describe("platform safe update API", () => {
+  it('validates schema refusal reports and restores normal maintenance without changing currentRelease', async () => {
+    const { app, store } = fixture();
+    const current = { version: '0.2.90', ref: 'a'.repeat(40), dataSchema: 'b'.repeat(64), publishedAt: null, releaseUrl: null, manifestUrl: null, apiImage: null, webImage: null };
+    store.heartbeatPlatformUpdater({ driver: 'docker_compose', currentRelease: current });
+    const operation = store.createPlatformOperation({ kind: 'check_updates' }, 'local');
+    store.claimPlatformOperation();
+    store.beginPlatformDrain({ operationId: operation.id });
+    let failure;
+    try { assertSchemaContract(['public.old.id:text:text:NO'], [], { stage: 'target', currentVersion: '0.2.90', targetVersion: 'candidate' }); }
+    catch (error) { failure = (error as SchemaContractRefusedError).failure; }
+    const report = (value: unknown) => app.request(`/api/platform-updater/operations/${operation.id}/report`, { method: 'POST', headers: updater, body: JSON.stringify({ status: 'failed', progress: { failure: value } }) });
+    for (const value of [null, [], { ...failure, reason: 'other' }, { ...failure, stage: 12 }, { ...failure, removedTables: { total: 21, examples: Array(21).fill('x') } }, { ...failure, targetVersion: 'x'.repeat(129) }]) expect((await report(value)).status).toBe(400);
+    expect((await report(failure)).status).toBe(200);
+    expect(store.getPlatformOperation(operation.id)?.progress.failure).toEqual(failure);
+    expect(store.getPlatformDrainStatus().maintenance.mode).toBe('normal');
+    expect(store.getPlatformState().currentRelease).toEqual(current);
+  });
+
   it('reports the observed mode, preserves it across keepalives and source changes, and invalidates checks on mode changes', async () => {
     const { app, store } = fixture();
     const preflight = { ready: true, checkedAt: new Date().toISOString(), platform: 'linux', arch: 'x64', checks: [] };

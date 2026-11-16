@@ -523,6 +523,12 @@ no compatibility is inferred from Git history. Declaration changes require renew
 human review. Packaging and publication do not authorize deployment; backup and
 migration rehearsal remain mandatory.
 
+Installations on v0.2.90 or earlier cross the ADR 0018 archive contraction boundary.
+Follow the [manual upgrade and complete restore procedure](../docs/deploy/manual-schema-boundary-upgrade.md),
+including its release checklist; automatic updates keep the strict schema gate.
+Schema refusals carry bounded, validated `progress.failure` diagnostics with
+`reason=schema_contract_refused`; recovery must still verify before maintenance is released.
+
 Legacy deployments must follow the [controlled cutover](../docs/deploy/unified-model-cutover.md)
 before adopting this schema; publication alone does not authorize that migration.
 

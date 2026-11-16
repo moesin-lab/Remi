@@ -26,7 +26,7 @@ async function fixture() {
   const manifest: ApplicationManifest = { ...previous, version: '1.0.1', ref: '2'.repeat(40), application: { format: 1, bun: '1.3.14', nodeMajor: 22, apiLibc: 'glibc 2.36', webLibc: 'glibc 2.36', apiBase: BASE, rollbackSafeFrom: [], assets: { 'linux-x64': { url: 'https://releases.example/application.tar.gz', sha256: hash } } } };
   const calls: Array<{ command: string; args: string[] }> = [];
   const events: string[] = [];
-  const state = { selected: '', volume: false, failMigration: false, loseColumns: false, failRecovery: false, drainReady: true, running: '', rehearsalContainers: '', rehearsalReadyAfter: 0, rehearsalProbes: 0 };
+  const state = { selected: '', volume: false, failMigration: false, breakFailureJournal: false, loseColumns: false, loseColumnsStage: 'target', failRecovery: false, drainReady: true, running: '', rehearsalContainers: '', rehearsalReadyAfter: 0, rehearsalProbes: 0 };
   const runner: CommandRunner = {
     async run(command: string, args: string[], options?: CommandOptions) {
       calls.push({ command, args });
@@ -63,7 +63,7 @@ async function fixture() {
           events.push('rehearsal-ready');
           return ok('1');
         }
-        if (args.includes('psql')) return ok(state.loseColumns && events.includes('migrate') ? '' : 'public.messages.id:integer:int4:NO');
+        if (args.includes('psql')) return ok(state.loseColumns && events.filter(event => event === 'migrate').length >= (state.loseColumnsStage === 'previous' ? 2 : 1) ? '' : 'public.messages.id:integer:int4:NO');
         return ok();
       }
       if (args[0] === 'volume') {
@@ -82,6 +82,10 @@ async function fixture() {
         }
         if (action === 'migrate') {
           events.push('migrate');
+          if (state.breakFailureJournal) {
+            await rm(join(root, 'application-operation-pop_app.json'));
+            await mkdir(join(root, 'application-operation-pop_app.json'));
+          }
           if (state.failMigration) return { exitCode: 1, stdout: '', stderr: '' };
         }
       }
@@ -178,8 +182,16 @@ describe('container application updates', () => {
     f.state.loseColumns = true;
     await expect(f.driver.execute(f.operation, f.report, f.gate)).rejects.toThrow('removed or changed');
     expect((await f.driver.inspect()).currentRelease?.version).toBe('1.0.0');
-    expect((await f.driver.pendingFinalization())?.report.status).toBe('failed');
+    expect((await f.driver.pendingFinalization())?.report).toMatchObject({ status: 'failed', progress: { failure: { reason: 'schema_contract_refused', stage: 'target', currentVersion: '1.0.0', targetVersion: '1.0.1', removedTables: { total: 1 } } } });
+    const restarted = new ContainerApplicationDriver({ kind: 'docker_compose', composeFile: join(f.root, 'compose.yml'), envFile: join(f.root, 'compose.env'), stateDir: f.root, apiHealthUrl: 'http://api.test', webHealthUrl: 'http://web.test' }, f.runner);
+    expect((await restarted.pendingFinalization())?.report).toEqual((await f.driver.pendingFinalization())?.report);
     expect(f.calls.some(call => call.args.includes('pg_restore') && call.args.includes('postgres-container'))).toBe(false);
+  });
+
+  it('retains the previous migration stage when the target preserves the old schema', async () => {
+    const f = await fixture(); f.state.loseColumns = true; f.state.loseColumnsStage = 'previous';
+    await expect(f.driver.execute(f.operation, f.report, f.gate)).rejects.toThrow('previous');
+    expect((await f.driver.pendingFinalization())?.report.progress?.failure?.stage).toBe('previous');
   });
 
   it('waits for the rehearsal database over TCP before restoring into it', async () => {
@@ -218,6 +230,12 @@ describe('container application updates', () => {
     const count = f.calls.length;
     await expect(f.driver.execute({ ...f.operation, status: 'verifying' }, f.report, f.gate)).rejects.toThrow('migration rehearsal');
     expect(f.calls.length).toBe(count);
+  });
+
+  it('keeps maintenance pinned if recording the failure cannot complete', async () => {
+    const f = await fixture(); f.state.failMigration = true; f.state.breakFailureJournal = true;
+    await expect(f.driver.execute(f.operation, f.report, f.gate)).rejects.toThrow('failure journal could not be persisted');
+    expect(await readFile(join(f.root, 'application-control/write-fence.json'), 'utf8')).toContain('pop_app');
   });
 
   it('keeps maintenance pinned if recovery fails and rejects corrupt recovery metadata', async () => {

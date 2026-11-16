@@ -106,6 +106,12 @@ Claude 桥 bundle 带两个补丁，都改 `dist/acp-agent.js`：`claude-usage-v
 保留。稳定 launcher 仅原子替换其中的版本目标，并将原内容保存为新快照的
 `previous-launcher`；已有自定义参数改写仍保留。macOS launchd 如果直接指向
 旧快照，会改为指向稳定 launcher，同时保存 `previous-launchd.plist`。
+`remi daemon service install` 在当前 executable 位于安装根目录的
+`versions/<id>/remi` 下时，会检查 `MULTIREMI_BIN_DIR` 和 PATH 中的 shell
+launcher；仅当 launcher 的 `exec` 目标与当前 executable 一致时，生成的
+systemd `ExecStart` / launchd `ProgramArguments` 才使用该稳定路径。
+安装根目录默认是 `~/.local/lib/remi`，可由 `MULTIREMI_INSTALL_ROOT` 指定。
+直接二进制安装和 Bun 源码运行保持原有启动方式。
 updater 不停止或重启 daemon；维护者仍需在已排空且明确批准的维护窗口中执行
 `remi restart`。安装脚本的首次安装路径同样先运行 runtime prepare，再替换
 `remi` 与配套 Claude wrapper。

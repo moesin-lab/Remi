@@ -6,11 +6,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 
-function fixture(t) {
+function fixture(t, complexPaths = true) {
   const root = mkdtempSync(join(tmpdir(), 'remi-installer-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   // Spaces and quotes exercise the shell launcher quoting, too.
-  const bin = join(root, "user's bin"), store = join(root, "user's store"), mocks = join(root, 'mocks');
+  const bin = join(root, complexPaths ? "user's bin" : "bin"), store = join(root, complexPaths ? "user's store" : "store"), mocks = join(root, 'mocks');
   for (const dir of [bin, store, mocks]) mkdirSync(dir);
   writeFileSync(join(mocks, 'curl'), '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\n if [ "$1" = "-o" ]; then cp "$FIXTURE_ARCHIVE" "$2"; exit 0; fi\n shift\ndone\nexit 93\n', { mode: 0o755 });
   function archive(version, prepareExit = 0) {
@@ -79,4 +79,18 @@ test('failure while publishing wrapper leaves the current CLI launcher unchanged
   writeFileSync(join(f.mocks, 'mv'), `#!/bin/sh\ncase "$*" in *remi-claude-agent-acp*) exit 79 ;; esac\nexec '${realMv}' "$@"\n`, { mode: 0o755 });
   assert.notEqual(f.install('1.0.1', b).status, 0);
   assert.deepEqual(readFileSync(f.launcher), before);
+});
+
+
+test('reinstall accepts historical simple single and double quoted executable tokens', t => {
+  for (const quote of ["'", '"']) {
+    const f = fixture(t, false), a = f.archive('1.0.0'), b = f.archive('1.0.1');
+    assert.equal(f.install('1.0.0', a).status, 0);
+    const target = join(f.store, 'versions', a.id, 'remi');
+    writeFileSync(f.launcher, `#!/bin/sh\nexport LOCAL_SETUP=preserved\nexec ${quote}${target}${quote} "fixed argument" "$@"\n`);
+    const r = f.install('1.0.1', b); assert.equal(r.status, 0, r.stderr);
+    assert.ok(readFileSync(f.launcher, 'utf8').includes('export LOCAL_SETUP=preserved'));
+    assert.ok(readFileSync(f.launcher, 'utf8').includes('"fixed argument" "$@"'));
+    assert.equal(execFileSync(f.launcher, ['--version'], { encoding: 'utf8' }).trim(), '1.0.1');
+  }
 });

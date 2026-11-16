@@ -167,6 +167,7 @@ install_binary() {
 build_launcher() {
   local current="$1" binary="$2" quoted line command index=-1 i=0
   local lines=() prefixes=() suffixes=()
+  local escaped_apostrophe="'\\''"
   quoted="$(printf '%s' "$binary" | sed "s/'/'\\\\''/g")"
   if [[ "$binary" =~ ^[A-Za-z0-9_/:=.,@%+-]+$ ]]; then
     quoted="$binary"
@@ -182,6 +183,7 @@ PATTERN
       lines[i]="$line"
       if [[ "$line" =~ $exec_pattern ]]; then
         command="${BASH_REMATCH[3]:-${BASH_REMATCH[4]:-${BASH_REMATCH[6]}}}"
+        command="${command//"$escaped_apostrophe"/\'}"
         if [ "${command##*/}" = remi ]; then
           index=$i; prefixes[i]="${BASH_REMATCH[1]}"; suffixes[i]="${BASH_REMATCH[7]}"
         fi

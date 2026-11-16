@@ -113,9 +113,8 @@ describe("MultiremiTaskReportOutbox", () => {
       known_cost_by_currency: { USD: 0.25 }, complete: true });
     expect(store.getTask(task.id)?.status).toBe("completed");
   }, 30_000);
-  // MUL-49: Windows CI exceeded the previous 90s budget replaying 3500
-  // individually committed deltas. Keep real disk persistence and Store writes.
-  // This recovery test verifies correctness; its timeout is not a throughput budget.
+  // MUL-49: keep 3500 individually persisted deltas and real Store writes.
+  // Replay avoids a second FULL commit for each acknowledged v2 usage fact.
   it("replays over 3000 request facts after an outage with bounded final chunks and delivers terminal last", async () => {
     const started = performance.now();
     let storeMs = 0;
@@ -154,7 +153,7 @@ describe("MultiremiTaskReportOutbox", () => {
     expect(report.summary.actual_total_tokens).toBe(7000);
     expect(report.by_model.map(row => row.actual_total_tokens).sort()).toEqual([3500, 3500]);
     console.log("[outbox-replay-timing]", JSON.stringify({ platform: process.platform, setupMs: initialized - started, persistMs: persisted - initialized, replayMs: performance.now() - persisted, storeMs }));
-  }, 180_000);
+  }, 90_000);
   it("restores enqueue durability after a failed v2 usage acknowledgement delete and keeps other deletes durable", async () => {
     let online = false;
     let usageDeliveries = 0;

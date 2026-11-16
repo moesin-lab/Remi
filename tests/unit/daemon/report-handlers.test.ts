@@ -257,18 +257,18 @@ describe("v2 reports", () => {
       });
     }
 
-    it(`degrades malformed card fields without blocking ${type} or exposing raw trace downstream`, async () => {
-      const error = spyOn(console, "error").mockImplementation(() => {});
-      try {
-        for (const [field, patch] of [
-          ["trace", { trace: { ...cardFields.trace, head: -1 } }],
-          ["trace", { trace: { ...cardFields.trace, event_count: 1.5 } }],
-          ["trace", { trace: { ...cardFields.trace, closed: false } }],
-          ["trace", { trace: { ...cardFields.trace, tool_call_count: "1" } }],
-          ["trace", { trace: { ...cardFields.trace, type_histogram: [{ type: "text", tool: null, count: -1 }] } }],
-          ["trace", { trace: { ...cardFields.trace, type_histogram: [{ type: "text", tool: 1, count: 1 }] } }],
-          ["final_reply_md", { final_reply_md: 3 }], ["model", { model: { provider: "claude" } }],
-        ] as const) {
+    for (const [index, [field, patch]] of ([
+      ["trace", { trace: { ...cardFields.trace, head: -1 } }],
+      ["trace", { trace: { ...cardFields.trace, event_count: 1.5 } }],
+      ["trace", { trace: { ...cardFields.trace, closed: false } }],
+      ["trace", { trace: { ...cardFields.trace, tool_call_count: "1" } }],
+      ["trace", { trace: { ...cardFields.trace, type_histogram: [{ type: "text", tool: null, count: -1 }] } }],
+      ["trace", { trace: { ...cardFields.trace, type_histogram: [{ type: "text", tool: 1, count: 1 }] } }],
+      ["final_reply_md", { final_reply_md: 3 }], ["model", { model: { provider: "claude" } }],
+    ] as const).entries()) {
+      it(`degrades malformed card fields without blocking ${type} or exposing raw trace downstream (${field}, case ${index + 1})`, async () => {
+        const error = spyOn(console, "error").mockImplementation(() => {});
+        try {
           const { store, task, runtime } = fixture();
           store.startTask(task.id);
           const received: unknown[] = [];
@@ -282,9 +282,9 @@ describe("v2 reports", () => {
           expect(received).toEqual([{ id: task.id, value: null }]);
           expect(closed).toEqual([]);
           expect(error.mock.calls).toEqual([[expect.stringContaining("malformed round-card field"), { taskId: task.id, field }]]);
-        }
-      } finally { error.mockRestore(); }
-    });
+        } finally { error.mockRestore(); }
+      });
+    }
 
     for (const [index, [field, patch, expected, level]] of ([
       ["context_usage", { context_usage: { used: -1, size: 10 } }, { context_usage: null }, "error"],

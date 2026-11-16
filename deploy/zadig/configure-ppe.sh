@@ -135,7 +135,7 @@ write_workflow_request() {
         {name:"PPE_SLOT",description:"自动分配；仅管理员排障时指定 1-6",type:"choice",value:"auto",default:"auto",choice_option:["auto","1","2","3","4","5","6"],choice_value:["auto"],is_credential:false,source:"runtime",required:true},
         {name:"ISSUE_KEY",description:"PPE 所属 Multiremi Issue，例如 MUL-123",type:"string",value:"",default:"",is_credential:false,source:"runtime",required:false},
         {name:"PPE_LEASE_ID",description:"续期或释放时使用的租约 ID",type:"string",value:"",default:"",is_credential:false,source:"runtime",required:false},
-        {name:"GIT_COMMIT",description:"Grassgod/Remi 的完整 40 位 Commit SHA",type:"string",value:"",default:"",is_credential:false,source:"runtime",required:false},
+        {name:"GIT_COMMIT",description:"moesin-lab/Remi 的完整 40 位 Commit SHA",type:"string",value:"",default:"",is_credential:false,source:"runtime",required:false},
         {name:"PPE_MODE",description:"纯平台或平台加隔离 daemon",type:"choice",value:"platform",default:"platform",choice_option:["platform","platform-daemon"],choice_value:["platform"],is_credential:false,source:"runtime",required:false}
       ],
       stages:[{

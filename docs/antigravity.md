@@ -1,12 +1,24 @@
 # Antigravity Runtime
 
-Remi runs Antigravity as the `antigravity` provider on Google's official ACP server (`antigravity-acp`, pinned at 1.4.0). The server authenticates only through its gateway mode, against a loopback gateway shim inside the daemon that holds the execution group endpoint key. The retired `agy -p` integration and personal-account `agy` logins no longer work.
+Remi supports two explicit Antigravity connections. A local-sign-in execution group launches the installed `agy acp` and reuses the daemon account's personal login. A gateway execution group uses Google's pinned `antigravity-acp` 1.4.0 through the daemon's loopback gateway shim. Neither connection falls back to the other. The old `agy -p` print integration remains retired.
+
+## Local sign-in
+
+Install a version of `agy` that supports `agy acp` on the Runtime machine and sign in under the daemon's OS account. Create an Antigravity execution group with `endpoint_id: null` (the UI's **Local sign-in**). Existing CLI commands support this via `remi runtime group create --file group.json --json`. The group discovers models and thinking levels through ACP; users do not need to copy the `agy models` variant IDs manually.
+
+The daemon copies only `$GEMINI_HOME/antigravity-cli/antigravity-oauth-token` (default `~/.gemini`) into each isolated session home with mode 0600. Personal settings, hooks and conversations are not copied. `agy acp --gemini-dir <session-home> --app-data-dir antigravity-cli --include-default-customizations=false` uses that home, with inherited gateway/API-key routing cleared. Missing credentials fail before execution with `antigravity_login_required`; daemon execution never starts an interactive login. Credentials remain on the Runtime machine. A fresh attempt refreshes the credential copy from the local login.
+
+Members must advertise `antigravity_native: 1`; older Runtime versions show an upgrade requirement and cannot become ready. Local execution supports the ACP model and thinking selectors and resumes native ACP sessions. Its usage comes from native ACP reports, not the gateway shim.
+
+Verification: `tests/unit/acp/antigravity-native.test.ts` covers isolated credentials, model/effort discovery, execution and resume with a fake ACP server. `tests/integration/antigravity-native-daemon.test.ts` covers group binding, discovery and task routing over the real daemon transport with a fake model provider. A local `agy acp` 1.5.9 was also checked for isolated authenticated session creation, model/effort discovery and a single `gemini-3.8-flash` prompt through the Remi Provider, which returned the requested `REMI_NATIVE_OK`. This does not establish compatibility with every installed agy version.
+
+## Gateway connection
 
 > **Opt-in, and not ready to enable by default.** The server is Google's proprietary software, downloaded per machine from Google after the operator accepts [Google's Antigravity terms](https://antigravity.google/terms). Whether this use (a third-party ACP client on an API-key gateway) is covered by those terms has not been reviewed: **get a legal review before enabling Antigravity by default** for any workspace or installer (PR 4 risk R2). Windows is not supported.
 
 ## Upgrade notes
 
-1. `agy -p` and personal-account `agy` logins no longer work; an Agent `executable` that points at `agy` is rejected ("points at the retired agy CLI; clear it").
+1. Gateway groups do not use `agy -p` or personal-account login; an Agent `executable` that points at `agy` is rejected ("points at the retired agy CLI; clear it").
 2. Configure a *Gateway endpoint* supporting `google-generative` in *Execution groups* with the gateway base URL, the API key and, ideally, a `default_model` ([engine contract](runtime-model-discovery.md#antigravity-gateway-engine)).
 3. On each machine run `remi runtime prepare --provider antigravity --accept-antigravity-terms`. It downloads about 110 MB on macOS (392 MB on disk) or about 330 MB on Linux (about 1.1 GB on disk).
 4. Reselect the model of every Antigravity Agent (or rely on the engine's `default_model`) and clear its thinking level: stale ids fail with `acp_model_unsupported`, and an explicit effort fails with `acp_effort_unsupported`.
@@ -15,7 +27,7 @@ Remi runs Antigravity as the `antigravity` provider on Google's official ACP ser
 ## Terms, licensing and platforms
 
 - **Never bundled.** The server has no redistribution grant. Remi release artifacts, images and the repository never contain, mirror or cache it for others; each machine downloads the archive pinned in [runtime-versions.json](../packages/acp/src/runtime-versions.json) from `dl.google.com` itself. Tests use fakes ([antigravity-acp-fake.mjs](../tests/fixtures/antigravity-acp-fake.mjs)).
-- **Explicit consent.** The first download requires `--accept-antigravity-terms` (or `REMI_ACCEPT_ANTIGRAVITY_TERMS=1`), prints the terms URL and records the acceptance time in `install.json`; later pin bumps carry it. Downloads happen only in `remi runtime prepare --provider antigravity`, in `remi setup` / `remi daemon start` when Antigravity is the explicit or configured provider, and in the default `remi runtime prepare` (the installer) when some Antigravity install already exists. Task execution never downloads, and auto-detection considers only the pinned install, never `agy` on `PATH`.
+- **Explicit consent.** The first download requires `--accept-antigravity-terms` (or `REMI_ACCEPT_ANTIGRAVITY_TERMS=1`), prints the terms URL and records the acceptance time in `install.json`; later pin bumps carry it. Downloads happen only in `remi runtime prepare --provider antigravity`, in `remi setup` / `remi daemon start` when Antigravity is the explicit or configured provider, and in the default `remi runtime prepare` (the installer) when some Antigravity install already exists. Task execution never downloads, and auto-detection accepts either the pinned install or local `agy` on `PATH`. Starting a daemon with an existing `agy` does not download the gateway server; prepare the gateway server explicitly when needed.
 - **Gateway auth only.** `antigravity-acp/settings.json` selects `auth.type = gateway`; personal OAuth, AI Studio keys and Vertex credentials are blanked from the server's environment and the browser is disabled (`BROWSER=/usr/bin/false`). The gateway key itself never reaches the server process (see the shim below).
 - **Platforms.** macOS (arm64, x64) and Linux (x64, arm64). Windows is listed by Google but not pinned and not supported.
 - **CI.** No CI job accepts Google's terms on a runner. The pin-bump verification (`runtime prepare --provider antigravity` on Linux and macOS) stays a maintainer step ([upgrade checklist](daemon-runtime-upgrades.md#antigravity-固定与升级检查项)) until someone decides who may accept the terms for CI.
@@ -41,7 +53,7 @@ The daemon-start health check spawns nothing: the manifest must match the pin, b
 
 ## Gateway engine and model
 
-Antigravity execution groups select a shared endpoint with the `google-generative` protocol. The task freezes its address, credential revision and selected model; the daemon adapts that snapshot to its loopback shim. Older frozen tasks retain the legacy workspace Relay. See [execution configuration](dev/execution-configuration.md). Before the start ACK, and therefore before any model call, a task fails with:
+Gateway Antigravity execution groups select a shared endpoint with the `google-generative` protocol. The task freezes its address, credential revision and selected model; the daemon adapts that snapshot to its loopback shim. Older frozen tasks retain the legacy workspace Relay. See [execution configuration](dev/execution-configuration.md). Before the start ACK, and therefore before any model call, a task fails with:
 
 - `antigravity_gateway_unconfigured` when the engine, its base URL or its key is missing;
 - `antigravity_model_required` when neither the Agent nor the engine names a model (without a selection the server silently runs the gateway's first model).

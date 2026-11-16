@@ -101,6 +101,8 @@ export class ExecutionBindingStatesRepo {
 
   isRuntimeExecutionBindingReady(groupId: string, runtimeId: string, profileId: string | null, profileRevision: number | null): boolean {
     const desired = this.getRuntimeExecutionBindings(runtimeId).find(binding => binding.groupId === groupId);
+    if (desired?.provider === "antigravity" && desired.connectionMode === "native"
+      && this.ctx.runtimes().getRuntimeLite(runtimeId)?.metadata.antigravity_native !== 1) return false;
     if (desired?.profile?.endpoint_options) {
       const runtime = this.ctx.runtimes().getRuntimeLite(runtimeId);
       if (runtime?.metadata.execution_endpoint_options !== 1) return false;

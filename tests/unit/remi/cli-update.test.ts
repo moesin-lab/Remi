@@ -25,7 +25,7 @@ describe("Remi CLI updater", () => {
   });
 
   test("uses the release pipeline repository and asset naming contract", () => {
-    expect(releaseRepository({})).toBe("Grassgod/Remi");
+    expect(releaseRepository({})).toBe("moesin-lab/Remi");
     expect(releaseRepository({ MULTIREMI_REPO: "legacy/repo" })).toBe("legacy/repo");
     expect(releaseRepository({ MULTIREMI_RELEASE_REPO: "release/repo", MULTIREMI_REPO: "legacy/repo" }))
       .toBe("release/repo");
@@ -80,7 +80,7 @@ describe("Remi CLI updater", () => {
     });
     if (result.status !== "installed") throw new Error("expected installed result");
     expect(fixture.requests).toEqual([
-      "https://api.github.com/repos/Grassgod/Remi/releases/latest",
+      "https://api.github.com/repos/moesin-lab/Remi/releases/latest",
       "https://downloads.example.test/remi-0.2.81-darwin-arm64.tar.gz",
     ]);
     expect(readFileSync(fixture.events, "utf8")).toBe("prepared");

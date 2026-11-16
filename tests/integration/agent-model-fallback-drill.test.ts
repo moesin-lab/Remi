@@ -345,7 +345,7 @@ describe("MUL-336 real-engine fallback drill", () => {
     expect(store.getTask(taskId)).toMatchObject({
       status: "failed",
       failureReason: TaskFailureReason.AgentProviderNoAvailableAccount,
-      executionModel: null,
+      executionModel: PRIMARY_MODEL,
       fallbackSwitched: false,
     });
     expect(store.listTasks().filter((candidate) => candidate.parentTaskId === taskId)).toHaveLength(0);

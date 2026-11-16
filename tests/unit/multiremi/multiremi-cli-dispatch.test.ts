@@ -240,10 +240,10 @@ describe("remi CLI dispatcher", () => {
 });
 
 describe("remi CLI provider detection", () => {
-  it("detects Antigravity only through the pinned install, never the retired agy CLI", () => {
+  it("detects Antigravity through a local agy or the pinned gateway install", () => {
     expect(detectMultiremiProviders({
       pathEnv: "/mock/bin", canExecute: path => path === join("/mock/bin", "agy"), antigravityInstalled: () => false,
-    })).toEqual([]);
+    })).toEqual(["antigravity"]);
     expect(detectMultiremiProviders({
       pathEnv: "/mock/bin", canExecute: () => false, antigravityInstalled: () => true,
     })).toEqual(["antigravity"]);

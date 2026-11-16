@@ -97,7 +97,7 @@ Claude 桥 bundle 带两个补丁，都改 `dist/acp-agent.js`：`claude-usage-v
 
 平台的 CLI 升级请求沿用现有排空/暂停接单流程。`remi update` 从
 `MULTIREMI_RELEASE_REPO`（兼容回退为 `MULTIREMI_REPO`，默认
-`Grassgod/Remi`）读取 GitHub Release。它按当前 OS/架构精确选择
+`moesin-lab/Remi`）读取 GitHub Release。它按当前 OS/架构精确选择
 `remi-<version>-<os>-<arch>.tar.gz`，核对 GitHub 资产的 SHA-256 digest、
 归档路径和新二进制 `--version`，再由新包的 `remi runtime prepare` 安装并
 验证该版本的固定依赖。任一步失败都不会改写现有 executable。

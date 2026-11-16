@@ -50,8 +50,8 @@
 - 平台：readyz、Web 登录页、`active.json` 的 ref。
 - daemon：`remi daemon status` 版本一致、`Outbox` 没有积压。
 - 真实轮次：挑一个之前出问题的会话或一张简单的单，看新轮次正常结束（`remi turn list --issue <KEY>`），失败就读 `remi turn trace read <turn> --json` 的 `.turn.error`。
-- 回滚：
-  - `stable deploy` 自身不会自动回滚。新服务启动失败时，它只打印恢复提示，并保留备份目录（`Backup: …`）。
-  - 平台代码回退用 host 回滚的两步：`node scripts/local-profile.mjs stable host-rollback-stage --operation-id <新的操作 ID> --ref <要回到的完整提交> --preserve-data true`，然后 `host-rollback-activate --operation-id <同一个 ID>`。`--preserve-data true` 只换代码、保留数据，要求两个版本的数据 schema 指纹一致，不一致时脚本会拒绝。
-  - 不加 `--preserve-data true` 时，activate 会重建数据库并恢复备份快照，更新之后写入的数据会丢失。这属于恢复数据库，必须先停下来问用户。
+- 回滚分两种情况，先判断属于哪一种：
+  - **部署成功之后要退回**：新服务已启动、`active.json` 已指向新提交，事后发现问题。用 host 回滚两步：先运行 `node scripts/local-profile.mjs stable host-rollback-stage --operation-id <新的操作 ID> --ref <要回到的完整提交> --preserve-data true`，再运行 `host-rollback-activate --operation-id <同一个 ID>`。`--preserve-data true` 只换代码、保留数据；此时脚本会比较当前版本与目标版本的数据 schema 指纹，不一致就拒绝。
+  - **部署过程中新服务启动失败**：`stable deploy` 不会自动回滚，只打印恢复提示，并保留备份目录（`Backup: …`）。新 API 可能已经执行了迁移，但 `active.json` 还指向旧提交，脚本的指纹比较会变成「旧版本对旧版本」，检查形同虚设。这种情况不要直接用 `--preserve-data true` 退回：先用 `node scripts/platform-data-schema.mjs <源码目录>` 分别算出失败候选提交和目标提交的指纹，确认一致后才能保留数据退回；不一致或无法确认时，停下来请用户决定是否恢复数据库。
+  - 不加 `--preserve-data true` 时，activate 会重建数据库并恢复备份快照，部署之后写入的数据会丢失。这属于恢复数据库，必须先问用户。
   - daemon：删掉新加的 drop-in（或改回上一个 release 的路径），`systemctl --user daemon-reload` 后重启。

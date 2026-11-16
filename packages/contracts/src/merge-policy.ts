@@ -37,6 +37,8 @@ export interface ScmStructuredReview extends ScmReviewInput {
   /** Monotone database order, independent of wall clock precision. */
   sequence: number;
 }
+/** Observed write restrictions; C must still prove enforcement and bypass permissions. */
+export interface RepositoryRefWriteRule { source: "branch_protection" | "ruleset"; type: string; evidence: unknown }
 export interface MergeGateReason { code: string; message: string; evidence?: unknown }
 export interface MergeGateResult {
   allowed: boolean;
@@ -45,4 +47,7 @@ export interface MergeGateResult {
   execution_authorized: false;
   credential_boundary: "平台入口受控、直推未封闭";
   policy: ProjectMergePolicy;
+  ref_write_rules: RepositoryRefWriteRule[];
+  /** Current eligible reviews; member attestations do not claim Agent independence. */
+  review_evidence: Array<{ review_id: string; attestation: "member_attested" | "agent_independent" }>;
 }

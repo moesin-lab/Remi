@@ -140,10 +140,12 @@ export class GitHubScmOperations {
         // Omit them so the required identity is missing until current jobs exist.
         continue;
       }
-      const jobs = await this.pages(`/actions/runs/${latest.id}/attempts/${latest.run_attempt}/jobs`, "jobs");
+      // filter=latest includes each job's latest execution in this run, including
+      // successful jobs retained when only failed jobs were rerun. Never use another run.
+      const jobs = await this.pages(appendQuery(`/actions/runs/${latest.id}/jobs`, { filter: "latest" }), "jobs");
       for (const job of jobs) {
         const match = typeof job.check_run_url === "string" ? /\/check-runs\/(\d+)$/u.exec(job.check_run_url) : null;
-        if (job.head_sha !== headSha || !match || typeof job.name !== "string") throw new ScmOperationError("scm_evidence_incomplete", "Invalid latest-attempt job evidence");
+        if (job.head_sha !== headSha || !match || typeof job.name !== "string") throw new ScmOperationError("scm_evidence_incomplete", "Invalid latest-run job evidence");
         const observation = actions.find(c => c.id === match[1] && c.name === job.name && c.workflowPath === path);
         if (observation) allowed.add(observation.id);
       }

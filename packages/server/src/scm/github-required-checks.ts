@@ -1,7 +1,7 @@
-import type { RequiredMergeCheck } from "@multiremi/contracts/merge-policy.js";
+import type { RequiredMergeCheck, RepositoryRefWriteRule } from "@multiremi/contracts/merge-policy.js";
 import { ScmOperationError } from "./operations.js";
 export interface RepositoryCheckRule { context: string; appId: number | null }
-export interface RepositoryRules { checks: RepositoryCheckRule[] }
+export interface RepositoryRules { checks: RepositoryCheckRule[]; ref_write_rules: RepositoryRefWriteRule[] }
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new ScmOperationError("repository_rules_incomplete", "Incomplete repository rule response");
   return value as Record<string, unknown>;
@@ -16,6 +16,7 @@ export async function readGitHubRequiredChecks(
   if (info.name !== target || typeof info.protected !== "boolean") throw new ScmOperationError("repository_rules_incomplete", "Provider omitted target branch protection identity");
   const rules = await pages(`/rules/branches/${branch}`);
   const checks: RepositoryCheckRule[] = [];
+  const ref_write_rules: RepositoryRefWriteRule[] = [];
   function add(value: unknown, appKey: string) {
     const check = object(value);
     const app = check[appKey];
@@ -28,11 +29,16 @@ export async function readGitHubRequiredChecks(
     // A 404 is ambiguous (missing permission vs ruleset-only protection): fail closed.
     const protection = object(await request(`/branches/${branch}/protection`));
     for (const [key, value] of Object.entries(protection)) {
-      if (["url", "required_status_checks", "enforce_admins", "allow_deletions", "allow_force_pushes", "block_creations", "lock_branch", "required_conversation_resolution"].includes(key)) {
+      if (["restrictions", "allow_deletions", "allow_force_pushes", "block_creations"].includes(key)) {
+        ref_write_rules.push({ source: "branch_protection", type: key, evidence: value });
+        continue; // Provider enforces ref writes; C must separately prove merger/bypass permissions.
+      }
+      if (["url", "required_status_checks", "enforce_admins", "lock_branch", "required_conversation_resolution"].includes(key)) {
         if (["lock_branch", "required_conversation_resolution"].includes(key) && object(value).enabled !== false) throw new ScmOperationError("repository_rules_unsupported", `Unsupported branch protection: ${key}`);
         continue;
       }
-      if (value !== null && value !== false && !(typeof value === "object" && !Array.isArray(value) && object(value).enabled === false)) throw new ScmOperationError("repository_rules_unsupported", `Unsupported branch protection: ${key}`);
+      const disabled = value === null || value === false || typeof value === "object" && !Array.isArray(value) && object(value).enabled === false;
+      if (!["required_pull_request_reviews", "required_signatures", "required_linear_history", "required_deployments"].includes(key) || !disabled) throw new ScmOperationError("repository_rules_unsupported", `Unsupported branch protection: ${key}`);
     }
     if (!("required_status_checks" in protection)) throw new ScmOperationError("repository_rules_incomplete", "Provider omitted required_status_checks");
     if (protection.required_status_checks !== null) {
@@ -46,6 +52,10 @@ export async function readGitHubRequiredChecks(
   }
   for (const raw of rules) {
     const rule = object(raw);
+    if (["deletion", "non_fast_forward", "creation", "update"].includes(String(rule.type))) {
+      ref_write_rules.push({ source: "ruleset", type: String(rule.type), evidence: rule });
+      continue;
+    }
     if (rule.type !== "required_status_checks") throw new ScmOperationError("repository_rules_unsupported", `Unsupported effective rule: ${String(rule.type)}`);
     const params = object(rule.parameters);
     if (Object.keys(params).some(k => !["required_status_checks", "strict_required_status_checks_policy", "do_not_enforce_on_create"].includes(k))) throw new ScmOperationError("repository_rules_unsupported", "Unknown required-check rule parameters");
@@ -53,14 +63,16 @@ export async function readGitHubRequiredChecks(
     if (params.strict_required_status_checks_policy) throw new ScmOperationError("repository_rules_unsupported", "Strict up-to-date branch checks are not yet verified");
     params.required_status_checks.forEach(c => add(c, "integration_id"));
   }
-  return { checks };
+  return { checks, ref_write_rules };
 }
 /** Repository rules do not carry workflow paths. An app-bound rule needs an
  * explicit project binding to establish that missing identity; never guess by name. */
 export function resolveRepositoryChecks(rules: RepositoryRules, project: RequiredMergeCheck[]): RequiredMergeCheck[] {
   return rules.checks.map(rule => {
-    if (rule.appId === null) return { kind: "commit_status" as const, context: rule.context };
-    const matches = project.filter((c): c is Extract<RequiredMergeCheck, { kind: "check_run" }> => c.kind === "check_run" && c.app_id === rule.appId && c.job === rule.context);
+    const matches = project.filter(c => rule.appId === null
+      ? c.kind === "commit_status" ? c.context === rule.context : c.job === rule.context
+      : c.kind === "check_run" && c.app_id === rule.appId && c.job === rule.context);
+    if (rule.appId === null && !matches.length) throw new ScmOperationError("repository_check_identity_missing", `Repository required check ${rule.context} has no source constraint; bind app/workflow/job or an explicit status context in project policy`);
     if (!matches.length) throw new ScmOperationError("repository_check_identity_missing", `Repository required check ${rule.context} needs app/workflow/job identity in project policy`);
     // More than one workflow with the same protected context must all pass.
     return matches;

@@ -20,6 +20,7 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
   beginQuestionWait(attemptId: string, messageId: string, waitId: string): void { this.nativeQuestionWaits.set(messageId, { attempt_id: attemptId, message_id: messageId, wait_id: waitId }); }
   activeQuestionWaits(): DaemonQuestionWait[] { return [...this.nativeQuestionWaits.values()]; }
   private readonly turns = new Map<string, { turnId: string; inputToSeq: number; wrapUpAt: string | null }>();
+  private readonly inputResyncs = new Map<string, number>();
   private readonly inputSeqs = new Map<string, number>();
   private readonly decisions = new Map<string, UnifiedMessage>();
   private readonly decisionAttempts = new Map<string, string>();
@@ -140,6 +141,7 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
   release(taskId: string): void {
     this.steers.delete(taskId);
     this.turns.delete(taskId);
+    this.inputResyncs.delete(taskId);
     this.decisionCreates.delete(taskId);
     this.confirmedDecisionInputs.delete(taskId);
     for (const [id, attemptId] of this.decisionAttempts) {
@@ -168,9 +170,42 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
         const seq = this.inputSeqs.get(`${taskId}:${pending.id}`);
         if (seq !== undefined && seq <= to && !confirmed.has(pending.id)) throw new Error("unconfirmed turn input gap");
       }
-      const messageIds = ids.filter(id => this.inputSeqs.has(`${taskId}:${id}`))
+      let messageIds = ids.filter(id => this.inputSeqs.has(`${taskId}:${id}`))
         .sort((a, b) => this.inputSeqs.get(`${taskId}:${a}`)! - this.inputSeqs.get(`${taskId}:${b}`)!);
-      await this.rpc("turn.input", { ...input, input_to_seq: to, message_ids: messageIds });
+      try {
+        await this.rpc("turn.input", { ...input, input_to_seq: to, message_ids: messageIds });
+      } catch (error) {
+        if (!(error instanceof DaemonProtocolRpcError) || error.code !== "input_gap") throw error;
+        const result = await this.rpc("turn.input", { ...input, message_ids: [], resync: true });
+        const aligned = result.input as DaemonTurnInput;
+        if (!aligned || aligned.attempt_id !== taskId || aligned.turn_id !== input.turn_id) throw error;
+        // IDs delivered before the server's cursor must not be replayed into the next receipt.
+        messageIds = messageIds.filter(id => this.inputSeqs.get(`${taskId}:${id}`)! > aligned.input_from_seq);
+        try {
+          await this.rpc("turn.input", { ...input, input_to_seq: to, message_ids: messageIds });
+        } catch (retryError) {
+          if (!(retryError instanceof DaemonProtocolRpcError) || retryError.code !== "input_gap") throw retryError;
+          // The provider must read the missing bodies before retrying. Keep the original
+          // receipts and steer it in this attempt instead of aborting its running session.
+          const retries = (this.inputResyncs.get(taskId) ?? 0) + 1;
+          if (retries > 3) throw retryError;
+          this.inputResyncs.set(taskId, retries);
+          let delivered = this.confirmedDecisionInputs.get(taskId);
+          if (!delivered) this.confirmedDecisionInputs.set(taskId, delivered = new Set());
+          for (const deliveredId of ids) {
+            if (this.inputSeqs.has(`${taskId}:${deliveredId}`)) delivered.add(deliveredId);
+            this.steers.get(taskId)?.delete(deliveredId);
+            this.decisionRangeHints.delete(deliveredId);
+          }
+          const id = `input_resync:${retries}:${aligned.input_from_seq}:${aligned.input_to_seq}`;
+          this.queueInput(taskId, { id, taskId, kind: "steer", authorType: "system", authorId: null,
+            createdAt: new Date().toISOString(), consumedAt: null,
+            content: unreadRangeHint(aligned.input_messages[0]?.session_id ?? "", aligned.input_from_seq,
+              aligned.input_to_seq, aligned.input_messages.length).replaceAll("remi session log get", "remi message list") });
+          return;
+        }
+      }
+      this.inputResyncs.delete(taskId);
       const current = this.turns.get(taskId);
       if (current) current.inputToSeq = Math.max(current.inputToSeq, to);
     }

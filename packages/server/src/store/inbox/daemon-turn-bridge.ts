@@ -124,6 +124,8 @@ export class DaemonTurnBridge {
     try{return this.transaction(events=>{
       const turn=this.authorized(String(payload.turn_id),String(payload.attempt_id),scope,false,type==='turn.input');
       if(type==='turn.input'){
+        // Re-project under the same current-attempt authority; never advance a receipt.
+        if(payload.resync===true)return {ok:true,input:this.offerInput(this.ctx.tasks().getTaskWithAgent(turn.current_attempt_id)!)};
         const to=Number(payload.input_to_seq),from=this.cursor(turn);
         if(!Number.isSafeInteger(to)||to<0||to>Number(turn.offered_to??0)||!Array.isArray(payload.message_ids))throw new Error('input_gap');
         const replay=this.ctx.db.query('SELECT input_trigger_ack,attempt_no,session_id FROM multiremi_turn_attempts WHERE id=?').get(turn.current_attempt_id);
@@ -140,7 +142,7 @@ export class DaemonTurnBridge {
         acknowledgeInput(this.ctx,turn.id,Math.min(from,to),to);
         acknowledgeAttemptInput(this.ctx,turn,to);
         for (const message of this.messages(turn.session_id,from,to)) if (message.metadata.question_continuation === true && typeof message.metadata.root_question_id === 'string')
-          new Questions(this.ctx).consumeWithinTransaction(message.metadata.root_question_id, turn.id, turn.current_attempt_id, message.id, events);
+          new Questions(this.ctx).consumeContinuationInputWithinTransaction(message.metadata.root_question_id, turn.id, turn.current_attempt_id, message.id, events);
         return {ok:true,input_to_seq:Math.max(from,to)};
       }
       if(type==='turn.decision'){

@@ -24293,7 +24293,7 @@
       "path": "/api/workspaces/local/scm/repositories/repo_snapshot/change-requests/42/checks",
       "status": 404,
       "body": {
-        "error": "SCM repository binding not found"
+        "error": "SCM repository binding not found. Available repository bindings: none"
       }
     },
     {

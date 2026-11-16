@@ -18,6 +18,8 @@ export const DATA_SCHEMA_INPUTS = [
   'packages/server/src/store/db/postgres.ts', 'packages/server/src/store/db/pg-worker.ts',
   'packages/contracts/src/attachments.ts',
   'packages/shared/src/db/index.ts',
+  'packages/server/src/store/merge-policy-schema.ts',
+  'packages/server/src/store/merge-operation-schema.ts',
 ];
 // These image-owned programs cannot change during a code-only update. Changes
 // to OS packages, external tools or the entrypoint require base maintenance.

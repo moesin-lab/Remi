@@ -154,7 +154,6 @@ try {
       assert(leases.includes('/isolated/locks/shared-locks/'), 'Supervisor lease escaped explicit test lock root');
       evidence.daemon_boundary = { systemd_session_environment_absent: true, leases: leases.split('\n'), mounts_checked: true };
     };
-    await inspectBoundary();
     const providerLines = () => docker(['compose', '-p', project, '--env-file', envFile, '-f', composeFile, 'exec', '-T', 'daemon', 'cat', '/control/provider.jsonl']);
     const clearGate = async () => { await compose(['exec', '-T', 'daemon', 'rm', '-f', '/control/release', '/control/provider.jsonl']); };
     const releaseGate = () => compose(['exec', '-T', 'daemon', 'touch', '/control/release']);
@@ -162,6 +161,8 @@ try {
       await clearGate(); const task = await control('/task', 'POST');
       await wait('ACP tool running', async () => (await providerLines()).includes('control_waiting'));
       assert.equal((await control(`/task/${task.id}`)).status, 'running');
+      // Workspace leases exist on demand, after the first task acquires its workspace.
+      await inspectBoundary();
       return task;
     };
     const assertCompleted = async (task: any) => {

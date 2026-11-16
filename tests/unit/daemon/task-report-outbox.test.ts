@@ -114,6 +114,7 @@ describe("MultiremiTaskReportOutbox", () => {
   it("replays over 3000 request facts after an outage with bounded final chunks and delivers terminal last", async () => {
     const started = performance.now();
     let storeMs = 0;
+    const storeBuckets = Array.from({ length: 7 }, () => ({ calls: 0, elapsedMs: 0 }));
     const store = createLocalStore();
     const runtime = store.registerRuntime({ name: "long-usage", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "long-usage", provider: "claude", runtimeId: runtime.id, workspaceId: "local" });
@@ -131,6 +132,7 @@ describe("MultiremiTaskReportOutbox", () => {
     expect(first.stats().blocked).toBe(0);
     await first.close();
     const persisted = performance.now();
+    console.log("[outbox-replay-persisted]", JSON.stringify({ setupMs: initialized - started, persistMs: persisted - initialized }));
     const kinds: string[] = [];
     const reopened = track(new MultiremiTaskReportOutbox({ path, deliver: async record => {
       expect(outboxRecordBytes(record)).toBeLessThanOrEqual(DAEMON_FRAME_MAX_BYTES);
@@ -138,7 +140,14 @@ describe("MultiremiTaskReportOutbox", () => {
       if (record.kind === "usage") {
         const before = performance.now();
         store.reportTaskUsageSnapshot(task.id, record.payload.usageSnapshot as any);
-        storeMs += performance.now() - before;
+        const elapsedMs = performance.now() - before;
+        storeMs += elapsedMs;
+        const snapshot = record.payload.usageSnapshot as { revision: number };
+        if (snapshot.revision <= 3500) {
+          const bucket = storeBuckets[Math.floor((snapshot.revision - 1) / 500)]!;
+          bucket.calls++;
+          bucket.elapsedMs += elapsedMs;
+        }
       }
       else if (record.kind === "complete") store.completeTask(task.id, { output: "done" });
     } }));
@@ -148,7 +157,7 @@ describe("MultiremiTaskReportOutbox", () => {
     const report = store.getUsageReport({ workspaceId: "local", days: null });
     expect(report.summary.actual_total_tokens).toBe(7000);
     expect(report.by_model.map(row => row.actual_total_tokens).sort()).toEqual([3500, 3500]);
-    console.log("[outbox-replay-timing]", JSON.stringify({ platform: process.platform, setupMs: initialized - started, persistMs: persisted - initialized, replayMs: performance.now() - persisted, storeMs }));
+    console.log("[outbox-replay-timing]", JSON.stringify({ platform: process.platform, setupMs: initialized - started, persistMs: persisted - initialized, replayMs: performance.now() - persisted, storeMs, storeBuckets }));
   }, 180_000);
   it("keeps v2 usage through cancellation and restart without discarding deltas behind a complete marker", async () => {
     const path = tempPath();

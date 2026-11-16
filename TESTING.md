@@ -193,6 +193,8 @@ bun run tests/integration/upgrade-harness.ts --self-check-only --output=/tmp/rem
 
 平台 API 的 HOME 是 api-home 卷根目录，原始迁移报告位于 `$HOME/reports/migrations`。显式备份该卷，供真实 updater 从本次备份恢复报告到隔离演练容器；演练结束检查升级与回滚没有改写原始 before/after 报告，并记录 SHA-256。不会生成替代报告或跳过迁移门禁。
 
+已知跨版本边界（MUL-52）：`v0.2.90` → 当前候选的真实平台演练会被 schema 收缩保护拒绝，以上命令目前不能作为全流程通过的示例。CI [43918836310](https://github.com/moesin-lab/Remi/actions/runs/43918836310) 的 `upgrade-harness-evidence/isolation.json` 记录 `migration_shapes` 和 `migration_columns_removed`：2281 → 2369 个列签名，50 个旧签名消失，分别来自 `multiremi_session_archives`（24，表重命名）、`multiremi_session_archive_requests`（8，删表）、`multiremi_trace_backfill_progress`（8，删表）、`multiremi_task_traces`（7，删列）和 `multiremi_issue_workspaces`（3，删列）。产品 `migrateLocalRecords()` 执行这些收缩，真实 updater 按设计拒绝自动更新；不是 harness 的比较规则。列签名只比较 schema、表名、列名、data_type、udt_name、is_nullable，不含默认值，因此 Feishu `sender_access_policy` 默认值改变不是本次拒绝的原因。平台升级成功及回滚断言仍保持严格，该已知失败不计为成功；手动升级契约与兼容基线由 MUL-52 跟进。
+
 Docker-free daemon 路径只需 Linux、Bun 1.3.14、Git 与公共依赖源：显式 release ref 和候选 HEAD 分别导出源码、安装锁定依赖，以相同的测试专属入口启动两个版本的独立 daemon。API 使用临时 SQLite；升级和回滚都在长工具 gate 进行中强制替换 daemon，断言原 attempt `lost(runtime_recovery)`、新 attempt `completed`、结果与 runtime 上报版本。输出 `daemon-upgrade.json`（双方 SHA、版本、端口、attempt）与 `daemon-upgrade.log`，不修改生产 schema 或添加跨版本兼容层。该路径也由全栈入口首先运行，纳入同一个 CI job。
 
 `.github/workflows/upgrade-harness.yml` 的 Linux job 跑全流程，始终上传 `isolation.json`、`run.log` 与容器日志。脚本退出时清理自己的容器/卷/镜像并检查 project label 下没有残留容器。任务沙箱不开放 Docker：平台全流程只在 Linux CI 跑，本机跑 Docker-free daemon 演练与隔离自检。沙箱无法读取所保护进程的 `/proc` 时，保留 `fully_observed=false`，只作为部分证据；CI 上没有线上实例的成功不能替代同机完整观测。

@@ -689,11 +689,8 @@ describe("Multiremi API — skills and agent templates", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: "https://skills.sh/example/skills/review-helper", workspaceId: "local", name: "Imported Review" }),
     });
-    expect(duplicateSkillsShImport.status).toBe(409);
-    expect(await duplicateSkillsShImport.json()).toEqual({
-      error: "a skill with this name already exists",
-      existing_skill: { id: skillsShBody.id, name: "Imported Review" },
-    });
+    expect(duplicateSkillsShImport.status).toBe(200);
+    expect((await duplicateSkillsShImport.json()).id).toBe(skillsShBody.id);
     expect(requestedUrls).toContain("https://api.github.com/repos/example/skills/contents/skills/review-helper?ref=main");
   });
 

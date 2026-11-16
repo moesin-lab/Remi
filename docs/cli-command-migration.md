@@ -517,6 +517,25 @@ compatible task can be claimed, leaving those tasks available after the update. 
 compatibility. JSON request input remains available through `--data` or `--file`;
 `--json` selects JSON output.
 
+### Skill URL import
+
+`remi skill import --url <url>` imports GitHub, skills.sh or ClawHub sources.
+GitHub and skills.sh imports recursively include text supporting files with their
+relative paths, skip binary extensions and LICENSE files, and retain the limits
+of 128 supporting files, 1 MiB per file and 8 MiB combined supporting content.
+A failed directory listing, invalid listing or failed file download fails the
+whole GitHub/skills.sh import before saving anything. Upstream rate limits return
+HTTP 429 with a reset time when available and a hint to configure `GITHUB_TOKEN`
+on the API server; other upstream failures return HTTP 502. CLI failures display
+the server error and exit unsuccessfully.
+
+Reimporting the same source type and URL in the selected workspace updates the
+existing Skill (HTTP 200, versus HTTP 201 on creation), including SKILL.md and a
+complete replacement of supporting files: deleted upstream files are removed.
+The Skill ID, creator and other local configuration remain. Existing Skill
+management permissions apply to updates. A same-name Skill from a different
+source remains a conflict (HTTP 409); it is never replaced by name alone.
+
 ### Repository checkout defaults
 
 `remi repo checkout <repository-or-url>` without `--ref` prefers the workspace

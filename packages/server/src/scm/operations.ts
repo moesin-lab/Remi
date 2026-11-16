@@ -81,7 +81,14 @@ export class GitHubScmOperations {
     sha(headSha);
     const runs = await this.pages(`/commits/${headSha}/check-runs?filter=latest`, "check_runs");
     const statuses = await this.pages(`/commits/${headSha}/statuses`);
-    const workflows = new Map<string, string | null>();
+    const workflowRuns = await this.pages(appendQuery("/actions/runs", { head_sha: headSha }), "workflow_runs");
+    // A rerun shares its run ID; retain the newest attempt without collapsing distinct runs.
+    const workflows = new Map<string, Record<string, unknown>>();
+    for (const run of workflowRuns) {
+      if (run.head_sha !== headSha) throw new ScmOperationError("scm_evidence_mismatch", "Workflow run does not match requested head SHA");
+      const previous = workflows.get(String(run.id));
+      if (!previous || Number(run.run_attempt ?? 0) > Number(previous.run_attempt ?? 0)) workflows.set(String(run.id), run);
+    }
     const checks: ScmCheckObservation[] = [];
     for (const run of runs) {
       if (run.head_sha !== headSha) throw new ScmOperationError("scm_evidence_mismatch", "Check run does not match requested head SHA");
@@ -89,19 +96,22 @@ export class GitHubScmOperations {
       const suite = record(run.check_suite);
       let workflowPath: string | null = null;
       if (app.slug === "github-actions" && suite.id != null) {
-        const key = String(suite.id);
-        if (!workflows.has(key)) {
-          const associated = await this.pages(appendQuery("/actions/runs", { check_suite_id: key, head_sha: headSha }), "workflow_runs");
-          const matching = associated.filter(item => String(item.check_suite_id) === key && item.head_sha === headSha);
-          const paths = new Set(matching.map(item => text(item.path)).filter(Boolean));
-          workflows.set(key, paths.size === 1 ? [...paths][0]! : null);
-        }
-        workflowPath = workflows.get(key) ?? null;
+        const matching = [...workflows.values()].filter(item => String(item.check_suite_id) === String(suite.id));
+        const paths = new Set(matching.map(item => text(item.path)).filter(Boolean));
+        workflowPath = paths.size === 1 ? [...paths][0]! : null;
       }
       checks.push({
         id: String(run.id), kind: "check_run", name: text(run.name) ?? "", headSha,
         appId: typeof app.id === "number" ? app.id : null, appSlug: text(app.slug), workflowPath,
         status: text(run.status) ?? "unknown", conclusion: text(run.conclusion), url: text(run.html_url),
+      });
+    }
+    for (const run of workflows.values()) {
+      checks.push({
+        id: String(run.id), kind: "workflow_run", name: text(run.name) ?? "", headSha,
+        appId: null, appSlug: null, workflowPath: text(run.path),
+        status: text(run.status) ?? "unknown", conclusion: text(run.conclusion), url: text(run.html_url),
+        runAttempt: typeof run.run_attempt === "number" ? run.run_attempt : null,
       });
     }
     // GitHub statuses are reverse chronological; retain the latest per context.

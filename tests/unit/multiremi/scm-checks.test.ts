@@ -34,14 +34,14 @@ describe("GitHub active SCM adapter (mock provider)", () => {
           : json({ check_runs: [{ ...run, id: 8, name: "lint" }] });
       }
       if (parsed.pathname.endsWith("actions/runs")) {
-        expect(parsed.searchParams.get("check_suite_id")).toBe("99");
-        return json({ workflow_runs: [{ id: 5, check_suite_id: 99, head_sha: head, path: ".github/workflows/release-build-check.yml" }] });
+        expect(parsed.searchParams.get("head_sha")).toBe(head);
+        return json({ workflow_runs: [{ id: 5, status: "completed", conclusion: "success", run_attempt: 1, check_suite_id: 99, head_sha: head, path: ".github/workflows/release-build-check.yml" }] });
       }
       return json([{ id: 2, context: "external", state: "success" }, { id: 1, context: "external", state: "failure" }]);
     });
     const summary = await adapter().checks(head);
     expect(summary.conclusion).toBe("success");
-    expect(summary.checks).toHaveLength(3);
+    expect(summary.checks).toHaveLength(4);
     expect(summary.checks[0]).toMatchObject({ appId: 15368, appSlug: "github-actions", name: "build", workflowPath: ".github/workflows/release-build-check.yml", headSha: head });
     expect(requested.filter(path => path.includes("actions/runs"))).toHaveLength(1);
     expect(requested.some(path => path.includes("page=2"))).toBe(true);
@@ -49,13 +49,13 @@ describe("GitHub active SCM adapter (mock provider)", () => {
 
   it("treats empty, unknown, skipped, pending and failed evidence conservatively", async () => {
     for (const [state, expected] of [[null, "missing"], ["pending", "pending"], ["skipped", "pending"], ["unknown", "pending"], ["error", "failure"]] as const) {
-      globalThis.fetch = stubFetch(async (url) => String(url).includes("check-runs") ? json({ check_runs: [] }) : json(state ? [{ id: 1, context: "test", state }] : []));
+      globalThis.fetch = stubFetch(async (url) => String(url).includes("actions/runs") ? json({ workflow_runs: [] }) : String(url).includes("check-runs") ? json({ check_runs: [] }) : json(state ? [{ id: 1, context: "test", state }] : []));
       expect((await adapter().checks(head)).conclusion).toBe(expected);
     }
   });
 
   it("fails closed on SHA mismatch, provider error, and truncated evidence", async () => {
-    globalThis.fetch = stubFetch(async (url) => String(url).includes("check-runs") ? json({ check_runs: [{ id: 7, name: "build", head_sha: base }] }) : json([]));
+    globalThis.fetch = stubFetch(async (url) => String(url).includes("actions/runs") ? json({ workflow_runs: [] }) : String(url).includes("check-runs") ? json({ check_runs: [{ id: 7, name: "build", head_sha: base }] }) : json([]));
     await expect(adapter().checks(head)).rejects.toMatchObject({ code: "scm_evidence_mismatch" });
     globalThis.fetch = stubFetch(async (_input) => json({}, 403));
     await expect(adapter().checks(head)).rejects.toMatchObject({ status: 403 });
@@ -68,10 +68,31 @@ describe("GitHub active SCM adapter (mock provider)", () => {
   it("leaves workflow unknown when provider association is not proven", async () => {
     globalThis.fetch = stubFetch(async (url) => {
       if (String(url).includes("check-runs")) return json({ check_runs: [{ id: 1, name: "build", head_sha: head, status: "completed", conclusion: "success", app: { id: 15368, slug: "github-actions" }, check_suite: { id: 99 } }] });
-      if (String(url).includes("actions/runs")) return json({ workflow_runs: [{ check_suite_id: 99, head_sha: base, path: ".github/workflows/release-build-check.yml" }] });
+      if (String(url).includes("actions/runs")) return json({ workflow_runs: [{ id: 5, check_suite_id: 100, head_sha: head, path: ".github/workflows/release-build-check.yml" }] });
       return json([]);
     });
     expect((await adapter().checks(head)).checks[0]?.workflowPath).toBeNull();
+  });
+
+  it("observes workflows without job checks, including queued reruns and cancellation", async () => {
+    for (const state of ["queued", "in_progress", "cancelled"] as const) {
+      for (const otherSucceeded of [false, true]) {
+        globalThis.fetch = stubFetch(async (url) => {
+          if (String(url).includes("actions/runs")) return json({ workflow_runs: [
+            { id: 5, head_sha: head, status: "completed", conclusion: "success", run_attempt: 1 },
+            { id: 5, head_sha: head, status: state === "cancelled" ? "completed" : state,
+              conclusion: state === "cancelled" ? state : null, run_attempt: 2 },
+          ] });
+          if (String(url).includes("check-runs")) return json({ check_runs: [] });
+          return json(otherSucceeded ? [{ id: 2, context: "external", state: "success" }] : []);
+        });
+        const summary = await adapter().checks(head);
+        expect(summary.conclusion).toBe(state === "cancelled" ? "failure" : "pending");
+        expect(summary.checks.filter(check => check.kind === "workflow_run")).toEqual([
+          expect.objectContaining({ id: "5", runAttempt: 2, status: state === "cancelled" ? "completed" : state }),
+        ]);
+      }
+    }
   });
 
   it("reports unverified providers as explicitly unavailable", () => {

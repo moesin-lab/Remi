@@ -374,6 +374,10 @@ function scmErrorResponse(c: Context, error: unknown): Response {
     return c.json({ error: message, code: error.code }, status);
   }
   if (error instanceof ScmHttpError) {
+    if (error.rateLimited) {
+      return c.json({ error: "SCM provider rate limit exceeded; retry later", code: "scm_rate_limited",
+        providerStatus: error.status, retryAfterSeconds: error.retryAfterSeconds, rateLimitResetAt: error.rateLimitResetAt }, 502);
+    }
     return c.json({ error: "SCM provider request failed", code: "scm_provider_error", providerStatus: error.status }, 502);
   }
   if (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) {

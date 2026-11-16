@@ -19,7 +19,7 @@ function setup() {
   return { store, app: createMultiremiApp({ store, authToken: "dashboard-secret" }) };
 }
 const headers = { Authorization: "Bearer dashboard-secret", "Content-Type": "application/json" };
-function json(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status }); }
+function json(value: unknown, status = 200, headers: Record<string, string> = {}) { return new Response(JSON.stringify(value), { status, headers }); }
 afterEach(() => {
   globalThis.fetch = originalFetch;
   if (originalKey === undefined) delete process.env.MULTIREMI_SCM_ENCRYPTION_KEY;
@@ -32,6 +32,7 @@ describe("SCM read-only checks HTTP (mock provider)", () => {
     const { app } = setup();
     let reads = 0;
     globalThis.fetch = stubFetch(async (url) => {
+      if (String(url).includes("actions/runs")) return json({ workflow_runs: [] });
       if (String(url).includes("check-runs")) return json({ check_runs: [] });
       if (String(url).includes("statuses")) return json([]);
       reads++;
@@ -52,6 +53,7 @@ describe("SCM read-only checks HTTP (mock provider)", () => {
     const { app } = setup();
     let reads = 0;
     globalThis.fetch = stubFetch(async (url) => {
+      if (String(url).includes("actions/runs")) return json({ workflow_runs: [] });
       if (String(url).includes("check-runs")) return json({ check_runs: [{ id: 1, name: "build", status: "completed", conclusion: "success", head_sha: head }] });
       if (String(url).includes("statuses")) return json([]);
       return json(++reads === 1 ? pull : { ...pull, base: { ...pull.base, ...base } });
@@ -80,14 +82,37 @@ describe("SCM read-only checks HTTP (mock provider)", () => {
     const other = store.createWorkspace({ name: "Other", slug: "scm-other" });
     const daemon = await store.createAccessToken({ name: "SCM daemon", type: "daemon", workspaceId: "local", daemonId: "dmn_scm" });
     let calls = 0;
-    globalThis.fetch = stubFetch(async (url, init) => { calls++; expect(init?.method).toBe("GET"); return String(url).includes("check-runs") ? json({ check_runs: [] }) : String(url).includes("statuses") ? json([]) : json(pull); });
+    globalThis.fetch = stubFetch(async (url, init) => { calls++; expect(init?.method).toBe("GET"); return String(url).includes("actions/runs") ? json({ workflow_runs: [] }) : String(url).includes("check-runs") ? json({ check_runs: [] }) : String(url).includes("statuses") ? json([]) : json(pull); });
     const taskHeaders = { Authorization: `Bearer ${taskToken.token}`, "Content-Type": "application/json" };
     expect((await app.request(`${root}/42/checks`, { headers: taskHeaders })).status).toBe(200);
     expect((await app.request(root.replace("/local/", `/${other.id}/`) + "/42/checks", { headers: taskHeaders })).status).toBe(404);
     expect((await app.request(`${root}/42/checks`, { headers: { Authorization: `Bearer ${daemon.token}` } })).status).toBe(403);
-    expect(calls).toBe(4);
+    expect(calls).toBe(5);
     expect(store.listScmCanonicalEvents({ workspaceId: "local" })).toHaveLength(0);
     expect(store.getScmEntitySnapshot("scm_github", "repo_widgets", "change_request", "9001")).toBeNull();
+  });
+
+  it("distinguishes rate-limited 403 from permission 403 without exposing provider secrets", async () => {
+    const { app } = setup();
+    for (const rateHeaders of [
+      { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1800000000" },
+      { "retry-after": "60" },
+      {},
+    ] as Record<string, string>[]) {
+      globalThis.fetch = stubFetch(async () => json({ message: "secret-provider-token" }, 403,
+        { ...rateHeaders, "x-private-header": "secret-provider-token" }));
+      const response = await app.request(`${root}/42/checks`, { headers });
+      expect(response.status).toBe(502);
+      const body = await response.text();
+      expect(body).not.toContain("secret-provider-token");
+      expect(body).not.toContain("x-private-header");
+      const limited = Object.keys(rateHeaders).length > 0;
+      expect(JSON.parse(body)).toEqual(limited
+        ? { error: "SCM provider rate limit exceeded; retry later", code: "scm_rate_limited", providerStatus: 403,
+          retryAfterSeconds: "retry-after" in rateHeaders ? 60 : null,
+          rateLimitResetAt: "x-ratelimit-reset" in rateHeaders ? 1800000000 : null }
+        : { error: "SCM provider request failed", code: "scm_provider_error", providerStatus: 403 });
+    }
   });
 
   it("redacts provider errors, marks timeout unknown, and exposes no merge route", async () => {
@@ -98,7 +123,7 @@ describe("SCM read-only checks HTTP (mock provider)", () => {
       expect(failed.status).toBe(502);
       const body = await failed.text();
       expect(body).not.toContain("secret-provider-token");
-      expect(JSON.parse(body)).toMatchObject({ code: "scm_provider_error", providerStatus });
+      expect(JSON.parse(body)).toMatchObject({ code: providerStatus === 429 ? "scm_rate_limited" : "scm_provider_error", providerStatus });
     }
     globalThis.fetch = stubFetch(async (_input) => { throw new DOMException("timeout", "TimeoutError"); });
     const timed = await app.request(`${root}/42/checks`, { headers });

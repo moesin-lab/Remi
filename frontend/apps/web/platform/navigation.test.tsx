@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render as testingRender, screen, waitFor } from "@testing-library/react";
+import { useOptimisticChatOutbox, setOptimisticChatRows } from "@multiremi/core/chat";
+import { useContinuityStore } from "@multiremi/core/platform-lifecycle";
 import { useNavigation } from "@multiremi/views/navigation";
 
 const build = vi.hoisted(() => ({ changed: false, idle: true }));
-vi.mock("./build-continuity", () => ({ checkBuild: async () => build.changed, canRefresh: () => build.idle }));
+vi.mock("./build-continuity", () => ({ checkBuild: async () => build.changed, canRefresh: () => build.idle && useContinuityStore.getState().heldSends === 0 }));
 const render = (element: React.ReactNode) => testingRender(<QueryClientProvider client={new QueryClient()}>{element}</QueryClientProvider>);
 const router = vi.hoisted(() => ({
   push: vi.fn(), replace: vi.fn(), back: vi.fn(), prefetch: vi.fn(),
@@ -24,6 +26,7 @@ function ReplaceUrlButton({ path }: { path: string }) {
 }
 
 afterEach(() => {
+  setOptimisticChatRows(() => []);
   vi.restoreAllMocks();
   router.replace.mockReset(); router.push.mockReset(); vi.unstubAllGlobals(); build.changed = false; build.idle = true;
 });
@@ -67,4 +70,24 @@ it("keeps the current document while a write is unconfirmed", async () => {
   render(<WebNavigationProvider><NavigateButton /></WebNavigationProvider>);
   fireEvent.click(screen.getByText("navigate"));
   await waitFor(() => expect(router.push).toHaveBeenCalledWith("/acme/issues", undefined));
+});
+
+function ChatOwner() {
+  const rows = useOptimisticChatOutbox(state => state.rows);
+  return <span>{rows.length} held</span>;
+}
+it("keeps both drift navigations in the document after Chat → Issues unmounts its owner", async () => {
+  build.changed = true;
+  setOptimisticChatRows(() => [{ clientId: "original", sessionId: "s1", content: "keep", createdAt: "now", localSeq: 1, status: "unconfirmed" }]);
+  const assign = vi.fn();
+  vi.stubGlobal("window", { document: window.document, location: { assign }, addEventListener: window.addEventListener.bind(window), removeEventListener: window.removeEventListener.bind(window) });
+  const chat = render(<ChatOwner />);
+  render(<WebNavigationProvider><NavigateButton /></WebNavigationProvider>);
+  fireEvent.click(screen.getByText("navigate"));
+  await waitFor(() => expect(router.push).toHaveBeenCalledTimes(1));
+  chat.unmount();
+  fireEvent.click(screen.getByText("navigate"));
+  await waitFor(() => expect(router.push).toHaveBeenCalledTimes(2));
+  expect(assign).not.toHaveBeenCalled();
+  expect(useOptimisticChatOutbox.getState().rows[0]?.clientId).toBe("original");
 });

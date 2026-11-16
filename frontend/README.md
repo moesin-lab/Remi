@@ -16,7 +16,7 @@
 
 Web 自己提供 `GET /health/build`（不走 `/api`），返回 `{ "build_id": "<string>" }`，响应为 `Cache-Control: no-store`。`health` 已在工作区保留 slug 集合中。构建时优先使用 `REMI_WEB_BUILD_ID`，否则生成一次 UUID；同一值用于 Next buildId、服务端路由和浏览器 bundle。启动同一 standalone 产物的多个实例不会重新生成身份。MUL-32 可用此端点确认 Web 构建，不能将它当 API 版本。
 
-全局横幅读取 platform status，并由 `daemon:maintenance_changed` 使查询失效；收到 `platform_update_in_progress` 立即显示切换。active operation 的 switching/restarting/verifying/rolling_back 属于切换阶段，maintenance 表仍可能标为 draining。构建检测在启动、窗口重新聚焦、每 15 秒和共享导航前执行；空闲时下一次导航整页切换，存在未确认发送、队列 outbox、草稿或进行中的写入时只提示。chunk 加载异常按 tab/源构建最多自动恢复一次。
+全局横幅读取 platform status，并由 `daemon:maintenance_changed` 使查询失效；收到 `platform_update_in_progress` 立即显示切换。active operation 的 switching/restarting/verifying/rolling_back 属于切换阶段，maintenance 表仍可能标为 draining。构建检测在启动、窗口重新聚焦、每 15 秒和共享导航前执行；空闲时下一次导航整页切换，存在未确认发送、队列 outbox、草稿或进行中的写入时只提示。chunk 加载异常按 tab/源构建最多自动恢复一次。Chat 未确认消息的内容、附件与幂等键由 core 共享 outbox 持有，页面卸载不释放刷新保护，重开 Chat 可使用原键重试；精确识别的 Next 网关裸 500 即使耗尽退避预算也保持网络未确认语义。
 
 自动重放写请求严格限定为带身份的 Chat message（`session_id + dedupe_key`）和 queue enqueue（`session_id + client_id`）；服务端分别在 `send-message.ts` 与 `queued-messages.ts` 去重。重放复用原始正文与身份，覆盖网络错误和 502/503/504。Next rewrite 对连接拒绝返回裸 500 文本 `Internal Server Error`，仅此精确网关响应也视为网络不可达；应用 JSON 500 不重放。其他写操作保持原失败路径，不因加请求头就被视为幂等。读取遇到 503 + Retry-After 也会等待。重试尊重 Retry-After 的秒数或 HTTP 日期，否则使用抖动退避；等待上限为 `MAINTENANCE_RETRY_LIMIT_MS`（10 分钟），等待不占 Chat 的 20 秒有效请求预算，AbortSignal 可取消等待。到达上限仍沿用未确认送达/保留输入与人工重试路径。
 

@@ -1015,3 +1015,9 @@ a replacement.
 | `remi message question transfer` | Automatic re-routing; `remi message question get <question>` shows the current handler |
 
 端点检查使用 `remi runtime endpoint inspect --file inspection.json --json`（operation 为 `models`、`detect` 或显式单模型 `test`）；缓存读取使用 `remi runtime endpoint catalog <endpoint-id> --json`。模型列表不代表实际调用验证，`test` 可能计费。
+
+`remi scm change-request create|get|update|checks` operates on a bound repository ID
+and GitHub PR number (create/update read JSON from `--file`). Creation defaults to
+Draft and reuses the source branch's open PR. Check summaries are observations;
+they do not authorize merge. See [SCM operations](dev/scm-operations.md) for
+contracts, conservative missing/unknown evidence, and staged merge-gate delivery.

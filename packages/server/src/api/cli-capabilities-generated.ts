@@ -5186,6 +5186,58 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "scm.change-request.create": {
+      "command": "remi scm change-request create",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.get": {
+      "command": "remi scm change-request get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.update": {
+      "command": "remi scm change-request update",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.checks": {
+      "command": "remi scm change-request checks",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.checks",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "scm.change-request.list": {
       "command": "remi scm change-request list",
       "auth": [

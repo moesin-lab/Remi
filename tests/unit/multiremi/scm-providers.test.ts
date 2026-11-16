@@ -16,7 +16,7 @@ afterEach(() => {
 describe("SCM provider adapters", () => {
   it("publishes provider differences instead of pretending webhook parity", () => {
     expect(GITHUB_SCM_CAPABILITIES.streams.pipelines.webhook).toBe(true);
-    expect(GITHUB_SCM_CAPABILITIES.streams.pipelines.limitations.join(" ")).toContain("workflow runs only");
+    expect(GITHUB_SCM_CAPABILITIES.streams.pipelines.limitations.join(" ")).toContain("workflow runs");
     expect(GITHUB_SCM_CAPABILITIES.streams.pipelines.limitations.join(" ")).toContain("check_run");
     expect(CODEBASE_SCM_CAPABILITIES.streams.pipelines.poll).toBe(true);
     expect(CODEBASE_SCM_CAPABILITIES.streams.pipelines.webhook).toBe(false);
@@ -224,7 +224,7 @@ describe("SCM provider adapters", () => {
     expect(rerun.subjectId).not.toBe(webhook.subjectId);
   });
 
-  it("ignores GitHub Checks instead of creating a second pipeline identity", () => {
+  it("ingests GitHub Checks with an identity distinct from workflow runs", () => {
     const parsed = new GitHubScmProviderAdapter().parseWebhook({
       connection: scmConnection(),
       credential: { accessToken: "token", webhookSecret: "secret" },
@@ -242,8 +242,9 @@ describe("SCM provider adapters", () => {
       },
       observedAt: "2026-08-21T08:00:00.000Z",
     });
-    expect(parsed.candidates).toEqual([]);
-    expect(parsed.ignoredReason).toContain("workflow_run only");
+    expect(parsed.candidates).toHaveLength(1);
+    expect(parsed.candidates[0]).toMatchObject({ subjectId: "check_run:7001", type: "pipeline.completed", payload: { kind: "check_run", head_sha: "abc" } });
+    expect(parsed.ignoredReason).toBeNull();
   });
 
   it("filters ordinary GitHub issue comments in webhook and polling ingestion", async () => {

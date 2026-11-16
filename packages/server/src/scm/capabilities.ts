@@ -37,7 +37,7 @@ export const GITHUB_SCM_CAPABILITIES: ScmProviderCapabilities = {
       pollFidelity: "inferred",
       webhookFidelity: "exact",
       limitations: [
-        "Canonical pipeline events cover GitHub Actions workflow runs only; GitHub Checks check_run events are ignored.",
+        "Polling covers Actions workflow runs; check_run events are ingested by webhook and checks are read live per head SHA.",
       ],
     },
   },

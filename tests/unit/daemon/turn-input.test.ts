@@ -93,12 +93,12 @@ describe("turn input (ADR 0023)", () => {
   it("adds one plain sentence with the read command when the input is not complete", () => {
     const incomplete = buildTaskPrompt(chatTurn(offered(range("chat_1", 0, 2, 1), [hello]),
       [range("chat_1", 0, 2, 1), triggering(hello)]));
-    expect(incomplete).toBe("你好\n\n(Some unread messages aren't shown here. Read them before you answer: `remi message list chat_1 --from 0 --to 2`)");
+    expect(incomplete).toBe("你好\n\n(Some unread messages aren't shown here. Read them before you answer: `remi message list chat_1 --from 0 --to 2`. You must read continuously starting at the given --from.)");
     // A cold start lists the earlier history without bodies: the sentence counts it.
     const earlier = message(1, "", { to_agent_id: null, wake_applied: "inbox_only" });
     const cold = buildTaskPrompt(chatTurn(offered(range("chat_1", 0, 3, 2), [earlier, message(2, "继续")]),
       [range("chat_1", 0, 3, 2), triggering(message(2, "继续"))]));
-    expect(cold).toBe("继续\n\n(1 earlier unread message isn't shown here. Read it before you answer: `remi message list chat_1 --from 0 --to 3`)");
+    expect(cold).toBe("继续\n\n(1 earlier unread message isn't shown here. Read it before you answer: `remi message list chat_1 --from 0 --to 3`. You must read continuously starting at the given --from.)");
     expect(cold).not.toContain("{");
   });
 
@@ -134,7 +134,7 @@ describe("turn input (ADR 0023)", () => {
   it("asks for the read of folded input, and adds nothing for a cold replacement's own replay", () => {
     const folded = buildTaskPrompt(chatTurn(offered(range("chat_1", 0, 2, 1, true), [hello]),
       [range("chat_1", 0, 2, 1, true), triggering(hello, { body_folded: true, body_omitted_chars: 3 })]));
-    expect(folded).toBe("你好\n\n(Part of this input isn't shown here. Read it before you answer: `remi message list chat_1 --from 0 --to 2`)");
+    expect(folded).toBe("你好\n\n(Part of this input isn't shown here. Read it before you answer: `remi message list chat_1 --from 0 --to 2`. You must read continuously starting at the given --from.)");
     const replay = offered(range("chat_1", 1, 3, 1, true, false), [hello]);
     replay[0] = { ...replay[0]!, body_md: replay[0]!.body_md.replace("\n", `\n${replayInputHint("chat_1", 0, 1)}\n`) };
     const replayed = buildTaskPrompt(chatTurn(replay, [range("chat_1", 1, 3, 1, true, false)]));
@@ -159,7 +159,7 @@ describe("turn input (ADR 0023)", () => {
       [range("ises_1", 0, 3, 2), triggering(later)], { input_to_seq: 3 }));
     expect(incomplete).toBe([
       "[Alice] please do X",
-      "(1 earlier unread message isn't shown here. Read it before you answer: `remi message list ises_1 --from 0 --to 3`)",
+      "(1 earlier unread message isn't shown here. Read it before you answer: `remi message list ises_1 --from 0 --to 3`. You must read continuously starting at the given --from.)",
       "(Reply to comment msg_1: `remi message send ises_1 --kind reply --reply-to msg_1`.)",
     ].join("\n\n"));
     // A wake for this agent in another delegation's scope arrives blanked and is not this turn's trigger.
@@ -184,7 +184,7 @@ describe("turn input (ADR 0023)", () => {
     const user = message(3, "顺便看看这个");
     expect(buildTaskPrompt(chatTurn([user], [range("chat_1", 1, 3, 2, true, false), triggering(user)]))).toBe("顺便看看这个");
     expect(buildTaskPrompt(chatTurn([user], [range("chat_1", 1, 3, 2, false, false), triggering(user)])))
-      .toBe("顺便看看这个\n\n(Some unread messages aren't shown here. Read them before you answer: `remi message list chat_1 --from 1 --to 3`)");
+      .toBe("顺便看看这个\n\n(Some unread messages aren't shown here. Read them before you answer: `remi message list chat_1 --from 1 --to 3`. You must read continuously starting at the given --from.)");
   });
 
   it("does not depend on the provider session being new or resumed", () => {
@@ -253,7 +253,7 @@ describe("steer input (ADR 0023)", () => {
   it("is the user's text, with the unread sentence when its range is not complete", () => {
     expect(buildSteerInjectionPrompt([steer(`${range("chat_1", 0, 5, 1, true)}\n改用中文输出`)])).toBe("改用中文输出");
     expect(buildSteerInjectionPrompt([steer(`${range("chat_1", 0, 5, 2, false)}\n改用中文输出`)]))
-      .toBe("改用中文输出\n\n(Some unread messages aren't shown here. Read them before you continue: `remi message list chat_1 --from 0 --to 5`)");
+      .toBe("改用中文输出\n\n(Some unread messages aren't shown here. Read them continuously starting at the given --from before you continue: `remi message list chat_1 --from 0 --to 5`)");
     expect(steerMessageText(`${range("chat_1", 0, 5, 2, false)}\n改用中文输出`)).toBe("改用中文输出");
   });
 

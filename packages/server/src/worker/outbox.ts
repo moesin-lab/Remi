@@ -503,6 +503,19 @@ export class MultiremiTaskReportOutbox {
         this.recordWaiters.delete(id);
       }
     } catch (error) {
+      if (error instanceof DaemonProtocolRpcError && error.code === "input_unread" && record.kind === "turn.complete") {
+        const waiter = this.recordWaiters.get(record.id);
+        if (waiter) {
+          this.deleteRecords(recordIds);
+          this.recordWaiters.delete(record.id);
+          waiter.reject(error);
+        } else {
+          // Preserve the durable reply across a crash between refusal and retry.
+          this.db.run("UPDATE outbox_events SET payload=?,next_attempt_at=NULL WHERE id=? AND status='pending'",
+            [JSON.stringify({ ...record.payload, input_unread_fallback: true }), record.id]);
+        }
+        return;
+      }
       if (error instanceof DaemonProtocolRpcError && error.code === "turn_input_pending" && record.kind === "turn.complete") {
         if (this.closed) return;
         const waiter = this.recordWaiters.get(record.id);

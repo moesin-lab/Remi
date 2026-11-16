@@ -250,6 +250,65 @@ describe("v2 report reconciliation with real sockets and DB", () => {
     expect(outbox(h).stats().blocked).toBe(0);
   });
 
+  it("MUL-63 preserves an orphaned unread completion over the real socket",async()=>{
+    const h=await fixture();await h.startDaemon();
+    const agent=h.store.createAgent({name:'Orphaned unread',provider:'claude'});
+    const t=h.store.createTask({agentId:agent.id,prompt:'x'.repeat(20000)});
+    expect(h.store.claimTask(runtime(h))?.id).toBe(t.id);h.store.startTask(t.id);
+    const input=h.store.getDaemonTurnBridge().offerInput(h.store.getTaskWithAgent(t.id)!);
+    outbox(h).enqueue(t.id,'turn.complete',{runtime_id:runtime(h),turn_id:input.turn_id,input_to_seq:input.input_to_seq,reply:{body_md:'saved before restart',message_kind:'final'}});
+    await outbox(h).waitForTaskDrain(t.id);
+    expect(h.store.getTask(t.id)).toMatchObject({status:'completed',result:'saved before restart'});
+    expect(h.store.getTurn(input.turn_id)?.input_to_seq??0).toBe(0);
+    expect(h.ledger.filter(entry=>entry.type==='turn.complete' && entry.partition===t.id)).toHaveLength(2);
+    expect(outbox(h).stats()).toMatchObject({pending:0,blocked:0});
+  });
+
+  for(const mode of ['read','limit','provider_gone','legacy'] as const)it(`MUL-63 live folded input recovery: ${mode}`,async()=>{
+    let rounds=0;
+    const prompts:string[]=[];
+    let taskId='';
+    let readTo=0;
+    const h=await fixture({onReady:()=>{},
+      beforeSend(frame,socket) {
+        if(mode==='legacy' && frame.t==='hello') {
+          frame.p.caps=frame.p.caps.filter((cap:string)=>cap!=='input_unread');
+          socket.native.send(JSON.stringify(frame));return false;
+        }
+      },
+      providerFactory:()=>({
+      async *sendStream(prompt) {
+        prompts.push(String(prompt));rounds++;
+        if(rounds>=(mode==='limit'?3:mode==='legacy'?1:2))(h.daemon as any).claimsPaused=true;
+        if(mode==='provider_gone' && rounds===2)throw new Error('provider session exited');
+        const task=h.store.getTaskWithAgent(taskId)!;
+        const offer=h.store.getDaemonTurnBridge().offerInput(task);
+        readTo=offer.input_to_seq;
+        if(rounds===1)h.store.recordSessionAgentRangeRead(offer.input_messages[0]!.session_id,task.agentId,{seq:readTo,offset:0},{seq:readTo+1,offset:0},taskId);
+        if(mode==='read' && rounds===2)h.store.recordSessionAgentRangeRead(offer.input_messages[0]!.session_id,task.agentId,{seq:1,offset:0},{seq:readTo+1,offset:0},taskId);
+        yield {sessionUpdate:'agent_message_chunk',content:[{type:'text',text:`answer ${rounds}`}]} as any;
+      },
+      getLastResponse:()=>({text:`answer ${rounds}`,sessionId:'folded-live',usage:[],toolCalls:[]} as any),
+      close:async()=>{},
+    })});
+    const agent=h.store.createAgent({name:'Folded recovery',provider:'claude'});
+    const t=h.store.createTask({agentId:agent.id,prompt:'x'.repeat(20000)});taskId=t.id;
+    await h.startDaemon();
+    await waitFor(()=>h.store.getTask(taskId)?.status==='completed','folded completion',10000);
+    await outbox(h).waitForTaskDrain(taskId);
+    expect(rounds).toBe(mode==='limit'?3:mode==='legacy'?1:2);
+    if(mode!=='legacy') {
+      expect(prompts[1]).toContain('--from 0');
+      expect(prompts[1]).toContain(`--to ${readTo}`);
+    }
+    expect(h.store.getTask(taskId)).toMatchObject({status:'completed',result:mode==='provider_gone'?'answer 1':`answer ${rounds}`});
+    const turn=h.db.query('SELECT input_to_seq FROM multiremi_turns WHERE current_attempt_id=?').get(taskId)!;
+    expect(turn.input_to_seq??0).toBe(mode==='read'?readTo:0);
+    expect(outbox(h).stats().blocked).toBe(0);
+    if(mode!=='read')expect(h.db.query("SELECT COUNT(*) AS n FROM multiremi_turns WHERE agent_id=? AND current_attempt_id<>?").get(agent.id,taskId)?.n).toBe(1);
+    expect(h.ledger.filter(entry=>entry.type==='turn.complete' && entry.partition===taskId)).toHaveLength(mode==='limit'?3:mode==='legacy'?1:2);
+  },15000);
+
   it("continues the live provider after a completion steer conflict and reaches exactly one terminal state", async () => {
     let turns = 0;
     let injected = false;

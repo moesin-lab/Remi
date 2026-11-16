@@ -29986,7 +29986,7 @@
       "path": "/api/skills/import",
       "status": 502,
       "body": {
-        "error": "SKILL.md not found at the root of example/skill@main. For multi-skill repositories, point to github.com/example/skill/tree/main/<skill-dir>"
+        "error": "HTTP 503 for https://api.github.com/repos/example/skill"
       }
     },
     {
@@ -30083,7 +30083,7 @@
       "path": "/api/multiremi/skills/import",
       "status": 502,
       "body": {
-        "error": "SKILL.md not found at the root of example/skill@main. For multi-skill repositories, point to github.com/example/skill/tree/main/<skill-dir>"
+        "error": "HTTP 503 for https://api.github.com/repos/example/skill"
       }
     },
     {

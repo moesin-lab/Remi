@@ -728,6 +728,21 @@ describe("MultiremiTaskReportOutbox", () => {
     expect(outbox.stats()).toMatchObject({ pending: 0, blocked: 0 });
   });
 
+  it("hands input_unread back without blocking and preserves an orphaned completion", async () => {
+    const delivered: MultiremiOutboxRecord[] = [];
+    const outbox = track(new MultiremiTaskReportOutbox({ path: ":memory:", deliver: async record => {
+      if (!record.payload.input_unread_fallback) throw new DaemonProtocolRpcError("input_unread", false, "read from 0");
+      delivered.push(record);
+    } }));
+    await expect(outbox.enqueueAndWait("live", "turn.complete", {reply:{body_md:"answer"}})).rejects.toMatchObject({code:"input_unread"});
+    expect(outbox.stats()).toMatchObject({pending:0,blocked:0});
+    outbox.enqueue("orphan", "turn.complete", {reply:{body_md:"saved answer"}});
+    await outbox.waitForTaskDrain("orphan");
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.payload).toMatchObject({input_unread_fallback:true,reply:{body_md:"saved answer"}});
+    expect(outbox.stats()).toMatchObject({pending:0,blocked:0});
+  });
+
   it("turns a replayed steer conflict into runtime_recovery failure without blocking", async () => {
     const delivered: MultiremiOutboxRecord[] = [];
     const outbox = track(new MultiremiTaskReportOutbox({ path: ":memory:", deliver: async record => {

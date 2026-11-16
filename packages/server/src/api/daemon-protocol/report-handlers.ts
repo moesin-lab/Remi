@@ -215,7 +215,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
         if (fields) fields.final_reply_md = reply.body_md;
         const result = await turns.complete({ payload: p as unknown as DaemonTurnCompletePayload, completionFields: fields,
           traceEventCount: completionTraceEventCount(p.trace, string(p.attempt_id)) },
-        { runtimeId, daemonId: session.daemonId, workspaceId: store.getRuntimeLite(runtimeId)!.workspaceId ?? "local", userId: session.ownerAccessToken?.userId });
+        { runtimeId, daemonId: session.daemonId, workspaceId: store.getRuntimeLite(runtimeId)!.workspaceId ?? "local", userId: session.ownerAccessToken?.userId, inputUnread: session.supportsInputUnread });
         if (result.ok === true && fields?.trace) onTraceClosed?.(string(p.attempt_id), fields.trace.head, runtimeId);
         return result;
       }

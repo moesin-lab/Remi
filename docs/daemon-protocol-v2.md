@@ -978,6 +978,16 @@ available_commands?: SlashCommandCatalogue | null;  // agent 最近一次发布�
   终态照常生效；截断后写进这一尝试的 agent 会话线 `multiremi_session_lanes.available_commands`
   （JSON 文本，迁移 `20261020_lane_available_commands`），空列表照存；较早的尝试不覆盖较新尝试写下的目录。
   Chat 菜单经 `GET /api/chat/slash-commands` 读取。
+- 折叠输入未读只在协商 `input_unread` 能力后返回 `input_unread`（`retryable:false`），
+  附 `read_to_seq`、`required_to_seq`、`read_command` 和包含连续读取命令的 `message`。
+  outbox 将该拒绝交回执行器并移除这次完成记录，保持 trace 开放；执行器在同一 provider 会话
+  提醒最多两次，要求从指定 `--from` 连续读取后重新给出最终回复。
+  达到上限、provider 补读续接失败，或 outbox 重放时执行器已不在，daemon 用
+  `input_unread_fallback:true` 重交原回复；未协商能力的旧 daemon 直接兜底。
+  服务端接受完成，只确认到实际读取位置（不回退既有业务覆盖），在结果和回复的
+  `task_result.input_unread` 记录 `{read_to_seq,required_to_seq}`；未读 now 输入由现有
+  `turn_end_re_ring` 再唤起。该原因不会变成 `invalid_report`，越过 offered 的非法完成仍拒绝。
+  `remi message list` 如因读取缺口未推进游标，在 stderr 提供连续读取命令，退出码不变。
 - `turn.complete` 的回复在 `reply: {body_md, message_kind}` 中，载荷另带 `turn_id`、`attempt_id`、`input_to_seq`；不再上报旧 `output`。
 - `head` 与 `event_count` 分开：新写的 trace 两者相等，**历史 trace 可能是稀疏的**，
   `head ≠ event_count`（A11）。

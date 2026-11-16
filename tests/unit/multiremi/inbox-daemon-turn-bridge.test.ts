@@ -10,6 +10,33 @@ pendingTurnBackendTests('MUL-506 DaemonTurnBridge',fixture=>{
     const attempt=store.claimTask('rt_inbox_bridge')!;store.startTask(attempt.id);
     const bridge=store.getDaemonTurnBridge(),scope={runtimeId:'rt_inbox_bridge',daemonId:'daemon_inbox_bridge',workspaceId:'local'},offer=bridge.offerInput(store.getTaskWithAgent(attempt.id)!);
     return {store,db,agent,issue,session,sent,attempt,bridge,scope,offer};}
+  for(const mode of ['read','limit','legacy'] as const)it(`MUL-63 folded input completion: ${mode}`,()=>{
+    const f=setup();
+    const folded=f.store.sendMessage({session_id:f.session.id,sender:{type:'member',id:'mem_local_local'},to:{type:'none'},message_kind:'status',wake_requested:'inbox_only',body_md:'folded context'});
+    const offer=f.bridge.offerInput(f.store.getTaskWithAgent(f.attempt.id)!);
+    const scope={...f.scope,inputUnread:mode!=='legacy'};
+    const payload={turn_id:f.sent.turn_id!,attempt_id:f.attempt.id,input_to_seq:offer.input_to_seq,reply:{body_md:'preserved reply',message_kind:'final' as const}};
+    // A suffix read cannot bridge the earlier unread trigger.
+    f.store.recordSessionAgentRangeRead(f.session.id,f.agent.id,{seq:folded.message.seq,offset:0},{seq:offer.input_to_seq+1,offset:0},f.attempt.id);
+    if(mode!=='legacy') {
+      const rejected=f.bridge.complete({payload,completionFields:null},scope);
+      expect(rejected).toMatchObject({ok:false,code:'input_unread',read_to_seq:0,required_to_seq:offer.input_to_seq});
+      expect(rejected.read_command).toBe(`remi message list ${f.session.id} --from 0 --to ${offer.input_to_seq}`);
+      expect(f.store.getTurn(f.sent.turn_id!)?.status).toBe('running');
+      if(mode==='read')f.store.recordSessionAgentRangeRead(f.session.id,f.agent.id,{seq:1,offset:0},{seq:offer.input_to_seq+1,offset:0},f.attempt.id);
+    }
+    const done=f.bridge.complete({payload:{...payload,input_unread_fallback:mode==='limit'},completionFields:null},scope);
+    expect(done.ok).toBe(true);
+    const turn=f.store.getTurn(f.sent.turn_id!)!;
+    expect(turn.status).toBe('completed');
+    expect(f.store.getMessage(String(done.reply_message_id))?.body_md).toBe('preserved reply');
+    expect(turn.input_to_seq??0).toBe(mode==='read'?offer.input_to_seq:0);
+    if(mode!=='read')expect(f.store.getMessage(String(done.reply_message_id))?.metadata.task_result).toMatchObject({input_unread:{read_to_seq:0,required_to_seq:offer.input_to_seq}});
+  });
+  it('MUL-63 completion beyond offered remains invalid even with fallback',()=>{
+    const f=setup();
+    expect(f.bridge.complete({payload:{turn_id:f.sent.turn_id!,attempt_id:f.attempt.id,input_to_seq:f.offer.input_to_seq+1,input_unread_fallback:true,reply:{body_md:'invalid',message_kind:'final'}},completionFields:null},{...f.scope,inputUnread:true})).toMatchObject({ok:false,code:'invalid_report'});
+  });
   it('checks current attempt/runtime and confirms input contiguously',()=>{const f=setup();const payload={turn_id:f.sent.turn_id,attempt_id:f.attempt.id,input_to_seq:f.offer.input_to_seq,message_ids:f.offer.input_messages.map(m=>m.id)};
     expect(f.bridge.rpc('turn.input',{...payload,attempt_id:'wrong'},f.scope).ok).toBe(false);
     expect(f.bridge.rpc('turn.input',{...payload,message_ids:[]},f.scope).ok).toBe(false);

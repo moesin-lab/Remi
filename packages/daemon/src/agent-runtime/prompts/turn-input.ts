@@ -127,13 +127,14 @@ function readCommand(range: Pick<UnreadRangeRecord, "session_id" | "from_seq" | 
 
 /** The one sentence incomplete input gets. The server's input receipt needs the read, so it is not optional. */
 function unreadSentence(range: UnreadRangeRecord, missing: number, partial: boolean): string {
+  const continuity = " You must read continuously starting at the given --from.";
   if (missing > 0) {
     return `(${missing} earlier unread message${missing === 1 ? " isn't" : "s aren't"} shown here. `
-      + `Read ${missing === 1 ? "it" : "them"} before you answer: ${readCommand(range)})`;
+      + `Read ${missing === 1 ? "it" : "them"} before you answer: ${readCommand(range)}.${continuity})`;
   }
   return partial
-    ? `(Part of this input isn't shown here. Read it before you answer: ${readCommand(range)})`
-    : `(Some unread messages aren't shown here. Read them before you answer: ${readCommand(range)})`;
+    ? `(Part of this input isn't shown here. Read it before you answer: ${readCommand(range)}.${continuity})`
+    : `(Some unread messages aren't shown here. Read them before you answer: ${readCommand(range)}.${continuity})`;
 }
 
 interface ProjectionTrigger { id: string; seq: number; author_type: string; author_id: string | null; body: string; folded: boolean }
@@ -355,7 +356,7 @@ function steerInputParts(messages: readonly PreparedSteer[], options: { agentId?
     parts.push([labelled(label(speakerOf(message)), body.trim() ? body : ""), ...(lines.length ? [lines.join("\n")] : [])]
       .filter(Boolean).join("\n\n"));
   }
-  if (incomplete) parts.push(`(Some unread messages aren't shown here. Read them before you continue: ${readCommand(incomplete)})`);
+  if (incomplete) parts.push(`(Some unread messages aren't shown here. Read them continuously starting at the given --from before you continue: ${readCommand(incomplete)})`);
   if (force.length) {
     const notes = force.map(message => message.content.trim()).filter(Boolean);
     parts.push([

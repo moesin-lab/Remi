@@ -111,6 +111,12 @@ export function reRingAfterTurnEnd(ctx: StoreContext, turnId: string, events: Co
   return successor;
 }
 
+export class InputUnreadError extends Error {
+  constructor(readonly readToSeq:number, readonly requiredToSeq:number, readonly command:string) {
+    super('input_unread');
+  }
+}
+
 /** Folded/context bodies need a full CLI range read before a receipt may cross them. */
 export function assertOfferedInputRead(ctx:StoreContext,turn:any,toSeq:number):void {
   const state=attemptInputState(ctx,turn);

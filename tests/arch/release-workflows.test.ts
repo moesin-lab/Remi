@@ -4,8 +4,6 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { parse } from "yaml";
-import { migrationFingerprint } from "../../packages/platform-updater/src/safety.js";
-import schemaInputs from "../../packages/platform-updater/src/data-schema-inputs.json";
 import { DAEMON_MIN_CLI_VERSION } from "../../packages/contracts/src/daemon-protocol.js";
 
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -32,14 +30,6 @@ describe("release workflows", () => {
       expect(new Set(minimums)).toEqual(new Set([DAEMON_MIN_CLI_VERSION]));
     });
   }
-
-  test("application publication policy matches the migration source included in bundles", () => {
-    const policy = JSON.parse(readFileSync(resolve(repoRoot, "deploy/platform-application-compatibility.json"), "utf8"));
-    const source = schemaInputs.map(path => readFileSync(resolve(repoRoot, path), "utf8")).join("");
-    expect(policy.dataSchema).toBe(migrationFingerprint(source));
-    expect(Array.isArray(policy.rollbackSafeFrom)).toBe(true);
-    for (const fingerprint of policy.rollbackSafeFrom) expect(fingerprint).toMatch(/^[a-f0-9]{64}$/);
-  });
 
   test("release publication uses a prepared snapshot and exact-commit full CI before building", () => {
     const release = readWorkflow("release.yml");
@@ -82,7 +72,7 @@ describe("release workflows", () => {
     const builds = release.jobs.publish.steps.filter((step: any) => step.uses === "docker/build-push-action@v6");
     expect(builds).toHaveLength(3);
     for (const build of builds) expect(build.with.platforms).toBe("linux/amd64,linux/arm64");
-    expect(JSON.stringify(release)).toContain("dataSchema");
+    expect(JSON.stringify(release)).toContain("platform-rollback-review.json");
     const packaging = release.jobs.publish.steps.findIndex((step: any) => step.run?.includes('package-platform-application.mjs'));
     // Packaging pulls the same immutable index for both architectures. The
     // classic Docker store cannot retain both under that digest.

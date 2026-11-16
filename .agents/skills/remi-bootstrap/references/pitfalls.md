@@ -19,3 +19,4 @@
 | 脚本里的 `remi` 连到了别的服务器 | 交互 shell 的 `remi` 是带 `MULTIREMI_CONFIG` 的函数 | 脚本里显式 export 该变量 |
 | Agent 的提交改了 `.github/workflows/`，推送被拒 | Agent 的令牌没有 `workflow` 权限（有意保留） | 维护者核对 workflow 改动（权限、令牌用途、触发条件）后用自己的凭据推送原提交，在 PR 描述里注明；不要给 Agent 扩权 |
 | 中断的会话恢复后要确认真的好了 | 修复部署后旧会话可能仍有残留状态 | 看修复后该会话的第一个新轮次是否 completed，确认后再关闭缺陷单 |
+| 设了代理变量，部署时镜像构建仍然下载失败 | docker 经 `sudo` 调用，环境变量被丢掉 | 包装脚本加 `--preserve-env=` 列出代理变量 |

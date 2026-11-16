@@ -11,21 +11,14 @@
    node scripts/local-profile.mjs stable deploy --ref <full-sha> --build-local true
    ```
 
-3. 主机只能通过本地代理出网时（Docker 构建容器连不上 GitHub，API 镜像下载 lark-cli 会失败），先手工构建镜像，再让脚本复用：
+3. 主机只能通过本地代理出网时（Docker 构建容器连不上外网，API 镜像下载 lark-cli 会失败），在运行部署脚本的进程里设置代理变量。脚本把 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 及小写形式按变量名传给构建；代理地址是回环地址时，Linux 上自动使用 `build.network: host`（可用 `REMI_BUILD_NETWORK=host|default|none` 覆盖）。代理值不会写进 profile、备份或日志。
 
    ```bash
-   S=~/.remi/profiles/stable/releases/<full-sha>   # 第一次运行 deploy 会建好这个快照目录；失败也会保留
-   docker build --network host \
-     --build-arg HTTP_PROXY=<proxy> --build-arg HTTPS_PROXY=<proxy> --build-arg NO_PROXY=<no-proxy> \
-     --build-arg MULTIREMI_VERSION=<version> --build-arg REMI_APPLICATION_BASE_REF=<full-sha> \
-     --label org.opencontainers.image.revision=<full-sha> \
-     -f $S/deploy/docker/Dockerfile.api -t remi-api:stable-<full-sha> $S
-   # Web 同理：--target runtime，另加 REMOTE_API_URL、REMI_APP_VERSION、NEXT_BUILD_CPUS、
-   # NEXT_PUBLIC_SITE_URL、NEXT_PUBLIC_LOCAL_PROFILE、NEXT_PUBLIC_WS_URL，取值见 profile 的 compose.env 与 compose.yml
+   export HTTP_PROXY=http://127.0.0.1:<port> HTTPS_PROXY=http://127.0.0.1:<port> NO_PROXY=localhost,127.0.0.1,::1,<内网段>
+   node scripts/local-profile.mjs stable deploy --ref <full-sha> --build-local true
    ```
 
-   `<version>` 取 `~/.remi/profiles/stable/deployment.json` 的 `version`。脚本会检查镜像的 revision label，不匹配会拒绝覆盖。构建完再运行第 2 步的命令。
-4. 当前用户不在 docker 组时，用一个只转发到 `sudo -n docker` 的包装脚本放到 `PATH` 前面再运行部署脚本。
+4. 当前用户不在 docker 组时，用一个转发到 `sudo -n docker` 的包装脚本放到 `PATH` 前面。`sudo` 默认会丢掉环境变量，包装脚本必须用 `--preserve-env=HTTP_PROXY,HTTPS_PROXY,NO_PROXY,http_proxy,https_proxy,no_proxy,REMI_BUILD_NETWORK` 保留它们，否则 Compose 拿不到代理、构建照样失败。
 5. 脚本先构建镜像、再停旧服务、备份（`Backup: …` 行给出目录）、启动新服务。检查：
 
    ```bash

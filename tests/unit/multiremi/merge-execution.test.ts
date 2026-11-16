@@ -11,17 +11,18 @@ const originalFetch = globalThis.fetch, originalKey = process.env.MULTIREMI_SCM_
 const head = 'a'.repeat(40), base = 'b'.repeat(40), mergeSha = 'c'.repeat(40);
 const headers = { Authorization: 'Bearer merge-test', 'Content-Type': 'application/json' };
 afterEach(() => { globalThis.fetch = originalFetch; if (originalKey === undefined) delete process.env.MULTIREMI_SCM_ENCRYPTION_KEY; else process.env.MULTIREMI_SCM_ENCRYPTION_KEY = originalKey; resetMultiremiTestEnv(); });
-async function fixture(options: { human?: boolean; chat?: boolean; omitReview?: boolean; strict?: boolean; disabled?: boolean } = {}) {
+async function fixture(options: { human?: boolean; chat?: boolean; delegated?: boolean; omitReview?: boolean; strict?: boolean; disabled?: boolean } = {}) {
   process.env.MULTIREMI_SCM_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString('base64');
   const store = createStore(); store.ensureLocalWorkspace();
   store.updateWorkspace('local', { settings: { scm_complete_issue_on_merge_enabled: true }, repos: [{ id: 'repo_merge', name: 'widgets', url: 'https://github.com/acme/widgets.git', defaultBranch: 'main' }] });
   store.createScmConnection({ id: 'scm_merge', workspaceId: 'local', name: 'GitHub', provider: 'github', mode: 'hybrid', accessToken: 'provider-secret', webhookSecret: 'hook-secret', repositoryIds: ['repo_merge'] });
   const project = store.createProject({ title: 'Merge execution' });
   const issue = createResponsibleTestIssue(store, { title: 'Merge', projectId: project.id, workspaceId: 'local', createdBy: 'local' });
-  const agent = store.createAgent({ name: 'Author', provider: 'codex', workspaceId: 'local' });
-  const runtime = store.registerRuntime({ name: 'Merge runtime', provider: 'codex', daemonId: 'merge-runtime' });
+  const agent = store.createAgent({ name: 'Author', provider: 'codex', workspaceId: 'local', ...(options.delegated ? { maxConcurrentTasks: 4 } : {}) });
+  const runtime = store.registerRuntime({ name: 'Merge runtime', provider: 'codex', daemonId: 'merge-runtime', ...(options.delegated ? { maxConcurrency: 4 } : {}) });
   const chat = options.chat ? store.createChatSession({ agentId: agent.id, creatorId: 'local', title: 'Chat merge' }) : null;
-  const task = store.createTask({ agentId: agent.id, ...(chat ? { chatSessionId: chat.id } : { issueId: issue.id }), workspaceId: 'local', prompt: 'Merge request' });
+  const delegator = options.delegated ? store.createAgent({ name: 'Delegator', provider: 'codex', workspaceId: 'local' }) : null;
+  const task = store.createTask({ ...(delegator ? { delegatedByAgentId: delegator.id, delegationId: 'dlg_merge_approval' } : {}), agentId: agent.id, ...(chat ? { chatSessionId: chat.id } : { issueId: issue.id }), workspaceId: 'local', prompt: 'Merge request' });
   expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
   const token = await store.createTaskAccessToken(task, 'local');
   const taskHeaders = { ...headers, Authorization: `Bearer ${token.token}` };
@@ -73,7 +74,7 @@ async function fixture(options: { human?: boolean; chat?: boolean; omitReview?: 
   const service = new MergeExecutionService(store);
   const request = async (key = 'key1', overrides = {}, h = taskHeaders) => app.request(`${root}/merge`, { method: 'POST', headers: h, body: JSON.stringify({ expected_head_sha: head, method: 'squash', idempotency_key: key, ...overrides }) });
   const answer = async (id: string, choice = 'approve', h = headers, extra = {}) => app.request(`/api/messages/${id}/question/answer`, { method: 'POST', headers: h, body: JSON.stringify({ expected_route_revision: 1, response: { selected_options: [choice] }, ...extra }) });
-  return { store, app, state, pull, pauseMerge, request, answer, service, root, cr, project, issue, agent, task, chat, taskHeaders, submit, policyRoot, policy };
+  return { store, app, state, pull, pauseMerge, request, answer, service, root, cr, project, issue, agent, runtime, task, chat, taskHeaders, submit, policyRoot, policy };
 }
 async function operation(response: Response) { return (await response.json()).operation; }
 function expire(f: Awaited<ReturnType<typeof fixture>>, id: string) { const op = f.store.mergeOperations.get(id)!; return f.store.mergeOperations.update(op, { lease_until: '2000-01-01T00:00:00Z' })!; }
@@ -144,6 +145,35 @@ describe('B2 policy-gated merge execution (real SQLite/HTTP, mock GitHub)', () =
     expect((await f.answer(q)).status).toBe(200); await f.service.runOnce(); expect(f.state.puts).toHaveLength(1);
     expect((await f.answer(q, 'reject', headers, { revise: true, reason: 'changed', expected_answer_revision: 1 })).status).toBe(409);
   });
+  it('keeps delegated approval on the originating scope and excludes other lanes of the same Agent', async () => {
+    const f = await fixture({ human: true, delegated: true });
+    const turn = f.store.getTurnForAttempt(f.task.id)!;
+    expect(turn.execution_scope).toBe('dlg_merge_approval');
+    const response = await f.request(); expect(response.status).toBe(202);
+    const op = await operation(response), q = op.approval_message_id;
+    expect(op.state).toBe('awaiting_human');
+    expect(f.store.getMessage(q)?.metadata.execution_scope).toBe(turn.execution_scope);
+    expect(f.store.getQuestion(q)).toMatchObject({ stage: 'human', wait_status: 'none', source_attempt_id: null });
+    expect((await f.app.request(`/api/messages/${q}/question`, { headers: f.taskHeaders })).status).toBe(200);
+    expect((await f.app.request(`/api/messages/${q}/question/present`, { method: 'POST', headers: f.taskHeaders,
+      body: JSON.stringify({ expected_route_revision: 1, summary: 'Delegated gate evidence inspected' }) })).status).toBe(200);
+    for (const scope of ['dlg_other_merge', '']) {
+      const other = f.store.createTask({ agentId: f.agent.id, issueId: f.issue.id, workspaceId: 'local', prompt: 'Other lane',
+        ...(scope ? { delegatedByAgentId: f.task.delegatedByAgentId!, delegationId: scope } : {}) });
+      expect(f.store.claimTask(f.runtime.id)?.id).toBe(other.id);
+      f.store.startTask(other.id);
+      const otherTurn = f.store.getTurnForAttempt(other.id)!;
+      expect(otherTurn.session_id).toBe(turn.session_id);
+      expect(otherTurn.execution_scope ?? '').toBe(scope);
+      const token = await f.store.createTaskAccessToken(other, 'local');
+      expect((await f.app.request(`/api/messages/${q}/question`, { headers: { ...headers, Authorization: `Bearer ${token.token}` } })).status).toBe(403);
+    }
+    expect(f.state.puts).toHaveLength(0);
+    expect((await f.answer(q)).status).toBe(200);
+    await f.service.runOnce();
+    expect(f.store.mergeOperations.get(op.id)?.state).toBe('merged');
+    expect(f.state.puts).toEqual([{ sha: head, merge_method: 'squash' }]);
+  });
   for (const reject of ['reject','close'] as const) it(`${reject} settles operation without merge`, async () => {
     const f = await fixture({ human: true }), op = await operation(await f.request()), q = op.approval_message_id;
     const response = reject === 'reject' ? await f.answer(q,'reject') : await f.app.request(`/api/messages/${q}/question/close`, { method: 'POST', headers, body: JSON.stringify({ expected_route_revision: 1, reason: 'Do not merge' }) });
@@ -202,6 +232,7 @@ describe('B2 policy-gated merge execution (real SQLite/HTTP, mock GitHub)', () =
   it('member requests route approval to linked Issue Main', async () => {
     const f = await fixture({ human: true }), op = await operation(await f.request('member', {}, headers));
     expect(f.store.getQuestion(op.approval_message_id)?.session_id).toBe(f.store.getOrCreateDefaultIssueSession(f.issue.id).id);
+    expect(f.store.getMessage(op.approval_message_id)?.metadata.execution_scope).toBe('');
     expect(f.store.mergeOperations.get(op.id)?.state).toBe('awaiting_human'); expect(f.state.puts).toHaveLength(0);
   });
   it('ambiguous provider response goes unknown, then recovers by GET without another PUT', async () => {

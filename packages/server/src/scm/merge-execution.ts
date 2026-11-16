@@ -59,7 +59,7 @@ export class MergeExecutionService {
     if (operation.state !== 'requested') return operation;
     return this.process(operation.id);
   }
-  private approvalRoute(op: ScmMergeOperation): { sessionId: string; issueId: string | null } | null {
+  private approvalRoute(op: ScmMergeOperation): { sessionId: string; issueId: string | null; executionScope: string } | null {
     if (op.actor.kind === 'agent') {
       const task = op.actor.turn_id ? this.store.getTask(op.actor.turn_id) : null;
       if (!task || task.agentId !== op.actor.id || task.workspaceId !== op.workspace_id) return null;
@@ -68,14 +68,14 @@ export class MergeExecutionService {
       const scoped = this.store.getIssueSessionWithOwnerScope(turn.session_id);
       if (scoped) {
         if (scoped.ownerWorkspaceId !== op.workspace_id || scoped.session.workspaceId !== op.workspace_id) return null;
-        return { sessionId: scoped.session.id, issueId: scoped.session.chatId ? null : scoped.session.issueId };
+        return { sessionId: scoped.session.id, issueId: scoped.session.chatId ? null : scoped.session.issueId, executionScope: turn.execution_scope ?? '' };
       }
       const chat = this.store.getChatSession(turn.session_id);
-      return chat?.workspaceId === op.workspace_id ? { sessionId: chat.id, issueId: null } : null;
+      return chat?.workspaceId === op.workspace_id ? { sessionId: chat.id, issueId: null, executionScope: turn.execution_scope ?? '' } : null;
     }
     const issueId = this.store.mergePolicies.approvalIssue(op.project_id, op.change_request_id);
     const issue = issueId ? this.store.getIssue(issueId) : null;
-    if (issue?.workspaceId === op.workspace_id) return { sessionId: this.store.getOrCreateDefaultIssueSession(issue.id).id, issueId: issue.id };
+    if (issue?.workspaceId === op.workspace_id) return { sessionId: this.store.getOrCreateDefaultIssueSession(issue.id).id, issueId: issue.id, executionScope: '' };
     return null;
   }
   async process(id: string): Promise<ScmMergeOperation> {

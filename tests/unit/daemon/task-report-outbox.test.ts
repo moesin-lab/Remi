@@ -735,12 +735,61 @@ describe("MultiremiTaskReportOutbox", () => {
       delivered.push(record);
     } }));
     await expect(outbox.enqueueAndWait("live", "turn.complete", {reply:{body_md:"answer"}})).rejects.toMatchObject({code:"input_unread"});
-    expect(outbox.stats()).toMatchObject({pending:0,blocked:0});
+    expect(outbox.stats()).toMatchObject({pending:1,pendingTerminal:1,blocked:0});
+    expect(outbox.taskIdsWithPendingTerminal()).toEqual(["live"]);
     outbox.enqueue("orphan", "turn.complete", {reply:{body_md:"saved answer"}});
     await outbox.waitForTaskDrain("orphan");
     expect(delivered).toHaveLength(1);
     expect(delivered[0]?.payload).toMatchObject({input_unread_fallback:true,reply:{body_md:"saved answer"}});
-    expect(outbox.stats()).toMatchObject({pending:0,blocked:0});
+    expect(outbox.stats()).toMatchObject({pending:1,blocked:0});
+  });
+
+  it("recovers the original reply after restart during an unread reminder exactly once", async () => {
+    const path = tempPath();
+    const paused = track(new MultiremiTaskReportOutbox({ path, deliver: async record => {
+      if (record.kind === "turn.complete") throw new DaemonProtocolRpcError("input_unread", false, "read from 0");
+    } }));
+    const payload = { runtime_id: "runtime", turn_id: "turn", input_to_seq: 341,
+      reply: { body_md: "original answer", message_kind: "final" } };
+    await expect(paused.enqueueAndWait("task", "turn.complete", payload)).rejects.toMatchObject({ code: "input_unread" });
+    // Progress during the reminder must neither publish nor erase the paused reply.
+    await paused.enqueueAndWait("task", "progress", {});
+    expect(paused.stats()).toMatchObject({ pendingTerminal: 1, blocked: 0 });
+    await paused.close();
+    const delivered: MultiremiOutboxRecord[] = [];
+    const reopened = track(new MultiremiTaskReportOutbox({ path, deliver: async record => { delivered.push(record); } }));
+    reopened.pumpAll();
+    expect(await reopened.waitForTaskDrain("task")).toBe("delivered");
+    expect(delivered.filter(record => record.kind === "turn.complete")).toHaveLength(1);
+    expect(delivered[0]?.payload).toEqual({ ...payload, input_unread_fallback: true });
+    await reopened.close();
+    const again = track(new MultiremiTaskReportOutbox({ path, deliver: async record => { delivered.push(record); } }));
+    await again.flushAll();
+    expect(delivered.filter(record => record.kind === "turn.complete")).toHaveLength(1);
+    expect(again.stats()).toMatchObject({ pending: 0, blocked: 0 });
+  });
+
+  it("atomically replaces a paused completion after reminder reports, retaining the successor for restart", async () => {
+    const path = tempPath();
+    const delivered: string[] = [];
+    let online = true;
+    const live = track(new MultiremiTaskReportOutbox({ path, canSend: () => online, deliver: async record => {
+      if (record.kind === "turn.complete") throw new DaemonProtocolRpcError("input_unread", false);
+      delivered.push(record.kind);
+    } }));
+    await expect(live.enqueueAndWait("task", "turn.complete", { reply: { body_md: "old" } })).rejects.toMatchObject({ code: "input_unread" });
+    await live.enqueueAndWait("task", "progress", {});
+    online = false;
+    live.enqueue("task", "turn.complete", { reply: { body_md: "new" } });
+    expect(live.stats()).toMatchObject({ pending: 1, pendingTerminal: 1, blocked: 0 });
+    await live.close();
+    const recovered: MultiremiOutboxRecord[] = [];
+    const reopened = track(new MultiremiTaskReportOutbox({ path, deliver: async record => { recovered.push(record); } }));
+    await reopened.flushAll();
+    expect(delivered).toEqual(["progress"]);
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]?.payload).toEqual({ reply: { body_md: "new" } });
+    expect(reopened.stats()).toMatchObject({ pending: 0, blocked: 0 });
   });
 
   it("turns a replayed steer conflict into runtime_recovery failure without blocking", async () => {

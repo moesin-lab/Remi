@@ -5650,16 +5650,20 @@ export class MultiremiDaemon {
           }
           throw turnError;
         }
-        unreadReply = null;
         const lastItem = trace.lastItem;
         if (!turnAbort.signal.aborted && provider.typedSessionFailures === false && lastItem?.type === "agent_message") {
           const error = redactProviderErrorText(lastItem.text, failureCredentials);
           const failureReason = classifyLegacyProviderFailure(error);
           if (failureReason) {
+            if (unreadReply !== null) {
+              await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: true }, unreadReply, finalSessionId, workDir);
+              return { output: unreadReply, sessionId: finalSessionId, workDir, usageSnapshot: ledger.finish(), completed: true };
+            }
             await this.client.pinTaskSession(task.id, finalSessionId, workDir);
             return { output: error, sessionId: finalSessionId, workDir, usageSnapshot: ledger.finish(), completed: false, failureReason };
           }
         }
+        unreadReply = null;
         if (forceAnswerExpired) {
           log.warn(`Task ${task.id} force-answer grace elapsed; delivering last reply`);
           // Steers that arrived too late to act on are still recorded/consumed

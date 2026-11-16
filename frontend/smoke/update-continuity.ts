@@ -83,6 +83,7 @@ try {
   checks.push("standalone A build endpoint is reachable with no-store");
   const fixture = JSON.parse(readFileSync(join(root, "fixture.json"), "utf8"));
   const browser = child("node", ["--experimental-strip-types", join(repo, "frontend/smoke/update-browser.ts")]);
+  browser.stdout!.on("data", data => writeFileSync(join(root, "browser-stdout.log"), data, { flag: "a" }));
   browser.stderr!.on("data", data => writeFileSync(join(root, "browser.log"), data, { flag: "a" }));
   const read = lineChannel(browser); browser.stdin!.write(JSON.stringify({ ...fixture, web, artifacts: root }) + "\n");
   assert.equal(await read(), "BROWSER_READY");

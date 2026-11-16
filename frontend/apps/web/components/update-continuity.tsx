@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useIsMutating, useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@multiremi/core/auth";
 import { platformStatusOptions, useContinuityStore } from "@multiremi/core/platform-lifecycle";
@@ -7,6 +7,15 @@ import { UpdateBanner } from "@multiremi/views/common/update-banner";
 import { checkBuild, canRefresh, recoverChunk } from "../platform/build-continuity";
 
 export function UpdateContinuity() {
+  const banner = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = banner.current;
+    if (!element) return;
+    const measure = () => document.documentElement.style.setProperty("--web-update-banner-height", `${element.getBoundingClientRect().height}px`);
+    const observer = new ResizeObserver(measure);
+    observer.observe(element); measure();
+    return () => { observer.disconnect(); document.documentElement.style.removeProperty("--web-update-banner-height"); };
+  }, []);
   const loggedIn = useAuthStore(s => !!s.user);
   const status = useQuery({ ...platformStatusOptions(), enabled: loggedIn });
   const switching = useContinuityStore(s => s.switching);
@@ -32,6 +41,6 @@ export function UpdateContinuity() {
   const mode = status.data?.maintenance.mode;
   const operationSwitching = ["switching", "restarting", "verifying", "rolling_back"].includes(status.data?.activeOperation?.status ?? "");
   const state = switching || operationSwitching ? "switching" : mode === "draining" ? "draining" : updated ? "updated" : null;
-  return <UpdateBanner state={state} busy={!!pending || !!mutations || busy} drain={status.data?.activeOperation?.progress.drain}
-    onRefresh={() => { if (canRefresh() && !mutations) window.location.reload(); }} />;
+  return <div ref={banner}><UpdateBanner state={state} busy={!!pending || !!mutations || busy} drain={status.data?.activeOperation?.progress.drain}
+    onRefresh={() => { if (canRefresh() && !mutations) window.location.reload(); }} /></div>;
 }

@@ -499,7 +499,7 @@ export class Questions {
     this.ctx.feishuBot().enqueueQuestionPresentationWithinTransaction(message.id);
   }
   /** Platform-only creation: no provider callback, nonce or execution-owner routing. */
-  createMergeApproval(input: { operation: ScmMergeOperation; sessionId: string; issueId: string | null; body: string }) {
+  createMergeApproval(input: { operation: ScmMergeOperation; sessionId: string; issueId: string | null; executionScope: string; body: string }) {
     return this.transaction(events => {
       const { operation: op } = input;
       const session = this.ctx.issueSessions().getIssueSessionWithOwnerScope(input.sessionId);
@@ -512,7 +512,7 @@ export class Questions {
         workspace_id: op.workspace_id, source_issue_id: input.issueId, source_attempt_id: null, responsibility_revision: null,
         human_required: true, route: [{ handler: operator ? { type: 'member', id: operator.id } : null, issue_id: input.issueId, stage: 'human' }], route_index: 0,
         route_revision: 1, route_reason: null, status: 'pending', summary: null, answer: null, answer_revision: 0, history: [], wait: { status: 'none', reason: null } };
-      const sent = sendMessageWithinTransaction(this.ctx, { session_id: input.sessionId,
+      const sent = sendMessageWithinTransaction(this.ctx, { session_id: input.sessionId, execution_scope: input.executionScope,
         sender: op.actor.kind === 'agent' ? { type: 'agent', id: op.actor.id } : { type: 'platform', id: null },
         to: { type: 'none' }, message_kind: 'decision', wake_requested: 'inbox_only', body_md: input.body,
         options: [{ label: 'Approve', value: 'approve' }, { label: 'Reject', value: 'reject' }],

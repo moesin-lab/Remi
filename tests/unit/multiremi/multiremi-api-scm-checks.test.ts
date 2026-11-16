@@ -92,10 +92,14 @@ describe("SCM read-only checks HTTP (mock provider)", () => {
 
   it("redacts provider errors, marks timeout unknown, and exposes no merge route", async () => {
     const { app } = setup();
-    globalThis.fetch = stubFetch(async (_input) => json({ message: "secret-provider-token" }, 403));
-    const failed = await app.request(`${root}/42/checks`, { headers });
-    expect(failed.status).toBe(502);
-    expect(await failed.text()).not.toContain("secret-provider-token");
+    for (const providerStatus of [403, 429]) {
+      globalThis.fetch = stubFetch(async (_input) => json({ message: "secret-provider-token" }, providerStatus));
+      const failed = await app.request(`${root}/42/checks`, { headers });
+      expect(failed.status).toBe(502);
+      const body = await failed.text();
+      expect(body).not.toContain("secret-provider-token");
+      expect(JSON.parse(body)).toMatchObject({ code: "scm_provider_error", providerStatus });
+    }
     globalThis.fetch = stubFetch(async (_input) => { throw new DOMException("timeout", "TimeoutError"); });
     const timed = await app.request(`${root}/42/checks`, { headers });
     expect(timed.status).toBe(504);

@@ -68,3 +68,7 @@ server/server
 data/
 .kilo
 .idea
+
+# Web build identity is an App Router source route.
+!apps/web/app/health/build/
+!apps/web/app/health/build/route.ts

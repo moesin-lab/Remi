@@ -39,7 +39,7 @@
     },
     "access": {
       "title": "Access control",
-      "description": "Choose who can use the bot to create Issues."
+      "description": "Choose which Feishu accounts can use the bot."
     },
     "conversations": {
       "title": "Chats & notifications",
@@ -385,11 +385,11 @@
     "senderAllowlist": {
       "access_title": "Bot capability access",
       "agent_access": "Anyone who can message this bot can use the responding Agent's enabled capabilities. The Agent's own permission and approval rules still apply.",
-      "require_allowlist": "Require a sender allowlist to create Issues",
+      "require_allowlist": "Only allowlisted accounts can use this bot",
       "unnamed": "Feishu account · {{id}}",
       "account_identifiers": "More account identifiers",
       "title": "Feishu account allowlist",
-      "description": "Accounts that message this bot appear here automatically, with duplicates merged. Allowlisted accounts can ask the bot to create Issues in this private space.",
+      "description": "Accounts that message this bot appear here automatically, with duplicates merged. Only allowlisted accounts can use the bot; other accounts are told they lack access.",
       "refresh": "Refresh",
       "loading": "Loading accounts…",
       "configure_first": "Configure the Feishu bot above to discover incoming accounts.",

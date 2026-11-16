@@ -23,6 +23,16 @@ afterEach(() => {
   resetMultiremiTestEnv();
 });
 
+/** In allowlist mode a first message only records the sender; approve it before it can chat. */
+function admitSender(store: MultiremiStore, revision: number, openId: string): void {
+  expect(() => store.submitFeishuBotMessage("local", "rt_bot", {
+    revision, externalSessionKey: `oc_admit_${openId}`, externalMessageId: `om_admit_${openId}`,
+    senderOpenId: openId, text: "Hello",
+  })).toThrow("allowlist");
+  const sender = store.listFeishuBotSenders("local").find((candidate) => candidate.open_id === openId)!;
+  store.setFeishuBotSenderAllowed("local", sender.id, true, "local");
+}
+
 function scaffold(options: { online?: boolean; chatQuestionHandler?: boolean } = {}): {
   store: MultiremiStore;
   revision: number;
@@ -422,10 +432,10 @@ describe("Feishu Issue topics", () => {
     for (const matching of [true, false]) {
       it(`accepts inbound messages with ${scenario.name} (${matching ? "matching" : "other"} group)`, () => {
         const { store, revision } = scaffold();
-        store.submitFeishuBotMessage("local", "rt_bot", {
+        expect(() => store.submitFeishuBotMessage("local", "rt_bot", {
           revision, externalSessionKey: "oc_discovery", externalMessageId: "om_discovery",
           senderOpenId: "ou_issue_topic_owner", text: "Hello",
-        });
+        })).toThrow("allowlist");
         store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
         store.updateWorkspace("local", { settings: { issueTopics: scenario.raw } });
         const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -498,10 +508,10 @@ describe("Feishu Issue topics", () => {
   for (const scenario of ["missing recipient", "invalid recipient", "invalid projects", "different chat"] as const) {
     it(`accepts inbound messages with an invalid person config (${scenario})`, () => {
       const { store, revision } = scaffold();
-      store.submitFeishuBotMessage("local", "rt_bot", {
+      expect(() => store.submitFeishuBotMessage("local", "rt_bot", {
         revision, externalSessionKey: "oc_discovery", externalMessageId: "om_discovery",
         senderOpenId: "ou_issue_topic_owner", text: "Hello",
-      });
+      })).toThrow("allowlist");
       store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
       const project = store.createProject({ title: "Topic project", workspaceId: "local" });
       const issueTopics = {
@@ -697,10 +707,10 @@ describe("Feishu Issue topics", () => {
     const { store, revision } = scaffold({ chatQuestionHandler: false });
     expect(store.getFeishuBotConfig("local")?.responsibleMemberId ?? null).toBeNull();
     configureTopics(store);
-    store.submitFeishuBotMessage("local", "rt_bot", {
+    expect(() => store.submitFeishuBotMessage("local", "rt_bot", {
       revision, externalSessionKey: "oc_no_human_discovery", externalMessageId: "om_no_human_discovery",
       senderOpenId: "ou_issue_topic_owner", text: "Hello",
-    });
+    })).toThrow("allowlist");
     store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
     const created = store.submitFeishuBotMessage("local", "rt_bot", {
       revision, chatType: "group", chatId: "oc_issue_topics",
@@ -720,10 +730,10 @@ describe("Feishu Issue topics", () => {
     it(`publishes group Issue creation ${rollback ? "never on rollback" : "after commit"}`, () => {
       const { store, revision } = scaffold();
       configureTopics(store);
-      store.submitFeishuBotMessage("local", "rt_bot", {
+      expect(() => store.submitFeishuBotMessage("local", "rt_bot", {
         revision, externalSessionKey: "oc_audit_discovery", externalMessageId: "om_audit_discovery",
         senderOpenId: "ou_issue_topic_owner", text: "Hello",
-      });
+      })).toThrow("allowlist");
       store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
       const events: boolean[] = [];
       const unsubscribe = store.onWorkspaceEvent((event) => {
@@ -980,6 +990,7 @@ describe("Feishu Issue topics", () => {
       reply_to_message_id: "om_issue_root",
     });
 
+    admitSender(store, revision, "ou_issue_topic_owner");
     const inbound = store.submitFeishuBotMessage("local", "rt_bot", {
       revision,
       externalSessionKey: "oc_issue_topics:thread:om_issue_root",
@@ -987,6 +998,7 @@ describe("Feishu Issue topics", () => {
       replyToMessageId: "om_issue_reply",
       chatId: "oc_issue_topics",
       threadId: "om_issue_root",
+      senderOpenId: "ou_issue_topic_owner",
       text: "Continue this Issue.",
     });
     expect(inbound.chatSessionId).toBe(String(binding.chat_session_id));
@@ -1048,6 +1060,7 @@ describe("Feishu Issue topics", () => {
   it("keeps a private Feishu chat independent when its Agent creates an Issue", async () => {
     const { store, revision } = scaffold();
     configureTopics(store);
+    admitSender(store, revision, "ou_issue_topic_owner");
     const inbound = store.submitFeishuBotMessage("local", "rt_bot", {
       revision,
       chatType: "p2p",
@@ -1087,8 +1100,8 @@ describe("Feishu Issue topics", () => {
   it("turns a new configured group topic into one Issue and reuses it for replies", () => {
     const { store, revision } = scaffold();
     configureTopics(store);
-    store.submitFeishuBotMessage("local", "rt_bot", { revision, externalSessionKey: "oc_discovery",
-      externalMessageId: "om_discovery", senderOpenId: "ou_issue_topic_owner", text: "Hello" });
+    expect(() => store.submitFeishuBotMessage("local", "rt_bot", { revision, externalSessionKey: "oc_discovery",
+      externalMessageId: "om_discovery", senderOpenId: "ou_issue_topic_owner", text: "Hello" })).toThrow("allowlist");
     store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
     const first = store.submitFeishuBotMessage("local", "rt_bot", {
       revision,
@@ -1151,16 +1164,23 @@ describe("Feishu Issue topics", () => {
       externalSessionKey: "oc_issue_topics:thread:approval", externalMessageId: messageId,
       senderOpenId: openId, text: "Create the requested Issue",
     });
+    const agentId = store.getFeishuBotConfig("local")!.agentId;
+    // Hold auto-creation back while both approved senders contribute to the Chat.
+    store.updateAgent(agentId, { issueCreationRequiresProposal: true });
+    admitSender(store, revision, "ou_first");
+    admitSender(store, revision, "ou_second");
     const first = send("ou_first", "om_first");
     const second = send("ou_second", "om_second");
     expect(second.chatSessionId).toBe(first.chatSessionId);
     expect(store.getFeishuIssueIdForChatSession(first.chatSessionId)).toBeNull();
+    store.updateAgent(agentId, { issueCreationRequiresProposal: false });
     const senders = store.listFeishuBotSenders("local");
-    store.setFeishuBotSenderAllowed("local", senders.find(s => s.open_id === "ou_second")!.id, true, "local");
+    // A revoked earlier contributor still blocks automatic creation for the Chat.
+    store.setFeishuBotSenderAllowed("local", senders.find(s => s.open_id === "ou_first")!.id, false, "local");
+    expect(() => send("ou_first", "om_revoked")).toThrow("allowlist");
     send("ou_second", "om_partial_approval");
     expect(store.listIssues({ workspaceId: "local" })).toHaveLength(0);
     store.setFeishuBotSenderAllowed("local", senders.find(s => s.open_id === "ou_first")!.id, true, "local");
-    const agentId = store.getFeishuBotConfig("local")!.agentId;
     store.updateAgent(agentId, { issueCreationRequiresProposal: true });
     send("ou_second", "om_agent_restricted");
     expect(store.listIssues({ workspaceId: "local" })).toHaveLength(0);
@@ -1173,6 +1193,7 @@ describe("Feishu Issue topics", () => {
   it("creates a dedicated Issue topic without binding the source Feishu conversation", async () => {
     const { store, revision } = scaffold();
     configureTopics(store);
+    admitSender(store, revision, "ou_issue_topic_owner");
     const inbound = store.submitFeishuBotMessage("local", "rt_bot", {
       revision,
       externalSessionKey: "oc_source:thread:om_source_root",

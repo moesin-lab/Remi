@@ -190,7 +190,7 @@ function scaffold(): ReturnType<typeof freshStore> & { agentId: string; runtimeI
     agentId: agent.id,
     runtimeId,
     appId: "cli_lock_paths",
-    senderAccessPolicy: "allowlist",
+    senderAccessPolicy: "agent",
     appSecretOp: "set",
     appSecret: APP_SECRET,
     domain: "feishu",

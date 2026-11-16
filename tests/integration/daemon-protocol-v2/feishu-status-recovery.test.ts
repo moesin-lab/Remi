@@ -27,7 +27,7 @@ it("recovers an unacknowledged online report and releases outbound without a new
     await h.settleHeartbeat();
     const runtimeId = h.ledger.find(entry => entry.type === "hello")!.frame.p.runtimes[0].runtime_id as string;
     const agent = h.store.createAgent({ name: "Concierge", provider: "claude", workspaceId: "local", runtimeId });
-    const config = h.store.upsertFeishuBotConfig("local", {
+    const config = h.store.upsertFeishuBotConfig("local", { senderAccessPolicy: "agent",
       agentId: agent.id, runtimeId, appId: "cli_status_recovery", appSecretOp: "set",
       appSecret: "fixture-only-secret", domain: "feishu", enabled: true,
     });

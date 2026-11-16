@@ -10,7 +10,7 @@ import { createServer } from "node:net";
 import { createInterface } from "node:readline";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
-import { Database } from "bun:sqlite";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 const repo = resolve(import.meta.dir, "../..");
 const root = mkdtempSync(join(tmpdir(), "remi-update-smoke-"));
 const webDir = join(repo, "frontend/apps/web");
@@ -97,7 +97,7 @@ try {
     if (mode === "gate") { backend.process.stdin!.write("release\n"); assert.equal(await backend.read(), "SMOKE_RELEASED"); }
     else backend = await api();
     assert.equal(await read(), `SENT_${mode}`);
-    const db = new Database(join(root, "smoke.sqlite"), { readonly: true });
+    const db = openSqliteDatabase(join(root, "smoke.sqlite"), { readonly: true });
     const row = db.query("SELECT count(*) AS total FROM multiremi_conversation_log WHERE session_id = ? AND body_md = ?").get(fixture.sessionId, `continuity-${mode}`) as { total: number };
     assert.equal(row.total, 1); db.close();
     checks.push(`${mode}: pending UI, restored delivery, exactly one SQLite row, no error UI`); console.log(`PASS ${checks.at(-1)}`);

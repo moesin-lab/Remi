@@ -7,9 +7,17 @@ beforeEach(() => {
   registerChatStore(createChatStore({ storage: { getItem: k => memory.get(k) ?? null, setItem: (k, v) => { memory.set(k, v); }, removeItem: k => { memory.delete(k); } } }));
   useContinuityStore.setState({ pendingWrites: 0, heldSends: 0 }); sessionStorage.clear();
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 describe("web build continuity", () => {
+  it("leaves development updates to HMR without compiling the build route", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    expect(await checkBuild()).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it("checks the Web-owned no-store identity, tolerating missing and malformed responses", async () => {
+    vi.stubEnv("NODE_ENV", "production");
     const fetch = vi.fn().mockResolvedValueOnce(Response.json({ build_id: "different" }))
       .mockResolvedValueOnce(Response.json({ build_id: 3 })).mockRejectedValueOnce(new TypeError("offline"));
     vi.stubGlobal("fetch", fetch);

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -75,7 +76,7 @@ describe("Multiremi release artifacts", () => {
       for (const directory of [release, bin, mocks]) mkdirSync(directory);
       const oldBinary = "#!/bin/sh\necho old-remi\n";
       writeFileSync(join(bin, "remi"), oldBinary);
-      const newBinary = `#!/bin/sh\n[ "$1 $2" = "runtime prepare" ] || exit 91\n[ "$(cat "$MULTIREMI_BIN_DIR/remi")" = "$(cat "$FIXTURE_OLD_BINARY")" ] || exit 92\nprintf prepared > "$FIXTURE_EVENTS"\nexit ${prepareExit}\n`;
+      const newBinary = `#!/bin/sh\nif [ "$1" = --version ]; then echo 0.0.0-test; exit 0; fi\n[ "$1 $2" = "runtime prepare" ] || exit 91\n[ "$(cat "$MULTIREMI_BIN_DIR/remi")" = "$(cat "$FIXTURE_OLD_BINARY")" ] || exit 92\nprintf prepared > "$FIXTURE_EVENTS"\nexit ${prepareExit}\n`;
       writeFileSync(join(root, "old-remi"), oldBinary);
       writeFileSync(join(release, "remi"), newBinary);
       writeFileSync(join(release, "remi-claude-agent-acp"), "#!/bin/sh\nexit 0\n");
@@ -86,12 +87,16 @@ describe("Multiremi release artifacts", () => {
       chmodSync(join(mocks, "curl"), 0o755);
       const result = spawnSync("bash", [resolve(import.meta.dir, "../../scripts/install-remi.sh")], {
         encoding: "utf8", timeout: 15_000,
-        env: { ...process.env, PATH: `${mocks}:${process.env.PATH}`, MULTIREMI_VERSION: "0.0.0-test", MULTIREMI_BIN_DIR: bin,
+        env: { ...process.env, PATH: `${mocks}:${process.env.PATH}`, MULTIREMI_VERSION: "0.0.0-test", MULTIREMI_BIN_DIR: bin, MULTIREMI_INSTALL_ROOT: join(root, "store"),
           FIXTURE_ARCHIVE: archive, FIXTURE_EVENTS: join(root, "events"), FIXTURE_OLD_BINARY: join(root, "old-remi") },
       });
       expect(result.status).toBe(prepareExit);
       expect(readFileSync(join(root, "events"), "utf8")).toBe("prepared");
-      expect(readFileSync(join(bin, "remi"), "utf8")).toBe(prepareExit === 0 ? newBinary : oldBinary);
+      if (prepareExit === 0) {
+        const id = createHash("sha256").update(readFileSync(archive)).digest("hex").slice(0, 8);
+        expect(readFileSync(join(root, "store", "versions", id, "remi"), "utf8")).toBe(newBinary);
+        expect(readFileSync(join(bin, "remi"), "utf8")).toContain(`/versions/${id}/remi`);
+      } else expect(readFileSync(join(bin, "remi"), "utf8")).toBe(oldBinary);
       if (prepareExit) expect(result.stderr).toContain("existing remi binary was not replaced");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });

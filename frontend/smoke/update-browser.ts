@@ -36,6 +36,13 @@ try {
     if (mode === "gate") {
       const bounds = await page.locator('[data-update-state="switching"]').boundingBox();
       assert(bounds && bounds.y >= 0 && bounds.height > 0, "Maintenance banner must be fully visible");
+      assert(await page.locator('[data-update-state="switching"]').evaluate(element => {
+        const bounds = element.getBoundingClientRect();
+        return [10, bounds.width / 2, bounds.width - 10].every(x =>
+          element.contains(document.elementFromPoint(bounds.x + x, bounds.y + bounds.height / 2)));
+      }), "Maintenance banner must not be occluded by the fixed sidebar");
+      const sidebar = await page.locator('[data-slot="sidebar-container"]').boundingBox();
+      assert(sidebar && sidebar.y >= bounds.y + bounds.height, "Sidebar must begin below the banner");
     }
     await page.screenshot({ path: join(fixture.artifacts, `pending-${mode}.png`) });
     console.log(`PENDING_${mode}`);

@@ -267,6 +267,16 @@ backup, and starts the selected code with its bundled runtimes. API/Web are
 temporarily unavailable during backup, rehearsal and child startup. Their
 containers, supervisors, PostgreSQL container and independent agents stay alive.
 
+The first `REMI_INTERNAL_BACKUP_PATHS` entry must be API HOME (`/remi-data`
+in the supplied Compose topology). For each target/previous startup, rehearsal
+uses the host's shared report recovery code to extract only `reports/migrations`
+from the current backup's `volume-data-0.archive` into separate scratch
+directories. Only regular files/directories are accepted, with the same entry
+and size limits as host rehearsal. Live HOME is never mounted into rehearsal;
+missing or invalid reports refuse the update with instructions to restore the
+persistent migration reports. Neither schema gates nor manual upgrade boundaries
+are relaxed.
+
 Supervisor JSON files are synced before atomic replacement. On Windows, short
 sharing violations (`EPERM`, `EACCES`, `EBUSY`) retry the rename at most nine times
 with 450 ms total backoff, keeping the previous file readable. Other errors and

@@ -4,6 +4,7 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { readJson, releaseDirectory, writeJson } from '../../packages/platform-updater/src/supervisor.mjs';
+import { rehearseStoreMigration } from '../../packages/platform-updater/src/container-runtime.mjs';
 
 const root = process.env.REMI_APPLICATION_ROOT || '/remi-program';
 const state = process.env.REMI_INTERNAL_UPDATE_STATE || '/remi-state';
@@ -40,12 +41,16 @@ async function rehearse(job: { backup: string; previous: string; target: string 
     await command('createdb', [env.PGDATABASE], env);
     await command('pg_restore', ['--dbname', env.PGDATABASE, '--no-owner', '--no-privileges', '--exit-on-error', join(backup, 'database.dump')], env);
     const before = (await command('psql', ['-X', '-At', '-v', 'ON_ERROR_STOP=1', '-c', query], env)).split('\n');
-    for (const id of [job.target, job.previous]) {
+    for (const [index, id] of [job.target, job.previous].entries()) {
       const release = releaseDirectory(root, id);
       if (!await readJson(join(release, 'complete.json'))) throw new Error('Rehearsal release is incomplete');
-      await command(join(release, 'runtime/bun'), ['--eval',
-        "const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {runMigrations}=await import('./packages/server/src/store/migrations.ts');const db=openMultiremiDatabase();try{await runMigrations(db)}finally{await db.close()}"],
-      { ...env, MULTIREMI_DATABASE_URL: 'postgresql://remi_rehearsal@127.0.0.1:55432/remi_update_rehearsal', MULTIREMI_HOME: join(scratch, 'home') }, join(release, 'api'));
+      // The first configured backup mount is API HOME. Restore it independently
+      // for each release so candidate writes cannot supply the previous reports.
+      await rehearseStoreMigration(join(release, 'api'), join(backup, 'volume-data-0.archive'),
+        join(scratch, 'migration-' + index), {
+          executable: join(release, 'runtime/bun'),
+          env: { ...env, MULTIREMI_DATABASE_URL: 'postgresql://remi_rehearsal@127.0.0.1:55432/remi_update_rehearsal' },
+        });
       const after = new Set((await command('psql', ['-X', '-At', '-v', 'ON_ERROR_STOP=1', '-c', query], env)).split('\n'));
       if (before.some(column => !after.has(column))) throw new Error('Migration removed or changed an existing column');
     }

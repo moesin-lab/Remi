@@ -266,7 +266,6 @@ jobs:
           SOURCE_SHA="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
           ASSET_BASE="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
           MANIFEST_URL="$ASSET_BASE/platform-release.json"
-          DATA_SCHEMA="$(node scripts/platform-data-schema.mjs)"
           jq -n \
             --arg version "$VERSION" \
             --arg ref "$SHA" \
@@ -278,9 +277,29 @@ jobs:
             --arg updaterImage "${REGISTRY}/${OWNER}/remi-updater@${UPDATER_DIGEST}" \
             --arg sourceUrl "$ASSET_BASE/$ARCHIVE" \
             --arg sourceSha256 "$SOURCE_SHA" \
-            --arg dataSchema "$DATA_SCHEMA" \
-            '{version:$version,ref:$ref,publishedAt:$publishedAt,releaseUrl:$releaseUrl,manifestUrl:$manifestUrl,apiImage:$apiImage,webImage:$webImage,updaterImage:$updaterImage,sourceUrl:$sourceUrl,sourceSha256:$sourceSha256,dataSchema:$dataSchema}' \
+            '{version:$version,ref:$ref,publishedAt:$publishedAt,releaseUrl:$releaseUrl,manifestUrl:$manifestUrl,apiImage:$apiImage,webImage:$webImage,updaterImage:$updaterImage,sourceUrl:$sourceUrl,sourceSha256:$sourceSha256}' \
             > platform-release.json
+
+      # Release managers attach a reviewed, target-ref-bound declaration before
+      # publication, or rerun this workflow after attaching it. No asset => [].
+      - name: Read reviewed release rollback declaration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          ASSETS="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+          if grep -qx 'platform-rollback-review.json' <<< "$ASSETS"; then
+            gh release download "$TAG" --pattern platform-rollback-review.json
+            PREVIOUS="$(jq -er '.previousVersion' platform-rollback-review.json)"
+            [[ "$PREVIOUS" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            test "$(gh release view "v$PREVIOUS" --json isDraft,isPrerelease --jq '[.isDraft,.isPrerelease] | any')" = false
+            mkdir previous-release
+            gh release download "v$PREVIOUS" --pattern platform-release.json --dir previous-release
+            jq --slurpfile review platform-rollback-review.json --slurpfile previous previous-release/platform-release.json \
+              '. + {rollbackReview: ($review[0] + {previousRelease: $previous[0]})}' platform-release.json > reviewed-release.json
+            mv reviewed-release.json platform-release.json
+          fi
 
       - name: Package API and Web application bundles for existing base images
         run: node scripts/package-platform-application.mjs platform-release.json

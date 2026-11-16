@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import {
   buildMultiremiDaemonLaunchSpec,
   buildMultiremiDaemonServiceSpec,
@@ -46,7 +46,7 @@ function expectCommand(execPath: string, expected: string): void {
   const systemd = buildMultiremiDaemonServiceSpec({}, "remi", "systemd", root, argv, execPath);
   expect(systemd.content).toContain(`ExecStart=${systemdQuote(expected)} daemon start --foreground\n`);
   const launchd = buildMultiremiDaemonServiceSpec({}, "remi", "launchd", root, argv, execPath);
-  const escaped = expected.replace(/&/g, "&amp;").replace(/'/g, "&apos;");
+  const escaped = expected.replace(/&/g, "&amp;").replace(/'/g, "&apos;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   expect(launchd.content).toContain(`<key>ProgramArguments</key>\n  <array>\n    <string>${escaped}</string>`);
 }
 
@@ -98,6 +98,8 @@ describe("daemon service stable launcher", () => {
   test("accepts a historical single quoted exec target on an otherwise safe path", () => {
     const plainBinary = join(root, "install", "versions", "release-a", "remi");
     process.env.MULTIREMI_INSTALL_ROOT = join(root, "install");
+    mkdirSync(dirname(plainBinary), { recursive: true });
+    writeFileSync(plainBinary, "fixture", { mode: 0o755 });
     writeLauncher();
     writeFileSync(launcher, `#!/bin/sh\nexec '${plainBinary}' "$@"\n`);
     expectCommand(plainBinary, launcher);
@@ -106,9 +108,71 @@ describe("daemon service stable launcher", () => {
   test("accepts a double quoted exec target", () => {
     const plainBinary = join(root, "install", "versions", "release-a", "remi");
     process.env.MULTIREMI_INSTALL_ROOT = join(root, "install");
+    mkdirSync(dirname(plainBinary), { recursive: true });
+    writeFileSync(plainBinary, "fixture", { mode: 0o755 });
     writeLauncher();
     writeFileSync(launcher, `#!/bin/sh\nexec "${plainBinary}" "$@"\n`);
     expectCommand(plainBinary, launcher);
+  });
+
+  test("resolves symlinks in the installation root, exec target and candidate launcher", () => {
+    const realRoot = process.env.MULTIREMI_INSTALL_ROOT!;
+    const alias = join(root, "install-alias");
+    symlinkSync(realRoot, alias);
+    process.env.MULTIREMI_INSTALL_ROOT = alias;
+    writeLauncher();
+    expectCommand(binary, launcher);
+    writeLauncher(launcher, join(alias, "versions", "release-a", "remi"));
+    expectCommand(binary, launcher);
+    const binAlias = join(root, "bin-alias");
+    symlinkSync(dirname(launcher), binAlias);
+    process.env.PATH = binAlias;
+    expectCommand(binary, join(binAlias, "remi"));
+    expectCommand(join(alias, "versions", "release-a", "remi"), join(binAlias, "remi"));
+    writeLauncher(launcher, join(alias, "versions", "missing", "remi"));
+    expectCommand(binary, binary);
+  });
+
+  test("resolves relative bin and installation directories", () => {
+    const cwd = process.cwd();
+    try {
+      process.chdir(root);
+      process.env.MULTIREMI_INSTALL_ROOT = "install root's";
+      process.env.MULTIREMI_BIN_DIR = "bin";
+      writeLauncher();
+      expectCommand(binary, launcher);
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
+  test("uses cwd for empty PATH entries at every position", () => {
+    writeLauncher();
+    const cwd = process.cwd();
+    try {
+      process.chdir(dirname(launcher));
+      const missing = join(root, "missing");
+      for (const path of ["", `${delimiter}${missing}`, `${missing}${delimiter}${delimiter}${missing}`, `${missing}${delimiter}`]) {
+        process.env.PATH = path;
+        expectCommand(binary, launcher);
+      }
+      delete process.env.PATH;
+      expectCommand(binary, binary);
+    } finally {
+      process.chdir(cwd);
+    }
+  });
+
+  test("decodes escaped double quotes and rejects shell substitutions without execution", () => {
+    const special = join(process.env.MULTIREMI_INSTALL_ROOT!, "versions", 'release-"$`', "remi");
+    mkdirSync(dirname(special), { recursive: true });
+    writeFileSync(special, "fixture", { mode: 0o755 });
+    writeLauncher();
+    const quoted = special.replace(/["\\$`]/g, "\\$&");
+    writeFileSync(launcher, `#!/bin/sh\nexec "${quoted}" "$@"\n`);
+    expectCommand(special, launcher);
+    writeFileSync(launcher, '#!/bin/sh\nexec "$(exit 99)" "$@"\n');
+    expectCommand(special, special);
   });
 
   test("preserves Bun source command and script arguments", () => {

@@ -13,6 +13,8 @@ import {
   type GithubRelease,
 } from "../../../apps/remi/cli/update.js";
 
+import { buildMultiremiDaemonServiceSpec, systemdQuote } from "../../../apps/remi/cli/multiremi/service.js";
+
 describe("Remi CLI updater", () => {
   const roots: string[] = [];
   const originalFetch = globalThis.fetch;
@@ -79,6 +81,7 @@ describe("Remi CLI updater", () => {
       launchdUpdated: true,
     });
     if (result.status !== "installed") throw new Error("expected installed result");
+    expectUpdaterServiceLauncher(fixture, join(result.snapshotDir, "remi"));
     expect(fixture.requests).toEqual([
       "https://api.github.com/repos/moesin-lab/Remi/releases/latest",
       "https://downloads.example.test/remi-0.2.81-darwin-arm64.tar.gz",
@@ -92,6 +95,23 @@ describe("Remi CLI updater", () => {
       .toContain(`<string>${oldSnapshot}/remi</string>`);
     expect(existsSync(join(oldSnapshot, "remi"))).toBe(true);
     expect(execFileSync(fixture.launcherPath, ["--version"], { encoding: "utf8" }).trim()).toBe("0.2.81");
+  });
+
+  test("service specs use the actual generic launcher written by the updater", async () => {
+    const fixture = releaseFixture(roots);
+    const result = await performUpdate({
+      currentVersion: "0.2.68",
+      platform: { os: "darwin", arch: "arm64" },
+      fetchImpl: fixture.fetchImpl,
+      env: { PATH: "", FIXTURE_EVENTS: fixture.events },
+      homeDir: fixture.homeDir,
+      installRoot: fixture.installRoot,
+      launcherPath: fixture.launcherPath,
+      launchdPath: fixture.launchdPath,
+    });
+    if (result.status !== "installed") throw new Error("expected installed result");
+    expect(readFileSync(fixture.launcherPath, "utf8")).toContain(`exec '${result.snapshotDir}/remi'`);
+    expectUpdaterServiceLauncher(fixture, join(result.snapshotDir, "remi"));
   });
 
   test("does not replace the executable when the release checksum fails", async () => {
@@ -182,4 +202,24 @@ function launchdPlist(binary: string): string {
 </array>
 </dict></plist>
 `;
+}
+
+function expectUpdaterServiceLauncher(fixture: { installRoot: string; launcherPath: string; homeDir: string }, binary: string): void {
+  const keys = ["MULTIREMI_INSTALL_ROOT", "MULTIREMI_BIN_DIR", "PATH"];
+  const previous = keys.map((key) => process.env[key]);
+  try {
+    process.env.MULTIREMI_INSTALL_ROOT = fixture.installRoot;
+    process.env.MULTIREMI_BIN_DIR = fixture.launcherPath.slice(0, -"/remi".length);
+    process.env.PATH = "";
+    const argv = [binary, "daemon", "service", "install"];
+    const systemd = buildMultiremiDaemonServiceSpec({}, "remi", "systemd", fixture.homeDir, argv, binary);
+    expect(systemd.content).toContain(`ExecStart=${systemdQuote(fixture.launcherPath)} daemon start --foreground`);
+    const launchd = buildMultiremiDaemonServiceSpec({}, "remi", "launchd", fixture.homeDir, argv, binary);
+    expect(launchd.content).toContain(`<string>${fixture.launcherPath}</string>`);
+  } finally {
+    keys.forEach((key, index) => {
+      if (previous[index] === undefined) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
+  }
 }

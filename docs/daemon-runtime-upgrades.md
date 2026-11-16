@@ -110,6 +110,8 @@ Claude 桥 bundle 带两个补丁，都改 `dist/acp-agent.js`：`claude-usage-v
 `versions/<id>/remi` 下时，会检查 `MULTIREMI_BIN_DIR` 和 PATH 中的 shell
 launcher；仅当 launcher 的 `exec` 目标与当前 executable 一致时，生成的
 systemd `ExecStart` / launchd `ProgramArguments` 才使用该稳定路径。
+支持 updater 写出的单引号目标及保留自定义参数的 sh/Bash launcher；只读解析绝对字面目标，
+不执行脚本探测。安装布局和目标身份通过 realpath 比较，支持符号链接；PATH 空项按当前目录查找。
 安装根目录默认是 `~/.local/lib/remi`，可由 `MULTIREMI_INSTALL_ROOT` 指定。
 直接二进制安装和 Bun 源码运行保持原有启动方式。
 updater 不停止或重启 daemon；维护者仍需在已排空且明确批准的维护窗口中执行

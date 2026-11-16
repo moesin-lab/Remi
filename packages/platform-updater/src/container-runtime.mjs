@@ -203,11 +203,11 @@ export async function restoreMigrationReports(archive, destination) {
   }
 }
 
-export async function rehearseStoreMigration(apiRoot, archive, scratch) {
+export async function rehearseStoreMigration(apiRoot, archive, scratch, options = {}) {
   const reportDirectory = await restoreMigrationReports(archive, scratch);
-  const child = spawn('bun', ['--eval',
+  const child = spawn(options.executable || 'bun', ['--eval',
     "const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {MultiremiStore}=await import('./packages/server/src/store/store.ts');const db=openMultiremiDatabase();try{new MultiremiStore(db)}finally{await db.close()}"],
-  { cwd: apiRoot, stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, HOME: '/tmp', MULTIREMI_HOME: '/tmp/remi', MULTIREMI_MIGRATION_REPORT_DIR: reportDirectory } });
+  { cwd: apiRoot, stdio: ['ignore', 'ignore', 'pipe'], env: { ...(options.env || process.env), HOME: scratch, MULTIREMI_HOME: scratch + '/home', MULTIREMI_MIGRATION_REPORT_DIR: reportDirectory } });
   let missingBeforeReport = false, stderrTail = '';
   child.stderr.on('data', chunk => {
     stderrTail = (stderrTail + chunk.toString()).slice(-4096);

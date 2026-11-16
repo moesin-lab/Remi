@@ -284,10 +284,11 @@ export class ContainerApplicationDriver implements PlatformDeploymentDriver {
 
   private async prepareControl(installation: Installation): Promise<Installation> {
     await mkdir(this.controlDir, { recursive: true, mode: 0o755 });
-    const digest = createHash('sha256').update(runtimeSource).update(fenceSource).digest('hex').slice(0, 16);
+    const digest = createHash('sha256').update(runtimeSource).update(JSON.stringify(DATA_SCHEMA_INPUTS)).update(fenceSource).digest('hex').slice(0, 16);
     const bootstrap = join(this.controlDir, digest);
     await mkdir(bootstrap, { recursive: true, mode: 0o755 });
     await writeFile(join(bootstrap, 'runtime.mjs'), runtimeSource, { mode: 0o644 });
+    await writeFile(join(bootstrap, 'data-schema-inputs.json'), JSON.stringify(DATA_SCHEMA_INPUTS), { mode: 0o644 });
     await writeFile(join(bootstrap, 'host-write-fence.ts'), fenceSource, { mode: 0o644 });
     const found = await this.runner.run('docker', ['volume', 'ls', '--format', '{{.Name}}', '--filter', `name=^${installation.volume}$`]);
     if (found.exitCode !== 0) throw new Error('Cannot inspect application volume');

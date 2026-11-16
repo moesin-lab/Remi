@@ -9,16 +9,8 @@ import { createGunzip } from 'node:zlib';
 import { pathToFileURL } from 'node:url';
 
 const ROOT = process.env.REMI_APPLICATION_ROOT || '/opt/remi-application';
-export const DATA_SCHEMA_INPUTS = [
-  'packages/server/src/store/migrations.ts',
-  'packages/server/src/store/inbox/member-records.ts',
-  'packages/server/src/store/inbox/questions.ts',
-  'packages/server/src/store/repos/workspaces-repo.ts',
-  'packages/server/src/store/daemon-routing.ts',
-  'packages/server/src/store/db/postgres.ts', 'packages/server/src/store/db/pg-worker.ts',
-  'packages/contracts/src/attachments.ts',
-  'packages/shared/src/db/index.ts',
-];
+import DATA_SCHEMA_INPUTS from './data-schema-inputs.json' with { type: 'json' };
+export { DATA_SCHEMA_INPUTS };
 // These image-owned programs cannot change during a code-only update. Changes
 // to OS packages, external tools or the entrypoint require base maintenance.
 export const API_BASE_INPUTS = ['deploy/docker/Dockerfile.api', 'deploy/docker/api-entrypoint.sh'];

@@ -43,3 +43,7 @@
   查询并验证最新稳定 ACP / Claude SDK / CC / Codex，更新 `package.json` 与
   `packages/acp/src/runtime-versions.json`，同批提交后再跑 CI、打 tag。
   不得只改版本号跳过依赖准备，也不得在 tag 构建或 daemon 运行时重新解析 latest。
+- 平台应用打包时计算 `dataSchema`，普通源码 PR 不提交指纹或回退声明。发版负责人
+  必须相对上一个已发布平台版本取得人工审阅确认，将目标 SHA、旧版 manifest 指纹、
+  审阅者及依据作为 `platform-rollback-review.json` 附件上传到目标 Release；操作见
+  [发版回退审核](deploy/README.md#release-rollback-review)。缺少声明时不允许跨指纹更新。

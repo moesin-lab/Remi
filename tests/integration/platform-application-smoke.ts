@@ -315,15 +315,6 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
   const settings = await originalFetch(webUrl + '/api/multiremi/platform/settings', { method: 'PATCH', headers: adminHeaders, body: JSON.stringify({ releaseFeedUrl: feedUrl }) });
   check(settings.ok, 'Could not configure source through the internal API');
   const first = await bundle('1.0.1', '2'.repeat(40));
-  if (!internal) {
-    console.log('phase: missing reports in current backup refuse rehearsal');
-    omitBackupReports = true;
-    try {
-      const refused = await updateFromWeb(await bundle('1.0.4', '9'.repeat(40)));
-      check(refused.status === 'failed' && String(refused.error).includes('reports/migrations'), 'Missing backup reports did not fail diagnostically');
-      check((await readMigrationReports()).every((report, index) => report === originalReports[index]), 'Failed rehearsal changed production reports');
-    } finally { omitBackupReports = false; }
-  }
   console.log('phase: bootstrap with existing base images');
   check((await updateFromWeb(first, true)).status === 'succeeded', 'Internally triggered bootstrap failed');
   const upgraded = await (await originalFetch(webUrl + '/api/verify')).json() as { version: string; rows: Array<{ value: string }> };
@@ -337,6 +328,15 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
   check((await updateFromWeb(second)).status === 'succeeded', 'Internally triggered application update failed');
   check(await docker(['inspect', '--format', '{{.Id}}|{{.Image}}', `${project}-api-1`]) === stableApi, 'Subsequent update replaced API container/image');
   check(await docker(['inspect', '--format', '{{.Id}}|{{.Image}}', `${project}-web-1`]) === stableWeb, 'Subsequent update replaced Web container/image');
+  if (!internal) {
+    console.log('phase: missing reports in current backup refuse rehearsal');
+    omitBackupReports = true;
+    try {
+      const refused = await updateFromWeb(await bundle('1.0.4', '9'.repeat(40)));
+      check(refused.status === 'failed' && String(refused.error).includes('reports/migrations'), 'Missing backup reports did not fail diagnostically');
+      check((await readMigrationReports()).every((report, index) => report === originalReports[index]), 'Failed rehearsal changed production reports');
+    } finally { omitBackupReports = false; }
+  }
   console.log('phase: broken application rolls code back and preserves later writes');
   const broken = await bundle('1.0.3', '4'.repeat(40), true);
   check((await updateFromWeb(broken)).status === 'failed', 'Broken release unexpectedly succeeded');

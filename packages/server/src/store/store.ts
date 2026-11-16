@@ -1,3 +1,4 @@
+import { MergePolicyRepo } from "./repos/merge-policy-repo.js";
 import { createId } from "@multiremi/ids.js";
 import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
 import { ExecutionProfilesRepo } from "@multiremi/store/repos/execution-profiles-repo.js";
@@ -529,6 +530,7 @@ export class MultiremiStore {
   private agentPlugins: AgentPluginsRepo;
   private workspaces: WorkspacesRepo;
   private scm: ScmRepo;
+  readonly mergePolicies: MergePolicyRepo;
   private feishuIngest: FeishuIngestRepo;
   private feishuBot: FeishuBotRepo;
   /**
@@ -612,6 +614,7 @@ export class MultiremiStore {
     this.workspaces = new WorkspacesRepo(this.ctx);
     this.passwordAccounts = new PasswordAccountsRepo(this.db, this.workspaces, this.accessTokens);
     this.scm = new ScmRepo(this.ctx);
+    this.mergePolicies = new MergePolicyRepo(this.ctx);
     this.feishuIngest = new FeishuIngestRepo(this.ctx);
     this.feishuBot = new FeishuBotRepo(this.ctx);
     this.messaging = new MessagingRepo(this.ctx);

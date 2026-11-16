@@ -54,6 +54,31 @@ describe("operations CLI contracts", () => {
     }
   });
 
+  it("executes B1 policy/review/gate commands with JSON file and project/internal CR scope", async () => {
+    useCliEnv();
+    const cases = [
+      ["project.merge-policy.get", ["project", "merge-policy", "get", "prj_1"], "GET", "/api/projects/prj_1/merge-policy", null],
+      ["project.merge-policy.update", ["project", "merge-policy", "update", "prj_1"], "PUT", "/api/projects/prj_1/merge-policy", { version: 1, expected_revision: 2 }],
+      ["scm.change-request.review.submit", ["scm", "change-request", "review", "submit", "prj_1", "scr_1"], "POST", "/api/projects/prj_1/change-requests/scr_1/reviews", { schema_version: 1, verdict: "block" }],
+      ["scm.change-request.review.list", ["scm", "change-request", "review", "list", "prj_1", "scr_1"], "GET", "/api/projects/prj_1/change-requests/scr_1/reviews", null],
+      ["scm.change-request.gate", ["scm", "change-request", "gate", "prj_1", "scr_1"], "GET", "/api/projects/prj_1/change-requests/scr_1/merge-gate", null],
+    ] as const;
+    for (const [id, argv, method, path, body] of cases) {
+      const spec = specById(id);
+      globalThis.fetch = capabilityFetch(spec.id, async request => {
+        expect(request.method).toBe(method); expect(new URL(request.url).pathname).toBe(path);
+        if (body) expect(await request.json()).toEqual(body);
+        return Response.json({ ok: true });
+      });
+      const args: string[] = [...argv, "--json"];
+      if (body) {
+        const directory = mkdtempSync(join(tmpdir(), "b1-cli-")); tempDirectories.push(directory);
+        const file = join(directory, "input.json"); writeFileSync(file, JSON.stringify(body)); args.push("--file", file);
+      }
+      expect(JSON.parse((await capture(() => registryFor([spec]).execute(args))).stdout)).toEqual({ ok: true });
+    }
+  });
+
   it("requests one canonical day/model detail page using the declared CLI parameters", async () => {
     useCliEnv();
     const spec = specById("dashboard.usage.report");

@@ -1,3 +1,4 @@
+import { readGitHubRequiredChecks } from "./github-required-checks.js";
 import type { MultiremiScmConnection, MultiremiScmConnectionCredential, MultiremiScmRepositoryBinding } from "@multiremi/contracts/types.js";
 import type { CreateScmPullRequestInput, MergeScmPullRequestInput, ScmCheckObservation, ScmCheckSummary, ScmMergeResult, UpdateScmPullRequestInput } from "@multiremi/contracts/scm-operations.js";
 import { githubPullObservation } from "./github.js";
@@ -114,6 +115,45 @@ export class GitHubScmOperations {
         conclusion: text(status.state), url: text(status.target_url) });
     }
     return { headSha, observedAt: new Date().toISOString(), checks, conclusion: summarize(checks) };
+  }
+
+  /** Gate-only evidence: bind Actions jobs to the newest workflow run/attempt.
+   * A's observational checks endpoint and response contract are unchanged. */
+  async gateChecks(headSha: string): Promise<ScmCheckObservation[]> {
+    const summary = await this.checks(headSha);
+    const actions = summary.checks.filter(c => c.kind === "check_run" && c.appSlug === "github-actions" && c.workflowPath);
+    if (!actions.length) return summary.checks;
+    const runs = await this.pages(appendQuery("/actions/runs", { head_sha: headSha }), "workflow_runs");
+    const allowed = new Set<string>();
+    for (const path of new Set(actions.map(c => c.workflowPath!))) {
+      const matching = runs.filter(r => r.path === path && r.head_sha === headSha);
+      if (!matching.length || matching.some(r => !Number.isSafeInteger(r.id) || !Number.isSafeInteger(r.run_number) || !Number.isSafeInteger(r.run_attempt))) {
+        throw new ScmOperationError("scm_evidence_incomplete", "Cannot establish latest workflow attempt");
+      }
+      matching.sort((a, b) => Number(b.run_number) - Number(a.run_number) || Number(b.run_attempt) - Number(a.run_attempt));
+      const latest = matching[0]!;
+      if (matching.some(r => r !== latest && r.run_number === latest.run_number && r.run_attempt === latest.run_attempt && r.id !== latest.id)) {
+        throw new ScmOperationError("scm_evidence_incomplete", "Ambiguous latest workflow attempt");
+      }
+      if (latest.status !== "completed") {
+        // A queued rerun can still expose check runs from the old successful attempt.
+        // Omit them so the required identity is missing until current jobs exist.
+        continue;
+      }
+      const jobs = await this.pages(`/actions/runs/${latest.id}/attempts/${latest.run_attempt}/jobs`, "jobs");
+      for (const job of jobs) {
+        const match = typeof job.check_run_url === "string" ? /\/check-runs\/(\d+)$/u.exec(job.check_run_url) : null;
+        if (job.head_sha !== headSha || !match || typeof job.name !== "string") throw new ScmOperationError("scm_evidence_incomplete", "Invalid latest-attempt job evidence");
+        const observation = actions.find(c => c.id === match[1] && c.name === job.name && c.workflowPath === path);
+        if (observation) allowed.add(observation.id);
+      }
+    }
+    return summary.checks.filter(c => c.kind !== "check_run" || c.appSlug !== "github-actions" || allowed.has(c.id));
+  }
+
+  async requiredChecks(targetBranch: string) {
+    branch(targetBranch, "target_branch");
+    return readGitHubRequiredChecks(path => this.request(path), path => this.pages(path), targetBranch);
   }
 
   async merge(number: number, input: MergeScmPullRequestInput): Promise<ScmMergeResult> {

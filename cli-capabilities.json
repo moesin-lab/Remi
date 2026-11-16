@@ -7336,6 +7336,91 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "project.merge-policy.get": {
+      "command": "remi project merge-policy get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "project.merge-policy.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "project.merge-policy.update": {
+      "command": "remi project merge-policy update",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "project.merge-policy.update",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "scm.change-request.review.submit": {
+      "command": "remi scm change-request review submit",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.review.submit",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "scm.change-request.review.list": {
+      "command": "remi scm change-request review list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.review.list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "scm.change-request.gate": {
+      "command": "remi scm change-request gate",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.gate",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "scm.change-request.checks": {
       "command": "remi scm change-request checks",
       "aliases": [],
@@ -12464,6 +12549,12 @@
     "GET /api/projects/:id": {
       "command": "project.get"
     },
+    "GET /api/projects/:id/change-requests/:changeRequestId/merge-gate": {
+      "command": "scm.change-request.gate"
+    },
+    "GET /api/projects/:id/change-requests/:changeRequestId/reviews": {
+      "command": "scm.change-request.review.list"
+    },
     "GET /api/projects/:id/devices": {
       "command": "project.device.list"
     },
@@ -12481,6 +12572,9 @@
     },
     "GET /api/projects/:id/knowledge/recall": {
       "command": "memory.search"
+    },
+    "GET /api/projects/:id/merge-policy": {
+      "command": "project.merge-policy.get"
     },
     "GET /api/projects/:id/resources": {
       "command": "project.resource.list"
@@ -13827,6 +13921,9 @@
     "POST /api/projects": {
       "command": "project.create"
     },
+    "POST /api/projects/:id/change-requests/:changeRequestId/reviews": {
+      "command": "scm.change-request.review.submit"
+    },
     "POST /api/projects/:id/devices": {
       "command": "project.device.add"
     },
@@ -14235,6 +14332,9 @@
     },
     "PUT /api/projects/:id/docs/:ref": {
       "command": "memory.update"
+    },
+    "PUT /api/projects/:id/merge-policy": {
+      "command": "project.merge-policy.update"
     },
     "PUT /api/projects/:id/resources/:resourceId": {
       "command": "project.resource.update"

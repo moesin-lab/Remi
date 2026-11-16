@@ -280,11 +280,14 @@ export class CommandRegistry {
 
   renderHelp(path: readonly string[] = [], programName = "remi"): string {
     const inventory = this.inventory();
-    const children = inventory.filter((entry) =>
-      !entry.hidden
-      && entry.path.length > path.length
+    const descendants = inventory.filter((entry) =>
+      entry.path.length > path.length
       && path.every((segment, index) => entry.path[index] === segment)
     );
+    const visible = descendants.filter((entry) => !entry.hidden);
+    // Hidden compatibility namespaces still need useful help when explicitly
+    // requested, without advertising them in their parents' command lists.
+    const children = visible.length || !path.length ? visible : descendants;
     const directChildren = uniqueDirectChildren(children, path.length);
     const exact = inventory.find((entry) => samePath(entry.path, path));
     if (exact) {
@@ -328,9 +331,34 @@ export class CommandRegistry {
 
   isImplicitGroup(path: readonly string[]): boolean {
     return path.length > 0 && !this.hasPath(path) && this.inventory().some((entry) =>
-      !entry.hidden && entry.path.length > path.length
+      entry.path.length > path.length
       && path.every((segment, index) => entry.path[index] === segment)
     );
+  }
+
+  /** Inspect paths before parsing: a group must never fall back to an ancestor handler. */
+  groupDispatch(argv: readonly string[]): { path: readonly string[]; unknown: boolean } | null {
+    const optionIndex = argv.findIndex((arg) => arg.startsWith("-"));
+    const requested = optionIndex < 0 ? argv : argv.slice(0, optionIndex);
+    for (let length = requested.length; length > 0; length--) {
+      const path = requested.slice(0, length);
+      const exact = this.paths.get(pathKey(path));
+      const hasChildren = [...this.paths.values()].some((entry) =>
+        entry.path.length > length && pathMatches(path, entry.path)
+      );
+      if (!exact && !hasChildren) continue;
+      // A real command may also have children (context, autopilot run, etc.).
+      // Its positional arguments still belong to its handler; only pure
+      // namespace nodes get bare-group help.
+      if (!hasChildren || exact?.spec.positionals?.length) return null;
+      if (length < requested.length) return { path: exact?.spec.path ?? path, unknown: true };
+      if (!exact || (exact.spec.parse === "passthrough" && !exact.spec.capability
+        && !exact.spec.id.startsWith("legacy."))) {
+        return { path: exact?.spec.path ?? path, unknown: argv.length > length };
+      }
+      return null;
+    }
+    return null;
   }
 
   renderHelpForArgv(argv: readonly string[], programName = "remi"): string {

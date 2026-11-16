@@ -8,6 +8,7 @@ import type {
 import { GitHubScmOperations, ScmOperationError } from "@multiremi/scm/operations.js";
 import { ScmHttpError } from "@multiremi/scm/http.js";
 import { ScmCredentialEncryptionError } from "@multiremi/scm/credentials.js";
+import { matchScmRepositoryBindings } from "@multiremi/scm/repository-reference.js";
 import {
   denyCurrentUserWorkspaceAccess,
   isJsonApiError,
@@ -273,9 +274,13 @@ function loadOperations(c: Context, deps: RouterDeps): {
   const workspaceId = c.req.param("workspaceId") ?? "";
   const denied = denyCurrentUserWorkspaceAccess(c, deps.store, workspaceId);
   if (denied) return denied;
-  const binding = deps.store.listScmRepositoryBindings({ workspaceId, enabled: true })
-    .find(item => item.repositoryId === c.req.param("repositoryId"));
-  if (!binding) return c.json({ error: "SCM repository binding not found" }, 404);
+  const bindings = deps.store.listScmRepositoryBindings({ workspaceId, enabled: true });
+  const matches = matchScmRepositoryBindings(bindings, c.req.param("repositoryId") ?? "");
+  if (matches.length !== 1) {
+    const available = bindings.map(item => `${item.repositoryId} (${item.owner ? `${item.owner}/` : ""}${item.name})`);
+    return c.json({ error: `${matches.length ? "SCM repository reference is ambiguous" : "SCM repository binding not found"}. Available repository bindings: ${available.join(", ") || "none"}` }, matches.length ? 409 : 404);
+  }
+  const binding = matches[0]!;
   const connection = deps.store.getScmConnection(binding.connectionId);
   if (!connection || !connection.enabled) return c.json({ error: "SCM connection unavailable" }, 409);
   try {

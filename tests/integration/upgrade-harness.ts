@@ -156,7 +156,9 @@ try {
       assert(leases.includes('/isolated/locks/shared-locks/'), 'Supervisor lease escaped explicit test lock root');
       evidence.daemon_boundary = { systemd_session_environment_absent: true, leases: leases.split('\n'), mounts_checked: true };
     };
-    const providerLines = () => docker(['compose', '-p', project, '--env-file', envFile, '-f', composeFile, 'exec', '-T', 'daemon', 'cat', '/control/provider.jsonl']);
+    // clearGate removes the log before the provider starts; absence means the gate is not ready yet.
+    // Keep real read/exec errors visible instead of masking them with `|| true`.
+    const providerLines = () => compose(['exec', '-T', 'daemon', 'sh', '-c', 'if [ -e /control/provider.jsonl ]; then cat /control/provider.jsonl; fi']);
     const clearGate = async () => { await compose(['exec', '-T', 'daemon', 'rm', '-f', '/control/release', '/control/provider.jsonl']); };
     const releaseGate = () => compose(['exec', '-T', 'daemon', 'touch', '/control/release']);
     const heldTask = async () => {

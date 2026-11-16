@@ -37,6 +37,7 @@ export const TaskFailureReason = {
   AgentRuntimeVersionUnsupported: "agent_error.runtime_version_unsupported",
   AgentRuntimeMissingExecutable: "agent_error.runtime_missing_executable",
   RepoSyncFailed: "repo_sync_failed",
+  PlatformInputRejected: "platform_input_rejected",
   AgentUnknown: "agent_error.unknown",
 } as const;
 

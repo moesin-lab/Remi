@@ -47,7 +47,12 @@ Earlier bridge-row and return-task mechanics remain traceable in Git history.
    private messages even if projected into an Issue; there is no automatic public
    Issue-comment mirror. Issue-owned return Sessions remain visible under Issue
    permissions. Sending a request or report does not grant the sender other
-   private messages, turn input, attempt trace or control authority.
+   private messages, turn input, attempt trace or control authority. The terminal
+   report grants its original recipient Agent, return Session and execution scope
+   read access to the named result message and direct replies only, including
+   attachment metadata. `remi message get <id> --output json` is the canonical report command;
+   Session thread listing is also allowed for that result. Other content and
+   mutation routes retain their existing guards.
 
 5. **Coordinate structural wakes through the same lane.** Child-status and
    dependency producers resolve their actual recipient and Session before

@@ -1524,7 +1524,9 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
         returned_from_seq: page.entries[0]?.seq ?? null, returned_to_seq: page.entries.at(-1)?.seq ?? null,
         read_start: page.read_start, read_end: page.read_end, next_cursor: page.next_cursor,
         read_high_water: progress?.seq ?? null, read_offset: progress?.offset ?? null });
-      return c.json({ ...page, entries: page.entries.map(entry => messageResponse(access.inheritedParentRange
+      return c.json({ ...page,
+        ...(progress && (page.read_start.seq>progress.seq+1 || page.read_start.seq===progress.seq+1 && page.read_start.offset>progress.offset) ? {read_warning:`Reading did not advance across a gap. Read continuously from the given --from: remi message list ${sessionId} --from ${progress.seq} --to ${to}`} : {}),
+        entries: page.entries.map(entry => messageResponse(access.inheritedParentRange
         ? { ...entry, metadata: {} } : entry)) });
     } catch (error) {
       if (error instanceof SyntaxError || error instanceof Error && error.message.startsWith("Invalid range cursor")) {

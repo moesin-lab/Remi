@@ -340,7 +340,7 @@ describe("task instructions and turn input", () => {
     // An incomplete range adds one sentence naming the read, never the history itself.
     const partial = buildTaskPromptArtifact({ ...resumed, sessionProjection: rangeProjection("delta", sessionId, 1, 4,
       [{ seq: 4, id: "cmt_new", author_type: "member", author_id: "mem_1", body: "New review feedback" }], false) });
-    expect(partial.prompt).toBe(`[Member mem_1] New review feedback\n\n(Some unread messages aren't shown here. Read them before you answer: \`remi message list ${sessionId} --from 1 --to 4\`)\n\n${reply}`);
+    expect(partial.prompt).toBe(`[Member mem_1] New review feedback\n\n(Some unread messages aren't shown here. Read them before you answer: \`remi message list ${sessionId} --from 1 --to 4\`; you must read continuously starting at the given --from.)\n\n${reply}`);
   });
 
   it("merges an older server's bootstrap and delta halves into one Workspace and Project section", () => {

@@ -1564,7 +1564,7 @@ export class MultiremiDaemon {
       daemonId: this.options.daemonId ?? this.options.runtimeName,
       cliVersion: multiremiVersion,
       launchedBy: this.options.launchedBy,
-      caps: ["offer", "turn.message", "trace.read", "trace.subscribe", "wiki.fetch"],
+      caps: ["offer", "turn.message", "input_unread", "trace.read", "trace.subscribe", "wiki.fetch"],
       log,
       ...options.protocolClientOptions,
     });
@@ -1579,6 +1579,8 @@ export class MultiremiDaemon {
           stateDir: join(dirname(this.outboxPath), "external-chats", outboxIdentity),
         }));
     }
+    // Co-resident lanes share a client whose construction-time caps may be empty.
+    this.protocolClient.advertiseCaps(["input_unread"]);
     // PR 6 §5.3: this lane keeps Chat processes alive for background tasks; it parks only when the server echoes the cap.
     if (this.options.asyncTasks) this.protocolClient.advertiseCaps(["lane.background"]);
     this.parkedLanes = new ParkedLanes({
@@ -5217,6 +5219,8 @@ export class MultiremiDaemon {
       this.enqueueTaskReport(task.id, "usage", { usageSnapshot: snapshot });
     };
     let turnIndex = 0;
+    let unreadReminders = 0;
+    let unreadReply: string | null = null;
     // Record when the provider failed, before cleanup can race with stop().
     let providerFailureDuringStop: boolean | null = null;
 
@@ -5488,6 +5492,19 @@ export class MultiremiDaemon {
       const firstPromptImages = turnImages(task.chatMessageAttachments);
       // ADR 0025: a `/compact` turn that only compacts has no reply text; it is still a success.
       const compactCommandInput = !skipFirstPrompt && isCompactCommand(prompt);
+      const remindUnreadInput = (err: unknown, candidate: string): boolean => {
+        if (!(err instanceof DaemonProtocolRpcError) || err.code !== "input_unread") return false;
+        unreadReminders++;
+        prompt = err.detail ?? "Read the folded input continuously from the original --from, then give your final reply again.";
+        if (laneRecord) this.parkedLanes.cancelHandOff(laneRecord);
+        backgroundDecision = null;
+        this.recordTrace(task.id, () => trace.steer([{
+          id: `input-unread:${unreadReminders}`, taskId: task.id, authorType: "platform", authorId: null,
+          kind: "steer", content: prompt, createdAt: new Date().toISOString(), consumedAt: null,
+        }], { via: "reprompt", native_outcome: null, error: null }));
+        unreadReply = candidate;
+        return true;
+      };
       while (true) {
         turnIndex++;
         config.media = turnIndex === 1 && firstPromptImages.length ? firstPromptImages : undefined;
@@ -5626,16 +5643,27 @@ export class MultiremiDaemon {
         // The grace ran out while waiting: deliver what there is, as a round's grace timer would.
         if (autonomousRounds > 0 && wrapUpOver()) forceAnswerExpired = true;
         const steered = steerFeed.take().filter((m) => !recordedSteerIds.has(m.id));
-        if (turnError && !turnAbort.signal.aborted) throw turnError;
+        if (turnError && !turnAbort.signal.aborted) {
+          if (unreadReply !== null) {
+            await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: true }, unreadReply, finalSessionId, workDir);
+            return { output: unreadReply, sessionId: finalSessionId, workDir, usageSnapshot: ledger.finish(), completed: true };
+          }
+          throw turnError;
+        }
         const lastItem = trace.lastItem;
         if (!turnAbort.signal.aborted && provider.typedSessionFailures === false && lastItem?.type === "agent_message") {
           const error = redactProviderErrorText(lastItem.text, failureCredentials);
           const failureReason = classifyLegacyProviderFailure(error);
           if (failureReason) {
+            if (unreadReply !== null) {
+              await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: true }, unreadReply, finalSessionId, workDir);
+              return { output: unreadReply, sessionId: finalSessionId, workDir, usageSnapshot: ledger.finish(), completed: true };
+            }
             await this.client.pinTaskSession(task.id, finalSessionId, workDir);
             return { output: error, sessionId: finalSessionId, workDir, usageSnapshot: ledger.finish(), completed: false, failureReason };
           }
         }
+        unreadReply = null;
         if (forceAnswerExpired) {
           log.warn(`Task ${task.id} force-answer grace elapsed; delivering last reply`);
           // Steers that arrived too late to act on are still recorded/consumed
@@ -5695,9 +5723,12 @@ export class MultiremiDaemon {
         onUsage?.(finalUsage);
         await this.client.reportTaskUsageSnapshot(task.id, finalUsage);
         try {
-          await this.taskDownlinks.consumeTaskSteerMessages(task.id, []);
-          await this.client.completeTurn(this.taskDownlinks.turnInput(task.id), candidate, finalSessionId, workDir);
+          // Inline receipts still advance normally; unread bodies are handled
+          // by the recoverable completion gate instead of the receipt-resync loop.
+          await this.taskDownlinks.consumeTaskSteerMessages(task.id, [], true);
+          await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
         } catch (err) {
+          if (remindUnreadInput(err, candidate)) continue;
           if (!isTurnInputPendingConflict(err)) throw err;
           const pendingNow = await this.taskDownlinks.waitForSteer(task.id, this.options.taskDrainTimeoutMs, signal);
           // Already-recorded ids still pending mean an earlier consume call
@@ -5723,7 +5754,12 @@ export class MultiremiDaemon {
           // Steers recorded without injection add no reply, so the pick stands;
           // settle() is still the one rule before every completion attempt.
           this.recordTrace(task.id, () => trace.settle());
-          await this.client.completeTurn(this.taskDownlinks.turnInput(task.id), candidate, finalSessionId, workDir);
+          try {
+            await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
+          } catch (error) {
+            if (remindUnreadInput(error, candidate)) continue;
+            throw error;
+          }
         }
         log.info(`Completed task ${task.id}`);
         return { output: candidate, sessionId: finalSessionId, workDir, usageSnapshot: ledger.snapshot, completed: true };

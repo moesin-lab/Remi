@@ -27,7 +27,7 @@ async function fixture(options: { human?: boolean; chat?: boolean; delegated?: b
   expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
   const token = await store.createTaskAccessToken(task, 'local');
   const taskHeaders = { ...headers, Authorization: `Bearer ${token.token}` };
-  const app = createMultiremiApp({ store, authToken: 'merge-test', backgroundJobs: false });
+  const app = createMultiremiApp({ store, authToken: 'merge-test', backgroundJobs: false, inspectGitRemoteRepository: async () => ({ default_branch: 'main', branches: ['main'] }) });
   const state = { head, base, target: 'main', baseRepo: 'acme/widgets', conclusion: 'success', merged: false, mergeable: true as boolean | null, puts: [] as unknown[], mode: 'ok', readsFail: false, rulesFail: false };
   let mergeBarrier: Promise<void> | null = null, entered: (() => void) | null = null;
   const pauseMerge = () => {
@@ -320,6 +320,87 @@ describe('C1 credential boundary (mock GitHub, real SQLite/HTTP/worker)', () => 
   };
   const otherCredentials = (f: Awaited<ReturnType<typeof protectionFixture>>) => f.app.request('/api/daemon/scm/git-credentials', { method: 'POST', headers: f.taskHeaders,
     body: JSON.stringify({ workspaceId: 'local', repositoryUrl: 'https://github.com/acme/other.git' }) });
+  const bind = (f: Awaited<ReturnType<typeof protectionFixture>>, repositoryId: string, connection = 'scm_merge', h = f.taskHeaders) =>
+    f.app.request(`/api/workspaces/local/scm/connections/${connection}/repositories/${repositoryId}`, { method: 'PUT', headers: h, body: JSON.stringify({ transfer: true }) });
+  const imported = async (f: Awaited<ReturnType<typeof protectionFixture>>, url: string) => {
+    const response = await f.app.request('/api/workspaces/local/repos', { method: 'POST', headers: f.taskHeaders, body: JSON.stringify({ url }) });
+    expect(response.status, await response.clone().text()).toBe(201);
+    return (await response.json()).repository;
+  };
+  const credentialFor = (f: Awaited<ReturnType<typeof protectionFixture>>, url: string) =>
+    f.app.request('/api/daemon/scm/git-credentials', { method: 'POST', headers: f.taskHeaders, body: JSON.stringify({ repositoryUrl: url }) });
+  it('retains remote coverage through Task deletion and HTTPS/SSH/case reimports', async () => {
+    const f = await protectionFixture({ strict: true });
+    expect((await f.credentials()).status).toBe(409);
+    await removeAssociations(f);
+    expect((await f.app.request('/api/workspaces/local/repos/repo_merge', { method: 'DELETE', headers: f.taskHeaders })).status).toBe(200);
+    for (const url of ['https://github.com/acme/widgets.git', 'git@github.com:acme/widgets.git', 'https://github.com/Acme/Widgets.git']) {
+      const repo = await imported(f, url);
+      expect((await bind(f, repo.id)).status).toBe(200);
+      const response = await credentialFor(f, url); expect(response.status).toBe(409);
+      expect((await response.json()).reasons[0].evidence.remote_key).toBe('github.com/acme/widgets');
+      expect((await f.app.request(`/api/workspaces/local/repos/${repo.id}`, { method: 'DELETE', headers: f.taskHeaders })).status).toBe(200);
+    }
+    expect(f.state.puts).toHaveLength(0);
+  });
+  it('withholds the connection token for uncovered Y, but leaves a never-recorded C2 unchanged', async () => {
+    const f = await protectionFixture({ strict: true }); await removeAssociations(f);
+    const y = await imported(f, 'https://github.com/acme/other.git');
+    expect((await bind(f, y.id)).status).toBe(200);
+    const denied = await otherCredentials(f); expect(denied.status).toBe(409);
+    expect((await denied.json()).reasons[0].evidence.remote_key).toBe('github.com/acme/widgets');
+    f.store.createScmConnection({ id: 'scm_other', workspaceId: 'local', name: 'Separate', provider: 'github', mode: 'poll', accessToken: 'separate-task-secret', repositoryIds: [] });
+    expect((await f.app.request(`/api/workspaces/local/scm/connections/scm_other/repositories/${y.id}`, { method: 'PUT', headers: f.taskHeaders, body: JSON.stringify({ transfer: true }) })).status).toBe(200);
+    const allowed = await otherCredentials(f); expect(allowed.status).toBe(200); expect((await allowed.json()).password).toBe('separate-task-secret');
+  });
+  it('binding upsert records coverage in the transaction before immediate Task unbind', async () => {
+    const f = await protectionFixture({ strict: true }); await removeAssociations(f);
+    f.store.createScmConnection({ id: 'scm_new', workspaceId: 'local', name: 'New', provider: 'github', mode: 'poll', accessToken: 'new-task-secret', repositoryIds: [] });
+    expect((await f.app.request('/api/workspaces/local/scm/connections/scm_new/repositories/repo_merge', { method: 'PUT', headers, body: JSON.stringify({ transfer: true }) })).status).toBe(200);
+    expect((await f.app.request('/api/workspaces/local/scm/connections/scm_new/repositories/repo_merge', { method: 'DELETE', headers: f.taskHeaders })).status).toBe(204);
+    const y = await imported(f, 'https://github.com/acme/other.git');
+    expect((await bind(f, y.id, 'scm_new')).status).toBe(200);
+    const denied = await otherCredentials(f); expect(denied.status).toBe(409);
+    expect((await denied.json()).reasons[0].evidence.remote_key).toBe('github.com/acme/widgets');
+  });
+  it('proves the union once per remote and reads each credential identity once per handout', async () => {
+    const f = await protectionFixture({ strict: true }); await f.configure(); await removeAssociations(f);
+    const y = await imported(f, 'https://github.com/acme/other.git'); expect((await bind(f, y.id)).status).toBe(200);
+    // A second policy for the same remote must reuse reads within the request, without caching across requests.
+    const second = f.store.createProject({ title: 'Also strict' });
+    f.store.createProjectResource(second.id, { resourceType: 'github_repo', resourceRef: { url: 'https://github.com/acme/widgets.git' } });
+    f.store.createProjectResource(second.id, { resourceType: 'github_repo', resourceRef: { url: 'https://github.com/acme/other.git' } });
+    f.store.mergePolicies.put(second.id, { ...f.policy, expected_revision: 0 }, 'operator');
+    for (const request of [() => otherCredentials(f), () => f.credentials()]) {
+      f.calls.length = 0;
+      const response = await request(); expect(response.status).toBe(200); expect((await response.json()).password).toBe('provider-secret');
+      expect(f.calls.filter(c => c.path === '/user').map(c => c.auth).sort()).toEqual(['Bearer merger-secret','Bearer provider-secret']);
+      expect(f.calls.filter(c => c.path === '/repos/acme/widgets/branches/main/protection')).toHaveLength(1);
+      expect(f.calls.filter(c => c.path === '/repos/acme/widgets/rules/branches/main')).toHaveLength(1);
+    }
+    expect((await policyPut(f, { enabled: false })).status).toBe(200);
+    expect((await otherCredentials(f)).status).toBe(200);
+  });
+  for (const change of ['credential','policy','coverage'] as const) it(`withholds credentials when ${change} changes during a proof`, async () => {
+    const f = await protectionFixture({ strict: true }); await f.configure();
+    const provider = globalThis.fetch;
+    let changed = false;
+    globalThis.fetch = Object.assign(async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      if (new URL(String(input)).pathname === '/user' && !changed) {
+        changed = true;
+        if (change === 'credential') f.store.updateScmConnection('scm_merge', { accessToken: 'rotated-task' });
+        if (change === 'policy') expect((await policyPut(f)).status).toBe(200);
+        if (change === 'coverage') {
+          addOtherRepository(f);
+          f.store.createProjectResource(f.project.id, { resourceType: 'github_repo', resourceRef: { url: 'https://github.com/acme/other.git' } });
+        }
+      }
+      return provider(input, init);
+    }, { preconnect: originalFetch.preconnect });
+    const response = await f.credentials(); expect(response.status).toBe(409);
+    expect(JSON.stringify(await response.json())).not.toContain('"password"');
+    expect(changed).toBe(true); expect(f.state.puts).toHaveLength(0);
+  });
   it('retains coverage after Task removals until member disables strict', async () => {
     const f = await protectionFixture({ strict: true }); await removeAssociations(f);
     expect((await f.credentials()).status).toBe(409);
@@ -333,7 +414,8 @@ describe('C1 credential boundary (mock GitHub, real SQLite/HTTP/worker)', () => 
     addOtherRepository(f);
     f.store.createProjectResource(f.project.id, { resourceType: 'github_repo', resourceRef: { url: 'https://github.com/acme/other.git' } });
     expect((await policyPut(f)).status).toBe(200);
-    expect((await f.credentials(headers)).status).toBe(200);
+    expect(f.store.mergePolicies.strictForRemote('local', 'github.com/acme/widgets')).toEqual([]);
+    expect((await f.credentials(headers)).status).toBe(409);
     expect((await otherCredentials(f)).status).toBe(409);
   });
   it('persists project_ref repositories and Task additions in the same write transaction', async () => {
@@ -356,7 +438,7 @@ describe('C1 credential boundary (mock GitHub, real SQLite/HTTP/worker)', () => 
     f.store.deleteProjectResource(f.project.id, resource.id);
     expect((await otherCredentials(f)).status).toBe(409);
     // Member recomputation drops the removed repository, while retaining the linked original CR.
-    expect((await policyPut(f)).status).toBe(200); expect((await otherCredentials(f)).status).toBe(200);
+    expect((await policyPut(f)).status).toBe(200); expect((await otherCredentials(f)).status).toBe(409);
     const second = f.store.createProject({ title: 'Second strict project' });
     f.store.createProjectResource(second.id, { resourceType: 'github_repo', resourceRef: { url: 'https://github.com/acme/other.git' } });
     f.store.mergePolicies.put(second.id, { ...f.policy, expected_revision: 0 }, 'operator');

@@ -105,3 +105,14 @@ function assertRepositoryPath(path: string): void {
 function normalizeHost(host: string): string {
   return host.trim().toLowerCase().replace(/^\[|\]$/gu, "");
 }
+
+/** Stable security identity; transport, user, port and case cannot reset strict coverage. */
+export function scmRepositoryIdentityKey(value: string): string {
+  const remote = value.trim();
+  const scp = remote.includes("://") ? null : remote.match(/^(?:[^@/:\s]+@)?([^/:\s]+):(.+)$/u);
+  const parsed = scp ? null : new URL(remote);
+  const host = (scp ? scp[1]! : parsed!.hostname).toLowerCase();
+  const path = (scp ? scp[2]! : parsed!.pathname).toLowerCase().replace(/^\/+|\/+$/gu, "").replace(/\.git$/u, "");
+  if (!host || !path) throw new Error("Invalid SCM repository identity");
+  return `${host}/${path}`;
+}

@@ -504,6 +504,7 @@ export class ScmRepo {
   }
 
   private upsertRepositoryBindingLocked(input: UpsertScmRepositoryBindingInput): MultiremiScmRepositoryBinding {
+    this.ctx.lockWorkspaceRepositoryTopology(input.workspaceId);
     const connection = this.lockConnection(input.connectionId);
     if (connection.workspaceId !== input.workspaceId) throw new Error("SCM connection belongs to another workspace");
     const repositorySource = normalizeRepositorySource(input.repositorySource ?? input.repository_source);
@@ -575,6 +576,7 @@ export class ScmRepo {
         now,
       ],
     );
+    new MergePolicyRepo(this.ctx).appendStrictCoverage(input.workspaceId);
     if (verificationChanged) this.invalidateConnectionVerificationLocked(input.connectionId);
     return this.getRepositoryBinding(input.connectionId, repositoryId)!;
   }

@@ -1,5 +1,6 @@
+import { scmRepositoryIdentityKey } from "../../scm/repository-url.js";
 import { resolveProjectRepositories } from "./tasks-repo.js";
-import { canonicalGitRemoteKey, normalizeWorkspaceRepositories } from "../../api/helpers/repositories.js";
+import { normalizeWorkspaceRepositories } from "../../api/helpers/repositories.js";
 import type { ProjectMergePolicy, ScmActor, ScmStructuredReview } from "@multiremi/contracts/merge-policy.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import type { StoreContext } from "../context.js";
@@ -41,40 +42,66 @@ export class MergePolicyRepo {
     })();
   }
 
-  private deriveCoverage(workspaceId: string, projectId: string): Map<string, string> {
-    const repositories = new Map<string, string>();
+  private deriveCoverage(workspaceId: string, projectId: string): Map<string, { repositoryId: string; source: string }> {
+    const repositories = new Map<string, { repositoryId: string; source: string }>();
     const imported = normalizeWorkspaceRepositories(this.ctx.workspaces().getWorkspace(workspaceId)?.repos ?? []);
     for (const repo of resolveProjectRepositories(this.ctx, workspaceId, this.ctx.projects().listProjectResources(projectId))) {
-      const match = imported.find(candidate => canonicalGitRemoteKey(candidate.url) === canonicalGitRemoteKey(repo.url));
-      if (match) repositories.set(match.id, "project_resource");
+      const key = scmRepositoryIdentityKey(repo.url);
+      const match = imported.find(candidate => scmRepositoryIdentityKey(candidate.url) === key);
+      if (match) repositories.set(key, { repositoryId: match.id, source: "project_resource" });
     }
     for (const cr of this.ctx.db.query(`SELECT DISTINCT cr.repository_id FROM multiremi_scm_issue_links l JOIN multiremi_issues i ON i.id=l.issue_id
       JOIN multiremi_scm_change_requests cr ON cr.id=l.change_request_id
-      WHERE i.project_id=? AND l.active=1 AND cr.workspace_id=?`).all(projectId, workspaceId)) repositories.set(String(cr.repository_id), "cr_link");
+      WHERE i.project_id=? AND l.active=1 AND cr.workspace_id=?`).all(projectId, workspaceId)) {
+      const repo = imported.find(r => r.id === String(cr.repository_id));
+      if (repo) repositories.set(scmRepositoryIdentityKey(repo.url), { repositoryId: repo.id, source: "cr_link" });
+    }
     return repositories;
   }
-  private persistCoverage(workspaceId: string, projectId: string, revision: number, repositories: Map<string, string>): void {
-    for (const [id, source] of repositories) this.ctx.db.query(`INSERT INTO multiremi_scm_strict_coverage
-      (workspace_id,repository_id,project_id,policy_revision,source,created_at) VALUES(?,?,?,?,?,?)
-      ON CONFLICT(workspace_id,repository_id,project_id) DO NOTHING`).run(workspaceId, id, projectId, revision, source, nowIso());
+  private persistCoverage(workspaceId: string, projectId: string, revision: number, repositories: Map<string, { repositoryId: string; source: string }>): void {
+    const bindings = this.ctx.db.query("SELECT repository_url,connection_id FROM multiremi_scm_repository_bindings WHERE workspace_id=?").all(workspaceId);
+    for (const [key, { repositoryId, source }] of repositories) {
+      const connections = bindings.filter(b => scmRepositoryIdentityKey(String(b.repository_url)) === key).map(b => String(b.connection_id));
+      for (const connectionId of connections.length ? connections : [""]) this.ctx.db.query(`INSERT INTO multiremi_scm_strict_coverage
+        (workspace_id,remote_key,repository_id,project_id,connection_id,policy_revision,source,created_at) VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(workspace_id,remote_key,project_id,connection_id) DO NOTHING`).run(workspaceId, key, repositoryId, projectId, connectionId, revision, source, nowIso());
+    }
   }
-  /** In a transaction, take the topology lock and include project_ref dependents. */
+  /** Caller owns a transaction. Topology lock precedes every coverage/binding mutation. */
   appendStrictCoverage(workspaceId: string): void {
     this.ctx.lockWorkspaceRepositoryTopology(workspaceId);
     for (const project of this.ctx.projects().listProjects(workspaceId).sort((a,b) => a.id.localeCompare(b.id))) {
       const policy = this.get(project.id);
-      if (policy.enabled && policy.credential_enforcement_mode === "strict") this.persistCoverage(workspaceId, project.id, policy.revision, this.deriveCoverage(workspaceId, project.id));
+      if (!policy.enabled || policy.credential_enforcement_mode !== "strict") continue;
+      const repositories = this.deriveCoverage(workspaceId, project.id);
+      // A removed resource remains covered; a later binding must inherit that remote's history.
+      for (const row of this.ctx.db.query("SELECT remote_key,repository_id,source FROM multiremi_scm_strict_coverage WHERE workspace_id=? AND project_id=?").all(workspaceId, project.id)) {
+        if (!repositories.has(String(row.remote_key))) repositories.set(String(row.remote_key), { repositoryId: String(row.repository_id), source: String(row.source) });
+      }
+      this.persistCoverage(workspaceId, project.id, policy.revision, repositories);
     }
   }
-  strictForRepository(workspaceId: string, repositoryId: string) {
+  private strictCoverage(workspaceId: string, remoteKey: string, connectionId?: string) {
     return this.ctx.db.transaction(() => {
       this.appendStrictCoverage(workspaceId);
-      return this.ctx.db.query(`SELECT project_id FROM multiremi_scm_strict_coverage WHERE workspace_id=? AND repository_id=? ORDER BY project_id`).all(workspaceId, repositoryId)
-        .map(row => ({ project_id: String(row.project_id), policy: this.get(String(row.project_id)),
-          coverage: this.ctx.db.query("SELECT repository_id,policy_revision,source FROM multiremi_scm_strict_coverage WHERE workspace_id=? AND project_id=? ORDER BY repository_id").all(workspaceId, String(row.project_id)) }))
-        .filter(entry => entry.policy.enabled && entry.policy.credential_enforcement_mode === "strict");
+      const rows = this.ctx.db.query(`SELECT * FROM multiremi_scm_strict_coverage WHERE workspace_id=? AND
+        (remote_key=?${connectionId === undefined ? "" : " OR connection_id=?"}) ORDER BY remote_key,project_id,connection_id`)
+        .all(...(connectionId === undefined ? [workspaceId, remoteKey] : [workspaceId, remoteKey, connectionId]));
+      const targets = new Map<string, { project_id: string; remote_key: string; policy: ProjectMergePolicy; coverage: typeof rows }>();
+      for (const row of rows) {
+        const project_id = String(row.project_id), remote_key = String(row.remote_key), policy = this.get(project_id);
+        if (policy.enabled && policy.credential_enforcement_mode === "strict") targets.set(`${remote_key}:${project_id}`, { project_id, remote_key, policy,
+          coverage: this.ctx.db.query("SELECT * FROM multiremi_scm_strict_coverage WHERE workspace_id=? AND project_id=? ORDER BY remote_key,connection_id").all(workspaceId, project_id) });
+      }
+      return [...targets.values()];
     })();
   }
+  strictForRepository(workspaceId: string, repositoryId: string) {
+    const repo = normalizeWorkspaceRepositories(this.ctx.workspaces().getWorkspace(workspaceId)?.repos ?? []).find(r => r.id === repositoryId);
+    return repo ? this.strictForRemote(workspaceId, scmRepositoryIdentityKey(repo.url)) : [];
+  }
+  strictForRemote(workspaceId: string, remoteKey: string) { return this.strictCoverage(workspaceId, remoteKey); }
+  strictForCredential(workspaceId: string, remoteKey: string, connectionId: string) { return this.strictCoverage(workspaceId, remoteKey, connectionId); }
 
   findChangeRequest(connectionId: string, repositoryId: string, externalId: string): { id: string } | null {
     return this.ctx.db.query("SELECT id FROM multiremi_scm_change_requests WHERE connection_id=? AND repository_id=? AND external_id=?").get(connectionId, repositoryId, externalId) ?? null;

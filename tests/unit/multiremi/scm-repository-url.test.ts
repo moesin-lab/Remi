@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { resolveScmRepositoryRemote } from "@multiremi/scm/repository-url.js";
+import { scmRepositoryIdentityKey, resolveScmRepositoryRemote } from "@multiremi/scm/repository-url.js";
 
 describe("SCM repository URL trust boundary", () => {
   it("accepts GitHub and Codebase HTTPS and SSH remotes on their connection hosts", () => {
@@ -54,4 +54,12 @@ describe("SCM repository URL trust boundary", () => {
       "https://git.enterprise.example:8443",
     )).toThrow("HTTPS origin does not match");
   });
+});
+
+it("uses one security identity for HTTPS, SSH, user, port and case variants", () => {
+  for (const url of ['https://github.com/Acme/Widgets.git/', 'git@github.com:acme/widgets.git',
+    'ssh://another@GITHUB.com:2222/ACME/Widgets', 'https://user@github.com:8443/acme/widgets/']) {
+    expect(scmRepositoryIdentityKey(url)).toBe('github.com/acme/widgets');
+  }
+  expect(scmRepositoryIdentityKey('https://github.com/acme/other.git')).not.toBe('github.com/acme/widgets');
 });

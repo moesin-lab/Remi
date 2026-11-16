@@ -17,9 +17,14 @@ export function mergerOperations(store: MultiremiStore, binding: MultiremiScmRep
   const merge = store.getScmMergeCredential(connection.id);
   return new GitHubScmOperations({ connection, binding, credential: { accessToken: merge ?? task.accessToken, webhookSecret: null }, signal });
 }
+/** Per-evaluation request memoization only; never survives a handout/gate/worker run.
+ * The key includes the credential, URL and query; secrets remain server-local. */
+export function protectionReadSession() {
+  return new Map<string, Promise<{ data: unknown; headers: Headers }>>();
+}
 /** No cache: every credential handout, preflight and worker execution re-proves all targets.
  * Credential and policy changes therefore invalidate evidence immediately. */
-export async function readProtectionProof(store: MultiremiStore, binding: MultiremiScmRepositoryBinding, policy: ProjectMergePolicy): Promise<ProtectionProof> {
+export async function readProtectionProof(store: MultiremiStore, binding: MultiremiScmRepositoryBinding, policy: ProjectMergePolicy, reads = protectionReadSession()): Promise<ProtectionProof> {
   const checked_at = new Date().toISOString();
   const credentialVersion = store.getScmCredentialVersion(binding.connectionId);
   const failure = (code: string, message: string): ProtectionProof => ({ proven: false, checked_at, reasons: [{ code, message }], evidence: { repository: binding.repositoryId, targets: policy.target_branches, policy_revision: policy.revision } });
@@ -31,9 +36,18 @@ export async function readProtectionProof(store: MultiremiStore, binding: Multir
     const task = store.getScmConnectionCredential(binding.connectionId)?.accessToken;
     if (!connection.enabled || !binding.enabled || !task || !binding.owner) return failure('protection_evidence_incomplete', 'Task credential or repository binding unavailable');
     const root = `/repos/${encodeURIComponent(binding.owner)}/${encodeURIComponent(binding.name)}`;
-    const request = async (path: string, token: string) => scmRequestJson<unknown>(`${connection.apiBaseUrl.replace(/\/$/, '')}${path}`, {
-      headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'multiremi-scm', Authorization: `Bearer ${token}` },
-    });
+    const request = (path: string, token: string) => {
+      const url = `${connection.apiBaseUrl.replace(/\/$/, '')}${path}`;
+      const key = JSON.stringify([url, token]);
+      let pending = reads.get(key);
+      if (!pending) {
+        pending = scmRequestJson<unknown>(url, {
+          headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'multiremi-scm', Authorization: `Bearer ${token}` },
+        });
+        reads.set(key, pending);
+      }
+      return pending;
+    };
     const get = async (path: string, token = merge) => object((await request(path, token)).data);
     const pages = async (path: string): Promise<Record<string, unknown>[]> => {
       const rows: Record<string, unknown>[] = [];

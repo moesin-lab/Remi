@@ -57,6 +57,7 @@ function questionRequest(question: QuestionView) {
 
 /** The first question the Agent asked, on one line; a permission request keeps its tool title. */
 export function questionTitle(question: QuestionView): string {
+  if (question.origin === "platform_merge_approval") return question.original_message.split("\n").slice(0, 3).join(" · ");
   const first = questionRequest(question)?.payload.questions?.[0]?.question;
   const text = first?.question || first?.header || question.original_message;
   return text.split("\n").map(line => line.trim()).find(Boolean) ?? "";
@@ -76,8 +77,9 @@ export function QuestionStatusTag({ question, getActorName }: { question: Questi
     : question.stage === "human" ? waitingOn ? ["agent", t($ => $.responsibility.tag_waiting_on, { name: waitingOn })] : ["human", t($ => $.responsibility.tag_pending)]
     : AGENT_STAGES.has(question.stage) ? ["agent", waitingOn ? t($ => $.responsibility.tag_waiting_on, { name: waitingOn }) : t($ => $.responsibility.agent_section)]
     : ["muted", t($ => $.responsibility.tag_unavailable)];
-  return <span title={label} data-question-tag={tone}
-    className={cn("max-w-[45%] shrink-0 truncate whitespace-nowrap rounded border px-1.5 text-[11px] font-medium leading-5", TAG_TONES[tone])}>{label}</span>;
+  const shownLabel = question.origin === "platform_merge_approval" ? `${t($ => $.responsibility.platform_merge_approval)} · ${label}` : label;
+  return <span title={shownLabel} data-question-tag={tone}
+    className={cn("max-w-[45%] shrink-0 truncate whitespace-nowrap rounded border px-1.5 text-[11px] font-medium leading-5", TAG_TONES[tone])}>{shownLabel}</span>;
 }
 
 /**
@@ -215,13 +217,13 @@ export function UnifiedQuestionCard({ question, getActorName = (_type, id) => id
         actions={actions} notice={routeNotes} history={answerContext} onAnswer={response => act.mutateAsync({ action: "answer", response })} />
         : <><DecisionHeading title={question.original_message} actions={actions} />{question.original_context && <QuestionContext context={question.original_context} />}{routeNotes}{answerContext}</>}
     </section>
-    {question.status === "answered" && <p className="mt-2 text-xs text-muted-foreground" role="status">{answeredStatus}</p>}
+    {question.status === "answered" && <p className="mt-2 text-xs text-muted-foreground" role="status">{question.origin === "platform_merge_approval" ? t($ => $.responsibility.merge_approval_saved) : answeredStatus}</p>}
     {question.status === "closed" && <p className="mt-2 text-xs text-muted-foreground">{t($ => $.responsibility.closed)}</p>}
     {agentStage && !allowed.includes("answer") && <p className="mt-2 text-xs text-muted-foreground">{t($ => $.responsibility.agent_readonly)}</p>}
     {!canAnswer && question.status === "pending" && question.original_questions.length === 0 && question.options?.map(option => <span key={option.value} className="mr-1.5 mt-2 inline-block rounded border px-2 py-1 text-xs">{option.label}</span>)}
     {canAnswer && !operation && question.original_questions.length === 0 && <DecisionAnswerArea>
       <DecisionOptions options={question.options ?? []} selected={selected} disabled={act.isPending} onSelect={value => { setSelected([value]); setText(""); }} />
-      {question.kind !== "permission" && <Textarea className="min-h-16 resize-none text-sm" aria-label={t($ => $.responsibility.answer)} value={text} onChange={e => { setText(e.target.value); setSelected([]); }} disabled={act.isPending} />}
+      {question.kind !== "permission" && question.origin !== "platform_merge_approval" && <Textarea className="min-h-16 resize-none text-sm" aria-label={t($ => $.responsibility.answer)} value={text} onChange={e => { setText(e.target.value); setSelected([]); }} disabled={act.isPending} />}
       <DecisionSubmit label={t($ => $.responsibility.answer)} pending={act.isPending} disabled={!text.trim() && selected.length === 0} error={act.error?.message}
         onSubmit={() => act.mutate({ action: "answer", response: question.kind === "permission" ? { option_id: selected[0] } : selected.length ? { selected_options: selected } : { answer: text.trim() } })} />
     </DecisionAnswerArea>}

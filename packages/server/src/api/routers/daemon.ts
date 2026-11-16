@@ -1,3 +1,5 @@
+import { scmRepositoryIdentityKey } from "@multiremi/scm/repository-url.js";
+import { readProtectionProof, protectionReadSession } from "@multiremi/scm/credential-boundary.js";
 import type { Hono } from "hono";
 import { ensureDaemonProtocolUpgrade } from "../helpers/daemon-protocol-upgrade.js";
 import { CHAT_ATTACHMENT_MAX_BYTES, sanitizeChatAttachmentFilename } from "@multiremi/contracts/attachments.js";
@@ -201,10 +203,27 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
         code: "scm_repository_origin_mismatch",
       }, 409);
     }
+    const credentialVersion = store.getScmCredentialVersion(binding.connectionId);
     const credential = store.getScmConnectionCredential(binding.connectionId);
     if (!credential?.accessToken) {
       return c.json({ error: "repository credential is not configured", code: "scm_credential_missing" }, 409);
     }
+    const remoteKey = scmRepositoryIdentityKey(binding.repositoryUrl);
+    const strictPolicies = store.mergePolicies.strictForCredential(workspaceId, remoteKey, binding.connectionId);
+    const reads = protectionReadSession();
+    const proofs = [];
+    for (const { policy, remote_key, project_id } of strictPolicies) {
+      const [host, ...path] = remote_key.split('/');
+      const name = path.pop()!, owner = path.join('/');
+      // Prove every historical remote with the credentials being handed out, even after unbinding.
+      const target = { ...binding, repositoryUrl: `https://${host}/${owner}/${name}.git`, owner, name };
+      const proof = await readProtectionProof(store, target, policy, reads);
+      proofs.push({ remote_key, project_id, proof });
+    }
+    if (proofs.some(p => !p.proof.proven)) return c.json({ error: "Repository protection is unproven; write credential withheld", code: "scm_credential_protection_unproven",
+      reasons: proofs.flatMap(p => p.proof.reasons.map(r => ({ ...r, evidence: { remote_key: p.remote_key, project_id: p.project_id, detail: r.evidence } }))), proofs }, 409);
+    if (credentialVersion !== store.getScmCredentialVersion(binding.connectionId)
+      || JSON.stringify(strictPolicies) !== JSON.stringify(store.mergePolicies.strictForCredential(workspaceId, remoteKey, binding.connectionId))) return c.json({ code: "scm_credential_protection_changed", error: "Credentials or strict policy changed during proof" }, 409);
     const password = scmGitCredentialPassword(connection.provider, credential.accessToken);
     if (!password || /[\r\n]/u.test(password)) {
       return c.json({ error: "repository credential is invalid", code: "scm_credential_invalid" }, 500);

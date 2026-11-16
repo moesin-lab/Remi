@@ -5327,6 +5327,7 @@ export type MultiremiScmSyncStream =
 
 export type MultiremiScmEntityType =
   | "repository"
+  | "check_run"
   | "change_request"
   | "comment"
   | "review"
@@ -5384,6 +5385,9 @@ export interface MultiremiScmConnection {
   isDefault: boolean;
   accessTokenSet: boolean;
   accessTokenHint: string | null;
+  mergeCredentialSet: boolean;
+  mergeCredentialHint: string | null;
+  mergeCredentialKind: "token" | null;
   webhookSecretSet: boolean;
   webhookSecretHint: string | null;
   verificationStatus: MultiremiScmVerificationStatus;
@@ -5428,6 +5432,9 @@ export interface CreateScmConnectionInput {
 }
 
 export interface UpdateScmConnectionInput {
+  mergeCredential?: string;
+  clearMergeCredential?: boolean;
+  mergeCredentialKind?: "token";
   name?: string;
   mode?: MultiremiScmSyncMode;
   baseUrl?: string | null;

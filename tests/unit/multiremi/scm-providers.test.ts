@@ -3,9 +3,9 @@ import { CODEBASE_SCM_CAPABILITIES, GITHUB_SCM_CAPABILITIES } from "@multiremi/s
 import { CodebaseScmProviderAdapter } from "@multiremi/scm/codebase.js";
 import { GitHubScmProviderAdapter } from "@multiremi/scm/github.js";
 import { ScmHttpError } from "@multiremi/scm/http.js";
-import { deriveCanonicalCandidates } from "@multiremi/scm/reconcile.js";
+import { deriveCanonicalCandidates, reconcileObservation } from "@multiremi/scm/reconcile.js";
 import { ScmStreamUnavailableError, type ScmPollContext } from "@multiremi/scm/types.js";
-import { scmBinding, scmConnection } from "./scm-test-helpers.js";
+import { MemoryScmIngestionStore, scmBinding, scmConnection } from "./scm-test-helpers.js";
 
 const originalFetch = globalThis.fetch;
 
@@ -16,7 +16,7 @@ afterEach(() => {
 describe("SCM provider adapters", () => {
   it("publishes provider differences instead of pretending webhook parity", () => {
     expect(GITHUB_SCM_CAPABILITIES.streams.pipelines.webhook).toBe(true);
-    expect(GITHUB_SCM_CAPABILITIES.streams.pipelines.limitations.join(" ")).toContain("workflow runs only");
+    expect(GITHUB_SCM_CAPABILITIES.streams.pipelines.limitations.join(" ")).toContain("workflow runs");
     expect(GITHUB_SCM_CAPABILITIES.streams.pipelines.limitations.join(" ")).toContain("check_run");
     expect(CODEBASE_SCM_CAPABILITIES.streams.pipelines.poll).toBe(true);
     expect(CODEBASE_SCM_CAPABILITIES.streams.pipelines.webhook).toBe(false);
@@ -224,7 +224,7 @@ describe("SCM provider adapters", () => {
     expect(rerun.subjectId).not.toBe(webhook.subjectId);
   });
 
-  it("ignores GitHub Checks instead of creating a second pipeline identity", () => {
+  it("ingests GitHub Checks with an identity distinct from workflow runs", () => {
     const parsed = new GitHubScmProviderAdapter().parseWebhook({
       connection: scmConnection(),
       credential: { accessToken: "token", webhookSecret: "secret" },
@@ -242,8 +242,13 @@ describe("SCM provider adapters", () => {
       },
       observedAt: "2026-08-21T08:00:00.000Z",
     });
-    expect(parsed.candidates).toEqual([]);
-    expect(parsed.ignoredReason).toContain("workflow_run only");
+    expect(parsed.candidates).toHaveLength(0);
+    expect(parsed.internalObservations).toHaveLength(1);
+    expect(parsed.internalObservations![0]!.observation).toMatchObject({
+      stream: "checks", entityType: "check_run", externalId: "check_run:7001",
+      payload: { kind: "check_run", head_sha: "abc", name: "build", provider_event_id: "delivery-check" },
+    });
+    expect(parsed.ignoredReason).toContain("internal checks evidence");
   });
 
   it("filters ordinary GitHub issue comments in webhook and polling ingestion", async () => {
@@ -509,6 +514,25 @@ describe("SCM provider adapters", () => {
     ]);
     expect(result.cursor).toBeNull();
     expect(result.done).toBe(true);
+  });
+
+  it("preserves Codebase check-run polling as pipeline events and snapshots", async () => {
+    globalThis.fetch = (async (input) => {
+      expect(new URL(String(input)).searchParams.get("Action")).toBe("ListCheckRuns");
+      return new Response(JSON.stringify({ Result: {
+        CheckRuns: [{ Id: "check_run:7001", Status: "completed", Conclusion: "failure", UpdatedAt: "2026-08-21T07:59:00.000Z" }],
+        TotalCount: 1,
+      } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as typeof fetch;
+    const pollContext = codebaseContext("pipelines");
+    const page = await new CodebaseScmProviderAdapter().poll(pollContext);
+    expect(page.observations).toHaveLength(1);
+    expect(page.observations[0]).toMatchObject({ stream: "pipelines", entityType: "pipeline", payload: { kind: "check_run", conclusion: "failure" } });
+    const store = new MemoryScmIngestionStore();
+    const result = reconcileObservation({ store, binding: pollContext.binding, observation: page.observations[0]!, baseline: false });
+    expect(result.events.map((entry) => entry.event.type)).toEqual(["pipeline.completed"]);
+    expect(result.snapshot).toMatchObject({ entityType: "pipeline", externalId: "check_run:7001", payload: { conclusion: "failure" } });
+    expect(store.snapshots.size).toBe(1);
   });
 
   it("resumes Codebase related-MR and pipeline pages without timestamp cutoffs", async () => {

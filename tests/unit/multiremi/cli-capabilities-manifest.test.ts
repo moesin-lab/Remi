@@ -253,10 +253,10 @@ describe("CLI capabilities manifest", () => {
 
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
     expect(cliCoverageReport(manifest)).toEqual({
-      mapped: 654,
+      mapped: 665,
       exempt: 180,
       missing: 0,
-      total: 834,
+      total: 845,
     });
     // ADR 0025: the Chat composer's slash-command menu is Web state; a CLI sender types the command.
     expect(manifest.routes["GET /api/chat/slash-commands"]).toMatchObject({ cli_exempt: true, category: "pure_ui" });

@@ -1,3 +1,6 @@
+import { ScmOperationError } from "../../scm/operations.js";
+import { MergeOperationRepo } from "../repos/merge-operation-repo.js";
+import type { ScmMergeOperation } from "@multiremi/contracts/merge-operation.js";
 import type { QuestionActor, QuestionAnswer, QuestionAnswerInput, QuestionHistoryEvent, QuestionMutationInput, QuestionStage, QuestionSubagent, QuestionView, QuestionWaitStatus } from '@multiremi/contracts';
 import { isHistoricalIssueQuestionRecord } from '@multiremi/contracts';
 import type { MultiremiWorkspaceMember } from '@multiremi/contracts/types.js';
@@ -19,6 +22,8 @@ type RouteStep = { handler: QuestionActor | null; issue_id: string | null; stage
 export type ChatQuestionResponsibilityFilter = { transportOnly?: boolean; botId?: string; memberId?: string; agentId?: string };
 interface QuestionRecord {
   version: 1;
+  origin?: "platform_merge_approval";
+  merge_operation_id?: string;
   workspace_id: string;
   source_issue_id: string | null;
   source_attempt_id: string | null;
@@ -268,6 +273,7 @@ export class Questions {
     return { type: sender.type, id: sender.id };
   }
   private fresh(message: UnifiedMessage, record: QuestionRecord) {
+    if (record.origin === "platform_merge_approval") return;
     if (this.route(record.source_issue_id, message.sender_id, message.session_id, record.workspace_id).revision !== record.responsibility_revision)
       throw new QuestionError(409, 'question_responsibility_changed', 'Responsibility changed; reload the question');
   }
@@ -496,6 +502,45 @@ export class Questions {
     // explicit deadline; the web always retains the original question.
     this.ctx.feishuBot().enqueueQuestionPresentationWithinTransaction(message.id);
   }
+  /** Platform-only creation: no provider callback, nonce or execution-owner routing. */
+  createMergeApproval(input: { operation: ScmMergeOperation; sessionId: string; issueId: string | null; executionScope: string; body: string }) {
+    return this.transaction(events => {
+      const { operation: op } = input;
+      const session = this.ctx.issueSessions().getIssueSessionWithOwnerScope(input.sessionId);
+      const chat = session ? null : this.ctx.chat().getChatSession(input.sessionId);
+      if ((session ? session.ownerWorkspaceId !== op.workspace_id || session.session.workspaceId !== op.workspace_id : chat?.workspaceId !== op.workspace_id)
+        || (input.issueId && this.ctx.issues().getIssue(input.issueId)?.workspaceId !== op.workspace_id)) throw new QuestionError(409, 'merge_approval_unroutable');
+      const operator = !input.issueId ? this.ctx.workspaces().getWorkspaceOperator(op.workspace_id) : null;
+      if (!input.issueId && (!operator || operator.archivedAt)) throw new QuestionError(409, 'merge_approval_unroutable');
+      const record: QuestionRecord = { version: 1, origin: 'platform_merge_approval', merge_operation_id: op.id,
+        workspace_id: op.workspace_id, source_issue_id: input.issueId, source_attempt_id: null, responsibility_revision: null,
+        human_required: true, route: [{ handler: operator ? { type: 'member', id: operator.id } : null, issue_id: input.issueId, stage: 'human' }], route_index: 0,
+        route_revision: 1, route_reason: null, status: 'pending', summary: null, answer: null, answer_revision: 0, history: [], wait: { status: 'none', reason: null } };
+      const sent = sendMessageWithinTransaction(this.ctx, { session_id: input.sessionId, execution_scope: input.executionScope,
+        sender: op.actor.kind === 'agent' ? { type: 'agent', id: op.actor.id } : { type: 'platform', id: null },
+        to: { type: 'none' }, message_kind: 'decision', wake_requested: 'inbox_only', body_md: input.body,
+        options: [{ label: 'Approve', value: 'approve' }, { label: 'Reject', value: 'reject' }],
+        dedupe_key: `merge-approval:${op.id}`, metadata: { question: record, platform_merge_approval: { operation_id: op.id } } }, events);
+      this.event(record, 'created', null); this.notify(sent.message, record, events); this.save(sent.message, record, events, true, true);
+      const repo = new MergeOperationRepo(this.ctx);
+      // Re-read within the workspace/Q transaction; another requester may have claimed it.
+      const current = repo.get(op.id);
+      if (!current || current.state !== 'executing' || current.version !== op.version
+        || !repo.update(current, { state: 'awaiting_human', lease_until: null, approval_message_id: sent.message.id }))
+        throw new QuestionError(409, 'merge_approval_conflict');
+      return sent.message.id;
+    });
+  }
+  /** Worker invalidation preserves the original question and closes it without impersonating a member. */
+  invalidateMergeApproval(id: string, reason: string, operation?: ScmMergeOperation): void {
+    this.transaction(events => {
+      const { message, record } = this.lock(id);
+      if (record.origin !== 'platform_merge_approval' || record.status === 'closed') return;
+      if (operation && !new MergeOperationRepo(this.ctx).update(operation, { state: 'blocked', lease_until: null, reasons: [{ code: reason, message: 'Approval no longer matches PR, target, policy or method' }] })) throw new QuestionError(409, 'merge_operation_conflict');
+      record.status = 'closed'; record.wait = { status: 'none', reason };
+      this.event(record, 'close', null, { reason }); this.save(message, record, events);
+    });
+  }
   createWithinTransaction(input: SendMessageInput, sourceAttemptId: string, events: CommitEventQueue) {
     const turn = input.source_turn_id ? this.ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(input.source_turn_id) : null;
     if (!turn || turn.current_attempt_id !== sourceAttemptId) throw new QuestionError(409, 'question_source_attempt_changed');
@@ -549,7 +594,12 @@ export class Questions {
     const bot = actor?.type === 'agent' ? this.ctx.feishuBot().getFeishuBotConfigForSession(record.workspace_id, message.session_id) : null;
     if (valid && actor?.type === 'agent' && actor.id === bot?.agentId && record.status === 'pending' && step?.stage === 'human') allowed.push('present');
     const humanRequest = message.metadata.human_request as { kind?: string; payload?: { questions?: unknown[]; context?: { text: string; truncated?: boolean }; subagent?: unknown } } | undefined;
-    return { id: message.id, kind: humanRequest ? humanRequest.kind === 'permission' ? 'permission' : 'question' : 'decision', session_id: message.session_id, workspace_id: record.workspace_id, source_issue_id: record.source_issue_id,
+    if (record.origin === "platform_merge_approval") {
+      if (actor?.type !== "member") { for (const action of ["answer", "revise", "close", "escalate", "continue"] as const) { const i = allowed.indexOf(action); if (i >= 0) allowed.splice(i, 1); } }
+      if (!new MergeOperationRepo(this.ctx).approvalMutable(record.merge_operation_id!)) { const i = allowed.indexOf("revise"); if (i >= 0) allowed.splice(i, 1); }
+      if (valid && actor?.type === "agent" && record.status === "pending" && !allowed.includes("present")) allowed.push("present");
+    }
+    return { ...(record.origin ? { origin: record.origin, merge_operation_id: record.merge_operation_id } : {}), id: message.id, kind: humanRequest ? humanRequest.kind === 'permission' ? 'permission' : 'question' : 'decision', session_id: message.session_id, workspace_id: record.workspace_id, source_issue_id: record.source_issue_id,
       source_agent_id: message.sender_type === 'agent' ? message.sender_id : null, source_turn_id: message.task_id, source_attempt_id: record.source_attempt_id,
       original_questions: Array.isArray(humanRequest?.payload?.questions) ? humanRequest.payload.questions : [], original_message: message.body_md, original_context: humanRequest?.payload?.context ?? null,
       source_subagent: questionSubagent(humanRequest?.payload?.subagent), options: message.options,
@@ -582,11 +632,32 @@ export class Questions {
       .all(issue.id, issue.workspaceId, issue.workspaceId, issue.workspaceId, issue.workspaceId, ...(cursor ? [cursor.created_at,cursor.created_at,cursor.id] : []), limit);
     return ids.map(row => this.get(row.id, actor)).filter((q): q is QuestionView => !!q);
   }
+  private mergeDecision(operationId: string, questionId: string, approve: boolean): void {
+    try { new MergeOperationRepo(this.ctx).decide(operationId, questionId, approve); }
+    catch (error) {
+      if (error instanceof ScmOperationError) throw new QuestionError(409, error.code, error.message);
+      throw error;
+    }
+  }
   answer(id: string, input: QuestionAnswerInput, sender: SendMessageInput['sender'], sourceTurnId?: string, credential?: QuestionCardCredential) {
     this.refreshIfStale(id);
     return this.transaction(events => {
       const { message, record } = this.lock(id), actor = this.actor(record, sender, sourceTurnId, id, input.expected_route_revision);
       if (credential) assertQuestionCardToken({ token_hash: message.card_token_hash, token_recipient: message.card_token_recipient, token_consumed_at: message.card_token_consumed_at, status: record.status }, credential, 'pending');
+      if (record.origin === 'platform_merge_approval') {
+        if (actor.type !== 'member') throw new QuestionError(403, 'merge_approval_member_required');
+        if (!this.handles(record, record.route[record.route_index], actor)) throw new QuestionError(403, 'question_handler_required');
+        if (input.expected_route_revision !== record.route_revision) throw new QuestionError(409, 'question_route_changed');
+        const keys = Object.keys(input.response ?? {});
+        const values = input.response?.selected_options;
+        if (keys.length !== 1 || keys[0] !== 'selected_options' || !Array.isArray(values) || values.length !== 1 || !['approve','reject'].includes(values[0])) throw new QuestionError(400, 'merge_approval_choice_required');
+        // A repeated identical answer is idempotent even after execution started.
+        if (!input.revise && record.status === 'answered' && JSON.stringify(record.answer?.response) === JSON.stringify(input.response))
+          return { question: this.view(message, record, actor), message: getMessage(this.ctx, record.answer!.reply_message_id)!, turn_id: null };
+        const repo = new MergeOperationRepo(this.ctx);
+        if (!repo.approvalMutable(record.merge_operation_id!)) throw new QuestionError(409, 'merge_approval_already_claimed');
+        this.mergeDecision(record.merge_operation_id!, id, values[0] === 'approve');
+      }
       const revise = input.revise === true;
       if (revise) {
         // Members revise only an answer given at the human stage; Agent-stage answers stay as given.
@@ -637,7 +708,7 @@ export class Questions {
       if (historical) this.notifyHistoricalSource(message, record, actor, events, `${revise ? 'revise' : 'answer'}:${reply.message.id}`,
         `问题 ${id} 的${revise ? '修订' : '答复'}已记录。原问题：\n${message.body_md}\n答复：\n${text}${input.reason ? `\n原因：${input.reason}` : ''}`,
         historicalSameLane ? { id: reply.message.id, failure: sameSessionFailure } : undefined);
-      if (revise && message.sender_id && !historical) sendMessageWithinTransaction(this.ctx, { session_id: message.session_id, sender, to: { type: 'agent', ref: message.sender_id }, message_kind: 'request', wake_requested: 'now',
+      if (revise && message.sender_id && !historical && record.origin !== 'platform_merge_approval') sendMessageWithinTransaction(this.ctx, { session_id: message.session_id, sender, to: { type: 'agent', ref: message.sender_id }, message_kind: 'request', wake_requested: 'now',
         execution_scope: String(message.metadata.execution_scope ?? ''), body_md: `成员修订了问题 ${id} 的答案：${text}\n原因：${input.reason}。这是补充指令，不是重放原 AUQ。`, metadata: { root_question_id: id, question_answer_revision: true }, dedupe_key: `question-revision:${id}:${reply.message.id}` }, events);
       if (!revise && record.wait.status === 'detached' && !/cancelled|explicit_stop/.test(record.wait.reason ?? '')) this.scheduleContinuation(message, record, actor, events);
       // The workspace/row locks still protect the just-written record. Reuse
@@ -649,6 +720,7 @@ export class Questions {
     this.refreshIfStale(id);
     return this.transaction(events => {
       const { message, record } = this.lock(id), actor = this.actor(record, sender, sourceTurnId, id, input.expected_route_revision);
+      if (record.origin === 'platform_merge_approval') throw new QuestionError(409, 'merge_approval_escalation_not_applicable');
       this.current(message, record, actor, input.expected_route_revision);
       if (actor.type !== 'agent' || record.status !== 'pending' || !input.reason?.trim()) throw new QuestionError(400, 'question_escalation_reason_required');
       record.route_index++; record.route_revision++; record.summary = null;
@@ -663,12 +735,16 @@ export class Questions {
     this.refreshIfStale(id);
     return this.transaction(events => {
       const { message, record } = this.lock(id), actor = this.actor(record, sender, sourceTurnId, id, input.expected_route_revision);
+      if (record.origin === 'platform_merge_approval') {
+        if (actor.type !== 'member') throw new QuestionError(403, 'merge_approval_member_required');
+        this.mergeDecision(record.merge_operation_id!, id, false);
+      }
       if (input.expected_route_revision !== record.route_revision) throw new QuestionError(409, 'question_route_changed');
       if (!this.handles(record, record.route[record.route_index], actor) && !(actor.type === 'agent' && actor.id === message.sender_id)) throw new QuestionError(403, 'question_close_authority_required');
       if (record.status !== 'pending' || !input.reason?.trim()) throw new QuestionError(400, 'question_close_reason_required');
       this.fresh(message, record);
       const waiting = this.waiting(message, record).status === 'waiting';
-      record.status = 'closed'; record.wait = { ...record.wait, status: message.metadata.decision_record && record.wait.status === 'none' ? 'none' : 'detached',
+      record.status = 'closed'; record.wait = { ...record.wait, status: record.origin === 'platform_merge_approval' || message.metadata.decision_record && record.wait.status === 'none' ? 'none' : 'detached',
         reason: message.metadata.decision_record && record.wait.status === 'none' ? 'historical_decision_without_native_call' : 'explicit_stop' };
       this.event(record, 'close', actor, { reason: input.reason }); this.save(message, record, events);
       this.ctx.db.run('UPDATE multiremi_conversation_log SET card_token_consumed_at=COALESCE(card_token_consumed_at,?) WHERE id=?', [nowIso(), id]);
@@ -690,7 +766,7 @@ export class Questions {
     return this.transaction(events => {
       const { message, record } = this.lock(id), actor = this.actor(record, sender, sourceTurnId, id, input.expected_route_revision);
       const bot = this.ctx.feishuBot().getFeishuBotConfigForSession(record.workspace_id, message.session_id);
-      if (actor.type !== 'agent' || actor.id !== bot?.agentId || record.route[record.route_index]?.stage !== 'human') throw new QuestionError(403, 'question_present_remi_required');
+      if (actor.type !== 'agent' || (record.origin !== 'platform_merge_approval' && actor.id !== bot?.agentId) || record.route[record.route_index]?.stage !== 'human') throw new QuestionError(403, 'question_present_remi_required');
       if (input.expected_route_revision !== record.route_revision || record.status !== 'pending') throw new QuestionError(409, 'question_route_changed');
       this.fresh(message, record);
       if (typeof input.summary !== 'string' || !input.summary.trim()) throw new QuestionError(400, 'question_summary_required');
@@ -798,10 +874,11 @@ export class Questions {
   }
   /** The refresh hooks and refreshIfStale share these states: an open Q, or a saved answer awaiting recovery. */
   private reroutable(record: QuestionRecord): boolean {
-    return record.status === 'pending' || record.status === 'answered' && record.wait.status === 'detached';
+    return record.origin !== 'platform_merge_approval' && (record.status === 'pending' || record.status === 'answered' && record.wait.status === 'detached');
   }
   /** Automatic re-route after responsibility facts changed; the revision is the only staleness signal. */
   private reroute(message: UnifiedMessage, record: QuestionRecord, events: CommitEventQueue, actor: QuestionActor | null, reason: string): boolean {
+    if (record.origin === 'platform_merge_approval') return false;
     const route = this.route(record.source_issue_id, message.sender_id, message.session_id, record.workspace_id);
     if (route.revision === record.responsibility_revision) return false;
     const index = this.transferredIndex(record, route.steps);
@@ -845,7 +922,7 @@ export class Questions {
           (${this.jsonText('m', 'question.status')}='answered' AND ${this.jsonText('m', 'question.wait.status')}='detached'))`).all(workspaceId);
     for (const row of rows) {
       const loaded = this.read(row.id);
-      if (!loaded || !this.integrity(loaded.message, loaded.record)) continue;
+      if (!loaded || loaded.record.origin === 'platform_merge_approval' || !this.integrity(loaded.message, loaded.record)) continue;
       const { message, record } = loaded;
       const route = this.route(record.source_issue_id, message.sender_id, message.session_id, workspaceId);
       if (route.revision === record.responsibility_revision) continue;

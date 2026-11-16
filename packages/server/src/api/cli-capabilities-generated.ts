@@ -5186,6 +5186,149 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "scm.change-request.create": {
+      "command": "remi scm change-request create",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.get": {
+      "command": "remi scm change-request get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.update": {
+      "command": "remi scm change-request update",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "project.merge-policy.get": {
+      "command": "remi project merge-policy get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "project.merge-policy.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "project.merge-policy.update": {
+      "command": "remi project merge-policy update",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "project.merge-policy.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.review.submit": {
+      "command": "remi scm change-request review submit",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.review.submit",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.review.list": {
+      "command": "remi scm change-request review list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.review.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.merge": {
+      "command": "remi scm change-request merge",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.merge",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.merge-operation.get": {
+      "command": "remi scm merge-operation get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.merge-operation.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.gate": {
+      "command": "remi scm change-request gate",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.gate",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.checks": {
+      "command": "remi scm change-request checks",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.checks",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "scm.change-request.list": {
       "command": "remi scm change-request list",
       "auth": [

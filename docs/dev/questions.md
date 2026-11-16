@@ -8,9 +8,17 @@ summary: 原会话中的唯一问题、沿执行负责人链上交、到顶由�
 
 [`Questions`](../../packages/server/src/store/inbox/questions.ts)以原会话的 decision 消息为问题主体，状态保存在 `metadata.question`，不建立第二个问答表。原题在 `human_request.payload.questions`；Remi 总结独立保存，选项不改写。跨会话通知只带 `root_question_id`，`reply_to_id` 仍只允许同会话引用。
 
-新问题只由 provider 的原生 AskUserQuestion 或权限请求进入；CLI 不提供另建业务 Q 的入口。`remi issue responsibility <issue>`读取执行负责人链，`remi message question`操作既有原 Q。普通 `message send --kind decision` 是会话消息选择，不进入上交链；Leader 咨询 Senior 仍用普通协作消息。
+普通新问题由 provider 的原生 AskUserQuestion 或权限请求进入；另有下文平台合并审批这一受控 origin。CLI 不提供通用的另建业务 Q 入口。`remi issue responsibility <issue>`读取执行负责人链，`remi message question`操作既有原 Q。普通 `message send --kind decision` 是会话消息选择，不进入上交链；Leader 咨询 Senior 仍用普通协作消息。
 
 [`QuestionView`](../../packages/contracts/src/question.ts)是 Web 与 CLI 的共享投影。`GET /api/issues/:id/questions` 返回待答和历史；`GET /api/messages/:id/question`读取一个原问题。答复、升级、Remi 总结、例外续接及显式关闭使用 `/api/messages/:id/question/{answer,escalate,present,continue,close}`；没有转交动作，旧的 transfer 接口返回410。所有写操作提交 `expected_route_revision`；已答问题只有人工阶段的处理者可以显式 `revise` 人工阶段给出的答案，且必须给原因和 `expected_answer_revision`；是否可修订看答案由谁给出（成员的答案只来自人工阶段），不看当前步骤，Agent 的答案保持原样；历史业务 decision 没有原生等待、答复后不再重新路由，仍按其当前步骤判断，处于人工阶段时成员可以推翻其中负责人 Agent 的答案。正常答复重放不当作改答。原 provider 上下文在 `original_context`；原生子代理的子会话发起的权限或提问在 `source_subagent`（`{item_id, name}`，取自 daemon 决策元数据 `subagent`，根会话和旧 daemon 为 null），Chat 的问题行与问题卡据此显示「来自子代理 X」；问题在根单之前就进入人工阶段的原因在 `route_reason`，格式为逗号拼接的 `<issueId>:<原因>`，均与 Remi 总结分开。关闭保存原因和完整历史，并取消尚存的原 provider 等待。
+
+## 平台合并审批
+
+`origin=platform_merge_approval` 是合并执行服务创建的唯一 operation 审批（见 [SCM 操作](scm-operations.md#b2持久合并执行与人工审批)），仍复用原 decision 消息、Question 历史、Inbox 与 route/answer revision。创建即 `stage=human`、`wait_status=none`，无 provider nonce/wait，不经 Issue 执行负责人链，不调用退役 decision writer。普通原生 Q 的上交、鉴权与等待语义不变。
+
+Agent 请求落在发起 turn 所在会话，Issue 来源按该会话所有者取得；成员请求落在 CR 关联 Issue 的 Main。正文固定展示绑定的 repository/PR/head/base/target/method/policy revision 与 gate 摘要，选项 approve/reject。仅成员可 answer/revise/close，Task 凭据包括负责人 Agent 都返回 403；escalate 返回 409，Agent 在现有 Q 可见权限内可 present。原生 Q 的责任刷新不会重路由此 origin。
+
+approve/reject 与 operation 的 CAS 状态在同一事务保存；批准提交后唤醒 worker，但不直接合并。重复 approve 幂等，worker 领取后 revise 一律 409。绑定变化以 approval_stale 同事务阻塞 operation、关闭 Q；没有 provider 消费或续接，不能将批准解释成原 AUQ 已恢复。前端 Inbox/问题卡显示平台合并审批来源；执行结果从 merge operation 查询。reject/close 不执行合并。
 
 ## 上交路由
 

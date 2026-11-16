@@ -51,7 +51,7 @@ export class ScmStreamUnavailableError extends Error {
 
 /** A provider-neutral entity as observed during one poll. */
 export interface ScmEntityObservation {
-  stream: MultiremiScmSyncStream;
+  stream: MultiremiScmSyncStream | "checks";
   entityType: MultiremiScmEntityType;
   externalId: string;
   version: string | null;
@@ -112,6 +112,9 @@ export interface ScmWebhookParseResult {
   deliveryId: string | null;
   candidates: ScmWebhookCandidate[];
   ignoredReason: string | null;
+  /** Internal evidence only: never published as canonical events or Autopilot triggers. */
+  internalObservations?: Array<Pick<ScmWebhookCandidate,
+    "repositoryExternalId" | "repositoryOwner" | "repositoryName"> & { observation: ScmEntityObservation }>;
 }
 
 export interface ScmProviderAdapter {

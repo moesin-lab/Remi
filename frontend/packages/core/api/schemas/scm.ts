@@ -64,6 +64,9 @@ export const ScmConnectionSchema = z.object({
   isDefault: z.boolean().default(false),
   accessTokenSet: z.boolean().default(false),
   accessTokenHint: z.string().nullable().default(null),
+  mergeCredentialSet: z.boolean().default(false),
+  mergeCredentialHint: z.string().nullable().default(null),
+  mergeCredentialKind: z.literal("token").nullable().catch(null).default(null),
   webhookSecretSet: z.boolean().default(false),
   webhookSecretHint: z.string().nullable().default(null),
   verificationStatus: z.enum([

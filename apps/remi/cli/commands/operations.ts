@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { FEISHU_BOT_OPTION, feishuBotPath } from "./feishu-bot-scope.js";
 import {
   AsyncOperationController,
@@ -601,7 +602,20 @@ function autopilotRunGuard(): CommandSpec {
   };
 }
 
+/** Validate/redact input before capability negotiation or reference resolution reads it. */
+function withScmCredentialInput(spec: CommandSpec): CommandSpec {
+  return { ...spec, run: async invocation => {
+    let body: Record<string, unknown>;
+    try { body = await requestBody(invocation); }
+    catch { throw new CliError("usage", "Invalid SCM connection JSON; use --file - for credentials"); }
+    if ("mergeCredential" in body && stringOption(invocation, "file") !== "-") throw new CliError("usage", "Read mergeCredential via --file - (stdin), never argv");
+    await spec.run(invocation);
+  } };
+}
+
 function scmSpecs(): CommandSpec[] {
+  const pullRequests = (i: CommandInvocation) => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/repositories/${encodePath(positional(i, 0, "repository"))}/change-requests`;
+  const pullRequest = (i: CommandInvocation) => `${pullRequests(i)}/${encodePath(positional(i, 1, "number"))}`;
   const connection = async (i: CommandInvocation, client: CliApiClient) => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/connections/${encodePath(await resolveListedId(
     client, i, positional(i, 0, "connection"), "SCM connection",
     `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/connections`, ["connections"],
@@ -612,13 +626,28 @@ function scmSpecs(): CommandSpec[] {
     op({ id: "scm.connection.list", path: ["scm", "connection", "list"], description: "List SCM connections", method: "GET", apiPath: (i) => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/connections`, auth: HUMAN, collections: ["connections"] }),
     op({ id: "scm.connection.get", path: ["scm", "connection", "get"], description: "Get an SCM connection", method: "GET", apiPath: connection, auth: HUMAN, positionals: [ref("connection")] }),
     op({ id: "scm.connection.create", path: ["scm", "connection", "create"], description: "Create an SCM connection", method: "POST", apiPath: (i) => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/connections`, mutation: "write", auth: HUMAN, options: INPUT_OPTIONS }),
-    op({ id: "scm.connection.update", path: ["scm", "connection", "update"], description: "Update an SCM connection", method: "PATCH", apiPath: connection, mutation: "write", auth: HUMAN, positionals: [ref("connection")], options: INPUT_OPTIONS }),
+    withScmCredentialInput(op({ id: "scm.connection.update", path: ["scm", "connection", "update"], description: "Update SCM connection; mergeCredential/clearMergeCredential via --file - (stdin), server-only token slot", method: "PATCH", apiPath: connection, mutation: "write", auth: HUMAN, positionals: [ref("connection")], options: INPUT_OPTIONS })),
     op({ id: "scm.connection.delete", path: ["scm", "connection", "delete"], description: "Delete an SCM connection after reporting repository impact", method: "DELETE", apiPath: connection, mutation: "destructive", auth: HUMAN, positionals: [ref("connection")], before: scmImpact }),
     op({ id: "scm.connection.verify", path: ["scm", "connection", "verify"], description: "Verify an SCM connection", method: "POST", apiPath: async (i, c) => `${await connection(i, c)}/verify`, mutation: "write", auth: HUMAN, positionals: [ref("connection")] }),
     op({ id: "scm.repository.bind", path: ["scm", "repository", "bind"], description: "Bind a repository to an SCM connection", method: "PUT", apiPath: async (i, c) => `${await connection(i, c)}/repositories/${encodePath(positional(i, 1, "repository"))}`, mutation: "write", auth: HUMAN, positionals: [ref("connection"), ref("repository")], options: INPUT_OPTIONS }),
     op({ id: "scm.repository.unbind", path: ["scm", "repository", "unbind"], description: "Unbind a repository from an SCM connection", method: "DELETE", apiPath: async (i, c) => `${await connection(i, c)}/repositories/${encodePath(positional(i, 1, "repository"))}`, mutation: "destructive", auth: HUMAN, positionals: [ref("connection"), ref("repository")] }),
     op({ id: "scm.event.list", path: ["scm", "event", "list"], description: "List normalized SCM events", method: "GET", apiPath: (i) => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/events`, auth: HUMAN, collections: ["events"] }),
     op({ id: "scm.event.get", path: ["scm", "event", "get"], description: "Get an SCM event and evidence", method: "GET", apiPath: (i) => `/api/workspaces/${encodePath(requiredWorkspace(i))}/scm/events/${encodePath(positional(i, 0, "event"))}`, auth: HUMAN, positionals: [ref("event")] }),
+    op({ id: "scm.change-request.create", path: ["scm", "change-request", "create"], description: "Create a draft PR or reuse the source branch's open PR; JSON: head, base, title, body?, draft?", method: "POST", apiPath: pullRequests, mutation: "write", auth: HUMAN_TASK, positionals: [ref("repository")], options: INPUT_OPTIONS }),
+    op({ id: "scm.change-request.get", path: ["scm", "change-request", "get"], description: "Read a live PR by bound repository ID and provider PR number", method: "GET", apiPath: pullRequest, auth: HUMAN_TASK, positionals: [ref("repository"), ref("number")] }),
+    op({ id: "scm.change-request.update", path: ["scm", "change-request", "update"], description: "Update a PR from JSON: title, body or base", method: "PATCH", apiPath: pullRequest, mutation: "write", auth: HUMAN_TASK, positionals: [ref("repository"), ref("number")], options: INPUT_OPTIONS }),
+    op({ id: "project.merge-policy.get", path: ["project", "merge-policy", "get"], description: "Read project merge policy (disabled by default)", method: "GET", apiPath: i => `/api/projects/${encodePath(positional(i, 0, "project"))}/merge-policy`, auth: HUMAN_TASK, positionals: [ref("project")] }),
+    op({ id: "project.merge-policy.update", path: ["project", "merge-policy", "update"], description: "Member-only policy update from JSON including expected_revision", method: "PUT", apiPath: i => `/api/projects/${encodePath(positional(i, 0, "project"))}/merge-policy`, auth: HUMAN, mutation: "write", positionals: [ref("project")], options: INPUT_OPTIONS }),
+    op({ id: "scm.change-request.review.submit", path: ["scm", "change-request", "review", "submit"], description: "Submit immutable structured review from JSON; identity comes from authentication", method: "POST", apiPath: i => `/api/projects/${encodePath(positional(i, 0, "project"))}/change-requests/${encodePath(positional(i, 1, "change-request"))}/reviews`, auth: HUMAN_TASK, mutation: "write", positionals: [ref("project"), ref("change-request")], options: INPUT_OPTIONS }),
+    op({ id: "scm.change-request.review.list", path: ["scm", "change-request", "review", "list"], description: "List structured review history by internal change-request ID", method: "GET", apiPath: i => `/api/projects/${encodePath(positional(i, 0, "project"))}/change-requests/${encodePath(positional(i, 1, "change-request"))}/reviews`, auth: HUMAN_TASK, positionals: [ref("project"), ref("change-request")], collections: ["reviews"] }),
+    op({ id: "scm.change-request.merge", path: ["scm", "change-request", "merge"], description: "Request a policy-gated merge, possibly awaiting member approval", method: "POST", apiPath: i => `/api/projects/${encodePath(positional(i, 0, "project"))}/change-requests/${encodePath(positional(i, 1, "change-request"))}/merge`, auth: HUMAN_TASK, mutation: "write", positionals: [ref("project"), ref("change-request")], options: [
+      { name: "expected-head", type: "string", required: true, valueName: "sha", description: "Expected full head SHA" },
+      { name: "method", type: "string", required: true, valueName: "method", description: "merge, squash or rebase" },
+      { name: "idempotency-key", type: "string", valueName: "key", description: "Stable key for replay (generated if omitted)" },
+    ], body: i => ({ expected_head_sha: stringOption(i, "expected-head"), method: stringOption(i, "method"), idempotency_key: stringOption(i, "idempotency-key") ?? randomUUID() }) }),
+    op({ id: "scm.merge-operation.get", path: ["scm", "merge-operation", "get"], description: "Read durable merge operation and approval state", method: "GET", apiPath: i => `/api/scm/merge-operations/${encodePath(positional(i, 0, "operation"))}`, auth: HUMAN_TASK, positionals: [ref("operation")] }),
+    op({ id: "scm.change-request.gate", path: ["scm", "change-request", "gate"], description: "Preflight live merge evidence; this never authorizes execution", method: "GET", apiPath: i => `/api/projects/${encodePath(positional(i, 0, "project"))}/change-requests/${encodePath(positional(i, 1, "change-request"))}/merge-gate`, auth: HUMAN_TASK, positionals: [ref("project"), ref("change-request")] }),
+    op({ id: "scm.change-request.checks", path: ["scm", "change-request", "checks"], description: "Read live head checks; observations do not authorize merge", method: "GET", apiPath: i => `${pullRequest(i)}/checks`, auth: HUMAN_TASK, positionals: [ref("repository"), ref("number")] }),
     op({ id: "scm.change-request.list", path: ["scm", "change-request", "list"], description: "List change requests linked to an issue", method: "GET", apiPath: (i) => `/api/issues/${encodePath(positional(i, 0, "issue"))}/change-requests`, auth: HUMAN_TASK, positionals: [ref("issue")], collections: ["changeRequests"] }),
     op({ id: "scm.change-request.link", path: ["scm", "change-request", "link"], description: "Link a change request to an issue", method: "PUT", apiPath: changeRequestPath, mutation: "write", auth: HUMAN_TASK, positionals: [ref("issue"), ref("change-request")] }),
     op({ id: "scm.change-request.unlink", path: ["scm", "change-request", "unlink"], description: "Unlink a change request from an issue", method: "DELETE", apiPath: changeRequestPath, mutation: "destructive", auth: HUMAN_TASK, positionals: [ref("issue"), ref("change-request")] }),

@@ -29,6 +29,106 @@ afterEach(() => {
 });
 
 describe("operations CLI contracts", () => {
+  it("reads the merger slot from real stdin and rejects argv/file secrets before any HTTP request", async () => {
+    const bodies: unknown[] = [];
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async request => {
+      const path = new URL(request.url).pathname;
+      if (path === "/api/cli/capabilities") return Response.json({ identity: "human", commands: [{ id: "scm.connection.update", allowed: true }] });
+      if (request.method === "GET") return Response.json({ connections: [{ id: "scm_fixture", name: "Fixture" }] });
+      expect(path).toBe("/api/workspaces/ws_1/scm/connections/scm_fixture");
+      expect(request.method).toBe("PATCH");
+      bodies.push(await request.json());
+      return Response.json({ connection: { id: "scm_fixture", mergeCredentialSet: true } });
+    } });
+    const secret = "fixture-merger-stdin-secret";
+    const directory = mkdtempSync(join(tmpdir(), "scm-credential-cli-")); tempDirectories.push(directory);
+    const file = join(directory, "input.json"); writeFileSync(file, JSON.stringify({ mergeCredential: secret }));
+    try {
+      for (const [args, success] of [
+        [["--file", "-"], true],
+        [["--data", JSON.stringify({ mergeCredential: secret })], false],
+        [["--file", file], false],
+      ] as const) {
+        const child = Bun.spawn([process.execPath, "apps/remi/main.ts", "scm", "connection", "update", "scm_fixture", ...args, "--json"], {
+          env: { ...process.env, MULTIREMI_SERVER_URL: `http://127.0.0.1:${server.port}`, MULTIREMI_WORKSPACE_ID: "ws_1", MULTIREMI_TOKEN: "fixture-member", MULTIREMI_CONFIG: join(directory, "config.json") },
+          stdin: Buffer.from(JSON.stringify({ mergeCredential: secret, mergeCredentialKind: "token" })), stdout: "pipe", stderr: "pipe",
+        });
+        const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+        expect(code === 0, stderr).toBe(success);
+        expect(stdout + stderr).not.toContain(secret);
+      }
+      expect(bodies).toEqual([{ mergeCredential: secret, mergeCredentialKind: "token" }]);
+    } finally { server.stop(true); }
+  });
+
+  it("executes active SCM commands through the Registry with real API paths and JSON bodies", async () => {
+    useCliEnv();
+    for (const [action, method, suffix, body] of [
+      ["create", "POST", "", { head: "feature", base: "main", title: "MUL-35" }],
+      ["get", "GET", "/42", null],
+      ["update", "PATCH", "/42", { title: "updated" }],
+      ["checks", "GET", "/42/checks", null],
+    ] as const) {
+      const spec = specById(`scm.change-request.${action}`);
+      globalThis.fetch = capabilityFetch(spec.id, async request => {
+        expect(request.method).toBe(method);
+        expect(new URL(request.url).pathname).toBe(`/api/workspaces/ws_1/scm/repositories/repo_widgets/change-requests${suffix}`);
+        if (body) expect(await request.json()).toEqual(body);
+        return Response.json({ ok: true });
+      });
+      const args = ["scm", "change-request", action, "repo_widgets", ...(action === "create" ? [] : ["42"]), "--json"];
+      if (body) {
+        const directory = mkdtempSync(join(tmpdir(), "scm-cli-")); tempDirectories.push(directory);
+        const path = join(directory, "body.json"); writeFileSync(path, JSON.stringify(body));
+        args.push("--file", path);
+      }
+      expect(JSON.parse((await capture(() => registryFor([spec]).execute(args))).stdout)).toEqual({ ok: true });
+    }
+  });
+
+  it("executes B1 policy/review/gate commands with JSON file and project/internal CR scope", async () => {
+    useCliEnv();
+    const cases = [
+      ["project.merge-policy.get", ["project", "merge-policy", "get", "prj_1"], "GET", "/api/projects/prj_1/merge-policy", null],
+      ["project.merge-policy.update", ["project", "merge-policy", "update", "prj_1"], "PUT", "/api/projects/prj_1/merge-policy", { version: 1, expected_revision: 2 }],
+      ["scm.change-request.review.submit", ["scm", "change-request", "review", "submit", "prj_1", "scr_1"], "POST", "/api/projects/prj_1/change-requests/scr_1/reviews", { schema_version: 1, verdict: "block" }],
+      ["scm.change-request.review.list", ["scm", "change-request", "review", "list", "prj_1", "scr_1"], "GET", "/api/projects/prj_1/change-requests/scr_1/reviews", null],
+      ["scm.change-request.gate", ["scm", "change-request", "gate", "prj_1", "scr_1"], "GET", "/api/projects/prj_1/change-requests/scr_1/merge-gate", null],
+    ] as const;
+    for (const [id, argv, method, path, body] of cases) {
+      const spec = specById(id);
+      globalThis.fetch = capabilityFetch(spec.id, async request => {
+        expect(request.method).toBe(method); expect(new URL(request.url).pathname).toBe(path);
+        if (body) expect(await request.json()).toEqual(body);
+        return Response.json({ ok: true });
+      });
+      const args: string[] = [...argv, "--json"];
+      if (body) {
+        const directory = mkdtempSync(join(tmpdir(), "b1-cli-")); tempDirectories.push(directory);
+        const file = join(directory, "input.json"); writeFileSync(file, JSON.stringify(body)); args.push("--file", file);
+      }
+      expect(JSON.parse((await capture(() => registryFor([spec]).execute(args))).stdout)).toEqual({ ok: true });
+    }
+  });
+
+  it("executes B2 merge and operation commands with a bound SHA/method/idempotency key", async () => {
+    useCliEnv();
+    const spec = specById("scm.change-request.merge");
+    globalThis.fetch = capabilityFetch(spec.id, async request => {
+      expect(request.method).toBe("POST"); expect(new URL(request.url).pathname).toBe("/api/projects/prj_1/change-requests/scr_1/merge");
+      expect(await request.json()).toEqual({ expected_head_sha: "a".repeat(40), method: "squash", idempotency_key: "merge-1" });
+      return Response.json({ operation_id: "mop_1" }, { status: 202 });
+    });
+    const output = await capture(() => registryFor([spec]).execute(["scm", "change-request", "merge", "prj_1", "scr_1", "--expected-head", "a".repeat(40), "--method", "squash", "--idempotency-key", "merge-1", "--json"]));
+    expect(JSON.parse(output.stdout).operation_id).toBe("mop_1");
+    const get = specById("scm.merge-operation.get");
+    globalThis.fetch = capabilityFetch(get.id, request => {
+      expect(request.method).toBe("GET"); expect(new URL(request.url).pathname).toBe("/api/scm/merge-operations/mop_1");
+      return Response.json({ operation: { id: "mop_1", state: "awaiting_human" } });
+    });
+    expect(JSON.parse((await capture(() => registryFor([get]).execute(["scm", "merge-operation", "get", "mop_1", "--json"]))).stdout).operation.state).toBe("awaiting_human");
+  });
+
   it("requests one canonical day/model detail page using the declared CLI parameters", async () => {
     useCliEnv();
     const spec = specById("dashboard.usage.report");

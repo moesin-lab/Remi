@@ -164,11 +164,31 @@ export class GitHubScmProviderAdapter implements ScmProviderAdapter {
         ),
       });
     } else if (providerEvent === "check_run") {
+      const run = record(body.check_run);
+      const normalized = {
+        id: nullableString(run.id), kind: "check_run", name: stringValue(run.name),
+        status: stringValue(run.status).toLowerCase(), conclusion: nullableString(run.conclusion),
+        head_sha: nullableString(run.head_sha), url: nullableString(run.html_url),
+        app_id: numberValue(record(run.app).id), app_slug: nullableString(record(run.app).slug),
+        check_suite_id: nullableString(record(run.check_suite).id),
+        created_at: nullableString(run.started_at),
+        updated_at: nullableString(run.completed_at) ?? nullableString(run.started_at),
+      };
+      if (!normalized.id || !normalized.head_sha) {
+        return { providerEvent, deliveryId, candidates: [], ignoredReason: "GitHub check_run requires id and head_sha" };
+      }
       return {
-        providerEvent,
-        deliveryId,
-        candidates: [],
-        ignoredReason: "GitHub check_run is ignored; canonical pipeline events support Actions workflow_run only",
+        providerEvent, deliveryId, candidates: [],
+        ignoredReason: "GitHub check_run retained as internal checks evidence only",
+        internalObservations: [{
+          ...base,
+          observation: {
+            stream: "checks", entityType: "check_run", externalId: `check_run:${normalized.id}`,
+            version: pipelineVersion(normalized), occurredAt: normalized.updated_at ?? request.observedAt,
+            observedAt: request.observedAt,
+            payload: { ...normalized, provider_event_id: deliveryId, raw_body: request.rawBody },
+          },
+        }],
       };
     } else if (providerEvent === "push") {
       const ref = stringValue(body.ref).replace(/^refs\/heads\//u, "");
@@ -420,7 +440,7 @@ export class GitHubScmProviderAdapter implements ScmProviderAdapter {
   }
 }
 
-function githubPullObservation(pull: Record<string, unknown>, now: Date): ScmEntityObservation {
+export function githubPullObservation(pull: Record<string, unknown>, now: Date): ScmEntityObservation {
   const payload = normalizeGitHubPull(pull);
   return {
     stream: "change_requests",
@@ -448,12 +468,14 @@ function normalizeGitHubPull(pull: Record<string, unknown>): Record<string, unkn
     target_branch: stringValue(base.ref),
     head_sha: stringAt(head, "sha"),
     base_sha: stringAt(base, "sha"),
+    base_repository_full_name: stringAt(record(base.repo), "full_name").toLowerCase() || null,
     author: stringAt(record(pull.user), "login") || null,
     created_at: nullableString(pull.created_at),
     updated_at: nullableString(pull.updated_at),
     closed_at: nullableString(pull.closed_at),
     merged_at: nullableString(pull.merged_at),
     merge_sha: nullableString(pull.merge_commit_sha),
+    mergeable: typeof pull.mergeable === "boolean" ? pull.mergeable : null,
     mergeable_state: nullableString(pull.mergeable_state),
     checks_conclusion: nullableString(pull.checks_conclusion),
     checks_passed: numberValue(pull.checks_passed),

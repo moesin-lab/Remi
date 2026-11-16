@@ -1,7 +1,7 @@
 import type { MultiremiScmRepositoryBinding } from "@multiremi/contracts/types.js";
 import { CodebaseScmProviderAdapter } from "./codebase.js";
 import { GitHubScmProviderAdapter } from "./github.js";
-import { buildScmLogicalKey, observationSnapshotInput, stableJsonHash } from "./reconcile.js";
+import { buildScmLogicalKey, observationSnapshotInput, reconcileObservation, stableJsonHash } from "./reconcile.js";
 import type {
   ScmIngestionStore,
   ScmProviderAdapter,
@@ -74,6 +74,11 @@ export class ScmWebhookIngestor {
     const parsed = adapter.parseWebhook(request);
     const bindings = this.store.listRepositoryBindings({ connectionId: connection.id, enabled: true });
     const events: ScmRecordResult[] = [];
+    for (const internal of parsed.internalObservations ?? []) {
+      const binding = resolveWebhookBinding(bindings, internal);
+      if (!binding) continue;
+      reconcileObservation({ store: this.store, binding, observation: internal.observation, baseline: false, source: "webhook" });
+    }
     for (const [index, candidate] of parsed.candidates.entries()) {
       const binding = resolveWebhookBinding(bindings, candidate);
       if (!binding) continue;

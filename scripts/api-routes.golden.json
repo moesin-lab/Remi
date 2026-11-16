@@ -1,22 +1,22 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 834,
+    "routeCount": 845,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 592,
+      "compat": 603,
       "root": 16
     },
-    "getRoutes": 363,
-    "getRoutesWithBody": 359,
+    "getRoutes": 369,
+    "getRoutesWithBody": 365,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /api/trace/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 471,
-    "mutationRoutesCovered": 299,
+    "mutationRoutes": 476,
+    "mutationRoutesCovered": 301,
     "flows": [
       "agents-compat",
       "agents-native",
@@ -51,6 +51,7 @@
       "projects",
       "responsibility-retired-routes",
       "runtimes",
+      "scm-active-binding-guard",
       "settings-misc",
       "skills-compat",
       "skills-native",
@@ -372,12 +373,15 @@
     "GET /api/project-knowledge/migration",
     "GET /api/projects",
     "GET /api/projects/:id",
+    "GET /api/projects/:id/change-requests/:changeRequestId/merge-gate",
+    "GET /api/projects/:id/change-requests/:changeRequestId/reviews",
     "GET /api/projects/:id/devices",
     "GET /api/projects/:id/docs",
     "GET /api/projects/:id/docs/:ref",
     "GET /api/projects/:id/docs/:ref/backlinks",
     "GET /api/projects/:id/docs/:ref/revisions",
     "GET /api/projects/:id/knowledge/recall",
+    "GET /api/projects/:id/merge-policy",
     "GET /api/projects/:id/resources",
     "GET /api/projects/search",
     "GET /api/realtime/ws",
@@ -410,6 +414,7 @@
     "GET /api/runtimes/:id/usage/by-hour",
     "GET /api/runtimes/:id/workspaces",
     "GET /api/scm/capabilities",
+    "GET /api/scm/merge-operations/:id",
     "GET /api/sessions/:sessionId",
     "GET /api/sessions/:sessionId/inherited-context",
     "GET /api/sessions/:sessionId/log",
@@ -504,6 +509,8 @@
     "GET /api/workspaces/:workspaceId/scm/connections/:connectionId",
     "GET /api/workspaces/:workspaceId/scm/events",
     "GET /api/workspaces/:workspaceId/scm/events/:eventId",
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks",
     "GET /api/workspaces/:workspaceId/system-model-endpoints",
     "GET /auth/lark/url",
     "GET /favicon.ico",
@@ -555,6 +562,7 @@
     "PATCH /api/workspaces/:workspaceId/messaging/connections/:connectionId",
     "PATCH /api/workspaces/:workspaceId/messaging/sources/:sourceId",
     "PATCH /api/workspaces/:workspaceId/scm/connections/:connectionId",
+    "PATCH /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
     "POST /api/agents",
     "POST /api/agents/:id/archive",
     "POST /api/agents/:id/cancel-tasks",
@@ -756,6 +764,8 @@
     "POST /api/project-knowledge/migration/retry-failed",
     "POST /api/project-knowledge/migration/verify",
     "POST /api/projects",
+    "POST /api/projects/:id/change-requests/:changeRequestId/merge",
+    "POST /api/projects/:id/change-requests/:changeRequestId/reviews",
     "POST /api/projects/:id/devices",
     "POST /api/projects/:id/docs",
     "POST /api/projects/:id/knowledge/publish",
@@ -845,6 +855,7 @@
     "POST /api/workspaces/:workspaceId/messaging/sources",
     "POST /api/workspaces/:workspaceId/scm/connections",
     "POST /api/workspaces/:workspaceId/scm/connections/:connectionId/verify",
+    "POST /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests",
     "POST /auth/google",
     "POST /auth/lark/callback",
     "POST /auth/logout",
@@ -880,6 +891,7 @@
     "PUT /api/projects/:id",
     "PUT /api/projects/:id/devices",
     "PUT /api/projects/:id/docs/:ref",
+    "PUT /api/projects/:id/merge-policy",
     "PUT /api/projects/:id/resources/:resourceId",
     "PUT /api/runtimes/:id/claude-profile",
     "PUT /api/runtimes/:id/codex-profile",
@@ -1187,12 +1199,15 @@
     "GET /api/project-knowledge/migration",
     "GET /api/projects",
     "GET /api/projects/:id",
+    "GET /api/projects/:id/change-requests/:changeRequestId/merge-gate",
+    "GET /api/projects/:id/change-requests/:changeRequestId/reviews",
     "GET /api/projects/:id/devices",
     "GET /api/projects/:id/docs",
     "GET /api/projects/:id/docs/:ref",
     "GET /api/projects/:id/docs/:ref/backlinks",
     "GET /api/projects/:id/docs/:ref/revisions",
     "GET /api/projects/:id/knowledge/recall",
+    "GET /api/projects/:id/merge-policy",
     "GET /api/projects/:id/resources",
     "GET /api/projects/search",
     "GET /api/realtime/ws",
@@ -1225,6 +1240,7 @@
     "GET /api/runtimes/:id/usage/by-hour",
     "GET /api/runtimes/:id/workspaces",
     "GET /api/scm/capabilities",
+    "GET /api/scm/merge-operations/:id",
     "GET /api/sessions/:sessionId",
     "GET /api/sessions/:sessionId/inherited-context",
     "GET /api/sessions/:sessionId/log",
@@ -1319,6 +1335,8 @@
     "GET /api/workspaces/:workspaceId/scm/connections/:connectionId",
     "GET /api/workspaces/:workspaceId/scm/events",
     "GET /api/workspaces/:workspaceId/scm/events/:eventId",
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks",
     "GET /api/workspaces/:workspaceId/system-model-endpoints",
     "GET /auth/lark/url",
     "GET /favicon.ico",
@@ -1355,6 +1373,7 @@
     "PATCH /api/squads/:id/members/role",
     "PATCH /api/workspaces/:id",
     "PATCH /api/workspaces/:id/members/:memberId",
+    "PATCH /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
     "POST /api/agents",
     "POST /api/agents/:id/archive",
     "POST /api/agents/:id/cancel-tasks",
@@ -1535,6 +1554,7 @@
     "POST /api/workspaces/:id/members",
     "POST /api/workspaces/:id/relay-config/:engine/reveal",
     "POST /api/workspaces/:workspaceId/issue-responsibility-migration/map",
+    "POST /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests",
     "POST /auth/google",
     "POST /auth/lark/callback",
     "POST /auth/logout",
@@ -9947,6 +9967,28 @@
             "allowed": true
           },
           {
+            "id": "project.merge-policy.get",
+            "command": "remi project merge-policy get",
+            "capability": "project.merge-policy.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "project.merge-policy.update",
+            "command": "remi project merge-policy update",
+            "capability": "project.merge-policy.update",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "project.resource.create",
             "command": "remi project resource create",
             "capability": "project.resource.create",
@@ -10827,6 +10869,50 @@
             "allowed": true
           },
           {
+            "id": "scm.change-request.checks",
+            "command": "remi scm change-request checks",
+            "capability": "scm.change-request.checks",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.change-request.create",
+            "command": "remi scm change-request create",
+            "capability": "scm.change-request.create",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.change-request.gate",
+            "command": "remi scm change-request gate",
+            "capability": "scm.change-request.gate",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.change-request.get",
+            "command": "remi scm change-request get",
+            "capability": "scm.change-request.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "scm.change-request.link",
             "command": "remi scm change-request link",
             "capability": "scm.change-request.link",
@@ -10849,9 +10935,53 @@
             "allowed": true
           },
           {
+            "id": "scm.change-request.merge",
+            "command": "remi scm change-request merge",
+            "capability": "scm.change-request.merge",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.change-request.review.list",
+            "command": "remi scm change-request review list",
+            "capability": "scm.change-request.review.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.change-request.review.submit",
+            "command": "remi scm change-request review submit",
+            "capability": "scm.change-request.review.submit",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "scm.change-request.unlink",
             "command": "remi scm change-request unlink",
             "capability": "scm.change-request.unlink",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.change-request.update",
+            "command": "remi scm change-request update",
+            "capability": "scm.change-request.update",
             "outputs": [
               "table",
               "json",
@@ -10940,6 +11070,17 @@
             "id": "scm.event.list",
             "command": "remi scm event list",
             "capability": "scm.event.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.merge-operation.get",
+            "command": "remi scm merge-operation get",
+            "capability": "scm.merge-operation.get",
             "outputs": [
               "table",
               "json",
@@ -21345,6 +21486,24 @@
       }
     },
     {
+      "key": "get-sweep GET /api/projects/:id/change-requests/:changeRequestId/merge-gate",
+      "route": "GET /api/projects/:id/change-requests/:changeRequestId/merge-gate",
+      "path": "/api/projects/prj_snapshot/change-requests/scr_snapshot_missing/merge-gate",
+      "status": 404,
+      "body": {
+        "error": "CR must be linked to an Issue in this project"
+      }
+    },
+    {
+      "key": "get-sweep GET /api/projects/:id/change-requests/:changeRequestId/reviews",
+      "route": "GET /api/projects/:id/change-requests/:changeRequestId/reviews",
+      "path": "/api/projects/prj_snapshot/change-requests/scr_snapshot_missing/reviews",
+      "status": 404,
+      "body": {
+        "error": "CR must be linked to an Issue in this project"
+      }
+    },
+    {
       "key": "get-sweep GET /api/projects/:id/devices",
       "route": "GET /api/projects/:id/devices",
       "path": "/api/projects/prj_snapshot/devices",
@@ -21487,6 +21646,28 @@
       "status": 400,
       "body": {
         "error": "q is required"
+      }
+    },
+    {
+      "key": "get-sweep GET /api/projects/:id/merge-policy",
+      "route": "GET /api/projects/:id/merge-policy",
+      "path": "/api/projects/prj_snapshot/merge-policy",
+      "status": 200,
+      "body": {
+        "policy": {
+          "version": 1,
+          "revision": 0,
+          "enabled": false,
+          "target_branches": [],
+          "required_checks": [],
+          "require_independent_review": true,
+          "independent_reviewers": [],
+          "require_human_approval": false,
+          "allowed_merge_methods": [
+            "squash"
+          ],
+          "credential_enforcement_mode": "platform_only"
+        }
       }
     },
     {
@@ -22004,7 +22185,7 @@
                 "pollFidelity": "inferred",
                 "webhookFidelity": "exact",
                 "limitations": [
-                  "Canonical pipeline events cover GitHub Actions workflow runs only; GitHub Checks check_run events are ignored."
+                  "Polling covers Actions workflow runs; check_run events are ingested by webhook and checks are read live per head SHA."
                 ]
               }
             },
@@ -22060,6 +22241,15 @@
             "supportsConditionalRequests": false
           }
         }
+      }
+    },
+    {
+      "key": "get-sweep GET /api/scm/merge-operations/:id",
+      "route": "GET /api/scm/merge-operations/:id",
+      "path": "/api/scm/merge-operations/mop_snapshot",
+      "status": 404,
+      "body": {
+        "error": "merge operation not found"
       }
     },
     {
@@ -24272,6 +24462,24 @@
       "status": 404,
       "body": {
         "error": "SCM event not found"
+      }
+    },
+    {
+      "key": "get-sweep GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
+      "route": "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
+      "path": "/api/workspaces/local/scm/repositories/repo_snapshot/change-requests/42",
+      "status": 404,
+      "body": {
+        "error": "SCM repository binding not found"
+      }
+    },
+    {
+      "key": "get-sweep GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks",
+      "route": "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks",
+      "path": "/api/workspaces/local/scm/repositories/repo_snapshot/change-requests/42/checks",
+      "status": 404,
+      "body": {
+        "error": "SCM repository binding not found"
       }
     },
     {
@@ -29771,6 +29979,24 @@
             "updatedAt": "<timestamp>"
           }
         ]
+      }
+    },
+    {
+      "key": "scm-active-binding-guard#000 POST /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests",
+      "route": "POST /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests",
+      "path": "/api/workspaces/local/scm/repositories/repo_snapshot/change-requests",
+      "status": 404,
+      "body": {
+        "error": "SCM repository binding not found"
+      }
+    },
+    {
+      "key": "scm-active-binding-guard#001 PATCH /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
+      "route": "PATCH /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number",
+      "path": "/api/workspaces/local/scm/repositories/repo_snapshot/change-requests/42",
+      "status": 404,
+      "body": {
+        "error": "SCM repository binding not found"
       }
     },
     {

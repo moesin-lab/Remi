@@ -1,5 +1,7 @@
 {
   "responsibility": {
+    "platform_merge_approval": "플랫폼 병합 승인",
+    "merge_approval_saved": "병합 결정이 저장되었습니다 · 작업 상태를 확인하세요",
     "pending_section": "답변 대기 질문",
     "history_section": "답변 완료 및 종료된 질문",
     "execution_resumed": "답변 완료 · 실행 재개됨",

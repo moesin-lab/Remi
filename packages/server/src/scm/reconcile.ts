@@ -101,6 +101,9 @@ export function deriveCanonicalCandidates(
   observation: ScmEntityObservation,
   previous: MultiremiScmEntitySnapshot | null,
 ): ScmCanonicalCandidate[] {
+  // The provider classifies internal check evidence at its source.
+  if (observation.entityType === "check_run") return [];
+
   const current = observation.payload;
   const prior = previous?.payload ?? null;
   if (observation.stream === "default_branch") {

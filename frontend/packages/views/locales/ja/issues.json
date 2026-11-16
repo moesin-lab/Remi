@@ -1,5 +1,7 @@
 {
   "responsibility": {
+    "platform_merge_approval": "プラットフォームのマージ承認",
+    "merge_approval_saved": "マージ判断を保存しました · 操作の状態を確認してください",
     "pending_section": "回答待ちの質問",
     "history_section": "回答済み・終了した質問",
     "execution_resumed": "回答済み・実行を再開しました",

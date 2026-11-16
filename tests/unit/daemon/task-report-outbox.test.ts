@@ -111,6 +111,8 @@ describe("MultiremiTaskReportOutbox", () => {
   // The real SQLite replay of 3500 persisted deltas can exceed 30s on CI.
   // This recovery test verifies correctness; its timeout is not a throughput budget.
   it("replays over 3000 request facts after an outage with bounded final chunks and delivers terminal last", async () => {
+    const started = performance.now();
+    let storeMs = 0;
     const store = createLocalStore();
     const runtime = store.registerRuntime({ name: "long-usage", provider: "claude", workspaceId: "local" });
     const agent = store.createAgent({ name: "long-usage", provider: "claude", runtimeId: runtime.id, workspaceId: "local" });
@@ -121,16 +123,22 @@ describe("MultiremiTaskReportOutbox", () => {
     const units = Array.from({ length: 3500 }, (_, i) => ({ ...actualUnit({ unitId: `request-${i}`, provider: "claude", model: i % 2 ? "opus" : "haiku",
       scope: "request", source: "provider_request", inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0,
       totalTokens: 2, evidenceRef: "upstream_request" }), occurredAt: "2026-10-01T01:00:00.000Z" }));
+    const initialized = performance.now();
     for (const [index, unit] of units.entries()) first.enqueue(task.id, "usage", { usageSnapshot: { version: 2, runId: "long-run", revision: index + 1, complete: false, units: [unit] } });
     first.enqueue(task.id, "usage", { usageSnapshot: { version: 2, runId: "long-run", revision: 3501, complete: true, units } });
     first.enqueue(task.id, "complete", { output: "done" });
     expect(first.stats().blocked).toBe(0);
     await first.close();
+    const persisted = performance.now();
     const kinds: string[] = [];
     const reopened = track(new MultiremiTaskReportOutbox({ path, deliver: async record => {
       expect(outboxRecordBytes(record)).toBeLessThanOrEqual(DAEMON_FRAME_MAX_BYTES);
       kinds.push(record.kind);
-      if (record.kind === "usage") store.reportTaskUsageSnapshot(task.id, record.payload.usageSnapshot as any);
+      if (record.kind === "usage") {
+        const before = performance.now();
+        store.reportTaskUsageSnapshot(task.id, record.payload.usageSnapshot as any);
+        storeMs += performance.now() - before;
+      }
       else if (record.kind === "complete") store.completeTask(task.id, { output: "done" });
     } }));
     expect(await reopened.waitForTaskDrain(task.id)).toBe("delivered");
@@ -139,6 +147,7 @@ describe("MultiremiTaskReportOutbox", () => {
     const report = store.getUsageReport({ workspaceId: "local", days: null });
     expect(report.summary.actual_total_tokens).toBe(7000);
     expect(report.by_model.map(row => row.actual_total_tokens).sort()).toEqual([3500, 3500]);
+    console.log("[outbox-replay-timing]", JSON.stringify({ platform: process.platform, setupMs: initialized - started, persistMs: persisted - initialized, replayMs: performance.now() - persisted, storeMs }));
   }, 90_000);
   it("keeps v2 usage through cancellation and restart without discarding deltas behind a complete marker", async () => {
     const path = tempPath();

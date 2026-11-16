@@ -177,7 +177,10 @@ export class Questions {
     return result;
   }
   private integrity(message: UnifiedMessage, record: QuestionRecord): boolean {
-    if (record.source_attempt_id) {
+    // Historical business Qs can live on a parent lane or a different scope.
+    // Their exact source relation is checked by historicalSource/canAccessFromTurn.
+    const historical = message.metadata.decision_record && !message.metadata.human_request && !record.wait.wait_id;
+    if (!historical && record.source_attempt_id) {
       const source = this.ctx.db.query(`SELECT t.id, t.session_id, t.workspace_id, t.agent_id, t.execution_scope
         FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id WHERE a.id=?`)
         .get(record.source_attempt_id);

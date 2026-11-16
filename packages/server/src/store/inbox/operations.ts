@@ -42,6 +42,34 @@ export class InboxOperations {
     return this.ctx.db.query(`SELECT m.* FROM multiremi_conversation_log m WHERE session_id=? AND seq>? AND seq<=?
       AND kind='message' AND visibility='shown' AND deleted_at IS NULL${extra}${input.message_kind?' AND message_kind=?':''}${unread} ORDER BY seq LIMIT ?`).all(...params).map(messageFromRow);
   }
+  /** A terminal report grants only its named result and direct replies to the original recipient lane. */
+  canReadDelegationResult(attemptId: string, messageId: string): boolean {
+    const caller = this.ctx.tasks().getTask(attemptId);
+    const current = this.ctx.db.query('SELECT * FROM multiremi_turns WHERE current_attempt_id=?').get(attemptId);
+    const message = getMessage(this.ctx, messageId);
+    if (!caller || !current || !message || message.deleted_at || message.visibility !== 'shown') return false;
+    const candidates = [message.id, message.reply_to_id].filter((id): id is string => !!id);
+    for (const id of candidates) {
+      const root = getMessage(this.ctx, id);
+      if (!root || root.deleted_at || root.visibility !== 'shown' || root.session_id !== message.session_id || !root.task_id) continue;
+      const source = this.ctx.db.query(`SELECT * FROM multiremi_turns WHERE id=? AND session_id=?
+        AND workspace_id=? AND delegated_by_agent_id=? AND delegation_id IS NOT NULL
+        AND COALESCE(delegated_from_issue_session_id,session_id)=?
+        AND agent_id<>delegated_by_agent_id AND status IN ('completed','failed','cancelled')`).get(
+        root.task_id, root.session_id, current.workspace_id, current.agent_id, current.session_id);
+      if (!source || root.sender_type !== 'agent' || root.sender_id !== source.agent_id) continue;
+      const report = this.ctx.db.query(`SELECT id FROM multiremi_conversation_log WHERE session_id=?
+        AND dedupe_key=? AND task_id=? AND sender_type='platform' AND to_agent_id=?
+        AND message_kind='report' AND visibility='shown' AND deleted_at IS NULL`).get(
+        current.session_id, `delegation_terminal:${source.current_attempt_id}`, source.id, current.agent_id);
+      const saved = report ? getMessage(this.ctx, String(report.id)) : null;
+      const evidence = saved?.metadata.message_source as { commentId?: string; taskId?: string } | undefined;
+      if (saved && evidence?.commentId === root.id
+        && evidence.taskId === source.current_attempt_id
+        && (saved.metadata.execution_scope ?? '') === current.execution_scope) return true;
+    }
+    return false;
+  }
   editMessage(id:string,input:{body_md:string}):UnifiedMessage {
     return this.transaction(()=>{
       const message=getMessage(this.ctx,id);if(!message||message.deleted_at)throw new Error('Message not found');

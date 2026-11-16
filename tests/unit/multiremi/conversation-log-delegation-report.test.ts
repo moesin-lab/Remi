@@ -1,3 +1,5 @@
+import { CommandRegistry } from "../../../apps/remi/cli/core/command-registry.js";
+import { unifiedCommandSpecs } from "../../../apps/remi/cli/commands/unified.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, taskRequestPath, sentTask } from "./unified-test-paths.js";
 import type { Database } from "bun:sqlite";
@@ -102,6 +104,63 @@ function expectNoSeqHole(store: MultiremiStore, sessionId: string): void {
 for (const backend of backendsInScope(import.meta.path, ["sqlite", "postgres"] as const)) {
   describe.skipIf(backend === "postgres" && !pgAdminUrl)(`MUL-402 delegation_report log mirror (${backend})`, () => {
     stores[backend].install();
+    it("MUL-61 grants only the reported result and reply thread to the delegator", async () => withStore(backend, async store => {
+      const f = fixture(store);
+      const child = await dispatch(store, f.leaderTask, f.child, f.worker.id);
+      const token = await store.createTaskAccessToken(f.leaderTask, "local");
+      const headers = { Authorization: `Bearer ${token.token}` };
+      const app = createMultiremiApp({ store, authToken: "test-root" });
+      const get = (path: string, h = headers) => app.request(path, { headers: h });
+      expect(store.claimTask(f.leaderRuntime.id)?.id).toBe(f.leaderTask.id);
+      store.startTask(f.leaderTask.id);
+      expect(store.claimTask(f.workerRuntime.id)?.id).toBe(child.id);
+      store.startTask(child.id);
+      const comment = (body: string, parentId?: string) => store.createIssueComment(f.child.id, {
+        authorType: "agent", authorId: f.worker.id, taskId: child.id, issueSessionId: child.issueSessionId, body, parentId,
+      });
+      const unrelated = comment("Other child content");
+      const result = comment("Complete review evidence. ".repeat(100));
+      const attachment = store.createAttachment({ issueId: f.child.id, commentId: result.id, workspaceId: "local",
+        filename: "evidence.txt", contentType: "text/plain", sizeBytes: 42, url: "/api/attachments/evidence/content" });
+      expect((await get(`/api/messages/${result.id}`)).status).toBe(403);
+      store.completeTask(child.id, { output: result.body });
+      const reply = store.sendMessage({ session_id: child.issueSessionId!, sender: { type: "agent", id: f.worker.id },
+        to: { type: "none" }, message_kind: "reply", wake_requested: "inbox_only", reply_to_id: result.id, body_md: "Follow-up evidence" }).message;
+      const report = reportEnvelope(store, f.leaderSession.id, child.id);
+      const command = /（remi ([^）]+)）/.exec(report.body_md)![1]!.split(" ");
+      const registry = new CommandRegistry();
+      for (const spec of unifiedCommandSpecs()) registry.register(spec);
+      const invocation = registry.resolve(command)!;
+      expect(invocation.spec.retired).toBeUndefined();
+      expect(invocation.spec.auth).toContain("task");
+      expect(command).toEqual(["message", "get", result.id, "--output", "json"]);
+      const response = await get(`/api/messages/${command[2]}`);
+      expect(response.status).toBe(200);
+      const data = await response.json() as any;
+      expect(data.message.body_md).toBe(result.body);
+      expect(data.message.attachments).toEqual([expect.objectContaining({ id: attachment.id, filename: "evidence.txt", sizeBytes: 42 })]);
+      expect((await get(`/api/messages/${reply.id}`)).status).toBe(200);
+      const thread = await get(`/api/sessions/${child.issueSessionId}/messages?thread=${result.id}&limit=1`);
+      expect(thread.status).toBe(200);
+      const page = await thread.json() as any;
+      expect(page.messages.map((m: any) => m.id)).toEqual([result.id]);
+      const next = await get(`/api/sessions/${child.issueSessionId}/messages?thread=${result.id}&cursor=${page.next_cursor}`);
+      expect((await next.json() as any).messages.map((m: any) => m.id)).toEqual([reply.id]);
+      for (const path of [`/api/messages/${unrelated.id}`, `/api/sessions/${child.issueSessionId}/messages`,
+        `/api/sessions/${child.issueSessionId}/messages?thread=${unrelated.id}`, `/api/sessions/${child.issueSessionId}/messages?from=1&to=100`]) {
+        expect((await get(path)).status, path).toBe(403);
+      }
+      expect((await app.request(`/api/messages/${result.id}/resolve`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: '{}' })).status).toBe(403);
+      const wrongSession = store.createIssueSession(f.parent.id, { title: "Another dispatch scope" });
+      const sameAgentTask = store.createTask({ agentId: f.leader.id, issueId: f.parent.id, issueSessionId: wrongSession.id, prompt: "Wrong Session" });
+      const sameAgentToken = await store.createTaskAccessToken(sameAgentTask, "local");
+      expect((await get(`/api/messages/${result.id}`, { Authorization: `Bearer ${sameAgentToken.token}` })).status).toBe(403);
+      const otherTask = store.createTask({ agentId: f.worker.id, issueId: f.parent.id, issueSessionId: f.leaderSession.id, prompt: "Not the delegator" });
+      const otherToken = await store.createTaskAccessToken(otherTask, "local");
+      const otherHeaders = { Authorization: `Bearer ${otherToken.token}` };
+      expect((await get(`/api/messages/${result.id}`, otherHeaders)).status).toBe(403);
+      expect((await get(`/api/sessions/${child.issueSessionId}/messages?thread=${result.id}`, otherHeaders)).status).toBe(403);
+    }), backend === "postgres" ? 20_000 : 10_000);
     for (const [terminal, withComment] of [["completed", true], ["failed", false], ["cancelled", false]] as const) {
       it(`mirrors one ${terminal} report ${withComment ? "with" : "without"} a result comment at the event's seq`,
         async () => withStore(backend, async (store) => {

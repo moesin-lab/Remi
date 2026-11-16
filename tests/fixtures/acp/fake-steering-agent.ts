@@ -11,7 +11,7 @@
  * ever sends one fails loudly. Every frame it receives is logged to
  * `FAKE_STEER_LOG` for assertions. Configured by `FAKE_STEER_CONFIG` (JSON).
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 export interface FakeSteerPromptPlan {
@@ -28,7 +28,7 @@ export interface FakeSteerPromptPlan {
   /** Ask the client a `session/request_permission` once the turn runs. */
   permission?: boolean;
   /** "steer": hold until a steer is injected; "cancel": hold until cancelled; "none": end now. */
-  hold?: "steer" | "cancel" | "none";
+  hold?: "steer" | "cancel" | "none" | "control";
   /** Text answering an injected steer. */
   answer?: string;
   /** Billing frames sent this long after the prompt resolved (a task-notification follow-up). */
@@ -161,6 +161,18 @@ function runTurn(prompt: ActivePrompt): void {
     send({ id: ++requestId, method: "session/request_permission", params: { sessionId,
       toolCall: { toolCallId: "toolu_perm", title: "Write file" },
       options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }] } });
+  }
+  if (plan.hold === "control") {
+    const control = process.env.FAKE_STEER_CONTROL;
+    if (!control) throw new Error("control hold requires FAKE_STEER_CONTROL");
+    log({ kind: "control_waiting", sessionId });
+    const release = () => {
+      if (!existsSync(control) || prompt.settled) return;
+      update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: "toolu_sleep", status: "completed" });
+      settle(prompt, "end_turn");
+    };
+    prompt.timers.push(setInterval(release, 25));
+    release();
   }
   if ((plan.hold ?? "none") === "none") settle(prompt, "end_turn");
 }

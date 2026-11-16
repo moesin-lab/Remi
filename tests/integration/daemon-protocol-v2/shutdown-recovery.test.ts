@@ -1,6 +1,44 @@
 import { expect, test } from "bun:test";
 import { DaemonProtocolHarness, waitFor } from "./harness.js";
 import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
+import { AcpRpcError, AcpSessionFailureError } from "@acp/index.js";
+
+for (const [shape, error, failureReason] of [
+  ["AIR authentication", new AcpSessionFailureError({ id: "auth", revision: 1,
+    category: "authentication", severity: "error", title: "Cancelled" }), "agent_error.provider_auth_or_access"],
+  ["RPC authentication", new AcpRpcError(-32603, "Internal error", { category: "authentication" }), "agent_error.provider_auth_or_access"],
+  ["plain authentication", new Error("invalid api key"), "agent_error.provider_auth_or_access"],
+  ["unrelated provider failure", new Error("fixture provider failure"), "agent_error.unknown"],
+] as const) {
+  test(`stop before provider failure: ${shape}`, async () => {
+    let rejectFirst!: (error: Error) => void;
+    const failing = new Promise<never>((_resolve, reject) => { rejectFirst = reject; });
+    let runs = 0;
+    const h = await DaemonProtocolHarness.create({ database: "sqlite", providerFactory: () => ({
+      async *sendStream() { runs++; await failing; },
+      getLastResponse: () => ({ text: "", sessionId: "drain-failure-session", usage: [], toolCalls: [] } as any),
+      close: async () => {},
+    }) });
+    try {
+      await h.startDaemon();
+      const runtimeId = h.ledger.find(entry => entry.type === "hello")!.frame.p.runtimes[0].runtime_id;
+      const agent = h.store.createAgent({ name: "Drain failure fixture", provider: "claude", runtimeId });
+      const issue = createResponsibleTestIssue(h.store, { title: "Real failure during drain", status: "in_progress",
+        assigneeType: "agent", assigneeId: agent.id });
+      const task = h.store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Long round", maxAttempts: 3 });
+      await waitFor(() => runs === 1, "provider running", 5_000);
+      h.daemon.stop();
+      rejectFirst(error);
+      await h.waitForDaemonExit();
+      await h.recreateDaemon();
+      await waitFor(() => h.store.getTask(task.id)?.status === "failed" && h.daemon.outboxStats()?.pending === 0,
+        "original failure delivered after stop", 5_000);
+      expect(h.store.getTask(task.id)).toMatchObject({ failureReason, sessionId: "drain-failure-session" });
+      expect(h.store.listTasksForIssue(issue.id)).toHaveLength(1);
+      expect(runs).toBe(1);
+    } finally { rejectFirst(new Error("fixture cleanup")); await h.dispose(); }
+  }, 20_000);
+}
 
 for (const error of ["Cancelled", "ACP agent died unexpectedly (stdout EOF)"]) {
   for (const scenario of ["live", "SIGTERM", "error_before_stop"] as const) {

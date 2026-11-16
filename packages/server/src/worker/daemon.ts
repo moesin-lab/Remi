@@ -663,6 +663,15 @@ class RunAgentError extends Error {
   }
 }
 
+/** stop() permits providers to drain; only transport cancellation/exit is
+ * evidence of an interrupted provider. Typed failures retain their authority. */
+function isShutdownInterruption(error: unknown): boolean {
+  if (error instanceof AcpSessionFailureError || error instanceof AcpRpcError) return false;
+  if (error instanceof DaemonProtocolRpcError) return error.code === "authority_revoked";
+  return error instanceof Error && (error.message === "Cancelled"
+    || /^ACP agent died unexpectedly \([^\n]+\)$/.test(error.message));
+}
+
 /**
  * What a Chat lane's process holds besides itself (PR 6 §2.8): its private
  * temp dir, the work directory (and its lock), the materialized plugins, and
@@ -4086,7 +4095,7 @@ export class MultiremiDaemon {
       // not an Agent failure. Keep the report durable: replay must create the
       // retry even when startup orphan recovery skips pending terminal rows.
       const runtimeInterrupted = !timedOut && (err instanceof RunAgentError
-        ? err.runtimeInterrupted : this.pollAbort.signal.aborted);
+        ? err.runtimeInterrupted : this.pollAbort.signal.aborted && isShutdownInterruption(err));
       const cause = err instanceof RunAgentError ? err.cause : err;
       const failureReason = runtimeInterrupted ? "runtime_recovery" : cause instanceof LocalDirectoryError
         ? cause.failureReason
@@ -5529,7 +5538,7 @@ export class MultiremiDaemon {
           }
         } catch (err) {
           turnError = err;
-          providerFailureDuringStop = this.pollAbort.signal.aborted;
+          providerFailureDuringStop = this.pollAbort.signal.aborted && isShutdownInterruption(err);
         } finally {
           // A steer interrupt aborts the round: its still-open tools end `stopped`.
           if (!skipRound) this.recordTrace(task.id, () => trace.promptEnded({ aborted: turnAbort.signal.aborted }));
@@ -5721,7 +5730,7 @@ export class MultiremiDaemon {
       }
     } catch (error) {
       throw new RunAgentError(error, finalSessionId, workDir,
-        providerFailureDuringStop ?? this.pollAbort.signal.aborted);
+        providerFailureDuringStop ?? (this.pollAbort.signal.aborted && isShutdownInterruption(error)));
     } finally {
       // PR 6 §6.3: a cancelled or failed attempt whose process lives still hands its tasks off or stops them
       // (its trace closes after this); a cancel ends the turn, not the background work.

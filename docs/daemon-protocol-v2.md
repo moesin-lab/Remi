@@ -492,6 +492,8 @@ daemon 停止/重启期间中断的执行通过持久 outbox 上报 `task.fail`�
 `runtime_recovery`，携带最新 provider session 和工作目录；服务端按现有尝试上限自动重试并续接
 该 session。尝试状态为 `failed`，恢复语义与孤儿的 `lost / runtime_recovery` 相同。
 已持久化的完成报告继续重放；停止导致收尾 RPC 失去执行权限时同样按运行时中断重试。
+provider 执行错误只有在停止期间观察到 `Cancelled` 或 ACP 进程退出时才按运行时中断恢复；
+drain 期间的 typed provider failure（包括 AIR session failure / RPC 错误）及其他普通错误仍按原分类处理。
 未停止时的 provider 退出仍按 Agent 错误分类，
 已由服务端取消的执行不再上报失败，超时继续按超时处理。进程来不及持久化报告而退出时，
 仍由孤儿恢复处理。本规则不增加 drain 期限或无感续接能力。

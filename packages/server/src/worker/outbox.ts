@@ -117,7 +117,12 @@ export class MultiremiTaskReportOutbox {
     if (options.path !== ":memory:") mkdirSync(dirname(options.path), { recursive: true, mode: 0o700 });
     this.db = openSqliteDatabase(options.path, { create: true });
     this.db.exec("PRAGMA journal_mode = WAL;");
-    this.synchronousMode = Number((this.db.query("PRAGMA synchronous").all()[0] as { synchronous: number }).synchronous);
+    const synchronous = this.db.prepare("PRAGMA synchronous");
+    try {
+      this.synchronousMode = Number((synchronous.get() as { synchronous: number }).synchronous);
+    } finally {
+      synchronous.finalize();
+    }
     if (options.path !== ":memory:") {
       // Payloads mirror task reports (transcripts, prompts) — owner-only, like
       // the rest of the daemon state dir.
@@ -618,10 +623,17 @@ export class MultiremiTaskReportOutbox {
   }
 
   private nextDelivery(taskId: string): OutboxDelivery | null {
-    // Exhaust the bounded head read before delivery can pause with pending rows.
-    const firstRow = (this.db.query(
+    // New reads must not overflow Bun's finite query cache: uncached statements
+    // otherwise survive close_v2 until GC and retain the database on Windows.
+    const head = this.db.prepare(
       "SELECT * FROM outbox_events WHERE task_id = ? AND status = 'pending' ORDER BY id ASC LIMIT 1",
-    ).all(taskId) as Array<Record<string, unknown>>)[0];
+    );
+    let firstRow: Record<string, unknown> | null;
+    try {
+      firstRow = head.get(taskId) as Record<string, unknown> | null;
+    } finally {
+      head.finalize();
+    }
     if (!firstRow) return null;
     const first = toRecord(firstRow);
     if (String(firstRow.status) === "blocked") {

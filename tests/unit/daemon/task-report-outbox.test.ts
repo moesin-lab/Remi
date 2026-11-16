@@ -23,7 +23,7 @@ let tempDirs: string[] = [];
 let outboxes: MultiremiTaskReportOutbox[] = [];
 
 afterEach(async () => {
-  for (const outbox of outboxes) await outbox.close().catch(() => {});
+  for (const outbox of outboxes) await outbox.close();
   outboxes = [];
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
   tempDirs = [];
@@ -37,6 +37,11 @@ function tempPath(): string {
 }
 
 function track(outbox: MultiremiTaskReportOutbox): MultiremiTaskReportOutbox {
+  // Detect outstanding SQLite statements on every platform. close_v2 otherwise
+  // defers releasing them until GC, which surfaces as EBUSY on Windows cleanup.
+  const db = (outbox as unknown as { db: Database }).db;
+  const close = db.close.bind(db);
+  db.close = () => close(true);
   outboxes.push(outbox);
   return outbox;
 }
@@ -190,6 +195,7 @@ describe("MultiremiTaskReportOutbox", () => {
     expect(retryModes).toEqual([originalMode]);
     expect(mode()).toBe(originalMode);
     expect(outbox.stats().pending).toBe(0);
+    await outbox.close();
   });
   it("keeps v2 usage through cancellation and restart without discarding deltas behind a complete marker", async () => {
     const path = tempPath();

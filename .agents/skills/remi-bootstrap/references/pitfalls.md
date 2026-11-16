@@ -8,7 +8,7 @@
 | 一个会话里之后的轮次全部以 `question_consumer_mismatch` 失败 | 通过问题接口回答了 detached 问题（MUL-40，修复前的版本） | 部署含修复的版本；修复前改为直接发消息说明决定 |
 | 轮次以 `input_gap` 失败、原因显示 `agent_error.unknown` | 轮次运行中同会话到达新消息时的输入回执校验（MUL-40） | 同上；修复后失败原因会显示为平台输入校验 |
 | 协调单每次子单状态变化都唤起必然失败的轮 | 协调会话被上一条问题拖坏 | 暂时取消指派协调单，修复部署后再指派回来 |
-| 合并 main 后 `guards` 报数据 schema 指纹不一致 | 有人改了被哈希的迁移源却没同步 `deploy/platform-application-compatibility.json` | 重算指纹；多个 PR 抢这两行时逐个合并（MUL-44 计划改为打包时计算） |
+| 改了迁移相关代码，打包或 updater 报指纹未知 | 新的迁移依赖没有加入 `packages/platform-updater/src/data-schema-inputs.json` | 补清单；指纹在打包时计算，源码 PR 不提交指纹 |
 | `api-route-snapshot.test.ts` 报某行与 golden 不同 | 改了 API 默认值或路由，没重新生成 golden | `bun run scripts/snapshot-api-routes.ts` 后 `--check` |
 | Agent 说「已完成」但 PR 还没合，或 CI 是红的 | Agent 看不到 CI，也可能把单子提前置 done | 以合入提交和 CI 为准；必要时重开单子 |
 | 平台部署构建 API 镜像失败，下载 lark-cli 报错 | Docker 构建容器没有外网 | 见部署说明的代理构建方式 |

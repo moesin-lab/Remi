@@ -1,6 +1,6 @@
 # 自用实例部署（stable profile）
 
-适用于用 `scripts/local-profile.mjs` 部署的本机 stable 实例：API / Web 在 Compose 项目 `remi-stable` 中运行，daemon 是 systemd user unit `multiremi-daemon.service`，以 drop-in 覆盖 `ExecStart` 指向某个 release 目录里的二进制。部署前确认用户已授权「拉最新代码重新部署」。
+适用条件：Linux 主机，用 `scripts/local-profile.mjs` 以本地构建（`--build-local true`）方式部署的本机 stable 实例，未接入应用更新模式（profile 里没有 `compose.application.json`）。下文 `<profile-root>` 指 `~/.remi/profiles/stable`，`<target>` 指 daemon 编译目标（例如 `bun-linux-x64`），按实际主机替换。以下适用于用 `scripts/local-profile.mjs` 部署的本机 stable 实例：API / Web 在 Compose 项目 `remi-stable` 中运行，daemon 是 systemd user unit `multiremi-daemon.service`，以 drop-in 覆盖 `ExecStart` 指向某个 release 目录里的二进制。部署前确认用户已授权「拉最新代码重新部署」。
 
 ## 1. 平台（API / Web）
 
@@ -35,7 +35,7 @@
    ```bash
    npm exec --yes --package=bun@1.3.14 -- bun install --registry https://registry.npmjs.org --frozen-lockfile
    npm exec --yes --package=bun@1.3.14 -- bun build apps/remi/main.ts --compile --minify \
-     --target bun-linux-x64 --define 'MULTIREMI_VERSION="<pkg-version>+main.<short-sha>"' --outfile out/remi
+     --target <target> --define 'MULTIREMI_VERSION="<pkg-version>+main.<short-sha>"' --outfile out/remi
    out/remi --version
    ```
 
@@ -48,4 +48,8 @@
 - 平台：readyz、Web 登录页、`active.json` 的 ref。
 - daemon：`remi daemon status` 版本一致、`Outbox` 没有积压。
 - 真实轮次：挑一个之前出问题的会话或一张简单的单，看新轮次正常结束（`remi turn list --issue <KEY>`），失败就读 `remi turn trace read <turn> --json` 的 `.turn.error`。
-- 回滚：平台用部署脚本自己的 rollback 子命令和备份目录；daemon 把 drop-in 删掉或改回上一个 release 后 `daemon-reload` 并重启。恢复数据库要先问用户。
+- 回滚：
+  - `stable deploy` 自身不会自动回滚。新服务启动失败时，它只打印恢复提示，并保留备份目录（`Backup: …`）。
+  - 平台代码回退用 host 回滚的两步：`node scripts/local-profile.mjs stable host-rollback-stage --operation-id <新的操作 ID> --ref <要回到的完整提交> --preserve-data true`，然后 `host-rollback-activate --operation-id <同一个 ID>`。`--preserve-data true` 只换代码、保留数据，要求两个版本的数据 schema 指纹一致，不一致时脚本会拒绝。
+  - 不加 `--preserve-data true` 时，activate 会重建数据库并恢复备份快照，更新之后写入的数据会丢失。这属于恢复数据库，必须先停下来问用户。
+  - daemon：删掉新加的 drop-in（或改回上一个 release 的路径），`systemctl --user daemon-reload` 后重启。

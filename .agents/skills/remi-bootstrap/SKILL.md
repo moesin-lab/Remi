@@ -24,7 +24,7 @@ description: 用 Remi 自己的 Agent 持续改进并重新部署 Remi（自举�
 
 ## 不得做的事
 
-- 不合并没有对最终 SHA 给出 approve 的 PR；不因为「只是测试」跳过审阅。冲突处理提交可以由你自己核对后合并，但要确认相对已审 SHA 只多了 merge 和冲突文件。
+- 不合并没有对最终 SHA 给出 approve 的 PR；不因为「只是测试」或「只是解决冲突」跳过审阅。合入 main、解决冲突后 SHA 变了，交审阅者做增量复审，冲突文件里的取舍同样是行为改动。
 - 不把由 `main` 引起的失败、runner 容量导致的取消当作 PR 的失败，也不把 PR 自己的失败当作 flaky 放过。分不清时读失败注解或日志，再下结论。
 - 不通过问题接口回答 `wait_status=detached` 的问题；在已修复 MUL-40 的版本之前，这会让整个会话之后的轮次全部失败。改为在会话里直接发消息说明决定。
 - 不直接改线上数据库、不删除备份、不把凭据写进命令行或消息。
@@ -36,8 +36,14 @@ description: 用 Remi 自己的 Agent 持续改进并重新部署 Remi（自举�
 - 平台操作用 `remi` CLI，GitHub 用 `gh`。脚本里调用 `remi` 时显式设 `MULTIREMI_CONFIG`，交互 shell 里的 `remi` 可能是指向另一配置的函数。`remi … --json` 输出较大时在管道里会被截断，先重定向到文件再用 `jq`。
 - 给 Agent 发消息要用会话 ID（`ises_…`，从 `remi turn list --issue <KEY> --json` 取），不是 Issue key。会话里有轮次正在跑、或消息无需对方动作时用 `--wake inbox_only`。
 - 盯链路用一个只读的轮询脚本，比较 Issue 状态、负责人、待决定数和轮次状态的变化；只对新 Issue、进入 in_review / done / blocked、负责人变化、失败或等待人工的轮次发通知，避免被常规交接刷屏。
-- 合并规则：审尺对该 SHA approve（或你核对过的纯冲突处理）、GitHub 显示 mergeable、没有由本 PR 引起的失败检查。用 `gh pr merge <n> --squash --match-head-commit <sha>`，防止审完之后又被推了新提交。合并后只有在该单没有剩余工作时才置 done（例如修复已部署且验证过）。
-- PR 改到 `deploy/platform-application-compatibility.json` 或被哈希的迁移源时，自己重算指纹核对（打包与哈希规则见该文件和 `packages/platform-updater/src/data-schema-inputs.json`）。多个 PR 改同一组被哈希文件时，一次只合一个，后一个先合 main 再重算。
+- 合并规则，四条同时满足：
+  1. 审阅者对最终 SHA 给出 approve；
+  2. GitHub 显示 mergeable；
+  3. 最终 SHA 上所有适用检查都已完成且成功。进行中、排队、缺失都不算通过；策略性跳过的检查、以及有证据的非本 PR 失败（runner 容量取消、已建单的 flaky）逐项列出并写明证据；
+  4. 用 `gh pr merge <n> --squash --match-head-commit <sha>` 合并，防止审完之后又被推了新提交。
+
+  合并后只有在该单没有剩余工作时才置 done（例如修复已部署且验证过）。
+- 数据 schema 指纹在打包时计算，源码 PR 不提交指纹或回退声明。改了迁移依赖的 PR 要同步 `packages/platform-updater/src/data-schema-inputs.json` 清单；回退兼容声明是发版步骤，规则见 `deploy/README.md` 的 Release rollback review。
 - 已知坑和处理办法汇总在 [常见问题](references/pitfalls.md)。
 
 ## 交付物形态

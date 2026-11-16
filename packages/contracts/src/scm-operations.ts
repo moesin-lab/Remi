@@ -19,4 +19,3 @@ export interface ScmCheckSummary {
   /** Empty and unknown observations must not be interpreted as success. */
   conclusion: "success" | "failure" | "pending" | "missing";
 }
-

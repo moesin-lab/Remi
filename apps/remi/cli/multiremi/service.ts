@@ -5,7 +5,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, readFileSync, statSync } from "node:fs";
+import { accessSync, constants, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, extname, join, relative, resolve, sep } from "node:path";
 import { type CliOptions, stringOpt, numberOpt } from "./options.js";
@@ -409,14 +409,21 @@ export function currentProcessLauncher(argv: string[], execPath: string): { comm
 /** Only prefer a stable launcher when it execs this installed version. Never run it to probe. */
 function stableDaemonLauncher(execPath: string): string | null {
   const installRoot = process.env.MULTIREMI_INSTALL_ROOT?.trim() || join(homedir(), ".local", "lib", "remi");
-  const versionPath = relative(join(installRoot, "versions"), execPath).split(sep);
+  let executable: string;
+  let versions: string;
+  try {
+    executable = realpathSync(execPath);
+    versions = realpathSync(join(installRoot, "versions"));
+  } catch {
+    return null;
+  }
+  const versionPath = relative(versions, executable).split(sep);
   if (versionPath.length !== 2 || versionPath[0] === ".." || versionPath[1] !== "remi") return null;
 
   const binDir = process.env.MULTIREMI_BIN_DIR?.trim();
-  const directories = [binDir, ...(process.env.PATH?.split(delimiter) ?? [])];
-  const targets = [shellQuote(execPath), `'${execPath.replace(/'/g, "'\\''")}'`, `"${execPath.replace(/["\\$`]/g, "\\$&")}"`];
+  // POSIX PATH empty entries mean cwd; an unset MULTIREMI_BIN_DIR does not.
+  const directories = [...(binDir ? [binDir] : []), ...(process.env.PATH?.split(delimiter) ?? [])];
   for (const directory of directories) {
-    if (!directory) continue;
     const candidate = resolve(directory, "remi");
     if (candidate === resolve(execPath)) continue;
     try {
@@ -424,11 +431,12 @@ function stableDaemonLauncher(execPath: string): string | null {
       const stat = statSync(candidate);
       if (!stat.isFile() || stat.size > 64 * 1024) continue;
       const content = readFileSync(candidate, "utf8");
-      if (!content.startsWith("#!/bin/sh\n")) continue;
+      if (!/^#!\s*\/(?:bin|usr\/bin)\/(?:sh|bash)(?:\r?\n)/.test(content)) continue;
       const matches = content.split("\n").some((line) => {
         const command = line.match(/^\s*exec\s+(.+)$/)?.[1];
-        return command && targets.some((target) => command === target
-          || command.startsWith(`${target} `) || command.startsWith(`${target}\t`));
+        const target = command && literalShellCommand(command);
+        // Relative exec paths depend on the service cwd, so only trust absolute targets.
+        return !!target && target.startsWith(sep) && realpathSync(target) === executable;
       });
       if (matches) return candidate;
     } catch {
@@ -436,6 +444,37 @@ function stableDaemonLauncher(execPath: string): string | null {
     }
   }
   return null;
+}
+
+/** Decode one literal shell word without evaluating substitutions or running the script. */
+function literalShellCommand(command: string): string | null {
+  let value = "";
+  let quote: "'" | '"' | null = null;
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index]!;
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      else value += char;
+    } else if (char === "\\") {
+      const next = command[++index];
+      if (next === undefined || next === "\n") return null;
+      if (quote === '"' && !'"\\$`'.includes(next)) value += "\\";
+      value += next;
+    } else if (char === quote) {
+      quote = null;
+    } else if (!quote && (char === "'" || char === '"')) {
+      quote = char;
+    } else if (char === "$" || char === "`") {
+      return null;
+    } else if (!quote && /\s/.test(char)) {
+      return value || null;
+    } else if (!quote && /[;&|<>()*?\[~]/.test(char)) {
+      return null;
+    } else {
+      value += char;
+    }
+  }
+  return quote ? null : value || null;
 }
 
 export function programSubcommandPrefix(programName: string): string[] {

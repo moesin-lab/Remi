@@ -20,6 +20,10 @@ afterEach(() => {
 });
 
 describe("Multiremi task failure classification", () => {
+  it("identifies platform input rejection without provider fallback", () => {
+    for (const code of ["input_gap", "question_consumer_mismatch", "invalid_report"])
+      expect(classifyTaskFailure(`daemon RPC failed: ${code}`)).toBe(TaskFailureReason.PlatformInputRejected);
+  });
   it("classifies agent and provider failures using the Go Multica taxonomy", () => {
     expect(classifyTaskFailure("API Error: 401 Unauthorized")).toBe(TaskFailureReason.AgentProviderAuthOrAccess);
     expect(classifyTaskFailure("You've hit your org's monthly usage limit")).toBe(TaskFailureReason.AgentProviderQuotaLimit);

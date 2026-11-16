@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@multiremi/core/i18n/react";
-import { createChatStore, registerChatStore } from "@multiremi/core/chat";
+import { createChatStore, registerChatStore, setOptimisticChatRows } from "@multiremi/core/chat";
 import { chatKeys } from "@multiremi/core/chat/queries";
 import type { ChatSession } from "@multiremi/core/types";
 import enChat from "../../locales/en/chat.json";
@@ -213,6 +213,8 @@ function mount(active: boolean = false) {
 }
 
 beforeEach(() => {
+  // The outbox intentionally survives ChatWindow unmounts; each test owns a fresh one.
+  setOptimisticChatRows(() => []);
   listChatSessionsCalls.mockReset();
   listChatMessagesPageCalls.mockReset();
   getPendingChatTaskCalls.mockReset();
@@ -727,10 +729,22 @@ describe("ChatWindow page shell", () => {
   it("waits 400ms before showing the first-load spinner", async () => {
     backend.sessions = [session];
     backend.logReady = false;
-    mount(true);
-    await screen.findByRole("button", { name: "Send test message" });
-    expect(screen.queryByRole("status", { name: "Loading conversation…" })).toBeNull();
-    expect(await screen.findByRole("status", { name: "Loading conversation…" }, { timeout: 1500 })).toBeInTheDocument();
+    vi.useFakeTimers();
+    const view = mount(true);
+    try {
+      // Flush query notifications without spending any of the indicator's delay.
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByRole("button", { name: "Send test message" })).toBeInTheDocument();
+      expect(screen.queryByRole("status", { name: "Loading conversation…" })).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(399); });
+      expect(screen.queryByRole("status", { name: "Loading conversation…" })).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(screen.getByRole("status", { name: "Loading conversation…" })).toBeInTheDocument();
+    } finally {
+      view.unmount();
+      view.client.clear();
+      vi.useRealTimers();
+    }
   });
 });
 

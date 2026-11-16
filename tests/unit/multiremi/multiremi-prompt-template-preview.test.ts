@@ -39,7 +39,7 @@ describe("platform prompt template preview (ADR 0023)", () => {
 
     // The turn: the labelled message, the unread sentence, the comment to reply to, the trigger payload, attachments.
     expect(preview.input.startsWith("[{{trigger_author_name}}] {{message_body}}\n\n")).toBe(true);
-    expect(preview.input).toContain("(1 earlier unread message isn't shown here. Read it before you answer: `remi message list {{chat_session_id}} --from 0 --to 2`)");
+    expect(preview.input).toContain("(1 earlier unread message isn't shown here. Read it before you answer: `remi message list {{chat_session_id}} --from 0 --to 2`; you must read continuously starting at the given --from.)");
     expect(preview.input).toContain("(Reply to comment {{trigger_comment_id}}: `remi message send {{issue_session_id}} --kind reply --reply-to {{trigger_comment_id}}`.)");
     expect(preview.input).toContain("Trigger payload:");
     expect(preview.input).toContain("- {{chat_attachment_filename}}: run `remi attachment download {{chat_attachment_id}} --output-dir <dir>`");

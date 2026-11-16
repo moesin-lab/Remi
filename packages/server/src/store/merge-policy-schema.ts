@@ -12,11 +12,13 @@ export function ensureMergePolicySchema(db: SqlDatabase): void {
     CREATE TABLE IF NOT EXISTS multiremi_scm_strict_coverage (
       workspace_id TEXT NOT NULL,
       repository_id TEXT NOT NULL,
+      remote_key TEXT NOT NULL,
+      connection_id TEXT NOT NULL,
       project_id TEXT NOT NULL REFERENCES multiremi_projects(id) ON DELETE CASCADE,
       policy_revision INTEGER NOT NULL,
       source TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      PRIMARY KEY(workspace_id, repository_id, project_id)
+      PRIMARY KEY(workspace_id, remote_key, project_id, connection_id)
     );
     CREATE TABLE IF NOT EXISTS multiremi_scm_cr_actors (
       id TEXT PRIMARY KEY,

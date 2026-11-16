@@ -1,3 +1,4 @@
+import { scmRepositoryIdentityKey } from "./repository-url.js";
 import { mergerOperations, readProtectionProof } from "./credential-boundary.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import type { ProjectMergePolicy } from "@multiremi/contracts/merge-policy.js";
@@ -10,7 +11,7 @@ export async function readLiveMergeGate(store: MultiremiStore, projectId: string
   if (!identity || before.externalId !== cr.externalId) throw new ScmOperationError("scm_evidence_mismatch", "Provider omitted or mismatched PR identity");
   const binding = store.listScmRepositoryBindings({ workspaceId: cr.workspaceId, enabled: true }).find(b => b.connectionId === cr.connectionId && b.repositoryId === cr.repositoryId);
   if (!binding) throw new ScmOperationError("scm_binding_unavailable", "SCM binding unavailable");
-  const coverage = store.mergePolicies.strictForRepository(cr.workspaceId, cr.repositoryId);
+  const coverage = store.mergePolicies.strictForRemote(cr.workspaceId, scmRepositoryIdentityKey(binding.repositoryUrl));
   const protectionProof = policy.credential_enforcement_mode === "strict" ? await readProtectionProof(store, binding, policy) : undefined;
   const reasons = [];
   let required = policy.required_checks;
@@ -28,7 +29,7 @@ export async function readLiveMergeGate(store: MultiremiStore, projectId: string
   const after = await op.get(cr.number!);
   const finalIdentity = pullIdentity(after.payload);
   if (!finalIdentity || after.externalId !== cr.externalId || !samePull(identity, finalIdentity)) reasons.push({ code: "pull_request_changed", message: "PR changed while evaluating gate" });
-  if (JSON.stringify(coverage) !== JSON.stringify(store.mergePolicies.strictForRepository(cr.workspaceId, cr.repositoryId))) reasons.push({ code: "protection_coverage_changed", message: "Strict coverage changed while evaluating gate" });
+  if (JSON.stringify(coverage) !== JSON.stringify(store.mergePolicies.strictForRemote(cr.workspaceId, scmRepositoryIdentityKey(binding.repositoryUrl)))) reasons.push({ code: "protection_coverage_changed", message: "Strict coverage changed while evaluating gate" });
   if (policy.revision !== store.mergePolicies.get(projectId).revision) reasons.push({ code: "policy_changed", message: "Policy changed while evaluating gate" });
   if (after.payload.state !== "open" || after.payload.draft === true) reasons.push({ code: "pull_request_not_mergeable", message: "PR must be open and ready for review" });
   const gate = evaluateMergeGate({ policy, pull: identity, required, checks,

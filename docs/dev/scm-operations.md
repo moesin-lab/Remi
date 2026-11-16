@@ -151,13 +151,14 @@ strict 成功返回 `protection_proof`（checked_at、身份和逐目标证据�
 GET gate 仍是预检，不变成执行授权。worker 在执行时重新证明，人工批准不缓存证明；
 凭据变更期间立即停止该次执行。所有证据均来自服务端，不接受任务提交或手填证明。
 
-strict 覆盖持久化于 `multiremi_scm_strict_coverage`，按 workspace/repository/project 唯一。派生集合为 github_repo、递归 project_ref 与活跃 CR link；复用任务仓库解析，但不采用空资源时的 workspace 回退。成员 PUT enabled+strict 时整体重算，集合为空返回 400 `merge_policy_strict_coverage_empty`；关闭或 platform_only 时清空该项目覆盖。
-资源创建/更新及 CR link 写入同一事务追加覆盖（包含 project_ref 的依赖项目）；每次凭据、gate 和 worker 判定再以持久 ∪ 动态补齐。Task 删除资源、解除 CR 或移动 Issue 不会收缩；只有成员 PUT 可收缩。Task 增加资源可能扩大覆盖，使其他项目取凭据也收到 409；成员删除资源并重新 PUT 可解除。
+strict 覆盖持久化于 `multiremi_scm_strict_coverage`，按 workspace/remote_key/project/connection 唯一，repository_id 仅作信息字段。remote_key 将 host 和 owner/name 转为小写，忽略协议、用户、端口、`.git` 和末尾斜杠，HTTPS/SSH 和大小写变体共用覆盖。派生集合为 github_repo、递归 project_ref 与活跃 CR link；复用任务仓库解析，但不采用空资源时的 workspace 回退。成员 PUT enabled+strict 时整体重算，集合为空返回 400 `merge_policy_strict_coverage_empty`；关闭或 platform_only 时清空该项目覆盖。
+资源创建/更新、CR link 写入及 binding upsert 在 topology 锁下同一事务追加覆盖（绑定时记下 connection，解绑不删除历史）（包含 project_ref 的依赖项目）；每次凭据、gate 和 worker 判定再以持久 ∪ 动态补齐。Task 删除资源、解除 CR 或移动 Issue 不会收缩；只有成员 PUT 可收缩。Task 增加资源可能扩大覆盖，使其他项目取凭据也收到 409；成员删除资源并重新 PUT 可解除。
 
-仓库只要被任一 enabled+strict 项目持久覆盖，该仓库的所有 git-credentials 调用方
-（包括 daemon broker）都必须先通过全部策略的证明；失败 HTTP 409 且不含 password。
-证明不缓存，每次重新读取，因此更换任一凭据、覆盖集合或策略 revision 立即重新证明。证明结束再核对覆盖集合、策略 revision 及凭据版本，变化时不下发写凭据。
+git-credentials（包括 daemon broker）发放的是整个连接的令牌。下发连接 C 的凭据前，证明目标取请求 remote_key 的覆盖与所有 connection_id=C 的历史覆盖的并集；每个远端都用 C 的两个凭据和对应策略证明，失败 HTTP 409，原因中列出 remote_key/project，且不含 password。gate/worker 仍只按 CR remote_key 查覆盖，不扩大到连接。
+不想受 strict 影响的仓库，应放到单独连接，且该连接令牌无权访问 strict 仓库。平台只认已记录过绑定的连接；其他连接的令牌若也有 strict 仓库写权限，平台无法发现，成员必须避免这样配置。仓库改名后旧名仍会重定向，属于同类遗留边界。
+证明不跨请求缓存；单次请求内按凭据和完整 API URL 去重，每个凭据仅一次 `/user`，相同仓库的 branch/protection/rules 只读一次。每次重新读取，因此更换任一凭据、覆盖集合或策略 revision 立即重新证明。证明结束再核对覆盖集合、策略 revision 及凭据版本，变化时不下发写凭据。
 返回的始终是 task-writer；原 PAT 生命周期与 helper 的 expiresAt 独立，旧凭据撤销仍需外部授权。
+保护证明只保证 provider 强制执行非空的 required checks，不保证项目附加检查在 gate 到 merge 之间始终有效；sha 参数不原子锁定检查状态。
 strict 尚未证明时私有仓库也无法克隆；只读源码获取通道不在 C1，需后续单独跟进。
 
 C1 回归使用 mock GitHub 与本地真实 SQLite/HTTP/Task token/Question/worker。

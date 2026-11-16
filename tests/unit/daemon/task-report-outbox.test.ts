@@ -41,6 +41,24 @@ function track(outbox: MultiremiTaskReportOutbox): MultiremiTaskReportOutbox {
   return outbox;
 }
 
+// Observe real SQLite calls on this test's private handle; no writes are mocked.
+// The target scenario performs each INSERT/ack DELETE in autocommit mode.
+function observeOutboxWrites(outbox: MultiremiTaskReportOutbox) {
+  const db = (outbox as unknown as { db: Database }).db;
+  const synchronous = (db.query("PRAGMA synchronous").get() as { synchronous: number }).synchronous;
+  const writes = { synchronous, insertCalls: 0, insertMs: 0, ackDeleteCalls: 0, ackDeleteMs: 0 };
+  const run = db.run.bind(db);
+  db.run = ((...args: Parameters<Database["run"]>) => {
+    const started = performance.now();
+    const result = run(...args);
+    const elapsedMs = performance.now() - started;
+    if (args[0].startsWith("INSERT INTO outbox_events")) { writes.insertCalls++; writes.insertMs += elapsedMs; }
+    if (args[0].startsWith("DELETE FROM outbox_events")) { writes.ackDeleteCalls++; writes.ackDeleteMs += elapsedMs; }
+    return result;
+  }) as Database["run"];
+  return writes;
+}
+
 function httpError(status: number, path = "/api/daemon/tasks/x"): MultiremiDaemonHttpError {
   return new MultiremiDaemonHttpError(status, "POST", path, "{}", null);
 }
@@ -122,6 +140,7 @@ describe("MultiremiTaskReportOutbox", () => {
     store.claimTask(runtime.id); store.startTask(task.id);
     const path = tempPath();
     const first = track(new MultiremiTaskReportOutbox({ path, canSend: () => false, deliver: async () => {} }));
+    const persistWrites = observeOutboxWrites(first);
     const units = Array.from({ length: 3500 }, (_, i) => ({ ...actualUnit({ unitId: `request-${i}`, provider: "claude", model: i % 2 ? "opus" : "haiku",
       scope: "request", source: "provider_request", inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0,
       totalTokens: 2, evidenceRef: "upstream_request" }), occurredAt: "2026-10-01T01:00:00.000Z" }));
@@ -132,7 +151,7 @@ describe("MultiremiTaskReportOutbox", () => {
     expect(first.stats().blocked).toBe(0);
     await first.close();
     const persisted = performance.now();
-    console.log("[outbox-replay-persisted]", JSON.stringify({ setupMs: initialized - started, persistMs: persisted - initialized }));
+    console.log("[outbox-replay-persisted]", JSON.stringify({ setupMs: initialized - started, persistMs: persisted - initialized, persistWrites }));
     const kinds: string[] = [];
     const reopened = track(new MultiremiTaskReportOutbox({ path, deliver: async record => {
       expect(outboxRecordBytes(record)).toBeLessThanOrEqual(DAEMON_FRAME_MAX_BYTES);
@@ -151,13 +170,14 @@ describe("MultiremiTaskReportOutbox", () => {
       }
       else if (record.kind === "complete") store.completeTask(task.id, { output: "done" });
     } }));
+    const replayWrites = observeOutboxWrites(reopened);
     expect(await reopened.waitForTaskDrain(task.id)).toBe("delivered");
     expect(kinds.at(-1)).toBe("complete");
     expect(store.getTask(task.id)?.status).toBe("completed");
     const report = store.getUsageReport({ workspaceId: "local", days: null });
     expect(report.summary.actual_total_tokens).toBe(7000);
     expect(report.by_model.map(row => row.actual_total_tokens).sort()).toEqual([3500, 3500]);
-    console.log("[outbox-replay-timing]", JSON.stringify({ platform: process.platform, setupMs: initialized - started, persistMs: persisted - initialized, replayMs: performance.now() - persisted, storeMs, storeBuckets }));
+    console.log("[outbox-replay-timing]", JSON.stringify({ platform: process.platform, setupMs: initialized - started, persistMs: persisted - initialized, replayMs: performance.now() - persisted, storeMs, storeBuckets, persistWrites, replayWrites }));
   }, 180_000);
   it("keeps v2 usage through cancellation and restart without discarding deltas behind a complete marker", async () => {
     const path = tempPath();

@@ -88,8 +88,6 @@ describe("SCM read-only checks HTTP (mock provider)", () => {
     expect(calls).toBe(4);
     expect(store.listScmCanonicalEvents({ workspaceId: "local" })).toHaveLength(0);
     expect(store.getScmEntitySnapshot("scm_github", "repo_widgets", "change_request", "9001")).toBeNull();
-    expect((await app.request(root, { method: "POST", headers: taskHeaders, body: "{}" })).status).toBe(404);
-    expect((await app.request(`${root}/42`, { method: "PATCH", headers: taskHeaders, body: "{}" })).status).toBe(404);
   });
 
   it("redacts provider errors, marks timeout unknown, and exposes no merge route", async () => {

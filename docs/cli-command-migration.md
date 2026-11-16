@@ -2,6 +2,14 @@
 
 ## Output and pipe completion
 
+Command namespaces, including implicit nested groups, print their generated help
+to stdout and exit 0 when invoked without a subcommand. An unknown subcommand
+prints `Unknown command: remi <full path>` and the nearest group's help to stderr
+and exits 1. Commands that also have children retain their positional arguments
+and executable behavior. `--help`, `-h`, and `remi help <path>` retain generated help.
+The [registry-wide group tests](../tests/unit/remi/cli-command-groups.test.ts)
+cover each namespace so new groups inherit this behavior.
+
 The CLI entry point routes console output through the standard streams and waits
 for stdout and stderr writes to complete before returning, including fatal command
 errors. JSON, JSONL and text output must remain complete when a pipe consumer is

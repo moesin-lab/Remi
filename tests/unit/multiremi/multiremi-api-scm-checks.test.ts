@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { matchScmRepositoryBindings } from "@multiremi/scm/repository-reference.js";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createStore, createResponsibleTestIssue, resetMultiremiTestEnv } from "./helpers.js";
 
@@ -28,12 +29,44 @@ afterEach(() => {
 });
 
 describe("SCM read-only checks HTTP (mock provider)", () => {
-  it.each(["acme/widgets", "ACME/Widgets", "https://github.com/acme/widgets.git", "git@github.com:acme/widgets.git", "ssh://git@github.com/acme/widgets.git"])("resolves the enabled workspace binding for %s", async reference => {
+  it.each(["acme/widgets", "ACME/Widgets", "https://github.com/acme/widgets.git", "git@github.com:acme/widgets.git", "ssh://git@github.com/acme/widgets.git", "ssh://git@github.com:22/acme/widgets.git", "https://github.com:443/acme/widgets.git", "http://github.com:80/acme/widgets.git"])("resolves the enabled workspace binding for %s", async reference => {
     const { app } = setup();
     globalThis.fetch = stubFetch(async url => String(url).includes("actions/runs") ? json({ workflow_runs: [] }) : String(url).includes("check-runs") ? json({ check_runs: [] }) : String(url).includes("statuses") ? json([]) : json(pull));
     const response = await app.request(root.replace("repo_widgets", encodeURIComponent(reference)) + "/42/checks", { headers });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ summary: { headSha: head, conclusion: "missing" } });
+  });
+
+  it.each([
+    "https://TEST_TOKEN@github.com/acme/widgets.git",
+    "http://TEST_TOKEN@github.com/acme/widgets.git",
+    "https://user:TEST_TOKEN@github.com/acme/widgets.git",
+    "https://@github.com/acme/widgets.git",
+  ])("rejects HTTP userinfo without echoing it or calling the provider: %s", async reference => {
+    const { app } = setup();
+    let calls = 0;
+    globalThis.fetch = stubFetch(async () => { calls++; return json(pull); });
+    const response = await app.request(root.replace("repo_widgets", encodeURIComponent(reference)) + "/42/checks", { headers });
+    expect(response.status).toBe(404);
+    const body = await response.text();
+    expect(body).not.toContain("TEST_TOKEN");
+    expect(body).not.toContain(reference);
+    expect(calls).toBe(0);
+  });
+
+  it.each([
+    ["https://github.com/acme/widgets.git", "ssh://git@github.com:2222/acme/widgets.git", 404],
+    ["https://github.com/acme/widgets.git", "https://github.com:8443/acme/widgets.git", 404],
+    ["https://github.com/acme/widgets.git", "http://github.com:8080/acme/widgets.git", 404],
+    ["ssh://git@github.com:2222/acme/widgets.git", "ssh://git@github.com/acme/widgets.git", 404],
+    ["ssh://git@github.com:2222/acme/widgets.git", "ssh://git@github.com:2223/acme/widgets.git", 404],
+    ["ssh://git@github.com:2222/acme/widgets.git", "ssh://git@elsewhere.example:2222/acme/widgets.git", 404],
+    ["ssh://git@github.com:2222/acme/widgets.git", "ssh://git@github.com:2222/acme/widgets.git", 200],
+    ["ssh://git@github.com:22/acme/widgets.git", "https://github.com/acme/widgets.git", 200],
+  ] as const)("keeps host and non-default ports isolated: %s vs %s", (repositoryUrl, reference, status) => {
+    const { store } = setup();
+    const binding = { ...store.listScmRepositoryBindings({ workspaceId: "local" })[0]!, repositoryUrl };
+    expect(matchScmRepositoryBindings([binding], reference)).toEqual(status === 200 ? [binding] : []);
   });
 
   it("lists only current workspace enabled bindings when resolution fails", async () => {

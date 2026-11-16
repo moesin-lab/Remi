@@ -21,8 +21,13 @@ function remoteKey(value: string): string | null {
     const url = new URL(scp && !value.includes("://") ? `ssh://${scp[1]}/${scp[2]}` : value);
     if (!["https:", "http:", "ssh:", "git:", "git+ssh:"].includes(url.protocol)
       || !url.hostname || url.password || url.search || url.hash) return null;
+    // HTTP userinfo can be a token in the username alone; SSH git@ remains valid.
+    if (["https:", "http:"].includes(url.protocol)
+      && (url.username || /^https?:\/\/[^/\\?#]*@/i.test(value))) return null;
     const path = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
     if (!path || /\s/.test(path)) return null;
-    return `${url.hostname}${url.port ? `:${url.port}` : ""}/${path}`.toLowerCase();
+    const defaultPort = ({ "ssh:": "22", "git+ssh:": "22", "https:": "443", "http:": "80" } as Record<string, string>)[url.protocol];
+    const port = url.port === defaultPort ? "" : url.port;
+    return `${url.hostname}${port ? `:${port}` : ""}/${path}`.toLowerCase();
   } catch { return null; }
 }

@@ -5225,6 +5225,71 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "project.merge-policy.get": {
+      "command": "remi project merge-policy get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "project.merge-policy.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "project.merge-policy.update": {
+      "command": "remi project merge-policy update",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "project.merge-policy.update",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.review.submit": {
+      "command": "remi scm change-request review submit",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.review.submit",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.review.list": {
+      "command": "remi scm change-request review list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.review.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.gate": {
+      "command": "remi scm change-request gate",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.gate",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "scm.change-request.checks": {
       "command": "remi scm change-request checks",
       "auth": [

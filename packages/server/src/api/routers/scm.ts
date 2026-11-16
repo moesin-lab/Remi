@@ -1,3 +1,4 @@
+import { registerMergePolicyRoutes, scmRequestActor } from "./merge-policy.js";
 import type { Context, Hono } from "hono";
 import type {
   CreateScmConnectionInput,
@@ -25,6 +26,7 @@ import type { RouterDeps } from "./deps.js";
 
 export function registerScmRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+  registerMergePolicyRoutes(app, deps);
   const activeRoot = "/api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests";
 
   app.post(activeRoot, async (c) => {
@@ -35,6 +37,7 @@ export function registerScmRoutes(app: Hono, deps: RouterDeps): void {
     try {
       const result = await loaded.operations.create(body);
       loaded.record(result.observation);
+      if (!result.reused) loaded.recordActor(result.observation, "create");
       return c.json({ pullRequest: result.observation.payload, reused: result.reused }, result.reused ? 200 : 201);
     } catch (error) { return scmErrorResponse(c, error); }
   });
@@ -57,6 +60,7 @@ export function registerScmRoutes(app: Hono, deps: RouterDeps): void {
     try {
       const observation = await loaded.operations.update(Number(c.req.param("number")), body);
       loaded.record(observation);
+      loaded.recordActor(observation, "update");
       return c.json({ pullRequest: observation.payload });
     } catch (error) { return scmErrorResponse(c, error); }
   });
@@ -309,6 +313,7 @@ export function registerScmRoutes(app: Hono, deps: RouterDeps): void {
 function loadOperations(c: Context, deps: RouterDeps): {
   operations: GitHubScmOperations;
   record: (observation: ScmEntityObservation) => void;
+  recordActor: (observation: ScmEntityObservation, action: "create" | "update") => void;
 } | Response {
   const workspaceId = c.req.param("workspaceId") ?? "";
   const denied = denyCurrentUserWorkspaceAccess(c, deps.store, workspaceId);
@@ -324,6 +329,11 @@ function loadOperations(c: Context, deps: RouterDeps): {
     if (!credential) return c.json({ error: "SCM credentials unavailable" }, 503);
     return {
       operations: new GitHubScmOperations({ connection, binding, credential, signal: c.req.raw.signal }),
+      recordActor: (observation, action) => {
+        const cr = deps.store.mergePolicies.findChangeRequest(connection.id, binding.repositoryId, observation.externalId);
+        const actor = scmRequestActor(c, deps, workspaceId);
+        if (cr && actor) deps.store.mergePolicies.recordActor(cr.id, action, actor);
+      },
       record: observation => {
         reconcileObservation({ store: scmIngestionStore(deps.store), binding, observation, baseline: false });
       },

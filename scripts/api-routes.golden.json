@@ -1,21 +1,21 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 838,
+    "routeCount": 843,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 596,
+      "compat": 601,
       "root": 16
     },
-    "getRoutes": 365,
-    "getRoutesWithBody": 361,
+    "getRoutes": 368,
+    "getRoutesWithBody": 364,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /api/trace/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 473,
+    "mutationRoutes": 475,
     "mutationRoutesCovered": 301,
     "flows": [
       "agents-compat",
@@ -373,12 +373,15 @@
     "GET /api/project-knowledge/migration",
     "GET /api/projects",
     "GET /api/projects/:id",
+    "GET /api/projects/:id/change-requests/:changeRequestId/merge-gate",
+    "GET /api/projects/:id/change-requests/:changeRequestId/reviews",
     "GET /api/projects/:id/devices",
     "GET /api/projects/:id/docs",
     "GET /api/projects/:id/docs/:ref",
     "GET /api/projects/:id/docs/:ref/backlinks",
     "GET /api/projects/:id/docs/:ref/revisions",
     "GET /api/projects/:id/knowledge/recall",
+    "GET /api/projects/:id/merge-policy",
     "GET /api/projects/:id/resources",
     "GET /api/projects/search",
     "GET /api/realtime/ws",
@@ -760,6 +763,7 @@
     "POST /api/project-knowledge/migration/retry-failed",
     "POST /api/project-knowledge/migration/verify",
     "POST /api/projects",
+    "POST /api/projects/:id/change-requests/:changeRequestId/reviews",
     "POST /api/projects/:id/devices",
     "POST /api/projects/:id/docs",
     "POST /api/projects/:id/knowledge/publish",
@@ -885,6 +889,7 @@
     "PUT /api/projects/:id",
     "PUT /api/projects/:id/devices",
     "PUT /api/projects/:id/docs/:ref",
+    "PUT /api/projects/:id/merge-policy",
     "PUT /api/projects/:id/resources/:resourceId",
     "PUT /api/runtimes/:id/claude-profile",
     "PUT /api/runtimes/:id/codex-profile",
@@ -1192,12 +1197,15 @@
     "GET /api/project-knowledge/migration",
     "GET /api/projects",
     "GET /api/projects/:id",
+    "GET /api/projects/:id/change-requests/:changeRequestId/merge-gate",
+    "GET /api/projects/:id/change-requests/:changeRequestId/reviews",
     "GET /api/projects/:id/devices",
     "GET /api/projects/:id/docs",
     "GET /api/projects/:id/docs/:ref",
     "GET /api/projects/:id/docs/:ref/backlinks",
     "GET /api/projects/:id/docs/:ref/revisions",
     "GET /api/projects/:id/knowledge/recall",
+    "GET /api/projects/:id/merge-policy",
     "GET /api/projects/:id/resources",
     "GET /api/projects/search",
     "GET /api/realtime/ws",
@@ -9956,6 +9964,28 @@
             "allowed": true
           },
           {
+            "id": "project.merge-policy.get",
+            "command": "remi project merge-policy get",
+            "capability": "project.merge-policy.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "project.merge-policy.update",
+            "command": "remi project merge-policy update",
+            "capability": "project.merge-policy.update",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "project.resource.create",
             "command": "remi project resource create",
             "capability": "project.resource.create",
@@ -10858,6 +10888,17 @@
             "allowed": true
           },
           {
+            "id": "scm.change-request.gate",
+            "command": "remi scm change-request gate",
+            "capability": "scm.change-request.gate",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "scm.change-request.get",
             "command": "remi scm change-request get",
             "capability": "scm.change-request.get",
@@ -10883,6 +10924,28 @@
             "id": "scm.change-request.list",
             "command": "remi scm change-request list",
             "capability": "scm.change-request.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.change-request.review.list",
+            "command": "remi scm change-request review list",
+            "capability": "scm.change-request.review.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.change-request.review.submit",
+            "command": "remi scm change-request review submit",
+            "capability": "scm.change-request.review.submit",
             "outputs": [
               "table",
               "json",
@@ -21398,6 +21461,24 @@
       }
     },
     {
+      "key": "get-sweep GET /api/projects/:id/change-requests/:changeRequestId/merge-gate",
+      "route": "GET /api/projects/:id/change-requests/:changeRequestId/merge-gate",
+      "path": "/api/projects/prj_snapshot/change-requests/scr_snapshot_missing/merge-gate",
+      "status": 404,
+      "body": {
+        "error": "CR must be linked to an Issue in this project"
+      }
+    },
+    {
+      "key": "get-sweep GET /api/projects/:id/change-requests/:changeRequestId/reviews",
+      "route": "GET /api/projects/:id/change-requests/:changeRequestId/reviews",
+      "path": "/api/projects/prj_snapshot/change-requests/scr_snapshot_missing/reviews",
+      "status": 404,
+      "body": {
+        "error": "CR must be linked to an Issue in this project"
+      }
+    },
+    {
       "key": "get-sweep GET /api/projects/:id/devices",
       "route": "GET /api/projects/:id/devices",
       "path": "/api/projects/prj_snapshot/devices",
@@ -21540,6 +21621,28 @@
       "status": 400,
       "body": {
         "error": "q is required"
+      }
+    },
+    {
+      "key": "get-sweep GET /api/projects/:id/merge-policy",
+      "route": "GET /api/projects/:id/merge-policy",
+      "path": "/api/projects/prj_snapshot/merge-policy",
+      "status": 200,
+      "body": {
+        "policy": {
+          "version": 1,
+          "revision": 0,
+          "enabled": false,
+          "target_branches": [],
+          "required_checks": [],
+          "require_independent_review": true,
+          "independent_reviewers": [],
+          "require_human_approval": false,
+          "allowed_merge_methods": [
+            "squash"
+          ],
+          "credential_enforcement_mode": "platform_only"
+        }
       }
     },
     {

@@ -1,3 +1,4 @@
+import { platformLifecycleKeys } from "../../platform-lifecycle/queries";
 import type { QueryClient } from "@tanstack/react-query";
 import type { WSMessage } from "../../types/events";
 import { getCurrentWsId } from "../../platform/workspace-storage";
@@ -220,6 +221,10 @@ export function createPrefixRefresh({ qc, authStore }: SyncContext): {
 
   return {
     onAny: (msg) => {
+      if (msg.type === "daemon:maintenance_changed") {
+        void qc.invalidateQueries({ queryKey: platformLifecycleKeys.status() });
+        return;
+      }
       if (msg.type === "agent:archived" || msg.type === "agent:restored") {
         // A re-routed question can enter or leave the human stage, which is
         // what the detail's pending_decision_count counts.

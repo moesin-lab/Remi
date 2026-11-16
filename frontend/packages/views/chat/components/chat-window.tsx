@@ -1,5 +1,7 @@
 "use client";
 
+import { useContinuityStore } from "@multiremi/core/platform-lifecycle";
+
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WorkLocationPicker, type WorkLocation } from "../../runtimes/components/runtime-workspace-picker";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -261,6 +263,11 @@ export function ChatWindow({
   // Fallback when the log does not say: while a send is in flight or got no
   // answer, or the read after a send failed, the tail is read again on the
   // pending-task cadence until the server's row is there.
+  const heldSends = optimisticRows.filter(row => row.status === "sending" || row.status === "unconfirmed").length;
+  useEffect(() => {
+    useContinuityStore.setState(s => ({ heldSends: s.heldSends + heldSends }));
+    return () => useContinuityStore.setState(s => ({ heldSends: s.heldSends - heldSends }));
+  }, [heldSends]);
   const awaitingLog = displayedOptimistic.some((row) => row.status === "sending" || row.status === "unconfirmed")
     || (!!displayedSessionId && staleLogSessionId === displayedSessionId);
   useEffect(() => {

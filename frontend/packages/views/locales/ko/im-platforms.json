@@ -37,7 +37,7 @@
     },
     "access": {
       "title": "접근 제어",
-      "description": "봇을 통해 Issue를 만들 수 있는 발신자를 관리합니다."
+      "description": "봇을 사용할 수 있는 Feishu 계정을 관리합니다."
     },
     "conversations": {
       "title": "채팅 및 알림",
@@ -383,11 +383,11 @@
     "senderAllowlist": {
       "access_title": "봇 기능 접근",
       "agent_access": "이 봇에 메시지를 보낼 수 있는 사람은 응답하는 에이전트의 활성화된 기능을 사용할 수 있습니다. 에이전트 자체의 권한 및 승인 규칙은 계속 적용됩니다.",
-      "require_allowlist": "허용 목록의 발신자만 이슈를 만들 수 있도록 제한",
+      "require_allowlist": "허용 목록의 계정만 봇을 사용할 수 있음",
       "unnamed": "Feishu 계정 · {{id}}",
       "account_identifiers": "추가 계정 식별자",
       "title": "Feishu 계정 허용 목록",
-      "description": "이 봇에 메시지를 보낸 계정을 자동으로 수집하고 중복을 제거합니다. 허용된 계정은 봇을 통해 이 개인 공간에 Issue를 만들 수 있습니다.",
+      "description": "이 봇에 메시지를 보낸 계정을 자동으로 수집하고 중복을 제거합니다. 허용 목록의 계정만 봇을 사용할 수 있으며, 그 외 계정에는 권한이 없다는 안내가 전송됩니다.",
       "refresh": "새로고침",
       "loading": "계정 불러오는 중…",
       "configure_first": "계정 요청을 받으려면 위에서 Feishu 봇을 설정하세요.",

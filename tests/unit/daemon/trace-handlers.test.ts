@@ -28,7 +28,7 @@ describe("trace RPC read authority", () => {
       capabilities: { feishu_concierge_protocol: FEISHU_CONCIERGE_PROTOCOL_VERSION } };
     expect(await reportFrame(store, "trace.head", { task_id: f.taskId }, host)).toMatchObject({ ok: false, code: "authority_revoked" });
     expect(await reportFrame(store, "trace.head", { task_id: f.taskId }, owner)).toMatchObject({ ok: true, head: 0 });
-    store.upsertFeishuBotConfig("local", { agentId: f.agentId, runtimeId: f.foreignRuntimeId,
+    store.upsertFeishuBotConfig("local", { senderAccessPolicy: "agent", agentId: f.agentId, runtimeId: f.foreignRuntimeId,
       appId: DAEMON_TASK_POLL_APP_ID, appSecretOp: "keep", enabled: true, domain: "feishu" });
     const submitted = store.submitFeishuBotMessage("local", f.foreignRuntimeId, {
       revision: store.getFeishuBotConfig("local")!.revision, externalSessionKey: "oc_trace_host",
@@ -42,7 +42,7 @@ describe("trace RPC read authority", () => {
     expect(await reportFrame(store, "trace.subscribe", { task_id: submitted.taskId, from_seq: 0 }, host)).toMatchObject({ ok: true, head: 0 });
     expect(await reportFrame(store, "trace.append", { task_id: submitted.taskId, closed: false,
       events: [{ seq: 1, type: "text", ts: "2026-09-28T00:00:00Z" }] }, host)).toMatchObject({ ok: false, code: "authority_revoked" });
-    store.upsertFeishuBotConfig("local", { agentId: f.agentId, runtimeId: f.runtimeId,
+    store.upsertFeishuBotConfig("local", { senderAccessPolicy: "agent", agentId: f.agentId, runtimeId: f.runtimeId,
       appId: DAEMON_TASK_POLL_APP_ID, appSecretOp: "keep", enabled: true, domain: "feishu" });
     expect(await reportFrame(store, "trace.subscribe", { task_id: submitted.taskId, from_seq: 0 }, host)).toMatchObject({ ok: false, code: "authority_revoked" });
     expect(await reportFrame(store, "trace.fetch", { task_id: submitted.taskId, after_seq: 0 }, host)).toMatchObject({ ok: false, code: "authority_revoked" });

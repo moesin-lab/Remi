@@ -34,7 +34,7 @@ async function fixture() {
   store.registerRuntime({ id: "rt_files", name: "Files", provider: "codex", workspaceId: "local", daemonId: "files-daemon" });
   store.heartbeatRuntime("rt_files", { supportsFeishuBotConfig: true });
   const token = await store.createAccessToken({ name: "Files", type: "daemon", workspaceId: "local", daemonId: "files-daemon" });
-  const config = store.upsertFeishuBotConfig("local", { agentId: agent.id, runtimeId: "rt_files", enabled: true,
+  const config = store.upsertFeishuBotConfig("local", { senderAccessPolicy: "agent", agentId: agent.id, runtimeId: "rt_files", enabled: true,
     appId: "cli_files", appSecretOp: "set", appSecret: "test-attachment-secret", domain: "feishu" });
   store.reportFeishuBotRuntimeStatus("local", "rt_files", { state: "online", appliedRevision: config.revision });
   const app = createMultiremiApp({ store, authToken: "MASTER" });

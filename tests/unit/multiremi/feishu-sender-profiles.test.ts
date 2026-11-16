@@ -19,7 +19,8 @@ function fixture() {
   store.registerRuntime({ id: "rt_profile", name: "Bot", provider: "codex", workspaceId: "local", daemonId: "profile" });
   store.heartbeatRuntime("rt_profile", { supportsFeishuBotConfig: true });
   const config = store.upsertFeishuBotConfig("local", { agentId: agent.id, runtimeId: "rt_profile",
-    appId: "cli_profile", domain: "feishu", enabled: true, appSecretOp: "set", appSecret: "test-profile-secret" });
+    appId: "cli_profile", domain: "feishu", enabled: true, appSecretOp: "set", appSecret: "test-profile-secret",
+    senderAccessPolicy: "agent" });
   store.submitFeishuBotMessage("local", "rt_profile", { revision: config.revision,
     externalSessionKey: "oc_profile", externalMessageId: "om_profile", senderOpenId: "ou_profile", text: "Hello" });
   const sender = store.listFeishuBotSenders("local")[0]!;
@@ -73,6 +74,24 @@ describe("Feishu sender message profiles", () => {
     expect(failing).toHaveBeenCalledTimes(1);
     expect(store.listFeishuBotSenders("local")[0]).toMatchObject({
       display_name: "Known Name", name_en: "Known English", allowed: false });
+  });
+
+  it("falls back to the contact profile when the message carries no sender name, matching by open_id", async () => {
+    const { store, sender } = fixture();
+    const fetchImpl = mock(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes("tenant_access_token")) return Response.json({ code: 0, tenant_access_token: "test-token" });
+      if (String(url).includes("/contact/v3/users/basic_batch")) {
+        expect(JSON.parse(String(init?.body))).toEqual({ user_ids: ["ou_profile"] });
+        return Response.json({ code: 0, data: { users: [
+          { user_id: "ou_other", name: "Someone else" },
+          { user_id: "ou_profile", name: "李联系人", i18n_name: { en_us: "Contact Li" } },
+        ] } });
+      }
+      return Response.json({ code: 0, data: { items: [{ ...namedMessage, sender: { ...namedMessage.sender, sender_name: "" , sender_i18n_names: {} } }] } });
+    });
+    await new FeishuBotSenderProfiles(fetchImpl as unknown as typeof fetch).refresh(store, "local");
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(store.listFeishuBotSenders("local")[0]).toMatchObject({ id: sender.id, display_name: "李联系人", name_en: "Contact Li" });
   });
 
   it("refuses stale application results and refreshes expired profiles", async () => {

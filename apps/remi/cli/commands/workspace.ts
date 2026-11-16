@@ -62,7 +62,7 @@ const FEISHU_BOT_FIELDS: readonly CliOptionSpec[] = [
   { name: "name", type: "string", valueName: "name", description: "Bot display name" },
   { name: "responsible-member", type: "string", description: "Member who answers questions from Feishu Chats without an Issue", conflictsWith: ["clear-responsible"] },
   { name: "clear-responsible", type: "boolean", description: "Clear it; such Chat questions then have no handler", conflictsWith: ["responsible-member"] },
-  { name: "sender-access-policy", type: "string", valueName: "agent|allowlist", description: "Use Agent permissions (default) or require a sender allowlist" },
+  { name: "sender-access-policy", type: "string", valueName: "agent|allowlist", description: "Require a sender allowlist (default) or let anyone use Agent permissions" },
   { name: "agent", type: "string", valueName: "agent-id", description: "Agent that answers concierge messages" },
   { name: "runtime", type: "string", valueName: "runtime-id", description: "Runtime that hosts the connector" },
   { name: "app-id", type: "string", valueName: "cli_xxx", description: "Feishu App ID" },

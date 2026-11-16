@@ -37,7 +37,7 @@
     },
     "access": {
       "title": "访问控制",
-      "description": "设置通过机器人创建 Issue 的发送者权限。"
+      "description": "设置哪些飞书账号可以使用机器人。"
     },
     "conversations": {
       "title": "群聊与通知",
@@ -383,11 +383,11 @@
     "senderAllowlist": {
       "access_title": "机器人能力访问",
       "agent_access": "能与机器人聊天的人，都可以使用回复智能体已开放的能力。智能体自身的权限和审批规则仍然有效。",
-      "require_allowlist": "仅允许白名单账号通过机器人创建任务",
+      "require_allowlist": "仅允许白名单账号使用机器人",
       "unnamed": "飞书账号 · {{id}}",
       "account_identifiers": "更多账号标识",
       "title": "飞书账号白名单",
-      "description": "向当前机器人发消息的账号会自动收集并去重。加入白名单后，该账号可通过机器人在此私人空间创建 Issue。",
+      "description": "向当前机器人发消息的账号会自动收集并去重。只有加入白名单的账号可以使用机器人，其他账号会收到无权限提示。",
       "refresh": "刷新",
       "loading": "正在加载账号…",
       "configure_first": "请先在上方配置飞书机器人，再接收账号请求。",

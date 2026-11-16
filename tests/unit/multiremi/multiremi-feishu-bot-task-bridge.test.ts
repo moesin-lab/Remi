@@ -53,13 +53,18 @@ function scaffold(provider: "claude" | "codex" = "codex") {
     agentId: agent.id,
     runtimeId: "rt_bot",
     appId: "cli_test",
-    senderAccessPolicy: "allowlist",
+    senderAccessPolicy: "agent",
     appSecretOp: "set",
     appSecret: APP_SECRET,
     domain: "feishu",
     enabled: true,
   });
   return { store, agent, config };
+}
+
+function requireAllowlist(store: MultiremiStore, agentId: string) {
+  return store.upsertFeishuBotConfig("local", { agentId, runtimeId: "rt_bot", appId: "cli_test",
+    senderAccessPolicy: "allowlist", appSecretOp: "keep", domain: "feishu", enabled: true });
 }
 
 describe("Feishu bot standard Task bridge", () => {
@@ -70,7 +75,7 @@ describe("Feishu bot standard Task bridge", () => {
     const agent = store.createAgent({ name: "Secondary Remi", provider: "codex", runtimeId: "rt_secondary", workspaceId: "local" });
     store.heartbeatRuntime("rt_secondary", { supportsFeishuBotConfig: true });
     const bot = store.feishuBotFor("secondary");
-    const config = bot.upsertConfig("local", { agentId: agent.id, runtimeId: "rt_secondary", appId: "cli_secondary",
+    const config = bot.upsertConfig("local", { senderAccessPolicy: "agent", agentId: agent.id, runtimeId: "rt_secondary", appId: "cli_secondary",
       appSecretOp: "set", appSecret: APP_SECRET, domain: "feishu", enabled: true });
     store.reportFeishuBotRuntimeStatus("local", "rt_secondary", { appliedRevision: config.revision, state: "online" });
     const inbound = bot.submitMessage("local", "rt_secondary", {
@@ -266,7 +271,7 @@ describe("Feishu bot standard Task bridge", () => {
       store.heartbeatRuntime("rt_legacy", { supportsFeishuBotConfig: true });
       const config = store.upsertFeishuBotConfig("local", {
         agentId: "agt_chat_migration", runtimeId: "rt_legacy", appId: "cli_migration",
-        senderAccessPolicy: "allowlist", appSecretOp: "set", appSecret: APP_SECRET,
+        senderAccessPolicy: "agent", appSecretOp: "set", appSecret: APP_SECRET,
         domain: "feishu", enabled: true,
       });
       expect(db!.query("SELECT issue_id FROM multiremi_feishu_bot_chat_bindings WHERE id = ?")
@@ -856,7 +861,7 @@ describe("Feishu bot standard Task bridge", () => {
       duplicate: false,
       steered: false,
       status: "queued",
-      senderAllowed: false,
+      senderAllowed: true,
     });
     const task = store.getTask(first.taskId)!;
     expect(task).toMatchObject({
@@ -865,7 +870,7 @@ describe("Feishu bot standard Task bridge", () => {
       prompt: "first message",
       workDir: null,
       requestingUserName: "Owner from Feishu",
-      requestingUserProfileDescription: "Source: Feishu personal bot\nThe space owner manages account access in IM platforms > Feishu > Access control > Feishu account allowlist.\nApproval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
+      requestingUserProfileDescription: "Source: Feishu personal bot\nAnyone who can message this bot may use the responding Agent's enabled capabilities. No separate sender approval or workspace membership is required.\nThe Agent's own permissions and approval requirements still apply. The API checks the bot's current access policy; do not infer a pending approval from earlier conversation history.",
       issueCreationRestricted: false,
     });
 
@@ -935,9 +940,10 @@ describe("Feishu bot standard Task bridge", () => {
     }
   });
 
-  it("admits an unknown sender but checks Issue creation against the dynamic allowlist", () => {
-    const { store, config } = scaffold();
-    const submitted = store.submitFeishuBotMessage("local", "rt_bot", {
+  it("rejects an unknown sender in allowlist mode and checks Issue creation dynamically once approved", () => {
+    const { store, agent } = scaffold();
+    const config = requireAllowlist(store, agent.id);
+    const message = {
       revision: config.revision,
       externalSessionKey: "oc_external_chat",
       externalMessageId: "om_external",
@@ -945,19 +951,28 @@ describe("Feishu bot standard Task bridge", () => {
       senderUnionId: "on_external",
       senderName: "External Alice",
       text: "help me understand this workspace",
-    });
+    };
+    expect(() => store.submitFeishuBotMessage("local", "rt_bot", message)).toThrow("allowlist");
+    const [sender] = store.listFeishuBotSenders("local");
+    expect(sender).toMatchObject({ display_name: "External Alice", allowed: false });
+    expect(store.listTasks()).toHaveLength(0);
 
-    expect(submitted.senderAllowed).toBe(false);
+    store.setFeishuBotSenderAllowed("local", sender!.id, true, "local");
+    const submitted = store.submitFeishuBotMessage("local", "rt_bot", message);
+    expect(submitted.senderAllowed).toBe(true);
     expect(store.getTask(submitted.taskId)).toMatchObject({
       requestingUserName: "External Alice",
-      requestingUserProfileDescription: "Source: Feishu personal bot\nThe space owner manages account access in IM platforms > Feishu > Access control > Feishu account allowlist.\nApproval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
+      requestingUserProfileDescription: "Source: Feishu personal bot\nOnly allowlisted Feishu accounts can use this bot. The space owner manages access in IM platforms > Feishu > Access control > Feishu account allowlist.\nIssue creation re-checks every source account of this Chat; retry after the owner updates the allowlist.",
       issueCreationRestricted: false,
     });
+    expect(store.isFeishuBotTaskIssueCreationRestricted(submitted.taskId)).toBe(false);
+    store.setFeishuBotSenderAllowed("local", sender!.id, false, "local");
     expect(store.isFeishuBotTaskIssueCreationRestricted(submitted.taskId)).toBe(true);
   });
 
   it("does not use a known Remi identity as an account approval", () => {
-    const { store, config } = scaffold();
+    const { store, agent } = scaffold();
+    const config = requireAllowlist(store, agent.id);
     const outsider = store.getOrCreateUser({
       externalId: "ou_sso_outsider",
       feishuUnionId: "on_outsider",
@@ -966,7 +981,7 @@ describe("Feishu bot standard Task bridge", () => {
     });
     expect(store.getUserRoleInWorkspace(outsider.id, "local")).toBeNull();
 
-    const submitted = store.submitFeishuBotMessage("local", "rt_bot", {
+    expect(() => store.submitFeishuBotMessage("local", "rt_bot", {
       revision: config.revision,
       externalSessionKey: "oc_known_outsider",
       externalMessageId: "om_known_outsider",
@@ -974,15 +989,8 @@ describe("Feishu bot standard Task bridge", () => {
       senderUnionId: "on_outsider",
       senderName: "Stale Event Name",
       text: "hello from another workspace",
-    });
-
-    expect(submitted.senderAllowed).toBe(false);
-    expect(store.getTask(submitted.taskId)).toMatchObject({
-      requestingUserName: "Stale Event Name",
-      requestingUserProfileDescription: "Source: Feishu personal bot\nThe space owner manages account access in IM platforms > Feishu > Access control > Feishu account allowlist.\nApproval can change during this Chat. Retry the requested action after the owner updates the allowlist; the API checks current access.",
-      issueCreationRestricted: false,
-    });
-    expect(store.isFeishuBotTaskIssueCreationRestricted(submitted.taskId)).toBe(true);
+    })).toThrow("allowlist");
+    expect(store.listFeishuBotSenders("local")).toMatchObject([{ open_id: "ou_known_outsider", allowed: false }]);
   });
 
   it("keeps the Chat Session across a config revision change", () => {
@@ -1165,9 +1173,6 @@ describe("Feishu bot standard Task bridge", () => {
       { scope: "chat", chatId: "oc_issues", agentId: routedAgent.id },
     ]);
 
-    store.submitFeishuBotMessage("local", "rt_bot", { revision: config.revision, externalSessionKey: "oc_discovery",
-      externalMessageId: "om_discovery", senderOpenId: "ou_owner", text: "Hello" });
-    store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
     const submitted = store.submitFeishuBotMessage("local", "rt_bot", {
       revision: config.revision,
       externalSessionKey: "oc_issues:thread:omt_issue",

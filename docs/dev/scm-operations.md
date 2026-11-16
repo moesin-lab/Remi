@@ -25,9 +25,9 @@ summary: GitHub PR 操作、检查证据与 MUL-35 分阶段交付边界。
 
 摘要的 `conclusion` 是已观察检查的汇总：空集合为 `missing`，失败为 `failure`，运行中、未知、skipped/neutral 为 `pending`，全部 success 才是 `success`。它**不代表 required checks 已满足，也不授权合并**；仓库规则和项目附加要求将在 B 阶段统一判定。
 
-GitHub `check_run` webhook 经现有签名验证后只写内部 `checks` 观测的 `check_run` 实体快照，以 `check_run:<id>` 标识，保留 app、job、check suite 身份、delivery ID 和原始签名所覆盖的 body。同一证据通过快照内容 hash/version 去重，快照仅代表最新证据，不是完整 delivery 历史。workflow 路径仍由实时检查接口在服务端关联。选择独立快照是为了保留证据而不扩展公开事件枚举：它不创建 canonical event，不可被 Autopilot 订阅，也不写 pipeline 快照；reconcile/poller 共用路径会将旧格式 check_run 观测重归类并禁止派生 `pipeline.*`。B 如需检查变化触发闸门重评，只在内部消费。
+GitHub `check_run` webhook 经现有签名验证后只写内部 `checks` 观测的 `check_run` 实体快照，以 `check_run:<id>` 标识，保留 app、job、check suite 身份、delivery ID 和原始签名所覆盖的 body。快照是按 revision 保留的最新证据，不是完整 delivery 历史。不同 delivery 会改变 contentHash，但相同 revision 会被 Store 拒绝；这不是忽略 delivery 的语义去重，B 不能把它当作检查状态变化通知。workflow 路径仍由实时检查接口在服务端关联。选择独立快照是为了保留证据而不扩展公开事件枚举：它不创建 canonical event，不可被 Autopilot 订阅，也不写 pipeline 快照；GitHub 适配器在来源处标记 `entityType=check_run`，reconcile 仅按此类型禁止派生事件，不按 payload.kind 或 ID 前缀猜测其他 provider 的分类。B 如需检查变化触发闸门重评，只在内部消费。
 
-既有 `workflow_run` 的 `pipeline.*`、`workflow_run:<id>:<attempt>` 标识及去重行为不变。后台 pipelines 轮询仍只采集 workflow runs；check runs 的当前证据通过上述实时检查接口读取。不能把 webhook 快照作为当前合并判据。
+既有 `workflow_run` 的 `pipeline.*`、`workflow_run:<id>:<attempt>` 标识及去重行为不变。GitHub 后台 pipelines 轮询仍只采集 workflow runs；Codebase 既有 ListCheckRuns 轮询仍产出 pipeline 快照和 `pipeline.*` 事件；check runs 的当前证据通过上述实时检查接口读取。不能把 webhook 快照作为当前合并判据。
 
 底层 `merge` 方法仅供后续服务端合并操作调用，固定传 GitHub merge API 的 `sha` 原子比较参数，不重试失败/超时写入。A 阶段没有公开合并 HTTP/CLI 入口；整个 Draft PR 需完成 B/C 并最终复审后才能上线。
 

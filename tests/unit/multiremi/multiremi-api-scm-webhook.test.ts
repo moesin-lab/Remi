@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { createStore, createResponsibleTestAutopilot, resetMultiremiTestEnv } from "./helpers.js";
+import { createStore, createResponsibleTestAutopilot, db, resetMultiremiTestEnv } from "./helpers.js";
 
 import { reconcileObservation } from "@multiremi/scm/reconcile.js";
 import { scmIngestionStore } from "@multiremi/scm/store.js";
@@ -101,6 +101,9 @@ describe("Multiremi API — normalized SCM webhooks", () => {
     const unsigned = await app.request("/api/webhooks/scm/scm_github", { method: "POST", headers: { "Content-Type": "application/json", "X-GitHub-Event": "check_run" }, body: JSON.stringify(checkBody) });
     expect(unsigned.status).toBe(401);
     expect(store.getScmEntitySnapshot("scm_github", "repo_widgets", "check_run", "check_run:7001")).toBeNull();
+    const unbound = await send("check_run", { ...checkBody, repository: { ...repository, id: 102, name: "unbound" } });
+    expect(unbound.status).toBe(202);
+    expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_scm_entity_snapshots").get()).toEqual({ count: 0 });
     const accepted = await send("check_run", checkBody);
     expect(accepted.status).toBe(202);
     expect(await accepted.json()).toMatchObject({ events: [], ignored: expect.stringContaining("internal checks") });
@@ -110,14 +113,15 @@ describe("Multiremi API — normalized SCM webhooks", () => {
     expect(store.getScmEntitySnapshot("scm_github", "repo_widgets", "check_run", "check_run:7001")?.contentHash).toBe(evidence.contentHash);
     expect(store.getScmEntitySnapshot("scm_github", "repo_widgets", "pipeline", "check_run:7001")).toBeNull();
     expect(store.dispatchPendingScmEvents()).toHaveLength(0);
+    expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_scm_sync_cursors").get()).toEqual({ count: 0 });
+    expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_scm_entity_snapshots").get()).toEqual({ count: 1 });
 
     const binding = store.listScmRepositoryBindings({ connectionId: connection.id })[0]!;
     const observation = new GitHubScmProviderAdapter().parseWebhook({ connection, credential: { accessToken: "token", webhookSecret: "webhook-secret" }, headers: { "x-github-event": "check_run" }, body: checkBody, rawBody: JSON.stringify(checkBody), observedAt: new Date().toISOString() }).internalObservations![0]!.observation;
-    // Exercise the shared poll/reconcile path, including a legacy pipelines observation.
-    for (const stream of ["checks", "pipelines"] as const) {
-      const reconciled = reconcileObservation({ store: scmIngestionStore(store), binding, observation: { ...observation, stream, entityType: stream === "pipelines" ? "pipeline" : "check_run", version: `poll-${stream}`, payload: { ...observation.payload, conclusion: "failure" } }, baseline: false, source: "poll" });
-      expect(reconciled.events).toHaveLength(0);
-    }
+    // Reconcile the provider's classification without guessing from its payload or ID.
+    const reconciled = reconcileObservation({ store: scmIngestionStore(store), binding, observation: { ...observation, version: "poll-checks", payload: { ...observation.payload, conclusion: "failure" } }, baseline: false, source: "poll" });
+    expect(reconciled.events).toHaveLength(0);
+    expect(reconciled.snapshot.entityType).toBe("check_run");
     expect(store.getScmEntitySnapshot("scm_github", "repo_widgets", "pipeline", "check_run:7001")).toBeNull();
     expect(store.dispatchPendingScmEvents()).toHaveLength(0);
     expect(store.listScmCanonicalEvents({ workspaceId: "local" })).toHaveLength(0);

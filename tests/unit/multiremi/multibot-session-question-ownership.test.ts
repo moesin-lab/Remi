@@ -5,6 +5,7 @@ import { migrateFeishuMultipleBots } from "@multiremi/store/migrations.js";
 import { pendingTurnBackendTests, type PendingTurnTestFixture } from "./pending-turn-test-backends.js";
 import { unifiedModelBackendTests } from "./unified-model-test-backends.js";
 import { bindFeishuTopicFixture } from "./feishu-topic-fixture.js";
+import { questionCardAction } from "@shared/feishu-task-card.js";
 
 let previousKey: string | undefined;
 let previousJobs: string | undefined;
@@ -120,7 +121,8 @@ pendingTurnBackendTests("multibot Question Session ownership", fixture => {
     expect(h.store.claimFeishuBotOutbounds("local", first.runtime.id)).toEqual([]);
 
     expect(h.store.prepareTaskStreamQuestionCard(question.id, first.openId)).toBeNull();
-    expect(h.store.prepareTaskStreamQuestionCard(question.id, second.openId)).not.toBeNull();
+    const card = h.store.prepareTaskStreamQuestionCard(question.id, second.openId)!;
+    expect(card).not.toBeNull();
     const protectedMessage = h.store.getMessage(question.id)!;
     expect(protectedMessage.card_token_recipient).toBe(second.openId);
     expect(protectedMessage.card_token_hash).toBeTruthy();
@@ -129,6 +131,19 @@ pendingTurnBackendTests("multibot Question Session ownership", fixture => {
     expect(h.store.getMessage(question.id)!.card_token_hash).toBe(protectedMessage.card_token_hash);
     expect(h.store.getQuestion(question.id)).toMatchObject({ status: "pending", session_id: h.session.id, wait_status: "waiting",
       summary: null });
+    const credential = { token: String(questionCardAction(card)!.t), operatorOpenId: second.openId };
+    const response = { expected_route_revision: 1, response: { answers: { direction: "A" } } };
+    // A valid token does not authorize another bot's member, or grant the
+    // configured recipient the shared operator's Web authority.
+    expect(() => h.store.answerQuestion(question.id, response, { type: "member", id: h.humans[0]!.id }, undefined, credential))
+      .toThrow("question_handler_required");
+    expect(() => h.store.answerQuestion(question.id, response, { type: "member", id: h.humans[1]!.id }))
+      .toThrow("question_handler_required");
+    expect(h.store.getMessage(question.id)!.card_token_consumed_at).toBeNull();
+    h.store.answerQuestion(question.id, response, { type: "member", id: h.humans[1]!.id }, undefined, credential);
+    expect(h.store.getQuestion(question.id)).toMatchObject({ status: "answered", answer: { actor: { type: "member", id: h.humans[1]!.id } } });
+    expect(h.store.getTaskHumanRequest(question.id)?.respondedBy).toBe(h.humans[1]!.id);
+    expect(h.store.getMessage(question.id)!.card_token_consumed_at).not.toBeNull();
   });
 
   it("editing or deleting default leaves the second bot's Question, token and running directive unchanged", () => {

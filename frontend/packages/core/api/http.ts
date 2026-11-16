@@ -1,3 +1,4 @@
+import { abortableDelay, maintenanceBudget, MAINTENANCE_RETRY_LIMIT_MS, pauseSendTimeout, retryAfterMs, useContinuityStore } from "../platform-lifecycle/continuity";
 import { type Logger, noopLogger } from "../logger";
 import { createRequestId } from "../utils";
 import { getCurrentSlug } from "../platform/workspace-storage";
@@ -86,6 +87,12 @@ export class PreviewUnsupportedError extends Error {
 /** Shared transport for every endpoint module: base URL, auth/CSRF/identity
  *  headers, the 401 recovery hook, request-id logging and the two fetch
  *  primitives. Endpoint modules receive one instance and own nothing else. */
+export interface HttpRequestInit extends RequestInit {
+  extraHeaders?: Record<string, string>;
+  /** Only callers backed by a verified server dedupe contract may opt in. */
+  retrySafe?: boolean;
+}
+
 export class HttpClient {
   private readonly baseUrl: string;
   private token: string | null = null;
@@ -167,7 +174,7 @@ export class HttpClient {
   // path, plain text for the attachment-preview proxy, etc.
   async fetchRaw(
     path: string,
-    init?: RequestInit & { extraHeaders?: Record<string, string> },
+    init?: HttpRequestInit,
   ): Promise<Response> {
     const rid = createRequestId();
     const start = Date.now();
@@ -182,25 +189,71 @@ export class HttpClient {
 
     this.logger.info(`→ ${method} ${path}`, { rid });
 
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      ...init,
-      headers,
-      credentials: "include",
-    });
+    const { retrySafe, extraHeaders: _extraHeaders, ...requestInit } = init ?? {};
+    const read = method === "GET" || method === "HEAD";
+    const trackedWrite = !read;
+    if (trackedWrite) useContinuityStore.setState(s => ({ pendingWrites: s.pendingWrites + 1 }));
+    try {
+      const budget = maintenanceBudget(init?.signal);
+      let attempt = 0;
+      let res: Response;
+      for (;;) {
+        init?.signal?.throwIfAborted();
+        let failure: unknown;
+        let response: Response | undefined;
+        try {
+          response = await fetch(`${this.baseUrl}${path}`, { ...requestInit, headers, credentials: "include" });
+        } catch (error) {
+          if (init?.signal?.aborted || !retrySafe || !(error instanceof TypeError)) throw error;
+          failure = error;
+        }
+        const maintenance = response?.status === 503 && response.headers.has("Retry-After");
+        if (response?.status === 503) {
+          const body: unknown = await response.clone().json().catch(() => null);
+          if (body && typeof body === "object" && "code" in body && body.code === "platform_update_in_progress") {
+            useContinuityStore.setState({ switching: true });
+          }
+        }
+        // Next rewrite's ECONNREFUSED response is a bare 500, not 502.
+        // Never reinterpret application JSON 500s as proxy/network failures.
+        const proxyUnavailable = retrySafe && response?.status === 500 &&
+          !response.headers.get("Content-Type")?.includes("application/json") &&
+          await response.clone().text() === "Internal Server Error";
+        const retry = proxyUnavailable || failure !== undefined || (response && (
+          (retrySafe && [502, 503, 504].includes(response.status)) || (read && maintenance)
+        ));
+        if (!retry) { res = response!; break; }
+        const delay = Math.max(250, retryAfterMs(response?.headers.get("Retry-After") ?? null)
+          ?? Math.min(1000 * 2 ** attempt, 15_000) * (0.8 + Math.random() * 0.4));
+        if (budget.waited + delay >= MAINTENANCE_RETRY_LIMIT_MS) {
+          if (failure) throw failure;
+          if (proxyUnavailable) throw new TypeError("Web proxy unavailable; delivery is unconfirmed");
+          res = response!;
+          break;
+        }
+        await response?.body?.cancel();
+        const resume = pauseSendTimeout(init?.signal);
+        try { await abortableDelay(delay, init?.signal); } finally { resume(); }
+        budget.waited += delay;
+        attempt++;
+      }
 
-    if (!res.ok) {
-      if (res.status === 401) this.handleUnauthorized();
-      const { message, body } = await this.parseErrorBody(res, `API error: ${res.status} ${res.statusText}`);
-      const logLevel = res.status === 404 ? "warn" : "error";
-      this.logger[logLevel](`← ${res.status} ${path}`, { rid, duration: `${Date.now() - start}ms`, error: message });
-      throw new ApiError(message, res.status, res.statusText, body);
+      if (!res.ok) {
+        if (res.status === 401) this.handleUnauthorized();
+        const { message, body } = await this.parseErrorBody(res, `API error: ${res.status} ${res.statusText}`);
+        const logLevel = res.status === 404 ? "warn" : "error";
+        this.logger[logLevel](`← ${res.status} ${path}`, { rid, duration: `${Date.now() - start}ms`, error: message });
+        throw new ApiError(message, res.status, res.statusText, body);
+      }
+
+      this.logger.info(`← ${res.status} ${path}`, { rid, duration: `${Date.now() - start}ms` });
+      return res;
+    } finally {
+      if (trackedWrite) useContinuityStore.setState(s => ({ pendingWrites: s.pendingWrites - 1 }));
     }
-
-    this.logger.info(`← ${res.status} ${path}`, { rid, duration: `${Date.now() - start}ms` });
-    return res;
   }
 
-  async fetch<T>(path: string, init?: RequestInit): Promise<T> {
+  async fetch<T>(path: string, init?: HttpRequestInit): Promise<T> {
     const res = await this.fetchRaw(path, {
       ...init,
       extraHeaders: { "Content-Type": "application/json" },

@@ -15,7 +15,7 @@ export interface UpdateScmPullRequestInput {
 
 export interface ScmCheckObservation {
   id: string;
-  kind: "check_run" | "commit_status";
+  kind: "check_run" | "commit_status" | "workflow_run";
   name: string;
   headSha: string;
   appId: number | null;
@@ -24,6 +24,8 @@ export interface ScmCheckObservation {
   status: string;
   conclusion: string | null;
   url: string | null;
+  /** GitHub workflow rerun attempt; absent for job checks and commit statuses. */
+  runAttempt?: number | null;
 }
 
 export interface ScmCheckSummary {

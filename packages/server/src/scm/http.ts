@@ -6,6 +6,8 @@ export class ScmHttpError extends Error {
     readonly responseBody: string,
     readonly url: string,
     readonly method: string,
+    readonly rateLimited = false,
+    readonly rateLimitResetAt: number | null = null,
   ) {
     super(message);
   }
@@ -27,14 +29,22 @@ export async function scmRequestJson<T>(
   const response = await fetch(url, { ...init, signal, redirect: "error" });
   const text = await response.text();
   if (!response.ok) {
-    const retryAfter = Number(response.headers.get("retry-after"));
+    const retryHeader = response.headers.get("retry-after");
+    const retryAfter = retryHeader && /^\d+$/u.test(retryHeader) ? Number(retryHeader)
+      : retryHeader && Number.isFinite(Date.parse(retryHeader)) ? Math.max(0, Math.ceil((Date.parse(retryHeader) - Date.now()) / 1000)) : null;
+    const resetHeader = response.headers.get("x-ratelimit-reset");
+    const resetAt = resetHeader && /^\d+$/u.test(resetHeader) ? Number(resetHeader) : null;
+    const rateLimited = response.status === 429 || (response.status === 403
+      && (response.headers.get("x-ratelimit-remaining") === "0" || retryHeader !== null));
     throw new ScmHttpError(
       `SCM provider request failed (${response.status})`,
       response.status,
-      Number.isFinite(retryAfter) ? retryAfter : null,
+      retryAfter !== null && Number.isSafeInteger(retryAfter) ? retryAfter : null,
       text.slice(0, 2_000),
       url,
       String(init.method ?? "GET").toUpperCase(),
+      rateLimited,
+      resetAt !== null && Number.isSafeInteger(resetAt) ? resetAt : null,
     );
   }
   let data: T;

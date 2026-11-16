@@ -46,7 +46,7 @@ CI 固定 Bun 版本并使用公共依赖源，发布唯一 `ci-<提交>-<run>-<
 
 ### 本地构建代理
 
-`build`、`deploy --build-local true`、dev deploy 和 dev watch（包括后续依赖重建）继承当前进程的 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 及其小写形式，作为 API/Web 的 build args。无代理时保持原有构建网络和参数。大小写变量分别按原值传入；请避免同时设置互相冲突的值。
+`build`、`deploy --build-local true`、dev deploy 和 dev watch（包括后续依赖重建）继承当前进程的 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 及其小写形式，作为 API/Web 的 build args。无代理时保持原有构建网络和参数。POSIX 上大小写变量分别按原值传入，请避免同时设置互相冲突的值；Windows 环境变量名不区分大小写，每项只生成一个大写 build arg，小写环境变量同样有效。
 
 Linux 原生 Docker 上，代理 URL 指向 `localhost`、`127.0.0.0/8` 或 `[::1]` 时自动使用 `build.network: host`，让构建步骤能访问宿主回环代理。例如（Bash）：
 

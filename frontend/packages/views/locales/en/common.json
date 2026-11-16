@@ -29,5 +29,13 @@
     "title": "Something went wrong",
     "description": "The request failed. Check your connection and try again.",
     "retry": "Try again"
+  },
+  "update": {
+    "draining": "Preparing an update. You can keep working.",
+    "switching": "Updating. Messages will send when the service returns.",
+    "updated": "A new version is ready.",
+    "waiting": "Waiting for pending messages and edits.",
+    "refresh": "Refresh",
+    "progress": "{{tasks}} active tasks · {{acked}}/{{total}} runtimes ready"
   }
 }

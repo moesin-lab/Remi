@@ -18,6 +18,7 @@ vi.mock("@multiremi/core/platform", () => ({
 vi.mock("@/platform/navigation", () => ({
   WebNavigationProvider: ({ children }: { children: ReactNode }) => children,
 }));
+vi.mock("./update-continuity", () => ({ UpdateContinuity: () => null }));
 vi.mock("./pageview-tracker", () => ({ PageviewTracker: () => null }));
 
 function json(body: unknown, status = 200) {

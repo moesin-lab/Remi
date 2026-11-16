@@ -490,9 +490,11 @@ also checks this policy against the tracked source before publication. Never
 copy a new fingerprint onto old code. The explicit image and
 systemd executors retain their stricter equal-fingerprint requirement.
 
-The unified message/turn/lane release has an empty `rollbackSafeFrom` policy.
-It can publish application bundles for fresh installations and same-schema
-updates, but does not attest code-only rollback from the legacy storage model.
+The current `rollbackSafeFrom` policy attests only the preceding fingerprint
+listed in the policy file: MUL-40 changes continuation consumer logic in a
+hashed source file without changing schema, migrations or record formats.
+Code-only rollback restores the known continuation/input failure behavior.
+This does not attest code-only rollback from the legacy storage model.
 Legacy deployments must follow the [controlled cutover](../docs/deploy/unified-model-cutover.md)
 before adopting this schema; publication alone does not authorize that migration.
 

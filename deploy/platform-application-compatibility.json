@@ -1,5 +1,7 @@
 {
-  "dataSchema": "d4a2df33297f71d5f18d79ff68f3d08c90a2fd107783b20e4daf358e6feee1ed",
-  "rollbackSafeFrom": [],
-  "reason": "The upstream integration replaces issue responsibility and delivery with execution-owner escalation, moves records and recyclable workspaces to daemon-owned storage, and adds turn/item traces, Chat follow-up queues, subagent activity fields, background-task registry per-attempt prompt instructions, slash-command catalogs and persistent Chat ID reservations. Fork shared-operator, dual-owner Session and model-catalog migrations are retained. No earlier schema fingerprint is attested for code-only rollback. Existing deployments require the ADR 0018 and ADR 0019 controlled cutover steps; publishing this bundle does not authorize a production migration. Same-schema updates still require backup verification and target/previous migration rehearsal. Adds nullable Autopilot delivery Chat and authorizing operator columns; prior automations remain unbound. No earlier fingerprint is newly attested for rollback."
+  "dataSchema": "6a1507fdd4766864209fb18f09b70399054d7759ae6fb842f7e765027a6d9e4b",
+  "rollbackSafeFrom": [
+    "d4a2df33297f71d5f18d79ff68f3d08c90a2fd107783b20e4daf358e6feee1ed"
+  ],
+  "reason": "MUL-40: relative to 47ff0932fefe4038e5b21e5953ecb7cd843f7e16 (fingerprint d4a2df33297f71d5f18d79ff68f3d08c90a2fd107783b20e4daf358e6feee1ed), the only changed data-schema input is packages/server/src/store/inbox/questions.ts. It adds continuation input consumer selection using existing question wait fields and existing turn records; no tables, columns, indexes, migrations, backfills, serialized record formats or status values change. The previous code can read the same persisted records, so code-only rollback to that fingerprint is compatible; it restores the known MUL-40 behavior defects. No other earlier fingerprint or legacy storage cutover is attested. Backup verification and target/previous migration rehearsal remain required before an application update; this declaration does not authorize production migration or deployment."
 }

@@ -11,6 +11,7 @@ import { PlatformUpdaterClient } from '../../packages/platform-updater/src/clien
 import { PlatformUpdateWorker } from '../../packages/platform-updater/src/worker.js';
 import { DATA_SCHEMA_INPUTS, migrationFingerprint } from '../../packages/platform-updater/src/safety.js';
 import { API_BASE_INPUTS, type ApplicationManifest } from '../../packages/platform-updater/src/application-manifest.js';
+import { UNIFIED_MODEL_MIGRATION } from '../../packages/server/src/store/unified-model-schema.js';
 
 const args = process.argv.slice(2);
 const value = (name: string) => args.find(arg => arg.startsWith(`--${name}=`))?.slice(name.length + 3);
@@ -122,7 +123,8 @@ try {
       FIXTURE_ADMIN_TOKEN: adminToken, FIXTURE_UPDATER_TOKEN: updaterToken, HARNESS_SOURCE_SHA: releaseSha, MULTIREMI_VERSION: builds.release!.version };
     const model: any = { services: {
       postgres: { image: 'pgvector/pgvector:pg17', environment: { POSTGRES_HOST_AUTH_METHOD: 'trust', POSTGRES_USER: 'fixture', POSTGRES_DB: 'fixture' }, volumes: ['db:/var/lib/postgresql/data'], healthcheck: { test: ['CMD-SHELL', 'pg_isready -U fixture -d fixture'], interval: '1s', retries: 60 } },
-      api: { image: builds.release!.image, init: true, environment: containerEnv, ports: [`127.0.0.1:${apiPort}:6120`, `127.0.0.1:${controlPort}:6121`], volumes: ['api-home:/isolated'], depends_on: { postgres: { condition: 'service_healthy' } } },
+      // Match production: the api-home archive root is HOME, with reports/migrations directly beneath it.
+      api: { image: builds.release!.image, init: true, environment: { ...containerEnv, HOME: '/isolated' }, ports: [`127.0.0.1:${apiPort}:6120`, `127.0.0.1:${controlPort}:6121`], volumes: ['api-home:/isolated'], depends_on: { postgres: { condition: 'service_healthy' } } },
       web: { image: builds.release!.webImage, init: true, ports: [`127.0.0.1:${webPort}:3000`] },
     }, volumes: { db: {}, 'api-home': {}, 'daemon-home': {}, control: {} } };
     await save(composeFile, JSON.stringify(model));
@@ -246,6 +248,9 @@ try {
       return { stdout, stderr, exitCode };
     } };
     const apiId = await compose(['ps', '-q', 'api']), webId = await compose(['ps', '-q', 'web']);
+    const migrationReports = ['before', 'after'].map(phase => `/isolated/reports/migrations/${UNIFIED_MODEL_MIGRATION}-${phase}.json`);
+    const readMigrationReports = () => Promise.all(migrationReports.map(path => compose(['exec', '-T', 'api', 'cat', path])));
+    const originalReports = await readMigrationReports();
     const pgId = await compose(['ps', '-q', 'postgres']);
     const apiRoot = join(root, 'platform-release/api'), webRoot = join(root, 'platform-release/web');
     await mkdir(apiRoot, { recursive: true }); await mkdir(webRoot, { recursive: true });
@@ -282,7 +287,10 @@ try {
       apiHealthUrl: apiUrl + '/readyz', webHealthUrl: webUrl + '/login', minimumFreeBytes: 1, verificationTimeoutMs: 60_000,
       backup: { directory: join(root, 'backups'), dataPaths: [composeFile, envFile],
         databaseDumpCommand: ['docker', 'exec', pgId, 'pg_dump', '-U', 'fixture', '-d', 'fixture', '-Fc'],
-        databaseVerifyCommand: ['docker', 'run', '--rm', '-i', '--network', 'none', '--entrypoint', 'pg_restore', 'pgvector/pgvector:pg17', '--list'] } }, commandRunner);
+        databaseVerifyCommand: ['docker', 'run', '--rm', '-i', '--network', 'none', '--entrypoint', 'pg_restore', 'pgvector/pgvector:pg17', '--list'],
+        archives: [{ name: 'api-home',
+          dumpCommand: ['docker', 'run', '--rm', '--pull=never', '--network', 'none', '--read-only', '--mount', `type=volume,src=${project}_api-home,dst=/backup,readonly`, '--entrypoint', 'tar', installedApi, '-C', '/backup', '-cf', '-', '.'],
+          verifyCommand: ['docker', 'run', '--rm', '-i', '--pull=never', '--network', 'none', '--entrypoint', 'tar', installedApi, '-tf', '-'] }] } }, commandRunner);
     const client = new PlatformUpdaterClient(apiUrl, adminToken, updaterToken);
     const worker = new PlatformUpdateWorker(client, driver, feedUrl);
     const request = async (path: string, method = 'GET', body?: unknown): Promise<any> => {
@@ -317,6 +325,8 @@ try {
     assert.deepEqual(await control('/version'), { version: previous.version, sha: releaseSha });
     const rollbackTask = await heldTask(); await releaseGate(); const rollbackAttempts = await assertCompleted(rollbackTask);
     evidence.scenarios.push({ kind: 'platform-rollback', version: previous.version, source_sha: releaseSha, attempts: rollbackAttempts });
+    assert.deepEqual(await readMigrationReports(), originalReports, 'Upgrade or rollback changed persistent migration reports');
+    evidence.migration_reports = originalReports.map((report, index) => ({ path: migrationReports[index], sha256: createHash('sha256').update(report).digest('hex'), unchanged: true }));
     await log('Platform real updater: ACP drain, candidate version and code rollback verified');
   }
 } catch (error) { failure = error; await log(error instanceof Error ? error.stack ?? error.message : String(error)); }

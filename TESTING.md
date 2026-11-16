@@ -191,6 +191,8 @@ bun run tests/integration/upgrade-harness.ts --self-check-only --output=/tmp/rem
 
 两条演练固化不同的当前行为：daemon 容器内进程被强制替换时，直接检查数据库 attempt 为 `lost(runtime_recovery)`，随后出现新的 `completed` attempt；升级和回滚均断言结果与源码版本。平台使用真实 `PlatformUpdateWorker` / `ContainerApplicationDriver`，观测在途 ACP 的 drain，完成任务后切到候选应用并执行代码回滚，daemon 容器保持原身份。平台正常 drain 不应制造 lost。daemon 的基线断言集中在 `assertLostThenCompleted`，供 MUL-28/31 显式调整；当前不覆盖 systemd 重启、CLI 自更新安装器或生产发布制品。测试应用跨 ref 使用相同的测试镜像基础配方，迁移与代码回滚兼容性仍由真实 updater 的隔离迁移演练校验，不能代替正式发布的兼容性审阅。
 
+平台 API 的 HOME 是 api-home 卷根目录，原始迁移报告位于 `$HOME/reports/migrations`。显式备份该卷，供真实 updater 从本次备份恢复报告到隔离演练容器；演练结束检查升级与回滚没有改写原始 before/after 报告，并记录 SHA-256。不会生成替代报告或跳过迁移门禁。
+
 Docker-free daemon 路径只需 Linux、Bun 1.3.14、Git 与公共依赖源：显式 release ref 和候选 HEAD 分别导出源码、安装锁定依赖，以相同的测试专属入口启动两个版本的独立 daemon。API 使用临时 SQLite；升级和回滚都在长工具 gate 进行中强制替换 daemon，断言原 attempt `lost(runtime_recovery)`、新 attempt `completed`、结果与 runtime 上报版本。输出 `daemon-upgrade.json`（双方 SHA、版本、端口、attempt）与 `daemon-upgrade.log`，不修改生产 schema 或添加跨版本兼容层。该路径也由全栈入口首先运行，纳入同一个 CI job。
 
 `.github/workflows/upgrade-harness.yml` 的 Linux job 跑全流程，始终上传 `isolation.json`、`run.log` 与容器日志。脚本退出时清理自己的容器/卷/镜像并检查 project label 下没有残留容器。任务沙箱不开放 Docker：平台全流程只在 Linux CI 跑，本机跑 Docker-free daemon 演练与隔离自检。沙箱无法读取所保护进程的 `/proc` 时，保留 `fully_observed=false`，只作为部分证据；CI 上没有线上实例的成功不能替代同机完整观测。

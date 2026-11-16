@@ -8,7 +8,7 @@ import type { StreamSubscriptionHandlers } from "@multiremi/core/api/ws-client";
 import { ApiError } from "@multiremi/core/api";
 import { I18nProvider } from "@multiremi/core/i18n/react";
 import { ReplicaEnvProvider } from "@multiremi/core/platform/replica-env";
-import { CHAT_SEND_TIMEOUT_MS, createChatStore, registerChatStore } from "@multiremi/core/chat";
+import { CHAT_SEND_TIMEOUT_MS, createChatStore, registerChatStore, setOptimisticChatRows, useOptimisticChatOutbox } from "@multiremi/core/chat";
 import { CHAT_PENDING_REFETCH_INTERVAL_MS, chatKeys } from "@multiremi/core/chat/queries";
 import { clearChatLogPool } from "@multiremi/core/session-log/chat-log-pool";
 import { SessionLogEntrySchema, type LogWindowParams, type SessionLogRow, type SessionLogWindow } from "@multiremi/core/api/schemas/session-log";
@@ -231,6 +231,7 @@ afterAll(() => configure({ asyncUtilTimeout: 1000 }));
 vi.setConfig({ testTimeout: 30_000 });
 
 beforeEach(() => {
+  setOptimisticChatRows(() => []);
   // Timer functions and Date only: React's scheduler and the editor keep their own.
   vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
   logs = chatLogs();
@@ -325,6 +326,28 @@ describe("a send without an answer is unconfirmed until the log says", () => {
     expect(backend.send).toHaveBeenCalledOnce();
     expect(logs.rows(existing.id).filter((row) => row.body_md === "Slow message")).toHaveLength(1);
     view.unmount();
+  });
+
+  it("retains the body and dedupe key when the Chat page unmounts and another Chat instance opens", async () => {
+    const view = mountPage(`/test/chat?session=${existing.id}`);
+    await waitFor(() => expect(conversation()).toHaveTextContent("Earlier question"));
+    backend.send.mockRejectedValueOnce(new TypeError("Web proxy unavailable; delivery is unconfirmed"));
+    await type("Keep across navigation"); submit();
+    await waitFor(() => expect(conversation()).toHaveTextContent("Delivery unconfirmed"));
+    const originalId = sentClientId();
+    view.unmount();
+    expect(useOptimisticChatOutbox.getState().rows).toEqual([expect.objectContaining({
+      clientId: originalId, content: "Keep across navigation", status: "unconfirmed",
+    })]);
+    act(() => router.go("/test/issues"));
+    const reopened = mountPage(`/test/chat?session=${existing.id}`);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry sending this message" })).toBeInTheDocument());
+    expect(conversation()).toHaveTextContent("Keep across navigation");
+    fireEvent.click(screen.getByRole("button", { name: "Retry sending this message" }));
+    await waitFor(() => expect(backend.send).toHaveBeenCalledTimes(2));
+    expect(sentClientId(1)).toBe(originalId);
+    await waitFor(() => expect(conversation()).toHaveTextContent("Sent"));
+    reopened.unmount();
   });
 
   it("retries an unconfirmed send with the same dedupe_key", async () => {

@@ -191,7 +191,7 @@ try {
   assert.equal(store.getFeishuBotConfig(workspace.id)?.appId, "cli_im_updated");
   assert.equal(store.revealFeishuBotSecrets(workspace.id)?.appSecret, botSecret);
   assert.equal(store.getFeishuBotConfig(workspace.id)?.enabled, false);
-  assert.equal(store.getFeishuBotConfig(workspace.id)?.senderAccessPolicy, "agent");
+  assert.equal(store.getFeishuBotConfig(workspace.id)?.senderAccessPolicy, "allowlist");
   assert.equal(store.getFeishuBotConfig(workspace.id)?.responsibleMemberId, null);
   assert(store.listFeishuBotAgentRoutes(workspace.id).some(route => route.agentId === specialist.id));
   assert.equal(store.getChatSession(sharedChat.id)?.unreadCount, 0);

@@ -80,7 +80,7 @@ for (const backend of ["SQLite", "Postgres"] as const) {
       const daemonId = `daemon_mul487_${n}`;
       store.registerRuntime({ id: runtimeId, name: "Question host", provider: "codex", workspaceId, daemonId });
       store.heartbeatRuntime(runtimeId, { supportsFeishuBotConfig: true, supportsDecisionCard: true, supportsIssueDecisionCard: true });
-      const config = store.upsertFeishuBotConfig(workspaceId, {
+      const config = store.upsertFeishuBotConfig(workspaceId, { senderAccessPolicy: "agent",
         agentId: agent.id, runtimeId, appId: "cli_mul487", appSecretOp: "set", appSecret: fixtureSecret, domain: "feishu", enabled: true,
         responsibleMemberId: member.id,
       });

@@ -488,6 +488,14 @@ A-2 用它进入 `upgrade_wait`（§7.3）而不是单纯停止重连。另外�
 允许排在 complete 之后；complete 是最后一条改变任务状态的帧，其余帧类型仍须在它之前。
 服务端接收这两种终态尾帧，不改变任务状态，相同内容的重放只生效一次。
 
+daemon 停止/重启期间中断的执行通过持久 outbox 上报 `task.fail`，原因为
+`runtime_recovery`，携带最新 provider session 和工作目录；服务端按现有尝试上限自动重试并续接
+该 session。尝试状态为 `failed`，恢复语义与孤儿的 `lost / runtime_recovery` 相同。
+已持久化的完成报告继续重放；停止导致收尾 RPC 失去执行权限时同样按运行时中断重试。
+未停止时的 provider 退出仍按 Agent 错误分类，
+已由服务端取消的执行不再上报失败，超时继续按超时处理。进程来不及持久化报告而退出时，
+仍由孤儿恢复处理。本规则不增加 drain 期限或无感续接能力。
+
 `outbox_events.task_id` 语义扩展为分区键：runtime 级记录写 `rt:<runtime_id>`。每分区内保序，
 分区间可并行。断线期间照常入库，重连后从最小未删 id 续发。
 

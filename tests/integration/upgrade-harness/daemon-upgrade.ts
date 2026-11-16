@@ -1,6 +1,6 @@
 /** Cross-ref daemon recovery with a real SQLite API and separate native ACP processes. */
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
@@ -76,6 +76,12 @@ export async function runDaemonUpgrade(releaseRef: string, output: string) {
       });
       const actualEnv = (await readFile(`/proc/${child.pid}/environ`, 'utf8')).split('\0').map(s => s.split('=')[0]);
       for (const key of SESSION_ENV) assert(!actualEnv.includes(key), `Inherited ${key}`);
+      const leaseRoot = join(root, 'locks/shared-locks/workspace-supervisors');
+      const owners = await Promise.all((await readdir(leaseRoot)).map(async name => JSON.parse(await readFile(join(leaseRoot, name, 'owner.lock/owner.json'), 'utf8'))));
+      assert.equal(owners.length, 1);
+      assert.equal(owners[0].pid, child.pid); assert.equal(owners[0].released, false);
+      assert.equal(owners[0].workspace_root, join(root, 'state/workspaces')); assert.equal(owners[0].base_port, port);
+      evidence.boundary = { lease_root: leaseRoot, lease_owner_pid: child.pid, session_environment_absent: true };
       evidence.sources[label].observed_cli_version = build.version;
       return child;
     }

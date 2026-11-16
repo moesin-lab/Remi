@@ -615,10 +615,9 @@ export class MultiremiTaskReportOutbox {
   }
 
   private nextDelivery(taskId: string): OutboxDelivery | null {
-    const rows = this.db.query(
-      "SELECT * FROM outbox_events WHERE task_id = ? AND status = 'pending' ORDER BY id ASC LIMIT ?",
-    ).all(taskId, this.deliveryBatchSize) as Array<Record<string, unknown>>;
-    const firstRow = rows[0];
+    const firstRow = this.db.query(
+      "SELECT * FROM outbox_events WHERE task_id = ? AND status = 'pending' ORDER BY id ASC LIMIT 1",
+    ).get(taskId) as Record<string, unknown> | null;
     if (!firstRow) return null;
     const first = toRecord(firstRow);
     if (String(firstRow.status) === "blocked") {
@@ -628,6 +627,11 @@ export class MultiremiTaskReportOutbox {
       return { record: first, recordIds: [first.id], blocked: false };
     }
 
+    // Only legacy messages can form a batch. Fetching a full window for each
+    // usage delta repeatedly materializes up to 255 unused payloads on replay.
+    const rows = this.db.query(
+      "SELECT * FROM outbox_events WHERE task_id = ? AND status = 'pending' ORDER BY id ASC LIMIT ?",
+    ).all(taskId, this.deliveryBatchSize) as Array<Record<string, unknown>>;
     const records: MultiremiOutboxRecord[] = [];
     const messages: TaskMessageInput[] = [];
     for (const row of rows) {

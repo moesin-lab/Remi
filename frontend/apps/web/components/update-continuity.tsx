@@ -41,6 +41,6 @@ export function UpdateContinuity() {
   const mode = status.data?.maintenance.mode;
   const operationSwitching = ["switching", "restarting", "verifying", "rolling_back"].includes(status.data?.activeOperation?.status ?? "");
   const state = switching || operationSwitching ? "switching" : mode === "draining" ? "draining" : updated ? "updated" : null;
-  return <div ref={banner}><UpdateBanner state={state} busy={!!pending || !!mutations || busy} drain={status.data?.activeOperation?.progress.drain}
+  return <div ref={banner} className="relative z-20"><UpdateBanner state={state} busy={!!pending || !!mutations || busy} drain={status.data?.activeOperation?.progress.drain}
     onRefresh={() => { if (canRefresh() && !mutations) window.location.reload(); }} /></div>;
 }

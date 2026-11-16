@@ -36,7 +36,7 @@ export function DashboardLayout({
         </div>
       }
     >
-      <SidebarProvider className="h-[calc(100svh-var(--web-update-banner-height,0px))] min-h-0" open={nav?.open} onOpenChange={nav?.setOpen}>
+      <SidebarProvider className="h-[calc(100svh-var(--web-update-banner-height,0px))] min-h-0 [&_[data-slot=sidebar-container]]:top-[var(--web-update-banner-height,0px)] [&_[data-slot=sidebar-container]]:h-[calc(100svh-var(--web-update-banner-height,0px))]" open={nav?.open} onOpenChange={nav?.setOpen}>
         <WorkspacePresencePrefetch />
         <AppSidebar searchSlot={searchSlot} />
         <SidebarInset className="relative overflow-hidden">

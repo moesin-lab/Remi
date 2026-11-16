@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { gzipSync } from 'node:zlib';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { gzipSync, gunzipSync } from 'node:zlib';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { API_BASE_INPUTS, DATA_SCHEMA_INPUTS, extractArchive } from '../../../packages/platform-updater/src/container-runtime.mjs';
+import { API_BASE_INPUTS, DATA_SCHEMA_INPUTS, extractArchive, restoreMigrationReports } from '../../../packages/platform-updater/src/container-runtime.mjs';
 import { API_BASE_INPUTS as expectedBaseInputs } from '../../../packages/platform-updater/src/application-manifest.js';
 import expectedInputs from '../../../packages/platform-updater/src/data-schema-inputs.json';
 
@@ -63,5 +63,40 @@ describe('application archive extraction', () => {
   it('rejects duplicate file entries', async () => {
     const f = await unpack([{ name: 'file', content: 'first' }, { name: 'file', content: 'replacement' }]);
     await expect(f.extract()).rejects.toThrow('Duplicate');
+  });
+});
+
+describe('rehearsal migration report restore', () => {
+  async function backup(entries: Parameters<typeof tar>[0]) {
+    const root = await mkdtemp(join(tmpdir(), 'remi-report-archive-')); roots.push(root);
+    const archive = join(root, 'api-home.archive');
+    await writeFile(archive, gunzipSync(tar(entries)));
+    const target = join(root, 'scratch');
+    return { archive, target, restore: () => restoreMigrationReports(archive, target) };
+  }
+  it('extracts only reports from the uncompressed HOME backup, ignoring cache links and credentials', async () => {
+    const f = await backup([
+      { name: './', type: '5' },
+      { name: './credentials.json', content: 'private' },
+      { name: './cache', type: '2', link: '/outside' },
+      { name: './reports/migrations/cutover-before.json', content: '{"phase":"before"}' },
+      { name: './reports/migrations/cutover-after.json', content: '{"phase":"after"}' },
+    ]);
+    const directory = await f.restore();
+    expect(await readFile(join(directory, 'cutover-before.json'), 'utf8')).toBe('{"phase":"before"}');
+    expect(await readdir(directory)).toEqual(['cutover-after.json', 'cutover-before.json']);
+    expect(await readdir(f.target)).toEqual(['reports']);
+  });
+  it('fails diagnostically when the backup has no migration reports', async () => {
+    const f = await backup([{ name: 'credentials.json', content: 'private' }]);
+    await expect(f.restore()).rejects.toThrow('current api-home backup is missing or has invalid reports/migrations');
+  });
+  it('fails diagnostically when the HOME archive is absent', async () => {
+    const f = await backup([]); await rm(f.archive);
+    await expect(f.restore()).rejects.toThrow('current api-home backup');
+  });
+  for (const type of ['1', '2']) it(`rejects report links of type ${type}`, async () => {
+    const f = await backup([{ name: 'reports/migrations/report.json', type, link: '../../credentials.json' }]);
+    await expect(f.restore()).rejects.toThrow('invalid reports/migrations');
   });
 });

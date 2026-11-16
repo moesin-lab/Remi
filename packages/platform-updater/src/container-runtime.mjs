@@ -52,7 +52,7 @@ async function manifest(id) {
 // Extract files first, links last. No archive entry can write through a link.
 // This accepts GNU/PAX archives and workspace links, but rejects absolute paths,
 // devices, traversal, escaping links, duplicate paths and unbounded expansion.
-export async function extractArchive(archive, destination, compressed = true) {
+export async function extractArchive(archive, destination, compressed = true, subtree = null) {
   const source = createReadStream(archive);
   const stream = compressed ? source.pipe(createGunzip()) : source;
   const iterator = stream[Symbol.asyncIterator]();
@@ -129,6 +129,17 @@ export async function extractArchive(archive, destination, compressed = true) {
       extension = {};
       if (names.has(name) || names.size >= 250000) throw new Error('Duplicate or excessive archive entries');
       names.add(name);
+      if (subtree && name !== subtree && !name.startsWith(subtree + '/')) {
+        // Consume unrelated HOME entries without materializing credentials,
+        // caches or links. Only this backup's migration reports enter tmpfs.
+        for (let left = size; left > 0;) {
+          const length = Math.min(left, 64 * 1024);
+          await take(length); left -= length;
+        }
+        if (size % 512) await take(512 - size % 512);
+        continue;
+      }
+      if (subtree && !['0', '5'].includes(type)) throw new Error('Migration report archive entries must be regular files or directories');
       const path = destination + '/' + name;
       await mkdir(dirname(path), { recursive: true });
       if (type === '5') {
@@ -179,6 +190,37 @@ export async function extractArchive(archive, destination, compressed = true) {
     }
     if (process.platform !== 'win32') await syncDirectories(destination);
   } finally { source.destroy(); stream.destroy(); await Promise.all(flushes); }
+}
+
+// Only the current backup archive is available here; never mount live HOME.
+export async function restoreMigrationReports(archive, destination) {
+  try {
+    if (!(await lstat(archive)).isFile()) throw new Error('Not an archive file');
+    await extractArchive(archive, destination, false, 'reports/migrations');
+    const directory = destination + '/reports/migrations';
+    if (!(await lstat(directory)).isDirectory()) throw new Error('Not a directory');
+    return directory;
+  } catch {
+    throw new Error('Migration rehearsal: current api-home backup is missing or has invalid reports/migrations; restore the persistent migration reports before retrying');
+  }
+}
+
+export async function rehearseStoreMigration(apiRoot, archive, scratch) {
+  const reportDirectory = await restoreMigrationReports(archive, scratch);
+  const child = spawn('bun', ['--eval',
+    "const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {MultiremiStore}=await import('./packages/server/src/store/store.ts');const db=openMultiremiDatabase();try{new MultiremiStore(db)}finally{await db.close()}"],
+  { cwd: apiRoot, stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, HOME: '/tmp', MULTIREMI_HOME: '/tmp/remi', MULTIREMI_MIGRATION_REPORT_DIR: reportDirectory } });
+  let missingBeforeReport = false, stderrTail = '';
+  child.stderr.on('data', chunk => {
+    stderrTail = (stderrTail + chunk.toString()).slice(-4096);
+    if (stderrTail.includes('Unified migration before report missing')) missingBeforeReport = true;
+  });
+  // A hung candidate migration must not strand API/Web offline indefinitely.
+  // Only this disposable rehearsal process is killed; no provider runs here.
+  const timeout = setTimeout(() => child.kill('SIGKILL'), 5 * 60_000);
+  try {
+    await new Promise((ok, fail) => { child.on('error', fail); child.on('exit', code => code === 0 ? ok() : fail(new Error(missingBeforeReport ? 'Migration rehearsal: Unified migration before report missing from current api-home backup; restore the persistent migration reports before retrying' : 'Migration rehearsal failed or timed out'))); });
+  } finally { clearTimeout(timeout); }
 }
 
 async function launch(role) {
@@ -279,16 +321,7 @@ async function main() {
   } else if (command === 'migrate') {
     const url = new URL(process.env.MULTIREMI_DATABASE_URL || '');
     if (url.hostname !== '127.0.0.1' || url.pathname !== '/remi_update_rehearsal' || url.username !== 'remi_rehearsal') throw new Error('Migrations may only run against the isolated rehearsal database');
-    const child = spawn('bun', ['--eval',
-      "const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {MultiremiStore}=await import('./packages/server/src/store/store.ts');const db=openMultiremiDatabase();try{new MultiremiStore(db)}finally{await db.close()}"],
-    { cwd: releasePath(id) + '/api', stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, HOME: '/tmp', MULTIREMI_HOME: '/tmp/remi' } });
-    child.stderr.resume();
-    // A hung candidate migration must not strand API/Web offline indefinitely.
-    // Only this disposable rehearsal process is killed; no provider runs here.
-    const timeout = setTimeout(() => child.kill('SIGKILL'), 5 * 60_000);
-    try {
-      await new Promise((ok, fail) => { child.on('error', fail); child.on('exit', code => code === 0 ? ok() : fail(new Error('Migration rehearsal failed or timed out'))); });
-    } finally { clearTimeout(timeout); }
+    await rehearseStoreMigration(releasePath(id) + '/api', '/remi-input/api-home.archive', '/tmp/remi-rehearsal');
   } else throw new Error('Unknown application control command');
 }
 

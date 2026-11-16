@@ -136,6 +136,20 @@ describe('container application updates', () => {
     expect(await f.driver.pendingFinalization()).toBeNull();
   });
 
+  it('mounts only the current backup HOME archive read-only for each migration pass', async () => {
+    const f = await fixture();
+    await f.driver.execute(f.operation, f.report, f.gate);
+    const migrations = f.calls.filter(call => call.args.includes('migrate'));
+    expect(migrations).toHaveLength(2);
+    for (const { args } of migrations) {
+      const mounts = args.filter((_, index) => args[index - 1] === '--mount');
+      expect(mounts).toContain(`type=volume,src=remi-test_application-releases,dst=/opt/remi-application,readonly`);
+      expect(mounts.some(mount => mount.startsWith(`type=bind,src=${f.root}/backups/pop_app-`) && mount.endsWith('/volume-api-home.archive,dst=/remi-input/api-home.archive,readonly'))).toBe(true);
+      expect(mounts.some(mount => mount.includes('src=remi-test_api-home'))).toBe(false);
+      expect(args).toContain('/tmp:rw,nosuid,size=512m');
+    }
+  });
+
   it('subsequent updates restart the same containers without compose up or image changes', async () => {
     const f = await fixture();
     await f.driver.execute(f.operation, f.report, f.gate); await f.driver.finalize(f.operation.id);

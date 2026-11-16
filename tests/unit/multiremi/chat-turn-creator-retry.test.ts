@@ -64,23 +64,25 @@ pendingTurnBackendTests("Chat creator turn retry", (fixture) => {
     expect(f.store.getTask(coldAttempt)).toMatchObject({ status: "queued", sessionId: null });
   });
 
-  it("refuses another member, the master token and an unrelated task credential", async () => {
+  it("lets shared human operators retry but refuses an unrelated task credential", async () => {
     const f = await scaffold();
     const { turn } = f.failed();
     const other = await f.retry(turn.id, {}, f.otherPat.token);
-    expect([403, 404]).toContain(other.status);
+    expect(other.status).toBe(200);
+    f.store.cancelTurn(turn.id);
     const master = await f.retry(turn.id, {}, "chat-retry-master");
-    expect([403, 404]).toContain(master.status);
+    expect(master.status).toBe(200);
+    f.store.cancelTurn(turn.id);
     const otherAgent = f.store.createAgent({ name: "Unrelated", provider: "codex", visibility: "workspace" });
     const otherChat = f.store.createChatSession({ agentId: otherAgent.id, creatorId: f.user.id });
     const unrelated = f.store.sendChatMessage(otherChat.id, { body: "Other work" }).task;
     const token = await f.store.createTaskAccessToken(unrelated, "local");
     const byTask = await f.retry(turn.id, {}, token.token);
     expect([403, 404]).toContain(byTask.status);
-    expect(f.store.listTurnAttempts(turn.id)).toHaveLength(1);
+    expect(f.store.listTurnAttempts(turn.id)).toHaveLength(3);
   });
 
-  it("keeps Issue turns behind the supervisor requirement for a person", async () => {
+  it("lets a shared human operator recover an Issue turn", async () => {
     const f = await scaffold();
     const issue = createResponsibleTestIssue(f.store, { title: "Issue work", assigneeType: "agent", assigneeId: f.agent.id, responsibleMemberId: f.member.id });
     const task = f.store.createTask({ agentId: f.agent.id, prompt: "Work", issueId: issue.id });
@@ -89,9 +91,8 @@ pendingTurnBackendTests("Chat creator turn retry", (fixture) => {
     const turn = f.store.getTurnForAttempt(task.id)!;
     f.store.cancelTurn(turn.id);
     const result = await f.retry(turn.id);
-    expect(result.status).toBe(403);
-    expect(result.data.code).toBe("organizer_supervisor_required");
-    expect(f.store.listTurnAttempts(turn.id)).toHaveLength(1);
+    expect(result.status).toBe(200);
+    expect(f.store.listTurnAttempts(turn.id)).toHaveLength(2);
   });
 
   it("refuses a turn that is still running, an archived Chat, and a retry beside a newer active turn", async () => {
@@ -99,18 +100,18 @@ pendingTurnBackendTests("Chat creator turn retry", (fixture) => {
     const live = f.run("Still working");
     const running = await f.retry(live.turn.id);
     expect(running.status).toBe(409);
-    expect(running.data.code).toBe("turn_not_retryable");
+    expect(running.data.code).toBe("active_run_exists");
     f.store.failTask(live.task.id, { error: "boom", failureReason: "agent_error" });
 
     f.store.sendChatMessage(f.chat.id, { body: "A newer request" });
     const beside = await f.retry(live.turn.id);
     expect(beside.status).toBe(409);
-    expect(beside.data.code).toBe("chat_turn_active");
+    expect(beside.data.code).toBe("active_run_exists");
 
     f.store.updateChatSession(f.chat.id, { status: "archived" });
     const archived = await f.retry(live.turn.id);
     expect(archived.status).toBe(409);
-    expect(archived.data.code).toBe("chat_archived");
+    expect(archived.data.code).toBe("session_archived");
     expect(f.store.listTurnAttempts(live.turn.id)).toHaveLength(1);
   });
 }, { isolation: "snapshot", file: import.meta.path });

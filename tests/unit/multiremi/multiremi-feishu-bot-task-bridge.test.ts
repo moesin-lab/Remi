@@ -265,6 +265,8 @@ describe("Feishu bot standard Task bridge", () => {
       db!.run("UPDATE multiremi_tasks SET status = 'cancelled'");
       bootstrapPreUnifiedSchema(db!);
       const store = new MultiremiStore(db!);
+      // Explicitly use the legacy native test Runtime; endpoint readiness has separate coverage.
+      store.updateAgent("agt_chat_migration", { executionGroupId: null });
       store.getOrCreateUser({ externalId: "ou_sso_owner", feishuUnionId: "on_owner", email: "local@example.test", name: "Owner" });
       store.registerRuntime({ id: "rt_bot", name: "Claim host", provider: "codex", workspaceId: "local" });
       store.registerRuntime({ id: "rt_legacy", name: "Original machine", provider: "codex", workspaceId: "local" });

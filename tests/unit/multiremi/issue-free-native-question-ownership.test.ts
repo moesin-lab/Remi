@@ -34,13 +34,14 @@ pendingTurnBackendTests('Issue-free native Question ownership', fixture => {
       expect(message).toMatchObject({ task_id: h.turn.id, session_id: h.turn.session_id,
         sender_type: 'agent', sender_id: h.agent.id });
       expect(h.store.getIssueSession(message.session_id)).toBeNull();
-      expect(h.store.getChatSession(message.session_id)).toBeNull();
+      if (kind === "autopilot") expect(h.store.getChatSession(message.session_id)).toMatchObject({ agentId: h.agent.id });
+      else expect(h.store.getChatSession(message.session_id)).toBeNull();
       expect(h.db.query('SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id=?').get(message.session_id))
         .toEqual({ workspace_id: 'local' });
       expect(h.store.getQuestion(h.id)).toMatchObject({ source_issue_id: null, source_attempt_id: h.task.id,
         source_turn_id: h.turn.id, status: 'pending', wait_status: 'waiting' });
       const before = h.store.getMessage(h.id);
-      expect(h.store.getQuestion(h.id)?.current_handler).toBeNull();
+      expect(h.store.getQuestion(h.id)?.current_handler).toEqual(kind === 'autopilot' ? { type: 'member', id: 'mem_local_local' } : null);
       expect(h.store.getMessage(h.id)).toEqual(before);
 
       expect(h.bridge.rpc('turn.decision.expire', { turn_id: h.turn.id, attempt_id: h.task.id,
@@ -84,9 +85,9 @@ pendingTurnBackendTests('Issue-free native Question ownership', fixture => {
       const original = h.store.getMessage(h.id)!;
       const metadata = original.metadata as Record<string, any>;
       const foreign = h.store.createWorkspace({ name: 'Foreign native Q source', slug: `foreign-native-q-${kind}` });
-      const assertRejected = () => {
+      const assertRejected = (reason = "source_workspace_changed") => {
         const before = h.store.getMessage(h.id);
-        expect(h.store.getQuestion(h.id)).toMatchObject({ wait_status: 'detached', wait_reason: 'source_workspace_changed' });
+        expect(h.store.getQuestion(h.id)).toMatchObject({ wait_status: 'detached', wait_reason: reason });
         expect(h.store.getMessage(h.id)).toEqual(before);
       };
       for (const workspaceId of [null, foreign.id]) {
@@ -109,7 +110,8 @@ pendingTurnBackendTests('Issue-free native Question ownership', fixture => {
 
       if (h.run) {
         h.db.run('UPDATE multiremi_autopilot_runs SET turn_id=? WHERE id=?', [unrelated.id, h.run.id]);
-        assertRejected();
+        // The automation is backed by a real Chat; its current turn owns the callback.
+        expect(h.store.getQuestion(h.id)?.wait_status).toBe('waiting');
         h.db.run('UPDATE multiremi_autopilot_runs SET turn_id=? WHERE id=?', [h.turn.id, h.run.id]);
       } else {
         const counterfeit = `auto_orphan_${unrelated.id}`;
@@ -141,7 +143,11 @@ pendingTurnBackendTests('Issue-free native Question ownership', fixture => {
         source_turn_id: h.turn.id, to: { type: 'none' }, message_kind: 'decision', wake_requested: 'inbox_only',
         body_md: 'Historical decision with a source attempt reference', metadata: { source_attempt_id: h.task.id,
           human_request: { kind: 'question', payload: { questions: [] }, status: 'pending' } } }).message;
-      expect(h.store.getQuestion(historical.id)).toBeNull();
+      if (kind === 'autopilot') {
+        expect(h.store.getQuestion(historical.id)).toMatchObject({ wait_status: 'detached', wait_reason: 'historical_native_wait_unverified' });
+      } else {
+        expect(h.store.getQuestion(historical.id)).toBeNull();
+      }
       expect(h.store.getMessage(historical.id)).toEqual(historical);
     });
   }

@@ -50,10 +50,10 @@ describe.skipIf(!available)("Invalid stored Feishu Issue topics on PostgreSQL (M
     });
     revision = config.revision;
     store.reportFeishuBotRuntimeStatus("local", "rt_pg459", { appliedRevision: revision, state: "online" });
-    store.submitFeishuBotMessage("local", "rt_pg459", {
+    expect(() => store.submitFeishuBotMessage("local", "rt_pg459", {
       revision, externalSessionKey: "oc_pg_discovery", externalMessageId: "om_pg_discovery",
       senderOpenId: "ou_pg459_sender", text: "Hello",
-    });
+    })).toThrow("sender is not on this bot's allowlist");
     store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
     projectId = store.createProject({ title: "PG topic project", workspaceId: "local" }).id;
   });

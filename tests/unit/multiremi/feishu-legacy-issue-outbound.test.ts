@@ -48,6 +48,8 @@ function scaffold(scenario: "unknown_legacy_group" | "p2p_thread_and_key" | "gro
   bootstrapPreUnifiedSchema(db!);
   db!.run("UPDATE multiremi_tasks SET status='cancelled' WHERE status IN ('running','dispatched','awaiting_human')");
   const store = new MultiremiStore(db!);
+  // Explicitly use the legacy native test Runtime; endpoint readiness has separate coverage.
+  store.updateAgent("agt_chat_migration", { executionGroupId: null });
   store.registerRuntime({ id: "rt_legacy_outbound", name: "Legacy outbound", provider: "codex", workspaceId: "local" });
   store.heartbeatRuntime("rt_legacy_outbound", { supportsFeishuBotConfig: true });
   const config = store.upsertFeishuBotConfig("local", {

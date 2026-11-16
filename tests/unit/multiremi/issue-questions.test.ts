@@ -10,7 +10,7 @@ import { createMultiremiApp } from '@multiremi/api.js';
 import { MultiremiDaemonClient } from '@multiremi/worker/client.js';
 
 type PermissionOption = { optionId: string; name: string; kind: string };
-function setup(f: PendingTurnTestFixture, sameOwner = false, busyOwner = false, kind = 'question', permission?: PermissionOption[]) {
+function setup(f: PendingTurnTestFixture, sameOwner = false, busyOwner = false, kind = 'question', permission?: PermissionOption[], separateSource = false) {
   const { store, db } = f;
   const runtime = store.registerRuntime({ name: 'questions host', provider: 'codex', daemonId: 'questions-daemon', maxConcurrency: 8 });
   const leader = store.createAgent({ name: 'Issue leader', provider: 'codex', maxConcurrentTasks: busyOwner ? 1 : 8 });
@@ -25,7 +25,8 @@ function setup(f: PendingTurnTestFixture, sameOwner = false, busyOwner = false, 
   }
   const busyTask = busyOwner ? store.createTask({ agentId: leader.id, issueId: issue.id, prompt: 'Already coordinating this Issue' }) : null;
   if (busyTask) { expect(store.claimTask(leaderRuntime!.id)?.id).toBe(busyTask.id); store.startTask(busyTask.id); }
-  const task = store.createTask({ agentId: worker.id, issueId: issue.id, prompt: 'Original task' });
+  const source = separateSource ? store.createIssueSession(issue.id, { title: 'Original worker context', holdsWorkspace: false }) : null;
+  const task = store.createTask({ agentId: worker.id, issueId: issue.id, issueSessionId: source?.id, prompt: 'Original task' });
   expect(store.claimTask(runtime.id)?.id).toBe(task.id); store.startTask(task.id);
   const turn = store.getTurnForAttempt(task.id)!;
   const bridge = store.getDaemonTurnBridge();
@@ -275,7 +276,7 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     expect(h.store.getQuestion(h.q.id)?.answer_revision).toBe(1);
   });
   it('HTTP grants only the routed original private Q to handlers and Remi without granting the source transcript', async () => {
-    const h = setup(fixture());
+    const h = setup(fixture(), false, false, 'question', undefined, true);
     h.store.updateAgent(h.worker.id, { visibility: 'private', ownerId: 'local' });
     const user = h.store.getOrCreateUser({ externalId: 'question_http_member', name: 'Question caller' });
     h.store.createWorkspaceMember({ workspaceId: 'local', userId: user.id, name: 'Question caller', role: 'member' });
@@ -290,7 +291,7 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
       ...(data === undefined ? {} : { body: JSON.stringify(data) }),
     });
     const { task: leaderTask, token: leaderToken } = await agentToken(h.leader.id);
-    expect(leaderTask).toMatchObject({ issueId: h.issue.id, issueSessionId: h.q.session_id, chatSessionId: null });
+    expect(leaderTask).toMatchObject({ issueId: h.issue.id, issueSessionId: h.store.getOrCreateDefaultIssueSession(h.issue.id).id, chatSessionId: null });
     const wrongLaneTokens = async (actorId: string, issueId: string, notifiedSessionId: string) => {
       const side = h.store.createIssueSession(issueId, { title: 'Unnotified inherited side', parentSessionId: notifiedSessionId, inheritMode: 'follow' });
       const otherIssue = h.store.createIssue({ title: 'Unrelated responsibility', assigneeType: 'agent', assigneeId: actorId });
@@ -314,12 +315,12 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
       }
       return tokens;
     };
-    for (const token of await wrongLaneTokens(h.leader.id, h.issue.id, h.q.session_id)) {
+    for (const token of await wrongLaneTokens(h.leader.id, h.issue.id, leaderTask.issueSessionId!)) {
       expect((await request(token, `/api/messages/${h.q.id}/question`)).status).toBe(403);
       expect((await request(token, `/api/messages/${h.q.id}/question/answer`, { expected_route_revision: 1, response: { answer: 'A' } })).status).toBe(403);
       expect(h.store.getQuestion(h.q.id)?.answer_revision).toBe(0);
     }
-    expect((await request(leaderToken, `/api/messages/${h.q.id}`)).status).toBe(404);
+    expect((await request(leaderToken, `/api/messages/${h.q.id}`)).status).toBe(403);
     const exact = await request(leaderToken, `/api/messages/${h.q.id}/question`);
     expect(exact.status).toBe(200); expect((await exact.json() as any).question.id).toBe(h.q.id);
     expect((await request(leaderToken, `/api/messages/${h.q.id}/question/escalate`, { expected_route_revision: 1, reason: 'Ask parent' })).status).toBe(200);
@@ -444,7 +445,7 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     expect(h.db.query("SELECT COUNT(*) AS count FROM multiremi_conversation_log WHERE dedupe_key LIKE 'question-route:%' AND to_agent_id IS NOT NULL").get().count).toBe(beforeNotifications);
     const notices = h.db.query("SELECT * FROM multiremi_conversation_log WHERE dedupe_key LIKE ? ORDER BY seq").all(`question-recovery-route:${h.q.id}:2:%`);
     expect(notices.map(notice => [notice.to_member_id, notice.dedupe_key])).toEqual([
-      [creator.id, `question-recovery-route:${h.q.id}:2:${creator.id}`], [subscriber.id, `question-recovery-route:${h.q.id}:2:${subscriber.id}`]]);
+      [creator.id, `question-recovery-route:${h.q.id}:2:${creator.id}`], [h.store.getWorkspaceOperator('local')!.id, `question-recovery-route:${h.q.id}:2:${h.store.getWorkspaceOperator('local')!.id}`]]);
     for (const notice of notices) {
       expect(notice.session_id).toBe(h.store.getOrCreateDefaultIssueSession(h.issue.id).id);
       expect(notice.reply_to_id).toBeNull(); expect(notice.wake_requested).toBe('inbox_only');
@@ -840,7 +841,7 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
     const sourceMain = h.store.getOrCreateDefaultIssueSession(h.issue.id).id;
     const reminders = h.db.query('SELECT * FROM multiremi_conversation_log WHERE dedupe_key LIKE ? ORDER BY seq').all(`question-route:${h.q.id}:3:%`);
     expect(reminders.map(row => [row.to_member_id, row.dedupe_key])).toEqual([
-      [creator.id, `question-route:${h.q.id}:3:${creator.id}`], [subscriber.id, `question-route:${h.q.id}:3:${subscriber.id}`]]);
+      [creator.id, `question-route:${h.q.id}:3:${creator.id}`], [h.store.getWorkspaceOperator('local')!.id, `question-route:${h.q.id}:3:${h.store.getWorkspaceOperator('local')!.id}`]]);
     for (const row of reminders) {
       expect(row).toMatchObject({ session_id: sourceMain, message_kind: 'request', wake_requested: 'inbox_only', to_agent_id: null, reply_to_id: null });
       expect(JSON.parse(row.metadata)).toMatchObject({ root_question_id: h.q.id, question_notification: true, question_route_revision: 3 });

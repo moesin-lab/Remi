@@ -8,7 +8,7 @@ function stubFetch(handler: (...args: Parameters<typeof fetch>) => ReturnType<ty
 }
 const originalKey = process.env.MULTIREMI_SCM_ENCRYPTION_KEY;
 const head = "a".repeat(40);
-const pull = { id: 9001, number: 42, title: "PR", state: "open", head: { ref: "feature", sha: head, repo: { full_name: "acme/widgets" } }, base: { ref: "main", sha: "b".repeat(40) }, updated_at: "2026-11-16T00:00:00Z" };
+const pull = { id: 9001, number: 42, title: "PR", state: "open", head: { ref: "feature", sha: head, repo: { full_name: "acme/widgets" } }, base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/widgets" } }, updated_at: "2026-11-16T00:00:00Z" };
 const root = "/api/workspaces/local/scm/repositories/repo_widgets/change-requests";
 function setup() {
   process.env.MULTIREMI_SCM_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
@@ -73,6 +73,23 @@ describe("SCM active HTTP operations (mock provider)", () => {
     const raced = await app.request(`${root}/42/checks`, { headers });
     expect(raced.status).toBe(409);
     expect(await raced.json()).toMatchObject({ code: "scm_head_changed" });
+  });
+
+  it.each([
+    { ref: "release", repo: { full_name: "acme/widgets" } },
+    { ref: "main", repo: { full_name: "acme/other" } },
+  ])("rejects target identity changes with unchanged head/base SHAs: %j", async (base) => {
+    const { app } = setup();
+    let reads = 0;
+    globalThis.fetch = stubFetch(async (url) => {
+      if (String(url).includes("check-runs")) return json({ check_runs: [{ id: 1, name: "build", status: "completed", conclusion: "success", head_sha: head }] });
+      if (String(url).includes("statuses")) return json([]);
+      return json(++reads === 1 ? pull : { ...pull, base: { ...pull.base, ...base } });
+    });
+    const response = await app.request(`${root}/42/checks`, { headers });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "scm_head_changed" });
+    expect(reads).toBe(2);
   });
 
   it("requires authentication and an enabled binding before provider access", async () => {

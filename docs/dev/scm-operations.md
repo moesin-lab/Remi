@@ -21,11 +21,13 @@ summary: GitHub PR 操作、检查证据与 MUL-35 分阶段交付边界。
 
 读写 PR 后立即更新现有快照、change-request 投影及事件链路；没有引入第二套 Issue 关联机制。返回的 `pullRequest` 使用已有 provider-neutral snake_case 字段。GitHub 以外 provider 返回 `scm_capability_unavailable`，不把未经验证的 Codebase 能力当作成功。
 
-[GitHub 适配器](../../packages/server/src/scm/operations.ts)分页读取完整 head SHA 的 check runs 与 commit statuses，保留 app ID/slug、job 名和 workflow 路径。Actions workflow 路径从同 head SHA、同 check suite 的服务端 API 关联读取，不信任客户端传入的路径或 details URL。无法建立关联时路径为 null。commit statuses 每个 context 只保留最新状态。分页超限、provider 错误、SHA 不一致均失败，不返回截断的成功摘要。检查读取前后复查 PR head/base，变化时返回 `scm_head_changed`。
+[GitHub 适配器](../../packages/server/src/scm/operations.ts)分页读取完整 head SHA 的 check runs 与 commit statuses，保留 app ID/slug、job 名和 workflow 路径。Actions workflow 路径从同 head SHA、同 check suite 的服务端 API 关联读取，不信任客户端传入的路径或 details URL。无法建立关联时路径为 null。commit statuses 每个 context 只保留最新状态。分页超限、provider 错误、SHA 不一致均失败，不返回截断的成功摘要。检查读取前后复查 PR head/base SHA、规范化的 `target_branch` 与 base 仓库 `full_name`（忽略大小写），任一变化时返回 409 `scm_head_changed`。该稳定性检查不作为授权依据；B 的执行服务仍须独立绑定并在执行前重验目标分支及仓库身份。
 
 摘要的 `conclusion` 是已观察检查的汇总：空集合为 `missing`，失败为 `failure`，运行中、未知、skipped/neutral 为 `pending`，全部 success 才是 `success`。它**不代表 required checks 已满足，也不授权合并**；仓库规则和项目附加要求将在 B 阶段统一判定。
 
-GitHub `check_run` webhook 通过现有签名验证和事件去重链路接入，以 `check_run:<id>` 独立于 `workflow_run:<id>:<attempt>` 标识。后台 pipelines 轮询仍覆盖 workflow runs；check runs 的当前证据通过上述实时检查接口读取。不能把 webhook 历史事件作为当前合并判据。
+GitHub `check_run` webhook 经现有签名验证后只写内部 `checks` 观测的 `check_run` 实体快照，以 `check_run:<id>` 标识，保留 app、job、check suite 身份、delivery ID 和原始签名所覆盖的 body。同一证据通过快照内容 hash/version 去重，快照仅代表最新证据，不是完整 delivery 历史。workflow 路径仍由实时检查接口在服务端关联。选择独立快照是为了保留证据而不扩展公开事件枚举：它不创建 canonical event，不可被 Autopilot 订阅，也不写 pipeline 快照；reconcile/poller 共用路径会将旧格式 check_run 观测重归类并禁止派生 `pipeline.*`。B 如需检查变化触发闸门重评，只在内部消费。
+
+既有 `workflow_run` 的 `pipeline.*`、`workflow_run:<id>:<attempt>` 标识及去重行为不变。后台 pipelines 轮询仍只采集 workflow runs；check runs 的当前证据通过上述实时检查接口读取。不能把 webhook 快照作为当前合并判据。
 
 底层 `merge` 方法仅供后续服务端合并操作调用，固定传 GitHub merge API 的 `sha` 原子比较参数，不重试失败/超时写入。A 阶段没有公开合并 HTTP/CLI 入口；整个 Draft PR 需完成 B/C 并最终复审后才能上线。
 

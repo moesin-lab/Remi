@@ -177,17 +177,19 @@ export class GitHubScmProviderAdapter implements ScmProviderAdapter {
       if (!normalized.id || !normalized.head_sha) {
         return { providerEvent, deliveryId, candidates: [], ignoredReason: "GitHub check_run requires id and head_sha" };
       }
-      const completed = normalized.status === "completed";
-      const subjectId = `check_run:${normalized.id}`;
-      const version = pipelineVersion(normalized);
-      const occurredAt = normalized.updated_at ?? request.observedAt;
-      candidates.push({
-        ...base, type: completed ? "pipeline.completed" : "pipeline.started",
-        subjectType: "pipeline", subjectId,
-        logicalVersion: `${version}:${completed ? normalized.conclusion || "completed" : normalized.status || "started"}`,
-        occurredAt, payload: normalized,
-        snapshotObservation: webhookObservation("pipelines", "pipeline", subjectId, version, occurredAt, request.observedAt, normalized),
-      });
+      return {
+        providerEvent, deliveryId, candidates: [],
+        ignoredReason: "GitHub check_run retained as internal checks evidence only",
+        internalObservations: [{
+          ...base,
+          observation: {
+            stream: "checks", entityType: "check_run", externalId: `check_run:${normalized.id}`,
+            version: pipelineVersion(normalized), occurredAt: normalized.updated_at ?? request.observedAt,
+            observedAt: request.observedAt,
+            payload: { ...normalized, provider_event_id: deliveryId, raw_body: request.rawBody },
+          },
+        }],
+      };
     } else if (providerEvent === "push") {
       const ref = stringValue(body.ref).replace(/^refs\/heads\//u, "");
       const after = stringValue(body.after);
@@ -466,6 +468,7 @@ function normalizeGitHubPull(pull: Record<string, unknown>): Record<string, unkn
     target_branch: stringValue(base.ref),
     head_sha: stringAt(head, "sha"),
     base_sha: stringAt(base, "sha"),
+    base_repository_full_name: stringAt(record(base.repo), "full_name").toLowerCase() || null,
     author: stringAt(record(pull.user), "login") || null,
     created_at: nullableString(pull.created_at),
     updated_at: nullableString(pull.updated_at),

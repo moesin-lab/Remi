@@ -5327,6 +5327,7 @@ export type MultiremiScmSyncStream =
 
 export type MultiremiScmEntityType =
   | "repository"
+  | "check_run"
   | "change_request"
   | "comment"
   | "review"

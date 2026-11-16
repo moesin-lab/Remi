@@ -70,7 +70,9 @@ export function registerScmRoutes(app: Hono, deps: RouterDeps): void {
       const summary = await loaded.operations.checks(String(before.payload.head_sha));
       const after = await loaded.operations.get(number);
       loaded.record(after);
-      if (before.payload.head_sha !== after.payload.head_sha || before.payload.base_sha !== after.payload.base_sha) {
+      if (before.payload.head_sha !== after.payload.head_sha || before.payload.base_sha !== after.payload.base_sha
+        || before.payload.target_branch !== after.payload.target_branch
+        || before.payload.base_repository_full_name !== after.payload.base_repository_full_name) {
         return c.json({ error: "Pull request changed while reading checks", code: "scm_head_changed" }, 409);
       }
       return c.json({ summary });

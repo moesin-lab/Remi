@@ -5277,6 +5277,32 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "scm.change-request.merge": {
+      "command": "remi scm change-request merge",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.merge",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.merge-operation.get": {
+      "command": "remi scm merge-operation get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.merge-operation.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "scm.change-request.gate": {
       "command": "remi scm change-request gate",
       "auth": [

@@ -475,6 +475,7 @@ function normalizeGitHubPull(pull: Record<string, unknown>): Record<string, unkn
     closed_at: nullableString(pull.closed_at),
     merged_at: nullableString(pull.merged_at),
     merge_sha: nullableString(pull.merge_commit_sha),
+    mergeable: typeof pull.mergeable === "boolean" ? pull.mergeable : null,
     mergeable_state: nullableString(pull.mergeable_state),
     checks_conclusion: nullableString(pull.checks_conclusion),
     checks_passed: numberValue(pull.checks_passed),

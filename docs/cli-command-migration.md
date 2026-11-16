@@ -1023,3 +1023,6 @@ and GitHub PR number (create/update read JSON from `--file`). Creation defaults 
 Draft and reuses the source branch's open PR. Check summaries are observations;
 they do not authorize merge. See [SCM operations](dev/scm-operations.md) for
 contracts, conservative missing/unknown evidence, and staged merge-gate delivery.
+
+
+MUL-35 B2：`remi scm change-request merge <project> <change-request> --expected-head <sha> --method <m> [--idempotency-key <key>]` 通过项目策略请求合并，可能返回等待人工审批的 operation；`remi scm merge-operation get <operation>` 查询状态。人工审批使用原 `remi message question answer` 成员入口；Agent 不能批准。预检 `scm change-request gate` 不提供执行授权。参见 [SCM 操作](dev/scm-operations.md)。

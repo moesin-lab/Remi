@@ -1110,6 +1110,7 @@ function resolveParam(pattern: string, name: string, refs: SeedRefs): string {
       const index = segments.indexOf(":id");
       const collection = segments[index - 1];
       if (collection === "agent-plugins") return "apl_snapshot";
+      if (collection === "merge-operations") return "mop_snapshot";
       const key = ID_BY_COLLECTION[collection];
       if (key) return String(refs[key]);
       break;

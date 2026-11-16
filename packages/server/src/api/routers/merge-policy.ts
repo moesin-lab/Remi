@@ -1,9 +1,9 @@
+import { readLiveMergeGate } from "@multiremi/scm/live-merge-gate.js";
 import type { Context, Hono } from "hono";
 import type { ScmActor } from "@multiremi/contracts/merge-policy.js";
 import { GitHubScmOperations, ScmOperationError } from "@multiremi/scm/operations.js";
-import { evaluateMergeGate, independentActor, pullIdentity, samePull } from "@multiremi/scm/merge-gate.js";
+import { evaluateMergeGate, independentActor, pullIdentity } from "@multiremi/scm/merge-gate.js";
 import { validateReview } from "@multiremi/scm/merge-policy.js";
-import { resolveRepositoryChecks } from "@multiremi/scm/github-required-checks.js";
 import { currentAccessToken, currentWorkspaceMember, isHumanOperatorRequest } from "../wire/index.js";
 import { denyCurrentUserWorkspaceAccess, isJsonApiError, readJsonStrict } from "../helpers.js";
 import type { RouterDeps } from "./deps.js";
@@ -82,29 +82,7 @@ export function registerMergePolicyRoutes(app: Hono, deps: RouterDeps): void {
     if (!policy.enabled) return c.json(evaluateMergeGate({ policy, pull: { head_sha: "", base_sha: "", target_branch: "", base_repository_full_name: "" }, checks: [], required: [], reviews: [], actors: [] }));
     try {
       const op = operations(loaded.cr, c.req.raw.signal);
-      const before = await op.get(loaded.cr.number!);
-      const identity = pullIdentity(before.payload);
-      if (!identity || before.externalId !== loaded.cr.externalId) throw new ScmOperationError("scm_evidence_mismatch", "Provider omitted or mismatched PR identity");
-      const reasons = [];
-      let required = policy.required_checks;
-      let ref_write_rules: Awaited<ReturnType<typeof op.requiredChecks>>["ref_write_rules"] = [];
-      try {
-        const rules = await op.requiredChecks(identity.target_branch);
-        ref_write_rules = rules.ref_write_rules;
-        required = [...required, ...resolveRepositoryChecks(rules, required)];
-      } catch (error) {
-        reasons.push({ code: error instanceof ScmOperationError ? ["scm_evidence_incomplete", "scm_invalid_response"].includes(error.code) ? "repository_rules_incomplete" : error.code : "repository_rules_unavailable", message: "Could not completely verify effective repository rules", evidence: error instanceof ScmOperationError ? error.message : undefined });
-      }
-      let checks: Awaited<ReturnType<typeof op.checks>>["checks"] = [];
-      try { checks = await op.gateChecks(identity.head_sha); }
-      catch { reasons.push({ code: "checks_unavailable", message: "Could not completely verify live checks" }); }
-      const after = await op.get(loaded.cr.number!);
-      const finalIdentity = pullIdentity(after.payload);
-      if (!finalIdentity || after.externalId !== loaded.cr.externalId || !samePull(identity, finalIdentity)) reasons.push({ code: "pull_request_changed", message: "PR changed while evaluating gate" });
-      if (policy.revision !== store.mergePolicies.get(loaded.project.id).revision) reasons.push({ code: "policy_changed", message: "Policy changed while evaluating gate" });
-      if (after.payload.state !== "open" || after.payload.draft === true) reasons.push({ code: "pull_request_not_mergeable", message: "PR must be open and ready for review" });
-      return c.json(evaluateMergeGate({ policy, pull: identity, required, checks,
-        reviews: store.mergePolicies.list(loaded.project.id, loaded.cr.id), actors: store.mergePolicies.actors(loaded.cr.id), reasons, ref_write_rules }));
+      return c.json((await readLiveMergeGate(store, loaded.project.id, loaded.cr, op, policy)).gate);
     } catch (error) {
       return c.json({ allowed: false, reasons: [{ code: "scm_evidence_unavailable", message: error instanceof ScmOperationError ? error.message : "Cannot verify live PR" }], preflight_only: true, execution_authorized: false, credential_boundary: "平台入口受控、直推未封闭", policy, review_evidence: [], ref_write_rules: [] });
     }

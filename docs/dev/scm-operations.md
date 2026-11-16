@@ -51,7 +51,7 @@ PR 的 build 运行采用 pr-fast，不运行 backend 全量测试；PR 绿灯�
 
 ## B1：持久策略、审阅与预检
 
-[策略契约](../../packages/contracts/src/merge-policy.ts)、[服务端预检](../../packages/server/src/api/routers/merge-policy.ts)和[共同迁移 SQL](../../packages/server/src/store/merge-policy-schema.ts)属于 B1；本阶段不开放合并执行或人工批准。项目策略未启用时，预检直接返回 `policy_disabled`，不访问 provider；既有 A 操作不受策略默认值影响。
+[策略契约](../../packages/contracts/src/merge-policy.ts)、[服务端预检](../../packages/server/src/api/routers/merge-policy.ts)和[共同迁移 SQL](../../packages/server/src/store/merge-policy-schema.ts)属于 B1；B1 只提供预检；执行和人工审批见 B2。项目策略未启用时，预检直接返回 `policy_disabled`，不访问 provider；既有 A 操作不受策略默认值影响。
 
 | API | CLI |
 |---|---|
@@ -73,6 +73,32 @@ PR 的 build 运行采用 pr-fast，不运行 backend 全量测试；PR 绿灯�
 
 提交时实时读取 PR，head/base 不符返回 409 `scm_pull_request_changed`。策略 PUT 与审阅追加在各自事务内取得同一个 project 行锁，使 PostgreSQL 中两者串行化；策略 PUT 保留 revision CAS。审阅追加不可变历史，绑定当时 head/base、目标分支、base 仓库及策略 revision。同 reviewer 的同绑定只取最高 sequence；任一有效 block 返回 `review_blocked`，另一 reviewer 的 pass 无法覆盖；要求审阅时至少一条有效 pass，否则 `independent_review_missing`。push/force-push、base、retarget、仓库或策略 revision 变化后旧结论不计入；判断实时比对，不依赖 webhook。读证据期间 PR 或策略变化同样阻塞。
 
-响应始终有 `preflight_only=true`、`execution_authorized=false` 和“平台入口受控、直推未封闭”。`allowed=true` 只表示此次读取的 B1 证据满足要求，不能作为执行授权或缓存授权。人工策略返回 `human_approval_required`；B2 才创建 operation 绑定的 Inbox 审批，并在 worker 内重新检查全部条件。B2 的执行目标仍须独立绑定和重验，本预检不代替它。
+响应始终有 `preflight_only=true`、`execution_authorized=false` 和“平台入口受控、直推未封闭”。`allowed=true` 只表示此次读取的 B1 证据满足要求，不能作为执行授权或缓存授权。人工策略返回 `human_approval_required`；B2 创建 operation 绑定的 Inbox 审批，并在 worker 内重新检查全部条件。B2 的执行目标仍须独立绑定和重验，本预检不代替它。
 
 内置 code-reviewer 模板由 `api/agent-templates.ts` 实际加载，本次加入 CLI 结构化提交指引；这只影响以后从模板创建的 Agent，不自动改写现有 DB Agent 的 instructions。`.remi/pipeline/skills/` 的读取链已删除，仍是死目录，本次没有将其当成生效配置；现有审阅 Agent 应由配置维护者按当前模板补提交指引。
+
+
+## B2：持久合并执行与人工审批
+
+[执行路由](../../packages/server/src/api/routers/merge-execution.ts)、[执行服务](../../packages/server/src/scm/merge-execution.ts)复用 B1 的实时证据读取和 `evaluateMergeGate`，没有第二套检查判据。公开 `GET merge-gate` 的响应和只读语义不变：即使某 operation 已获批准，也返回 `preflight_only=true`、`execution_authorized=false`，人工策略仍显示 `human_approval_required`。
+
+| API | CLI |
+|---|---|
+| `POST /api/projects/:id/change-requests/:changeRequestId/merge` | `remi scm change-request merge <project> <change-request> --expected-head <sha> --method <merge\|squash\|rebase> [--idempotency-key <key>]` |
+| `GET /api/scm/merge-operations/:id` | `remi scm merge-operation get <operation>` |
+
+POST 只接受 `{expected_head_sha, method, idempotency_key}`；HTTP 要求 key，CLI 未指定时生成 UUID。未知字段（包括 actor、reviewer、force、skip）、非法方法和策略未允许的方法返回 400；daemon 返回 403。actor 从认证上下文取得。策略未启用返回 409 `merge_policy_disabled`，不存在无闸门合并路径。CR 必须关联该项目的 Issue。重复 key 返回原 operation；同 key 不同 body 返回 409 `merge_idempotency_conflict`，不重新执行或读取 provider。
+
+operation 持久保存 head/base SHA、规范化 target/base repository、policy revision、method、actor、原因及凭据边界。状态包含 requested、blocked、awaiting_human、approved、executing、merged、failed、unknown、rejected。数据库 partial unique index 保证每个 CR 仅一个活动 operation；unknown 也持有该唯一位置，避免结果不明时创建第二次合并。不同 key 若绑定完全一致，复用活动 operation/Q，同时持久记录该 key 的别名以支持终态后的重放；绑定不同返回 409 `merge_operation_in_progress`。终态 blocked/failed/rejected/merged 允许新 key 新建 operation，但仍须全部重验。
+
+worker 以 version CAS 领取 120 秒租约，网络请求全部在数据库事务之外。每次执行实时重读 PR、完整规则与最新检查、策略和审阅；PR 必须 open、非 Draft，GitHub `mergeable=null` 以 `mergeability_unknown` 阻塞，不轮询等待。除人工批准外任一条件不满足时 operation=blocked、HTTP 409 `merge_gate_blocked` + reasons，不创建 Q，provider merge 调用为零。strict 在 C 前继续因 `credential_enforcement_unavailable` 阻塞。platform_only 可以执行，但 operation 和响应始终标注“平台入口受控、直推未封闭”。B2 使用连接现有凭据，`MergeExecutionService.live` 是 C 切换到 server-merger 身份的入口；当前不宣称直推已封闭。
+
+只差人工批准时返回 202、`operation_id`、`approval_message_id`，operation=awaiting_human。Agent 请求路由到原 turn 所在工作会话，source_issue_id 取该会话所有者 Issue；成员请求路由到关联项目 Issue 的 Main。无法定位则 409 `merge_approval_unroutable`，不跳过审批。Q 为 `origin=platform_merge_approval`，创建即 human / wait_status=none，无 provider nonce/wait，不经执行负责人链，不使用退役 decision writer。正文展示仓库、PR、head/base、target、method、policy revision、gate 摘要；选项固定 approve/reject。
+
+答复、改答、关闭强制 member-only；Agent 包括负责人都不能代批，escalate 返回 409。Agent 可在现有 Q 读取权限内 present，不改变执行状态。成员 approve 在同一事务以 CAS 将 awaiting_human 改为 approved，提交后唤醒 worker；reject/close 为 rejected，不合并。重复相同 approve 幂等；worker 领取后改答为 409。批准完整绑定 operation_id、head/base、target/base repository、policy revision、method；worker 重验发生绑定变化时以 `approval_stale` 原子阻塞 operation 并关闭原 Q；检查失败或审阅失效同样阻塞，不能靠批准覆盖。新请求使用新 operation/Q。
+
+服务启动、每 15 秒扫描及批准事务提交后的进程内唤醒共同恢复任务；跨进程以数据库为准。PUT 固定带 `sha=expected_head_sha`，不自动重试。GitHub 405/409 记 failed 并保留 provider 原因；超时、不完整响应或崩溃后租约过期只通过 GET 核对：已 merged 且 head 等于预期、merge SHA 可读则 merged；明确仍 open 则 failed，之后允许显式新请求；不能判断则保持 unknown，注明待调查原因。即使崩溃发生在 PUT 之前，也不盲重发可能已经执行的调用。
+
+合并成功后主动读取 PR 经同一 canonical `change.merged` 入站路径，webhook/poll 重放共用逻辑 ID；不另写合并活动，只沿既有开关记录一次 `scm_merge_completed`，不自动 done（ADR 0017）。
+
+B2 本地回归入口为 [merge-execution.test.ts](../../tests/unit/multiremi/merge-execution.test.ts)，覆盖真实 HTTP/SQLite/Question/签名 ingestion，provider 响应为 mock。部分重跑的真实 GitHub API 形状、真实合并、凭据隔离与仓库保护均需另行授权验证；SQLite 测试不代替 PostgreSQL 实跑。迁移为 [共同 additive SQL](../../packages/server/src/store/merge-operation-schema.ts)，兼容输入清单与指纹同批更新，不新增 rollbackSafeFrom 声明。

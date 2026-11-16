@@ -47,6 +47,11 @@ export class MergePolicyRepo {
     return Boolean(this.ctx.db.query(`SELECT 1 FROM multiremi_scm_issue_links l JOIN multiremi_issues i ON i.id=l.issue_id
       WHERE l.change_request_id=? AND l.active=1 AND i.project_id=? LIMIT 1`).get(changeRequestId, projectId));
   }
+  approvalIssue(projectId: string, crId: string): string | null {
+    const row = this.ctx.db.query(`SELECT i.id FROM multiremi_scm_issue_links l JOIN multiremi_issues i ON i.id=l.issue_id
+      WHERE l.change_request_id=? AND l.active=1 AND i.project_id=? ORDER BY i.id LIMIT 1`).get(crId, projectId);
+    return row ? String(row.id) : null;
+  }
   list(projectId: string, crId: string): ScmStructuredReview[] {
     return this.ctx.db.query("SELECT review FROM multiremi_scm_reviews WHERE project_id=? AND change_request_id=? ORDER BY sequence ASC")
       .all(projectId, crId).map(row => JSON.parse(String(row.review)));

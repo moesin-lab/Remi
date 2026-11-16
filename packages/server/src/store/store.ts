@@ -1,3 +1,4 @@
+import { MergeOperationRepo } from "./repos/merge-operation-repo.js";
 import { MergePolicyRepo } from "./repos/merge-policy-repo.js";
 import { createId } from "@multiremi/ids.js";
 import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
@@ -531,6 +532,7 @@ export class MultiremiStore {
   private workspaces: WorkspacesRepo;
   private scm: ScmRepo;
   readonly mergePolicies: MergePolicyRepo;
+  readonly mergeOperations: MergeOperationRepo;
   private feishuIngest: FeishuIngestRepo;
   private feishuBot: FeishuBotRepo;
   /**
@@ -615,6 +617,7 @@ export class MultiremiStore {
     this.passwordAccounts = new PasswordAccountsRepo(this.db, this.workspaces, this.accessTokens);
     this.scm = new ScmRepo(this.ctx);
     this.mergePolicies = new MergePolicyRepo(this.ctx);
+    this.mergeOperations = new MergeOperationRepo(this.ctx);
     this.feishuIngest = new FeishuIngestRepo(this.ctx);
     this.feishuBot = new FeishuBotRepo(this.ctx);
     this.messaging = new MessagingRepo(this.ctx);
@@ -5684,6 +5687,8 @@ runMigrations(this.db);
   retryTurnAsMember(...args: Parameters<InboxRepo["operations"]["retryTurnAsMember"]>) { return this.inbox.operations.retryTurnAsMember(...args); }
   issueMessageCardToken(...args: Parameters<InboxRepo["operations"]["issueMessageCardToken"]>) { return this.inbox.operations.issueMessageCardToken(...args); }
   answerMessageDecision(...args: Parameters<InboxRepo["operations"]["answerMessageDecision"]>) { return this.inbox.operations.answerMessageDecision(...args); }
+  createMergeApproval(...args: Parameters<Questions['createMergeApproval']>) { return new Questions(this.ctx).createMergeApproval(...args); }
+  invalidateMergeApproval(...args: Parameters<Questions['invalidateMergeApproval']>) { return new Questions(this.ctx).invalidateMergeApproval(...args); }
   getQuestion(...args: Parameters<Questions['get']>) { return new Questions(this.ctx).get(...args); }
   canAccessQuestionFromTurn(...args: Parameters<Questions['canAccessFromTurn']>) { return new Questions(this.ctx).canAccessFromTurn(...args); }
   listIssueQuestions(...args: Parameters<Questions['list']>) { return new Questions(this.ctx).list(...args); }

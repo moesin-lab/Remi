@@ -47,6 +47,8 @@ export interface QuestionSubagent {
 }
 /** Projection of one original decision message. Notifications never create a second Q. */
 export interface QuestionView {
+  origin?: "platform_merge_approval";
+  merge_operation_id?: string;
   id: string;
   kind: 'question' | 'permission' | 'decision';
   session_id: string;

@@ -8,5 +8,6 @@
   "packages/server/src/store/db/pg-worker.ts",
   "packages/contracts/src/attachments.ts",
   "packages/shared/src/db/index.ts",
-  "packages/server/src/store/merge-policy-schema.ts"
+  "packages/server/src/store/merge-policy-schema.ts",
+  "packages/server/src/store/merge-operation-schema.ts"
 ]

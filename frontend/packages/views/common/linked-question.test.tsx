@@ -37,6 +37,14 @@ beforeEach(() => {
 });
 
 describe("question references on message surfaces", () => {
+  it("shows platform approval origin in the Inbox summary without a provider wait", () => {
+    const merge: QuestionView = { ...question, origin: "platform_merge_approval", merge_operation_id: "mop_1", wait_status: "none",
+      original_questions: [], original_message: "Platform merge approval\nRepository: acme/widgets\nPR: #42", options: [{ label: "Approve", value: "approve" }, { label: "Reject", value: "reject" }] };
+    const view = wrap(<QuestionSummaryLine question={merge} getActorName={getActorName} onOpen={() => {}} />);
+    expect(view.container.textContent).toContain("Platform merge approval");
+    expect(view.container.textContent).toContain("#42");
+    expect(view.container.querySelector("[data-question-tag]")?.textContent).toContain("Platform merge approval");
+  });
   it("uses the original Q for explicit route and presentation notifications", () => {
     expect(linkedQuestionId("notification", { root_question_id: "original", question_notification: true })).toBe("original");
     expect(linkedQuestionId("presentation", { root_question_id: "original", question_present_request: true })).toBe("original");

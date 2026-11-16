@@ -7404,6 +7404,40 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "scm.change-request.merge": {
+      "command": "remi scm change-request merge",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.merge",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "scm.merge-operation.get": {
+      "command": "remi scm merge-operation get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.merge-operation.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "scm.change-request.gate": {
       "command": "remi scm change-request gate",
       "aliases": [],
@@ -12674,6 +12708,9 @@
     "GET /api/scm/capabilities": {
       "command": "scm.capabilities"
     },
+    "GET /api/scm/merge-operations/:id": {
+      "command": "scm.merge-operation.get"
+    },
     "GET /api/sessions/:sessionId": {
       "command": "session.show"
     },
@@ -13920,6 +13957,9 @@
     },
     "POST /api/projects": {
       "command": "project.create"
+    },
+    "POST /api/projects/:id/change-requests/:changeRequestId/merge": {
+      "command": "scm.change-request.merge"
     },
     "POST /api/projects/:id/change-requests/:changeRequestId/reviews": {
       "command": "scm.change-request.review.submit"

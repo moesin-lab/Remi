@@ -1,21 +1,21 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 843,
+    "routeCount": 845,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 601,
+      "compat": 603,
       "root": 16
     },
-    "getRoutes": 368,
-    "getRoutesWithBody": 364,
+    "getRoutes": 369,
+    "getRoutesWithBody": 365,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /api/trace/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 475,
+    "mutationRoutes": 476,
     "mutationRoutesCovered": 301,
     "flows": [
       "agents-compat",
@@ -414,6 +414,7 @@
     "GET /api/runtimes/:id/usage/by-hour",
     "GET /api/runtimes/:id/workspaces",
     "GET /api/scm/capabilities",
+    "GET /api/scm/merge-operations/:id",
     "GET /api/sessions/:sessionId",
     "GET /api/sessions/:sessionId/inherited-context",
     "GET /api/sessions/:sessionId/log",
@@ -763,6 +764,7 @@
     "POST /api/project-knowledge/migration/retry-failed",
     "POST /api/project-knowledge/migration/verify",
     "POST /api/projects",
+    "POST /api/projects/:id/change-requests/:changeRequestId/merge",
     "POST /api/projects/:id/change-requests/:changeRequestId/reviews",
     "POST /api/projects/:id/devices",
     "POST /api/projects/:id/docs",
@@ -1238,6 +1240,7 @@
     "GET /api/runtimes/:id/usage/by-hour",
     "GET /api/runtimes/:id/workspaces",
     "GET /api/scm/capabilities",
+    "GET /api/scm/merge-operations/:id",
     "GET /api/sessions/:sessionId",
     "GET /api/sessions/:sessionId/inherited-context",
     "GET /api/sessions/:sessionId/log",
@@ -10932,6 +10935,17 @@
             "allowed": true
           },
           {
+            "id": "scm.change-request.merge",
+            "command": "remi scm change-request merge",
+            "capability": "scm.change-request.merge",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "scm.change-request.review.list",
             "command": "remi scm change-request review list",
             "capability": "scm.change-request.review.list",
@@ -11056,6 +11070,17 @@
             "id": "scm.event.list",
             "command": "remi scm event list",
             "capability": "scm.event.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "scm.merge-operation.get",
+            "command": "remi scm merge-operation get",
+            "capability": "scm.merge-operation.get",
             "outputs": [
               "table",
               "json",
@@ -22216,6 +22241,15 @@
             "supportsConditionalRequests": false
           }
         }
+      }
+    },
+    {
+      "key": "get-sweep GET /api/scm/merge-operations/:id",
+      "route": "GET /api/scm/merge-operations/:id",
+      "path": "/api/scm/merge-operations/mop_snapshot",
+      "status": 404,
+      "body": {
+        "error": "merge operation not found"
       }
     },
     {

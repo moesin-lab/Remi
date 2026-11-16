@@ -4,6 +4,7 @@ const AnswerSchema = z.object({ response: z.record(z.string(), z.unknown()), bod
 /** An Issue Q at `stage: "human"` names nobody (`current_handler: null`); `actions.allowed` says what this viewer may do. */
 export const QuestionViewSchema = z.object({
   kind: z.string(),
+  origin: z.string().optional(), merge_operation_id: z.string().optional(),
   id: z.string(), session_id: z.string(), workspace_id: z.string(), source_issue_id: z.string().nullable(),
   source_agent_id: z.string().nullable(), source_turn_id: z.string().nullable(), source_attempt_id: z.string().nullable(),
   original_questions: z.array(z.unknown()), original_message: z.string(),

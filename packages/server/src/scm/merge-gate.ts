@@ -19,6 +19,8 @@ export function independentActor(actor: ScmActor, policy: ProjectMergePolicy, ac
 export function evaluateMergeGate(input: {
   policy: ProjectMergePolicy; pull: PullIdentity; required: RequiredMergeCheck[];
   checks: ScmCheckObservation[]; reviews: ScmStructuredReview[]; actors: Array<{ action: string; actor: ScmActor }>;
+  /** Internal execution evidence; HTTP preflight never supplies this. */
+  operationApprovalValid?: boolean;
   reasons?: MergeGateReason[]; ref_write_rules?: MergeGateResult["ref_write_rules"];
 }): MergeGateResult {
   const { policy, pull } = input;
@@ -53,7 +55,7 @@ export function evaluateMergeGate(input: {
       if ([...latest.values()].some(r => r.verdict === "block")) add("review_blocked", "A current eligible reviewer blocks this revision", [...latest.values()].filter(r => r.verdict === "block").map(r => r.id));
       if (policy.require_independent_review && ![...latest.values()].some(r => r.verdict === "pass")) add("independent_review_missing", "At least one current Agent-independent or member-attested pass review is required");
     }
-    if (policy.require_human_approval) add("human_approval_required", "An operation-bound member approval is required; preflight cannot grant approval");
+    if (policy.require_human_approval && !input.operationApprovalValid) add("human_approval_required", "An operation-bound member approval is required; preflight cannot grant approval");
     if (policy.credential_enforcement_mode === "strict") add("credential_enforcement_unavailable", "Strict credential enforcement is pending C; direct push has not been closed");
   }
   return { allowed: reasons.length === 0, reasons, preflight_only: true, execution_authorized: false,

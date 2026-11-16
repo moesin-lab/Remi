@@ -1,3 +1,4 @@
+import { registerMergeExecutionRoutes } from "./merge-execution.js";
 import { registerMergePolicyRoutes, scmRequestActor } from "./merge-policy.js";
 import type { Context, Hono } from "hono";
 import type {
@@ -27,6 +28,7 @@ import type { RouterDeps } from "./deps.js";
 export function registerScmRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
   registerMergePolicyRoutes(app, deps);
+  registerMergeExecutionRoutes(app, deps);
   const activeRoot = "/api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests";
 
   app.post(activeRoot, async (c) => {

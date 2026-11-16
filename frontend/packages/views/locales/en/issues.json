@@ -1,5 +1,7 @@
 {
   "responsibility": {
+    "platform_merge_approval": "Platform merge approval",
+    "merge_approval_saved": "Merge decision saved · check operation status",
     "pending_section": "Awaiting answers",
     "history_section": "Answered and closed",
     "execution_resumed": "Answered · execution resumed",

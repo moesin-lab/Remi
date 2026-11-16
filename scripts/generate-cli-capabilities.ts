@@ -215,6 +215,8 @@ function mappedResourceCommand(route: string): string | null {
     "POST /api/projects/:id/change-requests/:changeRequestId/reviews": "scm.change-request.review.submit",
     "GET /api/projects/:id/change-requests/:changeRequestId/reviews": "scm.change-request.review.list",
     "GET /api/projects/:id/change-requests/:changeRequestId/merge-gate": "scm.change-request.gate",
+    "POST /api/projects/:id/change-requests/:changeRequestId/merge": "scm.change-request.merge",
+    "GET /api/scm/merge-operations/:id": "scm.merge-operation.get",
     "GET /api/projects": "project.list",
     "POST /api/projects": "project.create",
     "GET /api/projects/search": "project.search",

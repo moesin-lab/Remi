@@ -79,6 +79,24 @@ describe("operations CLI contracts", () => {
     }
   });
 
+  it("executes B2 merge and operation commands with a bound SHA/method/idempotency key", async () => {
+    useCliEnv();
+    const spec = specById("scm.change-request.merge");
+    globalThis.fetch = capabilityFetch(spec.id, async request => {
+      expect(request.method).toBe("POST"); expect(new URL(request.url).pathname).toBe("/api/projects/prj_1/change-requests/scr_1/merge");
+      expect(await request.json()).toEqual({ expected_head_sha: "a".repeat(40), method: "squash", idempotency_key: "merge-1" });
+      return Response.json({ operation_id: "mop_1" }, { status: 202 });
+    });
+    const output = await capture(() => registryFor([spec]).execute(["scm", "change-request", "merge", "prj_1", "scr_1", "--expected-head", "a".repeat(40), "--method", "squash", "--idempotency-key", "merge-1", "--json"]));
+    expect(JSON.parse(output.stdout).operation_id).toBe("mop_1");
+    const get = specById("scm.merge-operation.get");
+    globalThis.fetch = capabilityFetch(get.id, request => {
+      expect(request.method).toBe("GET"); expect(new URL(request.url).pathname).toBe("/api/scm/merge-operations/mop_1");
+      return Response.json({ operation: { id: "mop_1", state: "awaiting_human" } });
+    });
+    expect(JSON.parse((await capture(() => registryFor([get]).execute(["scm", "merge-operation", "get", "mop_1", "--json"]))).stdout).operation.state).toBe("awaiting_human");
+  });
+
   it("requests one canonical day/model detail page using the declared CLI parameters", async () => {
     useCliEnv();
     const spec = specById("dashboard.usage.report");

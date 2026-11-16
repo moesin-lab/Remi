@@ -1,3 +1,4 @@
+import { MergeExecutionService } from "@multiremi/scm/merge-execution.js";
 import { registerExecutionConfigRoutes } from "./routers/execution-config.js";
 import { Hono, type Handler } from "hono";
 import { registerDaemonTraceHandlers } from "./daemon-protocol/trace-handlers.js";
@@ -1128,6 +1129,8 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     : null;
   scheduler?.start();
   scmPolling?.start();
+  const mergeExecution = backgroundJobs ? new MergeExecutionService(store) : null;
+  mergeExecution?.start();
   messaging?.start();
   issueTitleScheduler?.start();
   if (backgroundJobs) store.startNotificationDeliverySweeper();
@@ -1468,6 +1471,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     realtimeFanout.close();
     scheduler?.stop();
     scmPolling?.stop();
+    mergeExecution?.stop();
     messaging?.stop();
     issueTitleScheduler?.stop();
     store.stopNotificationDeliverySweeper();

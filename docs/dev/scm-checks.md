@@ -10,6 +10,8 @@ summary: Agent 使用任务凭据读取 GitHub PR head 的 CI 观测，不获取
 `GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks`。
 repository 接受平台仓库 ID、`owner/name` 或 Git URL（HTTPS、SSH URL、`git@host:owner/name.git`），number 是 GitHub PR 编号。
 解析仅限当前工作区已启用的 SCM 仓库绑定；URL 按主机和仓库路径匹配，名称有歧义时需改用 ID 或 URL。
+HTTP(S) URL 不接受 userinfo（包括只有用户名的 token）；SSH 的 `git@` 用户可用。
+显式默认端口（SSH 22、HTTPS 443、HTTP 80）按省略端口处理；不同主机和非默认端口保持隔离。
 无法匹配或存在歧义时，错误会列出当前工作区可用的绑定 ID 和名称。
 默认 table 首行显示完整 head SHA、汇总结论和观察时间，随后每项检查一行显示名称、status、conclusion 和完整链接（无链接时显示 ID）。
 `--json` 保留完整响应，`--output jsonl` 每项检查一行；没有检查时 table 明确显示 No checks observed。成员和同工作区 Task 凭据可读，daemon 不可调用业务端点。

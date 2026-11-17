@@ -1771,7 +1771,7 @@ export class RuntimesRepo {
       if (isTerminalRuntimeRequestStatus(current.status)) return current;
       if (current.scope === "cli") {
         if (current.status === "pending" && status === "running" && !this.admitCliUpdate(runtime, requestId)) {
-          throw new Error("CLI update admission denied; request remains pending");
+          throw Object.assign(new Error("CLI update admission denied; request remains pending"), { code: "cli_update_not_admitted" });
         }
         if (status === "completed" && (current.status !== "verifying" || input.self_check !== true)) {
           throw new Error("CLI completion requires target-version hello and startup self-check");

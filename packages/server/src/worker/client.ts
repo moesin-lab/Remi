@@ -934,14 +934,14 @@ export class MultiremiDaemonClient {
     return response.allowed === true;
   }
 
-  async reportRuntimeUpdateResult(runtimeId: string, requestId: string, result: { status: string; output?: string; error?: string; self_check?: boolean }): Promise<void> {
-    if (!this.reportTransport || this.reportTransport.upgradeWaiting()) {
-      await this.post(`/api/daemon/runtimes/${runtimeId}/update/${requestId}/result`, result);
+  async reportRuntimeUpdateResult(runtimeId: string, requestId: string, result: { status: string; output?: string; error?: string; self_check?: boolean }, signal?: AbortSignal): Promise<void> {
+    if (result.status === "running" || !this.reportTransport || this.reportTransport.upgradeWaiting()) {
+      await this.post(`/api/daemon/runtimes/${runtimeId}/update/${requestId}/result`, result, undefined, signal);
       return;
     }
     await this.report("runtime.update_result", `rt:${runtimeId}`, { ...result, request_id: requestId, runtime_id: runtimeId },
-      // Running is an admission barrier: never install before the platform accepts it.
-      result.status === "running" || result.status === "completed" || result.status === "rolled_back");
+      // Terminal self-check confirmation remains durable across reconnects.
+      result.status === "completed" || result.status === "rolled_back");
   }
 
   async reportRuntimeCommandResult(runtimeId: string, requestId: string, result: {

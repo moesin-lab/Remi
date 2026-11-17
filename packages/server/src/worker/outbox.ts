@@ -590,6 +590,15 @@ export class MultiremiTaskReportOutbox {
         }
         return;
       }
+      if (record.kind === "runtime.update_result" && record.payload.status === "running"
+        && error instanceof DaemonProtocolRpcError && error.code === "cli_update_not_admitted") {
+        // Compatibility for already queued admission reports. Rejection applies
+        // only to this attempt, never to later runtime results in the partition.
+        this.db.run("DELETE FROM outbox_events WHERE id = ?", [record.id]);
+        this.recordWaiters.get(record.id)?.reject(error);
+        this.recordWaiters.delete(record.id);
+        return;
+      }
       if (isPermanentDeliveryError(error)) {
         const blocked = this.db.run(
           `UPDATE outbox_events SET status = 'blocked', last_error = ?

@@ -2434,14 +2434,32 @@ export class MultiremiDaemon {
       });
       return;
     }
-    try {
-      await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "running" });
-    } catch (error) {
-      // A rejected admission must remain pending on the platform. Do not install,
-      // switch the launcher, or turn a retryable admission into a failed update.
-      this.releaseUpdateClaimPause(scope);
-      log.warn(`Runtime update admission failed: ${error instanceof Error ? error.message : String(error)}`);
-      return;
+    // Admission is deliberately non-durable: a timed-out running report must
+    // never replay after this executor has given up and queued failed.
+    const admissionEnd = Math.min(Date.now() + 30_000,
+      drainDeadline === undefined ? Infinity : Date.parse(drainDeadline));
+    while (true) {
+      try {
+        await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "running" },
+          AbortSignal.timeout(Math.max(1, admissionEnd - Date.now())));
+        break;
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "cli_update_not_admitted") {
+          this.releaseUpdateClaimPause(scope);
+          // Propagate so the WS downlink releases its dedupe key. Heartbeat
+          // also retries the same pending id on its next poll.
+          throw error;
+        }
+        if (Date.now() >= admissionEnd) {
+          try {
+            await this.client.reportRuntimeUpdateResult(runtimeId, requestId, {
+              status: "failed", error: `CLI update admission confirmation deadline exceeded: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          } finally { this.releaseUpdateClaimPause(scope); }
+          return;
+        }
+        await Bun.sleep(Math.min(250, Math.max(0, admissionEnd - Date.now())));
+      }
     }
     try {
       const output = scope === "acp"

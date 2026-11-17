@@ -477,6 +477,9 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
       }
       return { ok: true };
     } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "cli_update_not_admitted") {
+        return { ok: false, code: error.code, retryable: false };
+      }
       if (error instanceof TaskDaemonReportError) return { ok: false, code: error.code, retryable: error.retryable };
       if (error instanceof ReportRejection) return { ok: false, code: error.code, retryable: false };
       throw error;

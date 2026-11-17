@@ -17,7 +17,7 @@ scope.onmessage = ({ data: { url, cleanup, lock } }) => {
     }
     upstream.pipe(socket);
     socket.on("data", data => {
-      buffer = Buffer.concat([buffer, data]);
+      buffer = Buffer.concat([buffer, Buffer.from(data)]);
       while (buffer.length >= (startup ? 4 : 5)) {
         const length = startup ? buffer.readInt32BE(0) : buffer.readInt32BE(1) + 1;
         if (buffer.length < length) break;

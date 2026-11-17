@@ -2415,7 +2415,9 @@ export class RuntimesRepo {
     const families = this.probePendingRequestFamilies(runtimeId, { supportsBotMenu: true, supportsDirectoryScan: true });
     for (const kind of families.sweep) this.pendingRequestQueue(kind).expire(runtimeId);
     this.scrubRuntimeCommandRequests(runtimeId);
-    this.withRuntimeLifecycleLock(runtimeId, (lockedRuntime) => {
+    // An empty update family has nothing to admit. Keep the lifecycle lock
+    // and locked re-read whenever the probe finds update work.
+    if (families.claimable.has("update")) this.withRuntimeLifecycleLock(runtimeId, (lockedRuntime) => {
       for (const request of this.updateQueue.pending(runtimeId)) {
         if (request.scope === "cli" && !this.admitCliUpdate(lockedRuntime, request.id)) {
           this.ctx.db.run("UPDATE multiremi_runtime_update_requests SET updated_at = ? WHERE id = ? AND status = 'pending'",

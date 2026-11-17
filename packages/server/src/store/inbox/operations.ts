@@ -1,4 +1,5 @@
 import { inboxVisibilitySql, type InboxAccess } from './inbox-visibility.js';
+import { questionNotificationVisibilitySql } from './question-notification-visibility.js';
 import type { SendMessageInput, UnifiedMessage, MultiremiTurn, MultiremiTurnAttempt } from '@multiremi/contracts/unified-model.js';
 import type { MultiremiWorkspaceMember } from '@multiremi/contracts/types.js';
 import type { StoreContext } from '../context.js';
@@ -31,16 +32,20 @@ export class InboxOperations {
     const result=this.ctx.db.inTransaction?write():this.ctx.db.transaction(write)();
     afterCommit(this.ctx.db,()=>this.ctx.emitCommitEvents(events));return result;
   }
-  listMessages(sessionId:string,input:{from?:number;to?:number;limit?:number;thread?:string;unread_by?:string;message_kind?:string}={}):UnifiedMessage[]{
+  listMessages(sessionId:string,input:{from?:number;to?:number;limit?:number;thread?:string;unread_by?:string;message_kind?:string;access?:InboxAccess}={}):UnifiedMessage[]{
     const params:unknown[]=[sessionId,input.from??0,input.to??Number.MAX_SAFE_INTEGER];
     const extra=input.thread?' AND (id=? OR reply_to_id=?)':'';if(input.thread)params.push(input.thread,input.thread);
     if(input.message_kind)params.push(input.message_kind);
     if(input.unread_by)params.push(input.unread_by,input.unread_by);
     const scope=this.ctx.db.dialect==='postgres'?"m.metadata::jsonb ->> 'execution_scope'":"json_extract(m.metadata,'$.execution_scope')";
     const unread=input.unread_by?` AND m.to_agent_id=? AND seq>COALESCE((SELECT cursor_seq FROM multiremi_session_lanes WHERE session_id=m.session_id AND reader_type='agent' AND reader_id=? AND execution_scope=COALESCE(${scope},'')),0)`:'';
+    // Reject native notifications before LIMIT, so arbitrarily many expired
+    // routes cannot force the HTTP reader to scan one candidate page at a time.
+    const notification = input.access ? questionNotificationVisibilitySql(this.ctx.db, input.access, 'm', 'h.workspace_id') : null;
+    if (notification) params.push(...notification.params);
     params.push(Math.min(Math.max(input.limit??100,1),1000));
-    return this.ctx.db.query(`SELECT m.* FROM multiremi_conversation_log m WHERE session_id=? AND seq>? AND seq<=?
-      AND kind='message' AND visibility='shown' AND deleted_at IS NULL${extra}${input.message_kind?' AND message_kind=?':''}${unread} ORDER BY seq LIMIT ?`).all(...params).map(messageFromRow);
+    return this.ctx.db.query(`SELECT m.* FROM multiremi_conversation_log m ${notification ? 'JOIN multiremi_conversation_heads h ON h.session_id=m.session_id' : ''} WHERE m.session_id=? AND seq>? AND seq<=?
+      AND kind='message' AND visibility='shown' AND deleted_at IS NULL${extra}${input.message_kind?' AND message_kind=?':''}${unread}${notification ? ` AND ${notification.where}` : ''} ORDER BY seq LIMIT ?`).all(...params).map(messageFromRow);
   }
   /** A terminal report grants only its named result and direct replies to the original recipient lane. */
   canReadDelegationResult(attemptId: string, messageId: string): boolean {

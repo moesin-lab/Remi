@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createLogger } from "../logger.js";
 
-/** Only transport/server-availability failures are safe to retry at a loop boundary. */
+/** Only transport/server-availability failures count toward database outage backoff. */
 export function isDatabaseConnectionError(error: unknown): boolean {
   if (error instanceof DatabaseUnavailableError) return true;
   const code = (error as { code?: unknown } | null)?.code;
@@ -44,7 +44,13 @@ export function databaseTimeoutMs(): number | undefined {
 
 const log = createLogger("db-recovery");
 
-/** Single-flight timer. A failed tick is retried, never an individual SQL statement/commit. */
+/**
+ * Single-flight timer; never replays an individual SQL statement/commit.
+ * Unexpected action/interval errors are reported at ERROR and the next tick runs
+ * at the normal cadence (one-shot loops stop), without changing database outage
+ * backoff/recovery state. If interval lookup fails, use the last known cadence
+ * or retryMaxMs until a cadence has been read successfully.
+ */
 export class DatabaseRetryLoop {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
@@ -52,10 +58,13 @@ export class DatabaseRetryLoop {
   private generation = 0;
   private failures = 0;
   private lastWarning = -Infinity;
+  private lastInterval: number;
 
   constructor(private readonly name: string, private readonly action: () => unknown | Promise<unknown>,
     private readonly interval: number | (() => number),
-    private readonly retryBaseMs = 1_000, private readonly retryMaxMs = 30_000) {}
+    private readonly retryBaseMs = 1_000, private readonly retryMaxMs = 30_000) {
+    this.lastInterval = typeof interval === "number" ? interval : retryMaxMs;
+  }
 
   start(delayMs = 0): void {
     if (!this.stopped) return;
@@ -79,26 +88,51 @@ export class DatabaseRetryLoop {
     this.timer.unref?.();
   }
 
+  private readInterval(): number {
+    return this.lastInterval = withDatabaseTimeout(5_000,
+      () => typeof this.interval === "function" ? this.interval() : this.interval);
+  }
+
   private async tick(generation: number): Promise<void> {
     if (this.stopped || generation !== this.generation) return;
     let delay: number;
+    let readingInterval = false;
     try {
       this.active = Promise.resolve(withDatabaseTimeout(5_000, this.action));
       await this.active;
       if (this.stopped || generation !== this.generation) return;
       // Interval lookup may itself read configuration from the database.
-      delay = withDatabaseTimeout(5_000, () => typeof this.interval === "function" ? this.interval() : this.interval);
+      readingInterval = true;
+      delay = this.readInterval();
       if (this.failures) log.info(`${this.name}: database recovered`);
       this.failures = 0;
       this.lastWarning = -Infinity;
     } catch (error) {
-      if (!isDatabaseConnectionError(error)) throw error;
-      if (this.stopped || generation !== this.generation) return;
-      delay = Math.min(this.retryMaxMs, this.retryBaseMs * 2 ** Math.min(this.failures++, 16));
-      if (Date.now() - this.lastWarning >= 30_000) {
-        // Never include SQL, connection URLs, or driver error text.
-        log.warn(`${this.name}: database unavailable; retry in ${delay}ms`);
-        this.lastWarning = Date.now();
+      if (!isDatabaseConnectionError(error)) {
+        // Report even a late failure, but never let an obsolete tick rearm.
+        log.error(`${this.name}: unexpected maintenance error`, error);
+        if (this.stopped || generation !== this.generation) return;
+        delay = this.lastInterval;
+        if (!readingInterval) {
+          // Action failed: still honor the current configured cadence, including 0.
+          try { delay = this.readInterval(); }
+          catch (intervalError) {
+            if (isDatabaseConnectionError(intervalError)) {
+              delay = Math.max(delay, this.retryMaxMs);
+            } else {
+              log.error(`${this.name}: unexpected maintenance interval error`, intervalError);
+            }
+          }
+        }
+        if (this.stopped || generation !== this.generation) return;
+      } else {
+        if (this.stopped || generation !== this.generation) return;
+        delay = Math.min(this.retryMaxMs, this.retryBaseMs * 2 ** Math.min(this.failures++, 16));
+        if (Date.now() - this.lastWarning >= 30_000) {
+          // Never include SQL, connection URLs, or driver error text.
+          log.warn(`${this.name}: database unavailable; retry in ${delay}ms`);
+          this.lastWarning = Date.now();
+        }
       }
     }
     if (delay <= 0) { this.stopped = true; return; }

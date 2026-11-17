@@ -42,7 +42,15 @@ export function attemptInputState(ctx: StoreContext, turn: any): {
     }
     return { ack: Number(attempt.input_ack_seq), read: Number(attempt.input_read_seq ?? attempt.input_ack_seq), offset: Number(attempt.input_read_offset ?? 0) };
 }
-export function acknowledgeAttemptInput(ctx: StoreContext, turn: any, toSeq: number): void {
+export function acknowledgeAttemptInput(ctx: StoreContext, turn: any, toSeq: number, inputRead = false): void {
     const state = attemptInputState(ctx, turn);
-    ctx.db.run('UPDATE multiremi_turn_attempts SET input_ack_seq=?,input_trigger_ack=1 WHERE id=?', [Math.max(state.ack, toSeq), turn.current_attempt_id]);
+    // A successful turn.input checked full-body reads or complete inline
+    // delivery through toSeq. Keep its read receipt contiguous with the input:
+    // the next offer/resync starts at ack, and range reads cannot skip an older
+    // inline message still left behind in input_read_seq.
+    // Completion's unread fallback can retain business coverage from an older
+    // attempt; that coverage alone is not proof this provider read the bodies.
+    const read = inputRead ? Math.max(state.read, toSeq) : state.read;
+    ctx.db.run('UPDATE multiremi_turn_attempts SET input_ack_seq=?,input_read_seq=?,input_read_offset=?,input_trigger_ack=1 WHERE id=?',
+        [Math.max(state.ack, toSeq), read, read > state.read ? 0 : state.offset, turn.current_attempt_id]);
 }

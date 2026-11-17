@@ -5,7 +5,7 @@ import { ExecutionEndpointsRepo } from "@multiremi/store/repos/execution-endpoin
 import { getExecutionGroup, listExecutionGroups, saveExecutionGroup, deleteExecutionGroup } from "@multiremi/store/execution-groups.js";
 import { isRelatedTurnController } from './turn-controls.js';
 import { DaemonTurnBridge } from './inbox/daemon-turn-bridge.js';
-import { questionNotificationIdentity, questionNotificationFactsSql, canReadQuestionNotificationFacts } from './inbox/question-notification-visibility.js';
+import { questionNotificationIdentity, questionNotificationFactsSql, canReadQuestionNotificationFacts, questionNotificationVisibilitySql } from './inbox/question-notification-visibility.js';
 import type { InboxAccess } from './inbox/inbox-visibility.js';
 import type { QuestionCardCredential } from "@multiremi/store/question-card-token.js";
 import type { RuntimeConnectionProfile } from "@multiremi/contracts/runtime-connection";
@@ -1515,6 +1515,21 @@ runMigrations(this.db);
     if (!identity) return false;
     const query = questionNotificationFactsSql(identity, entry, access);
     return canReadQuestionNotificationFacts(identity, entry, access, this.db.query(query.sql).get(...query.params));
+  }
+
+  /** Batch the same notification grant used by Inbox before pagination. */
+  readableQuestionNotifications(entries: readonly Parameters<typeof questionNotificationIdentity>[0][], access: InboxAccess,
+    originals: ReadonlyMap<string, Parameters<typeof questionNotificationIdentity>[0] | null>): Set<string> {
+    // Keep strict metadata validation (including numeric route revisions) from
+    // the scalar reader before applying the shared SQL fact checks.
+    const ids = [...new Set(entries.filter(entry => questionNotificationIdentity(entry,
+      originals.get(String(entry.metadata.root_question_id)))).map(entry => entry.id!))];
+    if (!ids.length) return new Set();
+    const guard = questionNotificationVisibilitySql(this.db, access, 'm', 'h.workspace_id');
+    const rows = this.db.query(`SELECT m.id FROM multiremi_conversation_log m
+      JOIN multiremi_conversation_heads h ON h.session_id=m.session_id
+      WHERE m.id IN (${ids.map(() => '?').join(',')}) AND ${guard.where}`).all(...ids, ...guard.params) as Array<{ id: string }>;
+    return new Set(rows.map(row => row.id));
   }
 
   listWorkspacesForUser(userId: string | null | undefined): MultiremiWorkspace[] {

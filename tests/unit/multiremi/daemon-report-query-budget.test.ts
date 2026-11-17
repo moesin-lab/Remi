@@ -51,6 +51,8 @@ async function countSql(
   onResult?: (sql: string, value: unknown) => void,
 ) {
   const statements: string[] = [];
+  const traces: { sql: string; stack?: string }[] = [];
+  const record = (sql: string) => { statements.push(sql); if (process.env.MULTIREMI_TEST_SQL_TRACE) traces.push({ sql, stack: new Error().stack }); };
   const query = database.query.bind(database);
   const prepare = database.prepare.bind(database);
   const run = database.run.bind(database);
@@ -64,7 +66,7 @@ async function countSql(
         const value = Reflect.get(target, key, target);
         if (["get", "all", "run", "values"].includes(String(key)))
           return (...args: unknown[]) => {
-            statements.push(sql);
+            record(sql);
             const result = value.apply(target, args);
             onResult?.(sql, result);
             return result;
@@ -82,7 +84,7 @@ async function countSql(
   ) => wrap(prepare(sql), sql)) as typeof database.prepare);
   const runSpy = spyOn(database, "run").mockImplementation(
     (...args: Parameters<SqlDatabase["run"]>) => {
-      statements.push(args[0]);
+      record(args[0]);
       return run(...args);
     },
   );
@@ -93,6 +95,7 @@ async function countSql(
   try {
     await action();
     await layer.drain();
+    if (process.env.MULTIREMI_TEST_SQL_TRACE) await Bun.write(`/tmp/mul182-sql-${process.env.MULTIREMI_TEST_SQL_TRACE}.json`, JSON.stringify(traces, null, 2));
     return statements;
   } finally {
     querySpy.mockRestore();
@@ -100,6 +103,12 @@ async function countSql(
     runSpy.mockRestore();
     execSpy.mockRestore();
   }
+}
+
+const observedCosts = new Map<string, number>();
+function expectConstantCost(path: string, size: number, count: number) {
+  if (size === 2) observedCosts.set(path, count);
+  else if (observedCosts.has(path)) expect(count).toBe(observedCosts.get(path)!);
 }
 
 async function openFleetDatabase() {
@@ -403,9 +412,9 @@ for (const size of [2, 40]) {
                     runId: "budget-run",
                     revision: 1,
                     complete: false,
-                    units: [
+                    units: Array.from({ length: size }, (_, index) => (
                       {
-                        unitId: "request-1",
+                        unitId: `request-${index}`,
                         revision: 1,
                         provider: "claude",
                         model: "fixture",
@@ -424,8 +433,7 @@ for (const size of [2, 40]) {
                         costAmount: null,
                         costCurrency: null,
                         occurredAt: "2026-11-17T00:00:00Z",
-                      },
-                    ],
+                      })),
                   },
                 };
       const sql = await countSql(f.database, f.layer, () =>
@@ -457,8 +465,9 @@ for (const size of [2, 40]) {
       if (type === "task.fail")
         expect(f.store.getTask(f.task.id)?.status).toBe("failed");
       if (type === "task.usage")
-        expect(f.store.getTask(f.task.id)?.usage[0]?.totalTokens).toBe(12);
+        expect(f.store.getTask(f.task.id)?.usage[0]?.totalTokens).toBe(12 * size);
       console.info("REPORT_COST", type, size, sql.length);
+      expectConstantCost(type, size, sql.length);
       const budgets = {
         "task.workspace": 48,
         "turn.complete": 416,
@@ -690,3 +699,84 @@ for (const size of [2, 40])
     console.info("MARKER_COST", size, sql.length);
     expect(sql.length).toBeLessThan(50);
   }, 60_000);
+
+for (const size of [2, 40]) {
+  test(`POST feishu-bot/messages budget with ${size} history rows`, async () => {
+    const f = await loadedFleet(size);
+    const inbound = f.store.submitFeishuBotMessage('local', f.runtimeIds[0]!, {
+      revision: f.config.revision, externalSessionKey: 'oc_http_cost', externalMessageId: 'om_http_seed',
+      chatId: 'oc_http_cost', senderOpenId: 'ou_cost', text: 'seed', deliveryMode: 'native_cot_v1',
+    });
+    for (let index = 0; index < size; index++) f.store.sendMessage({ session_id: inbound.chatSessionId,
+      sender: { type: 'platform', id: null }, to: { type: 'none' }, message_kind: 'status',
+      wake_requested: 'inbox_only', body_md: `bot history ${index}` });
+    await f.layer.drain();
+    const app = createMultiremiApp({ store: f.store, authToken: 'fixture-cost' });
+    const sql = await countSql(f.database, f.layer, async () => {
+      const response = await app.request(`/api/daemon/runtimes/${f.runtimeIds[0]}/feishu-bot/messages`, {
+        method: 'POST', headers: { Authorization: 'Bearer fixture-cost', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revision: f.config.revision, external_session_key: 'oc_http_cost',
+          external_message_id: 'om_http_cost', chat_id: 'oc_http_cost', sender_open_id: 'ou_cost',
+          text: 'HTTP inbound', delivery_mode: 'native_cot_v1' }),
+      });
+      expect(response.status).toBe(202);
+      const body = await response.json() as any;
+      expect(body.chatSessionId).toBe(inbound.chatSessionId);
+      expect(body.duplicate).toBe(false);
+    });
+    console.info('POST_FEISHU_COST', size, sql.length);
+    expectConstantCost('POST feishu', size, sql.length);
+    expect(sql.length).toBeLessThanOrEqual(96);
+  }, 60_000);
+
+  test(`Question permissions and hidden pages budget with ${size} visible and ${size * 10} hidden notifications`, async () => {
+    const f = await loadedFleet(2);
+    const send = (metadata: Record<string, unknown>, body_md: string) => f.store.sendMessage({
+      session_id: f.issueSession.id, sender: { type: 'platform', id: null }, to: { type: 'none' },
+      message_kind: 'status', wake_requested: 'inbox_only', body_md, metadata,
+    }).message;
+    const original = send({ question: { version: 1, workspace_id: 'local', source_issue_id: f.issue.id,
+      route_revision: 1, route: [{ stage: 'human' }] } }, 'original');
+    for (let i = 0; i < size * 10; i++) send({ question_notification: true,
+      root_question_id: original.id, question_route_revision: 0 }, 'HIDDEN EXPIRED ROUTE');
+    // SQL casts are only the prefilter: strict metadata validation must still
+    // reject a string revision that happens to compare equal to numeric 1.
+    const malformed = send({ question_notification: true,
+      root_question_id: original.id, question_route_revision: '1' }, 'HIDDEN STRING REVISION');
+    expect(f.store.canReadQuestionNotification(malformed.id, { userId: 'local', admin: false })).toBe(false);
+    const visible = Array.from({ length: size }, () => send({ question_notification: true,
+      root_question_id: original.id, question_route_revision: 1 }, 'visible human notification'));
+    await f.layer.drain();
+    const app = createMultiremiApp({ store: f.store, authToken: 'fixture-cost' });
+    const sql = await countSql(f.database, f.layer, async () => {
+      const response = await app.request(`/api/sessions/${f.issueSession.id}/messages?after_seq=${original.seq}&limit=100`,
+        { headers: { Authorization: 'Bearer fixture-cost' } });
+      expect(response.status).toBe(200);
+      const body = await response.json() as any;
+      expect(body.messages.map((row: any) => row.id)).toEqual(visible.map(row => row.id));
+      expect(body.next_cursor).toBeNull();
+      expect(JSON.stringify(body)).not.toContain('HIDDEN');
+    });
+    console.info('QUESTION_HIDDEN_COST', size, sql.length);
+    expectConstantCost('Question permissions', size, sql.length);
+    expect(sql.length).toBeLessThan(50);
+  }, 60_000);
+}
+
+test('usage fact and receipt writes stay batched at the 10,000-unit protocol limit', async () => {
+  const f = await loadedFleet(2);
+  const unit = { unitId: 'limit', revision: 1, provider: 'claude', model: 'fixture', scope: 'request' as const,
+    source: 'provider_request' as const, accuracy: 'exact' as const, inputTokens: 10, outputTokens: 2,
+    cacheReadTokens: 0, cacheWriteTokens: 0, actualUnsplitTokens: 0, reportedTotalTokens: 12,
+    contextTokens: null, contextWindow: null, costAmount: null, costCurrency: null, occurredAt: '2026-11-17T00:00:00Z' };
+  const snapshot = { version: 2 as const, runId: 'maximum-frame', revision: 1, complete: false,
+    units: Array.from({ length: 10_000 }, (_, index) => ({ ...unit, unitId: `limit-${index}` })) };
+  const sql = await countSql(f.database, f.layer, () => f.store.reportTaskUsageSnapshot(f.task.id, snapshot));
+  expect(f.store.getTask(f.task.id)?.usage[0]?.totalTokens).toBe(120_000);
+  expect(sql.filter(statement => /^INSERT INTO multiremi_usage_units\(/.test(statement))).toHaveLength(1);
+  expect(sql.filter(statement => /^INSERT INTO multiremi_usage_unit_receipts\(/.test(statement))).toHaveLength(1);
+  const replay = await countSql(f.database, f.layer, () => f.store.reportTaskUsageSnapshot(f.task.id, snapshot));
+  expect(f.store.getTask(f.task.id)?.usage[0]?.totalTokens).toBe(120_000);
+  expect(replay.length).toBeLessThan(40);
+  console.info('MAX_USAGE_COST', sql.length, replay.length);
+}, 60_000);

@@ -16,6 +16,7 @@
  * answers `{}` until A-6 fills it.
  */
 
+import { withSynchronousRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import {
   DAEMON_PROTOCOL_CLOSE_CODES,
   DAEMON_PROTOCOL_VERSION,
@@ -179,7 +180,7 @@ export class DaemonProtocolLayer {
         for (const hooks of this.sessionHooks) hooks.hello?.(session, hello);
       },
       onHeartbeat: heartbeat => {
-        const reply = this.handleHeartbeat(heartbeat);
+        const reply = withSynchronousRequestReadCache(() => this.handleHeartbeat(heartbeat));
         for (const hooks of this.sessionHooks) hooks.heartbeat?.(session, heartbeat);
         return reply;
       },
@@ -513,10 +514,9 @@ export class DaemonProtocolLayer {
     // Recheck daemon-wide authority before stamping any runtime heartbeat.
     if (this.heartbeatOwnerCheck(heartbeat)) return { runtime_acks: [] };
     // Reading the maintenance row also enforces the drain lease TTL lazily, so a
-    // crashed updater cannot leave the platform draining forever. The row itself
-    // is not consumed here: `drainStatus` is the reader that scores runtimes, and
-    // the daemon learns about draining from the `platform.drain` push (A-4).
-    this.store.getPlatformMaintenance();
+    // crashed updater cannot leave the platform draining forever. Reuse this
+    // snapshot for the reply instead of reading it again for each runtime.
+    const maintenance = this.store.getPlatformMaintenance();
 
     const ackGeneration = readNonNegativeInteger(heartbeat.payload.drain_ack_generation);
     const activeTaskCount = readNonNegativeInteger(heartbeat.payload.active_task_count);
@@ -545,10 +545,15 @@ export class DaemonProtocolLayer {
           readNonNegativeInteger(reported.ssh_mesh_protocol) ?? 0,
           reported.ssh_mesh_status as MultiremiDaemonSshMeshStatus | undefined);
       }
+      // Score the fence before the ack write invalidates the Runtime read cache.
+      // Ack generation/counts do not change either the maintenance or daemon fence.
+      ack.drain = {
+        mode: maintenance.mode === "draining" || this.store.hasCliUpdateDrainForRuntime(runtimeId) ? "draining" : "normal",
+        generation: maintenance.generation,
+      };
       if (ackGeneration !== null) {
         this.store.recordRuntimeDrainAck(runtimeId, ackGeneration, activeTaskCount);
       }
-      ack.drain = this.store.daemonDrainDirective(runtimeId);
       acksByRuntime.set(runtimeId, ack);
     }
 

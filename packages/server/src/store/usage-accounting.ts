@@ -338,8 +338,10 @@ function usageRowsSelect(db: SqlDatabase, columns: readonly string[], rows: unkn
     const type = column === "cost_amount" ? "DOUBLE PRECISION" : integers.has(column) ? "BIGINT" : "TEXT";
     return `CAST(${value} AS ${type})`;
   });
+  // Bind serialized JSON as TEXT first: Bun.SQL otherwise encodes a string
+  // parameter inferred as JSONB as a JSON string scalar, not the array.
   return { sql: `SELECT ${fields.join(",")} FROM ${db.dialect === "postgres"
-    ? "jsonb_array_elements(CAST(? AS JSONB)) AS batch(value)" : "json_each(?) AS batch"} WHERE 1=1`, params: [JSON.stringify(rows)] };
+    ? "jsonb_array_elements(CAST(CAST(? AS TEXT) AS JSONB)) AS batch(value)" : "json_each(?) AS batch"} WHERE 1=1`, params: [JSON.stringify(rows)] };
 }
 
 /** One transaction serializes snapshot revisions; only newer unit revisions replace facts. */

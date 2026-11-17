@@ -20,6 +20,7 @@ Phase A 用于同一 PostgreSQL 数据库上的两个 `all` API（不配置 peer
 | `MULTIREMI_SLOT_CONTROL_TOKEN` | 独立控制凭据；启用 slot 时必填 |
 | `MULTIREMI_SLOT_LOCK_TIMEOUT_MS` | 激活获取角色锁的等待预算，默认 10000 ms |
 | `MULTIREMI_SLOT_DRAIN_TIMEOUT_MS` | 普通 HTTP 排空预算，默认 20000 ms |
+| `MULTIREMI_SLOT_STOP_TIMEOUT_MS` | 后台停止等待预算，默认 5000 ms |
 
 两个 slot 使用不同端口、同一数据库。standby 执行启动迁移并监听，但不获取角色锁、不开启后台任务，业务 HTTP 和 WebSocket 升级返回 503。`/healthz` 保留存活语义；`/readyz` 在非 active 状态返回 503 和 `{slot,state,version}`。active 时还检查数据库，成功返回 200 和 `{slot,state,version,term}`。
 
@@ -37,7 +38,9 @@ Phase A 用于同一 PostgreSQL 数据库上的两个 `all` API（不配置 peer
 
 激活锁竞争或 fence 失败返回 503，状态 failed，监听保留，可重试或 release。转换串行执行；重复 activate/release 幂等。released 可重新 activate。停止任务失败时保留角色锁及 draining/failed 状态，须先成功 release，避免后台工作尚未结束就交接所有权。
 
-release 首先停止接收业务请求；已受理的普通 HTTP 响应计数到 body EOF 或取消，SSE 和 WebSocket 不计入排空预算。预算到期后继续交接，不强制截断 HTTP。daemon 在排空期间保持连接，使在途 RPC 能完成；随后结束 SSE，daemon 收到 4001，浏览器（包括 trace）收到 1012。daemon 的现有重连、active task 恢复与 outbox 协议不变。
+release 首先停止接收业务请求；普通 HTTP 通过 Bun `pendingRequests` 原生计数到响应结束或取消（排除控制请求和 SSE），不代理普通响应 body，SSE 和 WebSocket 不计入排空预算。预算到期后继续交接，不强制截断 HTTP。超过预算的慢 HTTP 会在角色锁释放后继续执行，可能与新 active 的写入重叠；A3 live term fence 尚未接入前，这不是写入隔离保证。daemon 在排空期间保持连接，使在途 RPC 能完成；随后结束 SSE，daemon 收到 4001，浏览器（包括 trace）收到 1012。daemon 的现有重连、active task 恢复与 outbox 协议不变。
+
+后台停止等待超时会返回 503，保留角色锁和 draining/failed 状态，禁止重新 activate；底层网络操作仍可能运行，并未被超时取消。操作结束后可重试 release，再 activate。legacy 停机同样最多等待后台停止 5 秒，超时向 CLI 报错。Docker API 服务设置 `stop_grace_period: 30s`，覆盖默认 20 秒 HTTP 排空和 5 秒后台停止；调高预算时需同步调高容器宽限。第二次 SIGINT/SIGTERM 会强制退出。
 
 WebSocket 关闭握手最多等待 1 秒，未确认的连接随后断开，避免残留连接阻塞进程退出；这不影响普通 HTTP 的排空。
 
@@ -47,7 +50,7 @@ Bun 1.3.14 在服务端关闭 WebSocket 后可能保留 `pendingWebSockets` 计�
 
 ## 验证入口
 
-[生命周期单测](../../tests/unit/multiremi/slot-lifecycle.test.ts)检查转换顺序、异步停止、失败回收、鉴权、HTTP body 排空与 SSE 豁免。
+[生命周期单测](../../tests/unit/multiremi/slot-lifecycle.test.ts)检查转换顺序、异步停止、失败回收、鉴权、原生 HTTP body 排空、SSE 豁免、后台停止超时保锁，以及子进程中的 pipelined HTTP/socket reset 压力回归。
 [双进程测试](../../tests/integration/slot-lifecycle.test.ts)启动真实 CLI API 和 TCP 测试代理，用注入的惰性 provider 验证 daemon 运行中切换、离线终态 outbox 重放、浏览器关闭码和进程退出。SQLite 总是执行；配置 `MULTIREMI_TEST_POSTGRES_URL` 后额外执行 PostgreSQL，并检查角色锁竞争失败与回滚。测试数据库由既有隔离夹具创建、删除，不使用业务数据库；未配置 PG 时明确跳过其验收。
 
 ```bash

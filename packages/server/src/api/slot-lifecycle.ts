@@ -7,6 +7,7 @@ export interface SlotConfiguration {
   controlToken: string;
   lockTimeoutMs: number;
   drainTimeoutMs: number;
+  stopTimeoutMs?: number;
 }
 
 export function resolveSlotConfiguration(env: NodeJS.ProcessEnv): SlotConfiguration | null {
@@ -24,10 +25,13 @@ export function resolveSlotConfiguration(env: NodeJS.ProcessEnv): SlotConfigurat
     id: env.MULTIREMI_SLOT.trim(), start, controlToken: env.MULTIREMI_SLOT_CONTROL_TOKEN,
     lockTimeoutMs: milliseconds("MULTIREMI_SLOT_LOCK_TIMEOUT_MS", 10_000),
     drainTimeoutMs: milliseconds("MULTIREMI_SLOT_DRAIN_TIMEOUT_MS", 20_000),
+    stopTimeoutMs: milliseconds("MULTIREMI_SLOT_STOP_TIMEOUT_MS", 5_000),
   };
 }
 
 export interface SlotHooks {
+  /** Native HTTP count, excluding control handlers; SSE is subtracted here. */
+  pendingRequests?(): number;
   acquire(): Promise<{ close(): Promise<void> }>;
   /** A3 supplies the live term here, after acquiring the role lock. */
   fence?(): Promise<number | string | null>;
@@ -83,7 +87,7 @@ export class SlotLifecycle {
       if (this.state === "released" || this.state === "exited") return;
       this.state = "draining";
       const deadline = Date.now() + this.config.drainTimeoutMs;
-      while (this.requests.size && Date.now() < deadline) {
+      while (this.pendingRequests() > 0 && Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, Math.min(10, Math.max(0, deadline - Date.now()))));
       }
       for (const close of this.streams) close();
@@ -103,10 +107,14 @@ export class SlotLifecycle {
   }
 
   async waitForRequests(): Promise<void> {
-    while (this.requests.size) await new Promise(resolve => setTimeout(resolve, 10));
+    while (this.pendingRequests() > 0) await new Promise(resolve => setTimeout(resolve, 10));
   }
 
-  /** Ordinary responses count until EOF/cancellation. SSE and upgrades never hold drain. */
+  private pendingRequests(): number {
+    return Math.max(this.requests.size, (this.hooks.pendingRequests?.() ?? 0) - this.streams.size);
+  }
+
+  /** Return ordinary bodies untouched: a pull proxy crashes Bun on client abort. */
   async request(req: Request, handler: () => Response | Promise<Response>): Promise<Response> {
     const key = Symbol();
     this.requests.add(key);
@@ -118,12 +126,12 @@ export class SlotLifecycle {
     };
     try {
       const response = await handler();
-      if (!response.body) {
+      const streaming = response.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream");
+      if (!response.body || !streaming) {
         finish();
         return response;
       }
-      const streaming = response.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream");
-      if (streaming) this.requests.delete(key);
+      this.requests.delete(key);
       const reader = response.body.getReader();
       req.signal.addEventListener("abort", finish, { once: true });
       if (req.signal.aborted) finish();

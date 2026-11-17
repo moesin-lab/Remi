@@ -34,6 +34,7 @@ services:
       start_period: 90s
 
   api:
+    stop_grace_period: 30s
     image: ${REMI_API_IMAGE:?set REMI_API_IMAGE to an immutable digest}
     restart: unless-stopped
     env_file:
@@ -77,6 +78,7 @@ services:
   # and no SSH Mesh lease. The `split` profile keeps the default stack
   # (postgres, openviking, api, ssh-mesh-control-plane, web) unchanged.
   api-runtime:
+    stop_grace_period: 30s
     image: ${REMI_API_IMAGE:?set REMI_API_IMAGE to an immutable digest}
     restart: unless-stopped
     profiles: ["split"]

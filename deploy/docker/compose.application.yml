@@ -4,6 +4,7 @@ name: multiremi-platform-app
 # run in Docker. This stack owns only API/Web and joins their existing networks.
 services:
   api:
+    stop_grace_period: 30s
     image: ${REMI_API_IMAGE:?set REMI_API_IMAGE}
     restart: unless-stopped
     env_file:
@@ -50,6 +51,7 @@ services:
   # surface: no background jobs, no SSH Mesh lease, no scheduler. Starts only
   # under the `split` profile, so the default stack is unchanged.
   api-runtime:
+    stop_grace_period: 30s
     image: ${REMI_API_IMAGE:?set REMI_API_IMAGE}
     restart: unless-stopped
     profiles: ["split"]

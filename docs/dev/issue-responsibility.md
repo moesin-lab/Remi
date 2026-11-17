@@ -90,8 +90,10 @@ Agent 越权返回 `403 issue_done_requires_parent_owner` 或（无同工作区�
 子单未完成守卫（[ADR 0003](../adr/0003-parent-status-derived-from-children.md) Guard A）照常执行，`force` 只允许
 成员。done 规则不受 `MULTIREMI_PARENT_STATUS_GUARD` 影响。批量写入先对每行预检，任一行被拒整批回滚，
 写循环中的拒绝同样抛出，不吞成 `200 updated:0`；已 `done` 行的状态 no-op 保持可用。直接以 `done` 创建
-Issue 返回 `409 issue_create_done_unsupported`。父单执行负责人看完子单结果，没问题把子单改成 `done`，
-有问题给子单发消息；根单由任何成员改成 `done`，有问题直接评论。
+Issue 返回 `409 issue_create_done_unsupported`。父单执行负责人按会话指令中的
+「Issue Execution and Escalation」规则核对结果与剩余交付步骤，再决定是否把子单改成 `done`；
+有问题给子单发消息。该完成条件由提示词统一维护，Squad 说明和子单状态通知引用它；
+当前状态接口不额外校验 PR 合并或部署证据。根单由任何成员改成 `done`，有问题直接评论。
 
 done 规则按写入时 Issue 当前的父单判断，是流程约束，不是安全边界。改父单和改执行指派不需要成员确认，
 同工作区的 Task 凭据仍可以先把一张根单挂到自己执行的单下，或把自己执行的单改派给别的 Agent，再以父单

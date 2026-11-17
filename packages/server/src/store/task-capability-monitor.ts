@@ -1,23 +1,22 @@
-import { createLogger } from "@shared/logger.js";
+import { DatabaseRetryLoop } from "@shared/db/recovery.js";
+import { withDbJob } from "@shared/observability/db-sources.js";
 
-const log = createLogger("task-capability-monitor");
 export const QUEUED_CAPABILITY_SWEEP_MS = 60_000;
 
 export class TaskCapabilityMonitor {
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: DatabaseRetryLoop | null = null;
   private sweeping = false;
 
   constructor(private readonly refresh: ((now: number) => unknown) | readonly ((now: number) => unknown)[]) {}
 
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => this.sweep(), QUEUED_CAPABILITY_SWEEP_MS);
-    this.timer.unref?.();
-    this.sweep();
+    this.timer = new DatabaseRetryLoop("capability.sweep", () => withDbJob("capability.sweep", () => this.sweep()), QUEUED_CAPABILITY_SWEEP_MS);
+    this.timer.start();
   }
 
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
+    this.timer?.stop();
     this.timer = null;
   }
 
@@ -27,8 +26,7 @@ export class TaskCapabilityMonitor {
     try {
       const now = Date.now();
       for (const job of typeof this.refresh === "function" ? [this.refresh] : this.refresh) {
-        try { job(now); }
-        catch { log.warn("task maintenance sweep failed"); }
+        job(now);
       }
     } finally {
       this.sweeping = false;

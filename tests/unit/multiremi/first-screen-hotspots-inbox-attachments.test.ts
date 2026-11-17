@@ -230,6 +230,29 @@ describe("MUL-473 inbox summary", () => {
   }, 20000);
 });
 
+describe("MUL-85 list query budgets", () => {
+  it("keeps turns and inbox SQL count independent of returned page size", async () => {
+    const h = await createHarness({ sessions: 60, agents: 8, inboxRows: 100, privatePrimaryAgent: false });
+    for (const [path, key] of [["/api/turns", "turns"], ["/api/inbox", "items"]] as const) {
+      // Keep token last-used stamping outside the measured warm requests.
+      expect((await h.app.request(path, { headers: h.headers })).status).toBe(200);
+      const measurements = [];
+      for (const limit of [1, 10, 50]) {
+        h.probe.reset();
+        const response = await h.app.request(`${path}?limit=${limit}`, { headers: h.headers });
+        const page = await response.json();
+        expect(response.status).toBe(200);
+        expect(page[key]).toHaveLength(limit);
+        expect(page.next_cursor).toBeTruthy();
+        measurements.push({ limit, queries: h.probe.statements });
+      }
+      expect(new Set(measurements.map(point => point.queries)).size).toBe(1);
+      expect(measurements[0]!.queries).toBeLessThanOrEqual(8);
+      console.info(`MUL85_QUERY_BUDGET ${JSON.stringify({ path, dialect: h.db.dialect, measurements })}`);
+    }
+  }, 20000);
+});
+
 describe("MUL-473 attachment content caching", () => {
   async function seedAttachment(harness: Harness, sizeBytes = 512): Promise<{ id: string; bytes: Buffer }> {
     const root = mkdtempSync(join(tmpdir(), "mul473-uploads-"));

@@ -1,3 +1,4 @@
+import { withDbSource } from "@shared/observability/db-sources.js";
 /**
  * One daemon's v2 connection (MUL-417, spec §1-§2, §8).
  *
@@ -548,6 +549,12 @@ export class DaemonProtocolSession {
     }
 
     const frame = parsed.frame;
+    return withDbSource("ws", daemonFrameCategory(frame.type) === null ? "<unknown>" : frame.type,
+      () => this.dispatchMeasuredFrame(frame, startedAt, dbBefore));
+  }
+
+  private async dispatchMeasuredFrame(frame: DaemonParsedFrame, startedAt: number,
+    dbBefore: { dbMs: number; dbQueries: number }): Promise<void> {
     try {
       if (!this.handshakeComplete) {
         const code = await this.handleHandshakeFrame(frame);

@@ -27,9 +27,10 @@ import { resetMultiremiTestEnv } from "../../unit/multiremi/helpers.js";
 // template under the same environment (registered first, so it runs first).
 const FLEET_KEY = Buffer.alloc(32, 52).toString("base64");
 const cleanups: Array<() => Promise<void>> = [];
-const previousEncryptionKey = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
 export function useReportFleetFixtures(lifetime: "test" | "file" = "test") {
+  let previousEncryptionKey: string | undefined;
   beforeAll(() => {
+    previousEncryptionKey = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
     process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = FLEET_KEY;
   });
   useMigratedHotspotDatabases();

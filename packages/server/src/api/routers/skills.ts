@@ -31,6 +31,7 @@ import type {
   MultiremiSkillFile,
   UpdateSkillInput,
 } from "@multiremi/contracts/types.js";
+import { createGitHubReadHeaders } from "../../scm/github-read-auth.js";
 import type { RouterDeps } from "./deps.js";
 
 export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
@@ -88,7 +89,7 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const request = withSkillImportRequestContext(c, store, body);
     if (request instanceof Response) return request;
-    const imported = await buildImportedSkillInput(request, { signal: c.req.raw.signal });
+    const imported = await buildImportedSkillInput(request, { signal: c.req.raw.signal, githubHeaders: createGitHubReadHeaders(store, request.workspaceId!) });
     if (c.req.raw.signal.aborted) throw new SkillImportError("Skill import cancelled before saving", 408);
     const input = withSkillCreateRequestContext(c, store, imported.skillInput);
     if (input instanceof Response) return input;
@@ -186,7 +187,7 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const request = withSkillImportRequestContext(c, store, body);
     if (request instanceof Response) return request;
-    const imported = await buildImportedSkillInput(request, { signal: c.req.raw.signal });
+    const imported = await buildImportedSkillInput(request, { signal: c.req.raw.signal, githubHeaders: createGitHubReadHeaders(store, request.workspaceId!) });
     if (c.req.raw.signal.aborted) throw new SkillImportError("Skill import cancelled before saving", 408);
     const input = withSkillCreateRequestContext(c, store, imported.skillInput);
     if (input instanceof Response) return input;

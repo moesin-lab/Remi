@@ -337,7 +337,8 @@ describe("v2 report reconciliation with real sockets and DB", () => {
     const turn=h.db.query('SELECT input_to_seq FROM multiremi_turns WHERE current_attempt_id=?').get(taskId)!;
     expect(turn.input_to_seq??0).toBe(mode==='read'?readTo:0);
     expect(outbox(h).stats().blocked).toBe(0);
-    if(mode!=='read')expect(h.db.query("SELECT COUNT(*) AS n FROM multiremi_turns WHERE agent_id=? AND current_attempt_id<>?").get(agent.id,taskId)?.n).toBe(1);
+    // PostgreSQL COUNT returns bigint as a string; SQLite returns a number.
+    if(mode!=='read')expect(Number(h.db.query("SELECT COUNT(*) AS n FROM multiremi_turns WHERE agent_id=? AND current_attempt_id<>?").get(agent.id,taskId)?.n)).toBe(1);
     expect(h.ledger.filter(entry=>entry.type==='turn.complete' && entry.partition===taskId)).toHaveLength(mode==='limit'?3:mode==='legacy'?1:2);
   },15000);
 

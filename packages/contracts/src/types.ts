@@ -813,6 +813,8 @@ export interface MultiremiRuntimeUpdateRequest {
   scope: MultiremiRuntimeUpdateScope;
   targetVersion: string;
   target_version?: string;
+  targetCommit?: string | null;
+  target_commit?: string | null;
   output: string | null;
   error: string | null;
   createdAt: string;
@@ -1214,6 +1216,8 @@ export interface ReportRuntimeModelListInput {
 }
 
 export interface CreateRuntimeUpdateInput {
+  targetCommit?: string;
+  target_commit?: string;
   targetVersion?: string;
   target_version?: string;
   scope?: MultiremiRuntimeUpdateScope;

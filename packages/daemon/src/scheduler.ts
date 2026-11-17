@@ -1,3 +1,5 @@
+import { DatabaseRetryLoop, isDatabaseConnectionError } from "@shared/db/recovery.js";
+import { withDbJob } from "@shared/observability/db-sources.js";
 import { Cron } from "croner";
 import { createLogger } from "@shared/logger.js";
 import type {
@@ -20,6 +22,7 @@ const DEFAULT_ISSUE_ARCHIVE_SWEEP_STARTUP_DELAY_MS = 60 * 1000;
 interface ScheduledAutopilotJob {
   expression: string;
   job: Cron;
+  retry: DatabaseRetryLoop;
 }
 
 export interface MultiremiSchedulerOptions {
@@ -45,10 +48,9 @@ export class MultiremiScheduler {
   private issueArchiveSweepIntervalMs: number | null;
   private issueArchiveSweepStartupDelayMs: number;
   private jobs = new Map<string, ScheduledAutopilotJob>();
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private failureMonitorStartupTimer: ReturnType<typeof setTimeout> | null = null;
-  private failureMonitorTimer: ReturnType<typeof setInterval> | null = null;
-  private issueArchiveSweepTimer: ReturnType<typeof setTimeout> | null = null;
+  private syncLoop: DatabaseRetryLoop | null = null;
+  private failureLoop: DatabaseRetryLoop | null = null;
+  private archiveLoop: DatabaseRetryLoop | null = null;
   private running = false;
 
   constructor(options: MultiremiSchedulerOptions) {
@@ -67,35 +69,41 @@ export class MultiremiScheduler {
   start(): void {
     if (this.running) return;
     this.running = true;
-    this.store.recoverLostScheduleTriggers();
-    this.store.recoverLostRuntimeProvisionSchedules();
-    this.sync();
-    this.timer = setInterval(() => this.sync(), this.pollIntervalMs);
-    this.timer.unref?.();
+    let recovered = false;
+    this.syncLoop = new DatabaseRetryLoop("scheduler.sync", () => withDbJob("scheduler.sync", () => {
+      try {
+        // DatabaseRetryLoop serializes ticks and sync is synchronous: recovery
+        // runs only after the previous tick's claims are no longer in flight.
+        if (!recovered) {
+          this.store.recoverLostScheduleTriggers();
+          this.store.recoverLostRuntimeProvisionSchedules();
+          recovered = true;
+        }
+        this.sync();
+      } catch (error) {
+        // A failed tick can leave its whole claimed batch at next_run_at=NULL.
+        // Use startup recovery on the next tick, scheduling from now rather
+        // than replaying work whose commit may already have succeeded.
+        if (isDatabaseConnectionError(error)) recovered = false;
+        throw error;
+      }
+    }), this.pollIntervalMs);
+    this.syncLoop.start();
     this.startFailureMonitor();
     this.startIssueArchiveSweep();
   }
 
   stop(): void {
     this.running = false;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
-    if (this.failureMonitorStartupTimer) clearTimeout(this.failureMonitorStartupTimer);
-    this.failureMonitorStartupTimer = null;
-    if (this.failureMonitorTimer) clearInterval(this.failureMonitorTimer);
-    this.failureMonitorTimer = null;
-    if (this.issueArchiveSweepTimer) clearTimeout(this.issueArchiveSweepTimer);
-    this.issueArchiveSweepTimer = null;
-    for (const entry of this.jobs.values()) entry.job.stop();
+    this.syncLoop?.stop();
+    this.failureLoop?.stop();
+    this.archiveLoop?.stop();
+    for (const entry of this.jobs.values()) { entry.job.stop(); entry.retry.stop(); }
     this.jobs.clear();
   }
 
   sync(): void {
-    try {
-      this.store.advanceScheduledTargetRuns?.();
-    } catch (error) {
-      log.warn(`Scheduled target dispatch failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    this.store.advanceScheduledTargetRuns?.();
     this.tickDueTriggers();
     this.tickRuntimeProvisions();
     this.tickSystemEvents();
@@ -111,6 +119,7 @@ export class MultiremiScheduler {
       const autopilot = active.get(id);
       if (!autopilot || autopilot.cronExpression !== entry.expression) {
         entry.job.stop();
+        entry.retry.stop();
         this.jobs.delete(id);
       }
     }
@@ -149,10 +158,10 @@ export class MultiremiScheduler {
         this.store.enqueueWorkspaceRuntimeProvision(provision.id);
         fired += 1;
       } catch (error) {
+        if (isDatabaseConnectionError(error) || error instanceof TypeError || error instanceof ReferenceError) throw error;
         log.warn(`Runtime provision ${provision.id} dispatch failed: ${error instanceof Error ? error.message : String(error)}`);
-      } finally {
-        this.store.advanceRuntimeProvisionNextRun(provision.id, now);
       }
+      this.store.advanceRuntimeProvisionNextRun(provision.id, now);
     }
     return fired;
   }
@@ -188,50 +197,34 @@ export class MultiremiScheduler {
 
   private startFailureMonitor(): void {
     if (this.failureMonitorIntervalMs <= 0) return;
-    const run = () => {
-      if (!this.running) return;
-      this.runFailureMonitorOnce();
-      this.failureMonitorTimer = setInterval(() => this.runFailureMonitorOnce(), this.failureMonitorIntervalMs);
-      this.failureMonitorTimer.unref?.();
-    };
-    if (this.failureMonitorStartupDelayMs <= 0) {
-      run();
-      return;
-    }
-    this.failureMonitorStartupTimer = setTimeout(run, this.failureMonitorStartupDelayMs);
-    this.failureMonitorStartupTimer.unref?.();
+    this.failureLoop = new DatabaseRetryLoop("scheduler.failure-monitor",
+      () => withDbJob("scheduler.failure-monitor", () => this.runFailureMonitorOnce()), this.failureMonitorIntervalMs);
+    this.failureLoop.start(this.failureMonitorStartupDelayMs);
   }
 
   private startIssueArchiveSweep(): void {
-    const schedule = (delayMs: number) => {
-      if (!this.running || delayMs <= 0) return;
-      this.issueArchiveSweepTimer = setTimeout(() => {
-        if (!this.running) return;
-        try {
-          this.runIssueArchiveSweepOnce();
-        } catch (error) {
-          log.warn(`Issue archive sweep failed: ${error instanceof Error ? error.message : String(error)}`);
-        }
-        schedule(this.issueArchiveSweepIntervalMs ?? this.store.issueArchiveSweepIntervalMs());
-      }, delayMs);
-      this.issueArchiveSweepTimer.unref?.();
-    };
-    schedule(this.issueArchiveSweepStartupDelayMs);
+    if (this.issueArchiveSweepStartupDelayMs <= 0) return;
+    this.archiveLoop = new DatabaseRetryLoop("scheduler.issue-archive",
+      () => withDbJob("scheduler.issue-archive", () => this.runIssueArchiveSweepOnce()),
+      () => this.issueArchiveSweepIntervalMs ?? this.store.issueArchiveSweepIntervalMs());
+    this.archiveLoop.start(this.issueArchiveSweepStartupDelayMs);
   }
 
   private addJob(autopilot: Autopilot): void {
     const expression = autopilot.cronExpression;
     if (!expression) return;
     try {
+      const retry = new DatabaseRetryLoop("scheduler.autopilot",
+        () => withDbJob("scheduler.autopilot", () => this.runScheduledAutopilot(autopilot.id)), 0);
       const job = new Cron(expression, {
-        catch: (err) => log.warn(`Scheduled autopilot failed: ${(err as Error).message}`),
+        catch: (err) => { throw err; },
         name: `multiremi:${autopilot.id}`,
         protect: true,
         unref: true,
       }, () => {
-        this.runScheduledAutopilot(autopilot.id);
+        retry.start();
       });
-      this.jobs.set(autopilot.id, { expression, job });
+      this.jobs.set(autopilot.id, { expression, job, retry });
     } catch (err) {
       log.warn(`Invalid autopilot cron expression for ${autopilot.id}: ${(err as Error).message}`);
     }
@@ -249,12 +242,14 @@ export class MultiremiScheduler {
         },
       });
     } catch (err) {
+      if (isDatabaseConnectionError(err) || err instanceof TypeError || err instanceof ReferenceError) throw err;
       log.warn(`Scheduled autopilot ${autopilotId} skipped: ${(err as Error).message}`);
       return null;
     }
   }
 
   private runScheduleTrigger(trigger: AutopilotTrigger): AutopilotRun | null {
+    let connectionFailed = false;
     try {
       return this.store.runAutopilot(trigger.autopilotId, {
         source: "schedule",
@@ -268,10 +263,14 @@ export class MultiremiScheduler {
         },
       });
     } catch (err) {
+      if (isDatabaseConnectionError(err) || err instanceof TypeError || err instanceof ReferenceError) {
+        connectionFailed = true;
+        throw err;
+      }
       log.warn(`Scheduled autopilot trigger ${trigger.id} skipped: ${(err as Error).message}`);
       return null;
     } finally {
-      this.store.advanceScheduleTriggerNextRun(trigger.id);
+      if (!connectionFailed) this.store.advanceScheduleTriggerNextRun(trigger.id);
     }
   }
 }

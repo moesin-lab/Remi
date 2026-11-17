@@ -2002,6 +2002,13 @@ export function restartForegroundDaemonProcess(options: CliOptions, programName:
     // Let the manager replace the whole cgroup with one process on the new
     // binary, which also retires any pile an older release left behind.
     const result = spawnSync(plan.command, plan.args, { stdio: "inherit" });
+    if (plan.command === "systemctl" && result.signal === "SIGTERM") {
+      // --no-block still races the manager's stop job: KillMode=control-group
+      // can terminate systemctl in our own cgroup before it reports success.
+      // A spawned successor here would inherit that dying cgroup as well.
+      console.error("Multiremi daemon restart via systemctl interrupted by SIGTERM; leaving restart to the service manager");
+      process.exit(0);
+    }
     if (result.status === 0) {
       console.error(`Multiremi daemon restarting via ${plan.command} ${plan.args.join(" ")}`);
       process.exit(0);

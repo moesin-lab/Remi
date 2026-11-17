@@ -144,7 +144,7 @@ export function registerAgentRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/multiremi/agents/:id/skills", (c) => {
     const loaded = loadAgentForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
-    const skills = store.listAgentSkills(loaded.agent.id);
+    const skills = store.listAgentSkills(loaded.agent.id, { includeFiles: true });
     return c.json({ skills, total: skills.length });
   });
   app.get("/api/multiremi/agents/:id/tasks", (c) => {

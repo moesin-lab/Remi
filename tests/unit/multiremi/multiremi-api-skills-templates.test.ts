@@ -112,7 +112,7 @@ describe("Multiremi API — skills and agent templates", () => {
 
     const agentDetail = await app.request(`/api/multiremi/agents/${agent.id}`);
     const agentBody = await agentDetail.json();
-    expect(agentBody.agent.skills[0].files[0].path).toBe("notes/guide.md");
+    expect(agentBody.agent.skills[0].files).toEqual([]);
 
     const deleted = await app.request("/api/skills/skl_api", { method: "DELETE" });
     expect(deleted.status).toBe(204);

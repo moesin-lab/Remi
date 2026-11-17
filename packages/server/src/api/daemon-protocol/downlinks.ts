@@ -1,3 +1,4 @@
+import { isDatabaseConnectionError, withDatabaseTimeout } from "@shared/db/recovery.js";
 import type { DaemonProtocolLayer } from "./index.js";
 import { DaemonProtocolSession } from "./session.js";
 import { systemClock, type DaemonProtocolClock, type DaemonProtocolTimer } from "./clock.js";
@@ -22,6 +23,9 @@ interface RuntimeDownlinks {
   activeTaskIds: Set<string>;
   ack: number;
   wake: DaemonProtocolTimer | null;
+  databaseFailures?: number;
+  databaseRetryAt?: number;
+  databaseWarningAt?: number;
 }
 
 /** Payloads are derived from DB every run; only sent seq and entity identity stay in memory. */
@@ -51,7 +55,10 @@ export class DaemonDownlinks {
           if (!state || state.session !== session) continue;
           state.ack = Math.max(state.ack, ack);
           // Claim synchronously before a result arriving on another transport.
-          try { this.claimAcknowledged(state); } catch { this.schedule(rt, state, this.clock.now() + 1_000); }
+          if (this.clock.now() >= (state.databaseRetryAt ?? 0)) {
+            try { this.claimAcknowledged(state); }
+            catch (error) { this.databaseFailed(rt, state, error); }
+          }
           this.kick(rt, "pending");
         }
       },
@@ -103,9 +110,9 @@ export class DaemonDownlinks {
     }
     state.dirty = true;
     if (mode === "full") state.fullSnapshot = true;
-    if (state.running) return;
+    if (state.running || this.clock.now() < (state.databaseRetryAt ?? 0)) return;
     const current = state;
-    const run = Promise.resolve().then(async () => {
+    const run = Promise.resolve().then(() => withDatabaseTimeout(5_000, async () => {
       do {
         current.dirty = false;
         if (this.stopped || this.runtimes.get(runtimeId) !== current || session.isClosed || !session.isHandshakeComplete) return;
@@ -149,17 +156,35 @@ export class DaemonDownlinks {
         for (const key of current.delivered) if (!keys.has(key) && (mode === "full" || !current.configurationKeys.has(key))) current.delivered.delete(key);
         if (mode === "full") current.configurationKeys = configurationKeys;
       } while (current.dirty);
-    }).catch(error => {
-      console.warn(JSON.stringify({ event: "daemon_downlink_snapshot_failed", runtime_id: runtimeId,
-        error_class: error instanceof Error ? error.name : typeof error }));
-      current.dirty = false;
-      this.schedule(runtimeId, current, this.clock.now() + 1_000);
+      current.databaseFailures = 0;
+      current.databaseRetryAt = 0;
+      current.databaseWarningAt = undefined;
+    })).catch(error => {
+      this.databaseFailed(runtimeId, current, error);
     }).finally(() => {
       current.running = null;
       if (current.dirty && this.runtimes.get(runtimeId) === current) this.kick(runtimeId, current.fullSnapshot ? "full" : "pending");
     });
     current.running = run;
     this.options.layer.trackBackground(run);
+  }
+
+  private databaseFailed(runtimeId: string, state: RuntimeDownlinks, error: unknown): void {
+    if (!isDatabaseConnectionError(error)) {
+      console.error("daemon downlink failed", error);
+      throw error;
+    }
+    if (this.stopped || this.runtimes.get(runtimeId) !== state) return;
+    state.dirty = false;
+    state.fullSnapshot = true;
+    const delay = Math.min(30_000, 1_000 * 2 ** Math.min(state.databaseFailures ?? 0, 16));
+    state.databaseFailures = (state.databaseFailures ?? 0) + 1;
+    state.databaseRetryAt = this.clock.now() + delay;
+    this.schedule(runtimeId, state, state.databaseRetryAt);
+    if (state.databaseWarningAt !== undefined && this.clock.now() - state.databaseWarningAt < 30_000) return;
+    state.databaseWarningAt = this.clock.now();
+    console.warn(JSON.stringify({ event: "daemon_downlink_snapshot_failed", runtime_id: runtimeId,
+      error_class: "DatabaseUnavailableError" }));
   }
 
   private claimAcknowledged(state: RuntimeDownlinks): void {

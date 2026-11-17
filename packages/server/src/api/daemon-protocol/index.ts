@@ -16,6 +16,7 @@
  * answers `{}` until A-6 fills it.
  */
 
+import type { DaemonProtocolClock } from "./clock.js";
 import { withSynchronousRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import {
   DAEMON_PROTOCOL_CLOSE_CODES,
@@ -153,10 +154,11 @@ export class DaemonProtocolLayer {
 
 
   /** Open a v2 session for an upgraded socket. */
-  openSession(socket: DaemonProtocolSocket, identity: DaemonProtocolIdentity): DaemonProtocolSession {
+  openSession(socket: DaemonProtocolSocket, identity: DaemonProtocolIdentity, clock?: DaemonProtocolClock): DaemonProtocolSession {
     const sessionId = createId("dws");
     const session: DaemonProtocolSession = new DaemonProtocolSession({
       sessionId,
+      clock,
       socket,
       registry: this.registry,
       serverVersion: this.serverVersion,

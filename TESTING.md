@@ -31,6 +31,10 @@ ERROR 的 JSONL 保留异常 name、message 和 stack。
 另以真实 PG worker 连接本机未监听端口检查错误分类，不要求外部数据库。
 该组不证明真实 PostgreSQL 重启、网络黑洞或 Compose 重启行为；后者应在隔离部署另行验证。
 
+查询预算测试在每次测量前显式预热 readiness 缓存，继续限制业务 SQL 的原有预算，避免一秒 TTL
+使同一路由的冷、热请求混为一谈。[readiness 成本回归](tests/unit/multiremi/database-readiness-query-count.test.ts)
+单独断言冷请求、TTL 到期、强制 readiness 与已知断连各增加一次 `SELECT 1 AS ready`，缓存命中不增加。
+
 ## 后端测试入口
 
 ```bash

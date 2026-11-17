@@ -170,6 +170,8 @@ describe("session log window statement counts", () => {
     // throttle window do not. Spend that write outside the measured reads.
     for (const token of Object.values(fixture.tokens)) await app.request("/api/me", auth(token));
     const read = async (path: string, token: string) => {
+      // Keep route budgets independent of the one-second readiness TTL.
+      opened.store.checkDatabaseReady(true);
       opened.probe.reset();
       const response = await app.request(path, auth(token));
       expect(response.status).toBe(200);

@@ -208,6 +208,65 @@ test.skipIf(!process.env.MULTIREMI_TEST_POSTGRES_URL)("advisory SQL deadline clo
   }
 }, 15_000);
 
+test("real activation rejects synchronous fence overruns even before timers can run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "slot-sync-fence-"));
+  const c = await child("activate", join(root, "data.db"));
+  try {
+    await c.send({ op: "timeout", value: 30 });
+    await c.send({ op: "fence", value: "sync" });
+    const response = await c.control("activate");
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ state: "failed" });
+    expect((await fetch(`${c.url}/readyz`)).status).toBe(503);
+    expect(c.process.exitCode).toBeNull();
+    await c.send({ op: "fence", value: "normal" });
+    expect((await c.control("activate")).status).toBe(200);
+    expect((await c.control("release")).status).toBe(200);
+  } finally { await c.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test.skipIf(!process.env.MULTIREMI_TEST_POSTGRES_URL)("synchronous PG fence shares the absolute SQL budget and releases real role locks", async () => {
+  const database = await openIntegrationDatabase();
+  const root = mkdtempSync(join(tmpdir(), "slot-sync-pg-fence-"));
+  const a = await child("activate", join(root, "a.db"));
+  const b = await child("activate", join(root, "b.db"), "B");
+  const sql = new Bun.SQL(database.url!);
+  const locks = async () => Number((await sql.unsafe<{ n: number }[]>(
+    "SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+  ))[0]!.n);
+  try {
+    for (const c of [a, b]) await c.send({ op: "database", url: database.url });
+    for (const scenario of [
+      { budget: 30, sleepMs: 120, queries: 1 },
+      { budget: 100, sleepMs: 45, queries: 3 },
+      { budget: 10_000, sleepMs: 10_200, queries: 1 },
+    ]) {
+      await a.send({ op: "timeout", value: scenario.budget });
+      await a.send({ op: "fenceDatabase", url: database.url, ...scenario });
+      await a.send({ op: "fence", value: "sync-pg" });
+      // The default-budget case needs a client timeout beyond ten seconds.
+      const started = performance.now();
+      const response = await fetch(`${a.url}/internal/slot/activate`, {
+        method: "POST", headers: { Authorization: "Bearer control-test" },
+        signal: AbortSignal.timeout(scenario.budget + 3000),
+      });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ state: "failed" });
+      expect(performance.now() - started).toBeLessThan(scenario.budget + 250);
+      expect((await fetch(`${a.url}/readyz`)).status).toBe(503);
+      expect(await pollUntil(async () => await locks() === 0, 1000)).toBe(true);
+      expect((await b.control("activate")).status).toBe(200);
+      expect((await b.control("release")).status).toBe(200);
+    }
+    await a.send({ op: "fence", value: "normal" });
+    expect((await a.control("activate")).status).toBe(200);
+    expect((await a.control("release")).status).toBe(200);
+  } finally {
+    await a.close(); await b.close(); await sql.end({ timeout: 1 });
+    await database.close(); rmSync(root, { recursive: true, force: true });
+  }
+}, 20_000);
+
 test("slot and legacy SIGTERM bound the entire sequence including four post-server disposal steps", async () => {
   await Promise.all(["slot-shutdown", "legacy-shutdown"].map(async mode => {
     const root = mkdtempSync(join(tmpdir(), "slot-total-shutdown-"));

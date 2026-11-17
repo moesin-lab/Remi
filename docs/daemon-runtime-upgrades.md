@@ -270,6 +270,23 @@ Antigravity 的 ACP server 是 Google 的专有软件，不随 Remi 发布包分
 保留 `previous-launcher` 和原有 wrapper，以原子 rename 切换稳定 launcher。
 平台请求固定 `target_version`，不再下载 `install-remi.sh`。交互式安装仍不自动重启。
 
+平台更新在查询发布信息、下载或写入任何安装文件前，先确认服务实际执行入口就是
+将被替换的稳定 launcher（`MULTIREMI_BIN_DIR/remi`，否则为 PATH 上第一个
+`remi`，再回退 `/usr/local/bin/remi`）。systemd 使用
+`systemctl --user show -p ExecStart --value -- <unit>` 读取所有 drop-in 合并后的
+有效配置；launchd 通过 `launchctl print gui/<uid>/<label>` 确认已加载的
+program 与 plist 路径，再读取该 plist 的 `ProgramArguments[0]`，若有 `Program`
+则以其为准。已加载 program 与磁盘 plist 必须同时通过检查。查询失败、格式无法确认，或入口直接指向版本二进制时，
+请求以 `failed` 结束，不安装、不改写 launcher/plist、不启动回滚看门、不重启。
+错误包含实际入口、期望 launcher 和修复指引。
+
+维护者应在授权维护窗口运行 `remi daemon service install`，检查并移除冲突的
+systemd drop-in，再确认有效 `ExecStart` / plist 已指向同一稳定 launcher 后重试。
+安装器不会替你清理自定义 drop-in；平台更新也不会自动迁移服务配置。
+launchd 没有 systemd 式多层 drop-in；其覆盖语义由选定 plist 与 `Program` 决定。
+服务托管的平台更新不再改写任何 plist；交互式 `remi update` 的安装与 plist
+迁移行为保持不变，不自动重启 daemon。
+
 CLI 请求状态依次为 `pending → running → restarting → verifying → completed`。
 安装完成仅进入 `restarting`；服务端收到同一 Runtime、同一 daemon 身份、目标
 `cli_version` 的协议 hello 后才进入 `verifying`。新 daemon 完成工作区归属、崩溃

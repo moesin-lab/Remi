@@ -41,7 +41,10 @@
    out/remi --version
    ```
 
-2. 安装到 `<profile-root>/releases/<full-sha>/daemon-bin/remi`，新增一个编号更大的 drop-in（例如 `95-main-<short-sha>.conf`），内容为清空并重设 `ExecStart=<那个路径> daemon start --foreground`，然后 `systemctl --user daemon-reload`。
+2. 安装到 `<profile-root>/releases/<full-sha>/daemon-bin/remi`，新增一个 drop-in，内容为清空并重设 `ExecStart=<那个路径> daemon start --foreground`，然后 `systemctl --user daemon-reload`。
+   - systemd 按文件名的字典序应用 drop-in，后面的覆盖前面的。新文件名必须排在所有已有文件之后；数字前缀用到 99 之后，用 `99z-…`、`99zz-…` 之类。
+   - `daemon-reload` 后用 `systemctl --user show multiremi-daemon.service -p ExecStart` 确认生效的是新路径，再重启。
+   - 每次部署都叠一个 drop-in 只是过渡做法，改为稳定 launcher 由 MUL-26 跟进。
 3. 重启前看 `remi daemon status` 的 `Active tasks`。等空闲最多约 20 分钟；任务持续进来时直接 `systemctl --user restart multiremi-daemon.service`（systemd 约 90 秒后强杀）。
 4. 重启后确认每条 lane 的 `Version` 都是新版本。重启前先用 `remi turn list --status running` 记下在跑的轮次；重启后逐个看 `remi turn get <turn>`：大多数会自动换成新尝试继续运行（`current_attempt_id` 变了）；以 `runtime_recovery` 等原因结束的，用 `remi turn retry <turn> --yes` 重试。报 already has an active run 的，说明服务端已经续上，可以忽略。
 

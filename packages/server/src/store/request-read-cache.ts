@@ -338,6 +338,8 @@ function invalidateTable(table: string | null): void {
     return;
   }
   cache.clearTable(table);
+  // Runtime lite rows join the physical-daemon drain fence.
+  if (table === "multiremi_daemon_drains") cache.clearTable("multiremi_runtimes");
   if(table==='multiremi_turns'||table==='multiremi_turn_attempts')cache.clearTable('multiremi_turn_execution_records');
   if(table==='multiremi_session_lanes')cache.clearTable('multiremi_agent_lane_records');
   if(table==='multiremi_conversation_log'){cache.clearTable('multiremi_chat_message_records');cache.clearTable('multiremi_issue_message_records');}

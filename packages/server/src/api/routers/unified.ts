@@ -119,7 +119,8 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
       const rows: UnifiedMessage[] = [];
       let from = after;
       for (;;) {
-        const page = store.listMessages(conversation.id, { from, limit: n + 1, thread, unread_by: unread, message_kind: kind });
+        const page = store.listMessages(conversation.id, { from, limit: n + 1, thread, unread_by: unread, message_kind: kind,
+          ...(delegated ? {} : { access: { userId: currentRequestUserId(c), admin: false, attemptId: currentTaskAccessToken(c)?.taskId ?? undefined } }) });
         const visible = delegated ? (message: UnifiedMessage) => canReadDelegationResult(c, store, message.id)
           : conversationEntryVisibility(c, store, { prefetch: page, chatSession: "chatSession" in conversation ? conversation.chatSession : undefined });
         rows.push(...page.filter(visible));

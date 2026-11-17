@@ -47,7 +47,7 @@ it("bounds message reads and attachment hydration to the requested Chat page", a
   const reads = spyOn(db!, "query").mockImplementation(new Proxy(query, {
     apply(target, thisArg, args: [string]) {
       const statement = Reflect.apply(target, thisArg, args);
-      if (!/SELECT m\.\* FROM multiremi_conversation_log m WHERE session_id=\?/i.test(args[0])) return statement;
+      if (!/SELECT m\.\* FROM multiremi_conversation_log m\b/i.test(args[0])) return statement;
       pageSql.push(args[0]);
       return new Proxy(statement, {
         get(target, property) {

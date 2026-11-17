@@ -80,6 +80,15 @@ export function conversationEntryVisibility(c: Context, store: MultiremiStore, o
   const subjects = new Map<string, TaskVisibilitySubject | null>();
   const targets = new Map<string, ConversationVisibilityEntry | null>();
   if (options.prefetch?.length) prefetchConversationVisibility(store, options.prefetch, related, targets, subjects);
+  if (options.prefetch?.length) {
+    const candidates = [...options.prefetch, ...related.values(), ...targets.values()]
+      .filter((entry): entry is ConversationVisibilityEntry => !!entry && !!entry.id
+        && (entry.metadata.question_notification === true || entry.metadata.question_present_request === true));
+    const ids = [...new Set(candidates.map(entry => entry.id!))];
+    const readable = store.readableQuestionNotifications(candidates,
+      { userId: currentRequestUserId(c), admin: false, attemptId: currentTaskAccessToken(c)?.taskId ?? undefined }, related);
+    for (const id of ids) notifications.set(id, readable.has(id));
+  }
   // A prefetched id answers from the batch (null when it has no message row);
   // any other id is read exactly as before.
   const reply = (id: string): ConversationVisibilityEntry | null => related.has(id) ? related.get(id) ?? null : store.getMessage(id);

@@ -2457,7 +2457,7 @@ export class MultiremiDaemon {
   private async installRuntimeUpdate(runtimeId: string, requestId: string, targetVersion: string): Promise<string> {
     const restart = this.updateRestartSpec;
     if (!restart) throw new Error("This daemon launch has no recoverable update restart specification");
-    const result = await performUpdate({ targetVersion, currentVersion: multiremiVersion,
+    const result = await performUpdate({ targetVersion, currentVersion: multiremiVersion, serviceRestart: restart,
       ...(basename(process.execPath) === "remi" ? { rollbackExecutable: process.execPath } : {}),
       beforeActivate: async installed => {
         const journal = journalForInstall(installed, runtimeId, requestId, multiremiVersion);

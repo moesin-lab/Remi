@@ -1,6 +1,6 @@
 import { disabledSshMeshRuntime } from "../../helpers/ssh-mesh-isolation.js";
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MultiremiRuntimeUpdateScope } from "@multiremi/contracts/types.js";
@@ -28,7 +28,8 @@ interface TestDaemonState {
       report: UpdateReport,
     ): Promise<void>;
   };
-  updateRunner(targetVersion: string): string | Promise<string>;
+  updateRunner?: (targetVersion: string) => string | Promise<string>;
+  updateRestartSpec?: { command: string[]; manager?: "systemd" | "launchd" };
   updateAgentCli(): Promise<string>;
   reinstallAcpBridge(): string;
   handleRuntimeUpdate(
@@ -208,6 +209,45 @@ describe("co-resident CLI update coordination", () => {
       error: "daemon is busy; retry update when idle",
     }]);
     expect(daemonState.claimsPaused).toBe(false);
+  });
+
+  it("reports failed and resumes sibling claims when the real installer rejects the effective service entry", async () => {
+    const [daemon, sibling] = createDaemons();
+    const daemonState = state(daemon);
+    const reports = captureReports(daemonState);
+    const root = mkdtempSync(join(tmpdir(), "multiremi-cli-entry-mismatch-"));
+    roots.push(root);
+    const mocks = join(root, "bin");
+    mkdirSync(mocks);
+    const launcher = join(mocks, "remi");
+    writeFileSync(launcher, "unchanged launcher");
+    writeFileSync(join(mocks, "systemctl"), `#!/bin/sh\nprintf '%s\\n' '{ path=${root}/versions/old/remi ; }'\n`, { mode: 0o755 });
+    const keys = ["PATH", "MULTIREMI_BIN_DIR", "MULTIREMI_INSTALL_ROOT", "MULTIREMI_STATE_DIR"];
+    const original = keys.map(key => process.env[key]);
+    daemonState.updateRunner = undefined;
+    daemonState.updateRestartSpec = { manager: "systemd", command: ["systemctl", "--user", "restart", "--no-block", "fixture.service"] };
+    try {
+      process.env.PATH = `${mocks}:${original[0]}`;
+      process.env.MULTIREMI_BIN_DIR = mocks;
+      process.env.MULTIREMI_INSTALL_ROOT = join(root, "install");
+      process.env.MULTIREMI_STATE_DIR = join(root, "state");
+      await daemonState.handleRuntimeUpdate("rt_fixture", "upd_entry", "9.9.9", "cli");
+    } finally {
+      keys.forEach((key, index) => {
+        if (original[index] === undefined) delete process.env[key];
+        else process.env[key] = original[index];
+      });
+    }
+    expect(reports.map(report => report.status)).toEqual(["running", "failed"]);
+    expect(reports.at(-1)?.error).toContain(`expected launcher=${launcher}`);
+    expect(reports.at(-1)?.error).toContain(`${root}/versions/old/remi`);
+    expect(daemon.restartRequested()).toBe(false);
+    expect(sibling!.restartRequested()).toBe(false);
+    expect(daemonState.claimsPaused).toBe(false);
+    expect(state(sibling).claimsPaused).toBe(false);
+    expect(readFileSync(launcher, "utf8")).toBe("unchanged launcher");
+    expect(existsSync(join(root, "install"))).toBe(false);
+    expect(existsSync(join(root, "state"))).toBe(false);
   });
 
   function createDaemons(count = 2): MultiremiDaemon[] {

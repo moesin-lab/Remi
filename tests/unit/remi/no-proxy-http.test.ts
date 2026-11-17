@@ -76,3 +76,26 @@ it("isolates simultaneous bypassed and proxied requests, preserves port restrict
     proxy.stop(true);
   }
 }, 15000);
+
+it("bypasses the real HTTP proxy for an IPv6 CIDR target", async () => {
+  const direct = Bun.serve({ hostname: "::1", port: 0, fetch: () => new Response("ipv6-direct") });
+  const proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("proxy") });
+  try {
+    const child = Bun.spawn([process.execPath, "--eval", `
+      import { cliFetch } from "./apps/remi/cli/core/proxy-fetch.ts";
+      console.log(await (await cliFetch("${direct.url}")).text());
+    `], {
+      cwd: process.cwd(),
+      env: { ...process.env, HTTP_PROXY: proxy.url.href, http_proxy: proxy.url.href,
+        NO_PROXY: "::/0", no_proxy: "::/0" },
+      stdout: "pipe", stderr: "pipe",
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+    ]);
+    expect({ code, stderr, stdout: stdout.trim() }).toEqual({ code: 0, stderr: "", stdout: "ipv6-direct" });
+  } finally {
+    direct.stop(true);
+    proxy.stop(true);
+  }
+}, 15000);

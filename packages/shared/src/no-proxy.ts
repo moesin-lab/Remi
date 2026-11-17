@@ -50,6 +50,8 @@ export function shouldBypassProxy(url: string | URL, env: NodeJS.ProcessEnv = pr
 /** Preserve each casing's existing list and its spawn-time machine fallback. */
 export function appendTaskNoProxy(env: NodeJS.ProcessEnv, serverUrl: string): void {
   const hosts = [unbracket(new URL(serverUrl).hostname), "localhost", "127.0.0.1", "::1"];
+  // Bun matches bracketed URL hostnames; other clients expect bare IPv6.
+  hosts.push(...hosts.filter((host) => isIP(host) === 6).map((host) => `[${host}]`));
   for (const key of ["NO_PROXY", "no_proxy"] as const) {
     const other = key === "NO_PROXY" ? "no_proxy" : "NO_PROXY";
     const existing = env[key] ?? process.env[key] ?? env[other] ?? process.env[other] ?? "";

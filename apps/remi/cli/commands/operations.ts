@@ -604,6 +604,9 @@ function autopilotRunGuard(): CommandSpec {
     auth: HUMAN,
     mutation: "read",
     outputs: ["table", "json", "jsonl"],
+    // This retired positional has its own actionable refusal; do not let the
+    // namespace dispatcher replace it with generic unknown-subcommand help.
+    positionals: [{ name: "autopilot", required: false }],
     parse: "passthrough",
     run: async () => {
       throw new CliError(

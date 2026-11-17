@@ -36,6 +36,7 @@ it("profiles mixed HTTP, real daemon heartbeats and production background scans"
   const options = { enabled: true, summaryDbRoutes: true, slowRequestMs: 1e9,
     summaryIntervalMs: 1e9, summaryTopRoutes: 50, bufferCapacity: 32768, role: "all" as const };
   const h = await DaemonProtocolHarness.create({
+    database: "sqlite",
     requestMetrics: options, offerSweepMs: 60_000,
     beforeStart(h) {
       for (const id of extraIds) h.store.registerRuntime({ id, name: "profile runtime", provider: "claude",

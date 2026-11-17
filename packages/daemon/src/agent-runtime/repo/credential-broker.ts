@@ -64,6 +64,20 @@ export function appendGitCredentialBrokerEnv(
   }
   appendGitConfig(env, "credential.useHttpPath", "true");
 
+  // Existing caches may retain their SSH origin after a machine-authenticated
+  // fallback. Route task Git commands through the broker without changing that
+  // shared config or depending on the child being able to read ~/.ssh.
+  const repositoryUrls = [...new Set(
+    [options.repositoryUrl, ...(options.repositoryUrls ?? [])]
+      .map((url) => url?.trim()).filter((url): url is string => Boolean(url)),
+  )];
+  for (const repositoryUrl of repositoryUrls) {
+    const cloneUrl = preferredHttpsCloneUrl(repositoryUrl);
+    if (cloneUrl !== repositoryUrl) {
+      appendGitConfig(env, `url.${cloneUrl}.insteadOf`, repositoryUrl);
+    }
+  }
+
   env.GIT_TERMINAL_PROMPT = "0";
   env.GCM_INTERACTIVE = "Never";
   if (!env.GIT_SSH_COMMAND?.trim()) {
@@ -77,7 +91,6 @@ export function appendGitCredentialBrokerEnv(
   if (options.attemptId) env.MULTIREMI_ATTEMPT_ID = options.attemptId;
   if (options.repositoryUrl) env.MULTIREMI_GIT_REPOSITORY_URL = options.repositoryUrl;
   else delete env.MULTIREMI_GIT_REPOSITORY_URL;
-  const repositoryUrls = [...new Set((options.repositoryUrls ?? []).map((url) => url.trim()).filter(Boolean))];
   if (repositoryUrls.length) env.MULTIREMI_GIT_REPOSITORIES_JSON = JSON.stringify(repositoryUrls);
   else delete env.MULTIREMI_GIT_REPOSITORIES_JSON;
   env.MULTIREMI_GIT_CREDENTIAL_TIMEOUT_MS = String(

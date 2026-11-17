@@ -582,8 +582,11 @@ export class RuntimesRepo {
       if (cached !== undefined) return cached;
     }
     const row = this.ctx.db.query(
-      `SELECT runtime.*, profile.display_name AS daemon_display_name
+      `SELECT runtime.*, profile.display_name AS daemon_display_name, drain.daemon_id AS draining_daemon_id
        FROM multiremi_runtimes runtime
+       LEFT JOIN multiremi_daemon_drains drain
+         ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local')
+        AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id)
        LEFT JOIN multiremi_daemon_profiles profile
          ON profile.workspace_id = COALESCE(runtime.workspace_id, 'local')
         AND profile.daemon_id = runtime.daemon_id
@@ -1604,10 +1607,7 @@ export class RuntimesRepo {
 
   /** Persisted physical-daemon admission fence (also used by CLI updates). */
   hasCliUpdateDrainForRuntime(runtimeId: string): boolean {
-    const runtime = this.getRuntimeLite(runtimeId);
-    if (!runtime) return false;
-    return !!this.ctx.db.query(`SELECT 1 FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ?`)
-      .get(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id);
+    return this.readRuntimeRow(runtimeId)?.draining_daemon_id != null;
   }
 
   beginDaemonDrain(workspaceId: string, daemonId: string, reason: DaemonDrainReason = "manual", durationMs?: number, updateRequestId?: string): DaemonDrainStatus {
@@ -2552,6 +2552,9 @@ export class RuntimesRepo {
         [now, now, runtimeId],
       );
       runtime = withRuntimeLiveness({ ...runtime, status: "online", lastHeartbeatAt: now, updatedAt: now });
+      writeThroughRequestReadCache(cacheKey("multiremi_runtimes", "row", runtimeId), {
+        ...initialRow, status: "online", last_heartbeat_at: now, updated_at: now,
+      });
     }
     const ack: MultiremiDaemonHeartbeatAck = { runtime_id: runtimeId, status: "ok" };
     // The only v1 downlink is the compulsory upgrade; v2 claims on ACK.

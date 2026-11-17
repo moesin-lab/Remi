@@ -1,7 +1,8 @@
+import { DatabaseUnavailableError } from "@shared/db/recovery.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it, spyOn, setSystemTime } from "bun:test";
 import { DaemonProtocolLayer } from "@multiremi/api/daemon-protocol/index.js";
-import { DaemonTaskOffers, daemonTurnOfferPayload } from "@multiremi/api/daemon-protocol/task-offers.js";
+import { DAEMON_OFFER_SWEEP_MS, DaemonTaskOffers, daemonTurnOfferPayload } from "@multiremi/api/daemon-protocol/task-offers.js";
 import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.js";
 import { DAEMON_MIN_CLI_VERSION, DAEMON_OFFER_COOLDOWN_MS, DAEMON_OFFER_TIMEOUT_MS } from "@multiremi/contracts/daemon-protocol.js";
 import type { MultiremiTaskWithAgent } from "@multiremi/contracts/types.js";
@@ -13,7 +14,7 @@ afterEach(async () => {
   resetMultiremiTestEnv();
 });
 
-function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<string, unknown> | null>, runtimeCount = 1, sweepMs = 2_147_483_647) {
+function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<string, unknown> | null>, runtimeCount = 1, sweepMs?: number, metrics = false) {
   const store = createLocalStore();
   const runtimeIds = Array.from({ length: runtimeCount }, (_, index) => {
     const id = `rt_offer_${index}`;
@@ -24,7 +25,8 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
   const agentIds = runtimeIds.map(runtimeId => store.createAgent({ name: runtimeId, runtimeId,
     provider: "claude", workspaceId: "local" }).id);
   const clock = new ManualDaemonProtocolClock(Date.now());
-  const layer = new DaemonProtocolLayer({ store });
+  const layer = new DaemonProtocolLayer({ store, metrics: metrics ? { enabled: true,
+    summaryIntervalMs: 2_147_483_647, summaryTopTypes: 20, bufferCapacity: 4096 } : undefined });
   layers.push(layer);
   const offers = new DaemonTaskOffers({ store, layer, clock, sweepMs,
     prepare: async task => {
@@ -53,6 +55,35 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
 }
 
 describe("A-3 task offers", () => {
+  it("backs off an unavailable database and resumes offers on the same session", async () => {
+    const h = fixture();
+    const task = h.task();
+    await h.hello();
+    await h.accept();
+    h.store.startTask(task.id);
+    h.store.completeTask(task.id, { output: "done" });
+    const next = h.task();
+    const original = h.store.getRuntimeLite.bind(h.store);
+    let attempts = 0;
+    const probe = spyOn(h.store, "getRuntimeLite").mockImplementation((...args) => {
+      attempts++;
+      if (attempts <= 2) throw new DatabaseUnavailableError();
+      return original(...args);
+    });
+    try {
+      h.offers.kick(); await h.layer.drain();
+      expect(attempts).toBe(1);
+      h.clock.advance(999); await h.layer.drain();
+      expect(attempts).toBe(1);
+      h.clock.advance(1); await h.layer.drain();
+      expect(attempts).toBe(2);
+      h.clock.advance(1999); await h.layer.drain();
+      expect(attempts).toBe(2);
+      h.clock.advance(1); await h.layer.drain();
+      expect(h.offered().at(-1)!.p.attempt_id).toBe(next.id);
+    } finally { probe.mockRestore(); }
+  });
+
   it("dispatches irreducible structure that exceeds the soft budget but fits the actual protocol hard limit", async () => {
     const h = fixture(async task => ({ id: task.id, prompt: task.prompt, repos: new Array(300_000).fill(0) }));
     const task = h.task(); await h.hello();
@@ -182,14 +213,40 @@ describe("A-3 task offers", () => {
     expect(h.offered()).toHaveLength(2);
   });
 
-  it("keeps the sweep disabled by default so a missing direct trigger remains observable", async () => {
-    const h = fixture(); await h.hello(); h.task();
-    h.clock.advance(60_000); await h.layer.drain();
-    expect(h.offered()).toHaveLength(0);
+  it("recovers missed queue events with the production default sweep and increments the summary counter", async () => {
+    const previous = process.env.NODE_ENV;
+    let h: ReturnType<typeof fixture>;
+    try {
+      process.env.NODE_ENV = "production";
+      h = fixture(undefined, 1, undefined, true);
+    } finally {
+      if (previous === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previous;
+    }
+    await h.hello(); const task = h.task();
+    const metric = spyOn(h.layer, "recordOfferSweepRecovery");
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      h.clock.advance(DAEMON_OFFER_SWEEP_MS - 1); await h.layer.drain();
+      expect(h.offered()).toHaveLength(0); expect(metric).not.toHaveBeenCalled();
+      h.clock.advance(1); await h.layer.drain();
+      expect(h.offered().map(frame => frame.p.attempt_id)).toEqual([task.id]);
+      expect(metric).toHaveBeenCalledTimes(1);
+      h.layer.flushMetrics();
+      expect(JSON.parse(log.mock.calls[0]![0] as string)).toMatchObject({
+        event: "ws_minute_summary", offer_sweep_recovered: 1,
+      });
+      h.layer.flushMetrics();
+      expect(JSON.parse(log.mock.calls[1]![0] as string).offer_sweep_recovered).toBe(0);
+      expect(JSON.parse(warn.mock.calls[0]![0] as string)).toEqual({
+        event: "daemon_offer_sweep_recovered", runtime_id: h.runtimeIds[0], task_id: task.id,
+      });
+    } finally { metric.mockRestore(); warn.mockRestore(); log.mockRestore(); }
   });
 
   it("sweeps online runtimes at 60s, records recovered work and skips a pending offer", async () => {
-    const h = fixture(undefined, 1, 60_000); await h.hello(); const task = h.task();
+    const h = fixture(undefined, 1, DAEMON_OFFER_SWEEP_MS); await h.hello(); const task = h.task();
     const metric = spyOn(h.layer, "recordOfferSweepRecovery");
     const warn = spyOn(console, "warn").mockImplementation(() => {});
     try {
@@ -398,6 +455,25 @@ describe("A-3 task offers", () => {
     h.session.handleSocketClose();
     expect(h.store.claimTask(h.runtimeIds[0]!)?.id).toBe(task.id);
     expect(h.store.getTask(task.id)?.executionFingerprint).not.toBe(stale);
+  });
+
+  it("does not claim on ordinary ack/drain without a blocked offer, and enqueue still offers immediately", async () => {
+    const h = fixture(); await h.hello();
+    // Create work without an enqueue event: unrelated socket traffic must not poll it.
+    const task = h.task();
+    const claim = spyOn(h.store, "claimTask");
+    try {
+      for (let i = 0; i < 8; i++) {
+        await h.send("ack", { ack: 0 });
+        h.session.handleDrain();
+        await h.layer.drain();
+      }
+      h.clock.advance(180_000); await h.layer.drain();
+      expect(claim).not.toHaveBeenCalled();
+      h.offers.enqueued(task); await h.layer.drain();
+      expect(claim).toHaveBeenCalledTimes(1);
+      expect(h.offered()[0]!.p.attempt_id).toBe(task.id);
+    } finally { claim.mockRestore(); }
   });
 
   it("derives pending work again after a full window receives an ack", async () => {

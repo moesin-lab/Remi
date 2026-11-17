@@ -71,12 +71,31 @@ PR 6 的后台任务计数随同一帧、按同一规则写库。后台任务快
 不计算历史用量。CLI 排空、重试时点、任务下发的宿主所有者信息与飞书卡片能力判断也不附带统计；用户侧统计继续使用
 规范化台账的原查询。空派活仍有锁、资格和恢复检查，不能把“没有聚合”理解为“没有 SQL”。
 
+WebSocket 心跳处理共用一次同步范围的读取缓存，返回时关闭并清空缓存；同步 workspace 事件
+创建的 Promise/定时器即使继承 AsyncLocalStorage，也不能复用已关闭缓存，后台 pump 可建立新范围。
+Session hooks 在缓存范围外运行。drain 围栏并入 Runtime 行读取；
+写 drain 表时同时失效 Runtime 缓存，事务和锁仍强制重读。心跳复用本次读取的 maintenance，
+普通 liveness 写入后把新行写回缓存；drain 唤醒定时仅查询 deadline，不水合任务/ack 汇总。
+[心跳预算回归](../../tests/integration/daemon-protocol-v2/heartbeat-plugin-cost.test.ts)保持旧宿主单心跳
+7 次 SELECT / 2 次 UPDATE、mesh 全链路 SELECT ≤30 的预算；这不代表生产 DB 负载已验证下降。
+
 成本检查要计入排队的下行和派活及 `WITH` 查询，不能在同步 heartbeat handler 返回时停止。
 [多 Runtime 回归](../../tests/unit/multiremi/daemon-heartbeat-fanout-cost.test.ts)用 8 个 Runtime、
 初始 0 个任务覆盖相同报告、真实变化、目标范围与活动记录；新增任务用例验证入队立即推送，
 容量释放后在冷却到期前重试且只检查同一 daemon。默认 SQLite，显式
 `MULTIREMI_TEST_POSTGRES_URL` 则创建并清理独立 PostgreSQL 测试库，连接失败不回落。
 这是 SQL 成本与行为检查，不提供生产延迟、吞吐或恢复时间结论。
+
+## 认领候选与 offer 唤醒边界
+
+正常认领与陈旧 dispatch 恢复从 attempts/turns 基表选一次 ID，PG 锁候选时使用
+`SKIP LOCKED`；工作区生命周期锁继续保护并发上限与配置。随后按 ID 进入规范化变更器。
+活跃 attempt ID 集合物化一次供容量/lane/共享目录探针复用，保留当前 turn 的
+awaiting_human 状态覆盖及 unknown offer 保留的共享目录租约。索引、完整谓词对照、查询数范围及隔离 PG 计划见
+[MUL-163 报告](../../reports/performance/MUL-163-claim.md)。生产 offer 默认保留 60 s 兜底扫描，泵忙、等待或冷却时跳过；
+普通 ack/drain 只恢复背压等待；入队、终态、容量/配置变化及已有期限仍立即触发。
+扫描恢复派发时记 warn 和 `offer_sweep_recovered`，用于定位遗漏事件；测试环境默认禁用扫描。
+线上延迟与一小时稳定性仍需部署后测量。
 
 ## Issue 详情首屏的工作区读取
 

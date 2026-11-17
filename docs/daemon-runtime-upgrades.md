@@ -108,8 +108,10 @@ GitHub 来源从 `MULTIREMI_RELEASE_REPO`（兼容回退为 `MULTIREMI_REPO`，�
 两种来源都按当前 OS/架构选择制品，核对 size、SHA-256、归档路径和新二进制
 `--version`；平台来源额外要求 `--build-info` 的版本与提交匹配清单。然后由新包的
 `remi runtime prepare` 安装并验证固定依赖。任一步失败都不会改写现有 executable。
-未指定目标的更新遇到较旧版本直接返回 current；同版本不同提交仍可安装，显式指定
-较旧目标也仍可安装。
+未指定目标的更新遇到较旧版本直接返回 current；平台制品比较版本先后时，保留
+major.minor.patch 和预发布标签，忽略末尾构建哈希（如 `-stable.ab12cd34` 中的
+`ab12cd34`）及 `+` 构建元数据。同版本不同提交仍可安装，不按哈希字典顺序判断新旧；
+显式指定较旧目标也仍可安装。完整版本和提交仍用于制品身份校验。
 
 验证成功后，新包进入 `~/.local/lib/remi/versions/<digest-prefix>/`，旧快照
 保留。稳定 launcher 仅原子替换其中的版本目标，并将原内容保存为新快照的

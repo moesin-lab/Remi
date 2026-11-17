@@ -103,6 +103,12 @@ export interface PeerSummary {
   duplicates: number;
 }
 
+export interface RouteDbSummary extends RouteSummary {
+  db_queries: number;
+  queries_per_request: number;
+  db_ms: number;
+}
+
 export interface MinuteSummary {
   event: "api_minute_summary";
   ts: string;
@@ -119,6 +125,8 @@ export interface MinuteSummary {
   /** MUL-461: which API role produced this window. */
   role: ApiRole;
   routes: RouteSummary[];
+  /** Opt-in HTTP attribution, ranked by SQL count; never another process total. */
+  db_routes?: RouteDbSummary[];
   peer: PeerSummary;
 }
 
@@ -131,6 +139,8 @@ export interface RequestMetricsOptions {
   summaryIntervalMs: number;
   /** How many routes the summary keeps, ranked by `sum_ms`. */
   summaryTopRoutes: number;
+  /** Include SQL-ranked HTTP attribution in the existing minute summary. */
+  summaryDbRoutes?: boolean;
   /** Fixed window-buffer capacity; older samples are dropped once it wraps. */
   bufferCapacity: number;
   /**
@@ -1075,6 +1085,7 @@ export interface WindowSummaryInput {
   dbQueries: number;
   eventLoopLagMaxMs: number;
   topRoutes: number;
+  summaryDbRoutes?: boolean;
   /** MUL-461: reported verbatim in the summary line. */
   role: ApiRole;
   /** MUL-462: peer-channel counters for this window. Omitted means a zeroed block. */
@@ -1089,7 +1100,7 @@ export interface WindowSummaryInput {
  */
 export function summarizeWindow(input: WindowSummaryInput): MinuteSummary {
   const windowMs = finite(input.windowMs);
-  const groups = new Map<string, { method: string; route: string; durations: number[] }>();
+  const groups = new Map<string, { method: string; route: string; durations: number[]; dbQueries: number; dbMs: number }>();
   let status5xx = 0;
   let slow = 0;
   for (const sample of input.samples) {
@@ -1097,8 +1108,12 @@ export function summarizeWindow(input: WindowSummaryInput): MinuteSummary {
     if (sample.slow) slow += 1;
     const key = `${sample.method} ${sample.route}`;
     const group = groups.get(key);
-    if (group) group.durations.push(sample.totalMs);
-    else groups.set(key, { method: sample.method, route: sample.route, durations: [sample.totalMs] });
+    if (group) {
+      group.durations.push(sample.totalMs);
+      group.dbQueries += sample.dbQueries;
+      group.dbMs += sample.dbMs;
+    } else groups.set(key, { method: sample.method, route: sample.route, durations: [sample.totalMs],
+      dbQueries: sample.dbQueries, dbMs: sample.dbMs });
   }
 
   const routes: RouteSummary[] = [...groups.values()].map((group) => ({
@@ -1114,6 +1129,13 @@ export function summarizeWindow(input: WindowSummaryInput): MinuteSummary {
     || `${left.method} ${left.route}`.localeCompare(`${right.method} ${right.route}`));
 
   const top = Math.max(0, Math.trunc(input.topRoutes));
+  const dbRoutes: RouteDbSummary[] | undefined = input.summaryDbRoutes ? routes.map(route => {
+    const group = groups.get(`${route.method} ${route.route}`)!;
+    return { ...route, db_queries: group.dbQueries,
+      queries_per_request: round2(group.dbQueries / route.count), db_ms: round1(group.dbMs) };
+  }).sort((left, right) => right.db_queries - left.db_queries
+    || right.db_ms - left.db_ms || right.sum_ms - left.sum_ms
+    || `${left.method} ${left.route}`.localeCompare(`${right.method} ${right.route}`)).slice(0, top) : undefined;
   return {
     event: "api_minute_summary",
     ts: (input.now ?? new Date()).toISOString(),
@@ -1128,6 +1150,7 @@ export function summarizeWindow(input: WindowSummaryInput): MinuteSummary {
     event_loop_lag_max_ms: round1(finite(input.eventLoopLagMaxMs)),
     role: input.role,
     routes: routes.slice(0, top),
+    ...(dbRoutes ? { db_routes: dbRoutes } : {}),
     peer: input.peer ?? {
       sent: 0, batches: 0, dropped: 0, failed: 0, rtt_p95_ms: 0,
       oversize_dropped: 0, degraded: 0, duplicates: 0,
@@ -1163,6 +1186,7 @@ export function resolveRequestMetricsOptions(
       DEFAULT_SUMMARY_INTERVAL_MS,
       1,
     ),
+    summaryDbRoutes: envEnabled(env.MULTIREMI_METRICS_DB_ROUTES?.trim() || undefined, false),
     summaryTopRoutes: envNumber(env.MULTIREMI_METRICS_SUMMARY_TOP_N, DEFAULT_SUMMARY_TOP_ROUTES, 0),
     bufferCapacity: envNumber(env.MULTIREMI_METRICS_BUFFER_SIZE, DEFAULT_BUFFER_CAPACITY, 1),
     role,
@@ -1399,6 +1423,7 @@ export function startRequestMetricsSummary(options: RequestMetricsOptions): Requ
       dbQueries,
       eventLoopLagMaxMs: lag,
       topRoutes: options.summaryTopRoutes,
+      summaryDbRoutes: options.summaryDbRoutes,
       role: options.role,
       peer,
     });

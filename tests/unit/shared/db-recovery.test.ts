@@ -101,10 +101,69 @@ describe("database recovery boundaries", () => {
       await until(() => calls === 6);
       // Ignore until()'s 2ms polling timer. The bug neither increments nor
       // resets the outage counter; success on tick 4 resets it for tick 5.
-      expect(timers.mock.calls.map(call => call[1]).filter(delay => delay !== 2)).toEqual([11, 55, 22, 7, 11]);
+      expect(timers.mock.calls.map(call => call[1]).filter(delay => delay !== 2)).toEqual([11, 7, 22, 7, 11]);
       expect(errors.mock.calls).toHaveLength(1);
       expect(errors.mock.calls[0]![0]).toContain("mixed: unexpected maintenance error");
       expect(errors.mock.calls[0]![1]).toBe(bug);
+    } finally { loop.stop(); timers.mockRestore(); errors.mockRestore(); }
+  });
+
+  for (const interval of [0, -1, 86_400_000]) {
+    test(`unexpected errors honor cadence ${interval} and allow later one-shot fires`, async () => {
+      const errors = spyOn(console, "error").mockImplementation(() => {});
+      const timers = spyOn(globalThis, "setTimeout");
+      let calls = 0;
+      const loop = new DatabaseRetryLoop("cadence", async () => {
+        calls++;
+        throw new TypeError("post-commit bug");
+      }, interval, 5, 15);
+      try {
+        loop.start();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(calls).toBe(1);
+        expect(timers.mock.calls.map(call => call[1])).toEqual(interval > 0 ? [interval] : []);
+        if (interval <= 0) {
+          await Bun.sleep(40);
+          expect(calls).toBe(1);
+          loop.start();
+          await Promise.resolve();
+          await Promise.resolve();
+          expect(calls).toBe(2);
+        }
+      } finally { loop.stop(); timers.mockRestore(); errors.mockRestore(); }
+    });
+  }
+
+  test("an action error reads the current dynamic cadence", async () => {
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    const timers = spyOn(globalThis, "setTimeout");
+    const loop = new DatabaseRetryLoop("dynamic", () => { throw new ReferenceError("bug"); }, () => 86_400_000, 5, 15);
+    try {
+      loop.start();
+      await Promise.resolve();
+      expect(timers.mock.calls.map(call => call[1])).toEqual([86_400_000]);
+    } finally { loop.stop(); timers.mockRestore(); errors.mockRestore(); }
+  });
+
+  test("a broken dynamic interval retains its last successful cadence", async () => {
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    const timers = spyOn(globalThis, "setTimeout");
+    let intervalCalls = 0;
+    const loop = new DatabaseRetryLoop("cached", () => {}, () => {
+      if (++intervalCalls > 1) throw new TypeError("interval bug");
+      return 86_400_000;
+    }, 5, 15);
+    try {
+      loop.start();
+      await Promise.resolve();
+      const [callback, delay] = timers.mock.calls[0]!;
+      expect(delay).toBe(86_400_000);
+      callback();
+      await Promise.resolve();
+      expect(intervalCalls).toBe(2);
+      expect(timers.mock.calls.map(call => call[1])).toEqual([86_400_000, 86_400_000]);
+      expect(errors).toHaveBeenCalledTimes(1);
     } finally { loop.stop(); timers.mockRestore(); errors.mockRestore(); }
   });
 

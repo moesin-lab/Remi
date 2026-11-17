@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { UpstreamSocket } from '../../../packages/edge/src/websocket';
 import { Hono } from 'hono';
 import { Edge } from '../../../packages/edge/src/index';
-import { connect } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { statSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 const cleanups: (() => unknown)[] = [];
 afterEach(async () => { for (const stop of cleanups.splice(0).reverse()) await stop(); });
@@ -348,7 +348,7 @@ test('rejected upgrade body streams and remains in flight until drained', async 
 });
 
 async function regressionProcess(url: string, wsStallTimeoutMs = 30000) {
-  type Report = { baseline: number; peak: number; closeCalls: { code: number; reason: string }[]; relayTimers: number; activeRelays: number; status: ReturnType<Edge['status']> };
+  type Report = { baseline: number; peak: number; closeCalls: { code: number; reason: string }[]; relayTimers: number; activeRelays: number; activeUpstreams: number; status: ReturnType<Edge['status']> };
   let receive: ((data: Report) => void) | undefined;
   const child = Bun.spawn([process.execPath, 'tests/helpers/edge/regression-process.ts', url, String(wsStallTimeoutMs)], {
     stdout: 'pipe', stderr: 'inherit', ipc(data) { receive?.(data as Report); },
@@ -545,7 +545,7 @@ test('bodyless POST uses a fresh upstream connection and avoids stale keep-alive
   expect(e.status().backends[0].failures).toBe(0); expect(e.status().metrics.upstreamErrors).toBe(0);
 });
 
-test('isolated WS stalled TCP reader closes with 1013 within a bounded time and clears timers', async () => {
+test('isolated WS stall sends 1013/reason on backend wire, bounds downstream teardown and clears timers', async () => {
   const size = 1024 * 1024;
   let sent = 0; let backendClose: { code: number; reason: string } | undefined;
   let producer: ReturnType<typeof setInterval> | undefined;
@@ -559,7 +559,38 @@ test('isolated WS stalled TCP reader closes with 1013 within a bounded time and 
     close(_ws, code, reason) { clearInterval(producer); backendClose = { code, reason }; },
   } });
   cleanups.push(() => { clearInterval(producer); void b.stop(true); });
-  const child = await regressionProcess(b.url.href, 250);
+  // Observe the actual masked client frames before delivering them to Bun.
+  // Bun 1.3.14 rejects received 1013 in parseClosePayload, reporting 1006.
+  let wireClose: { code: number; reason: string } | undefined;
+  const tap = createServer(incoming => {
+    const upstream = connect(b.port!, '127.0.0.1');
+    cleanups.push(() => { incoming.destroy(); upstream.destroy(); });
+    let handshake = true; let bytes = Buffer.alloc(0);
+    incoming.on('data', chunk => {
+      bytes = Buffer.concat([bytes, typeof chunk === 'string' ? Buffer.from(chunk) : chunk]);
+      if (handshake) {
+        const end = bytes.indexOf('\r\n\r\n');
+        if (end < 0) return;
+        bytes = bytes.subarray(end + 4); handshake = false;
+      }
+      while (bytes.length >= 6) {
+        const length = bytes[1] & 127;
+        // This fixture only sends an empty command and the short close frame.
+        expect(bytes[1] & 128).toBe(128); expect(length).toBeLessThan(126);
+        if (bytes.length < 6 + length) return;
+        const payload = Buffer.from(bytes.subarray(6, 6 + length));
+        for (let i = 0; i < length; i++) payload[i] ^= bytes[2 + i % 4];
+        if ((bytes[0] & 15) === 8) wireClose = { code: payload.readUInt16BE(0), reason: payload.subarray(2).toString() };
+        bytes = bytes.subarray(6 + length);
+      }
+    });
+    incoming.pipe(upstream); upstream.pipe(incoming);
+    incoming.on('error', () => upstream.destroy()); upstream.on('error', () => incoming.destroy());
+  });
+  await new Promise<void>(resolve => tap.listen(0, '127.0.0.1', resolve));
+  cleanups.push(() => tap.close());
+  const port = (tap.address() as { port: number }).port;
+  const child = await regressionProcess(`http://127.0.0.1:${port}`, 250);
   const socket = connect(Number(new URL(child.url).port), '127.0.0.1'); cleanups.push(() => socket.destroy());
   await new Promise<void>((resolve, reject) => {
     let head = '';
@@ -574,7 +605,10 @@ test('isolated WS stalled TCP reader closes with 1013 within a bounded time and 
       resolve();
     });
   });
+  const closingStarted = performance.now();
   await until(() => backendClose !== undefined);
+  expect(wireClose).toEqual({ code: 1013, reason: 'Downstream stalled' });
+  expect(backendClose).toEqual({ code: 1006, reason: '' });
   const report = await child.query('report');
   expect(report.closeCalls).toContainEqual({ code: 1013, reason: 'Downstream stalled' });
   expect(report.status.backends[0].websockets).toBe(0);
@@ -582,8 +616,10 @@ test('isolated WS stalled TCP reader closes with 1013 within a bounded time and 
   socket.removeAllListeners('data');
   const ended = new Promise<void>((resolve, reject) => { socket.once('end', resolve); socket.once('error', reject); });
   socket.resume(); await ended;
+  expect(performance.now() - closingStarted).toBeLessThan(1500);
   // Close stops the producer even when it has buffered outgoing messages.
   await sleep(100); const finalSent = sent; await sleep(100); expect(sent).toBe(finalSent);
-  expect((await child.query('report')).relayTimers).toBe(0);
+  const finalReport = await child.query('report');
+  expect(finalReport.relayTimers).toBe(0); expect(finalReport.activeUpstreams).toBe(0);
 
 }, 5000);

@@ -111,11 +111,23 @@ Node's built-in stream adapter (provided by Bun), so pause suspends application
 avoids repeatedly concatenating an unread buffer and starving downstream I/O and
 timers. Close/stop cancels that timer. Upstream writes resume on TCP drain;
 reaching the downstream high-water mark pauses the relay. If buffered bytes make
-no progress for `wsStallTimeoutMs`, edge closes both sides with 1013
-(`Downstream stalled`) and terminates the downstream socket after 100 ms, so a
+no progress for `wsStallTimeoutMs`, edge initiates the upstream close first, sending
+a masked 1013 (`Downstream stalled`) frame, then closes the downstream and
+terminates its socket after 100 ms, so a
 non-reading client cannot retain a relay indefinitely. Buffer decreases reset the
 progress deadline. A peer that refuses all reads may observe transport closure
-instead of receiving the queued 1013 frame before forced teardown.
+instead of receiving the queued 1013 frame before forced teardown. The upstream
+also has a 100 ms close-handshake deadline; a backend that does not read or a
+blocked outgoing queue can prevent delivery before forced termination. The wire
+code is not a guarantee of the peer application's close callback: Bun 1.3.14's
+[`parseClosePayload`](https://github.com/oven-sh/bun/blob/bun-v1.3.14/packages/bun-uws/src/WebSocketProtocol.h#L132)
+rejects received codes above 1011 and below 4000 (including 1012/1013), reporting
+1006 with an empty reason even for a valid received 1013 frame and no congestion.
+Changing Edge's close order cannot correct that runtime validation. The regression
+observes and decodes the masked frame immediately before the real Bun backend,
+asserts 1013 and the exact reason on the wire, and separately asserts Bun's 1006
+callback. Getting 1013 in that callback requires a corrected backend runtime;
+this is not established by the pinned Bun 1.3.14 test.
 Bun ServerWebSocket exposes no input pause API: a client that produces faster
 than its upstream consumes accumulates an outgoing write queue. A separate
 `wsQueueLimit` hard safety ceiling closes with 1013 on sustained upstream overload;
@@ -143,7 +155,7 @@ npm run docs:check
 The suite includes 20 handovers under concurrent HTTP/SSE/WS, hold limits, handshake
 recovery, close codes, forwarding headers, private paths, health/draining, Unix
 control, 64 × 4 MiB, 64 × 1 MiB and 192 × 512 KiB messages to a slow TCP reader
-with per-frame content checks, bounded closure for a stalled reader and cleared
+with per-frame content checks, exact backend wire close code/reason, bounded closure for a stalled reader and cleared
 congestion timers (all using a real Bun backend and isolated edge process), and 100 MiB streaming with
 RSS sampling in an isolated edge subprocess. The memory source yields every MiB
 to let native I/O progress; upload and download share one peak and the unchanged

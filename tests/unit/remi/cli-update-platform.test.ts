@@ -150,13 +150,42 @@ test("same version with a different commit installs; the identical build skips d
   expect(current.requests).toHaveLength(1);
   expect(compareVersions(version, "0.2.95-stable.other")).not.toBe(0);
 });
-test("an unpinned platform hotfix installs even when its build hash sorts before the current hash", async () => {
-  const hotfixVersion = "0.2.95-stable.0a1b2c3d";
-  const currentVersion = "0.2.95-stable.ff001122";
-  const f = fixture(commit, hotfixVersion);
+for (const label of ["rc", "build"]) test(`an unpinned numeric ${label} downgrade skips download`, async () => {
+  const f = fixture(commit, `0.2.95-${label}.12345678`);
+  expect(await performUpdate({ ...f.options, currentVersion: `0.2.95-${label}.12345679`,
+    currentCommit: "b".repeat(40), env: { MULTIREMI_UPDATE_SOURCES: "platform" } }))
+    .toMatchObject({ status: "current", source: "platform" });
+  expect(f.requests).toHaveLength(1);
+  expect(readFileSync(f.launcherPath, "utf8")).toContain("echo previous");
+});
+for (const currentCommit of [undefined, "b".repeat(40)]) test(`unproven local hash suffix is preserved (${currentCommit ? "mismatch" : "unknown"})`, async () => {
+  const f = fixture(commit, "0.2.95-stable");
+  expect(await performUpdate({ ...f.options, currentVersion: "0.2.95-stable.ff001122", currentCommit }))
+    .toMatchObject({ status: "current" });
+  expect(f.requests).toHaveLength(1);
+});
+for (const target of ["version", "commit"]) test(`explicit ${target} bypasses numeric prerelease downgrade protection`, async () => {
+  const f = fixture(commit, "0.2.95-rc.12345678");
+  expect(await performUpdate({ ...f.options, currentVersion: "0.2.95-rc.12345679",
+    currentCommit: "b".repeat(40), ...(target === "version" ? { targetVersion: f.manifest.version } : { targetCommit: commit }) }))
+    .toMatchObject({ status: "installed", source: "platform" });
+  expect(f.requests).toHaveLength(2);
+});
+test("GitHub keeps numeric prerelease ordering without commit identity", async () => {
+  const f = fixture(commit, "0.2.95-rc.12345678");
+  expect(await performUpdate({ ...f.options, currentVersion: "0.2.95-rc.12345679",
+    env: { MULTIREMI_UPDATE_SOURCES: "github" } })).toMatchObject({ status: "current", source: "github" });
+  expect(f.requests).toHaveLength(1);
+});
+for (const [hotfixHash, currentHash] of [["0a1b2c3d", "ff001122"], ["12345678", "12345679"]]) test(`an unpinned platform hotfix installs when its proven hash ${hotfixHash} sorts before the current hash`, async () => {
+  const hotfixVersion = `0.2.95-stable.${hotfixHash}`;
+  const currentVersion = `0.2.95-stable.${currentHash}`;
+  const hotfixCommit = hotfixHash + "a".repeat(32);
+  const f = fixture(hotfixCommit, hotfixVersion);
+  f.manifest.commit = hotfixCommit;
   expect(compareVersions(hotfixVersion, currentVersion)).toBeLessThan(0);
-  expect(await performUpdate({ ...f.options, currentVersion, currentCommit: "b".repeat(40) }))
-    .toMatchObject({ status: "installed", version: hotfixVersion, source: "platform", commit });
+  expect(await performUpdate({ ...f.options, currentVersion, currentCommit: currentHash + "b".repeat(32) }))
+    .toMatchObject({ status: "installed", version: hotfixVersion, source: "platform", commit: hotfixCommit });
   expect(f.requests).toHaveLength(2);
   expect(readFileSync(f.launcherPath, "utf8")).not.toContain("echo previous");
 });

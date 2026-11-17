@@ -109,8 +109,9 @@ GitHub 来源从 `MULTIREMI_RELEASE_REPO`（兼容回退为 `MULTIREMI_REPO`，�
 `--version`；平台来源额外要求 `--build-info` 的版本与提交匹配清单。然后由新包的
 `remi runtime prepare` 安装并验证固定依赖。任一步失败都不会改写现有 executable。
 未指定目标的更新遇到较旧版本直接返回 current；平台制品比较版本先后时，保留
-major.minor.patch 和预发布标签，忽略末尾构建哈希（如 `-stable.ab12cd34` 中的
-`ab12cd34`）及 `+` 构建元数据。同版本不同提交仍可安装，不按哈希字典顺序判断新旧；
+major.minor.patch 和预发布标签，忽略 `+` 构建元数据；仅当末尾段匹配对应 commit
+前缀时才忽略该构建哈希（如 `-stable.ab12cd34` 中的 `ab12cd34`）。
+提交未知或后缀不匹配时保留该段，数字预发布序号仍按版本比较。同版本不同提交仍可安装，不按哈希字典顺序判断新旧；
 显式指定较旧目标也仍可安装。完整版本和提交仍用于制品身份校验。
 
 验证成功后，新包进入 `~/.local/lib/remi/versions/<digest-prefix>/`，旧快照

@@ -1,3 +1,5 @@
+import { SchemaContractRefusedError, assertSchemaContract } from './schema-contract.js';
+import type { PlatformSchemaContractFailure } from '@multiremi/contracts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { delimiter, dirname, join } from 'node:path';
@@ -57,6 +59,7 @@ interface Journal {
   operationId: string;
   kind: MultiremiPlatformOperation['kind'];
   error?: string;
+  failure?: PlatformSchemaContractFailure;
 }
 const CORE = new Set(['api', 'api-runtime', 'web']);
 const ROOT = '/opt/remi-application';
@@ -174,6 +177,7 @@ export class ContainerApplicationDriver implements PlatformDeploymentDriver {
         status: journal.phase === 'rolled_back' ? 'failed' : journal.kind === 'rollback' ? 'rolled_back' : 'succeeded',
         resultRelease: journal.phase === 'rolled_back' ? journal.previous.release : journal.target.release,
         ...(journal.error ? { error: journal.error } : {}),
+        ...(journal.failure ? { progress: { failure: journal.failure } } : {}),
       } as ReportPlatformOperationInput,
     };
   }
@@ -184,7 +188,10 @@ export class ContainerApplicationDriver implements PlatformDeploymentDriver {
     const path = this.journalPath(operation.id);
     const existing = await this.journal(path);
     if (existing?.phase === 'verified') return existing.target.release;
-    if (existing?.phase === 'rolled_back') throw new Error(existing.error || 'Previous application release recovered');
+    if (existing?.phase === 'rolled_back') {
+      if (existing.failure) throw new SchemaContractRefusedError(existing.failure);
+      throw new Error(existing.error || 'Previous application release recovered');
+    }
     if (existing?.phase === 'committed') { await this.recover(path, existing); throw new Error('Interrupted application switch recovered'); }
     if (COMMITTED.has(operation.status)) {
       if (existing) throw new Error('Prepared application update was interrupted before host commit; services were left running');
@@ -237,7 +244,11 @@ export class ContainerApplicationDriver implements PlatformDeploymentDriver {
       await atomicJson(path, { ...journal, phase: 'verified' });
       return target.release;
     } catch (error) {
-      await this.recover(path, { ...journal, error: message(error) });
+      journal.error = message(error);
+      if (error instanceof SchemaContractRefusedError) journal.failure = error.failure;
+      try { await atomicJson(path, journal); }
+      catch { throw new RecoveryRequiredError('Application failure journal could not be persisted; write fence and maintenance retained'); }
+      await this.recover(path, journal);
       throw error;
     }
   }
@@ -360,10 +371,9 @@ export class ContainerApplicationDriver implements PlatformDeploymentDriver {
       }
       await this.mustDocker(['exec', '-i', name, 'pg_restore', '-U', 'remi_rehearsal', '-d', 'remi_update_rehearsal', '--no-owner', '--no-privileges', '--exit-on-error'], { stdinFile: join(backup, 'database.dump') });
       const before = await this.databaseShape(name);
-      for (const id of [target.id, previous.id]) {
+      for (const [stage, id] of [['target', target.id], ['previous', previous.id]] as const) {
         await this.control(installation, ['migrate', id], { input: [join(backup, 'volume-api-home.archive'), '/remi-input/api-home.archive'], network: `container:${name}`, env: ['MULTIREMI_DATABASE_URL=postgresql://remi_rehearsal@127.0.0.1:5432/remi_update_rehearsal'] });
-        const after = new Set(await this.databaseShape(name));
-        if (before.some(column => !after.has(column))) throw new Error('Migration rehearsal removed or changed an existing column; automatic application update refused');
+        assertSchemaContract(before, await this.databaseShape(name), { stage, currentVersion: previous.release.version, targetVersion: target.release.version });
       }
     } finally {
       // Only this randomly named disposable database is removed, never a

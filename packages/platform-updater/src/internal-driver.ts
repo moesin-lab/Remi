@@ -1,3 +1,5 @@
+import { SchemaContractRefusedError } from './schema-contract.js';
+import { isPlatformSchemaContractFailure, type PlatformSchemaContractFailure } from '@multiremi/contracts/platform-failure';
 import { createHash, randomUUID } from 'node:crypto';
 import { cp, mkdir, open, readdir, rename, rm, statfs, symlink } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
@@ -25,7 +27,7 @@ export interface InternalUpdateConfig {
 interface Selection { id: string; release: ApplicationManifest }
 interface Journal {
   operationId: string; kind: string; phase: 'prepared' | 'committed' | 'verified' | 'recovered';
-  previous: Selection; target: Selection; backup?: string; error?: string;
+  previous: Selection; target: Selection; backup?: string; error?: string; failure?: PlatformSchemaContractFailure;
 }
 interface SupervisorStatus {
   protocol: number; role: string; arch: string; version: string; ref: string; runtime: string; libc: string;
@@ -279,11 +281,14 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
   }
   private async rehearse(journal: Journal) {
     const id = randomUUID();
-    await writeJson(join(this.config.control, 'rehearsal', 'job.json'), { id, backup: relative(this.config.state, journal.backup!), previous: journal.previous.id, target: journal.target.id });
+    await writeJson(join(this.config.control, 'rehearsal', 'job.json'), { id, backup: relative(this.config.state, journal.backup!), previous: journal.previous.id, target: journal.target.id, currentVersion: journal.previous.release.version, targetVersion: journal.target.release.version });
     await this.until(async () => {
-      const status = await readJson<{ id: string; ok: boolean; error?: string }>(join(this.config.control, 'rehearsal', 'result.json'));
+      const status = await readJson<{ id: string; ok: boolean; error?: string; failure?: unknown }>(join(this.config.control, 'rehearsal', 'result.json'));
       if (status?.id !== id) return false;
-      if (!status.ok) throw new Error(status.error || 'Isolated migration rehearsal failed');
+      if (!status.ok) {
+        if (isPlatformSchemaContractFailure(status.failure)) throw new SchemaContractRefusedError(status.failure);
+        throw new Error(status.error || 'Isolated migration rehearsal failed');
+      }
       return true;
     }, 12 * 60_000, 'Isolated migration rehearsal timed out');
   }
@@ -292,7 +297,10 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
     if (!drain) throw new Error('Drain is required');
     const previousJournal = await this.journal(operation.id);
     if (previousJournal?.phase === 'verified') return previousJournal.target.release;
-    if (previousJournal?.phase === 'recovered') throw new Error(previousJournal.error || 'Application update recovered');
+    if (previousJournal?.phase === 'recovered') {
+      if (previousJournal.failure) throw new SchemaContractRefusedError(previousJournal.failure);
+      throw new Error(previousJournal.error || 'Application update recovered');
+    }
     if (COMMITTED.has(operation.status)) {
       if (previousJournal?.phase === 'prepared') throw new Error('Update was interrupted before the container commit; application children were not changed');
       throw new RecoveryRequiredError('Committed operation requires internal journal recovery');
@@ -340,6 +348,9 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
       return target.release;
     } catch (error) {
       journal.error = error instanceof Error ? error.message : String(error);
+      if (error instanceof SchemaContractRefusedError) journal.failure = error.failure;
+      try { await writeJson(this.journalPath(operation.id), journal); }
+      catch { throw new RecoveryRequiredError('Internal failure journal could not be persisted; write fence and maintenance retained'); }
       await this.recover(journal);
       throw error;
     }
@@ -374,6 +385,7 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
     return { operationId: journal.operationId, report: {
       status: journal.phase === 'recovered' ? 'failed' as const : journal.kind === 'rollback' ? 'rolled_back' as const : 'succeeded' as const,
       resultRelease: (journal.phase === 'recovered' ? journal.previous : journal.target).release, error: journal.error ?? null,
+      ...(journal.failure ? { progress: { failure: journal.failure } } : {}),
     } };
   }
   async finalize(id: string) {

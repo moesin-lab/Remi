@@ -1,3 +1,4 @@
+import { cliFetch } from "./proxy-fetch.js";
 import { CliError, cliErrorCodeForStatus } from "./errors.js";
 import { remiCliUserAgent } from "./user-agent.js";
 
@@ -81,7 +82,7 @@ export class CliApiClient {
     this.workspaceId = options.workspaceId?.trim() || null;
     this.timeoutMs = positiveInteger(options.timeoutMs ?? 30_000, "timeoutMs");
     this.maxRetries = nonNegativeInteger(options.maxRetries ?? 2, "maxRetries");
-    this.fetchFn = options.fetch ?? fetch;
+    this.fetchFn = options.fetch ?? cliFetch;
     this.sleepFn = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 

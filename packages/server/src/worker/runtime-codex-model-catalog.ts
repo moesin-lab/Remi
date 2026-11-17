@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { stringify } from "smol-toml";
 import type { RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import { mergeCodexConfig } from "@daemon/agent-runtime/relay-sync.js";
+import { proxyFetch } from "@shared/proxy-fetch.js";
 import { readCapped } from "@multiremi/relay/http.js";
 import { validateCodexModelCatalog } from "@acp/model-catalog-validation.js";
 import { writePrivateFileIfChanged } from "@daemon/agent-runtime/workspace/session-home.js";
@@ -19,7 +20,7 @@ export async function prepareRuntimeCodexModelCatalog(
   let response: Response | undefined;
   let text: string;
   try {
-    response = await fetch(profile.endpoint_options?.models_url ?? profile.base_url.replace(/\/+$/, "") + "/models", {
+    response = await proxyFetch(profile.endpoint_options?.models_url ?? profile.base_url.replace(/\/+$/, "") + "/models", {
       headers: { ...profile.endpoint_options?.headers, Accept: "application/json", Authorization: `Bearer ${token}` },
       signal: AbortSignal.any([signal, AbortSignal.timeout(profile.endpoint_options?.timeout_ms ?? 10_000)]),
       redirect: "error",

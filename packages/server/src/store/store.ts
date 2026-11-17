@@ -3469,11 +3469,12 @@ runMigrations(this.db);
       generation: maintenance.generation };
   }
   nextDaemonDrainWakeAt(runtimeId: string): number | null {
-    if (!this.hasCliUpdateDrainForRuntime(runtimeId)) return null;
-    const runtime = this.getRuntimeLite(runtimeId);
-    if (!runtime) return null;
-    const state = this.getDaemonDrainStatus(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id);
-    const at = state.deadline ? Date.parse(state.deadline) : NaN;
+    // Scheduling only needs the deadline, not the status/task/ack aggregate.
+    const row = this.ctx.db.query(`SELECT drain.deadline FROM multiremi_runtimes runtime
+      JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local')
+        AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id)
+      WHERE runtime.id = ?`).get(runtimeId) as { deadline: string } | null;
+    const at = row ? Date.parse(row.deadline) : NaN;
     return Number.isFinite(at) && at > Date.now() ? at : null;
   }
 

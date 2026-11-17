@@ -59,6 +59,12 @@ PR 6 的后台任务计数随同一帧、按同一规则写库。后台任务快
 不计算历史用量。CLI 排空、重试时点、任务下发的宿主所有者信息与飞书卡片能力判断也不附带统计；用户侧统计继续使用
 规范化台账的原查询。空派活仍有锁、资格和恢复检查，不能把“没有聚合”理解为“没有 SQL”。
 
+WebSocket 心跳及其同步 hooks 共用一次请求级读取缓存，drain 围栏并入 Runtime 行读取；
+写 drain 表时同时失效 Runtime 缓存，事务和锁仍强制重读。心跳复用本次读取的 maintenance，
+普通 liveness 写入后把新行写回缓存；drain 唤醒定时仅查询 deadline，不水合任务/ack 汇总。
+[心跳预算回归](../../tests/integration/daemon-protocol-v2/heartbeat-plugin-cost.test.ts)保持旧宿主单心跳
+7 次 SELECT / 2 次 UPDATE、mesh 全链路 SELECT ≤30 的预算；这不代表生产 DB 负载已验证下降。
+
 成本检查要计入排队的下行和派活及 `WITH` 查询，不能在同步 heartbeat handler 返回时停止。
 [多 Runtime 回归](../../tests/unit/multiremi/daemon-heartbeat-fanout-cost.test.ts)用 8 个 Runtime、
 初始 0 个任务覆盖相同报告、真实变化、目标范围与活动记录；新增任务用例验证入队立即推送，

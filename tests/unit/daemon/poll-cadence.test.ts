@@ -1,3 +1,4 @@
+import { DAEMON_STOP_TIMEOUT_MS } from "@shared/daemon-update.js";
 import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
 import { afterEach, describe, expect, it, jest } from "bun:test";
 import { MultiremiDaemon } from "@multiremi/daemon.js";
@@ -61,6 +62,11 @@ function createLoopDaemon(options: {
   Object.assign(daemon, {
     stopped: false,
     ready: false,
+    runActive: false,
+    stopDeadlineTimer: null,
+    stopTimeoutMs: DAEMON_STOP_TIMEOUT_MS,
+    onStopTimeout: () => { throw new Error("cadence fixture failed to stop"); },
+    liveUpdateProviders: new Map(),
     // The workspace layout is not what these tests are about.
     sweepLegacyLayout: async () => {},
     startedAt: new Date(),

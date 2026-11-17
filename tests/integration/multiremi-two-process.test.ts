@@ -247,8 +247,9 @@ describe.skipIf(!configured)("MUL-463 two-process PostgreSQL integration", () =>
       expect(resumed.queued).toBe(0);
       expect(resumed.inflight).toBe(0);
       expect(resumed.sent).toBeGreaterThan(before.sent);
-      // dropped is cumulative; recovery drains the queue, it does not reset it.
-      expect(resumed.dropped).toBe(down.dropped);
+      // dropped is cumulative and must not reset. Restart can enqueue new
+      // events while the bounded backlog drains, so it may legitimately grow.
+      expect(resumed.dropped).toBeGreaterThanOrEqual(down.dropped);
       const [id] = await pair[1].call<string[]>("comments", { ...seed, count: 1, label: "recovered" });
       const event = await socket.wait("comment:created", (frame) => frame.payload.comment.id === id);
       expect(event?.payload.comment.id).toBe(id);

@@ -145,10 +145,11 @@ export class BodyHtmlBackfillTask {
     return true;
   }
 
-  stop(): void {
+  stop(): Promise<void> {
     this.stopped = true;
-    this.timer?.stop();
+    const stopped = this.timer?.stop();
     this.timer = null;
+    return stopped ?? Promise.resolve();
   }
 
   /** Re-run the probe; used by tests and by a caller that missed the table. */

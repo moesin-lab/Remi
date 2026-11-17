@@ -33,8 +33,12 @@ export async function withDatabaseDeadline<T>(at: number, action: () => T | Prom
     context.active = false;
   }
 }
-export function databaseTimeoutMs(): number | undefined {
+export function databaseTimeoutMs(options: { cleanup?: boolean } = {}): number | undefined {
   const timeout = timeoutContext.getStore();
+  // Cleanup must reach the worker even after an activation deadline expires:
+  // otherwise a live transaction (or the worker's lost-transaction flag) leaks
+  // into unrelated requests. Give it a fresh, bounded transport budget.
+  if (options.cleanup) return Math.min(timeout ?? 5_000, 5_000);
   const deadline = deadlineContext.getStore();
   if (!deadline?.active) return timeout;
   const remaining = Math.ceil(deadline.at - performance.now());

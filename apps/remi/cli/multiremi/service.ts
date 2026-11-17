@@ -1,3 +1,4 @@
+import { DAEMON_SERVICE_STOP_SECONDS } from "@shared/daemon-update.js";
 /**
  * Multiremi CLI — daemon launch spec plus launchd/systemd unit templating.
  *
@@ -190,8 +191,9 @@ export function buildMultiremiDaemonLaunchSpec(
   programName = "multiremi",
   argv = process.argv,
   execPath = process.execPath,
+  forRestart = false,
 ): MultiremiDaemonLaunchSpec {
-  const launcher = currentProcessLauncher(argv, execPath);
+  const launcher = currentProcessLauncher(argv, execPath, forRestart);
   const port = daemonPortFromOptions(options);
   const paths = multiremiDaemonPaths();
   return {
@@ -341,6 +343,10 @@ ${envBlock}  <key>WorkingDirectory</key>
   <string>${escapeXml(input.spec.logPath)}</string>
   <key>RunAtLoad</key>
   <true/>
+  <key>ExitTimeOut</key>
+  <integer>${DAEMON_SERVICE_STOP_SECONDS}</integer>
+  <key>AbandonProcessGroup</key>
+  <false/>
   <key>KeepAlive</key>
   <true/>
 </dict>
@@ -368,6 +374,8 @@ WorkingDirectory=${systemdQuote(input.spec.stateDir)}
 ${envLines}
 Restart=always
 RestartSec=10
+TimeoutStopSec=${DAEMON_SERVICE_STOP_SECONDS}
+KillMode=control-group
 StandardOutput=append:${input.spec.logPath}
 StandardError=append:${input.spec.logPath}
 
@@ -397,17 +405,17 @@ export function runServiceCommands(commands: string[][]): void {
   }
 }
 
-export function currentProcessLauncher(argv: string[], execPath: string): { command: string; argsPrefix: string[] } {
+export function currentProcessLauncher(argv: string[], execPath: string, forRestart = false): { command: string; argsPrefix: string[] } {
   const executable = basename(execPath, extname(execPath)).toLowerCase();
   const script = argv[1];
   if ((executable === "bun" || executable.startsWith("bun-")) && script) {
     return { command: execPath, argsPrefix: [script] };
   }
-  return { command: stableDaemonLauncher(execPath) ?? execPath, argsPrefix: [] };
+  return { command: stableDaemonLauncher(execPath, forRestart) ?? execPath, argsPrefix: [] };
 }
 
 /** Only prefer a stable launcher when it execs this installed version. Never run it to probe. */
-function stableDaemonLauncher(execPath: string): string | null {
+function stableDaemonLauncher(execPath: string, forRestart: boolean): string | null {
   const installRoot = process.env.MULTIREMI_INSTALL_ROOT?.trim() || join(homedir(), ".local", "lib", "remi");
   let executable: string;
   let versions: string;
@@ -436,7 +444,11 @@ function stableDaemonLauncher(execPath: string): string | null {
         const command = line.match(/^\s*exec\s+(.+)$/)?.[1];
         const target = command && literalShellCommand(command);
         // Relative exec paths depend on the service cwd, so only trust absolute targets.
-        return !!target && target.startsWith(sep) && realpathSync(target) === executable;
+        if (!target || !target.startsWith(sep)) return false;
+        const resolved = realpathSync(target);
+        if (resolved === executable) return true;
+        const next = relative(versions, resolved).split(sep);
+        return forRestart && next.length === 2 && next[0] !== ".." && next[1] === "remi";
       });
       if (matches) return candidate;
     } catch {

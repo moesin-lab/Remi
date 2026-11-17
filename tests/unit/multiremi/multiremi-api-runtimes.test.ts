@@ -993,10 +993,12 @@ describe("Multiremi API — runtimes and runtime request queues", () => {
     });
     expect(running.status).toBe(200);
 
+    store.reportRuntimeUpdateResult("rt_update_flow", createdBody.id, { status: "restarting" });
+    store.recordDaemonProtocol("rt_update_flow", store.getRuntime("rt_update_flow")!.daemonId ?? "", 2, "1.2.3");
     const completed = await app.request(`/api/daemon/runtimes/rt_update_flow/update/${createdBody.id}/result`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "completed", output: "updated ok" }),
+      body: JSON.stringify({ status: "completed", self_check: true, output: "updated ok" }),
     });
     expect(completed.status).toBe(200);
 

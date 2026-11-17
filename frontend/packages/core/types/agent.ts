@@ -661,6 +661,9 @@ export interface DashboardRunTimeDaily {
 }
 
 export type RuntimeUpdateStatus =
+  | "restarting"
+  | "verifying"
+  | "rolled_back"
   | "pending"
   | "running"
   | "completed"

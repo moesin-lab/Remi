@@ -14,7 +14,13 @@ type Family = { kind: string; create(store: MultiremiStore, rt: string): Request
 const families: Family[] = [
   { kind: "update", create: (store, rt) => store.createRuntimeUpdateRequest(rt, { targetVersion: "9.9.9" }),
     read: (store, rt, id) => store.getRuntimeUpdateRequest(rt, id),
-    report: (store, rt, id, status) => store.reportRuntimeUpdateResult(rt, id, { status, error: "Duplicate must not win" }) },
+    report: (store, rt, id, status) => {
+      if (status === "completed" && store.getRuntimeUpdateRequest(rt, id)?.status === "running") {
+        store.reportRuntimeUpdateResult(rt, id, { status: "restarting" });
+        store.recordDaemonProtocol(rt, store.getRuntime(rt)!.daemonId ?? "", 2, "9.9.9");
+      }
+      return store.reportRuntimeUpdateResult(rt, id, { status, self_check: true, error: "Duplicate must not win" });
+    } },
   { kind: "model_list", create: (store, rt) => store.createRuntimeModelListRequest(rt),
     read: (store, rt, id) => store.getRuntimeModelListRequest(rt, id),
     report: (store, rt, id, status) => store.reportRuntimeModelListResult(rt, id, { status, models: [], error: "Duplicate must not win" }) },

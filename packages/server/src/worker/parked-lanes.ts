@@ -622,6 +622,14 @@ export class ParkedLanes {
     await this.close(record, reason ?? "turn_end");
   }
 
+  /** Last resort at the daemon stop deadline, including active and already-closing lanes. */
+  killAllProcesses(): void {
+    for (const record of this.records.values()) {
+      const pgid = this.internals.get(record)?.pgid?.pgid ?? record.provider.processGroupId?.(record.poolChatId);
+      if (pgid) { try { this.options.killProcessGroup?.(pgid); } catch { /* already exited */ } }
+    }
+  }
+
   /** Close every lane: daemon stop, update or drain (§2.7 `daemon_restart`). */
   async closeAll(reason: BackgroundTaskStopReason, options: { parkedOnly?: boolean } = {}): Promise<void> {
     await Promise.allSettled([...this.records.values()]

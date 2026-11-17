@@ -3,6 +3,7 @@
  * MULTIREMI_TEST_DOCKER_RECOVERY=1 bun test tests/integration/platform-recovery-postgres.test.ts
  * Images must already exist locally; no ports or host database paths are used.
  */
+import { runSchemaBoundaryScenario } from './platform-schema-boundary-scenario.js';
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
@@ -30,6 +31,7 @@ function docker(args: string[], input?: string | Buffer): Buffer {
 }
 
 describe.skipIf(!enabled)("isolated PostgreSQL platform recovery", () => {
+  test("v0.2.90 schema boundary: refusal, manual migration and complete restore", runSchemaBoundaryScenario, 900_000);
   test("restores a clean business DB, overlays the current control plane, and reconciles receipts atomically", async () => {
     const container = `remi-updater-recovery-test-${process.pid}`;
     const temporary = mkdtempSync(join(tmpdir(), "remi-updater-recovery-"));

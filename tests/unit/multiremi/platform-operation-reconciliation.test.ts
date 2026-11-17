@@ -1,3 +1,4 @@
+import { assertSchemaContract, SchemaContractRefusedError } from '@remi-platform/updater/schema-contract.js';
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import type { MultiremiPlatformOperation } from "@multiremi/contracts";
@@ -29,6 +30,20 @@ function receipt(operation: MultiremiPlatformOperation, status = "rolled_back") 
 }
 
 describe("host operation reconciliation", () => {
+  it('validates failure diagnostics on receipt ingress and preserves identical replays', async () => {
+    const { store, post } = fixture();
+    store.createPlatformOperation({ kind: 'update', targetVersion: 'candidate' }, 'local');
+    const operation = store.claimPlatformOperation()!;
+    let failure;
+    try { assertSchemaContract(['public.old.id:text:text:NO'], [], { stage: 'target', currentVersion: '0.2.90', targetVersion: 'candidate' }); }
+    catch (error) { failure = (error as SchemaContractRefusedError).failure; }
+    const completed = { operation, report: { status: 'failed', progress: { failure } }, completedAt: new Date(Date.now() + 1000).toISOString() };
+    expect((await post([{ ...completed, report: { ...completed.report, progress: { failure: { ...failure, reason: 'other' } } } }])).status).toBe(400);
+    expect((await post([completed])).status).toBe(200);
+    expect((await post([completed])).status).toBe(200);
+    expect(store.getPlatformOperation(operation.id)?.progress.failure).toEqual(failure);
+  });
+
   it("restores a rollback operation erased by database restore without disturbing a new active operation", async () => {
     const { store, post } = fixture();
     const lost = store.createPlatformOperation({ kind: "rollback", requestId: "restore-1", targetRef: "a".repeat(40) }, "local");

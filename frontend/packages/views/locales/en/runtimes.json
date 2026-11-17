@@ -453,7 +453,10 @@
       "running": "Updating...",
       "completed": "Update complete. Daemon is restarting...",
       "failed": "Update failed",
-      "timeout": "Timeout"
+      "timeout": "Timeout",
+      "restarting": "Restarting…",
+      "verifying": "Verifying new daemon…",
+      "rolled_back": "Rolled back"
     }
   },
   "charts": {

@@ -8,6 +8,7 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./platform-failure": "./src/platform-failure.ts",
     "./trace": "./src/trace.ts",
     "./usage-accounting": "./src/usage-accounting.ts",
     "./daemon-protocol": "./src/daemon-protocol.ts",

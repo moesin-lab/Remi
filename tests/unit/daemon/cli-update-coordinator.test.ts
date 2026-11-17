@@ -9,7 +9,7 @@ import { MultiremiCliUpdateCoordinator } from "@multiremi/worker/cli-update-coor
 import { instantiateCoResidentWorkerDaemons } from "../../../apps/remi/cli/multiremi.js";
 
 interface UpdateReport {
-  status: "running" | "completed" | "failed";
+  status: "running" | "restarting" | "completed" | "failed";
   output?: string;
   error?: string;
 }
@@ -85,7 +85,7 @@ describe("co-resident CLI update coordination", () => {
 
     expect(reports).toEqual([
       { status: "running" },
-      { status: "completed", output: "updated together" },
+      { status: "restarting", output: "updated together" },
     ]);
     expect(claudeState.claimsPaused).toBe(true);
     expect(codexState.claimsPaused).toBe(true);
@@ -105,7 +105,7 @@ describe("co-resident CLI update coordination", () => {
 
     expect(reports).toEqual([
       { status: "running" },
-      { status: "completed", output: "updated while reports drain" },
+      { status: "restarting", output: "updated while reports drain" },
     ]);
     expect(claudeState.claimsPaused).toBe(true);
     expect(codexState.claimsPaused).toBe(true);
@@ -174,7 +174,7 @@ describe("co-resident CLI update coordination", () => {
 
       expect(updateCalls).toBe(1);
       expect(reports.map((report) => report.status)).toEqual(["running", "completed"]);
-      expect(claudeState.claimsPaused).toBe(true);
+      expect(claudeState.claimsPaused).toBe(false);
       expect(codexState.claimsPaused).toBe(false);
     }
   });

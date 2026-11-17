@@ -1,3 +1,5 @@
+import { performUpdate } from "@shared/cli-update.js";
+import { armUpdateWatchdog, restorePreviousLauncher, journalForInstall, updateJournalDir, readUpdateJournal, updateDecision, decideUpdate, DAEMON_STOP_TIMEOUT_MS } from "@shared/daemon-update.js";
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
 import { runtimeConnectionModels, type RuntimeExecutionBinding, type RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection";
 import { parseExecutionConnectionProfile } from "@multiremi/contracts/execution-profile.js";
@@ -11,7 +13,7 @@ import { ensureAntigravityServer, installedAntigravity } from "@acp/antigravity-
 import { AntigravityGatewayShim, type GatewayShimRun } from "@daemon/agent-runtime/antigravity/gateway-shim.js";
 import { prepareRuntimeCodexModelCatalog } from "./runtime-codex-model-catalog.js";
 import { isPermanentFeishuDeliveryError } from "@shared/feishu-delivery-error.js";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { cpus, homedir, hostname } from "node:os";
 import { multiremiStateDir } from "@shared/home-paths.js";
 import { basename, dirname, join, resolve } from "node:path";
@@ -513,6 +515,10 @@ export interface MultiremiDaemonOptions {
   onceOfferTimeoutMs?: number;
   providerFactory?: MultiremiDaemonProviderFactory;
   updateRunner?: MultiremiDaemonUpdateRunner;
+  updateRestartSpec?: { command: string[]; manager?: "systemd" | "launchd" };
+  updateVerifyTimeoutSeconds?: number;
+  stopTimeoutMs?: number;
+  onStopTimeout?: () => void;
   localSkillRoots?: Record<string, string>;
   launchedBy?: string | null;
   onRestartRequested?: () => void;
@@ -967,7 +973,7 @@ interface RuntimeBindingDiscovery {
 export class MultiremiDaemon {
   private readonly userHome = homedir();
   private client: MultiremiDaemonClient;
-  private options: Required<Omit<MultiremiDaemonOptions, "token" | "runtimeId" | "daemonId" | "workspaceId" | "providerFactory" | "updateRunner" | "localSkillRoots" | "launchedBy" | "onRestartRequested" | "taskTimeoutMs" | "daemonPort" | "workspacesRoot" | "repoCacheRoot" | "gcEnabled" | "gcIntervalMs" | "gcDryRun" | "legacyKeepDays" | "pluginCacheRoot" | "agentPluginProviderPreflight" | "sshMeshManager" | "terminalAuthorityCleanupRetryDelaysMs" | "issueWorkspaceLifecycleLocker" | "workspaceRootFence" | "runSnapshotGcPass" | "supervisorReady" | "onReadyChange" | "cliUpdateCoordinator" | "outboxPath" | "outboxBackoffMs" | "outboxMaxBytes" | "claimIdleMaxMs" | "pluginDesiredRefreshMs" | "protocolClient" | "protocolClientOptions" | "authorityProbeDelaysMs" | "antigravityGatewayShim" | "parkedLaneOptions">> & {
+  private options: Required<Omit<MultiremiDaemonOptions, "token" | "runtimeId" | "daemonId" | "workspaceId" | "providerFactory" | "updateRunner" | "updateRestartSpec" | "updateVerifyTimeoutSeconds" | "stopTimeoutMs" | "onStopTimeout" | "localSkillRoots" | "launchedBy" | "onRestartRequested" | "taskTimeoutMs" | "daemonPort" | "workspacesRoot" | "repoCacheRoot" | "gcEnabled" | "gcIntervalMs" | "gcDryRun" | "legacyKeepDays" | "pluginCacheRoot" | "agentPluginProviderPreflight" | "sshMeshManager" | "terminalAuthorityCleanupRetryDelaysMs" | "issueWorkspaceLifecycleLocker" | "workspaceRootFence" | "runSnapshotGcPass" | "supervisorReady" | "onReadyChange" | "cliUpdateCoordinator" | "outboxPath" | "outboxBackoffMs" | "outboxMaxBytes" | "claimIdleMaxMs" | "pluginDesiredRefreshMs" | "protocolClient" | "protocolClientOptions" | "authorityProbeDelaysMs" | "antigravityGatewayShim" | "parkedLaneOptions">> & {
     token: string | null;
     runtimeId: string | null;
     daemonId: string | null;
@@ -987,7 +993,15 @@ export class MultiremiDaemon {
     pluginDesiredRefreshMs: number;
   };
   private providerFactory: MultiremiDaemonProviderFactory;
-  private updateRunner: MultiremiDaemonUpdateRunner;
+  private updateRunner?: MultiremiDaemonUpdateRunner;
+  private updateRestartSpec?: MultiremiDaemonOptions["updateRestartSpec"];
+  private updateVerifyTimeoutSeconds?: number;
+  private stopTimeoutMs: number;
+  private onStopTimeout: () => void;
+  private liveUpdateProviders = new Map<MultiremiTaskProvider, string>();
+  private runActive = false;
+  private stopDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  private updateConfirmation: Promise<void> | null = null;
   private onRestartRequested: (() => void) | null;
   private localSkillRoots: Record<string, string>;
   private repoCache: MultiremiRepoCache;
@@ -1456,7 +1470,11 @@ export class MultiremiDaemon {
     this.providerFactory = options.providerFactory ?? createRuntimeProvider;
     this.antigravityShim = options.antigravityGatewayShim ?? null;
     this.ownsAntigravityShim = !options.antigravityGatewayShim;
-    this.updateRunner = options.updateRunner ?? runDefaultMultiremiUpdate;
+    this.updateRunner = options.updateRunner;
+    this.updateRestartSpec = options.updateRestartSpec;
+    this.updateVerifyTimeoutSeconds = options.updateVerifyTimeoutSeconds;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? DAEMON_STOP_TIMEOUT_MS;
+    this.onStopTimeout = options.onStopTimeout ?? (() => process.exit(1));
     this.onRestartRequested = options.onRestartRequested ?? null;
     this.cliUpdateCoordinator?.register({
       provider: this.options.provider,
@@ -1669,6 +1687,10 @@ export class MultiremiDaemon {
       onStateChange: () => { this.taskDownlinks.connectionChanged(); this.wakeClaim(); },
       readyToConnect: () => this.supervisorReady(),
       onConnected: () => {
+        // welcome follows the server's authenticated target-version hello transition.
+        this.updateConfirmation ??= this.confirmRuntimeUpdate().catch(error => {
+          log.warn(`Update confirmation deferred: ${error instanceof Error ? error.message : String(error)}`);
+        }).finally(() => { this.updateConfirmation = null; });
         for (const reporter of this.activityReporters) reporter.resend();
         this.parkedLanes?.resendAll();
         const runtime = this.protocolLane.runtime();
@@ -1911,6 +1933,7 @@ export class MultiremiDaemon {
   }
 
   async start(): Promise<void> {
+    this.runActive = true;
     this.ensureTrace();
     this.startedAt = new Date();
     this.ready = false;
@@ -1935,6 +1958,10 @@ export class MultiremiDaemon {
     this.startRepoCheckoutServer();
     try {
       await this.registerCurrentRuntime();
+      if (this.options.runtimeId) {
+        const directory = updateJournalDir(multiremiStateDir(), this.options.runtimeId);
+        if (readUpdateJournal(directory)) writeFileSync(join(directory, "candidate.pid"), String(process.pid), { mode: 0o600 });
+      }
       this.assertWorkspaceRootOwner();
       // Replay never holds startup waiting for a socket. The temporary HTTP
       // recovery below is guarded against pending terminal reports instead.
@@ -2014,6 +2041,7 @@ export class MultiremiDaemon {
       }
       throw error;
     } finally {
+      this.stop();
       await this.leaveProtocolLane();
       this.ready = false;
       this.onReadyChange(false);
@@ -2059,6 +2087,9 @@ export class MultiremiDaemon {
           log.warn(`outbox close failed: ${error instanceof Error ? error.message : String(error)}`);
         });
       }
+      if (this.stopDeadlineTimer) clearTimeout(this.stopDeadlineTimer);
+      this.stopDeadlineTimer = null;
+      this.runActive = false;
     }
   }
 
@@ -2404,19 +2435,64 @@ export class MultiremiDaemon {
         ? await this.reinstallAcpBridge()
         : scope === "agent"
           ? await this.updateAgentCli()
-          : await this.updateRunner(targetVersion);
+          : this.updateRunner ? await this.updateRunner(targetVersion)
+            : await this.installRuntimeUpdate(runtimeId, requestId, targetVersion);
       await this.client.reportRuntimeUpdateResult(runtimeId, requestId, {
-        status: "completed",
+        status: scope === "cli" ? "restarting" : "completed",
         output: output || (scope === "acp" ? "ACP bridge updated" : scope === "agent" ? "Agent updated" : `Updated to ${targetVersion}`),
       });
-      await this.requestRestartAfterUpdate();
+      if (scope === "cli") await this.requestRestartAfterUpdate();
+      else this.releaseUpdateClaimPause(scope);
     } catch (err) {
       this.releaseUpdateClaimPause(scope);
-      await this.client.reportRuntimeUpdateResult(runtimeId, requestId, {
-        status: "failed",
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const error = err instanceof Error ? err.message : String(err);
+      const directory = updateJournalDir(multiremiStateDir(), runtimeId, requestId);
+      const journal = scope === "cli" && !this.updateRunner ? readUpdateJournal(directory) : null;
+      if (journal && decideUpdate(directory, "rolled_back")) {
+        restorePreviousLauncher(journal);
+        writeFileSync(join(directory, "reason"), error, { mode: 0o600 });
+        await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "rolled_back", error });
+        renameSync(directory, `${directory}.settled`);
+      } else {
+        await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "failed", error });
+      }
     }
+  }
+
+  private async installRuntimeUpdate(runtimeId: string, requestId: string, targetVersion: string): Promise<string> {
+    const restart = this.updateRestartSpec;
+    if (!restart) throw new Error("This daemon launch has no recoverable update restart specification");
+    const result = await performUpdate({ targetVersion, currentVersion: multiremiVersion,
+      ...(basename(process.execPath) === "remi" ? { rollbackExecutable: process.execPath } : {}),
+      beforeActivate: async installed => {
+        const journal = journalForInstall(installed, runtimeId, requestId, multiremiVersion);
+        await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "restarting" });
+        armUpdateWatchdog({ directory: updateJournalDir(multiremiStateDir(), runtimeId, requestId), journal,
+          restart: restart.command, manager: restart.manager, timeoutSeconds: this.updateVerifyTimeoutSeconds });
+      },
+    });
+    return `Installed ${result.version}; awaiting target-version hello and startup self-check`;
+  }
+
+  private async confirmRuntimeUpdate(): Promise<void> {
+    if (!this.options.runtimeId || !this.ready || !this.supervisorReady() || this.stopped) return;
+    const directory = updateJournalDir(multiremiStateDir(), this.options.runtimeId);
+    const journal = readUpdateJournal(directory);
+    if (!journal) return;
+    const version = multiremiVersion.replace(/^v/, "");
+    if (!updateDecision(directory) && version === journal.targetVersion) decideUpdate(directory, "completed");
+    const decision = updateDecision(directory);
+    if (decision === "completed" && version === journal.targetVersion) {
+      await this.client.reportRuntimeUpdateResult(journal.runtimeId, journal.requestId, {
+        status: "completed", self_check: true, output: `Registered ${version}; startup self-check passed`,
+      });
+    } else if (decision === "rolled_back" && version === journal.previousVersion.replace(/^v/, "")) {
+      await this.client.reportRuntimeUpdateResult(journal.runtimeId, journal.requestId, {
+        status: "rolled_back", error: readFileSync(join(directory, "reason"), "utf8").trim(),
+        output: `Restored ${version}; startup self-check passed`,
+      });
+    } else return;
+    renameSync(directory, `${directory}.settled`);
   }
 
   /** Reinstall the ACP bundle pinned by this daemon release. */
@@ -3244,7 +3320,26 @@ export class MultiremiDaemon {
     return this.parkedLanesClosing.then(() => this.protocolClient?.stopLane(this.protocolLane));
   }
 
+  /** Synchronous cleanup shared by the process supervisor before any lane can exit. */
+  forceStopProcesses(): void {
+    for (const abort of this.activeTaskAborts) abort.abort();
+    this.parkedLanes?.killAllProcesses();
+    for (const [provider, chatId] of this.liveUpdateProviders) {
+      const pgid = provider.processGroupId?.(chatId);
+      if (pgid) { try { killProcessGroup(pgid); } catch { /* already exited */ } }
+    }
+    this.stopRepoCheckoutServer();
+  }
+
   stop(): void {
+    if (this.runActive && !this.stopDeadlineTimer) {
+      this.stopDeadlineTimer = setTimeout(() => {
+        this.forceStopProcesses();
+        log.error("Daemon graceful stop deadline exceeded; bridge process groups terminated");
+        this.onStopTimeout();
+      }, this.stopTimeoutMs);
+      this.stopDeadlineTimer.unref?.();
+    }
     if (this.pluginLocalRetryTimer !== null) clearTimeout(this.pluginLocalRetryTimer);
     this.pluginLocalRetryTimer = null;
     if (this.onceOfferTimer !== null) clearTimeout(this.onceOfferTimer);
@@ -5173,6 +5268,7 @@ export class MultiremiDaemon {
       attemptId: config.env?.MULTIREMI_ATTEMPT_ID || task.id,
     });
     const provider: MultiremiTaskProvider = chosen;
+    this.liveUpdateProviders.set(provider, config.chatId ?? task.id);
     if (!provider.sendStream) {
       throw new Error(`Provider ${agent.provider} does not support streaming`);
     }
@@ -5810,6 +5906,7 @@ export class MultiremiDaemon {
       } else {
         await provider.close?.();
       }
+      this.liveUpdateProviders.delete(provider);
     }
   }
 
@@ -6305,29 +6402,6 @@ function formatDuration(ms: number): string {
   return `${seconds}s`;
 }
 
-async function runDefaultMultiremiUpdate(targetVersion: string): Promise<string> {
-  const version = targetVersion.trim();
-  if (!version) throw new Error("target_version is required");
-  const repo = process.env.MULTIREMI_RELEASE_REPO || process.env.MULTIREMI_REPO || "moesin-lab/Remi";
-  const installerUrl = process.env.MULTIREMI_INSTALLER_URL || `https://github.com/${repo}/releases/latest/download/install-remi.sh`;
-  const env = cleanProcessEnv({
-    ...process.env,
-    MULTIREMI_VERSION: version,
-  });
-  const proc = Bun.spawn(["bash", "-lc", `curl -fsSL ${shellQuote(installerUrl)} | bash`], {
-    env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    streamText(proc.stdout),
-    streamText(proc.stderr),
-    proc.exited,
-  ]);
-  const output = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
-  if (exitCode !== 0) throw new Error(output || `multiremi update failed with exit code ${exitCode}`);
-  return output || `Updated to ${version}`;
-}
 
 async function streamText(stream: ReadableStream<Uint8Array> | null): Promise<string> {
   if (!stream) return "";

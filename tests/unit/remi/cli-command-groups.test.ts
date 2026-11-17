@@ -33,7 +33,9 @@ async function capture(args: string[]) {
   } finally {
     console.log = log;
     console.error = error;
-    process.exitCode = exitCode;
+    // Bun 1.3.14 ignores assigning undefined after a numeric exit code.
+    // Restore the original successful state explicitly for later suites.
+    process.exitCode = exitCode ?? 0;
   }
 }
 

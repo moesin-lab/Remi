@@ -6,9 +6,10 @@
 import { runSchemaBoundaryScenario } from './platform-schema-boundary-scenario.js';
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
+import { buildPostgresWorker } from "../helpers/build-postgres-worker.js";
 
 const enabled = process.env.MULTIREMI_TEST_DOCKER_RECOVERY === "1";
 const repository = resolve(import.meta.dir, "../..");
@@ -88,7 +89,7 @@ describe.skipIf(!enabled)("isolated PostgreSQL platform recovery", () => {
 
       const built = await Bun.build({ entrypoints: [join(import.meta.dir, "platform-recovery-postgres-fixture.ts")], target: "bun", outdir: temporary });
       if (!built.success) throw new Error(built.logs.map(String).join("\n"));
-      copyFileSync(join(repository, "packages/server/src/store/db/pg-worker.ts"), join(temporary, "pg-worker.ts"));
+      await buildPostgresWorker(temporary);
       const output = docker(["run", "--rm", "--pull=never", "--network", `container:${container}`,
         "--mount", `type=bind,src=${temporary},dst=/check,readonly`, "--workdir", "/check",
         "oven/bun:1.3.14", "bun", `/check/${basename(built.outputs[0]!.path)}`]).toString();

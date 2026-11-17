@@ -1,3 +1,4 @@
+import { DatabaseRetryLoop, isDatabaseConnectionError } from "@shared/db/recovery.js";
 import { withDbJob } from "@shared/observability/db-sources.js";
 import { randomUUID } from "node:crypto";
 import { createLogger } from "@shared/logger.js";
@@ -49,7 +50,7 @@ export class ScmPollingScheduler {
   private readonly leaseOwner: string;
   private readonly now: () => Date;
   private readonly inFlight = new Set<string>();
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: DatabaseRetryLoop | null = null;
   private running = false;
   private tickPromise: Promise<ScmPollingRunResult> | null = null;
 
@@ -67,18 +68,15 @@ export class ScmPollingScheduler {
   }
 
   start(): void {
-    if (this.running) return;
+    if (this.timer) return;
     this.running = true;
-    void this.runOnce().catch((error) => log.warn(`Initial SCM poll failed: ${errorMessage(error)}`));
-    this.timer = setInterval(() => {
-      void this.runOnce().catch((error) => log.warn(`SCM polling tick failed: ${errorMessage(error)}`));
-    }, this.tickIntervalMs);
-    this.timer.unref?.();
+    this.timer = new DatabaseRetryLoop("scm.poll", () => this.runOnce(), this.tickIntervalMs);
+    this.timer.start();
   }
 
   stop(): void {
     this.running = false;
-    if (this.timer) clearInterval(this.timer);
+    this.timer?.stop();
     this.timer = null;
   }
 
@@ -217,6 +215,7 @@ export class ScmPollingScheduler {
       }
       return { completed, eventsCreated, error: null };
     } catch (error) {
+      if (isDatabaseConnectionError(error) || error instanceof TypeError || error instanceof ReferenceError) throw error;
       if (error instanceof ScmStreamLeaseLostError) {
         log.warn(`SCM poll lease was lost for ${key}; stale results were discarded`);
         return { completed: false, eventsCreated, error: null };
@@ -241,6 +240,7 @@ export class ScmPollingScheduler {
       log.warn(`SCM poll failed for ${key}: ${message}`);
       return { completed: false, eventsCreated, error: message };
     } finally {
+      this.inFlight.delete(key);
       if (leaseToken) {
         this.store.releaseSyncStream({
           connectionId: connection.id,
@@ -249,7 +249,6 @@ export class ScmPollingScheduler {
           leaseToken,
         });
       }
-      this.inFlight.delete(key);
     }
   }
 

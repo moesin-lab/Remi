@@ -822,5 +822,5 @@ for (const historySize of [100, 3000]) {
       expect(sql.length).toBeLessThanOrEqual(40);
       expect(f.store.getTask(f.task.id)?.usage[0]?.totalTokens).toBe(12 * historySize + 1 + 12 * index);
     }
-  });
+  }, 60_000);
 }

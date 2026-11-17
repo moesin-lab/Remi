@@ -57,7 +57,7 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 插件心跳只协调当前 Runtime 的 desired 状态；绑定、版本和任务快照等业务变更仍协调工作区。
 心跳仍读取工作区插件绑定和活跃任务的版本需求，不能认为所有工作区读取已消除。
 Daemon 报告的 Runtime 身份校验使用 `getRuntimeLite`，不附带历史用量、模型和执行组。
-`task:usage` 继续向浏览器更新统计，但不唤醒 daemon 下行；账本逐单位写入成本仍需单独评估。
+`task:usage` 继续向浏览器更新统计，但不唤醒 daemon 下行；账本仅按本帧 unit_id 批量预取修订事实、回执与冲突水位，不读取整个 run 的历史单位；无累计 meter/增量金额 coverage 的多单位快照将事实和接受回执各用一条 JSON 展开 INSERT 写入，避免 10,000 unit 帧触及 bind 上限；单单位增量各用一次参数化 VALUES 写入。provider request 所有权仍逐项校验；累计 meter 与增量 coverage 保持原序列化路径。
 `task.activity` 的子代理计数只在变化时写库，`task:subagents` 同样只推浏览器、不唤醒 daemon 下行。
 PR 6 的后台任务计数随同一帧、按同一规则写库。后台任务快照（`lane.background_tasks`）内容不变时只更新 revision、不推事件；
 `chat:background_tasks` 只推 Chat 创建者、不唤醒 daemon 下行或 offer，引起它的快照或停止请求只重算相关 runtime 的下行。
@@ -96,6 +96,23 @@ awaiting_human 状态覆盖及 unknown offer 保留的共享目录租约。索�
 普通 ack/drain 只恢复背压等待；入队、终态、容量/配置变化及已有期限仍立即触发。
 扫描恢复派发时记 warn 和 `offer_sweep_recovered`，用于定位遗漏事件；测试环境默认禁用扫描。
 线上延迟与一小时稳定性仍需部署后测量。
+
+## Daemon 报告和消息接口的历史放大
+
+Daemon turn 输入范围和终态 input-read 校验均直接批量读取消息所需列；Chat retry ancestry 在 attempts 基表中一次回溯，
+历史消息的来源任务只批量读取 queue status。批量 task 水合对整个批次求 usage，
+workspace offer 扇出批量读取 Runtime 和 drain 围栏。会话 messages 的分页和 from/to 范围
+复用当前页的 related-message/source-subject 预取及原权限判定。
+原生 Question 通知先在分页 SQL 中排除失效路由；响应页中的通知复用批量权限事实检查，
+仍在 JavaScript 中执行与单条读取相同的严格 metadata 校验。普通回复间接继承的来源过滤
+仍可能扫描多个候选页，不能把直接 Question 通知的大/小夹具当作所有隐藏来源路径的常数证明。
+飞书入站 POST 的 Runtime 身份读取不水合历史 usage；已有会话的追加路径有单独预算。
+
+workspace 报告只唤醒派活条件；飞书结果只刷新已验证 bot host 的 pending 队列。
+消息和终态事件刷新活跃任务、bot、后台 lane 与 drain host 的输入，配置和维护事件保留完整扇出。
+同步读取范围退出即关闭，后台异步工作重新读取。
+[预算和复现报告](../../reports/performance/MUL-182-daemon-report-queries.md)区分历史放大消除、
+终态仍有的固定 SQL 成本、隐藏页/Question 权限查询边界与未完成的 stable 现场验收。
 
 ## Issue 详情首屏的工作区读取
 

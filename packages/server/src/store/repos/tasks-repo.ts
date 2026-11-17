@@ -3214,7 +3214,7 @@ export class TasksRepo {
     // The IN (…) read does not preserve request order, and the page order is a
     // contract, so order by the caller's list rather than by whatever the
     // backend returned.
-    const byId = new Map(rows.map((row) => [String(row.id), this.toTasks([row])[0]!]));
+    const byId = new Map(this.toTasks(rows).map((task) => [task.id, task]));
     const ordered = ids.map((id) => byId.get(id)).filter((task): task is MultiremiTask => task != null);
     return this.withTaskAutopilotRuns(ordered);
   }
@@ -5350,7 +5350,7 @@ ${placementAfter.sql}
       }
       if (!current || (!isActiveTaskStatus(current.status) && !(daemonAuthority && current.status === "queued"))
         || current.workspaceId !== initial.workspaceId) throw new Error(`Task not found or terminal: ${taskId}`);
-      if(input.expectedRuntimeId&&(current.runtimeId!==input.expectedRuntimeId||this.ctx.runtimes().getRuntime(input.expectedRuntimeId)?.daemonId!==input.expectedDaemonId))throw new Error('stale_attempt');
+      if(input.expectedRuntimeId&&(current.runtimeId!==input.expectedRuntimeId||this.ctx.runtimes().getRuntimeLite(input.expectedRuntimeId)?.daemonId!==input.expectedDaemonId))throw new Error('stale_attempt');
       this.assertTaskRuntimeAvailableWithinWorkspaceLock(current);
       const chatExecutionKind = this.getTaskChatExecutionKind(current);
       this.lockTaskIssueSessionsWithinWorkspaceLock([current]);
@@ -7057,7 +7057,7 @@ ${placementAfter.sql}
   /** Caller holds the task workspace lifecycle lock. */
   private assertTaskRuntimeAvailableWithinWorkspaceLock(task: MultiremiTask): void {
     if (!task.runtimeId) return;
-    const runtime = this.ctx.runtimes().getRuntime(task.runtimeId);
+    const runtime = this.ctx.runtimes().getRuntimeLite(task.runtimeId);
     if (!runtime || (runtime.workspaceId ?? "local") !== task.workspaceId) {
       throw new Error(`Runtime not found: ${task.runtimeId}`);
     }

@@ -137,6 +137,20 @@ export class ConversationLogRepo {
       if(entry)this.emit(entry.session_id,created || entry.session_id.startsWith("chat_") ?entry:toPatch(entry.seq,entry.revision,{metadata:entry.metadata,body_md:entry.body_md,body_html:entry.body_html,render_version:entry.render_version},entry.updated_at));
     });
   }
+  /** Visibility markers can target rows outside the requested window. */
+  getEntriesByRefs(refs: readonly { sessionId: string; seq: number }[]): ConversationLogEntry[] {
+    const unique = [...new Map(refs.map(ref => [JSON.stringify([ref.sessionId, ref.seq]), ref])).values()];
+    const entries: ConversationLogEntry[] = [];
+    for (let offset = 0; offset < unique.length; offset += 50) {
+      const batch = unique.slice(offset, offset + 50);
+      const rows = this.ctx.db.query(`SELECT * FROM multiremi_conversation_log
+        WHERE (session_id,seq) IN (VALUES ${batch.map(() => '(?,?)').join(',')})`)
+        .all(...batch.flatMap(ref => [ref.sessionId, ref.seq])) as Row[];
+      entries.push(...this.materializeAll(rows));
+    }
+    return entries;
+  }
+
   private materialize(row:Row):ConversationLogEntry { return projectTurnCard(this.ctx.db,toConversationLogEntry(row)); }
   /** Multi-row reads project their turn cards in a bounded number of statements. */
   private materializeAll(rows:Row[]):ConversationLogEntry[] { return projectTurnCards(this.ctx.db,rows.map(toConversationLogEntry)); }

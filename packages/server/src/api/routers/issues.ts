@@ -1512,7 +1512,8 @@ export function registerIssueRoutes(app: Hono, deps: RouterDeps): void {
       || ["seq", "id", "after_seq", "limit", "thread", "message_kind", "unread_by", "query"].some(key => c.req.query(key) != null)) return c.json({ error: "invalid message range" }, 400);
     const token = currentTaskAccessToken(c);
     try {
-      const page = readSessionLogRange(store, sessionId, from, to, c.req.query("cursor"), token?.agentId, access.inheritedParentRange ? undefined : conversationEntryVisibility(c, store));
+      const page = readSessionLogRange(store, sessionId, from, to, c.req.query("cursor"), token?.agentId, undefined, access.inheritedParentRange ? undefined
+        : entries => conversationEntryVisibility(c, store, { prefetch: entries }));
       let progress;
       if (token?.taskId && token.agentId && !access.inheritedParentRange) {
         try { progress = store.recordSessionAgentRangeRead(sessionId, token.agentId, page.read_start, page.read_end, token.taskId); }

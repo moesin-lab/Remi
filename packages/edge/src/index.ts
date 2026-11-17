@@ -26,6 +26,23 @@ export function cleanHeaders(input: Headers): Headers {
   for (const name of hop) headers.delete(name);
   return headers;
 }
+// Inspect every interpretation without rewriting the path forwarded to the slot.
+function isPrivatePath(path: string): boolean {
+  while (true) {
+    const segments: string[] = [];
+    for (const segment of path.replaceAll('\\', '/').split('/')) {
+      if (segment === '..') segments.pop();
+      else if (segment && segment !== '.') segments.push(segment);
+    }
+    if (segments[0] === 'internal') return true;
+    let decoded: string;
+    try { decoded = decodeURIComponent(path); } catch { return false; }
+    if (decoded === path) return false;
+    // Every successful changed decoding shortens the string, so nested percent
+    // encoding terminates without a depth cutoff that rejects public paths.
+    path = decoded;
+  }
+}
 class Unavailable extends Error {}
 
 /** Long-lived public listener. Slot lifecycle is controlled by the caller, never spawned here. */
@@ -72,7 +89,16 @@ export class Edge extends EventEmitter {
           if (r.upstream.bufferedAmount + Buffer.byteLength(data) > this.options.wsQueueLimit) { this.closeRelay(r, 1013, 'Upstream queue exhausted'); return; }
           r.upstream.send(data);
         },
-        drain: client => this.flush(client.data),
+        // A send during Bun 1.3.14's native writable callback can lose the
+        // renewed EPOLLOUT registration after a partial large-frame write.
+        // Microtasks still run inside that callback; resume on a later turn.
+        drain: client => {
+          const r = client.data;
+          if (r.ended) return;
+          clearTimeout(r.retryTimer);
+          r.retryTimer = setTimeout(() => this.flush(r), 0);
+          r.retryTimer.unref();
+        },
         close: (client, code, reason) => this.closeRelay(client.data, code, reason),
         backpressureLimit: this.options.wsBufferLimit, closeOnBackpressureLimit: false, maxPayloadLength: Math.max(16 * 1024 * 1024, this.options.wsMaxMessageBytes),
       },
@@ -218,20 +244,7 @@ export class Edge extends EventEmitter {
   }
   private async handle(req: Request, server: Bun.Server<Relay>): Promise<Response | undefined> {
     const url = new URL(req.url);
-    // Reject encoded separators/dots, including nested percent encoding, before
-    // normalization can turn a private prefix into a different checked path.
-    let path = url.pathname;
-    try {
-      let layers = 0;
-      while (path.includes('%')) {
-        if (++layers > 16 || /%(?:2e|2f|5c)/i.test(path)) return new Response('Not found', { status: 404 });
-        const decoded = decodeURIComponent(path);
-        if (decoded === path) break;
-        path = decoded;
-      }
-      path = new URL('http://edge' + path.replaceAll('\\', '/').replace(/\/+/g, '/')).pathname;
-    } catch { return new Response('Not found', { status: 404 }); }
-    if (path === '/internal' || path.startsWith('/internal/')) return new Response('Not found', { status: 404 });
+    if (isPrivatePath(url.pathname)) return new Response('Not found', { status: 404 });
     const deadline = Date.now() + this.options.holdMaxMs;
     const headers = this.headers(req, server);
     if (req.headers.get('upgrade')?.toLowerCase() === 'websocket') return this.upgrade(req, server, headers, deadline);

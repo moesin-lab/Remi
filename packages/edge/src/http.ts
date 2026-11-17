@@ -1,15 +1,23 @@
+/** Shared by Bun TCP exchanges and the Node stream adapter for WS upgrades. */
+export interface TransportSocket {
+  write(bytes: Uint8Array): number;
+  end(): void;
+  terminate(): void;
+  pause(): void;
+  resume(): void;
+}
 export interface TransportHandlers {
-  data(socket: Bun.Socket<undefined>, bytes: Buffer): void;
-  drain(socket: Bun.Socket<undefined>): void;
-  close(socket: Bun.Socket<undefined>): void;
-  error(socket: Bun.Socket<undefined>, error: Error): void;
-  connectError(socket: Bun.Socket<undefined>, error: Error): void;
+  data(socket: TransportSocket, bytes: Buffer): void;
+  drain(socket: TransportSocket): void;
+  close(socket: TransportSocket): void;
+  error(socket: TransportSocket, error: Error): void;
+  connectError(socket: TransportSocket, error: Error): void;
 }
 /** Per-edge pool: reuse only fully framed, bodyless-upload exchanges. */
 export class HttpPool {
-  private idle = new Map<string, Bun.Socket<undefined>[]>();
-  private handlers = new WeakMap<Bun.Socket<undefined>, TransportHandlers>();
-  private timers = new Map<Bun.Socket<undefined>, ReturnType<typeof setTimeout>>();
+  private idle = new Map<string, TransportSocket[]>();
+  private handlers = new WeakMap<TransportSocket, TransportHandlers>();
+  private timers = new Map<TransportSocket, ReturnType<typeof setTimeout>>();
   async connect(url: URL, handlers: TransportHandlers, reuse = true) {
     const key = url.origin;
     const socket = reuse ? this.idle.get(key)?.pop() : undefined;
@@ -23,14 +31,14 @@ export class HttpPool {
     } });
     this.handlers.set(connected, handlers); return connected;
   }
-  release(url: URL, socket: Bun.Socket<undefined>) {
+  release(url: URL, socket: TransportSocket) {
     this.handlers.delete(socket);
     const queue = this.idle.get(url.origin) ?? []; this.idle.set(url.origin, queue);
     if (queue.length >= 8) { socket.end(); return; }
     queue.push(socket);
     const timer = setTimeout(() => this.discard(socket), 1000); timer.unref(); this.timers.set(socket, timer);
   }
-  private discard(socket: Bun.Socket<undefined>) {
+  private discard(socket: TransportSocket) {
     clearTimeout(this.timers.get(socket)); this.timers.delete(socket); this.handlers.delete(socket);
     for (const queue of this.idle.values()) { const index = queue.indexOf(socket); if (index >= 0) queue.splice(index, 1); }
     socket.terminate();
@@ -43,11 +51,11 @@ export class HttpPool {
  */
 export async function exchange(url: URL, request: Request, headers: Headers, hooks: {
   sent(): void; done(): void; error(): void; connectTimeoutMs: number; responseHeaderTimeoutMs?: number; pool?: HttpPool; reportStatusErrors?: boolean; stopSignal?: AbortSignal;
-  transport?: { initialData: Buffer; connect(handlers: TransportHandlers): Promise<Bun.Socket<undefined>> };
+  transport?: { initialData: Buffer; connect(handlers: TransportHandlers): Promise<TransportSocket> };
 }): Promise<Response> {
   const signal = hooks.stopSignal ? AbortSignal.any([request.signal, hooks.stopSignal]) : request.signal;
   return new Promise<Response>((resolve, reject) => {
-    let socket: Bun.Socket<undefined> | undefined;
+    let socket: TransportSocket | undefined;
     let controller: ReadableStreamDefaultController<Uint8Array>;
     let buffer: Buffer = Buffer.alloc(0);
     let parsed = false; let ended = false; let chunked = false; let reusable = false;

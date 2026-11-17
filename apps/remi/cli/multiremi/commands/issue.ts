@@ -1,3 +1,4 @@
+import { proxyFetch } from "@shared/proxy-fetch.js";
 /**
  * Multiremi CLI — `issue` command handlers (issues, comments, sessions,
  * metadata, subscribers).
@@ -588,7 +589,7 @@ async function localDaemonBaseUrl(options: CliOptions): Promise<string | null> {
   const baseUrl = `http://127.0.0.1:${daemonPort}`;
   let health: Response;
   try {
-    health = await fetch(`${baseUrl}/health`);
+    health = await proxyFetch(`${baseUrl}/health`);
   } catch {
     // Ordinary CLI use does not require a daemon. A topic binding cannot exist
     // without the co-resident daemon which created it.
@@ -643,7 +644,7 @@ async function localTopicMigrationRequest(
   baseUrl: string,
   body: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const response = await fetch(`${baseUrl}/topic/migrate`, {
+  const response = await proxyFetch(`${baseUrl}/topic/migrate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

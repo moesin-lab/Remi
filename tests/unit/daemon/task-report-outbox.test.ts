@@ -1,7 +1,7 @@
 // MUL-74 outbox invariants: per-task seq ordering across an API outage,
 // durable restart recovery, permanent-error blocking, droppable-kind
 // tolerance, and safe compaction of overwritten rows at the soft size cap.
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
@@ -223,25 +223,33 @@ describe("MultiremiTaskReportOutbox", () => {
   });
 
   it("does not let new token reports bypass retry backoff", async () => {
-    let attempts = 0;
-    const outbox = track(new MultiremiTaskReportOutbox({
-      path: ":memory:",
-      backoffScheduleMs: [100],
-      deliver: async () => {
-        attempts += 1;
-        throw new Error("connection refused");
-      },
-    }));
-    outbox.enqueue("tsk_backoff", "messages", { messages: [{ seq: 1, type: "text", content: "a" }] });
-    await until(() => attempts === 1);
+    // Enqueueing and SQLite work can exceed 100ms on a loaded CI runner.
+    // Hold the retry clock still so this tests enqueue bypass, not wall time.
+    const now = Date.now();
+    const clock = spyOn(Date, "now").mockReturnValue(now);
+    try {
+      let attempts = 0;
+      const outbox = track(new MultiremiTaskReportOutbox({
+        path: ":memory:",
+        backoffScheduleMs: [100],
+        deliver: async () => {
+          attempts += 1;
+          throw new Error("connection refused");
+        },
+      }));
+      outbox.enqueue("tsk_backoff", "messages", { messages: [{ seq: 1, type: "text", content: "a" }] });
+      await until(() => attempts === 1);
 
-    for (let seq = 2; seq <= 20; seq += 1) {
-      outbox.enqueue("tsk_backoff", "messages", { messages: [{ seq, type: "text", content: "x" }] });
+      for (let seq = 2; seq <= 20; seq += 1) {
+        outbox.enqueue("tsk_backoff", "messages", { messages: [{ seq, type: "text", content: "x" }] });
+      }
+      await Bun.sleep(30);
+
+      expect(attempts).toBe(1);
+      expect(outbox.stats().pending).toBe(20);
+    } finally {
+      clock.mockRestore();
     }
-    await Bun.sleep(30);
-
-    expect(attempts).toBe(1);
-    expect(outbox.stats().pending).toBe(20);
   });
 
   it("batches consecutive persisted legacy message records into one delivery on replay", async () => {

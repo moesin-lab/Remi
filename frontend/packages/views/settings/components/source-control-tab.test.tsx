@@ -8,6 +8,7 @@ import enSettings from "../../locales/en/settings.json";
 
 const updateWorkspace = vi.hoisted(() => vi.fn());
 const setQueryData = vi.hoisted(() => vi.fn());
+const access = vi.hoisted(() => ({ role: "owner" }));
 const navigate = vi.hoisted(() => vi.fn());
 const workspaceRef = vi.hoisted(() => ({
   current: {
@@ -18,7 +19,7 @@ const workspaceRef = vi.hoisted(() => ({
 }));
 
 vi.mock("@tanstack/react-query", () => ({
-  useQuery: () => ({ data: [{ user_id: "local", role: "owner" }] }),
+  useQuery: () => ({ data: [{ user_id: "local", role: access.role }] }),
   useQueryClient: () => ({ setQueryData }),
   queryOptions: <T,>(options: T) => options,
 }));
@@ -67,6 +68,7 @@ function I18nWrapper({ children }: { children: ReactNode }) {
 describe("SourceControlTab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    access.role = "owner";
     workspaceRef.current.settings = { retained_setting: "yes" };
     updateWorkspace.mockImplementation(async (_id: string, input: { settings: Record<string, unknown> }) => ({
       ...workspaceRef.current,
@@ -100,6 +102,65 @@ describe("SourceControlTab", () => {
         scm_complete_issue_on_merge_enabled: true,
       },
     }));
+  });
+
+  it("updates preview live, validates drafts, and saves normalized identity with existing settings", async () => {
+    const user = userEvent.setup();
+    render(<SourceControlTab />, { wrapper: I18nWrapper });
+    const save = screen.getByRole("button", { name: enSettings.source_control.co_author_save });
+    expect(save).toBeDisabled();
+    const name = screen.getByLabelText(enSettings.source_control.co_author_name);
+    const email = screen.getByLabelText(enSettings.source_control.co_author_email);
+    await user.clear(name);
+    await user.type(name, " Custom ");
+    await user.clear(email);
+    await user.type(email, "invalid");
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(save).toBeDisabled();
+    await user.clear(email);
+    await user.type(email, " custom@example.test ");
+    expect(screen.getByText("Co-authored-by: Custom <custom@example.test>")).toBeInTheDocument();
+    await user.click(save);
+    await waitFor(() => expect(updateWorkspace).toHaveBeenCalledWith("workspace-1", {
+      settings: { retained_setting: "yes", co_authored_by_name: "Custom", co_authored_by_email: "custom@example.test" },
+    }));
+  });
+
+  it("resets both keys to null and previews defaults", async () => {
+    workspaceRef.current.settings = { retained_setting: "yes", co_authored_by_name: "Custom", co_authored_by_email: "custom@example.test" };
+    const user = userEvent.setup();
+    render(<SourceControlTab />, { wrapper: I18nWrapper });
+    await user.click(screen.getByRole("button", { name: enSettings.source_control.co_author_reset }));
+    await waitFor(() => expect(updateWorkspace).toHaveBeenCalledWith("workspace-1", {
+      settings: { retained_setting: "yes", co_authored_by_name: null, co_authored_by_email: null },
+    }));
+    expect(screen.getByText("Co-authored-by: Remi <remi@openremi.fun>")).toBeInTheDocument();
+  });
+
+  it("keeps identity editable when attribution is disabled and marks preview inactive", async () => {
+    workspaceRef.current.settings.co_authored_by_enabled = false;
+    const user = userEvent.setup();
+    render(<SourceControlTab />, { wrapper: I18nWrapper });
+    expect(screen.getByText(enSettings.source_control.co_author_disabled)).toBeInTheDocument();
+    const name = screen.getByLabelText(enSettings.source_control.co_author_name);
+    await user.clear(name);
+    await user.type(name, "Disabled Author");
+    expect(name).toHaveValue("Disabled Author");
+  });
+
+  it("makes the identity group read-only without management permission", async () => {
+    access.role = "member";
+    const user = userEvent.setup();
+    render(<SourceControlTab />, { wrapper: I18nWrapper });
+    const name = screen.getByLabelText(enSettings.source_control.co_author_name);
+    const email = screen.getByLabelText(enSettings.source_control.co_author_email);
+    expect(name).toHaveAttribute("readonly");
+    expect(email).toHaveAttribute("readonly");
+    expect(screen.getByRole("button", { name: enSettings.source_control.co_author_save })).toBeDisabled();
+    const reset = screen.getByRole("button", { name: enSettings.source_control.co_author_reset });
+    expect(reset).toBeDisabled();
+    await user.click(reset);
+    expect(updateWorkspace).not.toHaveBeenCalled();
   });
 
   it("opens the shared repository management surface", async () => {

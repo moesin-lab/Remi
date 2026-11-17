@@ -333,7 +333,15 @@
     "section_repositories": "リポジトリ",
     "repositories_shortcut_label": "リポジトリ URL はリポジトリタブにあります",
     "repositories_shortcut_link": "リポジトリを管理 →",
-    "toast_failed": "ソース管理設定を更新できませんでした"
+    "toast_failed": "ソース管理設定を更新できませんでした",
+    "co_author_description": "エージェントのコミットに共同作成者を自動追加します。",
+    "co_author_name": "名前",
+    "co_author_email": "メール",
+    "co_author_invalid_name": "制御文字や山括弧を含まない1〜100文字の名前を入力してください。",
+    "co_author_invalid_email": "ドット付きドメインの有効なメールを254文字以内で入力してください。",
+    "co_author_disabled": "トレーラーは無効です。",
+    "co_author_save": "保存",
+    "co_author_reset": "既定値に戻す"
   },
   "repositories": {
     "section_title": "リポジトリ",

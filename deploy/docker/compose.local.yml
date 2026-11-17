@@ -17,6 +17,7 @@ services:
       retries: 20
 
   api:
+    stop_grace_period: 30s
     image: ${REMI_API_IMAGE:?set REMI_API_IMAGE}
     pull_policy: never
     build:

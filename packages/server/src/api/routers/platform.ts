@@ -1,3 +1,4 @@
+import { readCurrentDaemonBuild } from "../../releases/current-daemon-build.js";
 import { isPlatformSchemaContractFailure } from '@multiremi/contracts/platform-failure';
 import type { Context, Hono } from "hono";
 import { runtimeProtocolSummary } from "@multiremi/contracts/runtime-protocol";
@@ -222,11 +223,17 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
     // daemons only after that switch is complete, and never compete with a release
     // operation that is still draining or replacing the API.
     if (!store.getActivePlatformOperation() && state.currentRelease?.version) {
-      const key = store.runtimeCliReleaseReconciliationKey(state.currentRelease.version);
+      const manifest = readCurrentDaemonBuild();
+      // The formal-release compatibility path remains available. Deployment
+      // versions require the API build's manifest and never compare by SemVer.
+      const version = manifest?.version ?? state.currentRelease.version;
+      const key = store.runtimeCliReleaseReconciliationKey(version, manifest?.commit);
       if (key !== reconciledCliKey) {
-        store.reconcileRuntimeCliRelease(state.currentRelease.version);
+        if (manifest) store.reconcileRuntimeCliRelease(version, manifest.commit);
+        else if (/^v?\d+\.\d+\.\d+$/.test(version)) store.reconcileRuntimeCliRelease(version);
         reconciledCliKey = key;
       }
+      store.reconcileRuntimeUpdateFailures();
     }
     return c.json({ state });
   });

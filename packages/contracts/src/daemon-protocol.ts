@@ -903,6 +903,8 @@ export const DAEMON_PROTOCOL_ERROR_CODES = [
   "task_not_found",
   "authority_revoked",
   "invalid_report",
+  "cli_update_not_admitted",
+  "cli_update_not_runnable",
   "report_shape_retired",
   "turn_input_pending",
   "input_unread",
@@ -1154,4 +1156,14 @@ export function compareDaemonCliVersion(left: string, right: string): number {
 /** Whether a daemon advertising `cliVersion` may use the v2 socket. */
 export function meetsDaemonMinCliVersion(cliVersion: string): boolean {
   return compareDaemonCliVersion(cliVersion, DAEMON_MIN_CLI_VERSION) >= 0;
+}
+
+/** Process-scoped CLI update directive. Explicit commits are resolved only through the platform. */
+export interface DaemonRuntimeUpdatePayload {
+  /** Persisted deadline only when this update owns the drain. */
+  drain_deadline?: string;
+  id: string;
+  target_version: string;
+  target_commit?: string;
+  scope?: "cli" | "acp" | "agent";
 }

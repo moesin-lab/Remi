@@ -5,7 +5,7 @@
  * Each handler exports: async run(args: string[]): Promise<void>
  */
 
-import { VERSION } from "@shared/version.js";
+import { BUILD_COMMIT, VERSION } from "@shared/version.js";
 import { CommandRegistry, type CommandInventoryEntry, type CommandSource } from "./core/command-registry.js";
 import { agentExtensionCommandSpecs } from "./commands/agent-extensions.js";
 import { contextCommandSpec } from "./commands/context.js";
@@ -103,7 +103,7 @@ register("login", "Interactive setup wizard", async () => {
   return { run: runLogin };
 });
 
-register("update", "Download latest version from GitHub", async () => {
+register("update", "Install a verified CLI release from the platform or GitHub", async () => {
   const { runUpdate } = await import("./update.js");
   return { run: runUpdate };
 });
@@ -191,6 +191,11 @@ export async function dispatch(args: string[]): Promise<void> {
 
   if (cmd === "--version" || cmd === "-V") {
     console.log(VERSION);
+    return;
+  }
+
+  if (cmd === "--build-info") {
+    console.log(JSON.stringify({ version: VERSION, commit: BUILD_COMMIT }));
     return;
   }
 

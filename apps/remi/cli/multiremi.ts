@@ -1,3 +1,5 @@
+import { API_SHUTDOWN_TIMEOUT_MS, resolveSlotConfiguration } from "@multiremi/api/slot-lifecycle.js";
+import { BUILD_COMMIT } from "@shared/version.js";
 import { bindUpdateCandidate } from "@shared/daemon-update.js";
 /**
  * `remi multiremi` — CLI entry facade.
@@ -218,19 +220,22 @@ async function serve(options: CliOptions): Promise<void> {
   const apiRoleConfiguration = resolveStartupApiRole(process.env);
   const startupConfig = evaluateStartupEnv({ ...process.env, ...(token !== undefined ? { MULTIREMI_TOKEN: token ?? undefined } : {}) }, apiRoleConfiguration);
   if (startupConfig.missingRequired.length) throw new Error(`Missing required production environment variables: ${startupConfig.missingRequired.join(", ")}`);
-  const roleGuard = await startHubRoleGuard({
+  const slotConfiguration = resolveSlotConfiguration(process.env);
+  const roleGuard = slotConfiguration ? null : await startHubRoleGuard({
     databaseUrl: process.env.MULTIREMI_DATABASE_URL,
     locks: locksForRole(apiRoleConfiguration.role, Boolean(process.env.MULTIREMI_PEER_URL?.trim())),
   });
   let server: ReturnType<typeof startMultiremiServer>;
+  let closeDatabase: (() => void) | undefined;
   try {
     const database = openMultiremiDatabase();
+    closeDatabase = () => database.close();
     try {
       const store = new MultiremiStore(database); // Constructor releases the schema migration lock.
       await prepareUsageAccountingStartup(database, {
         onBatch: batch => log.info("usage_startup_migration", batch),
       });
-      server = startMultiremiServer({ store, port, hostname: host, authToken: token, apiRoleConfiguration });
+      server = startMultiremiServer({ store, port, hostname: host, authToken: token, apiRoleConfiguration, slotConfiguration });
     } catch (error) {
       database.close();
       throw error;
@@ -241,11 +246,13 @@ async function serve(options: CliOptions): Promise<void> {
   }
   console.log(`Bun Multiremi API listening on ${formatListenUrls(host, server.port ?? port).join(", ")}`);
   await waitForShutdown(async () => {
-    server.stop(true);
+    await server.shutdown();
     // Release the locks only after the listener is down: a second process must not
     // be able to start while this one can still answer a request.
     await roleGuard?.close();
-  });
+    closeDatabase?.();
+    log.info("api_shutdown_complete");
+  }, server.exitRequested);
 }
 
 /**
@@ -550,7 +557,7 @@ export function attachControlPlaneConciergeHosts(
 }
 
 async function runDaemonForeground(options: CliOptions, programName: string): Promise<void> {
-  bindUpdateCandidate(multiremiDaemonPaths().stateDir, multiremiVersion);
+  bindUpdateCandidate(multiremiDaemonPaths().stateDir, multiremiVersion, process.pid, BUILD_COMMIT);
   if (!options.once && restartUnitIfSpawnedSuccessor()) process.exit(0);
   let workspaceSupervisor: WorkspaceSupervisorLease | null = acquireWorkspaceSupervisorLease(
     configuredMultiremiWorkspacesRoot(),
@@ -2387,16 +2394,36 @@ function localIPv4Addresses(): string[] {
   return result;
 }
 
-async function waitForShutdown(stop: () => void): Promise<void> {
+export async function waitForShutdown(stop: () => void | Promise<void>, exitRequested?: Promise<void>): Promise<void> {
   let resolve!: () => void;
-  const done = new Promise<void>((r) => { resolve = r; });
-  const shutdown = () => {
-    stop();
-    resolve();
+  const done = new Promise<void>(r => { resolve = r; });
+  let stopping = false;
+  const shutdown = async () => {
+    if (stopping) return;
+    stopping = true;
+    const deadline = setTimeout(() => {
+      log.error("shutdown deadline exceeded; terminating process");
+      process.exit(1);
+    }, API_SHUTDOWN_TIMEOUT_MS);
+    try { await stop(); resolve(); }
+    catch (error) {
+      log.error("shutdown failed; terminating process before releasing ownership");
+      process.exit(1);
+    }
+    finally { clearTimeout(deadline); }
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-  await done;
+  const signalShutdown = () => {
+    if (stopping) process.exit(1);
+    void shutdown();
+  };
+  process.on("SIGINT", signalShutdown);
+  process.on("SIGTERM", signalShutdown);
+  void exitRequested?.then(shutdown);
+  try { await done; }
+  finally {
+    process.off("SIGINT", signalShutdown);
+    process.off("SIGTERM", signalShutdown);
+  }
 }
 
 export const run = runMultiremi;

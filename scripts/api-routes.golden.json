@@ -1,21 +1,21 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 838,
+    "routeCount": 842,
     "routeCountByPrefix": {
       "native": 226,
       "compat": 596,
-      "root": 16
+      "root": 20
     },
-    "getRoutes": 365,
-    "getRoutesWithBody": 361,
+    "getRoutes": 366,
+    "getRoutesWithBody": 362,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /api/trace/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 473,
+    "mutationRoutes": 476,
     "mutationRoutesCovered": 299,
     "flows": [
       "agents-compat",
@@ -514,6 +514,7 @@
     "GET /health/realtime",
     "GET /healthz",
     "GET /internal/peer/health",
+    "GET /internal/slot/status",
     "GET /readyz",
     "GET /ws",
     "PATCH /api/autopilots/:id",
@@ -856,6 +857,9 @@
     "POST /auth/send-code",
     "POST /auth/verify-code",
     "POST /internal/peer/events",
+    "POST /internal/slot/activate",
+    "POST /internal/slot/exit",
+    "POST /internal/slot/release",
     "PUT /api/agents/:id",
     "PUT /api/agents/:id/env",
     "PUT /api/agents/:id/role",
@@ -1332,6 +1336,7 @@
     "GET /health/realtime",
     "GET /healthz",
     "GET /internal/peer/health",
+    "GET /internal/slot/status",
     "GET /readyz",
     "GET /ws",
     "PATCH /api/autopilots/:id",
@@ -20887,6 +20892,8 @@
         "scope": "acp",
         "targetVersion": "9.9.9",
         "target_version": "9.9.9",
+        "targetCommit": null,
+        "target_commit": null,
         "output": null,
         "error": null,
         "createdAt": "<timestamp>",
@@ -21650,6 +21657,8 @@
             "feishu_bot_menu": true,
             "feishu_concierge_config_v1": true
           },
+          "cli_commit": null,
+          "cli_commit_matches_platform": null,
           "protocol": {
             "version": 1,
             "state": "rejected",
@@ -21911,6 +21920,7 @@
         "status": "running",
         "scope": "acp",
         "target_version": "9.9.9",
+        "target_commit": null,
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>"
       }
@@ -24401,6 +24411,18 @@
         "ok": true,
         "enabled": false,
         "peer_healthy": false
+      }
+    },
+    {
+      "key": "get-sweep GET /internal/slot/status",
+      "route": "GET /internal/slot/status",
+      "path": "/internal/slot/status",
+      "status": 404,
+      "body": {
+        "__body__": {
+          "contentType": "text/plain; charset=UTF-8",
+          "text": "404 Not Found"
+        }
       }
     },
     {
@@ -29331,6 +29353,8 @@
           "feishu_bot_menu": true,
           "feishu_concierge_config_v1": true
         },
+        "cli_commit": null,
+        "cli_commit_matches_platform": null,
         "protocol": {
           "version": 1,
           "state": "rejected",

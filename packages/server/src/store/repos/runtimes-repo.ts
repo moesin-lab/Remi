@@ -1654,7 +1654,7 @@ export class RuntimesRepo {
       if (!drain) return;
       const runtimes = this.daemonDrainRuntimeRows(workspaceId, daemonId);
       const ids = runtimes.map(row => String(row.id));
-      // Terminal CLI updates release only their own fence, preserving manual/deploy drains.
+      // Terminal owners hand their fence to the oldest pending CLI sibling; manual/deploy drains remain isolated.
       if (drain.update_request_id) {
         if (isRuntimeEffectivelyOnline(runtime)) {
           this.ctx.db.run(`UPDATE multiremi_runtime_update_requests SET updated_at = ?
@@ -1664,8 +1664,7 @@ export class RuntimesRepo {
         const active = this.ctx.db.query(`SELECT 1 FROM multiremi_runtime_update_requests WHERE id = ?
           AND scope = 'cli' AND status IN ('pending', 'running', 'restarting', 'verifying')`).get(drain.update_request_id);
         if (!active) {
-          this.ctx.db.run(`DELETE FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`,
-            [workspaceId, daemonId, drain.update_request_id]);
+          this.handoffOrReleaseUpdateDrain(workspaceId, daemonId, String(drain.update_request_id), ids);
           this.notifyDaemonDrainChanged(workspaceId);
           return;
         }
@@ -1685,8 +1684,7 @@ export class RuntimesRepo {
         this.ctx.db.run(`UPDATE multiremi_runtime_update_requests SET status = 'failed', error = ?, updated_at = ?
           WHERE id = ? AND status IN ('pending', 'running')`,
           [`CLI update drain deadline exceeded; remaining tasks: ${tasks.map(task => String(task.id)).join(", ") || "daemon-reported active tasks"} (${remaining})`, nowIso(), drain.update_request_id]);
-        this.ctx.db.run(`DELETE FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`,
-          [workspaceId, daemonId, drain.update_request_id]);
+        this.handoffOrReleaseUpdateDrain(workspaceId, daemonId, String(drain.update_request_id), ids);
         this.notifyDaemonDrainChanged(workspaceId);
         return;
       }
@@ -1696,6 +1694,23 @@ export class RuntimesRepo {
       // Existing MUL-45 recovery supplies lost/runtime_recovery, retry budgets and notifications.
       for (const id of ids) this.ctx.tasks().recoverOrphans(id);
     })();
+  }
+
+  /** Called under the workspace lifecycle lock, after the previous owner is terminal. */
+  private handoffOrReleaseUpdateDrain(workspaceId: string, daemonId: string, ownerId: string, runtimeIds: string[]): void {
+    const sibling = this.ctx.db.query(`SELECT id FROM multiremi_runtime_update_requests
+      WHERE runtime_id IN (${runtimeIds.map(() => "?").join(",")}) AND scope = 'cli' AND status = 'pending'
+      ORDER BY created_at ASC, id ASC LIMIT 1`).get(...runtimeIds) as Row | null;
+    if (sibling) {
+      const duration = Number(process.env.MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS ?? DEFAULT_DAEMON_DRAIN_MS);
+      if (!Number.isSafeInteger(duration) || duration < 1 || duration > 86_400_000) throw new Error("drain deadline must be between 1ms and 24h");
+      this.ctx.db.run(`UPDATE multiremi_daemon_drains SET update_request_id = ?, started_at = ?, deadline = ?
+        WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`,
+        [String(sibling.id), nowIso(), new Date(Date.now() + duration).toISOString(), workspaceId, daemonId, ownerId]);
+    } else {
+      this.ctx.db.run(`DELETE FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`,
+        [workspaceId, daemonId, ownerId]);
+    }
   }
 
   getDaemonDrainStatus(workspaceId: string, daemonId: string): DaemonDrainStatus {
@@ -2245,7 +2260,11 @@ export class RuntimesRepo {
           [nowIso(), request.id]);
         continue;
       }
-      add("update", request.id, { id: request.id, target_version: request.targetVersion, scope: request.scope });
+      const drain = request.scope === "cli" ? this.ctx.db.query(`SELECT deadline FROM multiremi_daemon_drains
+        WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`)
+        .get(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id, request.id) as Row | null : null;
+      add("update", request.id, { id: request.id, target_version: request.targetVersion, scope: request.scope,
+        ...(drain?.deadline ? { drain_deadline: String(drain.deadline) } : {}) });
     }
     for (const request of this.modelListQueue.pending(runtimeId)) add("model_list", request.id, { id: request.id });
     for (const request of this.localSkillListQueue.pending(runtimeId)) add("local_skills", request.id,

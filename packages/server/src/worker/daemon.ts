@@ -3791,7 +3791,7 @@ export class MultiremiDaemon {
     });
     const configured = Number(process.env.MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS ?? DEFAULT_DAEMON_DRAIN_MS);
     const fallback = Number.isSafeInteger(configured) && configured > 0 && configured <= 86_400_000 ? configured : DEFAULT_DAEMON_DRAIN_MS;
-    const deadline = drainDeadline ? Date.parse(drainDeadline) : Date.now() + fallback;
+    const deadline = drainDeadline !== undefined ? Date.parse(drainDeadline) : Date.now() + fallback;
     return coordinator.pauseClaimsUntilIdle(Number.isFinite(deadline) ? deadline : Date.now(), () => this.stopped);
   }
 

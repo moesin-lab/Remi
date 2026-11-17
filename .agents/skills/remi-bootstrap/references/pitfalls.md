@@ -12,7 +12,8 @@
 | `api-route-snapshot.test.ts` 报某行与 golden 不同 | 改了 API 默认值或路由，没重新生成 golden | `bun run scripts/snapshot-api-routes.ts` 后 `--check` |
 | Agent 说「已完成」但 PR 还没合，或 CI 是红的 | Agent 看不到 CI，也可能把单子提前置 done | 以合入提交和 CI 为准；必要时重开单子 |
 | 平台部署构建 API 镜像失败，下载 lark-cli 报错 | Docker 构建容器没有外网 | 见部署说明的代理构建方式 |
-| daemon 一直等不到空闲 | 新任务持续进来，daemon 没有可用的排空命令 | 等一段时间后直接重启，再重试被中断的轮次 |
+| daemon 一直等不到空闲 | 新任务持续进来 | 用 `remi daemon drain` 先停止接单再等在跑的任务结束；重启后记得 `undrain` |
+| 重启后 daemon 不接任务 | 排空状态跨重启保留 | `remi daemon undrain --daemon-id <id>` |
 | daemon 重启后个别轮次以 `runtime_recovery` 结束 | 多数中断轮次会自动换新尝试（MUL-45），少数不会 | 重启前后对照在跑的轮次，没续上的 `remi turn retry <turn> --yes` |
 | 附件上传报 `EACCES … /srv/multiremi/uploads/local` | 线上 API 的上传目录权限 | Agent 改为把证据写进消息或 PR 描述；建单修复 |
 | `remi … --json \| jq` 报 Unfinished JSON | 大输出在管道里被截断 | 先重定向到文件再读 |

@@ -36,6 +36,7 @@ childProcess.spawnSync = (command, args, options = {}) => {
     buildOverride: args.includes('-') && options.input ? JSON.parse(options.input) : null,
     // Log only names, never inherited values or the generated credentials.
     environmentKeys: Object.keys(options.env || {}),
+    runtimeEnvironment: process.env.TEST_CAPTURE_RUNTIME === '1' ? Object.fromEntries(Object.entries(options.env || {}).filter(([key]) => key.startsWith('REMI_RUNTIME_'))) : null,
     selectedRef: selection?.ref ?? null,
     selectedProfile: selection?.profile ?? null,
     restoreControlPlane: args.includes('pg_restore') && String(options.input ?? '').includes('CONTROL-PLANE'),
@@ -79,6 +80,7 @@ childProcess.spawnSync = (command, args, options = {}) => {
     }
     return succeed(JSON.stringify({ Running: true, Health: { Status: 'healthy' } }));
   }
+  if (process.env.TEST_FAIL === 'runtime_diagnostic' && args.includes('up')) return { status: 1, stdout: options.env.REMI_RUNTIME_HTTPS_PROXY, stderr: 'sentinel-user sentinel-password ' + process.env.HTTPS_PROXY };
   if (process.env.TEST_FAIL === 'config' && args.includes('config')) return fail();
   if (process.env.TEST_FAIL === 'build' && args.includes('build')) return fail();
   if (process.env.TEST_FAIL === 'pull' && args.includes('pull')) return fail();
@@ -1085,4 +1087,104 @@ test('Dockerfiles keep predefined proxy args out of image metadata and shell tra
     assert.doesNotMatch(source, /^(?:ARG|ENV)\s+.*(?:https?_proxy|no_proxy)/imu);
     assert.doesNotMatch(source, /\$(?:\{)?(?:https?_proxy|no_proxy)|set\s+-[a-z]*x/iu);
   }
+});
+
+
+for (const host of ['127.0.0.1', 'localhost', '[::1]', '127.2.3.4', 'proxy.example']) {
+  test(`runtime proxy rewrites ${host} and merges internal bypasses without persisting values`, (t) => {
+    const f = fixture(t);
+    succeeds(f.run('dev', 'prepare'));
+    const before = Object.fromEntries(readdirSync(f.profileRoot('dev')).filter((name) => name !== 'backups').map((name) => [name, readFileSync(join(f.profileRoot('dev'), name), 'utf8')]));
+    const proxy = `http://sentinel-user:sentinel-password@${host}:17890`;
+    const result = f.run('dev', 'up', { args: ['--runtime-proxy', 'true'], environment: {
+      https_proxy: proxy, no_proxy: 'custom.internal,api', TEST_CAPTURE_RUNTIME: '1',
+    } });
+    succeeds(result);
+    const call = result.calls.find(isAction('up'));
+    const expected = `http://sentinel-user:sentinel-password@${host === 'proxy.example' ? host : 'host.docker.internal'}:17890/`;
+    assert.equal(call.runtimeEnvironment.REMI_RUNTIME_HTTPS_PROXY, expected);
+    assert.deepEqual(call.buildOverride.services.api.extra_hosts, ['host.docker.internal:host-gateway']);
+    assert.deepEqual(call.buildOverride.services.api.environment, {
+      HTTPS_PROXY: '${REMI_RUNTIME_HTTPS_PROXY}', https_proxy: '${REMI_RUNTIME_HTTPS_PROXY}',
+      NO_PROXY: '${REMI_RUNTIME_NO_PROXY}', no_proxy: '${REMI_RUNTIME_NO_PROXY}',
+    });
+    assert.equal(call.buildOverride.services.web, undefined);
+    const bypass = call.runtimeEnvironment.REMI_RUNTIME_NO_PROXY.split(',');
+    for (const value of ['postgres', 'api', 'web', 'updater', 'localhost', '127.0.0.1', 'host.docker.internal', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', 'custom.internal']) assert.ok(bypass.includes(value));
+    assert.equal(bypass.filter((value) => value === 'api').length, 1);
+    for (const [name, contents] of Object.entries(before)) assert.equal(readFileSync(join(f.profileRoot('dev'), name), 'utf8'), contents);
+    assert.deepEqual(readdirSync(join(f.profileRoot('dev'), 'backups')), []);
+    assert.doesNotMatch(result.stdout + result.stderr + JSON.stringify(call.args) + JSON.stringify(call.buildOverride), /sentinel-user|sentinel-password/);
+  });
+}
+
+test('disabled runtime proxy preserves compose bytes and invocation with proxy environment present', (t) => {
+  const f = fixture(t);
+  succeeds(f.run('dev', 'prepare'));
+  assert.equal(readFileSync(join(f.profileRoot('dev'), 'compose.yml'), 'utf8'), readFileSync(join(repository, 'deploy/docker/compose.local.yml'), 'utf8'));
+  const plain = f.run('dev', 'up');
+  const disabled = f.run('dev', 'up', { args: ['--runtime-proxy', 'false'], environment: { HTTPS_PROXY: 'not even a valid URL' } });
+  succeeds(plain); succeeds(disabled);
+  assert.deepEqual(dockerCalls(disabled).map(({ args, buildOverride }) => ({ args, buildOverride })), dockerCalls(plain).map(({ args, buildOverride }) => ({ args, buildOverride })));
+});
+
+test('runtime diagnostic failures redact original and rewritten URLs and credentials', (t) => {
+  const f = fixture(t);
+  succeeds(f.run('dev', 'prepare'));
+  const result = f.run('dev', 'up', { args: ['--runtime-proxy', 'true'], fail: 'runtime_diagnostic', environment: { HTTPS_PROXY: 'http://sentinel-user:sentinel-password@localhost:17890' } });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout + result.stderr, /REDACTED/);
+  assert.doesNotMatch(result.stdout + result.stderr, /sentinel-user|sentinel-password|localhost:17890|host.docker.internal:17890/);
+});
+
+test('runtime proxy validates opt-in and URLs without disclosing invalid credentials', (t) => {
+  const f = fixture(t);
+  for (const environment of [{}, { HTTPS_PROXY: 'sentinel-password-invalid' }, { HTTP_PROXY: 'socks5://sentinel-password@localhost:17890' }]) {
+    const result = f.run('dev', 'up', { args: ['--runtime-proxy', 'true'], environment });
+    assert.equal(result.status, 1);
+    assert.equal(dockerCalls(result).length, 0);
+    assert.doesNotMatch(result.stderr, /sentinel-password/);
+  }
+});
+
+test('stable deploy runtime proxy stays out of backups and precedes the up subcommand', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const result = f.run('stable', 'deploy', { commit: NEW_REF, args: ['--runtime-proxy', 'true'], environment: {
+    HTTP_PROXY: 'http://sentinel-user:sentinel-password@localhost:17890',
+    HTTPS_PROXY: 'https://secure.example:17891', NO_PROXY: 'upper.internal', no_proxy: 'lower.internal', TEST_CAPTURE_RUNTIME: '1',
+  } });
+  succeeds(result);
+  for (const call of result.calls.filter(isAction('up'))) {
+    assert.ok(call.args.indexOf('-') < call.args.indexOf('up'));
+    assert.equal(call.runtimeEnvironment.REMI_RUNTIME_HTTP_PROXY, 'http://sentinel-user:sentinel-password@host.docker.internal:17890/');
+    assert.equal(call.runtimeEnvironment.REMI_RUNTIME_HTTPS_PROXY, 'https://secure.example:17891/');
+    const bypass = call.runtimeEnvironment.REMI_RUNTIME_NO_PROXY;
+    if (process.platform !== 'win32') {
+      assert.ok(bypass.includes('upper.internal'));
+      assert.ok(bypass.includes('lower.internal'));
+    }
+  }
+  function scan(directory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) scan(path);
+      else assert.doesNotMatch(readFileSync(path, 'utf8'), /sentinel-user|sentinel-password|secure.example:17891|upper.internal|lower.internal/);
+    }
+  }
+  scan(f.profileRoot());
+  assert.doesNotMatch(result.stdout + result.stderr, /sentinel-user|sentinel-password/);
+});
+
+test('watch combines ephemeral runtime and build overlays without persisting proxy configuration', (t) => {
+  const f = fixture(t);
+  succeeds(f.run('dev', 'prepare'));
+  const result = f.run('dev', 'watch', { args: ['--runtime-proxy', 'true'], environment: { HTTPS_PROXY: 'http://localhost:17890', TEST_CAPTURE_RUNTIME: '1' } });
+  succeeds(result);
+  const up = result.calls.find(isAction('up'));
+  assert.ok(up.buildOverride.services.api.environment);
+  assert.ok(up.buildOverride.services.api.build);
+  assert.ok(up.buildOverride.services.web.build);
+  const watch = result.calls.find(isAction('watch'));
+  assert.equal(watch.buildOverride.services.api.environment, undefined);
 });

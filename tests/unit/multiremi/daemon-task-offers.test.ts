@@ -13,7 +13,7 @@ afterEach(async () => {
   resetMultiremiTestEnv();
 });
 
-function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<string, unknown> | null>, runtimeCount = 1, sweepMs = 2_147_483_647) {
+function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<string, unknown> | null>, runtimeCount = 1, sweepMs?: number) {
   const store = createLocalStore();
   const runtimeIds = Array.from({ length: runtimeCount }, (_, index) => {
     const id = `rt_offer_${index}`;
@@ -398,6 +398,25 @@ describe("A-3 task offers", () => {
     h.session.handleSocketClose();
     expect(h.store.claimTask(h.runtimeIds[0]!)?.id).toBe(task.id);
     expect(h.store.getTask(task.id)?.executionFingerprint).not.toBe(stale);
+  });
+
+  it("does not claim on ordinary ack/drain without a blocked offer, and enqueue still offers immediately", async () => {
+    const h = fixture(); await h.hello();
+    // Create work without an enqueue event: unrelated socket traffic must not poll it.
+    const task = h.task();
+    const claim = spyOn(h.store, "claimTask");
+    try {
+      for (let i = 0; i < 8; i++) {
+        await h.send("ack", { ack: 0 });
+        h.session.handleDrain();
+        await h.layer.drain();
+      }
+      h.clock.advance(180_000); await h.layer.drain();
+      expect(claim).not.toHaveBeenCalled();
+      h.offers.enqueued(task); await h.layer.drain();
+      expect(claim).toHaveBeenCalledTimes(1);
+      expect(h.offered()[0]!.p.attempt_id).toBe(task.id);
+    } finally { claim.mockRestore(); }
   });
 
   it("derives pending work again after a full window receives an ack", async () => {

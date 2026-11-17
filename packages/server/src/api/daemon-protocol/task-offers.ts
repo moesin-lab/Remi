@@ -127,7 +127,10 @@ export class DaemonTaskOffers {
       close: session => this.closed(session),
     });
     options.layer.registerBestEffortHandler("runtime.ready", (frame, session) => this.ready(frame, session));
-    const sweepMs = options.sweepMs ?? (process.env.NODE_ENV === "test" ? 2_147_483_647 : DAEMON_OFFER_SWEEP_MS);
+    // Dispatch is driven by queue/capacity/configuration events and explicit deadlines.
+    // A caller can opt into the diagnostic recovery sweep to find missing event wiring.
+    const sweepMs = options.sweepMs;
+    if (sweepMs === undefined) return;
     const sweep = () => {
       if (this.stopped) return;
       for (const session of options.layer.registry.listSessions()) {
@@ -335,7 +338,8 @@ export class DaemonTaskOffers {
   private resume(session: DaemonProtocolSession): void {
     for (const runtimeId of session.runtimeIds) {
       const pump = this.pumps.get(runtimeId);
-      if (pump) pump.waiting = false;
+      if (!pump?.waiting) continue;
+      pump.waiting = false;
       this.kick(runtimeId);
     }
   }

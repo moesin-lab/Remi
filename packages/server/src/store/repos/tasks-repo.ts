@@ -6,7 +6,7 @@ import { Questions } from '../inbox/questions.js';
 import { deriveIssueStatusWithinTransaction } from "../inbox/issue-status.js";
 import { runAutopilotRunMutation } from "@multiremi/store/autopilot-run-records.js";
 import { createReplacementAttemptWithinTransaction } from "@multiremi/store/turn-attempts.js";
-import { AgentReplyCommentError, turnExecutionMutationStatement, runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
+import { AgentReplyCommentError, executionClaimBaseSql, turnExecutionMutationStatement, runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // Tasks domain (task lifecycle, claiming/dispatch, task messages, human requests, usage and the
 // terminal-state fan-out into issues/sessions/autopilots), extracted verbatim from MultiremiStore
 // (the facade delegates every public method here).
@@ -3415,13 +3415,20 @@ export class TasksRepo {
       const profileAgents = new Map(this.ctx.agents().listAgentsLiteByIds(profileTaskRows.map(row => String(row.agent_id)))
         .map(agent => [agent.id, agent]));
       const excludedTaskIds: string[] = [];
+      // Readiness belongs to Agent/runtime configuration, which is stable under
+      // the workspace lock; do not reload the same execution profile per task.
+      const readyGroups = new Map<string, boolean>();
+      const readyGroup = (agent: MultiremiAgent): boolean => {
+        if (!readyGroups.has(agent.id)) readyGroups.set(agent.id, this.runtimeHasReadyExecutionGroup(lockedRuntime, agent));
+        return readyGroups.get(agent.id)!;
+      };
       for (const row of profileTaskRows) {
         // Eligibility uses identity, target and frozen profile; usage/autopilot
         // hydration belongs only to the task actually selected below.
         const task = toTask(row, []);
         const agent = profileAgents.get(task.agentId);
         if (task && (!agent || !this.runtimeCanRunTaskAgent(lockedRuntime, agent, task)
-          || (!task.executionFingerprint && !this.runtimeHasReadyExecutionGroup(lockedRuntime, agent)))) {
+          || (!task.executionFingerprint && !readyGroup(agent)))) {
           excludedTaskIds.push(task.id);
         }
       }
@@ -4249,25 +4256,22 @@ ${routing.sql}
     const leases = [...this.acceptedOfferLeases];
     const cutoff = new Date(Date.now() - CLAIM_RESPONSE_RECOVERY_MS).toISOString();
     const now = nowIso();
+    const candidate = this.ctx.db.query(executionClaimBaseSql(`
+      SELECT t.id FROM multiremi_turn_attempts claim_attempt
+      JOIN multiremi_turns claim_turn ON claim_turn.id = claim_attempt.turn_id
+      WHERE claim_attempt.status = 'accepted' AND t.status = 'dispatched'
+        AND t.runtime_id = ? AND t.started_at IS NULL
+        AND t.dispatched_at IS NOT NULL AND t.dispatched_at < ?
+        ${leases.length ? `AND t.id NOT IN (${leases.map(() => "?").join(", ")})` : ""}
+        ${excludedAgentIds.length ? `AND t.agent_id NOT IN (${excludedAgentIds.map(() => "?").join(", ")})` : ""}
+      ORDER BY t.priority DESC, t.dispatched_at ASC LIMIT 1
+      ${this.ctx.db.dialect === "postgres" ? "FOR UPDATE OF claim_turn, claim_attempt SKIP LOCKED" : ""}
+    `)).get(runtimeId, cutoff, ...leases, ...excludedAgentIds) as Row | null;
+    if (!candidate) return null;
     const row = turnExecutionMutationStatement(this.ctx.db, `UPDATE multiremi_turn_execution_records
        SET dispatched_at = ?, updated_at = ?
-       WHERE id = (
-         SELECT id
-         FROM multiremi_turn_execution_records
-         WHERE runtime_id = ?
-           AND status = 'dispatched'
-           AND started_at IS NULL
-           AND dispatched_at IS NOT NULL
-           AND dispatched_at < ?
-           ${leases.length ? `AND id NOT IN (${leases.map(() => "?").join(", ")})` : ""}
-           ${excludedAgentIds.length ? `AND agent_id NOT IN (${excludedAgentIds.map(() => "?").join(", ")})` : ""}
-         ORDER BY priority DESC, dispatched_at ASC
-         LIMIT 1
-       )
-       AND status = 'dispatched'
-       AND started_at IS NULL
-       RETURNING *`,
-    ).get(now, now, runtimeId, cutoff, ...leases, ...excludedAgentIds) as Row | null;
+       WHERE id = ? AND status = 'dispatched' AND started_at IS NULL RETURNING *`
+    ).get(now, now, candidate.id) as Row | null;
     if (!row) return null;
     const task = this.getTaskWithAgent(String(row.id));
     // The re-claim above matches only on runtime_id, so a task whose agent or
@@ -4525,14 +4529,18 @@ ${routing.sql}
     // lets any member stamp an arbitrary agent+runtime (a stamp is not proof
     // of authorization). Kept as a JS comment, not inline SQL: an apostrophe
     // in an in-string `--` comment corrupts the sqlite→pg placeholder scanner.
-    const claimOne = (): Row | null => turnExecutionMutationStatement(this.ctx.db, `UPDATE multiremi_turn_execution_records
-       SET offered_at = CASE WHEN runtime_id = ? THEN offered_at ELSE NULL END,
-           accepted_at = CASE WHEN runtime_id = ? THEN accepted_at ELSE NULL END,
-           status = 'dispatched', runtime_id = ?, dispatched_at = ?, wait_reason = NULL, updated_at = ?
-       WHERE id = (
+    // The workspace lifecycle lock above serializes capacity/configuration decisions.
+    // Select once, lock base identities on PG, then mutate only the selected ID.
+    const selectCandidate = this.ctx.db.query(executionClaimBaseSql(`
          SELECT t.id
-         ${TASK_CLAIM_FROM_SQL}
-         WHERE t.status = 'queued'
+         FROM multiremi_turn_attempts claim_attempt
+         JOIN multiremi_turns claim_turn ON claim_turn.id = claim_attempt.turn_id
+         JOIN multiremi_agents a ON a.id = claim_turn.agent_id
+         LEFT JOIN multiremi_chat_sessions project_chat ON project_chat.id = claim_turn.chat_session_id
+         LEFT JOIN multiremi_issues project_issue ON project_issue.id = claim_turn.issue_id
+         LEFT JOIN multiremi_issue_sessions code_session ON code_session.id = claim_turn.issue_session_id
+         LEFT JOIN multiremi_runtimes code_runtime ON code_runtime.id = code_session.code_runtime_id
+         WHERE claim_attempt.status = 'offered' AND t.status = 'queued'
            AND (t.next_retry_at IS NULL OR t.next_retry_at <= ?)
            AND a.archived_at IS NULL
            AND (t.chat_session_id IS NULL OR project_chat.status = 'active')
@@ -4625,10 +4633,18 @@ ${placementAfter.sql}
            ${excludedTaskIds.length ? `AND t.id NOT IN (${excludedTaskIds.map(() => "?").join(", ")})` : ""}
          ORDER BY t.priority DESC, t.created_at ASC
          LIMIT 1
-       )
-       AND status = 'queued'
-       RETURNING *`,
-    ).get(...params) as Row | null;
+
+         ${this.ctx.db.dialect === "postgres" ? "FOR UPDATE OF claim_turn, claim_attempt SKIP LOCKED" : ""}`));
+    const claimOne = (): Row | null => {
+      const candidate = selectCandidate.get(...params.slice(5)) as Row | null;
+      if (!candidate) return null;
+      return turnExecutionMutationStatement(this.ctx.db, `UPDATE multiremi_turn_execution_records
+        SET offered_at = CASE WHEN runtime_id = ? THEN offered_at ELSE NULL END,
+            accepted_at = CASE WHEN runtime_id = ? THEN accepted_at ELSE NULL END,
+            status = 'dispatched', runtime_id = ?, dispatched_at = ?, wait_reason = NULL, updated_at = ?
+        WHERE id = ? AND status = 'queued' RETURNING *`
+      ).get(...params.slice(0, 5), candidate.id) as Row | null;
+    };
     for (;;) {
       const row = claimOne();
       if (!row) return null;

@@ -33,16 +33,19 @@ export function useReportFleetFixtures(lifetime: "test" | "file" = "test") {
     previousEncryptionKey = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
     process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = FLEET_KEY;
   });
-  useMigratedHotspotDatabases();
-
   (lifetime === "test" ? afterEach : afterAll)(async () => {
-    for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
-    setSystemTime();
-    if (previousEncryptionKey === undefined)
-      delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
-    else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousEncryptionKey;
-    resetMultiremiTestEnv();
+    try {
+      for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+    } finally {
+      setSystemTime();
+      if (previousEncryptionKey === undefined)
+        delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
+      else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousEncryptionKey;
+      resetMultiremiTestEnv();
+    }
   });
+  // Close protocol sessions before the template hook disposes live PG clones.
+  useMigratedHotspotDatabases();
 }
 
 // Count executions, including WITH queries, until queued downlinks/offers finish.

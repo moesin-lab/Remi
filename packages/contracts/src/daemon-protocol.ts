@@ -1155,3 +1155,11 @@ export function compareDaemonCliVersion(left: string, right: string): number {
 export function meetsDaemonMinCliVersion(cliVersion: string): boolean {
   return compareDaemonCliVersion(cliVersion, DAEMON_MIN_CLI_VERSION) >= 0;
 }
+
+/** Process-scoped CLI update directive. Explicit commits are resolved only through the platform. */
+export interface DaemonRuntimeUpdatePayload {
+  id: string;
+  target_version: string;
+  target_commit?: string;
+  scope?: "cli" | "acp" | "agent";
+}

@@ -378,6 +378,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       drain_ack_generation?: number;
       active_task_count?: number;
       active_task_ids?: string[];
+      active_task_count_scope?: "daemon" | "runtime";
       supports_bot_menu?: boolean;
       bot_menu_protocol?: number;
       feishu_concierge_protocol?: number;
@@ -418,7 +419,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
         runtimeId,
         ackGeneration,
         Number.isSafeInteger(activeCount) && activeCount >= 0 ? activeCount : null,
-        "runtime",
+        body.active_task_count_scope === "daemon" ? "daemon" : "runtime",
       );
     }
     const ack = store.heartbeatRuntime(runtimeId, {

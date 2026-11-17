@@ -31,6 +31,26 @@ function ack(store: MultiremiStore, count: number) {
 }
 
 describe("daemon drain", () => {
+  it("accepts an explicit process-wide HTTP report without waiting for a disabled historical lane", async () => {
+    const { store, agent } = fixture();
+    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION })]);
+    const task = store.createTask({ agentId: agent.id, prompt: "long tool" });
+    store.claimTask("rt_a"); store.startTask(task.id);
+    // B's stale process-wide count is retained in storage after it was disabled.
+    ack(store, 1);
+    store.beginDaemonDrain("local", "machine-a", "manual", 1000);
+    advance(1000); store.reconcileDaemonDrain("rt_a");
+    const app = createMultiremiApp({ store, authToken: "test-root" });
+    const report = async (count: number) => app.request("/api/daemon/heartbeat", { method: "POST",
+      headers: { Authorization: "Bearer test-root", "Content-Type": "application/json" },
+      body: JSON.stringify({ runtime_id: "rt_a", drain_ack_generation: 0, active_task_count: count,
+        active_task_count_scope: "daemon", active_task_ids: [task.id] }) });
+    advance(1001); await report(1); // A/B still executing in the current process.
+    expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "draining", remaining_tasks: 1 });
+    advance(1002); await report(0); // Only A now exists and has stopped its task.
+    expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "drained_forced", remaining_tasks: 0 });
+  });
+
   it("aggregates HTTP provider counts and returns terminal cancellation to upgrade probes", async () => {
     const { store, agent } = fixture();
     db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION })]);

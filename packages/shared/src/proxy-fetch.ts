@@ -36,9 +36,24 @@ export async function proxyFetch(input: string | URL | Request, init?: RequestIn
     const url = target instanceof Request ? target.url : String(target);
     // Clone before sending so a 307/308 can replay a Request body.
     const replay = target instanceof Request && target.body && mode === "follow" ? target.clone() : target;
-    // Materialize getters, headers/body and WebIDL conversions before changing env.
-    const prepared = new Request(target, { ...options, redirect: "manual" });
-    const response = await withNoProxyRoute(url, () => fetch(prepared));
+    // Normalize caller-controlled values before the env override. Do not wrap
+    // an existing Request body: Bun 1.3.14 can stall after that stream transfer.
+    const normalized = { ...options };
+    const inherited: RequestInit = target instanceof Request ? {
+      method: target.method, headers: target.headers, signal: target.signal,
+      cache: target.cache, credentials: target.credentials, integrity: target.integrity,
+      keepalive: target.keepalive, mode: target.mode, referrer: target.referrer,
+      referrerPolicy: target.referrerPolicy,
+    } : {};
+    const prepared = new Request(url, { ...inherited, ...normalized, redirect: "manual" });
+    const transport: RequestInit = {
+      method: prepared.method, headers: prepared.headers, signal: prepared.signal,
+      cache: prepared.cache, credentials: prepared.credentials, integrity: prepared.integrity,
+      keepalive: prepared.keepalive, mode: prepared.mode, referrer: prepared.referrer,
+      referrerPolicy: prepared.referrerPolicy, redirect: "manual",
+      ...(normalized.body !== undefined ? { body: prepared.body } : {}),
+    };
+    const response = await withNoProxyRoute(url, () => fetch(target, transport));
     if (![301, 302, 303, 307, 308].includes(response.status) || mode === "manual") {
       if (hops > 0) Object.defineProperty(response, "redirected", { value: true });
       return response;

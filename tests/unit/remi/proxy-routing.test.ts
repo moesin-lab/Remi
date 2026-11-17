@@ -341,3 +341,38 @@ it("registers the daemon and opens its protocol socket directly with CIDR and AL
     expect(proxyHits).toBe(0);
   } finally { direct.stop(true); proxy.stop(true); }
 }, 15000);
+
+
+it("posts streaming Requests without stalling in every redirect mode", async () => {
+  let proxyHits = 0;
+  const bodies: string[] = [];
+  const direct = Bun.serve({ hostname: "0.0.0.0", port: 0, async fetch(req) {
+    bodies.push(await req.text());
+    return new Response(bodies.at(-1));
+  }});
+  const proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+    proxyHits++;
+    return new Response("unexpected proxy", { status: 502 });
+  }});
+  try {
+    expect(await child(`
+      import { proxyFetch } from "./packages/shared/src/proxy-fetch.ts";
+      import { strict as assert } from "node:assert";
+      for (const redirect of ["follow", "manual", "error"]) {
+        const body = new ReadableStream({ start(controller) {
+          controller.enqueue(new TextEncoder().encode("stream-"));
+          queueMicrotask(() => { controller.enqueue(new TextEncoder().encode(redirect)); controller.close(); });
+        } });
+        const request = new Request("http://127.0.0.2:${direct.port}/stream", {
+          method: "POST", body, redirect, signal: AbortSignal.timeout(2000),
+        });
+        const response = await proxyFetch(request);
+        assert.equal(response.status, 200);
+        assert.equal(await response.text(), "stream-" + redirect);
+      }
+      console.log("ok");
+    `, proxy.url.href)).toBe("ok");
+    expect(bodies).toEqual(["stream-follow", "stream-manual", "stream-error"]);
+    expect(proxyHits).toBe(0);
+  } finally { direct.stop(true); proxy.stop(true); }
+}, 15000);

@@ -103,14 +103,16 @@ Windows 上保留重试定时器的事件循环引用，避免 Bun 1.3.14 的无
 CLI 更新在 runtimes-repo 创建带 requestId 的持久化 daemon drain，等待期间请求
 保持 pending；`daemon.drain` 状态显示排空进度，无需新增请求状态。默认期限沿用
 MUL-68 的 5 分钟，`MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS` 可覆盖，避免引入两套期限。
-服务端排空后才下发更新，并携带原 deadline；daemon 对接受任务的竞态暂停各
+服务端排空后才下发更新，HTTP heartbeat 与 WebSocket 下行均携带持久化的原 deadline；daemon 对接受任务的竞态暂停各
 provider 接单，在剩余期限内等待。到期仍繁忙时更新失败，错误列出剩余任务，
 解除该更新持有的 drain，已有轮次继续运行，不执行 runtime recovery。
 人工和部署 drain 保持原有超时回收契约，不能被更新接管或释放。
 
 下载或校验失败的终态立即释放本次 requestId 的 drain；重启期间 drain 保持持久化，
 新进程完成版本注册和启动自检、确认 completed 后释放。恢复旧版本确认 rolled_back
-同样释放。进入 restarting/verifying 后排空期限不干扰新进程确认，仍由更新验证期限管理。
+同样释放。owner 进入终态（含排空超时）时，若同一物理 daemon 仍有 pending CLI 更新，
+则把 drain 交接给最早创建的请求，并从交接时刻重新计算期限；没有 pending sibling 才释放。
+人工/部署 drain 不参与交接。进入 restarting/verifying 后排空期限不干扰新进程确认，仍由更新验证期限管理。
 `daemon.drain` 的 `expiry_action=fail_update` 区分更新围栏和人工/部署的 `runtime_recovery`。
 
 验证入口：`tests/unit/multiremi/daemon-drain.test.ts`、

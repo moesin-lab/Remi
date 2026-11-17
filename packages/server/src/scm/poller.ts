@@ -1,3 +1,4 @@
+import { withDbJob } from "@shared/observability/db-sources.js";
 import { randomUUID } from "node:crypto";
 import { createLogger } from "@shared/logger.js";
 import type {
@@ -83,7 +84,7 @@ export class ScmPollingScheduler {
 
   runOnce(now: Date = this.now()): Promise<ScmPollingRunResult> {
     if (this.tickPromise) return this.tickPromise;
-    this.tickPromise = this.runOnceInternal(now).finally(() => {
+    this.tickPromise = withDbJob("scm.poll", () => this.runOnceInternal(now)).finally(() => {
       this.tickPromise = null;
     });
     return this.tickPromise;

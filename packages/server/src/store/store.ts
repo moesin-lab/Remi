@@ -5539,6 +5539,10 @@ runMigrations(this.db);
     return this.chat.archiveIdleChats(now);
   }
 
+  listChatSessionsByIds(ids: readonly string[]): MultiremiChatSession[] {
+    return this.chat.listChatSessionsByIds(ids);
+  }
+
   getChatSession(id: string): MultiremiChatSession | null {
     return this.chat.getChatSession(id);
   }

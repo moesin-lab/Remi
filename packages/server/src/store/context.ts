@@ -667,6 +667,7 @@ export interface TasksSurface {
 }
 
 export interface ChatSurface {
+  listChatSessionsByIds(ids: readonly string[]): MultiremiChatSession[];
   createChatSession(input: CreateChatSessionInput): MultiremiChatSession;
   createChatSessionWithinTransaction(input: CreateChatSessionInput): MultiremiChatSession;
   getChatSession(id: string): MultiremiChatSession | null;

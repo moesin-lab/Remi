@@ -167,3 +167,34 @@ pendingTurnBackendTests("configuration wakeups follow the outermost commit", fix
     } finally { unsubscribe(); }
   });
 }, { isolation: "snapshot" });
+
+describe("daemon drain update wakeup", () => {
+  it("delivers a waiting CLI update when a heartbeat acknowledges zero local tasks", async () => {
+    const store = createLocalStore();
+    store.registerRuntime({ id: rt, name: rt, provider: "codex", workspaceId: "local", daemonId: "dmn_config_push" });
+    store.recordRuntimeDrainAck(rt, 0, 1);
+    const server = startMultiremiServer({ store, authToken: "config-push-test", hostname: "127.0.0.1", port: 0 });
+    const frames: Record<string, any>[] = [];
+    const socket = new WebSocket(`ws://127.0.0.1:${server.port}/api/daemon/ws?protocol=2`,
+      { headers: { Authorization: "Bearer config-push-test" } } as never);
+    socket.addEventListener("message", event => frames.push(JSON.parse(String(event.data))));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener("open", () => resolve(), { once: true });
+        socket.addEventListener("error", () => reject(new Error("Socket failed")), { once: true });
+      });
+      socket.send(JSON.stringify({ v: 2, t: "hello", p: { protocol: 2, daemon_id: "dmn_config_push",
+        cli_version: DAEMON_MIN_CLI_VERSION, caps: [], runtimes: [{ runtime_id: rt, provider: "codex",
+          max_concurrency: 1, active_task_ids: [] }] } }));
+      await waitFor(() => frames.some(f => f.t === "welcome"));
+      const update = store.createRuntimeUpdateRequest(rt, { scope: "cli", targetVersion: "0.2.96" });
+      await Bun.sleep(30);
+      expect(frames.filter(f => f.t === "runtime.update")).toHaveLength(0);
+      // No status polling, config write, or task result to wake the downlink.
+      socket.send(JSON.stringify({ v: 2, t: "hb", p: { drain_ack_generation: 0, active_task_count: 0,
+        runtimes: [{ runtime_id: rt }] } }));
+      await waitFor(() => frames.some(f => f.t === "runtime.update"));
+      expect(frames.find(f => f.t === "runtime.update")?.p.id).toBe(update.id);
+    } finally { socket.close(); server.stop(true); }
+  });
+});

@@ -56,6 +56,22 @@ describe("unified turn input", () => {
     expect(daemonTurnOfferPayload({ id: "tsk_one", prompt: "old", runtime_id: "rt_one" }, turn)).toEqual({ ...turn, runtime_id: "rt_one" });
     expect(() => daemonTurnOfferPayload({}, {} as typeof turn)).toThrow("unified turn offer context missing");
   });
+  it("prepares ordered completion receipts without waiting for RPC or advancing acknowledged input", () => {
+    const h = downlinks();
+    h.inbox.bindTurn({ ...turn, input_messages: [message(1)] });
+    h.fail(new DaemonProtocolRpcError("daemon_timeout", true));
+    expect(h.inbox.completionInput("tsk_one")).toEqual({
+      turn_id: "turn_one", attempt_id: "tsk_one", input_to_seq: 1,
+      input_receipt: { messages: [{ id: "msg_1", seq: 1 }] },
+    });
+    expect(h.calls).toHaveLength(0);
+    expect(h.inbox.turnInput("tsk_one").input_to_seq).toBe(1);
+    h.push(2);
+    expect(h.inbox.completionInput("tsk_one").input_to_seq).toBe(1);
+    // New steers are still guarded by platform completion; no unread id is acknowledged.
+    expect(h.inbox.pendingTaskSteerMessages("tsk_one")).toHaveLength(1);
+  });
+
   it("orders and deduplicates messages, rejects foreign attempts and advances only confirmed input", async () => {
     const h = downlinks();
     h.push(3); h.push(2); h.push(2);

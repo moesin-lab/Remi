@@ -5,7 +5,11 @@ export function outboxRecordFrame(record: MultiremiOutboxRecord): DaemonOutbound
   const runtimeId = record.taskId.startsWith("rt:") ? record.taskId.slice(3) : record.payload.runtime_id;
   const type = record.kind.includes(".") ? record.kind : `task.${record.kind}`;
   const payload = { ...record.payload };
-  if (record.kind === "turn.complete") payload.attempt_id = record.taskId;
+  if (record.kind === "turn.complete") {
+    payload.attempt_id = record.taskId;
+    // Local replay prerequisite, never part of the platform completion payload.
+    delete payload.input_receipt;
+  }
   else if (!record.taskId.startsWith("rt:")) payload.task_id = record.taskId;
   if (record.kind === "session_pin" || record.kind === "complete" || record.kind === "fail") {
     if ("sessionId" in payload) { payload.session_id = payload.sessionId; delete payload.sessionId; }

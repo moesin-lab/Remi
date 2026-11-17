@@ -71,12 +71,22 @@ export class MultiremiScheduler {
     this.running = true;
     let recovered = false;
     this.syncLoop = new DatabaseRetryLoop("scheduler.sync", () => withDbJob("scheduler.sync", () => {
-      if (!recovered) {
-        this.store.recoverLostScheduleTriggers();
-        this.store.recoverLostRuntimeProvisionSchedules();
-        recovered = true;
+      try {
+        // DatabaseRetryLoop serializes ticks and sync is synchronous: recovery
+        // runs only after the previous tick's claims are no longer in flight.
+        if (!recovered) {
+          this.store.recoverLostScheduleTriggers();
+          this.store.recoverLostRuntimeProvisionSchedules();
+          recovered = true;
+        }
+        this.sync();
+      } catch (error) {
+        // A failed tick can leave its whole claimed batch at next_run_at=NULL.
+        // Use startup recovery on the next tick, scheduling from now rather
+        // than replaying work whose commit may already have succeeded.
+        if (isDatabaseConnectionError(error)) recovered = false;
+        throw error;
       }
-      this.sync();
     }), this.pollIntervalMs);
     this.syncLoop.start();
     this.startFailureMonitor();

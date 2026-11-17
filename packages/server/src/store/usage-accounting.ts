@@ -392,12 +392,15 @@ export function writeUsageSnapshot(db: SqlDatabase, taskId: string, input: TaskU
     // an older frame may contain a distinct unit that must still be accepted.
     db.run("UPDATE multiremi_usage_runs SET revision=revision WHERE task_id=? AND run_id=?", [taskId, s.runId]);
     const run = db.query("SELECT revision,complete FROM multiremi_usage_runs WHERE task_id=? AND run_id=?").get(taskId, s.runId) as Row;
-    // Read revision floors once under the run lock. A snapshot can contain
-    // thousands of units; the number of reads must not depend on that count.
-    const previousUnits = new Map((db.query("SELECT * FROM multiremi_usage_units WHERE task_id=? AND run_id=?").all(taskId, s.runId) as Row[]).map(row => [String(row.unit_id), row]));
-    const receipts = new Map((db.query("SELECT * FROM multiremi_usage_unit_receipts WHERE task_id=? AND run_id=?").all(taskId, s.runId) as Row[]).map(row => [String(row.unit_id), row]));
+    // Read only this frame's revision floors under the run lock. Incremental
+    // frames must not repeatedly materialize all units/receipts in a long run.
+    const frameUnits = usageRowsSelect(db, ["unit_id"], s.units.map(unit => [unit.unitId]));
+    const frameUnitFilter = ` AND unit_id IN (${frameUnits.sql})`;
+    const frameParams = [taskId, s.runId, ...frameUnits.params];
+    const previousUnits = new Map((db.query(`SELECT * FROM multiremi_usage_units WHERE task_id=? AND run_id=?${frameUnitFilter}`).all(...frameParams) as Row[]).map(row => [String(row.unit_id), row]));
+    const receipts = new Map((db.query(`SELECT * FROM multiremi_usage_unit_receipts WHERE task_id=? AND run_id=?${frameUnitFilter}`).all(...frameParams) as Row[]).map(row => [String(row.unit_id), row]));
     const parkedUnits = new Map<string, Row>();
-    for (const row of db.query("SELECT unit_id,revision,unit_json FROM multiremi_usage_identity_conflicts WHERE task_id=? AND run_id=? ORDER BY revision DESC").all(taskId, s.runId) as Row[]) {
+    for (const row of db.query(`SELECT unit_id,revision,unit_json FROM multiremi_usage_identity_conflicts WHERE task_id=? AND run_id=?${frameUnitFilter} ORDER BY revision DESC`).all(...frameParams) as Row[]) {
       if (!parkedUnits.has(String(row.unit_id))) parkedUnits.set(String(row.unit_id), row);
     }
     // Identity claims and incremental monetary coverage retain their existing

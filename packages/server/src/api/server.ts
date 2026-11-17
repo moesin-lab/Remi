@@ -1200,6 +1200,12 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
       yield* withRequestReadCache(() => backgroundTaskSnapshot(store, rt, session));
       yield* withRequestReadCache(() => runtimeInputSnapshot(store, rt, session, mode));
     } });
+  daemonProtocol.registerSessionHooks({ heartbeat: session => {
+    // A fresh zero-inflight acknowledgement can make an update deliverable
+    // after its deadline wakeup already sent the cancellation. Re-read pending
+    // requests after recording that acknowledgement, without requiring polling.
+    for (const rt of session.runtimeIds) if (store.hasCliUpdateDrainForRuntime(rt)) downlinks.kick(rt, "pending");
+  } });
   registerTaskInputRpcs(daemonProtocol, store, rt => downlinks.kick(rt), daemonTurnBridge);
   registerBackgroundTaskHandlers(daemonProtocol, store, rt => downlinks.kick(rt, "pending"));
   const browserWebSockets: BrowserWebSocketRegistry = new Map();

@@ -17,7 +17,7 @@ class SourceUnavailable extends Error {}
 /** Never surface fetch exceptions: they can contain request headers or credential-bearing URLs. */
 export async function fetchUpdateResource(fetchImpl: typeof fetch, url: string, headers: Record<string, string>): Promise<Response> {
   try {
-    return await fetchImpl(url, { headers, redirect: "error", signal: AbortSignal.timeout(30_000) });
+    return await fetchImpl(url, { headers, redirect: "manual", signal: AbortSignal.timeout(30_000) });
   } catch {
     throw new SourceUnavailable("Update source is unreachable");
   }

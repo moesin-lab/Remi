@@ -1,14 +1,25 @@
 import { shouldBypassProxy } from "./no-proxy.js";
 
+let routingEnv: NodeJS.ProcessEnv | undefined;
+
 /** Start the Bun transport synchronously: fetch and node:http snapshot proxy env here. */
 export function withNoProxyRoute<T>(url: string | URL, start: () => T): T {
-  if (!shouldBypassProxy(url)) return start();
+  // Reentrant transports must match the original rules, never an outer exact-host override.
+  const original = routingEnv ?? { NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy };
+  const bypass = shouldBypassProxy(url, original);
+  const hostname = new URL(url).hostname;
+  const parent = routingEnv;
   const previous = { NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy };
   try {
-    process.env.NO_PROXY = new URL(url).hostname;
-    process.env.no_proxy = process.env.NO_PROXY;
+    routingEnv = original;
+    for (const key of ["NO_PROXY", "no_proxy"] as const) {
+      const value = bypass ? hostname : original[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     return start();
   } finally {
+    routingEnv = parent;
     for (const key of ["NO_PROXY", "no_proxy"] as const) {
       if (previous[key] === undefined) delete process.env[key];
       else process.env[key] = previous[key];
@@ -25,7 +36,22 @@ export async function proxyFetch(input: string | URL | Request, init?: RequestIn
     const url = target instanceof Request ? target.url : String(target);
     // Clone before sending so a 307/308 can replay a Request body.
     const replay = target instanceof Request && target.body && mode === "follow" ? target.clone() : target;
-    const response = await withNoProxyRoute(url, () => fetch(target, { ...options, redirect: "manual" }));
+    // Materialize user getters and string conversions before changing env. Preserve the
+    // two-argument transport contract used by injected fetch implementations.
+    const prepared: RequestInit = { ...options, redirect: "manual" };
+    if (prepared.headers !== undefined) prepared.headers = new Headers(prepared.headers);
+    const body = prepared.body;
+    if (body instanceof URLSearchParams) {
+      const headers = new Headers(prepared.headers ?? (target instanceof Request ? target.headers : undefined));
+      if (!headers.has("content-type")) headers.set("content-type", "application/x-www-form-urlencoded;charset=UTF-8");
+      prepared.headers = headers;
+      prepared.body = body.toString();
+    } else if (body != null && typeof body !== "string" && !(body instanceof Blob)
+      && !(body instanceof FormData) && !(body instanceof ArrayBuffer)
+      && !ArrayBuffer.isView(body) && !(body instanceof ReadableStream)) {
+      prepared.body = String(body);
+    }
+    const response = await withNoProxyRoute(url, () => fetch(target, prepared));
     if (![301, 302, 303, 307, 308].includes(response.status) || mode === "manual") {
       if (hops > 0) Object.defineProperty(response, "redirected", { value: true });
       return response;
@@ -68,7 +94,7 @@ export async function proxyFetch(input: string | URL | Request, init?: RequestIn
 export function proxyWebSocket(url: string, init: { headers: Record<string, string> }): WebSocket {
   // Bun WebSocket does not auto-detect HTTP(S)_PROXY, unlike fetch.
   const secure = new URL(url).protocol === "wss:";
-  const proxy = shouldBypassProxy(url) ? undefined : secure
+  const proxy = shouldBypassProxy(url, routingEnv ?? process.env) ? undefined : secure
     ? process.env.https_proxy ?? process.env.HTTPS_PROXY
     : process.env.http_proxy ?? process.env.HTTP_PROXY;
   // The DOM constructor overload omits Bun's headers/proxy options.

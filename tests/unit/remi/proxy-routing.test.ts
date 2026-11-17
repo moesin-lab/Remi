@@ -6,7 +6,7 @@ async function child(code: string, proxy: string, noProxy = "127.0.0.0/8") {
   const proc = Bun.spawn([process.execPath, "--eval", code], {
     cwd: process.cwd(),
     env: { ...process.env, HTTP_PROXY: proxy, http_proxy: proxy, HTTPS_PROXY: proxy, https_proxy: proxy,
-      NO_PROXY: noProxy, no_proxy: noProxy, ALL_PROXY: "", all_proxy: "" },
+      NO_PROXY: noProxy, no_proxy: noProxy, ALL_PROXY: "socks5h://127.0.0.1:1", all_proxy: "socks5h://127.0.0.1:1" },
     stdout: "pipe", stderr: "pipe",
   });
   const [stdout, stderr, status] = await Promise.all([
@@ -200,4 +200,143 @@ it("routes real daemon WebSockets directly for CIDR and through HTTP CONNECT oth
     for (const socket of sockets) socket.destroy();
     proxy.close(); server.stop(true);
   }
+}, 15000);
+
+it("prepares init getters and coercions before routing and preserves original rules during reentry", async () => {
+  let proxyHits = 0;
+  const direct = Bun.serve({ hostname: "0.0.0.0", port: 0, fetch: () => new Response("direct") });
+  const proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() { proxyHits++; return new Response("proxy"); } });
+  try {
+    expect(await child(`
+      import { proxyFetch, withNoProxyRoute } from "./packages/shared/src/proxy-fetch.ts";
+      import { strict as assert } from "node:assert";
+      const before = { NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy };
+      const a = "http://127.0.0.2:${direct.port}", b = "http://127.0.0.3:${direct.port}";
+      const pending = [];
+      const reenter = () => {
+        assert.deepEqual({ NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy }, before);
+        pending.push(proxyFetch(b));
+      };
+      const response = await proxyFetch(a, {
+        get headers() { reenter(); return { "x-test": { toString() { reenter(); return "ok"; } } }; },
+        method: "POST", body: { toString() { reenter(); return "body"; } },
+      });
+      assert.equal(await response.text(), "direct");
+      const nested = withNoProxyRoute(a, () => {
+        const inner = withNoProxyRoute(b, () => fetch(b));
+        assert.equal(process.env.NO_PROXY, "127.0.0.2");
+        return inner;
+      });
+      pending.push(nested);
+      for (const result of await Promise.all(pending)) assert.equal(await result.text(), "direct");
+      // An unmatched nested URL must see the original list, too.
+      const outside = withNoProxyRoute(a, () => withNoProxyRoute("http://outside.invalid", () => {
+        assert.deepEqual({ NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy }, before);
+        return fetch("http://outside.invalid");
+      }));
+      assert.equal(await (await outside).text(), "proxy");
+      assert.deepEqual({ NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy }, before);
+      console.log("ok");
+    `, proxy.url.href)).toBe("ok");
+    expect(proxyHits).toBe(1); // Only the deliberately unmatched URL.
+  } finally { direct.stop(true); proxy.stop(true); }
+}, 15000);
+
+it("defaults credential broker and plugin artifacts to direct CIDR platform transport", async () => {
+  let proxyHits = 0;
+  const paths: string[] = [];
+  const manifest = { name: "demo", version: "1.0.0", description: "Routing regression" };
+  const content = JSON.stringify(manifest);
+  const { createHash } = await import("node:crypto");
+  const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+  const artifact = JSON.stringify({ provider: "claude", manifestPath: ".claude-plugin/plugin.json", manifest,
+    files: [{ path: ".claude-plugin/plugin.json", encoding: "utf8", content, size: Buffer.byteLength(content), digest: digest(content) }] });
+  const direct = Bun.serve({ hostname: "0.0.0.0", port: 0, fetch(req) {
+    const path = new URL(req.url).pathname;
+    paths.push(path);
+    expect(req.headers.get("authorization")).toBe("Bearer test");
+    if (path === "/api/daemon/scm/git-credentials") return Response.json({
+      repositoryId: "repo", repositoryUrl: "https://git.example/team/repo.git", cloneUrl: "https://git.example/team/repo.git",
+      username: "user", password: "credential", expiresAt: null,
+    });
+    if (path === "/api/daemon/agent-plugin-artifacts/test") return new Response(artifact);
+    return new Response("unexpected", { status: 404 });
+  }});
+  const proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() { proxyHits++; return new Response("proxy", { status: 502 }); } });
+  try {
+    expect(await child(`
+      import { runGitCredentialHelper } from "./packages/daemon/src/agent-runtime/repo/credential-broker.ts";
+      import { AgentPluginCache } from "./packages/daemon/src/agent-runtime/agent-plugins/cache.ts";
+      import { mkdtemp, readFile, chmod, rm } from "node:fs/promises";
+      import { tmpdir } from "node:os";
+      import { join } from "node:path";
+      import { strict as assert } from "node:assert";
+      const base = "http://127.0.0.2:${direct.port}";
+      const result = await runGitCredentialHelper("get", {
+        input: "protocol=https\\nhost=git.example\\npath=team/repo.git\\n\\n",
+        env: { MULTIREMI_SERVER_URL: base, MULTIREMI_WORKSPACE_ID: "local", MULTIREMI_TOKEN: "test" },
+      });
+      assert.equal(result, "username=user\\npassword=credential\\n");
+      const root = await mkdtemp(join(tmpdir(), "remi-proxy-plugin-"));
+      try {
+        const cache = new AgentPluginCache({ root, serverUrl: base, getAuthToken: () => "test" });
+        const payload = await cache.ensure({ pluginId: "p", versionId: "v", name: "demo", provider: "claude", version: "1.0.0",
+          digest: "${digest(artifact)}", artifactUrl: "/api/daemon/agent-plugin-artifacts/test" });
+        assert.equal(JSON.parse(await readFile(join(payload, ".claude-plugin/plugin.json"), "utf8")).name, "demo");
+      } finally {
+        await chmod(root, 0o700);
+        // Installed payload directories are immutable; make them writable for owned fixture cleanup.
+        const { readdir, lstat } = await import("node:fs/promises");
+        async function writable(path) { if ((await lstat(path)).isDirectory()) { await chmod(path, 0o700); for (const name of await readdir(path)) await writable(join(path, name)); } }
+        await writable(root); await rm(root, { recursive: true, force: true });
+      }
+      console.log("ok");
+    `, proxy.url.href)).toBe("ok");
+    expect(paths).toEqual(["/api/daemon/scm/git-credentials", "/api/daemon/agent-plugin-artifacts/test"]);
+    expect(proxyHits).toBe(0);
+  } finally { direct.stop(true); proxy.stop(true); }
+}, 15000);
+
+it("registers the daemon and opens its protocol socket directly with CIDR and ALL_PROXY", async () => {
+  let proxyHits = 0;
+  const paths: string[] = [];
+  const direct = Bun.serve({ hostname: "0.0.0.0", port: 0,
+    async fetch(req, server) {
+      const path = new URL(req.url).pathname;
+      paths.push(path);
+      if (path === "/api/daemon/register") {
+        expect(req.method).toBe("POST");
+        expect(req.headers.get("authorization")).toBe("Bearer test");
+        expect(await req.json()).toMatchObject({ daemon_id: "test", workspace_id: "local" });
+        return Response.json({ daemon_id: "test" });
+      }
+      if (path === "/api/daemon/ws" && server.upgrade(req)) return;
+      return new Response("unexpected", { status: 404 });
+    },
+    websocket: { message(ws, data) {
+      if (JSON.parse(String(data)).t === "hello") ws.send(JSON.stringify({ v: 2, ts: 1, t: "welcome", p: { protocol: 2, session_id: "test", min_cli_version: "0.2.95" } }));
+    } },
+  });
+  const proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() { proxyHits++; return new Response("proxy", { status: 502 }); } });
+  try {
+    expect(await child(`
+      import { MultiremiDaemonClient } from "./packages/server/src/worker/client.ts";
+      import { DaemonProtocolClient } from "./packages/server/src/worker/daemon-protocol-client.ts";
+      import { strict as assert } from "node:assert";
+      const base = "http://127.0.0.2:${direct.port}";
+      const result = await new MultiremiDaemonClient(base, "test").registerDaemonRuntime({ daemonId: "test", workspaceId: "local" });
+      assert.equal(result.daemon_id, "test");
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { client.close(); reject(new Error("WS timeout")); }, 3000);
+        const client = new DaemonProtocolClient({ serverUrl: base, daemonId: result.daemon_id, cliVersion: "0.2.95",
+          onWelcome: () => { clearTimeout(timer); client.close(); resolve(); }, onError: reject });
+        const lane = { runtime: () => ({ runtime_id: "rt", provider: "codex", max_concurrency: 1, active_task_ids: [] }), heartbeat: () => ({ active_task_count: 0 }),
+          onHeartbeatAck: async () => {}, probeUpgrade: async () => {}, onTerminal: async () => {} };
+        client.addLane(lane); client.startLane(lane);
+      });
+      console.log("ok");
+    `, proxy.url.href)).toBe("ok");
+    expect(paths).toEqual(["/api/daemon/register", "/api/daemon/ws"]);
+    expect(proxyHits).toBe(0);
+  } finally { direct.stop(true); proxy.stop(true); }
 }, 15000);

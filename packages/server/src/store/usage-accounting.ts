@@ -344,6 +344,13 @@ function usageRowsSelect(db: SqlDatabase, columns: readonly string[], rows: unkn
     ? "jsonb_array_elements(CAST(CAST(? AS TEXT) AS JSONB)) AS batch(value)" : "json_each(?) AS batch"} WHERE 1=1`, params: [JSON.stringify(rows)] };
 }
 
+/** The usual incremental frame has one unit; avoid JSON expansion for its writes. */
+function usageRowsInsert(db: SqlDatabase, columns: readonly string[], rows: unknown[][]): { sql: string; params: unknown[] } {
+  return rows.length === 1
+    ? { sql: `VALUES(${columns.map(() => "?").join(",")})`, params: rows[0]! }
+    : usageRowsSelect(db, columns, rows);
+}
+
 /** One transaction serializes snapshot revisions; only newer unit revisions replace facts. */
 export function writeUsageSnapshot(db: SqlDatabase, taskId: string, input: TaskUsageSnapshot, options: UsageWriteOptions = {}): boolean {
   const s = validateUsageSnapshot(input);
@@ -415,7 +422,7 @@ export function writeUsageSnapshot(db: SqlDatabase, taskId: string, input: TaskU
     const columns = ["task_id", "run_id", "unit_id", "revision", "workspace_id", "agent_id", "runtime_id", "project_id", "runtime_provenance", "project_provenance", ...UNIT_FIELDS, "cost_coverage_complete", "cost_coverage_received_count"];
     const persistUnits = (rows: unknown[][]) => {
       if (!rows.length) return;
-      const batch = usageRowsSelect(db, columns, rows);
+      const batch = usageRowsInsert(db, columns, rows);
       db.run(`INSERT INTO multiremi_usage_units(${columns.join(",")}) ${batch.sql}
         ON CONFLICT(task_id,run_id,unit_id) DO UPDATE SET revision=excluded.revision, ${UNIT_FIELDS.map(f => `${f}=excluded.${f}`).join(",")},cost_coverage_complete=excluded.cost_coverage_complete,cost_coverage_received_count=0
         WHERE multiremi_usage_units.revision<excluded.revision`, batch.params);
@@ -514,7 +521,7 @@ export function writeUsageSnapshot(db: SqlDatabase, taskId: string, input: TaskU
     }
     persistUnits(unitRows);
     if (receiptRows.length) {
-      const batch = usageRowsSelect(db, ["task_id", "run_id", "unit_id", "revision", "disposition", "normalized_json"], receiptRows);
+      const batch = usageRowsInsert(db, ["task_id", "run_id", "unit_id", "revision", "disposition", "normalized_json"], receiptRows);
       db.run(`INSERT INTO multiremi_usage_unit_receipts(task_id,run_id,unit_id,revision,disposition,normalized_json) ${batch.sql}
         ON CONFLICT(task_id,run_id,unit_id) DO UPDATE SET revision=excluded.revision,disposition=excluded.disposition,normalized_json=excluded.normalized_json`, batch.params);
     }

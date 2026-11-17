@@ -63,6 +63,17 @@ describe("server GitHub read credentials", () => {
     } finally { log.mockRestore(); }
   });
 
+  it("falls back for malformed tokens without exposing invalid header values", async () => {
+    const store = setup();
+    store.updateScmConnection("selected", { accessToken: "invalid-secret\nvalue" });
+    process.env.GITHUB_TOKEN = "env-secret";
+    expect(auth(createGitHubReadHeaders(store, "local"))).toBe("Bearer env-secret");
+    process.env.GITHUB_TOKEN = "invalid-env\nvalue";
+    expect(auth(createGitHubReadHeaders(store, "local"))).toBeNull();
+    await expect(withSkillImportDeadline({ githubHeaders: () => ({ Authorization: "Bearer invalid-secret\nvalue" }) },
+      () => fetchSkillImportResponse(api, {}, 100))).rejects.toThrow("Skill import authentication headers are invalid");
+  });
+
   it("HTTP POST imports a directory with connection credentials on both API and raw requests", async () => {
     const store = setup();
     const hosts = new Set<string>();

@@ -25,13 +25,19 @@ export function createGitHubReadHeaders(store: Pick<ScmStoreFacade,
       && connection.isDefault && !candidates.includes(connection)).sort((a, b) => a.id.localeCompare(b.id)));
     for (const connection of candidates) {
       try {
-        const token = store.getScmConnectionCredential(connection.id)?.accessToken?.trim();
+        const token = usableToken(store.getScmConnectionCredential(connection.id)?.accessToken);
         if (token) return { Authorization: `Bearer ${token}` };
       } catch {
         // Disabled/unavailable encryption keys must not expose errors or credential material.
       }
     }
-    const token = process.env.GITHUB_TOKEN?.trim();
+    const token = usableToken(process.env.GITHUB_TOKEN);
     return token ? { Authorization: `Bearer ${token}` } : {};
   };
+}
+
+function usableToken(value: string | null | undefined): string | undefined {
+  const token = value?.trim();
+  // Invalid header values can be quoted verbatim by the HTTP implementation.
+  return token && /^[\x21-\x7e]+$/.test(token) ? token : undefined;
 }

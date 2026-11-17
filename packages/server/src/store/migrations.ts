@@ -6740,6 +6740,7 @@ function addAutopilotDeliveryTarget(db: SqlDatabase): void {
 
 /** Additive for both historical and already-unified databases; preserves active fences. */
 function ensureDaemonDrains(db: SqlDatabase): void {
+  addColumnIfMissing(db, "multiremi_runtimes", "drain_ack_scope TEXT");
   db.exec(`
     CREATE TABLE IF NOT EXISTS multiremi_daemon_drains (
       workspace_id TEXT NOT NULL,

@@ -1,3 +1,4 @@
+import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // Platform drain (MUL-74): persistent maintenance state, lease TTL recovery,
 // the daemon heartbeat ack directive, the updater drain endpoints, and the
@@ -130,7 +131,7 @@ describe("platform maintenance store", () => {
 describe("daemon heartbeat drain directive", () => {
   it("carries the drain directive in the ack and records the daemon's ack + active count", async () => {
     const { app, store } = updaterApp();
-    const runtime = store.registerRuntime({ id: "rt_hb", name: "hb", provider: "claude", workspaceId: "local" });
+    const runtime = store.registerRuntime({ id: "rt_hb", name: "hb", provider: "claude", workspaceId: "local", metadata: { cli_version: DAEMON_MIN_CLI_VERSION } });
 
     const heartbeat = (body: Record<string, unknown>) => app.request("/api/daemon/heartbeat", {
       method: "POST",
@@ -152,7 +153,7 @@ describe("daemon heartbeat drain directive", () => {
 
   it("flips an expired drain back to normal on the very next heartbeat", async () => {
     const { app, store } = updaterApp();
-    const runtime = store.registerRuntime({ id: "rt_hb2", name: "hb2", provider: "claude", workspaceId: "local" });
+    const runtime = store.registerRuntime({ id: "rt_hb2", name: "hb2", provider: "claude", workspaceId: "local", metadata: { cli_version: DAEMON_MIN_CLI_VERSION } });
     store.beginPlatformDrain({ operationId: "pop_exp" });
     db!.run("UPDATE multiremi_platform_maintenance SET expires_at = ? WHERE id = 'platform'", [
       new Date(Date.now() - 1_000).toISOString(),

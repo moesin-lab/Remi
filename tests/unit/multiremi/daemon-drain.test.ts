@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { createMultiremiApp } from "@multiremi/api.js";
+import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
 import { parseDaemonDrainDuration } from "@multiremi/contracts/daemon-drain.js";
 import { taskInputSnapshot } from "@multiremi/api/daemon-protocol/task-input-snapshot.js";
 import { runtimeInputSnapshot } from "@multiremi/api/daemon-protocol/runtime-input-snapshot.js";
@@ -30,6 +31,31 @@ function ack(store: MultiremiStore, count: number) {
 }
 
 describe("daemon drain", () => {
+  it("aggregates HTTP provider counts and returns terminal cancellation to upgrade probes", async () => {
+    const { store, agent } = fixture();
+    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION })]);
+    const task = store.createTask({ agentId: agent.id, prompt: "local long task" });
+    store.claimTask("rt_a"); store.startTask(task.id);
+    const app = createMultiremiApp({ store, authToken: "test-root" });
+    const heartbeat = async (id: string, count: number, ids: string[] = []) => {
+      const response = await app.request("/api/daemon/heartbeat", { method: "POST",
+        headers: { Authorization: "Bearer test-root", "Content-Type": "application/json" },
+        body: JSON.stringify({ runtime_id: id, drain_ack_generation: 0, active_task_count: count, active_task_ids: ids }) });
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    await heartbeat("rt_a", 1); await heartbeat("rt_a_other", 0);
+    store.beginDaemonDrain("local", "machine-a", "deploy", 1000);
+    advance(1000); store.reconcileDaemonDrain("rt_a");
+    advance(1001);
+    const probe = await heartbeat("rt_a", 1, [task.id, "unknown"]);
+    expect(probe.cancelled_tasks).toEqual([{ task_id: task.id, status: "failed" }]);
+    advance(1002); await heartbeat("rt_a_other", 0);
+    expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "draining", remaining_tasks: 1 });
+    advance(1003); await heartbeat("rt_a", 0);
+    expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "drained_forced", remaining_tasks: 0 });
+  });
+
   it("fences all providers on one machine, routes to another, and resumes after undrain", () => {
     const { store, agent } = fixture();
     const task = store.createTask({ agentId: agent.id, prompt: "queued" });

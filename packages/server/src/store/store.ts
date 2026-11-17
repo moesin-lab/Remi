@@ -839,8 +839,8 @@ runMigrations(this.db);
     });
   }
 
-  recordRuntimeDrainAck(runtimeId: string, generation: number, activeTasks: number | null): void {
-    this.platformMaintenance.recordRuntimeDrainAck(runtimeId, generation, activeTasks);
+  recordRuntimeDrainAck(runtimeId: string, generation: number, activeTasks: number | null, scope: "daemon" | "runtime" = "daemon"): void {
+    this.platformMaintenance.recordRuntimeDrainAck(runtimeId, generation, activeTasks, scope);
   }
 
   getPlatformDrainStatus(): MultiremiPlatformDrainStatus {

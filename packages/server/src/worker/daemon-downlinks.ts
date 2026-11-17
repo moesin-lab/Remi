@@ -75,12 +75,16 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
       if (frame.rt !== runtimeId() || typeof frame.payload.task_id !== "string") return;
       const status = frame.payload.status;
       if (status === "completed" || status === "failed" || status === "cancelled") {
-        // A terminal waiting in outbox is not an executing task. Leave that partition untouched.
-        const listener = this.cancelListeners.get(frame.payload.task_id);
-        this.cancelListeners.delete(frame.payload.task_id);
-        listener?.(status);
+        this.reconcileCancellation(frame.payload.task_id, status);
       }
     });
+  }
+
+  /** Shared by WS cancellation pushes and HTTP upgrade-wait reconciliation. */
+  reconcileCancellation(taskId: string, status: Terminal): void {
+    const listener = this.cancelListeners.get(taskId);
+    this.cancelListeners.delete(taskId);
+    listener?.(status);
   }
 
   bindTurn(input: DaemonTurnInput): void {

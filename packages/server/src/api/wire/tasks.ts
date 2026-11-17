@@ -115,6 +115,7 @@ export function daemonHeartbeatHttpResponse(ack: MultiremiDaemonHeartbeatAck): R
   const response: Record<string, unknown> = { status: ack.status };
   if (ack.pending_update) response.pending_update = ack.pending_update;
   if (ack.drain) response.drain = ack.drain;
+  if (ack.cancelled_tasks?.length) response.cancelled_tasks = ack.cancelled_tasks;
   return response;
 }
 

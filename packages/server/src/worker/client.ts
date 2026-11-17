@@ -348,7 +348,7 @@ export class MultiremiDaemonClient {
   async heartbeatRuntime(
     runtimeId: string,
     sshMeshStatus?: MultiremiDaemonSshMeshStatus,
-    drainStatus?: { ackGeneration: number; activeTaskCount: number },
+    drainStatus?: { ackGeneration: number; activeTaskCount: number; activeTaskIds?: string[] },
     supportsBotMenu = false,
     supportsFeishuConcierge = false,
     signal?: AbortSignal,
@@ -372,6 +372,7 @@ export class MultiremiDaemonClient {
           ? {
               drain_ack_generation: drainStatus.ackGeneration,
               active_task_count: drainStatus.activeTaskCount,
+              active_task_ids: drainStatus.activeTaskIds,
             }
           : {}),
         // Only claimed when this process can actually host the connector, so

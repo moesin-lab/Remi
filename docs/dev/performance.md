@@ -91,10 +91,11 @@ Session hooks 在缓存范围外运行。drain 围栏并入 Runtime 行读取；
 正常认领与陈旧 dispatch 恢复从 attempts/turns 基表选一次 ID，PG 锁候选时使用
 `SKIP LOCKED`；工作区生命周期锁继续保护并发上限与配置。随后按 ID 进入规范化变更器。
 活跃 attempt ID 集合物化一次供容量/lane/共享目录探针复用，保留当前 turn 的
-awaiting_human 状态覆盖。索引、完整谓词对照、查询数范围及隔离 PG 计划见
-[MUL-163 报告](../../reports/performance/MUL-163-claim.md)。默认 offer 不周期扫描在线 runtime，
+awaiting_human 状态覆盖及 unknown offer 保留的共享目录租约。索引、完整谓词对照、查询数范围及隔离 PG 计划见
+[MUL-163 报告](../../reports/performance/MUL-163-claim.md)。生产 offer 默认保留 60 s 兜底扫描，泵忙、等待或冷却时跳过；
 普通 ack/drain 只恢复背压等待；入队、终态、容量/配置变化及已有期限仍立即触发。
-显式 `sweepMs` 只用于诊断遗漏事件；线上延迟与一小时稳定性仍需部署后测量。
+扫描恢复派发时记 warn 和 `offer_sweep_recovered`，用于定位遗漏事件；测试环境默认禁用扫描。
+线上延迟与一小时稳定性仍需部署后测量。
 
 ## Issue 详情首屏的工作区读取
 

@@ -1645,7 +1645,7 @@ export class MultiremiDaemon {
           const capabilities = this.runtimeCapabilities();
           const ack = await this.client.heartbeatRuntime(
             this.options.runtimeId, this.sshMeshManager.getHeartbeatStatus(),
-            { ackGeneration: this.appliedDrainGeneration, activeTaskCount: this.activeTaskCount, activeTaskIds: [...this.activeTaskIds] },
+            { ackGeneration: this.appliedDrainGeneration, activeTaskCount: this.protocolClient.processActiveTaskCount(), scope: "daemon", activeTaskIds: [...this.activeTaskIds] },
             capabilities.supports_bot_menu === true,
             Boolean(capabilities.feishu_concierge_protocol), this.pollAbort.signal,
           );

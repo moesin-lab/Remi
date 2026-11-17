@@ -1,3 +1,4 @@
+import { parseDaemonDrainDuration, type DaemonDrainReason } from "@multiremi/contracts/daemon-drain.js";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
 import type { Context, Hono } from "hono";
 import {
@@ -19,6 +20,37 @@ import type { RouterDeps } from "./deps.js";
 
 export function registerDaemonRetirementRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+
+  app.get("/api/daemons/:daemonId/drain", (c) => {
+    const workspaceId = requestedWorkspaceId(c, store);
+    if (workspaceId instanceof Response) return workspaceId;
+    const access = loadHumanWorkspaceAccess(c, deps, workspaceId);
+    if (access instanceof Response) return access;
+    try { return c.json(store.getDaemonDrainStatus(workspaceId, c.req.param("daemonId"))); }
+    catch (error) { return c.json({ error: String(error) }, 404); }
+  });
+  app.post("/api/daemons/:daemonId/drain", async (c) => {
+    const workspaceId = requestedWorkspaceId(c, store);
+    if (workspaceId instanceof Response) return workspaceId;
+    if (currentAccessToken(c)?.type === "task") return c.json({ error: "task credentials may only query drain status" }, 403);
+    const access = loadHumanWorkspaceAccess(c, deps, workspaceId);
+    if (access instanceof Response) return access;
+    const body = await readJsonStrict<{ deadline?: string; reason?: DaemonDrainReason }>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    try {
+      return c.json(store.beginDaemonDrain(workspaceId, c.req.param("daemonId"), body.reason,
+        body.deadline === undefined ? undefined : parseDaemonDrainDuration(body.deadline)));
+    } catch (error) { return c.json({ error: error instanceof Error ? error.message : String(error) }, 400); }
+  });
+  app.delete("/api/daemons/:daemonId/drain", (c) => {
+    const workspaceId = requestedWorkspaceId(c, store);
+    if (workspaceId instanceof Response) return workspaceId;
+    if (currentAccessToken(c)?.type === "task") return c.json({ error: "task credentials may only query drain status" }, 403);
+    const access = loadHumanWorkspaceAccess(c, deps, workspaceId);
+    if (access instanceof Response) return access;
+    try { return c.json(store.undrainDaemon(workspaceId, c.req.param("daemonId"))); }
+    catch (error) { return c.json({ error: error instanceof Error ? error.message : String(error) }, 409); }
+  });
 
   app.get("/api/daemons/:daemonId", (c) => {
     const workspaceId = requestedWorkspaceId(c, store);

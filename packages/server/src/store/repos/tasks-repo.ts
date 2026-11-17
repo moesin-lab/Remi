@@ -3356,9 +3356,8 @@ export class TasksRepo {
       }
       this.ctx.runtimes().heartbeatRuntime(runtimeId, { claimPending: false });
 
-      // A pending/running CLI update is a daemon-wide drain fence. Do not let
-      // another provider on the same machine fill the idle slot between the
-      // last in-flight Task finishing and the daemon claiming its update.
+      // Manual, deployment and CLI-update drains share a persisted physical-daemon
+      // fence, serialized with begin/undrain by the workspace lifecycle lock.
       if (this.ctx.runtimes().hasCliUpdateDrainForRuntime(runtimeId)) return null;
 
       this.resetStaleChatWorkspaceTasks(lockedRuntime.workspaceId ?? "local");

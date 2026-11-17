@@ -529,6 +529,7 @@ export class DaemonProtocolLayer {
       // `claimPending: false` because the v2 server does not sweep the pending
       // families on a heartbeat (MUL-389's merged poll): those become pushes in A-4.
       const reported = reportedRuntimes.find(entry => entry.runtime_id === runtimeId);
+      this.store.reconcileDaemonDrain(runtimeId);
       const ack = this.store.heartbeatRuntime(runtimeId, { claimPending: false,
         ...runtimeCapabilityOptions(readPayload(reported?.capabilities) as DaemonRuntimeCapabilities) });
       if (ack.status !== "runtime_gone") this.recordExternalChatCapabilities(runtimeId, readPayload(reported?.capabilities) as DaemonRuntimeCapabilities);
@@ -547,6 +548,7 @@ export class DaemonProtocolLayer {
       if (ackGeneration !== null) {
         this.store.recordRuntimeDrainAck(runtimeId, ackGeneration, activeTaskCount);
       }
+      ack.drain = this.store.daemonDrainDirective(runtimeId);
       acksByRuntime.set(runtimeId, ack);
     }
 

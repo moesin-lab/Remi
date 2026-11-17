@@ -4708,6 +4708,43 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "daemon.drain": {
+      "command": "remi daemon drain",
+      "auth": [
+        "human"
+      ],
+      "capability": "daemon.drain",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "daemon.drain.status": {
+      "command": "remi daemon drain status",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "daemon.drain.status",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "daemon.undrain": {
+      "command": "remi daemon undrain",
+      "auth": [
+        "human"
+      ],
+      "capability": "daemon.undrain",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "daemon.list": {
       "command": "remi daemon list",
       "auth": [

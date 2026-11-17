@@ -70,6 +70,16 @@ afterEach(async () => {
 });
 
 describe("daemon protocol v2 client", () => {
+  it("counts every process-owned lane for HTTP drain probes, including a stopping lane", () => {
+    const b = bed();
+    let busy = 2;
+    const other: DaemonProtocolLane = { ...b.lane, runtime: () => null,
+      heartbeat: () => ({ active_task_count: busy }) };
+    b.client.addLane(other);
+    expect(b.client.processActiveTaskCount()).toBe(3);
+    busy = 0;
+    expect(b.client.processActiveTaskCount()).toBe(1);
+  });
   it("keeps a new daemon out of an old v2 server and retains the 60-second upgrade probe", async () => {
     const b = bed({ cliVersion: DAEMON_MIN_CLI_VERSION });
     b.sockets[0]!.emit("open");

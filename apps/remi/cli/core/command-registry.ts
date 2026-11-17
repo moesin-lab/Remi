@@ -98,6 +98,8 @@ const TASK_PARITY_DENIED_COMMAND_IDS = new Set([
   "autopilot.trigger.rotate-token",
   "autopilot.trigger.set-secret",
   "daemon.retire",
+  "daemon.drain",
+  "daemon.undrain",
   "feishu.messages.create-issue",
   "feishu.proposals.approve",
   "feishu.proposals.reject",

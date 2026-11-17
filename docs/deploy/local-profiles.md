@@ -256,3 +256,48 @@ remi platform operation cancel <operation-id> --yes --json
 `status` 检查 API `/readyz` 和 Web `/login`，只能证明服务启动。还应验证登录、旧工作区与 Issue 数量、浏览器 API/WS，以及 dev token 无法访问 stable。Agent 执行还需要给对应环境单独注册 Runtime；宿主 Codex 已登录不等于平台已有可用 Runtime。真实 provider、飞书、SSH Mesh 与外部同步各自需要对应验证。
 
 配置隔离测试：`bun test tests/arch/deploy-local-profiles.test.ts`。实际部署版本、迁移备份和本次测试结果记录在任务中，本页只维护操作方法。
+
+## Daemon 有期限排空（MUL-68）
+
+`local-profile.mjs restart` 只重启 API/Web，不包含 daemon 重启。手工维护或部署 daemon
+时，成员先执行以下操作（`--daemon-id` 为 `remi daemon list` 中的机器 ID）：
+
+```bash
+remi daemon drain --daemon-id <id> --deadline 5m --reason deploy
+remi daemon drain status --daemon-id <id> --output json
+# 轮询 status，直到 status 为 drained 或 drained_forced，再重启 daemon 服务。
+# 确认新 daemon 已上线后恢复接单：
+remi daemon undrain --daemon-id <id>
+```
+
+省略 `--deadline` 时默认 **5 分钟**；服务端环境变量
+`MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS` 可调整默认毫秒数。时长支持 `ms`、`s`、`m`、`h`，
+范围为 1ms–24h。重复 drain 保留原来的开始时间、期限及原因，防止反复请求延长期限。
+排空状态保存在数据库，平台及 daemon 重启后仍阻止整台机器的所有 runtime 接单；
+同一工作区其他 daemon 继续接单。`MULTIREMI_DAEMON_ID` 可代替每次传 `--daemon-id`。
+
+status 返回 `remaining_tasks`、`started_at`、`deadline`、`reason`、`expiry_action`
+和 `awaiting_daemon_ack`。到期会通过既有恢复路径中断剩余尝试，记录为
+`lost` / `runtime_recovery`，按 MUL-45 的重试预算自动生成新尝试；本期仍消耗重试次数。
+只有服务端在途任务归零且 daemon 报告本地执行归零，强制排空才报告 `drained_forced`。
+失联 daemon 未确认时仍显示等待，不能把数据库已恢复任务当作本地进程已停止。
+
+CLI 更新创建同样的排空状态，归零或到期取消并确认后再下发更新。更新结束或请求超时
+只释放更新自己创建的排空；已有 manual/deploy 排空需成员显式 undrain。
+更新处于 pending/running/restarting/verifying 任一非终态时 undrain 返回冲突。
+重启后目标版本 hello 与启动自检确认成功（completed），或回滚完成（rolled_back）后，
+释放 cli_update 自有围栏；restarting/verifying 阶段由更新确认期限管理，不再触发排空期限的强制恢复。成员可 drain/undrain，任务凭据仅可查询。
+此排空与平台更新的 maintenance drain 独立；解除一方不会绕过另一方的派发限制。
+
+API：`GET /api/daemons/:daemonId/drain` 查询，`POST` 同路径发起
+（JSON 如 `{"deadline":"5m","reason":"manual"}`），`DELETE` 同路径解除；
+支持 `workspace_id` 查询参数。Agent 发起权限留待 MUL-29，停止服务上限与 unit 契约由 MUL-28 负责。
+
+协议拒绝后的 `upgrade_wait` 使用 HTTP 升级探测，不再有 WebSocket 取消下行。
+支持本排空协议的 daemon 会随探测报告本 runtime 的在途 attempt ID，消费服务端返回的
+终态取消后再报告零在途；新版 HTTP 探测显式报告当前进程所有 lane（含正在停止的 lane）的总数，
+以全机确认排除已停用 provider 的历史行；未声明范围的旧局部报告按 runtime 保守汇总，
+不能用空闲 provider 的零值替代全机确认。此路径的到期取消最多额外等待一次既有升级探测周期（60 秒），
+更新下发还可能等待下一次零在途探测。未安装本功能的旧 daemon 不会消费新增取消字段，
+平台无法仅靠数据库恢复终止其本地进程：这类实例需在维护窗口人工停止旧 daemon 后升级，
+不能把服务端任务归零当作已完成本地排空。

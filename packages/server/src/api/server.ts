@@ -1189,13 +1189,23 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
       supportsWikiFetch, daemonTurnBridge.offerInput(task)),
     onRuntimeReady: (rt, ids) => downlinks.runtimeReady(rt, ids) });
   const downlinks: DaemonDownlinks = new DaemonDownlinks({ layer: daemonProtocol,
-    nextWakeAt: rt => store.nextFeishuBotOutboundWakeAt(rt),
+    nextWakeAt: rt => {
+      const deadlines = [store.nextFeishuBotOutboundWakeAt(rt), store.nextDaemonDrainWakeAt(rt)].filter((at): at is number => at !== null);
+      return deadlines.length ? Math.min(...deadlines) : null;
+    },
     snapshot: function* (rt, session, activeIds, mode) {
+      store.reconcileDaemonDrain(rt);
       yield* withRequestReadCache(() => taskInputSnapshot(store, rt, session.daemonId, activeIds,
         id => downlinks.forgetTask(rt, id), daemonTurnBridge));
       yield* withRequestReadCache(() => backgroundTaskSnapshot(store, rt, session));
       yield* withRequestReadCache(() => runtimeInputSnapshot(store, rt, session, mode));
     } });
+  daemonProtocol.registerSessionHooks({ heartbeat: session => {
+    // A fresh zero-inflight acknowledgement can make an update deliverable
+    // after its deadline wakeup already sent the cancellation. Re-read pending
+    // requests after recording that acknowledgement, without requiring polling.
+    for (const rt of session.runtimeIds) if (store.hasCliUpdateDrainForRuntime(rt)) downlinks.kick(rt, "pending");
+  } });
   registerTaskInputRpcs(daemonProtocol, store, rt => downlinks.kick(rt), daemonTurnBridge);
   registerBackgroundTaskHandlers(daemonProtocol, store, rt => downlinks.kick(rt, "pending"));
   const browserWebSockets: BrowserWebSocketRegistry = new Map();

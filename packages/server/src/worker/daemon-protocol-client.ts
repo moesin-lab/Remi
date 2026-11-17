@@ -226,6 +226,11 @@ export class DaemonProtocolClient {
     this.connect();
   }
 
+  /** Includes every lane owned by this process, even one currently stopping. */
+  processActiveTaskCount(): number {
+    return [...this.lanes].reduce((total, lane) => total + lane.heartbeat().active_task_count, 0);
+  }
+
   allowsClaims(): boolean { return this.state !== "upgrade_wait" && this.state !== "terminal"; }
   connectionState(): DaemonProtocolClientState { return this.state; }
   uplinkPaused(): boolean { return this.paused; }

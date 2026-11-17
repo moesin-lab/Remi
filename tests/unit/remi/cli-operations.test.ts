@@ -404,6 +404,7 @@ describe("operations CLI contracts", () => {
     const registry = registryFor(specs);
     const inventory = new Map(registry.inventory().map((entry) => [entry.id, entry]));
     for (const id of [
+      "daemon.drain.status",
       "runtime.list",
       "runtime.update",
       "automation.quiet",
@@ -428,6 +429,8 @@ describe("operations CLI contracts", () => {
       "billing.balance",
       "platform.settings.update",
       "daemon.retire",
+      "daemon.drain",
+      "daemon.undrain",
       "feishu.messages.create-issue",
       "feishu.proposals.approve",
       "feishu.proposals.reject",
@@ -787,6 +790,28 @@ describe("operations CLI contracts", () => {
       restoreEnv("MULTIREMI_TURN_ID", saved.turn);
       restoreEnv(TASK_CONTEXT_FILE_ENV, saved.file);
     }
+  });
+
+  it("executes drain, status and undrain against the selected physical daemon", async () => {
+    useCliEnv();
+    const calls: string[] = [];
+    for (const [id, argv, method] of [
+      ["daemon.drain", ["daemon", "drain", "--deadline", "30s", "--reason", "deploy"], "POST"],
+      ["daemon.drain.status", ["daemon", "drain", "status"], "GET"],
+      ["daemon.undrain", ["daemon", "undrain"], "DELETE"],
+    ] as const) {
+      const spec = specById(id);
+      globalThis.fetch = capabilityFetch(id, async request => {
+        expect(request.method).toBe(method);
+        expect(new URL(request.url).pathname).toBe("/api/daemons/machine-a/drain");
+        expect(new URL(request.url).searchParams.get("workspace_id")).toBe("ws_1");
+        if (method === "POST") expect(await request.json()).toEqual({ deadline: "30s", reason: "deploy" });
+        calls.push(method);
+        return Response.json({ mode: "draining", remaining_tasks: 1 });
+      });
+      await capture(() => registryFor([spec]).execute([...argv, "--daemon-id", "machine-a", "--json"]));
+    }
+    expect(calls).toEqual(["POST", "GET", "DELETE"]);
   });
 
   it("reviews the daemon retirement snapshot and sends the exact confirmed snapshot", async () => {

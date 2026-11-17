@@ -284,7 +284,9 @@ status 返回 `remaining_tasks`、`started_at`、`deadline`、`reason`、`expiry
 
 CLI 更新创建同样的排空状态，归零或到期取消并确认后再下发更新。更新结束或请求超时
 只释放更新自己创建的排空；已有 manual/deploy 排空需成员显式 undrain。
-更新仍 pending/running 时 undrain 返回冲突。成员可 drain/undrain，任务凭据仅可查询。
+更新处于 pending/running/restarting/verifying 任一非终态时 undrain 返回冲突。
+重启后目标版本 hello 与启动自检确认成功（completed），或回滚完成（rolled_back）后，
+释放 cli_update 自有围栏；restarting/verifying 阶段由更新确认期限管理，不再触发排空期限的强制恢复。成员可 drain/undrain，任务凭据仅可查询。
 此排空与平台更新的 maintenance drain 独立；解除一方不会绕过另一方的派发限制。
 
 API：`GET /api/daemons/:daemonId/drain` 查询，`POST` 同路径发起

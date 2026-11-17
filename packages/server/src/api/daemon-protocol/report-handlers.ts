@@ -351,7 +351,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
       const result = p;
       const exists = (request: { status: string } | null, allowTimeout = false): boolean => {
         if (!request) reject("task_not_found");
-        return ["completed", "failed", ...(allowTimeout ? [] : ["timeout"])].includes(request.status);
+        return ["completed", "rolled_back", "failed", ...(allowTimeout ? [] : ["timeout"])].includes(request.status);
       };
       switch (frame.type) {
         case "runtime.binding_state":
@@ -360,7 +360,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
           break;
         case "runtime.update_result":
           if (exists(store.getRuntimeUpdateRequest(runtimeId, requestId))) break;
-          if (!["running", "completed", "failed"].includes(string(result.status))) reject();
+          if (!["running", "restarting", "completed", "rolled_back", "failed"].includes(string(result.status))) reject();
           store.reportRuntimeUpdateResult(runtimeId, requestId, result as unknown as ReportRuntimeUpdateInput);
           break;
         case "runtime.command_result":

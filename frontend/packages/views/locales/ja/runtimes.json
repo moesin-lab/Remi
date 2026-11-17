@@ -432,7 +432,10 @@
       "running": "更新中...",
       "completed": "更新が完了しました。デーモンを再起動しています...",
       "failed": "更新に失敗しました",
-      "timeout": "タイムアウト"
+      "timeout": "タイムアウト",
+      "restarting": "再起動中…",
+      "verifying": "新しいデーモンを検証中…",
+      "rolled_back": "ロールバック済み"
     }
   },
   "charts": {

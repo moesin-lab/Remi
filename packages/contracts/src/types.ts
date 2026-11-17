@@ -1,3 +1,4 @@
+import type { PlatformSchemaContractFailure } from './platform-failure.js';
 // Wire contracts for every Multiremi product domain. Entities and their Create*/Update* input DTOs
 // are grouped into the sections below; within a section, enums come first, then entities, then the
 // inputs that build them. Type-only module — no runtime code lives here.
@@ -614,7 +615,7 @@ export type MultiremiRuntimeModelListRequestStatus = "pending" | "running" | "co
 
 export type MultiremiRuntimeDirectoryScanRequestStatus = "pending" | "running" | "completed" | "failed" | "timeout";
 
-export type MultiremiRuntimeUpdateRequestStatus = "pending" | "running" | "completed" | "failed" | "timeout";
+export type MultiremiRuntimeUpdateRequestStatus = "pending" | "running" | "restarting" | "verifying" | "completed" | "rolled_back" | "failed" | "timeout";
 
 export type MultiremiRuntimeCommandRequestStatus = "pending" | "running" | "completed" | "failed" | "timeout";
 
@@ -1222,6 +1223,7 @@ export interface CreateRuntimeUpdateInput {
 }
 
 export interface ReportRuntimeUpdateInput {
+  self_check?: boolean;
   status?: string;
   output?: string;
   error?: string;
@@ -5962,7 +5964,7 @@ export interface MultiremiPlatformOperation {
   targetVersion: string | null;
   targetRef: string | null;
   targetManifest: Record<string, unknown>;
-  progress: Record<string, unknown>;
+  progress: Record<string, unknown> & { failure?: PlatformSchemaContractFailure };
   requestedBy: string;
   output: string | null;
   error: string | null;
@@ -6039,7 +6041,7 @@ export interface CreatePlatformOperationInput {
 
 export interface ReportPlatformOperationInput {
   status: MultiremiPlatformOperationStatus;
-  progress?: Record<string, unknown>;
+  progress?: Record<string, unknown> & { failure?: PlatformSchemaContractFailure };
   output?: string | null;
   error?: string | null;
   previousRelease?: MultiremiPlatformRelease | null;

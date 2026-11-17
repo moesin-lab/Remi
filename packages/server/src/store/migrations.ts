@@ -6759,7 +6759,7 @@ function ensureDaemonDrains(db: SqlDatabase): void {
     (workspace_id, daemon_id, started_at, deadline, reason, update_request_id)
     SELECT COALESCE(r.workspace_id, 'local'), COALESCE(r.daemon_id, r.id), ?, ?, 'cli_update', MIN(u.id)
     FROM multiremi_runtime_update_requests u JOIN multiremi_runtimes r ON r.id = u.runtime_id
-    WHERE u.scope = 'cli' AND u.status IN ('pending', 'running')
+    WHERE u.scope = 'cli' AND u.status IN ('pending', 'running', 'restarting', 'verifying')
     GROUP BY COALESCE(r.workspace_id, 'local'), COALESCE(r.daemon_id, r.id)
     ON CONFLICT (workspace_id, daemon_id) DO NOTHING`, [now, deadline]);
 }

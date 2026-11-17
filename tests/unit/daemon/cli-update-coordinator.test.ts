@@ -16,6 +16,7 @@ interface UpdateReport {
 
 interface TestDaemonState {
   activeTaskCount: number;
+  activeTaskIds: Set<string>;
   drainingTaskCount: number;
   pendingClaimCount: number;
   claimsPaused: boolean;
@@ -37,6 +38,7 @@ interface TestDaemonState {
     requestId: string,
     targetVersion: string,
     scope: MultiremiRuntimeUpdateScope,
+    drainDeadline?: string,
   ): Promise<void>;
   claimTask(runtimeId: string): Promise<unknown>;
 }
@@ -48,7 +50,7 @@ describe("co-resident CLI update coordination", () => {
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   });
 
-  it("rejects a CLI update when a sibling provider is busy and names it", async () => {
+  it("waits for a busy sibling without interrupting its tasks", async () => {
     const [claude, codex] = createDaemons();
     const claudeState = state(claude);
     const codexState = state(codex);
@@ -60,15 +62,42 @@ describe("co-resident CLI update coordination", () => {
     };
     codexState.activeTaskCount = 2;
 
-    await claudeState.handleRuntimeUpdate("rt_claude", "upd_busy", "v9.9.9", "cli");
-
+    const updating = claudeState.handleRuntimeUpdate("rt_claude", "upd_busy", "v9.9.9", "cli");
+    expect(claudeState.claimsPaused).toBe(true);
+    expect(codexState.claimsPaused).toBe(true);
     expect(updateCalls).toBe(0);
-    expect(reports).toEqual([{
-      status: "failed",
-      error: "CLI update blocked: provider is busy: codex (2 active tasks); retry when all providers are idle",
-    }]);
-    expect(claudeState.claimsPaused).toBe(false);
-    expect(codexState.claimsPaused).toBe(false);
+    expect(reports).toEqual([]);
+    codexState.activeTaskCount = 0;
+    await updating;
+    expect(updateCalls).toBe(1);
+    expect(reports.map(report => report.status)).toEqual(["running", "restarting"]);
+  });
+
+  it("times out a busy sibling using the supplied deadline and names its task", async () => {
+    const [daemon, sibling] = createDaemons();
+    const owner = state(daemon);
+    const busy = state(sibling);
+    const reports = captureReports(owner);
+    busy.activeTaskCount = 1;
+    busy.activeTaskIds.add("task_codex_busy");
+    await owner.handleRuntimeUpdate("rt_claude", "upd_timeout", "9.9.9", "cli", new Date(Date.now() + 15).toISOString());
+    expect(reports).toEqual([{ status: "failed", error: "CLI update drain deadline exceeded; remaining tasks: codex: task_codex_busy" }]);
+    expect(busy.activeTaskCount).toBe(1);
+    expect(busy.activeTaskIds.has("task_codex_busy")).toBe(true);
+    expect(owner.claimsPaused).toBe(false);
+    expect(busy.claimsPaused).toBe(false);
+  });
+
+  it("preserves a pre-existing local maintenance pause", async () => {
+    const [daemon, sibling] = createDaemons();
+    const owner = state(daemon);
+    const busy = state(sibling);
+    const reports = captureReports(owner);
+    busy.claimsPaused = true;
+    await owner.handleRuntimeUpdate("rt_claude", "upd_maintenance", "9.9.9", "cli");
+    expect(reports).toEqual([{ status: "failed", error: "CLI update already paused for maintenance" }]);
+    expect(owner.claimsPaused).toBe(false);
+    expect(busy.claimsPaused).toBe(true);
   });
 
   it("pauses claims on every provider before replacing the shared CLI", async () => {
@@ -112,25 +141,21 @@ describe("co-resident CLI update coordination", () => {
     expect(codexState.claimsPaused).toBe(true);
   });
 
-  it("rejects a CLI update while a sibling has pending dispatch work", async () => {
+  it("waits for a sibling pending claim before updating", async () => {
     const [claude, codex] = createDaemons();
     const claudeState = state(claude);
     const codexState = state(codex);
     const reports = captureReports(claudeState);
     codexState.pendingClaimCount = 1;
 
-    await claudeState.handleRuntimeUpdate("rt_claude", "upd_claiming", "v9.9.9", "cli");
-
-    expect(reports).toEqual([{
-      status: "failed",
-      error: "CLI update blocked: provider is checking for new work: codex; retry when all providers are idle",
-    }]);
-    expect(claudeState.claimsPaused).toBe(false);
-    expect(codexState.claimsPaused).toBe(false);
-    expect(codexState.pendingClaimCount).toBe(1);
-
+    claudeState.updateRunner = () => "updated";
+    const updating = claudeState.handleRuntimeUpdate("rt_claude", "upd_claiming", "v9.9.9", "cli");
+    expect(claudeState.claimsPaused).toBe(true);
+    expect(codexState.claimsPaused).toBe(true);
+    expect(reports).toEqual([]);
     codexState.pendingClaimCount = 0;
-    expect(codexState.pendingClaimCount).toBe(0);
+    await updating;
+    expect(reports.map(report => report.status)).toEqual(["running", "restarting"]);
   });
 
   it("releases every provider claim pause when a CLI update fails", async () => {
@@ -195,18 +220,19 @@ describe("co-resident CLI update coordination", () => {
     }
   });
 
-  it("preserves the single-provider update gate when no coordinator is injected", async () => {
+  it("times out the single-provider drain and resumes claims without cancelling work", async () => {
     const [daemon] = createDaemons(1);
     const daemonState = state(daemon);
     const reports = captureReports(daemonState);
     daemonState.activeTaskCount = 1;
+    daemonState.activeTaskIds.add("task_still_running");
 
     expect(daemonState.cliUpdateCoordinator).toBeNull();
-    await daemonState.handleRuntimeUpdate("rt_claude", "upd_single", "v9.9.9", "cli");
+    await daemonState.handleRuntimeUpdate("rt_claude", "upd_single", "v9.9.9", "cli", new Date(Date.now() - 1).toISOString());
 
     expect(reports).toEqual([{
       status: "failed",
-      error: "daemon is busy; retry update when idle",
+      error: "CLI update drain deadline exceeded; remaining tasks: claude: task_still_running",
     }]);
     expect(daemonState.claimsPaused).toBe(false);
   });

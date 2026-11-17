@@ -58,10 +58,11 @@ export class IssueTitleScheduler {
     this.timer.start();
   }
 
-  stop(): void {
+  stop(): Promise<void> {
     this.running = false;
-    this.timer?.stop();
+    const stopped = this.timer?.stop();
     this.timer = null;
+    return stopped ?? Promise.resolve();
   }
 
   runOnce(now: Date = this.now()): Promise<IssueTitleRunResult> {

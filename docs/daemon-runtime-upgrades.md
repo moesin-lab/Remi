@@ -95,12 +95,24 @@ Claude 桥 bundle 带两个补丁，都改 `dist/acp-agent.js`：`claude-usage-v
 
 ## 安装与启用
 
-平台的 CLI 升级请求沿用现有排空/暂停接单流程。`remi update` 从
-`MULTIREMI_RELEASE_REPO`（兼容回退为 `MULTIREMI_REPO`，默认
-`moesin-lab/Remi`）读取 GitHub Release。它按当前 OS/架构精确选择
-`remi-<version>-<os>-<arch>.tar.gz`，核对 GitHub 资产的 SHA-256 digest、
-归档路径和新二进制 `--version`，再由新包的 `remi runtime prepare` 安装并
-验证该版本的固定依赖。任一步失败都不会改写现有 executable。
+平台的 CLI 升级请求沿用现有排空/暂停接单流程。daemon 与已配置 server 的
+`remi update` 默认按 `MULTIREMI_UPDATE_SOURCES=platform,github` 选择来源。
+平台使用已有凭据读取 `/api/remi/releases/daemon/current`；显式 `target_commit`
+只读取平台对应提交，并要求清单同时满足请求的版本与提交。未指定提交时，若平台
+current 清单版本不符合 `target_version`，视为该来源没有请求版本，可后备到 GitHub
+对应 tag；平台 404、未配置或网络不可达也可后备。清单非法、其它 HTTP 状态以及
+制品 size、SHA-256、版本或提交校验失败均硬失败，不切换来源。
+
+GitHub 来源从 `MULTIREMI_RELEASE_REPO`（兼容回退为 `MULTIREMI_REPO`，默认
+`moesin-lab/Remi`）读取 Release，并在自身环境配置 `GITHUB_TOKEN` 时鉴权查询。
+两种来源都按当前 OS/架构选择制品，核对 size、SHA-256、归档路径和新二进制
+`--version`；平台来源额外要求 `--build-info` 的版本与提交匹配清单。然后由新包的
+`remi runtime prepare` 安装并验证固定依赖。任一步失败都不会改写现有 executable。
+未指定目标的更新遇到较旧版本直接返回 current；平台制品比较版本先后时，保留
+major.minor.patch 和预发布标签，忽略 `+` 构建元数据；仅当末尾段匹配对应 commit
+前缀时才忽略该构建哈希（如 `-stable.ab12cd34` 中的 `ab12cd34`）。
+提交未知或后缀不匹配时保留该段，数字预发布序号仍按版本比较。同版本不同提交仍可安装，不按哈希字典顺序判断新旧；
+显式指定较旧目标也仍可安装。完整版本和提交仍用于制品身份校验。
 
 验证成功后，新包进入 `~/.local/lib/remi/versions/<digest-prefix>/`，旧快照
 保留。稳定 launcher 仅原子替换其中的版本目标，并将原内容保存为新快照的

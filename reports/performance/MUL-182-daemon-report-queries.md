@@ -145,3 +145,11 @@ JSON TEXT 绑定修正后，同上四文件回归再次72 pass / 1 skip / 0 fail
 反向启动顺序复测：基线32.612s，单单位直接写入修复32.249s，各1pass/0fail、3515assertions。两轮修复均未明显慢于基线（-0.05% / -1.11%）。
 
 单单位VALUES路径纳入后，四文件回归72pass/1skip/0fail、402assertions，60.44s，HOME residual paths=[]；类型检查、docs:test（13pass）、docs:check、git diff --check通过。
+
+## 合并 MUL-185 后的 admission 空路径
+
+基于 main `b56d6aea5` 的合并对照与 rebase 首次回归均复现 outbound 66/66（原上限64）。新增成本来自 `pendingRuntimeRequests` 在 update 家族为空时仍获取生命周期锁、重读 Runtime 并读取空 update 队列。复用现有批量家族探针，仅有 update 工作时执行 admission；有工作时继续锁后重读、按原规则判断 drain 与权限，不修改预算。
+
+修复后本地 SQLite：outbound 63/63；workspace 38/38，usage 31/31，messages page/range14/14，Question9/9，POST已有会话81/81。complete404/404、fail238/238，原预算断言不变，后续降预算仍归 MUL-191。
+
+`bun run test tests/unit/multiremi/daemon-report-query-budget.test.ts tests/unit/multiremi/chat-message-pagination.test.ts tests/unit/multiremi/daemon-drain.test.ts tests/unit/multiremi/runtime-cli-build-reconciliation.test.ts tests/unit/multiremi/mul474-daemon-task-poll-count.test.ts`：110 pass / 0 fail，676 assertions，76.57s，HOME residual paths=[]。本命令未配置PG，不替代完整CI真实PG分片。最终SHA与完整CI结论以PR描述中链接为准。

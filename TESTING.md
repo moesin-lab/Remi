@@ -99,8 +99,10 @@ MULTIREMI_SYSTEMD_REHEARSAL=1 bun run tests/integration/daemon-update-recovery.t
 `systemd-run --user` 启动。ACP 与 Release 仍是 fixture（tarball 使用真实 sha256），不访问 GitHub Release
 或真实模型。服务使用产品的 45 秒停止超时和 `KillMode=control-group`；演练确认期限为 60 秒。
 
-当前实现正常更新及 exit 23 候选回滚两例，各自在恢复后派任务并断言 completed。
-MUL-70 的非 launcher 拒绝场景须等其合入 main 后普通 merge 再补齐，当前不代表三例验收通过。
+演练覆盖正常更新、exit 23 候选回滚、unit 直指版本二进制时拒绝更新三例，各自在更新/恢复/拒绝后派任务并断言 completed。
+第三例重新用旧二进制 1.0.0 启动隔离 unit，断言 failed 且带实际入口与预期 launcher 的拒绝原因；
+MainPID 与启动时间保持一致，未出现 restarting/verifying，launcher、版本目录、BIN_DIR 的内容及哈希不变，
+更新日志目录不变，且本窗口的用户 journal 没有 remi-update-* unit 启动记录。
 `update-recovery.json` 保存观测状态序列、版本、任务、unit、watchdog 决策和日志、清理与线上快照比较；
 `update-recovery.log` 保存 daemon 日志。SIGINT/SIGTERM 会让等待退出并进入 finally 清理；
 仅停止本轮 daemon/watchdog unit，不操作线上 unit。初始已有 rehearsal/update unit 时拒绝启动。
@@ -115,8 +117,8 @@ ExecMainStartTimestamp/ExecMainPID/ExecMainStatus、restart journal、停止耗�
 不能把进程消失推断成 SIGKILL。monitor 同样由 finally 停止并清理。
 
 MUL-71 首轮在隔离 daemon 注册前超时：本任务执行端的 `/tmp` 路径在用户 manager 中不可见。
-迁到共享目录后已实际跑通场景 1、2（含两个后续 completed 任务），线上快照一致且 unit/隔离端口无残留；
-场景 3 尚未实现，等待 MUL-70 合入。中断清理也已实跑；完整本单仍未验收。
+迁到共享目录后场景 1、2 和中断清理已有实跑证据。合入 MUL-70 后使用上述三例做最终一轮，
+以该轮 JSON 和中断 JSON 作为交付证据。产品的 fallback 竞态另见 MUL-72，不在本单处理。
 
 ## CI 覆盖
 

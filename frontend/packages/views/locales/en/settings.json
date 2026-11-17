@@ -333,7 +333,15 @@
     "section_repositories": "Repositories",
     "repositories_shortcut_label": "Repository URLs live in the Repositories tab",
     "repositories_shortcut_link": "Manage repositories →",
-    "toast_failed": "Failed to update source control settings"
+    "toast_failed": "Failed to update source control settings",
+    "co_author_description": "Automatically append a co-author trailer to agent commits.",
+    "co_author_name": "Name",
+    "co_author_email": "Email",
+    "co_author_invalid_name": "Enter a name of 1–100 characters without controls or angle brackets.",
+    "co_author_invalid_email": "Enter a valid email with a dotted domain (up to 254 characters).",
+    "co_author_disabled": "Trailer is disabled.",
+    "co_author_save": "Save",
+    "co_author_reset": "Restore defaults"
   },
   "repositories": {
     "section_title": "Repositories",

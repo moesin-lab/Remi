@@ -261,3 +261,44 @@ remi runtime prepare --provider antigravity --accept-antigravity-terms
 Antigravity 的 ACP server 是 Google 的专有软件，不随 Remi 发布包分发：每台机器自己从 `dl.google.com` 下载 `runtime-versions.json` 里固定的压缩包（macOS 约 110 MB、解压约 400 MB；Linux 约 330 MB、解压约 1.1 GB），流式校验大小与 sha256，在同级 stage 目录解压后原子改名到 `${REMI_HOME:-~/.remi}/acp/antigravity/<版本>-<平台>/`，保留一份旧副本。首次下载必须显式同意 Google 条款（`--accept-antigravity-terms` 或 `REMI_ACCEPT_ANTIGRAVITY_TERMS=1`），同意时间写入 `install.json`，之后的 pin 升级沿用。准备后运行完整校验：只做 `initialize`（版本与 `loadSession`），再对假上游做无凭据的网关契约检查（`session/new` 必须列出上游的唯一模型并带 Bearer 认证），不发 prompt。不支持 Windows。详见 [Antigravity Runtime](antigravity.md)。
 
 命令无服务端鉴权要求，只操作当前用户的本地 Remi 依赖。隔离验证时给 REMI_HOME 指定新临时目录；源码运行可通过 REMI_CLAUDE_AGENT_ACP_EXECUTABLE 显式选择仓库内 bin/remi-claude-agent-acp。
+
+## 平台 CLI 更新的确认与回滚
+
+平台 `scope=cli` 与交互式 `remi update` 共用
+[`cli-update.ts`](../packages/shared/src/cli-update.ts)：按 GitHub 发布资产的 SHA-256
+校验归档与目标版本，先准备配套 runtime，再写入 `versions/<digest 前 8 位>/`，
+保留 `previous-launcher` 和原有 wrapper，以原子 rename 切换稳定 launcher。
+平台请求固定 `target_version`，不再下载 `install-remi.sh`。交互式安装仍不自动重启。
+
+CLI 请求状态依次为 `pending → running → restarting → verifying → completed`。
+安装完成仅进入 `restarting`；服务端收到同一 Runtime、同一 daemon 身份、目标
+`cli_version` 的协议 hello 后才进入 `verifying`。新 daemon 完成工作区归属、崩溃
+bridge 清扫、注册、仓库初始化、孤儿恢复及所有 provider 的启动 readiness 屏障，
+收到 welcome 后提交自检结果，才能完成请求。安装检查不能代替这项确认。
+ACP 重装和 Grok Agent 更新不替换 daemon，仍在操作完成后上报成功并恢复接单。
+自动回滚要求更新前运行的 daemon 也包含本交接协议。首次从旧版迁入时，维护者需先
+用交互式 `remi update` 安装本版本并安排重启；旧 daemon 的更新报告不满足新的完成门槛，
+不能把这次引导安装当作自动回滚验收。
+CLI `remi runtime release status <runtime> <update>` 与 Web 展示全部状态；
+`rolled_back` 是带原因的终态，晚到或重放的报告不能覆盖终态。
+
+[`daemon-update.ts`](../packages/shared/src/daemon-update.ts) 在 launcher 激活前将交接
+记录写入 `${MULTIREMI_STATE_DIR:-~/.multiremi}/cli-updates/<runtime>.<request>/`，先启动独立
+POSIX shell 看门，再切换入口。systemd 使用独立的 `systemd-run --user` transient
+unit；launchd 使用独立 `launchctl submit` job，避免 daemon 服务重启杀死看门。
+无法启动独立看门时拒绝激活。没有 service manager 时看门脱离父进程，并保留稳定
+launcher 与完整前台参数作为重启入口；后继进程不再重新选择旧 `process.execPath`。
+
+默认 120 秒内未完成 hello 和启动自检（含启动即退出），看门通过原子 symlink
+争取唯一结果，恢复 `previous-launcher` 与旧 wrapper，再重启服务。无管理器时先停止
+候选 PID，45 秒后仍存活则强制结束，再运行旧 launcher。恢复的旧 daemon 注册并
+通过启动屏障后上报 `rolled_back`，原因保存在交接目录 `reason`。成功确认同样以
+原子 symlink 决定，防止晚到的看门覆盖成功；未送达的平台结果在重连时重试。
+确认结果被服务端接收后，目录追加 `.settled` 留作证据。
+手动删除记录会丢失恢复依据，不应在更新过程中清理。
+
+systemd 模板明确 `TimeoutStopSec=45`、`KillMode=control-group`；launchd 模板对应
+`ExitTimeOut=45`、`AbandonProcessGroup=false`。daemon 的优雅停止预算为 30 秒，
+超时中止任务、SIGKILL 所有已跟踪 bridge 进程组，然后以非零状态退出，留下 15 秒
+供管理器清理。该契约适用于新生成的 unit/plist；既有服务需由维护者重新安装模板
+才会取得模板参数。本改动不会自动写用户的 drop-in 或重启线上服务。

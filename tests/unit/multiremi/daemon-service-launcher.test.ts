@@ -62,6 +62,24 @@ describe("daemon service stable launcher", () => {
     expectCommand(binary, launcher);
   });
 
+  test("restart follows the stable launcher after it switches to a new snapshot", () => {
+    const next = join(process.env.MULTIREMI_INSTALL_ROOT!, "versions", "release-b", "remi");
+    mkdirSync(dirname(next), { recursive: true });
+    writeFileSync(next, "new binary", { mode: 0o755 });
+    writeLauncher(launcher, next);
+    expect(buildMultiremiDaemonLaunchSpec({}, "remi", [binary], binary, true).command).toBe(launcher);
+    expect(buildMultiremiDaemonLaunchSpec({}, "remi", [binary], binary).command).toBe(binary);
+  });
+
+  test("service stop contracts allow bounded bridge cleanup", () => {
+    const systemd = buildMultiremiDaemonServiceSpec({}, "remi", "systemd", root, [binary], binary);
+    expect(systemd.content).toContain("TimeoutStopSec=45");
+    expect(systemd.content).toContain("KillMode=control-group");
+    const launchd = buildMultiremiDaemonServiceSpec({}, "remi", "launchd", root, [binary], binary);
+    expect(launchd.content).toContain("<key>ExitTimeOut</key>\n  <integer>45</integer>");
+    expect(launchd.content).toContain("<key>AbandonProcessGroup</key>\n  <false/>");
+  });
+
   test("prefers MULTIREMI_BIN_DIR over PATH when both match", () => {
     writeLauncher();
     const custom = join(root, "custom bin", "remi");

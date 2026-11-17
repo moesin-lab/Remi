@@ -128,9 +128,8 @@ export class DaemonTaskOffers {
     });
     options.layer.registerBestEffortHandler("runtime.ready", (frame, session) => this.ready(frame, session));
     // Dispatch is driven by queue/capacity/configuration events and explicit deadlines.
-    // A caller can opt into the diagnostic recovery sweep to find missing event wiring.
-    const sweepMs = options.sweepMs;
-    if (sweepMs === undefined) return;
+    // Keep a low-frequency safety net for missed events; recoveries expose missing wiring.
+    const sweepMs = options.sweepMs ?? (process.env.NODE_ENV === "test" ? 2_147_483_647 : DAEMON_OFFER_SWEEP_MS);
     const sweep = () => {
       if (this.stopped) return;
       for (const session of options.layer.registry.listSessions()) {

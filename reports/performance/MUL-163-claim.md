@@ -8,7 +8,7 @@
 
 新增 expand-only 索引：attempt `(status, created_at, next_retry_at, turn_id)`、`(status, next_retry_at)`；turn `(status, current_attempt_id)`、`(chat_session_id, issue_session_id, priority, chat_queue_order)`。沿用既有 attempt `(runtime_id, status)` 和 turn `(agent_id, status)` 索引。两条启动迁移链在 Chat queue 列就绪后创建索引；不改 schema 指纹。
 
-offer 默认不再每分钟扫描所有在线 runtime；ack/drain 只恢复有背压等待的泵。hello、入队、终态、容量/配置变化、冷却/重试/租约期限继续立即唤醒；显式 `sweepMs` 保留诊断恢复扫描。关闭兜底扫描意味着遗漏事件必须修事件入口，不能依赖下一分钟恢复，部署后需关注该风险。
+offer 生产默认保留 60 s 兜底扫描，防止漏接事件后任务长期排队；泵忙、等待或冷却中跳过扫描。扫描派出任务记 warn 和 `ws_minute_summary.offer_sweep_recovered`，用于定位并补齐遗漏的事件入口。ack/drain 只恢复有背压等待的泵，消除高频空认领。hello、入队、终态、容量/配置变化、冷却/重试/租约期限继续立即唤醒；测试环境默认禁用分钟扫描，可显式传入 `sweepMs`。
 
 同一工作区锁内，未冻结任务的 Agent/runtime 执行组就绪事实按 Agent 缓存，避免对同一 Agent 的每条排队任务读取相同配置。缓存不跨认领或事务。
 
@@ -59,3 +59,22 @@ npm run docs:check
 SQL 次数回归在 statement.get/all/run 执行时计数（不将 prepare 视为执行），同时拦截 db.run；空 claim 队列 1/10/50 下 SELECT 计数为 22/22/22，成功 claim 队列 1/50 下 query/run 调用计数为 78/78，重候选选择均仅执行 1 次。常数范围如上节所述，不覆盖不同 Agent/profile 和需要逐条修复的历史坏状态。
 
 排障中确实出现的失败：PG15 的现有 `IS JSON OBJECT` 迁移语法不支持（改用 PG17）；最初大 payload PG offer 触及默认 5s 测试超时（30s 后通过）；首次 broad PG 五个子进程找不到 PATH 中的 bun（配置 Bun1.3.14 PATH 后全文件 115 项通过）。早期新增成功 claim 成本测试还抓到按 queued task 重读执行组就绪配置，已改为锁内按 Agent 复用并重跑通过。未跳过这些失败来宣称通过。
+
+## 架构复核增量：保留默认兜底扫描
+
+恢复生产默认 `DAEMON_OFFER_SWEEP_MS`（60 s），测试环境默认使用最大计时周期；保留普通 ack/drain 不唤醒非 waiting 泵的回归。新增生产默认构造回归：无直接入队触发的 queued 任务在 59,999 ms 尚未派出，60,000 ms 派出并记 warn，实际 `ws_minute_summary.offer_sweep_recovered` 为 1，下次汇总归零。显式扫描配置的 pending offer 跳过用例仍保留。
+
+Bun 1.3.14 / 本轮隔离 PG 17.12 实跑：
+
+```sh
+bun test --timeout 30000 tests/unit/multiremi/daemon-task-offers.test.ts tests/unit/multiremi/claim-queued-chat-query-count.test.ts
+# SQLite：36 pass / 0 fail，248 assertions。
+MULTIREMI_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:55464/postgres bun test --timeout 30000 tests/unit/multiremi/daemon-task-offers-pg.test.ts tests/unit/multiremi/claim-queued-chat-query-count.test.ts
+# PostgreSQL：8 pass / 0 fail，70 assertions；无跳过。
+bun x tsc --noEmit
+npm run docs:test
+npm run docs:check
+# 均退出 0；docs:test 13 pass / 0 fail。
+```
+
+此次不改变基表选择或批量变更器范围，EXPLAIN 沿用上节既有测量；线上验收仍未执行。
